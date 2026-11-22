@@ -519,8 +519,9 @@ fn inline_lanes_through_field() -> bool {
 // The outer limit pays 24 for the token's buffer and lends 72 to the inner
 // limit. Its 40-byte blocker leaves 32, so the seal charge (32 header + 6
 // content, rounded to 40) is refused. After the retry, the inner limit has
-// 72 - 40 = 32 left. The buffer refund goes to the outer limit, which ends
-// with 104 - 40 = 64 after the inner limit exits.
+// 72 - 40 = 32 left while the Secret lives, and 72 again once its last
+// designation drops. The buffer refund goes to the outer limit, which ends
+// with all 104 bytes after the inner limit exits.
 // expect: run seal_refusal_keeps_buffer_payer() = true
 fn seal_refusal_keeps_buffer_payer() -> bool {
     let checked = bound bytes 104 {
@@ -537,14 +538,18 @@ fn seal_refusal_keeps_buffer_payer() -> bool {
                 true
             }
             let _ = take blocker
-            let Ok(_) = secret.seal(take returned, "mac") else {
+            let Ok(kept) = secret.seal(take returned, "mac") else {
                 return false
             }
             let after_retry = bound bytes 72 {
                 true
             }
-            match (after_refusal, after_retry) {
-                (Error(before), Error(after)) => {
+            let _ = take kept
+            let after_drop = bound bytes 72 {
+                true
+            }
+            match (after_refusal, after_retry, after_drop) {
+                (Error(before), Error(after), Ok(true)) => {
                     let refusal_was_free = before.requested == 72 && before.available == 32
                     let retry_charged_inner = after.requested == 72 && after.available == 32
                     refused && intact && refusal_was_free && retry_charged_inner
@@ -552,11 +557,11 @@ fn seal_refusal_keeps_buffer_payer() -> bool {
                 _ => false,
             }
         }
-        let outer = bound bytes 72 {
+        let outer = bound bytes 105 {
             true
         }
         match (inner, outer) {
-            (Ok(true), Error(c)) => c.requested == 72 && c.available == 64,
+            (Ok(true), Error(c)) => c.requested == 105 && c.available == 104,
             _ => false,
         }
     }

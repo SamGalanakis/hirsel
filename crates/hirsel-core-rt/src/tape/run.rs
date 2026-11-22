@@ -542,7 +542,7 @@ unsafe extern "C" fn invoke(
                                 }
                                 crate::secret::Secret {
                                     origin: crate::secret::Origin::Granted(0),
-                                    policy: hirsel_core_net::SecretPolicy::parse(&record.patterns)
+                                    policy: hirsel_core_net::SecretPolicy::parse(&record.policy)
                                         .unwrap(),
                                     bytes: None,
                                     seal: None,

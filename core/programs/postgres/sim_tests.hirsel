@@ -150,7 +150,7 @@ fn peer(take input: Peer) waits {
 
 fn client(net: Net, address: Addr, clock: Clock, script: Script) waits {
     let password = string.into_bytes(string.from("pencil"))
-    let config = postgres.Config(host: string.from(HOSTNAME), port: address.port, user: string.from("user"), database: string.from("postgres"), password: result.unwrap(secret.seal(take password, HOSTNAME)), random: provide.random(0), clock: clock, deadline: DEADLINE)
+    let config = postgres.Config(host: string.from(HOSTNAME), port: address.port, user: string.from("user"), database: string.from("postgres"), password: result.unwrap(secret.seal(take password, "tls_send(postgres.test)")), random: provide.random(0), clock: clock, deadline: DEADLINE)
     let opened = postgres.connect(net, System, config)
     match script {
         StartupError => match take opened {

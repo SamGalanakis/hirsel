@@ -942,7 +942,7 @@ fn rfc_scram_and_normalization(run: &mut Run) {
             false,
         ),
     ] {
-        let secret = run.seal_secret(password, b"alpha.test");
+        let secret = run.seal_secret(password, b"tls_send(alpha.test)");
         let (key, peer) = run.scram_peer(certificate_config(&[]), CA, 106);
         let len = run.scram_len(key, CLIENT_FIRST, SERVER_FIRST);
         assert_eq!((len.error, len.value), (IoError::OK, 106));
@@ -962,7 +962,7 @@ fn rfc_scram_and_normalization(run: &mut Run) {
             assert_eq!(&observed[proof_at..], suffix);
         }
     }
-    let secret = run.seal_secret(b"pencil", b"alpha.test");
+    let secret = run.seal_secret(b"pencil", b"tls_send(alpha.test)");
     // 2 + 4 + 3 + len("rOprNGfwEbeRWgbNEkqOmore") + 3 + 44.
     let (key, peer) = run.scram_peer(certificate_config(&[]), CA, 80);
     let result = run.scram_send(key, secret, CLIENT_FIRST, &distinct_server);
@@ -973,8 +973,8 @@ fn rfc_scram_and_normalization(run: &mut Run) {
 }
 
 fn scram_checks(run: &mut Run) {
-    let secret = run.seal_secret(b"pencil", b"alpha.test");
-    let denied = run.seal_secret(b"pencil", b"beta.test");
+    let secret = run.seal_secret(b"pencil", b"tls_send(alpha.test)");
+    let denied = run.seal_secret(b"pencil", b"tls_send(beta.test)");
     let (key, peer) = run.scram_peer(certificate_config(&[]), CA, 0);
     let (server_prefix, _) = SERVER_FIRST.split_at(SERVER_FIRST.len() - b"4096".len());
     let mut count = |field: &[u8], tag| {
@@ -1045,7 +1045,7 @@ fn scram_checks(run: &mut Run) {
 
 fn scram_iteration_steps(run: &mut Run) {
     crate::causes::task_start(&mut run.context).unwrap();
-    let secret = run.seal_secret(b"pencil", b"alpha.test");
+    let secret = run.seal_secret(b"pencil", b"tls_send(alpha.test)");
     for budget in [4097, 4096] {
         let (key, peer) = run.scram_peer(
             certificate_config(&[]),
@@ -1076,7 +1076,7 @@ fn scram_channel_binding(run: &mut Run) {
     const SHA384_KEY: &[u8] = include_bytes!("../../testdata/tls/alpha-sha384.key.pem");
     const ED25519_LEAF: &[u8] = include_bytes!("../../testdata/tls/alpha-ed25519.pem");
     const ED25519_KEY: &[u8] = include_bytes!("../../testdata/tls/alpha-ed25519.key.pem");
-    let secret = run.seal_secret(b"pencil", b"alpha.test");
+    let secret = run.seal_secret(b"pencil", b"tls_send(alpha.test)");
     let original = run.net;
     let new_ca = run.grant("Tls alpha.test 0-65535 Roots=sha256:4398b17f3dee153317fa713ea5d8e105037a1e4e212b6dce9732e60dda880c9b");
     let connecting = run.grant("Connect 127.0.0.0/8 1-65535");
@@ -1145,7 +1145,7 @@ fn expired_secret_send_issues_no_host_tls_bytes() {
         received
     });
     let key = run.connect(port);
-    let sealed = run.seal_secret(b"BCD", b"alpha.test");
+    let sealed = run.seal_secret(b"BCD", b"tls_send(alpha.test)");
     let upgrade = run.upgrade(key, b"alpha.test", Some(CA), &[]);
     assert_eq!(upgrade.outcome.error, IoError::OK);
     let deadline = run.now();

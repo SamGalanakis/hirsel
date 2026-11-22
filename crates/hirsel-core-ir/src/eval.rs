@@ -3246,7 +3246,7 @@ impl Machine<'_> {
                 let Some(secret) = calls[&id].secret.clone() else {
                     return Some(Err(Stop::Cause("Fail")));
                 };
-                let size = SecretGrant::logical_size(&secret.policy.patterns, 0);
+                let size = SecretGrant::logical_size(&secret.policy.send, 0);
                 let charge = size.unwrap_or(u64::MAX);
                 let payer = t.limits.last().unwrap();
                 if let Err(available) = self.admit_charge(payer, charge, size.is_none()) {
@@ -4449,7 +4449,7 @@ impl Machine<'_> {
             };
             (intersection, 0)
         };
-        let size = SecretGrant::logical_size(&policy.patterns, len);
+        let size = SecretGrant::logical_size(&policy.send, len);
         let charge = size.unwrap_or(u64::MAX);
         let payer = t.limits.last().unwrap();
         if let Err(available) = self.admit_charge(payer, charge, size.is_none()) {
@@ -4537,11 +4537,11 @@ impl Machine<'_> {
         let secret = self.secret(a[0]).unwrap();
         let signing = op == HostOp::SecretHmac;
         let needed = if signing {
-            SecretUse::Mac
+            SecretUse::MAC
         } else {
-            SecretUse::Verify
+            SecretUse::VERIFY
         };
-        if secret.policy.usage < needed {
+        if !secret.policy.uses.permits(needed) {
             return vec![0, 1, 0, 0];
         }
         let data = self.carrier_bytes(a[1]);
@@ -4571,7 +4571,7 @@ impl Machine<'_> {
         };
         if !secret
             .policy
-            .patterns
+            .send
             .iter()
             .any(|pattern| pattern.covers(name))
         {
@@ -4614,7 +4614,7 @@ impl Machine<'_> {
         let secret = self.secret(args[1]).unwrap();
         if !secret
             .policy
-            .patterns
+            .send
             .iter()
             .any(|pattern| pattern.covers(name))
         {

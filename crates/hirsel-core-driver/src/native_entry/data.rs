@@ -154,7 +154,7 @@ pub(super) fn write(
         object,
         plan.secret_grants
             .iter()
-            .flat_map(|grant| grant.map_or([""; 3], |g| [&g.parameter, &g.source, &g.patterns])),
+            .flat_map(|grant| grant.map_or([""; 3], |g| [&g.parameter, &g.source, &g.policy])),
     )?;
     let env_patterns = bytes(
         object,

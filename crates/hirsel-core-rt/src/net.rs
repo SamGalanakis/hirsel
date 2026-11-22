@@ -948,7 +948,7 @@ pub unsafe extern "C" fn hirsel_core_host_send_secret(
             }
             if !secret
                 .policy
-                .patterns
+                .send
                 .iter()
                 .any(|pattern| pattern.covers(&write.name))
             {
@@ -988,7 +988,7 @@ pub unsafe extern "C" fn hirsel_core_host_send_secret(
                 capacity: 0,
             },
             origin: secret.origin,
-            patterns: secret.policy.patterns,
+            patterns: secret.policy.send,
             committed: 0,
             narrowed,
         };

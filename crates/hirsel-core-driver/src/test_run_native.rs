@@ -2323,7 +2323,7 @@ fn run_writes_main_error_value_then_names_the_outcome() {
         (
             r#"pub fn main() -> Result[(), AppError] {
     let b = string.into_bytes(string.from("pencil"))
-    let key = result.unwrap(secret.seal(take b, string.from("beta.test")))
+    let key = result.unwrap(secret.seal(take b, string.from("tls_send(beta.test)")))
     Error(Config(file: "a\tb.conf", key: key))
 }
 "#,

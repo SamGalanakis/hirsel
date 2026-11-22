@@ -660,7 +660,7 @@ fn bindings(
                 .iter()
                 .find(|grant| grant.parameter == param.name)
                 .map_or_else(Vec::new, |grant| {
-                    vec![grant.source.clone(), grant.patterns.clone()]
+                    vec![grant.source.clone(), grant.policy.clone()]
                 }),
             GrantKind::Args => vec![grant_name(kind).to_owned()],
             _ if index == 0 && options.grant_mask & (1 << tag) != 0 => {

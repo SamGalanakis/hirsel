@@ -64,7 +64,7 @@ pub(crate) fn show(path: &Path) -> io::Result<()> {
     );
     println!("arg {:?}  grants {:?}", h.arg, h.net_rules);
     for grant in &h.secret_grants {
-        println!("grant `{}` [secret] to {}", grant.parameter, grant.patterns);
+        println!("grant `{}` [secret] for {}", grant.parameter, grant.policy);
     }
     let mut decoder = Decoder::default();
     decoder.physical = true;

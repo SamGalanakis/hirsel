@@ -59,7 +59,7 @@ impl Granted {
         Some(Self {
             secret: Secret {
                 origin: Origin::Granted(index),
-                policy: SecretPolicy::parse(&record.patterns)?,
+                policy: SecretPolicy::parse(&record.policy)?,
                 bytes: Some(Arc::new(bytes)),
                 seal: None,
             },
@@ -295,7 +295,7 @@ pub(crate) unsafe fn resolve(context: *const Context, handle: u64) -> Secret {
 /// current limit; a refusal answers error tag 2 (`provide.secret`).
 pub(crate) unsafe fn designate(context: *mut Context, secret: Secret) -> Outcome {
     unsafe {
-        let charge = match admit((*context).payer(), &secret.policy.patterns, 0) {
+        let charge = match admit((*context).payer(), &secret.policy.send, 0) {
             Ok(charge) => charge,
             Err(error) => return error,
         };
@@ -358,7 +358,7 @@ pub unsafe extern "C" fn hirsel_core_secret_seal(
             return INVALID;
         };
         let bytes = crate::tls::bytes(&*source);
-        let charge = match admit((*context).payer(), &policy.patterns, bytes.len() as u64) {
+        let charge = match admit((*context).payer(), &policy.send, bytes.len() as u64) {
             Ok(charge) => charge,
             Err(error) => return error,
         };
@@ -408,7 +408,7 @@ pub unsafe extern "C" fn hirsel_core_secret_narrow(
         let Some(policy) = secret.policy.intersect(&requested) else {
             return INVALID;
         };
-        let charge = match admit((*context).payer(), &policy.patterns, 0) {
+        let charge = match admit((*context).payer(), &policy.send, 0) {
             Ok(charge) => charge,
             Err(error) => return error,
         };
@@ -505,11 +505,11 @@ unsafe fn mac(
         crate::process::deny_describe_capability(context);
         let secret = resolve(context, handle);
         let needed = if tag.is_some() {
-            SecretUse::Verify
+            SecretUse::VERIFY
         } else {
-            SecretUse::Mac
+            SecretUse::MAC
         };
-        if secret.policy.usage < needed {
+        if !secret.policy.uses.permits(needed) {
             return crate::net::DENIED;
         }
         let args = MacRequest {

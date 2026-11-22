@@ -2411,7 +2411,7 @@ pub fn main(e: Env, secret: Secret) -> Result[(), Exit] {
     options.grant_mask = 1 << grant_kind("Env").unwrap();
     options
         .secret_grants
-        .push(SecretGrant::new("secret", "env:PRIVATE_VALUE", "test.example").unwrap());
+        .push(SecretGrant::new("secret", "env:PRIVATE_VALUE", "tls_send(test.example)").unwrap());
     let launch = |patterns| {
         let mut options = options.clone();
         options.env_patterns = EnvPatterns::parse(patterns);

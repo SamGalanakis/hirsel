@@ -1571,8 +1571,8 @@ fn cli_tls_replay(with_secret: bool) {
     assert!(export.contains("op=22"), "{export}");
     if with_secret {
         assert!(export.contains("op=23"));
-        assert!(export.contains("grant `token` [secret] to alpha.test mac"));
-        assert!(export.contains("grant `local` [secret] to alpha.test"));
+        assert!(export.contains("grant `token` [secret] for tls_send(alpha.test) mac"));
+        assert!(export.contains("grant `local` [secret] for tls_send(alpha.test)"));
         assert_secrets_absent(&[&replay.stdout, &replay.stderr, export.as_bytes()]);
         let mac_op = format!(" op={} ", hirsel_tape_format::op::SECRET_MAC);
         let mac: Vec<_> = export
@@ -2648,7 +2648,7 @@ pub fn main(n: Net, password: Secret, out: Stdout) -> Result[(), Exit] waits {
     .map(|text| GrantRule::parse(&text).unwrap())
     .into();
     options.secret_grants =
-        vec![SecretGrant::new("password", "env:HIRSEL_SCRAM_PASSWORD", "alpha.test").unwrap()];
+        vec![SecretGrant::new("password", "env:HIRSEL_SCRAM_PASSWORD", "tls_send(alpha.test)").unwrap()];
     let entry = DefPath::from_full("app@1/main/main").unwrap();
     let record = product.build(&entry, &options).unwrap();
 
@@ -3070,7 +3070,7 @@ fn postgres_scripted_peer_laws() {
     .map(|rule| GrantRule::parse(&rule).unwrap())
     .into();
     options.secret_grants =
-        vec![SecretGrant::new("password", "env:HIRSEL_SCRAM_PASSWORD", "alpha.test").unwrap()];
+        vec![SecretGrant::new("password", "env:HIRSEL_SCRAM_PASSWORD", "tls_send(alpha.test)").unwrap()];
     let entry = DefPath::from_full("app@1/main/main").unwrap();
     let program = product.build(&entry, &options).unwrap();
 

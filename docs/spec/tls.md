@@ -259,13 +259,35 @@ When they come, the client key is a `Secret` that only the provider reads.
 ### TLS-5: Secrets
 
 ```hirsel core
-pub fn seal(take b: Bytes, to: String) -> Result[Secret, (SecretError, Bytes)]
-pub fn narrow(s: Secret, to: String) -> Result[Secret, SecretError]
+pub fn seal(take b: Bytes, uses: String) -> Result[Secret, (SecretError, Bytes)]
+pub fn narrow(s: Secret, uses: String) -> Result[Secret, SecretError]
 pub fn share(s: Secret) -> Secret
 pub fn render(s: Secret) -> View[String] in s
 pub fn send_secret(mut w: WriteHalf, before: Bytes, s: Secret, after: Bytes, until: Until) -> Result[(), NetError] waits
 pub type SecretError = Invalid | Capacity(Capacity)
 ```
+
+**Uses.** A secret is opaque host material together with the typed set of uses it
+permits, its **policy**. A policy's text is its uses separated by single spaces, each at
+most once:
+
+| Use | Permits |
+| --- | --- |
+| `tls_send(<patterns>)` | `tls.send_secret` and `secret.scram_sha256` on a stream whose verified name one of the comma-separated TLS-3 patterns covers |
+| `mac` | `secret.hmac_sha256` and `secret.verify_hmac_sha256` (the MAC sink, below) |
+| `verify` | `secret.verify_hmac_sha256` only |
+| `sign(<alg>)` | signing with `<alg>`, one of `ed25519`, `p256` and `rs256` |
+| `wrap` | use as a key-encryption key |
+| `mtls_client_id` | use as a TLS client identity |
+
+`mac` includes `verify`, so the two are not written together. A name is a destination
+only inside `tls_send(...)` and a use word only outside it, so `tls_send(mac)` sends to
+the host `mac` and permits no MAC. A policy with no use, a word given twice, an unknown
+word or a malformed pattern list is `Invalid`. The canonical text, which recordings and
+diagnostics print, writes `tls_send` first, then `mac` or `verify`, the `sign` uses in the
+order above, `wrap` and `mtls_client_id`, with each pattern as TLS-3 prints it. No
+operation yet reads `sign`, `wrap` or `mtls_client_id`: a policy may hold them and
+`narrow` intersects them, so the policy's shape is final.
 
 **Ingestion.** A secret's bytes enter the run in one of two ways:
 
@@ -275,6 +297,7 @@ pub type SecretError = Invalid | Capacity(Capacity)
   ```sh
   hirsel run app --grant 'Secret:api_key=env:OPENAI_API_KEY to api.openai.com'
   hirsel run app --grant 'Secret:db=file:/run/secrets/db to *.db.internal,10.0.0.7'
+  hirsel run app --grant 'Secret:hook=env:WEBHOOK_KEY verify'
   ```
 
   `Secret:<parameter>` names the `main` parameter. The launcher reads the environment
@@ -282,29 +305,35 @@ pub type SecretError = Invalid | Capacity(Capacity)
   the run does not start (exit 103). The bytes are kept in run-owned host memory. They
   are zeroed when the run ends and are never charged to a limit, and releasing a holder
   of a granted secret never releases them. The program receives a
-  designation, never the bytes. `to` is the list of name patterns the secret may be sent
-  to (TLS-3 pattern syntax), optionally followed by a use word (the MAC sink, below).
+  designation, never the bytes. The text after the source is the grant's policy.
+  `to <patterns>`, with no space in `<patterns>`, is the command line's spelling of
+  `tls_send(<patterns>)`, and other uses may follow it, so the first grant above is
+  `tls_send(api.openai.com)`. The policy is the longest space-separated suffix of the
+  text that parses as a policy, so a file path may hold spaces.
 - **`secret.seal`.** This takes bytes the program already holds, such as a token a
-  server minted during the run, together with a `to` pattern list. It moves them into
+  server minted during the run, together with a policy in canonical spelling (no `to`
+  sugar). It moves them into
   run-owned storage charged to the caller's current limit. Sealing admits
   `round_up_8(pattern_bytes + len(b) + 32)` using the length of `b` before copying.
-  `pattern_bytes` is the sum, over the patterns, of 32 plus the bytes of the name for a
-  DNS name or a wildcard's suffix, and 32 for an IP literal or `*`. A malformed pattern list returns `Error((Invalid, b))`. If
+  `pattern_bytes` is the sum, over the `tls_send` patterns, of 32 plus the bytes of the name for a
+  DNS name or a wildcard's suffix, and 32 for an IP literal or `*`; other uses add nothing.
+  A policy that is `Invalid` returns `Error((Invalid, b))`. If
   admission refuses, sealing returns `Error((Capacity(c), b))` with the requested
   charge and available space. Either refusal returns the original bytes with their
   original payer and charge. The call admits nothing and retains neither the bytes
   nor the policy. On success, sealing copies the bytes, then zeroes and refunds the
   owned source storage. A sealed secret that crosses to another unit
-  ([CONC-15](tasks.md#conc-15-units)) designates the same bytes and keeps its `to`
-  patterns. The program can still access any copies it made before sealing.
+  ([CONC-15](tasks.md#conc-15-units)) designates the same bytes and keeps its policy. The program can still access any copies it made before sealing.
 
-`secret.narrow` keeps the patterns of `s` that the new list also covers, using TLS-3's
-intersection, and designates the same bytes. If the intersection is empty, the result
-is `Invalid`. It admits `round_up_8(pattern_bytes + 32)` for the new designation, and a
+`secret.narrow` keeps the uses of `s` that the new policy also permits and designates the
+same bytes. Its `tls_send` patterns are the TLS-3 intersection of the two lists, so
+`tls_send` remains when that is not empty. `mac` against `verify` gives `verify`, and
+every other use remains when both policies hold it. If no use remains, or `uses` is
+`Invalid`, the result is `Invalid`. It admits `round_up_8(pattern_bytes + 32)` for the new designation, and a
 refusal returns `Capacity(c)`.
 
 **Holders and release.** Each `Secret` value is one **holder** of a **designation**: the
-bytes it designates together with its `to` text. `seal`, `narrow` and `provide.secret`
+bytes it designates together with its policy. `seal`, `narrow` and `provide.secret`
 ([core](core.md#provide)) each make a new designation with one holder.
 `secret.share(s)` returns one more holder of the designation of `s`, as `share` adds a
 holder of an `Rc` ([MEM-16](memory.md#mem-16-counting)): it admits nothing, never fails
@@ -353,7 +382,7 @@ authorized peer can return any bytes, and a recording keeps its replies exactly
 sent, or the operation fails. These checks run before issue, each with no effect:
 
 1. If `w` is not a TLS half, the result is `Denied`.
-2. If no pattern of `s` covers the verified name of `w`'s stream, the result is
+2. If no `tls_send` pattern of `s` covers the verified name of `w`'s stream, the result is
    `Denied`.
 
 The provider receives the bytes from run-owned memory. They never pass through program
@@ -383,11 +412,8 @@ tag)` use a secret as an HMAC-SHA256 key without sending it
 ([hmac](../../core/std/api/hmac.md#secret-keys)). The runtime computes from run-owned
 memory. The tag, or the constant-time verdict for exactly 32 tag bytes, is a delivery
 that passes the replay point ([CAP-8](capabilities.md#cap-8-the-replay-point)), and the
-key never does. A secret's `to` text takes an optional use word after its patterns: `mac`
-permits both operations, and `verify` permits only verification. A list may then have no
-patterns. The words `mac` and `verify` are reserved in this text and cannot name DNS destinations.
-`narrow` intersects uses, with `mac` and `verify` giving `verify`. Without the
-use, the result is `Denied` before issue, with no effect. A tag over chosen data is a
+key never does. `hmac_sha256` needs the `mac` use, and `verify_hmac_sha256` needs `mac`
+or `verify`. Without the use, the result is `Denied` before issue, with no effect. A tag over chosen data is a
 signing oracle wherever it is sent, which is why the use must be granted. A signature
 sink with another algorithm follows the same rule.
 
@@ -441,9 +467,9 @@ beyond the call's own:
 
 1. `w` is not a TLS half: `Denied`. SCRAM over plain TCP gives an attacker on the path
    material for offline password guessing, and channel binding needs TLS.
-2. No pattern of `s` covers the verified name of `w`'s stream: `Denied`. On a TLS half of a
+2. No `tls_send` pattern of `s` covers the verified name of `w`'s stream: `Denied`. On a TLS half of a
    `provide.net` `Net`, a `Secret` from an entry grant also gives `Denied`, as for
-   `send_secret` ([TLS-5](#tls-5-secrets)). No use word is needed. The operation sends a
+   `send_secret` ([TLS-5](#tls-5-secrets)). `tls_send` is the only use needed. The operation sends a
    value computed from the password only to a host the password itself may be sent to,
    and that value tells the host less than the password does.
 3. The transcript is malformed: `Transcript`. `client_first` must be a GS2 header followed
@@ -573,12 +599,12 @@ computes.
 | **TL7** release on every exit | an fd or session leaked on abort or failure | Check four cases: cancel during a handshake parked on a peer that never answers (`Aborted`), a deadline expiry (`TimedOut`), TL1's failure, and a refusal from TL3. After each one, the process's open descriptor count, read from `/proc/self/fd`, is back to its value before `connect`. |
 | **TL8** ALPN | the wrong protocol reported, or a server choice outside the offer accepted | Offer `[h2, http/1.1]` to a server that lists `[http/1.1]`: the result is `Some(1)`. Against a server that lists only `[x]`: `Tls(Protocol(120))`. An entry of 0 bytes, an entry of 256 bytes, or a repeated entry: `Tls(Alpn)` before issue. The oracle is RFC 7301 §3.2. |
 | **TL10** a secret never renders | the bytes reaching a render, log line or diagnostic | The grant `env:` source is 32 random bytes encoded as hex. The program makes an HTTPS request with it as `Authorization: Bearer`, renders the request, triggers and renders an HTTP error, and writes a `Log`. Search stdout, stderr and the run's diagnostics for the value, its base64 and its raw bytes: there are no hits. The loopback server's received header equals the environment value, and the server does not echo it. |
-| **TL11** a secret reaches only its names | exfiltration to a host the grant did not name | Two cases: `send_secret` on a stream verified as `beta.test` with a secret `to alpha.test`, and `send_secret` on a plain-TCP half. Both give `Denied`, and the server receives zero bytes after the handshake. |
+| **TL11** a secret reaches only its names | exfiltration to a host the grant did not name | Two cases: `send_secret` on a stream verified as `beta.test` with a secret granted `tls_send(alpha.test)`, and `send_secret` on a plain-TCP half. Both give `Denied`, and the server receives zero bytes after the handshake. |
 | **TL13** spent half | a resumed send that splits a secret | Make `send_secret` time out after it has committed a prefix (the scripted peer stops reading). The next `send_pair` on that half gives `Reset`. The scripted peer's received bytes are a prefix of `before ‖ secret ‖ after` and contain nothing after it. |
 | **TL14** STARTTLS in place | `join` shutting down, rebuffering or losing the connection, or `tls.connect` refusing a joined socket | A loopback fixture server reads 8 bytes and checks they equal `00 00 00 08 04 D2 16 2F` (PostgreSQL's `SSLRequest`, from the protocol documentation's code 80877103). It answers `S`, then runs TLS as `alpha.test`. NET-7's `pg_starttls` succeeds, `Handshake.peer` equals the `openssl` digest of the alpha leaf, and `hello` sent on the TLS half reaches the server as plaintext. When the server answers `N`, the result is `Declined` with byte `0x4E`, and `hello` sent on the returned half reaches the server unencrypted. |
 | **TL15** injected plaintext before TLS | bytes after the go-ahead read as the server's (CVE-2021-23222) | The fixture server writes `S` followed by `R\x00\x00\x00\x08\x00\x00\x00\x00` (a fake `AuthenticationOk`) in one write, then waits. The client reads one byte, joins, and `tls.connect` gives `Tls(Protocol(0))`. The server receives no byte after the 8-byte request, and the open descriptor count is back to its value before `connect` (TL7's check). The oracle is TLS-1's peek rule and RFC 8446 §4.1.2, under which the client speaks first. |
 | **TL16** join refusals | halves of different sockets merged, or a refusal that loses a half | Using a counting provider: halves of two different loopback sockets, the halves of a TLS stream, and the halves of an accepted socket each give `Unjoined` with zero provider calls. Afterwards, one byte sent on each returned write half reaches that half's own peer, and no other. |
-| **SC1** RFC 7677 vector | a wrong derivation, AuthMessage or base64 | Use secret `pencil` `to alpha.test`, over a loopback TLS stream verified as `alpha.test`. `client_first` is `n,,n=user,r=rOprNGfwEbeRWgbNEkqO`. `server_first` is `r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096`. `before` and `after` are empty. The server receives exactly `c=biws,r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,p=dHzbZapWIk4jUhN+Ute9ytag9zjfMHgsqmmiz7AndVQ=`, and `scram_final_len` gives 106. `scram_verify` with `v=6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4=` gives `true`. With the first signature character changed to `7`, with `e=invalid-proof`, and with the right `v=` on a `Scram` made from a different server nonce, it gives `false`. The oracle is RFC 7677 §3. |
+| **SC1** RFC 7677 vector | a wrong derivation, AuthMessage or base64 | Use secret `pencil` granted `tls_send(alpha.test)`, over a loopback TLS stream verified as `alpha.test`. `client_first` is `n,,n=user,r=rOprNGfwEbeRWgbNEkqO`. `server_first` is `r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096`. `before` and `after` are empty. The server receives exactly `c=biws,r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,p=dHzbZapWIk4jUhN+Ute9ytag9zjfMHgsqmmiz7AndVQ=`, and `scram_final_len` gives 106. `scram_verify` with `v=6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4=` gives `true`. With the first signature character changed to `7`, with `e=invalid-proof`, and with the right `v=` on a `Scram` made from a different server nonce, it gives `false`. The oracle is RFC 7677 §3. |
 | **SC2** normalization and raw fallback | skipping SASLprep, or failing where PostgreSQL falls back | Use SC1's transcript with three passwords. `pen\u{AD}cil` (U+00AD, which RFC 4013 table B.1 maps to nothing) sends SC1's proof. The bytes `70 65 6E FF 63 69 6C` are not UTF-8 and are used raw, so the proof is `p=udNjQvoDM/dE+e/v63Vs504VHmXCmsAHQp5FC38JZcU=`. `pen\u{E000}cil` holds a private-use code point, which RFC 4013 §5 prohibits, so its raw UTF-8 bytes `70 65 6E EE 80 80 63 69 6C` are used and the proof is `p=S0CJLeozN1oaedLBR16sXAg8qzxE/6wMKY16FfthmYo=`. The last two proofs come from Python's `hashlib.pbkdf2_hmac` and `hmac` over those raw bytes. |
 | **SC3** iteration range before work | a check after the derivation, or an off-by-one at either end | With SC1's transcript, `i=4096` succeeds (SC1), and `i=1000000` succeeds, with the server accepting the proof by its own reference computation. `i=4095`, `i=1000001` and `i=0` give `Iterations`. `i=04096` and a missing `i=` give `Transcript`. In each refused case the server receives no byte after the handshake, and the call takes exactly 1 step: `bound steps 1 { let mut h = take w; secret.scram_sha256(mut h, ...) }` returns `Ok` holding the refusal. The half is moved into the scope, since MEM-30 refuses a body that lends `mut` a place declared outside it, and a `let` with a move takes no step. |
 | **SC4** per-iteration charge | the derivation counted as one step | With the other arguments in locals bound outside the scope, `bound steps 4097 { let mut h = take w; secret.scram_sha256(mut h, ...) }` returns `Ok`, and the same body under `bound steps 4096` returns `Error(OutOfTime(steps: 4096))`, with no byte reaching the server. By hand, that is 1 step for the call and 4096 for its iterations, and the `let` takes none (MEM-30). |
@@ -586,7 +612,7 @@ computes.
 | **SC6** authority | a proof emitted to a host the secret may not reach | Each of these gives `Denied`, and the server receives zero bytes after the handshake: a secret `to beta.test` on an `alpha.test` stream, any secret on a plain-TCP half, and a granted secret on a TLS half of `provide.net`, where the server's `provide.next` sees no `Send`. |
 | **SC7** channel binding | the identity digest used where the signature's hash is required, or binding over a missing value | `client_first` `p=tls-server-end-point,,n=,r=abc` over the `alpha.test` leaf, signed with SHA-256, sends `c=` the base64 of `p=tls-server-end-point,,` followed by the leaf's `openssl x509 -outform der \| sha256sum` digest. Over a leaf signed with SHA-384 (an added fixture), it sends the base64 of the header followed by the leaf's `sha384sum` digest, and `scram_final_len` counts its 48 bytes. An Ed25519 leaf, and `p=tls-unique,,`, give `Binding` before issue. The oracle is RFC 5929 §4.1. |
 | **SC8** no key material in a recording | key material or the proof reaching a frame | Record SC1's run with the password from an `env:` grant. The tape holds none of these: `pencil`, `SaltedPassword` `c4a49510323ab4f952cac1fa99441939e78ea74d6be81ddf7096e87513dc615d`, `ClientKey` `a60fc923d67e8644a92d16b96eda5ef4656b0c725c484374be25535576996e8b`, `StoredKey` `586e5df283e6dceb5c3e791d8b8528ec191e664045ce971792e2e6b5bb13e2a6`, `ServerKey` `c1f3cbc1c13a9d35a14c0990eed97629ea225863e566a4314ab99f3f00e5d9d5`, the proof's 32 raw bytes, and their base64. Each is searched raw and as hex. The values follow by hand from RFC 7677's inputs through RFC 5802 §3. Replayed with the variable unset, the run gives the same verdict and ends `Sealed`. |
-| **SC9** virtual SCRAM | the virtual path sending different bytes or exposing a granted secret | Against a `provide.net` server whose handshake reply is `Secured`, seal the owned bytes of `"pencil"` to `"alpha.test"`, unwrap the result, and use SC1's transcript. The server's `Send` calls carry exactly SC1's client-final bytes. When the server commits 10 bytes and then the rest, the second `Send` offers bytes 10 to 106. Under `hirsel test --replay`, the replay ends `Sealed` and its server sees the same calls. |
+| **SC9** virtual SCRAM | the virtual path sending different bytes or exposing a granted secret | Against a `provide.net` server whose handshake reply is `Secured`, seal the owned bytes of `"pencil"` with `"tls_send(alpha.test)"`, unwrap the result, and use SC1's transcript. The server's `Send` calls carry exactly SC1's client-final bytes. When the server commits 10 bytes and then the rest, the second `Send` offers bytes 10 to 106. Under `hirsel test --replay`, the replay ends `Sealed` and its server sees the same calls. |
 
 TL1 to TL8, TL10, TL11, TL14 to TL16 and SC1 to SC8 run against the OS provider over
 loopback. TL5, TL7, TL13, TL15, SC1 and SC5 also have scripted-provider cases, so that the

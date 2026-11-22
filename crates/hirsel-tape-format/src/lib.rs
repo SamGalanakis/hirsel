@@ -13,7 +13,7 @@ use hirsel_core_net::{
 use std::hash::Hasher;
 use twox_hash::XxHash3_64;
 
-pub const FORMAT: u16 = 8;
+pub const FORMAT: u16 = 9;
 pub const MAGIC: [u8; 3] = *b"HTB";
 /// The tape's last block.
 pub const END: u8 = 2;
@@ -503,7 +503,7 @@ impl Header {
         }
         for grant in &self.secret_grants {
             grants.push(SECRET_KIND);
-            for field in [&grant.parameter, &grant.source, &grant.patterns] {
+            for field in [&grant.parameter, &grant.source, &grant.policy] {
                 if grants.len().saturating_add(field.len()) > MAX_LEN {
                     return Err(HeaderTooLarge);
                 }

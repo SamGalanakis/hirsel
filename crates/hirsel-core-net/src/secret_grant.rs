@@ -1,95 +1,141 @@
 use crate::{Name, Pattern};
 use std::sync::Arc;
 
-#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
-pub enum SecretUse {
-    #[default]
-    None,
-    Verify,
-    Mac,
-}
+/// The uses of a Secret other than `tls_send` (TLS-5), as a set. `mac`
+/// permits verification too, so its set holds `VERIFY` as well, and an
+/// intersection is the bitwise and.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SecretUse(u8);
 
 impl SecretUse {
-    fn parse(word: &str) -> Option<Self> {
-        match word {
-            "verify" => Some(Self::Verify),
-            "mac" => Some(Self::Mac),
-            _ => None,
-        }
+    pub const VERIFY: Self = Self(1);
+    pub const MAC: Self = Self(2 | 1);
+    pub const SIGN_ED25519: Self = Self(4);
+    pub const SIGN_P256: Self = Self(8);
+    pub const SIGN_RS256: Self = Self(16);
+    pub const WRAP: Self = Self(32);
+    pub const MTLS_CLIENT_ID: Self = Self(64);
+
+    /// Each use word in its canonical order. A set prints `mac` alone for
+    /// `MAC`, which implies `verify`.
+    const WORDS: [(&str, Self); 7] = [
+        ("mac", Self::MAC),
+        ("verify", Self::VERIFY),
+        ("sign(ed25519)", Self::SIGN_ED25519),
+        ("sign(p256)", Self::SIGN_P256),
+        ("sign(rs256)", Self::SIGN_RS256),
+        ("wrap", Self::WRAP),
+        ("mtls_client_id", Self::MTLS_CLIENT_ID),
+    ];
+
+    pub fn permits(self, needed: Self) -> bool {
+        self.0 & needed.0 == needed.0
     }
 
-    fn word(self) -> &'static str {
-        match self {
-            Self::None => "",
-            Self::Verify => "verify",
-            Self::Mac => "mac",
-        }
+    fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    fn word(word: &str) -> Option<Self> {
+        Self::WORDS
+            .iter()
+            .find(|(w, _)| *w == word)
+            .map(|&(_, u)| u)
     }
 }
 
+/// A Secret's typed set of uses (TLS-5): `tls_send(<patterns>)`, `mac`,
+/// `verify`, `sign(<alg>)`, `wrap` and `mtls_client_id`, written in that
+/// order, separated by single spaces. A DNS name appears only inside
+/// `tls_send(...)`, so no name can be read as a use.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SecretPolicy {
-    pub patterns: Arc<[Pattern]>,
-    pub usage: SecretUse,
+    /// The `tls_send` patterns (TLS-3 syntax); empty without `tls_send`.
+    pub send: Arc<[Pattern]>,
+    pub uses: SecretUse,
 }
 
 impl SecretPolicy {
     pub fn parse(text: &str) -> Option<Self> {
-        let (patterns, word) = text.rsplit_once(' ').unwrap_or(("", text));
-        let usage = SecretUse::parse(word).unwrap_or_default();
-        let patterns = if usage == SecretUse::None {
-            text
-        } else {
-            patterns
-        };
-        let patterns = if patterns.is_empty() && usage != SecretUse::None {
-            if text != word {
-                return None;
+        let mut send: Option<Box<[Pattern]>> = None;
+        let mut uses = SecretUse::default();
+        for token in text.split(' ') {
+            if let Some(patterns) = token
+                .strip_prefix("tls_send(")
+                .and_then(|t| t.strip_suffix(')'))
+            {
+                if send.is_some() {
+                    return None;
+                }
+                send = Some(Pattern::parse_list(patterns)?);
+            } else {
+                let word = SecretUse::word(token)?;
+                // A word given twice, or `verify` beside `mac`, is not canonical.
+                if uses.0 & word.0 != 0 {
+                    return None;
+                }
+                uses.0 |= word.0;
             }
-            Arc::from([])
-        } else {
-            let patterns = Pattern::parse_list(patterns)?;
-            if patterns.iter().any(|p| {
-                matches!(p, Pattern::Exact(Name::Dns(name)) if SecretUse::parse(name).is_some())
-            }) {
-                return None;
-            }
-            patterns.into()
-        };
-        Some(Self { patterns, usage })
+        }
+        let send: Arc<[Pattern]> = send.map_or_else(|| Arc::from([]), Into::into);
+        if send.is_empty() && uses.is_empty() {
+            return None;
+        }
+        Some(Self { send, uses })
     }
 
-    /// The policy covering `name` alone, with no use: a Secret whose policy
-    /// covers a stream's verified name, narrowed to it (TLS-5, virtual
-    /// streams).
+    /// The policy that sends to `name` alone, with no other use: a Secret
+    /// whose policy covers a stream's verified name, narrowed to it (TLS-5,
+    /// virtual streams).
     pub fn exactly(name: &Name) -> Self {
         Self {
-            patterns: Arc::from([Pattern::Exact(name.clone())]),
-            usage: SecretUse::None,
+            send: Arc::from([Pattern::Exact(name.clone())]),
+            uses: SecretUse::default(),
         }
     }
 
     pub fn intersect(&self, requested: &Self) -> Option<Self> {
-        let patterns = Pattern::intersection(&self.patterns, &requested.patterns);
-        let usage = self.usage.min(requested.usage);
-        if patterns.is_empty() && usage == SecretUse::None {
+        let send = Pattern::intersection(&self.send, &requested.send);
+        let uses = SecretUse(self.uses.0 & requested.uses.0);
+        if send.is_empty() && uses.is_empty() {
             return None;
         }
         Some(Self {
-            patterns: patterns.into(),
-            usage,
+            send: send.into(),
+            uses,
         })
     }
 
     pub fn text(&self) -> String {
-        let mut text = Pattern::list_text(&self.patterns);
-        if self.usage != SecretUse::None {
-            if !text.is_empty() {
-                text.push(' ');
-            }
-            text.push_str(self.usage.word());
+        let mut words = Vec::new();
+        let send;
+        if !self.send.is_empty() {
+            send = format!("tls_send({})", Pattern::list_text(&self.send));
+            words.push(send.as_str());
         }
-        text
+        let mut left = self.uses.0;
+        for (word, u) in SecretUse::WORDS {
+            if left & u.0 == u.0 {
+                words.push(word);
+                left &= !u.0;
+            }
+        }
+        words.join(" ")
+    }
+
+    /// The CLI's policy text: canonical, or `to <patterns>` (one token) for
+    /// `tls_send(<patterns>)`, then any other uses.
+    fn cli(text: &str) -> Option<Self> {
+        match text.strip_prefix("to ") {
+            Some(rest) => {
+                let (patterns, more) = rest
+                    .split_once(' ')
+                    .map_or((rest, None), |(p, m)| (p, Some(m)));
+                let canonical = format!("tls_send({patterns})");
+                Self::parse(&more.map_or(canonical.clone(), |m| format!("{canonical} {m}")))
+            }
+            None => Self::parse(text),
+        }
     }
 }
 
@@ -98,7 +144,8 @@ impl SecretPolicy {
 pub struct SecretGrant {
     pub parameter: String,
     pub source: String,
-    pub patterns: String,
+    /// The canonical policy text.
+    pub policy: String,
 }
 
 pub enum SecretSource<'a> {
@@ -121,7 +168,7 @@ impl<'a> SecretSource<'a> {
 }
 
 impl SecretGrant {
-    pub const SYNTAX: &str = "expected --grant 'Secret:<parameter>=env:VAR|file:PATH to <policy>' or 'Secret:<parameter>=env:VAR|file:PATH mac|verify'";
+    pub const SYNTAX: &str = "expected --grant 'Secret:<parameter>=env:VAR|file:PATH <uses>', <uses> being tls_send(<patterns>), mac, verify, sign(<alg>), wrap or mtls_client_id separated by spaces, with 'to <patterns>' for tls_send(<patterns>)";
 
     pub fn logical_size(patterns: &[Pattern], len: u64) -> Option<u64> {
         Pattern::list_bytes(patterns)
@@ -130,17 +177,17 @@ impl SecretGrant {
             .map(|n| n & !7)
     }
 
+    /// `Secret:<parameter>=<source> <policy>`: the policy is the longest
+    /// space-separated suffix that parses, so a file path may hold spaces.
     pub fn parse(spec: &str) -> Option<Self> {
         let (parameter, value) = spec.strip_prefix("Secret:")?.split_once('=')?;
-        let (source, policy) = value.rsplit_once(" to ").or_else(|| {
-            value
-                .rsplit_once(' ')
-                .filter(|&(_, word)| SecretUse::parse(word).is_some())
-        })?;
-        Self::new(parameter, source, policy)
+        value
+            .match_indices(' ')
+            .find_map(|(at, _)| Some((&value[..at], SecretPolicy::cli(&value[at + 1..])?)))
+            .and_then(|(source, policy)| Self::new(parameter, source, &policy.text()))
     }
 
-    pub fn new(parameter: &str, source: &str, patterns: &str) -> Option<Self> {
+    pub fn new(parameter: &str, source: &str, policy: &str) -> Option<Self> {
         if parameter.is_empty() {
             return None;
         }
@@ -148,7 +195,7 @@ impl SecretGrant {
         Some(Self {
             parameter: parameter.to_owned(),
             source: source.to_owned(),
-            patterns: SecretPolicy::parse(patterns)?.text(),
+            policy: SecretPolicy::parse(policy)?.text(),
         })
     }
 }

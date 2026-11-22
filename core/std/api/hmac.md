@@ -49,22 +49,20 @@ time in 256.
 
 - **Authority.** A MAC with a secret's key is a signing oracle. Whoever can ask for tags
   over chosen data can forge what the key authenticates, wherever the tag is then sent.
-  So a secret can be used as a key only when its grant says so. Its `to` list takes an
-  optional use word after the patterns, separated by a space: `mac` permits both
-  operations, and `verify` permits only `verify_hmac_sha256`, which reveals one bit per
-  call.
+  So a secret can be used as a key only when its policy holds the use
+  ([TLS-5](../../../docs/spec/tls.md#tls-5-secrets)): `mac` permits both operations, and
+  `verify` permits only `verify_hmac_sha256`, which reveals one bit per call.
 
   ```sh
   hirsel run app --grant 'Secret:hook=env:WEBHOOK_KEY verify'
   hirsel run app --grant 'Secret:aws=file:/run/secrets/aws to *.amazonaws.com mac'
   ```
 
-  The same text is accepted by `secret.seal` and `secret.narrow` (`"*.example.com mac"`,
-  `"verify"`). `mac` and `verify` are reserved in this text and cannot name DNS destinations.
-  A list may have no patterns when it has a use. `narrow` intersects uses as
-  well: `mac` with `verify` gives `verify`, and a use absent from either side is dropped.
-  An empty result is still `Invalid`. Without the needed use, the operation gives
-  `Denied` before issue, with no effect.
+  The second grant is `tls_send(*.amazonaws.com) mac`, the canonical text that
+  `secret.seal` and `secret.narrow` take (`"tls_send(*.example.com) mac"`, `"verify"`).
+  `narrow` intersects uses: `mac` with `verify` gives `verify`, and a use absent from
+  either side is dropped. An empty result is `Invalid`. Without the needed use, the
+  operation gives `Denied` before issue, with no effect.
 - **Passwords.** A password used for SCRAM goes through `secret.scram_sha256`
   ([TLS-6](../../../docs/spec/tls.md#tls-6-scram-sha-256)), never through these. Under
   `mac`, a program could rebuild PBKDF2 one HMAC at a time and read `SaltedPassword`.

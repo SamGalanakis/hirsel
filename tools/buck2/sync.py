@@ -508,6 +508,11 @@ def adapted_citations_present() -> list[str]:
     return sorted(path for path in cited if READS.is_file(ROOT / path))
 
 
+def distribution_license_paths() -> list[str]:
+    sources = json.loads(READS.text(ROOT / "tools/toolchain-dist/notice-sources.json"))
+    return sorted({path for runtime in sources["host_runtimes"].values() for path in runtime["texts"]})
+
+
 def first_party(meta: dict) -> str:
     packages = {p["id"]: p for p in meta["packages"]}
     nodes = {n["id"]: n for n in meta["resolve"]["nodes"]}
@@ -525,7 +530,7 @@ def first_party(meta: dict) -> str:
     out.append("\n" + call("hirsel_script_test", name="test-buck2-client", script="tools/tests/buck2_client.py",
                            data=["//tools/buck2:bootstrap.py", "//tools/buck2:bootstrap_store.py", "//tools/buck2:bootstrap_llvm.py",
                                  "//tools/buck2:client.py", "//tools/buck2:generated.py", "//tools/buck2:merging.py",
-                                 "//tools/buck2:llvm-cxx-headers-lock.json", "//tools/buck2:llvm-runtime-lock.json",
+                                 "//tools/buck2:llvm-cxx-headers-lock.json",
                                  "//tools/buck2:pins.json", "tools/native-toolchain/llvm-23.lock"]))
     out.append("\n" + call("hirsel_script_test", name="test-native-scratch-tools", script="tools/tests/buck2_sync.py",
                            args=["AtomicScratch", "ProductionFeatures", "CargoUnits", "ExecutorConfiguration"],
@@ -661,6 +666,7 @@ def first_party(meta: dict) -> str:
                             bin_exes={"hirsel": "//:hirsel-core-driver-bin-hirsel"},
                             files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic",
                                        "HIRSEL_CORE_RT_ARCHIVES": "//:hirsel-core-rt-archives",
+                                       "HIRSEL_LINK_KIT": "//tools/buck2/native-toolchain:kit",
                                        "HIRSEL_TOOLCHAIN_ARM": "//tools/buck2/native-toolchain:arm",
                                        "HIRSEL_TOOLCHAIN_QEMU": "//tools/buck2/native-toolchain:qemu"},
                             data=Raw('glob(["core/core/**", "core/std/**", "docs/spec/**"]) + ["core/tools/case_progress.py", "docs/PRIMER.md"]')))
@@ -792,9 +798,8 @@ def first_party(meta: dict) -> str:
                             args=["--present", *adapted_citations_present()],
                             data=["tools/tests/distribution_notices.py", "NOTICES.md", "Cargo.lock", "//third-party:NOTICES.md",
                                   "tools/native-toolchain/llvm-23.lock", "//tools/toolchain-dist:notice-sources.json",
-                                  *("//tools/toolchain-dist:licenses/" + name for name in (
-                                      "libc6-dev.copyright", "gcc-13-base.copyright", "common-licenses/LGPL-2.1",
-                                      "common-licenses/GPL-2", "common-licenses/GPL-3"))],
+                                  *("//tools/toolchain-dist:" + path.removeprefix("tools/toolchain-dist/")
+                                    for path in distribution_license_paths())],
                             files_env={"HIRSEL_DISTRIBUTION_NOTICES": "//tools/toolchain-dist:notices.py",
                                        "HIRSEL_TOOLCHAIN_BUNDLE": "//:hirsel-toolchain"}))
     out.append("\n" + call("hirsel_script_test", name="core-evaluator", script="core/tools/gate_evaluator.py",
@@ -1121,18 +1126,14 @@ def native_toolchain_pins() -> str:
     records = [line.split() for line in READS.text(directory / "llvm-23.lock").splitlines()
                if line and not line.startswith("#")]
     scalars = {row[0]: " ".join(row[1:]) for row in records if row[0] != "deb"}
-    lld_sha, lld_size, lld_asset = scalars["static_lld"].split()
-    llvm = [{"url": f"{scalars['deb_pool']}/{asset}",
-             "sha256": sha, "size": int(size)}
-            for key, name, arch, sha, size, asset in (row for row in records if row[0] == "deb")]
-    runtime = json.loads(READS.text(HERE / "llvm-runtime-lock.json"))["debs"]
-    llvm += [{"url": row["urls"][0].replace("http:", "https:"), "sha256": row["sha256"], "size": row["size"]}
-             for row in runtime]
+    def llvm_asset(name):
+        sha, size, asset = scalars[name].split()
+        return {"url": f"{scalars['asset_pool']}/{asset}", "sha256": sha, "size": int(size)}
     pins = json.loads(READS.text(directory / "native.lock.json"))
     valgrind_runtime = pins.pop("valgrind_runtime")
     link_kit = pins.pop("link_kit")
-    return (HEADER + "LLVM_DEBS = " + json.dumps(llvm, indent=4)
-            + "\nSTATIC_LLD = " + json.dumps({"url": f"{scalars['deb_pool']}/{lld_asset}", "sha256": lld_sha, "size": int(lld_size)}, indent=4)
+    return (HEADER + "BOOTSTRAP_LLVM = " + json.dumps(llvm_asset("bootstrap_llvm"), indent=4)
+            + "\nSTATIC_LLD = " + json.dumps(llvm_asset("static_lld"), indent=4)
             + "\nVALGRIND_DEBS = " + json.dumps(valgrind_runtime, indent=4)
             + "\nLINK_KIT = " + json.dumps(link_kit, indent=4)
             + "\nNATIVE = " + json.dumps({k: v for k, v in pins.items() if k != "schema"}, indent=4) + "\n")

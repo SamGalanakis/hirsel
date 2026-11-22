@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Build the pinned ld.lld that the toolchain image ships (`static_lld` in llvm-23.lock).
 #
-#   build-static-lld DIR    build DIR/ld.lld from the locked source archive and print
-#                           the `static_lld` lock record for it
+#   build-static-lld DIR [package]   build and package DIR/ld.lld, or package an
+#                                   already-built linker, and print its lock record
 #
 # The result is ld.lld only: the ELF port (static-lld-elf-only.patch), X86 and
 # AArch64, Release without assertions, linked -static-pie and stripped. A static PIE
@@ -11,16 +11,20 @@
 # (about 10 M instructions per run). A static PIE also refuses DT_RUNPATH, so the
 # build has no rpath and no plugin exports. Nothing is loaded at run time.
 #
-# Run once per pin change on an x86_64 Ubuntu 24.04 host (gcc 13, glibc 2.39), then
-# upload DIR/ld.lld to the release in `deb_pool` under the printed asset name and
-# write the record into llvm-23.lock. The build runs under tools/capped (4G) with
-# two jobs. Nothing rebuilds it per land.
+# Run once per pin change in the manylinux_2_28 x86_64 image (with glibc-static
+# and the image's GCC toolset on PATH), then
+# upload DIR/ld.lld to the release in `asset_pool` under the printed asset name and
+# write the record into llvm-23.lock. The build runs under tools/capped with
+# JOBS jobs (default two). Nothing rebuilds it per land.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 lock="$here/llvm-23.lock"
 fail() { echo "build-static-lld: $*" >&2; exit 1; }
-(( $# == 1 )) || { echo "usage: build-static-lld DIR" >&2; exit 2; }
+if (( $# < 1 || $# > 2 )) || [[ ${2:-package} != package ]]; then
+  echo "usage: build-static-lld DIR [package]" >&2
+  exit 2
+fi
 lock_value() {
   awk -v k="$1" '$1 == k { sub(/^[^ ]+ /, ""); print; found = 1 } END { exit !found }' "$lock" \
     || fail "llvm-23.lock has no '$1' record"
@@ -28,27 +32,32 @@ lock_value() {
 
 mkdir -p "$1"
 dir="$(cd "$1" && pwd)"
+jobs=${JOBS:-2}
 version="$(lock_value llvm_version)"
-archive="$dir/llvm-project-$version.src.tar.xz"
-[[ -f "$archive" ]] || curl -fsSL "$(lock_value source_url)" -o "$archive" || fail "could not download the source archive"
-[[ "$(sha256sum "$archive" | cut -d ' ' -f 1)" == "$(lock_value source_sha256)" ]] || fail "$archive does not have the locked SHA-256"
-rm -rf "$dir/src" "$dir/build"
-mkdir "$dir/src"
-tar xf "$archive" --strip-components=1 -C "$dir/src"
-patch -d "$dir/src" -p1 < "$here/static-lld-elf-only.patch"
+if (( $# == 1 )); then
+  archive="$dir/llvm-project-$version.src.tar.xz"
+  [[ -f "$archive" ]] || curl -fsSL "$(lock_value source_url)" -o "$archive" || fail "could not download the source archive"
+  [[ "$(sha256sum "$archive" | cut -d ' ' -f 1)" == "$(lock_value source_sha256)" ]] || fail "$archive does not have the locked SHA-256"
+  rm -rf "$dir/src" "$dir/build"
+  mkdir "$dir/src"
+  tar xf "$archive" --strip-components=1 -C "$dir/src"
+  patch -d "$dir/src" -p1 < "$here/static-lld-elf-only.patch"
 
-cmake -S "$dir/src/llvm" -B "$dir/build" -G Ninja \
-  -DCMAKE_BUILD_TYPE=Release -DLLVM_ENABLE_ASSERTIONS=OFF \
-  -DLLVM_ENABLE_PROJECTS=lld -DLLVM_TARGETS_TO_BUILD='X86;AArch64' -DLLD_VENDOR=Ubuntu \
-  -DBUILD_SHARED_LIBS=OFF -DLLVM_BUILD_LLVM_DYLIB=OFF -DLLVM_LINK_LLVM_DYLIB=OFF \
-  -DCMAKE_EXE_LINKER_FLAGS=-static-pie -DCMAKE_SKIP_RPATH=ON -DLLVM_ENABLE_PLUGINS=OFF \
-  -DLLVM_ENABLE_ZLIB=OFF -DLLVM_ENABLE_ZSTD=OFF -DLLVM_ENABLE_LIBXML2=OFF \
-  -DLLVM_ENABLE_TERMINFO=OFF -DLLVM_ENABLE_LIBEDIT=OFF \
-  -DLLVM_INCLUDE_TESTS=OFF -DLLVM_INCLUDE_BENCHMARKS=OFF -DLLVM_INCLUDE_EXAMPLES=OFF > "$dir/cmake.log"
-HIRSEL_JOBS=2 "$here/../capped" --long ninja -C "$dir/build" -j2 lld > "$dir/ninja.log"
+  cmake -S "$dir/src/llvm" -B "$dir/build" -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release -DLLVM_ENABLE_ASSERTIONS=OFF \
+    -DLLVM_ENABLE_PROJECTS=lld -DLLVM_TARGETS_TO_BUILD='X86;AArch64' \
+    -DBUILD_SHARED_LIBS=OFF -DLLVM_BUILD_LLVM_DYLIB=OFF -DLLVM_LINK_LLVM_DYLIB=OFF \
+    -DCMAKE_C_FLAGS=-fPIE -DCMAKE_CXX_FLAGS=-fPIE \
+    -DCMAKE_EXE_LINKER_FLAGS=-static-pie -DCMAKE_SKIP_RPATH=ON -DLLVM_ENABLE_PLUGINS=OFF \
+    -DLLVM_ENABLE_ZLIB=OFF -DLLVM_ENABLE_ZSTD=OFF -DLLVM_ENABLE_LIBXML2=OFF \
+    -DLLVM_ENABLE_TERMINFO=OFF -DLLVM_ENABLE_LIBEDIT=OFF \
+    -DLLVM_INCLUDE_TESTS=OFF -DLLVM_INCLUDE_BENCHMARKS=OFF -DLLVM_INCLUDE_EXAMPLES=OFF > "$dir/cmake.log"
+  HIRSEL_JOBS=$jobs "$here/../capped" --long ninja -C "$dir/build" -j "$jobs" lld > "$dir/ninja.log"
+fi
 strip --strip-all -o "$dir/ld.lld" "$dir/build/bin/lld"
 
 [[ "$(readelf -h "$dir/ld.lld" | awk '$1 == "Type:" { print $2 }')" == DYN ]] || fail "ld.lld is not a static PIE"
 ! readelf -d "$dir/ld.lld" | grep -q '(NEEDED)\|(RUNPATH)' || fail "ld.lld loads a library"
+! readelf -l "$dir/ld.lld" | grep -q INTERP || fail "ld.lld needs an interpreter"
 [[ "$("$dir/ld.lld" --version)" == *" $version "* ]] || fail "ld.lld does not report $version"
-echo "static_lld $(sha256sum "$dir/ld.lld" | cut -d ' ' -f 1) $(stat -c %s "$dir/ld.lld") ld.lld-$version-static-pie-x86_64"
+echo "static_lld $(sha256sum "$dir/ld.lld" | cut -d ' ' -f 1) $(stat -c %s "$dir/ld.lld") ld.lld-$version-static-pie-manylinux_2_28-x86_64"

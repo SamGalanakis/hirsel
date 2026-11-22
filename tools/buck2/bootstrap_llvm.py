@@ -1,22 +1,9 @@
 #!/usr/bin/env python3
 """Materialize the pinned LLVM 23 tree as an ignored Buck2 toolchain input.
 
-`tools/native-toolchain/install --unpack` verifies every locked `.deb` against
-`tools/native-toolchain/llvm-23.lock`, unpacks it and runs the pin's `check`.
-This script then lays the result out as one self-contained tree with no
-symbolic links (Buck2 hashes a link, not its target):
-
-    bin/                 every LLVM, clang and lld executable (RUNPATH $ORIGIN/../lib),
-                         except ld.lld: the locked static PIE (`static_lld`),
-                         and hirsel-clang, hirsel-clang++, hirsel-llvm-ar: wrappers
-                         that locate their tools without PATH
-    lib/                 libLLVM, libclang-cpp, the clang resource directory, and
-                         the libraries they load that a minimal worker image lacks
-                         (llvm-runtime-lock.json), with their own relative RUNPATH
-    engine/              libLLVM.so.23.1: the compiler's own LLVM (`engine_llvm`, built
-                         by build-libllvm), which first-party binaries load first
-                         (tools/buck2/defs.bzl LLVM_RPATH); clang and the tools keep lib/'s
-    include/llvm{,-c}/   the LLVM headers
+The locked bootstrap archive provides clang, the LLVM tools and headers, and
+their stock shared library. This script adds the independently pinned ld.lld
+and engine libLLVM and flattens symlinks (Buck2 hashes a link, not its target).
 
 The static LLVM component archives are left out: llvm-sys links libLLVM
 dynamically (`force-dynamic`). Remote workers receive the tree as an action
@@ -31,12 +18,13 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import os
 import pathlib
-import re
 import shutil
 import stat
+import tarfile
 import subprocess
 import sys
 import tempfile
@@ -48,11 +36,9 @@ import bootstrap_store
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 LOCK = ROOT / "tools/native-toolchain/llvm-23.lock"
 CXX_LOCK = pathlib.Path(__file__).with_name("llvm-cxx-headers-lock.json")
-RUNTIME_LOCK = pathlib.Path(__file__).with_name("llvm-runtime-lock.json")
-INSTALL = ROOT / "tools/native-toolchain/install"
 DEFAULT_OUTPUT = pathlib.Path(__file__).with_name("toolchains") / "llvm-files"
 RECEIPT = ".hirsel-llvm.json"
-LAYOUT = 9
+LAYOUT = 10
 REQUIRED = (
     "sysroot/usr/include/c++/13/vector",
     "sysroot/usr/include/features.h",
@@ -62,14 +48,10 @@ REQUIRED = (
     "bin/ld.lld",
     "lib/libLLVM.so.23.1",
     "lib/libLLVM-23.so",
-    "engine/libLLVM.so.23.1",
     "lib/libclang-cpp.so.23.1",
+    "engine/libLLVM.so.23.1",
     "lib/clang/23/include/stddef.h",
     "include/llvm-c/Core.h",
-    "lib/libedit.so.2",
-    "lib/libxml2.so.2",
-    "lib/libz3.so.4",
-    "lib/libcurl.so.4",
     "bin/hirsel-clang",
     "bin/hirsel-clang++",
     "bin/hirsel-llvm-ar",
@@ -86,7 +68,6 @@ def identity() -> dict:
         "layout": LAYOUT,
         "lock_sha256": hashlib.sha256(LOCK.read_bytes()).hexdigest(),
         "cxx_headers_lock_sha256": hashlib.sha256(CXX_LOCK.read_bytes()).hexdigest(),
-        "runtime_lock_sha256": hashlib.sha256(RUNTIME_LOCK.read_bytes()).hexdigest(),
     }
 
 
@@ -125,71 +106,31 @@ def place_tree(source: pathlib.Path, target: pathlib.Path) -> None:
         place(path, target / path.relative_to(source))
 
 
-def fetch_deb(deb: dict, directory: pathlib.Path) -> pathlib.Path:
-    path = directory / deb["name"]
-    for url in deb["urls"]:
+def fetch(pin: dict, directory: pathlib.Path) -> pathlib.Path:
+    path = directory / pin["name"]
+    for url in pin["urls"]:
         try:
             with urllib.request.urlopen(url, timeout=120) as response, path.open("wb") as out:
                 shutil.copyfileobj(response, out)
         except OSError as error:
             print(f"{url}: {error}", file=sys.stderr)
             continue
-        if path.stat().st_size == deb["size"] and hashlib.sha256(path.read_bytes()).hexdigest() == deb["sha256"]:
+        if path.stat().st_size == pin["size"] and hashlib.sha256(path.read_bytes()).hexdigest() == pin["sha256"]:
             return path
         print(f"{url}: size or SHA-256 differs from the lock", file=sys.stderr)
-    raise SystemExit(f"could not fetch a verified {deb['name']}")
+    raise SystemExit(f"could not fetch a verified {pin['name']}")
 
 
 def fetch_built(record: str, directory: pathlib.Path) -> pathlib.Path:
-    """A locked asset built from the source archive: `static_lld`, the static-PIE
-    ld.lld that replaces the deb's (build-static-lld), or `engine_llvm`, the
-    compiler's libLLVM (build-libllvm)."""
+    """Fetch one of the binaries built from the locked source archive."""
     records = {}
     for line in LOCK.read_text(encoding="utf-8").splitlines():
         fields = line.split()
         if fields and not fields[0].startswith("#"):
             records[fields[0]] = fields[1:]
     sha256, size, asset = records[record]
-    pool = records["deb_pool"][0]
-    return fetch_deb({"name": asset, "urls": [f"{pool}/{asset}"], "size": int(size), "sha256": sha256}, directory)
-
-
-def place_runtime_libraries(stage: pathlib.Path, scratch: pathlib.Path) -> None:
-    lock = json.loads(RUNTIME_LOCK.read_text(encoding="utf-8"))
-    if lock.get("schema") != 1:
-        raise SystemExit("unsupported llvm-runtime-lock.json schema")
-    unpacked = scratch / "runtime"
-    for deb in lock["debs"]:
-        subprocess.run(["dpkg-deb", "-x", fetch_deb(deb, scratch), unpacked], check=True)
-    for path in sorted((unpacked / "usr/lib/x86_64-linux-gnu").iterdir()):
-        # Sonames may be regular files (libz3) or links (libedit).
-        if ".so." in path.name and path.is_file():
-            place(path, stage / "lib" / path.name)
-
-
-def relocate_tools(stage: pathlib.Path, scratch: pathlib.Path) -> None:
-    lock = json.loads(RUNTIME_LOCK.read_text(encoding="utf-8"))
-    patcher = scratch / "patchelf"
-    subprocess.run(["dpkg-deb", "-x", fetch_deb(lock["patchelf"], scratch), patcher], check=True)
-    libraries = {path.name for path in (stage / "lib").glob("*.so*")}
-    tools = sorted(path for path in (stage / "bin").iterdir() if path.is_file())
-    for path in tools + sorted((stage / "lib").glob("*.so*")):
-        with path.open("rb") as source:
-            if source.read(4) != b"\x7fELF":
-                continue
-        dynamic = subprocess.check_output(["readelf", "-d", path], env={**os.environ, "LC_ALL": "C"}, text=True)
-        needed = set(re.findall(r"\(NEEDED\).*\[(.*?)\]", dynamic))
-        existing = re.findall(r"\(RUNPATH\).*\[(.*?)\]", dynamic)
-        if path.parent.name == "bin":
-            if not needed:
-                continue
-            runpath = "$ORIGIN/../lib"
-        else:
-            if not needed & libraries or existing == ["$ORIGIN/../lib"]:
-                continue
-            runpath = "$ORIGIN"
-        if existing != [runpath]:
-            subprocess.run([patcher / "usr/bin/patchelf", "--set-rpath", runpath, path], check=True)
+    pool = records["asset_pool"][0]
+    return fetch({"name": asset, "urls": [f"{pool}/{asset}"], "size": int(size), "sha256": sha256}, directory)
 
 
 def tool_version(path: pathlib.Path) -> str:
@@ -198,28 +139,34 @@ def tool_version(path: pathlib.Path) -> str:
     return subprocess.check_output([path, "--version"], env=env, text=True).strip()
 
 
+def unpack_headers(deb: pathlib.Path, headers: pathlib.Path) -> None:
+    # AlmaLinux 8's dpkg does not read Ubuntu's zstd-compressed header package.
+    members = subprocess.check_output(["ar", "t", deb], text=True).splitlines()
+    if "data.tar.zst" not in members:
+        subprocess.run(["dpkg-deb", "-x", deb, headers], check=True)
+        return
+    compressed = subprocess.check_output(["ar", "p", deb, "data.tar.zst"])
+    data = subprocess.check_output(["zstd", "-dq"], input=compressed)
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as archive:
+        archive.extractall(headers, filter="data")
+
+
 def build(stage: pathlib.Path, wanted: dict) -> None:
     stage.mkdir()
     with tempfile.TemporaryDirectory(prefix="hirsel-llvm-") as raw:
-        unpacked = pathlib.Path(raw) / "root"
-        subprocess.run([INSTALL, "--unpack", unpacked], check=True, stdout=sys.stderr)
-        prefix = unpacked / "usr/lib/llvm-23"
-        for path in sorted((prefix / "bin").iterdir()):
-            place(path, stage / "bin" / path.name)
-        linker = fetch_built("static_lld", pathlib.Path(raw))
+        scratch = pathlib.Path(raw)
+        bootstrap = scratch / "bootstrap"
+        with tarfile.open(fetch_built("bootstrap_llvm", scratch)) as archive:
+            archive.extractall(bootstrap, filter="data")
+        place_tree(bootstrap, stage)
+        linker = fetch_built("static_lld", scratch)
         linker.chmod(0o755)
         place(linker, stage / "bin/ld.lld")
-        place(fetch_built("engine_llvm", pathlib.Path(raw)), stage / "engine/libLLVM.so.23.1")
-        for name in ("libLLVM.so.23.1", "libLLVM-23.so", "libclang-cpp.so.23.1"):
-            place(prefix / "lib" / name, stage / "lib" / name)
-        place_tree(prefix / "lib/clang", stage / "lib/clang")
-        for name in ("llvm", "llvm-c"):
-            place_tree(prefix / "include" / name, stage / "include" / name)
-        place_runtime_libraries(stage, pathlib.Path(raw))
-        relocate_tools(stage, pathlib.Path(raw))
-        headers = pathlib.Path(raw) / "cxx-headers"
-        for deb in json.loads(CXX_LOCK.read_text())["debs"]:
-            subprocess.run(["dpkg-deb", "-x", fetch_deb(deb, pathlib.Path(raw)), headers], check=True)
+        place(linker, stage / "bin/lld")
+        place(fetch_built("engine_llvm", scratch), stage / "engine/libLLVM.so.23.1")
+        headers = scratch / "cxx-headers"
+        for pin in json.loads(CXX_LOCK.read_text())["debs"]:
+            unpack_headers(fetch(pin, scratch), headers)
         place_tree(headers / "usr/include", stage / "sysroot/usr/include")
     for name in ("clang", "clang++", "llvm-ar"):
         wrapper = stage / "bin" / f"hirsel-{name}"

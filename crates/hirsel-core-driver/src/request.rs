@@ -260,6 +260,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     let mut profile_front = false;
     let mut image_path = None;
     let mut install_root = None;
+    let mut link_kit = None;
     let mut core_product = None;
     let mut source_core = inspect_library.is_some();
     let mut source_std = false;
@@ -349,6 +350,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             Opt::ExpectVerdict => expect_verdict = Some(value),
             Opt::Diagnose => diagnose = true,
             Opt::Install => install_root = Some(PathBuf::from(value)),
+            Opt::LinkKit => link_kit = Some(PathBuf::from(value)),
             Opt::SourceCore => source_core = true,
             Opt::SourceStd => source_std = true,
             Opt::Name => {
@@ -812,6 +814,9 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         std::process::exit(0);
     }
     if command == "core-product" || command == "std-product" {
+        if link_kit.is_some() && (install_root.is_none() || runtime.is_none()) {
+            return Err("--link-kit requires --install and --runtime".into());
+        }
         meter.finish("startup/discovery");
         let (image, rebuilt) = if let Some(path) = image_path {
             (
@@ -838,7 +843,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                             .as_deref()
                             .map(|path| (path, target.as_str())),
                     },
-                    cc.clone().or_else(pinned).as_deref(),
+                    link_kit.as_deref(),
                     &mut meter,
                 )?
             } else if command == "std-product" {

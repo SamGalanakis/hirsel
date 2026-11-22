@@ -2,8 +2,7 @@
 set -u
 
 # tools/toolchain-dist/build reads this assignment for the release gate.
-# Satisfy the weak pidfd imports too, so glibc starts Hirsel without a warning.
-glibc_floor=2.39
+glibc_floor=2.28
 release_url=https://github.com/SamGalanakis/hirsel/releases
 release_api=https://api.github.com/repos/SamGalanakis/hirsel/releases/latest
 target=x86_64-unknown-linux-gnu
@@ -175,6 +174,7 @@ actual=$(hash_command "$download_dir/$archive") || fail 'cannot compute SHA-256'
 
 has_bundle() {
     [ -x "$1/hirsel" ] && [ -x "$1/bin/ld.lld" ] &&
+        [ -d "$1/link/kit" ] &&
         [ -f "$1/lib/libLLVM.so.23.1" ] && [ -f "$1/hirsel-core-toolchain.json" ]
 }
 

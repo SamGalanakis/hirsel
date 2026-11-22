@@ -8,7 +8,8 @@
 //! ROOT/hirsel                       the compiler, RPATH $ORIGIN/lib
 //! ROOT/lib/libLLVM.so.23.1 ...      the LLVM engine and the libraries it loads
 //! ROOT/bin/ld.lld                   the link editor
-//! ROOT/link/<target>.json           the link recipe captured at install
+//! ROOT/link/<target>.json           the bundle-relative link recipe
+//! ROOT/link/kit/                   the startup objects and link-only libraries
 //! ROOT/runtime/<target>/<hash>/     runtime archives
 //! ROOT/core-packages/               core and std images
 //! ROOT/hirsel-core-toolchain.json   this selection
@@ -107,7 +108,7 @@ impl Installed {
         };
         runtimes.get(target).map(|path| self.root.join(path))
     }
-    /// The link recipe this installation captured for `target`. A target
+    /// The link recipe this installation provides for `target`. A target
     /// without one links only through an explicit `--cc`.
     pub fn link(&self, target: &str) -> Option<PathBuf> {
         self.registration
@@ -397,14 +398,13 @@ impl<T> RuntimeVariants<T> {
 /// selection is written last, so a failed install keeps the previous one.
 ///
 /// Installing the host's runtime installs the native toolchain with it: the
-/// LLVM engine the compiler loads, and the link editor and recipe captured
-/// through `cc`, which runs only here.
+/// LLVM engine the compiler loads and the pinned kit that links its programs.
 pub fn publish(
     root: &Path,
     std: bool,
     runtime: Option<(&Path, &str)>,
     additional: RuntimeVariants<(&Path, &str)>,
-    cc: Option<&Path>,
+    link_kit: Option<&Path>,
     meter: &mut Meter,
 ) -> io::Result<PackageProduct> {
     let root = crate::product::normalized(root);
@@ -445,15 +445,16 @@ pub fn publish(
         .as_ref()
         .map(|(_, target)| *target)
         .filter(|target| *target == HOST);
-    let driver = linked
-        .map(|target| {
-            cc.ok_or_else(|| {
-                io::Error::other(format!(
-                    "installing the {target} toolchain captures its link recipe through a C driver: pass --cc"
-                ))
-            })
-        })
-        .transpose()?;
+    let kit = match (linked, link_kit) {
+        (Some(target), Some(kit)) => Some((target, kit)),
+        (Some(target), None) => {
+            return Err(io::Error::other(format!(
+                "installing the {target} runtime requires --link-kit"
+            )));
+        }
+        (None, Some(_)) => return Err(io::Error::other("--link-kit requires a host runtime")),
+        (None, None) => None,
+    };
     std::fs::create_dir_all(&root)?;
     install_executable(&root)?;
     let cache = root.join("core-packages");
@@ -462,16 +463,13 @@ pub fn publish(
     } else {
         PackageProduct::bundled(&cache, meter)?
     };
-    let link = match (linked, driver) {
-        (Some(target), Some(driver)) => {
+    let link = match kit {
+        Some((target, kit)) => {
             let library = hirsel_llvm_lazy::llvm_library().map_err(|error| {
                 io::Error::other(format!("cannot install the LLVM engine: {error}"))
             })?;
             install_libraries(library, &root.join("lib"))?;
-            let (recipe, linker) = crate::tool_inputs::install_recipe(driver, target, &root)?;
-            let installed = root.join(crate::tool_inputs::INSTALLED_LINKER);
-            install_file(&std::fs::read(&linker)?, &installed, 0o755)?;
-            install_dependencies(&installed, &root.join("lib"))?;
+            let recipe = crate::tool_inputs::install_recipe(kit, target, &root)?;
             meter.finish("install/native toolchain");
             Some((target, recipe))
         }
@@ -642,12 +640,6 @@ fn install_libraries(library: &Path, directory: &Path) -> io::Result<()> {
     install_dependencies_from(library, &installed, directory)
 }
 
-/// Copy the libraries an installed object loads that its source's
-/// directories provide; the rest are the system's.
-fn install_dependencies(installed: &Path, directory: &Path) -> io::Result<()> {
-    install_dependencies_from(installed, installed, directory)
-}
-
 fn install_dependencies_from(source: &Path, installed: &Path, directory: &Path) -> io::Result<()> {
     let home = source
         .canonicalize()?
@@ -697,7 +689,7 @@ fn install_dependencies_from(source: &Path, installed: &Path, directory: &Path) 
 }
 
 /// Write `bytes` at `path` atomically, unless the file already holds them.
-fn install_file(bytes: &[u8], path: &Path, mode: u32) -> io::Result<()> {
+pub(crate) fn install_file(bytes: &[u8], path: &Path, mode: u32) -> io::Result<()> {
     if std::fs::read(path).is_ok_and(|existing| existing == bytes) {
         return Ok(());
     }

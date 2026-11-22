@@ -19,11 +19,9 @@ jobs:
             --cap-add SYS_ADMIN --security-opt seccomp=unconfined \
             --security-opt apparmor=unconfined --security-opt systempaths=unconfined \
             -v "$GITHUB_WORKSPACE:/src" -v "$RUNNER_TEMP/release:/release" -w /src \
-            -e RELEASE_TAG ubuntu:24.04 bash -euxo pipefail -c '
+            -e RELEASE_TAG quay.io/pypa/manylinux_2_28_x86_64@sha256:55a36963bc0504cdf004011001c1072306402f0b8b83be5a5eba7068f93eec53 bash -euxo pipefail -c '
               [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?(\+[A-Za-z0-9.-]+)?$ ]]
-              export DEBIAN_FRONTEND=noninteractive
-              apt-get update -qq
-              apt-get install -yq --no-install-recommends bubblewrap build-essential ca-certificates curl git libedit2 libffi8 libxml2 libz3-4 pkg-config python3 xz-utils zlib1g zstd
+              dnf -y install bubblewrap dpkg zstd
               git config --global --add safe.directory /src
               curl --proto "=https" --tlsv1.2 -fsSL https://sh.rustup.rs |
                 sh -s -- -y --profile minimal --default-toolchain 1.99.0
@@ -49,13 +47,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - image: ubuntu:24.04
-            expect_refusal: 'false'
-          - image: debian:trixie
-            expect_refusal: 'false'
-          - image: ubuntu:22.04
-            expect_refusal: 'true'
+        image: [ubuntu:22.04, debian:bookworm-slim, ubuntu:24.04, debian:trixie-slim]
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -65,26 +57,18 @@ jobs:
         env:
           HIRSEL_VERSION: ${{ github.ref_name }}
           IMAGE: ${{ matrix.image }}
-          EXPECT_REFUSAL: ${{ matrix.expect_refusal }}
         run: |
           # The executable writer uses unshare(CLONE_FILES), which Docker's default filter denies.
           docker run --rm --cpus 4 --memory 8g --memory-swap 8g \
             --security-opt seccomp=unconfined \
-            -v "$RUNNER_TEMP/release:/release:ro" -e HIRSEL_VERSION -e EXPECT_REFUSAL \
+            -v "$RUNNER_TEMP/release:/release:ro" -e HIRSEL_VERSION \
             -e HIRSEL_DOWNLOAD_BASE=file:///release "$IMAGE" dash -ec '
-              if [ "$EXPECT_REFUSAL" = true ]; then
-                if dash /release/install.sh > /tmp/install.log 2>&1; then
-                  echo "The installer accepted an unsupported glibc" >&2
-                  exit 1
-                fi
-                host=$(getconf GNU_LIBC_VERSION)
-                floor=$(sed -n "s/^glibc_floor=//p" /release/install.sh)
-                grep -Fx "hirsel installer: Hirsel requires glibc $floor or later (found ${host#glibc })" /tmp/install.log
-                test ! -e "$HOME/.hirsel"
-                exit 0
+              packages=$(dpkg-query -W -f="\${Package} \${Status}\n")
+              if printf "%s\n" "$packages" | grep -E "^(libc6-dev|libgcc-[0-9]+-dev) install ok installed$"; then
+                exit 1
               fi
-              apt-get update -qq
-              apt-get install -yq --no-install-recommends libc6-dev libgcc-13-dev libstdc++6 zlib1g
+              exec 3>&2 2>/tmp/hirsel-smoke.stderr
+              trap "cat /tmp/hirsel-smoke.stderr >&3" 0
               dash /release/install.sh
               . "$HOME/.hirsel/env"
               test "$(command -v hirsel)" = "$HOME/.hirsel/bin/hirsel"
@@ -97,6 +81,7 @@ jobs:
               hirsel test
               hirsel run
               hirsel build
+              test ! -s /tmp/hirsel-smoke.stderr
             '
 
   publish:

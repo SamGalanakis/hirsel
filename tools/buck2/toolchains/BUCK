@@ -101,6 +101,12 @@ system_python_bootstrap_toolchain(name = "python_bootstrap", interpreter = "/usr
 remote_test_execution_toolchain(name = "remote_test_execution", visibility = ["PUBLIC"])
 noop_test_toolchain(name = "test", visibility = ["PUBLIC"])
 
+cxx_library(
+    name = "libm",
+    exported_linker_flags = ["-lm"],
+    visibility = ["PUBLIC"],
+)
+
 # libLLVM and its C headers, for llvm-sys (tools/buck2/fixups/llvm-sys).
 prebuilt_cxx_library(
     name = "libllvm",

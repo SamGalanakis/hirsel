@@ -1,7 +1,7 @@
-load("//tools/native-toolchain:pins.bzl", "LINK_KIT", "LLVM_DEBS", "NATIVE", "STATIC_LLD", "VALGRIND_DEBS")
+load("//tools/native-toolchain:pins.bzl", "BOOTSTRAP_LLVM", "LINK_KIT", "NATIVE", "STATIC_LLD", "VALGRIND_DEBS")
 load(":defs.bzl", "link_kit", "toolchain_proof", "unpack_toolchain")
 
-[http_file(name = "llvm-deb-{}".format(i), urls = [pin["url"]], sha256 = pin["sha256"], size_bytes = pin["size"]) for i, pin in enumerate(LLVM_DEBS)]
+http_file(name = "llvm-bootstrap", urls = [BOOTSTRAP_LLVM["url"]], sha256 = BOOTSTRAP_LLVM["sha256"], size_bytes = BOOTSTRAP_LLVM["size"])
 [http_file(name = name + "-archive", urls = [pin["url"]], sha256 = pin["sha256"], size_bytes = pin["size"]) for name, pin in NATIVE.items()]
 
 [http_file(name = "valgrind-runtime-{}".format(i), urls = [pin["url"]], sha256 = pin["sha256"], size_bytes = pin["size"]) for i, pin in enumerate(VALGRIND_DEBS)]
@@ -11,7 +11,7 @@ http_file(name = "static-lld", urls = [STATIC_LLD["url"]], sha256 = STATIC_LLD["
 
 unpack_toolchain(
     name = "llvm", kind = "llvm",
-    archives = [":llvm-deb-{}".format(i) for i in range(len(LLVM_DEBS))],
+    archives = [":llvm-bootstrap"],
     linker = ":static-lld",
     visibility = ["PUBLIC"],
 )

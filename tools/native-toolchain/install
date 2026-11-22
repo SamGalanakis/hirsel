@@ -1,20 +1,16 @@
 #!/usr/bin/env bash
 # Install the LLVM pin in llvm-23.lock.
 #
-#   install                 print the install command and pinned asset URLs (changes nothing)
-#   install --run           fetch, verify and install the debs; needs root and changes the system
-#   install --unpack DIR    verify each locked .deb and unpack it under DIR with `dpkg -x`,
-#                           without root; prints the environment that selects it
-#   install --source        print the pinned source build (shared libLLVM, X86 and AArch64)
-#
-# Every .deb is checked against its locked SHA-256 and size before it is used.
+#   install                 print the install command and pinned asset URLs
+#   install --unpack DIR    install the verified toolchain below DIR without root
+#   install --source        print the pinned source build commands
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 lock="$here/llvm-23.lock"
 
 fail() { echo "native-toolchain install: $*" >&2; exit 1; }
-usage() { echo "usage: install [--run | --unpack DIR | --source]" >&2; exit 2; }
+usage() { echo "usage: install [--unpack DIR | --source]" >&2; exit 2; }
 
 lock_value() {
   local value
@@ -23,74 +19,32 @@ lock_value() {
   printf '%s\n' "$value"
 }
 
-mapfile -t packages < <(awk '$1 == "deb" { print $2 }' "$lock")
-
-# Prints the path of a locked .deb downloaded into $2 and verified.
-verified_deb() {
-  local package="$1" downloads="$2" arch sha size name file
-  read -r _ _ arch sha size name < <(awk -v p="$package" '$1 == "deb" && $2 == p' "$lock")
-  file="$downloads/$name"
-  curl -fsSL "$(lock_value deb_pool)/$name" -o "$file" || fail "could not download $name"
-  [[ "$(stat -c %s "$file")" == "$size" ]] || fail "$file is not $size bytes"
-  [[ "$(sha256sum "$file" | cut -d ' ' -f 1)" == "$sha" ]] || fail "$file does not have SHA-256 $sha"
-  printf '%s\n' "$file"
-}
-
 case "${1:-}" in
   "")
     (( $# == 0 )) || usage
-    echo "# Run as root to install the pin; then run tools/native-toolchain/check."
-    printf '%q --run\n' "$here/install"
-    for package in "${packages[@]}"; do
-      name="$(awk -v p="$package" '$1 == "deb" && $2 == p { print $6 }' "$lock")"
-      echo "# $(lock_value deb_pool)/$name"
+    printf '%q --unpack DIR\n' "$here/install"
+    for key in bootstrap_llvm static_lld engine_llvm; do
+      read -r _ _ asset <<< "$(lock_value "$key")"
+      echo "# $(lock_value asset_pool)/$asset"
     done
-    ;;
-  --run)
-    (( $# == 1 )) || usage
-    [[ "$(id -u)" == 0 ]] || fail "--run changes the system and needs root; run 'install' to see the commands"
-    downloads="$(mktemp -d)"
-    trap 'rm -rf "$downloads"' EXIT
-    debs=()
-    for package in "${packages[@]}"; do
-      file="$(verified_deb "$package" "$downloads")" || exit $?
-      debs+=("$file")
-    done
-    apt-get install -y --no-install-recommends --allow-change-held-packages "${debs[@]}"
-    apt-mark hold "${packages[@]}"
     ;;
   --unpack)
     (( $# == 2 )) || usage
-    command -v dpkg > /dev/null || fail "--unpack needs dpkg"
     mkdir -p "$2"
     root="$(cd "$2" && pwd)"
-    downloads="$(mktemp -d)"
-    trap 'rm -rf "$downloads"' EXIT
-    for package in "${packages[@]}"; do
-      file="$(verified_deb "$package" "$downloads")" || exit $?
-      dpkg -x "$file" "$root"
-    done
     llvm_prefix="$root$(lock_value prefix)"
-    LD_LIBRARY_PATH="$root/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
-      "$here/check" --prefix "$llvm_prefix"
-    echo "export LLVM_SYS_231_PREFIX=$llvm_prefix"
-    echo "export LD_LIBRARY_PATH=$root/usr/lib/x86_64-linux-gnu\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
+    python3 "$here/../buck2/bootstrap_llvm.py" --output "$llvm_prefix"
+    "$here/check" --prefix "$llvm_prefix"
+    printf 'export LLVM_SYS_231_PREFIX=%q\n' "$llvm_prefix"
+    printf "export LD_LIBRARY_PATH=%q\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}\n" "$llvm_prefix/lib"
     ;;
   --source)
     (( $# == 1 )) || usage
-    cat <<EOF
-# The pinned source build: LLVM, clang and lld with a shared libLLVM-23.so.
-curl -fsSLO $(lock_value source_url)
-echo '$(lock_value source_sha256)  llvm-project-$(lock_value llvm_version).src.tar.xz' | sha256sum -c -
-mkdir llvm-project-$(lock_value llvm_version).src
-tar xf llvm-project-$(lock_value llvm_version).src.tar.xz --strip-components=1 -C llvm-project-$(lock_value llvm_version).src
-cmake -S llvm-project-$(lock_value llvm_version).src/llvm -B build -G Ninja \\
-  -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="\$PREFIX" \\
-  -DLLVM_ENABLE_PROJECTS='clang;lld' -DLLVM_TARGETS_TO_BUILD='X86;AArch64' \\
-  -DLLVM_BUILD_LLVM_DYLIB=ON -DLLVM_LINK_LLVM_DYLIB=ON
-cmake --build build --target install
-tools/native-toolchain/check --prefix "\$PREFIX"
-EOF
+    printf '%q DIR ARTIFACTS bootstrap\n' "$here/build-libllvm"
+    printf '%q DIR\n' "$here/build-static-lld"
+    for stage in instr train opt guard; do
+      printf '%q DIR ARTIFACTS %s\n' "$here/build-libllvm" "$stage"
+    done
     ;;
   *) usage ;;
 esac

@@ -30,8 +30,8 @@ first-party, linked crates (the compiler and the runtime archive, by their
 workspace package and link root) or a native pin (`lib/libLLVM.so.23.1`,
 `bin/ld.lld`). A native pin's notices are the LLVM source tree's license and
 copyright-bearing files (`native_text_rule`) and the texts of the C and C++
-runtimes it links statically, copied from the build host's Ubuntu packages
-into `licenses/`.
+runtimes it links statically. The manylinux_2_28 build host's AlmaLinux
+runtime notices and the pinned link kit's source notices are in `licenses/`.
 
 `//:gate-distribution-notices` fails when a crate Cargo.lock
 reaches from the shipped workspace packages has no row, when a native row is
@@ -79,15 +79,13 @@ a project, compile a std-using program with both native backends, and check
 both executables' stdout. It restores the prefix after both runs pass and
 removes the bundle on failure.
 
-Run `tools/toolchain-dist/build --check-fresh PREFIX` on a host with `readelf`,
-`bwrap` and the system link inputs named by the bundle. The gate checks the
-bundled ELF files against the glibc floor declared by `site/install.sh`, then
-starts two empty Linux roots. It mounts the prefix read-only at a new path and
-puts only that prefix on `PATH`. The first root checks the missing CRT
-diagnostic with the loader and shared libraries alone. The second adds the
-host's link inputs and runs
+Run `tools/toolchain-dist/build --check-fresh PREFIX` on a host with `readelf`
+and `bwrap`. The gate checks all bundled ELF version requirements against the
+installer's glibc 2.28 floor. It then mounts the bundle read-only in an empty
+Linux root with just the loader and runtime libraries. From that root it runs
 `hirsel new demo && cd demo && hirsel test && hirsel run && hirsel build`, then
-executes `./program` and checks the package.
+executes `./program` and checks the package. The installation's link kit provides
+the CRT and link-time libraries.
 
 On Rust toolchain or LLVM bumps, run
 `tools/toolchain-dist/check-repro --output /tmp/hirsel-repro` from the commit

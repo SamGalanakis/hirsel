@@ -29,7 +29,6 @@ while (( $# > 0 )); do
     *) echo "usage: check [--prefix DIR]" >&2; exit 2 ;;
   esac
 done
-lock_prefix="$(lock_value prefix)"
 prefix="${prefix:-${LLVM_SYS_231_PREFIX:-}}"
 [[ -n "$prefix" && "$prefix" == /* ]] || fail "--prefix or LLVM_SYS_231_PREFIX must name an absolute input directory"
 
@@ -63,17 +62,6 @@ for tool in clang ld.lld; do
   tool_version="$("$bindir/$tool" --version | head -n 1)"
   [[ "$tool_version" == *" $version"* ]] || fail "$bindir/$tool reports '$tool_version', not $version"
 done
-
-# At the system prefix every locked package is installed at the
-# locked version. A local `install --unpack` prefix has no dpkg records to compare.
-if [[ "$prefix" == "$lock_prefix" ]] && command -v dpkg-query > /dev/null; then
-  apt_version="$(lock_value apt_version)"
-  while read -r _ package arch _; do
-    installed="$(dpkg-query -W -f '${Version}' "$package:$arch" 2> /dev/null || true)"
-    [[ "$installed" == "$apt_version" ]] \
-      || fail "package $package:$arch is '${installed:-not installed}', the pin is $apt_version"
-  done < <(grep '^deb ' "$lock")
-fi
 
 # The binding: Cargo.lock resolves llvm-sys to the pinned version and checksum.
 sys_version="$(lock_value llvm_sys_version)"

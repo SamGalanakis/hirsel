@@ -27,7 +27,7 @@ class BuckClient(unittest.TestCase):
         scripts = self.root / 'tools/buck2'
         scripts.mkdir(parents=True)
         for name in ('client.py', 'generated.py', 'bootstrap_llvm.py', 'bootstrap_store.py',
-                     'llvm-cxx-headers-lock.json', 'llvm-runtime-lock.json'):
+                     'llvm-cxx-headers-lock.json'):
             if (SCRIPTS / name).exists():
                 shutil.copy(SCRIPTS / name, scripts / name)
         # The fake client records exactly when Buck itself was reached.

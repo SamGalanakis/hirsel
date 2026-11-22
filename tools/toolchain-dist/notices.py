@@ -284,6 +284,8 @@ def render(recorded):
             notices = f'native component `{entry["native"]}`, below'
         elif 'crates' in entry:
             notices = f'Hirsel; the Rust standard library; crates linked into `{entry["path"]}`, below'
+        elif 'runtimes' in entry:
+            notices = ', '.join(f'`{name}`' for name in entry['runtimes'])
         else:
             notices = 'Hirsel'
         out.append(f'| `{entry["path"]}` | {entry["contents"]} | {notices} |')
@@ -305,7 +307,7 @@ def render(recorded):
                 '| Source file | SHA-256 |', '|---|---|']
         out += [f'| `{text["path"]}` | `{text["sha256"]}` |' for text in row['texts'] or []]
         out.append('')
-    out += ['## C and C++ runtimes linked statically', '']
+    out += ['## C and C++ runtime notices', '']
     for name, runtime in recorded['host_runtimes'].items():
         out += [f'### {name}', '', f'{runtime["distribution"]} {runtime["package"]} {runtime["version"]}. {runtime["source"]}', '',
                 '| Text | From | SHA-256 |', '|---|---|---|']

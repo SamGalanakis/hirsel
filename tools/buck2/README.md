@@ -364,9 +364,8 @@ the aggregate holds both for the workspace build and the toolchain bundle.
   clippy, rustfmt), byte-identical to the rustup ones, from
   `hermeticbuild/rust-redist`.
 - C and linking: clang 23.1.5 from the pinned LLVM tree
-  (`tools/native-toolchain/llvm-23.lock`). The Ubuntu clang and libLLVM load
-  five libraries a minimal Ubuntu worker image lacks; `llvm-runtime-lock.json` pins
-  them and `bootstrap_llvm.py` bundles them in the tree's `lib/`.
+  (`tools/native-toolchain/llvm-23.lock`), built in manylinux_2_28. The tree
+  contains stock libLLVM for the build tools and the optimized engine for Hirsel.
 - `platforms.bzl`: one remote execution platform per measured `(CPU, memory,
   CPU class)` budget, with a 1 CPU/1 GiB compile default, 1 CPU/512 MiB Clippy
   twins and measured test requests (below), carrying the pool's platform

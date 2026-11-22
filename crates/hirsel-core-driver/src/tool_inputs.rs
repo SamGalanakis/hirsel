@@ -70,7 +70,7 @@ pub(crate) struct LinkRecipe {
 impl LinkRecipe {
     /// The generated start is the only entry to Hirsel when the surrounding
     /// link contains just the platform's startup objects and support libraries.
-    pub(crate) fn uses_hirsel_launcher(&self) -> bool {
+    pub(crate) fn uses_hirsel_launcher(&self, link: &Link) -> bool {
         self.source_files.is_empty()
             && self.files.iter().all(|file| {
                 file.path == self.linker
@@ -102,6 +102,18 @@ impl LinkRecipe {
                                 | "ld-linux-aarch64.so.1",
                         )
                     )
+                    || matches!(link, Link::Installed(_))
+                        && matches!(
+                            file.path.file_name().and_then(OsStr::to_str),
+                            Some(
+                                "libunwind.a"
+                                    | "libpthread.so.0"
+                                    | "libdl.so.2"
+                                    | "librt.so.1"
+                                    | "libutil.so.1"
+                                    | "libresolv.so.2"
+                            )
+                        )
             })
             && !self.args.iter().any(|arg| {
                 let name = arg.trim_start_matches('-').split('=').next().unwrap();
@@ -230,72 +242,108 @@ pub(crate) fn recapture_link_recipe(link: &Link, target: &str) -> io::Result<Lin
     }
 }
 
-/// The argv an installation links with, captured at install through the
-/// install's C driver. Its link editor is the installation's own
-/// [`INSTALLED_LINKER`]; every other path it names is a system file.
+/// An installed link's argv. File operands are relative to the bundle root.
 #[derive(Serialize, serde::Deserialize)]
 struct InstalledRecipe {
     schema: u32,
     target: String,
     args: Vec<String>,
 }
-const INSTALLED_RECIPE_SCHEMA: u32 = 1;
+const INSTALLED_RECIPE_SCHEMA: u32 = 2;
 /// The link editor's place in an installation.
 pub(crate) const INSTALLED_LINKER: &str = "bin/ld.lld";
 
-/// Capture `target`'s link recipe through `cc` for the installation at
-/// `root` and write it there. Returns the recipe's path relative to `root`
-/// and the link editor the recipe ran, which the installation copies to
-/// [`INSTALLED_LINKER`]. A recipe that needs anything from the driver's own
-/// tree besides that link editor, or compiles link sources, is refused: the
-/// installation would still depend on the tree it was made from.
-pub(crate) fn install_recipe(
-    cc: &Path,
-    target: &str,
-    root: &Path,
-) -> io::Result<(PathBuf, PathBuf)> {
-    let cc = link_driver(cc)?;
-    let recipe = capture_link_recipe(&cc, target, false, &search())?;
-    if !recipe.source_files.is_empty() {
+fn installed_interpreter(target: &str) -> io::Result<&'static str> {
+    match target {
+        "x86_64-unknown-linux-gnu" => Ok("/lib64/ld-linux-x86-64.so.2"),
+        "aarch64-unknown-linux-gnu" => Ok("/lib/ld-linux-aarch64.so.1"),
+        _ => Err(io::Error::other("unsupported installed link target")),
+    }
+}
+
+fn kit_path(path: &str) -> io::Result<&Path> {
+    let path = Path::new(path);
+    if path.as_os_str().is_empty()
+        || !path
+            .components()
+            .all(|part| matches!(part, std::path::Component::Normal(_)))
+    {
         return Err(io::Error::other(format!(
-            "the link recipe through {} compiles link sources ({}); an installation carries none",
-            cc.display(),
-            recipe
-                .source_files
-                .iter()
-                .map(|file| file.path.display().to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
+            "invalid link kit path {}",
+            path.display()
         )));
     }
-    if let Some(tree) = cc.parent().and_then(Path::parent) {
-        let named = recipe
-            .args
-            .iter()
-            .map(|arg| arg.strip_prefix("-L").unwrap_or(arg))
-            .filter(|arg| arg.contains('/'))
-            .filter_map(|arg| Path::new(arg).canonicalize().ok())
-            .filter(|path| path.starts_with(tree))
-            .map(|path| path.display().to_string())
-            .collect::<Vec<_>>();
-        if !named.is_empty() {
-            return Err(io::Error::other(format!(
-                "the link recipe through {} names {} inside the driver's own tree, which an installation does not carry",
-                cc.display(),
-                named.join(", ")
-            )));
-        }
+    Ok(path)
+}
+
+/// Install only the dynamic link inputs from the pinned kit.
+pub(crate) fn install_recipe(kit: &Path, target: &str, root: &Path) -> io::Result<PathBuf> {
+    #[derive(serde::Deserialize)]
+    struct KitTarget {
+        start: Vec<String>,
+        unwind: String,
+        unwind_script: String,
+        libraries: Vec<String>,
+        nonshared: String,
+        end: Vec<String>,
     }
+    #[derive(serde::Deserialize)]
+    struct KitManifest {
+        targets: std::collections::BTreeMap<String, KitTarget>,
+    }
+    let manifest: KitManifest = serde_json::from_slice(&std::fs::read(kit.join("manifest.json"))?)
+        .map_err(io::Error::other)?;
+    let inputs = manifest
+        .targets
+        .get(target)
+        .ok_or_else(|| io::Error::other("link kit has no installed target"))?;
+    let mut args = [
+        "-pie",
+        "--eh-frame-hdr",
+        "--hash-style=gnu",
+        "-z",
+        "noexecstack",
+    ]
+    .map(str::to_owned)
+    .to_vec();
+    if target == "aarch64-unknown-linux-gnu" {
+        args.push("--fix-cortex-a53-843419".into());
+    }
+    let placed = format!("link/kit/{target}");
+    let copy = |path: &str| -> io::Result<String> {
+        let source = kit.join(target).join(kit_path(path)?);
+        let relative = format!("{placed}/{path}");
+        crate::installation::install_file(&std::fs::read(source)?, &root.join(&relative), 0o644)?;
+        Ok(relative)
+    };
+    for path in &inputs.start {
+        args.push(copy(path)?);
+    }
+    args.push(INPUT_MARKER.into());
+    copy(&inputs.unwind)?;
+    args.push(copy(&inputs.unwind_script)?);
+    args.push("--as-needed".into());
+    for path in &inputs.libraries {
+        args.push(copy(path)?);
+    }
+    args.push(copy(&inputs.nonshared)?);
+    for path in &inputs.end {
+        args.push(copy(path)?);
+    }
+    crate::installation::install_file(
+        &std::fs::read(kit.join("ld.lld"))?,
+        &root.join(INSTALLED_LINKER),
+        0o755,
+    )?;
     let relative = Path::new("link").join(format!("{target}.json"));
     let directory = root.join("link");
-    std::fs::create_dir_all(&directory)?;
     let installed = InstalledRecipe {
         schema: INSTALLED_RECIPE_SCHEMA,
         target: target.into(),
-        args: recipe.args,
+        args,
     };
     publish(&directory, &root.join(&relative), &installed)?;
-    Ok((relative, recipe.linker))
+    Ok(relative)
 }
 
 /// What native products are keyed by, besides the Hirsel compiler itself.
@@ -338,9 +386,8 @@ pub(crate) fn toolchain(
     }
 }
 
-/// An installation's toolchain: its recipe's argv, its own link editor and
-/// the system files the argv names, each under its own host-tool record (the
-/// installation is not written by requests), and the request's runtime.
+/// Hash the installed argv, resolved bundle files, and runtime. Resolve
+/// relative paths only for the link so the key survives relocation.
 fn installed_toolchain(
     path: &Path,
     target: &str,
@@ -371,25 +418,39 @@ fn installed_toolchain(
             linker.display()
         )));
     }
-    let closure = crate::link_closure::closure(&installed.args, INPUT_MARKER, SUPPORT_LIBS, true)
-        .map_err(|error| {
-        if error.kind() == io::ErrorKind::NotFound {
-            host_link_input_error(error)
+    let interpreter = installed_interpreter(target)?;
+    let mut args = vec!["-dynamic-linker".to_owned(), interpreter.to_owned()];
+    for arg in &installed.args {
+        if arg.starts_with("link/kit/") {
+            let path = root.join(kit_path(arg)?);
+            args.push(
+                path.to_str()
+                    .ok_or_else(|| refused("has a non-UTF-8 path".into()))?
+                    .to_owned(),
+            );
         } else {
-            refused(error.to_string())
+            args.push(arg.clone());
         }
-    })?;
+    }
+    let closure = crate::link_closure::closure(&args, INPUT_MARKER, &[], true)
+        .map_err(|error| refused(error.to_string()))?;
     let mut paths = closure.files;
     paths.push(linker.clone());
+    let real_root = root.canonicalize()?;
+    if paths.iter().any(|path| {
+        !path
+            .canonicalize()
+            .is_ok_and(|real| real.starts_with(&real_root))
+    }) {
+        return Err(refused("names inputs outside the installation".into()));
+    }
     let store = host_tools()?;
     let files = paths
         .iter()
         .map(|path| recorded(path, &store))
         .collect::<io::Result<Vec<_>>>()?;
     let archive = recorded(runtime, &store)?;
-    // The installation's own files are named by their place in it, so a
-    // relocated installation keeps its identity and its prebuilt objects;
-    // the system files its argv names are named as the argv names them.
+    // A relocated installation keeps its identity and its prebuilt objects.
     let placed = files
         .iter()
         .map(|file| {
@@ -400,10 +461,11 @@ fn installed_toolchain(
         })
         .collect::<Vec<_>>();
     let identity = ContentHash::of_parts(
-        "hirsel.installed-link-recipe.v3",
+        "hirsel.installed-link-recipe.v4",
         [crate::encode(&(
             INSTALLED_RECIPE_SCHEMA,
             target,
+            interpreter,
             Path::new(INSTALLED_LINKER),
             &installed.args,
             placed,
@@ -423,7 +485,7 @@ fn installed_toolchain(
         schema: LINK_RECIPE_SCHEMA,
         target: target.into(),
         linker,
-        args: installed.args,
+        args,
         files,
         source_files: Vec::new(),
         absent: closure.absent,
@@ -1998,39 +2060,30 @@ __attribute__((ifunc("hfl_resolve"))) int hfl_indirect(void);
         );
     }
 
-    /// Law: an installation's toolchain is a function of its files' bytes and
-    /// its system argv, not of where it is installed: one installation copied
+    /// Law: one installation copied
     /// to another root keys the same recipe and toolchain, so its prebuilt
     /// objects are hits there. Oracle: the two roots hold byte-equal files.
     #[test]
     fn a_relocated_installation_keys_the_same_toolchain() {
         let work = tempfile::tempdir().unwrap();
-        let crt = work.path().join("system/crt1.o");
-        std::fs::create_dir(crt.parent().unwrap()).unwrap();
-        std::fs::write(&crt, b"crt").unwrap();
-        let system = crt.parent().unwrap();
-        for library in ["gcc_s", "pthread", "dl", "m", "rt", "util"] {
-            std::fs::write(system.join(format!("lib{library}.a")), b"!<arch>\n").unwrap();
-        }
         let target = "x86_64-unknown-linux-gnu";
         let keyed = |root: &str| {
             let root = work.path().join(root);
-            let recipe = root.join("recipes/link.json");
+            let recipe = root.join("link/link.json");
             let linker = root.join(INSTALLED_LINKER);
             let runtime = root.join("lib/libhirsel_core_rt.a");
-            for dir in [&recipe, &linker, &runtime] {
+            let crt = "link/kit/crt1.o";
+            let crt_file = root.join(crt);
+            for dir in [&recipe, &linker, &runtime, &crt_file] {
                 std::fs::create_dir_all(dir.parent().unwrap()).unwrap();
             }
+            std::fs::write(crt_file, b"\x7fELFcrt").unwrap();
             std::fs::write(&linker, b"linker").unwrap();
             std::fs::write(&runtime, b"runtime").unwrap();
             let installed = InstalledRecipe {
                 schema: INSTALLED_RECIPE_SCHEMA,
                 target: target.into(),
-                args: vec![
-                    crt.display().to_string(),
-                    format!("-L{}", system.display()),
-                    INPUT_MARKER.into(),
-                ],
+                args: vec![crt.into(), INPUT_MARKER.into()],
             };
             std::fs::write(&recipe, serde_json::to_vec(&installed).unwrap()).unwrap();
             let (toolchain, recipe) = installed_toolchain(&recipe, target, &runtime).unwrap();

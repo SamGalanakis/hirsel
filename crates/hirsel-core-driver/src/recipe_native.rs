@@ -1365,7 +1365,7 @@ impl Publication {
                 &options,
                 tools.runtime,
                 &store,
-                link.uses_hirsel_launcher(),
+                link.uses_hirsel_launcher(&options.link),
             )?;
             release_sites = emitted.release_sites;
             release_debug_sites = emitted.release_debug_sites;

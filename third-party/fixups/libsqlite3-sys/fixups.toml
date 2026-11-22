@@ -11,6 +11,8 @@ OUT_DIR = "libsqlite3-sys-0.40.0.crate/src/bundled-bindings"
 name = "sqlite3"
 srcs = ["sqlite3/sqlite3.c"]
 headers = ["sqlite3/*.h"]
+# FTS5's BM25 scorer calls log. The math library must follow this archive.
+deps = ["toolchains//:libm"]
 compiler_flags = [
     "-O3",
     "-DSQLITE_CORE",

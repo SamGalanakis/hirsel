@@ -11,7 +11,8 @@ fn object_request(source: &str, dir: &Path, store: &str) -> CheckRequest {
     request
 }
 /// Each reached instance's object: whether it was compiled, and its bytes
-/// and debug rows.
+/// and debug rows: those in hand, or a stored object's from its record, as
+/// the link reads them.
 fn objects_of(
     product: &CheckProduct,
     options: &NativeOptions,
@@ -22,7 +23,13 @@ fn objects_of(
         .unwrap()
         .into_iter()
         .map(|o| {
-            let debug = encode(&o.debug).unwrap();
+            let debug = match (&o.debug, &o.debug_record) {
+                (None, Some((store, address))) => {
+                    crate::native_object::load_debug(store, *address).unwrap().unwrap()
+                }
+                (debug, _) => debug.clone().unwrap(),
+            };
+            let debug = encode(&debug).unwrap();
             (format!("{:?}", o.instance), (o.compiled, std::fs::read(&o.path).unwrap(), debug))
         })
         .collect()
@@ -71,7 +78,9 @@ const SHAPE: &str = "type P { a: u8 }\nfn id[T](take x: T) -> T { x }\nfn get(p:
 /// A request served from the store builds exactly the fresh request's
 /// objects, a generic and a non-generic instance among them, on both
 /// development engines. One native store serves debug lines off, on and off
-/// again: a changed setting misses every object, the same setting hits.
+/// again: every object carries its debug rows, since a native build writes
+/// detached DWARF and debug lines only embed it at the link (cli.md), so
+/// only the cold request misses and the setting changes no object.
 /// A last request changes a field of the shape `id[P]` is materialised with:
 /// the shape's closure, and so the instance's identity, changes with it, so
 /// the instance misses under a new identity.
@@ -104,7 +113,7 @@ fn dev_objects_served_from_the_store_are_fresh_emissions() {
             assert_eq!(product.rechecked.is_empty(), n > 0, "{case}");
             let objects = objects_of(&product, &options(debug_lines));
             let compiled = compiled_names(&objects);
-            if n < 2 {
+            if n == 0 {
                 assert_eq!(compiled.len(), objects.len(), "{case}: misses");
             } else {
                 assert_eq!(compiled, Vec::<&str>::new(), "{case}: hits");
@@ -279,11 +288,7 @@ fn a_body_record_with_another_module_part_misses_its_object() {
             .live(&path)
             .unwrap();
         let head = store.get_body_head(record).unwrap().unwrap().head().to_vec();
-        let (forged, part, bytes) = Store::frame_body(&head, |b| {
-            b.extend_from_slice(&other);
-            Ok(())
-        })
-        .unwrap();
+        let (forged, part, bytes) = Store::frame_body(&head, &other);
         assert_ne!(part, check(SHAPE, "store").definitions[&path].ir_hash());
         store.write_framed(forged, &bytes).unwrap();
         check_index::forge(&store, |_, leaves| {
@@ -314,7 +319,7 @@ fn a_body_record_with_another_module_part_misses_its_object() {
     }
 }
 
-/// Key glue (`$key_hash`, `$key_fold`, `$key_equal`) is an instance of its own,
+/// Key glue (`$key_place`, `$key_class`, `$key_equal`) is an instance of its own,
 /// so a newly reached instance that sorts first and calls the same glue
 /// (`map.get` beside `map.insert`) changes no existing object: every object
 /// the first build made, `map.insert`'s and the glue's among them, hits, on
@@ -351,7 +356,7 @@ fn a_new_caller_of_shared_glue_leaves_every_existing_object_a_hit() {
     let cold = check(&base);
     run_clean(&cold.build(&entry, &options).unwrap().executable, 0);
     let first = objects_of(&cold, &options);
-    assert!(first.keys().any(|i| i.contains("name: \"$key_hash\"")), "{backend:?}: {first:?}");
+    assert!(first.keys().any(|i| i.contains("name: \"$key_equal\"")), "{backend:?}: {first:?}");
     let product = check(&both);
     let edited = objects_of(&product, &options);
     // `b`'s source is unchanged, but `main`, which calls `a`, is edited.

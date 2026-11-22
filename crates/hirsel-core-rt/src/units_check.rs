@@ -1687,7 +1687,21 @@ pub(super) static CASES: &[Case] = &[
         params: |r| PARAM[0].store(r(3_000, 6_000), Ordering::Relaxed),
         pct: None,
     },
-    // 18. A returnable client gives its stack back at a connection receive,
+    // 18. A receiver that returned its stack at a channel receive is woken
+    // by each send after another task reused and overwrote that stack, and
+    // cancelled while parked. What it receives equals the stackful
+    // receiver's (`units_returnable_check.rs`).
+    Case {
+        name: "returnable_receive",
+        workers: 2,
+        units: 1,
+        body: returnable::receive_body,
+        producers: &[],
+        goals: 0b1,
+        params: |_| {},
+        pct: None,
+    },
+    // 19. A returnable client gives its stack back at a connection receive,
     // a full connection's send, a task join and a helper join, against a real
     // helper unit; what it observes equals the stackful client's
     // (`units_park_waits_check.rs`).
@@ -1701,7 +1715,7 @@ pub(super) static CASES: &[Case] = &[
         params: |_| {},
         pct: None,
     },
-    // 19. The same, with the blocking-call hand-off at one of the waits whose
+    // 20. The same, with the blocking-call hand-off at one of the waits whose
     // wake comes from the helper: the client resumes on another thread.
     Case {
         name: "handoff_park_waits",
@@ -2212,6 +2226,10 @@ mod tests {
     #[test]
     fn handoff_returnable() {
         check("handoff_returnable");
+    }
+    #[test]
+    fn returnable_receive() {
+        check("returnable_receive");
     }
     #[test]
     fn park_waits() {

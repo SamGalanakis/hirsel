@@ -32,6 +32,7 @@ grants = ["Clock", "Random", "Tasks", "Net=Listen 127.0.0.0/8 0-65535;Connect 12
 dirs = ["."]
 
 [tests.sources]
+"location_laws.hirsel" = "store"
 "assembly_laws.hirsel" = "store"
 "import_read_laws.hirsel" = "store"
 "session-laws.hirsel" = "runner"

@@ -112,9 +112,10 @@ static void schedule_event(void *state,HirselCoreEvent event) {
 static struct { int enabled, schedule_probe, child_probe; uint64_t token[64], calls[64]; } hold;
 static HirselCoreWait ready(void *state,HirselCoreHostRequest *request,uint64_t token) {
     (void)state;
-    /* SleepUntil (the runner's deadline timers) waits on host time and never reaches the
-     * W2 filesystem; its deadlines are far, so a timer ends only by being dropped. */
-    if(request->operation==15) return (HirselCoreWait){1,UINT64_MAX};
+    /* SleepUntil and SleepUntilWall (the runner's deadline and trigger timers) wait on
+     * host time and never reach the W2 filesystem; their deadlines are far, so a timer
+     * ends only by being dropped. */
+    if(request->operation==15 || request->operation==77) return (HirselCoreWait){1,UINT64_MAX};
     const int probe=hold.schedule_probe && request->operation==12 &&
         request->buffer.len==8 && !memcmp(request->buffer.data,"SCHEDULE",8);
     const int child=hold.child_probe && request->operation==2 && request->buffer.len>=20 &&
@@ -134,7 +135,7 @@ static uint64_t scratch_dirs;
 static uint64_t park_wall_ms;
 static HirselCoreStep issue(void *state,HirselCoreHostRequest *r,uint64_t token) {
     (void)token;
-    if(r->operation==15) return (HirselCoreStep){0};
+    if(r->operation==15 || r->operation==77) return (HirselCoreStep){0};
     if(park_wall_ms && r->operation==10) return (HirselCoreStep){.outcome.value=park_wall_ms};
     const uint64_t scratch_handle=UINT64_C(1)<<48;
     if(r->operation==7) {

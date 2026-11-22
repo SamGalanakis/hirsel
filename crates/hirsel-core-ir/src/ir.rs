@@ -1032,6 +1032,13 @@ pub enum RtOp {
     /// operands and results. The word is 1 when the task parked and the
     /// result is not yet delivered, else 0 with the row's result.
     Returnable(Wait),
+    /// `Receive` that may park with the stack given back (`crate::returnable`):
+    /// a leading pointer to the caller's child word, then `Receive`'s operands.
+    /// The word is 1 when the task parked and nothing is received yet, else 0
+    /// with `Receive`'s outcome.
+    ReceiveRec {
+        item: TypeId,
+    },
 }
 
 /// The waits with a returnable row ([`RtOp::Returnable`]), each the stackful
@@ -1166,6 +1173,8 @@ pub enum HostOp {
     DatagramSendTo = hirsel_core_ids::host_op::DATAGRAM_SEND_TO as isize,
     DatagramRecv = hirsel_core_ids::host_op::DATAGRAM_RECV as isize,
     NetNarrowUnix = hirsel_core_ids::host_op::NET_NARROW_UNIX as isize,
+    /// Wait until the clock's wall time reaches an absolute millisecond reading.
+    SleepUntilWall = hirsel_core_ids::host_op::SLEEP_UNTIL_WALL as isize,
 }
 
 impl HostOp {
@@ -1196,6 +1205,7 @@ impl HostOp {
         HostOp::Stderr,
         HostOp::Rename,
         HostOp::SleepUntil,
+        HostOp::SleepUntilWall,
         HostOp::Sync,
         HostOp::SyncDir,
         HostOp::Random,
@@ -1296,6 +1306,7 @@ impl HostOp {
             HostOp::Stderr => "stderr_write",
             HostOp::Rename => "host_rename",
             HostOp::SleepUntil => "host_sleep_until",
+            HostOp::SleepUntilWall => "host_sleep_until_wall",
             HostOp::Sync => "host_sync",
             HostOp::SyncDir => "host_sync_dir",
             HostOp::Random => "host_random",
@@ -1579,6 +1590,7 @@ impl RtOp {
             RtOp::Send { item } => (vec![V(p), take(item)], vec![bool_]),
             RtOp::TrySend { item } => (vec![V(p), take(item)], vec![u8_]),
             RtOp::Receive { item } => (vec![V(p), out(item)], vec![bool_]),
+            RtOp::ReceiveRec { item } => (vec![V(p), V(p), out(item)], vec![bool_]),
             RtOp::TryReceive { item } => (vec![V(p), out(item)], vec![u8_]),
             RtOp::LatestNew { .. } => (vec![V(p)], vec![p, u64_]),
             RtOp::ConnNew { .. } => (vec![V(u64_), V(u64_)], vec![p, p, u64_]),
@@ -1852,7 +1864,9 @@ impl RtOp {
                     HostOp::Open => (vec![V(u64_), V(p), V(u8_)], outcome),
                     HostOp::ReadAt | HostOp::WriteAt => (vec![V(u64_), V(u64_), V(p)], outcome),
                     HostOp::Rename => (vec![V(u64_), V(p), V(p)], outcome),
-                    HostOp::SleepUntil => (vec![V(u64_), V(u64_)], outcome),
+                    HostOp::SleepUntil | HostOp::SleepUntilWall => {
+                        (vec![V(u64_), V(u64_)], outcome)
+                    }
                     HostOp::Stat | HostOp::StatFile => {
                         let mut metadata = outcome;
                         metadata[3] = Ty::Scalar(Scalar::I64);
@@ -1896,6 +1910,7 @@ impl RtOp {
                 | RtOp::ChannelNew { .. }
                 | RtOp::Send { .. }
                 | RtOp::Receive { .. }
+                | RtOp::ReceiveRec { .. }
                 | RtOp::ConnNew { .. }
                 | RtOp::ConnSend { .. }
                 | RtOp::ConnTrySend { .. }
@@ -1920,6 +1935,7 @@ impl RtOp {
             | RtOp::Send { item }
             | RtOp::TrySend { item }
             | RtOp::Receive { item }
+            | RtOp::ReceiveRec { item }
             | RtOp::TryReceive { item }
             | RtOp::LatestNew { item } => vec![item],
             RtOp::LaunchTarget { view } => vec![view],

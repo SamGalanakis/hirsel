@@ -1,5 +1,6 @@
 //! Returnable waits: the waits a task parks at with its stack given back
-//! (owned network waits, unit-connection sends and receives, task joins).
+//! (owned network waits, unit-connection sends and receives, task joins, and
+//! the channel receives of represented functions).
 //!
 //! A wait is returnable when every frame from the task's entry down to it is a
 //! body of this module represented in the task's frame record. Each such body
@@ -21,7 +22,9 @@
 //! every address it needs after a wait is computed from parameters and
 //! constants alone. A task entry is represented when its spawn names the entry
 //! adapter and a represented callee whose code pointer the spawning body
-//! stores. Every other wait keeps the stackful drive.
+//! stores. A channel receive in a represented function is a returnable wait
+//! too when the function's shape allows it with the receive as a site; it
+//! represents no function by itself. Every other wait keeps the stackful drive.
 use crate::extent::{operands, terminator_uses};
 use crate::*;
 use hirsel_core_ids::ContentHash;
@@ -53,7 +56,8 @@ pub enum Refusal {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Site {
-    Leaf(Wait),
+    /// A wait made by the runtime: the returnable op the call becomes.
+    Leaf(RtOp),
     Callee(FuncId),
 }
 
@@ -71,6 +75,17 @@ pub fn waits_owned(module: &Module, f: FuncId) -> bool {
 fn leaf(callee: Callee) -> Option<Wait> {
     match callee {
         Callee::Runtime(row) => Wait::of(row),
+        _ => None,
+    }
+}
+
+/// The returnable form of a channel receive. A receive is a site only in a
+/// function that is represented through its owned waits, and only when its
+/// shape allows: it makes no function represented on its own, and one that
+/// cannot be represented keeps the stackful drive (`shaped`).
+fn receive(callee: Callee) -> Option<RtOp> {
+    match callee {
+        Callee::Runtime(RtOp::Receive { item }) => Some(RtOp::ReceiveRec { item }),
         _ => None,
     }
 }
@@ -497,6 +512,9 @@ pub struct Sizes {
     pub dest: u64,
     pub demoted: u64,
     pub area: u64,
+    /// Channel receives that are sites, and those the shape left stackful.
+    pub receives: u64,
+    pub stackful_receives: u64,
 }
 
 /// The slots a variant keeps in its record: each one whose bytes or address
@@ -772,6 +790,10 @@ fn shape(
     let mut at = round(CHILD + child, ALIGN);
     let mut sizes = Sizes {
         child,
+        receives: sites
+            .values()
+            .filter(|s| matches!(s, Site::Leaf(RtOp::ReceiveRec { .. })))
+            .count() as u64,
         ..Sizes::default()
     };
     let homed = homed_slots(body, &module.signatures, &wanted, &live);
@@ -947,7 +969,7 @@ impl Build<'_> {
 struct Calls<'a> {
     /// The variant and its signature for a represented callee.
     variant: &'a dyn Fn(FuncId) -> (FuncId, SigId),
-    returnable: &'a dyn Fn(Wait) -> SigId,
+    returnable: &'a dyn Fn(RtOp) -> SigId,
     frame_record: SigId,
 }
 
@@ -1184,10 +1206,7 @@ fn build(old: &Body, s: &Shape, root: bool, results_ty: &[Ty], calls: &Calls) ->
         let (callee, signature) = match site {
             Site::Leaf(op) => {
                 args.insert(0, Arg::Value(child));
-                (
-                    Callee::Runtime(RtOp::Returnable(op)),
-                    (calls.returnable)(op),
-                )
+                (Callee::Runtime(op), (calls.returnable)(op))
             }
             Site::Callee(g) => {
                 args.push(Arg::Value(child));
@@ -1688,12 +1707,16 @@ fn sig_id(module: &mut Module, s: Signature) -> SigId {
     SigId(module.signatures.len() as u32 - 1)
 }
 
-fn sites_of(body: &Body, ok: &[bool]) -> BTreeMap<usize, Site> {
+fn sites_of(body: &Body, ok: &[bool], receives: bool) -> BTreeMap<usize, Site> {
     let mut sites = BTreeMap::new();
     for (k, inst) in body.insts.iter().enumerate() {
         if let Inst::Call { call } = *inst {
             let c = &body.calls[call.index()];
             if let Some(op) = leaf(c.callee) {
+                sites.insert(k, Site::Leaf(RtOp::Returnable(op)));
+            } else if let Some(op) = receive(c.callee)
+                && receives
+            {
                 sites.insert(k, Site::Leaf(op));
             } else if let Callee::Direct(g) = c.callee
                 && ok[g.index()]
@@ -1703,6 +1726,29 @@ fn sites_of(body: &Body, ok: &[bool]) -> BTreeMap<usize, Site> {
         }
     }
     sites
+}
+
+/// The shape of `body` with its receives as sites, or, when that is refused,
+/// without them.
+fn shaped(
+    module: &Module,
+    recipes: &[hirsel_core_layout::Recipe],
+    body: &Body,
+    dest: Option<TypeId>,
+    ok: &[bool],
+    area: &dyn Fn(FuncId) -> u64,
+) -> Result<Shape, Refusal> {
+    let all = sites_of(body, ok, true);
+    let owned = sites_of(body, ok, false);
+    if all.len() == owned.len() {
+        return shape(module, recipes, body, dest, owned, area);
+    }
+    let receives = (all.len() - owned.len()) as u64;
+    shape(module, recipes, body, dest, all, area).or_else(|_| {
+        let mut s = shape(module, recipes, body, dest, owned, area)?;
+        s.sizes.stackful_receives = receives;
+        Ok(s)
+    })
 }
 
 /// Give every represented task entry and the functions it reaches a variant
@@ -1763,8 +1809,7 @@ pub fn apply(module: &mut Module) -> Applied {
                     continue;
                 }
                 let body = module.functions[f].body.as_ref().unwrap();
-                let sites = sites_of(body, &ok);
-                if sites
+                if sites_of(body, &ok, false)
                     .values()
                     .any(|s| matches!(*s, Site::Callee(g) if !shapes.contains_key(&g.index())))
                 {
@@ -1772,7 +1817,7 @@ pub fn apply(module: &mut Module) -> Applied {
                 }
                 let area = |g: FuncId| shapes[&g.index()].area;
                 let dest = module.signatures[module.functions[f].signature.index()].dest;
-                match shape(module, &recipes, body, dest, sites, &area) {
+                match shaped(module, &recipes, body, dest, &ok, &area) {
                     Ok(s) => {
                         shapes.insert(f, s);
                         progress = true;
@@ -1840,10 +1885,9 @@ pub fn apply(module: &mut Module) -> Applied {
             let mut body = old.clone();
             body.calls[indirect.index()].callee = Callee::Direct(callee);
             body.calls[indirect.index()].signature = module.functions[callee.index()].signature;
-            let sites = sites_of(&body, &ok);
             let area = |g: FuncId| shapes[&g.index()].area;
             let dest = module.signatures[function.signature.index()].dest;
-            let s = shape(module, &recipes, &body, dest, sites, &area).map_err(Stackful::Entry)?;
+            let s = shaped(module, &recipes, &body, dest, &ok, &area).map_err(Stackful::Entry)?;
             Ok(Form {
                 entry,
                 callee,
@@ -1891,18 +1935,31 @@ pub fn apply(module: &mut Module) -> Applied {
         return applied;
     }
     let frame_record = sig_id(module, RtOp::FrameRecord.signature());
-    let mut waits: Vec<Wait> = vec![];
-    for b in module.functions.iter().filter_map(|f| f.body.as_ref()) {
-        for w in b.calls.iter().filter_map(|c| leaf(c.callee)) {
-            if !waits.contains(&w) {
-                waits.push(w);
-            }
+    // In a fixed order, so the signature table is a function of the module.
+    let leaves: Vec<RtOp> = shapes
+        .iter()
+        .filter(|(f, _)| needed[**f])
+        .map(|(_, s)| s)
+        .chain(
+            roots
+                .iter()
+                .flat_map(|(_, checked, free)| [Some(checked), free.as_ref()])
+                .flatten()
+                .map(|form| &form.shape),
+        )
+        .flat_map(|s| s.sites.values())
+        .filter_map(|site| match *site {
+            Site::Leaf(op) => Some(op),
+            Site::Callee(_) => None,
+        })
+        .collect();
+    let mut returnable: HashMap<RtOp, SigId> = HashMap::new();
+    for op in leaves {
+        if !returnable.contains_key(&op) {
+            let sig = sig_id(module, op.signature());
+            returnable.insert(op, sig);
         }
     }
-    let returnable: HashMap<Wait, SigId> = waits
-        .into_iter()
-        .map(|w| (w, sig_id(module, RtOp::Returnable(w).signature())))
-        .collect();
     let mut variant: BTreeMap<usize, (FuncId, SigId)> = BTreeMap::new();
     for f in (0..n).filter(|&f| needed[f]) {
         let canonical = &module.functions[f];
@@ -1928,7 +1985,7 @@ pub fn apply(module: &mut Module) -> Applied {
         applied.sizes.push((FuncId(f as u32), shapes[&f].sizes));
     }
     let lookup = |g: FuncId| variant[&g.index()];
-    let ret = |w: Wait| returnable[&w];
+    let ret = |op: RtOp| returnable[&op];
     let calls = Calls {
         variant: &lookup,
         returnable: &ret,
@@ -2061,7 +2118,7 @@ pub fn report(module: &Module, applied: &Applied) -> String {
     }
     for (f, z) in &applied.sizes {
         s.push_str(&format!(
-            "  area f{} {}: {} = word 16 + child {} + slots {} of {} + dest {} + demoted {}\n",
+            "  area f{} {}: {} = word 16 + child {} + slots {} of {} + dest {} + demoted {}; receives {} returnable, {} stackful\n",
             f.0,
             name(*f),
             z.area,
@@ -2069,7 +2126,9 @@ pub fn report(module: &Module, applied: &Applied) -> String {
             z.slots,
             z.all_slots,
             z.dest,
-            z.demoted
+            z.demoted,
+            z.receives,
+            z.stackful_receives
         ));
     }
     s

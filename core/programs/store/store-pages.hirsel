@@ -1,6 +1,8 @@
 type PageTree: shareable + send {
     root: Arc[std.page.Page],
-    inline: u64
+    inline: u64,
+    // The collection map keeps its empty child shared even while every collection has rows.
+    empty_collection: Option[Arc[std.page.Page]]
 }
 
 type PageRoots: shareable + send {
@@ -9,24 +11,30 @@ type PageRoots: shareable + send {
     catalog: PageTree
 }
 
-fn attach_page_tree(pages: Map[u64, Arc[std.page.Page]], ptr: std.page.PagePtr, domain: std.page.Domain, inline: u64) -> PageTree {
-    if ptr.stamp == 0 { return new_page_tree(domain, inline) }
-    let Some(root) = map.get(pages, ptr.stamp) else { fail("store: missing validated root") }
-    PageTree(root: arc.share(root), inline: inline)
+fn attach_page_tree(pages: Map[u64, Arc[std.page.Page]], ptr: std.page.PagePtr, domain: std.page.Domain, inline: u64, take empty_collection: Option[Arc[std.page.Page]]) -> PageTree {
+    let root = if ptr.stamp == 0 {
+        std.page.empty(0, 0, domain)
+    } else {
+        let Some(found) = map.get(pages, ptr.stamp) else { fail("store: missing validated root") }
+        arc.share(found)
+    }
+    PageTree(root: take root, inline: inline, empty_collection: take empty_collection)
 }
 
-fn attach_page_roots(pages: Map[u64, Arc[std.page.Page]], roots: LocatedRoots, inline: u64) -> PageRoots {
-    PageRoots(collections: attach_page_tree(pages, roots.collections, CollectionMap, inline),
-              streams: attach_page_tree(pages, roots.streams, Unprefixed, inline),
-              catalog: attach_page_tree(pages, roots.catalog, Unprefixed, inline))
+fn attach_page_roots(pages: Map[u64, Arc[std.page.Page]], roots: LocatedRoots, inline: u64, empty_collection: Arc[std.page.Page]) -> PageRoots {
+    PageRoots(collections: attach_page_tree(pages, roots.collections, CollectionMap, inline, Some(arc.share(empty_collection))),
+              streams: attach_page_tree(pages, roots.streams, Unprefixed, inline, None),
+              catalog: attach_page_tree(pages, roots.catalog, Unprefixed, inline, None))
 }
 
 fn new_page_tree(domain: std.page.Domain, inline: u64) -> PageTree {
-    PageTree(root: std.page.empty(0, 0, domain), inline: inline)
+    let empty_collection = if domain == CollectionMap { Some(std.page.empty(0, 0, Collection)) } else { None }
+    PageTree(root: std.page.empty(0, 0, domain), inline: inline, empty_collection: take empty_collection)
 }
 
 fn share_page_tree(tree: PageTree) -> PageTree {
-    PageTree(root: arc.share(tree.root), inline: tree.inline)
+    let empty_collection = match tree.empty_collection { Some(empty) => Some(arc.share(empty)), None => None }
+    PageTree(root: arc.share(tree.root), inline: tree.inline, empty_collection: take empty_collection)
 }
 
 fn tree_domain(tree: PageTree) -> std.page.Domain {
@@ -38,7 +46,7 @@ fn tree_stamp(tree: PageTree) -> u64 {
 }
 
 fn install_page_tree(mut tree: PageTree, take replacement: PageTree) {
-    let PageTree(root: take ready, inline: width) = take replacement
+    let PageTree(root: take ready, inline: width, ..) = take replacement
     std.page.install_planned(mut tree.root, take ready)
     tree.inline = width
 }
@@ -70,23 +78,25 @@ fn collection_record(root: Arc[std.page.Page], kind: u8) -> Result[Bytes, Error]
     Ok(take record)
 }
 
-fn put_collection(mut tree: PageTree, key: Bytes, root: Arc[std.page.Page], kind: u8, private_from: u64, mut ids: u64) -> Result[(), Error] {
+fn put_collection(mut tree: PageTree, key: Bytes, built: Option[Arc[std.page.Page]], kind: u8, private_from: u64, mut ids: u64) -> Result[(), Error] {
+    let root = match built {
+        Some(ready) => arc.share(ready),
+        None => {
+            let Some(shared) = view tree.empty_collection else { fail("store: missing empty collection page") }
+            arc.share(shared)
+        },
+    }
     let record = collection_record(root, kind)?
-    page_result(std.page.insert(mut tree.root, key, record, Some(arc.share(root)), tree.inline, private_from, mut ids))
+    page_result(std.page.insert(mut tree.root, key, record, Some(take root), tree.inline, private_from, mut ids))
 }
 
 fn define_collection(mut tree: PageTree, id: u32, kind: u8, private_from: u64, mut ids: u64) -> Result[(), Error] {
-    let root = std.page.empty(0, 0, Collection)
-    put_collection(mut tree, prefix(id)?, root, kind, private_from, mut ids)
+    put_collection(mut tree, prefix(id)?, None, kind, private_from, mut ids)
 }
 
 fn bulk_collection(mut tree: PageTree, id: u32, kind: u8, rows: List[std.page.Row], private_from: u64, mut ids: u64) -> Result[(), Error] {
     let bulk = page_result(std.page.bulk(rows, Collection, tree.inline, mut ids))?
-    let root = match take bulk {
-        Some(take ready) => take ready,
-        None => std.page.empty(0, 0, Collection),
-    }
-    put_collection(mut tree, prefix(id)?, root, kind, private_from, mut ids)
+    put_collection(mut tree, prefix(id)?, bulk, kind, private_from, mut ids)
 }
 
 fn count_page_rows(tree: PageTree, id: u32, low: Bytes, high: Bytes) -> Result[u64, Error] {
@@ -367,9 +377,10 @@ fn remove_page_row(mut tree: PageTree, key: Bytes, private_from: u64, mut ids: u
     if !present { return Ok(false) }
     let collection_key = list.slice(key, 0, 4)
     let suffix = list.slice(key, 4, list.len(key))
+    let Some(empty_root) = view tree.empty_collection else { fail("store: missing empty collection page") }
     page_result(std.page.edit_collection(mut tree.root, collection_key, private_from, mut ids,
         scoped fn(mut root: Arc[std.page.Page], mut stamps: u64) -> Result[(), std.page.Error] {
-            let _ = std.page.remove(mut root, suffix, private_from, mut stamps)?
+            let _ = std.page.remove_with_empty(mut root, suffix, empty_root, private_from, mut stamps)?
             Ok(())
         }))?
     Ok(true)
@@ -575,4 +586,72 @@ fn test_paged_collection_paths() -> Result[(), Error] {
         return Error(Missing("held index"))
     }
     Ok(())
+}
+
+fn check_shrunk_collection(db: Db, rows: Table[u64, Bytes], wide: Bytes, short: Bytes) -> Result[(), Error] {
+    let tree = db.heads[0u64].roots.collections
+    let Some(root) = std.page.collection_child(tree.root, prefix(rows.id)?) else { return Error(Missing("collection")) }
+    let image = std.page.image_of(root)
+    if std.page.level(image) != 0 || std.page.count(image) != 5 || std.page.sealed_size(image) != 3758 {
+        return Error(Missing("merged root leaf"))
+    }
+    let s = snapshot(db)
+    let reader = shape(rows)
+    if get(s, reader, 0)? != Some(clone(short)) { return Error(Missing("overwritten row")) }
+    for key in 1u64 .. 5 {
+        if get(s, reader, key)? != Some(clone(wide)) { return Error(Missing("unchanged row")) }
+    }
+    Ok(())
+}
+
+@test
+fn test_paged_shrinking_overwrite(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let dir = disk_test_directory(d)
+    let mut options = defaults()
+    options.pack_bytes = 4096
+    let mut db = open(tasks, dir, c, r, options)?
+    create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_bytes()))?
+    let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    let seq = db.file_seq
+    let mut wide: Bytes = list.with_capacity(914)
+    list.fill(mut wide, 914, b'w')
+    let short = string.as_bytes("s")
+
+    // AP3: 24-byte header, 7 common key bytes, and 8 bytes per slot
+    // including its one-byte key suffix. A typed value adds six bytes.
+    // Five 920-byte values force a split, with the leftmost minimax cut 2/3.
+    let filled = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+        for key in 0u64 .. 5 { put(mut tx, rows, key, wide)? }
+        Ok(())
+    })?
+    if let Committed(_) = take filled {} else { return Error(Missing("initial commit")) }
+    {
+        let Some(root) = std.page.collection_child(db.heads[0u64].roots.collections.root, prefix(rows.id)?) else {
+            return Error(Missing("collection"))
+        }
+        let image = std.page.image_of(root)
+        if std.page.level(image) != 1 || std.page.count(image) != 2 {
+            return Error(Missing("two-leaf tree"))
+        }
+        let left = option.unwrap(std.page.child(root, 0))
+        let right = option.unwrap(std.page.child(root, 1))
+        if std.page.sealed_size(std.page.image_of(left)) != 1887 || std.page.sealed_size(std.page.image_of(right)) != 2815 {
+            return Error(Missing("2/3 split"))
+        }
+    }
+
+    // The overwrite leaves the left leaf at 31 + 2*8 + 920 + 7 = 974,
+    // below 1024. AP3 joins it with the right leaf and collapses the root:
+    // 31 + 5*8 + 4*920 + 7 = 3758 bytes, within 4096.
+    let shrunk = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] { put(mut tx, rows, 0, short) })?
+    let Committed(done) = take shrunk else { return Error(Missing("overwrite commit")) }
+    durable(mut db, done.ticket)?
+    if db.file_seq != seq { return Error(Missing("uncovered journal")) }
+    check_shrunk_collection(db, rows, wide, short)?
+    close(take db)?
+
+    let mut reopened = open(tasks, dir, c, r, options)?
+    let replayed_rows = table(mut reopened, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    check_shrunk_collection(reopened, replayed_rows, wide, short)?
+    close(take reopened)
 }

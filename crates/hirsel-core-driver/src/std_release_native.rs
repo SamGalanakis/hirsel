@@ -163,6 +163,102 @@ pub fn main(n: Net, tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
 "#,
 );
 
+/// Channel receives in a represented task, which park with the stack given
+/// back: owned items, then the close; and a cancel while parked.
+const STD_RECEIVES: (&str, &str) = (
+    "receives",
+    r#"type Drain: send {
+    socket: Socket,
+    from: Receiver[String],
+    acks: Sender[()],
+}
+
+fn opened(take socket: Socket) -> bool waits {
+    let (read, write) = net.split(take socket)
+    let mut r = take read
+    let _ = take write
+    let mut buf: Bytes = list.with_capacity(1)
+    match host.recv_bounded(mut r, mut buf, 1, Never) {
+        Ok(1) => true,
+        _ => false,
+    }
+}
+
+fn drain(take job: Drain) -> u64 waits {
+    let Drain(socket: take socket, from: take from, acks: take acks) = take job
+    if !opened(take socket) { return 0 }
+    let mut total: u64 = 0
+    loop {
+        match channel.receive(from) {
+            Ok(take s) => {
+                total = total * 10 + list.len(string.as_bytes(s))
+                if let Error(_) = channel.send(acks, ()) { return 0 }
+            },
+            Error(_) => return total,
+        }
+    }
+}
+
+fn stuck(take job: Drain) -> u64 waits {
+    let Drain(socket: take socket, from: take from, acks: take acks) = take job
+    if !opened(take socket) { return 0 }
+    if let Error(_) = channel.send(acks, ()) { return 0 }
+    match channel.receive(from) {
+        Ok(_) => 1,
+        Error(_) => 2,
+    }
+}
+
+fn wake(take client: Socket) waits {
+    let (read, write) = net.split(take client)
+    let _ = take read
+    let mut w = take write
+    let _ = result.unwrap(host.send_pair(mut w, string.as_bytes("a"), string.as_bytes(""), Never))
+}
+
+pub fn main(n: Net, tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
+    let (listening, addr) = result.unwrap(host.listen(n, Addr(ip: V4(2130706433), port: 0), 8))
+    let mut listener = take listening
+    let drain_client = result.unwrap(host.connect(n, addr, Never))
+    let (drain_socket, _) = result.unwrap(host.accept(mut listener, Never))
+    let stuck_client = result.unwrap(host.connect(n, addr, Never))
+    let (stuck_socket, _) = result.unwrap(host.accept(mut listener, Never))
+    let (to, from): (Sender[String], Receiver[String]) = channel.new(1)
+    let (acks, acked): (Sender[()], Receiver[()]) = channel.new(1)
+    let drained = task.spawn(tasks, bytes 65536, Drain(socket: take drain_socket, from: take from, acks: take acks), drain)
+    wake(take drain_client)
+    let mut k: u64 = 1
+    while k <= 3 {
+        let mut item = string.new()
+        string.push_uint(mut item, k, 10u32, k, '0')
+        result.unwrap(channel.send(to, take item))
+        result.unwrap(channel.receive(acked))
+        k += 1
+    }
+    let _ = take to
+    let mut line = string.new()
+    match task.join(take drained) {
+        Ok(v) => string.push_uint(mut line, v, 10u32, 0, ' '),
+        Error(_) => {},
+    }
+    result.unwrap(stdout.write(out, line));
+    let (held, never): (Sender[String], Receiver[String]) = channel.new(1)
+    let (stuck_acks, stuck_acked): (Sender[()], Receiver[()]) = channel.new(1)
+    let mut parked = task.spawn(tasks, bytes 65536, Drain(socket: take stuck_socket, from: take never, acks: take stuck_acks), stuck)
+    wake(take stuck_client)
+    result.unwrap(channel.receive(stuck_acked))
+    task.cancel(mut parked)
+    let stopped = match task.join(take parked) {
+        Error(Cancelled(take causes)) => { let _ = take causes; " Cancelled" },
+        _ => " other",
+    }
+    let _ = take held
+    result.unwrap(stdout.write(out, stopped));
+    Ok(())
+}
+"#,
+);
+
 /// One check of `source` as project `project` over std imaged into `cache`.
 fn std_checked(dir: &Path, project: &str, source: &str, cache: &str) -> Arc<CheckProduct> {
     let libraries = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core");
@@ -356,7 +452,7 @@ fn std_differential(modes: &[&str]) -> usize {
             .join(std::env::var_os(name).unwrap_or_else(|| panic!("{name}")))
     };
     let mut taped = 0;
-    for (name, source) in UNIT_PROGRAMS.into_iter().chain([STD_FAILS, STD_WAITS]) {
+    for (name, source) in UNIT_PROGRAMS.into_iter().chain([STD_FAILS, STD_WAITS, STD_RECEIVES]) {
         let product = std_checked(dir.path(), name, source, "cache");
         let project = dir.path().join(name);
         let mut base = native_options(Backend::Llvm, &dir.path().join("shared"));
@@ -395,6 +491,14 @@ fn std_differential(modes: &[&str]) -> usize {
             // and an inlined copy of a std body, does and reports what the
             // program's own copy of the std body does.
             let parts = std_run(&product, &options, StdBuild::Dev, &project);
+            if (name, mode) == ("receives", "plain") {
+                assert_eq!(
+                    (parts.0, String::from_utf8_lossy(&parts.1)),
+                    (Some(0), "123 Cancelled".into()),
+                    "receives: {}",
+                    String::from_utf8_lossy(&parts.2)
+                );
+            }
             if (name, mode) == ("waits", "plain") {
                 assert_eq!(
                     (parts.0, String::from_utf8_lossy(&parts.1)),

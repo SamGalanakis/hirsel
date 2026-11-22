@@ -606,6 +606,218 @@ pub(super) fn handoff_body(_: u32) -> u8 {
     0
 }
 
+/// A channel receive at the returnable boundary (`hirsel_core_receive_rec`),
+/// the form `RtOp::ReceiveRec` lowers to. The receiver loops over one
+/// channel, keeping its site word and item slot in its frame record, and
+/// gives its stack back each time the channel is empty. The root sends 1, 2
+/// and 3 with a scribbler turn after each send, so the receiver parks between
+/// items and its released stack is overwritten, then closes the channel. A
+/// second receiver parks on a channel nobody sends to and is cancelled.
+///
+/// The law: the receiver's log (each item, the close, the cancel) and the
+/// joins equal the stackful receiver's, and equal the sequence worked out by
+/// hand from the script.
+mod receiving {
+    use super::*;
+
+    /// Everything the receivers saw, in order.
+    static SEEN: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+    #[repr(C)]
+    struct Area {
+        word: u64,
+        child: u64,
+        item: u64,
+    }
+    struct Job {
+        returnable: bool,
+        channel: *mut crate::channel::Channel,
+        parks: *mut u64,
+    }
+
+    unsafe extern "C" fn receiver(context: *mut Context, _: *mut u8, input: *mut u8) -> u8 {
+        // SAFETY: the root pins the job and the channel through the join.
+        unsafe {
+            let job = &*input.cast::<Job>();
+            let mut local = std::mem::MaybeUninit::<Area>::zeroed();
+            let a: *mut Area = if job.returnable {
+                hirsel_core_frame_record(context, size_of::<Area>() as u64).cast()
+            } else {
+                local.as_mut_ptr()
+            };
+            if (*a).word == 0 {
+                (*a).child = 0;
+            }
+            (*a).word = 0;
+            loop {
+                let item = (&raw mut (*a).item).cast::<u8>();
+                let got = if job.returnable {
+                    crate::channel::hirsel_core_receive_rec(
+                        context,
+                        &raw mut (*a).child,
+                        job.channel,
+                        item,
+                        0,
+                    )
+                } else {
+                    crate::channel::hirsel_core_receive(context, job.channel, item, 0)
+                };
+                if (&raw const (*a).child).read_volatile() != 0 {
+                    (*a).word = 1;
+                    *job.parks += 1;
+                    return 0;
+                }
+                let seen = match (got.status, got.transferred) {
+                    (0, true) => format!("item {}", (*a).item),
+                    (0, false) => "closed".into(),
+                    _ => "cancelled".into(),
+                };
+                SEEN.lock().unwrap().push(seen);
+                // A failed call fails the task, as the compiled caller does.
+                if got.status != 0 {
+                    return 1;
+                }
+                if !got.transferred {
+                    return 0;
+                }
+            }
+        }
+    }
+
+    fn run_form(returnable: bool) -> (Vec<String>, u64) {
+        SEEN.lock().unwrap().clear();
+        struct Root {
+            returnable: bool,
+            parks: *mut u64,
+        }
+        unsafe extern "C" fn root(context: *mut Context, _: *mut u8, input: *mut u8) -> u8 {
+            // SAFETY: run_root pins Root and its outputs through the run.
+            unsafe {
+                let root = input.cast::<Root>().read();
+                let item = ValueLayout {
+                    bytes: 8,
+                    align: 8,
+                    logical: 0,
+                    clean: None,
+                };
+                let open = |context| {
+                    let made = crate::channel::hirsel_core_channel_new(context, 1, item, 0);
+                    assert_eq!(made.status, 0);
+                    made.sender
+                };
+                let spawn = |context, job: &mut Job| {
+                    hirsel_core_spawn(
+                        context,
+                        0,
+                        64,
+                        (job as *mut Job).cast(),
+                        receiver,
+                        layout(size_of::<Job>()),
+                        0,
+                    )
+                    .task
+                };
+                let channel = open(context);
+                let mut job = Job {
+                    returnable: root.returnable,
+                    channel,
+                    parks: root.parks,
+                };
+                let task = spawn(context, &mut job);
+                scribble_turn(context);
+                for mut value in 1u64..=3 {
+                    let sent = crate::channel::hirsel_core_send(
+                        context,
+                        channel,
+                        (&raw mut value).cast(),
+                        0,
+                    );
+                    assert!(sent.transferred && sent.status == 0);
+                    scribble_turn(context);
+                }
+                crate::channel::hirsel_core_sender_drop(channel);
+                join(context, task, true);
+                assert_eq!(
+                    crate::channel::hirsel_core_receiver_drop(context, channel),
+                    0
+                );
+                let silent = open(context);
+                let mut job = Job {
+                    returnable: root.returnable,
+                    channel: silent,
+                    parks: root.parks,
+                };
+                let task = spawn(context, &mut job);
+                scribble_turn(context);
+                hirsel_core_cancel(context, task);
+                join(context, task, true);
+                crate::channel::hirsel_core_sender_drop(silent);
+                assert_eq!(
+                    crate::channel::hirsel_core_receiver_drop(context, silent),
+                    0
+                );
+            }
+            0
+        }
+        LOG.lock().unwrap().clear();
+        let mut parks = 0u64;
+        let mut context = Context::new(1 << 20);
+        crate::causes::task_start(&mut context).unwrap();
+        let mut input = Root {
+            returnable,
+            parks: &mut parks,
+        };
+        // SAFETY: Root, its outputs and the context outlive the run.
+        let failed = unsafe {
+            run_root(
+                &mut context,
+                root,
+                (&mut input as *mut Root).cast(),
+                ptr::null_mut(),
+                size_of::<Root>(),
+                0,
+                SchedulerProvider::default(),
+            )
+        };
+        assert_eq!(failed, 0);
+        let mut seen = std::mem::take(&mut *SEEN.lock().unwrap());
+        seen.extend(std::mem::take(&mut *LOG.lock().unwrap()));
+        (seen, parks)
+    }
+
+    pub(in super::super) fn body(_: u32) -> u8 {
+        let stackful = run_form(false);
+        let returnable = run_form(true);
+        assert!(
+            returnable.1 > 0,
+            "the returnable receiver never returned its stack"
+        );
+        assert_eq!(stackful.1, 0);
+        // Items in send order, the close after the last, then the cancel;
+        // the joins (logged after the receivers' entries) end the first task
+        // normally and the second cancelled.
+        let expected: Vec<String> = [
+            "item 1",
+            "item 2",
+            "item 3",
+            "closed",
+            "cancelled",
+            "joined kind=0",
+            "joined kind=2",
+        ]
+        .map(String::from)
+        .to_vec();
+        assert_eq!(stackful.0, expected, "the stackful receiver");
+        assert_eq!(
+            returnable.0, stackful.0,
+            "the returnable receiver saw what the stackful one did"
+        );
+        served(0, "the returnable receiver matched the stackful one");
+        0
+    }
+}
+pub(super) use receiving::body as receive_body;
+
 /// Held while one of the case's threads is inside `hirsel_core_ready`.
 static READYING: super::seam::AtomicBool = super::seam::AtomicBool::new(false);
 /// `hirsel_core_ready` from either of the case's threads. The runtime holds

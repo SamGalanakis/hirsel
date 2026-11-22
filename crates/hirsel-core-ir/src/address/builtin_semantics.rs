@@ -128,6 +128,7 @@ const BUILTIN_SEMANTICS: &[(&str, &str, u32)] = &[
     ("host", "send_pair", 1),
     ("host", "send_to", 1),
     ("host", "sleep_until", 1),
+    ("host", "sleep_until_wall", 1),
     ("host", "stat", 1),
     ("host", "stat_file", 1),
     ("host", "stopped", 1),

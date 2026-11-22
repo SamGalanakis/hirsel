@@ -34,15 +34,15 @@ unfinished. This guard records today's work; it does not certify completion.
 
 For local evidence, run `./crates/hirsel-core-front/check-cost.py --compiler <release-hirsel-core>
 --request-compiler <release-request-cost> --out <new-directory>`.
-Manifest membership stays fixed. The tool counts actual source lines for each run.
+Manifest membership stays fixed. Both cost gates use the driver's count of
+semantic tokens, excluding trivia and EOF.
 The tool reports observations, denominators and completion findings. The
 committed JSON contains ceilings and policy.
 
 The fixed product rows divide the whole-process instruction count by the
 semantic tokens of the corresponding library sources. `fixed std` uses core
-and std, and `fixed core` uses core. The driver excludes trivia and EOF from
-both counts. Product marginal rows still subtract the raw fixed std count
-and divide by the program's own code lines.
+and std, and `fixed core` uses core. Product marginal rows subtract the raw
+fixed std count and divide by the program's own semantic tokens.
 
 The driver's `check_cost` example enables this crate's `cost-profile` feature only
 through a dev dependency. `check_cost <inputs.json> <new-store> <output.json>
@@ -53,9 +53,9 @@ Omit `--profile` to export CoreIR, outcomes and definition keys for comparison.
 The feature and all scopes are absent from production compiler units.
 
 Both cost checks compare measurements against the committed ceiling files.
-Proposed ceilings use a 2% margin. Source costs round up to 100 instructions
-per line. Front-stage and fixed product costs round up to 100 instructions
-before normalizing by tokens. Integer image counts use a minimum margin of
-one event. The fixed finished-process budget is 60,000 instructions per line. The absolute
+Proposed instruction ceilings add a 2% margin and round up to 100 instructions
+before dividing by tokens. Integer image counts use a minimum margin of one event.
+The finished budget has a fixed token rate for each corpus and product entry,
+recorded separately from the observed cost ceilings. The absolute
 core-check-index-912 residual allowances apply to source comparisons. The
 finished budget and product requests use their full process cost.

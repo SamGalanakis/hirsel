@@ -28,7 +28,7 @@ pub fn defaults() -> Options {
     Options(create: true, lock_wait_ms: 0, group_commits: 64, group_bytes: 4194304, checkpoint_bytes: 67108864, journal_limit: 268435456, pack_bytes: 67108864, resident_limit: 1073741824, authority: Directory())
 }
 
-pub type Limit = Key | Value | Transaction | Name | Ids | Manifest
+pub type Limit = Key | Value | Transaction | Name | Ids | Manifest | Triggers
 
 pub type Why = Checksum | Truncated | Flags | Kind(u64) | Header | Gap(u64) | Order | Dangling(u64) | Malformed
 
@@ -467,13 +467,13 @@ pub fn memory(c: Clock, r: Random, o: Options) -> Db {
 }
 
 fn memory_at(c: Clock, id: StoreId, o: Options) -> Db {
-    empty_db(c, id, o)
+    let mut db = empty_db(c, id, o)
+    list.push(mut db.heads, main_head(empty_roots(), 0, 0))
+    take db
 }
 
 fn empty_db(c: Clock, id: StoreId, o: Options) -> Db {
-    let mut heads: List[Head] = list.new()
-    list.push(mut heads, main_head(empty_roots(), 0, 0))
-    Db(store: id, fence: 0, disk: list.new(), clock: c, heads: take heads, branch_names: map.new(), pins: list.new(), record_bytes: branch_record_bytes("main"), next_pin: 0, next_branch: 1, next_node: 0, next_table: 1, file_seq: 1, file_end: 72, frame_seq: 0, resident: 0, page_resident: 0, changes: 0, settled: 0, ceiling: o.resident_limit, acks: None, journaled: 0, inflight: 0, uncovered: 0, since_cut: 0, acked_bytes: 0, written: None, written_send: None, checkpointed: 0, poison: None, journal: None, pending: None, journal_task: None, admits: map.new())
+    Db(store: id, fence: 0, disk: list.new(), clock: c, heads: list.new(), branch_names: map.new(), pins: list.new(), record_bytes: branch_record_bytes("main"), next_pin: 0, next_branch: 1, next_node: 0, next_table: 1, file_seq: 1, file_end: 72, frame_seq: 0, resident: 0, page_resident: 0, changes: 0, settled: 0, ceiling: o.resident_limit, acks: None, journaled: 0, inflight: 0, uncovered: 0, since_cut: 0, acked_bytes: 0, written: None, written_send: None, checkpointed: 0, poison: None, journal: None, pending: None, journal_task: None, admits: map.new())
 }
 
 pub type Accounts {
@@ -559,7 +559,7 @@ fn this_open(db: Db, s: Snapshot) -> Result[(), Error] {
 // A cut-made operation reserves its holder storage before the cut and
 // changes the installed holder records only after publication.
 fn cut_install(mut db: Db, take planned: HolderDelta) -> Result[Ticket, Error] waits {
-    if is_disk(db) { return disk_cut_state(mut db, take planned) }
+    if is_disk(db) { return disk_cut_state(mut db, take planned, seal_page_manifest_file) }
     prepare_holder_slot(mut db, planned)?
     let proposed = disk_allocation(scoped fn() -> Result[State, Error] {
         capacity(state_with_delta(db, planned))
@@ -1069,6 +1069,7 @@ type Ran[R, A] {
     first_stamp: u64,
     prepared_roots: bool,
     live: u64,
+    exact: bool,
     admits_rows: bool,
     frame: Option[Bytes],
     info: CallInfo,
@@ -1230,7 +1231,7 @@ fn finish_stage[R, A](ci: CallInfo, take finished: Finished[R, A], take seen: Li
         }
     }
     Ran(Ran(value: take outcome, roots: Some(take roots), edits: take operations, replies: take stream_edits,
-        first_stamp: first_stamp, prepared_roots: prepared_roots, live: live, admits_rows: admits_rows,
+        first_stamp: first_stamp, prepared_roots: prepared_roots, live: live, exact: false, admits_rows: admits_rows,
         frame: take frame, info: ci, reads: take seen))
 }
 
@@ -1443,7 +1444,7 @@ fn commit_ran[R, A](mut db: Db, i: u64, take ran: Ran[R, A]) -> Result[Outcome[R
 }
 
 fn commit_prepared[R, A](mut db: Db, i: u64, take ran: Ran[R, A], take publication: Publication) -> Outcome[R, A] {
-    let Ran(value: take value, roots: take roots, live: live, frame: take frame, info: ci, reads: take seen, ..) = take ran
+    let Ran(value: take value, roots: take roots, live: live, exact: exact, frame: take frame, info: ci, reads: take seen, ..) = take ran
     if let Some(_) = db.journal {
         let frame_size = match frame { Some(raw) => list.len(raw), None => 0u64 }
         db.file_end += frame_size
@@ -1460,6 +1461,7 @@ fn commit_prepared[R, A](mut db: Db, i: u64, take ran: Ran[R, A], take publicati
     db.heads[i].head += 1
     db.heads[i].at = ci.at
     db.changes += 1
+    if exact { db.settled = db.changes }
     publish(take publication)
     let sent_sequence = if list.len(db.disk) == 0 {
         db.changes
@@ -1473,9 +1475,20 @@ fn commit_prepared[R, A](mut db: Db, i: u64, take ran: Ran[R, A], take publicati
     }
 }
 
-// I4: past the bound with charges made since the last cut under a pin or a
-// branch, settle them by a cut and check again, so a refusal rests on the
-// exact figure. Rebind the existing frame to the new segment and offset.
+fn draft_row_account(db: Db, i: u64, proposed: Roots) -> Result[u64, Error] {
+    disk_allocation(scoped fn() -> Result[u64, Error] {
+        let mut roots: List[Roots] = list.with_capacity(list.len(db.heads) + list.len(db.pins))
+        for slot in 0u64 .. list.len(db.heads) {
+            let root = if slot == i { share_roots(proposed) } else { share_roots(db.heads[slot].roots) }
+            list.push(mut roots, take root)
+        }
+        for held in db.pins { list.push(mut roots, share_roots(held.roots)) }
+        Ok(page_row_account(roots))
+    })
+}
+
+// AP15: an over-bound retained-root draft is admitted on its proposed union.
+// If settling old charges rotates the journal, rebind the staged frame.
 fn settle_draft[R, A](mut db: Db, i: u64, take ran: Ran[R, A]) -> Result[AdmittedDraft[R, A], Error] waits {
     if list.len(db.disk) != 0 {
         let refusal = match ran.frame {
@@ -1486,7 +1499,7 @@ fn settle_draft[R, A](mut db: Db, i: u64, take ran: Ran[R, A]) -> Result[Admitte
             return Ok(OverLimit(take ran, Journal(overflow)))
         }
     }
-    if !over_bound(db, ran) || !retaining(db) || db.settled == db.changes {
+    if !over_bound(db, ran) || !retaining(db) {
         wait_for_frame_room(mut db, ran.frame)?
         return prepare_run_commit(mut db, i, take ran)
     }
@@ -1496,42 +1509,39 @@ fn settle_draft[R, A](mut db: Db, i: u64, take ran: Ran[R, A]) -> Result[Admitte
         Error(Full(problem)) => return Ok(OverLimit(take settled, problem)),
         Error(take problem) => return Error(take problem),
     }
-    let drafted_publication = disk_allocation(scoped fn() -> Result[Publication, Error] {
+    let counted = {
         let Some(roots) = view settled.roots else { fail("store: settled draft has no roots") }
-        capacity(prepare_publication(db, i, db.heads[i].head + 1, roots))
-    })
-    let publication = match take drafted_publication {
-        Ok(take plan) => take plan,
+        draft_row_account(db, i, roots)
+    }
+    let live = match take counted {
+        Ok(live) => live,
         Error(Full(problem)) => return Ok(OverLimit(take settled, problem)),
         Error(take problem) => return Error(take problem),
     }
-    let added = int.saturating_sub(settled.live, db.resident)
-    match cut_install(mut db, NoHolderChange) {
-        Ok(_) => {},
-        Error(Full(c)) => return Ok(OverLimit(take settled, c)),
-        Error(take e) => return Error(take e)
+    settled.live = live
+    settled.exact = true
+    let checked = prepare_run_commit(mut db, i, take settled)?
+    let (take admitted, take publication) = match take checked {
+        Ready(take ready, take plan) => (take ready, take plan),
+        OverLimit(take rejected, problem) => return Ok(OverLimit(take rejected, problem)),
     }
-    settled.live = int.saturating_add(db.resident, added)
-    if let Some(take frame) = replace(mut settled.frame, None) {
-        let mut raw = take frame
-        let context = DiskContext(store: db.store, role: 2, seq: db.file_seq)
-        let checked = disk_allocation(scoped fn() -> Result[u64, Error] {
-            capacity(disk_check(context, db.file_end, list.slice(raw, 0, 8), list.slice(raw, 16, list.len(raw))))
-        })
-        let checksum = match take checked {
-            Ok(sum) => sum,
-            Error(Full(Allocation(c))) => return Ok(OverLimit(take settled, Allocation(c))),
-            Error(take problem) => return Error(take problem),
+    let mut draft = take admitted
+    if db.settled != db.changes {
+        match cut_install(mut db, NoHolderChange) {
+            Ok(_) => {},
+            Error(Full(c)) => return Ok(OverLimit(take draft, c)),
+            Error(take e) => return Error(take e)
         }
-        list.set_word_le(mut raw, 8, checksum)
-        settled.frame = Some(take raw)
+        if let Some(take frame) = replace(mut draft.frame, None) {
+            let mut raw = take frame
+            if let Error(c) = seal_frame(mut raw, DiskContext(store: db.store, role: 2, seq: db.file_seq), db.file_end) {
+                return Ok(OverLimit(take draft, Allocation(c)))
+            }
+            draft.frame = Some(take raw)
+        }
     }
-    if over_bound(db, settled) {
-        let needed = settled.live
-        return Ok(OverLimit(take settled, Resident(Capacity(requested: needed, available: db.ceiling))))
-    }
-    wait_for_frame_room(mut db, settled.frame)?
-    Ok(Ready(take settled, take publication))
+    wait_for_frame_room(mut db, draft.frame)?
+    Ok(Ready(take draft, take publication))
 }
 
 fn settle_admit[R, A](mut db: Db, i: u64, take ran: Ran[R, A]) -> Result[Outcome[R, A], Error] waits {
@@ -2773,7 +2783,7 @@ fn encode_frame(ci: CallInfo, ops: List[DataOp], streams: List[DataOp], call: Op
         }
     }
     let slots = data_order(ops)?
-    let mut out: Bytes = list.with_capacity(16 + size)
+    let mut out: Bytes = list.with_capacity(16 + size + BINDING_BYTES)
     le(mut out, 0x0011, 2)?
     le(mut out, 1, 2)?
     le(mut out, size, 4)?
@@ -2784,9 +2794,7 @@ fn encode_frame(ci: CallInfo, ops: List[DataOp], streams: List[DataOp], call: Op
     le(mut out, sections, 1)?
     if data { encode_data_ops(mut out, ops, slots)? }
     if stream { encode_stream_ops(mut out, streams, call, settlement)? }
-    let context = DiskContext(store: ci.id.store, role: 2, seq: seq)
-    let seal = disk_check(context, offset, list.slice(out, 0, 8), list.slice(out, 16, list.len(out)))?
-    list.set_word_le(mut out, 8, seal)
+    seal_frame(mut out, DiskContext(store: ci.id.store, role: 2, seq: seq), offset)?
     Ok(take out)
 }
 
@@ -3042,6 +3050,7 @@ pub opaque type Table[K, V]: send {
     epoch: u64,
     complete: bool,
     catalog_key: Arc[Bytes],
+    catalog_page: Arc[Bytes],
     key: std.codec.Key[K],
     readers: Arc[Readers[V]],
     indexes: List[IndexOf[V]]
@@ -3051,6 +3060,7 @@ pub opaque type Shape[K, V]: shareable + send {
     store: StoreId,
     id: u32,
     catalog_key: Arc[Bytes],
+    catalog_page: Arc[Bytes],
     key: std.codec.Key[K],
     readers: Arc[Readers[V]]
 }
@@ -3059,6 +3069,7 @@ pub opaque type Index[J, K, V]: shareable + send {
     store: StoreId,
     id: u32,
     catalog_key: Arc[Bytes],
+    catalog_page: Arc[Bytes],
     table: u32,
     key: std.codec.Key[J],
     primary: std.codec.Key[K],
@@ -3124,11 +3135,11 @@ pub opaque type Rows[K, V]: send {
 // write, since it does not carry the table's registered index extractors.
 pub fn query_table[K, V](t: Table[K, V]) -> Table[K, V] {
     Table(store: t.store, id: t.id, epoch: t.epoch, complete: false,
-        catalog_key: arc.share(t.catalog_key), key: t.key, readers: arc.share(t.readers), indexes: list.new())
+        catalog_key: arc.share(t.catalog_key), catalog_page: arc.share(t.catalog_page), key: t.key, readers: arc.share(t.readers), indexes: list.new())
 }
 
 pub fn shape[K, V](t: Table[K, V]) -> Shape[K, V] {
-    Shape(store: t.store, id: t.id, catalog_key: arc.share(t.catalog_key), key: t.key, readers: arc.share(t.readers))
+    Shape(store: t.store, id: t.id, catalog_key: arc.share(t.catalog_key), catalog_page: arc.share(t.catalog_page), key: t.key, readers: arc.share(t.readers))
 }
 
 fn decoded[T](take r: Result[T, std.codec.DecodeError]) -> Result[T, Error] {
@@ -3205,7 +3216,7 @@ pub fn fetch_bytes[K, V](tx: Tx, t: Shape[K, V], k: K) -> Result[Option[View[Byt
     if !same(tx.store, t.store) {
         return Error(Foreign)
     }
-    readable(tx.roots, t.catalog_key, t.id)?
+    readable(tx.roots, t.catalog_key, t.catalog_page, t.id)?
     let mut p: Bytes = list.with_capacity(12)
     list.put_word_be(mut p, t.id)
     std.codec.encode_key(t.key, k, mut p)
@@ -3324,7 +3335,7 @@ fn open_range[K, V](tx: Tx, t: Shape[K, V], lo: Bound[K], hi: Bound[K], reverse:
     if !same(tx.store, t.store) {
         return Error(Foreign)
     }
-    readable(tx.roots, t.catalog_key, t.id)?
+    readable(tx.roots, t.catalog_key, t.catalog_page, t.id)?
     let low = lower_bytes(t.id, typed_bound(t.key, lo)?, false)?
     let high = lower_bytes(t.id, typed_bound(t.key, hi)?, true)?
     let tree = transaction_collection_pages(tx)?
@@ -3342,7 +3353,7 @@ pub fn get_bytes[K, V](s: Snapshot, t: Shape[K, V], k: K) -> Result[Option[View[
     if !same(s.store, t.store) {
         return Error(Foreign)
     }
-    readable(s.roots, t.catalog_key, t.id)?
+    readable(s.roots, t.catalog_key, t.catalog_page, t.id)?
     let mut p = prefixed(t.id, 8)?
     std.codec.encode_key(t.key, k, mut p)
     Ok(get_page_row(s.roots.collections, p))
@@ -3360,7 +3371,7 @@ pub fn scan_bytes[K, V](s: Snapshot, t: Shape[K, V], lo: Bound[K], hi: Bound[K])
     if !same(s.store, t.store) {
         return Error(Foreign)
     }
-    readable(s.roots, t.catalog_key, t.id)?
+    readable(s.roots, t.catalog_key, t.catalog_page, t.id)?
     let low = lower_bytes(t.id, typed_bound(t.key, lo)?, false)?
     let high = lower_bytes(t.id, typed_bound(t.key, hi)?, true)?
     let id = prefix(t.id)?
@@ -3398,7 +3409,7 @@ pub fn scan[K, V](s: Snapshot, t: Shape[K, V], lo: Bound[K], hi: Bound[K]) -> Re
     if !same(s.store, t.store) {
         return Error(Foreign)
     }
-    readable(s.roots, t.catalog_key, t.id)?
+    readable(s.roots, t.catalog_key, t.catalog_page, t.id)?
     let cursor = scan_raw(s, t.id, typed_bound(t.key, lo)?, typed_bound(t.key, hi)?)?
     Ok(table_rows(s, t, take cursor))
 }
@@ -3407,7 +3418,7 @@ pub fn scan_reverse[K, V](s: Snapshot, t: Shape[K, V], lo: Bound[K], hi: Bound[K
     if !same(s.store, t.store) {
         return Error(Foreign)
     }
-    readable(s.roots, t.catalog_key, t.id)?
+    readable(s.roots, t.catalog_key, t.catalog_page, t.id)?
     let low = lower_bytes(t.id, typed_bound(t.key, lo)?, false)?
     let high = lower_bytes(t.id, typed_bound(t.key, hi)?, true)?
     let cursor = reverse_byte_cursor(s.roots.collections, low, high)?
@@ -3418,7 +3429,7 @@ pub fn count[K, V](s: Snapshot, t: Shape[K, V], lo: Bound[K], hi: Bound[K]) -> R
     if !same(s.store, t.store) {
         return Error(Foreign)
     }
-    readable(s.roots, t.catalog_key, t.id)?
+    readable(s.roots, t.catalog_key, t.catalog_page, t.id)?
     let low = lower_bytes(t.id, typed_bound(t.key, lo)?, false)?
     let high = lower_bytes(t.id, typed_bound(t.key, hi)?, true)?
     count_page_rows(s.roots.collections, t.id, low, high)
@@ -3551,7 +3562,7 @@ pub fn lookup[J, K, V](tx: Tx, ix: Index[J, K, V], lo: Bound[J], hi: Bound[J]) -
     if !same(tx.store, ix.store) {
         return Error(Foreign)
     }
-    readable(tx.roots, ix.catalog_key, ix.id)?
+    readable(tx.roots, ix.catalog_key, ix.catalog_page, ix.id)?
     let low = index_bound(ix.id, ix.key, lo, false)?
     let high = index_bound(ix.id, ix.key, hi, true)?
     note_read(tx, Span(copied(low)?, copied(high)?))?
@@ -3565,7 +3576,7 @@ pub fn find[J, K, V](s: Snapshot, ix: Index[J, K, V], lo: Bound[J], hi: Bound[J]
     if !same(s.store, ix.store) {
         return Error(Foreign)
     }
-    readable(s.roots, ix.catalog_key, ix.id)?
+    readable(s.roots, ix.catalog_key, ix.catalog_page, ix.id)?
     let cursor = byte_cursor(s.roots.collections, Included(index_bound(ix.id, ix.key, lo, false)?), index_bound(ix.id, ix.key, hi, true)?)?
     indexed_rows(s.roots.collections, ix, take cursor)
 }
@@ -3585,7 +3596,7 @@ pub fn scan_page[K, V](s: Snapshot, t: Shape[K, V], lo: Bound[K], hi: Bound[K], 
     if !same(s.store, t.store) {
         return Error(Foreign)
     }
-    readable(s.roots, t.catalog_key, t.id)?
+    readable(s.roots, t.catalog_key, t.catalog_page, t.id)?
     let high = lower_bytes(t.id, typed_bound(t.key, hi)?, true)?
     let cursor = byte_cursor(s.roots.collections, Included(lower_bytes(t.id, typed_bound(t.key, lo)?, false)?), high)?
     read_page(s, t.id, take high, table_rows(s, t, take cursor), l)
@@ -3596,13 +3607,13 @@ pub fn find_page[J, K, V](s: Snapshot, ix: Index[J, K, V], lo: Bound[J], hi: Bou
     if !same(s.store, ix.store) {
         return Error(Foreign)
     }
-    readable(s.roots, ix.catalog_key, ix.id)?
+    readable(s.roots, ix.catalog_key, ix.catalog_page, ix.id)?
     let high = index_bound(ix.id, ix.key, hi, true)?
     let cursor = byte_cursor(s.roots.collections, Included(index_bound(ix.id, ix.key, lo, false)?), high)?
     read_page(s, ix.id, take high, indexed_rows(s.roots.collections, ix, take cursor)?, l)
 }
 
-fn resume_here(s: Snapshot, store: StoreId, id: u32, catalog_key: Bytes, r: Resume, limits: Limits) -> Result[bool, Error] {
+fn resume_here(s: Snapshot, store: StoreId, id: u32, catalog_key: Bytes, seen: Bytes, r: Resume, limits: Limits) -> Result[bool, Error] {
     if !same(s.store, store) {
         return Error(Foreign)
     }
@@ -3613,12 +3624,12 @@ fn resume_here(s: Snapshot, store: StoreId, id: u32, catalog_key: Bytes, r: Resu
         return Error(Stale(r.source))
     }
     page_limits(limits)?
-    readable(s.roots, catalog_key, id)?
+    readable(s.roots, catalog_key, seen, id)?
     Ok(true)
 }
 
 pub fn scan_next[K, V](s: Snapshot, t: Shape[K, V], take r: Resume, l: Limits) -> Result[Resumed[K, V], Error] {
-    if !resume_here(s, t.store, t.id, t.catalog_key, r, l)? {
+    if !resume_here(s, t.store, t.id, t.catalog_key, t.catalog_page, r, l)? {
         return Ok(Moved(s.head))
     }
     let Resume(store: _, open: _, branch: _, version: _, source: _, high: take high, last: take last) = take r
@@ -3627,7 +3638,7 @@ pub fn scan_next[K, V](s: Snapshot, t: Shape[K, V], take r: Resume, l: Limits) -
 }
 
 pub fn find_next[J, K, V](s: Snapshot, ix: Index[J, K, V], take r: Resume, l: Limits) -> Result[Resumed[K, V], Error] {
-    if !resume_here(s, ix.store, ix.id, ix.catalog_key, r, l)? {
+    if !resume_here(s, ix.store, ix.id, ix.catalog_key, ix.catalog_page, r, l)? {
         return Ok(Moved(s.head))
     }
     let Resume(store: _, open: _, branch: _, version: _, source: _, high: take high, last: take last) = take r
@@ -3923,6 +3934,10 @@ pub fn with_schema[H](db: Db, make: StaticFn[fn(Schema) -> Result[H, Error]]) ->
     (code.callable(make))(Schema(store: db.store, catalog: share_page_tree(db.heads[0].roots.catalog)))
 }
 
+pub fn snapshot_schema(s: Snapshot) -> Schema {
+    Schema(store: s.store, catalog: share_page_tree(s.roots.catalog))
+}
+
 pub fn tx_schema(tx: Tx) -> Schema {
     Schema(store: tx.store, catalog: share_page_tree(tx.roots.catalog))
 }
@@ -4163,6 +4178,7 @@ fn stage_table[K, V](mut plan: SchemaPlan, name: String, take key: std.codec.Key
     let resolved = readers(value, c, number)?
     let catalog = index_catalog_in(plan.roots.catalog, c.id)?
     let key_handle = catalog_key_handle(take k)?
+    let seen = catalog_page(plan.roots.catalog)?
     if !found {
         list.push(mut c.schemas, ValueSchema(number: number, fingerprint: fp, schema: take schema))
         c.next += 1
@@ -4173,7 +4189,7 @@ fn stage_table[K, V](mut plan: SchemaPlan, name: String, take key: std.codec.Key
         let next_id = plan.next_table
         keep_schema(mut plan, take roots, live, next_id)?
     }
-    Ok(Table(store: plan.store, id: c.id, epoch: c.epoch, complete: list.len(catalog) == 0, catalog_key: take key_handle, key: key, readers: take resolved, indexes: list.new()))
+    Ok(Table(store: plan.store, id: c.id, epoch: c.epoch, complete: list.len(catalog) == 0, catalog_key: take key_handle, catalog_page: take seen, key: key, readers: take resolved, indexes: list.new()))
 }
 
 pub fn schema_table[K, V](source: Schema, take name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[Table[K, V], Error] {
@@ -4196,7 +4212,7 @@ fn catalog_handle[K, V](store_id: StoreId, catalog: PageTree, writable_handle: b
             let number = prior.number
             let resolved = readers(value, c, number)?
             let complete = writable_handle && list.len(index_catalog_in(catalog, c.id)?) == 0
-            return Ok(Table(store: store_id, id: c.id, epoch: c.epoch, complete: complete, catalog_key: catalog_key_handle(take k)?, key: key, readers: take resolved, indexes: list.new()))
+            return Ok(Table(store: store_id, id: c.id, epoch: c.epoch, complete: complete, catalog_key: catalog_key_handle(take k)?, catalog_page: catalog_page(catalog)?, key: key, readers: take resolved, indexes: list.new()))
         }
     }
     Error(Schema(int.widen(c.next)))
@@ -4309,7 +4325,7 @@ fn catalog_index[J, K, V](store_id: StoreId, catalog: PageTree, mut t: Table[K, 
     }
     t.complete = complete
     t.epoch = catalog_entry_in(catalog, t.catalog_key)?.epoch
-    Ok(Index(store: t.store, id: c.id, catalog_key: catalog_key_handle(take k)?, table: t.id, key: key, primary: t.key, readers: arc.share(t.readers)))
+    Ok(Index(store: t.store, id: c.id, catalog_key: catalog_key_handle(take k)?, catalog_page: catalog_page(catalog)?, table: t.id, key: key, primary: t.key, readers: arc.share(t.readers)))
 }
 
 pub fn drop_table[K, V](mut db: Db, take t: Table[K, V]) -> Result[Ticket, Error] waits {
@@ -6501,7 +6517,28 @@ fn catalog_key_handle(take key: Bytes) -> Result[Arc[Bytes], Error] {
     Ok(arc.new(take key))
 }
 
-fn readable(roots: Roots, key: Bytes, id: u32) -> Result[(), Error] {
+// The catalog root page bytes a handle resolved against, for `readable`: empty
+// when the root is a branch or holds a BLOB cell, whose lookup reads more than
+// the root's bytes.
+fn catalog_page(catalog: PageTree) -> Result[Arc[Bytes], Error] {
+    let image = std.page.image_of(catalog.root)
+    if std.page.level(image) != 0 {
+        return Ok(arc.new(list.new()))
+    }
+    if let Some(_) = std.page.body(catalog.root, 0) {
+        return Ok(arc.new(list.new()))
+    }
+    Ok(arc.new(copied(std.page.payload(image))?))
+}
+
+// I3's catalog check. `page` is the catalog root page the handle was resolved
+// against when that root was one leaf without BLOB cells, and empty otherwise.
+// A lookup in such a leaf reads only its bytes, so a root with the same bytes
+// lists the handle's id under its key and the lookup is skipped.
+fn readable(roots: Roots, key: Bytes, page: Bytes, id: u32) -> Result[(), Error] {
+    if std.page.payload(std.page.image_of(roots.catalog.root)) == page {
+        return Ok(())
+    }
     match get_page_row(roots.catalog, key) {
         Some(raw) => {
             if list.len(raw) < 5 {
@@ -6842,9 +6879,9 @@ pub fn law_branches(c: Clock) -> bool waits {
     match branch(db, "b") { Some(found) => found.id == 1 && version(snapshot(db)) == 5, None => false }
 }
 
-// L27(b). The descriptor and catalog charge 260. With a pin, each
-// overwrite adds 94 until settlement reduces the count to the two live
-// versions at 448. A third version fits the 542-byte ceiling.
+// L27(b). The descriptor and catalog charge 260 and each row version 94.
+// A conservative overwrite reaches 542. The next overwrite settles the
+// proposed union to 448, for the pinned and proposed versions.
 pub fn law_pin_settle(c: Clock) -> bool waits {
     let mut options = defaults()
     options.resident_limit = 542
@@ -6857,13 +6894,73 @@ pub fn law_pin_settle(c: Clock) -> bool waits {
     if db.resident != 354 { return false }
     for step in 0u64 .. 100 {
         if !typed_put(mut db, t, 1, step + 2) { return false }
-        if db.resident != (if step == 0 { 448u64 } else { 542u64 }) { return false }
+        if db.resident != (if step % 2 == 0 { 448u64 } else { 542u64 }) { return false }
     }
     let _ = result.unwrap(checkpoint(mut db))
     if db.resident != 448 { return false }
     let _ = result.unwrap(unpin(mut db, "p"))
     if db.resident != 354 || !typed_put(mut db, t, 1, 7) || db.resident != 354 { return false }
     result.unwrap(get(snapshot(db), shape(t), 1)) == Some(7u64)
+}
+
+// AP15. The catalog and descriptor cost 260 and one row version costs 94.
+// Rewriting or restoring the pinned value keeps the union at 354. Adding a
+// second key costs 448 in total, even if the draft also rewrites the first.
+fn pinned_draft_at_bound(mut db: Db) -> Result[(), Error] waits {
+    create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
+    let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    if !typed_put(mut db, rows, 1, 1) { return Error(Foreign) }
+    let base = snapshot(db)
+    let _ = pin(mut db, "p", base)?
+    if accounts(db).logical != 354 || !accounts(db).exact { return Error(Foreign) }
+    if !typed_put(mut db, rows, 1, 1) { return Error(Foreign) }
+    if accounts(db).logical != 354 || !accounts(db).exact { return Error(Foreign) }
+
+    let deleted = run(mut db, None, fn(mut tx: Tx) -> Result[bool, Error] { delete(mut tx, rows, 1) })?
+    if let Committed(Done(value: true, ..)) = deleted {} else { return Error(Foreign) }
+    if accounts(db).logical != 354 || accounts(db).exact { return Error(Foreign) }
+    let cut = db.checkpointed
+    let restored = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] { put(mut tx, rows, 1, 1) })?
+    let Committed(done) = restored else { return Error(Foreign) }
+    if db.checkpointed != cut + 1 { return Error(Foreign) }
+    durable(mut db, done.ticket)?
+
+    let journal = accounts(db).journal
+    let refused = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+        put(mut tx, rows, 1, 1)?
+        put(mut tx, rows, 2, 2)
+    })?
+    let Refused(Resident(cap)) = refused else { return Error(Foreign) }
+    let head = snapshot(db)
+    if cap.requested != 448 || cap.available != 354 || accounts(db).journal != journal ||
+        accounts(db).logical != 354 || !accounts(db).exact || version(head) != 5 ||
+        get(head, shape(rows), 1)? != Some(1u64) || get(head, shape(rows), 2)? != None {
+        return Error(Foreign)
+    }
+    Ok(())
+}
+
+@test
+fn test_pinned_draft_at_bound(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let mut options = defaults()
+    options.resident_limit = 354
+    options.pack_bytes = 512
+    let mut mem = memory(c, r, options)
+    pinned_draft_at_bound(mut mem)?
+    close(take mem)?
+
+    let child = disk_test_directory(d)
+    let mut db = open(tasks, child, c, r, options)?
+    pinned_draft_at_bound(mut db)?
+    close(take db)?
+    let mut reopened = open(tasks, child, c, r, options)?
+    let rows = table(mut reopened, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let head = snapshot(reopened)
+    if accounts(reopened).logical != 354 || !accounts(reopened).exact || version(head) != 5 ||
+        get(head, shape(rows), 1)? != Some(1u64) || get(head, shape(rows), 2)? != None {
+        return Error(Foreign)
+    }
+    close(take reopened)
 }
 
 // L27(c)(i) and L51(h). A live-head fork shares the 354-byte account.
@@ -8010,17 +8107,43 @@ fn disk_fault(file: String, at: u64, why: Why) -> Error {
     Corrupt(Fault(file: take name, offset: at, why: why))
 }
 
+// Every check starts with the store, file role, file sequence and offset.
+const BINDING_BYTES: u64 = 33
+
+fn put_binding(mut out: Bytes, ctx: DiskContext, offset: u64) -> Result[(), Capacity] {
+    le(mut out, ctx.store.hi, 8)?
+    le(mut out, ctx.store.lo, 8)?
+    le(mut out, int.widen(ctx.role), 1)?
+    le(mut out, ctx.seq, 8)?
+    le(mut out, offset, 8)
+}
+
 fn disk_check_start(ctx: DiskContext, offset: u64, head: Bytes) -> Result[std.check.Xxh3, Capacity] {
-    let mut binding: Bytes = list.with_capacity(33)
-    le(mut binding, ctx.store.hi, 8)?
-    le(mut binding, ctx.store.lo, 8)?
-    le(mut binding, int.widen(ctx.role), 1)?
-    le(mut binding, ctx.seq, 8)?
-    le(mut binding, offset, 8)?
+    let mut binding: Bytes = list.with_capacity(BINDING_BYTES)
+    put_binding(mut binding, ctx, offset)?
     let mut state = std.check.start()
-    std.check.add(mut state, binding, 0, 33)
+    std.check.add(mut state, binding, 0, BINDING_BYTES)
     std.check.add(mut state, head, 0, 8)
     Ok(take state)
+}
+
+// Writes the check of a frame laid out as head[0..8], check[8..16] and
+// payload[16..]. The binding goes past the payload, into capacity the caller
+// reserved, and is hashed from there, so sealing allocates nothing and needs no
+// allocation isolation when a commit seals its frame at the file end.
+fn seal_frame(mut out: Bytes, ctx: DiskContext, offset: u64) -> Result[(), Capacity] {
+    let end = list.len(out)
+    if list.capacity(out) - end < BINDING_BYTES {
+        fail("store: frame has no room for its check binding")
+    }
+    put_binding(mut out, ctx, offset)?
+    let mut state = std.check.start()
+    std.check.add(mut state, out, end, end + BINDING_BYTES)
+    std.check.add(mut state, out, 0, 8)
+    std.check.add(mut state, out, 16, end)
+    list.truncate(mut out, end)
+    list.set_word_le(mut out, 8, std.check.finish(state))
+    Ok(())
 }
 
 fn disk_check(ctx: DiskContext, offset: u64, head: Bytes, payload: Bytes) -> Result[u64, Capacity] {
@@ -8030,14 +8153,13 @@ fn disk_check(ctx: DiskContext, offset: u64, head: Bytes, payload: Bytes) -> Res
 }
 
 fn disk_seal(ctx: DiskContext, offset: u64, kind: u16, flags: u16, payload: Bytes) -> Result[Bytes, Capacity] {
-    let mut out: Bytes = list.with_capacity(16 + list.len(payload))
+    let mut out: Bytes = list.with_capacity(16 + list.len(payload) + BINDING_BYTES)
     le(mut out, int.widen(kind), 2)?
     le(mut out, int.widen(flags), 2)?
     le(mut out, list.len(payload), 4)?
     le(mut out, 0, 8)?
     list.append(mut out, payload)
-    let checksum = disk_check(ctx, offset, list.slice(out, 0u64, 8u64), payload)?
-    list.set_word_le(mut out, 8, checksum)
+    seal_frame(mut out, ctx, offset)?
     Ok(take out)
 }
 
@@ -8291,28 +8413,33 @@ pub fn disk_law_frames() -> bool {
 }
 
 // L37: AP19's beta vector, with the outer checksum from libxxhash.
+fn fork_frame_bytes() -> Bytes {
+    let wire: Inline[u8, 38] = [
+        19, 0, 1, 0, 22, 0, 0, 0, 104, 100, 110, 15, 101, 85, 18, 178,
+        1, 0, 0, 0, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0, 4, 0, 98, 101, 116, 97,
+    ]
+    let mut frame: Bytes = list.with_capacity(38)
+    for b in wire { list.push(mut frame, b) }
+    take frame
+}
+
+fn fork_frame_fields(read_fork: JournalFork) -> bool {
+    read_fork.id == 1 && read_fork.parent == 0 && read_fork.forked_at == 64 && read_fork.name == "beta"
+}
+
 fn fork_frame_vector(id: StoreId) -> bool {
     let beta = Head(id: 1, name: "beta", parent: 0, forked_at: 64, roots: empty_roots(), head: 64, at: 100, following: None)
     let journal_ctx = DiskContext(store: id, role: 2, seq: 7)
     let encoded = result.unwrap(encode_fork(journal_ctx, 114, beta))
-    let expected: Inline[u8, 38] = [
-        19, 0, 1, 0, 22, 0, 0, 0, 104, 100, 110, 15, 101, 85, 18, 178,
-        1, 0, 0, 0, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0, 4, 0, 98, 101, 116, 97,
-    ]
+    let expected = fork_frame_bytes()
     if list.len(encoded) != 38 { return false }
-    let mut wire = result.unwrap(disk_header_bytes(journal_ctx, 0))
-    list.append(mut wire, journal_empty_commit(journal_ctx, 72, 64))
     for i in 0u64 .. 38 {
         if encoded[i] != expected[i] { return false }
-        list.push(mut wire, expected[i])
     }
-    let segment = result.unwrap(journal_segment("j-7", id, 7, wire, Some(152), true))
-    if segment.wire_bytes != 80 || list.len(segment.events) != 2 { return false }
-    let (Commit(previous), Fork(read_fork)) = (segment.events[0], segment.events[1]) else { return false }
-    if previous.version != 64 || read_fork.id != 1 || read_fork.parent != 0 || read_fork.forked_at != 64 || read_fork.name != "beta" {
-        return false
-    }
-    let mut trailing = result.unwrap(copied(list.slice(wire, 130, 152)))
+    let payload = list.slice(expected, 16, 38)
+    let Ok(Fork(read_fork)) = journal_decode("j-7", 0x0013, payload) else { return false }
+    if !fork_frame_fields(read_fork) { return false }
+    let mut trailing = result.unwrap(copied(payload))
     list.push(mut trailing, 0u8)
     if !disk_corrupt(journal_decode("j-7", 0x0013, trailing)) { return false }
     let _ = list.set(mut trailing, 18, 255u8)
@@ -8366,7 +8493,7 @@ fn disk_put_name(mut out: Bytes, name: String) -> Result[(), Capacity] {
 
 fn encode_fork(context: DiskContext, offset: u64, head: Head) -> Result[Bytes, Capacity] {
     let size = 18 + string.byte_len(head.name)
-    let mut out: Bytes = list.with_capacity(16 + size)
+    let mut out: Bytes = list.with_capacity(16 + size + BINDING_BYTES)
     le(mut out, 0x0013, 2)?
     le(mut out, 1, 2)?
     le(mut out, size, 4)?
@@ -8375,8 +8502,7 @@ fn encode_fork(context: DiskContext, offset: u64, head: Head) -> Result[Bytes, C
     le(mut out, int.widen(head.parent), 4)?
     le(mut out, head.forked_at, 8)?
     disk_put_name(mut out, head.name)?
-    let checksum = disk_check(context, offset, list.slice(out, 0, 8), list.slice(out, 16, list.len(out)))?
-    list.set_word_le(mut out, 8, checksum)
+    seal_frame(mut out, context, offset)?
     Ok(take out)
 }
 
@@ -8748,6 +8874,15 @@ pub fn stage_export_migration(source: Preparation, tasks: Tasks, configure: Stat
     stage_migration(source.db, tasks, configure)
 }
 
+pub fn export_system_get[K, V](source: Preparation, name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V], at: K) -> Result[Option[V], Error] {
+    let selected = system_table(source.db, name, take key, take value)?
+    get(snapshot(source.db), shape(selected), at)
+}
+
+pub fn staged_snapshot(source: Preparation, staged: StagedMigration) -> Snapshot {
+    snapshot_from(source.db, 0u64, source.stamp.head, staged.plan.roots)
+}
+
 pub type PreparedTarget: codec + send {
     describe: Bytes,
     release: Bytes,
@@ -9113,7 +9248,7 @@ pub fn validate_prepared(d: Dir) -> Result[ValidatedImport, DeployError] waits {
     Ok(ValidatedImport(meta: take meta, delta: take delta, ranges: take ranges, digest: std.sha256.finish(hashed), charge: charge))
 }
 
-type ImportedRange: send { id: u32, kind: u8, tree: Arc[std.page.Page] }
+type ImportedRange: send { id: u32, kind: u8, tree: Option[Arc[std.page.Page]] }
 
 pub opaque type Imported: send {
     meta: PreparedMeta,
@@ -9177,11 +9312,7 @@ pub fn import_trees(take work: ImportWork) -> Result[Imported, DeployError] {
         let built: Option[Arc[std.page.Page]] = if checked_range.kind == 0 { None }
             else { deploy_result(page_result(std.page.bulk(checked_range.rows, Collection, inline, mut ids)))? }
         if ids - 1 > high { return Error(IdBound) }
-        let tree = match take built {
-            Some(take root) => take root,
-            None => std.page.empty(0, 0, Collection),
-        }
-        list.push(mut imported, ImportedRange(id: checked_range.id, kind: checked_range.kind, tree: take tree))
+        list.push(mut imported, ImportedRange(id: checked_range.id, kind: checked_range.kind, tree: take built))
     }
     Ok(Imported(meta: take meta, delta: take delta, ranges: take imported, digest: digest, charge: charge))
 }
@@ -10071,7 +10202,8 @@ fn cut_participants(db: Db, delta: HolderDelta) -> Result[CutParticipants, Error
 }
 
 fn fill_cut_manifest(mut raw: Bytes, db: Db, delta: HolderDelta, generation: u64, seq: u64, prev_first: u64,
-    layout: PagedCutLayout, next_stamp: u64, account: u64) -> Result[(), Error] {
+    layout: PagedCutLayout, next_stamp: u64, account: u64,
+    seal: scoped fn(mut Bytes, DiskContext, u32) -> Result[(), Error] waits) -> Result[(), Error] waits {
     let tables = match delta { ReplaceMain(main, _) => main.tables, _ => db.next_table }
     let manifest = PageManifest(generation: generation, fence: db.fence, inline: db.heads[0u64].roots.collections.inline,
         next_stamp: next_stamp, next_branch: db.next_branch, next_table: tables, next_pack: layout.lists.run_packs.next_pack,
@@ -10100,7 +10232,7 @@ fn fill_cut_manifest(mut raw: Bytes, db: Db, delta: HolderDelta, generation: u64
     visit_cut_pins(db, delta, mut raw, scoped fn(mut buffer: Bytes, held: Pin) -> Result[(), Error] {
         append_page_manifest_pin(mut buffer, held.name, held.branch, held.version, published_page_roots(layout.locations, held.roots))
     })?
-    seal_page_manifest_file(mut raw, context, db.fence)
+    seal(mut raw, context, db.fence)
 }
 
 fn cut_retirement(layout: PagedCutLayout, holders: List[HeldPage], lease: Option[Arc[ExportLease]], first: u64, end: u64)
@@ -10140,7 +10272,14 @@ fn cut_io_error(mut db: Db, take problem: Error) -> Error {
     }
 }
 
-fn disk_cut_state(mut db: Db, take delta: HolderDelta) -> Result[Ticket, Error] waits {
+type PreparedDiskCut {
+    pages: PageDisk,
+    removals: DiskRemovals,
+    manifest: Bytes
+}
+
+fn disk_cut_state(mut db: Db, take delta: HolderDelta,
+    seal: scoped fn(mut Bytes, DiskContext, u32) -> Result[(), Error] waits) -> Result[Ticket, Error] waits {
     healthy(db)?
     db.since_cut = 0
     let last = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq))
@@ -10166,25 +10305,34 @@ fn disk_cut_state(mut db: Db, take delta: HolderDelta) -> Result[Ticket, Error] 
     let cap = match target { Some(wanted) => wanted.pack, None => db.disk[0u64].options.pack_bytes }
     let d = db.disk[0u64].d
     let mut next_stamp = stamp_after(db.next_node)?
-    let attempt = write_page_cut_with_relocation(d, id, base, holders, db.disk[0u64].pages.lists,
-        db.disk[0u64].pages.carried, db.disk[0u64].pages.next_pack, cap, mut next_stamp)
+    let attempt = {
+        let installed = view db.disk[0u64].pages
+        let prev_first = match installed.deferred { Some(low) => low, None => db.disk[0u64].record_cut }
+        prepare_page_cut(base.locations, mut next_stamp,
+            scoped fn(marks: Map[u64, ()], relocated: Option[View[Log[bool]]], mut stamp: u64) -> Result[PreparedDiskCut, Error] waits {
+                let written = write_page_cut(d, id, base, holders, installed.lists, installed.carried,
+                    installed.next_pack, cap, marks, relocated, mut stamp)?
+                let WrittenPageCut(layout: take layout, buffers: take reserved) = take written
+                let PackBuffers(out: take out, ..) = take reserved
+                let mut manifest = take out
+                let (take pages, take removals) = disk_allocation(scoped fn() -> Result[(PageDisk, DiskRemovals), Error] {
+                    cut_retirement(layout, holders, db.disk[0u64].lease, prev_first, seq)
+                })?
+                fill_cut_manifest(mut manifest, db, delta, generation, seq, prev_first, layout, stamp, base.account, seal)?
+                Ok(PreparedDiskCut(pages: take pages, removals: take removals, manifest: take manifest))
+            })
+    }
     db.next_node = next_stamp - 1
-    let written = match take attempt {
+    let prepared = match take attempt {
         Ok(take cut) => take cut,
         Error(take problem) => return Error(cut_io_error(mut db, take problem)),
     }
-    let WrittenPageCut(layout: take layout, buffers: take reserved) = take written
-    let mut buffers = take reserved
-    let prev_first = match db.disk[0u64].pages.deferred { Some(low) => low, None => db.disk[0u64].record_cut }
-    let (take pages, take removals) = disk_allocation(scoped fn() -> Result[(PageDisk, DiskRemovals), Error] {
-        cut_retirement(layout, holders, db.disk[0u64].lease, prev_first, seq)
-    })?
+    let PreparedDiskCut(pages: take pages, removals: take removals, manifest: take manifest) = take prepared
     // The records name exactly the frames reachable from the participants
     // and the two list roots, so their running charge is the AP15 report.
     let resident_pages = resident_location_charge(pages.locations)
-    fill_cut_manifest(mut buffers.out, db, delta, generation, seq, prev_first, layout, next_stamp, base.account)?
-    if let Some(wanted) = target { validate_new_page_manifest(d, id, buffers.out, wanted)? }
-    if let Error(take problem) = publish_page_manifest_bytes(d, buffers.out) {
+    if let Some(wanted) = target { validate_new_page_manifest(d, id, manifest, wanted)? }
+    if let Error(take problem) = publish_page_manifest_bytes(d, manifest) {
         return Error(cut_io_error(mut db, take problem))
     }
 
@@ -10218,13 +10366,11 @@ fn disk_close_connection(take connection: DiskConnection) -> Result[(), Error] w
 // parent b at 2, and adopt(c) still Diverged. Wrong implementations caught: a
 // COMMIT that names main (replay puts k5 on main); a cut that writes only
 // main (b and c are lost, and b's frame is a Gap).
-// I4 on disk: law_pin_settle's figures, with the limit raised by 128 for the
-// frame in flight. One put's COMMIT is over 34 and under 128 bytes, so 510
-// plus it passes 544 and 416 plus it does not. Each settle is a cut that
-// rotates the segment, so the frame is encoded again for the new one. The
-// last value survives reopen, and open's exact account is 322. Wrong
-// implementation caught: a frame kept with the old segment's binding, which
-// reopen drops as a torn tail.
+// I4 on disk: law_pin_settle's 448 and 542 byte figures also alternate at a
+// 544 byte limit. Each settle is a cut that rotates the segment, so the
+// staged frame needs the new binding. Reopen recovers the last value and an
+// exact account of 448. With the old binding, reopen drops the frame as a
+// torn tail.
 pub fn disk_law_branches(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
     let mut options = defaults()
 
@@ -10271,7 +10417,7 @@ pub fn disk_law_branches(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wait
     for step in 0u64 .. 20 {
         let committed = result.unwrap(run(mut sdb, None, fn(mut tx: Tx) -> Result[(), Error] { put(mut tx, st, 1, step + 2) }))
         match take committed { Committed(done) => result.unwrap(durable(mut sdb, done.ticket)), _ => return false }
-        if sdb.resident != (if step == 0 { 448u64 } else { 542u64 }) { return false }
+        if sdb.resident != (if step % 2 == 0 { 448u64 } else { 542u64 }) { return false }
     }
     result.unwrap(close(take sdb))
     let settled_open = result.unwrap(open(tasks, settle_dir, c, r, options))
@@ -10849,6 +10995,46 @@ fn law_resident_scan(db: Db) -> bool {
     accounts(db).resident == int.saturating_add(images, location_storage_charge(db.disk[0u64].pages.locations))
 }
 
+fn law_empty_collection_pages() -> Result[List[Arc[std.page.Page]], Error] {
+    let mut tree = new_page_tree(CollectionMap, 1024)
+    let mut stamps = 1u64
+    for id in 1u32 .. 5 {
+        define_collection(mut tree, id, 1, 1, mut stamps)?
+        put_page_row(mut tree, logical_key(id, key_word(1))?, string.as_bytes("x"), 1, mut stamps)?
+    }
+    define_collection(mut tree, 5, 1, 1, mut stamps)?
+    bulk_collection(mut tree, 6, 1, list.new(), 1, mut stamps)?
+    for id in 1u32 .. 5 {
+        if !remove_page_row(mut tree, logical_key(id, key_word(1))?, 1, mut stamps)? {
+            return Error(Foreign)
+        }
+    }
+    let mut children: List[Arc[std.page.Page]] = list.with_capacity(6)
+    for id in 1u32 .. 7 {
+        let Some((page, descriptor)) = std.page.collection_entry(tree.root, prefix(id)?) else { return Error(Foreign) }
+        let image = std.page.image_of(page)
+        if std.page.stamp(image) != 0 || std.page.count(image) != 0 ||
+            list.slice(descriptor, 0, 36) != std.page.encode_ptr(std.page.unlocated(0)) {
+            return Error(Foreign)
+        }
+        list.push(mut children, arc.share(page))
+    }
+    Ok(take children)
+}
+
+fn law_empty_collection_resident() -> bool {
+    let mut pages = result.unwrap(law_empty_collection_pages())
+    let mut resident = 0u64
+    // The fixture has dropped the map. Only the last handle to each distinct
+    // allocation unwraps, so its image capacity contributes exactly once.
+    while let Some(take page) = list.pop(mut pages) {
+        let image_capacity = list.capacity(std.page.payload(std.page.image_of(page)))
+        if let Ok(_) = arc.try_unwrap(take page) { resident += image_capacity }
+    }
+    // AP3's 24-byte header is the whole image of AP2's shared empty page.
+    resident == 24
+}
+
 fn law_resident_text(state: u64) -> String {
     // Values of 1,500 bytes are over the 1,024-byte inline threshold.
     let width = if (state >> 40) % 4 == 0 { 1500u64 } else { 1 + (state >> 44) % 48 }
@@ -10869,6 +11055,7 @@ fn law_resident_name(lead: String, slot: u64) -> String {
 // relocation that charges a moved frame again, and an open whose seed
 // disagrees with the pages a journal replay replaced.
 pub fn disk_law_resident_charge(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    if !law_empty_collection_resident() { return false }
     let mut options = defaults()
     options.resident_limit = 16777216
     options.pack_bytes = 512
@@ -11759,12 +11946,6 @@ fn journal_test_payload() -> Result[(), ()] {
     if journal_law_payload() { Ok(()) } else { Error(()) }
 }
 
-type JournalSegment {
-    end: u64,
-    wire_bytes: u64,
-    events: List[JournalEvent]
-}
-
 fn journal_torn(why: Why) -> bool {
     match why {
         Truncated => true,
@@ -11774,37 +11955,6 @@ fn journal_torn(why: Why) -> bool {
         Kind(0) => true,
         _ => false,
     }
-}
-
-// Middle segments stop at the next HEADER's prev_end. Only the last segment
-// reads beyond its durable boundary, stopping at the first physically bad frame.
-fn journal_segment(file: String, id: StoreId, seq: u64, raw: Bytes, boundary: Option[u64], last: bool) -> Result[JournalSegment, Error] {
-    let header = disk_read_header(file, raw, 2, Some(seq), Some(id))?
-    let durable_end = match boundary { Some(d) => d, None => 72u64 }
-    if durable_end < 72 || durable_end > list.len(raw) { return Error(disk_fault(file, list.len(raw), Truncated)) }
-    let stop = if last { list.len(raw) } else { durable_end }
-    let mut at = 72u64
-    let mut wire_bytes = 0u64
-    let mut events: List[JournalEvent] = list.new()
-    while at < stop {
-        let read_frame = disk_read_frame(file, header.context, raw, at)
-        let frame = match take read_frame {
-            Ok(f) => f,
-            Error(Corrupt(take fault)) => {
-                if !last || at < durable_end || !journal_torn(fault.why) { return Error(Corrupt(take fault)) }
-                break
-            },
-            Error(take e) => return Error(take e)
-        }
-        if at < durable_end && frame.end > durable_end { return Error(disk_fault(file, at, Truncated)) }
-        if journal_event_kind(frame.kind) {
-            let payload = list.slice(raw, frame.payload, frame.end)
-            list.push(mut events, journal_decode(file, frame.kind, payload)?)
-            wire_bytes += frame.end - at
-        }
-        at = frame.end
-    }
-    Ok(JournalSegment(end: at, wire_bytes: wire_bytes, events: take events))
 }
 
 type JournalInput {
@@ -11889,6 +12039,8 @@ fn disk_stream_payload(mut input: JournalInput, path: String, context: DiskConte
     Ok(take payload)
 }
 
+// Middle segments stop at the next HEADER's prev_end. Only the last segment
+// reads beyond its durable boundary, stopping at the first physically bad frame.
 fn journal_scan[S](mut input: JournalInput, path: String, id: StoreId, seq: u64, boundary: Option[u64], last: bool,
     mut destination: S, consume: scoped fn(mut S, take JournalEvent) -> Result[(), Error]) -> Result[(u64, u64), Error] waits {
     let header = disk_read_header(path, journal_prefix(mut input, path, 0, 72)?, 2, Some(seq), Some(id))?
@@ -11934,10 +12086,25 @@ fn journal_empty_commit(ctx: DiskContext, offset: u64, head: u64) -> Bytes {
     result.unwrap(disk_seal(ctx, offset, 0x0011, 1, payload))
 }
 
-// L3/L10/L11/L12: the durable boundary is an independently calculated offset,
-// never the decoder's returned end. Every truncation of the second42-byte frame
-// is a valid torn last tail when d=114, and corruption when d=156.
-pub fn journal_law_segment() -> bool {
+fn journal_scan_fixture(d: Dir, id: StoreId, raw: Bytes, boundary: Option[u64], last: bool) -> Result[(u64, u64, List[JournalEvent]), Error] waits {
+    disk_write_synced(d, "j-7", raw)?
+    let mut input = journal_input(disk_io(host.open(d, "j-7", Read))?, false)?
+    let mut events: List[JournalEvent] = list.new()
+    let scanned = journal_scan(mut input, "j-7", id, 7, boundary, last, mut events,
+        scoped fn(mut observed: List[JournalEvent], take event: JournalEvent) -> Result[(), Error] {
+            list.push(mut observed, take event)
+            Ok(())
+        })
+    let JournalInput(file: take opened_file, ..) = take input
+    disk_io(host.close(take opened_file))?
+    let (end, accepted) = scanned?
+    Ok((end, accepted, take events))
+}
+
+// L3/L10/L11/L12: the fixture's two COMMIT frames are 42 bytes each.
+// Every short prefix of the second frame is a torn tail at d=114
+// and corruption at d=156.
+fn journal_law_segment_boundaries(d: Dir) -> bool waits {
     let id = StoreId(hi: 1, lo: 2)
     let ctx = DiskContext(store: id, role: 2, seq: 7)
     let header = result.unwrap(disk_header_bytes(ctx, 0))
@@ -11947,51 +12114,56 @@ pub fn journal_law_segment() -> bool {
     list.append(mut raw, first)
     list.append(mut raw, second)
     if list.len(raw) != 156 { return false }
-    let got = result.unwrap(journal_segment("j-7", id, 7, raw, Some(114), true))
-    if got.end != 156 || list.len(got.events) != 2 { return false }
-    let (Commit(left), Commit(right)) = (got.events[0], got.events[1]) else { return false }
+    let (end, accepted, take events) = result.unwrap(journal_scan_fixture(d, id, raw, Some(114), true))
+    if end != 156 || accepted != 84 || list.len(events) != 2 { return false }
+    let (Commit(left), Commit(right)) = (events[0], events[1]) else { return false }
     if left.version != 1 || right.version != 2 { return false }
-    let middle = result.unwrap(journal_segment("j-7", id, 7, raw, Some(114), false))
-    if middle.end != 114 || list.len(middle.events) != 1 { return false }
+    let (middle_end, middle_bytes, take middle) = result.unwrap(journal_scan_fixture(d, id, raw, Some(114), false))
+    if middle_end != 114 || middle_bytes != 42 || list.len(middle) != 1 { return false }
     for n in 114u64 .. 156 {
         let tail = list.slice(raw, 0, n)
-        let partial = result.unwrap(journal_segment("j-7", id, 7, tail, Some(114), true))
-        if partial.end != 114 || list.len(partial.events) != 1 { return false }
-        if !disk_corrupt(journal_segment("j-7", id, 7, tail, Some(156), true)) { return false }
+        let (partial_end, partial_bytes, take partial) = result.unwrap(journal_scan_fixture(d, id, tail, Some(114), true))
+        if partial_end != 114 || partial_bytes != 42 || list.len(partial) != 1 { return false }
+        if !disk_corrupt(journal_scan_fixture(d, id, tail, Some(156), true)) { return false }
     }
     for n in 72u64 .. 114 {
         let mut broken = result.unwrap(copied(raw))
         let changed = broken[n] ^ 1u8
         let _ = list.set(mut broken, n, changed)
-        if !disk_corrupt(journal_segment("j-7", id, 7, broken, Some(114), true)) { return false }
-        let torn = result.unwrap(journal_segment("j-7", id, 7, broken, None, true))
-        if torn.end != 72 || list.len(torn.events) != 0 { return false }
+        if !disk_corrupt(journal_scan_fixture(d, id, broken, Some(114), true)) { return false }
+        let (torn_end, torn_bytes, take torn) = result.unwrap(journal_scan_fixture(d, id, broken, None, true))
+        if torn_end != 72 || torn_bytes != 0 || list.len(torn) != 0 { return false }
     }
-    if !disk_corrupt(journal_segment("j-7", id, 7, raw, Some(115), true)) { return false }
+    if !disk_corrupt(journal_scan_fixture(d, id, raw, Some(115), true)) { return false }
     let empty: Bytes = list.new()
     let optional = result.unwrap(disk_seal(ctx, 72, 0x7ffe, 0, empty))
     let shifted = journal_empty_commit(ctx, 88, 1)
     let mut extended = result.unwrap(copied(header))
     list.append(mut extended, optional)
     list.append(mut extended, shifted)
-    let future = result.unwrap(journal_segment("j-7", id, 7, extended, None, true))
-    if future.end != 130 || list.len(future.events) != 1 { return false }
+    let (future_end, future_bytes, take future) = result.unwrap(journal_scan_fixture(d, id, extended, None, true))
+    if future_end != 130 || future_bytes != 42 || list.len(future) != 1 { return false }
     let required = result.unwrap(disk_seal(ctx, 156, 0x0040, 1, empty))
     list.append(mut raw, required)
-    match journal_segment("j-7", id, 7, raw, Some(114), true) {
+    match journal_scan_fixture(d, id, raw, Some(114), true) {
         Error(Unsupported(0x0040)) => true,
         _ => false
     }
 }
 
-@test
-fn journal_test_segment() -> Result[(), ()] {
-    if journal_law_segment() { Ok(()) } else { Error(()) }
+fn journal_law_segment_fork(d: Dir) -> bool waits {
+    let id = StoreId(hi: 1, lo: 2)
+    let ctx = DiskContext(store: id, role: 2, seq: 7)
+    let mut raw = result.unwrap(disk_header_bytes(ctx, 0))
+    list.append(mut raw, journal_empty_commit(ctx, 72, 64))
+    list.append(mut raw, fork_frame_bytes())
+    let (end, accepted, take events) = result.unwrap(journal_scan_fixture(d, id, raw, Some(152), true))
+    if end != 152 || accepted != 80 || list.len(events) != 2 { return false }
+    let (Commit(previous), Fork(read_fork)) = (events[0], events[1]) else { return false }
+    previous.version == 64 && fork_frame_fields(read_fork)
 }
 
-@test
-fn journal_test_chunked_segment(d: Dir) -> Result[(), ()] waits {
-    let child = disk_test_directory(d)
+fn journal_law_chunked_segment(d: Dir) -> bool waits {
     let id = StoreId(hi: 1, lo: 2)
     let context = DiskContext(store: id, role: 2, seq: 7)
     let mut raw = result.unwrap(disk_header_bytes(context, 0))
@@ -12020,20 +12192,20 @@ fn journal_test_chunked_segment(d: Dir) -> Result[(), ()] waits {
     result.unwrap(le(mut raw, 65536, 4))
     list.fill(mut raw, 65536, 17u8)
     list.fill(mut raw, 11, 0u8)
-    result.unwrap(disk_write_synced(child, "j-7", raw))
-    let mut input = result.unwrap(journal_input(result.unwrap(host.open(child, "j-7", Read)), false))
-    let mut versions: List[u64] = list.new()
-    let (valid_end, accepted) = result.unwrap(journal_scan(mut input, "j-7", id, 7, Some(131223), true, mut versions,
-        scoped fn(mut observed: List[u64], take event: JournalEvent) -> Result[(), Error] {
-            if let Commit(commit) = event { list.push(mut observed, commit.version) }
-            Ok(())
-        }))
-    let JournalInput(file: take opened_file, ..) = take input
-    result.unwrap(host.close(take opened_file))
-    if valid_end != 131223 || accepted != 65599 || list.len(versions) != 1 || versions[0] != 1 {
-        return Error(())
-    }
-    Ok(())
+    let (end, accepted, take events) = result.unwrap(journal_scan_fixture(d, id, raw, Some(131223), true))
+    if end != 131223 || accepted != 65599 || list.len(events) != 1 { return false }
+    let Commit(commit) = events[0] else { return false }
+    commit.version == 1
+}
+
+pub fn journal_law_segment(d: Dir) -> bool waits {
+    let child = disk_test_directory(d)
+    journal_law_segment_boundaries(child) && journal_law_segment_fork(child) && journal_law_chunked_segment(child)
+}
+
+@test
+fn journal_test_segment(d: Dir) -> Result[(), ()] waits {
+    if journal_law_segment(d) { Ok(()) } else { Error(()) }
 }
 
 type JournalReplay {
@@ -14215,11 +14387,9 @@ pub fn journal_law_streams(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
     let kept = match take aborted { Aborted(Undone(value: 5, ticket: Some(t))) => t, _ => return false }
     match result.unwrap(recorded(db, b, db.heads[0].head)) { Some(call) => if call.record.stream != s { return false }, None => return false }
     if let Some(_) = get_page_row(db.heads[0].roots.collections, result.unwrap(logical_key(1, key_word(2)))) { return false }
-    // I4 with a pin: main's data leaf holds keys 1 and 9, so the pinned leaf
-    // and main's copy cost four rows exactly. Three overwrites of key 9
-    // charge five, one row over. With nothing in flight, a ceiling one below
-    // this commit's figure sends it through the settle cut, which removes
-    // that row, and it is admitted.
+    // I4 with a pin: three overwrites of key 9 leave obsolete charges.
+    // Set the ceiling one byte below the conservative draft to force a
+    // settle and verify that the rebound data-and-reply frame replays.
     if !put_run(mut db, 9, 1) { return false }
     let held = snapshot(db)
     let _ = result.unwrap(pin(mut db, "p", held))
@@ -14234,10 +14404,11 @@ pub fn journal_law_streams(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
         Over(_) => return false
     }
     let ceiling = db.ceiling
+    let cut = db.checkpointed
     db.ceiling = figure - 1
     let settled = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), u64] { settle_body(mut tx, s) }))
     match take settled { Committed(_) => {}, _ => return false }
-    if db.settled + 1 != db.changes { return false }
+    if !accounts(db).exact || db.checkpointed != cut + 1 { return false }
     db.ceiling = ceiling
     let committed_at = db.heads[0].head
     result.unwrap(close(take db))
@@ -14952,6 +15123,7 @@ fn reserve_settles_pin(c: Clock, rows: u64, plan: Plan) -> bool waits {
     db.ceiling = db.resident
     let unsettled = db.changes
     if db.settled == unsettled { return false }
+    let cut = db.checkpointed
     let Some(grant) = call_reserves(plan) else { return false }
     let ci = next_call_info(db)
     let no_record: Option[CallRecord] = None
@@ -14966,7 +15138,7 @@ fn reserve_settles_pin(c: Clock, rows: u64, plan: Plan) -> bool waits {
     match serve(mut db, take complete, plan, None, fn(mut tx: Tx) -> Result[Bytes, Bytes] {
         Ok(key_word(7))
     }) {
-        Ok(Committed(receipt)) => receipt.reply == key_word(7) && db.settled == unsettled,
+        Ok(Committed(receipt)) => receipt.reply == key_word(7) && accounts(db).exact && db.checkpointed == cut + 1,
         _ => false,
     }
 }

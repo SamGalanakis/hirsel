@@ -21,7 +21,7 @@ pub type Domain: key = Collection | CollectionMap | Unprefixed
 
 pub type Error: key = MalformedPage | UnsupportedPage | OutOfOrder | PageLimit | StampLimit
 
-pub type Edit: key = Changed | AbsentKey | Shared | Split
+type Edit: key = Changed | Shrunk | Split
 
 pub type PagePtr: key {
     pack: u64,
@@ -508,6 +508,60 @@ pub fn separator(left: Bytes, right: Bytes) -> Result[Bytes, Error] {
     Ok(clone(list.slice(right, 0, common_prefix(left, right) + 1)))
 }
 
+// The `width` (at most eight) bytes ending at `end` as a big-endian word with
+// zero bytes after them; `end` is at least eight. Two runs of at most eight bytes
+// order as these words do, and on equal words as their widths do.
+fn head_word(b: Bytes, end: u64, width: u64) -> u64 {
+    if width == 0 {
+        return 0
+    }
+    let w: u64 = list.word_be(b, end - 8)
+    int.wrapping_shl(w, int.narrow(64 - 8 * width))
+}
+
+// The first `width` (one to eight) bytes of `b`, which has at least eight, as
+// `head_word` lays them out.
+fn lead_word(b: Bytes, width: u64) -> u64 {
+    let w: u64 = list.word_be(b, 0)
+    let gone = 64 - 8 * width
+    (w >> gone) << gone
+}
+
+// `search`'s bisection over slots [first, n) when key[p, len(key)) has at most
+// eight bytes and the key at least eight: the suffix is compared as one word.
+fn search_word(raw: Bytes, start: u64, first: u64, n: u64, key: Bytes, p: u64) -> (u64, bool) {
+    let key_width = list.len(key)
+    let tail = key_width - p
+    let word = head_word(key, key_width, tail)
+    let mut lo = first
+    let mut hi = n
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2
+        let at = u16_at(raw, start + 2 * mid)
+        let width = u16_at(raw, at)
+        let probe = if width <= 8 {
+            let cell = head_word(raw, at + 2 + width, width)
+            if cell != word {
+                order.compare(cell, word)
+            } else {
+                order.compare(width, tail)
+            }
+        } else {
+            list.compare_bytes(list.slice(raw, at + 2, at + 2 + width), list.slice(key, p, key_width))
+        }
+        match probe {
+            Less => {
+                lo = mid + 1
+            },
+            Greater => {
+                hi = mid
+            },
+            Equal => return (mid, true),
+        }
+    }
+    (lo, false)
+}
+
 /// In a leaf, the first slot at or above key and whether it equals key.
 pub fn search(image: Image, key: Bytes) -> (u64, bool) {
     let n = count(image)
@@ -519,7 +573,12 @@ pub fn search(image: Image, key: Bytes) -> (u64, bool) {
     let key_width = list.len(key)
     let common = order.min(p, key_width)
     if common != 0 {
-        match list.compare_bytes(list.slice(image.raw, HEADER, HEADER + common), list.slice(key, 0, common)) {
+        let head = if common <= 8 && key_width >= 8 {
+            order.compare(head_word(image.raw, HEADER + common, common), lead_word(key, common))
+        } else {
+            list.compare_bytes(list.slice(image.raw, HEADER, HEADER + common), list.slice(key, 0, common))
+        }
+        match head {
             Less => return (n, false),
             Greater => return (first, false),
             Equal => (),
@@ -528,8 +587,12 @@ pub fn search(image: Image, key: Bytes) -> (u64, bool) {
     if key_width < p {
         return (first, false)
     }
-    let suffix = list.slice(key, p, key_width)
     let start = list.len(image.raw) - 2 * n
+    let tail = key_width - p
+    if tail <= 8 && key_width >= 8 {
+        return search_word(image.raw, start, first, n, key, p)
+    }
+    let suffix = list.slice(key, p, key_width)
     let mut lo = first
     let mut hi = n
     while lo < hi {
@@ -1178,7 +1241,8 @@ fn private_put(mut page: Page, incoming: Entry, kid: Option[Arc[Page]], blob: Op
     }
     let has_prefix = list.len(incoming.key) >= p && list.compare_bytes(list.slice(incoming.key, 0, p), list.slice(page.image.raw, HEADER, HEADER + p)) == Equal
     let full = full_size(incoming) - 2
-    let needed = heap + full - order.min(p, full) + 2 * total
+    let width = full - order.min(p, full)
+    let needed = heap + width + 2 * total
     let packed = needed - dead - old_size
     let replacement = if !has_prefix || needed > PRIVATE_MAX || !legal(lvl, total, packed) {
         match repack(page.image, incoming, slot, hit, body_index) {
@@ -1220,21 +1284,14 @@ fn private_put(mut page: Page, incoming: Entry, kid: Option[Arc[Page]], blob: Op
         },
     }
     changed_totals(mut page, old_rows, old_charge, rows, charge)
-    Ok(Changed)
+    Ok(if width < old_size {
+        Shrunk
+    } else {
+        Changed
+    })
 }
 
-/// Upsert into a private page. Split asks the caller to split the logical
-/// entries with the incoming entry included. The Arc is unchanged on Split.
-pub fn put(mut holder: Arc[Page], row: Entry, kid: Option[Arc[Page]], blob: Option[Arc[Bytes]]) -> Result[Edit, Error] {
-    match arc.with_unique(mut holder, scoped fn(mut page: Page) -> Result[Edit, Error] {
-        private_put(mut page, row, kid, blob)
-    }) {
-        Some(answer) => answer,
-        None => Ok(Shared),
-    }
-}
-
-fn private_delete(mut page: Page, key: Bytes) -> Edit {
+fn private_delete(mut page: Page, key: Bytes) {
     let lvl = level(page.image)
     let n = count(page.image)
     let (slot, hit) = if lvl != 0 && list.len(key) == 0 {
@@ -1243,7 +1300,7 @@ fn private_delete(mut page: Page, key: Bytes) -> Edit {
         search(page.image, key)
     }
     if !hit {
-        return AbsentKey
+        return ()
     }
     let (old_rows, old_charge) = stored_totals(page.image, slot)
     let mut dead = u16_at(page.image.raw, 6) + entry_size(page.image, slot)
@@ -1263,7 +1320,7 @@ fn private_delete(mut page: Page, key: Bytes) -> Edit {
         put32(mut page.image.raw, 16, HEADER)
         page.rows = 0
         page.charge = 0
-        return Changed
+        return ()
     }
     if lvl != 0 && slot == 0 {
         let at = entry_at(page.image, 1)
@@ -1282,18 +1339,6 @@ fn private_delete(mut page: Page, key: Bytes) -> Edit {
     put16(mut page.image.raw, 2, n - 1)
     put16(mut page.image.raw, 6, dead)
     changed_totals(mut page, old_rows, old_charge, 0, 0)
-    Changed
-}
-
-/// Delete by key under the Arc's uniqueness check. In a branch the empty key
-/// selects child zero, and its successor takes the empty separator.
-pub fn delete(mut holder: Arc[Page], key: Bytes) -> Edit {
-    match arc.with_unique(mut holder, scoped fn(mut page: Page) -> Edit {
-        private_delete(mut page, key)
-    }) {
-        Some(answer) => answer,
-        None => Shared,
-    }
 }
 
 type Built: shareable + send {
@@ -1818,11 +1863,26 @@ fn refresh_child(mut page: Page, slot: u64) {
     changed_totals(mut page, old_rows, old_charge, rows, charge)
 }
 
-fn replace_children(page: Page, slot: u64, parts: List[Arc[Page]], mut next: u64) -> Result[List[Arc[Page]], Error] {
-    let leading_key = option.unwrap(key_at(page.image, slot))
-    let mut edited = owned_slots(page)
-    edited[slot] = branch_slot(take leading_key, parts[0])
+// Puts the pieces that replace the child at slot into the private page itself
+// while they fit, and rebuilds the page into pieces only when one does not.
+fn adopt_children(mut page: Page, slot: u64, parts: List[Arc[Page]], mut next: u64) -> Result[Option[List[Arc[Page]]], Error] {
+    let _ = list.set(mut page.kids, slot, arc.share(parts[0]))
+    refresh_child(mut page, slot)
     for i in 1u64 .. list.len(parts) {
+        let divider = separator(extreme_key(parts[i - 1], true), extreme_key(parts[i], false))?
+        let row = branch_slot(take divider, parts[i])
+        if private_put(mut page, row.row, row.kid, None)? == Split {
+            return Ok(Some(replace_children(page, slot, parts, i, mut next)?))
+        }
+    }
+    Ok(None)
+}
+
+// The page already holds parts[0] at slot and the dividers of parts[1..from];
+// the rebuilt pieces add the rest.
+fn replace_children(page: Page, slot: u64, parts: List[Arc[Page]], from: u64, mut next: u64) -> Result[List[Arc[Page]], Error] {
+    let mut edited = owned_slots(page)
+    for i in from .. list.len(parts) {
         let divider = separator(extreme_key(parts[i - 1], true), extreme_key(parts[i], false))?
         open_slot(mut edited, slot + i, branch_slot(take divider, parts[i]))
     }
@@ -1887,26 +1947,40 @@ fn split_insert(page: Page, incoming: PageSlot, mut next: u64) -> Result[List[Ar
     Ok(take parts)
 }
 
-fn insert_private(mut page: Page, incoming: PageSlot, private_from: u64, mut next: u64) -> Result[Option[List[Arc[Page]]], Error] {
+// The boolean tracks a decrease in this page's sealed size. Child totals alone
+// do not change a branch's size, so only a rebuilt branch can pass it upward.
+fn insert_private(mut page: Page, incoming: PageSlot, private_from: u64, mut next: u64) -> Result[(Option[List[Arc[Page]]], bool), Error] {
     let Some(slot) = descend(page.image, incoming.row.key) else {
         let edit = private_put(mut page, incoming.row, incoming.kid, incoming.blob)?
         if edit == Split {
-            return Ok(Some(split_insert(page, incoming, mut next)?))
+            return Ok((Some(split_insert(page, incoming, mut next)?), false))
         }
-        return Ok(None)
+        return Ok((None, edit == Shrunk))
     }
-    let split = insert_path(mut page.kids[slot], incoming, private_from, mut next)?
-    if let Some(parts) = split {
-        return Ok(Some(replace_children(page, slot, parts, mut next)?))
+    let (take revised, shrank) = insert_path(mut page.kids[slot], incoming, private_from, mut next)?
+    if let Some(parts) = view revised {
+        if !shrank {
+            return Ok((adopt_children(mut page, slot, parts, mut next)?, false))
+        }
+        page.kids[slot] = arc.share(parts[0])
     }
-    refresh_child(mut page, slot)
-    Ok(None)
+    if !shrank {
+        refresh_child(mut page, slot)
+        return Ok((None, false))
+    }
+    let rebuilt = rebalance_child(mut page, slot, mut next)?
+    let smaller = if let Some(parts) = view rebuilt {
+        list.len(parts) == 1 && sealed_size(parts[0].image) < sealed_size(page.image)
+    } else {
+        false
+    }
+    Ok((take rebuilt, smaller))
 }
 
-fn insert_path(mut root: Arc[Page], incoming: PageSlot, private_from: u64, mut next: u64) -> Result[Option[List[Arc[Page]]], Error] {
+fn insert_path(mut root: Arc[Page], incoming: PageSlot, private_from: u64, mut next: u64) -> Result[(Option[List[Arc[Page]]], bool), Error] {
     let prior = stamp(root.image)
     if prior != 0 && prior >= private_from {
-        let update = arc.with_unique(mut root, scoped fn(mut page: Page) -> Result[Option[List[Arc[Page]]], Error] {
+        let update = arc.with_unique(mut root, scoped fn(mut page: Page) -> Result[(Option[List[Arc[Page]]], bool), Error] {
             stamp_replay_edit(mut page, private_from, mut next)?
             insert_private(mut page, incoming, private_from, mut next)
         })
@@ -1915,7 +1989,7 @@ fn insert_path(mut root: Arc[Page], incoming: PageSlot, private_from: u64, mut n
         }
     }
     root = copy_with_stamp(root, take_stamp(mut next)?)
-    option.unwrap(arc.with_unique(mut root, scoped fn(mut page: Page) -> Result[Option[List[Arc[Page]]], Error] {
+    option.unwrap(arc.with_unique(mut root, scoped fn(mut page: Page) -> Result[(Option[List[Arc[Page]]], bool), Error] {
         insert_private(mut page, incoming, private_from, mut next)
     }))
 }
@@ -1926,12 +2000,11 @@ fn rebalance_child(mut page: Page, slot: u64, mut next: u64) -> Result[Option[Li
     let siblings = count(page.image)
     if n == 0 {
         let top_key = option.unwrap(key_at(page.image, slot))
-        let _ = private_delete(mut page, top_key)
+        private_delete(mut page, top_key)
         return Ok(None)
     }
     let unary = lvl != 0 && n == 1
-    let local = owned_slots(page.kids[slot])
-    if siblings == 1 || (!unary && section_size(local, lvl, 0, n) >= TARGET / 4) {
+    if siblings == 1 || (!unary && sealed_size(page.kids[slot].image) >= TARGET / 4) {
         refresh_child(mut page, slot)
         return Ok(None)
     }
@@ -1984,7 +2057,7 @@ fn rebalance_child(mut page: Page, slot: u64, mut next: u64) -> Result[Option[Li
 
 fn remove_private(mut page: Page, key: Bytes, private_from: u64, mut next: u64) -> Result[Option[List[Arc[Page]]], Error] {
     let Some(slot) = descend(page.image, key) else {
-        let _ = private_delete(mut page, key)
+        private_delete(mut page, key)
         return Ok(None)
     }
     let revised = remove_path(mut page.kids[slot], key, private_from, mut next)?
@@ -1993,7 +2066,7 @@ fn remove_private(mut page: Page, key: Bytes, private_from: u64, mut next: u64) 
             page.kids[slot] = arc.share(parts[0])
             return rebalance_child(mut page, slot, mut next)
         }
-        return Ok(Some(replace_children(page, slot, parts, mut next)?))
+        return adopt_children(mut page, slot, parts, mut next)
     }
     rebalance_child(mut page, slot, mut next)
 }
@@ -2031,6 +2104,16 @@ fn finish_split(mut root: Arc[Page], parts: List[Arc[Page]], mut next: u64) -> R
 
 /// Delete one row, rebalancing its path and collapsing a unary root.
 pub fn remove(mut root: Arc[Page], key: Bytes, private_from: u64, mut next: u64) -> Result[bool, Error] {
+    remove_to(mut root, key, None, private_from, mut next)
+}
+
+/// Delete one row, using the caller's stamp-zero empty leaf of the same domain
+/// if the root becomes empty.
+pub fn remove_with_empty(mut root: Arc[Page], key: Bytes, empty_root: Arc[Page], private_from: u64, mut next: u64) -> Result[bool, Error] {
+    remove_to(mut root, key, Some(view empty_root), private_from, mut next)
+}
+
+fn remove_to(mut root: Arc[Page], key: Bytes, empty_root: Option[View[Arc[Page]]], private_from: u64, mut next: u64) -> Result[bool, Error] {
     let present = match lookup(root, key) {
         Some(_) => true,
         None => false
@@ -2042,7 +2125,10 @@ pub fn remove(mut root: Arc[Page], key: Bytes, private_from: u64, mut next: u64)
         finish_split(mut root, parts, mut next)?
     }
     if count(root.image) == 0 {
-        root = empty(0, 0, root.image.domain)
+        root = match empty_root {
+            Some(shared) => arc.share(shared),
+            None => empty(0, 0, root.image.domain),
+        }
     } else if count(root.image) == 1 && level(root.image) != 0 {
         root = arc.share(root.kids[0u64])
     }
@@ -2077,8 +2163,12 @@ fn insert_value(mut root: Arc[Page], key: Bytes, value: Bytes, shared: Option[Vi
         }
         PageSlot(row: Entry(key: clone(key), cell: BlobValue(edge)), kid: None, blob: Some(take shared_body))
     }
-    if let Some(parts) = insert_path(mut root, incoming, private_from, mut next)? {
+    let (take revised, _) = insert_path(mut root, incoming, private_from, mut next)?
+    if let Some(parts) = view revised {
         finish_split(mut root, parts, mut next)?
+        if level(root.image) != 0 && count(root.image) == 1 {
+            root = arc.share(root.kids[0u64])
+        }
     }
     Ok(())
 }
@@ -2129,7 +2219,7 @@ pub fn edit_collection(mut root: Arc[Page], key: Bytes, private_from: u64, mut n
     }))
 }
 
-fn put_inline_leaf(mut page: Page, key: Bytes, data: Bytes, id: u64) -> Result[bool, Capacity] {
+fn put_inline_leaf(mut page: Page, key: Bytes, data: Bytes, id: u64, has_sibling: bool) -> Result[bool, Capacity] {
     let (slot, hit) = search(page.image, key)
     let p = u16_at(page.image.raw, 4)
     let key_width = list.len(key)
@@ -2150,6 +2240,9 @@ fn put_inline_leaf(mut page: Page, key: Bytes, data: Bytes, id: u64) -> Result[b
             list.copy_from_slice(mut page.image.raw, value + 3, data)
             list.set_word_le(mut page.image.raw, 8, id)
             return Ok(true)
+        }
+        if has_sibling && value_width < previous && sealed_size(page.image) - previous + value_width < TARGET / 4 {
+            return Ok(false)
         }
         (value - at + 3 + previous, 1u64, row_charge(key_width + (if page.image.domain == Collection {
             4u64
@@ -2193,7 +2286,7 @@ fn put_inline_leaf(mut page: Page, key: Bytes, data: Bytes, id: u64) -> Result[b
     Ok(true)
 }
 
-fn put_inline_path(mut root: Arc[Page], collection: Bytes, key: Bytes, data: Bytes, mut next: u64) -> Result[bool, Capacity] {
+fn put_inline_path(mut root: Arc[Page], collection: Bytes, key: Bytes, data: Bytes, mut next: u64, has_sibling: bool) -> Result[bool, Capacity] {
     let edited = arc.with_unique(mut root, scoped fn(mut page: Page) -> Result[bool, Capacity] {
         // Issue the path's stamps in the same root-first order as a copy.
         let id = next
@@ -2205,18 +2298,18 @@ fn put_inline_path(mut root: Arc[Page], collection: Bytes, key: Bytes, data: Byt
             view key
         }
         if let Some(slot) = descend(page.image, page_key) {
-            if !put_inline_path(mut page.kids[slot], collection, key, data, mut next)? {
+            if !put_inline_path(mut page.kids[slot], collection, key, data, mut next, count(page.image) > 1)? {
                 return Ok(false)
             }
             refresh_child(mut page, slot)
         } else if map_page {
             let (slot, hit) = search(page.image, collection)
-            if !hit || !put_inline_path(mut page.kids[slot], collection, key, data, mut next)? {
+            if !hit || !put_inline_path(mut page.kids[slot], collection, key, data, mut next, false)? {
                 return Ok(false)
             }
             refresh_collection(mut page, slot)
         } else {
-            return put_inline_leaf(mut page, key, data, id)
+            return put_inline_leaf(mut page, key, data, id, has_sibling)
         }
         list.set_word_le(mut page.image.raw, 8, id)
         Ok(true)
@@ -2228,13 +2321,13 @@ fn put_inline_path(mut root: Arc[Page], collection: Bytes, key: Bytes, data: Byt
 }
 
 /// Apply an inline write after the writer's checks, holding the full path
-/// unique. A split, repack or shared path leaves the tree untouched.
+/// unique. A split, repack, possible merge or shared path leaves the tree untouched.
 pub fn put_inline_unique(mut root: Arc[Page], collection: Bytes, key: Bytes, data: Bytes, inline: u64, first: u64) -> Result[bool, Capacity] {
     if list.len(data) > inline || first == 0 || first > 18446744073709551103u64 {
         return Ok(false)
     }
     let mut next = first
-    put_inline_path(mut root, collection, key, data, mut next)
+    put_inline_path(mut root, collection, key, data, mut next, false)
 }
 
 /// Install a prepared tree without allocating. Reuse the Arc of each

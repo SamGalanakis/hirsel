@@ -365,11 +365,7 @@ fn a_body_record_reads_back_only_whole() {
     expected.extend(prefix_check.to_le_bytes());
     expected.extend(twox_hash::XxHash3_64::oneshot(ir).to_le_bytes());
     expected.extend(address.0);
-    let framed = Store::frame_body(head, |b| {
-        b.extend_from_slice(ir);
-        Ok(())
-    })
-    .unwrap();
+    let framed = Store::frame_body(head, ir);
     assert_eq!(framed, (address, ir_hash, expected.clone()));
     let read = |bytes: &[u8]| {
         std::fs::write(store.path(address), bytes).unwrap();
@@ -818,6 +814,11 @@ fn damaged_disk_results_recompute() {
         .check(request(source, dir.path()), &mut Meter::new(false))
         .unwrap();
     let store = Store::new(&dir.path().join("store")).unwrap();
+    // The body record is the result; its key pointer would answer a damaged
+    // index root alone.
+    let index = check_index::ProgramIndex::open(&store).unwrap();
+    let record = index.rows().next().unwrap().1.body;
+    std::fs::write(store.path(record), b"damaged").unwrap();
     std::fs::write(store.path(first.root), b"damaged").unwrap();
     let disk = Driver::default()
         .check(request(source, dir.path()), &mut Meter::new(false))
@@ -2508,6 +2509,8 @@ fn damaged_and_foreign_records_rebuild_the_fresh_publication() {
         "missing root",
         "missing body",
         "zero-filled selection",
+        "missing root, torn key pointer",
+        "missing root, key pointer to another path's record",
     ] {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("store");
@@ -2524,12 +2527,15 @@ fn damaged_and_foreign_records_rebuild_the_fresh_publication() {
         let store = Store::new(&path).unwrap();
         let index = check_index::ProgramIndex::open(&store).unwrap();
         let body = |p: &DefPath| store.path(index.live(p).unwrap().1);
-        let mut leaf_rows = vec![];
+        let pointer = |p: &DefPath| check_index::key_pointer(p, index.live(p).unwrap().0).unwrap();
+        // A row the index no longer yields is found by its key pointer, which
+        // names a record whose own path and key are checked: damage to the
+        // index alone rechecks nothing (README, d3428ec4).
         let expect: Vec<&str> = match case {
             "torn root" => {
                 let bytes = std::fs::read(store.path(base.root)).unwrap();
                 std::fs::write(store.path(base.root), &bytes[..bytes.len() / 2]).unwrap();
-                names(&fresh)
+                vec![]
             }
             "torn body" => {
                 let bytes = std::fs::read(body(&dispatch)).unwrap();
@@ -2556,14 +2562,12 @@ fn damaged_and_foreign_records_rebuild_the_fresh_publication() {
                 let bytes = std::fs::read(&leaf).unwrap();
                 let payload = &bytes[12..bytes.len() - 48];
                 let mut rows: Vec<(DefPath, check_index::Row)> = decode(&payload[4..]).unwrap();
-                leaf_rows = rows.iter().map(|r| r.0.0.name.clone()).collect();
-                leaf_rows.sort_unstable();
                 rows.retain(|r| r.0 != dispatch);
                 let mut cut = payload[..4].to_vec();
                 cut.extend(encode(&rows).unwrap());
                 std::fs::write(&leaf, under_old_address(&bytes, &cut)).unwrap();
-                // Every row below a damaged node is a miss.
-                leaf_rows.iter().map(String::as_str).collect()
+                // Every row below a damaged node misses the index.
+                vec![]
             }
             "swapped body records" => {
                 std::fs::copy(body(&main), body(&dispatch)).unwrap();
@@ -2590,14 +2594,14 @@ fn damaged_and_foreign_records_rebuild_the_fresh_publication() {
                 };
                 std::fs::write(&file, vec![0; len]).unwrap();
                 if case.ends_with("root") {
-                    names(&fresh)
+                    vec![]
                 } else {
                     vec!["dispatch"]
                 }
             }
             "missing root" => {
                 std::fs::remove_file(store.path(base.root)).unwrap();
-                names(&fresh)
+                vec![]
             }
             "missing body" => {
                 std::fs::remove_file(body(&dispatch)).unwrap();
@@ -2605,7 +2609,22 @@ fn damaged_and_foreign_records_rebuild_the_fresh_publication() {
             }
             "zero-filled selection" => {
                 std::fs::write(path.join(check_index::SELECTION), [0; 40]).unwrap();
-                names(&fresh)
+                vec![]
+            }
+            "missing root, torn key pointer" => {
+                let file = store.path(pointer(&dispatch));
+                let bytes = std::fs::read(&file).unwrap();
+                std::fs::write(&file, &bytes[..bytes.len() / 2]).unwrap();
+                std::fs::remove_file(store.path(base.root)).unwrap();
+                vec!["dispatch"]
+            }
+            // A well-formed pointer must still name the record of its own path.
+            "missing root, key pointer to another path's record" => {
+                store
+                    .put_keyed(pointer(&dispatch), &index.live(&main).unwrap().1.0)
+                    .unwrap();
+                std::fs::remove_file(store.path(base.root)).unwrap();
+                vec!["dispatch"]
             }
             // Valid body records referenced in each other's places: a body
             // record must name the path and key of the row that cites it.
@@ -2639,6 +2658,22 @@ fn damaged_and_foreign_records_rebuild_the_fresh_publication() {
             published(&path),
             published(&fresh_dir.path().join("store")),
             "{case}"
+        );
+        // Key pointers answer a damaged index, so the repair is the index
+        // itself: it reads back every row of the fresh publication.
+        let repaired = check_index::ProgramIndex::open(&Store::new(&path).unwrap()).unwrap();
+        let fresh_index =
+            check_index::ProgramIndex::open(&Store::new(&fresh_dir.path().join("store")).unwrap())
+                .unwrap();
+        let rows = |index: &check_index::ProgramIndex| {
+            let mut rows: Vec<_> = index.rows().map(|(p, r)| (p.clone(), *r)).collect();
+            rows.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+            rows
+        };
+        assert_eq!(
+            rows(&repaired),
+            rows(&fresh_index),
+            "{case}: the rebuild repaired the index"
         );
         let again = Driver::default()
             .check(

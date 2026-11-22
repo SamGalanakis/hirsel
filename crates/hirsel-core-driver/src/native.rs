@@ -2628,6 +2628,12 @@ fn f5 = n5 g5 extern
             &Command::new(refused.executable).output().unwrap(),
             "not started: grant `other` is not in the run's configuration\n",
         );
+        // The entries below take no parameters, and a grant without a
+        // matching parameter is refused, so they run with no grants.
+        options.grant_mask = 0;
+        options.env_patterns = None;
+        options.net_rules.clear();
+        options.directories.clear();
         // A declared record crosses result and view-argument ABIs between units.
         // Its u64 field has padding before it, so reading it at byte 1 is wrong.
         options.optimize = matches!(backend, Backend::Llvm);

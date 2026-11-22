@@ -375,6 +375,7 @@ tags!(RtOp {
     62 => MapStrongWord,
     63 => MapStrongBytes,
     64 => MapStrongStart,
+    65 => ReceiveRec { item },
 });
 
 tags!(Wait {
@@ -470,6 +471,7 @@ tags!(HostOp {
     113 => DatagramSendTo,
     114 => DatagramRecv,
     115 => NetNarrowUnix,
+    116 => SleepUntilWall,
 });
 
 tags!(RaiseCause {

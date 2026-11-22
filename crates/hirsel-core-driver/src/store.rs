@@ -16,6 +16,7 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use twox_hash::XxHash3_64;
 
@@ -490,13 +491,10 @@ impl Store {
         hirsel_core_front::cost_scope!("non-check", "archive write and digest");
         ContentHash::of_parts(IR, [ir])
     }
-    /// A body record: `head`, then the IR `fill` appends in place. Returns
+    /// A body record: `head`, then the encoded IR `ir`. Returns
     /// its address, the IR's hash and the envelope.
-    pub(crate) fn frame_body(
-        head: &[u8],
-        fill: impl FnOnce(&mut Vec<u8>) -> io::Result<()>,
-    ) -> io::Result<(ContentHash, ContentHash, Vec<u8>)> {
-        let mut bytes = Vec::with_capacity(BODY_HEADER + head.len() + 32 + 64 + BODY_TRAILER);
+    pub(crate) fn frame_body(head: &[u8], ir: &[u8]) -> (ContentHash, ContentHash, Vec<u8>) {
+        let mut bytes = Vec::with_capacity(BODY_HEADER + head.len() + 32 + ir.len() + BODY_TRAILER);
         bytes.extend_from_slice(BODY_MAGIC);
         bytes.extend_from_slice(&VERSION.to_le_bytes());
         bytes.extend_from_slice(&(head.len() as u64).to_le_bytes());
@@ -505,7 +503,7 @@ impl Store {
         let hash_at = bytes.len();
         bytes.extend_from_slice(&[0; 32]);
         let ir_at = bytes.len();
-        fill(&mut bytes)?;
+        bytes.extend_from_slice(ir);
         let ir_hash = Self::ir_hash(&bytes[ir_at..]);
         let ir_len = (bytes.len() - ir_at) as u64;
         bytes[20..28].copy_from_slice(&ir_len.to_le_bytes());
@@ -517,7 +515,7 @@ impl Store {
             bytes.extend_from_slice(&check.to_le_bytes());
         }
         bytes.extend_from_slice(&address.0);
-        Ok((address, ir_hash, bytes))
+        (address, ir_hash, bytes)
     }
     /// A body record read back under its address. Nothing escapes until both
     /// its checksums check; a short, long, foreign or damaged file is `None`.
@@ -643,8 +641,25 @@ impl Store {
         Ok(())
     }
     pub fn get(&self, key: ContentHash) -> io::Result<Option<Vec<u8>>> {
+        let Some((mut bytes, end)) = self.checked(key)? else {
+            return Ok(None);
+        };
+        bytes.truncate(end);
+        bytes.drain(..HEADER);
+        Ok(Some(bytes))
+    }
+    /// A record's payload in one shared copy, never moved within its read
+    /// buffer first.
+    pub(crate) fn get_shared(&self, key: ContentHash) -> io::Result<Option<Arc<[u8]>>> {
+        Ok(self
+            .checked(key)?
+            .map(|(bytes, end)| Arc::from(&bytes[HEADER..end])))
+    }
+    /// A framed record's bytes when they pass their check, and where its
+    /// payload ends.
+    fn checked(&self, key: ContentHash) -> io::Result<Option<(Vec<u8>, usize)>> {
         let image = crate::meter::ImageRead::start(self.image);
-        let Some(mut bytes) = self.read_whole(key, image.as_ref())? else {
+        let Some(bytes) = self.read_whole(key, image.as_ref())? else {
             return Ok(None);
         };
         let size = bytes.len();
@@ -663,9 +678,7 @@ impl Store {
         {
             return Ok(None);
         }
-        bytes.drain(..HEADER);
-        bytes.truncate(end - HEADER);
-        Ok(Some(bytes))
+        Ok(Some((bytes, end)))
     }
     /// A bare object's bytes when they pass their check, with the descriptor
     /// they were read and checked through.

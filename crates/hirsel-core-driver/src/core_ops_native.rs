@@ -6,26 +6,27 @@ fn core_operations(backend: Backend) {
     let cases = [
         (
             "channel FIFO and sender clone",
-            "fn end(take tx: Sender[u64]) {}\nfn run() -> u64 waits { let c: Result[(Sender[u64], Receiver[u64]), Capacity] = channel.new(2); let (tx,rx) = result.unwrap(take c); let other = channel.sender(tx); result.unwrap(channel.send(tx,7u64)); result.unwrap(channel.send(other,11u64)); let a = result.unwrap(channel.receive(rx)); let b = result.unwrap(channel.receive(rx)); end(take tx); end(take other); match channel.receive(rx) { Ok(_) => 0u64, Error(Closed(())) => a*100u64+b } }\npub fn main() -> Result[(), Exit] { task.check_cancel(); if run()==711u64 { Ok(()) } else { Error(Exit(status:1)) } }",
+            "fn end(take tx: Sender[u64]) {}\nfn run() -> u64 waits { let (tx,rx): (Sender[u64], Receiver[u64]) = channel.new(2); let other = channel.sender(tx); result.unwrap(channel.send(tx,7u64)); result.unwrap(channel.send(other,11u64)); let a = result.unwrap(channel.receive(rx)); let b = result.unwrap(channel.receive(rx)); end(take tx); end(take other); match channel.receive(rx) { Ok(_) => 0u64, Error(Closed(())) => a*100u64+b } }\npub fn main() -> Result[(), Exit] { task.check_cancel(); if run()==711u64 { Ok(()) } else { Error(Exit(status:1)) } }",
             1_048_576,
             0,
         ),
         (
             "channel Full and Closed keep input",
-            "fn end(take rx: Receiver[u64]) {}\nfn run() -> u64 waits { let c: Result[(Sender[u64], Receiver[u64]), Capacity] = channel.new(1); let (tx,rx) = result.unwrap(take c); result.unwrap(channel.try_send(tx,7u64)); let a = match channel.try_send(tx,11u64) { Ok(()) => 0u64, Error(Full(x)) => x, Error(Closed(_)) => 1u64 }; end(take rx); let b = match channel.try_send(tx,13u64) { Ok(()) => 0u64, Error(Full(_)) => 1u64, Error(Closed(x)) => x }; let z = match channel.send(tx,17u64) { Ok(()) => 0u64, Error(Closed(x)) => x }; a*10000u64+b*100u64+z }\npub fn main() -> Result[(), Exit] { if run()==111317u64 { Ok(()) } else { Error(Exit(status:1)) } }",
+            "fn end(take rx: Receiver[u64]) {}\nfn run() -> u64 waits { let (tx,rx): (Sender[u64], Receiver[u64]) = channel.new(1); result.unwrap(channel.try_send(tx,7u64)); let a = match channel.try_send(tx,11u64) { Ok(()) => 0u64, Error(Full(x)) => x, Error(Closed(_)) => 1u64 }; end(take rx); let b = match channel.try_send(tx,13u64) { Ok(()) => 0u64, Error(Full(_)) => 1u64, Error(Closed(x)) => x }; let z = match channel.send(tx,17u64) { Ok(()) => 0u64, Error(Closed(x)) => x }; a*10000u64+b*100u64+z }\npub fn main() -> Result[(), Exit] { if run()==111317u64 { Ok(()) } else { Error(Exit(status:1)) } }",
             1_048_576,
             0,
         ),
-        // Main's 288 startup bytes leave 60. A two-u64 channel needs 80.
+        // Main's 288 startup bytes and isolate's 32-byte cause cell (MEM-24) leave 60.
+        // A two-u64 channel needs 80.
         (
             "channel Capacity",
-            "pub fn main() -> Result[(), Exit] { let c: Result[(Sender[u64], Receiver[u64]), Capacity] = channel.new(2); match take c { Ok(_) => Error(Exit(status:1)), Error(e) => if e.requested==80u64 && e.available==60u64 { Ok(()) } else { Error(Exit(status:2)) } } }",
-            348,
+            "pub fn main() -> Result[(), Exit] { let attempt = isolate(fn() { let (tx,rx): (Sender[u64], Receiver[u64]) = channel.new(2); let _ = take tx; let _ = take rx; }); let Ok(Error(take causes)) = take attempt else { return Error(Exit(status:1)) }; for c in causes { return match c.kind { Capacity(k) => if k.requested==80u64 && k.available==60u64 { Ok(()) } else { Error(Exit(status:2)) }, _ => Error(Exit(status:3)) } }; Error(Exit(status:4)) }",
+            380,
             0,
         ),
         (
             "channel zero Bounds",
-            "pub fn main() -> Result[(), Exit] { let c: Result[(Sender[u64], Receiver[u64]), Capacity] = channel.new(0); let _ = take c; Ok(()) }",
+            "pub fn main() -> Result[(), Exit] { let (tx,rx): (Sender[u64], Receiver[u64]) = channel.new(0); let _ = take tx; let _ = take rx; Ok(()) }",
             1_048_576,
             101,
         ),
@@ -50,7 +51,7 @@ fn core_operations(backend: Backend) {
         // Main's 288 leaves 359. 256+32+8+64 = 360, input 41 comes back.
         (
             "spawn Capacity returns X",
-            "fn child(take x:u64) -> u64 { x }\npub fn main(tasks:Tasks) -> Result[(), Exit] { let c = task.spawn(tasks,bytes 64,41u64,child); match take c { Ok(_) => Error(Exit(status:1)), Error((e,x)) => if e.requested==360u64 && e.available==359u64 && x==41u64 { Ok(()) } else { Error(Exit(status:2)) } } }",
+            "fn child(take x:u64) -> u64 { x }\npub fn main(tasks:Tasks) -> Result[(), Exit] { let c = task.try_spawn(tasks,bytes 64,41u64,child); match take c { Ok(_) => Error(Exit(status:1)), Error((e,x)) => if e.requested==360u64 && e.available==359u64 && x==41u64 { Ok(()) } else { Error(Exit(status:2)) } } }",
             647,
             0,
         ),
@@ -82,7 +83,7 @@ fn core_operations(backend: Backend) {
         let polls = "task.check_cancel(); ".repeat(64);
         cases.push((
             name,
-            format!("fn child(take x:u64) -> u64 {{ x }}\nfn room() -> u64 {{ let c: Result[(Sender[u64], Receiver[u64]), Capacity] = channel.new(18446744073709551615u64); match take c {{ Ok(_) => 0u64, Error(e) => e.available }} }}\npub fn main(tasks:Tasks) -> Result[(), Exit] {{ let a = arc.new(7u64); let h = task.spawn(tasks,bytes 64,41u64,child); {polls}{share}let first = room(); let second = room(); let _ = result.unwrap(task.join(take h)); if second - first == {expected}u64 {{ Ok(()) }} else {{ Error(Exit(status:1)) }} }}"),
+            format!("fn child(take x:u64) -> u64 {{ x }}\nfn room() -> u64 {{ let attempt = isolate(fn() {{ let (tx,rx): (Sender[u64], Receiver[u64]) = channel.new(18446744073709551615u64); let _ = take tx; let _ = take rx; }}); let Ok(Error(take causes)) = take attempt else {{ return 0u64 }}; for c in causes {{ return match c.kind {{ Capacity(k) => k.available, _ => 0u64 }} }}; 0u64 }}\npub fn main(tasks:Tasks) -> Result[(), Exit] {{ let a = arc.new(7u64); let h = task.spawn(tasks,bytes 64,41u64,child); {polls}{share}let first = room(); let second = room(); let _ = result.unwrap(task.join(take h)); if second - first == {expected}u64 {{ Ok(()) }} else {{ Error(Exit(status:1)) }} }}"),
             1_048_576,
             0,
         ));
@@ -163,18 +164,21 @@ fn core_operations_llvm() {
 
 fn counted_operations(backend: Backend) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    // Each isolate first admits its 32-byte cause cell (MEM-24, FAIL-16), so a
+    // Capacity case's room is the refused admission's available bytes plus 32.
+    const SEEN: &str = "fn seen(take attempt: Result[Result[u64, Causes], Capacity]) -> u64 { let Ok(Error(take causes)) = take attempt else { return 0u64 }; for c in causes { return match c.kind { Capacity(k) => k.requested*10000u64+k.available*100u64, _ => 1u64 } }; 2u64 }\n";
     let mut vectors = vec![
         ("fn run() -> u64 { box.unbox(box.new(7u64)) }".to_owned(), 8, 7),
         ("fn run() -> u64 { box.unbox(box.new(())); 7u64 }".to_owned(), 0, 7),
-        ("fn run() -> u64 { let r = box.new(7u64); match take r { Ok(_) => 0u64, Error((e,x)) => e.requested+e.available+x } }".to_owned(), 7, 22),
-        ("fn run() -> u64 { let r = bound bytes 0 { box.new(7u64) }; match take r { Ok(Error((e,x))) => e.requested+x, _ => 0u64 } }".to_owned(), 1000, 15),
-        ("resource type R:send { a:u64,b:u64 }\nfn run() -> u64 { let c:Result[(Sender[R],Receiver[R]),Capacity] = channel.new(1); match take c { Ok(_) => 0u64, Error(e) => e.requested+e.available } }".to_owned(), 71, 143),
-        ("resource type R:send { a:u64,b:u64 }\nfn run() -> u64 { let r = result.unwrap(R(a:7u64,b:11u64)); let c = box.new(take r); match take c { Ok(_) => 0u64, Error((e,take back)) => e.requested*10000u64+e.available*100u64+back.a+back.b } }".to_owned(), 55, 80718),
+        (format!("{SEEN}fn run() -> u64 {{ seen(isolate(fn() -> u64 {{ box.unbox(box.new(7u64)) }})) }}"), 7 + 32, 80700),
+        (format!("{SEEN}fn run() -> u64 {{ seen(isolate(fn() -> u64 {{ match (bound bytes 0 {{ box.unbox(box.new(7u64)) }}) {{ Ok(v) => v, Error(_) => 3u64 }} }})) }}"), 1000, 80000),
+        (format!("resource type R:send {{ a:u64,b:u64 }}\n{SEEN}fn run() -> u64 {{ seen(isolate(fn() -> u64 {{ let (tx,rx): (Sender[R], Receiver[R]) = channel.new(1); let _ = take tx; let _ = take rx; 0u64 }})) }}"), 71 + 32, 727100),
+        (format!("resource type R:send {{ a:u64,b:u64 }}\n{SEEN}fn run() -> u64 {{ seen(isolate(fn() -> u64 {{ let r = result.unwrap(R(a:7u64,b:11u64)); let b = box.new(take r); let R(a:x,b:y) = box.unbox(take b); x+y }})) }}"), 55 + 32, 80700),
     ];
     for (module, ty) in [("rc", "Rc"), ("arc", "Arc")] {
-        vectors.push((format!("fn end(take h:{ty}[u64]) {{}}\nfn run() -> u64 {{ let h = result.unwrap({module}.new(7u64)); let other = {module}.share(h); let last = match {module}.try_unwrap(take h) {{ Ok(_) => return 0u64, Error(take back) => back }}; end(take other); result.unwrap({module}.try_unwrap(take last)) }}"),16,7));
-        vectors.push((format!("type Data:shareable+send {{ a:u8,b:Box[u64] }}\nfn run() -> u64 {{ let b = box.new(41u64); let data = Data(a:7u8,b:take b); let r = {module}.new(take data); match take r {{ Ok(_) => 0u64, Error((e,take back)) => {{ let Data(a:_,b:take boxed) = take back; let v = box.unbox(take boxed); e.requested*10000u64+e.available*100u64+v }} }} }}"),31,242341));
-        vectors.push((format!("fn run() -> u64 {{ let b = box.new(41u64); let h = result.unwrap({module}.new(take b)); let b = result.unwrap({module}.try_unwrap(take h)); box.unbox(take b) }}").replacen("let b = result.unwrap", "let first = result.unwrap", 1).replacen("new(take b)", "new(take first)", 1),24,41));
+        vectors.push((format!("fn end(take h:{ty}[u64]) {{}}\nfn run() -> u64 {{ let h = {module}.new(7u64); let other = {module}.share(h); let last = match {module}.try_unwrap(take h) {{ Ok(_) => return 0u64, Error(take back) => back }}; end(take other); result.unwrap({module}.try_unwrap(take last)) }}"),16,7));
+        vectors.push((format!("type Data:shareable+send {{ a:u8,b:Box[u64] }}\n{SEEN}fn run() -> u64 {{ seen(isolate(fn() -> u64 {{ let b = box.new(41u64); let data = Data(a:7u8,b:take b); let h = {module}.new(take data); let _ = take h; 0u64 }})) }}"),31 + 32,242300));
+        vectors.push((format!("fn run() -> u64 {{ let b = box.new(41u64); let h = {module}.new(take b); let first = result.unwrap({module}.try_unwrap(take h)); box.unbox(take first) }}"),24,41));
     }
     let mut failures = vec![];
     for (source, room, expected) in vectors {
@@ -989,18 +993,20 @@ fn packed_private_variants_llvm() {
 }
 fn generic_runtime_operations(backend: Backend) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let make =
-        "fn make[T:send](n:u64) -> Result[(Sender[T],Receiver[T]),Capacity] { channel.new(n) }";
-    let launch = "fn launch[X:send,R:send](tasks:Tasks,bytes n:u64,take x:X,f:fn(take X)->R) -> Result[Task[R],(Capacity,X)] { task.spawn(tasks,bytes n,take x,f) }";
+    let make = "fn make[T:send](n:u64) -> (Sender[T],Receiver[T]) { channel.new(n) }";
+    // Each isolate first admits its 32-byte cause cell (MEM-24, FAIL-16), so a
+    // Capacity case's room is the refused admission's available bytes plus 32.
+    let cap = "fn cap(take a: Result[Result[(), Causes], Capacity], requested:u64, available:u64) -> Result[(),Exit] { let Ok(Error(take causes)) = take a else { return Error(Exit(status:1)) }; for c in causes { return match c.kind { Capacity(k) => if k.requested==requested && k.available==available { Ok(()) } else { Error(Exit(status:2)) }, _ => Error(Exit(status:3)) } }; Error(Exit(status:4)) }";
+    let launch = "fn launch[X:send,R:send](tasks:Tasks,bytes n:u64,take x:X,f:fn(take X)->R) -> Result[Task[R],(Capacity,X)] { task.try_spawn(tasks,bytes n,take x,f) }";
     let vectors = [
-        (format!("{make}\npub fn main()->Result[(),Exit] {{ let c:Result[(Sender[()],Receiver[()]),Capacity]=make(1); let _=result.unwrap(take c); Ok(()) }}"),64,0),
+        (format!("{make}\npub fn main()->Result[(),Exit] {{ let (tx,rx):(Sender[()],Receiver[()])=make(1); let _=take tx; let _=take rx; Ok(()) }}"),64,0),
         // P is logically 9 bytes and physically 16.
-        (format!("{make}\ntype P:send {{a:u8,b:u64}}\npub fn main()->Result[(),Exit] {{ let c:Result[(Sender[P],Receiver[P]),Capacity]=make(2); match take c {{ Ok(_) => Error(Exit(status:1)), Error(e) => if e.requested==82u64 && e.available==81u64 {{ Ok(()) }} else {{ Error(Exit(status:2)) }} }} }}"),81,0),
+        (format!("{make}\n{cap}\ntype P:send {{a:u8,b:u64}}\npub fn main()->Result[(),Exit] {{ cap(isolate(fn() {{ let (tx,rx):(Sender[P],Receiver[P])=make(2); let _=take tx; let _=take rx; }}),82u64,81u64) }}"),81 + 32,0),
         // A resource holder is 8, independent of its 16-byte resource block.
-        (format!("{make}\nresource type R:send {{a:u64,b:u64}}\npub fn main()->Result[(),Exit] {{ let c:Result[(Sender[R],Receiver[R]),Capacity]=make(1); match take c {{ Ok(_) => Error(Exit(status:1)), Error(e) => if e.requested==72u64 && e.available==71u64 {{ Ok(()) }} else {{ Error(Exit(status:2)) }} }} }}"),71,0),
-        (format!("{make}\npub fn main()->Result[(),Exit] {{ let c:Result[(Sender[u64],Receiver[u64]),Capacity]=make(18446744073709551615u64); match take c {{ Ok(_) => Error(Exit(status:1)), Error(e) => if e.requested==18446744073709551615u64 && e.available==1000u64 {{ Ok(()) }} else {{ Error(Exit(status:2)) }} }} }}"),1000,0),
-        ("type P:send {a:u8,b:u64}\nfn transfer[T:send](take x:T)->T waits { let c:Result[(Sender[T],Receiver[T]),Capacity]=channel.new(1); let (tx,rx)=result.unwrap(take c); result.unwrap(channel.send(tx,take x)); result.unwrap(channel.receive(rx)) }\npub fn main()->Result[(),Exit] { let p=transfer(P(a:7u8,b:11u64)); if p.a==7u8 && p.b==11u64 { Ok(()) } else { Error(Exit(status:1)) } }".to_owned(),1000,0),
-        ("resource type R:send {a:u64,b:u64}\nfn transfer[T:send](take x:T)->T waits { let c:Result[(Sender[T],Receiver[T]),Capacity]=channel.new(1); let (tx,rx)=result.unwrap(take c); result.unwrap(channel.send(tx,take x)); result.unwrap(channel.receive(rx)) }\npub fn main()->Result[(),Exit] { let r=result.unwrap(R(a:7u64,b:11u64)); let p=transfer(take r); if p.a==7u64 && p.b==11u64 { Ok(()) } else { Error(Exit(status:1)) } }".to_owned(),1000,0),
+        (format!("{make}\n{cap}\nresource type R:send {{a:u64,b:u64}}\npub fn main()->Result[(),Exit] {{ cap(isolate(fn() {{ let (tx,rx):(Sender[R],Receiver[R])=make(1); let _=take tx; let _=take rx; }}),72u64,71u64) }}"),71 + 32,0),
+        (format!("{make}\n{cap}\npub fn main()->Result[(),Exit] {{ cap(isolate(fn() {{ let (tx,rx):(Sender[u64],Receiver[u64])=make(18446744073709551615u64); let _=take tx; let _=take rx; }}),18446744073709551615u64,1000u64) }}"),1000 + 32,0),
+        ("type P:send {a:u8,b:u64}\nfn transfer[T:send](take x:T)->T waits { let (tx,rx):(Sender[T],Receiver[T])=channel.new(1); result.unwrap(channel.send(tx,take x)); result.unwrap(channel.receive(rx)) }\npub fn main()->Result[(),Exit] { let p=transfer(P(a:7u8,b:11u64)); if p.a==7u8 && p.b==11u64 { Ok(()) } else { Error(Exit(status:1)) } }".to_owned(),1000,0),
+        ("resource type R:send {a:u64,b:u64}\nfn transfer[T:send](take x:T)->T waits { let (tx,rx):(Sender[T],Receiver[T])=channel.new(1); result.unwrap(channel.send(tx,take x)); result.unwrap(channel.receive(rx)) }\npub fn main()->Result[(),Exit] { let r=result.unwrap(R(a:7u64,b:11u64)); let p=transfer(take r); if p.a==7u64 && p.b==11u64 { Ok(()) } else { Error(Exit(status:1)) } }".to_owned(),1000,0),
         (format!("{launch}\ntype P:send {{a:u8,b:u64}}\nfn child(take x:u64)->P {{P(a:7u8,b:x)}}\npub fn main(tasks:Tasks)->Result[(),Exit] {{ let c=launch(tasks,bytes 64,41u64,child); match take c {{ Ok(_) => Error(Exit(status:1)), Error((e,x)) => if e.requested==361u64 && e.available==360u64 && x==41u64 {{ Ok(()) }} else {{ Error(Exit(status:2)) }} }} }}"),360,1<<9),
         (format!("{launch}\ntype P:send {{a:u8,b:u64}}\nfn child(take x:u64)->P {{P(a:7u8,b:x)}}\npub fn main(tasks:Tasks)->Result[(),Exit] {{ let h=result.unwrap(launch(tasks,bytes 64,41u64,child)); let p=result.unwrap(task.join(take h)); if p.a==7u8 && p.b==41u64 {{ Ok(()) }} else {{ Error(Exit(status:1)) }} }}"),1000,1<<9),
     ];
@@ -1049,41 +1055,44 @@ fn generic_runtime_operations_llvm() {
 
 fn generic_counted_operations(backend: Backend) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let boxing = "fn boxed[T](take x:T)->Result[Box[T],(Capacity,T)] {box.new(take x)}\nfn unboxed[T](take x:Box[T])->T {box.unbox(take x)}";
+    let boxing = "fn boxed[T](take x:T)->Box[T] {box.new(take x)}\nfn unboxed[T](take x:Box[T])->T {box.unbox(take x)}";
+    // Each isolate first admits its 32-byte cause cell (MEM-24, FAIL-16), so a
+    // Capacity case's room is the refused admission's available bytes plus 32.
+    let seen = "fn seen(take attempt: Result[Result[u64, Causes], Capacity]) -> u64 { let Ok(Error(take causes)) = take attempt else { return 0u64 }; for c in causes { return match c.kind { Capacity(k) => k.requested*10000u64+k.available*100u64, _ => 1u64 } }; 2u64 }";
     let mut vectors = vec![
         (
-            format!("{boxing}\nfn run()->u64 {{unboxed(result.unwrap(boxed(())));7u64}}"),
+            format!("{boxing}\nfn run()->u64 {{unboxed(boxed(()));7u64}}"),
             0,
             7,
         ),
         (
             format!(
-                "{boxing}\nfn run()->u64 {{let s=unboxed(result.unwrap(boxed(\"abc\")));string.byte_len(s)}}"
+                "{boxing}\nfn run()->u64 {{let s=unboxed(boxed(\"abc\"));string.byte_len(s)}}"
             ),
             24,
             3,
         ),
         (
             format!(
-                "{boxing}\ntype P {{a:u8,b:u32,c:u8}}\nfn run()->u64 {{ let c=boxed(P(a:7u8,b:11u32,c:13u8));match take c {{Ok(_) => 0u64,Error((e,p)) => e.requested*10000u64+e.available*100u64+int.widen(p.a)+int.widen(p.b)+int.widen(p.c)}} }}"
+                "{boxing}\n{seen}\ntype P {{a:u8,b:u32,c:u8}}\nfn run()->u64 {{ seen(isolate(fn() -> u64 {{ let p=unboxed(boxed(P(a:7u8,b:11u32,c:13u8)));let va:u64=int.widen(p.a);va }})) }}"
             ),
-            7,
-            80731,
+            7 + 32,
+            80700,
         ),
         (
             format!(
-                "{boxing}\nresource type R:send {{a:u64,b:u64}}\nfn run()->u64 {{ let r=result.unwrap(R(a:7u64,b:11u64));let c=boxed(take r);match take c {{Ok(_) => 0u64,Error((e,take back)) => e.requested*10000u64+e.available*100u64+back.a+back.b}} }}"
+                "{boxing}\n{seen}\nresource type R:send {{a:u64,b:u64}}\nfn run()->u64 {{ seen(isolate(fn() -> u64 {{ let r=result.unwrap(R(a:7u64,b:11u64));let R(a:x,b:y)=unboxed(boxed(take r));x+y }})) }}"
             ),
-            55,
-            80718,
+            55 + 32,
+            80700,
         ),
     ];
     for (module, ty, bounds) in [("rc", "Rc", "shareable"), ("arc", "Arc", "shareable+send")] {
         let helpers = format!(
-            "fn new_owner[T:{bounds}](take x:T)->Result[{ty}[T],(Capacity,T)] {{{module}.new(take x)}}\nfn share_owner[T:{bounds}](x:{ty}[T])->{ty}[T] {{{module}.share(x)}}\nfn unwrap_owner[T:{bounds}](take x:{ty}[T])->Result[T,{ty}[T]] {{{module}.try_unwrap(take x)}}\nfn end[T:{bounds}](take x:{ty}[T]) {{}}"
+            "fn new_owner[T:{bounds}](take x:T)->{ty}[T] {{{module}.new(take x)}}\nfn share_owner[T:{bounds}](x:{ty}[T])->{ty}[T] {{{module}.share(x)}}\nfn unwrap_owner[T:{bounds}](take x:{ty}[T])->Result[T,{ty}[T]] {{{module}.try_unwrap(take x)}}\nfn end[T:{bounds}](take x:{ty}[T]) {{}}"
         );
-        vectors.push((format!("{helpers}\ntype P:shareable+send {{a:u8,b:u32,c:u8}}\nfn run()->u64 {{ let h=result.unwrap(new_owner(P(a:7u8,b:11u32,c:13u8)));let other=share_owner(h);let h2=match unwrap_owner(take h) {{Ok(_) => return 0u64,Error(take back) => back}};end(take other);let p=result.unwrap(unwrap_owner(take h2));let va:u64=int.widen(p.a);let vb:u64=int.widen(p.b);let vc:u64=int.widen(p.c);va+vb+vc }}"),16,31));
-        vectors.push((format!("{helpers}\ntype P:shareable+send {{a:u8,b:Box[u64]}}\nfn run()->u64 {{ let b=box.new(41u64);let c=new_owner(P(a:7u8,b:take b));match take c {{Ok(_) => 0u64,Error((e,take back)) => {{let P(a:_,b:take b2)=take back;e.requested*10000u64+e.available*100u64+box.unbox(take b2)}}}} }}"),31,242341));
+        vectors.push((format!("{helpers}\ntype P:shareable+send {{a:u8,b:u32,c:u8}}\nfn run()->u64 {{ let h=new_owner(P(a:7u8,b:11u32,c:13u8));let other=share_owner(h);let h2=match unwrap_owner(take h) {{Ok(_) => return 0u64,Error(take back) => back}};end(take other);let p=result.unwrap(unwrap_owner(take h2));let va:u64=int.widen(p.a);let vb:u64=int.widen(p.b);let vc:u64=int.widen(p.c);va+vb+vc }}"),16,31));
+        vectors.push((format!("{helpers}\ntype P:shareable+send {{a:u8,b:Box[u64]}}\n{seen}\nfn run()->u64 {{ seen(isolate(fn() -> u64 {{ let b=box.new(41u64);let h=new_owner(P(a:7u8,b:take b));end(take h);0u64 }})) }}"),31 + 32,242300));
     }
     let mut failures = vec![];
     for (body, room, expected) in vectors {

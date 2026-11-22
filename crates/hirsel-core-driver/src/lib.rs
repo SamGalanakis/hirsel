@@ -368,9 +368,16 @@ mod body {
         pub(crate) fn frame(&mut self) -> io::Result<Vec<u8>> {
             let head = encode(&DiskCheckRef::of(self)?)?;
             let ir = self.ir.get().expect("a fresh product holds its IR");
-            let (record, ir_hash, bytes) = Store::frame_body(&head, |bytes| {
-                hirsel_core_front::cost_scope!("encoding", "canonical key encoding");
-                bincode::serialize_into(&mut *bytes, ir).map_err(io::Error::other)
+            thread_local! {
+                static SCRATCH: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+            }
+            let (record, ir_hash, bytes) = SCRATCH.with_borrow_mut(|scratch| {
+                scratch.clear();
+                {
+                    hirsel_core_front::cost_scope!("encoding", "canonical key encoding");
+                    bincode::serialize_into(&mut *scratch, ir).map_err(io::Error::other)?;
+                }
+                Ok::<_, io::Error>(Store::frame_body(&head, scratch))
             })?;
             self.record = record;
             self.ir_hash = ir_hash;
@@ -537,6 +544,9 @@ impl CheckProduct {
 pub struct Driver {
     #[cfg(test)]
     pub(crate) layers: layers::Probe,
+    /// Each body builds every row it names, as `closure_laws` compares copies with.
+    #[cfg(test)]
+    pub(crate) fresh_rows: bool,
 }
 
 /// An item in one source file: the file's occurrence and the item's ordinal
@@ -1004,6 +1014,10 @@ impl Driver {
                 )
             });
             p.entry = request.entry.clone();
+            #[cfg(test)]
+            if self.fresh_rows {
+                p.build_rows_fresh();
+            }
             if !result.foreign_inputs.is_empty() {
                 result.foreign_headers = p
                     .fns

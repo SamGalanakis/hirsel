@@ -556,7 +556,8 @@ pub(crate) fn monotonic_ns() -> u64 {
 pub(crate) const WAIT: unsafe extern "C" fn(*mut u8, *mut Request, u64) -> Wait = wait;
 /// SLEEP_UNTIL waits until its deadline (program mono_ns, from `epoch`), given to
 /// the scheduler as host CLOCK_MONOTONIC; it is Ready once the deadline has
-/// passed. Every other operation is Ready at once. Never inlined, so `WAIT`
+/// passed. SLEEP_UNTIL_WALL waits until CLOCK_REALTIME reaches its millisecond
+/// reading (`wall_wait`). Every other operation is Ready at once. Never inlined, so `WAIT`
 /// has one address (`provider::deliver`).
 /// # Safety
 /// State is the run's live OsProvider; request meets the provider ABI contract.
@@ -565,10 +566,14 @@ pub unsafe extern "C" fn wait(state: *mut u8, request: *mut Request, _: u64) -> 
     // SAFETY: pinned request and provider state.
     let wait = unsafe {
         let request = &*request;
-        if request.operation != SLEEP_UNTIL || request.buffer.len < 8 {
+        if request.buffer.len < 8 {
             Wait::default()
-        } else {
+        } else if request.operation == SLEEP_UNTIL {
             sleep_wait(state, request)
+        } else if request.operation == SLEEP_UNTIL_WALL {
+            wall_wait(request)
+        } else {
+            Wait::default()
         }
     };
     #[cfg(test)]
@@ -593,6 +598,41 @@ unsafe fn sleep_wait(state: *mut u8, request: &Request) -> Wait {
             }
         }
     }
+}
+/// # Safety
+/// As `wait`, for a SLEEP_UNTIL_WALL request with an eight-byte wall reading.
+/// The remaining wall time becomes a host CLOCK_MONOTONIC deadline. The scheduler
+/// calls `wait` again when that deadline passes, so a wall clock set back since
+/// is waited out from a fresh pair of readings, and the wait is Ready only once
+/// CLOCK_REALTIME has reached the reading. These reads are host scheduling and
+/// never reach a tape.
+#[cold]
+#[inline(never)]
+unsafe fn wall_wait(request: &Request) -> Wait {
+    // SAFETY: the caller checked the eight-byte buffer.
+    let at = unsafe { request.buffer.data.cast::<u64>().read_unaligned() };
+    let Some(now) = wall_clock_ms() else {
+        crate::process::stop(b"Clock")
+    };
+    if at <= now {
+        return Wait::default();
+    }
+    let remaining = (at - now).saturating_mul(1_000_000);
+    Wait {
+        kind: WAIT_UNTIL,
+        deadline_ns: monotonic_ns().saturating_add(remaining),
+    }
+}
+fn wall_clock_ms() -> Option<u64> {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: valid writable timespec for the host wall clock.
+    if unsafe { libc::clock_gettime(libc::CLOCK_REALTIME, &mut now) } != 0 {
+        return None;
+    }
+    u64::try_from(i128::from(now.tv_sec) * 1000 + i128::from(now.tv_nsec) / 1_000_000).ok()
 }
 /// `issue` as a provider callback, for recognising the OS provider's own.
 pub(crate) const ISSUE: unsafe extern "C" fn(*mut u8, *mut Request, u64) -> Step = issue;
@@ -850,7 +890,7 @@ unsafe extern "C" fn issue_on_stack(state: *mut u8, request: *mut Request) -> Ou
         STDOUT => write_request(os.stdout.as_ref().map_or(-1, AsRawFd::as_raw_fd), request),
         STDERR => write_request(os.stderr_fd(), request),
         // Waiting is owned by the scheduler; issue completes at once.
-        SLEEP_UNTIL => Outcome::default(),
+        SLEEP_UNTIL | SLEEP_UNTIL_WALL => Outcome::default(),
         RANDOM => {
             let _blocking = crate::units::blocking();
             request_outcome(random(request))

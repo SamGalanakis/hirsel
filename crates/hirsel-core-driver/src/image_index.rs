@@ -613,7 +613,7 @@ impl DiskIndex {
         // The page's hash is in the sections record the image root names, so a
         // page that reads back different bytes refuses the request: there is no
         // other path to its rows.
-        let bytes = self.store.get(pages.sections.pages[n])?.ok_or_else(|| {
+        let bytes = self.store.get_shared(pages.sections.pages[n])?.ok_or_else(|| {
             io::Error::other(format!(
                 "core image {} is damaged: section page {n} is missing or fails its hash check; rebuild the image",
                 pages.image
@@ -621,7 +621,7 @@ impl DiskIndex {
         })?;
         self.checked.fetch_add(1, Ordering::Relaxed);
         crate::meter::count(crate::meter::Count::ImagePageBytes, bytes.len() as u64);
-        let page = Page::parse(Arc::from(bytes)).ok_or_else(|| damaged(pages))?;
+        let page = Page::parse(bytes).ok_or_else(|| damaged(pages))?;
         Ok(cell.get_or_init(|| page))
     }
     /// The item at `position` of `run`.

@@ -148,6 +148,7 @@ impl Function<'_, '_, '_> {
             | RtOp::ChannelNew { .. }
             | RtOp::Send { .. }
             | RtOp::Receive { .. }
+            | RtOp::ReceiveRec { .. }
             | RtOp::Spawn { .. }
             | RtOp::SpawnUnit { .. }
             | RtOp::ConnNew { .. }
@@ -292,6 +293,7 @@ impl Function<'_, '_, '_> {
                     | HostOp::ReadAt
                     | HostOp::WriteAt
                     | HostOp::SleepUntil
+                    | HostOp::SleepUntilWall
                     | HostOp::Sync
                     | HostOp::SyncDir
                     | HostOp::Connect
@@ -450,6 +452,12 @@ impl Function<'_, '_, '_> {
                     )?,
                     HostOp::SleepUntil => self.c_call(
                         "hirsel_core_host_sleep_until",
+                        &[P, U, U, U],
+                        &[U, K, Ty::Scalar(Scalar::U32), U, K],
+                        &[self.context, args[0], args[1], site],
+                    )?,
+                    HostOp::SleepUntilWall => self.c_call(
+                        "hirsel_core_host_sleep_until_wall",
                         &[P, U, U, U],
                         &[U, K, Ty::Scalar(Scalar::U32), U, K],
                         &[self.context, args[0], args[1], site],
@@ -879,6 +887,17 @@ impl Function<'_, '_, '_> {
                     &[P, P, P, U],
                     &[B, K],
                     &[self.context, args[0], args[1], site],
+                )?;
+                self.call_failure(values[1], call.fail)?;
+                outputs[0] = values[0];
+                1
+            }
+            RtOp::ReceiveRec { .. } => {
+                let values = self.c_call(
+                    "hirsel_core_receive_rec",
+                    &[P, P, P, P, U],
+                    &[B, K],
+                    &[self.context, args[0], args[1], args[2], site],
                 )?;
                 self.call_failure(values[1], call.fail)?;
                 outputs[0] = values[0];

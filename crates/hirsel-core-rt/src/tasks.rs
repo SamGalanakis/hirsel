@@ -3241,7 +3241,10 @@ unsafe fn mark_parked(task: *mut Task) {
             } else {
                 0
             };
-            let reason = if (*(*op).request).operation == crate::provider::SLEEP_UNTIL {
+            let reason = if matches!(
+                (*(*op).request).operation,
+                crate::provider::SLEEP_UNTIL | crate::provider::SLEEP_UNTIL_WALL
+            ) {
                 Reason::Timer
             } else {
                 Reason::ProviderIo
@@ -4311,6 +4314,48 @@ pub(crate) unsafe fn park_for(
         }
     }
     commit
+}
+
+/// Whether the running task's waits may park with its stack given back: it
+/// runs a returnable root (`FrameRecord`) and is not replaying a tape, whose
+/// boundaries a park that returns has not been audited against.
+pub(crate) fn returnable_waits() -> bool {
+    let task = CURRENT.get();
+    // SAFETY: CURRENT pins the task while this fiber is executing.
+    unsafe {
+        let Some(task) = task.as_ref() else {
+            return false;
+        };
+        #[cfg(feature = "record")]
+        if task.replay {
+            return false;
+        }
+        task.frame.is_some()
+    }
+}
+
+/// Park the running task in `queue` as `park_for` does, in the same order,
+/// but leave the switch to `start`, after the represented frames have
+/// returned. The commit stays held until the dispatcher's, as across the
+/// stackful form's switch; a wake makes the task runnable, and it resumes on
+/// a fresh stack by entering its body again (`park_returnable`).
+/// # Safety
+/// As for `park`; the running task has `returnable_waits`.
+pub(crate) unsafe fn park_returnable_in(
+    queue: *mut Waiters,
+    #[cfg(feature = "prof")] wait: (Reason, u64),
+) {
+    let task = CURRENT.get();
+    let commit = crate::sequencer::enter();
+    // SAFETY: the condition was checked in this commit and the queue is pinned.
+    unsafe {
+        #[cfg(feature = "prof")]
+        prof_state(task, State::Waiting, wait.0, wait.1);
+        (*task).state = State::Waiting;
+        Waiters::push(queue, task);
+        (*task).stackless = true;
+    }
+    std::mem::forget(commit);
 }
 
 /// # Safety

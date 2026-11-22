@@ -50,6 +50,8 @@ pub opaque type Pending: send {
     row: Row
 }
 
+pub opaque type PendingRows { rows: store.Rows[Id, Row] }
+
 pub opaque type Attempt: send { id: Id, number: u64 }
 
 pub type Started: send = Body(Attempt) | Held
@@ -107,13 +109,49 @@ pub fn migrate(mut phase: store.Migration) -> Result[(), store.Error] {
     created(store.migration_create_table(mut phase, store.spec(outcomes_name(), id_key(), terminal)))
 }
 
-pub fn tables(source: store.Schema) -> Result[Tables, store.Error] {
+fn pending_table(source: store.Schema) -> Result[store.Table[Id, Row], store.Error] {
     let value: std.codec.Codec[Row] = std.codec.of()
+    store.schema_table(source, rows_name(), id_key(), value)
+}
+
+pub fn tables(source: store.Schema) -> Result[Tables, store.Error] {
+    let mut rows = pending_table(source)?
     let terminal: std.codec.Codec[Terminal] = std.codec.of()
-    let mut rows = store.schema_table(source, rows_name(), id_key(), value)?
     let due = store.schema_index(source, mut rows, "due", code.describe(row_due), std.codec.key_u64())?
     let outcomes = store.schema_table(source, outcomes_name(), id_key(), terminal)?
     Ok(Tables(rows: take rows, due: take due, outcomes: take outcomes))
+}
+
+pub opaque type PendingTable { table: Option[store.Table[Id, Row]] }
+
+pub fn pending_table_if_present(source: store.Schema) -> Result[PendingTable, store.Error] {
+    match pending_table(source) {
+        Ok(take table) => Ok(PendingTable(table: Some(take table))),
+        Error(Missing(_)) => Ok(PendingTable(table: None)),
+        Error(take problem) => Error(take problem),
+    }
+}
+
+pub fn scan_pending(s: store.Snapshot, t: PendingTable) -> Result[Option[PendingRows], store.Error] {
+    match t.table {
+        Some(table) => Ok(Some(PendingRows(rows: store.scan(s, store.shape(table), Unbounded, Unbounded)?))),
+        None => Ok(None),
+    }
+}
+
+pub fn next_scanned(mut cursor: PendingRows) -> Result[Option[Pending], store.Error] {
+    while let Some((id, take row)) = store.next(mut cursor.rows)? {
+        if id.branch == 0u32 { return Ok(Some(Pending(id: id, row: take row))) }
+    }
+    Ok(None)
+}
+
+pub fn tables_for_settlement(source: store.Schema, snapshot: store.Snapshot) -> Result[Option[Tables], store.Error] {
+    let pending = pending_table_if_present(source)?
+    let Some(take cursor) = scan_pending(snapshot, pending)? else { return Ok(None) }
+    let mut remaining = take cursor
+    if let None = next_scanned(mut remaining)? { return Ok(None) }
+    Ok(Some(tables(source)?))
 }
 
 fn stored[T](take r: Result[T, store.Error]) -> Result[T, Error] {
@@ -209,6 +247,8 @@ pub fn run_id(a: Attempt) -> Id { a.id }
 pub fn number(a: Attempt) -> u64 { a.number }
 pub fn is_granted(p: Pending) -> bool { p.row.granted }
 pub fn argument(p: Pending) -> View[Bytes] in p { view p.row.arg }
+pub fn entry_path(p: Pending) -> View[Bytes] in p { view p.row.path }
+pub fn argument_schema(p: Pending) -> View[Bytes] in p { view p.row.schema }
 
 pub fn is_allowed(p: Pending, choices: Entries) -> bool {
     listed(choices, p.row.path, p.row.schema, p.row.granted)
@@ -219,6 +259,14 @@ pub fn matches(p: Pending, identity: Bytes, schema: Bytes) -> bool {
 }
 
 pub fn cancelling(p: Pending) -> bool { p.row.cancel }
+
+fn revision_mismatch(row: Row, image: Bytes) -> bool {
+    row.attempt != 0u64 && row.revision != image
+}
+
+pub fn held_on_start(p: Pending, image: Bytes) -> bool {
+    parked(p.row.state) || (p.row.granted && revision_mismatch(p.row, image))
+}
 
 fn read(tx: store.Tx, t: Tables, id: Id) -> Result[Row, Error] {
     match stored(store.fetch(tx, store.shape(t.rows), id))? {
@@ -269,7 +317,7 @@ pub fn start(mut tx: store.Tx, t: Tables, p: Pending, revision: Bytes) -> Result
     let mut row = read(tx, t, p.id)?
     if at < row.due { return Error(NotDue) }
     if row.cancel || parked(row.state) { return Error(StaleAttempt) }
-    if row.attempt != 0u64 && row.revision != revision {
+    if revision_mismatch(row, revision) {
         row.state = Parked(Revision(copy_bytes(row.revision)?, copy_bytes(revision)?))
         stored(store.put(mut tx, t.rows, p.id, row))?
         return Ok(Held)

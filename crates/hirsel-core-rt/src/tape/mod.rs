@@ -1025,7 +1025,7 @@ unsafe fn canonical(r: &Request) -> Args {
             WRITE_AT => return Args::of_parts(&[path, bytes]),
             WRITE | STDOUT | STDERR | MKDTEMP => bytes.to_vec(),
             MKDIR | REMOVE | REMOVE_TREE | RENAME | OPEN_DIR | STAT => path.to_vec(),
-            SLEEP_UNTIL => bytes.to_vec(),
+            SLEEP_UNTIL | SLEEP_UNTIL_WALL => bytes.to_vec(),
             _ => vec![],
         })
     }

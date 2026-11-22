@@ -252,7 +252,12 @@ the containment is empty before reporting completion. That containment would als
 child's death certain when the host kills the run, which v1 gives only on a best-effort basis
 ([EXEC-6](exec.md#exec-6-dropping-a-proc-kills-its-child)). *v1:* no profile is contained, and an `Exec` grant confers what its
 programs can do ([EXEC-1](exec.md#exec-1-an-exec-grant-confers-what-its-programs-can-do-and-hirsel-does-not-confine-them));
-a contained kind adds a profile kind and changes nothing EXEC-1 to EXEC-8 specify.
+a contained kind adds a profile kind and changes nothing EXEC-1 to EXEC-8 specify. The
+platform launcher's `contained` label ([launch](launch.md#containment-r27)) is the same
+containment, applied to every process that runs an authority group's code: the install child of
+genesis and standalone install, the describe, preview, prepare and serving children, and
+every descendant they start, `Exec` tools included, each with its mode's authority. No group whose author is outside the operator's first-party authors runs
+before it is built; until then only `uncontained` first-party groups run.
 
 **R28 (claims and verdicts).** A later claim form is written with contextual words in
 positions v1 refuses, and never changes whether a program that does not use it is accepted

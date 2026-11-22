@@ -274,6 +274,8 @@ enum VirtualCell {
         wall: u64,
         /// Tasks waiting on a deadline of this clock, in registration order.
         timers: Vec<(u64, usize)>,
+        /// Tasks waiting on this clock's wall time, as `timers`.
+        wall_timers: Vec<(u64, usize)>,
         /// Tasks in `clock.idle`, and whether quiescence has woken each.
         idle: Vec<(usize, bool)>,
     },
@@ -2243,8 +2245,15 @@ impl Machine<'_> {
         let parked = |k: usize| tasks[k].state == State::Provider;
         let mut woken = Vec::new();
         for cell in &mut self.world.cells {
-            if let VirtualCell::Clock { timers, idle, .. } = cell {
+            if let VirtualCell::Clock {
+                timers,
+                wall_timers,
+                idle,
+                ..
+            } = cell
+            {
                 timers.retain(|&(_, k)| parked(k));
+                wall_timers.retain(|&(_, k)| parked(k));
                 for (k, flag) in idle.iter_mut() {
                     if !*flag && parked(*k) {
                         *flag = true;
@@ -3082,6 +3091,7 @@ impl Machine<'_> {
                         mono: a[0],
                         wall: a[1],
                         timers: Vec::new(),
+                        wall_timers: Vec::new(),
                         idle: Vec::new(),
                     },
                 );
@@ -3289,8 +3299,23 @@ impl Machine<'_> {
             }
             HostOp::ClockSetWall => {
                 let c = self.cell(a[0]).unwrap();
-                if let VirtualCell::Clock { wall, .. } = &mut self.world.cells[c] {
-                    *wall = a[1];
+                let VirtualCell::Clock {
+                    wall, wall_timers, ..
+                } = &mut self.world.cells[c]
+                else {
+                    unreachable!()
+                };
+                *wall = a[1];
+                let now = *wall;
+                let mut due: Vec<_> = wall_timers
+                    .iter()
+                    .copied()
+                    .filter(|&(at, _)| at <= now)
+                    .collect();
+                wall_timers.retain(|&(at, _)| at > now);
+                due.sort_by_key(|&(at, _)| at);
+                for (_, k) in due {
+                    self.ready_provider(k);
                 }
                 ok(0, 0)
             }
@@ -3377,6 +3402,7 @@ impl Machine<'_> {
             HostOp::WallMs
             | HostOp::MonoNs
             | HostOp::SleepUntil
+            | HostOp::SleepUntilWall
             | HostOp::Random
             | HostOp::Stopped => {
                 let c = self.cell(a[0])?;
@@ -3409,6 +3435,36 @@ impl Machine<'_> {
                                 if let VirtualCell::Clock { timers, .. } = &mut self.world.cells[c]
                                 {
                                     timers.retain(|&(_, k)| k != t.k);
+                                }
+                                if let Err(cancelled) = self.check_cancel(t) {
+                                    return Some(Err(cancelled));
+                                }
+                            }
+                        }
+                        ok(0, 0)
+                    }
+                    HostOp::SleepUntilWall => {
+                        let at = a[1];
+                        loop {
+                            let VirtualCell::Clock { wall, .. } = self.world.cells[c] else {
+                                unreachable!()
+                            };
+                            if at <= wall {
+                                break;
+                            }
+                            if let VirtualCell::Clock { wall_timers, .. } = &mut self.world.cells[c]
+                                && !wall_timers.iter().any(|&(_, j)| j == t.k)
+                            {
+                                wall_timers.push((at, t.k));
+                            }
+                            self.sched.tasks[t.k].cancellable =
+                                t.shield == 0 && t.obligations.len() == 1;
+                            self.park(Some(Wait::Network(None)));
+                            if std::mem::take(&mut self.sched.tasks[t.k].cancelled) {
+                                if let VirtualCell::Clock { wall_timers, .. } =
+                                    &mut self.world.cells[c]
+                                {
+                                    wall_timers.retain(|&(_, k)| k != t.k);
                                 }
                                 if let Err(cancelled) = self.check_cancel(t) {
                                     return Some(Err(cancelled));
@@ -4778,10 +4834,12 @@ impl Machine<'_> {
                 self.check_cancel(t)?;
                 vec![]
             }
-            HostOp::SleepUntil => {
+            HostOp::SleepUntil | HostOp::SleepUntilWall => {
                 // Ready if the deadline has passed, else park in W until its
                 // timer (os.rs `sleep_wait`); a cancellation that takes effect
-                // there fails the sleep Cancelled.
+                // there fails the sleep Cancelled. The model's wall and
+                // monotonic readings are one counter, so a wall wait is this
+                // same wait.
                 let deadline = a[1];
                 if deadline > self.world.clock {
                     self.sched.tasks[t.k].cancellable = t.shield == 0 && t.obligations.len() == 1;
@@ -6701,7 +6759,7 @@ impl Machine<'_> {
             }
             // Only the release lowering of a native program forms these
             // (returnable.rs); the evaluator runs the module before it.
-            RtOp::FrameRecord | RtOp::Returnable(_) => {
+            RtOp::FrameRecord | RtOp::Returnable(_) | RtOp::ReceiveRec { .. } => {
                 unreachable!("returnable waits are native-only")
             }
         })

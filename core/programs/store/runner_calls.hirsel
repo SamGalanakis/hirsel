@@ -2426,6 +2426,11 @@ pub fn law_dir_reopen_keeps(parent: Dir, clock: Clock, random: Random, tasks: Ta
 }
 
 @test
+fn test_trigger_timer_wall_wait(tasks: Tasks) -> Result[(), ()] waits {
+    if runner.law_trigger_timer_wall_wait(tasks) { Ok(()) } else { Error(()) }
+}
+
+@test
 fn test_dir_reopen_keeps(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
     if law_dir_reopen_keeps(parent, clock, random, tasks, net) { Ok(()) } else { Error(()) }
 }

@@ -17,6 +17,19 @@ impl Rows {
         rows.slice(self.start as usize..self.end as usize)
     }
 }
+/// A `DefPath` borrowed from its index (`NameIndex::definition_path_ref`):
+/// the same fields in the same order, so it serializes to the same bytes.
+#[derive(serde::Serialize)]
+pub struct DefPathRef<'a> {
+    package: PackageRef<'a>,
+    modules: Vec<&'a str>,
+    name: std::borrow::Cow<'a, str>,
+}
+#[derive(serde::Serialize)]
+struct PackageRef<'a> {
+    name: &'a str,
+    version: &'a str,
+}
 /// External discovery input. Strings stop at the compilation's symbol table.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ModulePath {
@@ -842,6 +855,32 @@ impl NameIndex {
                 name.into()
             },
         })
+    }
+    /// `definition_path` borrowed from the index, for encoding it without
+    /// building the owned path: it serializes as that `DefPath` does.
+    pub fn definition_path_ref(&self, id: DefinitionId) -> DefPathRef<'_> {
+        let d = self.get(id);
+        let mut modules = vec![];
+        let mut m = d.site.module;
+        while let Some(parent) = self.modules[m.0 as usize].parent {
+            modules.push(self.symbols.text(self.modules[m.0 as usize].name));
+            m = parent;
+        }
+        modules.reverse();
+        let p = self.packages[self.module_package(d.site.module).0 as usize];
+        let name = self.symbols.text(d.name);
+        DefPathRef {
+            package: PackageRef {
+                name: self.symbols.text(p.name),
+                version: self.symbols.text(p.version),
+            },
+            modules,
+            name: if d.kind == DefinitionKind::Clone {
+                format!("{name}.$clone").into()
+            } else {
+                name.into()
+            },
+        }
     }
     pub fn definition(&self, module: ModuleId, name: Symbol) -> Option<DefinitionId> {
         let key = (module, name);

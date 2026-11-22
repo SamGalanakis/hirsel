@@ -86,10 +86,10 @@ mechanically specialized. Incomplete reached bodies still refuse assembly.
 publication, before instance collection, engine emission and linking. Its optional
 instance-details output measures collection separately, including body loads,
 generic specialization and dependency discovery. It does not publish instances.
-The cost guard keeps its two source corpora and adds published-library requests
-with an absolute empty-program fixed cost and a separate marginal cost per own
-source line. The 60,000 instruction budget remains independent of observed
-regression ceilings.
+The cost guard measures two source corpora and published-library requests.
+Fixed requests divide the empty-program process cost by library tokens.
+Marginal requests subtract the fixed std process cost and divide by program
+tokens. The finished budgets are independent of the observed regression ceilings.
 
 Package opening allocates no slot per library row. Immutable prefixes use sparse
 fixed-height caches and request-owned suffixes; request snapshots store prefix

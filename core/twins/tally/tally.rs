@@ -8,7 +8,10 @@ use std::thread;
 fn main() {
     let mut args = std::env::args().skip(1);
     let mode = args.next().expect("usage: tally atomic|local N");
-    let n: u64 = args.next().and_then(|n| n.parse().ok()).expect("usage: tally atomic|local N");
+    let n: u64 = args
+        .next()
+        .and_then(|n| n.parse().ok())
+        .expect("usage: tally atomic|local N");
     let total = match mode.as_str() {
         "atomic" => {
             let total = AtomicU64::new(0);

@@ -342,6 +342,8 @@ pub(crate) struct Keys {
     anchors: hirsel_core_ids::published::Map<crate::ItemAt, DefPath>,
     // One closure hash per definition, memoised across the bodies of a request.
     closures: std::cell::RefCell<rustc_hash::FxHashMap<u32, ContentHash>>,
+    // `closure`'s traversal state, emptied by each traversal and kept for the next.
+    walk: std::cell::RefCell<Walk>,
     signature_reads: std::cell::RefCell<SignatureReads>,
     // Contextual constructor candidates in index order, per (module, name).
     constructors: std::cell::RefCell<rustc_hash::FxHashMap<(u32, Symbol), Arc<[DefinitionId]>>>,
@@ -358,6 +360,16 @@ pub(crate) struct Keys {
     siblings: Vec<Siblings>,
     /// `forms`' definitions as a bit set, tested for every name of every body.
     form_bits: Vec<u64>,
+}
+/// `Keys::closure`'s traversal: visit order and low link per node, the node
+/// stack, the frames, and the component being hashed.
+#[derive(Default)]
+struct Walk {
+    order: rustc_hash::FxHashMap<usize, (u32, u32)>,
+    stack: Vec<usize>,
+    frames: Vec<(usize, usize)>,
+    rows: Vec<(ContentHash, ContentHash)>,
+    successors: Vec<ContentHash>,
 }
 /// Marks definition IDs for the body whose signature reads are being collected.
 #[derive(Default)]
@@ -690,6 +702,7 @@ impl Keys {
             modules,
             packages: Demand::new(index.packages.base_len(), index.packages.len()),
             closures: Default::default(),
+            walk: Default::default(),
             signature_reads: Default::default(),
             constructors: Default::default(),
             prelude: vec![],
@@ -718,7 +731,7 @@ impl Keys {
             .get_or_try_init(id.0 as u64, || {
                 Ok(ContentHash::of_parts(
                     "hirsel.key-identity.definition.v1",
-                    [&encode(&index.definition_path(id))?[..]],
+                    [&encode(&index.definition_path_ref(id))?[..]],
                 ))
             })
             .copied()
@@ -823,24 +836,29 @@ impl Keys {
         if let Some(hash) = self.known(start) {
             return Ok(hash);
         }
-        // Visit order and low link per node of this traversal.
-        let mut order: rustc_hash::FxHashMap<usize, (u32, u32)> = Default::default();
-        let mut stack: Vec<usize> = vec![];
-        let mut on_stack: rustc_hash::FxHashSet<usize> = Default::default();
-        let mut frames: Vec<(usize, usize)> = vec![];
-        let mut next = 0u32;
+        let mut walk = self.walk.borrow_mut();
+        let Walk {
+            order,
+            stack,
+            frames,
+            rows,
+            successors,
+        } = &mut *walk;
+        order.clear();
+        stack.clear();
+        frames.clear();
+        // A visited node not yet known is on the stack: a finished component's
+        // members are known from the moment it is hashed.
         let enter = |v: usize,
                      order: &mut rustc_hash::FxHashMap<usize, (u32, u32)>,
                      stack: &mut Vec<usize>,
-                     on_stack: &mut rustc_hash::FxHashSet<usize>,
-                     next: &mut u32| {
-            order.insert(v, (*next, *next));
-            *next += 1;
+                     frames: &mut Vec<(usize, usize)>| {
+            let n = order.len() as u32;
+            order.insert(v, (n, n));
             stack.push(v);
-            on_stack.insert(v);
+            frames.push((v, 0));
         };
-        enter(start, &mut order, &mut stack, &mut on_stack, &mut next);
-        frames.push((start, 0));
+        enter(start, order, stack, frames);
         while let Some(&(v, child)) = frames.last() {
             let reads = &self.dependency(index, v)?.reads;
             if let Some(w) = reads.get(child).map(|id| id.0 as usize) {
@@ -849,15 +867,11 @@ impl Keys {
                     continue;
                 }
                 match order.get(&w) {
-                    None => {
-                        enter(w, &mut order, &mut stack, &mut on_stack, &mut next);
-                        frames.push((w, 0));
-                    }
-                    Some(&(w_index, _)) if on_stack.contains(&w) => {
+                    None => enter(w, order, stack, frames),
+                    Some(&(w_index, _)) => {
                         let low = &mut order.get_mut(&v).unwrap().1;
                         *low = (*low).min(w_index);
                     }
-                    Some(_) => {}
                 }
                 continue;
             }
@@ -871,13 +885,9 @@ impl Keys {
                 continue;
             }
             let at = stack.iter().rposition(|&m| m == v).unwrap();
-            let members: Vec<usize> = stack.drain(at..).collect();
-            for m in &members {
-                on_stack.remove(m);
-            }
-            let mut rows = Vec::with_capacity(members.len());
-            let mut successors = vec![];
-            for &m in &members {
+            rows.clear();
+            successors.clear();
+            for &m in &stack[at..] {
                 let header = self.dependency(index, m)?;
                 rows.push((
                     self.definition_identity(index, DefinitionId(m as u32))?,
@@ -890,19 +900,19 @@ impl Keys {
             successors.dedup();
             let hash = ContentHash::of_parts_stream("hirsel.signature-component.v2", |parts| {
                 parts.part_byte_slice(0, &(rows.len() as u64).to_le_bytes());
-                for (identity, digest) in &rows {
+                for (identity, digest) in rows.iter() {
                     let mut row = [0u8; 64];
                     row[..32].copy_from_slice(&identity.0);
                     row[32..].copy_from_slice(&digest.0);
                     parts.part_byte_slice(1, &row);
                 }
-                for successor in &successors {
+                for successor in successors.iter() {
                     parts.part_byte_slice(2, &successor.0);
                 }
                 Ok(())
             })?;
             let mut closures = self.closures.borrow_mut();
-            for m in members {
+            for m in stack.drain(at..) {
                 closures.insert(m as u32, hash);
             }
         }

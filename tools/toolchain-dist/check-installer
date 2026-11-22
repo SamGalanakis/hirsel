@@ -1,0 +1,75 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+mkdir "$work/bin" "$work/home"
+export HOME="$work/home" PATH="$work/bin:$PATH"
+export HIRSEL_INSTALL_DIR="$work/home/.hirsel" HIRSEL_DOWNLOAD_BASE='' HIRSEL_VERSION=''
+export RELEASES="$work/releases" NEXT_RELEASES="$work/next-releases" EXPECTED_TAG=''
+
+cat > "$work/bin/curl" <<'EOF'
+#!/bin/sh
+for url do :; done
+case "$url" in
+    'https://api.github.com/repos/SamGalanakis/hirsel/releases?per_page=100&page=1')
+        cat "$RELEASES" ;;
+    'https://api.github.com/repos/SamGalanakis/hirsel/releases?per_page=100&page=2')
+        cat "$NEXT_RELEASES" ;;
+    "https://github.com/SamGalanakis/hirsel/releases/download/$EXPECTED_TAG/SHA256SUMS")
+        printf '%064d  hirsel-%s-x86_64-unknown-linux-gnu.tar.gz\n' 0 "$EXPECTED_TAG" ;;
+    *) exit 1 ;;
+esac
+EOF
+chmod +x "$work/bin/curl"
+ln -s curl "$work/bin/wget"
+
+check_error() {
+    if dash "$root/site/install.sh" --no-modify-path > "$work/stdout" 2> "$work/stderr"; then
+        printf '%s\n' 'installer unexpectedly succeeded' >&2
+        exit 1
+    fi
+    if [ "$(cat "$work/stderr")" != "hirsel installer: $1" ]; then
+        printf 'Expected: %s\n' "$1" >&2
+        cat "$work/stderr" >&2
+        exit 1
+    fi
+}
+
+check_tag() {
+    EXPECTED_TAG=$1
+    check_error "cannot download hirsel-$EXPECTED_TAG-x86_64-unknown-linux-gnu.tar.gz"
+}
+
+# The public releases list on 2026-11-22, reduced to the fields relevant here.
+cat > "$RELEASES" <<'EOF'
+[
+  {"tag_name": "toolchain-llvm-23.1.5", "prerelease": false, "draft": false}
+]
+EOF
+check_error 'no Hirsel release published yet'
+
+cat > "$RELEASES" <<'EOF'
+[
+  {"tag_name": "v1.10.0-rc.9"},
+  {"tag_name": "toolchain-llvm-23.1.5", "assets": [{"tag_name": "v99.0.0"}]},
+  {"tag_name": "v1.9.99-rc.20"},
+  {"tag_name": "v1.10.0-rc.10+linux"},
+  {"tag_name": "vnext"}
+]
+EOF
+check_tag v1.10.0-rc.10+linux
+
+# Fill the first page to exercise a stable release on the next page.
+awk 'BEGIN {
+    print "[ {\"tag_name\":\"v1.9.99\"}, {\"tag_name\":\"v2.0.0-rc.1\"}"
+    for (i = 1; i <= 98; i++) printf ", {\"tag_name\":\"toolchain-llvm-23.1.%d\"}\n", i
+    print "]"
+}' > "$RELEASES"
+printf '%s\n' '[{"tag_name":"v1.10.0"}, {"tag_name":"v1.2.3"}]' > "$NEXT_RELEASES"
+check_tag v1.10.0
+
+rm "$RELEASES"
+HIRSEL_VERSION=1.2.3 check_tag v1.2.3
+printf '%s\n' 'Installer release resolution passed.'

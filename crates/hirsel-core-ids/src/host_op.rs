@@ -16,6 +16,8 @@ pub const STDOUT: u8 = 12;
 pub const STDERR: u8 = 13;
 pub const RENAME: u8 = 14;
 pub const SLEEP_UNTIL: u8 = 15;
+/// A wait until the clock's wall time reaches an absolute millisecond reading.
+pub const SLEEP_UNTIL_WALL: u8 = 77;
 pub const SYNC: u8 = 16;
 pub const SYNC_DIR: u8 = 17;
 pub const RANDOM: u8 = 18;

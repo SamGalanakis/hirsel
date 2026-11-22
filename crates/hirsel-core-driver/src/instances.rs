@@ -551,7 +551,7 @@ impl CheckProduct {
                 }
                 return Err(InstanceStop::Incomplete {
                     definition: key.definition.clone(),
-                    message: "foreign modules are not enabled yet".into(),
+                    message: "foreign code requires a native build".into(),
                 });
             }
             if let Some((_, expand)) = records

@@ -11,9 +11,8 @@ is parked. A program that can reach native code has no recording, no replay and 
 test pass.
 
 The rules are FFI-1 to FFI-9. The [`sqlite` package](#the-sqlite-package) is the acceptance
-consumer. These rules are unbuilt design. Every fence on this page is marked `hirsel unbuilt` and stays
-documentation, because a fence cannot carry a foreign manifest; the laws' refusal cases check
-the rules it shows.
+consumer. The fences remain marked `hirsel unbuilt` because they cannot carry a foreign
+manifest. The laws' refusal cases check the examples.
 
 ## Trust
 

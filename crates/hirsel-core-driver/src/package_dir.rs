@@ -340,9 +340,6 @@ impl PackageDir {
                 (&member.content, member.edges.keys().collect::<Vec<_>>())
             } else {
                 let content = &resolution.libraries[&resolution.published[&id]].content;
-                if !cfg!(test) && !content.foreign.is_empty() {
-                    return Err(io::Error::other("foreign modules are not enabled yet"));
-                }
                 (content, content.bindings.keys().collect())
             };
             pending.extend(edges.iter().copied().cloned());

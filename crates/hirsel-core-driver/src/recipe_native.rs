@@ -163,9 +163,9 @@ impl CheckProduct {
     ) -> Result<Publication, NativeStop> {
         reached.require()?;
         if options.recording
-            && let Some(reason) = reached.recording_refusal(entry)
+            && let Some(stop) = reached.recording_stop(self, entry)?
         {
-            return Err(NativeStop::ForeignRecording(reason));
+            return Err(stop);
         }
         let decl = self.entry_decl(entry)?;
         let foreign = self.release_foreign(reached, options, decl, store)?;
@@ -615,7 +615,7 @@ fn bindings(
         let kind = GrantKind::from_tag(tag).expect("runtime grant kind");
         if kind == GrantKind::Foreign {
             return Err(NativeStop::Entry(
-                "foreign modules are not enabled yet".into(),
+                "Foreign entry grant needs an interface".into(),
             ));
         }
         let index = next[usize::from(tag)];
@@ -754,7 +754,10 @@ fn launch_options(
     if options.recording
         && let Some(reason) = foreign_recording_refusal(recipe)
     {
-        return Err(NativeStop::ForeignRecording(reason));
+        return Err(NativeStop::ForeignRecording {
+            reason,
+            site: recipe.entry.definition.definition_identity(),
+        });
     }
     let mut options = options.clone();
     options.target.clone_from(&recipe.launch.target);

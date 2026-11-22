@@ -154,7 +154,10 @@ pub enum NativeStop {
     Check(String),
     Instances(InstanceStop),
     Entry(String),
-    ForeignRecording(String),
+    ForeignRecording {
+        reason: String,
+        site: String,
+    },
     Archive(crate::code_admission::AdmissionError),
     Emit {
         definition: DefPath,
@@ -175,7 +178,7 @@ impl fmt::Display for NativeStop {
             Self::Check(s) => write!(f, "check: {s}"),
             Self::Instances(s) => write!(f, "instances: {s:?}"),
             Self::Entry(s) => write!(f, "entry: {s}"),
-            Self::ForeignRecording(s) => write!(f, "refused: {s}"),
+            Self::ForeignRecording { reason, .. } => write!(f, "refused: {reason}"),
             Self::Archive(error) => error.fmt(f),
             Self::Emit {
                 definition,
@@ -536,7 +539,7 @@ impl CheckProduct {
         if !(matches!(options.backend, Backend::Llvm) && options.optimize) {
             return Ok(self.emit_reached(entry, &reached, options)?.0);
         }
-        reached.require_native(entry, options)?;
+        reached.require_native(self, entry, options)?;
         let inputs = reached.native.as_ref().expect("a build's reachable set");
         let root = Identity::plain(entry.clone());
         let code = crate::code_store::CodeStore::new(options.store.join("code"));
@@ -560,7 +563,7 @@ impl CheckProduct {
         options: &NativeOptions,
     ) -> Result<(Vec<ObjectProduct>, Option<Table>), NativeStop> {
         let inputs = reached.native.as_ref().expect("a build's reachable set");
-        let instances = reached.require_native(entry, options)?;
+        let instances = reached.require_native(self, entry, options)?;
         if matches!(options.backend, Backend::Llvm) && options.optimize {
             return Err(NativeStop::Entry(
                 "an optimised LLVM build is assembled from its recipe over the release std".into(),
@@ -814,7 +817,7 @@ impl CheckProduct {
         // the separately lowered release std, like `build`.
         if matches!(options.backend, Backend::Llvm) && options.optimize {
             self.preflight_foreign_link(reached, options)?;
-            reached.require_native(entry, options)?;
+            reached.require_native(self, entry, options)?;
             let code = crate::code_store::CodeStore::new(options.store.join("code"));
             return self
                 .publish_release(
@@ -870,7 +873,7 @@ impl CheckProduct {
         damaged: &BTreeSet<Identity>,
     ) -> Result<Linked, NativeStop> {
         let link_archives = self.preflight_foreign_link(reached, options)?;
-        let instances = reached.require_native(entry, options)?;
+        let instances = reached.require_native(self, entry, options)?;
         let foreign_modules = self.reached_foreign_modules(reached)?;
         let address = reached.address(entry)?;
         let inputs = reached

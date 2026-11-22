@@ -664,7 +664,7 @@ hfl_release waits (take ffi_laws@1/laws/Obj) -> i32\n"
 
 #[test]
 fn foreign_publication_pins_grants_and_walks_only_reached_functions() {
-    use crate::code_admission::{AdmissionError, admit_local, NativeSemantics};
+    use crate::code_admission::{admit_local, NativeSemantics};
     use crate::code_store::{CodeStore, ObjectKind};
     use hirsel_core_ir::decode::DecodeBudget;
     use hirsel_core_ir::release_recipe::{GrantKind, Recipe};
@@ -734,20 +734,14 @@ pub fn free(f: Foreign[main.I], take p: foreign.Ptr[main.Obj]) waits\n");
     let [reached] = leaf.functions.as_slice() else { panic!("expected one reached function") };
     assert_eq!(reached.identity.definition.definition_identity(), "app@1/native/value");
     assert_eq!(reached.header, "(core@1/core/Foreign[app@1/main/I])->u64");
-    assert!(matches!(
-        admit_local(&store, root, &crate::request::local_admission_limits(), &NativeSemantics),
-        Err(AdmissionError::Unsupported("foreign modules are not enabled yet")),
-    ));
+    admit_local(&store, root, &crate::request::local_admission_limits(), &NativeSemantics).unwrap();
 
     main("let _ = native.make(f); Ok(())");
     let (root, made) = publish();
     let [leaf] = made.foreign_modules.as_slice() else { panic!("expected one reached module") };
     let functions: BTreeSet<_> = leaf.functions.iter().map(|row| row.identity.definition.0.name.as_str()).collect();
     assert_eq!(functions, BTreeSet::from(["free", "make"]));
-    assert!(matches!(
-        admit_local(&store, root, &crate::request::local_admission_limits(), &NativeSemantics),
-        Err(AdmissionError::Unsupported("foreign modules are not enabled yet")),
-    ));
+    admit_local(&store, root, &crate::request::local_admission_limits(), &NativeSemantics).unwrap();
 }
 
 struct PackageLaw {
@@ -867,6 +861,8 @@ fn foreign_recipe_build_uses_only_selected_sealed_archive() {
             law.write(&format!("ffi_laws/{file}"), contents);
         }
         let store = CodeStore::new(law.path("code-store"));
+        let x86 = std::fs::read(law.path("ffi_laws/libffi_laws.a")).unwrap();
+        let x86_pin = crate::call::hex(&ObjectKind::ForeignArchive.hash(&x86).0);
         let publish = |arm: &[u8]| {
             let arm_pin = crate::call::hex(&ObjectKind::ForeignArchive.hash(arm).0);
             law.write("ffi_laws/arm.a", arm);
@@ -878,10 +874,10 @@ fn foreign_recipe_build_uses_only_selected_sealed_archive() {
 [foreign.native]
 symbols = "hfl_"
 archives = [
-    {{ target = "x86_64-unknown-linux-gnu", file = "libffi_laws.a", sha256 = "{}" }},
+    {{ target = "x86_64-unknown-linux-gnu", file = "libffi_laws.a", sha256 = "{x86_pin}" }},
     {{ target = "aarch64-unknown-linux-gnu", file = "arm.a", sha256 = "{arm_pin}" }},
 ]
-"#, crate::package_manifest::STAGED_FOREIGN[0].3));
+"#));
             PackageLaw::pass(law.run(&[
                 "publish", "ffi_laws", "--backend", engine, "--grant", "Foreign=ffi_laws@1/laws/Laws",
             ])).trim().to_owned()
@@ -2164,10 +2160,11 @@ fn granted(f: Foreign[laws.Laws]) -> Result[(), ()] {
 }
 "#);
     let pinned = fs::read(fixture.join("libffi_laws.a")).unwrap();
+    let fixture_pin = crate::call::hex(&ObjectKind::ForeignArchive.hash(&pinned).0);
     let repin = |bytes: &[u8], pin: &str| {
         law.write("ffi_laws/laws.a", bytes);
         law.write("ffi_laws/hirsel.toml", original.replace("libffi_laws.a", "laws.a")
-            .replace(crate::package_manifest::STAGED_FOREIGN[0].3, pin));
+            .replace(&fixture_pin, pin));
     };
     let pinned_options = native_options(Backend::Cranelift, law.dir.path());
     let Link::Driver(cc) = pinned_options.link else { unreachable!() };
@@ -2203,7 +2200,7 @@ fn granted(f: Foreign[laws.Laws]) -> Result[(), ()] {
         fail_build(engine, TARGET, &format!("{PREFIX} does not match its pin: expected sha256 {EMPTY}, found sha256 {ABC}"));
         repin(b"abc", ABC);
         fail_build(engine, TARGET, &format!("{PREFIX} is not an indexed ar archive"));
-        repin(&pinned, crate::package_manifest::STAGED_FOREIGN[0].3);
+        repin(&pinned, &fixture_pin);
         fail_build(engine, ARM, "FFI-3: ffi_laws@1/native has no archive for target aarch64-unknown-linux-gnu; its archives are for x86_64-unknown-linux-gnu");
         let (_, _, pure_error) = invoke("build", engine, &["--target", ARM, "--entry", "ffi_laws@1/main/pure"]);
         assert!(!pure_error.contains("FFI-3"), "{pure_error}");

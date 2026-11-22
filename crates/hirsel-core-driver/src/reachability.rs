@@ -42,23 +42,99 @@ impl Reachable<'_> {
             .map(|identity| &identity.definition)
     }
 
-    pub(crate) fn recording_refusal(&self, entry: &DefPath) -> Option<String> {
+    pub(crate) fn recording_stop(
+        &self,
+        product: &CheckProduct,
+        entry: &DefPath,
+    ) -> Result<Option<NativeStop>, NativeStop> {
         if !self.accepted() {
-            return None;
+            return Ok(None);
         }
-        crate::native::recipe_build::recording_refusal(entry, self.foreign_functions())
+        let Some(function) = self
+            .foreign_functions()
+            .min_by_key(|function| function.definition_identity())
+        else {
+            return Ok(None);
+        };
+        let reason =
+            crate::native::recipe_build::recording_refusal(entry, std::iter::once(function))
+                .expect("one reached foreign function");
+        // Reach records decide the refusal. Read the checked bodies for its
+        // site only, so cached call sites never outlive the current source.
+        let fresh = if self.reach.is_some() || !self.materialized.hits.is_empty() {
+            let limit = self.require()?.len() + self.materialized.foreign.len();
+            Some(product.reachable(entry, limit)?)
+        } else {
+            None
+        };
+        let reached = fresh.as_ref().unwrap_or(self);
+        let site = reached.foreign_site(product, function)?;
+        Ok(Some(NativeStop::ForeignRecording { reason, site }))
+    }
+
+    fn foreign_site(
+        &self,
+        product: &CheckProduct,
+        function: &DefPath,
+    ) -> Result<String, NativeStop> {
+        use hirsel_core_ir::{Callee, Inst};
+
+        for identity in self.require()? {
+            let instance = self.materialized.get(identity);
+            let module = instance.ir()?;
+            let Some(body) = &module.functions[instance.function.index()].body else {
+                continue;
+            };
+            let anchors = body
+                .insts
+                .iter()
+                .zip(&body.inst_anchors)
+                .filter_map(|(inst, anchor)| {
+                    let Inst::Call { call } = inst else {
+                        return None;
+                    };
+                    let Callee::Direct(callee) = body.calls[call.index()].callee else {
+                        return None;
+                    };
+                    let path = module
+                        .identity(module.functions[callee.index()].instance)
+                        .definition;
+                    (&path == function).then_some(*anchor).flatten()
+                })
+                .collect::<Vec<_>>();
+            if anchors.is_empty() {
+                continue;
+            }
+            let items = anchors
+                .iter()
+                .map(|anchor| module.items[anchor.item.index()].clone())
+                .collect::<Vec<_>>();
+            let sources = product.native_sources(&items)?;
+            let positions = sources.positions();
+            if let Some((file, line, column)) = anchors
+                .iter()
+                .zip(&items)
+                .filter_map(|(anchor, item)| positions.position(item, anchor.start))
+                .min_by_key(|(file, line, column)| (&file.path, *line, *column))
+            {
+                return Ok(format!("{}:{line}:{column}", file.path));
+            }
+        }
+        // An implicit release can contribute a slot without a source call.
+        Ok(function.definition_identity())
     }
 
     pub(crate) fn require_native(
         &self,
+        product: &CheckProduct,
         entry: &DefPath,
         options: &NativeOptions,
     ) -> Result<&[Identity], NativeStop> {
         let instances = self.require()?;
         if options.recording
-            && let Some(reason) = self.recording_refusal(entry)
+            && let Some(stop) = self.recording_stop(product, entry)?
         {
-            return Err(NativeStop::ForeignRecording(reason));
+            return Err(stop);
         }
         Ok(instances)
     }

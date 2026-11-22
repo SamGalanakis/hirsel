@@ -1056,7 +1056,11 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             .map_or(crate::native::DEFAULT_INSTANCE_LIMIT, |options| {
                 options.instance_limit
             });
-        if let Some(reason) = product.reachable(entry, limit)?.recording_refusal(entry) {
+        if let Some(crate::NativeStop::ForeignRecording { reason, site }) = product
+            .reachable(entry, limit)?
+            .recording_stop(&product, entry)?
+        {
+            eprintln!("{site}: recording refusal site");
             eprintln!("replay: refused: {reason}");
             std::process::exit(2);
         }
@@ -1175,14 +1179,17 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                 }
                 Err(error) => {
                     failed = true;
-                    if !json {
-                        if matches!(error, crate::NativeStop::ForeignRecording(_)) {
+                    let mut row = serde_json::json!({"definition":test.to_string(),"passed":false,"source":"executed","stopped":error.to_string(),"wall_ms":null});
+                    if let crate::NativeStop::ForeignRecording { site, .. } = &error {
+                        row["site"] = site.as_str().into();
+                        if !json {
+                            eprintln!("{site}: recording refusal site");
                             println!("fail executed {test}: {error}");
-                        } else {
-                            println!("fail executed {test}: {error} (time unavailable)");
                         }
+                    } else if !json {
+                        println!("fail executed {test}: {error} (time unavailable)");
                     }
-                    serde_json::json!({"definition":test.to_string(),"passed":false,"source":"executed","stopped":error.to_string(),"wall_ms":null})
+                    row
                 }
             };
             rows.push(row);
@@ -1271,6 +1278,9 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                 None
             }
             Err(e) => {
+                if let crate::NativeStop::ForeignRecording { site, .. } = &e {
+                    eprintln!("{site}: recording refusal site");
+                }
                 stopped = Some(e.to_string());
                 None
             }

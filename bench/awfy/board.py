@@ -472,6 +472,11 @@ def cargo(*args):
     return ["cargo", "+1.99.0", *args]
 
 
+def fetch(rust, env):
+    """Download the locked crates the Cargo cache lacks; the measured builds stay offline."""
+    run(cargo("fetch", "--locked"), cwd=rust, env=cargo_scope(env))
+
+
 def compile_profile(target):
     return ["--offline", "--locked", "--release", "--target-dir", target,
             "--config", "profile.release.incremental=true",
@@ -500,6 +505,7 @@ def prepare_compile(out, artifacts, env):
         shutil.copyfile(source / name, rust / name)
     shutil.copytree(source / "src", rust / "src")
     target = out / "target"
+    fetch(rust, env)
     run(cargo("build", "-j2", *compile_profile(target)), cwd=rust, env=cargo_scope(env))
     run(cargo("clean", "--release", "--target-dir", target, "-p", "benchmarks"), cwd=rust, env=cargo_scope(env))
 
@@ -752,6 +758,7 @@ def prepare_arena(out, args, compiler, artifacts, env):
     out.mkdir()
     rust = args.langarena / "rust"
     target = out / "rust-target"
+    fetch(rust, env)
     run(cargo("build", "--release", "--locked", "--offline", "-j2", "--target-dir", target),
         cwd=rust, env=cargo_scope(env))
     shutil.copy2(target / "release/benchmarks", out / "rust")

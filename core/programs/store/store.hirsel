@@ -344,7 +344,7 @@ pub opaque scoped type Tx {
     refusal: Option[Capacity],
     frame_bytes: u64,
     wrote: bool,
-    ops: std.omap.OMap[Bytes, Option[Bytes]],
+    ops: Map[Bytes, Option[Arc[Bytes]]],
     op_ids: u64,
     info: CallInfo,
     // The streams section's ops (§1.8). `extra_bytes` is that section with
@@ -826,7 +826,7 @@ pub fn info(mut tx: Tx) -> CallInfo {
 // issued-id log and read set, and roll back the body's table writes.
 pub fn rollback_writes_on_error[R, E](mut tx: Tx, body: scoped[view] fn(mut Tx) -> Result[R, E]) -> Result[R, E] {
     let roots = share_roots(tx.roots)
-    let ops = std.omap.snapshot(tx.ops)
+    let ops: Map[Bytes, Option[Arc[Bytes]]] = clone(tx.ops)
     let resident = tx.resident
     let frame_bytes = tx.frame_bytes
     let wrote = tx.wrote
@@ -910,7 +910,7 @@ type Ran[R, A] {
     live: u64,
     wrote: bool,
     frame: Option[Bytes],
-    ops: std.omap.OMap[Bytes, Option[Bytes]],
+    ops: Map[Bytes, Option[Arc[Bytes]]],
     stream_ops: std.omap.OMap[Bytes, Option[Bytes]],
     call: Option[CallSection],
     info: CallInfo,
@@ -928,7 +928,7 @@ type Prepared[R, A] {
     live: u64,
     wrote: bool,
     frame: Option[Bytes],
-    ops: std.omap.OMap[Bytes, Option[Bytes]],
+    ops: Map[Bytes, Option[Arc[Bytes]]],
     stream_ops: std.omap.OMap[Bytes, Option[Bytes]],
     call: Option[CallSection]
 }
@@ -987,7 +987,7 @@ fn raised_capacity(causes: Causes) -> Option[Capacity] {
 
 fn draft_body[R, A](db: Db, i: u64, ci: CallInfo, keep_reply: Option[fn(A) -> bool], reads: Log[Read], issued: Log[u64],
         body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Finished[R, A] {
-    let mut tx = Tx(store: db.store, roots: share_roots(db.heads[i].roots), ids: db.next_node, resident: db.resident, retain_old: retaining(db), reads: view reads, issued: view issued, refusal: None, frame_bytes: 42, wrote: false, ops: std.omap.new(), op_ids: 0, info: ci, stream_ops: std.omap.new(), extra_bytes: 0, call: None)
+    let mut tx = Tx(store: db.store, roots: share_roots(db.heads[i].roots), ids: db.next_node, resident: db.resident, retain_old: retaining(db), reads: view reads, issued: view issued, refusal: None, frame_bytes: 42, wrote: false, ops: map.new(), op_ids: 0, info: ci, stream_ops: std.omap.new(), extra_bytes: 0, call: None)
     let outcome = body(mut tx)
     if let Some(c) = tx.refusal { return RolledBack(Refused(c)) }
     let value: Result[R, A] = match take outcome {
@@ -1005,7 +1005,7 @@ fn draft_body[R, A](db: Db, i: u64, ci: CallInfo, keep_reply: Option[fn(A) -> bo
             tx.resident = live
             tx.roots.data = std.omap.snapshot(db.heads[i].roots.data)
             tx.roots.catalog = std.omap.snapshot(db.heads[i].roots.catalog)
-            tx.ops = std.omap.new()
+            tx.ops = map.new()
             Error(take a)
         }
     }
@@ -1471,7 +1471,7 @@ fn refused(mut tx: Tx, c: Capacity) -> Error {
 }
 
 // `h` is the height of the tree being written.
-fn reserve_ids(mut tx: Tx, h: u64) -> Result[u64, Error] {
+fn reserve_ids(mut tx: Tx, h: u64) -> u64 {
     // Record a range before the map can issue an id. Logging after the map
     // would lose its high-water mark if the log append itself were refused.
     // Insert uses <= 2h+1 ids. Remove uses <= 3h, including discarded merge
@@ -1480,7 +1480,7 @@ fn reserve_ids(mut tx: Tx, h: u64) -> Result[u64, Error] {
     let end = start + 4 * h + 1
     log.append(tx.issued, end)
     tx.ids = end
-    Ok(start)
+    start
 }
 
 fn note_read(tx: Tx, take read: Read) -> Result[(), Error] {
@@ -1503,68 +1503,90 @@ fn put_bytes(mut tx: Tx, id: u32, key: Bytes, val: Bytes) -> Result[(), Error] {
 }
 
 fn put_physical(mut tx: Tx, take p: Bytes, take val: Bytes) -> Result[(), Error] {
-    let _ = replace_physical(mut tx, take p, take val)?
+    let frame = put_frame(tx, p, val, tx.frame_bytes)?
+    apply_put(mut tx, take p, take val)
+    tx.frame_bytes = frame
     Ok(())
 }
 
-fn replace_physical(mut tx: Tx, take p: Bytes, take val: Bytes) -> Result[Option[std.omap.Replaced[Bytes, Arc[Bytes]]], Error] {
-    if list.len(p) > 4096 {
+fn put_frame(tx: Tx, key: Bytes, value: Bytes, frame: u64) -> Result[u64, Error] {
+    if list.len(key) > 4096 {
         return Error(Limit(Key))
     }
-    if list.len(val) > 1048576 {
+    if list.len(value) > 1048576 {
         return Error(Limit(Value))
     }
-    let charge = entry(p, val)
-    let frame = int.saturating_add(tx.frame_bytes - old_op_size(tx.ops, p), 9 + list.len(p) + list.len(val))
-    let saved_key = copied(p)?
-    if int.saturating_add(frame, tx.extra_bytes) - 16 > 16777280 {
+    edit_frame(tx, key, 9 + list.len(key) + list.len(value), frame)
+}
+
+fn edit_frame(tx: Tx, key: Bytes, width: u64, frame: u64) -> Result[u64, Error] {
+    let after = int.saturating_add(frame - old_data_op_size(tx.ops, key), width)
+    if int.saturating_add(after, tx.extra_bytes) - 16 > 16777280 {
         return Error(Limit(Transaction))
     }
-    let h = tree_height(tx.roots.data)
-    let mut ids = reserve_ids(mut tx, h)?
-    let saved_value = copied(val)?
+    Ok(after)
+}
+
+fn apply_put(mut tx: Tx, take p: Bytes, take val: Bytes) {
+    let charge = entry(p, val)
+    let saved_key: Bytes = clone(p)
     let shared_value = arc.new(take val)
-    let (take data, take replaced) = std.omap.insert(mut ids, tx.roots.data, take p, take shared_value)
-    let old_charge = if tx.retain_old { 0u64 } else {
+    let saved_value = arc.share(shared_value)
+    let h = tree_height(tx.roots.data)
+    let mut ids = reserve_ids(mut tx, h)
+    let old_data = replace(mut tx.roots.data, std.omap.new())
+    let (take data, take replaced) = std.omap.insert_owned(mut ids, take old_data, take p, take shared_value)
+    let old_charge = if tx.retain_old {
+        0u64
+    } else {
         match replaced {
             Some(old) => entry(saved_key, std.omap.replaced_value(old)),
             None => 0
         }
     }
-    record_op(mut tx, take saved_key, Some(take saved_value))?
+    map.insert(mut tx.ops, take saved_key, Some(take saved_value))
     tx.roots.data = take data
     // Main without a retained durable root subtracts the replaced entry (I4).
     tx.resident = int.saturating_add(int.saturating_sub(tx.resident, old_charge), charge)
-    tx.frame_bytes = frame
     tx.wrote = true
-    Ok(take replaced)
 }
 
 fn delete_bytes(mut tx: Tx, id: u32, key: Bytes) -> Result[bool, Error] {
     let p = physical(id, key)?
-    let refund = match std.omap.get(tx.roots.data, p) {
-        Some(v) => if tx.retain_old { 0u64 } else { entry(p, v) },
-        None => return Ok(false)
+    let Some(refund) = delete_refund(tx, p) else {
+        return Ok(false)
     }
-    let frame = int.saturating_add(tx.frame_bytes - old_op_size(tx.ops, p), 5 + list.len(p))
-    if int.saturating_add(frame, tx.extra_bytes) - 16 > 16777280 {
-        return Error(Limit(Transaction))
-    }
-    let h = tree_height(tx.roots.data)
-    let mut ids = reserve_ids(mut tx, h)?
-    let data = std.omap.remove(mut ids, tx.roots.data, p)
-    record_op(mut tx, copied(p)?, None)?
-    tx.roots.data = take data
-    tx.resident = int.saturating_sub(tx.resident, refund)
+    let frame = edit_frame(tx, p, 5 + list.len(p), tx.frame_bytes)?
+    apply_delete(mut tx, take p, refund)
     tx.frame_bytes = frame
     Ok(true)
+}
+
+fn delete_refund(tx: Tx, key: Bytes) -> Option[u64] {
+    match std.omap.get(tx.roots.data, key) {
+        Some(v) => Some(if tx.retain_old {
+            0u64
+        } else {
+            entry(key, v)
+        }),
+        None => None
+    }
+}
+
+fn apply_delete(mut tx: Tx, take p: Bytes, refund: u64) {
+    let h = tree_height(tx.roots.data)
+    let mut ids = reserve_ids(mut tx, h)
+    let data = std.omap.remove(mut ids, tx.roots.data, p)
+    map.insert(mut tx.ops, take p, None)
+    tx.roots.data = take data
+    tx.resident = int.saturating_sub(tx.resident, refund)
 }
 
 // The COMMIT frame this Tx encodes (section 2.4). A frame with stream ops and
 // no data ops has no data head.
 fn tx_frame(tx: Tx) -> u64 {
     let total = int.saturating_add(tx.frame_bytes, tx.extra_bytes)
-    if std.omap.len(tx.ops) == 0 && std.omap.len(tx.stream_ops) != 0 { total - 5 } else { total }
+    if map.len(tx.ops) == 0 && std.omap.len(tx.stream_ops) != 0 { total - 5 } else { total }
 }
 
 fn tree_height(m: std.omap.OMap[Bytes, Arc[Bytes]]) -> u64 {
@@ -1658,13 +1680,13 @@ fn stream_write(mut tx: Tx, take key: Bytes, take value: Bytes, call_size: u64) 
     }
     let head = if std.omap.len(tx.stream_ops) == 0 { 5u64 } else { 0u64 }
     let extra = int.saturating_add(tx.extra_bytes - old_op_size(tx.stream_ops, key), head + 9 + list.len(key) + list.len(value) + call_size)
-    let data_head = if std.omap.len(tx.ops) == 0 { 5u64 } else { 0u64 }
+    let data_head = if map.len(tx.ops) == 0 { 5u64 } else { 0u64 }
     if int.saturating_add(tx.frame_bytes, extra) - data_head - 16 > 16777280 {
         return Error(Limit(Transaction))
     }
     let charge = entry(key, value)
     let h = tree_height(tx.roots.streams)
-    let mut ids = reserve_ids(mut tx, h)?
+    let mut ids = reserve_ids(mut tx, h)
     let saved_key = copied(key)?
     let saved_value = copied(value)?
     let shared_value = arc.new(take value)
@@ -2204,6 +2226,14 @@ fn test_foreign(c: Clock) -> Result[(), ()] waits {
     }
 }
 
+fn old_data_op_size(ops: Map[Bytes, Option[Arc[Bytes]]], key: Bytes) -> u64 {
+    match map.get(ops, key) {
+        None => 0,
+        Some(None) => 5 + list.len(key),
+        Some(Some(value)) => 9 + list.len(key) + list.len(value)
+    }
+}
+
 fn old_op_size(ops: std.omap.OMap[Bytes, Option[Bytes]], key: Bytes) -> u64 {
     match std.omap.get(ops, key) {
         None => 0,
@@ -2238,9 +2268,51 @@ fn blob(mut out: Bytes, b: Bytes) -> Result[(), Capacity] {
     Ok(list.append(mut out, b))
 }
 
-fn encode_commit(ci: CallInfo, ops: std.omap.OMap[Bytes, Option[Bytes]], seq: u64, offset: u64) -> Result[Bytes, Capacity] {
+fn encode_commit(ci: CallInfo, ops: Map[Bytes, Option[Arc[Bytes]]], seq: u64, offset: u64) -> Result[Bytes, Capacity] {
     let streams: std.omap.OMap[Bytes, Option[Bytes]] = std.omap.new()
     encode_sections(ci, ops, streams, None, seq, offset)
+}
+
+// Map stores entries in a flat array indexed by key. Only the journal needs
+// sorted keys, and the common single-key commit can write its entry directly.
+fn encode_data_ops(mut payload: Bytes, ops: Map[Bytes, Option[Arc[Bytes]]]) -> Result[(), Capacity] {
+    le(mut payload, 0, 1)?
+    let n = map.len(ops)
+    le(mut payload, n, 4)?
+    if n < 2 {
+        for (key, value) in ops {
+            encode_data_op(mut payload, key, value)?
+        }
+    } else {
+        let mut keys: List[Bytes] = list.with_capacity(n)
+        for (key, _) in ops {
+            list.push(mut keys, clone(key))
+        }
+        list.sort(mut keys, fn(a: Bytes, b: Bytes) -> Order {
+            std.order.compare(a, b)
+        })
+        for key in keys {
+            let Some(value) = map.get(ops, key) else {
+                fail("store: missing data op")
+            }
+            encode_data_op(mut payload, key, value)?
+        }
+    }
+    Ok(())
+}
+
+fn encode_data_op(mut payload: Bytes, key: Bytes, value: Option[Arc[Bytes]]) -> Result[(), Capacity] {
+    match value {
+        None => {
+            le(mut payload, 2, 1)?;
+            blob(mut payload, key)
+        },
+        Some(raw) => {
+            le(mut payload, 1, 1)?;
+            blob(mut payload, key)?;
+            blob(mut payload, raw)
+        }
+    }
 }
 
 fn encode_ops(mut payload: Bytes, tag: u64, ops: std.omap.OMap[Bytes, Option[Bytes]]) -> Result[(), Capacity] {
@@ -2256,22 +2328,22 @@ fn encode_ops(mut payload: Bytes, tag: u64, ops: std.omap.OMap[Bytes, Option[Byt
     Ok(())
 }
 
-fn encode_staged(ci: CallInfo, ops: std.omap.OMap[Bytes, Option[Bytes]], streams: std.omap.OMap[Bytes, Option[Bytes]], call: Option[CallSection], rec: Option[CallRecord], settlement: Option[Settlement], seq: u64, offset: u64) -> Result[Bytes, Capacity] {
+fn encode_staged(ci: CallInfo, ops: Map[Bytes, Option[Arc[Bytes]]], streams: std.omap.OMap[Bytes, Option[Bytes]], call: Option[CallSection], rec: Option[CallRecord], settlement: Option[Settlement], seq: u64, offset: u64) -> Result[Bytes, Capacity] {
     if let Some(record) = rec {
         return encode_frame(ci, ops, streams, Some(view record), settlement, seq, offset)
     }
     encode_sections(ci, ops, streams, call, seq, offset)
 }
 
-fn encode_sections(ci: CallInfo, ops: std.omap.OMap[Bytes, Option[Bytes]], streams: std.omap.OMap[Bytes, Option[Bytes]], call: Option[CallSection], seq: u64, offset: u64) -> Result[Bytes, Capacity] {
+fn encode_sections(ci: CallInfo, ops: Map[Bytes, Option[Arc[Bytes]]], streams: std.omap.OMap[Bytes, Option[Bytes]], call: Option[CallSection], seq: u64, offset: u64) -> Result[Bytes, Capacity] {
     match call {
         Some(section) => encode_frame(ci, ops, streams, Some(view section.record), section.settlement, seq, offset),
         None => encode_frame(ci, ops, streams, None, None, seq, offset),
     }
 }
 
-fn encode_frame(ci: CallInfo, ops: std.omap.OMap[Bytes, Option[Bytes]], streams: std.omap.OMap[Bytes, Option[Bytes]], call: Option[View[CallRecord]], settlement: Option[Settlement], seq: u64, offset: u64) -> Result[Bytes, Capacity] {
-    let data = std.omap.len(ops) != 0 || std.omap.len(streams) == 0
+fn encode_frame(ci: CallInfo, ops: Map[Bytes, Option[Arc[Bytes]]], streams: std.omap.OMap[Bytes, Option[Bytes]], call: Option[View[CallRecord]], settlement: Option[Settlement], seq: u64, offset: u64) -> Result[Bytes, Capacity] {
+    let data = map.len(ops) != 0 || std.omap.len(streams) == 0
     let stream = std.omap.len(streams) != 0
     let mut sections = if data { 1u64 } else { 0u64 }
     if stream { sections += 1 }
@@ -2281,7 +2353,7 @@ fn encode_frame(ci: CallInfo, ops: std.omap.OMap[Bytes, Option[Bytes]], streams:
     le(mut payload, ci.id.version, 8)?
     le(mut payload, ci.at, 8)?
     le(mut payload, sections, 1)?
-    if data { encode_ops(mut payload, 0, ops)? }
+    if data { encode_data_ops(mut payload, ops)? }
     if stream { encode_ops(mut payload, 1, streams)? }
     if let Some(c) = call {
         le(mut payload, 2, 1)?
@@ -2317,7 +2389,7 @@ pub fn law_frames(c: Clock) -> bool {
         put_bytes(mut tx, 1, key_word(1), key_word(11))?
         put_bytes(mut tx, 1, key_word(2), key_word(33))?
         let _ = delete_bytes(mut tx, 1, key_word(1))?
-        if tx.frame_bytes != 88 || std.omap.len(tx.ops) != 2 {
+        if tx.frame_bytes != 88 || map.len(tx.ops) != 2 {
             return Error(Foreign)
         }
         capacity(encode_commit(info(mut tx), tx.ops, 1, 72))
@@ -2732,56 +2804,96 @@ pub fn fetch[K, V](tx: Tx, t: Shape[K, V], k: K) -> Result[Option[V], Error] {
     }
 }
 
-fn index_key[V](ix: IndexOf[V], value: V, primary: Bytes) -> Result[Bytes, Error] {
-    let mut raw = capacity((ix.extract)(value))?
-    list.append(mut raw, primary)
-    Ok(take raw)
+type DataEdit = StoreRow(Bytes, Bytes) | RemoveRow(Bytes, u64)
+
+fn index_physical(id: u32, index_part: Bytes, key: Bytes) -> Result[Bytes, Error] {
+    let mut row = prefixed(id, list.len(index_part) + list.len(key))?
+    list.append(mut row, index_part)
+    list.append(mut row, key)
+    Ok(take row)
 }
 
-// `key` is Key[K] of the row, checked by `put` (writable, scope).
+fn append_index_remove(tx: Tx, mut edits: List[DataEdit], take key: Bytes, mut frame: u64) -> Result[(), Error] {
+    if let Some(refund) = delete_refund(tx, key) {
+        frame = edit_frame(tx, key, 5 + list.len(key), frame)?
+        list.push(mut edits, RemoveRow(take key, refund))
+    }
+    Ok(())
+}
+
+fn apply_edits(mut tx: Tx, take edits: List[DataEdit]) {
+    for take edit in take edits {
+        match take edit {
+            StoreRow(take key, take raw) => apply_put(mut tx, take key, take raw),
+            RemoveRow(take key, refund) => apply_delete(mut tx, take key, refund)
+        }
+    }
+}
+
+// Index IDs are distinct from the table ID and each other. Within one index,
+// a delete and put are emitted only for distinct keys. Each planned edit can
+// therefore check the original op table while carrying the cumulative frame size.
+// A returned Error leaves all roots, accounting and issued IDs untouched.
 fn put_impl[K, V](mut tx: Tx, t: Table[K, V], key: Bytes, v: V) -> Result[(), Error] {
     let p = physical(t.id, key)?
     let mut raw: Bytes = list.new()
     capacity(le(mut raw, int.widen(t.readers.current), 2))?
     std.codec.encode(t.readers.codec, v, mut raw) ?=> |_| Limit(Value)
-    let replaced = replace_physical(mut tx, take p, take raw)?
-    let previous: Option[V] = if list.len(t.indexes) == 0 { None } else {
-        match replaced {
-            Some(old) => Some(row_value(t.readers, t.id, std.omap.replaced_value(old))?),
+    let mut frame = put_frame(tx, p, raw, tx.frame_bytes)?
+    if list.len(t.indexes) == 0 {
+        apply_put(mut tx, take p, take raw)
+    } else {
+        let previous = match std.omap.get(tx.roots.data, p) {
+            Some(old) => Some(row_value(t.readers, t.id, old)?),
             None => None
         }
-    }
-    for ix in t.indexes {
-        let new_key = index_key(ix, v, key)?
-        let old_key = match previous {
-            Some(value) => Some(index_key(ix, value, key)?),
-            None => None
-        }
-        let unchanged = match old_key {
-            Some(old) => old == new_key,
-            None => false
-        }
-        if !unchanged {
-            if let Some(take old) = take old_key {
-                let _ = delete_bytes(mut tx, ix.id, old)?
+        let mut edits: List[DataEdit] = list.new()
+        for ix in t.indexes {
+            let new_part = capacity((ix.extract)(v))?
+            if let Some(value) = previous {
+                let old_part = capacity((ix.extract)(value))?
+                if old_part == new_part {
+                    continue
+                }
+                append_index_remove(tx, mut edits, index_physical(ix.id, old_part, key)?, mut frame)?
             }
+            let index_row = index_physical(ix.id, new_part, key)?
             let empty: Bytes = list.new()
-            put_bytes(mut tx, ix.id, new_key, empty)?
+            frame = put_frame(tx, index_row, empty, frame)?
+            list.push(mut edits, StoreRow(take index_row, take empty))
         }
+        apply_put(mut tx, take p, take raw)
+        apply_edits(mut tx, take edits)
     }
+    tx.frame_bytes = frame
     Ok(())
 }
 
 fn delete_impl[K, V](mut tx: Tx, t: Table[K, V], key: Bytes) -> Result[bool, Error] {
     let p = physical(t.id, key)?
-    let old = match std.omap.get(tx.roots.data, p) {
-        Some(raw) => row_value(t.readers, t.id, raw)?,
-        None => return Ok(false)
+    let (take old, refund) = {
+        let raw = match std.omap.get(tx.roots.data, p) {
+            Some(v) => v,
+            None => return Ok(false)
+        }
+        let value = row_value(t.readers, t.id, raw)?
+        (take value, if tx.retain_old {
+            0u64
+        } else {
+            entry(p, raw)
+        })
     }
+    let mut frame = tx.frame_bytes
+    let mut edits: List[DataEdit] = list.new()
     for ix in t.indexes {
-        let _ = delete_bytes(mut tx, ix.id, index_key(ix, old, key)?)?
+        let old_part = capacity((ix.extract)(old))?
+        append_index_remove(tx, mut edits, index_physical(ix.id, old_part, key)?, mut frame)?
     }
-    delete_bytes(mut tx, t.id, key)
+    frame = edit_frame(tx, p, 5 + list.len(p), frame)?
+    apply_edits(mut tx, take edits)
+    apply_delete(mut tx, take p, refund)
+    tx.frame_bytes = frame
+    Ok(true)
 }
 
 pub fn range[K, V](tx: Tx, t: Shape[K, V], lo: Bound[K], hi: Bound[K]) -> Result[Rows[K, V], Error] {
@@ -4000,80 +4112,16 @@ fn test_typed_indexes(c: Clock) -> Result[(), ()] waits {
     }
 }
 
-fn record_op(mut tx: Tx, take key: Bytes, take value: Option[Bytes]) -> Result[(), Error] {
-    let (take ops, _) = std.omap.insert(mut tx.op_ids, tx.ops, take key, take value)
-    tx.ops = take ops
-    Ok(())
-}
-
-// A multi-index operation either installs every new path or none. The op tree
-// is persistent too, so rolling back an operation admits no memory.
-type Staged[R] {
-    result: Result[R, Error],
-    roots: Roots,
-    ids: u64,
-    resident: u64,
-    refusal: Option[Capacity],
-    frame_bytes: u64,
-    wrote: bool,
-    ops: std.omap.OMap[Bytes, Option[Bytes]],
-    op_ids: u64
-}
-
-fn stage_result[R](take draft: Tx, take change: Result[R, Error]) -> Staged[R] {
-    let Tx(store: _, roots: take roots, ids: ids, resident: live, retain_old: _, reads: _, issued: _, refusal: no_room, frame_bytes: size, wrote: wrote, ops: take ops, op_ids: op_ids, info: _, stream_ops: _, extra_bytes: _, call: _) = take draft
-    Staged(result: take change, roots: take roots, ids: ids, resident: live, refusal: no_room, frame_bytes: size, wrote: wrote, ops: take ops, op_ids: op_ids)
-}
-
-fn stage_put[K, V](tx: Tx, t: Table[K, V], key: Bytes, v: V) -> Staged[()] {
-    let mut draft = Tx(store: tx.store, roots: share_roots(tx.roots), ids: tx.ids, resident: tx.resident, retain_old: tx.retain_old, reads: tx.reads, issued: tx.issued, refusal: tx.refusal, frame_bytes: tx.frame_bytes, wrote: tx.wrote, ops: std.omap.snapshot(tx.ops), op_ids: tx.op_ids, info: tx.info, stream_ops: std.omap.new(), extra_bytes: tx.extra_bytes, call: None)
-    let changed = put_impl(mut draft, t, key, v)
-    stage_result(take draft, take changed)
-}
-
-fn stage_delete[K, V](tx: Tx, t: Table[K, V], key: Bytes) -> Staged[bool] {
-    let mut draft = Tx(store: tx.store, roots: share_roots(tx.roots), ids: tx.ids, resident: tx.resident, retain_old: tx.retain_old, reads: tx.reads, issued: tx.issued, refusal: tx.refusal, frame_bytes: tx.frame_bytes, wrote: tx.wrote, ops: std.omap.snapshot(tx.ops), op_ids: tx.op_ids, info: tx.info, stream_ops: std.omap.new(), extra_bytes: tx.extra_bytes, call: None)
-    let changed = delete_impl(mut draft, t, key)
-    stage_result(take draft, take changed)
-}
-
-fn install[R](mut tx: Tx, take staged: Staged[R]) -> Result[R, Error] {
-    let Staged(result: take change, roots: take roots, ids: ids, resident: live, refusal: no_room, frame_bytes: size, wrote: wrote, ops: take ops, op_ids: op_ids) = take staged
-    let ok = match change {
-        Ok(_) => true,
-        Error(_) => false
-    }
-    tx.ids = ids
-    tx.op_ids = op_ids
-    if ok {
-        tx.roots = take roots
-        tx.resident = live
-        tx.refusal = no_room
-        tx.frame_bytes = size
-        tx.wrote = wrote
-        tx.ops = take ops
-    }
-    take change
-}
-
 pub fn put[K, V](mut tx: Tx, t: Table[K, V], k: K, v: V) -> Result[(), Error] {
     writable(tx, t)?
     let key = encode_key(t.key, k)?
-    if list.len(t.indexes) == 0 {
-        return put_impl(mut tx, t, key, v)
-    }
-    let changed = stage_put(tx, t, key, v)
-    install(mut tx, take changed)
+    put_impl(mut tx, t, key, v)
 }
 
 pub fn delete[K, V](mut tx: Tx, t: Table[K, V], k: K) -> Result[bool, Error] {
     writable(tx, t)?
     let key = encode_key(t.key, k)?
-    if list.len(t.indexes) == 0 {
-        return delete_impl(mut tx, t, key)
-    }
-    let changed = stage_delete(tx, t, key)
-    install(mut tx, take changed)
+    delete_impl(mut tx, t, key)
 }
 
 type OldAccount {
@@ -4518,8 +4566,47 @@ fn reject_999(v: u64) -> Result[u64, Capacity] {
     }
 }
 
-// A user's index extractor can refuse after other index paths have been changed.
-// Catching that error and committing must preserve the old row and every index.
+fn write_state(tx: Tx) -> (u64, u64, u64, u64, u64, bool) {
+    let node = match std.omap.root(tx.roots.data) {
+        Some(head) => std.omap.node_id(head),
+        None => 0u64
+    }
+    (node, tx.ids, tx.resident, tx.frame_bytes, map.len(tx.ops), tx.wrote)
+}
+
+fn check_index_put_refusal(mut db: Db, t: Table[u64, u64], value: u64, frame_limit: bool) -> bool waits {
+    let watermark = db.next_node
+    let out = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[bool, Error] {
+        let previous_extra = tx.extra_bytes
+        if frame_limit {
+            // U1: header42 + primary31 + two (delete25 + put29) + delete25.
+            // The last index put is the only edit that exceeds this allowance.
+            tx.extra_bytes = 16777280 - (42 + 31 + 2 * (25 + 29) + 25 - 16)
+        }
+        let prior = write_state(tx)
+        let rejected = match put(mut tx, t, 1, value) {
+            Error(Full(_)) => !frame_limit,
+            Error(Limit(Transaction)) => frame_limit,
+            _ => false
+        }
+        tx.extra_bytes = previous_extra
+        Ok(rejected && write_state(tx) == prior && fetch(tx, shape(t), 1)? == Some(99u64))
+    }))
+    match take out {
+        Committed(done) => done.value && db.next_node == watermark,
+        _ => false
+    }
+}
+
+fn reject_old_index_value(value: u64) -> Result[Bytes, Capacity] {
+    if value == 99 {
+        return Error(Capacity(requested: 1, available: 0))
+    }
+    Ok(key_word(value))
+}
+
+// Catch an error from a new extractor, an old extractor and the last index
+// frame check, then commit. Preserve the old row, index keys and ID watermark.
 pub fn law_index_refusal(c: Clock) -> bool waits {
     let mut db = test_db(c, 1073741824)
     result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
@@ -4533,22 +4620,15 @@ pub fn law_index_refusal(c: Clock) -> bool waits {
     let a = result.unwrap(index(db, mut t, "a", code.describe(bucket), std.codec.key_u64()))
     let b = result.unwrap(index(db, mut t, "b", code.describe(quotient), std.codec.key_u64()))
     let _ = result.unwrap(index(db, mut t, "c", code.describe(reject_999), std.codec.key_u64()))
-    let failures: Inline[u64, 2] =[999, 1999]
-    for i in 0u64 .. 2 {
-        let rejected = failures[i]
-        let out = run(mut db, None, fn(mut tx: Tx) -> Result[bool, Error] {
-            match put(mut tx, t, 1, rejected) {
-                Error(Full(_)) => {},
-                _ => return Error(Foreign)
-            }
-            Ok(std.omap.len(tx.ops) == 0 && option.unwrap(fetch(tx, shape(t), 1)?) == 99)
-        })
-        match take out {
-            Ok(Committed(done)) => if !done.value {
-                return false
-            },
-            _ => return false
-        }
+    if !check_index_put_refusal(mut db, t, 999, false) ||
+        !check_index_put_refusal(mut db, t, 1999, false) ||
+        !check_index_put_refusal(mut db, t, 100, true) {
+        return false
+    }
+    let last_id = t.indexes[2].id
+    t.indexes[2] = IndexOf(id: last_id, extract: reject_old_index_value)
+    if !check_index_put_refusal(mut db, t, 100, false) {
+        return false
     }
     let mut first = result.unwrap(find(snapshot(db), a, Included(3), Included(3)))
     let mut second = result.unwrap(find(snapshot(db), b, Included(24), Included(24)))
@@ -4557,6 +4637,97 @@ pub fn law_index_refusal(c: Clock) -> bool waits {
     match (result.unwrap(next(mut first)), result.unwrap(next(mut second)), result.unwrap(next(mut absent)), result.unwrap(next(mut absent_second))) {
         (Some((1, 99)), Some((1, 99)), None, None) => true,
         _ => false
+    }
+}
+
+fn write_validation_encode(value: u64, mut raw: Bytes) -> Result[(), std.codec.EncodeError] {
+    if value == 999 {
+        return Error(CountOverflow(4294967296u64))
+    }
+    std.codec.put_u64(value, mut raw)
+    Ok(())
+}
+
+fn write_validation_decode(raw: Bytes, mut at: u64) -> Result[u64, std.codec.DecodeError] {
+    let start = at
+    let value = std.codec.take_u64(raw, mut at)?
+    if value == 99 {
+        Error(Value(start))
+    } else {
+        Ok(value)
+    }
+}
+
+fn write_validation_schema(mut schema: std.codec.Schema, _dictionary: std.codec.Codec[u64]) -> Result[(), std.codec.EncodeError] {
+    std.codec.schema_u64(mut schema)
+    Ok(())
+}
+
+fn validation_refusal[K, V](mut tx: Tx, t: Table[K, V], key: K, value: V, expected: Limit) -> bool {
+    let before = write_state(tx)
+    let rejected = match (put(mut tx, t, key, value), expected) {
+        (Error(Limit(Key)), Key) => true,
+        (Error(Limit(Value)), Value) => true,
+        _ => false
+    }
+    rejected && write_state(tx) == before
+}
+
+pub fn law_put_validation(c: Clock) -> bool waits {
+    let mut db = test_db(c, 1073741824)
+    let refusing = std.codec.make(write_validation_encode, write_validation_decode, write_validation_schema, 8)
+    result.unwrap(create_table(mut db, spec("refusing", std.codec.key_u64(), refusing)))
+    let mut t = result.unwrap(table(mut db, "refusing", std.codec.key_u64(), refusing))
+    result.unwrap(create_index(mut db, t, "a", code.describe(bucket), std.codec.key_u64()))
+    let _ = result.unwrap(index(db, mut t, "a", code.describe(bucket), std.codec.key_u64()))
+    let byte_codec = std.codec.of_bytes()
+    result.unwrap(create_table(mut db, spec("bytes", std.codec.key_bytes(), byte_codec)))
+    let byte_table = result.unwrap(table(mut db, "bytes", std.codec.key_bytes(), byte_codec))
+    let outcome = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[bool, Error] {
+        if !validation_refusal(mut tx, t, 1u64, 999u64, Value) {
+            return Ok(false)
+        }
+        let mut key: Bytes = list.with_capacity(4096)
+        list.fill(mut key, 4096, 1u8)
+        let empty: Bytes = list.new()
+        if !validation_refusal(mut tx, byte_table, key, empty, Key) {
+            return Ok(false)
+        }
+        let mut large: Bytes = list.with_capacity(1048576)
+        list.fill(mut large, 1048576, 1u8)
+        if !validation_refusal(mut tx, byte_table, empty, large, Value) {
+            return Ok(false)
+        }
+        // Install a raw fixture with a valid schema tag and a value the current
+        // reader rejects. The attempted indexed overwrite has to read it.
+        let mut old: Bytes = list.with_capacity(10)
+        le(mut old, int.widen(t.readers.current), 2) ?=> Full
+        std.codec.put_u64(99, mut old)
+        put_bytes(mut tx, t.id, key_word(1), old)?
+        let prior = write_state(tx)
+        let rejected = match put(mut tx, t, 1, 100) {
+            Error(Decode(Value(2))) => true,
+            _ => false
+        }
+        // Roll back the deliberately unreadable fixture.
+        Error(if rejected && write_state(tx) == prior {
+            Missing("checked")
+        } else {
+            Foreign
+        })
+    }))
+    match take outcome {
+        Aborted(Undone(value: Missing(checked), ticket: None)) => checked == "checked",
+        _ => false
+    }
+}
+
+@test
+fn test_put_validation(c: Clock) -> Result[(), ()] waits {
+    if law_put_validation(c) {
+        Ok(())
+    } else {
+        Error(())
     }
 }
 
@@ -4958,7 +5129,7 @@ pub fn look[R](s: Snapshot, steps: Option[u64], body: scoped[view] fn(Tx) -> R) 
     let issued: Log[u64] = log.new()
     let caught = isolate(fn() -> Result[R, OutOfTime] {
         let perform = scoped fn() -> R {
-            let tx = Tx(store: s.store, roots: share_roots(s.roots), ids: 0, resident: 0, retain_old: false, reads: view reads, issued: view issued, refusal: None, frame_bytes: 42, wrote: false, ops: std.omap.new(), op_ids: 0, info: CallInfo(id: CallId(store: s.store, branch: s.branch, version: s.head), at: 0, seed: 0), stream_ops: std.omap.new(), extra_bytes: 0, call: None)
+            let tx = Tx(store: s.store, roots: share_roots(s.roots), ids: 0, resident: 0, retain_old: false, reads: view reads, issued: view issued, refusal: None, frame_bytes: 42, wrote: false, ops: map.new(), op_ids: 0, info: CallInfo(id: CallId(store: s.store, branch: s.branch, version: s.head), at: 0, seed: 0), stream_ops: std.omap.new(), extra_bytes: 0, call: None)
             body(tx)
         }
         match steps {
@@ -5581,8 +5752,7 @@ fn frame_boundary_points() -> bool {
     let times: Inline[u64, 5] =[999, 999, 999, 1001, 0]
     let segments: Inline[u64, 5] =[9, 9, 9, 10, 256]
     let offsets: Inline[u64, 5] =[72, 73, 1048576, 73, 1048576]
-    let mut ids: u64 = 0
-    let mut ops: std.omap.OMap[Bytes, Option[Bytes]] = std.omap.new()
+    let mut ops: Map[Bytes, Option[Arc[Bytes]]] = map.new()
     let key = result.unwrap(physical(1, key_word(7)))
     let mut value: Bytes = list.new()
     list.push(mut value, 0u8)
@@ -5590,10 +5760,7 @@ fn frame_boundary_points() -> bool {
     for i in 0u64 .. 32 {
         list.push(mut value, int.truncate(i))
     }
-    ops = {
-        let (take next_map, _) = std.omap.insert(mut ids, ops, take key, Some(take value))
-        take next_map
-    }
+    map.insert(mut ops, take key, Some(arc.new(take value)))
     for i in 0u64 .. 5 {
         let ci = CallInfo(id: CallId(store: stores[i], branch: branches[i], version: versions[i]), at: times[i], seed: 0)
         let raw = result.unwrap(encode_commit(ci, ops, segments[i], offsets[i]))
@@ -6377,7 +6544,7 @@ pub fn law_index_writes(c: Clock) -> bool waits {
     }
     let same_j = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[u64, Error] {
         put(mut tx, t, 1, 21)?;
-        Ok(std.omap.len(tx.ops))
+        Ok(map.len(tx.ops))
     }))
     match take same_j {
         Committed(done) => if done.value != 1 {
@@ -6387,7 +6554,7 @@ pub fn law_index_writes(c: Clock) -> bool waits {
     }
     let changed_j = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[u64, Error] {
         put(mut tx, t, 1, 22)?;
-        Ok(std.omap.len(tx.ops))
+        Ok(map.len(tx.ops))
     }))
     match take changed_j {
         Committed(done) => done.value == 7,
@@ -12066,9 +12233,8 @@ pub fn journal_law_bootstrap(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool 
     result.unwrap(le(mut stored, 0, 2))
     result.unwrap(le(mut stored, 70, 8))
     let key = result.unwrap(physical(1, key_word(7)))
-    let mut ids = 0u64
-    let ops: std.omap.OMap[Bytes, Option[Bytes]] = std.omap.new()
-    let (take written, _) = std.omap.insert(mut ids, ops, take key, Some(take stored))
+    let mut written: Map[Bytes, Option[Arc[Bytes]]] = map.new()
+    map.insert(mut written, take key, Some(arc.new(take stored)))
     let ci = CallInfo(id: CallId(store: id, branch: 0, version: 2), at: wall, seed: 0)
     let raw = result.unwrap(encode_commit(ci, written, seq, 72))
     if list.len(raw) != 73 { return false }
@@ -13073,8 +13239,8 @@ pub fn journal_law_call_vector() -> bool {
     list.fill(mut value, 32, 4u8)
     let key = result.unwrap(physical(1, key_word(7)))
     let mut ids = 0u64
-    let ops: std.omap.OMap[Bytes, Option[Bytes]] = std.omap.new()
-    let (take data, _) = std.omap.insert(mut ids, ops, take key, Some(take value))
+    let mut data: Map[Bytes, Option[Arc[Bytes]]] = map.new()
+    map.insert(mut data, take key, Some(arc.new(take value)))
     let mut stream_value: Bytes = list.new()
     result.unwrap(le(mut stream_value, 1, 8))
     list.fill(mut stream_value, 32, 5u8)
@@ -13142,7 +13308,7 @@ fn journal_fixture_call(mut db: Db, i: u64, large: bool, take revision: Option[B
     call_checked(checked)?
     let call = Some(CallSection(record: take checked, settlement: None))
     let ci = call_info(db.store, db.heads[i].id, db.heads[i].head + 1, db.heads[i].at + 1, db.heads[i].at)
-    let data: std.omap.OMap[Bytes, Option[Bytes]] = std.omap.new()
+    let data: Map[Bytes, Option[Arc[Bytes]]] = map.new()
     let raw = result.unwrap(encode_sections(ci, data, streams, call, db.file_seq, db.file_end))
     let size = list.len(raw)
     let commit = {

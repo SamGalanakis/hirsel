@@ -21,13 +21,21 @@ trait Codec: Sized {
 }
 
 fn word(b: &[u8], at: &mut usize) -> Result<u64, Truncated> {
-    let bytes: [u8; 8] = b.get(*at..*at + 8).ok_or(Truncated)?.try_into().map_err(|_| Truncated)?;
+    let bytes: [u8; 8] = b
+        .get(*at..*at + 8)
+        .ok_or(Truncated)?
+        .try_into()
+        .map_err(|_| Truncated)?;
     *at += 8;
     Ok(u64::from_le_bytes(bytes))
 }
 
 fn count(b: &[u8], at: &mut usize) -> Result<u32, Truncated> {
-    let bytes: [u8; 4] = b.get(*at..*at + 4).ok_or(Truncated)?.try_into().map_err(|_| Truncated)?;
+    let bytes: [u8; 4] = b
+        .get(*at..*at + 4)
+        .ok_or(Truncated)?
+        .try_into()
+        .map_err(|_| Truncated)?;
     *at += 4;
     Ok(u32::from_le_bytes(bytes))
 }
@@ -62,7 +70,10 @@ impl Codec for f64 {
     }
     fn decode(b: &[u8], at: &mut usize) -> Result<Self, Truncated> {
         let x = word(b, at)?;
-        if x & 0x7ff0_0000_0000_0000 == 0x7ff0_0000_0000_0000 && x & 0xf_ffff_ffff_ffff != 0 && x != 0x7ff8_0000_0000_0000 {
+        if x & 0x7ff0_0000_0000_0000 == 0x7ff0_0000_0000_0000
+            && x & 0xf_ffff_ffff_ffff != 0
+            && x != 0x7ff8_0000_0000_0000
+        {
             return Err(Truncated);
         }
         Ok(f64::from_bits(x))
@@ -153,21 +164,37 @@ fn owner(k: u64) -> String {
 }
 
 fn main() {
-    let a: Vec<u64> = env::args().skip(1).map(|s| s.parse().unwrap_or(0)).collect();
+    let a: Vec<u64> = env::args()
+        .skip(1)
+        .map(|s| s.parse().unwrap_or(0))
+        .collect();
     let (work, mode, n, r) = (a[0], a[1], a[2], a[3]);
     let v = match work {
         // 3 is Hirsel's other route to the same bytes.
         0 | 3 => {
-            let xs: Vec<Account> = (0..n).map(|k| Account { id: k, owner: owner(k), balance: k as i64 - 50000 }).collect();
-            run(&xs, mode, r, |xs| { let a = &xs[xs.len() - 1]; xs.len() as u64 + a.id + a.owner.len() as u64 })
+            let xs: Vec<Account> = (0..n)
+                .map(|k| Account {
+                    id: k,
+                    owner: owner(k),
+                    balance: k as i64 - 50000,
+                })
+                .collect();
+            run(&xs, mode, r, |xs| {
+                let a = &xs[xs.len() - 1];
+                xs.len() as u64 + a.id + a.owner.len() as u64
+            })
         }
         1 => {
             let xs: Vec<f64> = (0..n).map(|k| k as f64 * 0.37 + 1.5).collect();
-            run(&xs, mode, r, |xs| xs.len() as u64 + (xs[xs.len() - 1].to_bits() & 0xff))
+            run(&xs, mode, r, |xs| {
+                xs.len() as u64 + (xs[xs.len() - 1].to_bits() & 0xff)
+            })
         }
         _ => {
             let xs: Vec<String> = (0..n).map(owner).collect();
-            run(&xs, mode, r, |xs| xs.len() as u64 + xs[xs.len() - 1].len() as u64)
+            run(&xs, mode, r, |xs| {
+                xs.len() as u64 + xs[xs.len() - 1].len() as u64
+            })
         }
     };
     println!("{v}");

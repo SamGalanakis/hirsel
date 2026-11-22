@@ -53,7 +53,11 @@ def library_inputs(root, core):
 
 def load_manifest(path, root=ROOT):
     """A program manifest with core's package derived from core/core, never listed by hand."""
-    manifest = json.loads(path.read_text())
+    data = path.read_bytes()
+    try:
+        manifest = json.loads(data)
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise ValueError(f'{path}: {error} (first bytes: {data[:160]!r})') from error
     manifest['packages'].insert(0, installed(root, manifest['core'], 'core'))
     return manifest
 

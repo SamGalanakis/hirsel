@@ -18,6 +18,17 @@ TOOLCHAIN = '1.99.0'
 TARGET = 'x86_64-unknown-linux-gnu'
 
 
+def parse_json(data, source):
+    try:
+        return json.loads(data)
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise ValueError(f'{source}: {error} (first bytes: {data[:160]!r})') from error
+
+
+def read_json(path):
+    return parse_json(path.read_bytes(), path)
+
+
 def source_lines(path):
     """Rust physical lines with code, excluding blank and comment-only lines.
 
@@ -140,7 +151,7 @@ def sample(command, directory, compiler_only=False, env=None, *, cycles=False, c
     instructions, seconds, rss = '', '', ''
     status = 'ok' if result.returncode == 0 else f'exit:{result.returncode}'
     if compiler_only and stats.exists():
-        usage = json.loads(stats.read_text())
+        usage = read_json(stats)
         seconds, rss = str(usage['seconds']), usage['max_rss_kib']
     elif stats.exists():
         fields = stats.read_text().strip().splitlines()[-1].split('\t')
@@ -183,7 +194,7 @@ def sample(command, directory, compiler_only=False, env=None, *, cycles=False, c
     peak = re.search(r'capped: peak (\d+) MiB of', stderr)
     counters = {'cycles': cycle_count} if cycles else {}
     if smt_siblings is not None and activity.is_file():
-        counters['smt_busy_percent'] = {int(cpu): busy for cpu, busy in json.loads(activity.read_text()).items()}
+        counters['smt_busy_percent'] = {int(cpu): busy for cpu, busy in read_json(activity).items()}
     if pmu_times:
         counters['pmu_times_ns'] = counter_times
     return dict(status=status, instructions=instructions, pmu_active_percent=active_percent, seconds=seconds, max_rss_kib=rss, tree_peak_mib=peak[1] if peak else '', wrapper_seconds=f'{elapsed:.6f}', directory=directory, **counters)

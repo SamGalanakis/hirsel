@@ -205,6 +205,64 @@ The command validates the run and prints its commit and the reason it was
 promoted. It also accepts a clean wrapper run directory and updates
 `~/.local/share/hirsel-board/last-complete.json` atomically.
 
+## Run the on-demand comparisons
+
+Use a clean candidate and the pinned peer checkouts. Fetch locked Cargo
+dependencies before starting. The output directory must be new.
+
+```sh
+python3 bench/awfy/board.py "$out" --comparison \
+  --build-cpus 8-11 --measure-cpus 16-19 \
+  --awfy "$awfy" --resid "$resid" --goose "$goose" --langarena "$langarena" \
+  --units-deadline-seconds "$units_budget"
+```
+
+Repeat `--comparison-family` to select among `compile`, `check`,
+`runtime-memory`, `image-size`, `checkbox` and `units`. A selected run can
+complete its requested rows. The full board requires all six families.
+`comparison.json` holds raw samples, modes, revision and peer pins.
+`comparison.md` shows raw values, ratios, coverage and refusal reasons.
+Validate and render the evidence without building or measuring again with
+`python3 bench/awfy/board.py render-comparison "$out" --revision "$commit"`.
+
+Builds use up to four jobs with an 8 GiB allocation. The board measures
+under the regime lock followed by the board lock, outside 02:45–04:00 local
+time, with a 2 GiB cap on each measured process tree. CPU 16 runs serial
+measurements. Checkbox uses CPUs 16 and 17 for server and loader. Cargo
+runs inside the board's process-tree scope. Instructions and cycles count
+user-space CPU for the whole measured tree. Cycles and elapsed seconds are
+single observations.
+
+| Row | Metric boundary and qualification |
+| --- | --- |
+| LangArena dev compile | Whole-suite Cranelift, Cargo dev and Goose debug C build/link. The one-iteration Spectralnorm checksum is 1,051,192,944 cold and 1,051,192,945 after a one-body edit. Hirsel starts with a published product and reports Cranelift library objects written. Goose rebuilds the suite on the edit. |
+| LangArena check | The same staged application and edit, with dedicated check stores. Hirsel must check application bodies and accept the entry and source manifest. Cargo must produce fresh application metadata. Goose checks the suite and its imports in full on both passes. |
+| LangArena release compile | Whole-suite LLVM, Cargo release and Goose emission plus Clang compile/link, with the same Spectralnorm oracles. |
+| AWFY original-14 release compile | Original harness only, with the board's LLVM and Goose/Clang flags and an isolated dependency-free Cargo package for the Rust port. Each executable must pass all 14 reference workloads. The edit adds an exact `board-edit` marker to the verified-success line. |
+| Peak RSS | Whole-process peak in KiB from the verified runtime samples. The suite ratios cover 14/14, 8/8 and 50/50 pairs for each peer. The aggregate geomean uses all 72 underlying ratios once per peer. Missing or censored pairs reduce coverage and withhold that peer's aggregate. |
+| Checkbox memory | Fresh private stores with the same verified seed and 64 live connections per arm. Each subscription mode reports live `smaps_rollup` RSS and process `VmHWM`, both in bytes. Rust is the server peer. |
+| AWFY image size | Bytes after GNU `strip --strip-all -R .comment` on a disposable copy of each verified original-14 harness. There is one image per peer. |
+| Units A1 | Hirsel/Tokio passing offered ceilings, measured goodput and scheduled-arrival latency by filesystem, population and SHA-256 backend. Matched offers separately compare CPU µs per verified turn and latency with the same offered rate and qualified sync grouping. |
+| Units regimes | Hirsel/Tokio work rates and relative width-1 speedups at each verified case, grain and worker width. Checkbox has native grain. Arc and Checkbox expose one runnable unit. |
+
+Compile and check receipts include the command, dedicated cache mode, active
+PMU counters, elapsed seconds and peak RSS. The edited Hirsel and Cargo arms
+reuse their own cold application state. Cargo primes dependencies before
+measurement and clears application artifacts. Goose performs a full build
+or check for the edit.
+
+The units owner runs outside the board's lock holds. Supply
+`--units-receipt /path/to/fair.json` with the producer's raw pair and trial
+files beside it. The board requires a full same-revision export with the
+exact cell inventory, an eight-worker topology, the 2 GiB measurement cap,
+the build allocation and the common durable sync policy. The receipt
+config records those limits as `measurement_memory_limit_bytes`,
+`build_memory_limit_bytes`, `build_cpus`, `build_jobs` and `sync_policy`.
+Without an import, the board invokes the same-revision producer when the
+units owner authorizes its separate host allocation and caps with
+`HIRSEL_BOARD_UNITS_AUTHORIZED=1`. Missing owner evidence leaves the affected
+cells pending. Only an ordinary nightly run supplies a promotion receipt.
+
 ## Qualify a runtime cycle claim
 
 Run `receipt.py sample` with the base toolchain, its build directory, the

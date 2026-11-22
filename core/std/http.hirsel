@@ -2759,6 +2759,32 @@ fn trailer(c: u8, mut d: Decoder) {
     }
 }
 
+/// Returns the number of consecutive payload bytes allowed by the decoder.
+/// None indicates framing or completion. A zero window requires EOF.
+pub fn body_payload(d: Decoder) -> Option[u64] {
+    match d.state {
+        Fixed => Some(d.remaining),
+        ChunkData => Some(d.remaining),
+        UntilEof => Some(d.body_max - d.decoded),
+        _ => None,
+    }
+}
+
+/// Accounts for payload read directly into output, within the current window.
+pub fn advance_body_payload(mut d: Decoder, n: u64) {
+    d.decoded += n
+    if d.state != UntilEof {
+        d.remaining -= n
+        if d.remaining == 0 {
+            d.state = if d.state == Fixed {
+                Finished
+            } else {
+                DataCr
+            }
+        }
+    }
+}
+
 /// Consumes a fresh input fragment, returning one body span at a time. used
 /// counts bytes consumed from THIS call's input, including framing bytes.
 /// Pass its unconsumed suffix to the next call. More needs more network bytes;
@@ -2784,29 +2810,15 @@ pub fn decode(mut d: Decoder, b: Bytes) -> BodyProgress {
             }
             return More
         }
-        if d.state == UntilEof {
-            let n = order.min(d.body_max - d.decoded, list.len(b))
+        if let Some(window) = body_payload(d) {
+            let start = d.used
+            let n = order.min(window, list.len(b) - start)
             if n == 0 {
                 fail(mut d, 413)
                 continue
             }
-            d.used = n
-            d.decoded += n
-            return Data(http1.Span(start: 0, end: n))
-        }
-        if d.state == Fixed || d.state == ChunkData {
-            let start = d.used
-            let n = order.min(d.remaining, list.len(b) - start)
             d.used += n
-            d.remaining -= n
-            d.decoded += n
-            if d.remaining == 0 {
-                if d.state == Fixed {
-                    d.state = Finished
-                } else {
-                    d.state = DataCr
-                }
-            }
+            advance_body_payload(mut d, n)
             return Data(http1.Span(start, end: d.used))
         }
         let c = b[d.used]

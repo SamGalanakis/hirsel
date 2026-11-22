@@ -40,11 +40,16 @@ The client refuses other transfer codings.
 capacity and returns the number of bytes appended. Zero means body EOF.
 A buffer with no spare capacity, such as a fresh `list.new()`, returns
 `NoSpace` without reading; reserve room first with `list.with_capacity`.
+After `NoSpace`, supply another buffer or clear the current one to resume.
+Pass a buffer with spare capacity on the call that checks for EOF.
 `body_max` bounds the total decoded bytes, including for close-delimited
-bodies. The reader stores at most 8192 wire bytes and 8192 bytes of head,
-with up to 64 fields in one head. It consumes chunk extensions and trailers
-without returning them as body data. Read to EOF before starting another
-request. The client keeps bytes read ahead for the next exchange and
+bodies. The connection copies payload already buffered during the head read
+once. It receives subsequent payload directly into the caller's buffer,
+limited by the current payload span and spare capacity. Body reads allocate
+no storage. The reader has 8192 bytes of wire storage and 8192 bytes of head
+storage, with up to 64 fields in one head. It consumes chunk extensions and
+trailers without returning them as body data. Read to EOF before starting
+another request. The client keeps bytes read ahead for the next exchange and
 reports whether `reusable(connection)` permits it. Close-delimited bodies
 and `Connection: close` end reuse.
 

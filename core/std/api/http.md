@@ -74,6 +74,12 @@ unconsumed suffix to the next call. A `Data` result can leave framing bytes for
 the next call. `More` consumes the input and needs more bytes; `Done` preserves
 the pipelined tail. `body_eof(mut decoder)` refuses an incomplete body.
 
+`body_payload(decoder)` reports the current consecutive payload window.
+It gives `None` when framing or completion needs `decode`, and `Some(0)`
+when a close-delimited body has reached its limit and requires EOF.
+`advance_body_payload(mut decoder, n)` accounts for payload delivered
+directly into output. Call it only with a byte count within that window.
+
 Chunk lines include CRLF in their 1024-byte bound. Chunk extensions follow RFC
 9112 section 7.1.1's token and quoted-string syntax, then are discarded. Trailer
 fields follow strict head-field syntax with CRLF and share the original head's

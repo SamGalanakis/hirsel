@@ -329,6 +329,35 @@ pub fn parse_head(mut r: Reader, head_request: bool, body_max: u64) -> Result[bo
     }
 }
 
+fn read_staged(mut r: Reader, mut decoder: http.Decoder, mut into: Bytes, room: u64) -> Result[BodyRead, Error] {
+    loop {
+        let stop = r.at + order.min(room, list.len(r.input) - r.at)
+        let input = list.slice(r.input, r.at, stop)
+        let progress = http.decode(mut decoder, input)
+        r.at += decoder.used
+        match progress {
+            Data(span) => {
+                let _ = list.append(mut into, list.slice(input, span.start, span.end))
+                return Ok(Data(span.end - span.start))
+            },
+            Done => return Ok(End),
+            Failed(e) => return Error(framing_error(e)),
+            More => {
+                if r.at != list.len(r.input) {
+                    continue
+                }
+                if r.eof {
+                    return match http.body_eof(mut decoder) {
+                        Ok(()) => Ok(End),
+                        Error(e) => Error(framing_error(e)),
+                    }
+                }
+                return Ok(NeedInput)
+            },
+        }
+    }
+}
+
 /// Appends one decoded span or reports the next input requirement.
 pub fn read_buffered(mut r: Reader, mut into: Bytes) -> Result[BodyRead, Error] {
     let room = list.capacity(into) - list.len(into)
@@ -344,38 +373,14 @@ pub fn read_buffered(mut r: Reader, mut into: Bytes) -> Result[BodyRead, Error] 
         }
     }
     let mut decoder = take d
-    loop {
-        let stop = r.at + order.min(room, list.len(r.input) - r.at)
-        let input = list.slice(r.input, r.at, stop)
-        let progress = http.decode(mut decoder, input)
-        r.at += decoder.used
-        match progress {
-            Data(span) => {
-                let _ = list.append(mut into, list.slice(input, span.start, span.end))
-                r.body = Some(take decoder)
-                return Ok(Data(span.end - span.start))
-            },
-            Done => return Ok(End),
-            Failed(e) => {
-                r.body = Some(take decoder)
-                return Error(framing_error(e))
-            },
-            More => {
-                if r.at != list.len(r.input) {
-                    continue
-                }
-                if r.eof {
-                    if let Error(e) = http.body_eof(mut decoder) {
-                        r.body = Some(take decoder)
-                        return Error(framing_error(e))
-                    }
-                    return Ok(End)
-                }
-                r.body = Some(take decoder)
-                return Ok(NeedInput)
-            },
-        }
+    let progress = read_staged(mut r, mut decoder, mut into, room)
+    match progress {
+        Ok(End) => {},
+        _ => {
+            r.body = Some(take decoder)
+        },
     }
+    progress
 }
 
 type Phase: key = Idle | Upload | Download | Closed
@@ -547,18 +552,21 @@ pub fn write(mut c: Connection, data: Bytes) -> Result[(), Error] waits {
     Ok(())
 }
 
-fn receive(mut c: Connection) -> Result[(), Error] waits {
+fn receive_into(mut input: ReadHalf, mut into: Bytes, max: u64, clock: Clock, deadline: u64) -> Result[u64, Error] waits {
+    match host.recv_bounded(mut input, mut into, max, At(clock, deadline)) {
+        Ok(n) => Ok(n),
+        Error(TimedOut) => Error(Deadline),
+        Error(Aborted) => Error(Cancelled),
+        Error(e) => Error(Receive(e)),
+    }
+}
+
+fn receive_staged(mut c: Connection, allowance: u64) -> Result[(), Error] waits {
     check_deadline(mut c)?
     compact(mut c.wire)
-    let max = 8192 - list.len(c.wire.input)
-    match host.recv_bounded(mut c.input, mut c.wire.input, max, At(c.clock, c.deadline)) {
-        Ok(0) => end_input(mut c.wire),
-        Ok(_) => {},
-        Error(e) => return Error(match e {
-            TimedOut => Deadline,
-            Aborted => Cancelled,
-            _ => Receive(e),
-        }),
+    let max = order.min(allowance, 8192 - list.len(c.wire.input))
+    if receive_into(mut c.input, mut c.wire.input, max, c.clock, c.deadline)? == 0 {
+        end_input(mut c.wire)
     }
     check_deadline(mut c)
 }
@@ -585,7 +593,7 @@ pub fn finish_request(mut c: Connection, body_max: u64) -> Result[(), Error] wai
             c.phase = Download
             return Ok(())
         }
-        receive(mut c)?
+        receive_staged(mut c, 8192)?
     }
 }
 
@@ -594,19 +602,27 @@ pub fn head(c: Connection) -> View[ResponseHead] in c {
     response_head(c.wire)
 }
 
-/// Reads bounded decoded raw into spare output capacity. Zero is body EOF.
+/// Appends decoded bytes to caller-owned spare capacity. Zero is body EOF.
 pub fn read(mut c: Connection, mut into: Bytes) -> Result[u64, Error] waits {
     if c.phase != Download {
         return Error(State)
     }
-    if list.len(into) == list.capacity(into) {
+    let original_len = list.len(into)
+    let room = list.capacity(into) - original_len
+    if room == 0 {
         return Error(NoSpace)
     }
     c.phase = Closed
+    let current = replace(mut c.wire.body, None)
+    let Some(take d) = take current else {
+        return Error(State)
+    }
+    let mut decoder = take d
     loop {
         check_deadline(mut c)?
-        match read_buffered(mut c.wire, mut into)? {
+        match read_staged(mut c.wire, mut decoder, mut into, room)? {
             Data(n) => {
+                c.wire.body = Some(take decoder)
                 c.phase = Download
                 return Ok(n)
             },
@@ -616,8 +632,35 @@ pub fn read(mut c: Connection, mut into: Bytes) -> Result[u64, Error] waits {
                 }
                 return Ok(0)
             },
-            NeedInput => receive(mut c)?,
+            NeedInput => {},
         }
+        if let Some(window) = http.body_payload(decoder) {
+            if window != 0 {
+                let received = receive_into(mut c.input, mut into, order.min(window, room), c.clock, c.deadline)
+                let n = match received {
+                    Ok(n) => n,
+                    Error(e) => {
+                        list.truncate(mut into, original_len)
+                        return Error(e)
+                    },
+                }
+                if let Error(e) = check_deadline(mut c) {
+                    list.truncate(mut into, original_len)
+                    return Error(e)
+                }
+                if n == 0 {
+                    end_input(mut c.wire)
+                    continue
+                }
+                http.advance_body_payload(mut decoder, n)
+                c.wire.body = Some(take decoder)
+                c.phase = Download
+                return Ok(n)
+            }
+        }
+        // A framing byte can open a payload window. Read it alone so no
+        // payload lands in staging. At the EOF limit it can only be overflow.
+        receive_staged(mut c, 1)?
     }
 }
 

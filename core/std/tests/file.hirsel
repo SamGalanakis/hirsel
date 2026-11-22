@@ -257,10 +257,10 @@ fn handoff_replies(replies: Inbox[(u64, u64)]) -> (bool, u64) waits {
     (first == 14 && second == 22 && a <= b, b)
 }
 
-// The modeled sleep preserves the peer's reply order. The native FIFO
-// fixture below compares the two units' reply times against a real deadline.
-// expect: run peer_replies_during_sleep(network) = true
-fn peer_replies_during_sleep(_net: Net, clock: Clock, tasks: Tasks) -> bool waits {
+// The sleep preserves the peer's reply order. The native FIFO fixture
+// below compares the two units' reply times against a real deadline.
+// expect: run peer_replies_during_sleep(clock, tasks) = true
+fn peer_replies_during_sleep(clock: Clock, tasks: Tasks) -> bool waits {
     let (take peer, requests, replies) = handoff_start(clock, tasks)
     let start = host.mono_ns(clock)
     result.unwrap(conn.send(requests, 7))

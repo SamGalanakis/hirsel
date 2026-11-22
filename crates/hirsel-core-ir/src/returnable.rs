@@ -450,6 +450,11 @@ struct Shape {
     sites: BTreeMap<usize, Site>,
     /// Values kept in the record across a site.
     demoted: Vec<ValueId>,
+    /// The demoted values a resume at each site reads: what is live after it
+    /// and what its call takes, less the call's own results. A park copies them
+    /// into the record and the resume copies them back; between waits they
+    /// live in frame slots, so a wait that does not park touches no record.
+    kept: BTreeMap<usize, Vec<ValueId>>,
     /// Addresses evaluated again at each resume, bases first.
     reevaluated: BTreeMap<usize, Vec<AddressId>>,
     /// Addresses only the site's call takes, built afresh at each resume.
@@ -656,15 +661,18 @@ fn shape(
         Ok(())
     };
     let mut cloned = BTreeMap::new();
+    let mut kept = BTreeMap::new();
     for (&k, set) in &live {
         let Inst::Call { call } = body.insts[k] else {
             unreachable!("a site is a call")
         };
         let mut list = vec![];
+        let mut keep = BTreeSet::new();
         for name in (0..nv + body.addresses.len()).filter(|&n| has(set, n)) {
             if name < nv {
                 if !prologue[name] {
                     demote[name] = true;
+                    keep.insert(name);
                 }
             } else {
                 needed(AddressId((name - nv) as u32), &mut list)?;
@@ -679,10 +687,14 @@ fn shape(
             && !prologue[v.index()]
         {
             demote[v.index()] = true;
+            keep.insert(v.index());
         }
         for arg in site.args.get(&body.pools.args).unwrap_or_default() {
             match *arg {
-                Arg::Value(v) if !prologue[v.index()] => demote[v.index()] = true,
+                Arg::Value(v) if !prologue[v.index()] => {
+                    demote[v.index()] = true;
+                    keep.insert(v.index());
+                }
                 Arg::Value(_) => {}
                 Arg::Address(a) if list.contains(&a) => {}
                 Arg::Address(a) => {
@@ -699,6 +711,7 @@ fn shape(
                         for v in values {
                             if !prologue[v.index()] {
                                 demote[v.index()] = true;
+                                keep.insert(v.index());
                             }
                         }
                         chain.push(x);
@@ -714,6 +727,10 @@ fn shape(
         }
         addresses.insert(k, list);
         cloned.insert(k, fresh);
+        for r in site.results.get(&body.pools.values).unwrap_or_default() {
+            keep.remove(&r.index());
+        }
+        kept.insert(k, keep.into_iter().map(|v| ValueId(v as u32)).collect());
     }
     // An address whose operands are kept in the record is evaluated where it
     // was, from reloaded operands: that needs one evaluation.
@@ -792,6 +809,7 @@ fn shape(
     Ok(Shape {
         sites,
         demoted,
+        kept,
         reevaluated: addresses,
         cloned,
         slot_at,
@@ -1048,19 +1066,47 @@ fn build(old: &Body, s: &Shape, root: bool, results_ty: &[Ty], calls: &Calls) ->
         b.emit(old.insts[k].clone());
     }
     let skip: BTreeSet<usize> = pointers.into_iter().collect();
+    // A demoted value lives in a frame slot of its own, which the engine can
+    // keep in a register; its place in the record is written only by a park.
+    let mut kept_at: HashMap<ValueId, (AddressId, AddressId)> = HashMap::new();
     for &v in &s.demoted {
+        let ty = PlaceTy::Value(old.values[v.index()]);
         let p = b.at(rec, s.value_at[&v]);
-        let a = b.address(
-            AddressBase::Value(p),
-            &[],
-            PlaceTy::Value(old.values[v.index()]),
-        );
-        b.emit(Inst::Address {
-            address: a,
-            fail: None,
-        });
-        b.home.insert(v, a);
+        let in_record = b.address(AddressBase::Value(p), &[], ty);
+        b.n.slots.push(ty);
+        let slot = SlotId(b.n.slots.len() as u32 - 1);
+        let home = b.address(AddressBase::Slot(slot), &[], ty);
+        for address in [in_record, home] {
+            b.emit(Inst::Address {
+                address,
+                fail: None,
+            });
+        }
+        b.home.insert(v, home);
+        kept_at.insert(v, (home, in_record));
     }
+    // Copy the values a resume at site `k` reads between their frame slots and
+    // the record.
+    let copy_kept = |b: &mut Build, k: usize, to_record: bool| {
+        for v in &s.kept[&k] {
+            let (home, in_record) = kept_at[v];
+            let (from, to) = if to_record {
+                (home, in_record)
+            } else {
+                (in_record, home)
+            };
+            let x = b.value(old.values[v.index()]);
+            b.emit(Inst::Read {
+                result: x,
+                address: from,
+                mode: ReadMode::Bits,
+            });
+            b.emit(Inst::Store {
+                address: to,
+                value: x,
+            });
+        }
+    };
     let sites: Vec<(usize, Site)> = s.sites.iter().map(|(&k, &v)| (k, v)).collect();
     let number: HashMap<usize, u64> = sites
         .iter()
@@ -1212,6 +1258,7 @@ fn build(old: &Body, s: &Shape, root: bool, results_ty: &[Ty], calls: &Calls) ->
                     address: own,
                     value: zero,
                 });
+                copy_kept(&mut b, k, false);
                 for &a in &s.reevaluated[&k] {
                     let fail = old.insts.iter().find_map(|x| match *x {
                         Inst::Address { address, fail } if address == a => Some(fail),
@@ -1297,6 +1344,7 @@ fn build(old: &Body, s: &Shape, root: bool, results_ty: &[Ty], calls: &Calls) ->
                     },
                     None,
                 );
+                copy_kept(&mut b, k, true);
                 b.emit(Inst::Store {
                     address: own,
                     value: site_const[number[&k] as usize - 1],

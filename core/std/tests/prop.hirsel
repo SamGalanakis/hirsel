@@ -1,0 +1,124 @@
+// test-of: std.prop
+// test-reason: replay laws inspect the consumed tape and the private source flags.
+fn law_returns_error(value: u64) -> Result[(), String] {
+    Error(string.from("always false"))
+}
+
+fn law_passes(value: u64) -> Result[(), String] {
+    Ok(())
+}
+
+fn show_u64(value: u64, mut out: String) {
+    string.push_u64(mut out, value)
+}
+
+fn prop_failure_text(take run: Result[Result[Outcome, Causes], Capacity], expected: String) -> bool {
+    if let Ok(Error(causes)) = take run {
+        for cause in causes {
+            if let Fail(text) = cause.kind {
+                return text == expected
+            }
+            return false
+        }
+    }
+    false
+}
+
+// Catches a noncanonical byte encoding or a decoded case index or word in the wrong position.
+// expect: run prop_token_vector() = true
+fn prop_token_vector() -> bool {
+    let g = make(fn(mut s: Source) -> u64 {
+        word(mut s) + word(mut s) + word(mut s)
+    }, show_u64)
+    let c = replay(config(), "AQcDAwCsAg==")
+    if let Falsified(result) = search(c, g, law_returns_error) {
+        let mut text = string.new()
+        token(result, mut text)
+        return text == "AQcDAwCsAg==" && result.index == 7 && result.rendered == "303" && list.len(result.tape) == 3 && result.tape[0].value == 3 && result.tape[1].value == 0 && result.tape[2].value == 300
+    }
+    false
+}
+
+// Catches using the first case's stream or swapping the Pcg seed words.
+// expect: run prop_case_seed() = 0xc4f5a58656eef510
+fn prop_case_seed() -> u64 {
+    let mut c = config()
+    c.seed = 1
+    let empty: Option[List[u64]] = None
+    let g = make(word, show_u64)
+    if let Some((value, _)) = generate(c, g, 2, empty) {
+        return value
+    }
+    0
+}
+
+// A draw of 9 against bound 5 must record the normalized choice and render zero.
+// expect: run prop_replay_misalignment() = true
+fn prop_replay_misalignment() -> bool {
+    let g = make(fn(mut s: Source) -> u64 {
+        below(mut s, 5)
+    }, show_u64)
+    if let Falsified(result) = search(replay(config(), "AQABCQ=="), g, law_returns_error) {
+        return result.rendered == "0" && list.len(result.tape) == 1 && result.tape[0].value == 0 && result.tape[0].limit == 5
+    }
+    false
+}
+
+// Catches running the always-false law with a missing second choice.
+// expect: run prop_replay_overrun() = true
+fn prop_replay_overrun() -> bool {
+    let g = make(fn(mut s: Source) -> u64 {
+        word(mut s) + word(mut s)
+    }, show_u64)
+    let short_run = isolate(fn() -> Outcome {
+        search(replay(config(), "AQABAQ=="), g, law_returns_error)
+    })
+    if !prop_failure_text(take short_run, "prop: replay token no longer fails") {
+        return false
+    }
+    if let Falsified(result) = search(replay(config(), "AQACAQI="), g, law_returns_error) {
+        return result.rendered == "3" && list.len(result.tape) == 2
+    }
+    false
+}
+
+// Catches classifying a refused byte bound as a failing law.
+// expect: run prop_config_bytes_refused() = true
+fn prop_config_bytes_refused() -> bool {
+    let trial = bound bytes 4096 {
+        let g = make(word, show_u64)
+        let mut c = config()
+        c.case_bytes = 8192
+        let run = isolate(fn() -> Outcome {
+            search(c, g, law_returns_error)
+        })
+        prop_failure_text(take run, "prop: config: case_bytes 8192 refused")
+    }
+    match trial {
+        Ok(ok) => ok,
+        Error(_) => false,
+    }
+}
+
+// Catches accepting a replay that the law now passes.
+// expect: run prop_stale_replay() = true
+fn prop_stale_replay() -> bool {
+    let g = make(word, show_u64)
+    let run = isolate(fn() -> Outcome {
+        search(replay(config(), "AQABCQ=="), g, law_passes)
+    })
+    prop_failure_text(take run, "prop: replay token no longer fails")
+}
+
+// Catches calling the law outside its own step bound.
+// expect: run prop_case_steps() = true
+fn prop_case_steps() -> bool {
+    let mut c = config()
+    c.case_steps = 0
+    c.cases = 1
+    let g = make(word, show_u64)
+    if let Falsified(result) = search(c, g, law_passes) {
+        return result.message == "OutOfTime"
+    }
+    false
+}

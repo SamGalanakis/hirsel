@@ -1,7 +1,6 @@
 # Prop
 
-[API overview](../API.md). Specified, not built: every fence below is `hirsel unbuilt`.
-The design record is roadmap item 13a.
+[API overview](../API.md). The design record is roadmap item 13a.
 
 `std.prop` checks a law against generated values. When the law fails, it shrinks
 the failing case to a minimal one. A generator draws its choices from an explicit
@@ -17,10 +16,10 @@ test's ([PROG-4](../../../docs/spec/programs.md#prog-4-tests)).
 
 ## Generators
 
-```hirsel unbuilt
+```hirsel
 pub opaque type Source
 pub type Gen[T] { draw: own fn(mut Source) -> T, show: own fn(T, mut String) }
-pub fn make[T](draw: own fn(mut Source) -> T, show: own fn(T, mut String)) -> Gen[T]
+pub fn make[T](take draw_fn: own fn(mut Source) -> T, take show_fn: own fn(T, mut String)) -> Gen[T]
 pub fn draw[T](mut s: Source, g: Gen[T]) -> T
 ```
 
@@ -114,22 +113,28 @@ Rendering:
 
 ## Running a property
 
-```hirsel unbuilt
+```hirsel
 pub type Config {
     seed: u64, cases: u64, max_choices: u64, max_rejects: u64, max_shrinks: u64,
     gen_steps: u64, case_steps: u64, case_bytes: u64,
     sim_seed: Option[u64], replay: Option[String]
 }
 pub fn config() -> Config
-pub fn replay(take c: Config, token: String) -> Config
-pub type Case[T] { value: T, index: u64, world_seed: u64, tasks: Tasks }
-pub type Outcome = Passed { cases: u64 } | GaveUp { cases: u64, rejected: u64 } | Falsified(Found)
+pub fn replay(take c: Config, text: String) -> Config
+pub type Outcome = Passed(u64) | GaveUp(u64, u64) | Falsified(Found)
 pub opaque type Found
 pub fn search[T](c: Config, g: Gen[T], law: own fn(T) -> Result[(), String]) -> Outcome
 pub fn check[T](c: Config, g: Gen[T], law: own fn(T) -> Result[(), String]) -> Result[(), ()]
-pub fn check_tasks[T: send](tasks: Tasks, c: Config, g: Gen[T], law: fn(take Case[T]) -> Result[(), String] waits) -> Result[(), ()] waits
 pub fn report(f: Found, mut out: String)
 pub fn token(f: Found, mut out: String)
+```
+
+`Passed(cases)` counts valid cases, and `GaveUp(cases, rejected)` also counts
+discarded cases.
+
+```hirsel unbuilt
+pub type Case[T] { value: T, index: u64, world_seed: u64, tasks: Tasks }
+pub fn check_tasks[T: send](tasks: Tasks, c: Config, g: Gen[T], law: fn(take Case[T]) -> Result[(), String] waits) -> Result[(), ()] waits
 pub fn world_seed(sim: u64, index: u64) -> u64
 ```
 

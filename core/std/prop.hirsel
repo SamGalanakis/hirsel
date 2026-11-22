@@ -1,0 +1,432 @@
+type Choice {
+    value: u64,
+    limit: u64
+}
+
+type Span {
+    label: u64,
+    start: u64,
+    end: u64
+}
+
+pub opaque type Source {
+    pcg: rand.Pcg,
+    prefix: Option[List[u64]],
+    tape: List[Choice],
+    spans: List[Span],
+    max_choices: u64,
+    overrun: bool,
+    invalid: bool
+}
+
+pub type Gen[T] {
+    draw: own fn(mut Source) -> T,
+    show: own fn(T, mut String)
+}
+
+pub fn make[T](take draw_fn: own fn(mut Source) -> T, take show_fn: own fn(T, mut String)) -> Gen[T] {
+    Gen(draw: take draw_fn, show: take show_fn)
+}
+
+pub fn draw[T](mut s: Source, g: Gen[T]) -> T {
+    (g.draw)(mut s)
+}
+
+fn source(seed: u64, index: u64, max_choices: u64, prefix: Option[List[u64]]) -> Source {
+    let replay_prefix: Option[List[u64]] = clone(prefix)
+    Source(pcg: rand.new(seed, index), prefix: take replay_prefix, tape: list.new(), spans: list.new(), max_choices, overrun: false, invalid: false)
+}
+
+// After a discard, return zero without advancing either input stream.
+fn ready(mut s: Source) -> bool {
+    if s.overrun || s.invalid {
+        return false
+    }
+    let i = list.len(s.tape)
+    let past_prefix = match s.prefix {
+        Some(values) => i >= list.len(values),
+        None => false,
+    }
+    s.overrun = i >= s.max_choices || past_prefix
+    !s.overrun
+}
+
+fn replay_choice(s: Source, limit: u64) -> Option[u64] {
+    if let Some(values) = s.prefix {
+        let value = values[list.len(s.tape)]
+        return Some(if limit == 0 || value < limit {
+            value
+        } else {
+            0
+        })
+    }
+    None
+}
+
+fn record(mut s: Source, value: u64, limit: u64) -> u64 {
+    list.push(mut s.tape, Choice(value, limit))
+    value
+}
+
+pub fn below(mut s: Source, n: u64) -> u64 {
+    if !ready(mut s) {
+        return 0
+    }
+    if n == 0 {
+        let _ = string.as_bytes("")[0]
+    }
+    if let Some(value) = replay_choice(s, n) {
+        return record(mut s, value, n)
+    }
+    let limit = if rand.below(mut s.pcg, 4) == 0 {
+        order.min(n, 16)
+    } else {
+        n
+    }
+    let value = rand.below(mut s.pcg, limit)
+    record(mut s, value, n)
+}
+
+pub fn word(mut s: Source) -> u64 {
+    if !ready(mut s) {
+        return 0
+    }
+    let value = match replay_choice(s, 0) {
+        Some(value) => value,
+        None => rand.next(mut s.pcg),
+    }
+    record(mut s, value, 0)
+}
+
+pub fn weighted(mut s: Source, k: u64, n: u64) -> bool {
+    if !ready(mut s) {
+        return false
+    }
+    if n == 0 || k > n {
+        let _ = string.as_bytes("")[0]
+    }
+    let value = match replay_choice(s, 2) {
+        Some(value) => value,
+        None => if rand.below(mut s.pcg, n) < k {
+            1
+        } else {
+            0
+        },
+    }
+    record(mut s, value, 2) != 0
+}
+
+pub fn span[T](mut s: Source, label: u64, body: scoped fn(mut Source) -> T) -> T {
+    if s.invalid || s.overrun {
+        return body(mut s)
+    }
+    let i = list.len(s.spans)
+    let start = list.len(s.tape)
+    list.push(mut s.spans, Span(label, start, end: start))
+    let value = body(mut s)
+    s.spans[i].end = list.len(s.tape)
+    take value
+}
+
+pub fn reject(mut s: Source) {
+    s.invalid = true
+}
+
+pub type Config {
+    seed: u64,
+    cases: u64,
+    max_choices: u64,
+    max_rejects: u64,
+    max_shrinks: u64,
+    gen_steps: u64,
+    case_steps: u64,
+    case_bytes: u64,
+    sim_seed: Option[u64],
+    replay: Option[String]
+}
+
+pub fn config() -> Config {
+    Config(seed: 0, cases: 100, max_choices: 4096, max_rejects: 1000, max_shrinks: 1000, gen_steps: 1000000, case_steps: 10000000, case_bytes: 262144, sim_seed: None, replay: None)
+}
+
+pub fn replay(take c: Config, text: String) -> Config {
+    let mut next = take c
+    next.replay = Some(string.from(text))
+    take next
+}
+
+pub type Outcome = Passed(u64) | GaveUp(u64, u64) | Falsified(Found)
+
+pub opaque type Found {
+    index: u64,
+    tape: List[Choice],
+    cases: u64,
+    shrinks: u64,
+    sim_seed: Option[u64],
+    rendered: String,
+    message: String
+}
+
+type Replay {
+    index: u64,
+    values: List[u64]
+}
+
+fn put_uleb(mut data: Bytes, n: u64) {
+    let mut left = n
+    while left >= 128 {
+        list.push(mut data, int.narrow((left & 127) | 128))
+        left >>= 7
+    }
+    list.push(mut data, int.narrow(left))
+}
+
+fn read_uleb(data: Bytes, mut at: u64) -> Option[u64] {
+    let mut n: u64 = 0
+    for i in 0u64 .. 10 {
+        if at >= list.len(data) {
+            return None
+        }
+        let byte = data[at]
+        at += 1
+        if i == 9 && byte > 1 {
+            return None
+        }
+        let chunk: u64 = int.widen(byte & 127)
+        n |= chunk << (i * 7)
+        if byte < 128 {
+            return if i != 0 && byte == 0 {
+                None
+            } else {
+                Some(n)
+            }
+        }
+    }
+    None
+}
+
+fn bad_token() -> Never {
+    fail("prop: config: bad replay token")
+}
+
+fn parse_token(text: String, max_choices: u64) -> Replay {
+    let data = match base64.decode(string.as_bytes(text)) {
+        Some(take value) => take value,
+        None => bad_token(),
+    }
+    if list.len(data) == 0 || data[0] != 1 {
+        bad_token()
+    }
+    let mut at: u64 = 1
+    let index = match read_uleb(data, mut at) {
+        Some(n) => n,
+        None => bad_token(),
+    }
+    let count = match read_uleb(data, mut at) {
+        Some(n) => n,
+        None => bad_token(),
+    }
+    if count > max_choices || count > list.len(data) - at {
+        bad_token()
+    }
+    let mut values: List[u64] = list.with_capacity(count)
+    for _ in 0u64 .. count {
+        match read_uleb(data, mut at) {
+            Some(n) => list.push(mut values, n),
+            None => bad_token(),
+        }
+    }
+    if at != list.len(data) {
+        bad_token()
+    }
+    Replay(index, values: take values)
+}
+
+pub fn token(f: Found, mut out: String) {
+    let mut data: Bytes = list.new()
+    list.push(mut data, 1u8)
+    put_uleb(mut data, f.index)
+    put_uleb(mut data, list.len(f.tape))
+    for choice in f.tape {
+        put_uleb(mut data, choice.value)
+    }
+    string.push(mut out, base64.encode_string(data))
+}
+
+fn push_excerpt(mut out: String, text: String) {
+    if string.byte_len(text) <= 1024 {
+        string.push(mut out, text)
+        return
+    }
+    let data = string.as_bytes(text)
+    let mut end: u64 = 1021
+    while data[end] & 0xc0 == 0x80 {
+        end -= 1
+    }
+    string.push(mut out, string.slice(text, 0, end))
+    string.push(mut out, "…")
+}
+
+fn excerpt(text: String) -> String {
+    let mut out = string.new()
+    push_excerpt(mut out, text)
+    take out
+}
+
+pub fn report(f: Found, mut out: String) {
+    string.push(mut out, "prop: falsified: ")
+    if let Some(seed) = f.sim_seed {
+        string.push(mut out, "sim seed ")
+        string.push_u64(mut out, seed)
+        string.push(mut out, "; ")
+    }
+    string.push(mut out, "reproduce: prop.replay(cfg, \"")
+    token(f, mut out)
+    string.push(mut out, "\"); after ")
+    string.push_u64(mut out, f.cases)
+    string.push(mut out, " cases, ")
+    string.push_u64(mut out, f.shrinks)
+    string.push(mut out, " shrinks: ")
+    string.push(mut out, f.rendered)
+    string.push(mut out, "; law: ")
+    string.push(mut out, f.message)
+}
+
+fn config_bytes(requested: u64) -> Never {
+    let mut text = string.from("prop: config: case_bytes ")
+    string.push_u64(mut text, requested)
+    string.push(mut text, " refused")
+    fail(take text)
+}
+
+fn generation_failed(index: u64) -> Never {
+    let mut text = string.from("prop: generator failed at case ")
+    string.push_u64(mut text, index)
+    fail(take text)
+}
+
+fn primary_message(causes: Causes) -> String {
+    for cause in causes {
+        return match cause.kind {
+            Fail(text) => excerpt(text),
+            Overflow => string.from("Overflow"),
+            Bounds => string.from("Bounds"),
+            Division => string.from("Division"),
+            Unwrap => string.from("Unwrap"),
+            Cancelled => string.from("Cancelled"),
+            Capacity(_) => string.from("Capacity"),
+            OutOfTime => string.from("OutOfTime"),
+        }
+    }
+    string.from("failed")
+}
+
+fn generate[T](cfg: Config, g: Gen[T], index: u64, prefix: Option[List[u64]]) -> Option[(T, Source)] {
+    let run = isolate(fn() -> Result[(T, Source), OutOfTime] {
+        bound steps cfg.gen_steps {
+            let mut s = source(cfg.seed, index, cfg.max_choices, prefix)
+            let value = draw(mut s, g)
+            (take value, take s)
+        }
+    })
+    match take run {
+        Ok(Ok(Ok((take value, take s)))) => Some((take value, take s)),
+        _ => None,
+    }
+}
+
+fn case_failure[T](cfg: Config, v: T, law: own fn(T) -> Result[(), String]) -> Option[String] {
+    let run = bound bytes cfg.case_bytes {
+        isolate(fn() -> Result[Result[(), String], OutOfTime] {
+            bound steps cfg.case_steps {
+                law(v)
+            }
+        })
+    }
+    match take run {
+        Error(_) => config_bytes(cfg.case_bytes),
+        Ok(Error(_)) => Some(string.from("Capacity")),
+        Ok(Ok(Error(causes))) => Some(primary_message(causes)),
+        Ok(Ok(Ok(Error(_)))) => Some(string.from("OutOfTime")),
+        Ok(Ok(Ok(Ok(Error(text))))) => Some(excerpt(text)),
+        Ok(Ok(Ok(Ok(Ok(()))))) => None,
+    }
+}
+
+fn render[T](cfg: Config, g: Gen[T], v: T) -> String {
+    let run = isolate(fn() -> Result[String, OutOfTime] {
+        bound steps cfg.case_steps {
+            let mut text = string.new()
+            (g.show)(v, mut text)
+            excerpt(text)
+        }
+    })
+    match take run {
+        Ok(Ok(Ok(take text))) => take text,
+        _ => string.from("<rendering failed>"),
+    }
+}
+
+fn found[T](cfg: Config, g: Gen[T], v: T, take s: Source, index: u64, cases: u64, take message: String) -> Found {
+    let Source(tape: take tape, ..) = take s
+    Found(index, tape: take tape, cases, shrinks: 0, sim_seed: cfg.sim_seed, rendered: render(cfg, g, v), message: take message)
+}
+
+fn replay_one[T](cfg: Config, g: Gen[T], law: own fn(T) -> Result[(), String], text: String) -> Outcome {
+    let Replay(index, values: take values) = parse_token(text, cfg.max_choices)
+    let prefix = Some(take values)
+    let Some((take value, take s)) = generate(cfg, g, index, prefix) else {
+        generation_failed(index)
+    }
+    if !s.overrun && !s.invalid {
+        if let Some(take message) = case_failure(cfg, value, law) {
+            return Falsified(found(cfg, g, value, take s, index, 1, take message))
+        }
+    }
+    fail("prop: replay token no longer fails")
+}
+
+pub fn search[T](c: Config, g: Gen[T], law: own fn(T) -> Result[(), String]) -> Outcome {
+    if let Some(text) = c.replay {
+        return replay_one(c, g, law, text)
+    }
+    let empty: Option[List[u64]] = None
+    let mut cases: u64 = 0
+    let mut rejected: u64 = 0
+    let mut index: u64 = 0
+    while cases < c.cases {
+        let Some((take value, take s)) = generate(c, g, index, empty) else {
+            generation_failed(index)
+        }
+        if s.overrun || s.invalid {
+            rejected += 1
+            if rejected > c.max_rejects {
+                return GaveUp(cases, rejected)
+            }
+        } else {
+            cases += 1
+            if let Some(take message) = case_failure(c, value, law) {
+                return Falsified(found(c, g, value, take s, index, cases, take message))
+            }
+        }
+        index += 1
+    }
+    Passed(cases)
+}
+
+pub fn check[T](c: Config, g: Gen[T], law: own fn(T) -> Result[(), String]) -> Result[(), ()] {
+    let outcome = search(c, g, law)
+    let mut out = string.new()
+    match outcome {
+        Passed(_) => return Ok(()),
+        GaveUp(cases, rejected) => {
+            string.push(mut out, "prop: gave up after ")
+            string.push_u64(mut out, cases)
+            string.push(mut out, " cases, ")
+            string.push_u64(mut out, rejected)
+            string.push(mut out, " rejected")
+        },
+        Falsified(f) => report(f, mut out),
+    }
+    fail(take out)
+}

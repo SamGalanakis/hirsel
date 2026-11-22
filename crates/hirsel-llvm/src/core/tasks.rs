@@ -196,7 +196,7 @@ impl FunctionEmitter<'_> {
                         }
                         Ty::Scalar(Scalar::U8) => zeroext(Type::I8, value.clone()),
                         Ty::Scalar(Scalar::U16) => zeroext(Type::Int(16), value.clone()),
-                        _ => word(value.clone()),
+                        _ => arg(ty(*t), value.clone()),
                     });
                 }
                 operands.push(word(at));

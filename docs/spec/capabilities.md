@@ -181,7 +181,7 @@ is no ambient clock, randomness, environment, input, thread identity or address,
 observable hash seed. No value depends on where a block is placed in memory, and no
 operation reveals the order in which `Unique` values were made
 ([MEM-18](memory.md#mem-18-pools-are-library-code)). The `Map` hash seed enters at the
-replay point and no value depends on it or on the placement salts derived from it
+replay point and no value depends on it or on the placement salts and strong placement key derived from it
 ([SEM-5](semantics.md#sem-5-maps)).
 
 ### CAP-7: Attenuation
@@ -204,8 +204,9 @@ result, each scheduler choice of [CONC-10](tasks.md#conc-10-event-order), and th
 arguments, which include its grants, its root limit and its launch metadata
 ([launch](launch.md)). At entry the launcher acquires a protected 128-bit Map hash key
 from host entropy. The key belongs to the run and every task uses it. A replay entry
-restores the recorded key without requesting host entropy. The Map placement salts are derived
-from the key ([PROG-11](programs.md#prog-11-map-index)) and are not inputs of their own. A provider operation passes it twice: at issue, before any host
+restores the recorded key without requesting host entropy. The Map placement salts and strong placement key
+are derived from the key, before the first Map operation of any task
+([PROG-11](programs.md#prog-11-map-index)), and are not inputs of their own. A provider operation passes it twice: at issue, before any host
 effect, and at delivery, before its result reaches the task. Each input enters the run once,
 at its own point, and nothing outside the run reaches a value except through such a point,
 or through a foreign call, which is not a replay point and which no recording build reaches

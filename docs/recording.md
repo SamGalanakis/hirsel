@@ -269,7 +269,7 @@ and its pinned executable reads that layout. The host uses the checked block-zer
 through the launch arguments to find and verify the pin.
 
 - The header ends with the run's 16-byte Map hash key. Replay restores it before starting
-  any task. The Map placement salts are derived from it, not recorded
+  any task. The Map placement salts and strong placement key are derived from it, not recorded
   ([PROG-11](spec/programs.md#prog-11-map-index)). Call tape fixtures reserve this field as sixteen zero bytes.
 - The header has no mode byte. Its grant snapshot stores the run's root Net rules in order
   and with duplicates; each address rule occupies 23 bytes.

@@ -5,7 +5,7 @@
 pub const TAG: u8 = 0xff;
 pub const POINTS_TAG: u8 = 0xfe;
 /// The linked entry checks the native runtime ABI through its source table decoder.
-pub const POINTS_TABLE_SYMBOL: &str = "hirsel_core_annex_source_table_v3";
+pub const POINTS_TABLE_SYMBOL: &str = "hirsel_core_annex_source_table_v4";
 pub const TABLE_SYMBOL: &str = "hirsel_core_relative_source_table_v3";
 /// Every linked site word is below this bound, so code materialises it as a
 /// sign-extended 32-bit immediate. A word is the file's first site plus a
@@ -21,13 +21,9 @@ pub fn encode(text: &str) -> Vec<u8> {
             continue;
         }
         let after = index + 1;
-        let mut marker = ((after - previous) << 1) | usize::from(newline);
+        let marker = ((after - previous) << 1) | usize::from(newline);
         previous = after;
-        while marker >= 0x80 {
-            output.push((marker as u8) | 0x80);
-            marker >>= 7;
-        }
-        output.push(marker as u8);
+        push_uleb(&mut output, marker as u64);
     }
     output
 }
@@ -60,39 +56,76 @@ pub fn position(markers: &[u8], offset: usize) -> (usize, usize) {
     (line, offset - start - continuations + 1)
 }
 
-/// Encode exact positions in site order. Each file picks the byte width of a
-/// packed row and the number of low bits holding its column.
+const POINTS_PER_BLOCK: usize = 64;
+const BLOCK_OFFSET_BYTES: usize = size_of::<u64>();
+
+/// Encode sorted, unique positions in site order. A directory gives the
+/// offset of each block relative to the byte after the tag. Inside a block,
+/// a ULEB128 word with low bit zero advances the column by the upper bits.
+/// A word with low bit one advances the line and takes the next word as its
+/// absolute column. Each block starts from line and column zero.
 pub fn encode_points(points: &[(u32, u32)]) -> Vec<u8> {
-    let (max_line, max_column) = points
-        .iter()
-        .fold((0u32, 0u32), |(lines, columns), &(line, column)| {
-            (lines.max(line), columns.max(column))
-        });
-    let column_bits = u32::BITS - max_column.leading_zeros();
-    let line_bits = u32::BITS - max_line.leading_zeros();
-    let width = (line_bits + column_bits).div_ceil(8).max(1) as usize;
-    let mut output = Vec::with_capacity(3 + points.len() * width);
-    output.extend([POINTS_TAG, width as u8, column_bits as u8]);
-    for &(line, column) in points {
-        let packed = (u64::from(line) << column_bits) | u64::from(column);
-        output.extend_from_slice(&packed.to_le_bytes()[..width]);
+    let directory = points.len().div_ceil(POINTS_PER_BLOCK) * BLOCK_OFFSET_BYTES;
+    let mut output = Vec::with_capacity(1 + directory + points.len());
+    output.resize(1 + directory, 0);
+    output[0] = POINTS_TAG;
+    for (block, points) in points.chunks(POINTS_PER_BLOCK).enumerate() {
+        let offset = (output.len() - 1) as u64;
+        let slot = 1 + block * BLOCK_OFFSET_BYTES;
+        output[slot..slot + BLOCK_OFFSET_BYTES].copy_from_slice(&offset.to_le_bytes());
+        let (mut last_line, mut last_column) = (0, 0);
+        for &(line, column) in points {
+            if line == last_line {
+                push_uleb(&mut output, u64::from(column - last_column) << 1);
+            } else {
+                push_uleb(&mut output, (u64::from(line - last_line) << 1) | 1);
+                push_uleb(&mut output, u64::from(column));
+            }
+            (last_line, last_column) = (line, column);
+        }
     }
     output
 }
 
 /// Resolve a linked site's ordinal in a generated point table after its tag.
 pub fn point_position(points: &[u8], ordinal: usize) -> (usize, usize) {
-    let width = usize::from(points[0]);
-    let column_bits = points[1];
-    let start = 2 + ordinal * width;
-    let mut bytes = [0; 8];
-    bytes[..width].copy_from_slice(&points[start..start + width]);
-    let packed = u64::from_le_bytes(bytes);
-    let column_mask = (1u64 << column_bits) - 1;
-    (
-        (packed >> column_bits) as usize,
-        (packed & column_mask) as usize,
-    )
+    let slot = ordinal / POINTS_PER_BLOCK * BLOCK_OFFSET_BYTES;
+    let offset = u64::from_le_bytes(points[slot..slot + BLOCK_OFFSET_BYTES].try_into().unwrap());
+    let mut bytes = &points[offset as usize..];
+    let (mut line, mut column) = (0, 0);
+    for _ in 0..=ordinal % POINTS_PER_BLOCK {
+        let marker = take_uleb(&mut bytes);
+        let delta = marker >> 1;
+        if marker & 1 == 0 {
+            column += delta;
+        } else {
+            line += delta;
+            column = take_uleb(&mut bytes);
+        }
+    }
+    (line as usize, column as usize)
+}
+
+fn push_uleb(output: &mut Vec<u8>, mut value: u64) {
+    while value >= 0x80 {
+        output.push((value as u8) | 0x80);
+        value >>= 7;
+    }
+    output.push(value as u8);
+}
+
+fn take_uleb(bytes: &mut &[u8]) -> u64 {
+    let mut value = 0;
+    let mut shift = 0;
+    loop {
+        let (&byte, remaining) = bytes.split_first().unwrap();
+        *bytes = remaining;
+        value |= u64::from(byte & 0x7f) << shift;
+        if byte < 0x80 {
+            return value;
+        }
+        shift += 7;
+    }
 }
 
 #[cfg(test)]
@@ -115,7 +148,7 @@ mod tests {
     }
 
     #[test]
-    fn finds_packed_annex_positions_by_ordinal() {
+    fn finds_annex_positions_by_ordinal() {
         for points in [
             &[(1, 1), (8, 12), (15, 15)][..],
             &[(1, 128), (257, 1025)],

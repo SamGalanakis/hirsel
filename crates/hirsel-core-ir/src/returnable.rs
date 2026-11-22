@@ -3,11 +3,12 @@
 //!
 //! A wait is returnable when every frame from the task's entry down to it is a
 //! body of this module represented in the task's frame record. Each such body
-//! gets a private variant that keeps its slots and the values it needs across
-//! the wait in its part of the record: a site word, then the child area its
-//! callee uses, then the homes. A parked callee leaves its site word nonzero;
-//! its caller stores its own site number and returns, so the task's entry
-//! returns to the dispatcher and the stack goes back to the pool. The runtime
+//! gets a private variant that keeps its slots, its result place and the
+//! values it needs across the wait in its part of the record: a site word,
+//! then the child area its callee uses, then the homes. A return copies the
+//! result out to the caller's place. A parked callee leaves its site word
+//! nonzero; its caller stores its own site number and returns, so the task's
+//! entry returns to the dispatcher and the stack goes back to the pool. The runtime
 //! resumes by entering the entry again with the same arguments on a pooled
 //! stack: each variant reads its site word and jumps to that site's resume
 //! block, which reloads what the call needs and makes it again. A wait's own
@@ -47,6 +48,7 @@ pub enum Refusal {
     NoSite,
     LiveAddress,
     SlotLayout,
+    ResultPlace,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -456,6 +458,11 @@ struct Shape {
     /// Record offset of each slot.
     slot_at: Vec<u64>,
     value_at: HashMap<ValueId, u64>,
+    /// The result place's parameter, type, record offset and size. A backend may
+    /// keep a result it returns in registers in a place of the frame, which a
+    /// resume would find empty, so the variant builds it in the record and
+    /// copies it out at each return.
+    dest: Option<(ValueId, TypeId, u64, u64)>,
     /// The function's whole area, its own word first.
     area: u64,
 }
@@ -490,11 +497,28 @@ fn shape(
     module: &Module,
     recipes: &[hirsel_core_layout::Recipe],
     body: &Body,
+    dest: Option<TypeId>,
     sites: BTreeMap<usize, Site>,
     area: &dyn Fn(FuncId) -> u64,
 ) -> Result<Shape, Refusal> {
     if sites.is_empty() {
         return Err(Refusal::NoSite);
+    }
+    // The result place, the leading parameter, is used only as an address
+    // base, so every access to it can be moved into the record.
+    let dest = dest.map(|t| (params(body, 0)[0], t));
+    if let Some((d, _)) = dest {
+        let based = |a: AddressId| matches!(body.addresses[a.index()].base, AddressBase::Value(x) if x == d);
+        let stray = body.insts.iter().any(|inst| match *inst {
+            Inst::Address { address, .. } => {
+                let (values, _) = address_values(body, address);
+                values.iter().filter(|&&v| v == d).count() > usize::from(based(address))
+            }
+            _ => operands(body, inst).0.contains(&d.index()),
+        }) || (0..body.blocks.len()).any(|bi| terminator_uses(body, bi).contains(&d.index()));
+        if stray {
+            return Err(Refusal::ResultPlace);
+        }
     }
     let nv = body.values.len();
     let (prologue, _) = prologue_plan(body);
@@ -620,6 +644,20 @@ fn shape(
         slot_at.push(at);
         at += size;
     }
+    let dest = match dest {
+        Some((d, t)) => {
+            let (size, align) =
+                place_layout(module, recipes, PlaceTy::Declared(t)).ok_or(Refusal::ResultPlace)?;
+            if align > ALIGN {
+                return Err(Refusal::ResultPlace);
+            }
+            at = round(at, align);
+            let off = at;
+            at += size;
+            Some((d, t, off, size))
+        }
+        None => None,
+    };
     at = round(at, 8);
     let mut value_at = HashMap::new();
     let demoted: Vec<ValueId> = (0..nv)
@@ -637,6 +675,7 @@ fn shape(
         cloned,
         slot_at,
         value_at,
+        dest,
         area: round(at, ALIGN),
     })
 }
@@ -841,12 +880,28 @@ fn build(old: &Body, s: &Shape, root: bool, results_ty: &[Ty], calls: &Calls) ->
     let child_word = word(&mut b, child);
     let zero = b.konst(u64_, 0);
     let slot_ptr: Vec<ValueId> = s.slot_at.iter().map(|&off| b.at(rec, off)).collect();
-    // Slots live in the record.
+    let dest = s.dest.map(|(d, t, off, size)| (d, t, b.at(rec, off), size));
+    // Slots and the result place live in the record.
     for info in &mut b.n.addresses {
-        if let AddressBase::Slot(slot) = info.base {
-            info.base = AddressBase::Value(slot_ptr[slot.index()]);
+        match info.base {
+            AddressBase::Slot(slot) => info.base = AddressBase::Value(slot_ptr[slot.index()]),
+            AddressBase::Value(v) => {
+                if let Some((d, _, home, _)) = dest
+                    && d == v
+                {
+                    info.base = AddressBase::Value(home);
+                }
+            }
+            AddressBase::Address(_) => {}
         }
     }
+    // A return copies the result out of the record.
+    let dest_out = dest.map(|(d, t, home, size)| {
+        let bytes = b.konst(u64_, size);
+        let to = b.address(AddressBase::Value(d), &[], PlaceTy::Declared(t));
+        let from = b.address(AddressBase::Value(home), &[], PlaceTy::Declared(t));
+        (to, from, bytes)
+    });
     let (_, pointers) = prologue_plan(old);
     for &k in &pointers {
         let Inst::Pointer { address, .. } = old.insts[k] else {
@@ -1222,6 +1277,11 @@ fn build(old: &Body, s: &Shape, root: bool, results_ty: &[Ty], calls: &Calls) ->
                 }
             }
             Terminator::Return(r) => {
+                if let Some((to, from, bytes)) = dest_out {
+                    b.emit(Inst::Address { address: to, fail: None });
+                    b.emit(Inst::Address { address: from, fail: None });
+                    b.emit(Inst::Copy { to, from, bytes });
+                }
                 let values: Vec<ValueId> = r
                     .get(&old.pools.values)
                     .unwrap_or_default()
@@ -1464,7 +1524,8 @@ pub fn apply(module: &mut Module) -> Applied {
                     continue;
                 }
                 let area = |g: FuncId| shapes[&g.index()].area;
-                match shape(module, &recipes, body, sites, &area) {
+                let dest = module.signatures[module.functions[f].signature.index()].dest;
+                match shape(module, &recipes, body, dest, sites, &area) {
                     Ok(s) => {
                         shapes.insert(f, s);
                         progress = true;
@@ -1509,7 +1570,8 @@ pub fn apply(module: &mut Module) -> Applied {
             module.functions[spawn.callee.index()].signature;
         let sites = sites_of(&body, &ok);
         let area = |g: FuncId| shapes[&g.index()].area;
-        match shape(module, &recipes, &body, sites, &area) {
+        let dest = module.signatures[entry.signature.index()].dest;
+        match shape(module, &recipes, &body, dest, sites, &area) {
             Ok(s) => roots.push((spawn, body, s)),
             Err(_) => applied.stackful_roots += 1,
         }

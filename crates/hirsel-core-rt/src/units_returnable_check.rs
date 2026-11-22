@@ -228,7 +228,8 @@ unsafe fn boundary(
 unsafe fn recv_exact(context: *mut Context, job: &Job, word: *mut u64, carrier: *mut Buffer, want: usize) -> bool {
     // SAFETY: by the contract.
     unsafe {
-        while *word != 0 || (*carrier).len < want {
+        // The boundary writes both the word and the carrier.
+        while word.read_volatile() != 0 || (&raw const (*carrier).len).read_volatile() < want {
             let out = boundary(context, job, word, carrier, false, (want - (*carrier).len) as u64);
             if *word != 0 || out.error != IoError::OK || out.status != 0 || out.value == 0 {
                 return false;
@@ -343,7 +344,8 @@ fn run_form(returnable: bool) -> (Vec<String>, Vec<usize>, Vec<usize>, u64) {
             // takes the stock's most recent stack (the one the returnable
             // client gave back) and overwrites it. Each run is a dispatcher
             // pass, where the outside provider gets its turn.
-            while !*job.done {
+            // The client's task sets `done`.
+            while !job.done.read_volatile() {
                 scribble_turn(context);
             }
             join(context, client_task, true);

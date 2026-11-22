@@ -95,6 +95,11 @@ interface Sub {
   complete: boolean; active: boolean;
 }
 
+interface QueuedCall {
+  want: Want; args: Uint8Array; slot: number; prediction?: unknown;
+  resolve: (outcome: Outcome<Uint8Array>) => void; reject: (error: unknown) => void;
+}
+
 export class Client implements Transport {
   state: State = 'Connecting';
   readonly generation: bigint;
@@ -119,6 +124,7 @@ export class Client implements Transport {
   private subs = new Set<Sub>();
   private version = 0n;
   private notifications?: Array<() => void>;
+  private calls = new Set<QueuedCall>();
   private resolveCall?: (outcome: Outcome<Uint8Array>) => void;
   private readyResolve!: () => void;
   private readyReject!: (error: unknown) => void;
@@ -186,7 +192,14 @@ export class Client implements Transport {
     this.work = next.catch(error => error instanceof ClientError ? undefined : this.unavailable(error));
     return next;
   }
-  private setState(state: State): void { this.state = state; this.options.onState?.(state); }
+  private setState(state: State): void {
+    this.state = state;
+    if (state !== 'Ready' && state !== 'Connecting' && state !== 'Backoff') {
+      for (const call of this.calls) call.reject(new ClientError(state));
+      this.calls.clear();
+    }
+    this.options.onState?.(state);
+  }
   private async unavailable(error: unknown): Promise<void> {
     if (this.state === 'Closed') return;
     this.options.onDiagnostic?.(String(error));
@@ -236,6 +249,7 @@ export class Client implements Transport {
         frame = this.options.frame.decode(event.data instanceof Uint8Array ? event.data : new Uint8Array(event.data));
       } catch { await this.incompatible(1007); return; }
       await this.receive(frame);
+      await this.startNextCall();
     }); };
     socket.onclose = event => { void this.enqueue(async () => {
       if (epoch !== this.epoch) return;
@@ -375,25 +389,40 @@ export class Client implements Transport {
   }
   call<R>(want: Want, args: Uint8Array, decode: (bytes: Uint8Array) => R, prediction?: unknown): Promise<Outcome<R>> {
     const copied = copyWant(want), arg = args.slice();
-    let resolve!: (outcome: Outcome<Uint8Array>) => void;
-    const answer = new Promise<Outcome<Uint8Array>>(r => { resolve = r; });
-    return this.enqueue(async () => {
-      if (this.state !== 'Ready') throw new ClientError(this.state);
-      if (this.record.pending) throw new ClientError('RecoveringOrBusy');
-      const slot = this.wants.findIndex(w => sameWant(w, copied));
-      if (slot < 0) throw new ClientError('UnknownWant');
+    return new Promise<Outcome<Uint8Array>>((resolve, reject) => {
+      void this.enqueue(async () => {
+        if (this.state !== 'Ready') throw new ClientError(this.state);
+        const slot = this.wants.findIndex(w => sameWant(w, copied));
+        if (slot < 0) throw new ClientError('UnknownWant');
+        this.calls.add({want: copied, args: arg, slot, prediction, resolve, reject});
+        await this.startNextCall();
+      }).catch(reject);
+    }).then(outcome => outcome.tag === 'Returned' ? {tag: 'Returned', value: decode(outcome.value)} : outcome);
+  }
+  private async startNextCall(): Promise<void> {
+    if (this.state !== 'Ready' || this.record.pending) return;
+    const call = this.calls.values().next().value;
+    if (!call) return;
+    this.calls.delete(call);
+    try {
       await this.installation(async state => {
         const record = state.streams[this.stream];
         const pending: Pending = {generation: this.generation, stream: this.stream, p: record.next,
-          want: copied, args: arg, slot, attempts: 0, possiblyAdmitted: false};
+          want: call.want, args: call.args, slot: call.slot, attempts: 0, possiblyAdmitted: false};
         record.pending = pending;
         await this.options.storage.write(state);
-        this.record = structuredClone(record); this.resolveCall = resolve;
-        if (prediction !== undefined) { this.predictions.set(pending.p, prediction); this.options.onPrediction?.(this.predictions); }
+        this.record = structuredClone(record); this.resolveCall = call.resolve;
+        if (call.prediction !== undefined) {
+          this.predictions.set(pending.p, call.prediction);
+          this.options.onPrediction?.(this.predictions);
+        }
       });
       if (this.state !== 'Ready') throw new ClientError(this.state);
       await this.sendPending();
-    }).then(() => answer).then(outcome => outcome.tag === 'Returned' ? {tag: 'Returned', value: decode(outcome.value)} : outcome);
+    } catch (error) {
+      call.reject(error);
+      throw error;
+    }
   }
   private async sendPending(): Promise<void> {
     if (this.state !== 'Ready' || !this.record.pending || this.sent) return;

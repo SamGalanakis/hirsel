@@ -184,14 +184,31 @@ export async function laws(codec, only, mutant) {
     const a=h.client.call(want,bytes(7),x=>x);await settle();
     await h.client.close();await a;await settle();
     const c=await setup(h.storage);await ready(c);assert.equal(c.client.stream,0);
-    let failure;
-    void c.client.call(want,bytes(8),x=>x).then(()=>{},error=>{failure=error;});await settle();
-    assert.equal(failure?.code,'RecoveringOrBusy');
+    const next=c.client.call(want,bytes(8),x=>x);await settle();
     assert.deepEqual(h.storage.raw.streams[0].pending.args,bytes(7));
     assert.deepEqual(c.server.calls.map(x=>x.frame),[call(0,0n,7)]);
     c.server.answer(c.server.sockets[0],0,0n,returned(7));await settle();
-    const next=c.client.call(want,bytes(8),x=>x);await settle();assert.deepEqual(c.server.calls[1].frame,call(0,1n,8));
+    assert.deepEqual(c.server.calls[1].frame,call(0,1n,8));
     c.server.answer(c.server.sockets[0],0,1n,returned(8));await settle();await next;c.server.check();
+  };
+  tests.calls_wait_in_order=async()=>{
+    const h=await setup();await ready(h);
+    const first=h.client.call(want,bytes(7),x=>x);
+    const args=bytes(8), second=h.client.call(want,args,x=>x);
+    args[0]=0;
+    const third=h.client.call(want,bytes(9),x=>x);
+    const closed=assert.rejects(third,{code:'Closed'});
+    await settle();
+    assert.deepEqual(h.server.calls.map(x=>x.frame),[call(0,0n,7)]);
+    assert.deepEqual(h.storage.raw.streams[0].pending.args,bytes(7));
+    h.server.answer(h.server.sockets[0],0,0n,returned(7));await settle();
+    assert.deepEqual(await first,returned(7));
+    assert.deepEqual(h.server.calls.map(x=>x.frame),[call(0,0n,7),call(0,1n,8)]);
+    await h.client.close();
+    assert.equal((await second).tag,'LocallyUnknown');
+    await closed;
+    assert.deepEqual(h.storage.raw.streams[0].pending.args,bytes(8));
+    assert.equal(h.server.calls.length,2);h.server.check();
   };
   tests.incompatible_is_terminal=async()=>{
     const h=await setup();await ready(h);

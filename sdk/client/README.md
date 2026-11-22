@@ -33,8 +33,10 @@ lock and each stream lease with kernel file locks; no stale lockfile cleanup is
 needed. State replacement writes a private temporary file, syncs it, renames it
 and syncs the directory. The state directory holds pending arguments and replies.
 
-Each client leases one stream and permits one call in flight. Recovering clients
-reject new calls until the durable pending request finishes. `onRecovered`
+Each client leases one stream and sends one call at a time. Calls made while
+ready wait in memory in submission order, including behind a recovered call.
+A queued call becomes durable when it reaches the front. Closing the client
+rejects calls still in the queue. `onRecovered`
 receives the outcome of a recovered request whose original promise no longer
 exists. Call arguments and Want bytes are copied before asynchronous work.
 `LocallyUnknown` means the original effect cannot be determined locally.

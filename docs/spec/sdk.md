@@ -71,6 +71,8 @@ replacement and `flock` leases. Generation validation and each work send share
 the installation lock. Missing allocated stream records fence the generation;
 pending requests are tied to the Caller saved for that stream.
 
+The client keeps one call in flight per stream. Calls submitted while ready
+wait in memory in submission order, including behind a recovered call.
 Pending identity and admission uncertainty are durable before send. Returned
 and Failed outcomes commit together with the next position. A definitive V1
 refusal reuses the position only after a single, unambiguous attempt; otherwise

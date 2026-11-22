@@ -1035,9 +1035,15 @@ pub enum RtOp {
 pub enum Wait {
     /// An owned network wait (`RecvBounded`, `SendPair`).
     Host(HostOp),
-    Join { r: TypeId },
-    ConnSend { item: TypeId },
-    ConnReceive { item: TypeId },
+    Join {
+        r: TypeId,
+    },
+    ConnSend {
+        item: TypeId,
+    },
+    ConnReceive {
+        item: TypeId,
+    },
 }
 
 impl Wait {

@@ -50,18 +50,38 @@ struct Item {
 }
 const ITEM_OWNERS: [[u64; 4]; 1] = [[8, CLIENT, 0, 0]];
 fn item() -> Cross {
-    Cross { bytes: 16, owners: ITEM_OWNERS.as_ptr(), count: 1 }
+    Cross {
+        bytes: 16,
+        owners: ITEM_OWNERS.as_ptr(),
+        count: 1,
+    }
 }
 const INPUT_OWNERS: [[u64; 4]; 1] = [[0, CLIENT, 0, 0]];
 fn helper_input() -> Cross {
-    Cross { bytes: 8, owners: INPUT_OWNERS.as_ptr(), count: 1 }
+    Cross {
+        bytes: 8,
+        owners: INPUT_OWNERS.as_ptr(),
+        count: 1,
+    }
 }
 fn plain(bytes: u64) -> Cross {
-    Cross { bytes, owners: ptr::null(), count: 0 }
+    Cross {
+        bytes,
+        owners: ptr::null(),
+        count: 0,
+    }
 }
 fn layout(input: usize, result: usize) -> TaskLayout {
-    let value = |bytes| ValueLayout { bytes, align: 8, logical: bytes as u64, clean: None };
-    TaskLayout { input: value(input), result: value(result) }
+    let value = |bytes| ValueLayout {
+        bytes,
+        align: 8,
+        logical: bytes as u64,
+        clean: None,
+    };
+    TaskLayout {
+        input: value(input),
+        result: value(result),
+    }
 }
 
 /// The client's waits, by the phase that makes them.
@@ -157,18 +177,27 @@ unsafe extern "C" fn helper(c: *mut Context, out: *mut u8, input: *mut u8) -> u8
         let made = hirsel_core_conn_new(c, 1, 64, &i, 16, 0);
         assert!(!made.inbox.is_null());
         after(RECV_HELLO);
-        let mut hello = Item { v: 0, back: made.client };
+        let mut hello = Item {
+            v: 0,
+            back: made.client,
+        };
         let sent = hirsel_core_conn_send(c, back, (&raw mut hello).cast(), 0, true);
         assert_eq!((sent.outcome, sent.status), (0, 0));
         let mut n = 0u64;
         for at in [SEND_TWO, RECV_TWO, JOIN_HELPER] {
             after(at);
-            let mut x = Item { v: 0, back: ptr::null_mut() };
+            let mut x = Item {
+                v: 0,
+                back: ptr::null_mut(),
+            };
             let got = hirsel_core_conn_receive(c, made.inbox, (&raw mut x).cast(), 0, true);
             if got.code_and_requested != 0 {
                 break;
             }
-            let mut answer = Item { v: x.v + 10, back: ptr::null_mut() };
+            let mut answer = Item {
+                v: x.v + 10,
+                back: ptr::null_mut(),
+            };
             let sent = hirsel_core_conn_send(c, back, (&raw mut answer).cast(), 0, true);
             assert_eq!((sent.outcome, sent.status), (0, 0));
             n += 1;
@@ -198,7 +227,10 @@ unsafe fn waited(context: *mut Context, a: *mut Area, job: &Job, what: String) -
         reach(phase);
         // The unit's open waits: each settled wait has closed its own.
         let waits = (*crate::tasks::lang_unit()).waits;
-        log(format!("{phase}: {what} available={} waits={waits}", (*context).available()));
+        log(format!(
+            "{phase}: {what} available={} waits={waits}",
+            (*context).available()
+        ));
         true
     }
 }
@@ -236,7 +268,13 @@ unsafe extern "C" fn client(context: *mut Context, _: *mut u8, input: *mut u8) -
         let recv = |a: *mut Area| {
             entering(job, a);
             let o = if job.returnable {
-                hirsel_core_conn_receive_rec(c, &raw mut (*a).child, (*a).inbox, (&raw mut (*a).item).cast(), 1)
+                hirsel_core_conn_receive_rec(
+                    c,
+                    &raw mut (*a).child,
+                    (*a).inbox,
+                    (&raw mut (*a).item).cast(),
+                    1,
+                )
             } else {
                 hirsel_core_conn_receive(c, (*a).inbox, (&raw mut (*a).item).cast(), 1, true)
             };
@@ -245,10 +283,19 @@ unsafe extern "C" fn client(context: *mut Context, _: *mut u8, input: *mut u8) -
         let send = |a: *mut Area, v: u64| {
             entering(job, a);
             if (*a).child == 0 {
-                (*a).item = Item { v, back: ptr::null_mut() };
+                (*a).item = Item {
+                    v,
+                    back: ptr::null_mut(),
+                };
             }
             let o = if job.returnable {
-                hirsel_core_conn_send_rec(c, &raw mut (*a).child, (*a).to_helper, (&raw mut (*a).item).cast(), 1)
+                hirsel_core_conn_send_rec(
+                    c,
+                    &raw mut (*a).child,
+                    (*a).to_helper,
+                    (&raw mut (*a).item).cast(),
+                    1,
+                )
             } else {
                 hirsel_core_conn_send(c, (*a).to_helper, (&raw mut (*a).item).cast(), 1, true)
             };
@@ -273,12 +320,24 @@ unsafe extern "C" fn client(context: *mut Context, _: *mut u8, input: *mut u8) -
                     let (xi, r) = (helper_input(), plain(8));
                     let l = layout(8, 8);
                     let spawned = hirsel_core_spawn_unit(
-                        c, 0, 4096, (&raw mut (*a).give).cast(), helper, &l, &xi, &r, 0,
+                        c,
+                        0,
+                        4096,
+                        (&raw mut (*a).give).cast(),
+                        helper,
+                        &l,
+                        &xi,
+                        &r,
+                        0,
                     );
                     assert!(
                         !spawned.task.is_null(),
                         "spawn_unit refused: requested {} available {} status {} (conn {:?} {})",
-                        spawned.requested, spawned.available, spawned.status, made.client, made.status
+                        spawned.requested,
+                        spawned.available,
+                        spawned.status,
+                        made.client,
+                        made.status
                     );
                     (*a).helper = spawned.task;
                     log(format!("0: spawned available={}", (*c).available()));
@@ -312,7 +371,11 @@ unsafe extern "C" fn client(context: *mut Context, _: *mut u8, input: *mut u8) -
                 // the client's observations in both forms.
                 8 => hirsel_core_client_drop(c, (*a).to_helper),
                 JOIN_CHILD | JOIN_HELPER => {
-                    let t = if (*a).phase == JOIN_CHILD { (*a).kid } else { (*a).helper };
+                    let t = if (*a).phase == JOIN_CHILD {
+                        (*a).kid
+                    } else {
+                        (*a).helper
+                    };
                     let o = join(a, t);
                     if !waited(c, a, job, format!("joined {o:?} out={}", (*a).out)) {
                         break;
@@ -370,9 +433,13 @@ fn run_form(returnable: bool) -> (Vec<String>, u64, u64) {
         unsafe {
             let returnable = input.cast::<bool>().read();
             let mut done = false;
-            let mut job = Job { returnable, done: &mut done };
+            let mut job = Job {
+                returnable,
+                done: &mut done,
+            };
             let l = layout(size_of::<Job>(), 0);
-            let task = hirsel_core_spawn(context, 0, 64 << 10, (&raw mut job).cast(), client, l, 0).task;
+            let task =
+                hirsel_core_spawn(context, 0, 64 << 10, (&raw mut job).cast(), client, l, 0).task;
             assert!(!task.is_null());
             let at = HANDOFF_AT[param(1) as usize];
             while !job.done.read_volatile() {
@@ -388,7 +455,8 @@ fn run_form(returnable: bool) -> (Vec<String>, u64, u64) {
                     HANDED.store(true, Ordering::SeqCst);
                     break;
                 }
-                let s = hirsel_core_spawn(context, 0, 0, ptr::null_mut(), scribbler, layout(0, 0), 0);
+                let s =
+                    hirsel_core_spawn(context, 0, 0, ptr::null_mut(), scribbler, layout(0, 0), 0);
                 join_plain(context, s.task);
             }
             join_plain(context, task);
@@ -439,10 +507,16 @@ pub(super) fn body(_: u32) -> u8 {
     FLAG[0].store(true, Ordering::SeqCst);
     let parks = *PARKS.lock().unwrap();
     for at in [RECV_HELLO, SEND_TWO, RECV_TWO, JOIN_CHILD, JOIN_HELPER] {
-        assert!(parks[at as usize] > 0, "wait {at} never returned its stack: {parks:?}");
+        assert!(
+            parks[at as usize] > 0,
+            "wait {at} never returned its stack: {parks:?}"
+        );
     }
     compare(&stackful, &returnable);
-    served(0, "every returnable wait gave its stack back and matched the stackful client");
+    served(
+        0,
+        "every returnable wait gave its stack back and matched the stackful client",
+    );
     0
 }
 
@@ -455,9 +529,18 @@ pub(super) fn handoff_body(_: u32) -> u8 {
     let returnable = run_form(true);
     FLAG[0].store(true, Ordering::SeqCst);
     let at = HANDOFF_AT[param(1) as usize] as usize;
-    assert!(PARKS.lock().unwrap()[at] > 0, "wait {at} never returned its stack");
-    assert!(MOVED.lock().unwrap()[at], "wait {at} never resumed on another thread");
+    assert!(
+        PARKS.lock().unwrap()[at] > 0,
+        "wait {at} never returned its stack"
+    );
+    assert!(
+        MOVED.lock().unwrap()[at],
+        "wait {at} never resumed on another thread"
+    );
     compare(&stackful, &returnable);
-    served(0, "the returnable wait resumed on another thread and matched the stackful client");
+    served(
+        0,
+        "the returnable wait resumed on another thread and matched the stackful client",
+    );
     0
 }

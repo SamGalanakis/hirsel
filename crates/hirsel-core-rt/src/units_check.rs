@@ -71,10 +71,10 @@ use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
 #[path = "units_conn_check.rs"]
 mod conn;
-#[path = "units_returnable_check.rs"]
-mod returnable;
 #[path = "units_park_waits_check.rs"]
 mod park_waits;
+#[path = "units_returnable_check.rs"]
+mod returnable;
 use std::fmt::Write as _;
 use std::panic::Location;
 use std::sync::atomic::Ordering;

@@ -206,7 +206,7 @@ a closed rotation sender poisons the Db and takes no Cut.
 ## M1 target (not yet built)
 
 Nothing in this section is on main. It is the store's M1 surface, specified in
-STORE-SPEC v2.39 §11 (AP1–AP21, L37–L51), and the M1 implementation slices flip
+STORE-SPEC v2.40 §11 (AP1–AP21, L37–L51), and the M1 implementation slices flip
 it to built. Everything above describes the store as built.
 
 - **Pages.** Every tree becomes a B+ tree of packed pages (`Arc[Page]`, 4 KiB
@@ -270,17 +270,27 @@ it to built. Everything above describes the store as built.
   syncs and renames the MANIFEST. A cut that cannot get memory is refused and
   loses nothing: the old MANIFEST and the journal still recover every committed
   write. `checkpoint`, schema commits, `migrate`, `pin`, `unpin`, a fork from an
-  older Snapshot, `adopt`, `delete_branch` and install return `Full(c)` when
-  their cut is refused (install: `FullNew(c)`), with nothing changed. A pause is
+  older Snapshot, `adopt`, `delete_branch` and install return
+  `Full(Allocation(c))` when their cut cannot get memory (install:
+  `FullNew(cause)`), with nothing changed. The MANIFEST a cut writes encodes
+  the operation's prospective branch and pin records, and the writer adopts them
+  only after the rename is durable (AP16). A pause is
   about 0.1–0.25 s for a 10 GB store with 1% changed (an estimate; AP16 gives
   the bound). The checkpoint task and `checkpoint_task_bytes` are removed.
 - **Journal cap.** Until a cut succeeds the journal keeps growing, up to
   `journal_limit` (default 268,435,456 bytes; at least `checkpoint_bytes` +
-  `FRAME_LIMIT`, or open is `Full(c)`). A write whose frame would pass it is
-  refused at once, never waiting: `run` and `run_on` return `Refused(c)`, and a
-  committing `admit` and a live-head `fork` return `Full(c)`, with
-  c = `Capacity{requested: journal + frame bytes, available: journal_limit}`.
-  A `checkpoint` or any other cut-made operation is the way out (AP15, AP16).
+  `FRAME_LIMIT`, or open is `Full(Journal(c))` before it takes the lock). The
+  journal counts accepted COMMIT and FORK bytes. A write whose frame would pass
+  the limit is refused at once, never waiting, through each operation's own
+  result: `run` and `run_on` return `Refused(Journal(c))`, a committing `admit`
+  and a live-head `fork` return `Full(Journal(c))`, `serve` returns
+  `Before(Full(Journal(c)), None)`, and `conclude` returns
+  `Before(Full(Journal(c)), Some(p))`, handing its Pending back so a retry after
+  a checkpoint writes the original context. Here c is
+  `Capacity{requested: journal + frame bytes (saturated), available: journal_limit}`.
+  A journal refusal is never `NoRoom`, so it never counts toward a claim's
+  resident refusals or settle 2. A `checkpoint` or any other cut-made
+  operation is the way out (AP15, AP16).
 - **Fork.** A `fork` from a Snapshot at its live branch head writes one FORK
   journal frame, waits for its sync, and returns the branch with an already
   durable journal ticket: no walk, settle or cut, the account is unchanged, and
@@ -295,7 +305,17 @@ it to built. Everything above describes the store as built.
 - **Install.** A release install edits each collection by remove (a dropped id,
   with its empty drop record), replace (a created id; zero rows give an empty
   collection) or keep (no range). A schema-only change to a populated table keeps its rows,
-  index ranges and root stamps (§11.1).
+  index ranges and root stamps (§11.1). The preparation metadata records NEW's
+  `resident_limit`, `pack_bytes`, `checkpoint_bytes` and `journal_limit`, and
+  install checks exactly those before activation; a refusal is
+  `FullNew(cause)` with OLD still selected (AP1b).
 - **Constants and options.** `FRAME_LIMIT: u64 = 16777296` joins `VALUE_LIMIT`.
   `Options` gains `journal_limit: u64` and loses `checkpoint_task_bytes`.
-- **Errors.** `Limit` gains `Ids` and `Manifest`; every other case is unchanged.
+- **Errors.** `Limit` gains `Ids` and `Manifest`. Every capacity refusal carries
+  `StoreCapacity = Journal(Capacity) | Resident(Capacity) | Allocation(Capacity)`,
+  naming the resource that refused: `Error.Full`, `Outcome.Refused`,
+  `Looked.Refused`, `Served.NoRoom` (resident or allocation only) and
+  `DeployError.FullNew`. `ServeError` becomes
+  `Before(Error, Option[Pending]) | After(Error)`. Core `Capacity` and the
+  body's `Stop.OutOfBytes(Capacity)` are unchanged, and every other case is
+  unchanged (§11.16).

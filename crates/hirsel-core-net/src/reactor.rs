@@ -194,6 +194,7 @@ fn shared_tag(unit: u32, index: usize, generation: u32) -> u64 {
 
 struct Record {
     fd: OwnedFd,
+    pipe: bool,
     owners: u8,
     reset: bool,
     ended: bool,
@@ -241,16 +242,38 @@ impl Sockets {
     }
     /// Transfer a uniquely owned descriptor; harness descriptors need no poller until parked.
     pub fn insert(&mut self, fd: OwnedFd) -> Option<u64> {
-        self.insert_record(Record {
+        self.insert_fd(fd, false, 0)
+    }
+
+    /// Reserve descriptor table slots before a provider creates its resources.
+    pub fn reserve(&mut self, count: usize) -> io::Result<()> {
+        let new = count.saturating_sub(self.free.len());
+        if self.slots.len().saturating_add(new) > u32::MAX as usize {
+            return Err(io::Error::from_raw_os_error(libc::EMFILE));
+        }
+        self.slots
+            .try_reserve(new)
+            .map_err(|_| io::Error::from_raw_os_error(libc::ENOMEM))
+    }
+
+    /// A pipe has one directional owner and closes its descriptor on release.
+    pub fn insert_pipe(&mut self, fd: OwnedFd, write: bool) -> Option<u64> {
+        self.insert_fd(fd, true, if write { 2 } else { 1 })
+    }
+
+    fn insert_fd(&mut self, fd: OwnedFd, pipe: bool, direction: u64) -> Option<u64> {
+        let key = self.insert_record(Record {
             fd,
-            owners: 1,
+            pipe,
+            owners: 1 << direction,
             reset: false,
             ended: false,
             waiters: [None; 2],
             registered: false,
             read_drained: false,
             read_terminal: false,
-        })
+        })?;
+        Some(key | direction)
     }
 
     fn insert_record(&mut self, record: Record) -> Option<u64> {
@@ -328,6 +351,10 @@ impl Sockets {
     }
     pub fn fd(&self, key: u64) -> i32 {
         self.record(key).fd.as_raw_fd()
+    }
+
+    pub fn pipe(&self, key: u64) -> bool {
+        self.record(key).pipe
     }
     pub fn reset(&self, key: u64) -> bool {
         self.record(key).reset
@@ -491,7 +518,7 @@ impl Sockets {
     pub fn release(&mut self, key: u64) -> bool {
         let r = self.record_mut(key);
         let direction = key & 3;
-        if direction == 2 {
+        if direction == 2 && !r.pipe {
             // SAFETY: the record owns the connected descriptor through final release.
             unsafe { libc::shutdown(r.fd.as_raw_fd(), libc::SHUT_WR) };
         }

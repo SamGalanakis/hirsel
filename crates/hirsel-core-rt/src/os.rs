@@ -621,6 +621,22 @@ pub(crate) unsafe fn duplicate_file(provider: &Provider, handle: u64) -> Option<
 /// As `wait`.
 #[inline(never)]
 pub unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64) -> Step {
+    // SAFETY: these operations pin the Exec call and its callback table.
+    unsafe {
+        match ((*request).operation, (*request).mode) {
+            (EXEC_SPAWN, _) => {
+                let spawn = crate::exec_runtime::operations(request).spawn;
+                return Step {
+                    outcome: crate::tasks::host_operation(state, request, spawn),
+                    ..Step::default()
+                };
+            }
+            (EXEC_WAIT | EXEC_SIGNAL, _) | (CLOSE, crate::exec_runtime::PROC_CLOSE) => {
+                return (crate::exec_runtime::operations(request).process)(&mut *request, token);
+            }
+            _ => {}
+        }
+    }
     if unsafe { matches!((*request).operation, WALL_MS | MONO_NS) } {
         let outcome = unsafe { clock(state, request) };
         #[cfg(test)]
@@ -749,7 +765,9 @@ unsafe fn unix_operations(request: *const Request) -> &'static crate::os_unix::O
 unsafe extern "C" fn resume(state: *mut u8, request: *mut Request, token: u64) -> Step {
     // SAFETY: an outstanding request pins its socket or stdin operands.
     unsafe {
-        if (*request).operation == STDIN_READ {
+        if (*request).operation == EXEC_WAIT {
+            (crate::exec_runtime::operations(request).process)(&mut *request, token)
+        } else if (*request).operation == STDIN_READ {
             (crate::stdin::operations(request).step)(request, token, false)
         } else if unix_operation((*request).operation) {
             (unix_operations(request).step)(&*state.cast(), &mut *request, token, false)
@@ -766,7 +784,9 @@ unsafe extern "C" fn abort(
 ) -> Outcome {
     // SAFETY: an outstanding request pins its socket or stdin operands.
     unsafe {
-        if (*request).operation == STDIN_READ {
+        if (*request).operation == EXEC_WAIT {
+            (crate::exec_runtime::operations(request).abort)(&mut *request, reason)
+        } else if (*request).operation == STDIN_READ {
             (crate::stdin::operations(request).abort)(request, token, reason)
         } else if unix_operation((*request).operation) {
             (unix_operations(request).abort)(&*state.cast(), &mut *request, token, reason)

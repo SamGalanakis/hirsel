@@ -1,5 +1,12 @@
 """Semantic CPU requirements of the surviving test harnesses."""
 
+# These laws execute sealed memfds. The native host supports them, but the
+# bwrap profile used for loopback isolation denies execveat on a memfd.
+NATIVE_EXEC_TEST_CASES = [
+    "provider_tests::exec_supervisor_preserves_inputs_and_only_reaps_its_children",
+    "provider_tests::exec_provider_runs_the_sealed_image_and_uses_directional_pipes",
+]
+
 # These bodies use the real Linux OS Dir provider. Compile on the pool, execute
 # only on the invoking host; each body executes the shared fail-loud precondition.
 OPENAT2_TEST_CASES = {
@@ -23,7 +30,7 @@ OPENAT2_TEST_CASES = {
         "provider_s0_tests::s0_os_callbacks_by_identity_match_the_pointer_calls",
         "tape::tests::every_s1_kind_recorded_on_the_os_replays_with_no_host",
         "tape::tests::filesystem_observations_survive_removing_the_recorded_directory",
-    ],
+    ] + NATIVE_EXEC_TEST_CASES,
     "hirsel-core-driver-unittest": [
         "host::child::terminal_fixture::terminal_bits_follow_each_granted_descriptor",
         "native::tests::dir_cranelift_entry",

@@ -979,6 +979,10 @@ pub unsafe extern "C" fn hirsel_core_net_join(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_socket_drop(context: *mut Context, key: u64) {
     unsafe {
+        if crate::exec_runtime::is_proc(key) {
+            crate::exec_runtime::drop_proc(context, key);
+            return;
+        }
         if let Some(provider) = served_socket(context, key) {
             // The port queues the Released; its server is readied outside
             // the run's commit section.

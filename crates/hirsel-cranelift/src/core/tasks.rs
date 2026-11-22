@@ -346,6 +346,9 @@ impl Function<'_, '_, '_> {
                     | HostOp::ProvideNet
                     | HostOp::PortFill
                     | HostOp::NetJoin
+                    | HostOp::ExecSpawn
+                    | HostOp::ExecWait
+                    | HostOp::ExecSignal
                     | HostOp::NetSplit
                     | HostOp::Stopped => (null, no_mode),
                 };
@@ -405,6 +408,9 @@ impl Function<'_, '_, '_> {
                     | HostOp::ProvideNet
                     | HostOp::PortFill
                     | HostOp::NetJoin
+                    | HostOp::ExecSpawn
+                    | HostOp::ExecWait
+                    | HostOp::ExecSignal
                     | HostOp::NetSplit => {
                         let signature = op_signature(op);
                         let count = signature.len();
@@ -422,6 +428,8 @@ impl Function<'_, '_, '_> {
                             results.extend([K, U, U, Ty::Scalar(Scalar::U16)]);
                         } else if op == HostOp::TlsConnect {
                             results.extend([U; 4]);
+                        } else if op == HostOp::ExecSpawn {
+                            results.extend([U; 3]);
                         }
                         self.c_call(op.adapter_symbol(), &params, &results, &operands)?
                     }
@@ -473,6 +481,11 @@ impl Function<'_, '_, '_> {
                         outputs[i] = values[i + 1];
                     }
                     8
+                } else if op == HostOp::ExecSpawn {
+                    for i in 4..7 {
+                        outputs[i] = values[i + 1];
+                    }
+                    7
                 } else if matches!(op, HostOp::Stat | HostOp::StatFile) {
                     outputs[4] = values[5];
                     5

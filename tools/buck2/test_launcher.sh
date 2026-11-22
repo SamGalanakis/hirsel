@@ -8,7 +8,8 @@ set -eu
 if [ -n "${HIRSEL_TEST_REPORTER:-}" ] && [ -z "${HIRSEL_TEST_REPORT_ACTIVE:-}" ]; then
   exec python3 "$HIRSEL_TEST_REPORTER" sh "$0" "$@"
 fi
-# Every test runs in a network namespace whose only interface is lo, so only
+# The dedicated Exec laws use no network and need the host's memfd execution policy.
+# Other tests run in a network namespace whose only interface is lo, so only
 # the test reaches the loopback ports it listens on. Programs on a developer
 # host probe new loopback listeners (one connects and sends `GET /` to each),
 # which stopped test servers and added foreign requests to what tests
@@ -20,7 +21,7 @@ fi
 only_lo() {
   [ "$(awk 'NR > 2 { sub(":", "", $1); print $1 }' /proc/self/net/dev)" = lo ]
 }
-if ! only_lo; then
+if [ -z "${HIRSEL_TEST_NATIVE_EXEC:-}" ] && ! only_lo; then
   # The marker only stops a second entry: the namespace itself decides.
   if [ -n "${HIRSEL_TEST_NETNS_ENTERED:-}" ]; then
     echo "test_launcher.sh: bwrap --unshare-net did not give a namespace with only lo" >&2

@@ -225,7 +225,7 @@ pub(crate) unsafe fn drive(
 }
 
 #[inline(always)]
-unsafe fn drive_with(
+pub(crate) unsafe fn drive_with(
     context: *mut Context,
     provider: *const Provider,
     request: *mut Request,

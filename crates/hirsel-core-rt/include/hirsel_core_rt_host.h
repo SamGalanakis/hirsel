@@ -250,6 +250,13 @@ HirselCoreHostOutcome hirsel_core_env_get(HirselCoreContext *, uint64_t, const H
 HirselCoreHostOutcome hirsel_core_env_len(HirselCoreContext *, uint64_t, uint64_t);
 HirselCoreHostOutcome hirsel_core_env_name(HirselCoreContext *, uint64_t, uint64_t, uint64_t);
 HirselCoreHostOutcome hirsel_core_env_narrow(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, uint64_t);
+typedef struct {
+    HirselCoreHostOutcome outcome;
+    uint64_t stdin_pipe, stdout_pipe, stderr_pipe;
+} HirselCoreSpawnOutcome;
+HirselCoreSpawnOutcome hirsel_core_exec_spawn(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, const HirselCoreBuffer *, const HirselCoreBuffer *, const HirselCoreBuffer *, const HirselCoreBuffer *, uint8_t, uint8_t, uint8_t, uint64_t);
+HirselCoreHostOutcome hirsel_core_exec_wait(HirselCoreContext *, uint64_t, uint8_t, uint64_t, uint64_t, uint64_t);
+HirselCoreHostOutcome hirsel_core_exec_signal(HirselCoreContext *, uint64_t, uint8_t, uint64_t);
 /* provide cells (core.md, Provide). Constructors admit one cell from the
    current limit; a refusal returns value 0 with written = available. Clock
    answers (value = Clock grant, written = ClockHand key), random answers its

@@ -91,6 +91,7 @@ struct Child {
     pid: libc::pid_t,
     fd: OwnedFd,
     disposition: Disposition,
+    waiter: Option<(crate::tasks::Outside, u64)>,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -105,7 +106,7 @@ enum Disposition {
 struct Registry {
     children: Vec<Child>,
     spawn: Option<(SpawnInput, Option<SetupStep>)>,
-    result: Option<Result<(RawFd, [Option<OwnedFd>; 3]), SpawnError>>,
+    result: Option<Result<Started, SpawnError>>,
     stopping: bool,
     #[cfg(test)]
     orphans: Vec<(libc::pid_t, bool)>,
@@ -181,7 +182,10 @@ impl Supervisor {
             .completed
             .wait_while(registry, |r| r.result.is_none())
             .unwrap();
-        let (fd, [stdin, stdout, stderr]) = registry.result.take().unwrap()?;
+        let Started {
+            pidfd: fd,
+            pipes: [stdin, stdout, stderr],
+        } = registry.result.take().unwrap()?;
         Ok(Spawned {
             process: Process {
                 shared: self.shared.clone(),
@@ -239,17 +243,31 @@ impl Process {
     }
 
     pub fn try_wait(&mut self) -> io::Result<Option<Termination>> {
+        self.wait_or_park(None)
+    }
+
+    pub(crate) fn wait_or_park(&mut self, token: Option<u64>) -> io::Result<Option<Termination>> {
         if self.termination.is_some() {
             return Ok(self.termination);
         }
         let mut registry = self.shared.registry.lock().unwrap();
         let child = direct(&mut registry, self.pidfd())?;
         if let Some(status) = wait(child.fd.as_raw_fd(), libc::WNOHANG)? {
+            child.waiter = None;
             child.disposition = Disposition::Reaped;
             self.termination = Some(status);
             self.shared.wake();
+        } else if let Some(token) = token {
+            child.waiter = Some((crate::tasks::Outside::begin(), token));
         }
         Ok(self.termination)
+    }
+
+    pub(crate) fn withdraw_wait(&self) {
+        let mut registry = self.shared.registry.lock().unwrap();
+        if let Ok(child) = direct(&mut registry, self.pidfd()) {
+            child.waiter = None;
+        }
     }
 
     pub fn signal(&mut self, signal: Signal) -> io::Result<()> {
@@ -363,6 +381,25 @@ impl Shared {
                 unsafe { libc::read(self.change.as_raw_fd(), (&raw mut pending).cast(), 8) };
             }
             let mut registry = self.registry.lock().unwrap();
+            let mut ready: [_; 16] = std::array::from_fn(|_| None);
+            for (event, slot) in events[..count as usize].iter().zip(&mut ready) {
+                if let Some(fd) = event.u64.checked_sub(1)
+                    && let Some(child) = registry
+                        .children
+                        .iter_mut()
+                        .find(|child| child.fd.as_raw_fd() as u64 == fd)
+                {
+                    *slot = child.waiter.take();
+                }
+            }
+            if ready.iter().any(Option::is_some) {
+                // A scheduler may hold its ready queue while entering a callback.
+                drop(registry);
+                for (outside, token) in ready.into_iter().flatten() {
+                    outside.complete(token);
+                }
+                registry = self.registry.lock().unwrap();
+            }
             if let Some((input, failure)) = registry.spawn.take() {
                 let started = self.clone_child(&mut registry, input, failure);
                 drop(registry);
@@ -443,11 +480,12 @@ impl Shared {
         check(pid)?;
         // SAFETY: CLONE_PIDFD transfers a fresh descriptor to the parent.
         let fd = unsafe { OwnedFd::from_raw_fd(pidfd) };
-        let monitored = watch(&self.poller, &fd, 1, true);
+        let monitored = watch(&self.poller, &fd, pidfd as u64 + 1, true);
         registry.children.push(Child {
             pid: pid as libc::pid_t,
             fd,
             disposition: Disposition::Live,
+            waiter: None,
         });
         drop(writer);
         let pipes = mem::take(&mut streams.parent);
@@ -459,10 +497,7 @@ impl Shared {
         })
     }
 
-    fn finish_spawn(
-        &self,
-        starting: Result<Starting, SpawnError>,
-    ) -> Result<(RawFd, [Option<OwnedFd>; 3]), SpawnError> {
+    fn finish_spawn(&self, starting: Result<Starting, SpawnError>) -> Result<Started, SpawnError> {
         let Starting {
             pidfd,
             reader,
@@ -471,7 +506,7 @@ impl Shared {
         } = starting?;
         let error = match monitored {
             Ok(()) => match read_report(reader) {
-                Ok(None) => return Ok((pidfd, pipes)),
+                Ok(None) => return Ok(Started { pidfd, pipes }),
                 Ok(Some(error)) => error,
                 Err(error) => {
                     let _ = send(pidfd, Signal::Kill);
@@ -528,11 +563,14 @@ impl Shared {
                     continue;
                 }
                 match wait(fd.as_raw_fd(), libc::WNOHANG) {
-                    Ok(None) if watch(&self.poller, &fd, 1, true).is_ok() => {
+                    Ok(None)
+                        if watch(&self.poller, &fd, fd.as_raw_fd() as u64 + 1, true).is_ok() =>
+                    {
                         registry.children.push(Child {
                             pid,
                             fd,
                             disposition: Disposition::Orphan,
+                            waiter: None,
                         });
                     }
                     _ => {}
@@ -540,6 +578,11 @@ impl Shared {
             }
         }
     }
+}
+
+struct Started {
+    pidfd: RawFd,
+    pipes: [Option<OwnedFd>; 3],
 }
 
 struct Starting {
@@ -550,6 +593,7 @@ struct Starting {
 }
 
 fn release(child: &mut Child) {
+    child.waiter = None;
     if let Err(error) = send(child.fd.as_raw_fd(), Signal::Kill)
         && error.raw_os_error() != Some(libc::ESRCH)
     {

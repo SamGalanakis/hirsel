@@ -13,7 +13,7 @@ CARGO_TARGET_TMPDIR and CARGO_BIN_EXE_<name>.
 """
 
 load(":platforms.bzl", "CLIPPY_REQUEST", "PRECHECK_REQUEST", "PROBE_CPUS", "budget_constraint", "compile_request", "doctest_properties", "dist_compile_request", "pool_budget_name", "test_budget_name", "test_executor", "test_request", "test_memory_limit")
-load(":test_requirements.bzl", "OPENAT2_TEST_CASES")
+load(":test_requirements.bzl", "NATIVE_EXEC_TEST_CASES", "OPENAT2_TEST_CASES")
 load(":exec_sizes.bzl", "COMPILE_CLASSES", "COMPILE_REQUESTS")
 load(":profile.bzl", "runtime_profile_flags", "workspace_profile_flags")
 load("@prelude//rust:cargo_package.bzl", "get_reindeer_platforms")
@@ -311,6 +311,9 @@ def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, pac
     host_targets = []
     for index, case in enumerate(host_cases):
         target = "{}-openat2-{}".format(name, index + 1)
+        environment = {"HIRSEL_TEST_DEDICATED_CASE": case}
+        if case in NATIVE_EXEC_TEST_CASES:
+            environment["HIRSEL_TEST_NATIVE_EXEC"] = "1"
         host_targets.append(":" + target)
         _rust_test(
             name = target,
@@ -318,7 +321,7 @@ def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, pac
             labels = ["local-execution", "requires-openat2"],
             exec_compatible_with = [budget_constraint("host")],
             pool = False,
-            extra_env = {"HIRSEL_TEST_DEDICATED_CASE": case},
+            extra_env = environment,
             **isolated_common
         )
     if host_cases:

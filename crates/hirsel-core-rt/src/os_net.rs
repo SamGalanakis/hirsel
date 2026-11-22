@@ -580,16 +580,31 @@ unsafe fn attempt(request: &mut Request, n: &mut NetworkRequest, first: bool) ->
                 if receiving && sockets.ended(key) && !sockets.reset(key) {
                     return Some(Outcome::default());
                 }
+                let fd = sockets.fd(key);
+                let pipe = sockets.pipe(key);
                 let rc = retry(|| {
                     if let Some(tail) = tail {
-                        send_pair(sockets.fd(key), b, tail)
+                        if pipe {
+                            // The run ignores SIGPIPE. One writev commits
+                            // a prefix across both offered slices.
+                            let parts = [
+                                libc::iovec {
+                                    iov_base: b.data.cast(),
+                                    iov_len: b.len,
+                                },
+                                libc::iovec {
+                                    iov_base: tail.data.cast(),
+                                    iov_len: tail.len,
+                                },
+                            ];
+                            libc::writev(fd, parts.as_ptr(), parts.len() as i32)
+                        } else {
+                            send_pair(fd, b, tail)
+                        }
+                    } else if pipe {
+                        libc::read(fd, b.data.add(b.len).cast(), b.capacity - b.len)
                     } else {
-                        libc::recv(
-                            sockets.fd(key),
-                            b.data.add(b.len).cast(),
-                            b.capacity - b.len,
-                            0,
-                        )
+                        libc::recv(fd, b.data.add(b.len).cast(), b.capacity - b.len, 0)
                     }
                 });
                 match rc {

@@ -293,6 +293,7 @@ impl Files {
         if let Some(run) = Arc::get_mut(&mut self.registry.run) {
             run.net_grants.get_mut().unwrap().clear();
             run.env_grants.get_mut().unwrap().clear();
+            run.exec_grants.get_mut().unwrap().clear();
             *run.secrets.get_mut().unwrap() = crate::secret::Secrets::default();
             crate::provide::forget(&mut run.cells);
         }

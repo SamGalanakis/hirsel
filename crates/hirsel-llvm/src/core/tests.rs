@@ -2383,6 +2383,10 @@ fn provider_samples_match_the_hand_oracle_and_every_closed_row_emits() {
     }
     for &op in HostOp::ALL {
         let params: &[&str] = match op {
+            HostOp::ExecSpawn => &["u64", "ptr", "ptr", "ptr", "ptr", "ptr", "u8", "u8", "u8"],
+            HostOp::ExecWait => &["u64", "u8", "u64", "u64"],
+            HostOp::ExecSignal => &["u64", "u8"],
+            HostOp::ExecNarrow => &["u64", "u32", "ptr", "ptr"],
             HostOp::Connect => &["u64", "u8", "u64", "u64", "u16", "u8", "u64", "u64"],
             HostOp::Listen => &["u64", "u8", "u64", "u64", "u16", "u16"],
             HostOp::Accept => &["u64", "u8", "u64", "u64"],
@@ -2447,6 +2451,8 @@ fn provider_samples_match_the_hand_oracle_and_every_closed_row_emits() {
             &["u64", "u8", "u32", "u64", "u8", "u64", "u64", "u16"]
         } else if op == HostOp::TlsConnect {
             &["u64", "u8", "u32", "u64", "u64", "u64", "u64", "u64"]
+        } else if op == HostOp::ExecSpawn {
+            &["u64", "u8", "u32", "u64", "u64", "u64", "u64"]
         } else if matches!(op, HostOp::Stat | HostOp::StatFile) {
             &["u64", "u8", "u32", "i64", "u8"]
         } else if !matches!(op, HostOp::WallMs | HostOp::MonoNs) {

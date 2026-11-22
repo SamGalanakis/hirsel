@@ -411,9 +411,9 @@ operations! {
     ("writer", "completed", Lane::Language, "A", "core-check-895", false),
     ("writer", "last_completed", Lane::Language, "A", "core-check-895", false),
     ("exec", "narrow", Lane::Runtime(Kernel::Net(HostOp::ExecNarrow)), "B", "exec-unix-impl-a-1619", false),
-    ("exec", "spawn", Lane::Declaration, "B", "exec-unix-impl-a-1619", false),
-    ("exec", "wait", Lane::Declaration, "B", "exec-unix-impl-a-1619", false),
-    ("exec", "signal", Lane::Declaration, "B", "exec-unix-impl-a-1619", false),
+    ("exec", "spawn", Lane::Runtime(Kernel::Net(HostOp::ExecSpawn)), "B", "exec-unix-impl-b-1626", false),
+    ("exec", "wait", Lane::Runtime(Kernel::Net(HostOp::ExecWait)), "B", "exec-unix-impl-b-1626", false),
+    ("exec", "signal", Lane::Runtime(Kernel::Net(HostOp::ExecSignal)), "B", "exec-unix-impl-b-1626", false),
     ("host", "connect_unix", Lane::Runtime(Kernel::Net(HostOp::UnixConnect)), "B", "exec-unix-impl-c-1627", false),
     ("host", "listen_unix", Lane::Runtime(Kernel::Net(HostOp::UnixListen)), "B", "exec-unix-impl-c-1627", false),
     ("host", "accept_unix", Lane::Runtime(Kernel::Net(HostOp::UnixAccept)), "B", "exec-unix-impl-c-1627", false),
@@ -3434,6 +3434,190 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.start(join);
         self.runtime_store(to, &[Step::Field(1)], Ty::Scalar(Scalar::U16), values[3], n);
     }
+    fn exec_tag(&mut self, at: AddressId, n: NodeId) -> ValueId {
+        let tag = self.net_case(at, n);
+        self.exec_byte(tag, n)
+    }
+
+    fn exec_byte(&mut self, value: ValueId, n: NodeId) -> ValueId {
+        let result = self.value(Ty::Scalar(Scalar::U8));
+        self.inst(
+            Inst::Convert {
+                result,
+                flag: None,
+                operand: value,
+                mode: ConvertMode::Truncate,
+            },
+            n,
+        );
+        result
+    }
+
+    fn runtime_exec(
+        &mut self,
+        op: HostOp,
+        function: usize,
+        vals: &[Option<ValueId>],
+        result: TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let operand_ty = self.p.fns[function].params[1].ty;
+        let mut args = vec![if op == HostOp::ExecSpawn {
+            vals[0]?
+        } else {
+            self.runtime_key(vals[0]?, n)
+        }];
+        match op {
+            HostOp::ExecSpawn => {
+                let (_, launch) = self.runtime_place(operand_ty, vals[1], n)?;
+                for index in 0..5 {
+                    args.push(self.net_read_field(operand_ty, launch, index, n)?);
+                }
+                for index in 5..8 {
+                    let (_, stream) = self.net_field(operand_ty, launch, index, n)?;
+                    args.push(self.exec_tag(stream, n));
+                }
+            }
+            HostOp::ExecWait => args.extend(self.net_until(operand_ty, vals[1]?, n)?),
+            HostOp::ExecSignal => {
+                let (_, signal) = self.runtime_place(operand_ty, vals[1], n)?;
+                args.push(self.exec_tag(signal, n));
+            }
+            _ => unreachable!(),
+        }
+        let args: Vec<_> = args.into_iter().map(Arg::Value).collect();
+        let [value, tag, code, _, stdin, stdout, stderr] =
+            self.runtime_outputs::<7>(RtOp::Host(op), &args, n)?;
+        let ok = self.runtime_compare(Ty::Scalar(Scalar::U8), tag, 0, n)?;
+        self.runtime_result(
+            result,
+            ok,
+            n,
+            |cx, to, ty| {
+                if op != HostOp::ExecSignal
+                    && let Some(at) =
+                        cx.runtime_field(to, &[Step::CaseField { case: 0, field: 0 }], ty, n)
+                {
+                    if op == HostOp::ExecSpawn {
+                        cx.runtime_spawned(at, ty, [value, stdin, stdout, stderr], n);
+                    } else {
+                        cx.runtime_termination(at, value, n);
+                    }
+                }
+            },
+            |cx, to, ty| {
+                if let Some(at) =
+                    cx.runtime_field(to, &[Step::CaseField { case: 1, field: 0 }], ty, n)
+                {
+                    cx.runtime_exec_error(at, tag, code, n);
+                }
+            },
+        )
+    }
+
+    fn runtime_spawned(
+        &mut self,
+        to: AddressId,
+        ty: TyId,
+        [proc, stdin, stdout, stderr]: [ValueId; 4],
+        n: NodeId,
+    ) {
+        let u = Ty::Scalar(Scalar::U64);
+        self.inst(
+            Inst::SetCase {
+                address: to,
+                case: 0,
+            },
+            n,
+        );
+        self.runtime_store(to, &[Step::CaseField { case: 0, field: 0 }], u, proc, n);
+        for (i, pipe) in [stdin, stdout, stderr].into_iter().enumerate() {
+            let Some((_, option)) = self.net_case_field(ty, to, 0, i as u32 + 1, n) else {
+                return;
+            };
+            let absent = self.runtime_compare(u, pipe, 0, n).unwrap();
+            let no = self.new_block(&[]);
+            let yes = self.new_block(&[]);
+            let join = self.new_block(&[]);
+            self.runtime_branch(absent, no, yes, n);
+            self.start(no);
+            self.inst(
+                Inst::SetCase {
+                    address: option,
+                    case: 0,
+                },
+                n,
+            );
+            self.jump(join, &[], n);
+            self.start(yes);
+            self.inst(
+                Inst::SetCase {
+                    address: option,
+                    case: 1,
+                },
+                n,
+            );
+            self.runtime_store(option, &[Step::CaseField { case: 1, field: 0 }], u, pipe, n);
+            self.jump(join, &[], n);
+            self.start(join);
+        }
+    }
+
+    fn runtime_termination(&mut self, to: AddressId, value: ValueId, n: NodeId) {
+        let max = self.konst(Ty::Scalar(Scalar::U64), 255, n).unwrap();
+        let exited = self.test(CompareOp::Le, value, max, n);
+        let code = self.exec_byte(value, n);
+        let exit = self.new_block(&[]);
+        let signal = self.new_block(&[]);
+        let join = self.new_block(&[]);
+        self.runtime_branch(exited, exit, signal, n);
+        for (block, case) in [(exit, 0), (signal, 1)] {
+            self.start(block);
+            self.inst(Inst::SetCase { address: to, case }, n);
+            self.runtime_store(
+                to,
+                &[Step::CaseField { case, field: 0 }],
+                Ty::Scalar(Scalar::U8),
+                code,
+                n,
+            );
+            self.jump(join, &[], n);
+        }
+        self.start(join);
+    }
+
+    fn runtime_exec_error(&mut self, to: AddressId, tag: ValueId, code: ValueId, n: NodeId) {
+        let join = self.new_block(&[]);
+        for case in 0..3 {
+            let is = self
+                .runtime_compare(Ty::Scalar(Scalar::U8), tag, u64::from(case + 1), n)
+                .unwrap();
+            let yes = self.new_block(&[]);
+            let no = self.new_block(&[]);
+            self.runtime_branch(is, yes, no, n);
+            self.start(yes);
+            self.inst(Inst::SetCase { address: to, case }, n);
+            self.jump(join, &[], n);
+            self.start(no);
+        }
+        self.inst(
+            Inst::SetCase {
+                address: to,
+                case: 3,
+            },
+            n,
+        );
+        self.runtime_store(
+            to,
+            &[Step::CaseField { case: 3, field: 0 }],
+            Ty::Scalar(Scalar::U32),
+            code,
+            n,
+        );
+        self.jump(join, &[], n);
+        self.start(join);
+    }
+
     fn runtime_net(
         &mut self,
         op: HostOp,
@@ -3442,6 +3626,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         result: TyId,
         n: NodeId,
     ) -> Option<ValueId> {
+        if matches!(
+            op,
+            HostOp::ExecSpawn | HostOp::ExecWait | HostOp::ExecSignal
+        ) {
+            return self.runtime_exec(op, f, vals, result, n);
+        }
         if matches!(op, HostOp::SecretHmac | HostOp::SecretVerifyHmac) {
             return self.runtime_secret_mac(op, vals, result, n);
         }

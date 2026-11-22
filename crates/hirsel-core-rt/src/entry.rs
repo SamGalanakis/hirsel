@@ -850,6 +850,7 @@ unsafe extern "C" fn close_grants(state: *mut u8) {
         let process = &mut *state.cast::<OsProcess>();
         process.secrets.clear();
         drop(process.stdin.take());
+        drop(process._exec.take());
         drop(process.os.take());
         drop(process.describe_out.take());
     }

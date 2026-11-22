@@ -4234,6 +4234,9 @@ impl Machine<'_> {
             return reply;
         }
         match op {
+            HostOp::ExecSpawn | HostOp::ExecWait | HostOp::ExecSignal => {
+                std::panic::resume_unwind(Box::new(RunStop("NativeExec")))
+            }
             HostOp::TlsConnect => return self.tls_connect(t, a),
             HostOp::SendSecret => return self.send_secret(t, a),
             HostOp::ScramSha256 => return self.scram_send(t, a),

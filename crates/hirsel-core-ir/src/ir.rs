@@ -1073,6 +1073,9 @@ pub enum HostOp {
     PortNext = hirsel_core_ids::host_op::PORT_NEXT as isize,
     CallWord = hirsel_core_ids::host_op::CALL_WORD as isize,
     CallSecret = hirsel_core_ids::host_op::CALL_SECRET as isize,
+    ExecSpawn = hirsel_core_ids::host_op::EXEC_SPAWN as isize,
+    ExecWait = hirsel_core_ids::host_op::EXEC_WAIT as isize,
+    ExecSignal = hirsel_core_ids::host_op::EXEC_SIGNAL as isize,
     CallPayload = hirsel_core_ids::host_op::CALL_PAYLOAD as isize,
     PortReply = hirsel_core_ids::host_op::PORT_REPLY as isize,
     ProvideDir = hirsel_core_ids::host_op::PROVIDE_DIR as isize,
@@ -1178,6 +1181,9 @@ impl HostOp {
         HostOp::PortNext,
         HostOp::CallWord,
         HostOp::CallSecret,
+        HostOp::ExecSpawn,
+        HostOp::ExecWait,
+        HostOp::ExecSignal,
         HostOp::CallPayload,
         HostOp::PortReply,
         HostOp::ProvideDir,
@@ -1272,6 +1278,9 @@ impl HostOp {
             HostOp::PortNext => "port_next",
             HostOp::CallWord => "call_word",
             HostOp::CallSecret => "call_secret",
+            HostOp::ExecSpawn => "exec_spawn",
+            HostOp::ExecWait => "exec_wait",
+            HostOp::ExecSignal => "exec_signal",
             HostOp::CallPayload => "call_payload",
             HostOp::PortReply => "port_reply",
             HostOp::ProvideDir => "provide_dir",
@@ -1331,6 +1340,9 @@ impl HostOp {
             Self::PortNext => "hirsel_core_port_next",
             Self::CallWord => "hirsel_core_call_word",
             Self::CallSecret => "hirsel_core_call_secret",
+            Self::ExecSpawn => "hirsel_core_exec_spawn",
+            Self::ExecWait => "hirsel_core_exec_wait",
+            Self::ExecSignal => "hirsel_core_exec_signal",
             Self::CallPayload => "hirsel_core_call_payload",
             Self::PortReply => "hirsel_core_port_reply",
             Self::ProvideDir => "hirsel_core_provide_dir",
@@ -1727,6 +1739,26 @@ impl RtOp {
                             vec![p, u8_, Ty::Scalar(Scalar::U32), u64_],
                         )
                     }
+                    HostOp::ExecSpawn => {
+                        let mut results = outcome;
+                        results.extend([u64_; 3]);
+                        (
+                            vec![
+                                V(u64_),
+                                V(p),
+                                V(p),
+                                V(p),
+                                V(p),
+                                V(p),
+                                V(u8_),
+                                V(u8_),
+                                V(u8_),
+                            ],
+                            results,
+                        )
+                    }
+                    HostOp::ExecWait => (vec![V(u64_), V(u8_), V(u64_), V(u64_)], outcome),
+                    HostOp::ExecSignal => (vec![V(u64_), V(u8_)], outcome),
                     HostOp::StdinRead => (vec![V(u64_), V(p), V(u8_), V(u64_), V(u64_)], outcome),
                     HostOp::Open => (vec![V(u64_), V(p), V(u8_)], outcome),
                     HostOp::ReadAt | HostOp::WriteAt => (vec![V(u64_), V(u64_), V(p)], outcome),

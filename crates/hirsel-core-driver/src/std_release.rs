@@ -6,8 +6,10 @@
 //! generator. Every root is an export; a program calls it by its symbol and
 //! holds none of its bodies. Every optimised LLVM build takes one: a program
 //! lowers every other library instance it reaches itself, so its optimiser
-//! sees the closure and dictionary arguments it passes them, and the roots
-//! [`ALWAYS_IMPORT`] holds back with what they reach.
+//! sees the closure and dictionary arguments it passes them, and the held
+//! roots with what they reach: those [`ALWAYS_IMPORT`] names, and those that
+//! take code a caller can bind ([`callable_variants::takes_code`]), whose
+//! calls through it a program's private bodies make direct.
 //!
 //! The unit and a program meet at five contracts:
 //! - callable: each root is defined under its instance symbol, and one
@@ -50,7 +52,6 @@ const LEND_LIMIT: usize = 2000;
 /// std bodies the program's optimizer must see whole.
 const ALWAYS_IMPORT: &[&str] = &[
     "std@1/json/parse",
-    "std@1/json/write",
     "std@1/regex/next_captures",
     "std@1/string/next_split",
 ];
@@ -58,6 +59,13 @@ const ALWAYS_IMPORT: &[&str] = &[
 fn always_imported(definition: &DefPath) -> bool {
     let path = definition.to_string();
     ALWAYS_IMPORT.contains(&path.as_str())
+}
+
+/// A plain root a program lowers itself, with what it reaches: one
+/// [`ALWAYS_IMPORT`] names, or one taking code a caller can bind. Both sides
+/// decide it from the root's own function alone.
+fn held_root(definition: &DefPath, module: &hirsel_core_ir::Module, root: FuncId) -> bool {
+    always_imported(definition) || crate::callable_variants::takes_code(module, root)
 }
 
 /// The source law runner places program modules in the core and std packages.
@@ -155,9 +163,9 @@ fn program_side(
     };
     let held = reach(
         units
-            .keys()
-            .filter(|i| plain(i) && always_imported(&i.definition))
-            .cloned()
+            .iter()
+            .filter(|(i, unit)| plain(i) && held_root(&i.definition, &unit.module, FuncId(0)))
+            .map(|(i, _)| i.clone())
             .collect(),
     );
     let roots: Vec<Identity> = units
@@ -197,31 +205,31 @@ impl CheckProduct {
     /// plain root the image checked whole and what it reaches, prepared as a
     /// recipe names them. Reads the library image only.
     fn image_side(&self) -> Result<SideUnits, NativeStop> {
-        let mut plain = self.std_plain_roots()?;
-        // What an always-imported entry reaches stays the program's to lower.
-        let mut held = BTreeSet::new();
-        for root in plain
-            .iter()
-            .filter(|root| always_imported(&root.definition))
-        {
-            let mut scratch = crate::instances::InstanceSet::default();
-            if let Ok(walked) =
-                self.instances_into([root.clone()], SIDE_INSTANCE_LIMIT, &mut scratch)
-            {
-                held.extend(walked);
-            }
-            held.insert(root.clone());
-        }
-        plain.retain(|root| !held.contains(root));
+        let plain = self.std_plain_roots()?;
         let mut materialized = crate::instances::InstanceSet::default();
-        let mut reached = BTreeSet::new();
-        let mut roots = Vec::new();
         // A root whose walk stops is left out alone; a program reaching it
         // lowers it itself and stops there as it does today.
+        let mut walks = Vec::new();
         for root in plain {
             if let Ok(walked) =
                 self.instances_into([root.clone()], SIDE_INSTANCE_LIMIT, &mut materialized)
             {
+                walks.push((root, walked));
+            }
+        }
+        // What a held root reaches stays the program's to lower.
+        let mut held = BTreeSet::new();
+        for (root, walked) in &walks {
+            let instance = materialized.get(root);
+            if held_root(&root.definition, instance.ir()?, instance.function) {
+                held.extend(walked.iter().cloned());
+                held.insert(root.clone());
+            }
+        }
+        let mut reached = BTreeSet::new();
+        let mut roots = Vec::new();
+        for (root, walked) in walks {
+            if !held.contains(&root) {
                 reached.extend(walked);
                 roots.push(root);
             }

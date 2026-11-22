@@ -545,15 +545,18 @@ fn damaged_executable_links_again(backend: Backend) {
     let core = core_sources();
     let options = native_options(backend, dir.path());
     let product = record_check(DAMAGE_APP, &core, dir.path(), "store");
-    let first = executable_bytes(&product, &options);
-    let records: Vec<_> = std::fs::read_dir(&options.store)
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .filter(|p| std::fs::read(p).is_ok_and(|b| b.get(12..16) == Some(b"\x7fELF")))
-        .collect();
-    assert_eq!(records.len(), 1, "one executable record");
-    damage(&records[0], Damage::Middle);
     let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let built = product.build(&entry, &options).unwrap();
+    let status = Command::new(&built.executable).status().unwrap().code();
+    let first = (std::fs::read(&built.executable).unwrap(), status);
+    // The executable record is framed under the build's key; its detached
+    // DWARF, also an ELF file, is a record of its own.
+    let record = Store::new(&options.store).unwrap().path(built.identity);
+    assert!(
+        std::fs::read(&record).is_ok_and(|b| b.get(12..16) == Some(b"\x7fELF")),
+        "the executable record"
+    );
+    damage(&record, Damage::Middle);
     let again = product.build(&entry, &options).unwrap();
     assert!(again.linked, "the damaged executable is not reused");
     let status = Command::new(&again.executable).status().unwrap().code();

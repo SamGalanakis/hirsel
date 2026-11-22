@@ -641,6 +641,18 @@ the operator or a named first-party author is `contained`, so no external or mul
 tenant runs until R27 is built. Changing a group's label is an operator action, recorded in
 the catalog, and it takes effect at the group's next start.
 
+*Built (2026-11-22):* the `contained` label's containment is the `hirsel-contain` crate,
+which the launcher calls for each contained child. A launcher host opens a delegated cgroup v2
+subtree and is refused unless a trial container works: the `cpu`, `memory` and `pids`
+controllers, and an unprivileged user, PID, mount, network and cgroup namespace with its own
+root. Each child runs as its own container, named by its identity (RUNNER-SPEC §14.1), under
+an init that is PID 1 of its namespaces. Its root holds only its mode's directories, its image
+and the read-only paths the launcher names. Its network namespace is empty. Only its mode's
+descriptors reach it. A new launcher empties every container its predecessor left before it
+answers `Hello`. One part is not built: a child whose authority holds a `Net` binding
+(serving only) is refused rather than contained, because no NET-6 rule is enforced inside a
+container yet.
+
 ### Deploy preview of pending triggers
 
 The deploy preview (above) adds one more report: what NEW will do with the triggers already
@@ -691,14 +703,14 @@ OLD's head has closed it, and an extra launch of the group is refused `Held`;
 restarted gives the host's reconciliation the same result as the host's records alone,
 and a host killed at every step adopts the live children and starts no second serving
 child of any group;
-`contained_all_children`, where an install, describe, preview, prepare and serving child
+`contained_all_children` (built, crates/hirsel-contain), where an install, describe, preview, prepare and serving child
 of a contained group, and a tool descendant of the serving child, each fail to read a
 file outside its mode's row and to connect outside its `Net` bindings (all connections,
 for every mode but serving), and leave no process after it ends, and where a launcher
 killed while they run is replaced by one that reports them ended only after their
-containers are empty; `child_mode_authority`, where a prepare child can write only its
+containers are empty; `child_mode_authority` (containment half built, crates/hirsel-contain), where a prepare child can write only its
 export directory and holds no listener, and no child holds the control socket;
 `collect_reservation_handoff`, where a deploy's reservation is released between the host's
 `CollectBegin` and its root read and the pending record's image can still be opened after
-collection; `contained_refused_uncontainable`, where a launcher on a host without the
+collection; `contained_refused_uncontainable` (built, crates/hirsel-contain), where a launcher on a host without the
 mechanism admits no contained group; and `trigger_scan_classes` (RUNNER-SPEC §14.7, L40).

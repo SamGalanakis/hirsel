@@ -2379,6 +2379,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             .resolution
             .binders;
         let fd = self.fd.clone();
+        let mut written_parameters = vec![];
         for (parameter_index, pd) in fd.params.iter().enumerate() {
             let v = match self.ir_ty(pd.ty) {
                 _ if pd.mode == Mode::Mut && k < entry_params.len() => {
@@ -2461,7 +2462,13 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
                 self.has_callback_parameters |= self.contains_callback(pd.ty);
                 self.parameter_anchors(b.id, pd.ty, pd.mode, parameter_index as u32);
                 self.own(b.id, body);
+                written_parameters.push((parameter_index, b.id, pd.ty, pd.mode));
             }
+        }
+        // A formal whose written type names anchors (`take b: Body in input`) has
+        // that anchor set (OWN-19), which may name a later parameter.
+        for (index, slot, ty, mode) in written_parameters {
+            self.written_parameter_anchors(index, slot, ty, mode);
         }
         // A clone body builds its result in a local destination (`clone_return`).
         if self.fd.clone_of.is_some() && self.live() {

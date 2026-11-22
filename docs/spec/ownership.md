@@ -818,7 +818,9 @@ does (OWN-20), has exactly that anchor set for its whole extent, whatever it hol
 or sub-view of one included, or it is refused there. Its set is then the same at a loop's
 head and at every edge (OWN-17), so a loop may keep a view it finds; a slot without a
 written anchor starts with its initialiser's set, which is why `last_len` (OWN-8) is
-refused and `last` below is not. A scoped callback slot with a written anchor may so be
+refused and `last` below is not. A scoped `take` or view formal starts with the anchors its
+written type names, not with itself: `take b: Body in input` reads `input`, so a result
+anchored to `input` may hold `b` or a part of it (OWN-20). A scoped callback slot with a written anchor may so be
 assigned a callback that captures that anchor as a view, even while it holds one that
 captures nothing (`pick`); a `mut` capture of the anchor is refused where it is activated,
 the anchor being frozen (OWN-10). Only a body that can name the anchor builds such a

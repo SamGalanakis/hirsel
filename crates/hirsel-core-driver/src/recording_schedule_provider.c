@@ -1,6 +1,8 @@
 /* Engine-agreement oracle: scripted clock, deterministic ready notifications,
-   and an adversarial chooser. Only the recording run uses this provider. */
+   and an adversarial chooser. Only the recording run links this provider; it
+   registers itself as the test runtime's recording launch before main. */
 #include "hirsel_core_rt_sites.h"
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 static uint64_t waits[16];
@@ -34,10 +36,8 @@ static HirselCoreHostOutcome script_deliver(void *s,HirselCoreHostRequest *r,Hir
     (void)s;(void)r;return o;
 }
 extern uint8_t hirsel_core_test_run_last(const HirselCoreProcessConfig *,HirselCoreEntry);
-extern uint8_t __real_hirsel_core_run(const HirselCoreProcessConfig *,HirselCoreEntry);
-static int in_wrap;
-uint8_t __wrap_hirsel_core_run(const HirselCoreProcessConfig *input,HirselCoreEntry entry) {
-    if(in_wrap || !getenv("HIRSEL_RECORD_SCHEDULE"))return __real_hirsel_core_run(input,entry);
+extern bool hirsel_core_test_set_record_launch(uint8_t (*)(const HirselCoreProcessConfig *,HirselCoreEntry));
+static uint8_t scripted_launch(const HirselCoreProcessConfig *input,HirselCoreEntry entry) {
     HirselCoreProcessConfig cfg=*input;
     HirselCoreEntryGrant grants[16];
     if(cfg.capabilities_len>16)abort();
@@ -45,8 +45,8 @@ uint8_t __wrap_hirsel_core_run(const HirselCoreProcessConfig *input,HirselCoreEn
     HirselCoreProvider script={0,script_wait,script_issue,script_resume,script_abort,script_deliver};
     for(size_t i=0;i<cfg.capabilities_len;i++)if(grants[i].kind==2)grants[i].provider=&script;
     cfg.capabilities=grants;
-    in_wrap=1;
-    uint8_t status=hirsel_core_test_run_last(&cfg,entry);
-    in_wrap=0;
-    return status;
+    return hirsel_core_test_run_last(&cfg,entry);
+}
+__attribute__((constructor)) static void install_scripted_launch(void) {
+    if(!hirsel_core_test_set_record_launch(scripted_launch))abort();
 }

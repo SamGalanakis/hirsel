@@ -732,7 +732,7 @@ fn recording_schedule_replays_across_engines() {
     options.link = Link::Driver(appending_driver(
         dir.path(),
         "clang-record-schedule",
-        &format!("'{}' -Wl,--wrap=hirsel_core_run", object.display()),
+        &format!("'{}'", object.display()),
     ));
     options.runtime = root.join(
         std::env::var_os("HIRSEL_CORE_RT_SCRIPTED_RECORD_ARCHIVE")
@@ -815,7 +815,6 @@ fn recording_schedule_replays_across_engines() {
         let built = product.build(&entry, &options).unwrap();
         let output = Command::new(&built.executable)
             .env("HIRSEL_RECORD", &tape)
-            .env("HIRSEL_RECORD_SCHEDULE", "1")
             .env("HIRSEL_S8_WORKERS", "1")
             .output()
             .unwrap();

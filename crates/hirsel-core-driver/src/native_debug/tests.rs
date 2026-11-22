@@ -163,6 +163,32 @@ fn native_fiber_boundary_has_no_caller() {
     let section = elf.section_by_name(".eh_frame").unwrap();
     let base = BaseAddresses::default().set_eh_frame(section.address());
     let eh = EhFrame::new(section.data().unwrap(), LittleEndian);
+    let launch = ["main", "__hirsel_entry"].map(|name| {
+        elf.symbol_by_name(name)
+            .unwrap_or_else(|| panic!("missing entry function {name}"))
+    });
+    let hirsel = elf.symbols().filter(|symbol| {
+        symbol.kind() == object::SymbolKind::Text
+            && symbol.is_definition()
+            && symbol.name().is_ok_and(|name| {
+                name.starts_with("hirsel.g.")
+                    || name
+                        .strip_prefix('h')
+                        .and_then(|rest| rest.get(..64))
+                        .is_some_and(|hash| hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            })
+    });
+    for function in launch.into_iter().chain(hirsel) {
+        let name = function.name().unwrap();
+        let fde = eh
+            .fde_for_address(&base, function.address(), EhFrame::cie_from_offset)
+            .unwrap_or_else(|error| panic!("{name} has no FDE: {error}"));
+        assert_eq!(
+            (fde.initial_address(), fde.len()),
+            (function.address(), function.size()),
+            "incomplete FDE for {name}"
+        );
+    }
     let (sp, ra) = match elf.architecture() {
         object::Architecture::X86_64 => (Register(7), Register(16)),
         object::Architecture::Aarch64 => (Register(31), Register(30)),

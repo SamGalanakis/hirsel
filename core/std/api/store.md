@@ -268,8 +268,9 @@ it to built. Everything above describes the store as built.
   allocates with the frames they describe, and the checkpoint task only
   writes the plan, in a fixed workspace: `checkpoint_task_bytes` defaults to
   67,174,400 bytes and open refuses less. A checkpoint is never refused by
-  its task; a planning allocation the writer cannot make returns `Full` with
-  nothing captured (AP16).
+  its task. Per-frame state is allocated with the frame; the cut's new list
+  pages, pack rows and retired seqs are writer memory with no reservation, and
+  a plan that cannot allocate them returns `Full` with nothing captured (AP16).
 - **Fork.** A `fork` from a Snapshot at its live branch head writes one FORK
   journal frame, waits for its sync, and returns the branch with an already
   durable journal ticket: no walk, settle or cut, the account is unchanged, and

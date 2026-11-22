@@ -1,4 +1,6 @@
-# STORE-SPEC v2.31: the M4 store library, final form (lane store-spec-1001)
+# STORE-SPEC v2.32: the M4 store library, final form (lane store-spec-1001)
+
+v2.32 (lane store-m1-spec-1618, the M1 target): text only, **not yet built**. §11 specifies the one format cutover of the store roadmap's M1 (`store-wholehog/MASTER-SPEC.md`): packed copy-on-write pages, per-collection roots, `PagePtr`, `BlobRef` with a 1 KiB inline threshold on 4 KiB leaves, the reserved `base` root and the journaled live-head `fork`, as clauses AP1–AP20 and laws L37–L48. §0–§10 still describe the store as built, and the M1 cutover slice flips §11 to built. See CHANGES-v2.32.
 
 v2.31 (durable-cut spec lane; tape Durable mode is removed, so the store is the one durability contract): text only. `admit` now reserves its open entry before it commits, so §1.8 holds as written (AO1). §1.8's `Admission` comment no longer cites REPLAY-SPEC rule S3 (AO2), and §1.13 names the trigger refusal `StaleAttempt` and the run state "held" (AO3). See CHANGES-v2.31.
 
@@ -74,6 +76,17 @@ v2.29 (RUNNER-SPEC v2.18, lane caller-scope-1128, astra's third attack, ATTACK-3
 - **Two RUNNER-SPEC slices consume this version.** AM3 and AM8 are small and are built first, as slice RA. RS then takes AM1, AM2 and AM4–AM7, and RR builds on AM8 (RUNNER-SPEC §9). Neither RS nor RR waits on the other.
 
 v2.28 (RUNNER-SPEC v2.17, lane caller-scope-1128, astra's second attack, ATTACK-2): text and format; no store has been deployed, so the cutover is a fresh store. `serve` runs an admitted position: it runs the policy and the body as two isolated executions over one snapshot and writes the reply, and the record when there is one, in the body's transaction; a fault keeps the run's digest in a `Pending` that `conclude` writes with the fixed reply (AL1). A duplicate returns the stored reply with its scope digest (AL2). The scope digest begins with the StoreId (AL3). `migrate` is its own phase over a `Migration`, and `Schema` only opens (AL4). The CALL section carries the authority bytes (AL5). The sizes follow the 32-byte scope digest, and `serve` keeps no read log (AL6).
+
+## CHANGES-v2.32 (the M1 target: §11, not yet built)
+
+| # | Item | Verdict | What v2.32 does | Where |
+|---|---|---|---|---|
+| AP1–AP4, AP20 | M1's format: word 3, the PAGE, BLOB, FORK and MANIFEST 0x0031 kinds, NODE and MANIFEST 0x0030 retired, the page layout and `PagePtr`, and limits with the value limit moved out of the format | **TARGET, not built** | specified byte by byte, with vectors | §11.1–§11.2 |
+| AP5–AP8 | logical keys and stored suffixes, stamps, per-collection roots (`CollectionRoot`), and inline values and BlobRef | **TARGET, not built** | | §11.3–§11.6 |
+| AP9–AP13 | copy-on-first-write per transaction; in-place edits across commits only for writer-side applies with a unique path; `View[Bytes]` reads; bottom-up bulk build | **TARGET, not built** | | §11.7–§11.9 |
+| AP14–AP16 | the format-3 MANIFEST with the reserved `base` root; logical and resident accounts; the relocation closure and its cascade bound | **TARGET, not built** | | §11.10–§11.12 |
+| AP17–AP19 | the journaled live-head `fork` and its recovery in every journal reader | **TARGET, not built** | | §11.13 |
+| L37–L48 | the laws M1 adds, each in a named existing harness | **TARGET, not built** | | §11.14 |
 
 ## CHANGES-v2.31 (the store is the one durability contract)
 
@@ -1840,3 +1853,415 @@ OPENED means I opened the file at that revision. KNOWN means I know it but did n
 | store-spec-review-1006 model.py, OPENED | an executable crash-cut model of v1 | ADAPTED | it had no oracle (every cut passed). v2's model adds one and the END rule, and its mutants show it can fail (§3.9). |
 | Convex npm-packages/convex/src/server/impl/query_impl.ts:279-312, OPENED | `paginate`: an opaque `continueCursor`, `maximumRowsRead` and `maximumBytesRead` | ADAPTED (v2.25) | its cursor is a served token that names a position but not the snapshot, so a later page can read another version, and its split cursors and page statuses serve a reactive query. Here a page names its Snapshot (`Moved` otherwise), and the served token waits for caller binding |
 | Goose stdlib/dictionary.goose:1-15, OPENED | the library's keyed collection is an open-addressing hash table with no order | NOT TAKEN (v2.25) | it has no ordered cursor to page, so there is nothing to adapt |
+
+---
+
+## 11. M1 target: packed pages, per-collection roots, BlobRef, journaled fork (v2.32, NOT YET BUILT)
+
+> **Status: M1 target, not yet built.** Nothing in this section describes code on main. §0–§10 describe the store as built, and they stay true until the M1 cutover slice lands. That slice flips this section to built and rewrites §2, §1.11, §3.5 and §5 to match. The slice plan, the corrections to the master plan and the bench gates are in `store-wholehog/M1-DESIGN.md` (lane store-m1-spec-1618). Clause ids are AP1–AP20, and the laws are L37–L48.
+
+Integers are little-endian unless marked BE, as in §2. "str" and "bytes" have §2's meanings. xxh3-64 always means seed 0 with the default secret (E1).
+
+### 11.1 Format word, kinds and limits
+
+**AP1. The format word is 3.** HEADER's `format` (§2.3) is 3 in every file. A file with any other format is `Unsupported(format)`. A format-2 store directory is refused at its MANIFEST's HEADER. There is no dual reader and no migration path: M1 is the one format cutover.
+
+**Kinds of format 3:**
+
+| Kind | Name | Where | MUST | Payload limit | Status |
+|---|---|---|---|---|---|
+| 0x0001 | HEADER | first frame of every file | 1 | 56 | unchanged |
+| 0x0011 | COMMIT | j-* | 1 | 16,777,280 (U1) | unchanged payload; keys are logical keys (AP5) |
+| 0x0012 | END | j-*.end | 1 | 8 | unchanged |
+| 0x0013 | FORK | j-* | 1 | 4 + 4 + 8 + 2 + 255 = 273 | new (AP19) |
+| 0x0020 | NODE | — | — | — | **retired; never reused** |
+| 0x0021 | PAGE | p-* of class 0 | 1 | 8,384 (AP3) | new |
+| 0x0022 | BLOB | p-* of class 1 | 1 | 8 + 16,711,680 = 16,711,688 | new (AP8) |
+| 0x0030 | MANIFEST (format 2) | — | — | — | **retired; never reused** |
+| 0x0031 | MANIFEST | MANIFEST | 1 | 64 MiB | new (AP14) |
+| 0x0040, 0x0050, 0x0060, 0x0070 | CLAIM, AUTHORITY, PRINCIPAL, FENCE | as §2.7 | as §2.7 | as §2.7 | unchanged |
+| 0x0080–0x0083 | export stamp, preparation metadata, catalog delta, inventory | EXPORT (role 5), PREPARED (role 6), §3.5a | as built | as built | unchanged payloads |
+| 0x0084 | prepared rows | PREPARED (role 6) | as built | 4096 + 16,711,680 + 8 = 16,715,784 (was 4096 + 1 MiB + 8) | payload unchanged; its limit follows AP4's value limit |
+
+A format-3 file that holds a frame of kind 0x0020 or 0x0030 is `Unsupported(kind)`, by §2.7 rule 4.
+
+**Install a prepared release (§3.5a) under format 3.** Its scratch files carry format 3 in their HEADERs. The EXPORT copies format-3 MANIFEST, pack and segment bytes as it copies format-2 bytes now. No 0x0080–0x0084 payload carries a node id, a stamp, a root or a location: the inventory names collection ids with a row count and a digest, and prepared rows are (logical key, stored value) pairs (AP5). The import builds each replacement collection by AP13's bulk build, and the graft at V3–C7 replaces that collection's `CollectionRoot` in the collection map, one map entry per range.
+
+**§2.7 rule 6 is restated:** the format word changes at a cutover that retires kinds or changes a kept kind's payload, as AN2 (word 2) and AP1 (word 3) did. A kind added inside a format follows rules 1–5.
+
+**AP4. Limits.**
+- The key limit stays 4096 bytes on the logical key (AP5), which is today's check on the id-prefixed key.
+- The page target is 4096 bytes (AP3).
+- The inline threshold is 1024 bytes (AP8).
+- The transaction limit stays 16,777,280 COMMIT payload bytes (U1).
+- **The value limit leaves the format.** For table rows and index entries it becomes an API constant, 16,711,680 bytes (16 MiB − 64 KiB), checked by `put`, `migrate` and import as `Limit(Value)` is today. A catalog value keeps its built cap of 1 MiB (`encode_catalog`), and a streams value keeps its built bound, so kinds 0x0081 and 0x0082, which carry catalog values, keep their limits. The BlobRef form (AP8) applies in every tree, to any stored value above the inline threshold. A put of a full key and a full value fits one COMMIT with room for its fixed fields. Lowering the constant needs no format change. Raising it past the transaction limit needs a chunked COMMIT path, which M1 does not have.
+
+### 11.2 Pages
+
+**AP2. One page, one `Arc`, one layout.** Every tree (each collection's tree, the collection map, `streams` and `catalog`) is a B+ tree of pages.
+- In memory a page is `Arc[Page]` with `Page { image: Bytes, kids: List[Arc[Page]], blobs: List[Arc[Bytes]] }`.
+- `image` has the PAGE payload's layout (AP3). A published page's image is in canonical form except for its location fields, and the cut writes that canonical form. A private page's image may hold free space and dead entries (AP9). The child and blob locations inside it (`pack`, `offset`, `len`, `checksum` of each PagePtr and BlobRef) are meaningful only on disk. In memory they hold whatever was loaded, or zero for a page no cut has written. Readers follow `kids` and `blobs`, never locations. The `stamp` fields are always meaningful.
+- `kids[i]` is the child of branch entry i. `blobs[j]` is the body of the BlobRef whose `body` field is j.
+- The checkpoint task keeps a table from stamp to location. The cut fills the location fields as it copies each image into its frame (AP16), so a memory image is never changed after it is published.
+
+**AP3. PAGE payload (kind 0x0021): one page.**
+
+| Off | Size | Field | Rule |
+|---|---|---|---|
+| 0 | 1 | level u8 | 0 = leaf; a branch's level is its children's + 1 |
+| 1 | 1 | zero u8 | |
+| 2 | 2 | count u16 | entries, ≥ 1 |
+| 4 | 2 | prefix u16 | P, the length of the page prefix |
+| 6 | 2 | dead u16 | bytes of dead entries in the heap; 0 on disk |
+| 8 | 8 | stamp u64 | non-zero (AP6) |
+| 16 | 4 | heap u32 | the offset of the first byte after the last heap entry |
+| 20 | 4 | zero u32 | |
+| 24 | P | prefix | the page prefix bytes |
+| 24 + P | heap − 24 − P | heap | the entries |
+| heap | len − heap − 2·count | free | 0 bytes on disk |
+| len − 2·count | 2·count | slots | count u16 offsets into the page, one per entry, in ascending key order |
+
+`len` is the payload length.
+
+**Leaf entry**, at its slot's offset:
+- `klen u16`, then `klen` bytes of stored suffix (AP5);
+- `vtag u8`: 0 = inline, 1 = BlobRef, anything else `Corrupt(Malformed)`;
+- for vtag 0: `vlen u16` (at most the inline threshold), then `vlen` value bytes;
+- for vtag 1: a 42-byte BlobRef (AP8).
+
+**Branch entry:**
+- `slen u16`, then `slen` bytes of stored separator suffix;
+- a 36-byte `PagePtr` (AP20) to the child;
+- `rows u64`, the child subtree's exact row count;
+- `bytes u64`, the child subtree's logical charge (AP15).
+
+Entry 0's separator is always empty (slen 0): it stands for "below every key" and takes no prefix. For entry i ≥ 1, the logical separator is the page's prefix ‖ its suffix. Every key in child i − 1 is below it, and every key in child i is at or above it.
+
+**The page prefix.**
+- In a leaf, the prefix is a common prefix of every entry's key after the collection id is removed (AP5).
+- In a branch, it is a common prefix of the separators of entries 1 … count − 1.
+- On disk it is the *longest* such common prefix. A leaf with one entry therefore has that entry's whole key as its prefix and an empty suffix.
+
+**The canonical (disk) form.**
+- A page on disk has `dead` = 0 and no free space (`heap` = len − 2·count).
+- Its heap holds the entries in slot order, packed from 24 + P with no gaps.
+- Its prefix is the longest common prefix.
+- Its BlobRef `body` fields number 0, 1, … in slot order.
+- So the disk bytes of a page are a function of its logical content, its stamp and the locations of its children and blobs.
+
+**A private page** (AP9) may hold free space, dead entries, a shorter common prefix and any `body` numbering. The cut writes the canonical form of every page.
+
+**Size bound.** The page target is T = 4096 bytes.
+- A leaf exceeds T only when it holds one entry. The largest leaf is 24 + 2 + 4096 + 1 + 2 + 1024 + 2 = **5,151** bytes: a stored key of up to 4096 bytes (the streams and catalog trees have no id to strip), with an inline value at the threshold.
+- A branch exceeds T only when it holds at most three entries. The largest branch is 24 + 3 × 54 + 2 × 4096 + 3 × 2 = **8,384** bytes, and that is the PAGE payload limit.
+- **A page is legal** when its canonical size is at most T, or it is a leaf with one entry, or it is a branch with at most three entries. Any edit that leaves a page illegal (an insert, an overwrite that grows a value, a separator pushed up from a child) splits it at once, in the same write.
+- **The split rule.** Cut the page's entries, in slot order, into the fewest consecutive pieces that are each legal. Among the cuts with that fewest number, take the one whose largest piece (by canonical size) is smallest, and among those the leftmost. Two pieces always suffice unless one entry that cannot share a legal leaf with its neighbours lands between two runs, which gives three: the left run, that entry alone, and the right run. Each run is a part of a legal page, so it is legal. The parent gains one entry per extra piece, and may split in turn. A root that splits gains a new root above it.
+- **The merge rule.** A delete or a shrinking overwrite that leaves a non-root page's canonical size below T/4 merges it with its right sibling under the same parent, or its left sibling when it is the last child, if the merged page is legal. Otherwise nothing is done. A page left with no entries is removed from its parent. A root branch left with one entry is replaced by its child. A root leaf left with no entries makes the tree empty: its root becomes the all-zero PagePtr. The rule is deterministic, so two writers that apply the same op list to the same pages give the same pages.
+- In a branch split, the right piece's first entry becomes its entry 0 with an empty separator, and its separator moves up to the parent.
+- The separator pushed up by a split, and by bulk build, is the **shortest separator**: the first (lcp(a, b) + 1) bytes of b, where a is the left side's last key and b the right side's first.
+
+**Decode rules (each failure is `Corrupt(Malformed)` unless named).**
+- The header's zero fields are zero.
+- count ≥ 1.
+- 24 + P ≤ heap ≤ len − 2·count.
+- Each slot points into [24 + P, heap), and its entry ends at or before heap.
+- vtag is 0 or 1.
+- vlen ≤ 1024.
+- dead = 0 and heap = len − 2·count on disk.
+- **Not checked** (§2.8's line): key order across slots, separator bounds, prefix maximality and heap order. They are our writer's output under a 64-bit check bound to its place. A wrong order gives a wrong but well-formed tree, and decoding stays total.
+
+**AP20. `PagePtr`, 36 bytes, in branch entries and in MANIFEST roots:**
+
+| Off | Size | Field | Rule |
+|---|---|---|---|
+| 0 | 8 | pack u64 | the seq of the class-0 pack that holds the child's PAGE frame |
+| 8 | 8 | offset u64 | the byte offset of that frame's head in the pack |
+| 16 | 4 | len u32 | the frame's payload length, which is the page's length |
+| 20 | 8 | checksum u64 | xxh3-64 of the page's payload bytes (not the frame head) |
+| 28 | 8 | stamp u64 | the child's stamp; equal to the stamp in the child's header |
+
+**The empty tree** is the all-zero PagePtr: stamp 0 is never issued.
+
+**A load through a PagePtr checks five things:**
+- the frame at `offset` in `p-<pack>` passes its frame check (§2.1), which binds store, file and offset;
+- its kind is PAGE;
+- its payload length is `len`;
+- xxh3-64 of its payload is `checksum`;
+- its header stamp is `stamp`.
+
+A failure is `Corrupt(Checksum)`. A pack not listed, or an offset past the pack's end, is `Dangling(stamp)`. The frame check alone cannot catch a pointer that names another valid page of the same store; the checksum and stamp checks catch it (L47).
+
+**Acyclic by location.** A child's (pack, offset) is lexicographically below its parent's, else `Corrupt(Order)`. That replaces §2.5's "child id lower than the parent". With in-place edits (AP9), a parent's stamp may be lower than a child's, so stamps cannot order the tree.
+
+### 11.3 Keys
+
+**AP5. Logical key and stored suffix.**
+- The **logical key** of a collection row is `collection id u32 BE ‖ encoded key`:
+  - for a table row, `Key[K]`;
+  - for an index entry, `Key[J] ‖ Key[K]`.
+- These are exactly the bytes §2.4 calls the data-tree key, and the code's `physical` builds them; the cutover renames it `logical_key`.
+- The logical key is the only key form that leaves the store, or that a COMMIT carries:
+  - `Read`'s `Point` and `Span`;
+  - `Change.key`;
+  - a runner `Cover`;
+  - `Resume`'s last key (L36);
+  - wire `Row.key`;
+  - COMMIT ops (§2.4);
+  - the limit checks.
+- So keys of different collections never collide in a read set, a subscription or a frame.
+- The **stored suffix** is what a leaf holds: the logical key without its 4-byte collection id and without its page's prefix. A collection's tree holds rows of one collection only, so the id is implied by the tree.
+- The collection map, `streams` and `catalog` trees strip nothing but the page prefix. Their logical keys are as in §2.4, and the collection map's are `collection id u32 BE`.
+- A reader rebuilds a logical key as id ‖ page prefix ‖ suffix, in one allocation, only where a logical key leaves the store.
+
+### 11.4 Stamps
+
+**AP6. A stamp names a subtree's logical content.**
+- Stamps come from the one writer counter that node ids use today (§2.5): shared by every branch, never rolled back, and reserved before a map operation.
+- **A published page never changes its logical content under its stamp.** Logical content means its entries, its values and its children's stamps.
+- A page takes a new stamp when a Tx first copies it (AP9). While it is private to that Tx, its in-place edits keep that stamp: no one else can see it, and no cut has written it.
+- **An in-place edit of a published page across commits (AP10) draws a new stamp for the page and for every ancestor on its path, up to the root.** Otherwise the checkpoint task, which writes only stamps it has no location for (AP16), would skip the edited page, and the edit would be lost once its journal segment retires.
+- Relocation, sealing to canonical form, a location refresh in a branch entry, and a prefix recomputation keep the stamp.
+- So two pages with one stamp in one open have equal logical content. `changes(a, b)` skips a child whose stamp is equal on both sides without loading it, and compaction makes no change in `changes` (L41).
+- `changes(a, b)` walks the two collection maps in id order. An entry present on both sides with equal root stamps gives nothing. A collection present only in a gives one deletion per row of its tree, and one present only in b gives one insertion per row, each with its logical key. So a `drop_table` costs O(1) to commit, and `changes` across it costs the dropped rows, as L23 requires.
+- A BLOB's stamp is drawn from the same counter when its value is first written, and is kept across relocation.
+- **Stamps on disk are unique.** The MANIFEST's `next_stamp` bounds every stamp written, and stamps issued after it (by an open that did not cut) never reached a pack.
+
+### 11.5 Per-collection roots
+
+**AP7. `Roots` becomes three page trees: `{collections, streams, catalog}`.**
+- `collections` is the collection map: a page tree keyed by `collection id u32 BE`. Its value is a `CollectionRoot`, inline (vtag 0, vlen 56).
+- Every table and every index is one collection, so `share_roots` stays three Arc shares. Dropping or swapping a collection changes one map entry.
+
+**`CollectionRoot`, 56 bytes:**
+
+| Off | Size | Field | Rule |
+|---|---|---|---|
+| 0 | 36 | root PagePtr | the collection's tree; all zero when it has no rows |
+| 36 | 8 | rows u64 | exact row count |
+| 44 | 8 | bytes u64 | logical charge of the collection's rows (AP15) |
+| 52 | 1 | kind u8 | 1 table, 2 index (as the catalog's kind) |
+| 53 | 1 | residency u8 | 0 = Memory. 1 = Tiered is reserved for M3 and is `Unsupported(0x0021)` in M1 (the kind of the page holding it). Other values are `Corrupt(Malformed)`. |
+| 54 | 1 | tree u8 | 0 = B+ pages. Other values are reserved (a future per-collection Bε-tree) and are `Unsupported(0x0021)`. |
+| 55 | 1 | zero u8 | |
+
+**Counts.**
+- `count(snapshot, shape, lower, upper)` over a whole table returns `rows` after one map lookup.
+- Over a sub-range it descends with the branch entries' `rows`, in O(log N).
+- `put` over an existing key leaves `rows` unchanged; a new key adds 1, and a delete subtracts 1.
+
+### 11.6 Values
+
+**AP8. Inline values and BlobRef.** A stored value (schema number u16 ‖ codec bytes, D1) of v bytes is inline when v ≤ the inline threshold (1024), and otherwise a BlobRef.
+
+**BlobRef, 42 bytes, a leaf entry's value when vtag = 1:**
+
+| Off | Size | Field | Rule |
+|---|---|---|---|
+| 0 | 8 | stamp u64 | the blob's stamp (AP6) |
+| 8 | 8 | len u64 | v, the value's length: at least 1 and at most the value limit, else `Corrupt(Malformed)`. A reader never compares it with the threshold. |
+| 16 | 8 | checksum u64 | xxh3-64 of the v value bytes |
+| 24 | 8 | pack u64 | the seq of the class-1 pack that holds the BLOB frame |
+| 32 | 8 | offset u64 | the byte offset of that frame's head |
+| 40 | 2 | body u16 | the index of this value's body in the page's `blobs` (AP2); 0, 1, … in slot order on disk |
+
+**BLOB payload (kind 0x0022):** `stamp u64 ‖ the value bytes`. A load through a BlobRef checks:
+- the frame check;
+- the kind;
+- payload length = 8 + len;
+- the payload's stamp = the BlobRef's stamp;
+- xxh3-64 of the value bytes = checksum.
+
+Each failure is `Corrupt(Checksum)`.
+
+- **Blobs are immutable and live in class-1 packs only.** Compaction of class-0 packs never copies a blob.
+- A class-1 pack is copied forward only when its own live ratio falls below the same threshold as §3.5's. Then each moved blob's leaf is rewritten, keeping its stamp (AP16).
+- A put of a BlobRef value costs the same COMMIT bytes as an inline one: the COMMIT carries the value (§2.4).
+- **The default threshold** is 1024, on 4 KiB leaves. It is a store-wide field in the MANIFEST `limits`. M1 always writes 1024, and a reader accepts any value from 0 to 1024: the vtag says which form an entry has, so a reader never needs the threshold. A writer uses it to choose a form.
+
+### 11.7 Writes
+
+**AP9. Copy-on-first-write per transaction.**
+- A Tx starts from shares of its head's roots (`share_roots`, as today).
+- The first write that reaches a page in the Tx copies it: a new `Arc[Page]` with the same image and a new stamp, together with each ancestor up to the collection root, the collection map's path, and the root.
+- A page whose stamp is at or above the Tx's first reserved stamp is **private** to the Tx.
+- A later write to a private page edits its `image` in place, through `arc.with_unique` (MEM-15) on each Arc of the path:
+  - insert into free space, else rebuild the page;
+  - delete by marking the entry dead (`dead` += its size) and removing its slot;
+  - update an inline value of the same length in place, else as a delete and an insert.
+- If `with_unique` returns `None` on a private page (a body shared it, for example by taking a view that is still alive), the write copies again with a new stamp. The stamp test only selects candidates for an in-place edit; `with_unique` decides soundness.
+- **A failed, aborted, stopped or refused body leaves the head's pages untouched.** The head never shared a private page, and FAIL-16's `isolate` undoes nothing, so nothing needs undoing (L39).
+- At commit the Tx's roots become the head's. Nothing is copied or sealed at commit: the private pages simply stop being private, because the next Tx's first reserved stamp is above them.
+- The cut writes each page's canonical form (AP3).
+
+**AP10. In-place edits across commits.**
+- **A `run` body never edits a page it did not copy.** The head holds a share of every page the body sees, so `with_unique` would return `None`. Even if it did not, an in-place edit of a head page followed by a failure would change the head with nothing to restore it (FAIL-16).
+- An edit across commits is allowed only for a writer-side apply that runs outside `isolate` and holds the only path. The condition is **path uniqueness**: every Arc from the root holder down to the page has count 1, checked level by level with `with_unique`.
+- No live Snapshot, pin, branch, follower root or other Tx then reaches the page, because each of those would hold a share on the path.
+- The edit re-stamps the page and its path (AP6).
+- The writer-side applies are:
+  - journal replay in `open`, before `open` returns a Db;
+  - bulk build (AP13), into pages it made;
+  - commit-time apply of a Tx's op list on the writer, which is a follow-up slice gated on R1 (M1-DESIGN §6, M1-7).
+
+**AP11. Index writes** keep J1's rule: an unchanged encoded index key writes nothing. An index entry's value is empty in M1; the page format already carries a value field for M2's covering indexes.
+
+### 11.8 Reads
+
+**AP12. `View[Bytes]` reads under a page guard.**
+- `fetch_bytes(tx, t, k)` returns `Option[View[Bytes]] in tx`, and `get_bytes(s, shape, k)` returns the same `in s`. The view is the row's stored value (schema number ‖ codec bytes). For an inline value it is a `list.slice` of the page's `image`; for a BlobRef it is the body in `blobs`.
+- The anchor is the Tx or Snapshot, which holds the page's Arc. By OWN-8 the view freezes its anchor for its extent: the checker refuses a `put` through that Tx while the view lives, and the view cannot escape its extent.
+- **The owned `fetch` decodes from that view.** `std.codec` takes `Bytes` parameters, which accept a `View[Bytes]` (OWN-7). So an owned read copies nothing before decoding, and decode materializes the owned `V`.
+- A row under an older schema number is transcoded by that number's resolved plan at each read (`row_value`, as built). A read never writes a transcoded row back.
+- A read records its `Point` or `Span` on logical keys (AP5), exactly as §1.3 says.
+- Typed zero-copy views of a user `V` (copying scalars, borrowing byte fields) need view types from `std.codec`. They are M2 codec work, not M1.
+- `scan_bytes` is `scan` with views in place of decoded values: a cursor scoped to its Snapshot (`ByteRows`, not `send`), whose `next_bytes` returns the next row's logical key and value view, anchored to the cursor for that row's extent.
+
+### 11.9 Bulk build
+
+**AP13. Bottom-up from sorted entries.**
+- `migrate_build` and index backfill build each new collection's tree from its entries in ascending logical-key order, with no duplicates.
+  - `migrate` has its source rows in key order already.
+  - Index backfill collects its (J ‖ K) entries, sorts them by byte order (a duplicate is the writer's bug, refused by `debug.check`), and builds.
+- **Leaves.** Fill leaves greedily: append an entry while the leaf's canonical size with it stays ≤ 4096, or while the leaf is empty; otherwise close the leaf and start the next.
+- **Upper levels.** One branch entry per child, with the shortest separator (AP3) between consecutive children. Fill branches greedily the same way, but each holds at least two entries: if a level's last branch would hold one, it takes the previous branch's last entry. Repeat until a level has one page, which is the root.
+- **Stamps** are drawn in build order: the leaves left to right, then each level left to right.
+- A build of n entries does O(n) work and allocates one Arc per page. The same input and starting counter give the same pages and stamps.
+- The bulk build reserves its stamps before building, as §1.2 reserves ids, so a refusal cannot return them. Its charge is added before the build (§1.11), and the build is all or nothing.
+
+### 11.10 MANIFEST and the reserved `base` root
+
+**AP14. MANIFEST payload (kind 0x0031):**
+
+| Field | Encoding |
+|---|---|
+| generation | u64 (equals the HEADER's seq) |
+| limits | key u32 = 4096, page u32 = 4096, inline u32 (0–1024; M1 writes 1024), transaction u32 = 16,777,280. A key, page or transaction field of any other value, or an inline above 1024, is `Corrupt(Malformed)` (V5 restated) |
+| next_stamp | u64: every stamp in a listed pack is lower |
+| next_branch | u32 |
+| next_table | u32 |
+| next_pack | u64 |
+| first_live | u64 |
+| prev_first | u64 |
+| account | u64: the exact logical account (AP15) at this cut |
+| packs | u32 count; each: seq u64, class u8 (0 pages, 1 blobs; other values `Corrupt(Malformed)`), frames u32, live u64 (payload bytes of the frames that are live at this cut) |
+| retired | u32 count; each: pack seq u64 |
+| branches | u32 count; each: id u32, name str, parent u32, forked_at u64, version u64, at u64, collections PagePtr, streams PagePtr, catalog PagePtr, base (below). Ascending by id; main is id 0 and always present. |
+| pins | u32 count; each: name str, branch u32, version u64, collections PagePtr, streams PagePtr, catalog PagePtr. Ascending by name. |
+
+- `next_branch`, `next_table`, `next_pack`, `first_live`, `prev_first`, `retired` and the list order rules (`Order`) are as §2.6.
+- `next_stamp` replaces `next_node`.
+- `packs` gains `class` and `live`. The `account` field is new.
+
+**The reserved base root:**
+- `base` is `tag u8`. Tag 0 means "no merge base". Tag 1 is reserved for a later three-way merge: it would be followed by `version u64` and three PagePtrs, the fork point's roots, retained as a pin's are. In M1 tag 1 is `Unsupported(0x0031)`, and other tags are `Corrupt(Malformed)`.
+- M1 writes 0 for every branch. A later writer that sets tag 1 makes an M1 reader refuse, which is correct, because that reader would not retain the base's pages. So the base needs no format change later.
+
+**`live` and `account`** are written by every cut from the checkpoint task's table. M1's open decodes eagerly and checks neither. They exist so that M3's lazy open can select compaction and start the account without walking the trees, and L42 compares `account` with a hand sum.
+
+### 11.11 Accounting
+
+**AP15. The logical account and the resident account.**
+- **Logical account (I4 in page terms):** the sum, over the distinct leaf pages (by stamp) that any root reaches, of each row's `entry(k, v) = 62 + r8(|k|) + r8(|v|)`.
+  - |k| is the logical key's length (AP5), the same number as today.
+  - |v| is the stored value's full length, inline or BlobRef.
+  - Roots are every branch head's three trees, every pin's, and the collection map's own rows: one 56-byte CollectionRoot per collection, charged as `entry(4, 56)` = 126.
+- The admission bound (`resident_limit`, §1.11) applies to the logical account, unchanged in meaning. It is exact on main with no pin and no other branch, and conservative between cuts otherwise, settled at a cut by the exact union (1616's `state_account`, AF1). `CollectionRoot.bytes` and the branch entries' `bytes` are the logical charges of their subtrees.
+- **Resident account:** the sum, over distinct pages, of each page's image capacity, each blob body's length, and the checkpoint task's per-page record. It is reported by `accounts(db)` and admits nothing in M1. It is the figure M3's cache budget bounds, once M3 can evict.
+- The two separate cleanly because a page's logical charge is in its parent's entry. Eviction (M3) changes the resident account and leaves the logical account alone.
+
+### 11.12 Checkpoints and relocation
+
+**AP16. What a cut writes, and the relocation closure.**
+- A cut writes, in children-before-parents order (blobs before the leaves that name them, children before parents):
+  - every page reachable from a live root that has no location in the checkpoint task's table;
+  - every blob reachable from a live root that has no location;
+  - the relocation closure below.
+- It fills each written page's PagePtrs and BlobRefs from the table, and writes canonical images (AP3).
+- Pages go to class-0 packs and blobs to class-1 packs. Pack size follows H1, with PAGE and BLOB in place of NODE.
+- **Relocation (copy-forward).**
+  - Packs are selected as §3.5 selects them, by the `live` ratio of each class.
+  - Each live page or blob in a selected pack is moved: it is written into the cut's new pack and keeps its stamp.
+  - Moving a page or blob changes its parent's bytes (the PagePtr or BlobRef location), so **every ancestor of a moved page, under every live root (branch heads, pins and, after a later merge, base roots), is rewritten in the same cut, after its children, keeping its stamp.** That set is the **closure**. Each page in it is written once per cut, however many roots reach it.
+- **Finding the closure.**
+  - The checkpoint task's per-page record keeps `low`, the least pack seq in the page's subtree (writer memory, not format).
+  - The cut walks down from each live root and descends only into children whose `low` is in a selected pack, or whose subtree holds a page written in this cut. So it visits the closure and the siblings' entries, and nothing else.
+- **Cascade bound.**
+  - The bytes a compacting cut writes are at most live(selected packs) + |closure| × 8,384, where |closure| ≤ moved pages × tree depth.
+  - The old copies of the closure become dead in their packs. They count toward the *next* cut's selection, and a cut never compacts recursively.
+  - Stamps are kept, so `changes` reports nothing (L41).
+- **GC.** A page or blob is dead once no live root reaches its stamp. A pack whose frames are all dead is retired as §3.5 retires it. Reference counts are by stamp, and the record table holds one record per stamp with its location.
+
+### 11.13 Instant journaled fork
+
+**AP17. Which forks are journaled.**
+- `fork(mut db, name, from)` with `from` a Snapshot of this open whose version equals its branch head's version **and** whose three root stamps equal the head's three root stamps at the call is a **live-head fork**. It writes one FORK frame and makes no cut. Both halves are needed: replay checks `forked_at` against the parent's version (AP19), and the stamps make sure the new branch's roots are the head's.
+- Every other fork (a Snapshot older than its head) keeps §1.9's cut path, because journal replay rebuilds only head versions.
+- A `memory` store's fork writes nothing in either case.
+- The ticket of a live-head fork is `Mark::Journal(seq)` of its frame. `durable(t)` returns when the frame is synced.
+- The new branch is usable at once. A commit on it is a later journal frame, so by the prefix rule (§1.6) a crash never keeps a commit on the branch without the branch.
+
+**AP18. Admission and cost of a live-head fork.**
+- The new branch's three roots are shares of the head's, so the set of distinct pages reachable from all roots is unchanged.
+- As built (afd981c8, §1.11), `fork` counts the exact union of the proposed heads and the named pins with `state_account`, a walk of every reachable node, and then makes a cut. For a live-head fork that union is the current one, because the new heads' roots are the same Arcs. So its count equals the exact account of the current roots, and the fork's charge is zero. The journaled fork therefore skips both the walk and the cut, and leaves the account unchanged. If the account is conservative at the call, it stays conservative, and that remains an upper bound on the exact count.
+- After the fork the store has a second branch, so later commits are charged conservatively until a cut settles them (§1.11), exactly as after a cut-made fork today.
+- A live-head fork costs one FORK frame (16 + 18 + |name| bytes), one branch record and three Arc shares, independent of the tree's size (L44).
+
+**AP19. FORK payload (kind 0x0013, MUST), in a journal segment:**
+
+| Field | Encoding | Replay rule (each failure is `Corrupt(Malformed)`) |
+|---|---|---|
+| id | u32 | equals replay's `next_branch`; then `next_branch` = id + 1 |
+| parent | u32 | names a live branch |
+| forked_at | u64 | equals the parent's head version at this point of replay |
+| name | str, 1–255 bytes | no live branch has this name |
+
+**Recovery, and every journal reader:**
+- **`journal_recover` / `journal_apply`** apply FORK in journal order. They make branch `id` with the parent's head roots, version = `forked_at`, `at` = the parent head's `at`, parent and `forked_at` as given, and base tag 0.
+- **`journal_decode`** decodes the four fields exactly; bytes left over are `Malformed`.
+- **`journal_account`** adds nothing (AP18).
+- **`recorded`** skips a FORK frame: it holds no CALL section.
+- **`replay_export`** (§3.5a) replays every branch's frames through `journal_apply` as recovery does, so it applies FORK by the same rule. A store that forked after its last cut can then still export.
+- **The next cut** writes the branch into the MANIFEST, and from then on its frames are covered by the cut like any commit's.
+
+**Vectors (L37).** These were derived from this section's text by an independent script, not by the store. Checksums are xxh3-64 from a Python implementation of the 17–128-byte path that reproduces the nine published twox-hash 2.1.5 vectors for 17, 18, 19, 31, 32, 33, 126, 127 and 128 bytes.
+- **Leaf A**, stamp 5, collection 1. Two rows, keys u64 1 and 2 (`Key[u64]` is 8 bytes BE), values schema 0 ‖ u32 7 and schema 0 ‖ u32 9. Prefix 7 zero bytes; suffixes `01` and `02`. 59 bytes, xxh3-64 `0x7ea83212bab36260`: `000002000700000005000000000000003700000000000000000000000000000100010006000000070000000100020006000000090000001f002b00`.
+- **Leaf B**, stamp 7, keys 3 and 4, values 11 and 13. 59 bytes, xxh3-64 `0x5b7778306daed154`: `0000020007000000070000000000000037000000000000000000000000000001000300060000000b00000001000400060000000d0000001f002b00`.
+- **Branch**, level 1, stamp 9, on disk. Child 0 is leaf A, in pack 3 at offset 72 (right after the HEADER). Child 1 is leaf B, in pack 3 at offset 147 (72 + 16 + 59), with separator u64 3, the shortest separator between keys 2 and 3. Each child has rows 2 and bytes 2 × entry(12, 6) = 2 × 86 = 172. The branch prefix is the one separator (8 bytes), so its suffix is empty. 144 bytes: `010002000800000009000000000000008c0000000000000000000000000000030000030000000000000048000000000000003b0000006062b3ba1232a87e05000000000000000200000000000000ac000000000000000000030000000000000093000000000000003b00000054d1ae6d3078775b07000000000000000200000000000000ac0000000000000020005600`.
+- **FORK** of branch 1 "beta" from main at version 64. 22 bytes: `01000000000000004000000000000000040062657461`.
+- **MANIFEST** of an empty store: generation 1; limits 4096, 4096, 1024 and 16,777,280; next_stamp, next_branch, next_table, next_pack, first_live and prev_first all 1; account 0; no packs, retired packs or pins; one branch, main (id 0, parent 0, forked_at, version and at 0, three empty roots, base tag 0). 235 bytes: `0100000000000000001000000010000000040000400000010100000000000000010000000100000001000000000000000100000000000000010000000000000000000000000000000000000000000000010000000000000004006d61696e000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000`.
+- **BLOB** (no fixed hex, because it is over 1024 bytes): stamp 11 and the value u16 0 ‖ bytes (i mod 251) for i in 0 … 1022, so v = 1025 and the payload is 1,033 bytes. Its BlobRef's checksum is computed in the law by `std.check`'s xxh3-64, whose vectors are independent (`core/std/tests/check.hirsel`).
+
+### 11.14 Laws M1 adds
+
+The harnesses are §5's. **S1** is the store's law functions (`law_*`, `disk_law_*`). **S2** is `disk_crash_main` (`core/tools/store_crash_tests.py` SCENARIOS). **S3** is `journal_crash_main` (`core/tools/store_journal_tests.py`). Each case goes into the named existing law, not into a new suite.
+
+| Law | Statement | Harness | The wrong implementation it catches |
+|---|---|---|---|
+| **L37 page vectors** | the §11.13 vectors decode to their stated fields, and encoding those fields gives those bytes: PAGE leaf A, leaf B and branch, MANIFEST 0x0031 and BLOB in the cutover slice, and FORK in the fork slice | F (`disk_law_frames`) | a slot array in key order reversed; a prefix that counts the collection id; a checksum over the frame head |
+| **L38 owned and borrowed reads** | for random tables (inline values, values on both sides of the threshold, old-schema rows, one-entry oversize leaves), `fetch` equals decoding `fetch_bytes`, on a Tx, a Snapshot and a reader task, and both equal M | S1 `law_typed_model` | a view sliced from the wrong offset once a page has a prefix; a BlobRef view of the descriptor instead of the body |
+| **L39 refusal leaves the head** | a body that writes k rows into one leaf (so later writes edit its private copy in place), then fails, aborts, runs out of steps or is refused: the head's root stamps, every reachable page's image, and M equal the state before | S1 `law_abort_budget`, `law_model` | an in-place edit of a page the head shares (AP10); a privacy test by stamp without `with_unique` |
+| **L40 old-schema reads** | rows written under schema 0 and read through schema 1 by `fetch`, `fetch_bytes` with decode, `range` and `changes` equal M's transcoded value, and no read rewrites a row (the page stamps are unchanged) | S1 `law_schema_numbers` | a view path that drops the schema number; a transcode written back |
+| **L41 stamps survive relocation** | after cuts that move every live page and blob, `changes(a, b)` for a before and b after is empty, every root's stamps are unchanged, and reopen gives M | S1 `law_changes_rewritten_equal`; S2 `checkpoint` | a moved page or a rewritten ancestor given a new stamp |
+| **L42 pinned and divergent roots** | pin at v, fork b at v (by the cut path in the cutover slice, and by the journaled path once it lands), divergent commits on main and b, a `drop_table` on b, compacting cuts, reopen: each root equals its M; each page is written at most once per cut; MANIFEST `account` equals the hand sum of AP15 over the distinct live rows | S1 `disk_law_branches`, L7 | a closure walked from main only; a shared page charged twice; a collection map copied instead of shared |
+| **L43 journaled fork recovery** | at every S3 cut around a FORK frame and the commits after it: after reopen, the branch exists exactly when its frame lies below the last synced boundary; no commit on it survives without it; its head equals M at `forked_at` plus its own commits; `recorded` on either branch is unaffected | S3, new scenario `journal-fork` | replay applying a FORK before the parent's commit at `forked_at`; a fork ticket returned durable before its sync; `recorded` or `replay_export` decoding a FORK as a COMMIT |
+| **L44 fork cost** | a live-head fork of a 100,000-row head sends exactly one frame of 16 + 18 + |name| bytes, writes no pack, leaves `resident` unchanged and requests no cut; a fork from an older Snapshot still makes a cut | S1 `law_branches` | a fork that still walks or cuts; a fork that copies the collection map |
+| **L45 BlobRef** | values of 1024 and 1025 bytes, 1 MiB, and the value limit round-trip through commit, cut, compaction of class-0 packs (which copies no BLOB) and reopen; a value one byte over the limit is `Limit(Value)`; a flipped blob byte is `Corrupt(Checksum)` at open | S1 `law_put_validation`; S2 `oversize` | an off-by-one at the threshold; a blob copied with its leaf; a blob read without its checksum |
+| **L46 per-collection count and drop** | after random puts, deletes, overwrites and `drop_table`, each `CollectionRoot.rows` equals M's count and `count` over every sub-range equals M's; `drop_table` changes one map entry and no other collection's root stamp | S1 `law_typed_model`, `law_drop_recreate` | `rows` not decremented by a delete; a drop that touches other collections |
+| **L47 page corruption and misdirection** | flipping any byte of a PAGE or BLOB payload is `Corrupt(Checksum)` at open; rewriting a MANIFEST root PagePtr (with the MANIFEST frame's check recomputed) to name another valid page of the store, with that page's checksum, is `Corrupt(Checksum)` by the stamp check | S2 (L12's flip sweep) | a load checked by the frame check alone; a stamp not compared with the header |
+| **L48 cutover refusal** | a format-2 directory opens as `Unsupported(format)`; a format-3 pack holding a 0x0020 frame, or a MANIFEST holding a 0x0030 frame, is `Unsupported(kind)` | S2 `genesis` | a dual reader; a retired kind decoded |
+
+**Laws restated by the cutover slice** (statement kept, wording moved to pages): L5 (the bound becomes pages per k one-key commits, re-derived by hand from AP3's fan-out), L6, L7, L12, L23 (stamps for node ids), L25 (PAGE for NODE; H1 unchanged), L27, L28, L29 (COMMIT bytes unchanged) and L36 (logical key for "full physical key").
+
+### 11.15 API surface M1 adds
+
+```text
+pub fn fetch_bytes[K, V](tx: Tx, t: Shape[K, V], k: K) -> Result[Option[View[Bytes]], Error] in tx
+pub fn get_bytes[K, V](s: Snapshot, t: Shape[K, V], k: K) -> Result[Option[View[Bytes]], Error] in s
+pub fn scan_bytes[K, V](s: Snapshot, t: Shape[K, V], lo: Bound[K], hi: Bound[K]) -> Result[ByteRows, Error] in s
+pub type Accounts { logical: u64, resident: u64 }
+pub fn accounts(db: Db) -> Accounts
+pub const VALUE_LIMIT: u64 = 16711680
+```
+
+- `fork`'s signature is unchanged. Its ticket is a journal mark for a live-head fork (AP17).
+- `Error` is unchanged. `Unsupported(u64)` carries the format number for AP1 and the kind of the holding frame for a reserved field: 0x0021 for `residency` and `tree`, and 0x0031 for `base`.

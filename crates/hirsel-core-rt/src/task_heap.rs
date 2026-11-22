@@ -33,6 +33,9 @@ const MIN_GROWTH_RESERVATION: usize = 256 * 1024;
 const EMPTY_DEDICATED_LIMIT: usize = 8;
 // A reused reservation may coexist with other warm extents from its growth sequence.
 const DEDICATED_REUSE_MARGIN: usize = 4 << 20;
+// A block of another stride reuses a resident extent of at most this many
+// times its size, so live slack that only `free` returns stays bounded.
+const DEDICATED_REUSE_WASTE: usize = 4;
 // Detached empty slabs kept for reuse by the custodian.
 const EMPTY_SLAB_LIMIT: usize = 8;
 /// How long a worker waits with nothing to run before it releases retained pages.
@@ -910,23 +913,25 @@ impl DedicatedCache {
             (extent >= needed
                 && payload.addr().get() & (class.align - 1) == 0
                 && backing.headroom(payload) >= own_prefix(class.kind))
-            .then(|| (backing.used.get(), backing.born.get()))
+            .then(|| (backing.used.get(), backing.born.get(), backing.grown.get()))
         };
         // Preserve the reservation for a repeated growth sequence. Only
-        // extents that have never grown can serve a different starting size.
-        // Among those, prefer the smallest already resident fit.
+        // extents that have not grown since their last purge can serve a
+        // different starting size. Among those, prefer the smallest resident
+        // fit, so buffers that cycle through varying sizes keep reusing their
+        // warm extents instead of evicting them for fresh ones.
         let mut best = None;
         let mut best_used = usize::MAX;
         for (index, &page) in self.retained.iter().enumerate().rev() {
-            if let Some((used, born)) = fit(page) {
+            if let Some((used, born, grown)) = fit(page) {
                 if born == class.stride {
                     best = Some(index);
                     break;
                 }
-                if used >= needed
+                if !grown
+                    && used >= needed
                     && used < best_used
-                    && used <= born.next_multiple_of(page_bytes())
-                    && used - needed <= needed
+                    && used / DEDICATED_REUSE_WASTE <= needed
                 {
                     best = Some(index);
                     best_used = used;
@@ -1315,6 +1320,7 @@ pub(crate) unsafe fn try_grow_in_place(
         if !backing.extend(payload, class.stride) {
             return false;
         }
+        backing.grown.set(true);
         let before = backing.backed(payload);
         let after = backing.use_extent(payload, class.stride);
         heap.dedicated().lock().unwrap().add_live(
@@ -1663,6 +1669,9 @@ pub(crate) struct Mapping {
     used: Cell<usize>,
     // The starting stride of the last live allocation, before in-place growth.
     born: Cell<usize>,
+    // A live block grew in place since the last purge, so `used` holds its
+    // growth sequence's extent for a later block of stride `born`.
+    grown: Cell<bool>,
 }
 // SAFETY: an idle mapping is uniquely owned. Moving it preserves the address;
 // only the owner can unmap it or change its writable extent.
@@ -1707,6 +1716,7 @@ impl Mapping {
         // SAFETY: the complete mapping contains this requested prefix.
         let payload = unsafe { mapping.base.add(headroom) };
         mapping.born.set(0);
+        mapping.grown.set(false);
         Some((mapping, payload))
     }
 
@@ -1761,6 +1771,7 @@ impl Mapping {
                 writable: Cell::new(bytes),
                 used: Cell::new(0),
                 born: Cell::new(0),
+                grown: Cell::new(false),
             };
             if space != bytes
                 && libc::mprotect(base.as_ptr().cast(), headroom + bytes, Self::WRITABLE) != 0
@@ -1831,6 +1842,7 @@ impl Mapping {
         // SAFETY: the empty dedicated mapping owns this whole writable range.
         if unsafe { Mapping::discard(self.base, self.backed(payload)) } {
             self.used.set(0);
+            self.grown.set(false);
             true
         } else {
             false
@@ -2338,6 +2350,16 @@ mod tests {
         assert_eq!(medium, large);
         assert_eq!(context.available(), (OVERSIZED - MEDIUM) as u64);
         free(medium, MEDIUM);
+        // The original stride comes back to the same warm extent, though the
+        // smaller block reused it last.
+        let large_again = allocate_unwritten(LARGE, block::PLAIN);
+        assert_eq!(large_again, large);
+        // SAFETY: the second page lies within LARGE.
+        assert!(
+            resident(unsafe { large_again.add(page_bytes()) }),
+            "an extent last reused at a smaller stride lost residency"
+        );
+        free(large_again, LARGE);
 
         // However long the heap stays busy, its payload stays until a worker idles.
         purge();

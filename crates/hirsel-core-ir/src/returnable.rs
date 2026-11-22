@@ -36,8 +36,12 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 /// Set to any value, the driver leaves every wait stackful.
 pub const DISABLE: &str = "HIRSEL_NO_RETURNABLE";
 
-const CHILD: u64 = 16;
-const ALIGN: u64 = 16;
+/// The record's area is only as aligned as its block and header make it,
+/// eight bytes (`tasks::FrameRecord`), so each level is laid out at that
+/// alignment: its word, then its child area, then its homes, and a home that
+/// needs more alignment refuses the function.
+const CHILD: u64 = 8;
+const ALIGN: u64 = 8;
 
 /// Why a function cannot be represented.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2259,7 +2263,7 @@ pub fn report(module: &Module, applied: &Applied) -> String {
     }
     for (f, z) in &applied.sizes {
         s.push_str(&format!(
-            "  area f{} {}: {} = word 16 + child {} + slots {} of {} + dest {} + demoted {}; receives {} returnable, {} stackful\n",
+            "  area f{} {}: {} = word 8 + child {} + slots {} of {} + dest {} + demoted {}; receives {} returnable, {} stackful\n",
             f.0,
             name(*f),
             z.area,

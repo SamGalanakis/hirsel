@@ -613,17 +613,23 @@ child classifies it against NEW exactly as NEW's head will at dispatch (RUNNER-S
 The classes are tried in this order, which is the order of `advance_trigger`, and a row
 takes the first that applies:
 
-1. **`cancelling`**: a row whose cancel was requested. NEW's head finishes it as cancelled
-   before it looks at its entry, so NEW's entries do not matter.
+1. **`cancelling`**: a row whose cancel was requested, parked or not. NEW's head finishes it
+   as cancelled at its due time before it looks at its entry, so NEW's entries do not
+   matter.
 2. **`held`**: a granted trigger that is parked under a hold, or whose attempt is at least
-   1 so that NEW's start compares its revision stamp. The stamp is the launch image digest
-   of the code that started it, and NEW's digest differs. So NEW parks it with a `Revision`
-   hold at its next start, or keeps it parked, until a release on NEW's revision. This
-   class comes before `gone`: `triggers.start` runs before the head looks for the entry,
-   so a started granted run whose entry NEW removes is held, not consumed.
+   1 **and** whose revision stamp differs from NEW's launch image digest. The stamp is the
+   launch image digest of the code that started it (or the one a release selected). NEW
+   parks the second kind with a `Revision` hold at its next start, or keeps the first
+   parked, until a release. This class comes before `gone`: `triggers.start` runs before
+   the head looks for the entry, so a started granted run under another digest whose entry
+   NEW removes is held, not consumed. A parked `Request` hold stays parked even when the
+   digests are equal.
 3. **`gone`**: NEW's trigger entry list does not allow its entry, or no registered entry of
    NEW has its kind, path and argument schema. NEW's head will consume it with the terminal
-   `Gone` when it comes due.
+   `Gone` when it comes due. Two recipes can differ in `n_place` alone and share an image
+   digest; then a started granted run passes `triggers.start` and lands here if its entry
+   is gone. NEW's head consumes these rows even when NEW lists no trigger entry at all
+   (RUNNER-SPEC §12.1).
 4. **`changed`**: an allowed entry whose `revision` (PROG-9) differs from OLD's. It runs
    NEW's code when it comes due.
 5. **`unchanged`**: every other row.

@@ -60,6 +60,11 @@ pub(crate) fn is_active(context: &Context, id: u64) -> bool {
 
 fn leave(context: &mut Context) {
     let window = window_left(context);
+    #[cfg(feature = "prof")]
+    if let Some(left) = remaining(context) {
+        crate::mem_prof::step_remaining(left);
+        crate::mem_prof::scope_exit(1);
+    }
     let left = context.step_bounds.pop().expect("an open step scope").left + window;
     if let Some(parent) = context.step_bounds.last_mut() {
         parent.left += left;
@@ -79,13 +84,22 @@ pub unsafe extern "C" fn hirsel_core_step_enter(context: *mut Context, steps: u6
     if let Some(current) = context.step_bounds.last_mut() {
         let left = current.left + window;
         if left < steps {
+            #[cfg(feature = "prof")]
+            {
+                crate::mem_prof::step_remaining(left);
+                crate::mem_prof::scope_enter(1, 0, steps, true);
+            }
             return false;
         }
         current.left = left - steps;
+        #[cfg(feature = "prof")]
+        crate::mem_prof::step_remaining(current.left);
         slice += window;
     }
     context.step_bounds.push(bound(steps));
     install_window(context, slice);
+    #[cfg(feature = "prof")]
+    crate::mem_prof::scope_enter(1, 0, steps, false);
     true
 }
 
@@ -157,6 +171,8 @@ pub unsafe extern "C" fn hirsel_core_step_out(context: *mut Context, site: u64) 
     if ctx.steps < 0
         && let Some(current) = ctx.step_bounds.last()
     {
+        #[cfg(feature = "prof")]
+        crate::mem_prof::step_refused();
         ctx.steps = 0;
         let mut cause = causes::Cause::new(causes::OUT_OF_TIME, site);
         cause.message.data = std::ptr::without_provenance_mut(current.id as usize);

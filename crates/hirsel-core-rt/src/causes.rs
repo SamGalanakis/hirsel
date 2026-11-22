@@ -114,6 +114,12 @@ impl Cell {
         });
         #[cfg(any(test, feature = "charge-observation"))]
         crate::peak::allocated((&*cell as *const Self).cast(), size_of::<Self>());
+        #[cfg(feature = "prof")]
+        crate::mem_prof::alloc(
+            (&*cell as *const Self).cast(),
+            size_of::<Self>(),
+            crate::mem_prof::Backing::CauseCell,
+        );
         cell
     }
 
@@ -172,6 +178,10 @@ impl Drop for Cell {
         }
         #[cfg(any(test, feature = "charge-observation"))]
         crate::peak::deallocated((self as *const Self).cast());
+        #[cfg(feature = "prof")]
+        if !self.startup && !self.reserved {
+            crate::mem_prof::free((self as *const Self).cast(), size_of::<Self>());
+        }
     }
 }
 
@@ -360,6 +370,12 @@ pub unsafe fn resource_new(
     });
     #[cfg(any(test, feature = "charge-observation"))]
     crate::peak::allocated((&*state as *const Resource).cast(), size_of::<Resource>());
+    #[cfg(feature = "prof")]
+    crate::mem_prof::alloc(
+        (&*state as *const Resource).cast(),
+        size_of::<Resource>(),
+        crate::mem_prof::Backing::Block,
+    );
     // SAFETY: fresh resource storage receives its single prepaid metadata record.
     unsafe {
         block::set_resource(block.pointer(), Box::into_raw(state));
@@ -514,9 +530,12 @@ pub unsafe fn value<'a>(cell: *const Cell) -> &'a Cause {
     unsafe { &(*cell).cause }
 }
 
-#[cfg(any(test, feature = "charge-observation"))]
+#[cfg(any(test, feature = "charge-observation", feature = "prof"))]
 impl Drop for Resource {
     fn drop(&mut self) {
+        #[cfg(any(test, feature = "charge-observation"))]
         crate::peak::deallocated((self as *const Self).cast());
+        #[cfg(feature = "prof")]
+        crate::mem_prof::free((self as *const Self).cast(), size_of::<Self>());
     }
 }

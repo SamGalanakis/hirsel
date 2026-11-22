@@ -29,6 +29,10 @@ mod isa;
 pub mod isolate;
 pub mod latest;
 pub mod limit;
+#[cfg(feature = "prof")]
+mod mem_prof;
+#[cfg(any(test, feature = "prof"))]
+mod mem_sampler;
 pub mod net;
 pub mod os;
 pub mod os_exec;
@@ -40,6 +44,8 @@ mod os_unix;
 #[cfg(any(test, feature = "charge-observation"))]
 pub mod peak;
 pub mod process;
+#[cfg(feature = "prof")]
+mod prof_stack;
 mod provide;
 pub mod provider;
 pub mod region;
@@ -238,6 +244,11 @@ impl Context {
     #[inline]
     pub fn limit_exit(&mut self) {
         self.bound_depth = self.bound_depth.wrapping_sub(1);
+        #[cfg(feature = "prof")]
+        {
+            crate::mem_prof::slot(self.limit_record().addr(), self.available());
+            crate::mem_prof::scope_exit(0);
+        }
         self.current.exit();
     }
 

@@ -125,6 +125,15 @@ pub unsafe extern "C" fn hirsel_core_region_open(
         // SAFETY: the opaque ABI handle remains pinned until region_close.
         unsafe { crate::peak::region_open(region) };
     }
+    #[cfg(feature = "prof")]
+    {
+        crate::mem_prof::alloc(
+            region.cast(),
+            size_of::<crate::region::Region>(),
+            crate::mem_prof::Backing::Region,
+        );
+        crate::mem_prof::region_open(region);
+    }
     region
 }
 
@@ -230,7 +239,11 @@ pub unsafe extern "C" fn hirsel_core_region_close(region: *mut crate::region::Re
     unsafe {
         #[cfg(any(test, feature = "charge-observation"))]
         crate::peak::region_close(region);
+        #[cfg(feature = "prof")]
+        crate::mem_prof::region_close(region);
         Box::from_raw(region).close();
+        #[cfg(feature = "prof")]
+        crate::mem_prof::free(region.cast(), size_of::<crate::region::Region>());
         #[cfg(any(test, feature = "charge-observation"))]
         crate::peak::deallocated(region.cast());
     }
@@ -357,6 +370,8 @@ pub unsafe extern "C" fn hirsel_core_raise_capacity(
     requested: u64,
     available: u64,
 ) {
+    #[cfg(feature = "prof")]
+    crate::mem_prof::capacity_raise(requested, available);
     let capacity = Capacity {
         requested,
         available,
@@ -698,6 +713,8 @@ pub unsafe extern "C" fn hirsel_core_limit_enter(context: *mut Context, bytes: u
         if result.is_ok() {
             task.bound_depth = task.bound_depth.wrapping_add(1);
         }
+        #[cfg(feature = "prof")]
+        crate::mem_prof::byte_scope(task.limit_record().addr(), bytes, result.as_ref().err());
         scope_allocation(context, result)
     }
 }
@@ -705,6 +722,12 @@ pub unsafe extern "C" fn hirsel_core_limit_enter(context: *mut Context, bytes: u
 unsafe extern "C" fn limit_enter_refill(context: *mut Context, bytes: u64) -> Allocation {
     // SAFETY: this is the same task-exclusive entry with an empty record pool.
     let result = unsafe { &mut *context }.limit_enter(bytes);
+    #[cfg(feature = "prof")]
+    crate::mem_prof::byte_scope(
+        unsafe { (*context).limit_record().addr() },
+        bytes,
+        result.as_ref().err(),
+    );
     scope_allocation(context, result)
 }
 #[inline(always)]

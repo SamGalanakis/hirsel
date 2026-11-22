@@ -151,7 +151,11 @@ impl Region {
         charge: Option<u64>,
     ) -> Result<NonNull<u8>, Capacity> {
         let payer = context.payer();
+        #[cfg(feature = "prof")]
+        let borrow = crate::mem_prof::region_borrow(self);
         payer.admit(charge)?;
+        #[cfg(feature = "prof")]
+        drop(borrow);
         Ok(self.allocate_admitted(payer, bytes, align, charge.unwrap()))
     }
 
@@ -241,6 +245,8 @@ impl Region {
         let result = self.take(stride);
         #[cfg(any(test, feature = "charge-observation"))]
         crate::peak::region_refill(self, layout.size());
+        #[cfg(feature = "prof")]
+        crate::mem_prof::region_refill(self, pointer.as_ptr(), layout.size());
         result
     }
 
@@ -277,6 +283,8 @@ impl Region {
         if refund == 0 {
             return;
         }
+        #[cfg(feature = "prof")]
+        let _borrow = crate::mem_prof::region_borrow(self);
         if entry == self.entry {
             Payer::from_current(self.payer).refund(refund);
             self.charge = self.charge.wrapping_sub(refund);
@@ -305,6 +313,10 @@ impl Region {
     /// Return the recently used chunks and their metadata to the cache.
     /// Closing refunds payer runs and can release one stale chunk.
     pub fn close(mut self: Box<Self>) {
+        #[cfg(feature = "prof")]
+        for chunk in &self.chunks[..self.used_chunks] {
+            crate::mem_prof::free(chunk.pointer.as_ptr(), chunk.layout.size());
+        }
         self.refund();
         if let Some(cache) = self.cache.upgrade() {
             if self.used_chunks != 0 {

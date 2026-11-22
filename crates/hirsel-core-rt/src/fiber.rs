@@ -43,6 +43,22 @@ pub(crate) fn set_stop_fd(fd: i32) -> i32 {
 pub(crate) fn set_stop_fd_here(fd: i32) -> i32 {
     STOP_FD.replace_here(fd)
 }
+#[cfg(feature = "prof")]
+pub(crate) fn profile_stack_top(sp: usize) -> Option<usize> {
+    let (_, guard_end) = GUARD.get();
+    if guard_end == 0 {
+        return None;
+    }
+    let top = guard_end + RESERVE;
+    if sp < guard_end || sp >= top - HEADER {
+        return None;
+    }
+    // SAFETY: the active guard pins this stack's committed header. The
+    // current thread owns its low-water word until the next stack switch.
+    let committed = unsafe { low_word(top).read() };
+    (sp >= committed).then_some(top - HEADER)
+}
+
 pub(crate) fn guard(bounds: (usize, usize)) {
     GUARD.set(bounds);
 }

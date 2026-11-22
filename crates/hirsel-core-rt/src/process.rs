@@ -359,6 +359,8 @@ pub(crate) unsafe fn run_with_map_hash_key(
         #[cfg(feature = "prof")]
         let _worker_profile = crate::prof::Worker::enter();
         let mut context = Context::with_unit_heap(config.root_limit);
+        #[cfg(feature = "prof")]
+        crate::mem_prof::root(context.limit_record().addr(), context.available());
         context.run = config;
         context.map_hash_key = hirsel_core_layout::map_hash::PreparedKey::new(&key);
         #[cfg(feature = "charge-observation")]

@@ -359,7 +359,10 @@ impl Forest {
         let parent = self.find(original_parent);
         // SAFETY: the recipient owns both the original parent and the merged
         // record through this fold.
-        let parent_available = unsafe { (*parent.local()).available }.wrapping_add(unused);
+        let available = unsafe { (*parent.local()).available };
+        #[cfg(feature = "prof")]
+        parent.observe(available);
+        let parent_available = available.wrapping_add(unused);
         let parent_live = self.record(parent).live;
         let (winner, loser) = if self.record(child).rank > self.record(parent).rank {
             (child, parent)
@@ -379,6 +382,8 @@ impl Forest {
         }
         self.record_mut(winner).live = parent_live;
         unsafe { (*winner.local()).available = parent_available };
+        #[cfg(feature = "prof")]
+        crate::mem_prof::forward(parent.local().addr(), winner.local().addr());
         self.retain(winner);
         self.record_mut(loser).parent = Some(winner);
         self.release(original_parent);
@@ -404,6 +409,8 @@ impl Forest {
         // SAFETY: the recipient owns credits along this ordered route.
         let outstanding = unsafe {
             let recipient = root.local();
+            #[cfg(feature = "prof")]
+            root.observe((*recipient).available);
             (*recipient).available = (*recipient).available.wrapping_add(bytes);
             let original = payer.local();
             (*original).outstanding = (*original).outstanding.wrapping_sub(bytes);
@@ -567,6 +574,10 @@ impl Payer {
     fn local(self) -> *mut LimitRecord {
         self.slot().local.get()
     }
+    #[cfg(feature = "prof")]
+    fn observe(self, available: u64) {
+        crate::mem_prof::slot(self.local().addr(), available);
+    }
     fn links(self) -> *mut Links {
         self.slot().links.get()
     }
@@ -597,6 +608,8 @@ impl Payer {
             Some(n) if !injected && n <= r.available => {
                 r.available = r.available.wrapping_sub(n);
                 r.outstanding = r.outstanding.wrapping_add(n);
+                #[cfg(feature = "prof")]
+                payer.observe(r.available);
                 #[cfg(any(test, feature = "charge-observation"))]
                 crate::peak::sample();
                 Ok(())
@@ -649,6 +662,8 @@ impl Payer {
             // outstanding bytes prevent reuse of its stored payer slot.
             unsafe {
                 let r = &mut *context.limit_record();
+                #[cfg(feature = "prof")]
+                self.observe(r.available);
                 r.available = r.available.wrapping_add(bytes);
                 r.outstanding = r.outstanding.wrapping_sub(bytes);
             }
@@ -669,6 +684,8 @@ impl Payer {
             let links = &*self.links();
             let r = &mut *self.local();
             if links.parent.is_none() && (links.refs != 0 || r.outstanding != bytes) {
+                #[cfg(feature = "prof")]
+                self.observe(r.available);
                 r.available = r.available.wrapping_add(bytes);
                 r.outstanding = r.outstanding.wrapping_sub(bytes);
                 return;
@@ -731,6 +748,8 @@ impl Payer {
             let link = unsafe { &*self.links() };
             if bytes != 0 && link.parent.is_none() && link.refs != 0 {
                 let r = unsafe { &mut *self.local() };
+                #[cfg(feature = "prof")]
+                self.observe(r.available);
                 r.available = r.available.wrapping_add(bytes);
                 r.outstanding = r.outstanding.wrapping_sub(bytes);
             } else {
@@ -1213,6 +1232,8 @@ impl Funding {
             return Err(crate::tasks::capacity_refused(bytes, r.available));
         }
         r.available = r.available.wrapping_sub(bytes);
+        #[cfg(feature = "prof")]
+        parent.observe(r.available);
         let source = unsafe { (*parent.links()).live };
         let live = Live {
             owner: source.owner,
@@ -1288,6 +1309,8 @@ impl Funding {
         let unused = self.recycle_scope(parent);
         // SAFETY: the parent edge's existing pin becomes this context's pin.
         unsafe {
+            #[cfg(feature = "prof")]
+            self.payer.get().observe((*self.raw_local()).available);
             (*self.raw_local()).available = (*self.raw_local()).available.wrapping_add(unused);
         }
     }
@@ -1320,7 +1343,11 @@ impl Funding {
             return false;
         }
         let unused = unsafe { (*child.local()).available };
-        unsafe { (*parent.local()).available = (*parent.local()).available.wrapping_add(unused) };
+        unsafe {
+            #[cfg(feature = "prof")]
+            parent.observe((*parent.local()).available);
+            (*parent.local()).available = (*parent.local()).available.wrapping_add(unused);
+        }
         if parent_rank == 0 {
             f.record_mut(parent).rank += 1;
         }
@@ -1385,6 +1412,8 @@ impl Funding {
         self.normalize_merged();
         // SAFETY: normalization transferred the context's sole pin to the winner.
         unsafe {
+            #[cfg(feature = "prof")]
+            self.payer.get().observe((*self.raw_local()).available);
             (*self.raw_local()).available = (*self.raw_local()).available.wrapping_add(unused);
         }
     }

@@ -101,6 +101,12 @@ pub unsafe extern "C" fn hirsel_core_channel_new(
         }));
         #[cfg(any(test, feature = "charge-observation"))]
         crate::peak::allocated(channel.cast(), size_of::<Channel>());
+        #[cfg(feature = "prof")]
+        crate::mem_prof::alloc(
+            channel.cast(),
+            size_of::<Channel>(),
+            crate::mem_prof::Backing::Channel,
+        );
         tasks::event(tasks::SENDERS, id, 1);
         New {
             sender: channel,
@@ -580,9 +586,12 @@ pub unsafe extern "C" fn hirsel_core_receiver_release(
 #[path = "channel_rule_stop_tests.rs"]
 mod rule_stop_tests;
 
-#[cfg(any(test, feature = "charge-observation"))]
+#[cfg(any(test, feature = "charge-observation", feature = "prof"))]
 impl Drop for Channel {
     fn drop(&mut self) {
+        #[cfg(any(test, feature = "charge-observation"))]
         crate::peak::deallocated((self as *const Self).cast());
+        #[cfg(feature = "prof")]
+        crate::mem_prof::free((self as *const Self).cast(), size_of::<Self>());
     }
 }

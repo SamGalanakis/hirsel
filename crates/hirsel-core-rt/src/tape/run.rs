@@ -613,7 +613,7 @@ pub unsafe extern "C" fn hirsel_core_os_run_recording(
     unsafe {
         if let Some((path, mode)) = pinned_replay(&*input) {
             #[cfg(feature = "prof")]
-            let _profile = crate::prof::Run::start();
+            let _profile = crate::prof::Run::start_replay();
             return run_taped(
                 input, names, sources, entry, path, mode, identity, revision, None,
             );
@@ -693,7 +693,7 @@ pub unsafe extern "C" fn hirsel_core_os_replay(
     revision: *const [u8; 32],
 ) -> u8 {
     #[cfg(feature = "prof")]
-    let _profile = crate::prof::Run::start();
+    let _profile = crate::prof::Run::start_replay();
     // SAFETY: every pointer is a borrowed generated startup operand.
     unsafe {
         run_taped(

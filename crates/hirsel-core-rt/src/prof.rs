@@ -30,7 +30,12 @@ pub(crate) enum Kind {
     IoPending = 10,
     IoEnd = 11,
     Mapping = 12,
-    // 16–31 are reserved for allocation, peak and budget observations.
+    Alloc = 16,
+    Peak = 17,
+    BudgetScope = 18,
+    ScopeStack = 19,
+    MemoryMeta = 20,
+    SlackMember = 21,
 }
 
 thread_local! {
@@ -233,11 +238,21 @@ pub(crate) struct Run {
 }
 
 impl Run {
+    #[cfg(feature = "record")]
+    pub(crate) fn start_replay() -> Option<Self> {
+        Self::start_with(true)
+    }
+
     /// Call before taking the environment grant snapshot. The generated
     /// process entry owns access to the environment at that point.
     pub(crate) fn start() -> Option<Self> {
+        Self::start_with(false)
+    }
+
+    fn start_with(replay: bool) -> Option<Self> {
         let path = std::env::var_os("HIRSEL_PROFILE")?;
         let size = std::env::var_os("HIRSEL_PROFILE_CHUNK_BYTES");
+        let memory = replay.then(crate::mem_prof::read_settings).flatten();
         // SAFETY: the generated executable calls this at process entry.
         unsafe {
             std::env::remove_var("HIRSEL_PROFILE");
@@ -257,7 +272,12 @@ impl Run {
             return None;
         };
         match Self::open(path, size) {
-            Ok(run) => Some(run),
+            Ok(run) => {
+                if let Some(settings) = memory {
+                    crate::mem_prof::start(settings);
+                }
+                Some(run)
+            }
             Err(error) => {
                 eprintln!("hirsel: cannot start runtime profile: {error}");
                 None
@@ -301,7 +321,10 @@ impl Run {
 impl Drop for Run {
     fn drop(&mut self) {
         // Every runtime worker has returned, so all registered chunks are sealed.
-        // Final profile summaries can append here on the launch thread.
+        if crate::mem_prof::enabled() {
+            let _worker = Worker::enter();
+            crate::mem_prof::finish();
+        }
         *RUN.lock().unwrap() = None;
         self.shared.done.store(true, Ordering::Release);
         let drain = self.drain.take().unwrap();

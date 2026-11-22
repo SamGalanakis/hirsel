@@ -602,6 +602,12 @@ impl Local<'_> {
 fn finish_allocation(pointer: NonNull<u8>, class: Class) -> NonNull<u8> {
     #[cfg(any(test, feature = "charge-observation"))]
     crate::peak::allocated(pointer.as_ptr(), class.stride);
+    #[cfg(feature = "prof")]
+    crate::mem_prof::alloc(
+        pointer.as_ptr(),
+        class.stride,
+        crate::mem_prof::Backing::TaskHeap,
+    );
     #[cfg(not(any(test, feature = "charge-observation")))]
     let _ = class;
     pointer
@@ -1317,6 +1323,8 @@ pub(crate) unsafe fn try_grow_in_place(
             after > before,
             reused_reservation,
         );
+        #[cfg(feature = "prof")]
+        let old_bytes = (*header.class.get()).stride;
         header.class.get().write(class);
         #[cfg(feature = "memcheck")]
         {
@@ -1326,6 +1334,8 @@ pub(crate) unsafe fn try_grow_in_place(
         }
         #[cfg(any(test, feature = "charge-observation"))]
         crate::peak::resized(payload.as_ptr(), class.stride);
+        #[cfg(feature = "prof")]
+        crate::mem_prof::resize(payload.as_ptr(), old_bytes, class.stride);
         true
     }
 }
@@ -1351,6 +1361,8 @@ pub(crate) unsafe fn release_page(
     let heap = unsafe { &page.as_ref().heap };
     #[cfg(any(test, feature = "charge-observation"))]
     crate::peak::deallocated(payload.as_ptr());
+    #[cfg(feature = "prof")]
+    crate::mem_prof::free(payload.as_ptr(), unsafe { Page::class(page) }.stride);
     #[cfg(feature = "memcheck")]
     // SAFETY: the outstanding slot pins its immutable kind.
     unsafe {

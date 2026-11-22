@@ -21,7 +21,7 @@ pub type Domain: key = Collection | CollectionMap | Unprefixed
 
 pub type Error: key = MalformedPage | UnsupportedPage | OutOfOrder | PageLimit | StampLimit
 
-pub type Edit: key = Changed | Shrunk | AbsentKey | Shared | Split
+type Edit: key = Changed | Shrunk | Split
 
 pub type PagePtr: key {
     pack: u64,
@@ -1291,23 +1291,7 @@ fn private_put(mut page: Page, incoming: Entry, kid: Option[Arc[Page]], blob: Op
     })
 }
 
-/// Upsert into a private page. Split asks the caller to split the logical
-/// entries with the incoming entry included. The Arc is unchanged on Split.
-pub fn put(mut holder: Arc[Page], row: Entry, kid: Option[Arc[Page]], blob: Option[Arc[Bytes]]) -> Result[Edit, Error] {
-    match arc.with_unique(mut holder, scoped fn(mut page: Page) -> Result[Edit, Error] {
-        let edit = private_put(mut page, row, kid, blob)?
-        Ok(if edit == Shrunk {
-            Changed
-        } else {
-            edit
-        })
-    }) {
-        Some(answer) => answer,
-        None => Ok(Shared),
-    }
-}
-
-fn private_delete(mut page: Page, key: Bytes) -> Edit {
+fn private_delete(mut page: Page, key: Bytes) {
     let lvl = level(page.image)
     let n = count(page.image)
     let (slot, hit) = if lvl != 0 && list.len(key) == 0 {
@@ -1316,7 +1300,7 @@ fn private_delete(mut page: Page, key: Bytes) -> Edit {
         search(page.image, key)
     }
     if !hit {
-        return AbsentKey
+        return ()
     }
     let (old_rows, old_charge) = stored_totals(page.image, slot)
     let mut dead = u16_at(page.image.raw, 6) + entry_size(page.image, slot)
@@ -1336,7 +1320,7 @@ fn private_delete(mut page: Page, key: Bytes) -> Edit {
         put32(mut page.image.raw, 16, HEADER)
         page.rows = 0
         page.charge = 0
-        return Changed
+        return ()
     }
     if lvl != 0 && slot == 0 {
         let at = entry_at(page.image, 1)
@@ -1355,18 +1339,6 @@ fn private_delete(mut page: Page, key: Bytes) -> Edit {
     put16(mut page.image.raw, 2, n - 1)
     put16(mut page.image.raw, 6, dead)
     changed_totals(mut page, old_rows, old_charge, 0, 0)
-    Changed
-}
-
-/// Delete by key under the Arc's uniqueness check. In a branch the empty key
-/// selects child zero, and its successor takes the empty separator.
-pub fn delete(mut holder: Arc[Page], key: Bytes) -> Edit {
-    match arc.with_unique(mut holder, scoped fn(mut page: Page) -> Edit {
-        private_delete(mut page, key)
-    }) {
-        Some(answer) => answer,
-        None => Shared,
-    }
 }
 
 type Built: shareable + send {
@@ -2028,7 +2000,7 @@ fn rebalance_child(mut page: Page, slot: u64, mut next: u64) -> Result[Option[Li
     let siblings = count(page.image)
     if n == 0 {
         let top_key = option.unwrap(key_at(page.image, slot))
-        let _ = private_delete(mut page, top_key)
+        private_delete(mut page, top_key)
         return Ok(None)
     }
     let unary = lvl != 0 && n == 1
@@ -2085,7 +2057,7 @@ fn rebalance_child(mut page: Page, slot: u64, mut next: u64) -> Result[Option[Li
 
 fn remove_private(mut page: Page, key: Bytes, private_from: u64, mut next: u64) -> Result[Option[List[Arc[Page]]], Error] {
     let Some(slot) = descend(page.image, key) else {
-        let _ = private_delete(mut page, key)
+        private_delete(mut page, key)
         return Ok(None)
     }
     let revised = remove_path(mut page.kids[slot], key, private_from, mut next)?

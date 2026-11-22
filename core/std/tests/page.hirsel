@@ -96,7 +96,7 @@ fn bisects(image: page.Image, stored: List[Bytes], key: Bytes) -> bool {
 // bytes or in width, at most eight bytes and past eight.
 // expect: run search_short_suffixes() = true
 fn search_short_suffixes() -> bool {
-    let suffixes = ["", "00", "0000", "01", "0100", "0102030405060708", "010203040506070809", "ff", "ff00ff"]
+    let suffixes =["", "00", "0000", "01", "0100", "0102030405060708", "010203040506070809", "ff", "ff00ff"]
     let mut rows: List[page.Entry] = list.new()
     let mut stored: List[Bytes] = list.new()
     for s in suffixes {
@@ -104,7 +104,7 @@ fn search_short_suffixes() -> bool {
         list.push(mut stored, keyed(string.from(s)))
     }
     let image = result.unwrap(page.decode(clone(page.payload(result.unwrap(page.encode(rows, 0, 1, Collection)))), Collection))
-    let probes = ["", "00", "000000", "0000", "0001", "01", "0101", "0100", "00ff", "02", "0102030405060707", "0102030405060708", "0102030405060709", "01020304050607", "010203040506070800", "010203040506070809", "fe", "ff", "ff00", "ff00ff", "ff00ff00", "ffff"]
+    let probes =["", "00", "000000", "0000", "0001", "01", "0101", "0100", "00ff", "02", "0102030405060707", "0102030405060708", "0102030405060709", "01020304050607", "010203040506070800", "010203040506070809", "fe", "ff", "ff00", "ff00ff", "ff00ff00", "ffff"]
     for s in probes {
         if !bisects(image, stored, keyed(string.from(s))) {
             return false
@@ -279,6 +279,7 @@ fn edit_model() -> bool {
     for seed in 1u64 .. 5 {
         let mut rng = seed
         let mut holder = page.empty(0, 17, Collection)
+        let mut next = 18u64
         let mut rows: List[(u64, u64)] = list.new()
         for step in 0u64 .. 240 {
             rng = int.wrapping_add(int.wrapping_mul(rng, 6364136223846793005), 1442695040888963407)
@@ -286,17 +287,17 @@ fn edit_model() -> bool {
             let deleting = (rng >> 40u64) % 4 == 0
             let wire_key = model_key(key)
             if deleting {
-                let mut expected: page.Edit = AbsentKey
+                let mut expected = false
                 for row in rows {
                     if row.0 == key {
-                        expected = Changed
+                        expected = true
                     }
                 }
-                if page.delete(mut holder, wire_key) != expected {
+                if result.unwrap(page.remove(mut holder, wire_key, 1, mut next)) != expected {
                     return false
                 }
-            } else if result.unwrap(page.put(mut holder, inline_row(take wire_key, model_value(step)), None, None)) != Changed {
-                return false
+            } else {
+                result.unwrap(page.insert(mut holder, wire_key, model_value(step), None, 1024, 1, mut next))
             }
             rows = model(rows, key, step, deleting)
             if !matches_model(page.image_of(holder), rows) {
@@ -322,36 +323,33 @@ fn body_number(image: page.Image, slot: u64, id: u64) -> u16 {
     }
 }
 
-fn blob_row(key: u64, id: u64) -> page.Entry {
-    page.Entry(key: be(key), cell: BlobValue(page.BlobRef(stamp: id, len: 1, checksum: 0, pack: 0, offset: 0, body: 65535)))
-}
-
 // expect: run private_blob_slots() = true
 fn private_blob_slots() -> bool {
     let mut holder = page.empty(0, 19, Collection)
+    let mut next = 20u64
     let first = arc.new(hex("f1"))
     let last = arc.new(hex("f3"))
     let middle = arc.new(hex("f2"))
-    if result.unwrap(page.put(mut holder, blob_row(1, 11), None, Some(arc.share(first)))) != Changed || result.unwrap(page.put(mut holder, blob_row(3, 13), None, Some(arc.share(last)))) != Changed || result.unwrap(page.put(mut holder, blob_row(2, 12), None, Some(arc.share(middle)))) != Changed {
-        return false
-    }
+    result.unwrap(page.insert_shared(mut holder, be(1), first, 0, 1, mut next))
+    result.unwrap(page.insert_shared(mut holder, be(3), last, 0, 1, mut next))
+    result.unwrap(page.insert_shared(mut holder, be(2), middle, 0, 1, mut next))
     let held = arc.share(holder)
-    if page.delete(mut holder, be(1)) != Shared || page.count(page.image_of(held)) != 3 {
+    if !result.unwrap(page.remove(mut holder, be(1), 1, mut next)) || page.count(page.image_of(held)) != 3 || body_number(page.image_of(held), 0, 20) != 0 {
         return false
     }
     drop(take held)
-    if page.delete(mut holder, be(1)) != Changed || body_number(page.image_of(holder), 0, 12) != 0 || body_number(page.image_of(holder), 1, 13) != 1 || page.body(holder, 2) != None {
+    if body_number(page.image_of(holder), 0, 22) != 0 || body_number(page.image_of(holder), 1, 21) != 1 || page.body(holder, 2) != None {
         return false
     }
     // Replace one live blob with an inline row, then append another out of slot order.
-    if result.unwrap(page.put(mut holder, inline_row(be(2), hex("aa")), None, None)) != Changed || result.unwrap(page.put(mut holder, blob_row(0, 11), None, Some(arc.share(first)))) != Changed {
-        return false
-    }
+    result.unwrap(page.insert(mut holder, be(2), hex("aa"), None, 1, 1, mut next))
+    let replacement_stamp = next
+    result.unwrap(page.insert_shared(mut holder, be(0), first, 0, 1, mut next))
     let (take image, take order) = result.unwrap(page.seal(holder))
     let disk = result.unwrap(page.decode(clone(page.payload(image)), Collection))
     let zero = option.unwrap(page.body(holder, 0))
     let one = option.unwrap(page.body(holder, 1))
-    list.len(order) == 2 && order[0u64] == 1 && order[1u64] == 0 && body_number(disk, 0, 11) == 0 && body_number(disk, 2, 13) == 1 && zero == last && one == first
+    list.len(order) == 2 && order[0u64] == 1 && order[1u64] == 0 && body_number(disk, 0, replacement_stamp) == 0 && body_number(disk, 2, 21) == 1 && zero == last && one == first
 }
 
 fn long_key(byte: u8, common: bool) -> Bytes {
@@ -446,20 +444,34 @@ fn bulk_blob_leaf() -> bool {
 fn split_and_branch_delete() -> bool {
     let mut next = 100u64
     let mut root = option.unwrap(result.unwrap(page.bulk(bulk_rows(3, true), Unprefixed, 1024, mut next)))
-    let leaf = option.unwrap(page.child(root, 2))
-    let row = branch_row(long_key(3, true), page.unlocated(102))
-    if result.unwrap(page.put(mut root, row, Some(arc.share(leaf)), None)) != Split || page.count(page.image_of(root)) != 3 || page.delete(mut root, list.new()) != Changed {
+    let mut value: Bytes = list.with_capacity(1024)
+    list.fill(mut value, 1024, 255)
+    // Four oversize leaves require a 2/2 branch split under AP3.
+    result.unwrap(page.insert(mut root, long_key(3, true), value, None, 1024, 1, mut next))
+    if page.level(page.image_of(root)) != 2 || page.count(page.image_of(root)) != 2 {
+        return false
+    }
+    for slot in 0u64 .. 2 {
+        let piece = option.unwrap(page.child(root, slot))
+        if page.count(page.image_of(piece)) != 2 {
+            return false
+        }
+    }
+    // Removing child zero leaves a unary branch. Merging restores the
+    // separator before key 2, and the now-unary root collapses.
+    if !result.unwrap(page.remove(mut root, long_key(0, true), 1, mut next)) || page.level(page.image_of(root)) != 1 || page.count(page.image_of(root)) != 3 {
         return false
     }
     let slot0 = option.unwrap(page.entry(page.image_of(root), 0))
-    if list.len(slot0.key) != 0 || child_stamp(root, 0) != 101 || child_stamp(root, 1) != 102 {
+    let slot1 = option.unwrap(page.entry(page.image_of(root), 1))
+    if list.len(slot0.key) != 0 || slot1.key != long_key(2, true) || child_stamp(root, 0) != 101 {
         return false
     }
-    if page.delete(mut root, long_key(2, true)) != Changed {
+    if !result.unwrap(page.remove(mut root, long_key(3, true), 1, mut next)) || !result.unwrap(page.remove(mut root, long_key(2, true), 1, mut next)) {
         return false
     }
     let (take sealed, _) = result.unwrap(page.seal(root))
-    page.count(sealed) == 1 && list.len(page.payload(sealed)) == 80 && child_stamp(root, 0) == 101
+    page.level(sealed) == 0 && page.count(sealed) == 1 && list.len(page.payload(sealed)) == 5151 && page.stamp(sealed) == 101 && option.unwrap(page.lookup(root, long_key(1, true))) == value
 }
 
 // expect: run collection_map_leaf() = true

@@ -421,6 +421,8 @@ impl OsProcess {
             let mut n_place = hirsel_core_ids::launch::DEFAULT_N_PLACE;
             let mut describe_mode = false;
             let mut preview_mode = false;
+            let mut wake = false;
+            let mut idle_ms = None;
             let mut prefix = 0;
             let mut exec_approvals = Vec::new();
             for argument in argv.clone() {
@@ -434,6 +436,21 @@ impl OsProcess {
                     }
                     describe_mode = true;
                     preview_mode = argument == b"--hirsel-preview";
+                } else if argument == b"--hirsel-wake" {
+                    if wake {
+                        return Err(io::Error::from_raw_os_error(libc::EINVAL).into());
+                    }
+                    wake = true;
+                } else if let Some(value) = argument.strip_prefix(b"--hirsel-idle=") {
+                    if idle_ms.is_some() {
+                        return Err(io::Error::from_raw_os_error(libc::EINVAL).into());
+                    }
+                    let idle = std::str::from_utf8(value)
+                        .ok()
+                        .and_then(|value| value.parse::<u64>().ok())
+                        .filter(|idle| *idle != 0)
+                        .ok_or_else(|| io::Error::from_raw_os_error(libc::EINVAL))?;
+                    idle_ms = Some(idle);
                 } else if let Some(value) = argument.strip_prefix(b"--hirsel-n-place=") {
                     n_place = std::str::from_utf8(value)
                         .ok()
@@ -457,6 +474,20 @@ impl OsProcess {
             } else {
                 None
             };
+            if (wake && (describe_mode || prepare_path.is_some())) || (!wake && idle_ms.is_some()) {
+                return Err(io::Error::from_raw_os_error(libc::EINVAL).into());
+            }
+            // Fd 3 is the inherited listener and fd 4 is the control socket.
+            // Take the launcher's dedicated report descriptor before opening grants.
+            let wake_report = if wake {
+                const REPORT_FD: i32 = 5;
+                if libc::fcntl(REPORT_FD, libc::F_SETFD, libc::FD_CLOEXEC) < 0 {
+                    return Err(io::Error::last_os_error().into());
+                }
+                Some(OwnedFd::from_raw_fd(REPORT_FD))
+            } else {
+                None
+            };
             let env = if input.grant_mask & (1 << ENV) != 0 {
                 let operations = input.env_ops.as_ref().ok_or(StartupError::EnvPatterns)?;
                 (operations.load)(input, describe_mode)?
@@ -466,6 +497,9 @@ impl OsProcess {
             let target = std::str::from_utf8(bytes(input.target))
                 .map_err(|_| io::Error::from_raw_os_error(libc::EILSEQ))?;
             let mut launch = launch_metadata(target, n_place, describe_mode);
+            if wake {
+                launch = launch.with_wake(idle_ms.unwrap_or_default());
+            }
             if prepare_path.is_some() {
                 launch = launch.with_prepare(prepare_hex(&args[2])?, prepare_hex(&args[3])?);
             }
@@ -543,7 +577,7 @@ impl OsProcess {
             let describe_out = if describe_mode {
                 Some(duplicate(input.stdout_fd)?)
             } else {
-                None
+                wake_report
             };
             let directory_ops = input.directory_ops.as_ref();
             let mut dirs = Vec::new();

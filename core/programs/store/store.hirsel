@@ -8791,6 +8791,8 @@ pub fn begin_export_copy(mut db: Db, scratch: Dir, take attempt: Bytes, activati
     Ok(take job)
 }
 
+pub fn export_leased(db: Db) -> bool { is_disk(db) && (match db.disk[0].lease { Some(_) => true, None => false }) }
+
 // The owner joins or cancels the copy before it releases the attempt.
 pub fn release_export(mut db: Db, attempt: Bytes) {
     if is_disk(db) {

@@ -96,7 +96,14 @@ fn write_launch(out: &mut Vec<u8>, launch: &Metadata, managed: bool) {
         out.extend_from_slice(bytes);
     }
     out.extend_from_slice(&launch.n_place().to_le_bytes());
-    out.push(u8::from(launch.is_describe()) | (u8::from(managed) << 1));
+    out.push(
+        u8::from(launch.is_describe())
+            | (u8::from(managed) << 1)
+            | (u8::from(launch.is_wake()) << 2),
+    );
+    if launch.is_wake() {
+        out.extend_from_slice(&launch.idle_ms().to_le_bytes());
+    }
 }
 
 fn read_launch(arg: &[u8]) -> Result<(Metadata, bool), Corrupt> {
@@ -111,13 +118,17 @@ fn read_launch(arg: &[u8]) -> Result<(Metadata, bool), Corrupt> {
     let target = std::str::from_utf8(c.bytes()?).map_err(|_| Corrupt)?;
     let n_place = u64::from_le_bytes(c.fixed()?);
     let flags = c.u8()?;
-    if !c.done() || flags > 2 {
+    if !matches!(flags, 0 | 1 | 2 | 4 | 6) {
         return Err(Corrupt);
     }
-    Ok((
-        Metadata::embedded(digest, target, n_place, flags == 1),
-        flags == 2,
-    ))
+    let mut launch = Metadata::embedded(digest, target, n_place, flags == 1);
+    if flags & 4 != 0 {
+        launch = launch.with_wake(u64::from_le_bytes(c.fixed()?));
+    }
+    if !c.done() {
+        return Err(Corrupt);
+    }
+    Ok((launch, flags & 2 != 0))
 }
 unsafe extern "C" fn diagnostic(state: *mut u8, bytes: *const u8, len: usize) {
     // SAFETY: the process pins Run and the caller pins this diagnostic view.
@@ -435,7 +446,7 @@ unsafe extern "C" fn invoke(
             }
         };
         *run.launch = launch;
-        if run.launch.is_describe() {
+        if run.launch.is_describe() || run.launch.is_wake() {
             let source = if run.mode == 0 {
                 Provider {
                     state: (run as *mut Run).cast(),

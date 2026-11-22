@@ -241,7 +241,9 @@ pub unsafe extern "C" fn hirsel_core_describe_emit(
 ) -> bool {
     // SAFETY: the launcher pins Config and callback, and the caller pins buffer.
     unsafe {
-        if hirsel_core_launch_word(context, 5, 0) == 0 {
+        if hirsel_core_launch_word(context, 5, 0) == 0
+            && hirsel_core_launch_word(context, 12, 0) == 0
+        {
             return false;
         }
         let config = &*(*context).run;

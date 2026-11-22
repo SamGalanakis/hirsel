@@ -329,7 +329,7 @@ identity (the launch digest with the selected constructors, derived by
 `place_head`); otherwise its verdict is `Unknown(RevisionUnknown)`. A chosen
 candidate always runs (RUNNER-SPEC v2.19).
 
-**Operating a place (RUNNER-SPEC v2.15 §12; specified, not built).**
+**Operating a place (RUNNER-SPEC §12.1).**
 `operate(config, stop, status, watch)` owns a place from store open to store close.
 It supervises a head task (store, activation, publisher), a serve supervisor
 with one acceptor child, and the sessions. It publishes
@@ -343,8 +343,11 @@ min(stop + `lag_ms`, D): the acceptor is cancelled, so the listener refuses.
 After that, a new send is `Refused(Overloaded)`, and so is a head FIFO entry
 that was never admitted. Admitted work runs to its reply, and then the head
 closes the store. At D, every owed send is `Abandoned`, the head is cancelled,
-and the store is left at a crash cut for recovery. The result is `Stopped` or
-`Forced(n)`. The place serves `GET /hirsel/status`, a raw route that answers 200
+and the store is left at a crash cut for recovery. The result is
+`Stopped(next_due)` after a clean drain, `Unstarted` after a clean stop during
+startup, or `Forced(n)` at the deadline. With `PlaceConfig.idle = Some(ms)`,
+the runner starts a drain with admission closed after both supervisors
+confirm the place has been idle for the interval. The place serves `GET /hirsel/status`, a raw route that answers 200
 only when `Ready`, with the launch identity and `release_digest`.
 The `fixture` module starts a place through `operate` on a memory or temporary
 store, with typed calls whose replies are durable, `seen_at` for the first

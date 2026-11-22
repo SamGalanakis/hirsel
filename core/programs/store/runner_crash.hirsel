@@ -103,23 +103,23 @@ fn want(ok: bool, take what: String) {
 }
 
 // H4 uses the same registry and durable counter as the W2 crash scenarios.
-pub fn host_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, n: Net, process: Process) -> Result[(), Exit] waits {
-    let serve = scoped fn(take stopping: Receiver[()]) -> Result[(), Exit] waits {
+pub fn host_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, n: Net, process: Process, errors: Stderr) -> Result[(), Exit] waits {
+    let serve = scoped fn(take stopping: Receiver[()]) -> Result[runner.Ended, runner.MainError] waits {
         let mut wire = runner.wire_defaults(131072u64, N_PLACE)
         wire.n_pool = 4194304u64
         wire.socket.max_frame = 131072u64
         let mut disk = options()
         disk.lock_wait_ms = 10000u64
         let config: runner.PlaceConfig[(), Hd, ()] = runner.PlaceConfig(
-            backing: Disk(d, disk), selection: runner.launch_selection(argv)?, place: code.describe(place), n_place: N_PLACE,
+            backing: Disk(d, disk), selection: (runner.launch_selection(argv) ?=> Usage), place: code.describe(place), n_place: N_PLACE,
             migrate: code.describe(migrate), handles: code.describe(handles), session: wire, max_sessions: 4u64,
             proxies: list.new(), n_publisher: 3145728u64,
             listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r,
-            stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(ingress.binding()), triggers: None)
-        let serving = runner.operate(take config, take stopping, result.unwrap(runner.status_root()), None)
-        match take serving { Ok(_) => Ok(()), Error(_) => Error(Exit(status: 1u8)) }
+            stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(ingress.binding()), triggers: None, idle: None)
+        let ended = runner.operate(take config, take stopping, result.unwrap(runner.status_root()), None) ?=> Start
+        Ok(ended)
     }
-    runner.main(argv, process, tasks, code.describe(place), serve)
+    runner.main(argv, process, errors, tasks, code.describe(place), serve)
 }
 
 // A client verdict: empty when every call was answered as expected.
@@ -607,7 +607,7 @@ fn activation_pairs(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, out: Stdo
     let settings: runner.PlaceConfig[(), Hd, ()] = runner.PlaceConfig(backing: Disk(d, existing), selection: chosen, place: code.describe(place), n_place: N_PLACE, migrate: code.describe(migrate), handles: code.describe(handles),
         session: wire, max_sessions: 1u64, proxies: list.new(), n_publisher: 1048576u64,
         listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r,
-        stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(ingress.binding()), triggers: None)
+        stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(ingress.binding()), triggers: None, idle: None)
     let seed = DeadlinePlace(config: take settings, stop: take stopping, status: result.unwrap(runner.status_root()), watch: take watch)
     let running = task.spawn(tasks, bytes 50331648u64, take seed, deadline_place)
     let phases = result.unwrap(channel.receive(watcher))
@@ -616,7 +616,7 @@ fn activation_pairs(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, out: Stdo
     }
     if phase == "write" { result.unwrap(stdout.write(out, "DONE")) }
     result.unwrap(channel.send(stop, ()))
-    if let Ok(Ok(Stopped)) = task.join(take running) {} else { fail("activation: empty place did not stop") }
+    if let Ok(Ok(Stopped(_))) = task.join(take running) {} else { fail("activation: empty place did not stop") }
     if phase == "read" {
         let db = result.unwrap(store.open(tasks, d, c, r, existing))
         want(store.version(store.snapshot(db)) == expected_version, "activation: wrong write count on restart")
@@ -667,7 +667,7 @@ fn unavailable_identity(d: Dir, c: Clock, r: Random, tasks: Tasks, grow: bool, p
     }
 }
 
-fn freeze_until_stop(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, n: Net, take stopping: Receiver[()], twice: bool) -> () waits {
+fn freeze_until_stop(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, n: Net, take stopping: Receiver[()], twice: bool) -> runner.Ended waits {
     let (watch, watcher): (Sender[Receiver[runner.Phase]], Receiver[Receiver[runner.Phase]]) = channel.new(1u64)
     let status = result.unwrap(runner.status_root())
     let mut wire = runner.wire_defaults(131072u64, N_PLACE)
@@ -676,7 +676,7 @@ fn freeze_until_stop(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, n: 
     let config: runner.PlaceConfig[(), Hd, ()] = runner.PlaceConfig(backing: Disk(d, options()), selection: Current(0u64), place: code.describe(place), n_place: N_PLACE, migrate: code.describe(migrate), handles: code.describe(handles),
         session: wire, max_sessions: 1u64, proxies: list.new(), n_publisher: 1048576u64,
         listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r,
-        stop: runner.Stop(lag_ms: 10000u64, grace_ms: 100u64), wire: Some(ingress.binding()), triggers: None)
+        stop: runner.Stop(lag_ms: 10000u64, grace_ms: 100u64), wire: Some(ingress.binding()), triggers: None, idle: None)
     let seed = DeadlinePlace(config: take config, stop: take stopping, status: latest.handle(status), watch: take watch)
     let running = task.spawn(tasks, bytes 50331648u64, take seed, deadline_place)
     let phases = result.unwrap(channel.receive(watcher))
@@ -698,8 +698,8 @@ fn freeze_until_stop(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, n: 
     }
     if let Ok(Draining) = channel.receive(phases) {} else { fail("runner-deadline: no Draining after SIGTERM") }
     if twice { result.unwrap(stdout.write(out, "SECOND")) }
-    match task.join(take running) {
-        Ok(Ok(Forced(1u64))) => (),
+    let ended = match task.join(take running) {
+        Ok(Ok(Forced(count))) if count == 1u64 => Forced(count),
         _ => fail("runner-deadline: expected exactly one logically abandoned send"),
     }
     let mut abandoned = 0u64
@@ -714,6 +714,7 @@ fn freeze_until_stop(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, n: 
     want(abandoned <= 1u64, "runner-deadline: duplicate Abandoned")
     let _ = wire_client.close(take connection)
     result.unwrap(stdout.write(out, "DONE"))
+    ended
 }
 
 fn deadline_reopen(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args) -> () waits {
@@ -735,26 +736,24 @@ fn deadline_reopen(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args) -> () 
 
 // §12.4 uses the live Process grant, including under the crash adapter's
 // substituted directory and stdout providers.
-pub fn stop_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Stdout, n: Net, process: Process) -> Result[(), Exit] waits {
+pub fn stop_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Stdout, n: Net, process: Process, errors: Stderr) -> Result[(), Exit] waits {
     let phase = option.unwrap(args.get(argv, 0u64))
     let scenario = option.unwrap(args.get(argv, 1u64))
     if scenario == "runner-stop-early" {
         result.unwrap(stdout.write(out, "EARLY"))
         host.stopped(process)
-        let start = scoped fn(take stopping: Receiver[()]) -> Result[(), Exit] waits {
+        let start = scoped fn(take stopping: Receiver[()]) -> Result[runner.Ended, runner.MainError] waits {
             let mut wire = runner.wire_defaults(131072u64, N_PLACE)
             wire.n_pool = 4194304u64
             let config: runner.PlaceConfig[(), Hd, ()] = runner.PlaceConfig(backing: Disk(d, options()), selection: Current(0u64), place: code.describe(place), n_place: N_PLACE,
                 migrate: code.describe(migrate), handles: code.describe(handles), session: wire, max_sessions: 1u64,
                 proxies: list.new(), n_publisher: 1048576u64,
                 listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r,
-                stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(ingress.binding()), triggers: None)
-            if let Ok(Stopped) = runner.operate(take config, take stopping, result.unwrap(runner.status_root()), None) {} else {
-                fail("runner-stop-early: place did not stop")
-            }
-            Ok(())
+                stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(ingress.binding()), triggers: None, idle: None)
+            let ended = runner.operate(take config, take stopping, result.unwrap(runner.status_root()), None) ?=> Start
+            Ok(ended)
         }
-        return runner.main(argv, process, tasks, code.describe(place), start)
+        return runner.main(argv, process, errors, tasks, code.describe(place), start)
     }
     if phase == "init" {
         let mut db = result.unwrap(store.open(tasks, d, c, r, options()))
@@ -764,11 +763,10 @@ pub fn stop_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Std
         result.unwrap(store.close(take db))
     } else if phase == "write" {
         let twice = scenario == "runner-stop-twice"
-        let start = scoped fn(take stopping: Receiver[()]) -> Result[(), Exit] waits {
-            freeze_until_stop(d, c, r, tasks, out, n, take stopping, twice)
-            Ok(())
+        let start = scoped fn(take stopping: Receiver[()]) -> Result[runner.Ended, runner.MainError] waits {
+            Ok(freeze_until_stop(d, c, r, tasks, out, n, take stopping, twice))
         }
-        return runner.main(argv, process, tasks, code.describe(place), start)
+        return runner.main(argv, process, errors, tasks, code.describe(place), start)
     } else { deadline_reopen(d, c, r, tasks, argv) }
     Ok(())
 }

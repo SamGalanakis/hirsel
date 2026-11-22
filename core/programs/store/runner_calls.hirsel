@@ -1347,11 +1347,11 @@ fn test_drain_reopened(parent: Dir, c: Clock, r: Random, tasks: Tasks) -> Result
     Ok(())
 }
 
-type ManagedRun: send {
-    settings: runner.PlaceConfig[(), Hd, ()], stop: Receiver[()], status: Latest[runner.Status], watch: Sender[Receiver[runner.Phase]],
+type ManagedRun[G: send, S: send]: send {
+    settings: runner.PlaceConfig[G, Hd, S], stop: Receiver[()], status: Latest[runner.Status], watch: Sender[Receiver[runner.Phase]],
 }
 
-fn run_managed(take job: ManagedRun) -> Result[runner.Ended, runner.StartError] waits {
+fn run_managed[G: send, S: send](take job: ManagedRun[G, S]) -> Result[runner.Ended, runner.StartError] waits {
     let ManagedRun(settings: take settings, stop: take stop, status: take status, watch: take watch) = take job
     runner.operate(take settings, take stop, status, Some(take watch))
 }
@@ -1364,16 +1364,17 @@ fn managed_settings(dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: N
     runner.PlaceConfig(backing: Disk(dir, disk_options()), selection: Current(0u64), place: code.describe(place), n_place: N_PLACE,
         migrate: code.describe(migrate), handles: code.describe(handles), session: wire, max_sessions: 1u64,
         proxies: list.new(), n_publisher: 1048576u64, listen: listen,
-        net: net, tasks: tasks, clock: clock, random: random, stop: stop, wire: Some(ingress.binding()), triggers: None)
+        net: net, tasks: tasks, clock: clock, random: random, stop: stop, wire: Some(ingress.binding()), triggers: None, idle: None)
 }
 
-fn start_managed(tasks: Tasks, take settings: runner.PlaceConfig[(), Hd, ()], stop_pending: bool) -> (Task[Result[runner.Ended, runner.StartError]], Sender[()], Receiver[runner.Phase], Latest[runner.Status]) waits {
+fn start_managed[G: send, S: send](tasks: Tasks, take settings: runner.PlaceConfig[G, Hd, S], stop_pending: bool) -> (Task[Result[runner.Ended, runner.StartError]], Sender[()], Receiver[runner.Phase], Latest[runner.Status]) waits {
     let (stop_to, stop_from): (Sender[()], Receiver[()]) = channel.new(1u64)
     if stop_pending { result.unwrap(channel.send(stop_to, ())) }
     let (handoff, phase_rx): (Sender[Receiver[runner.Phase]], Receiver[Receiver[runner.Phase]]) = channel.new(1u64)
     let status = result.unwrap(runner.status_root())
     let request = ManagedRun(settings: take settings, stop: take stop_from, status: latest.handle(status), watch: take handoff)
-    let running = task.spawn(tasks, bytes 50331648u64, take request, run_managed)
+    let run: fn(take ManagedRun[G, S]) -> Result[runner.Ended, runner.StartError] waits = run_managed
+    let running = task.spawn(tasks, bytes 50331648u64, take request, run)
     (take running, take stop_to, result.unwrap(channel.receive(phase_rx)), take status)
 }
 
@@ -1463,8 +1464,9 @@ pub fn law_ready_after_activation(parent: Dir, clock: Clock, random: Random, tas
     result.unwrap(channel.send(stop_to, ()))
     if let Ok(Draining) = channel.receive(phases) {} else { fail("expected Draining") }
     match task.join(take running) {
-        Ok(Ok(Stopped)) => (),
+        Ok(Ok(Stopped(_))) => (),
         Ok(Ok(Forced(_))) => fail("empty place forced"),
+        Ok(Ok(Unstarted)) => fail("ready place returned Unstarted"),
         Ok(Error(Full(_))) => fail("place allowance exhausted"),
         Ok(Error(_)) => fail("place returned a start error"),
         Error(_) => fail("operate task failed"),
@@ -1481,7 +1483,7 @@ pub fn law_ready_after_activation(parent: Dir, clock: Clock, random: Random, tas
     let _ = take held_stop
     let _ = take blocking
     let (early, early_stop, early_phases, _) = start_managed(tasks, managed_settings(dir, clock, random, tasks, net, address, bounds), true)
-    if let Ok(Ok(Stopped)) = task.join(take early) {} else { fail("ready: queued stop did not cleanly stop") }
+    if let Ok(Ok(Unstarted)) = task.join(take early) {} else { fail("ready: queued stop did not cleanly stop") }
     if let Ok(Starting(Recovering)) = channel.try_receive(early_phases) {} else { fail("ready: early stop did not start at Recovering") }
     if let Ok(Draining) = channel.try_receive(early_phases) {} else { fail("ready: early stop passed recovery") }
     if let Ok(_) = channel.try_receive(early_phases) { fail("ready: early stop continued") }
@@ -1548,7 +1550,7 @@ fn test_lag_window(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net:
     }
     want(host.mono_ns(clock) < before + 500000000u64, "lag: this test did not exercise an answer inside the lag window")
     let _ = wire_client.close(take connection)
-    if let Ok(Ok(Stopped)) = task.join(take running) {} else { fail("lag: idle place did not stop") }
+    if let Ok(Ok(Stopped(_))) = task.join(take running) {} else { fail("lag: idle place did not stop") }
     if let Ok(_) = wire_client.connect(tasks, net, address, clock, random, client_keys(), Some(ingress.credential(random)), socket) { fail("lag: accepted a connection after the drain") }
     let clipped = runner.Stop(lag_ms: 10000u64, grace_ms: 100u64)
     let mut restarted_settings = managed_settings(dir, clock, random, tasks, net, address, clipped)
@@ -1673,7 +1675,7 @@ pub fn law_stop_after_trigger_run(parent: Dir, clock: Clock, random: Random, tas
     // step 5), so the client sees its connection end, and operate closes the Db.
     result.unwrap(channel.send(stop_to, ()))
     let ended = match wire_client.next(client) { Error(Closed) => true, _ => false }
-    let stopped = match task.join(take running) { Ok(Ok(Stopped)) => true, _ => false }
+    let stopped = match task.join(take running) { Ok(Ok(Stopped(_))) => true, _ => false }
     let _ = wire_client.close(take client)
     // Stopped means operate closed the Db, so the store opens again here.
     let mut options = disk_options()
@@ -1686,6 +1688,186 @@ pub fn law_stop_after_trigger_run(parent: Dir, clock: Clock, random: Random, tas
 @test
 fn test_stop_after_trigger_run(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
     if law_stop_after_trigger_run(parent, clock, random, tasks, net) { Ok(()) } else { Error(()) }
+}
+
+const IDLE_MS: u64 = 30u64
+
+type IdleSeed: send { clock: Clock, starts: Sender[u64] }
+type IdleGrant: send { clock: Clock, starts: Sender[u64], attempt: u64 }
+
+fn idle_grant(seed: IdleSeed, take ctx: runner.TriggerContext) -> Result[IdleGrant, Capacity] {
+    let number = triggers.number(runner.trigger_attempt(ctx))
+    Ok(IdleGrant(clock: seed.clock, starts: channel.sender(seed.starts), attempt: number))
+}
+
+fn idle_body(grant: IdleGrant, author: runner.Caller, take delay: u64) -> Result[u64, Capacity] waits {
+    let outside_done_at = std.clock.deadline_after_ms(host.mono_ns(grant.clock), delay)
+    result.unwrap(channel.send(grant.starts, grant.attempt))
+    host.sleep_until(grant.clock, outside_done_at)
+    Ok(grant.attempt)
+}
+
+fn idle_entries() -> (triggers.Entries, triggers.Entry[u64]) {
+    let target: triggers.Entry[u64] = result.unwrap(triggers.granted(code.describe(idle_body)))
+    let mut entries = triggers.empty_entries()
+    result.unwrap(triggers.allow(mut entries, target))
+    (take entries, take target)
+}
+
+fn idle_place(mut r: runner.Registry[IdleGrant, Hd]) -> Result[(), runner.RegisterError] {
+    runner.granted(mut r, code.describe(idle_body), 65536u64, runner.DEFAULT_STEPS)
+}
+
+// A listener with no clients. Both the accept deadline and the sweeps use the
+// virtual clock, so clock.idle can tell when all runnable tasks have settled.
+fn idle_net(take seed: (Clock, Served[NetOp])) -> () waits {
+    let (when, take port) = take seed
+    let mut net_port = take port
+    while let Some(take request) = provide.next(mut net_port) {
+        let net_reply: NetReply = match provide.net_op(request) {
+            Listen(addr: addr, ..) => Listener(1u64, Addr(ip: addr.ip, port: 4000u16)),
+            Accept(..) => {
+                host.sleep_until(when, std.clock.deadline_after_ms(host.mono_ns(when), IDLE_MS / 2u64))
+                Failed(TimedOut)
+            },
+            Released(..) => continue,
+            _ => fail("idle: unexpected network operation"),
+        }
+        let _ = provide.reply(mut net_port, take request, provide.net_reply(net_reply))
+    }
+}
+
+fn idle_triggers(dir: Dir, time: Clock, random: Random, tasks: Tasks, due: u64, future: u64) -> triggers.Id waits {
+    let mut db = result.unwrap(store.open(tasks, dir, time, random, disk_options()))
+    result.unwrap(store.run_migration(mut db, tasks, code.describe(ping_migrate)))
+    let tables = result.unwrap(store.with_schema(db, code.describe(triggers.tables)))
+    let (entries, target) = idle_entries()
+    let schedule = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[triggers.Id, triggers.Error] {
+        let id = triggers.write(mut tx, tables, entries, target, 3u64 * IDLE_MS, At(due))?
+        let _ = triggers.write(mut tx, tables, entries, target, 3u64 * IDLE_MS, At(future))?
+        Ok(id)
+    })
+    let scheduled = match take schedule {
+        Ok(Committed(row)) => row,
+        _ => fail("idle: trigger schedule failed"),
+    }
+    result.unwrap(store.durable(mut db, scheduled.ticket))
+    result.unwrap(store.close(take db))
+    scheduled.value
+}
+
+fn idle_trigger_case(parent: Dir, wall_clock: Clock, random: Random, tasks: Tasks, final_sweep: bool) -> () waits {
+    let (virtual_time, hand) = provide.clock(0u64, 1000u64)
+    let mut ticks = take hand
+    let mut name = string.with_capacity(32u64)
+    let dir = result.unwrap(host.mkdtemp(parent, mut name))
+    let due = if final_sweep { 1000u64 + IDLE_MS / 2u64 + IDLE_MS } else { 1000u64 }
+    let future = 2000u64
+    let id = idle_triggers(dir, virtual_time, random, tasks, due, future)
+    let (network, provider) = provide.net(bytes 4096u64)
+    let serving_net = task.spawn(tasks, bytes 16384u64, (virtual_time, take provider), idle_net)
+    let listen = Addr(ip: V4(0x7f000001u32), port: 0u16)
+    let stop = runner.Stop(lag_ms: 1000u64, grace_ms: 1000u64)
+    let (starts, started): (Sender[u64], Receiver[u64]) = channel.new(2u64)
+    let (entries, _) = idle_entries()
+    let config = runner.TriggerConfig(entries: take entries, author: store.Caller(issuer: 0u8, subject: list.new()),
+        grants: IdleSeed(clock: virtual_time, starts: take starts), grant: idle_grant, grant_bytes: 65536u64)
+    let mut wire = runner.wire_defaults(65536u64, N_PLACE)
+    wire.n_pool = 4194304u64
+    let settings: runner.PlaceConfig[IdleGrant, Hd, IdleSeed] = runner.PlaceConfig(
+        backing: Disk(dir, disk_options()), selection: Current(0u64), place: code.describe(idle_place), n_place: N_PLACE,
+        migrate: code.describe(ping_migrate), handles: code.describe(handles), session: wire, max_sessions: 1u64,
+        proxies: list.new(), n_publisher: 1048576u64, listen: listen, net: network, tasks: tasks, clock: virtual_time,
+        random: random, stop: stop, wire: None, triggers: Some(take config), idle: Some(IDLE_MS))
+    let (running, stop_to, phases, status) = start_managed(tasks, take settings, false)
+    loop {
+        match channel.receive(phases) { Ok(Ready) => break, Ok(Starting(_)) => (), _ => fail("idle: place did not become ready") }
+    }
+    let first_due = (due - 1000u64) * 1000000u64
+    let mut now = 0u64
+    let quantum = IDLE_MS * 500000u64
+    while now <= first_due {
+        let _ = clock.idle(mut ticks)
+        if now == first_due { break }
+        now += quantum
+        clock.advance_to(mut ticks, now)
+        clock.set_wall(mut ticks, 1000u64 + now / 1000000u64)
+    }
+    if let Ok(1u64) = channel.try_receive(started) {} else { fail("idle: the first attempt did not start") }
+    let finish_at = first_due + 3u64 * IDLE_MS * 1000000u64
+    while now < finish_at {
+        if let Ready = latest.read(status).phase {} else { fail("idle: a waiting granted run lost its place") }
+        now += quantum
+        clock.advance_to(mut ticks, now)
+        clock.set_wall(mut ticks, 1000u64 + now / 1000000u64)
+        let _ = clock.idle(mut ticks)
+    }
+    let mut next_clock: Option[u64] = None
+    while now < finish_at + 5u64 * IDLE_MS * 1000000u64 {
+        if let Draining = latest.read(status).phase { break }
+        now += quantum
+        clock.advance_to(mut ticks, now)
+        clock.set_wall(mut ticks, 1000u64 + now / 1000000u64)
+        next_clock = clock.idle(mut ticks)
+    }
+    if let Draining = latest.read(status).phase {} else { fail("idle: completed run kept the place up") }
+    want(next_clock == None, "idle: drain waited for the configured lag")
+    if let Ok(Ok(Stopped(Some(next)))) = task.join(take running) {
+        want(next == future, "idle: clean stop lost the future trigger")
+    } else { fail("idle: expected a clean stop") }
+    let _ = take serving_net
+    let _ = take stop_to
+    let _ = take started
+    let mut db = result.unwrap(store.open(tasks, dir, wall_clock, random, disk_options()))
+    let tables = result.unwrap(store.with_schema(db, code.describe(triggers.tables)))
+    if let Ok(Some(Returned(raw))) = triggers.outcome(store.snapshot(db), tables, id) {
+        want(result.unwrap(std.codec.decode(std.codec.of_u64(), raw)) == 1u64, "idle: the run did not finish on attempt one")
+    } else { fail("idle: no terminal result") }
+    result.unwrap(store.close(take db))
+    result.unwrap(std.dir.remove_all(parent, name))
+}
+
+// L44. In the second case the granted trigger becomes due on the final
+// sweep, so the head must participate in deciding whether to drain.
+@test
+fn test_idle_keeps_runs(parent: Dir, clock: Clock, random: Random, tasks: Tasks) -> Result[(), ()] waits {
+    idle_trigger_case(parent, clock, random, tasks, false)
+    idle_trigger_case(parent, clock, random, tasks, true)
+    Ok(())
+}
+
+@test
+fn test_stop_unstarted(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
+    let mut name = string.with_capacity(32u64)
+    let dir = result.unwrap(host.mkdtemp(parent, mut name))
+    let config = managed_settings(dir, clock, random, tasks, net, Addr(ip: V4(0x7f000001u32), port: 0u16),
+        runner.Stop(lag_ms: 0u64, grace_ms: 1000u64))
+    let (running, stop_to, phases, _) = start_managed(tasks, take config, true)
+    if let Ok(Ok(Unstarted)) = task.join(take running) {} else { fail("stop: expected Unstarted") }
+    if let Ok(Starting(Recovering)) = channel.try_receive(phases) {} else { fail("stop: expected Recovering") }
+    if let Ok(Draining) = channel.try_receive(phases) {} else { fail("stop: expected Draining") }
+    if let Error(Closed) = channel.try_receive(phases) {} else { fail("stop: place continued after Draining") }
+    let _ = take stop_to
+    result.unwrap(std.dir.remove_all(parent, name))
+    Ok(())
+}
+
+pub fn wake_report_main(a: Args, process: Process, err: Stderr, d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), Exit] waits {
+    let run = scoped fn(take stop: Receiver[()]) -> Result[runner.Ended, runner.MainError] waits {
+        match args.get(a, 0u64) {
+            Some(mode) if mode == "clean" => {
+                let settings = managed_settings(d, c, r, tasks, n, Addr(ip: V4(0x7f000001u32), port: 0u16), runner.Stop(lag_ms: 0u64, grace_ms: 1000u64))
+                let ended = runner.operate(take settings, take stop, result.unwrap(runner.status_root()), None) ?=> Start
+                Ok(ended)
+            },
+            Some(mode) if mode == "due" => Ok(Stopped(Some(123456u64))),
+            Some(mode) if mode == "forced" => Ok(Forced(2u64)),
+            Some(mode) if mode == "unstarted" => Ok(Unstarted),
+            Some(mode) if mode == "error" => Error(Start(Missing("test"))),
+            _ => Error(Usage(Exit(status: 2u8))),
+        }
+    }
+    runner.main(a, process, err, tasks, code.describe(place), run)
 }
 
 pub fn law_calls_recorded(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
@@ -2233,7 +2415,7 @@ fn directory_config(supplied: places.Supplied, place_fn: StaticFn[fn(mut Calls) 
     runner.PlaceConfig(backing: Memory, selection: Install, place: place_fn, n_place: N_PLACE,
         migrate: migrate_fn, handles: code.describe(handles), session: directory_wire(), max_sessions: 1u64,
         proxies: list.new(), n_publisher: 1048576u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16),
-        net: supplied.net, tasks: supplied.tasks, clock: supplied.clock, random: supplied.random, stop: stop, wire: Some(ingress.binding()), triggers: None)
+        net: supplied.net, tasks: supplied.tasks, clock: supplied.clock, random: supplied.random, stop: stop, wire: Some(ingress.binding()), triggers: None, idle: None)
 }
 
 // A place that stops at once.
@@ -2268,7 +2450,7 @@ fn end_directory(parent: Dir, take run: DirectoryRun) -> bool waits {
     let ended = places.stop(take directory)
     let mut stopped = true
     for unloaded in ended {
-        if let Ok(Stopped) = unloaded.ended {} else { stopped = false }
+        if let Ok(Stopped(_)) = unloaded.ended {} else { stopped = false }
     }
     result.unwrap(std.dir.remove_all(parent, dir_name))
     stopped
@@ -2340,7 +2522,7 @@ fn test_dir_one_head(parent: Dir, clock: Clock, random: Random, tasks: Tasks, ne
 }
 
 fn close_a(take opener: places.Opener) -> bool waits {
-    match places.close(opener, "a") { Ok(unloaded) => match unloaded.ended { Ok(Stopped) => true, _ => false }, Error(_) => false }
+    match places.close(opener, "a") { Ok(unloaded) => match unloaded.ended { Ok(Stopped(_)) => true, _ => false }, Error(_) => false }
 }
 
 // §13.2: an open during a close waits for the close and gets a fresh instance. Wrong
@@ -2381,7 +2563,7 @@ pub fn law_dir_idle_unload(parent: Dir, clock: Clock, random: Random, tasks: Tas
     // A refused reopen already breaks the law; the watch would never hear the Down.
     if !reopened { return false }
     let _ = next_change(run.changes)
-    let unloaded_ok = match next_change(run.changes) { Down(unloaded) => match unloaded.ended { Ok(Stopped) => true, _ => false }, Up(_) => false }
+    let unloaded_ok = match next_change(run.changes) { Down(unloaded) => match unloaded.ended { Ok(Stopped(_)) => true, _ => false }, Up(_) => false }
     end_directory(parent, take run) && reopened && unloaded_ok
 }
 
@@ -2450,7 +2632,7 @@ pub fn law_dir_reopen_keeps(parent: Dir, clock: Clock, random: Random, tasks: Ta
     let version = ping_call(client, wanted, wanted[0u64], 0u64, 7u64)
     let _ = wire_client.close(take client)
     let _ = take first
-    let unloaded = match places.close(run.opener, "a") { Ok(done) => match done.ended { Ok(Stopped) => true, _ => false }, Error(_) => false }
+    let unloaded = match places.close(run.opener, "a") { Ok(done) => match done.ended { Ok(Stopped(_)) => true, _ => false }, Error(_) => false }
     want(host.mono_ns(clock) < before + 1000000000u64, "directory: the place was not unloaded before its trigger came due")
     host.sleep_until(clock, before + 1200000000u64)
     let second = match places.open(run.opener, "a") { Ok(take held) => take held, Error(_) => fail("directory: reopen refused") }

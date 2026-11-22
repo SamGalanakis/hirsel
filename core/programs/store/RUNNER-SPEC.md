@@ -36,7 +36,7 @@ The v2.2 and v2.3 texts are RUNNER-SPEC-v2.2.md and RUNNER-SPEC-v2.3.md. **v2.4*
 
 ## CHANGES-v2.27 (amendments to v2.26 from astra's attack, platform-spec-attack-1748/REPORT.md; lane platform-spec-amend-1755)
 
-astra attacked v2.26 and ruled "amend first". This first part amends the rules that lanes P1 (idle stop) and P2 (trigger scan) are building now: findings 8, 3 and 6. Text only, **unbuilt**; every changed law is **UNTESTED**.
+This part answers findings 8, 3 and 6 of the v2.26 review. P1's idle stop, startup stop and child report are built. The native `core-runner-r1` checks cover L44, the pre-Ready stop and the child part of L42.
 
 | # | Finding | Decision | What v2.27 says | Basis |
 |---|---|---|---|---|
@@ -58,7 +58,7 @@ astra attacked v2.26 and ruled "amend first". This first part amends the rules t
 
 ## CHANGES-v2.26 (cold places under the platform host: the wake row, the idle stop, the clean report and the deploy trigger scan; lane platform-host-spec-1741)
 
-Agent Platform 2027 (ratified 2026-11-22, Topics 2 and 3) runs places cold by default under a Hirsel platform host (docs/spec/launch.md "Platform host and launcher"). §13.5 said an unloaded place is not woken for a trigger. That rule is reopened for platform places in a new §14. Text only, **unbuilt**; every new law is **UNTESTED**.
+Agent Platform 2027 (ratified 2026-11-22, Topics 2 and 3) runs places cold by default under a Hirsel platform host (docs/spec/launch.md "Platform host and launcher"). §13.5 said an unloaded place is not woken for a trigger. That rule is reopened for platform places in §14, which records the implementation status.
 
 | # | Point | Decision | What v2.26 says | Basis |
 |---|---|---|---|---|
@@ -1325,11 +1325,11 @@ pub type PlaceConfig[G: send, H: send, S: send]: send {
     session: WireConfig, max_sessions: u64, proxies: List[std.wsock.Prefix], n_publisher: u64,
     listen: Addr, net: Net, tasks: Tasks, clock: Clock, random: Random, stop: Stop,
     triggers: Option[TriggerConfig[G, S]],
-    idle: Option[u64],   // v2.26 (unbuilt): the idle stop (§14.4); a wake launch's idle time replaces it (v2.27)
+    idle: Option[u64],   // the idle stop (§14.4); a wake launch's idle time replaces it
     wire: Option[Wire[G]],   // v2.24: None refuses wire calls to Granted entries and gives every session a fresh anonymous Caller
 }
 pub type StartError: send = Open(OpenError) | Listen(NetError) | Missing(String) | Full(Capacity)   // OpenError is place_head's: Store | Place
-pub type Ended: codec + send = Stopped(Option[u64]) | Unstarted | Forced(u64)   // v2.26 (unbuilt): Stopped carries next_due, Unstarted is a stop before Ready (§14.4); as built: Stopped | Forced(u64)
+pub type Ended: codec + send = Stopped(Option[u64]) | Unstarted | Forced(u64)   // Stopped carries next_due; Unstarted is a stop before Ready (§14.4)
 
 pub fn status_root() -> Result[Latest[Status], Capacity]
 pub fn operate[G: send, H: send, S: send](take p: PlaceConfig[G, H, S], take stop: Receiver[()], status: Latest[Status], take watch: Option[Sender[Receiver[Phase]]]) -> Result[Ended, StartError] waits
@@ -1368,7 +1368,7 @@ Each child sends one last message to `operate` before it ends.
 A failure after the activation commit and before `Ready` leaves the new activation rows on disk, because it happens in `Publishing` or `Listening`. The process never reported `Ready`, so a confirmation fails (§12.2). Restart the selected image. Restoring an earlier activation requires an explicit install and a compatible migration (§6).
 
 **A stop during `Starting`.** `operate` takes `StopRequested` in any phase. During `Starting`, it fixes D = t₀ + `grace_ms` as below, publishes `Draining`, spawns T, and answers H's next step result with `Close`. Nothing has been accepted yet, so there is nothing to refuse.
-- H ends as a failure in that step ends: it drops the publisher if it spawned one and calls `store.close` if it opened the store. `operate` releases the listener if it bound one, and returns `Ok(Unstarted)` (v2.26; before, `Ok(Stopped)`). The head never ran its trigger drive, so it cannot say when its next trigger is due, and `Unstarted` carries nothing.
+- H ends as a failure in that step ends: it drops the publisher if it spawned one and calls `store.close` if it opened the store. `operate` releases the listener if it bound one, and returns `Ok(Unstarted)`. The head never ran its trigger drive, so it cannot say when its next trigger is due, and `Unstarted` carries nothing.
 - A step still running at D (a long recovery) is not waited for: at `Expired`, `operate` cancels H and joins it. H is cancelled at its next cancellation point inside the step, and the `Db`, if it exists, is dropped without `close` (§1.10, §3.7). `operate` returns `Ok(Forced(0))`.
 - `Ready` is never published after a stop is taken. If S has already prepared, its acceptor is released without accepting and S is joined.
 
@@ -1627,9 +1627,9 @@ Each law runs in runner_calls (`core-runner-r1`, native only) over one disk-back
 - **Orleans** (af30f59f). Idle activations are collected after `CollectionAge` (15 min), scanned every `CollectionQuantum` (1 min) (src/Orleans.Runtime/Configuration/Options/GrainCollectionOptions.cs:14–24; Catalog/ActivationCollector.cs ScanStale :243–282). Requests that arrive while an activation deactivates are held and forwarded after it completes, not given the old activation (src/Orleans.Runtime/Catalog/ActivationData.cs:1295–1316, :2335–2360). Under memory pressure it collects regardless of keep-alive (Catalog/ActivationCollector.cs:447). **Taken:** hold opens during deactivation, sweep on a period. **Not taken:** memory-pressure eviction; we refuse when full.
 - **Akka cluster sharding** (49e479e8). Idle passivation with a 120 s default timeout, checked every half the timeout (akka-cluster-sharding/src/main/resources/reference.conf:55, :92; akka-cluster-sharding/src/main/scala/akka/cluster/sharding/internal/EntityPassivationStrategy.scala:147–167). Messages for a passivating entity are buffered and the entity restarts when passivation completes if any arrived (akka-cluster-sharding/src/main/scala/akka/cluster/sharding/Shard.scala:457–459, :820–823, :1044–1060); passivation is ignored while messages are buffered (:976–1000). **Taken:** sweep at half the idle time, buffer and restart. **Not taken:** limit-based passivation (evicting least-recently-used entities); see §13.4.
 
-## 14. Cold places under the platform host (new in v2.26; unbuilt)
+## 14. Cold places under the platform host (new in v2.26)
 
-A place run by the platform host (docs/spec/launch.md "Platform host and launcher") is **cold by default**: it runs only while it has work, and the host starts it again when work comes. This section is the wake contract between the two. It reopens §13.5's trigger rule for these places. Everything here is **unbuilt** and its laws are **UNTESTED**. The in-process directory (§13) is unchanged until it is retired (§14.8, conflict 9).
+A place run by the platform host (docs/spec/launch.md "Platform host and launcher") is **cold by default**: it runs only while it has work, and the host starts it again when work comes. This section is the wake contract between the two. It reopens §13.5's trigger rule for these places. The runner's idle stop and child report are **built**. The platform host and launcher have separate implementation lanes. The in-process directory (§13) is unchanged until it is retired (§14.8, conflict 9).
 
 The rule in one line: a place that a commit has given a future trigger is woken for it, and the host can always tell, from one durable row per place, whether it knows the place's next due time or must start the place to find out.
 

@@ -14,6 +14,9 @@ const SAMPLE_FIELDS: u64 = RECORD_ID | (1 << 0) // IP
     | (1 << 12) // REGS_USER
     | (1 << 13); // STACK_USER
 
+const PERF_RECORD_MISC_CPUMODE_MASK: u16 = 7;
+const PERF_RECORD_MISC_KERNEL: u16 = 1;
+
 #[cfg(target_arch = "x86_64")]
 const REGISTERS: u64 = (1 << 6) | (1 << 7) | (1 << 8); // BP, SP, IP
 #[cfg(target_arch = "aarch64")]
@@ -499,6 +502,7 @@ pub(crate) struct Mapping {
 
 pub(crate) struct Sample {
     pub(crate) pc: u64,
+    pub(crate) kernel: bool,
     pub(crate) cpu: u32,
     pub(crate) period: u64,
     pub(crate) event: Event,
@@ -551,7 +555,7 @@ impl<'a> Bytes<'a> {
     }
 }
 
-fn decode(kind: u32, misc: u16, bytes: &[u8], event: Event) -> Result<Option<Record>> {
+pub(super) fn decode(kind: u32, misc: u16, bytes: &[u8], event: Event) -> Result<Option<Record>> {
     let mut payload = Bytes(bytes);
     if kind == 9 {
         let pc = payload.u64()?;
@@ -593,6 +597,7 @@ fn decode(kind: u32, misc: u16, bytes: &[u8], event: Event) -> Result<Option<Rec
             tid,
             kind: Kind::Sample(Sample {
                 pc,
+                kernel: misc & PERF_RECORD_MISC_CPUMODE_MASK == PERF_RECORD_MISC_KERNEL,
                 cpu,
                 period,
                 event,

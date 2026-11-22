@@ -7,7 +7,7 @@ use rusqlite::Connection;
 
 use super::image::{self, Function, Image, Symbolized};
 use super::perf::{Kind, Mapping, Record, Sample};
-use super::procfs::{self, Identity};
+use super::procfs::{self, Identity, KernelSymbols};
 use super::unwind::{Registers, Stack, Step};
 use crate::MemMode;
 use crate::memory::MemoryImport;
@@ -42,6 +42,7 @@ pub(crate) struct Import<'a> {
     mapping: BTreeMap<u64, ActiveMapping>,
     images: HashMap<Identity, Rc<Image>>,
     vdso: Option<Rc<Image>>,
+    kernel_symbols: Option<KernelSymbols>,
     threads: HashMap<u32, Thread>,
     functions: HashMap<Function, i64>,
     frames: HashMap<FrameKey, i64>,
@@ -69,6 +70,7 @@ impl<'a> Import<'a> {
             mapping: BTreeMap::new(),
             images: HashMap::new(),
             vdso: None,
+            kernel_symbols: None,
             threads: HashMap::new(),
             functions: HashMap::new(),
             frames: HashMap::new(),
@@ -353,7 +355,35 @@ impl<'a> Import<'a> {
 
     fn sample(&mut self, tid: u32, time: u64, sample: Sample) -> Result<()> {
         let thread = self.thread(tid, "", time)?;
-        let (frames, root, status) = self.stack(sample.pc, sample.registers, &sample.stack)?;
+        let (frames, root, status) = if sample.kernel
+            || (kernel_address(sample.pc)
+                && Self::active_mapping(&self.mapping, sample.pc).is_none())
+        {
+            let label = self
+                .kernel_symbols
+                .get_or_insert_with(KernelSymbols::read)
+                .label(sample.pc);
+            let symbol = Symbolized {
+                function: Some(Function {
+                    def_path: None,
+                    instance: label.to_owned(),
+                    name: label.to_owned(),
+                    kind: "kernel",
+                }),
+                ..Symbolized::default()
+            };
+            (
+                vec![FrameKey {
+                    mapping: None,
+                    rel_pc: None,
+                    symbol,
+                }],
+                "kernel",
+                "not_attempted",
+            )
+        } else {
+            self.stack(sample.pc, sample.registers, &sample.stack)?
+        };
         let site = self.callsite(frames)?;
         self.db.execute(
             "INSERT INTO cpu_sample(ts_ns,thread_id,cpu,callsite_id,raw_pc_hex,period,stack_root,unwind_status)
@@ -439,12 +469,7 @@ impl<'a> Import<'a> {
         let mut fallback = false;
         let mut visited = HashSet::new();
         let (root, status) = loop {
-            let active = self
-                .mapping
-                .range(..=pc)
-                .next_back()
-                .map(|(_, value)| value)
-                .filter(|active| pc < active.map.end);
+            let active = Self::active_mapping(&self.mapping, pc);
             let rel_pc = active.map(|active| pc - active.map.start);
             let resolved = active.and_then(|active| {
                 let address = active.virtual_start?.checked_add(rel_pc?)?;
@@ -495,6 +520,14 @@ impl<'a> Import<'a> {
             return Ok((frames, "failed", "missing_cfi"));
         }
         Ok((frames, root, status))
+    }
+
+    fn active_mapping(mapping: &BTreeMap<u64, ActiveMapping>, pc: u64) -> Option<&ActiveMapping> {
+        mapping
+            .range(..=pc)
+            .next_back()
+            .map(|(_, value)| value)
+            .filter(|active| pc < active.map.end)
     }
 
     fn frame(&mut self, key: FrameKey) -> Result<i64> {
@@ -561,5 +594,99 @@ impl<'a> Import<'a> {
             )?;
         }
         Ok(())
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+fn kernel_address(pc: u64) -> bool {
+    // The upper canonical half with five-level paging, except the legacy
+    // userspace vsyscall page.
+    pc >= 0xff00_0000_0000_0000 && !(0xffff_ffff_ff60_0000..0xffff_ffff_ff60_1000).contains(&pc)
+}
+
+#[cfg(target_arch = "aarch64")]
+fn kernel_address(pc: u64) -> bool {
+    // A 52-bit TTBR1 range starts at the lowest kernel address.
+    pc >= 0xfff0_0000_0000_0000
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::perf::{CPU_CLOCK, decode};
+    use super::*;
+    use crate::{By, Group, ProfileWriter, Query, RunMeta, query};
+    use serde_json::json;
+
+    #[test]
+    fn kernel_samples_keep_periods_without_user_unwind_failures() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kernel.hprof");
+        let profile = ProfileWriter::create(&path).unwrap();
+        let exe = std::env::current_exe().unwrap();
+        let identity = Identity::read(&std::fs::File::open(&exe).unwrap()).unwrap();
+        let bytes = std::fs::read(exe).unwrap();
+        let image = Rc::new(Image::parse(&bytes, image::SymbolSource::OffsetsOnly, true).unwrap());
+        let mut import = Import::new(profile.connection(), 1, dir.path().into(), image, identity);
+        import.kernel_symbols = Some(KernelSymbols::parse(
+            "0000000000000000 T hidden\nffffffff81000100 T page_fault\nffffffff81000200 D data\n",
+        ));
+        // Linux perf sample records with no user registers or stack bytes.
+        for (pc, mode, period) in [
+            (0xffff_ffff_8100_0110u64, 2, 11),
+            (0xffff_ffff_8100_0200, 2, 7),
+            (0x10, 1, 5),
+            (0x20, 2, 13),
+        ] {
+            let pid_tid = (1u64 << 32) | 1;
+            let payload: Vec<u8> = [pc, pid_tid, 1, 0, period, 0, 0]
+                .into_iter()
+                .flat_map(u64::to_ne_bytes)
+                .collect();
+            import
+                .record(decode(9, mode, &payload, CPU_CLOCK).unwrap().unwrap())
+                .unwrap();
+        }
+        drop(import);
+        profile
+            .finish(&RunMeta {
+                capture_mode: "attach",
+                target: "linux",
+                cmdline: "[]",
+                build_id: "",
+                image_digest: "",
+                symbol_tier: "offsets_only",
+                clock: "CLOCK_MONOTONIC",
+                primary_event: "cpu-clock",
+                primary_unit: "nanoseconds",
+                freq_hz: 997,
+                fallback_reason: "",
+                start_ns: 0,
+                duration_ns: 2,
+                samples_lost: 0,
+            })
+            .unwrap();
+        let top = query(
+            &path,
+            Query::Top {
+                by: By::SelfCost,
+                event: None,
+                group: Group::DefPath,
+                filter: None,
+            },
+            10,
+        )
+        .unwrap();
+        assert_eq!(top.quality["kernel_samples"], 3);
+        assert_eq!(top.quality["unwind_failed"], 1);
+        assert_eq!(top.quality["unknown_mapping"], 1);
+        assert_eq!(top.quality["unresolved_samples"], 1);
+        assert_eq!(top.quality["host_root_samples"], 0);
+        assert_eq!(
+            top.result["rows"],
+            json!([
+                {"function":"[kernel]", "self_total":12, "inclusive_total":12, "sample_count":2},
+                {"function":"[kernel] page_fault", "self_total":11, "inclusive_total":11, "sample_count":1},
+            ])
+        );
     }
 }

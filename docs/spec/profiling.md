@@ -84,7 +84,7 @@ The database has the following tables and columns.
 `build_id`, `image_digest`, `symbol_tier`, `clock`, `primary_event`,
 `primary_unit`, `freq_hz`, `fallback_reason`, `start_ns`, `duration_ns`,
 `samples_total`, `samples_lost`, `stacks_truncated`, `unwind_failed`,
-`unresolved_samples` and `host_root_samples`.
+`unresolved_samples`, `host_root_samples` and `kernel_samples`.
 
 Addresses in `*_hex` columns are hexadecimal text. Unsigned numeric values
 above the SQLite signed integer range use exact decimal text. Time is in
@@ -114,14 +114,21 @@ registers. It leaves the sampled instruction pointer intact and subtracts
 one byte once from caller return addresses. x86-64 captures IP, SP and BP.
 AArch64 captures PC, LR, SP and X29.
 
-`stack_root` is `fiber`, `host`, `truncated` or `failed`. A host stack
+`stack_root` is `fiber`, `host`, `truncated`, `failed` or `kernel`. A host stack
 can contain a Foreign or OS operation whose calling fiber is unreachable.
 `unwind_status` is `ok`, `fiber_root`, `truncated_stack`, `missing_cfi`,
-`unknown_mapping` or `eval_error`. An undefined return address ends the
+`unknown_mapping`, `eval_error` or `not_attempted`. An undefined return address ends the
 walk. Missing CFI may permit frame-pointer recovery, but the sample retains
 `missing_cfi` and a `failed` root. Expression rules and CFA rules that
 require uncaptured registers, such as a stack-probe scratch register,
 produce `eval_error` with a `failed` root.
+
+A sample marked as kernel by perf, or with a kernel-range IP outside user
+mappings, has a single kernel leaf and `unwind_status = 'not_attempted'`.
+It contributes to `kernel_samples` without contributing to unknown user
+mappings or unwind failures. Hotspots show `[kernel] SYMBOL` when the
+current boot's `/proc/kallsyms` can resolve the address and `[kernel]`
+otherwise. The sample keeps its original event and period.
 
 `symbol_tier` is `full_dwarf` for matched detached or embedded DWARF,
 `symtab_only` for ELF symbols, or `offsets_only` if only mapping-relative
@@ -248,7 +255,7 @@ with the calling task and source site in `host_stack_interval`. The launch
 records executable mappings from `/proc/self/maps` before program operations.
 Live profiles use perf mapping records for libraries loaded by audited C.
 If sampling fails, the profiler tries a mapping-only perf event. If that also
-fails, only the startup mappings are available. A PC outside the known
+fails, only the startup mappings are available. A user PC outside the known
 mappings has status `unknown_mapping`.
 
 `io_op` records the request's site, delivered byte count and error. Time spent

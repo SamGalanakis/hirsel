@@ -206,7 +206,7 @@ a closed rotation sender poisons the Db and takes no Cut.
 ## M1 target (not yet built)
 
 Nothing in this section is on main. It is the store's M1 surface, specified in
-STORE-SPEC v2.37 §11 (AP1–AP21, L37–L51), and the M1 implementation slices flip
+STORE-SPEC v2.38 §11 (AP1–AP21, L37–L51), and the M1 implementation slices flip
 it to built. Everything above describes the store as built.
 
 - **Pages.** Every tree becomes a B+ tree of packed pages (`Arc[Page]`, 4 KiB
@@ -259,30 +259,34 @@ it to built. Everything above describes the store as built.
   acks instead of failing; the frame being built and the worker's group buffer
   have their own fixed bounds. No single figure bounds the store's process
   memory. A delete-only commit is never refused by admission, on disk or in
-  memory; like any operation it can still return `Full(c)` if the writer's own
-  allocator cannot grow its checkpoint state, before anything is published. A delayed cut
-  ack never erases newer charges.
-  `accounts(db)` returns `{logical, exact, frames, resident}`; resident page
+  memory; like every write it is still refused at the journal cap (below).
+  `accounts(db)` returns `{logical, exact, frames, journal, resident}`, where
+  `journal` is the journal bytes no published checkpoint covers; resident page
   memory is reported, not admitted, and can exceed `logical` when roots diverge
   (AP15).
-- **Checkpoints.** The writer plans each cut, and the checkpoint task only
-  writes the plan, in a fixed workspace W = max(`pack_bytes`, 16,777,476) +
-  65,536 bytes: `checkpoint_task_bytes` defaults to 67,174,400 bytes (W at the
-  64 MiB default), and open refuses less than W of its own `pack_bytes`.
-  Planning draws on a checkpoint reserve in the writer's memory that grows with
-  the store's packs, unlocated frames and branches and pins; the operation that
-  creates each one (open, a commit, a fork or `pin`) pays its credit before it
-  publishes, and can return `Full(c)` then. So a covering checkpoint is never
-  refused, by the writer or by its task, and `delete_branch` spends credit it
-  already holds. Only compaction's relocation of old frames is funded when the
-  cut needs it, and is deferred to a later cut if the writer has no room. A
-  segment rotates at `checkpoint_bytes` even while a cut is in flight, so no
-  segment grows past `checkpoint_bytes` plus one frame (AP15, AP16).
+- **Checkpoints.** The writer makes each cut itself and serves no other call
+  until it ends. It writes only the pages and blobs no earlier cut wrote, plus
+  the moved frames of compaction and the changed pack-list pages, and then
+  syncs and renames the MANIFEST. A cut that cannot get memory is refused and
+  loses nothing: the old MANIFEST and the journal still recover every committed
+  write. `checkpoint`, schema commits, `migrate`, `pin`, `unpin`, a fork from an
+  older Snapshot, `adopt`, `delete_branch` and install return `Full(c)` when
+  their cut is refused (install: `FullNew(c)`), with nothing changed. A pause is
+  about 0.1–0.25 s for a 10 GB store with 1% changed (an estimate; AP16 gives
+  the bound). The checkpoint task and `checkpoint_task_bytes` are removed.
+- **Journal cap.** Until a cut succeeds the journal keeps growing, up to
+  `journal_limit` (default 268,435,456 bytes; at least `checkpoint_bytes` +
+  `FRAME_LIMIT`, or open is `Full(c)`). A write whose frame would pass it is
+  refused at once, never waiting: `run` and `run_on` return `Refused(c)`, and a
+  committing `admit` and a live-head `fork` return `Full(c)`, with
+  c = `Capacity{requested: journal + frame bytes, available: journal_limit}`.
+  A `checkpoint` or any other cut-made operation is the way out (AP15, AP16).
 - **Fork.** A `fork` from a Snapshot at its live branch head writes one FORK
   journal frame, waits for its sync, and returns the branch with an already
   durable journal ticket: no walk, settle or cut, the account is unchanged, and
-  it is never refused by admission. Everything that can fail (allocation) is
-  prepared before the frame is sent and returns with nothing sent; a failed send
+  it is never refused by admission. Everything that can fail (allocation, and
+  the journal cap) is checked before the frame is sent and returns with nothing
+  sent; its latency is O(1), one group sync. A failed send
   poisons the Db.
   A fork from an older Snapshot still makes a cut. The empty name is allowed.
   A fork past the id counter is `Limit(Ids)`. A fork or `pin` whose record
@@ -292,5 +296,6 @@ it to built. Everything above describes the store as built.
   with its empty drop record), replace (a created id; zero rows give an empty
   collection) or keep (no range). A schema-only change to a populated table keeps its rows,
   index ranges and root stamps (§11.1).
-- **Constants.** `FRAME_LIMIT: u64 = 16777296` joins `VALUE_LIMIT`.
+- **Constants and options.** `FRAME_LIMIT: u64 = 16777296` joins `VALUE_LIMIT`.
+  `Options` gains `journal_limit: u64` and loses `checkpoint_task_bytes`.
 - **Errors.** `Limit` gains `Ids` and `Manifest`; every other case is unchanged.

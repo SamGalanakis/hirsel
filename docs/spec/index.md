@@ -60,6 +60,7 @@ These goals decide between designs. A rule that would break one of them is wrong
 | [Diagnostics](diagnostics.md) | PROG-7 and PROG-8 |
 | [Packages](packages.md) | |
 | [Foreign calls](foreign.md) | FFI-1 to FFI-9 |
+| [Process creation](exec.md) | EXEC-1 to EXEC-8 |
 | [Core library](core.md) | |
 | [Reserved](reserved.md) | |
 | [Examples](examples.md) | |
@@ -90,6 +91,11 @@ The [packages specification](packages.md) defines `hirsel.toml`, `hirsel.lock`, 
 workspaces, library roots and package archives. It is unbuilt design.
 The [Regex specification](regex.md) defines std `regex`, regular expressions over
 `String` with the Rust `regex` crate's syntax and meaning.
+
+The [process creation specification](exec.md) defines the `Exec` capability over
+operator-approved launch profiles, spawning, waiting, signalling and supervised cleanup of
+children, and served Exec. It is unbuilt design, as are the Net chapter's Unix-domain socket
+rules, NET-12 to NET-14.
 
 The [foreign calls specification](foreign.md) defines foreign modules over pinned native
 archives, the `Foreign[I]` capability, the call ABI and its handles, and the `sqlite` package.
@@ -123,6 +129,8 @@ archives, the `Foreign[I]` capability, the call ABI and its handles, and the `sq
 | hand-over, limit record | [MEM-20](budgets.md#mem-20-limit-records-and-hand-over) |
 | kind | [OWN-3](ownership.md#own-3-kinds) |
 | lane, mask, vector, version | [SEM-11](semantics.md#sem-11-vectors) |
+| launch profile, argument form, cwd label | [EXEC-2](exec.md#exec-2-launch-profiles-and-narrowing) |
+| root label | [NET-12](net.md#net-12-unix-rules) |
 | library root, package archive, package store | [packages §1, §7](packages.md#1-canonical-library-content) |
 | lock, stale lock | [packages §8](packages.md#8-hirsellock) |
 | mapping propagate | [LANG-18](language.md#lang-18-errors) |

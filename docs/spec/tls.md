@@ -300,7 +300,11 @@ holding a secret writes this marker in the secret's place. This includes the HTT
 client's request and error renders. Run diagnostics, failure causes and the launcher's
 grant summary print the parameter name and `[secret]`, never the source's contents.
 Since program code never gets the bytes from a `Secret`, it can log or render copies
-it had before sealing. Received plaintext is outside the TL10 guarantee because an
+it had before sealing. A child process started through `Exec` is outside this guarantee: it
+runs with the OS user's authority and may read a granted secret's source
+([EXEC-1](exec.md#exec-1-an-exec-grant-confers-what-its-programs-can-do-and-hirsel-does-not-confine-them)),
+though never the run's memory ([EXEC-7](exec.md#exec-7-a-run-granted-exec-is-out-of-its-childrens-reach)).
+Received plaintext is outside the TL10 guarantee because an
 authorized peer can return any bytes, and a recording keeps its replies exactly
 ([recording](../recording.md#credentials)).
 

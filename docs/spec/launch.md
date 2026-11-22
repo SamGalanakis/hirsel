@@ -162,7 +162,9 @@ ordinary value codec. Its type, `ReleaseManifest`, is declared with `Describe` a
 - `grants` is every grant baked into the executable, one canonical string each,
   sorted bytewise: a kind name as `--grant` takes it (`Clock`, `Random`, …),
   `Net=` or `Env=` followed by the rule or pattern text `--grant` takes, `Foreign=`
-  followed by the interface's definition path `D` (`Foreign=sqlite@1/sqlite/Sqlite`), and
+  followed by the interface's definition path `D` (`Foreign=sqlite@1/sqlite/Sqlite`), `Exec=`
+followed by the profile file path and the profile names as `--grant` took them (unbuilt,
+[EXEC-1](exec.md#exec-1-an-exec-grant-confers-what-its-programs-can-do-and-hirsel-does-not-confine-them)), and
   `Dir=` followed by the path `--dir` took. The strings are a display of the recipe's grant bindings
   (below), which say which parameter receives each one. A directory path stays as
   given. It is resolved against the launch's working directory at startup, which

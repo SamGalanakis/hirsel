@@ -340,11 +340,13 @@ unsafe fn load(channel: *mut Channel, destination: *mut u8) {
             destination,
             (*channel).item.bytes,
         );
-        (*channel).head += 1;
-        if (*channel).head == (*channel).capacity {
-            (*channel).head = 0;
-        }
         (*channel).len -= 1;
+        let next = (*channel).head + 1;
+        (*channel).head = if (*channel).len == 0 || next == (*channel).capacity {
+            0
+        } else {
+            next
+        };
     }
 }
 /// # Safety
@@ -591,6 +593,7 @@ unsafe fn receiver_step(context: *mut Context, holder: *mut Holder, list: *mut W
             (*channel).cursor = 0;
             (*channel).len = newest;
         }
+        (*channel).head = 0;
         let _commit = crate::sequencer::enter();
         (*channel).receiver = Receiver::Gone;
         if (*channel).senders == 0 && !(*channel).closing_sender {
@@ -637,6 +640,55 @@ pub unsafe extern "C" fn hirsel_core_receiver_release(
 #[cfg(test)]
 #[path = "channel_rule_stop_tests.rs"]
 mod rule_stop_tests;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tasks_tests::{run, value};
+
+    unsafe extern "C" fn drain_refill(context: *mut Context, _: *mut u8, _: *mut u8) -> u8 {
+        // SAFETY: the root owns both endpoints and passes valid u64 places.
+        unsafe {
+            let queue = hirsel_core_channel_new(context, 4, value::<u64>(8), 1);
+            assert!(!queue.sender.is_null());
+            let mut next = 1u64;
+            let mut got = 0u64;
+            assert_eq!(
+                hirsel_core_try_send(queue.sender, (&mut next as *mut u64).cast()),
+                0
+            );
+            assert_eq!(
+                hirsel_core_try_receive(queue.receiver, (&mut got as *mut u64).cast()),
+                0
+            );
+            assert_eq!(got, 1);
+            let drained_head = (*queue.receiver).head;
+
+            for mut sent in [2u64, 3, 4, 5] {
+                assert_eq!(
+                    hirsel_core_try_send(queue.sender, (&mut sent as *mut u64).cast()),
+                    0
+                );
+            }
+            for expected in [2, 3, 4, 5] {
+                assert_eq!(
+                    hirsel_core_try_receive(queue.receiver, (&mut got as *mut u64).cast()),
+                    0
+                );
+                assert_eq!(got, expected);
+            }
+            assert_eq!(drained_head, 0);
+            hirsel_core_sender_drop(queue.sender);
+            assert_eq!(hirsel_core_receiver_drop(context, queue.receiver), 0);
+        }
+        0
+    }
+
+    #[test]
+    fn drained_fifo_reuses_slot_zero_and_refills_in_order() {
+        run(drain_refill, ());
+    }
+}
 
 #[cfg(any(test, feature = "charge-observation", feature = "prof"))]
 impl Drop for Channel {

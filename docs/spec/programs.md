@@ -136,6 +136,12 @@ another test function, and a value so taken may be passed on and called anywhere
 otherwise it is an ordinary function of its module (PROG-2), so it may call that module's
 private functions.
 
+With `--property-corpus DIR`, the runner uses the
+[runner-owned property failure corpus](../../core/std/api/prop.md#runner-owned-failure-corpus)
+for opted-in properties. It verifies a saved minimized case in a fresh run
+before searching and bypasses pass reuse for the invocation. The corpus
+directory is outside the test's grants.
+
 In `hirsel.toml`, use plural `grants` and `dirs` in `[tests]` or an individual
 test's run table. The `test` command accepts `--grant` and `--dir` when the package
 has no manifest test configuration.

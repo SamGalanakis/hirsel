@@ -36,6 +36,7 @@ pub enum OptionId {
     InspectCore,
     TestTimeout,
     Rerun,
+    PropertyCorpus,
     Sim,
     SimSeeds,
     SimSeed,
@@ -776,6 +777,13 @@ static OPTIONS: &[OptionSpec] = &[
         None,
         ["test"],
         "Execute every selected test, reusing no recorded pass."
+    ),
+    option!(
+        PropertyCorpus,
+        ["--property-corpus"],
+        Some("DIR"),
+        ["test"],
+        "Replay and save minimized failures from opt-in properties in DIR."
     ),
     option!(
         Sim,

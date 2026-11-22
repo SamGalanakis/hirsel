@@ -391,3 +391,55 @@ fn sum_stays_small() -> Result[(), ()] {
 ```
 
 That property's minimal counterexample is `[10]`, with tape [1, 10, 0].
+
+## Runner-owned failure corpus
+
+`hirsel test --property-corpus DIR` enables a primary corpus for tests that
+take an `Env` parameter and call `check_corpus` or `check_tasks_corpus`.
+
+```hirsel
+pub type Corpus {
+    generator: u64,
+    label: Option[fn(String) -> u64]
+}
+pub fn check_corpus[T](e: Env, key: Corpus, c: Config, g: Gen[T], law: own fn(T) -> Result[(), String]) -> Result[(), ()]
+pub fn check_tasks_corpus[T: send](e: Env, tasks: Tasks, key: Corpus, c: Config, g: Gen[T], law: fn(take Case[T]) -> Result[(), String] waits) -> Result[(), ()] waits
+```
+
+Use one corpus-backed property per test and one directory per project. Keep
+the test definition path and `generator` identifier stable across edits that
+preserve the generator's meaning. Change the identifier when the meaning of
+a choice changes. The optional label maps the returned error excerpt to a
+stable integer identifying which assertion failed. Shrinking preserves that
+label. Without a label, all
+returned errors share one coarse fingerprint.
+
+The runner stores at most one entry per test. The filename is the hex content
+hash of the fully qualified test path plus `.json`. The version 1 JSON record
+contains the test path, the optional launch simulation seed, and the
+space-separated property record. The latter contains, in order, the generator
+identifier, data seed, effective optional simulation seed, case count, choice
+limit, rejection limit, shrink limit, generator step limit, case step limit,
+case byte limit, minimized token, encoded draw bounds, and failure fingerprint.
+The bounds are standard base64 of one ULEB128 per consumed bound followed by
+a zero byte. The token carries the case index. The task law derives its
+world seed from that index and the effective simulation seed.
+
+Before generating any cases, the runner attempts one saved case in a fresh
+process using its recorded launch seed and property settings. The generator
+identifier, consumed values, draw bounds, and draw count must match. Replay
+uses the recorded generator and case limits only when they fit within the
+active limits. Replay spends no shrink or search budget. The runner reports
+`confirmed` if the verified case has the same failure fingerprint. Raised
+failures currently report `changed-failure` even when the cause kind matches,
+because the runner cannot establish the original law's source site from its
+property report. Any verified failure still fails the test. An exact passing
+case or an incompatible generator or tape is `stale`. The runner retires
+the entry, then starts the requested search in a fresh process. A run that
+cannot verify the saved property keeps the entry and fails the test.
+
+The runner grants the process read-only environment data for the replay, using
+`HIRSEL_TEST_PROPERTY_CORPUS`. It keeps the directory private, rejects overlapping
+test directory grants, and publishes owner-only entries by atomic replacement.
+The input record is limited to 96 KiB. Corpus runs bypass pass caching and
+support ordinary testing and single simulation seeds.

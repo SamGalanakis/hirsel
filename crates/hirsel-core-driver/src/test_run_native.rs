@@ -2455,6 +2455,85 @@ fn prop_seeds(e: Env, tasks: Tasks) -> Result[(), ()] waits {
 }
 
 #[test]
+fn property_corpus_replays_minimized_case_before_search() {
+    let law = PackageLaw::new();
+    law.manifest(
+        "app",
+        "app",
+        1,
+        "[sources]\n\"main.hirsel\" = \"main\"\n\n[dependencies]\nstd = { major = 1 }\n\n[tests]\nlimit = 1048576\ngrants = [\"Tasks\"]\n",
+    );
+    let source = r#"
+fn classify(message: String) -> u64 {
+    if message == "original assertion" { 31 } else { 82 }
+}
+fn planted(take sample: std.prop.Case[u64]) -> Result[(), String] {
+    if sample.world_seed == 6869612563719971519 && sample.value >= 3 {
+        Error(string.from("original assertion"))
+    } else if sample.world_seed == 6869612563719971519 && sample.value == 0 {
+        Error(string.from("different assertion"))
+    } else {
+        Ok(())
+    }
+}
+@test
+fn property(e: Env, tasks: Tasks) -> Result[(), ()] waits {
+    let seed = option.unwrap(std.sim.world.test_seed(e))
+    let mut c = std.prop.config()
+    c.seed = if seed == 0 { 5 } else { 0 }
+    c.cases = 1
+    c.sim_seed = Some(seed + 123)
+    let key = std.prop.Corpus(generator: 17, label: Some(classify))
+    std.prop.check_tasks_corpus(e, tasks, key, c, std.prop.u64_in(0, 9), planted)
+}
+"#;
+    let run = |seed: &str, code: i32| {
+        let (status, stdout, stderr) = law.run(&[
+            "test", "app", "--property-corpus", "corpus", "--seed", seed, "--json",
+        ]);
+        assert_eq!(status, Some(code), "{stdout}\n{stderr}");
+        let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+        json["tests"][0].clone()
+    };
+    law.write("app/main.hirsel", source);
+    let saved = run("0", 1);
+    assert_eq!(saved["property_corpus"], "saved");
+    let entries: Vec<_> = std::fs::read_dir(law.path("corpus")).unwrap()
+        .map(|entry| entry.unwrap().path()).collect();
+    assert_eq!(entries.len(), 1);
+    let bytes = std::fs::read(&entries[0]).unwrap();
+    let record: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(record["test"], "app@1/main/property");
+    assert_eq!(record["launch_seed"], 0);
+    let input = record["input"].as_str().unwrap();
+    // The data RNG first draws 4. The planted assertion first fails at 3.
+    // AQABAw== is version 1, case 0, one choice, value 3. CgA= is bound 10 and terminator.
+    assert_eq!(input, "17 5 123 1 4096 1000 1000 1000000 10000000 262144 AQABAw== CgA= returned-31");
+    let replayed = run("1", 1);
+    assert_eq!(replayed["property_corpus"], "confirmed");
+    assert!(replayed["stderr"].as_str().unwrap().contains("0 shrinks: 3; law: original assertion"));
+    assert_eq!(std::fs::read(&entries[0]).unwrap(), bytes);
+
+    // Keep the generator and tape but return a second failure from the same law.
+    law.write("app/main.hirsel", source.replace(
+        "Error(string.from(\"original assertion\"))",
+        "Error(string.from(\"different assertion\"))",
+    ));
+    let changed = run("1", 1);
+    assert_eq!(changed["property_corpus"], "changed-failure");
+    assert!(changed["stderr"].as_str().unwrap().contains("returned-82"));
+
+    // Same identity and a bound that would otherwise replace saved 3 by zero.
+    // The old world still fails if the law sees that coerced value.
+    law.write("app/main.hirsel", source
+        .replace("u64_in(0, 9)", "u64_in(0, 2)")
+        .replace("sample.value >= 3", "sample.value == 0"));
+    let stale = run("1", 0);
+    assert_eq!(stale["property_corpus"], "stale");
+    assert!(!entries[0].exists());
+}
+
+#[test]
 fn exec_test_and_deploy_require_the_exact_profile_approval() {
     let law = PackageLaw::new();
     law.app(

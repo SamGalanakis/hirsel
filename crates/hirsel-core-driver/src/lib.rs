@@ -19,6 +19,7 @@ mod inspect;
 pub mod installation;
 pub(crate) mod launcher;
 mod product;
+mod property_corpus;
 pub mod sdk;
 pub mod sdk_command;
 mod tape_cli;

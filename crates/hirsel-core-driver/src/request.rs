@@ -281,6 +281,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     let mut test_jobs = None;
     let mut test_timeout = None;
     let mut test_sim = false;
+    let mut corpus_path = None;
     let mut test_seeds = None;
     let mut test_seed = None;
     let mut explicit_limit = false;
@@ -339,6 +340,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             Opt::Replay => test_replay = true,
             Opt::Rerun => test_rerun = true,
             Opt::Sim => test_sim = true,
+            Opt::PropertyCorpus => corpus_path = Some(PathBuf::from(value)),
             Opt::SimSeeds => {
                 test_seeds = Some(
                     value
@@ -480,6 +482,9 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     }
     if expect_verdict.is_some() && !test_replay {
         return Err("--expect-verdict requires --replay".into());
+    }
+    if corpus_path.is_some() && (test_replay || test_seeds.is_some()) {
+        return Err("--property-corpus requires ordinary tests or a single simulation seed".into());
     }
     test_sim |= test_seed.is_some();
     if !test_sim && test_seeds.is_some() {
@@ -1242,7 +1247,15 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             })
             .cloned()
             .collect();
-        let cache = if !test_sim && !test_replay && matches!(runner, crate::Runner::Native) {
+        let corpus = corpus_path
+            .as_deref()
+            .map(crate::property_corpus::Corpus::open)
+            .transpose()?;
+        let cache = if corpus.is_none()
+            && !test_sim
+            && !test_replay
+            && matches!(runner, crate::Runner::Native)
+        {
             TestCache::open(&TestCache::default_root())
         } else {
             None
@@ -1266,6 +1279,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                 cache: cache.as_ref(),
                 rerun: test_rerun,
                 seed,
+                corpus: corpus.as_ref(),
             };
             batch.run(&product, &tests, native_options.as_ref().unwrap(), |test, result| {
             let label = seed.map_or_else(|| test.to_string(), |seed| format!("{test} (seed {seed})"));
@@ -1276,10 +1290,13 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                         .then(|| outcome.wall_time.as_secs_f64() * 1000.0);
                     let source = source.as_str();
                     failed |= !passed;
+                    let corpus_note = outcome.corpus.map_or_else(String::new, |state| {
+                        format!(" [property corpus {state}]")
+                    });
                     if !json {
                         if let Some(wall_ms) = wall_ms {
                             if passed {
-                                println!("pass {source} {label} ({wall_ms:.3} ms)");
+                                println!("pass {source} {label}{corpus_note} ({wall_ms:.3} ms)");
                             } else {
                                 let mut reason = if outcome.timed_out {
                                     "execution timed out".to_owned()
@@ -1295,7 +1312,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                                             .join(" | "),
                                     );
                                 }
-                                println!("fail {source} {label}: {reason} ({wall_ms:.3} ms)");
+                                println!("fail {source} {label}{corpus_note}: {reason} ({wall_ms:.3} ms)");
                                 for line in String::from_utf8_lossy(&outcome.output.stdout).lines() {
                                     println!("  stdout: {line}");
                                 }
@@ -1304,7 +1321,11 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                             println!("pass {source} {label}");
                         }
                     }
-                    serde_json::json!({"definition":test.to_string(),"passed":passed,"source":source,"status":outcome.output.status.code(),"stdout":String::from_utf8_lossy(&outcome.output.stdout),"stderr":String::from_utf8_lossy(&outcome.output.stderr),"timed_out":outcome.timed_out,"wall_ms":wall_ms})
+                    let mut row = serde_json::json!({"definition":test.to_string(),"passed":passed,"source":source,"status":outcome.output.status.code(),"stdout":String::from_utf8_lossy(&outcome.output.stdout),"stderr":String::from_utf8_lossy(&outcome.output.stderr),"timed_out":outcome.timed_out,"wall_ms":wall_ms});
+                    if let Some(state) = outcome.corpus {
+                        row["property_corpus"] = state.into();
+                    }
+                    row
                 }
                 Err(error) => {
                     failed = true;

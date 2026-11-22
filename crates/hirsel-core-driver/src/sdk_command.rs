@@ -152,45 +152,6 @@ pub fn frame_schema(
             vec![core.clone()],
             false,
         ),
-        (
-            "store",
-            &[
-                (
-                    "runner",
-                    include_str!("../../../core/programs/store/runner.hirsel"),
-                ),
-                (
-                    "store",
-                    include_str!("../../../core/programs/store/store.hirsel"),
-                ),
-                (
-                    "store",
-                    include_str!("../../../core/programs/store/store-pages.hirsel"),
-                ),
-                (
-                    "store",
-                    include_str!("../../../core/programs/store/store-manifest.hirsel"),
-                ),
-                (
-                    "store",
-                    include_str!("../../../core/programs/store/store-locations.hirsel"),
-                ),
-                (
-                    "store",
-                    include_str!("../../../core/programs/store/store-packs.hirsel"),
-                ),
-                (
-                    "ingress",
-                    include_str!("../../../core/programs/store/ingress.hirsel"),
-                ),
-                (
-                    "triggers",
-                    include_str!("../../../core/programs/store/triggers.hirsel"),
-                ),
-            ][..],
-            vec![core.clone(), std.clone()],
-            false,
-        ),
     ] {
         let directory = work.join(name);
         std::fs::create_dir_all(&directory)?;
@@ -218,6 +179,26 @@ pub fn frame_schema(
             dependencies,
         });
     }
+    let mut sources = Vec::new();
+    let directory = work.join("store");
+    for (file, module, text) in crate::product::bundled::STORE_SOURCES {
+        let file = directory.join(file);
+        std::fs::create_dir_all(file.parent().expect("store source has a directory"))?;
+        std::fs::write(&file, text)?;
+        sources.push(ModuleSource {
+            foreign: false,
+            captured: None,
+            file,
+            modules: module.split('.').map(str::to_owned).collect(),
+            signatures: false,
+        });
+    }
+    packages.push(PackageManifest {
+        namespace: None,
+        package: store.clone(),
+        sources,
+        dependencies: vec![core.clone(), std.clone()],
+    });
     let source = work.join("schema.hirsel");
     std::fs::write(
         &source,

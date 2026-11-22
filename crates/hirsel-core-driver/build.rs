@@ -50,6 +50,19 @@ fn main() {
     let mut generated = String::new();
     let core = package(&root.join("core"), "SOURCES", &mut generated);
     let std = package(&root.join("std"), "STD_SOURCES", &mut generated);
+    let store = root.join("programs/store");
+    let manifest = store.join("hirsel.toml");
+    println!("cargo:rerun-if-changed={}", manifest.display());
+    let manifest: toml::Table = fs::read_to_string(manifest).unwrap().parse().unwrap();
+    generated.push_str("pub const STORE_SOURCES: &[(&str, &str, &str)] = &[\n");
+    for (file, module) in manifest["sources"].as_table().unwrap() {
+        let path = store.join(file);
+        println!("cargo:rerun-if-changed={}", path.display());
+        let source = fs::read_to_string(path).unwrap();
+        let module = module.as_str().unwrap();
+        generated.push_str(&format!("({file:?}, {module:?}, {source:?}),\n"));
+    }
+    generated.push_str("];\n");
     let mut combined = Sha256::new();
     combined.update(b"hirsel.bundled-core-std.v1");
     combined.update(core);

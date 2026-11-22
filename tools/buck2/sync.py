@@ -81,7 +81,8 @@ BUILD_SCRIPT_SOURCES = {
 
 BUILD_SCRIPT_INPUTS = {
     "hirsel-core-diag": ["docs/spec/*.md", "core/front/cases/**/*.hirsel"],
-    "hirsel-core-driver": ["core/core/**", "core/std/*.hirsel", "core/std/sim/*.hirsel"],
+    "hirsel-core-driver": ["core/core/**", "core/std/*.hirsel", "core/std/sim/*.hirsel",
+                          "core/programs/store/*.hirsel", "core/programs/store/hirsel.toml"],
 }
 
 # What each crate's tests read at run time outside their crate: repository

@@ -137,12 +137,15 @@ fn same_length_ir_damage_refuses_once_then_builds_fresh() {
     let last = bytes.len() - 33;
     bytes[last] ^= 1;
     std::fs::write(store.path(record), bytes).unwrap();
-    // Request 1: the head is intact, so check reuses `get`; debug lines on
-    // miss every instance record, so the build reads `get`'s IR.
+    // Request 1: the head is intact, so check reuses `get`; an LLVM build
+    // has no object in this store, so it reads `get`'s IR.
     let first = record_check(APP, &core, dir.path(), "store");
     assert!(first.rechecked.is_empty(), "{:?}", first.rechecked);
     let error = first
-        .build(&DefPath::from_full("app@1/main/main").unwrap(), &lines(true))
+        .build(
+            &DefPath::from_full("app@1/main/main").unwrap(),
+            &native_options(Backend::Llvm, dir.path()),
+        )
         .err()
         .unwrap()
         .to_string();

@@ -718,7 +718,7 @@ impl Keys {
             .get_or_try_init(id.0 as u64, || {
                 Ok(ContentHash::of_parts(
                     "hirsel.key-identity.definition.v1",
-                    [&encode(&index.definition_path(id))?[..]],
+                    [&encode(&index.definition_path_ref(id))?[..]],
                 ))
             })
             .copied()

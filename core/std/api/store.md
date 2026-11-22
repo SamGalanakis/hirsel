@@ -206,37 +206,53 @@ a closed rotation sender poisons the Db and takes no Cut.
 ## M1 target (not yet built)
 
 Nothing in this section is on main. It is the store's M1 surface, specified in
-STORE-SPEC v2.32 §11 (AP1–AP20, L37–L48), and the M1 implementation slices flip
+STORE-SPEC v2.33 §11 (AP1–AP21, L37–L51), and the M1 implementation slices flip
 it to built. Everything above describes the store as built.
 
-- **Pages.** Every tree becomes a B+ tree of packed pages (`Arc[Page]`, one
-  image per page, 4 KiB target) in place of `std.omap` nodes. The in-memory image
-  has the on-disk PAGE layout, and a cut writes its canonical form (AP2, AP3).
+- **Pages.** Every tree becomes a B+ tree of packed pages (`Arc[Page]`, 4 KiB
+  target) in place of `std.omap` nodes. A cut writes each page in canonical form;
+  a published in-memory image may be unsealed, and readers find entries by slot
+  (AP2, AP3).
 - **Format 3.** A format-2 directory is `Unsupported(format)`, with no migration.
   The new kinds are PAGE, BLOB, FORK and MANIFEST 0x0031. NODE 0x0020 and
-  MANIFEST 0x0030 are retired (AP1).
+  MANIFEST 0x0030 are retired and refused whatever their MUST bit (AP1).
 - **Per-collection roots.** `Roots` is `{collections, streams, catalog}`, where
   `collections` maps a table or index id to a `CollectionRoot` with its root
-  `PagePtr` and its exact row count and logical bytes. `count` over a whole
-  table is O(1) after the lookup, and `drop_table` changes one entry (AP7).
+  `PagePtr`, exact row count and row charge, and the map leaf owns that root
+  page. `count` over a whole table is O(1) after the lookup. `drop_table` removes
+  the table's and its indexes' map entries in one schema commit (AP7).
 - **Keys.** Read sets, `Change`, `Resume`, covers and COMMIT ops carry the
   logical key (`id u32 BE ‖ encoded key`), the bytes this page calls the physical
   data-tree key. Pages store only the suffix past the id and the page prefix
   (AP5).
 - **Values.** A stored value up to 1024 bytes is inline. A longer one is a
-  `BlobRef` to an immutable BLOB in a blob pack. `Limit(Value)` moves to
-  `VALUE_LIMIT` = 16,711,680 bytes (AP4, AP8).
+  `BlobRef` to an immutable BLOB in a blob pack. Writes are limited by
+  `VALUE_LIMIT` = 16,711,680 bytes (`Limit(Value)`); readers check only format
+  3's fixed decode ceiling, so a value stored under a larger limit stays
+  readable (AP4, AP8).
 - **Writes.** A Tx copies a page on its first write to it and edits that private
   copy in place afterwards. A body never edits a page the head shares, so a
-  failed, aborted, stopped or refused body leaves the head untouched (AP9, AP10).
-  `migrate` and index backfill build bottom-up from sorted entries (AP13).
-- **Reads.** `fetch_bytes(tx, t, k)` and `get_bytes(s, t, k)` return
-  `Option[View[Bytes]]` anchored to the Tx or Snapshot, and `scan_bytes` returns a
-  cursor of such views. The owned `fetch` decodes from the view without copying
-  (AP12).
-- **Accounts.** `accounts(db)` returns `{logical, resident}`. Admission uses the
-  logical account, which is the per-entry formula above. The resident account
-  is reported only (AP15).
-- **Fork.** A `fork` from a Snapshot at its branch's head writes one FORK
-  journal frame and makes no cut. Its ticket is a journal mark, and the account
-  is unchanged. A fork from an older Snapshot still makes a cut (AP17–AP19).
+  failed, aborted, stopped or refused body leaves the head untouched. A
+  writer-side apply on a published head makes every fallible step first
+  (AP9, AP10). `migrate` sorts its output, refuses duplicate keys with
+  `Exists`, and builds bottom-up (AP13).
+- **Reads.** `fetch_bytes(tx, t, k)` and `get_bytes(s, t, k)` return the raw
+  stored bytes as `Option[View[Bytes]]` anchored to the Tx or Snapshot. The owned
+  `fetch` and `get` decode from the view, transcoding old-schema rows.
+  `scan_bytes` returns a `ViewRows`, a scoped cursor that is not `send`:
+  `next_view(mut c)` returns the next logical key, and `value_view(c)` the
+  current value as `View[Bytes] in c` (AP12). `ByteRows` is unchanged.
+- **Accounts.** Admission counts each distinct row version (tree, logical key,
+  stored value) once across every branch head, pin and in-flight fork, at
+  `entry(k, v)`, plus 126 bytes per distinct collection. The figure does not
+  depend on page layout or history, and a delete-only commit is never refused.
+  `accounts(db)` returns `{logical, exact, frames, resident}`; resident page
+  memory is reported, not admitted, and can exceed `logical` when roots diverge
+  (AP15).
+- **Fork.** A `fork` from a Snapshot at its live branch head writes one FORK
+  journal frame, waits for its sync, and returns the branch with an already
+  durable journal ticket: no walk, settle or cut, and the account is unchanged.
+  A fork from an older Snapshot still makes a cut. The empty name is allowed.
+  A fork past the id counter is `Limit(Ids)`, and past the 16 MiB branch and
+  pin metadata budget `Limit(Manifest)` (AP4, AP17–AP19).
+- **Errors.** `Limit` gains `Ids` and `Manifest`; every other case is unchanged.

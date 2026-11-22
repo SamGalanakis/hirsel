@@ -1119,7 +1119,14 @@ fn drain_error(mut rows: Rows, mut s: Session, synced: bool) -> Result[bool, Err
     if !synced {
         send(mut s.writer, b"S\x00\x00\x00\x04", s.until)?
     }
-    let _ = receive(mut s, mut rows.row.body, b"Z")?
+    // Sync can report another error before ReadyForQuery. A fatal error
+    // ends the session without ReadyForQuery and takes precedence.
+    while receive(mut s, mut rows.row.body, b"ZE")? == b'E' {
+        let later = diagnostic(rows.row.body)?
+        if is_fatal(later) {
+            return Error(Fatal(take later))
+        }
+    }
     ready(mut s, rows.row.body)?
     rows.phase = Complete
     Error(Sql(take e))

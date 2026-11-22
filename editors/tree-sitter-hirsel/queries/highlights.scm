@@ -50,6 +50,38 @@
 ((identifier) @type.builtin
   (#any-of? @type.builtin "u8" "u16" "u32" "u64" "i8" "i16" "i32" "i64" "f32" "f64" "bool"))
 
+(bounds
+  [
+    "plain"
+    "shareable"
+    "send"
+    "cross"
+    "key"
+    "ordered"
+    "integer"
+    "float"
+    "packed"
+    "streamable"
+    "codec"
+    "inert"
+  ] @type.builtin)
+
+(callable_bounds
+  [
+    "plain"
+    "shareable"
+    "send"
+    "cross"
+    "key"
+    "ordered"
+    "integer"
+    "float"
+    "packed"
+    "streamable"
+    "codec"
+    "inert"
+  ] @type.builtin)
+
 (type_path
   (identifier) @type)
 

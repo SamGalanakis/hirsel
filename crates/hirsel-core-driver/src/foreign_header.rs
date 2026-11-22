@@ -197,18 +197,13 @@ fn definition_path(text: &str) -> Option<&str> {
     .then_some(text)
 }
 
-pub(crate) fn symbol_prefix(
-    resolution: &crate::package_resolve::Resolution,
+pub(crate) fn symbol_prefix<'a>(
+    content: impl Iterator<Item = &'a crate::package_content::Content>,
     module: &DefPath,
 ) -> io::Result<String> {
     let path = &module.0;
     let parts = module_parts(module);
-    resolution
-        .workspace
-        .members
-        .values()
-        .map(|row| &row.content)
-        .chain(resolution.libraries.values().map(|row| &row.content))
+    content
         .filter(|content| content.id.compiler_id() == path.package)
         .find_map(|content| content.foreign.get(&parts))
         .map(|foreign| foreign.symbols.clone())

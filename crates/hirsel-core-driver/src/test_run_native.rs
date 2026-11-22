@@ -1021,6 +1021,19 @@ fn package_known_roots() {
 }
 
 #[test]
+fn inspect_reads_a_package_archive_and_a_named_dependency() {
+    let law = PackageLaw::new();
+    law.library("jx", "json", 1, PACKAGE_X_SOURCE, "");
+    law.fixture("jx", "vendored.hpkg");
+    law.app(".", &format!(
+        "[dependencies]\njson = {{ major = 1, root = \"{PACKAGE_X}\", archive = \"vendored.hpkg\" }}\n"
+    ));
+    let expected = "json@1/json/version\tpub fn version() -> u64\n";
+    assert_eq!(PackageLaw::pass(law.run(&["inspect", "vendored.hpkg", "--interface"])), expected);
+    assert_eq!(PackageLaw::pass(law.run(&["inspect", "json"])), expected);
+}
+
+#[test]
 fn package_member_root_enforces_content_file_limit() {
     use crate::package_content::{Root, Source};
     use crate::package_resolve::Resolution;

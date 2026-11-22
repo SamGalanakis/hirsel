@@ -66,9 +66,11 @@ impl Inspection {
                 _ => unreachable!("only inspect options are extracted"),
             }
         }
-        let [query]: [Query; 1] = queries.try_into().map_err(|_| {
-            "inspect requires exactly one of --interface, --foreign-header, --dependents, --affected-tests or --unused"
-        })?;
+        let query = match queries.len() {
+            0 => Query::Interface,
+            1 => queries.pop().unwrap(),
+            _ => return Err("inspect takes at most one of --interface, --foreign-header, --dependents, --affected-tests or --unused".into()),
+        };
         let json = invocation.options.iter().any(|(id, _)| *id == Json);
         if json && !matches!(query, Query::Interface) {
             return Err("inspect --json requires --interface".into());
@@ -95,7 +97,10 @@ impl Inspection {
             && !matches!(query, Query::ForeignHeader(_))
             && invocation.positional.is_none()
         {
-            return Err("inspect requires a package directory, --core or --std".into());
+            return Err(
+                "inspect requires a package directory, archive, dependency name, --core or --std"
+                    .into(),
+            );
         }
         Ok(Self {
             query,

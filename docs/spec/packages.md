@@ -781,7 +781,11 @@ R built from it, equal those of a build from fresh source.
 | `hirsel lock [DIR]` | resolves the workspace and writes the lock |
 | `hirsel fetch [DIR]` | resolves the workspace and fills the store with every published root of the closure, building nothing |
 | `hirsel pack [DIR] --output FILE` | publishes the member at DIR (section 6) |
+| `hirsel inspect DIR\|ARCHIVE.hpkg\|DEPENDENCY` | prints the selected package's public interface by default |
 | `hirsel new NAME` | writes `NAME/hirsel.toml`, its sources, its tests and its first lock |
+
+Inspect a dependency by its manifest name from the package that declares it.
+An archive supplies its head package and verified dependency closure.
 
 `--locked`, `--frozen` and `--package-store DIR` apply to `check`, `build`, `publish`, `run`,
 `test`, `inspect`, `replay`, `sdk`, `lock`, `fetch` and `pack`, when the command is given a

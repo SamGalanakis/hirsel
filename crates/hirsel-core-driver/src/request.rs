@@ -246,7 +246,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     let inspection = (command == "inspect")
         .then(|| crate::inspect::Inspection::read(&mut invocation))
         .transpose()?;
-    let inspect_library = inspection.as_ref().and_then(|option| option.source_library);
+    let mut inspect_library = inspection.as_ref().and_then(|option| option.source_library);
     let inspect_foreign = inspection
         .as_ref()
         .and_then(crate::inspect::Inspection::foreign_module);
@@ -492,7 +492,25 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     if test_sim && test_replay {
         return Err("choose one of --sim and --replay".into());
     }
-    let app_directory = dir.clone().or_else(|| {
+    let archive = dir.as_deref().filter(|path| {
+        inspection.is_some() && path.extension().is_some_and(|ext| ext == "hpkg") && !path.is_dir()
+    });
+    let dependency = dir
+        .as_deref()
+        .filter(|_| inspection.is_some())
+        .and_then(Path::to_str)
+        .filter(|name| crate::package_dir::package_name(name) && !Path::new(name).exists());
+    let app_directory = if let Some(archive) = archive {
+        archive
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .map(Path::to_owned)
+    } else if dependency.is_some() {
+        Some(PathBuf::from("."))
+    } else {
+        dir.clone()
+    }
+    .or_else(|| {
         (manifest.is_none()
             && recipe_root.is_none()
             && matches!(command, "check" | "build" | "publish" | "run" | "test"))
@@ -506,20 +524,48 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         package_mode.require_workspace("--recipe")?;
     } else if let Some(name) = inspect_library {
         package_mode.require_workspace(if name == "core" { "--core" } else { "--std" })?;
+    } else if let Some(path) = archive {
+        package_mode.require_workspace("an archive path")?;
+        let archive = crate::package_content::PackageArchive::open(path)?;
+        if let Some(module) = inspect_foreign {
+            foreign_symbols = Some(crate::foreign_header::symbol_prefix(
+                archive.entries.values().map(|library| &library.content),
+                module,
+            )?);
+        }
+        workspace_app = Some(crate::package_dir::PackageDir::from_archive(&archive)?);
     } else if matches!(
         command,
         "check" | "build" | "publish" | "run" | "test" | "inspect" | "replay"
     ) {
         if let Some(directory) = &app_directory {
             if let Some(workspace) = crate::package_workspace::Workspace::discover(directory)? {
-                let selected = workspace.selected()?.clone();
+                let member = workspace.selected()?;
+                let selected = if let Some(name) = dependency {
+                    workspace.members[member]
+                        .edges
+                        .keys()
+                        .find(|id| id.name == name)
+                        .ok_or_else(|| format!("{member} has no dependency named {name}"))?
+                } else {
+                    member
+                }
+                .clone();
                 let resolved = crate::package_resolve::Resolution::resolve(
                     workspace,
                     package_store,
                     package_mode == crate::package_lock::Mode::Frozen,
                 )?;
                 if let Some(path) = inspect_foreign {
-                    foreign_symbols = Some(crate::foreign_header::symbol_prefix(&resolved, path)?);
+                    foreign_symbols = Some(crate::foreign_header::symbol_prefix(
+                        resolved
+                            .workspace
+                            .members
+                            .values()
+                            .map(|member| &member.content)
+                            .chain(resolved.libraries.values().map(|library| &library.content)),
+                        path,
+                    )?);
                 }
                 crate::package_lock::Lock::compare(&resolved, package_mode)?
                     .commit(&resolved.workspace)?;
@@ -527,12 +573,20 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                     || inspection
                         .as_ref()
                         .is_some_and(|option| option.includes_tests());
-                workspace_app = Some(crate::package_dir::PackageDir::from_resolution(
-                    &resolved,
-                    &selected,
-                    include_tests,
-                )?);
+                if dependency == Some("std") {
+                    inspect_library = Some("std");
+                    source_core = true;
+                } else {
+                    workspace_app = Some(crate::package_dir::PackageDir::from_resolution(
+                        &resolved,
+                        &selected,
+                        include_tests,
+                    )?);
+                }
             } else {
+                if let Some(name) = dependency {
+                    return Err(format!("cannot resolve dependency {name} without a package manifest in the current directory").into());
+                }
                 package_mode.require_workspace("the directory convention")?;
             }
         } else {

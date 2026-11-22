@@ -3,6 +3,7 @@
 //! configuration. A directory without a manifest is the directory
 //! convention: package `app`, one module per file, `main` in `main`.
 use crate::NativeOptions;
+use crate::package_content::{Content, Id, PackageArchive, Root, Source};
 use hirsel_core_ids::DefPath;
 use hirsel_core_net::{EnvPatterns, GrantRule, NetGrant, RULE_SYNTAX, SecretGrant};
 use hirsel_core_resolve::{ModuleSource, PackageManifest};
@@ -315,117 +316,183 @@ impl PackageDir {
 
     pub(crate) fn from_resolution(
         resolution: &crate::package_resolve::Resolution,
-        selected: &crate::package_content::Id,
+        selected: &Id,
         include_tests: bool,
     ) -> io::Result<Self> {
-        use hirsel_core_resolve::{CapturedSource, PackageNamespace};
+        use crate::package_workspace::Edge;
         use std::collections::BTreeSet;
 
-        let make_sources =
-            |name: &crate::package_content::Id,
-             sources: &BTreeMap<String, crate::package_content::Source>,
-             foreign: &BTreeMap<Vec<String>, crate::package_content::ForeignModule>,
-             test: bool| {
-                sources
-                    .iter()
-                    .map(|(file, source)| {
-                        let logical = if name == selected {
-                            file.clone()
-                        } else {
-                            format!("{name}/{file}")
-                        };
-                        ModuleSource {
-                            foreign: foreign.contains_key(&source.module),
-                            file: PathBuf::from(&logical),
-                            modules: source.module.clone(),
-                            signatures: false,
-                            captured: Some(CapturedSource {
-                                bytes: source.bytes.clone(),
-                                name: Some(logical),
-                                test,
-                            }),
-                        }
-                    })
-                    .collect::<Vec<_>>()
-            };
-        let this = &resolution.workspace.members[selected];
+        let selected_member = resolution.workspace.members.get(selected);
         let mut seen = BTreeSet::new();
-        let mut pending = vec![selected.clone()];
+        let mut pending = vec![selected];
         let mut dependencies = Vec::new();
         let mut main = None;
         while let Some(id) = pending.pop() {
-            if id.name == "std" || !seen.insert(id.clone()) {
+            if id.name == "std" || !seen.insert(id) {
                 continue;
             }
-            let (content, edges) = if let Some(member) = resolution.workspace.members.get(&id) {
-                (&member.content, member.edges.keys().collect::<Vec<_>>())
-            } else {
-                let content = &resolution.libraries[&resolution.published[&id]].content;
-                (content, content.bindings.keys().collect())
-            };
-            pending.extend(edges.iter().copied().cloned());
-            let mut sources = make_sources(&id, &content.files, &content.foreign, false);
-            if include_tests && &id == selected {
-                sources.extend(make_sources(&id, &this.tests, &content.foreign, true));
-            }
-            let published_bindings = if let Some(member) = resolution.workspace.members.get(&id) {
-                member
+            let root = resolution.published.get(id).copied();
+            let (content, bindings) = if let Some(member) = resolution.workspace.members.get(id) {
+                let bindings = member
                     .edges
                     .iter()
-                    .filter_map(|(id, edge)| match edge {
-                        crate::package_workspace::Edge::Published(root, _) => {
-                            Some((id.compiler_id(), hirsel_core_ids::ContentHash(root.0)))
-                        }
-                        _ => None,
+                    .map(|(id, edge)| {
+                        let pin = match edge {
+                            Edge::Published(root, _) => Some(*root),
+                            _ => None,
+                        };
+                        (id, pin)
                     })
-                    .collect()
+                    .collect::<Vec<_>>();
+                (&member.content, bindings)
             } else {
-                content
-                    .bindings
-                    .iter()
-                    .filter_map(|(id, root)| {
-                        root.map(|root| (id.compiler_id(), hirsel_core_ids::ContentHash(root.0)))
-                    })
-                    .collect()
+                let content = &resolution.libraries[&root.unwrap()].content;
+                (
+                    content,
+                    content
+                        .bindings
+                        .iter()
+                        .map(|(id, pin)| (id, *pin))
+                        .collect(),
+                )
             };
-            let namespace = PackageNamespace {
-                root: resolution
-                    .published
-                    .get(&id)
-                    .map(|root| hirsel_core_ids::ContentHash(root.0)),
-                foreign: content.foreign_stamp(),
-                foreign_inputs: content.foreign.clone(),
-                published_bindings,
-            };
-            let manifest = PackageManifest {
-                namespace: Some(namespace),
-                package: id.compiler_id(),
-                dependencies: std::iter::once(crate::package("core"))
-                    .chain(edges.into_iter().map(|id| id.compiler_id()))
-                    .collect(),
-                sources,
-            };
-            if &id == selected {
-                main = Some(manifest);
+            pending.extend(bindings.iter().map(|(id, _)| *id));
+            let tests = if include_tests && id == selected {
+                selected_member.map(|member| &member.tests)
             } else {
-                dependencies.push(manifest);
+                None
+            };
+            let package = Self::manifest_from_content(content, selected, root, bindings, tests);
+            if id == selected {
+                main = Some(package);
+            } else {
+                dependencies.push(package);
+            }
+        }
+        let tests = if include_tests {
+            selected_member
+                .and_then(|member| {
+                    member
+                        .package
+                        .tests
+                        .as_ref()
+                        .map(|tests| tests.runs(&member.manifest_path))
+                })
+                .transpose()?
+        } else {
+            None
+        };
+        Ok(Self {
+            package: main.expect("the selection is a non-toolchain package"),
+            dependencies,
+            entry: selected_member.map_or_else(
+                || Self::archive_entry(selected),
+                |member| member.package.entry.clone(),
+            ),
+            manifest: Some(selected_member.map_or_else(
+                || resolution.workspace.directory.clone(),
+                |member| member.manifest_path.parent().unwrap().to_owned(),
+            )),
+            tests,
+        })
+    }
+
+    fn archive_entry(id: &Id) -> DefPath {
+        DefPath::from_full(&format!("{id}/main/main")).expect("a validated package identity")
+    }
+
+    pub(crate) fn from_archive(archive: &PackageArchive) -> io::Result<Self> {
+        let head = &archive.entries[&archive.head].content;
+        let manifest = |content: &Content, root| {
+            Self::manifest_from_content(
+                content,
+                &head.id,
+                Some(root),
+                content.bindings.iter().map(|(id, pin)| (id, *pin)),
+                None,
+            )
+        };
+        let mut roots = BTreeMap::new();
+        let mut dependencies = Vec::new();
+        for (root, library) in &archive.entries {
+            let content = &library.content;
+            if let Some(previous) = roots.insert(&content.id, root) {
+                return Err(io::Error::other(format!(
+                    "{} is bound to both {previous} and {root}",
+                    content.id
+                )));
+            }
+            if *root != archive.head {
+                dependencies.push(manifest(content, *root));
             }
         }
         Ok(Self {
-            package: main.unwrap(),
+            package: manifest(head, archive.head),
             dependencies,
-            entry: this.package.entry.clone(),
-            manifest: Some(this.manifest_path.parent().unwrap().to_owned()),
-            tests: if include_tests {
-                this.package
-                    .tests
-                    .as_ref()
-                    .map(|tests| tests.runs(&this.manifest_path))
-                    .transpose()?
-            } else {
-                None
-            },
+            entry: Self::archive_entry(&head.id),
+            manifest: None,
+            tests: None,
         })
+    }
+
+    fn manifest_from_content<'a>(
+        content: &Content,
+        selected: &Id,
+        root: Option<Root>,
+        bindings: impl IntoIterator<Item = (&'a Id, Option<Root>)>,
+        tests: Option<&BTreeMap<String, Source>>,
+    ) -> PackageManifest {
+        use hirsel_core_ids::ContentHash;
+        use hirsel_core_resolve::{CapturedSource, PackageNamespace};
+
+        let sources = content
+            .files
+            .iter()
+            .map(|row| (row, false))
+            .chain(
+                tests
+                    .into_iter()
+                    .flat_map(|tests| tests.iter().map(|row| (row, true))),
+            )
+            .map(|((file, source), test)| {
+                let logical = if content.id == *selected {
+                    file.clone()
+                } else {
+                    format!("{}/{file}", content.id)
+                };
+                ModuleSource {
+                    foreign: content.foreign.contains_key(&source.module),
+                    file: PathBuf::from(&logical),
+                    modules: source.module.clone(),
+                    signatures: false,
+                    captured: Some(CapturedSource {
+                        bytes: source.bytes.clone(),
+                        name: Some(logical),
+                        test,
+                    }),
+                }
+            })
+            .collect();
+        let mut dependencies = vec![crate::package("core")];
+        let mut published_bindings = BTreeMap::new();
+        for (id, pin) in bindings {
+            let id = id.compiler_id();
+            if let Some(pin) = pin {
+                published_bindings.insert(id.clone(), ContentHash(pin.0));
+            }
+            dependencies.push(id);
+        }
+        PackageManifest {
+            namespace: Some(PackageNamespace {
+                root: root.map(|root| ContentHash(root.0)),
+                foreign: content.foreign_stamp(),
+                foreign_inputs: content.foreign.clone(),
+                published_bindings,
+            }),
+            package: content.id.compiler_id(),
+            dependencies,
+            sources,
+        }
     }
 
     pub(crate) fn needs_std(&self) -> bool {

@@ -1,0 +1,573 @@
+/// Limits and propagation time for the simulated link.
+pub type Config {
+    queue_bytes: u64,
+    fragment_bytes: u64,
+    latency_ns: u64
+}
+
+pub fn defaults() -> Config {
+    Config(queue_bytes: 8, fragment_bytes: 8, latency_ns: 0)
+}
+
+/// A link that silently stalls or reports a reset.
+pub type Partition = Stall | Break
+
+pub opaque type Network: send {
+    config: Config,
+    partitions: List[Link],
+    source_ip: Option[Ip],
+    dns: Map[String, List[Ip]],
+    tls_outcomes: Map[String, Result[Handshake, TlsFailure]]
+}
+
+type Link {
+    a: Ip,
+    b: Ip,
+    starts: u64,
+    action: Partition
+}
+
+type Listening {
+    addr: Addr,
+    backlog: u64,
+    queued: List[u64]
+}
+
+type Endpoint {
+    peer: u64,
+    addr: Addr,
+    read_closed: bool,
+    write_closed: bool,
+    reset: bool
+}
+
+type Pipe {
+    info: Endpoint,
+    outgoing: Bytes
+}
+
+type State {
+    next_id: u64,
+    ephemeral: u64,
+    secret_sends: u64,
+    listeners: Map[u64, Listening],
+    pipes: Map[u64, Pipe]
+}
+
+pub fn new(config: Config) -> Network {
+    if config.queue_bytes == 0 || config.fragment_bytes == 0 {
+        fail("sim.net needs positive pipe and fragment sizes")
+    }
+    Network(config: config, partitions: list.new(), source_ip: None, dns: map.new(), tls_outcomes: map.new())
+}
+
+/// Stalls both directions between these addresses.
+pub fn partition(mut n: Network, a: Ip, b: Ip) {
+    interrupt_at(mut n, a, b, 0, Stall)
+}
+
+/// Resets connections between these addresses.
+pub fn reset(mut n: Network, a: Ip, b: Ip) {
+    interrupt_at(mut n, a, b, 0, Break)
+}
+
+/// Interrupts traffic between these peers starting at a virtual instant.
+pub fn interrupt_at(mut n: Network, a: Ip, b: Ip, starts: u64, action: Partition) {
+    list.push(mut n.partitions, Link(a: a, b: b, starts: starts, action: action))
+}
+
+pub fn set_source(mut n: Network, address: Ip) {
+    n.source_ip = Some(address)
+}
+
+pub fn heal(mut n: Network) {
+    list.clear(mut n.partitions)
+}
+
+/// Scripts a DNS answer. The caller's spare space limits how many addresses it gets.
+pub fn resolve_as(mut n: Network, take hostname: String, take addrs: List[Ip]) {
+    let mut key = take hostname
+    string.make_ascii_lower(mut key)
+    map.insert(mut n.dns, take key, take addrs)
+}
+
+/// Scripts the result of handshakes for one canonical verification name.
+pub fn handshake_as(mut n: Network, take hostname: String, outcome: Result[Handshake, TlsFailure]) {
+    let mut key = take hostname
+    string.make_ascii_lower(mut key)
+    map.insert(mut n.tls_outcomes, take key, outcome)
+}
+
+fn same(a: Ip, b: Ip) -> bool {
+    match (a, b) {
+        (V4(x), V4(y)) => x == y,
+        (V6(x, y), V6(z, w)) => x == z && y == w,
+        _ => false
+    }
+}
+
+fn family(a: Ip) -> u64 {
+    match a {
+        V4(_) => 4,
+        V6(_, _) => 6
+    }
+}
+
+fn unspecified(a: Ip) -> bool {
+    match a {
+        V4(x) => x == 0,
+        V6(x, y) => x == 0 && y == 0
+    }
+}
+
+fn covers(a: Ip, b: Ip) -> bool {
+    same(a, b) || (family(a) == family(b) && unspecified(a))
+}
+
+fn disrupted(n: Network, a: Ip, b: Ip, now: u64) -> Option[Partition] {
+    for link in n.partitions {
+        if now >= link.starts && ((same(link.a, a) && same(link.b, b)) || (same(link.b, a) && same(link.a, b))) {
+            return Some(link.action)
+        }
+    }
+    None
+}
+
+fn listener(state: State, addr: Addr) -> Option[u64] {
+    for (id, l) in state.listeners {
+        if l.addr.port == addr.port && (covers(l.addr.ip, addr.ip) || covers(addr.ip, l.addr.ip)) {
+            return Some(id)
+        }
+    }
+    None
+}
+
+fn answer(mut s: Served[NetOp], take c: Call[NetOp], r: NetReply) -> bool {
+    match provide.reply(mut s, take c, provide.net_reply(r)) {
+        Ok(()) => true,
+        Error(_) => false
+    }
+}
+
+fn reject(mut s: Served[NetOp], take c: Call[NetOp], error: NetError) -> Option[Call[NetOp]] {
+    let _ = answer(mut s, take c, Failed(error))
+    None
+}
+
+fn listen(mut state: State, wanted: Addr, backlog: u16, mut s: Served[NetOp], take c: Call[NetOp]) {
+    let (addr, ephemeral) = if wanted.port == 0 {
+        let mut cursor = state.ephemeral
+        loop {
+            let at = Addr(ip: wanted.ip, port: int.truncate(1024 + cursor))
+            cursor = (cursor + 1) % 64512
+            if listener(state, at) == None {
+                break (at, cursor)
+            }
+            if cursor == state.ephemeral {
+                let _ = reject(mut s, take c, InUse)
+                return
+            }
+        }
+    } else {
+        if listener(state, wanted) != None {
+            let _ = reject(mut s, take c, InUse)
+            return
+        }
+        (wanted, state.ephemeral)
+    }
+    let id = state.next_id
+    let limit: u64 = order.max(1, int.widen(backlog))
+    let queue: List[u64] = list.with_capacity(limit)
+    map.reserve(mut state.listeners, 1)
+    if answer(mut s, take c, Listener(id, addr)) {
+        state.next_id += 1
+        state.ephemeral = ephemeral
+        map.insert(mut state.listeners, id, Listening(addr: addr, backlog: limit, queued: take queue))
+    }
+}
+
+fn pipe(peer: u64, addr: Addr, room: u64) -> Pipe {
+    Pipe(info: Endpoint(peer: peer, addr: addr, read_closed: false, write_closed: false, reset: false), outgoing: list.with_capacity(room))
+}
+
+fn connect(n: Network, mut state: State, addr: Addr, now: u64, mut s: Served[NetOp], take c: Call[NetOp]) -> Option[Call[NetOp]] {
+    let ip = match n.source_ip {
+        Some(ip) => ip,
+        None => addr.ip
+    }
+    if let Some(_) = disrupted(n, ip, addr.ip, now) {
+        return reject(mut s, take c, Reset)
+    }
+    let id = match listener(state, addr) {
+        Some(id) => id,
+        None => return reject(mut s, take c, Refused)
+    }
+    let available = match map.get(state.listeners, id) {
+        Some(l) => list.len(l.queued) < l.backlog,
+        None => false
+    }
+    if !available {
+        return reject(mut s, take c, Refused)
+    }
+    let client = state.next_id
+    let peer = client + 1
+    let local = Addr(ip: ip, port: int.truncate(1024 + (state.ephemeral % 64512)))
+    let first = pipe(peer, local, n.config.queue_bytes)
+    let second = pipe(client, addr, n.config.queue_bytes)
+    map.reserve(mut state.pipes, 2)
+    if answer(mut s, take c, Socket(client, addr)) {
+        state.next_id += 2
+        state.ephemeral = (state.ephemeral + 1) % 64512
+        map.insert(mut state.pipes, client, take first)
+        map.insert(mut state.pipes, peer, take second)
+        let _ = map.update(mut state.listeners, id, scoped fn(mut l: Listening) {
+            list.push(mut l.queued, peer)
+        })
+    }
+    None
+}
+
+fn endpoint(state: State, id: u64) -> Option[Endpoint] {
+    match map.get(state.pipes, id) {
+        Some(p) => Some(p.info),
+        None => None
+    }
+}
+
+fn accept(mut state: State, id: u64, mut s: Served[NetOp], take c: Call[NetOp]) -> Option[Call[NetOp]] {
+    let head: Option[u64] = match map.get(state.listeners, id) {
+        Some(l) => match list.get(l.queued, 0) {
+            Some(peer) => Some(peer),
+            None => None
+        },
+        None => return reject(mut s, take c, Reset)
+    }
+    let Some(peer) = head else {
+        return Some(take c)
+    }
+    let info = option.unwrap(endpoint(state, peer))
+    let remote = option.unwrap(endpoint(state, info.peer))
+    if answer(mut s, take c, Socket(peer, remote.addr)) {
+        let _ = map.update(mut state.listeners, id, scoped fn(mut l: Listening) {
+            list.drop_prefix(mut l.queued, 1)
+        })
+    }
+    None
+}
+
+fn release(mut state: State, id: u64, part: Part) {
+    if let Some(take l) = map.remove(mut state.listeners, id) {
+        for queued in l.queued {
+            let mut mate = map.remove(mut state.pipes, queued)
+            if let Some(take p) = take mate {
+                let _ = map.update(mut state.pipes, p.info.peer, scoped fn(mut other: Pipe) {
+                    other.info.reset = true
+                })
+            }
+        }
+        return
+    }
+    let Some(info) = endpoint(state, id) else {
+        return
+    }
+    let (read_closed, write_closed) = match part {
+        Whole => (true, true),
+        Read => (true, info.write_closed),
+        Write => (info.read_closed, true)
+    }
+    let _ = map.update(mut state.pipes, id, scoped fn(mut local: Pipe) {
+        local.info.read_closed = read_closed
+        local.info.write_closed = write_closed
+    })
+    let other = endpoint(state, info.peer)
+    if read_closed && write_closed {
+        match other {
+            None => {
+                let _ = map.remove(mut state.pipes, id)
+            },
+            Some(remote) if remote.read_closed && remote.write_closed => {
+                let _ = map.remove(mut state.pipes, id)
+                let _ = map.remove(mut state.pipes, info.peer)
+            },
+            _ => ()
+        }
+    }
+}
+
+fn receive(n: Network, mut state: State, mut plan: sim.world.Plan, id: u64, room: u64, now: u64, mut s: Served[NetOp], take call: Call[NetOp]) -> Option[Call[NetOp]] {
+    let mut c = take call
+    let Some(local) = endpoint(state, id) else {
+        return reject(mut s, take c, Reset)
+    }
+    let limit: u64 = match map.get(state.pipes, local.peer) {
+        Some(source) => order.min(n.config.fragment_bytes, order.min(room, list.len(source.outgoing))),
+        None => return reject(mut s, take c, Reset)
+    }
+    let remote = option.unwrap(endpoint(state, local.peer))
+    if local.reset || remote.reset {
+        return reject(mut s, take c, Reset)
+    }
+    match disrupted(n, local.addr.ip, remote.addr.ip, now) {
+        Some(Stall) => return Some(take c),
+        Some(Break) => return reject(mut s, take c, Reset),
+        None => ()
+    }
+    if limit == 0 && room != 0 && !remote.write_closed {
+        return Some(take c)
+    }
+    let count = if limit == 0 {
+        0u64
+    } else {
+        let prefix_count = 1 + sim.world.pick(mut plan, limit)
+        let Some(source) = map.get(state.pipes, local.peer) else {
+            fail("sim.net lost its peer")
+        }
+        provide.fill(mut s, mut c, list.slice(source.outgoing, 0, prefix_count))
+    }
+    if answer(mut s, take c, Count(count)) && count != 0 {
+        let _ = map.update(mut state.pipes, local.peer, scoped fn(mut source: Pipe) {
+            list.drop_prefix(mut source.outgoing, count)
+        })
+    }
+    None
+}
+
+fn transmit(n: Network, mut state: State, mut plan: sim.world.Plan, clock: Clock, id: u64, prefix: u64, tail: u64, mut s: Served[NetOp], take c: Call[NetOp]) -> Option[Call[NetOp]] waits {
+    let (local, queued): (Endpoint, u64) = match map.get(state.pipes, id) {
+        Some(p) => (p.info, list.len(p.outgoing)),
+        None => return reject(mut s, take c, Reset)
+    }
+    let Some(remote) = endpoint(state, local.peer) else {
+        return reject(mut s, take c, Reset)
+    }
+    if remote.read_closed || remote.reset || local.reset {
+        return reject(mut s, take c, Reset)
+    }
+    match disrupted(n, local.addr.ip, remote.addr.ip, host.mono_ns(clock)) {
+        Some(Stall) => return Some(take c),
+        Some(Break) => return reject(mut s, take c, Reset),
+        None => ()
+    }
+    let offered = prefix + tail
+    let space = n.config.queue_bytes - queued
+    let limit = order.min(n.config.fragment_bytes, order.min(space, offered))
+    if offered == 0 {
+        let _ = answer(mut s, take c, Count(0))
+        return None
+    }
+    if limit == 0 {
+        return Some(take c)
+    }
+    let mut data: Bytes = list.with_capacity(offered)
+    provide.payload(c, 1, mut data)
+    provide.payload(c, 2, mut data)
+    if list.len(data) != offered {
+        return reject(mut s, take c, Aborted)
+    }
+    let sent = 1 + sim.world.pick(mut plan, limit)
+    if n.config.latency_ns != 0 {
+        host.sleep_until(clock, int.saturating_add(host.mono_ns(clock), n.config.latency_ns))
+        match disrupted(n, local.addr.ip, remote.addr.ip, host.mono_ns(clock)) {
+            Some(Stall) => return Some(take c),
+            Some(Break) => return reject(mut s, take c, Reset),
+            None => ()
+        }
+    }
+    if answer(mut s, take c, Count(sent)) {
+        let _ = map.update(mut state.pipes, id, scoped fn(mut dest: Pipe) {
+            list.append(mut dest.outgoing, list.slice(data, 0, sent))
+        })
+    }
+    None
+}
+
+fn payload_name(c: Call[NetOp], field: u64, len: u64) -> Option[String] {
+    let mut raw: Bytes = list.with_capacity(len)
+    provide.payload(c, field, mut raw)
+    if list.len(raw) != len {
+        return None
+    }
+    match string.from_utf8(take raw) {
+        Ok(take hostname) => {
+            let mut key = take hostname
+            string.make_ascii_lower(mut key)
+            Some(take key)
+        },
+        Error(_) => None
+    }
+}
+
+fn record_ip(mut out: Bytes, a: Ip) {
+    match a {
+        V4(addr) => {
+            list.fill(mut out, 13, 0u8)
+            list.put_word_be(mut out, addr)
+        },
+        V6(hi, lo) => {
+            list.push(mut out, 1u8)
+            list.put_word_be(mut out, hi)
+            list.put_word_be(mut out, lo)
+        }
+    }
+}
+
+fn resolve(n: Network, len: u64, room: u64, mut s: Served[NetOp], take call: Call[NetOp]) {
+    let mut c = take call
+    let Some(take name) = payload_name(c, 0, len) else {
+        let _ = reject(mut s, take c, Denied)
+        return
+    }
+    let mut selected: List[Ip] = list.new()
+    if let Some(addresses) = map.get(n.dns, name) {
+        for addr in addresses {
+            if list.len(selected) == room / 17 {
+                break
+            }
+            let mut duplicate = false
+            for previous in selected {
+                if same(previous, addr) {
+                    duplicate = true;
+                    break
+                }
+            }
+            if !duplicate {
+                list.push(mut selected, addr)
+            }
+        }
+    } else if room >= 17 {
+        if let Ok(addr) = net.parse_ip(string.as_bytes(name)) {
+            list.push(mut selected, addr)
+        }
+    }
+    let mut data: Bytes = list.with_capacity(17 * list.len(selected))
+    for addr in selected {
+        record_ip(mut data, addr)
+    }
+    let count = provide.fill(mut s, mut c, data) / 17
+    let _ = answer(mut s, take c, Count(count))
+}
+
+fn handshake(n: Network, namelen: u64, mut s: Served[NetOp], take c: Call[NetOp]) {
+    let Some(take hostname) = payload_name(c, 1, namelen) else {
+        let _ = reject(mut s, take c, Denied)
+        return
+    }
+    let r: NetReply = match map.get(n.tls_outcomes, hostname) {
+        Some(Ok(h)) => Secured(h),
+        Some(Error(err)) => Failed(Tls(err)),
+        None => Failed(Tls(Certificate(UnknownIssuer)))
+    }
+    let _ = answer(mut s, take c, r)
+}
+
+fn send_secret(n: Network, mut state: State, id: u64, now: u64, mut s: Served[NetOp], take c: Call[NetOp]) -> Option[Call[NetOp]] {
+    let Some(local) = endpoint(state, id) else {
+        return reject(mut s, take c, Reset)
+    }
+    let Some(remote) = endpoint(state, local.peer) else {
+        return reject(mut s, take c, Reset)
+    }
+    if local.reset || remote.reset || remote.read_closed {
+        return reject(mut s, take c, Reset)
+    }
+    match disrupted(n, local.addr.ip, remote.addr.ip, now) {
+        Some(Stall) => return Some(take c),
+        Some(Break) => return reject(mut s, take c, Reset),
+        None => ()
+    }
+    if answer(mut s, take c, Done) {
+        state.secret_sends += 1
+    }
+    None
+}
+
+fn attempt(n: Network, mut state: State, mut plan: sim.world.Plan, clock: Clock, mut port: Served[NetOp], take c: Call[NetOp]) -> Option[Call[NetOp]] waits {
+    match provide.net_op(c) {
+        Connect(addr: addr) => connect(n, mut state, addr, host.mono_ns(clock), mut port, take c),
+        Listen(addr: addr, backlog: backlog) => {
+            listen(mut state, addr, backlog, mut port, take c)
+            None
+        },
+        Accept(listener: id) => accept(mut state, id, mut port, take c),
+        Recv(socket: id, room: room, ..) => receive(n, mut state, mut plan, id, room, host.mono_ns(clock), mut port, take c),
+        Send(socket: id, prefix: prefix, tail: tail) => transmit(n, mut state, mut plan, clock, id, prefix, tail, mut port, take c),
+        Resolve(name: len, room: room) => {
+            resolve(n, len, room, mut port, take c);
+            None
+        },
+        Handshake(name: len, ..) => {
+            handshake(n, len, mut port, take c);
+            None
+        },
+        SendSecret(socket: id, ..) => send_secret(n, mut state, id, host.mono_ns(clock), mut port, take c),
+        Released(id: id, part: part) => {
+            release(mut state, id, part);
+            None
+        }
+    }
+}
+
+fn waiter(op: NetOp) -> Option[(u64, u64)] {
+    match op {
+        Recv(socket: id, ..) => Some((id, 0)),
+        Send(socket: id, ..) => Some((id, 1)),
+        SendSecret(socket: id, ..) => Some((id, 1)),
+        Accept(listener: id) => Some((id, 2)),
+        _ => None
+    }
+}
+
+// A linear half or listener cannot issue another operation of the same
+// kind until the former caller has already withdrawn.
+fn same_waiter(old: NetOp, incoming: NetOp) -> bool {
+    let slot = waiter(old)
+    if slot == None {
+        return false
+    }
+    match incoming {
+        Released(id: id, part: part) => {
+            let (key, kind) = option.unwrap(slot)
+            key == id && match part {
+                Whole => true,
+                Read => kind == 0,
+                Write => kind == 1
+            }
+        },
+        _ => slot == waiter(incoming)
+    }
+}
+
+/// Serves a port until the run reaches quiescence with no pending timers.
+/// A clock driver must run alongside the link when latency is positive.
+pub fn serve(n: Network, mut plan: sim.world.Plan, clock: Clock, take served: Served[NetOp]) -> u64 waits {
+    let mut port = take served
+    let ephemeral = sim.world.pick(mut plan, 64512)
+    let mut state = State(next_id: 1, ephemeral: ephemeral, secret_sends: 0, listeners: map.new(), pipes: map.new())
+    let mut pending: Deque[Call[NetOp]] = deque.new()
+    while let Some(take incoming) = provide.next(mut port) {
+        let op = provide.net_op(incoming)
+        for _ in 0u64 .. deque.len(pending) {
+            let c = option.unwrap(deque.pop_front(mut pending))
+            if !same_waiter(provide.net_op(c), op) {
+                deque.push_back(mut pending, take c)
+            }
+        }
+        deque.push_back(mut pending, take incoming)
+        loop {
+            let mut progressed = false
+            for _ in 0u64 .. deque.len(pending) {
+                let c = option.unwrap(deque.pop_front(mut pending))
+                match attempt(n, mut state, mut plan, clock, mut port, take c) {
+                    Some(take waiting) => deque.push_back(mut pending, take waiting),
+                    None => {
+                        progressed = true
+                    }
+                }
+            }
+            if !progressed || deque.len(pending) == 0 {
+                break
+            }
+        }
+    }
+    state.secret_sends
+}

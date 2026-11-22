@@ -253,6 +253,8 @@ def host_parameter(case):
         return 'native_tasks:Tasks,native_granted:Secret', ''
     if '(dir, tasks)' in case.call:  # A host Dir as the oracle beside served ports.
         return 'native_dir:Dir,native_tasks:Tasks', ''
+    if '(clock, tasks)' in case.call:
+        return 'native_clock:Clock,native_tasks:Tasks', ''
     for argument, kind in [('dir', 'Dir'), ('out', 'Stdout'), ('err', 'Stderr'), ('clock', 'Clock'), ('tasks', 'Tasks'), ('env', 'Env')]:
         if '(' + argument + ')' in case.call:
             name = 'native_' + argument
@@ -400,6 +402,7 @@ def wrapper(case, port=None):
     # The adapter lives in the original module, so private helpers remain private.
     call = case.call.replace('(dir)', '(native_dir)').replace('(out)', '(native_out)').replace('(err)', '(native_err)').replace('(clock)', '(native_clock)').replace('(tasks)', '(native_tasks)')
     call = call.replace('(dir, tasks)', '(native_dir,native_tasks)').replace('(network)', '(native_net,native_clock,native_tasks)').replace('(env)', '(native_env)')
+    call = call.replace('(clock, tasks)', '(native_clock,native_tasks)')
     call = call.replace('(granted, tasks)', '(native_granted,native_tasks)')
     parameters, _ = host_parameter(case)
     effect = ' waits' if case.waits else ''
@@ -759,9 +762,9 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                     command.extend(['--grant', 'Stdout'])
                 if '(err)' in case.call:
                     command.extend(['--grant', 'Stderr'])
-                if '(clock)' in case.call:
+                if '(clock)' in case.call or '(clock, tasks)' in case.call:
                     command.extend(['--grant', 'Clock'])
-                if '(tasks)' in case.call or '(dir, tasks)' in case.call:
+                if any(args in case.call for args in ('(tasks)', '(dir, tasks)', '(clock, tasks)')):
                     command.extend(['--grant', 'Tasks'])
                 if '(granted, tasks)' in case.call:
                     command.extend(['--grant', 'Tasks', '--grant', 'Secret:native_granted=env:HIRSEL_GRANTED_SECRET to alpha.test'])

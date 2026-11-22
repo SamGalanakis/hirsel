@@ -22,6 +22,7 @@ fn unknown() -> u64 { missing() }                       // refused: LANG-7, miss
 | `option`, `result` | [option](../../core/core/option.hirsel), [result](../../core/core/result.hirsel) | FAIL-2 |
 | `int`, `float`, `char` | [int](../../core/core/int.hirsel), [float](../../core/core/float.hirsel), [char](../../core/core/char.hirsel) | SEM-1 to SEM-3 |
 | `simd` | [simd](../../core/core/simd.hirsel) | SEM-11 |
+| `order` | [order](../../core/core/order.hirsel) | SEM-7 |
 | `check` | [check](../../core/core/check.hirsel) | SEM-8, SEM-11, MEM-30 |
 | `sha1` | [sha1](../../core/core/sha1.hirsel) | SEM-8, MEM-30 |
 | `sha256` | [sha256](../../core/core/sha256.hirsel) | SEM-8, MEM-30 |
@@ -340,6 +341,13 @@ operations it names; nothing else about them may be inferred from an implementat
   the same and returns a refusal as `Error(c)`. A `Map` is cleaned entry by entry in insertion order, each key
   before its value, and `for take (k, v) in m` consumes one entry by entry
   ([SEM-6](semantics.md#sem-6-iteration)).
+- **Order.** `order.compare(a, b)` returns the `Order` that `<` decides for every
+  `ordered` type: `Less` when `a < b`, `Greater` when `b < a`, and `Equal` otherwise. It
+  orders the two values once, leaving at the first component that differs, so a `String`,
+  `Text` or `List[u8]` is read over its common prefix once. It fails in no case, admits
+  nothing and takes one step whatever the values, as each core call does
+  ([MEM-30](budgets.md#mem-30-step-bounds)). `std.order` extends this module with `min`, `max`
+  and the `Order` combinators.
 - **Integers.** The `integer` and `float` bounds ([OWN-4](ownership.md#own-4-bounds)) say
   which numeric types a core parameter ranges over. `int.widen` is accepted only where
   every `T` fits in `U`, and `int.truncate` only where `U` is no wider than `T`

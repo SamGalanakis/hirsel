@@ -243,14 +243,7 @@ fn lookup[K: ordered + shareable + send, V: shareable + send](n: Arc[Node[K, V]]
 }
 
 fn key_order[K: ordered + shareable + send, V: shareable + send](ks: List[Arc[Entry[K, V]]], i: u64, k: K) -> Order {
-    let a: View[K] = view ks[i].key
-    if a < k {
-        Less
-    } else if k < a {
-        Greater
-    } else {
-        Equal
-    }
+    order.compare(ks[i].key, k)
 }
 
 fn lower[K: ordered + shareable + send, V: shareable + send](ks: List[Arc[Entry[K, V]]], k: K) -> u64 {

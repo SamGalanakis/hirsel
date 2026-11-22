@@ -1,0 +1,5 @@
+// Module `order` (SEM-7): the three-way order of `<`; std.order extends it.
+/// Three-way order, the order of `<`: Less when a < b, Greater when b < a, else Equal,
+/// from one ordering of a and b. Cost: O(1) for scalars; one pass over the common prefix
+/// for sequences. Ex: `list.sort(mut ids, fn(a: u64, b: u64) -> Order { order.compare(a, b) })`
+pub fn compare[T: ordered](a: T, b: T) -> Order

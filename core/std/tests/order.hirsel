@@ -62,3 +62,66 @@ fn reverse_cases() -> u64 {
 fn then_cases() -> u64 {
     rank(order.then(Less, Less)) * 100000000 + rank(order.then(Less, Equal)) * 10000000 + rank(order.then(Less, Greater)) * 1000000 + rank(order.then(Equal, Less)) * 100000 + rank(order.then(Equal, Equal)) * 10000 + rank(order.then(Equal, Greater)) * 1000 + rank(order.then(Greater, Less)) * 100 + rank(order.then(Greater, Equal)) * 10 + rank(order.then(Greater, Greater))
 }
+
+/// The order through a generic body, where `T` reaches order.compare unresolved.
+fn ranked[T: ordered](a: T, b: T) -> u64 {
+    rank(order.compare(a, b))
+}
+
+type Tagged: key + ordered {
+    id: u64,
+    name: String,
+}
+
+// None is declared before Some, so it orders first, though its word is above every char.
+// expect: run generic_option_none_first() = 0
+fn generic_option_none_first() -> u64 {
+    let none: Option[char] = None
+    ranked(none, Some('a'))
+}
+
+// expect: run generic_signed() = 0
+fn generic_signed() -> u64 {
+    let a: i64 = -3
+    ranked(a, 2)
+}
+
+// A proper prefix orders first.
+// expect: run generic_string_prefix() = 0
+fn generic_string_prefix() -> u64 {
+    ranked("ab", "abc")
+}
+
+// expect: run string_later_byte() = 2
+fn string_later_byte() -> u64 {
+    let a = "abd"
+    rank(order.compare(a, "abc"))
+}
+
+// Elements order by value: 256 > 2, though its first little-endian byte is 0.
+// expect: run generic_list_u16_by_element() = 2
+fn generic_list_u16_by_element() -> u64 {
+    let one: u16 = 1
+    let mut a: List[u16] = list.new()
+    list.push(mut a, one)
+    list.push(mut a, 256)
+    let mut b: List[u16] = list.new()
+    list.push(mut b, one)
+    list.push(mut b, 2)
+    ranked(a, b)
+}
+
+// Fields order in declaration order: equal ids, then "b" > "a".
+// expect: run record_later_field() = 2
+fn record_later_field() -> u64 {
+    let a = Tagged(id: 7, name: "b")
+    let b = Tagged(id: 7, name: "a")
+    rank(order.compare(a, b))
+}
+
+// expect: run generic_record_equal() = 1
+fn generic_record_equal() -> u64 {
+    let a = Tagged(id: 7, name: "a")
+    let b = Tagged(id: 7, name: "a")
+    ranked(a, b)
+}

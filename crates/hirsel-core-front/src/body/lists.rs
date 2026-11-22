@@ -313,17 +313,38 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         let order = self.runtime_row(hirsel_core_ir::RtOp::CompareBytes, &args, n)?[0];
         let zero = self.konst(Ty::Scalar(Scalar::I8), 0, n)?;
+        self.order_of(order, zero, id, result, n)
+    }
+
+    /// The `Order` value at type `result` (place row `id`): `Less` when `left < right`,
+    /// `Greater` when `left > right`, else `Equal`, for two scalars of one type.
+    pub(super) fn order_of(
+        &mut self,
+        left: ValueId,
+        right: ValueId,
+        id: TypeId,
+        result: TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
         let to = self.result_slot(PlaceTy::Declared(id), n);
+        // Order is `Less | Equal | Greater`, cases 0, 1 and 2. Equal is written before the
+        // branch, so the slot's first write dominates both overwrites and the read.
+        self.inst(
+            Inst::SetCase {
+                address: to,
+                case: 1,
+            },
+            n,
+        );
         let (less, not_less) = (self.new_block(&[]), self.new_block(&[]));
-        let (greater, equal) = (self.new_block(&[]), self.new_block(&[]));
+        let greater = self.new_block(&[]);
         let done = self.new_block(&[]);
-        let below = self.list_compare(CompareOp::Lt, order, zero, n);
+        let below = self.list_compare(CompareOp::Lt, left, right, n);
         self.list_branch(below, less, not_less, n);
         self.start(not_less);
-        let above = self.list_compare(CompareOp::Gt, order, zero, n);
-        self.list_branch(above, greater, equal, n);
-        // Order is `Less | Equal | Greater`, cases 0, 1 and 2.
-        for (block, case) in [(less, 0), (equal, 1), (greater, 2)] {
+        let above = self.list_compare(CompareOp::Gt, left, right, n);
+        self.list_branch(above, greater, done, n);
+        for (block, case) in [(less, 0), (greater, 2)] {
             self.start(block);
             self.inst(Inst::SetCase { address: to, case }, n);
             self.jump(done, &[], n);

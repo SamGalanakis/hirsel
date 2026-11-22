@@ -53,8 +53,9 @@ canvas#c{position:fixed;inset:0;width:100vw;height:100vh;display:block}
 .wmfont{font-family:"Archivo Black","Arial Black","Inter",system-ui,sans-serif;font-weight:400;font-synthesis:none;letter-spacing:-.035em}
 
 header{position:fixed;left:0;right:0;top:0;display:flex;align-items:center;gap:28px;padding:calc(18px + var(--sat)) max(48px,var(--sar)) 18px max(48px,var(--sal));z-index:3}
-header .wm{font-size:22px;line-height:1}
-header .idx{flex:1;min-width:0}
+header .wm{font-size:22px;line-height:1;flex:none}
+header .idx{flex:1;min-width:0;overflow-x:auto;scrollbar-width:none}
+header .idx::-webkit-scrollbar{display:none}
 header .strip{position:relative;display:flex;gap:20px;font-size:14px;font-weight:500;white-space:nowrap}
 header .strip button{position:relative;color:var(--mute);padding:4px 0 5.5px;transition:color var(--t-state) var(--ease);flex:none}
 header .strip button::after{content:"";position:absolute;left:0;right:0;bottom:0;height:1.5px;background:currentColor;transform:scaleX(0);transform-origin:left;opacity:.35;transition:transform var(--t-state) var(--ease),opacity var(--t-state) var(--ease)}
@@ -62,9 +63,18 @@ header .strip button:hover,header .strip button:focus-visible{color:var(--ink)}
 header .strip button:hover::after,header .strip button:focus-visible::after{transform:scaleX(1)}
 header .strip button.on{color:var(--ink)}
 header .strip button.on::after{transform:scaleX(1);opacity:1}
-header .links{margin-left:auto;display:flex;align-items:center;gap:14px}
-header .doc{font-size:14px;font-weight:500;color:var(--mute);text-decoration:none;padding:4px 0;transition:color var(--t-state) var(--ease)}
-header .doc:hover,header .doc:focus-visible{color:var(--ink)}
+header .links{margin-left:auto;display:flex;align-items:center;gap:12px;flex:none}
+header .copy{position:relative;display:inline-flex;align-items:center;gap:6px;font-size:13.5px;font-weight:500;line-height:1;color:var(--mute);padding:6px 11px;border:1px solid var(--rule);border-radius:999px;white-space:nowrap;transition:color var(--t-state) var(--ease),border-color var(--t-state) var(--ease),background-color var(--t-state) var(--ease),transform var(--t-press) var(--ease)}
+header .copy:hover,header .copy:focus-visible{color:var(--ink);border-color:rgba(17,17,15,.34);background:rgba(17,17,15,.035)}
+header .copy:active{transform:scale(.97)}
+header .copy.ok{color:var(--ink);border-color:var(--ink)}
+header .copy svg{width:13.5px;height:13.5px;flex:none}
+header .copy .ic-ok,header .copy.ok .ic-copy{display:none}
+header .copy.ok .ic-ok{display:block}
+header .copy .lbl{display:grid;text-align:left}
+header .copy .lbl span{grid-area:1/1;transition:opacity var(--t-press) var(--ease)}
+header .copy .lbl .done,header .copy.ok .lbl .idle{opacity:0}
+header .copy.ok .lbl .done{opacity:1}
 header .gh{display:inline-flex;align-items:center;justify-content:center;width:36px;height:36px;margin-right:-8px;border-radius:50%;color:var(--ink);opacity:.82;transition:opacity var(--t-state) var(--ease),background-color var(--t-state) var(--ease)}
 header .gh:hover,header .gh:focus-visible{opacity:1;background:rgba(17,17,15,.06)}
 header .gh svg{width:20px;height:20px;display:block;transition:transform var(--t-state) var(--ease)}
@@ -166,7 +176,8 @@ header .gh:active svg{transform:scale(.92);transition-duration:var(--t-press)}
   header .wm{font-size:19px;padding:13px 8px 13px 0;margin:-13px -8px -13px 0}
   header .idx{display:none}
   header .links{gap:8px}
-  header .doc{display:inline-flex;align-items:center;min-height:44px;padding:0 6px}
+  header .copy{font-size:13px;padding:6px 10px}
+  header .copy::before{content:"";position:absolute;inset:-8px -4px}
   header .gh{width:44px;height:44px;margin:-4px -12px -4px 0}
   .land{left:max(16px,var(--sal));right:max(16px,var(--sar));bottom:calc(34px + var(--sab))}
   .land h1{font-size:84px}
@@ -326,7 +337,7 @@ html,body{height:auto;overflow:auto}
       <p><b>Build.</b> The compiler checks and lowers each definition once and caches it by content, so an edit rechecks only that definition and callers of a changed signature.</p>
       <p><b>Run.</b> Every type declares how its values are represented, so costs follow from the declaration, not from an analysis. A region is freed at once, with no per-node walk.</p>
     </section>
-    <p class="out"><a href="/primer.md">Primer</a> &middot; <a href="/install.sh">Install</a> &middot; <a href="https://github.com/samgalanakis/hirsel">Source on GitHub &rarr;</a></p>
+    <p class="out"><a href="/llms.txt">For agents (llms.txt)</a> &middot; <a href="/install.sh">Install</a> &middot; <a href="https://github.com/samgalanakis/hirsel">Source on GitHub &rarr;</a></p>
   </main>
 </noscript>
 
@@ -345,7 +356,11 @@ html,body{height:auto;overflow:auto}
     </div>
   </nav>
   <nav class="links" aria-label="Site">
-    <a class="doc" href="/primer.md">Primer</a>
+    <button class="copy" id="copyAgent" type="button" title="Copy Hirsel docs and install links for coding agents" aria-live="polite">
+      <svg class="ic-copy" viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 5.5V3.5a1 1 0 0 0-1-1h-6a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2"/></svg>
+      <svg class="ic-ok" viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3.2 8.4 6.5 11.7 12.8 4.8"/></svg>
+      <span class="lbl"><span class="idle">Copy for agents</span><span class="done" aria-hidden="true">Copied</span></span>
+    </button>
     <button class="menu" id="menuBtn" aria-label="All views" aria-haspopup="dialog" aria-controls="list" aria-expanded="false"><svg viewBox="0 0 20 20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M3.5 6.5h13M3.5 13.5h8"/></svg></button>
     <a class="gh" id="gh" href="https://github.com/samgalanakis/hirsel" aria-label="Source on GitHub" title="Source on GitHub">
       <svg viewBox="0 0 16 16" aria-hidden="true" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
@@ -2056,6 +2071,38 @@ addEventListener('wheel', e => {
 const nearRed = (x, y) => { const r = rend[REDI]; return Math.hypot(x - r.x, y - (r.y - r.s * .45)) < Math.max(18, r.s * .6); };
 cv.addEventListener('click', e => { if (view === 'hill' && nearRed(e.clientX, e.clientY)) go(1); });
 cv.addEventListener('mousemove', e => { cv.style.cursor = view === 'hill' && nearRed(e.clientX, e.clientY) ? 'pointer' : ''; });
+
+const AGENT_TXT = [
+  'Hirsel docs and install for coding agents:',
+  '- Index: https://hirsel.ai/llms.txt',
+  '- Primer (whole language in one page): https://hirsel.ai/primer.md',
+  '- Standard library index: https://hirsel.ai/api-index.md',
+  '- Install (Linux x86_64): curl -fsSL https://hirsel.ai/install.sh | sh',
+].join('\n');
+let copyTimer = 0;
+$('copyAgent').addEventListener('click', () => {
+  const b = $('copyAgent'), done = () => {
+    b.classList.add('ok');
+    b.querySelector('.idle').setAttribute('aria-hidden', 'true');
+    b.querySelector('.done').removeAttribute('aria-hidden');
+    clearTimeout(copyTimer);
+    copyTimer = setTimeout(() => {
+      b.classList.remove('ok');
+      b.querySelector('.idle').removeAttribute('aria-hidden');
+      b.querySelector('.done').setAttribute('aria-hidden', 'true');
+    }, 1800);
+  };
+  const fallback = () => {
+    const t = document.createElement('textarea');
+    t.value = AGENT_TXT; t.setAttribute('readonly', '');
+    t.style.cssText = 'position:fixed;opacity:0;pointer-events:none';
+    document.body.append(t); t.select();
+    try { if (document.execCommand('copy')) done(); } finally { t.remove(); }
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(AGENT_TXT).then(done, fallback);
+  } else fallback();
+});
 
 </script>
 </body>

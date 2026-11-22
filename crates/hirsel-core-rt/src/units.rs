@@ -423,8 +423,8 @@ fn admit() -> bool {
 
 /// Make unit `id`, admitted already, and queue it. The record is made here;
 /// its stack is taken and its program starts on its first run.
-fn create_unit(id: u32) -> &'static Unit {
-    create_unit_with(id, None)
+fn create_unit(id: u32) {
+    publish_unit(new_unit(id, false));
 }
 
 /// Helper units take ids from here up, recycled with their records.
@@ -469,15 +469,18 @@ pub(crate) fn spawn_job(job: Job) -> Result<(), Job> {
     if id >= ID_END {
         crate::process::stop(b"UnitIdSpace");
     }
-    create_unit_with(id, Some(job));
+    let unit = new_unit(id, true);
+    unit.job.set(Some(job));
+    publish_unit(unit);
     Ok(())
 }
 
-fn create_unit_with(id: u32, job: Option<Job>) -> &'static Unit {
+// A helper's job is set by its spawner before publication. Keeping the job
+// out of the shared constructor also keeps its vtable out of the root path.
+fn new_unit(id: u32, helper: bool) -> Box<Unit> {
     let t0 = now();
-    let p = pool();
     let config = BASE.get().unwrap().0;
-    let u: &'static Unit = Box::leak(Box::new(Unit {
+    Box::new(Unit {
         id,
         #[cfg(feature = "testing")]
         observed_queue_ns: AtomicU64::new(0),
@@ -503,13 +506,17 @@ fn create_unit_with(id: u32, job: Option<Job>) -> &'static Unit {
         alone: std::sync::OnceLock::new(),
         alone_depth: Cell::new(0),
         config,
-        helper: job.is_some(),
-        job: Cell::new(job),
-    }));
-    if !TABLE[id as usize]
+        helper,
+        job: Cell::new(None),
+    })
+}
+
+fn publish_unit(unit: Box<Unit>) {
+    let unit: &'static Unit = Box::leak(unit);
+    if !TABLE[unit.id as usize]
         .compare_exchange(
             std::ptr::null_mut(),
-            (u as *const Unit).cast_mut(),
+            (unit as *const Unit).cast_mut(),
             Ordering::AcqRel,
             Ordering::Acquire,
         )
@@ -518,9 +525,8 @@ fn create_unit_with(id: u32, job: Option<Job>) -> &'static Unit {
         crate::process::stop(b"UnitIdTaken");
     }
     bump(S_CREATED);
-    add_stat(S_CREATE_NS, now() - t0);
-    enqueue(p, u);
-    u
+    add_stat(S_CREATE_NS, now() - unit.created_ns);
+    enqueue(pool(), unit);
 }
 
 /// Give a unit about to run for the first time its stack and initial frame.

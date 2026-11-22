@@ -123,8 +123,11 @@ fn core_contract_directory_is_not_part_of_the_std_seed() {
 fn manifest() -> CorpusManifest {
     let root = repo();
     let core = package("core");
-    let mut std_sources = sources(&root.join("core/std"), &[], false);
-    std_sources.extend(sources(&root.join("core/std/tests"), &["tests"], false));
+    let mut std = PackageManifest::directory(&root.join("core/std"), package("std"), false)
+        .expect("std source directory reads");
+    std.dependencies.push(core.clone());
+    std.sources
+        .extend(sources(&root.join("core/std/tests"), &["tests"], false));
     CorpusManifest {
         core: core.clone(),
         packages: vec![
@@ -134,12 +137,7 @@ fn manifest() -> CorpusManifest {
                 sources: sources(&root.join("core/core"), &[], true),
                 dependencies: vec![],
             },
-            PackageManifest {
-                namespace: None,
-                package: package("std"),
-                sources: std_sources,
-                dependencies: vec![core],
-            },
+            std,
         ],
     }
 }

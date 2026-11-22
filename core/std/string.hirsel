@@ -121,6 +121,12 @@ pub fn find(s: String, start: u64, pat: String) -> Option[u64] {
     if m == 0 {
         return Some(start)
     }
+    if m >= 2 && m <= 8 && rest - m >= 127 {
+        return match find_short(hay, needle, m, rest - m - 31) {
+            Some(found) => Some(start + found),
+            None => None,
+        }
+    }
     let first = needle[0]
     let last = m - 1
     let last_byte = needle[last]
@@ -151,6 +157,34 @@ pub fn find(s: String, start: u64, pat: String) -> Option[u64] {
         }
     }
     None
+}
+
+// Filter 32 candidate starts at once. The last load in each pair ends at or
+// before the end of hay, including when the final group overlaps the one before it.
+fn find_short(hay: Bytes, needle: Bytes, m: u64, last_group: u64) -> Option[u64] {
+    let first: Simd[u8, 32] = simd.splat(needle[0])
+    let last: Simd[u8, 32] = simd.splat(needle[m - 1])
+    let mut at: u64 = 0
+    loop {
+        let heads: Simd[u8, 32] = list.lanes(hay, at)
+        let tails: Simd[u8, 32] = list.lanes(hay, at + m - 1)
+        let mut matches = simd.bitmask(simd.eq(heads, first) & simd.eq(tails, last))
+        while matches != 0 {
+            let lane: u64 = int.widen(int.trailing_zeros(matches))
+            let candidate = at + lane
+            if m == 2 || list.starts_with_at(hay, candidate, needle) {
+                return Some(candidate)
+            }
+            matches = matches & (matches - 1)
+        }
+        if at == last_group {
+            return None
+        }
+        at += 32
+        if at > last_group {
+            at = last_group
+        }
+    }
 }
 
 // Crochemore-Perrin Two-Way search, using memchr's critical factorization.

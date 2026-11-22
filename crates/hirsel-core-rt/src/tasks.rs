@@ -2684,7 +2684,9 @@ unsafe fn provider_operation_in<const RETURNABLE: bool>(
         } else {
             provider_outcome_opt!(
                 token,
-                operation::<PointerCalls, RETURNABLE>(context, task, provider, request, token, issued)
+                operation::<PointerCalls, RETURNABLE>(
+                    context, task, provider, request, token, issued
+                )
             )
         }
     }
@@ -2731,7 +2733,9 @@ unsafe fn operation<C: Calls, const RETURNABLE: bool>(
         CALLBACK_TASK.set(ptr::null_mut());
         if wait.kind != WAIT_READY {
             let start = Start::Entry(Some(wait));
-            return off_fast_path::<RETURNABLE>(context, task, provider, request, token, start, issued);
+            return off_fast_path::<RETURNABLE>(
+                context, task, provider, request, token, start, issued,
+            );
         }
         let step = provider_callback!(
             token,
@@ -2740,12 +2744,18 @@ unsafe fn operation<C: Calls, const RETURNABLE: bool>(
         );
         if step.kind != STEP_DONE {
             let start = Start::Issued(step);
-            return off_fast_path::<RETURNABLE>(context, task, provider, request, token, start, issued);
+            return off_fast_path::<RETURNABLE>(
+                context, task, provider, request, token, start, issued,
+            );
         }
         if let Some(issued) = issued {
             *issued = Some(step.outcome);
         }
-        Some(provider_callback!(token, Deliver, C::deliver(provider, request, step.outcome)))
+        Some(provider_callback!(
+            token,
+            Deliver,
+            C::deliver(provider, request, step.outcome)
+        ))
     }
 }
 /// How `operation` calls a provider's `wait` and `deliver`. A form may contain
@@ -2908,9 +2918,14 @@ unsafe fn returnable(
                 park_returnable(task, op);
                 None
             }
-            Next::Done(produced) => {
-                Some(delivered(context, &(*op).provider, request, token, produced, None))
-            }
+            Next::Done(produced) => Some(delivered(
+                context,
+                &(*op).provider,
+                request,
+                token,
+                produced,
+                None,
+            )),
         }
     }
 }
@@ -2934,7 +2949,14 @@ pub(crate) unsafe fn resume_returnable(context: *mut Context) -> Option<crate::p
             Next::Done(produced) => {
                 (*task).operation = ptr::null_mut();
                 let request = (*op).request;
-                let outcome = delivered(context, &(*op).provider, request, (*op).token, produced, None);
+                let outcome = delivered(
+                    context,
+                    &(*op).provider,
+                    request,
+                    (*op).token,
+                    produced,
+                    None,
+                );
                 #[cfg(feature = "prof")]
                 prof_io_end((*op).token, &outcome);
                 Some(outcome)

@@ -302,7 +302,9 @@ unsafe fn admit<const RETURNABLE: bool>(
         if RETURNABLE {
             crate::tasks::provider_operation_returnable(context, &*provider, request)
         } else {
-            Some(crate::tasks::provider_operation(context, &*provider, request, issued))
+            Some(crate::tasks::provider_operation(
+                context, &*provider, request, issued,
+            ))
         }
     }
 }

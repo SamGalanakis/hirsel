@@ -260,8 +260,8 @@ it to built. Everything above describes the store as built.
   acks instead of failing; the frame being built and the worker's group buffer
   have their own fixed bounds. No single figure bounds the store's process
   memory. A delete-only commit is never refused by admission, on disk or in
-  memory; like any operation it can still fail `Capacity` if the writer's own
-  allocator cannot grow its maps, before anything is published. A delayed cut
+  memory; like any operation it can still return `Full(c)` if the writer's own
+  allocator cannot grow its checkpoint state, before anything is published. A delayed cut
   ack never erases newer charges.
   `accounts(db)` returns `{logical, exact, frames, resident}`; resident page
   memory is reported, not admitted, and can exceed `logical` when roots diverge
@@ -273,7 +273,7 @@ it to built. Everything above describes the store as built.
   Planning draws on a checkpoint reserve in the writer's memory that grows with
   the store's packs, unlocated frames and branches and pins; the operation that
   creates each one (open, a commit, a fork or `pin`) pays its credit before it
-  publishes, and can fail `Capacity` then. So a covering checkpoint is never
+  publishes, and can return `Full(c)` then. So a covering checkpoint is never
   refused, by the writer or by its task, and `delete_branch` spends credit it
   already holds. Only compaction's relocation of old frames is funded when the
   cut needs it, and is deferred to a later cut if the writer has no room. A

@@ -1142,6 +1142,9 @@ impl UnitCtx {
 
     /// The running receiver can take its own item without dispatching an
     /// inbox wake. Older arrivals and batches still go through `take`.
+    /// Inlined: it is the receive fast path in the dispatcher and in both
+    /// receive forms, and a call here costs `x_pingpong` about 2% of its Ir.
+    #[inline(always)]
     pub(crate) fn take_single_item(&mut self, c: &ConnCore) -> bool {
         if !self.reached.is_empty() {
             return false;

@@ -2299,7 +2299,20 @@ pub fn edit_collection(mut root: Arc[Page], key: Bytes, private_from: u64, mut n
     }))
 }
 
-fn put_inline_leaf(mut page: Page, key: Bytes, data: Bytes, id: u64, has_sibling: bool) -> Result[bool, Capacity] {
+// What an inline write needs from its leaf. None sends the write to the
+// copying path; rewrite marks a same-width value written over in place.
+type InlineFit {
+    slot: u64,
+    hit: bool,
+    rewrite: bool,
+    old_size: u64,
+    old_rows: u64,
+    old_charge: u64,
+    charge: u64,
+    needed: u64
+}
+
+fn inline_leaf_fit(page: Page, key: Bytes, data: Bytes, has_sibling: bool) -> Option[InlineFit] {
     let (slot, hit) = search(page.image, key)
     let p = u16_at(page.image.raw, 4)
     let key_width = list.len(key)
@@ -2313,16 +2326,14 @@ fn put_inline_leaf(mut page: Page, key: Bytes, data: Bytes, id: u64, has_sibling
         let at = entry_at(page.image, slot)
         let value = at + 2 + u16_at(page.image.raw, at)
         if page.image.raw[value] != 0 {
-            return Ok(false)
+            return None
         }
         let previous = u16_at(page.image.raw, value + 1)
         if previous == value_width {
-            list.copy_from_slice(mut page.image.raw, value + 3, data)
-            list.set_word_le(mut page.image.raw, 8, id)
-            return Ok(true)
+            return Some(InlineFit(slot: slot, hit: true, rewrite: true, old_size: 0, old_rows: 0, old_charge: 0, charge: charge, needed: value + 3))
         }
         if has_sibling && value_width < previous && sealed_size(page.image) - previous + value_width < TARGET / 4 {
-            return Ok(false)
+            return None
         }
         (value - at + 3 + previous, 1u64, row_charge(key_width + (if page.image.domain == Collection {
             4u64
@@ -2333,10 +2344,10 @@ fn put_inline_leaf(mut page: Page, key: Bytes, data: Bytes, id: u64, has_sibling
         (0u64, 0u64, 0u64)
     }
     if key_width < p {
-        return Ok(false)
+        return None
     }
     if list.compare_bytes(list.slice(page.image.raw, HEADER, HEADER + p), list.slice(key, 0, p)) != Equal {
-        return Ok(false)
+        return None
     }
     let total = count(page.image) + (if hit {
         0u64
@@ -2346,24 +2357,76 @@ fn put_inline_leaf(mut page: Page, key: Bytes, data: Bytes, id: u64, has_sibling
     let suffix = key_width - p
     let needed = u32_at(page.image.raw, 16) + 5 + suffix + value_width + 2 * total
     if needed > PRIVATE_MAX || !legal(0, total, needed - u16_at(page.image.raw, 6) - old_size) {
-        return Ok(false)
+        return None
     }
+    Some(InlineFit(slot: slot, hit: hit, rewrite: false, old_size: old_size, old_rows: old_rows, old_charge: old_charge, charge: charge, needed: needed))
+}
+
+// Reserve the room an inline write grows its leaf to, so writing it cannot allocate.
+fn reserve_inline_fit(mut page: Page, fit: InlineFit) -> Result[(), Capacity] {
     let old_len = list.len(page.image.raw)
-    if needed > old_len {
-        let capacity = order.min(PRIVATE_MAX, order.max(2 * old_len, needed))
+    if !fit.rewrite && fit.needed > old_len {
+        let capacity = order.min(PRIVATE_MAX, order.max(2 * old_len, fit.needed))
         list.try_reserve(mut page.image.raw, capacity - old_len)?
     }
-    let at = slot_space(mut page.image, slot, hit, old_size, needed)
-    put16(mut page.image.raw, at, suffix)
+    Ok(())
+}
+
+fn put_inline_leaf(mut page: Page, key: Bytes, data: Bytes, id: u64, has_sibling: bool) -> Result[bool, Capacity] {
+    let Some(fit) = inline_leaf_fit(page, key, data, has_sibling) else {
+        return Ok(false)
+    }
+    reserve_inline_fit(mut page, fit)?
+    if fit.rewrite {
+        list.copy_from_slice(mut page.image.raw, fit.needed, data)
+        list.set_word_le(mut page.image.raw, 8, id)
+        return Ok(true)
+    }
+    let p = u16_at(page.image.raw, 4)
+    let key_width = list.len(key)
+    let value_width = list.len(data)
+    let at = slot_space(mut page.image, fit.slot, fit.hit, fit.old_size, fit.needed)
+    put16(mut page.image.raw, at, key_width - p)
     list.copy_from_slice(mut page.image.raw, at + 2, list.slice(key, p, key_width))
-    let value = at + 2 + suffix
+    let value = at + 2 + key_width - p
     page.image.raw[value] = 0
     put16(mut page.image.raw, value + 1, value_width)
     list.copy_from_slice(mut page.image.raw, value + 3, data)
     put32(mut page.image.raw, 16, value + 3 + value_width)
-    changed_totals(mut page, old_rows, old_charge, 1, charge)
+    changed_totals(mut page, fit.old_rows, fit.old_charge, 1, fit.charge)
     list.set_word_le(mut page.image.raw, 8, id)
     Ok(true)
+}
+
+// put_inline_path's walk without the edit: the leaf's fit, with its room reserved.
+fn inline_path_ready(mut root: Arc[Page], collection: Bytes, key: Bytes, data: Bytes, has_sibling: bool) -> Result[bool, Capacity] {
+    let ready = arc.with_unique(mut root, scoped fn(mut page: Page) -> Result[bool, Capacity] {
+        let map_page = page.image.domain == CollectionMap
+        let page_key = if map_page {
+            view collection
+        } else {
+            view key
+        }
+        if let Some(slot) = descend(page.image, page_key) {
+            return inline_path_ready(mut page.kids[slot], collection, key, data, count(page.image) > 1)
+        }
+        if map_page {
+            let (slot, hit) = search(page.image, collection)
+            if !hit {
+                return Ok(false)
+            }
+            return inline_path_ready(mut page.kids[slot], collection, key, data, false)
+        }
+        let Some(fit) = inline_leaf_fit(page, key, data, has_sibling) else {
+            return Ok(false)
+        }
+        reserve_inline_fit(mut page, fit)?
+        Ok(true)
+    })
+    match take ready {
+        Some(take answer) => take answer,
+        None => Ok(false),
+    }
 }
 
 fn put_inline_path(mut root: Arc[Page], collection: Bytes, key: Bytes, data: Bytes, mut next: u64, has_sibling: bool) -> Result[bool, Capacity] {
@@ -2400,13 +2463,23 @@ fn put_inline_path(mut root: Arc[Page], collection: Bytes, key: Bytes, data: Byt
     }
 }
 
-/// Apply an inline write after the writer's checks, holding the full path
-/// unique. A split, repack, possible merge or shared path leaves the tree untouched.
-pub fn put_inline_unique(mut root: Arc[Page], collection: Bytes, key: Bytes, data: Bytes, inline: u64, first: u64) -> Result[bool, Capacity] {
-    if list.len(data) > inline || first == 0 || first > 18446744073709551103u64 {
+/// Whether an inline write can take the unique path, with its leaf room
+/// reserved so that put_inline_unique then cannot refuse it. A write stays
+/// ready while writes into other collections are applied.
+pub fn inline_unique_ready(mut root: Arc[Page], collection: Bytes, key: Bytes, data: Bytes, inline: u64) -> Result[bool, Capacity] {
+    if list.len(data) > inline {
         return Ok(false)
     }
-    let mut next = first
+    inline_path_ready(mut root, collection, key, data, false)
+}
+
+/// Apply an inline write after the writer's checks, holding the full path
+/// unique and stamping it root first from next. A split, repack, possible
+/// merge or shared path leaves the tree untouched.
+pub fn put_inline_unique(mut root: Arc[Page], collection: Bytes, key: Bytes, data: Bytes, inline: u64, mut next: u64) -> Result[bool, Capacity] {
+    if list.len(data) > inline || next == 0 || next > 18446744073709551103u64 {
+        return Ok(false)
+    }
     put_inline_path(mut root, collection, key, data, mut next, false)
 }
 

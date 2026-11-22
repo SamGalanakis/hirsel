@@ -11183,6 +11183,112 @@ fn disk_test_db(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] wai
     }
 }
 
+fn disk_watermark_rows(s: Snapshot, sh: Shape[u64, u64], expected: Option[(u64, u64)]) -> Result[bool, Error] {
+    let old = match expected {
+        Some((1, v)) => Some(v),
+        _ => None
+    }
+    let new = match expected {
+        Some((2, v)) => Some(v),
+        _ => None
+    }
+    if get(s, sh, 1)? != old || get(s, sh, 2)? != new {
+        return Ok(false)
+    }
+    let mut rows = scan(s, sh, Unbounded, Unbounded)?
+    if next(mut rows)? != expected || next(mut rows)? != None {
+        return Ok(false)
+    }
+    let inspected = look(s, None, fn(tx: Tx) -> Result[bool, Error] {
+        if fetch(tx, sh, 1)? != old || fetch(tx, sh, 2)? != new {
+            return Ok(false)
+        }
+        let mut ranged = range(tx, sh, Unbounded, Unbounded)?
+        Ok(next_range(mut ranged)? == expected && next_range(mut ranged)? == None)
+    })?
+    match take inspected {
+        Seen(take seen) => {
+            let Seen(value: take result_value, ..) = take seen
+            take result_value
+        },
+        _ => Ok(false)
+    }
+}
+
+// STORE-SPEC §§1.5, 1.9 and 3.4. The checkpoint contains the table and no
+// data rows. The discarded COMMIT inserts (1, 10). After recovery, the first
+// insert (2, 20) reuses the discarded leaf's id. Reads from each snapshot
+// stay on its own leaf, and the old snapshot confers no authority to fork.
+fn disk_watermark_cut(d: Dir, c: Clock, r: Random, tasks: Tasks, torn: bool) -> Result[(), Error] waits {
+    let mut options = disk_crash_options("watermark-absent")
+    let mut db = open(tasks, d, c, r, options)?
+    let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
+    let t = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let sh = shape(t)
+    let (_, take manifest) = disk_read_manifest("MANIFEST", disk_read_file(d, "MANIFEST", 4096)?)?
+    let segment = capacity(disk_path("j-", db.file_seq, ""))?
+    let end = capacity(disk_path("j-", db.file_seq, ".end"))?
+    let durable_prefix = disk_read_file(d, segment, 4096)?
+    let boundary = disk_read_file(d, end, 4096)?
+    if !typed_put(mut db, t, 1, 10) {
+        fail("watermark: old insert did not commit")
+    }
+    let old = snapshot(db)
+    let old_id = std.omap.node_id(option.unwrap(std.omap.root(old.roots.data)))
+    if old_id < manifest.next_node {
+        fail("watermark: old node was below the cut")
+    }
+    // Drain the writer to materialize the frame, then construct the two
+    // legal power-cut images before its sync: absent write or torn tail.
+    // The retained Snapshot models a reader holding the old-open roots.
+    close(take db)?
+    if torn {
+        let written = disk_read_file(d, segment, 4096)?
+        if list.len(written) <= list.len(durable_prefix) + 1 {
+            fail("watermark: no frame to tear")
+        }
+        disk_write_synced(d, segment, list.slice(written, 0, list.len(written) - 1))?
+    } else {
+        disk_write_synced(d, segment, durable_prefix)?
+    }
+    disk_write_synced(d, end, boundary)?
+    options.create = false
+    let mut reopened = open(tasks, d, c, r, options)?
+    let recovered = snapshot(reopened)
+    if !same(old.store, recovered.store) || old.open == recovered.open {
+        fail("watermark: missing reopen fence")
+    }
+    if !disk_watermark_rows(recovered, sh, None)? {
+        fail("watermark: discarded row visible after reopen")
+    }
+    let reopened_table = table(mut reopened, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    if !typed_put(mut reopened, reopened_table, 2, 20) {
+        fail("watermark: new insert did not commit")
+    }
+    let new = snapshot(reopened)
+    let new_id = std.omap.node_id(option.unwrap(std.omap.root(new.roots.data)))
+    if new_id != old_id {
+        fail("watermark: fixture did not reissue the old node id")
+    }
+    if !disk_watermark_rows(old, sh, Some((1, 10)))? || !disk_watermark_rows(new, sh, Some((2, 20)))? {
+        fail("watermark: snapshots alias after node id reissue")
+    }
+    if !is_foreign(changes(old, new)) || !is_foreign(changes(new, old)) || !is_foreign(fork(mut reopened, "stale", old)) || !is_foreign(pin(mut reopened, "stale", old)) {
+        fail("watermark: accepted an old-open snapshot with a reissued node id")
+    }
+    let (b, _) = fork(mut reopened, "fresh", new)?
+    if !disk_watermark_rows(snapshot_of(reopened, b)?, sh, Some((2, 20)))? {
+        fail("watermark: fresh fork saw the discarded row")
+    }
+    close(take reopened)
+}
+
+pub fn disk_law_watermark_reissue(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    result.unwrap(disk_watermark_cut(disk_test_directory(d), c, r, tasks, false))
+    result.unwrap(disk_watermark_cut(disk_test_directory(d), c, r, tasks, true))
+    true
+}
+
 // L28 caller component: Full is not poison, a refused cut changes no version
 // or manifest generation, and deleting the oversized row permits the retry.
 pub fn disk_law_db_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
@@ -11840,6 +11946,15 @@ fn crash_install_read(d: Dir, c: Clock, r: Random, tasks: Tasks, required_new: b
 pub fn disk_crash_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Stdout) -> Result[(), Exit] waits {
     let phase = option.unwrap(args.get(argv, 0))
     let scenario = option.unwrap(args.get(argv, 1))
+    if scenario == "watermark-absent" || scenario == "watermark-torn" {
+        if phase == "write" {
+            if let Error(_) = disk_watermark_cut(d, c, r, tasks, scenario == "watermark-torn") {
+                return Error(Exit(status: 65u8))
+            }
+            let _ = stdout.write(out, "DONE")
+        }
+        return Ok(())
+    }
     if scenario == "install-refusals" {
         if phase == "init" {
             return match crash_install_init(d, c, r, tasks) { Ok(()) => Ok(()), Error(_) => Error(Exit(status: 61u8)) }

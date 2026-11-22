@@ -782,7 +782,7 @@ fn emit_module(
             inline: match definition.as_str() {
                 "core@1/string/push_char" => Inline::Always,
                 "core@1/string/push_scalar" => Inline::Never,
-                "core@1/map/placement" | "core@1/map/probe_limit" | "core@1/map/probe" => Inline::Always,
+                "core@1/map/placement" | "core@1/map/probe" => Inline::Always,
                 // pivot.rs leaves the recursive sample to the inliner.
                 "core@1/list/median3_rec" => Inline::Default,
                 "std@1/float/shortest64" | "std@1/float/push_fixed64" => Inline::Always,
@@ -829,6 +829,7 @@ fn emit_module(
                 }
                 _ => Inline::Default,
             },
+            map_probe: definition == "core@1/map/probe",
             carriers: carriers(module, &recipes, role_facts, FuncId(i as u32), sig, &locals),
             subprogram: function_debug.map(|d| d.scope),
             level,

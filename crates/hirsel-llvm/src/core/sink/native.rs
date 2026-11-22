@@ -397,6 +397,9 @@ impl<'a> NativeSink<'a> {
         if !attrs.carriers.is_empty() {
             string("hirsel-carriers", &attrs.carriers);
         }
+        if attrs.map_probe {
+            string("hirsel-map-probe", "");
+        }
         if let Some(level) = attrs.level {
             string("target-features", &level.llvm_features());
         }

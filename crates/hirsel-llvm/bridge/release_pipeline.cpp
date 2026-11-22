@@ -39,6 +39,7 @@
 #include <llvm/Transforms/Scalar/LICM.h>
 #include <llvm/Transforms/Scalar/LoopPassManager.h>
 #include <llvm/Transforms/Scalar/LoopUnrollPass.h>
+#include <llvm/Transforms/Utils/LoopPeel.h>
 #include <llvm/Transforms/Utils/LoopSimplify.h>
 #include <llvm/Transforms/Utils/LoopUtils.h>
 #include <llvm/Transforms/Utils/UnrollLoop.h>
@@ -75,6 +76,30 @@ void limit_recursive_entry_inlining(Module &module) {
         }
     }
 }
+
+// Specialize the home group before inlining. Its group number and candidate
+// mask can then simplify independently of the loop's packed bucket recurrence.
+class MapHomeGroupPass : public OptionalPassInfoMixin<MapHomeGroupPass> {
+public:
+    PreservedAnalyses run(Function &f, FunctionAnalysisManager &analyses) {
+        if (!f.hasFnAttribute("hirsel-map-probe")) return PreservedAnalyses::all();
+        f.removeFnAttr("hirsel-map-probe");
+        auto &dt = analyses.getResult<DominatorTreeAnalysis>(f);
+        auto &loops = analyses.getResult<LoopAnalysis>(f);
+        auto &assumptions = analyses.getResult<AssumptionAnalysis>(f);
+        auto &evolution = analyses.getResult<ScalarEvolutionAnalysis>(f);
+        if (loops.getTopLevelLoops().size() == 1) {
+            Loop *probe = *loops.begin();
+            simplifyLoop(probe, &dt, &loops, &evolution, &assumptions, nullptr, false);
+            if (canPeel(probe)) {
+                formLCSSARecursively(*probe, dt, &loops, &evolution);
+                ValueToValueMapTy home;
+                peelLoop(probe, 1, false, &loops, &evolution, dt, &assumptions, true, home);
+            }
+        }
+        return PreservedAnalyses::none();
+    }
+};
 
 // A library's lent bodies (hirsel_llvm_emit_parts) join the module for its
 // inliner: each body a definition calls, and those they call, comes in
@@ -587,7 +612,10 @@ extern "C" LLVMErrorRef hirsel_llvm_optimize_release(
     if (auto error = builder.parsePassPipeline(pipeline,
         "hotcoldsplit,inferattrs,function<eager-inv>(simplifycfg,sroa<modify-cfg>,early-cse),"
         "ipsccp,globalopt,"
-        "function<eager-inv>(mem2reg,instcombine<no-verify-fixpoint>,simplifycfg<switch-range-to-icmp>),always-inline"))
+        "function<eager-inv>(mem2reg,instcombine<no-verify-fixpoint>,simplifycfg<switch-range-to-icmp>)"))
+        return wrap(std::move(error));
+    pipeline.addPass(createModuleToFunctionPassAdaptor(MapHomeGroupPass()));
+    if (auto error = builder.parsePassPipeline(pipeline, "always-inline"))
         return wrap(std::move(error));
 
     // Keep LLVM's O3 inline advisor and devirtualization iterations. A parsed

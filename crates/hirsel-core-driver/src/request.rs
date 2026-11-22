@@ -235,8 +235,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         .positional
         .map(PathBuf::from)
         .or_else(|| inspect_foreign.map(|_| PathBuf::from(".")));
-    let mut libraries = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core");
-    let mut libraries_explicit = false;
+    let mut libraries = None;
     let mut store = None;
     let mut manifest = None;
     let mut metrics = None;
@@ -371,10 +370,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                 entry =
                     Some(hirsel_core_ids::DefPath::from_full(&value).ok_or("invalid entry path")?)
             }
-            Opt::Libraries => {
-                libraries_explicit = true;
-                libraries = PathBuf::from(value)
-            }
+            Opt::Libraries => libraries = Some(PathBuf::from(value)),
             Opt::Store => store = Some(PathBuf::from(value)),
             Opt::Inputs => manifest = Some(PathBuf::from(value)),
             Opt::Metrics => metrics = Some(PathBuf::from(value)),
@@ -504,7 +500,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             || manifest.is_some()
             || entry.is_some()
             || image_path.is_some()
-            || libraries_explicit
+            || libraries.is_some()
             || source_core
             || source_std
             || core_product.is_some()
@@ -613,7 +609,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         meter.profile_image_index();
     }
     let installed_std = if installed.is_some()
-        && !libraries_explicit
+        && libraries.is_none()
         && !source_std
         && !source_core
         && workspace_app.as_ref().is_none_or(|app| app.needs_std())
@@ -626,21 +622,17 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         meter.result.image_selection = Some("image used: explicit image".into());
     } else if installed_std.is_some() {
         meter.result.image_selection = Some("image used: installed std product".into());
-    } else if source_std || libraries_explicit {
+    } else if source_std || libraries.is_some() {
         meter.result.image_selection = Some("source checked: explicit library source".into());
     } else if installed.is_some() {
         meter.result.image_selection = Some("source checked: no registered std product".into());
     } else {
         meter.result.image_selection = Some("source checked: no installed image".into());
     }
-    // Directory checks and source comparisons use checkout sources when Buck's
-    // build-time package path is relative to its action directory.
-    if manifest.is_none()
-        && libraries == Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core")
-        && Path::new("core/std").is_dir()
-    {
-        libraries = PathBuf::from("core");
-    }
+    // An uninstalled compiler can use the current checkout for source checks.
+    let libraries = libraries.as_deref().or_else(|| {
+        (installed.is_none() && Path::new("core/std").is_dir()).then_some(Path::new("core"))
+    });
     let store = store
         .or_else(|| install_root.as_ref().map(|root| root.join("core-packages")))
         .unwrap_or_else(|| {
@@ -828,9 +820,9 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             entry: None,
         }
     } else if inspect_std {
-        CheckRequest::libraries(&libraries, &store)?
+        CheckRequest::library_request(libraries, &store)?
     } else if command == "image" {
-        CheckRequest::libraries(dir.as_deref().unwrap_or(&libraries), &store)?
+        CheckRequest::library_request(dir.as_deref().or(libraries), &store)?
     } else {
         let mut app = match workspace_app {
             Some(app) => app,
@@ -842,7 +834,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         manifest_runs = app.tests.take();
         CheckRequest::from_app(
             app,
-            &libraries,
+            libraries,
             &store,
             native_command || installed.is_some() || inspection.is_some() || image.is_some(),
         )?

@@ -1523,7 +1523,7 @@ fn same_site() -> Result[(), ()] {
         let resolved = crate::package_resolve::Resolution::resolve(workspace,
             crate::package_store::PackageStore::new(Some(law.path("packages"))), false).unwrap();
         let app = crate::package_dir::PackageDir::from_resolution(&resolved, &selected, true).unwrap();
-        let mut request = CheckRequest::from_app(app, &law.libraries, &law.path("address-store"), true).unwrap();
+        let mut request = CheckRequest::from_app(app, Some(&law.libraries), &law.path("address-store"), true).unwrap();
         request.entry = None;
         let product = Driver::default().check(request, &mut Meter::new(false)).unwrap();
         let path = DefPath::from_full("app@1/tests/same_site").unwrap();

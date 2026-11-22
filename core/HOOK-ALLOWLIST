@@ -262,6 +262,8 @@ core@1/list/reserve
 # MEM-21 / R1 (3d1bbe30): reserve with the same inline refusal as before R1.
 core@1/list/try_reserve
 core@1/list/set
+# DECISIONS.md 2026-11-22 (core-perf-primitives-1606, disk_seal checksum in place).
+core@1/list/set_word_le
 core@1/list/slice
 core@1/list/slots_empty
 core@1/list/slots_finish_list

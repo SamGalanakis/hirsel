@@ -7397,15 +7397,14 @@ fn disk_check(ctx: DiskContext, offset: u64, head: Bytes, payload: Bytes) -> Res
 }
 
 fn disk_seal(ctx: DiskContext, offset: u64, kind: u16, flags: u16, payload: Bytes) -> Result[Bytes, Capacity] {
-    let mut head: Bytes = list.with_capacity(8)
-    le(mut head, int.widen(kind), 2)?
-    le(mut head, int.widen(flags), 2)?
-    le(mut head, list.len(payload), 4)?
-    let checksum = disk_check(ctx, offset, head, payload)?
     let mut out: Bytes = list.with_capacity(16 + list.len(payload))
-    list.append(mut out, head)
-    le(mut out, checksum, 8)?
+    le(mut out, int.widen(kind), 2)?
+    le(mut out, int.widen(flags), 2)?
+    le(mut out, list.len(payload), 4)?
+    le(mut out, 0, 8)?
     list.append(mut out, payload)
+    let checksum = disk_check(ctx, offset, list.slice(out, 0u64, 8u64), payload)?
+    list.set_word_le(mut out, 8, checksum)
     Ok(take out)
 }
 

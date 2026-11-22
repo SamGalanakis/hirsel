@@ -359,6 +359,25 @@ fn provenance(b: &Body) -> Vec<Vec<u32>> {
     from
 }
 
+/// What a pass that moves slots needs to know of them: each slot's use points
+/// (`Slots::uses`), the slots each name may point into ([`provenance`]), and
+/// the slots whose address leaves what provenance follows, as in
+/// [`scoped_slots`] (a `mut` loan to a call with results counts as leaving).
+pub(crate) struct SlotFacts {
+    pub uses: Vec<Vec<Point>>,
+    pub from: Vec<Vec<u32>>,
+    pub escapes: Vec<bool>,
+}
+
+pub(crate) fn slot_facts(b: &Body, signatures: &[Signature]) -> SlotFacts {
+    let from = provenance(b);
+    SlotFacts {
+        uses: slots_with(b, &from).uses,
+        escapes: escaping(b, signatures, &from, true),
+        from,
+    }
+}
+
 #[cfg(any(test, feature = "wf"))]
 /// Each slot's `StorageLive`, `StorageDead` and use points.
 pub(crate) fn slots(b: &Body) -> Slots {

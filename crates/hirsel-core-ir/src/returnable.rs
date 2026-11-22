@@ -482,30 +482,85 @@ pub struct Sizes {
     pub area: u64,
 }
 
-/// Slots whose bytes a resume may read: every slot an engine keeps for the
-/// whole body, and each scoped slot that may be in use at a site. A scoped
-/// slot not in use at a site is begun again, unwritten, before any use after
-/// it (`extent::scoped_slots`), so it stays in the frame.
-fn homed_slots(b: &Body, signatures: &[Signature], sites: &BTreeSet<usize>) -> Vec<bool> {
-    let scoped = crate::extent::scoped_slots(b, signatures);
-    let mut homed: Vec<bool> = scoped.slots.iter().map(|s| !s).collect();
-    for (bi, blk) in b.blocks.iter().enumerate() {
-        let first = blk.insts.start as usize;
-        let insts = blk.insts.get(&b.insts).unwrap_or_default();
-        if !(first..first + insts.len()).any(|k| sites.contains(&k)) {
-            continue;
+/// The slots a variant keeps in its record: each one whose bytes or address
+/// may be needed after one of its sites. A slot is needed at a site when
+/// - its address leaves what provenance follows (`SlotFacts::escapes`);
+/// - the site's own call uses it, since the callee is given the address again
+///   at every resume;
+/// - a value that may point into it is live after the site, since a pointer
+///   kept across the wait must still reach the same bytes; or
+/// - a use of it is reachable from the site, on a terminator or failure edge,
+///   with no `StorageLive` or `StorageDead` of it between. Neither ends a need
+///   that a marker does not reach: a `StorageLive` begins the slot unwritten,
+///   and no use follows a `StorageDead` without one (crate docs, "Values, slots
+///   and addresses").
+///
+/// Every other slot stays a frame slot of the variant, with its markers, so
+/// the engine can still promote or share it.
+fn homed_slots(
+    b: &Body,
+    signatures: &[Signature],
+    sites: &BTreeSet<usize>,
+    live: &BTreeMap<usize, Set>,
+) -> Vec<bool> {
+    let facts = crate::extent::slot_facts(b, signatures);
+    let k = b.slots.len();
+    let words = k.div_ceil(64).max(1);
+    let mut used: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
+    for (s, points) in facts.uses.iter().enumerate() {
+        for &p in points {
+            used.entry(p).or_default().push(s);
         }
-        let mut may = scoped.may_live_at(bi);
-        for (j, inst) in insts.iter().enumerate() {
-            if sites.contains(&(first + j)) {
-                for (slot, h) in homed.iter_mut().enumerate() {
-                    *h |= has(&may, slot);
+    }
+    let gen_at = |now: &mut Set, bi: usize, j: usize| {
+        for &s in used.get(&(bi as u32, j as u32)).into_iter().flatten() {
+            put(now, s);
+        }
+    };
+    let n = b.blocks.len();
+    let mut live_in: Vec<Set> = vec![vec![0; words]; n];
+    let mut homed = facts.escapes.clone();
+    let mut pass = |live_in: &mut Vec<Set>, homed: &mut Vec<bool>, record: bool| -> bool {
+        let mut changed = false;
+        for bi in (0..n).rev() {
+            let mut now = vec![0; words];
+            for t in successors(b, bi) {
+                join(&mut now, &live_in[t]);
+            }
+            let range = b.blocks[bi].insts;
+            let first = range.start as usize;
+            let insts = range.get(&b.insts).unwrap_or_default();
+            gen_at(&mut now, bi, insts.len());
+            for (j, inst) in insts.iter().enumerate().rev() {
+                match *inst {
+                    Inst::StorageLive { slot } | Inst::StorageDead { slot } => cut(&mut now, slot.index()),
+                    _ => gen_at(&mut now, bi, j),
+                }
+                if let Some(f) = inst.fail(b) {
+                    join(&mut now, &live_in[f.index()]);
+                }
+                if record && sites.contains(&(first + j)) {
+                    // `now` holds what the site uses, what follows it, and what
+                    // its failure continues with.
+                    for (s, h) in homed.iter_mut().enumerate() {
+                        *h |= has(&now, s);
+                    }
                 }
             }
-            match *inst {
-                Inst::StorageLive { slot } => put(&mut may, slot.index()),
-                Inst::StorageDead { slot } => cut(&mut may, slot.index()),
-                _ => {}
+            if now != live_in[bi] {
+                live_in[bi] = now;
+                changed = true;
+            }
+        }
+        changed
+    };
+    while pass(&mut live_in, &mut homed, false) {}
+    pass(&mut live_in, &mut homed, true);
+    let nv = b.values.len();
+    for set in live.values() {
+        for v in (0..nv).filter(|&v| has(set, v)) {
+            for &s in &facts.from[v] {
+                homed[s as usize] = true;
             }
         }
     }
@@ -683,7 +738,7 @@ fn shape(
         child,
         ..Sizes::default()
     };
-    let homed = homed_slots(body, &module.signatures, &wanted);
+    let homed = homed_slots(body, &module.signatures, &wanted, &live);
     let mut slot_at = Vec::with_capacity(body.slots.len());
     for (&t, &home) in body.slots.iter().zip(&homed) {
         if !home {

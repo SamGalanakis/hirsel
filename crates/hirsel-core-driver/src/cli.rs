@@ -64,6 +64,14 @@ pub enum OptionId {
     ProfStackBytes,
     ProfDuration,
     ProfDebug,
+    ProfBy,
+    ProfEvent,
+    ProfGroup,
+    ProfFilter,
+    ProfRows,
+    ProfDepth,
+    ProfMinDeltaPct,
+    ProfTimeout,
     Image,
     Lib,
     Help,
@@ -126,6 +134,14 @@ commands! {
     "prof", "prof <command>", "Capture or inspect a CPU profile.";
     "prof run", "prof run [package-dir] [build-opts] [--out FILE.hprof] [--freq 997] [--pmu LIST] [--stack-bytes 32768] [-- args...]", "Build and sample a native executable from exec until exit.";
     "prof attach", "prof attach <PID> [--duration SECS] [--freq 997] [--pmu LIST] [--debug PATH] [--out FILE.hprof]", "Sample a running Linux process without stopping it.";
+    "prof summary", "prof summary <FILE.hprof> [--json]", "Report capture quality and the five hottest functions per event.";
+    "prof schema", "prof schema <FILE.hprof> [--json]", "List the profile's tables and columns.";
+    "prof top", "prof top <FILE.hprof> [--by self|inclusive] [--event NAME] [--group def_path|instance] [--filter GLOB] [--limit 20] [--json]", "Rank functions by attributed event periods.";
+    "prof annotate", "prof annotate <FILE.hprof> <DEF_PATH|FILE:LINE> [--json]", "Show attributed periods alongside saved source lines.";
+    "prof callers", "prof callers <FILE.hprof> <DEF_OR_SYM> [--depth 5] [--json]", "Show sampled callers of a function.";
+    "prof callees", "prof callees <FILE.hprof> <DEF_OR_SYM> [--depth 5] [--json]", "Show sampled callees of a function.";
+    "prof diff", "prof diff <BASE.hprof> <HEAD.hprof> [--by self|inclusive] [--group def_path|instance] [--min-delta-pct 1.0] [--json]", "Compare compatible captures and report changed and unmatched functions.";
+    "prof sql", "prof sql <FILE.hprof> \"<SQL>\" [--limit 500] [--timeout-ms 5000] [--json]", "Query the profile with one read-only SQL statement.";
     "replay", "replay PACKAGE --tape TAPE [--diagnose] [options]", "Replay a recorded program with no host grants.";
     "tape", "tape show TAPE --include-credentials", "Export the header and frames stored in a credential-bearing tape.";
     "test", "test [package-dir] [options]", "Run each discovered @test in an independent process. When hirsel.toml contains [tests], set limit, dirs and grants there.";
@@ -543,6 +559,71 @@ static OPTIONS: &[OptionSpec] = &[
         "Use detached DWARF verified against the sampled image."
     ),
     option!(
+        ProfBy,
+        ["--by"],
+        Some("self|inclusive"),
+        ["prof top", "prof diff"],
+        "Rank by leaf periods or periods anywhere in the stack."
+    ),
+    option!(
+        ProfEvent,
+        ["--event"],
+        Some("NAME"),
+        ["prof top"],
+        "Rank samples of this event (default primary event)."
+    ),
+    option!(
+        ProfGroup,
+        ["--group"],
+        Some("def_path|instance"),
+        ["prof top", "prof diff"],
+        "Combine instances of one definition or show them separately."
+    ),
+    option!(
+        ProfFilter,
+        ["--filter"],
+        Some("GLOB"),
+        ["prof top"],
+        "Keep matching definitions or symbols."
+    ),
+    option!(
+        ProfRows,
+        ["--limit"],
+        Some("ROWS"),
+        [
+            "prof summary",
+            "prof schema",
+            "prof top",
+            "prof annotate",
+            "prof callers",
+            "prof callees",
+            "prof diff",
+            "prof sql"
+        ],
+        "Return at most this many rows (default 20, or 500 for SQL)."
+    ),
+    option!(
+        ProfDepth,
+        ["--depth"],
+        Some("FRAMES"),
+        ["prof callers", "prof callees"],
+        "Include at most this many frames above or below the function (default 5)."
+    ),
+    option!(
+        ProfMinDeltaPct,
+        ["--min-delta-pct"],
+        Some("PERCENT"),
+        ["prof diff"],
+        "Omit matched functions below this absolute change (default 1.0)."
+    ),
+    option!(
+        ProfTimeout,
+        ["--timeout-ms"],
+        Some("MS"),
+        ["prof sql"],
+        "Interrupt the statement after this many milliseconds (default 5000)."
+    ),
+    option!(
         Json,
         ["--json"],
         None,
@@ -873,6 +954,9 @@ pub(crate) fn named(name: &str) -> Result<&'static CommandSpec, String> {
 fn applies(option: &OptionSpec, command: &CommandSpec) -> bool {
     option.commands.is_empty()
         || option.commands.contains(&command.name)
+        || (option.id == OptionId::Json
+            && command.name.starts_with("prof ")
+            && !matches!(command.name, "prof run" | "prof attach" | "prof export"))
         || (command.name == "prof run"
             && option.id != OptionId::Output
             && option.commands.contains(&"run"))
@@ -987,7 +1071,13 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Action, Stri
             invocation.arguments.extend(arguments);
             break;
         }
-        if argument.starts_with('-') {
+        if argument.starts_with('-')
+            && !(name == "prof sql"
+                && argument.starts_with("--")
+                && argument.chars().any(char::is_whitespace)
+                && invocation.positional.is_some()
+                && invocation.arguments.is_empty())
+        {
             let option = OPTIONS
                 .iter()
                 .find(|o| o.names.contains(&argument.as_str()) && applies(o, command))
@@ -1010,6 +1100,13 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Action, Stri
             && !matches!(name.as_str(), "core-product" | "std-product" | "env")
         {
             invocation.positional = Some(argument);
+        } else if invocation.arguments.is_empty()
+            && matches!(
+                name.as_str(),
+                "prof annotate" | "prof callers" | "prof callees" | "prof diff" | "prof sql"
+            )
+        {
+            invocation.arguments.push(argument);
         } else {
             return Err(format!("unexpected argument `{argument}` for {name}"));
         }

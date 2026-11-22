@@ -1,8 +1,10 @@
 //! Portable CPU profiles for Hirsel.
 
 mod profile;
+mod query;
 
 pub use profile::{Profile, ProfileWriter, RunMeta};
+pub use query::{By, Group, Query, QueryResult, query};
 
 #[cfg(test)]
 hirsel_guard::install!();

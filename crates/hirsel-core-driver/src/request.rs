@@ -65,9 +65,16 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         }
         crate::cli::Action::Invoke(invocation) => invocation,
     };
-    if invocation.command.name == "prof attach" {
-        crate::prof_command::attach(invocation)?;
-        std::process::exit(0);
+    match invocation.command.name {
+        "prof attach" => {
+            crate::prof_command::attach(invocation)?;
+            std::process::exit(0);
+        }
+        name if name.starts_with("prof ") && name != "prof run" => {
+            crate::prof_command::query(invocation)?;
+            std::process::exit(0);
+        }
+        _ => {}
     }
     let profile = (invocation.command.name == "prof run")
         .then(|| crate::prof_command::Run::read(&mut invocation))
@@ -441,7 +448,15 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             | Opt::ProfPmu
             | Opt::ProfStackBytes
             | Opt::ProfDuration
-            | Opt::ProfDebug => {
+            | Opt::ProfDebug
+            | Opt::ProfBy
+            | Opt::ProfEvent
+            | Opt::ProfGroup
+            | Opt::ProfFilter
+            | Opt::ProfRows
+            | Opt::ProfDepth
+            | Opt::ProfMinDeltaPct
+            | Opt::ProfTimeout => {
                 unreachable!("CLI early command option")
             }
         }

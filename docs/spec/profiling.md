@@ -122,3 +122,13 @@ The profiler opens per-CPU events until the CPU count times the target's
 thread count plus one reaches 1000, when it uses one set of events per thread
 that follows the thread across CPUs. Samples captured before the initial
 mapping snapshot can remain unresolved.
+
+## Query results
+
+Every JSON query includes `quality` and `result`. `quality` contains the
+`run_meta` fields, an `unresolved_pct`, a `host_stack_share` between zero
+and one, a `verdict` and `warnings`. A share is null when no samples were
+captured. Query results encode unsigned integers above 2^53 as decimal
+strings. `summary` groups hotspots by event and shows at most five rows
+per event. Function grouping deduplicates the definition across all
+instances in a stack.

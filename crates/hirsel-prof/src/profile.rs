@@ -171,7 +171,7 @@ pub struct Profile {
 impl Profile {
     pub fn open(path: &Path) -> Result<Self> {
         let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        db.execute_batch("PRAGMA trusted_schema = OFF; PRAGMA query_only = ON;")?;
+        db.execute_batch("PRAGMA trusted_schema = OFF; PRAGMA query_only = ON; BEGIN DEFERRED;")?;
         for (pragma, expected) in [
             ("application_id", APPLICATION_ID),
             ("user_version", HPROF_VERSION),
@@ -189,6 +189,10 @@ impl Profile {
 
     pub fn connection(&self) -> &Connection {
         &self.db
+    }
+
+    pub(crate) fn connection_mut(&mut self) -> &mut Connection {
+        &mut self.db
     }
 }
 

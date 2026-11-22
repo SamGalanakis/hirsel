@@ -16,6 +16,14 @@ The native unwind records mark where a stack walk ends at a fiber boundary.
 ```text
 hirsel prof run [package-dir] [build-opts] [--out FILE.hprof] [--freq 997] [--pmu LIST] [--stack-bytes 32768] [-- args...]
 hirsel prof attach <PID> [--duration SECS] [--freq 997] [--pmu LIST] [--debug PATH] [--out FILE.hprof]
+hirsel prof summary <FILE.hprof> [--json]
+hirsel prof schema <FILE.hprof> [--json]
+hirsel prof top <FILE.hprof> [--by self|inclusive] [--event NAME] [--group def_path|instance] [--filter GLOB] [--limit 20] [--json]
+hirsel prof annotate <FILE.hprof> <DEF_PATH|FILE:LINE> [--json]
+hirsel prof callers <FILE.hprof> <DEF_OR_SYM> [--depth 5] [--json]
+hirsel prof callees <FILE.hprof> <DEF_OR_SYM> [--depth 5] [--json]
+hirsel prof diff <BASE.hprof> <HEAD.hprof> [--by self|inclusive] [--group def_path|instance] [--min-delta-pct 1.0] [--json]
+hirsel prof sql <FILE.hprof> "<SQL>" [--limit 500] [--timeout-ms 5000] [--json]
 ```
 
 `prof run` takes the native build options of `run`. It passes arguments after
@@ -28,3 +36,21 @@ and ELF symbols.
 `prof attach` samples a running process without stopping it. It ends the
 capture after `--duration`, at process exit, or on Ctrl+C. `--debug` selects a
 detached DWARF file to verify when the executable has no embedded DWARF.
+
+Start with `prof summary` for data quality and the five hottest functions
+per event. Use `prof schema` for tables and columns, and `prof sql` for
+read-only queries. Query commands accept `--limit` and `--json`. The default
+limit is 20 rows, or 500 for SQL. JSON includes a `quality` object and a
+command-specific `result` object. Unsigned values above 2^53 use decimal strings.
+
+`prof top` defaults to self cost and groups by definition path. `prof diff`
+uses those same defaults, refuses incompatible targets, clocks and primary
+events or units, and reports unmatched functions. A live-only capture
+cannot be compared with replay. A single cycle or wall-time comparison
+reports possible sampling noise.
+
+`prof sql` accepts one read-only statement that returns rows. An SQLite
+authorizer denies writes, ATTACH, and connection-changing statements.
+The result includes the ordered column names, rows, row limit, returned row
+count, and a truncation flag. The profiler interrupts a query that exceeds
+`--timeout-ms`.

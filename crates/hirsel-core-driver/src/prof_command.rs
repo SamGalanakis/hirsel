@@ -142,3 +142,100 @@ pub(crate) fn symbol_source(
         Resolved::OffsetsOnly => SymbolSource::OffsetsOnly,
     })
 }
+
+pub(crate) fn query(invocation: Invocation) -> Result<()> {
+    use hirsel_prof::{By, Group, Query};
+
+    let command = invocation.command.name;
+    let path = invocation
+        .positional
+        .as_deref()
+        .ok_or("prof query requires a profile file")?;
+    let operand = || {
+        invocation
+            .arguments
+            .first()
+            .map(String::as_str)
+            .ok_or("prof query is missing its second argument")
+    };
+    let mut by = By::SelfCost;
+    let mut group = Group::DefPath;
+    let mut event = None;
+    let mut filter = None;
+    let mut limit = if command == "prof sql" { 500 } else { 20 };
+    let mut depth = 5;
+    let mut min_delta_pct = 1.0;
+    let mut timeout = Duration::from_millis(5000);
+    let mut json = false;
+    for (id, value) in invocation.options {
+        let arg = || value.as_deref().expect("profile option takes a value");
+        match id {
+            OptionId::Json => json = true,
+            OptionId::ProfBy => {
+                by = match arg() {
+                    "self" => By::SelfCost,
+                    "inclusive" => By::Inclusive,
+                    _ => return Err("--by requires self or inclusive".into()),
+                }
+            }
+            OptionId::ProfGroup => {
+                group = match arg() {
+                    "def_path" => Group::DefPath,
+                    "instance" => Group::Instance,
+                    _ => return Err("--group requires def_path or instance".into()),
+                }
+            }
+            OptionId::ProfEvent => event = value,
+            OptionId::ProfFilter => filter = value,
+            OptionId::ProfRows => limit = arg().parse()?,
+            OptionId::ProfDepth => depth = arg().parse()?,
+            OptionId::ProfMinDeltaPct => min_delta_pct = arg().parse()?,
+            OptionId::ProfTimeout => timeout = Duration::from_millis(arg().parse()?),
+            _ => unreachable!(),
+        }
+    }
+    let request = match command {
+        "prof summary" => Query::Summary,
+        "prof schema" => Query::Schema,
+        "prof top" => Query::Top {
+            by,
+            event: event.as_deref(),
+            group,
+            filter: filter.as_deref(),
+        },
+        "prof annotate" => Query::Annotate { target: operand()? },
+        "prof callers" => Query::Callers {
+            target: operand()?,
+            depth,
+        },
+        "prof callees" => Query::Callees {
+            target: operand()?,
+            depth,
+        },
+        "prof diff" => Query::Diff {
+            head: Path::new(operand()?),
+            by,
+            group,
+            min_delta_pct,
+        },
+        "prof sql" => Query::Sql {
+            statement: operand()?,
+            timeout,
+        },
+        _ => unreachable!("profile command catalog"),
+    };
+    let report = hirsel_prof::query(Path::new(path), request, limit)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({"quality": report.quality, "result": report.result})
+        );
+    } else {
+        for (key, value) in report.quality.as_object().expect("quality object") {
+            println!("{key} = {value}");
+        }
+        println!();
+        println!("{:#}", report.result);
+    }
+    Ok(())
+}

@@ -1,5 +1,5 @@
-//! Returnable waits: the owned network waits a task parks at with its stack
-//! given back.
+//! Returnable waits: the waits a task parks at with its stack given back
+//! (owned network waits, unit-connection sends and receives, task joins).
 //!
 //! A wait is returnable when every frame from the task's entry down to it is a
 //! body of this module represented in the task's frame record. Each such body
@@ -15,7 +15,7 @@
 //! row continues the parked operation, so nothing before the wait runs twice.
 //!
 //! The rule is a function of the module alone. A function is represented when
-//! it reaches an owned wait (`recv_bounded`, `send_pair`) through direct calls
+//! it reaches a wait with a returnable row ([`Wait`]) through direct calls
 //! of represented functions, has none of the refused forms (frame storage,
 //! regions, limits, step scopes, isolation, vectors, `never`, recursion), and
 //! every address it needs after a wait is computed from parameters and
@@ -53,13 +53,13 @@ pub enum Refusal {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Site {
-    Leaf(HostOp),
+    Leaf(Wait),
     Callee(FuncId),
 }
 
-fn leaf(callee: Callee) -> Option<HostOp> {
+fn leaf(callee: Callee) -> Option<Wait> {
     match callee {
-        Callee::Runtime(RtOp::Host(op @ (HostOp::RecvBounded | HostOp::SendPair))) => Some(op),
+        Callee::Runtime(row) => Wait::of(row),
         _ => None,
     }
 }
@@ -912,7 +912,7 @@ impl Build<'_> {
 struct Calls<'a> {
     /// The variant and its signature for a represented callee.
     variant: &'a dyn Fn(FuncId) -> (FuncId, SigId),
-    returnable: &'a dyn Fn(HostOp) -> SigId,
+    returnable: &'a dyn Fn(Wait) -> SigId,
     frame_record: SigId,
 }
 
@@ -1734,9 +1734,17 @@ pub fn apply(module: &mut Module) -> Applied {
         return applied;
     }
     let frame_record = sig_id(module, RtOp::FrameRecord.signature());
-    let returnable: BTreeMap<u8, SigId> = [HostOp::RecvBounded, HostOp::SendPair]
+    let mut waits: Vec<Wait> = vec![];
+    for b in module.functions.iter().filter_map(|f| f.body.as_ref()) {
+        for w in b.calls.iter().filter_map(|c| leaf(c.callee)) {
+            if !waits.contains(&w) {
+                waits.push(w);
+            }
+        }
+    }
+    let returnable: HashMap<Wait, SigId> = waits
         .into_iter()
-        .map(|op| (op.code(), sig_id(module, RtOp::Returnable(op).signature())))
+        .map(|w| (w, sig_id(module, RtOp::Returnable(w).signature())))
         .collect();
     let mut variant: BTreeMap<usize, (FuncId, SigId)> = BTreeMap::new();
     for f in (0..n).filter(|&f| needed[f]) {
@@ -1763,7 +1771,7 @@ pub fn apply(module: &mut Module) -> Applied {
         applied.sizes.push((FuncId(f as u32), shapes[&f].sizes));
     }
     let lookup = |g: FuncId| variant[&g.index()];
-    let ret = |op: HostOp| returnable[&op.code()];
+    let ret = |w: Wait| returnable[&w];
     let calls = Calls {
         variant: &lookup,
         returnable: &ret,

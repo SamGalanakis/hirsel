@@ -319,7 +319,12 @@ fn rt(op: RtOp) -> String {
         RtOp::LaunchTarget { view } => format!("rt.launch_target[t{}]", view.0),
         RtOp::Host(op) => format!("rt.{}", op.name()),
         RtOp::FrameRecord => "rt.frame_record".into(),
-        RtOp::Returnable(op) => format!("rt.{}_rec", op.name()),
+        RtOp::Returnable(wait) => match wait {
+            Wait::Host(op) => format!("rt.{}_rec", op.name()),
+            Wait::Join { r } => format!("rt.join_rec[t{}]", r.0),
+            Wait::ConnSend { item } => format!("rt.conn_send_rec[t{}]", item.0),
+            Wait::ConnReceive { item } => format!("rt.conn_receive_rec[t{}]", item.0),
+        },
         RtOp::IsolateEnter => "rt.isolate_enter".into(),
         RtOp::IsolateLeave => "rt.isolate_leave".into(),
         RtOp::IsolateCatch => "rt.isolate_catch".into(),
@@ -1937,11 +1942,14 @@ impl BodyParser {
                     RtOp::Flow(op)
                 }
                 "frame_record" => RtOp::FrameRecord,
+                "join_rec" => RtOp::Returnable(Wait::Join { r: tys(1)?[0] }),
+                "conn_send_rec" => RtOp::Returnable(Wait::ConnSend { item: tys(1)?[0] }),
+                "conn_receive_rec" => RtOp::Returnable(Wait::ConnReceive { item: tys(1)?[0] }),
                 name if let Some(op) = name
                     .strip_suffix("_rec")
                     .and_then(|n| HostOp::ALL.iter().copied().find(|op| op.name() == n)) =>
                 {
-                    RtOp::Returnable(op)
+                    RtOp::Returnable(Wait::Host(op))
                 }
                 _ => match HostOp::ALL.iter().copied().find(|op| op.name() == name) {
                     Some(op) => RtOp::Host(op),

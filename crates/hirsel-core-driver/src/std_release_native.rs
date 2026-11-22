@@ -164,7 +164,8 @@ pub fn main(n: Net, tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
 );
 
 /// Channel receives in a represented task, which park with the stack given
-/// back: owned items, then the close; and a cancel while parked.
+/// back: an owned item kept through a match across later waits, owned items
+/// received in a helper, then the close; and a cancel while parked.
 const STD_RECEIVES: (&str, &str) = (
     "receives",
     r#"type Drain: send {
@@ -184,17 +185,29 @@ fn opened(take socket: Socket) -> bool waits {
     }
 }
 
+fn next(from: Receiver[String]) -> Option[u64] waits {
+    match channel.receive(from) {
+        Ok(take s) => Some(list.len(string.as_bytes(s))),
+        Error(_) => None,
+    }
+}
+
 fn drain(take job: Drain) -> u64 waits {
     let Drain(socket: take socket, from: take from, acks: take acks) = take job
     if !opened(take socket) { return 0 }
+    let first = match channel.receive(from) {
+        Ok(take s) => take s,
+        Error(_) => return 0,
+    }
+    if let Error(_) = channel.send(acks, ()) { return 0 }
     let mut total: u64 = 0
     loop {
-        match channel.receive(from) {
-            Ok(take s) => {
-                total = total * 10 + list.len(string.as_bytes(s))
+        match next(from) {
+            Some(n) => {
+                total = total * 10 + n
                 if let Error(_) = channel.send(acks, ()) { return 0 }
             },
-            Error(_) => return total,
+            None => return total * 10 + list.len(string.as_bytes(first)),
         }
     }
 }
@@ -494,7 +507,7 @@ fn std_differential(modes: &[&str]) -> usize {
             if (name, mode) == ("receives", "plain") {
                 assert_eq!(
                     (parts.0, String::from_utf8_lossy(&parts.1)),
-                    (Some(0), "123 Cancelled".into()),
+                    (Some(0), "231 Cancelled".into()),
                     "receives: {}",
                     String::from_utf8_lossy(&parts.2)
                 );

@@ -2,11 +2,12 @@
 // makes the backend transcript reproducible. Drivers normally use host.random.
 fn scripted_connection(n: Net, clock: Clock, password: Secret, mode: TlsMode) -> Result[Conn, Error] waits {
     let until = At(clock, host.mono_ns(clock) + 5000000000u64)
-    let socket = match host.connect(n, Addr(ip: V4(2130706433u32), port: 12345u16), until) {
+    let address = Addr(ip: V4(2130706433u32), port: 12345u16)
+    let socket = match host.connect(n, address, until) {
         Ok(take handle) => take handle,
         Error(e) => return Error(transport(e)),
     }
-    let session = secure(n, take socket, "alpha.test", System, until, mode)?
+    let session = secure(n, take socket, address, "alpha.test", System, until, mode)?
     login(take session, "user", "postgres", password, b"rOprNGfwEbeRWgbNEkqO")
 }
 
@@ -114,6 +115,25 @@ fn reuse_law(mut conn: Conn) -> bool waits {
     equal(string.as_bytes(strings), b"off")
 }
 
+fn cancel_law(n: Net, clock: Clock, mut conn: Conn) -> bool waits {
+    let mut cursor = result.unwrap(query(mut conn, "SELECT 42", list.new()))
+    let token = result.unwrap(cancel_token(mut cursor))
+    if let Error(CancelUnavailable) = cancel_token(mut cursor) {} else {
+        return false
+    }
+    // A cancel that reaches the server before Execute cannot cancel this query.
+    // Its successful send must still retire the connection when the query ends.
+    result.unwrap(cancel(n, take token, clock, host.mono_ns(clock) + 5000000000u64))
+    if !result.unwrap(next(mut cursor)) || !integer_row(cursor, 42) || result.unwrap(next(mut cursor)) {
+        return false
+    }
+    conn = finish(take cursor)
+    if let None = transaction(conn) {
+        return true
+    }
+    false
+}
+
 pub fn main(n: Net, clock: Clock, password: Secret, arguments: Args) -> Result[(), Exit] waits {
     let scenario = option.unwrap(args.get(arguments, 0))
     let name = string.as_bytes(scenario)
@@ -123,13 +143,17 @@ pub fn main(n: Net, clock: Clock, password: Secret, arguments: Args) -> Result[(
         Direct
     }
     let outcome = scripted_connection(n, clock, password, mode)
-    if equal(name, b"reuse") || equal(name, b"short-row") || equal(name, b"trailing") {
+    if equal(name, b"reuse") || equal(name, b"short-row") || equal(name, b"trailing") || equal(name, b"cancel") {
         let mut conn = result.unwrap(take outcome)
         if equal(name, b"reuse") {
             if !reuse_law(mut conn) {
                 return Error(Exit(status: 2))
             }
             result.unwrap(close(take conn))
+        } else if equal(name, b"cancel") {
+            if !cancel_law(n, clock, mut conn) {
+                return Error(Exit(status: 5))
+            }
         } else {
             if !malformed_row(mut conn, scenario) {
                 return Error(Exit(status: 3))

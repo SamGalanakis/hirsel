@@ -102,8 +102,8 @@ fn rendered_hints_follow_the_current_index_on_warm_and_cold_checks() {
 #[test]
 fn unresolved_library_path_hints_name_existing_public_declarations() {
     let dir = tempfile::tempdir().unwrap();
-    let source = "fn one() -> String { order.compare(\"a\", \"b\") }\n\
-                  fn absent() { order.unknown() }\n\
+    let source = "fn one() { let _ = time.from_unix_ms(5u64); }\n\
+                  fn absent() { time.unknown() }\n\
                   fn listener(n: Net, a: Addr) waits { let _ = net.listen(n, a, 8u16); }\n";
     let mut app = request(source, dir.path()).inputs.packages.remove(0);
     app.dependencies.extend([package("core"), package("std")]);
@@ -125,14 +125,14 @@ fn unresolved_library_path_hints_name_existing_public_declarations() {
     let Some(DiagnosticHint::StdPath {
         replacement,
         merged_modules,
-    }) = hint("order.compare")
+    }) = hint("time.from_unix_ms")
     else {
-        panic!("expected an exact std path for order.compare");
+        panic!("expected an exact std path for time.from_unix_ms");
     };
-    assert_eq!(replacement, "std.order.compare");
+    assert_eq!(replacement, "std.time.from_unix_ms");
     assert!(merged_modules.iter().any(|name| name == "clock"));
     assert!(merged_modules.iter().any(|name| name == "list"));
-    assert!(hint("order.unknown").is_none());
+    assert!(hint("time.unknown").is_none());
     assert_eq!(
         hint("net.listen").map(ToString::to_string).as_deref(),
         Some("did you mean `host.listen`?")

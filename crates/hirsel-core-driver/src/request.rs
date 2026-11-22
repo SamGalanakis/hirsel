@@ -133,10 +133,8 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     let mut package_store = None;
     let mut pack_out = None;
     for (option, value) in invocation.options.extract_if(.., |(option, _)| {
-        matches!(
-            option,
-            Opt::Locked | Opt::Frozen | Opt::PackageStore | Opt::PackOut
-        )
+        matches!(option, Opt::Locked | Opt::Frozen | Opt::PackageStore)
+            || (command == "pack" && *option == Opt::Output)
     }) {
         match option {
             Opt::Locked if package_mode != crate::package_lock::Mode::Frozen => {
@@ -144,7 +142,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             }
             Opt::Frozen => package_mode = crate::package_lock::Mode::Frozen,
             Opt::PackageStore => package_store = value.map(PathBuf::from),
-            Opt::PackOut => pack_out = value.map(PathBuf::from),
+            Opt::Output => pack_out = value.map(PathBuf::from),
             _ => {}
         }
     }
@@ -167,7 +165,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         )?;
         let lock = crate::package_lock::Lock::compare(&resolved, package_mode)?;
         if let Some(selected) = selected {
-            let out = pack_out.ok_or("pack requires --out FILE")?;
+            let out = pack_out.ok_or("pack requires --output FILE")?;
             let (bytes, archive) = resolved.make_archive(&selected)?;
             let output = crate::package_lock::PackOutput::stage(&resolved, &archive, &lock, &out)?;
             lock.commit(&resolved.workspace)?;
@@ -436,8 +434,6 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             | Opt::FmtStdin
             | Opt::Signatures
             | Opt::ListRules
-            | Opt::SdkOut
-            | Opt::PackOut
             | Opt::PackageStore
             | Opt::Locked
             | Opt::Frozen

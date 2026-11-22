@@ -1,6 +1,6 @@
 # Generated TypeScript bindings
 
-`hirsel sdk ts <program> --out <dir>` builds the program and runs its describe
+`hirsel sdk ts <program> --output <dir>` builds the program and runs its describe
 launch mode. The generated ES modules and `.d.ts` declarations use the same
 code in Node and browsers, without a build step.
 The output directory has `package.json` with `"type": "module"`, so Node loads

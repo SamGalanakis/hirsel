@@ -59,7 +59,6 @@ pub enum OptionId {
     PackageStore,
     Locked,
     Frozen,
-    PackOut,
     Metrics,
     ProfileFront,
     ProfOut,
@@ -87,7 +86,6 @@ pub enum OptionId {
     FmtStdin,
     Signatures,
     ListRules,
-    SdkOut,
     PlaceTimeout,
     NPlace,
     Url,
@@ -132,7 +130,7 @@ commands! {
     "check", "check [package-dir] [options]", "Check a package or an explicit input manifest.";
     "lock", "lock [package-dir] [options]", "Resolve a workspace and write or verify its lock.";
     "fetch", "fetch [package-dir] [options]", "Fetch the pinned libraries a workspace uses.";
-    "pack", "pack [package-dir] --out FILE [options]", "Publish a library and its dependency closure to an archive.";
+    "pack", "pack [package-dir] -o FILE [options]", "Publish a library and its dependency closure to an archive.";
     "build", "build [package-dir | --recipe HASH] [options]", "Assemble a native executable from a release recipe.";
     "publish", "publish PACKAGE [options]", "Check a package, publish its code objects and print the recipe hash.";
     "manifest", "manifest show PATH", "Print a release manifest.";
@@ -167,7 +165,7 @@ commands! {
     "fmt", "fmt [--check] [--signatures] <FILE|DIR|--stdin>", "Format a source file, a source directory, or standard input.";
     "explain", "explain RULE|MODULE|debug-lines|primer | explain --list [--json]", "Explain specification rules and find library declarations.";
     "primer", "primer", "Print the Hirsel primer: the language in one page.";
-    "sdk", "sdk ts <program> --out DIR [options]", "Generate browser and Node ES modules and TypeScript declarations.";
+    "sdk", "sdk ts <program> -o DIR [options]", "Generate browser and Node ES modules and TypeScript declarations.";
     "call", "call SERVER --url ws://HOST:PORT/PATH [options] [-- ENTRY [--FLAG VALUE...]]", "List a running place's entries, or call one, typed from the server's Describe.";
 }
 macro_rules! option {
@@ -205,13 +203,6 @@ static OPTIONS: &[OptionSpec] = &[
             "fetch", "pack"
         ],
         "Require a current workspace lock and use only the package store."
-    ),
-    option!(
-        PackOut,
-        ["--out"],
-        Some("FILE"),
-        ["pack"],
-        "Write the library archive to this file."
     ),
     option!(
         Interface,
@@ -408,13 +399,6 @@ static OPTIONS: &[OptionSpec] = &[
         Some("PATH"),
         ["build"],
         "Write a release manifest from an empty-list preview."
-    ),
-    option!(
-        SdkOut,
-        ["--out"],
-        Some("DIR"),
-        ["sdk"],
-        "Write the generated SDK to this directory."
     ),
     option!(
         PlaceTimeout,
@@ -900,8 +884,8 @@ static OPTIONS: &[OptionSpec] = &[
         Output,
         ["-o", "--output"],
         Some("PATH"),
-        ["build", "run", "replay", "test"],
-        "Write the executable, or test executables, here."
+        ["build", "run", "replay", "test", "pack", "sdk"],
+        "Write the command output to this path."
     ),
     option!(
         Entry,

@@ -838,7 +838,7 @@ impl PackageLaw {
     }
 
     fn fixture(&self, directory: &str, out: &str) -> String {
-        Self::pass(self.with_store(&["pack", directory, "--out", out], "fixtures"))
+        Self::pass(self.with_store(&["pack", directory, "--output", out], "fixtures"))
     }
 
     fn fixture_json(&self) {
@@ -968,11 +968,14 @@ fn package_bundle(entries: &[&[u8]]) -> Vec<u8> {
 #[test]
 fn package_known_roots() {
     let law = PackageLaw::new();
+    PackageLaw::refuse(law.run(&["pack", "jx", "--out", "jx.hpkg"]),
+        "unknown option `--out` for pack; use help pack");
     law.library("jx", "json", 1, PACKAGE_X_SOURCE, "");
     law.library("jy", "json", 1, PACKAGE_Y_SOURCE, "");
     for (dir, root) in [("jx", PACKAGE_X), ("jy", PACKAGE_Y)] {
         let archive = format!("{dir}.hpkg");
-        let stdout = PackageLaw::pass(law.run(&["pack", dir, "--out", &archive]));
+        let flag = if dir == "jx" { "-o" } else { "--output" };
+        let stdout = PackageLaw::pass(law.run(&["pack", dir, flag, &archive]));
         assert_eq!(stdout, format!("json@1 {root}\n"));
         let content = std::fs::read(law.path(&format!("packages/{}", &root[7..]))).unwrap();
         assert_eq!(content.len(), 72);
@@ -1093,7 +1096,7 @@ fn package_l4_symlink_escape() {
     law.manifest("p", "p", 1, "[sources]\n\"a.hirsel\" = \"a\"\n");
     law.write("outside.hirsel", PACKAGE_MAIN);
     std::os::unix::fs::symlink("../outside.hirsel", law.path("p/a.hirsel")).unwrap();
-    for args in [&["check", "p"][..], &["pack", "p", "--out", "p.hpkg"][..]] {
+    for args in [&["check", "p"][..], &["pack", "p", "--output", "p.hpkg"][..]] {
         PackageLaw::refuse(law.run(args), "p/hirsel.toml: sources: \"a.hirsel\" resolves outside the package");
         assert!(!law.path("p/hirsel.lock").exists());
         assert!(!law.path("p.hpkg").exists());
@@ -1102,10 +1105,10 @@ fn package_l4_symlink_escape() {
     law.write("p/real/a.hirsel", PACKAGE_MAIN);
     std::os::unix::fs::symlink("real/a.hirsel", law.path("p/a.hirsel")).unwrap();
     PackageLaw::pass(law.run(&["check", "p"]));
-    let linked = PackageLaw::pass(law.run(&["pack", "p", "--out", "p.hpkg"]));
+    let linked = PackageLaw::pass(law.run(&["pack", "p", "--output", "p.hpkg"]));
     law.manifest("copy", "p", 1, "[sources]\n\"a.hirsel\" = \"a\"\n");
     law.write("copy/a.hirsel", PACKAGE_MAIN);
-    assert_eq!(linked, PackageLaw::pass(law.run(&["pack", "copy", "--out", "copy.hpkg"])));
+    assert_eq!(linked, PackageLaw::pass(law.run(&["pack", "copy", "--output", "copy.hpkg"])));
 }
 
 #[test]
@@ -1115,7 +1118,7 @@ fn package_l5_test_files_do_not_enter_content() {
         "[tests]\nlimit = 67108864\n[tests.sources]\n\"json_laws.hirsel\" = \"json\"\n");
     law.write("jx/json_laws.hirsel",
         "@test\nfn version_law() -> Result[(), ()] { if version() == 1u64 { Ok(()) } else { Error(()) } }\n");
-    assert_eq!(PackageLaw::pass(law.run(&["pack", "jx", "--out", "jx.hpkg"])), format!("json@1 {PACKAGE_X}\n"));
+    assert_eq!(PackageLaw::pass(law.run(&["pack", "jx", "--output", "jx.hpkg"])), format!("json@1 {PACKAGE_X}\n"));
     let stdout = PackageLaw::pass(law.run(&["test", "jx", "--json"]));
     let results: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     let tests = results["tests"].as_array().unwrap();
@@ -1227,7 +1230,7 @@ fn package_l6_archive_closure_and_atomic_refusal() {
 fn package_l11_store_hits_validate_every_incoming_edge() {
     let law = PackageLaw::new();
     law.library("jx", "json", 1, PACKAGE_X_SOURCE, "");
-    PackageLaw::pass(law.run(&["pack", "jx", "--out", "jx.hpkg"]));
+    PackageLaw::pass(law.run(&["pack", "jx", "--output", "jx.hpkg"]));
     let yaml = format!("yaml = {{ major = 1, root = \"{PACKAGE_X}\" }}");
     let expected = format!("yaml@1: {PACKAGE_X} is json@1");
     law.app("app", &format!("[dependencies]\n{yaml}\n"));
@@ -1671,8 +1674,8 @@ fn package_pack_output_cannot_alias_a_fetched_archive() {
     std::fs::hard_link(law.path("work/json.hpkg"), law.path("output.hpkg")).unwrap();
     let original = std::fs::read(law.path("output.hpkg")).unwrap();
     PackageLaw::refuse(
-        law.run(&["pack", "work", "--out", "output.hpkg"]),
-        "--out output.hpkg is an input of this command",
+        law.run(&["pack", "work", "--output", "output.hpkg"]),
+        "--output output.hpkg is an input of this command",
     );
     assert_eq!(std::fs::read(law.path("output.hpkg")).unwrap(), original);
     assert!(!law.path("work/hirsel.lock").exists());
@@ -1685,7 +1688,7 @@ fn package_pack_output_cannot_alias_an_input() {
     std::fs::hard_link(law.path("jx/json.hirsel"), law.path("linked.hpkg")).unwrap();
     let store_entry = format!("packages/{}", &PACKAGE_X[7..]);
     for out in ["jx/hirsel.toml", "linked.hpkg", "jx/hirsel.lock", &store_entry] {
-        PackageLaw::refuse(law.run(&["pack", "jx", "--out", out]), &format!("--out {out} is an input of this command"));
+        PackageLaw::refuse(law.run(&["pack", "jx", "--output", out]), &format!("--output {out} is an input of this command"));
         assert!(!law.path("jx/hirsel.lock").exists());
         law.empty_store();
     }

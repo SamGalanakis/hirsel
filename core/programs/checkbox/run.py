@@ -75,7 +75,7 @@ def build(compiler, work, web, listen, source=PROGRAM / "main.hirsel", store_sou
 
 def prepare_web(compiler, executable, web):
     subprocess.run([
-        compiler, "sdk", "ts", executable, "--out", web, "--n-place", N_PLACE,
+        compiler, "sdk", "ts", executable, "--output", web, "--n-place", N_PLACE,
     ], check=True, cwd=ROOT)
     shutil.copyfile(PROGRAM / "web/index.html", web / "index.html")
     subprocess.run([

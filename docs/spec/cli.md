@@ -3,6 +3,11 @@
 Run `hirsel help` for the command catalog. Use `hirsel help <command>` for
 the options accepted by a command.
 
+## Output paths
+
+Build, pack, and SDK generation accept `-o` or `--output`. Use a file
+path for `build` and `pack`, and a directory for `sdk ts`.
+
 ## Native build options
 
 Native binaries from both backends include `.eh_frame` unwind

@@ -27,7 +27,7 @@ impl Options {
         for (id, value) in invocation.options {
             let text = value.as_deref().unwrap_or_default();
             match id {
-                OptionId::SdkOut => out = Some(PathBuf::from(text)),
+                OptionId::Output => out = Some(PathBuf::from(text)),
                 OptionId::PlaceTimeout => {
                     let seconds: f64 = text.parse()?;
                     timeout = Duration::try_from_secs_f64(seconds)
@@ -67,7 +67,7 @@ impl Options {
         }
         Ok(Self {
             program,
-            out: out.ok_or("sdk ts requires --out DIR")?,
+            out: out.ok_or("sdk ts requires --output DIR")?,
             timeout,
             n_place,
             build,
@@ -293,14 +293,16 @@ mod tests {
     }
     #[test]
     fn sdk_command_options() {
-        let options = parse(&["sdk", "ts", "server", "--out", "bindings"]).unwrap();
+        let options = parse(&["sdk", "ts", "server", "-o", "bindings"]).unwrap();
+        assert_eq!(options.out, PathBuf::from("bindings"));
+        assert!(parse(&["sdk", "ts", "server", "--out", "bindings"]).is_err());
         assert_eq!(options.timeout, Duration::from_secs(10));
         assert_eq!(options.n_place, 16 * 1024 * 1024);
         let options = parse(&[
             "sdk",
             "ts",
             "server",
-            "--out",
+            "--output",
             "bindings",
             "--place-timeout",
             "0.5",
@@ -316,7 +318,7 @@ mod tests {
                     "sdk",
                     "ts",
                     "server",
-                    "--out",
+                    "--output",
                     "bindings",
                     "--place-timeout",
                     seconds
@@ -325,7 +327,7 @@ mod tests {
             );
         }
         assert!(parse(&["sdk", "ts", "server"]).is_err());
-        assert!(parse(&["sdk", "js", "server", "--out", "bindings"]).is_err());
+        assert!(parse(&["sdk", "js", "server", "--output", "bindings"]).is_err());
     }
     #[test]
     fn sdk_command_does_not_write_after_a_describe_error() {

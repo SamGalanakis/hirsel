@@ -8,3 +8,10 @@ charge = "charge-v1"
 
 [dependencies]
 std = { major = 1 }
+
+[tests]
+limit = 16777216
+grants = ["Tasks", "Env=HIRSEL_TEST_SIM_SEED"]
+
+[tests.sources]
+"sim_tests.hirsel" = "sim_tests"

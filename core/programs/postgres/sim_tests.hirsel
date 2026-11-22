@@ -1,0 +1,245 @@
+type Script: key + send = StartupError | TruncatedFrame | ReadyDeadline | FatalDuringSync
+
+type Link: send {
+    port: Served[NetOp],
+    clock: Clock,
+    plan: std.sim.world.Plan
+}
+
+type Peer: send {
+    listener: Listener,
+    script: Script
+}
+
+const HOSTNAME: String = "postgres.test"
+
+const DEADLINE: u64 = 100
+
+fn drive_clock(take input: std.sim.world.World) waits {
+    let mut world = take input
+    std.sim.world.run(mut world)
+}
+
+fn serve_link(take input: Link) waits {
+    let Link(port: take port, clock: clock, plan: take initial) = take input
+    let mut plan = take initial
+    // A five-byte frame header always spans fragments. The seed also varies
+    // where sends and reads split the body and how much reaches the pipe.
+    let config = std.sim.net.Config(queue_bytes: 64, fragment_bytes: 4, latency_ns: 0)
+    let mut link = std.sim.net.new(config)
+    let mut addresses: List[Ip] = list.new()
+    list.push(mut addresses, V4(2130706433))
+    std.sim.net.resolve_as(mut link, string.from(HOSTNAME), take addresses)
+    std.sim.net.handshake_as(mut link, string.from(HOSTNAME), Ok(Handshake(protocol: Some(0), peer: (0, 0, 0, 0))))
+    let _ = std.sim.net.serve(link, mut plan, clock, take port)
+}
+
+fn send_all(mut writer: WriteHalf, data: Bytes) waits {
+    let end = list.len(data)
+    let mut at: u64 = 0
+    while at < end {
+        let count = result.unwrap(host.send_pair(mut writer, list.slice(data, at, end), b"", Never))
+        if count == 0 {
+            fail("peer could not send the scripted bytes")
+        }
+        at += count
+    }
+}
+
+fn send_frame(mut writer: WriteHalf, tag: u8, body: Bytes) waits {
+    let mut frame: Bytes = list.with_capacity(5 + list.len(body))
+    list.push(mut frame, tag)
+    let length: u32 = int.narrow(4 + list.len(body))
+    list.put_word_be(mut frame, length)
+    list.append(mut frame, body)
+    send_all(mut writer, frame)
+}
+
+fn expect_bytes(mut reader: ReadHalf, expected: Bytes) waits {
+    let end = list.len(expected)
+    let mut received: Bytes = list.with_capacity(end)
+    while list.len(received) < end {
+        let remaining = end - list.len(received)
+        if result.unwrap(host.recv_bounded(mut reader, mut received, remaining, Never)) == 0 {
+            fail("client closed before sending the expected message")
+        }
+    }
+    for at in 0u64 .. end {
+        if received[at] != expected[at] {
+            fail("unexpected frontend bytes")
+        }
+    }
+}
+
+fn expect_frame(mut reader: ReadHalf, tag: u8, body: Bytes) waits {
+    let mut header: Bytes = list.with_capacity(5)
+    list.push(mut header, tag)
+    let length: u32 = int.narrow(4 + list.len(body))
+    list.put_word_be(mut header, length)
+    expect_bytes(mut reader, header)
+    expect_bytes(mut reader, body)
+}
+
+fn expect_eof(mut reader: ReadHalf) waits {
+    let mut data: Bytes = list.with_capacity(1)
+    if result.unwrap(host.recv_bounded(mut reader, mut data, 1, Never)) != 0 {
+        fail("client sent bytes after the exchange ended")
+    }
+}
+
+// PostgreSQL 17 §§53.3 and 53.7. The nonce is Base64 of the first
+// 18 little-endian bytes of SplitMix64(0). The proof and verifier use
+// RFC 5802's transcript and RFC 7677's SHA-256, salt and password.
+fn authenticate(mut reader: ReadHalf, mut writer: WriteHalf) waits {
+    send_frame(mut writer, b'R', b"\x00\x00\x00\x0aSCRAM-SHA-256\0\0")
+    expect_frame(mut reader, b'p', b"SCRAM-SHA-256\0\x00\x00\x00\x20n,,n=,r=r80dezmoIOL0Zbmhap54bk9F")
+    send_frame(mut writer, b'R', b"\x00\x00\x00\x0br=r80dezmoIOL0Zbmhap54bk9Fserver,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096")
+    expect_frame(mut reader, b'p', b"c=biws,r=r80dezmoIOL0Zbmhap54bk9Fserver,p=IDbuODPYrF/1dQ4/01RNykAXAcDJjZ+E6BT9wOXlykg=")
+    send_frame(mut writer, b'R', b"\x00\x00\x00\x0cv=RbpTzOV+lD7KxlFx93YWzRtM6JnNBL8RwDlfp4Eu5bI=")
+    send_frame(mut writer, b'R', b"\x00\x00\x00\x00")
+    send_frame(mut writer, b'S', b"client_encoding\0UTF8\0")
+    send_frame(mut writer, b'K', b"\x12\x34\x56\x78\x9a\xbc\xde\xf0")
+}
+
+fn peer(take input: Peer) waits {
+    let Peer(listener: take listen, script) = take input
+    let mut listener = take listen
+    let (socket, _) = result.unwrap(host.accept(mut listener, Never))
+    let (r, w) = net.split(take socket)
+    let mut reader = take r
+    let mut writer = take w
+    // PostgreSQL 17 §53.7 StartupMessage. 58 bytes including the length word.
+    expect_bytes(mut reader, b"\x00\x00\x00\x3a\x00\x03\x00\x00user\0user\0database\0postgres\0client_encoding\0UTF8\0\0")
+    match script {
+        StartupError => {
+            // §§53.2.1, 53.7, 53.8 and Appendix A. A startup refusal can
+            // precede authentication. Field V is the unlocalized severity.
+            send_frame(mut writer, b'E', b"SGRAVE\0VFATAL\0C3D000\0Mdatabase does not exist\0Dscripted detail\0\0")
+        },
+        TruncatedFrame => {
+            // §§53.1.1 and 53.2.9. Length 68 promises 64 body bytes.
+            // Close the write half after delivering only seven of them.
+            send_all(mut writer, b"E\x00\x00\x00\x44SFATAL\0")
+            drop(take writer)
+            expect_eof(mut reader)
+            return
+        },
+        ReadyDeadline => {
+            // §53.2.1. AuthenticationOk, parameters and the backend key
+            // do not finish startup. Withhold ReadyForQuery until EOF.
+            authenticate(mut reader, mut writer)
+        },
+        FatalDuringSync => {
+            authenticate(mut reader, mut writer)
+            send_frame(mut writer, b'Z', b"I")
+            expect_frame(mut reader, b'P', b"\0SELECT missing\0\0\0")
+            expect_frame(mut reader, b'D', b"S\0")
+            expect_frame(mut reader, b'H', b"")
+            // §§53.2.3 and 53.2.9. Parse fails, then the server shuts
+            // down during resynchronization and reports admin_shutdown.
+            send_frame(mut writer, b'E', b"SERROR\0VERROR\0C42703\0Mcolumn does not exist\0\0")
+            expect_frame(mut reader, b'S', b"")
+            send_frame(mut writer, b'E', b"SFATAL\0VFATAL\0C57P01\0Mterminating connection\0\0")
+            drop(take writer)
+            expect_eof(mut reader)
+            return
+        },
+    }
+    expect_eof(mut reader)
+}
+
+fn client(net: Net, address: Addr, clock: Clock, script: Script) waits {
+    let password = string.into_bytes(string.from("pencil"))
+    let config = postgres.Config(host: string.from(HOSTNAME), port: address.port, user: string.from("user"), database: string.from("postgres"), password: result.unwrap(secret.seal(take password, HOSTNAME)), random: provide.random(0), clock: clock, deadline: DEADLINE)
+    let opened = postgres.connect(net, System, config)
+    match script {
+        StartupError => match take opened {
+            Error(Fatal(e)) => {
+                if e.sqlstate != "3D000" || e.severity != "FATAL" || e.message != "database does not exist" {
+                    fail("startup ErrorResponse lost its SQLSTATE, severity or message")
+                }
+                if let Some(detail) = e.detail {
+                    if detail != "scripted detail" {
+                        fail("startup ErrorResponse changed its detail")
+                    }
+                } else {
+                    fail("startup ErrorResponse lost its detail")
+                }
+            },
+            _ => fail("expected a fatal startup ErrorResponse"),
+        },
+        TruncatedFrame => match take opened {
+            Error(Protocol(Truncated)) => {},
+            _ => fail("EOF inside ErrorResponse must report a truncated frame"),
+        },
+        ReadyDeadline => match take opened {
+            Error(OutcomeUnknown(TimedOut)) => {
+                if host.mono_ns(clock) != DEADLINE {
+                    fail("waiting for ReadyForQuery ended at the wrong virtual time")
+                }
+            },
+            _ => fail("startup must wait for ReadyForQuery until the deadline"),
+        },
+        FatalDuringSync => {
+            let mut conn = result.unwrap(take opened)
+            let params: List[postgres.Param] = list.new()
+            match postgres.execute(mut conn, "SELECT missing", params) {
+                Error(Fatal(e)) => {
+                    if e.sqlstate != "57P01" || e.message != "terminating connection" {
+                        fail("expected the shutdown diagnostic sent during Sync")
+                    }
+                },
+                _ => fail("fatal ErrorResponse during Sync must end the exchange"),
+            }
+            if let Some(_) = postgres.transaction(conn) {
+                fail("a connection shut down during Sync must be retired")
+            }
+        },
+    }
+}
+
+fn simulate(tasks: Tasks, seed: u64, script: Script) waits {
+    let (initial, clock) = std.sim.world.new(seed, 0, 0)
+    let mut world = take initial
+    let plan = std.sim.world.detach(mut world)
+    let timer = task.spawn(tasks, bytes 65536, take world, drive_clock)
+    let (net, port) = provide.net(bytes 4096)
+    let link = task.spawn(tasks, bytes 4194304, Link(port: take port, clock: clock, plan: take plan), serve_link)
+    let (listener, address) = result.unwrap(host.listen(net, Addr(ip: V4(2130706433), port: 0), 1))
+    let server = task.spawn(tasks, bytes 262144, Peer(listener: take listener, script: script), peer)
+    client(net, address, clock, script)
+    result.unwrap(task.join(take server))
+    result.unwrap(task.join(take link))
+    result.unwrap(task.join(take timer))
+}
+
+fn test_seed(e: Env) -> u64 {
+    match std.sim.world.test_seed(e) {
+        Some(active) => active,
+        None => 0,
+    }
+}
+
+@test
+fn fragmented_startup_error(tasks: Tasks, e: Env) -> Result[(), ()] waits {
+    simulate(tasks, test_seed(e), StartupError)
+    Ok(())
+}
+
+@test
+fn eof_in_error_response(tasks: Tasks, e: Env) -> Result[(), ()] waits {
+    simulate(tasks, test_seed(e), TruncatedFrame)
+    Ok(())
+}
+
+@test
+fn startup_ready_deadline(tasks: Tasks, e: Env) -> Result[(), ()] waits {
+    simulate(tasks, test_seed(e), ReadyDeadline)
+    Ok(())
+}
+
+@test
+fn fatal_error_during_sync(tasks: Tasks, e: Env) -> Result[(), ()] waits {
+    simulate(tasks, test_seed(e), FatalDuringSync)
+    Ok(())
+}

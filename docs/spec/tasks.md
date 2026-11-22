@@ -436,8 +436,38 @@ that admitted it, except the charges for the result's content, any delivered cau
 each connection the helper made that is still open (CONC-17). These charges are refunded
 when their owners are cleaned.
 
+A unit's **entry** is its function `f`, its argument `x`, its root limit `n` and its root
+step bound or the absence of one; the first unit's entry is `main` with its grants, the run's
+root limit and the launch metadata ([launch](launch.md)). A unit's **inputs** are what
+reaches it from outside: the items and close of each inbox it holds and the outcome of each
+`conn.send` it issues (CONC-17), the end of each helper it owns, a cancellation request for
+its root, refunds sent to its limits by other units, and its providers' results. Two units
+with the same entry that receive the same inputs in the same order behave the same. The order
+in which inputs from different senders reach a unit is free. How many workers run the
+units, which worker or thread runs a unit at any moment, and whether a spare thread takes
+the place of a worker blocked in a host call are not observable.
+
+Every charged byte has one payer, a limit, at each moment, and each reservation is released
+at one point. A limit's spendable balance changes only at an operation of its own unit or
+when its unit takes a refund that another unit sent it, and a send to an inbox of the
+sender's own unit follows the same rule. A unit's storage is charged to that unit's limits
+and refunded to the limit that paid for it ([MEM-20](budgets.md#mem-20-limit-records-and-hand-over));
+where an engine places that storage, and whether a waiting task keeps its stack, are not
+observable.
+
 This clause fixes no order between the actions of different units, and does not say when an
 action in one unit becomes visible in another.
+
+**Unbuilt.** These are not built, and no program or test may rely on them:
+
+- `Shared` payloads and boards, which would let units read one immutable payload by
+  reference and publish its latest version to many units; no program can name them.
+- A recording of a unit other than the run's first: a recorded run records its first unit
+  and not its helpers, so no replay of a helper, and no equality of recordings made at
+  different worker counts for a program with helpers, is promised.
+- A test configuration that fixes every input of a unit, including how many of the inputs
+  that have reached it it takes at each point; until it exists, a test of units asserts only
+  what holds for every such count.
 
 ```hirsel
 type Table: cross { rows: List[u64] }
@@ -476,8 +506,13 @@ and admits nothing.
 content charge exceeds `b`. It answers `Closed(x)` once the inbox has been cleaned. The
 connection accepts `x` only while fewer than `cap` items are queued and the room's free bytes
 hold `x`'s content charge; acceptance moves `x` into the connection and refunds its old
-storage where it was charged. Until then the send waits. The wait is a cancellation point
-([CONC-7](#conc-7-cancellation-points)), and a send cancelled there is not accepted.
+storage where it was charged. Until then the send waits. Its entry and its wait are
+cancellation points ([CONC-7](#conc-7-cancellation-points)), and a send cancelled there is
+not accepted. Waiting sends are accepted oldest first, by the order in which they began
+waiting, and no send is accepted while an older one waits, even one that would fit. One
+large waiting send therefore holds back every smaller one behind it; a program that needs
+small items to pass a large one sends them on another connection. Accepting a newer send
+that fits ahead of an older one is not built.
 `conn.try_send(c, take x) -> Result[(), SendError[T]]` decides as `send` does, but never
 waits and is not a cancellation point: it returns `Full(x)` where `send` would wait.
 
@@ -496,8 +531,10 @@ is seen by the inbox's unit.
 Cleaning the inbox seals the connection: every later send and every waiting send answers
 `Closed(x)`. The cleaning waits for the seal with cancellation shielded, then drops every
 item not received, last accepted first, as [CONC-9](#conc-9-queue-drop) says for a channel.
-After the inbox and every client have been cleaned, the connection's charge is refunded to
-the limit that admitted it. When the last of them is cleaned in the unit that holds that
+When that cleaning ends, what the drops left charged to the room, such as a failing
+finalizer's cause, is charged from then on to the limit that admitted the connection. After
+the inbox and every client have been cleaned, the rest of the connection's charge is
+refunded to that limit. When the last of them is cleaned in the unit that holds that
 limit, the refund is complete when that cleaning ends.
 
 A request that wants a reply carries a client of the asker's own inbox:

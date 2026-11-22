@@ -282,7 +282,10 @@ pub type SecretError = Invalid()
 - **`secret.seal`.** This takes bytes the program already holds, such as a token a
   server minted during the run, together with a `to` pattern list. It moves them into
   run-owned storage that is charged to the caller's limit until the run ends, as
-  `net.narrow` charges rule storage. A malformed pattern list gives `Invalid`. Once
+  `net.narrow` charges rule storage. A malformed pattern list gives `Invalid`, and `b` is
+  dropped. Returning `b` in the error, as `Result[Secret, (SecretError, Bytes)]`, is a
+  pending signature change and is not built. A sealed secret that crosses to another unit
+  ([CONC-15](tasks.md#conc-15-units)) designates the same bytes, keeps its `to` patterns, and stays charged until the run ends. Once
   sealed, the program has no access to the bytes. Sealing does not remove copies the
   program made before sealing.
 

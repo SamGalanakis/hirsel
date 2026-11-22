@@ -552,11 +552,13 @@ impl CheckProduct {
         let inputs = reached.native.as_ref().expect("a build's reachable set");
         let root = Identity::plain(entry.clone());
         let code = crate::code_store::CodeStore::new(options.store.join("code"));
-        let (mut units, _, _) = self.release_units(&root, &reached, &code, None)?;
+        let mut units = self
+            .release_units(&root, &reached, &code, None, None)?
+            .units;
         let runtime = inputs.toolchain.runtime;
         let std = std_release::std_side(&units, &root, Some(self), None, options, runtime)?;
         units.retain(|identity, _| identity == &root || !std.roots.contains(identity));
-        recipe_build::bind_annexes(&mut units, &std.points, true)?;
+        recipe_build::bind_annexes(&mut units, &BTreeMap::new(), &std.points, true)?;
         let store = Store::new(&options.store)?;
         Ok(
             recipe_build::release_objects(&units, &root, std, options, runtime, &store, false)?

@@ -50,6 +50,59 @@ pub(super) struct Unit {
     pub(super) module: Module,
     annex: Annex,
     builtins: Vec<u32>,
+    /// The unit's key in its store's unit index, when its publication keeps
+    /// one ([`Memo`]).
+    memo: Option<ContentHash>,
+}
+
+/// What an earlier publication into the same stores made of a unit, under
+/// the unit's memo key ([`CheckProduct::memo_key`]): its stored body and
+/// annex, its builtins, the sites its binding reads and the items it adds,
+/// and its object's key under one emitter. A unit found here is not prepared
+/// again: its module is decoded from its stored body only if its object must
+/// be emitted. The index is a cache; nothing it holds enters a key or a
+/// recipe that the unit's preparation would not give.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub(super) struct Memo {
+    body: (ContentHash, u64),
+    annex: (ContentHash, u64),
+    builtins: Vec<u32>,
+    /// The distinct sites of the unit's annex.
+    points: Vec<(String, u32, u32)>,
+    /// Each item binding added to the unit's module: its index and its site
+    /// in `points`.
+    anchored: Vec<(u32, u32)>,
+    /// An emitter, and the key of the unit's bound object under it.
+    object: (ContentHash, ContentHash),
+}
+
+impl Memo {
+    fn code(&self) -> BodyRef {
+        let object = |(hash, len)| ObjectRef { hash, len };
+        BodyRef {
+            body: object(self.body),
+            annex: object(self.annex),
+        }
+    }
+}
+
+/// The units a publication took from its memos: each one's memo key and memo.
+type Hits = BTreeMap<Identity, (ContentHash, Memo)>;
+
+/// A store's unit index for one entry: each unit memo by its key.
+#[derive(Default, PartialEq, Serialize, Deserialize)]
+struct UnitIndex {
+    schema: u32,
+    units: BTreeMap<ContentHash, Memo>,
+}
+const UNIT_INDEX_SCHEMA: u32 = 1;
+
+/// Where a publication's unit memos come from and go: its index's key, the
+/// index as read, and the code store its bodies are in.
+pub(super) struct Memos {
+    key: ContentHash,
+    read: UnitIndex,
+    code: CodeStore,
 }
 
 impl Unit {
@@ -97,6 +150,7 @@ fn unit(original: &Module, body: normal::EncodedBody, annex: Annex, module: Modu
         module,
         annex,
         builtins,
+        memo: None,
     }
 }
 
@@ -136,6 +190,9 @@ pub struct Publication {
     pub(crate) root: ContentHash,
     pub(crate) recipe: Recipe,
     pub(super) units: BTreeMap<Identity, Unit>,
+    /// The units an earlier publication's memo gave, apart from `units`.
+    memos: Hits,
+    index: Option<Memos>,
     addresses: BTreeMap<Identity, ContentHash>,
     link_archives: LinkArchives,
 }
@@ -171,8 +228,26 @@ impl CheckProduct {
         let foreign = self.release_foreign(entry, reached, options, decl, store)?;
         let entry = Identity::plain(entry.clone());
         let names = decl.parameters.iter().map(|p| p.name.clone()).collect();
-        let (units, groups, addresses) = self.release_units(&entry, reached, store, Some(names))?;
-        let mut bodies = units.values().map(|unit| unit.code).collect::<Vec<_>>();
+        let index = Memos::open(options, &entry, store)?;
+        let Released {
+            units,
+            memos,
+            groups,
+            addresses,
+        } = self.release_units(&entry, reached, store, Some(names), index.as_ref())?;
+        // The bodies in identity order before their sort, as one map of every
+        // unit gives them.
+        let mut coded = units
+            .iter()
+            .map(|(identity, unit)| (identity, unit.code))
+            .chain(
+                memos
+                    .iter()
+                    .map(|(identity, (_, memo))| (identity, memo.code())),
+            )
+            .collect::<Vec<_>>();
+        coded.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+        let mut bodies = coded.into_iter().map(|(_, code)| code).collect::<Vec<_>>();
         bodies.sort_unstable_by_key(|body| body.body.hash);
         let launch = Launch {
             backend: match options.backend {
@@ -199,6 +274,8 @@ impl CheckProduct {
             root,
             recipe,
             units,
+            memos,
+            index,
             addresses,
             link_archives: foreign.link_archives,
         })
@@ -206,35 +283,50 @@ impl CheckProduct {
 
     /// The units of `entry`'s reached closure, each body and annex put in
     /// `store`, with its groups and each unit's address; `names` are the
-    /// entry's startup parameter names when it is a program entry.
-    #[allow(clippy::type_complexity)]
+    /// entry's startup parameter names when it is a program entry. A unit
+    /// other than the entry whose memo `index` holds, with its body and annex
+    /// still in `store`, is taken from it and not prepared.
     pub(super) fn release_units(
         &self,
         entry: &Identity,
         reached: &Reachable<'_>,
         store: &CodeStore,
         names: Option<Vec<String>>,
-    ) -> Result<
-        (
-            BTreeMap<Identity, Unit>,
-            Vec<hirsel_core_ir::release_recipe::ObjectRef>,
-            BTreeMap<Identity, ContentHash>,
-        ),
-        NativeStop,
-    > {
+        index: Option<&Memos>,
+    ) -> Result<Released, NativeStop> {
         let instances = reached.require()?;
-        let items = instances
+        let anchored = instances
             .iter()
             .map(|i| reached.materialized.get(i).ir().map(anchored_items))
-            .collect::<io::Result<Vec<_>>>()?
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>();
-        let sources = self.native_sources(&items)?;
-        let sources = sources.positions();
+            .collect::<io::Result<Vec<_>>>()?;
+        let items = anchored.iter().flatten().cloned().collect::<Vec<_>>();
+        let map = self.native_sources(&items)?;
+        let sources = map.positions();
+        let files = index.map(|_| file_digests(&map)).transpose()?;
         let mut units = BTreeMap::new();
-        for identity in instances {
+        let mut memos = BTreeMap::new();
+        for (identity, anchored) in instances.iter().zip(&anchored) {
             let instance = reached.materialized.get(identity);
+            let memo = match (index, &files) {
+                (Some(index), Some(files)) if identity != entry => {
+                    let key = memo_key(identity, instance, anchored, &map, files)?;
+                    if let Some(memo) = index.read.units.get(&key)
+                        && index
+                            .code
+                            .path(ObjectKind::Body, memo.body.0)
+                            .try_exists()?
+                        && index
+                            .code
+                            .path(ObjectKind::Annex, memo.annex.0)
+                            .try_exists()?
+                    {
+                        memos.insert(identity.clone(), (key, memo.clone()));
+                        continue;
+                    }
+                    Some(key)
+                }
+                _ => None,
+            };
             let original = instance.ir()?;
             let (body, mut annex, module) =
                 normal::prepare_assembly(original, instance.function, &sources);
@@ -258,6 +350,7 @@ impl CheckProduct {
                     module,
                     annex,
                     builtins,
+                    memo,
                 },
             );
         }
@@ -278,7 +371,142 @@ impl CheckProduct {
         }
         groups.sort_unstable_by_key(|group| group.hash);
         units.retain(|identity, _| addresses.contains_key(identity));
-        Ok((units, groups, addresses))
+        memos.retain(|identity, _| addresses.contains_key(identity));
+        Ok(Released {
+            units,
+            memos,
+            groups,
+            addresses,
+        })
+    }
+}
+
+/// A closure's units ([`CheckProduct::release_units`]): those prepared now,
+/// those an earlier publication's memo gave, its groups and each unit's
+/// address.
+pub(super) struct Released {
+    pub(super) units: BTreeMap<Identity, Unit>,
+    memos: Hits,
+    groups: Vec<ObjectRef>,
+    addresses: BTreeMap<Identity, ContentHash>,
+}
+
+/// Each source file's digest: its path, its text and its annex points, all
+/// a site resolved in it reads.
+fn file_digests(map: &SourceMap) -> io::Result<Vec<ContentHash>> {
+    map.files
+        .iter()
+        .map(|file| {
+            key(
+                "hirsel.recipe-unit-file.v1",
+                &(&file.path, &file.text, map.points.get(&file.path)),
+            )
+        })
+        .collect()
+}
+
+/// A unit's memo key: every input of its preparation. The instance's
+/// identity and its definition's record fix its module, as they key its
+/// instance object; its body hash fixes the normal body; and its anchored
+/// items' bindings, with the digests of their files, fix every site its
+/// annex resolves. The entry, whose annex also takes the startup names, is
+/// never memoized.
+fn memo_key(
+    identity: &Identity,
+    instance: &crate::instances::InstanceBody,
+    anchored: &[DefPath],
+    map: &SourceMap,
+    files: &[ContentHash],
+) -> io::Result<ContentHash> {
+    let positions = anchored
+        .iter()
+        .map(|item| {
+            let binding = map.items.get(item);
+            (
+                item,
+                binding.map(|binding| (files[binding.file as usize], binding.file_offset)),
+            )
+        })
+        .collect::<Vec<_>>();
+    key(
+        "hirsel.recipe-unit.v1",
+        &(
+            identity,
+            instance.product.as_ref().map(|product| product.record),
+            instance.body,
+            instance.function.0,
+            positions,
+        ),
+    )
+}
+
+impl Memos {
+    /// The bound module of the unit `identity` whose memo is `memo`, decoded
+    /// from its stored body and annex as its preparation made it, its items
+    /// bound in `bindings`.
+    fn module(
+        &self,
+        identity: &Identity,
+        memo: &Memo,
+        bindings: &mut BTreeMap<DefPath, ItemSource>,
+    ) -> Result<Module, NativeStop> {
+        use std::io::Read;
+        let read = |kind: ObjectKind, (hash, len): (ContentHash, u64)| {
+            let mut bytes = Vec::new();
+            self.code.open(kind, hash)?.read_to_end(&mut bytes)?;
+            if bytes.len() as u64 != len || kind.hash(&bytes) != hash {
+                return Err(NativeStop::Link(format!(
+                    "a memoized unit's stored code changed: {}",
+                    identity.definition
+                )));
+            }
+            Ok(bytes)
+        };
+        let refused = |error| {
+            NativeStop::Link(format!(
+                "a memoized unit's stored code does not decode: {}: {error:?}",
+                identity.definition
+            ))
+        };
+        let body = read(ObjectKind::Body, memo.body)?;
+        let mut module = normal::decode(&body, &mut DecodeBudget::unlimited())
+            .map_err(refused)?
+            .module;
+        let annex = Annex::decode(
+            &read(ObjectKind::Annex, memo.annex)?,
+            &module,
+            &mut DecodeBudget::unlimited(),
+        )
+        .map_err(refused)?;
+        let symbol = hirsel_core_ir::symbol(identity.digest());
+        bind_module(&mut module, &annex, bindings, Some(&symbol));
+        Ok(module)
+    }
+
+    /// The unit index of `entry`'s publications into `code` under
+    /// `options`, read from `options`' store: none for an optimised LLVM
+    /// build, whose units a separately lowered std takes.
+    fn open(
+        options: &NativeOptions,
+        entry: &Identity,
+        code: &CodeStore,
+    ) -> Result<Option<Self>, NativeStop> {
+        if matches!(options.backend, Backend::Llvm) && options.optimize {
+            return Ok(None);
+        }
+        let key = key(
+            "hirsel.recipe-unit-index.v1",
+            &(crate::reuse::compiler_identity()?, entry, code.root()),
+        )?;
+        let read = cached(&Store::new(&options.store)?, key)?
+            .and_then(|bytes| crate::decode::<UnitIndex>(&bytes))
+            .filter(|index| index.schema == UNIT_INDEX_SCHEMA)
+            .unwrap_or_default();
+        Ok(Some(Self {
+            key,
+            read,
+            code: code.clone(),
+        }))
     }
 }
 
@@ -1046,6 +1274,7 @@ impl Publication {
                         module: body.module,
                         annex,
                         builtins,
+                        memo: None,
                     },
                 );
             }
@@ -1054,6 +1283,8 @@ impl Publication {
             root,
             recipe,
             units,
+            memos: BTreeMap::new(),
+            index: None,
             addresses,
             link_archives,
         }
@@ -1076,6 +1307,7 @@ fn site_item(site: &Site) -> DefPath {
 /// builds its DefPath once.
 fn anchor<'a>(
     seen: &mut HashMap<(&'a str, u32, u32), ItemId>,
+    added: &mut Vec<(ItemId, &'a Site)>,
     items: &mut Vec<DefPath>,
     bindings: &mut BTreeMap<DefPath, ItemSource>,
     unit: Option<&str>,
@@ -1089,11 +1321,11 @@ fn anchor<'a>(
             let mut item = site_item(site);
             if let Some(unit) = unit {
                 let binding = bindings[&item];
-                item.0.modules = vec!["unit".into(), unit.into()];
-                item.0.name = index.0.to_string();
+                item = unit_item(unit, index);
                 bindings.insert(item.clone(), binding);
             }
             items.push(item);
+            added.push((index, site));
             index
         });
     Some(hirsel_core_ir::Anchor {
@@ -1104,12 +1336,22 @@ fn anchor<'a>(
 }
 
 /// Bind each unit's annex sites to source items, and the source map of every
-/// site the units and `extra` (a separately lowered std's sites) name.
+/// site the units, `memos` and `extra` (a separately lowered std's sites)
+/// name. Also each unit's binding as its memo keeps it ([`Memo`]), for each
+/// unit with a memo key. A memo's sites and items enter the map as its
+/// unit's binding gave them; its module is bound only if it is decoded
+/// ([`Publication::memo_module`]).
 pub(super) fn bind_annexes(
     units: &mut BTreeMap<Identity, Unit>,
+    memos: &Hits,
     extra: &BTreeMap<String, Vec<(u32, u32)>>,
     relocate: bool,
-) -> Result<SourceMap, NativeStop> {
+) -> Result<(SourceMap, BTreeMap<Identity, Bound>), NativeStop> {
+    if !relocate && !memos.is_empty() {
+        return Err(NativeStop::Entry(
+            "unit memos bind only relocated units".into(),
+        ));
+    }
     let mut points = BTreeMap::<String, BTreeSet<(u32, u32)>>::new();
     for (file, at) in extra {
         points
@@ -1117,24 +1359,22 @@ pub(super) fn bind_annexes(
             .or_default()
             .extend(at.iter().copied());
     }
+    let mut add = |file: &String, at: (u32, u32)| match points.get_mut(file) {
+        Some(file) => {
+            file.insert(at);
+        }
+        None => {
+            points.insert(file.clone(), BTreeSet::from([at]));
+        }
+    };
     for unit in units.values() {
-        for hints in unit.annex.0.iter().flatten() {
-            for site in hints
-                .instructions
-                .iter()
-                .chain(&hints.terminators)
-                .flatten()
-            {
-                let at = (site.line, site.column);
-                match points.get_mut(&site.file) {
-                    Some(file) => {
-                        file.insert(at);
-                    }
-                    None => {
-                        points.insert(site.file.clone(), BTreeSet::from([at]));
-                    }
-                }
-            }
+        for site in annex_sites(&unit.annex) {
+            add(&site.file, (site.line, site.column));
+        }
+    }
+    for (_, memo) in memos.values() {
+        for (file, line, column) in &memo.points {
+            add(file, (*line, *column));
         }
     }
     let mut sources = SourceMap::default();
@@ -1171,62 +1411,149 @@ pub(super) fn bind_annexes(
         sources.points.insert(path, points);
     }
     sources.items = items.into_iter().collect();
+    let mut bound = BTreeMap::new();
     for (identity, unit) in units {
         // Cached objects reference a unit's local site numbers. The final link
         // binds those symbols to the current recipe's absolute positions.
         let symbol = relocate.then(|| hirsel_core_ir::symbol(identity.digest()));
-        let symbol = symbol.as_deref();
-        let module = &mut unit.module;
-        let mut items = HashMap::new();
-        for (function, hints) in module.functions.iter_mut().zip(&unit.annex.0) {
-            let (Some(body), Some(hints)) = (function.body.as_mut(), hints) else {
-                continue;
-            };
-            for (at, site) in body.inst_anchors.iter_mut().zip(&hints.instructions) {
-                *at = anchor(
-                    &mut items,
-                    &mut module.items,
-                    &mut sources.items,
-                    symbol,
-                    site.as_ref(),
-                );
-            }
-            for (block, site) in body.blocks.iter_mut().zip(&hints.terminators) {
-                block.anchor = anchor(
-                    &mut items,
-                    &mut module.items,
-                    &mut sources.items,
-                    symbol,
-                    site.as_ref(),
-                );
-            }
-            for (call, &cold) in body.calls.iter_mut().zip(&hints.cold_calls) {
-                call.cold = cold;
-            }
-            for (edge, &cold) in body.edges.iter_mut().zip(&hints.cold_edges) {
-                edge.cold = cold;
-            }
-            body.callable_parameters = hints
-                .callable_parameters
-                .iter()
-                .copied()
-                .map(hirsel_core_ir::ValueId)
-                .collect();
+        let added = bind_module(
+            &mut unit.module,
+            &unit.annex,
+            &mut sources.items,
+            symbol.as_deref(),
+        );
+        if unit.memo.is_some() {
+            bound.insert(identity.clone(), Bound::of(&unit.annex, added));
         }
     }
-    Ok(sources)
+    for (identity, (_, memo)) in memos {
+        let symbol = hirsel_core_ir::symbol(identity.digest());
+        for &(index, point) in &memo.anchored {
+            let (file, line, column) = &memo.points[point as usize];
+            let binding = sources.items[&site_item(&Site {
+                file: file.clone(),
+                line: *line,
+                column: *column,
+            })];
+            sources
+                .items
+                .insert(unit_item(&symbol, ItemId(index)), binding);
+        }
+    }
+    Ok((sources, bound))
 }
 
-/// The object of `instance`'s `module` under `key`: stored in `store`, else
+/// Every site of `annex`, in body order.
+fn annex_sites(annex: &Annex) -> impl Iterator<Item = &Site> {
+    annex.0.iter().flatten().flat_map(|hints| {
+        hints
+            .instructions
+            .iter()
+            .chain(&hints.terminators)
+            .flatten()
+    })
+}
+
+/// The source item of a relocated unit's item `index`, named by the unit's
+/// `symbol`.
+fn unit_item(symbol: &str, index: ItemId) -> DefPath {
+    DefPath(hirsel_core_ids::ItemPath {
+        package: PackageId {
+            name: "source".into(),
+            version: "1".into(),
+        },
+        modules: vec!["unit".into(), symbol.into()],
+        name: index.0.to_string(),
+    })
+}
+
+/// Anchor `module`'s sites to source items and apply its annex's hints; with
+/// a unit `symbol`, each site's item is the unit's own, bound in `bindings`
+/// as the site's. The items added, by index, with their sites.
+fn bind_module<'a>(
+    module: &mut Module,
+    annex: &'a Annex,
+    bindings: &mut BTreeMap<DefPath, ItemSource>,
+    symbol: Option<&str>,
+) -> Vec<(ItemId, &'a Site)> {
+    let mut items = HashMap::new();
+    let mut added = Vec::new();
+    for (function, hints) in module.functions.iter_mut().zip(&annex.0) {
+        let (Some(body), Some(hints)) = (function.body.as_mut(), hints) else {
+            continue;
+        };
+        for (at, site) in body.inst_anchors.iter_mut().zip(&hints.instructions) {
+            *at = anchor(
+                &mut items,
+                &mut added,
+                &mut module.items,
+                bindings,
+                symbol,
+                site.as_ref(),
+            );
+        }
+        for (block, site) in body.blocks.iter_mut().zip(&hints.terminators) {
+            block.anchor = anchor(
+                &mut items,
+                &mut added,
+                &mut module.items,
+                bindings,
+                symbol,
+                site.as_ref(),
+            );
+        }
+        for (call, &cold) in body.calls.iter_mut().zip(&hints.cold_calls) {
+            call.cold = cold;
+        }
+        for (edge, &cold) in body.edges.iter_mut().zip(&hints.cold_edges) {
+            edge.cold = cold;
+        }
+        body.callable_parameters = hints
+            .callable_parameters
+            .iter()
+            .copied()
+            .map(hirsel_core_ir::ValueId)
+            .collect();
+    }
+    added
+}
+
+/// A prepared unit's binding as its memo keeps it.
+pub(super) struct Bound {
+    points: Vec<(String, u32, u32)>,
+    anchored: Vec<(u32, u32)>,
+}
+
+impl Bound {
+    fn of(annex: &Annex, added: Vec<(ItemId, &Site)>) -> Self {
+        let mut index = HashMap::new();
+        let mut points = Vec::new();
+        for site in annex_sites(annex) {
+            index
+                .entry((site.file.as_str(), site.line, site.column))
+                .or_insert_with(|| {
+                    points.push((site.file.clone(), site.line, site.column));
+                    points.len() as u32 - 1
+                });
+        }
+        let anchored = added
+            .into_iter()
+            .map(|(item, site)| (item.0, index[&(site.file.as_str(), site.line, site.column)]))
+            .collect();
+        Self { points, anchored }
+    }
+}
+
+/// The object of `instance`'s module under `key`: stored in `store`, else
 /// prebuilt in `library` (an installed image's store, only read), else
-/// emitted now and published in `store`.
-fn object(
+/// emitted now from `module` and published in `store`.
+fn object<'m>(
     store: &Store,
     library: Option<&Store>,
     options: &NativeOptions,
     key: ContentHash,
     instance: &Identity,
-    module: &Module,
+    module: impl FnOnce() -> Result<Cow<'m, Module>, NativeStop>,
 ) -> Result<ObjectProduct, NativeStop> {
     let mut found = crate::native_object::load(store, key)?.map(|hit| (store, hit));
     if found.is_none()
@@ -1237,7 +1564,8 @@ fn object(
     let (store, held, object, compiled) = match found {
         Some((store, (bare, object, file))) => (store, (bare, file), object, false),
         None => {
-            let object = emit_unit(module, || module.link_symbols(), options, key, instance)
+            let module = module()?;
+            let object = emit_unit(&module, || module.link_symbols(), options, key, instance)
                 .map_err(|message| NativeStop::Emit {
                     definition: instance.definition.clone(),
                     message,
@@ -1290,11 +1618,12 @@ fn emitter(
 fn unit_object_key(
     emitter: ContentHash,
     identity: &Identity,
-    unit: &Unit,
+    module: &Module,
+    builtins: &[u32],
 ) -> io::Result<ContentHash> {
     key(
         "hirsel.recipe-native-object.v2",
-        &(emitter, identity, &unit.module, &unit.builtins),
+        &(emitter, identity, module, builtins),
     )
 }
 
@@ -1327,7 +1656,7 @@ impl CheckProduct {
                 prepare_unit(instance.ir()?, instance.function, &positions),
             );
         }
-        bind_annexes(&mut units, &BTreeMap::new(), true)?;
+        bind_annexes(&mut units, &BTreeMap::new(), &BTreeMap::new(), true)?;
         let target = hirsel_core_layout::Target::from_triple(&options.target)
             .filter(|_| options.backend.supports_target(&options.target))
             .ok_or_else(|| {
@@ -1338,8 +1667,10 @@ impl CheckProduct {
         let emitter = emitter(options, tools.runtime, &target)?;
         let mut compiled = 0;
         for (identity, unit) in &units {
-            let key = unit_object_key(emitter, identity, unit)?;
-            let object = object(store, None, options, key, identity, &unit.module)?;
+            let key = unit_object_key(emitter, identity, &unit.module, &unit.builtins)?;
+            let object = object(store, None, options, key, identity, || {
+                Ok(Cow::Borrowed(&unit.module))
+            })?;
             compiled += usize::from(object.compiled);
         }
         Ok(compiled)
@@ -1469,8 +1800,9 @@ impl Publication {
             ),
         );
         let no_points = BTreeMap::new();
-        let sources = bind_annexes(
+        let (mut sources, mut bound) = bind_annexes(
             &mut self.units,
+            &self.memos,
             std.as_ref().map_or(&no_points, |std| &std.points),
             true,
         )?;
@@ -1531,21 +1863,92 @@ impl Publication {
                 emitted.launch_digest_unused,
             )
         } else {
-            let objects = self
+            // Every unit in identity order, as one map of them gives it.
+            let mut all = self
                 .units
                 .iter()
-                .map(|(identity, unit)| {
-                    let object_key = unit_object_key(emitter, identity, unit)?;
-                    object(
-                        &store,
-                        library.as_ref(),
-                        &options,
-                        object_key,
-                        identity,
-                        &unit.module,
-                    )
-                })
-                .collect::<Result<Vec<_>, NativeStop>>()?;
+                .map(|(identity, unit)| (identity, Ok(unit)))
+                .chain(
+                    self.memos
+                        .iter()
+                        .map(|(identity, hit)| (identity, Err(hit))),
+                )
+                .collect::<Vec<_>>();
+            all.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+            let mut objects = Vec::with_capacity(all.len());
+            let mut kept = BTreeMap::new();
+            for (identity, unit) in all {
+                match unit {
+                    Ok(unit) => {
+                        let object_key =
+                            unit_object_key(emitter, identity, &unit.module, &unit.builtins)?;
+                        objects.push(object(
+                            &store,
+                            library.as_ref(),
+                            &options,
+                            object_key,
+                            identity,
+                            || Ok(Cow::Borrowed(&unit.module)),
+                        )?);
+                        if let (Some(memo), Some(bound)) = (unit.memo, bound.remove(identity)) {
+                            let object = |object: ObjectRef| (object.hash, object.len);
+                            kept.insert(
+                                memo,
+                                Memo {
+                                    body: object(unit.code.body),
+                                    annex: object(unit.code.annex),
+                                    builtins: unit.builtins.clone(),
+                                    points: bound.points,
+                                    anchored: bound.anchored,
+                                    object: (emitter, object_key),
+                                },
+                            );
+                        }
+                    }
+                    Err((memo_key, memo)) => {
+                        let index = self
+                            .index
+                            .as_ref()
+                            .expect("a memo's publication keeps an index");
+                        let (object_key, decoded) = if memo.object.0 == emitter {
+                            (memo.object.1, None)
+                        } else {
+                            let module = index.module(identity, memo, &mut sources.items)?;
+                            let key = unit_object_key(emitter, identity, &module, &memo.builtins)?;
+                            (key, Some(module))
+                        };
+                        objects.push(object(
+                            &store,
+                            library.as_ref(),
+                            &options,
+                            object_key,
+                            identity,
+                            || match decoded {
+                                Some(module) => Ok(Cow::Owned(module)),
+                                None => index
+                                    .module(identity, memo, &mut sources.items)
+                                    .map(Cow::Owned),
+                            },
+                        )?);
+                        kept.insert(
+                            *memo_key,
+                            Memo {
+                                object: (emitter, object_key),
+                                ..memo.clone()
+                            },
+                        );
+                    }
+                }
+            }
+            if let Some(index) = &self.index
+                && kept != index.read.units
+            {
+                let written = UnitIndex {
+                    schema: UNIT_INDEX_SCHEMA,
+                    units: kept,
+                };
+                publish(&store, index.key, &crate::encode(&written)?)?;
+            }
             (objects, false, false)
         };
         let cleanup = if let Some(module) = cleanup {
@@ -1560,7 +1963,7 @@ impl Publication {
                 &options,
                 cleanup_key,
                 &identity,
-                &module,
+                || Ok(Cow::Borrowed(&module)),
             )?);
             Some(identity.symbol())
         } else {

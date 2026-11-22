@@ -63,6 +63,7 @@ impl ObjectKind {
     }
 }
 
+#[derive(Clone)]
 pub struct CodeStore {
     root: PathBuf,
 }
@@ -70,6 +71,10 @@ pub struct CodeStore {
 impl CodeStore {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
+    }
+
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
     }
 
     pub fn path(&self, kind: ObjectKind, hash: ContentHash) -> PathBuf {

@@ -116,12 +116,9 @@ impl<'a> Scanner<'a> {
         self.output
             .canonical_offsets
             .push(self.output.canonical.len() as u32);
-        match kind {
-            TokenKind::LineComment | TokenKind::DocLine => {}
-            kind if kind.is_trivia() => {
-                self.newline |= self.bytes[start..self.pos].contains(&b'\n')
-            }
-            _ => self.newline = false,
+        // No token spans a line feed (LANG-1), so only whitespace sets the flag.
+        if !kind.is_trivia() {
+            self.newline = false;
         }
     }
     fn finish(mut self) -> LexOutput {
@@ -163,7 +160,7 @@ impl<'a> Scanner<'a> {
         let mut symbol = sym::NONE;
         let kind = match self.bytes[self.pos] {
             b'/' if self.starts(b"//") => self.line_comment(),
-            b'/' if self.starts(b"/*") => self.block_comment(),
+            b'/' if self.starts(b"/*") => self.block_comment_refusal(),
             b'r' if self.raw_start(false).is_some() => self.raw_string(false),
             b'b' if self.raw_start(true).is_some() => self.raw_string(true),
             b'"' => self.string(false),
@@ -284,65 +281,46 @@ impl<'a> Scanner<'a> {
         }
         kind
     }
-    // Validate a source scalar while traversing a comment, including bare CR.
+    // Validate a source scalar while traversing a comment to its line end.
     fn comment_scalar(&mut self) {
         let start = self.pos;
         if self.bytes[start].is_ascii() {
             self.pos += 1;
-            if self.bytes[start] == b'\r' && self.bytes.get(self.pos) != Some(&b'\n') {
-                self.error("LANG-1", start, self.pos, "forbidden character in comment");
-            }
             return;
         }
         let (ch, len) = scalar(&self.bytes[start..]);
         self.pos += len;
-        if ch.is_none()
-            || ch
-                .is_some_and(|c| bidi(c) || (c == '\r' && self.bytes.get(self.pos) != Some(&b'\n')))
-        {
+        if ch.is_none_or(bidi) {
             self.error("LANG-1", start, self.pos, "forbidden character in comment");
+        }
+    }
+    fn skip_to_line_end(&mut self) {
+        while self.pos < self.bytes.len() && !matches!(self.bytes[self.pos], b'\r' | b'\n') {
+            self.comment_scalar();
         }
     }
     fn line_comment(&mut self) -> TokenKind {
         let doc = self.starts(b"///");
         self.pos += 2;
-        while self.pos < self.bytes.len() && !matches!(self.bytes[self.pos], b'\r' | b'\n') {
-            self.comment_scalar();
-        }
+        self.skip_to_line_end();
         if doc {
             TokenKind::DocLine
         } else {
             TokenKind::LineComment
         }
     }
-    fn block_comment(&mut self) -> TokenKind {
+    // Every line tokenizes on its own, so a block comment is one invalid token to its line end.
+    fn block_comment_refusal(&mut self) -> TokenKind {
         let start = self.pos;
-        let doc = self.starts(b"/**");
-        // /**/ overlaps the doc prefix's star with the closing delimiter (#21).
         self.pos += 2;
-        let mut depth = 1usize;
-        while self.pos < self.bytes.len() {
-            if self.starts(b"/*") {
-                depth += 1;
-                self.pos += 2;
-            } else if self.starts(b"*/") {
-                depth -= 1;
-                self.pos += 2;
-                if depth == 0 {
-                    break;
-                }
-            } else {
-                self.comment_scalar();
-            }
-        }
-        if depth != 0 {
-            self.error("LANG-1", start, self.pos, "unterminated block comment");
-        }
-        if doc {
-            TokenKind::DocBlock
-        } else {
-            TokenKind::BlockComment
-        }
+        self.skip_to_line_end();
+        self.error(
+            "LANG-1",
+            start,
+            self.pos,
+            "block comments are not Hirsel: every line tokenizes on its own, so use `//`",
+        );
+        TokenKind::Invalid
     }
     // Exponent and suffix validity is lexical (LANG-3).
     fn number(&mut self) -> TokenKind {
@@ -461,28 +439,22 @@ impl<'a> Scanner<'a> {
                 };
             }
             let at = self.pos;
+            if matches!(self.bytes[at], b'\r' | b'\n') {
+                self.error(
+                    "LANG-1",
+                    start,
+                    at,
+                    "a raw literal must close on its line: every line tokenizes on its own",
+                );
+                return TokenKind::Invalid;
+            }
             if self.bytes[at].is_ascii() {
-                if self.bytes[at] == b'\r' {
-                    self.error(
-                        "LANG-1",
-                        at,
-                        at + 1,
-                        "raw literal newlines must be LF; CR and CRLF are forbidden",
-                    );
-                }
                 self.pos += 1;
                 continue;
             }
             let (ch, len) = scalar(&self.bytes[at..]);
             self.pos += len;
-            if ch == Some('\r') {
-                self.error(
-                    "LANG-1",
-                    at,
-                    self.pos,
-                    "raw literal newlines must be LF; CR and CRLF are forbidden",
-                );
-            } else if ch.is_none() || ch.is_some_and(|c| bidi(c) || (bytes && !c.is_ascii())) {
+            if ch.is_none() || ch.is_some_and(|c| bidi(c) || (bytes && !c.is_ascii())) {
                 self.error(
                     if ch.is_some_and(bidi) {
                         "LANG-1"

@@ -14,15 +14,16 @@ digit         = "0".."9" ;
 identifier    = letter, { letter | digit } ;
 NL            = LF | CR, LF ;
 line-comment  = "//", { non-newline-scalar } ;
-block-comment = "/*", { block-comment | non-delimiter-scalar }, "*/" ;
 ```
 
-A `non-newline-scalar` is any scalar other than LF and CR; a `non-delimiter-scalar` is any
-scalar that does not begin `/*` or `*/`. Tokens are formed by longest match, except that
-no float literal begins directly after a `.` token, so `p.0.1` is `p`, `.`, `0`, `.`, `1`.
-Comments nest. `///` and `/** */` are documentation comments and otherwise comments. A
-block comment's newlines count as newlines for LANG-4. An unterminated comment is one
-invalid token.
+A `non-newline-scalar` is any scalar other than LF and CR. Tokens are formed by longest
+match, except that no float literal begins directly after a `.` token, so `p.0.1` is `p`,
+`.`, `0`, `.`, `1`. `///` is a documentation comment and otherwise a comment.
+
+No token spans a newline, so every line tokenizes on its own. `//` is the only comment:
+there are no block comments, and `/*` is refused as one invalid token running to the end
+of its line. A raw literal ends on the line it opens (LANG-3); a newline inside it is
+refused here, and the invalid token ends before that newline.
 
 ### LANG-2: Keywords
 
@@ -76,13 +77,13 @@ literal      = integer | float | character | byte | string | byte-string
 
 `string-scalar` excludes `"`, `\`, the controls U+0000–U+001F and U+007F, newlines and
 `Bidi_Control`; `character-scalar` is the same with `'` in place of `"`; `raw-body` is any
-scalars other than CR; `byte-escape` is `escape` without its `\u{..}` form; the `ascii-`
+scalars other than LF and CR; `byte-escape` is `escape` without its `\u{..}` form; the `ascii-`
 forms also exclude non-ASCII. In strings and characters `\xNN`
 is at most 7F and `\u{..}` has one to six digits denoting a Unicode scalar value; in byte strings
 and byte literals `\xNN` is any byte and `\u{..}` is absent. A character literal is exactly
 one scalar. A raw literal closes at the first `"` followed by its opening number of
-hashes, keeps every source byte including LF, and has no escapes; a CR inside it is
-refused. Integer literals have no sign: `-128i8` is negation of a magnitude, and the
+hashes on the line it opens, keeps every source byte, and has no escapes; a newline inside
+it is refused under LANG-1. Integer literals have no sign: `-128i8` is negation of a magnitude, and the
 magnitude of `MIN` is accepted there. A malformed number or suffix is one invalid token. A
 fractional point needs a digit on both sides, so `1..2` is a range. An unsuffixed number
 takes its type from the expected type ([LANG-11](language.md#lang-11-typing-is-local)): an

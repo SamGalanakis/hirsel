@@ -2,9 +2,9 @@
 #include <string.h>
 
 enum Token {
-  LINE_COMMENT, BLOCK_COMMENT, RAW_STRING, RAW_BYTE_STRING,
+  LINE_COMMENT, RAW_STRING, RAW_BYTE_STRING,
   EXPRESSION_NEWLINE, ENTRY_NEWLINE, EXIT_NEWLINE, TRIVIA_NEWLINE,
-  EXPRESSION_COMMENT, ENTRY_COMMENT, ITEM_NEWLINE, ITEM_COMMENT, STEPS_MODE, PROJECTION_DOT, ERROR_RECOVERY,
+  ITEM_NEWLINE, STEPS_MODE, PROJECTION_DOT, ERROR_RECOVERY,
 };
 
 static void advance(TSLexer *lexer) { lexer->advance(lexer, false); }
@@ -21,35 +21,14 @@ static bool newline(TSLexer *lexer) {
   return true;
 }
 
-static bool comment(TSLexer *lexer, enum Token kind, bool *line) {
+// Every line tokenizes on its own (LANG-1): `//` is the only comment, and it ends at the line end.
+static bool comment(TSLexer *lexer) {
   advance(lexer);  // The caller consumed the opening slash.
-  if (kind == LINE_COMMENT) {
-    while (!lexer->eof(lexer) && lexer->lookahead != '\n' && lexer->lookahead != '\r') {
-      if (forbidden(lexer->lookahead)) return false;
-      advance(lexer);
-    }
-    return true;
-  }
-
-  unsigned depth = 1;
-  while (!lexer->eof(lexer)) {
-    const int32_t c = lexer->lookahead;
-    if (forbidden(c)) return false;
-    if (c == '\r' || c == '\n') {
-      if (!newline(lexer)) return false;
-      *line = true;
-      continue;
-    }
+  while (!lexer->eof(lexer) && lexer->lookahead != '\n' && lexer->lookahead != '\r') {
+    if (forbidden(lexer->lookahead)) return false;
     advance(lexer);
-    if (c == '/' && lexer->lookahead == '*') {
-      advance(lexer);
-      depth++;
-    } else if (c == '*' && lexer->lookahead == '/') {
-      advance(lexer);
-      if (--depth == 0) return true;
-    }
   }
-  return false;
+  return true;
 }
 
 static bool raw_string(TSLexer *lexer, bool bytes) {
@@ -68,7 +47,7 @@ static bool raw_string(TSLexer *lexer, bool bytes) {
 
   while (!lexer->eof(lexer)) {
     const int32_t c = lexer->lookahead;
-    if (c == '\r' || forbidden(c) || (bytes && c > 127)) return false;
+    if (c == '\r' || c == '\n' || forbidden(c) || (bytes && c > 127)) return false;
     advance(lexer);
     if (c != '"') continue;
     unsigned closing = 0;
@@ -134,10 +113,7 @@ static int32_t next_token(TSLexer *lexer) {
       if (!newline(lexer)) return c;
     } else if (c == '/') {
       advance(lexer);
-      int32_t delimiter = lexer->lookahead;
-      if (delimiter != '/' && delimiter != '*') return c;
-      bool line = false;
-      if (!comment(lexer, delimiter == '/' ? LINE_COMMENT : BLOCK_COMMENT, &line)) return c;
+      if (lexer->lookahead != '/' || !comment(lexer)) return c;
     } else {
       return c;
     }
@@ -166,48 +142,40 @@ bool tree_sitter_hirsel_external_scanner_scan(void *payload, TSLexer *lexer, con
     return true;
   }
 
-  // A multiline block comment can separate entries without losing its comment node.
-  bool line = false;
-  enum Token trivia = TRIVIA_NEWLINE;
   lexer->mark_end(lexer);
   if (c == '/') {
     advance(lexer);
-    if (lexer->lookahead == '*') trivia = BLOCK_COMMENT;
-    else if (lexer->lookahead == '/') trivia = LINE_COMMENT;
-    else return false;
-    if (!valid[trivia] || !comment(lexer, trivia, &line)) return false;
-  } else {
-    if ((c != '\r' && c != '\n') || !newline(lexer)) return false;
-    line = true;
+    if (lexer->lookahead != '/' || !valid[LINE_COMMENT] || !comment(lexer)) return false;
+    lexer->mark_end(lexer);
+    lexer->result_symbol = LINE_COMMENT;
+    return true;
   }
+  if ((c != '\r' && c != '\n') || !newline(lexer)) return false;
 
-  if (line && valid[EXIT_NEWLINE] && !valid[ERROR_RECOVERY]) {
+  if (valid[EXIT_NEWLINE] && !valid[ERROR_RECOVERY]) {
     lexer->result_symbol = EXIT_NEWLINE;
     return true;  // Leave the newline for the enclosing statement.
   }
   lexer->mark_end(lexer);
-  enum Token expression_end = trivia == BLOCK_COMMENT ? EXPRESSION_COMMENT : EXPRESSION_NEWLINE;
-  enum Token entry_end = trivia == BLOCK_COMMENT ? ENTRY_COMMENT : ENTRY_NEWLINE;
-  enum Token item_end = trivia == BLOCK_COMMENT ? ITEM_COMMENT : ITEM_NEWLINE;
-  if (line && !valid[ERROR_RECOVERY] &&
-      (valid[expression_end] || valid[entry_end] || valid[item_end])) {
+  if (!valid[ERROR_RECOVERY] &&
+      (valid[EXPRESSION_NEWLINE] || valid[ENTRY_NEWLINE] || valid[ITEM_NEWLINE])) {
     int32_t next = next_token(lexer);
-    if (valid[expression_end] && !continues_expression(lexer, next)) {
-      lexer->result_symbol = expression_end;
+    if (valid[EXPRESSION_NEWLINE] && !continues_expression(lexer, next)) {
+      lexer->result_symbol = EXPRESSION_NEWLINE;
       return true;
     }
     // Only an item starter needs an item separator. In particular, a header
     // can keep going at a body, where clause, or other header punctuation.
-    if (valid[item_end] && next != 0 && next < 128 && strchr("@pcftrs", next)) {
-      lexer->result_symbol = item_end;
+    if (valid[ITEM_NEWLINE] && next != 0 && next < 128 && strchr("@pcftrs", next)) {
+      lexer->result_symbol = ITEM_NEWLINE;
       return true;
     }
-    if (valid[entry_end] && next != '=' && next != ',' && next != '}') {
-      lexer->result_symbol = entry_end;
+    if (valid[ENTRY_NEWLINE] && next != '=' && next != ',' && next != '}') {
+      lexer->result_symbol = ENTRY_NEWLINE;
       return true;
     }
   }
 
-  lexer->result_symbol = trivia;
-  return valid[trivia];
+  lexer->result_symbol = TRIVIA_NEWLINE;
+  return valid[TRIVIA_NEWLINE];
 }

@@ -64,13 +64,12 @@ module.exports = grammar({
 
   word: $ => $.identifier,
   reserved: { global: _ => keywords },
-  extras: $ => [/[ \t]/, $._trivia_newline, $.line_comment, $.block_comment],
+  extras: $ => [/[ \t]/, $._trivia_newline, $.line_comment],
 
   externals: $ => [
-    $.line_comment, $.block_comment, $.raw_string_literal, $.raw_byte_string_literal,
+    $.line_comment, $.raw_string_literal, $.raw_byte_string_literal,
     $._expression_newline, $._entry_newline, $._exit_newline, $._trivia_newline,
-    $._expression_comment, $._entry_comment, $._item_newline, $._item_comment,
-    $.steps_mode, $._projection_dot, $._error_recovery,
+    $._item_newline, $.steps_mode, $._projection_dot, $._error_recovery,
   ],
 
   conflicts: $ => [
@@ -80,9 +79,8 @@ module.exports = grammar({
 
   rules: {
     source_file: $ => seq(
-      repeat(choice(seq($._item, choice(';', $._item_end)), ';')), optional($._item),
+      repeat(choice(seq($._item, choice(';', $._item_newline)), ';')), optional($._item),
     ),
-    _item_end: $ => choice($._item_newline, alias($._item_comment, $.block_comment)),
     _item: $ => choice(
       $.function_definition, $.function_signature, $.type_definition,
       $.constant_definition, $.clone_definition,
@@ -130,9 +128,7 @@ module.exports = grammar({
       ',', 'from', ':', field('from', $.identifier), ')',
     ),
     grant: $ => seq('grant', 'bytes', $.integer_literal),
-    _entry_end: $ => choice($._entry_newline, alias($._entry_comment, $.block_comment)),
-    _expression_end: $ => choice($._expression_newline, alias($._expression_comment, $.block_comment)),
-    fields: $ => seq('{', separated($.field_definition, choice(',', $._entry_end)), '}'),
+    fields: $ => seq('{', separated($.field_definition, choice(',', $._entry_newline)), '}'),
     field_definition: $ => seq(
       optional('removed'), field('name', $.identifier), ':', field('type', $.type),
       optional(seq('=', field('default', $._scalar))),
@@ -170,7 +166,7 @@ module.exports = grammar({
       optional($._mode), optional(seq(field('name', $.identifier), ':')), field('type', $.type),
     ),
 
-    block: $ => seq('{', repeat(choice(seq($._statement, choice(';', $._expression_end)), ';')),
+    block: $ => seq('{', repeat(choice(seq($._statement, choice(';', $._expression_newline)), ';')),
       optional($._statement), '}'),
     _statement: $ => choice($.let_statement, $.assignment, $._expression),
     let_statement: $ => prec.right(seq(
@@ -243,7 +239,7 @@ module.exports = grammar({
       optional(seq('else', field('alternative', choice($.block, $.if_expression)))),
     )),
     match_expression: $ => seq('match', field('value', $._expression), '{',
-      separated($.match_arm, choice(',', $._expression_end)), '}'),
+      separated($.match_arm, choice(',', $._expression_newline)), '}'),
     match_arm: $ => seq(
       field('pattern', $._pattern), optional(seq('if', field('guard', $._expression))),
       '=>', field('value', $._expression),

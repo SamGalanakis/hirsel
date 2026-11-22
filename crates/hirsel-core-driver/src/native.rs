@@ -2011,7 +2011,7 @@ pub(crate) mod tests {
         let good = dir.path().join("a.hirsel");
         let good_source = b"fn a(){1}";
         std::fs::write(&good, good_source).unwrap();
-        let bad_source = "// header\r\nfn bad() { /* é→😀 */ # }\r\n";
+        let bad_source = "// header\r\nfn bad() { \"  é→😀  \" # }\r\n";
         let request = crate::tests::request(bad_source, dir.path());
         let bad = &request.inputs.packages[0].sources[0].file;
         let manifest = dir.path().join("inputs.json");
@@ -2105,8 +2105,10 @@ pub(crate) mod tests {
         let (status, stdout, stderr) = run(&[], b"// ok\r\n\xff");
         assert_eq!((status, stdout.as_str()), (Some(1), ""));
         assert_eq!(stderr, "<stdin>:2:1-2: LANG-1: source is not UTF-8\n");
-        let (status, stdout, stderr) =
-            run(&[], "// header\r\nfn bad() { /* é→😀 */ # }\r\n".as_bytes());
+        let (status, stdout, stderr) = run(
+            &[],
+            "// header\r\nfn bad() { \"  é→😀  \" # }\r\n".as_bytes(),
+        );
         assert_eq!((status, stdout.as_str()), (Some(1), ""));
         assert!(stderr.contains("<stdin>:2:22-23: LANG-1: "), "{stderr}");
     }

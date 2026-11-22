@@ -90,9 +90,7 @@ pub enum TokenKind {
     String,
     Bytes,
     LineComment,
-    BlockComment,
     DocLine,
-    DocBlock,
     Invalid,
     Eof,
 }
@@ -145,10 +143,7 @@ impl TokenKind {
         (30..=76).contains(&(self as u8)) || self == Self::QuestionFatArrow
     }
     pub fn is_trivia(self) -> bool {
-        matches!(
-            self,
-            Self::LineComment | Self::BlockComment | Self::DocLine | Self::DocBlock
-        )
+        matches!(self, Self::LineComment | Self::DocLine)
     }
 }
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq)]

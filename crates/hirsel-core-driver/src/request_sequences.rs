@@ -912,14 +912,14 @@ pub type T{x:u8}"###)), src("b", "b.hirsel", false, lit(r###"fn bad(x:a.T)->u8{f
             pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"fn f(){}"###)), src("a", "a#2.hirsel", false, lit(r###"fn f(){}"###))])]),
         check(vec![
             core(vec![]),
-            pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"fn /* shift */ f(){}"###)), src("a", "a#2.hirsel", false, lit(r###"fn f(){}"###))])])]),
+            pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit("// shift\nfn f(){}")), src("a", "a#2.hirsel", false, lit(r###"fn f(){}"###))])])]),
         seq("foreign_private_span", vec![
         check(vec![
             core(vec![]),
             pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"fn f(x:b.Hidden){}"###)), src("b", "b.hirsel", false, lit(r###"type Hidden{}"###))])]),
         check(vec![
             core(vec![]),
-            pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"fn f(x:b.Hidden){}"###)), src("b", "b.hirsel", false, lit(r###"type /* shifted */ Hidden{}"###))])])]),
+            pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"fn f(x:b.Hidden){}"###)), src("b", "b.hirsel", false, lit("// shifted\ntype Hidden{}"))])])]),
         seq("generic_body", vec![
         build(vec![
             core(vec![]),

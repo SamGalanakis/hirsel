@@ -259,11 +259,10 @@ fn print(text: &str, tokens: &[Token], roles: &[Role]) -> String {
     let mut out = String::new();
     let mut indent = 0;
     let mut line = false;
-    let mut original_newline = true;
     let mut previous: Option<(TokenKind, Role)> = None;
     for (token, &role) in tokens.iter().zip(roles) {
         let raw = &text[token.span.start as usize..token.span.end as usize];
-        original_newline |= token.line_before;
+        let original_newline = previous.is_none() || token.line_before;
         if token.kind == TokenKind::Eof {
             continue;
         }
@@ -271,7 +270,7 @@ fn print(text: &str, tokens: &[Token], roles: &[Role]) -> String {
             indent -= 1;
         }
         let comment = token.kind.is_trivia();
-        let trailing = comment && !original_newline && previous.is_some();
+        let trailing = comment && !original_newline;
         // A trailing comment belongs before the previous token's pending break.
         // An indented group opener always puts its contents on a new line.
         let after_open = previous.is_some_and(|(_, r)| r.open);
@@ -295,14 +294,12 @@ fn print(text: &str, tokens: &[Token], roles: &[Role]) -> String {
         if role.open {
             indent += 1;
         }
-        let line_comment = matches!(token.kind, TokenKind::LineComment | TokenKind::DocLine);
+        // Every comment runs to its line end (LANG-1), and no token spans a line.
         line = (trailing && line)
             || role.line_after
             || (token.kind == TokenKind::Semicolon && !role.inline_semicolon)
-            || line_comment
-            || (comment && original_newline);
+            || comment;
         previous = Some((token.kind, role));
-        original_newline = raw.contains('\n');
     }
     if !out.is_empty() && !out.ends_with('\n') {
         out.push('\n');

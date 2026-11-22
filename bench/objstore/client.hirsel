@@ -1,0 +1,106 @@
+const BODY: u64 = 8388608
+
+const CHUNK: u64 = 262144
+
+const DEADLINE: u64 = 18446744073709551615
+
+fn number(argv: Args, index: u64) -> u64 {
+    let Some(value) = args.get(argv, index) else {
+        return 0
+    }
+    result.unwrap(int.parse(value))
+}
+
+fn request(mut client: std.http_client.Connection, tx: Bytes, mut rx: Bytes, put: bool, verify: bool) waits {
+    if put {
+        for _ in 0 .. BODY / CHUNK {
+            result.unwrap(std.http_client.write(mut client, tx))
+        }
+    }
+    result.unwrap(std.http_client.finish_request(mut client, BODY))
+    let expected: u16 = if put {
+        204
+    } else {
+        200
+    }
+    if std.http_client.status(std.http_client.head(client)) != expected {
+        fail("unexpected HTTP status")
+    }
+    let mut received = 0u64
+    loop {
+        list.clear(mut rx)
+        let n = result.unwrap(std.http_client.read(mut client, mut rx))
+        if n == 0 {
+            break
+        }
+        if verify {
+            for byte in rx {
+                if byte != 165u8 {
+                    fail("incorrect object payload")
+                }
+            }
+        }
+        received += n
+    }
+    let expected_bytes: u64 = if put {
+        0
+    } else {
+        BODY
+    }
+    if received != expected_bytes || !std.http_client.reusable(client) {
+        fail("incomplete HTTP response")
+    }
+}
+
+pub fn main(net: Net, clock: Clock, input: Stdin, out: Stdout, argv: Args) -> Result[(), Exit] waits {
+    let Some(method) = args.get(argv, 0) else {
+        return Error(Exit(status: 2))
+    }
+    let Some(mode) = args.get(argv, 3) else {
+        return Error(Exit(status: 2))
+    }
+    let put = method == "put"
+    let verify = mode == "verify"
+    let address = Addr(ip: V4(0x7f000001), port: int.truncate(number(argv, 1)))
+    let count = number(argv, 2)
+    let head = std.http_client.Request(method: if put {
+        "PUT"
+    } else {
+        "GET"
+    }, target: "/object", headers: list.new(), body: Fixed(if put {
+        BODY
+    } else {
+        0
+    }))
+    let mut tx: Bytes = list.with_capacity(CHUNK)
+    for _ in 0 .. CHUNK {
+        list.push(mut tx, 165u8)
+    }
+    let mut rx: Bytes = list.with_capacity(CHUNK)
+    let mut client = match args.get(argv, 4) {
+        Some(pem) => result.unwrap(std.http_client.https(net, address, "localhost", "localhost", Roots(string.into_bytes(string.from(pem))), clock, head, DEADLINE)),
+        None => result.unwrap(std.http_client.dial(net, address, "localhost", clock, head, DEADLINE)),
+    }
+    request(mut client, tx, mut rx, put, verify)
+    let mut gate: Bytes = list.with_capacity(1)
+    result.unwrap(stdout.write(out, "READY\n"))
+    if result.unwrap(stdin.read(input, mut gate, Never)) != 1 {
+        fail("missing measurement gate byte")
+    }
+    let start = host.mono_ns(clock)
+    for _ in 0 .. count {
+        result.unwrap(std.http_client.start(mut client, head, DEADLINE))
+        request(mut client, tx, mut rx, put, verify)
+    }
+    let ns = host.mono_ns(clock) - start
+    let mut line = string.from("DONE ")
+    string.push_u64(mut line, ns)
+    string.push(mut line, "\n")
+    result.unwrap(stdout.write(out, line))
+    list.clear(mut gate)
+    if result.unwrap(stdin.read(input, mut gate, Never)) != 1 {
+        fail("missing measurement gate byte")
+    }
+    std.http_client.close(take client)
+    Ok(())
+}

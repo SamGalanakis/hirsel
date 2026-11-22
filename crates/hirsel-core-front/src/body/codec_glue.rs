@@ -100,6 +100,14 @@ impl CodecOp {
         d.0.name = OPS.iter().find(|(op, _)| *op == self).unwrap().1.into();
         d
     }
+    /// The operation's instance at `rows`.
+    pub(super) fn instance(self, of: &DefPath, rows: &Rows) -> InstanceKey {
+        InstanceKey {
+            definition: self.definition(of),
+            arguments: rows.arguments(),
+            dictionaries: vec![],
+        }
+    }
     /// The tuple codec operation instance `key` names, and the rows it reads.
     pub fn of(key: &InstanceKey) -> Option<(Self, Rows)> {
         Some((Self::named(&key.definition)?, Rows::from(&key.arguments)?))
@@ -163,7 +171,7 @@ impl CodecOp {
         self.place(module, rows.tuple, rows.codec, rows.decoded, rows)
     }
     /// The signature a row of the operation has: the address one sealed by [`Self::abi`].
-    fn sealed(
+    pub(super) fn sealed(
         self,
         module: &Module,
         value: TypeId,
@@ -185,11 +193,7 @@ pub(super) fn is_glue(definition: &DefPath) -> bool {
 /// The row of `op` at `rows` in `module`, signature-only when it is new. `of` is any
 /// definition of std.codec.
 pub fn row(module: &mut Module, of: &DefPath, rows: &Rows, op: CodecOp) -> FuncId {
-    let key = InstanceKey {
-        definition: op.definition(of),
-        arguments: rows.arguments(),
-        dictionaries: vec![],
-    };
+    let key = op.instance(of, rows);
     if let Some(i) = module
         .functions
         .iter()
@@ -774,12 +778,9 @@ impl Emitter {
             });
             f
         } else {
-            let f = self::row(&mut self.module, &of, &rows, op);
-            let key = &self.module.instances[self.module.functions[f.index()].instance.index()];
-            if !self.funcs.contains_key(key) {
-                self.funcs.insert(key.clone(), f);
-            }
-            f
+            self.glue_function(op.instance(&of, &rows), |m| {
+                op.sealed(m, rows.tuple, rows.codec, rows.decoded, &rows)
+            })
         };
         self.module.types[row.index()].codec = Some(hirsel_core_layout::FuncRef(f.0));
     }

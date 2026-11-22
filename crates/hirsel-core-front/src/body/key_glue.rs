@@ -23,6 +23,14 @@ pub enum KeyOp {
     Class,
 }
 impl KeyOp {
+    /// The operation's instance at closed row `ty`.
+    pub(super) fn instance(self, ty: TypeId) -> InstanceKey {
+        InstanceKey {
+            definition: self.definition(),
+            arguments: vec![ty],
+            dictionaries: vec![],
+        }
+    }
     fn definition(self) -> DefPath {
         DefPath::core(match self {
             Self::Hash => "map.$key_hash",
@@ -274,7 +282,7 @@ impl KeyOp {
     /// The operation's address signature at `ty`, and the signature of its row: the
     /// address one sealed by [`Self::abi`]. Every row of a glue instance, in its own
     /// module and in a caller's, has the sealed one.
-    fn sealed(self, module: &Module, ty: TypeId) -> (Signature, Signature) {
+    pub(super) fn sealed(self, module: &Module, ty: TypeId) -> (Signature, Signature) {
         let place = self.signature(&module.types, ty);
         let mut sealed = place.clone();
         scalar_abi::Plan::signature(module, &mut sealed, &self.abi());
@@ -555,11 +563,7 @@ pub(super) struct Derive<'a> {
 impl Derive<'_> {
     /// The row of `op` at `ty` in `module`, added signature-only when it is missing.
     fn row(module: &mut Module, ty: TypeId, op: KeyOp) -> FuncId {
-        let key = InstanceKey {
-            definition: op.definition(),
-            arguments: vec![ty],
-            dictionaries: vec![],
-        };
+        let key = op.instance(ty);
         if let Some(i) = module
             .functions
             .iter()

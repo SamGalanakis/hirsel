@@ -186,11 +186,7 @@ pub unsafe extern "C" fn hirsel_core_scram_sha256(
         }
         let charge = Charge(payer);
         if spent {
-            return if served {
-                net::DENIED
-            } else {
-                net_error(net::RESET)
-            };
+            return net_error(net::RESET);
         }
         if served {
             let Some(password) = secret.bytes.as_deref() else {

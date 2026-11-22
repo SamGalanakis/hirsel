@@ -419,12 +419,7 @@ pub(crate) unsafe fn owned_op(
         #[cfg(feature = "record")]
         let tape = (*files).net_tape;
         if op == SEND_PAIR && write_spent(files, key) {
-            let error = if served_socket(context, key).is_some() {
-                DENIED
-            } else {
-                RESET
-            };
-            return AddressOutcome::new(error, Address::default());
+            return AddressOutcome::new(RESET, Address::default());
         }
         let mut network = NetworkRequest {
             send_tail,
@@ -670,7 +665,7 @@ pub unsafe extern "C" fn hirsel_core_host_send_secret(
                 return DENIED;
             }
             if write.spent {
-                return if served { DENIED } else { RESET };
+                return RESET;
             }
             if !secret
                 .policy

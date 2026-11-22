@@ -1074,7 +1074,7 @@ fn drive_repair_delivered(take d: Drive) -> () waits {
 }
 
 pub fn law_repair_delivered(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
-    if !runner.law_owner_take_wakes() { return false }
+    if !runner.law_owner_take_wakes() || !runner.law_owner_takes_queued() { return false }
     served(c, r, tasks, n, drive_repair_delivered)
 }
 

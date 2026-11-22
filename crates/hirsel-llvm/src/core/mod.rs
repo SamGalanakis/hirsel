@@ -726,6 +726,7 @@ fn emit_module(
                 current: None,
                 exits: Vec::new(),
                 exit_live: Some(Vec::new()),
+                raised_exit: None,
                 step_labels: Default::default(),
                 unchecked_steps: false,
                 precharge: None,
@@ -944,8 +945,8 @@ fn emit_module(
             }
             let mut forwarding = forward::Forwarding::native(body, sig, &call_layouts);
             // A view freezes the carrier header throughout the activation, even
-            // across calls through an opaque capture. End the invariant at the
-            // function's exit; retain existing frame-safe tail-call functions unchanged.
+            // across calls through an opaque capture. End the invariant before
+            // returning, and keep frame-safe tail calls in tail position.
             if facts
                 && !(0..body.blocks.len()).any(|b| {
                     forwarding
@@ -1058,6 +1059,7 @@ fn emit_module(
                 })?;
             }
             e.finish_exit();
+            e.finish_raised_exit();
             e.sink.end_function();
             e.current = None;
             e.step_counter = None;
@@ -1544,6 +1546,23 @@ fn int(n: impl Into<i128>) -> Value {
     Value::Int(n.into())
 }
 const FALSE: Value = Value::Bool(false);
+const RAISED_EXIT: Label = Label::plain("exit_raised");
+
+struct RaisedExit {
+    live: Option<Vec<u64>>,
+}
+
+fn include_exit_liveness(exit_live: &mut Option<Vec<u64>>, live: &Option<Vec<u64>>) {
+    match (exit_live, live) {
+        (Some(all), Some(live)) => {
+            all.resize(live.len(), 0);
+            for (a, l) in all.iter_mut().zip(live) {
+                *a |= l;
+            }
+        }
+        (exit_live, _) => *exit_live = None,
+    }
+}
 
 struct FunctionEmitter<'a> {
     function: Option<FuncId>,
@@ -1594,6 +1613,7 @@ struct FunctionEmitter<'a> {
     /// scoped slot). The exit ends those slots once and returns.
     exits: Vec<(Option<(Type, Value)>, Label)>,
     exit_live: Option<Vec<u64>>,
+    raised_exit: Option<RaisedExit>,
     step_labels: std::collections::BTreeMap<usize, Label>,
     unchecked_steps: bool,
     precharge: Option<steps::Precharge>,
@@ -1738,25 +1758,19 @@ impl FunctionEmitter<'_> {
     }
     /// Branches a return to the shared exit to end scoped slots and view
     /// invariants once.
-    /// A return after a forwarded tail call, or in the entry block, stays put.
+    /// The raised exit and returns in the entry block or after a forwarded
+    /// tail call stay put.
     fn to_exit(&mut self, v: Option<(&Type, &Value)>) -> bool {
         let Some(from) = self.current else {
             return false;
         };
-        if self.scoped_ended
+        if from == RAISED_EXIT
+            || self.scoped_ended
             || (self.view_invariants.is_empty() && !self.scoped.slots.iter().any(|&s| s))
         {
             return false;
         }
-        match (&mut self.exit_live, &self.live) {
-            (Some(all), Some(live)) => {
-                all.resize(live.len(), 0);
-                for (a, l) in all.iter_mut().zip(live) {
-                    *a |= l;
-                }
-            }
-            (exit_live, _) => *exit_live = None,
-        }
+        include_exit_liveness(&mut self.exit_live, &self.live);
         self.exits
             .push((v.map(|(t, v)| (t.clone(), v.clone())), from));
         self.flush_steps();
@@ -1784,6 +1798,27 @@ impl FunctionEmitter<'_> {
         self.end_view_invariants();
         self.end_scoped();
         self.effect(Operation::Return(value.as_ref().map(|(t, v)| (t, v))));
+    }
+    /// Keep a raised status out of the ordinary return's result phi so LLVM
+    /// can optimize the normal result and the failure path separately.
+    fn to_raised_exit(&mut self) -> bool {
+        if self.view_invariants.is_empty() {
+            return false;
+        }
+        let exit = self.raised_exit.get_or_insert_with(|| RaisedExit {
+            live: Some(Vec::new()),
+        });
+        include_exit_liveness(&mut exit.live, &self.live);
+        self.br(RAISED_EXIT);
+        true
+    }
+    fn finish_raised_exit(&mut self) {
+        if let Some(exit) = self.raised_exit.take() {
+            self.live = exit.live;
+            self.scoped_ended = false;
+            self.block(RAISED_EXIT);
+            self.emit_failure_return();
+        }
     }
     /// Ends every scoped slot's storage that may be live before a return, once.
     fn end_scoped(&mut self) {

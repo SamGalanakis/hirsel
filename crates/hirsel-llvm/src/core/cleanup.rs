@@ -221,6 +221,7 @@ pub(super) fn glue_emitter<'a>(
         current: None,
         exits: Vec::new(),
         exit_live: Some(Vec::new()),
+        raised_exit: None,
         step_labels: Default::default(),
         unchecked_steps: false,
         precharge: None,

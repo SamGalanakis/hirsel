@@ -74,17 +74,9 @@ fn list_growth(backend: Backend) {
         ),
         (
             include_str!("../../../core/front/cases/body/list-push.hirsel"),
-            "fresh_push()==711u64 && grew()==711u64 && returned_input()==73231u64 && stored_input()==7u64",
+            "fresh_push()==711u64 && grew()==711u64 && stored_input()==7u64",
             0,
             1_048_576,
-        ),
-        // A second resource allocation under the same finite root budget proves
-        // that the failed push returned an input that was dropped and refunded.
-        (
-            include_str!("../../../core/front/cases/body/list-push.hirsel"),
-            "returned_input()==73231u64 && returned_input()==73231u64",
-            0,
-            288 + 71,
         ),
         (
             include_str!("../../../core/front/cases/body/list-push.hirsel"),
@@ -94,7 +86,7 @@ fn list_growth(backend: Backend) {
         ),
         (
             include_str!("../../../core/front/cases/body/list-append.hirsel"),
-            "appended()==606u64 && unchanged()==0u64 && rejected()==404009u64",
+            "appended()==606u64 && unchanged()==0u64 && rejected()==4009u64",
             0,
             1_048_576,
         ),

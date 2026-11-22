@@ -11,6 +11,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import random
 import signal
 import subprocess
 import time
@@ -20,8 +21,22 @@ import scale
 import scale2
 
 CTL = {6, 7}
-# Ports apart from the other pool lanes, which use 28190 and 28200-28206.
-scale.PORT, scale.TOOL_PORT = 28400, 28390
+
+
+def pick_ports():
+    """Two free listening ports drawn at random for this run, below the
+    ephemeral range (the load generator's 8K source ports come from there) and
+    apart from the other pool lanes' fixed 28190, 28200-28206 and 29690-29708.
+    A stray client cannot aim at a port it cannot predict."""
+    rows = subprocess.run(["ss", "-H", "-ltn"], capture_output=True, text=True, check=True).stdout
+    taken = {int(row.split()[3].rsplit(":", 1)[1]) for row in rows.splitlines()}
+    taken |= {28190, *range(28200, 28207), *range(29690, 29709)}
+    rng = random.SystemRandom()
+    free = [p for p in range(20000, 32000) if p not in taken]
+    return tuple(rng.sample(free, 2))
+
+
+scale.PORT, scale.TOOL_PORT = pick_ports()
 CELLS = {
     "A1-256": scale.SCALE_CELLS["A1-256"],
     "A1-8192": scale.SCALE_CELLS["A1-8192"],

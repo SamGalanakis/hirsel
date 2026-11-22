@@ -5,6 +5,9 @@
 // The root makes `partitions` partition units, one shared service unit and k
 // session units, and wires them with connections. The root accepts on one
 // port and sends each socket to the next session unit in round-robin order.
+// A session unit drops a connection whose 8-byte hello (its session id) does
+// not arrive whole within HELLO_NS or names no session, and asks the root to
+// accept one more in its place, so a stray connection takes no client's slot.
 //
 // A turn request is 48 bytes: turn u64, seed u64, ncalls u8, par u8,
 // shared u8, pad to 24, then one size code per call (0 1 KiB, 1 8 KiB,
@@ -33,6 +36,13 @@ const SVC_CAP: u64 = 1024
 const SVC_ROUNDS: u64 = 1000
 
 const PAR_TOOLS: u64 = 16
+
+// How long a session unit waits for a connection's hello.
+const HELLO_NS: u64 = 1000000000
+
+// A session unit's word to the root once it has all its sessions; any other
+// word is the unit's index, asking for one more connection.
+const FILLED: u64 = 18446744073709551615
 
 fn kernel(seed: u64, rounds: u64) -> u64 {
     let mut x = seed
@@ -333,6 +343,7 @@ type Front: cross {
     tasks: Tasks,
     nw: Net,
     clock: Clock,
+    me: u64,
     mine: u64,
     sessions: u64,
     partitions: u64,
@@ -340,7 +351,8 @@ type Front: cross {
     par: bool,
     ready_ack: bool,
     svc: Client[SvcReq],
-    hello: Client[FrontWiring]
+    hello: Client[FrontWiring],
+    more: Client[u64]
 }
 
 type FrontWiring: cross {
@@ -349,12 +361,13 @@ type FrontWiring: cross {
 }
 
 // The hello, tolerating a connection the client dropped (a retried connect
-// the server had already accepted): false when it never arrives whole.
-fn read_hello(mut s: ReadHalf, mut buf: Bytes) -> bool waits {
+// the server had already accepted) or one that sends nothing: false when it
+// does not arrive whole by `until`.
+fn read_hello(mut s: ReadHalf, mut buf: Bytes, until: Until) -> bool waits {
     list.clear(mut buf)
     while list.len(buf) < 8 {
         let want = 8 - list.len(buf)
-        match host.recv_bounded(mut s, mut buf, want, Never) {
+        match host.recv_bounded(mut s, mut buf, want, until) {
             Ok(got) => {
                 if got == 0 {
                     return false
@@ -367,7 +380,7 @@ fn read_hello(mut s: ReadHalf, mut buf: Bytes) -> bool waits {
 }
 
 fn front(take job: Front) -> u64 waits {
-    let Front(tasks: tasks, nw: nw, clock: clock, mine: mine, sessions: sessions, partitions: partitions, tool_port: tool_port, par: par, ready_ack: ready_ack, svc: svc, hello: hello,) = take job
+    let Front(tasks: tasks, nw: nw, clock: clock, me: me, mine: mine, sessions: sessions, partitions: partitions, tool_port: tool_port, par: par, ready_ack: ready_ack, svc: svc, hello: hello, more: more,) = take job
     // An inbox does not cross: the root sends the partitions' clients here.
     let (c, wiring): (Client[Client[Commit]], Inbox[Client[Commit]]) = result.unwrap(conn.new(partitions, bytes 0))
     let (sockets, incoming): (Client[Socket], Inbox[Socket]) = result.unwrap(conn.new(if mine == 0 { 1 } else { mine }, bytes 0))
@@ -385,23 +398,25 @@ fn front(take job: Front) -> u64 waits {
     }
     let mut jobs: List[Task[u64]] = list.new()
     let mut hello_buf: Bytes = list.with_capacity(8)
-    for _ in 0 .. mine {
+    let mut got = 0u64
+    while got < mine {
         let s = result.unwrap(conn.receive(incoming))
         let (rh, wh) = net.split(take s)
         let mut r = take rh
-        if !read_hello(mut r, mut hello_buf) {
+        if !read_hello(mut r, mut hello_buf, At(clock, host.mono_ns(clock) + HELLO_NS)) || list.word_le(hello_buf, 0) >= sessions {
+            result.unwrap(conn.send(more, me))
             continue
         }
         let sid: u64 = list.word_le(hello_buf, 0)
-        if sid >= sessions {
-            continue
-        }
+        got = got + 1
         let Some(commit) = list.get(commits, sid % partitions) else {
             fail("no partition")
         }
         let one = Session(tasks: tasks, nw: nw, clock: clock, r: take r, w: take wh, sid: sid, commit: conn.client(commit), svc: conn.client(svc), tool_port: tool_port, par: par, ready_ack: ready_ack,)
         list.push(mut jobs, task.spawn(tasks, bytes per, take one, session))
     }
+    result.unwrap(conn.send(more, FILLED))
+    let _ = take more
     // Release this unit's own clients so the partitions and the service see
     // Closed once the sessions end.
     let _ = take commits
@@ -455,11 +470,12 @@ pub fn main(tasks: Tasks, nw: Net, clock: Clock, err: Stderr, d: Dir, argv: Args
     } else {
         SESSION_BYTES
     }
+    let (more, asks): (Client[u64], Inbox[u64]) = result.unwrap(conn.new(k, bytes 0))
     let mut fronts: List[Task[u64]] = list.new()
     let mut clients: List[Client[Socket]] = list.new()
     for u in 0 .. k {
         let mine = (sessions + k - 1 - u) / k
-        let job = Front(tasks: tasks, nw: nw, clock: clock, mine: mine, sessions: sessions, partitions: partitions, tool_port: tool_port, par: par, ready_ack: ready_ack, svc: conn.client(svc), hello: conn.client(fh),)
+        let job = Front(tasks: tasks, nw: nw, clock: clock, me: u, mine: mine, sessions: sessions, partitions: partitions, tool_port: tool_port, par: par, ready_ack: ready_ack, svc: conn.client(svc), hello: conn.client(fh), more: conn.client(more),)
         list.push(mut fronts, result.unwrap(task.spawn_unit(tasks, bytes UNIT_BYTES + mine * per, take job, front)))
         let FrontWiring(commits: wiring, sockets: sockets) = result.unwrap(conn.receive(fh_in))
         list.push(mut clients, take sockets)
@@ -479,6 +495,23 @@ pub fn main(tasks: Tasks, nw: Net, clock: Clock, err: Stderr, d: Dir, argv: Args
         }
         result.unwrap(conn.send(client, take socket))
     }
+    // Each rejected connection is replaced by the next accept, sent to the
+    // unit that rejected it, until every unit has all its sessions.
+    let _ = take more
+    let mut filled = 0u64
+    while filled < k {
+        let u = result.unwrap(conn.receive(asks))
+        if u == FILLED {
+            filled = filled + 1
+        } else {
+            let (take socket, _) = result.unwrap(host.accept(mut listener, Never))
+            let Some(client) = list.get(clients, u) else {
+                fail("no session unit")
+            }
+            result.unwrap(conn.send(client, take socket))
+        }
+    }
+    let _ = take asks
     let _ = take listener
     let _ = take clients
     let _ = take commits

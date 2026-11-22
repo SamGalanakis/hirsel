@@ -182,11 +182,15 @@ fn main() {
         let svc = tokio::spawn(service(svc_rx));
         let l = tokio::net::TcpListener::bind(("127.0.0.1", port)).await.unwrap();
         let mut jobs = Vec::new();
+        // A connection whose hello does not arrive whole within a second or
+        // names no session is dropped and does not count as a session, as in
+        // session_u.
         while jobs.len() < sessions as usize {
             let (mut st, _) = l.accept().await.unwrap();
             st.set_nodelay(true).unwrap();
             let mut hello = [0u8; 8];
-            if st.read_exact(&mut hello).await.is_err() { continue; }
+            let read = tokio::time::timeout(std::time::Duration::from_secs(1), st.read_exact(&mut hello)).await;
+            if !matches!(read, Ok(Ok(_))) { continue; }
             let sid = u64::from_le_bytes(hello);
             if sid >= sessions { continue; }
             let commit = commits[(sid % partitions as u64) as usize].clone();

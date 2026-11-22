@@ -152,6 +152,9 @@ pub struct Types {
     #[serde(skip)]
     map: hashbrown::HashTable<(TyId, u64)>,
     published_map: Map<TyKind, TyId>,
+    /// One past the largest declaration a published kind names: a kind naming
+    /// a later declaration was interned after publication and is not probed.
+    published_decls: u32,
 }
 impl<'de> serde::Deserialize<'de> for Types {
     fn deserialize<D: serde::Deserializer<'de>>(decoder: D) -> Result<Self, D::Error> {
@@ -160,6 +163,7 @@ impl<'de> serde::Deserialize<'de> for Types {
             base: Option<std::sync::Arc<Types>>,
             kinds: Table<TypeEntry>,
             published_map: Map<TyKind, TyId>,
+            published_decls: u32,
         }
         let wire: Wire = serde::Deserialize::deserialize(decoder)?;
         let base_len = wire.base.as_ref().map_or(0, |b| b.len());
@@ -175,6 +179,7 @@ impl<'de> serde::Deserialize<'de> for Types {
             kinds: wire.kinds,
             map,
             published_map: wire.published_map,
+            published_decls: wire.published_decls,
         })
     }
 }
@@ -189,12 +194,21 @@ impl Types {
             .enumerate()
             .map(|(i, k)| (k.kind.clone(), TyId(i as u32)))
             .collect();
+        let published_decls = rows
+            .iter()
+            .filter_map(|k| match k.kind {
+                TyKind::Adt(d, _) => Some(d.0 + 1),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0);
         Ok(Self {
             base: None,
             base_len: 0,
             kinds: writer.table(&rows)?,
             map: hashbrown::HashTable::new(),
             published_map: writer.map(&map)?,
+            published_decls,
         })
     }
     pub fn new() -> Self {
@@ -214,6 +228,7 @@ impl Types {
             // The base's published kinds, asked through this overlay's own
             // clone, so its answers live as long as the overlay.
             published_map: base.published_map.clone(),
+            published_decls: base.published_decls,
             base: Some(base),
             base_len,
             kinds: Table::default(),
@@ -224,12 +239,41 @@ impl Types {
         self.base
             .as_ref()
             .and_then(|b| b.find_interned(k, None))
-            .or_else(|| self.published_map.get(k).copied())
+            .or_else(|| self.find_published(k))
     }
     #[inline(always)]
     fn find_hashed(&self, k: &TyKind, hash: u64) -> Option<TyId> {
         self.find_interned(k, Some(hash))
-            .or_else(|| self.published_map.get(k).copied())
+            .or_else(|| self.find_published(k))
+    }
+    /// A kind in the published prefix. Published kinds name only the types and
+    /// declarations published with them, so a kind naming a later one is
+    /// absent without a probe.
+    fn find_published(&self, k: &TyKind) -> Option<TyId> {
+        let types = self.published_map.len();
+        if types == 0 {
+            return None;
+        }
+        let ty = |t: &TyId| (t.0 as usize) < types;
+        let named = match k {
+            TyKind::Tuple(xs) => xs.iter().all(ty),
+            TyKind::Array(x, _) | TyKind::View(x) => ty(x),
+            TyKind::Anchored(x, r) => ty(x) && ty(r),
+            TyKind::Adt(d, xs) => d.0 < self.published_decls && xs.iter().all(ty),
+            TyKind::Fn(ps, r, _, _) => ty(r) && ps.iter().all(|(_, x)| ty(x)),
+            TyKind::Error
+            | TyKind::Never
+            | TyKind::Unit
+            | TyKind::Scalar(_)
+            | TyKind::Region(_)
+            | TyKind::Param(_)
+            | TyKind::Hole
+            | TyKind::Vector(_) => true,
+        };
+        if !named {
+            return None;
+        }
+        self.published_map.get(k).copied()
     }
     /// A kind interned in this table or its bases, not in a published prefix:
     /// an overlay asks its own clone of the base's published kinds. A loop, so
@@ -1027,7 +1071,7 @@ mod interner_tests {
                 .keys()
                 .map(String::as_str)
                 .collect::<Vec<_>>(),
-            ["base", "kinds", "published_map"]
+            ["base", "kinds", "published_decls", "published_map"]
         );
         let decoded: Types = serde_json::from_value(wire).unwrap();
         assert_eq!(decoded.len(), program.len());

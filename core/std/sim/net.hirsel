@@ -503,7 +503,8 @@ fn attempt(n: Network, mut state: State, mut plan: sim.world.Plan, clock: Clock,
         Released(id: id, part: part) => {
             release(mut state, id, part);
             None
-        }
+        },
+        _ => reject(mut port, take c, Denied)
     }
 }
 

@@ -106,11 +106,10 @@ unsafe fn call(
             }
         };
         let served = crate::provide::owns(&provider);
-        let authorized = !served
-            && state_ok
+        let authorized = state_ok
             && direction(operation).is_none_or(|dir| {
                 !root.is_empty()
-                    && path.len() <= crate::os_unix::max_path()
+                    && path.len() <= hirsel_core_net::unix::MAX_PATH_BYTES
                     && valid_relative_path(path.as_bytes())
                     && permits(rules, dir, root, path)
             });

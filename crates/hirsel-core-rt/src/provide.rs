@@ -85,6 +85,8 @@ enum Kind {
     Entries,
     Socket,
     Listener,
+    UnixListener,
+    Datagram,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -136,6 +138,15 @@ const NET_SEND: u64 = 5;
 const NET_HANDSHAKE: u64 = 6;
 const NET_SEND_SECRET: u64 = 7;
 const NET_RELEASED: u64 = 8;
+const NET_UNIX_CONNECT: u64 = 9;
+const NET_UNIX_LISTEN: u64 = 10;
+const NET_UNIX_ACCEPT: u64 = 11;
+const NET_DATAGRAM_OPEN: u64 = 12;
+const NET_DATAGRAM_BIND: u64 = 13;
+const NET_DATAGRAM_CONNECT: u64 = 14;
+const NET_DATAGRAM_SEND: u64 = 15;
+const NET_DATAGRAM_SEND_TO: u64 = 16;
+const NET_DATAGRAM_RECV: u64 = 17;
 /// DirReply and StreamReply variants as `Reply[Op]` tags.
 const R_DONE: u64 = 0;
 const R_FAILED: u64 = 1;
@@ -150,6 +161,10 @@ const R_ENTRIES: u64 = 8;
 const R_SOCKET: u64 = 9;
 const R_LISTENER: u64 = 10;
 const R_SECURED: u64 = 11;
+const R_UNIX_SOCKET: u64 = 12;
+const R_UNIX_LISTENING: u64 = 13;
+const R_DATAGRAM: u64 = 14;
+const R_PACKET: u64 = 15;
 /// A port caller's socket and listener keys: the registry's generation-0
 /// band with bit 33 set, so they never meet a registry key (generation 1 and
 /// up) or a model key (small and sequential). Process-wide, so two ports'
@@ -303,6 +318,40 @@ impl Port {
     /// A Net call's words: an address operation on the port's Net (its rules
     /// already permitted the address), or an operation on a live key.
     fn net_words(&self, request: &Request) -> Option<[u64; 8]> {
+        if unix_operation(request.operation) {
+            // SAFETY: the Unix adapter pins this extension through delivery.
+            let n = unsafe { &*request.path.cast::<crate::unix_net::UnixRequest>() };
+            let root = n.root.len() as u64;
+            let path = n.path.len() as u64;
+            let bytes = request.buffer.len as u64;
+            let datagram = || self.socket(request.handle, Kind::Datagram);
+            let mut w = [0; 8];
+            match request.operation {
+                UNIX_CONNECT => w[..3].copy_from_slice(&[NET_UNIX_CONNECT, root, path]),
+                UNIX_LISTEN => {
+                    w[..4].copy_from_slice(&[NET_UNIX_LISTEN, root, path, u64::from(n.backlog)])
+                }
+                UNIX_ACCEPT => w[..2].copy_from_slice(&[
+                    NET_UNIX_ACCEPT,
+                    self.socket(request.handle, Kind::UnixListener)?,
+                ]),
+                DATAGRAM_OPEN => w[0] = NET_DATAGRAM_OPEN,
+                DATAGRAM_BIND => w[..3].copy_from_slice(&[NET_DATAGRAM_BIND, root, path]),
+                DATAGRAM_CONNECT => {
+                    w[..4].copy_from_slice(&[NET_DATAGRAM_CONNECT, datagram()?, root, path])
+                }
+                DATAGRAM_SEND => w[..3].copy_from_slice(&[NET_DATAGRAM_SEND, datagram()?, bytes]),
+                DATAGRAM_SEND_TO => {
+                    w[..5].copy_from_slice(&[NET_DATAGRAM_SEND_TO, datagram()?, root, path, bytes])
+                }
+                DATAGRAM_RECV => {
+                    let room = request.buffer.capacity.saturating_sub(request.buffer.len) as u64;
+                    w[..3].copy_from_slice(&[NET_DATAGRAM_RECV, datagram()?, room]);
+                }
+                _ => unreachable!(),
+            }
+            return Some(w);
+        }
         // SAFETY: every Net adapter pins its NetworkRequest in `path`.
         let n = unsafe { &*request.path.cast::<crate::net::NetworkRequest>() };
         let a = n.address;
@@ -443,6 +492,17 @@ unsafe fn field_bytes<'a>(vocab: Vocab, call: &PortCall, field: u64) -> &'a [u8]
     unsafe {
         let r = &*call.request;
         let buffer = request_bytes(r.buffer.data, r.buffer.len);
+        if vocab == Vocab::Net && unix_operation(r.operation) {
+            let unix = &*r.path.cast::<crate::unix_net::UnixRequest>();
+            return match (call.words[0], field) {
+                (NET_UNIX_CONNECT | NET_UNIX_LISTEN | NET_DATAGRAM_BIND, 0)
+                | (NET_DATAGRAM_CONNECT | NET_DATAGRAM_SEND_TO, 1) => unix.root.as_bytes(),
+                (NET_UNIX_CONNECT | NET_UNIX_LISTEN | NET_DATAGRAM_BIND, 1)
+                | (NET_DATAGRAM_CONNECT | NET_DATAGRAM_SEND_TO, 2) => unix.path.as_bytes(),
+                (NET_DATAGRAM_SEND, 1) | (NET_DATAGRAM_SEND_TO, 3) => buffer,
+                _ => &[],
+            };
+        }
         let path = request_bytes(r.path, r.path_len);
         match (vocab, call.words[0], field) {
             (Vocab::Stream, 0, 0) => buffer,
@@ -476,7 +536,7 @@ fn call_room(vocab: Vocab, words: &[u64; 8]) -> u64 {
     match (vocab, words[0]) {
         (Vocab::Dir, 10 | 19) => words[2],
         (Vocab::Dir, 2 | 11) => words[3],
-        (Vocab::Net, NET_RECV | NET_RESOLVE) => words[2],
+        (Vocab::Net, NET_RECV | NET_RESOLVE | NET_DATAGRAM_RECV) => words[2],
         _ => 0,
     }
 }
@@ -505,7 +565,12 @@ fn answers(vocab: Vocab, op: u64, reply: u64) -> bool {
                     NET_LISTEN => reply == R_LISTENER,
                     NET_RESOLVE | NET_RECV | NET_SEND => reply == R_COUNT,
                     NET_HANDSHAKE => reply == R_SECURED,
-                    NET_SEND_SECRET => reply == R_DONE,
+                    NET_SEND_SECRET | NET_DATAGRAM_CONNECT | NET_DATAGRAM_SEND
+                    | NET_DATAGRAM_SEND_TO => reply == R_DONE,
+                    NET_UNIX_CONNECT | NET_UNIX_ACCEPT => reply == R_UNIX_SOCKET,
+                    NET_UNIX_LISTEN => reply == R_UNIX_LISTENING,
+                    NET_DATAGRAM_OPEN | NET_DATAGRAM_BIND => reply == R_DATAGRAM,
+                    NET_DATAGRAM_RECV => reply == R_PACKET,
                     _ => false,
                 }
         }
@@ -643,8 +708,12 @@ unsafe fn due(port: &Mutex<Port>, request: &Request, token: u64) -> crate::os_ne
     }
     // SAFETY: every Net adapter pins its NetworkRequest in `path`.
     unsafe {
-        let n = &*request.path.cast::<crate::net::NetworkRequest>();
-        crate::os_net::deadline(n.until, token)
+        let until = if unix_operation(request.operation) {
+            (*request.path.cast::<crate::unix_net::UnixRequest>()).until
+        } else {
+            (*request.path.cast::<crate::net::NetworkRequest>()).until
+        };
+        crate::os_net::deadline(until, token)
     }
 }
 
@@ -1286,7 +1355,10 @@ unsafe fn provide_port(context: *mut Context, n: u64, vocab: Vocab, terminal: bo
         });
         let tls = hirsel_core_net::GrantRule::Tls(hirsel_core_net::TlsRule::served());
         let resolve = hirsel_core_net::GrantRule::Resolve(hirsel_core_net::ResolveRule::served());
-        let rules = crate::net::RulesStorage::new(addresses.chain([tls, resolve]));
+        let unix = hirsel_core_net::UnixDirection::ALL
+            .into_iter()
+            .map(|dir| hirsel_core_net::GrantRule::Unix(hirsel_core_net::UnixRule::served(dir)));
+        let rules = crate::net::RulesStorage::new(addresses.chain([tls, resolve]).chain(unix));
         root = rules.handle();
         port.rules = Some(rules);
     }
@@ -1632,7 +1704,11 @@ fn answer(p: &Port, call: &PortCall, tag: u64, w: [u64; 6]) -> Option<Outcome> {
     }
     // An IoError's tags are 1 to 5, a NetError's 1 to 9; the code is the
     // reply word's low 32 bits.
-    let tags = if p.vocab == Vocab::Net { 9 } else { 5 };
+    let tags = match (p.vocab, op) {
+        (Vocab::Net, NET_UNIX_LISTEN) => 10,
+        (Vocab::Net, _) => 9,
+        _ => 5,
+    };
     let io = |t: u64, code: u64| {
         (1..=tags).contains(&t).then_some(IoError {
             tag: t as u8,
@@ -1703,6 +1779,15 @@ fn answer(p: &Port, call: &PortCall, tag: u64, w: [u64; 6]) -> Option<Outcome> {
             }
             // SAFETY: as above.
             out.value = unsafe { (*call.request).handle };
+        }
+        R_PACKET => {
+            let room = call.words[2];
+            if w[1] != u64::from(w[0] > room) || w[0].min(room) != call.staged.len() as u64 {
+                return None;
+            }
+            out.value = w[0];
+            out.written = call.staged.len() as u64;
+            out.kind = w[1] as u8;
         }
         R_LOCKED => out.value = (w[0] != 0) as u64,
         R_STAT => {
@@ -1806,6 +1891,9 @@ pub unsafe extern "C" fn hirsel_core_port_reply(
         (Vocab::Dir, R_ENTRIES) => Some(Kind::Entries),
         (Vocab::Net, R_SOCKET) => Some(Kind::Socket),
         (Vocab::Net, R_LISTENER) => Some(Kind::Listener),
+        (Vocab::Net, R_UNIX_SOCKET) => Some(Kind::Socket),
+        (Vocab::Net, R_UNIX_LISTENING) => Some(Kind::UnixListener),
+        (Vocab::Net, R_DATAGRAM) => Some(Kind::Datagram),
         _ => None,
     };
     if let Some(kind) = kind {
@@ -1825,7 +1913,9 @@ pub unsafe extern "C" fn hirsel_core_port_reply(
             let key = PORT_KEYS | (seq << 2);
             p.keys.insert(key, w[0]);
             outcome.value = key;
-            // SAFETY: the call is unsettled, so its caller's request is pinned.
+        }
+        if matches!(kind, Kind::Socket | Kind::Listener) && matches!(tag, R_SOCKET | R_LISTENER) {
+            // SAFETY: the unsettled IP operation pins its address output.
             unsafe {
                 let n = (*p.calls[&id].request)
                     .path
@@ -1869,7 +1959,9 @@ pub unsafe extern "C" fn hirsel_core_port_reply(
         }
     }
     let c = &p.calls[&id];
-    if !c.staged.is_empty() {
+    if !c.staged.is_empty()
+        && !(c.words[0] == NET_DATAGRAM_RECV && p.vocab == Vocab::Net && tag == R_FAILED)
+    {
         // The commit copies the staged bytes into the caller's spare
         // capacity, which `fill` bounded by the call's room.
         // SAFETY: the call is unsettled, so its caller's request is pinned.

@@ -389,13 +389,16 @@ of each direction over every root and path. A universal rule intersected with a 
 calls and answers them with these replies, in addition to the existing ones
 ([core](core.md#provide)):
 
-```hirsel unbuilt
-pub type UnixOp = ConnectUnix(root: u64, path: u64) | ListenUnix(root: u64, path: u64, backlog: u16) | AcceptUnix(listener: u64) | OpenDatagram | BindDatagram(root: u64, path: u64) | ConnectDatagram(datagram: u64, root: u64, path: u64) | SendDatagram(datagram: u64, len: u64) | SendTo(datagram: u64, root: u64, path: u64, len: u64) | RecvDatagram(datagram: u64, room: u64)
-pub type UnixReply = UnixSocket(u64) | UnixListening(u64) | Datagram(u64) | Packet(len: u64, truncated: bool)
+```hirsel core
+pub type NetOp = Connect(addr: Addr) | Resolve(name: u64, room: u64) | Listen(addr: Addr, backlog: u16) | Accept(listener: u64) | Recv(socket: u64, room: u64, max: u64) | Send(socket: u64, prefix: u64, tail: u64) | Handshake(socket: u64, name: u64, alpn: u64, system: bool) | SendSecret(socket: u64, before: u64, after: u64) | Released(id: u64, part: Part) | ConnectUnix(root: u64, path: u64) | ListenUnix(root: u64, path: u64, backlog: u16) | AcceptUnix(listener: u64) | OpenDatagram | BindDatagram(root: u64, path: u64) | ConnectDatagram(datagram: u64, root: u64, path: u64) | SendDatagram(datagram: u64, len: u64) | SendTo(datagram: u64, root: u64, path: u64, len: u64) | RecvDatagram(datagram: u64, room: u64)
+pub type NetReply = Done | Failed(NetError) | Count(u64) | Socket(u64, Addr) | Listener(u64, Addr) | Secured(Handshake) | UnixSocket(u64) | UnixListening(u64) | Datagram(u64) | Packet(len: u64, truncated: bool)
 ```
 
-These cases join `NetOp` and `NetReply` themselves. They are shown apart here only because
-those types are built. The caller makes the handle-state checks above before it queues a call.
+The server receives these variants in `NetOp` and answers with the corresponding `NetReply`
+variants. The `root` and `path` fields hold byte lengths. `provide.payload` reads root and
+path from fields 0 and 1 of ConnectUnix, ListenUnix and BindDatagram, and from fields
+1 and 2 of ConnectDatagram and SendTo. Packet bytes are in field 1 of SendDatagram and
+field 3 of SendTo. The caller checks handle state before queueing a call.
 A `Packet` reply must have staged exactly `min(room, len)` bytes with `truncated` equal to
 `len > room`. An error reply to `RecvDatagram` delivers no bytes and discards whatever the
 server staged. Any other packet, or a reply of the wrong kind for its call, fails the server

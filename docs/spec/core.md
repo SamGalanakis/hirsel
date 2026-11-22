@@ -583,9 +583,9 @@ runs each on the evaluator, Cranelift dev and LLVM release ([README](../../core/
 program's own code ([CAP-5](capabilities.md#cap-5-provider-operations)). Callers see nothing
 new: a `Dir`, `Net`, `Stdout`, `Stderr`, `Clock`, `Random` or `Process` from `provide` has its
 ordinary type and every `host`, `net`, `tls`, `stdout` and `stderr` operation takes it.
+A `provide.net` port also answers the Unix operations ([NET-14](net.md#net-14-unix-datagrams)).
 Unbuilt: `provide.exec` makes an `Exec` answered on a `Served[ExecOp]` port
-([EXEC-8](exec.md#exec-8-exec-at-the-replay-point-and-served-exec)), and a `provide.net` port
-also answers the Unix operations ([NET-14](net.md#net-14-unix-datagrams)).
+([EXEC-8](exec.md#exec-8-exec-at-the-replay-point-and-served-exec)).
 
 ```hirsel core
 pub opaque resource type Served[Op]
@@ -597,8 +597,8 @@ pub type Withdrawn = Withdrawn()
 pub type Part = Whole | Read | Write
 pub type DirOp = Open(dir: u64, path: u64, mode: OpenMode) | OpenDir(dir: u64, path: u64) | Mkdtemp(dir: u64, prefix: u64, room: u64) | Stat(dir: u64, path: u64) | Mkdir(dir: u64, path: u64) | Remove(dir: u64, path: u64) | RemoveTree(dir: u64, path: u64) | Rename(dir: u64, from: u64, to: u64) | SyncDir(dir: u64) | Entries(dir: u64) | Read(file: u64, room: u64) | ReadAt(file: u64, at: u64, room: u64) | Write(file: u64, len: u64) | WriteAt(file: u64, at: u64, len: u64) | StatFile(file: u64) | Sync(file: u64) | TryLock(file: u64) | Unlock(file: u64) | Close(file: u64) | NextEntries(entries: u64, room: u64) | Released(id: u64)
 pub type DirReply = Done | Failed(IoError) | WriteFailed(WriteError) | Count(u64) | Locked(bool) | Stat(Stat) | File(u64) | Dir(u64) | Entries(u64)
-pub type NetOp = Connect(addr: Addr) | Resolve(name: u64, room: u64) | Listen(addr: Addr, backlog: u16) | Accept(listener: u64) | Recv(socket: u64, room: u64, max: u64) | Send(socket: u64, prefix: u64, tail: u64) | Handshake(socket: u64, name: u64, alpn: u64, system: bool) | SendSecret(socket: u64, before: u64, after: u64) | Released(id: u64, part: Part)
-pub type NetReply = Done | Failed(NetError) | Count(u64) | Socket(u64, Addr) | Listener(u64, Addr) | Secured(Handshake)
+pub type NetOp = Connect(addr: Addr) | Resolve(name: u64, room: u64) | Listen(addr: Addr, backlog: u16) | Accept(listener: u64) | Recv(socket: u64, room: u64, max: u64) | Send(socket: u64, prefix: u64, tail: u64) | Handshake(socket: u64, name: u64, alpn: u64, system: bool) | SendSecret(socket: u64, before: u64, after: u64) | Released(id: u64, part: Part) | ConnectUnix(root: u64, path: u64) | ListenUnix(root: u64, path: u64, backlog: u16) | AcceptUnix(listener: u64) | OpenDatagram | BindDatagram(root: u64, path: u64) | ConnectDatagram(datagram: u64, root: u64, path: u64) | SendDatagram(datagram: u64, len: u64) | SendTo(datagram: u64, root: u64, path: u64, len: u64) | RecvDatagram(datagram: u64, room: u64)
+pub type NetReply = Done | Failed(NetError) | Count(u64) | Socket(u64, Addr) | Listener(u64, Addr) | Secured(Handshake) | UnixSocket(u64) | UnixListening(u64) | Datagram(u64) | Packet(len: u64, truncated: bool)
 pub type StreamOp = Write(len: u64)
 pub type StreamReply = Done | WriteFailed(WriteError)
 

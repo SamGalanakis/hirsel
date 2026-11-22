@@ -131,6 +131,8 @@ struct World {
     /// port, server id and the peer's port, which a handshake's rule checks
     /// (native `provide::Port::keys`, `Files::connected`).
     port_keys: BTreeMap<u64, (usize, u64, u16)>,
+    /// A datagram retains the rule list of the grant that created it.
+    datagrams: BTreeMap<u64, DatagramState>,
     next_port_key: u64,
 }
 const CELL_BASE: u64 = 0x80_0000;
@@ -204,6 +206,26 @@ enum Queued {
 const DIR_CLOSE: u64 = 18;
 const DIR_RELEASED: u64 = 20;
 const NET_RELEASED: u64 = 8;
+const NET_UNIX_CONNECT: u64 = 9;
+const NET_UNIX_LISTEN: u64 = 10;
+const NET_UNIX_ACCEPT: u64 = 11;
+const NET_DATAGRAM_OPEN: u64 = 12;
+const NET_DATAGRAM_BIND: u64 = 13;
+const NET_DATAGRAM_CONNECT: u64 = 14;
+const NET_DATAGRAM_SEND: u64 = 15;
+const NET_DATAGRAM_SEND_TO: u64 = 16;
+const NET_DATAGRAM_RECV: u64 = 17;
+const PORT_SOCKET: u8 = 3;
+const PORT_UNIX_SOCKET: u8 = 5;
+const PORT_UNIX_LISTENER: u8 = 6;
+const PORT_DATAGRAM: u8 = 7;
+
+#[derive(Clone, Copy)]
+struct DatagramState {
+    grant: u64,
+    bound: bool,
+    connected: bool,
+}
 fn is_notice(vocab: Vocab, op: u64) -> bool {
     match vocab {
         Vocab::Stream => false,
@@ -2680,7 +2702,11 @@ impl Machine<'_> {
                 2 => tag == 10,
                 1 | 4 | 5 => tag == 3,
                 6 => tag == 11,
-                7 => tag == 0,
+                7 | NET_DATAGRAM_CONNECT | NET_DATAGRAM_SEND | NET_DATAGRAM_SEND_TO => tag == 0,
+                NET_UNIX_CONNECT | NET_UNIX_ACCEPT => tag == 12,
+                NET_UNIX_LISTEN => tag == 13,
+                NET_DATAGRAM_OPEN | NET_DATAGRAM_BIND => tag == 14,
+                NET_DATAGRAM_RECV => tag == 15,
                 _ => false,
             };
         if !answers {
@@ -2702,7 +2728,8 @@ impl Machine<'_> {
                 ([0, 0, 0, w[0] + w[1], 0], None)
             }
             1 => {
-                (1..=9).contains(&w[0]).then_some(())?;
+                let max = if op == NET_UNIX_LISTEN { 10 } else { 9 };
+                (1..=max).contains(&w[0]).then_some(())?;
                 ([0, w[0], w[1] & 0xffff_ffff, 0, 0], None)
             }
             3 => {
@@ -2717,6 +2744,24 @@ impl Machine<'_> {
                 };
                 fits.then_some(())?;
                 ([w[0], 0, 0, 0, 0], None)
+            }
+            15 => {
+                let room = call.words[2];
+                if w[1] != u64::from(w[0] > room) || w[0].min(room) != call.staged.len() as u64 {
+                    return None;
+                }
+                ([w[0], 0, 0, w[1], 0], None)
+            }
+            12..=14 => {
+                if w[0] == 0 || handles.contains_key(&w[0]) {
+                    return None;
+                }
+                let kind = match tag {
+                    12 => PORT_UNIX_SOCKET,
+                    13 => PORT_UNIX_LISTENER,
+                    _ => PORT_DATAGRAM,
+                };
+                ([w[0], 0, 0, 0, 0], Some(kind))
             }
             _ => {
                 let v4 = w[1] == 0 && w[2] == 0 && w[3] <= u64::from(u32::MAX);
@@ -2804,7 +2849,9 @@ impl Machine<'_> {
         }
         let (calls, ..) = self.world.cells[c].port();
         let call = &calls[&id];
-        if let (Some(out), false) = (call.out, call.staged.is_empty()) {
+        if let (Some(out), false) = (call.out, call.staged.is_empty())
+            && !(vocab == Vocab::Net && op == NET_DATAGRAM_RECV && answer[1] != 0)
+        {
             // The commit copies the staged bytes into the caller's capacity.
             let (op, staged) = (call.words[0], call.staged.clone());
             let (_, data, len, _) = self.carrier(out);
@@ -2961,6 +3008,9 @@ impl Machine<'_> {
                         })
                     })
                     .chain([tls, resolve])
+                    .chain(hirsel_core_net::UnixDirection::ALL.into_iter().map(|dir| {
+                        hirsel_core_net::GrantRule::Unix(hirsel_core_net::UnixRule::served(dir))
+                    }))
                     .collect();
                 let grants = &mut self.world.network.grants;
                 let key = grants
@@ -3049,7 +3099,9 @@ impl Machine<'_> {
                     return Some(Ok(ok(0, 0)));
                 }
                 let offer = match (*vocab, call.words[0]) {
-                    (Vocab::Dir, 10 | 19) | (Vocab::Net, 1 | 4) => call.words[2],
+                    (Vocab::Dir, 10 | 19) | (Vocab::Net, 1 | 4 | NET_DATAGRAM_RECV) => {
+                        call.words[2]
+                    }
                     (Vocab::Dir, 2 | 11) => call.words[3],
                     _ => 0,
                 };
@@ -3561,7 +3613,11 @@ impl Machine<'_> {
             unreachable!()
         };
         match handles.get_mut(&id) {
-            Some(h) if h.state == PortState::Live && h.write == Some(PortState::Live) => {
+            Some(h)
+                if h.kind == PORT_SOCKET
+                    && h.state == PortState::Live
+                    && h.write == Some(PortState::Live) =>
+            {
                 h.write = None;
                 true
             }
@@ -3586,6 +3642,7 @@ impl Machine<'_> {
         };
         let Some(h) = handles.get_mut(&id) else {
             self.world.port_keys.remove(&(key & !3));
+            self.world.datagrams.remove(&key);
             return true;
         };
         if split {
@@ -3606,6 +3663,7 @@ impl Machine<'_> {
         };
         if h.state != PortState::Live && h.write.is_none_or(|w| w != PortState::Live) {
             self.world.port_keys.remove(&(key & !3));
+            self.world.datagrams.remove(&key);
         }
         if marked {
             *next += 1;
@@ -3640,8 +3698,15 @@ impl Machine<'_> {
                 }
             }
             HostOp::Accept | HostOp::RecvBounded | HostOp::SendPair => {
-                let kind = if op == HostOp::Accept { 4 } else { 3 };
-                if let Some((c, id, live)) = self.port_socket(a[0], kind) {
+                let stream = op != HostOp::Accept;
+                let kind = if stream { PORT_SOCKET } else { 4 };
+                let original = self.port_socket(a[0], kind);
+                let socket = if stream && original.is_some_and(|(_, _, live)| !live) {
+                    self.port_socket(a[0], PORT_UNIX_SOCKET)
+                } else {
+                    original
+                };
+                if let Some((c, id, live)) = socket {
                     return self.net_call(t, op, c, id, live, a);
                 }
             }
@@ -3652,6 +3717,136 @@ impl Machine<'_> {
             denied.extend([0; 4]);
         }
         Ok(denied)
+    }
+
+    fn unix_host(&mut self, t: &Task, op: HostOp, a: &[u64]) -> X<Vec<u64>> {
+        use hirsel_core_net::{GrantRule, UnixDirection, valid_relative_path};
+
+        let denied = || Ok(vec![0, 1, 0, 0]);
+        let key = a[0];
+        let creates_datagram = matches!(op, HostOp::DatagramOpen | HostOp::DatagramBind);
+        let (grant, c, id, live) = match op {
+            HostOp::UnixConnect
+            | HostOp::UnixListen
+            | HostOp::DatagramOpen
+            | HostOp::DatagramBind => {
+                let Some(&c) = self.world.net_ports.get(&key) else {
+                    return denied();
+                };
+                (key, c, 0, true)
+            }
+            HostOp::UnixAccept => {
+                let Some((c, id, live)) = self.port_socket(key, PORT_UNIX_LISTENER) else {
+                    return denied();
+                };
+                (0, c, id, live)
+            }
+            _ => {
+                let Some(state) = self.world.datagrams.get(&key) else {
+                    return denied();
+                };
+                if (op == HostOp::DatagramRecv && !state.bound)
+                    || (op == HostOp::DatagramSend && !state.connected)
+                {
+                    return denied();
+                }
+                let Some((c, id, live)) = self.port_socket(key, PORT_DATAGRAM) else {
+                    return denied();
+                };
+                (state.grant, c, id, live)
+            }
+        };
+        let direction = match op {
+            HostOp::UnixConnect => Some(UnixDirection::Connect),
+            HostOp::UnixListen => Some(UnixDirection::Listen),
+            HostOp::DatagramBind => Some(UnixDirection::Bind),
+            HostOp::DatagramConnect | HostOp::DatagramSendTo => Some(UnixDirection::Send),
+            _ => None,
+        };
+        let mut fields = Vec::new();
+        if let Some(dir) = direction {
+            let root = self.carrier_bytes(a[1]);
+            let path = self.carrier_bytes(a[2]);
+            if root.is_empty() || path.len() > hirsel_core_net::unix::MAX_PATH_BYTES || !valid_relative_path(path)
+                || !self.world.network.grants[&grant].iter().any(|rule| {
+                    matches!(rule, GrantRule::Unix(rule) if rule.permits(
+                        dir, std::str::from_utf8(root).unwrap(), std::str::from_utf8(path).unwrap()))
+                })
+            {
+                return denied();
+            }
+            if matches!(op, HostOp::DatagramConnect | HostOp::DatagramSendTo) {
+                fields.push(Vec::new());
+            }
+            fields.extend([root.to_vec(), path.to_vec()]);
+        }
+        let (root, path) = if direction.is_some() {
+            let i = fields.len() - 2;
+            (fields[i].len() as u64, fields[i + 1].len() as u64)
+        } else {
+            (0, 0)
+        };
+        let mut w = [0; 8];
+        let (out, deadline) = match op {
+            HostOp::UnixConnect => {
+                w[..3].copy_from_slice(&[NET_UNIX_CONNECT, root, path]);
+                (None, self.until(a, 3))
+            }
+            HostOp::UnixListen => {
+                w[..4].copy_from_slice(&[NET_UNIX_LISTEN, root, path, a[3]]);
+                (None, None)
+            }
+            HostOp::UnixAccept => {
+                w[..2].copy_from_slice(&[NET_UNIX_ACCEPT, id]);
+                (None, self.until(a, 1))
+            }
+            HostOp::DatagramOpen => {
+                w[0] = NET_DATAGRAM_OPEN;
+                (None, None)
+            }
+            HostOp::DatagramBind => {
+                w[..3].copy_from_slice(&[NET_DATAGRAM_BIND, root, path]);
+                (None, None)
+            }
+            HostOp::DatagramConnect => {
+                w[..4].copy_from_slice(&[NET_DATAGRAM_CONNECT, id, root, path]);
+                (None, None)
+            }
+            HostOp::DatagramSend => {
+                let data = self.carrier_bytes(a[1]);
+                w[..3].copy_from_slice(&[NET_DATAGRAM_SEND, id, data.len() as u64]);
+                fields.extend([Vec::new(), data.to_vec()]);
+                (None, self.until(a, 2))
+            }
+            HostOp::DatagramSendTo => {
+                let data = self.carrier_bytes(a[3]);
+                w[..5].copy_from_slice(&[NET_DATAGRAM_SEND_TO, id, root, path, data.len() as u64]);
+                fields.push(data.to_vec());
+                (None, self.until(a, 4))
+            }
+            HostOp::DatagramRecv => {
+                let (_, _, len, cap) = self.carrier(a[1]);
+                w[..3].copy_from_slice(&[NET_DATAGRAM_RECV, id, cap.saturating_sub(len)]);
+                (Some(a[1]), self.until(a, 2))
+            }
+            _ => unreachable!(),
+        };
+        let result = self.port_call_with(t, c, w, fields, out, live, &mut None, deadline)?;
+        if result[1] == 0 {
+            if creates_datagram {
+                self.world.datagrams.insert(
+                    result[0],
+                    DatagramState {
+                        grant,
+                        bound: op == HostOp::DatagramBind,
+                        connected: false,
+                    },
+                );
+            } else if op == HostOp::DatagramConnect {
+                self.world.datagrams.get_mut(&key).unwrap().connected = true;
+            }
+        }
+        Ok(result)
     }
 
     fn network_resolve(&mut self, t: &Task, a: &[u64]) -> X<Vec<u64>> {
@@ -3731,7 +3926,11 @@ impl Machine<'_> {
             s.port_socket_part(key, false);
             Ok(vec![0, tag, code, 0, 0, 0, 0, 0])
         };
-        if served != Some(c) {
+        if served != Some(c)
+            || !self
+                .port_socket(key, PORT_SOCKET)
+                .is_some_and(|(_, _, live)| live)
+        {
             return failed(self, 1, 0);
         }
         let offered = match self.tls_offer(a, peer) {
@@ -4128,7 +4327,9 @@ impl Machine<'_> {
             | HostOp::DatagramConnect
             | HostOp::DatagramSend
             | HostOp::DatagramSendTo
-            | HostOp::DatagramRecv => error(1),
+            | HostOp::DatagramRecv => {
+                return self.unix_host(t, op, a);
+            }
             HostOp::NetNarrowUnix => {
                 use hirsel_core_net::{GrantRule, UnixDirection, UnixRule};
                 let rule = UnixDirection::from_tag(a[1] as u8).and_then(|dir| {

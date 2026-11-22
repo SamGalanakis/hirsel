@@ -7,6 +7,10 @@ use std::os::{
     unix::net::{UnixListener, UnixStream},
 };
 
+/// A Linux pathname address leaves one byte for the terminator.
+pub const MAX_PATH_BYTES: usize =
+    size_of::<libc::sockaddr_un>() - std::mem::offset_of!(libc::sockaddr_un, sun_path) - 1;
+
 #[repr(C)]
 struct OpenHow {
     flags: u64,

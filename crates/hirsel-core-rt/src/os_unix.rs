@@ -72,11 +72,6 @@ fn host(code: io::Error) -> i32 {
     code.raw_os_error().unwrap_or(libc::EIO)
 }
 
-pub(crate) const fn max_path() -> usize {
-    // Linux's pathname limit leaves one byte for the terminator.
-    size_of::<libc::sockaddr_un>() - offset_of!(libc::sockaddr_un, sun_path) - 1
-}
-
 fn address(path: &[u8]) -> (libc::sockaddr_un, libc::socklen_t) {
     // SAFETY: sockaddr_un is an integer-only structure.
     let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };

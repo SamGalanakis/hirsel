@@ -573,3 +573,255 @@ fn sim_captured_stop(tasks: Tasks) -> bool waits {
     result.unwrap(task.join(take driver))
     terminals && before == 21 && stopped == 42 && list.len(a) == 8 && list.len(b) == 5 && list.starts_with(a, string.as_bytes("alpha\nβ")) && list.starts_with(b, string.as_bytes("error"))
 }
+
+type UnixAttempt: send {
+    net: Net,
+    steps: u64
+}
+
+fn unix_client(take input: UnixAttempt) -> u64 waits {
+    let UnixAttempt(net: n, steps: steps) = take input
+    let run = bound steps steps {
+        let mut rx = result.unwrap(host.bind_datagram(n, "parity", "packet"))
+        let mut tx = result.unwrap(host.open_datagram(n))
+        result.unwrap(host.send_to(mut tx, "parity", "packet", string.as_bytes("abc"), Never))
+        let mut buf: Bytes = list.with_capacity(2)
+        let Received(len: len, truncated: truncated) = result.unwrap(host.recv_datagram(mut rx, mut buf, Never))
+        if len == 3 && truncated && list.len(buf) == 2 && buf[0] == b'a' && buf[1] == b'b' {
+            1u64
+        } else {
+            0u64
+        }
+    }
+    match run {
+        Ok(value) => value,
+        Error(out) => 1000 + out.steps
+    }
+}
+
+fn unix_attempt(tasks: Tasks, n: Net, b: u64, steps: u64) -> (u64, u64, u64) waits {
+    let child = task.spawn(tasks, bytes b, UnixAttempt(net: n, steps: steps), unix_client)
+    match task.join(take child) {
+        Ok(value) => (value, 0, 0),
+        Error(Failed(causes)) => {
+            for c in causes {
+                return match c.kind {
+                    Capacity(k) => (2, k.requested, k.available),
+                    _ => (3, 0, 0)
+                }
+            }
+            (4, 0, 0)
+        },
+        Error(_) => (5, 0, 0)
+    }
+}
+
+fn unix_loopback(take input: Served[NetOp]) -> u64 waits {
+    let mut port = take input
+    let mut queued: Bytes = list.with_capacity(3)
+    let mut id: u64 = 40
+    let mut packets: u64 = 0
+    let mut going = true
+    while going {
+        match provide.next(mut port) {
+            Some(take call) => {
+                let mut c = take call
+                match provide.net_op(c) {
+                    OpenDatagram => {
+                        id += 1
+                        let _ = net_answer(mut port, take c, Datagram(id))
+                    },
+                    BindDatagram(root: root, path: path) => {
+                        id += 1
+                        let mut label: Bytes = list.with_capacity(root)
+                        let mut endpoint: Bytes = list.with_capacity(path)
+                        provide.payload(c, 0, mut label)
+                        provide.payload(c, 1, mut endpoint)
+                        let reply: NetReply = if label == string.as_bytes("parity") && endpoint == string.as_bytes("packet") {
+                            Datagram(id)
+                        } else {
+                            Failed(Denied)
+                        }
+                        let _ = net_answer(mut port, take c, reply)
+                    },
+                    SendTo(datagram: _, root: root, path: path, len: len) => {
+                        let mut label: Bytes = list.with_capacity(root)
+                        let mut endpoint: Bytes = list.with_capacity(path)
+                        let mut packet: Bytes = list.with_capacity(len)
+                        provide.payload(c, 1, mut label)
+                        provide.payload(c, 2, mut endpoint)
+                        provide.payload(c, 3, mut packet)
+                        let reply: NetReply = if label == string.as_bytes("parity") && endpoint == string.as_bytes("packet") {
+                            Done
+                        } else {
+                            Failed(Denied)
+                        }
+                        if net_answer(mut port, take c, reply) {
+                            queued = take packet
+                        }
+                    },
+                    RecvDatagram(datagram: _, room: room) => {
+                        let len = list.len(queued)
+                        let staged = provide.fill(mut port, mut c, queued)
+                        if net_answer(mut port, take c, Packet(len: len, truncated: len > room)) {
+                            packets += staged
+                            list.clear(mut queued)
+                        }
+                    },
+                    Released(id: _, part: _) => {
+                        let _ = take c
+                    },
+                    _ => {
+                        let _ = net_answer(mut port, take c, Failed(Denied))
+                    }
+                }
+            },
+            None => {
+                going = false
+            }
+        }
+    }
+    packets
+}
+
+fn unix_parity_attempt(n: Net, v: Net, dir: Dir, tasks: Tasks, b: u64, steps: u64) -> (bool, u64) waits {
+    let native = unix_attempt(tasks, n, b, steps)
+    match host.stat(dir, "packet") {
+        Ok(_) => result.unwrap(host.remove(dir, "packet")),
+        Error(NotFound) => (),
+        Error(e) => {
+            fail("socket node stat")
+        }
+    }
+    let clean = match host.stat(dir, "packet") {
+        Error(NotFound) => true,
+        _ => false
+    }
+    let (value, _, _) = native
+    (clean && native == unix_attempt(tasks, v, b, steps), value)
+}
+
+// The same fixed client crosses the eight-byte buffer admission and a
+// step bound on the real Unix Net and the served Net.
+// expect: run unix_parity(unix, dir, tasks) = true
+fn unix_parity(n: Net, dir: Dir, tasks: Tasks) -> bool waits {
+    let (v, serve) = provide.net(bytes 4096)
+    let server = task.spawn(tasks, bytes 65536, take serve, unix_loopback)
+    let mut parity = true
+    let mut refused = false
+    let mut finished = false
+    let mut short = false
+    let mut b: u64 = 0
+    while b <= 16 {
+        let (same, value) = unix_parity_attempt(n, v, dir, tasks, b, 64)
+        parity = parity && same
+        refused = refused || value == 2
+        finished = finished || value == 1
+        b += 1
+    }
+    let mut steps: u64 = 0
+    while steps <= 16 {
+        let (same, value) = unix_parity_attempt(n, v, dir, tasks, 64, steps)
+        parity = parity && same
+        short = short || value == 1000 + steps
+        steps += 1
+    }
+    let packets = result.unwrap(task.join(take server))
+    parity && refused && finished && short && packets > 0
+}
+
+type UnixReplyCase: send {
+    port: Served[NetOp],
+    mode: u64
+}
+
+fn unix_reply_server(take input: UnixReplyCase) -> bool waits {
+    let UnixReplyCase(port: take p, mode: mode) = take input
+    let mut port = take p
+    match provide.next(mut port) {
+        Some(take call) => {
+            if mode == 4 {
+                return net_answer(mut port, take call, Failed(BoundNotListening(22)))
+            }
+            if !net_answer(mut port, take call, Datagram(1)) {
+                return false
+            }
+        },
+        None => {
+            return false
+        }
+    }
+    match provide.next(mut port) {
+        Some(take call) => {
+            let mut c = take call
+            let staged = if mode == 1 {
+                string.as_bytes("a")
+            } else {
+                string.as_bytes("ab")
+            }
+            let _ = provide.fill(mut port, mut c, staged)
+            let reply: NetReply = if mode == 2 {
+                Failed(Other(42))
+            } else if mode == 3 {
+                Failed(BoundNotListening(22))
+            } else {
+                Packet(len: 3, truncated: mode == 1)
+            }
+            net_answer(mut port, take c, reply)
+        },
+        None => false
+    }
+}
+
+// Room is two. A length-three packet must stage exactly two bytes and
+// report truncation. An ordinary error discards the staged bytes, and
+// BoundNotListening is valid only for ListenUnix.
+// expect: run unix_reply_validation(tasks) = true
+fn unix_reply_validation(tasks: Tasks) -> bool waits {
+    let mut mode: u64 = 0
+    let mut valid = true
+    while mode < 5 {
+        let (n, port) = provide.net(bytes 4096)
+        let server = task.spawn(tasks, bytes 4096, UnixReplyCase(port: take port, mode: mode), unix_reply_server)
+        let caller = if mode == 4 {
+            let only = result.unwrap(net.narrow(n, Unix(dir: UnixListen, root: "root", path: "sock")))
+            let denied = match host.listen_unix(only, "root", "other", 1) {
+                Error(Denied) => true,
+                _ => false
+            }
+            denied && match host.listen_unix(only, "root", "sock", 1) {
+                Error(BoundNotListening(22)) => true,
+                _ => false
+            }
+        } else {
+            let mut d = result.unwrap(host.bind_datagram(n, "root", "sock"))
+            let mut buf: Bytes = list.with_capacity(2)
+            let result = host.recv_datagram(mut d, mut buf, Never)
+            let error_matches = match result {
+                Error(Other(42)) => mode == 2,
+                Error(Reset) => mode != 2,
+                _ => false
+            }
+            list.len(buf) == 0 && error_matches
+        }
+        let settled = match task.join(take server) {
+            Ok(ok) => (mode == 2 || mode == 4) && ok,
+            Error(Failed(causes)) => {
+                let mut fail_seen = false
+                for c in causes {
+                    match c.kind {
+                        Fail(_) => {
+                            fail_seen = true
+                        },
+                        _ => ()
+                    }
+                }
+                (mode == 0 || mode == 1 || mode == 3) && fail_seen
+            },
+            _ => false
+        }
+        valid = valid && caller && settled
+        mode += 1
+    }
+    valid
+}

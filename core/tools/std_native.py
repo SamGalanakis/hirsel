@@ -298,6 +298,8 @@ def host_parameter(case):
         return 'native_net:Net,native_clock:Clock,token:Secret,native_out:Stdout,native_err:Stderr', ''
     if network_case(case):
         return 'native_net:Net,native_clock:Clock,native_tasks:Tasks', ''
+    if '(unix, dir, tasks)' in case.call:
+        return 'native_net:Net,native_dir:Dir,native_tasks:Tasks', ''
     if '(granted, tasks)' in case.call:  # An entry-grant Secret: native only.
         return 'native_tasks:Tasks,native_granted:Secret', ''
     if '(dir, tasks)' in case.call:  # A host Dir as the oracle beside served ports.
@@ -450,6 +452,7 @@ def wrapper(case, port=None):
     call = case.call.replace('(dir)', '(native_dir)').replace('(out)', '(native_out)').replace('(err)', '(native_err)').replace('(clock)', '(native_clock)').replace('(tasks)', '(native_tasks)')
     call = call.replace('(dir, tasks)', '(native_dir,native_tasks)').replace('(network)', '(native_net,native_clock,native_tasks)').replace('(env)', '(native_env)')
     call = call.replace('(clock, tasks)', '(native_clock,native_tasks)')
+    call = call.replace('(unix, dir, tasks)', '(native_net,native_dir,native_tasks)')
     call = call.replace('(granted, tasks)', '(native_granted,native_tasks)')
     parameters, _ = host_parameter(case)
     effect = ' waits' if case.waits else ''
@@ -667,6 +670,11 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                            cause=None, owner=None, native_only=False)
                 # The evaluator models tasks and the clock (virtual time); a law
                 # whose entry takes another host capability runs natively only.
+                if engine == 'evaluator' and '(unix, dir, tasks)' in case.call:
+                    row.update(applicable=False, passed=None, native_only=True,
+                               cause='native-only: Unix socket and directory oracle')
+                    save_row(rows, row, output)
+                    continue
                 if engine == 'evaluator' and unit_socket_case(case):
                     row.update(applicable=False, passed=None, native_only=True,
                                cause='stay on host walker until R8b')
@@ -872,6 +880,9 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                     command.extend(['--grant', 'Tasks'])
                 elif network_case(case):
                     command.extend(loopback_grants())
+                elif '(unix, dir, tasks)' in case.call:
+                    grant = f'Net=UnixRoot parity {host};UnixBind parity packet;UnixSend parity packet'
+                    command.extend(['--grant', grant, '--grant', 'Tasks'])
                 if case.first_write is not None:
                     wrapped = 'hirsel_core_host_op' if case.host_op else 'hirsel_core_host_io'
                     scripts.append(('std_host.c', [f'-DFIRST={case.first_write}', f'-DFIRST_OP={case.host_op}'],

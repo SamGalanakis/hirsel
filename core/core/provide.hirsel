@@ -146,8 +146,26 @@ pub fn net_op(c: Call[NetOp]) -> NetOp {
         Handshake(socket: a, name: b, alpn: d, system: e == 1)
     } else if t == 7 {
         SendSecret(socket: a, before: b, after: d)
-    } else {
+    } else if t == 8 {
         Released(id: a, part: part(b))
+    } else if t == 9 {
+        ConnectUnix(root: a, path: b)
+    } else if t == 10 {
+        ListenUnix(root: a, path: b, backlog: int.truncate(d))
+    } else if t == 11 {
+        AcceptUnix(listener: a)
+    } else if t == 12 {
+        OpenDatagram
+    } else if t == 13 {
+        BindDatagram(root: a, path: b)
+    } else if t == 14 {
+        ConnectDatagram(datagram: a, root: b, path: d)
+    } else if t == 15 {
+        SendDatagram(datagram: a, len: b)
+    } else if t == 16 {
+        SendTo(datagram: a, root: b, path: d, len: e)
+    } else {
+        RecvDatagram(datagram: a, room: b)
     }
 }
 
@@ -297,6 +315,14 @@ pub fn net_reply(r: NetReply) -> Reply[NetOp] {
             let (p0, p1, p2, p3) = h.peer
             Reply(tag: 11, w0: some, w1: protocol, w2: p0, w3: p1, w4: p2, w5: p3)
         },
+        UnixSocket(id) => words(12, id, 0, 0),
+        UnixListening(id) => words(13, id, 0, 0),
+        Datagram(id) => words(14, id, 0, 0),
+        Packet(len: len, truncated: truncated) => words(15, len, if truncated {
+            1
+        } else {
+            0
+        }, 0),
     }
 }
 

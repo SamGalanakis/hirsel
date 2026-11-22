@@ -219,6 +219,8 @@ core@1/host/wall_ms
 core@1/host/write
 core@1/host/write_at
 core@1/indexed/get
+# DECISIONS.md 2026-11-22 (core-perf-primitives-1606, std.check tail shift in place).
+core@1/inline/copy_within
 # DECISIONS.md 2026-11-19 (dedup-1357 rank 10, endian words).
 core@1/inline/word_be
 core@1/inline/word_le

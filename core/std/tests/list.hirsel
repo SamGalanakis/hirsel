@@ -1208,3 +1208,11 @@ fn caught[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
         _ => None,
     }
 }
+
+// Dropping 6 of five elements has no suffix to keep; the documented failure is Bounds.
+// expect: run drop_prefix_past_end() = fail Bounds
+fn drop_prefix_past_end() -> u64 {
+    let mut xs = five(1, 2, 3, 4, 5)
+    list.drop_prefix(mut xs, 6)
+    list.len(xs)
+}

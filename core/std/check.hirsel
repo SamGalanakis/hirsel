@@ -90,9 +90,7 @@ pub fn add(mut s: Xxh3, b: Bytes, lo: u64, hi: u64) {
         } else {
             64 - n
         }
-        for i in 0u64 .. keep {
-            s.tail[i] = s.tail[s.tail_len - keep + i]
-        }
+        inline.copy_within(mut s.tail, s.tail_len - keep, 0, keep)
         for i in 0u64 .. n {
             s.tail[keep + i] = chunk[i]
         }

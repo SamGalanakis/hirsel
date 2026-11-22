@@ -2699,7 +2699,7 @@ fn postgres_scripted_peer_laws() {
         body
     }
 
-    fn ended(peer: &mut Peer) {
+    fn ended(peer: &mut impl Read) {
         match peer.read(&mut [0]) {
             Ok(0) => {}
             Err(error)
@@ -2931,10 +2931,22 @@ fn postgres_scripted_peer_laws() {
         "short-row",
         "trailing",
         "reuse",
+        "ssl-refused",
+        "ssl-extra",
     ];
     let peer = std::thread::spawn(move || {
         for name in cases {
-            let (socket, _) = listener.accept().unwrap();
+            let (mut socket, _) = listener.accept().unwrap();
+            if matches!(name, "ssl-refused" | "ssl-extra") {
+                // SSLRequest has length 8 and request code (1234 << 16) | 5679.
+                let mut request = [0; 8];
+                socket.read_exact(&mut request).unwrap();
+                assert_eq!(request, *b"\x00\x00\x00\x08\x04\xd2\x16\x2f");
+                let reply: &[u8] = if name == "ssl-refused" { b"N" } else { b"S!" };
+                socket.write_all(reply).unwrap();
+                ended(&mut socket);
+                continue;
+            }
             let mut tls = config.clone();
             if name != "alpn" {
                 tls.alpn_protocols = vec![b"postgresql".to_vec()];

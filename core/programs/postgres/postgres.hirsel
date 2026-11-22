@@ -1,4 +1,4 @@
-// PostgreSQL 17+ direct TLS client, protocol 3.0.
+// PostgreSQL client with direct TLS or SSLRequest, protocol 3.0.
 //
 // A frame body is at most 2 MiB. DataRow may use all 2 MiB, descriptions,
 // notifications and diagnostics use at most 64 KiB, authentication and
@@ -41,9 +41,9 @@ pub type SqlError {
 
 pub type AuthMethod = Trust | Cleartext | Md5 | Gss | Sspi | Other(i32) | NoScram
 
-pub type ProtocolError = Length | Tag(u8) | Truncated | Fields | AuthenticationOrder | UnverifiedServer
+pub type ProtocolError = Length | Tag(u8) | Truncated | Fields | AuthenticationOrder | UnverifiedServer | SslReply(u8)
 
-pub type Error = Protocol(ProtocolError) | Network(NetError) | OutcomeUnknown(NetError) | EndOfStream | MissingAlpn | UnsupportedAuthentication(AuthMethod) | Scram(secret.ScramError) | Encoding | Sql(SqlError) | Fatal(SqlError) | InvalidRequest | RequestTooLarge | NoAddress | ConnectionClosed | RollbackRequired
+pub type Error = Protocol(ProtocolError) | Network(NetError) | OutcomeUnknown(NetError) | EndOfStream | MissingAlpn | TlsRequired | UpgradeUnavailable | UnsupportedAuthentication(AuthMethod) | Scram(secret.ScramError) | Encoding | Sql(SqlError) | Fatal(SqlError) | InvalidRequest | RequestTooLarge | NoAddress | ConnectionClosed | RollbackRequired
 
 pub type Transaction: key = Idle | InTransaction | Failed
 
@@ -595,17 +595,52 @@ fn dial(n: Net, hostname: String, port: u16, until: Until) -> Result[Socket, Err
     Error(transport(last))
 }
 
-fn secure(n: Net, take socket: Socket, hostname: String, trust: Trust, until: Until) -> Result[Session, Error] waits {
-    let mut alpn: List[String] = list.with_capacity(1)
-    list.push(mut alpn, string.from("postgresql"))
-    let (take reader, take writer, handshake) = match tls.connect(n, take socket, hostname, trust, alpn, until) {
+type TlsMode: key = Direct | StartTls
+
+fn request_tls(take socket: Socket, until: Until) -> Result[Socket, Error] waits {
+    let (take input, take output) = net.split(take socket)
+    let mut reader = take input
+    let mut writer = take output
+    send(mut writer, b"\x00\x00\x00\x08\x04\xd2\x16\x2f", until)?
+    let mut reply: Bytes = list.with_capacity(1)
+    fill(mut reader, mut reply, 1, false, until)?
+    match reply[0] {
+        b'S' => match net.join(take reader, take writer) {
+            Ok(take joined) => Ok(take joined),
+            Error(_) => Error(UpgradeUnavailable),
+        },
+        b'N' => Error(TlsRequired),
+        other => Error(Protocol(SslReply(other))),
+    }
+}
+
+fn encrypted_halves(n: Net, take socket: Socket, hostname: String, trust: Trust, until: Until, mode: TlsMode) -> Result[(ReadHalf, WriteHalf), Error] waits {
+    let upgraded = if mode == StartTls {
+        request_tls(take socket, until)?
+    } else {
+        take socket
+    }
+    let mut alpn: List[String] = list.new()
+    if mode == Direct {
+        list.push(mut alpn, string.from("postgresql"))
+    }
+    // On SSLRequest the bounded read admitted only 'S'. TLS checks the
+    // socket for unread plaintext before sending its first handshake byte.
+    let (take reader, take writer, handshake) = match tls.connect(n, take upgraded, hostname, trust, alpn, until) {
         Ok((take r, take w, h)) => (take r, take w, h),
         Error(e) => return Error(transport(e)),
     }
-    if let Some(0) = handshake.protocol {
-        return Ok(Session(reader: take reader, writer: take writer, until, transaction: Idle, portal_open: false, parameters: Parameters(server_version: None, client_encoding: None, standard_conforming_strings: None)))
+    if mode == Direct {
+        if let Some(0) = handshake.protocol {} else {
+            return Error(MissingAlpn)
+        }
     }
-    Error(MissingAlpn)
+    Ok((take reader, take writer))
+}
+
+fn secure(n: Net, take socket: Socket, hostname: String, trust: Trust, until: Until, mode: TlsMode) -> Result[Session, Error] waits {
+    let (take reader, take writer) = encrypted_halves(n, take socket, hostname, trust, until, mode)?
+    Ok(Session(reader: take reader, writer: take writer, until, transaction: Idle, portal_open: false, parameters: Parameters(server_version: None, client_encoding: None, standard_conforming_strings: None)))
 }
 
 fn login(take session: Session, user: String, database: String, password: Secret, nonce: Bytes) -> Result[Conn, Error] waits {
@@ -618,13 +653,23 @@ fn login(take session: Session, user: String, database: String, password: Secret
     Ok(Conn(live: Some(take s)))
 }
 
+/// Connect over PostgreSQL direct TLS with the postgresql ALPN protocol.
 pub fn connect(net: Net, tls_trust: Trust, config: Config) -> Result[Conn, Error] waits {
+    connect_with(net, tls_trust, config, Direct)
+}
+
+/// Negotiate TLS using PostgreSQL SSLRequest. A refusal ends the connection.
+pub fn connect_starttls(net: Net, tls_trust: Trust, config: Config) -> Result[Conn, Error] waits {
+    connect_with(net, tls_trust, config, StartTls)
+}
+
+fn connect_with(net: Net, tls_trust: Trust, config: Config, mode: TlsMode) -> Result[Conn, Error] waits {
     if !valid_startup_value(config.user) || !valid_startup_value(config.database) {
         return Error(InvalidRequest)
     }
     let until = At(config.clock, config.deadline)
     let socket = dial(net, config.host, config.port, until)?
-    let session = secure(net, take socket, config.host, tls_trust, until)?
+    let session = secure(net, take socket, config.host, tls_trust, until, mode)?
     let mut entropy: Bytes = list.with_capacity(18)
     host.random(config.random, mut entropy)
     let nonce = std.base64.encode_string(entropy)

@@ -485,7 +485,7 @@ struct Alternate {
 impl Alternate {
     fn new() -> Self {
         let stack = crate::units::signal_stack_memory()
-            .map_or_else(Stack::new, |memory| memory.map(Stack::new));
+            .map_or_else(Stack::new, |memory| memory.signal_stack());
         // SAFETY: install owned usable pages as the current thread's signal stack.
         unsafe {
             let mut previous = std::mem::zeroed();

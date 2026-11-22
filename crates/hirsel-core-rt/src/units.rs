@@ -22,8 +22,8 @@
 //! root alone, and its helpers are not recorded.
 #[path = "unit_memory.rs"]
 mod memory;
-pub(crate) use memory::Memory;
 use memory::UnitStack;
+pub(crate) use memory::{Memory, SharedMemory};
 #[cfg(test)]
 #[path = "units_check.rs"]
 mod check;
@@ -167,7 +167,7 @@ pub(crate) fn untied() -> bool {
 }
 
 struct PoolHooks {
-    memory: fn(bool) -> Option<&'static Memory>,
+    memory: fn(bool) -> Option<&'static dyn SharedMemory>,
     park: fn(Option<u64>),
     maybe_yield: fn(),
     wake: fn(u32),
@@ -402,18 +402,18 @@ static LIVE: AtomicUsize = AtomicUsize::new(0);
 fn pool() -> &'static Pool {
     POOL.get().unwrap()
 }
-pub(crate) fn memory() -> Option<&'static Memory> {
+pub(crate) fn memory() -> Option<&'static dyn SharedMemory> {
     untied().then(|| (pool_hooks().memory)(false)).flatten()
 }
 /// A spare must arm its signal stack even if the memory thread is blocked.
-pub(crate) fn signal_stack_memory() -> Option<&'static Memory> {
+pub(crate) fn signal_stack_memory() -> Option<&'static dyn SharedMemory> {
     untied().then(|| (pool_hooks().memory)(true)).flatten()
 }
 
-fn pool_memory(signal_stack: bool) -> Option<&'static Memory> {
+fn pool_memory(signal_stack: bool) -> Option<&'static dyn SharedMemory> {
     let p = pool();
     ((!signal_stack || p.handoff_ticks == 0) && !p.stop.load(Ordering::Acquire))
-        .then_some(&p.memory)
+        .then_some(&p.memory as &dyn SharedMemory)
 }
 
 struct RunFn(&'static (dyn Fn(&crate::entry::OsConfig) -> u8 + Sync));

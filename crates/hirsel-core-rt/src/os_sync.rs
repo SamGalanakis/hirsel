@@ -270,7 +270,7 @@ pub(crate) unsafe fn submit(
         Ok(())
     } else if let Some(memory) = crate::units::memory() {
         // Starting the helpers can map their OS thread stacks.
-        memory.map(start)
+        memory.start_sync(start)
     } else {
         start()
     };

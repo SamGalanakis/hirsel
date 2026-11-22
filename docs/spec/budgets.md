@@ -159,7 +159,15 @@ it is **mechanical**: its cleanup can never add a cause. These mechanical resour
 handle releases its root. If cleaning a queued item or result raises a cause, the
 value's finalizer owns that cause. A `Flow` discards its entries and refunds every
 charge during cleanup. Its stages run no user cleanup ([CONC-14](tasks.md#conc-14-flows)).
-`HostFile` closes the host file and ignores the outcome. Other resources admit their
+`HostFile` closes the host file and ignores the outcome. Unbuilt: `Proc`, `UnixListener`
+and `UnixDatagram` are mechanical too ([EXEC-3](exec.md#exec-3-spawn),
+[NET-13](net.md#net-13-unix-streams), [NET-14](net.md#net-14-unix-datagrams)). A child's pipe
+ends are the existing `ReadHalf` and `WriteHalf`. The supervisor's records and the host's
+descriptors are provider storage, outside every limit. A served reply that issues several ids
+reserves all their room from the server's port at once, or fails with `Capacity` having
+issued none. A narrowed `Exec` or `Unix` rule's storage is the logical size that
+[EXEC-2](exec.md#exec-2-launch-profiles-and-narrowing) and
+[NET-12](net.md#net-12-unix-rules) define. Other resources admit their
 cells. `channel.sender` and `latest.handle` admit nothing.
 
 Sizes are logical, never an engine's: scalars are their widths, `bool` 1, `char` 4, `()` 0; a

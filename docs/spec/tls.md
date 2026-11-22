@@ -303,7 +303,8 @@ Since program code never gets the bytes from a `Secret`, it can log or render co
 it had before sealing. A child process started through `Exec` is outside this guarantee: it
 runs with the OS user's authority and may read a granted secret's source
 ([EXEC-1](exec.md#exec-1-an-exec-grant-confers-what-its-programs-can-do-and-hirsel-does-not-confine-them)),
-though never the run's memory ([EXEC-7](exec.md#exec-7-a-run-granted-exec-is-out-of-its-childrens-reach)).
+and may rewrite a recording of the run, though it never reaches the run's memory
+([EXEC-7](exec.md#exec-7-a-run-granted-exec-is-out-of-its-childrens-reach)).
 Received plaintext is outside the TL10 guarantee because an
 authorized peer can return any bytes, and a recording keeps its replies exactly
 ([recording](../recording.md#credentials)).

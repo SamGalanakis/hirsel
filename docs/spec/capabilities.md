@@ -238,6 +238,13 @@ operation, and changes no delivery. When a recording fails, the run goes on unch
 the tool reports it; when a replay diverges, the tool ends that replay and reports where.
 Neither reaches the program.
 
+A replay compares the program against the recording it is given, and does not establish
+which execution produced it. A recording is a file of the recording user, so any process of
+that user can rewrite it, including a child of a run granted `Exec`
+([EXEC-8](exec.md#exec-8-exec-at-the-replay-point-and-served-exec), unbuilt). A deployment that
+needs recording integrity against such a child keeps the recording where the child cannot write
+it, or does not record that run.
+
 A recording is for diagnosis and testing and makes no durability promise: nothing resumes
 from one, and a crash ends it where it falls. The store is the one durability contract: a
 commit to a disk store survives any crash once `store.durable` has returned for it

@@ -210,7 +210,12 @@ The grant bindings follow `main`'s capability parameters in declaration order. E
 gives the parameter's ordinal, its kind, and the values that parameter receives, in order and
 with their count: each directory path a `Dir` parameter takes, each rule text a `Net`
 parameter takes, or the one interface definition identity a `Foreign` parameter takes.
-A `Foreign` binding then holds the SHA-256 and byte length of the selected archive.
+A `Foreign` binding then holds the SHA-256 and byte length of the selected archive. An
+`Exec` parameter (unbuilt) takes the profile file path as given and the selected profile
+names, and its binding then holds the grant's policy digest
+([EXEC-2](exec.md#exec-2-launch-profiles-and-narrowing)). That digest covers each image pin
+and every launch constraint, so replacing the profile file changes what the binding
+approves.
 So exchanging the paths given to two `Dir` parameters changes R. The
 manifest's sorted `grants` strings are derived from the bindings for display and comparison;
 nothing is assembled or launched from them.
@@ -243,7 +248,13 @@ images and the bounds below. The operator still approves the grant bindings each
 give, as the preview shows them. A recipe that grants `Foreign=D` is deployed only when the
 request passes `--grant Foreign=D` itself, and the deploy's output shows, before any child runs,
 the interface, target, selected archive digest and recipe of each such grant
-([FFI-4](foreign.md#ffi-4-the-foreign-capability)). One local principal that both publishes and deploys needs no
+([FFI-4](foreign.md#ffi-4-the-foreign-capability)). A recipe that grants `Exec=FILE NAME`
+(unbuilt) is deployed only when the request passes that grant itself. The host then loads the
+policy from `FILE`, resolved against the place's working directory, and compares its digest
+with the binding's before any child of the attempt runs. Preview, prepare and serving each
+check the digest again, and refuse to start on a different one
+([EXEC-1](exec.md#exec-1-an-exec-grant-confers-what-its-programs-can-do-and-hirsel-does-not-confine-them)).
+One local principal that both publishes and deploys needs no
 signature. A request from another machine would add publisher authentication at this point: a
 signature over R by a key the host is configured to trust establishes who vouched for R, and
 the operator still decides whether to deploy it.

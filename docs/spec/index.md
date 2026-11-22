@@ -34,7 +34,10 @@ These goals decide between designs. A rule that would break one of them is wrong
    trusted, not checked: these goals hold while it keeps the native contract
    ([FFI-1](foreign.md#ffi-1-hirsel-trusts-audited-native-code-and-does-not-contain-it)).
 4. **Authority is explicit.** Files, network, clocks, randomness, tasks and output are
-   values passed as parameters ([capabilities](capabilities.md)).
+   values passed as parameters ([capabilities](capabilities.md)). These bounds bind the
+   program's own code. A child process started through an `Exec` grant holds its OS user's
+   authority, and a recording of such a run is only as intact as that user's files
+   ([EXEC-1](exec.md#exec-1-an-exec-grant-confers-what-its-programs-can-do-and-hirsel-does-not-confine-them), unbuilt).
 5. **Deterministic.** Given the same outside inputs and limits, every run that no run
    stop ends, and that reaches no foreign code, behaves identically on every engine and build ([SEM-8](semantics.md#sem-8-determinism)),
    including where it runs out of memory ([MEM-24](budgets.md#mem-24-logical-charges)).

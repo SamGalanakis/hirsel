@@ -233,7 +233,8 @@ not a rule: it grants nothing alone, and `net.narrow` cannot name one. `net.narr
 a `Unix` rule only with a `Unix` rule of the same direction, root and path, and drops every
 other intersection. So an address, `Tls` or `Resolve` rule never matches a Unix operation, and
 a `Unix` rule never matches anything else. A path that is not valid, or an empty label, gives
-`Invalid`.
+`Invalid`. A narrowed `Unix` rule's storage is 8 plus its label's and path's bytes, rounded up
+to 8, added to the narrowed Net's rule storage ([NET-6](#net-6-network-rules)).
 
 A Unix rule authorizes only the lookup or creation its operation needs. It grants no listing,
 no file I/O and no unlink. A `Dir` grants no connect, bind or send. An operator who wants a
@@ -241,38 +242,55 @@ service to remove a stale socket node grants a writable `Dir` for that as well. 
 abstract names, no unnamed binds, no peer credentials and no descriptor passing. A Linux
 abstract name ignores file permissions and would need its own name space of grants. A
 descriptor passed over a socket duplicates authority to an open object that a byte tape cannot
-reconstruct.
+reconstruct. An approved pathname designates whichever peer occupies that slot, and that peer
+may act on what it receives, as an IP peer may.
+
+A run with a `Unix` rule probes once before `main` that it can bind and connect beneath a
+root as NET-13 does, even when it holds no `Dir`. Where it cannot, the run does not start and
+its one line names the missing operation.
 
 Law: for every pair of Net rule lists, `net.narrow` keeps a `Unix` rule exactly when both
-lists hold it, and no Unix operation succeeds under a list that holds no `Unix` rule for its
-direction, root and path.
+lists hold it. Each operation that designates a Unix endpoint succeeds only under a matching
+rule of its originating Net. Opening an unbound datagram socket designates no endpoint and
+gives no endpoint authority. A connected send uses its previously authorized peer, a receive
+needs a bound socket, and accepted streams and existing connections keep the authority they
+were made with. The host, a replay and a served Net make the same checks.
 
 ### NET-13: Unix streams
 
 ```hirsel unbuilt
 pub opaque resource type UnixListener
+pub type NetError = Denied | Refused | Unreachable | InUse | Reset | TimedOut | Aborted | Other(u32) | Tls(TlsFailure) | BoundNotListening(u32)
 
 pub fn connect_unix(n: Net, root: String, path: String, until: Until) -> Result[Socket, NetError] waits
 pub fn listen_unix(n: Net, root: String, path: String, backlog: u16) -> Result[UnixListener, NetError] waits
 pub fn accept_unix(mut l: UnixListener, until: Until) -> Result[Socket, NetError] waits
 ```
 
-An endpoint the rules do not permit gives `Denied` before issue. A connect, bind or listen
-resolves `path` beneath its root as a `Dir` path is resolved, through no symbolic link and
-never out of the root, and acts on what that resolution found. There is no fallback that
-checks a path and then hands it to the kernel to resolve again.
+An endpoint that the rules do not permit, or a root label of no `UnixRoot`, gives `Denied`
+before issue. So does a path whose bytes do not fit the host's socket address, which is never
+truncated. Everything that depends on host files is decided after issue and delivered, and a
+replay supplies it without looking at a host path. A connect, bind or listen resolves `path`
+beneath its root as a `Dir` path is resolved, through no symbolic link and never out of the
+root, and acts on what that resolution found. There is no fallback that checks a path and then
+hands it to the kernel to resolve again.
 
-- `connect_unix` connects to the very socket node it resolved. A node that is not a socket
-  gives `Denied`, and so does a symbolic link at the final component.
-- `listen_unix` binds the final component inside the directory it resolved. An existing node
-  there gives `InUse`.
-- Bind creates the node. A listen that fails after the bind leaves the node, which the error
-  reports as `Other(code)`. Dropping a `UnixListener` closes it once and never unlinks its node;
-  removing it is a `Dir` operation.
+- `connect_unix` resolves the whole endpoint, checks that it is a socket, and keeps that
+  socket's identity through the connect. A node that is not a socket, or a symbolic link at
+  the final component, gives `Denied`.
+- `listen_unix` pins the endpoint's parent directory, which resolved beneath the root, and
+  binds one validated final component inside it. An existing node there gives `InUse`.
+- A pinned directory is the directory itself, not its path, as for every `Dir` handle. If a
+  process outside the run moves that directory while the bind runs, the node is created where
+  the directory now is. An operator who needs every node to stay beneath the root keeps the
+  root's subtree from being renamed by others.
+- Bind creates the node. A listen that fails after its bind committed gives
+  `BoundNotListening(code)`, which says the node exists. Every other listen error left no
+  node. The provider never unlinks a node: not on this error and not when a `UnixListener` is
+  dropped. Removing one is a `Dir` operation.
 
-A pathname names a slot, not a peer. If a legitimate rebind replaces the node, a later connect
-reaches the new listener. An address that does not fit the host's socket address is `Denied`,
-never truncated.
+A pathname names a slot, not a peer. A later operation resolves the slot anew, so if a
+legitimate rebind replaces the node, a later connect reaches the new listener.
 
 A connected or accepted Unix socket is a `Socket` with NET-1 and NET-7's I/O, halves,
 deadlines, partial commits and drop rules. Accepted peers inherit the listener's authority, and
@@ -282,8 +300,15 @@ a Unix socket's halves (NET-7 check 3), and `tls.connect` refuses a Unix socket
 their TCP origin. Connect starts nonblocking and reports success only once connected. `listen_unix`
 has a backlog and no `Until`.
 
-Law: when a symbolic link or a directory outside the root has been swapped into the
-endpoint's path, connect and bind give `Denied` and reach no socket outside the root.
+Laws:
+
+- when a symbolic link, a non-socket node or a directory outside the root is in the
+  endpoint's path at resolution, connect and bind give `Denied` and reach no socket outside
+  the root;
+- when the slot is replaced after the connect resolved it, that connect still reaches the
+  socket it resolved, and a later connect resolves the new slot;
+- a listen that fails after binding gives `BoundNotListening`, and one that fails before
+  binding leaves no node.
 
 ### NET-14: Unix datagrams
 
@@ -306,11 +331,13 @@ pub fn recv_datagram(mut d: UnixDatagram, mut buf: Bytes, until: Until) -> Resul
 - `bind_datagram` needs a `UnixBind` rule and binds to receive at that endpoint, as
   `listen_unix` binds;
 - `connect_datagram` fixes one peer and needs a `UnixSend` rule;
-- `send_to` needs a `UnixSend` rule for its destination in the originating Net.
+- `send_to` needs a `UnixSend` rule for its destination in the originating Net;
+- `send_datagram` needs a connected socket, and `recv_datagram` a bound one.
 
-No Net is passed per send, so a datagram never combines two capabilities' authority
-([CAP-7](capabilities.md#cap-7-attenuation)). The provider sends to the very node it resolved,
-as NET-13 connects.
+Each of these checks is made before issue and gives `Denied` with no host effect. No Net is
+passed per send, so a datagram never combines two capabilities' authority
+([CAP-7](capabilities.md#cap-7-attenuation)). The provider sends to the very socket it
+resolved, as NET-13 connects.
 
 A send commits the whole packet or fails, and an empty packet is a packet. `recv_datagram`
 receives one packet. It appends at most `buf`'s spare capacity and returns the packet's whole
@@ -320,18 +347,25 @@ no reply authority. Control data is never received, so a descriptor sent to the 
 by the host. Each operation keeps one absolute deadline through readiness retries. A receive or
 send whose host call has committed delivers its result even when cancellation arrives after.
 
-Law: truncation reports the packet's real length and appends exactly the room, a zero-length
-packet is delivered as one, and a send of `n` bytes either delivers one packet of `n` bytes or
+Law: a receive with room `r` of a packet of length `len` appends exactly `min(r, len)` bytes
+and reports `len` and `truncated` equal to `len > r`, including at room 0. A zero-length
+packet is delivered as one. A send of `n` bytes either delivers one packet of `n` bytes or
 returns an error having delivered none.
 
 **Replay.** The grant snapshot holds each `Unix` rule's direction, root label and path, and
-never a root's host path. An issue holds the Net or handle ordinal, the root label, the path, the
-backlog or deadline where the operation has one, and the offered bytes or room. A delivery holds
-the new ordinal, the committed outcome, or the packet with its length and truncation flag.
+never a root's host path. An issue holds the Net or handle ordinal, the root label, the path,
+the backlog or deadline where the operation has one, and the offered bytes or room. A
+delivery holds the new ordinal, the committed outcome, or the packet with its length and
+truncation flag. Dropping a host-issued `UnixListener`, `UnixDatagram` or Unix socket half
+records a `RELEASE` at its position, as EXEC-8 does for a `Proc`
+([EXEC-8](exec.md#exec-8-exec-at-the-replay-point-and-served-exec)). A packet delivery whose
+appended bytes, length and flag break the law above is `Corrupt`, found before the buffer
+changes.
 
 **Served Unix.** A `provide.net` Net also permits every Unix endpoint through one internal rule
-of each direction over every root and path. No grant or tape can write that rule. Its port
-receives these calls and answers them with these replies, in addition to the existing ones
+of each direction over every root and path. A universal rule intersected with a concrete
+`Unix` rule gives that concrete rule. No grant or tape can write it. Its port receives these
+calls and answers them with these replies, in addition to the existing ones
 ([core](core.md#provide)):
 
 ```hirsel unbuilt
@@ -340,6 +374,9 @@ pub type UnixReply = UnixSocket(u64) | UnixListening(u64) | Datagram(u64) | Pack
 ```
 
 These cases join `NetOp` and `NetReply` themselves. They are shown apart here only because
-those types are built. A server models a listener as a named queue and a datagram endpoint as a
-bounded packet queue. It commits a dequeue or a send only after its reply returns `Ok(())`. A
-virtual server never receives a host directory.
+those types are built. The caller makes the handle-state checks above before it queues a call.
+A `Packet` reply must have staged exactly `min(room, len)` bytes with `truncated` equal to
+`len > room`. Any other packet, or a reply of the wrong kind for its call, fails the server
+with `Fail` before the caller changes. A server models a listener as a named queue and a
+datagram endpoint as a bounded packet queue. It commits a dequeue or a send only after its
+reply returns `Ok(())`. A virtual server never receives a host directory.

@@ -106,24 +106,34 @@ error. The header's grant snapshot records a `Resolve` rule with direction byte 
 
 **Child processes and Unix sockets (unbuilt).** An `Exec` grant is recorded in the grant
 snapshot with each profile's name, image digest, `argv0`, argument forms, environment keys
-each marked fixed or `{any}`, and cwd labels. A `Unix` rule is recorded with its direction,
-root label and path. Neither records a host path, a fixed environment value, a process ID or
-a descriptor.
+each marked fixed or caller-settable, and cwd labels. A `Unix` rule is recorded with its
+direction, root label and path. The provider metadata holds no host root mapping, image path,
+fixed value, native process ID or descriptor number. Logical labels, `argv0`, argument
+literals, the caller's bytes and delivered payloads follow the ordinary rules, and any of
+them may contain such values.
 
 | operation | at issue (checked on replay) | at delivery (supplied on replay) |
 |---|---|---|
-| `SPAWN` | Exec ordinal; canonical args = program, cwd label, path, each argument with its length, the environment sorted by key with lengths, the three stdio modes | the new `Proc` ordinal and one ordinal per piped stream, or the error |
+| `SPAWN` | Exec ordinal; one canonical argument: program, cwd label and path, each with a `u32` length; the argument count and each argument with its length; the environment count and each key and value with lengths, sorted by key; the three stdio modes, one byte each | the new `Proc` ordinal and one ordinal per piped stream, or the error, including `Denied` for a cwd that did not resolve |
 | `WAIT` | `Proc` ordinal; `until` | the termination (`Exited` code or `Signalled` number), or the error |
 | `SIGNAL` | `Proc` ordinal; the signal | the outcome |
 | `RECV_BOUNDED`, `SEND_PAIR` on a pipe half | as for a socket | as for a socket |
-| `UNIX_CONNECT`, `UNIX_LISTEN`, `UNIX_ACCEPT` | Net or listener ordinal; root label, path, backlog or `until` | the new ordinal, or the error, including a node left by a failed listen |
+| `UNIX_CONNECT`, `UNIX_LISTEN`, `UNIX_ACCEPT` | Net or listener ordinal; root label, path, backlog or `until` | the new ordinal, or the error, `BoundNotListening` included |
 | `DGRAM_OPEN`, `DGRAM_BIND`, `DGRAM_CONNECT` | Net or datagram ordinal; root label and path where given | the new ordinal or the outcome |
 | `DGRAM_SEND`, `DGRAM_SEND_TO` | datagram ordinal; root label and path for send-to; the packet; `until` | the outcome |
 | `DGRAM_RECV` | datagram ordinal; spare capacity; `until` | the appended bytes, the packet's length and the truncation flag, or the error |
+| `RELEASE` | the ordinal and part of a dropped `Proc`, pipe half, Unix socket half, listener or datagram socket | none: it completes at issue |
 
-A replay starts no process and opens no socket. Dropping a replayed `Proc`, pipe half,
-listener or datagram changes local ownership only: nothing is killed, closed or unlinked on
-the host ([EXEC-8](spec/exec.md#exec-8-exec-at-the-replay-point-and-served-exec)).
+A replay starts no process and opens no socket. It checks each `RELEASE` at its position, so
+a moved drop diverges there (RL2). It then changes local ownership only: nothing is killed,
+closed or unlinked on the host. A delivery that its issue could not have produced, such as a
+packet whose length and flag contradict its room, is `Corrupt`
+([EXEC-8](spec/exec.md#exec-8-exec-at-the-replay-point-and-served-exec)).
+
+A recording is a file of the recording user. Every child of a run granted `Exec` runs as that
+user and can rewrite it, or put another valid tape of the same program in its place. Replay
+compares the program against the tape it is given. A `Sealed` verdict does not say which
+execution produced that tape.
 
 **Terminal bits.** The `GRANT` frame of a `Stdin`, `Stdout` or `Stderr` grant carries one
 byte after its kind: 1 when the stream was a terminal at launch, 0 otherwise
@@ -238,7 +248,7 @@ Where cleartext can be in a recording:
 |---|---|---|
 | bytes supplied by a `Secret` grant | never via the grant or send record | Replay uses the designation. |
 | a sealed secret | only where the bytes were already there, as the received plaintext they were computed from | Replay recomputes the same bytes from those deliveries, so the seal adds nothing. |
-| received plaintext (response bodies, cookies, minted tokens) | always, exactly as received | Replay delivers these bytes to the program, so it needs them exactly. |
+| received plaintext (response bodies, cookies, minted tokens; a child's stdout and stderr; received datagrams) | always, exactly as received | Replay delivers these bytes to the program, so it needs them exactly. |
 | a SCRAM exchange | the salt, iteration count, nonces and the server's `v=`, as received plaintext; never the proof | The server's messages are deliveries. With the client's first message they let a holder of the tape test password guesses offline, which is one reason every tape is credential-bearing. The proof would give the same, so it is not stored. |
 | sent plaintext | as the canonical-arguments rule stores it: 16 bytes or fewer literally, otherwise a digest | Replay only checks sends. |
 

@@ -1903,6 +1903,15 @@ impl Scheduler {
         }
     }
 
+    fn net_idle_wait(&self, timeout: i32) -> (i32, bool) {
+        crate::task_heap::idle_wait(timeout, self.stacks.has_warm_kept())
+    }
+
+    fn release_net_idle(&mut self) {
+        release_idle(self);
+        self.stacks.cool_kept();
+    }
+
     fn idle(&mut self, flow_pending: bool) {
         if self.readies.has_pending() || !self.cancels.is_empty() {
             return;
@@ -1923,8 +1932,7 @@ impl Scheduler {
         let release = match deadline {
             Some(deadline) => {
                 if !self.net.is_null() {
-                    let (timeout, release) =
-                        crate::task_heap::idle_wait(poll_timeout(Some(deadline)));
+                    let (timeout, release) = self.net_idle_wait(poll_timeout(Some(deadline)));
                     self.poll_net(timeout);
                     release
                 } else {
@@ -1943,7 +1951,7 @@ impl Scheduler {
                     self.stop_quiescent();
                 }
                 if !self.net.is_null() {
-                    let (timeout, release) = crate::task_heap::idle_wait(-1);
+                    let (timeout, release) = self.net_idle_wait(-1);
                     self.poll_net(timeout);
                     release
                 } else {
@@ -1954,7 +1962,7 @@ impl Scheduler {
             }
         };
         if release && !self.readies.has_pending() {
-            release_idle(self);
+            self.release_net_idle();
         }
     }
 
@@ -5018,7 +5026,7 @@ impl RunPtr {
                     let (timeout, release) = if wait_for_net && untied {
                         (poll_timeout(run.timers.deadline()), false)
                     } else if wait_for_net {
-                        crate::task_heap::idle_wait(poll_timeout(run.timers.deadline()))
+                        run.net_idle_wait(poll_timeout(run.timers.deadline()))
                     } else {
                         (0, false)
                     };
@@ -5037,7 +5045,7 @@ impl RunPtr {
                     let task = run.pop();
                     if task.is_null() {
                         if release {
-                            release_idle(run);
+                            run.release_net_idle();
                         }
                         if !wait_for_net {
                             if run.share_heap {
@@ -5299,7 +5307,7 @@ impl RunPtr {
             (deadline, poller)
         };
         let (timeout, release) = match poller {
-            Some(_) => crate::task_heap::idle_wait(poll_timeout(deadline)),
+            Some(_) => crate::task_heap::idle_wait(poll_timeout(deadline), false),
             None => {
                 release_idle(self.0);
                 (poll_timeout(deadline), false)

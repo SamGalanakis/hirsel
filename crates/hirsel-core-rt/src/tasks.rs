@@ -59,17 +59,9 @@ impl Storage {
                 NonNull::new(alloc(layout)).unwrap_or_else(|| crate::process::stop(b"HostMemory"))
             }
         };
-        #[cfg(any(test, feature = "charge-observation"))]
+        #[cfg(any(test, feature = "charge-observation", feature = "prof"))]
         if bytes != 0 {
-            crate::peak::allocated(pointer.as_ptr(), bytes);
-        }
-        #[cfg(feature = "prof")]
-        if bytes != 0 {
-            crate::mem_prof::alloc(
-                pointer.as_ptr(),
-                bytes,
-                crate::mem_prof::Backing::TaskStorage,
-            );
+            crate::backing_observation::observe!(allocate, pointer.as_ptr(), bytes, TaskStorage);
         }
         Self { pointer, layout }
     }
@@ -82,10 +74,11 @@ impl Drop for Storage {
         // SAFETY: sole owner of this host storage; payload is already moved/cleaned.
         unsafe {
             if self.layout.size() != 0 {
-                #[cfg(any(test, feature = "charge-observation"))]
-                crate::peak::deallocated(self.pointer.as_ptr());
-                #[cfg(feature = "prof")]
-                crate::mem_prof::free(self.pointer.as_ptr(), self.layout.size());
+                crate::backing_observation::observe!(
+                    free,
+                    self.pointer.as_ptr(),
+                    self.layout.size(),
+                );
                 dealloc(self.pointer.as_ptr(), self.layout);
             }
         }
@@ -4781,13 +4774,11 @@ pub unsafe fn run_root(
         holder: std::mem::MaybeUninit::uninit(),
         cursor: 0,
     });
-    #[cfg(any(test, feature = "charge-observation"))]
-    crate::peak::allocated((&*root as *const Task).cast(), size_of::<Task>());
-    #[cfg(feature = "prof")]
-    crate::mem_prof::alloc(
+    crate::backing_observation::observe!(
+        allocate,
         (&*root as *const Task).cast(),
         size_of::<Task>(),
-        crate::mem_prof::Backing::TaskStorage,
+        TaskStorage,
     );
     // SAFETY: root's stable allocation and both stacks stay live through the loop.
     unsafe {
@@ -5405,13 +5396,11 @@ unsafe fn spawn_in(
             holder: std::mem::MaybeUninit::uninit(),
             cursor: 0,
         });
-        #[cfg(any(test, feature = "charge-observation"))]
-        crate::peak::allocated((&*task as *const Task).cast(), size_of::<Task>());
-        #[cfg(feature = "prof")]
-        crate::mem_prof::alloc(
+        crate::backing_observation::observe!(
+            allocate,
             (&*task as *const Task).cast(),
             size_of::<Task>(),
-            crate::mem_prof::Backing::TaskStorage,
+            TaskStorage,
         );
         let task = Box::into_raw(task);
         #[cfg(feature = "record")]
@@ -5802,10 +5791,7 @@ pub(crate) unsafe fn on_host_stack<T>(
 #[cfg(any(test, feature = "charge-observation", feature = "prof"))]
 impl Drop for Task {
     fn drop(&mut self) {
-        #[cfg(any(test, feature = "charge-observation"))]
-        crate::peak::deallocated((self as *const Self).cast());
-        #[cfg(feature = "prof")]
-        crate::mem_prof::free((self as *const Self).cast(), size_of::<Self>());
+        crate::backing_observation::observe!(free, (self as *const Self).cast(), size_of::<Self>());
     }
 }
 

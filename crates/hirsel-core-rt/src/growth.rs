@@ -4,9 +4,9 @@ use crate::{Capacity, Context, block, task_heap};
 use std::ptr::NonNull;
 
 /// # Safety
-/// Exclusive live nonzero-capacity sequence carrier; kind, alignment, moved
-/// prefix and both charges are the exact FORM operands. Fixed/resource/region
-/// storage and static data cannot reach this operation. `stride` is the
+/// Exclusive data and nonzero capacity words; length may be uninitialized.
+/// Kind, alignment, moved prefix and both charges are exact FORM operands.
+/// Static, fixed, resource and region storage cannot reach this. `stride` is the
 /// element's native size, so the old carrier's capacity times `stride` is its
 /// native payload: from the shared threshold upward the backing may be reused
 /// in place, below it it is replaced.

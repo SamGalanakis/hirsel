@@ -66,8 +66,8 @@ typedef struct { void *pointer; uint64_t available; } HirselCoreGrowth;
 /* Consuming sequence growth; stride is the element's native size and the
  * shared reuse threshold is tested here. Success installs data/capacity before
  * refund and returns pointer/0. Capacity returns NULL/room without mutation.
- * HostMemory is stop102, no
- * cleanup. kind is PLAIN/GRAPH, capacity was nonzero. */
+ * The length word is unused and may be uninitialized. HostMemory is stop102
+ * with no cleanup. kind is PLAIN/GRAPH, capacity was nonzero. */
 HirselCoreGrowth hirsel_core_grow_cold(const HirselCoreContext *, void *carrier,
     size_t bytes, size_t align, uint64_t stride, uint64_t charge, uint64_t capacity,
     size_t moved, uint64_t refund, bool overflow, uint8_t kind);

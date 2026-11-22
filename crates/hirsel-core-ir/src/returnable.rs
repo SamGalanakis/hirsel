@@ -1618,10 +1618,25 @@ pub fn apply(module: &mut Module) -> Applied {
         module.functions.push(function);
         module.code_variants.insert(id, hash);
     }
+    // A spawning function that is itself represented runs as its variant, so
+    // the variant's reference to the entry is rewritten too. The variant keeps
+    // the original's value numbers.
     for (f, k, id) in rewrites {
         let body = module.functions[f].body.as_mut().unwrap();
-        if let Inst::FunctionRef { function, .. } = &mut body.insts[k] {
-            *function = id;
+        let Inst::FunctionRef { result, function } = &mut body.insts[k] else {
+            unreachable!()
+        };
+        *function = id;
+        let result = *result;
+        if let Some(&(v, _)) = variant.get(&f) {
+            let body = module.functions[v.index()].body.as_mut().unwrap();
+            for inst in &mut body.insts {
+                if let Inst::FunctionRef { result: r, function } = inst
+                    && *r == result
+                {
+                    *function = id;
+                }
+            }
         }
         applied.roots += 1;
     }

@@ -270,6 +270,7 @@ pub const fn is_stream_grant(kind: u8) -> bool {
 
 const ENV_KIND: u8 = 7;
 const SECRET_KIND: u8 = 11;
+const EXEC_KIND: u8 = 13;
 const NET_RULE_LEN: usize = 23;
 
 fn read_net_rule(bytes: &[u8]) -> Rule {
@@ -884,7 +885,7 @@ pub fn writes(op: u8) -> bool {
     use crate::op::*;
     matches!(
         op,
-        WRITE | WRITE_AT | STDOUT | STDERR | RANDOM | NEXT_ENTRIES
+        WRITE | WRITE_AT | STDOUT | STDERR | RANDOM | NEXT_ENTRIES | DATAGRAM_RECV
     )
 }
 
@@ -905,6 +906,8 @@ pub fn carries_payload(op: u8) -> bool {
             | NEXT_ENTRIES
             | STAT
             | STAT_FILE
+            | EXEC_SPAWN
+            | DATAGRAM_RECV
     )
 }
 
@@ -948,9 +951,7 @@ impl Out {
             put_varint(out, self.written);
         }
         if carries_payload(op) {
-            let first = self.payload.len().min(PAYLOAD_CHUNK);
-            put_bytes(out, &self.payload[..first]);
-            rest.extend(self.payload[first..].chunks(PAYLOAD_CHUNK));
+            put_payload(out, &self.payload, rest);
         }
     }
     fn decode(op: u8, c: &mut Cursor) -> Result<Self, Corrupt> {
@@ -975,6 +976,9 @@ impl Out {
             && (value != 0
                 || (status == ERROR && (error.0 != 8 || u32::try_from(error.1).is_err())))
         {
+            return Err(Corrupt);
+        }
+        if error.0 == 10 && op != op::UNIX_LISTEN {
             return Err(Corrupt);
         }
         let written = if writes(op) || (matches!(op, op::SEND_SECRET | op::SCRAM) && status != OK) {
@@ -1032,7 +1036,11 @@ impl Out {
                 .and_then(|n| n.checked_mul(hirsel_core_net::IP_RECORD_LEN))
                 .ok_or(Corrupt),
             op::RESOLVE if self.value != 0 => Err(Corrupt),
-            op::RECV_BOUNDED | op::RESOLVE | op::STDIN_READ => Ok(0),
+            op::DATAGRAM_RECV if self.status == OK => usize::try_from(self.written)
+                .ok()
+                .and_then(|count| count.checked_add(1))
+                .ok_or(Corrupt),
+            op::DATAGRAM_RECV | op::RECV_BOUNDED | op::RESOLVE | op::STDIN_READ => Ok(0),
             op::RANDOM | op::NEXT_ENTRIES => usize::try_from(self.written).map_err(|_| Corrupt),
             _ => Ok(self.payload.len()),
         }
@@ -1075,7 +1083,7 @@ pub enum Frame {
         gap: u64,
         index: u64,
     },
-    /// Args carries the whole argument vector, each `varint len + bytes`.
+    /// Args carries the argument vector. Exec carries the logical profiles.
     Grant {
         gap: u64,
         kind: u8,
@@ -1089,6 +1097,25 @@ pub enum Frame {
         gap: u64,
         ending: Ending,
     },
+}
+
+fn put_payload<'a>(out: &mut Vec<u8>, payload: &'a [u8], rest: &mut Vec<&'a [u8]>) {
+    let first = payload.len().min(PAYLOAD_CHUNK);
+    put_bytes(out, &payload[..first]);
+    rest.extend(payload[first..].chunks(PAYLOAD_CHUNK));
+}
+
+impl Frame {
+    fn continued_payload(&mut self) -> &mut Vec<u8> {
+        match self {
+            Self::Done { out, .. } | Self::Op { out, .. } => &mut out.payload,
+            Self::Grant {
+                args: Some(payload),
+                ..
+            } => payload,
+            _ => unreachable!(),
+        }
+    }
 }
 
 /// Encodes frames with the T bit's previous-task compression. DATA
@@ -1195,6 +1222,10 @@ impl Encoder {
                         out,
                         args.as_deref().expect("an Args grant carries its vector"),
                     );
+                } else if *kind == EXEC_KIND {
+                    let snapshot = args.as_deref().expect("an Exec grant carries its profiles");
+                    put_varint(out, snapshot.len() as u64);
+                    put_payload(out, snapshot, rest);
                 } else if is_stream_grant(*kind) {
                     let [terminal] = args
                         .as_deref()
@@ -1361,8 +1392,25 @@ impl Decoder {
                 F_GRANT => {
                     let gap = c.varint()?;
                     let kind = c.u8()?;
-                    if kind > SECRET_KIND {
+                    if kind > SECRET_KIND && kind != EXEC_KIND {
                         return Err(Corrupt);
+                    }
+                    if kind == EXEC_KIND {
+                        let needs = usize::try_from(c.varint()?).map_err(|_| Corrupt)?;
+                        let chunk = c.bytes()?;
+                        if chunk.is_empty() || chunk.len() > PAYLOAD_CHUNK {
+                            return Err(Corrupt);
+                        }
+                        let f = Frame::Grant {
+                            gap,
+                            kind,
+                            args: Some(chunk.to_vec()),
+                        };
+                        let Some(frame) = self.complete(f, needs)? else {
+                            continue;
+                        };
+                        frames.push(frame);
+                        continue;
                     }
                     let args = if kind == ARGS_KIND {
                         Some(c.bytes()?.to_vec())
@@ -1382,13 +1430,10 @@ impl Decoder {
                     let Some((mut f, needs)) = self.open.take() else {
                         return Err(Corrupt);
                     };
-                    let (Frame::Op { out, .. } | Frame::Done { out, .. }) = &mut f else {
-                        unreachable!()
-                    };
                     if chunk.is_empty() || chunk.len() > PAYLOAD_CHUNK {
                         return Err(Corrupt);
                     }
-                    out.payload.extend_from_slice(chunk);
+                    f.continued_payload().extend_from_slice(chunk);
                     let Some(frame) = self.complete(f, needs)? else {
                         continue;
                     };
@@ -1420,11 +1465,8 @@ impl Decoder {
         Ok(frames)
     }
     /// Keep a frame whose payload is short of `needs` until its DATA frames arrive.
-    fn complete(&mut self, f: Frame, needs: usize) -> Result<Option<Frame>, Corrupt> {
-        let (Frame::Op { out, .. } | Frame::Done { out, .. }) = &f else {
-            unreachable!()
-        };
-        match out.payload.len().cmp(&needs) {
+    fn complete(&mut self, mut f: Frame, needs: usize) -> Result<Option<Frame>, Corrupt> {
+        match f.continued_payload().len().cmp(&needs) {
             std::cmp::Ordering::Less => {
                 self.open = Some((f, needs));
                 Ok(None)

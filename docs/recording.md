@@ -104,7 +104,7 @@ capacity and the deadline. Its delivery holds the addresses in the order deliver
 error. The header's grant snapshot records a `Resolve` rule with direction byte 3 and a
 `u16` count of patterns, each a length byte followed by its bytes, as a `Tls` rule's.
 
-**Child processes and Unix sockets (unbuilt).** An `Exec` grant is recorded in the grant
+**Child processes and Unix sockets.** An `Exec` grant is recorded in the grant
 snapshot with each profile's name, image digest, `argv0`, argument forms, environment keys
 each marked fixed or caller-settable, and cwd labels. A `Unix` rule is recorded with its
 direction, root label and path. The provider metadata holds no host root mapping, image path,
@@ -122,7 +122,7 @@ them may contain such values.
 | `DGRAM_OPEN`, `DGRAM_BIND`, `DGRAM_CONNECT` | Net or datagram ordinal; root label and path where given | the new ordinal or the outcome |
 | `DGRAM_SEND`, `DGRAM_SEND_TO` | datagram ordinal; root label and path for send-to; the packet; `until` | the outcome |
 | `DGRAM_RECV` | datagram ordinal; spare capacity; `until` | the appended bytes, the packet's length and the truncation flag, or the error |
-| `CLOSE` of a `Proc`, listener or datagram socket | the ordinal and part, as for every dropped host handle | the outcome |
+| `CLOSE` of a `Proc`, pipe half or Unix socket | the ordinal and part, as for every dropped host handle | the outcome |
 
 A replay starts no process and opens no socket. It checks each `CLOSE` at its position, so a moved
 drop diverges there (RL2). It then changes local ownership only: nothing is killed,
@@ -278,6 +278,8 @@ through the launch arguments to find and verify the pin.
 - A `Secret` grant record holds the parameter name, the source label and the patterns, all
   length-prefixed.
 - The `GRANT` frame of a `Stdin`, `Stdout` or `Stderr` grant holds its terminal byte.
+- The `GRANT` frame of an `Exec` grant holds the total profile snapshot length, then its
+  first payload chunk. `DATA` frames carry the remaining bytes.
 - An `Env` grant record holds the pattern list and the sorted name and value pairs. Values
   retain their OS bytes, including when they are not UTF-8.
 - REPEAT stores periodic CHOOSE frames, and a replay expands them to their original

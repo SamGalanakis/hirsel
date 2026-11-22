@@ -165,9 +165,9 @@ impl<'a> Plan<'a> {
                 "Exec grant has no matching entry parameter".into(),
             ));
         }
-        if !options.exec_grants.is_empty() && (options.recording || options.replay.is_some()) {
+        if !options.exec_grants.is_empty() && options.replay.is_some() {
             return Err(NativeStop::Entry(
-                "Exec grants require native launch until Exec replay is available".into(),
+                "replay takes Exec grants from its tape".into(),
             ));
         }
         let exec = options

@@ -5,6 +5,7 @@
 NATIVE_EXEC_TEST_CASES = [
     "provider_tests::exec_supervisor_preserves_inputs_and_only_reaps_its_children",
     "provider_tests::exec_provider_runs_the_sealed_image_and_uses_directional_pipes",
+    "native::tests::exec_unix_recording_replays_without_host_resources",
 ]
 
 # These bodies use the real Linux OS Dir provider. Compile on the pool, execute
@@ -30,7 +31,7 @@ OPENAT2_TEST_CASES = {
         "provider_s0_tests::s0_os_callbacks_by_identity_match_the_pointer_calls",
         "tape::tests::every_s1_kind_recorded_on_the_os_replays_with_no_host",
         "tape::tests::filesystem_observations_survive_removing_the_recorded_directory",
-    ] + NATIVE_EXEC_TEST_CASES,
+    ] + [case for case in NATIVE_EXEC_TEST_CASES if case.startswith("provider_tests::")],
     "hirsel-core-driver-unittest": [
         "host::child::terminal_fixture::terminal_bits_follow_each_granted_descriptor",
         "native::tests::dir_cranelift_entry",
@@ -61,5 +62,5 @@ OPENAT2_TEST_CASES = {
         "native::tests::parallel_test_cli_preserves_rows_and_isolates_shared_directory",
         "native::tests::sqlite_directory_recovery_locking_and_sync",
         "native::tests::recording_switch_preserves_native_observations",
-    ],
+    ] + [case for case in NATIVE_EXEC_TEST_CASES if case.startswith("native::tests::")],
 }

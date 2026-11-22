@@ -1,0 +1,38 @@
+fn close_input(take input: WriteHalf) {}
+
+fn close_child(take child: Proc) {}
+
+pub fn main(e: Exec, n: Net) -> Result[(), Exit] waits {
+    let narrowed = result.unwrap(exec.narrow(e, Form(program: "cat", form: list.new())))
+    let launch = Launch(program: "cat", args: list.new(), env: list.new(), dir: "work", path: "", stdin: Piped, stdout: Piped, stderr: Discard)
+    let Spawned(proc, stdin, stdout, _) = result.unwrap(exec.spawn(narrowed, launch))
+    let mut input = option.unwrap(take stdin)
+    let mut output = option.unwrap(take stdout)
+    let mut child = take proc
+
+    let offer = string.into_bytes("abc")
+    if result.unwrap(host.send_pair(mut input, offer, string.into_bytes(""), Never)) != 3 {
+        return Error(Exit(status: 1))
+    }
+    close_input(take input)
+    let mut response: Bytes = list.with_capacity(8)
+    while result.unwrap(host.recv_bounded(mut output, mut response, 8, Never)) != 0 {}
+    if list.len(response) != 3 || response[0] != b'a' || response[1] != b'b' || response[2] != b'c' {
+        return Error(Exit(status: 2))
+    }
+    match result.unwrap(exec.wait(mut child, Never)) {
+        Exited(0) => {},
+        _ => return Error(Exit(status: 3)),
+    }
+    close_child(take child)
+
+    let mut receive = result.unwrap(host.bind_datagram(n, "work", "packet"))
+    let mut send = result.unwrap(host.open_datagram(n))
+    result.unwrap(host.send_to(mut send, "work", "packet", offer, Never))
+    let mut packet: Bytes = list.with_capacity(2)
+    let Received(len: length, truncated: truncated) = result.unwrap(host.recv_datagram(mut receive, mut packet, Never))
+    if length != 3 || !truncated || list.len(packet) != 2 || packet[0] != b'a' || packet[1] != b'b' {
+        return Error(Exit(status: 4))
+    }
+    Ok(())
+}

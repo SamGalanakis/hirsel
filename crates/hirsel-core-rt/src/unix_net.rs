@@ -113,13 +113,6 @@ unsafe fn call(
                     && valid_relative_path(path.as_bytes())
                     && permits(rules, dir, root, path)
             });
-        // Until the Unix issue and delivery codecs are installed, refuse
-        // before the tape can append or replay an incomplete operation.
-        #[cfg(feature = "record")]
-        if authorized && (crate::tape::owns(&provider) || (!served && (*files).net_tape.is_some()))
-        {
-            crate::process::stop(b"UnixRecording");
-        }
         let mut unix = UnixRequest {
             os: &crate::os_unix::OPERATIONS,
             root,

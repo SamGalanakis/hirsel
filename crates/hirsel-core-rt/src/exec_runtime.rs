@@ -334,22 +334,7 @@ pub unsafe extern "C" fn hirsel_core_exec_spawn(
         let mut refusal = None;
         let mut outcome = drive_with(context, &provider, &mut r, None, |provider, r| {
             let launch = &(*r.path.cast::<Call<SpawnCall>>()).data.launch;
-            #[cfg(feature = "record")]
-            let handle = if crate::tape::owns(provider) {
-                if let Some((_, handle)) = crate::tape::source(provider, r.handle) {
-                    handle
-                } else {
-                    return false;
-                }
-            } else {
-                r.handle
-            };
-            #[cfg(not(feature = "record"))]
-            let handle = {
-                let _ = provider;
-                r.handle
-            };
-            if !launch.permitted((*(handle as *const Grant)).rules()) {
+            if !launch_permitted(provider, r.handle, launch) {
                 return false;
             }
             let amount =
@@ -401,6 +386,18 @@ pub unsafe extern "C" fn hirsel_core_exec_spawn(
             pipes: call.data.pipes,
         }
     }
+}
+
+/// The caller pins the native or served Grant in key, or supplies a tape key.
+unsafe fn launch_permitted(provider: &Provider, key: u64, launch: &LogicalLaunch<'_>) -> bool {
+    #[cfg(feature = "record")]
+    if crate::tape::owns(provider) {
+        return crate::tape::exec_rules(provider, key)
+            .is_some_and(|rules| launch.permitted(&rules));
+    }
+    let _ = provider;
+    // SAFETY: the non-tape key points to the pinned grant.
+    launch.permitted(unsafe { (*(key as *const Grant)).rules() })
 }
 
 fn request<T>(operation: u8, mode: u8, handle: u64, call: *mut Call<T>, site: u64) -> Request {

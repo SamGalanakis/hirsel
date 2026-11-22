@@ -130,6 +130,52 @@ impl Hooks for TapeHooks {
         }
     }
 
+    fn exec_rules(
+        &self,
+        cell: &Cell,
+        key: u64,
+    ) -> Option<std::sync::Arc<hirsel_core_net::exec::ExecRules>> {
+        let state = cell.state.lock().unwrap();
+        if state.generation != generation_of(key) {
+            return None;
+        }
+        state
+            .live
+            .as_ref()?
+            .exec_rules
+            .get(&ordinal_of(key))
+            .cloned()
+    }
+
+    fn narrow_exec(
+        &self,
+        cell: &'static Cell,
+        parent: u64,
+        inner: Option<u64>,
+        rules: hirsel_core_net::exec::ExecRules,
+    ) -> u64 {
+        let _commit = crate::tasks::before_commit();
+        let mut state = cell.state.lock().unwrap();
+        let generation = state.generation;
+        let live = state.live.as_mut().unwrap();
+        live.commit(super::schedule::task(cell), crate::tasks::group_index);
+        let inner =
+            live.objects[ordinal_of(parent) - 1]
+                .inner
+                .zip(inner)
+                .map(|(source, handle)| Inner {
+                    provider: source.provider,
+                    handle,
+                });
+        let ordinal = live.objects.len() + 1;
+        live.objects.push(Object {
+            inner,
+            open_resource: false,
+        });
+        live.exec_rules.insert(ordinal, std::sync::Arc::new(rules));
+        handle(generation, ordinal)
+    }
+
     fn narrow_net(&self, cell: &'static Cell, parent: u64, rules: u64) -> (u64, Group) {
         let _commit = crate::tasks::before_commit();
         let mut state = cell.state.lock().unwrap();

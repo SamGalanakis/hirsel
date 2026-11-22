@@ -7,7 +7,7 @@ use crate::{
 use hirsel_core_net::exec::{ArgToken, ExecRule, Form, Names};
 
 pub(crate) struct NarrowedGrant {
-    _grant: Box<super::Grant>,
+    _grant: Option<Box<super::Grant>>,
     payer: crate::limit::Payer,
     charge: u64,
 }
@@ -65,10 +65,28 @@ pub unsafe extern "C" fn hirsel_core_exec_narrow(
             _ => unreachable!(),
         };
         let Some(rule) = rule else { return DENIED };
-        let parent = &*(hirsel_core_capability_handle(context, exec) as *const super::Grant);
-        let Some(rules) = parent.rules().narrow(&rule) else {
-            return DENIED;
+        let provider = *hirsel_core_capability_provider(context, exec);
+        let key = hirsel_core_capability_handle(context, exec);
+        #[cfg(feature = "record")]
+        let taped = crate::tape::owns(&provider);
+        #[cfg(feature = "record")]
+        let (parent, rules) = if taped {
+            let parent = crate::tape::source(&provider, key)
+                .map(|(_, handle)| &*(handle as *const super::Grant));
+            let Some(rules) = crate::tape::exec_rules(&provider, key) else {
+                return DENIED;
+            };
+            (parent, rules.narrow(&rule))
+        } else {
+            let parent = &*(key as *const super::Grant);
+            (Some(parent), parent.rules().narrow(&rule))
         };
+        #[cfg(not(feature = "record"))]
+        let (parent, rules) = {
+            let parent = &*(key as *const super::Grant);
+            (Some(parent), parent.rules().narrow(&rule))
+        };
+        let Some(rules) = rules else { return DENIED };
         let charge = rules.charge();
         let payer = (*context).payer();
         if let Err(capacity) = payer.admit_run_owned(charge) {
@@ -80,8 +98,18 @@ pub unsafe extern "C" fn hirsel_core_exec_narrow(
                 kind: 0,
             };
         }
-        let grant = Box::new(parent.with_rules(rules));
-        let handle = std::ptr::from_ref(&*grant) as u64;
+        let grant = parent.map(|parent| Box::new(parent.with_rules(rules.clone())));
+        let handle = grant
+            .as_deref()
+            .map(|grant| std::ptr::from_ref(grant) as u64);
+        #[cfg(feature = "record")]
+        let handle = if taped {
+            crate::tape::narrow_exec(&provider, key, handle, rules)
+        } else {
+            handle.unwrap()
+        };
+        #[cfg(not(feature = "record"))]
+        let handle = handle.unwrap();
         let registry = &(*(*context).host_files).registry;
         registry
             .run_grants()
@@ -93,7 +121,6 @@ pub unsafe extern "C" fn hirsel_core_exec_narrow(
                 payer,
                 charge: charge.unwrap(),
             });
-        let provider = *hirsel_core_capability_provider(context, exec);
         Outcome {
             value: registry.grant(provider, handle),
             error: IoError::OK,

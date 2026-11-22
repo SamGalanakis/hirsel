@@ -22,6 +22,18 @@ pub(super) trait Hooks: Sync {
     fn consume_input(&self, group: Group);
     fn source(&self, cell: &Cell, handle: u64) -> Option<(Provider, u64)>;
     fn net_rules(&self, cell: &Cell, handle: u64) -> u64;
+    fn exec_rules(
+        &self,
+        cell: &Cell,
+        key: u64,
+    ) -> Option<std::sync::Arc<hirsel_core_net::exec::ExecRules>>;
+    fn narrow_exec(
+        &self,
+        cell: &'static Cell,
+        parent: u64,
+        inner: Option<u64>,
+        rules: hirsel_core_net::exec::ExecRules,
+    ) -> u64;
     fn narrow_net(&self, cell: &'static Cell, parent: u64, rules: u64) -> (u64, Group);
     unsafe fn issue(&self, cell: &Cell, request: *mut Request, token: u64) -> Step;
 }
@@ -119,6 +131,24 @@ pub(crate) fn source(provider: &Provider, handle: u64) -> Option<(Provider, u64)
 pub(crate) fn net_rules(provider: &Provider, handle: u64) -> u64 {
     let cell = cell_of(provider.state);
     cell.hooks.net_rules(cell, handle)
+}
+
+pub(crate) fn exec_rules(
+    provider: &Provider,
+    handle: u64,
+) -> Option<std::sync::Arc<hirsel_core_net::exec::ExecRules>> {
+    let cell = cell_of(provider.state);
+    cell.hooks.exec_rules(cell, handle)
+}
+
+pub(crate) fn narrow_exec(
+    provider: &Provider,
+    parent: u64,
+    inner: Option<u64>,
+    rules: hirsel_core_net::exec::ExecRules,
+) -> u64 {
+    let cell = cell_of(provider.state);
+    cell.hooks.narrow_exec(cell, parent, inner, rules)
 }
 
 /// Successful local narrowing assigns the child ordinal in commit order.

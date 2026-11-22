@@ -621,6 +621,20 @@ pub(crate) unsafe fn duplicate_file(provider: &Provider, handle: u64) -> Option<
 /// As `wait`.
 #[inline(never)]
 pub unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64) -> Step {
+    #[cfg(feature = "record")]
+    // SAFETY: the tape pins the source's local socket registry in a typed CLOSE.
+    unsafe {
+        let r = &*request;
+        if r.operation == CLOSE && r.mode & !3 == crate::net::SOCKET_CLOSE {
+            return Step {
+                outcome: Outcome {
+                    value: u64::from(crate::net::close_socket_source(r)),
+                    ..Outcome::default()
+                },
+                ..Step::default()
+            };
+        }
+    }
     // SAFETY: these operations pin the Exec call and its callback table.
     unsafe {
         match ((*request).operation, (*request).mode) {

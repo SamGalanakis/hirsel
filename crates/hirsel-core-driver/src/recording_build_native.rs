@@ -14,10 +14,15 @@ fn env_record_runtime() -> PathBuf {
 
 #[test]
 fn foreign_source_replay_refuses_before_reading_tape() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
     let dir = tempfile::tempdir().unwrap();
     let write = |name, text| std::fs::write(dir.path().join(name), text).unwrap();
-    write("hirsel.toml", r#"
+    write(
+        "hirsel.toml",
+        r#"
 [package]
 name = "app"
 major = 1
@@ -30,8 +35,11 @@ charge = "charge-v1"
 [foreign.native]
 symbols = "hfl_"
 archives = []
-"#);
-    write("main.hirsel", r#"
+"#,
+    );
+    write(
+        "main.hirsel",
+        r#"
 pub opaque type Law {}
 fn enter(f: Foreign[Law]) {
     native.zed(f)
@@ -46,18 +54,27 @@ fn touches(f: Foreign[Law]) -> Result[(), ()] {
     enter(f)
     Ok(())
 }
-"#);
-    write("native.hirsel", "pub fn zed(f: Foreign[main.Law])\npub fn alpha(f: Foreign[main.Law])\n");
+"#,
+    );
+    write(
+        "native.hirsel",
+        "pub fn zed(f: Foreign[main.Law])\npub fn alpha(f: Foreign[main.Law])\n",
+    );
     let llvm = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap());
     let runtime = env_record_runtime();
     let run = |command: &str, args: &[&str]| {
         let mut argv = vec![command.to_owned(), dir.path().display().to_string()];
         argv.extend([
-            "--runtime".into(), runtime.display().to_string(),
-            "--cc".into(), llvm.join("bin/clang").display().to_string(),
-            "--libraries".into(), root.join("core").display().to_string(),
-            "--source-core".into(), "--source-std".into(),
-            "--store".into(), dir.path().join("cache").display().to_string(),
+            "--runtime".into(),
+            runtime.display().to_string(),
+            "--cc".into(),
+            llvm.join("bin/clang").display().to_string(),
+            "--libraries".into(),
+            root.join("core").display().to_string(),
+            "--source-core".into(),
+            "--source-std".into(),
+            "--store".into(),
+            dir.path().join("cache").display().to_string(),
         ]);
         argv.extend(args.iter().map(|s| (*s).to_owned()));
         process::tape_request(&argv, dir.path())
@@ -66,12 +83,22 @@ fn touches(f: Foreign[Law]) -> Result[(), ()] {
     let (code, _, error) = run("replay", &["--tape", "missing.tape"]);
     assert_eq!(code, Some(2), "{error}");
     let expected_replay = format!("replay: refused: {expected_main}");
-    let mut lines = error.lines().filter(|line| !line.starts_with("hirsel: created hirsel.lock"));
-    assert!(lines.next().unwrap().starts_with("main.hirsel:5:"), "{error}");
+    let mut lines = error
+        .lines()
+        .filter(|line| !line.starts_with("hirsel: created hirsel.lock"));
+    assert!(
+        lines.next().unwrap().starts_with("main.hirsel:5:"),
+        "{error}"
+    );
     assert_eq!(lines.collect::<Vec<_>>(), [expected_replay], "{error}");
     let (code, _, error) = run("build", &["--recording"]);
     assert_eq!(code, Some(2), "{error}");
-    assert!(error.lines().any(|line| line == format!("refused: {expected_main}")), "{error}");
+    assert!(
+        error
+            .lines()
+            .any(|line| line == format!("refused: {expected_main}")),
+        "{error}"
+    );
     let (code, output, error) = run("test", &["--replay", "--limit", "67108864"]);
     assert_eq!(code, Some(1), "{output}\n{error}");
     assert!(output.lines().any(|line| line.ends_with("refused: FFI-8: a recording build cannot reach foreign code: app@1/main/touches reaches app@1/native/alpha")), "{output}\n{error}");
@@ -3029,4 +3056,96 @@ fn postgres_scripted_peer_laws() {
         );
     }
     peer.join().unwrap();
+}
+
+/// The replay has neither the copied executable nor the Unix root used by the
+/// recorded run. It must recover the child, pipes and packet only from tape.
+#[test]
+fn exec_unix_recording_replays_without_host_resources() {
+    use hirsel_core_net::{GrantRule, UnixDirection, UnixRule};
+    use sha2::{Digest, Sha256};
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir = tempfile::tempdir().unwrap();
+    let work = dir.path().join("work");
+    std::fs::create_dir(&work).unwrap();
+    let image = work.join("image");
+    std::fs::copy("/bin/cat", &image).unwrap();
+    let pin = Sha256::digest(std::fs::read(&image).unwrap());
+    let policy = work.join("policy.toml");
+    // The recording must split a valid profile snapshot larger than a tape block.
+    let unused_arg = "x".repeat(hirsel_tape_format::MAX_LEN);
+    std::fs::write(
+        &policy,
+        format!(
+            "[cat]\nimage = {:?}\nsha256 = \"{pin:x}\"\nargv0 = \"cat\"\nargs = [[], [\"{unused_arg}\"]]\nenv = {{}}\ndirs = {{ work = {:?} }}\n",
+            image.to_str().unwrap(),
+            work.to_str().unwrap(),
+        ),
+    )
+    .unwrap();
+    let request =
+        hirsel_core_net::exec::Request::parse(&format!("{} cat", policy.display())).unwrap();
+    let digest = request.load().unwrap().digest;
+    let source =
+        std::fs::read_to_string(root.join("core/front/fixtures/recording/exec-unix.hirsel"))
+            .unwrap();
+    let mut inputs = source_request(&source, dir.path());
+    inputs.inputs.packages[1] =
+        PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+    let checked = Driver::default()
+        .check(inputs, &mut Meter::new(false))
+        .unwrap();
+    assert!(
+        checked.accepted(),
+        "{:?} {:?}",
+        checked.diagnostics,
+        checked.incomplete
+    );
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let mut options = native_options(Backend::Cranelift, dir.path());
+    options.runtime = PathBuf::from(env_record_runtime());
+    options.recording = true;
+    options.output = dir.path().join("record");
+    options.grant_mask = 1 << grant_kind("Net").unwrap();
+    options.exec_grants.push(crate::exec_launch::Binding {
+        request,
+        policy: Some(digest),
+        workdir: None,
+    });
+    options
+        .unix_roots
+        .insert("work".into(), work.to_str().unwrap().into());
+    options.net_rules = [UnixDirection::Bind, UnixDirection::Send]
+        .into_iter()
+        .map(|direction| GrantRule::Unix(UnixRule::new(direction, "work", "packet").unwrap()))
+        .collect();
+    let executable = checked.build(&entry, &options).unwrap().executable;
+    let tape = dir.path().join("run.tape");
+    let mut record = Command::new(executable);
+    options.exec_grants[0].approve(&mut record);
+    let recorded = record.env("HIRSEL_RECORD", &tape).output().unwrap();
+    assert_eq!(
+        recorded.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&recorded.stderr)
+    );
+    let sealed = std::fs::read(&tape).unwrap();
+    std::fs::remove_dir_all(&work).unwrap();
+
+    options.output = dir.path().join("replay");
+    options.exec_grants.clear();
+    options.net_rules.clear();
+    options.unix_roots.clear();
+    options.grant_mask = 0;
+    options.replay = Some(crate::ReplayPlan {
+        path: tape.to_str().unwrap().into(),
+        diagnose: false,
+    });
+    let replay = checked.build(&entry, &options).unwrap().executable;
+    let (status, _, stderr) = tape_run(&replay, &[], None);
+    assert_eq!(status, Some(0), "{stderr}");
+    assert!(!work.exists());
+    assert_eq!(std::fs::read(tape).unwrap(), sealed);
 }

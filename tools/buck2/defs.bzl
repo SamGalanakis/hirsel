@@ -761,6 +761,9 @@ def hirsel_core_driver_native_test(name, data, case_filter = "native::tests::"):
     host_targets = []
     for index, case in enumerate(cases):
         target = "{}-openat2-{}".format(name, index + 1)
+        environment = {"HIRSEL_TEST_DEDICATED_CASE": case}
+        if case in NATIVE_EXEC_TEST_CASES:
+            environment["HIRSEL_TEST_NATIVE_EXEC"] = "1"
         host_targets.append(":" + target)
         _rust_test(
             name = target,
@@ -768,7 +771,7 @@ def hirsel_core_driver_native_test(name, data, case_filter = "native::tests::"):
             labels = ["local-execution", "requires-openat2"],
             exec_compatible_with = [budget_constraint("host")],
             pool = False,
-            extra_env = {"HIRSEL_TEST_DEDICATED_CASE": case},
+            extra_env = environment,
             **common
         )
     if cases:

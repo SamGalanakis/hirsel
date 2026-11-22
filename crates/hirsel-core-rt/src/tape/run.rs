@@ -490,6 +490,9 @@ unsafe extern "C" fn invoke(
                     let terminal = run.mode == 0
                         && (*(*config).capabilities.add((source - 1) as usize)).terminal;
                     tape.on_tape_stream(req.kind, (provider, handle), terminal)
+                } else if req.kind == entry::EXEC {
+                    tape.on_tape_exec((provider, handle))
+                        .map(|(p, h)| (p, h, false))
                 } else {
                     tape.on_tape(req.kind, (provider, handle))
                         .map(|(p, h)| (p, h, false))
@@ -503,6 +506,9 @@ unsafe extern "C" fn invoke(
                                 };
                                 tape.bind_replay_net_rules(h, rules.handle());
                             }
+                            (*files).net_tape = Some(crate::net::SocketTape::new(p, h));
+                        }
+                        if req.kind == entry::EXEC {
                             (*files).net_tape = Some(crate::net::SocketTape::new(p, h));
                         }
                         if req.kind == entry::SECRET {

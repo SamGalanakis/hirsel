@@ -1966,3 +1966,342 @@ fn a_repeat_the_format_forbids_is_corrupt() {
         }
     }
 }
+
+/// The hand-built rows put stdin and Proc release between distinct issues.
+#[test]
+fn exec_close_rows_diverge_and_impossible_spawn_issues_no_handles() {
+    use crate::{
+        Context,
+        exec_runtime::{hirsel_core_exec_spawn, hirsel_core_exec_wait},
+        net::{
+            SocketTape, hirsel_core_host_recv_bounded, hirsel_core_host_send_pair,
+            hirsel_core_socket_drop,
+        },
+    };
+
+    fn row(op: u8, object: u64, args: &[u8], value: u64, payload: &[u8]) -> Frame {
+        Frame::Op {
+            task: 0,
+            op,
+            object,
+            args: Args::of(args),
+            out: Out {
+                value,
+                payload: payload.to_vec(),
+                ..Out::default()
+            },
+        }
+    }
+
+    fn carrier(data: &[u8]) -> Buffer {
+        Buffer {
+            data: data.as_ptr().cast_mut(),
+            len: data.len(),
+            capacity: 0,
+        }
+    }
+
+    let mut snapshot = b"\x01\x00\x00\x00\x04\x00\x00\x00tool".to_vec();
+    snapshot.extend_from_slice(&[0x42; 32]); // public pin
+    snapshot.extend_from_slice(b"\x04\x00\x00\x00tool\x01\x00\x00\x00");
+    snapshot.extend_from_slice(b"\x00\x00\x00\x00\x00\x00\x00\x00");
+    snapshot.extend_from_slice(b"\x01\x00\x00\x00\x04\x00\x00\x00work");
+    let launch = b"\x04\x00\x00\x00tool\x04\x00\x00\x00work\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01\x01\x00";
+    let mut recv_args = [0; 9];
+    recv_args[0] = 4; // little-endian spare room, followed by Never
+    let normal = vec![
+        Frame::Grant {
+            gap: 0,
+            kind: crate::entry::EXEC,
+            args: Some(snapshot),
+        },
+        row(EXEC_SPAWN, 1, launch, 2, &[3, 4, 0]),
+        row(SEND_PAIR, 3, &[0, 1, b'x', 0], 1, &[]),
+        row(CLOSE, 3, &[2], 0, &[]),
+        row(RECV_BOUNDED, 4, &recv_args, 1, b"x"),
+        row(EXEC_WAIT, 2, &[0], 23, &[]),
+        row(CLOSE, 2, &[0], 0, &[]),
+        row(CLOSE, 4, &[1], 0, &[]),
+        Frame::End {
+            gap: 2, // last CLOSE issue and its synchronous delivery
+            ending: ending(),
+        },
+    ];
+
+    for case in 0..6 {
+        let mut frames = normal.clone();
+        let want = match case {
+            0 => Ok(()),
+            1 => {
+                frames.swap(3, 4);
+                Err(Fault::Diverged(Divergence {
+                    at: 4,
+                    kind: Mismatch::Op,
+                }))
+            }
+            2 => {
+                frames.swap(6, 7);
+                Err(Fault::Diverged(Divergence {
+                    at: 7,
+                    kind: Mismatch::Object,
+                }))
+            }
+            3 => {
+                frames[1] = row(EXEC_SPAWN, 1, launch, 2, &[3, 3, 0]);
+                Err(Fault::Corrupt)
+            }
+            4 => {
+                frames[1] = row(EXEC_SPAWN, 1, launch, 2, &[3, 4, 5]);
+                Err(Fault::Corrupt)
+            }
+            5 => {
+                let Frame::Op { out, .. } = &mut frames[1] else {
+                    unreachable!()
+                };
+                *out = Out {
+                    status: TIMED_OUT,
+                    ..Out::default()
+                };
+                Err(Fault::Corrupt)
+            }
+            _ => unreachable!(),
+        };
+        let h = header(REVISION);
+        let mut encoder = Encoder::default();
+        let data: Vec<_> = frames.iter().flat_map(|f| encoder.frame(f).0).collect();
+        let tape_bytes = [
+            block(&h.tape_id, 0, 0, &h.encode(REVISION).unwrap()),
+            block(&h.tape_id, END, 1, &data),
+        ]
+        .concat();
+        let mut store = Store::with(&tape_bytes);
+        let no_host = Counted::new(None);
+        // SAFETY: the store and all fixture carriers remain owned through replay.
+        unsafe {
+            let (tape, _) =
+                Tape::open(REVISION, store.dir(), b"t", Mode::Replay, &h, &expect()).unwrap();
+            let (provider, key) = tape.on_tape_exec((no_host.provider(), 0)).unwrap();
+            let mut files = crate::host_file::Files::default();
+            let mut context = Context::new(1 << 20);
+            context.host_files = &mut files;
+            files.net_tape = Some(SocketTape::new(provider, key));
+            let grant = files.registry.grant(provider, key);
+            let spawned = hirsel_core_exec_spawn(
+                &mut context,
+                grant,
+                &carrier(b"tool"),
+                &carrier(b""),
+                &carrier(b""),
+                &carrier(b"work"),
+                &carrier(b""),
+                1,
+                1,
+                0,
+                801,
+            );
+            if case >= 3 {
+                assert_eq!(spawned.outcome.status, STATUS_REFUSED);
+                assert_eq!(spawned.pipes, [0; 3]);
+                assert_eq!(
+                    tape.cell
+                        .state
+                        .lock()
+                        .unwrap()
+                        .live
+                        .as_ref()
+                        .unwrap()
+                        .objects
+                        .len(),
+                    1
+                );
+            } else {
+                let fault = tape.cell.state.lock().unwrap().live.as_ref().unwrap().fault;
+                assert_eq!(
+                    (spawned.outcome.status, spawned.outcome.error),
+                    (0, IoError::OK),
+                    "spawn: {fault:?}"
+                );
+                let [input, output, no_stderr] = spawned.pipes;
+                assert_eq!(no_stderr, 0);
+                let sent = hirsel_core_host_send_pair(
+                    &mut context,
+                    input,
+                    &carrier(b"x"),
+                    &carrier(b""),
+                    0,
+                    0,
+                    0,
+                    802,
+                );
+                let fault = tape.cell.state.lock().unwrap().live.as_ref().unwrap().fault;
+                assert_eq!((sent.status, sent.value), (0, 1), "send: {fault:?}");
+                hirsel_core_socket_drop(&mut context, input);
+                let mut bytes = [0xcc; 4];
+                let mut b = Buffer {
+                    data: bytes.as_mut_ptr(),
+                    len: 0,
+                    capacity: bytes.len(),
+                };
+                let read =
+                    hirsel_core_host_recv_bounded(&mut context, output, &mut b, 4, 0, 0, 0, 803);
+                let proc = spawned.outcome.value;
+                if case == 1 {
+                    assert_eq!(read.status, STATUS_REFUSED);
+                    assert_eq!((b.len, bytes), (0, [0xcc; 4]));
+                } else {
+                    assert_eq!(read.value, 1);
+                    assert_eq!((b.len, bytes), (1, [b'x', 0xcc, 0xcc, 0xcc]));
+                    assert_eq!(
+                        hirsel_core_exec_wait(&mut context, proc, 0, 0, 0, 804).value,
+                        23
+                    );
+                }
+                hirsel_core_socket_drop(&mut context, proc);
+                hirsel_core_socket_drop(&mut context, output);
+            }
+            assert_eq!(tape.end(&ending()), want, "variant {case}");
+        }
+        assert_eq!(no_host.calls.get(), 0);
+    }
+}
+
+#[test]
+fn unix_tape_rejects_impossible_packet_before_appending() {
+    let make = |flag, written, payload: &[u8], outcome| {
+        let mut bytes = vec![flag];
+        bytes.extend_from_slice(payload);
+        if outcome != OK {
+            bytes.clear();
+        }
+        Out {
+            status: outcome,
+            value: 3,
+            written,
+            payload: bytes,
+            ..Out::default()
+        }
+    };
+    let stale_listen_error = Frame::Op {
+        task: 0,
+        op: DATAGRAM_BIND,
+        object: 1,
+        args: Args::of(&[]),
+        out: Out {
+            status: ERROR,
+            error: (10, libc::EIO as u64),
+            ..Out::default()
+        },
+    };
+    let bytes = Encoder::default().frame(&stale_listen_error).0;
+    assert!(Decoder::default().block(&bytes, false).is_err());
+
+    let h = header(REVISION);
+    for (is_valid, packet) in [
+        (true, make(1, 2, b"ab", OK)),
+        (false, make(0, 2, b"ab", OK)),
+        (false, make(1, 1, b"a", OK)),
+        (false, make(1, 3, b"abc", OK)),
+        (false, make(0, 0, b"", ABORTED)),
+    ] {
+        let frames = [
+            Frame::Grant {
+                gap: 0,
+                kind: crate::entry::NET,
+                args: None,
+            },
+            Frame::Op {
+                task: 0,
+                op: DATAGRAM_BIND,
+                object: 1,
+                args: Args::of(b"\x04work\x06packet"),
+                out: Out {
+                    value: 2,
+                    ..Out::default()
+                },
+            },
+            Frame::Op {
+                task: 0,
+                op: DATAGRAM_RECV,
+                object: 2,
+                args: Args::of(&[0, 2, 0, 0, 0, 0, 0, 0, 0]),
+                out: packet,
+            },
+            Frame::Op {
+                task: 0,
+                op: CLOSE,
+                object: 2,
+                args: Args::of(&[0]),
+                out: Out::default(),
+            },
+            Frame::End {
+                gap: 2, // last CLOSE issue and its synchronous delivery
+                ending: ending(),
+            },
+        ];
+        let mut encoder = Encoder::default();
+        let data: Vec<_> = frames.iter().flat_map(|f| encoder.frame(f).0).collect();
+        let tape_bytes = [
+            block(&h.tape_id, 0, 0, &h.encode(REVISION).unwrap()),
+            block(&h.tape_id, END, 1, &data),
+        ]
+        .concat();
+        let mut store = Store::with(&tape_bytes);
+        let no_host = Counted::new(None);
+        // SAFETY: the store and request carriers remain owned through replay.
+        unsafe {
+            let (tape, _) =
+                Tape::open(REVISION, store.dir(), b"t", Mode::Replay, &h, &expect()).unwrap();
+            let (provider, net) = tape
+                .on_tape(crate::entry::NET, (no_host.provider(), 0))
+                .unwrap();
+            let mut context = crate::Context::new(1000);
+            let mut local = hirsel_core_net::Sockets::default();
+            let mut unix = crate::unix_net::UnixRequest {
+                os: &crate::os_unix::OPERATIONS,
+                root: "work",
+                path: "packet",
+                backlog: 0,
+                authorized: true,
+                until: None,
+                sockets: &raw mut local,
+                connecting: None,
+                target: None,
+                retry: None,
+            };
+            let mut bind = request(DATAGRAM_BIND, 0, net, &[], empty_buffer());
+            bind.path = (&raw mut unix).cast();
+            let result = hirsel_core_host(&mut context, &provider, &mut bind);
+            assert_eq!(ordinal_of(result.value), 2);
+            let mut storage = [b'!', 0xcc, 0xcc];
+            let buffer = Buffer {
+                data: storage.as_mut_ptr(),
+                len: 1,
+                capacity: 3,
+            };
+            let mut recv = request(DATAGRAM_RECV, 0, result.value, &[], buffer);
+            recv.path = (&raw mut unix).cast();
+            let got = hirsel_core_host(&mut context, &provider, &mut recv);
+            if is_valid {
+                assert_eq!((got.value, got.written, got.kind), (3, 2, 1));
+                assert_eq!((recv.buffer.len, storage), (3, *b"!ab"));
+                let mut close = request(
+                    CLOSE,
+                    crate::net::SOCKET_CLOSE,
+                    result.value,
+                    &[],
+                    empty_buffer(),
+                );
+                assert_eq!(
+                    hirsel_core_host(&mut context, &provider, &mut close).value,
+                    1
+                );
+                assert_eq!(tape.end(&ending()), Ok(()));
+            } else {
+                assert_eq!(got.status, STATUS_REFUSED);
+                assert_eq!((recv.buffer.len, storage), (1, [b'!', 0xcc, 0xcc]));
+                assert_eq!(tape.end(&ending()), Err(Fault::Corrupt));
+            }
+        }
+        assert_eq!(no_host.calls.get(), 0);
+    }
+}

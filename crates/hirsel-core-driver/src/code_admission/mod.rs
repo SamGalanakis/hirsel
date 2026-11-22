@@ -393,11 +393,6 @@ impl AdmissionStore {
             if let Some(reason) = crate::exec_launch::refuse_missing(&recipe, approved) {
                 return Err(AdmissionError::Refused(reason));
             }
-            if recording && crate::exec_launch::arguments(&recipe).next().is_some() {
-                return Err(AdmissionError::Refused(
-                    "Exec grants require native launch until Exec replay is available".into(),
-                ));
-            }
             crate::exec_launch::approval_lines(&recipe, workdir).map_err(AdmissionError::Refused)?
         } else {
             String::new()

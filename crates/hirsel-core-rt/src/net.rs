@@ -208,8 +208,45 @@ impl SocketTape {
         outcome
     }
 
+    /// Release a taped Proc pipe or Unix object at its recorded position.
+    /// Other socket types keep their existing cleanup path.
+    unsafe fn release(self, context: *mut Context, key: u64) -> Option<Outcome> {
+        let handle = self.handle(key);
+        if !crate::tape::typed_socket(&self.provider, handle) {
+            return None;
+        }
+        // SAFETY: cleanup owns this half/whole object and pins Files through CLOSE.
+        unsafe {
+            let sockets = &raw mut (*(*context).host_files).sockets;
+            let mut request = Request {
+                operation: CLOSE,
+                mode: SOCKET_CLOSE | (key as u8 & 3),
+                handle,
+                path: sockets.cast(),
+                path_len: 0,
+                buffer: empty_buffer(),
+                site: 0,
+            };
+            (*context).cancel_shield += 1;
+            let answer = drive(context, &self.provider, &mut request, None);
+            (*context).cancel_shield -= 1;
+            Some(answer)
+        }
+    }
+
     fn source(self, key: u64) -> Option<u64> {
         crate::tape::source(&self.provider, self.handle(key)).map(|(_, handle)| handle | (key & 3))
+    }
+}
+
+#[cfg(feature = "record")]
+pub(crate) const SOCKET_CLOSE: u8 = 0x40;
+
+#[cfg(feature = "record")]
+pub(crate) unsafe fn close_socket_source(request: &Request) -> bool {
+    // SAFETY: SocketTape::release pins its local source registry.
+    unsafe {
+        (&mut *request.path.cast_mut().cast::<hirsel_core_net::Sockets>()).release(request.handle)
     }
 }
 
@@ -803,6 +840,7 @@ pub unsafe extern "C" fn hirsel_core_net_split(
         let files = (*context).host_files;
         #[cfg(feature = "record")]
         let (read, write) = if let Some(tape) = (*files).net_tape {
+            crate::tape::socket_parts(&tape.provider, tape.handle(key), 0b110);
             if let Some(source) = tape.source(key) {
                 (*files).sockets.split(source);
             }
@@ -959,7 +997,10 @@ pub unsafe extern "C" fn hirsel_core_net_join(
         }
         #[cfg(feature = "record")]
         let source = match (*files).net_tape {
-            Some(tape) => tape.source(key),
+            Some(tape) => {
+                crate::tape::socket_parts(&tape.provider, tape.handle(key), 1);
+                tape.source(key)
+            }
             None => Some(key),
         };
         #[cfg(not(feature = "record"))]
@@ -983,17 +1024,35 @@ pub unsafe extern "C" fn hirsel_core_socket_drop(context: *mut Context, key: u64
             crate::exec_runtime::drop_proc(context, key);
             return;
         }
+        let files = (*context).host_files;
+        let served = served_socket(context, key);
+        #[cfg(feature = "record")]
+        if let Some(tape) = (*files).net_tape.filter(|_| served.is_none())
+            && let Some(answer) = tape.release(context, key)
+        {
+            if answer.status == 0 && answer.error == IoError::OK {
+                let charge = {
+                    let _commit = crate::sequencer::enter();
+                    if answer.value != 0 {
+                        (*files).datagrams.remove(&key);
+                        (*files).connected.remove(&(key & !3));
+                    }
+                    (*files).exec_pipes.remove(&key)
+                };
+                drop(charge);
+            }
+            return;
+        }
         let charge = {
             let _commit = crate::sequencer::enter();
-            (*(*context).host_files).exec_pipes.remove(&key)
+            (*files).exec_pipes.remove(&key)
         };
         drop(charge);
-        if let Some(provider) = served_socket(context, key) {
+        if let Some(provider) = served {
             // The port queues the Released; its server is readied outside
             // the run's commit section.
             let gone = crate::provide::release_socket(&provider, key);
             let _commit = crate::sequencer::enter();
-            let files = (*context).host_files;
             if key & 3 == 2 {
                 (*files).tls_writes.remove(&(key & !3));
             }
@@ -1005,7 +1064,6 @@ pub unsafe extern "C" fn hirsel_core_socket_drop(context: *mut Context, key: u64
             return;
         }
         let _commit = crate::sequencer::enter();
-        let files = (*context).host_files;
         (*files).datagrams.remove(&key);
         if key & 3 == 2 {
             (*files).tls_writes.remove(&(key & !3));

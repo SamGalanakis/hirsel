@@ -15,11 +15,13 @@
 //! dropping a tape advances its cell's generation, so every handle made
 //! through it then fails before issue and never uses its source.
 mod dispatch;
+mod exec;
 mod managed;
 pub mod run;
 pub(crate) mod schedule;
+mod unix;
 pub(crate) mod writer;
-pub(crate) use dispatch::{narrow_net, net_rules, owns, source};
+pub(crate) use dispatch::{exec_rules, narrow_exec, narrow_net, net_rules, owns, source};
 pub use hirsel_tape_format as format;
 #[cfg(test)]
 mod schedule_cases;
@@ -255,6 +257,9 @@ struct Live {
     objects: Vec<Object>,
     /// Replay Net grants retain an inert rule list without an inner provider.
     replay_net_rules: BTreeMap<usize, u64>,
+    exec_rules: BTreeMap<usize, std::sync::Arc<hirsel_core_net::exec::ExecRules>>,
+    typed_resources: BTreeMap<usize, Resource>,
+
     /// The previous value of each clock op on each object (section 5.4).
     clocks: BTreeMap<(u8, u64), u64>,
     recorder: Option<Recorder>,
@@ -575,6 +580,11 @@ impl Recorder {
             self.chooses = [None, None];
             let mut left = match f {
                 Frame::Done { out, .. } | Frame::Op { out, .. } => out.payload.len(),
+                Frame::Grant {
+                    kind: crate::entry::EXEC,
+                    args: Some(snapshot),
+                    ..
+                } => snapshot.len(),
                 _ => 0,
             };
             self.room(left);
@@ -756,6 +766,29 @@ impl Replayer {
     }
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ResourceKind {
+    Proc,
+    Pipe,
+    UnixStream,
+    UnixListener,
+    Datagram,
+}
+
+struct Resource {
+    kind: ResourceKind,
+    parts: u8,
+}
+
+impl Resource {
+    fn new(kind: ResourceKind, part: u8) -> Self {
+        Self {
+            kind,
+            parts: 1 << part,
+        }
+    }
+}
+
 fn socket_op(op: u8) -> bool {
     matches!(
         op,
@@ -774,12 +807,20 @@ fn socket_op(op: u8) -> bool {
 fn creates_object(op: u8) -> bool {
     matches!(
         op,
-        OPEN | OPEN_DIR | ENTRIES | MKDTEMP | LISTEN | CONNECT | ACCEPT | TLS_CONNECT | SCRAM
-    )
+        OPEN | OPEN_DIR
+            | ENTRIES
+            | MKDTEMP
+            | LISTEN
+            | CONNECT
+            | ACCEPT
+            | TLS_CONNECT
+            | SCRAM
+            | EXEC_SPAWN
+    ) || unix::kind(op).is_some()
 }
 
 fn waiting_io(op: u8) -> bool {
-    socket_op(op) || op == STDIN_READ
+    socket_op(op) || unix_operation(op) || matches!(op, STDIN_READ | EXEC_WAIT)
 }
 
 fn waiting_io_status(error: u8) -> u8 {
@@ -909,6 +950,18 @@ unsafe fn socket_args(request: &Request) -> Args {
 unsafe fn canonical(r: &Request) -> Args {
     // SAFETY: the request's operands are pinned for its issue.
     unsafe {
+        if matches!(r.operation, EXEC_SPAWN | EXEC_WAIT | EXEC_SIGNAL) {
+            return exec::canonical(r);
+        }
+        if r.operation == CLOSE && r.mode == crate::exec_runtime::PROC_CLOSE {
+            return Args::of(&[0]);
+        }
+        if r.operation == CLOSE && r.mode & !3 == crate::net::SOCKET_CLOSE {
+            return Args::of(&[r.mode & 3]);
+        }
+        if unix_operation(r.operation) {
+            return unix::canonical(r);
+        }
         if socket_op(r.operation) {
             return socket_args(r);
         }
@@ -1090,6 +1143,8 @@ impl Tape {
                     replay_abort: None,
                     objects: vec![],
                     replay_net_rules: BTreeMap::new(),
+                    exec_rules: BTreeMap::new(),
+                    typed_resources: BTreeMap::new(),
                     clocks: BTreeMap::new(),
                     recorder: Some(recorder),
                     replayer: None,
@@ -1136,6 +1191,8 @@ impl Tape {
                     replay_abort: None,
                     objects: vec![],
                     replay_net_rules: BTreeMap::new(),
+                    exec_rules: BTreeMap::new(),
+                    typed_resources: BTreeMap::new(),
                     clocks: BTreeMap::new(),
                     recorder: None,
                     replayer: Some({
@@ -1205,6 +1262,28 @@ impl Tape {
     pub fn on_tape(&self, kind: u8, source: (Provider, u64)) -> Result<(Provider, u64), Fault> {
         let args = format::is_stream_grant(kind).then(|| vec![0]);
         self.grant(kind, args, Some(source)).map(|(p, h, _)| (p, h))
+    }
+
+    fn on_tape_exec(&self, source: (Provider, u64)) -> Result<(Provider, u64), Fault> {
+        let (provider, handle) = source;
+        let snapshot = if handle == 0 {
+            None
+        } else {
+            // SAFETY: the launch owner pins the Exec grant through cleanup.
+            let grant = unsafe { &*(handle as *const crate::exec::Grant) };
+            let crate::exec::Grant::Native { profiles, .. } = grant else {
+                return Err(Fault::Corrupt);
+            };
+            Some(exec::snapshot(profiles))
+        };
+        let (provider, handle, stored) =
+            self.grant(crate::entry::EXEC, snapshot, Some((provider, handle)))?;
+        let rules = exec::rules(&stored)?;
+        let mut state = self.cell.state.lock().unwrap();
+        let live = state.live.as_mut().unwrap();
+        live.exec_rules
+            .insert(ordinal_of(handle), std::sync::Arc::new(rules));
+        Ok((provider, handle))
     }
 
     fn on_tape_stream(
@@ -1454,6 +1533,30 @@ fn cell_of(state: *mut u8) -> &'static Cell {
     // SAFETY: a tape provider's state is its leaked cell.
     unsafe { &*state.cast::<Cell>() }
 }
+/// The typed resources added by Exec and Unix carry CLOSE at release.
+pub(crate) fn typed_socket(provider: &Provider, key: u64) -> bool {
+    let state = cell_of(provider.state).state.lock().unwrap();
+    state.generation == generation_of(key)
+        && state
+            .live
+            .as_ref()
+            .and_then(|live| live.typed_resources.get(&ordinal_of(key)))
+            .is_some_and(|resource| resource.kind != ResourceKind::Proc)
+}
+
+pub(crate) fn socket_parts(provider: &Provider, key: u64, parts: u8) {
+    let mut state = cell_of(provider.state).state.lock().unwrap();
+    if state.generation == generation_of(key)
+        && let Some(resource) = state
+            .live
+            .as_mut()
+            .and_then(|live| live.typed_resources.get_mut(&ordinal_of(key)))
+        && resource.kind == ResourceKind::UnixStream
+    {
+        resource.parts = parts;
+    }
+}
+
 fn generation_of(h: u64) -> u32 {
     (h >> 32) as u32
 }
@@ -1468,6 +1571,8 @@ unsafe fn source_handle(request: &Request, inner: Inner) -> u64 {
     ) {
         // SAFETY: owned network operations pin this operand through delivery.
         unsafe { (*request.path.cast::<crate::net::NetworkRequest>()).direction }
+    } else if request.operation == CLOSE && request.mode & !3 == crate::net::SOCKET_CLOSE {
+        request.mode & 3
     } else {
         0
     };
@@ -1714,7 +1819,14 @@ unsafe fn record_out(
     let ordinal = ordinal_of(r.handle);
     let ok = o.status == 0 && o.error == IoError::OK;
     let mut out = Out {
-        status: if waiting_io(r.operation) {
+        status: if r.operation == EXEC_WAIT {
+            match o.error.tag {
+                0 => OK,
+                2 => TIMED_OUT,
+                3 => ABORTED,
+                _ => ERROR,
+            }
+        } else if waiting_io(r.operation) {
             waiting_io_status(o.error.tag)
         } else if o.error == IoError::OK {
             OK
@@ -1740,6 +1852,51 @@ unsafe fn record_out(
         answer.value = handle(generation, live.objects.len());
         created = Some(answer.value);
     }
+    if ok && r.operation == EXEC_SPAWN {
+        live.typed_resources
+            .insert(live.objects.len(), Resource::new(ResourceKind::Proc, 0));
+        // SAFETY: spawn pins its private output slots through delivery.
+        let call = unsafe {
+            &mut (*r
+                .path
+                .cast_mut()
+                .cast::<crate::exec_runtime::Call<crate::exec_runtime::SpawnCall>>())
+            .data
+        };
+        for (i, pipe) in call.pipes.iter_mut().enumerate() {
+            if *pipe == 0 {
+                put_varint(&mut out.payload, 0);
+                continue;
+            }
+            let part = if i == 0 { 2 } else { 1 };
+            live.objects.push(Object {
+                inner: Some(Inner {
+                    provider: inner.provider,
+                    handle: *pipe & !3,
+                }),
+                open_resource: false,
+            });
+            live.typed_resources
+                .insert(live.objects.len(), Resource::new(ResourceKind::Pipe, part));
+            put_varint(&mut out.payload, live.objects.len() as u64);
+            *pipe = (live.objects.len() as u64) << 2 | u64::from(part);
+        }
+    }
+    if ok && let Some(kind) = unix::kind(r.operation) {
+        live.typed_resources
+            .insert(live.objects.len(), Resource::new(kind, 0));
+    }
+    if ok && r.operation == CLOSE && r.mode == crate::exec_runtime::PROC_CLOSE {
+        live.typed_resources.remove(&ordinal);
+    }
+    if ok && r.operation == CLOSE && r.mode & !3 == crate::net::SOCKET_CLOSE {
+        let entry = live.typed_resources.get_mut(&ordinal).unwrap();
+        entry.parts &= !(1 << (r.mode & 3));
+        if entry.parts == 0 {
+            live.typed_resources.remove(&ordinal);
+        }
+        out.value = 0;
+    }
     if ok && matches!(r.operation, CLOSE | CLOSE_ENTRIES) {
         live.objects[ordinal - 1].open_resource = false;
     }
@@ -1757,6 +1914,14 @@ unsafe fn record_out(
     } else if ok && matches!(r.operation, STAT | STAT_FILE) {
         out.payload.push(o.kind);
         out.payload.extend_from_slice(&o.written.to_le_bytes());
+    } else if ok && r.operation == DATAGRAM_RECV {
+        out.payload.push(o.kind);
+        if r.buffer.len > before {
+            // SAFETY: receive initialized exactly its appended bytes.
+            out.payload.extend(unsafe {
+                std::slice::from_raw_parts(r.buffer.data.add(before), r.buffer.len - before)
+            });
+        }
     } else if ok && r.operation == RESOLVE {
         // SAFETY: the resolve provider initialized these Ip elements in spare.
         for i in before..r.buffer.len {
@@ -1853,14 +2018,17 @@ unsafe fn replay(
         return Err(rep.diverged(Mismatch::Arg));
     }
     let Some(out) = out else {
-        if matches!(op, SECRET_MAC | SCRAM_VERIFY) {
+        if matches!(op, SECRET_MAC | SCRAM_VERIFY | EXEC_SPAWN | EXEC_SIGNAL)
+            || (unix_operation(op) && !unix::can_park(op))
+            || (op == CLOSE && matches!(r.mode, crate::exec_runtime::PROC_CLOSE | 0x40..=0x42))
+        {
             return Err(Fault::Corrupt);
         }
         // Without a scheduler nothing else readies a replayed helper, and
         // nothing else runs before its completion. Ready it only when its
         // recorded Done comes next, as `complete` will accept; any other
         // frame is the divergence `complete` would report.
-        if matches!(op, SYNC | SYNC_DIR | RESOLVE | STDIN_READ)
+        if (matches!(op, SYNC | SYNC_DIR | RESOLVE | STDIN_READ | EXEC_WAIT) || unix::can_park(op))
             && !crate::tasks::has_provider_task()
         {
             if !matches!(rep.peek()?, Frame::Done { gap, task: t, .. }
@@ -1885,6 +2053,56 @@ unsafe fn replay_out(
     r: &mut Request,
     out: Out,
 ) -> Result<Outcome, Fault> {
+    if unix_operation(op) {
+        unix::delivery(r, &out, live.objects.len() as u64)?;
+    }
+    if op == CLOSE && r.mode & !3 == crate::net::SOCKET_CLOSE {
+        let ordinal = object as usize;
+        let part = 1 << (r.mode & 3);
+        let resource = live
+            .typed_resources
+            .get_mut(&ordinal)
+            .ok_or(Fault::Corrupt)?;
+        if out != Out::default()
+            || resource.kind == ResourceKind::Proc
+            || resource.parts & part == 0
+        {
+            return Err(Fault::Corrupt);
+        }
+        resource.parts &= !part;
+        let closed = resource.parts == 0;
+        if closed {
+            live.typed_resources.remove(&ordinal);
+        }
+        return Ok(Outcome {
+            value: u64::from(closed),
+            ..Outcome::default()
+        });
+    }
+    let mut spawn_pipes = [0; 3];
+    if matches!(op, EXEC_SPAWN | EXEC_WAIT | EXEC_SIGNAL) {
+        if op != EXEC_SPAWN
+            && live
+                .typed_resources
+                .get(&(object as usize))
+                .is_none_or(|r| r.kind != ResourceKind::Proc)
+        {
+            return Err(Fault::Corrupt);
+        }
+        spawn_pipes = exec::delivery(r, &out, live.objects.len() as u64)?;
+    }
+    if op == CLOSE && r.mode == crate::exec_runtime::PROC_CLOSE {
+        if out != Out::default()
+            || live
+                .typed_resources
+                .get(&(object as usize))
+                .is_none_or(|r| r.kind != ResourceKind::Proc)
+        {
+            return Err(Fault::Corrupt);
+        }
+        live.typed_resources.remove(&(object as usize));
+        return Ok(Outcome::default());
+    }
     let mut o = Outcome {
         value: out.value,
         error: IoError {
@@ -1899,7 +2117,9 @@ unsafe fn replay_out(
         OK => {}
         ERROR if out.error.0 != 0 => {}
         ABORTED | TIMED_OUT => {
-            if waiting_io(op) {
+            if op == EXEC_WAIT {
+                o.error.tag = if out.status == ABORTED { 3 } else { 2 };
+            } else if waiting_io(op) {
                 o.error.tag = if out.status == ABORTED { 7 } else { 6 };
             }
         }
@@ -1920,6 +2140,56 @@ unsafe fn replay_out(
             open_resource: false,
         });
         o.value = handle(generation, live.objects.len());
+    }
+    if ok && let Some(kind) = unix::kind(op) {
+        live.typed_resources
+            .insert(ordinal_of(o.value), Resource::new(kind, 0));
+    }
+    if ok && op == EXEC_SPAWN {
+        live.typed_resources
+            .insert(live.objects.len(), Resource::new(ResourceKind::Proc, 0));
+        // SAFETY: every ordinal and the whole pipe plan passed delivery validation.
+        let call = unsafe {
+            &mut (*r
+                .path
+                .cast_mut()
+                .cast::<crate::exec_runtime::Call<crate::exec_runtime::SpawnCall>>())
+            .data
+        };
+        for (i, pipe) in spawn_pipes.into_iter().enumerate() {
+            if pipe == 0 {
+                continue;
+            }
+            let part = if i == 0 { 2 } else { 1 };
+            live.objects.push(Object {
+                inner: None,
+                open_resource: false,
+            });
+            live.typed_resources
+                .insert(pipe as usize, Resource::new(ResourceKind::Pipe, part));
+            call.pipes[i] = (pipe << 2) | u64::from(part);
+        }
+    }
+    if matches!(op, EXEC_SPAWN | EXEC_WAIT | EXEC_SIGNAL) {
+        return Ok(o);
+    }
+    if op == DATAGRAM_RECV {
+        if ok {
+            let (flag, bytes) = out.payload.split_first().unwrap();
+            if !bytes.is_empty() {
+                // SAFETY: Unix delivery validation proved the byte count fits.
+                unsafe {
+                    ptr::copy_nonoverlapping(
+                        bytes.as_ptr(),
+                        r.buffer.data.add(r.buffer.len),
+                        bytes.len(),
+                    )
+                };
+                r.buffer.len += bytes.len();
+            }
+            o.kind = *flag;
+        }
+        return Ok(o);
     }
     if matches!(op, LISTEN | ACCEPT) {
         if ok {

@@ -755,6 +755,9 @@ impl CheckProduct {
         record_options.replay = None;
         let built = self.build(test, &record_options)?;
         let mut cmd = runner.test_command(&std::fs::canonicalize(&built.executable)?);
+        for grant in &record_options.exec_grants {
+            grant.approve(&mut cmd);
+        }
         cmd.env("HIRSEL_RECORD", &tape_path);
         let directory = private_directory(&mut cmd)?;
         let (output, timed_out, wall_time) = execute(&mut cmd, timeout)?;
@@ -775,6 +778,8 @@ impl CheckProduct {
         replay_options.grant_mask = 0;
         replay_options.directories.clear();
         replay_options.net_rules.clear();
+        replay_options.unix_roots.clear();
+        replay_options.exec_grants.clear();
         replay_options.secret_grants.clear();
         replay_options.output = options.output.with_extension("replay");
         replay_options.replay = Some(crate::ReplayPlan {

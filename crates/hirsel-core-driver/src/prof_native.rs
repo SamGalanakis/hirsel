@@ -1,3 +1,24 @@
+fn capture_native_profile(program: &Path, out: &Path) -> hirsel_prof::Profile {
+    let status = hirsel_prof::run(
+        &hirsel_prof::Launch {
+            executable: program,
+            arguments: &[],
+            record: None,
+            source_root: program.parent().unwrap(),
+        },
+        &hirsel_prof::CaptureOptions {
+            out,
+            freq: 997,
+            pmu: Some("cpu-clock"),
+            stack_bytes: 32768,
+        },
+        |path, bytes| crate::prof_command::symbol_source(path, bytes, None),
+    )
+    .unwrap();
+    assert!(status.success(), "{status}");
+    hirsel_prof::Profile::open(out).unwrap()
+}
+
 #[test]
 fn profiler_attach_uses_snapshot_before_sampling_existing_mappings() {
     use std::io::{BufRead, BufReader};
@@ -93,4 +114,138 @@ int main(void) {
         }
     }
     assert!(in_image > 0, "expected CPU samples in the existing mapping");
+}
+
+#[test]
+fn profiler_keeps_interleaved_fibers_and_source_lines_on_both_backends() {
+    const SOURCE: &str = r#"type Endpoints: send { tx: Sender[u64], rx: Receiver[u64] }
+
+fn alpha(take ends: Endpoints) -> u64 waits {
+    let mut n = 1u64
+    for _ in 0u64 .. 6u64 {
+        for i in 0u64 .. 7500000u64 {
+            n = (n * 5u64 + i % 19u64) % 2147483647u64
+        }
+        result.unwrap(channel.send(ends.tx, n))
+        n = result.unwrap(channel.receive(ends.rx))
+    }
+    n
+}
+
+fn beta(take ends: Endpoints) -> u64 waits {
+    let mut n = 0u64
+    for _ in 0u64 .. 6u64 {
+        n = result.unwrap(channel.receive(ends.rx))
+        for i in 0u64 .. 7500000u64 {
+            n = (n * 7u64 + i % 13u64) % 2147483647u64
+        }
+        result.unwrap(channel.send(ends.tx, n))
+    }
+    n
+}
+
+pub fn main(tasks: Tasks) -> Result[(), Exit] waits {
+    let (tx_a, rx_a): (Sender[u64], Receiver[u64]) = channel.new(1)
+    let (tx_b, rx_b): (Sender[u64], Receiver[u64]) = channel.new(1)
+    let first = task.spawn(tasks, bytes 4096, Endpoints(tx: take tx_a, rx: take rx_b), alpha)
+    let second = task.spawn(tasks, bytes 4096, Endpoints(tx: take tx_b, rx: take rx_a), beta)
+    let x = result.unwrap(task.join(take first))
+    let y = result.unwrap(task.join(take second))
+    if x == y { Ok(()) } else { Error(Exit(status: 1)) }
+}
+"#;
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut request = source_request(SOURCE, dir.path());
+        request.inputs.packages[1] =
+            PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+        let product = Driver::default()
+            .check(request, &mut Meter::new(false))
+            .unwrap();
+        assert!(
+            product.accepted(),
+            "{backend:?}: {}",
+            serde_json::to_string(&product.machine_diagnostics().unwrap()).unwrap()
+        );
+        let entry = DefPath::from_full("app@1/main/main").unwrap();
+        let mut options = native_options(backend, dir.path());
+        options.instance_limit = 512;
+        options.grant_mask = 1 << grant_kind("Tasks").unwrap();
+        let built = product.build(&entry, &options).unwrap();
+        let profile = capture_native_profile(&built.executable, &dir.path().join("fibers.hprof"));
+        let db = profile.connection();
+        let tier: String = db
+            .query_row(
+                "SELECT value FROM run_meta WHERE key='symbol_tier'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(tier, "full_dwarf", "{backend:?}");
+
+        let mut stmt = db
+            .prepare(
+                "SELECT f.def_path,fr.file,fr.line,fr.col
+             FROM cpu_sample s JOIN callsite c ON c.id=s.callsite_id
+             JOIN frame fr ON fr.id=c.frame_id JOIN function f ON f.id=fr.function_id
+             WHERE s.stack_root='fiber' AND s.unwind_status='fiber_root'
+             AND f.def_path IN ('app@1/main/alpha','app@1/main/beta')
+             ORDER BY s.ts_ns,s.id",
+            )
+            .unwrap();
+        let ordered = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<u32>>(2)?,
+                    row.get::<_, Option<u32>>(3)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        // The two channels force consecutive CPU bursts to switch between
+        // alpha and beta. Inspect the order without predicting sample counts.
+        let transitions = ordered
+            .windows(2)
+            .filter(|rows| rows[0].0 != rows[1].0)
+            .count();
+        assert!(
+            transitions >= 2,
+            "{backend:?}: sampled {transitions} fiber transitions"
+        );
+        let mut functions_with_source = BTreeSet::new();
+        for (function, file, line, col) in ordered {
+            // Compiler-generated instructions can lack a source location.
+            let Some(line) = line else {
+                continue;
+            };
+            let valid_line = if function.ends_with("/alpha") {
+                3..=13
+            } else {
+                15..=25
+            };
+            assert!(
+                valid_line.contains(&line)
+                    && col.is_some_and(|col| col > 0)
+                    && file
+                        .as_deref()
+                        .is_some_and(|file| file.ends_with(".hirsel")),
+                "{backend:?}: {function} at {file:?}:{line}:{col:?}"
+            );
+            functions_with_source.insert(function);
+        }
+        assert_eq!(
+            functions_with_source.len(),
+            2,
+            "{backend:?}: {functions_with_source:?}"
+        );
+    }
+}
+
+#[test]
+fn profiler_labels_foreign_callback_as_host_stack() {
+    shared_foreign_thunk_fixture(true);
 }

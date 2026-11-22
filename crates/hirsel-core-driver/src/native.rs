@@ -2127,6 +2127,10 @@ pub(crate) mod tests {
 
     #[test]
     fn shared_foreign_thunk_links_sealed_code_and_runs_from_each_backend() {
+        shared_foreign_thunk_fixture(false);
+    }
+
+    fn shared_foreign_thunk_fixture(profile: bool) {
         use crate::code_store::ObjectKind;
         use crate::foreign_archive::LinkArchives;
         use hirsel_core_ir::release_recipe::{ForeignFunction, ForeignLeaf, ObjectRef};
@@ -2145,11 +2149,31 @@ pub(crate) mod tests {
 #include <stdint.h>
 static uint8_t cell;
 static uint64_t released;
-uint64_t hfl_measure(int8_t s, float f) { return s == -3 && f == 1.25f ? 42 : 0; }
+#ifdef HFL_PROFILE
+#define MEASURE_EFFECT " stack "
+__attribute__((noinline)) static void hfl_profile_hot(volatile uint8_t *frame) {
+    volatile uint64_t value = frame[0];
+    for (uint64_t i = 0; i < 80000000; i++) value = value * 5 + i;
+    frame[20 * 1024 - 1] = (uint8_t)value;
+}
+#else
+#define MEASURE_EFFECT " waits "
+#endif
+uint64_t hfl_measure(int8_t s, float f) {
+#ifdef HFL_PROFILE
+    volatile uint8_t frame[20 * 1024];
+    /* perf's stack copy cannot page in untouched anonymous stack pages. */
+    for (unsigned long i = 4096; i < sizeof(frame); i += 4096) frame[i] = 0;
+    frame[0] = (uint8_t)s;
+    hfl_profile_hot(frame);
+    __asm__ volatile("" : : "r"(&frame) : "memory");
+#endif
+    return s == -3 && f == 1.25f ? 42 : 0;
+}
 void *hfl_make(void) { return &cell; }
 void hfl_free(void *p) { if (p == &cell) released++; }
 uint64_t hfl_freed(void) { return released; }
-#define ABI "hfl_measure waits (i8, f32) -> u64\n" \
+#define ABI "hfl_measure" MEASURE_EFFECT "(i8, f32) -> u64\n" \
             "hfl_make stack () -> new ffi_laws@1/laws/Obj\n" \
             "hfl_free waits (take ffi_laws@1/laws/Obj) -> ()\n" \
             "hfl_freed stack () -> u64\n"
@@ -2161,6 +2185,8 @@ static const char abi[sizeof(ABI) - 1] = ABI;
         command(
             Command::new(cc)
                 .args(["-std=c11", "-O2", "-fPIC", "-c"])
+                .args(profile.then_some("-DHFL_PROFILE"))
+                .args(profile.then_some("-fasynchronous-unwind-tables"))
                 .arg(adapter)
                 .arg("-o")
                 .arg(path("adapter.o")),
@@ -2180,12 +2206,17 @@ static const char abi[sizeof(ABI) - 1] = ABI;
         };
         let entry = DefPath::from_full("ffi_laws@1/laws/main").unwrap();
         let identity = Identity::plain(entry.clone());
+        let measure = if profile {
+            "(core@1/core/Foreign[ffi_laws@1/laws/Laws],i8,f32)->u64"
+        } else {
+            "(core@1/core/Foreign[ffi_laws@1/laws/Laws],i8,f32)->u64 waits"
+        };
         let leaf = ForeignLeaf {
             module: DefPath::from_full("ffi_laws@1/native").unwrap(),
             symbols: "hfl_".into(),
             targets: vec![],
             functions: [
-                ("measure", "(core@1/core/Foreign[ffi_laws@1/laws/Laws],i8,f32)->u64 waits"),
+                ("measure", measure),
                 ("make", "(core@1/core/Foreign[ffi_laws@1/laws/Laws])->core@1/core/Option[core@1/foreign/Ptr[ffi_laws@1/laws/Obj]]"),
                 ("free", "(core@1/core/Foreign[ffi_laws@1/laws/Laws],take core@1/foreign/Ptr[ffi_laws@1/laws/Obj])->()waits"),
                 ("freed", "(core@1/core/Foreign[ffi_laws@1/laws/Laws])->u64"),
@@ -2330,7 +2361,30 @@ fn f5 = n5 g5 extern
                 false,
             )
             .unwrap();
-            run_clean(&output, 0);
+            if profile {
+                let profile_path = dir.path().join(format!("foreign-{backend:?}.hprof"));
+                let report = capture_native_profile(&output, &profile_path);
+                let db = report.connection();
+                let host: i64 = db.query_row(
+                    "SELECT count(*) FROM cpu_sample s JOIN callsite c ON c.id=s.callsite_id
+                     JOIN frame fr ON fr.id=c.frame_id JOIN function f ON f.id=fr.function_id
+                     WHERE f.name='hfl_profile_hot' AND s.stack_root='host' AND s.unwind_status='ok'",
+                    [], |row| row.get(0),
+                ).unwrap();
+                if host == 0 {
+                    let counts: String = db.query_row(
+                        "SELECT COALESCE(group_concat(unwind_status || '/' || stack_root || '=' || n), '')
+                         FROM (SELECT unwind_status, stack_root, count(*) AS n FROM cpu_sample
+                               GROUP BY unwind_status, stack_root)",
+                        [], |row| row.get(0),
+                    ).unwrap();
+                    panic!(
+                        "{backend:?}: expected Foreign callback samples on the host fiber. {counts}"
+                    );
+                }
+            } else {
+                run_clean(&output, 0);
+            }
         }
     }
     fn exercise(backend: Backend) {

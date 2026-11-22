@@ -335,7 +335,8 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 
 pub(crate) fn host_fiber_invocation(name: &str) -> bool {
     let name = addr2line::demangle_auto(Cow::Borrowed(name), None);
-    name.contains("hirsel_core_rt::fiber::Stack::call::invoke")
+    name.starts_with("<hirsel_core_rt::fiber::Stack>::call::invoke")
+        || name.starts_with("hirsel_core_rt::fiber::Stack::call::invoke")
 }
 
 pub(crate) fn fiber_boundary(name: &str) -> bool {

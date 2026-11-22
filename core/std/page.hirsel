@@ -2665,16 +2665,40 @@ pub fn cursor_value(cursor: Cursor, slot: u64) -> Option[View[Bytes]] in cursor 
 
 /// Decode from the positioned leaf with a key buffer shared across advances.
 pub fn cursor_read[T](mut cursor: Cursor, visit: scoped[view] fn(Bytes, Bytes) -> T) -> Option[T] {
-    let Some(slot) = cursor_step(mut cursor) else {
-        return None
+    // A next slot on the current leaf is taken here; cursor_step handles the
+    // rest: popping a finished page and descending to the next leaf.
+    let depth = list.len(cursor.path)
+    let mut slot: u64 = 0
+    let mut stepped = false
+    if depth != 0 && level(cursor.path[depth - 1].page.image) == 0 {
+        let candidate = cursor.path[depth - 1].next_slot
+        if cursor.reverse && candidate != 0 {
+            slot = candidate - 1
+            cursor.path[depth - 1].next_slot = slot
+            stepped = true
+        } else if !cursor.reverse && candidate < count(cursor.path[depth - 1].page.image) {
+            slot = candidate
+            cursor.path[depth - 1].next_slot = candidate + 1
+            stepped = true
+        }
+    }
+    if !stepped {
+        let Some(next) = cursor_step(mut cursor) else {
+            return None
+        }
+        slot = next
     }
     let page = cursor.path[list.len(cursor.path) - 1].page
     let at = entry_at(page.image, slot)
     let prefix = u16_at(page.image.raw, 4)
     let suffix = u16_at(page.image.raw, at)
-    let raw_suffix = list.slice(page.image.raw, at + 2, at + 2 + suffix)
-    let Some(raw) = value_at(page, slot) else {
-        fail("page cursor is not on a row")
+    let cell = at + 2 + suffix
+    let raw_suffix = list.slice(page.image.raw, at + 2, cell)
+    // An inline cell's value follows its tag and length; a BLOB cell's is the page's body.
+    let raw = if page.image.raw[cell] == 0 {
+        list.slice(page.image.raw, cell + 3, cell + 3 + u16_at(page.image.raw, cell + 1))
+    } else {
+        view page.blobs[int.widen(ref_at(page.image.raw, cell + 1).body)]
     }
     if prefix == 0 {
         return Some(visit(raw_suffix, raw))

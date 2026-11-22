@@ -25,12 +25,20 @@ JSON Pointer. The empty path denotes the root. `Capacity` reports refusal to
 enter the byte bound. A refused allocation inside the bound raises Capacity.
 `LengthOverflow` reports a count that the codec cannot represent.
 
+`from_string(format, input, byte_limit)` applies the same bound to a borrowed
+String.
+
 `encode_typed` writes T's codec bytes into reusable caller-owned scratch.
 It measures the JSON, calls the supplied length callback, then streams the JSON
 bytes to the sink. For a value already encoded by the codec, use `typed_length`
 and `write_typed`. Both passes use a fixed 64-entry traversal stack and allocate
 no heap storage. A sink refusal can leave a prefix. The length pass refuses
 nesting over 64 before any output is sent.
+
+`push_typed(format, value, mut out, mut scratch)` measures the value and
+reserves room before appending JSON to Bytes. It returns the appended byte
+count. A refused measurement or reservation leaves the output bytes intact.
+`to_string(format, value)` returns a new String containing the same JSON.
 
 The format follows [HTTP B-4 and B-5](../../../docs/spec/http.md#b-4-lexical-forms-json-path-and-query).
 In particular, 64-bit integers are strings, Bytes use padded base64, and maps

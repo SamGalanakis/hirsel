@@ -1354,8 +1354,13 @@ pub fn decode_typed[T](format: Format[T], take input: Bytes, byte_limit: u64) ->
             Ok(()) => fail("UTF-8 validation must agree"),
         },
     }
+    from_string(format, s, byte_limit)
+}
+
+/// Decodes one JSON value from a borrowed String under the same byte bound.
+pub fn from_string[T](format: Format[T], input: String, byte_limit: u64) -> Result[T, TypedError] {
     let decoded = bound bytes byte_limit {
-        decode_profile(format, s)
+        decode_profile(format, input)
     }
     match take decoded {
         Ok(take result) => take result,
@@ -1982,9 +1987,11 @@ fn read_float(op: u8, s: String, mut d: ReadTyped, mut out: Bytes) -> Result[(),
 
 pub type TypedWriteError = DepthLimit | Binary(codec.DecodeError) | LengthOverflow
 
+type WritePass: key = Measure | CheckAndWrite | WriteMeasured
+
 scoped type TypedWriter {
     byte: scoped fn(u8),
-    count_only: bool
+    pass: WritePass
 }
 
 fn ignore_output_byte(_byte: u8) {}
@@ -1992,16 +1999,20 @@ fn ignore_output_byte(_byte: u8) {}
 /// Measures the canonical JSON of a value already encoded by format's codec.
 /// No bytes are written and the transcoder allocates nothing.
 pub fn typed_length[T](format: Format[T], binary: Bytes) -> Result[u64, TypedWriteError] {
-    let w = TypedWriter(byte: ignore_output_byte, count_only: true)
+    let w = TypedWriter(byte: ignore_output_byte, pass: Measure)
     write_profile(format.plan, binary, w)
 }
 
-/// Streams a codec value to send, one byte pos a time, and returns its length.
+/// Streams a codec value to send, one byte at a time, and returns its length.
 /// Run typed_length first to check depth and obtain the length before writing.
 pub fn write_typed[T](format: Format[T], binary: Bytes, send: scoped fn(u8)) -> Result[u64, TypedWriteError] {
+    stream_typed(format, binary, send, CheckAndWrite)
+}
+
+fn stream_typed[T](format: Format[T], binary: Bytes, send: scoped fn(u8), pass: WritePass) -> Result[u64, TypedWriteError] {
     let w = TypedWriter(byte: scoped fn(x: u8) {
         send(x)
-    }, count_only: false)
+    }, pass)
     write_profile(format.plan, binary, w)
 }
 
@@ -2009,11 +2020,39 @@ pub fn write_typed[T](format: Format[T], binary: Bytes, send: scoped fn(u8)) -> 
 /// caller can reserve scratch ahead of time and reuse it across calls. The
 /// length pass runs before start or send. No JSON buffer is allocated.
 pub fn encode_typed[T](format: Format[T], value: T, mut scratch: Bytes, start: scoped fn(u64), send: scoped fn(u8)) -> Result[u64, TypedWriteError] {
+    let length = measure_typed(format, value, mut scratch)?
+    start(length)
+    stream_typed(format, scratch, send, WriteMeasured)
+}
+
+/// Writes one typed JSON value to a new String.
+pub fn to_string[T](format: Format[T], value: T) -> Result[String, TypedWriteError] {
+    let mut out: Bytes = list.new()
+    let mut scratch: Bytes = list.new()
+    let _ = push_typed(format, value, mut out, mut scratch)?
+    match string.from_utf8(take out) {
+        Ok(take text) => Ok(take text),
+        Error(_) => fail("typed JSON output is UTF-8"),
+    }
+}
+
+/// Appends one typed JSON value and returns its byte length. Measures and
+/// reserves the entire append before changing the contents of out.
+pub fn push_typed[T](format: Format[T], value: T, mut out: Bytes, mut scratch: Bytes) -> Result[u64, TypedWriteError] {
+    let length = measure_typed(format, value, mut scratch)?
+    if let None = int.checked_add(list.len(out), length) {
+        return Error(LengthOverflow)
+    }
+    list.reserve(mut out, length)
+    stream_typed(format, scratch, scoped fn(byte: u8) {
+        list.push(mut out, byte)
+    }, WriteMeasured)
+}
+
+fn measure_typed[T](format: Format[T], value: T, mut scratch: Bytes) -> Result[u64, TypedWriteError] {
     list.clear(mut scratch)
     codec.encode(format.binary, value, mut scratch) ?=> |_| LengthOverflow
-    let length = typed_length(format, scratch)?
-    start(length)
-    write_typed(format, scratch, send)
+    typed_length(format, scratch)
 }
 
 fn binary_read[T](take r: Result[T, codec.DecodeError]) -> Result[T, TypedWriteError] {
@@ -2033,7 +2072,7 @@ fn output_count(mut length: u64, add: u64) -> Result[(), TypedWriteError] {
 
 fn output_byte(w: TypedWriter, mut length: u64, b: u8) -> Result[(), TypedWriteError] {
     output_count(mut length, 1)?
-    if !w.count_only {
+    if w.pass != Measure {
         (w.byte)(b)
     }
     Ok(())
@@ -2042,7 +2081,7 @@ fn output_byte(w: TypedWriter, mut length: u64, b: u8) -> Result[(), TypedWriteE
 fn output_literal(w: TypedWriter, mut length: u64, s: String) -> Result[(), TypedWriteError] {
     let b = string.as_bytes(s)
     output_count(mut length, list.len(b))?
-    if !w.count_only {
+    if w.pass != Measure {
         for x in b {
             (w.byte)(x)
         }
@@ -2318,7 +2357,7 @@ fn write_char(w: TypedWriter, mut length: u64, c: char) -> Result[(), TypedWrite
 
 fn write_base64(w: TypedWriter, mut length: u64, b: Bytes) -> Result[(), TypedWriteError] {
     let n = list.len(b)
-    if w.count_only {
+    if w.pass == Measure {
         // A codec Bytes value has a u32 count.
         return output_count(mut length, ((n + 2) / 3) * 4 + 2)
     }
@@ -2404,8 +2443,10 @@ fn write_atom(op: u8, binary: Bytes, mut pos: u64, w: TypedWriter, mut length: u
             let n: u64 = int.widen(binary_read(codec.take_u32(binary, mut pos))?)
             binary_read(codec.need(binary, pos, n))?
             let text = list.slice(binary, pos, pos + n)
-            if let Error(e) = utf8.validate(text) {
-                return Error(Binary(Utf8(pos + e.valid_up_to)))
+            if w.pass != WriteMeasured {
+                if let Error(e) = utf8.validate(text) {
+                    return Error(Binary(Utf8(pos + e.valid_up_to)))
+                }
             }
             write_quoted(w, mut length, text)?
             pos += n

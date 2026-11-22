@@ -745,6 +745,48 @@ fn typed_json_profile_refusals() -> bool {
     duplicate && unknown && bare && padding && surrogate && overflow && depth && good_depth && bad_depth
 }
 
+// The output starts with an existing byte, and é uses two bytes on the wire.
+// An over-depth value may be measured but may never append bytes.
+// expect: run typed_json_buffer_helpers() = true
+fn typed_json_buffer_helpers() -> bool {
+    let format: json.Format[String] = result.unwrap(json.typed())
+    let text = "é\n"
+    let mut out = typed_input("!")
+    let mut scratch: Bytes = list.new()
+    let n = result.unwrap(json.push_typed(format, text, mut out, mut scratch))
+    let encoded = result.unwrap(json.to_string(format, text))
+    let decoded = result.unwrap(json.from_string(format, " \"\\u00e9\\n\" ", 65536))
+    let deep: json.Format[ProfileDepth] = result.unwrap(json.typed())
+    let mut nested: ProfileDepth = Stop
+    for _ in 0u64 .. 33 {
+        let mut items: List[ProfileDepth] = list.new()
+        list.push(mut items, take nested)
+        nested = Next(take items)
+    }
+    let refused = match json.push_typed(deep, nested, mut out, mut scratch) {
+        Error(DepthLimit) => true,
+        _ => false,
+    }
+    let enter = isolate(fn() -> Result[bool, Capacity] {
+        bound bytes 0 {
+            match json.from_string(format, "\"é\"", 8) {
+                Error(Capacity(_)) => true,
+                _ => false,
+            }
+        }
+    })
+    let in_bound = isolate(fn() -> Result[bool, Capacity] {
+        bound bytes 0 {
+            let _ = json.from_string(format, "\"é\"", 0)
+            false
+        }
+    })
+    n == 10 && encoded == "\"é\\u000A\"" && decoded == text && refused && out == typed_input("!\"é\\u000A\"") && match (take enter, caught(take in_bound)) {
+        (Ok(Ok(Ok(true))), Some(c)) => c.available == 0,
+        _ => false,
+    }
+}
+
 // The primary cause of a caught failure, when it is a refused admission.
 fn caught[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
     match r {

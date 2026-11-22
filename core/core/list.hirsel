@@ -60,6 +60,10 @@ pub fn clear[T](mut xs: List[T])
 
 pub fn fill[T: plain](mut xs: List[T], n: u64, x: T)
 
+// Overwrite count existing elements starting at at with copies of x. A range
+// outside dst (including an overflowing end) fails with Bounds before any write.
+pub fn fill_slice[T: plain](mut dst: List[T], at: u64, count: u64, x: T)
+
 pub fn append[T: plain](mut xs: List[T], ys: List[T])
 
 // Overwrite src's length of existing elements starting at at. A range outside

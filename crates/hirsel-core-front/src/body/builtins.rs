@@ -130,6 +130,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.list_copy_from_slice(item, vals[0]?, vals[1]?, vals[2]?, n)?;
                 return Some(None);
             }
+            "fill_slice" => {
+                self.list_fill_slice(item, vals[0]?, vals[1]?, vals[2]?, vals[3], n)?;
+                return Some(None);
+            }
             "reserve" => {
                 self.list_reserve(item, vals[0]?, vals[1]?, super::lists::Ask::Reserve, n)?;
                 return Some(None);

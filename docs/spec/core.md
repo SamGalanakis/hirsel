@@ -213,6 +213,13 @@ operations it names; nothing else about them may be inferred from an implementat
   A range outside either carrier raises `Bounds` before any writes. The destination
   keeps its length and capacity. Each copy admits no bytes and takes one Step
   ([MEM-30](budgets.md#mem-30-step-bounds)).
+  `list.fill_slice(mut dst, at, count, x)` overwrites the `count` elements of `dst`
+  from `at` with copies of the plain `x`. It raises `Bounds` before any write unless
+  `at ≤ len` and `count ≤ len − at`, so an `at + count` past `u64` is refused rather
+  than wrapped, and it checks the range even when `T` has no storage. The list keeps
+  its length and capacity; the call admits no bytes and takes one Step whatever
+  `count` is. A fill writes the same bytes on every engine
+  ([SEM-8](semantics.md#sem-8-determinism)).
 - **Words.** `list.word_le(b, at)` and `list.word_be(b, at)` read a little- or big-endian
   word from `b` at a byte offset. The expected `u16`, `u32` or `u64` type fixes the width.
   Without an expected type the result is `u64`. An invalid range, including an overflowing

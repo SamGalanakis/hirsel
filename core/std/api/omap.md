@@ -67,14 +67,18 @@ payloads in place and may discard its draft on Capacity. `insert_recover` retain
 original root; taking the unique path there requires a failure-atomic update algorithm.
 Borrowed `insert` continues to express a persistent update of a retained version.
 
-`range(m,take lower,take upper)` accepts `Unbounded`, `Included(k)` or
+`range(m, lower, take upper)` accepts `Unbounded`, `Included(k)` or
 `Excluded(k)` endpoints and returns an owned, sendable `Cursor`. It reserves one
 Arc frame per level, seeks recursively in O(log n), and pins the version from
-which it was made. `next(mut cursor)` returns `Result[Option[(K,V)],Capacity]`.
-It copies just that row, and Capacity leaves that row unconsumed. Traversing k
-rows costs O(k + log n) node work and the cost of copying their payloads.
-Reversed bounds yield an empty cursor. A cursor can outlive its originating map
-and move to another task. User cursors are read with `while let`, not `for`.
+which it was made. `range_reverse(m, take lower, upper)` seeks from the upper
+bound and walks the same interval in descending order. `next(mut cursor)`
+returns `Option[(K, V)]`. It copies just that row. A raised Capacity leaves
+the row unconsumed. Traversing k rows costs O(k + log n) node work and the cost
+of copying their payloads. Inverted bounds yield an empty cursor. A cursor
+can outlive its originating map and move to another task.
+
+`count(m, lower, upper)` uses subtree sizes to return the number of keys in
+the requested interval. It visits O(log n) nodes and allocates nothing.
 
 Checkpoint writers use `root` for an Arc holder and `node_id`, `node_level`,
 `node_count`, `node_len`, `node_key`, `node_value`, `node_child` for individual

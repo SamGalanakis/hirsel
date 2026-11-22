@@ -88,7 +88,7 @@ WIRE_TEST_INSTRUCTIONS = {
 WIDE_WINDOW_LAWS = {'store@1/runner_calls/law_calls_session_charge'}
 
 # R2's publisher laws, in runner.hirsel itself (RUNNER-SPEC §8.2).
-SUBS = ('subs_main', 'subs_reset_keeps_diff', 'rows_normalized', 'projection_isolated', 'subscribe_order', 'retired_without_waiting', 'stale_never_released')
+SUBS = ('subs_main', 'range_reruns', 'subs_reset_keeps_diff', 'rows_normalized', 'projection_isolated', 'subscribe_order', 'retired_without_waiting', 'stale_never_released')
 
 
 def counted(name, report):

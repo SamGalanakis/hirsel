@@ -47,7 +47,8 @@ type Frame[K: ordered + shareable + send, V: shareable + send]: shareable + send
 
 pub opaque type Cursor[K: ordered + shareable + send, V: shareable + send]: send {
     path: List[Frame[K, V]],
-    upper: Bound[K]
+    stop: Bound[K],
+    reverse: bool
 }
 
 fn copied[T: shareable](x: T) -> T {
@@ -184,18 +185,18 @@ pub fn from_sorted[K: ordered + shareable + send, V: shareable + send](mut ids: 
     let mut level: List[Arc[Node[K, V]]] = list.with_capacity(groups)
     let mut at: u64 = 0
     for group in 0 .. groups {
-        let count = n / groups + if group < n % groups {
+        let width = n / groups + if group < n % groups {
             1u64
         } else {
             0u64
         }
-        let mut rows: List[Arc[Entry[K, V]]] = list.with_capacity(count)
-        for i in at .. at + count {
+        let mut rows: List[Arc[Entry[K, V]]] = list.with_capacity(width)
+        for i in at .. at + width {
             list.push(mut rows, new_entry(keys[i], values[i]))
         }
         ids += 1
         list.push(mut level, pack_leaf(ids, take rows))
-        at += count
+        at += width
     }
     while list.len(level) > 1 {
         let total = list.len(level)
@@ -203,17 +204,17 @@ pub fn from_sorted[K: ordered + shareable + send, V: shareable + send](mut ids: 
         let mut parents: List[Arc[Node[K, V]]] = list.with_capacity(branches)
         let mut start: u64 = 0
         for group in 0 .. branches {
-            let count = total / branches + if group < total % branches {
+            let width = total / branches + if group < total % branches {
                 1u64
             } else {
                 0u64
             }
-            let mut children: List[Arc[Node[K, V]]] = list.with_capacity(count)
-            for i in start .. start + count {
+            let mut children: List[Arc[Node[K, V]]] = list.with_capacity(width)
+            for i in start .. start + width {
                 list.push(mut children, arc.share(level[i]))
             }
             list.push(mut parents, fresh_branch(mut ids, take children))
-            start += count
+            start += width
         }
         level = take parents
     }
@@ -652,12 +653,12 @@ fn edit_owned_arc[K: ordered + shareable + send, V: shareable + send](mut ids: u
         }
         ids += 1
         node.stamp = ids
-        let count = if node.depth == 0 {
+        let width = if node.depth == 0 {
             list.len(node.rows)
         } else {
             list.len(node.kids)
         }
-        if count > 32 {
+        if width > 32 {
             Some(split_owned_node(mut ids, mut node))
         } else {
             None
@@ -740,19 +741,19 @@ fn split_owned_node[K: ordered + shareable + send, V: shareable + send](mut ids:
     } else {
         list.len(node.kids)
     }
-    let count = total - total / 2
+    let width = total - total / 2
     let mut rows: List[Arc[Entry[K, V]]] = list.with_capacity(if is_leaf {
-        count
+        width
     } else {
         0
     })
     let mut kids: List[Arc[Node[K, V]]] = list.with_capacity(if is_leaf {
         0
     } else {
-        count
+        width
     })
     let mut size = 0u64
-    for _ in 0 .. count {
+    for _ in 0 .. width {
         if is_leaf {
             list.push(mut rows, option.unwrap(list.pop(mut node.rows)))
             size += 1
@@ -762,11 +763,11 @@ fn split_owned_node[K: ordered + shareable + send, V: shareable + send](mut ids:
             list.push(mut kids, take child)
         }
     }
-    for i in 0u64 .. count / 2 {
+    for i in 0u64 .. width / 2 {
         if is_leaf {
-            list.swap(mut rows, i, count - 1 - i)
+            list.swap(mut rows, i, width - 1 - i)
         } else {
-            list.swap(mut kids, i, count - 1 - i)
+            list.swap(mut kids, i, width - 1 - i)
         }
     }
     node.size -= size
@@ -949,7 +950,7 @@ pub fn range[K: ordered + shareable + send, V: shareable + send](m: OMap[K, V], 
     if let Some(n) = m.head {
         seek(n, lo, mut path)
     }
-    Cursor(path: take path, upper: take hi)
+    Cursor(path: take path, stop: take hi, reverse: false)
 }
 
 fn seek[K: ordered + shareable + send, V: shareable + send](n: Arc[Node[K, V]], lo: Bound[K], mut path: List[Frame[K, V]]) {
@@ -1013,6 +1014,9 @@ fn ready[K: ordered + shareable + send, V: shareable + send](mut path: List[Fram
 /// Next owned pair; a refused payload copy raises Capacity with this row unconsumed.
 /// Complete traversal is O(n) node work plus payload copies. The cursor is send.
 pub fn next[K: ordered + shareable + send, V: shareable + send](mut c: Cursor[K, V]) -> Option[(K, V)] {
+    if c.reverse {
+        return previous(mut c)
+    }
     if !ready(mut c.path) {
         return None
     }
@@ -1020,7 +1024,7 @@ pub fn next[K: ordered + shareable + send, V: shareable + send](mut c: Cursor[K,
     let pair = {
         let frame = view c.path[at]
         let i = frame.position
-        if !within_upper(c.upper, frame.node.rows[i].key) {
+        if !within_upper(c.stop, frame.node.rows[i].key) {
             return None
         }
         let key: K = clone(frame.node.rows[i].key)
@@ -1028,6 +1032,118 @@ pub fn next[K: ordered + shareable + send, V: shareable + send](mut c: Cursor[K,
         (take key, take value)
     }
     c.path[at].position += 1
+    Some(take pair)
+}
+
+/// The number of keys in the interval, using subtree sizes without reading rows.
+pub fn count[K: ordered + shareable + send, V: shareable + send](m: OMap[K, V], lo: Bound[K], hi: Bound[K]) -> u64 {
+    let n = match m.head {
+        Some(head) => head,
+        None => return 0
+    }
+    let start = match lo {
+        Unbounded => 0u64,
+        Included(k) => rank(n, k, false),
+        Excluded(k) => rank(n, k, true)
+    }
+    let end = match hi {
+        Unbounded => n.size,
+        Included(k) => rank(n, k, true),
+        Excluded(k) => rank(n, k, false)
+    }
+    int.saturating_sub(end, start)
+}
+
+fn leaf_rank[K: ordered + shareable + send, V: shareable + send](rows: List[Arc[Entry[K, V]]], k: K, include: bool) -> u64 {
+    let at = lower(rows, k)
+    if include && at < list.len(rows) && key_order(rows, at, k) == Equal {
+        at + 1
+    } else {
+        at
+    }
+}
+
+fn rank[K: ordered + shareable + send, V: shareable + send](n: Arc[Node[K, V]], k: K, include: bool) -> u64 {
+    if n.depth == 0 {
+        return leaf_rank(n.rows, k, include)
+    }
+    let child = child_index(n, k)
+    let mut before: u64 = 0
+    for i in 0u64 .. child {
+        before += n.kids[i].size
+    }
+    before + rank(n.kids[child], k, include)
+}
+
+/// Seek to the upper bound and traverse the interval in descending key order.
+pub fn range_reverse[K: ordered + shareable + send, V: shareable + send](m: OMap[K, V], take lo: Bound[K], hi: Bound[K]) -> Cursor[K, V] {
+    let mut path: List[Frame[K, V]] = list.with_capacity(match m.head {
+        Some(n) => n.depth + 1,
+        None => 0
+    })
+    if let Some(n) = m.head {
+        seek_reverse(n, hi, mut path)
+    }
+    Cursor(path: take path, stop: take lo, reverse: true)
+}
+
+fn seek_reverse[K: ordered + shareable + send, V: shareable + send](n: Arc[Node[K, V]], hi: Bound[K], mut path: List[Frame[K, V]]) {
+    if n.depth == 0 {
+        let position = match hi {
+            Unbounded => list.len(n.rows),
+            Included(k) => leaf_rank(n.rows, k, true),
+            Excluded(k) => leaf_rank(n.rows, k, false)
+        }
+        list.push(mut path, Frame(node: arc.share(n), position))
+    } else {
+        let child = match hi {
+            Unbounded => list.len(n.kids) - 1,
+            Included(k) => child_index(n, k),
+            Excluded(k) => child_index(n, k)
+        }
+        list.push(mut path, Frame(node: arc.share(n), position: child))
+        seek_reverse(n.kids[child], hi, mut path)
+    }
+}
+
+// A leaf's position counts candidates, and a branch's position counts children to its left.
+fn ready_reverse[K: ordered + shareable + send, V: shareable + send](mut path: List[Frame[K, V]]) -> bool {
+    while list.len(path) > 0 {
+        let at = list.len(path) - 1
+        if path[at].position == 0 {
+            let _ = list.pop(mut path)
+        } else if path[at].node.depth == 0 {
+            return true
+        } else {
+            path[at].position -= 1
+            let child = arc.share(path[at].node.kids[path[at].position])
+            seek_reverse(child, Unbounded, mut path)
+        }
+    }
+    false
+}
+
+fn previous[K: ordered + shareable + send, V: shareable + send](mut c: Cursor[K, V]) -> Option[(K, V)] {
+    if !ready_reverse(mut c.path) {
+        return None
+    }
+    let at = list.len(c.path) - 1
+    let pair = {
+        let frame = view c.path[at]
+        let row = view frame.node.rows[frame.position - 1]
+        let in_range = match c.stop {
+            Unbounded => true,
+            Included(low) => !(row.key < low),
+            Excluded(low) => low < row.key
+        }
+        if !in_range {
+            return None
+        }
+        let key: K = clone(row.key)
+        let value: V = clone(row.value)
+        (take key, take value)
+    }
+    c.path[at].position -= 1
     Some(take pair)
 }
 

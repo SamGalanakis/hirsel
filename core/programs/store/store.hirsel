@@ -1860,15 +1860,13 @@ fn lower_bytes(id: u32, limit: Bound[Bytes], high: bool) -> Result[Bytes, Error]
     }
 }
 
-fn range_bytes(tx: Tx, id: u32, lo: Bound[Bytes], hi: Bound[Bytes]) -> Result[ByteRows, Error] {
-    let low = lower_bytes(id, lo, false)?
-    let high = lower_bytes(id, hi, true)?
-    note_read(tx, Span(copied(low)?, copied(high)?))?
-    byte_cursor(tx.roots.data, Included(take low), high)
-}
-
 fn byte_cursor(data: std.omap.OMap[Bytes, Arc[Bytes]], take low: std.omap.Bound[Bytes], high: Bytes) -> Result[ByteRows, Error] {
     let cursor = std.omap.range(data, take low, Excluded(copied(high)?))
+    Ok(ByteRows(cursor: take cursor))
+}
+
+fn reverse_byte_cursor(data: std.omap.OMap[Bytes, Arc[Bytes]], low: Bytes, high: Bytes) -> Result[ByteRows, Error] {
+    let cursor = std.omap.range_reverse(data, Included(copied(low)?), Excluded(copied(high)?))
     Ok(ByteRows(cursor: take cursor))
 }
 
@@ -1975,7 +1973,7 @@ pub fn law_snapshots(c: Clock) -> bool {
     let held = snapshot(db)
     let before = version(held)
     let rows_result = execute(mut db, 0, 30, None, fn(mut tx: Tx) -> Result[ByteRows, Error] {
-        let rows = range_bytes(tx, 1, Unbounded, Unbounded)?
+        let rows = byte_cursor(tx.roots.data, Included(prefix(1)?), prefix(2)?)?
         put_bytes(mut tx, 1, key_word(0), key_word(9999))?
         Ok(take rows)
     })
@@ -2005,52 +2003,46 @@ pub fn law_snapshots(c: Clock) -> bool {
     version(held) == before && result.unwrap(next_bytes(mut rows)) == None
 }
 
-// L15: point reads of own writes and the full requested half-open span, in order.
-// Wrong implementation caught: missing range record or own-write read record.
+// L15: reads see their own writes. The two point reads precede the adjacent
+// gaps that cover exactly the exhausted range.
 pub fn law_reads_ranges(c: Clock) -> bool waits {
     if !range_boundary_points(c) {
         return false
     }
     let mut db = test_db(c, 1073741824)
+    let cv = std.codec.of_u64()
+    result.unwrap(create_table(mut db, spec("range-law", std.codec.key_u64(), cv)))
+    let t = result.unwrap(table(mut db, "range-law", std.codec.key_u64(), cv))
+    let sh = shape(t)
     for k in 0u64 .. 6 {
-        if !put_one(mut db, k, k + 1) {
+        if !typed_put(mut db, t, k, k + 1) {
             return false
         }
     }
     let outcome = execute(mut db, 0, 1, None, fn(mut tx: Tx) -> Result[u64, Error] {
-        let _ = fetch_bytes(tx, 1, key_word(1))?
-        put_bytes(mut tx, 1, key_word(2), key_word(42))?
-        let own = option.unwrap(fetch_bytes(tx, 1, key_word(2))?)
-        if decode_word(own) != 42 {
+        let _ = fetch(tx, sh, 1)?
+        put(mut tx, t, 2, 42)?
+        if fetch(tx, sh, 2)? != Some(42u64) {
             return Error(Foreign)
         }
-        let mut rows = range_bytes(tx, 1, Excluded(key_word(1)), Included(key_word(3)))?
+        let mut rows = range(tx, sh, Excluded(1), Included(3))?
         let mut sum: u64 = 0
-        while let Some((_, val)) = next_bytes(mut rows)? {
-            sum += decode_word(val)
+        while let Some((_, val)) = next_range(mut rows)? {
+            sum += val
         }
         Ok(sum)
     })
     match take outcome {
         Ok(Committed(done)) => {
-            if done.value != 46 || list.len(done.reads) != 3 {
+            if done.value != 46 || list.len(done.reads) != 4 {
                 return false
             }
-            let a = match done.reads[0] {
-                Point(k) => k == result.unwrap(physical(1, key_word(1))),
-                _ => false
-            }
-            let b = match done.reads[1] {
-                Point(k) => k == result.unwrap(physical(1, key_word(2))),
-                _ => false
-            }
-            let lo = result.unwrap(lower_bytes(1, Excluded(key_word(1)), false))
-            let hi = result.unwrap(lower_bytes(1, Included(key_word(3)), true))
-            let span = match done.reads[2] {
-                Span(l, h) => l == lo && h == hi,
-                _ => false
-            }
-            a && b && span
+            let one = result.unwrap(physical(t.id, key_word(1)))
+            let two = result.unwrap(physical(t.id, key_word(2)))
+            let lo = result.unwrap(lower_bytes(t.id, Excluded(key_word(1)), false))
+            let middle = result.unwrap(lower_bytes(t.id, Excluded(key_word(2)), false))
+            let hi = result.unwrap(lower_bytes(t.id, Included(key_word(3)), true))
+            same_read(done.reads[0], Point(take one)) && same_read(done.reads[1], Point(take two)) && same_read(done.reads[2], Span(take lo, result.unwrap(copied(middle)))) && same_read(done.reads[3], Span(take middle, take hi))
         },
         _ => false
     }
@@ -2896,13 +2888,29 @@ fn delete_impl[K, V](mut tx: Tx, t: Table[K, V], key: Bytes) -> Result[bool, Err
     Ok(true)
 }
 
-pub fn range[K, V](tx: Tx, t: Shape[K, V], lo: Bound[K], hi: Bound[K]) -> Result[Rows[K, V], Error] {
+pub fn range[K, V](tx: Tx, t: Shape[K, V], lo: Bound[K], hi: Bound[K]) -> Result[RangeRows[K, V], Error] in tx {
+    open_range(tx, t, lo, hi, false)
+}
+
+pub fn range_reverse[K, V](tx: Tx, t: Shape[K, V], lo: Bound[K], hi: Bound[K]) -> Result[RangeRows[K, V], Error] in tx {
+    open_range(tx, t, lo, hi, true)
+}
+
+fn open_range[K, V](tx: Tx, t: Shape[K, V], lo: Bound[K], hi: Bound[K], reverse: bool) -> Result[RangeRows[K, V], Error] in tx {
     if !same(tx.store, t.store) {
         return Error(Foreign)
     }
     readable(tx.roots, t.catalog_key, t.id)?
-    let cursor = range_bytes(tx, t.id, typed_bound(t.key, lo)?, typed_bound(t.key, hi)?)?
-    Ok(Rows(cursor: take cursor, table: t.id, key: t.key, readers: arc.share(t.readers), data: std.omap.snapshot(tx.roots.data), skip: None))
+    let low = lower_bytes(t.id, typed_bound(t.key, lo)?, false)?
+    let high = lower_bytes(t.id, typed_bound(t.key, hi)?, true)?
+    let tree = std.omap.snapshot(tx.roots.data)
+    let cursor = if reverse {
+        reverse_byte_cursor(tree, low, high)?
+    } else {
+        byte_cursor(tree, Included(copied(low)?), high)?
+    }
+    let rows = Rows(cursor: take cursor, table: t.id, key: t.key, readers: arc.share(t.readers), data: take tree, skip: None)
+    Ok(RangeRows(rows: take rows, reads: tx.reads, low: take low, high: take high, reverse))
 }
 
 pub fn get[K, V](s: Snapshot, t: Shape[K, V], k: K) -> Result[Option[V], Error] {
@@ -2926,12 +2934,33 @@ pub fn scan[K, V](s: Snapshot, t: Shape[K, V], lo: Bound[K], hi: Bound[K]) -> Re
     Ok(table_rows(s, t, take cursor))
 }
 
+pub fn scan_reverse[K, V](s: Snapshot, t: Shape[K, V], lo: Bound[K], hi: Bound[K]) -> Result[Rows[K, V], Error] {
+    if !same(s.store, t.store) {
+        return Error(Foreign)
+    }
+    readable(s.roots, t.catalog_key, t.id)?
+    let low = lower_bytes(t.id, typed_bound(t.key, lo)?, false)?
+    let high = lower_bytes(t.id, typed_bound(t.key, hi)?, true)?
+    let cursor = reverse_byte_cursor(s.roots.data, low, high)?
+    Ok(table_rows(s, t, take cursor))
+}
+
+pub fn count[K, V](s: Snapshot, t: Shape[K, V], lo: Bound[K], hi: Bound[K]) -> Result[u64, Error] {
+    if !same(s.store, t.store) {
+        return Error(Foreign)
+    }
+    readable(s.roots, t.catalog_key, t.id)?
+    let low = lower_bytes(t.id, typed_bound(t.key, lo)?, false)?
+    let high = lower_bytes(t.id, typed_bound(t.key, hi)?, true)?
+    Ok(std.omap.count(s.roots.data, Included(take low), Excluded(take high)))
+}
+
 fn table_rows[K, V](s: Snapshot, t: Shape[K, V], take cursor: ByteRows) -> Rows[K, V] {
     Rows(cursor: take cursor, table: t.id, key: t.key, readers: arc.share(t.readers), data: std.omap.snapshot(s.roots.data), skip: None)
 }
 
 // RUNNER-SPEC §4 (R2): a Cover names data-tree key ranges (I1) without reading them. `key_span`
-// gives the Span a `range` over the same bounds records.
+// gives the Span a fully consumed range over the same bounds covers.
 pub fn key_span[K, V](t: Shape[K, V], lo: Bound[K], hi: Bound[K]) -> Result[Read, Error] {
     Ok(Span(lower_bytes(t.id, typed_bound(t.key, lo)?, false)?, lower_bytes(t.id, typed_bound(t.key, hi)?, true)?))
 }
@@ -3253,9 +3282,9 @@ fn decode_catalog(raw: Bytes) -> Result[Catalog, Error] {
         return Error(malformed(0))
     }
     let key = take_blob(raw, mut at)?
-    let count = take_le(raw, mut at, 2)?
+    let schema_count = take_le(raw, mut at, 2)?
     let mut schemas: List[ValueSchema] = list.new()
-    for _ in 0u64 .. count {
+    for _ in 0u64 .. schema_count {
         let number: u16 = int.truncate(take_le(raw, mut at, 2)?)
         let fingerprint = take_le(raw, mut at, 8)?
         let schema = take_blob(raw, mut at)?
@@ -3983,13 +4012,13 @@ fn stage_migrate[K, V, K2, V2](mut plan: SchemaPlan, take from: Table[K, V], tak
     }
     let olds = index_catalog_in(plan.roots.catalog, from.id)?
     let id = plan.next_table
-    let count: u32 = int.truncate(list.len(to.indexes))
+    let total_count: u32 = int.truncate(list.len(to.indexes))
     let base = share_roots(plan.roots)
     let mut ids = plan.next_node
     let built = migrate_build(plan.roots.data, take base, mut ids, plan.live, plan.ceiling, plan.retained, from, olds, to, f, id, meta.next, target)
     plan.next_node = ids
     let Built(roots: take roots, live: live) = built?
-    keep_schema(mut plan, take roots, live, id + 1 + count)
+    keep_schema(mut plan, take roots, live, id + 1 + total_count)
 }
 
 fn bucket(v: u64) -> Result[u64, Capacity] {
@@ -4774,12 +4803,16 @@ fn typed_foreign_at(c: Clock, other_id: StoreId) -> bool waits {
         return false
     }
     let out = run(mut b, None, fn(mut tx: Tx) -> Result[(), bool] {
-        let ok = is_foreign(fetch(tx, shape(t), 1)) && is_foreign(put(mut tx, t, 1, 2)) && is_foreign(delete(mut tx, t, 1)) && is_foreign(range(tx, shape(t), Unbounded, Unbounded))
+        let ok = is_foreign(fetch(tx, shape(t), 1)) && is_foreign(put(mut tx, t, 1, 2)) && is_foreign(delete(mut tx, t, 1))
         let lookup_foreign = match lookup(tx, ix, Unbounded, Unbounded) {
             Error(Foreign) => true,
             _ => false
         }
-        Error(ok && lookup_foreign)
+        let range_foreign = match range(tx, shape(t), Unbounded, Unbounded) {
+            Error(Foreign) => true,
+            _ => false
+        }
+        Error(ok && lookup_foreign && range_foreign)
     })
     match take out {
         Ok(Aborted(Undone(value: true, ticket: None))) => b.heads[0].head == 0 && b.resident == 0,
@@ -4949,7 +4982,7 @@ pub fn law_typed_model(c: Clock) -> bool waits {
                 }
                 let mut bucket_rows = range(tx, shape(t), Excluded(4), Included(17))?
                 let mut a: u64 = 0
-                while let Some((_, v)) = next(mut bucket_rows)? {
+                while let Some((_, v)) = next_range(mut bucket_rows)? {
                     a += v
                 }
                 let mut matches = lookup(tx, ix, Included(2), Included(2))?
@@ -5278,7 +5311,7 @@ fn look_query(tx: Tx, sh: Shape[u64, u64], ix: Index[u64, u64, u64]) -> Result[u
     }
     let mut rows = range(tx, sh, Excluded(1), Included(3))?
     let mut sum = a
-    while let Some((_, v)) = next(mut rows)? {
+    while let Some((_, v)) = next_range(mut rows)? {
         sum += v
     }
     let mut matches = lookup(tx, ix, Included(2), Included(2))?
@@ -5335,7 +5368,7 @@ pub fn law_look(c: Clock) -> bool waits {
         Ok(100) => {},
         _ => return false
     }
-    if got.version != head || list.len(got.reads) != 6 || db.heads[0].head != head || db.resident != live || db.next_node != high_water || db.file_end != end {
+    if got.version != head || list.len(got.reads) != 7 || db.heads[0].head != head || db.resident != live || db.next_node != high_water || db.file_end != end {
         return false
     }
     let p1 = match got.reads[0] {
@@ -5351,13 +5384,15 @@ pub fn law_look(c: Clock) -> bool waits {
     list.push(mut low, 0u8)
     let mut high = result.unwrap(physical(t.id, key_word(3)))
     list.push(mut high, 0u8)
-    let span = match got.reads[2] {
-        Span(l, h) => l == low && h == high,
+    let mut middle = result.unwrap(physical(t.id, key_word(2)))
+    list.push(mut middle, 0u8)
+    let span = match (got.reads[2], got.reads[3]) {
+        (Span(l, m), Span(n, h)) => l == low && m == middle && n == middle && h == high,
         _ => false
     }
     let ix_low = result.unwrap(physical(ix.id, key_word(2)))
     let ix_high = result.unwrap(physical(ix.id, key_word(3)))
-    let index_span = match got.reads[3] {
+    let index_span = match got.reads[4] {
         Span(l, h) => l == ix_low && h == ix_high,
         _ => false
     }
@@ -5381,7 +5416,7 @@ pub fn law_look(c: Clock) -> bool waits {
     }))
     match take second {
         Seen(value) => match value.value {
-            Ok(108) => value.version == db.heads[0].head && list.len(value.reads) == 6,
+            Ok(108) => value.version == db.heads[0].head && list.len(value.reads) == 7,
             _ => false
         },
         _ => false
@@ -5822,7 +5857,7 @@ fn range_boundary_points(c: Clock) -> bool waits {
     let witness = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[bool, Error] {
         put(mut tx, t, 32, 7)?
         let mut rows = range(tx, sh, Included(32), Included(32))?
-        Ok(next(mut rows)? == Some((32u64, 7u64)) && next(mut rows)? == None)
+        Ok(next_range(mut rows)? == Some((32u64, 7u64)) && next_range(mut rows)? == None)
     }))
     match take witness {
         Committed(done) => if !done.value {
@@ -5856,12 +5891,12 @@ fn range_boundary_points(c: Clock) -> bool waits {
                         let lower = a == 0 || (a == 1 && k >= pivot) || (a == 2 && k > pivot)
                         let upper = b == 0 || (b == 1 && k <= pivot + 1) || (b == 2 && k < pivot + 1)
                         if lower && upper {
-                            if next(mut rows)? != Some((k, k + 1)) {
+                            if next_range(mut rows)? != Some((k, k + 1)) {
                                 return Ok(false)
                             }
                         }
                     }
-                    Ok(next(mut rows)? == None)
+                    Ok(next_range(mut rows)? == None)
                 }))
                 match take outcome {
                     Committed(done) => if !done.value {
@@ -5878,7 +5913,7 @@ fn range_boundary_points(c: Clock) -> bool waits {
     let second_witness = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[bool, Error] {
         put(mut tx, second_table, 32, 17)?
         let mut rows = range(tx, second_shape, Included(32), Included(32))?
-        Ok(next(mut rows)? == Some((32u64, 17u64)) && next(mut rows)? == None)
+        Ok(next_range(mut rows)? == Some((32u64, 17u64)) && next_range(mut rows)? == None)
     }))
     match take second_witness {
         Committed(done) => if !done.value {
@@ -5906,6 +5941,49 @@ fn readable(roots: Roots, key: Bytes, id: u32) -> Result[(), Error] {
             }
         },
         None => Error(Stale(id))
+    }
+}
+
+pub opaque scoped type RangeRows[K, V] {
+    rows: Rows[K, V],
+    reads: View[Log[Read]],
+    low: Bytes,
+    high: Bytes,
+    reverse: bool
+}
+
+// Before decoding an attempted row, record it and the gap traversed to find it.
+// Exhaustion records the remainder once. An unused cursor observes no keys.
+pub fn next_range[K, V](mut r: RangeRows[K, V]) -> Result[Option[(K, V)], Error] {
+    let found = next_bytes(mut r.rows.cursor)?
+    match take found {
+        Some((take key, take raw)) => {
+            if r.reverse {
+                let new_high = copied(key)?
+                let high = replace(mut r.high, take new_high)
+                log.append(r.reads, Span(copied(key)?, take high))
+            } else {
+                let mut end = copied(key)?
+                list.push(mut end, 0u8)
+                let low = replace(mut r.low, copied(end)?)
+                log.append(r.reads, Span(take low, take end))
+            }
+            let row = advance_rows(r.rows, key, raw, None, fn(observed: Bytes) -> Result[(), Error] {
+                Ok(())
+            })?
+            match take row {
+                Some((take value, _)) => Ok(Some(take value)),
+                None => Ok(None)
+            }
+        },
+        None => {
+            if r.low < r.high {
+                let low = replace(mut r.low, list.new())
+                let high = replace(mut r.high, list.new())
+                log.append(r.reads, Span(take low, take high))
+            }
+            Ok(None)
+        },
     }
 }
 
@@ -6736,13 +6814,13 @@ fn cover_observe(tx: Tx, a: Shape[u64, u64], b: Shape[u64, u64], ia: Index[u64, 
         _ => Excluded(6)
     }
     let mut left = range(tx, a, lo, hi)?
-    while let Some((k, v)) = next(mut left)? {
+    while let Some((k, v)) = next_range(mut left)? {
         cover_push(mut out, k)?;
         cover_push(mut out, v)?
     }
     cover_push(mut out, 65535)?
     let mut right = range(tx, b, lo, hi)?
-    while let Some((k, v)) = next(mut right)? {
+    while let Some((k, v)) = next_range(mut right)? {
         cover_push(mut out, k)?;
         cover_push(mut out, v)?
     }
@@ -6876,7 +6954,7 @@ fn test_read_cover(c: Clock) -> Result[(), ()] waits {
 // R2's Cover reads (RUNNER-SPEC §4). Keys 1..5 of "data" are put after `before`, so
 // changes(before, after) lists their five data-tree rows in key order (d[0] is key 1): that
 // list is the oracle for which rows a span holds. A row of table "other" is never in a span
-// of "data". A span's bytes equal the Span a range over the same bounds records.
+// of "data". Constructing a range cursor alone observes no rows.
 fn same_rows(got: List[Change], want: List[Change], from: u64, n: u64) -> bool {
     if list.len(got) != n {
         return false
@@ -6937,7 +7015,88 @@ pub fn law_read_spans(c: Clock) -> bool waits {
         Seen(take x) => take x,
         _ => return false
     }
-    list.len(got.reads) == 2 && same_read(got.reads[0], mid) && same_read(got.reads[1], shifted)
+    list.len(got.reads) == 0
+}
+
+fn prefix_observation(s: Snapshot, sh: Shape[u64, u64], reverse: bool, steps: u64) -> List[Read] {
+    let observed = result.unwrap(look(s, None, fn(tx: Tx) -> Result[(), Error] {
+        let mut rows = if reverse {
+            range_reverse(tx, sh, Included(1), Excluded(10))?
+        } else {
+            range(tx, sh, Included(1), Excluded(10))?
+        }
+        for _ in 0u64 .. steps {
+            if let None = next_range(mut rows)? {
+                break
+            }
+        }
+        Ok(())
+    }))
+    match take observed {
+        Seen(take seen) => {
+            let Seen(value: take checked, reads: take read_set, ..) = take seen
+            result.unwrap(take checked)
+            take read_set
+        },
+        _ => fail("expected observed range")
+    }
+}
+
+// With keys 3 and 7, a forward step inspects [1,3] and a reverse step inspects
+// [7,10). Inserts in those gaps invalidate the read. A probe returning None
+// inspects the terminal gap, so those inserts invalidate an exhausted scan too.
+pub fn law_range_prefix(c: Clock) -> bool waits {
+    let mut db = test_db(c, 1073741824)
+    let dictionary = std.codec.of_u64()
+    result.unwrap(create_table(mut db, spec("prefix", std.codec.key_u64(), dictionary)))
+    let t = result.unwrap(table(mut db, "prefix", std.codec.key_u64(), dictionary))
+    if !typed_put(mut db, t, 3, 30) || !typed_put(mut db, t, 7, 70) {
+        return false
+    }
+    let sh = shape(t)
+    let base = snapshot(db)
+    let forward = prefix_observation(base, sh, false, 1)
+    let two_forward = prefix_observation(base, sh, false, 2)
+    let fully_forward = prefix_observation(base, sh, false, 3)
+    let reverse = prefix_observation(base, sh, true, 1)
+    let fully_reverse = prefix_observation(base, sh, true, 3)
+    if !typed_put(mut db, t, 2, 20) {
+        return false
+    }
+    let inserted_left = snapshot(db)
+    let left = result.unwrap(changes(base, inserted_left))
+    if !read_set_hit(forward, left) || read_set_hit(reverse, left) || !read_set_hit(fully_reverse, left) {
+        return false
+    }
+    if !typed_put(mut db, t, 8, 80) {
+        return false
+    }
+    let right = result.unwrap(changes(inserted_left, snapshot(db)))
+    if read_set_hit(forward, right) || read_set_hit(two_forward, right) || !read_set_hit(fully_forward, right) || !read_set_hit(reverse, right) {
+        return false
+    }
+    let inserted_right = snapshot(db)
+    if !typed_put(mut db, t, 5, 50) {
+        return false
+    }
+    let middle = result.unwrap(changes(inserted_right, snapshot(db)))
+    if read_set_hit(forward, middle) || !read_set_hit(two_forward, middle) {
+        return false
+    }
+    if result.unwrap(count(snapshot(db), sh, Included(2), Excluded(8))) != 4 {
+        return false
+    }
+    let mut rows = result.unwrap(scan_reverse(snapshot(db), sh, Included(2), Excluded(8)))
+    result.unwrap(next(mut rows)) == Some((7u64, 70u64)) && result.unwrap(next(mut rows)) == Some((5u64, 50u64)) && result.unwrap(next(mut rows)) == Some((3u64, 30u64)) && result.unwrap(next(mut rows)) == Some((2u64, 20u64)) && result.unwrap(next(mut rows)) == None
+}
+
+@test
+fn test_range_prefix(c: Clock) -> Result[(), ()] waits {
+    if law_range_prefix(c) {
+        Ok(())
+    } else {
+        Error(())
+    }
 }
 
 fn same_read(a: Read, b: Read) -> bool {
@@ -7766,9 +7925,9 @@ fn disk_node_bytes(node: Arc[std.omap.Node[Bytes, Arc[Bytes]]]) -> Result[Bytes,
     le(mut payload, std.omap.node_id(node), 8)?
     le(mut payload, std.omap.node_level(node), 1)?
     le(mut payload, 0, 1)?
-    let count = std.omap.node_count(node)
-    le(mut payload, count, 2)?
-    for i in 0u64 .. count {
+    let node_width = std.omap.node_count(node)
+    le(mut payload, node_width, 2)?
+    for i in 0u64 .. node_width {
         if std.omap.node_level(node) == 0 {
             let k = option.unwrap(std.omap.node_key(node, i))
             let v = option.unwrap(std.omap.node_value(node, i))
@@ -7797,14 +7956,14 @@ fn disk_parse_node(file: String, raw: Bytes, nodes: Map[u64, Arc[std.omap.Node[B
     }
     let level = disk_number(file, raw, mut at, 1)?
     let zero = disk_number(file, raw, mut at, 1)?
-    let count = disk_number(file, raw, mut at, 2)?
-    if zero != 0 || count == 0 || count > 32 {
+    let node_width = disk_number(file, raw, mut at, 2)?
+    if zero != 0 || node_width == 0 || node_width > 32 {
         return Error(disk_fault(file, at, Malformed))
     }
     let mut keys: List[Bytes] = list.new()
     if level == 0 {
         let mut values: List[Arc[Bytes]] = list.new()
-        for _ in 0u64 .. count {
+        for _ in 0u64 .. node_width {
             let k = disk_blob(file, raw, mut at, 4096)?
             let v = disk_blob(file, raw, mut at, 1048576)?
             list.push(mut keys, take k)
@@ -7817,7 +7976,7 @@ fn disk_parse_node(file: String, raw: Bytes, nodes: Map[u64, Arc[std.omap.Node[B
         Ok(std.omap.leaf(id, take keys, take values))
     } else {
         let mut children: List[Arc[std.omap.Node[Bytes, Arc[Bytes]]]] = list.new()
-        for i in 0u64 .. count {
+        for i in 0u64 .. node_width {
             let child_id = disk_number(file, raw, mut at, 8)?
             if child_id == 0 || child_id >= id {
                 return Error(disk_fault(file, at, Dangling(child_id)))
@@ -8297,8 +8456,8 @@ fn disk_pack_close(d: Dir, id: StoreId, mut writer: DiskPackWriter, mut graph: D
     // unpublished cut. Existence never changes the assigned sequence (H2).
     disk_write_synced(d, temporary, writer.raw)?
     disk_io(host.rename(d, temporary, path))?
-    let count: u32 = int.truncate(list.len(writer.ids))
-    list.push(mut writer.packs, DiskPack(seq: writer.seq, nodes: count))
+    let total_count: u32 = int.truncate(list.len(writer.ids))
+    list.push(mut writer.packs, DiskPack(seq: writer.seq, nodes: total_count))
     for node_id in writer.ids {
         let _ = option.unwrap(capacity(disk_index_update(mut graph.nodes, node_id, fn(mut row: DiskNodeRecord) {
             row.pack = writer.seq
@@ -8458,7 +8617,7 @@ fn disk_load_pack(d: Dir, id: StoreId, pack: DiskPack, next_node: u64, mut raw_n
     let raw = disk_read_file(d, path, limit)?
     let header = disk_read_header(path, raw, 3, Some(pack.seq), Some(id))?
     let mut at: u64 = 72
-    let mut count: u64 = 0
+    let mut node_total: u64 = 0
     let mut room: u64 = 0
     let mut pack_ids: List[u64] = list.new()
     while at < list.len(raw) {
@@ -8477,14 +8636,14 @@ fn disk_load_pack(d: Dir, id: StoreId, pack: DiskPack, next_node: u64, mut raw_n
             map.insert(mut raw_nodes, node_id, take row)
             list.push(mut ids, node_id)
             list.push(mut pack_ids, node_id)
-            count += 1
+            node_total += 1
         } else {
             room = int.saturating_add(room, frame.end - at)
             if room > 1048576 { return Error(disk_fault(path, at, Malformed)) }
         }
         at = frame.end
     }
-    if count != int.widen(pack.nodes) {
+    if node_total != int.widen(pack.nodes) {
         return Error(disk_fault(path, at, Malformed))
     }
     let shared_ids = arc.new(DiskPackIds(items: take pack_ids))
@@ -8639,21 +8798,21 @@ fn disk_insert_skipped_node_frame(d: Dir, id: StoreId, pack: DiskPack) waits {
     let ctx = DiskContext(store: id, role: 3, seq: pack.seq)
     let mut rewritten = result.unwrap(copied(list.slice(raw, 0, 72)))
     let mut at: u64 = 72
-    let mut count: u64 = 0
+    let mut total_count: u64 = 0
     while at < list.len(raw) {
         let frame = result.unwrap(disk_read_frame(path, ctx, raw, at))
         let payload = list.slice(raw, frame.payload, frame.end)
         let fresh = result.unwrap(disk_seal(ctx, list.len(rewritten), frame.kind, frame.flags, payload))
         list.append(mut rewritten, fresh)
-        if count == 0 {
+        if total_count == 0 {
             let empty: Bytes = list.new()
             let skipped = result.unwrap(disk_seal(ctx, list.len(rewritten), 0x7ffe, 0, empty))
             list.append(mut rewritten, skipped)
         }
-        count += 1
+        total_count += 1
         at = frame.end
     }
-    if count < 2 { fail("L11 requires two NODEs") }
+    if total_count < 2 { fail("L11 requires two NODEs") }
     result.unwrap(disk_write_synced(d, path, rewritten))
 }
 
@@ -8853,7 +9012,7 @@ pub fn disk_law_draft_refusal(c: Clock) -> bool {
     }
     let mut tracking = disk_graph()
     let _ = result.unwrap(disk_track(mut tracking, writing.heads[0].roots))
-    let count = disk_index_len(tracking.nodes)
+    let total_count = disk_index_len(tracking.nodes)
     let saved: List[u64] = clone(tracking.roots)
     for k in 0u64 .. 64 {
         if !put_one(mut writing, k, k + 101) {
@@ -8891,7 +9050,7 @@ pub fn disk_law_draft_refusal(c: Clock) -> bool {
             },
             _ => return false,
         }
-        if installed.live != 96 * 86 || disk_index_len(installed.nodes) != count || installed.roots != saved {
+        if installed.live != 96 * 86 || disk_index_len(installed.nodes) != total_count || installed.roots != saved {
             return false
         }
         for root_id in installed.roots {
@@ -8973,16 +9132,16 @@ fn copy_export_file(from: Dir, to: Dir, name: String, end: Option[u64]) -> Resul
                 chunk = list.with_capacity(total - offset)
             }
         }
-        let count = disk_io(host.read(mut input, mut chunk))?
-        if count == 0 {
+        let read_size = disk_io(host.read(mut input, mut chunk))?
+        if read_size == 0 {
             if let Some(_) = end { return Error(disk_fault(name, offset, Truncated)) }
             break
         }
         // A provider may round a buffer's capacity up. Keep only the captured
         // prefix of the terminal segment.
         let written = if let Some(total) = end {
-            if count > total - offset { total - offset } else { count }
-        } else { count }
+            if read_size > total - offset { total - offset } else { read_size }
+        } else { read_size }
         match host.write(mut output, list.slice(chunk, 0u64, written)) {
             Ok(()) => (),
             Error(e) => return Error(Io(e.error)),
@@ -9238,13 +9397,13 @@ fn range_inventory(data: std.omap.OMap[Bytes, Arc[Bytes]], ranges: List[RangeCha
     let mut inventory: List[Inventory] = list.with_capacity(list.len(ranges))
     for desc in ranges {
         let mut cursor = entries_of(data, desc.id)?
-        let mut count = 0u64
+        let mut row_total = 0u64
         let mut checksum = std.check.start()
         while let Some((key, value)) = next_bytes(mut cursor)? {
             checksum_row(mut checksum, key, value)?
-            count += 1
+            row_total += 1
         }
-        list.push(mut inventory, Inventory(id: desc.id, count: count, digest: std.check.finish(checksum)))
+        list.push(mut inventory, Inventory(id: desc.id, count: row_total, digest: std.check.finish(checksum)))
     }
     Ok(take inventory)
 }
@@ -9345,9 +9504,9 @@ fn validate_catalog_key(key: Bytes, c: Catalog) -> bool {
         if owner != c.owner { return false }
     }
     if c.kind == 1 {
-        let count = list.len(c.schemas)
-        if c.owner != 0 || c.next == 0 || count == 0 || c.schemas[count - 1u64].number != c.next - 1u16 { return false }
-        for i in 0u64 .. count {
+        let total_count = list.len(c.schemas)
+        if c.owner != 0 || c.next == 0 || total_count == 0 || c.schemas[total_count - 1u64].number != c.next - 1u16 { return false }
+        for i in 0u64 .. total_count {
             let schema = c.schemas[i]
             if (i > 0 && schema.number <= c.schemas[i - 1u64].number) ||
                 std.codec.fingerprint_of(schema.schema) != schema.fingerprint { return false }
@@ -9409,9 +9568,9 @@ pub opaque type ValidatedImport: send {
     charge: u64
 }
 
-fn bounded_nodes(count: u64) -> u64 {
-    if count == 0 { return 0u64 }
-    let mut at_level = (count - 1u64) / 16u64 + 1u64
+fn bounded_nodes(row_total: u64) -> u64 {
+    if row_total == 0 { return 0u64 }
+    let mut at_level = (row_total - 1u64) / 16u64 + 1u64
     let mut total = at_level
     while at_level > 1 {
         at_level = (at_level - 1u64) / 16u64 + 1u64
@@ -10098,8 +10257,8 @@ fn disk_read_synced(d: Dir, path: String, limit: u64) -> Result[Bytes, Error] wa
             1u64
         }
         let mut chunk: Bytes = list.with_capacity(room)
-        let count = disk_io(host.read(mut file, mut chunk))?
-        if count == 0 {
+        let total_count = disk_io(host.read(mut file, mut chunk))?
+        if total_count == 0 {
             break
         }
         if size == limit {
@@ -11711,9 +11870,9 @@ type JournalCommit {
 }
 
 fn journal_ops(file: String, raw: Bytes, mut at: u64) -> Result[List[JournalOp], Error] {
-    let count = disk_count(file, raw, mut at, 5)?
+    let operation_count = disk_count(file, raw, mut at, 5)?
     let mut ops: List[JournalOp] = list.new()
-    for i in 0u64 .. count {
+    for i in 0u64 .. operation_count {
         let kind = disk_number(file, raw, mut at, 1)?
         if kind != 1 && kind != 2 { return Error(disk_fault(file, at - 1, Malformed)) }
         let key = disk_blob(file, raw, mut at, 4096)?
@@ -12020,12 +12179,12 @@ fn journal_apply_ops(mut ids: u64, tree: std.omap.OMap[Bytes, Arc[Bytes]], ops: 
 
 fn journal_apply(file: String, mut replay: JournalReplay, commit: JournalCommit) -> Result[(), Error] {
     // Section 3.4 step 6: the branch must exist, and the version is its head + 1.
-    let count = list.len(replay.state.tips)
-    let mut i = count
-    for k in 0u64 .. count {
+    let total_count = list.len(replay.state.tips)
+    let mut i = total_count
+    for k in 0u64 .. total_count {
         if replay.state.tips[k].id == commit.branch { i = k }
     }
-    if i == count || commit.version != replay.state.tips[i].head + 1 { return Error(disk_fault(file, 0, Gap(commit.version))) }
+    if i == total_count || commit.version != replay.state.tips[i].head + 1 { return Error(disk_fault(file, 0, Gap(commit.version))) }
     let data = journal_apply_ops(mut replay.next_node, replay.state.tips[i].roots.data, commit.data)?
     let streams = journal_apply_ops(mut replay.next_node, replay.state.tips[i].roots.streams, commit.streams)?
     replay.state.tips[i].roots.data = take data
@@ -12903,9 +13062,9 @@ fn journal_place_receive(db: Db, mut place: JournalPlace, wait: bool) -> Option[
     }
 }
 
-fn journal_place_requests(count: u64) -> Receiver[u64] waits {
-    let (send, requests): (Sender[u64], Receiver[u64]) = channel.new(count)
-    for key in 0u64 .. count { result.unwrap(channel.send(send, key)) }
+fn journal_place_requests(total_count: u64) -> Receiver[u64] waits {
+    let (send, requests): (Sender[u64], Receiver[u64]) = channel.new(total_count)
+    for key in 0u64 .. total_count { result.unwrap(channel.send(send, key)) }
     take requests
 }
 

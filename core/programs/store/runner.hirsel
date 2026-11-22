@@ -4758,17 +4758,47 @@ fn q_late(tx: store.Tx, h: Qh, take _arg: u32) -> Result[Cover, Capacity] {
 
 fn q_moving(tx: store.Tx, h: Qh, take _arg: u32) -> Result[Cover, Capacity] {
     let selector = option.unwrap(result.unwrap(store.fetch(tx, h.t, 0u64)))
-    let key = if selector == 0u64 { 3u64 } else { 4u64 }
-    let mut scan = result.unwrap(store.range(tx, h.t, Included(key), Excluded(key + 1u64)))
-    let chosen = match result.unwrap(store.next(mut scan)) { Some((_, _)) => 2u64, None => 1u64 }
+    let key = if selector == 0u64 {
+        3u64
+    } else {
+        4u64
+    }
+    let mut scan = match store.range(tx, h.t, Included(key), Excluded(key + 1u64)) {
+        Ok(take rows) => take rows,
+        Error(_) => fail("subs: q_moving range")
+    }
+    let chosen = match result.unwrap(store.next_range(mut scan)) {
+        Some((_, _)) => 2u64,
+        None => 1u64
+    }
     cover(h.t, Included(chosen), Included(chosen))
+}
+
+fn q_range_prefix(tx: store.Tx, h: Qh, take limit: u32) -> Result[Cover, Capacity] {
+    let mut rows = match store.range(tx, h.t, Included(1u64), Excluded(10u64)) {
+        Ok(take cursor) => take cursor,
+        Error(_) => fail("subs: prefix range")
+    }
+    let mut key = 0u64
+    for _ in 0u64 .. int.widen(limit) {
+        match result.unwrap(store.next_range(mut rows)) {
+            Some((k, _)) => {
+                key = k
+            },
+            None => {
+                break
+            }
+        }
+    }
+    cover(h.t, Included(key), Included(key))
 }
 
 fn subs_place(mut r: Registry[(), Qh]) -> Result[(), RegisterError] {
     query(mut r, code.describe(q1), 65536u64, DEFAULT_STEPS)?
     query(mut r, code.describe(qf), 65536u64, DEFAULT_STEPS)?
     query(mut r, code.describe(q_late), 65536u64, DEFAULT_STEPS)?
-    query(mut r, code.describe(q_moving), 65536u64, DEFAULT_STEPS)
+    query(mut r, code.describe(q_moving), 65536u64, DEFAULT_STEPS)?
+    query(mut r, code.describe(q_range_prefix), 65536u64, DEFAULT_STEPS)
 }
 
 fn subs_handles(mut db: store.Db) -> Result[Qh, store.Error] waits {
@@ -5028,6 +5058,67 @@ pub fn law_subs_main(c: Clock, r: Random) -> bool waits {
     if list.len(step(mut b, db)) != 0u64 { return false }
     set(mut db, t, 3u64, 21u64)
     apply_all(mut cl, step(mut b, db)) && holds(cl, keys, 2u64, 1u32, None, Some(2u8))
+}
+
+fn range_limit(n: u32) -> Bytes {
+    let mut out: Bytes = list.new()
+    std.codec.put_u32(n, mut out)
+    take out
+}
+
+// A tail insert misses a prefix subscription but hits a cursor that received
+// None. An insert before the prefix's first row also changes its Cover.
+pub fn law_range_reruns(c: Clock, r: Random) -> bool waits {
+    let mut db = store.memory(c, r, store.defaults())
+    let cv = std.codec.of_u64()
+    result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
+    let t = result.unwrap(store.table(mut db, "data", std.codec.key_u64(), cv))
+    set(mut db, t, 3, 30)
+    set(mut db, t, 7, 70)
+    let reg = result.unwrap(placed(code.describe(subs_place), 1048576))
+    let h = result.unwrap(subs_handles(mut db))
+    let mut b = Board(r: take reg, h: take h, base: store.snapshot(db), newest: None, subs: subscriptions())
+    let _ = at_base(mut b, 1, 1, query_key(code.describe(q_range_prefix)), range_limit(1))
+    let _ = at_base(mut b, 2, 1, query_key(code.describe(q_range_prefix)), range_limit(8))
+    set(mut db, t, 8, 80)
+    let delta = result.unwrap(store.changes(b.base, store.snapshot(db)))
+    let hits = result.unwrap(affected_subscriptions(b.subs, delta))
+    if list.len(hits) != 1 || hits[0].0 .who != 2 || !hits[0].1 {
+        return false
+    }
+    let updated = step(mut b, db)
+    if list.len(updated) != 1 || updated[0].session != 2 {
+        return false
+    }
+    set(mut db, t, 2, 20)
+    let changed = result.unwrap(store.changes(b.base, store.snapshot(db)))
+    let reruns = result.unwrap(affected_subscriptions(b.subs, changed))
+    if list.len(reruns) != 2 || !reruns[0].1 || !reruns[1].1 {
+        return false
+    }
+    let projected = step(mut b, db)
+    if list.len(projected) != 2 {
+        return false
+    }
+    for owed in projected {
+        if owed.session == 1 {
+            if list.len(owed.rows) != 2 {
+                return false
+            }
+        } else if owed.session != 2 || list.len(owed.rows) != 0 {
+            return false
+        }
+    }
+    true
+}
+
+@test
+fn test_range_reruns(c: Clock, r: Random) -> Result[(), ()] waits {
+    if law_range_reruns(c, r) {
+        Ok(())
+    } else {
+        Error(())
+    }
 }
 
 pub fn law_subs_reset_keeps_diff(c: Clock, r: Random) -> bool waits {

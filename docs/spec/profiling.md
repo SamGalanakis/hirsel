@@ -74,6 +74,7 @@ The database has the following tables and columns.
 | `source_snippet` | `file, start_line, end_line, text` |
 | `fn_cpu_summary` | `function_id, event, self_total, inclusive_total, sample_count` |
 | `line_cpu_summary` | `file, line, function_id, event, self_total, sample_count` |
+| `codegen_remark` | `function_id, file, line, col, kind, outcome, evidence_level, count` |
 
 `run_meta` has the keys `hprof_version`, `capture_mode`, `target`, `cmdline`,
 `build_id`, `image_digest`, `symbol_tier`, `clock`, `primary_event`,
@@ -139,6 +140,12 @@ captured. Query results encode unsigned integers above 2^53 as decimal
 strings. `summary` groups hotspots by event and shows at most five rows
 per event. Function grouping deduplicates the definition across all
 instances in a stack.
+
+`annotate` aggregates CPU events by source line and event. It aggregates
+compiler remarks by source line, kind, outcome and evidence level before
+joining them to the CPU results. A line with multiple remarks still reports
+each sample period once. Lines carrying only remarks have an empty `cpu`
+array.
 
 `prof export` supports the pprof format. It preserves mapping addresses,
 inline frame order, and one value per event. Values that exceed the signed

@@ -102,5 +102,17 @@ CREATE TABLE line_cpu_summary (
     PRIMARY KEY (file, line, function_id, event)
 ) STRICT, WITHOUT ROWID;
 
+CREATE TABLE codegen_remark (
+    function_id INTEGER NOT NULL REFERENCES function,
+    file TEXT NOT NULL,
+    line INTEGER NOT NULL CHECK (line > 0),
+    col INTEGER NOT NULL CHECK (col > 0),
+    kind TEXT NOT NULL CHECK (kind IN ('bounds_check', 'overflow_check', 'step_sync')),
+    outcome TEXT NOT NULL CHECK (outcome IN ('emitted', 'elided', 'coalesced')),
+    evidence_level TEXT NOT NULL CHECK (evidence_level IN ('source_remark', 'verified_scope')),
+    count ANY NOT NULL,
+    PRIMARY KEY (file, line, function_id, col, kind, outcome, evidence_level)
+) STRICT, WITHOUT ROWID;
+
 CREATE INDEX cpu_sample_callsite ON cpu_sample(callsite_id);
 CREATE INDEX fn_cpu_summary_event ON fn_cpu_summary(event);

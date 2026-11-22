@@ -51,6 +51,10 @@ events or units, and reports unmatched functions. A live-only capture
 cannot be compared with replay. A single cycle or wall-time comparison
 reports possible sampling noise.
 
+`prof annotate` returns one row per source line, with saved source text and
+separate `cpu` and `remarks` arrays. It sums CPU periods and sample counts per
+event across the selected functions on each line.
+
 `prof sql` accepts one read-only statement that returns rows. An SQLite
 authorizer denies writes, ATTACH, and connection-changing statements.
 The result includes the ordered column names, rows, row limit, returned row

@@ -220,6 +220,7 @@ const TABLES: &[&str] = &[
     "source_snippet",
     "fn_cpu_summary",
     "line_cpu_summary",
+    "codegen_remark",
 ];
 
 fn schema(db: &Connection, limit: usize) -> Result<Value> {
@@ -342,14 +343,22 @@ fn annotate(db: &Connection, target: &str, limit: usize) -> Result<Value> {
         },
         None => (target, None),
     };
-    let sql = "SELECT s.file,s.line,f.def_path,f.instance_label,s.event,s.self_total,s.sample_count,
-                      (SELECT sn.text FROM source_snippet sn WHERE sn.file=s.file AND sn.start_line<=s.line AND sn.end_line>=s.line
-                       ORDER BY sn.end_line-sn.start_line,sn.start_line LIMIT 1) AS source
-               FROM line_cpu_summary s JOIN function f ON f.id=s.function_id
-               WHERE (?2 IS NOT NULL AND s.file=?1 AND s.line=?2)
-                  OR (?2 IS NULL AND (f.def_path=?1 OR f.instance_label=?1 OR f.name=?1))
-               ORDER BY s.file,s.line,f.instance_label,s.event LIMIT ?3";
-    select_result(db, sql, (file, line, bounded_limit(limit)?), limit)
+    register_totals(db)?;
+    let mut stmt = db.prepare(include_str!("annotate.sql"))?;
+    let mut rows = stmt.query((file, line, bounded_limit(limit)?))?;
+    let mut result = Vec::new();
+    while result.len() < limit {
+        let Some(row) = rows.next()? else { break };
+        result.push(json!({
+            "file": row.get::<_, String>(0)?,
+            "line": row.get::<_, u32>(1)?,
+            "source": row.get::<_, Option<String>>(2)?,
+            "cpu": serde_json::from_str::<Value>(row.get_ref(3)?.as_str()?)?,
+            "remarks": serde_json::from_str::<Value>(row.get_ref(4)?.as_str()?)?,
+        }));
+    }
+    Ok(json!({"rows": result, "limit": unsigned(limit as u64),
+        "returned_rows": unsigned(result.len() as u64), "truncated": rows.next()?.is_some()}))
 }
 
 fn related(
@@ -542,6 +551,45 @@ mod tests {
     use crate::{ProfileWriter, RunMeta};
 
     use super::*;
+
+    #[test]
+    fn annotate_aggregates_cpu_and_remarks_before_joining_lines() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(include_str!("schema.sql")).unwrap();
+        db.execute_batch(
+            "INSERT INTO function VALUES (1,'app/math/f','f@u64','f','hirsel'),
+                                         (2,'app/math/f','f@u8','f','hirsel'),
+                                         (3,'app/math/g','g','g','hirsel');
+             INSERT INTO line_cpu_summary VALUES ('math.hirsel',7,1,'instructions',20,2),
+                                                ('math.hirsel',7,2,'instructions',15,1),
+                                                ('math.hirsel',7,3,'instructions',90,9);
+             INSERT INTO codegen_remark VALUES
+                (1,'math.hirsel',7,3,'bounds_check','elided','source_remark',1),
+                (2,'math.hirsel',7,3,'bounds_check','elided','source_remark',2),
+                (2,'math.hirsel',7,9,'step_sync','emitted','source_remark',1),
+                (2,'math.hirsel',8,1,'overflow_check','emitted','source_remark',1);",
+        )
+        .unwrap();
+
+        let by_definition = annotate(&db, "app/math/f", 20).unwrap();
+        assert_eq!(by_definition["returned_rows"], 2);
+        assert_eq!(
+            by_definition["rows"][0],
+            json!({
+                "file": "math.hirsel", "line": 7, "source": null,
+                "cpu": [{"event": "instructions", "self_total": 35, "sample_count": 3}],
+                "remarks": [
+                    {"kind": "bounds_check", "outcome": "elided", "evidence_level": "source_remark", "count": 3},
+                    {"kind": "step_sync", "outcome": "emitted", "evidence_level": "source_remark", "count": 1},
+                ],
+            })
+        );
+        assert_eq!(by_definition["rows"][1]["cpu"], json!([]));
+        let by_line = annotate(&db, "math.hirsel:7", 20).unwrap();
+        assert_eq!(by_line["returned_rows"], 1);
+        assert_eq!(by_line["rows"][0]["cpu"][0]["self_total"], 125);
+        assert_eq!(by_line["rows"][0]["cpu"][0]["sample_count"], 12);
+    }
 
     fn fixture(path: &Path) {
         let writer = ProfileWriter::create(path).unwrap();

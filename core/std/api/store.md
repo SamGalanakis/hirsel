@@ -207,8 +207,7 @@ a closed rotation sender poisons the Db and takes no Cut.
 
 ## Format 3
 
-STORE-SPEC §11 specifies the paged store. The scoped view API in AP12
-and journaled fork in AP17–AP19 are follow-up slices.
+STORE-SPEC §11 specifies the paged store. AP17–AP19 describe the planned journaled fork.
 
 - **Pages.** Trees use packed pages (`Arc[Page]`, 4 KiB target). A cut writes
   the canonical format. A published in-memory image may be unsealed, and readers find entries by slot
@@ -242,14 +241,16 @@ and journaled fork in AP17–AP19 are follow-up slices.
   `migrate` sorts the output, refuses duplicate keys with `Exists`, and builds
   bottom-up. It publishes only if the exact account of its new roots fits
   (AP13).
-- **Planned view reads (AP12).** `fetch_bytes(tx, t, k)` and `get_bytes(s, t, k)` will return the raw
-  stored bytes as `Option[View[Bytes]]` anchored to the Tx or Snapshot.
-  The owned `fetch` and `get` already transcode old-schema rows.
-  The planned `scan_bytes` returns a scoped `ViewRows` cursor:
-  it is declared `pub opaque scoped type ViewRows`, like `RangeRows`.
-  `next_view(mut c)` returns the next logical key, and `value_view(c)` the
-  current value as `View[Bytes] in c`; on `Poisoned` the cursor does not move
-  (AP12). `ByteRows` is unchanged.
+- **View reads (AP12).** `fetch_bytes(tx, t, k)` and `get_bytes(s, t, k)` return
+  `Result[Option[View[Bytes]], Error]` anchored to the Tx or Snapshot. The bytes
+  include the stored schema number and codec payload. The owned `fetch` and `get`
+  decode from the view and transcode older schemas as needed.
+  `scan_bytes(s, t, lo, hi)` returns `Result[ViewRows, Error] in s`. `ViewRows`
+  is scoped to its Snapshot and cannot be sent to a task. `next_view(mut c)`
+  returns an owned logical key or `None` at exhaustion. `value_view(c)` borrows
+  the current value as `View[Bytes] in c`. It traps if there is no current row.
+  The checker prevents advancing the cursor while the value view lives.
+  On `Poisoned` the cursor does not move. `ByteRows` is an owning, sendable cursor.
 - **Accounts.** Admission counts each distinct row version (tree, logical key,
   stored value) once across every branch head, pin and in-flight fork, at
   `entry(k, v)`, plus 126 bytes per distinct collection. The figure does not

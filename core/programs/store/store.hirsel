@@ -408,6 +408,13 @@ pub opaque type ByteRows: send {
     reverse: bool
 }
 
+pub opaque scoped type ViewRows {
+    cursor: List[std.page.Cursor],
+    prefix: Bytes,
+    high: Bytes,
+    slot: Option[u64]
+}
+
 /// Mix a SplitMix64 seed after adding the generator stride with wrapping arithmetic.
 pub fn splitmix64(x: u64) -> u64 {
     let mut z = int.wrapping_add(x, 0x9E3779B97F4A7C15u64)
@@ -1694,14 +1701,17 @@ fn note_read(tx: Tx, take read: Read) -> Result[(), Error] {
     Ok(())
 }
 
-fn fetch_bytes(tx: Tx, id: u32, key: Bytes) -> Result[Option[Bytes], Error] {
-    let p = logical_key(id, key)?
-    let found = transaction_row(tx, p)
-    note_read(tx, Point(take p))?
-    match found {
+fn fetch_raw(tx: Tx, id: u32, key: Bytes) -> Result[Option[Bytes], Error] {
+    match fetch_logical(tx, logical_key(id, key)?) {
         Some(v) => Ok(Some(copied(v)?)),
         None => Ok(None)
     }
+}
+
+fn fetch_logical(tx: Tx, take key: Bytes) -> Option[View[Bytes]] in tx {
+    let found = transaction_row(tx, key)
+    log.append(tx.reads, Point(take key))
+    found
 }
 
 fn put_bytes(mut tx: Tx, id: u32, key: Bytes, val: Bytes) -> Result[(), Error] {
@@ -2106,7 +2116,7 @@ fn next_bytes(mut rows: ByteRows) -> Result[Option[(Bytes, Arc[Bytes])], Error] 
     Ok(take found)
 }
 
-fn get_bytes(s: Snapshot, id: u32, key: Bytes) -> Result[Option[Bytes], Error] {
+fn get_raw(s: Snapshot, id: u32, key: Bytes) -> Result[Option[Bytes], Error] {
     let p = logical_key(id, key)?
     match get_page_row(s.roots.collections, p) {
         Some(v) => Ok(Some(copied(v)?)),
@@ -2114,7 +2124,7 @@ fn get_bytes(s: Snapshot, id: u32, key: Bytes) -> Result[Option[Bytes], Error] {
     }
 }
 
-fn scan_bytes(s: Snapshot, id: u32, lo: Bound[Bytes], hi: Bound[Bytes]) -> Result[ByteRows, Error] {
+fn scan_raw(s: Snapshot, id: u32, lo: Bound[Bytes], hi: Bound[Bytes]) -> Result[ByteRows, Error] {
     byte_cursor(s.roots.collections, Included(lower_bytes(id, lo, false)?), lower_bytes(id, hi, true)?)
 }
 
@@ -2159,7 +2169,7 @@ fn put_one(mut db: Db, k: u64, v: u64) -> bool {
 }
 
 fn value_at(s: Snapshot, k: u64) -> u64 {
-    match result.unwrap(get_bytes(s, 1, key_word(k))) {
+    match result.unwrap(get_raw(s, 1, key_word(k))) {
         Some(raw) => decode_word(raw),
         None => 0
     }
@@ -2382,7 +2392,7 @@ fn model_step(mut db: Db, wall: u64) -> bool {
             let _ = delete_bytes(mut tx, 1, key_word(k))?
         } else {
             put_bytes(mut tx, 1, key_word(k), key_word(v))?
-            let raw = option.unwrap(fetch_bytes(tx, 1, key_word(k))?)
+            let raw = option.unwrap(fetch_raw(tx, 1, key_word(k))?)
             if decode_word(raw) != v {
                 return Error(Missing("law"))
             }
@@ -2754,7 +2764,7 @@ pub fn law_reader_task(c: Clock, tasks: Tasks) -> bool waits {
     }
     let held = snapshot(db)
     let reader = task.spawn(tasks, bytes 1048576, take held, fn(take s: Snapshot) -> bool {
-        let mut rows = result.unwrap(scan_bytes(s, 1, Unbounded, Unbounded))
+        let mut rows = result.unwrap(scan_raw(s, 1, Unbounded, Unbounded))
         for k in 0u64 .. 24 {
             if value_at(s, k) != k + 1 {
                 return false
@@ -3109,16 +3119,20 @@ fn writable[K, V](tx: Tx, t: Table[K, V]) -> Result[(), Error] {
     }
 }
 
-pub fn fetch[K, V](tx: Tx, t: Shape[K, V], k: K) -> Result[Option[V], Error] {
+/// Borrow the stored schema tag and codec bytes, including any staged write.
+pub fn fetch_bytes[K, V](tx: Tx, t: Shape[K, V], k: K) -> Result[Option[View[Bytes]], Error] in tx {
     if !same(tx.store, t.store) {
         return Error(Foreign)
     }
     readable(tx.roots, t.catalog_key, t.id)?
-    let mut p = prefixed(t.id, 8)?
+    let mut p: Bytes = list.with_capacity(12)
+    list.put_word_be(mut p, t.id)
     std.codec.encode_key(t.key, k, mut p)
-    let found = transaction_row(tx, p)
-    note_read(tx, Point(take p))?
-    match found {
+    Ok(fetch_logical(tx, take p))
+}
+
+pub fn fetch[K, V](tx: Tx, t: Shape[K, V], k: K) -> Result[Option[V], Error] {
+    match fetch_bytes(tx, t, k)? {
         Some(raw) => Ok(Some(row_value(t.readers, t.id, raw)?)),
         None => Ok(None)
     }
@@ -3242,17 +3256,61 @@ fn open_range[K, V](tx: Tx, t: Shape[K, V], lo: Bound[K], hi: Bound[K], reverse:
     Ok(RangeRows(rows: take rows, reads: tx.reads, low: take low, high: take high, reverse))
 }
 
-pub fn get[K, V](s: Snapshot, t: Shape[K, V], k: K) -> Result[Option[V], Error] {
+/// Borrow the stored schema tag and codec bytes from a snapshot.
+pub fn get_bytes[K, V](s: Snapshot, t: Shape[K, V], k: K) -> Result[Option[View[Bytes]], Error] in s {
     if !same(s.store, t.store) {
         return Error(Foreign)
     }
     readable(s.roots, t.catalog_key, t.id)?
     let mut p = prefixed(t.id, 8)?
     std.codec.encode_key(t.key, k, mut p)
-    match get_page_row(s.roots.collections, p) {
+    Ok(get_page_row(s.roots.collections, p))
+}
+
+pub fn get[K, V](s: Snapshot, t: Shape[K, V], k: K) -> Result[Option[V], Error] {
+    match get_bytes(s, t, k)? {
         Some(raw) => Ok(Some(row_value(t.readers, t.id, raw)?)),
         None => Ok(None)
     }
+}
+
+/// Open a forward cursor over the stored values in a snapshot.
+pub fn scan_bytes[K, V](s: Snapshot, t: Shape[K, V], lo: Bound[K], hi: Bound[K]) -> Result[ViewRows, Error] in s {
+    if !same(s.store, t.store) {
+        return Error(Foreign)
+    }
+    readable(s.roots, t.catalog_key, t.id)?
+    let low = lower_bytes(t.id, typed_bound(t.key, lo)?, false)?
+    let high = lower_bytes(t.id, typed_bound(t.key, hi)?, true)?
+    let id = prefix(t.id)?
+    let mut cursor: List[std.page.Cursor] = list.new()
+    if let Some(root) = std.page.collection_child(s.roots.collections.root, id) {
+        let boundary: Bytes = clone(list.slice(low, 4, list.len(low)))
+        list.push(mut cursor, std.page.cursor_open(root, Some(take boundary), true, false))
+    }
+    Ok(ViewRows(cursor: take cursor, prefix: take id, high: take high, slot: None))
+}
+
+/// Advance the cursor and return the next owned logical key.
+pub fn next_view(mut c: ViewRows) -> Result[Option[Bytes], Error] {
+    if list.len(c.cursor) != 0 {
+        if let Some((take key, slot)) = std.page.cursor_next_key(mut c.cursor[0u64], c.prefix) {
+            if key < c.high {
+                c.slot = Some(slot)
+                return Ok(Some(take key))
+            }
+        }
+        let _ = list.pop(mut c.cursor)
+    }
+    c.slot = None
+    Ok(None)
+}
+
+/// Borrow the current row's value. Traps if the cursor has no current row.
+pub fn value_view(c: ViewRows) -> View[Bytes] in c {
+    let Some(slot) = c.slot else { fail("store: no current view row") }
+    let Some(raw) = std.page.cursor_value(c.cursor[0u64], slot) else { fail("store: invalid view row") }
+    raw
 }
 
 pub fn scan[K, V](s: Snapshot, t: Shape[K, V], lo: Bound[K], hi: Bound[K]) -> Result[Rows[K, V], Error] {
@@ -3260,7 +3318,7 @@ pub fn scan[K, V](s: Snapshot, t: Shape[K, V], lo: Bound[K], hi: Bound[K]) -> Re
         return Error(Foreign)
     }
     readable(s.roots, t.catalog_key, t.id)?
-    let cursor = scan_bytes(s, t.id, typed_bound(t.key, lo)?, typed_bound(t.key, hi)?)?
+    let cursor = scan_raw(s, t.id, typed_bound(t.key, lo)?, typed_bound(t.key, hi)?)?
     Ok(table_rows(s, t, take cursor))
 }
 
@@ -4625,6 +4683,25 @@ fn new_codec() -> std.codec.Codec[NewAccount] {
     std.codec.make(new_put, new_take, new_schema, 16)
 }
 
+fn schema_zero_bytes(balance: u64) -> Bytes {
+    let mut raw: Bytes = list.with_capacity(10)
+    list.put_word_le(mut raw, 0u16)
+    list.put_word_le(mut raw, balance)
+    take raw
+}
+
+fn schema_snapshot_bytes[V](s: Snapshot, sh: Shape[u64, V], expected: Bytes) -> Result[bool, Error] {
+    let point = match get_bytes(s, sh, 1)? {
+        Some(raw) => raw == expected,
+        None => false,
+    }
+    let mut rows = scan_bytes(s, sh, Included(1), Included(1))?
+    if !point || next_view(mut rows)? == None {
+        return Ok(false)
+    }
+    Ok(value_view(rows) == expected && next_view(mut rows)? == None)
+}
+
 // L17 in memory: old rows use a resolved reader and defaults; new rows use the new tag.
 // Wrong implementation: overwrite the old schema, or treat a fingerprint match as identity.
 pub fn law_schema_numbers(c: Clock) -> bool waits {
@@ -4639,6 +4716,7 @@ pub fn law_schema_numbers(c: Clock) -> bool waits {
         _ => return false
     }
     let held = snapshot(db)
+    result.unwrap(pin(mut db, "schema_zero", held))
     // An injected equal fingerprint with unequal bytes must not reuse number 0.
     let mut meta = result.unwrap(catalog_entry(db, old.catalog_key))
     let writer = result.unwrap(std.codec.schema(old_codec()))
@@ -4659,6 +4737,25 @@ pub fn law_schema_numbers(c: Clock) -> bool waits {
     let before = option.unwrap(result.unwrap(get(held, sh, 1)))
     if before.balance != 10 || before.bonus != 7 {
         return false
+    }
+    // L40: the raw paths retain the original little-endian schema tag and balance.
+    let expected = schema_zero_bytes(10)
+    let head = snapshot(db)
+    let old_shape = shape(old)
+    if !result.unwrap(schema_snapshot_bytes(held, old_shape, expected)) ||
+        !result.unwrap(schema_snapshot_bytes(held, sh, expected)) ||
+        !result.unwrap(schema_snapshot_bytes(head, sh, expected)) ||
+        !result.unwrap(schema_snapshot_bytes(head, old_shape, expected)) {
+        return false
+    }
+    for source in [take held, take head] {
+        let read = result.unwrap(look(source, None, fn(tx: Tx) -> Result[bool, Error] {
+            let new_raw = match fetch_bytes(tx, sh, 1)? { Some(stored) => stored == expected, None => false }
+            let old_raw = match fetch_bytes(tx, old_shape, 1)? { Some(stored) => stored == expected, None => false }
+            let Some(account) = fetch(tx, sh, 1)? else { return Ok(false) }
+            Ok(new_raw && old_raw && account.balance == 10 && account.bonus == 7)
+        }))
+        match take read { Seen(Seen(value: Ok(true), ..)) => {}, _ => return false }
     }
     let second = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
         put(mut tx, current, 2, NewAccount(balance: 20, bonus: 9))
@@ -5359,8 +5456,94 @@ fn test_typed_resident(c: Clock) -> Result[(), ()] waits {
     }
 }
 
+fn view_law_payload(length: u64, seed: u64) -> Bytes {
+    let mut payload: Bytes = list.with_capacity(length)
+    for i in 0u64 .. length {
+        list.push(mut payload, int.truncate(splitmix64(seed + i)))
+    }
+    take payload
+}
+
+fn view_law_stored(payload: Bytes) -> Bytes {
+    let mut raw: Bytes = list.with_capacity(6 + list.len(payload))
+    list.put_word_le(mut raw, 0u16)
+    let width: u32 = int.truncate(list.len(payload))
+    list.put_word_le(mut raw, width)
+    list.append(mut raw, payload)
+    take raw
+}
+
+// L38: the first two keys share a page prefix. The third has a BlobRef.
+// The final key and its inline value require a one-entry oversize leaf.
+fn law_view_geometry(c: Clock, seed: u64) -> bool waits {
+    let mut db = test_db(c, 1073741824)
+    result.unwrap(create_table(mut db, spec("views", std.codec.key_bytes(), std.codec.of_bytes())))
+    let t = result.unwrap(table(mut db, "views", std.codec.key_bytes(), std.codec.of_bytes()))
+    let sh = shape(t)
+    let mut large_key: Bytes = list.with_capacity(4000)
+    list.fill(mut large_key, 4000, 122u8)
+    let first: Bytes = clone(string.as_bytes("prefix/a"))
+    let second: Bytes = clone(string.as_bytes("prefix/b"))
+    let third: Bytes = clone(string.as_bytes("prefix/c"))
+    let keys = [take first, take second, take third, take large_key]
+    let lengths = [31u64, 1018u64, 1019u64, 1018u64]
+    let written = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[bool, Error] {
+        for i in 0u64 .. 4 {
+            let payload = view_law_payload(lengths[i], seed + i)
+            put(mut tx, t, keys[i], payload)?
+            let Some(raw) = fetch_bytes(tx, sh, keys[i])? else { return Ok(false) }
+            let Some(owned) = fetch(tx, sh, keys[i])? else { return Ok(false) }
+            if raw != view_law_stored(payload) || owned != payload {
+                return Ok(false)
+            }
+        }
+        Ok(true)
+    }))
+    match take written { Committed(done) => if !done.value { return false }, _ => return false }
+    let held = snapshot(db)
+    let mut values = result.unwrap(scan_bytes(held, sh, Unbounded, Unbounded))
+    let mut typed = result.unwrap(scan(held, sh, Unbounded, Unbounded))
+    for i in 0u64 .. 4 {
+        let payload = view_law_payload(lengths[i], seed + i)
+        let expected = view_law_stored(payload)
+        let point = match get_bytes(held, sh, keys[i]) {
+            Ok(Some(raw)) => raw == expected,
+            _ => false,
+        }
+        let Some(owned) = result.unwrap(get(held, sh, keys[i])) else { return false }
+        if !point || owned != payload {
+            return false
+        }
+        // The only table has id 1. These keys contain no zero bytes to escape.
+        let mut logical: Bytes = list.with_capacity(6 + list.len(keys[i]))
+        list.put_word_be(mut logical, 1u32)
+        list.append(mut logical, keys[i])
+        list.put_word_le(mut logical, 0u16)
+        if result.unwrap(next_view(mut values)) != Some(logical) || value_view(values) != expected ||
+            result.unwrap(next(mut typed)) != Some((clone(keys[i]), take payload)) {
+            return false
+        }
+    }
+    let reads = result.unwrap(look(held, None, fn(tx: Tx) -> Result[bool, Error] {
+        for i in 0u64 .. 4 {
+            let Some(raw) = fetch_bytes(tx, sh, keys[i])? else { return Ok(false) }
+            if raw != view_law_stored(view_law_payload(lengths[i], seed + i)) { return Ok(false) }
+        }
+        Ok(true)
+    }))
+    match take reads { Seen(Seen(value: Ok(true), ..)) => {}, _ => return false }
+    let mut bounded = result.unwrap(scan_bytes(held, sh, Excluded(clone(keys[0])), Included(clone(keys[1]))))
+    result.unwrap(next_view(mut bounded)) != None &&
+        value_view(bounded) == view_law_stored(view_law_payload(lengths[1], seed + 1)) &&
+        result.unwrap(next_view(mut bounded)) == None && result.unwrap(next_view(mut bounded)) == None &&
+        result.unwrap(next_view(mut values)) == None && result.unwrap(next(mut typed)) == None
+}
+
 pub fn law_typed_model(c: Clock) -> bool waits {
     for seed in 0u64 .. 2 {
+        if !law_view_geometry(c, seed) {
+            return false
+        }
         let mut db = test_db(c, 1073741824)
         result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
         let mut t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
@@ -5479,6 +5662,10 @@ fn test_typed_snapshot_task(c: Clock, tasks: Tasks) -> Result[(), ()] waits {
         for k in 0u64 .. 24 {
             if typed_value(p.held, p.sh, k) != k + 1 {
                 return false
+            }
+            match get_bytes(p.held, p.sh, k) {
+                Ok(Some(raw)) => if raw != schema_zero_bytes(k + 1) { return false },
+                _ => return false,
             }
             match result.unwrap(next(mut rows)) {
                 Some((key, value)) => if key != k || value != k + 1 {
@@ -6050,8 +6237,8 @@ pub fn law_changes_rewritten_equal(c: Clock) -> bool {
     if list.len(delta) != 0 {
         return false
     }
-    let mut left = result.unwrap(scan_bytes(a, 1, Unbounded, Unbounded))
-    let mut right = result.unwrap(scan_bytes(b, 1, Unbounded, Unbounded))
+    let mut left = result.unwrap(scan_raw(a, 1, Unbounded, Unbounded))
+    let mut right = result.unwrap(scan_raw(b, 1, Unbounded, Unbounded))
     let mut sum: u64 = 0
     for k in 0u64 .. 96 {
         let x = option.unwrap(result.unwrap(next_bytes(mut left)))
@@ -6919,7 +7106,7 @@ fn refused_reply(c: Clock, oversized: bool) -> bool waits {
     }
     let head = snapshot(db)
     if version(head) != 1 { return false }
-    if let Some(_) = result.unwrap(get_bytes(head, 1, key_word(1))) { return false }
+    if let Some(_) = result.unwrap(get_raw(head, 1, key_word(1))) { return false }
     match result.unwrap(admit(mut db, stream, 0, digest)) {
         Abandoned(t) => if !mark_is(ticket(t), 1) { return false },
         _ => return false
@@ -9973,8 +10160,8 @@ pub fn disk_law_migrate(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits
     let ix = result.unwrap(index(reopened, mut back, "by_b", code.describe(new_bonus), std.codec.key_u64()))
     let listed = result.unwrap(index_catalog(reopened, 3))
     let now = snapshot(reopened)
-    let mut leftovers = result.unwrap(scan_bytes(now, 1, Unbounded, Unbounded))
-    let mut old_index = result.unwrap(scan_bytes(now, 2, Unbounded, Unbounded))
+    let mut leftovers = result.unwrap(scan_raw(now, 1, Unbounded, Unbounded))
+    let mut old_index = result.unwrap(scan_raw(now, 2, Unbounded, Unbounded))
     let empty_old = match result.unwrap(next_bytes(mut leftovers)) { None => true, Some(_) => false }
     let empty_index = match result.unwrap(next_bytes(mut old_index)) { None => true, Some(_) => false }
     let good = back.id == 3 && ix.id == 4 && list.len(listed) == 1 && version(now) == 4 && empty_old && empty_index && result.unwrap(bonus_order(now, ix)) == 305010702090
@@ -13451,7 +13638,7 @@ fn journal_boundary_case(d: Dir, c: Clock, r: Random, tasks: Tasks, last: u64, a
     if page_row_count(reopened.heads[0].roots.collections) != (if accepted { 16u64 } else { 0u64 }) { return false }
     if accepted {
         for k in 0u64 .. 16 {
-            let found = option.unwrap(result.unwrap(get_bytes(snapshot(reopened), 1, key_word(k))))
+            let found = option.unwrap(result.unwrap(get_raw(snapshot(reopened), 1, key_word(k))))
             let expected_size = if k == 15 { last } else { 1048576u64 }
             if list.len(found) != expected_size { return false }
             for byte in found { if byte != 0u8 { return false } }

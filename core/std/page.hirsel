@@ -2345,6 +2345,30 @@ pub fn cursor_next(mut cursor: Cursor) -> Option[CursorRow] {
     Some(cursor_row(cursor.path[list.len(cursor.path) - 1].page, slot))
 }
 
+/// Advance to a leaf slot and return its owned key with `leading` prepended.
+pub fn cursor_next_key(mut cursor: Cursor, leading: Bytes) -> Option[(Bytes, u64)] {
+    let Some(slot) = cursor_step(mut cursor) else {
+        return None
+    }
+    let image = cursor.path[list.len(cursor.path) - 1].page.image
+    let at = entry_at(image, slot)
+    let prefix = u16_at(image.raw, 4)
+    let suffix = u16_at(image.raw, at)
+    let mut key: Bytes = list.with_capacity(list.len(leading) + prefix + suffix)
+    list.append(mut key, leading)
+    list.append(mut key, list.slice(image.raw, HEADER, HEADER + prefix))
+    list.append(mut key, list.slice(image.raw, at + 2, at + 2 + suffix))
+    Some((take key, slot))
+}
+
+/// Borrow the value at a slot returned by `cursor_next_key` on this leaf.
+pub fn cursor_value(cursor: Cursor, slot: u64) -> Option[View[Bytes]] in cursor {
+    let Some(top) = list.last(cursor.path) else {
+        return None
+    }
+    value_at(top.page, slot)
+}
+
 /// Decode from the positioned leaf with a key buffer shared across advances.
 pub fn cursor_read[T](mut cursor: Cursor, visit: scoped[view] fn(Bytes, Bytes) -> T) -> Option[T] {
     let Some(slot) = cursor_step(mut cursor) else {

@@ -77,8 +77,8 @@ pub fn law_shared_payload_copy(c: Clock) -> bool {
     }
     let now = snapshot(db)
     for i in 0u64 .. 32 {
-        let old = option.unwrap(result.unwrap(get_bytes(held, 1, shared_store_bytes(i))))
-        let current = option.unwrap(result.unwrap(get_bytes(now, 1, shared_store_bytes(i))))
+        let old = option.unwrap(result.unwrap(get_raw(held, 1, shared_store_bytes(i))))
+        let current = option.unwrap(result.unwrap(get_raw(now, 1, shared_store_bytes(i))))
         let expected = if i == 16 {
             99u64
         } else {

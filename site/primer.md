@@ -33,7 +33,8 @@ Outcome: success.
 
 Every outside effect comes in as a parameter: `main` writes only because it receives
 `Stdout`. The entry `main` may wait with or without the `waits` marker (LANG-8). It returns
-`Result[(), E]`, and `Ok(())` exits 0 (PROG-3, CAP-1, CAP-4).
+`Result[(), E]`: `Ok(())` exits 0, and `Error(e)` exits 1 after writing `error: ` and `e`
+as Hirsel source on stderr (PROG-3, CAP-1, CAP-4).
 
 ## 2. What is not there
 

@@ -86,9 +86,11 @@ with explicit rules ([Net sockets](spec/net.md)). Env requires
 `--grant 'Env=<pattern>[,<pattern>]'`, where a pattern is a variable name or a prefix
 followed by `*` ([Env](../core/std/api/env.md)). A missing grant is refused before native code is emitted, naming the parameter
 and the option it needs. Everything after `--` is passed to the program as `Args`.
-`run` exits with the program's status. A `main` that returns `Error` writes
-nothing of its own ([PROG-3](spec/programs.md)), so for every nonzero status `run`
-adds one stderr line naming the outcome, for example
+`run` exits with the program's status. A `main` that returns `Error(e)` writes
+`e` as Hirsel source after `error: `, with every `Secret` shown as `[secret]`; an
+`Exit` writes nothing ([PROG-3](spec/programs.md#prog-3-entry)). For every nonzero
+status `run` then adds one stderr line naming the outcome, so
+`Error(Serve(Configuration))` ends the run with `error: Serve(Configuration)` and
 `hirsel: main returned an error, exit status 1`. A directory grant that cannot be
 opened stops the program before `main` with status 103 and
 ``not started: directory grant `PATH` (RESOLVED): ERROR``, where the resolved path

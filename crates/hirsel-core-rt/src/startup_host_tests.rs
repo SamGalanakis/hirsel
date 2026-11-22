@@ -255,7 +255,13 @@ fn exit_cannot_select_the_not_started_status() {
         out: *mut crate::process::MainResult,
     ) -> u8 {
         // SAFETY: native entry exclusively initializes its result slot.
-        unsafe { *out = crate::process::MainResult { kind: 2, exit: 103 } };
+        unsafe {
+            *out = crate::process::MainResult {
+                kind: 2,
+                exit: 103,
+                ..Default::default()
+            }
+        };
         0
     }
     let fixture = Fixture::new();

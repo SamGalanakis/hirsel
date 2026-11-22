@@ -52,13 +52,46 @@ process early.
 | `Ok(())` | 0 | nothing |
 | `Error(Exit(status: s))`, `s` from 1 to 100 | `s` | nothing |
 | `Error(Exit(status: s))`, `s` 0 or above 100 | 1 | nothing |
-| `Error(e)`, `E` not `Exit` | 1 | nothing |
+| `Error(e)`, `E` not `Exit` | 1 | one line: `error: ` and the text of `e` |
 | failure | 101 | the cause chain, one line per cause, primary first: the cause and its site |
 | run stop ([FAIL-15](failure.md#fail-15-run-stops)), other than termination by the host | 102 | `run stop: ` and the stop's name |
 | not started ([CAP-4](capabilities.md#cap-4-entry-grants), [MEM-19](budgets.md#mem-19-limits)) | 103 | one line naming what could not be given |
 
 So 101 to 103 never come from an `Exit`. The stderr writes are the run's, not the
-program's. A program writes its own diagnostics before it returns.
+program's, and come after cleanup; a failure in that cleanup is the run's outcome instead
+(101) and the error's line is not written. An `Exit` carries only a status, so it writes
+nothing.
+
+The text of an error value is the value written as Hirsel source, from `E`'s declarations:
+
+- A record is `Name(field: v, ..)`, a tuple `(v, ..)` and the unit `()`.
+- A variant case is its name, with its payload in parentheses when it has one, labelled
+  (`Bind(port: 80)`) when the case's fields are.
+- A list or array is `[v, ..]`. A `Box[T]` is its `T`.
+- A string is a string literal and a `char` a character literal. Each uses only the escapes
+  `\\`, `\n`, `\r`, `\t`, `\0`, its own delimiter's, and `\u{..}` for any other control
+  character.
+- An integer is in decimal. A float is the shortest decimal that reads back as the same
+  value, with a `.` or an exponent, or `NaN`, `inf` or `-inf`.
+- A `Secret` is `[secret]` ([TLS-5](tls.md#tls-5-secrets)). Any other capability or handle, and any opaque,
+  compact or region-carrying type, is `<Name>`. A function value is `<fn>`.
+
+```hirsel run
+type ServeError = Configuration | Bind(port: u16)
+type AppError = Serve(ServeError) | Config(file: String, line: u32)
+
+pub fn main() -> Result[(), AppError] { Error(Config(file: "app \"a\".conf", line: 3)) }
+```
+
+Output:
+
+```text
+```
+
+Outcome: error, stderr `error: Config(file: "app \"a\".conf", line: 3)`.
+
+The run then exits with status 1, and `Error(Serve(Configuration))` writes
+`error: Serve(Configuration)`.
 
 ```hirsel
 pub fn main(out: Stdout, argv: Args) -> Result[(), WriteError] waits { stdout.write(out, "hello\n") }

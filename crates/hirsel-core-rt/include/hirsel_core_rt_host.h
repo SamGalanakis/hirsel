@@ -81,7 +81,9 @@ HirselCoreHostOutcome hirsel_core_host_file(HirselCoreContext *, HirselCoreHostF
    descriptors). OS calls retain the guarded foreign-call stack rule. */
 void hirsel_core_hostfile_drop(HirselCoreContext *, HirselCoreHostFile);
 typedef struct { const uint8_t *data; size_t len; } HirselCoreView;
-typedef struct { uint8_t kind, exit; } HirselCoreMainResult;
+/* text/text_len: PROG-3's text of a non-Exit error, set by hirsel_core_main_error
+   before the result is cleaned; the run prints and frees it. */
+typedef struct { uint8_t kind, exit; uint8_t *text; size_t text_len; } HirselCoreMainResult;
 typedef struct { uint8_t kind; uint64_t task, object, value; } HirselCoreEvent;
 /* CONC-10 event kinds, one number each: hirsel_core_layout::event, which a runtime
    test compares with this table. */
@@ -128,6 +130,8 @@ typedef struct HirselCoreProcessConfig {
 } HirselCoreProcessConfig;
 typedef uint8_t (*HirselCoreEntry)(HirselCoreContext *, const HirselCoreProcessConfig *, HirselCoreMainResult *);
 uint8_t hirsel_core_run(const HirselCoreProcessConfig *, HirselCoreEntry);
+void hirsel_core_main_error(HirselCoreContext *, const uint8_t *value, const uint8_t *program,
+                            size_t len, HirselCoreMainResult *);
 uint64_t hirsel_core_args_len(const HirselCoreContext *, uint64_t args);
 uint64_t hirsel_core_launch_word(const HirselCoreContext *, uint64_t field, uint64_t index);
 void hirsel_core_launch_target(const HirselCoreContext *, HirselCoreBuffer *output);

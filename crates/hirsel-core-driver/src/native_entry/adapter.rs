@@ -70,6 +70,17 @@ pub(super) fn emit(
         );
         f.store(status, params[2], abi::MAIN_RESULT_EXIT);
     }
+    // PROG-3: the value's text is taken before its cleanup; the run prints it
+    // after the cleanup has ended without a failure.
+    if let Some(text) = &plan.error_text {
+        let len = f.constant(text.len() as u64);
+        let program = data::bytes(f.object, None, text.clone(), 8)?;
+        let program = f.address(program);
+        f.void_call(
+            "hirsel_core_main_error",
+            &[params[0], result, program, len, params[2]],
+        )?;
+    }
     f.b.ins().jump(cleaned, &[]);
     f.b.switch_to_block(cleaned);
     let status = if let Some(cleanup) = &plan.cleanup {

@@ -41,6 +41,8 @@ pub(crate) struct Plan<'a> {
     identity: String,
     layout: &'a Fixed,
     exit_offset: Option<u64>,
+    /// PROG-3: the encoded text program of a non-`Exit` error.
+    error_text: Option<Vec<u8>>,
     parameters: Vec<Requirement<'a>>,
     cleanup: Option<String>,
     launch_digest_unused: bool,
@@ -62,7 +64,7 @@ pub(crate) struct Plan<'a> {
 /// root limit, grant mask, explicit Net rules, ordered directories, charge-report
 /// path, recording flag and optional replay plan. The plan's other fields are the entry's:
 /// `symbol` is the entry's
-/// identity, `layout`, `exit_offset` and `parameters` are read from the entry
+/// identity, `layout`, `exit_offset`, `error_text` and `parameters` are read from the entry
 /// body (its record's address and the declaration part), `cleanup` is the
 /// cleanup instance's identity. The request's source map is the link's, and
 /// the executable key takes its digest.
@@ -188,6 +190,7 @@ impl<'a> Plan<'a> {
             identity,
             layout,
             exit_offset: binding.exit_offset,
+            error_text: binding.error_text.as_ref().map(|show| show.encode()),
             parameters,
             launch_digest_unused: launch_digest_unused && cleanup.is_none(),
             release_sites: &[],

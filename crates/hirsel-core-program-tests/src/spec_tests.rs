@@ -30,7 +30,14 @@ struct Run {
 
 enum ExpectedOutcome {
     Success,
-    Failure { cause: String, site: (u32, u32) },
+    Failure {
+        cause: String,
+        site: (u32, u32),
+    },
+    /// PROG-3: `main` returned `Error(e)`; `stderr` is the run's line for `e`.
+    Error {
+        stderr: String,
+    },
 }
 
 impl Fence {
@@ -67,6 +74,15 @@ fn expected_run(lines: &mut Lines<'_>, location: &str) -> Run {
         .unwrap_or_else(|| panic!("{location}: missing outcome"));
     let outcome = match outcome.trim().strip_prefix("Outcome: ") {
         Some(outcome) if outcome.starts_with("success.") => ExpectedOutcome::Success,
+        Some(outcome) if outcome.starts_with("error, stderr `") => {
+            let stderr = outcome
+                .strip_prefix("error, stderr `")
+                .and_then(|rest| rest.strip_suffix("`."))
+                .unwrap_or_else(|| panic!("{location}: expected an error stderr line"));
+            ExpectedOutcome::Error {
+                stderr: stderr.to_owned(),
+            }
+        }
         Some(outcome) if outcome.starts_with("failure, primary cause `") => {
             let failure = outcome.strip_prefix("failure, primary cause `").unwrap();
             let (cause, site) = failure
@@ -305,7 +321,7 @@ fn evaluate(
 ) -> Result<(), String> {
     const ROOT_LIMIT: u64 = 1_048_576;
     const INSTRUCTIONS: u64 = 1_000_000_000;
-    let root = Identity::plain(entry);
+    let root = Identity::plain(entry.clone());
     let units = product
         .units([root.clone()], 65_536)
         .map_err(|e| format!("{e:?}"))?;
@@ -335,6 +351,8 @@ fn evaluate(
     let sites = sources
         .item_sites(&module.items)
         .map_err(|e| e.to_string())?;
+    let show = product.entry_error_text(&entry, &module, result.index())?;
+    let mut text = None;
     let evaluated = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         eval::run_entry(
             &module,
@@ -348,6 +366,7 @@ fn evaluate(
             false,
             &sites,
             None,
+            show.as_ref().map(|show| (show, &mut text)),
         )
         .0
     }));
@@ -376,6 +395,12 @@ fn evaluate(
             let case = case_of(&tag, u64::from_le_bytes(word));
             if case != 0 {
                 errors.push(format!("main returned Result case {case}, expected Ok"));
+            }
+        }
+        (ExpectedOutcome::Error { stderr }, eval::Outcome::Returned(_)) => {
+            let actual = text.as_ref().map(|text| format!("error: {text}"));
+            if actual.as_deref() != Some(stderr.as_str()) {
+                errors.push(format!("error line was {actual:?}, expected {stderr:?}"));
             }
         }
         (ExpectedOutcome::Failure { cause, site }, eval::Outcome::Failed(causes)) => {

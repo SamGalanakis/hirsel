@@ -40,7 +40,9 @@ pub use crate::host_ops::{
     hirsel_core_host_at, hirsel_core_host_op, hirsel_core_host_rename,
     hirsel_core_host_sleep_until, hirsel_core_host_stat,
 };
-pub use crate::process::{hirsel_core_args_get, hirsel_core_args_len, hirsel_core_run};
+pub use crate::process::{
+    hirsel_core_args_get, hirsel_core_args_len, hirsel_core_main_error, hirsel_core_run,
+};
 pub use crate::provider::hirsel_core_host;
 
 /// HostFile is an opaque u64 provider handle, with no cell, grant or charge

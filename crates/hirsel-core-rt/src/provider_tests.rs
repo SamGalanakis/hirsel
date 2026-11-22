@@ -645,6 +645,7 @@ unsafe extern "C" fn main_result(
                 2
             },
             exit: n as u8,
+            ..Default::default()
         };
     }
     0

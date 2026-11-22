@@ -1057,6 +1057,23 @@ impl CheckProduct {
             })?;
         binding.as_ref().map_err(|e| NativeStop::Entry(e.clone()))
     }
+    /// PROG-3: the text program for the checked entry's error value, placed on
+    /// `module`'s rows with `dest` its `Result`; `None` when `E` is `Exit`.
+    pub fn entry_error_text(
+        &self,
+        entry: &DefPath,
+        module: &Module,
+        dest: usize,
+    ) -> Result<Option<hirsel_core_layout::show::Show>, String> {
+        let decl = self.entry_decl(entry).map_err(|e| e.to_string())?;
+        let recipes =
+            hirsel_core_layout::compute(&module.types).map_err(|_| "invalid entry layout")?;
+        decl.error
+            .as_ref()
+            .map(|e| crate::entry_show::place(e, &module.types, &recipes, dest))
+            .transpose()
+            .map_err(String::from)
+    }
     /// The entry's ABI from its declaration part and its body's IR, and its
     /// result cleanup module.
     fn entry_abi(
@@ -1258,6 +1275,8 @@ impl CheckProduct {
 pub(crate) struct EntryAbi {
     pub(super) recipe: Recipe,
     pub(super) exit_offset: Option<u64>,
+    /// PROG-3: the text of an `Error(e)` whose `E` is not `Exit`.
+    pub(super) error_text: Option<hirsel_core_layout::show::Show>,
     pub(super) parameters: Vec<EntryParameter>,
 }
 /// The part of an entry's binding that check reads from the declaration
@@ -1265,6 +1284,8 @@ pub(crate) struct EntryAbi {
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct EntryDecl {
     pub(super) exit: bool,
+    /// `E` described from its declarations, unless it is `Exit`.
+    pub(super) error: Option<crate::entry_show::ErrorShown>,
     pub(super) parameters: Vec<EntryParameter>,
 }
 #[derive(Clone, Serialize, Deserialize)]
@@ -1281,7 +1302,7 @@ struct EntryRecord {
     abi: Result<EntryAbi, String>,
     cleanup: Option<Identity>,
 }
-const ENTRY_SCHEMA: u32 = 1;
+const ENTRY_SCHEMA: u32 = 2;
 fn entry_record(store: &Store, key: ContentHash) -> io::Result<Option<EntryRecord>> {
     Ok(cached(store, key)?
         .and_then(|bytes| crate::decode::<EntryRecord>(&bytes))
@@ -1294,7 +1315,7 @@ fn cleanup_identity(module: &Module) -> Identity {
     ))
 }
 /// Check's part of an entry binding, from the declaration table alone.
-pub(crate) fn bind_entry(p: &Program<'_>, entry: &DefPath) -> EntryBinding {
+pub(crate) fn bind_entry(p: &mut Program<'_>, entry: &DefPath) -> EntryBinding {
     use hirsel_core_front::TyKind;
     let binding = (|| {
         let fd = p.function(entry).ok_or("entry declaration unavailable")?;
@@ -1313,6 +1334,7 @@ pub(crate) fn bind_entry(p: &Program<'_>, entry: &DefPath) -> EntryBinding {
             TyKind::Adt(d, a) if a.is_empty()
                 && p.decls[d.index()].path == DefPath::from_full("core@1/core/Exit").unwrap()
         );
+        let error_ty = args[1];
         let parameters = fd
             .params
             .iter()
@@ -1338,7 +1360,12 @@ pub(crate) fn bind_entry(p: &Program<'_>, entry: &DefPath) -> EntryBinding {
                 })
             })
             .collect::<Result<Vec<_>, &str>>()?;
-        Ok(EntryDecl { exit, parameters })
+        let error = (!exit).then(|| crate::entry_show::describe(&mut p.types, &p.decls, error_ty));
+        Ok(EntryDecl {
+            exit,
+            error,
+            parameters,
+        })
     })()
     .map_err(str::to_owned);
     (entry.clone(), binding)
@@ -1398,11 +1425,17 @@ fn bound_entry_abi(
         } else {
             None
         };
+        let error_text = decl
+            .error
+            .as_ref()
+            .map(|e| crate::entry_show::place(e, &module.types, &recipes, dest.index()))
+            .transpose()?;
         let cleanup = (!recipe.plain).then(|| result_cleanup(module, dest, entry));
         Ok((
             EntryAbi {
                 recipe,
                 exit_offset,
+                error_text,
                 parameters: decl.parameters.clone(),
             },
             cleanup,
@@ -2220,6 +2253,7 @@ fn f5 = n5 g5 extern
                 .unwrap()
                 .remove(0),
             exit_offset: None,
+            error_text: None,
             parameters: vec![EntryParameter {
                 ty: "core@1/core/Foreign[ffi_laws@1/laws/Laws]".into(),
                 name: "f".into(),

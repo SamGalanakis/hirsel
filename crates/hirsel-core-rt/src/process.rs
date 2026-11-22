@@ -13,11 +13,77 @@ pub struct View {
     pub len: usize,
 }
 #[repr(C)]
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 pub struct MainResult {
     /// 0 Ok, 1 Error(E) for E != Exit, 2 Error(Exit).
     pub kind: u8,
     pub exit: u8,
+    /// PROG-3: the text of `e` for kind 1, a host block from
+    /// [`hirsel_core_main_error`] that the run prints and frees; null when absent.
+    pub text: *mut u8,
+    pub text_len: usize,
+}
+impl Default for MainResult {
+    fn default() -> Self {
+        Self {
+            kind: 0,
+            exit: 0,
+            text: std::ptr::null_mut(),
+            text_len: 0,
+        }
+    }
+}
+impl MainResult {
+    /// Take the error text, if any, leaving none.
+    fn take_text(&mut self) -> Option<Box<[u8]>> {
+        if self.text.is_null() {
+            return None;
+        }
+        let text = std::ptr::slice_from_raw_parts_mut(self.text, self.text_len);
+        self.text = std::ptr::null_mut();
+        // SAFETY: `text` is the block hirsel_core_main_error leaked, taken once.
+        Some(unsafe { Box::from_raw(text) })
+    }
+}
+
+/// PROG-3: called by the generated entry when `main` returned `Error(e)` with
+/// `E` not `Exit`, before the result is cleaned. Renders `e` from the entry's
+/// text program (`hirsel_core_layout::show`) into `out`.
+///
+/// # Safety
+/// `value` is the entry's live `Result`, `program` the `len` bytes the build
+/// encoded for its `E`, and `out` the run's MainResult.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_main_error(
+    _context: *mut Context,
+    value: *const u8,
+    program: *const u8,
+    len: usize,
+    out: *mut MainResult,
+) {
+    struct Host;
+    impl hirsel_core_layout::show::Memory for Host {
+        fn read(&self, at: u64, out: &mut [u8]) {
+            // SAFETY: the program reads only the live value's own bytes.
+            unsafe {
+                std::ptr::copy_nonoverlapping(at as *const u8, out.as_mut_ptr(), out.len());
+            }
+        }
+    }
+    // SAFETY: the build's program bytes are static and live for the run.
+    let program = unsafe { std::slice::from_raw_parts(program, len) };
+    let show = hirsel_core_layout::show::Show::decode(program)
+        .expect("the build encodes the entry's text program");
+    let text = show
+        .render(value as u64, &Host)
+        .into_bytes()
+        .into_boxed_slice();
+    // SAFETY: the run's MainResult outlives the entry; an earlier text is freed.
+    unsafe {
+        drop((*out).take_text());
+        (*out).text_len = text.len();
+        (*out).text = Box::into_raw(text).cast();
+    }
 }
 pub type Entry = unsafe extern "C" fn(*mut Context, *const Config, *mut MainResult) -> u8;
 /// Host configuration and grant operands, all pinned for the run. Missing
@@ -379,6 +445,7 @@ pub(crate) unsafe fn run_with_map_hash_key(
         #[cfg(feature = "charge-observation")]
         crate::peak::checkpoint("main");
         crate::fiber::set_stop_fd(previous_fd);
+        let text = result.take_text();
         let status = if failed != 0 {
             for cause in context.causes.iter() {
                 if let Some(describe) = config.describe {
@@ -392,12 +459,21 @@ pub(crate) unsafe fn run_with_map_hash_key(
             }
             101
         } else {
+            // PROG-3: `error: ` and the value, after its cleanup has ended.
+            if result.kind == 1
+                && let Some(text) = &text
+            {
+                diagnostic(config, b"error: ");
+                diagnostic(config, text);
+                diagnostic(config, b"\n");
+            }
             match result.kind {
                 0 => 0,
                 2 if (1..=100).contains(&result.exit) => result.exit,
                 _ => 1,
             }
         };
+        drop(text);
         files.close_all(&mut context);
         drop(context);
         if let Some(close) = config.close_grants {

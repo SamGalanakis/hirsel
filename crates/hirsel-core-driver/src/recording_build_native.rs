@@ -2366,8 +2366,8 @@ fn rejected() -> Result[(), ()] { Error(()) }
             .collect::<String>()
     };
 
-    let executed = "pass executed app@1/main/good\nfail executed app@1/main/rejected: returned an error, exit status 1\n";
-    let cached = "pass cached app@1/main/good\nfail executed app@1/main/rejected: returned an error, exit status 1\n";
+    let executed = "pass executed app@1/main/good\nfail executed app@1/main/rejected: returned an error, exit status 1: error: ()\n";
+    let cached = "pass cached app@1/main/good\nfail executed app@1/main/rejected: returned an error, exit status 1: error: ()\n";
     assert_eq!(run(&["-j", "1"], 1), executed);
     assert_eq!(run(&["-j", "2"], 1), cached);
     assert_eq!(run(&["--rerun"], 1), executed);
@@ -2384,7 +2384,7 @@ fn rejected() -> Result[(), ()] { Error(()) }
             "passed": false,
             "tests": [
                 {"definition":"app@1/main/good","passed":true,"source":"cached","status":0,"stdout":"","stderr":"","timed_out":false,"wall_ms":null},
-                {"definition":"app@1/main/rejected","passed":false,"source":"executed","status":1,"stdout":"","stderr":"","timed_out":false}
+                {"definition":"app@1/main/rejected","passed":false,"source":"executed","status":1,"stdout":"","stderr":"error: ()\n","timed_out":false}
             ]
         })
     );

@@ -900,6 +900,7 @@ fn launch_options(
         EntryDecl {
             exit: recipe.launch.exit_status,
             parameters: params,
+            error: None,
         },
     ))
 }

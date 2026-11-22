@@ -1303,6 +1303,7 @@ pub fn run_nans_into(
 /// process entry does. The limit must cover startup. May record CONC-10 events.
 /// A cause's site word is `sites[item] + start` (`SourceMap::item_sites` over the
 /// module's items); an empty `sites` means the module's own (`source::module_sites`).
+/// With `error_text`, a returned `Error(e)` is rendered as PROG-3 says.
 #[allow(clippy::too_many_arguments)]
 pub fn run_entry(
     m: &Module,
@@ -1316,6 +1317,7 @@ pub fn run_entry(
     events: bool,
     sites: &[u64],
     launch: Option<&hirsel_core_ids::launch::Metadata>,
+    error_text: Option<ErrorText<'_>>,
 ) -> (Report, Checked) {
     run_world(
         m,
@@ -1331,6 +1333,7 @@ pub fn run_entry(
             process_entry: true,
             sites,
             launch,
+            error_text,
             ..WorldInput::default()
         },
     )
@@ -1492,7 +1495,12 @@ struct WorldInput<'a> {
     events: bool,
     process_entry: bool,
     sites: &'a [u64],
+    /// PROG-3: render `main`'s `Error(e)` with this program, before the run's
+    /// memory is released, into the slot.
+    error_text: Option<ErrorText<'a>>,
 }
+/// The entry's text program for `Error(e)` and where its text goes (PROG-3).
+pub type ErrorText<'a> = (&'a hirsel_core_layout::show::Show, &'a mut Option<String>);
 impl Default for WorldInput<'_> {
     fn default() -> Self {
         Self {
@@ -1513,6 +1521,7 @@ impl Default for WorldInput<'_> {
             events: false,
             process_entry: false,
             sites: &[],
+            error_text: None,
         }
     }
 }
@@ -1690,6 +1699,21 @@ fn run_world(
     });
     mach.sched.ready.push_back(0);
     let (mut mach, outcome, chain) = drive(mach, input.process_entry);
+    if let (Some((show, text)), Some(at), Outcome::Returned(_)) =
+        (input.error_text.take(), destination, &outcome)
+        && let Some(dest) = signature.dest
+        && let Layout::Fixed(fixed) = &mach.recipes[dest.index()].layout
+        && let Some(tag) = fixed.tag
+        && hirsel_core_layout::case_of(&tag, mach.load(at + tag.offset, tag.width as usize)) == 1
+    {
+        struct Blocks<'b, 'm>(&'b Machine<'m>);
+        impl hirsel_core_layout::show::Memory for Blocks<'_, '_> {
+            fn read(&self, at: u64, out: &mut [u8]) {
+                out.copy_from_slice(self.0.get(at, out.len()));
+            }
+        }
+        *text = Some(show.render(at, &Blocks(&mach)));
+    }
     if let Some(bytes) = input.destination.as_mut() {
         bytes.copy_from_slice(&mach.mem[split(destination.unwrap()).0].bytes);
     }

@@ -119,8 +119,7 @@ impl TestOutcome {
 }
 
 /// What a run's nonzero exit status means (PROG-3), for the driver's line on
-/// a run or test that did not succeed. The run writes nothing for an `Error`,
-/// so this line is the only report of one.
+/// a run or test that did not succeed, after any line the run wrote for it.
 pub(crate) fn outcome_text(status: std::process::ExitStatus) -> String {
     use std::os::unix::process::ExitStatusExt;
     match (status.code(), status.signal()) {

@@ -7,6 +7,7 @@ pub mod code_admission;
 pub mod code_store;
 pub mod describe;
 mod diagnostics;
+mod entry_show;
 mod exec_launch;
 mod foreign_archive;
 mod foreign_header;
@@ -1209,11 +1210,14 @@ impl Driver {
             result.diagnostics.extend(diagnostics);
             // Check binds an entry's declaration part; its ABI is read from
             // the body's IR in the build.
-            result.native_entry = request.entry.as_ref().map(|e| native::bind_entry(&p, e));
+            result.native_entry = request
+                .entry
+                .as_ref()
+                .map(|e| native::bind_entry(&mut p, e));
             for f in p.fns.base_len()..p.fns.len() {
-                let fd = &p.fns[f];
-                if fd.is_test {
-                    let (path, decl) = native::bind_entry(&p, &fd.path);
+                if p.fns[f].is_test {
+                    let path = p.fns[f].path.clone();
+                    let (path, decl) = native::bind_entry(&mut p, &path);
                     result.test_entries.insert(path, decl);
                 }
             }

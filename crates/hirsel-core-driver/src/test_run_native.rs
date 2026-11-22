@@ -2262,18 +2262,46 @@ __attribute__((constructor)) static void init(void) { write(2, "ctor\n", 5); }
 }
 
 /// Bug: `hirsel run` of a `main` that returns `Error(e)` exited 1 with no
-/// output, since the run writes nothing for an error outcome (PROG-3). The
-/// driver names the outcome on stderr and passes the status through.
+/// output, and then with only the driver's outcome line, so the value that
+/// said what went wrong was lost. PROG-3: the run writes `error: ` and `e` as
+/// Hirsel source, a `Secret` as `[secret]`, on both engines' entry glue.
 #[test]
-fn run_names_an_error_outcome_the_run_does_not_report() {
+fn run_writes_main_error_value_then_names_the_outcome() {
     let law = PackageLaw::new();
     law.manifest("app", "app", 1, "[sources]\n\"main.hirsel\" = \"main\"\n");
-    law.write("app/main.hirsel", "pub fn main() -> Result[(), ()] { Error(()) }\n");
-    let (status, stdout, stderr) = law.run(&["run", "app"]);
-    assert_eq!(status, Some(1), "{stdout}\n{stderr}");
-    let stderr: Vec<_> =
-        stderr.lines().filter(|line| !line.starts_with("hirsel: created hirsel.lock")).collect();
-    assert_eq!(stderr, ["hirsel: main returned an error, exit status 1"]);
+    let types = "type ServeError = Configuration | Bind(port: u16)\n\
+        type AppError = Serve(ServeError) | Config(file: String, key: Secret)\n";
+    let cases = [
+        (
+            r#"pub fn main() -> Result[(), AppError] {
+    let b = string.into_bytes(string.from("pencil"))
+    let key = result.unwrap(secret.seal(take b, string.from("beta.test")))
+    Error(Config(file: "a\tb.conf", key: key))
+}
+"#,
+            r#"error: Config(file: "a\tb.conf", key: [secret])"#,
+        ),
+        (
+            "pub fn main() -> Result[(), AppError] { Error(Serve(Configuration)) }\n",
+            "error: Serve(Configuration)",
+        ),
+    ];
+    for (main, line) in cases {
+        law.write("app/main.hirsel", &format!("{types}{main}"));
+        for engine in ["cranelift", "llvm"] {
+            let (status, stdout, stderr) = law.run(&["run", "app", "--backend", engine]);
+            assert_eq!(status, Some(1), "{engine}: {stdout}\n{stderr}");
+            let stderr: Vec<_> = stderr
+                .lines()
+                .filter(|line| !line.starts_with("hirsel: created hirsel.lock"))
+                .collect();
+            assert_eq!(
+                stderr,
+                [line, "hirsel: main returned an error, exit status 1"],
+                "{engine}"
+            );
+        }
+    }
 }
 
 #[test]

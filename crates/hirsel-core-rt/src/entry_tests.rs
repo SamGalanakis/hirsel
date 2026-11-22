@@ -614,7 +614,11 @@ fn run_closes_grants_after_main_cleanup_and_before_reporting_status_without_admi
         unsafe {
             (&mut *(*config).state.cast::<State>()).events.push(1);
             (*context).current.inject(1, true);
-            *out = MainResult { kind: 2, exit: 7 };
+            *out = MainResult {
+                kind: 2,
+                exit: 7,
+                ..Default::default()
+            };
         }
         0
     }
@@ -679,7 +683,11 @@ fn broken_pipe_child() {
                 (out.status, out.written, out.error.code),
                 (0, 0, libc::EPIPE as u32)
             );
-            *result = MainResult { kind: 2, exit: 7 };
+            *result = MainResult {
+                kind: 2,
+                exit: 7,
+                ..Default::default()
+            };
         }
         0
     }

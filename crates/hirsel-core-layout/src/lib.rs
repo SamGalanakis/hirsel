@@ -25,6 +25,7 @@ pub mod isa;
 pub mod map_hash;
 mod recipe;
 mod shape;
+pub mod show;
 pub mod source_positions;
 mod target;
 

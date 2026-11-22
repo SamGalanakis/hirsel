@@ -7178,17 +7178,36 @@ pub fn serve_connection[C: send](tasks: Tasks, take upgraded: std.wsock.Upgraded
 
 fn wire_connection_owner[C: send](take x: WireOwner[C]) -> Result[(), std.wsock.Error] waits {
     if !wire_configuration(x.config) { return Error(Configuration) }
-    let mut abandoned = 0u64
     let c = x.config
     // The reader and owner each wait for their single allocation request.
     let allocated: Result[(Sender[WireAllocation[C]], Task[()]), Capacity] = start_wire_pool(x.tasks, c, x.clock, wire_connection_pool_bytes(c), 2u64)
-    let (to, take holding) = match take allocated {
+    let (take to, take holding) = match take allocated {
         Ok(take pair) => take pair, Error(cap) => return Error(Allocation(cap)),
     }
-    let served = wire_owner(take x, to, mut abandoned)
-    let _ = take holding
-    served
+    wire_owner(take x, take to, Pooled(take holding))
 }
+
+// What the owner holds for whoever started it until it ends: the accept
+// loop's completion, or a lone connection's own allocation pool task.
+type WireTail = Served(OwnerCompletion) | Pooled(Task[()])
+
+// Ends the owner's hold: the completion reports the count of sends its work
+// abandoned, or the pool task is dropped; then the pool sender goes.
+fn wire_tail[C: send](take tail: WireTail, take pool: Sender[WireAllocation[C]], abandoned: u64) {
+    match take tail {
+        Served(take completion) => {
+            let mut report = take completion
+            report.abandoned = abandoned
+        },
+        Pooled(take holding) => { let _ = take holding },
+    }
+    let _ = take pool
+}
+
+// The owner's steady phase owns all it needs, so nothing of the setup is
+// left to finish after it, and the task enters it in place of its setup's
+// frames (returnable.rs, transfer sites).
+type WireSteady[C: send] { st: WireLoop[C], service: Box[Service[C]], pool: Sender[WireAllocation[C]], tail: WireTail }
 
 // The owner's state across its event loop. wire_owner_setup builds it and
 // returns, so the setup's temporaries leave the stack before the loop runs, and
@@ -7210,12 +7229,15 @@ type WireLoop[C: send] {
 // any), start the next event, or leave the loop with this result.
 type WireStep = Go(Option[Frame]) | Again | Stop(Result[(), std.wsock.Error])
 
-fn wire_owner[C: send](take x: WireOwner[C], pool: Sender[WireAllocation[C]], mut abandoned: u64) -> Result[(), std.wsock.Error] waits {
+fn wire_owner[C: send](take x: WireOwner[C], take pool: Sender[WireAllocation[C]], take tail: WireTail) -> Result[(), std.wsock.Error] waits {
     let (take st, take service) = match wire_owner_setup(take x, pool) {
         Ok(take ready) => take ready,
-        Error(take done) => return take done,
+        Error(take done) => {
+            wire_tail(take tail, take pool, 0u64)
+            return take done
+        },
     }
-    wire_owner_run(take st, take service, pool, mut abandoned)
+    wire_owner_run(WireSteady(st: take st, service: take service, pool: take pool, tail: take tail))
 }
 
 // Error(r) is the owner's result when it ends before its loop.
@@ -7262,7 +7284,9 @@ fn wire_owner_setup[C: send](take x: WireOwner[C], pool: Sender[WireAllocation[C
     Ok((take st, take service))
 }
 
-fn wire_owner_run[C: send](take initial: WireLoop[C], take initial_service: Box[Service[C]], pool: Sender[WireAllocation[C]], mut abandoned: u64) -> Result[(), std.wsock.Error] waits {
+fn wire_owner_run[C: send](take job: WireSteady[C]) -> Result[(), std.wsock.Error] waits {
+    let WireSteady(st: take initial, service: take initial_service, pool: take pool, tail: take tail) = take job
+    let mut abandoned = 0u64
     let mut st = take initial
     let mut service = take initial_service
     // Every normal exit goes through wire_join, including service refusal and
@@ -7282,21 +7306,33 @@ fn wire_owner_run[C: send](take initial: WireLoop[C], take initial_service: Box[
                         service = take kept
                         match take outcome { Go(take next) => take next, Again => continue, Stop(take r) => break take r }
                     },
-                    None => return wire_owner_lost(take st),
+                    None => {
+                        let lost = wire_owner_lost(take st)
+                        wire_tail(take tail, take pool, 0u64)
+                        return lost
+                    },
                 }
             },
             FromRunner(take e) => {
                 if st.closing { continue }
                 match wire_owner_runner(mut st, take service, pool, take e) {
                     Some((take kept, take next)) => { service = take kept; take next },
-                    None => return wire_owner_lost(take st),
+                    None => {
+                        let lost = wire_owner_lost(take st)
+                        wire_tail(take tail, take pool, 0u64)
+                        return lost
+                    },
                 }
             },
             HelloBound(take identity_result) => {
                 let _ = replace(mut st.work.asking, None)
                 match wire_owner_hello(mut st, take service, pool, take identity_result) {
                     Some(take kept) => { service = take kept; None },
-                    None => return wire_owner_lost(take st),
+                    None => {
+                        let lost = wire_owner_lost(take st)
+                        wire_tail(take tail, take pool, 0u64)
+                        return lost
+                    },
                 }
             },
             GrantedDone(take tick, take outcome) => {
@@ -7342,7 +7378,10 @@ fn wire_owner_run[C: send](take initial: WireLoop[C], take initial_service: Box[
         match wire_owner_send(mut st, mut service, pool, take outgoing) { Stop(take r) => break take r, _ => {} }
     }
     if st.expired { abandoned = st.work.abandoned }
-    wire_owner_end(take st, mut service, take result)
+    let ended = wire_owner_end(take st, mut service, take result)
+    let _ = take service
+    wire_tail(take tail, take pool, abandoned)
+    ended
 }
 
 // v2.22 (§3): the owner's Join goes into PubIn with a waiting send, like connect's. The
@@ -7807,7 +7846,6 @@ fn wire_accepted[C: send](take x: WireAccept[C]) -> Result[(), std.wsock.Error] 
     let admission = scoped fn(ip: Ip) -> bool {
         match control { Some(life) => !closing_at(life.drain, clock), None => true }
     }
-    let mut abandoned = 0u64
     let raw = scoped fn(path: Bytes) -> Result[Option[(bool, String)], Capacity] {
         if path != string.as_bytes("/hirsel/status") { return Ok(None) }
         match control {
@@ -7816,14 +7854,14 @@ fn wire_accepted[C: send](take x: WireAccept[C]) -> Result[(), std.wsock.Error] 
         }
     }
     let received = std.wsock.server_with_site(take socket, take slot, peer, proxies, c.socket, clock, accepted, c.site, raw, admission)
-    let result: Result[(), std.wsock.Error] = match take received {
+    let _ = take proxies
+    let ended: Result[(), std.wsock.Error] = match take received {
+        Ok(Some(take up)) => return wire_owner(WireOwner(upgraded: take up, service: take service, publisher: take pub_to, config: c, clock: clock, tasks: tasks, managed: take control), take allocation, Served(take completion)),
         Ok(None) => Ok(()),
-        Ok(Some(take up)) => wire_owner(WireOwner(upgraded: take up, service: take service, publisher: take pub_to, config: c, clock: clock, tasks: tasks, managed: take control), allocation, mut abandoned),
         Error(e) => Error(e),
     }
-    let mut final_report = take completion
-    final_report.abandoned = abandoned
-    result
+    wire_tail(Served(take completion), take allocation, 0u64)
+    ended
 }
 
 type ServeInput: send = AcceptedSocket(Socket, Ip, u64) | AcceptEnded(NetError) | OwnerReady(u64, Sender[WireEvent], Sender[()]) | OwnerEnded(u64, u64) | ServeStart | ServeWake | ServeRetire | CheckServeIdle | AcceptIdle

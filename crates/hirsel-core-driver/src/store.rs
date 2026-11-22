@@ -16,6 +16,7 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use twox_hash::XxHash3_64;
 
@@ -643,8 +644,25 @@ impl Store {
         Ok(())
     }
     pub fn get(&self, key: ContentHash) -> io::Result<Option<Vec<u8>>> {
+        let Some((mut bytes, end)) = self.checked(key)? else {
+            return Ok(None);
+        };
+        bytes.truncate(end);
+        bytes.drain(..HEADER);
+        Ok(Some(bytes))
+    }
+    /// A record's payload in one shared copy, never moved within its read
+    /// buffer first.
+    pub(crate) fn get_shared(&self, key: ContentHash) -> io::Result<Option<Arc<[u8]>>> {
+        Ok(self
+            .checked(key)?
+            .map(|(bytes, end)| Arc::from(&bytes[HEADER..end])))
+    }
+    /// A framed record's bytes when they pass their check, and where its
+    /// payload ends.
+    fn checked(&self, key: ContentHash) -> io::Result<Option<(Vec<u8>, usize)>> {
         let image = crate::meter::ImageRead::start(self.image);
-        let Some(mut bytes) = self.read_whole(key, image.as_ref())? else {
+        let Some(bytes) = self.read_whole(key, image.as_ref())? else {
             return Ok(None);
         };
         let size = bytes.len();
@@ -663,9 +681,7 @@ impl Store {
         {
             return Ok(None);
         }
-        bytes.drain(..HEADER);
-        bytes.truncate(end - HEADER);
-        Ok(Some(bytes))
+        Ok(Some((bytes, end)))
     }
     /// A bare object's bytes when they pass their check, with the descriptor
     /// they were read and checked through.

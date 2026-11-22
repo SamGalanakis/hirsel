@@ -72,6 +72,7 @@ fn runtime_probes() -> Module {
         RtOp::MapStrongBytes,
         RtOp::MapStrongStart,
         RtOp::ReceiveRec { item: ITEM },
+        RtOp::Crc32c,
         RtOp::SecretShare,
     ]
     .into_iter()

@@ -89,6 +89,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 _ => None,
             };
         }
+        if module == ["crc32c"] && name == "update" {
+            return Some(self.crc32c_update(vals[0]?, vals[1]?, n));
+        }
         if module == ["sha1"] && name == "blocks" {
             return Some(self.sha1_blocks(vals[0]?, vals[1]?, n));
         }

@@ -43,6 +43,7 @@ const BUILTIN_SEMANTICS: &[(&str, &str, u32)] = &[
     ("core", "finish_trim", 1),
     ("core", "isolate", 1),
     ("core", "replace", 1),
+    ("crc32c", "update", 1),
     ("deque", "slots_empty", 1),
     ("deque", "slots_forget_ring", 1),
     ("deque", "slots_free", 1),

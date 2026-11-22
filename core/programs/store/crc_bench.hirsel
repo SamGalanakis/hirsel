@@ -1,25 +1,3 @@
-// CRC-32C (Castagnoli), reflected polynomial 0x82f63b78.
-// The byte recurrence is the portable crc32c 0.6.8 sw.rs:35-40 form.
-// One 1-KiB table replaces its 8-KiB slicing table; no hardware core operation.
-const CRC: Inline[u32, 256] =[0x00000000u32, 0xf26b8303u32, 0xe13b70f7u32, 0x1350f3f4u32, 0xc79a971fu32, 0x35f1141cu32, 0x26a1e7e8u32, 0xd4ca64ebu32, 0x8ad958cfu32, 0x78b2dbccu32, 0x6be22838u32, 0x9989ab3bu32, 0x4d43cfd0u32, 0xbf284cd3u32, 0xac78bf27u32, 0x5e133c24u32, 0x105ec76fu32, 0xe235446cu32, 0xf165b798u32, 0x030e349bu32, 0xd7c45070u32, 0x25afd373u32, 0x36ff2087u32, 0xc494a384u32, 0x9a879fa0u32, 0x68ec1ca3u32, 0x7bbcef57u32, 0x89d76c54u32, 0x5d1d08bfu32, 0xaf768bbcu32, 0xbc267848u32, 0x4e4dfb4bu32, 0x20bd8edeu32, 0xd2d60dddu32, 0xc186fe29u32, 0x33ed7d2au32, 0xe72719c1u32, 0x154c9ac2u32, 0x061c6936u32, 0xf477ea35u32, 0xaa64d611u32, 0x580f5512u32, 0x4b5fa6e6u32, 0xb93425e5u32, 0x6dfe410eu32, 0x9f95c20du32, 0x8cc531f9u32, 0x7eaeb2fau32, 0x30e349b1u32, 0xc288cab2u32, 0xd1d83946u32, 0x23b3ba45u32, 0xf779deaeu32, 0x05125dadu32, 0x1642ae59u32, 0xe4292d5au32, 0xba3a117eu32, 0x4851927du32, 0x5b016189u32, 0xa96ae28au32, 0x7da08661u32, 0x8fcb0562u32, 0x9c9bf696u32, 0x6ef07595u32, 0x417b1dbcu32, 0xb3109ebfu32, 0xa0406d4bu32, 0x522bee48u32, 0x86e18aa3u32, 0x748a09a0u32, 0x67dafa54u32, 0x95b17957u32, 0xcba24573u32, 0x39c9c670u32, 0x2a993584u32, 0xd8f2b687u32, 0x0c38d26cu32, 0xfe53516fu32, 0xed03a29bu32, 0x1f682198u32, 0x5125dad3u32, 0xa34e59d0u32, 0xb01eaa24u32, 0x42752927u32, 0x96bf4dccu32, 0x64d4cecfu32, 0x77843d3bu32, 0x85efbe38u32, 0xdbfc821cu32, 0x2997011fu32, 0x3ac7f2ebu32, 0xc8ac71e8u32, 0x1c661503u32, 0xee0d9600u32, 0xfd5d65f4u32, 0x0f36e6f7u32, 0x61c69362u32, 0x93ad1061u32, 0x80fde395u32, 0x72966096u32, 0xa65c047du32, 0x5437877eu32, 0x4767748au32, 0xb50cf789u32, 0xeb1fcbadu32, 0x197448aeu32, 0x0a24bb5au32, 0xf84f3859u32, 0x2c855cb2u32, 0xdeeedfb1u32, 0xcdbe2c45u32, 0x3fd5af46u32, 0x7198540du32, 0x83f3d70eu32, 0x90a324fau32, 0x62c8a7f9u32, 0xb602c312u32, 0x44694011u32, 0x5739b3e5u32, 0xa55230e6u32, 0xfb410cc2u32, 0x092a8fc1u32, 0x1a7a7c35u32, 0xe811ff36u32, 0x3cdb9bddu32, 0xceb018deu32, 0xdde0eb2au32, 0x2f8b6829u32, 0x82f63b78u32, 0x709db87bu32, 0x63cd4b8fu32, 0x91a6c88cu32, 0x456cac67u32, 0xb7072f64u32, 0xa457dc90u32, 0x563c5f93u32, 0x082f63b7u32, 0xfa44e0b4u32, 0xe9141340u32, 0x1b7f9043u32, 0xcfb5f4a8u32, 0x3dde77abu32, 0x2e8e845fu32, 0xdce5075cu32, 0x92a8fc17u32, 0x60c37f14u32, 0x73938ce0u32, 0x81f80fe3u32, 0x55326b08u32, 0xa759e80bu32, 0xb4091bffu32, 0x466298fcu32, 0x1871a4d8u32, 0xea1a27dbu32, 0xf94ad42fu32, 0x0b21572cu32, 0xdfeb33c7u32, 0x2d80b0c4u32, 0x3ed04330u32, 0xccbbc033u32, 0xa24bb5a6u32, 0x502036a5u32, 0x4370c551u32, 0xb11b4652u32, 0x65d122b9u32, 0x97baa1bau32, 0x84ea524eu32, 0x7681d14du32, 0x2892ed69u32, 0xdaf96e6au32, 0xc9a99d9eu32, 0x3bc21e9du32, 0xef087a76u32, 0x1d63f975u32, 0x0e330a81u32, 0xfc588982u32, 0xb21572c9u32, 0x407ef1cau32, 0x532e023eu32, 0xa145813du32, 0x758fe5d6u32, 0x87e466d5u32, 0x94b49521u32, 0x66df1622u32, 0x38cc2a06u32, 0xcaa7a905u32, 0xd9f75af1u32, 0x2b9cd9f2u32, 0xff56bd19u32, 0x0d3d3e1au32, 0x1e6dcdeeu32, 0xec064eedu32, 0xc38d26c4u32, 0x31e6a5c7u32, 0x22b65633u32, 0xd0ddd530u32, 0x0417b1dbu32, 0xf67c32d8u32, 0xe52cc12cu32, 0x1747422fu32, 0x49547e0bu32, 0xbb3ffd08u32, 0xa86f0efcu32, 0x5a048dffu32, 0x8ecee914u32, 0x7ca56a17u32, 0x6ff599e3u32, 0x9d9e1ae0u32, 0xd3d3e1abu32, 0x21b862a8u32, 0x32e8915cu32, 0xc083125fu32, 0x144976b4u32, 0xe622f5b7u32, 0xf5720643u32, 0x07198540u32, 0x590ab964u32, 0xab613a67u32, 0xb831c993u32, 0x4a5a4a90u32, 0x9e902e7bu32, 0x6cfbad78u32, 0x7fab5e8cu32, 0x8dc0dd8fu32, 0xe330a81au32, 0x115b2b19u32, 0x020bd8edu32, 0xf0605beeu32, 0x24aa3f05u32, 0xd6c1bc06u32, 0xc5914ff2u32, 0x37faccf1u32, 0x69e9f0d5u32, 0x9b8273d6u32, 0x88d28022u32, 0x7ab90321u32, 0xae7367cau32, 0x5c18e4c9u32, 0x4f48173du32, 0xbd23943eu32, 0xf36e6f75u32, 0x0105ec76u32, 0x12551f82u32, 0xe03e9c81u32, 0x34f4f86au32, 0xc69f7b69u32, 0xd5cf889du32, 0x27a40b9eu32, 0x79b737bau32, 0x8bdcb4b9u32, 0x988c474du32, 0x6ae7c44eu32, 0xbe2da0a5u32, 0x4c4623a6u32, 0x5f16d052u32, 0xad7d5351u32]
-
-/// CRC-32C of b, with initial/final complement. Empty is zero; "123456789"
-/// is 0xe3069283. Allocates nothing. Cost: O(len(b)).
-fn crc32c(b: Bytes) -> u32 {
-    crc32c_append(0, b)
-}
-
-/// CRC-32C of prefix followed by b, where prefix is the CRC of the prefix bytes.
-/// Allocates nothing; accepts arbitrary byte chunks, including an empty chunk.
-fn crc32c_append(prefix: u32, b: Bytes) -> u32 {
-    let mut crc = prefix ^ 0xffffffffu32
-    for byte in b {
-        let i: u8 = int.truncate(crc ^ int.widen(byte))
-        crc = CRC[int.widen(i)] ^ (crc >> 8)
-    }
-    crc ^ 0xffffffffu32
-}
-
 // R9: 10,000 CRCs of the same 4-KiB image. Runtime Args prevents constant folding.
 pub fn main(argv: Args, out: Stdout) -> Result[(), Exit] waits {
     let argument = option.unwrap(args.get(argv, 0))
@@ -30,7 +8,7 @@ pub fn main(argv: Args, out: Stdout) -> Result[(), Exit] waits {
     }
     let mut crc: u32 = 0
     for _ in 0u64 .. loops {
-        crc = crc32c_append(crc, image)
+        crc = crc32c.update(crc, image)
     }
     let mut rendered = string.new()
     string.push_u64(mut rendered, int.widen(crc))

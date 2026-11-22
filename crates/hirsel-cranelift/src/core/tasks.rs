@@ -5,6 +5,7 @@ use super::*;
 use cranelift_codegen::ir::{MemFlagsData, Value};
 const P: Ty = Ty::Ptr;
 const U: Ty = Ty::Scalar(Scalar::U64);
+const W: Ty = Ty::Scalar(Scalar::U32);
 const K: Ty = Ty::Scalar(Scalar::U8);
 const B: Ty = Ty::Scalar(Scalar::Bool);
 
@@ -601,6 +602,10 @@ impl Function<'_, '_, '_> {
             RtOp::Sha256Blocks => {
                 self.c_call("hirsel_core_sha256_blocks", &[P, P, U], &[], &args[..3])?;
                 0
+            }
+            RtOp::Crc32c => {
+                outputs[0] = self.c_call("hirsel_core_crc32c", &[W, P, U], &[W], &args[..3])?[0];
+                1
             }
             RtOp::Ed25519Verify | RtOp::P256Verify | RtOp::P256VerifyDer => {
                 let name = match op {

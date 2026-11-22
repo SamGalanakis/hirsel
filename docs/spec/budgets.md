@@ -280,12 +280,12 @@ is core's plain record `{ steps: u64 }`.
   `via`). Iteration (SEM-6), operators, field and index access, literals and constructors,
   `?`, patterns and `match` run no user code and take none. A core function's call, and a
   foreign function's ([FFI-7](foreign.md#ffi-7-host-stack-and-waits)), is one
-  step whatever it does; nothing inside it is counted but the user code it enters. The one
-  exception is `secret.scram_sha256`, which takes one further step for each PBKDF2 iteration
-  it admits, at the call and before any derivation, because its work is chosen by an untrusted
-  server, not by sizes a limit bounds ([TLS-6](tls.md#tls-6-scram-sha-256)). Code an
-  engine adds of its own, such as drop, clone and growth code, takes none. So the steps a run
-  takes follow from its source and its values alone.
+  step plus any steps taken by the user code it enters. `secret.scram_sha256` takes
+  one further step for each PBKDF2 iteration it admits, at the call and before any
+  derivation, because an untrusted server chooses the work ([TLS-6](tls.md#tls-6-scram-sha-256)).
+  `crc32c.update` takes one further step before each nonempty 16 KiB chunk,
+  including a final partial chunk. Code an engine adds for drop, clone and growth
+  takes no steps. The steps a run takes follow from its source and its values alone.
 - **The current bound.** At each point exactly one step bound is current, or none: the
   innermost enclosing `bound steps` scope's, else the task's root step bound, else none.
   Every step taken while a bound is current uses one of it. Entering `bound steps n`

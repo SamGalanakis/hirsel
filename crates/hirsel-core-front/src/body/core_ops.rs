@@ -301,6 +301,7 @@ operations! {
     ("check", "xxh3_short_inline", Lane::Value, "A", "xxh3-stripes", false),
     ("check", "xxh3_stripes", Lane::Value, "A", "xxh3-stripes", false),
     ("check", "xxh3_stripe", Lane::Value, "A", "xxh3-stripes", false),
+    ("crc32c", "update", Lane::Value, "A", "crc32c-hw-1794", false),
     ("sha1", "blocks", Lane::Value, "A", "sha1-hardware", false),
     ("sha256", "blocks", Lane::Value, "A", "sha256-hardware", false),
     ("sha256", "block", Lane::Value, "A", "sha256-hardware", false),

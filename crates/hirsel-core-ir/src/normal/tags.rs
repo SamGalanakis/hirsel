@@ -377,6 +377,7 @@ tags!(RtOp {
     63 => MapStrongBytes,
     64 => MapStrongStart,
     65 => ReceiveRec { item },
+    67 => Crc32c,
     66 => SecretShare,
 });
 

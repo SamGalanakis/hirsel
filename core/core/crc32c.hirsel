@@ -1,0 +1,4 @@
+// Module `crc32c`: CRC-32C (Castagnoli).
+/// Extend a finalized CRC-32C over input. Pass zero to start a checksum.
+/// Empty input returns crc. Alloc: none. Steps: one per started 16 KiB, plus the call.
+pub fn update(crc: u32, input: Bytes) -> u32

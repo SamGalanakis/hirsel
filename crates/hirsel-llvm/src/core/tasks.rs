@@ -4,6 +4,7 @@ use super::storage::zeroext;
 use super::*;
 const P: Ty = Ty::Ptr;
 const U: Ty = Ty::Scalar(Scalar::U64);
+const W: Ty = Ty::Scalar(Scalar::U32);
 const K: Ty = Ty::Scalar(Scalar::U8);
 const B: Ty = Ty::Scalar(Scalar::Bool);
 
@@ -466,6 +467,11 @@ impl FunctionEmitter<'_> {
                 "hirsel_core_sha256_blocks",
                 &[],
                 &[p(&args[0]), p(&args[1]), u(&args[2])],
+            ),
+            RtOp::Crc32c => self.native_call(
+                "hirsel_core_crc32c",
+                &[W],
+                &[arg(Type::I32, args[0].clone()), p(&args[1]), u(&args[2])],
             ),
             RtOp::Ed25519Verify | RtOp::P256Verify | RtOp::P256VerifyDer => {
                 let name = match op {

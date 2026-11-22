@@ -1600,6 +1600,16 @@ fn run_lines_native(backend: Backend, case: &str) {
     main += "  Ok(())\n}\n";
     ordered_case(backend, &format!("{case}\n{main}"));
 }
+#[test]
+#[ignore = "explicit native integration target"]
+fn crc32c_contract_on_both_native_engines() {
+    let source = include_str!("../../../core/std/tests/crc32.hirsel");
+    let start = source.find("fn castagnoli_vectors()").unwrap();
+    for engine in [Backend::Cranelift, Backend::Llvm] {
+        run_lines_native(engine, &source[start..]);
+    }
+}
+
 /// core.md "Floats": the unary float operations and IEEE comparison predicates.
 fn float_contract(backend: Backend) {
     run_lines_native(

@@ -1019,6 +1019,8 @@ pub enum RtOp {
     Xxh3Stripes,
     /// Take the socket or read the scratch grant designated by the place host.
     LaunchHandle,
+    /// Extend a finalized Castagnoli CRC over a readable byte range.
+    Crc32c,
     /// Verify a pure Ed25519 signature over a message.
     Ed25519Verify,
     /// Verify a fixed-width P-256 ECDSA signature over a message with SHA-256.
@@ -1504,6 +1506,7 @@ impl RtOp {
     /// | `sha1_blocks` | state `ptr`, `data: ptr`, `len: u64` | (crate docs, "SHA-1") |
     /// | `zero_bytes` | `block: ptr`, `at: ptr`, `len: u64` | (crate docs, "Zero fill") |
     /// | `sha256_blocks` | state `ptr`, `data: ptr`, `blocks: u64` | (crate docs, "SHA-256") |
+    /// | `crc32c` | `crc: u32`, `data: ptr`, `len: u64` | `u32`: updated CRC-32C |
     /// | `ed25519_verify`, `p256_verify`, `p256_verify_der` | key, message and signature pointer/length pairs (lengths `u64`) | `u64`: 1 if valid, 0 otherwise |
     /// | `cause_next` | cell `ptr` | `ptr`: the next cell, null after the last |
     /// | `cause_value` | cell `ptr` | `ptr`: the cell's `Cause` |
@@ -1604,6 +1607,10 @@ impl RtOp {
             RtOp::Sha1Blocks => (vec![V(p), V(p), V(u64_)], vec![]),
             RtOp::ZeroBytes => (vec![V(p), V(p), V(u64_)], vec![]),
             RtOp::Sha256Blocks => (vec![V(p), V(p), V(u64_)], vec![]),
+            RtOp::Crc32c => {
+                let u32_ = Ty::Scalar(Scalar::U32);
+                (vec![V(u32_), V(p), V(u64_)], vec![u32_])
+            }
             RtOp::Ed25519Verify | RtOp::P256Verify | RtOp::P256VerifyDer => (
                 vec![V(p), V(u64_), V(p), V(u64_), V(p), V(u64_)],
                 vec![u64_],
@@ -1943,6 +1950,7 @@ impl RtOp {
             | RtOp::Sha1Blocks
             | RtOp::ZeroBytes
             | RtOp::Sha256Blocks
+            | RtOp::Crc32c
             | RtOp::Ed25519Verify
             | RtOp::P256Verify
             | RtOp::P256VerifyDer

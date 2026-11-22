@@ -6688,6 +6688,18 @@ impl Machine<'_> {
                 );
                 vec![]
             }
+            RtOp::Crc32c => {
+                let mut crc = !(a[0] as u32);
+                if a[2] != 0 {
+                    for &byte in self.get(a[1], a[2] as usize) {
+                        crc ^= u32::from(byte);
+                        for _ in 0..8 {
+                            crc = (crc >> 1) ^ (0x82f63b78 & (crc & 1).wrapping_neg());
+                        }
+                    }
+                }
+                vec![u64::from(!crc)]
+            }
             RtOp::Ed25519Verify | RtOp::P256Verify | RtOp::P256VerifyDer => {
                 use hirsel_core_net::SignatureAlgorithm;
                 let algorithm = match op {

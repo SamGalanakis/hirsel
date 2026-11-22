@@ -477,6 +477,14 @@
 //! it to `void hirsel_core_sha256_blocks(uint32_t *, const uint8_t *, uint64_t)`,
 //! with no context or status.
 //!
+//! # CRC-32C
+//!
+//! `rt.crc32c(crc, data, len)` extends a finalized Castagnoli CRC over the
+//! readable span. Zero length returns the incoming CRC without reading data.
+//! The row admits no memory, never fails and takes no step itself. Lowering
+//! `crc32c.update` emits a step before calling the kernel on each nonempty
+//! chunk of up to 16 KiB.
+//!
 //! # Zero fill
 //!
 //! `rt.zero_bytes(block, at, len)` writes `len` zero bytes at `at`, which lies

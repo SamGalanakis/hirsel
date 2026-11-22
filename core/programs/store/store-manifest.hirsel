@@ -969,12 +969,9 @@ fn publish_page_manifest_bytes(d: Dir, raw: Bytes) -> Result[(), Error] waits {
     disk_io(host.sync_dir(d))
 }
 
-fn attach_page_graph(mut graph: PageGraph) -> Result[Map[u64, Arc[std.page.Page]], Error] {
+fn attach_page_graph(mut graph: PageGraph, empty_collection: Arc[std.page.Page]) -> Result[Map[u64, Arc[std.page.Page]], Error] {
     let mut pages: Map[u64, Arc[std.page.Page]] = map.new()
     let mut bodies: Map[u64, Arc[Bytes]] = map.new()
-    let empty_collection = disk_allocation(fn() -> Result[Arc[std.page.Page], Error] {
-        Ok(std.page.empty(0, 0, Collection))
-    })?
     let stamps = replace(mut graph.postorder, list.new())
     for stamp in stamps {
         let frame = option.unwrap(map.remove(mut graph.frames, stamp))
@@ -1036,17 +1033,20 @@ fn rebuild_page_store(take validated: ValidatedPageManifest) -> Result[LoadedPag
     })?
     let ValidatedPageManifest(manifest: take manifest, graph: take resolved, ..) = take validated
     let mut graph = take resolved
-    let pages = attach_page_graph(mut graph)?
+    let empty_collection = disk_allocation(fn() -> Result[Arc[std.page.Page], Error] {
+        Ok(std.page.empty(0, 0, Collection))
+    })?
+    let pages = attach_page_graph(mut graph, empty_collection)?
     let (take holders, take lists) = disk_allocation(scoped fn() -> Result[(List[PageRoots], PagedLists), Error] {
         let mut all: List[PageRoots] = list.with_capacity(list.len(manifest.branches) + list.len(manifest.pins))
         for item in manifest.branches {
-            list.push(mut all, attach_page_roots(pages, item.roots, manifest.inline))
+            list.push(mut all, attach_page_roots(pages, item.roots, manifest.inline, empty_collection))
         }
         for held in manifest.pins {
-            list.push(mut all, attach_page_roots(pages, held.roots, manifest.inline))
+            list.push(mut all, attach_page_roots(pages, held.roots, manifest.inline, empty_collection))
         }
-        let list_tree = attach_page_tree(pages, manifest.pack_root, Unprefixed, 1024)
-        let retirement_tree = attach_page_tree(pages, manifest.retirement_root, Unprefixed, 1024)
+        let list_tree = attach_page_tree(pages, manifest.pack_root, Unprefixed, 1024, None)
+        let retirement_tree = attach_page_tree(pages, manifest.retirement_root, Unprefixed, 1024, None)
         let PageTree(root: take packs, ..) = take list_tree
         let PageTree(root: take retired, ..) = take retirement_tree
         Ok((take all, PagedLists(packs: take packs, retired: take retired)))
@@ -1181,8 +1181,9 @@ fn check_paged_inventory(d: Dir) -> Result[(), Error] waits {
     let inline = validated.manifest.inline
     let ValidatedPageManifest(graph: take resolved, ..) = take validated
     let mut graph = take resolved
-    let pages = attach_page_graph(mut graph)?
-    let roots = attach_page_roots(pages, root_ptrs, inline)
+    let empty_collection = std.page.empty(0, 0, Collection)
+    let pages = attach_page_graph(mut graph, empty_collection)?
+    let roots = attach_page_roots(pages, root_ptrs, inline, empty_collection)
     let mut key: Bytes = list.with_capacity(1)
     list.push(mut key, 16u8)
     let Some(value) = get_page_row(roots.streams, key) else {

@@ -1,6 +1,8 @@
 type PageTree: shareable + send {
     root: Arc[std.page.Page],
-    inline: u64
+    inline: u64,
+    // The collection map keeps its empty child shared even while every collection has rows.
+    empty_collection: Option[Arc[std.page.Page]]
 }
 
 type PageRoots: shareable + send {
@@ -9,24 +11,30 @@ type PageRoots: shareable + send {
     catalog: PageTree
 }
 
-fn attach_page_tree(pages: Map[u64, Arc[std.page.Page]], ptr: std.page.PagePtr, domain: std.page.Domain, inline: u64) -> PageTree {
-    if ptr.stamp == 0 { return new_page_tree(domain, inline) }
-    let Some(root) = map.get(pages, ptr.stamp) else { fail("store: missing validated root") }
-    PageTree(root: arc.share(root), inline: inline)
+fn attach_page_tree(pages: Map[u64, Arc[std.page.Page]], ptr: std.page.PagePtr, domain: std.page.Domain, inline: u64, take empty_collection: Option[Arc[std.page.Page]]) -> PageTree {
+    let root = if ptr.stamp == 0 {
+        std.page.empty(0, 0, domain)
+    } else {
+        let Some(found) = map.get(pages, ptr.stamp) else { fail("store: missing validated root") }
+        arc.share(found)
+    }
+    PageTree(root: take root, inline: inline, empty_collection: take empty_collection)
 }
 
-fn attach_page_roots(pages: Map[u64, Arc[std.page.Page]], roots: LocatedRoots, inline: u64) -> PageRoots {
-    PageRoots(collections: attach_page_tree(pages, roots.collections, CollectionMap, inline),
-              streams: attach_page_tree(pages, roots.streams, Unprefixed, inline),
-              catalog: attach_page_tree(pages, roots.catalog, Unprefixed, inline))
+fn attach_page_roots(pages: Map[u64, Arc[std.page.Page]], roots: LocatedRoots, inline: u64, empty_collection: Arc[std.page.Page]) -> PageRoots {
+    PageRoots(collections: attach_page_tree(pages, roots.collections, CollectionMap, inline, Some(arc.share(empty_collection))),
+              streams: attach_page_tree(pages, roots.streams, Unprefixed, inline, None),
+              catalog: attach_page_tree(pages, roots.catalog, Unprefixed, inline, None))
 }
 
 fn new_page_tree(domain: std.page.Domain, inline: u64) -> PageTree {
-    PageTree(root: std.page.empty(0, 0, domain), inline: inline)
+    let empty_collection = if domain == CollectionMap { Some(std.page.empty(0, 0, Collection)) } else { None }
+    PageTree(root: std.page.empty(0, 0, domain), inline: inline, empty_collection: take empty_collection)
 }
 
 fn share_page_tree(tree: PageTree) -> PageTree {
-    PageTree(root: arc.share(tree.root), inline: tree.inline)
+    let empty_collection = match tree.empty_collection { Some(empty) => Some(arc.share(empty)), None => None }
+    PageTree(root: arc.share(tree.root), inline: tree.inline, empty_collection: take empty_collection)
 }
 
 fn tree_domain(tree: PageTree) -> std.page.Domain {
@@ -38,7 +46,7 @@ fn tree_stamp(tree: PageTree) -> u64 {
 }
 
 fn install_page_tree(mut tree: PageTree, take replacement: PageTree) {
-    let PageTree(root: take ready, inline: width) = take replacement
+    let PageTree(root: take ready, inline: width, ..) = take replacement
     std.page.install_planned(mut tree.root, take ready)
     tree.inline = width
 }
@@ -70,23 +78,25 @@ fn collection_record(root: Arc[std.page.Page], kind: u8) -> Result[Bytes, Error]
     Ok(take record)
 }
 
-fn put_collection(mut tree: PageTree, key: Bytes, root: Arc[std.page.Page], kind: u8, private_from: u64, mut ids: u64) -> Result[(), Error] {
+fn put_collection(mut tree: PageTree, key: Bytes, built: Option[Arc[std.page.Page]], kind: u8, private_from: u64, mut ids: u64) -> Result[(), Error] {
+    let root = match built {
+        Some(ready) => arc.share(ready),
+        None => {
+            let Some(shared) = view tree.empty_collection else { fail("store: missing empty collection page") }
+            arc.share(shared)
+        },
+    }
     let record = collection_record(root, kind)?
-    page_result(std.page.insert(mut tree.root, key, record, Some(arc.share(root)), tree.inline, private_from, mut ids))
+    page_result(std.page.insert(mut tree.root, key, record, Some(take root), tree.inline, private_from, mut ids))
 }
 
 fn define_collection(mut tree: PageTree, id: u32, kind: u8, private_from: u64, mut ids: u64) -> Result[(), Error] {
-    let root = std.page.empty(0, 0, Collection)
-    put_collection(mut tree, prefix(id)?, root, kind, private_from, mut ids)
+    put_collection(mut tree, prefix(id)?, None, kind, private_from, mut ids)
 }
 
 fn bulk_collection(mut tree: PageTree, id: u32, kind: u8, rows: List[std.page.Row], private_from: u64, mut ids: u64) -> Result[(), Error] {
     let bulk = page_result(std.page.bulk(rows, Collection, tree.inline, mut ids))?
-    let root = match take bulk {
-        Some(take ready) => take ready,
-        None => std.page.empty(0, 0, Collection),
-    }
-    put_collection(mut tree, prefix(id)?, root, kind, private_from, mut ids)
+    put_collection(mut tree, prefix(id)?, bulk, kind, private_from, mut ids)
 }
 
 fn count_page_rows(tree: PageTree, id: u32, low: Bytes, high: Bytes) -> Result[u64, Error] {
@@ -367,9 +377,10 @@ fn remove_page_row(mut tree: PageTree, key: Bytes, private_from: u64, mut ids: u
     if !present { return Ok(false) }
     let collection_key = list.slice(key, 0, 4)
     let suffix = list.slice(key, 4, list.len(key))
+    let Some(empty_root) = view tree.empty_collection else { fail("store: missing empty collection page") }
     page_result(std.page.edit_collection(mut tree.root, collection_key, private_from, mut ids,
         scoped fn(mut root: Arc[std.page.Page], mut stamps: u64) -> Result[(), std.page.Error] {
-            let _ = std.page.remove(mut root, suffix, private_from, mut stamps)?
+            let _ = std.page.remove_with_empty(mut root, suffix, empty_root, private_from, mut stamps)?
             Ok(())
         }))?
     Ok(true)

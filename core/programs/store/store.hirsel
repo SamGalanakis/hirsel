@@ -467,13 +467,13 @@ pub fn memory(c: Clock, r: Random, o: Options) -> Db {
 }
 
 fn memory_at(c: Clock, id: StoreId, o: Options) -> Db {
-    empty_db(c, id, o)
+    let mut db = empty_db(c, id, o)
+    list.push(mut db.heads, main_head(empty_roots(), 0, 0))
+    take db
 }
 
 fn empty_db(c: Clock, id: StoreId, o: Options) -> Db {
-    let mut heads: List[Head] = list.new()
-    list.push(mut heads, main_head(empty_roots(), 0, 0))
-    Db(store: id, fence: 0, disk: list.new(), clock: c, heads: take heads, branch_names: map.new(), pins: list.new(), record_bytes: branch_record_bytes("main"), next_pin: 0, next_branch: 1, next_node: 0, next_table: 1, file_seq: 1, file_end: 72, frame_seq: 0, resident: 0, page_resident: 0, changes: 0, settled: 0, ceiling: o.resident_limit, acks: None, journaled: 0, inflight: 0, uncovered: 0, since_cut: 0, acked_bytes: 0, written: None, written_send: None, checkpointed: 0, poison: None, journal: None, pending: None, journal_task: None, admits: map.new())
+    Db(store: id, fence: 0, disk: list.new(), clock: c, heads: list.new(), branch_names: map.new(), pins: list.new(), record_bytes: branch_record_bytes("main"), next_pin: 0, next_branch: 1, next_node: 0, next_table: 1, file_seq: 1, file_end: 72, frame_seq: 0, resident: 0, page_resident: 0, changes: 0, settled: 0, ceiling: o.resident_limit, acks: None, journaled: 0, inflight: 0, uncovered: 0, since_cut: 0, acked_bytes: 0, written: None, written_send: None, checkpointed: 0, poison: None, journal: None, pending: None, journal_task: None, admits: map.new())
 }
 
 pub type Accounts {
@@ -9230,7 +9230,7 @@ pub fn validate_prepared(d: Dir) -> Result[ValidatedImport, DeployError] waits {
     Ok(ValidatedImport(meta: take meta, delta: take delta, ranges: take ranges, digest: std.sha256.finish(hashed), charge: charge))
 }
 
-type ImportedRange: send { id: u32, kind: u8, tree: Arc[std.page.Page] }
+type ImportedRange: send { id: u32, kind: u8, tree: Option[Arc[std.page.Page]] }
 
 pub opaque type Imported: send {
     meta: PreparedMeta,
@@ -9294,11 +9294,7 @@ pub fn import_trees(take work: ImportWork) -> Result[Imported, DeployError] {
         let built: Option[Arc[std.page.Page]] = if checked_range.kind == 0 { None }
             else { deploy_result(page_result(std.page.bulk(checked_range.rows, Collection, inline, mut ids)))? }
         if ids - 1 > high { return Error(IdBound) }
-        let tree = match take built {
-            Some(take root) => take root,
-            None => std.page.empty(0, 0, Collection),
-        }
-        list.push(mut imported, ImportedRange(id: checked_range.id, kind: checked_range.kind, tree: take tree))
+        list.push(mut imported, ImportedRange(id: checked_range.id, kind: checked_range.kind, tree: take built))
     }
     Ok(Imported(meta: take meta, delta: take delta, ranges: take imported, digest: digest, charge: charge))
 }
@@ -10981,6 +10977,46 @@ fn law_resident_scan(db: Db) -> bool {
     accounts(db).resident == int.saturating_add(images, location_storage_charge(db.disk[0u64].pages.locations))
 }
 
+fn law_empty_collection_pages() -> Result[List[Arc[std.page.Page]], Error] {
+    let mut tree = new_page_tree(CollectionMap, 1024)
+    let mut stamps = 1u64
+    for id in 1u32 .. 5 {
+        define_collection(mut tree, id, 1, 1, mut stamps)?
+        put_page_row(mut tree, logical_key(id, key_word(1))?, string.as_bytes("x"), 1, mut stamps)?
+    }
+    define_collection(mut tree, 5, 1, 1, mut stamps)?
+    bulk_collection(mut tree, 6, 1, list.new(), 1, mut stamps)?
+    for id in 1u32 .. 5 {
+        if !remove_page_row(mut tree, logical_key(id, key_word(1))?, 1, mut stamps)? {
+            return Error(Foreign)
+        }
+    }
+    let mut children: List[Arc[std.page.Page]] = list.with_capacity(6)
+    for id in 1u32 .. 7 {
+        let Some((page, descriptor)) = std.page.collection_entry(tree.root, prefix(id)?) else { return Error(Foreign) }
+        let image = std.page.image_of(page)
+        if std.page.stamp(image) != 0 || std.page.count(image) != 0 ||
+            list.slice(descriptor, 0, 36) != std.page.encode_ptr(std.page.unlocated(0)) {
+            return Error(Foreign)
+        }
+        list.push(mut children, arc.share(page))
+    }
+    Ok(take children)
+}
+
+fn law_empty_collection_resident() -> bool {
+    let mut pages = result.unwrap(law_empty_collection_pages())
+    let mut resident = 0u64
+    // The fixture has dropped the map. Only the last handle to each distinct
+    // allocation unwraps, so its image capacity contributes exactly once.
+    while let Some(take page) = list.pop(mut pages) {
+        let image_capacity = list.capacity(std.page.payload(std.page.image_of(page)))
+        if let Ok(_) = arc.try_unwrap(take page) { resident += image_capacity }
+    }
+    // AP3's 24-byte header is the whole image of AP2's shared empty page.
+    resident == 24
+}
+
 fn law_resident_text(state: u64) -> String {
     // Values of 1,500 bytes are over the 1,024-byte inline threshold.
     let width = if (state >> 40) % 4 == 0 { 1500u64 } else { 1 + (state >> 44) % 48 }
@@ -11001,6 +11037,7 @@ fn law_resident_name(lead: String, slot: u64) -> String {
 // relocation that charges a moved frame again, and an open whose seed
 // disagrees with the pages a journal replay replaced.
 pub fn disk_law_resident_charge(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    if !law_empty_collection_resident() { return false }
     let mut options = defaults()
     options.resident_limit = 16777216
     options.pack_bytes = 512

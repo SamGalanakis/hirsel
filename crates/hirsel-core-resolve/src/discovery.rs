@@ -240,19 +240,16 @@ impl PackageManifest {
 impl NameIndex {
     /// External package discovery is converted once, before header indexing.
     pub fn add_manifests(&mut self, manifests: &[PackageManifest]) -> Vec<ModuleId> {
-        for m in manifests {
-            self.add_package(
-                self.symbols.find(&m.package.name).unwrap(),
-                self.symbols.find(&m.package.version).unwrap(),
-            );
-        }
-        for m in manifests {
-            let p = self
-                .package(
+        let packages: Vec<_> = manifests
+            .iter()
+            .map(|m| {
+                self.add_package(
                     self.symbols.find(&m.package.name).unwrap(),
                     self.symbols.find(&m.package.version).unwrap(),
                 )
-                .unwrap();
+            })
+            .collect();
+        for (m, &p) in manifests.iter().zip(&packages) {
             let deps = m
                 .dependencies
                 .iter()
@@ -266,15 +263,10 @@ impl NameIndex {
                 .collect::<Vec<_>>();
             self.set_dependencies(p, deps);
         }
-        let mut modules = vec![];
+        let source_count = manifests.iter().map(|m| m.sources.len()).sum();
+        let mut modules = Vec::with_capacity(source_count);
         let mut path = Vec::new();
-        for m in manifests {
-            let p = self
-                .package(
-                    self.symbols.find(&m.package.name).unwrap(),
-                    self.symbols.find(&m.package.version).unwrap(),
-                )
-                .unwrap();
+        for (m, p) in manifests.iter().zip(packages) {
             for s in &m.sources {
                 path.clear();
                 path.extend(s.modules.iter().map(|n| self.symbols.find(n).unwrap()));

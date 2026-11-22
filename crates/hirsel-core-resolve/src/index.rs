@@ -274,7 +274,7 @@ impl NameIndex {
     pub fn add_module(&mut self, package: PackageKey, path: &[Symbol]) -> ModuleId {
         let mut parent = self.packages[package.0 as usize].root;
         for &name in path {
-            if let Some(&id) = self.children.get(&(parent, name)) {
+            if let Some(id) = self.child(parent, name) {
                 parent = id;
                 continue;
             }
@@ -315,7 +315,13 @@ impl NameIndex {
         parent
     }
     pub fn child(&self, parent: ModuleId, name: Symbol) -> Option<ModuleId> {
-        self.children.get(&(parent, name)).copied()
+        // A module added by this request has no children in the image.
+        let key = (parent, name);
+        if (parent.0 as usize) < self.modules.base_len() {
+            self.children.get(&key).copied()
+        } else {
+            self.children.own_get(&key).copied()
+        }
     }
     pub fn module_at(&self, package: &PackageId, modules: &[String]) -> Option<ModuleId> {
         let key = self.package(
@@ -447,7 +453,7 @@ impl NameIndex {
         ns: Namespace,
         constructor: bool,
     ) -> Option<(DefinitionId, &Definition)> {
-        let id = *self.members.get(&(module, name))?;
+        let id = self.definition(module, name)?;
         let d = self.get(id);
         (match ns {
             Namespace::Type => d.kind == DefinitionKind::Type,
@@ -714,14 +720,8 @@ impl NameIndex {
                 .iter()
                 .map(|(_, &d)| d)
                 .find(|&d| self.get(d).site.module == module && self.get(d).name == name)
-        } else if module.0 as usize >= self.modules.base_len() {
-            // New modules cannot have members in the published prefix.
-            match self.members.entry((module, name)) {
-                std::collections::hash_map::Entry::Occupied(e) => Some(*e.get()),
-                std::collections::hash_map::Entry::Vacant(_) => None,
-            }
         } else {
-            self.members.get(&(module, name)).copied()
+            self.definition(module, name)
         };
         if let Some(old) = old {
             let mut r = Refusal::new("LANG-7", site, "duplicate definition");
@@ -837,7 +837,12 @@ impl NameIndex {
         })
     }
     pub fn definition(&self, module: ModuleId, name: Symbol) -> Option<DefinitionId> {
-        self.members.get(&(module, name)).copied()
+        let key = (module, name);
+        if (module.0 as usize) < self.modules.base_len() {
+            self.members.get(&key).copied()
+        } else {
+            self.members.own_get(&key).copied()
+        }
     }
 }
 /// The last name of a clone body's parameter type (`Map` in `x: core.Map[K, V]`).

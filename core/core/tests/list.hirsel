@@ -351,3 +351,17 @@ fn inline_set_word_past_end() -> u8 {
     inline.set_word_le(mut raw, 5, 1u32)
     raw[5]
 }
+
+// compare_bytes (core.md, Words), by hand: "abc" vs "abd" differ at index 2 (c < d);
+// "ab" is a proper prefix of "abc" either way round; 0x80 sorts above 0x7f, as an
+// unsigned byte; empty vs empty and equal bytes are Equal; empty is before any byte.
+// expect: run compare_bytes_orders() = true
+fn compare_bytes_orders() -> bool {
+    let mut high: Bytes = list.new()
+    list.push(mut high, 0x80)
+    let mut low: Bytes = list.new()
+    list.push(mut low, 0x7f)
+    let empty: Bytes = list.new()
+    let abc = string.as_bytes("abc")
+    list.compare_bytes(abc, string.as_bytes("abd")) == Less && list.compare_bytes(string.as_bytes("abd"), abc) == Greater && list.compare_bytes(string.as_bytes("ab"), abc) == Less && list.compare_bytes(abc, string.as_bytes("ab")) == Greater && list.compare_bytes(high, low) == Greater && list.compare_bytes(low, high) == Less && list.compare_bytes(empty, empty) == Equal && list.compare_bytes(abc, string.as_bytes("abc")) == Equal && list.compare_bytes(empty, low) == Less
+}

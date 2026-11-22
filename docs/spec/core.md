@@ -239,6 +239,11 @@ operations it names; nothing else about them may be inferred from an implementat
   array, and `inline.set_word_le(mut a, at, x)` and `inline.set_word_be(mut a, at, x)`
   overwrite them in one under the same rules. The expected type of a read, or the type of
   `x`, fixes the width, and an invalid range fails with `Bounds`.
+  `list.compare_bytes(a, b)` returns the `Order` of `a` and `b` as `<` orders them: by the
+  first differing byte read as unsigned, and otherwise the shorter first, so it is `Equal`
+  only for equal bytes. It reads the common prefix once and fails in no case; it admits
+  nothing and takes one Step, whatever the lengths, and returns the same `Order` on every
+  engine ([SEM-8](semantics.md#sem-8-determinism)).
   The word operations and [SEM-11](semantics.md#sem-11-vectors) lane operations are the
   multi-byte loads and stores. Library scans use them and the [SEM-1](semantics.md#sem-1-integers)
   integer operations.

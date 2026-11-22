@@ -40,6 +40,10 @@ pub fn put_word_le[T: integer](mut b: Bytes, x: T)
 // Like put_word_le, in big-endian byte order.
 pub fn put_word_be[T: integer](mut b: Bytes, x: T)
 
+// The lexicographic order of a and b by unsigned byte, a proper prefix first, in one
+// pass over their common prefix.
+pub fn compare_bytes(a: Bytes, b: Bytes) -> Order
+
 // Overwrite the u16, u32 or u64 x at byte offset at, little-endian. A range past
 // len (including an overflowing end) fails with Bounds before any write.
 pub fn set_word_le[T: integer](mut b: Bytes, at: u64, x: T)

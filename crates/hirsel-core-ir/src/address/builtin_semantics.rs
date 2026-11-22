@@ -175,6 +175,7 @@ const BUILTIN_SEMANTICS: &[(&str, &str, u32)] = &[
     ("list", "append", 2),
     ("list", "capacity", 1),
     ("list", "clear", 1),
+    ("list", "compare_bytes", 1),
     ("list", "copy_from_slice", 1),
     ("list", "fill", 2),
     ("list", "fill_slice", 1),

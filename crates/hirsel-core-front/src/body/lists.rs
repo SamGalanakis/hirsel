@@ -275,6 +275,65 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         Some(scalar)
     }
 
+    /// `list.compare_bytes`: one `CompareBytes` pass, its -1, 0 or 1 mapped to the
+    /// `Less`, `Equal` or `Greater` case of the result slot.
+    pub(super) fn list_compare_bytes(
+        &mut self,
+        a: ValueId,
+        b: ValueId,
+        result: TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        if !self.live() {
+            return None;
+        }
+        let id = match self.rep(result) {
+            Ok(Rep::Place(id)) => id,
+            Ok(_) => return None,
+            Err(what) => {
+                self.gap(n, what);
+                return None;
+            }
+        };
+        let carrier = self.list_carrier(scalar(Scalar::U8), n)?;
+        let mut args = Vec::with_capacity(4);
+        for header in [a, b] {
+            args.push(Arg::Value(self.carrier_word(
+                header,
+                carrier,
+                SeqWord::Data,
+                n,
+            )));
+            args.push(Arg::Value(self.carrier_word(
+                header,
+                carrier,
+                SeqWord::Len,
+                n,
+            )));
+        }
+        let order = self.runtime_row(hirsel_core_ir::RtOp::CompareBytes, &args, n)?[0];
+        let zero = self.konst(Ty::Scalar(Scalar::I8), 0, n)?;
+        let to = self.result_slot(PlaceTy::Declared(id), n);
+        let (less, not_less) = (self.new_block(&[]), self.new_block(&[]));
+        let (greater, equal) = (self.new_block(&[]), self.new_block(&[]));
+        let done = self.new_block(&[]);
+        let below = self.list_compare(CompareOp::Lt, order, zero, n);
+        self.list_branch(below, less, not_less, n);
+        self.start(not_less);
+        let above = self.list_compare(CompareOp::Gt, order, zero, n);
+        self.list_branch(above, greater, equal, n);
+        // Order is `Less | Equal | Greater`, cases 0, 1 and 2.
+        for (block, case) in [(less, 0), (equal, 1), (greater, 2)] {
+            self.start(block);
+            self.inst(Inst::SetCase { address: to, case }, n);
+            self.jump(done, &[], n);
+        }
+        self.start(done);
+        let p = self.pointer(to, n);
+        self.temp(result, Some(p));
+        Some(p)
+    }
+
     pub(super) fn inline_word(
         &mut self,
         array: TyId,

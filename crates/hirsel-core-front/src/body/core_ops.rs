@@ -228,6 +228,7 @@ operations! {
     ("list", "put_word_le", Lane::Value, "A", "core-ops-914", false),
     ("list", "word_be", Lane::Value, "A", "dedup-1357", false),
     ("list", "put_word_be", Lane::Value, "A", "dedup-1357", false),
+    ("list", "compare_bytes", Lane::Value, "A", "core-perf-primitives-1606", false),
     ("list", "set_word_le", Lane::Value, "A", "core-perf-primitives-1606", false),
     ("list", "set_word_be", Lane::Value, "A", "core-perf-primitives-1606", false),
     ("int", "widen", Lane::Numeric, "A", "core-check-index-912", false),

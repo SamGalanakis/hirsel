@@ -87,6 +87,82 @@ const STD_FAILS: (&str, &str) = (
 "#,
 );
 
+/// Two tasks that wait once at an owned network wait, then take 1000 loop
+/// steps: one spawned with no step bound current, one inside `bound steps
+/// 100`. A task keeps the step context it was spawned under for life
+/// (MEM-30), across a wait whose frames the release build represents, so the
+/// first counts to 1000 and the second stops with OutOfTime: the program
+/// prints "1000 OutOfTime".
+const STD_WAITS: (&str, &str) = (
+    "waits",
+    r#"type SpinJob: send {
+    socket: Socket,
+}
+
+fn spin(take job: SpinJob) -> u64 waits {
+    let SpinJob(socket: take socket) = take job
+    let (read, write) = net.split(take socket)
+    let mut r = take read
+    let _ = take write
+    let mut buf: Bytes = list.with_capacity(1)
+    match host.recv_bounded(mut r, mut buf, 1, Never) {
+        Ok(1) => {},
+        _ => return 0,
+    }
+    let mut n: u64 = 0
+    while n < 1000 {
+        n += 1
+    }
+    n
+}
+
+fn wake(take client: Socket) waits {
+    let (read, write) = net.split(take client)
+    let _ = take read
+    let mut w = take write
+    let _ = result.unwrap(host.send_pair(mut w, string.as_bytes("a"), string.as_bytes(""), Never))
+}
+
+pub fn main(n: Net, tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
+    let (listening, addr) = result.unwrap(host.listen(n, Addr(ip: V4(2130706433), port: 0), 8))
+    let mut listener = take listening
+    let free_client = result.unwrap(host.connect(n, addr, Never))
+    let (free_socket, _) = result.unwrap(host.accept(mut listener, Never))
+    let bounded_client = result.unwrap(host.connect(n, addr, Never))
+    let (bounded_socket, _) = result.unwrap(host.accept(mut listener, Never))
+    let free = task.spawn(tasks, bytes 65536, SpinJob(socket: take free_socket), spin)
+    let spawned = bound steps 100 {
+        task.spawn(tasks, bytes 65536, SpinJob(socket: take bounded_socket), spin)
+    }
+    let bounded = result.unwrap(take spawned)
+    wake(take free_client)
+    wake(take bounded_client)
+    let mut line = string.new()
+    match task.join(take free) {
+        Ok(v) => string.push_uint(mut line, v, 10u32, 0, ' '),
+        Error(_) => {},
+    }
+    result.unwrap(stdout.write(out, line));
+    let stopped = match task.join(take bounded) {
+        Error(Failed(causes)) => {
+            let mut kind = " other"
+            for c in causes {
+                kind = match c.kind {
+                    OutOfTime => " OutOfTime",
+                    _ => " other",
+                }
+                break
+            }
+            kind
+        },
+        _ => " finished",
+    }
+    result.unwrap(stdout.write(out, stopped));
+    Ok(())
+}
+"#,
+);
+
 /// One check of `source` as project `project` over std imaged into `cache`.
 fn std_checked(dir: &Path, project: &str, source: &str, cache: &str) -> Arc<CheckProduct> {
     let libraries = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core");
@@ -280,15 +356,23 @@ fn std_differential(modes: &[&str]) -> usize {
             .join(std::env::var_os(name).unwrap_or_else(|| panic!("{name}")))
     };
     let mut taped = 0;
-    for (name, source) in UNIT_PROGRAMS.into_iter().chain([STD_FAILS]) {
+    for (name, source) in UNIT_PROGRAMS.into_iter().chain([STD_FAILS, STD_WAITS]) {
         let product = std_checked(dir.path(), name, source, "cache");
         let project = dir.path().join(name);
         let mut base = native_options(Backend::Llvm, &dir.path().join("shared"));
         base.optimize = true;
         base.instance_limit = crate::native::DEFAULT_INSTANCE_LIMIT;
         base.debug_lines = true;
-        // Stdout, for the program that takes it.
-        base.grant_mask = if source.contains("out: Stdout") { 1 << 4 } else { 0 };
+        // The grants the program's main takes.
+        base.grant_mask = [("out: Stdout", "Stdout"), ("n: Net", "Net"), ("tasks: Tasks", "Tasks")]
+            .into_iter()
+            .filter(|(param, _)| source.contains(param))
+            .fold(0, |mask, (_, kind)| mask | 1 << crate::native::grant_kind(kind).unwrap());
+        if source.contains("n: Net") {
+            base.net_rules = ["Connect 127.0.0.0/8 1-65535", "Listen 127.0.0.0/8 0-65535"]
+                .map(|r| hirsel_core_net::GrantRule::parse(r).unwrap())
+                .to_vec();
+        }
         for &mode in modes {
             let options = match mode {
                 "plain" => base.clone(),
@@ -311,6 +395,14 @@ fn std_differential(modes: &[&str]) -> usize {
             // and an inlined copy of a std body, does and reports what the
             // program's own copy of the std body does.
             let parts = std_run(&product, &options, StdBuild::Dev, &project);
+            if (name, mode) == ("waits", "plain") {
+                assert_eq!(
+                    (parts.0, String::from_utf8_lossy(&parts.1)),
+                    (Some(0), "1000 OutOfTime".into()),
+                    "waits: each task keeps its step context: {}",
+                    String::from_utf8_lossy(&parts.2)
+                );
+            }
             let builds = [StdBuild::Dev, StdBuild::Parts, StdBuild::Imported];
             let mut tapes = vec![(StdBuild::Dev, parts.4.clone())];
             for build in [StdBuild::Parts, StdBuild::Imported] {

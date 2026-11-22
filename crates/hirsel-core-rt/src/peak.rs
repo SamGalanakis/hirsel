@@ -124,6 +124,22 @@ thread_local! {
     static ACTIVE: RefCell<Vec<Observation>> = const { RefCell::new(Vec::new()) };
     static LAST: Cell<u64> = const { Cell::new(0) };
     static LAST_REPORT: RefCell<String> = const { RefCell::new(String::new()) };
+    static STACK_LIKE: Cell<bool> = const { Cell::new(false) };
+}
+/// While held, a backing request stands in for a task stack and is not
+/// retained backing: a stack is not one, and whether a waiting task keeps its
+/// stack is not observable (tasks.md, "Every charged byte has one payer").
+pub(crate) struct StackLike(());
+impl StackLike {
+    pub(crate) fn hold() -> Self {
+        STACK_LIKE.set(true);
+        Self(())
+    }
+}
+impl Drop for StackLike {
+    fn drop(&mut self) {
+        STACK_LIKE.set(false);
+    }
 }
 /// Retains the original root through forwarding; restores nested host observations.
 pub struct Run(std::marker::PhantomData<std::rc::Rc<()>>);
@@ -182,6 +198,9 @@ pub(crate) fn checkpoint(name: &str) {
     });
 }
 pub(crate) fn allocated(pointer: *const u8, bytes: usize) {
+    if STACK_LIKE.get() {
+        return;
+    }
     ACTIVE.with(|active| {
         if let Some(o) = active.borrow_mut().last_mut() {
             o.allocations.insert(pointer.addr(), bytes);

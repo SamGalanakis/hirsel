@@ -7,9 +7,10 @@
 //! holds none of its bodies. Every optimised LLVM build takes one: a program
 //! lowers every other library instance it reaches itself, so its optimiser
 //! sees the closure and dictionary arguments it passes them, and the held
-//! roots with what they reach: those [`ALWAYS_IMPORT`] names, and those that
+//! roots with what they reach: those [`ALWAYS_IMPORT`] names, those that
 //! take code a caller can bind ([`callable_variants::takes_code`]), whose
-//! calls through it a program's private bodies make direct.
+//! calls through it a program's private bodies make direct, and those that
+//! make an owned network wait, whose returnable variants a program builds.
 //!
 //! The unit and a program meet at five contracts:
 //! - callable: each root is defined under its instance symbol, and one
@@ -62,10 +63,14 @@ fn always_imported(definition: &DefPath) -> bool {
 }
 
 /// A plain root a program lowers itself, with what it reaches: one
-/// [`ALWAYS_IMPORT`] names, or one taking code a caller can bind. Both sides
-/// decide it from the root's own function alone.
+/// [`ALWAYS_IMPORT`] names, one taking code a caller can bind, or one making
+/// an owned network wait, whose returnable variant (`returnable.rs`) only a
+/// program's unit can build. Both sides decide it from the root's own
+/// function alone.
 fn held_root(definition: &DefPath, module: &hirsel_core_ir::Module, root: FuncId) -> bool {
-    always_imported(definition) || crate::callable_variants::takes_code(module, root)
+    always_imported(definition)
+        || crate::callable_variants::takes_code(module, root)
+        || hirsel_core_ir::returnable::waits_owned(module, root)
 }
 
 /// The source law runner places program modules in the core and std packages.

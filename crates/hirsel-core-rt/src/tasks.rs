@@ -4528,7 +4528,8 @@ unsafe fn unmount(task: *mut Task) -> Stack {
 }
 /// A task's frame record for the returnable form (DESIGN "Eager records"):
 /// one block of the task's unit heap, funded by the task's payer at zero
-/// logical charge like the stack it stands in for, made at the root's first
+/// logical charge and outside the observed retained backing, like the stack
+/// it stands in for, made at the root's first
 /// call and at a stable address until the task ends. Its header holds the
 /// owned operation state; the area after it holds the represented frames the
 /// compiler lays out.
@@ -4558,7 +4559,13 @@ impl FrameRecord {
         // charges never reaches it; the block pins its payer until freed.
         let payer = context.payer();
         payer.pin_zero();
+        // Like the stack it stands in for, the block is not retained backing;
+        // its free, of a block the observer never took, is no event.
+        #[cfg(any(test, feature = "charge-observation"))]
+        let stack_like = crate::peak::StackLike::hold();
         let base = crate::block::allocate_admitted(context, payer, bytes, 8, crate::block::PLAIN);
+        #[cfg(any(test, feature = "charge-observation"))]
+        drop(stack_like);
         // SAFETY: the block holds `bytes` writable bytes, the word in bounds.
         unsafe {
             #[cfg(any(test, debug_assertions, feature = "testing"))]

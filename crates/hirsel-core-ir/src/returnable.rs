@@ -57,6 +57,16 @@ enum Site {
     Callee(FuncId),
 }
 
+/// Whether `f`'s own body makes an owned wait (`recv_bounded`, `send_pair`).
+/// A separately lowered library holds no variant of its own, so a program
+/// lowers each such function itself and the rule sees through it.
+pub fn waits_owned(module: &Module, f: FuncId) -> bool {
+    module.functions[f.index()]
+        .body
+        .as_ref()
+        .is_some_and(|b| b.calls.iter().any(|c| leaf(c.callee).is_some()))
+}
+
 fn leaf(callee: Callee) -> Option<HostOp> {
     match callee {
         Callee::Runtime(RtOp::Host(op @ (HostOp::RecvBounded | HostOp::SendPair))) => Some(op),
@@ -1478,8 +1488,30 @@ pub struct Applied {
     pub roots: usize,
     /// Spawns of entries that reach an owned wait but stay stackful.
     pub stackful_roots: usize,
+    /// Each such spawn's entry, stored callee and reason.
+    pub stackful: Vec<(FuncId, FuncId, Stackful)>,
     /// The record area of each variant, roots by their entry adapter.
     pub sizes: Vec<(FuncId, Sizes)>,
+}
+
+/// Why a spawn whose callee reaches an owned wait keeps the stackful drive.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Stackful {
+    /// The stored callee is not represented.
+    Callee,
+    /// The entry adapter's step-free body has no single indirect call.
+    StepFree,
+    /// The entry adapter itself cannot be represented.
+    Entry(Refusal),
+}
+
+/// A root variant's plan: the entry body it is built from, with its one
+/// indirect call made a direct call of `callee`.
+struct Form {
+    entry: FuncId,
+    callee: FuncId,
+    body: Body,
+    shape: Shape,
 }
 
 /// A spawn of the task entry adapter `entry` whose stored callee is `callee`,
@@ -1711,34 +1743,80 @@ pub fn apply(module: &mut Module) -> Applied {
             why.insert(f, Refusal::Recursive);
         }
     }
-    // Roots.
-    let mut roots = vec![];
+    // Roots. An entry whose symbol selects its body by the step window
+    // (MEM-30) gets a root of each body, and the checked root's symbol selects
+    // the same way. Represented frames open no step bound, so a resume selects
+    // the root the task first entered.
+    let mut roots: Vec<(Spawn, Form, Option<Form>)> = vec![];
+    let free_of = |g: FuncId| module.step_free.get(&g).map_or(g, |s| s.body);
     for spawn in spawns(module) {
-        let entry = &module.functions[spawn.entry.index()];
-        if !ok[spawn.callee.index()]
-            || module.step_free.contains_key(&spawn.entry)
-            || refusal(module, entry, entry.body.as_ref().unwrap()).is_some()
-        {
-            if reaches[spawn.callee.index()] {
-                applied.stackful_roots += 1;
+        let selects = module.step_free.get(&spawn.entry).filter(|s| s.dispatch);
+        let form = |entry: FuncId, callee: FuncId| -> Result<Form, Stackful> {
+            if !ok[callee.index()] {
+                return Err(Stackful::Callee);
             }
-            continue;
-        }
-        let mut body = entry.body.clone().unwrap();
-        body.calls[spawn.indirect.index()].callee = Callee::Direct(spawn.callee);
-        body.calls[spawn.indirect.index()].signature =
-            module.functions[spawn.callee.index()].signature;
-        let sites = sites_of(&body, &ok);
-        let area = |g: FuncId| shapes[&g.index()].area;
-        let dest = module.signatures[entry.signature.index()].dest;
-        match shape(module, &recipes, &body, dest, sites, &area) {
-            Ok(s) => roots.push((spawn, body, s)),
-            Err(_) => applied.stackful_roots += 1,
+            let function = &module.functions[entry.index()];
+            let old = function.body.as_ref().unwrap();
+            if let Some(r) = refusal(module, function, old) {
+                return Err(Stackful::Entry(r));
+            }
+            let indirect = if entry == spawn.entry {
+                spawn.indirect
+            } else {
+                let calls: Vec<CallId> = old
+                    .insts
+                    .iter()
+                    .filter_map(|i| match *i {
+                        Inst::Call { call }
+                            if matches!(old.calls[call.index()].callee, Callee::Indirect(_)) =>
+                        {
+                            Some(call)
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                let [call] = calls[..] else {
+                    return Err(Stackful::StepFree);
+                };
+                call
+            };
+            let mut body = old.clone();
+            body.calls[indirect.index()].callee = Callee::Direct(callee);
+            body.calls[indirect.index()].signature = module.functions[callee.index()].signature;
+            let sites = sites_of(&body, &ok);
+            let area = |g: FuncId| shapes[&g.index()].area;
+            let dest = module.signatures[function.signature.index()].dest;
+            let s = shape(module, &recipes, &body, dest, sites, &area).map_err(Stackful::Entry)?;
+            Ok(Form {
+                entry,
+                callee,
+                body,
+                shape: s,
+            })
+        };
+        let checked = form(spawn.entry, spawn.callee);
+        let free = match selects {
+            Some(free) => form(free.body, free_of(spawn.callee)).map(Some),
+            None => Ok(None),
+        };
+        match (checked, free) {
+            (Ok(checked), Ok(free)) => roots.push((spawn, checked, free)),
+            (Err(why), _) | (_, Err(why)) => {
+                if reaches[spawn.callee.index()] {
+                    applied.stackful_roots += 1;
+                    applied.stackful.push((spawn.entry, spawn.callee, why));
+                }
+            }
         }
     }
     // Only what a root reaches gets a variant.
     let mut needed = vec![false; n];
-    let mut work: Vec<usize> = roots.iter().map(|r| r.0.callee.index()).collect();
+    let mut work: Vec<usize> = roots
+        .iter()
+        .flat_map(|(_, checked, free)| [Some(checked), free.as_ref()])
+        .flatten()
+        .map(|form| form.callee.index())
+        .collect();
     while let Some(f) = work.pop() {
         if std::mem::replace(&mut needed[f], true) {
             continue;
@@ -1799,37 +1877,45 @@ pub fn apply(module: &mut Module) -> Applied {
     }
     let mut entries: BTreeMap<(FuncId, FuncId), FuncId> = BTreeMap::new();
     let mut root_bodies = vec![];
+    let mut selecting = vec![];
     let mut rewrites = vec![];
-    for (spawn, body, s) in &roots {
-        applied.sizes.push((spawn.entry, s.sizes));
+    for (spawn, checked, free) in &roots {
+        applied.sizes.push((spawn.entry, checked.shape.sizes));
         let key = (spawn.entry, spawn.callee);
         let id = match entries.get(&key) {
             Some(&id) => id,
             None => {
-                let canonical = &module.functions[spawn.entry.index()];
-                let id = FuncId((module.functions.len() + root_bodies.len()) as u32);
-                let identity = module.code_identity(spawn.entry);
-                let callee = module.code_identity(spawn.callee);
-                root_bodies.push((
-                    Function {
-                        instance: canonical.instance,
-                        signature: canonical.signature,
-                        body: Some(build(
-                            body,
-                            s,
-                            true,
-                            &module.signatures[canonical.signature.index()].results,
-                            &calls,
-                        )),
-                        versioned: canonical.versioned,
-                    },
-                    ContentHash::of_parts(
-                        "hirsel.returnable.root.v1",
-                        [identity.0.as_slice(), callee.0.as_slice()],
-                    ),
-                ));
-                entries.insert(key, id);
-                id
+                let mut ids = vec![];
+                for form in [Some(checked), free.as_ref()].into_iter().flatten() {
+                    let canonical = &module.functions[form.entry.index()];
+                    let id = FuncId((module.functions.len() + root_bodies.len()) as u32);
+                    let identity = module.code_identity(form.entry);
+                    let callee = module.code_identity(form.callee);
+                    root_bodies.push((
+                        Function {
+                            instance: canonical.instance,
+                            signature: canonical.signature,
+                            body: Some(build(
+                                &form.body,
+                                &form.shape,
+                                true,
+                                &module.signatures[canonical.signature.index()].results,
+                                &calls,
+                            )),
+                            versioned: canonical.versioned,
+                        },
+                        ContentHash::of_parts(
+                            "hirsel.returnable.root.v1",
+                            [identity.0.as_slice(), callee.0.as_slice()],
+                        ),
+                    ));
+                    ids.push(id);
+                }
+                if let [checked, free] = ids[..] {
+                    selecting.push((checked, free));
+                }
+                entries.insert(key, ids[0]);
+                ids[0]
             }
         };
         rewrites.push((spawn.function, spawn.reference, id));
@@ -1841,6 +1927,15 @@ pub fn apply(module: &mut Module) -> Applied {
         let id = FuncId(module.functions.len() as u32);
         module.functions.push(function);
         module.code_variants.insert(id, hash);
+    }
+    for (checked, free) in selecting {
+        module.step_free.insert(
+            checked,
+            crate::StepFree {
+                body: free,
+                dispatch: true,
+            },
+        );
     }
     // A spawning function that is itself represented runs as its variant, so
     // the variant's reference to the entry is rewritten too. The variant keeps
@@ -1889,6 +1984,15 @@ pub fn report(module: &Module, applied: &Applied) -> String {
     }
     for &(f, r) in &applied.refused {
         s.push_str(&format!("  refused f{} {} {r:?}\n", f.0, name(f)));
+    }
+    for &(e, c, why) in &applied.stackful {
+        s.push_str(&format!(
+            "  stackful root f{} {} -> f{} {} {why:?}\n",
+            e.0,
+            name(e),
+            c.0,
+            name(c)
+        ));
     }
     for (f, z) in &applied.sizes {
         s.push_str(&format!(

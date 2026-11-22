@@ -991,29 +991,43 @@ unsafe fn run_os_with_sources(
         // SAFETY: the root unit borrows the pinned tables until its run returns.
         return crate::units::launch(1, w, unsafe { &*input }, &|config| unsafe {
             let shared = &shared;
-            let operations = config.directory_ops.as_ref();
-            run_with_sources_and_probe(
-                config,
-                shared.0,
-                shared.1,
-                entry,
-                |os, handle| (operations.unwrap().probe)(os, handle),
-                launch_metadata,
-                &run,
-            )
+            run_sourced(config, shared.0, shared.1, entry, launch_metadata, &run)
         });
     }
     // SAFETY: all configuration and source storage is pinned by the caller.
     unsafe {
-        let operations = (*input).directory_ops.as_ref();
-        run_with_sources_and_probe(
+        run_sourced(
             &*input,
+            parameter_names,
+            sources,
+            entry,
+            launch_metadata,
+            &run,
+        )
+    }
+}
+
+// Both root launch modes share one instantiation of OS process setup.
+#[inline(never)]
+unsafe fn run_sourced(
+    input: &OsConfig,
+    parameter_names: *const View,
+    sources: *const crate::abi_sites::SourceTable,
+    entry: crate::process::Entry,
+    launch_metadata: fn(&str, u64, bool) -> Metadata,
+    run: impl FnOnce(&Config, crate::process::Entry) -> u8,
+) -> u8 {
+    // SAFETY: the launch pins the operation, name and source tables.
+    unsafe {
+        let operations = input.directory_ops.as_ref();
+        run_with_sources_and_probe(
+            input,
             parameter_names,
             sources,
             entry,
             |os, handle| (operations.unwrap().probe)(os, handle),
             launch_metadata,
-            &run,
+            run,
         )
     }
 }

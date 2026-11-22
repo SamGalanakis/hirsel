@@ -1,4 +1,3 @@
 fn bad(xs: Inline[scoped fn() -> u64, 1]) {}
 // expect: refuse OWN-19 at 1:19
 // expect: compared OWN-19 at 1:19 | scoped fn() -> u64 | not scoped
-// expect: gap values of this type are not built

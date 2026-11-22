@@ -316,7 +316,6 @@ mod body {
         /// The hash of `ir`'s serialization: its body record's module part,
         /// set when the record is framed.
         ir_hash: ContentHash,
-        pub resolved: bool,
         pub key: DefinitionKey,
         pub anchors: BTreeMap<ItemAt, DefPath>,
         pub incomplete: Vec<Incomplete>,
@@ -346,7 +345,6 @@ mod body {
             definition: DefPath,
             check: CoreCheck,
             ir: Module,
-            resolved: bool,
             key: DefinitionKey,
             anchors: BTreeMap<ItemAt, DefPath>,
             incomplete: Vec<Incomplete>,
@@ -357,7 +355,6 @@ mod body {
                 ir: ir.into(),
                 ir_source: None,
                 ir_hash: ContentHash::default(),
-                resolved,
                 key,
                 anchors,
                 incomplete,
@@ -404,7 +401,6 @@ mod body {
                     .collect(),
                 key: disk.key,
                 incomplete: disk.incomplete,
-                resolved: disk.resolved,
                 ir_hash: head.ir_hash,
                 ir: std::sync::OnceLock::new(),
                 ir_source: Some(source),
@@ -584,21 +580,17 @@ struct DiskCheckRef<'a> {
     template: &'a Option<hirsel_core_front::GenericTemplate>,
     flow: hirsel_core_front::FlowFacts,
     function: Option<u32>,
-    resolved: bool,
 }
 impl<'a> DiskCheckRef<'a> {
     /// A site is a byte offset from its item's start and the key covers only
-    /// the body's own item, so a resolved body, whose refusals and gaps are
-    /// reported from its record, must cite no other item. An unresolved body
-    /// records none (see `check_inner`).
+    /// the body's own item, so a body, whose refusals and gaps are reported
+    /// from its record, must cite no other item.
     fn of(d: &'a DefinitionProduct) -> io::Result<Self> {
         let c = d.check.counts;
         let mut anchors: Vec<&DefPath> = d.anchors.values().collect();
         anchors.sort_unstable();
         anchors.dedup();
-        if d.resolved
-            && let Some(other) = anchors.iter().find(|p| **p != &d.definition)
-        {
+        if let Some(other) = anchors.iter().find(|p| **p != &d.definition) {
             return Err(io::Error::other(format!(
                 "internal error: the checked body `{}` cites a site in `{other}`",
                 d.definition
@@ -635,7 +627,6 @@ impl<'a> DiskCheckRef<'a> {
             template: &d.check.template,
             flow,
             function: d.check.function.map(|f| f.0),
-            resolved: d.resolved,
         })
     }
 }
@@ -651,7 +642,6 @@ struct DiskCheck {
     template: Option<hirsel_core_front::GenericTemplate>,
     flow: hirsel_core_front::FlowFacts,
     function: Option<u32>,
-    resolved: bool,
 }
 impl Driver {
     pub fn check(
@@ -1139,11 +1129,7 @@ impl Driver {
                     product
                 } else {
                     let mut emitter = Emitter::new();
-                    // Resolution owns this body's refusal. Lowering it again
-                    // would report cascades; other bodies still check normally.
-                    let check = if !resolution.diagnostics.is_empty()
-                        || resolution.resource_refusal.is_some()
-                    {
+                    let check = if resolution.resource_refusal.is_some() {
                         CoreCheck::default()
                     } else {
                         p.check_lower(f, &mut emitter)
@@ -1164,7 +1150,6 @@ impl Driver {
                         fd.path.clone(),
                         check,
                         emitter.module,
-                        resolution.diagnostics.is_empty(),
                         key,
                         anchors,
                         incomplete,
@@ -1172,15 +1157,13 @@ impl Driver {
                     checked = Some(key_hash);
                     Arc::new(product)
                 };
-                if product.resolved {
-                    for r in &product.check.refusals {
-                        let mut r = r.clone();
-                        keys.bind_site(&product.anchors, &mut r.primary);
-                        for cause in &mut r.causal {
-                            keys.bind_site(&product.anchors, &mut cause.site);
-                        }
-                        result.diagnostics.push(r);
+                for r in &product.check.refusals {
+                    let mut r = r.clone();
+                    keys.bind_site(&product.anchors, &mut r.primary);
+                    for cause in &mut r.causal {
+                        keys.bind_site(&product.anchors, &mut cause.site);
                     }
+                    result.diagnostics.push(r);
                 }
                 for g in &product.incomplete {
                     let mut g = g.clone();

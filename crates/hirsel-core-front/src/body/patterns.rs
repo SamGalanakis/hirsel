@@ -257,6 +257,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let p: &'c Program<'a> = self.p;
         let decl = &p.decls[d.index()];
         let target = p.target(self.at, path).copied();
+        // The resolver refused this name (LANG-7): the pattern is poisoned and
+        // matches anything, so its visibility is not checked again (PROG-8).
+        if matches!(target, Some(Target::Missing)) {
+            return fail(self);
+        }
         let from = p.modules[self.at.module as usize].id;
         let visible = match target {
             Some(Target::Definition(def)) => p.by_definition[def.0 as usize] == Some(Def::Type(d)),

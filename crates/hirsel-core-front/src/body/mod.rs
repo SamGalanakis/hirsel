@@ -972,6 +972,9 @@ impl Program<'_> {
         let mut out = cx.finish();
         if self.entry.as_ref() == Some(&fd.path) {
             self.check_entry(fd, &mut out.refusals);
+            if !out.refusals.is_empty() {
+                out.gaps.clear();
+            }
         }
         out
     }
@@ -1655,7 +1658,17 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             r.message.push_str(". Expected signature: ");
             r.message.push_str(&self.shown_callee(callee));
         }
-        self.out.refusals.push(r);
+        // PROG-8: a construct the resolver refused is not refused again by a
+        // later check of the same site.
+        let resolved = &self.p.items[self.at.module as usize][self.at.item as usize].resolution;
+        let restated = resolved.diagnostics.iter().any(|d| {
+            d.rule == r.rule
+                && (d.primary.module, d.primary.item, d.primary.span.start)
+                    == (r.primary.module, r.primary.item, r.primary.span.start)
+        });
+        if !restated {
+            self.out.refusals.push(r);
+        }
         self.halt();
     }
     /// Node `n` of this body as a causal site.
@@ -2516,15 +2529,24 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
     fn finish(mut self) -> CoreCheck {
         crate::cost_scope!("phase", "body finish");
         self.out.flow.waits = self.fd.waits;
+        // The resolver's and the declarations' refusals of this item are reported.
+        let item = self.p.site(self.at, self.header);
+        let refused = self.inherited_refusal
+            || !self.out.refusals.is_empty()
+            || self
+                .p
+                .refusals
+                .iter()
+                .any(|r| (r.primary.module, r.primary.item) == (item.module, item.item));
+        // PROG-8: a refused definition is never built, so none of its constructs is a
+        // gap in the build; a gap there only restates the refusal.
+        if refused {
+            self.out.gaps.clear();
+        }
         if let Some(n) = self.halted
-            && !self.inherited_refusal
-            && self.out.refusals.is_empty()
+            && !refused
             && self.out.gaps.is_empty()
             && let site = self.p.site(self.at, n)
-            // The resolver's and the declarations' refusals of this item are reported.
-            && !self.p.refusals.iter().any(|r| {
-                (r.primary.module, r.primary.item) == (site.module, site.item)
-            })
         {
             self.out.gaps.push(Gap::new(site, SILENT_HALT));
             self.broken = true;

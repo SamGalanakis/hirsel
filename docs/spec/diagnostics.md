@@ -67,3 +67,29 @@ An implementation reports at least one refusal for every refused program and may
 several, in any order. No first diagnostic is fixed across independent refusals, and a
 refusal is never suppressed or reworded by another one, except that checks depending on a
 construct that failed to parse, resolve or type are not made.
+
+**Poison.** Suppression is by construct, not by definition. A construct that failed to
+resolve or type is **poisoned**: a name that was not found, a call or construction of it,
+and a type with a refused part all have the refused type. An expression with a poisoned
+operand is poisoned, and so is a place bound from a poisoned value. A poisoned operand
+suppresses only the checks that read it:
+
+- A comparison with the refused type succeeds silently
+  ([LANG-11](language.md#lang-11-typing-is-local)), and so does a bound required of it.
+- A pattern naming a constructor that was not found matches anything, so it is checked for
+  neither visibility nor exhaustiveness ([LANG-17](language.md#lang-17-match)).
+- The arguments of a call whose callee is poisoned are not checked, so they are neither
+  moved nor lent.
+- A construct the resolver refused is not refused again by a later check of the same site.
+- Checks that read the body's whole inference or flow are not made once the body has
+  a poisoned construct or any refusal: a type parameter still open
+  ([LANG-12](language.md#lang-12-generics)), an owning closure that mutates a capture
+  ([LANG-14](language.md#lang-14-captures)), a loop binding whose captures or anchors
+  change on repetition ([OWN-17](ownership.md#own-17-loops)), a stage body whose reach
+  cannot be closed ([CONC-14](tasks.md#conc-14-flows)), and whether the body waits.
+- A refused definition reports no gaps (constructs the implementation does not build):
+  it is never built.
+
+Every other check of the same body, before or after the poisoned construct, is made, and
+its refusals are reported. A definition with a syntax refusal is not resolved or checked
+further.

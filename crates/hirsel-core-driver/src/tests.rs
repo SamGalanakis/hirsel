@@ -2973,22 +2973,33 @@ fn unresolved_closure_patterns_do_not_emit_or_use_undeclared_binders() {
 }
 
 #[test]
-fn unresolved_bodies_suppress_cascades_without_hiding_independent_body_errors() {
+fn unresolved_bodies_suppress_cascades_without_hiding_independent_errors() {
     let dir = tempfile::tempdir().unwrap();
-    let source = "type Choice = Yes | No(u64)\nfn pattern(x: Choice) -> u64 { match x { Yes => 1u64, Missing(_) => 0u64 } }\nfn independent() -> u64 { true }\n";
-    for attempt in 0..2 {
+    // The refused body's own independent error (`let k`) is reported cold, from
+    // its record when warm, and follows a change to the signature it reads (PROG-8
+    // poison).
+    let source = |other: &str| {
+        format!(
+            "type Choice = Yes | No(u64)\nfn other() -> {other} {{ {other}_value() }}\nfn pattern(x: Choice) -> u64 {{ let k: u64 = other(); match x {{ Yes => 1u64, Missing(_) => 0u64 }} }}\nfn bool_value() -> bool {{ true }}\nfn u64_value() -> u64 {{ 0u64 }}\n"
+        )
+    };
+    for (attempt, other, expected) in [
+        (0, "bool", &[("LANG-11", 2), ("LANG-7", 2)][..]),
+        (1, "bool", &[("LANG-11", 2), ("LANG-7", 2)][..]),
+        (2, "u64", &[("LANG-7", 2)][..]),
+    ] {
         let product = Driver::default()
-            .check(request(source, dir.path()), &mut Meter::new(false))
+            .check(request(&source(other), dir.path()), &mut Meter::new(false))
             .unwrap();
         assert!(!product.accepted());
-        let rules: Vec<_> = product
+        let mut rules: Vec<_> = product
             .diagnostics
             .iter()
-            .map(|r| r.rule.as_str())
+            .map(|r| (r.rule.as_str(), r.primary.item))
             .collect();
+        rules.sort_unstable();
         assert_eq!(
-            rules,
-            ["LANG-7", "LANG-11"],
+            rules, expected,
             "attempt {attempt}: {:?}",
             product.diagnostics
         );

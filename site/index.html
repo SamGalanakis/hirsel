@@ -1023,7 +1023,8 @@ SC.bounded = (g) => {
   for (let i = outerT.length - 1; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [outerT[i], outerT[j]] = [outerT[j], outerT[i]]; }
   /* a ram stands a little under half a tile wide at every size, so the field never looks crowded */
   const s = Math.min(46 * VS, ts * .44);
-  const HOME = K(.95, 2.05), OUT = K(2.6, 4.45);
+  /* the red ram stands inside the bound it fills, on its front-left patch, clear of every wall */
+  const HOME = K(1.5, 2.5), OUT = K(2.6, 4.45);
   const slots = [
     { x: HOME[0], y: HOME[1], s, a: 1, rx: 0, ry: 0, slot: 0 },
     { ...(() => { const p = K(6.1, .7); return { x: p[0], y: p[1] }; })(), s, a: 1, rx: ts * .14, ry: ts * .05, slot: 1 },
@@ -1083,12 +1084,13 @@ SC.bounded = (g) => {
     },
     over(t, a) {
       t %= C; const r = rend[ids[0]];
-      if (t >= REF && t < REF + 34) {
-        /* the next mouthful: thrown at the full bound, it does not land */
-        const f = (t - REF) / 34, tgt = K(3.3, 1.6), ox = r.x + s * .1, oy = r.y - s * .55;
-        const go = Math.min(1, f / .55), back = f > .55 ? (f - .55) / .45 : 0;
-        const x = lerp(ox, tgt[0], ease(go) * (1 - back * .55)), y = lerp(oy, tgt[1] - ts * .2, ease(go)) + back * back * ts * .25;
-        token(x, y, a * (1 - back * .8), RED);
+      if (t >= REF && t < REF + 48) {
+        /* the next mouthful: from the ram's muzzle onto the full patch ahead of it, where it does not
+           land; it springs back toward the ram and is gone */
+        const f = (t - REF) / 48, tgt = K(2.5, 2.4), ox = r.x + r.face * s * .3, oy = r.y - s * .45;
+        const go = ease(Math.min(1, f / .5)), back = f > .5 ? (f - .5) / .5 : 0;
+        const x = lerp(ox, tgt[0], go * (1 - back * .6)), y = lerp(oy, tgt[1] - ts * .04, go) - Math.sin(go * Math.PI) * ts * .1 - Math.sin(back * Math.PI) * ts * .1;
+        token(x, y, a * (1 - back * .85), RED);
       }
       const ca = capA(t);
       if (ca > .01) {

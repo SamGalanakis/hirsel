@@ -36,7 +36,7 @@ while ids identify table and index incarnations and are never reused.
 runs on a reader task without a Db. The checker refuses a write or `info(mut tx)`
 in that body with OWN-5. CallInfo belongs only to `run` and helpers taking mut Tx.
 `changes(a, b)` compares data-tree bytes in ascending physical-key order, skipping
-shared nodes by node id. Deletions have value None. Different stores or opens
+shared nodes by node id. Each change holds an Arc to its stored value. Deletions have value None. Different stores or opens
 are Foreign; branches of one open are allowed. Catalog and stream roots do not
 contribute changes. Node visits are O(k log n), where k counts keys written
 between snapshots, including same-value rewrites. The output uses O(w) storage

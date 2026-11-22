@@ -24,7 +24,7 @@ BYTE_LAWS = ('refused_reply',
              'model', 'snapshots', 'reads_ranges', 'call_info', 'resident', 'foreign', 'frames', 'follow', 'node_ids',
              'typed_indexes', 'schema_numbers', 'catalog_invalid', 'index_refusal',
              'typed_foreign', 'drop_recreate', 'typed_resident', 'typed_model', 'close_follow', 'abort_budget',
-             'look', 'look_faults', 'changes', 'changes_identity', 'info_mut', 'changes_rewritten_equal',
+             'look', 'look_faults', 'changes', 'shared_changes', 'changes_identity', 'info_mut', 'changes_rewritten_equal',
              'assembly_indexed_recreate', 'read_liveness', 'overwrite_account', 'index_writes', 'read_cover', 'read_spans', 'published_value',
              'frame_size', 'frame_size_boundary', 'stored_size', 'shared_payload_copy', 'branches', 'pin_settle', 'pinned_delete', 'migrate', 'step_bounds', 'streams', 'request_digest', 'keyset_pages')
 
@@ -101,6 +101,8 @@ def main():
                         and sorted(actual) == sorted(expected)
                         and not report.get('incomplete') and not report.get('resources'))
                 rows.append(dict(engine='checker', law=control, passed=good, result=report))
+                if (work / control).is_dir():
+                    shutil.rmtree(work / control)
                 print(f'checker {control}: {"PASS" if good else "FAIL"}', flush=True)
         for engine in engines:
             if engine == 'evaluator':
@@ -121,6 +123,7 @@ def main():
                 if args.compiler is None or args.runtime is None:
                     p.error('native backends require --compiler and --runtime')
                 package = [str(args.compiler.resolve()), 'test', str(args.root.resolve() / 'core/programs/store'),
+                           '--libraries', str(args.root.resolve() / 'core'), '--source-core', '--source-std',
                            '--backend', 'llvm' if engine == 'llvm-release' else engine,
                            '--store', str(work / engine), '--json']
                 if engine == 'llvm-release':
@@ -168,6 +171,8 @@ def main():
                         and tests[0].get('passed'))
                 rows.append(dict(engine=engine, schedules=32, passed=good, result=report))
                 print(f'{engine}: follow across 32 schedules {"PASS" if good else "FAIL"}', flush=True)
+                if (work / engine).is_dir():
+                    shutil.rmtree(work / engine)
     if args.report:
         args.report.write_text(json.dumps(rows, indent=2) + '\n')
     failures = [row for row in rows if row['passed'] is False]

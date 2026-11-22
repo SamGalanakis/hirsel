@@ -1490,8 +1490,9 @@ fn note_read(tx: Tx, take read: Read) -> Result[(), Error] {
 
 fn fetch_bytes(tx: Tx, id: u32, key: Bytes) -> Result[Option[Bytes], Error] {
     let p = physical(id, key)?
-    note_read(tx, Point(copied(p)?))?
-    match std.omap.get(tx.roots.data, p) {
+    let found = std.omap.get(tx.roots.data, p)
+    note_read(tx, Point(take p))?
+    match found {
         Some(v) => Ok(Some(copied(v)?)),
         None => Ok(None)
     }
@@ -2721,10 +2722,11 @@ pub fn fetch[K, V](tx: Tx, t: Shape[K, V], k: K) -> Result[Option[V], Error] {
         return Error(Foreign)
     }
     readable(tx.roots, t.catalog_key, t.id)?
-    let key = encode_key(t.key, k)?
-    let p = physical(t.id, key)?
-    note_read(tx, Point(copied(p)?))?
-    match std.omap.get(tx.roots.data, p) {
+    let mut p = prefixed(t.id, 8)?
+    std.codec.encode_key(t.key, k, mut p)
+    let found = std.omap.get(tx.roots.data, p)
+    note_read(tx, Point(take p))?
+    match found {
         Some(raw) => Ok(Some(row_value(t.readers, t.id, raw)?)),
         None => Ok(None)
     }
@@ -2829,7 +2831,7 @@ pub fn open_span_changes(s: Snapshot, lo: Bytes, hi: Bytes) -> Result[ByteRows, 
 
 pub fn next_span_change(mut rows: ByteRows) -> Result[Option[Change], Error] {
     match next_bytes(mut rows)? {
-        Some((take k, take v)) => Ok(Some(Change(tree_key: take k, value: Some(copied(v)?)))),
+        Some((take k, take v)) => Ok(Some(Change(tree_key: take k, value: Some(take v)))),
         None => Ok(None),
     }
 }
@@ -4221,7 +4223,7 @@ fn with_value(c: Change, number: u8, rest: u64) -> Change {
     for _ in 0u64 .. rest {
         list.push(mut v, 0u8)
     }
-    Change(tree_key: result.unwrap(copied(c.tree_key)), value: Some(take v))
+    Change(tree_key: result.unwrap(copied(c.tree_key)), value: Some(arc.new(take v)))
 }
 
 pub fn law_published_value(c: Clock) -> bool waits {
@@ -4978,7 +4980,7 @@ pub fn look[R](s: Snapshot, steps: Option[u64], body: scoped[view] fn(Tx) -> R) 
 
 pub type Change {
     tree_key: Bytes,
-    value: Option[Bytes]
+    value: Option[Arc[Bytes]]
 }
 
 type DiffPart {
@@ -5015,7 +5017,7 @@ fn diff_emit(mut out: List[Change], p: DiffPart, present: bool) -> Result[(), Er
     let k = option.unwrap(std.omap.node_key(p.node, p.at))
     let value = if present {
         let source = option.unwrap(std.omap.node_value(p.node, p.at))
-        Some(copied(source)?)
+        Some(arc.share(source))
     } else {
         None
     }
@@ -5285,7 +5287,7 @@ fn check_delta(a: Snapshot, b: Snapshot, before: List[u64], after: List[u64]) ->
             }
             let good = match delta[at].value {
                 None => after[k] == 0,
-                Some(raw) => raw == key_word(after[k]) && after[k] != 0
+                Some(raw) => list.slice(raw, 0, list.len(raw)) == key_word(after[k]) && after[k] != 0
             }
             if !good {
                 return false
@@ -5376,6 +5378,33 @@ pub fn law_changes(c: Clock) -> bool {
         },
         _ => false
     }
+}
+
+// A change can keep a large value within a budget that cannot copy it.
+pub fn law_shared_changes(c: Clock) -> bool {
+    let mut db = test_db(c, 1073741824)
+    let before = snapshot(db)
+    let outcome = execute(mut db, 0, 1, None, fn(mut tx: Tx) -> Result[(), Error] {
+        let mut payload: Bytes = list.with_capacity(8192)
+        list.fill(mut payload, 8192, 51u8)
+        put_bytes(mut tx, 1, key_word(7), payload)
+    })
+    if let Ok(Committed(_)) = outcome {} else { return false }
+    let after = snapshot(db)
+    let low = result.unwrap(prefix(1))
+    let high = result.unwrap(prefix(2))
+    let delta = result.unwrap(result.unwrap(bound bytes 4096 { changes(before, after) }))
+    let rows = result.unwrap(result.unwrap(bound bytes 4096 { span_changes(after, low, high) }))
+    if !same_rows(rows, delta, 0, 1) || list.len(delta) != 1 { return false }
+    match delta[0].value {
+        Some(payload) => list.len(payload) == 8192 && payload[0] == 51 && payload[8191] == 51,
+        None => false
+    }
+}
+
+@test
+fn test_shared_changes(c: Clock) -> Result[(), ()] {
+    if law_shared_changes(c) { Ok(()) } else { Error(()) }
 }
 
 @test
@@ -13530,7 +13559,7 @@ pub fn journal_law_changes_checkpoint(d: Dir, c: Clock, r: Random, tasks: Tasks)
             let mut expected: Bytes = list.with_capacity(10)
             list.fill(mut expected, 2, 0u8)
             for j in 0u64 .. 8 { list.push(mut expected, int.truncate(v >> int.truncate(j * 8))) }
-            match found[i].value { Some(raw) => if raw != expected { return false }, None => return false }
+            match found[i].value { Some(raw) => if list.slice(raw, 0, list.len(raw)) != expected { return false }, None => return false }
         }
     }
     let sh = shape(t)

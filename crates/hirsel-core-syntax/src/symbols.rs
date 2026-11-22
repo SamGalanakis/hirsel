@@ -291,7 +291,12 @@ impl Default for Symbols {
         strings.push(Arc::from("streamable"));
         strings.push(Arc::from("clone"));
         strings.push(Arc::from("codec"));
-        strings.extend(["via", "to", "from", "removed", "steps", "Simd", "inert", "cross"].map(Arc::from));
+        strings.extend(
+            [
+                "via", "to", "from", "removed", "steps", "Simd", "inert", "cross",
+            ]
+            .map(Arc::from),
+        );
         let mut single = empty_single();
         for (i, s) in strings.iter().enumerate().skip(1) {
             if let [b] = s.as_bytes() {

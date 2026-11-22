@@ -525,7 +525,10 @@ pub(super) fn release_race(id: u32) -> u8 {
             cx.obs("seal", "");
             while cx.wait() != Took::SealAnswer {}
             let (causes, took) = cx.u.clean(&inbox);
-            assert!(causes.is_empty() && took.is_empty(), "unit 0 still holds a client");
+            assert!(
+                causes.is_empty() && took.is_empty(),
+                "unit 0 still holds a client"
+            );
             cx.released(&took);
             cx.obs("clean", "");
             compute_until(now() + draw(0, param(0)));

@@ -873,7 +873,6 @@ fn f{entry} = n{instance} g{g} {{
                 (152, 0),
                 (160, 0x157dbcb1260ec7ea),
                 (168, 0x53d1166d79c4dddb),
-
             ]
             .into_iter()
             .enumerate()

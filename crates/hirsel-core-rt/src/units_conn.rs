@@ -11,7 +11,10 @@
 //! wait, the service of waiting sends, a withdrawal, the seal, the last client
 //! and the cleaning's end.
 use super::super::sync::{AtomicU64, Mutex};
-use super::{Account, Arrival, ArrivalRef, Body, Cap, Credit, CrossRoom, Released, Settle, UnitCtx, Value, repay};
+use super::{
+    Account, Arrival, ArrivalRef, Body, Cap, Credit, CrossRoom, Released, Settle, UnitCtx, Value,
+    repay,
+};
 use crate::limit::Payer;
 use std::{
     cell::{Cell, UnsafeCell},
@@ -436,68 +439,68 @@ impl UnitCtx {
         let _ = k;
         let owner = self.port.clone();
         let c = Arc::new(ConnCore {
-                hot: Hot {
-                    word: AtomicU64::new(0),
-                    first: UnsafeCell::new(MaybeUninit::uninit()),
-                },
-                spares: (1..cap)
-                    .map(|_| UnsafeCell::new(MaybeUninit::uninit()))
-                    .collect(),
-                flat: match (cap as usize)
-                    .checked_mul(stride)
-                    .expect("connection slot extent")
-                {
-                    0..=8 => FlatSlots::Inline(UnsafeCell::new(MaybeUninit::uninit())),
-                    // Each UnsafeCell contains MaybeUninit, so all bit
-                    // patterns are valid and the arena need not be zeroed.
-                    bytes => FlatSlots::Arena(unsafe {
-                        Box::<[UnsafeCell<MaybeUninit<u8>>]>::new_uninit_slice(bytes).assume_init()
-                    }),
-                },
-                spare: UnsafeCell::new(Box::default()),
-                stride,
-                seqs: owners
-                    .iter()
-                    .copied()
-                    .filter(|o| o[1] == hirsel_core_layout::cross::SEQ)
-                    .collect(),
-                socket_offsets: owners
-                    .iter()
-                    .filter(|o| o[1] == hirsel_core_layout::cross::SOCKET)
-                    .map(|o| o[0])
-                    .collect(),
-                free: (cap > u64::from(BITMAP_CAP)).then(|| {
-                    Box::new(Mutex::new(FreeArrivals {
-                        returned: Vec::with_capacity(cap as usize),
-                        next: 0,
-                    }))
+            hot: Hot {
+                word: AtomicU64::new(0),
+                first: UnsafeCell::new(MaybeUninit::uninit()),
+            },
+            spares: (1..cap)
+                .map(|_| UnsafeCell::new(MaybeUninit::uninit()))
+                .collect(),
+            flat: match (cap as usize)
+                .checked_mul(stride)
+                .expect("connection slot extent")
+            {
+                0..=8 => FlatSlots::Inline(UnsafeCell::new(MaybeUninit::uninit())),
+                // Each UnsafeCell contains MaybeUninit, so all bit
+                // patterns are valid and the arena need not be zeroed.
+                bytes => FlatSlots::Arena(unsafe {
+                    Box::<[UnsafeCell<MaybeUninit<u8>>]>::new_uninit_slice(bytes).assume_init()
                 }),
-                cap,
-                b,
-                h,
-                owner,
-                admitting,
-                room_open: Cell::new(true),
-                slow: Mutex::new(Slow {
-                    waiters: VecDeque::new(),
-                    clients: 1,
-                    cleaned: false,
-                    close_sent: false,
-                    retained: 0,
-                }),
-                side: UnsafeCell::new(Side {
-                    taken: VecDeque::new(),
-                    intaken: 0,
-                    freed: 0,
-                    seal_due: 0,
-                    closed: false,
-                    seal_taken: false,
-                    sealed: false,
-                    cleaned: false,
-                }),
-                #[cfg(test)]
-                label,
-            });
+            },
+            spare: UnsafeCell::new(Box::default()),
+            stride,
+            seqs: owners
+                .iter()
+                .copied()
+                .filter(|o| o[1] == hirsel_core_layout::cross::SEQ)
+                .collect(),
+            socket_offsets: owners
+                .iter()
+                .filter(|o| o[1] == hirsel_core_layout::cross::SOCKET)
+                .map(|o| o[0])
+                .collect(),
+            free: (cap > u64::from(BITMAP_CAP)).then(|| {
+                Box::new(Mutex::new(FreeArrivals {
+                    returned: Vec::with_capacity(cap as usize),
+                    next: 0,
+                }))
+            }),
+            cap,
+            b,
+            h,
+            owner,
+            admitting,
+            room_open: Cell::new(true),
+            slow: Mutex::new(Slow {
+                waiters: VecDeque::new(),
+                clients: 1,
+                cleaned: false,
+                close_sent: false,
+                retained: 0,
+            }),
+            side: UnsafeCell::new(Side {
+                taken: VecDeque::new(),
+                intaken: 0,
+                freed: 0,
+                seal_due: 0,
+                closed: false,
+                seal_taken: false,
+                sealed: false,
+                cleaned: false,
+            }),
+            #[cfg(test)]
+            label,
+        });
         self.connections.insert(Arc::as_ptr(&c).addr(), c.clone());
         (Inbox(c.clone()), Client(c))
     }
@@ -522,9 +525,21 @@ impl UnitCtx {
                 let tag = source.tag;
                 let room = if index == 0 {
                     // SAFETY: this sender holds slot 0's reservation.
-                    source.copy_into(c.flat_ptr(index), c.stride, &c.seqs, bytes, &mut *c.spare.get())
+                    source.copy_into(
+                        c.flat_ptr(index),
+                        c.stride,
+                        &c.seqs,
+                        bytes,
+                        &mut *c.spare.get(),
+                    )
                 } else {
-                    source.copy_into(c.flat_ptr(index), c.stride, &c.seqs, bytes, &mut Box::default())
+                    source.copy_into(
+                        c.flat_ptr(index),
+                        c.stride,
+                        &c.seqs,
+                        bytes,
+                        &mut Box::default(),
+                    )
                 };
                 let v = Value::cross(room, source.sockets);
                 #[cfg(test)]

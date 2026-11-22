@@ -1284,13 +1284,7 @@ impl Heap {
         *left = left.checked_sub(1)?;
         let page = *nursery.page.get_or_insert_with(|| {
             let (allocation, start) = slabs::Slab::allocate(Arc::as_ptr(heap).addr());
-            Page::nursery(
-                heap,
-                payer,
-                class.kind,
-                Backing::Slab(allocation),
-                start,
-            )
+            Page::nursery(heap, payer, class.kind, Backing::Slab(allocation), start)
         });
         // SAFETY: the context custodian owns the nursery and its slots.
         unsafe {
@@ -1849,7 +1843,10 @@ unsafe fn release_slow(mut state: Local<'_>, page: PagePointer, payload: NonNull
         }
         let pages = state.private_pages();
         push_free(slots, payload);
-        if (*page.as_ref().spread.get()).spread && slots.live <= slots.watch && !crate::units::untied() {
+        if (*page.as_ref().spread.get()).spread
+            && slots.live <= slots.watch
+            && !crate::units::untied()
+        {
             slots.watch = 1;
             list(heap, pages, page);
         }
@@ -1921,10 +1918,14 @@ impl Mapping {
     ) -> Option<(Self, NonNull<u8>)> {
         let mapping = if let Some(memory) = crate::units::memory() {
             let len = space.checked_add(headroom)?;
-            memory.take_page(|mapping| {
-                mapping.len == len && mapping.prefix == headroom && mapping.writable.get() >= bytes
-                    && (mapping.base.addr().get() + headroom) & (align - 1) == 0
-            }).or_else(|| memory.map(move || Self::map_aligned(bytes, space, align, headroom)))?
+            memory
+                .take_page(|mapping| {
+                    mapping.len == len
+                        && mapping.prefix == headroom
+                        && mapping.writable.get() >= bytes
+                        && (mapping.base.addr().get() + headroom) & (align - 1) == 0
+                })
+                .or_else(|| memory.map(move || Self::map_aligned(bytes, space, align, headroom)))?
         } else {
             Self::map_aligned(bytes, space, align, headroom)?
         };

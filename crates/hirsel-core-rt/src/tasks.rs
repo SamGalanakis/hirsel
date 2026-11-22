@@ -2405,7 +2405,10 @@ pub extern "C" fn hirsel_core_ready(token: u64) {
 /// needs no `Moved` accessor.
 #[inline(never)]
 pub(crate) fn check_idle_tls() {
-    if !CURRENT.get_here().is_null() || !CALLBACK_TASK.get_here().is_null() || !WORKER.get_here().is_null() {
+    if !CURRENT.get_here().is_null()
+        || !CALLBACK_TASK.get_here().is_null()
+        || !WORKER.get_here().is_null()
+    {
         crate::process::stop(b"UntiedParkWithTask");
     }
     crate::limit::check_unbound();
@@ -4538,9 +4541,7 @@ impl RunPtr {
         // readiness flag, which outside threads set without a nudge.
         let deadline = crate::os::monotonic_ns().saturating_add(IDLE_SPIN_NS);
         loop {
-            if pool.nudged[index].load(Ordering::Acquire)
-                || pool.readies.has_pending()
-            {
+            if pool.nudged[index].load(Ordering::Acquire) || pool.readies.has_pending() {
                 pool.wake(index);
                 return;
             }
@@ -4598,8 +4599,7 @@ impl RunPtr {
         if let Some(poller) = poller
             && let Some(events) = poller
                 .wait(timeout, || {
-                    pool.nudged[index].load(Ordering::Acquire)
-                        || pool.readies.has_pending()
+                    pool.nudged[index].load(Ordering::Acquire) || pool.readies.has_pending()
                 })
                 .unwrap_or_else(|_| crate::process::stop(b"HostPoll"))
         {

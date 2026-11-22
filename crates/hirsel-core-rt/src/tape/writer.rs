@@ -102,14 +102,28 @@ pub(crate) fn push(stream: &Arc<Stream>, block: Vec<u8>, frames: u64, first: boo
     if !first && q.bytes + block.len() > bound() {
         return false;
     }
-    enqueue(q, stream, Block { bytes: block, frames });
+    enqueue(
+        q,
+        stream,
+        Block {
+            bytes: block,
+            frames,
+        },
+    );
     true
 }
 
 /// Queue a recording's TRUNCATED marker, past the bound.
 pub(crate) fn mark(stream: &Arc<Stream>, marker: Vec<u8>) {
     TAPE_COUNTS[super::C_TRUNCATED].fetch_add(1, Relaxed);
-    enqueue(lock(&QUEUE), stream, Block { bytes: marker, frames: 0 });
+    enqueue(
+        lock(&QUEUE),
+        stream,
+        Block {
+            bytes: marker,
+            frames: 0,
+        },
+    );
 }
 
 /// Start the writer thread, once. A recording launch calls it on the host
@@ -237,10 +251,22 @@ fn write_all(fd: i32, blocks: &[Block]) -> Result<(), (usize, IoError)> {
             if code == libc::EINTR {
                 continue;
             }
-            return Err((at, IoError { tag: 5, code: code as u32 }));
+            return Err((
+                at,
+                IoError {
+                    tag: 5,
+                    code: code as u32,
+                },
+            ));
         }
         if n == 0 {
-            return Err((at, IoError { tag: 5, code: libc::EIO as u32 }));
+            return Err((
+                at,
+                IoError {
+                    tag: 5,
+                    code: libc::EIO as u32,
+                },
+            ));
         }
         let mut n = n as usize;
         while at < iov.len() && n >= iov[at].iov_len {

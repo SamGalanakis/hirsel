@@ -1333,7 +1333,10 @@ impl UnitCtx {
     }
 
     pub(crate) fn enter_bound(&mut self, size: u64) -> Result<(), Cap> {
-        let f = self.funding.as_mut().expect("a language unit has no bounds here");
+        let f = self
+            .funding
+            .as_mut()
+            .expect("a language unit has no bounds here");
         let avail = f.available();
         if size > avail {
             return Err(Cap { req: size, avail });
@@ -1355,7 +1358,10 @@ impl UnitCtx {
     pub(crate) fn exit_bound(&mut self) {
         #[cfg(test)]
         {
-            let i = self.books.iter().rposition(|(_, b)| matches!(b, Book::Bound(_)));
+            let i = self
+                .books
+                .iter()
+                .rposition(|(_, b)| matches!(b, Book::Bound(_)));
             self.books.remove(i.expect("cannot exit the root scope"));
         }
         self.funding.as_mut().unwrap().exit();

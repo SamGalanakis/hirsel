@@ -61,6 +61,27 @@ pub enum InstanceStop {
         message: String,
     },
 }
+impl std::fmt::Display for InstanceStop {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Resource { limit, next } => write!(
+                f,
+                "`{}` needs instance {} past the limit of {limit}",
+                next.definition,
+                limit + 1
+            ),
+            Self::OutsideReached(definition) => write!(f, "{definition}: body is unavailable"),
+            Self::Input {
+                definition,
+                message,
+            }
+            | Self::Incomplete {
+                definition,
+                message,
+            } => write!(f, "{definition}: {message}"),
+        }
+    }
+}
 /// The emitter supplies mechanical instance dependencies. In particular, a growing
 /// f[T] -> f[List[T]] family stops as a compiler resource outcome, not a language rule.
 pub fn collect_instances(

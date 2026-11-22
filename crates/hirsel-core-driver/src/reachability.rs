@@ -23,6 +23,11 @@ pub struct Reachable<'a> {
     /// Resource refusals the build needs: the product's, and instance collection's.
     pub resources: Vec<ResourceRefusal>,
     pub first_stops: Vec<GapStop>,
+    /// The stop a refused build reports, rendered with its source location:
+    /// a source refusal ahead of a checker gap, and either ahead of an
+    /// instance-collection stop, which a refusal elsewhere can cause (a body
+    /// that calls a refused definition has no native product of its own).
+    pub(crate) leading: Option<String>,
     pub instances: Result<Vec<Identity>, InstanceStop>,
     pub counters: crate::reach::ReachCounters,
     pub(crate) materialized: crate::instances::InstanceSet,
@@ -185,11 +190,11 @@ impl Reachable<'_> {
     }
     pub(crate) fn require(&self) -> Result<&[Identity], NativeStop> {
         if !self.diagnostics.is_empty() || !self.incomplete.is_empty() {
-            let stop = self.first_stops.first().unwrap();
-            return Err(NativeStop::Check(format!(
-                "{}: {} {}",
-                stop.definition, stop.rule, stop.construct
-            )));
+            let stop = self
+                .leading
+                .clone()
+                .expect("a refused walk has a leading stop");
+            return Err(NativeStop::Check(stop));
         }
         if let Some(r) = self.resources.first() {
             return Err(NativeStop::Check(r.message.clone()));
@@ -321,6 +326,7 @@ impl CheckProduct {
                     incomplete: vec![],
                     resources: vec![],
                     first_stops: vec![],
+                    leading: None,
                     instances: Ok(instances),
                     counters: crate::reach::ReachCounters {
                         expanded: held.len() as u64,
@@ -591,6 +597,8 @@ impl CheckProduct {
         let clean =
             self.diagnostics.is_empty() && self.incomplete.is_empty() && self.resources.is_empty();
         let mut first_stops = BTreeMap::new();
+        // Each stop's site, to render the leading one.
+        let mut stop_sites: BTreeMap<String, Site> = BTreeMap::new();
         let mut diagnostics = vec![];
         let mut incomplete = vec![];
         let mut resources: Vec<ResourceRefusal> = vec![];
@@ -676,6 +684,7 @@ impl CheckProduct {
                 if let std::collections::btree_map::Entry::Vacant(slot) =
                     first_stops.entry(name.clone())
                 {
+                    stop_sites.insert(name.clone(), *site);
                     slot.insert(GapStop {
                         definition: name,
                         rule: rule.to_owned(),
@@ -693,6 +702,7 @@ impl CheckProduct {
         }
         for path in reached.unavailable() {
             if let Some(h) = self.headers.get(&path) {
+                stop_sites.entry(path.to_string()).or_insert(h.site);
                 first_stops.entry(path.to_string()).or_insert(GapStop {
                     definition: path.to_string(),
                     rule: "instances".into(),
@@ -732,6 +742,7 @@ impl CheckProduct {
                 && let std::collections::btree_map::Entry::Vacant(slot) =
                     first_stops.entry(path.to_string())
             {
+                stop_sites.insert(path.to_string(), h.site);
                 slot.insert(GapStop {
                     definition: path.to_string(),
                     rule: "instances".into(),
@@ -752,6 +763,26 @@ impl CheckProduct {
         {
             self.bind_foreign_addresses(&mut materialized)?;
         }
+        let rank = |rule: &str| match rule {
+            "instances" => 2,
+            "checker gap" => 1,
+            _ => 0,
+        };
+        let leading = first_stops
+            .iter()
+            .min_by_key(|(name, stop)| (rank(&stop.rule), *name))
+            .map(|(name, stop)| -> io::Result<String> {
+                let location = self.render_site(&stop_sites[name])?;
+                Ok(if stop.definition == stop.primary.module {
+                    format!("{location}: {} {}", stop.rule, stop.construct)
+                } else {
+                    format!(
+                        "{}: {location}: {} {}",
+                        stop.definition, stop.rule, stop.construct
+                    )
+                })
+            })
+            .transpose()?;
         Ok(Reachable {
             bodies: bodies_len,
             declarations: declarations_len,
@@ -759,6 +790,7 @@ impl CheckProduct {
             incomplete,
             resources,
             first_stops: first_stops.into_values().collect(),
+            leading,
             instances,
             counters,
             materialized,

@@ -1526,6 +1526,26 @@ fn reachable_build_refuses_and_censuses_the_incomplete_callee() {
     assert_eq!(reachable.census().values().sum::<usize>(), 1);
 }
 
+/// Bug: a caller whose body stops at a callee with a refused signature has no
+/// native product of its own, and the build reported that internal stop (the
+/// caller sorts first) in place of the callee's refusal and its location.
+#[test]
+fn reachable_build_reports_the_refusal_ahead_of_the_instance_stop_it_causes() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = "fn answer() -> u8 { zeta(7u8) }\nfn zeta(x: Missing) -> u8 { 7u8 }\n";
+    let product = Driver::default()
+        .check(request(source, dir.path()), &mut Meter::new(false))
+        .unwrap();
+    let reachable = product
+        .reachable(&DefPath::from_full("app@1/main/answer").unwrap(), 64)
+        .unwrap();
+    let stopped = reachable.require().unwrap_err().to_string();
+    assert!(
+        stopped.starts_with("check: app@1/main/zeta: app@1/main:2:12-19: LANG-7 "),
+        "{stopped}"
+    );
+}
+
 #[test]
 fn reachable_build_keeps_refusals_in_named_signature_declarations() {
     // The declaration's refusal is kept wherever the declaration sits in its file.

@@ -1346,11 +1346,13 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         image: image.map(|i| hex(i.identity)),
         native,
         stopped: stopped.or_else(|| {
+            // Behind a reported refusal the instance stop is its consequence.
             reach
                 .as_ref()
+                .filter(|r| r.diagnostics.is_empty() && r.incomplete.is_empty())
                 .and_then(|r| r.instances.as_ref().err())
                 .filter(|e| !matches!(e, crate::InstanceStop::Resource { .. }))
-                .map(|e| format!("instances: {e:?}"))
+                .map(|e| format!("instances: {e}"))
         }),
         reachable: reach.as_ref().map(|r| ReachableOutput {
             bodies: r.bodies,

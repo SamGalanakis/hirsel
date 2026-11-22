@@ -176,7 +176,7 @@ impl fmt::Display for NativeStop {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Check(s) => write!(f, "check: {s}"),
-            Self::Instances(s) => write!(f, "instances: {s:?}"),
+            Self::Instances(s) => write!(f, "instances: {s}"),
             Self::Entry(s) => write!(f, "entry: {s}"),
             Self::ForeignRecording { reason, .. } => write!(f, "refused: {reason}"),
             Self::Archive(error) => error.fmt(f),

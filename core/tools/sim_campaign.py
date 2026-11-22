@@ -16,6 +16,13 @@ from store_tests import inputs as store_inputs
 
 ROOT = std_native.ROOT
 SEED = 'HIRSEL_TEST_SIM_SEED'
+DEFAULT_SEEDS = 32
+# These laws drive 10,000 frames per seed. Keep the complete floods in each
+# nightly batch while giving their disjoint ranges fewer seeds.
+FLOOD_SEEDS = {
+    'store@1/runner_calls/law_calls_refusals': 2,
+    'store@1/runner_calls/law_calls_session_charge': 2,
+}
 POSTGRES = (
     'fragmented_startup_error', 'eof_in_error_response',
     'startup_ready_deadline', 'fatal_error_during_sync',
@@ -203,7 +210,8 @@ def prepare(compiler, work, kind, group, jobs, seeds):
             raise ValueError(f'{law} produced no executable; see {report}')
         if not rows[definition]['passed']:
             print(f'{law}: preparation seed 0 failed; see {report}', flush=True)
-        laws.append({'law': law, 'executable': str(binary), 'seeds': seeds})
+        count = seeds if seeds is not None else FLOOD_SEEDS.get(law, DEFAULT_SEEDS)
+        laws.append({'law': law, 'executable': str(binary), 'seeds': count})
     shutil.rmtree(scratch / 'objects')
     return laws
 
@@ -213,7 +221,7 @@ def main():
     parser.add_argument('--compiler', type=Path)
     parser.add_argument('--work', type=Path)
     parser.add_argument('--jobs', type=int, default=4, choices=range(1, 5))
-    parser.add_argument('--seeds', type=int, default=32)
+    parser.add_argument('--seeds', type=int, help='override the default seed count for every law')
     parser.add_argument('--law', help='prepare or list just one exact law')
     parser.add_argument('--list', action='store_true')
     args = parser.parse_args()
@@ -223,8 +231,8 @@ def main():
     if args.list:
         print('\n'.join(name for laws in inventory.values() for name in laws if not args.law or name == args.law))
         return
-    if not args.compiler or not args.work or args.seeds <= 0:
-        parser.error('preparation needs --compiler, --work and a positive --seeds')
+    if not args.compiler or not args.work or (args.seeds is not None and args.seeds <= 0):
+        parser.error('preparation needs --compiler and --work, with a positive --seeds override')
     work = args.work.resolve()
     work.mkdir()
     laws = []

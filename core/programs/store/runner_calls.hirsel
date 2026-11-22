@@ -1415,7 +1415,7 @@ fn fixture_settings(clock: Clock, random: Random, tasks: Tasks, net: Net, take w
     runner.PlaceConfig(backing: Memory, selection: Current(0u64), place: code.describe(fixture_place), n_place: N_PLACE,
         migrate: code.describe(migrate), handles: code.describe(handles), session: session, max_sessions: 2u64,
         proxies: list.new(), n_publisher: 1048576u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16),
-        net: net, tasks: tasks, clock: clock, random: random, stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: take wire, triggers: None)
+        net: net, tasks: tasks, clock: clock, random: random, stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: take wire, triggers: None, idle: None)
 }
 
 // RUNNER-SPEC §12.3: a fixture's typed Callee names the key registration computes, a
@@ -1430,12 +1430,12 @@ pub fn law_fixture_granted(clock: Clock, random: Random, tasks: Tasks, net: Net)
     let put_durable = match put_reply.answer { Returned(Ok(at)) => at >= 1u64 && put_reply.version >= at, _ => false }
     let ping_ran = match result.unwrap(fixture.call(mut c, ping_entry, 9u64, 2000u32)).answer { Returned(9u64) => true, _ => false }
     fixture.close(take c)
-    let wired_stopped = match fixture.end(take with_wire, 5000u64) { Ok(Stopped) => true, _ => false }
+    let wired_stopped = match fixture.end(take with_wire, 5000u64) { Ok(Stopped(None)) => true, _ => false }
     let without_wire = result.unwrap(fixture.start(fixture_settings(clock, random, tasks, net, None), 5000u64))
     let mut d = result.unwrap(fixture.client(without_wire, None, 5000u64))
     let ping_refused = match result.unwrap(fixture.call(mut d, ping_entry, 9u64, 2000u32)).answer { Refused(NotAllowed) => true, _ => false }
     fixture.close(take d)
-    let bare_stopped = match fixture.end(take without_wire, 5000u64) { Ok(Stopped) => true, _ => false }
+    let bare_stopped = match fixture.end(take without_wire, 5000u64) { Ok(Stopped(None)) => true, _ => false }
     put_durable && ping_ran && wired_stopped && ping_refused && bare_stopped
 }
 

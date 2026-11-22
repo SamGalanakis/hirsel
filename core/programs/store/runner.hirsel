@@ -4711,7 +4711,7 @@ fn trigger_scan_last_entry(d: Dir, c: Clock, r: Random, tasks: Tasks, options: s
         place: code.describe(trigger_scan_law_empty), migrate: code.describe(trigger_scan_law_keep_schema),
         handles: code.describe(trigger_law_handles), n_place: n_place, n_publisher: 1048576u64, inbox: take inbox,
         finish_from: take finish_from, to: take to, drain: take drain, head_to: channel.sender(head_to),
-        cut: result.unwrap(cut_activity()), triggering: take triggering)
+        cut: result.unwrap(cut_activity()), triggering: take triggering, idle: None)
     let allowance = head_bytes(job.backing, job.n_place, job.n_publisher)
     let server = task.spawn(tasks, bytes allowance, take job, head_ended)
     if let Ok(Recovered) = channel.receive(events) {} else { fail("L40: serving head did not recover") }
@@ -4725,7 +4725,7 @@ fn trigger_scan_last_entry(d: Dir, c: Clock, r: Random, tasks: Tasks, options: s
     result.unwrap(channel.send(head_to, HeadClose))
     if let Ok(Settled) = channel.receive(events) {} else { fail("L40: serving head did not settle") }
     result.unwrap(channel.send(head_to, HeadFinish))
-    if let Ok(HeadEnded(Ok(()))) = channel.receive(events) {} else { fail("L40: serving head did not close") }
+    if let Ok(HeadEnded(Ok(None))) = channel.receive(events) {} else { fail("L40: serving head did not close") }
     result.unwrap(task.join(take server))
     let reopened = result.unwrap(store.open(tasks, dir, c, r, options))
     let outcome = result.unwrap(triggers.outcome(store.snapshot(reopened), tables, id))

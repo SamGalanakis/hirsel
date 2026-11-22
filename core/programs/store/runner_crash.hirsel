@@ -698,8 +698,8 @@ fn freeze_until_stop(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, n: 
     }
     if let Ok(Draining) = channel.receive(phases) {} else { fail("runner-deadline: no Draining after SIGTERM") }
     if twice { result.unwrap(stdout.write(out, "SECOND")) }
-    let ended = match task.join(take running) {
-        Ok(Ok(Forced(count))) if count == 1u64 => Forced(count),
+    let ended: runner.Ended = match task.join(take running) {
+        Ok(Ok(Forced(abandoned_count))) if abandoned_count == 1u64 => Forced(abandoned_count),
         _ => fail("runner-deadline: expected exactly one logically abandoned send"),
     }
     let mut abandoned = 0u64

@@ -182,6 +182,11 @@ pub struct Task {
     /// retire unlinks in O(1) however many tasks are live.
     all: *mut Task,
     all_previous: *mut Task,
+    /// The scheduler's warm list: tasks a serial run dispatched since network
+    /// idle last released the stack pages below their parked frames.
+    warm_next: *mut Task,
+    warm_previous: *mut Task,
+    warm: bool,
     state: State,
     id: u64,
     #[cfg(feature = "record")]
@@ -1282,8 +1287,9 @@ struct Scheduler {
     timers: TimerHeap,
     all: *mut Task,
     next: u64,
-    /// Task IDs below this cursor have already been considered at network idle.
-    stack_cool_next: u64,
+    /// Tasks dispatched since the last network idle, whose parked stacks may
+    /// hold pages below their live frames.
+    warm: *mut Task,
     provider: SchedulerProvider,
     #[cfg(any(test, feature = "testing"))]
     script: Option<Arc<crate::schedule_script::ScheduleScript>>,
@@ -1917,40 +1923,78 @@ impl Scheduler {
     }
 
     fn net_idle_wait(&self, timeout: i32) -> (i32, bool) {
-        let new_stacks =
-            cfg!(target_os = "linux") && self.pool.is_none() && self.stack_cool_next != self.next;
-        crate::task_heap::idle_wait(timeout, self.stacks.has_warm_kept() || new_stacks)
+        crate::task_heap::idle_wait(timeout, self.stacks.has_warm_kept() || !self.warm.is_null())
     }
 
     fn release_net_idle(&mut self) {
         release_idle(self);
         self.stacks.cool_kept();
         #[cfg(target_os = "linux")]
-        if self.pool.is_none() && self.stack_cool_next != self.next {
-            self.cool_new_waiters();
+        self.cool_warm();
+    }
+
+    /// Record a serial dispatch: until the next network idle, the task's
+    /// stack may grow below wherever it parks.
+    ///
+    /// # Safety
+    /// The serial dispatcher has exclusive custody of `task`, which is live.
+    #[inline]
+    unsafe fn mark_warm(&mut self, task: *mut Task) {
+        // SAFETY: per the contract; the warm list holds only live tasks.
+        unsafe {
+            if !cfg!(target_os = "linux") || self.pool.is_some() || (*task).warm {
+                return;
+            }
+            (*task).warm = true;
+            (*task).warm_previous = ptr::null_mut();
+            (*task).warm_next = self.warm;
+            if !self.warm.is_null() {
+                (*self.warm).warm_previous = task;
+            }
+            self.warm = task;
         }
     }
 
-    #[cfg(target_os = "linux")]
-    fn cool_new_waiters(&mut self) {
-        let mut task = self.all;
-        // SAFETY: the serial dispatcher has exclusive custody of these tasks.
-        // The list is newest-first. A waiting stack's saved SP begins the
-        // switch frame, below the caller's live frames and any caller red zone.
+    /// # Safety
+    /// `task` is live and owned by this scheduler's dispatcher.
+    unsafe fn unmark_warm(&mut self, task: *mut Task) {
+        // SAFETY: per the contract; warm neighbours are live tasks.
         unsafe {
-            while let Some(waiter) = task.as_ref() {
-                if waiter.id < self.stack_cool_next {
-                    break;
-                }
+            if !(*task).warm {
+                return;
+            }
+            let (previous, next) = ((*task).warm_previous, (*task).warm_next);
+            if previous.is_null() {
+                self.warm = next;
+            } else {
+                (*previous).warm_next = next;
+            }
+            if !next.is_null() {
+                (*next).warm_previous = previous;
+            }
+            (*task).warm = false;
+        }
+    }
+
+    /// Release the pages below each parked frame of every task that ran since
+    /// the last network idle, however deep it went while running.
+    #[cfg(target_os = "linux")]
+    fn cool_warm(&mut self) {
+        let mut task = std::mem::replace(&mut self.warm, ptr::null_mut());
+        // SAFETY: the serial dispatcher has exclusive custody of these tasks.
+        // A waiting stack's saved SP begins the switch frame, below the
+        // caller's live frames and any caller red zone.
+        unsafe {
+            while let Some(waiter) = task.as_mut() {
                 if matches!(waiter.state, State::Waiting | State::Provider)
                     && let Some(stack) = &waiter.stack
                 {
                     stack.discard_below(waiter.sp.addr());
                 }
-                task = waiter.all;
+                waiter.warm = false;
+                task = waiter.warm_next;
             }
         }
-        self.stack_cool_next = self.next;
     }
 
     fn idle(&mut self, flow_pending: bool) {
@@ -4749,7 +4793,7 @@ pub(crate) unsafe fn run_root_with_unit(
         timers: TimerHeap::default(),
         all: ptr::null_mut(),
         next: 1,
-        stack_cool_next: 0,
+        warm: ptr::null_mut(),
         provider,
         #[cfg(any(test, feature = "testing"))]
         script: crate::schedule_script::installed(),
@@ -4833,6 +4877,9 @@ pub(crate) unsafe fn run_root_with_unit(
         operation: ptr::null_mut(),
         all: ptr::null_mut(),
         all_previous: ptr::null_mut(),
+        warm_next: ptr::null_mut(),
+        warm_previous: ptr::null_mut(),
+        warm: false,
         state: State::Ready,
         id: 0,
         #[cfg(feature = "record")]
@@ -5110,6 +5157,7 @@ impl RunPtr {
                 }
                 CURRENT.set(task);
                 (*task).state = State::Running;
+                (*run).mark_warm(task);
                 #[cfg(feature = "prof")]
                 prof_dispatch(task, true);
                 abi::task_resume((*task).context);
@@ -5461,6 +5509,9 @@ unsafe fn spawn_in(
             operation: ptr::null_mut(),
             all: (*run).all,
             all_previous: ptr::null_mut(),
+            warm_next: ptr::null_mut(),
+            warm_previous: ptr::null_mut(),
+            warm: false,
             state: State::Ready,
             id,
             #[cfg(feature = "record")]
@@ -5638,6 +5689,7 @@ unsafe fn retire(task: *mut Task) {
         let run = (*task).run;
         #[cfg(feature = "record")]
         (*run).outside_cancels.retain(|&t| t != task);
+        (*run).unmark_warm(task);
         let (previous, next) = ((*task).all_previous, (*task).all);
         if previous.is_null() {
             debug_assert!((*run).all == task);
@@ -5944,7 +5996,7 @@ mod ready_routing_laws {
                 timers: TimerHeap::default(),
                 all: ptr::null_mut(),
                 next: 1,
-                stack_cool_next: 0,
+                warm: ptr::null_mut(),
                 provider: SchedulerProvider::default(),
                 script: None,
                 #[cfg(feature = "record")]
@@ -6011,6 +6063,9 @@ mod ready_routing_laws {
                         operation: &mut operations[i],
                         all: ptr::null_mut(),
                         all_previous: ptr::null_mut(),
+                        warm_next: ptr::null_mut(),
+                        warm_previous: ptr::null_mut(),
+                        warm: false,
                         state: State::Provider,
                         id: i as u64,
                         #[cfg(feature = "record")]

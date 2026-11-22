@@ -21,7 +21,8 @@ Failure after a partial commit spends the write half. Later sends on it give
 `Reset`.
 
 The launcher can grant a `Secret` from the environment or a file. Use
-`secret.seal` to transfer owned bytes into secret storage and `secret.narrow`
+`secret.seal` to transfer owned bytes into secret storage. If sealing refuses, its
+`Error((reason, bytes))` gives back the original bytes. Use `secret.narrow`
 to restrict the permitted names. `secret.render` always returns `[secret]`.
 A grant or seal whose `to` text ends in `mac` or `verify` also lets the secret key an
 HMAC-SHA256 ([HMAC](hmac.md#secret-keys)).

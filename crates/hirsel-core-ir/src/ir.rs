@@ -1732,6 +1732,8 @@ impl RtOp {
                     ),
                     HostOp::ScramFinalLen => (vec![V(u64_), V(p), V(p)], outcome),
                     HostOp::ScramVerify => (vec![V(u64_), V(p)], outcome),
+                    // The source carrier stays with the caller. Success wipes its
+                    // owned bytes. Tags 1 (invalid) and 2 (capacity) leave it intact.
                     HostOp::SecretSeal => (vec![V(p), V(p)], outcome),
                     HostOp::SecretNarrow => (vec![V(u64_), V(p)], outcome),
                     HostOp::SecretHmac | HostOp::SecretVerifyHmac => {

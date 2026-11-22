@@ -256,11 +256,11 @@ When they come, the client key is a `Secret` that only the provider reads.
 ### TLS-5: Secrets
 
 ```hirsel core
-pub fn seal(take b: Bytes, to: String) -> Result[Secret, SecretError]
+pub fn seal(take b: Bytes, to: String) -> Result[Secret, (SecretError, Bytes)]
 pub fn narrow(s: Secret, to: String) -> Result[Secret, SecretError]
 pub fn render(s: Secret) -> View[String] in s
 pub fn send_secret(mut w: WriteHalf, before: Bytes, s: Secret, after: Bytes, until: Until) -> Result[(), NetError] waits
-pub type SecretError = Invalid()
+pub type SecretError = Invalid | Capacity(Capacity)
 ```
 
 **Ingestion.** A secret's bytes enter the run in one of two ways:
@@ -282,12 +282,16 @@ pub type SecretError = Invalid()
 - **`secret.seal`.** This takes bytes the program already holds, such as a token a
   server minted during the run, together with a `to` pattern list. It moves them into
   run-owned storage that is charged to the caller's limit until the run ends, as
-  `net.narrow` charges rule storage. A malformed pattern list gives `Invalid`, and `b` is
-  dropped. Returning `b` in the error, as `Result[Secret, (SecretError, Bytes)]`, is a
-  pending signature change and is not built. A sealed secret that crosses to another unit
-  ([CONC-15](tasks.md#conc-15-units)) designates the same bytes, keeps its `to` patterns, and stays charged until the run ends. Once
-  sealed, the program has no access to the bytes. Sealing does not remove copies the
-  program made before sealing.
+  `net.narrow` charges rule storage. Sealing admits that charge using the length of
+  `b` before copying. A malformed pattern list returns `Error((Invalid, b))`. If
+  admission refuses, sealing returns `Error((Capacity(c), b))` with the requested
+  charge and available space. Either refusal returns the original bytes with their
+  original payer and charge. The call admits nothing and retains neither the bytes
+  nor the policy. On success, sealing copies the bytes, then zeroes and refunds the
+  owned source storage. A sealed secret that crosses to another unit
+  ([CONC-15](tasks.md#conc-15-units)) designates the same bytes, keeps its `to`
+  patterns, and stays charged until the run ends. The program can still access any
+  copies it made before sealing.
 
 `secret.narrow` keeps the patterns of `s` that the new list also covers, using TLS-3's
 intersection, and designates the same bytes. If the intersection is empty, the result
@@ -552,7 +556,7 @@ computes.
 | **SC6** authority | a proof emitted to a host the secret may not reach | Each of these gives `Denied`, and the server receives zero bytes after the handshake: a secret `to beta.test` on an `alpha.test` stream, any secret on a plain-TCP half, and a granted secret on a TLS half of `provide.net`, where the server's `provide.next` sees no `Send`. |
 | **SC7** channel binding | the identity digest used where the signature's hash is required, or binding over a missing value | `client_first` `p=tls-server-end-point,,n=,r=abc` over the `alpha.test` leaf, signed with SHA-256, sends `c=` the base64 of `p=tls-server-end-point,,` followed by the leaf's `openssl x509 -outform der \| sha256sum` digest. Over a leaf signed with SHA-384 (an added fixture), it sends the base64 of the header followed by the leaf's `sha384sum` digest, and `scram_final_len` counts its 48 bytes. An Ed25519 leaf, and `p=tls-unique,,`, give `Binding` before issue. The oracle is RFC 5929 §4.1. |
 | **SC8** no key material in a recording | key material or the proof reaching a frame | Record SC1's run with the password from an `env:` grant. The tape holds none of these: `pencil`, `SaltedPassword` `c4a49510323ab4f952cac1fa99441939e78ea74d6be81ddf7096e87513dc615d`, `ClientKey` `a60fc923d67e8644a92d16b96eda5ef4656b0c725c484374be25535576996e8b`, `StoredKey` `586e5df283e6dceb5c3e791d8b8528ec191e664045ce971792e2e6b5bb13e2a6`, `ServerKey` `c1f3cbc1c13a9d35a14c0990eed97629ea225863e566a4314ab99f3f00e5d9d5`, the proof's 32 raw bytes, and their base64. Each is searched raw and as hex. The values follow by hand from RFC 7677's inputs through RFC 5802 §3. Replayed with the variable unset, the run gives the same verdict and ends `Sealed`. |
-| **SC9** virtual SCRAM | the virtual path sending different bytes or exposing a granted secret | Against a `provide.net` server whose handshake reply is `Secured`, `secret.seal("pencil", "alpha.test")` with SC1's transcript: the server's `Send` calls carry exactly SC1's client-final bytes. When the server commits 10 bytes and then the rest, the second `Send` offers bytes 10 to 106. Under `hirsel test --replay`, the replay ends `Sealed` and its server sees the same calls. |
+| **SC9** virtual SCRAM | the virtual path sending different bytes or exposing a granted secret | Against a `provide.net` server whose handshake reply is `Secured`, seal the owned bytes of `"pencil"` to `"alpha.test"`, unwrap the result, and use SC1's transcript. The server's `Send` calls carry exactly SC1's client-final bytes. When the server commits 10 bytes and then the rest, the second `Send` offers bytes 10 to 106. Under `hirsel test --replay`, the replay ends `Sealed` and its server sees the same calls. |
 
 TL1 to TL8, TL10, TL11, TL14 to TL16 and SC1 to SC8 run against the OS provider over
 loopback. TL5, TL7, TL13, TL15, SC1 and SC5 also have scripted-provider cases, so that the

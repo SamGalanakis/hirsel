@@ -1170,15 +1170,25 @@ pub(super) fn bind_annexes(
     Ok(sources)
 }
 
+/// The object of `instance`'s `module` under `key`: stored in `store`, else
+/// prebuilt in `library` (an installed image's store, only read), else
+/// emitted now and published in `store`.
 fn object(
     store: &Store,
+    library: Option<&Store>,
     options: &NativeOptions,
     key: ContentHash,
     instance: &Identity,
     module: &Module,
 ) -> Result<ObjectProduct, NativeStop> {
-    let (held, object, compiled) = match crate::native_object::load(store, key)? {
-        Some((bare, object, file)) => ((bare, file), object, false),
+    let mut found = crate::native_object::load(store, key)?.map(|hit| (store, hit));
+    if found.is_none()
+        && let Some(library) = library
+    {
+        found = crate::native_object::load(library, key)?.map(|hit| (library, hit));
+    }
+    let (store, held, object, compiled) = match found {
+        Some((store, (bare, object, file))) => (store, (bare, file), object, false),
         None => {
             let object = emit_unit(module, || module.link_symbols(), options, key, instance)
                 .map_err(|message| NativeStop::Emit {
@@ -1186,6 +1196,7 @@ fn object(
                     message,
                 })?;
             (
+                store,
                 crate::native_object::publish(store, key, &object)?,
                 object,
                 true,
@@ -1202,6 +1213,92 @@ fn object(
     ))
 }
 
+/// Where a library image's store holds the objects an installation
+/// prebuilt, under the keys a program's build computes.
+pub(crate) const LIBRARY_OBJECTS: &str = "native";
+
+/// The identity of the emitter a recipe's objects are made by under
+/// `options`, linking the runtime whose identity is `runtime`.
+fn emitter(
+    options: &NativeOptions,
+    runtime: ContentHash,
+    target: &hirsel_core_layout::Target,
+) -> io::Result<ContentHash> {
+    let emission = environment(options, runtime)?;
+    key(
+        "hirsel.recipe-emitter.v1",
+        &(
+            &emission,
+            target.cpu(),
+            target.llvm_features(),
+            options.optimize
+                && matches!(options.backend, Backend::Llvm)
+                && std::env::var_os("HIRSEL_LLVM_PRINTED_ORACLE").is_some(),
+        ),
+    )
+}
+
+/// The key of a bound unit's object: every input of its emission. An
+/// installation's prebuild and a program's assembly both key by it.
+fn unit_object_key(
+    emitter: ContentHash,
+    identity: &Identity,
+    unit: &Unit,
+) -> io::Result<ContentHash> {
+    key(
+        "hirsel.recipe-native-object.v2",
+        &(emitter, identity, &unit.module, &unit.builtins),
+    )
+}
+
+impl CheckProduct {
+    /// Emit the recipe object of every plain instance in `instances` (each
+    /// materialized in `materialized`) under `options` into `store`, as a
+    /// development build of a program reaching it emits it. A store only
+    /// adds what it lacks; the number of objects emitted now.
+    pub(crate) fn prebuild_recipe_objects(
+        &self,
+        instances: &[Identity],
+        materialized: &crate::instances::InstanceSet,
+        options: &NativeOptions,
+        store: &Store,
+    ) -> Result<usize, NativeStop> {
+        let items = instances
+            .iter()
+            .map(|i| materialized.get(i).ir().map(anchored_items))
+            .collect::<io::Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        let sources = self.native_sources(&items)?;
+        let positions = sources.positions();
+        let mut units = BTreeMap::new();
+        for identity in instances {
+            let instance = materialized.get(identity);
+            units.insert(
+                identity.clone(),
+                prepare_unit(instance.ir()?, instance.function, &positions),
+            );
+        }
+        bind_annexes(&mut units, &BTreeMap::new(), true)?;
+        let target = hirsel_core_layout::Target::from_triple(&options.target)
+            .filter(|_| options.backend.supports_target(&options.target))
+            .ok_or_else(|| {
+                NativeStop::Entry(format!("unsupported prebuild target {}", options.target))
+            })?;
+        let (tools, _) =
+            crate::tool_inputs::toolchain(&options.link, &options.target, &options.runtime)?;
+        let emitter = emitter(options, tools.runtime, &target)?;
+        let mut compiled = 0;
+        for (identity, unit) in &units {
+            let key = unit_object_key(emitter, identity, unit)?;
+            let object = object(store, None, options, key, identity, &unit.module)?;
+            compiled += usize::from(object.compiled);
+        }
+        Ok(compiled)
+    }
+}
+
 impl Publication {
     pub fn assemble(
         self,
@@ -1214,17 +1311,23 @@ impl Publication {
     /// [`Self::assemble`] of a program checked as `product`. An optimised
     /// LLVM build takes every library instance a separately lowered release
     /// std holds from it ([`std_side`]): the program holds none of their
-    /// bodies and calls each by its exported symbol. That std is read first
-    /// from `prebuilt` (a library image's store), else from `product`'s image.
+    /// bodies and calls each by its exported symbol. That std, and any other
+    /// build's prebuilt objects, are read first from `library` (a library
+    /// image's store), else from `product`'s image.
     pub(crate) fn assemble_with(
         self,
         options: &NativeOptions,
         counters: crate::reach::ReachCounters,
         product: Option<&CheckProduct>,
-        prebuilt: Option<&Path>,
+        library: Option<&Path>,
     ) -> Result<BuildProduct, NativeStop> {
-        let std = self.std_side(options, product, prebuilt)?;
-        self.assemble_over(options, counters, std)
+        let library = library.map(Path::to_owned).or_else(|| {
+            product
+                .and_then(|product| product.image.as_ref())
+                .map(|image| image.store_root().to_owned())
+        });
+        let std = self.std_side(options, product, library.as_deref())?;
+        self.assemble_over(options, counters, std, library.as_deref())
     }
 
     /// The separately lowered release std an optimised LLVM build of this
@@ -1233,7 +1336,7 @@ impl Publication {
         &self,
         options: &NativeOptions,
         product: Option<&CheckProduct>,
-        prebuilt: Option<&Path>,
+        library: Option<&Path>,
     ) -> Result<Option<StdSide>, NativeStop> {
         let (options, _) = self.launch(options)?;
         if !matches!(options.backend, Backend::Llvm) || !options.optimize {
@@ -1251,7 +1354,7 @@ impl Publication {
             &self.units,
             &self.recipe.entry,
             product,
-            prebuilt,
+            library,
             &options,
             runtime,
         )
@@ -1274,12 +1377,14 @@ impl Publication {
     /// Assemble the program; an optimised LLVM build over `std`, the
     /// separately lowered release std ([`Self::std_side`]), which every such
     /// build takes and no other does: the program holds none of its exports'
-    /// bodies and calls each by its exported symbol.
+    /// bodies and calls each by its exported symbol. An object `library` (a
+    /// library image's store) holds prebuilt under its key is read from it.
     pub(crate) fn assemble_over(
         mut self,
         options: &NativeOptions,
         counters: crate::reach::ReachCounters,
         std: Option<StdSide>,
+        library: Option<&Path>,
     ) -> Result<BuildProduct, NativeStop> {
         let mut counters = counters;
         counters.std_lowered = std.as_ref().map_or(0, |std| std.lowered);
@@ -1317,18 +1422,7 @@ impl Publication {
         let (abi, cleanup) = bound_entry_abi(&decl, &entry.definition, &root.module, FuncId(0))
             .map_err(NativeStop::Entry)?;
         // Native bodies and lent std code can operate on the same live Map.
-        let emission = environment(&options, tools.runtime)?;
-        let emitter = key(
-            "hirsel.recipe-emitter.v1",
-            &(
-                &emission,
-                target.cpu(),
-                target.llvm_features(),
-                options.optimize
-                    && matches!(options.backend, Backend::Llvm)
-                    && std::env::var_os("HIRSEL_LLVM_PRINTED_ORACLE").is_some(),
-            ),
-        )?;
+        let emitter = emitter(&options, tools.runtime, &target)?;
         use std::os::unix::ffi::OsStrExt;
         let fingerprint = key(
             "hirsel.assembly-environment.v1",
@@ -1354,6 +1448,11 @@ impl Publication {
             ),
         )?;
         let store = Store::new(&options.store)?;
+        let library = library
+            .map(|root| root.join(LIBRARY_OBJECTS))
+            .filter(|path| path.is_dir())
+            .map(|path| Store::new(&path))
+            .transpose()?;
         let mut release_sites = Vec::new();
         let mut release_debug_sites = Vec::new();
         let mut remarks = Vec::new();
@@ -1380,11 +1479,15 @@ impl Publication {
                 .units
                 .iter()
                 .map(|(identity, unit)| {
-                    let object_key = key(
-                        "hirsel.recipe-native-object.v2",
-                        &(emitter, identity, &unit.module, &unit.builtins),
-                    )?;
-                    object(&store, &options, object_key, identity, &unit.module)
+                    let object_key = unit_object_key(emitter, identity, unit)?;
+                    object(
+                        &store,
+                        library.as_ref(),
+                        &options,
+                        object_key,
+                        identity,
+                        &unit.module,
+                    )
                 })
                 .collect::<Result<Vec<_>, NativeStop>>()?;
             (objects, false, false)
@@ -1395,7 +1498,14 @@ impl Publication {
                 "hirsel.recipe-entry-cleanup.v1",
                 &(emitter, root.code.body.hash),
             )?;
-            objects.push(object(&store, &options, cleanup_key, &identity, &module)?);
+            objects.push(object(
+                &store,
+                None,
+                &options,
+                cleanup_key,
+                &identity,
+                &module,
+            )?);
             Some(identity.symbol())
         } else {
             None

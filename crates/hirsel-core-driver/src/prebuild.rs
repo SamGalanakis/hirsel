@@ -1,8 +1,10 @@
 //! An installation's prebuilt objects. Every program-independent instance of
 //! an image's packages is emitted once, for the development engine and a
 //! request's default options ([`NativeOptions::development`]), by the walk and
-//! emission a program's build runs, into the image's own native store: a program's first build then finds each of them under the key it
-//! computes itself. Program-independent means a plain identity (no
+//! emission a program's build runs, into the image's own native store: a
+//! program's first build then finds each of them under the key it computes
+//! itself. Each is emitted both as a `run` links it and as a recipe's
+//! assembly (`build`) links it. Program-independent means a plain identity (no
 //! dictionaries, no closures) of a non-generic function the image checked
 //! whole; the set is read from the image, never listed.
 use super::*;
@@ -16,6 +18,8 @@ pub struct Prebuilt {
     pub instances: usize,
     /// Of them, those whose object was compiled now, not already stored.
     pub compiled: usize,
+    /// Of their recipe objects, those compiled now, not already stored.
+    pub recipe_compiled: usize,
     /// Non-generic functions skipped: a body the image refused, or one whose
     /// instance stops, which a program's build stops on too.
     pub skipped: usize,
@@ -81,6 +85,13 @@ impl CheckProduct {
             self.emit_instances(&instances, &materialized, &inputs, None, options)?;
         prebuilt.instances = objects.len();
         prebuilt.compiled = objects.iter().filter(|o| o.compiled).count();
+        let library = Store::new(
+            &image
+                .store_root()
+                .join(crate::native::recipe_build::LIBRARY_OBJECTS),
+        )?;
+        prebuilt.recipe_compiled =
+            self.prebuild_recipe_objects(&instances, &materialized, options, &library)?;
         Ok(prebuilt)
     }
 }

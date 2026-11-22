@@ -298,7 +298,7 @@ impl CheckProduct {
 
 /// The release std a program's publication assembles against under
 /// `options`' generator, linking the runtime whose identity is `runtime`. Of
-/// the sides stored in `prebuilt` (a library image's own store), then in the
+/// the sides stored in `library` (a library image's own store), then in the
 /// shared parts cache, most recent first, one each of whose units the program
 /// also holds is the program's own (equal owner): a whole library's first;
 /// for a program checked without a library image, one lowered for the plain
@@ -310,7 +310,7 @@ pub(crate) fn std_side(
     units: &BTreeMap<Identity, Unit>,
     entry: &Identity,
     product: Option<&CheckProduct>,
-    prebuilt: Option<&Path>,
+    library: Option<&Path>,
     options: &NativeOptions,
     runtime: ContentHash,
 ) -> Result<StdSide, NativeStop> {
@@ -345,8 +345,8 @@ pub(crate) fn std_side(
             .all(|root| record.requested.binary_search(root).is_ok())
     };
     let shared = Store::new(&options.parts)?;
-    let prebuilt = prebuilt
-        .map(Path::to_owned)
+    let prebuilt = library
+        .map(|root| root.join(PREBUILT))
         .or_else(|| {
             image
                 .and_then(|p| p.image.as_ref())

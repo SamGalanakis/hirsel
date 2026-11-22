@@ -320,7 +320,7 @@ fn std_run(product: &CheckProduct, options: &NativeOptions, build: StdBuild, dir
     };
     let built = Publication::open(&code, publication.root, &crate::request::local_admission_limits())
         .unwrap()
-        .assemble_over(options, reached.counters, std)
+        .assemble_over(options, reached.counters, std, None)
         .unwrap();
     if let Some(report) = &options.logical_charge_report {
         let _ = std::fs::remove_file(report);

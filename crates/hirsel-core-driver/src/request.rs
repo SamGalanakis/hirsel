@@ -787,13 +787,11 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         options.logical_charge_report = logical_charge_report;
         options.recording = needs_recording;
         let recipe = release_manifest.as_ref().map(|_| recipe.clone());
-        let prebuilt = installed_std.as_ref().map(|image| {
-            image
-                .store_root()
-                .join(crate::native::std_release::PREBUILT)
-        });
+        let library = installed_std
+            .as_ref()
+            .map(|image| image.store_root().to_owned());
         let product =
-            publication.assemble_with(&options, Default::default(), None, prebuilt.as_deref())?;
+            publication.assemble_with(&options, Default::default(), None, library.as_deref())?;
         if let (Some(path), Some(recipe)) = (release_manifest, recipe) {
             crate::release_manifest::write(
                 &path,

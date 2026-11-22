@@ -294,12 +294,17 @@ static bool versionReadLoop(Loop &L, LoopInfo &LI, DominatorTree &DT,
   auto *Index = Next ? dyn_cast<PHINode>(Next->getOperand(0)) : nullptr;
   auto *One = Next ? dyn_cast<ConstantInt>(Next->getOperand(1)) : nullptr;
   Value *Limit = Eq->getOperand(1);
-  if (!Next || Next->getOpcode() != Instruction::Add || !Next->hasNoUnsignedWrap() ||
+  if (!Next || Next->getOpcode() != Instruction::Add ||
       !One || !One->isOne() || !Index || Index->getParent() != H ||
       Index->getNumIncomingValues() != 2 || Index->getIncomingValueForBlock(Latch) != Next ||
       !L.isLoopInvariant(Limit) || !DT.dominates(Limit, Entry->getTerminator())) return false;
   Value *Initial = Index->getIncomingValueForBlock(Entry);
   if (!Initial) return false;
+  bool ProveIncrement = !Next->hasNoUnsignedWrap();
+  if (ProveIncrement &&
+      !SE.isLoopEntryGuardedByCond(&L, ICmpInst::ICMP_ULT, SE.getSCEV(Initial),
+                                  SE.getSCEV(Limit)))
+    return false;
 
   // No loop store, call into the runtime, volatile read, or other effect can
   // invalidate a staged read or change which state the checked path observes.
@@ -364,6 +369,9 @@ static bool versionReadLoop(Loop &L, LoopInfo &LI, DominatorTree &DT,
   IRBuilder<> B(PH->getTerminator());
   Value *Nonempty = B.CreateFreeze(B.CreateICmpULT(Initial, Limit));
   versionLoop(L, Nonempty, LI, DT, SE, "read.fast.ph", ".read.checked");
+  // An increasing loop entered below Limit exits as soon as the unit
+  // increment reaches Limit, even when Limit is the maximum unsigned value.
+  if (ProveIncrement) Next->setHasNoUnsignedWrap();
   auto *Route = cast<CondBrInst>(PH->getTerminator());
   BasicBlock *Fast = Route->getSuccessor(0), *Slow = Route->getSuccessor(1);
   Done.insert(H);

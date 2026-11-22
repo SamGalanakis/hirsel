@@ -332,6 +332,101 @@ impl FunctionEmitter<'_> {
         lane.size().checked_mul(*lanes)
     }
 
+    /// Fixed projections retain the extent of a typed slot or loan. A raw
+    /// offset, reinterpretation or dereference needs its own size proof.
+    fn fixed_projection(&self, mut address: AddressId) -> bool {
+        loop {
+            let info = &self.body.addresses[address.index()];
+            let steps = info.steps.get(&self.body.pools.steps).unwrap();
+            if steps
+                .iter()
+                .any(|step| matches!(step, Step::Byte(_) | Step::Index(_) | Step::Deref))
+            {
+                return false;
+            }
+            address = match info.base {
+                AddressBase::Slot(_) => return true,
+                AddressBase::Address(parent) => parent,
+                AddressBase::Value(value) if steps.is_empty() => {
+                    match self.pointer_origins.get(value.index()).copied().flatten() {
+                        Some(PointerOrigin::Parameter(place @ PlaceTy::Declared(t))) => {
+                            return info.ty == place
+                                && self.module.types[t.index()].repr == Repr::Own;
+                        }
+                        Some(PointerOrigin::Address(parent))
+                            if info.ty == self.body.addresses[parent.index()].ty =>
+                        {
+                            parent
+                        }
+                        _ => return false,
+                    }
+                }
+                AddressBase::Value(_) => return false,
+            };
+        }
+    }
+
+    pub(super) fn read_write_alignment(&self, address: AddressId, ty: Ty) -> u32 {
+        if !self.facts {
+            return 1;
+        }
+        self.address_alignment(address).min(size(ty)) as u32
+    }
+
+    /// The frame allocation proves a slot's alignment. Each fixed offset or
+    /// stride preserves only the common power-of-two alignment. Byte
+    /// projections, loaded pointers, and borrowed addresses do not carry an
+    /// alignment guarantee in CoreIR.
+    fn address_alignment(&self, address: AddressId) -> u64 {
+        let info = &self.body.addresses[address.index()];
+        let place_alignment = |place| match place {
+            PlaceTy::Declared(row) if self.module.types[row.index()].repr == Repr::Region => 1,
+            _ => self.place_layout(place).1,
+        };
+        let mut align = match info.base {
+            AddressBase::Slot(slot) => place_alignment(self.body.slots[slot.index()]),
+            AddressBase::Address(parent) => self.address_alignment(parent),
+            AddressBase::Value(value) => {
+                match self.pointer_origins.get(value.index()).copied().flatten() {
+                    Some(PointerOrigin::Address(parent)) => self.address_alignment(parent),
+                    _ => 1,
+                }
+            }
+        };
+        for (step_index, step) in info
+            .steps
+            .get(&self.body.pools.steps)
+            .unwrap()
+            .iter()
+            .enumerate()
+        {
+            let displacement = match *step {
+                Step::Byte(_) | Step::Deref => return 1,
+                _ if align == 1 => return 1,
+                Step::Seq(word) => word.offset(),
+                Step::Index(_) => self.place_layout(info.ty).0,
+                Step::Element(_) => {
+                    let At::Array(item, _) = self.walk(address, step_index) else {
+                        unreachable!("producer array projection")
+                    };
+                    field_size(&self.module.types, self.recipes, &item).0
+                }
+                Step::Field(field) | Step::CaseField { field, .. } => {
+                    let case = match *step {
+                        Step::CaseField { case, .. } => case as usize,
+                        _ => 0,
+                    };
+                    let At::Declared(t) = self.walk(address, step_index) else {
+                        unreachable!("producer declared projection")
+                    };
+                    self.fixed(t).offsets[case][field as usize]
+                }
+            };
+            align = align.min(1u64 << displacement.trailing_zeros().min(63));
+        }
+        align
+    }
+
     fn kind_at(&self, address: AddressId) -> At {
         self.walk(address, usize::MAX)
     }
@@ -420,6 +515,7 @@ impl FunctionEmitter<'_> {
             ),
             AddressBase::Address(a) => (self.address(a), self.kind_at(a)),
         };
+        let in_place = self.facts && self.fixed_projection(address);
         for step in info.steps.get(&self.body.pools.steps).unwrap() {
             match *step {
                 Step::Deref => {
@@ -434,7 +530,9 @@ impl FunctionEmitter<'_> {
                     };
                 }
                 Step::Seq(w) => {
-                    p = self.offset(&p, w.offset());
+                    // The typed carrier owns data, length and capacity at
+                    // fixed offsets inside its 24-byte representation.
+                    p = self.offset_with_bounds(&p, w.offset(), in_place);
                     at = At::Other;
                 }
                 Step::Byte(v) => {
@@ -463,7 +561,9 @@ impl FunctionEmitter<'_> {
                     self.fail_if(&outside, fail, 1)?;
                     let i = self.widen_index(v, i);
                     let stride = field_size(&self.module.types, self.recipes, &e).0;
-                    p = self.gep(&Type::bytes(stride), &p, &i, false);
+                    // The successful bounds check proves i < the array extent.
+                    // A zero-sized array need not have an allocated object.
+                    p = self.gep(&Type::bytes(stride), &p, &i, in_place && stride != 0);
                     at = self.field_kind(&e);
                 }
                 Step::Field(field) | Step::CaseField { case: _, field } => {
@@ -475,7 +575,9 @@ impl FunctionEmitter<'_> {
                         panic!("producer declared projection")
                     };
                     let offset = self.fixed(t).offsets[case.unwrap_or(0) as usize][field as usize];
-                    p = self.offset(&p, offset);
+                    // The fixed recipe places this field within the typed value;
+                    // the producer has selected the case before projecting it.
+                    p = self.offset_with_bounds(&p, offset, in_place);
                     at = self.field_kind(
                         &self.module.types[t.index()].fields(case).unwrap()[field as usize].ty,
                     );

@@ -165,6 +165,54 @@ fn append_prefix(mut dst: Bytes, byte: u8, count: u64) {
 }
 
 #[test]
+fn typed_inline_projection_emits_inbounds_after_check_and_aligned_memory() {
+    let source = r#"
+fn replace_word(at: u64, value: u64) -> u64 {
+    let mut a: Inline[u64, 4] = [17u64; 4]
+    let previous = a[at]
+    a[at] = value
+    previous
+}
+fn replace_loan(mut word: u64, value: u64) -> u64 {
+    let previous = word
+    word = value
+    previous
+}
+fn unaligned_word(b: Bytes, at: u64) -> u64 { list.word_le(b, at) }
+"#;
+    let (program, names) = hirsel_core_program_tests::SourceProgram::lower(source, None);
+    let ir =
+        emit_ir_for_test_with_facts(&program, Target::X86_64Linux, false, false, true).unwrap();
+    verify_ir(&ir);
+    let body = emitted_body(&ir, &symbol(&program, names["replace_word"]));
+    let checked = body.find("icmp uge i64").unwrap();
+    let projected = body.find("getelementptr inbounds [8 x i8]").unwrap();
+    assert!(checked < projected, "{body}");
+    for op in ["load i64,", "store i64"] {
+        assert!(
+            body[projected..]
+                .lines()
+                .any(|line| line.contains(op) && line.contains("align 8,")),
+            "{body}"
+        );
+    }
+    let loan = emitted_body(&ir, &symbol(&program, names["replace_loan"]));
+    assert!(
+        loan.lines()
+            .any(|line| line.contains("load i64, ptr %p0, align 1")),
+        "{loan}"
+    );
+    let unaligned = emitted_body(&ir, &symbol(&program, names["unaligned_word"]));
+    let data = storage_access_tag(&ir, "scalar data");
+    assert!(
+        unaligned.lines().any(|line| line.contains("load i64,")
+            && line.contains(&data)
+            && line.contains("align 1,")),
+        "{unaligned}"
+    );
+}
+
+#[test]
 fn scalar_record_calls_agree_with_evaluator() {
     let source = r#"
 type Single { n: u64 }

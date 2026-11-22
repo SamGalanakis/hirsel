@@ -60,6 +60,62 @@ fn fixed_width_check_rewrites_all_admitted_widths() {
 }
 
 #[test]
+fn ordered_counted_read_entry_proves_a_nonwrapping_increment() {
+    // These inequality checks admit UINT64_MAX for some bounds. An unsigned
+    // less-than check would itself prove the increment cannot wrap.
+    let kernel = r#"
+define i64 @read_loop(ptr %a, ptr %b, ptr %data, i64 %start, i64 %limit) {
+entry:
+  %nonempty = icmp ult i64 %start, %limit
+  br i1 %nonempty, label %header, label %empty
+header:
+  %i = phi i64 [ %start, %entry ], [ %next, %body ]
+  %sum = phi i64 [ 0, %entry ], [ %total, %body ]
+  %len_a = load i64, ptr %a, align 8
+  %in_a = icmp ne i64 %i, %len_a
+  br i1 %in_a, label %check_b, label %failed_a
+check_b:
+  %len_b = load i64, ptr %b, align 8
+  %in_b = icmp ne i64 %i, %len_b
+  br i1 %in_b, label %body, label %failed_b
+body:
+  %at = getelementptr i64, ptr %data, i64 %i
+  %x = load i64, ptr %at, align 8
+  %total = add i64 %sum, %x
+  %next = add i64 %i, 1
+  %finished = icmp eq i64 %next, %limit
+  br i1 %finished, label %done, label %header
+done:
+  ret i64 %total
+empty:
+  ret i64 0
+failed_a:
+  ret i64 -1
+failed_b:
+  ret i64 -2
+}
+"#;
+    let unordered = kernel.replace(
+        "br i1 %nonempty, label %header, label %empty",
+        "br label %header",
+    );
+    let context = Context::new();
+    let machine = TargetMachine::core(hirsel_core_layout::Target::X86_64Linux, true).unwrap();
+    for (source, guarded_entry) in [(kernel, true), (&unordered, false)] {
+        let module = Module::parse(&context, "counted-read", source).unwrap();
+        module.set_target(&machine);
+        module.verify().unwrap();
+        module.release_tail(&machine);
+        module.verify().unwrap();
+        let ir = module.text();
+        assert_eq!(ir.contains("read.fast.ph"), guarded_entry, "{ir}");
+        if guarded_entry {
+            assert!(ir.contains("add nuw i64"), "{ir}");
+        }
+    }
+}
+
+#[test]
 fn guarded_copy_preserves_partial_writes_and_first_failure() {
     let (ir, object) = optimized(COPY);
     assert!(ir.contains("copy.first.safe"), "{ir}");

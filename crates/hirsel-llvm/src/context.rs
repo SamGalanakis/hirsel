@@ -162,6 +162,15 @@ impl<'context> Module<'context> {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn release_tail(&self, machine: &TargetMachine) {
+        unsafe extern "C" {
+            fn hirsel_llvm_release_tail(module: LLVMModuleRef, machine: LLVMTargetMachineRef);
+        }
+        // SAFETY: both owning wrappers stay live while the release tail runs.
+        unsafe { hirsel_llvm_release_tail(self.raw, machine.raw) };
+    }
+
     /// Sets the module's triple and data layout to the machine's.
     pub(crate) fn set_target(&self, machine: &TargetMachine) {
         let triple = c_string(&machine.triple);

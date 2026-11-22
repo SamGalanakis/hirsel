@@ -46,7 +46,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if !self.live() {
             return None;
         }
-        let probe = self.p.core_fn("map", "probe_staged")?;
+        let probe = self.p.core_helper(crate::CoreHelper::MapProbeStaged)?;
         let probe_ty = self.t.mk(TyKind::Tuple(vec![
             scalar(Scalar::U64),
             scalar(Scalar::U64),
@@ -207,11 +207,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let committed = self.new_block(&[]);
         self.list_branch(insertion.crowded, crowded, vacant, n);
         self.start(crowded);
-        let commit = self.p.core_fn("map", "commit_crowded")?;
+        let commit = self.p.core_helper(crate::CoreHelper::MapCommitCrowded)?;
         self.emit_call(commit, types, &[Some(header), key], UNIT, n);
         self.jump(committed, &[], n);
         self.start(vacant);
-        let commit = self.p.core_fn("map", "commit")?;
+        let commit = self.p.core_helper(crate::CoreHelper::MapCommit)?;
         self.emit_call(
             commit,
             types,

@@ -172,51 +172,112 @@ pub const PRELUDE: [&str; 15] = [
     "OutOfTime",
     "Arc",
 ];
+/// A core function body lowering calls by a path it builds, never through a
+/// resolved name of the body. Lowering finds one only through
+/// `Program::core_helper`, and the driver's reuse key hashes the closure of each
+/// in [`SIBLING_READS`]' row of the callee being lowered, or its absence, so a
+/// lowering site that calls a helper missing from its callee's row is the one
+/// read the key does not cover.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CoreHelper {
+    ListGrow,
+    ListGrowBy,
+    HeapPreparePush,
+    HeapFinishPreparedPush,
+    DequePreparePush,
+    DequeFinishPreparedPush,
+    MapProbeStaged,
+    MapCommitCrowded,
+    MapCommit,
+}
+impl CoreHelper {
+    /// The helper's module in core and its name there.
+    pub const fn path(self) -> (&'static str, &'static str) {
+        match self {
+            Self::ListGrow => ("list", "grow"),
+            Self::ListGrowBy => ("list", "grow_by"),
+            Self::HeapPreparePush => ("heap", "prepare_push"),
+            Self::HeapFinishPreparedPush => ("heap", "finish_prepared_push"),
+            Self::DequePreparePush => ("deque", "prepare_push"),
+            Self::DequeFinishPreparedPush => ("deque", "finish_prepared_push"),
+            Self::MapProbeStaged => ("map", "probe_staged"),
+            Self::MapCommitCrowded => ("map", "commit_crowded"),
+            Self::MapCommit => ("map", "commit"),
+        }
+    }
+}
+/// What lowering a [`SIBLING_READS`] callee reads beyond the body's names.
+pub enum SiblingReads {
+    /// Core helpers lowering calls ([`CoreHelper`]).
+    Core(&'static [CoreHelper]),
+    /// Functions of one module of the callee's package, by name: std's built-in
+    /// codec makers beside `codec.of`.
+    Named(&'static str, &'static [&'static str]),
+}
+impl SiblingReads {
+    /// Each read as (module, name) in the callee's package, in key order.
+    pub fn paths(&self) -> impl Iterator<Item = (&'static str, &'static str)> + '_ {
+        let (core, named) = match *self {
+            Self::Core(helpers) => (helpers, None),
+            Self::Named(module, names) => (&[][..], Some((module, names))),
+        };
+        core.iter().map(|h| h.path()).chain(
+            named
+                .into_iter()
+                .flat_map(|(module, names)| names.iter().map(move |&name| (module, name))),
+        )
+    }
+}
 /// The items body lowering calls when it lowers a resolved callee:
-/// (package, callee module, callee, target module, target names). A body that
-/// names the callee reads those items, though no resolved name of the body
-/// reaches them, so its reuse key hashes their closures (`Keys::for_body`).
-/// Lowering builds no other path: a new one is added here first.
-pub const SIBLING_READS: [(&str, &str, &str, &str, &[&str]); 11] = [
-    ("core", "list", "push", "list", &["grow"]),
-    (
-        "core",
-        "heap",
-        "push",
-        "heap",
-        &["prepare_push", "finish_prepared_push"],
-    ),
-    (
-        "core",
-        "deque",
-        "push_front",
-        "deque",
-        &["prepare_push", "finish_prepared_push"],
-    ),
-    (
-        "core",
-        "deque",
-        "push_back",
-        "deque",
-        &["prepare_push", "finish_prepared_push"],
-    ),
-    (
-        "core",
-        "map",
-        "insert",
-        "map",
-        &["probe_staged", "commit_crowded", "commit"],
-    ),
-    // `codec.of[T]` at a built-in T calls T's maker (body/calls.rs `codec_of`,
-    // and body/templates.rs `codec_maker` at an instance).
-    ("std", "codec", "of", "codec", &body::BUILTIN_CODEC_MAKERS),
-    ("core", "list", "reserve", "list", &["grow", "grow_by"]),
-    ("core", "list", "append", "list", &["grow_by"]),
-    ("core", "list", "fill", "list", &["grow_by"]),
-    // String push and reserve use the List[u8] append and reserve kernels.
-    ("core", "string", "push", "list", &["grow_by"]),
-    ("core", "string", "reserve", "list", &["grow", "grow_by"]),
-];
+/// (package, callee module, callee, reads). A body that names the callee reads
+/// those items, though no resolved name of the body reaches them, so its reuse
+/// key hashes their closures (`Keys::for_body`). Lowering builds no other path:
+/// a new one is added here first.
+pub const SIBLING_READS: [(&str, &str, &str, SiblingReads); 11] = {
+    use CoreHelper::*;
+    use SiblingReads::*;
+    [
+        ("core", "list", "push", Core(&[ListGrow])),
+        (
+            "core",
+            "heap",
+            "push",
+            Core(&[HeapPreparePush, HeapFinishPreparedPush]),
+        ),
+        (
+            "core",
+            "deque",
+            "push_front",
+            Core(&[DequePreparePush, DequeFinishPreparedPush]),
+        ),
+        (
+            "core",
+            "deque",
+            "push_back",
+            Core(&[DequePreparePush, DequeFinishPreparedPush]),
+        ),
+        (
+            "core",
+            "map",
+            "insert",
+            Core(&[MapProbeStaged, MapCommitCrowded, MapCommit]),
+        ),
+        // `codec.of[T]` at a built-in T calls T's maker (body/calls.rs `codec_of`,
+        // and body/templates.rs `codec_maker` at an instance).
+        (
+            "std",
+            "codec",
+            "of",
+            Named("codec", &body::BUILTIN_CODEC_MAKERS),
+        ),
+        ("core", "list", "reserve", Core(&[ListGrow, ListGrowBy])),
+        ("core", "list", "append", Core(&[ListGrowBy])),
+        ("core", "list", "fill", Core(&[ListGrowBy])),
+        // String push and reserve use the List[u8] append and reserve kernels.
+        ("core", "string", "push", Core(&[ListGrowBy])),
+        ("core", "string", "reserve", Core(&[ListGrow, ListGrowBy])),
+    ]
+};
 /// Tuple codec row construction reads these protocol signatures even when the
 /// source never calls `codec.of`; the driver's prelude component records them.
 pub const TUPLE_CODEC_READS: [&str; 3] = ["take_with", "put_with", "schema_of"];
@@ -382,7 +443,9 @@ impl<'a> Program<'a> {
         *self.core_declarations[slot].get_or_init(|| self.core_decl_uncached(name))
     }
     /// The core function `module.name`, when the program has core.
-    pub(crate) fn core_fn(&self, module: &str, name: &str) -> Option<usize> {
+    /// The function `helper` names in core, if core defines it.
+    pub(crate) fn core_helper(&self, helper: CoreHelper) -> Option<usize> {
+        let (module, name) = helper.path();
         let key = self.index.core?;
         let package = &self.index.packages[key.0 as usize];
         let path = DefPath(hirsel_core_ids::ItemPath {

@@ -762,9 +762,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             ListGrowth::Raise
         } else {
             let single = ask == Ask::Reserve && self.growth.recent_one == Some(additional);
-            let name = if single { "grow" } else { "grow_by" };
+            let helper = if single {
+                crate::CoreHelper::ListGrow
+            } else {
+                crate::CoreHelper::ListGrowBy
+            };
             self.p
-                .core_fn("list", name)
+                .core_helper(helper)
                 .map_or(ListGrowth::Raise, |grow| ListGrowth::Call { grow, single })
         };
         self.list_room(item, header, additional, ask, growth, n)
@@ -1131,7 +1135,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         };
         let rep = self.rep_at(item, n)?;
         // `list.grow` is a sibling read of `list.push` (`crate::SIBLING_READS`).
-        let Some(grow) = self.p.core_fn("list", "grow") else {
+        let Some(grow) = self.p.core_helper(crate::CoreHelper::ListGrow) else {
             self.gap(n, "push without core's list.grow is not built");
             return None;
         };

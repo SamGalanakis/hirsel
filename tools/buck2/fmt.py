@@ -5,8 +5,9 @@
 rustfmt starts from each target's root file and follows its modules.
 Changed new-language sources are checked, never rewritten, and the primer's copies
 (tools/site_sync.py --check) must match docs/PRIMER.md. The std operation index
-must match the current compiler's interface. Refusal/gap fixtures
-are excluded by explicit expectation comments to preserve diagnostic coordinates.
+must match the current compiler's interface. The editor parser checks the core
+and spec corpus. Explicit expectation comments exclude refusal/gap fixtures
+from formatting to preserve diagnostic coordinates.
 """
 
 import json
@@ -99,6 +100,10 @@ def main():
     site = subprocess.run([sys.executable, str(ROOT / 'tools/site_sync.py'), '--check'], cwd=ROOT)
     if status or site.returncode:
         return status or site.returncode
+    corpus = subprocess.run(
+        [sys.executable, str(ROOT / 'editors/tree-sitter-hirsel/check-local')], cwd=ROOT)
+    if corpus.returncode:
+        return corpus.returncode
     synced = subprocess.run([sys.executable, str(ROOT / 'tools/buck2/sync.py'), '--if-stale'], cwd=ROOT)
     if synced.returncode:
         return synced.returncode

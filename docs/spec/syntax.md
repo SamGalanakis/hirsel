@@ -35,7 +35,7 @@ pub opaque const where true false bytes
 ```
 
 A keyword cannot be declared or used as a name anywhere, after a `.` included. These names
-are contextual and ordinary elsewhere: `drop` after a resource declaration; `plain`, `shareable`, `send`, `key`, `ordered`, `integer`, `float`, `packed`,
+are contextual and ordinary elsewhere: `drop` after a resource declaration; `plain`, `shareable`, `send`, `cross`, `key`, `ordered`, `integer`, `float`, `packed`,
 `streamable`, `codec` and `inert` in a bound list; `via` after a bound list, and `to` and `from` in
 its parentheses; `removed` before a field or variant name; `own` before `fn` in a type; `waits` after a function or callable header; `steps` after `bound`, as a parameter mark and as an argument mark; `clone` at the start of an item; `grant` after a type's bounds. Library types and functions, including `Region`,
 `View`, `Rc`, `Arc` and `Capacity`, are ordinary names. `_` is the discard pattern.
@@ -217,7 +217,7 @@ parameter   = [ "take" | "mut" | "bytes" | "steps" ], name, ":", type ;
 generics    = "[", nonempty(generic), "]" ;
 generic     = name, [ ":", bounds ] | "in", name ;
 bounds      = bound-name, { "+", bound-name } ;
-bound-name  = "plain" | "shareable" | "send" | "key" | "ordered" | "integer" | "float"
+bound-name  = "plain" | "shareable" | "send" | "cross" | "key" | "ordered" | "integer" | "float"
             | "packed" | "streamable" | "codec" | "inert" ;
 outlives    = "where", place, ":", place, { ",", place, ":", place } ;
 type-def    = [ "resource" | "scoped" ], "type", name, [ generics ],

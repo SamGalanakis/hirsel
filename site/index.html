@@ -1127,7 +1127,8 @@ const DET = (() => {
     const q = opts[Math.floor(r() * opts.length)];
     steps.push({ k, from: pos[k].slice(), to: q }); pos[k] = q; worn.add(q + '');
   }
-  const RUN0 = 120, STEP = 54, MOVE = 30, NS = steps.length, RUN_END = RUN0 + NS * STEP;
+  /* a step walks in MOVE ticks, the walking pace of the other scenes, and leaves room for its print's ring before the next */
+  const RUN0 = 120, STEP = 58, MOVE = 36, NS = steps.length, RUN_END = RUN0 + NS * STEP;
   const P1 = 50, RWS = 11, P2 = 40, HOLD = 80, CYC = P1 + NS * RWS + P2 + NS * STEP + HOLD;
   /* where the clock is: which pass, and how far along the walk (0..NS, fractional mid-step) */
   function at(t) {
@@ -1219,18 +1220,21 @@ SC.authority = (g) => {
   const slots = P.map((p, k) => ({ x: p[0], y: p[1], s, a: 1, rx: cw * .16, ry: ch * .16, slot: k }));
   const holders = { 1: [0, 0], 3: [150, 1] };
   const gin = [G[0] - cw * .42, G[1] + 4], gout = [G[0] + cw * .42, G[1] + 4];
-  const route = (home, dest) => [[0, 70, home, gin], [70, 116, gin, gout], [116, 176, gout, dest], [176, 236, dest, dest], [236, 296, dest, gout], [296, 342, gout, gin], [342, 410, gin, home]];
+  /* out through the gate, a stand at the far patch, and back; each leg at the walking pace of the other scenes */
+  const route = (home, dest) => [[0, 84, home, gin], [84, 148, gin, gout], [148, 224, gout, dest], [224, 290, dest, dest], [290, 366, dest, gout], [366, 430, gout, gin], [430, 514, gin, home]];
   return {
-    slots, redSlot: 2, ids, key: 93, start: 329,
+    slots, redSlot: 2, ids, key: 116, start: 412,
     calm(i, l) { return holders[l.slot] ? 0 : 1; },
     ext: [Math.min(b.y - 8, ...P.map(p => p[1] - s * 1.12 - 32), gin[1] - s * 1.12 - 32), Math.max(b.y + b.h + 6, ...P.concat(D).map(p => p[1] + ch * .4 + 3))],
     pose(i, l, t) {
       const h = holders[l.slot]; if (!h) return null;
-      const u = (t + h[0]) % 480, R = route(P[l.slot], D[h[1]]);
-      for (const [t0, t1, A, B] of R) if (u >= t0 && u < t1) {
-        const e = ease((u - t0) / (t1 - t0)), g2 = graze(i * 7 + 3, gT);
-        const wob = A === B ? 1 : 0;
-        return { x: lerp(A[0], B[0], e) + g2[0] * cw * .14 * wob, y: lerp(A[1], B[1], e) + g2[1] * ch * .14 * wob, face: A === B ? g2[2] : (B[0] >= A[0] ? 1 : -1) };
+      const u = (t + h[0]) % 560, R = route(P[l.slot], D[h[1]]);
+      for (let k = 0; k < R.length; k++) {
+        const [t0, t1, A, B] = R[k]; if (u < t0 || u >= t1) continue;
+        const e = sm((u - t0) / (t1 - t0)), g2 = graze(i * 7 + 3, gT);
+        /* the shuffle it has where it stands fades out as it sets off and back in as it arrives, so it never jumps */
+        const home = P[l.slot], dest = D[h[1]], wob = A === B ? 1 : (A === home || A === dest ? 1 - e : 0) + (B === home || B === dest ? e : 0);
+        return { x: lerp(A[0], B[0], e) + g2[0] * cw * .16 * wob, y: lerp(A[1], B[1], e) + (g2[1] * ch * .16 - g2[3]) * wob, face: A === B ? g2[2] : (B[0] >= A[0] ? 1 : -1) };
       }
       return null;
     },
@@ -1517,7 +1521,8 @@ SC.memory = (g) => {
   const ownA = t => { const u = uO(t); return { cr: 1 - sm((u - 200) / 36) + sm((u - 400) / 40), cx: sm((u - 200) / 36) * (1 - sm((u - 400) / 40)) * cw * .25, ram: 1 - sm((u - 240) / 34) + sm((u - 410) / 40) }; };
   const foldIn = (k, t) => { const u = uF(t); return sm((u - 20 - k * 30) / 24) * (1 - sm((u - 320) / 30)); };
   const cntA = t => { const u = uS(t), out = [120, 200, 280].map(t0 => 1 - sm((u - t0) / 30) + sm((u - 420) / 40)); return { cr: out, ram: 1 - sm((u - 316) / 34) + sm((u - 430) / 40) }; };
-  const mvAt = t => { const u = uM(t); const e1 = ease(cl01((u - 160) / 70)), e2 = ease(cl01((u - 400) / 70)), e = e1 - e2; return { e, moving: (u > 160 && u < 230) || (u > 400 && u < 470), u }; };
+  /* the move takes 110 ticks each way, at the walking pace of the other scenes */
+  const mvAt = t => { const u = uM(t); const e1 = ease(cl01((u - 120) / 110)), e2 = ease(cl01((u - 360) / 110)), e = e1 - e2; return { e, moving: (u > 120 && u < 230) || (u > 360 && u < 470), u }; };
   const arcC = [M[0], M[1] - ch * 1.15];
   const mys = [O[1] + ch * .08 - s * 1.02 - ch * .3, crO[1] - s * 1.4 * 1.18, FK(0, 0)[1] - fs - 4, S[1] - s * 1.25 - 6, qpt(MA, arcC, MB, .5)[1] - 4, ...crS.map(p => p[1] - s * 1.15 * 1.18), S[1] + ch * .08 - s * 1.02 - ch * .3,
     O[1] + ch * .5 + (MOB ? 16 : 22) + 8, FK(2, 2)[1] + (MOB ? 16 : 22) + 8, S[1] + ch * .5 + (MOB ? 16 : 22) + 8, M[1] + ch * .45 + (MOB ? 16 : 22) + 8];
@@ -1558,7 +1563,8 @@ SC.memory = (g) => {
       /* a move */
       const m = mvAt(t), at2 = m.e;
       patch(MA[0], MA[1], cw * .4, ch * .4, a); patch(MB[0], MB[1], cw * .4, ch * .4, a);
-      const tr = m.moving ? .5 : .5 * (1 - sm(((m.u > 300 ? m.u - 470 : m.u - 230 + (m.u < 160 ? CY : 0))) / 90));
+      /* the path it took shows while it moves and fades in the 90 ticks after it lands */
+      const tr = m.moving ? .5 : .5 * (1 - sm(((m.u >= 230 && m.u < 360 ? m.u - 230 : (m.u - 470 + CY) % CY)) / 90));
       if (tr > .01) dashed([[MA[0], MA[1] - 3], arcC, [MB[0], MB[1] - 3]], a * tr, true);
       lab('moved, not copied', [M[0], M[1]], ch * .45 + (MOB ? 16 : 22));
     },

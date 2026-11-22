@@ -14,6 +14,46 @@ pub(super) enum Payer {
     Region(Value),
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum PointerOrigin {
+    Address(AddressId),
+    Read(AddressId),
+    Parameter(PlaceTy),
+}
+
+pub(super) fn pointer_origins(body: &Body, sig: &Signature) -> Box<[Option<PointerOrigin>]> {
+    let mut origins = vec![None; body.values.len()];
+    if !body.edges.iter().any(|edge| edge.target.index() == 0) {
+        let parameters =
+            sig.dest
+                .map(PlaceTy::Declared)
+                .into_iter()
+                .map(Some)
+                .chain(sig.params.iter().map(|param| match *param {
+                    Param::Address { place, .. } => Some(place),
+                    Param::Value(_) => None,
+                }));
+        let entry = body.blocks[0].params.get(&body.pools.values).unwrap();
+        for (&value, place) in entry.iter().zip(parameters) {
+            origins[value.index()] = place.map(PointerOrigin::Parameter);
+        }
+    }
+    for inst in &body.insts {
+        match *inst {
+            Inst::Pointer { result, address } => {
+                origins[result.index()] = Some(PointerOrigin::Address(address));
+            }
+            Inst::Read {
+                result, address, ..
+            } if body.values[result.index()] == Ty::Ptr => {
+                origins[result.index()] = Some(PointerOrigin::Read(address));
+            }
+            _ => {}
+        }
+    }
+    origins.into_boxed_slice()
+}
+
 #[derive(Clone)]
 pub(super) enum At {
     Declared(TypeId),
@@ -176,6 +216,17 @@ impl FunctionEmitter<'_> {
         };
         let data = match *last {
             Step::Seq(_) => return Some(alias::SEQ_WORD_ACCESS),
+            Step::Byte(at) => {
+                let PlaceTy::Value(ty) = info.ty else {
+                    return None;
+                };
+                self.scalar_buffer(address)
+                    || (before.is_empty()
+                        && self.constants[at.index()]
+                            .and_then(|offset| offset.checked_add(size(ty)))
+                            .zip(self.inline_scalar_extent(info.base))
+                            .is_some_and(|(end, extent)| end <= extent))
+            }
             _ if steps.iter().any(|s| matches!(s, Step::Byte(_))) => false,
             Step::Index(_) => matches!(info.ty, PlaceTy::Value(_)),
             Step::Element(_) => {
@@ -193,10 +244,88 @@ impl FunctionEmitter<'_> {
                     _ => false,
                 }
             }
-            Step::Deref | Step::Byte(_) => false,
+            Step::Deref => false,
         };
         data.then_some(alias::DATA_ACCESS)
     }
+    /// A typed data word of a scalar sequence points into an element buffer.
+    /// Its bytes hold no carriers. Raw projections preserve that fact for
+    /// accesses within the buffer, which the CoreIR producer bounds.
+    fn scalar_buffer(&self, mut address: AddressId) -> bool {
+        loop {
+            let info = &self.body.addresses[address.index()];
+            let steps = info.steps.get(&self.body.pools.steps).unwrap();
+            if !steps
+                .iter()
+                .all(|s| matches!(s, Step::Byte(_) | Step::Index(_)))
+            {
+                return false;
+            }
+            match info.base {
+                AddressBase::Slot(_) => return false,
+                AddressBase::Address(parent) => address = parent,
+                AddressBase::Value(value) => {
+                    match self.pointer_origins.get(value.index()).copied().flatten() {
+                        Some(PointerOrigin::Address(parent)) => address = parent,
+                        Some(PointerOrigin::Read(source)) => {
+                            let info = &self.body.addresses[source.index()];
+                            let steps = info.steps.get(&self.body.pools.steps).unwrap();
+                            let Some((Step::Seq(SeqWord::Data), before)) = steps.split_last()
+                            else {
+                                return false;
+                            };
+                            return matches!(
+                                self.walk(source, before.len()),
+                                At::Seq(element) if matches!(*element, FieldTy::Scalar(_))
+                            );
+                        }
+                        Some(PointerOrigin::Parameter(_)) | None => return false,
+                    }
+                }
+            }
+        }
+    }
+
+    /// A constant byte access inside the physical scalar array cannot reach
+    /// other fields in the same allocation. Leave dynamic Inline offsets
+    /// unclassified when this projection has no extent proof.
+    fn inline_scalar_extent(&self, base: AddressBase) -> Option<u64> {
+        let declared = match base {
+            AddressBase::Slot(slot) => self.body.slots[slot.index()],
+            AddressBase::Value(value) => {
+                match self.pointer_origins.get(value.index()).copied().flatten() {
+                    Some(PointerOrigin::Parameter(place)) => place,
+                    Some(PointerOrigin::Address(address)) => {
+                        let info = &self.body.addresses[address.index()];
+                        let (AddressBase::Slot(slot), 0) = (info.base, info.steps.len) else {
+                            return None;
+                        };
+                        self.body.slots[slot.index()]
+                    }
+                    _ => return None,
+                }
+            }
+            AddressBase::Address(_) => return None,
+        };
+        let PlaceTy::Declared(row) = declared else {
+            return None;
+        };
+        let shape = &self.module.types[row.index()];
+        if shape.repr != Repr::Own {
+            return None;
+        }
+        let [field] = shape.fields(None)? else {
+            return None;
+        };
+        let FieldTy::Array(element, lanes) = &field.ty else {
+            return None;
+        };
+        let FieldTy::Scalar(lane) = **element else {
+            return None;
+        };
+        lane.size().checked_mul(*lanes)
+    }
+
     fn kind_at(&self, address: AddressId) -> At {
         self.walk(address, usize::MAX)
     }

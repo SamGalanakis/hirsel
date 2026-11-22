@@ -33,16 +33,7 @@ fn strings_lt(a: String, b: String) -> bool { a < b }
     let (program, names) = hirsel_core_program_tests::SourceProgram::lower(source, None);
     let ir =
         emit_ir_for_test_with_facts(&program, Target::X86_64Linux, false, false, true).unwrap();
-    let (seq_type, _) = ir
-        .lines()
-        .find_map(|line| line.split_once(" = !{!\"seq words\","))
-        .unwrap();
-    let access = format!(" = !{{{seq_type}, {seq_type}, i64 0}}");
-    let seq_access = ir
-        .lines()
-        .find_map(|line| line.strip_suffix(&access))
-        .unwrap();
-    let metadata = format!("!tbaa {seq_access}");
+    let metadata = storage_access_tag(&ir, "seq words");
     for (name, lengths) in [
         ("word", 1),
         ("short", 1),
@@ -52,23 +43,63 @@ fn strings_lt(a: String, b: String) -> bool { a < b }
         ("bytes_eq", 2),
         ("strings_lt", 2),
     ] {
-        let link = symbol(&program, names[name]);
-        let body = [format!("@{link}.infallible("), format!("@{link}(")]
-            .into_iter()
-            .find_map(|symbol| {
-                let header = ir
-                    .lines()
-                    .find(|line| line.starts_with("define ") && line.contains(&symbol))?;
-                let (_, definition) = ir.split_once(header)?;
-                definition.split_once("\n}").map(|(body, _)| body)
-            })
-            .unwrap();
+        let body = emitted_body(&ir, &symbol(&program, names[name]));
         assert_eq!(
             body.lines()
                 .filter(|line| line.contains("load i64,") && line.contains(&metadata))
                 .count(),
             lengths,
             "{name} sequence length loads:{body}"
+        );
+    }
+}
+
+fn storage_access_tag(ir: &str, name: &str) -> String {
+    let label = format!(" = !{{!\"{name}\",");
+    let (storage, _) = ir.lines().find_map(|line| line.split_once(&label)).unwrap();
+    let access = format!(" = !{{{storage}, {storage}, i64 0}}");
+    let tag = ir
+        .lines()
+        .find_map(|line| line.strip_suffix(&access))
+        .unwrap();
+    format!("!tbaa {tag}")
+}
+
+fn emitted_body<'a>(ir: &'a str, link: &str) -> &'a str {
+    [format!("@{link}.infallible("), format!("@{link}(")]
+        .into_iter()
+        .find_map(|symbol| {
+            let header = ir
+                .lines()
+                .find(|line| line.starts_with("define ") && line.contains(&symbol))?;
+            let (_, definition) = ir.split_once(header)?;
+            definition.split_once("\n}").map(|(body, _)| body)
+        })
+        .unwrap()
+}
+
+#[test]
+fn byte_word_projections_keep_data_tbaa_and_byte_alignment() {
+    let source = r#"
+fn load_word(b: Bytes, at: u64) -> u32 { list.word_le(b, at) }
+fn append_word(mut b: Bytes, word: u32) { list.put_word_le(mut b, word) }
+fn inline_word(a: Inline[u8, 12]) -> u32 { inline.word_be(a, 1) }
+"#;
+    let (program, names) = hirsel_core_program_tests::SourceProgram::lower(source, None);
+    let ir =
+        emit_ir_for_test_with_facts(&program, Target::X86_64Linux, false, false, true).unwrap();
+    let data = storage_access_tag(&ir, "scalar data");
+    for (name, operation) in [
+        ("load_word", "load i32,"),
+        ("append_word", "store i32"),
+        ("inline_word", "load i32,"),
+    ] {
+        let body = emitted_body(&ir, &symbol(&program, names[name]));
+        assert!(
+            body.lines().any(|line| line.contains(operation)
+                && line.contains("align 1,")
+                && line.contains(&data)),
+            "{name} has no tagged unaligned word access:{body}"
         );
     }
 }

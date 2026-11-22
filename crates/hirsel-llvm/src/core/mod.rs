@@ -730,6 +730,11 @@ fn emit_module(
                 neutral_step_call: false,
                 view_invariants: Vec::new(),
                 aliases,
+                pointer_origins: if facts {
+                    storage::pointer_origins(body, &module.signatures[f.signature.index()])
+                } else {
+                    Box::default()
+                },
                 module,
                 body,
                 recipes: &recipes,
@@ -1537,6 +1542,7 @@ struct FunctionEmitter<'a> {
     receive_loops: hirsel_core_ir::receive_loops::ReceiveLoops,
     facts: bool,
     aliases: Option<alias::Scopes>,
+    pointer_origins: Box<[Option<storage::PointerOrigin>]>,
     caller_site: Value,
     debug_location: Option<usize>,
     anchor: Option<Anchor>,

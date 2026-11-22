@@ -34,6 +34,8 @@ pub(super) struct Growth {
     words: HashMap<ValueId, (FillWord, PlaceChain)>,
     /// Results of a full test.
     full: FxHashSet<ValueId>,
+    /// The most recently emitted u64 constant with value one.
+    pub(super) recent_one: Option<ValueId>,
     /// Lowering is inside the true arm of a full test.
     pub(super) cold: bool,
 }

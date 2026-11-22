@@ -1941,6 +1941,9 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             return None;
         }
         let result = self.value(t);
+        if bits == 1 && t == Ty::Scalar(Scalar::U64) {
+            self.growth.recent_one = Some(result);
+        }
         self.inst(Inst::Const { result, bits }, n);
         Some(result)
     }

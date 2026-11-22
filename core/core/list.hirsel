@@ -61,6 +61,11 @@ fn grow[T](mut xs: List[T]) {
     reserve(mut xs, 1)
 }
 
+// The cold growth arm of reserve, append and fill.
+fn grow_by[T](mut xs: List[T], additional: u64) {
+    reserve(mut xs, additional)
+}
+
 pub fn pop[T](mut xs: List[T]) -> Option[T]
 
 pub fn set[T](mut xs: List[T], i: u64, take x: T) -> T

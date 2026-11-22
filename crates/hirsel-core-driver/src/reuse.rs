@@ -380,17 +380,19 @@ impl SignatureReads {
 }
 
 /// What a form's lowering reads beyond its names.
-/// One `hirsel_core_front::SIBLING_READS` callee: its row, its module, and
-/// the hash of its siblings' closures once a body names it.
+/// One `hirsel_core_front::SIBLING_READS` callee: its row, the target module,
+/// and the hash of the target closures once a body names the callee.
 struct Siblings {
     row: usize,
-    module: ModuleId,
+    module: Option<ModuleId>,
     hash: std::cell::OnceCell<ContentHash>,
 }
 /// Each core operation whose lowering resolves sibling definitions.
 fn forms(index: &NameIndex) -> (Vec<(DefinitionId, usize)>, Vec<Siblings>) {
     let (mut forms, mut siblings) = (vec![], vec![]);
-    for (row, &(package, module, name, _)) in hirsel_core_front::SIBLING_READS.iter().enumerate() {
+    for (row, &(package, module, name, target, _)) in
+        hirsel_core_front::SIBLING_READS.iter().enumerate()
+    {
         let (Some(package), Some(module), Some(name)) = (
             index.symbols.find(package),
             index.symbols.find(module),
@@ -398,16 +400,16 @@ fn forms(index: &NameIndex) -> (Vec<(DefinitionId, usize)>, Vec<Siblings>) {
         ) else {
             continue;
         };
+        let target = index.symbols.find(target);
         for p in index.packages.iter().filter(|p| p.name == package) {
             if let Some(id) = index
                 .child(p.root, module)
-                .and_then(|m| index.definition(m, name).map(|id| (m, id)))
+                .and_then(|m| index.definition(m, name))
             {
-                let (module, id) = id;
                 forms.push((id, siblings.len()));
                 siblings.push(Siblings {
                     row,
-                    module,
+                    module: target.and_then(|target| index.child(p.root, target)),
                     hash: Default::default(),
                 });
             }
@@ -440,9 +442,9 @@ impl Siblings {
         index: &'a NameIndex,
     ) -> impl Iterator<Item = Option<DefinitionId>> + 'a {
         hirsel_core_front::SIBLING_READS[self.row]
-            .3
+            .4
             .iter()
-            .map(|name| index.definition(self.module, index.symbols.find(name)?))
+            .map(|name| index.definition(self.module?, index.symbols.find(name)?))
     }
 }
 

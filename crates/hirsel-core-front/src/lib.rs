@@ -172,37 +172,44 @@ pub const PRELUDE: [&str; 15] = [
     "OutOfTime",
     "Arc",
 ];
-/// The items body lowering calls by a path it builds from a callee the body
-/// resolves, keeping the callee's package and modules and replacing its name:
-/// (package name, module, callee, the names it builds). A body that names the
-/// callee reads those items, though no resolved name of the body reaches them,
-/// so its reuse key hashes their closures (the driver's `Keys::for_body`).
+/// The items body lowering calls when it lowers a resolved callee:
+/// (package, callee module, callee, target module, target names). A body that
+/// names the callee reads those items, though no resolved name of the body
+/// reaches them, so its reuse key hashes their closures (`Keys::for_body`).
 /// Lowering builds no other path: a new one is added here first.
-pub const SIBLING_READS: [(&str, &str, &str, &[&str]); 6] = [
-    // `list.push` grows a full list by calling `list.grow` (body/lists.rs).
-    ("core", "list", "push", &["grow"]),
+pub const SIBLING_READS: [(&str, &str, &str, &str, &[&str]); 11] = [
+    ("core", "list", "push", "list", &["grow"]),
     (
         "core",
         "heap",
         "push",
+        "heap",
         &["prepare_push", "finish_prepared_push"],
     ),
     (
         "core",
         "deque",
         "push_front",
+        "deque",
         &["prepare_push", "finish_prepared_push"],
     ),
     (
         "core",
         "deque",
         "push_back",
+        "deque",
         &["prepare_push", "finish_prepared_push"],
     ),
-    ("core", "map", "insert", &["probe_insert"]),
+    ("core", "map", "insert", "map", &["probe_insert"]),
     // `codec.of[T]` at a built-in T calls T's maker (body/calls.rs `codec_of`,
     // and body/templates.rs `codec_maker` at an instance).
-    ("std", "codec", "of", &body::BUILTIN_CODEC_MAKERS),
+    ("std", "codec", "of", "codec", &body::BUILTIN_CODEC_MAKERS),
+    ("core", "list", "reserve", "list", &["grow", "grow_by"]),
+    ("core", "list", "append", "list", &["grow_by"]),
+    ("core", "list", "fill", "list", &["grow_by"]),
+    // String push and reserve use the List[u8] append and reserve kernels.
+    ("core", "string", "push", "list", &["grow_by"]),
+    ("core", "string", "reserve", "list", &["grow", "grow_by"]),
 ];
 /// Tuple codec row construction reads these protocol signatures even when the
 /// source never calls `codec.of`; the driver's prelude component records them.

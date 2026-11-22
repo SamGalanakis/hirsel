@@ -164,7 +164,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 return Some(None);
             }
             "reserve" => {
-                self.list_reserve(item, vals[0]?, vals[1]?, super::lists::Ask::Reserve, n)?;
+                self.list_reserve_shared(item, vals[0]?, vals[1]?, super::lists::Ask::Reserve, n)?;
                 return Some(None);
             }
             "try_reserve" => {

@@ -678,7 +678,7 @@ extern "C" LLVMErrorRef hirsel_llvm_specialize_release(LLVMModuleRef module,
         pipeline.addPass(LendPass(StringRef((const char *)lent, lent_len), &lend_failure));
     }
     if (auto error = release.builder.parsePassPipeline(pipeline,
-        "cgscc(argpromotion),ipsccp,partial-inliner,cgscc(inline)"))
+        "cgscc(argpromotion),ipsccp,cgscc(inline)"))
         return wrap(std::move(error));
     release.run(pipeline, "specialize");
     if (!lend_failure.empty())

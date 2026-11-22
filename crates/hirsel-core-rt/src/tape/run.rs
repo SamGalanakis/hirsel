@@ -9,6 +9,8 @@ use crate::{
     process::{self, Config, Entry, MainResult, View},
 };
 use hirsel_core_ids::launch::Metadata;
+#[cfg(feature = "testing")]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{
     ffi::{CStr, OsStr},
     os::unix::ffi::OsStrExt,
@@ -199,19 +201,39 @@ fn stopped(run: &mut Run, message: impl std::fmt::Display) -> u8 {
     });
     1
 }
+#[cfg(feature = "testing")]
+static NO_HOST_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+/// Count calls to the refuse-all provider in a standalone replay test process.
+#[cfg(feature = "testing")]
+#[unsafe(no_mangle)]
+pub extern "C" fn hirsel_core_test_replay_provider_calls() -> usize {
+    NO_HOST_CALLS.load(Ordering::Relaxed)
+}
+
 unsafe extern "C" fn refuse_wait(_: *mut u8, _: *mut Request, _: u64) -> Wait {
+    #[cfg(feature = "testing")]
+    NO_HOST_CALLS.fetch_add(1, Ordering::Relaxed);
     Wait::default()
 }
 unsafe extern "C" fn refuse_issue(_: *mut u8, _: *mut Request, _: u64) -> Step {
+    #[cfg(feature = "testing")]
+    NO_HOST_CALLS.fetch_add(1, Ordering::Relaxed);
     done(REFUSED)
 }
 unsafe extern "C" fn refuse_resume(_: *mut u8, _: *mut Request, _: u64) -> Step {
+    #[cfg(feature = "testing")]
+    NO_HOST_CALLS.fetch_add(1, Ordering::Relaxed);
     done(REFUSED)
 }
 unsafe extern "C" fn refuse_abort(_: *mut u8, _: *mut Request, _: u64, _: u8) -> Outcome {
+    #[cfg(feature = "testing")]
+    NO_HOST_CALLS.fetch_add(1, Ordering::Relaxed);
     REFUSED
 }
 unsafe extern "C" fn refuse_deliver(_: *mut u8, _: *mut Request, o: Outcome) -> Outcome {
+    #[cfg(feature = "testing")]
+    NO_HOST_CALLS.fetch_add(1, Ordering::Relaxed);
     o
 }
 const NO_HOST: Provider = Provider {

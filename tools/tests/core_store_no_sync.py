@@ -211,11 +211,9 @@ class StoreNoSync(unittest.TestCase):
             recipe_linker.write_text(f'#!/bin/sh\nexec {shlex.quote(str(cc))} "$@"\n')
             recipe_linker.chmod(0o755)
             env = dict(os.environ, XDG_CACHE_HOME=str(root / "cache"))
-            env.pop("HIRSEL_TL9_REPLAY", None)
 
-            def cli(*args, replay=False):
-                run_env = dict(env, HIRSEL_TL9_REPLAY="1") if replay else env
-                return subprocess.run([self.compiler, *args], cwd=work, env=run_env,
+            def cli(*args):
+                return subprocess.run([self.compiler, *args], cwd=work, env=env,
                                       capture_output=True, text=True)
 
             with self.subTest(command="build --recipe"):
@@ -242,8 +240,8 @@ class StoreNoSync(unittest.TestCase):
                 self.assert_offline_replay(root, cc, recording, cli)
 
     def assert_offline_replay(self, root, cc, recording, cli):
-        # The recording gets its exit status from the peer. The existing tape
-        # observer replaces the replay's live provider with a counting refuser.
+        # The recording gets its exit status from the peer. The tape observer
+        # counts calls to replay's refuse-all provider.
         received = []
 
         class Peer(socketserver.BaseRequestHandler):
@@ -257,7 +255,7 @@ class StoreNoSync(unittest.TestCase):
         linker = root / "tools/recording-clang"
         linker.write_text(
             f"#!/bin/sh\nexec {shlex.quote(str(cc))} \"$@\" {shlex.quote(str(observer))} "
-            "-Wl,--wrap=hirsel_core_run,--wrap=hirsel_core_host_io\n"
+            "-Wl,--wrap=hirsel_core_os_replay,--wrap=hirsel_core_host_io\n"
         )
         linker.chmod(0o755)
         app = root / "client"
@@ -292,11 +290,13 @@ class StoreNoSync(unittest.TestCase):
             finally:
                 server.shutdown()
                 serve.join()
-        self.assertEqual((recorded.returncode, recorded.stdout, recorded.stderr), (42, "*", "*"))
+        # `hirsel run` reports a nonzero status (docs/building.md).
+        self.assertEqual((recorded.returncode, recorded.stdout, recorded.stderr),
+                         (42, "*", "*hirsel: main returned an error, exit status 42\n"))
         self.assertEqual(len(received), 1)
         sealed = tape.read_bytes()
         replayed = cli("replay", *common, "--store", root / "replay-store",
-                       "-o", root / "replay-program", "--tape", tape, replay=True)
+                       "-o", root / "replay-program", "--tape", tape)
         # Sealed exits 0 and guarantees the recorded outcome. The observer
         # also sees the replayed output while the CLI suppresses live Stdout.
         self.assertEqual((replayed.returncode, replayed.stdout, replayed.stderr),

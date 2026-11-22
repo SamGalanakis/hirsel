@@ -1305,7 +1305,7 @@ fn cli_tls_replay(with_secret: bool) {
         dir.path(),
         "clang-observe-tls",
         &format!(
-            "'{}' -Wl,--wrap=hirsel_core_run,--wrap=hirsel_core_host_io",
+            "'{}' -Wl,--wrap=hirsel_core_os_replay,--wrap=hirsel_core_host_io",
             observer_obj.display().to_string().replace('\'', "'\\''")
         ),
     );
@@ -1314,7 +1314,12 @@ fn cli_tls_replay(with_secret: bool) {
         "--backend".into(),
         "cranelift".into(),
         "--runtime".into(),
-        env_record_runtime().display().to_string(),
+        root.join(
+            std::env::var_os("HIRSEL_CORE_RT_SCRIPTED_RECORD_ARCHIVE")
+                .expect("scripted recording runtime archive"),
+        )
+        .display()
+        .to_string(),
         "--cc".into(),
         linker.display().to_string(),
         "--libraries".into(),
@@ -1353,7 +1358,6 @@ fn cli_tls_replay(with_secret: bool) {
         .env("HIRSEL_TL10_TOKEN", &token)
         .env("SSL_CERT_FILE", &roots)
         .env_remove("SSL_CERT_DIR")
-        .env_remove("HIRSEL_TL9_REPLAY")
         .output()
         .unwrap();
     let after = |bytes: &[u8]| {
@@ -1430,7 +1434,6 @@ fn cli_tls_replay(with_secret: bool) {
         .env("SSL_CERT_FILE", &roots)
         .env_remove("SSL_CERT_DIR")
         .env_remove("HIRSEL_TL10_TOKEN")
-        .env("HIRSEL_TL9_REPLAY", "1")
         .output()
         .unwrap();
     let replay_log = after(&replay.stderr);

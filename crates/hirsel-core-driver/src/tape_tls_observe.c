@@ -1,45 +1,18 @@
 #include "hirsel_core_rt_host.h"
-#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 
-static _Atomic unsigned calls;
-static const HirselCoreHostOutcome refused = {.error = {.tag = 1}};
+extern size_t hirsel_core_test_replay_provider_calls(void);
+extern uint8_t __real_hirsel_core_os_replay(const HirselCoreOsConfig *, const HirselCoreView *,
+    const HirselCoreSourceTable *, HirselCoreEntry, const char *, uint64_t, const char *,
+    const uint8_t revision[32]);
 
-static HirselCoreWait refuse_wait(void *state, HirselCoreHostRequest *r, uint64_t token) {
-    ++calls;
-    return (HirselCoreWait){0};
-}
-
-static HirselCoreStep refuse_step(void *state, HirselCoreHostRequest *r, uint64_t token) {
-    ++calls;
-    return (HirselCoreStep){.outcome = refused};
-}
-
-static HirselCoreHostOutcome refuse_abort(void *state, HirselCoreHostRequest *r,
-    uint64_t token, uint8_t reason) {
-    ++calls;
-    return refused;
-}
-
-static HirselCoreHostOutcome refuse_deliver(void *state, HirselCoreHostRequest *r,
-    HirselCoreHostOutcome out) {
-    ++calls;
-    return refused;
-}
-
-extern uint8_t __real_hirsel_core_run(const HirselCoreProcessConfig *, HirselCoreEntry);
-
-uint8_t __wrap_hirsel_core_run(const HirselCoreProcessConfig *config, HirselCoreEntry entry) {
-    if (!getenv("HIRSEL_TL9_REPLAY")) return __real_hirsel_core_run(config, entry);
-    HirselCoreProvider provider = {
-        .wait = refuse_wait, .issue = refuse_step, .resume = refuse_step,
-        .abort = refuse_abort, .deliver = refuse_deliver
-    };
-    HirselCoreProcessConfig replay = *config;
-    replay.provider = &provider;
-    uint8_t status = __real_hirsel_core_run(&replay, entry);
-    fprintf(stderr, "inner calls: %u\n", (unsigned)calls);
+uint8_t __wrap_hirsel_core_os_replay(const HirselCoreOsConfig *config, const HirselCoreView *names,
+    const HirselCoreSourceTable *sources, HirselCoreEntry entry, const char *path, uint64_t mode,
+    const char *identity, const uint8_t revision[32]) {
+    uint8_t status = __real_hirsel_core_os_replay(config, names, sources, entry, path, mode,
+        identity, revision);
+    fprintf(stderr, "inner calls: %zu\n", hirsel_core_test_replay_provider_calls());
     return status;
 }
 

@@ -553,6 +553,7 @@ def first_party(meta: dict) -> str:
                           else {
                               "HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic",
                               "HIRSEL_CORE_RT_RECORD_ARCHIVE": "//:core-driver-record-runtime-pic",
+                              "HIRSEL_CORE_RT_SCRIPTED_RECORD_ARCHIVE": "//:core-scripted-record-runtime-pic",
                           } if binary == "hirsel-core-driver-unittest"
                           else {"HIRSEL_CORE_RT_ARCHIVE": "//:core-native-runtime-fixture-pic"} if binary == "hirsel-llvm-unittest" or program_llvm else None)
             return dict(data=test_data(binary, name, package_dir, src),
@@ -723,10 +724,11 @@ def first_party(meta: dict) -> str:
     out.append("\n" + call("hirsel_script_test", name="core-closed-pipe", script="tools/tests/core_closed_pipe.py",
         files_env={"HIRSEL_PIPE_COMPILER": "//:hirsel-core-driver-bin-hirsel"},
         data=Raw('glob(["core/core/**", "core/std/**"])')))
-    out.append("\n" + call("hirsel_script_test", name="core-store-no-sync", script="tools/tests/core_store_no_sync.py",
+    # The offline replay case opens its tape through the confined OS Dir provider.
+    out.append("\n" + call("hirsel_script_test", name="core-store-no-sync", script="tools/tests/core_store_no_sync.py", host=True,
         files_env={"HIRSEL_SYNC_COMPILER": "//:hirsel-core-driver-bin-hirsel",
                    "HIRSEL_CORE_RT_DEFAULT_ARCHIVES": "//:hirsel-core-rt-archives",
-                   "HIRSEL_CORE_RT_RECORD_ARCHIVE": "//:core-driver-record-runtime-pic"},
+                   "HIRSEL_CORE_RT_RECORD_ARCHIVE": "//:core-scripted-record-runtime-pic"},
         data=Raw('glob(["core/core/**", "core/std/**", "crates/hirsel-core-rt/include/**"]) + ["crates/hirsel-core-driver/src/tape_tls_observe.c"]')))
     out.append("\n" + call("hirsel_script_test", name="core-memory-report", script="tools/tests/core_memory_report.py",
         files_env={"HIRSEL_REPORT_COMPILER": "//:hirsel-core-driver-bin-hirsel", "HIRSEL_REPORT_EVALUATOR": "//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval", "HIRSEL_CORE_RT_DEFAULT_ARCHIVES": "//:hirsel-core-rt-archives", "HIRSEL_CORE_RT_OBSERVED_ARCHIVES": "//:hirsel-core-rt-observed-archives"},

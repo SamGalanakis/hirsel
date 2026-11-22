@@ -1463,6 +1463,17 @@ impl Scheduler {
             if self.head.is_null() {
                 return ptr::null_mut();
             }
+            #[cfg(feature = "testing")]
+            if crate::units::observe::sample_depth() {
+                let mut depth = 0;
+                for mut next in [self.head, self.deferred] {
+                    while !next.is_null() {
+                        depth += 1;
+                        next = (*next).ready;
+                    }
+                }
+                crate::units::observe::depth(depth);
+            }
             #[cfg(any(test, feature = "testing"))]
             if let Some(script) = self.script.clone() {
                 let selected = self.scripted_task(&script);

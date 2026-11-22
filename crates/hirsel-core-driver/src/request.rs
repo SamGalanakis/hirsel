@@ -74,13 +74,13 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             crate::prof_command::export(invocation)?;
             std::process::exit(0);
         }
-        name if name.starts_with("prof ") && name != "prof run" => {
+        name if name.starts_with("prof ") && !matches!(name, "prof run" | "prof replay") => {
             crate::prof_command::query(invocation)?;
             std::process::exit(0);
         }
         _ => {}
     }
-    let profile = (invocation.command.name == "prof run")
+    let profile = matches!(invocation.command.name, "prof run" | "prof replay")
         .then(|| crate::prof_command::Run::read(&mut invocation))
         .transpose()?;
     let command = invocation.command.name;
@@ -587,7 +587,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     };
     let dir = app_directory;
     if profile.is_some() && (emulator.is_some() || sysroot.is_some()) {
-        return Err("prof run samples a native executable and cannot use an emulator".into());
+        return Err("profiling requires a native executable and cannot use an emulator".into());
     }
     let runner = match (emulator, sysroot) {
         (None, None) => crate::Runner::Native,
@@ -1164,6 +1164,9 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         {
             eprintln!("{site}: recording refusal site");
             eprintln!("replay: refused: {reason}");
+            if let Some(profile) = &profile {
+                profile.cleanup();
+            }
             std::process::exit(2);
         }
         if let Some(Ok(options)) = &mut prepared {
@@ -1658,6 +1661,9 @@ fn finish(
     meter.finish("output/render");
     if let Some(path) = metrics {
         meter.write_metrics(path)?;
+    }
+    if let Some(profile) = profile {
+        profile.cleanup();
     }
     // Publication and output are complete. The OS reclaims these in-memory
     // graphs at exit; the reusable library Driver retains ordinary destruction.

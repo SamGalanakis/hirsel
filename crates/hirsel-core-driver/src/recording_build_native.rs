@@ -12,6 +12,40 @@ fn env_record_runtime() -> PathBuf {
         .expect("recording runtime archive")
 }
 
+fn env_observe_runtime() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(std::env::var_os("HIRSEL_CORE_RT_PROF_RECORD_ARCHIVE").unwrap())
+        .canonicalize()
+        .unwrap()
+}
+
+fn profile_fixture_replay(common: &[String], cwd: &Path, tape: &Path) {
+    let scratch = tempfile::tempdir_in(cwd).unwrap();
+    let out = scratch.path().join("tape.hprof");
+    let mut build = common.to_vec();
+    let argument = |flag: &str| common.iter().position(|arg| arg == flag).unwrap() + 1;
+    build[argument("--runtime")] = env_observe_runtime().into_os_string().into_string().unwrap();
+    // The original replay checks the C fixture's independent callback
+    // witnesses. This replay uses the standalone shipping runtime.
+    build[argument("--cc")] = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap())
+        .join("bin/clang").into_os_string().into_string().unwrap();
+    let mut args = vec!["prof".into(), "replay".into()];
+    args.extend(build);
+    args.extend([
+        "--tasks".into(), "--tape".into(), tape.display().to_string(),
+        "--out".into(), out.display().to_string(),
+    ]);
+    let (status, stdout, stderr) = process::tape_request(&args, cwd);
+    assert_eq!(status, Some(0), "{tape:?}: {stderr}");
+    assert!(stdout.is_empty(), "{tape:?}: unexpected live stdout {stdout:?}");
+    let profile = hirsel_prof::Profile::open(&out).unwrap();
+    let closed: i64 = profile.connection()
+        .query_row("SELECT count(*) FROM task WHERE end_ns IS NOT NULL", [], |row| row.get(0))
+        .unwrap();
+    assert!(closed > 0, "{tape:?}: runtime observations");
+}
+
 #[test]
 fn foreign_source_replay_refuses_before_reading_tape() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -315,8 +349,13 @@ pub fn main(a: Args, out: Stdout) -> Result[(), Exit] waits {
                     if recording_on {
                         assert_eq!(run(true), off, "RL1 recording on: {tag}");
                         assert!(tape.is_file(), "RL1 recording on must write a tape: {tag}");
-                        for archive in [&recording, &observe] {
-                            let mut replay = vec!["replay"];
+                        for (archive, profiled) in [(&recording, false), (&observe, true)] {
+                            let out = dir.path().join("replay.hprof");
+                            let mut replay = if profiled {
+                                vec!["prof", "replay", "--tasks", "--out", out.to_str().unwrap()]
+                            } else {
+                                vec!["replay"]
+                            };
                             replay.extend(inputs);
                             replay.extend(link);
                             let other = if engine == "llvm" {
@@ -341,6 +380,20 @@ pub fn main(a: Args, out: Stdout) -> Result[(), Exit] waits {
                             let (status, stdout, stderr) = invoke(&replay);
                             assert_eq!(status, Some(0), "{tag} replay on {archive:?}: {stderr}");
                             assert_eq!(code_revision_of(&replay_output), code_revision_of(&program));
+                            if profiled {
+                                let hprof = hirsel_prof::Profile::open(&out).unwrap();
+                                let completed: i64 = hprof.connection().query_row(
+                                    "SELECT count(*) FROM task WHERE runtime_id=0 AND end_ns IS NOT NULL",
+                                    [], |r| r.get(0),
+                                ).unwrap();
+                                assert_eq!(completed, 1, "{tag}: replay completed the root task");
+                                let mapped: i64 = hprof.connection().query_row(
+                                    "SELECT count(*) FROM mapping WHERE image_digest IS NOT NULL",
+                                    [], |r| r.get(0),
+                                ).unwrap();
+                                assert!(mapped > 0, "{tag}: replay captured executable mappings");
+                                std::fs::remove_file(&out).unwrap();
+                            }
                             assert!(
                                 stdout.is_empty(),
                                 "RL1 replay must not repeat live writes: {tag}"
@@ -413,7 +466,7 @@ fn tape_run_build(
         product.incomplete
     );
     let mut options = native_options(backend, dir);
-    options.runtime = PathBuf::from(env_record_runtime());
+    options.runtime = if replay.is_some() { env_observe_runtime() } else { env_record_runtime() };
     options.store = dir.join(store);
     options.output = dir.join(format!("{store}-program"));
     options.grant_mask = if replay.is_some() {
@@ -443,6 +496,17 @@ fn tape_run(program: &Path, argv: &[&str], record: Option<&Path>) -> (Option<i32
     )
 }
 
+fn observed_tape_run(program: &Path, args: &[&str]) -> (Option<i32>, String, String) {
+    let raw = tempfile::NamedTempFile::new().unwrap();
+    let output = Command::new(program).args(args).env_remove("HIRSEL_RECORD")
+        .env("HIRSEL_PROFILE", raw.path()).output().unwrap();
+    if output.status.success() {
+        let data = std::fs::read(raw.path()).unwrap();
+        assert!(data.starts_with(b"HIRSOBS1") && data.len() > 8, "{program:?}: runtime observations");
+    }
+    (output.status.code(), String::from_utf8(output.stdout).unwrap(), String::from_utf8(output.stderr).unwrap())
+}
+
 /// External recording and replay end to end: recording runs with HIRSEL_RECORD
 /// set, replays with no grants on either engine, refuses a changed revision
 /// with exit 2 unless `--diagnose` is set, and checks both a changed write argument
@@ -470,7 +534,7 @@ fn tape_run_replays(backend: Backend, other: Backend) {
         ("", ""),
         Some(replay_plan.clone()),
     );
-    let (code, replayed, err) = tape_run(&replay_bin, &["two"], None);
+    let (code, replayed, err) = observed_tape_run(&replay_bin, &["two"]);
     assert_eq!(code, Some(0), "replay: {err}");
     assert!(replayed.is_empty(), "replay must not write to live Stdout");
     assert_eq!(std::fs::read(&tape).unwrap(), tape_bytes);
@@ -766,13 +830,17 @@ fn recording_schedule_replays_across_engines() {
 
         let mut replay = options.clone();
         replay.backend = replay_backend;
+        replay.runtime = env_observe_runtime();
+        replay.link = native_options(replay_backend, dir.path()).link;
         replay.grant_mask = 0;
         replay.replay = Some(crate::ReplayPlan {
             path: tape.to_str().unwrap().into(),
             diagnose: false,
         });
         let built = product.build(&entry, &replay).unwrap();
-        run_clean(&built.executable, 0);
+        let (status, stdout, stderr) = observed_tape_run(&built.executable, &[]);
+        assert_eq!(status, Some(0), "{backend:?}: {stderr}");
+        assert!(stdout.is_empty(), "{backend:?}: {stdout}");
         assert_eq!(std::fs::read(&tape).unwrap(), sealed);
     }
     assert_eq!(
@@ -852,6 +920,8 @@ fn recording_cli_replays() {
         "replay with no grants: {err}"
     );
     assert_eq!(std::fs::read(&tape).unwrap(), bytes);
+    profile_fixture_replay(&common, &app, &tape);
+
     let shown = vec![
         "tape".to_owned(),
         "show".into(),
@@ -892,6 +962,7 @@ fn recording_cli_replays() {
         (Some(0), String::new()),
         "random replay: {err}"
     );
+    profile_fixture_replay(&common, &app, &random_tape);
     std::fs::write(
         app.join("main.hirsel"),
         source.replace("\"input.json\"", "\"other.json\""),
@@ -1188,6 +1259,7 @@ fn tape_http_replays_both_native_engines() {
         assert!(stdout.is_empty(), "{engine}: {stdout}");
         assert_eq!(sent.as_bytes(), wire, "{engine} replay compared to wire");
         assert_eq!(std::fs::read(&tape).unwrap(), sealed);
+        profile_fixture_replay(&common, dir.path(), &tape);
 
         let changed = fixture.replace(
             "std.http.copy_bytes(std.http.path(req))",
@@ -1481,6 +1553,7 @@ fn cli_tls_replay(with_secret: bool) {
         .unwrap();
     let replay_log = after(&replay.stderr);
     assert_eq!(replay.status.code(), Some(0), "{replay_log}");
+    profile_fixture_replay(&common, dir.path(), &tape);
     assert!(after(&replay.stdout).is_empty());
     assert_eq!(replay_log, format!("{recorded}inner calls: 0\n"));
     assert_eq!(std::fs::read(&tape).unwrap(), sealed);
@@ -3151,6 +3224,7 @@ fn exec_unix_recording_replays_without_host_resources() {
     std::fs::remove_dir_all(&work).unwrap();
 
     options.output = dir.path().join("replay");
+    options.runtime = env_observe_runtime();
     options.exec_grants.clear();
     options.net_rules.clear();
     options.unix_roots.clear();
@@ -3160,7 +3234,7 @@ fn exec_unix_recording_replays_without_host_resources() {
         diagnose: false,
     });
     let replay = checked.build(&entry, &options).unwrap().executable;
-    let (status, _, stderr) = tape_run(&replay, &[], None);
+    let (status, _, stderr) = observed_tape_run(&replay, &[]);
     assert_eq!(status, Some(0), "{stderr}");
     assert!(!work.exists());
     assert_eq!(std::fs::read(tape).unwrap(), sealed);

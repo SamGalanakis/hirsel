@@ -21,11 +21,55 @@ pub struct CaptureOptions<'a> {
     pub stack_bytes: u32,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MemMode {
+    Exact,
+    Sampled,
+}
+
+impl MemMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Exact => "exact",
+            Self::Sampled => "sampled",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct ObservationOptions<'a> {
+    pub path: &'a Path,
+    pub tasks: bool,
+    pub mem: Option<MemMode>,
+}
+
+impl<'a> ObservationOptions<'a> {
+    pub(super) const KEYS: [&str; 3] = [
+        "HIRSEL_PROFILE",
+        "HIRSEL_PROFILE_TASKS",
+        "HIRSEL_PROFILE_MEM",
+    ];
+
+    pub(super) fn environment(self) -> [(&'static str, Option<&'a OsStr>); 3] {
+        [
+            (Self::KEYS[0], Some(self.path.as_os_str())),
+            (
+                Self::KEYS[1],
+                Some(OsStr::new(if self.tasks { "1" } else { "0" })),
+            ),
+            (
+                Self::KEYS[2],
+                self.mem.map(|mode| OsStr::new(mode.as_str())),
+            ),
+        ]
+    }
+}
+
 pub struct Launch<'a> {
     pub executable: &'a Path,
     pub arguments: &'a [String],
     pub record: Option<&'a OsStr>,
-    pub observation: Option<&'a Path>,
+    pub observation: Option<ObservationOptions<'a>>,
     pub source_root: &'a Path,
 }
 
@@ -95,8 +139,8 @@ pub fn run(
             import.record(record)?;
         }
     }
-    if let Some(path) = launch.observation {
-        let observations = Observation::read(path)?;
+    if let Some(options) = launch.observation {
+        let observations = Observation::read(options.path)?;
         if group.is_none() {
             seed_mappings(&mut import, &observations)?;
         }
@@ -121,6 +165,73 @@ pub fn run(
             freq: options.freq,
             fallback,
             event,
+            provenance,
+        },
+    )?;
+    Ok(status)
+}
+
+/// Launch the existing native tape-replay entry without CPU sampling.
+/// Its own verifier decides the exit status and no profile is published on refusal.
+pub fn replay(
+    launch: &Launch<'_>,
+    out: &Path,
+    resolve: impl FnOnce(&Path, &[u8]) -> io::Result<SymbolSource>,
+) -> Result<ExitStatus> {
+    let path = launch.executable.canonicalize()?;
+    let mut file = File::open(&path)?;
+    let provenance = Provenance::load(&path, &mut file, resolve)?;
+    let start = perf::monotonic_ns()?;
+    let mut command = std::process::Command::new(&path);
+    command.args(launch.arguments).env_remove("HIRSEL_RECORD");
+    for key in ObservationOptions::KEYS {
+        command.env_remove(key);
+    }
+    if let Some(options) = launch.observation {
+        command.envs(
+            options
+                .environment()
+                .into_iter()
+                .filter_map(|(key, value)| value.map(|value| (key, value))),
+        );
+    }
+    let mut child = command.spawn()?;
+    let pid = child.id();
+    let status = child.wait()?;
+    if !status.success() {
+        return Ok(status);
+    }
+    let end = perf::monotonic_ns()?;
+    let profile = ProfileWriter::create(out)?;
+    if let Some(options) = launch.observation {
+        let observations = Observation::read(options.path)?;
+        let mut import = Import::new(
+            profile.connection(),
+            pid,
+            launch.source_root.to_owned(),
+            provenance.main.clone(),
+            provenance.identity,
+        );
+        seed_mappings(&mut import, &observations)?;
+        import.close(end)?;
+        observations.store(profile.connection())?;
+    }
+    let cmdline = serde_json::to_string(
+        &std::iter::once(path.to_string_lossy())
+            .chain(launch.arguments.iter().map(|arg| arg.as_str().into()))
+            .collect::<Vec<_>>(),
+    )?;
+    finish(
+        profile,
+        Capture {
+            mode: "replay",
+            cmdline,
+            start,
+            end,
+            samples_lost: 0,
+            freq: 0,
+            fallback: String::new(),
+            event: perf::RUNTIME,
             provenance,
         },
     )?;

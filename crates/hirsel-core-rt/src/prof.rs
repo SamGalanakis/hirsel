@@ -100,16 +100,18 @@ struct Writer {
     index: usize,
     used: usize,
     capacity: usize,
+    tasks: bool,
     lost: u64,
 }
 
 impl Writer {
-    fn new(thread: Arc<Thread>, capacity: usize) -> Self {
+    fn new(thread: Arc<Thread>, capacity: usize, tasks: bool) -> Self {
         Self {
             thread,
             index: 0,
             used: 0,
             capacity,
+            tasks,
             lost: 0,
         }
     }
@@ -186,13 +188,16 @@ pub(crate) fn now_ns() -> u64 {
 
 pub(crate) fn append(kind: Kind, words: &[u64], bytes: &[u8]) {
     WRITER.with(|slot| {
-        if let Some(writer) = slot.borrow_mut().as_mut() {
+        if let Some(writer) = slot.borrow_mut().as_mut()
+            && (writer.tasks || kind as u16 >= 16)
+        {
             writer.append(kind, words, bytes);
         }
     });
 }
 
 struct Shared {
+    tasks: bool,
     chunk_bytes: usize,
     /// Workers publish their buffers at startup. Hooks access only TLS.
     new_threads: Mutex<Vec<Arc<Thread>>>,
@@ -219,7 +224,7 @@ impl Worker {
         };
         let slot = Arc::new(thread);
         shared.new_threads.lock().unwrap().push(slot.clone());
-        WRITER.set(Some(Writer::new(slot, capacity)));
+        WRITER.set(Some(Writer::new(slot, capacity, shared.tasks)));
         Self(true)
     }
 }
@@ -253,10 +258,12 @@ impl Run {
         let path = std::env::var_os("HIRSEL_PROFILE")?;
         let size = std::env::var_os("HIRSEL_PROFILE_CHUNK_BYTES");
         let memory = replay.then(crate::mem_prof::read_settings).flatten();
+        let tasks = std::env::var_os("HIRSEL_PROFILE_TASKS").is_none_or(|value| value != "0");
         // SAFETY: the generated executable calls this at process entry.
         unsafe {
             std::env::remove_var("HIRSEL_PROFILE");
             std::env::remove_var("HIRSEL_PROFILE_CHUNK_BYTES");
+            std::env::remove_var("HIRSEL_PROFILE_TASKS");
         }
         let size = size.map_or(Some(DEFAULT_CHUNK_BYTES), |value| {
             value
@@ -271,7 +278,7 @@ impl Run {
             );
             return None;
         };
-        match Self::open(path, size) {
+        match Self::open(path, size, tasks) {
             Ok(run) => {
                 if let Some(settings) = memory {
                     crate::mem_prof::start(settings);
@@ -285,7 +292,11 @@ impl Run {
         }
     }
 
-    fn open(path: impl AsRef<std::path::Path>, chunk_bytes: usize) -> io::Result<Self> {
+    fn open(
+        path: impl AsRef<std::path::Path>,
+        chunk_bytes: usize,
+        tasks: bool,
+    ) -> io::Result<Self> {
         let mut output = BufWriter::new(File::options().write(true).truncate(true).open(path)?);
         output.write_all(MAGIC)?;
         if let Ok(maps) = std::fs::read("/proc/self/maps") {
@@ -302,6 +313,7 @@ impl Run {
         }
         output.flush()?;
         let shared = Arc::new(Shared {
+            tasks,
             chunk_bytes,
             new_threads: Mutex::default(),
             done: AtomicBool::new(false),
@@ -462,7 +474,11 @@ impl Drop for Callback {
 }
 
 pub(crate) fn timing_start() -> u64 {
-    if enabled() { now_ns() } else { 0 }
+    if WRITER.with(|slot| slot.borrow().as_ref().is_some_and(|writer| writer.tasks)) {
+        now_ns()
+    } else {
+        0
+    }
 }
 
 pub(crate) fn pending(token: u64, start: u64) {
@@ -483,7 +499,7 @@ mod tests {
     fn full_chunks_drop_without_waiting_for_the_drain() {
         let bytes = HEADER_BYTES + 8;
         let thread = Arc::new(Thread::new(3, bytes).unwrap());
-        let mut writer = Writer::new(thread.clone(), bytes);
+        let mut writer = Writer::new(thread.clone(), bytes, true);
         writer.append(Kind::Task, &[23], &[]);
         writer.append(Kind::Task, &[29], &[]);
         // Both chunks have unread records. No other thread is running, so

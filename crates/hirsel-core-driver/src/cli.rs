@@ -137,6 +137,7 @@ commands! {
     "run", "run [package-dir] [options] [-- arguments...]", "Build and run a native executable.";
     "prof", "prof <command>", "Capture or inspect a CPU profile.";
     "prof run", "prof run [package-dir] [build-opts] [--tasks] [--out FILE.hprof] [--freq 997] [--pmu LIST] [--stack-bytes 32768] [-- args...]", "Build and sample a native executable from exec until exit.";
+    "prof replay", "prof replay [package-dir] --tape TAPE [--tasks] [--out FILE.hprof]", "Profile serial replay through the recording and profiling runtime.";
     "prof attach", "prof attach <PID> [--duration SECS] [--freq 997] [--pmu LIST] [--debug PATH] [--out FILE.hprof]", "Snapshot mappings, then sample a running Linux process without stopping it.";
     "prof summary", "prof summary <FILE.hprof> [--json]", "Report capture quality and the five hottest functions per event.";
     "prof schema", "prof schema <FILE.hprof> [--json]", "List the profile's tables and columns.";
@@ -539,14 +540,14 @@ static OPTIONS: &[OptionSpec] = &[
         ProfTasks,
         ["--tasks"],
         None,
-        ["prof run"],
+        ["prof run", "prof replay"],
         "Capture runtime task, wake, host-stack and I/O observations."
     ),
     option!(
         ProfOut,
         ["--out"],
         Some("PATH"),
-        ["prof run", "prof attach", "prof export"],
+        ["prof run", "prof replay", "prof attach", "prof export"],
         "Write the profile to this path."
     ),
     option!(
@@ -989,7 +990,20 @@ fn applies(option: &OptionSpec, command: &CommandSpec) -> bool {
         || option.commands.contains(&command.name)
         || (option.id == OptionId::Json
             && command.name.starts_with("prof ")
-            && !matches!(command.name, "prof run" | "prof attach" | "prof export"))
+            && !matches!(
+                command.name,
+                "prof run" | "prof replay" | "prof attach" | "prof export"
+            ))
+        || (command.name == "prof replay"
+            && option.commands.contains(&"replay")
+            && !matches!(
+                option.id,
+                OptionId::HostState
+                    | OptionId::Diagnose
+                    | OptionId::Emulator
+                    | OptionId::Sysroot
+                    | OptionId::Json
+            ))
         || (command.name == "prof run"
             && option.id != OptionId::Output
             && option.commands.contains(&"run"))

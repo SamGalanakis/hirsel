@@ -1,10 +1,11 @@
+use std::cell::Cell;
 use std::ffi::OsStr;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::time::Duration;
 
-use hirsel_prof::{CaptureOptions, Launch, SymbolSource};
+use hirsel_prof::{CaptureOptions, Launch, ObservationOptions, SymbolSource};
 
 use crate::cli::{Invocation, OptionId};
 
@@ -54,6 +55,8 @@ pub(crate) struct Run {
     sampling: Sampling,
     source_root: PathBuf,
     tasks: bool,
+    replay: bool,
+    replay_executable: Cell<Option<tempfile::TempDir>>,
 }
 
 impl Run {
@@ -62,6 +65,8 @@ impl Run {
             sampling: Sampling::default(),
             source_root: invocation.positional.as_deref().unwrap_or(".").into(),
             tasks: false,
+            replay: invocation.command.name == "prof replay",
+            replay_executable: Cell::new(None),
         };
         for (id, value) in invocation.options.extract_if(.., |(option, _)| {
             matches!(
@@ -80,12 +85,36 @@ impl Run {
                     .apply(id, value.expect("profile option takes a value"))?;
             }
         }
-        invocation.command = crate::cli::named("run")?;
+        if run.replay {
+            invocation.positional.get_or_insert_with(|| ".".into());
+            if !invocation
+                .options
+                .iter()
+                .any(|(id, _)| *id == OptionId::Output)
+            {
+                let scratch = tempfile::tempdir()?;
+                let executable = scratch.path().join("program");
+                let executable = executable
+                    .to_str()
+                    .ok_or("temporary executable path is not UTF-8")?;
+                invocation
+                    .options
+                    .push((OptionId::Output, Some(executable.to_owned())));
+                run.replay_executable.set(Some(scratch));
+            }
+            invocation.command = crate::cli::named("replay")?;
+        } else {
+            invocation.command = crate::cli::named("run")?;
+        }
         Ok(run)
     }
 
+    pub(crate) fn cleanup(&self) {
+        drop(self.replay_executable.take());
+    }
+
     pub(crate) fn observes(&self) -> bool {
-        self.tasks
+        self.tasks || self.replay
     }
 
     pub(crate) fn capture(
@@ -95,18 +124,26 @@ impl Run {
         record: Option<&str>,
     ) -> Result<ExitStatus> {
         let raw = self.tasks.then(tempfile::NamedTempFile::new).transpose()?;
-        let status = hirsel_prof::run(
-            &Launch {
-                executable,
-                arguments,
-                record: record.map(OsStr::new),
-                observation: raw.as_ref().map(tempfile::NamedTempFile::path),
-                source_root: &self.source_root,
-            },
-            &self.sampling.options(),
-            |path, image| symbol_source(path, image, None),
-        )?;
-        eprintln!("hirsel: wrote {}", self.sampling.out.display());
+        let launch = Launch {
+            executable,
+            arguments,
+            record: record.map(OsStr::new),
+            observation: raw.as_ref().map(|file| ObservationOptions {
+                path: file.path(),
+                tasks: self.tasks,
+                mem: None,
+            }),
+            source_root: &self.source_root,
+        };
+        let resolve = |path: &Path, image: &[u8]| symbol_source(path, image, None);
+        let status = if self.replay {
+            hirsel_prof::replay(&launch, &self.sampling.out, resolve)?
+        } else {
+            hirsel_prof::run(&launch, &self.sampling.options(), resolve)?
+        };
+        if !self.replay || status.success() {
+            eprintln!("hirsel: wrote {}", self.sampling.out.display());
+        }
         Ok(status)
     }
 }

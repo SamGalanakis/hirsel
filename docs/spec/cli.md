@@ -15,6 +15,7 @@ The native unwind records mark where a stack walk ends at a fiber boundary.
 
 ```text
 hirsel prof run [package-dir] [build-opts] [--tasks] [--out FILE.hprof] [--freq 997] [--pmu LIST] [--stack-bytes 32768] [-- args...]
+hirsel prof replay [package-dir] --tape TAPE [--tasks] [--out FILE.hprof]
 hirsel prof attach <PID> [--duration SECS] [--freq 997] [--pmu LIST] [--debug PATH] [--out FILE.hprof]
 hirsel prof summary <FILE.hprof> [--json]
 hirsel prof schema <FILE.hprof> [--json]
@@ -41,6 +42,11 @@ its exit status. `--out` names the profile and defaults to `profile.hprof`.
 The command writes a [portable SQLite profile](profiling.md) after the
 process exits. The sampler resolves verified detached DWARF, embedded DWARF
 and ELF symbols.
+
+`prof replay` executes the tape serially with the combined profiling and
+recording runtime. `--tasks` captures runtime observations. The replay
+verdict determines the command's status. A refused or divergent replay
+leaves no profile.
 
 `prof attach` snapshots mappings before sampling a running process without
 stopping it. It ends the capture after `--duration`, at process exit, or on

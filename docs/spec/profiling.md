@@ -200,3 +200,15 @@ mappings has status `unknown_mapping`.
 in the wait, issue, resume, deliver and abort callbacks contributes to
 `callback_ns`. Time waiting for readiness or a deadline contributes to
 `pending_ns`. The total operation interval can also include scheduler delay.
+
+## Tape replay
+
+`hirsel prof replay --tape TAPE --tasks` records the same runtime task
+observations during serial replay. The regular replay verifier checks
+revision, event positions and outcome. A refusal or divergence leaves no
+profile. Replay records no CPU samples. Its I/O timing describes the
+replay callbacks and passes through the tape provider.
+
+Replay starts with executable mappings from `/proc/self/maps`. FFI-8
+refuses programs that reach Foreign code before replay, and the replay
+runtime does not dynamically load libraries.

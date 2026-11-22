@@ -8,7 +8,11 @@ fn capture_native_profile(
             executable: program,
             arguments: &[],
             record: None,
-            observation,
+            observation: observation.map(|path| hirsel_prof::ObservationOptions {
+                path,
+                tasks: true,
+                mem: None,
+            }),
             source_root: program.parent().unwrap(),
         },
         &hirsel_prof::CaptureOptions {

@@ -1,3 +1,4 @@
+use super::capture::ObservationOptions;
 use std::ffi::{CString, OsStr};
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -36,7 +37,7 @@ impl SuspendedLaunchedProcess {
         path: &Path,
         arguments: &[String],
         record: Option<&OsStr>,
-        observation: Option<&Path>,
+        observation: Option<ObservationOptions<'_>>,
     ) -> io::Result<Self> {
         let program = CString::new(path.as_os_str().as_bytes())?;
         let arguments = arguments
@@ -50,7 +51,9 @@ impl SuspendedLaunchedProcess {
 
         let mut env = Vec::new();
         for (key, value) in std::env::vars_os() {
-            if (record.is_some() && key == "HIRSEL_RECORD") || key == "HIRSEL_PROFILE" {
+            if (record.is_some() && key == "HIRSEL_RECORD")
+                || ObservationOptions::KEYS.iter().any(|name| key == *name)
+            {
                 continue;
             }
             let mut entry = key.into_encoded_bytes();
@@ -64,9 +67,14 @@ impl SuspendedLaunchedProcess {
             env.push(CString::new(entry)?);
         }
         if let Some(observation) = observation {
-            let mut entry = b"HIRSEL_PROFILE=".to_vec();
-            entry.extend_from_slice(observation.as_os_str().as_bytes());
-            env.push(CString::new(entry)?);
+            for (key, value) in observation.environment() {
+                if let Some(value) = value {
+                    let mut entry = key.as_bytes().to_vec();
+                    entry.push(b'=');
+                    entry.extend_from_slice(value.as_bytes());
+                    env.push(CString::new(entry)?);
+                }
+            }
         }
         let envp: Vec<_> = env
             .iter()

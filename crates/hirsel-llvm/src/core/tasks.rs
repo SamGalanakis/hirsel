@@ -320,6 +320,12 @@ impl FunctionEmitter<'_> {
                 Arg::Address(a) => self.address(a),
             })
             .collect::<Vec<_>>();
+        // A returnable wait lowers as its row, with the record word after the
+        // context and the `_rec` symbol.
+        let (op, rec, args) = match op {
+            RtOp::Returnable(wait) => (wait.row(), Some(args[0].clone()), args[1..].to_vec()),
+            _ => (op, None, args),
+        };
         let at = if matches!(
             op,
             RtOp::Join { .. }
@@ -404,8 +410,8 @@ impl FunctionEmitter<'_> {
                 &[P],
                 &[ptr(CONTEXT), u(&args[0]), u(&args[1])],
             ),
-            RtOp::Host(op) => self.host_call(op, &args, None),
-            RtOp::Returnable(op) => self.host_call(op, &args[1..], Some(args[0].clone())),
+            RtOp::Host(op) => self.host_call(op, &args, rec),
+            RtOp::Returnable(_) => unreachable!("lowered as its row"),
             RtOp::Transfer { x, r } => {
                 // The job packed as a task input behind the root's code word.
                 let (packed, offset) = self.task_input(x, &args[1], &args[0]);
@@ -595,33 +601,49 @@ impl FunctionEmitter<'_> {
                 )
             }
             RtOp::ConnClient => self.native_call("hirsel_core_conn_client", &[P], &[p(&args[0])]),
-            RtOp::ConnSend { .. } | RtOp::ConnTrySend { .. } => {
-                let wait = u64::from(matches!(op, RtOp::ConnSend { .. }));
-                self.native_call(
-                    "hirsel_core_conn_send",
+            RtOp::ConnSend { .. } | RtOp::ConnTrySend { .. } => match &rec {
+                Some(word) => self.native_call(
+                    "hirsel_core_conn_send_rec",
                     &[K, K],
-                    &[
-                        ptr(CONTEXT),
-                        p(&args[0]),
-                        p(&args[1]),
-                        u(&at),
-                        zeroext(Type::I8, int(wait)),
-                    ],
-                )
-            }
+                    &[ptr(CONTEXT), p(word), p(&args[0]), p(&args[1]), u(&at)],
+                ),
+                None => {
+                    let wait = u64::from(matches!(op, RtOp::ConnSend { .. }));
+                    self.native_call(
+                        "hirsel_core_conn_send",
+                        &[K, K],
+                        &[
+                            ptr(CONTEXT),
+                            p(&args[0]),
+                            p(&args[1]),
+                            u(&at),
+                            zeroext(Type::I8, int(wait)),
+                        ],
+                    )
+                }
+            },
             RtOp::ConnReceive { .. } | RtOp::ConnTryReceive { .. } => {
-                let wait = u64::from(matches!(op, RtOp::ConnReceive { .. }));
-                let returned = self.native_call(
-                    "hirsel_core_conn_receive",
-                    &[U, U],
-                    &[
-                        ptr(CONTEXT),
-                        p(&args[0]),
-                        p(&args[1]),
-                        u(&at),
-                        zeroext(Type::I8, int(wait)),
-                    ],
-                );
+                let returned = match &rec {
+                    Some(word) => self.native_call(
+                        "hirsel_core_conn_receive_rec",
+                        &[U, U],
+                        &[ptr(CONTEXT), p(word), p(&args[0]), p(&args[1]), u(&at)],
+                    ),
+                    None => {
+                        let wait = u64::from(matches!(op, RtOp::ConnReceive { .. }));
+                        self.native_call(
+                            "hirsel_core_conn_receive",
+                            &[U, U],
+                            &[
+                                ptr(CONTEXT),
+                                p(&args[0]),
+                                p(&args[1]),
+                                u(&at),
+                                zeroext(Type::I8, int(wait)),
+                            ],
+                        )
+                    }
+                };
                 let packed = &returned[0];
                 let outcome = self.cast(Cast::Trunc, &Type::I64, packed, &Type::I8);
                 let status = self.bin(Binary::LShr, &Type::I64, packed, &int(8));
@@ -629,11 +651,18 @@ impl FunctionEmitter<'_> {
                 let requested = self.bin(Binary::LShr, &Type::I64, packed, &int(16));
                 vec![outcome, requested, returned[1].clone(), status]
             }
-            RtOp::Join { .. } => self.native_call(
-                "hirsel_core_join",
-                &[K, P, K],
-                &[ptr(CONTEXT), p(&args[0]), p(&args[1]), u(&at)],
-            ),
+            RtOp::Join { .. } => match &rec {
+                Some(word) => self.native_call(
+                    "hirsel_core_join_rec",
+                    &[K, P, K],
+                    &[ptr(CONTEXT), p(word), p(&args[0]), p(&args[1]), u(&at)],
+                ),
+                None => self.native_call(
+                    "hirsel_core_join",
+                    &[K, P, K],
+                    &[ptr(CONTEXT), p(&args[0]), p(&args[1]), u(&at)],
+                ),
+            },
             RtOp::Cancel => {
                 self.native_call("hirsel_core_cancel", &[], &[ptr(CONTEXT), p(&args[0])])
             }

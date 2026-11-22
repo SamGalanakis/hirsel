@@ -776,87 +776,154 @@ pub unsafe extern "C" fn hirsel_core_conn_send(
     site: u64,
     wait: bool,
 ) -> SendOutcome {
-    let out = |outcome| SendOutcome { outcome, status: 0 };
-    let failed = SendOutcome {
+    // SAFETY: by the contract; the stackful form never parks returning.
+    unsafe { conn_send::<false>(context, client, value, site, wait, false) }
+        .unwrap_or_else(|| unreachable!())
+}
+
+/// The returnable form of `conn.send` (`RtOp::Returnable`): `word` is the
+/// caller's child word, 1 while the send waits with the stack given back.
+/// # Safety
+/// As `hirsel_core_conn_send`, in a task that runs a returnable root; a
+/// resume passes the same client and item place.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_conn_send_rec(
+    context: *mut Context,
+    word: *mut u64,
+    client: *mut ClientH,
+    value: *mut u8,
+    site: u64,
+) -> SendOutcome {
+    // SAFETY: by the contract.
+    unsafe {
+        let sent = conn_send::<true>(context, client, value, site, true, *word != 0);
+        tasks::returned(word, sent, SendOutcome { outcome: 0, status: 0 })
+    }
+}
+
+/// A waiting send's state from its registration to its settlement: on the
+/// stack in the stackful form, in the frame record in the returnable one.
+pub(crate) struct SendRec {
+    frame: SendWait,
+    id: u32,
+    withdrawn: bool,
+    sockets: Option<CrossingSockets>,
+}
+
+/// `REC` parks with the stack given back (None) and keeps the waiting
+/// send's state in the frame record; `resumed` continues that wait.
+#[inline(always)]
+unsafe fn conn_send<const REC: bool>(
+    context: *mut Context,
+    client: *mut ClientH,
+    value: *mut u8,
+    site: u64,
+    wait: bool,
+    resumed: bool,
+) -> Option<SendOutcome> {
+    let out = |outcome| Some(SendOutcome { outcome, status: 0 });
+    let failed = Some(SendOutcome {
         outcome: 0,
         status: 1,
-    };
-    // SAFETY: the caller pins the client and the value.
+    });
+    // SAFETY: the caller pins the client and the value; the record outlives
+    // the wait and only this task's fiber touches it.
     unsafe {
         let client = &(*client).client;
         let owners = &client.0.seqs;
         let task = tasks::current_task();
-        let mut commit = tasks::before_commit_for(task);
-        if wait && tasks::check_cancel_for(context, site, task) != 0 {
-            return failed;
-        }
-        let charge = item_charge(value, owners);
         let offsets = || client.0.socket_offsets.iter().copied();
-        let sockets = if client.0.socket_offsets.is_empty() {
-            None
+        let mut local = MaybeUninit::<SendRec>::uninit();
+        // The returnable form's state is in the record; the fast path that
+        // never waits leaves it untouched.
+        let mut state: *mut SendRec = local.as_mut_ptr();
+        let mut commit = if REC && resumed {
+            state = tasks::held_wait();
+            // As the stackful form's commit after `park_for`.
+            crate::sequencer::enter()
         } else {
-            detach_sockets(context, value, offsets())
-        };
-        let mut source = CrossSend::new(value);
-        source.sockets = sockets.clone();
-        let id = match UnitCtx::send_cross(client, source, charge, wait, || {
-            &mut (*tasks::lang_unit_for(task)).ctx
-        }) {
-            Sent::Accepted => {
-                free_owners(Some(&*context), value, owners);
-                return out(0);
-            }
-            Sent::Bounds => {
-                attach_sockets(context, value, offsets(), sockets.as_ref());
-                causes::record(&mut *context, Cause::new(causes::BOUNDS, site));
+            let commit = tasks::before_commit_for(task);
+            if wait && tasks::check_cancel_for(context, site, task) != 0 {
                 return failed;
             }
-            Sent::Closed(_) => {
-                attach_sockets(context, value, offsets(), sockets.as_ref());
-                return out(1);
-            }
-            Sent::Full(_) => {
-                attach_sockets(context, value, offsets(), sockets.as_ref());
-                return out(2);
-            }
-            Sent::Waiting(id) => id,
-        };
-        let unit = tasks::lang_unit_for(task);
-        let mut frame = SendWait {
-            waiters: Waiters::default(),
-            settled: None,
-        };
-        (*unit).sends.insert(id, &raw mut frame);
-        (*unit).waits += 1;
-        let mut withdrawn = false;
-        loop {
-            let u = &mut *unit;
-            if frame.settled.is_none() {
-                pump(u);
-            }
-            match frame.settled.take() {
-                Some(Took::Accepted(_)) => {
-                    u.waits -= 1;
+            let charge = item_charge(value, owners);
+            let sockets = if client.0.socket_offsets.is_empty() {
+                None
+            } else {
+                detach_sockets(context, value, offsets())
+            };
+            let mut source = CrossSend::new(value);
+            source.sockets = sockets.clone();
+            let id = match UnitCtx::send_cross(client, source, charge, wait, || {
+                &mut (*tasks::lang_unit_for(task)).ctx
+            }) {
+                Sent::Accepted => {
                     free_owners(Some(&*context), value, owners);
                     return out(0);
                 }
-                Some(Took::Closed(_)) => {
+                Sent::Bounds => {
                     attach_sockets(context, value, offsets(), sockets.as_ref());
-                    u.waits -= 1;
-                    return out(1);
-                }
-                Some(_) => {
-                    attach_sockets(context, value, offsets(), sockets.as_ref());
-                    u.waits -= 1;
+                    causes::record(&mut *context, Cause::new(causes::BOUNDS, site));
                     return failed;
                 }
-                None => {}
+                Sent::Closed(_) => {
+                    attach_sockets(context, value, offsets(), sockets.as_ref());
+                    return out(1);
+                }
+                Sent::Full(_) => {
+                    attach_sockets(context, value, offsets(), sockets.as_ref());
+                    return out(2);
+                }
+                Sent::Waiting(id) => id,
+            };
+            if REC {
+                state = tasks::held_wait();
             }
-            if !withdrawn && tasks::cancel_pending_for(context, task) {
+            state.write(SendRec {
+                frame: SendWait {
+                    waiters: Waiters::default(),
+                    settled: None,
+                },
+                id,
+                withdrawn: false,
+                sockets,
+            });
+            let unit = tasks::lang_unit_for(task);
+            (*unit).sends.insert(id, &raw mut (*state).frame);
+            (*unit).waits += 1;
+            commit
+        };
+        let unit = tasks::lang_unit_for(task);
+        let st = &mut *state;
+        loop {
+            let u = &mut *unit;
+            if st.frame.settled.is_none() {
+                pump(u);
+            }
+            let settled = st.frame.settled.take();
+            if settled.is_some() {
+                u.waits -= 1;
+                let sockets = ptr::read(&st.sockets);
+                return match settled {
+                    Some(Took::Accepted(_)) => {
+                        free_owners(Some(&*context), value, owners);
+                        out(0)
+                    }
+                    Some(Took::Closed(_)) => {
+                        attach_sockets(context, value, offsets(), sockets.as_ref());
+                        out(1)
+                    }
+                    _ => {
+                        attach_sockets(context, value, offsets(), sockets.as_ref());
+                        failed
+                    }
+                };
+            }
+            if !st.withdrawn && tasks::cancel_pending_for(context, task) {
                 // A withdrawal that wins settles Withdrawn; one that loses
                 // waits for the acceptance or close on its way.
-                withdrawn = true;
-                if u.ctx.withdraw(client, id) {
+                st.withdrawn = true;
+                if u.ctx.withdraw(client, st.id) {
                     tasks::check_cancel_for(context, site, task);
                 }
                 continue;
@@ -871,9 +938,18 @@ pub unsafe extern "C" fn hirsel_core_conn_send(
                 commit = tasks::before_commit_for(task);
                 continue;
             }
+            if REC {
+                tasks::park_returning(
+                    task,
+                    &raw mut st.frame.waiters,
+                    #[cfg(feature = "prof")]
+                    (crate::prof::Reason::Join, 0),
+                );
+                return None;
+            }
             commit = tasks::park_for(
                 task,
-                &raw mut frame.waiters,
+                &raw mut st.frame.waiters,
                 #[cfg(feature = "prof")]
                 (crate::prof::Reason::Join, 0),
             );
@@ -902,18 +978,66 @@ pub unsafe extern "C" fn hirsel_core_conn_receive(
     site: u64,
     wait: bool,
 ) -> ReceiveOutcome {
-    let out = |outcome: u64, requested: u64, available| ReceiveOutcome {
-        code_and_requested: (requested << 16) | outcome,
-        available,
+    // SAFETY: by the contract; the stackful form never parks returning.
+    unsafe { conn_receive::<false>(context, inbox, dest, site, wait, false) }
+        .unwrap_or_else(|| unreachable!())
+}
+
+/// The returnable form of `conn.receive` (`RtOp::Returnable`): `word` is the
+/// caller's child word, 1 while the receive waits with the stack given back.
+/// # Safety
+/// As `hirsel_core_conn_receive`, in a task that runs a returnable root; a
+/// resume passes the same inbox and destination place.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_conn_receive_rec(
+    context: *mut Context,
+    word: *mut u64,
+    inbox: *mut InboxH,
+    dest: *mut u8,
+    site: u64,
+) -> ReceiveOutcome {
+    let parked = ReceiveOutcome {
+        code_and_requested: 0,
+        available: 0,
+    };
+    // SAFETY: by the contract.
+    unsafe {
+        let received = conn_receive::<true>(context, inbox, dest, site, true, *word != 0);
+        tasks::returned(word, received, parked)
+    }
+}
+
+/// `REC` parks with the stack given back (None); `resumed` continues that
+/// wait, which has already counted itself in the unit's waits.
+#[inline(always)]
+unsafe fn conn_receive<const REC: bool>(
+    context: *mut Context,
+    inbox: *mut InboxH,
+    dest: *mut u8,
+    site: u64,
+    wait: bool,
+    resumed: bool,
+) -> Option<ReceiveOutcome> {
+    let out = |outcome: u64, requested: u64, available| {
+        Some(ReceiveOutcome {
+            code_and_requested: (requested << 16) | outcome,
+            available,
+        })
     };
     // SAFETY: the inbox borrow pins the handle and its connection.
     unsafe {
         let input = &(*inbox).inbox;
         let c = &input.0;
         let task = tasks::current_task();
-        let mut commit = tasks::before_commit_for(task);
+        let waited_before = REC && resumed;
+        let mut commit = if waited_before {
+            // As the stackful form's commit after `park_for`.
+            crate::sequencer::enter()
+        } else {
+            tasks::before_commit_for(task)
+        };
         let unit = tasks::lang_unit_for(task);
-        let mut waited = false;
+        let mut waited = waited_before;
         loop {
             let u = &mut *unit;
             if wait && tasks::check_cancel_for(context, site, task) != 0 {
@@ -974,6 +1098,15 @@ pub unsafe extern "C" fn hirsel_core_conn_receive(
             if tasks::park_unit_alone(task, || (*unit).ctx.port.spin_before_park(None)) {
                 commit = tasks::before_commit_for(task);
                 continue;
+            }
+            if REC {
+                tasks::park_returning(
+                    task,
+                    &raw mut (*inbox).waiters,
+                    #[cfg(feature = "prof")]
+                    (crate::prof::Reason::None, 0),
+                );
+                return None;
             }
             commit = tasks::park_for(
                 task,
@@ -1466,23 +1599,45 @@ unsafe fn end_take(u: &mut LangUnit, h: &mut HelperH) {
     drop(held.split(held.bytes.saturating_sub(keep)));
 }
 
-/// Wait for a helper's end take. Shielded waits ignore cancellation.
-unsafe fn wait_end(context: *mut Context, h: *mut HelperH, site: u64, shielded: bool) -> bool {
+/// Wait for a helper's end take. Shielded waits ignore cancellation. `REC`
+/// parks with the stack given back (None); `resumed` continues that wait.
+#[inline(always)]
+unsafe fn wait_end<const REC: bool>(
+    context: *mut Context,
+    h: *mut HelperH,
+    site: u64,
+    shielded: bool,
+    resumed: bool,
+) -> Option<bool> {
     // SAFETY: the handle is pinned by its owner through the wait.
     unsafe {
-        let mut commit = tasks::before_commit();
+        let mut commit = if REC && resumed {
+            // As the stackful form's commit after `park`.
+            crate::sequencer::enter()
+        } else {
+            tasks::before_commit()
+        };
         loop {
             if !shielded && tasks::check_cancel(context, site) != 0 {
-                return false;
+                return Some(false);
             }
             let u = unit();
             if !(*h).ended {
                 pump(u);
             }
             if (*h).ended {
-                return true;
+                return Some(true);
             }
             drop(commit);
+            if REC {
+                tasks::park_returning(
+                    tasks::current_task(),
+                    &raw mut (*h).waiters,
+                    #[cfg(feature = "prof")]
+                    (crate::prof::Reason::Join, 0),
+                );
+                return None;
+            }
             commit = tasks::park(
                 &raw mut (*h).waiters,
                 #[cfg(feature = "prof")]
@@ -1549,22 +1704,24 @@ unsafe fn consume(context: *mut Context, h: *mut HelperH, dest: Option<*mut u8>)
     }
 }
 
-/// `join` on a helper's handle.
-pub(crate) unsafe fn join(
+/// `join` on a helper's handle; `REC` and `resumed` as `wait_end`'s.
+#[inline(always)]
+pub(crate) unsafe fn join<const REC: bool>(
     context: *mut Context,
     task: *mut tasks::Task,
     result: *mut u8,
     site: u64,
-) -> tasks::Join {
+    resumed: bool,
+) -> Option<tasks::Join> {
     let h = helper_of(task);
     // SAFETY: as `hirsel_core_join`.
     unsafe {
-        if !wait_end(context, h, site, false) {
-            return tasks::Join {
+        if !wait_end::<REC>(context, h, site, false, resumed)? {
+            return Some(tasks::Join {
                 kind: 0,
                 causes: ptr::null_mut(),
                 status: 1,
-            };
+            });
         }
         let _commit = tasks::before_commit();
         let (failed, chain) = consume(context, h, Some(result));
@@ -1572,11 +1729,11 @@ pub(crate) unsafe fn join(
             .iter()
             .next()
             .is_some_and(|c| c.kind() == causes::CANCELLED);
-        tasks::Join {
+        Some(tasks::Join {
             kind: if cancelled { 2 } else { u8::from(failed) },
             causes: chain.into_raw(),
             status: 0,
-        }
+        })
     }
 }
 
@@ -1598,7 +1755,7 @@ pub(crate) unsafe fn abandon(context: *mut Context, task: *mut tasks::Task) -> u
     // SAFETY: the caller transfers the handle.
     unsafe {
         cancel(task);
-        wait_end(context, helper_of(task), 0, true);
+        wait_end::<false>(context, helper_of(task), 0, true, false);
         let _commit = tasks::before_commit();
         consume(context, helper_of(task), None);
         0

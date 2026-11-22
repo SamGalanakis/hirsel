@@ -1,5 +1,6 @@
-//! Returnable waits: the owned network waits, and the channel receives of
-//! represented functions, that a task parks at with its stack given back.
+//! Returnable waits: the waits a task parks at with its stack given back
+//! (owned network waits, unit-connection sends and receives, task joins, and
+//! the channel receives of represented functions).
 //!
 //! A wait is returnable when every frame from the task's entry down to it is a
 //! body of this module represented in the task's frame record. Each such body
@@ -23,7 +24,7 @@
 //! value replaced by that value, which dominates the join, so an address based
 //! on such a parameter is based on what it forwards. A task entry is
 //! represented when its spawn names the entry adapter and a represented callee
-//! that reaches an owned wait (`recv_bounded`, `send_pair`), whose code pointer
+//! that reaches an owned wait (a returnable row, [`Wait`]), whose code pointer
 //! the spawning body stores; a task that reaches only channel receives keeps
 //! its stack. Below such an entry, a channel receive, or a call of a function
 //! that reaches one, is a site when the caller's shape allows it. Every other
@@ -251,7 +252,7 @@ fn transfer_job(
     Some((job, size))
 }
 
-/// Whether `f`'s own body makes an owned wait (`recv_bounded`, `send_pair`).
+/// Whether `f`'s own body makes an owned wait (a returnable row, [`Wait`]).
 /// A separately lowered library holds no variant of its own, so a program
 /// lowers each such function itself and the rule sees through it.
 pub fn waits_owned(module: &Module, f: FuncId) -> bool {
@@ -261,9 +262,9 @@ pub fn waits_owned(module: &Module, f: FuncId) -> bool {
         .is_some_and(|b| b.calls.iter().any(|c| leaf(c.callee).is_some()))
 }
 
-fn leaf(callee: Callee) -> Option<HostOp> {
+fn leaf(callee: Callee) -> Option<Wait> {
     match callee {
-        Callee::Runtime(RtOp::Host(op)) if op.returnable_symbol().is_some() => Some(op),
+        Callee::Runtime(row) => Wait::of(row),
         _ => None,
     }
 }

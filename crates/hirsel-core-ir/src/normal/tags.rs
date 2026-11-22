@@ -385,6 +385,13 @@ tags!(RtOp {
     71 => Transfer { x, r },
 });
 
+tags!(Wait {
+    0 => Host(part0),
+    1 => Join { r },
+    2 => ConnSend { item },
+    3 => ConnReceive { item },
+});
+
 tags!(HostOp {
     0 => Open,
     1 => Read,

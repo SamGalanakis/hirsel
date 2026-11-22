@@ -1037,11 +1037,11 @@ pub enum RtOp {
     /// bytes allocated at the first call and the same bytes at every later
     /// one, freed when the task ends.
     FrameRecord,
-    /// An owned wait of `HostOp` that may park with the stack given back
-    /// (`crate::returnable`): a leading pointer to the caller's child word,
-    /// then the provider row's operands. The word is 1 when the task parked
-    /// and the outcome is not yet delivered, else 0 with the row's outcome.
-    Returnable(HostOp),
+    /// A wait that may park with the stack given back (`crate::returnable`):
+    /// a leading pointer to the caller's child word, then the wrapped row's
+    /// operands and results. The word is 1 when the task parked and the
+    /// result is not yet delivered, else 0 with the row's result.
+    Returnable(Wait),
     /// `Receive` that may park with the stack given back (`crate::returnable`):
     /// a leading pointer to the caller's child word, then `Receive`'s operands.
     /// The word is 1 when the task parked and nothing is received yet, else 0
@@ -1059,6 +1059,40 @@ pub enum RtOp {
         x: TypeId,
         r: TypeId,
     },
+}
+
+/// The waits with a returnable row ([`RtOp::Returnable`]), each the stackful
+/// row [`Wait::row`] with the child word in front.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum Wait {
+    /// An owned provider wait (one with [`HostOp::returnable_symbol`]).
+    Host(HostOp),
+    Join { r: TypeId },
+    ConnSend { item: TypeId },
+    ConnReceive { item: TypeId },
+}
+
+impl Wait {
+    /// The stackful row this wait wraps.
+    pub fn row(self) -> RtOp {
+        match self {
+            Wait::Host(op) => RtOp::Host(op),
+            Wait::Join { r } => RtOp::Join { r },
+            Wait::ConnSend { item } => RtOp::ConnSend { item },
+            Wait::ConnReceive { item } => RtOp::ConnReceive { item },
+        }
+    }
+
+    /// The returnable wait of a stackful row, if it has one.
+    pub fn of(row: RtOp) -> Option<Wait> {
+        Some(match row {
+            RtOp::Host(op) if op.returnable_symbol().is_some() => Wait::Host(op),
+            RtOp::Join { r } => Wait::Join { r },
+            RtOp::ConnSend { item } => Wait::ConnSend { item },
+            RtOp::ConnReceive { item } => Wait::ConnReceive { item },
+            _ => return None,
+        })
+    }
 }
 
 /// The provider operations, numbered as the run time's `HirselCoreHostRequest`
@@ -1671,11 +1705,11 @@ impl RtOp {
             RtOp::LaunchHandle | RtOp::SecretShare => (vec![V(u64_)], vec![u64_]),
             RtOp::FrameRecord => (vec![V(u64_)], vec![p]),
             RtOp::Transfer { x, .. } => (vec![take(x), V(p)], vec![Ty::Scalar(Scalar::Bool)]),
-            RtOp::Returnable(op) => {
-                let host = RtOp::Host(op).signature();
+            RtOp::Returnable(wait) => {
+                let row = wait.row().signature();
                 let mut params = vec![V(p)];
-                params.extend(host.params);
-                (params, host.results)
+                params.extend(row.params);
+                (params, row.results)
             }
             RtOp::LaunchTarget { view } => (vec![out(view)], vec![]),
             RtOp::DescribeEmit => (vec![V(p)], vec![bool_]),
@@ -1966,6 +2000,7 @@ impl RtOp {
 
     pub fn types(self) -> Vec<TypeId> {
         match self {
+            RtOp::Returnable(wait) => wait.row().types(),
             RtOp::Spawn { x, r } | RtOp::SpawnUnit { x, r } | RtOp::Transfer { x, r } => vec![x, r],
             RtOp::Join { r } => vec![r],
             RtOp::ConnNew { item }
@@ -2024,7 +2059,6 @@ impl RtOp {
             | RtOp::Flow(_)
             | RtOp::Host(_)
             | RtOp::FrameRecord
-            | RtOp::Returnable(_)
             | RtOp::IsolateEnter
             | RtOp::IsolateLeave
             | RtOp::IsolateCatch

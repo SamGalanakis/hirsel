@@ -488,7 +488,46 @@ impl Function<'_, '_, '_> {
                 )?[0];
                 1
             }
-            RtOp::Returnable(op) => {
+            RtOp::Returnable(Wait::ConnSend { .. }) => {
+                let values = self.c_call(
+                    "hirsel_core_conn_send_rec",
+                    &[P, P, P, P, U],
+                    &[K, K],
+                    &[self.context, args[0], args[1], args[2], site],
+                )?;
+                self.call_failure(values[1], call.fail)?;
+                outputs[0] = values[0];
+                1
+            }
+            RtOp::Returnable(Wait::ConnReceive { .. }) => {
+                let values = self.c_call(
+                    "hirsel_core_conn_receive_rec",
+                    &[P, P, P, P, U],
+                    &[U, U],
+                    &[self.context, args[0], args[1], args[2], site],
+                )?;
+                let packed = values[0];
+                let status = self.b.ins().ushr_imm_s(packed, 8);
+                let status = self.b.ins().ireduce(types::I8, status);
+                self.call_failure(status, call.fail)?;
+                outputs[0] = self.b.ins().ireduce(types::I8, packed);
+                outputs[1] = self.b.ins().ushr_imm_s(packed, 16);
+                outputs[2] = values[1];
+                3
+            }
+            RtOp::Returnable(Wait::Join { .. }) => {
+                let values = self.c_call(
+                    "hirsel_core_join_rec",
+                    &[P, P, P, P, U],
+                    &[K, P, K],
+                    &[self.context, args[0], args[1], args[2], site],
+                )?;
+                self.call_failure(values[2], call.fail)?;
+                outputs[0] = values[0];
+                outputs[1] = values[1];
+                2
+            }
+            RtOp::Returnable(Wait::Host(op)) => {
                 // The host row with the record word after the context.
                 let symbol = op
                     .returnable_symbol()

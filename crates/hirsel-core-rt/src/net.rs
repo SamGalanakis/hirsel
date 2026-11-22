@@ -665,10 +665,7 @@ unsafe fn returnable_op(
     site: u64,
 ) -> Outcome {
     unsafe {
-        let Some(header) = crate::tasks::frame_header() else {
-            crate::process::stop(b"FrameRecord");
-        };
-        let this: *mut OwnedNet = (&raw mut (*header).net).cast();
+        let this: *mut OwnedNet = crate::tasks::held_wait();
         let outcome = if *word == 0 {
             if let Err(outcome) = OwnedNet::init(
                 this,

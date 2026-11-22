@@ -2,7 +2,7 @@ use super::{Backend, BackendSemantics, EngineTag, NativeSemantics};
 use hirsel_core_ids::ContentHash;
 use hirsel_core_ir::{
     AddressBase, AddressId, AddressInfo, Arg, Block, Body, CallId, CallSite, Callee, HostOp, Inst,
-    Module, Param, PoolRange, RtOp, SigId, Terminator, Ty, TypeId, ValueId, normal, text,
+    Module, Param, PoolRange, RtOp, SigId, Terminator, Ty, TypeId, ValueId, Wait, normal, text,
 };
 use hirsel_core_layout::flow;
 use std::collections::BTreeSet;
@@ -62,9 +62,9 @@ fn runtime_probes() -> Module {
         RtOp::ConnTryReceive { item: ITEM },
         RtOp::SpawnUnit { x: ITEM, r: ITEM },
         RtOp::FrameRecord,
-        RtOp::Returnable(HostOp::RecvBounded),
-        RtOp::Returnable(HostOp::RecvReady),
-        RtOp::Returnable(HostOp::SendPair),
+        RtOp::Returnable(Wait::Host(HostOp::RecvBounded)),
+        RtOp::Returnable(Wait::Host(HostOp::RecvReady)),
+        RtOp::Returnable(Wait::Host(HostOp::SendPair)),
         RtOp::ZeroBytes,
         RtOp::MapPlaceWord,
         RtOp::MapPlaceBytes,
@@ -237,7 +237,7 @@ fn every_admitted_tag_lowers_in_both_engines() {
                 if let Callee::Runtime(op) = call.callee {
                     exercised[1].insert(normal::runtime_tag(&op));
                     match op {
-                        RtOp::Host(op) | RtOp::Returnable(op) => {
+                        RtOp::Host(op) | RtOp::Returnable(Wait::Host(op)) => {
                             exercised[2].insert(normal::host_tag(&op));
                         }
                         RtOp::Flow(op) => {

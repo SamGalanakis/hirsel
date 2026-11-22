@@ -3110,9 +3110,17 @@ unsafe fn park_returnable(task: *mut Task, op: *mut Operation) {
     unsafe {
         (*task).operation = op;
         mark_parked(task);
-        (*task).stackless = true;
-        std::mem::forget(crate::sequencer::enter());
+        give_back(task, crate::sequencer::enter());
     }
+}
+/// The stack release every returnable park ends with: the task returns its
+/// stack through its represented frames (`start` switches to the dispatcher,
+/// which unmounts it), and `commit` stays held into the dispatcher's, as
+/// across the stackful form's switch, so nothing wakes the task before then.
+unsafe fn give_back(task: *mut Task, commit: crate::sequencer::Guard) {
+    // SAFETY: the active task owns its record.
+    unsafe { (*task).stackless = true };
+    std::mem::forget(commit);
 }
 /// Where an operation that does not finish at once leaves the fast path.
 enum Start {
@@ -4318,6 +4326,27 @@ pub(crate) unsafe fn park(
     }
 }
 
+/// The returnable form of `park_for`: register in `queue` the same way, then
+/// leave the switch to `start` after the represented frames have returned.
+/// The resumed wait reenters its row and continues where this park left off.
+/// # Safety
+/// As for `park_for`, with a live task that runs a returnable root.
+pub(crate) unsafe fn park_returning(
+    task: *mut Task,
+    queue: *mut Waiters,
+    #[cfg(feature = "prof")] wait: (Reason, u64),
+) {
+    let commit = crate::sequencer::enter();
+    // SAFETY: as park_for.
+    unsafe {
+        #[cfg(feature = "prof")]
+        prof_state(task, State::Waiting, wait.0, wait.1);
+        (*task).state = State::Waiting;
+        Waiters::push(queue, task);
+        give_back(task, commit);
+    }
+}
+
 /// # Safety
 /// As for `park`, with the active task passed by the caller.
 pub(crate) unsafe fn park_for(
@@ -4708,12 +4737,24 @@ pub unsafe extern "C" fn hirsel_core_transfer(
     }
     1
 }
-/// The record's header: one operation and the owned helper state it borrows.
+/// The record's header: one operation and the state of the one wait in
+/// flight that outlives its stack.
 #[repr(C)]
 pub(crate) struct FrameHeader {
     operation: std::mem::MaybeUninit<Operation>,
-    pub(crate) net: std::mem::MaybeUninit<crate::net::OwnedNet>,
+    pub(crate) held: std::mem::MaybeUninit<HeldWait>,
 }
+/// A task waits at one site at a time, so the waits share their state's room.
+#[repr(C)]
+pub(crate) union HeldWait {
+    net: std::mem::ManuallyDrop<crate::net::OwnedNet>,
+    send: std::mem::ManuallyDrop<crate::units_lang::SendRec>,
+}
+// A waiting send fits in the room the network waits already take.
+const _: () = assert!(
+    size_of::<crate::units_lang::SendRec>() <= size_of::<crate::net::OwnedNet>()
+        && align_of::<crate::units_lang::SendRec>() <= align_of::<crate::net::OwnedNet>()
+);
 pub(crate) const FRAME_HEADER: usize = size_of::<FrameHeader>();
 const _: () = assert!(FRAME_HEADER % 8 == 0 && align_of::<FrameHeader>() <= 8);
 impl FrameRecord {
@@ -4794,6 +4835,26 @@ pub(crate) fn frame_header() -> Option<*mut FrameHeader> {
     let task = CURRENT.get();
     // SAFETY: CURRENT pins the task.
     unsafe { task.as_ref()?.frame.as_ref().map(FrameRecord::header) }
+}
+/// The current task's held-wait room, as a `T` of the union.
+/// # Safety
+/// The current task runs a returnable root; `T` is one of `HeldWait`'s cases.
+pub(crate) unsafe fn held_wait<T>() -> *mut T {
+    match frame_header() {
+        // SAFETY: the union's cases start at its address.
+        Some(header) => unsafe { (&raw mut (*header).held).cast() },
+        None => crate::process::stop(b"FrameRecord"),
+    }
+}
+/// A returnable row's result: the delivered `value` with the caller's child
+/// word 0, or `parked` with the word 1 when the wait gave the stack back.
+/// # Safety
+/// `word` is the caller's child word.
+#[inline(always)]
+pub(crate) unsafe fn returned<T>(word: *mut u64, value: Option<T>, parked: T) -> T {
+    // SAFETY: by the contract.
+    unsafe { word.write(u64::from(value.is_none())) };
+    value.unwrap_or(parked)
 }
 
 unsafe extern "C" fn start(first: *mut u8, _: *mut u8) -> ! {
@@ -5370,7 +5431,7 @@ impl RunPtr {
                             direct = task;
                         }
                     }
-                    State::Waiting if (*task).stackless => {
+                    _ if (*task).stackless => {
                         (*worker_stock(self.0)).recycle(unmount(task));
                     }
                     _ => {}
@@ -5506,9 +5567,7 @@ impl RunPtr {
                             direct = task;
                         }
                     }
-                    State::Waiting if (*task).stackless => {
-                        ended = Some(unmount(task));
-                    }
+                    _ if (*task).stackless => ended = Some(unmount(task)),
                     _ => {}
                 }
                 // The commit keeps custody with this dispatcher until the
@@ -5921,9 +5980,46 @@ pub unsafe extern "C" fn hirsel_core_join(
     result: *mut u8,
     site: u64,
 ) -> Join {
+    // SAFETY: by the contract; the stackful form never parks returning.
+    unsafe { join::<false>(context, task, result, site, false) }.unwrap_or_else(|| unreachable!())
+}
+/// The returnable form of `join` (`RtOp::Returnable`): `word` is the
+/// caller's child word, 1 while the join waits with the stack given back.
+/// # Safety
+/// As `hirsel_core_join`, in a task that runs a returnable root; a resume
+/// passes the same handle and destination.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_join_rec(
+    context: *mut Context,
+    word: *mut u64,
+    task: *mut Task,
+    result: *mut u8,
+    site: u64,
+) -> Join {
+    let parked = Join {
+        kind: 0,
+        causes: ptr::null_mut(),
+        status: 0,
+    };
+    // SAFETY: by the contract.
+    unsafe {
+        let joined = join::<true>(context, task, result, site, *word != 0);
+        returned(word, joined, parked)
+    }
+}
+/// `REC` parks with the stack given back (None). A task join's resume runs
+/// its loop again from the top, as the stackful form's next iteration does.
+#[inline(always)]
+unsafe fn join<const REC: bool>(
+    context: *mut Context,
+    task: *mut Task,
+    result: *mut u8,
+    site: u64,
+    resumed: bool,
+) -> Option<Join> {
     if crate::units_lang::is_helper(task) {
         // SAFETY: as below, for a helper's handle.
-        return unsafe { crate::units_lang::join(context, task, result, site) };
+        return unsafe { crate::units_lang::join::<REC>(context, task, result, site, resumed) };
     }
     // SAFETY: parent owns task throughout waits, no references survive switches.
     unsafe {
@@ -5931,14 +6027,23 @@ pub unsafe extern "C" fn hirsel_core_join(
         let _commit = loop {
             let commit = before_commit();
             if check_cancel(context, site) != 0 {
-                return Join {
+                return Some(Join {
                     kind: 0,
                     causes: ptr::null_mut(),
                     status: 1,
-                };
+                });
             }
             if (*task).state == State::Ended {
                 break commit;
+            }
+            if REC {
+                park_returning(
+                    CURRENT.get(),
+                    &raw mut (*task).waiters,
+                    #[cfg(feature = "prof")]
+                    (Reason::Join, (*task).id),
+                );
+                return None;
             }
             _resumed = Some(park(
                 &raw mut (*task).waiters,
@@ -5957,11 +6062,11 @@ pub unsafe extern "C" fn hirsel_core_join(
         }
         event(JOIN, (*task).id, u64::from(failed));
         retire(task);
-        Join {
+        Some(Join {
             kind: if cancelled { 2 } else { u8::from(failed) },
             causes: causes.into_raw(),
             status: 0,
-        }
+        })
     }
 }
 /// Cancel the task and wait for it to end, under shielding; its result (if it

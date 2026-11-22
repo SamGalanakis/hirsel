@@ -1,0 +1,16 @@
+// MEM-6: a closure header can name an enclosing Region without capturing it.
+// expect: accept
+@compact(u32)
+type Doc {
+    value: u64
+}
+
+fn check_header(r: Region) -> () {
+    let _ = fn() -> () {
+        let _ = fn() -> () {
+            let _ = fn(take w: Writer[Doc, in r]) -> Result[Child[Doc], BuildError] {
+                emit(take w, Doc(value: 7u64))
+            }
+        }
+    }
+}

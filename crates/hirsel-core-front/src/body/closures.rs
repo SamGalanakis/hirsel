@@ -1189,12 +1189,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let region_roots: Vec<_> = (0..self.vars.len())
             .map(|slot| self.region_root_for_capture(slot))
             .collect();
+        let enclosing_frame = self.capture_frame.as_ref().map(|frame| EnclosingFrame {
+            outer: &frame.outer,
+            parent: self.enclosing_frame,
+        });
         let mut child = Cx::new(self.p, self.definition, self.e);
         child.fd = std::borrow::Cow::Owned(fd);
         child.header = n;
         child.frame_level = self.frame_level + 1;
         child.entry = false;
         child.inherited_refusal = self.inherited_refusal || !self.out.refusals.is_empty();
+        child.enclosing_frame = enclosing_frame.as_ref();
         let view_only = expected_kind == Some(Callable::ScopedView);
         child.capture_frame = Some(CaptureFrame {
             view_only,
@@ -1363,6 +1368,11 @@ struct CapturedEnvironment {
     owner: u32,
     words: usize,
     offset: u64,
+}
+
+pub(super) struct EnclosingFrame<'e> {
+    outer: &'e [Option<Var>],
+    parent: Option<&'e EnclosingFrame<'e>>,
 }
 
 pub(super) struct CaptureFrame {
@@ -1716,8 +1726,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let p: &'c Program<'a> = self.p;
         let mut stack = vec![body];
         while let Some(n) = stack.pop() {
+            let kind = self.kind(n);
+            if is_type_node(kind) {
+                continue;
+            }
             stack.extend(self.kids(n).iter().copied());
-            if self.kind(n) != NodeKind::Path {
+            if kind != NodeKind::Path {
                 continue;
             }
             let Some(u) = p.resolved(self.at, n) else {
@@ -1734,11 +1748,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     /// Type-only root mentions need the enclosing declaration's type, without a
     /// runtime capture. An expression use still discovers its capture normally.
     pub(super) fn captured_root_ty(&self, slot: u32) -> Option<TyId> {
-        self.capture_frame
-            .as_ref()?
-            .outer
-            .get(slot as usize)?
-            .map(|v| v.ty)
+        let slot = slot as usize;
+        let frame = self.capture_frame.as_ref()?;
+        frame.outer[slot]
+            .or_else(|| {
+                std::iter::successors(self.enclosing_frame, |frame| frame.parent)
+                    .find_map(|frame| frame.outer[slot])
+            })
+            .map(|var| var.ty)
     }
     /// Discover an outer slot exactly when its first source use is visited.
     pub(super) fn capture_slot(&mut self, slot: u32, n: NodeId) {

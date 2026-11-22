@@ -1320,6 +1320,7 @@ struct Cx<'c, 'a, 'e> {
     pending: Option<(AddressBase, TypeId)>,
     out: CoreCheck,
     capture_frame: Option<closures::CaptureFrame>,
+    enclosing_frame: Option<&'e closures::EnclosingFrame<'e>>,
     /// Resolution, an enclosing closure or a callee's header already has a refusal.
     inherited_refusal: bool,
     has_callback_parameters: bool,
@@ -1472,6 +1473,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             pending: None,
             out: CoreCheck::default(),
             capture_frame: None,
+            enclosing_frame: None,
             inherited_refusal: refused,
             has_callback_parameters: false,
             frame_level: 0,

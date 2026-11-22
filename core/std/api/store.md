@@ -266,8 +266,9 @@ it to built. Everything above describes the store as built.
   (AP15).
 - **Checkpoints.** The writer plans each cut over checkpoint records it
   allocates with the frames they describe, and the checkpoint task only
-  writes the plan, in a fixed workspace: `checkpoint_task_bytes` defaults to
-  67,174,400 bytes and open refuses less. A checkpoint is never refused by
+  writes the plan, in a fixed workspace W = max(`pack_bytes`, 16,777,476) +
+  65,536 bytes: `checkpoint_task_bytes` defaults to 67,174,400 bytes (W at the
+  64 MiB default), and open refuses less than W of its own `pack_bytes`. A checkpoint is never refused by
   its task. Per-frame state is allocated with the frame; the cut's new list
   pages, pack rows and retired seqs are writer memory with no reservation, and
   a plan that cannot allocate them returns `Full` with nothing captured (AP16).

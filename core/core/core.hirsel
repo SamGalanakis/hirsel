@@ -275,6 +275,9 @@ pub type JoinError = Failed(Causes) | Cancelled(Causes)
 
 pub opaque type Site
 
+/// Returns the native site word within the current program image.
+pub fn site_word(site: Site) -> u64
+
 // A cause chain, owned. Read it with `for c in causes`: a view of each Cause, primary
 // cause first (docs/spec/core.md, "Built-in types").
 pub opaque type Causes

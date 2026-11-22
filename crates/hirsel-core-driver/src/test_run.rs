@@ -318,6 +318,7 @@ impl TestLaunch<'_> {
 
 struct TestProcess<'a> {
     command: Command,
+    executable: PathBuf,
     pass: Option<(&'a TestCache, ContentHash)>,
     /// Removed once the run is collected.
     _directory: tempfile::TempDir,
@@ -389,44 +390,52 @@ impl TestBatch<'_> {
                 unreachable!("corpus runs have no pass cache")
             };
             process.command.env(property_corpus::ENV, input);
-            process.run(test, self.timeout)
+            let executable = process.executable.clone();
+            let (outcome, source) = process.run(test, self.timeout)?;
+            Ok::<_, NativeStop>((outcome, source, executable))
         };
         let mut replay_time = Duration::ZERO;
-        let mut stale = false;
-        if let Some(saved) = corpus.read(test)? {
-            let (mut outcome, source) = run(saved.launch_seed, &saved.input)?;
-            match property_corpus::report(&outcome.output, outcome.timed_out) {
-                Some(property_corpus::Report::Stale) => {
-                    corpus.retire(test)?;
-                    stale = true;
-                    replay_time = outcome.wall_time;
-                }
-                Some(property_corpus::Report::Failure(input)) => {
-                    outcome.corpus = Some(if property_corpus::confirmed(&saved.input, input) {
-                        "confirmed"
-                    } else {
-                        corpus.write(test, saved.launch_seed, input)?;
-                        "changed-failure"
-                    });
-                    return Ok((outcome, source));
-                }
-                None => {
-                    if outcome.passed() {
-                        return Err(NativeStop::Entry(
-                            "test did not verify its saved property corpus entry".into(),
-                        ));
+        let stale = match corpus.read(test)? {
+            property_corpus::SavedEntry::Missing => false,
+            property_corpus::SavedEntry::Stale => {
+                corpus.retire(test)?;
+                true
+            }
+            property_corpus::SavedEntry::Current(saved) => {
+                let (mut outcome, source, executable) = run(saved.launch_seed, &saved.input)?;
+                match property_corpus::report(&outcome.output, outcome.timed_out, &executable) {
+                    Some(property_corpus::Report::Stale) => {
+                        corpus.retire(test)?;
+                        replay_time = outcome.wall_time;
+                        true
                     }
-                    outcome.corpus = Some("unverified");
-                    return Ok((outcome, source));
+                    Some(property_corpus::Report::Failure(failure)) => {
+                        outcome.corpus = Some(if saved.confirms(&failure) {
+                            "confirmed"
+                        } else {
+                            corpus.write(test, saved.launch_seed, failure)?;
+                            "changed-failure"
+                        });
+                        return Ok((outcome, source));
+                    }
+                    None => {
+                        if outcome.passed() {
+                            return Err(NativeStop::Entry(
+                                "test did not verify its saved property corpus entry".into(),
+                            ));
+                        }
+                        outcome.corpus = Some("unverified");
+                        return Ok((outcome, source));
+                    }
                 }
             }
-        }
-        let (mut outcome, source) = run(self.seed, "search")?;
+        };
+        let (mut outcome, source, executable) = run(self.seed, "search")?;
         outcome.wall_time += replay_time;
-        if let Some(property_corpus::Report::Failure(input)) =
-            property_corpus::report(&outcome.output, outcome.timed_out)
+        if let Some(property_corpus::Report::Failure(failure)) =
+            property_corpus::report(&outcome.output, outcome.timed_out, &executable)
         {
-            corpus.write(test, self.seed, input)?;
+            corpus.write(test, self.seed, failure)?;
             outcome.corpus = Some(if stale { "stale-and-saved" } else { "saved" });
         } else if stale {
             outcome.corpus = Some("stale");
@@ -748,7 +757,8 @@ impl CheckProduct {
             }
             built
         };
-        let mut command = runner.test_command(&std::fs::canonicalize(&built.executable)?);
+        let executable = std::fs::canonicalize(&built.executable)?;
+        let mut command = runner.test_command(&executable);
         for grant in &options.exec_grants {
             grant.approve(&mut command);
         }
@@ -758,6 +768,7 @@ impl CheckProduct {
         let directory = private_directory(&mut command)?;
         Ok(TestLaunch::Run(TestProcess {
             command,
+            executable,
             pass,
             _directory: directory,
         }))

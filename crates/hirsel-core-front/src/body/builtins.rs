@@ -114,8 +114,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if module == ["list"] {
             return self.list_value(name, types[0], vals, result, n);
         }
-        if module == ["core"] && name == "replace" {
-            return Some(self.replace_value(types[0], vals[0], vals[1], n));
+        if module == ["core"] {
+            match name {
+                "replace" => return Some(self.replace_value(types[0], vals[0], vals[1], n)),
+                "site_word" => return Some(vals[0]),
+                _ => {}
+            }
         }
         if (module == ["option"] || module == ["result"]) && name == "unwrap" {
             let input = subst(&mut self.t, g.params[0].ty, types);

@@ -1589,10 +1589,12 @@ fn corpus_fingerprint(f: Found, mut out: String) {
             string.push(mut out, "returned-")
             string.push_u64(mut out, label)
         },
-        AtSite(kind, _) => {
+        AtSite(kind, site) => {
             string.push(mut out, "raised-")
             let n: u64 = int.widen(kind)
             string.push_u64(mut out, n)
+            string.push(mut out, " @")
+            string.push_u64(mut out, site_word(site))
         },
         TimedOut => string.push(mut out, "steps"),
         ByteCapacity => string.push(mut out, "bytes"),
@@ -1600,7 +1602,7 @@ fn corpus_fingerprint(f: Found, mut out: String) {
 }
 
 fn corpus_report(cfg: Config, key: Corpus, f: Found) -> Never {
-    let mut out = string.from("prop-corpus-v1 ")
+    let mut out = string.from("prop-corpus-v2 ")
     corpus_number(mut out, key.generator)
     corpus_number(mut out, cfg.seed)
     match cfg.sim_seed {
@@ -1641,7 +1643,7 @@ fn corpus_u64(text: String) -> u64 {
 }
 
 fn corpus_stale() -> Never {
-    fail("prop-corpus-v1 stale")
+    fail("prop-corpus-v2 stale")
 }
 
 fn corpus_replay(input: String, active: Config, key: Corpus) -> (Config, Replay, String) {

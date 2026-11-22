@@ -428,7 +428,7 @@ label. Without a label, all
 returned errors share one coarse fingerprint.
 
 The runner stores at most one entry per test. The filename is the hex content
-hash of the fully qualified test path plus `.json`. The version 1 JSON record
+hash of the fully qualified test path plus `.json`. The version 2 JSON record
 contains the test path, the optional launch simulation seed, and the
 space-separated property record. The latter contains, in order, the generator
 identifier, data seed, effective optional simulation seed, case count, choice
@@ -436,20 +436,22 @@ limit, rejection limit, shrink limit, generator step limit, case step limit,
 case byte limit, minimized token, encoded draw bounds, and failure fingerprint.
 The bounds are standard base64 of one ULEB128 per consumed bound followed by
 a zero byte. The token carries the case index. The task law derives its
-world seed from that index and the effective simulation seed.
+world seed from that index and the effective simulation seed. For raised
+failures, the fingerprint combines the primary cause kind with the module's
+linked source file name and the span's start line and column in the `site` field.
 
 Before generating any cases, the runner attempts one saved case in a fresh
 process using its recorded launch seed and property settings. The generator
 identifier, consumed values, draw bounds, and draw count must match. Replay
 uses the recorded generator and case limits only when they fit within the
 active limits. Replay spends no shrink or search budget. The runner reports
-`confirmed` if the verified case has the same failure fingerprint. Raised
-failures currently report `changed-failure` even when the cause kind matches,
-because the runner cannot establish the original law's source site from its
-property report. Any verified failure still fails the test. An exact passing
-case or an incompatible generator or tape is `stale`. The runner retires
-the entry, then starts the requested search in a fresh process. A run that
-cannot verify the saved property keeps the entry and fails the test.
+`confirmed` if the verified case has the same failure fingerprint. A change
+in the fingerprint, including a move to a different raise site, reports
+`changed-failure`. Any verified failure still fails the test. An exact passing
+case, an incompatible generator or tape, or an older entry version is
+`stale`. The runner retires the entry, then starts the requested search in a
+fresh process. A run that cannot verify the saved property keeps the entry
+and fails the test.
 
 The runner grants the process read-only environment data for the replay, using
 `HIRSEL_TEST_PROPERTY_CORPUS`. It keeps the directory private, rejects overlapping

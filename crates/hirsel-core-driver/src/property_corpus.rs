@@ -10,7 +10,8 @@ use std::process::Output;
 pub(crate) const ENV: &str = "HIRSEL_TEST_PROPERTY_CORPUS";
 const MAX_INPUT: usize = 96 * 1024;
 const MAX_FILE: usize = MAX_INPUT + 4096;
-const MARKER: &str = "Fail(\"prop-corpus-v1 ";
+const VERSION: u32 = 2;
+const MARKER: &str = "Fail(\"prop-corpus-v2 ";
 
 pub(crate) struct Corpus {
     root: PathBuf,
@@ -24,11 +25,29 @@ pub(crate) struct Entry {
     test: String,
     pub launch_seed: Option<u64>,
     pub input: String,
+    site: Option<String>,
+}
+
+pub(crate) enum SavedEntry {
+    Missing,
+    Stale,
+    Current(Entry),
 }
 
 pub(crate) enum Report<'a> {
     Stale,
-    Failure(&'a str),
+    Failure(Failure<'a>),
+}
+
+pub(crate) struct Failure<'a> {
+    input: &'a str,
+    site: Option<String>,
+}
+
+impl Entry {
+    pub(crate) fn confirms(&self, failure: &Failure<'_>) -> bool {
+        self.input == failure.input && self.site == failure.site
+    }
 }
 
 fn invalid(message: &str) -> io::Error {
@@ -96,14 +115,16 @@ impl Corpus {
             .join(format!("{}.json", crate::request::hex(digest)))
     }
 
-    pub(crate) fn read(&self, test: &DefPath) -> io::Result<Option<Entry>> {
+    pub(crate) fn read(&self, test: &DefPath) -> io::Result<SavedEntry> {
         let file = match OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
             .open(self.path(test))
         {
             Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(SavedEntry::Missing);
+            }
             Err(error) => return Err(error),
         };
         let meta = file.metadata()?;
@@ -116,26 +137,33 @@ impl Corpus {
             return Err(invalid("entry exceeds the size limit"));
         }
         let entry: Entry = serde_json::from_slice(&bytes)?;
-        if entry.version != 1 || entry.test != test.to_string() || !valid_input(&entry.input) {
+        if entry.test != test.to_string() {
             return Err(invalid("invalid entry"));
         }
-        Ok(Some(entry))
+        if entry.version < VERSION {
+            return Ok(SavedEntry::Stale);
+        }
+        if entry.version != VERSION || !valid_input(&entry.input, entry.site.is_some()) {
+            return Err(invalid("invalid entry"));
+        }
+        Ok(SavedEntry::Current(entry))
     }
 
     pub(crate) fn write(
         &self,
         test: &DefPath,
         launch_seed: Option<u64>,
-        input: &str,
+        failure: Failure<'_>,
     ) -> io::Result<()> {
-        if !valid_input(input) {
+        if !valid_input(failure.input, failure.site.is_some()) {
             return Err(invalid("invalid or oversized failure report"));
         }
         let entry = Entry {
-            version: 1,
+            version: VERSION,
             test: test.to_string(),
             launch_seed,
-            input: input.to_owned(),
+            input: failure.input.to_owned(),
+            site: failure.site,
         };
         let bytes = serde_json::to_vec(&entry)?;
         if bytes.len() > MAX_FILE {
@@ -154,7 +182,7 @@ impl Corpus {
     }
 }
 
-fn valid_input(input: &str) -> bool {
+fn valid_input(input: &str, has_site: bool) -> bool {
     if input.len() > MAX_INPUT {
         return false;
     }
@@ -178,14 +206,21 @@ fn valid_input(input: &str) -> bool {
     fields.next().is_some_and(base64)
         && fields.next().is_some_and(base64)
         && fields.next().is_some_and(|word| {
-            matches!(word, "returned" | "steps" | "bytes")
-                || word.strip_prefix("returned-").is_some_and(natural)
-                || word.strip_prefix("raised-").is_some_and(natural)
+            if has_site {
+                word.strip_prefix("raised-").is_some_and(natural)
+            } else {
+                matches!(word, "returned" | "steps" | "bytes")
+                    || word.strip_prefix("returned-").is_some_and(natural)
+            }
         })
         && fields.next().is_none()
 }
 
-pub(crate) fn report(output: &Output, timed_out: bool) -> Option<Report<'_>> {
+pub(crate) fn report<'a>(
+    output: &'a Output,
+    timed_out: bool,
+    executable: &Path,
+) -> Option<Report<'a>> {
     if timed_out || output.status.code() != Some(101) {
         return None;
     }
@@ -199,9 +234,15 @@ pub(crate) fn report(output: &Output, timed_out: bool) -> Option<Report<'_>> {
         return Some(Report::Stale);
     }
     let (input, _) = line.split_once(" | prop: falsified: ")?;
-    Some(Report::Failure(input))
-}
-
-pub(crate) fn confirmed(saved: &str, current: &str) -> bool {
-    saved == current && !current.rsplit_once(' ').unwrap().1.starts_with("raised-")
+    let (input, word) = input
+        .rsplit_once(" @")
+        .map_or((input, None), |(input, word)| (input, Some(word)));
+    let site = match word {
+        Some(word) => Some(crate::native_entry::source_site(
+            executable,
+            word.parse().ok()?,
+        )?),
+        None => None,
+    };
+    Some(Report::Failure(Failure { input, site }))
 }

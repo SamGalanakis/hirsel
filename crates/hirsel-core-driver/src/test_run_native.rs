@@ -2596,6 +2596,37 @@ fn property(e: Env, tasks: Tasks) -> Result[(), ()] waits {
     let stale = run("1", 0);
     assert_eq!(stale["property_corpus"], "stale");
     assert!(!entries[0].exists());
+
+    let raised = source.replace(
+        "Error(string.from(\"original assertion\"))",
+        "if 0u64 == 0 { fail(\"raised assertion\") } else { fail(\"raised assertion\") }",
+    );
+    law.write("app/main.hirsel", &raised);
+    let saved_raise = run("0", 1);
+    assert_eq!(saved_raise["property_corpus"], "saved");
+    let raise_bytes = std::fs::read(&entries[0]).unwrap();
+    let raise_record: serde_json::Value = serde_json::from_slice(&raise_bytes).unwrap();
+    assert_eq!(raise_record["site"], "main.hirsel:7:24");
+    let replayed_raise = run("1", 1);
+    assert_eq!(replayed_raise["property_corpus"], "confirmed");
+    assert_eq!(std::fs::read(&entries[0]).unwrap(), raise_bytes);
+
+    law.write("app/main.hirsel", raised.replace("if 0u64 == 0", "if 1u64 == 0"));
+    let changed_site = run("1", 1);
+    assert_eq!(changed_site["property_corpus"], "changed-failure");
+    let changed_record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&entries[0]).unwrap()).unwrap();
+    assert_eq!(changed_record["site"], "main.hirsel:7:58");
+
+    let mut old_record = record;
+    old_record["version"] = 1.into();
+    old_record.as_object_mut().unwrap().remove("site");
+    std::fs::write(&entries[0], serde_json::to_vec(&old_record).unwrap()).unwrap();
+    let replaced = run("0", 1);
+    assert_eq!(replaced["property_corpus"], "stale-and-saved");
+    let current: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&entries[0]).unwrap()).unwrap();
+    assert_eq!(current["version"], 2);
 }
 
 #[test]

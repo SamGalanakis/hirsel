@@ -206,7 +206,7 @@ a closed rotation sender poisons the Db and takes no Cut.
 ## M1 target (not yet built)
 
 Nothing in this section is on main. It is the store's M1 surface, specified in
-STORE-SPEC v2.33 §11 (AP1–AP21, L37–L51), and the M1 implementation slices flip
+STORE-SPEC v2.34 §11 (AP1–AP21, L37–L51), and the M1 implementation slices flip
 it to built. Everything above describes the store as built.
 
 - **Pages.** Every tree becomes a B+ tree of packed pages (`Arc[Page]`, 4 KiB
@@ -240,19 +240,33 @@ it to built. Everything above describes the store as built.
   stored bytes as `Option[View[Bytes]]` anchored to the Tx or Snapshot. The owned
   `fetch` and `get` decode from the view, transcoding old-schema rows.
   `scan_bytes` returns a `ViewRows`, a scoped cursor that is not `send`:
+  it is declared `pub opaque scoped type ViewRows`, like `RangeRows`.
   `next_view(mut c)` returns the next logical key, and `value_view(c)` the
-  current value as `View[Bytes] in c` (AP12). `ByteRows` is unchanged.
+  current value as `View[Bytes] in c`; on `Poisoned` the cursor does not move
+  (AP12). `ByteRows` is unchanged.
 - **Accounts.** Admission counts each distinct row version (tree, logical key,
   stored value) once across every branch head, pin and in-flight fork, at
   `entry(k, v)`, plus 126 bytes per distinct collection. The figure does not
-  depend on page layout or history, and a delete-only commit is never refused.
+  depend on page layout or history. `resident_limit` bounds this figure alone:
+  journal frames sent and not yet acked are bounded separately by
+  `FRAME_LIMIT` = 16,777,296 bytes, and a commit that would pass it waits for
+  acks instead of failing. So a delete-only commit is never refused, on disk or
+  in memory, and a delayed cut ack never erases newer charges.
   `accounts(db)` returns `{logical, exact, frames, resident}`; resident page
   memory is reported, not admitted, and can exceed `logical` when roots diverge
   (AP15).
 - **Fork.** A `fork` from a Snapshot at its live branch head writes one FORK
   journal frame, waits for its sync, and returns the branch with an already
-  durable journal ticket: no walk, settle or cut, and the account is unchanged.
+  durable journal ticket: no walk, settle or cut, the account is unchanged, and
+  it is never refused by admission. Everything that can fail (allocation) is
+  prepared before the frame is sent and returns with nothing sent; a failed send
+  poisons the Db.
   A fork from an older Snapshot still makes a cut. The empty name is allowed.
   A fork past the id counter is `Limit(Ids)`, and past the 16 MiB branch and
-  pin metadata budget `Limit(Manifest)` (AP4, AP17–AP19).
+  pin records' 16 MiB share, or past the share left for the MANIFEST's pack
+  lists, `Limit(Manifest)` (AP4, AP17–AP19).
+- **Install.** A release install edits each collection by replace, remove,
+  create-empty or keep. A schema-only change to a populated table keeps its rows,
+  index ranges and root stamps (§11.1).
+- **Constants.** `FRAME_LIMIT: u64 = 16777296` joins `VALUE_LIMIT`.
 - **Errors.** `Limit` gains `Ids` and `Manifest`; every other case is unchanged.

@@ -16,6 +16,9 @@ use super::{
     repay,
 };
 use crate::limit::Payer;
+pub(crate) use hirsel_core_layout::charge::{
+    CONNECTION_MAX_CAPACITY as MAX_CAP, CONNECTION_MAX_ROOM as MAX_ROOM,
+};
 use std::{
     cell::{Cell, UnsafeCell},
     collections::VecDeque,
@@ -27,12 +30,9 @@ const SEALED: u64 = 1 << 63;
 const WAITERS: u64 = 1 << 62;
 const SLOT_SHIFT: u32 = 40;
 const SLOT: u64 = 1 << SLOT_SHIFT;
-const BYTES: u64 = SLOT - 1;
+const BYTES: u64 = MAX_ROOM;
 const BITMAP_CAP: u32 = 22;
-const SLOTS: u64 = ((1 << BITMAP_CAP) - 1) << SLOT_SHIFT;
-/// The largest capacity and room the word can hold.
-pub(crate) const MAX_CAP: u64 = (1 << 22) - 1;
-pub(crate) const MAX_ROOM: u64 = BYTES;
+const SLOTS: u64 = MAX_CAP << SLOT_SHIFT;
 
 fn first_free_bit(w: u64) -> u64 {
     let free = !w & SLOTS;

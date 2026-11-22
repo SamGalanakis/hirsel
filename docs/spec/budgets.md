@@ -127,7 +127,7 @@ A charge is the logical size of what is allocated under the policy `charge-v1`:
 | task | 256 + its result's size + 32 for its primary cause cell + its reserved limit `n` |
 | `main`'s task at startup | 256 + 32, from the root limit before `main` runs; a root limit smaller than this does not start the run |
 | channel | capacity × item size + 64 |
-| connection ([CONC-17](tasks.md#conc-17-connections)) | 64 + capacity × item size + its room |
+| connection ([CONC-17](tasks.md#conc-17-connections)) | 64 + capacity × item size + its room, up to `2^22 − 1` slots and `2^40 − 1` bytes of room |
 | `Latest` root | 32 |
 | `log.new` node | 24 |
 | a log's entries | as `List[E]` storage |

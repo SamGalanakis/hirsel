@@ -18,6 +18,10 @@ pub const CAUSE_CELL: u64 = 32;
 pub const CHANNEL_BASE: u64 = 64;
 /// Charge of a connection's bookkeeping, besides its slots and room (CONC-17).
 pub const CONNECTION_BASE: u64 = 64;
+/// The largest slot count of a connection (CONC-17).
+pub const CONNECTION_MAX_CAPACITY: u64 = (1 << 22) - 1;
+/// The largest byte room of a connection (CONC-17).
+pub const CONNECTION_MAX_ROOM: u64 = (1 << 40) - 1;
 /// A `Latest` root's bookkeeping: its `Arc` holder, handle count, identity and
 /// the holder's drop (CONC-13), exactly the record the engine keeps.
 pub const LATEST_ROOT: u64 = 32;

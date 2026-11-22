@@ -419,19 +419,22 @@ length × element size rounded up to 8.
 + `n` ([MEM-24](budgets.md#mem-24-logical-charges)), against the spawner's current limit,
 and then admits `x`'s content charge against `n`. Either refusal returns `Error((c, x))`,
 where `c` gives that admission's requested and available bytes, and leaves `x` as it was.
-Otherwise `x`'s content is charged to the helper's root limit of `n`. An `X` or `R` that is
-not `cross` is refused at the call.
+Otherwise `x`'s content is charged to the helper's root limit of `n`. The helper starts
+with its own root step bound equal to the spawner's remaining steps at the spawn, if a
+bound is current ([MEM-30](budgets.md#mem-30-step-bounds)). An `X` or `R` that is not
+`cross` is refused at the call.
 
 The helper's `Task[R]` is a task handle (CONC-1). `task.join` waits for the helper to end and
 returns `Ok(r)`, `Failed(causes)` or `Cancelled(causes)` as [CONC-6](#conc-6-join) says, with
-the kinds and sites of the helper's causes. `task.cancel` asks the helper's root to cancel,
+the full chain of causes, including each cause's site and payload. A `Fail` message keeps
+its storage charge until it is dropped. `task.cancel` asks the helper's root to cancel,
 and the root observes the request at a cancellation point
 ([CONC-7](#conc-7-cancellation-points)). Cleaning an unjoined helper handle cancels the
 helper, waits for its end with cancellation shielded, and drops its result or causes. Once
 `join` returns or that cleaning ends, all of the task charge has been refunded to the limit
-that admitted it, except the result's content charge, which stays charged there until the
-result is dropped, and the charge of each connection the helper made that is still open
-(CONC-17).
+that admitted it, except the charges for the result's content, any delivered causes, and
+each connection the helper made that is still open (CONC-17). These charges are refunded
+when their owners are cleaned.
 
 This clause fixes no order between the actions of different units, and does not say when an
 action in one unit becomes visible in another.
@@ -462,8 +465,10 @@ its inbox. `Client[T]` and `Inbox[T]` are mechanical resources
 
 `conn.new(cap: u64, bytes b: u64) -> Result[(Client[T], Inbox[T]), Capacity]` admits
 64 + `cap` × size(T) + `b` from the current limit and returns the connection's first client
-and its inbox. A `cap` of 0 is a failure with cause `Bounds`. The connection holds at most
-`cap` items, and its **room** of `b` bytes holds their content
+and its inbox. A `cap` of 0 is a failure with cause `Bounds`. A `cap` above `2^22 − 1` or
+`b` above `2^40 − 1` returns `Capacity` with the computed charge (saturated at `2^64 − 1`)
+as `requested` and 0 as `available`. The connection holds at most `cap` items, and its
+**room** of `b` bytes holds their content
 ([CONC-15](#conc-15-units)). `conn.client(c)` returns another client of the same connection
 and admits nothing.
 

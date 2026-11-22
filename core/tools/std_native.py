@@ -457,7 +457,7 @@ def wrapper(case, port=None):
         address = f'Addr(ip: V4(2130706433u32), port: {port}u16)'
         call = call.replace('(https)', f'(native_net,native_clock,{address},token,native_out,native_err)')
         return f'\npub fn native_contract({parameters})->Result[(),Exit]{effect} {{\nif {call} == {case.expected} {{Ok(())}} else {{Error(Exit(status: 1))}}\n}}\n'
-    if case.expected.startswith(('fail ', 'fault ')):
+    if case.expected.startswith(('fail ', 'fault ', 'stop ')):
         body = f'let _ = {call}\nOk(())'
     else:
         body = f'if {call} == {case.expected} {{Ok(())}} else {{Error(())}}'
@@ -551,6 +551,11 @@ def wait_load():
         time.sleep(10)
 
 
+def expected_stop_stderr(case):
+    name = case.expected.removeprefix('stop ').encode()
+    return case.stderr + b'run stop: ' + name + b'\n'
+
+
 def observation(case, result):
     if case.expected.startswith('fail '):
         kind = case.expected.removeprefix('fail ').encode()
@@ -558,6 +563,9 @@ def observation(case, result):
         good = (result.returncode == 101 and result.stdout == case.stdout
                 and result.stderr.startswith(case.stderr)
                 and re.match(re.escape(kind) + rb'(?:\s|$|:|\()', diagnostics))
+    elif case.expected.startswith('stop '):
+        good = (result.returncode == 102 and result.stdout == case.stdout
+                and result.stderr == expected_stop_stderr(case))
     else:
         good = result.returncode == 0 and result.stdout == case.stdout and result.stderr == case.stderr
     if good:
@@ -599,12 +607,15 @@ def evaluator_observation(case, result):
         expected = dict(kind='fault', message=json.loads(case.expected.removeprefix('fault ')))
     elif case.expected.startswith('fail '):
         expected = dict(kind='failed', causes=case.expected.removeprefix('fail ').split(','))
+    elif case.expected.startswith('stop '):
+        expected = dict(kind='stopped', name=case.expected.removeprefix('stop '))
     else:
         expected = dict(kind='returned', values=[1])
     if outcome != expected:
         return True, f'evaluator got {outcome!r}; expected {expected!r}'
     if expected['kind'] != 'fault':
-        if bytes(report.get('stdout', [])) != case.stdout or bytes(report.get('stderr', [])) != case.stderr:
+        stderr = expected_stop_stderr(case) if expected['kind'] == 'stopped' else case.stderr
+        if bytes(report.get('stdout', [])) != case.stdout or bytes(report.get('stderr', [])) != stderr:
             return True, 'evaluator output differs'
         if expected['kind'] == 'returned' and report.get('used') != 0:
             return True, f"evaluator returned with {report.get('used')} bytes admitted"

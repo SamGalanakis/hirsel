@@ -55,6 +55,34 @@ fn new_charges_header_slots_and_room() -> bool {
     }
 }
 
+fn refused_connection(cap: u64, room: u64) -> Capacity {
+    let opened: Result[(Client[u64], Inbox[u64]), Capacity] = conn.new(cap, bytes room)
+    match opened {
+        Error(c) => c,
+        Ok(_) => fail("connection unexpectedly admitted"),
+    }
+}
+
+// A request at either maximum is limited by the current 72 bytes. The next
+// value is refused with zero available. For u64 the request is 64 + 8 × cap + room.
+// expect: run connection_capacity_limits() = true
+fn connection_capacity_limits() -> bool {
+    let checked = bound bytes 72 {
+        let slots = refused_connection(4194303, 0)
+        let too_many = refused_connection(4194304, 0)
+        let room = refused_connection(1, 1099511627775)
+        let too_much = refused_connection(1, 1099511627776)
+        let slot_limits = slots.requested == 33554488 && slots.available == 72 && too_many.requested == 33554496 && too_many.available == 0
+        let room_limits = room.requested == 1099511627847 && room.available == 72 && too_much.requested == 1099511627848 && too_much.available == 0
+        let probe: Result[(Client[u64], Inbox[u64]), Capacity] = conn.new(1, bytes 0)
+        match probe {
+            Ok(_) => slot_limits && room_limits,
+            Error(_) => false,
+        }
+    }
+    result.unwrap(checked)
+}
+
 // A connection with no slots is a program error.
 // expect: run zero_slots() = fail Bounds
 fn zero_slots() -> bool {
@@ -262,6 +290,95 @@ fn helper_refusals(tasks: Tasks) -> bool {
         Ok(a) => a && second,
         _ => false,
     }
+}
+
+// The current bound has zero steps while its enclosing bound has 17. Entry
+// into the helper's callable costs one step, so the helper fails OutOfTime.
+// expect: run helper_entry_charges_inherited_bound(tasks) = true
+fn helper_entry_charges_inherited_bound(tasks: Tasks) -> bool waits {
+    let spawned = bound steps 17 {
+        let inner = bound steps 0 {
+            task.spawn_unit(tasks, bytes 0, 7u64, idle)
+        }
+        result.unwrap(take inner)
+    }
+    let helper = result.unwrap(result.unwrap(take spawned))
+    match task.join(take helper) {
+        Error(Failed(causes)) => {
+            for c in causes {
+                return match c.kind {
+                    OutOfTime => true,
+                    _ => false,
+                }
+            }
+            false
+        },
+        _ => false,
+    }
+}
+
+fn fail_owned(take unit: ()) {
+    fail(owned("unit fail"))
+}
+
+// Spawn costs 256 + 32 + 16 = 304. After join, the cause cell and the
+// nine-byte message still cost 32 + round8(9) = 48. Dropping them returns all 304.
+// expect: run helper_join_keeps_failure_message(tasks) = true
+fn helper_join_keeps_failure_message(tasks: Tasks) -> bool waits {
+    let checked = bound bytes 304 {
+        let helper = result.unwrap(task.spawn_unit(tasks, bytes 16, (), fail_owned))
+        let message = match task.join(take helper) {
+            Error(Failed(causes)) => {
+                let room = refused_connection(1, 201)
+                let mut count = 0u64
+                let mut exact = false
+                for c in causes {
+                    count += 1
+                    exact = match c.kind {
+                        Fail(message) => message == "unit fail",
+                        _ => false,
+                    }
+                }
+                count == 1 && exact && room.requested == 273 && room.available == 256
+            },
+            _ => false,
+        }
+        let whole: Result[(Client[u64], Inbox[u64]), Capacity] = conn.new(1, bytes 232)
+        match whole {
+            Ok(_) => message,
+            Error(_) => false,
+        }
+    }
+    result.unwrap(checked)
+}
+
+fn discard_listener(take l: Listener) {
+    let _ = take l
+}
+
+fn cross_served_listener(take args: (Net, Tasks)) waits {
+    let (n, tasks) = args
+    let address = Addr(ip: V4(2130706433), port: 8080)
+    let (l, _) = result.unwrap(host.listen(n, address, 4))
+    let _ = task.spawn_unit(tasks, bytes 0, take l, discard_listener)
+}
+
+// A virtual Net owns the listener it returned. Transferring it to a helper
+// stops the whole run with exit 102 and the UnitSocket name (FAIL-15).
+// expect: run served_listener_stops_unit_transfer(tasks) = stop UnitSocket
+fn served_listener_stops_unit_transfer(tasks: Tasks) waits {
+    let (n, s) = provide.net(bytes 32)
+    let mut served = take s
+    let child = task.spawn(tasks, bytes 4096, (n, tasks), cross_served_listener)
+    let Some(take call) = provide.next(mut served) else {
+        fail("expected a listen call")
+    }
+    let address = match provide.net_op(call) {
+        Listen(addr: address, backlog: _) => address,
+        _ => fail("expected a listen call"),
+    }
+    result.unwrap(provide.reply(mut served, take call, provide.net_reply(Listener(1, address))))
+    let _ = task.join(take child)
 }
 
 // Both release orders return the whole charge within the owner's operation.

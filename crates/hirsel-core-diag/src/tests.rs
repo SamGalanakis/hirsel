@@ -41,6 +41,15 @@ fn catalogue_is_current_spec_with_no_separate_guidance() {
 }
 
 #[test]
+fn fail_15_lists_unit_socket() {
+    let fail_15 = rule("FAIL-15").unwrap();
+    let spec = fs::read_to_string(repo().join(fail_15.spec_file)).unwrap();
+    let (_, chapter) = spec.split_once("### FAIL-15: Run stops\n").unwrap();
+    let body = chapter.split("\n### ").next().unwrap();
+    assert!(body.lines().any(|line| line.ends_with("| `UnitSocket` |")));
+}
+
+#[test]
 fn examples_assert_the_requested_rule() {
     // The corpus has explicit LANG-11 refusal cases, including body/arity.hirsel.
     example("LANG-11").expect("checked LANG-11 example");

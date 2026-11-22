@@ -21,14 +21,17 @@
 //! capacity. Clients move as handles. Sockets move with their registrations detached.
 use crate::{
     Capacity, Context, block,
-    causes::{self, Cause, Causes, Cell},
+    causes::{self, Cause, Causes, Cell, StringMessage},
     limit::Payer,
     net::{CrossedSocket, CrossingSockets, SocketCrossing},
     tasks::{self, Body, Readies, TaskLayout, Waiters},
     units::ledger::conn::{Client, Inbox, MAX_CAP, MAX_ROOM, Sent},
     units::ledger::{Released, Took, UnitCtx, Value},
 };
-use hirsel_core_layout::cross::{CLIENT, SEQ, SOCKET};
+use hirsel_core_layout::{
+    charge,
+    cross::{CLIENT, SEQ, SOCKET},
+};
 use std::{
     collections::HashMap,
     mem::MaybeUninit,
@@ -675,7 +678,7 @@ pub unsafe extern "C" fn hirsel_core_conn_new(
         }
         let charge = cap
             .checked_mul(logical)
-            .and_then(|s| s.checked_add(64))
+            .and_then(|s| s.checked_add(charge::CONNECTION_BASE))
             .and_then(|s| s.checked_add(b));
         // A connection the connection word cannot hold is refused as one no
         // limit admits.
@@ -1039,13 +1042,82 @@ struct ValueOut {
 /// What the helper's thread hands back in the ledger's result value.
 struct Ended {
     failed: bool,
-    causes: Vec<(u8, u64)>,
+    causes: Vec<CrossedCause>,
     /// The result's content.
     result: u64,
     /// The cleaned connections it left behind with clients elsewhere: each
     /// one's key and its retained charge, part of `n`.
     survivors: Vec<(usize, u64)>,
     run_grants: u64,
+}
+
+struct CrossedCause {
+    cause: Cause,
+    owned_message: Vec<u8>,
+    message_charge: u64,
+}
+
+// SAFETY: owned bytes are copied into the Vec, and the remaining cause pointer
+// is either null, run-lived immutable storage or a scalar payload.
+unsafe impl Send for CrossedCause {}
+
+impl CrossedCause {
+    fn pack(cause: &Cause) -> Self {
+        let StringMessage {
+            data,
+            len,
+            capacity,
+        } = cause.message;
+        let (data, owned_message, message_charge) = if cause.kind() == causes::FAIL && capacity != 0
+        {
+            let content = if len == 0 {
+                Vec::new()
+            } else {
+                // SAFETY: the live cause owns this initialized String prefix.
+                unsafe { std::slice::from_raw_parts(data, len as usize) }.to_vec()
+            };
+            (ptr::null_mut(), content, charge::seq(capacity, 1).unwrap())
+        } else {
+            // Static message bytes live through the run. Other causes carry
+            // scalar payloads in these words.
+            (data, Vec::new(), 0)
+        };
+        Self {
+            cause: Cause {
+                message: StringMessage {
+                    data,
+                    len,
+                    capacity,
+                },
+                site: cause.site,
+            },
+            owned_message,
+            message_charge,
+        }
+    }
+
+    fn unpack(self, context: &Context, held: &mut Held) -> Cause {
+        let mut cause = self.cause;
+        if self.message_charge != 0 {
+            let data = block::allocate_admitted(
+                context,
+                held.partition(self.message_charge),
+                cause.message.capacity as usize,
+                8,
+                block::PLAIN,
+            );
+            // SAFETY: the copied prefix fits in the new buffer at the original capacity.
+            unsafe {
+                ptr::copy_nonoverlapping(
+                    self.owned_message.as_ptr(),
+                    data.as_ptr(),
+                    self.owned_message.len(),
+                );
+            }
+            cause.message.data = data.as_ptr();
+        }
+        cause
+    }
 }
 
 /// A tagged task handle names a helper.
@@ -1137,6 +1209,7 @@ pub unsafe extern "C" fn hirsel_core_spawn_unit(
         let run = (*context).run;
         let foreign = (*context).foreign;
         let map_hash_key = (*context).map_hash_key;
+        let steps = crate::steps::remaining(&*context);
         let registry = (*context)
             .host_files
             .as_ref()
@@ -1158,6 +1231,7 @@ pub unsafe extern "C" fn hirsel_core_spawn_unit(
             body,
             layout,
             n,
+            steps,
             shared,
         ));
         let start = move || {
@@ -1177,6 +1251,7 @@ pub unsafe extern "C" fn hirsel_core_spawn_unit(
                 body,
                 layout,
                 n,
+                steps,
                 shared,
             ) = job.0;
             helper_main(
@@ -1194,6 +1269,7 @@ pub unsafe extern "C" fn hirsel_core_spawn_unit(
                 body,
                 layout,
                 n,
+                steps,
                 shared,
             );
         };
@@ -1231,12 +1307,14 @@ fn helper_main(
     body: Body,
     layout: TaskLayout,
     n: u64,
+    steps: Option<u64>,
     shared: Arc<HelperShared>,
 ) {
     // SAFETY: this thread owns the helper's context and run for its life.
     unsafe {
         // The task record and primary cell are the owner's (outside n).
         let mut context = Context::with_unit_heap(n + 256 + 32);
+        crate::steps::install_inherited(&mut context, steps);
         context.run = run;
         context.foreign = foreign;
         context.map_hash_key = map_hash_key;
@@ -1289,7 +1367,7 @@ fn helper_main(
         let survivors = lu.retained.drain().map(|(k, h)| (k, h.bytes)).collect();
         let ended = Ended {
             failed: failed != 0,
-            causes: context.causes.iter().map(|c| (c.kind(), c.site)).collect(),
+            causes: context.causes.iter().map(CrossedCause::pack).collect(),
             result: if failed == 0 {
                 item_charge(result.as_ptr(), &ro)
             } else {
@@ -1352,12 +1430,12 @@ unsafe fn end_take(u: &mut LangUnit, h: &mut HelperH) {
     if ended.run_grants != 0 {
         u.run_grants.push(held.split(ended.run_grants));
     }
-    let cells = if ended.failed {
-        32 * ended.causes.len() as u64
-    } else {
-        0
-    };
-    let keep = h.r_size + ended.result + cells;
+    let causes = ended
+        .causes
+        .iter()
+        .map(|cause| charge::CAUSE_CELL + cause.message_charge)
+        .sum::<u64>();
+    let keep = h.r_size + ended.result + causes;
     drop(held.split(held.bytes.saturating_sub(keep)));
 }
 
@@ -1383,10 +1461,9 @@ unsafe fn wait_end(context: *mut Context, h: *mut HelperH, site: u64, shielded: 
     }
 }
 
-/// Consume an ended helper: its result into `dest` (when it succeeded and
-/// `dest` is not null), its causes as a chain. The spawn's charge is released
-/// except what the result's owners keep.
-unsafe fn consume(context: *mut Context, h: *mut HelperH, dest: *mut u8) -> (bool, Causes) {
+/// Consume an ended helper. A join delivers the result or the cause chain.
+/// The spawn's charge is released except what the delivered owners keep.
+unsafe fn consume(context: *mut Context, h: *mut HelperH, dest: Option<*mut u8>) -> (bool, Causes) {
     // SAFETY: the owner consumes the sole handle once.
     unsafe {
         let u = unit();
@@ -1403,6 +1480,7 @@ unsafe fn consume(context: *mut Context, h: *mut HelperH, dest: *mut u8) -> (boo
         let mut chain = Causes::default();
         if !ended.failed {
             if let Some(v) = ret.as_ref()
+                && let Some(dest) = dest
                 && !dest.is_null()
             {
                 let s = item_charge(v.item().as_ptr(), &hb.result.owners);
@@ -1425,17 +1503,10 @@ unsafe fn consume(context: *mut Context, h: *mut HelperH, dest: *mut u8) -> (boo
                     v.item_sockets(),
                 );
             }
-        } else {
-            for (kind, site) in &ended.causes {
-                if held.bytes < 32 {
-                    break;
-                }
-                let mut cell = Cell::prepaid(held.partition(32));
-                cell.cause = if *kind == causes::FAIL {
-                    Cause::fail(Default::default(), *site)
-                } else {
-                    Cause::new(*kind, *site)
-                };
+        } else if dest.is_some() {
+            for cause in ended.causes {
+                let mut cell = Cell::prepaid(held.partition(charge::CAUSE_CELL));
+                cell.cause = cause.unpack(&*context, &mut held);
                 chain.append(cell);
             }
         }
@@ -1465,7 +1536,7 @@ pub(crate) unsafe fn join(
             };
         }
         let _commit = tasks::before_commit();
-        let (failed, chain) = consume(context, h, result);
+        let (failed, chain) = consume(context, h, Some(result));
         let cancelled = chain
             .iter()
             .next()
@@ -1498,8 +1569,7 @@ pub(crate) unsafe fn abandon(context: *mut Context, task: *mut tasks::Task) -> u
         cancel(task);
         wait_end(context, helper_of(task), 0, true);
         let _commit = tasks::before_commit();
-        let (_, chain) = consume(context, helper_of(task), ptr::null_mut());
-        drop(chain);
+        consume(context, helper_of(task), None);
         0
     }
 }

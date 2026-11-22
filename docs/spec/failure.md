@@ -249,6 +249,7 @@ are the host's, PROG-3's exception, a native abort's included:
 | the host refuses memory the engine needs | `HostMemory` |
 | the host refuses the signal stack, a signal action, the clock or the page size | `SignalStack`, `Signal`, `Clock`, `PageSize` |
 | a host provider lacks one of its five callbacks when the run installs it, before `main`, or answers a `wait` or step kind outside the provider ABI | `Provider` |
+| a unit's spawn, result or connection send attempts to transfer a socket half, a TLS socket, or a socket or listener owned by a virtual `Net` provider ([CONC-15](tasks.md#conc-15-units), [CONC-17](tasks.md#conc-17-connections)) | `UnitSocket` |
 
 A flow operation ends at its closure ([CONC-14](tasks.md#conc-14-flows)). The `Deadlock` rule does not count its owner as waiting.
 An operation on a virtual provider ([core](core.md#provide)) waits on the task that serves

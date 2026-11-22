@@ -950,6 +950,10 @@ pub(super) fn run_expect(
             report.used
         ));
     }
+    if let ["stop", expected] = want {
+        return (!matches!(got, eval::Outcome::Stopped(name) if name == *expected))
+            .then(|| format!("run {call}: want stop {expected}, got {got:?}"));
+    }
     let expected = match want {
         ["fail", causes] => eval::Outcome::Failed(causes.split(',').map(str::to_string).collect()),
         [rs] => {

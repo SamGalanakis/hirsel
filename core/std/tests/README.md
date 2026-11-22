@@ -25,6 +25,7 @@ No-argument scalar tests, f(dir), f(out), f(err), f(clock), f(tasks) and f(dir, 
 a fresh empty confined host directory and run locally on a host with openat2,
 Linux >= 5.6 and a seccomp profile permitting the syscall. Expected failure syntax
 is "= fail Bounds" (or Fail, Overflow etc); the cause and process status are checked.
+A run stop uses "= stop UnitSocket" and checks the stop name and native exit status 102.
 
 A stream contract can state exact output before its run oracle:
 

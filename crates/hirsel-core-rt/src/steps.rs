@@ -37,10 +37,19 @@ fn install_window(context: &mut Context, slice: u64) {
 }
 
 pub(crate) fn inherit(child: &mut Context, parent: &Context) {
-    if let Some(current) = parent.step_bounds.last() {
-        child
-            .step_bounds
-            .push(bound(current.left + window_left(parent)));
+    install_inherited(child, remaining(parent));
+}
+
+pub(crate) fn remaining(context: &Context) -> Option<u64> {
+    context
+        .step_bounds
+        .last()
+        .map(|current| current.left + window_left(context))
+}
+
+pub(crate) fn install_inherited(child: &mut Context, remaining: Option<u64>) {
+    if let Some(remaining) = remaining {
+        child.step_bounds.push(bound(remaining));
         install_window(child, SLICE);
     }
 }

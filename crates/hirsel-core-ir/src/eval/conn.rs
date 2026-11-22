@@ -208,8 +208,12 @@ impl Machine<'_> {
         let charge = cap
             .checked_mul(self.logical(item))
             .and_then(|n| n.checked_add(charge::CONNECTION_BASE))
-            .and_then(|n| n.checked_add(room))
-            .unwrap_or(u64::MAX);
+            .and_then(|n| n.checked_add(room));
+        let Some(charge) = charge.filter(|_| {
+            cap <= charge::CONNECTION_MAX_CAPACITY && room <= charge::CONNECTION_MAX_ROOM
+        }) else {
+            return Ok(vec![0, 0, 0]);
+        };
         if let Err(available) = self.admit(cur, charge) {
             return Ok(vec![0, 0, available]);
         }

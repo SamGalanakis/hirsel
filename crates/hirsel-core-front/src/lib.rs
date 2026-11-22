@@ -200,7 +200,13 @@ pub const SIBLING_READS: [(&str, &str, &str, &str, &[&str]); 11] = [
         "deque",
         &["prepare_push", "finish_prepared_push"],
     ),
-    ("core", "map", "insert", "map", &["probe_insert"]),
+    (
+        "core",
+        "map",
+        "insert",
+        "map",
+        &["probe_staged", "commit_crowded", "commit"],
+    ),
     // `codec.of[T]` at a built-in T calls T's maker (body/calls.rs `codec_of`,
     // and body/templates.rs `codec_maker` at an instance).
     ("std", "codec", "of", "codec", &body::BUILTIN_CODEC_MAKERS),

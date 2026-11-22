@@ -3230,32 +3230,12 @@ fn program_inputs_rebuild_bodies_like_fresh() {
     // Copies of core and std whose std lacks one maker: `of_u64`, or `of_list`.
     let without = |maker: &str, next: char| {
         let copy = libraries.path().join(maker);
-        let mut pending = vec![PathBuf::new()];
-        while let Some(at) = pending.pop() {
-            std::fs::create_dir_all(copy.join(&at)).unwrap();
-            for top in ["core", "std"].iter().filter(|_| at.as_os_str().is_empty()) {
-                pending.push(PathBuf::from(top));
-            }
-            if at.as_os_str().is_empty() {
-                continue;
-            }
-            for entry in std::fs::read_dir(shipped.join(&at)).unwrap() {
-                let relative = at.join(entry.unwrap().file_name());
-                if shipped.join(&relative).is_dir() {
-                    pending.push(relative);
-                } else if relative.extension().is_some_and(|e| e == "hirsel") {
-                    let text = std::fs::read_to_string(shipped.join(&relative)).unwrap();
-                    let text = text.replace(
-                        &format!("pub fn {maker}{next}"),
-                        &format!("pub fn {maker}_renamed{next}"),
-                    );
-                    std::fs::write(copy.join(&relative), text).unwrap();
-                } else {
-                    // Test vectors are bytes, some of them deliberately not UTF-8.
-                    std::fs::copy(shipped.join(&relative), copy.join(&relative)).unwrap();
-                }
-            }
-        }
+        copy_libraries(&shipped, &copy, &|text| {
+            text.replace(
+                &format!("pub fn {maker}{next}"),
+                &format!("pub fn {maker}_renamed{next}"),
+            )
+        });
         copy
     };
     let renamed = without("of_u64", '(');
@@ -3338,6 +3318,133 @@ fn program_inputs_rebuild_bodies_like_fresh() {
                 .collect()
         };
         assert_eq!(records(&built), records(&fresh), "{case}: products");
+    }
+}
+
+/// Copies `shipped`'s `core` and `std` trees to `copy`, each source text through `edit`.
+fn copy_libraries(shipped: &Path, copy: &Path, edit: &dyn Fn(String) -> String) {
+    let mut pending = vec![PathBuf::from("core"), PathBuf::from("std")];
+    while let Some(at) = pending.pop() {
+        std::fs::create_dir_all(copy.join(&at)).unwrap();
+        for entry in std::fs::read_dir(shipped.join(&at)).unwrap() {
+            let relative = at.join(entry.unwrap().file_name());
+            if shipped.join(&relative).is_dir() {
+                pending.push(relative);
+            } else if relative.extension().is_some_and(|e| e == "hirsel") {
+                let text = std::fs::read_to_string(shipped.join(&relative)).unwrap();
+                std::fs::write(copy.join(&relative), edit(text)).unwrap();
+            } else {
+                // Test vectors are bytes, some of them deliberately not UTF-8.
+                std::fs::copy(shipped.join(&relative), copy.join(&relative)).unwrap();
+            }
+        }
+    }
+}
+
+/// A body whose lowering calls a core helper by a path it builds (list growth,
+/// heap and deque slot preparation and publication, Map's staged probe and
+/// commits) is rechecked when that helper's header moves; here the helper is
+/// renamed away, so lowering no longer finds it. The sets are read off the
+/// lowering by hand, not from the key's table: `list.push` calls `grow`
+/// (body/lists.rs `list_push`); `reserve` at a fresh amount, `append`, `fill`
+/// and String's `push` and `reserve` call `grow_by` (`list_reserve_shared`);
+/// a constructed `heap.push`, `deque.push_front` or `deque.push_back` value
+/// calls its module's `prepare_push` and `finish_prepared_push`
+/// (body/slots.rs); a constructed `map.insert` value calls `probe_staged`,
+/// `commit_crowded` and `commit` (body/maps.rs). A body that calls none of
+/// them is never rechecked. Red on a key that hashed `probe_insert` for
+/// `map.insert` (cx-reuse-key-refs-1726).
+#[test]
+fn renamed_lowering_helpers_recheck_the_bodies_that_lower_through_them() {
+    const APP: &str = "\
+fn plain() -> u64 { 1u64 }
+fn push_list(mut xs: List[u64]) { list.push(mut xs, 1u64) }
+fn reserve_list(mut xs: List[u64], n: u64) { list.reserve(mut xs, n) }
+fn append_list(mut xs: List[u64], ys: List[u64]) { list.append(mut xs, ys) }
+fn fill_list(mut xs: List[u64], n: u64) { list.fill(mut xs, n, 0u64) }
+fn push_string(mut s: String) { let _ = string.push(mut s, \"!\") }
+fn reserve_string(mut s: String, n: u64) { string.reserve(mut s, n) }
+fn push_heap(mut h: Heap[(u64, u64)]) { heap.push(mut h, (1u64, 2u64)) }
+fn push_front(mut d: Deque[(u64, u64)]) { deque.push_front(mut d, (1u64, 2u64)) }
+fn push_back(mut d: Deque[(u64, u64)]) { deque.push_back(mut d, (1u64, 2u64)) }
+fn insert_map(mut m: Map[u64, (u64, u64)]) { map.insert(mut m, 1u64, (2u64, 3u64)) }
+";
+    let heap = ["push_heap"].as_slice();
+    let deque = ["push_back", "push_front"].as_slice();
+    let map = ["insert_map"].as_slice();
+    let growth = [
+        "append_list",
+        "fill_list",
+        "push_string",
+        "reserve_list",
+        "reserve_string",
+    ];
+    let cases: [(&str, &str, &[&str]); 9] = [
+        ("list", "grow", &["push_list"]),
+        ("list", "grow_by", &growth),
+        ("heap", "prepare_push", heap),
+        ("heap", "finish_prepared_push", heap),
+        ("deque", "prepare_push", deque),
+        ("deque", "finish_prepared_push", deque),
+        ("map", "probe_staged", map),
+        ("map", "commit_crowded", map),
+        ("map", "commit", map),
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("libraries");
+    let shipped = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core");
+    copy_libraries(&shipped, &root, &|text| text);
+    let app = dir.path().join("app");
+    std::fs::create_dir(&app).unwrap();
+    std::fs::write(app.join("main.hirsel"), APP).unwrap();
+    let check = || {
+        let mut request = CheckRequest::program(&app, &root, &dir.path().join("store")).unwrap();
+        request.entry = None;
+        Driver::default()
+            .check(request, &mut Meter::new(false))
+            .unwrap()
+    };
+    let base = check();
+    assert!(
+        base.diagnostics.is_empty() && base.incomplete.is_empty(),
+        "{:?} {:?}",
+        base.diagnostics,
+        base.incomplete
+    );
+    for (module, helper, readers) in cases {
+        let file = root.join("core").join(format!("{module}.hirsel"));
+        let text = std::fs::read_to_string(&file).unwrap();
+        // Every use of the name as a whole word: its definition and its calls.
+        let (mut renamed, mut copied) = (String::new(), 0);
+        for (at, _) in text.match_indices(helper) {
+            let end = at + helper.len();
+            let prior = text[..at].chars().next_back();
+            if !prior.is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '.')
+                && text[end..].starts_with(['[', '('])
+            {
+                renamed.push_str(&text[copied..end]);
+                renamed.push_str("_renamed");
+                copied = end;
+            }
+        }
+        renamed.push_str(&text[copied..]);
+        assert_ne!(renamed, text, "{module}.{helper}: no definition to rename");
+        let _ = std::fs::remove_file(&file);
+        std::fs::write(&file, &renamed).unwrap();
+        let edited = check();
+        let rechecked = names(&edited);
+        for reader in readers {
+            assert!(
+                rechecked.contains(reader),
+                "{module}.{helper}: `{reader}` was reused; rechecked {rechecked:?}"
+            );
+        }
+        assert!(
+            !rechecked.contains(&"plain"),
+            "{module}.{helper}: rechecked {rechecked:?}"
+        );
+        let _ = std::fs::remove_file(&file);
+        std::fs::write(&file, &text).unwrap();
     }
 }
 

@@ -54,14 +54,14 @@ Each classifier takes a `char` and returns whether it has a property of the pinn
 (UNI-1), with no allocation and no failure.
 
 ```hirsel
-pub fn is_alphabetic(c: char) -> bool
-pub fn is_letter(c: char) -> bool
-pub fn is_numeric(c: char) -> bool
-pub fn is_decimal(c: char) -> bool
-pub fn is_alphanumeric(c: char) -> bool
-pub fn is_whitespace(c: char) -> bool
-pub fn is_uppercase(c: char) -> bool
-pub fn is_lowercase(c: char) -> bool
+pub fn is_alphabetic(c: char) -> bool { char.is_alphabetic(c) }
+pub fn is_letter(c: char) -> bool { char.is_letter(c) }
+pub fn is_numeric(c: char) -> bool { char.is_numeric(c) }
+pub fn is_decimal(c: char) -> bool { char.is_decimal(c) }
+pub fn is_alphanumeric(c: char) -> bool { char.is_alphanumeric(c) }
+pub fn is_whitespace(c: char) -> bool { char.is_whitespace(c) }
+pub fn is_uppercase(c: char) -> bool { char.is_uppercase(c) }
+pub fn is_lowercase(c: char) -> bool { char.is_lowercase(c) }
 ```
 
 | function | true exactly when `c` | as in |
@@ -101,13 +101,14 @@ fn word_char(c: char) -> bool {
 `char.Category` named by the database's short alias.
 
 ```hirsel
-pub type Category: key = Lu | Ll | Lt | Lm | Lo | Mn | Mc | Me | Nd | Nl | No | Pc | Pd | Ps | Pe | Pi | Pf | Po | Sm | Sc | Sk | So | Zs | Zl | Zp | Cc | Cf | Co | Cn
-pub fn category(c: char) -> Category
+pub type Category = char.Category
+pub fn category(c: char) -> Category { char.category(c) }
 ```
 
-- The variants are the 30 General_Category values in the order UAX #44 lists them, less `Cs`:
-  a `char` is a scalar value and never a surrogate, so `Cs` cannot be returned and is not
-  declared.
+- `char.Category` is a `key` type with these variants in UAX #44 order: `Lu`, `Ll`, `Lt`, `Lm`,
+  `Lo`, `Mn`, `Mc`, `Me`, `Nd`, `Nl`, `No`, `Pc`, `Pd`, `Ps`, `Pe`, `Pi`, `Pf`, `Po`, `Sm`, `Sc`,
+  `Sk`, `So`, `Zs`, `Zl`, `Zp`, `Cc`, `Cf`, `Co`, `Cn`. A `char` is a scalar value and never a
+  surrogate, so there is no `Cs` variant.
 - `Cn` is every scalar `UnicodeData.txt` does not list, noncharacters such as U+FFFF included.
   A scalar inside a `<..., First>` to `<..., Last>` range takes that range's category: `Lo` for
   U+4E00, `Co` for U+F0000.
@@ -133,10 +134,10 @@ A scalar's uppercase and lowercase are full case mappings, possibly several scal
 string's is the concatenation of its scalars' mappings, in order.
 
 ```hirsel
-pub fn push_upper(mut out: String, c: char)
-pub fn push_lower(mut out: String, c: char)
-pub fn to_upper(s: String) -> String
-pub fn to_lower(s: String) -> String
+pub fn push_upper(mut out: String, c: char) { string.push_upper(mut out, c) }
+pub fn push_lower(mut out: String, c: char) { string.push_lower(mut out, c) }
+pub fn to_upper(s: String) -> String { string.to_upper(s) }
+pub fn to_lower(s: String) -> String { string.to_lower(s) }
 ```
 
 - **One scalar.** `upper(c)` is the `<upper>` field of the `SpecialCasing.txt` entry for `c` with

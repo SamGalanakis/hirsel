@@ -118,7 +118,7 @@ them may contain such values.
 | `WAIT` | `Proc` ordinal; `until` | the termination (`Exited` code or `Signalled` number), or the error |
 | `SIGNAL` | `Proc` ordinal; the signal | the outcome |
 | `RECV_BOUNDED`, `SEND_PAIR` on a pipe half | as for a socket | as for a socket |
-| `UNIX_CONNECT`, `UNIX_LISTEN`, `UNIX_ACCEPT` | Net or listener ordinal; root label, path, backlog or `until` | the new ordinal, or the error, `BoundNotListening` included |
+| `UNIX_CONNECT`, `UNIX_LISTEN`, `UNIX_ACCEPT` | Net or listener ordinal; root label, path, backlog or `until` | the new ordinal, or the error; `BoundNotListening` only for `UNIX_LISTEN`, and `Corrupt` elsewhere |
 | `DGRAM_OPEN`, `DGRAM_BIND`, `DGRAM_CONNECT` | Net or datagram ordinal; root label and path where given | the new ordinal or the outcome |
 | `DGRAM_SEND`, `DGRAM_SEND_TO` | datagram ordinal; root label and path for send-to; the packet; `until` | the outcome |
 | `DGRAM_RECV` | datagram ordinal; spare capacity; `until` | the appended bytes, the packet's length and the truncation flag, or the error |

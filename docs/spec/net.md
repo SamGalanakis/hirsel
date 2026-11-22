@@ -276,19 +276,28 @@ beneath its root as a `Dir` path is resolved, through no symbolic link and never
 root, and acts on what that resolution found. There is no fallback that checks a path and then
 hands it to the kernel to resolve again.
 
-- `connect_unix` resolves the whole endpoint, checks that it is a socket, and keeps that
-  socket's identity through the connect. A node that is not a socket, or a symbolic link at
-  the final component, gives `Denied`.
-- `listen_unix` pins the endpoint's parent directory, which resolved beneath the root, and
-  binds one validated final component inside it. An existing node there gives `InUse`.
+- Every operation first resolves the endpoint's parent components. A symbolic link, a
+  non-directory or an escape among them gives `Denied`.
+- `connect_unix` then resolves the final component, checks that it is a socket, and keeps
+  that socket's identity through the connect. A final component that is a symbolic link or
+  any node other than a socket gives `Denied`. A successful connect reaches that socket.
+  Its listener may close or stop accepting before the connect completes, and the connect
+  then fails with the host's error, such as `Refused`, with no second lookup.
+- `listen_unix` pins the parent directory and binds one validated final component inside
+  it. The final component is the bind slot: an existing node of any kind there, a regular
+  file, a directory, a socket or a symbolic link, gives `InUse`.
 - A pinned directory is the directory itself, not its path, as for every `Dir` handle. If a
   process outside the run moves that directory while the bind runs, the node is created where
   the directory now is. An operator who needs every node to stay beneath the root keeps the
   root's subtree from being renamed by others.
 - Bind creates the node. A listen that fails after its bind committed gives
-  `BoundNotListening(code)`, which says the node exists. Every other listen error left no
-  node. The provider never unlinks a node: not on this error and not when a `UnixListener` is
-  dropped. Removing one is a `Dir` operation.
+  `BoundNotListening(code)`, which says that this call created a node in the slot and that
+  its listen then failed. It says nothing about the slot at delivery: another process may
+  already have removed or replaced that node. Every other `listen_unix` error says that this
+  call created no node. The provider never unlinks a node: not on this error and not when a
+  `UnixListener` is dropped. Removing one is a `Dir` operation.
+- Only `listen_unix` produces `BoundNotListening`. Any other Unix or IP operation that
+  delivers it is `Corrupt` on a tape and fails a server with `Fail`.
 
 A pathname names a slot, not a peer. A later operation resolves the slot anew, so if a
 legitimate rebind replaces the node, a later connect reaches the new listener.
@@ -303,13 +312,16 @@ has a backlog and no `Until`.
 
 Laws:
 
-- when a symbolic link, a non-socket node or a directory outside the root is in the
-  endpoint's path at resolution, connect and bind give `Denied` and reach no socket outside
-  the root;
-- when the slot is replaced after the connect resolved it, that connect still reaches the
-  socket it resolved, and a later connect resolves the new slot;
-- a listen that fails after binding gives `BoundNotListening`, and one that fails before
-  binding leaves no node.
+- when a symbolic link, a non-directory or a directory outside the root is among the
+  endpoint's parent components at resolution, connect and bind give `Denied` and reach no
+  socket outside the root;
+- for connect, a symbolic link or a non-socket node at the final component gives `Denied`;
+  for bind, any existing node there gives `InUse`;
+- when the slot is replaced after the connect resolved it, that connect either reaches the
+  socket it resolved or fails, and never reaches the replacement; a later connect resolves
+  the new slot;
+- a listen that fails after its bind gives `BoundNotListening`, and that call created the
+  node; a listen that fails before its bind creates no node.
 
 ### NET-14: Unix datagrams
 
@@ -378,7 +390,8 @@ pub type UnixReply = UnixSocket(u64) | UnixListening(u64) | Datagram(u64) | Pack
 These cases join `NetOp` and `NetReply` themselves. They are shown apart here only because
 those types are built. The caller makes the handle-state checks above before it queues a call.
 A `Packet` reply must have staged exactly `min(room, len)` bytes with `truncated` equal to
-`len > room`. Any other packet, or a reply of the wrong kind for its call, fails the server
+`len > room`. An error reply to `RecvDatagram` delivers no bytes and discards whatever the
+server staged. Any other packet, or a reply of the wrong kind for its call, fails the server
 with `Fail` before the caller changes. A server models a listener as a named queue and a
 datagram endpoint as a bounded packet queue. It commits a dequeue or a send only after its
 reply returns `Ok(())`. A virtual server never receives a host directory.

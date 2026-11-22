@@ -506,7 +506,7 @@ mod tests {
     use super::*;
     use hirsel_core_ids::{
         ContentHash,
-        published::{Descriptor, Reader, Source},
+        published::{Descriptor, Reader, Source, encode_row},
     };
     use std::{
         io,
@@ -514,26 +514,21 @@ mod tests {
     };
 
     struct Names {
-        rows: Vec<Arc<str>>,
+        rows: Vec<Vec<u8>>,
         lookups: AtomicUsize,
         reads: AtomicUsize,
-    }
-    fn text(name: &str) -> Vec<u8> {
-        let mut bytes = (name.len() as u64).to_le_bytes().to_vec();
-        bytes.extend_from_slice(name.as_bytes());
-        bytes
     }
     impl Source for Names {
         fn row(&self, _: Descriptor, index: u32) -> io::Result<Vec<u8>> {
             self.reads.fetch_add(1, Ordering::Relaxed);
-            Ok(text(&self.rows[index as usize]))
+            Ok(self.rows[index as usize].clone())
         }
         fn find(&self, _: Descriptor, key: &[u8]) -> io::Result<Option<u32>> {
             self.lookups.fetch_add(1, Ordering::Relaxed);
             Ok(self
                 .rows
                 .iter()
-                .position(|name| key == text(name))
+                .position(|row| row == key)
                 .map(|i| i as u32))
         }
     }
@@ -543,7 +538,11 @@ mod tests {
         let mut original = Symbols::default();
         let library = original.intern("library_name");
         let names = Arc::new(Names {
-            rows: original.strings.iter().cloned().collect(),
+            rows: original
+                .strings
+                .iter()
+                .map(|name| encode_row(name).unwrap())
+                .collect(),
             lookups: AtomicUsize::new(0),
             reads: AtomicUsize::new(0),
         });

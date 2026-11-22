@@ -2759,7 +2759,7 @@ fn postgres_scripted_peer_laws() {
         packet(&mut ready, b'R', &final_message);
         packet(&mut ready, b'R', &[0; 4]);
         packet(&mut ready, b'S', b"client_encoding\0UTF8\0");
-        packet(&mut ready, b'K', &[0; 8]);
+        packet(&mut ready, b'K', b"\x12\x34\x56\x78\x9a\xbc\xde\xf0");
         packet(&mut ready, b'Z', b"I");
         peer.write_all(&ready).unwrap();
         true
@@ -2863,6 +2863,33 @@ fn postgres_scripted_peer_laws() {
         ended(peer);
     }
 
+    fn cancel_race(listener: &TcpListener, config: &ServerConfig, original: &mut Peer) {
+        // The new stream carries 16, (1234 << 16) | 5678, then exactly
+        // the four-byte PID and four-byte key in BackendKeyData (protocol 3.0).
+        let (socket, _) = listener.accept().unwrap();
+        let mut tls = config.clone();
+        tls.alpn_protocols = vec![b"postgresql".to_vec()];
+        let mut cancel = StreamOwned::new(ServerConnection::new(Arc::new(tls)).unwrap(), socket);
+        let mut request = [0; 16];
+        cancel.read_exact(&mut request).unwrap();
+        assert_eq!(
+            request,
+            *b"\x00\x00\x00\x10\x04\xd2\x16\x2e\x12\x34\x56\x78\x9a\xbc\xde\xf0"
+        );
+        cancel.conn.send_close_notify();
+        cancel.flush().unwrap();
+        ended(&mut cancel);
+
+        begin(original, "SELECT 42", true);
+        send(original, b'D', b"\x00\x01\x00\x00\x00\x04\x00\x00\x00\x2a");
+        send(original, b's', b"");
+        demand(original);
+        send(original, b'C', b"SELECT 1\0");
+        close_portal(original);
+        sync(original, b"I");
+        ended(original);
+    }
+
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
     let config =
@@ -2933,6 +2960,7 @@ fn postgres_scripted_peer_laws() {
         "reuse",
         "ssl-refused",
         "ssl-extra",
+        "cancel",
     ];
     let peer = std::thread::spawn(move || {
         for name in cases {
@@ -2958,6 +2986,7 @@ fn postgres_scripted_peer_laws() {
                 match name {
                     "signature" => ended(&mut peer),
                     "reuse" => recover(&mut peer),
+                    "cancel" => cancel_race(&listener, &config, &mut peer),
                     _ => {
                         begin(&mut peer, "SELECT 1", true);
                         let row: &[u8] = if name == "short-row" {

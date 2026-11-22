@@ -104,6 +104,27 @@ capacity and the deadline. Its delivery holds the addresses in the order deliver
 error. The header's grant snapshot records a `Resolve` rule with direction byte 3 and a
 `u16` count of patterns, each a length byte followed by its bytes, as a `Tls` rule's.
 
+**Child processes and Unix sockets (unbuilt).** An `Exec` grant is recorded in the grant
+snapshot with each profile's name, image digest, `argv0`, argument forms, environment keys
+each marked fixed or `{any}`, and cwd labels. A `Unix` rule is recorded with its direction,
+root label and path. Neither records a host path, a fixed environment value, a process ID or
+a descriptor.
+
+| operation | at issue (checked on replay) | at delivery (supplied on replay) |
+|---|---|---|
+| `SPAWN` | Exec ordinal; canonical args = program, cwd label, path, each argument with its length, the environment sorted by key with lengths, the three stdio modes | the new `Proc` ordinal and one ordinal per piped stream, or the error |
+| `WAIT` | `Proc` ordinal; `until` | the termination (`Exited` code or `Signalled` number), or the error |
+| `SIGNAL` | `Proc` ordinal; the signal | the outcome |
+| `RECV_BOUNDED`, `SEND_PAIR` on a pipe half | as for a socket | as for a socket |
+| `UNIX_CONNECT`, `UNIX_LISTEN`, `UNIX_ACCEPT` | Net or listener ordinal; root label, path, backlog or `until` | the new ordinal, or the error, including a node left by a failed listen |
+| `DGRAM_OPEN`, `DGRAM_BIND`, `DGRAM_CONNECT` | Net or datagram ordinal; root label and path where given | the new ordinal or the outcome |
+| `DGRAM_SEND`, `DGRAM_SEND_TO` | datagram ordinal; root label and path for send-to; the packet; `until` | the outcome |
+| `DGRAM_RECV` | datagram ordinal; spare capacity; `until` | the appended bytes, the packet's length and the truncation flag, or the error |
+
+A replay starts no process and opens no socket. Dropping a replayed `Proc`, pipe half,
+listener or datagram changes local ownership only: nothing is killed, closed or unlinked on
+the host ([EXEC-8](spec/exec.md#exec-8-exec-at-the-replay-point-and-served-exec)).
+
 **Terminal bits.** The `GRANT` frame of a `Stdin`, `Stdout` or `Stderr` grant carries one
 byte after its kind: 1 when the stream was a terminal at launch, 0 otherwise
 ([stdin](../core/std/api/stdin.md#terminals)). `is_terminal` reads it and adds no frames, and

@@ -138,7 +138,7 @@ impl Layout {
             .into_iter()
             .find_map(|k| {
                 let s = self.tokens.get(k)?;
-                (s.start <= offset && s.start <= self.header_end).then_some(Pos::Token {
+                (s.start <= offset && s.start <= self.header_end).then(|| Pos::Token {
                     ordinal: k as u32,
                     offset: offset - s.start,
                 })

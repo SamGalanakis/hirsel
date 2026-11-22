@@ -3,11 +3,15 @@
 ### CAP-1: Authority is explicit
 
 Files, directories, network, processes, clocks, randomness, standard streams, environment
-variables, tasks, credentials ([`Secret`](tls.md#tls-5-secrets)) and native code
-([`Foreign[I]`](foreign.md#ffi-4-the-foreign-capability)) are reached only
+variables, tasks, credentials ([`Secret`](tls.md#tls-5-secrets)), native code
+([`Foreign[I]`](foreign.md#ffi-4-the-foreign-capability)) and child processes
+([`Exec`](exec.md#exec-2-launch-profiles-and-narrowing), unbuilt) are reached only
 through operations that take a capability argument.
 These capability values are the only way a program affects or observes the world outside
 its values. A function holds authority only through its parameters (CAP-3). Top-level `const` values cannot hold capabilities.
+These bounds bind the run's own code. A child process that an `Exec` grant starts is not
+bound by them, and the grant confers what its programs can do
+([EXEC-1](exec.md#exec-1-an-exec-grant-confers-what-its-programs-can-do-and-hirsel-does-not-confine-them)).
 
 ```hirsel
 fn stamp(c: Clock) -> u64 { host.mono_ns(c) }
@@ -26,7 +30,8 @@ A `Secret` can also be sealed from bytes the program already holds
 ([TLS-5](tls.md#tls-5-secrets)). Sealing gives the program no authority it did not have
 before, because it already held those bytes. A capability is also made by **virtual
 construction**: `provide.dir`, `provide.net`, `provide.stdout`, `provide.stderr`,
-`provide.clock`, `provide.random` and `provide.process` ([core](core.md#provide)) each make
+`provide.clock`, `provide.random`, `provide.process` and, unbuilt, `provide.exec`
+([EXEC-8](exec.md#exec-8-exec-at-the-replay-point-and-served-exec)) ([core](core.md#provide)) each make
 a fresh capability whose provider is local state of the run, with the endpoint that answers
 it (a `Served` port, a `ClockHand` or a `StopTrigger`). Virtual construction grants no host
 authority: what such a capability reaches is only what the program that answers it already
@@ -176,7 +181,8 @@ A capability can be narrowed by its module's functions: a `Dir` to a subdirector
 read-only access, a `Net` to a subset of its rules (including its `Tls` rules,
 [TLS-3](tls.md#tls-3-authority)), a `Secret` to fewer destination names, an `Env` to fewer
 variable names ([env](../../core/std/api/env.md)), a `Tasks` to a
-child limit. A narrowed
+child limit, an `Exec` to fewer profiles, argument forms, environment keys or cwd labels
+([EXEC-2](exec.md#exec-2-launch-profiles-and-narrowing), unbuilt). A narrowed
 capability never permits more than its source. No operation widens a capability or
 combines two into more than either.
 

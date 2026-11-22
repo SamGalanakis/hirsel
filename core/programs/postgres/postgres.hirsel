@@ -41,9 +41,9 @@ pub type SqlError {
 
 pub type AuthMethod = Trust | Cleartext | Md5 | Gss | Sspi | Other(i32) | NoScram
 
-pub type ProtocolError = Length | Tag(u8) | Truncated | Fields | AuthenticationOrder | UnverifiedServer | SslReply(u8)
+pub type ProtocolError = Length | Tag(u8) | Truncated | Fields | AuthenticationOrder | UnverifiedServer | SslReply(u8) | CancelReply
 
-pub type Error = Protocol(ProtocolError) | Network(NetError) | OutcomeUnknown(NetError) | EndOfStream | MissingAlpn | TlsRequired | UpgradeUnavailable | UnsupportedAuthentication(AuthMethod) | Scram(secret.ScramError) | Encoding | Sql(SqlError) | Fatal(SqlError) | InvalidRequest | RequestTooLarge | NoAddress | ConnectionClosed | RollbackRequired
+pub type Error = Protocol(ProtocolError) | Network(NetError) | OutcomeUnknown(NetError) | EndOfStream | MissingAlpn | TlsRequired | UpgradeUnavailable | UnsupportedAuthentication(AuthMethod) | Scram(secret.ScramError) | Encoding | Sql(SqlError) | Fatal(SqlError) | InvalidRequest | RequestTooLarge | NoAddress | ConnectionClosed | RollbackRequired | CancelUnavailable
 
 pub type Transaction: key = Idle | InTransaction | Failed
 
@@ -62,13 +62,32 @@ pub type Parameters {
     standard_conforming_strings: Option[String]
 }
 
+type CancelTrust: send = SystemTrust | PinnedRoots(Bytes)
+
+type CancelTarget: send {
+    address: Addr,
+    hostname: String,
+    trust: CancelTrust,
+    mode: TlsMode
+}
+
+/// A one-use request for the exchange whose cursor issued it.
+pub opaque type CancelToken: send {
+    target: CancelTarget,
+    pid: u32,
+    key: Secret
+}
+
 type Session {
     reader: ReadHalf,
     writer: WriteHalf,
     until: Until,
     transaction: Transaction,
     portal_open: bool,
-    parameters: Parameters
+    parameters: Parameters,
+    target: Option[CancelTarget],
+    backend: Option[(u32, u32)],
+    retire: bool
 }
 
 pub opaque type Conn {
@@ -569,10 +588,11 @@ fn startup_packet(user: String, database: String) -> Bytes {
     take b
 }
 
-fn dial(n: Net, hostname: String, port: u16, until: Until) -> Result[Socket, Error] waits {
+fn dial(n: Net, hostname: String, port: u16, until: Until) -> Result[(Socket, Addr), Error] waits {
     if let Ok(ip) = std.net.parse_ip(string.as_bytes(hostname)) {
-        return match host.connect(n, Addr(ip, port), until) {
-            Ok(take s) => Ok(take s),
+        let address = Addr(ip, port)
+        return match host.connect(n, address, until) {
+            Ok(take s) => Ok((take s, address)),
             Error(e) => Error(transport(e)),
         }
     }
@@ -583,8 +603,9 @@ fn dial(n: Net, hostname: String, port: u16, until: Until) -> Result[Socket, Err
     }
     let mut last: NetError = Unreachable
     for ip in addresses {
-        match host.connect(n, Addr(ip, port), until) {
-            Ok(take s) => return Ok(take s),
+        let address = Addr(ip, port)
+        match host.connect(n, address, until) {
+            Ok(take s) => return Ok((take s, address)),
             Error(TimedOut) => return Error(OutcomeUnknown(TimedOut)),
             Error(Aborted) => return Error(OutcomeUnknown(Aborted)),
             Error(e) => {
@@ -595,7 +616,7 @@ fn dial(n: Net, hostname: String, port: u16, until: Until) -> Result[Socket, Err
     Error(transport(last))
 }
 
-type TlsMode: key = Direct | StartTls
+type TlsMode: key + send = Direct | StartTls
 
 fn request_tls(take socket: Socket, until: Until) -> Result[Socket, Error] waits {
     let (take input, take output) = net.split(take socket)
@@ -638,9 +659,14 @@ fn encrypted_halves(n: Net, take socket: Socket, hostname: String, trust: Trust,
     Ok((take reader, take writer))
 }
 
-fn secure(n: Net, take socket: Socket, hostname: String, trust: Trust, until: Until, mode: TlsMode) -> Result[Session, Error] waits {
+fn secure(n: Net, take socket: Socket, address: Addr, hostname: String, trust: Trust, until: Until, mode: TlsMode) -> Result[Session, Error] waits {
     let (take reader, take writer) = encrypted_halves(n, take socket, hostname, trust, until, mode)?
-    Ok(Session(reader: take reader, writer: take writer, until, transaction: Idle, portal_open: false, parameters: Parameters(server_version: None, client_encoding: None, standard_conforming_strings: None)))
+    let saved = match trust {
+        System => SystemTrust,
+        Roots(pem) => PinnedRoots(bytes_copy(pem)),
+    }
+    let destination = CancelTarget(address, hostname: string.from(hostname), trust: take saved, mode)
+    Ok(Session(reader: take reader, writer: take writer, until, transaction: Idle, portal_open: false, parameters: Parameters(server_version: None, client_encoding: None, standard_conforming_strings: None), target: Some(take destination), backend: None, retire: false))
 }
 
 fn login(take session: Session, user: String, database: String, password: Secret, nonce: Bytes) -> Result[Conn, Error] waits {
@@ -668,8 +694,8 @@ fn connect_with(net: Net, tls_trust: Trust, config: Config, mode: TlsMode) -> Re
         return Error(InvalidRequest)
     }
     let until = At(config.clock, config.deadline)
-    let socket = dial(net, config.host, config.port, until)?
-    let session = secure(net, take socket, config.host, tls_trust, until, mode)?
+    let (take socket, address) = dial(net, config.host, config.port, until)?
+    let session = secure(net, take socket, address, config.host, tls_trust, until, mode)?
     let mut entropy: Bytes = list.with_capacity(18)
     host.random(config.random, mut entropy)
     let nonce = std.base64.encode_string(entropy)
@@ -680,8 +706,9 @@ fn startup_ready(mut s: Session, mut b: Bytes) -> Result[(), Error] waits {
     let mut tag = receive(mut s, mut b, b"KZE")?
     if tag == b'K' {
         consumed(b, 8)?
-        // CancelRequest is outside this API. The key stays in the receive
-        // buffer and has the same recording treatment as any backend bytes.
+        // Protocol 3.0 sends a four-byte PID and four-byte cancellation key.
+        // Like other received backend bytes, BackendKeyData is recorded on tape.
+        s.backend = Some((list.word_be(b, 0), list.word_be(b, 4)))
         tag = receive(mut s, mut b, b"ZE")?
     }
     if tag == b'E' {
@@ -1221,16 +1248,83 @@ pub fn next(mut rows: Rows) -> Result[bool, Error] waits {
     take outcome
 }
 
-/// Recover the session after exhaustion or a drained SQL error. Finishing an
-/// unfinished exchange retires the connection. A cursor never leaves a second
-/// live connection behind in the original Conn.
+/// Take the only cancellation token for this exchange. Hand it to the
+/// caller supervising the query. Issuing a token retires the connection
+/// at finish even if the query completes before cancellation reaches it.
+pub fn cancel_token(mut rows: Rows) -> Result[CancelToken, Error] {
+    if rows.phase == Complete {
+        return Error(CancelUnavailable)
+    }
+    if let Some(mut session) = rows.live {
+        if let Some((pid, key_word)) = session.backend {
+            let key = match session.target {
+                Some(peer) => {
+                    let mut raw: Bytes = list.with_capacity(4)
+                    list.put_word_be(mut raw, key_word)
+                    match secret.seal(take raw, peer.hostname) {
+                        Ok(secret_value) => secret_value,
+                        Error(_) => return Error(CancelUnavailable),
+                    }
+                },
+                None => return Error(CancelUnavailable),
+            }
+            let Some(take destination) = replace(mut session.target, None) else {
+                return Error(CancelUnavailable)
+            }
+            session.backend = None
+            session.retire = true
+            return Ok(CancelToken(target: take destination, pid, key))
+        }
+    }
+    Error(CancelUnavailable)
+}
+
+/// Send CancelRequest to the saved TCP peer under the original TLS policy.
+/// EOF ends the request. Observe the query's outcome on the original cursor.
+pub fn cancel(net: Net, take token: CancelToken, clock: Clock, deadline: u64) -> Result[(), Error] waits {
+    let CancelToken(target: take destination, pid, key) = take token
+    let until = At(clock, deadline)
+    let socket = match host.connect(net, destination.address, until) {
+        Ok(take handle) => take handle,
+        Error(e) => return Error(transport(e)),
+    }
+    let CancelTarget(address: _, hostname: take hostname, trust: take saved, mode) = take destination
+    let trust: Trust = match take saved {
+        SystemTrust => System,
+        PinnedRoots(take pem) => Roots(take pem),
+    }
+    let (take reader, take writer) = encrypted_halves(net, take socket, hostname, trust, until, mode)?
+    let mut output = take writer
+    let mut prefix: Bytes = list.with_capacity(12)
+    list.put_word_be(mut prefix, 16u32)
+    list.put_word_be(mut prefix, 80877102u32)
+    list.put_word_be(mut prefix, pid)
+    match tls.send_secret(mut output, prefix, key, b"", until) {
+        Ok(()) => {},
+        Error(e) => return Error(transport(e)),
+    }
+    let mut input = take reader
+    let mut reply: Bytes = list.with_capacity(1)
+    match host.recv_bounded(mut input, mut reply, 1, until) {
+        Ok(0) => Ok(()),
+        Ok(_) => Error(Protocol(CancelReply)),
+        Error(e) => Error(transport(e)),
+    }
+}
+
+/// Recover the session after exhaustion or a drained SQL error. Finishing
+/// an unfinished exchange or an exchange that issued a cancel token retires
+/// the connection.
 pub fn finish(take rows: Rows) -> Conn {
     let Rows(live: take session, phase: phase, ..) = take rows
     if phase == Complete || phase == Unstarted {
-        Conn(live: take session)
-    } else {
-        Conn(live: None)
+        if let Some(take s) = take session {
+            if !s.retire {
+                return Conn(live: Some(take s))
+            }
+        }
     }
+    Conn(live: None)
 }
 
 pub fn execute(mut conn: Conn, sql: String, params: List[Param]) -> Result[i64, Error] waits {

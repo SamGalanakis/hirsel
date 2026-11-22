@@ -5,27 +5,52 @@ type IncomingEdge: key = PageSource(u64) | HolderSource(u8, u64, u8) | ListSourc
 type FrameLocation: shareable + send {
     place: std.page.PagePtr,
     class: u8,
+    // A page's resident image capacity (AP15). A blob's charge is its
+    // body length, place.len - 8, so this is 0 for class 1.
+    image: u16,
     outgoing: List[u64],
     incoming: List[IncomingEdge]
 }
 
+// images is the sum of every record's frame charge: the resident report's
+// page images and blob bodies, each once by stamp (AP15). A record is
+// charged when it is added and refunded when its last incoming edge goes.
 type PageLocations: send {
     frames: DiskIndex[FrameLocation],
-    packs: DiskIndex[PagePack]
+    packs: DiskIndex[PagePack],
+    images: u64
 }
 
 fn new_page_locations() -> PageLocations {
-    PageLocations(frames: disk_index(), packs: disk_index())
+    PageLocations(frames: disk_index(), packs: disk_index(), images: 0)
 }
 
 fn share_page_locations(known: PageLocations) -> PageLocations {
-    PageLocations(frames: disk_index_share(known.frames), packs: disk_index_share(known.packs))
+    PageLocations(frames: disk_index_share(known.frames), packs: disk_index_share(known.packs), images: known.images)
+}
+
+fn frame_charge(location: FrameLocation) -> u64 {
+    if location.class == 1 {
+        let width: u64 = int.widen(location.place.len)
+        return width - 8
+    }
+    int.widen(location.image)
+}
+
+fn image_width(image: std.page.Image) -> u16 {
+    let width = list.capacity(std.page.payload(image))
+    if width > 65535 { fail("store: page image above 65,535 bytes") }
+    int.truncate(width)
+}
+
+fn resident_location_charge(known: PageLocations) -> u64 {
+    int.saturating_add(known.images, location_storage_charge(known))
 }
 
 fn location_storage_charge(known: PageLocations) -> u64 {
-    // FrameLocation is PagePtr (36), class (1) and two List headers (48).
+    // FrameLocation is PagePtr (36), class (1), image (2) and two List headers (48).
     // PagePack is class (1), frames (4), live (8) and payload bytes (8).
-    let records = std.omap.storage_charge(known.frames.values, 8, 85)
+    let records = std.omap.storage_charge(known.frames.values, 8, 87)
     let packs = std.omap.storage_charge(known.packs.values, 8, 21)
     let mut total = int.saturating_add(records, packs)
     let root = std.omap.root(known.frames.values)
@@ -92,13 +117,16 @@ fn add_page_source(mut known: PageLocations, stamp: u64, source: IncomingEdge) -
     Ok(())
 }
 
-fn add_location(mut known: PageLocations, ptr: std.page.PagePtr, class: u8, take outgoing: List[u64]) -> Result[(), Error] {
+fn add_location(mut known: PageLocations, ptr: std.page.PagePtr, class: u8, image: u16, take outgoing: List[u64]) -> Result[(), Error] {
     // Its children already have records. The caller walks in postorder.
     for child in outgoing {
         add_page_source(mut known, child, PageSource(ptr.stamp))?
     }
-    let item = FrameLocation(place: ptr, class: class, outgoing: take outgoing, incoming: list.new())
-    capacity(disk_index_put(mut known.frames, ptr.stamp, take item))
+    let item = FrameLocation(place: ptr, class: class, image: image, outgoing: take outgoing, incoming: list.new())
+    let charge = frame_charge(item)
+    capacity(disk_index_put(mut known.frames, ptr.stamp, take item))?
+    known.images = int.saturating_add(known.images, charge)
+    Ok(())
 }
 
 fn add_location_holder(mut known: PageLocations, kind: u8, holder: u64, roots: LocatedRoots) -> Result[(), Error] {
@@ -129,7 +157,10 @@ fn rebuild_page_locations(validated: ValidatedPageManifest) -> Result[PageLocati
             pack.class
         }))?)
         let mut outgoing: List[u64] = list.new()
-        if let ReadPage(_, kids, blobs) = frame {
+        let mut image = 0u16
+        if let ReadPage(raw, kids, blobs) = frame {
+            // Attach moves this image into its page unchanged.
+            image = image_width(raw)
             for child in kids {
                 if child != 0 {
                     list.push(mut outgoing, child)
@@ -137,7 +168,7 @@ fn rebuild_page_locations(validated: ValidatedPageManifest) -> Result[PageLocati
             }
             list.append(mut outgoing, blobs)
         }
-        add_location(mut known, ptr, class, take outgoing)?
+        add_location(mut known, ptr, class, image, take outgoing)?
     }
     for item in validated.manifest.branches {
         add_location_holder(mut known, 0, int.widen(item.id), item.roots)?
@@ -167,6 +198,7 @@ fn remove_page_source(mut known: PageLocations, stamp: u64, source: IncomingEdge
     }))?
     if let Some(true) = dead {
         let location = option.unwrap(capacity(disk_index_remove(mut known.frames, stamp))?)
+        known.images -= frame_charge(location)
         if location.place.pack != 0 {
             let _ = capacity(disk_index_update(mut known.packs, location.place.pack, fn(mut pack: PagePack) {
                 let width: u64 = int.widen(location.place.len)
@@ -221,14 +253,18 @@ fn record_fresh_tree(mut known: PageLocations, root: Arc[std.page.Page], class: 
             },
             Some(BlobEdge(reference)) => {
                 if !map_has_location(known, reference.stamp) {
-                    add_location(mut known, std.page.unlocated(reference.stamp), 1, list.new())?
+                    // An unwritten blob's place carries its frame length, so
+                    // its charge is known before the layout locates it.
+                    let mut place = std.page.unlocated(reference.stamp)
+                    place.len = int.truncate(8 + reference.len)
+                    add_location(mut known, place, 1, 0, list.new())?
                 }
                 list.push(mut outgoing, reference.stamp)
             },
             None => (),
         }
     }
-    add_location(mut known, std.page.unlocated(stamp), class, take outgoing)
+    add_location(mut known, std.page.unlocated(stamp), class, image_width(image), take outgoing)
 }
 
 type HeldPage: shareable + send {
@@ -333,12 +369,12 @@ fn check_page_location_closure() -> Result[(), Error] {
     let mut installed = new_page_locations()
     capacity(disk_index_put(mut installed.packs, 1, PagePack(class: 1, frames: 1, live: 10, payload_bytes: 10)))?
     capacity(disk_index_put(mut installed.packs, 2, PagePack(class: 0, frames: 2, live: 66, payload_bytes: 66)))?
-    add_location(mut installed, std.page.PagePtr(pack: 1, offset: 72, len: 10, checksum: 1, stamp: 1), 1, list.new())?
+    add_location(mut installed, std.page.PagePtr(pack: 1, offset: 72, len: 10, checksum: 1, stamp: 1), 1, 0, list.new())?
     for parent in 2u64 .. 4 {
         let mut outgoing: List[u64] = list.with_capacity(1)
         list.push(mut outgoing, 1)
         let ptr = std.page.PagePtr(pack: 2, offset: 72 + 49 * (parent - 2), len: 33, checksum: parent, stamp: parent)
-        add_location(mut installed, ptr, 0, take outgoing)?
+        add_location(mut installed, ptr, 0, 0, take outgoing)?
         add_page_source(mut installed, parent, HolderSource(0, parent, 0))?
     }
     let mut moved: List[u64] = list.with_capacity(1)
@@ -350,7 +386,7 @@ fn check_page_location_closure() -> Result[(), Error] {
     let mut candidate = share_page_locations(installed)
     let mut outgoing: List[u64] = list.with_capacity(1)
     list.push(mut outgoing, 1)
-    add_location(mut candidate, std.page.unlocated(4), 0, take outgoing)?
+    add_location(mut candidate, std.page.unlocated(4), 0, 0, take outgoing)?
     add_page_source(mut candidate, 4, HolderSource(0, 2, 0))?
     remove_page_source(mut candidate, 2, HolderSource(0, 2, 0))?
     let after = relocation_ancestors(candidate, moved)

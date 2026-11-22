@@ -1,0 +1,20 @@
+// expect: run zero_chunks_across_feeds() = true
+fn zero_chunks_across_feeds() -> bool {
+    let Ok(take state) = cdc.chunker(64, 300, 1024) else {
+        return false
+    }
+    let mut c = take state
+    let mut block: Bytes = list.new()
+    list.fill(mut block, 500, 0)
+    let mut lengths: List[u64] = list.new()
+    for _ in 0u64 .. 5u64 {
+        cdc.feed(mut c, block, scoped fn(n: u64) {
+            list.push(mut lengths, n)
+        })
+    }
+    cdc.finish(take c, scoped fn(n: u64) {
+        list.push(mut lengths, n)
+    })
+    // The all-zero gear recurrence cannot clear either mask, so the maximum wins.
+    list.len(lengths) == 3 && lengths[0] == 1024 && lengths[1] == 1024 && lengths[2] == 452
+}

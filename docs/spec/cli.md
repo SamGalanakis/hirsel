@@ -10,6 +10,9 @@ path for `build` and `pack`, and a directory for `sdk ts`.
 
 ## Native build options
 
+`hirsel run` uses a temporary executable in the compiler cache by default.
+Pass `-o PATH` to keep the executable at a specific path.
+
 Native binaries from both backends include `.eh_frame` unwind
 information. Native builds write detached DWARF alongside the executable.
 `--debug-lines on` also embeds DWARF. Failure positions are available in

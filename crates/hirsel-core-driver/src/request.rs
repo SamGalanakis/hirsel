@@ -1042,12 +1042,17 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         }
     }
     meter.finish("startup/discovery");
+    let run_output = (command == "run" && output_path.is_none())
+        .then(|| crate::Store::new(&native_store)?.scratch())
+        .transpose()?;
     // Native options come before the reach: a Cranelift development build
     // walks its instance records, which its options address. An options
     // error is reported only for a request check accepts.
     let mut prepared = if native_command {
         let prepare = || -> Result<_, Box<dyn std::error::Error>> {
-            let default_output = if test_command {
+            let default_output = if let Some(scratch) = &run_output {
+                scratch.path().join("program")
+            } else if test_command {
                 native_store.join("tests")
             } else {
                 PathBuf::from("program")
@@ -1154,6 +1159,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                 run_args,
                 record_path.as_deref(),
                 profile.as_ref(),
+                run_output,
                 &mut meter,
                 metrics,
             );
@@ -1504,6 +1510,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         run_args,
         record_path.as_deref(),
         profile.as_ref(),
+        run_output,
         &mut meter,
         metrics,
     )
@@ -1531,6 +1538,7 @@ fn answer_hit(
     run_args: Vec<String>,
     record_path: Option<&str>,
     profile: Option<&crate::prof_command::Run>,
+    run_output: Option<crate::store::Scratch>,
     meter: &mut Meter,
     metrics: Option<PathBuf>,
 ) -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
@@ -1588,6 +1596,7 @@ fn answer_hit(
         run_args,
         record_path,
         profile,
+        run_output,
         meter,
         metrics,
     )
@@ -1604,6 +1613,7 @@ fn finish(
     run_args: Vec<String>,
     record_path: Option<&str>,
     profile: Option<&crate::prof_command::Run>,
+    run_output: Option<crate::store::Scratch>,
     meter: &mut Meter,
     metrics: Option<PathBuf>,
 ) -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
@@ -1692,6 +1702,7 @@ fn finish(
     if let Some(profile) = profile {
         profile.cleanup();
     }
+    drop(run_output);
     // Publication and output are complete. The OS reclaims these in-memory
     // graphs at exit; the reusable library Driver retains ordinary destruction.
     std::process::exit(exit)

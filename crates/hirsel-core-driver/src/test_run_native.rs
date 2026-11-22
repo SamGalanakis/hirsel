@@ -870,6 +870,28 @@ fn build_names_unmatched_grant_and_entry() {
 }
 
 #[test]
+fn run_materializes_only_in_the_cache_by_default() {
+    let law = PackageLaw::new();
+    law.app("app", "");
+    let listing = |directory| {
+        let mut entries = std::fs::read_dir(law.path(directory)).unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        entries.sort();
+        entries
+    };
+    PackageLaw::pass(law.run(&["lock", "app"]));
+    for _ in 0..2 {
+        PackageLaw::pass(law.run(&["run", "app"]));
+        let names = |entries: &[&str]| entries.iter().map(std::ffi::OsString::from).collect::<Vec<_>>();
+        assert_eq!(listing("."), names(&["app", "cache", "compiler-store", "fixtures", "packages"]));
+        assert_eq!(listing("app"), names(&["hirsel.lock", "hirsel.toml", "main.hirsel"]));
+    }
+    PackageLaw::pass(law.run(&["run", "app", "-o", "custom-program"]));
+    assert!(law.path("custom-program").is_file());
+}
+
+#[test]
 fn package_archive_outside_root_explains_workspace() {
     let law = PackageLaw::new();
     law.app("app", &format!(

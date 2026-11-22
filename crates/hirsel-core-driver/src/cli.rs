@@ -300,7 +300,7 @@ static OPTIONS: &[OptionSpec] = &[
         ["--cgroup-root"],
         Some("DIR"),
         ["launcher"],
-        "Use an empty delegated cgroup v2 subtree for contained groups."
+        "Use a delegated cgroup v2 subtree for child lifecycle and contained groups."
     ),
     option!(
         TapeRetention,

@@ -7,12 +7,17 @@
 //! endpoint notice is reported, as one ordered event stream. The launcher keeps no record
 //! that a decision reads again: what it knows of its children is in memory and reaches a
 //! new host through the inventory that answers `Hello`.
+mod cgroup;
 #[cfg(test)]
 mod laws;
+mod ready;
 pub(crate) mod session;
+mod spawn;
 mod stores;
 
 use hirsel_core_ids::launch::LAUNCH_IMAGE_ENV;
+use ready::{CHANGE, Epoll, READ, WRITE, Watch};
+
 use session::{
     Attempt, Bindings, Child, ChildState, End, Event, Group, HostCommand, HostReply, Label, Launch,
     Limits, Mode, Phase, Refusal, Request, Role, Status, Wire,
@@ -24,9 +29,9 @@ use std::io::{self, Read, Seek, Write};
 use std::net::TcpListener;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::os::unix::process::{CommandExt, ExitStatusExt};
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus};
 use std::time::Duration;
 
 use stores::Stores;
@@ -54,7 +59,7 @@ pub(crate) fn run(
     })?;
     launcher.listen(crate::host::bind_control(&control)?)?;
     loop {
-        launcher.turn(Duration::from_secs(1))?;
+        launcher.wait_turn(None)?;
     }
 }
 
@@ -86,6 +91,7 @@ const REPORT_BYTES: u64 = 12;
 
 /// A nonblocking framed stream: the control session, or a serving child's endpoint.
 struct Conn {
+    watch: Watch,
     stream: UnixStream,
     input: Vec<u8>,
     output: Vec<u8>,
@@ -93,14 +99,26 @@ struct Conn {
 }
 
 impl Conn {
-    fn new(stream: UnixStream) -> io::Result<Self> {
+    fn new(epoll: &Epoll, stream: UnixStream) -> io::Result<Self> {
         stream.set_nonblocking(true)?;
         Ok(Self {
+            watch: epoll.watch(stream.as_raw_fd()),
             stream,
             input: Vec::new(),
             output: Vec::new(),
             closed: false,
         })
+    }
+
+    fn watch(&mut self) -> io::Result<()> {
+        let interest = if self.closed {
+            0
+        } else if self.output.is_empty() {
+            READ
+        } else {
+            READ | WRITE
+        };
+        self.watch.set(interest)
     }
 
     /// Read what is ready. A peer that closed or failed ends the stream.
@@ -146,6 +164,7 @@ impl Conn {
 }
 
 struct Listening {
+    watch: Watch,
     group: Group,
     socket: TcpListener,
     label: Label,
@@ -158,7 +177,8 @@ struct Listening {
 }
 
 struct Process {
-    child: Running,
+    watch: Option<Watch>,
+    child: Option<Running>,
     /// A serving child's private endpoint (descriptor 4).
     endpoint: Option<Conn>,
     /// A serving child's wake report (descriptor 5), the launcher's read end.
@@ -167,15 +187,22 @@ struct Process {
     answer: Option<(File, u64)>,
 }
 
+struct Ordinary {
+    pid: libc::pid_t,
+    pidfd: OwnedFd,
+    group: Option<cgroup::Group>,
+    status: Option<Status>,
+}
+
 enum Running {
-    Uncontained(std::process::Child, OwnedFd),
+    Ordinary(Ordinary),
     Contained(hirsel_contain::Contained),
 }
 
 impl Running {
     fn pidfd(&self) -> RawFd {
         match self {
-            Self::Uncontained(_, fd) => fd.as_raw_fd(),
+            Self::Ordinary(child) => child.pidfd.as_raw_fd(),
             Self::Contained(child) => child.pidfd().as_raw_fd(),
         }
     }
@@ -184,46 +211,118 @@ impl Running {
         match self {
             Self::Contained(child) if signal == libc::SIGKILL => child.kill(),
             Self::Contained(child) => child.signal(signal),
-            Self::Uncontained(_, fd) => {
-                // SAFETY: a pidfd signal reaches only the process it pins.
-                let rc = unsafe {
-                    libc::syscall(
-                        libc::SYS_pidfd_send_signal,
-                        fd.as_raw_fd(),
-                        signal,
-                        std::ptr::null::<libc::siginfo_t>(),
-                        0,
-                    )
-                };
-                if rc == 0 {
-                    Ok(())
-                } else {
-                    Err(io::Error::last_os_error())
-                }
-            }
+            Self::Ordinary(child) => match (&child.group, signal, &child.status) {
+                (Some(group), libc::SIGKILL, _) => group.kill(),
+                (_, _, Some(_)) => Ok(()),
+                _ => send(child.pidfd.as_raw_fd(), signal),
+            },
         }
     }
 
     fn wait(self) -> io::Result<Status> {
-        let status = match self {
-            Self::Uncontained(mut child, _) => child.wait()?,
+        match self {
+            Self::Ordinary(mut child) => {
+                child.reap_leader()?;
+                if let Some(group) = &child.group {
+                    group.wait_empty()?;
+                }
+                child.finish()
+            }
             Self::Contained(child) => match child.wait()? {
-                hirsel_contain::End::Exited(status) => status,
+                hirsel_contain::End::Exited(status) => Ok(status_of(status)),
                 hirsel_contain::End::Setup { step, errno } => {
                     eprintln!(
                         "contained launch failed at {step}: {}",
                         io::Error::from_raw_os_error(errno)
                     );
-                    return Ok(Status::Code(127));
+                    Ok(Status::Code(127))
                 }
-                hirsel_contain::End::Killed => return Ok(Status::Signal(libc::SIGKILL)),
+                hirsel_contain::End::Killed => Ok(Status::Signal(libc::SIGKILL)),
             },
-        };
-        Ok(match status.code() {
-            Some(code) => Status::Code(code),
-            None => Status::Signal(status.signal().unwrap_or(0)),
-        })
+        }
     }
+}
+
+impl Ordinary {
+    fn reap_leader(&mut self) -> io::Result<()> {
+        if self.status.is_none() {
+            self.status = Some(status_of(wait_pid(self.pid)?));
+            if let Some(group) = &self.group {
+                group.kill()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn finish(self) -> io::Result<Status> {
+        if let Some(group) = self.group {
+            group.reap_orphans()?;
+            group.remove()?;
+        }
+        Ok(self.status.expect("leader reaped"))
+    }
+}
+
+impl Process {
+    fn complete(&mut self, epoll: &Epoll) -> io::Result<Option<Status>> {
+        self.watch.take();
+        if let Some(Running::Ordinary(child)) = &mut self.child {
+            child.reap_leader()?;
+            if let Some(group) = &child.group
+                && !group.empty()?
+            {
+                let mut watch = epoll.watch(group.event_fd());
+                watch.set(CHANGE)?;
+                self.watch = Some(watch);
+                return Ok(None);
+            }
+        }
+        match self.child.take().expect("a live child") {
+            Running::Ordinary(child) => child.finish().map(Some),
+            child => child.wait().map(Some),
+        }
+    }
+}
+
+fn status_of(status: ExitStatus) -> Status {
+    match status.code() {
+        Some(code) => Status::Code(code),
+        None => Status::Signal(status.signal().unwrap_or(0)),
+    }
+}
+
+pub(super) fn wait_pid(pid: libc::pid_t) -> io::Result<ExitStatus> {
+    let mut status = 0;
+    loop {
+        // SAFETY: the caller owns this child and waitpid writes one status.
+        if unsafe { libc::waitpid(pid, &mut status, 0) } == pid {
+            return Ok(ExitStatus::from_raw(status));
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+}
+
+fn send(pidfd: RawFd, signal: i32) -> io::Result<()> {
+    // SAFETY: a pidfd signal reaches only the process it pins.
+    let rc = unsafe {
+        libc::syscall(
+            libc::SYS_pidfd_send_signal,
+            pidfd,
+            signal,
+            std::ptr::null::<libc::siginfo_t>(),
+            0,
+        )
+    };
+    if rc != 0 {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ESRCH) {
+            return Err(error);
+        }
+    }
+    Ok(())
 }
 
 struct Kept {
@@ -234,6 +333,8 @@ struct Kept {
 pub(crate) struct Launcher<I> {
     images: I,
     containment: Option<hirsel_contain::Host>,
+    cgroup_root: Option<PathBuf>,
+    epoll: Epoll,
     scratch: PathBuf,
     listeners: Vec<Listening>,
     children: Vec<Kept>,
@@ -241,6 +342,7 @@ pub(crate) struct Launcher<I> {
     fenced: bool,
     reservations: BTreeMap<Attempt, BTreeSet<[u8; 32]>>,
     deferred: Vec<Attempt>,
+    control_watch: Option<Watch>,
     control: Option<UnixListener>,
     session: Option<Conn>,
     _lock: File,
@@ -286,9 +388,8 @@ fn readable(fd: RawFd) -> bool {
 }
 
 fn above_launch_slots(fd: RawFd) -> io::Result<OwnedFd> {
-    // SAFETY: fcntl returns a fresh close-on-exec descriptor numbered 6 or more, so no dup2
-    // into the launch slots 3 to 5 overwrites a source.
-    let raw = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 6) };
+    // SAFETY: fcntl returns a fresh close-on-exec descriptor above every launch slot.
+    let raw = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, spawn::IMAGE_FD + 1) };
     if raw < 0 {
         return Err(io::Error::last_os_error());
     }
@@ -357,6 +458,23 @@ fn runtime_files(image: &Path) -> Vec<PathBuf> {
     files
 }
 
+fn container_id(launch: &Launch) -> hirsel_contain::ChildId {
+    use hirsel_contain::{ChildId, Mode};
+    let (role, key) = match launch.mode.role() {
+        Role::Install(generation) => (Mode::Install, u128::from(generation)),
+        Role::Serving(generation) => (Mode::Serving, u128::from(generation)),
+        Role::Describe(a) => (Mode::Describe, u128::from_le_bytes(a.bytes())),
+        Role::Preview(a) => (Mode::Preview, u128::from_le_bytes(a.bytes())),
+        Role::Prepare(a) => (Mode::Prepare, u128::from_le_bytes(a.bytes())),
+    };
+    ChildId {
+        group: launch.group.name.clone(),
+        incarnation: launch.group.incarnation,
+        key,
+        role,
+    }
+}
+
 impl<I: Images> Launcher<I> {
     /// A launcher over `state`, which it locks before it opens its objects with `open`;
     /// `state/scratch` holds each group's private scratch and export directories.
@@ -375,6 +493,20 @@ impl<I: Images> Launcher<I> {
                 Ok::<_, io::Error>(host)
             })
             .transpose()?;
+        let cgroup_root = match cgroup_root {
+            Some(path) => Some(path.to_owned()),
+            None => {
+                let root = cgroup::delegated(state)?;
+                if let Some(root) = &root {
+                    cgroup::recover(root)?;
+                }
+                root
+            }
+        };
+        if cgroup_root.is_some() {
+            cgroup::own_orphans()?;
+        }
+        let epoll = Epoll::new()?;
         let images = open()?;
         let scratch = state.join("scratch");
         // A lost launcher's staging is not state: remove it.
@@ -386,6 +518,8 @@ impl<I: Images> Launcher<I> {
         Ok(Self {
             images,
             containment,
+            cgroup_root,
+            epoll,
             scratch,
             listeners: Vec::new(),
             children: Vec::new(),
@@ -393,6 +527,7 @@ impl<I: Images> Launcher<I> {
             fenced: false,
             reservations: BTreeMap::new(),
             deferred: Vec::new(),
+            control_watch: None,
             control: None,
             session: None,
             _lock: lock,
@@ -402,6 +537,9 @@ impl<I: Images> Launcher<I> {
     /// Serve the control session on `listener`; the socket's permission is the host's.
     pub(crate) fn listen(&mut self, listener: UnixListener) -> io::Result<()> {
         listener.set_nonblocking(true)?;
+        let mut watch = self.epoll.watch(listener.as_raw_fd());
+        watch.set(READ)?;
+        self.control_watch = Some(watch);
         self.control = Some(listener);
         Ok(())
     }
@@ -597,6 +735,7 @@ impl<I: Images> Launcher<I> {
         match TcpListener::bind(address) {
             Ok(socket) => {
                 self.listeners.push(Listening {
+                    watch: self.epoll.watch(socket.as_raw_fd()),
                     group: group.clone(),
                     socket,
                     label,
@@ -659,22 +798,12 @@ impl<I: Images> Launcher<I> {
     }
 
     /// Start one child with its mode's row of launch.md "Child modes": the serving child
-    /// gets the listener (3), its private endpoint (4) and its wake report (5); every other
-    /// mode gets descriptors 0-2 only.
+    /// sees its listener (3), private endpoint (4) and wake report (5); the other modes
+    /// see descriptors 0-2. The runtime consumes the verified image descriptor at entry.
     fn spawn(&self, launch: &Launch, image: &Image, listener: &Listening) -> io::Result<Process> {
         let workdir = Path::new(&launch.workdir);
         let n_place = format!("--hirsel-n-place={}", image.n_place);
-        let executable = match (&image.executable, listener.label) {
-            (ImageFile::Verified(file), Label::Uncontained) => {
-                Some(above_launch_slots(file.as_raw_fd())?)
-            }
-            _ => None,
-        };
-        let fd_path = executable
-            .as_ref()
-            .map(|fd| PathBuf::from(format!("/proc/self/fd/{}", fd.as_raw_fd())));
-        let program = fd_path.as_deref().unwrap_or(&image.path);
-        let mut command;
+        let mut command = Command::new(&image.path);
         let mut slots: Vec<(OwnedFd, RawFd)> = Vec::new();
         let mut endpoint = None;
         let mut report = None;
@@ -684,16 +813,17 @@ impl<I: Images> Launcher<I> {
         let scratch = self.scratch_of(&launch.group);
         match &launch.mode {
             Mode::Serving(_, serve) => {
-                // The shell sets LISTEN_PID to its own PID and exec keeps it.
-                command = Command::new("/bin/sh");
-                command
-                    .args([
-                        "-c",
-                        "LISTEN_PID=$$ LISTEN_FDS=1 exec \"$@\"",
-                        "hirsel-place",
-                    ])
-                    .arg(program)
-                    .arg("--hirsel-wake");
+                if listener.label == Label::Contained {
+                    command = Command::new("/bin/sh");
+                    command
+                        .args([
+                            "-c",
+                            "LISTEN_PID=$$ LISTEN_FDS=1 exec \"$@\"",
+                            "hirsel-place",
+                        ])
+                        .arg(&image.path);
+                }
+                command.arg("--hirsel-wake");
                 if serve.idle != 0 {
                     command.arg(format!("--hirsel-idle={}", serve.idle));
                 }
@@ -717,11 +847,10 @@ impl<I: Images> Launcher<I> {
                 slots.push((above_launch_slots(listener.socket.as_raw_fd())?, 3));
                 slots.push((above_launch_slots(theirs.as_raw_fd())?, 4));
                 slots.push((above_launch_slots(write.as_raw_fd())?, 5));
-                endpoint = Some(Conn::new(ours)?);
+                endpoint = Some(Conn::new(&self.epoll, ours)?);
                 report = Some(read);
             }
             Mode::Describe(_) | Mode::Preview(_, _) => {
-                command = Command::new(program);
                 let flag = if let Mode::Preview(..) = launch.mode {
                     "--hirsel-preview"
                 } else {
@@ -746,7 +875,6 @@ impl<I: Images> Launcher<I> {
                     return Err(io::Error::new(io::ErrorKind::InvalidInput, "export name"));
                 }
                 let path = scratch.join(export);
-                command = Command::new(program);
                 command
                     .args(&image.prefix)
                     .arg(&n_place)
@@ -758,97 +886,95 @@ impl<I: Images> Launcher<I> {
             }
             Mode::Install(..) => return Err(io::ErrorKind::Unsupported.into()),
         }
-        if listener.label == Label::Contained {
+        let child = if listener.label == Label::Contained {
             if let Some(input) = input {
                 slots.push((input.into(), 0));
             }
             if let Some((out, _)) = &answer {
                 slots.push((out.try_clone()?.into(), 1));
             }
-            let child = self.spawn_contained(
+            Running::Contained(self.spawn_contained(
                 launch,
                 listener,
                 image,
                 &command,
                 slots,
                 export_path.as_deref(),
-            )?;
-            return Ok(Process {
-                child: Running::Contained(child),
-                endpoint,
-                report,
-                answer,
-            });
-        }
-        if let Some((out, _)) = &answer {
-            command.stdout(Stdio::from(out.try_clone()?));
-        }
-        if let Some(input) = input {
-            command.stdin(Stdio::from(input));
-        }
-        if !matches!(launch.mode, Mode::Describe(_) | Mode::Preview(..)) {
-            command.stdin(Stdio::null());
-        }
-        if !matches!(launch.mode, Mode::Serving(..)) {
-            command
-                .env_remove("HIRSEL_CONTROL_FD")
-                .env_remove("HIRSEL_SCRATCH");
-        }
-        command
-            .current_dir(workdir)
-            .env_remove("LISTEN_FDS")
-            .env_remove("LISTEN_PID")
-            .env_remove("LISTEN_FDNAMES")
-            .env_remove("LISTEN_PIDFDID")
-            .env_remove("HIRSEL_RECORD")
-            .env_remove("HIRSEL_RECORD_ID");
-        let parent = std::process::id() as libc::pid_t;
-        if let Some(fd) = executable.as_ref() {
-            command.env(
-                LAUNCH_IMAGE_ENV,
-                format!("{parent}:{}:{}", fd.as_raw_fd(), hex(&image.digest)),
-            );
+            )?)
         } else {
-            command.env_remove(LAUNCH_IMAGE_ENV);
-        }
-        let raw: Vec<(RawFd, RawFd)> = slots.iter().map(|(f, to)| (f.as_raw_fd(), *to)).collect();
-        let image_fd = executable.as_ref().map(AsRawFd::as_raw_fd);
-        // SAFETY: the closure makes only system calls. Each source is numbered above the
-        // launch slots, so no dup2 overwrites another source.
-        unsafe {
-            command.pre_exec(move || {
-                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) != 0 {
-                    return Err(io::Error::last_os_error());
+            let null = File::options().read(true).write(true).open("/dev/null")?;
+            let stdin = input.as_ref().unwrap_or(&null);
+            let stdout = answer.as_ref().map_or(&null, |(out, _)| out);
+            for (source, target) in [(stdin, 0), (stdout, 1), (&null, 2)] {
+                slots.push((above_launch_slots(source.as_raw_fd())?, target));
+            }
+            let serving = matches!(launch.mode, Mode::Serving(..));
+            if !serving {
+                command
+                    .env_remove("HIRSEL_CONTROL_FD")
+                    .env_remove("HIRSEL_SCRATCH");
+            }
+            command
+                .env_remove("LISTEN_FDS")
+                .env_remove("LISTEN_PID")
+                .env_remove("LISTEN_FDNAMES")
+                .env_remove("LISTEN_PIDFDID")
+                .env_remove("HIRSEL_RECORD")
+                .env_remove("HIRSEL_RECORD_ID");
+            if serving {
+                command.env("LISTEN_FDS", "1");
+            }
+            match &image.executable {
+                ImageFile::Verified(file) => {
+                    let slot = spawn::IMAGE_FD;
+                    slots.push((above_launch_slots(file.as_raw_fd())?, slot));
+                    let parent = std::process::id();
+                    let digest = hex(&image.digest);
+                    command.env(LAUNCH_IMAGE_ENV, format!("{parent}:{slot}:{digest}"));
                 }
-                if libc::getppid() != parent {
-                    return Err(io::Error::from_raw_os_error(libc::ESRCH));
+                #[cfg(test)]
+                ImageFile::Script => {
+                    command.env_remove(LAUNCH_IMAGE_ENV);
                 }
-                for &(from, to) in &raw {
-                    if libc::dup2(from, to) < 0 {
-                        return Err(io::Error::last_os_error());
+            }
+            let group = self
+                .cgroup_root
+                .as_ref()
+                .map(|root| cgroup::Group::create(root, &container_id(launch)))
+                .transpose()?;
+            let started = (|| {
+                let directory = group.as_ref().map(cgroup::Group::directory).transpose()?;
+                spawn::start(&command, workdir, &slots, directory.as_ref(), serving)
+            })();
+            let (pid, pidfd) = match started {
+                Ok(started) => started,
+                Err(error) => {
+                    if let Some(group) = group {
+                        group.kill()?;
+                        group.wait_empty()?;
+                        group.reap_orphans()?;
+                        group.remove()?;
                     }
+                    return Err(error);
                 }
-                // The serving shell needs the descriptor for its second exec.
-                // Native entry closes it before opening any grants.
-                if let Some(fd) = image_fd
-                    && libc::fcntl(fd, libc::F_SETFD, 0) < 0
-                {
-                    return Err(io::Error::last_os_error());
-                }
-                Ok(())
-            });
+            };
+            Running::Ordinary(Ordinary {
+                pid,
+                pidfd,
+                group,
+                status: None,
+            })
+        };
+        let mut watch = self.epoll.watch(child.pidfd());
+        if let Err(error) = watch.set(READ) {
+            if child.signal(libc::SIGKILL).is_ok() {
+                let _ = child.wait();
+            }
+            return Err(error);
         }
-        let mut child = command.spawn()?;
-        drop(executable);
-        // Our copies of the child's descriptors close here: the report's write end
-        // especially, so the report reads end once the child does.
-        drop(slots);
-        let pidfd = pidfd(child.id()).inspect_err(|_| {
-            let _ = child.kill();
-            let _ = child.wait();
-        })?;
         Ok(Process {
-            child: Running::Uncontained(child, pidfd),
+            watch: Some(watch),
+            child: Some(child),
             endpoint,
             report,
             answer,
@@ -864,32 +990,20 @@ impl<I: Images> Launcher<I> {
         slots: Vec<(OwnedFd, RawFd)>,
         export: Option<&Path>,
     ) -> io::Result<hirsel_contain::Contained> {
-        use hirsel_contain::{Authority, ChildId, LaunchError, Mode};
+        use hirsel_contain::{Authority, LaunchError};
         let host = self
             .containment
             .as_ref()
             .expect("a contained bind requires a host");
-        let (role, key) = match launch.mode.role() {
-            Role::Install(generation) => (Mode::Install, u128::from(generation)),
-            Role::Serving(generation) => (Mode::Serving, u128::from(generation)),
-            Role::Describe(a) => (Mode::Describe, u128::from_le_bytes(a.bytes())),
-            Role::Preview(a) => (Mode::Preview, u128::from_le_bytes(a.bytes())),
-            Role::Prepare(a) => (Mode::Prepare, u128::from_le_bytes(a.bytes())),
-        };
+        let id = container_id(launch);
         let bindings = hirsel_contain::Bindings {
             store: PathBuf::from(&listener.bindings.store),
             dirs: listener.bindings.dirs.iter().map(PathBuf::from).collect(),
             net: listener.bindings.net.clone(),
         };
-        let authority = Authority::of(role, &bindings, export)
+        let authority = Authority::of(id.role, &bindings, export)
             .map_err(|why| io::Error::other(format!("contained authority: {why:?}")))?
             .with_serving_scratch(&self.scratch_of(&launch.group));
-        let id = ChildId {
-            group: launch.group.name.clone(),
-            incarnation: launch.group.incarnation,
-            key,
-            role,
-        };
         let args: Vec<_> = command.get_args().map(OsString::from).collect();
         let env: Vec<_> = command
             .get_envs()
@@ -920,8 +1034,9 @@ impl<I: Images> Launcher<I> {
     fn signal(&mut self, child: &Child, signal: i32) {
         if let Some(i) = self.child(child)
             && let Some(process) = &self.children[i].process
+            && let Some(running) = &process.child
         {
-            let _ = process.child.signal(signal);
+            let _ = running.signal(signal);
         }
     }
 
@@ -1001,10 +1116,9 @@ impl<I: Images> Launcher<I> {
 
     /// A child has exited: relay its endpoint's last frames, read its report and answer,
     /// sample its listener, send its end, and only then let the listener's watch start.
-    fn ended(&mut self, i: usize) -> io::Result<()> {
+    fn ended(&mut self, i: usize, status: Status) -> io::Result<()> {
         self.drain_endpoint(i);
         let mut process = self.children[i].process.take().expect("a live child");
-        let status = process.child.wait()?;
         let report = process.report.as_mut().and_then(read_report);
         let child = self.children[i].state.child.clone();
         if let Some((mut out, bound)) = process.answer.take()
@@ -1037,94 +1151,65 @@ impl<I: Images> Launcher<I> {
         Ok(())
     }
 
-    /// Run the loop once: wait up to `timeout` for a child end, an endpoint notice, a cold
-    /// listener's arrival or a session frame, and act on each in that order.
+    #[cfg(test)]
     pub(crate) fn turn(&mut self, timeout: Duration) -> io::Result<()> {
-        enum Source {
-            Exit(usize),
-            Endpoint(usize),
-            Watch(usize),
-            Control,
-            Session,
-        }
-        let mut fds = Vec::new();
-        let mut sources = Vec::new();
-        let mut watch = |fd: RawFd, events: i16, source: Source| {
-            fds.push(libc::pollfd {
-                fd,
-                events,
-                revents: 0,
-            });
-            sources.push(source);
-        };
-        for (i, kept) in self.children.iter().enumerate() {
-            if let Some(process) = &kept.process {
-                watch(process.child.pidfd(), libc::POLLIN, Source::Exit(i));
-                if let Some(conn) = &process.endpoint {
-                    watch(conn.stream.as_raw_fd(), libc::POLLIN, Source::Endpoint(i));
-                }
+        self.wait_turn(Some(timeout))
+    }
+
+    /// One wait for the host session, child lifecycle, endpoints and cold listeners.
+    fn wait_turn(&mut self, timeout: Option<Duration>) -> io::Result<()> {
+        for kept in &mut self.children {
+            if let Some(conn) = kept.process.as_mut().and_then(|p| p.endpoint.as_mut()) {
+                conn.watch()?;
             }
         }
-        for (i, l) in self.listeners.iter().enumerate() {
-            // The watch is level-triggered and runs only while the group is cold.
-            let cold = !self.children.iter().any(|k| {
-                k.process.is_some()
-                    && k.state.child.group == l.group
-                    && matches!(k.state.child.role, Role::Serving(_))
-            });
-            if cold && !l.reported && !l.retiring {
-                watch(l.socket.as_raw_fd(), libc::POLLIN, Source::Watch(i));
-            }
+        for i in 0..self.listeners.len() {
+            let listener = &self.listeners[i];
+            let cold =
+                !listener.reported && !listener.retiring && !self.serving_live(&listener.group);
+            self.listeners[i].watch.set(if cold { READ } else { 0 })?;
         }
-        if let Some(control) = &self.control {
-            watch(control.as_raw_fd(), libc::POLLIN, Source::Control);
+        if let Some(conn) = &mut self.session {
+            conn.watch()?;
         }
-        if let Some(conn) = &self.session {
-            let events = if conn.output.is_empty() {
-                libc::POLLIN
-            } else {
-                libc::POLLIN | libc::POLLOUT
-            };
-            watch(conn.stream.as_raw_fd(), events, Source::Session);
-        }
-        let millis = timeout.as_millis().min(i32::MAX as u128) as i32;
-        // SAFETY: poll borrows the initialized records for its duration.
-        let ready = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, millis) };
-        if ready < 0 {
-            let error = io::Error::last_os_error();
-            return if error.kind() == io::ErrorKind::Interrupted {
-                Ok(())
-            } else {
-                Err(error)
-            };
-        }
-        let fired: Vec<_> = fds
-            .iter()
-            .zip(sources)
-            .filter(|(fd, _)| fd.revents != 0)
-            .map(|(_, source)| source)
-            .collect();
-        for source in &fired {
-            if let Source::Endpoint(i) = *source {
+        let mut events = [libc::epoll_event { events: 0, u64: 0 }; 64];
+        let count = self.epoll.wait(timeout, &mut events)?;
+        let events = &events[..count];
+        for i in 0..self.children.len() {
+            if self.children[i]
+                .process
+                .as_ref()
+                .and_then(|p| p.endpoint.as_ref())
+                .is_some_and(|conn| conn.watch.fired(events))
+            {
                 self.drain_endpoint(i);
             }
         }
-        for source in &fired {
-            if let Source::Exit(i) = *source {
-                self.ended(i)?;
-            }
-        }
-        for source in &fired {
-            if let Source::Watch(i) = *source
-                && !self.listeners[i].reported
-                && readable(self.listeners[i].socket.as_raw_fd())
+        for i in 0..self.children.len() {
+            if let Some(process) = self.children[i].process.as_mut()
+                && process
+                    .watch
+                    .as_ref()
+                    .is_some_and(|watch| watch.fired(events))
+                && let Some(status) = process.complete(&self.epoll)?
             {
-                self.listeners[i].reported = true;
-                let group = self.listeners[i].group.clone();
-                self.emit(Event::Arrived(group));
+                self.ended(i, status)?;
             }
         }
-        if fired.iter().any(|s| matches!(s, Source::Control)) {
+        for listener in &mut self.listeners {
+            if listener.watch.fired(events)
+                && !listener.reported
+                && readable(listener.socket.as_raw_fd())
+            {
+                listener.reported = true;
+                self.out.push(Event::Arrived(listener.group.clone()));
+            }
+        }
+        if self
+            .control_watch
+            .as_ref()
+            .is_some_and(|watch| watch.fired(events))
+        {
             self.accept();
         }
         self.serve_session();
@@ -1136,7 +1221,7 @@ impl<I: Images> Launcher<I> {
         let mut accepted = None;
         if let Some(control) = &self.control {
             while let Ok((stream, _)) = control.accept() {
-                accepted = Conn::new(stream).ok().or(accepted);
+                accepted = Conn::new(&self.epoll, stream).ok().or(accepted);
             }
         }
         if let Some(conn) = accepted {
@@ -1183,9 +1268,13 @@ impl<I: Images> Launcher<I> {
 impl<I> Drop for Launcher<I> {
     fn drop(&mut self) {
         for kept in &mut self.children {
-            if let Some(process) = kept.process.take() {
-                let _ = process.child.signal(libc::SIGKILL);
-                let _ = process.child.wait();
+            if let Some(mut process) = kept.process.take()
+                && let Some(child) = process.child.take()
+            {
+                process.watch.take();
+                if child.signal(libc::SIGKILL).is_ok() {
+                    let _ = child.wait();
+                }
             }
         }
     }

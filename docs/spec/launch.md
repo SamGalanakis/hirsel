@@ -537,8 +537,8 @@ children according to each group's label, and collects unused objects. `Bind` su
 the group's approved store, Dir and Net bindings and its cgroup limits. `Start` selects
 the child's mode. Publishing and assembling are pending. Admission reserves objects through
 the in-process `reserve` call. Install starts are refused because the runtime has no
-install-only mode. An uncontained serving child's descendants can hold its listener open
-after it exits. R27 empties a contained child's cgroup before the launcher reports its end.
+install-only mode. The launcher waits on a single epoll set for its control session,
+cold listeners, child endpoints, pidfds and cgroup population changes.
 
 - **Publish and assemble.** It admits recipes (steps 1-8 above), publishes source for
   untrusted authors, and assembles images. It writes objects with the "Durable publication"
@@ -578,9 +578,11 @@ its answer is an inventory taken in the launcher's one state loop, after which e
 follows in order (RUNNER-SPEC §14.5). A **host restart** adopts the live children the
 inventory names, reconciles each pending deploy as "When the host starts" says above, and
 probes only the `Dirty` rows left without a child. A **launcher loss** is fenced by the
-launcher lock: the new launcher empties every container it owns, removes staging, binds the
-groups' addresses again (their backlogs were lost with their only holder), and answers
-`Hello` with no child; the host then probes every `Dirty` row.
+launcher lock. The child identities in the delegated cgroup tree are the process
+inventory left by the predecessor. A successor in the same delegation empties and removes
+those cgroups under the lock before it can answer `Hello`. It removes staging and
+answers with no child. The host binds the groups' addresses again and probes every
+`Dirty` row. A launcher loss also loses the listener backlogs.
 
 **One control socket.** The launcher's control socket is the platform's single
 authority boundary, as the control socket of "Authority" is. Its filesystem permission
@@ -610,6 +612,24 @@ are:
 (to run tools), contained by R27 like the rest of the group's processes. The launcher, which the operator starts, is
 the only process that starts a group's children, and it owns their containers. Its control socket is the host's alone: no child
 receives it, in any mode.
+
+**Ordinary child lifecycle.** The launcher starts an uncontained image directly in a
+new session, enters its working directory by descriptor, and passes only its mode's
+descriptors. Standard streams use files or `/dev/null`. The runtime consumes the
+verified image descriptor at entry. A serving child receives the socket activation
+metadata and descriptors 3 through 5.
+
+With `--cgroup-root`, ordinary children use the same delegated root and identity names
+as contained children. Otherwise the launcher uses its own subtree under the current
+delegated cgroup v2, keyed by the state directory. Each ordinary child is born in its
+own cgroup with a pidfd. After the leader exits, the launcher requests `cgroup.kill`
+and reads `cgroup.events`. If the cgroup is still populated, epoll waits for a population
+change. The launcher reports `Ended` after observing `populated 0`, reaping any adopted
+descendants and removing the cgroup. An explicit kill targets the whole cgroup.
+
+On a host without a delegated subtree, the pidfd tracks and reaps the direct child.
+Its descendants can outlive it and can keep inherited descriptors open. Neither
+ordinary lifecycle uses a pidfile.
 
 ### Containment (R27)
 
@@ -723,7 +743,9 @@ restarted gives the host's reconciliation the same result as the host's records 
 and a host killed at every step adopts the live children and starts no second serving
 child of any group; `child_mode_authority`, for its descriptor and control socket parts;
 `collect_reservation_handoff`; and L46 (RUNNER-SPEC §14.3), where a child's end samples
-its listener before the watch resumes. The Boat `contain` selector runs the launcher's
+its listener before the watch resumes. The delegated `cgroup_lifecycle` law checks
+that a successor recovers the predecessor's cgroup inventory and that an ordinary child's
+grandchild PID is gone by `Ended`. The Boat `contain` selector runs the launcher's
 `contained_group` law, which checks a child's cgroup and limits, the directories it can reach,
 and container removal before `Ended`. The selector also runs the laws in
 crates/hirsel-contain. These include `contained_all_children`, where an install, describe,

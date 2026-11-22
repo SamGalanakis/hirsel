@@ -224,7 +224,8 @@ def measured_command(directory, cpus, command, profile=False, cycles=False):
 
 
 def observe(bins, out, case, language, cpus, size, wanted, kernel, lock_path, s0=False,
-            test_pool=False, *, command=None, profile=False, allow_smt=False, cycles=False, shipping_units=False):
+            test_pool=False, *, command=None, profile=False, allow_smt=False, cycles=False,
+            shipping_units=False, launch_measurement=None):
     width = len(cpus)
     siblings = sibling_cpus(cpus, allow_smt=allow_smt)
     command = command or sample_command(bins, case, language, width, size, s0)
@@ -232,7 +233,7 @@ def observe(bins, out, case, language, cpus, size, wanted, kernel, lock_path, s0
         return {"status": "missing-binary"}
     directory = out / f"{case}-{language.lower()}-{width}"
     directory.mkdir()
-    launch = measured_command(directory, cpus, command, profile, cycles)
+    launch = (launch_measurement or measured_command)(directory, cpus, command, profile, cycles)
     env = sample_env(width, language, test_pool, shipping_units=shipping_units)
     stdin = sample_stdin(bins, case, language)
     if lock_path:
@@ -429,7 +430,8 @@ def listening(process, directory, port):
 
 
 def observe_service(bins, directory, case, language, cpus, load_cpus, size, rounds, wanted, *,
-                    profile=False, allow_smt=False, cycles=False):
+                    profile=False, allow_smt=False, cycles=False, launch_measurement=None,
+                    launch_loader=None):
     width = len(cpus)
     checkbox = case == "checkbox"
     work = regimes.WORKLOADS[case]
@@ -459,7 +461,7 @@ def observe_service(bins, directory, case, language, cpus, load_cpus, size, roun
         port = 0
         server = regimes.command(bins, "socket_server", language, width, size, rounds, port, work.connections)
     (directory / "command").write_text(shlex.join(map(str, server)) + "\n")
-    launch = measured_command(directory, cpus, [
+    launch = (launch_measurement or measured_command)(directory, cpus, [
         "sh", "-c", 'printf "%s\\n" "$$" > "$1"; shift; exec "$@"', "server", pidfile, *server,
     ], profile, cycles)
     cpus_text = ",".join(map(str, cpus))
@@ -472,7 +474,7 @@ def observe_service(bins, directory, case, language, cpus, load_cpus, size, roun
             if not checkbox:
                 load = regimes.command(bins, "socket_load", "Tokio", len(load_cpus), size,
                                        rounds, port, work.connections)
-            command = measured_load(data["load_cpus"], load)
+            command = (launch_loader or measured_load)(data["load_cpus"], load)
             (directory / "load-command").write_text(shlex.join(map(str, command)) + "\n")
             with ((directory / "load.stdout").open("wb") as reply,
                   (directory / "load.stderr").open("wb") as load_err):
@@ -562,6 +564,30 @@ def run_regime_block(args, parser, bins, out, workers):
         return result
 
 
+def observe_regime(bins, point, case, language, cpus, load_cpus, size, rounds, wanted, *,
+                   profile=False, allow_smt=False, cycles=False,
+                   launch_measurement=None, launch_loader=None):
+    width = len(cpus)
+    path = point / f"{case}-{language.lower()}-{width}"
+    if regimes.WORKLOADS[case].connections or case == "checkbox":
+        row = observe_service(bins, path, case, language, cpus, load_cpus, size, rounds, wanted,
+                              profile=profile, allow_smt=allow_smt, cycles=cycles,
+                              launch_measurement=launch_measurement, launch_loader=launch_loader)
+    else:
+        command = regimes.command(bins, case, language, width, size, rounds)
+        row = observe(bins, point, case, language, cpus, size, wanted, False, None,
+                      command=command, profile=profile, allow_smt=allow_smt, cycles=cycles,
+                      shipping_units=True, launch_measurement=launch_measurement)
+        if path.exists():
+            (path / "command").write_text(shlex.join(map(str, command)) + "\n")
+            row["metrics"] = stderr_metrics(path)
+    if language == "Hirsel" and path.exists():
+        row["pool"] = unit_pool(path)
+        if row["status"] == "ok" and row["pool"].get("workers") != width:
+            row["status"] = "missing-unit-pool-receipt"
+    return path, row
+
+
 def run_regimes(args, parser, bins, out, workers):
     cases = tuple(dict.fromkeys(args.case or (case for case in regimes.WORKLOADS if case != "calibrate")))
     if not set(cases).issubset(regimes.WORKLOADS):
@@ -600,28 +626,14 @@ def run_regimes(args, parser, bins, out, workers):
                         pair_index += 1
                         for lang in peers:
                             cpus = args.measure_cpus[:width]
-                            path = point / f"{case}-{lang.lower()}-{width}"
-                            if work.connections or case == "checkbox":
-                                row = observe_service(bins, path, case, lang, cpus, args.load_cpus,
-                                                      size, rounds, wanted, profile=args.profile,
-                                                      allow_smt=args.allow_smt, cycles=args.cycles)
-                            else:
-                                command = regimes.command(bins, case, lang, width, size, rounds)
-                                row = observe(bins, point, case, lang, cpus, size, wanted, False,
-                                              None, command=command, profile=args.profile,
-                                              allow_smt=args.allow_smt, cycles=args.cycles, shipping_units=True)
-                                if path.exists():
-                                    (path / "command").write_text(shlex.join(map(str, command)) + "\n")
-                                    row["metrics"] = stderr_metrics(path)
+                            path, row = observe_regime(
+                                bins, point, case, lang, cpus, args.load_cpus, size, rounds, wanted,
+                                profile=args.profile, allow_smt=args.allow_smt, cycles=args.cycles)
                             row |= {"case": case, "language": lang, "width": width, "size": size,
                                     "rounds": rounds, "grain_ns": grain, "repeat": repeat,
                                     "mode": "untaped", "path": str(path.relative_to(out))}
                             if args.allow_smt and args.load_cpus and set(cpus).intersection(args.load_cpus):
                                 row["placement"] = "SMT-bound, load shares the server CPUs"
-                            if lang == "Hirsel" and path.exists():
-                                row["pool"] = unit_pool(path)
-                                if row["status"] == "ok" and row["pool"].get("workers") != width:
-                                    row["status"] = "missing-unit-pool-receipt"
                             rows.append(row)
                             print(f"{case} {grain}ns {lang} {width} repeat {repeat}: {row['status']}",
                                   file=sys.stderr, flush=True)

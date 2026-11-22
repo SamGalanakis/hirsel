@@ -179,7 +179,7 @@ def assert_ports_free(ports):
 
 
 class Runner:
-    def __init__(self, scratch, data):
+    def __init__(self, scratch, data, *, hold_guard=None):
         self.scratch = scratch
         self.data = data
         self.bin = scratch / "bin"
@@ -188,6 +188,7 @@ class Runner:
         self.store.mkdir(exist_ok=True)
         self.tapes.mkdir(exist_ok=True)
         self.active_hold = None
+        self.hold_guard = hold_guard or timing_hold
         self.hold = 0
 
     @contextmanager
@@ -406,7 +407,7 @@ class Runner:
             records = []
             self.active_hold = receipt
             try:
-                with timing_hold(receipt) as usable:
+                with self.hold_guard(receipt) as usable:
                     if usable:
                         with self.tool(precise=cell.get("fair", False)) as tool:
                             for side, rate, seed in items:

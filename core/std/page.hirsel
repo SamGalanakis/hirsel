@@ -1881,11 +1881,26 @@ fn refresh_child(mut page: Page, slot: u64) {
     changed_totals(mut page, old_rows, old_charge, rows, charge)
 }
 
-fn replace_children(page: Page, slot: u64, parts: List[Arc[Page]], mut next: u64) -> Result[List[Arc[Page]], Error] {
-    let leading_key = option.unwrap(key_at(page.image, slot))
-    let mut edited = owned_slots(page)
-    edited[slot] = branch_slot(take leading_key, parts[0])
+// Puts the pieces that replace the child at slot into the private page itself
+// while they fit, and rebuilds the page into pieces only when one does not.
+fn adopt_children(mut page: Page, slot: u64, parts: List[Arc[Page]], mut next: u64) -> Result[Option[List[Arc[Page]]], Error] {
+    let _ = list.set(mut page.kids, slot, arc.share(parts[0]))
+    refresh_child(mut page, slot)
     for i in 1u64 .. list.len(parts) {
+        let divider = separator(extreme_key(parts[i - 1], true), extreme_key(parts[i], false))?
+        let row = branch_slot(take divider, parts[i])
+        if private_put(mut page, row.row, row.kid, None)? == Split {
+            return Ok(Some(replace_children(page, slot, parts, i, mut next)?))
+        }
+    }
+    Ok(None)
+}
+
+// The page already holds parts[0] at slot and the dividers of parts[1..from];
+// the rebuilt pieces add the rest.
+fn replace_children(page: Page, slot: u64, parts: List[Arc[Page]], from: u64, mut next: u64) -> Result[List[Arc[Page]], Error] {
+    let mut edited = owned_slots(page)
+    for i in from .. list.len(parts) {
         let divider = separator(extreme_key(parts[i - 1], true), extreme_key(parts[i], false))?
         open_slot(mut edited, slot + i, branch_slot(take divider, parts[i]))
     }
@@ -1959,11 +1974,11 @@ fn insert_private(mut page: Page, incoming: PageSlot, private_from: u64, mut nex
         return Ok(None)
     }
     let split = insert_path(mut page.kids[slot], incoming, private_from, mut next)?
-    if let Some(parts) = split {
-        return Ok(Some(replace_children(page, slot, parts, mut next)?))
+    let Some(parts) = split else {
+        refresh_child(mut page, slot)
+        return Ok(None)
     }
-    refresh_child(mut page, slot)
-    Ok(None)
+    adopt_children(mut page, slot, parts, mut next)
 }
 
 fn insert_path(mut root: Arc[Page], incoming: PageSlot, private_from: u64, mut next: u64) -> Result[Option[List[Arc[Page]]], Error] {
@@ -2056,7 +2071,7 @@ fn remove_private(mut page: Page, key: Bytes, private_from: u64, mut next: u64) 
             page.kids[slot] = arc.share(parts[0])
             return rebalance_child(mut page, slot, mut next)
         }
-        return Ok(Some(replace_children(page, slot, parts, mut next)?))
+        return adopt_children(mut page, slot, parts, mut next)
     }
     rebalance_child(mut page, slot, mut next)
 }

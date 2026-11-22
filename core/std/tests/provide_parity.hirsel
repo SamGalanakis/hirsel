@@ -508,3 +508,42 @@ fn sim_withdrawn_read_keeps_byte(tasks: Tasks) -> bool waits {
     result.unwrap(task.join(take driver))
     expired && sent == 1 && received == 1 && eof == 0 && host.mono_ns(c) == 11 && list.len(data) == 1 && data[0] == b'x'
 }
+
+type WaitForStop: send {
+    p: Process,
+    c: Clock
+}
+
+fn at_stop(take watch: WaitForStop) -> u64 waits {
+    let WaitForStop(p, c) = take watch
+    host.stopped(p)
+    host.mono_ns(c)
+}
+
+// The stop is delivered at virtual time 42, after the 21 timer. Each stream
+// keeps the exact bytes it received, with its own order and no cross-talk.
+// expect: run sim_captured_stop(tasks) = true
+fn sim_captured_stop(tasks: Tasks) -> bool waits {
+    let (world, c) = sim.world.new(0, 0, 0)
+    let (p, trigger) = provide.process()
+    let wake = sim.io.stop_at(tasks, c, 42, take trigger)
+    let watch = task.spawn(tasks, bytes 0, WaitForStop(p: p, c: c), at_stop)
+    let driver = task.spawn(tasks, bytes 65536, take world, drive_sim_clock)
+    let (out, output) = sim.io.capture(bytes 128, false)
+    let (err, errors) = sim.io.capture_stderr(bytes 128, true)
+    let terminals = !stdout.is_terminal(out) && stderr.is_terminal(err)
+    let out_task = task.spawn(tasks, bytes 65536, take output, sim.io.collect)
+    let err_task = task.spawn(tasks, bytes 65536, take errors, sim.io.collect)
+    result.unwrap(stdout.write(out, "alpha\n"))
+    host.sleep_until(c, 21)
+    let before = host.mono_ns(c)
+    result.unwrap(stderr.write(err, "error"))
+    result.unwrap(stdout.write(out, "β"))
+    let stopped = result.unwrap(task.join(take watch))
+    result.unwrap(task.join(take wake))
+    host.stopped(p)
+    let a = result.unwrap(task.join(take out_task))
+    let b = result.unwrap(task.join(take err_task))
+    result.unwrap(task.join(take driver))
+    terminals && before == 21 && stopped == 42 && list.len(a) == 8 && list.len(b) == 5 && list.starts_with(a, string.as_bytes("alpha\nβ")) && list.starts_with(b, string.as_bytes("error"))
+}

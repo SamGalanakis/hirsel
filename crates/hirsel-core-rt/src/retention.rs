@@ -49,8 +49,7 @@ impl Budget {
         };
         self.used
             .fetch_update(Relaxed, Relaxed, |used| {
-                used.checked_add(bytes)
-                    .filter(|&next| next <= headroom)
+                used.checked_add(bytes).filter(|&next| next <= headroom)
             })
             .ok()?;
         Some(Retained {

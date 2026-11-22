@@ -105,7 +105,9 @@ impl Run {
     }
 
     fn val(&mut self, t: &str) -> Value {
-        self.vals.remove(&id(t)).unwrap_or_else(|| panic!("no value {t}"))
+        self.vals
+            .remove(&id(t))
+            .unwrap_or_else(|| panic!("no value {t}"))
     }
 
     fn put(&mut self, v: Value) {
@@ -167,10 +169,12 @@ impl Run {
                 Ok(v) => format!("ok {}", self.bind(v, w.get(1).copied())),
                 Err(c) => cap(c),
             },
-            "alloc_run_lifetime" => match ctx(&mut self.units, u.unwrap()).alloc_run_lifetime(num(1)) {
-                Ok(()) => "ok".into(),
-                Err(c) => cap(c),
-            },
+            "alloc_run_lifetime" => {
+                match ctx(&mut self.units, u.unwrap()).alloc_run_lifetime(num(1)) {
+                    Ok(()) => "ok".into(),
+                    Err(c) => cap(c),
+                }
+            }
             "make_resource" => {
                 let f = fin(a[3]);
                 match ctx(&mut self.units, u.unwrap()).make_resource(num(1), num(2), f) {
@@ -265,12 +269,22 @@ impl Run {
                 String::new()
             }
             "drop_shared" => {
-                let s = self.nodes.get_mut(&id(a[1])).unwrap().pop().expect("no share left");
+                let s = self
+                    .nodes
+                    .get_mut(&id(a[1]))
+                    .unwrap()
+                    .pop()
+                    .expect("no share left");
                 ctx(&mut self.units, u.unwrap()).drop_shared(s);
                 String::new()
             }
             "make_board" => {
-                let s = self.nodes.get_mut(&id(a[1])).unwrap().pop().expect("no share left");
+                let s = self
+                    .nodes
+                    .get_mut(&id(a[1]))
+                    .unwrap()
+                    .pop()
+                    .expect("no share left");
                 match ctx(&mut self.units, u.unwrap()).make_board(s) {
                     Ok(b) => {
                         let bid = id(w[1]);
@@ -294,11 +308,20 @@ impl Run {
                 let e = self.nodes.entry(sid).or_default();
                 let ok = e.first().is_none_or(|x| x.same(&s));
                 e.push(s);
-                if ok { format!("s{sid}") } else { "s<other>".into() }
+                if ok {
+                    format!("s{sid}")
+                } else {
+                    "s<other>".into()
+                }
             }
             "board_post" => {
                 let b = self.boards[&id(a[1])].clone();
-                let s = self.nodes.get_mut(&id(a[2])).unwrap().pop().expect("no share left");
+                let s = self
+                    .nodes
+                    .get_mut(&id(a[2]))
+                    .unwrap()
+                    .pop()
+                    .expect("no share left");
                 ctx(&mut self.units, u.unwrap()).board_post(&b, s);
                 String::new()
             }
@@ -405,7 +428,10 @@ impl Run {
                 self.release_took(uid, took)
             }
             "take_arrivals" => {
-                let n = w.iter().filter(|t| !t.is_empty() && !t.starts_with("new_shared=")).count();
+                let n = w
+                    .iter()
+                    .filter(|t| !t.is_empty() && !t.starts_with("new_shared="))
+                    .count();
                 let uid = u.unwrap();
                 let mut got = Vec::new();
                 for _ in 0..n {
@@ -424,7 +450,9 @@ impl Run {
             _ => panic!("unknown op {op}"),
         };
         let made = match u {
-            Some(u) if matches!(self.units.get(&u), Some(Slot::Live(_) | Slot::Ended(_))) => self.made(u, want),
+            Some(u) if matches!(self.units.get(&u), Some(Slot::Live(_) | Slot::Ended(_))) => {
+                self.made(u, want)
+            }
             _ => String::new(),
         };
         out + &made
@@ -556,7 +584,11 @@ fn ledger_law() {
             "{} of {} scenarios disagree with the model:\n{}",
             bad.len(),
             all.len(),
-            shown.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("\n")
+            shown
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
         );
     }
 }

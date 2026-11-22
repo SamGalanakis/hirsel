@@ -27,10 +27,10 @@ use memory::UnitStack;
 #[cfg(test)]
 #[path = "units_check.rs"]
 mod check;
-#[path = "units_sync.rs"]
-pub(crate) mod sync;
 #[path = "units_ledger.rs"]
 pub(crate) mod ledger;
+#[path = "units_sync.rs"]
+pub(crate) mod sync;
 use std::{
     cell::Cell,
     collections::VecDeque,
@@ -43,9 +43,17 @@ use sync::{AtomicU64, Mutex};
 /// The running pool unit's id, or NONE outside the pool.
 #[inline(never)]
 pub(crate) fn current() -> u32 {
-    let u = if untied() { cur() } else { std::ptr::null_mut() };
+    let u = if untied() {
+        cur()
+    } else {
+        std::ptr::null_mut()
+    };
     // SAFETY: a running unit's record is never freed.
-    if u.is_null() { NONE } else { unsafe { (*u).id } }
+    if u.is_null() {
+        NONE
+    } else {
+        unsafe { (*u).id }
+    }
 }
 
 pub(crate) fn spin() -> bool {
@@ -166,7 +174,10 @@ pub(crate) fn workers() -> Option<usize> {
         .filter(|&w: &usize| w >= 1)
 }
 fn env_u64(name: &str, default: u64) -> u64 {
-    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 /// Counts from outside the worker pool and from workers that have exited.
@@ -397,9 +408,10 @@ fn now() -> u64 {
 /// and the stop decision are the same count, so an admitted unit runs to its
 /// end before any worker leaves, and a refused one never starts.
 fn admit() -> bool {
-    LIVE
-        .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| (n > 0).then_some(n + 1))
-        .is_ok()
+    LIVE.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+        (n > 0).then_some(n + 1)
+    })
+    .is_ok()
 }
 
 /// Make unit `id`, admitted already, and queue it. The record is made here;
@@ -425,7 +437,10 @@ pub(crate) fn spawn_job(job: Job) -> Result<(), Job> {
     if !admit() {
         crate::process::stop(b"UnitAfterStop");
     }
-    let spare = SPARE_HELPERS.lock().unwrap_or_else(|e| e.into_inner()).pop();
+    let spare = SPARE_HELPERS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .pop();
     if let Some(up) = spare {
         // SAFETY: an ended helper's leaked record; no worker is inside it and
         // its stack was returned. A late wake of its old run is a spurious
@@ -481,7 +496,12 @@ fn create_unit_with(id: u32, job: Option<Job>) -> &'static Unit {
         job: Cell::new(job),
     }));
     if !TABLE[id as usize]
-        .compare_exchange(std::ptr::null_mut(), (u as *const Unit).cast_mut(), Ordering::AcqRel, Ordering::Acquire)
+        .compare_exchange(
+            std::ptr::null_mut(),
+            (u as *const Unit).cast_mut(),
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
         .is_ok()
     {
         crate::process::stop(b"UnitIdTaken");
@@ -503,7 +523,11 @@ unsafe fn start_stack(p: &Pool, u: &Unit) {
     // this worker alone owns until the unit runs.
     unsafe {
         let top = stack.top();
-        let words = hirsel_stack::initial_frame(unit_entry, (u as *const Unit).cast_mut().cast(), std::ptr::null_mut());
+        let words = hirsel_stack::initial_frame(
+            unit_entry,
+            (u as *const Unit).cast_mut().cast(),
+            std::ptr::null_mut(),
+        );
         let start = top.sub(16 + size_of_val(&words));
         std::ptr::copy_nonoverlapping(words.as_ptr().cast::<u8>(), start, size_of_val(&words));
         *u.sp.get() = start;
@@ -700,14 +724,14 @@ fn requeue_detached() {
 /// Publish readiness to the next entry even when the unit already has a
 /// pending entry. Only the PARKED transition publishes a new queue item.
 pub(crate) fn wake(u: &Unit) {
-    let prior = u.state.fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
-        match state {
+    let prior = u
+        .state
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| match state {
             PARKED => Some(QUEUED),
             RUNNING => Some(NOTIFIED),
             QUEUED | NOTIFIED => Some(state),
             _ => None,
-        }
-    });
+        });
     if prior == Ok(PARKED) {
         enqueue(pool(), u);
     }
@@ -827,7 +851,9 @@ fn mark_blocking(publish_private: bool) -> Blocking {
             if HOST_MONITOR_PARKED.load(Ordering::SeqCst) {
                 wake_host_monitor();
             }
-            return Blocking { call: Some((word, stamp)) };
+            return Blocking {
+                call: Some((word, stamp)),
+            };
         }
     } else if publish_private && untied() {
         publish_before_unmonitored_call();
@@ -944,7 +970,9 @@ fn watch_blocking(p: &Pool, mut spawn: impl FnMut(Arc<Spare>) -> bool) {
             last_activity = Some(t);
             if stamp == HOST_ACTIVITY {
                 // A marker that starts and returns between ticks still counts.
-                let _ = call.0.compare_exchange(HOST_ACTIVITY, 0, Ordering::SeqCst, Ordering::SeqCst);
+                let _ =
+                    call.0
+                        .compare_exchange(HOST_ACTIVITY, 0, Ordering::SeqCst, Ordering::SeqCst);
                 continue;
             }
             pending = true;
@@ -995,7 +1023,10 @@ fn watch_blocking(p: &Pool, mut spawn: impl FnMut(Arc<Spare>) -> bool) {
             // the shared SC order, a marker either sees the flag or its mark
             // is visible to this check. A completed call leaves activity too.
             HOST_MONITOR_PARKED.store(true, Ordering::SeqCst);
-            if p.host_calls.iter().all(|call| call.0.load(Ordering::SeqCst) == 0) {
+            if p.host_calls
+                .iter()
+                .all(|call| call.0.load(Ordering::SeqCst) == 0)
+            {
                 sync::thread::park();
             }
             HOST_MONITOR_PARKED.store(false, Ordering::SeqCst);
@@ -1058,7 +1089,8 @@ fn hand_search(p: &Pool, mut idle: sync::MutexGuard<'_, Vec<usize>>) -> bool {
 /// wake a sleeper: it searches, then blocks in the poller until the earliest
 /// deadline.
 fn keep_poller(p: &Pool) {
-    let unwatched = |p: &Pool| !p.poll_held.load(Ordering::SeqCst) && p.searching.load(Ordering::SeqCst) == 0;
+    let unwatched =
+        |p: &Pool| !p.poll_held.load(Ordering::SeqCst) && p.searching.load(Ordering::SeqCst) == 0;
     if p.nsleep.load(Ordering::SeqCst) > 0 && unwatched(p) {
         let idle = p.idle.lock().unwrap();
         if unwatched(p) {
@@ -1100,7 +1132,8 @@ fn add_timer(p: &Pool, at: u64, u: &Unit) {
         let mut set = p.timers.lock().unwrap();
         u.timer_at.store(at, Ordering::SeqCst);
         set.insert((at, u.id));
-        p.next_timer.store(set.first().map_or(u64::MAX, |e| e.0), Ordering::SeqCst);
+        p.next_timer
+            .store(set.first().map_or(u64::MAX, |e| e.0), Ordering::SeqCst);
     }
     // The poller publishes `poll_until` and then reloads `next_timer`, so
     // either it sees this deadline or this load sees its bound.
@@ -1120,7 +1153,8 @@ fn clear_timer(p: &Pool, u: &Unit) {
     }
     let mut set = p.timers.lock().unwrap();
     set.remove(&(at, u.id));
-    p.next_timer.store(set.first().map_or(u64::MAX, |e| e.0), Ordering::SeqCst);
+    p.next_timer
+        .store(set.first().map_or(u64::MAX, |e| e.0), Ordering::SeqCst);
 }
 fn fire_timers(p: &Pool) {
     let next = p.next_timer.load(Ordering::SeqCst);
@@ -1141,12 +1175,15 @@ fn fire_timers(p: &Pool) {
             set.pop_first();
             // The registration is live unless its park already ended.
             if let Some(u) = unit_ref(id)
-                && u.timer_at.compare_exchange(at, u64::MAX, Ordering::SeqCst, Ordering::SeqCst).is_ok()
+                && u.timer_at
+                    .compare_exchange(at, u64::MAX, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
             {
                 due.push(u);
             }
         }
-        p.next_timer.store(set.first().map_or(u64::MAX, |e| e.0), Ordering::SeqCst);
+        p.next_timer
+            .store(set.first().map_or(u64::MAX, |e| e.0), Ordering::SeqCst);
     }
     for u in due {
         bump(S_TIMER_FIRES);
@@ -1313,7 +1350,10 @@ unsafe fn run_unit(p: &Pool, ix: usize, up: UP, host: &mut *mut u8) {
                 p.memory.put_unit_stack((*u.stack.get()).take().unwrap());
                 *u.sp.get() = std::ptr::null_mut();
                 if u.helper {
-                    SPARE_HELPERS.lock().unwrap_or_else(|e| e.into_inner()).push(up);
+                    SPARE_HELPERS
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push(up);
                 }
                 if LIVE.fetch_sub(1, Ordering::SeqCst) == 1 {
                     p.stop.store(true, Ordering::SeqCst);
@@ -1342,8 +1382,7 @@ unsafe fn run_unit(p: &Pool, ix: usize, up: UP, host: &mut *mut u8) {
                 if let Some(at) = deadline {
                     add_timer(p, at, u);
                 }
-                if u
-                    .state
+                if u.state
                     .compare_exchange(RUNNING, PARKED, Ordering::AcqRel, Ordering::Acquire)
                     .is_err()
                 {
@@ -1357,9 +1396,7 @@ unsafe fn run_unit(p: &Pool, ix: usize, up: UP, host: &mut *mut u8) {
         }
         // Busy workers poll now and then when no idle worker is blocked in
         // the poller.
-        if !p.poller_blocked.load(Ordering::Relaxed)
-            && has_poll_sources(p)
-            && WORKER_IX.get() == ix
+        if !p.poller_blocked.load(Ordering::Relaxed) && has_poll_sources(p) && WORKER_IX.get() == ix
         {
             poll_due(p, now(), p.poll_every_ns);
         }
@@ -1455,7 +1492,9 @@ fn run_slot(p: &'static Pool, ix: usize) -> bool {
                     let timeout = if nt == u64::MAX {
                         -1
                     } else {
-                        nt.saturating_sub(now()).div_ceil(1_000_000).min(i32::MAX as u64) as i32
+                        nt.saturating_sub(now())
+                            .div_ceil(1_000_000)
+                            .min(i32::MAX as u64) as i32
                     };
                     poll_global(p, timeout);
                 }
@@ -1535,13 +1574,16 @@ pub(crate) fn launch(
     run: &(dyn Fn(&crate::entry::OsConfig) -> u8 + Sync),
 ) -> u8 {
     // One poller for every unit's descriptors; its wake eventfd is WAKE_TAG.
-    let shared = hirsel_core_net::share_poller(shared_unit).unwrap_or_else(|_| crate::process::stop(b"HostPoll"));
+    let shared = hirsel_core_net::share_poller(shared_unit)
+        .unwrap_or_else(|_| crate::process::stop(b"HostPoll"));
     let (gep, gwake) = (shared.raw_fd(), shared.wake_fd());
     let handoff_ticks = env_u64("HIRSEL_UNTIED_HANDOFF_US", 1_000).div_ceil(HOST_TICK_US);
     let _ = POOL.set(Pool {
         w,
         locals: (0..w).map(|_| Mutex::new(VecDeque::new())).collect(),
-        lifo: (0..w).map(|_| AtomicPtr::new(std::ptr::null_mut())).collect(),
+        lifo: (0..w)
+            .map(|_| AtomicPtr::new(std::ptr::null_mut()))
+            .collect(),
         lifo_runs: (0..w).map(|_| AtomicU32::new(0)).collect(),
         lifo_on: env_u64("HIRSEL_UNTIED_LIFO", 1) != 0,
         injector: Mutex::new(VecDeque::new()),
@@ -1576,7 +1618,8 @@ pub(crate) fn launch(
         poll_every_ns: env_u64("HIRSEL_UNTIED_POLL_US", 100) * 1000,
     });
     // SAFETY: the launch joins every worker before `run` goes out of scope.
-    let run: &'static (dyn Fn(&crate::entry::OsConfig) -> u8 + Sync) = unsafe { std::mem::transmute(run) };
+    let run: &'static (dyn Fn(&crate::entry::OsConfig) -> u8 + Sync) =
+        unsafe { std::mem::transmute(run) };
     let _ = RUN.set(RunFn(run));
     let _ = BASE.set(Base(*input));
     LIVE.store(k, Ordering::SeqCst);

@@ -64,9 +64,8 @@
 //! every thread waits with no timeout pending while a goal is unmet (stuck
 //! for ever), or when the bound passes.
 use super::{
-    BASE, Base, Memory, NONE, POOL, Pool, RUN, RunFn, TABLE, UNTIED_ON,
-    USTATS, create_unit, cur, maybe_yield, park as unit_park, pool, take_xready, wake_id,
-    worker_main,
+    BASE, Base, Memory, NONE, POOL, Pool, RUN, RunFn, TABLE, UNTIED_ON, USTATS, create_unit, cur,
+    maybe_yield, park as unit_park, pool, take_xready, wake_id, worker_main,
 };
 use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
@@ -1799,7 +1798,10 @@ pub(super) fn run_one(case: &Case, seed: u64, out: &str) -> ! {
     n(addr(&p.last_poll), "last_poll".into());
     n(addr(&super::LIVE), "live".into());
     n(addr(&super::HOST_TICK.0), "host clock tick".into());
-    n(addr(&super::HOST_MONITOR_PARKED), "host monitor parked".into());
+    n(
+        addr(&super::HOST_MONITOR_PARKED),
+        "host monitor parked".into(),
+    );
     n(addr(&p.stop), "stop".into());
     n(addr(&p.injector), "injector".into());
     n(addr(&p.idle), "idle list".into());

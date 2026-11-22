@@ -40,7 +40,15 @@ unsafe fn body(parked: bool, warm: u64, n: u64, size: u64) -> u8 {
     // the slots are local, the handles are live until the end.
     unsafe {
         let u = hirsel_unit_root(1 << 30);
-        assert!(hirsel_unit_conn_new(u, 4, 8, 4 * size, &mut inbox, &mut client, null_mut()));
+        assert!(hirsel_unit_conn_new(
+            u,
+            4,
+            8,
+            4 * size,
+            &mut inbox,
+            &mut client,
+            null_mut()
+        ));
         PEER[me].store(client, Ordering::Release);
         let peer = loop {
             let p = PEER[1 - me].load(Ordering::Acquire);
@@ -68,7 +76,10 @@ unsafe fn body(parked: bool, warm: u64, n: u64, size: u64) -> u8 {
             assert_eq!(hirsel_unit_receive(u, inbox, v, null_mut()), RECV_OK);
         };
         let put = |v: &mut MaybeUninit<_>| {
-            assert_eq!(hirsel_unit_send(u, peer, v, false, null_mut()), SENT_ACCEPTED);
+            assert_eq!(
+                hirsel_unit_send(u, peer, v, false, null_mut()),
+                SENT_ACCEPTED
+            );
         };
         let total = warm + n;
         if me == 0 {

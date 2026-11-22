@@ -325,7 +325,10 @@ impl Stock {
 
     pub(crate) fn take(&mut self) -> Stack {
         if let Some(memory) = crate::units::memory() {
-            return self.recent.take().unwrap_or_else(|| memory.take_task_stack());
+            return self
+                .recent
+                .take()
+                .unwrap_or_else(|| memory.take_task_stack());
         }
         if let Some(stack) = self.surplus.pop() {
             SURPLUS.fetch_sub(1, Relaxed);

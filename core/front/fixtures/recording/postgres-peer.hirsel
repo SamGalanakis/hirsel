@@ -1,12 +1,12 @@
 // Appended to the client module by the native recording tests. One fixed nonce
 // makes the backend transcript reproducible. Drivers normally use host.random.
-fn scripted_connection(n: Net, clock: Clock, password: Secret) -> Result[Conn, Error] waits {
+fn scripted_connection(n: Net, clock: Clock, password: Secret, mode: TlsMode) -> Result[Conn, Error] waits {
     let until = At(clock, host.mono_ns(clock) + 5000000000u64)
     let socket = match host.connect(n, Addr(ip: V4(2130706433u32), port: 12345u16), until) {
         Ok(take handle) => take handle,
         Error(e) => return Error(transport(e)),
     }
-    let session = secure(n, take socket, "alpha.test", System, until)?
+    let session = secure(n, take socket, "alpha.test", System, until, mode)?
     login(take session, "user", "postgres", password, b"rOprNGfwEbeRWgbNEkqO")
 }
 
@@ -18,6 +18,8 @@ fn startup_law(outcome: Result[Conn, Error], scenario: String) -> bool {
         Error(Protocol(UnverifiedServer)) => equal(name, b"signature"),
         Error(Scram(Transcript)) => equal(name, b"nonce"),
         Error(MissingAlpn) => equal(name, b"alpn"),
+        Error(TlsRequired) => equal(name, b"ssl-refused"),
+        Error(Network(Tls(Protocol(0)))) => equal(name, b"ssl-extra"),
         _ => false,
     }
 }
@@ -114,8 +116,13 @@ fn reuse_law(mut conn: Conn) -> bool waits {
 
 pub fn main(n: Net, clock: Clock, password: Secret, arguments: Args) -> Result[(), Exit] waits {
     let scenario = option.unwrap(args.get(arguments, 0))
-    let outcome = scripted_connection(n, clock, password)
     let name = string.as_bytes(scenario)
+    let mode: TlsMode = if equal(name, b"ssl-refused") || equal(name, b"ssl-extra") {
+        StartTls
+    } else {
+        Direct
+    }
+    let outcome = scripted_connection(n, clock, password, mode)
     if equal(name, b"reuse") || equal(name, b"short-row") || equal(name, b"trailing") {
         let mut conn = result.unwrap(take outcome)
         if equal(name, b"reuse") {

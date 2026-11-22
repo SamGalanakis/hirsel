@@ -658,7 +658,10 @@ impl Recorder {
         self.encoder.new_block();
         format::seal(&self.tape_id, flags, seq, &mut self.buffer);
         TAPE_COUNTS[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        TAPE_COUNTS[1].fetch_add(self.buffer.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        TAPE_COUNTS[1].fetch_add(
+            self.buffer.len() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         let t0 = std::time::Instant::now();
         let r = match &self.sink {
             Sink::Provider(f) => {
@@ -679,7 +682,10 @@ impl Recorder {
             }
             Sink::Closed => Err(IoError { tag: 5, code: 0 }),
         };
-        TAPE_COUNTS[C_WORKER_NS].fetch_add(t0.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+        TAPE_COUNTS[C_WORKER_NS].fetch_add(
+            t0.elapsed().as_nanos() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         match r {
             Ok(()) => {
                 if matches!(self.sink, Sink::Provider(_)) {
@@ -1042,9 +1048,12 @@ impl Tape {
                     .encode(revision)
                     .map_err(|_| OpenError::Refused(Refusal::HeaderTooLarge))?;
                 // SAFETY: forwarded.
-                let mut file = unsafe { ProviderFile::open(dir, 3, name) }.map_err(OpenError::Io)?;
+                let mut file =
+                    unsafe { ProviderFile::open(dir, 3, name) }.map_err(OpenError::Io)?;
                 // SAFETY: the file is open in this run's provider.
-                let sink = match unsafe { crate::os::duplicate_file(&dir.provider, file.0.unwrap().handle) } {
+                let sink = match unsafe {
+                    crate::os::duplicate_file(&dir.provider, file.0.unwrap().handle)
+                } {
                     Some(fd) => {
                         file.close().map_err(OpenError::Io)?;
                         Sink::Writer(writer::Stream::new(fd))
@@ -1057,7 +1066,9 @@ impl Tape {
                     tape_id: header.tape_id,
                     encoder: Encoder::default(),
                     buffer: {
-                        let mut b = Recorder::fresh(Vec::with_capacity(BLOCK_HEAD + buffer.len() + BLOCK_CHECK));
+                        let mut b = Recorder::fresh(Vec::with_capacity(
+                            BLOCK_HEAD + buffer.len() + BLOCK_CHECK,
+                        ));
                         b.extend_from_slice(&buffer);
                         b
                     },
@@ -1765,16 +1776,26 @@ unsafe fn record_out(
             out.payload.push(binding.len() as u8);
             out.payload.extend_from_slice(binding);
         }
-    } else if ok && carries_payload(r.operation) && r.buffer.len.saturating_sub(before) > 256 && order_only() {
+    } else if ok
+        && carries_payload(r.operation)
+        && r.buffer.len.saturating_sub(before) > 256
+        && order_only()
+    {
         // mc-units-untied order-only variant (not replayable): a payload over
         // 256 bytes is recorded as its length only (`value`), no bytes, no digest.
-        TAPE_COUNTS[3].fetch_add((r.buffer.len - before) as u64, std::sync::atomic::Ordering::Relaxed);
+        TAPE_COUNTS[3].fetch_add(
+            (r.buffer.len - before) as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
     } else if ok && carries_payload(r.operation) && r.buffer.len > before {
         // SAFETY: source initialized these bytes in the request's spare carrier.
         out.payload =
             unsafe { std::slice::from_raw_parts(r.buffer.data.add(before), r.buffer.len - before) }
                 .to_vec();
-        TAPE_COUNTS[2].fetch_add(out.payload.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        TAPE_COUNTS[2].fetch_add(
+            out.payload.len() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
     }
     if r.operation == NEXT_ENTRIES {
         out.written = out.payload.len() as u64;
@@ -2230,7 +2251,8 @@ fn order_only() -> bool {
 /// mc-units-untied counters: block writes, block bytes, payload bytes
 /// recorded, payload bytes skipped by the order-only variant, then the
 /// `C_*` counters below.
-pub(crate) static TAPE_COUNTS: [std::sync::atomic::AtomicU64; 9] = [const { std::sync::atomic::AtomicU64::new(0) }; 9];
+pub(crate) static TAPE_COUNTS: [std::sync::atomic::AtomicU64; 9] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; 9];
 /// Nanoseconds recording tasks spent handing off (or writing) closed blocks.
 pub(crate) const C_WORKER_NS: usize = 4;
 /// Recordings truncated because the writer's queue was full.

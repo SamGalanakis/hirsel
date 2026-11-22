@@ -195,7 +195,11 @@ pub(crate) unsafe extern "C" fn hirsel_unit_alloc(
 /// # Safety
 /// `u` is live and owned by the caller; `v` holds a value of this unit (the
 /// slot is empty afterwards); `cause` is a writable, empty slot.
-pub(crate) unsafe extern "C" fn hirsel_unit_drop(u: *mut UnitCtx, v: *mut ValueSlot, cause: *mut ValueSlot) -> bool {
+pub(crate) unsafe extern "C" fn hirsel_unit_drop(
+    u: *mut UnitCtx,
+    v: *mut ValueSlot,
+    cause: *mut ValueSlot,
+) -> bool {
     // SAFETY: by the contract.
     match unsafe { (*u).drop_value(take_value(v)) } {
         Some(c) => {
@@ -225,7 +229,13 @@ pub(crate) unsafe extern "C" fn hirsel_unit_conn_new(
     cap: *mut Capacity,
 ) -> bool {
     if slots == 0 || slots > super::conn::MAX_CAP || room > super::conn::MAX_ROOM {
-        cap_out(cap, Cap { req: room, avail: 0 });
+        cap_out(
+            cap,
+            Cap {
+                req: room,
+                avail: 0,
+            },
+        );
         return false;
     }
     // SAFETY: by the contract.
@@ -301,7 +311,11 @@ pub(crate) unsafe extern "C" fn hirsel_unit_send(
 /// and dropping the value there releases the sender's reservation.
 /// # Safety
 /// As `hirsel_unit_send`.
-pub(crate) unsafe extern "C" fn hirsel_unit_withdraw(u: *mut UnitCtx, c: *const Client, id: u32) -> bool {
+pub(crate) unsafe extern "C" fn hirsel_unit_withdraw(
+    u: *mut UnitCtx,
+    c: *const Client,
+    id: u32,
+) -> bool {
     // SAFETY: by the contract.
     unsafe { (*u).withdraw(&*c, id) }
 }
@@ -309,7 +323,11 @@ pub(crate) unsafe extern "C" fn hirsel_unit_withdraw(u: *mut UnitCtx, c: *const 
 /// The value of a send settled `TOOK_CLOSED`, back to its sender.
 /// # Safety
 /// `u` is live and owned by the caller; `out` is a writable, empty slot.
-pub(crate) unsafe extern "C" fn hirsel_unit_closed_value(u: *mut UnitCtx, id: u32, out: *mut ValueSlot) -> bool {
+pub(crate) unsafe extern "C" fn hirsel_unit_closed_value(
+    u: *mut UnitCtx,
+    id: u32,
+    out: *mut ValueSlot,
+) -> bool {
     // SAFETY: by the contract.
     match unsafe { (*u).closed_value(id) } {
         Some(v) => {
@@ -366,7 +384,11 @@ pub(crate) unsafe extern "C" fn hirsel_unit_seal(u: *mut UnitCtx, inbox: *const 
 /// # Safety
 /// `u` owns the inbox and took its seal answer; it was not cleaned before;
 /// `cause` is a writable, empty slot.
-pub(crate) unsafe extern "C" fn hirsel_unit_clean(u: *mut UnitCtx, inbox: *const Inbox, cause: *mut ValueSlot) -> bool {
+pub(crate) unsafe extern "C" fn hirsel_unit_clean(
+    u: *mut UnitCtx,
+    inbox: *const Inbox,
+    cause: *mut ValueSlot,
+) -> bool {
     // SAFETY: by the contract.
     let u = unsafe { &mut *u };
     // SAFETY: by the contract.
@@ -449,7 +471,11 @@ pub(crate) unsafe extern "C" fn hirsel_unit_shared_drop(u: *mut UnitCtx, s: *mut
 /// # Safety
 /// `u` is live and owned by the caller; `init` points to a live share
 /// handle, which the call consumes on success; `cap` is null or writable.
-pub(crate) unsafe extern "C" fn hirsel_unit_board_make(u: *mut UnitCtx, init: *mut *mut Shared, cap: *mut Capacity) -> *const BoardCore {
+pub(crate) unsafe extern "C" fn hirsel_unit_board_make(
+    u: *mut UnitCtx,
+    init: *mut *mut Shared,
+    cap: *mut Capacity,
+) -> *const BoardCore {
     // SAFETY: by the contract.
     let s = unsafe { *Box::from_raw(*init) };
     // SAFETY: by the contract.
@@ -472,7 +498,9 @@ pub(crate) unsafe extern "C" fn hirsel_unit_board_make(u: *mut UnitCtx, init: *m
 /// Another reading handle on the board.
 /// # Safety
 /// `b` is a live board handle.
-pub(crate) unsafe extern "C" fn hirsel_unit_board_add_handle(b: *const BoardCore) -> *const BoardCore {
+pub(crate) unsafe extern "C" fn hirsel_unit_board_add_handle(
+    b: *const BoardCore,
+) -> *const BoardCore {
     // SAFETY: by the contract; each handle owns one count of the Arc.
     unsafe {
         UnitCtx::board_add_handle(&*b);
@@ -484,7 +512,10 @@ pub(crate) unsafe extern "C" fn hirsel_unit_board_add_handle(b: *const BoardCore
 /// A share of the board's latest post.
 /// # Safety
 /// `u` is the calling pool unit's; `b` is a live board handle.
-pub(crate) unsafe extern "C" fn hirsel_unit_board_read(u: *mut UnitCtx, b: *const BoardCore) -> *mut Shared {
+pub(crate) unsafe extern "C" fn hirsel_unit_board_read(
+    u: *mut UnitCtx,
+    b: *const BoardCore,
+) -> *mut Shared {
     // SAFETY: by the contract.
     Box::into_raw(Box::new(unsafe { (*u).board_read(&*b) }))
 }
@@ -493,7 +524,11 @@ pub(crate) unsafe extern "C" fn hirsel_unit_board_read(u: *mut UnitCtx, b: *cons
 /// # Safety
 /// `u` is the calling pool unit's and holds the poster; `b` is a live board
 /// handle; `s` is a live share consumed by the call.
-pub(crate) unsafe extern "C" fn hirsel_unit_board_post(u: *mut UnitCtx, b: *const BoardCore, s: *mut Shared) {
+pub(crate) unsafe extern "C" fn hirsel_unit_board_post(
+    u: *mut UnitCtx,
+    b: *const BoardCore,
+    s: *mut Shared,
+) {
     // SAFETY: by the contract.
     unsafe { (*u).board_post(&*b, *Box::from_raw(s)) };
 }
@@ -501,7 +536,10 @@ pub(crate) unsafe extern "C" fn hirsel_unit_board_post(u: *mut UnitCtx, b: *cons
 /// Drop the board's poster.
 /// # Safety
 /// `u` holds the board's poster, not used again; `b` is the poster's pointer.
-pub(crate) unsafe extern "C" fn hirsel_unit_board_drop_poster(u: *mut UnitCtx, b: *const BoardCore) {
+pub(crate) unsafe extern "C" fn hirsel_unit_board_drop_poster(
+    u: *mut UnitCtx,
+    b: *const BoardCore,
+) {
     // SAFETY: by the contract; the poster's count of the Arc is given up.
     unsafe {
         (*u).board_drop_poster(&*b);
@@ -512,7 +550,10 @@ pub(crate) unsafe extern "C" fn hirsel_unit_board_drop_poster(u: *mut UnitCtx, b
 /// Drop a board handle. The last one releases the board's post and root.
 /// # Safety
 /// `u` is the calling pool unit's; `b` is a live board handle not used again.
-pub(crate) unsafe extern "C" fn hirsel_unit_board_drop_handle(u: *mut UnitCtx, b: *const BoardCore) {
+pub(crate) unsafe extern "C" fn hirsel_unit_board_drop_handle(
+    u: *mut UnitCtx,
+    b: *const BoardCore,
+) {
     // SAFETY: by the contract; this handle's count of the Arc is given up.
     unsafe {
         (*u).board_drop_handle(&*b);

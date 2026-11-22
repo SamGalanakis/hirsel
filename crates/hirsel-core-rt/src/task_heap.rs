@@ -1680,10 +1680,14 @@ impl Mapping {
     ) -> Option<(Self, NonNull<u8>)> {
         let mapping = if let Some(memory) = crate::units::memory() {
             let len = space.checked_add(headroom)?;
-            memory.take_page(|mapping| {
-                mapping.len == len && mapping.prefix == headroom && mapping.writable.get() >= bytes
-                    && (mapping.base.addr().get() + headroom) & (align - 1) == 0
-            }).or_else(|| memory.map(move || Self::map_aligned(bytes, space, align, headroom)))?
+            memory
+                .take_page(|mapping| {
+                    mapping.len == len
+                        && mapping.prefix == headroom
+                        && mapping.writable.get() >= bytes
+                        && (mapping.base.addr().get() + headroom) & (align - 1) == 0
+                })
+                .or_else(|| memory.map(move || Self::map_aligned(bytes, space, align, headroom)))?
         } else {
             Self::map_aligned(bytes, space, align, headroom)?
         };

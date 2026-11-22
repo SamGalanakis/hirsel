@@ -1,8 +1,8 @@
 # Generated TypeScript bindings
 
 `hirsel sdk ts <program> --output <dir>` builds the program and runs its describe
-launch mode. The generated ES modules and `.d.ts` declarations use the same
-code in Node and browsers, without a build step.
+launch mode. It emits ES modules and `.d.ts` declarations for Node and
+browsers, along with the TypeScript client runtime.
 The output directory has `package.json` with `"type": "module"`, so Node loads
 the same `.js` files even inside a CommonJS project.
 
@@ -67,9 +67,44 @@ registration errors retain their typed payloads; an expired child reports
 
 ## Shared client runtime
 
-`@hirsel/client` lives in `sdk/client`. Its shared state machine consumes the
-generated Frame codec and Want list. Browser storage uses strict IndexedDB
-transactions and generation-scoped Web Locks; Node storage uses durable file
+The generated directory includes the shared client runtime in `client.ts`,
+`persistence.ts`, `browser.ts` and `node.ts`. Compile these sources with your
+TypeScript app or bundle them with your browser app. Include the generated
+`codec.js`, `entries.js` and `frame.js` beside the compiled runtime. The SDK
+needs no runtime npm dependencies.
+
+```ts
+import {Client} from './generated/client.js';
+import {BrowserStorage} from './generated/browser.js';
+import {Frame} from './generated/frame.js';
+import {bind, identity, want} from './generated/entries.js';
+
+const client = await Client.open({
+  url: 'wss://example.test/hirsel',
+  frame: Frame,
+  wants: want,
+  identity,
+  storage: new BrowserStorage(),
+});
+await client.whenReady();
+const api = bind(client);
+```
+
+For Node 22 or later, use `NodeStorage` from `./generated/node.js` and pass
+a private state directory to its constructor. The Node adapter uses `flock`
+and needs Node type declarations when you type-check it.
+
+`Client.open` requires the ingress WebSocket `url`, the generated `frame`
+codec and `wants`, and a `storage` adapter. Pass the generated `identity` to
+check the launch digest, target and `n_place`. Optional `credential` bytes go
+in Hello. `deadlineMs` sets the server's call deadline and defaults to 30,000.
+The optional `socket` factory and `clock` override the platform WebSocket and
+time source. `onState`, `onDiagnostic`, `onRecovered`, `onBatch` and
+`onPrediction` observe state changes, diagnostics, recovered call outcomes,
+applied Batch versions and pending predictions, respectively.
+
+Browser storage uses strict IndexedDB transactions and generation-scoped Web
+Locks. Node storage uses durable file
 replacement and `flock` leases. Generation validation and each work send share
 the installation lock. Missing allocated stream records fence the generation;
 pending requests are tied to the Caller saved for that stream.

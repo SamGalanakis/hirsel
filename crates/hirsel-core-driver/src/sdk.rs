@@ -367,7 +367,7 @@ pub fn generate(describe: &Describe) -> Result<BTreeMap<String, String>, Error> 
     }
     entries.push_str("return {call,subscribe};\n}\n");
     let entry_dts = format!(
-        "import type * as codec from './codec.js';\nimport type {{Outcome, Row, Subscription, SubscriptionEnd, Transport}} from '@hirsel/client';\nexport const identity: {{readonly digest: Uint8Array; readonly target: string; readonly n_place: bigint}};\nexport const want: Array<{{identity: Uint8Array; args_fp: bigint; result_fp: bigint}}>;\nexport function bind(client: Transport): {{call: {{ {} }}; subscribe: {{ {} }} }};\n",
+        "import type * as codec from './codec.js';\nimport type {{Outcome, Row, Subscription, SubscriptionEnd, Transport}} from './client.js';\nexport const identity: {{readonly digest: Uint8Array; readonly target: string; readonly n_place: bigint}};\nexport const want: Array<{{identity: Uint8Array; args_fp: bigint; result_fp: bigint}}>;\nexport function bind(client: Transport): {{call: {{ {} }}; subscribe: {{ {} }} }};\n",
         calls.join("; "),
         subscriptions.join("; ")
     );
@@ -377,6 +377,22 @@ pub fn generate(describe: &Describe) -> Result<BTreeMap<String, String>, Error> 
         ("codec.d.ts".into(), dts),
         ("entries.js".into(), entries),
         ("entries.d.ts".into(), entry_dts),
+        (
+            "client.ts".into(),
+            include_str!("../../../sdk/client/client.ts").into(),
+        ),
+        (
+            "browser.ts".into(),
+            include_str!("../../../sdk/client/browser.ts").into(),
+        ),
+        (
+            "node.ts".into(),
+            include_str!("../../../sdk/client/node.ts").into(),
+        ),
+        (
+            "persistence.ts".into(),
+            include_str!("../../../sdk/client/persistence.ts").into(),
+        ),
     ]))
 }
 pub fn write(describe: &Describe, out: &Path) -> Result<(), Error> {

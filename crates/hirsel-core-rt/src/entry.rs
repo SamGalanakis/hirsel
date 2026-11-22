@@ -158,6 +158,9 @@ pub struct ProcessOperations {
 pub struct SocketActivation {
     pub(crate) receive: unsafe fn() -> io::Result<Option<OwnedFd>>,
     pub(crate) rules: unsafe fn(&[hirsel_core_net::RuleView]) -> Option<crate::net::RulesStorage>,
+    pub(crate) unix_probe: fn() -> io::Result<()>,
+    pub(crate) unix_roots:
+        unsafe fn(&mut OsProvider, &[hirsel_core_net::RuleView]) -> Result<(), StartupError>,
 }
 
 /// Reads the credential source for a Secret grant during startup.
@@ -342,6 +345,7 @@ pub(crate) enum StartupError {
     MissingGrant(usize),
     MissingSecret(usize),
     NetRules,
+    UnixProbe(io::Error),
     EnvPatterns,
     EnvSecretOverlap(String),
     UnsupportedHostOpenat2(io::Error),
@@ -355,9 +359,10 @@ impl From<io::Error> for StartupError {
 impl StartupError {
     fn into_io(self) -> io::Error {
         match self {
-            Self::Io(error) | Self::Directory(_, error) | Self::UnsupportedHostOpenat2(error) => {
-                error
-            }
+            Self::Io(error)
+            | Self::Directory(_, error)
+            | Self::UnsupportedHostOpenat2(error)
+            | Self::UnixProbe(error) => error,
             Self::Exec(reason) => io::Error::other(reason),
             Self::MissingGrant(_)
             | Self::MissingSecret(_)
@@ -492,6 +497,15 @@ impl OsProcess {
             if host_control.is_some() && (describe_mode || prepare_path.is_some()) {
                 return Err(io::Error::from_raw_os_error(libc::EINVAL).into());
             }
+            let rows = if input.net_rules_len == 0 {
+                &[][..]
+            } else {
+                std::slice::from_raw_parts(input.net_rules, input.net_rules_len)
+            };
+            let unix = !describe_mode
+                && prepare_path.is_none()
+                && input.grant_mask & (1 << NET) != 0
+                && rows.iter().any(|row| row.address.dir == 4);
             let exec = if input.exec_bindings_len != 0 {
                 let ops = input
                     .exec_ops
@@ -499,8 +513,12 @@ impl OsProcess {
                     .ok_or_else(|| StartupError::Exec("no Exec startup operations".into()))?;
                 let bindings =
                     std::slice::from_raw_parts(input.exec_bindings, input.exec_bindings_len);
-                Some((ops.load)(bindings, &exec_approvals, describe_mode)?)
+                Some((ops.load)(bindings, &exec_approvals, describe_mode, unix)?)
             } else {
+                if unix {
+                    let probe = net_ops.ok_or(StartupError::NetRules)?.unix_probe;
+                    probe().map_err(StartupError::UnixProbe)?;
+                }
                 None
             };
             let terminal = [
@@ -571,9 +589,10 @@ impl OsProcess {
             } else if prepare_path.is_some() {
                 net_granted.then(crate::net::RulesStorage::empty)
             } else if input.net_rules_len != 0 {
-                let load = net_ops.ok_or(StartupError::NetRules)?.rules;
-                let rows = std::slice::from_raw_parts(input.net_rules, input.net_rules_len);
-                Some(load(rows).ok_or(StartupError::NetRules)?)
+                let ops = net_ops.ok_or(StartupError::NetRules)?;
+                let rules = (ops.rules)(rows).ok_or(StartupError::NetRules)?;
+                (ops.unix_roots)(&mut os, rows)?;
+                Some(rules)
             } else if net_granted {
                 return Err(StartupError::NetRules);
             } else {
@@ -1050,6 +1069,9 @@ unsafe fn run_with_sources_and_probe(
 pub(crate) unsafe fn report_startup(error: StartupError, stderr: i32, names: *const View) {
     let mut line = b"not started: ".to_vec();
     match error {
+        StartupError::UnixProbe(error) => {
+            line.extend_from_slice(format!("{error}\n").as_bytes());
+        }
         StartupError::NetRules => {
             line.extend_from_slice(b"Net requires --grant ");
             line.extend_from_slice(hirsel_core_net::RULE_SYNTAX.as_bytes());

@@ -35,6 +35,7 @@ mod os_net;
 mod os_resolve;
 mod os_sync;
 mod os_tls;
+mod os_unix;
 #[cfg(any(test, feature = "charge-observation"))]
 pub mod peak;
 pub mod process;
@@ -65,6 +66,7 @@ pub mod test_provider;
 pub mod tls;
 mod units;
 pub mod units_lang;
+mod unix_net;
 /// The unit connection path's round-trip measurement (`examples/units_conn.rs`).
 #[cfg(not(test))]
 #[doc(hidden)]

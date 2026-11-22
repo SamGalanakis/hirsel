@@ -93,19 +93,30 @@ pub(super) fn write(
     use hirsel_core_net::{GrantRule, RuleView};
     let mut rules = Vec::new();
     let mut pointers = Vec::new();
-    for rule in plan.net_rules {
+    let rows = plan.net_rules.iter().map(|rule| match rule {
+        GrantRule::Address(address) => (RuleView::address(*address), None),
+        GrantRule::Tls(rule) => {
+            let patterns = rule.pattern_text();
+            (RuleView::tls(rule, &patterns), Some(patterns))
+        }
+        GrantRule::Resolve(rule) => {
+            let patterns = rule.pattern_text();
+            (RuleView::resolve(&patterns), Some(patterns))
+        }
+        GrantRule::Unix(rule) => {
+            let (label, path) = rule
+                .endpoint()
+                .expect("launch rule has a concrete endpoint");
+            let text = [label, path].concat();
+            (RuleView::unix(rule, &text), Some(text))
+        }
+    });
+    let roots = plan.unix_roots.iter().map(|(label, path)| {
+        let text = [label.as_str(), path.as_str()].concat();
+        (RuleView::unix_root(label.len(), &text), Some(text))
+    });
+    for (view, patterns) in roots.chain(rows) {
         let mut row = [0; size_of::<RuleView>()];
-        let (view, patterns) = match rule {
-            GrantRule::Address(address) => (RuleView::address(*address), None),
-            GrantRule::Tls(rule) => {
-                let patterns = rule.pattern_text();
-                (RuleView::tls(rule, &patterns), Some(patterns))
-            }
-            GrantRule::Resolve(rule) => {
-                let patterns = rule.pattern_text();
-                (RuleView::resolve(&patterns), Some(patterns))
-            }
-        };
         if let Some(patterns) = patterns {
             let offset = rules.len() + offset_of!(RuleView, patterns);
             let data = bytes(object, None, patterns.into_bytes(), 1)?;

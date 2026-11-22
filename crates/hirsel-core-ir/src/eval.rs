@@ -4071,6 +4071,7 @@ impl Machine<'_> {
                 | HostOp::NetNarrow
                 | HostOp::NetNarrowTls
                 | HostOp::NetNarrowResolve
+                | HostOp::NetNarrowUnix
                 | HostOp::NetSplit
                 | HostOp::NetJoin
         ) {
@@ -4119,6 +4120,27 @@ impl Machine<'_> {
             }
             HostOp::ExecNarrow => panic!("Exec evaluation uses the native reference"),
             HostOp::Resolve => return self.network_resolve(t, a),
+            HostOp::UnixConnect
+            | HostOp::UnixListen
+            | HostOp::UnixAccept
+            | HostOp::DatagramOpen
+            | HostOp::DatagramBind
+            | HostOp::DatagramConnect
+            | HostOp::DatagramSend
+            | HostOp::DatagramSendTo
+            | HostOp::DatagramRecv => error(1),
+            HostOp::NetNarrowUnix => {
+                use hirsel_core_net::{GrantRule, UnixDirection, UnixRule};
+                let rule = UnixDirection::from_tag(a[1] as u8).and_then(|dir| {
+                    let root = std::str::from_utf8(self.carrier_bytes(a[2])).ok()?;
+                    let path = std::str::from_utf8(self.carrier_bytes(a[3])).ok()?;
+                    UnixRule::new(dir, root, path)
+                });
+                match rule {
+                    Some(rule) => self.narrow_net(t, a[0], GrantRule::Unix(rule)),
+                    None => error(1),
+                }
+            }
             HostOp::NetNarrowResolve => {
                 use hirsel_core_net::{GrantRule, ResolveRule};
                 match std::str::from_utf8(self.carrier_bytes(a[1]))

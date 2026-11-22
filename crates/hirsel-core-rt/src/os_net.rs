@@ -39,6 +39,8 @@ pub(crate) static TLS_OPERATIONS: Operations = Operations {
 pub static hirsel_core_os_socket_activation: SocketActivation = SocketActivation {
     receive: receive_listener,
     rules: RulesStorage::from_views,
+    unix_probe: hirsel_core_net::unix::probe,
+    unix_roots: crate::os_unix::configure_roots,
 };
 
 pub(crate) const LISTEN_FD: i32 = 3;

@@ -574,6 +574,12 @@ fn net_rule(rule: &hirsel_core_net::GrantRule) -> String {
             format!("Tls {} {first}-{last} {trust}", rule.pattern_text())
         }
         GrantRule::Resolve(rule) => format!("Resolve {}", rule.pattern_text()),
+        GrantRule::Unix(rule) => {
+            let (root, path) = rule
+                .endpoint()
+                .expect("launch rule has a concrete endpoint");
+            format!("{} {root} {path}", rule.direction.word())
+        }
     }
 }
 
@@ -638,7 +644,12 @@ fn bindings(
                 .iter()
                 .map(|s| (*s).clone())
                 .collect(),
-            GrantKind::Net if index == 0 => options.net_rules.iter().map(net_rule).collect(),
+            GrantKind::Net if index == 0 => options
+                .unix_roots
+                .iter()
+                .map(|(label, path)| format!("UnixRoot {label} {path}"))
+                .chain(options.net_rules.iter().map(net_rule))
+                .collect(),
             GrantKind::Env if index == 0 => options
                 .env_patterns
                 .iter()
@@ -787,6 +798,7 @@ fn launch_options(
     options.directories.clear();
     options.grant_mask = 0;
     options.net_rules.clear();
+    options.unix_roots.clear();
     options.secret_grants.clear();
     options.foreign_grants.clear();
     let configured_exec = std::mem::take(&mut options.exec_grants);
@@ -849,11 +861,9 @@ fn launch_options(
                 _ => return Err(invalid()),
             },
             GrantKind::Net if index == 0 && !values.is_empty() => {
-                options.net_rules = values
-                    .iter()
-                    .map(|v| hirsel_core_net::GrantRule::parse(v))
-                    .collect::<Result<_, _>>()
-                    .map_err(NativeStop::Entry)?;
+                let grant = hirsel_core_net::NetGrant::parse(values).map_err(NativeStop::Entry)?;
+                options.net_rules = grant.rules;
+                options.unix_roots = grant.roots;
                 options.grant_mask |= 1 << kind as u8;
             }
             GrantKind::Env => match values.as_slice() {

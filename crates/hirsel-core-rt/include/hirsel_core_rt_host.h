@@ -147,7 +147,11 @@ uint64_t hirsel_core_capability_handle(const HirselCoreContext *, uint64_t);
 /* NET-6 configuration. dir: 0 Connect, 1 Listen, 2 Tls, 3 Resolve. Address
    rules use family (0 V4, 1 V6), hi, lo and bits. Tls and Resolve use
    comma-separated patterns. Tls also uses trust (0 System, 1 Roots) and
-   roots for the SHA-256 pin. Resolve uses only patterns and patterns_len. */
+   roots for the SHA-256 pin. Resolve uses only patterns and patterns_len.
+   NET-12 extends dir with 4 Unix and 5 UnixRoot (launch input only). For
+   those rows, patterns contains the concatenated label and path, and hi
+   gives the label's byte count. A Unix row's family is its direction
+   (0 Connect, 1 Listen, 2 Bind, 3 Send). */
 typedef struct {
     uint8_t dir, family;
     uint64_t hi, lo;

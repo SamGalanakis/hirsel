@@ -84,3 +84,18 @@ pub fn needs_writable_dir(op: u8, mode: u8) -> bool {
 }
 
 pub const EXEC_NARROW: u8 = 75;
+// Unix endpoints and datagrams (NET-12 through NET-14).
+pub const UNIX_CONNECT: u8 = 106;
+pub const UNIX_LISTEN: u8 = 107;
+pub const UNIX_ACCEPT: u8 = 108;
+pub const DATAGRAM_OPEN: u8 = 109;
+pub const DATAGRAM_BIND: u8 = 110;
+pub const DATAGRAM_CONNECT: u8 = 111;
+pub const DATAGRAM_SEND: u8 = 112;
+pub const DATAGRAM_SEND_TO: u8 = 113;
+pub const DATAGRAM_RECV: u8 = 114;
+pub const NET_NARROW_UNIX: u8 = 115;
+
+pub fn unix_operation(op: u8) -> bool {
+    (UNIX_CONNECT..=DATAGRAM_RECV).contains(&op)
+}

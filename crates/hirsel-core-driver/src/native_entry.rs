@@ -48,6 +48,7 @@ pub(crate) struct Plan<'a> {
     root_limit: u64,
     grant_mask: u64,
     net_rules: &'a [hirsel_core_net::GrantRule],
+    unix_roots: &'a std::collections::BTreeMap<String, String>,
     env_patterns: Option<String>,
     secret_grants: Vec<Option<&'a hirsel_core_net::SecretGrant>>,
     directories: &'a [String],
@@ -70,7 +71,10 @@ pub(crate) fn policy(
 ) -> (
     u64,
     u64,
-    &[hirsel_core_net::GrantRule],
+    (
+        &[hirsel_core_net::GrantRule],
+        &std::collections::BTreeMap<String, String>,
+    ),
     &[hirsel_core_net::SecretGrant],
     Option<&hirsel_core_net::EnvPatterns>,
     &[String],
@@ -83,7 +87,7 @@ pub(crate) fn policy(
     (
         options.root_limit,
         options.grant_mask,
-        &options.net_rules,
+        (&options.net_rules, &options.unix_roots),
         &options.secret_grants,
         options.env_patterns.as_ref(),
         &options.directories,
@@ -191,6 +195,7 @@ impl<'a> Plan<'a> {
             root_limit: options.root_limit,
             grant_mask,
             net_rules: &options.net_rules,
+            unix_roots: &options.unix_roots,
             env_patterns: options
                 .env_patterns
                 .as_ref()

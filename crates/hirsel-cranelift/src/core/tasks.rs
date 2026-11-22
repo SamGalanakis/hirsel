@@ -302,6 +302,16 @@ impl Function<'_, '_, '_> {
                     | HostOp::ExecNarrow
                     | HostOp::NetNarrowTls
                     | HostOp::NetNarrowResolve
+                    | HostOp::UnixConnect
+                    | HostOp::UnixListen
+                    | HostOp::UnixAccept
+                    | HostOp::DatagramOpen
+                    | HostOp::DatagramBind
+                    | HostOp::DatagramConnect
+                    | HostOp::DatagramSend
+                    | HostOp::DatagramSendTo
+                    | HostOp::DatagramRecv
+                    | HostOp::NetNarrowUnix
                     | HostOp::Resolve
                     | HostOp::TlsConnect
                     | HostOp::SendSecret
@@ -351,6 +361,16 @@ impl Function<'_, '_, '_> {
                     | HostOp::ExecNarrow
                     | HostOp::NetNarrowTls
                     | HostOp::NetNarrowResolve
+                    | HostOp::UnixConnect
+                    | HostOp::UnixListen
+                    | HostOp::UnixAccept
+                    | HostOp::DatagramOpen
+                    | HostOp::DatagramBind
+                    | HostOp::DatagramConnect
+                    | HostOp::DatagramSend
+                    | HostOp::DatagramSendTo
+                    | HostOp::DatagramRecv
+                    | HostOp::NetNarrowUnix
                     | HostOp::Resolve
                     | HostOp::TlsConnect
                     | HostOp::SendSecret

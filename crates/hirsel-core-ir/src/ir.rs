@@ -1084,6 +1084,16 @@ pub enum HostOp {
     NetJoin = 97,
     ScramFinalLen = 98,
     ExecNarrow = hirsel_core_ids::host_op::EXEC_NARROW as isize,
+    UnixConnect = hirsel_core_ids::host_op::UNIX_CONNECT as isize,
+    UnixListen = hirsel_core_ids::host_op::UNIX_LISTEN as isize,
+    UnixAccept = hirsel_core_ids::host_op::UNIX_ACCEPT as isize,
+    DatagramOpen = hirsel_core_ids::host_op::DATAGRAM_OPEN as isize,
+    DatagramBind = hirsel_core_ids::host_op::DATAGRAM_BIND as isize,
+    DatagramConnect = hirsel_core_ids::host_op::DATAGRAM_CONNECT as isize,
+    DatagramSend = hirsel_core_ids::host_op::DATAGRAM_SEND as isize,
+    DatagramSendTo = hirsel_core_ids::host_op::DATAGRAM_SEND_TO as isize,
+    DatagramRecv = hirsel_core_ids::host_op::DATAGRAM_RECV as isize,
+    NetNarrowUnix = hirsel_core_ids::host_op::NET_NARROW_UNIX as isize,
 }
 
 impl HostOp {
@@ -1141,6 +1151,16 @@ impl HostOp {
         HostOp::WriteAt,
         HostOp::Resolve,
         HostOp::NetNarrowResolve,
+        HostOp::UnixConnect,
+        HostOp::UnixListen,
+        HostOp::UnixAccept,
+        HostOp::DatagramOpen,
+        HostOp::DatagramBind,
+        HostOp::DatagramConnect,
+        HostOp::DatagramSend,
+        HostOp::DatagramSendTo,
+        HostOp::DatagramRecv,
+        HostOp::NetNarrowUnix,
         HostOp::StdinRead,
         HostOp::EnvGet,
         HostOp::EnvLen,
@@ -1213,6 +1233,16 @@ impl HostOp {
             HostOp::ExecNarrow => "exec_narrow",
             HostOp::NetNarrowTls => "net_narrow_tls",
             HostOp::NetNarrowResolve => "net_narrow_resolve",
+            HostOp::UnixConnect => "host_connect_unix",
+            HostOp::UnixListen => "host_listen_unix",
+            HostOp::UnixAccept => "host_accept_unix",
+            HostOp::DatagramOpen => "host_open_datagram",
+            HostOp::DatagramBind => "host_bind_datagram",
+            HostOp::DatagramConnect => "host_connect_datagram",
+            HostOp::DatagramSend => "host_send_datagram",
+            HostOp::DatagramSendTo => "host_send_to",
+            HostOp::DatagramRecv => "host_recv_datagram",
+            HostOp::NetNarrowUnix => "net_narrow_unix",
             HostOp::TlsConnect => "tls_connect",
             HostOp::SendSecret => "send_secret",
             HostOp::SecretSeal => "secret_seal",
@@ -1263,6 +1293,16 @@ impl HostOp {
             Self::ExecNarrow => "hirsel_core_exec_narrow",
             Self::NetNarrowTls => "hirsel_core_net_narrow_tls",
             Self::NetNarrowResolve => "hirsel_core_net_narrow_resolve",
+            Self::UnixConnect => "hirsel_core_host_connect_unix",
+            Self::UnixListen => "hirsel_core_host_listen_unix",
+            Self::UnixAccept => "hirsel_core_host_accept_unix",
+            Self::DatagramOpen => "hirsel_core_host_open_datagram",
+            Self::DatagramBind => "hirsel_core_host_bind_datagram",
+            Self::DatagramConnect => "hirsel_core_host_connect_datagram",
+            Self::DatagramSend => "hirsel_core_host_send_datagram",
+            Self::DatagramSendTo => "hirsel_core_host_send_to",
+            Self::DatagramRecv => "hirsel_core_host_recv_datagram",
+            Self::NetNarrowUnix => "hirsel_core_net_narrow_unix",
             Self::TlsConnect => "hirsel_core_tls_connect",
             Self::SendSecret => "hirsel_core_host_send_secret",
             Self::SecretSeal => "hirsel_core_secret_seal",
@@ -1311,6 +1351,7 @@ impl HostOp {
                 | HostOp::ExecNarrow
                 | HostOp::NetNarrowTls
                 | HostOp::NetNarrowResolve
+                | HostOp::NetNarrowUnix
                 | HostOp::SecretSeal
                 | HostOp::SecretNarrow
                 | HostOp::SecretHmac
@@ -1561,6 +1602,28 @@ impl RtOp {
                         vec![V(u64_), V(Ty::Scalar(Scalar::U32)), V(p), V(p)],
                         outcome,
                     ),
+                    HostOp::UnixConnect => {
+                        (vec![V(u64_), V(p), V(p), V(u8_), V(u64_), V(u64_)], outcome)
+                    }
+                    HostOp::UnixListen => (
+                        vec![V(u64_), V(p), V(p), V(Ty::Scalar(Scalar::U16))],
+                        outcome,
+                    ),
+                    HostOp::UnixAccept => (vec![V(u64_), V(u8_), V(u64_), V(u64_)], outcome),
+                    HostOp::DatagramOpen => (vec![V(u64_)], outcome),
+                    HostOp::DatagramBind => (vec![V(u64_), V(p), V(p)], outcome),
+                    HostOp::DatagramConnect => (vec![V(u64_), V(p), V(p)], outcome),
+                    HostOp::DatagramSend => {
+                        (vec![V(u64_), V(p), V(u8_), V(u64_), V(u64_)], outcome)
+                    }
+                    HostOp::DatagramSendTo => (
+                        vec![V(u64_), V(p), V(p), V(p), V(u8_), V(u64_), V(u64_)],
+                        outcome,
+                    ),
+                    HostOp::DatagramRecv => {
+                        (vec![V(u64_), V(p), V(u8_), V(u64_), V(u64_)], outcome)
+                    }
+                    HostOp::NetNarrowUnix => (vec![V(u64_), V(u8_), V(p), V(p)], outcome),
                     HostOp::SendPair => {
                         (vec![V(u64_), V(p), V(p), V(u8_), V(u64_), V(u64_)], outcome)
                     }

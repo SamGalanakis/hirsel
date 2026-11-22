@@ -4,7 +4,7 @@
 //! convention: package `app`, one module per file, `main` in `main`.
 use crate::NativeOptions;
 use hirsel_core_ids::DefPath;
-use hirsel_core_net::{EnvPatterns, GrantRule, RULE_SYNTAX, SecretGrant};
+use hirsel_core_net::{EnvPatterns, GrantRule, NetGrant, RULE_SYNTAX, SecretGrant};
 use hirsel_core_resolve::{ModuleSource, PackageManifest};
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -34,6 +34,7 @@ pub(crate) struct Grants {
     pub directories: Vec<String>,
     pub mask: u64,
     pub net_rules: Vec<GrantRule>,
+    pub unix_roots: BTreeMap<String, String>,
     pub secrets: Vec<SecretGrant>,
     pub foreign: std::collections::BTreeSet<String>,
     pub exec: Vec<crate::exec_launch::Binding>,
@@ -71,9 +72,16 @@ impl Grants {
         } else if value == "Net" {
             return Err(format!("Net requires --grant {RULE_SYNTAX}").into());
         } else if let Some(rules) = value.strip_prefix("Net=") {
-            for rule in rules.split(';') {
-                self.net_rules.push(GrantRule::parse(rule)?);
+            let grant = NetGrant::parse(rules.split(';'))?;
+            if grant
+                .roots
+                .keys()
+                .any(|label| self.unix_roots.contains_key(label))
+            {
+                return Err(format!("expected --grant {RULE_SYNTAX}: duplicate UnixRoot").into());
             }
+            self.net_rules.extend(grant.rules);
+            self.unix_roots.extend(grant.roots);
             self.mask |= 1 << 1;
         } else if value == "Env" {
             return Err(EnvPatterns::SYNTAX.into());
@@ -105,6 +113,7 @@ impl Grants {
         options.directories.clone_from(&self.directories);
         options.grant_mask = self.mask;
         options.net_rules.clone_from(&self.net_rules);
+        options.unix_roots.clone_from(&self.unix_roots);
         options.secret_grants.clone_from(&self.secrets);
         options.foreign_grants.clone_from(&self.foreign);
         options.exec_grants.clone_from(&self.exec);

@@ -14,7 +14,7 @@ pub struct Binding {
 }
 
 pub struct Operations {
-    pub(crate) load: unsafe fn(&[Binding], &[&[u8]], bool) -> Result<Launch, StartupError>,
+    pub(crate) load: unsafe fn(&[Binding], &[&[u8]], bool, bool) -> Result<Launch, StartupError>,
 }
 
 #[unsafe(no_mangle)]
@@ -37,6 +37,7 @@ unsafe fn load(
     bindings: &[Binding],
     approvals: &[&[u8]],
     preview: bool,
+    unix: bool,
 ) -> Result<Launch, StartupError> {
     let mut requests = Vec::with_capacity(bindings.len());
     for (index, binding) in bindings.iter().enumerate() {
@@ -75,8 +76,10 @@ unsafe fn load(
         });
     }
 
-    let supervisor =
-        Arc::new(Supervisor::start(probe).map_err(|error| StartupError::Exec(error.to_string()))?);
+    let prepare_host = if unix { probe_with_unix } else { probe };
+    let supervisor = Arc::new(
+        Supervisor::start(prepare_host).map_err(|error| StartupError::Exec(error.to_string()))?,
+    );
     let mut grants = Vec::with_capacity(requests.len());
     let mut lines = Vec::new();
     for policy in requests {
@@ -86,4 +89,9 @@ unsafe fn load(
         lines.extend(approval);
     }
     Ok(Launch { grants, lines })
+}
+
+fn probe_with_unix() -> std::io::Result<()> {
+    probe()?;
+    hirsel_core_net::unix::probe()
 }

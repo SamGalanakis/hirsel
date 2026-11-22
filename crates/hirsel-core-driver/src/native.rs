@@ -96,6 +96,7 @@ pub struct NativeOptions {
     /// Explicit host authority, using the runtime's grant-kind bit positions.
     pub grant_mask: u64,
     pub net_rules: Vec<hirsel_core_net::GrantRule>,
+    pub unix_roots: std::collections::BTreeMap<String, String>,
     pub secret_grants: Vec<hirsel_core_net::SecretGrant>,
     pub foreign_grants: BTreeSet<String>,
     pub(crate) exec_grants: Vec<crate::exec_launch::Binding>,
@@ -148,6 +149,7 @@ impl NativeOptions {
             directories: vec![],
             grant_mask: 0,
             net_rules: vec![],
+            unix_roots: Default::default(),
             secret_grants: vec![],
             foreign_grants: BTreeSet::new(),
             exec_grants: vec![],
@@ -2057,6 +2059,7 @@ pub(crate) mod tests {
             directories: vec![],
             grant_mask: 0,
             net_rules: vec![],
+            unix_roots: Default::default(),
             secret_grants: vec![],
             foreign_grants: BTreeSet::new(),
             exec_grants: vec![],

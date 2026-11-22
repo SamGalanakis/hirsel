@@ -10,7 +10,7 @@ pub mod unix;
 pub use env::{EnvPatterns, EnvSnapshot};
 
 /// The public grant spelling, also used in configuration diagnostics.
-pub const RULE_SYNTAX: &str = "Net=<Connect|Listen> <prefix>/<len> <lo>-<hi>[;<rule>] or Net=Tls <names> <lo>-<hi> <System|Roots=sha256:<hex>> or Net=Resolve <names>";
+pub const RULE_SYNTAX: &str = "Net=<Connect|Listen> <prefix>/<len> <lo>-<hi>[;<rule>] or Net=Tls <names> <lo>-<hi> <System|Roots=sha256:<hex>> or Net=Resolve <names> or Net=UnixRoot <label> <absolute-path>;<UnixConnect|UnixListen|UnixBind|UnixSend> <label> <path>";
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
@@ -122,7 +122,9 @@ impl Rule {
 mod ip;
 pub use ip::{IP_RECORD_LEN, Ip, ip_record, ip_records};
 mod grant;
-pub use grant::{GrantRule, ResolveRule, RuleView};
+pub use grant::{
+    GrantRule, NetGrant, ResolveRule, RuleView, UnixDirection, UnixRule, valid_relative_path,
+};
 mod reactor;
 pub use reactor::{Poller, SHARED_UNIT_SHIFT, SocketTransfer, Sockets, share_poller};
 /// mc-units-untied: epoll_wait calls made by run reactors.
@@ -307,6 +309,42 @@ mod tests {
         assert!(!fixed.permits("git", &[], &["FIXED"], "work"));
         assert!(!fixed.permits("git", &[], &["CALLER"], "work"));
         assert_eq!(fixed.charge(), Some(80)); // 32 + 11 + 16 + 8 + 12, rounded.
+    }
+
+    #[test]
+    fn unix_rules_intersect_only_the_same_direction_root_and_path() {
+        let exact = GrantRule::parse("UnixConnect pg .s.PGSQL.5432").unwrap();
+        assert_eq!(exact.logical_size(), 24); // 8 + 2 + 13, rounded to 8.
+        for other in [
+            "UnixListen pg .s.PGSQL.5432",
+            "UnixConnect other .s.PGSQL.5432",
+            "UnixConnect pg .s.PGSQL.1234",
+            "Connect 0.0.0.0/0 0-65535",
+            "Tls pg.test 0-65535 System",
+            "Resolve pg.test",
+        ] {
+            let other = GrantRule::parse(other).unwrap();
+            assert_eq!(exact.intersect(&other), None);
+            assert_eq!(other.intersect(&exact), None);
+        }
+        assert_eq!(exact.intersect(&exact), Some(exact));
+        let parsed = NetGrant::parse(["UnixConnect pg x", "UnixRoot pg /run/pg"]).unwrap();
+        assert_eq!(parsed.roots["pg"], "/run/pg");
+        assert_eq!(parsed.rules.len(), 1);
+        for rows in [
+            vec!["UnixConnect pg x"],
+            vec!["UnixRoot pg /run/pg", "UnixRoot pg /elsewhere"],
+            vec!["UnixRoot pg run/pg"],
+            vec!["UnixRoot pg /run/pg", "UnixConnect pg ../x"],
+        ] {
+            assert!(NetGrant::parse(rows).is_err());
+        }
+        assert!(
+            NetGrant::parse(["UnixRoot pg /run/pg"])
+                .unwrap()
+                .rules
+                .is_empty()
+        );
     }
 
     // TL4. The truth table follows TLS-3's label-suffix rule.

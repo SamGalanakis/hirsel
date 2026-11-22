@@ -13,6 +13,7 @@ OPENAT2_TEST_CASES = {
         "provider_tests::guarded_root_routes_real_os_calls_through_the_separate_host_stack",
         "provider_tests::locks_are_exclusive_idempotent_and_end_at_close",
         "provider_tests::paths_cannot_escape_grants_and_tree_drop_never_follows_links",
+        "provider_tests::unix_endpoints_retain_authority_and_datagrams_commit_exactly_one_packet",
         "host_ops_tests::sleep_until_cancellation_is_cancelled_at_the_native_wait_boundary",
         "host_ops_tests::live_sleep_until_waits_on_host_clock_and_advances_wall",
         "host_ops_tests::already_reached_sleep_until_returns_at_once",

@@ -414,15 +414,15 @@ operations! {
     ("exec", "spawn", Lane::Declaration, "B", "exec-unix-impl-a-1619", false),
     ("exec", "wait", Lane::Declaration, "B", "exec-unix-impl-a-1619", false),
     ("exec", "signal", Lane::Declaration, "B", "exec-unix-impl-a-1619", false),
-    ("host", "connect_unix", Lane::Declaration, "B", "exec-unix-impl-a-1619", false),
-    ("host", "listen_unix", Lane::Declaration, "B", "exec-unix-impl-a-1619", false),
-    ("host", "accept_unix", Lane::Declaration, "B", "exec-unix-impl-a-1619", false),
-    ("host", "open_datagram", Lane::Declaration, "B", "exec-unix-impl-a-1619", false),
-    ("host", "bind_datagram", Lane::Declaration, "B", "exec-unix-impl-a-1619", false),
-    ("host", "connect_datagram", Lane::Declaration, "B", "exec-unix-impl-a-1619", false),
-    ("host", "send_datagram", Lane::Declaration, "B", "exec-unix-impl-a-1619", false),
-    ("host", "send_to", Lane::Declaration, "B", "exec-unix-impl-a-1619", false),
-    ("host", "recv_datagram", Lane::Declaration, "B", "exec-unix-impl-a-1619", false),
+    ("host", "connect_unix", Lane::Runtime(Kernel::Net(HostOp::UnixConnect)), "B", "exec-unix-impl-c-1627", false),
+    ("host", "listen_unix", Lane::Runtime(Kernel::Net(HostOp::UnixListen)), "B", "exec-unix-impl-c-1627", false),
+    ("host", "accept_unix", Lane::Runtime(Kernel::Net(HostOp::UnixAccept)), "B", "exec-unix-impl-c-1627", false),
+    ("host", "open_datagram", Lane::Runtime(Kernel::Net(HostOp::DatagramOpen)), "B", "exec-unix-impl-c-1627", false),
+    ("host", "bind_datagram", Lane::Runtime(Kernel::Net(HostOp::DatagramBind)), "B", "exec-unix-impl-c-1627", false),
+    ("host", "connect_datagram", Lane::Runtime(Kernel::Net(HostOp::DatagramConnect)), "B", "exec-unix-impl-c-1627", false),
+    ("host", "send_datagram", Lane::Runtime(Kernel::Net(HostOp::DatagramSend)), "B", "exec-unix-impl-c-1627", false),
+    ("host", "send_to", Lane::Runtime(Kernel::Net(HostOp::DatagramSendTo)), "B", "exec-unix-impl-c-1627", false),
+    ("host", "recv_datagram", Lane::Runtime(Kernel::Net(HostOp::DatagramRecv)), "B", "exec-unix-impl-c-1627", false),
 }
 
 pub(crate) fn binding(f: &FnDecl) -> Option<u16> {
@@ -3157,8 +3157,34 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.start(no);
         let tls = self.runtime_compare(Ty::Scalar(Scalar::U32), tag, 1, n)?;
         let tls_rule = self.new_block(&[]);
+        let named_or_unix = self.new_block(&[]);
+        self.runtime_branch(tls, tls_rule, named_or_unix, n);
+        self.start(named_or_unix);
+        let unix = self.runtime_compare(Ty::Scalar(Scalar::U32), tag, 3, n)?;
+        let unix_rule = self.new_block(&[]);
         let resolve_rule = self.new_block(&[]);
-        self.runtime_branch(tls, tls_rule, resolve_rule, n);
+        self.runtime_branch(unix, unix_rule, resolve_rule, n);
+        self.start(unix_rule);
+        let (_, dir) = self.net_case_field(ty, at, 3, 0, n)?;
+        let dir = self.net_case(dir, n);
+        let dir8 = self.value(Ty::Scalar(Scalar::U8));
+        self.inst(
+            Inst::Convert {
+                result: dir8,
+                flag: None,
+                operand: dir,
+                mode: ConvertMode::Truncate,
+            },
+            n,
+        );
+        let root = self.net_read_case(ty, at, 3, 1, n)?;
+        let path = self.net_read_case(ty, at, 3, 2, n)?;
+        let outputs = self.runtime_row(
+            RtOp::Host(HostOp::NetNarrowUnix),
+            &[net, dir8, root, path].map(Arg::Value),
+            n,
+        )?;
+        self.jump(join, &outputs, n);
         self.start(resolve_rule);
         let names = self.net_read_case(ty, at, 2, 0, n)?;
         let outputs = self.runtime_row(
@@ -3429,6 +3455,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let key = if matches!(
             op,
             HostOp::Accept
+                | HostOp::UnixAccept
+                | HostOp::DatagramConnect
+                | HostOp::DatagramSend
+                | HostOp::DatagramSendTo
+                | HostOp::DatagramRecv
                 | HostOp::RecvBounded
                 | HostOp::SendPair
                 | HostOp::SendSecret
@@ -3465,8 +3496,37 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     // the operation's failure edge.
                     self.consume(vals[1], n);
                 }
-                HostOp::Accept => {
+                HostOp::Accept | HostOp::UnixAccept => {
                     operands.extend(self.net_until(self.p.fns[f].params[1].ty, vals[1]?, n)?)
+                }
+                HostOp::UnixConnect
+                | HostOp::UnixListen
+                | HostOp::DatagramBind
+                | HostOp::DatagramConnect
+                | HostOp::DatagramSendTo => {
+                    operands.extend([vals[1]?, vals[2]?]);
+                    match op {
+                        HostOp::UnixConnect => operands.extend(self.net_until(
+                            self.p.fns[f].params[3].ty,
+                            vals[3]?,
+                            n,
+                        )?),
+                        HostOp::UnixListen => operands.push(vals[3]?),
+                        HostOp::DatagramSendTo => {
+                            operands.push(vals[3]?);
+                            operands.extend(self.net_until(
+                                self.p.fns[f].params[4].ty,
+                                vals[4]?,
+                                n,
+                            )?);
+                        }
+                        _ => {}
+                    }
+                }
+                HostOp::DatagramOpen => {}
+                HostOp::DatagramSend | HostOp::DatagramRecv => {
+                    operands.push(vals[1]?);
+                    operands.extend(self.net_until(self.p.fns[f].params[2].ty, vals[2]?, n)?);
                 }
                 HostOp::RecvBounded | HostOp::SendPair | HostOp::Resolve => {
                     operands.extend([vals[1]?, vals[2]?]);
@@ -3577,7 +3637,36 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     )
                 {
                     cx.runtime_case_payload(to, 0, ty, Some(value), n);
-                } else if op == HostOp::Connect {
+                } else if op == HostOp::DatagramRecv {
+                    if let Some(at) =
+                        cx.runtime_field(to, &[Step::CaseField { case: 0, field: 0 }], ty, n)
+                    {
+                        let flag = cx.runtime_nonzero(u, written, n).unwrap();
+                        cx.inst(
+                            Inst::SetCase {
+                                address: at,
+                                case: 0,
+                            },
+                            n,
+                        );
+                        cx.runtime_store(at, &[Step::CaseField { case: 0, field: 0 }], u, value, n);
+                        cx.runtime_store(
+                            at,
+                            &[Step::CaseField { case: 0, field: 1 }],
+                            Ty::Scalar(Scalar::Bool),
+                            flag,
+                            n,
+                        );
+                    }
+                } else if matches!(
+                    op,
+                    HostOp::Connect
+                        | HostOp::UnixConnect
+                        | HostOp::UnixListen
+                        | HostOp::UnixAccept
+                        | HostOp::DatagramOpen
+                        | HostOp::DatagramBind
+                ) {
                     if let Some(at) =
                         cx.runtime_field(to, &[Step::CaseField { case: 0, field: 0 }], ty, n)
                     {
@@ -3611,7 +3700,37 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     } else if op == HostOp::StdinRead {
                         cx.runtime_stdin_error(at, error, code, n);
                     } else {
-                        cx.runtime_net_error(at, ty, error, code, n);
+                        if op == HostOp::UnixListen {
+                            let bound = cx
+                                .runtime_compare(Ty::Scalar(Scalar::U8), error, 10, n)
+                                .unwrap();
+                            let yes = cx.new_block(&[]);
+                            let no = cx.new_block(&[]);
+                            let join = cx.new_block(&[]);
+                            cx.runtime_branch(bound, yes, no, n);
+                            cx.start(yes);
+                            cx.inst(
+                                Inst::SetCase {
+                                    address: at,
+                                    case: 9,
+                                },
+                                n,
+                            );
+                            cx.runtime_store(
+                                at,
+                                &[Step::CaseField { case: 9, field: 0 }],
+                                Ty::Scalar(Scalar::U32),
+                                code,
+                                n,
+                            );
+                            cx.jump(join, &[], n);
+                            cx.start(no);
+                            cx.runtime_net_error(at, ty, error, code, n);
+                            cx.jump(join, &[], n);
+                            cx.start(join);
+                        } else {
+                            cx.runtime_net_error(at, ty, error, code, n);
+                        }
                     }
                 }
             },

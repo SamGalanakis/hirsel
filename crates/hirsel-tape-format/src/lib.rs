@@ -6,7 +6,10 @@
 //! block's xxh3-64 check, which covers the tape id, the block's flags, magic,
 //! sequence number and length, so a block from another tape or another place
 //! fails. Discovery is sequential from offset 0 and never resynchronises.
-use hirsel_core_net::{EnvPatterns, EnvSnapshot, GrantRule, ResolveRule, Rule, TlsRule, TlsTrust};
+use hirsel_core_net::{
+    EnvPatterns, EnvSnapshot, GrantRule, ResolveRule, Rule, TlsRule, TlsTrust, UnixDirection,
+    UnixRule,
+};
 use std::hash::Hasher;
 use twox_hash::XxHash3_64;
 
@@ -324,6 +327,19 @@ fn read_net_rules(c: &mut Cursor<'_>) -> Result<Vec<GrantRule>, Corrupt> {
                 let rule = ResolveRule::new(&read_patterns(c)?).ok_or(Corrupt)?;
                 rules.push(GrantRule::Resolve(rule));
             }
+            Some(4) => {
+                c.u8()?;
+                let direction = UnixDirection::from_tag(c.u8()?).ok_or(Corrupt)?;
+                let mut read_text = || {
+                    let len = usize::try_from(c.varint()?).map_err(|_| Corrupt)?;
+                    std::str::from_utf8(c.take(len)?).map_err(|_| Corrupt)
+                };
+                let root = read_text()?;
+                let path = read_text()?;
+                rules.push(GrantRule::Unix(
+                    UnixRule::new(direction, root, path).ok_or(Corrupt)?,
+                ));
+            }
             _ => {
                 let rule = read_net_rule(c.take(NET_RULE_LEN)?);
                 if !rule.valid() {
@@ -375,6 +391,14 @@ fn write_net_rules(rules: &[GrantRule]) -> Result<Vec<u8>, HeaderTooLarge> {
             GrantRule::Resolve(rule) => {
                 out.push(3);
                 write_patterns(&mut out, &rule.pattern_text())?;
+            }
+            GrantRule::Unix(rule) => {
+                let (root, path) = rule.endpoint().ok_or(HeaderTooLarge)?;
+                out.extend_from_slice(&[4, rule.direction as u8]);
+                for text in [root, path] {
+                    put_varint(&mut out, text.len() as u64);
+                    out.extend_from_slice(text.as_bytes());
+                }
             }
         }
         if out.len() > MAX_LEN {

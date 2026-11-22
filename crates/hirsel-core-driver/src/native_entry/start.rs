@@ -56,7 +56,7 @@ pub(super) fn emit(
     let parameters_len = f.constant(plan.parameters.len() as u64);
     let streams = f.constant((2u64 << 32) | 1);
     let net_rules = f.address(data.net_rules);
-    let net_rules_len = f.constant(plan.net_rules.len() as u64);
+    let net_rules_len = f.constant((plan.net_rules.len() + plan.unix_roots.len()) as u64);
     let target_data = data::bytes(f.object, None, triple.as_bytes().to_vec(), 1)?;
     let target = f.address(target_data);
     let target_len = f.constant(triple.len() as u64);

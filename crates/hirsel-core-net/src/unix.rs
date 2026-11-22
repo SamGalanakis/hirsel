@@ -54,23 +54,32 @@ pub fn isolate_binding_thread(dir: BorrowedFd<'_>) -> io::Result<()> {
 pub fn probe() -> io::Result<()> {
     use std::os::fd::AsFd;
 
-    let private = tempfile::tempdir()?;
-    let root = File::open(private.path())?;
-    let parent = open_beneath(root.as_fd(), c".", libc::O_PATH | libc::O_DIRECTORY)?;
+    fn requires(operation: &str, error: io::Error) -> io::Error {
+        io::Error::other(format!("Net Unix requires {operation}: {error}"))
+    }
+    let private = tempfile::tempdir().map_err(|e| requires("a private probe directory", e))?;
+    let root =
+        File::open(private.path()).map_err(|e| requires("opening the probe directory", e))?;
+    let parent = open_beneath(root.as_fd(), c".", libc::O_PATH | libc::O_DIRECTORY)
+        .map_err(|e| requires("openat2", e))?;
     let binding = std::thread::Builder::new()
         .name("hirsel-unix-probe".into())
         .spawn(move || {
-            isolate_binding_thread(parent.as_fd())?;
-            UnixListener::bind("socket")
-        })?;
+            isolate_binding_thread(parent.as_fd())
+                .map_err(|e| requires("unshare(CLONE_FS) and fchdir", e))?;
+            UnixListener::bind("socket").map_err(|e| requires("bind and listen", e))
+        })
+        .map_err(|e| requires("a bind helper thread", e))?;
     let listener = binding
         .join()
         .map_err(|_| io::Error::other("Unix bind helper stopped"))??;
-    let endpoint = open_beneath(root.as_fd(), c"socket", libc::O_PATH | libc::O_NOFOLLOW)?;
+    let endpoint = open_beneath(root.as_fd(), c"socket", libc::O_PATH | libc::O_NOFOLLOW)
+        .map_err(|e| requires("openat2 on the socket endpoint", e))?;
     if File::from(endpoint.try_clone()?).metadata()?.st_mode() & libc::S_IFMT != libc::S_IFSOCK {
         return Err(io::Error::other("Unix probe did not pin a socket"));
     }
-    let _client = UnixStream::connect(format!("/proc/self/fd/{}", endpoint.as_raw_fd()))?;
+    let _client = UnixStream::connect(format!("/proc/self/fd/{}", endpoint.as_raw_fd()))
+        .map_err(|e| requires("connect through /proc/self/fd", e))?;
     drop(listener);
     Ok(())
 }

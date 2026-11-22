@@ -46,6 +46,7 @@ pub struct OsProvider {
     /// Host CLOCK_MONOTONIC at construction: mono_ns and sleep deadlines count from it.
     epoch: u64,
     directories: BTreeMap<u64, OwnedFd>,
+    pub(crate) unix_roots: BTreeMap<String, OwnedFd>,
     files: BTreeMap<u64, OwnedFd>,
     listings: BTreeMap<u64, Listing>,
     next: u64,
@@ -86,6 +87,7 @@ impl OsProvider {
             sync_file: None,
             epoch: monotonic_ns(),
             directories: BTreeMap::new(),
+            unix_roots: BTreeMap::new(),
             files: BTreeMap::new(),
             listings: BTreeMap::new(),
             next: 1,
@@ -665,6 +667,13 @@ pub unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64
         probe::note(probe::ISSUE, request, probe::answer(&step.outcome));
         return step;
     }
+    if unsafe { unix_operation((*request).operation) } {
+        let step =
+            unsafe { (unix_operations(request).step)(&*state.cast(), &mut *request, token, true) };
+        #[cfg(test)]
+        probe::note(probe::ISSUE, request, probe::answer(&step.outcome));
+        return step;
+    }
     if unsafe { (*request).operation == STDIN_READ } {
         // SAFETY: STDIN_READ carries the adapter's live Stdin request.
         let step = unsafe { (crate::stdin::operations(request).step)(request, token, true) };
@@ -731,22 +740,36 @@ pub(crate) mod probe {
 unsafe fn socket_operations(request: *const Request) -> &'static crate::os_net::Operations {
     unsafe { (*(*request).path.cast::<crate::net::NetworkRequest>()).os }
 }
+#[inline]
+unsafe fn unix_operations(request: *const Request) -> &'static crate::os_unix::Operations {
+    unsafe { (*(*request).path.cast::<crate::unix_net::UnixRequest>()).os }
+}
+
 /// The OS provider without directory operations parks socket and Stdin requests.
-unsafe extern "C" fn resume(_: *mut u8, request: *mut Request, token: u64) -> Step {
+unsafe extern "C" fn resume(state: *mut u8, request: *mut Request, token: u64) -> Step {
     // SAFETY: an outstanding request pins its socket or stdin operands.
     unsafe {
         if (*request).operation == STDIN_READ {
             (crate::stdin::operations(request).step)(request, token, false)
+        } else if unix_operation((*request).operation) {
+            (unix_operations(request).step)(&*state.cast(), &mut *request, token, false)
         } else {
             (socket_operations(request).step)(request, token, false)
         }
     }
 }
-unsafe extern "C" fn abort(_: *mut u8, request: *mut Request, token: u64, reason: u8) -> Outcome {
+unsafe extern "C" fn abort(
+    state: *mut u8,
+    request: *mut Request,
+    token: u64,
+    reason: u8,
+) -> Outcome {
     // SAFETY: an outstanding request pins its socket or stdin operands.
     unsafe {
         if (*request).operation == STDIN_READ {
             (crate::stdin::operations(request).abort)(request, token, reason)
+        } else if unix_operation((*request).operation) {
+            (unix_operations(request).abort)(&*state.cast(), &mut *request, token, reason)
         } else {
             (socket_operations(request).abort)(request, token, reason)
         }
@@ -972,16 +995,16 @@ fn write_all_from(fd: i32, bytes: &[u8], offset: Option<u64>) -> Outcome {
 // Validate user paths once, before any operation can touch the host. Internal
 // descriptor walks may still use "." to duplicate their already granted parent.
 fn valid_path(path: &[u8]) -> io::Result<()> {
-    if path.contains(&0)
-        || path
-            .split(|&byte| byte == b'/')
-            .any(|part| part.is_empty() || part == b"." || part == b"..")
-    {
+    if !hirsel_core_net::valid_relative_path(path) {
         return Err(io::Error::from_raw_os_error(libc::EACCES));
     }
     Ok(())
 }
 fn beneath(fd: i32, path: &[u8], flags: i32) -> io::Result<OwnedFd> {
+    open_beneath(fd, path, flags, libc::RESOLVE_NO_MAGICLINKS)
+}
+
+pub(crate) fn open_beneath(fd: i32, path: &[u8], flags: i32, resolve: u64) -> io::Result<OwnedFd> {
     let mut short = [0; 64];
     let long;
     let path: &CStr = if path.len() < short.len() {
@@ -995,7 +1018,7 @@ fn beneath(fd: i32, path: &[u8], flags: i32) -> io::Result<OwnedFd> {
     let mut how: libc::open_how = unsafe { std::mem::zeroed() };
     how.flags = (flags | libc::O_CLOEXEC) as u64;
     how.mode = if flags & libc::O_CREAT != 0 { 0o600 } else { 0 };
-    how.resolve = libc::RESOLVE_BENEATH | libc::RESOLVE_NO_MAGICLINKS;
+    how.resolve = libc::RESOLVE_BENEATH | resolve;
     // SAFETY: Linux openat2 atomically enforces confinement, including symlinks.
     // Unsupported hosts return Other(ENOSYS); no unconstrained fallback.
     let raw = unsafe {

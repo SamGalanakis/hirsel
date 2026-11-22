@@ -1,0 +1,459 @@
+//! Linux AF_UNIX operations. Bind uses a private cwd. Connect and send-to
+//! retain an O_PATH descriptor to the endpoint until the operation settles.
+use crate::{
+    net::DENIED,
+    os::{OsProvider, open_beneath},
+    os_net::{Due, adopt_socket, deadline, error, retry, signal},
+    provider::*,
+    unix_net::UnixRequest,
+};
+use hirsel_core_net::Sockets;
+use std::{
+    io,
+    mem::offset_of,
+    os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd},
+};
+
+type Result<T> = std::result::Result<T, i32>;
+
+pub(crate) struct Operations {
+    pub step: unsafe fn(&OsProvider, &mut Request, u64, bool) -> Step,
+    pub abort: unsafe fn(&OsProvider, &mut Request, u64, u8) -> Outcome,
+}
+
+pub(crate) static OPERATIONS: Operations = Operations { step, abort };
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static AFTER_RESOLVE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// SAFETY: the launcher pins each row and the text it designates for this call.
+pub(crate) unsafe fn configure_roots(
+    os: &mut OsProvider,
+    rows: &[hirsel_core_net::RuleView],
+) -> std::result::Result<(), crate::entry::StartupError> {
+    use crate::entry::StartupError;
+    use hirsel_core_net::GrantRule;
+    use std::{collections::BTreeMap, fs::OpenOptions, os::unix::fs::OpenOptionsExt};
+
+    let mut roots = BTreeMap::new();
+    for row in rows.iter().filter(|row| row.is_unix_root()) {
+        let (label, path) = unsafe { row.decode_unix_root() }.ok_or(StartupError::NetRules)?;
+        if roots.insert(label, path).is_some() {
+            return Err(StartupError::NetRules);
+        }
+    }
+    for row in rows.iter().filter(|row| row.address.dir == 4) {
+        let Some((label, _)) = (match unsafe { row.decode() } {
+            Some(GrantRule::Unix(rule)) => rule
+                .endpoint()
+                .map(|(label, path)| (label.to_owned(), path.to_owned())),
+            _ => None,
+        }) else {
+            return Err(StartupError::NetRules);
+        };
+        if !roots.contains_key(label.as_str()) {
+            return Err(StartupError::NetRules);
+        }
+    }
+    for (label, path) in roots {
+        let directory = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_PATH | libc::O_DIRECTORY)
+            .open(path)?;
+        os.unix_roots.insert(label.to_owned(), directory.into());
+    }
+    Ok(())
+}
+
+fn host(code: io::Error) -> i32 {
+    code.raw_os_error().unwrap_or(libc::EIO)
+}
+
+pub(crate) const fn max_path() -> usize {
+    // Linux's pathname limit leaves one byte for the terminator.
+    size_of::<libc::sockaddr_un>() - offset_of!(libc::sockaddr_un, sun_path) - 1
+}
+
+fn address(path: &[u8]) -> (libc::sockaddr_un, libc::socklen_t) {
+    // SAFETY: sockaddr_un is an integer-only structure.
+    let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    for (dst, byte) in addr.sun_path.iter_mut().zip(path.iter().copied()) {
+        *dst = byte as libc::c_char;
+    }
+    let len = offset_of!(libc::sockaddr_un, sun_path) + path.len() + 1;
+    (addr, len as libc::socklen_t)
+}
+
+fn socket(kind: i32) -> Result<OwnedFd> {
+    // SAFETY: success returns one fresh descriptor.
+    let fd = retry(|| unsafe {
+        libc::socket(
+            libc::AF_UNIX,
+            kind | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+            0,
+        ) as isize
+    })?;
+    Ok(unsafe { OwnedFd::from_raw_fd(fd as i32) })
+}
+
+fn pinned_parent<'p>(root: BorrowedFd<'_>, path: &'p str) -> io::Result<(OwnedFd, &'p str)> {
+    let (parent, name) = path.rsplit_once('/').unwrap_or((".", path));
+    let dir = open_beneath(
+        root.as_raw_fd(),
+        parent.as_bytes(),
+        libc::O_PATH | libc::O_DIRECTORY,
+        libc::RESOLVE_NO_SYMLINKS,
+    )?;
+    Ok((dir, name))
+}
+
+pub(crate) fn pinned_socket(root: BorrowedFd<'_>, path: &str) -> io::Result<OwnedFd> {
+    let (parent, name) =
+        pinned_parent(root, path).map_err(|_| io::Error::from_raw_os_error(libc::EACCES))?;
+    let target = open_beneath(
+        parent.as_raw_fd(),
+        name.as_bytes(),
+        libc::O_PATH | libc::O_NOFOLLOW,
+        libc::RESOLVE_NO_SYMLINKS,
+    )?;
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: both the pinned O_PATH descriptor and the result slot are live.
+    retry(|| unsafe { libc::fstat(target.as_raw_fd(), stat.as_mut_ptr()) as isize })
+        .map_err(io::Error::from_raw_os_error)?;
+    if unsafe { stat.assume_init() }.st_mode & libc::S_IFMT != libc::S_IFSOCK {
+        return Err(io::Error::from_raw_os_error(libc::EACCES));
+    }
+    Ok(target)
+}
+
+pub(crate) fn private_bind(fd: BorrowedFd<'_>, parent: OwnedFd, name: &str) -> Result<()> {
+    let (addr, len) = address(name.as_bytes());
+    let fd = fd.as_raw_fd();
+    let _blocking = crate::units::blocking();
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .spawn_scoped(scope, move || {
+                // SAFETY: fd remains borrowed until the join. Only this
+                // helper's cwd changes, and the parent entry stays pinned.
+                hirsel_core_net::unix::isolate_binding_thread(parent.as_fd()).map_err(host)?;
+                retry(|| unsafe {
+                    libc::bind(fd, (&addr as *const libc::sockaddr_un).cast(), len) as isize
+                })?;
+                Ok(())
+            })
+            .map_err(host)?
+            .join()
+            .unwrap()
+    })
+}
+
+pub(crate) fn bound(
+    os: &OsProvider,
+    n: &UnixRequest,
+    sockets: &mut Sockets,
+    listen: bool,
+    after_bind: impl FnOnce(i32, i32) -> Result<()>,
+) -> Outcome {
+    let Some(root) = os.unix_roots.get(n.root) else {
+        return DENIED;
+    };
+    let Ok((parent, name)) = pinned_parent(root.as_fd(), n.path) else {
+        return DENIED;
+    };
+    let make = || {
+        socket(if listen {
+            libc::SOCK_STREAM
+        } else {
+            libc::SOCK_DGRAM
+        })
+    };
+    let fd = match make() {
+        Ok(fd) => fd,
+        Err(code) => return error(code),
+    };
+    let raw = fd.as_raw_fd();
+    let key = match unsafe { adopt_socket(sockets, fd) } {
+        Ok(key) => key,
+        Err(code) => return error(host(code)),
+    };
+    // SAFETY: the registry owns raw until this operation takes its release path.
+    let result = private_bind(unsafe { BorrowedFd::borrow_raw(raw) }, parent, name);
+    let failure = match result {
+        Err(libc::EADDRINUSE) => signal(4),
+        Err(code) => error(code),
+        Ok(()) => {
+            if listen && let Err(code) = after_bind(raw, i32::from(n.backlog)) {
+                Outcome {
+                    error: IoError {
+                        tag: 10,
+                        code: code as u32,
+                    },
+                    ..Outcome::default()
+                }
+            } else {
+                return success(key);
+            }
+        }
+    };
+    sockets.release(key);
+    failure
+}
+
+fn success(key: u64) -> Outcome {
+    Outcome {
+        value: key,
+        ..Outcome::default()
+    }
+}
+
+fn done(outcome: Outcome) -> Step {
+    Step {
+        outcome,
+        ..Step::default()
+    }
+}
+
+fn endpoint(os: &OsProvider, n: &UnixRequest) -> io::Result<OwnedFd> {
+    let root = os
+        .unix_roots
+        .get(n.root)
+        .ok_or_else(|| io::Error::from_raw_os_error(libc::EACCES))?;
+    pinned_socket(root.as_fd(), n.path)
+}
+
+fn pinned_address(target: &OwnedFd) -> (libc::sockaddr_un, libc::socklen_t) {
+    address(format!("/proc/self/fd/{}", target.as_raw_fd()).as_bytes())
+}
+
+fn connect(fd: i32, target: &OwnedFd) -> Result<isize> {
+    let (addr, len) = pinned_address(target);
+    // SAFETY: fd and its pinned target remain live through the syscall.
+    retry(|| unsafe { libc::connect(fd, (&addr as *const libc::sockaddr_un).cast(), len) as isize })
+}
+
+fn accept(sockets: &mut Sockets, fd: i32) -> Result<Outcome> {
+    // SAFETY: no peer address is requested. Success returns a fresh descriptor.
+    let accepted = retry(|| unsafe {
+        libc::accept4(
+            fd,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+        ) as isize
+    })?;
+    let accepted = unsafe { OwnedFd::from_raw_fd(accepted as i32) };
+    unsafe { adopt_socket(sockets, accepted) }
+        .map(success)
+        .map_err(host)
+}
+
+fn send(fd: i32, buf: &Buffer, target: Option<&OwnedFd>) -> Result<Outcome> {
+    // SAFETY: the caller pins the offered prefix for the send. Linux queues an
+    // AF_UNIX datagram atomically, including an empty datagram.
+    unsafe {
+        if let Some(target) = target {
+            let (addr, len) = pinned_address(target);
+            retry(|| {
+                libc::sendto(
+                    fd,
+                    buf.data.cast(),
+                    buf.len,
+                    libc::MSG_NOSIGNAL,
+                    (&addr as *const libc::sockaddr_un).cast(),
+                    len,
+                )
+            })?;
+        } else {
+            retry(|| libc::send(fd, buf.data.cast(), buf.len, libc::MSG_NOSIGNAL))?;
+        }
+    }
+    Ok(Outcome::default())
+}
+
+fn recv(fd: i32, buf: &mut Buffer) -> Result<Outcome> {
+    let room = buf.capacity.saturating_sub(buf.len);
+    let mut iov = libc::iovec {
+        iov_base: if room == 0 {
+            std::ptr::null_mut()
+        } else {
+            // SAFETY: when there is room the caller owns the pinned buffer.
+            unsafe { buf.data.add(buf.len).cast() }
+        },
+        iov_len: room,
+    };
+    // SAFETY: integer/pointer-only header. There is no address or control area.
+    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+    msg.msg_iov = &mut iov;
+    msg.msg_iovlen = 1;
+    let len = retry(|| unsafe { libc::recvmsg(fd, &mut msg, libc::MSG_TRUNC) })? as usize;
+    let written = room.min(len);
+    buf.len += written;
+    Ok(Outcome {
+        value: len as u64,
+        written: written as u64,
+        kind: u8::from(len > room),
+        ..Outcome::default()
+    })
+}
+
+fn poll_retry(sockets: &mut Sockets) -> Result<u64> {
+    // Linux gives no writable notification on an unconnected sender when
+    // the receiver gains room, including a stream connect with a full backlog.
+    let raw = retry(|| unsafe {
+        libc::timerfd_create(
+            libc::CLOCK_MONOTONIC,
+            libc::TFD_CLOEXEC | libc::TFD_NONBLOCK,
+        ) as isize
+    })? as i32;
+    // SAFETY: fresh descriptor uniquely owned by this request until release.
+    let timer = unsafe { OwnedFd::from_raw_fd(raw) };
+    let interval = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 1_000_000,
+    };
+    let spec = libc::itimerspec {
+        it_interval: interval,
+        it_value: interval,
+    };
+    retry(|| unsafe { libc::timerfd_settime(raw, 0, &spec, std::ptr::null_mut()) as isize })?;
+    unsafe { adopt_socket(sockets, timer) }.map_err(host)
+}
+
+fn tick(fd: i32) {
+    let mut count = 0u64;
+    // SAFETY: a live timerfd and its exact eight-byte result slot.
+    let _ = retry(|| unsafe { libc::read(fd, (&mut count as *mut u64).cast(), size_of::<u64>()) });
+}
+
+fn finish(n: &mut UnixRequest, outcome: Outcome) -> Step {
+    // SAFETY: provider callbacks hold the commit token through registry access.
+    let sockets = unsafe { &mut *n.sockets };
+    if let Some(timer) = n.retry.take() {
+        sockets.disarm(timer, false);
+        sockets.release(timer);
+    }
+    if let Some(key) = n.connecting.take()
+        && outcome.error != IoError::OK
+    {
+        sockets.release(key);
+    }
+    drop(n.target.take());
+    done(outcome)
+}
+
+/// SAFETY: the adapter pins the request extension, buffer and registry.
+pub(crate) unsafe fn step(os: &OsProvider, request: &mut Request, token: u64, first: bool) -> Step {
+    let n = unsafe { &mut *request.path.cast_mut().cast::<UnixRequest>() };
+    let sockets = unsafe { &mut *n.sockets };
+    let op = request.operation;
+    if first {
+        if matches!(op, UNIX_LISTEN | DATAGRAM_BIND) {
+            return done(bound(os, n, sockets, op == UNIX_LISTEN, |fd, backlog| {
+                retry(|| unsafe { libc::listen(fd, backlog) as isize }).map(|_| ())
+            }));
+        }
+        if matches!(op, UNIX_CONNECT | DATAGRAM_CONNECT | DATAGRAM_SEND_TO) {
+            n.target = match endpoint(os, n) {
+                Ok(fd) => Some(fd),
+                // ENOENT at the leaf is a host error. Resolution of an unsafe
+                // parent or a final non-socket is always Denied.
+                Err(e) => return done(error(host(e))),
+            };
+            #[cfg(test)]
+            AFTER_RESOLVE.with_borrow_mut(|after| {
+                if let Some(after) = after.take() {
+                    after();
+                }
+            });
+        }
+        if matches!(op, UNIX_CONNECT | DATAGRAM_OPEN) {
+            let kind = if op == UNIX_CONNECT {
+                libc::SOCK_STREAM
+            } else {
+                libc::SOCK_DGRAM
+            };
+            let key = match socket(kind)
+                .and_then(|fd| unsafe { adopt_socket(sockets, fd) }.map_err(host))
+            {
+                Ok(key) => key,
+                Err(e) => return finish(n, error(e)),
+            };
+            if op == DATAGRAM_OPEN {
+                return done(success(key));
+            }
+            n.connecting = Some(key);
+        }
+    }
+    let key = n.connecting.unwrap_or(request.handle);
+    let writable = op == DATAGRAM_SEND;
+    if !first {
+        let interest = n.retry.unwrap_or(key);
+        sockets.disarm(interest, n.retry.is_none() && writable);
+        if let Some(timer) = n.retry {
+            tick(sockets.fd(timer));
+        }
+    }
+    let fd = sockets.fd(key);
+    let attempt = match op {
+        UNIX_CONNECT | DATAGRAM_CONNECT => connect(fd, n.target.as_ref().unwrap()).map(|_| {
+            if op == UNIX_CONNECT {
+                success(key)
+            } else {
+                Outcome::default()
+            }
+        }),
+        UNIX_ACCEPT => accept(sockets, fd),
+        DATAGRAM_SEND | DATAGRAM_SEND_TO => send(fd, &request.buffer, n.target.as_ref()),
+        DATAGRAM_RECV => recv(fd, &mut request.buffer),
+        _ => unreachable!(),
+    };
+    match attempt {
+        Ok(outcome) => return finish(n, outcome),
+        Err(libc::EAGAIN) if op != DATAGRAM_CONNECT => {}
+        Err(e) => return finish(n, error(e)),
+    }
+    let due = unsafe { deadline(n.until, token) };
+    if due == Due::Passed {
+        return finish(n, signal(6));
+    }
+    if matches!(op, UNIX_CONNECT | DATAGRAM_SEND_TO) && n.retry.is_none() {
+        n.retry = match poll_retry(sockets) {
+            Ok(timer) => Some(timer),
+            Err(e) => return finish(n, error(e)),
+        };
+    }
+    if let Err(e) = sockets.arm(n.retry.unwrap_or(key), n.retry.is_none() && writable, token) {
+        return finish(n, error(host(e)));
+    }
+    Step {
+        kind: STEP_PENDING,
+        deadline_ns: due.host().unwrap_or(0),
+        ..Step::default()
+    }
+}
+
+/// SAFETY: the adapter pins the request extension and the operation is pending.
+pub(crate) unsafe fn abort(
+    os: &OsProvider,
+    request: &mut Request,
+    token: u64,
+    reason: u8,
+) -> Outcome {
+    if reason == ABORT_DEADLINE {
+        let step = unsafe { step(os, request, token, false) };
+        if step.kind == STEP_DONE {
+            return step.outcome;
+        }
+    }
+    let n = unsafe { &mut *request.path.cast_mut().cast::<UnixRequest>() };
+    let sockets = unsafe { &mut *n.sockets };
+    let key = n.connecting.unwrap_or(request.handle);
+    if n.retry.is_none() {
+        sockets.disarm(key, request.operation == DATAGRAM_SEND);
+    }
+    finish(n, signal(if reason == ABORT_DEADLINE { 6 } else { 7 })).outcome
+}

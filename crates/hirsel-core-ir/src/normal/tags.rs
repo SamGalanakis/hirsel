@@ -440,6 +440,16 @@ tags!(HostOp {
     68 => ProvideNet,
     69 => CallSecret,
     75 => ExecNarrow,
+    106 => UnixConnect,
+    107 => UnixListen,
+    108 => UnixAccept,
+    109 => DatagramOpen,
+    110 => DatagramBind,
+    111 => DatagramConnect,
+    112 => DatagramSend,
+    113 => DatagramSendTo,
+    114 => DatagramRecv,
+    115 => NetNarrowUnix,
 });
 
 tags!(RaiseCause {

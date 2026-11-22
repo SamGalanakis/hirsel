@@ -2345,7 +2345,11 @@ impl Program<'_> {
             }
             refs[d - base].retain_mut(|other| {
                 if *other < base {
-                    h |= self.decls[*other].summary.holds;
+                    // A base row's raw-handle bit reaches this program's rows
+                    // only through `mark_raw_handle_summaries`, which stops at
+                    // owning resources (FFI-6). Folding it here would mark an
+                    // owning resource of a published `foreign.Ptr` as raw.
+                    h |= self.decls[*other].summary.holds & !H_RAW_HANDLE;
                     false
                 } else {
                     *other -= base;

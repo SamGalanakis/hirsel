@@ -229,16 +229,16 @@ pub fn law_subscription_room_refunded() -> bool {
     let mut quota = result.unwrap(subscription_room(400u64, 2u64))
     let (to, from): (Sender[SubscriptionInput], Receiver[SubscriptionInput]) = channel.new(1u64)
     let arg: Bytes = list.with_capacity(128u64)
-    let first = result.unwrap(subscription_hold(mut quota, list.new(), take arg))
+    let first = result.unwrap(subscription_hold(mut quota, store.Caller(issuer: 1u8, subject: list.new()), list.new(), take arg))
     result.unwrap(channel.try_send(to, take first))
     let same_size: Bytes = list.with_capacity(128u64)
-    let refused = match subscription_hold(mut quota, list.new(), take same_size) {
+    let refused = match subscription_hold(mut quota, store.Caller(issuer: 1u8, subject: list.new()), list.new(), take same_size) {
         Error(Capacity(requested: 192u64, available: 120u64)) => true,
         _ => false,
     }
     let _ = result.unwrap(channel.try_receive(from))
     let after_drop: Bytes = list.with_capacity(128u64)
-    let readmitted = match subscription_hold(mut quota, list.new(), take after_drop) { Ok(_) => true, _ => false }
+    let readmitted = match subscription_hold(mut quota, store.Caller(issuer: 1u8, subject: list.new()), list.new(), take after_drop) { Ok(_) => true, _ => false }
     refused && readmitted
 }
 

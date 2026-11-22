@@ -111,7 +111,9 @@ group (G1). The session hands its client a `Down`: `Batched(KeyedBatch)`, where 
 `KeyedDone{stream, p, outcome}` (the wire `Done` with the store's stream key in place of a
 stream slot, until R3), or `Ended(sub, outcome)`, or `KeyedReset(version, outcomes)`.
 
-R2 adds `query(mut r, f, n, s)`, which registers a subscription entry. Its body reads at a
+R2 adds `query(mut r, f, n, s)` and `query_as(mut r, f, n, s)`, which register a subscription
+entry. A `query` body is `fn(Tx, H, take A)` and never sees the Caller; a `query_as` body is
+`fn(Tx, H, Caller, take A)` and gets the subscribing session's Caller at every run. Its body reads at a
 snapshot inside `look`, under `bound bytes n` and `s` steps. Row conversion shares
 those limits when the query runs. A query returns a `Cover` that describes one
 data-tree key range of one table, made with `cover(shape, lo, hi)`, which keeps that

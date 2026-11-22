@@ -153,7 +153,12 @@ every section.
 
 The store does no authorization (STORE v2.30 AN1): a Tx may read and write
 every key of its store. A program decides access itself, from the Caller it is
-given.
+given. A live query is registered as caller-independent (`runner.query`, body
+`fn(Tx, H, take A)`) or caller-dependent (`runner.query_as`, body
+`fn(Tx, H, Caller, take A)`; RUNNER-SPEC v2.25 rule 2). A `query_as` body is
+given the subscribing session's bound Caller at its first run, every rerun and
+every repair, and its Cover is that subscription's alone: no result is shared
+between subscriptions, so one Caller's result never reaches another.
 
 Branches and pins (§1.9, §1.12) are named heads of one open. `fork(mut db, name,
 from)` makes a branch at a Snapshot of this open; `branch(db, name)` finds one.

@@ -50,12 +50,14 @@ def traced_calls(root, work):
         text = re.sub(rf'(?<!fn )\b{name}\(', f'{name}(out, err, ', text)
     text = replace(text, 'Some(Socket(take cn, take h))',
                    'Some(observed(d, Socket(take cn, take h)))')
-    text = text.replace('Held(runner.fixture_owner(d.post))',
-                        'observed(d, Held(runner.fixture_owner(d.post)))')
+    text = re.sub(r'Held\(runner\.fixture_owner\(d\.post, (\w+\(\w+\))\)\)',
+                  r'observed(d, Held(runner.fixture_owner(d.post, \1)))', text)
     text = text.replace('match cn {', 'match cn.link {')
     text = replace(text, 'fn ask(cn: Conn,', 'fn ask(mut cn: Conn,')
     text = replace(text, 'fn stall(b: Conn,', 'fn stall(mut b: Conn,')
     text = re.sub(r'(?<![\w.])stall\(b,', 'stall(mut b,', text)
+    text = replace(text, 'fn put_at(w: Conn,', 'fn put_at(mut w: Conn,')
+    text = re.sub(r'(?<![\w.])put_at\(w,', 'put_at(mut w,', text)
     text = re.sub(r'(?<![\w.])ask\((\w+),', r'ask(mut \1,', text)
     text = re.sub(r'let (\w+)(: Conn)? = (conn\(|try_conn\(|observed\()', r'let mut \1\2 = \3', text)
     text = replace(text, 'let Some(take cn) = try_conn', 'let Some(take available) = try_conn')

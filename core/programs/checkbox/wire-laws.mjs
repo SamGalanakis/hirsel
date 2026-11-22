@@ -19,6 +19,7 @@ const {want, identity, bind} = await imported('entries.js');
 const sockets = new Set();
 
 const some = value => ({tag: 'Some', value});
+const none = {tag: 'None'};
 
 async function raw(credential = some(randomBytes(16)), entries = want) {
   const socket = new WebSocket(url, 'hirsel.2');

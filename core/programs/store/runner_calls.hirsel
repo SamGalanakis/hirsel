@@ -147,12 +147,27 @@ fn place(mut r: Calls) -> Result[(), runner.RegisterError] {
     runner.transact(mut r, code.describe(flood), 524288u64, runner.DEFAULT_STEPS)?
     runner.transact(mut r, code.describe(hung), 65536u64, 65536u64)?
     runner.compute(mut r, code.describe(answer), 65536u64, runner.DEFAULT_STEPS)?
-    runner.query(mut r, code.describe(everything), 65536u64, runner.DEFAULT_STEPS)
+    runner.query(mut r, code.describe(everything), 65536u64, runner.DEFAULT_STEPS)?
+    runner.query_as(mut r, code.describe(mine), 65536u64, runner.DEFAULT_STEPS)
 }
 
 // subs_wired's query: keys 0 to 1,000 of "data".
 fn everything(tx: store.Tx, h: Hd, take _arg: u32) -> Result[runner.Cover, Capacity] {
     runner.cover(store.shape(h.t), Included(0u64), Included(1000u64))
+}
+
+// query_as_caller's query, caller-dependent: keys from the Caller's first subject byte to
+// 1,000. It reads key 0 first, so a write to key 0 re-runs it (G2).
+fn mine(tx: store.Tx, h: Hd, caller: runner.Caller, take _arg: u32) -> Result[runner.Cover, Capacity] {
+    let _ = store.fetch(tx, store.shape(h.t), 0u64)
+    let low: u64 = int.widen(caller.subject[0])
+    runner.cover(store.shape(h.t), Included(low), Included(1000u64))
+}
+
+fn k_mine() -> Bytes {
+    let ca: std.codec.Codec[u32] = std.codec.of()
+    let cr: std.codec.Codec[()] = std.codec.of_unit()
+    key_of(code.identity(code.describe(mine)), ca, cr)
 }
 
 fn k_everything() -> Bytes {
@@ -296,7 +311,7 @@ type Drive: send { head: Sender[runner.Req], post: Sender[runner.PubIn], clock: 
 
 fn client_keys() -> List[Bytes] {
     let mut requested_keys: List[Bytes] = list.new()
-    for key in [k_write(), k_refuse(), k_crash(), k_tally(), k_named(), k_flood(), k_everything(),
+    for key in [k_write(), k_refuse(), k_crash(), k_tally(), k_named(), k_flood(), k_everything(), k_mine(),
         key_of(code.identity(code.describe(hung)), std.codec.of_u64(), reply()),
         key_of(code.identity(code.describe(answer)), std.codec.of_u64(), std.codec.of_u64()),
         key_of(code.identity(code.describe(write)), std.codec.of_u32(), reply())] {
@@ -997,7 +1012,7 @@ fn quiet_repair(a: Conn, mut c: Cache, n: u64) -> () waits {
 // writing: A's sub is never ended or reset, no diff crosses the hole the bounce made, and
 // one replacing `complete` brings A's cache to the exact rows.
 fn drive_publisher_never_blocks(take d: Drive) -> () waits {
-    let a: Conn = Held(runner.fixture_owner(d.post))
+    let a: Conn = Held(runner.fixture_owner(d.post, subject_caller(1u8)))
     let b = conn(d, 1u64)
     subscribe(a, 1u32, k_everything())
     subscribe(b, 1u32, k_everything())
@@ -1029,7 +1044,7 @@ fn drive_publisher_never_blocks(take d: Drive) -> () waits {
 // carry the second. Then a third stall, with an Unsubscribe while sub 1 is due: A drains the
 // rounds that fit and nothing names sub 1 after them.
 fn drive_repair_delivered(take d: Drive) -> () waits {
-    let a: Conn = Held(runner.fixture_owner(d.post))
+    let a: Conn = Held(runner.fixture_owner(d.post, subject_caller(1u8)))
     let b = conn(d, 1u64)
     subscribe(a, 1u32, k_everything())
     subscribe(b, 1u32, k_everything())
@@ -1066,6 +1081,123 @@ pub fn law_repair_delivered(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool w
 @test
 fn test_repair_delivered(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
     if law_repair_delivered(c, r, tasks, n) { Ok(()) } else { Error(()) }
+}
+
+// The keys `first` and then `rest`, in order.
+fn key_list(first: Option[u64], rest: Option[u64]) -> List[u64] {
+    let mut out: List[u64] = list.new()
+    if let Some(k) = first { list.push(mut out, k) }
+    if let Some(k) = rest { list.push(mut out, k) }
+    out
+}
+
+// A Caller whose subject is the one byte `first`.
+fn subject_caller(first: u8) -> runner.Caller {
+    let mut subject: Bytes = list.new()
+    list.push(mut subject, first)
+    store.Caller(issuer: 2u8, subject: take subject)
+}
+
+// One owner's image of sub 1: a `complete` replaces it, a row sets or removes its key.
+type Image { rows: Map[Bytes, Bytes], at: u64, completes: u64 }
+
+fn follow(mut i: Image, take d: runner.Down, who: String) {
+    match take d {
+        Batched(take x) => {
+            let runner.KeyedBatch(version: version, complete: complete, rows: take rows, outcomes: _) = take x
+            want(version != NEVER, clone(who))
+            if list.len(complete) != 0u64 {
+                want(list.len(complete) == 1u64 && complete[0] == 1u32, clone(who))
+                i.rows = map.new()
+                i.completes += 1u64
+            }
+            for take row in rows {
+                want(row.sub == 1u32, clone(who))
+                let runner.Row(sub: _, key: take key, value: take value) = take row
+                match take value {
+                    Some(take v) => map.insert(mut i.rows, take key, take v),
+                    None => { let _ = map.remove(mut i.rows, key) },
+                }
+            }
+            i.at = version
+        },
+        _ => want(false, clone(who)),
+    }
+}
+
+// Follow `cn` until its image is at `version` with at least `completes` completes, then
+// check it holds exactly `ks`, each with write(k)'s value.
+fn image_at(cn: Conn, mut i: Image, version: u64, completes: u64, ks: List[u64], take who: String) -> () waits {
+    while i.at != version || i.completes < completes {
+        follow(mut i, down(cn), clone(who))
+    }
+    want(map.len(i.rows) == list.len(ks), clone(who))
+    for k in ks {
+        match map.get(i.rows, row_key(k)) {
+            Some(v) => want(v == row_value(k), clone(who)),
+            None => want(false, clone(who)),
+        }
+    }
+}
+
+// W's write of key k at position p, committed at 3 + 2p.
+fn put_at(w: Conn, clock: Clock, p: u64, k: u64) -> () waits {
+    ask(w, clock, 0u64, p, k_write(), u64_arg(k), LATER)
+    want(written(frame(w), 3u64 + 2u64 * p), "query_as: W's write commits in order")
+}
+
+// query_as_caller (RUNNER-SPEC rule 2, L32 for subscriptions): A and B, bound to Callers with
+// subject bytes 1 and 2, subscribe the same sub id to the same caller-dependent query with the
+// same argument. `mine` covers keys from the subject byte up, so each image is worked out by
+// hand from the writes: key 1 is A's alone.
+// - Subscribe: W wrote key 1 at 3. A's image is {1}; B's is empty.
+// - Rerun: W writes key 0 at 5, which both runs read, so both re-run; then key 3 at 7. Run
+//   with its own Caller, each Cover is unchanged, so A's image is {1, 3} and B's is {3}.
+// - Repair: A and B stop reading while W writes keys 100 to 249 at 9 to 307, so both inboxes
+//   fill and both subs fall due. Each one's replacing `complete` at 307 holds its own rows:
+//   A's {1, 3, 100..249} and B's {3, 100..249}.
+fn drive_query_as_caller(take d: Drive) -> () waits {
+    let w = conn(d, 1u64)
+    put_at(w, d.clock, 0u64, 1u64)
+    let a: Conn = Held(runner.fixture_owner(d.post, subject_caller(1u8)))
+    let b: Conn = Held(runner.fixture_owner(d.post, subject_caller(2u8)))
+    subscribe(a, 1u32, k_mine())
+    subscribe(b, 1u32, k_mine())
+    let mut ia = Image(rows: map.new(), at: 0u64, completes: 0u64)
+    let mut ib = Image(rows: map.new(), at: 0u64, completes: 0u64)
+    image_at(a, mut ia, 3u64, 1u64, key_list(Some(1u64), None), string.from("query_as: A's initial image is {1} at 3"))
+    image_at(b, mut ib, 3u64, 1u64, list.new(), string.from("query_as: B's initial image is empty at 3"))
+    put_at(w, d.clock, 1u64, 0u64)
+    put_at(w, d.clock, 2u64, 3u64)
+    image_at(a, mut ia, 7u64, 1u64, key_list(Some(1u64), Some(3u64)), string.from("query_as: A's image after the rerun is {1, 3} at 7"))
+    image_at(b, mut ib, 7u64, 1u64, key_list(Some(3u64), None), string.from("query_as: B's image after the rerun is {3} at 7"))
+    let mut shared: List[u64] = list.new()
+    for p in 3u64 .. 3u64 + STALL_WRITES {
+        let k = 97u64 + p
+        put_at(w, d.clock, p, k)
+        list.push(mut shared, k)
+    }
+    let last = 3u64 + 2u64 * (2u64 + STALL_WRITES)
+    let mut own_a = key_list(Some(1u64), Some(3u64))
+    let mut own_b = key_list(Some(3u64), None)
+    for k in shared {
+        list.push(mut own_a, k)
+        list.push(mut own_b, k)
+    }
+    image_at(a, mut ia, last, 2u64, own_a, string.from("query_as: A's repaired image holds key 1 and the stall"))
+    image_at(b, mut ib, last, 2u64, own_b, string.from("query_as: B's repaired image holds the stall without key 1"))
+    hang(take a)
+    hang(take b)
+    hang(take w)
+}
+
+pub fn law_query_as_caller(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
+    served(c, r, tasks, n, drive_query_as_caller)
+}
+
+@test
+fn test_query_as_caller(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    if law_query_as_caller(c, r, tasks, n) { Ok(()) } else { Error(()) }
 }
 
 pub fn law_publisher_never_blocks(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {

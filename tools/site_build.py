@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build the deployed site: site/ copied as is, with index.html's inline script and styles minified.
 
-The source stays readable; only the Pages artifact is minified. Every file but index.html is
+The source stays readable; only the deployed copy is minified. Every file but index.html is
 copied byte for byte. Usage: tools/site_build.py <out-dir>
 """
 import re

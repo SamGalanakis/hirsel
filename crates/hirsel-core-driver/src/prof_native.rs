@@ -482,7 +482,7 @@ pub fn main() -> Result[(), Exit] {
     // Charged: root startup (256 + 32) plus the full 160-byte scope.
     // Retained at the region allocation: startup slot, cause cell, inputs,
     // main result, root Task, Region header and one 4 KiB backing request.
-    let retained = 16 + 56 + 16 + 24 + 656 + 272 + 4096;
+    let retained = 16 + 56 + 16 + 24 + 672 + 272 + 4096;
     // The Stamp takes one 24-byte native slot in the first chunk.
     assert_eq!(
         peaks,

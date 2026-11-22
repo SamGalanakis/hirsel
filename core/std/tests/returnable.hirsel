@@ -5,7 +5,7 @@
 // the other engines keep every wait stackful. The bytes and their order are
 // fixed by the protocol below, so every engine must give the same log.
 
-type Served: send {
+type ServeJob: send {
     socket: Socket,
     clock: Clock,
 }
@@ -60,8 +60,8 @@ fn send_all(mut w: WriteHalf, b: Bytes) waits {
 // logs `c` and the one byte a scoped closure waits for. Each round then
 // relays three bytes and acknowledges with `k`. The log goes back to the
 // peer, and `net.finish` drains the peer to EOF.
-fn serve(take job: Served) -> u64 waits {
-    let Served(socket: take socket, clock: clock) = take job
+fn serve(take job: ServeJob) -> u64 waits {
+    let ServeJob(socket: take socket, clock: clock) = take job
     let (read, write) = net.split(take socket)
     let mut r = take read
     let mut w = take write
@@ -99,7 +99,7 @@ fn waits_through_wrappers_and_closures(n: Net, clock: Clock, tasks: Tasks) -> bo
     let mut listener = take listening
     let client = result.unwrap(host.connect(n, addr, Never))
     let (socket, _) = result.unwrap(host.accept(mut listener, Never))
-    let h = task.spawn(tasks, bytes 65536, Served(socket: take socket, clock: clock), serve)
+    let h = task.spawn(tasks, bytes 65536, ServeJob(socket: take socket, clock: clock), serve)
     let (read, write) = net.split(take client)
     let mut r = take read
     let mut w = take write

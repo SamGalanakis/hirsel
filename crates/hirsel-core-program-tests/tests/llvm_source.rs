@@ -750,7 +750,11 @@ fn unknown(j: u64, n: u64) -> u64 {
 /// 8 at the shift, which still fails with the evaluator's text and site on
 /// both native engines. `guarded` counts under a data-dependent guard, which
 /// release LLVM if-converts (`guarded_check.h`): the count fails only when the
-/// guard holds at 255, never when it is skipped there.
+/// guard holds at 255, never when it is skipped there. A count that grows at
+/// most once per trip is bounded by its start plus the trip count, so
+/// `guarded` and `from_zero` run their loop without the check when the trips
+/// fit and keep it, failing at the same trip, when they do not; `twice` grows
+/// faster than its trips and keeps its checks.
 #[test]
 fn counter_resets_keep_reachable_failures() {
     let source = r#"
@@ -840,6 +844,27 @@ fn guarded(n: u64, every: u64, start: u64) -> u64 {
     }
     int.widen(count)
 }
+
+fn from_zero(n: u64, every: u64) -> u64 {
+    let mut count: u8 = 0
+    for i in 0u64 .. n {
+        if i % every == 0u64 {
+            count += 1
+        }
+    }
+    int.widen(count)
+}
+
+fn twice(n: u64, start: u64) -> u64 {
+    let mut count: u8 = int.narrow(start)
+    for i in 0u64 .. n {
+        count += 1
+        if i % 2u64 == 0u64 {
+            count += 1
+        }
+    }
+    int.widen(count)
+}
 "#;
     let (program, names) = hirsel_core_program_tests::SourceProgram::lower(source, None);
     // Hand-derived. Bit i is set when i % 3 != 0, at bit 7 - pos. With a reset
@@ -851,7 +876,12 @@ fn guarded(n: u64, every: u64, start: u64) -> u64 {
     // bit, and at i = 15 (pos 7, no bit) it carries pos past 8 to 9, so the
     // set bit at i = 16 fails. `guarded` adds one per i in 0..n divisible by
     // `every`: from 254 every 5th of 4 reaches 255 at i = 0 and skips at 255
-    // for i = 1..3; every 4th of 6 reaches 256 at i = 4.
+    // for i = 1..3; every 4th of 6 reaches 256 at i = 4. Every 1st adds one
+    // per i, so 5 from 250 ends at 255 and 6 reaches 256 at i = 5; the count
+    // is at most start + i below n, so n + start <= 255 runs unchecked.
+    // `twice` adds two at even i and one at odd i: 3 from 250 ends at 255, 4
+    // reaches 256 at i = 3 though n + start is 254. `from_zero` every 1st
+    // ends 255 trips at 255 and reaches 256 at i = 255 of 256.
     let overflow = || eval::Outcome::Failed(vec!["Overflow".into()]);
     let returned = |x: u64| eval::Outcome::Returned(vec![x]);
     let laws = [
@@ -876,6 +906,12 @@ fn guarded(n: u64, every: u64, start: u64) -> u64 {
         ("guarded", vec![6, 3, 253], returned(255)),
         ("guarded", vec![6, 4, 254], overflow()),
         ("guarded", vec![7, 3, 253], overflow()),
+        ("guarded", vec![5, 1, 250], returned(255)),
+        ("guarded", vec![6, 1, 250], overflow()),
+        ("from_zero", vec![255, 1], returned(255)),
+        ("from_zero", vec![256, 1], overflow()),
+        ("twice", vec![3, 250], returned(255)),
+        ("twice", vec![4, 250], overflow()),
     ];
     let cases: Vec<_> = laws
         .iter()
@@ -895,10 +931,26 @@ fn guarded(n: u64, every: u64, start: u64) -> u64 {
             run
         })
         .collect();
-    let exports =
-        ["packed", "reset_at_nine", "one_path", "bumped", "guarded"].map(|name| names[name]);
+    let exports = [
+        "packed",
+        "reset_at_nine",
+        "one_path",
+        "bumped",
+        "guarded",
+        "from_zero",
+        "twice",
+    ]
+    .map(|name| names[name]);
     let cranelift = program.cranelift_object("x86_64-unknown-linux-gnu", false, false, false);
-    let llvm = program.llvm_program(Target::X86_64Linux, false, false, &exports);
+    let (llvm, folds) =
+        program.llvm_program_with_counter_range_folds(Target::X86_64Linux, &exports);
+    for name in ["guarded", "from_zero"] {
+        let symbol = symbol(&program, names[name]);
+        assert!(
+            folds.get(symbol.as_bytes()).is_some_and(|&n| n > 0),
+            "{name}'s count check must go where the trips fit the count"
+        );
+    }
     for (optimization, object) in [(Optimization::None, cranelift), (Optimization::Speed, llvm)] {
         let reports = execute_object(&program, &cases, "", "", optimization, Some(object));
         for ((case, evaluated), native) in cases.iter().zip(&evaluated).zip(reports) {

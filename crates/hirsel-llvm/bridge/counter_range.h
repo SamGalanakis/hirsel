@@ -2,6 +2,7 @@
 // when a range fixed point proves they can never fire, including checks on
 // counters that a reset keeps in range.
 #pragma once
+#include "loop_version.h"
 #include "source_remark.h"
 #include <llvm/ADT/BitVector.h>
 #include <llvm/ADT/DenseMap.h>
@@ -10,16 +11,20 @@
 #include <llvm/ADT/SetVector.h>
 #include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/Analysis/LoopInfo.h>
+#include <llvm/Analysis/ScalarEvolution.h>
+#include <llvm/Analysis/ValueTracking.h>
 #include <llvm/IR/CFG.h>
 #include <llvm/IR/ConstantRange.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/DataLayout.h>
 #include <llvm/IR/Dominators.h>
+#include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/IntrinsicInst.h>
 #include <llvm/IR/Operator.h>
 #include <llvm/IR/PassManager.h>
 #include <llvm/IR/PatternMatch.h>
+#include <llvm/Transforms/Utils/Local.h>
 #include <numeric>
 #include <optional>
 #include <queue>
@@ -78,28 +83,68 @@ using namespace llvm;
 // alternate the SSA fixed point with one reverse-postorder sweep over memory;
 // a summary is widened like a phi per round, so the rounds end. The full
 // argument is the design note of collection-ranges-1529.
+//
+// Bounded counters. `count += if alive {1} else {0}` over a list of neighbours
+// (LangArena GameOfLife) keeps its overflow check: the count has no range of
+// its own, since it can grow by one per element of a list of any length.
+// What bounds it is the index: the count grows by at most one for each step
+// of an index that stays below the list's length `n`, so it stays at most
+// its start plus `n`. The rule: for a check that fails only when `count`
+// exceeds `limit`, find an index `i` with `i < n` wherever the check runs, and
+// an upper bound `D` on `count - i` over the integers that holds wherever both
+// are defined; then `count <= n - 1 + D`, and the check cannot fail when
+// `n + D <= limit + 1`. `D` is a fixed point over pairs of values: a count
+// plus a constant or a zero-extended bool adds it, an index plus k that
+// cannot wrap subtracts k, a select joins its arms, and a pair that has a phi
+// joins the pairs on the phi's incoming edges (both phis of one block in
+// step, or a phi against a value that dominates its block). A pair with no
+// phi is constants or bounds itself as `count - i`; joining two different
+// such pairs is unbounded, and so is a variable whose bound grows a fifth
+// time. `i < n` is a dominating branch outcome or assumption at the check, or
+// for a phi a coinductive fact: every value it receives is below `n` on its
+// edge, as zero where `n` is nonzero, as `x + 1` with `x < n` where it is not
+// `n`, or as a phi with the fact; an assumption an edge refutes is withdrawn
+// until the rest hold. Every path, early exit and nested loop is in the fixed
+// point; a count that grows faster than its index has no bound.
+// Discharges. When `n + D <= limit + 1` holds for every value (constant
+// operands, or the range of `n`), the check is removed as above. Otherwise,
+// after inlining, the outermost loop around the check whose preheader sees
+// the same `n` and pair is versioned (loop_version.h): the preheader tests the
+// condition once, in 128 bits, frozen; the loop runs without the check when
+// it holds, and its unchanged checked copy runs when it does not, so a
+// reachable overflow fails at the same step with the same effects.
 class CounterRangePass : public OptionalPassInfoMixin<CounterRangePass> {
     using Report = void (*)(void *, const char *, size_t, unsigned);
     Report report;
     SourceRemark source;
     void *receiver;
+    // After inlining: bounded counters only, and they may version loops.
+    bool version;
 
 public:
-    CounterRangePass(Report report, SourceRemark source, void *receiver)
-        : report(report), source(source), receiver(receiver) {}
+    CounterRangePass(Report report, SourceRemark source, void *receiver, bool version = false)
+        : report(report), source(source), receiver(receiver), version(version) {}
 
     PreservedAnalyses run(Function &f, FunctionAnalysisManager &analyses) {
         if (f.isDeclaration()) return PreservedAnalyses::all();
         LoopInfo &loops = analyses.getResult<LoopAnalysis>(f);
         if (loops.empty()) return PreservedAnalyses::all();
-        State state(f, analyses.getResult<DominatorTreeAnalysis>(f));
-        state.close();
-        if (!state.collect(loops)) return PreservedAnalyses::all();
-        state.solve();
+        DominatorTree &tree = analyses.getResult<DominatorTreeAnalysis>(f);
         unsigned removed = 0;
-        if (!state.fold(removed, source, receiver)) return PreservedAnalyses::all();
+        bool changed = false;
+        if (!version) {
+            State state(f, tree);
+            state.close();
+            if (state.collect(loops)) {
+                state.solve();
+                changed |= state.fold(removed, source, receiver);
+            }
+        }
+        bool reshaped = bound(f, loops, tree, analyses, removed, changed);
+        if (!changed) return PreservedAnalyses::all();
         if (report && removed && f.hasName())
             report(receiver, f.getName().data(), f.getName().size(), removed);
+        if (reshaped) return PreservedAnalyses::none();
         PreservedAnalyses kept;
         kept.preserveSet<CFGAnalyses>();
         return kept;
@@ -1218,5 +1263,602 @@ private:
             return changed;
         }
     };
+
+    // Bounded counters (see the rule at the top of the file).
+    struct Bounded {
+        Function &f;
+        DominatorTree &tree;
+        LoopInfo &loops;
+
+        // A check that fails exactly when `count` exceeds `limit`: a branch
+        // into a failure on `count` compared with a constant, or an add with
+        // overflow of a constant.
+        struct Check {
+            Instruction *site;
+            Value *count;
+            APInt limit;
+        };
+        std::vector<Check> checks;
+
+        // An upper bound on count - index over the integers: `offset`, plus
+        // `count - index` of one pair of values when they are set. Bottom is
+        // no value yet, top is unbounded.
+        struct Diff {
+            enum Kind : uint8_t { Bottom, Known, Top } kind = Bottom;
+            int64_t offset = 0;
+            Value *count = nullptr, *index = nullptr;
+            static Diff top() {
+                Diff d;
+                d.kind = Top;
+                return d;
+            }
+            static Diff known(int64_t offset, Value *count = nullptr, Value *index = nullptr) {
+                Diff d;
+                d.kind = Known;
+                d.offset = offset;
+                d.count = count;
+                d.index = index;
+                return d;
+            }
+            bool operator==(const Diff &o) const {
+                return kind == o.kind &&
+                       (kind != Known || (offset == o.offset && count == o.count && index == o.index));
+            }
+            Diff plus(int64_t k) const {
+                if (kind != Known) return *this;
+                int64_t r;
+                if (__builtin_add_overflow(offset, k, &r) || r > (int64_t(1) << 62) || r < -(int64_t(1) << 62))
+                    return top();
+                return known(r, count, index);
+            }
+            Diff join(const Diff &o) const {
+                if (kind == Bottom) return o;
+                if (o.kind == Bottom) return *this;
+                if (kind == Top || o.kind == Top || count != o.count || index != o.index) return top();
+                return known(std::max(offset, o.offset), count, index);
+            }
+        };
+        // A pair with a phi in it is a variable of the fixed point. Mode 0:
+        // both are phis of one block; 1: the count is a phi and the index is
+        // available at its block; 2: the other way round.
+        struct Var {
+            Value *count, *index;
+            unsigned mode;
+            Diff value;
+            unsigned changes = 0;
+        };
+        std::vector<Var> vars;
+        DenseMap<std::pair<Value *, Value *>, unsigned> varIndex;
+
+        using Fact = std::pair<Value *, bool>;
+        using Facts = SmallVector<Fact, 8>;
+        DenseMap<BasicBlock *, Facts> dominating;
+        // Index phis optimistically below a bound, and those refuted.
+        DenseMap<std::pair<Value *, Value *>, bool> below;
+        std::vector<std::pair<PHINode *, Value *>> assumed;
+        // Compile-time budget; once spent nothing more is proved.
+        unsigned budget = 200000;
+
+        Bounded(Function &f, DominatorTree &tree, LoopInfo &loops) : f(f), tree(tree), loops(loops) {}
+
+        bool spend() {
+            if (!budget) return false;
+            --budget;
+            return true;
+        }
+
+        static bool counter(Value *v) {
+            return isa<Instruction>(v) && v->getType()->isIntegerTy() && v->getType()->getIntegerBitWidth() <= 64;
+        }
+
+        void collect() {
+            using namespace PatternMatch;
+            for (BasicBlock &block : f) {
+                if (!loops.getLoopFor(&block) || !tree.isReachableFromEntry(&block)) continue;
+                for (Instruction &i : block) {
+                    auto *op = dyn_cast<WithOverflowInst>(&i);
+                    const APInt *k;
+                    if (!op || op->getIntrinsicID() != Intrinsic::uadd_with_overflow || !counter(op->getLHS()) ||
+                        !match(op->getRHS(), m_APInt(k)))
+                        continue;
+                    bool used = any_of(op->users(), [](User *user) {
+                        auto *flag = dyn_cast<ExtractValueInst>(user);
+                        return flag && flag->getNumIndices() == 1 && flag->getIndices()[0] == 1;
+                    });
+                    if (used && !k->isZero())
+                        checks.push_back({op, op->getLHS(), APInt::getMaxValue(k->getBitWidth()) - *k});
+                }
+                auto *branch = dyn_cast<CondBrInst>(block.getTerminator());
+                auto *compare = branch ? dyn_cast<ICmpInst>(branch->getCondition()) : nullptr;
+                if (!compare || !(isa<ConstantInt>(compare->getOperand(0)) || isa<ConstantInt>(compare->getOperand(1))))
+                    continue;
+                bool fails = reachesRaise(branch->getSuccessor(0));
+                if (fails == reachesRaise(branch->getSuccessor(1))) continue;
+                for (unsigned side = 0; side < 2; side++) {
+                    Value *x = compare->getOperand(side);
+                    const APInt *k;
+                    if (!counter(x) || !match(compare->getOperand(1 - side), m_APInt(k))) continue;
+                    CmpInst::Predicate predicate = fails ? compare->getPredicate() : compare->getInversePredicate();
+                    if (side) predicate = CmpInst::getSwappedPredicate(predicate);
+                    ConstantRange failing = ConstantRange::makeExactICmpRegion(predicate, *k);
+                    if (failing.isEmptySet() || failing.getUnsignedMin().isZero()) continue;
+                    checks.push_back({branch, x, failing.getUnsignedMin() - 1});
+                }
+            }
+        }
+
+        bool available(Value *v, BasicBlock *block) const {
+            auto *i = dyn_cast<Instruction>(v);
+            return !i || tree.properlyDominates(i->getParent(), block);
+        }
+
+        static void assumes(BasicBlock *block, Instruction *before, Facts &out) {
+            for (Instruction &i : *block) {
+                if (&i == before) break;
+                if (auto *assume = dyn_cast<AssumeInst>(&i)) out.push_back({assume->getArgOperand(0), true});
+            }
+        }
+
+        // Conditions that hold whenever `block` runs: the outcomes of the
+        // branches whose edge dominates it, and the assumptions in the
+        // blocks that dominate it.
+        const Facts &dominated(BasicBlock *block) {
+            auto [at, fresh] = dominating.try_emplace(block);
+            if (!fresh) return at->second;
+            Facts facts;
+            DomTreeNode *node = tree.getNode(block);
+            for (unsigned depth = 0; node && node->getIDom() && depth < 32; depth++) {
+                BasicBlock *above = node->getIDom()->getBlock();
+                assumes(above, nullptr, facts);
+                if (auto *branch = dyn_cast<CondBrInst>(above->getTerminator());
+                    branch && branch->getSuccessor(0) != branch->getSuccessor(1))
+                    for (unsigned k = 0; k < 2; k++)
+                        if (tree.dominates(BasicBlockEdge(above, branch->getSuccessor(k)), block))
+                            facts.push_back({branch->getCondition(), k == 0});
+                node = node->getIDom();
+            }
+            return dominating[block] = std::move(facts);
+        }
+
+        Facts at(Instruction *i) {
+            Facts facts = dominated(i->getParent());
+            assumes(i->getParent(), i, facts);
+            return facts;
+        }
+
+        Facts edge(BasicBlock *from, BasicBlock *to) {
+            Facts facts = dominated(from);
+            assumes(from, nullptr, facts);
+            if (auto *branch = dyn_cast<CondBrInst>(from->getTerminator());
+                branch && branch->getSuccessor(0) != branch->getSuccessor(1))
+                facts.push_back({branch->getCondition(), branch->getSuccessor(0) == to});
+            return facts;
+        }
+
+        // Whether `condition` being `truth` gives `a predicate b` for one of
+        // the unsigned predicates in `accepted`.
+        static bool implies(Value *condition, bool truth, Value *a, Value *b,
+                            std::initializer_list<CmpInst::Predicate> accepted, unsigned depth = 0) {
+            using namespace PatternMatch;
+            Value *l, *r;
+            if (depth < 4 && (truth ? match(condition, m_LogicalAnd(m_Value(l), m_Value(r)))
+                                    : match(condition, m_LogicalOr(m_Value(l), m_Value(r)))))
+                return implies(l, truth, a, b, accepted, depth + 1) || implies(r, truth, a, b, accepted, depth + 1);
+            auto *compare = dyn_cast<ICmpInst>(condition);
+            if (!compare) return false;
+            CmpInst::Predicate predicate = truth ? compare->getPredicate() : compare->getInversePredicate();
+            Value *x = compare->getOperand(0), *y = compare->getOperand(1);
+            if (x == b && y == a) predicate = CmpInst::getSwappedPredicate(predicate);
+            else if (x != a || y != b) return false;
+            return is_contained(accepted, predicate);
+        }
+
+        static bool holds(const Facts &facts, Value *a, Value *b, std::initializer_list<CmpInst::Predicate> accepted) {
+            for (auto [condition, truth] : facts)
+                if (implies(condition, truth, a, b, accepted)) return true;
+            return false;
+        }
+
+        static bool nonzero(Value *n, const Facts &facts) {
+            if (auto *c = dyn_cast<ConstantInt>(n)) return !c->isZero();
+            Value *zero = ConstantInt::get(n->getType(), 0);
+            if (holds(facts, n, zero, {CmpInst::ICMP_NE, CmpInst::ICMP_UGT})) return true;
+            // x < n for any x.
+            for (auto [condition, truth] : facts)
+                if (auto *compare = dyn_cast<ICmpInst>(condition))
+                    for (unsigned side = 0; side < 2; side++)
+                        if (compare->getOperand(1 - side) == n &&
+                            implies(condition, truth, compare->getOperand(side), n, {CmpInst::ICMP_ULT}))
+                            return true;
+            return false;
+        }
+
+        // Whether `v < n` (unsigned) wherever `facts` hold.
+        bool lt(Value *v, Value *n, const Facts &facts, unsigned depth) {
+            if (depth > 6 || !spend()) return false;
+            if (auto *c = dyn_cast<ConstantInt>(v)) {
+                if (auto *m = dyn_cast<ConstantInt>(n)) return c->getValue().ult(m->getValue());
+                if (c->isZero() && nonzero(n, facts)) return true;
+            }
+            if (holds(facts, v, n, {CmpInst::ICMP_ULT})) return true;
+            if (auto *phi = dyn_cast<PHINode>(v); phi && phiBelow(phi, n)) return true;
+            // v != n and v <= n.
+            if (!holds(facts, v, n, {CmpInst::ICMP_NE})) return false;
+            if (holds(facts, v, n, {CmpInst::ICMP_ULE})) return true;
+            using namespace PatternMatch;
+            Value *x;
+            auto *add = dyn_cast<Instruction>(v);
+            return add && match(v, m_Add(m_Value(x), m_One())) && lt(x, n, at(add), depth + 1);
+        }
+
+        // Every value the phi receives is below `n`: a coinductive
+        // assumption, which `verify` withdraws when an edge refutes it.
+        bool phiBelow(PHINode *phi, Value *n) {
+            if (!available(n, phi->getParent())) return false;
+            auto [at, fresh] = below.try_emplace({phi, n}, true);
+            if (!fresh) return at->second;
+            assumed.push_back({phi, n});
+            if (edgesBelow(phi, n)) return true;
+            below[{phi, n}] = false;
+            return false;
+        }
+
+        bool edgesBelow(PHINode *phi, Value *n) {
+            for (unsigned k = 0; k < phi->getNumIncomingValues(); k++) {
+                BasicBlock *from = phi->getIncomingBlock(k);
+                if (tree.isReachableFromEntry(from) &&
+                    !lt(phi->getIncomingValue(k), n, edge(from, phi->getParent()), 0))
+                    return false;
+            }
+            return true;
+        }
+
+        bool verify() {
+            bool withdrawn = false;
+            for (bool again = true; again;) {
+                again = false;
+                for (size_t k = 0; k < assumed.size(); k++) {
+                    auto [phi, n] = assumed[k];
+                    if (!below.lookup({phi, n}) || edgesBelow(phi, n)) continue;
+                    below[{phi, n}] = false;
+                    again = withdrawn = true;
+                }
+            }
+            return withdrawn;
+        }
+
+        // Whether `index < n` wherever `site` runs.
+        bool indexBelow(Value *index, Value *n, Instruction *site) {
+            for (unsigned round = 0; round < 16 && budget; round++) {
+                size_t before = assumed.size();
+                bool result = lt(index, n, at(site), 0);
+                if (!verify() && assumed.size() == before) return result;
+            }
+            return false;
+        }
+
+        // The values `index` is compared with, directly, as an incoming
+        // value of a phi, or plus one.
+        SmallVector<Value *, 4> bounds(Value *index) {
+            using namespace PatternMatch;
+            SmallVector<Value *, 8> sources{index};
+            if (isa<Constant>(index)) return {};
+            if (auto *phi = dyn_cast<PHINode>(index))
+                for (Value *v : phi->incoming_values()) sources.push_back(v);
+            for (User *user : index->users())
+                if (match(user, m_Add(m_Specific(index), m_One()))) sources.push_back(user);
+            SmallVector<Value *, 4> out;
+            for (Value *source : sources) {
+                // A constant has no list of users.
+                if (isa<Constant>(source)) continue;
+                for (User *user : source->users())
+                    if (auto *compare = dyn_cast<ICmpInst>(user); compare && out.size() < 6)
+                        for (Value *other : compare->operands())
+                            if (other != source && other != index && other->getType() == index->getType() &&
+                                !is_contained(out, other))
+                                out.push_back(other);
+            }
+            return out;
+        }
+
+        // `x < n` at `site` for a bound `n` of x, so `x + 1` cannot wrap.
+        bool belowAny(Value *x, Instruction *site) {
+            for (Value *n : bounds(x))
+                if (indexBelow(x, n, site)) return true;
+            return false;
+        }
+
+        Diff var(Value *count, Value *index, unsigned mode) {
+            auto [at, fresh] = varIndex.try_emplace({count, index}, vars.size());
+            if (fresh) vars.push_back({count, index, mode, Diff()});
+            return vars[at->second].value;
+        }
+
+        Diff diff(Value *count, Value *index, unsigned depth) {
+            using namespace PatternMatch;
+            if (depth > 32 || !spend()) return Diff::top();
+            const uint64_t big = uint64_t(1) << 62;
+            auto *c = dyn_cast<ConstantInt>(count), *i = dyn_cast<ConstantInt>(index);
+            if (c && i && c->getValue().ule(big) && i->getValue().ule(big))
+                return Diff::known(int64_t(c->getZExtValue()) - int64_t(i->getZExtValue()));
+            // The count steps up: a wrapped sum is below the unwrapped one.
+            Value *x, *b;
+            const APInt *k;
+            if (match(count, m_Add(m_Value(x), m_APInt(k))) && k->ule(big))
+                return diff(x, index, depth + 1).plus(int64_t(k->getZExtValue()));
+            if (match(count, m_c_Add(m_Value(x), m_ZExt(m_Value(b)))) && b->getType()->isIntegerTy(1))
+                return diff(x, index, depth + 1).plus(1);
+            if (auto *extract = dyn_cast<ExtractValueInst>(count);
+                extract && extract->getNumIndices() == 1 && extract->getIndices()[0] == 0)
+                if (auto *op = dyn_cast<WithOverflowInst>(extract->getAggregateOperand());
+                    op && op->getBinaryOp() == Instruction::Add && match(op->getRHS(), m_APInt(k)) &&
+                    k->ule(big))
+                    return diff(op->getLHS(), index, depth + 1).plus(int64_t(k->getZExtValue()));
+            if (auto *select = dyn_cast<SelectInst>(count))
+                return diff(select->getTrueValue(), index, depth + 1)
+                    .join(diff(select->getFalseValue(), index, depth + 1));
+            // The index steps up by exactly k: it must not wrap.
+            if (auto *add = dyn_cast<BinaryOperator>(index);
+                add && match(add, m_Add(m_Value(x), m_APInt(k))) && !k->isZero() && k->ule(big)) {
+                if (add->hasNoUnsignedWrap() || (k->isOne() && belowAny(x, add)))
+                    return diff(count, x, depth + 1).plus(-int64_t(k->getZExtValue()));
+                return Diff::top();
+            }
+            auto *pc = dyn_cast<PHINode>(count), *pi = dyn_cast<PHINode>(index);
+            if (pc && pi && pc->getParent() == pi->getParent()) return var(count, index, 0);
+            if (pc && available(index, pc->getParent())) return var(count, index, 1);
+            if (pi && available(count, pi->getParent())) return var(count, index, 2);
+            return Diff::known(0, count, index);
+        }
+
+        Diff compute(unsigned k) {
+            Value *count = vars[k].count, *index = vars[k].index;
+            unsigned mode = vars[k].mode;
+            auto *phi = cast<PHINode>(mode == 2 ? index : count);
+            Diff result;
+            for (unsigned j = 0; j < phi->getNumIncomingValues() && result.kind != Diff::Top; j++) {
+                BasicBlock *from = phi->getIncomingBlock(j);
+                if (!tree.isReachableFromEntry(from)) continue;
+                Value *c = mode == 2 ? count : cast<PHINode>(count)->getIncomingValueForBlock(from);
+                Value *i = mode == 1 ? index : cast<PHINode>(index)->getIncomingValueForBlock(from);
+                Diff d = diff(c, i, 0);
+                // A loop's exit edge tests its index against the value the
+                // pair holds: either one bounds the difference.
+                if (Value *same = equal(from, phi->getParent(), i)) d = tighter(d, diff(c, same, 0));
+                result = result.join(d);
+            }
+            return result;
+        }
+
+        // A value equal to `v` on the edge, by the branch taken there.
+        static Value *equal(BasicBlock *from, BasicBlock *to, Value *v) {
+            auto *branch = dyn_cast<CondBrInst>(from->getTerminator());
+            if (!branch || branch->getSuccessor(0) == branch->getSuccessor(1)) return nullptr;
+            auto *compare = dyn_cast<ICmpInst>(branch->getCondition());
+            if (!compare) return nullptr;
+            bool truth = branch->getSuccessor(0) == to;
+            CmpInst::Predicate predicate = truth ? compare->getPredicate() : compare->getInversePredicate();
+            if (predicate != CmpInst::ICMP_EQ) return nullptr;
+            if (compare->getOperand(0) == v) return compare->getOperand(1);
+            if (compare->getOperand(1) == v) return compare->getOperand(0);
+            return nullptr;
+        }
+
+        // Either bound holds; a constant one joins with more of the others.
+        static Diff tighter(const Diff &a, const Diff &b) {
+            if (a.kind == Diff::Bottom || b.kind == Diff::Bottom) return Diff();
+            if (a.kind == Diff::Top) return b;
+            if (b.kind == Diff::Top) return a;
+            if (a.count == b.count && a.index == b.index) return a.offset <= b.offset ? a : b;
+            return a.count ? b : a;
+        }
+
+        // The least bound the fixed point gives `count - index`; a variable
+        // that grows a fifth time is unbounded.
+        Diff query(Value *count, Value *index) {
+            for (unsigned round = 0; round < 64; round++) {
+                size_t before = vars.size();
+                Diff result = diff(count, index, 0);
+                bool changed = false;
+                for (unsigned k = 0; k < vars.size(); k++) {
+                    Diff computed = compute(k);
+                    Diff next = vars[k].value.join(computed);
+                    if (next == vars[k].value) continue;
+                    if (++vars[k].changes > 4) next = Diff::top();
+                    vars[k].value = next;
+                    changed = true;
+                }
+                if (!budget) return Diff::top();
+                if (!changed && vars.size() == before) return result;
+            }
+            return Diff::top();
+        }
+
+        // `count <= n - 1 + bound` at the check, for an index below `n`.
+        struct Plan {
+            Check check;
+            Value *n;
+            Diff bound;
+        };
+
+        std::optional<Plan> plan(const Check &check) {
+            SmallVector<Value *, 8> candidates;
+            auto add = [&](PHINode &phi) {
+                if (&phi != check.count && counter(&phi) && !is_contained(candidates, &phi))
+                    candidates.push_back(&phi);
+            };
+            if (auto *phi = dyn_cast<PHINode>(check.count))
+                for (PHINode &other : phi->getParent()->phis()) add(other);
+            if (Loop *loop = loops.getLoopFor(check.site->getParent()))
+                for (PHINode &other : loop->getHeader()->phis()) add(other);
+            for (Value *index : candidates)
+                for (Value *n : bounds(index)) {
+                    if (!budget) return std::nullopt;
+                    if (!indexBelow(index, n, check.site)) continue;
+                    Diff bound = query(check.count, index);
+                    if (bound.kind != Diff::Known) break;
+                    return Plan{check, n, bound};
+                }
+            return std::nullopt;
+        }
+
+        // The check passes when n + offset + (count - index) <= limit + 1.
+        // Returns the constant threshold for `n` when the bound has no pair.
+        static std::optional<__int128> threshold(const Plan &plan) {
+            if (plan.bound.count) {
+                auto *c = dyn_cast<ConstantInt>(plan.bound.count), *i = dyn_cast<ConstantInt>(plan.bound.index);
+                if (!c || !i) return std::nullopt;
+                return __int128(plan.check.limit.getZExtValue()) + 1 - plan.bound.offset -
+                       __int128(c->getZExtValue()) + __int128(i->getZExtValue());
+            }
+            return __int128(plan.check.limit.getZExtValue()) + 1 - plan.bound.offset;
+        }
+
+        // True when the plan's condition holds for every value of its operands.
+        bool always(const Plan &plan) const {
+            auto t = threshold(plan);
+            if (!t || *t < 0) return false;
+            APInt most = computeConstantRange(plan.n, false, SimplifyQuery(f.getDataLayout())).getUnsignedMax();
+            return __int128(most.getZExtValue()) <= *t;
+        }
+
+        static Value *condition(IRBuilder<> &builder, const Plan &plan) {
+            Value *n = plan.n;
+            unsigned width = n->getType()->getIntegerBitWidth();
+            if (auto t = threshold(plan)) {
+                if (*t < 0) return builder.getFalse();
+                if (*t >= (__int128(1) << width) - 1) return builder.getTrue();
+                return builder.CreateICmpULE(n, ConstantInt::get(n->getType(), uint64_t(*t)));
+            }
+            Type *wide = builder.getInt128Ty();
+            Value *sum = builder.CreateAdd(builder.CreateZExt(n, wide),
+                                           ConstantInt::getSigned(wide, plan.bound.offset));
+            sum = builder.CreateAdd(sum, builder.CreateZExt(plan.bound.count, wide));
+            sum = builder.CreateSub(sum, builder.CreateZExt(plan.bound.index, wide));
+            Constant *ceiling = ConstantInt::get(wide, plan.check.limit.zext(128) + 1);
+            return builder.CreateICmpSLE(sum, ceiling);
+        }
+
+        // The outermost loop around the check that has a preheader and
+        // leaves the condition's operands invariant.
+        Loop *versioned(const Plan &plan) const {
+            Loop *chosen = nullptr;
+            for (Loop *loop = loops.getLoopFor(plan.check.site->getParent()); loop; loop = loop->getParentLoop()) {
+                auto invariant = [&](Value *v) {
+                    auto *i = dyn_cast_or_null<Instruction>(v);
+                    return !i || (!loop->contains(i) && tree.dominates(i, loop->getHeader()));
+                };
+                if (!invariant(plan.n) || !invariant(plan.bound.count) || !invariant(plan.bound.index)) break;
+                if (loop->getLoopPreheader()) chosen = loop;
+            }
+            return chosen;
+        }
+
+        // A copy of the loop must behave like the loop.
+        static bool clonable(Loop &loop) {
+            unsigned size = 0;
+            for (BasicBlock *block : loop.blocks()) {
+                if (block->isEHPad() || !isa<UncondBrInst, CondBrInst, SwitchInst, ReturnInst, UnreachableInst>(
+                                            block->getTerminator()))
+                    return false;
+                for (Instruction &i : *block) {
+                    if (++size > 4000 || i.getType()->isTokenTy()) return false;
+                    if (auto *call = dyn_cast<CallBase>(&i); call && (call->cannotDuplicate() || call->isConvergent()))
+                        return false;
+                }
+            }
+            SmallVector<BasicBlock *, 8> exits;
+            loop.getUniqueExitBlocks(exits);
+            return none_of(exits, [](BasicBlock *exit) { return exit->isEHPad(); });
+        }
+    };
+
+    // The check can never fail: an overflow flag becomes false, and a
+    // branch into a failure takes its other edge. Returns the checks it
+    // removed.
+    static unsigned discharge(Function &f, Instruction *site, SourceRemark source, void *receiver) {
+        if (auto *op = dyn_cast<WithOverflowInst>(site)) {
+            unsigned removed = 0;
+            for (User *user : make_early_inc_range(op->users())) {
+                auto *flag = dyn_cast<ExtractValueInst>(user);
+                if (!flag || flag->getNumIndices() != 1 || flag->getIndices()[0] != 1) continue;
+                if (!flag->use_empty()) {
+                    ++removed;
+                    remark(source, receiver, OverflowCheck, *op);
+                }
+                flag->replaceAllUsesWith(ConstantInt::getFalse(f.getContext()));
+                flag->eraseFromParent();
+            }
+            return removed;
+        }
+        auto *guard = cast<CondBrInst>(site);
+        auto *compare = dyn_cast<ICmpInst>(guard->getCondition());
+        if (!compare) return 0;
+        bool fails = reachesRaise(guard->getSuccessor(0));
+        if (source && reachesBounds(guard->getSuccessor(fails ? 0 : 1)))
+            remark(source, receiver, BoundsCheck, *guard);
+        guard->setCondition(ConstantInt::getBool(f.getContext(), !fails));
+        if (compare->use_empty()) compare->eraseFromParent();
+        return 1;
+    }
+
+    // Removes the bounded counters' checks: those whose condition always
+    // holds, and, when versioning, those whose condition a loop can test
+    // once at its preheader. Returns whether the control flow changed.
+    bool bound(Function &f, LoopInfo &loops, DominatorTree &tree, FunctionAnalysisManager &analyses,
+               unsigned &removed, bool &changed) const {
+        Bounded bounded(f, tree, loops);
+        bounded.collect();
+        if (bounded.checks.empty()) return false;
+        MapVector<Loop *, std::vector<Bounded::Plan>> groups;
+        SmallVector<Instruction *, 8> proved;
+        for (const Bounded::Check &check : bounded.checks) {
+            auto plan = bounded.plan(check);
+            if (!plan) continue;
+            if (auto t = Bounded::threshold(*plan); t && *t < 0) continue;
+            if (bounded.always(*plan)) proved.push_back(check.site);
+            else if (version)
+                if (Loop *loop = bounded.versioned(*plan)) groups[loop].push_back(*plan);
+        }
+        // The facts the plans read stay intact until every plan is made.
+        for (Instruction *site : proved) {
+            removed += discharge(f, site, source, receiver);
+            changed = true;
+        }
+        if (groups.empty()) return false;
+        // A loop inside another chosen loop is versioned with it or not at all.
+        SmallVector<Loop *, 4> chosen;
+        for (auto &[loop, plans] : groups) {
+            bool nested = false;
+            for (auto &[other, _] : groups)
+                if (other != loop && other->contains(loop)) nested = true;
+            if (!nested && Bounded::clonable(*loop)) chosen.push_back(loop);
+        }
+        if (chosen.empty()) return false;
+        // Every condition is in place before any loop is copied, so a later
+        // copy rewrites its uses through its exits like any other.
+        SmallVector<std::pair<Loop *, Value *>, 4> safe;
+        for (Loop *loop : chosen) {
+            IRBuilder<> builder(loop->getLoopPreheader()->getTerminator());
+            Value *all = builder.getTrue();
+            for (const Bounded::Plan &plan : groups[loop])
+                all = builder.CreateAnd(all, Bounded::condition(builder, plan));
+            safe.push_back({loop, builder.CreateFreeze(all, "counter.safe")});
+        }
+        ScalarEvolution &evolution = analyses.getResult<ScalarEvolutionAnalysis>(f);
+        for (auto [loop, condition] : safe) {
+            versionLoop(*loop, condition, loops, tree, evolution, "counter.fast.ph", ".counter.checked");
+            // The loop itself is the fast copy. Its failure edges go, which
+            // leaves the loops as they are; the copy moved exits' dominators.
+            for (const Bounded::Plan &plan : groups[loop]) {
+                BasicBlock *block = plan.check.site->getParent();
+                removed += discharge(f, plan.check.site, source, receiver);
+                ConstantFoldTerminator(block, true);
+            }
+            tree.recalculate(f);
+        }
+        changed = true;
+        return true;
+    }
 };
 } // namespace hirsel_llvm

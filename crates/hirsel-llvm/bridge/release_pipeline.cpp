@@ -491,6 +491,10 @@ void registerReleasePasses(PassBuilder &builder, CounterRangeReport report, hirs
                 passes.addPass(hirsel_llvm::CounterRangePass(report, source, receiver));
                 return true;
             }
+            if (name == "counter-range<version>") {
+                passes.addPass(hirsel_llvm::CounterRangePass(report, source, receiver, /*version=*/true));
+                return true;
+            }
             if (name == "counted-exit-split") {
                 passes.addPass(hirsel_llvm::CountedExitSplitPass());
                 return true;
@@ -624,7 +628,7 @@ extern "C" LLVMErrorRef hirsel_llvm_optimize_release(
         "deadargelim,globalopt,globaldce,rpo-function-attrs,recompute-globalsaa,"
         "function<eager-inv>("
             "drop-unnecessary-assumes,float2int,lower-constant-intrinsics,"
-            "loop(loop-rotate<check-exit-count>,loop-deletion,loop-interchange),masked-cell-unroll,"
+            "loop(loop-rotate<check-exit-count>,loop-deletion,loop-interchange),masked-cell-unroll,counter-range<version>,"
             "inject-tli-mappings,loop-vectorize,drop-unnecessary-assumes<drop-deref>,"
             "infer-alignment,loop-load-elim,instcombine<no-verify-fixpoint>,"
             "simplifycfg<forward-switch-cond;switch-range-to-icmp;switch-to-arithmetic;"

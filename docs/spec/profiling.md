@@ -6,7 +6,8 @@ LLVM emits asynchronous `.eh_frame` unwind information for defined Hirsel
 functions on x86-64 and AArch64. Hirsel failures still use the call ABI.
 Linker garbage collection discards the unwind records of discarded code.
 Release builds can reuse whole modules on both architectures. x86-64 ELF
-also supports splitting and reusing individual definitions.
+also supports splitting and reusing individual definitions. AArch64 emits
+and reuses whole modules only.
 
 Cranelift emits `.eh_frame` for every native definition, including the entry
 adapter and foreign-call glue. It uses PC-relative FDE addresses so the
@@ -19,13 +20,14 @@ LLVM's inline stack-probe loops can use a temporary CFA register (`r11` on
 x86-64 and `x9` on AArch64). A sample inside such a range with that register
 absent is `eval_error` with stack root `failed`.
 
-Across 26 x86-64 AWFY and LangArena executables, LLVM and fiber unwind
-metadata added 112,792 bytes of `.eh_frame` (4.26% of Hirsel function text)
-and 11,680 bytes of `.eh_frame_hdr`. Every one of the 1,408 Hirsel function
-symbols in those images had FDE coverage. The largest instruction increase
-across the 72 checked workloads was 0.0793%.
-With Cranelift's unwind writer also enabled, the same release comparison
-had a maximum instruction increase of 0.0201%.
+Across 26 x86-64 AWFY and LangArena executables, the final builds had an FDE
+for each of the 1,420 Hirsel function symbols and all 52 startup symbols,
+including `main` and `__hirsel_entry`. Compared with the pre-change builds,
+`.eh_frame` grew by 119,500 bytes (4.53% of Hirsel function text) and
+`.eh_frame_hdr` grew by 12,216 bytes. The largest instruction increase across
+the 72 workloads was 0.3401% (AWFY Json), within the 0.5% Guard B threshold.
+Cross-linked AArch64 images verified FDE coverage for whole and reused
+modules with both backends.
 
 ## DWARF and symbol resolution
 
@@ -39,6 +41,11 @@ ELF DWARF file beside the executable. A GNU build ID selects
 has no GNU build ID, its exact byte digest selects `.hirsel-debug/DIGEST.debug`.
 `--debug-lines on` also embeds the DWARF. Object emission is the same with
 either flag setting.
+
+With cold native caches, always-on extraction and binding increased combined
+release build time for the x86-64 corpus from 268.18 s to 270.50 s (+0.87%).
+AWFY with embedded DWARF took 123.00 s before and 119.18 s after. LangArena
+with default flags took 145.18 s before and 151.32 s after.
 
 A resolver reports `full_dwarf` when the image embeds DWARF or the detached
 file matches its GNU build ID or exact image digest. `symtab_only` provides

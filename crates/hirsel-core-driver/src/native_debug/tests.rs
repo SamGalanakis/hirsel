@@ -4,6 +4,101 @@ fn link_rebinds_rows_and_inline_calls_without_changing_native_code() {
 }
 
 #[test]
+fn llvm_split_preserves_distinct_cie_rules() {
+    use gimli::{
+        BaseAddresses, CfaRule, EhFrame, LittleEndian, Register, RegisterRule, UnwindContext,
+        UnwindSection as _,
+    };
+    use hirsel_core_ids::ContentHash;
+    use object::{Object as _, ObjectSection as _, ObjectSymbol as _};
+    use std::{path::PathBuf, process::Command};
+
+    let dir = tempfile::tempdir().unwrap();
+    let bin = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin");
+    let assembly = dir.path().join("two-cies.s");
+    std::fs::write(
+        &assembly,
+        r#"
+.section .text.normal,"ax",@progbits
+.globl normal
+.type normal,@function
+normal:
+.cfi_startproc
+ret
+.cfi_endproc
+.size normal, .-normal
+.section .text.custom,"ax",@progbits
+.globl custom
+.type custom,@function
+custom:
+.cfi_startproc simple
+.cfi_def_cfa %rbp, 16
+ret
+.cfi_endproc
+.size custom, .-custom
+"#,
+    )
+    .unwrap();
+    let whole = dir.path().join("whole.o");
+    assert!(
+        Command::new(bin.join("clang"))
+            .args(["--target=x86_64-unknown-linux-gnu", "-c"])
+            .arg(&assembly)
+            .arg("-o")
+            .arg(&whole)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let names = ["normal", "custom"].map(|name| (name, ContentHash::of_bytes(name.as_bytes())));
+    let parts =
+        hirsel_llvm_lazy::core::split_native_object(&std::fs::read(whole).unwrap(), &names, false)
+            .unwrap();
+    let paths = parts
+        .into_iter()
+        .zip(names)
+        .map(|(part, (name, _))| {
+            let path = dir.path().join(format!("{name}.o"));
+            std::fs::write(&path, part.bytes).unwrap();
+            path
+        })
+        .collect::<Vec<_>>();
+    let image = dir.path().join("image");
+    assert!(
+        Command::new(bin.join("ld.lld"))
+            .args(["--gc-sections", "-e", "normal", "-u", "custom", "-o"])
+            .arg(&image)
+            .args(paths)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let bytes = std::fs::read(image).unwrap();
+    let elf = object::File::parse(bytes.as_slice()).unwrap();
+    let section = elf.section_by_name(".eh_frame").unwrap();
+    let base = BaseAddresses::default().set_eh_frame(section.address());
+    let frame = EhFrame::new(section.data().unwrap(), LittleEndian);
+    for (name, sp, offset, ret) in [
+        ("normal", 7, 8, Some(RegisterRule::Offset(-8))),
+        ("custom", 6, 16, None),
+    ] {
+        let address = elf.symbol_by_name(name).unwrap().address();
+        let mut ctx = UnwindContext::new();
+        let row = frame
+            .unwind_info_for_address(&base, &mut ctx, address, EhFrame::cie_from_offset)
+            .unwrap();
+        assert_eq!(
+            *row.cfa(),
+            CfaRule::RegisterAndOffset {
+                register: Register(sp),
+                offset
+            }
+        );
+        assert_eq!(row.register(Register(16)), ret);
+    }
+}
+
+#[test]
 fn native_symbol_tiers_follow_the_elf_identity() {
     use super::{NativeImage, SymbolSource, bind_detached, resolve_symbols, source_positions};
     use hirsel_core_ir::source::*;

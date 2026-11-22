@@ -488,18 +488,25 @@ fn child_mode_authority() {
             .collect()
     };
 
+    let answer_before_end = |events: &[Event], child: Child, answer: Vec<u8>| {
+        let end = events
+            .iter()
+            .position(|event| matches!(event, Event::Ended(id, _) if id == &child))
+            .unwrap();
+        assert!(
+            events[..end].contains(&Event::Answered(child, answer)),
+            "{events:?}"
+        );
+    };
     let describing = role(Role::Describe(attempt(1)));
     rig.ask(launch(1, &work, Mode::Describe(attempt(1))));
     let events = rig.until(|e| ended(e, &describing));
-    assert_eq!(
-        events[0],
-        Event::Answered(describing, b"described".to_vec())
-    );
+    answer_before_end(&events, describing, b"described".to_vec());
     let previewing = role(Role::Preview(attempt(2)));
     let old = b"old entries".to_vec();
     rig.ask(launch(2, &work, Mode::Preview(attempt(2), old.clone())));
     let events = rig.until(|e| ended(e, &previewing));
-    assert_eq!(events[0], Event::Answered(previewing, old));
+    answer_before_end(&events, previewing, old);
     let preparing = role(Role::Prepare(attempt(3)));
     rig.ask(launch(
         3,

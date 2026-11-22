@@ -133,12 +133,13 @@ executes it, forwarding arguments after `--` and returning its process status.
 Every LLVM release build, `build`, `run` and `test` alike, is assembled from its
 published recipe over the release std: the core and std instances lowered once,
 apart from any program, keyed by their own content, and either prebuilt into the
-image (`release-std`) or held in the user's cache. The std side holds every
-instance it lowered as an export, with its step summary, and lends bodies of at
-most `LEND_LIMIT` instructions `available_externally` for inlining. The release
-unit holds the program's own bodies and the library instances the side does not
-hold, which the program's own type and closure arguments make; it calls every
-export by its symbol, and its widths stay dynamic. A program that reaches no std
+image (`release-std`) or held in the user's cache. The std side exports its plain
+roots, each with its step summary, and lends bodies of at most `LEND_LIMIT`
+instructions `available_externally` for inlining. The release unit holds the
+program's own bodies and every other library instance it reaches, so its
+optimiser sees the closure and dictionary arguments it passes them, along with
+the roots `ALWAYS_IMPORT` holds back and what they reach; it calls every export
+by its symbol, and its widths stay dynamic. A program that reaches no std
 root links the side like any other.
 The unit's key covers every reached module and the sealed and place-blind
 parameter facts its emitter consumed, with the fact schema.

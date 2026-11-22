@@ -3,15 +3,16 @@
 //! the image alone. Its roots are the image's non-generic functions the image
 //! checked whole, read from the image, never from a program's reach, so what
 //! the unit holds and how it is optimised is a function of the image and the
-//! generator. Every instance the unit holds is an export; a program calls it
-//! by its symbol and holds none of its bodies. Every optimised LLVM build
-//! takes one: a program lowers only the library instances the unit does not
-//! hold, which its own type and closure arguments make.
+//! generator. Every root is an export; a program calls it by its symbol and
+//! holds none of its bodies. Every optimised LLVM build takes one: a program
+//! lowers every other library instance it reaches itself, so its optimiser
+//! sees the closure and dictionary arguments it passes them, and the roots
+//! [`ALWAYS_IMPORT`] holds back with what they reach.
 //!
 //! The unit and a program meet at five contracts:
-//! - callable: each instance is defined under its instance symbol, and one
+//! - callable: each root is defined under its instance symbol, and one
 //!   with a step-free body also under that body's code symbol;
-//! - step: each instance's [`Summary`] (step-free body, opens a bound,
+//! - step: each root's [`Summary`] (step-free body, opens a bound,
 //!   launches) stands in the program's step specialisation for the body it
 //!   calls;
 //! - width: neither side resolves a blob's `W` over the other's bodies;
@@ -33,7 +34,7 @@ use hirsel_core_ir::{FuncId, Identity};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 
-const STD_SCHEMA: u32 = 4;
+const STD_SCHEMA: u32 = 5;
 
 /// How many std sides each toolchain and variant's index names, most recent
 /// first. One that falls off is lowered again when a build needs it.
@@ -43,6 +44,21 @@ const INDEX_LENGTH: usize = 8;
 /// lends a program's inliner. LLVM's inline cost decides each call site; this
 /// bounds what each program reads and links.
 const LEND_LIMIT: usize = 2000;
+
+/// Definitions whose callers need the program to lower them, with every
+/// plain root they reach, to pass Guard B: their hot loops call through
+/// std bodies the program's optimizer must see whole.
+const ALWAYS_IMPORT: &[&str] = &[
+    "std@1/json/parse",
+    "std@1/json/write",
+    "std@1/regex/next_captures",
+    "std@1/string/next_split",
+];
+
+fn always_imported(definition: &DefPath) -> bool {
+    let path = definition.to_string();
+    ALWAYS_IMPORT.contains(&path.as_str())
+}
 
 /// The source law runner places program modules in the core and std packages.
 fn library(definition: &DefPath) -> bool {
@@ -63,14 +79,14 @@ struct StdRecord {
     whole: bool,
     /// The plain roots the side was asked to lower, in identity order.
     requested: Vec<Identity>,
-    /// The units the side defines under their instance symbols, in identity
-    /// order: every unit it holds, plain or not.
+    /// The plain roots the side defines under their instance symbols, in
+    /// identity order.
     roots: Vec<Identity>,
     /// Every unit the side lowered, with its owner (its body, annex and
     /// builtins), in identity order. The side's code is a function of these
     /// and of its toolchain and variant alone.
     units: Vec<(Identity, ContentHash)>,
-    /// Each export's step summary, by its code identity.
+    /// Each root's step summary, by the root's code identity.
     summaries: Vec<(ContentHash, Summary)>,
     /// The source points the unit's site references name, by file.
     points: BTreeMap<String, Vec<(u32, u32)>>,
@@ -133,7 +149,18 @@ fn program_side(
             && identity.closures.is_empty()
             && identity.dictionaries.is_empty()
     };
-    let roots: Vec<Identity> = units.keys().filter(|i| plain(i)).cloned().collect();
+    let held = reach(
+        units
+            .keys()
+            .filter(|i| plain(i) && always_imported(&i.definition))
+            .cloned()
+            .collect(),
+    );
+    let roots: Vec<Identity> = units
+        .keys()
+        .filter(|i| plain(i) && !held.contains(*i))
+        .cloned()
+        .collect();
     let reached = reach(roots.clone());
     (roots, reached)
 }
@@ -166,7 +193,22 @@ impl CheckProduct {
     /// plain root the image checked whole and what it reaches, prepared as a
     /// recipe names them. Reads the library image only.
     fn image_side(&self) -> Result<SideUnits, NativeStop> {
-        let plain = self.std_plain_roots()?;
+        let mut plain = self.std_plain_roots()?;
+        // What an always-imported entry reaches stays the program's to lower.
+        let mut held = BTreeSet::new();
+        for root in plain
+            .iter()
+            .filter(|root| always_imported(&root.definition))
+        {
+            let mut scratch = crate::instances::InstanceSet::default();
+            if let Ok(walked) =
+                self.instances_into([root.clone()], SIDE_INSTANCE_LIMIT, &mut scratch)
+            {
+                held.extend(walked);
+            }
+            held.insert(root.clone());
+        }
+        plain.retain(|root| !held.contains(root));
         let mut materialized = crate::instances::InstanceSet::default();
         let mut reached = BTreeSet::new();
         let mut roots = Vec::new();
@@ -377,12 +419,12 @@ fn lower(
         .values()
         .map(|unit| Cow::Borrowed(&unit.module))
         .collect();
-    // Every unit the side holds is an export: a program calls it by its
-    // instance symbol and lowers only the instances the side does not hold.
+    // Only the roots are exports: a program lowers every other instance it
+    // reaches, so its optimiser sees the arguments it passes them.
     let body_keys = crate::callable_variants::prepare_inputs(
         &mut modules,
         &reached,
-        crate::callable_variants::Roots::All(&reached),
+        crate::callable_variants::Roots::All(&roots),
         SIDE_INSTANCE_LIMIT,
         |identity| {
             let owner = units[identity].owner()?;
@@ -399,9 +441,9 @@ fn lower(
         .ok_or_else(|| NativeStop::Entry("the image has no plain function".into()))?;
     let (mut module, _) = release::join_modules(&first, &reached, &modules, |_| FuncId(0))?;
     drop(modules);
-    // Each unit's function: the row holding its own body.
+    // Each root's function: the row holding its own body.
     let mut functions: BTreeMap<Identity, FuncId> = BTreeMap::new();
-    let wanted: BTreeSet<&Identity> = reached.iter().collect();
+    let wanted: BTreeSet<&Identity> = roots.iter().collect();
     for (f, function) in module.functions.iter().enumerate() {
         let id = FuncId(f as u32);
         if function.body.is_none() || module.code_variants.contains_key(&id) {
@@ -413,7 +455,7 @@ fn lower(
         }
     }
     drop(wanted);
-    let roots: Vec<Identity> = reached
+    let roots: Vec<Identity> = roots
         .into_iter()
         .filter(|unit| functions.contains_key(unit))
         .collect();

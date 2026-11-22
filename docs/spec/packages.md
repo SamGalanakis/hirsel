@@ -113,8 +113,9 @@ below keeps its own walk, which follows a source symlink wherever it points, bec
 directory-convention package is never a dependency and never published. It captures what it
 reads in the same way.
 
-**Limits.** One `C` is at most 64 MiB and holds at most 65 536 files and archive rows
-together.
+**Limits.** One `C` is at most 64 MiB and holds at most 65 536 source files and
+foreign archive rows together. The producer checks the combined count before
+encoding `C` or computing its root. The decoder enforces the same count limit.
 
 **Decoding.** A reader accepts `C` only when it is the encoding of a package that a valid
 effective manifest describes, with every binding a tag 0 or a root. It applies the same checks

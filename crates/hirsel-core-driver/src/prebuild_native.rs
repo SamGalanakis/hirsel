@@ -131,8 +131,10 @@ fn a_prebuilt_image_compiles_no_plain_library_object() {
         let expected = std::fs::read(product.build(entry.as_ref().unwrap(), &without).unwrap().executable).unwrap();
         assert!(built == expected, "{name}: the executable a build without the prebuild links");
     }
+    // The charge report's observation mode is in every object's key; debug
+    // lines are a link option only (ddf2a345).
     let mut other = options("other");
-    other.debug_lines = true;
+    other.logical_charge_report = Some(dir.path().join("other-charges"));
     let (product, entry) = prebuild_corpus(&prebuilt, &dir.path().join("other"));
     let (reached, compiled) = plain_library_objects(&product, &entry, &other);
     assert_eq!(compiled, reached, "other options compile their own objects");

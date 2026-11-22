@@ -469,17 +469,27 @@ pub(crate) fn binding(f: &FnDecl) -> Option<u16> {
     if !f.path.package_is("core", "1") || f.body.is_some() {
         return None;
     }
-    OPERATIONS
-        .iter()
-        .position(|entry| {
-            f.path.0.modules == [entry.module]
-                && f.path.0.name == entry.name
-                && matches!(
-                    entry.lane,
-                    Lane::Runtime(_) | Lane::PendingCode | Lane::Simd(_)
-                )
-        })
-        .map(|i| i as u16)
+    let [module] = f.path.0.modules.as_slice() else {
+        return None;
+    };
+    // Each bound operation's first row, by its core module and name.
+    static BOUND: std::sync::OnceLock<rustc_hash::FxHashMap<(&str, &str), u16>> =
+        std::sync::OnceLock::new();
+    let bound = BOUND.get_or_init(|| {
+        let mut bound = rustc_hash::FxHashMap::default();
+        for (i, entry) in OPERATIONS.iter().enumerate() {
+            if matches!(
+                entry.lane,
+                Lane::Runtime(_) | Lane::PendingCode | Lane::Simd(_)
+            ) {
+                bound.entry((entry.module, entry.name)).or_insert(i as u16);
+            }
+        }
+        bound
+    });
+    bound
+        .get(&(module.as_str(), f.path.0.name.as_str()))
+        .copied()
 }
 
 pub(super) fn simd_call(row: Option<u16>) -> Option<SimdCall> {

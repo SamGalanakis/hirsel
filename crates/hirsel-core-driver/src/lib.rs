@@ -1032,7 +1032,7 @@ impl Driver {
             if layer.wanted() && declarations_accepted && !reachable_only {
                 layer_record = p.declared().map(|d| encode(&d)).transpose()?;
             }
-            let mut fresh: Vec<(DefPath, ContentHash)> = Vec::new();
+            let mut fresh: Vec<(DefPath, ContentHash, Option<ContentHash>)> = Vec::new();
             // A duplicate definition is a refusal of the declarations.
             let duplicated: BTreeSet<&DefPath> = if declarations_accepted {
                 BTreeSet::new()
@@ -1095,12 +1095,16 @@ impl Driver {
                 // The copies of a duplicate definition (LANG-7) share one
                 // name, whose key hashes one copy's text: each is checked on
                 // every request.
+                // The key pointer, once a lookup has hashed it; publication
+                // reuses it.
+                let mut pointer = None;
                 let cached = if duplicated.contains(&fd.path) {
                     None
                 } else if let Some(product) = recorded {
                     Some(Arc::new(product))
                 } else {
-                    prior_definition(&store, &prior, &fd.path, &key, key_hash)?.map(Arc::new)
+                    prior_definition(&store, &prior, &fd.path, &key, key_hash, &mut pointer)?
+                        .map(Arc::new)
                 };
                 let mut checked = None;
                 let product = if let Some(product) = cached {
@@ -1172,18 +1176,18 @@ impl Driver {
                     .insert(fd.path.clone(), product)
                     .is_some()
                 {
-                    fresh.retain(|(path, _)| *path != fd.path);
+                    fresh.retain(|(path, _, _)| *path != fd.path);
                 }
                 // Framed below, as publication work, once checking is done.
                 if let Some(key_hash) = checked {
-                    fresh.push((fd.path.clone(), key_hash));
+                    fresh.push((fd.path.clone(), key_hash, pointer));
                 }
             }
             meter.finish("check/lower");
             if MEASURE {
                 meter.finish_front();
             }
-            for (path, key_hash) in fresh {
+            for (path, key_hash, pointer) in fresh {
                 let product = result
                     .definitions
                     .get_mut(&path)
@@ -1199,7 +1203,11 @@ impl Driver {
                 // The copies of a duplicate definition share a key; none is
                 // found by it.
                 if !duplicated.contains(&path) {
-                    publication.keyed.push((path.clone(), key_hash, record));
+                    let pointer = match pointer {
+                        Some(pointer) => pointer,
+                        None => check_index::key_pointer(&path, key_hash)?,
+                    };
+                    publication.keyed.push((pointer, record));
                 }
                 publication.rows.insert(
                     path,
@@ -1313,17 +1321,23 @@ fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Option<T> {
 /// publication's live row names when the row carries the key, else the one
 /// the key's pointer names, which an earlier request of another shape wrote.
 /// The record's own path and key must match; anything else is a miss. Only
-/// its head is read; its IR is read on demand.
+/// its head is read; its IR is read on demand. A key pointer hashed for the
+/// lookup is left in `pointer`.
 fn prior_definition(
     store: &Store,
     prior: &check_index::ProgramIndex,
     path: &DefPath,
     key: &DefinitionKey,
     key_hash: ContentHash,
+    pointer: &mut Option<ContentHash>,
 ) -> io::Result<Option<DefinitionProduct>> {
     let record = match prior.live(path) {
         Some((row_key, record)) if row_key == key_hash => Some(record),
-        _ => check_index::keyed_record(store, path, key_hash)?,
+        _ => {
+            let at = check_index::key_pointer(path, key_hash)?;
+            *pointer = Some(at);
+            check_index::keyed_record(store, at)?
+        }
     };
     let Some(record) = record else {
         return Ok(None);

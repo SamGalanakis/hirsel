@@ -258,6 +258,7 @@ pub(crate) fn query(invocation: Invocation) -> Result<()> {
     }
     let request = match command {
         "prof summary" => Query::Summary,
+        "prof tail" => Query::Tail,
         "prof schema" => Query::Schema,
         "prof top" => Query::Top {
             by,

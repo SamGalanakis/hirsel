@@ -58,6 +58,7 @@ pub enum Group {
 
 pub enum Query<'a> {
     Summary,
+    Tail,
     Schema,
     PeakMem,
     Top {
@@ -102,6 +103,7 @@ pub fn query(path: &Path, query: Query<'_>, limit: usize) -> Result<QueryResult>
     let result = match query {
         Query::Summary => summary(db, &quality, primary, limit.min(5))?,
         Query::Schema => schema(db, limit)?,
+        Query::Tail => crate::tail::tail(db, limit)?,
         Query::PeakMem => peak_mem(db, &quality, limit)?,
         Query::Top {
             by,

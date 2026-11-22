@@ -140,6 +140,7 @@ commands! {
     "prof run", "prof run [package-dir] [build-opts] [--tasks] [--out FILE.hprof] [--freq 997] [--pmu LIST] [--stack-bytes 32768] [-- args...]", "Build and sample a native executable from exec until exit.";
     "prof replay", "prof replay [package-dir] --tape TAPE [--tasks] [--mem[=exact|sampled]] [--out FILE.hprof]", "Profile serial replay through the recording and profiling runtime.";
     "prof attach", "prof attach <PID> [--duration SECS] [--freq 997] [--pmu LIST] [--debug PATH] [--out FILE.hprof]", "Snapshot mappings, then sample a running Linux process without stopping it.";
+    "prof tail", "prof tail <FILE.hprof> [--limit 20] [--json]", "Report completed and censored task latencies and the observed causal edges.";
     "prof summary", "prof summary <FILE.hprof> [--json]", "Report capture quality and the five hottest functions per event.";
     "prof schema", "prof schema <FILE.hprof> [--json]", "List the profile's tables and columns.";
     "prof top", "prof top <FILE.hprof> [--by self|inclusive] [--event NAME] [--group def_path|instance] [--filter GLOB] [--limit 20] [--json]", "Rank functions by attributed event periods.";
@@ -635,7 +636,8 @@ static OPTIONS: &[OptionSpec] = &[
             "prof callers",
             "prof callees",
             "prof diff",
-            "prof sql"
+            "prof sql",
+            "prof tail"
         ],
         "Return at most this many rows (default 20, or 500 for SQL)."
     ),

@@ -18,6 +18,7 @@ hirsel prof run [package-dir] [build-opts] [--tasks] [--out FILE.hprof] [--freq 
 hirsel prof replay [package-dir] --tape TAPE [--tasks] [--mem[=exact|sampled]] [--out FILE.hprof]
 hirsel prof attach <PID> [--duration SECS] [--freq 997] [--pmu LIST] [--debug PATH] [--out FILE.hprof]
 hirsel prof summary <FILE.hprof> [--json]
+hirsel prof tail <FILE.hprof> [--limit 20] [--json]
 hirsel prof schema <FILE.hprof> [--json]
 hirsel prof top <FILE.hprof> [--by self|inclusive] [--event NAME] [--group def_path|instance] [--filter GLOB] [--limit 20] [--json]
 hirsel prof annotate <FILE.hprof> <DEF_PATH|FILE:LINE> [--json]

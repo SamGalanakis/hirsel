@@ -6,6 +6,7 @@ mod observation;
 mod pprof;
 mod profile;
 mod query;
+mod tail;
 
 pub use pprof::export_pprof;
 pub use profile::{Profile, ProfileWriter, RunMeta};

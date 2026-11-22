@@ -262,3 +262,14 @@ replay callbacks and passes through the tape provider.
 Replay starts with executable mappings from `/proc/self/maps`. FFI-8
 refuses programs that reach Foreign code before replay, and the replay
 runtime does not dynamically load libraries.
+
+## Task latency
+
+`hirsel prof tail` counts completed tasks and tasks censored by a missing
+start or end. The p50, p95 and p99 are nearest-rank percentiles in
+nanoseconds over completed lifetimes. Each lifetime runs from task creation
+through its end. With no completed lifetime, the percentiles are null.
+The result includes measured causal edges, the count of wakes whose source
+does not identify an observed task and any truncation from `--limit`.
+External and timer wakes stop causal provenance. The query reports
+individual measured edges and leaves critical paths unspecified.

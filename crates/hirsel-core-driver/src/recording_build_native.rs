@@ -116,16 +116,25 @@ fn spent_steps() -> u64 {
     }
 }
 
+fn refused_literal() -> bool {
+    let attempt = isolate(fn() -> Result[u64, Capacity] {
+        bound bytes 15 {
+            let literal: FrozenBytes = b"abcdefghi"
+            list.len(bytebuf.as_bytes(literal))
+        }
+    })
+    let Ok(Error(take causes)) = take attempt else { return false }
+    for c in causes {
+        return match c.kind {
+            Capacity(k) => k.requested == 16 && k.available == 15,
+            _ => false,
+        }
+    }
+    false
+}
+
 pub fn main(a: Args, out: Stdout) -> Result[(), Exit] waits {
-    let capacity = bound bytes 15 {
-        let literal: Result[FrozenBytes, Capacity] = b"abcdefghi"
-        let value = literal?
-        list.len(bytebuf.as_bytes(value))
-    }
-    match capacity {
-        Error(c) => if c.requested != 16 || c.available != 15 { return Error(Exit(status: 2)) },
-        Ok(_) => return Error(Exit(status: 3)),
-    }
+    if !refused_literal() { return Error(Exit(status: 2)) }
     if spent_steps() != 8 { return Error(Exit(status: 4)) }
     result.unwrap(stdout.write(out, "first\n"))
     let n = 1u64 / args.len(a)

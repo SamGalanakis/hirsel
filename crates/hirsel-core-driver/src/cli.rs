@@ -33,6 +33,9 @@ pub enum OptionId {
     InspectStd,
     TestTimeout,
     Rerun,
+    Sim,
+    SimSeeds,
+    SimSeed,
     Release,
     DebugLines,
     Backend,
@@ -570,6 +573,27 @@ static OPTIONS: &[OptionSpec] = &[
         None,
         ["test"],
         "Execute every selected test, reusing no recorded pass."
+    ),
+    option!(
+        Sim,
+        ["--sim"],
+        None,
+        ["test"],
+        "Run fresh simulations and grant their seed through Env as HIRSEL_TEST_SIM_SEED."
+    ),
+    option!(
+        SimSeeds,
+        ["--seeds"],
+        Some("N"),
+        ["test"],
+        "With --sim, run once per seed starting at zero."
+    ),
+    option!(
+        SimSeed,
+        ["--seed"],
+        Some("S"),
+        ["test"],
+        "Run exactly simulation seed S."
     ),
     option!(
         Release,

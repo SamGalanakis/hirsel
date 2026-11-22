@@ -2260,3 +2260,49 @@ __attribute__((constructor)) static void init(void) { write(2, "ctor\n", 5); }
         fs::remove_file(&called).unwrap();
     }
 }
+
+#[test]
+fn simulation_runs_fresh_seeds_and_reproduces_one_failure() {
+    let law = PackageLaw::new();
+    law.manifest(
+        "app",
+        "app",
+        1,
+        "[sources]\n\"main.hirsel\" = \"main\"\n\n[dependencies]\nstd = { major = 1 }\n\n[tests]\nlimit = 1048576\n",
+    );
+    law.write(
+        "app/main.hirsel",
+        r#"
+@test
+fn seeded(e: Env) -> Result[(), ()] {
+    match std.sim.world.test_seed(e) {
+        Some(0) => Ok(()),
+        Some(1) => Error(()),
+        Some(2) => Ok(()),
+        _ => fail("unexpected simulation seed")
+    }
+}
+"#,
+    );
+    let result = |args: &[&str]| {
+        let (status, stdout, stderr) = law.run(args);
+        assert_eq!(status, Some(1), "{stdout}\n{stderr}");
+        serde_json::from_str::<serde_json::Value>(&stdout).unwrap()
+    };
+    let sweep = result(&["test", "app", "--sim", "--seeds", "3", "--json"]);
+    let runs = sweep["tests"].as_array().unwrap();
+    assert_eq!(runs.len(), 3);
+    for (row, (seed, passed)) in runs.iter().zip([(0u64, true), (1, false), (2, true)]) {
+        assert_eq!(row["seed"], seed);
+        assert_eq!(row["source"], "executed");
+        assert_eq!(row["passed"], passed);
+        assert_eq!(row["status"], if passed { 0 } else { 1 });
+    }
+    let (status, stdout, stderr) = law.run(&["test", "app", "--seed", "1"]);
+    assert_eq!(status, Some(1), "{stdout}\n{stderr}");
+    assert!(
+        stdout.contains("fail executed app@1/main/seeded (seed 1): error"),
+        "{stdout}"
+    );
+    assert_eq!(stdout.lines().count(), 1, "{stdout}");
+}

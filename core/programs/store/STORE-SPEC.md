@@ -2496,7 +2496,7 @@ Each failure is `Corrupt(Checksum)`. A pack not listed, or an offset at which no
 - **Resident account (M2):** the sum of
   - each distinct page's image capacity, for the pages reachable from the Db's heads, its pins and the two list roots of the selected generation (at open, the selected MANIFEST's), each page once by stamp within this open (S9);
   - each distinct blob body's length, each body once by blob stamp, however many leaves name it;
-  - the writer's location table (AP16), at its MEM-24 charges: the record map's and the pack inventory's OMap nodes and rows, each record's out-edge stamps (8 per edge) and incoming list (its entries' storage), and spare capacity in any of them. These are charges, not a reporting unit: the writer's own limit pays them, and they admit nothing against `resident_limit`.
+  - the writer's location table (AP16), at its MEM-24 charges: the record map's, pack inventory's and pack membership index's OMap nodes and rows, each record's out-edge stamps (8 per edge) and incoming list (its entries' storage), and spare capacity in any of them. These are charges, not a reporting unit: the writer's own limit pays them, and they admit nothing against `resident_limit`.
   Reader-only Snapshots are excluded: the Db cannot enumerate them, and their memory is the holder's. The figure is computed by the writer when each cut publishes and at open, and `accounts(db)` returns the latest one. Open scans the resident images and rebuilds the location table. A cut takes the total from the location table, whose records are exactly the frames reachable from the participating holders and the two list roots. Each record carries its frame's charge (a page's image capacity or a blob's body length). The table keeps a running total of the frame and edge list charges as records are inserted, replaced and removed. Each OMap keeps the subtree charges up to date on the nodes the edit touches, including capacity changes when a node is copied. The two methods give the same figure (law `disk_law_resident_charge`), so a cut does no rescan. It admits nothing in M1. It is the figure M3's cache budget bounds, once M3 can evict.
 - **`accounts(db)` reports five numbers, synchronously:** `logical`, the admission figure A; `exact`, whether A is known to equal the logical account (R7): true in exact mode, and after a settle or a published cut, which sets A = X, until a publication whose exact change is unknown clears it. A conservative commit clears it (a delete subtracts nothing though the union may shrink), as do `unpin`, `delete_branch` and `adopt`; a live-head fork keeps it, because it leaves the set of versions unchanged; `frames`, F, the bytes of frames sent and not acked; `journal`, U, the journal bytes that no published cut covers (the journal cap's figure); `resident`, the resident account as of the last published cut or open. The writer holds all five, so no call waits on a task.
 - The two accounts separate cleanly because a page's row charge is in its parent's entry. Eviction (M3) changes the resident account and leaves the logical account alone.
@@ -2513,6 +2513,7 @@ Each failure is `Corrupt(Checksum)`. A pack not listed, or an offset at which no
 - **A record holds no share of the body (T4).** A private page, and a published page on AP10's unique path, has exactly the owners it had without records, and `with_unique` decides an in-place edit as before.
 - **Only a cut creates records.** A frame that no cut has written has no record. Commits, `migrate`, index backfill, the install graft, forks and pins allocate no checkpoint state. A cut creates the records of the frames it writes, and removes those of the frames its generation drops.
 - **The pack inventory** is a persistent ordered map keyed by seq. It holds one entry per pack that exists (listed, reached class-2, or retired and not yet unlinked), with its class, `frames`, `live` and `bytes`, and its leased and retiring flags.
+- **The pack membership index** is a persistent ordered set of (pack seq, stamp) pairs for located live frames, including class-2 frames. Open seeds it from the validated reachable locations. A candidate shares the installed index, removes the pair when a located frame dies, and replaces it when the layout moves the frame. The layout inserts pairs for newly located frames. The index publishes or is discarded with the candidate maps.
 - The records' locations are the **stamp index**: a page or blob is located exactly when it has a record. Dead copies (B3) are never records. They count only in their pack's `frames` and `bytes`.
 - **Relocation changes a location, not an identity (R6).** A moved frame keeps its stamp. So the incoming lists that name it, and its parents' out-edge stamps, need no update, and a later cut's upward walk from a stationary child reaches the moved parent.
 
@@ -2525,7 +2526,7 @@ Each failure is `Corrupt(Checksum)`. A pack not listed, or an offset at which no
    - Nothing has been sent since step 0, so the roots the cut reads in step 2 are exactly the roots at the rotation. This is §3.5 step 3's ordering rule.
 2. **Plan.** The generation's roots are every branch head's and pin's current roots with the triggering operation's change H applied (plan item 0). The writer builds a **candidate** from its own limit, by fallible allocation, in this order (v2.40 C-6). Each item reads only what the items before it produced:
    0. **the prospective holder delta H** (C-2, below), which the live records never see before step 5;
-   1. the fresh set N and the candidate record map and inventory (the reference count, below);
+   1. the fresh set N and the candidate record map, inventory and membership index (the reference count, below);
    2. the cut's settle X, by AP15's walk over the generation's roots;
 
    Items 0–2 are the **mandatory candidate**. The writer keeps it as the **retry base**: the candidate maps are persistent, so keeping that version is one share.
@@ -2575,7 +2576,7 @@ H owns its added record's storage. It reserves the one slot of growth that recor
 **A refused cut drops H with the candidate.** The live records, T, `next_table` and the last published generation are then as they were. A cut with no triggering operation (`checkpoint`, a threshold cut) has an empty H.
 
 **A refused cut loses nothing.** A refusal in steps 1–4 before the rename refuses the cut. The refusal is an `Allocation(c)` from any allocation, `Limit(Ids)` from the stamp draw, or an install's `FullNew(cause)`. The writer drops the candidate, H and the cut's buffers, and is left as follows:
-- The installed record map and inventory, A, `exact`, U, the heads, the pins, T, `next_table`, the last published generation and the MANIFEST are as they were. The installed maps are other versions, which the candidate never edited, and the live holder records never saw H (C-2).
+- The installed record map, inventory and membership index, A, `exact`, U, the heads, the pins, T, `next_table`, the last published generation and the MANIFEST are as they were. The installed maps are other versions, which the candidate never edited, and the live holder records never saw H (C-2).
 - Packs that step 3 already wrote stay as leftovers at seq ≥ `next_pack`, which the next cut replaces and open removes (H2). They are contiguous from `next_pack`, because every cut writes its packs at consecutive seqs from the installed `next_pack`, so open's leftover sweep, which stops at the first missing seq, finds them all.
 - A rotated segment stays as the current segment. The old MANIFEST plus the journal, which `prev_end` chains across the rotation, still recover every committed write. This is built §3.5 Q1's argument.
 - The only lasting traces are consumed stamps (the counter never rolls back) and spare capacity left in the writer's own maps by a refused growth. The resident account reports that capacity.
@@ -2597,14 +2598,13 @@ A write refused at the journal cap triggers no cut (AP15).
   `T = t_drain + t_plan + t_write + t_sync`
 
 - **t_drain** is the journal's queued prefix (v2.40 C-12). F ≤ `FRAME_LIMIT` bounds its bytes, not its groups: a prefix of small frames can span several groups, and step 0 waits through each group's sync. R4 and R6 count the group syncs they observe.
-- **t_plan** is O(|N| + |M ∪ C| + |L| + their edges + D + K + P + V), counted in candidate-map updates and walk steps, each an O(log) OMap step:
+- **t_plan** is O(|N| + |M ∪ C| + |L| + their edges + D + K + P), counted in candidate-map updates and walk steps, each an O(log) OMap step:
   - N is the fresh frames;
   - M ∪ C is the moved frames and their closure;
   - L is the list pages;
   - D is the settle's divergence (AP15's n-way walk visits only pages that some root does not share);
   - K is the records the cascade drops;
-  - P is the pack inventory, which selection scans;
-  - V is the records scanned to find M when a data pack is selected.
+  - P is the pack inventory, which selection scans. Each selected pack takes one membership range seek. Enumerating and sorting its live stamps is charged to M.
 - **t_write** = B / w, where B is the bytes written (the bound below) and w is the device's sequential write rate.
 - **t_sync** is (p + 3 + s_r) syncs:
   - one per pack written (p);
@@ -2627,12 +2627,12 @@ So **T ≈ 0.1–0.25 s**. R4 and R6 measure it (M1-DESIGN §4.2).
 
 **The pause's upper bound** in bytes is the write bound below. From L5, k one-key commits since the last published cut write at most k × L5's page count, plus the list pages and the closure.
 
-**The fresh set and the reference count (N13).** The candidate starts as the installed record map and inventory, shared. Each update path-copies, so the installed versions never change before step 5.
+**The fresh set and the reference count (N13).** The candidate starts as the installed record map, inventory and pack membership index, shared. Each update path-copies, so the installed versions never change before step 5.
 1. **Fresh set.** Walk down from the generation's roots, stopping at every page or blob that has a record. The frames reached are N. Each is reached once, however many roots share it, and each gets a candidate record whose location comes from the layout.
    - The walk keeps one stack per tree it is in, each at most 65 levels. A map leaf's collection root starts a new stack, so the map path and the collection path are counted separately (U9).
 2. **Add incoming entries.** Add each edge of a frame of N to its target's candidate incoming list. Add a holder entry to the root record of each holder whose root is new or differs from its installed one.
 3. **Then remove.** For each holder whose root changed, or that the generation drops, remove its entry from the old root's candidate record.
-   - A located record whose incoming list becomes empty is dead. It leaves the candidate map, and the entries named by its out-edge stamps are removed in turn (the cascade of §3.5's count, by stamp).
+   - A located record whose incoming list becomes empty is dead. It leaves the candidate map and membership index, and the entries named by its out-edge stamps are removed in turn (the cascade of §3.5's count, by stamp).
    - Step 2 ran first, so a located child shared by a dropped parent P and a fresh parent Q keeps Q's entry and stays live.
 4. Each pack's candidate `live` is its installed `live` minus the payload bytes of its dead records. Selection reads this figure.
 
@@ -2661,14 +2661,14 @@ Within each run the frames fill packs in emission order. A frame that would take
 **Relocation (copy-forward).**
 - **Selection.** Packs are selected as §3.5 selects them, per class, by `live / bytes` (AP14), from the candidate inventory.
   - A class-2 pack is selected by the same rule. Its `live` comes from its records, and its `bytes` is the PAGE payload bytes of its file, which the writer knows from writing it and open from streaming the file once (AP21 step 0, S7). Class-2 selection is part of the list edits below.
-  - The moved set M is every live frame in a selected data pack, found by scanning the candidate records for its seq.
+  - The moved set M is every live frame in a selected pack. One membership range per selected pack yields its live stamps. The stamps seed the closure in ascending order across selected packs.
 - **The closure.** C is the set of live pages from which some live edge path reaches a frame in M. It is the union, over every frame in M, of its live ancestors under every live root: branch heads, pins, the two list roots, and, after a later merge, base roots. It includes a leaf whose blob moves and a map leaf whose collection root moves.
 - **Finding it.** Walk upward from every frame in M through the candidate incoming lists, marking each located record reached in a worklist. Stop at records already marked, at fresh records (already in N) and at holders.
   - The walk visits exactly C ∪ M, their incoming entries and the boundary of N. No reachability scan is needed.
   - A selected pack holding a frame with no live parent is dead, not moved.
 - **Relocation is optional, and never takes the mandatory part's memory (U13).** Its allocations come after the mandatory candidate (plan items 0–2) has succeeded: the worklist, M ∪ C's candidate updates and their share of the new packs.
   - If one of them is refused, the writer drops relocation's part of the candidate (found by the worklist) and continues with M = C = ∅ for data.
-  - If a later plan item (4–8), or a record insert or pack write of step 3, is refused while relocation is in the candidate, the writer **restores the retry base** (v2.40 C-6). That is the mandatory candidate of items 0–2. Restoring it discards everything built on it: the dead counts, changed pointers, list edits, emitted flags, layouts and partial candidate records. The writer then redoes items 4–8 and step 3 once, with M = C = ∅ for data. The redo emits its final layout from the installed `next_pack` again. A pack the first try already renamed is either rewritten at its seq (`Write` truncates the `.tmp`, and the rename replaces `p-<seq>`) or, when the redo writes fewer packs, left as a contiguous leftover above the redo's last seq (H2). Consumed stamps stay consumed: the redo draws its list stamps above the first try's, and captures `next_stamp` after them. Only a refusal without relocation refuses the cut.
+  - If a later plan item (4–8), or a record insert or pack write of step 3, is refused while relocation is in the candidate, the writer **restores the retry base** (v2.40 C-6). That is the mandatory candidate of items 0–2. Restoring it discards everything built on it: the dead counts, changed pointers, pack membership edits, list edits, emitted flags, layouts and partial candidate records. The writer then redoes items 4–8 and step 3 once, with M = C = ∅ for data. The redo emits its final layout from the installed `next_pack` again. A pack the first try already renamed is either rewritten at its seq (`Write` truncates the `.tmp`, and the rename replaces `p-<seq>`) or, when the redo writes fewer packs, left as a contiguous leftover above the redo's last seq (H2). Consumed stamps stay consumed: the redo draws its list stamps above the first try's, and captures `next_stamp` after them. Only a refusal without relocation refuses the cut.
   - A cut without data relocation still covers the journal, writes every fresh frame and retires every dead pack, and the next cut selects again. This is the only way a cut does less than §3.5 selects.
 - **Emitting.** The cut writes N ∪ M ∪ C ∪ L once. The emission walk goes down from the generation's roots and from the planned list roots. It enters a child only when the child is in N ∪ M ∪ C ∪ L (fresh, marked, or a planned list page) and not yet emitted, and it appends each frame after its children. The plan visits the frames run by run: blobs, then data pages, then list pages.
 - Each frame in M is written into the cut's new packs, keeping its stamp. Each page in C is written once, after its children, keeping its stamp, with its edges' new locations. Every live root then reaches only new locations for M ∪ C.

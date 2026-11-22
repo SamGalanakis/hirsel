@@ -381,8 +381,8 @@ fn totals(
 ) -> Result<Vec<Total>> {
     register_totals(db)?;
     let group = match group {
-        Group::DefPath => "coalesce(f.def_path,f.instance_label)",
-        Group::Instance => "f.instance_label",
+        Group::DefPath => "nullif(f.def_path,''),nullif(f.instance_label,'')",
+        Group::Instance => "nullif(f.instance_label,'')",
     };
     let order = match by {
         By::SelfCost => "self_total",
@@ -391,11 +391,15 @@ fn totals(
     // Group after forming a distinct membership per sample leaf. Summing
     // inclusive rows from separate monomorphs would count common stacks twice.
     let sql = format!(
-        "WITH RECURSIVE {CHAIN}, membership(leaf, label, is_self) AS (
-            SELECT a.leaf,{group},max(a.leaf=a.site)
+        "WITH RECURSIVE {CHAIN}, labelled(leaf, site, label, name, def_path) AS (
+            SELECT a.leaf,a.site,coalesce({group},nullif(f.name,''),fr.file || ':' || fr.line),
+                   f.name,f.def_path
             FROM chain a JOIN callsite c ON c.id=a.site JOIN frame fr ON fr.id=c.frame_id
-            JOIN function f ON f.id=fr.function_id
-            WHERE {group} GLOB ?2 OR f.name GLOB ?2 OR f.def_path GLOB ?2 GROUP BY a.leaf,{group}
+            LEFT JOIN function f ON f.id=fr.function_id
+        ), membership(leaf, label, is_self) AS (
+            SELECT leaf,label,max(leaf=site)
+            FROM labelled WHERE label IS NOT NULL AND (label GLOB ?2 OR name GLOB ?2 OR def_path GLOB ?2)
+            GROUP BY leaf,label
         ), totals AS (
             SELECT label,u64_sum(CASE WHEN is_self THEN weight ELSE 0 END) AS self_total,
                 u64_sum(weight) AS inclusive_total,u64_sum(samples) AS sample_count
@@ -432,9 +436,18 @@ fn annotate(db: &Connection, target: &str, limit: usize) -> Result<Value> {
         },
         None => (target, None),
     };
+    let matched_file = if line.is_some() {
+        source_file(db, file)?
+    } else {
+        None
+    };
     register_totals(db)?;
     let mut stmt = db.prepare(include_str!("annotate.sql"))?;
-    let mut rows = stmt.query((file, line, bounded_limit(limit)?))?;
+    let mut rows = stmt.query((
+        matched_file.as_deref().unwrap_or(file),
+        line,
+        bounded_limit(limit)?,
+    ))?;
     let mut result = Vec::new();
     while result.len() < limit {
         let Some(row) = rows.next()? else { break };
@@ -449,6 +462,33 @@ fn annotate(db: &Connection, target: &str, limit: usize) -> Result<Value> {
     }
     Ok(json!({"rows": result, "limit": unsigned(limit as u64),
         "returned_rows": unsigned(result.len() as u64), "truncated": rows.next()?.is_some()}))
+}
+
+fn source_file(db: &Connection, file: &str) -> Result<Option<String>> {
+    if file.is_empty() {
+        return Ok(None);
+    }
+    let mut stmt = db.prepare(
+        "SELECT file FROM line_cpu_summary
+         UNION SELECT file FROM codegen_remark
+         UNION SELECT file FROM frame WHERE file IS NOT NULL
+         ORDER BY file",
+    )?;
+    let mut rows = stmt.query([])?;
+    let mut candidates = Vec::new();
+    while let Some(row) = rows.next()? {
+        let candidate: String = row.get(0)?;
+        if candidate == file {
+            return Ok(Some(candidate));
+        }
+        if Path::new(&candidate).ends_with(file) {
+            candidates.push(candidate);
+        }
+    }
+    if candidates.len() > 1 {
+        return Err(format!("ambiguous source path {file:?}: {}", candidates.join(", ")).into());
+    }
+    Ok(candidates.pop())
 }
 
 fn related(
@@ -641,6 +681,75 @@ mod tests {
     use crate::{ProfileWriter, RunMeta};
 
     use super::*;
+
+    #[test]
+    fn annotate_matches_path_components_and_reports_ambiguous_suffixes() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(include_str!("schema.sql")).unwrap();
+        db.execute_batch(
+            "INSERT INTO function VALUES (1,'app/math/f','f','f','hirsel');
+             INSERT INTO line_cpu_summary VALUES
+                 ('/workspace/core/matmul.hirsel',95,1,'cycles',17,1),
+                 ('/workspace/core/othermatmul.hirsel',95,1,'cycles',23,1);",
+        )
+        .unwrap();
+        for target in ["matmul.hirsel:95", "core/matmul.hirsel:95"] {
+            let report = annotate(&db, target, 10).unwrap();
+            assert_eq!(report["returned_rows"], 1);
+            assert_eq!(report["rows"][0]["file"], "/workspace/core/matmul.hirsel");
+            assert_eq!(report["rows"][0]["line"], 95);
+            assert_eq!(report["rows"][0]["cpu"][0]["self_total"], 17);
+        }
+        db.execute(
+            "INSERT INTO codegen_remark VALUES
+                 (1,'/workspace/tests/matmul.hirsel',3,1,'step_sync','emitted','source_remark',1)",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            annotate(&db, "matmul.hirsel:95", 10)
+                .unwrap_err()
+                .to_string(),
+            "ambiguous source path \"matmul.hirsel\": /workspace/core/matmul.hirsel, /workspace/tests/matmul.hirsel"
+        );
+        db.execute(
+            "INSERT INTO line_cpu_summary VALUES ('matmul.hirsel',95,1,'cycles',8,1)",
+            [],
+        )
+        .unwrap();
+        let exact = annotate(&db, "matmul.hirsel:95", 10).unwrap();
+        assert_eq!(exact["rows"][0]["cpu"][0]["self_total"], 8);
+    }
+
+    #[test]
+    fn top_names_anonymous_frames_by_source_location() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(include_str!("schema.sql")).unwrap();
+        db.execute_batch(
+            "INSERT INTO thread VALUES (1,1,1,'main',0,NULL);
+             INSERT INTO function VALUES (1,'','','','hirsel');
+             INSERT INTO frame(id,function_id,file,line,inlined) VALUES
+                 (1,1,'math.hirsel',7,0),(2,1,'math.hirsel',12,0),(3,NULL,'loop.hirsel',3,0);
+             INSERT INTO callsite VALUES (1,NULL,1,0),(2,1,2,1),(3,NULL,3,0);
+             INSERT INTO cpu_sample VALUES
+                 (1,1,1,NULL,NULL,0,2,'0x20',11,'fiber','fiber_root'),
+                 (2,2,1,NULL,NULL,0,3,'0x30',5,'fiber','fiber_root');
+             INSERT INTO sample_counter VALUES (1,'cycles',11),(2,'cycles',5);",
+        )
+        .unwrap();
+
+        for group in [Group::DefPath, Group::Instance] {
+            let top = totals(&db, "cycles", By::SelfCost, group, "*", Some(10)).unwrap();
+            assert_eq!(
+                top.iter().map(Total::json).collect::<Vec<_>>(),
+                [
+                    json!({"function":"math.hirsel:12","self_total":11,"inclusive_total":11,"sample_count":1}),
+                    json!({"function":"loop.hirsel:3","self_total":5,"inclusive_total":5,"sample_count":1}),
+                    json!({"function":"math.hirsel:7","self_total":0,"inclusive_total":11,"sample_count":1}),
+                ]
+            );
+        }
+    }
 
     #[test]
     fn annotate_aggregates_cpu_remarks_and_allocations_before_joining_lines() {

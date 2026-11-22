@@ -63,9 +63,9 @@ CREATE TABLE cpu_sample (
     callsite_id INTEGER NOT NULL REFERENCES callsite,
     raw_pc_hex TEXT NOT NULL,
     period ANY NOT NULL,
-    stack_root TEXT NOT NULL CHECK (stack_root IN ('fiber', 'host', 'truncated', 'failed')),
+    stack_root TEXT NOT NULL CHECK (stack_root IN ('fiber', 'host', 'truncated', 'failed', 'kernel')),
     unwind_status TEXT NOT NULL CHECK (unwind_status IN (
-        'ok', 'fiber_root', 'truncated_stack', 'missing_cfi', 'unknown_mapping', 'eval_error'
+        'ok', 'fiber_root', 'truncated_stack', 'missing_cfi', 'unknown_mapping', 'eval_error', 'not_attempted'
     ))
 ) STRICT;
 

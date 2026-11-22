@@ -74,5 +74,6 @@ OPENAT2_TEST_CASES = {
         "native::tests::sqlite_directory_recovery_locking_and_sync",
         "native::tests::recording_switch_preserves_native_observations",
         "native::tests::profiler_replay_memory_peaks_match_the_runtime_metrics",
+        "native::tests::profiler_replays_an_explicit_inputs_entry_and_checks_its_identity",
     ] + [case for case in NATIVE_EXEC_TEST_CASES if case.startswith("native::tests::")],
 }

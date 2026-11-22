@@ -42,6 +42,54 @@ pub(crate) fn mappings(pid: u32) -> Result<Vec<Mapping>> {
     parse_mappings(&fs::read(process(pid).join("maps"))?)
 }
 
+#[derive(Default)]
+pub(crate) struct KernelSymbols(Vec<(u64, Option<String>)>);
+
+impl KernelSymbols {
+    pub(crate) fn read() -> Self {
+        fs::read_to_string("/proc/kallsyms")
+            .map(|text| Self::parse(&text))
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn parse(text: &str) -> Self {
+        let mut symbols: Vec<_> = text
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line.split_ascii_whitespace();
+                let address = u64::from_str_radix(fields.next()?, 16).ok()?;
+                let kind = fields.next()?;
+                let name = fields.next()?;
+                if address == 0 {
+                    // Linux can expose the names with all addresses redacted.
+                    return None;
+                }
+                let label = matches!(kind, "T" | "t" | "W" | "w").then(|| {
+                    let mut label = format!("[kernel] {name}");
+                    if let Some(module) = fields.next() {
+                        label.push(' ');
+                        label.push_str(module);
+                    }
+                    label
+                });
+                Some((address, label))
+            })
+            .collect();
+        symbols.sort_by_key(|(address, label)| (*address, label.is_some()));
+        Self(symbols)
+    }
+
+    pub(crate) fn label(&self, pc: u64) -> &str {
+        let next = self.0.partition_point(|(address, _)| *address <= pc);
+        if let Some((start, Some(label))) = self.0[..next].last()
+            && (pc == *start || next < self.0.len())
+        {
+            return label;
+        }
+        "[kernel]"
+    }
+}
+
 pub(crate) fn parse_mappings(bytes: &[u8]) -> Result<Vec<Mapping>> {
     use std::os::unix::ffi::OsStrExt;
 

@@ -372,6 +372,7 @@ operations! {
     ("host", "listen", Lane::Runtime(Kernel::Net(HostOp::Listen)), "B", "wire-w1a-1063", false),
     ("host", "accept", Lane::Runtime(Kernel::Net(HostOp::Accept)), "B", "wire-w1a-1063", false),
     ("host", "recv_bounded", Lane::Runtime(Kernel::Net(HostOp::RecvBounded)), "B", "wire-w1a-1063", false),
+    ("host", "recv_ready", Lane::Runtime(Kernel::Net(HostOp::RecvReady)), "B", "net-ready-wait-1776", false),
     ("host", "send_pair", Lane::Runtime(Kernel::Net(HostOp::SendPair)), "B", "wire-w1a-1063", false),
     ("stdin", "read", Lane::Runtime(Kernel::Net(HostOp::StdinRead)), "B", "stdin-env-1501", false),
     ("stdin", "is_terminal", Lane::Runtime(Kernel::StreamTerminal(0)), "B", "small-host-impl-1576", false),
@@ -3715,6 +3716,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 | HostOp::DatagramSendTo
                 | HostOp::DatagramRecv
                 | HostOp::RecvBounded
+                | HostOp::RecvReady
                 | HostOp::SendPair
                 | HostOp::SendSecret
                 | HostOp::SecretNarrow
@@ -3751,7 +3753,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     // the operation's failure edge.
                     self.consume(vals[1], n);
                 }
-                HostOp::Accept | HostOp::UnixAccept => {
+                HostOp::Accept | HostOp::UnixAccept | HostOp::RecvReady => {
                     operands.extend(self.net_until(self.p.fns[f].params[1].ty, vals[1]?, n)?)
                 }
                 HostOp::UnixConnect

@@ -128,6 +128,7 @@ impl FunctionEmitter<'_> {
             | HostOp::Listen
             | HostOp::Accept
             | HostOp::RecvBounded
+            | HostOp::RecvReady
             | HostOp::SendPair
             | HostOp::NetNarrow
             | HostOp::ExecNarrow

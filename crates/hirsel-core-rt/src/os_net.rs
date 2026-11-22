@@ -545,6 +545,34 @@ unsafe fn attempt(request: &mut Request, n: &mut NetworkRequest, first: bool) ->
                 // Success requires flushing the final committed record too.
                 return stream.send(fd, &[], &[]);
             }
+            RECV_READY => {
+                if let Some(stream) = n
+                    .tls
+                    .as_mut()
+                    .and_then(|tls| tls.sessions.get_mut(&(key & !3)))
+                {
+                    return stream.ready(sockets.fd(key));
+                }
+                // An ended or reset half answers its next receive at once.
+                if sockets.ended(key) || sockets.reset(key) {
+                    return Some(Outcome::default());
+                }
+                // Bytes, end of stream and a pending error all make the fd
+                // readable; none is consumed, so the receive still reports it.
+                let mut poll = libc::pollfd {
+                    fd: sockets.fd(key),
+                    events: libc::POLLIN | libc::POLLRDHUP,
+                    revents: 0,
+                };
+                match retry(|| libc::poll(&mut poll, 1, 0) as isize) {
+                    Ok(0) => {
+                        sockets.mark_read_drained(key);
+                        return None;
+                    }
+                    Ok(_) => Ok(Outcome::default()),
+                    Err(e) => Err(e),
+                }
+            }
             RECV_BOUNDED | SEND_PAIR => {
                 let b = &mut request.buffer;
                 let receiving = request.operation == RECV_BOUNDED;
@@ -752,8 +780,9 @@ pub(crate) unsafe fn step(request: *mut Request, token: u64, first: bool) -> Ste
             return finish(request, n, signal(6));
         }
         let drained = first
-            && request.operation == RECV_BOUNDED
-            && request.buffer.len < request.buffer.capacity
+            && (request.operation == RECV_READY
+                || (request.operation == RECV_BOUNDED
+                    && request.buffer.len < request.buffer.capacity))
             && (*n.sockets).read_drained(request.handle)
             && n.tls
                 .as_ref()

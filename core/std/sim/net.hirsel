@@ -332,6 +332,33 @@ fn receive(n: Network, mut state: State, mut plan: sim.world.Plan, id: u64, room
     None
 }
 
+/// NET-1 readiness: answered once the half's next receive would not wait, as
+/// `receive` decides, and parked like a receive otherwise.
+fn ready(n: Network, state: State, id: u64, now: u64, mut s: Served[NetOp], take call: Call[NetOp]) -> Option[Call[NetOp]] {
+    let c = take call
+    let Some(local) = endpoint(state, id) else {
+        return reject(mut s, take c, Reset)
+    }
+    let queued: u64 = match map.get(state.pipes, local.peer) {
+        Some(source) => list.len(source.outgoing),
+        None => return reject(mut s, take c, Reset)
+    }
+    let remote = option.unwrap(endpoint(state, local.peer))
+    if local.reset || remote.reset {
+        return reject(mut s, take c, Reset)
+    }
+    match disrupted(n, local.addr.ip, remote.addr.ip, now) {
+        Some(Stall) => return Some(take c),
+        Some(Break) => return reject(mut s, take c, Reset),
+        None => ()
+    }
+    if queued == 0 && !remote.write_closed {
+        return Some(take c)
+    }
+    let _ = answer(mut s, take c, Done)
+    None
+}
+
 fn transmit(n: Network, mut state: State, mut plan: sim.world.Plan, clock: Clock, id: u64, prefix: u64, tail: u64, mut s: Served[NetOp], take c: Call[NetOp]) -> Option[Call[NetOp]] waits {
     let (local, queued): (Endpoint, u64) = match map.get(state.pipes, id) {
         Some(p) => (p.info, list.len(p.outgoing)),
@@ -490,6 +517,7 @@ fn attempt(n: Network, mut state: State, mut plan: sim.world.Plan, clock: Clock,
         },
         Accept(listener: id) => accept(mut state, id, mut port, take c),
         Recv(socket: id, room: room, ..) => receive(n, mut state, mut plan, id, room, host.mono_ns(clock), mut port, take c),
+        Ready(socket: id) => ready(n, state, id, host.mono_ns(clock), mut port, take c),
         Send(socket: id, prefix: prefix, tail: tail) => transmit(n, mut state, mut plan, clock, id, prefix, tail, mut port, take c),
         Resolve(name: len, room: room) => {
             resolve(n, len, room, mut port, take c);
@@ -511,6 +539,7 @@ fn attempt(n: Network, mut state: State, mut plan: sim.world.Plan, clock: Clock,
 fn waiter(op: NetOp) -> Option[(u64, u64)] {
     match op {
         Recv(socket: id, ..) => Some((id, 0)),
+        Ready(socket: id) => Some((id, 0)),
         Send(socket: id, ..) => Some((id, 1)),
         SendSecret(socket: id, ..) => Some((id, 1)),
         Accept(listener: id) => Some((id, 2)),

@@ -8,8 +8,8 @@ logical size 8. They are `send`, move-only and never `shareable`.
 
 ### NET-1: Socket operation declarations
 
-Core declares `host.connect`, `host.listen`, `host.accept`, `host.recv_bounded` and
-`host.send_pair`. Each operation is `waits`. Run `hirsel inspect --core --interface`
+Core declares `host.connect`, `host.listen`, `host.accept`, `host.recv_bounded`,
+`host.recv_ready` and `host.send_pair`. Each operation is `waits`. Run `hirsel inspect --core --interface`
 for their signatures.
 
 ```hirsel core
@@ -17,6 +17,7 @@ pub fn connect(n: Net, a: Addr, until: Until) -> Result[Socket, NetError] waits
 pub fn listen(n: Net, a: Addr, backlog: u16) -> Result[(Listener, Addr), NetError] waits
 pub fn accept(mut l: Listener, until: Until) -> Result[(Socket, Addr), NetError] waits
 pub fn recv_bounded(mut r: ReadHalf, mut buf: Bytes, max_receive: u64, until: Until) -> Result[u64, NetError] waits
+pub fn recv_ready(mut r: ReadHalf, until: Until) -> Result[(), NetError] waits
 pub fn send_pair(mut w: WriteHalf, prefix: Bytes, tail: Bytes, until: Until) -> Result[u64, NetError] waits
 ```
 
@@ -24,6 +25,18 @@ Receive appends at most `max_receive` bytes and cannot exceed the caller's
 spare capacity. Send attempts the concatenation of its two borrowed slices
 and returns the number of prefix bytes committed across both. Each operation
 keeps one absolute deadline through readiness retries.
+
+`recv_ready` waits, with no buffer and no capacity, until the next receive on the half
+would not wait: bytes are buffered, the peer has ended its write side, or the half has an
+error. End and error count as ready, so a wait on an ended half returns `Ok(())` at once.
+It consumes nothing. A host may report readiness early, so the next receive can still
+time out when its own deadline is reached; a caller treats that receive's `TimedOut` before
+its overall deadline as stale readiness and waits again. An error may surface either from
+the wait or from the next receive. The wait returns `TimedOut` at its deadline and is a
+cancellation point ([CONC-7](tasks.md#conc-7-cancellation-points)). On a TLS stream it is
+ready when decrypted plaintext is buffered, the peer has sent `close_notify`, or the
+stream has an error. On a pipe served by an Exec port, which has no readiness call, it is
+ready at once and the next receive waits.
 
 An address argument outside the grant returns `Denied` before issue.
 `listen` has a backlog, with no `Until` parameter.
@@ -390,12 +403,14 @@ calls and answers them with these replies, in addition to the existing ones
 ([core](core.md#provide)):
 
 ```hirsel core
-pub type NetOp = Connect(addr: Addr) | Resolve(name: u64, room: u64) | Listen(addr: Addr, backlog: u16) | Accept(listener: u64) | Recv(socket: u64, room: u64, max: u64) | Send(socket: u64, prefix: u64, tail: u64) | Handshake(socket: u64, name: u64, alpn: u64, system: bool) | SendSecret(socket: u64, before: u64, after: u64) | Released(id: u64, part: Part) | ConnectUnix(root: u64, path: u64) | ListenUnix(root: u64, path: u64, backlog: u16) | AcceptUnix(listener: u64) | OpenDatagram | BindDatagram(root: u64, path: u64) | ConnectDatagram(datagram: u64, root: u64, path: u64) | SendDatagram(datagram: u64, len: u64) | SendTo(datagram: u64, root: u64, path: u64, len: u64) | RecvDatagram(datagram: u64, room: u64)
+pub type NetOp = Connect(addr: Addr) | Resolve(name: u64, room: u64) | Listen(addr: Addr, backlog: u16) | Accept(listener: u64) | Recv(socket: u64, room: u64, max: u64) | Send(socket: u64, prefix: u64, tail: u64) | Handshake(socket: u64, name: u64, alpn: u64, system: bool) | SendSecret(socket: u64, before: u64, after: u64) | Released(id: u64, part: Part) | ConnectUnix(root: u64, path: u64) | ListenUnix(root: u64, path: u64, backlog: u16) | AcceptUnix(listener: u64) | OpenDatagram | BindDatagram(root: u64, path: u64) | ConnectDatagram(datagram: u64, root: u64, path: u64) | SendDatagram(datagram: u64, len: u64) | SendTo(datagram: u64, root: u64, path: u64, len: u64) | RecvDatagram(datagram: u64, room: u64) | Ready(socket: u64)
 pub type NetReply = Done | Failed(NetError) | Count(u64) | Socket(u64, Addr) | Listener(u64, Addr) | Secured(Handshake) | UnixSocket(u64) | UnixListening(u64) | Datagram(u64) | Packet(len: u64, truncated: bool)
 ```
 
 The server receives these variants in `NetOp` and answers with the corresponding `NetReply`
-variants. The `root` and `path` fields hold byte lengths. `provide.payload` reads root and
+variants. `Ready(socket)` is one `recv_ready`: it carries no room and no payload, `Done`
+answers it when that socket's next `Recv` would not wait, and `Failed` answers it with the
+error. Any other reply fails the server with `Fail`. The `root` and `path` fields hold byte lengths. `provide.payload` reads root and
 path from fields 0 and 1 of ConnectUnix, ListenUnix and BindDatagram, and from fields
 1 and 2 of ConnectDatagram and SendTo. Packet bytes are in field 1 of SendDatagram and
 field 3 of SendTo. The caller checks handle state before queueing a call.

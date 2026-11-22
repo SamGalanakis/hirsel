@@ -188,6 +188,41 @@ impl SecureStream for Stream {
         }
     }
 
+    fn ready(&mut self, fd: i32) -> Option<Outcome> {
+        let ready = Some(count(0));
+        if self.read_error.is_some() {
+            return ready;
+        }
+        let mut io = SocketIo(fd);
+        loop {
+            match self.connection.process_new_packets() {
+                Ok(state) if state.plaintext_bytes_to_read() > 0 || state.peer_has_closed() => {
+                    return ready;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    let _ = self.connection.write_tls(&mut io);
+                    self.read_error = Some(protocol_error(error));
+                    return ready;
+                }
+            }
+            match self.connection.read_tls(&mut io) {
+                // End of stream: the receive reports a close or truncation.
+                Ok(0) => return ready,
+                Ok(_) => {
+                    if let Err(error) = flush(&mut self.connection, &mut io) {
+                        self.write_error = Some(transport(error));
+                    }
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return None,
+                Err(error) => {
+                    self.read_error = Some(transport(error));
+                    return ready;
+                }
+            }
+        }
+    }
+
     fn send(&mut self, fd: i32, prefix: &[u8], tail: &[u8]) -> Option<Outcome> {
         if let Some(error) = self.write_error {
             return Some(error);

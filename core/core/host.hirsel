@@ -66,6 +66,8 @@ pub fn accept(mut l: Listener, until: Until) -> Result[(Socket, Addr), NetError]
 
 pub fn recv_bounded(mut r: ReadHalf, mut buf: Bytes, max_receive: u64, until: Until) -> Result[u64, NetError] waits
 
+pub fn recv_ready(mut r: ReadHalf, until: Until) -> Result[(), NetError] waits
+
 pub fn send_pair(mut w: WriteHalf, prefix: Bytes, tail: Bytes, until: Until) -> Result[u64, NetError] waits
 
 pub fn connect_unix(n: Net, root: String, path: String, until: Until) -> Result[Socket, NetError] waits

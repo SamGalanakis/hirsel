@@ -1073,6 +1073,8 @@ pub enum HostOp {
     Listen,
     Accept,
     RecvBounded = 27,
+    /// Wait until a read half's next receive has something to report.
+    RecvReady = hirsel_core_ids::host_op::RECV_READY as isize,
     SendPair = 26,
     NetNarrow = 24,
     NetSplit = 25,
@@ -1181,6 +1183,7 @@ impl HostOp {
         HostOp::SecretHmac,
         HostOp::SecretVerifyHmac,
         HostOp::RecvBounded,
+        HostOp::RecvReady,
         HostOp::SendPair,
         HostOp::NetNarrow,
         HostOp::NetNarrowTls,
@@ -1277,6 +1280,7 @@ impl HostOp {
             HostOp::Listen => "host_listen",
             HostOp::Accept => "host_accept",
             HostOp::RecvBounded => "host_recv_bounded",
+            HostOp::RecvReady => "host_recv_ready",
             HostOp::SendPair => "host_send_pair",
             HostOp::NetNarrow => "net_narrow",
             HostOp::ExecNarrow => "exec_narrow",
@@ -1341,6 +1345,7 @@ impl HostOp {
             Self::Listen => "hirsel_core_host_listen",
             Self::Accept => "hirsel_core_host_accept",
             Self::RecvBounded => "hirsel_core_host_recv_bounded",
+            Self::RecvReady => "hirsel_core_host_recv_ready",
             Self::SendPair => "hirsel_core_host_send_pair",
             Self::NetNarrow => "hirsel_core_net_narrow",
             Self::ExecNarrow => "hirsel_core_exec_narrow",
@@ -1402,6 +1407,7 @@ impl HostOp {
     pub const fn returnable_symbol(self) -> Option<&'static str> {
         match self {
             Self::RecvBounded => Some("hirsel_core_host_recv_bounded_rec"),
+            Self::RecvReady => Some("hirsel_core_host_recv_ready_rec"),
             Self::SendPair => Some("hirsel_core_host_send_pair_rec"),
             _ => None,
         }
@@ -1691,7 +1697,9 @@ impl RtOp {
                         vec![V(u64_), V(p), V(p), V(Ty::Scalar(Scalar::U16))],
                         outcome,
                     ),
-                    HostOp::UnixAccept => (vec![V(u64_), V(u8_), V(u64_), V(u64_)], outcome),
+                    HostOp::UnixAccept | HostOp::RecvReady => {
+                        (vec![V(u64_), V(u8_), V(u64_), V(u64_)], outcome)
+                    }
                     HostOp::DatagramOpen => (vec![V(u64_)], outcome),
                     HostOp::DatagramBind => (vec![V(u64_), V(p), V(p)], outcome),
                     HostOp::DatagramConnect => (vec![V(u64_), V(p), V(p)], outcome),

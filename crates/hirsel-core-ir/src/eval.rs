@@ -247,6 +247,7 @@ const NET_DATAGRAM_CONNECT: u64 = 14;
 const NET_DATAGRAM_SEND: u64 = 15;
 const NET_DATAGRAM_SEND_TO: u64 = 16;
 const NET_DATAGRAM_RECV: u64 = 17;
+const NET_READY: u64 = 18;
 const PORT_SOCKET: u8 = 3;
 const PORT_UNIX_SOCKET: u8 = 5;
 const PORT_UNIX_LISTENER: u8 = 6;
@@ -2843,7 +2844,9 @@ impl Machine<'_> {
                 2 => tag == 10,
                 1 | 4 | 5 => tag == 3,
                 6 => tag == 11,
-                7 | NET_DATAGRAM_CONNECT | NET_DATAGRAM_SEND | NET_DATAGRAM_SEND_TO => tag == 0,
+                7 | NET_DATAGRAM_CONNECT | NET_DATAGRAM_SEND | NET_DATAGRAM_SEND_TO | NET_READY => {
+                    tag == 0
+                }
                 NET_UNIX_CONNECT | NET_UNIX_ACCEPT => tag == 12,
                 NET_UNIX_LISTEN => tag == 13,
                 NET_DATAGRAM_OPEN | NET_DATAGRAM_BIND => tag == 14,
@@ -3836,6 +3839,7 @@ impl Machine<'_> {
                 };
                 (vec![tag, id, room, a[2]], vec![], Some(a[1]))
             }
+            HostOp::RecvReady => (vec![NET_READY, id], vec![], None),
             HostOp::SendPair => {
                 let prefix = self.carrier(a[1]).0;
                 let tail = self.carrier(a[2]).0;
@@ -3857,7 +3861,7 @@ impl Machine<'_> {
         // Each operation's `until` operand (Listen has none).
         let deadline = match op {
             HostOp::Connect => self.until(a, 5),
-            HostOp::Accept => self.until(a, 1),
+            HostOp::Accept | HostOp::RecvReady => self.until(a, 1),
             HostOp::Resolve | HostOp::RecvBounded | HostOp::SendPair => self.until(a, 3),
             _ => None,
         };
@@ -4102,7 +4106,7 @@ impl Machine<'_> {
                     return self.net_call(t, op, c, 0, true, a);
                 }
             }
-            HostOp::Accept | HostOp::RecvBounded | HostOp::SendPair => {
+            HostOp::Accept | HostOp::RecvBounded | HostOp::RecvReady | HostOp::SendPair => {
                 let stream = op != HostOp::Accept;
                 let kind = if stream { PORT_SOCKET } else { 4 };
                 let original = self.port_socket(a[0], kind);
@@ -4121,12 +4125,18 @@ impl Machine<'_> {
                             }
                         )
                     {
-                        let kind = if op == HostOp::RecvBounded {
-                            PORT_PIPE_READ
-                        } else {
+                        let kind = if op == HostOp::SendPair {
                             PORT_PIPE_WRITE
+                        } else {
+                            PORT_PIPE_READ
                         };
                         (_, _, live) = self.port_socket(a[0], kind).unwrap();
+                        if op == HostOp::RecvReady {
+                            // ExecOp has no readiness call: a served pipe is
+                            // ready at once and its receive waits (NET-1).
+                            self.check_cancel(t)?;
+                            return Ok(vec![0, 0, 0, 0]);
+                        }
                     }
                     return self.net_call(t, op, c, id, live, a);
                 }
@@ -4764,6 +4774,7 @@ impl Machine<'_> {
             | HostOp::Listen
             | HostOp::Accept
             | HostOp::RecvBounded
+            | HostOp::RecvReady
             | HostOp::SendPair => {
                 return self.network_host(t, op, a);
             }

@@ -121,6 +121,7 @@ const BUILTIN_SEMANTICS: &[(&str, &str, u32)] = &[
     ("host", "read_only", 1),
     ("host", "recv_bounded", 1),
     ("host", "recv_datagram", 1),
+    ("host", "recv_ready", 1),
     ("host", "remove", 1),
     ("host", "remove_tree", 1),
     ("host", "rename", 1),

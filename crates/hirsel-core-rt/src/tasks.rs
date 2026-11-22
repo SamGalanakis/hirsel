@@ -2080,6 +2080,7 @@ impl Scheduler {
                                     host::CONNECT
                                         | host::ACCEPT
                                         | host::RECV_BOUNDED
+                                        | host::RECV_READY
                                         | host::SEND_PAIR
                                         | host::TLS_CONNECT
                                         | host::SEND_SECRET

@@ -212,7 +212,7 @@ fn name_hint(index: &NameIndex, refusal: &Refusal) -> Option<DiagnosticHint> {
                 && module.modules == ["net"]
                 && matches!(
                     lookup.written.as_str(),
-                    "listen" | "connect" | "accept" | "recv_bounded" | "send_pair"
+                    "listen" | "connect" | "accept" | "recv_bounded" | "recv_ready" | "send_pair"
                 )
                 && let Some(host) = index.module_at(&module.package, &["host".into()])
                 && let Some(head) = index.symbols.find("host")

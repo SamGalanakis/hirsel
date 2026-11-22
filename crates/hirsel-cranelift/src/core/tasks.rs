@@ -292,6 +292,7 @@ impl Function<'_, '_, '_> {
                     | HostOp::Listen
                     | HostOp::Accept
                     | HostOp::RecvBounded
+                    | HostOp::RecvReady
                     | HostOp::SendPair
                     | HostOp::NetNarrow
                     | HostOp::ExecNarrow

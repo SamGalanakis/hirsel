@@ -929,6 +929,7 @@ fn socket_op(op: u8) -> bool {
             | LISTEN
             | ACCEPT
             | RECV_BOUNDED
+            | RECV_READY
             | SEND_PAIR
             | TLS_CONNECT
             | SEND_SECRET
@@ -1716,7 +1717,7 @@ fn ordinal_of(h: u64) -> usize {
 unsafe fn source_handle(request: &Request, inner: Inner) -> u64 {
     let direction = if matches!(
         request.operation,
-        RECV_BOUNDED | SEND_PAIR | SEND_SECRET | SCRAM
+        RECV_BOUNDED | RECV_READY | SEND_PAIR | SEND_SECRET | SCRAM
     ) {
         // SAFETY: owned network operations pin this operand through delivery.
         unsafe { (*request.path.cast::<crate::net::NetworkRequest>()).direction }
@@ -2476,6 +2477,11 @@ unsafe fn replay_out(
         }
     } else if op == WRITE_AT {
         if out.written > r.buffer.len as u64 || (ok && out.written != r.buffer.len as u64) {
+            return Err(Fault::Corrupt);
+        }
+    } else if op == RECV_READY {
+        // Readiness carries no count: only its status and error.
+        if out.value != 0 || out.written != 0 {
             return Err(Fault::Corrupt);
         }
     } else if op == SEND_SECRET {

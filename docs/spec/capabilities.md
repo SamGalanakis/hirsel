@@ -220,6 +220,14 @@ result ([CONC-7](tasks.md#conc-7-cancellation-points)). Given the same values at
 replay point in the same order, the run behaves identically
 ([SEM-8](semantics.md#sem-8-determinism)).
 
+A read readiness wait ([NET-1](net.md#net-1-socket-operation-declarations)) is a provider
+operation of its own, on the half it names. At issue it passes the half and its deadline;
+at delivery it passes only its outcome (ready, `TimedOut`, `Aborted` or an error), with no
+bytes, length or capacity. The receive that follows is a separate operation with its own
+issue and delivery. Served, issue is the port's `Ready(socket)` call and delivery is its
+reply. The wait adds no ordering beyond what these two points already give any receive on
+the same half.
+
 The replay point is a position in every run, not a mechanism: a build without recording
 machinery has the same points and does nothing at them beyond the operation itself. They
 are where a recording build observes each input once (CAP-9). Passing the replay point makes

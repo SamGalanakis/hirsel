@@ -63,6 +63,7 @@ fn runtime_probes() -> Module {
         RtOp::SpawnUnit { x: ITEM, r: ITEM },
         RtOp::FrameRecord,
         RtOp::Returnable(HostOp::RecvBounded),
+        RtOp::Returnable(HostOp::RecvReady),
         RtOp::Returnable(HostOp::SendPair),
         RtOp::ZeroBytes,
         RtOp::MapPlaceWord,

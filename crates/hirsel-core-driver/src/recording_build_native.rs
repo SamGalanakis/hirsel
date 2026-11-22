@@ -2214,6 +2214,130 @@ fn scram_partial_send(tasks: Tasks) -> Result[(), ()] waits {
     assert_eq!(tests[0]["passed"], true);
 }
 
+/// NET-1/CAP-8: a host recv_ready records one RECV_READY issue and an OK delivery
+/// with no value, bytes or payload; the bytes arrive only with the following
+/// RECV_BOUNDED, and the tape replays on the other engine with no Net grant.
+#[test]
+fn host_ready_wait_replays_exactly() {
+    use hirsel_core_net::GrantRule;
+    use std::{
+        io::{Read, Write},
+        net::{Ipv4Addr, TcpListener},
+    };
+
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let source = r#"pub fn main(n: Net, out: Stdout) -> Result[(), Exit] waits {
+    let (rh, wh) = net.split(result.unwrap(host.connect(n, Addr(ip: V4(2130706433), port: 12345), Never)))
+    let mut r = take rh
+    result.unwrap(host.recv_ready(mut r, Never))
+    let mut b: Bytes = list.with_capacity(4)
+    if result.unwrap(host.recv_bounded(mut r, mut b, 4, Never)) != 2 {
+        return Error(Exit(status: 1))
+    }
+    result.unwrap(stdout.write_bytes(out, b))
+    let _ = take r
+    let _ = take wh
+    Ok(())
+}
+"#
+    .replace("12345", &port.to_string());
+    let dir = tempfile::tempdir().unwrap();
+    let tape = dir.path().join("ready.tape");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core/core");
+    let mut request = source_request(&source, dir.path());
+    request.inputs.packages[1] = PackageManifest::directory(&root, package("core"), true).unwrap();
+    let product = Driver::default()
+        .check(request, &mut Meter::new(false))
+        .unwrap();
+    assert!(
+        product.accepted(),
+        "{:?} {:?}",
+        product.diagnostics,
+        product.incomplete
+    );
+    let mut options = native_options(Backend::Cranelift, dir.path());
+    options.grant_mask = (1 << grant_kind("Net").unwrap()) | (1 << grant_kind("Stdout").unwrap());
+    options.runtime = env_record_runtime();
+    options.recording = true;
+    options.net_rules = vec![GrantRule::parse(&format!("Connect 127.0.0.1/32 {port}-{port}")).unwrap()];
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let record = product.build(&entry, &options).unwrap();
+
+    let peer = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        socket.write_all(b"hi").unwrap();
+        let mut rest = Vec::new();
+        socket.read_to_end(&mut rest).unwrap();
+    });
+    let output = Command::new(record.executable)
+        .env("HIRSEL_RECORD", &tape)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"hi");
+    peer.join().unwrap();
+
+    let sealed = std::fs::read(&tape).unwrap();
+    let mut input = sealed.as_slice();
+    let (mut blocks, _) = hirsel_tape_format::Blocks::open(|buffer| input.read(buffer)).unwrap();
+    let mut decoder = hirsel_tape_format::Decoder::default();
+    let mut seen = Vec::new();
+    let mut issued = std::collections::BTreeMap::new();
+    while let Some((flags, payload)) = blocks.next(|buffer| input.read(buffer)).unwrap() {
+        use hirsel_tape_format::{Frame, op};
+        for frame in decoder
+            .block(payload, flags & hirsel_tape_format::END != 0)
+            .unwrap()
+        {
+            let (operation, out) = match frame {
+                Frame::Issue { task, op, .. } => {
+                    issued.insert(task, op);
+                    continue;
+                }
+                Frame::Op { op, out, .. } => (op, out),
+                Frame::Done { task, out, .. } => (issued.remove(&task).unwrap(), out),
+                _ => continue,
+            };
+            if operation == op::RECV_READY {
+                assert_eq!(out.status, hirsel_tape_format::OK);
+                assert_eq!((out.value, out.written), (0, 0));
+                assert!(out.payload.is_empty());
+            }
+            if matches!(operation, op::RECV_READY | op::RECV_BOUNDED) {
+                seen.push((operation, out.payload));
+            }
+        }
+    }
+    assert_eq!(
+        seen,
+        [
+            (hirsel_tape_format::op::RECV_READY, vec![]),
+            (hirsel_tape_format::op::RECV_BOUNDED, b"hi".to_vec())
+        ]
+    );
+
+    options.grant_mask = 0;
+    options.net_rules.clear();
+    options.backend = Backend::Llvm;
+    options.replay = Some(crate::ReplayPlan {
+        path: tape.to_str().unwrap().into(),
+        diagnose: false,
+    });
+    let replay = product.build(&entry, &options).unwrap();
+    let output = Command::new(replay.executable).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 fn inspect_cli() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")

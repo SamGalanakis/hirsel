@@ -2011,3 +2011,56 @@ fn settled_handshake(tasks: Tasks, cancel: bool) -> bool waits {
 fn net_tls_withdrawal(tasks: Tasks) -> bool waits {
     settled_handshake(tasks, false) && settled_handshake(tasks, true)
 }
+
+// NET-1 recv_ready on a served stream: the wait is one Ready(socket) call
+// with no room and no payload, and Done reports readiness without consuming
+// bytes, so the following receive still takes the staged "hi" whole.
+fn ready_client(take n: Net) -> bool waits {
+    let (rh, wh) = net.split(result.unwrap(host.connect(n, Addr(ip: V4(2130706433), port: 80), Never)))
+    let mut r = take rh
+    let ready = match host.recv_ready(mut r, Never) {
+        Ok(_) => true,
+        Error(_) => false
+    }
+    let mut b: Bytes = list.with_capacity(4)
+    let got = match host.recv_bounded(mut r, mut b, 4, Never) {
+        Ok(k) => k == 2 && b == string.as_bytes("hi"),
+        Error(_) => false
+    }
+    let _ = take r
+    let _ = take wh
+    ready && got
+}
+
+// expect: run net_ready(tasks) = true
+fn net_ready(tasks: Tasks) -> bool waits {
+    let (n, s) = provide.net(bytes 64)
+    let mut served = take s
+    let child = task.spawn(tasks, bytes 65536, n, ready_client)
+    let connected = net_connect(mut served, 8, 80)
+    let ready = match provide.next(mut served) {
+        Some(take call) => {
+            let op = match provide.net_op(call) {
+                Ready(socket) => socket == 8,
+                _ => false
+            }
+            op && net_answer(mut served, take call, Done)
+        },
+        None => false
+    }
+    let received = match provide.next(mut served) {
+        Some(take call) => {
+            let mut c = take call
+            let op = match provide.net_op(c) {
+                Recv(socket, room, max) => socket == 8 && room == 4 && max == 4,
+                _ => false
+            }
+            let took = provide.fill(mut served, mut c, string.as_bytes("hi"))
+            op && took == 2 && net_answer(mut served, take c, Count(2))
+        },
+        None => false
+    }
+    let halves = net_released(mut served, 8, 1) && net_released(mut served, 8, 2)
+    let client = result.unwrap(task.join(take child))
+    connected && ready && received && halves && client
+}

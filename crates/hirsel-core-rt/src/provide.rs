@@ -152,6 +152,8 @@ const NET_SEND: u64 = 5;
 const NET_HANDSHAKE: u64 = 6;
 const NET_SEND_SECRET: u64 = 7;
 const NET_RELEASED: u64 = 8;
+/// After the Unix variants (9 to 17).
+const NET_READY: u64 = 18;
 /// DirReply and StreamReply variants as `Reply[Op]` tags.
 const R_DONE: u64 = 0;
 const R_FAILED: u64 = 1;
@@ -410,6 +412,10 @@ impl Port {
                 let id = self.socket(request.handle, Kind::Socket)?;
                 w[..4].copy_from_slice(&[NET_RECV, id, spare, n.max_receive]);
             }
+            RECV_READY => {
+                let id = self.socket(request.handle, Kind::Socket)?;
+                w[..2].copy_from_slice(&[NET_READY, id]);
+            }
             SEND_PAIR => {
                 let id = self.socket(request.handle, Kind::Socket)?;
                 // SAFETY: SEND_PAIR pins its tail carrier through delivery.
@@ -653,7 +659,7 @@ fn answers(vocab: Vocab, op: u64, reply: u64) -> bool {
                     NET_LISTEN => reply == R_LISTENER,
                     NET_RESOLVE | NET_RECV | NET_SEND => reply == R_COUNT,
                     NET_HANDSHAKE => reply == R_SECURED,
-                    NET_SEND_SECRET => reply == R_DONE,
+                    NET_SEND_SECRET | NET_READY => reply == R_DONE,
                     _ => false,
                 }
         }

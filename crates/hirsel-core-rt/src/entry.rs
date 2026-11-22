@@ -902,12 +902,43 @@ pub unsafe extern "C" fn hirsel_core_os_run_with_sources(
 ) -> u8 {
     // SAFETY: all configuration and source storage is pinned by the caller.
     unsafe {
-        run_os_with_sources(
+        run_os_with_sources::<false>(
             input,
             parameter_names,
             sources,
             entry,
             native_metadata,
+            |config, entry| crate::process::launch(config, entry),
+        )
+    }
+}
+
+/// The sourced OS entry for a program that can spawn a helper unit.
+///
+/// # Safety
+/// As hirsel_core_os_run_with_sources. If omit_digest is true, the executable
+/// must meet hirsel_core_os_run_without_digest's contract.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_os_run_with_units(
+    input: *const OsConfig,
+    parameter_names: *const View,
+    sources: *const crate::abi_sites::SourceTable,
+    entry: crate::process::Entry,
+    omit_digest: bool,
+) -> u8 {
+    let metadata = if omit_digest {
+        Metadata::source
+    } else {
+        native_metadata
+    };
+    // SAFETY: the caller pins configuration and sources for the OS entry.
+    unsafe {
+        run_os_with_sources::<true>(
+            input,
+            parameter_names,
+            sources,
+            entry,
+            metadata,
             |config, entry| crate::process::launch(config, entry),
         )
     }
@@ -928,7 +959,33 @@ pub unsafe extern "C" fn hirsel_core_os_run_foreign_with_sources(
 ) -> u8 {
     // SAFETY: the caller pins configuration and sources for the OS entry.
     unsafe {
-        run_os_with_sources(
+        run_os_with_sources::<false>(
+            input,
+            parameter_names,
+            sources,
+            entry,
+            native_metadata,
+            |config, entry| crate::process::hirsel_core_run_with_foreign(config, entry, waits),
+        )
+    }
+}
+
+/// The sourced OS entry for a program that reaches foreign code and can spawn
+/// a helper unit.
+///
+/// # Safety
+/// As hirsel_core_os_run_foreign_with_sources.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_os_run_foreign_with_units(
+    input: *const OsConfig,
+    parameter_names: *const View,
+    sources: *const crate::abi_sites::SourceTable,
+    entry: crate::process::Entry,
+    waits: bool,
+) -> u8 {
+    // SAFETY: the caller pins configuration and sources for the OS entry.
+    unsafe {
+        run_os_with_sources::<true>(
             input,
             parameter_names,
             sources,
@@ -960,7 +1017,7 @@ pub unsafe extern "C" fn hirsel_core_os_run_without_digest(
 ) -> u8 {
     // SAFETY: all configuration and source storage is pinned by the caller.
     unsafe {
-        run_os_with_sources(
+        run_os_with_sources::<false>(
             input,
             parameter_names,
             sources,
@@ -973,7 +1030,7 @@ pub unsafe extern "C" fn hirsel_core_os_run_without_digest(
 
 // The entry selects the runner at compile time. Each launcher links through
 // to the process lifecycle it needs.
-unsafe fn run_os_with_sources(
+unsafe fn run_os_with_sources<const UNITS: bool>(
     input: *const OsConfig,
     parameter_names: *const View,
     sources: *const crate::abi_sites::SourceTable,
@@ -983,7 +1040,7 @@ unsafe fn run_os_with_sources(
 ) -> u8 {
     #[cfg(feature = "prof")]
     let _profile = crate::prof::Run::start();
-    if let Some(w) = crate::units::workers() {
+    if UNITS && let Some(w) = crate::units::workers() {
         struct Shared(*const View, *const crate::abi_sites::SourceTable);
         // SAFETY: the caller pins the tables for the whole launch.
         unsafe impl Sync for Shared {}

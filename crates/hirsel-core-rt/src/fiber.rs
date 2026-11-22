@@ -304,6 +304,8 @@ impl Drop for Stack {
 pub(crate) struct Stock {
     budget: &'static Budget,
     kept: Vec<(Stack, Retained<'static>)>,
+    // The prefix whose stack pages have already been returned during idle.
+    cooled: usize,
     surplus: Vec<Stack>,
     // Repeated calls from one live unit reuse its last stack without locking
     // the pool. The unit gives it back with the rest of its task storage.
@@ -347,6 +349,7 @@ impl Stock {
         Self {
             budget,
             kept: Vec::new(),
+            cooled: 0,
             surplus: Vec::new(),
             recent: None,
         }
@@ -379,7 +382,10 @@ impl Stock {
         }
         stack.trim();
         match self.budget.retain(stack.retained()) {
-            Some(held) => self.kept.push((stack, held)),
+            Some(held) => {
+                self.cooled = self.cooled.min(self.kept.len());
+                self.kept.push((stack, held));
+            }
             None => {
                 SURPLUS.fetch_add(1, Relaxed);
                 self.surplus.push(stack);
@@ -393,12 +399,42 @@ impl Stock {
         self.surplus.clear();
     }
 
+    pub(crate) fn has_warm_kept(&self) -> bool {
+        cfg!(target_os = "linux") && self.kept.len() > self.cooled
+    }
+
+    /// Keep each reservation and its low-water word. The ended task owns no
+    /// frames, so the rest of its writable pages can return to the host.
+    pub(crate) fn cool_kept(&mut self) {
+        #[cfg(target_os = "linux")]
+        {
+            for (stack, _) in self.kept.iter().skip(self.cooled) {
+                let top = stack.top();
+                let page = stack.len - RESERVE;
+                if page == COMMIT {
+                    break;
+                }
+                // SAFETY: the stock owns this idle stack. Recycling trimmed
+                // it to COMMIT, and the last native page holds its low word.
+                unsafe {
+                    libc::madvise(
+                        std::ptr::without_provenance_mut(top - COMMIT),
+                        COMMIT - page,
+                        libc::MADV_DONTNEED,
+                    );
+                }
+            }
+            self.cooled = self.kept.len();
+        }
+    }
+
     /// Move up to `count` idle stacks, surplus first, to `to`.
     fn hand(&mut self, to: &mut Self, count: usize) {
         let surplus = count.min(self.surplus.len());
         to.surplus
             .extend(self.surplus.drain(self.surplus.len() - surplus..));
         let kept = (count - surplus).min(self.kept.len());
+        to.cooled = to.cooled.min(to.kept.len());
         to.kept.extend(self.kept.drain(self.kept.len() - kept..));
     }
 

@@ -255,7 +255,7 @@ impl<'a> Plan<'a> {
         source_identity: hirsel_core_ids::ContentHash,
         revision: &[u8; 32],
         revisions: &[(String, [u8; 32])],
-        live_sites: Option<&BTreeSet<u64>>,
+        (live_sites, spawns_units): (Option<&BTreeSet<u64>>, bool),
     ) -> Result<Vec<u8>> {
         let mut object = object(target)?;
         let mut unwind = Unwind::new(object.isa()).map_err(error)?;
@@ -275,7 +275,15 @@ impl<'a> Plan<'a> {
             .declare_function("__hirsel_entry", Linkage::Local, &signature)
             .map_err(error)?;
         adapter::emit(&mut object, &mut unwind, self, entry, signature)?;
-        start::emit(&mut object, &mut unwind, self, &data, entry, waits)?;
+        start::emit(
+            &mut object,
+            &mut unwind,
+            self,
+            &data,
+            entry,
+            waits,
+            spawns_units,
+        )?;
         let mut product = object.finish();
         unwind.write(&mut product).map_err(error)?;
         crate::native_debug::add_source_note(&mut product.object, source_identity);

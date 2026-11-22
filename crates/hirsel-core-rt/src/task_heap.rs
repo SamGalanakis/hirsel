@@ -48,8 +48,9 @@ static RETAINING_HEAPS: AtomicUsize = AtomicUsize::new(0);
 /// The poll timeout for a worker about to wait `timeout` ms (-1: no limit),
 /// and whether it should release retained pages and surplus stacks if that
 /// wait finds nothing.
-pub(crate) fn idle_wait(timeout: i32) -> (i32, bool) {
-    let retaining = slabs::retaining()
+pub(crate) fn idle_wait(timeout: i32, warm_stacks: bool) -> (i32, bool) {
+    let retaining = warm_stacks
+        || slabs::retaining()
         || returns::orphaned_pending()
         || RETAINING_HEAPS.load(Ordering::Relaxed) != 0
         || crate::fiber::surplus();
@@ -2541,7 +2542,7 @@ mod tests {
         assert_eq!(context.available(), 0);
         free(first);
         assert_eq!(count_resident(&pages), SLABS);
-        assert_eq!(idle_wait(-1), (RELEASE_DELAY_MS, true));
+        assert_eq!(idle_wait(-1, false), (RELEASE_DELAY_MS, true));
         let second = burst();
         assert_eq!(probes(&second), pages);
         assert_eq!(count_resident(&pages), SLABS);

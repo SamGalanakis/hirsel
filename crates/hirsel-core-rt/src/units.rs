@@ -1,5 +1,5 @@
-//! The unit pool (CONC-15). `HIRSEL_UNTIED=W` runs a program's root
-//! unit, and every helper unit `task.spawn_unit` makes, on W worker threads;
+//! The unit pool (CONC-15). For a program that can reach `task.spawn_unit`,
+//! `HIRSEL_UNTIED=W` runs its root and helper units on W worker threads;
 //! without it a helper runs on its own OS thread (units_lang.rs). A unit is one
 //! order of events: its entry chain, scheduler, tasks, reactor and budget live
 //! on its own stack and heap records. Units meet only through connections
@@ -169,7 +169,7 @@ pub(crate) fn untied() -> bool {
     UNTIED_ON.load(Ordering::Relaxed)
 }
 /// `HIRSEL_UNTIED=W`: run the root unit, and every helper unit it makes, on W
-/// worker threads.
+/// worker threads. Only executables that can spawn a helper unit read it.
 pub(crate) fn workers() -> Option<usize> {
     std::env::var("HIRSEL_UNTIED")
         .ok()

@@ -1810,7 +1810,8 @@ fn link_objects(
             ))
         }));
         let mut runtime_sources = sources.clone();
-        crate::native_entry::retain_referenced(&mut runtime_sources, &inputs[1..])?;
+        let spawns_units =
+            crate::native_entry::retain_referenced(&mut runtime_sources, &inputs[1..])?;
         let source_identity = assembly.map_or(sources_digest, |(root, _)| root);
         let write_entry = |live_sites: Option<&BTreeSet<u64>>| -> Result<(), NativeStop> {
             let bytes = entry_plan
@@ -1820,7 +1821,7 @@ fn link_objects(
                     source_identity,
                     &revision.0,
                     &revisions,
-                    live_sites,
+                    (live_sites, spawns_units),
                 )
                 .map_err(|error| NativeStop::Link(format!("entry object: {error}")))?;
             std::fs::write(&entry, bytes)?;
@@ -2404,7 +2405,7 @@ fn f5 = n5 g5 extern
                     ContentHash::default(),
                     &[0; 32],
                     &[],
-                    None,
+                    (None, false),
                 )
                 .unwrap();
             std::fs::write(path("unit.o"), object.bytes).unwrap();

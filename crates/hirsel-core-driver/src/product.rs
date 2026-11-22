@@ -111,12 +111,14 @@ impl PackageProduct {
         }
         for (name, texts, dependencies) in selected {
             let sources = directory.join("sources").join(name);
-            std::fs::create_dir_all(&sources)?;
             for (module, text) in texts {
                 use std::io::Write;
-                let mut file = tempfile::NamedTempFile::new_in(&sources)?;
+                let destination = sources.join(format!("{module}.hirsel"));
+                let parent = destination.parent().expect("bundled source has a parent");
+                std::fs::create_dir_all(parent)?;
+                let mut file = tempfile::NamedTempFile::new_in(parent)?;
                 file.write_all(text.as_bytes())?;
-                file.persist(sources.join(format!("{module}.hirsel")))?;
+                file.persist(destination)?;
             }
             packages.push(Self::manifest(&sources, name, texts, dependencies));
         }

@@ -62,7 +62,7 @@ fn fixed_box(
 
 /// Whether `field` is cleaned directly given the direct types `set`: flat, an
 /// inline value or array of direct values, or a box of a direct type.
-fn direct_field(
+pub(super) fn direct_field(
     module: &Module,
     recipes: &[hirsel_core_layout::Recipe],
     field: &FieldTy,
@@ -78,8 +78,8 @@ fn direct_field(
     }
 }
 
-/// The types whose dead boxes ordinary glue cleans and frees itself
-/// (`core_direct_T`) instead of handing them to the descriptor drain: every
+/// The types whose dead boxes and list elements ordinary glue cleans and frees
+/// itself (`core_direct_T`) instead of handing them to the descriptor drain: every
 /// type reachable from such a box has no finalizer, is no resource, and holds
 /// only flat fields, inline or array values of such types, and boxes of them.
 /// Nothing below one can fail or take a step (MEM-30), so cleaning it in the
@@ -110,10 +110,11 @@ fn direct_types(
     ) {
         match field {
             FieldTy::Array(e, _) => boxes(module, recipes, e, pending),
+            FieldTy::Seq(e) => reach(module, recipes, e, pending),
             _ => pending.extend(fixed_box(module, recipes, field)),
         }
     }
-    // The roots: the boxes ordinary glue releases.
+    // The roots: the boxes and the elements of the lists ordinary glue releases.
     let mut pending = Vec::new();
     for &t in normal {
         if let Some(drop) = &recipes[t].drop {
@@ -565,7 +566,7 @@ impl FunctionEmitter<'_> {
                 self.block(done);
                 None
             }
-            FieldTy::Seq(_) | FieldTy::Map(_, _) => self.release_collection(field, p),
+            FieldTy::Seq(_) | FieldTy::Map(_, _) => self.release_collection(field, p)?,
             FieldTy::FrozenBytes => {
                 self.runtime_void(
                     "hirsel_core_drop_frozen_bytes",
@@ -686,7 +687,7 @@ impl FunctionEmitter<'_> {
         Ok(())
     }
     /// Clean `field` of a direct type's payload at box depth `depth`.
-    fn direct_field(
+    pub(super) fn direct_field(
         &mut self,
         field: &FieldTy,
         p: &Value,
@@ -746,7 +747,7 @@ impl FunctionEmitter<'_> {
     /// below an ordinary release: below DIRECT_DEPTH in place, child before
     /// parent as the drain does, with the drain's free (`free_dead_in`);
     /// deeper through the drain itself (LANG-19).
-    fn direct_box(&mut self, block: &Value, t: TypeRef, depth: &Value) {
+    pub(super) fn direct_box(&mut self, block: &Value, t: TypeRef, depth: &Value) {
         let i64 = Type::I64;
         let site = self.site_word();
         let n = self.counter();

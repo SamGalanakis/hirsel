@@ -315,14 +315,27 @@ operations! {
     ("map", "hash", Lane::Value, "A", "core-check-callables-913", true),
     ("map", "slots", Lane::Value, "A", "core-check-callables-913", true),
     ("map", "capacity", Lane::Value, "A", "core-check-callables-913", true),
-    ("map", "slot_hash", Lane::Value, "A", "core-check-callables-913", true),
-    ("map", "slot_live", Lane::Value, "A", "core-check-callables-913", true),
     ("map", "slot_key", Lane::Value, "A", "core-check-callables-913", true),
     ("map", "slot_value", Lane::Value, "A", "core-check-callables-913", true),
     ("map", "with_value", Lane::Value, "A", "core-check-callables-913", true),
-    ("map", "index_len", Lane::Value, "A", "core-check-callables-913", true),
-    ("map", "index_get", Lane::Value, "A", "core-check-callables-913", true),
-    ("map", "index_set", Lane::Value, "A", "core-check-callables-913", true),
+    ("map", "place", Lane::Value, "A", "map-nf3-impl-1702", true),
+    ("map", "strong", Lane::Value, "A", "map-nf3-impl-1702", true),
+    ("map", "fast_class", Lane::Value, "A", "map-nf3-impl-1702", true),
+    ("map", "mode", Lane::Value, "A", "map-nf3-impl-1702", true),
+    ("map", "group_mask", Lane::Value, "A", "map-nf3-impl-1702", true),
+    ("map", "strong_empty", Lane::Value, "A", "map-nf3-impl-1702", true),
+    ("map", "set_strong_empty", Lane::Value, "A", "map-nf3-impl-1702", true),
+    ("map", "group_match", Lane::Value, "A", "map-nf3-impl-1702", true),
+    ("map", "group_empty", Lane::Value, "A", "map-nf3-impl-1702", true),
+    ("map", "group_vacant", Lane::Value, "A", "map-nf3-impl-1702", true),
+    ("map", "bucket_entry", Lane::Value, "A", "map-nf3-impl-1702", true),
+    ("map", "install", Lane::Value, "A", "map-nf3-impl-1702", true),
+    ("map", "advance", Lane::Value, "A", "map-nf3-impl-1702", true),
+    ("map", "erase", Lane::Value, "A", "map-nf3-impl-1702", true),
+    ("map", "clear_index", Lane::Value, "A", "map-nf3-impl-1702", true),
+    ("map", "set_strong", Lane::Value, "A", "map-nf3-impl-1702", true),
+    ("map", "slot_meta", Lane::Value, "A", "map-nf3-impl-1702", true),
+    ("map", "copy_entry", Lane::Value, "A", "map-nf3-impl-1702", true),
     ("map", "new", Lane::Value, "A", "core-check-callables-913", false),
     ("map", "len", Lane::Value, "A", "core-check-callables-913", false),
     ("float", "sqrt", Lane::Numeric, "A", "core-check-895", false),
@@ -456,17 +469,27 @@ pub(crate) fn binding(f: &FnDecl) -> Option<u16> {
     if !f.path.package_is("core", "1") || f.body.is_some() {
         return None;
     }
-    OPERATIONS
-        .iter()
-        .position(|entry| {
-            f.path.0.modules == [entry.module]
-                && f.path.0.name == entry.name
-                && matches!(
-                    entry.lane,
-                    Lane::Runtime(_) | Lane::PendingCode | Lane::Simd(_)
-                )
-        })
-        .map(|i| i as u16)
+    let [module] = f.path.0.modules.as_slice() else {
+        return None;
+    };
+    // Each bound operation's first row, by its core module and name.
+    static BOUND: std::sync::OnceLock<rustc_hash::FxHashMap<(&str, &str), u16>> =
+        std::sync::OnceLock::new();
+    let bound = BOUND.get_or_init(|| {
+        let mut bound = rustc_hash::FxHashMap::default();
+        for (i, entry) in OPERATIONS.iter().enumerate() {
+            if matches!(
+                entry.lane,
+                Lane::Runtime(_) | Lane::PendingCode | Lane::Simd(_)
+            ) {
+                bound.entry((entry.module, entry.name)).or_insert(i as u16);
+            }
+        }
+        bound
+    });
+    bound
+        .get(&(module.as_str(), f.path.0.name.as_str()))
+        .copied()
 }
 
 pub(super) fn simd_call(row: Option<u16>) -> Option<SimdCall> {

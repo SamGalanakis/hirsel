@@ -7,9 +7,10 @@
 //! holds none of its bodies. Every optimised LLVM build takes one: a program
 //! lowers every other library instance it reaches itself, so its optimiser
 //! sees the closure and dictionary arguments it passes them, and the held
-//! roots with what they reach: those [`ALWAYS_IMPORT`] names, and those that
+//! roots with what they reach: those [`ALWAYS_IMPORT`] names, those that
 //! take code a caller can bind ([`callable_variants::takes_code`]), whose
-//! calls through it a program's private bodies make direct.
+//! calls through it a program's private bodies make direct, and those that
+//! make an owned network wait, whose returnable variants a program builds.
 //!
 //! The unit and a program meet at five contracts:
 //! - callable: each root is defined under its instance symbol, and one
@@ -62,10 +63,14 @@ fn always_imported(definition: &DefPath) -> bool {
 }
 
 /// A plain root a program lowers itself, with what it reaches: one
-/// [`ALWAYS_IMPORT`] names, or one taking code a caller can bind. Both sides
-/// decide it from the root's own function alone.
+/// [`ALWAYS_IMPORT`] names, one taking code a caller can bind, or one making
+/// an owned wait, whose returnable variant (`returnable.rs`) only a
+/// program's unit can build. Both sides decide it from the root's own
+/// function alone.
 fn held_root(definition: &DefPath, module: &hirsel_core_ir::Module, root: FuncId) -> bool {
-    always_imported(definition) || crate::callable_variants::takes_code(module, root)
+    always_imported(definition)
+        || crate::callable_variants::takes_code(module, root)
+        || hirsel_core_ir::returnable::waits_owned(module, root)
 }
 
 /// The source law runner places program modules in the core and std packages.
@@ -276,14 +281,16 @@ impl CheckProduct {
             .as_ref()
             .ok_or_else(|| NativeStop::Entry("the release std is an image's".into()))?;
         let store = Store::new(&image.store_root().join(PREBUILT))?;
-        let side = self.image_side()?;
+        // Each variant walks the side afresh, so no lowering holds another
+        // variant's copy of the std's units through its optimiser.
         for &(runtime, observe_charge) in runtimes {
             let generator = Generator {
                 target,
                 observe_charge,
                 runtime,
             };
-            lower(&generator, generator.kin()?, side.clone_units(), &store)?;
+            let side = self.image_side()?;
+            lower(&generator, generator.kin()?, side, &store)?;
         }
         Ok(())
     }
@@ -390,16 +397,6 @@ pub(crate) fn std_side(
     side(&shared, key, record, lowered)
 }
 
-impl SideUnits {
-    fn clone_units(&self) -> SideUnits {
-        SideUnits {
-            whole: self.whole,
-            roots: self.roots.clone(),
-            units: self.units.clone(),
-        }
-    }
-}
-
 /// Join, specialize and lower a side's units, publish its parts and record
 /// into `store` under the key its content derives, and name it first in its
 /// toolchain and variant's index there. Also returns how many units it
@@ -452,7 +449,10 @@ fn lower(
         .cloned()
         .ok_or_else(|| NativeStop::Entry("the image has no plain function".into()))?;
     let (mut module, _) = release::join_modules(&first, &reached, &modules, |_| FuncId(0))?;
+    // The joined module holds every body LLVM lowers; the per-unit modules
+    // are not read again, so they leave before the optimiser runs.
     drop(modules);
+    drop(units);
     // Each root's function: the row holding its own body.
     let mut functions: BTreeMap<Identity, FuncId> = BTreeMap::new();
     let wanted: BTreeSet<&Identity> = roots.iter().collect();
@@ -490,20 +490,28 @@ fn lower(
         definition: first.definition.clone(),
         message,
     };
-    let program = hirsel_llvm_lazy::emit_program_parts(
+    // The LLVM modules read nothing of the Core module or its facts, which
+    // leave before the optimiser and the code generator run.
+    let lowered = hirsel_llvm_lazy::lower_program(
         &[hirsel_llvm_lazy::Unit::Core {
             module: &module,
             facts: &facts[0],
             observe_charge: options.observe_charge,
             debug_lines: true,
         }],
-        &exports,
         target,
-        hirsel_guard::jobs() as u32,
-        &mut hirsel_llvm_lazy::Unheld,
-        hirsel_llvm_lazy::Lend::Lend { limit: LEND_LIMIT },
     )
     .map_err(emit)?;
+    drop(facts);
+    drop(module);
+    let program = lowered
+        .emit(
+            &exports,
+            hirsel_guard::jobs() as u32,
+            &mut hirsel_llvm_lazy::Unheld,
+            hirsel_llvm_lazy::Lend::Lend { limit: LEND_LIMIT },
+        )
+        .map_err(emit)?;
     let parts: Vec<ContentHash> = (0..program.parts.len())
         .map(|i| part_name(key, i))
         .collect::<io::Result<_>>()?;

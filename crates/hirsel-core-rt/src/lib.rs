@@ -114,6 +114,8 @@ pub struct Context {
     pub steps: i64,
     pub(crate) run: *const crate::process::Config,
     pub(crate) map_hash_key: hirsel_core_layout::map_hash::PreparedKey,
+    pub(crate) map_fast_salt: [u64; 2],
+    pub(crate) map_strong_key: hirsel_core_layout::map_hash::PreparedKey,
     pub(crate) cancel_requested: AtomicBool,
     // Standalone roots and concurrent test tasks close their own heaps.
     owns_heap: bool,
@@ -138,7 +140,32 @@ pub struct Context {
 const _: () =
     assert!(std::mem::offset_of!(Context, map_hash_key) == abi_layout::CONTEXT_MAP_HASH_KEY);
 
+type MapKeys = (
+    hirsel_core_layout::map_hash::PreparedKey,
+    [u64; 2],
+    hirsel_core_layout::map_hash::PreparedKey,
+);
+
+fn map_keys(key: &[u8; 16]) -> MapKeys {
+    use hirsel_core_layout::{map_hash::PreparedKey, map_index::derive};
+
+    let (s0, s1, strong) = derive(key);
+    (PreparedKey::new(key), [s0, s1], PreparedKey::new(&strong))
+}
+
+const _: () = {
+    assert!(std::mem::offset_of!(Context, map_fast_salt) == abi_layout::CONTEXT_MAP_FAST_SALT);
+    assert!(std::mem::offset_of!(Context, map_strong_key) == abi_layout::CONTEXT_MAP_STRONG_KEY);
+};
+
 impl Context {
+    fn map_keys(&self) -> MapKeys {
+        (self.map_hash_key, self.map_fast_salt, self.map_strong_key)
+    }
+
+    fn set_map_keys(&mut self, keys: MapKeys) {
+        (self.map_hash_key, self.map_fast_salt, self.map_strong_key) = keys;
+    }
     /// The task provider admits its task record and primary cell separately.
     #[inline]
     pub fn new(bytes: u64) -> Self {
@@ -160,6 +187,9 @@ impl Context {
 
     pub(crate) fn with_funding(current: Funding) -> Self {
         current.normalize();
+        static DEFAULT_KEYS: std::sync::OnceLock<MapKeys> = std::sync::OnceLock::new();
+        let (map_hash_key, map_fast_salt, map_strong_key) =
+            *DEFAULT_KEYS.get_or_init(|| map_keys(&[0; 16]));
         Self {
             current,
             events: 0,
@@ -169,7 +199,9 @@ impl Context {
             regions: region::RegionCache::default(),
             heap: std::cell::OnceCell::new(),
             run: std::ptr::null(),
-            map_hash_key: hirsel_core_layout::map_hash::PreparedKey::new(&[0; 16]),
+            map_hash_key,
+            map_fast_salt,
+            map_strong_key,
             cancel_requested: AtomicBool::new(false),
             owns_heap: true,
             cancel_shield: 0,
@@ -214,6 +246,11 @@ impl Context {
             primary.exclude_startup_from_test_limit();
         }
         self.current.set_test_available(bytes);
+    }
+
+    #[cfg(feature = "testing")]
+    pub fn set_test_map_key(&mut self, key: &[u8; 16]) {
+        self.set_map_keys(map_keys(key));
     }
 
     #[cfg(feature = "testing")]

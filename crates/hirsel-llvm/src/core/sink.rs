@@ -603,6 +603,7 @@ pub(super) struct FnAttrs {
     pub inline: Inline,
     pub nounwind: bool,
     pub argmem_read: bool,
+    pub map_probe: bool,
     /// `"hirsel-carriers"`: the LLVM parameters that point to a lent sequence
     /// header, and whether the callee may change it (the bridge passes them as
     /// words on direct calls).
@@ -617,6 +618,7 @@ impl Default for FnAttrs {
             inline: Inline::Default,
             nounwind: false,
             argmem_read: false,
+            map_probe: false,
             carriers: String::new(),
             subprogram: None,
             level: None,
@@ -811,6 +813,9 @@ fn function_attrs(out: &mut String, attrs: &FnAttrs) {
     }
     if attrs.argmem_read {
         out.push_str(" memory(argmem: read)");
+    }
+    if attrs.map_probe {
+        out.push_str(" \"hirsel-map-probe\"");
     }
     if !attrs.carriers.is_empty() {
         write!(out, " \"hirsel-carriers\"=\"{}\"", attrs.carriers).unwrap();

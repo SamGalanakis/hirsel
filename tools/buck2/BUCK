@@ -224,6 +224,5 @@ export_file(name = "scratch.py", visibility = ["PUBLIC"])
     "bootstrap_llvm.py",
     "client.py",
     "llvm-cxx-headers-lock.json",
-    "llvm-runtime-lock.json",
     "pins.json",
 ]]

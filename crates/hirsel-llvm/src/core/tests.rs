@@ -1962,6 +1962,43 @@ fn hash_read_facts_observe_intervening_writes() {
 }
 
 #[test]
+fn map_placement_operations_match_prog_11() {
+    mod vectors {
+        include!("../../../hirsel-core-ir/samples/map-placement-vectors.rs");
+    }
+    let module = text::parse(include_str!(
+        "../../../hirsel-core-ir/samples/map-placement.core"
+    ))
+    .unwrap();
+    wf::module(&module).unwrap();
+    let cases: Vec<_> = vectors::CASES
+        .iter()
+        .map(|&(f, arg, _)| Case {
+            function: FuncId(f),
+            args: vec![arg],
+            limit: 0,
+            injection: None,
+        })
+        .collect();
+    let bindings = r#"
+#include <sys/random.h>
+extern ssize_t __real_getrandom(void *, size_t, unsigned int);
+ssize_t __wrap_getrandom(void *buf, size_t len, unsigned int flags) {
+    if (len != 16 || flags != 0) return __real_getrandom(buf, len, flags);
+    for (size_t i = 0; i < len; ++i) ((uint8_t *)buf)[i] = (uint8_t)i;
+    return len;
+}
+"#;
+    let reports = execute_object(&module, &cases, bindings, "", Optimization::Speed, None);
+    for ((&(_, _, expected), case), native) in vectors::CASES.iter().zip(&cases).zip(reports) {
+        let key = std::array::from_fn(|i| i as u8);
+        let (eval, _) = eval::run_map_hash(&module, case.function, &case.args, 0, key);
+        assert_eq!(eval.outcome, eval::Outcome::Returned(expected.to_vec()));
+        assert_eq!(native.outcome, eval.outcome);
+    }
+}
+
+#[test]
 fn string_literals_growth_and_byte_order_match_the_evaluator() {
     let source = include_str!("../../../hirsel-core-ir/samples/strings.core");
     let module = text::parse(source).unwrap();

@@ -904,7 +904,11 @@
 //! at once rather than every slot a body names. A shared slot keeps its members'
 //! `StorageLive`s and drops their `StorageDead`s; no write is removed, so every
 //! read still follows a write of its own place. Stored bodies, instance records and
-//! object keys are the unshared IR.
+//! object keys are the unshared IR. An engine may also end a slot's storage
+//! early, where no path reaches a use of it before its next `StorageLive` or
+//! `StorageDead`, when its address leaves the body only on a loan that lasts the
+//! call ([`extent::scoped_slots`]), so slots of any types that are never needed
+//! at once share frame bytes.
 //!
 //! # Calling convention (FORM v0)
 //!

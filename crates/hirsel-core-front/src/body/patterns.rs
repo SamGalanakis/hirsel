@@ -2035,6 +2035,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.consume(v, n);
             if t != ERROR {
                 let value = self.wrap_case(self.fd.result, err_case, f, v, n);
+                // The returned error reads what the mapper's result reads, nothing else.
+                if !self.anchor_tracked(f) {
+                    self.anchors.last = 0;
+                }
                 self.ret(value, n);
             } else {
                 self.halt();
@@ -2048,6 +2052,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 error_value,
                 n,
             );
+            // The propagated result reads only what its error payload reads (OWN-20).
+            self.anchors.last = match error {
+                Some(e) if self.anchor_tracked(e) => {
+                    let subject = self.anchor_expression(operand);
+                    self.anchors
+                        .project(subject, anchors::Component::Case(err_case, 0))
+                }
+                _ => 0,
+            };
             self.ret(value, n);
         }
         if let Some(no) = no {

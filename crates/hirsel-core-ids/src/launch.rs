@@ -69,9 +69,8 @@ impl Metadata {
         if let Ok(file) = &file
             && let Some(image) = MappedImage::new(file)
         {
-            let digest: DeferredDigest = LazyLock::new(Box::new(move || {
-                Executable::Digest(hash_bytes(image.bytes()))
-            }));
+            let digest: DeferredDigest =
+                LazyLock::new(Box::new(move || Executable::Digest(image.digest())));
             return Self::with_image(Image::Deferred(Arc::new(digest)), target, n_place, describe);
         }
         Self::with_image(Image::Ready(read_digest(file)), target, n_place, describe)
@@ -251,9 +250,29 @@ impl MappedImage {
         Some(Self(NonNull::slice_from_raw_parts(base, len)))
     }
 
-    fn bytes(&self) -> &[u8] {
+    /// Hash the image one window at a time and return each hashed window's
+    /// pages, so the process never holds more than one window of the image
+    /// resident for the digest (a whole-image hash once set the peak RSS of a
+    /// small server).
+    fn digest(&self) -> [u8; 32] {
+        const WINDOW: usize = 1 << 20;
+        let mut hash = Sha256::new();
         // SAFETY: the image remains mapped for this owner's lifetime.
-        unsafe { self.0.as_ref() }
+        let bytes = unsafe { self.0.as_ref() };
+        for window in bytes.chunks(WINDOW) {
+            hash.update(window);
+            // SAFETY: this owner's private read-only mapping; the window is
+            // page aligned and nothing reads it again, and a later read would
+            // only fault the same file bytes back in.
+            unsafe {
+                libc::madvise(
+                    window.as_ptr().cast_mut().cast(),
+                    window.len(),
+                    libc::MADV_DONTNEED,
+                )
+            };
+        }
+        finish_hash(hash)
     }
 }
 

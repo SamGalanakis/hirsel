@@ -442,7 +442,7 @@ cache and actual product roots, target and selected runtime. Explicit
 `--core-product`, `--runtime` and `--target` take precedence over installed defaults.
 With no registered runtime, env reports null and native commands require --runtime.
 
-`std-product --install ROOT --runtime ARCHIVE [--target TRIPLE] [--cc DRIVER]`
+`std-product --install ROOT --runtime ARCHIVE [--target TRIPLE] [--link-kit DIRECTORY]`
 makes ROOT a self-contained installation and `core-product` takes the same
 options. A request from ROOT/hirsel loads nothing outside ROOT and the system:
 no environment variable, no checkout and no C driver.
@@ -450,18 +450,16 @@ no environment variable, no checkout and no C driver.
     ROOT/hirsel                      this compiler, its RPATH patched to $ORIGIN/lib
     ROOT/lib/                        libLLVM.so.23.1 and the libraries it loads from the pinned tree
     ROOT/bin/ld.lld                  the link editor
-    ROOT/link/<target>.json          the link recipe captured at install
+    ROOT/link/<target>.json          the bundle-relative link recipe
+    ROOT/link/kit/                   the startup objects and link-only libraries
     ROOT/runtime/<target>/<hash>/    runtime archives, by content
     ROOT/core-packages/              the core and std images
     ROOT/hirsel-core-toolchain.json  the selection, committed last
 
-glibc, libstdc++, libgcc_s and the CRT files the recipe names stay the
-system's. Installing the host target's runtime installs the native toolchain
-with it: the recipe is captured once, through `--cc` or the pinned clang, and
-an install with neither refuses. Another target's runtime is registered without
-a recipe; its links take `--cc` and `--sysroot`. Every outside input is read
-and checked before anything is written, so a failed publication preserves the
-previous registration. A missing piece of the prefix is a named refusal at the
+The system supplies runtime libraries such as glibc and libstdc++. Installing
+the host runtime requires `--link-kit`, which supplies the editor, startup
+objects and link-time libraries. Another target's runtime is registered without
+a recipe and its links take `--cc` and `--sysroot`. A missing piece of the prefix is a named refusal at the
 request that needs it; nothing falls back. --store and --image cannot combine
 with --install; product --runtime/--target require --install. The distribution
 assembler uses this same producer. It does not switch the currently installed

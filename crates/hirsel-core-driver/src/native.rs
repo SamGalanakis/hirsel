@@ -49,8 +49,8 @@ pub enum Link {
     /// Capture the link recipe through this C driver (`--cc`, or the pinned
     /// LLVM's clang for a compiler that is not installed).
     Driver(PathBuf),
-    /// The recipe an installation captured at install: its own `bin/ld.lld`
-    /// and the system's CRT files. No C driver runs.
+    /// The recipe an installation bundled: its own `bin/ld.lld`
+    /// and its link kit. No C driver runs.
     Installed(PathBuf),
 }
 impl Link {
@@ -1652,6 +1652,10 @@ fn link_objects(
     assembly: Option<(ContentHash, ContentHash)>,
 ) -> Result<Linked, NativeStop> {
     let revision = hirsel_core_ir::code_revision(address);
+    let support_libs = match &options.link {
+        Link::Driver(_) => DIRECT_LINK_SUPPORT_LIBS,
+        Link::Installed(_) => &[],
+    };
     // The executable key includes the mode-specific lld options.
     let link_mode = if options.optimize {
         "release-link-gc-source-coordinates"
@@ -1671,7 +1675,7 @@ fn link_objects(
                 compiler_identity()?,
                 toolchain,
                 recipe.identity,
-                DIRECT_LINK_SUPPORT_LIBS,
+                support_libs,
                 entry_plan,
                 &identities,
                 &archive_pins,
@@ -1736,7 +1740,7 @@ fn link_objects(
                     "link inputs changed during recipe assembly".into(),
                 ));
             }
-            if closed_image && !recipe.uses_hirsel_launcher() {
+            if closed_image && !recipe.uses_hirsel_launcher(&options.link) {
                 return Err(NativeStop::Link(
                     "direct link refused: process entry inputs changed".into(),
                 ));
@@ -1849,7 +1853,7 @@ fn link_objects(
                 direct_link(
                     recipe,
                     &inputs,
-                    DIRECT_LINK_SUPPORT_LIBS,
+                    support_libs,
                     &output,
                     options.optimize,
                     options.debug_lines,

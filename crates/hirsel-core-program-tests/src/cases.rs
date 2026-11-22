@@ -263,8 +263,6 @@ pub(crate) fn run_case(path: &Path) -> Vec<String> {
         .file_stem()
         .is_some_and(|name| name == "map-operations")
     {
-        // SipHasher13 1.0.4 places 1 and 4 in bucket 1 of an eight-word
-        // index with the zero key. With 0x51 repeated, the buckets are 5 and 0.
         let run = |key| eval::run_map_hash(module, functions["two_run_keys"], &[], 1 << 20, key);
         let (colliding, steps) = run([0; 16]);
         let (separate, separate_steps) = run([0x51; 16]);
@@ -276,6 +274,28 @@ pub(crate) fn run_case(path: &Path) -> Vec<String> {
         assert_eq!(colliding.used, separate.used);
         assert!(steps > 0);
         assert_eq!(steps, separate_steps);
+
+        // The copied order has 128 entries. Its sum is 129*130/2 minus 1
+        // and 65 for the two removals, plus 10 for the update and 210 for
+        // the appended entry. The empty clone's first value is 42.
+        let run =
+            |key| eval::run_map_observed(module, functions["promotion_run"], &[], 1 << 20, key);
+        let (promoted, strong) = run([0; 16]);
+        let (ordinary, fast) = run([0x51; 16]);
+        let expected = eval::Outcome::Returned(vec![128_853_942]);
+        assert_eq!(promoted.outcome, expected);
+        assert_eq!(ordinary.outcome, expected);
+        assert_eq!(promoted.trace, ordinary.trace);
+        assert_eq!(promoted.events, ordinary.events);
+        assert_eq!(promoted.admissions, ordinary.admissions);
+        assert_eq!(promoted.peak_reserved, ordinary.peak_reserved);
+        assert_eq!(promoted.used, ordinary.used);
+        assert_eq!(strong.steps, fast.steps);
+        let strong = strong.maps.unwrap();
+        let fast = fast.maps.unwrap();
+        assert_eq!((strong.promotions, fast.promotions), (1, 0));
+        assert!(strong.last_word_strong);
+        assert!(!fast.last_word_strong);
     }
     if path
         .file_stem()

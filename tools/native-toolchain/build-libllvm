@@ -1,43 +1,46 @@
 #!/usr/bin/env bash
 # Build the compiler's engine libLLVM (`engine_llvm` in llvm-23.lock): PGO + ThinLTO.
 #
-#   build-libllvm DIR ARTIFACTS [instr|train|opt|guard|plain]
+#   build-libllvm DIR ARTIFACTS bootstrap|package|instr|train|opt|guard|plain
 #
 # ARTIFACTS is a core/tools/measurement_artifacts.py identity (compiler and runtime
-# archive). With no stage, runs instr, train, opt and guard in order, then prints the
-# `engine_llvm` and `engine_llvm_guard` lock records.
+# archive). For train and guard, set HIRSEL_LLVM_PROFILE_SOURCE to the checkout
+# named by engine_llvm_guard_source and use ARTIFACTS built in that checkout.
 #
+#   bootstrap  each build tool and its stock shared libraries, as DIR/llvm-bootstrap.tar.xz
+#   package    package an already-built bootstrap tree
 #   instr  IR-instrumented libLLVM.so.23.1 from the locked source archive
 #   train  every training program of engine_llvm.py through it, merged into DIR/llvm.profdata
 #   opt    the profile-guided ThinLTO libLLVM.so.23.1, debug info stripped, as DIR/libLLVM.so.23.1
-#   guard  engine_llvm.py guard: the stock library against DIR/libLLVM.so.23.1 on the training
+#   guard  the locked apt.llvm.org deb against DIR/libLLVM.so.23.1 on the training
 #          and held-out programs. Fails unless every .text is byte-identical and the warm build
 #          cost geomean is below the stock library's and no worse than the lock's previous
-#          `engine_llvm_guard` record
+#          `engine_llvm_guard` record. Runs on the host and prints the engine_llvm record.
 #   plain  the same configuration without profile or ThinLTO, as DIR/plain/lib/libLLVM.so.23.1:
 #          the fallback when a profile build fails its guard (about 0.88 of the stock library's
 #          warm cost against 0.64 for the profile build)
 #
-# The stage compiler is the pinned tree's clang, lld, llvm-tblgen and llvm-profdata, so the
-# profile format and the library version match the pin. Configuration: Release without
+# Build in the manylinux_2_28 x86_64 image with the GCC toolset on PATH.
+# For the engine stages, set CC and CXX to the matching bootstrap clangs and
+# provide their compiler-rt profile runtime. Use the same LLVM snapshot's
+# lld, TableGen and llvm-profdata beside clang. Configuration: Release without
 # assertions; targets X86 and AArch64, the only ones the compiler initialises (engine.c);
 # a dylib without RPATH or RUNPATH; -fno-semantic-interposition; zlib on; zstd, libxml2, libedit, terminfo, ffi, z3
 # and libpfm off. The result loads only libz, libstdc++, libm, libgcc_s and libc.
 #
-# Each compile stage runs under tools/capped (16G) at nice 19 with JOBS jobs (default 12),
+# Each compile stage runs under tools/capped (8G) at nice 19 with JOBS jobs (default 4),
 # on CPUS if set (a taskset list), after the 1-minute load falls to MAX_LOAD (default 32).
 # About 2.7 CPU-hours at 12 jobs: instr 4.5 min, train 3 min, opt 6 min of wall time.
 #
-# Run once per pin change on an x86_64 Ubuntu 24.04 host, then upload DIR/libLLVM.so.23.1 to
-# the release in `deb_pool` under the printed asset name and write both records into
-# llvm-23.lock. Nothing rebuilds it per land.
+# Run once per pin change, then upload DIR/libLLVM.so.23.1 to
+# the release in `asset_pool` under the printed asset name and update the engine_llvm
+# record in llvm-23.lock. Nothing rebuilds it per land.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 lock="$here/llvm-23.lock"
-tree="$here/../buck2/toolchains/llvm-files"
 fail() { echo "build-libllvm: $*" >&2; exit 1; }
-(( $# == 2 || $# == 3 )) || { echo "usage: build-libllvm DIR ARTIFACTS [instr|train|opt|guard|plain]" >&2; exit 2; }
+(( $# == 3 )) || { echo "usage: build-libllvm DIR ARTIFACTS bootstrap|package|instr|train|opt|guard|plain" >&2; exit 2; }
 lock_value() {
   awk -v k="$1" '$1 == k { sub(/^[^ ]+ /, ""); print; found = 1 } END { exit !found }' "$lock" \
     || fail "llvm-23.lock has no '$1' record"
@@ -46,17 +49,17 @@ lock_value() {
 mkdir -p "$1"
 dir="$(cd "$1" && pwd)"
 artifacts="$(realpath "$2")"
-jobs=${JOBS:-12}
+jobs=${JOBS:-4}
 version="$(lock_value llvm_version)"
-[[ -x "$tree/bin/clang" ]] || fail "no pinned LLVM tree at $tree (run tools/buck2/sync.py)"
-tree="$(cd "$tree" && pwd)"
-# The tree's clang finds libclang-cpp and libLLVM only through the loader path.
-export LD_LIBRARY_PATH="$tree/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+cc="$(command -v "${CC:-clang}")"
+cxx="$(command -v "${CXX:-clang++}")"
+tool_bin="$(dirname "$cc")"
+gcc_install="$(dirname "$(gcc -print-libgcc-file-name)")"
 
 wait_load() { while awk -v m="${MAX_LOAD:-32}" '{ exit !($1 > m) }' /proc/loadavg; do sleep 60; done; }
 capped() {
   wait_load
-  HIRSEL_JOBS=$jobs HIRSEL_MEMORY_LIMIT=16G "$here/../capped" --long nice -n 19 ${CPUS:+taskset -c "$CPUS"} "$@"
+  HIRSEL_JOBS=$jobs HIRSEL_MEMORY_LIMIT=${HIRSEL_MEMORY_LIMIT:-8G} "$here/../capped" --long nice -n 19 ${CPUS:+taskset -c "$CPUS"} "$@"
 }
 
 source_tree() {
@@ -71,14 +74,12 @@ source_tree() {
 
 configure() {  # configure BUILD EXTRA...
   local build=$1; shift
-  rm -rf "$build"
   cmake -G Ninja -S "$dir/src/llvm" -B "$build" \
     -DCMAKE_BUILD_TYPE=Release -DLLVM_ENABLE_ASSERTIONS=OFF \
-    -DCMAKE_C_COMPILER="$tree/bin/clang" -DCMAKE_CXX_COMPILER="$tree/bin/clang++" \
-    -DCMAKE_AR="$tree/bin/llvm-ar" -DCMAKE_RANLIB="$tree/bin/llvm-ranlib" -DLLVM_USE_LINKER=lld \
-    -DCMAKE_EXE_LINKER_FLAGS="-B$tree/bin" -DCMAKE_SHARED_LINKER_FLAGS="-B$tree/bin" \
-    -DCMAKE_C_FLAGS=-fno-semantic-interposition -DCMAKE_CXX_FLAGS=-fno-semantic-interposition \
-    -DLLVM_NATIVE_TOOL_DIR="$tree/bin" -DLLVM_TABLEGEN="$tree/bin/llvm-tblgen" \
+    -DCMAKE_C_COMPILER="$cc" -DCMAKE_CXX_COMPILER="$cxx" \
+    -DCMAKE_AR="$tool_bin/llvm-ar" -DCMAKE_RANLIB="$tool_bin/llvm-ranlib" -DLLVM_USE_LINKER=lld \
+    -DCMAKE_C_FLAGS="--gcc-install-dir=$gcc_install -fno-semantic-interposition" \
+    -DCMAKE_CXX_FLAGS="--gcc-install-dir=$gcc_install -fno-semantic-interposition" \
     -DLLVM_TARGETS_TO_BUILD='X86;AArch64' -DLLVM_ENABLE_PROJECTS= \
     -DLLVM_BUILD_LLVM_DYLIB=ON -DLLVM_LINK_LLVM_DYLIB=ON \
     -DLLVM_ENABLE_ZLIB=FORCE_ON -DLLVM_ENABLE_ZSTD=OFF -DLLVM_ENABLE_LIBXML2=OFF -DLLVM_ENABLE_LIBEDIT=OFF \
@@ -87,66 +88,130 @@ configure() {  # configure BUILD EXTRA...
     -DLLVM_PARALLEL_LINK_JOBS=1 -DCMAKE_SKIP_RPATH=ON "$@" > "$build.cmake.log"
 }
 
+configure_engine() {  # configure_engine BUILD SHARED_LINKER_FLAGS EXTRA...
+  local build=$1 shared_linker_flags=$2
+  shift 2
+  configure "$build" \
+    -DCMAKE_EXE_LINKER_FLAGS="-B$tool_bin" \
+    -DCMAKE_SHARED_LINKER_FLAGS="-B$tool_bin -Wl,--build-id=sha1${shared_linker_flags:+ $shared_linker_flags}" \
+    -DLLVM_NATIVE_TOOL_DIR="$tool_bin" -DLLVM_TABLEGEN="$tool_bin/llvm-tblgen" "$@"
+}
+
 library() {  # library BUILD
   capped ninja -C "$1" -j "$jobs" LLVM > "$1.ninja.log" || fail "the LLVM build in $1 failed (see $1.ninja.log)"
 }
 
+bootstrap_tools=(clang llvm-ar llvm-config llvm-nm llvm-objcopy llvm-objdump llvm-profdata llvm-readobj llvm-strip llvm-symbolizer llvm-tblgen)
+
+bootstrap() {
+  source_tree
+  local build="$dir/bootstrap"
+  configure "$build" -DLLVM_ENABLE_PROJECTS=clang -DLLVM_DEFAULT_TARGET_TRIPLE=x86_64-unknown-linux-gnu \
+    -DCMAKE_SKIP_RPATH=OFF "-DCMAKE_INSTALL_RPATH=\$ORIGIN/../lib"
+  capped ninja -C "$build" -j "$jobs" LLVM clang-resource-headers "${bootstrap_tools[@]}" > "$build.ninja.log"
+  package
+}
+
+package() {
+  local build="$dir/bootstrap" stage="$dir/bootstrap-install"
+  local components=(LLVM clang-cpp clang-resource-headers llvm-headers "${bootstrap_tools[@]}")
+  rm -rf "$stage"
+  local component
+  for component in "${components[@]}"; do
+    cmake --install "$build" --prefix "$stage" --strip --component "$component"
+  done
+  ln -sf llvm-ar "$stage/bin/llvm-ranlib"
+  ln -sf llvm-readobj "$stage/bin/llvm-readelf"
+  "$stage/bin/clang" --version
+  "$stage/bin/llvm-config" --link-shared --libnames
+  mkdir -p "$stage/share/licenses/llvm-project"
+  for component in llvm clang; do
+    cp "$dir/src/$component/LICENSE.TXT" "$stage/share/licenses/llvm-project/$component-LICENSE.TXT"
+  done
+  cp -r "$here/../toolchain-dist/licenses/"almalinux-* "$stage/share/licenses/"
+  tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -cJf "$dir/llvm-bootstrap.tar.xz" -C "$stage" .
+  echo "bootstrap_llvm $(sha256sum "$dir/llvm-bootstrap.tar.xz" | cut -d ' ' -f 1) $(stat -c %s "$dir/llvm-bootstrap.tar.xz") llvm-$version-bootstrap-manylinux_2_28-x86_64.tar.xz"
+}
+
 instr() {
   source_tree
-  configure "$dir/instr" -DLLVM_BUILD_INSTRUMENTED=IR -DLLVM_PROFILE_DATA_DIR="$dir/profiles"
+  configure_engine "$dir/instr" "" -DLLVM_BUILD_INSTRUMENTED=IR -DLLVM_PROFILE_DATA_DIR="$dir/profiles"
   library "$dir/instr"
+}
+
+benchmark_script() {
+  local source=${HIRSEL_LLVM_PROFILE_SOURCE:?set HIRSEL_LLVM_PROFILE_SOURCE to the guard checkout}
+  [[ "$(git -C "$source" rev-parse HEAD)" == "$(lock_value engine_llvm_guard_source)" ]] \
+    || fail "HIRSEL_LLVM_PROFILE_SOURCE must be at $(lock_value engine_llvm_guard_source)"
+  realpath "$source/tools/native-toolchain/engine_llvm.py"
 }
 
 train() {
   [[ -f "$dir/instr/lib/libLLVM.so.23.1" ]] || fail "no instrumented library: run the instr stage"
+  local benchmark
+  benchmark=$(benchmark_script)
+  # The arena opens more than Docker's default soft limit of 1024 descriptors.
+  ulimit -Sn "$(ulimit -Hn)"
   rm -rf "$dir/profiles" && mkdir "$dir/profiles"
   LLVM_PROFILE_FILE="$dir/profiles/%m-%p.profraw" capped \
-    python3 "$here/engine_llvm.py" train "$dir/instr/lib" "$dir/train" --artifacts "$artifacts"
-  "$tree/bin/llvm-profdata" merge -o "$dir/llvm.profdata" "$dir"/profiles/*.profraw
+    python3 "$benchmark" train "$dir/instr/lib" "$dir/train" --artifacts "$artifacts"
+  "$tool_bin/llvm-profdata" merge -o "$dir/llvm.profdata" "$dir"/profiles/*.profraw
 }
 
 opt() {
   [[ -f "$dir/llvm.profdata" ]] || fail "no profile: run the train stage"
   source_tree
-  configure "$dir/opt" -DLLVM_ENABLE_LTO=Thin -DLLVM_PROFDATA_FILE="$dir/llvm.profdata" \
-    -DCMAKE_SHARED_LINKER_FLAGS="-B$tree/bin -Wl,--thinlto-jobs=$jobs" \
+  configure_engine "$dir/opt" "-Wl,--thinlto-jobs=$jobs" \
+    -DLLVM_ENABLE_LTO=Thin -DLLVM_PROFDATA_FILE="$dir/llvm.profdata" \
     -DLLVM_THINLTO_CACHE_PATH="$dir/opt/thinlto-cache"
   library "$dir/opt"
-  "$tree/bin/llvm-strip" --strip-debug -o "$dir/libLLVM.so.23.1" "$dir/opt/lib/libLLVM.so.23.1"
+  "$tool_bin/llvm-strip" --strip-debug -o "$dir/libLLVM.so.23.1" "$dir/opt/lib/libLLVM.so.23.1"
   [[ "$(readelf -d "$dir/libLLVM.so.23.1" | awk '/\(SONAME\)/ { print $NF }')" == '[libLLVM.so.23.1]' ]] \
     || fail "the library's soname is not libLLVM.so.23.1"
+  [[ "$(readelf -n "$dir/libLLVM.so.23.1" | awk '/Build ID:/ { print $NF }')" =~ ^[0-9a-f]{40}$ ]] \
+    || fail "the library has no SHA-1 build ID"
   local needed
   needed="$(readelf -d "$dir/libLLVM.so.23.1" | awk '/\(NEEDED\)/ { print $NF }' | sort | tr '\n' ' ')"
-  [[ "$needed" == '[ld-linux-x86-64.so.2] [libc.so.6] [libgcc_s.so.1] [libm.so.6] [libstdc++.so.6] [libz.so.1] ' ]] \
-    || fail "the library loads more than libz, libstdc++, libm, libgcc_s and libc: $needed"
+  local name
+  for name in $needed; do
+    case "$name" in
+      '[ld-linux-x86-64.so.2]'|'[libc.so.6]'|'[libgcc_s.so.1]'|'[libm.so.6]'|'[libstdc++.so.6]'|'[libz.so.1]'|'[libdl.so.2]'|'[libpthread.so.0]'|'[librt.so.1]') ;;
+      *) fail "unexpected library dependency: $name" ;;
+    esac
+  done
   # No search path of its own: the loading executable's RPATH finds libz, never the
   # build tree's lib/ or, through an empty entry, the working directory.
   ! readelf -d "$dir/libLLVM.so.23.1" | grep -qE '\((RPATH|RUNPATH)\)' || fail "the library carries a search path"
 }
 
-guard() {
+guard() (
   [[ -f "$dir/libLLVM.so.23.1" ]] || fail "no engine library: run the opt stage"
-  local previous=()
-  if grep -q '^engine_llvm_guard ' "$lock"; then previous=(--previous-warm "$(lock_value engine_llvm_guard)"); fi
-  python3 "$here/engine_llvm.py" guard "$tree/lib" "$dir" "$dir/guard" --artifacts "$artifacts" "${previous[@]}" \
+  local benchmark reference sha256 size asset package
+  benchmark=$(benchmark_script)
+  reference=$(mktemp -d "$dir/.guard-deb.XXXXXXXX")
+  trap 'rm -rf "$reference"' EXIT
+  read -r sha256 size asset <<< "$(lock_value engine_llvm_guard_deb)"
+  package="$reference/$asset"
+  curl -fsSL "$(lock_value asset_pool)/$asset" -o "$package"
+  [[ "$(stat -c %s "$package")" == "$size" ]] || fail "the guard reference deb has the wrong size"
+  printf '%s  %s\n' "$sha256" "$package" | sha256sum -c --status \
+    || fail "the guard reference deb has the wrong SHA-256"
+  dpkg-deb -x "$package" "$reference/root"
+  ulimit -Sn "$(ulimit -Hn)"
+  systemd-run --quiet --user --scope -p MemoryMax=2G -p MemorySwapMax=0 \
+    python3 "$benchmark" guard "$reference/root/usr/lib/x86_64-linux-gnu" "$dir" "$dir/guard" \
+    --artifacts "$artifacts" --previous-warm "$(lock_value engine_llvm_guard)" \
     || fail "the engine library fails its guard (see $dir/guard/guard.json)"
-}
+  echo "engine_llvm $(sha256sum "$dir/libLLVM.so.23.1" | cut -d ' ' -f 1) $(stat -c %s "$dir/libLLVM.so.23.1") libLLVM-$version-engine-manylinux_2_28-x86_64.so"
+)
 
 plain() {
   source_tree
-  configure "$dir/plain"
+  configure_engine "$dir/plain" ""
   library "$dir/plain"
 }
 
-case ${3:-all} in
-  instr | train | opt | guard | plain) "$3" ;;
-  all)
-    instr
-    train
-    opt
-    guard
-    echo "engine_llvm $(sha256sum "$dir/libLLVM.so.23.1" | cut -d ' ' -f 1) $(stat -c %s "$dir/libLLVM.so.23.1") libLLVM-$version-engine-x86_64.so"
-    echo "engine_llvm_guard $(python3 -c 'import json, sys; print(f"{json.load(open(sys.argv[1]))["warm"]:.4f}")' "$dir/guard/guard.json")"
-    ;;
+case $3 in
+  bootstrap | package | instr | train | opt | guard | plain) "$3" ;;
   *) fail "unknown stage '$3'" ;;
 esac

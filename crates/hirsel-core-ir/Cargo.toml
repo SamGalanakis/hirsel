@@ -11,6 +11,7 @@ rust-version.workspace = true
 wf = []
 # The FORM v0 test evaluator, for producers' behaviour cases.
 eval = ["dep:hirsel-core-net", "dep:twox-hash", "dep:zeroize"]
+map-observation = ["eval"]
 
 [dependencies]
 hirsel-core-net = { path = "../hirsel-core-net", optional = true }

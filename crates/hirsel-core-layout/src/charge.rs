@@ -75,8 +75,8 @@ pub const fn seq_len_bound(size: u64) -> Option<u64> {
 /// `Map[K, V]` storage of `capacity` entries.
 pub const fn map(capacity: u64, key: u64, value: u64) -> Option<u64> {
     match key.checked_add(value) {
-        Some(kv) => match capacity.checked_mul(kv + MAP_ENTRY_EXTRA) {
-            Some(n) => round8(n),
+        Some(kv) => match kv.checked_add(MAP_ENTRY_EXTRA) {
+            Some(entry) => seq(capacity, entry),
             None => None,
         },
         None => None,

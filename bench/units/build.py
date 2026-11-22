@@ -17,12 +17,13 @@ def main():
     data = mc.hirsel_inputs(src)
     inputs.write_text(json.dumps(data))
     llvm = ROOT / "tools/buck2/toolchains/llvm-files"
-    env = os.environ | {"HIRSEL_MEMORY_LIMIT": "2G", "HIRSEL_JOBS": "1",
+    env = os.environ | {"HIRSEL_MEMORY_LIMIT": "2G", "HIRSEL_JOBS": os.environ.get("HIRSEL_JOBS", "1"),
                         "LD_LIBRARY_PATH": str(llvm / "lib")}
     net = ("Net=Listen 127.77.0.0/16 0-65535;Connect 127.77.0.0/16 0-65535;"
            "Listen 127.0.0.1/32 0-65535;Connect 127.0.0.1/32 0-65535")
     record = os.environ.get("UNITS_RECORD")
-    cmd = [ROOT / "tools/capped", compiler, "run" if record else "build", "--inputs", inputs,
+    capped = [] if os.environ.get("UNITS_BUILD_UNDER_CAP") == "1" else [ROOT / "tools/capped"]
+    cmd = [*capped, compiler, "run" if record else "build", "--inputs", inputs,
            "--entry", f"multicore@1/{case}/main", "--backend", "llvm", "--release",
            "--runtime", runtime, "--cc", llvm / "bin/clang", "--store", out / "store",
            "--grant", "Tasks", "--grant", "Clock",

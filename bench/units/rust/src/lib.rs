@@ -1,4 +1,54 @@
 //! Shared helpers for the mc-units-proto Rust side.
+use std::io;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::time::Duration;
+use tokio::io::unix::AsyncFd;
+
+/// The Tokio timer wheel rounds to milliseconds. A reusable timerfd keeps
+/// the delay in the benchmark at its requested resolution.
+pub struct DeadlineTimer(AsyncFd<OwnedFd>);
+
+impl DeadlineTimer {
+    pub fn new() -> io::Result<Self> {
+        let fd = unsafe {
+            libc::timerfd_create(libc::CLOCK_MONOTONIC, libc::TFD_CLOEXEC | libc::TFD_NONBLOCK)
+        };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: timerfd_create returned a fresh descriptor.
+        AsyncFd::new(unsafe { OwnedFd::from_raw_fd(fd) }).map(Self)
+    }
+
+    pub async fn sleep(&self, delay: Duration) -> io::Result<()> {
+        if delay.is_zero() {
+            return Ok(());
+        }
+        let spec = libc::itimerspec {
+            it_interval: libc::timespec { tv_sec: 0, tv_nsec: 0 },
+            it_value: libc::timespec { tv_sec: delay.as_secs().try_into().unwrap(),
+                                       tv_nsec: delay.subsec_nanos().into() },
+        };
+        if unsafe { libc::timerfd_settime(self.0.as_raw_fd(), 0, &spec, std::ptr::null_mut()) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        loop {
+            let mut ready = self.0.readable().await?;
+            match ready.try_io(|timer| {
+                let mut expirations = [0u8; size_of::<u64>()];
+                let count = unsafe {
+                    libc::read(timer.as_raw_fd(), expirations.as_mut_ptr().cast(), expirations.len())
+                };
+                if count < 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
+            }) {
+                Ok(Err(error)) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Ok(result) => return result,
+                Err(_) => continue,
+            }
+        }
+    }
+}
+
 pub fn pin(cpu: usize) {
     unsafe {
         let mut set: libc::cpu_set_t = std::mem::zeroed();

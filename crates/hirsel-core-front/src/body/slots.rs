@@ -55,12 +55,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             );
             index
         };
-        let module = if kind == SlotPush::Heap {
-            "heap"
+        let helper = if kind == SlotPush::Heap {
+            crate::CoreHelper::HeapPreparePush
         } else {
-            "deque"
+            crate::CoreHelper::DequePreparePush
         };
-        let Some(prepare) = self.p.core_fn(module, "prepare_push") else {
+        let Some(prepare) = self.p.core_helper(helper) else {
             self.gap(n, "a prepared push requires its slot preparation body");
             return None;
         };
@@ -99,12 +99,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.goto(join, result, built, n);
         self.start(spare);
         self.consume(value, n);
-        let module = if prepared.kind == SlotPush::Heap {
-            "heap"
+        let helper = if prepared.kind == SlotPush::Heap {
+            crate::CoreHelper::HeapFinishPreparedPush
         } else {
-            "deque"
+            crate::CoreHelper::DequeFinishPreparedPush
         };
-        let Some(publish) = self.p.core_fn(module, "finish_prepared_push") else {
+        let Some(publish) = self.p.core_helper(helper) else {
             self.gap(n, "a prepared push requires its publication body");
             return None;
         };

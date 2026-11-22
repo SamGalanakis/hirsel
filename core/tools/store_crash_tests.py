@@ -81,6 +81,7 @@ def run_crashes(root, compiler, runtime, bridge, cc, manifest, work, engine,
                        + ' -Wl,--wrap=hirsel_core_os_run_with_sources'
                        + ('\n' if adapter == 'runner_crash.c' else
                           ' -Wl,--wrap=hirsel_core_spawn -Wl,--wrap=hirsel_core_host_op'
+                          ' -Wl,--wrap=hirsel_core_host_at -Wl,--wrap=hirsel_core_host_stat'
                           ' -Wl,--wrap=hirsel_core_host_rename -Wl,--wrap=hirsel_core_send'
                           ' -Wl,--wrap=hirsel_core_receive -Wl,--wrap=hirsel_core_join\n'))
     wrapper.chmod(0o755)

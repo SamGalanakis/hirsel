@@ -391,13 +391,7 @@ impl Emitter {
             dictionaries,
         };
         if let Some(&function) = self.funcs.get(&key) {
-            if let Some(signature) = self.source_signatures.get(function) {
-                return Ok((function, signature));
-            }
-            let (signature, abi) = self.signature_inst(p, t, f, signed)?;
-            let signature = self.sig_abi(signature, abi);
-            self.source_signatures.remember(function, signature);
-            return Ok((function, signature));
+            return Ok((function, self.source_signature(function)));
         }
         let (signature, abi) = self.signature_inst(p, t, f, signed)?;
         let function = self.add_function_abi(key, signature, abi);
@@ -464,16 +458,33 @@ impl Emitter {
     /// closed), is that row and not a second one (one row per instance; FORM #117).
     fn glue(&mut self, ty: TypeId, op: key_glue::KeyOp) -> Result<FuncId, &'static str> {
         key_glue::derivable(&self.module, ty, op)?;
-        let glue = key_glue::glue_row(&mut self.module, ty, op);
-        // Glue's constructor emits its fixed convention directly. It has no
-        // source-parameter/result carriage for seal to convert.
-        self.source_signatures
-            .remember(glue, self.module.functions[glue.index()].signature);
-        let key = &self.module.instances[self.module.functions[glue.index()].instance.index()];
-        if !self.funcs.contains_key(key) {
-            self.funcs.insert(key.clone(), glue);
+        Ok(self.glue_function(op.instance(ty), |m| op.sealed(m, ty).1))
+    }
+    /// The signature-only row of generated glue at `key`, made on first mention. Glue's
+    /// constructor emits its fixed convention directly: it has no source carriage for
+    /// seal to convert, so `sealed` is its source signature too, interned with every
+    /// other.
+    fn glue_function(
+        &mut self,
+        key: InstanceKey,
+        sealed: impl FnOnce(&Module) -> Signature,
+    ) -> FuncId {
+        if let Some(&f) = self.funcs.get(&key) {
+            return f;
         }
-        Ok(glue)
+        let signature = self.sig(sealed(&self.module));
+        let instance = InstanceId(self.module.instances.len() as u32);
+        self.module.instances.push(key.clone());
+        let f = FuncId(self.module.functions.len() as u32);
+        self.module.functions.push(Function {
+            instance,
+            signature,
+            body: None,
+            versioned: false,
+        });
+        self.source_signatures.remember(f, signature);
+        self.funcs.insert(key, f);
+        f
     }
     fn add_function_abi(
         &mut self,
@@ -483,10 +494,6 @@ impl Emitter {
     ) -> FuncId {
         crate::cost_scope!("instance row request", format!("{key:?}"));
         if let Some(&f) = self.funcs.get(&key) {
-            if self.source_signatures.get(f).is_none() {
-                let signature = self.sig_abi(sig, abi);
-                self.source_signatures.remember(f, signature);
-            }
             return f;
         }
         let versioned = sig.has_vectors();
@@ -1941,6 +1948,9 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             return None;
         }
         let result = self.value(t);
+        if bits == 1 && t == Ty::Scalar(Scalar::U64) {
+            self.growth.recent_one = Some(result);
+        }
         self.inst(Inst::Const { result, bits }, n);
         Some(result)
     }
@@ -2376,6 +2386,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             .resolution
             .binders;
         let fd = self.fd.clone();
+        let mut written_parameters = vec![];
         for (parameter_index, pd) in fd.params.iter().enumerate() {
             let v = match self.ir_ty(pd.ty) {
                 _ if pd.mode == Mode::Mut && k < entry_params.len() => {
@@ -2458,7 +2469,13 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
                 self.has_callback_parameters |= self.contains_callback(pd.ty);
                 self.parameter_anchors(b.id, pd.ty, pd.mode, parameter_index as u32);
                 self.own(b.id, body);
+                written_parameters.push((parameter_index, b.id, pd.ty, pd.mode));
             }
+        }
+        // A formal whose written type names anchors (`take b: Body in input`) has
+        // that anchor set (OWN-19), which may name a later parameter.
+        for (index, slot, ty, mode) in written_parameters {
+            self.written_parameter_anchors(index, slot, ty, mode);
         }
         // A clone body builds its result in a local destination (`clone_return`).
         if self.fd.clone_of.is_some() && self.live() {

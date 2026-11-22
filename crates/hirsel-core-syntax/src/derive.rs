@@ -442,13 +442,25 @@ impl<'a> File<'a> {
         if !matches!(self.kind(root), NodeKind::TypeDecl) {
             return None;
         }
+        let children = self.children(root);
+        let bounds = children
+            .iter()
+            .rev()
+            .copied()
+            .find(|&c| self.kind(c) == NodeKind::Bounds)?;
+        if !self
+            .children(bounds)
+            .iter()
+            .any(|&b| self.name(b) == "codec")
+        {
+            return None;
+        }
         let mut generics = vec![];
-        let mut codec = false;
         let mut body = None;
         let mut via = None;
         let mut mentions = BTreeSet::new();
         let mut wire = BTreeSet::new();
-        for &c in self.children(root) {
+        for &c in children {
             match self.kind(c) {
                 NodeKind::Generics => {
                     for &g in self.children(c) {
@@ -458,9 +470,6 @@ impl<'a> File<'a> {
                         let bounds = self.children(g).first().map(|&b| self.text(item, b));
                         generics.push((self.name(g), bounds));
                     }
-                }
-                NodeKind::Bounds => {
-                    codec = self.children(c).iter().any(|&b| self.name(b) == "codec");
                 }
                 NodeKind::CodecVia => {
                     let v = self.children(c);
@@ -520,7 +529,7 @@ impl<'a> File<'a> {
         Some(Decl {
             name: self.name(root),
             generics,
-            body: body.filter(|_| codec)?,
+            body: body?,
             via,
             mentions,
         })

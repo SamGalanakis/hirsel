@@ -777,7 +777,7 @@ impl Driver {
         for p in &request.inputs.packages {
             p.intern(&mut symbols);
         }
-        let mut modules = vec![];
+        let mut modules = Vec::with_capacity(sources.len());
         let mut syntax_diagnostics = vec![];
         let mut syntax_resources = vec![];
         for (file, (path, mode, bytes, _, _)) in sources.iter().enumerate() {
@@ -795,14 +795,14 @@ impl Driver {
             if let Some(r) = output.resource_refusal {
                 syntax_resources.push((file, r.site(), format!("parser resource refusal: {r}")));
             }
-            modules.push((path, output.syntax));
+            modules.push(output.syntax);
         }
         meter.finish("parse");
         if MEASURE {
             meter.result.source_bytes += bytes_total as u64;
             meter.result.tokens += modules
                 .iter()
-                .map(|(_, syntax)| {
+                .map(|syntax| {
                     syntax
                         .tree
                         .tokens
@@ -822,11 +822,14 @@ impl Driver {
             |i| i.index.as_ref().clone(),
         );
         index.symbols = symbols;
-        index.add_manifests(&resolution_inputs.packages);
+        // Both traversals follow the request's package and source order.
+        // Manifests retained from the image have no sources in this request.
+        let module_ids = index.add_manifests(&resolution_inputs.packages);
         let modules: Vec<_> = modules
             .into_iter()
-            .map(|(path, syntax)| ModuleInput {
-                id: index.module(path).unwrap(),
+            .zip(module_ids)
+            .map(|(syntax, id)| ModuleInput {
+                id,
                 source: index.add_source(),
                 syntax,
             })

@@ -134,6 +134,38 @@ pub fn node_child[K: ordered + shareable + send, V: shareable + send](n: Arc[Nod
     }
 }
 
+/// MEM-24 storage of one tree. Entry-owned allocations are counted by its owner.
+pub fn storage_charge[K: ordered + shareable + send, V: shareable + send](m: OMap[K, V], key_bytes: u64, value_bytes: u64) -> u64 {
+    match m.head {
+        Some(node) => node_storage_charge(node, key_bytes, value_bytes),
+        None => 0,
+    }
+}
+
+fn storage_round(total: u64) -> u64 {
+    int.saturating_add(total, 7) & 0xfffffffffffffff8u64
+}
+
+fn node_storage_charge[K: ordered + shareable + send, V: shareable + send](n: Arc[Node[K, V]], key_bytes: u64, value_bytes: u64) -> u64 {
+    // Three u64s, two List headers, an optional Arc, and the counted header.
+    let mut total = 96 + 8 * (list.capacity(n.rows) + list.capacity(n.kids))
+    let entry_bytes = storage_round(int.saturating_add(8, int.saturating_add(key_bytes, value_bytes)))
+    total = int.saturating_add(total, int.saturating_mul(list.len(n.rows), entry_bytes))
+    if let Some(lows) = n.lows {
+        // The counted List and its 16-byte tagged separators.
+        total = int.saturating_add(total, 32 + 16 * list.capacity(lows))
+        for slot in 0u64 .. list.len(lows) {
+            if let Decoded(_) = lows[slot] {
+                total = int.saturating_add(total, storage_round(int.saturating_add(8, key_bytes)))
+            }
+        }
+    }
+    for child in n.kids {
+        total = int.saturating_add(total, node_storage_charge(child, key_bytes, value_bytes))
+    }
+    total
+}
+
 /// Construct a decoded leaf with its recorded id. No order or fan-out checks.
 /// Payloads are copied into node lists; a refusal raises Capacity.
 pub fn leaf[K: ordered + shareable + send, V: shareable + send](id: u64, keys: List[K], values: List[V]) -> Arc[Node[K, V]] {

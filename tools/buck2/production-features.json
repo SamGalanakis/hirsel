@@ -4,6 +4,7 @@
   "features": {
     "hirsel-core-front/cost-profile": "test-only",
     "hirsel-core-ir/eval": "test-only",
+    "hirsel-core-ir/map-observation": "test-only",
     "hirsel-core-rt/testing": "test-only",
     "hirsel-core-rt/memcheck": "test-only",
     "hirsel-core-rt/allocation-count": "test-only",

@@ -22,6 +22,9 @@
 //! root alone, and its helpers are not recorded.
 #[path = "unit_memory.rs"]
 mod memory;
+#[cfg(feature = "testing")]
+#[path = "units_observe.rs"]
+pub(crate) mod observe;
 use memory::UnitStack;
 pub(crate) use memory::{Memory, SharedMemory};
 #[cfg(test)]
@@ -265,6 +268,10 @@ enum After {
 
 pub(crate) struct Unit {
     id: u32,
+    #[cfg(feature = "testing")]
+    observed_queue_ns: AtomicU64,
+    #[cfg(feature = "testing")]
+    observed_queue_cpu: AtomicU32,
     sp: UnsafeCell<*mut u8>,
     /// The running worker's host stack slot.
     host: UnsafeCell<*mut *mut u8>,
@@ -500,6 +507,10 @@ fn new_unit(id: u32, helper: bool) -> Box<Unit> {
     let config = BASE.get().unwrap().0;
     Box::new(Unit {
         id,
+        #[cfg(feature = "testing")]
+        observed_queue_ns: AtomicU64::new(0),
+        #[cfg(feature = "testing")]
+        observed_queue_cpu: AtomicU32::new(u32::MAX),
         sp: UnsafeCell::new(std::ptr::null_mut()),
         host: UnsafeCell::new(std::ptr::null_mut()),
         stack: UnsafeCell::new(None),
@@ -825,6 +836,8 @@ fn shared_unit() -> Option<u32> {
 const LIFO_RUNS: u32 = 3;
 const INJECTOR_EVERY: u32 = 61;
 fn enqueue(p: &Pool, u: &Unit) {
+    #[cfg(feature = "testing")]
+    observe::queued(u);
     let ix = worker_ix();
     if ix < p.w && p.lifo_on && !cur().is_null() {
         #[cfg(test)]
@@ -1282,6 +1295,8 @@ fn find(p: &Pool, ix: usize) -> Option<UP> {
         TURNS.set(0);
         if let Some(u) = p.injector.lock().unwrap().pop_front() {
             p.queued.fetch_sub(1, Ordering::SeqCst);
+            #[cfg(feature = "testing")]
+            observe::found(observe::Queue::Injector);
             return Some(u);
         }
     }
@@ -1292,12 +1307,16 @@ fn find(p: &Pool, ix: usize) -> Option<UP> {
         if runs < LIFO_RUNS {
             p.lifo_runs[ix].store(runs + 1, Ordering::Relaxed);
             bump_host(S_LIFO);
+            #[cfg(feature = "testing")]
+            observe::found(observe::Queue::Private);
             return Some(UP(l));
         }
         // Out of private runs. Take the slot only when this worker's
         // queue is empty, as it would come first there.
         if p.locals[ix].lock().unwrap().is_empty() {
             p.lifo_runs[ix].store(0, Ordering::Relaxed);
+            #[cfg(feature = "testing")]
+            observe::found(observe::Queue::Private);
             return Some(UP(l));
         }
         publish(p, &p.locals[ix], UP(l));
@@ -1314,9 +1333,13 @@ fn find(p: &Pool, ix: usize) -> Option<UP> {
         Some(u)
     };
     if let Some(u) = p.locals[ix].lock().unwrap().pop_front() {
+        #[cfg(feature = "testing")]
+        observe::found(observe::Queue::Local);
         return taken(u);
     }
     if let Some(u) = p.injector.lock().unwrap().pop_front() {
+        #[cfg(feature = "testing")]
+        observe::found(observe::Queue::Injector);
         return taken(u);
     }
     for j in 1..p.w {
@@ -1327,6 +1350,8 @@ fn find(p: &Pool, ix: usize) -> Option<UP> {
             if let Some(u) = q.pop_back() {
                 drop(q);
                 bump_host(S_STEALS);
+                #[cfg(feature = "testing")]
+                observe::found(observe::Queue::Stolen);
                 return taken(u);
             }
         }
@@ -1356,6 +1381,8 @@ unsafe fn run_unit(p: &Pool, ix: usize, up: UP, host: &mut *mut u8) {
     // SAFETY: the dequeued record is live; this worker alone dequeued it.
     unsafe {
         let u = &*up.0;
+        #[cfg(feature = "testing")]
+        let entry_ns = if observe::enabled() { now() } else { 0 };
         if (*u.sp.get()).is_null() {
             start_stack(p, u);
             if WORKER_IX.get() != ix {
@@ -1373,6 +1400,10 @@ unsafe fn run_unit(p: &Pool, ix: usize, up: UP, host: &mut *mut u8) {
             std::process::abort();
         }
         bump_host(S_RESUMES);
+        #[cfg(feature = "testing")]
+        if entry_ns != 0 {
+            observe::enter(u, ix, entry_ns);
+        }
         // Any park this entry ends is over: its deadline no longer applies.
         clear_timer(p, u);
         CUR.set(up.0.cast_mut());
@@ -1420,6 +1451,8 @@ unsafe fn run_unit(p: &Pool, ix: usize, up: UP, host: &mut *mut u8) {
                 }
             }
             After::Yield => {
+                #[cfg(feature = "testing")]
+                observe::queued(u);
                 u.state.swap(QUEUED, Ordering::SeqCst);
                 let q = if WORKER_IX.get() == ix {
                     &p.injector
@@ -1438,6 +1471,8 @@ unsafe fn run_unit(p: &Pool, ix: usize, up: UP, host: &mut *mut u8) {
                 {
                     // Woken while it ran: run it again.
                     bump_host(S_NOTIFIED_REQUEUE);
+                    #[cfg(feature = "testing")]
+                    observe::queued(u);
                     u.state.swap(QUEUED, Ordering::SeqCst);
                     publish(p, &p.locals[ix], up);
                 }
@@ -1606,6 +1641,8 @@ fn worker_main(p: &'static Pool, mut slot: Option<usize>, mut spare: Option<Arc<
         slot = spare.wait(p);
     }
     merge_stats();
+    #[cfg(feature = "testing")]
+    observe::flush();
 }
 
 fn merge_stats() {

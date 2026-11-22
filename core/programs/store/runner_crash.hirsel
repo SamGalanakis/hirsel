@@ -200,7 +200,7 @@ fn resends(scenario: View[String]) -> (List[Pos], u64) {
 
 fn options() -> store.Options {
     let mut o = store.defaults()
-    o.checkpoint_task_bytes = 1048576u64
+
     o.resident_limit = 1048576u64
     o.pack_bytes = 512u64
     o.group_commits = 2u32

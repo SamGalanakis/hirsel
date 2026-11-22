@@ -88,7 +88,16 @@ fn identity_stable() {
             break;
         }
     }
-    assert_eq!(first.len(), 64);
+    // FIPS 180-4 over the whole launched file, from ring's independent SHA-256;
+    // the image spans many of the launcher's hashing windows.
+    let image = std::fs::read(&child_path).unwrap();
+    assert!(image.len() > 4 << 20);
+    let expected: String = crate::os_tls::sha256(&image)
+        .as_ref()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    assert_eq!(first, expected);
     let replacement = directory.path().join("replacement");
     std::fs::write(&replacement, b"a different executable on disk").unwrap();
     std::fs::rename(replacement, &child_path).unwrap();

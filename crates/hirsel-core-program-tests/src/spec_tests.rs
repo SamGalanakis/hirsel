@@ -428,19 +428,29 @@ fn evaluate(
 
 #[test]
 fn every_live_spec_fence_checks_its_claim() {
-    let mut paths = fs::read_dir(repo().join("docs/spec"))
+    let spec = repo().join("docs/spec");
+    let mut paths = fs::read_dir(&spec)
         .unwrap()
         .map(|entry| entry.unwrap().path())
         .filter(|path| path.extension().is_some_and(|e| e == "md"))
         .collect::<Vec<_>>();
     paths.sort();
     let primer = repo().join("docs/PRIMER.md");
+    let unicode = spec.join("unicode.md");
     paths.push(primer.clone());
     let (mut failures, mut unbuilt) = (Vec::new(), 0);
     let fences = paths
         .iter()
-        // `hirsel new` declares std, whose extensions are also visible through core module names.
-        .flat_map(|path| read_fences(path, path == &primer, &mut failures, &mut unbuilt))
+        // The primer starts with `hirsel new` (which declares std), and Unicode
+        // documents std extensions under the core names `char` and `string`.
+        .flat_map(|path| {
+            read_fences(
+                path,
+                path == &primer || path == &unicode,
+                &mut failures,
+                &mut unbuilt,
+            )
+        })
         .collect::<Vec<_>>();
     let refused = fences
         .iter()

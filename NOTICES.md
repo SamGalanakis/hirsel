@@ -11,7 +11,8 @@ Code Hirsel adapts into its own sources is listed in [third-party/NOTICES.md](th
 | `hirsel` | the compiler | Hirsel; the Rust standard library; crates linked into `hirsel`, below |
 | `runtime/*/*/libhirsel_core_rt.a` | the runtime archive a program links, per target | Hirsel; the Rust standard library; crates linked into `runtime/*/*/libhirsel_core_rt.a`, below |
 | `hirsel-core-toolchain.json` | the installation record | Hirsel |
-| `link/*.json` | the host link recipe | Hirsel |
+| `link/*.json` | the bundle-relative link recipe | Hirsel |
+| `link/kit/*` | glibc 2.28 startup objects and link-only stubs, LLVM CRT and libunwind | `link-kit-glibc`, `link-kit-llvm` |
 | `core-packages/*` | the core and std package images (Hirsel sources and their checked and compiled products) | Hirsel |
 | `lib/libLLVM.so.23.1` | the compiler's LLVM library (tools/native-toolchain/build-libllvm) | native component `engine_llvm`, below |
 | `bin/ld.lld` | the linker, a static PIE (tools/native-toolchain/build-static-lld) | native component `static_lld`, below |
@@ -156,7 +157,7 @@ Every registry package in Cargo.lock that the shipped files' workspace packages 
 
 ### `bin/ld.lld`
 
-llvm-23.lock `static_lld`: `ld.lld-23.1.5-static-pie-x86_64`, 77075264 bytes, SHA-256 `489d53bcce4038f070453dbcf4eb251d1492e5e7bd04787ced7f79ef4529833d`. Built from https://github.com/SamGalanakis/hirsel-lang/releases/download/toolchain-llvm-23.1.5/llvm-project-23.1.5.src.tar.xz (SHA-256 `51f5bf7d7af1c72e1b16eb48bf14872a6e7bf6be0dc3d3b5d6a04386e70e88d5`), whose notices follow. Runtimes linked statically: glibc, gcc. A static PIE: it contains the build host's glibc (libc.a, libm.a; LGPL-2.1-or-later) and libstdc++, libgcc and libgcc_eh (GPL-3.0-or-later with the GCC Runtime Library Exception).
+llvm-23.lock `static_lld`: `ld.lld-23.1.5-static-pie-manylinux_2_28-x86_64`, 79508536 bytes, SHA-256 `ac8db179571813f67e823c6ebf69a9ed8f5eeae941546cc0a74fea2b22a2d679`. Built from https://github.com/SamGalanakis/hirsel-lang/releases/download/toolchain-llvm-23.1.5/llvm-project-23.1.5.src.tar.xz (SHA-256 `51f5bf7d7af1c72e1b16eb48bf14872a6e7bf6be0dc3d3b5d6a04386e70e88d5`), whose notices follow. Runtimes linked statically: glibc, gcc. A static PIE built in manylinux_2_28. It includes AlmaLinux's static glibc and GCC Toolset 14 libstdc++, libgcc and libgcc_eh.
 
 | Source file | SHA-256 |
 |---|---|
@@ -190,7 +191,7 @@ llvm-23.lock `static_lld`: `ld.lld-23.1.5-static-pie-x86_64`, 77075264 bytes, SH
 
 ### `lib/libLLVM.so.23.1`
 
-llvm-23.lock `engine_llvm`: `libLLVM-23.1.5-engine-x86_64.so`, 95114608 bytes, SHA-256 `7cdd9a4d59f3f4efa35e17427fecefd80d53cbc3bedd4b7f1c49e3676a154312`. Built from https://github.com/SamGalanakis/hirsel-lang/releases/download/toolchain-llvm-23.1.5/llvm-project-23.1.5.src.tar.xz (SHA-256 `51f5bf7d7af1c72e1b16eb48bf14872a6e7bf6be0dc3d3b5d6a04386e70e88d5`), whose notices follow. Runtimes linked statically: glibc, gcc. Linked by the pinned clang and lld against the build host's glibc and GCC; the startup objects, libgcc and libc_nonshared parts linked into it are covered conservatively by both runtimes' texts. libz, libstdc++, libm, libgcc_s and libc are loaded from the host.
+llvm-23.lock `engine_llvm`: `libLLVM-23.1.5-engine-manylinux_2_28-x86_64.so`, 94921024 bytes, SHA-256 `34e9c29b5f54adc2b74ccc8b52e3080c9d5f55da51b8d84da2a8fdec02cb19d7`. Built from https://github.com/SamGalanakis/hirsel-lang/releases/download/toolchain-llvm-23.1.5/llvm-project-23.1.5.src.tar.xz (SHA-256 `51f5bf7d7af1c72e1b16eb48bf14872a6e7bf6be0dc3d3b5d6a04386e70e88d5`), whose notices follow. Runtimes linked statically: glibc, gcc. Linked by clang and lld in manylinux_2_28 against AlmaLinux's glibc and GCC Toolset 14. These notices cover the startup objects and the libgcc, libstdc++ and libc_nonshared parts linked into the library.
 
 | Source file | SHA-256 |
 |---|---|
@@ -221,30 +222,49 @@ llvm-23.lock `engine_llvm`: `libLLVM-23.1.5-engine-x86_64.so`, 95114608 bytes, S
 | `llvm/lib/Transforms/Utils/LowerCommentStringPass.cpp` | `32efac8529ff3b355a215f5df6df7b3de6bdc470f45144ed8aca0ac0f4f1929d` |
 | `llvm/lib/Transforms/Utils/SCCPSolver.cpp` | `db491fca6872d48e1b7bf86a21e9f2644f8e6c1681c33643126c507d7d59d30b` |
 
-## C and C++ runtimes linked statically
+## C and C++ runtime notices
 
 ### gcc
 
-Ubuntu 24.04 gcc-13-base (libstdc++-13-dev, libgcc-13-dev) 13.3.0-6ubuntu2~24.04.1. The corresponding source is Ubuntu's gcc-13 13.3.0-6ubuntu2~24.04.1 source package; the GCC Runtime Library Exception (in the copyright file) applies.
+AlmaLinux 8.10 in manylinux_2_28 gcc-toolset-14-gcc and gcc-toolset-14-libstdc++-devel 14.2.1-11.el8_10. Corresponding source: https://vault.almalinux.org/8.10/AppStream/Source/Packages/gcc-toolset-14-gcc-14.2.1-11.el8_10.src.rpm. The GCC Runtime Library Exception applies.
 
 | Text | From | SHA-256 |
 |---|---|---|
-| [`tools/toolchain-dist/licenses/common-licenses/GPL-3`](tools/toolchain-dist/licenses/common-licenses/GPL-3) | `/usr/share/common-licenses/GPL-3` | `3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986` |
-| [`tools/toolchain-dist/licenses/gcc-13-base.copyright`](tools/toolchain-dist/licenses/gcc-13-base.copyright) | `/usr/share/doc/gcc-13-base/copyright` | `08c6f3dee4c19aa1e57eb7d4ad45829b2e99656313bd07fa0922e2553f500be5` |
+| [`tools/toolchain-dist/licenses/almalinux-gcc-toolset-14/COPYING.RUNTIME`](tools/toolchain-dist/licenses/almalinux-gcc-toolset-14/COPYING.RUNTIME) | `/opt/rh/gcc-toolset-14/root/usr/share/doc/gcc-toolset-14-gcc/COPYING.RUNTIME` | `28e85c5aa4af9b4f1dfe6b4817aa3eefb3eaaee7fd735045016f29ccf50276a1` |
+| [`tools/toolchain-dist/licenses/almalinux-gcc-toolset-14/COPYING3`](tools/toolchain-dist/licenses/almalinux-gcc-toolset-14/COPYING3) | `/opt/rh/gcc-toolset-14/root/usr/share/doc/gcc-toolset-14-gcc/COPYING3` | `8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903` |
 
 ### glibc
 
-Ubuntu 24.04 libc6-dev 2.39-0ubuntu8.12. The corresponding source is Ubuntu's glibc 2.39-0ubuntu8.12 source package. The rest of each component is built from the locked LLVM source archive by its build script (tools/native-toolchain/build-static-lld with static-lld-elf-only.patch, or build-libllvm), so a recipient can rebuild and relink it against a modified glibc.
+AlmaLinux 8.10 in manylinux_2_28 glibc-devel and glibc-static 2.28-251.el8_10.53. Corresponding source: https://vault.almalinux.org/8.10/BaseOS/Source/Packages/glibc-2.28-251.el8_10.53.src.rpm. See tools/native-toolchain/build-static-lld and build-libllvm for rebuilding and relinking the components.
+
+| Text | From | SHA-256 |
+|---|---|---|
+| [`tools/toolchain-dist/licenses/almalinux-glibc/COPYING`](tools/toolchain-dist/licenses/almalinux-glibc/COPYING) | `/usr/share/licenses/glibc/COPYING` | `8177f97513213526df2cf6184d8ff986c675afb514d4e68a404010521b880643` |
+| [`tools/toolchain-dist/licenses/almalinux-glibc/COPYING.LIB`](tools/toolchain-dist/licenses/almalinux-glibc/COPYING.LIB) | `/usr/share/licenses/glibc/COPYING.LIB` | `dc626520dcd53a22f727af3ee42c770e56c97a64fe3adb063799d8ab032fe551` |
+| [`tools/toolchain-dist/licenses/almalinux-glibc/LICENSES`](tools/toolchain-dist/licenses/almalinux-glibc/LICENSES) | `/usr/share/licenses/glibc/LICENSES` | `35bdb41dc0bcb10702ddacbd51ec4c0fe6fb3129f734e8c85fc02e4d3eb0ce3f` |
+
+### link-kit-glibc
+
+Debian 10 libc6 and libc6-dev 2.28-10+deb10u1. Corresponding source: https://archive.debian.org/debian/pool/main/g/glibc/glibc_2.28-10+deb10u1.dsc. tools/buck2/native-toolchain/link_kit.py derives the link-only stubs from the pinned release and copies its startup objects and libc_nonshared archive.
 
 | Text | From | SHA-256 |
 |---|---|---|
 | [`tools/toolchain-dist/licenses/common-licenses/GPL-2`](tools/toolchain-dist/licenses/common-licenses/GPL-2) | `/usr/share/common-licenses/GPL-2` | `8177f97513213526df2cf6184d8ff986c675afb514d4e68a404010521b880643` |
 | [`tools/toolchain-dist/licenses/common-licenses/LGPL-2.1`](tools/toolchain-dist/licenses/common-licenses/LGPL-2.1) | `/usr/share/common-licenses/LGPL-2.1` | `dc626520dcd53a22f727af3ee42c770e56c97a64fe3adb063799d8ab032fe551` |
-| [`tools/toolchain-dist/licenses/libc6-dev.copyright`](tools/toolchain-dist/licenses/libc6-dev.copyright) | `/usr/share/doc/libc6-dev/copyright` | `d3c95b56fa33e28b57860580f0baf4e4f4de2a268a2b80f1d031a5191bade265` |
+| [`tools/toolchain-dist/licenses/link-kit/libc6-dev.copyright`](tools/toolchain-dist/licenses/link-kit/libc6-dev.copyright) | `/usr/share/doc/libc6-dev/copyright` | `40c7e1f2118531f038ca22999bd976901254e1bc5cd1b0f0211bdd064c599987` |
+
+### link-kit-llvm
+
+LLVM compiler-rt and libunwind 23.1.5. The locked LLVM source archive supplies the CRT objects and the LLVM unwinder selected by the kit’s libgcc_s.so linker script. The Apache 2.0 license with LLVM exceptions and the upstream alternatives appear in the shipped texts.
+
+| Text | From | SHA-256 |
+|---|---|---|
+| [`tools/toolchain-dist/licenses/link-kit/compiler-rt-LICENSE.TXT`](tools/toolchain-dist/licenses/link-kit/compiler-rt-LICENSE.TXT) | `compiler-rt/LICENSE.TXT` | `1a8f1058753f1ba890de984e48f0242a3a5c29a6a8f2ed9fd813f36985387e8d` |
+| [`tools/toolchain-dist/licenses/link-kit/libunwind-LICENSE.TXT`](tools/toolchain-dist/licenses/link-kit/libunwind-LICENSE.TXT) | `libunwind/LICENSE.TXT` | `b5efebcaca80879234098e52d1725e6d9eb8fb96a19fce625d39184b705f7b6d` |
 
 ## Not shipped
 
-- Host loader, libc, libm, libgcc_s, libstdc++ and libz (the DT_NEEDED libraries of hirsel and lib/libLLVM.so.23.1): System dependencies, not copied into the installation.
+- Host loader, libc, libm, libdl, libpthread, librt, libgcc_s, libstdc++ and libz: System dependencies, not copied into the installation.
 
 ## Inventory
 
@@ -1250,7 +1270,7 @@ Ubuntu 24.04 libc6-dev 2.39-0ubuntu8.12. The corresponding source is Ubuntu's gl
  ],
  "external": [
   {
-   "component": "Host loader, libc, libm, libgcc_s, libstdc++ and libz (the DT_NEEDED libraries of hirsel and lib/libLLVM.so.23.1)",
+   "component": "Host loader, libc, libm, libdl, libpthread, librt, libgcc_s, libstdc++ and libz",
    "status": "System dependencies, not copied into the installation."
   }
  ],
@@ -1272,8 +1292,16 @@ Ubuntu 24.04 libc6-dev 2.39-0ubuntu8.12. The corresponding source is Ubuntu's gl
    "path": "hirsel-core-toolchain.json"
   },
   {
-   "contents": "the host link recipe",
+   "contents": "the bundle-relative link recipe",
    "path": "link/*.json"
+  },
+  {
+   "contents": "glibc 2.28 startup objects and link-only stubs, LLVM CRT and libunwind",
+   "path": "link/kit/*",
+   "runtimes": [
+    "link-kit-glibc",
+    "link-kit-llvm"
+   ]
   },
   {
    "contents": "the core and std package images (Hirsel sources and their checked and compiled products)",
@@ -1296,27 +1324,50 @@ Ubuntu 24.04 libc6-dev 2.39-0ubuntu8.12. The corresponding source is Ubuntu's gl
  ],
  "host_runtimes": {
   "gcc": {
-   "distribution": "Ubuntu 24.04",
-   "package": "gcc-13-base (libstdc++-13-dev, libgcc-13-dev)",
-   "source": "The corresponding source is Ubuntu's gcc-13 13.3.0-6ubuntu2~24.04.1 source package; the GCC Runtime Library Exception (in the copyright file) applies.",
+   "distribution": "AlmaLinux 8.10 in manylinux_2_28",
+   "package": "gcc-toolset-14-gcc and gcc-toolset-14-libstdc++-devel",
+   "source": "Corresponding source: https://vault.almalinux.org/8.10/AppStream/Source/Packages/gcc-toolset-14-gcc-14.2.1-11.el8_10.src.rpm. The GCC Runtime Library Exception applies.",
    "texts": [
     {
-     "path": "tools/toolchain-dist/licenses/common-licenses/GPL-3",
-     "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986",
-     "upstream": "/usr/share/common-licenses/GPL-3"
+     "path": "tools/toolchain-dist/licenses/almalinux-gcc-toolset-14/COPYING.RUNTIME",
+     "sha256": "28e85c5aa4af9b4f1dfe6b4817aa3eefb3eaaee7fd735045016f29ccf50276a1",
+     "upstream": "/opt/rh/gcc-toolset-14/root/usr/share/doc/gcc-toolset-14-gcc/COPYING.RUNTIME"
     },
     {
-     "path": "tools/toolchain-dist/licenses/gcc-13-base.copyright",
-     "sha256": "08c6f3dee4c19aa1e57eb7d4ad45829b2e99656313bd07fa0922e2553f500be5",
-     "upstream": "/usr/share/doc/gcc-13-base/copyright"
+     "path": "tools/toolchain-dist/licenses/almalinux-gcc-toolset-14/COPYING3",
+     "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903",
+     "upstream": "/opt/rh/gcc-toolset-14/root/usr/share/doc/gcc-toolset-14-gcc/COPYING3"
     }
    ],
-   "version": "13.3.0-6ubuntu2~24.04.1"
+   "version": "14.2.1-11.el8_10"
   },
   "glibc": {
-   "distribution": "Ubuntu 24.04",
-   "package": "libc6-dev",
-   "source": "The corresponding source is Ubuntu's glibc 2.39-0ubuntu8.12 source package. The rest of each component is built from the locked LLVM source archive by its build script (tools/native-toolchain/build-static-lld with static-lld-elf-only.patch, or build-libllvm), so a recipient can rebuild and relink it against a modified glibc.",
+   "distribution": "AlmaLinux 8.10 in manylinux_2_28",
+   "package": "glibc-devel and glibc-static",
+   "source": "Corresponding source: https://vault.almalinux.org/8.10/BaseOS/Source/Packages/glibc-2.28-251.el8_10.53.src.rpm. See tools/native-toolchain/build-static-lld and build-libllvm for rebuilding and relinking the components.",
+   "texts": [
+    {
+     "path": "tools/toolchain-dist/licenses/almalinux-glibc/COPYING",
+     "sha256": "8177f97513213526df2cf6184d8ff986c675afb514d4e68a404010521b880643",
+     "upstream": "/usr/share/licenses/glibc/COPYING"
+    },
+    {
+     "path": "tools/toolchain-dist/licenses/almalinux-glibc/COPYING.LIB",
+     "sha256": "dc626520dcd53a22f727af3ee42c770e56c97a64fe3adb063799d8ab032fe551",
+     "upstream": "/usr/share/licenses/glibc/COPYING.LIB"
+    },
+    {
+     "path": "tools/toolchain-dist/licenses/almalinux-glibc/LICENSES",
+     "sha256": "35bdb41dc0bcb10702ddacbd51ec4c0fe6fb3129f734e8c85fc02e4d3eb0ce3f",
+     "upstream": "/usr/share/licenses/glibc/LICENSES"
+    }
+   ],
+   "version": "2.28-251.el8_10.53"
+  },
+  "link-kit-glibc": {
+   "distribution": "Debian 10",
+   "package": "libc6 and libc6-dev",
+   "source": "Corresponding source: https://archive.debian.org/debian/pool/main/g/glibc/glibc_2.28-10+deb10u1.dsc. tools/buck2/native-toolchain/link_kit.py derives the link-only stubs from the pinned release and copies its startup objects and libc_nonshared archive.",
    "texts": [
     {
      "path": "tools/toolchain-dist/licenses/common-licenses/GPL-2",
@@ -1329,22 +1380,40 @@ Ubuntu 24.04 libc6-dev 2.39-0ubuntu8.12. The corresponding source is Ubuntu's gl
      "upstream": "/usr/share/common-licenses/LGPL-2.1"
     },
     {
-     "path": "tools/toolchain-dist/licenses/libc6-dev.copyright",
-     "sha256": "d3c95b56fa33e28b57860580f0baf4e4f4de2a268a2b80f1d031a5191bade265",
+     "path": "tools/toolchain-dist/licenses/link-kit/libc6-dev.copyright",
+     "sha256": "40c7e1f2118531f038ca22999bd976901254e1bc5cd1b0f0211bdd064c599987",
      "upstream": "/usr/share/doc/libc6-dev/copyright"
     }
    ],
-   "version": "2.39-0ubuntu8.12"
+   "version": "2.28-10+deb10u1"
+  },
+  "link-kit-llvm": {
+   "distribution": "LLVM",
+   "package": "compiler-rt and libunwind",
+   "source": "The locked LLVM source archive supplies the CRT objects and the LLVM unwinder selected by the kit\u2019s libgcc_s.so linker script. The Apache 2.0 license with LLVM exceptions and the upstream alternatives appear in the shipped texts.",
+   "texts": [
+    {
+     "path": "tools/toolchain-dist/licenses/link-kit/compiler-rt-LICENSE.TXT",
+     "sha256": "1a8f1058753f1ba890de984e48f0242a3a5c29a6a8f2ed9fd813f36985387e8d",
+     "upstream": "compiler-rt/LICENSE.TXT"
+    },
+    {
+     "path": "tools/toolchain-dist/licenses/link-kit/libunwind-LICENSE.TXT",
+     "sha256": "b5efebcaca80879234098e52d1725e6d9eb8fb96a19fce625d39184b705f7b6d",
+     "upstream": "libunwind/LICENSE.TXT"
+    }
+   ],
+   "version": "23.1.5"
   }
  },
  "native": [
   {
-   "asset": "ld.lld-23.1.5-static-pie-x86_64",
+   "asset": "ld.lld-23.1.5-static-pie-manylinux_2_28-x86_64",
    "lock": "static_lld",
-   "note": "A static PIE: it contains the build host's glibc (libc.a, libm.a; LGPL-2.1-or-later) and libstdc++, libgcc and libgcc_eh (GPL-3.0-or-later with the GCC Runtime Library Exception).",
+   "note": "A static PIE built in manylinux_2_28. It includes AlmaLinux's static glibc and GCC Toolset 14 libstdc++, libgcc and libgcc_eh.",
    "path": "bin/ld.lld",
-   "sha256": "489d53bcce4038f070453dbcf4eb251d1492e5e7bd04787ced7f79ef4529833d",
-   "size": 77075264,
+   "sha256": "ac8db179571813f67e823c6ebf69a9ed8f5eeae941546cc0a74fea2b22a2d679",
+   "size": 79508536,
    "source": {
     "sha256": "51f5bf7d7af1c72e1b16eb48bf14872a6e7bf6be0dc3d3b5d6a04386e70e88d5",
     "url": "https://github.com/SamGalanakis/hirsel-lang/releases/download/toolchain-llvm-23.1.5/llvm-project-23.1.5.src.tar.xz"
@@ -1465,12 +1534,12 @@ Ubuntu 24.04 libc6-dev 2.39-0ubuntu8.12. The corresponding source is Ubuntu's gl
    ]
   },
   {
-   "asset": "libLLVM-23.1.5-engine-x86_64.so",
+   "asset": "libLLVM-23.1.5-engine-manylinux_2_28-x86_64.so",
    "lock": "engine_llvm",
-   "note": "Linked by the pinned clang and lld against the build host's glibc and GCC; the startup objects, libgcc and libc_nonshared parts linked into it are covered conservatively by both runtimes' texts. libz, libstdc++, libm, libgcc_s and libc are loaded from the host.",
+   "note": "Linked by clang and lld in manylinux_2_28 against AlmaLinux's glibc and GCC Toolset 14. These notices cover the startup objects and the libgcc, libstdc++ and libc_nonshared parts linked into the library.",
    "path": "lib/libLLVM.so.23.1",
-   "sha256": "7cdd9a4d59f3f4efa35e17427fecefd80d53cbc3bedd4b7f1c49e3676a154312",
-   "size": 95114608,
+   "sha256": "34e9c29b5f54adc2b74ccc8b52e3080c9d5f55da51b8d84da2a8fdec02cb19d7",
+   "size": 94921024,
    "source": {
     "sha256": "51f5bf7d7af1c72e1b16eb48bf14872a6e7bf6be0dc3d3b5d6a04386e70e88d5",
     "url": "https://github.com/SamGalanakis/hirsel-lang/releases/download/toolchain-llvm-23.1.5/llvm-project-23.1.5.src.tar.xz"

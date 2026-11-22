@@ -3,158 +3,405 @@ pub fn new[K: key, V]() -> Map[K, V]
 
 pub fn len[K: key, V](m: Map[K, V]) -> u64
 
+type Probe = Found(u64, u64) | Vacant(u64) | Crowded
+
+fn placement[K: key, V](m: Map[K, V], k: K) -> u64 {
+    let class = fast_class(m)
+    if class == 0 {
+        strong(k)
+    } else if class == 1 {
+        let p = place(k)
+        if mode(m) {
+            strong(k)
+        } else {
+            p
+        }
+    } else if mode(m) {
+        strong(k)
+    } else {
+        place(k)
+    }
+}
+
+fn more_groups[K: key, V](m: Map[K, V], scanned: u64, mask: u64) -> bool {
+    scanned <= mask && (scanned != 8 || fast_class(m) == 0 || mode(m))
+}
+
+fn first_lane(bits: u64) -> u64 {
+    let lane: u64 = int.widen(int.trailing_zeros(bits))
+    lane & 15
+}
+
+// Look for a match before terminating at EMPTY or using a remembered vacancy.
+fn probe[K: key, V](m: Map[K, V], k: K, p: u64, inserting: bool) -> Probe {
+    let mask = group_mask(m)
+    let tag = p >> 57
+    let bucket_mask = mask << 4
+    let mut base = (p & mask) << 4
+    let mut n: u64 = 0
+    let mut first_free: u64 = 18446744073709551615
+    loop {
+        let group = base >> 4
+        let mut matches = group_match(m, group, tag)
+        while matches != 0 {
+            let lane = first_lane(matches)
+            let bucket = base | lane
+            let entry = bucket_entry(m, bucket)
+            if slot_key(m, entry) == k {
+                return Found(entry, bucket)
+            }
+            matches = matches & int.wrapping_sub(matches, 1)
+        }
+        if inserting && first_free == 18446744073709551615 {
+            let free = group_vacant(m, group)
+            if free != 0 {
+                let lane = first_lane(free)
+                first_free = base | lane
+            }
+        }
+        if group_empty(m, group) != 0 {
+            break
+        }
+        n = int.wrapping_add(n, 1)
+        if !more_groups(m, n, mask) {
+            break
+        }
+        base = int.wrapping_add(base, n << 4) & bucket_mask
+    }
+    if first_free == 18446744073709551615 {
+        Crowded
+    } else {
+        Vacant(first_free)
+    }
+}
+
 pub fn get[K: key, V](m: Map[K, V], k: K) -> Option[View[V]] in m {
     if capacity(m) == 0 {
         return None
     }
-    let h = hash(k)
-    // Hashing reads only the key. Load the private index metadata afterwards so
-    // the byte-hash call does not keep the index mask alive across that call.
-    let mask = int.wrapping_sub(index_len(m), 1)
-    let mut j = h & mask
-    loop {
-        let w = index_get(m, j)
-        if w == 0 {
-            return None
-        }
-        if (w ^ h) <= mask {
-            let i = int.wrapping_sub(w & mask, 1)
-            if slot_live(m, i) && slot_key(m, i) == k {
-                return Some(slot_value(m, i))
-            }
-        }
-        j = int.wrapping_add(j, 1) & mask
+    match probe(m, k, placement(m, k), false) {
+        Found(i, _) => Some(slot_value(m, i)),
+        _ => None,
     }
+}
+
+fn probe_insert[K: key, V](m: Map[K, V], k: K) -> (u64, Probe) {
+    if capacity(m) == 0 {
+        return (0, Vacant(0))
+    }
+    let p = placement(m, k)
+    (p, probe(m, k, p, true))
+}
+
+// The in-place insertion lowerer only needs the entry on Found, or the
+// placement word and bucket on Vacant. Crowded has no valid bucket.
+fn probe_staged[K: key, V](m: Map[K, V], k: K) -> (u64, u64, bool, bool) {
+    let (p, r) = probe_insert(m, k)
+    match r {
+        Found(i, _) => (p, i, true, false),
+        Vacant(b) => (p, b, false, false),
+        Crowded => (p, 0, false, true),
+    }
+}
+
+fn vacancy[K: key, V](m: Map[K, V], p: u64) -> Option[u64] {
+    let mask = group_mask(m)
+    let mut g = p & mask
+    let mut n: u64 = 0
+    loop {
+        let free = group_vacant(m, g)
+        if free != 0 {
+            let lane = first_lane(free)
+            return Some((g << 4) | lane)
+        }
+        n = int.wrapping_add(n, 1)
+        if !more_groups(m, n, mask) {
+            break
+        }
+        g = int.wrapping_add(g, n) & mask
+    }
+    None
+}
+
+fn place_entry[K: key, V](mut m: Map[K, V], p: u64, i: u64) -> bool {
+    match vacancy(m, p) {
+        Some(b) => {
+            install(mut m, b, p, i)
+            true
+        },
+        None => false,
+    }
+}
+
+fn commit[K: key, V](mut m: Map[K, V], b: u64, p: u64) {
+    let i = slots(m)
+    install(mut m, b, p, i)
+    advance(mut m)
+}
+
+// Promotion rebuilds the live prefix without reading the staged next slot.
+fn promote[K: key, V](mut m: Map[K, V]) {
+    set_strong(mut m)
+    clear_index(mut m)
+    let count = slots(m)
+    let mut i: u64 = 0
+    while i < count {
+        if slot_meta(m, i) != 0 {
+            let p = strong(slot_key(m, i))
+            let _ = place_entry(mut m, p, i)
+        }
+        i = int.wrapping_add(i, 1)
+    }
+}
+
+fn rebuild[K: key, V](mut m: Map[K, V]) {
+    clear_index(mut m)
+    let count = slots(m)
+    let mut i: u64 = 0
+    while i < count {
+        let p = slot_meta(m, i)
+        if p != 0 && !place_entry(mut m, p, i) {
+            promote(mut m)
+            return
+        }
+        i = int.wrapping_add(i, 1)
+    }
+}
+
+// The pending key is known absent. After a rebuild its earlier bucket and word
+// no longer apply. Strong post-promotion placement always has a vacancy.
+fn reprobe_crowded[K: key, V](mut m: Map[K, V], k: K) -> (u64, u64) {
+    promote(mut m)
+    let p = strong(k)
+    let mask = group_mask(m)
+    let mut g = p & mask
+    let mut n: u64 = 0
+    loop {
+        let free = group_vacant(m, g)
+        if free != 0 {
+            let lane = first_lane(free)
+            return ((g << 4) | lane, p)
+        }
+        n = int.wrapping_add(n, 1)
+        g = int.wrapping_add(g, n) & mask
+    }
+}
+
+fn commit_crowded[K: key, V](mut m: Map[K, V], k: K) {
+    let (b, p) = reprobe_crowded(mut m, k)
+    commit(mut m, b, p)
+}
+
+fn put_absent[K: key, V](mut m: Map[K, V], take k: K, take v: V, b: u64, p: u64, crowded: bool) -> u64 {
+    let (bucket, word) = if slots(m) == capacity(m) {
+        make_room(mut m)
+        let word = placement(m, k)
+        match vacancy(m, word) {
+            Some(bucket) => (bucket, word),
+            None => reprobe_crowded(mut m, k),
+        }
+    } else if crowded {
+        reprobe_crowded(mut m, k)
+    } else {
+        (b, p)
+    }
+    let i = slots(m)
+    push_entry(mut m, take k, take v)
+    commit(mut m, bucket, word)
+    i
 }
 
 pub fn insert[K: key, V](mut m: Map[K, V], take k: K, take v: V) {
-    let (h, index, existing) = probe_insert(m, k)
-    if existing {
-        let _ = swap_value(mut m, index, take v)
-        let _ = take k
-        return
+    let (p, r) = probe_insert(m, k)
+    match r {
+        Found(i, _) => {
+            let _ = swap_value(mut m, i, take v)
+            let _ = take k
+        },
+        Vacant(b) => {
+            let _ = put_absent(mut m, take k, take v, b, p, false)
+        },
+        Crowded => {
+            let _ = put_absent(mut m, take k, take v, 0, p, true)
+        },
     }
-    let mut j = index
-    let cap = capacity(m)
-    if slots(m) == cap {
-        make_room(mut m)
-        let mask = int.wrapping_sub(index_len(m), 1)
-        j = h & mask
-        while index_get(m, j) != 0 {
-            j = int.wrapping_add(j, 1) & mask
-        }
-    }
-    // Slots fit the admitted entry capacity (at least16 logical bytes each), so
-    // adding the one-based index cannot overflow. Nonzero index words and lengths
-    // similarly justify the wrapping subtractions above.
-    let s = int.wrapping_add(slots(m), 1)
-    let w = index_word(m, h, s)
-    push_entry(mut m, h, take k, take v)
-    index_set(mut m, j, w)
-}
-
-// The existing entry, or the first empty index word if the key is absent.
-fn probe_insert[K: key, V](m: Map[K, V], k: K) -> (u64, u64, bool) {
-    let h = hash(k)
-    let mut j: u64 = 0
-    let n = index_len(m)
-    if n != 0 {
-        let mask = int.wrapping_sub(n, 1)
-        j = h & mask
-        loop {
-            let w = index_get(m, j)
-            if w == 0 {
-                break
-            }
-            if (w ^ h) <= mask {
-                let i = int.wrapping_sub(w & mask, 1)
-                if slot_live(m, i) && slot_key(m, i) == k {
-                    return (h, i, true)
-                }
-            }
-            j = int.wrapping_add(j, 1) & mask
-        }
-    }
-    (h, j, false)
 }
 
 pub fn update[K: key, V, R](mut m: Map[K, V], k: K, f: scoped fn(mut V) -> R) -> Option[R] {
-    match find(m, k, hash(k)) {
-        Some(i) => Some(with_value(mut m, i, f)),
-        None => None
+    if capacity(m) == 0 {
+        return None
+    }
+    match probe(m, k, placement(m, k), false) {
+        Found(i, _) => Some(with_value(mut m, i, f)),
+        _ => None,
     }
 }
 
 pub fn remove[K: key, V](mut m: Map[K, V], k: K) -> Option[V] {
-    match find(m, k, hash(k)) {
-        Some(i) => Some(kill(mut m, i)),
-        None => None
+    if capacity(m) == 0 {
+        return None
+    }
+    match probe(m, k, placement(m, k), false) {
+        Found(i, b) => {
+            erase(mut m, b)
+            Some(kill(mut m, i))
+        },
+        _ => None,
     }
 }
 
-// Room for n more absent keys: afterwards the next n insertions admit nothing, whatever
-// removals, replacements and updates come between. Growth follows MEM-24 from needed = len + n;
-// when the capacity already holds len + n but removed entries fill the slots, it compacts
-// in place and admits nothing. A refusal raises Capacity and leaves the map unchanged.
 pub fn reserve[K: key, V](mut m: Map[K, V], n: u64) {
     let target = reserve_target(m, n)
     if target != 0 {
-        // Growth keeps only live entries, in insertion order.
         regrow(mut m, target)
-        reindex(mut m)
+        rebuild(mut m)
     } else if int.saturating_add(slots(m), n) > capacity(m) {
         compact(mut m)
-        reindex(mut m)
+        rebuild(mut m)
     }
 }
 
-// Like reserve, returning a refusal as a value instead of raising it (MEM-21).
 pub fn try_reserve[K: key, V](mut m: Map[K, V], n: u64) -> Result[(), Capacity] {
     let target = reserve_target(m, n)
     if target != 0 {
         try_regrow(mut m, target)?
-        reindex(mut m)
+        rebuild(mut m)
     } else if int.saturating_add(slots(m), n) > capacity(m) {
         compact(mut m)
-        reindex(mut m)
+        rebuild(mut m)
     }
     Ok(())
 }
 
-// The capacity reserve grows to, or 0 when the capacity already holds len + n.
 fn reserve_target[K: key, V](m: Map[K, V], n: u64) -> u64 {
     let cap = capacity(m)
     let needed = int.saturating_add(len(m), n)
     if needed <= cap {
         return 0
     }
-    let doubled = int.saturating_add(cap, cap)
-    let mut target = if needed > doubled {
-        needed
+    growth_target(cap, needed)
+}
+
+fn growth_target(cap: u64, needed: u64) -> u64 {
+    if needed > 576460752303423488 {
+        return needed
+    }
+    let doubled = int.wrapping_add(cap, cap)
+    let grown: u64 = if doubled > 576460752303423488 {
+        576460752303423488
     } else {
         doubled
     }
-    if target < 4 {
-        target = 4
+    if needed > grown {
+        if needed < 4 {
+            4
+        } else {
+            needed
+        }
+    } else {
+        if grown < 4 {
+            4
+        } else {
+            grown
+        }
     }
-    // An entry charges at least 16 bytes, so no limit admits 2^60 entries: a larger
-    // need is refused at that request, inside the index size regrow can compute.
-    if target > 1152921504606846976 {
-        target = 1152921504606846976
-    }
-    target
 }
 
-// Only this module can access entries and its private lookup index.
+fn make_room[K: key, V](mut m: Map[K, V]) {
+    let cap = capacity(m)
+    let live = len(m)
+    if cap != 0 && live <= cap / 2 {
+        compact(mut m)
+    } else {
+        let target = growth_target(cap, int.wrapping_add(live, 1))
+        regrow(mut m, target)
+    }
+    rebuild(mut m)
+}
+
+// Core-private clone, with each completed pair available to cleanup before the
+// next key or value is cloned. Rebuild only after the whole copy exists.
+clone[K: key, V](x: Map[K, V]) {
+    let mut copied: Map[K, V] = new()
+    let was_strong = if capacity(x) == 0 {
+        strong_empty(x)
+    } else {
+        mode(x)
+    }
+    if was_strong {
+        set_strong_empty(mut copied)
+    }
+    let count = len(x)
+    if count != 0 {
+        regrow(mut copied, count)
+        let mut i: u64 = 0
+        while i < slots(x) {
+            let meta = slot_meta(x, i)
+            if meta != 0 {
+                let key: K = clone(slot_key(x, i))
+                let value: V = clone(slot_value(x, i))
+                copy_entry(mut copied, meta, take key, take value)
+            }
+            i = int.wrapping_add(i, 1)
+        }
+        rebuild(mut copied)
+    }
+    take copied
+}
+
+pub fn update_or_insert[K: key, V, R](mut m: Map[K, V], take k: K, take initial: V, f: scoped fn(mut V) -> R) -> R {
+    let (p, r) = probe_insert(m, k)
+    let entry = match r {
+        Found(i, _) => {
+            let _ = take k
+            let _ = take initial
+            i
+        },
+        Vacant(b) => put_absent(mut m, take k, take initial, b, p, false),
+        Crowded => put_absent(mut m, take k, take initial, 0, p, true),
+    }
+    with_value(mut m, entry, f)
+}
+
 fn hash[K: key](k: K) -> u64
+
+fn place[K: key](k: K) -> u64
+
+fn strong[K: key](k: K) -> u64
+
+fn fast_class[K: key, V](m: Map[K, V]) -> u8
 
 fn slots[K: key, V](m: Map[K, V]) -> u64
 
 fn capacity[K: key, V](m: Map[K, V]) -> u64
 
-fn slot_hash[K: key, V](m: Map[K, V], i: u64) -> u64
+fn mode[K: key, V](m: Map[K, V]) -> bool
 
-fn slot_live[K: key, V](m: Map[K, V], i: u64) -> bool
+fn group_mask[K: key, V](m: Map[K, V]) -> u64
+
+fn strong_empty[K: key, V](m: Map[K, V]) -> bool
+
+fn set_strong_empty[K: key, V](mut m: Map[K, V])
+
+fn group_match[K: key, V](m: Map[K, V], g: u64, tag: u64) -> u64
+
+fn group_empty[K: key, V](m: Map[K, V], g: u64) -> u64
+
+fn group_vacant[K: key, V](m: Map[K, V], g: u64) -> u64
+
+fn bucket_entry[K: key, V](m: Map[K, V], b: u64) -> u64
+
+fn install[K: key, V](mut m: Map[K, V], b: u64, p: u64, i: u64)
+
+fn advance[K: key, V](mut m: Map[K, V])
+
+fn erase[K: key, V](mut m: Map[K, V], b: u64)
+
+fn clear_index[K: key, V](mut m: Map[K, V])
+
+fn set_strong[K: key, V](mut m: Map[K, V])
+
+fn slot_meta[K: key, V](m: Map[K, V], i: u64) -> u64
 
 fn slot_key[K: key, V](m: Map[K, V], i: u64) -> View[K] in m
 
@@ -162,150 +409,18 @@ fn slot_value[K: key, V](m: Map[K, V], i: u64) -> View[V] in m
 
 fn with_value[K: key, V, R](mut m: Map[K, V], i: u64, f: scoped fn(mut V) -> R) -> R
 
-fn index_len[K: key, V](m: Map[K, V]) -> u64
-
-fn index_get[K: key, V](m: Map[K, V], j: u64) -> u64
-
-fn index_set[K: key, V](mut m: Map[K, V], j: u64, w: u64)
-
-// An index word keeps the hash's bits above the index mask over the one-based
-// entry slot (at most capacity, below the index length), so a probe rejects
-// most other keys without loading their entries. Zero stays the empty word.
-fn index_word[K: key, V](m: Map[K, V], h: u64, s: u64) -> u64 {
-    (h & ~int.wrapping_sub(index_len(m), 1)) | s
-}
-
-fn find[K: key, V](m: Map[K, V], k: K, h: u64) -> Option[u64] {
-    let n = index_len(m)
-    if n == 0 {
-        return None
-    }
-    let mask = n - 1
-    let mut j = h & mask
-    loop {
-        let w = index_get(m, j)
-        if w == 0 {
-            return None
-        }
-        if (w ^ h) <= mask {
-            let i = int.wrapping_sub(w & mask, 1)
-            if slot_live(m, i) && slot_key(m, i) == k {
-                return Some(i)
-            }
-        }
-        j = int.wrapping_add(j, 1) & mask
-    }
-}
-
 fn swap_value[K: key, V](mut m: Map[K, V], i: u64, take v: V) -> V
 
 fn kill[K: key, V](mut m: Map[K, V], i: u64) -> V
 
-// Move one live entry out in insertion order. The source slot becomes dead;
-// ordinary Map cleanup owns every entry not reached by a consuming loop.
 fn take_entry[K: key, V](mut m: Map[K, V], i: u64) -> (K, V)
 
-fn push_entry[K: key, V](mut m: Map[K, V], h: u64, take k: K, take v: V)
+fn push_entry[K: key, V](mut m: Map[K, V], take k: K, take v: V)
 
-// Capacity is at most max(4, 4 * peak live entries). Removals do not shrink.
-// At full slots and at least capacity/2 dead entries, compact in place without
-// allocation or admission, preserving live insertion order; rebuild the index.
+fn copy_entry[K: key, V](mut m: Map[K, V], meta: u64, take k: K, take v: V)
+
 fn compact[K: key, V](mut m: Map[K, V])
 
 fn regrow[K: key, V](mut m: Map[K, V], cap: u64)
 
 fn try_regrow[K: key, V](mut m: Map[K, V], cap: u64) -> Result[(), Capacity]
-
-// Keep rebuilding and admission on the full-table path, outside the ordinary
-// insertion probe. The caller still owns its key and value if admission fails.
-fn make_room[K: key, V](mut m: Map[K, V]) {
-    let cap = capacity(m)
-    if cap != 0 && len(m) <= cap / 2 {
-        compact(mut m)
-    } else {
-        let new_cap: u64 = if cap == 0 {
-            4
-        } else {
-            cap * 2
-        }
-        regrow(mut m, new_cap)
-    }
-    reindex(mut m)
-}
-
-// Reindexing changes only index words, never the entry count or index length.
-fn reindex[K: key, V](mut m: Map[K, V]) {
-    let count = slots(m)
-    let mask = int.wrapping_sub(index_len(m), 1)
-    let mut i: u64 = 0
-    while i < count {
-        let stored_hash = slot_hash(m, i)
-        let mut j = stored_hash & mask
-        while index_get(m, j) != 0 {
-            j = int.wrapping_add(j, 1) & mask
-        }
-        let s = int.wrapping_add(i, 1)
-        index_set(mut m, j, (stored_hash & ~mask) | s)
-        i = s
-    }
-}
-
-fn install_index[K: key, V](mut m: Map[K, V], h: u64, s: u64) {
-    let mask = index_len(m) - 1
-    let mut j = h & mask
-    while index_get(m, j) != 0 {
-        j = int.wrapping_add(j, 1) & mask
-    }
-    index_set(mut m, j, (h & ~mask) | s)
-}
-
-// Core-private clone item in core.map; declaration-only MEM-17 eligibility.
-clone[K: key, V](x: Map[K, V]) {
-    let mut copied: Map[K, V] = new()
-    let count = len(x)
-    if count == 0 {
-        return take copied
-    }
-    // A refusal raises Capacity; cleanup drops the entries copied so far.
-    regrow(mut copied, count)
-    let mut i: u64 = 0
-    while i < slots(x) {
-        if slot_live(x, i) {
-            let key: K = clone(slot_key(x, i))
-            let value: V = clone(slot_value(x, i))
-            let h = slot_hash(x, i)
-            let s = slots(copied) + 1
-            push_entry(mut copied, h, take key, take value)
-            install_index(mut copied, h, s)
-        }
-        i += 1
-    }
-    take copied
-}
-
-// Insert initial only for an absent key, then call f once on the entry.
-// A refusal raises Capacity and leaves m unchanged.
-pub fn update_or_insert[K: key, V, R](mut m: Map[K, V], take k: K, take initial: V, f: scoped fn(mut V) -> R) -> R {
-    let (h, index, existing) = probe_insert(m, k)
-    let entry = if existing {
-        let _ = take k
-        let _ = take initial
-        index
-    } else {
-        let full = slots(m) == capacity(m)
-        if full {
-            make_room(mut m)
-        }
-        let i = slots(m)
-        let entry_word = int.wrapping_add(i, 1)
-        push_entry(mut m, h, take k, take initial)
-        if full {
-            install_index(mut m, h, entry_word)
-        } else {
-            let w = index_word(m, h, entry_word)
-            index_set(mut m, index, w)
-        }
-        i
-    }
-    with_value(mut m, entry, f)
-}

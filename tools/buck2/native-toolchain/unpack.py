@@ -71,27 +71,20 @@ def unpack(kind, output, archives, linker=None):
                 archive.extractall(tree, filter="tar")
             copy_tree(next(tree.iterdir()), output)
             return
-        for archive in archives:
-            subprocess.run(["dpkg-deb", "-x", archive, tree], check=True)
-        normalize_links(tree)
         if kind == "llvm":
-            prefix = tree / "usr/lib/llvm-23"
-            for name in ("bin", "include"):
-                copy_tree(prefix / name, output / name)
-            copy_tree(prefix / "lib/clang", output / "lib/clang")
-            for source in (prefix / "lib").glob("*.so*"):
-                shutil.copy2(source, output / "lib" / source.name)
-            for source in (tree / "usr/lib/x86_64-linux-gnu").glob("*.so*"):
-                if source.is_file():
-                    shutil.copy2(source, output / "lib" / source.name)
-            if linker:
-                (output / "bin/ld.lld").unlink()
-                shutil.copyfile(linker, output / "bin/ld.lld")
-                (output / "bin/ld.lld").chmod(0o755)
+            with tarfile.open(archives[0]) as archive:
+                archive.extractall(tree, filter="data")
+            copy_tree(tree, output)
+            shutil.copyfile(linker, output / "bin/ld.lld")
+            (output / "bin/ld.lld").chmod(0o755)
             wrapper = output / "bin/hirsel-clang"
             wrapper.write_text('#!/bin/sh\ntree="$(cd "$(dirname "$0")/.." && pwd)"\nLD_LIBRARY_PATH="$tree/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" exec "$tree/bin/clang" --ld-path="$tree/bin/ld.lld" "$@"\n')
             wrapper.chmod(0o755)
-        elif kind == "qemu":
+            return
+        for archive in archives:
+            subprocess.run(["dpkg-deb", "-x", archive, tree], check=True)
+        normalize_links(tree)
+        if kind == "qemu":
             output.mkdir()
             shutil.copy2(tree / "usr/bin/qemu-aarch64", output / "qemu-aarch64")
         elif kind == "valgrind":

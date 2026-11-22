@@ -47,9 +47,9 @@ def write(path, data):
 
 
 @contextmanager
-def measurement_slot(path):
+def measurement_slot(path, *, blocking=True):
     with path.open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        fcntl.flock(lock, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
         yield
 
 

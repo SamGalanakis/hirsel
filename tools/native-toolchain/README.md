@@ -2,26 +2,19 @@
 
 The pinned LLVM for native code is the 23.1.5 release-branch snapshot at
 `a738f2737189bcc1de75c25e8cd1d4b466c9526e`, packaged on 2026-10-28.
-Its debs and matching source archive are retained at
+The matching source archive and manylinux_2_28 builds are retained at
 https://github.com/SamGalanakis/hirsel-lang/releases/tag/toolchain-llvm-23.1.5.
 
-- `llvm-23.lock`: the pin, the only place it is written. LLVM 23.1.5 from the
-  `llvm-toolchain-noble-23` packages at one exact version, with each `.deb`'s SHA-256 and
-  size; the mirror release tag, upstream commit and source tarball's SHA-256; and
-  llvm-sys 231.0.1 with its crates.io checksum.
-- `install`: prints the install command and pinned asset URLs; `--run` fetches and verifies
-  the debs, installs those local files as root and holds the packages; `--unpack DIR`
-  verifies every `.deb` and unpacks it under DIR without root, then prints the
-  `LLVM_SYS_231_PREFIX` and loader path that select it; `--source` prints the pinned source
-  build with a shared libLLVM.
-  Both paths fetch only the retained GitHub assets, with no apt.llvm.org repository or
-  pool URL. The hashes and sizes match its signed Packages and Sources indexes.
-- `check [--prefix DIR]`: passes only on the exact pin. It rejects a wrong `llvm-config`
-  major, minor, patch or suffix, a static-only install (no `libLLVM-23.so`), missing
-  headers, a missing X86 or AArch64 target, a clang or lld of another version, an installed
-  package at another version (system prefix only), and a Cargo.lock llvm-sys other than the
-  pinned version and checksum. It then links `fixtures/version.c` against the shared
-  libLLVM and requires it to report 23.1.5 at run time. It never searches PATH or falls back.
+- `llvm-23.lock`: the source archive and compiled assets, with SHA-256 and size
+  checks, plus the llvm-sys 231.0.1 version and checksum.
+- `install --unpack DIR`: unpack the verified tree without root and print the
+  `LLVM_SYS_231_PREFIX` and loader path that select it. `install --source` prints
+  the build commands for the pinned source.
+- `check [--prefix DIR]`: verify the LLVM version, shared library, headers,
+  X86 and AArch64 targets, clang and ld.lld versions, and the llvm-sys version
+  and checksum in Cargo.lock. Link and execute `fixtures/version.c` with the
+  pinned tools.
+
 - `fixtures/`: `version.c` for `check`; `smoke.ll`, `smoke_harness.c` and `smoke.expected`,
   the FFI smoke that `crates/hirsel-llvm/tests/it/native.rs` compiles, links and runs.
 
@@ -32,19 +25,19 @@ https://github.com/SamGalanakis/hirsel-lang/releases/tag/toolchain-llvm-23.1.5.
 
 ## Static ld.lld
 
-The toolchain image's `bin/ld.lld` is not the deb's. It is built once per pin
+The toolchain image's `bin/ld.lld` is built once per pin
 from the locked source archive by `build-static-lld`: the ELF port only
 (`static-lld-elf-only.patch`), targets X86 and AArch64, Release without assertions,
 linked `-static-pie` and stripped. It loads no library, so each link skips
 the dynamic loader's work for libLLVM (about 18 M instructions per run). It is a static
 PIE rather than plain `-static` because a `-static` binary's start-up registers
 `.eh_frame` and libgcc then classifies every FDE (about 10 M instructions). The
-product runs it as a child exactly as it ran the deb's `ld.lld`, and the toolchain
+product runs it as a child, and the toolchain
 identity hashes it by content like every other recipe file.
 
-To rebuild it after a pin change, run `build-static-lld DIR` on an x86_64 Ubuntu 24.04
-host. It needs 4G and two jobs under `tools/capped`, and takes about an hour. Upload
-`DIR/ld.lld` to the `deb_pool` release under the printed asset name, then replace the
+To rebuild it, run `build-static-lld DIR` in the manylinux_2_28 x86-64 image
+with its GCC Toolset and glibc-static installed. Upload `DIR/ld.lld` to the
+`asset_pool` release under the printed asset name, then replace the
 `static_lld` record in `llvm-23.lock`. `tools/buck2/bootstrap_llvm.py` fetches that
 asset, verifies its SHA-256 and size, and places it as `bin/ld.lld`. Nothing rebuilds
 it per land.
@@ -55,36 +48,41 @@ require a shared libLLVM; binary archives are not a fallback.
 ## Engine libLLVM
 
 `build-libllvm` builds a libLLVM 23.1.5 for the compiler alone from the locked source
-archive: profile-guided and ThinLTO, X86 and AArch64, zlib only. Its optimised builds
-cost about 0.64 of the deb library's instructions warm and load none of z3, ICU,
-libxml2, libedit, libffi or zstd. It runs three stages: an IR-instrumented library;
+archive with profile guidance, ThinLTO, X86, AArch64 and zlib. It runs three
+stages: an IR-instrumented library;
 `engine_llvm.py train`, which builds the training programs through it (the LangArena
 suite, every M1 program and the documents layout family, all generated from the
 repository's own input helpers); and the profile-guided build.
 
-Its guard, `engine_llvm.py guard`, builds the training programs and four held-out ones
-(the graph and json layout families, the M2b table and dispatch_cross_package workloads)
-through the deb library and the new one with the same compiler. It fails unless every
-executable's `.text` is byte-identical and the warm build cost geomean is below the deb
-library's and no worse than the lock's previous `engine_llvm_guard` ratio. `check` is the
-install pin check above; this guard is separate because it needs a built compiler.
+The guard builds the training programs and four held-out ones (the graph and json
+layout families and the M2b table and dispatch_cross_package workloads). It compares
+the locked apt.llvm.org deb with the new engine through the same compiler. It requires
+byte-identical executable `.text` for all cases and a warm instruction geomean at or
+below `engine_llvm_guard`. `engine_llvm_guard_source` pins the compiler and workloads
+that set this ratio. Changes in how Hirsel builds and caches std affect the ratio.
 
-Run `build-libllvm DIR ARTIFACTS` once per pin change on an x86_64 Ubuntu 24.04 host.
-It takes about 2.7 CPU-hours at 12 jobs. Then upload `DIR/libLLVM.so.23.1` under the
-printed asset name and write both printed records into `llvm-23.lock`. Nothing rebuilds
-it per land. `build-libllvm DIR ARTIFACTS plain` builds the same configuration without
-profile or ThinLTO (about 0.88 warm): the fallback if a profile build fails its guard.
+Use the manylinux_2_28 x86-64 image with its GCC Toolset to build the engine.
+`build-libllvm DIR ARTIFACTS bootstrap` builds the stock shared library, headers,
+clang and LLVM tools. For `instr` and `opt`, set `CC` and `CXX` to the bootstrap
+compilers and supply the same snapshot's lld, TableGen and compiler-rt profile runtime.
 
-`tools/buck2/bootstrap_llvm.py` places the locked library as the tree's
-`engine/libLLVM.so.23.1`. First-party binaries search `engine/` before `lib/` (their
-RPATH, `tools/buck2/defs.bzl`), so the compiler loads it while clang and the other tools
-keep the deb library, which libclang-cpp needs. The library carries no search path of
-its own: the executable's RPATH finds its libz. `hirsel std-product --install` copies it, and
-nothing else of the tree, into the prefix's `lib/`.
+On Ubuntu 24.04, build the release compiler and shipping runtime at
+`engine_llvm_guard_source` with `core/tools/measurement_artifacts.py`. Use its JSON as
+`ARTIFACTS` and set `HIRSEL_LLVM_PROFILE_SOURCE` to that checkout. Run `train` on the
+host with the instrumented library and the same snapshot's llvm-profdata. Place the
+merged `llvm.profdata` in `DIR` for the container's `opt` stage. Run `guard` on the
+host with the optimized library in `DIR`. It verifies the reference deb and enforces
+a 2 GiB memory cgroup with no swap. Upload the qualified library under the printed
+name and update `engine_llvm` in the lock.
+
+The bootstrap places the stock library in the tree's `lib/` and the optimized
+library in its `engine/`. The compiler's RPATH selects the engine while clang
+and the LLVM tools select the stock library. The installation ships the
+engine, the static linker, and the dynamic inputs of the pinned link kit.
 
 ## Pool execution inputs
 
-`BUCK` downloads LLVM's locked Debian packages and their runtime libraries,
+`BUCK` downloads the locked LLVM bootstrap archive and static linker,
 Arm GNU 14.3.Rel1 (including its Linux sysroot), Ubuntu's static AArch64 qemu
 and Valgrind 3.22.0 with a matching libc 2.39 loader and debug symbols. `native.lock.json` pins the additional archives by SHA-256
 and byte size. `python3 tools/buck2/sync.py` generates `pins.bzl` from these

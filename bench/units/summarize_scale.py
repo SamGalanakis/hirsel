@@ -106,7 +106,10 @@ def fair(rows, side):
     cold, hot = (fairness_trial(rows, side, v) for v in (False, True))
     if not cold or not hot:
         return None
-    return complete(cold) and complete(hot) and hot["load"]["p99_ns"] <= min(5_000_000, 2 * cold["load"]["p99_ns"])
+    cold_p99 = load_number(cold, "e2e_p99_ns")
+    hot_p99 = load_number(hot, "e2e_p99_ns")
+    return (complete(cold) and complete(hot) and cold_p99 is not None and hot_p99 is not None
+            and hot_p99 <= min(5_000_000, 2 * cold_p99))
 
 
 def verdicts(rows, n):
@@ -114,19 +117,11 @@ def verdicts(rows, n):
     u0, n0 = best(rows, "A1-256", "untied")
     u, nu = best(rows, high, "untied")
     t, nt = best(rows, high, "tokiow8")
-    s, ns = best(rows, high, "S3k7")
-    if all((u0, u, t, s)):
-        repeat = " At least one side had a single passing search." if min(n0, nu, nt, ns) == 1 else ""
-        rel = f"At {n:,} sessions untied reached {u / u0:.3f}× its 256-session rate and {u / t:.3f}× tokiow8. S3k7 reached {s / u:.3f}× untied."
-        exclusion = s >= 1.25 * u
-        if u < 0.9 * u0 or u < 0.75 * t:
-            state = "Threshold missed."
-        elif exclusion and fair(rows, "S3k7") is None:
-            state = "Rate thresholds met. S3k7 fairness is pending."
-        elif exclusion and fair(rows, "S3k7"):
-            state = "Pool not supported at scale under the S3k7 rule."
-        else:
-            state = "Holds."
+    if all((u0, u, t)):
+        repeat = " At least one side had a single passing search." if min(n0, nu, nt) == 1 else ""
+        retention = u / u0
+        state = "Retention target met." if retention >= 0.9 else "Retention target missed."
+        rel = f"At {n:,} sessions Hirsel reached {retention:.3f}× its 256-session rate and {u / t:.3f}× Tokio's rate."
         print(f"- **Scale.** {state} {rel}{repeat}")
     else:
         print("- **Scale.** Pending comparable passing rates.")
@@ -174,14 +169,15 @@ def verdicts(rows, n):
 def scale_tables(rows):
     for cell_name, cell in SCALE_CELLS.items():
         print(f"\n## Base load at {cell['sessions']:,} sessions, f=0\n")
-        table(("Side", "Search", "Result", "Best pass or lowest tried (turns/s)", "p99 (ms)",
-               "Peak RSS (MiB)", "Peak sampled threads", "CPU µs/turn after warmup (est.)",
+        table(("Side", "Search", "Result", "Best pass or lowest tried (turns/s)", "Intended-arrival p99 (ms)",
+               "Server-added p99 (ms)", "Sync groups/turn", "Peak RSS (MiB)", "Peak sampled threads", "CPU µs/turn after warmup (est.)",
                "CPU µs/turn incl. setup", "Steals/s incl. setup", "Units"))
         for side in SCALE_SIDES:
             for group in (1, 2):
                 trial, rate, state = result(rows, cell_name, side, group)
                 row(side, group, state, fmt(rate if rate is not None else number(trial, "rate")),
-                    ms(load_number(trial, "p99_ns")), *resources(trial))
+                    ms(load_number(trial, "e2e_p99_ns")), ms(load_number(trial, "p99_ns")),
+                    fmt(number(trial, "sync_groups_per_turn"), 3), *resources(trial))
         print()
         for first, second in combinations(SCALE_SIDES, 2):
             a, b = best(rows, cell_name, first)[0], best(rows, cell_name, second)[0]

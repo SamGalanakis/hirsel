@@ -164,6 +164,22 @@ pub fn frame_schema(
                     include_str!("../../../core/programs/store/store.hirsel"),
                 ),
                 (
+                    "store",
+                    include_str!("../../../core/programs/store/store-pages.hirsel"),
+                ),
+                (
+                    "store",
+                    include_str!("../../../core/programs/store/store-manifest.hirsel"),
+                ),
+                (
+                    "store",
+                    include_str!("../../../core/programs/store/store-locations.hirsel"),
+                ),
+                (
+                    "store",
+                    include_str!("../../../core/programs/store/store-packs.hirsel"),
+                ),
+                (
                     "ingress",
                     include_str!("../../../core/programs/store/ingress.hirsel"),
                 ),
@@ -179,9 +195,10 @@ pub fn frame_schema(
         let directory = work.join(name);
         std::fs::create_dir_all(&directory)?;
         let mut sources = Vec::new();
-        for (module, text) in texts {
-            // Nested modules (std's `sim/fs`) are paths, as in the bundled product manifest.
-            let file = directory.join(format!("{module}.hirsel"));
+        for (i, (module, text)) in texts.iter().enumerate() {
+            // Nested modules (std's `sim/fs`) are paths, as in the bundled product
+            // manifest; a module may span several files (the store's `store`).
+            let file = directory.join(format!("{module}.{i}.hirsel"));
             if let Some(parent) = file.parent() {
                 std::fs::create_dir_all(parent)?;
             }

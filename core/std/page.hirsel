@@ -53,6 +53,8 @@ pub type Entry: shareable + send {
     cell: Cell
 }
 
+pub type Edge = PageEdge(PagePtr) | BlobEdge(BlobRef)
+
 pub type Blob: shareable + send {
     stamp: u64,
     value: Bytes
@@ -66,7 +68,9 @@ pub opaque type Image: shareable + send {
 pub opaque type Page: shareable + send {
     image: Image,
     kids: List[Arc[Page]],
-    blobs: List[Arc[Bytes]]
+    blobs: List[Arc[Bytes]],
+    rows: u64,
+    charge: u64
 }
 
 pub type Row: shareable + send {
@@ -205,6 +209,10 @@ pub fn count(image: Image) -> u64 {
     u16_at(image.raw, 2)
 }
 
+pub fn key_domain(image: Image) -> Domain {
+    image.domain
+}
+
 pub fn image_of(page: Arc[Page]) -> View[Image] in page {
     view page.image
 }
@@ -228,6 +236,139 @@ pub fn body(page: Arc[Page], at: u16) -> Option[Arc[Bytes]] {
     } else {
         None
     }
+}
+
+pub fn copy_with_stamp(page: Arc[Page], id: u64) -> Arc[Page] {
+    let mut raw: Bytes = clone(page.image.raw)
+    list.set_word_le(mut raw, 8, id)
+    arc.new(Page(image: Image(raw: take raw, domain: page.image.domain), kids: clone(page.kids), blobs: clone(page.blobs), rows: page.rows, charge: page.charge))
+}
+
+pub fn value_at(page: Arc[Page], slot: u64) -> Option[View[Bytes]] in page {
+    if level(page.image) != 0 || slot >= count(page.image) {
+        return None
+    }
+    let at = entry_at(page.image, slot)
+    let value = at + 2 + u16_at(page.image.raw, at)
+    if page.image.raw[value] == 0 {
+        let n = u16_at(page.image.raw, value + 1)
+        return Some(list.slice(page.image.raw, value + 3, value + 3 + n))
+    }
+    let edge = ref_at(page.image.raw, value + 1)
+    let index: u64 = int.widen(edge.body)
+    Some(view page.blobs[index])
+}
+
+pub fn lookup(root: Arc[Page], key: Bytes) -> Option[View[Bytes]] in root {
+    if let Some(slot) = descend(root.image, key) {
+        return lookup(root.kids[slot], key)
+    }
+    let (slot, hit) = search(root.image, key)
+    if hit {
+        value_at(root, slot)
+    } else {
+        None
+    }
+}
+
+pub fn collection_child(root: Arc[Page], key: Bytes) -> Option[View[Arc[Page]]] in root {
+    if let Some(slot) = descend(root.image, key) {
+        return collection_child(root.kids[slot], key)
+    }
+    let (slot, hit) = search(root.image, key)
+    if hit && root.image.domain == CollectionMap {
+        Some(view root.kids[slot])
+    } else {
+        None
+    }
+}
+
+pub fn collection_entry(root: Arc[Page], key: Bytes) -> Option[(View[Arc[Page]], View[Bytes])] in root {
+    if let Some(slot) = descend(root.image, key) {
+        return collection_entry(root.kids[slot], key)
+    }
+    let (slot, hit) = search(root.image, key)
+    if hit && root.image.domain == CollectionMap {
+        let Some(descriptor) = value_at(root, slot) else {
+            return None
+        }
+        return Some((view root.kids[slot], descriptor))
+    }
+    None
+}
+
+pub fn rank(root: Arc[Page], key: Bytes, inclusive: bool) -> u64 {
+    if let Some(slot) = descend(root.image, key) {
+        let mut prior = 0u64
+        for i in 0u64 .. slot {
+            let at = entry_at(root.image, i)
+            let value = at + 2 + u16_at(root.image.raw, at)
+            let child_rows: u64 = list.word_le(root.image.raw, value + PTR_BYTES)
+            prior = int.saturating_add(prior, child_rows)
+        }
+        return int.saturating_add(prior, rank(root.kids[slot], key, inclusive))
+    }
+    let (slot, hit) = search(root.image, key)
+    if hit && inclusive {
+        slot + 1
+    } else {
+        slot
+    }
+}
+
+fn row_charge(key: u64, value: u64) -> u64 {
+    62 + ((key + 7) / 8) * 8 + ((value + 7) / 8) * 8
+}
+
+pub fn totals(page: Arc[Page]) -> (u64, u64) {
+    (page.rows, page.charge)
+}
+
+fn stored_totals(image: Image, slot: u64) -> (u64, u64) {
+    let at = entry_at(image, slot)
+    let suffix = u16_at(image.raw, at)
+    let cell = at + 2 + suffix
+    if level(image) != 0 {
+        return (list.word_le(image.raw, cell + PTR_BYTES), list.word_le(image.raw, cell + PTR_BYTES + 8))
+    }
+    let prefix = u16_at(image.raw, 4) + (if image.domain == Collection {
+        4u64
+    } else {
+        0u64
+    })
+    let width = if image.raw[cell] == 0 {
+        u16_at(image.raw, cell + 1)
+    } else {
+        ref_at(image.raw, cell + 1).len
+    }
+    (1, row_charge(prefix + suffix, width))
+}
+
+fn image_totals(image: Image) -> (u64, u64) {
+    let mut rows = 0u64
+    let mut charge = 0u64
+    for slot in 0u64 .. count(image) {
+        let (one_rows, one_charge) = stored_totals(image, slot)
+        rows = int.saturating_add(rows, one_rows)
+        charge = int.saturating_add(charge, one_charge)
+    }
+    (rows, charge)
+}
+
+fn changed_totals(mut page: Page, old_rows: u64, old_charge: u64, rows: u64, charge: u64) {
+    if (page.rows == 0xffffffffffffffffu64 && old_rows != 0) || (page.charge == 0xffffffffffffffffu64 && old_charge != 0) {
+        let (calculated_rows, calculated_charge) = image_totals(page.image)
+        page.rows = calculated_rows
+        page.charge = calculated_charge
+        return ()
+    }
+    page.rows = int.saturating_add(page.rows - old_rows, rows)
+    page.charge = int.saturating_add(page.charge - old_charge, charge)
+}
+
+fn new_page(take image: Image, take kids: List[Arc[Page]], take blobs: List[Arc[Bytes]]) -> Page {
+    let (rows, charge) = image_totals(image)
+    Page(image: take image, kids: take kids, blobs: take blobs, rows: rows, charge: charge)
 }
 
 fn slots(image: Image) -> u64 {
@@ -367,38 +508,45 @@ pub fn separator(left: Bytes, right: Bytes) -> Result[Bytes, Error] {
     Ok(clone(list.slice(right, 0, common_prefix(left, right) + 1)))
 }
 
-fn slot_order(image: Image, slot: u64, key: Bytes) -> Order {
-    if level(image) != 0 && slot == 0 {
-        return Less
-    }
-    let p = u16_at(image.raw, 4)
-    let before = order.min(p, list.len(key))
-    let head = list.compare_bytes(list.slice(image.raw, HEADER, HEADER + before), list.slice(key, 0, before))
-    if head != Equal {
-        return head
-    }
-    if before < p {
-        return Greater
-    }
-    let at = entry_at(image, slot)
-    let n = u16_at(image.raw, at)
-    list.compare_bytes(list.slice(image.raw, at + 2, at + 2 + n), list.slice(key, p, list.len(key)))
-}
-
 /// In a leaf, the first slot at or above key and whether it equals key.
 pub fn search(image: Image, key: Bytes) -> (u64, bool) {
-    let mut lo = 0u64
     let n = count(image)
+    if n == 0 {
+        return (0, false)
+    }
+    let first = first_key_slot(level(image))
+    let p = u16_at(image.raw, 4)
+    let key_width = list.len(key)
+    let common = order.min(p, key_width)
+    if common != 0 {
+        match list.compare_bytes(list.slice(image.raw, HEADER, HEADER + common), list.slice(key, 0, common)) {
+            Less => return (n, false),
+            Greater => return (first, false),
+            Equal => (),
+        }
+    }
+    if key_width < p {
+        return (first, false)
+    }
+    let suffix = list.slice(key, p, key_width)
+    let start = list.len(image.raw) - 2 * n
+    let mut lo = first
     let mut hi = n
     while lo < hi {
         let mid = lo + (hi - lo) / 2
-        if slot_order(image, mid, key) == Less {
-            lo = mid + 1
-        } else {
-            hi = mid
+        let at = u16_at(image.raw, start + 2 * mid)
+        let width = u16_at(image.raw, at)
+        match list.compare_bytes(list.slice(image.raw, at + 2, at + 2 + width), suffix) {
+            Less => {
+                lo = mid + 1
+            },
+            Greater => {
+                hi = mid
+            },
+            Equal => return (mid, true),
         }
     }
-    (lo, lo < n && slot_order(image, lo, key) == Equal)
+    (lo, false)
 }
 
 /// In a branch, the last slot at or below key. Slot zero is below every key.
@@ -426,11 +574,7 @@ fn cell_at(image: Image, at: u64) -> Cell {
     }
 }
 
-pub fn entry(image: Image, slot: u64) -> Option[Entry] {
-    if slot >= count(image) {
-        return None
-    }
-    let at = entry_at(image, slot)
+fn read_slot_key(image: Image, slot: u64, at: u64) -> Bytes {
     let n = u16_at(image.raw, at)
     let p: u64 = if level(image) != 0 && slot == 0 {
         0
@@ -440,7 +584,40 @@ pub fn entry(image: Image, slot: u64) -> Option[Entry] {
     let mut key: Bytes = list.with_capacity(p + n)
     list.append(mut key, list.slice(image.raw, HEADER, HEADER + p))
     list.append(mut key, list.slice(image.raw, at + 2, at + 2 + n))
-    Some(Entry(key: take key, cell: cell_at(image, at + 2 + n)))
+    take key
+}
+
+pub fn key_at(image: Image, slot: u64) -> Option[Bytes] {
+    if slot >= count(image) {
+        return None
+    }
+    Some(read_slot_key(image, slot, entry_at(image, slot)))
+}
+
+pub fn entry(image: Image, slot: u64) -> Option[Entry] {
+    if slot >= count(image) {
+        return None
+    }
+    let at = entry_at(image, slot)
+    Some(Entry(key: read_slot_key(image, slot, at), cell: cell_at(image, at + 2 + u16_at(image.raw, at))))
+}
+
+pub fn owning_edge(image: Image, slot: u64) -> Option[Edge] {
+    if slot >= count(image) {
+        return None
+    }
+    let at = entry_at(image, slot)
+    let cell = at + 2 + u16_at(image.raw, at)
+    if level(image) != 0 {
+        return Some(PageEdge(ptr_at(image.raw, cell)))
+    }
+    if image.domain == CollectionMap {
+        return Some(PageEdge(ptr_at(image.raw, cell + 3)))
+    }
+    if image.raw[cell] == 1 {
+        return Some(BlobEdge(ref_at(image.raw, cell + 1)))
+    }
+    None
 }
 
 fn full_size(row: Entry) -> u64 {
@@ -500,10 +677,7 @@ fn cell_size(raw: Bytes, lvl: u8, at: u64) -> u64 {
 }
 
 fn write_entry(mut raw: Bytes, at: u64, p: u64, row: Entry, body_index: Option[u16]) -> u64 {
-    let suffix = list.len(row.key) - p
-    put16(mut raw, at, suffix)
-    list.copy_from_slice(mut raw, at + 2, list.slice(row.key, p, p + suffix))
-    let value = at + 2 + suffix
+    let value = write_key(mut raw, at, p, row.key)
     match row.cell {
         Child(branch) => {
             put_ptr(mut raw, value, branch.child)
@@ -511,22 +685,35 @@ fn write_entry(mut raw: Bytes, at: u64, p: u64, row: Entry, body_index: Option[u
             list.set_word_le(mut raw, value + PTR_BYTES + 8, branch.charge)
             value + BRANCH_BYTES
         },
-        InlineValue(data) => {
-            raw[value] = 0
-            put16(mut raw, value + 1, list.len(data))
-            list.copy_from_slice(mut raw, value + 3, data)
-            value + 3 + list.len(data)
-        },
+        InlineValue(data) => write_inline(mut raw, value, data),
         BlobValue(original) => {
             let mut blob = original
             if let Some(index) = body_index {
                 blob.body = index
             }
-            raw[value] = 1
-            put_ref(mut raw, value + 1, blob)
-            value + 1 + REF_BYTES
+            write_blob(mut raw, value, blob)
         },
     }
+}
+
+fn write_key(mut raw: Bytes, at: u64, p: u64, key: Bytes) -> u64 {
+    let suffix = list.len(key) - p
+    put16(mut raw, at, suffix)
+    list.copy_from_slice(mut raw, at + 2, list.slice(key, p, p + suffix))
+    at + 2 + suffix
+}
+
+fn write_inline(mut raw: Bytes, at: u64, data: Bytes) -> u64 {
+    raw[at] = 0
+    put16(mut raw, at + 1, list.len(data))
+    list.copy_from_slice(mut raw, at + 3, data)
+    at + 3 + list.len(data)
+}
+
+fn write_blob(mut raw: Bytes, at: u64, blob: BlobRef) -> u64 {
+    raw[at] = 1
+    put_ref(mut raw, at + 1, blob)
+    at + 1 + REF_BYTES
 }
 
 fn header(mut raw: Bytes, lvl: u8, id: u64, n: u64, p: u64, heap: u64) {
@@ -558,6 +745,25 @@ fn prefix_of(rows: List[Entry], lvl: u8) -> u64 {
 fn compressed(sum: u64, keys: u64, p: u64) -> u64 {
     // The prefix is stored once, even when just one key takes it.
     HEADER + sum - (order.max(keys, 1) - 1) * p
+}
+
+/// Canonical size for layout planning without allocating a canonical image.
+pub fn sealed_size(image: Image) -> u64 {
+    let n = count(image)
+    let first = first_key_slot(level(image))
+    let p = u16_at(image.raw, 4)
+    let keyed = n - order.min(first, n)
+    let mut sum = keyed * p + 2 * n
+    for slot in 0u64 .. n {
+        sum += entry_size(image, slot)
+    }
+    if keyed == 0 {
+        return HEADER + sum
+    }
+    let left = entry_at(image, first)
+    let right = entry_at(image, n - 1)
+    let extension = common_prefix(list.slice(image.raw, left + 2, left + 2 + u16_at(image.raw, left)), list.slice(image.raw, right + 2, right + 2 + u16_at(image.raw, right)))
+    compressed(sum, keyed, p + extension)
 }
 
 fn pack_entries(rows: List[Entry], lvl: u8, id: u64, domain: Domain) -> Result[Image, Error] {
@@ -612,6 +818,41 @@ pub fn encode(rows: List[Entry], lvl: u8, id: u64, domain: Domain) -> Result[Ima
 
 /// Attach the loader's already resolved edges, in slot and body order.
 pub fn attach(take image: Image, take kids: List[Arc[Page]], take blobs: List[Arc[Bytes]]) -> Result[Arc[Page], Error] {
+    check_attachment(image, kids, blobs)?
+    Ok(arc.new(new_page(take image, take kids, take blobs)))
+}
+
+/// Attach without copying the adopted image, returning an allocation refusal.
+pub fn attach_fallible(take image: Image, take kids: List[Arc[Page]], take blobs: List[Arc[Bytes]]) -> Result[Result[Arc[Page], Error], Capacity] {
+    if let Error(problem) = check_attachment(image, kids, blobs) {
+        return Ok(Error(problem))
+    }
+    // Allocate the counted node inside a read-only failure boundary, then
+    // move the validated owners into it while it is still unique.
+    let reserved = isolate(fn() -> Arc[Page] {
+        arc.new(Page(image: Image(raw: list.new(), domain: Unprefixed), kids: list.new(), blobs: list.new(), rows: 0, charge: 0))
+    })
+    let mut resident = match take reserved {
+        Ok(Ok(take allocated)) => take allocated,
+        Error(problem) => return Error(problem),
+        Ok(Error(causes)) => {
+            for cause in causes {
+                if let Capacity(problem) = cause.kind {
+                    return Error(problem)
+                }
+            }
+            fail("page: counted allocation failed")
+        },
+    }
+    let mut ready: Option[Page] = Some(new_page(take image, take kids, take blobs))
+    let moved = arc.with_unique(mut resident, scoped fn(mut destination: Page) {
+        destination = option.unwrap(replace(mut ready, None))
+    })
+    let _ = option.unwrap(moved)
+    Ok(Ok(take resident))
+}
+
+fn check_attachment(image: Image, kids: List[Arc[Page]], blobs: List[Arc[Bytes]]) -> Result[(), Error] {
     let n = count(image)
     let lvl = level(image)
     let owns_kids = lvl != 0 || image.domain == CollectionMap
@@ -647,14 +888,14 @@ pub fn attach(take image: Image, take kids: List[Arc[Page]], take blobs: List[Ar
     if list.len(blobs) != body_count {
         return Error(MalformedPage)
     }
-    Ok(arc.new(Page(image: take image, kids: take kids, blobs: take blobs)))
+    Ok(())
 }
 
 pub fn empty(lvl: u8, id: u64, domain: Domain) -> Arc[Page] {
     let mut raw: Bytes = list.with_capacity(HEADER)
     list.fill(mut raw, HEADER, 0)
     header(mut raw, lvl, id, 0, 0, HEADER)
-    arc.new(Page(image: Image(raw: take raw, domain: domain), kids: list.new(), blobs: list.new()))
+    arc.new(Page(image: Image(raw: take raw, domain: domain), kids: list.new(), blobs: list.new(), rows: 0, charge: 0))
 }
 
 fn rows_of(image: Image) -> List[Entry] {
@@ -686,6 +927,40 @@ pub fn seal(page: Arc[Page]) -> Result[(Image, List[u16]), Error] {
         }
     }
     Ok((encode(rows, level(page.image), stamp(page.image), page.image.domain)?, take bodies))
+}
+
+/// Seal a page for disk and fill its edges from the selected generation's
+/// locations. BLOB locations carry the value checksum and payload length.
+pub fn seal_located(page: Arc[Page], locate: scoped[view] fn(u64) -> PagePtr) -> Result[Bytes, Error] {
+    let (take sealed, _) = seal(page)?
+    let mut image = take sealed
+    for slot in 0u64 .. count(image) {
+        let at = entry_at(image, slot)
+        let value = at + 2 + u16_at(image.raw, at)
+        match owning_edge(image, slot) {
+            Some(PageEdge(edge)) => {
+                let ptr = if edge.stamp == 0 {
+                    unlocated(0)
+                } else {
+                    locate(edge.stamp)
+                }
+                let field = if level(image) == 0 {
+                    value + 3
+                } else {
+                    value
+                }
+                put_ptr(mut image.raw, field, ptr)
+            },
+            Some(BlobEdge(edge)) => {
+                let loc = locate(edge.stamp)
+                let relocated = BlobRef(stamp: edge.stamp, len: edge.len, checksum: loc.checksum, pack: loc.pack, offset: loc.offset, body: edge.body)
+                put_ref(mut image.raw, value + 1, relocated)
+            },
+            None => (),
+        }
+    }
+    let Image(raw: take raw, ..) = take image
+    Ok(take raw)
 }
 
 fn blob_field(image: Image, slot: u64) -> Option[u64] {
@@ -745,16 +1020,20 @@ fn entry_size(image: Image, slot: u64) -> u64 {
 // Rebuild when a new key shortens the prefix or dead entries exhaust the image.
 // The replacement keeps the private stamp and the existing body numbering.
 fn repack(image: Image, row: Entry, slot: u64, hit: bool, body_index: Option[u16]) -> Result[Image, Error] {
-    let mut rows = rows_of(image)
-    let cell = match row.cell {
-        BlobValue(original) => {
-            let mut blob = original
-            blob.body = option.unwrap(body_index)
-            BlobValue(blob)
-        },
-        _ => clone(row.cell),
+    if level(image) == 0 {
+        let edits = leaf_edit_slots(image, row, slot, hit)
+        let end = list.len(edits)
+        let mut width = 0u64
+        for item in edits {
+            width += item.width
+        }
+        if !legal(0, end, slot_section_size(edits, 0, 0, end, width)) {
+            return Error(PageLimit)
+        }
+        return Ok(pack_leaf_section(image, row, body_index, edits, 0, end, stamp(image)))
     }
-    let replacement = Entry(key: clone(row.key), cell: take cell)
+    let mut rows = rows_of(image)
+    let replacement: Entry = clone(row)
     if hit {
         rows[slot] = take replacement
     } else {
@@ -763,12 +1042,12 @@ fn repack(image: Image, row: Entry, slot: u64, hit: bool, body_index: Option[u16
     pack_entries(rows, level(image), stamp(image), image.domain)
 }
 
-fn write_slot(mut image: Image, row: Entry, slot: u64, hit: bool, p: u64, old_size: u64, needed: u64, body_index: Option[u16]) {
+fn slot_space(mut image: Image, slot: u64, hit: bool, old_size: u64, needed: u64) -> u64 {
     let n = count(image)
     let start = slots(image)
     let old_len = list.len(image.raw)
     if needed > old_len {
-        let len = order.max(TARGET, needed)
+        let len = order.min(PRIVATE_MAX, order.max(2 * old_len, needed))
         list.reserve(mut image.raw, len - old_len)
         list.fill(mut image.raw, len - old_len, 0)
         list.copy_within(mut image.raw, start, len - 2 * n, 2 * n)
@@ -786,6 +1065,11 @@ fn write_slot(mut image: Image, row: Entry, slot: u64, hit: bool, p: u64, old_si
         base - 2
     }
     put16(mut image.raw, dest + 2 * slot, heap)
+    heap
+}
+
+fn write_slot(mut image: Image, row: Entry, slot: u64, hit: bool, p: u64, old_size: u64, needed: u64, body_index: Option[u16]) {
+    let heap = slot_space(mut image, slot, hit, old_size, needed)
     let end = write_entry(mut image.raw, heap, p, row, body_index)
     put32(mut image.raw, 16, end)
 }
@@ -832,6 +1116,16 @@ fn private_put(mut page: Page, incoming: Entry, kid: Option[Arc[Page]], blob: Op
     if stamp(page.image) == 0 || !edge_matches(page.image, incoming, kid, blob) {
         return Error(MalformedPage)
     }
+    if hit && lvl == 0 && page.image.domain != CollectionMap {
+        if let InlineValue(value) = incoming.cell {
+            let at = entry_at(page.image, slot)
+            let cell = at + 2 + u16_at(page.image.raw, at)
+            if page.image.raw[cell] == 0 && u16_at(page.image.raw, cell + 1) == list.len(value) {
+                list.copy_from_slice(mut page.image.raw, cell + 3, value)
+                return Ok(Changed)
+            }
+        }
+    }
     let old_body = if hit {
         match blob_field(page.image, slot) {
             Some(at) => Some(u16_at(page.image.raw, at)),
@@ -861,6 +1155,21 @@ fn private_put(mut page: Page, incoming: Entry, kid: Option[Arc[Page]], blob: Op
         entry_size(page.image, slot)
     } else {
         0
+    }
+    let (old_rows, old_charge) = if hit {
+        stored_totals(page.image, slot)
+    } else {
+        (0u64, 0u64)
+    }
+    let key_width = list.len(incoming.key) + (if page.image.domain == Collection {
+        4u64
+    } else {
+        0u64
+    })
+    let (rows, charge) = match incoming.cell {
+        Child(edge) => (edge.rows, edge.charge),
+        InlineValue(value) => (1u64, row_charge(key_width, list.len(value))),
+        BlobValue(edge) => (1u64, row_charge(key_width, edge.len)),
     }
     let total = if hit {
         n
@@ -910,6 +1219,7 @@ fn private_put(mut page: Page, incoming: Entry, kid: Option[Arc[Page]], blob: Op
             move_last_body(mut page, i, slot)
         },
     }
+    changed_totals(mut page, old_rows, old_charge, rows, charge)
     Ok(Changed)
 }
 
@@ -935,6 +1245,7 @@ fn private_delete(mut page: Page, key: Bytes) -> Edit {
     if !hit {
         return AbsentKey
     }
+    let (old_rows, old_charge) = stored_totals(page.image, slot)
     let mut dead = u16_at(page.image.raw, 6) + entry_size(page.image, slot)
     if let Some(at) = blob_field(page.image, slot) {
         let removed = u16_at(page.image.raw, at)
@@ -950,6 +1261,8 @@ fn private_delete(mut page: Page, key: Bytes) -> Edit {
         put16(mut page.image.raw, 4, 0)
         put16(mut page.image.raw, 6, 0)
         put32(mut page.image.raw, 16, HEADER)
+        page.rows = 0
+        page.charge = 0
         return Changed
     }
     if lvl != 0 && slot == 0 {
@@ -968,6 +1281,7 @@ fn private_delete(mut page: Page, key: Bytes) -> Edit {
     list.fill_slice(mut page.image.raw, base, 2, 0)
     put16(mut page.image.raw, 2, n - 1)
     put16(mut page.image.raw, 6, dead)
+    changed_totals(mut page, old_rows, old_charge, 0, 0)
     Changed
 }
 
@@ -1027,21 +1341,59 @@ fn leaf_end(rows: List[Row], start: u64, inline: u64) -> u64 {
 }
 
 fn bulk_leaf(rows: List[Row], lo: u64, hi: u64, inline: u64, domain: Domain, mut next: u64) -> Result[Built, Error] {
-    let mut entries: List[Entry] = list.with_capacity(hi - lo)
+    // The rows are written straight into the image with pack_entries' cell
+    // writers, so no row key or inline value is copied into an Entry first.
+    let mut refs: List[BlobRef] = list.new()
     let mut blobs: List[Arc[Bytes]] = list.new()
     let mut charge = 0u64
+    let mut sum = 0u64
     for i in lo .. hi {
         let row = view rows[i]
-        let Some(sum) = int.checked_add(charge, row.charge) else {
+        let Some(total) = int.checked_add(charge, row.charge) else {
             return Error(PageLimit)
         }
-        charge = sum
-        let cell = leaf_cell(row, inline, mut next, mut blobs)
-        list.push(mut entries, Entry(key: clone(row.key), cell: take cell))
+        charge = total
+        let value = list.len(row.value)
+        sum += 4 + list.len(row.key) + (if value <= inline {
+            3 + value
+        } else {
+            1 + REF_BYTES
+        })
+        if value > inline {
+            if let BlobValue(blob) = leaf_cell(row, inline, mut next, mut blobs) {
+                list.push(mut refs, blob)
+            }
+        }
     }
     let id = draw(mut next)
-    let image = pack_entries(entries, 0, id, domain)?
-    let root = arc.new(Page(image: take image, kids: list.new(), blobs: take blobs))
+    let n = hi - lo
+    let p = common_prefix(rows[lo].key, rows[hi - 1].key)
+    let size = compressed(sum, n, p)
+    if !legal(0, n, size) {
+        return Error(PageLimit)
+    }
+    let slot_start = size - 2 * n
+    let mut raw: Bytes = list.with_capacity(size)
+    list.fill(mut raw, size, 0)
+    header(mut raw, 0, id, n, p, slot_start)
+    if p != 0 {
+        list.copy_from_slice(mut raw, HEADER, list.slice(rows[lo].key, 0, p))
+    }
+    let mut at = HEADER + p
+    let mut blob_slot = 0u64
+    for i in lo .. hi {
+        let row = view rows[i]
+        put16(mut raw, slot_start + 2 * (i - lo), at)
+        let cell = write_key(mut raw, at, p, row.key)
+        if list.len(row.value) <= inline {
+            at = write_inline(mut raw, cell, row.value)
+        } else {
+            at = write_blob(mut raw, cell, refs[blob_slot])
+            blob_slot += 1
+        }
+    }
+    let image = Image(raw: take raw, domain: domain)
+    let root = arc.new(new_page(take image, list.new(), take blobs))
     Ok(Built(root: take root, first: clone(rows[lo].key), last: clone(rows[hi - 1].key), rows: hi - lo, charge: charge))
 }
 
@@ -1081,7 +1433,7 @@ fn bulk_branch(nodes: List[Built], seps: List[Bytes], lo: u64, hi: u64, domain: 
     }
     let id = draw(mut next)
     let image = pack_entries(entries, lvl, id, domain)?
-    let root = arc.new(Page(image: take image, kids: take kids, blobs: list.new()))
+    let root = arc.new(Page(image: take image, kids: take kids, blobs: list.new(), rows: rows, charge: charge))
     Ok(Built(root: take root, first: clone(nodes[lo].first), last: clone(nodes[hi - 1].last), rows: rows, charge: charge))
 }
 
@@ -1168,4 +1520,1075 @@ pub fn bulk(rows: List[Row], domain: Domain, inline: u64, mut next: u64) -> Resu
         nodes = bulk_level(nodes, domain, mut cursor)?
     }
     Ok(Some(arc.share(nodes[0u64].root)))
+}
+
+type PageSlot: shareable + send {
+    row: Entry,
+    kid: Option[Arc[Page]],
+    blob: Option[Arc[Bytes]]
+}
+
+fn take_stamp(mut next: u64) -> Result[u64, Error] {
+    let Some(end) = int.checked_add(next, 1) else {
+        return Error(StampLimit)
+    }
+    if next == 0 {
+        return Error(StampLimit)
+    }
+    let id = next
+    next = end
+    Ok(id)
+}
+
+fn stamp_replay_edit(mut page: Page, private_from: u64, mut next: u64) -> Result[(), Error] {
+    if private_from == 0 {
+        let id = take_stamp(mut next)?
+        list.set_word_le(mut page.image.raw, 8, id)
+    }
+    Ok(())
+}
+
+fn owned_slots(page: Page) -> List[PageSlot] {
+    let n = count(page.image)
+    let mut slots_out: List[PageSlot] = list.with_capacity(n)
+    for i in 0u64 .. n {
+        let row = option.unwrap(entry(page.image, i))
+        let blob: Option[Arc[Bytes]] = match row.cell {
+            BlobValue(edge) => Some(arc.share(page.blobs[int.widen(edge.body)])),
+            _ => None,
+        }
+        let kid: Option[Arc[Page]] = if list.len(page.kids) == 0 {
+            None
+        } else {
+            Some(arc.share(page.kids[i]))
+        }
+        list.push(mut slots_out, PageSlot(row: take row, kid: take kid, blob: take blob))
+    }
+    take slots_out
+}
+
+type PackedSlot {
+    key: Bytes,
+    width: u64,
+    at: u64
+}
+
+// Slot offsets identify the existing cells. Offset zero denotes the incoming
+// cell because no entry overlaps the page header.
+fn leaf_edit_slots(image: Image, row: Entry, position: u64, hit: bool) -> List[PackedSlot] {
+    let n = count(image) + (if hit {
+        0u64
+    } else {
+        1u64
+    })
+    let mut entries: List[PackedSlot] = list.with_capacity(n)
+    for i in 0u64 .. n {
+        if i == position {
+            list.push(mut entries, PackedSlot(key: clone(row.key), width: full_size(row), at: 0))
+        } else {
+            let prior = if !hit && i > position {
+                i - 1
+            } else {
+                i
+            }
+            let at = entry_at(image, prior)
+            let key = read_slot_key(image, prior, at)
+            let cell = at + 2 + u16_at(image.raw, at)
+            let width = 4 + list.len(key) + cell_size(image.raw, 0, cell)
+            list.push(mut entries, PackedSlot(key: take key, width: width, at: cell))
+        }
+    }
+    take entries
+}
+
+fn pack_leaf_section(image: Image, incoming: Entry, body_index: Option[u16], entries: List[PackedSlot], lo: u64, hi: u64, id: u64) -> Image {
+    let n = hi - lo
+    let prefix = common_prefix(entries[lo].key, entries[hi - 1].key)
+    let mut width = 0u64
+    for i in lo .. hi {
+        width += entries[i].width
+    }
+    let size = compressed(width, n, prefix)
+    let slot_start = size - 2 * n
+    let mut raw: Bytes = list.with_capacity(size)
+    list.fill(mut raw, size, 0)
+    header(mut raw, 0, id, n, prefix, slot_start)
+    list.copy_from_slice(mut raw, HEADER, list.slice(entries[lo].key, 0, prefix))
+    let mut at = HEADER + prefix
+    for i in lo .. hi {
+        let source = view entries[i]
+        put16(mut raw, slot_start + 2 * (i - lo), at)
+        if source.at == 0 {
+            at = write_entry(mut raw, at, prefix, incoming, body_index)
+        } else {
+            let key_end = list.len(source.key)
+            let suffix = key_end - prefix
+            put16(mut raw, at, suffix)
+            list.copy_from_slice(mut raw, at + 2, list.slice(source.key, prefix, key_end))
+            let payload_width = source.width - 4 - key_end
+            list.copy_from_slice(mut raw, at + 2 + suffix, list.slice(image.raw, source.at, source.at + payload_width))
+            at += 2 + suffix + payload_width
+        }
+    }
+    Image(raw: take raw, domain: image.domain)
+}
+
+fn slot_section_size(items: List[PackedSlot], lvl: u8, lo: u64, hi: u64, width: u64) -> u64 {
+    let first = lo + first_key_slot(lvl)
+    let sum = if first == lo {
+        width
+    } else {
+        width - list.len(items[lo].key)
+    }
+    if first >= hi {
+        return HEADER + sum
+    }
+    compressed(sum, hi - first, common_prefix(items[first].key, items[hi - 1].key))
+}
+
+fn slot_size_with_prefix(items: List[PageSlot], lvl: u8, lo: u64, hi: u64, sum: u64) -> u64 {
+    let first = lo + first_key_slot(lvl)
+    let width = if first == lo {
+        sum
+    } else {
+        sum - list.len(items[lo].row.key)
+    }
+    if first >= hi {
+        return HEADER + width
+    }
+    compressed(width, hi - first, common_prefix(items[first].row.key, items[hi - 1].row.key))
+}
+
+fn section_size(items: List[PageSlot], lvl: u8, lo: u64, hi: u64) -> u64 {
+    let mut sum = 0u64
+    for i in lo .. hi {
+        sum += full_size(items[i].row)
+    }
+    slot_size_with_prefix(items, lvl, lo, hi, sum)
+}
+
+fn split_slots(n: u64, lvl: u8, width_at: scoped fn(u64) -> u64, section: scoped fn(u64, u64, u64) -> u64) -> Result[(u64, u64), Error] {
+    let mut total = 0u64
+    for slot in 0u64 .. n {
+        total += width_at(slot)
+    }
+    if legal(lvl, n, section(0, n, total)) {
+        return Ok((n, n))
+    }
+    let minimum = if lvl == 0 {
+        1u64
+    } else {
+        2u64
+    }
+    if n < 2 * minimum {
+        return Error(PageLimit)
+    }
+    let mut best = PAGE_MAX + 1
+    let mut left = 0u64
+    let mut middle = n
+    let mut first_size = if minimum == 2 {
+        width_at(0)
+    } else {
+        0u64
+    }
+    for cut in minimum .. n - minimum + 1 {
+        first_size += width_at(cut - 1)
+        let a = section(0, cut, first_size)
+        let b = section(cut, n, total - first_size)
+        let widest = order.max(a, b)
+        if widest < best && legal(lvl, cut, a) && legal(lvl, n - cut, b) {
+            left = cut
+            best = widest
+        }
+    }
+    if left != 0 {
+        return Ok((left, n))
+    }
+    if n < 3 * minimum {
+        return Error(PageLimit)
+    }
+    first_size = if minimum == 2 {
+        width_at(0)
+    } else {
+        0u64
+    }
+    for cut in minimum .. n - 2 * minimum + 1 {
+        first_size += width_at(cut - 1)
+        let a = section(0, cut, first_size)
+        if !legal(lvl, cut, a) {
+            continue
+        }
+        let mut second_size = if minimum == 2 {
+            width_at(cut)
+        } else {
+            0u64
+        }
+        for split in cut + minimum .. n - minimum + 1 {
+            second_size += width_at(split - 1)
+            let b = section(cut, split, second_size)
+            let c = section(split, n, total - first_size - second_size)
+            let widest = order.max(a, order.max(b, c))
+            if widest < best && legal(lvl, split - cut, b) && legal(lvl, n - split, c) {
+                left = cut
+                middle = split
+                best = widest
+            }
+        }
+    }
+    if left == 0 {
+        Error(PageLimit)
+    } else {
+        Ok((left, middle))
+    }
+}
+
+fn build_section(items: List[PageSlot], domain: Domain, lvl: u8, lo: u64, hi: u64, id: u64) -> Result[Arc[Page], Error] {
+    let mut rows: List[Entry] = list.with_capacity(hi - lo)
+    let mut kids: List[Arc[Page]] = list.new()
+    let mut blobs: List[Arc[Bytes]] = list.new()
+    for i in lo .. hi {
+        let piece = view items[i]
+        let mut row: Entry = clone(piece.row)
+        if lvl != 0 && i == lo {
+            list.clear(mut row.key)
+        }
+        if let Some(kid) = piece.kid {
+            list.push(mut kids, arc.share(kid))
+        }
+        if let BlobValue(edge) = row.cell {
+            let mut located = edge
+            located.body = int.truncate(list.len(blobs))
+            row.cell = BlobValue(located)
+            let Some(payload_arc) = piece.blob else {
+                return Error(MalformedPage)
+            }
+            list.push(mut blobs, arc.share(payload_arc))
+        }
+        list.push(mut rows, take row)
+    }
+    let image = pack_entries(rows, lvl, id, domain)?
+    Ok(arc.new(new_page(take image, take kids, take blobs)))
+}
+
+fn build_pieces(items: List[PageSlot], domain: Domain, lvl: u8, mut next: u64) -> Result[List[Arc[Page]], Error] {
+    let n = list.len(items)
+    let (left, middle) = split_slots(n, lvl, scoped fn(slot: u64) -> u64 {
+        full_size(items[slot].row)
+    }, scoped fn(lo: u64, hi: u64, width: u64) -> u64 {
+        slot_size_with_prefix(items, lvl, lo, hi, width)
+    })?
+    let mut parts: List[Arc[Page]] = list.new()
+    list.push(mut parts, build_section(items, domain, lvl, 0, left, take_stamp(mut next)?)?)
+    if left < middle {
+        list.push(mut parts, build_section(items, domain, lvl, left, middle, take_stamp(mut next)?)?)
+    }
+    if middle < n {
+        list.push(mut parts, build_section(items, domain, lvl, middle, n, take_stamp(mut next)?)?)
+    }
+    Ok(take parts)
+}
+
+fn extreme_key(root: Arc[Page], right: bool) -> Bytes {
+    let i = if right {
+        count(root.image) - 1
+    } else {
+        0u64
+    }
+    if level(root.image) == 0 {
+        return option.unwrap(key_at(root.image, i))
+    }
+    extreme_key(root.kids[i], right)
+}
+
+fn branch_slot(take key: Bytes, descendant: Arc[Page]) -> PageSlot {
+    let (rows, charge) = totals(descendant)
+    PageSlot(row: Entry(key: take key, cell: Child(Branch(child: unlocated(stamp(descendant.image)), rows: rows, charge: charge))), kid: Some(arc.share(descendant)), blob: None)
+}
+
+fn refresh_child(mut page: Page, slot: u64) {
+    let child_id = stamp(page.kids[slot].image)
+    let (rows, charge) = totals(page.kids[slot])
+    let start = entry_at(page.image, slot)
+    let edge = start + 2 + u16_at(page.image.raw, start)
+    let old_rows: u64 = list.word_le(page.image.raw, edge + PTR_BYTES)
+    let old_charge: u64 = list.word_le(page.image.raw, edge + PTR_BYTES + 8)
+    put_ptr(mut page.image.raw, edge, unlocated(child_id))
+    list.set_word_le(mut page.image.raw, edge + PTR_BYTES, rows)
+    list.set_word_le(mut page.image.raw, edge + PTR_BYTES + 8, charge)
+    changed_totals(mut page, old_rows, old_charge, rows, charge)
+}
+
+fn replace_children(page: Page, slot: u64, parts: List[Arc[Page]], mut next: u64) -> Result[List[Arc[Page]], Error] {
+    let leading_key = option.unwrap(key_at(page.image, slot))
+    let mut edited = owned_slots(page)
+    edited[slot] = branch_slot(take leading_key, parts[0])
+    for i in 1u64 .. list.len(parts) {
+        let divider = separator(extreme_key(parts[i - 1], true), extreme_key(parts[i], false))?
+        open_slot(mut edited, slot + i, branch_slot(take divider, parts[i]))
+    }
+    build_pieces(edited, page.image.domain, level(page.image), mut next)
+}
+
+fn build_leaf_piece(page: Page, incoming: PageSlot, entries: List[PackedSlot], slot: u64, hit: bool, lo: u64, hi: u64, id: u64) -> Arc[Page] {
+    let mut image = pack_leaf_section(page.image, incoming.row, None, entries, lo, hi, id)
+    let mut kids: List[Arc[Page]] = list.new()
+    let mut blobs: List[Arc[Bytes]] = list.new()
+    for i in lo .. hi {
+        if let Some(at) = blob_field(image, i - lo) {
+            let blob_bytes = if i == slot {
+                let Some(staged_blob) = view incoming.blob else {
+                    fail("page: split lost its incoming blob")
+                }
+                arc.share(staged_blob)
+            } else {
+                let ordinal = u16_at(image.raw, at)
+                arc.share(page.blobs[ordinal])
+            }
+            put16(mut image.raw, at, list.len(blobs))
+            list.push(mut blobs, take blob_bytes)
+        }
+        if page.image.domain == CollectionMap {
+            let kid = if i == slot {
+                let Some(staged_kid) = view incoming.kid else {
+                    fail("page: split lost its incoming child")
+                }
+                arc.share(staged_kid)
+            } else {
+                let prior = if !hit && i > slot {
+                    i - 1
+                } else {
+                    i
+                }
+                arc.share(page.kids[prior])
+            }
+            list.push(mut kids, take kid)
+        }
+    }
+    arc.new(new_page(take image, take kids, take blobs))
+}
+
+fn split_insert(page: Page, incoming: PageSlot, mut next: u64) -> Result[List[Arc[Page]], Error] {
+    let (slot, hit) = search(page.image, incoming.row.key)
+    let entries = leaf_edit_slots(page.image, incoming.row, slot, hit)
+    let n = list.len(entries)
+    let (left, middle) = split_slots(n, 0, scoped fn(index: u64) -> u64 {
+        entries[index].width
+    }, scoped fn(lo: u64, hi: u64, width: u64) -> u64 {
+        slot_section_size(entries, 0, lo, hi, width)
+    })?
+    let mut parts: List[Arc[Page]] = list.new()
+    list.push(mut parts, build_leaf_piece(page, incoming, entries, slot, hit, 0, left, take_stamp(mut next)?))
+    if left < middle {
+        list.push(mut parts, build_leaf_piece(page, incoming, entries, slot, hit, left, middle, take_stamp(mut next)?))
+    }
+    if middle < n {
+        list.push(mut parts, build_leaf_piece(page, incoming, entries, slot, hit, middle, n, take_stamp(mut next)?))
+    }
+    Ok(take parts)
+}
+
+fn insert_private(mut page: Page, incoming: PageSlot, private_from: u64, mut next: u64) -> Result[Option[List[Arc[Page]]], Error] {
+    let Some(slot) = descend(page.image, incoming.row.key) else {
+        let edit = private_put(mut page, incoming.row, incoming.kid, incoming.blob)?
+        if edit == Split {
+            return Ok(Some(split_insert(page, incoming, mut next)?))
+        }
+        return Ok(None)
+    }
+    let split = insert_path(mut page.kids[slot], incoming, private_from, mut next)?
+    if let Some(parts) = split {
+        return Ok(Some(replace_children(page, slot, parts, mut next)?))
+    }
+    refresh_child(mut page, slot)
+    Ok(None)
+}
+
+fn insert_path(mut root: Arc[Page], incoming: PageSlot, private_from: u64, mut next: u64) -> Result[Option[List[Arc[Page]]], Error] {
+    let prior = stamp(root.image)
+    if prior != 0 && prior >= private_from {
+        let update = arc.with_unique(mut root, scoped fn(mut page: Page) -> Result[Option[List[Arc[Page]]], Error] {
+            stamp_replay_edit(mut page, private_from, mut next)?
+            insert_private(mut page, incoming, private_from, mut next)
+        })
+        if let Some(take result) = take update {
+            return take result
+        }
+    }
+    root = copy_with_stamp(root, take_stamp(mut next)?)
+    option.unwrap(arc.with_unique(mut root, scoped fn(mut page: Page) -> Result[Option[List[Arc[Page]]], Error] {
+        insert_private(mut page, incoming, private_from, mut next)
+    }))
+}
+
+fn rebalance_child(mut page: Page, slot: u64, mut next: u64) -> Result[Option[List[Arc[Page]]], Error] {
+    let lvl = level(page.kids[slot].image)
+    let n = count(page.kids[slot].image)
+    let siblings = count(page.image)
+    if n == 0 {
+        let top_key = option.unwrap(key_at(page.image, slot))
+        let _ = private_delete(mut page, top_key)
+        return Ok(None)
+    }
+    let unary = lvl != 0 && n == 1
+    let local = owned_slots(page.kids[slot])
+    if siblings == 1 || (!unary && section_size(local, lvl, 0, n) >= TARGET / 4) {
+        refresh_child(mut page, slot)
+        return Ok(None)
+    }
+    let left = if slot + 1 == siblings {
+        slot - 1
+    } else {
+        slot
+    }
+    let right = left + 1
+    let mut merged = owned_slots(page.kids[left])
+    let first_right = list.len(merged)
+    let mut right_items = owned_slots(page.kids[right])
+    if lvl != 0 {
+        right_items[0u64].row.key = option.unwrap(key_at(page.image, right))
+    }
+    for take item in take right_items {
+        list.push(mut merged, take item)
+    }
+    let combined = list.len(merged)
+    let works = if unary {
+        combined <= 3
+    } else {
+        legal(lvl, combined, section_size(merged, lvl, 0, combined))
+    }
+    if !works && !unary {
+        refresh_child(mut page, slot)
+        return Ok(None)
+    }
+    let domain = page.image.domain
+    let mut parent = owned_slots(page)
+    let left_separator: Bytes = clone(parent[left].row.key)
+    if works {
+        let joined = build_section(merged, domain, lvl, 0, combined, take_stamp(mut next)?)?
+        parent[left] = branch_slot(take left_separator, joined)
+        close_slot(mut parent, right)
+    } else {
+        let pivot = if first_right == 1 {
+            2u64
+        } else {
+            combined - 2
+        }
+        let right_separator: Bytes = clone(merged[pivot].row.key)
+        let smaller_left = build_section(merged, domain, lvl, 0, pivot, take_stamp(mut next)?)?
+        let smaller_right = build_section(merged, domain, lvl, pivot, combined, take_stamp(mut next)?)?
+        parent[left] = branch_slot(take left_separator, smaller_left)
+        parent[right] = branch_slot(take right_separator, smaller_right)
+    }
+    Ok(Some(build_pieces(parent, domain, level(page.image), mut next)?))
+}
+
+fn remove_private(mut page: Page, key: Bytes, private_from: u64, mut next: u64) -> Result[Option[List[Arc[Page]]], Error] {
+    let Some(slot) = descend(page.image, key) else {
+        let _ = private_delete(mut page, key)
+        return Ok(None)
+    }
+    let revised = remove_path(mut page.kids[slot], key, private_from, mut next)?
+    if let Some(parts) = revised {
+        if list.len(parts) == 1 {
+            page.kids[slot] = arc.share(parts[0])
+            return rebalance_child(mut page, slot, mut next)
+        }
+        return Ok(Some(replace_children(page, slot, parts, mut next)?))
+    }
+    rebalance_child(mut page, slot, mut next)
+}
+
+fn remove_path(mut root: Arc[Page], key: Bytes, private_from: u64, mut next: u64) -> Result[Option[List[Arc[Page]]], Error] {
+    if stamp(root.image) >= private_from {
+        let update = arc.with_unique(mut root, scoped fn(mut page: Page) -> Result[Option[List[Arc[Page]]], Error] {
+            stamp_replay_edit(mut page, private_from, mut next)?
+            remove_private(mut page, key, private_from, mut next)
+        })
+        if let Some(take result) = take update {
+            return take result
+        }
+    }
+    root = copy_with_stamp(root, take_stamp(mut next)?)
+    option.unwrap(arc.with_unique(mut root, scoped fn(mut page: Page) -> Result[Option[List[Arc[Page]]], Error] {
+        remove_private(mut page, key, private_from, mut next)
+    }))
+}
+
+fn finish_split(mut root: Arc[Page], parts: List[Arc[Page]], mut next: u64) -> Result[(), Error] {
+    if list.len(parts) == 1 {
+        root = arc.share(parts[0])
+        return Ok(())
+    }
+    let mut parents: List[PageSlot] = list.with_capacity(list.len(parts))
+    list.push(mut parents, branch_slot(list.new(), parts[0]))
+    for i in 1u64 .. list.len(parts) {
+        let divider = separator(extreme_key(parts[i - 1], true), extreme_key(parts[i], false))?
+        list.push(mut parents, branch_slot(take divider, parts[i]))
+    }
+    root = build_section(parents, root.image.domain, level(root.image) + 1, 0, list.len(parents), take_stamp(mut next)?)?
+    Ok(())
+}
+
+/// Delete one row, rebalancing its path and collapsing a unary root.
+pub fn remove(mut root: Arc[Page], key: Bytes, private_from: u64, mut next: u64) -> Result[bool, Error] {
+    let present = match lookup(root, key) {
+        Some(_) => true,
+        None => false
+    }
+    if !present {
+        return Ok(false)
+    }
+    if let Some(parts) = remove_path(mut root, key, private_from, mut next)? {
+        finish_split(mut root, parts, mut next)?
+    }
+    if count(root.image) == 0 {
+        root = empty(0, 0, root.image.domain)
+    } else if count(root.image) == 1 && level(root.image) != 0 {
+        root = arc.share(root.kids[0u64])
+    }
+    Ok(true)
+}
+
+/// Upsert one row, copying a shared path and keeping private pages editable.
+/// Collection descriptors supply the collection root as their owning child.
+/// Replay passes zero to re-stamp unique pages outside a live store.
+pub fn insert(mut root: Arc[Page], key: Bytes, value: Bytes, descriptor: Option[Arc[Page]], inline: u64, private_from: u64, mut next: u64) -> Result[(), Error] {
+    insert_value(mut root, key, value, None, descriptor, inline, private_from, mut next)
+}
+
+/// Share the value body with the journal operation when the row uses a BLOB.
+pub fn insert_shared(mut root: Arc[Page], key: Bytes, value: Arc[Bytes], inline: u64, private_from: u64, mut next: u64) -> Result[(), Error] {
+    insert_value(mut root, key, value, Some(view value), None, inline, private_from, mut next)
+}
+
+fn insert_value(mut root: Arc[Page], key: Bytes, value: Bytes, shared: Option[View[Arc[Bytes]]], descriptor: Option[Arc[Page]], inline: u64, private_from: u64, mut next: u64) -> Result[(), Error] {
+    let domain = root.image.domain
+    let n = list.len(value)
+    if inline > INLINE_MAX || n > VALUE_MAX || list.len(key) > key_limit(domain) {
+        return Error(PageLimit)
+    }
+    let incoming = if n <= inline || domain == CollectionMap {
+        PageSlot(row: Entry(key: clone(key), cell: InlineValue(clone(value))), kid: clone(descriptor), blob: None)
+    } else {
+        let edge = BlobRef(stamp: take_stamp(mut next)?, len: n, checksum: check.xxh3(value, 0, n), pack: 0, offset: 0, body: 0)
+        let shared_body = match shared {
+            Some(held) => arc.share(held),
+            None => arc.new(clone(value)),
+        }
+        PageSlot(row: Entry(key: clone(key), cell: BlobValue(edge)), kid: None, blob: Some(take shared_body))
+    }
+    if let Some(parts) = insert_path(mut root, incoming, private_from, mut next)? {
+        finish_split(mut root, parts, mut next)?
+    }
+    Ok(())
+}
+
+fn collection_private(mut page: Page, key: Bytes, private_from: u64, mut next: u64, edit: scoped fn(mut Arc[Page], mut u64) -> Result[(), Error]) -> Result[(), Error] {
+    if let Some(slot) = descend(page.image, key) {
+        edit_collection(mut page.kids[slot], key, private_from, mut next, edit)?
+        refresh_child(mut page, slot)
+        return Ok(())
+    }
+    let (slot, hit) = search(page.image, key)
+    if !hit {
+        return Error(MalformedPage)
+    }
+    edit(mut page.kids[slot], mut next)?
+    refresh_collection(mut page, slot)
+    Ok(())
+}
+
+fn refresh_collection(mut page: Page, slot: u64) {
+    let (rows, charge) = totals(page.kids[slot])
+    let child_id = if rows == 0 {
+        0u64
+    } else {
+        stamp(page.kids[slot].image)
+    }
+    let start = entry_at(page.image, slot)
+    let value = start + 2 + u16_at(page.image.raw, start) + 3
+    put_ptr(mut page.image.raw, value, unlocated(child_id))
+    list.set_word_le(mut page.image.raw, value + PTR_BYTES, rows)
+    list.set_word_le(mut page.image.raw, value + PTR_BYTES + 8, charge)
+}
+
+/// Edit a collection through the unique path that holds its descriptor.
+pub fn edit_collection(mut root: Arc[Page], key: Bytes, private_from: u64, mut next: u64, edit: scoped fn(mut Arc[Page], mut u64) -> Result[(), Error]) -> Result[(), Error] {
+    if stamp(root.image) >= private_from {
+        let edited = arc.with_unique(mut root, scoped fn(mut page: Page) -> Result[(), Error] {
+            stamp_replay_edit(mut page, private_from, mut next)?
+            collection_private(mut page, key, private_from, mut next, edit)
+        })
+        if let Some(take answer) = take edited {
+            return take answer
+        }
+    }
+    root = copy_with_stamp(root, take_stamp(mut next)?)
+    option.unwrap(arc.with_unique(mut root, scoped fn(mut page: Page) -> Result[(), Error] {
+        collection_private(mut page, key, private_from, mut next, edit)
+    }))
+}
+
+fn put_inline_leaf(mut page: Page, key: Bytes, data: Bytes, id: u64) -> Result[bool, Capacity] {
+    let (slot, hit) = search(page.image, key)
+    let p = u16_at(page.image.raw, 4)
+    let key_width = list.len(key)
+    let value_width = list.len(data)
+    let charge = row_charge(key_width + (if page.image.domain == Collection {
+        4u64
+    } else {
+        0u64
+    }), value_width)
+    let (old_size, old_rows, old_charge) = if hit {
+        let at = entry_at(page.image, slot)
+        let value = at + 2 + u16_at(page.image.raw, at)
+        if page.image.raw[value] != 0 {
+            return Ok(false)
+        }
+        let previous = u16_at(page.image.raw, value + 1)
+        if previous == value_width {
+            list.copy_from_slice(mut page.image.raw, value + 3, data)
+            list.set_word_le(mut page.image.raw, 8, id)
+            return Ok(true)
+        }
+        (value - at + 3 + previous, 1u64, row_charge(key_width + (if page.image.domain == Collection {
+            4u64
+        } else {
+            0u64
+        }), previous))
+    } else {
+        (0u64, 0u64, 0u64)
+    }
+    if key_width < p {
+        return Ok(false)
+    }
+    if list.compare_bytes(list.slice(page.image.raw, HEADER, HEADER + p), list.slice(key, 0, p)) != Equal {
+        return Ok(false)
+    }
+    let total = count(page.image) + (if hit {
+        0u64
+    } else {
+        1u64
+    })
+    let suffix = key_width - p
+    let needed = u32_at(page.image.raw, 16) + 5 + suffix + value_width + 2 * total
+    if needed > PRIVATE_MAX || !legal(0, total, needed - u16_at(page.image.raw, 6) - old_size) {
+        return Ok(false)
+    }
+    let old_len = list.len(page.image.raw)
+    if needed > old_len {
+        let capacity = order.min(PRIVATE_MAX, order.max(2 * old_len, needed))
+        list.try_reserve(mut page.image.raw, capacity - old_len)?
+    }
+    let at = slot_space(mut page.image, slot, hit, old_size, needed)
+    put16(mut page.image.raw, at, suffix)
+    list.copy_from_slice(mut page.image.raw, at + 2, list.slice(key, p, key_width))
+    let value = at + 2 + suffix
+    page.image.raw[value] = 0
+    put16(mut page.image.raw, value + 1, value_width)
+    list.copy_from_slice(mut page.image.raw, value + 3, data)
+    put32(mut page.image.raw, 16, value + 3 + value_width)
+    changed_totals(mut page, old_rows, old_charge, 1, charge)
+    list.set_word_le(mut page.image.raw, 8, id)
+    Ok(true)
+}
+
+fn put_inline_path(mut root: Arc[Page], collection: Bytes, key: Bytes, data: Bytes, mut next: u64) -> Result[bool, Capacity] {
+    let edited = arc.with_unique(mut root, scoped fn(mut page: Page) -> Result[bool, Capacity] {
+        // Issue the path's stamps in the same root-first order as a copy.
+        let id = next
+        next += 1
+        let map_page = page.image.domain == CollectionMap
+        let page_key = if map_page {
+            view collection
+        } else {
+            view key
+        }
+        if let Some(slot) = descend(page.image, page_key) {
+            if !put_inline_path(mut page.kids[slot], collection, key, data, mut next)? {
+                return Ok(false)
+            }
+            refresh_child(mut page, slot)
+        } else if map_page {
+            let (slot, hit) = search(page.image, collection)
+            if !hit || !put_inline_path(mut page.kids[slot], collection, key, data, mut next)? {
+                return Ok(false)
+            }
+            refresh_collection(mut page, slot)
+        } else {
+            return put_inline_leaf(mut page, key, data, id)
+        }
+        list.set_word_le(mut page.image.raw, 8, id)
+        Ok(true)
+    })
+    match take edited {
+        Some(take answer) => take answer,
+        None => Ok(false),
+    }
+}
+
+/// Apply an inline write after the writer's checks, holding the full path
+/// unique. A split, repack or shared path leaves the tree untouched.
+pub fn put_inline_unique(mut root: Arc[Page], collection: Bytes, key: Bytes, data: Bytes, inline: u64, first: u64) -> Result[bool, Capacity] {
+    if list.len(data) > inline || first == 0 || first > 18446744073709551103u64 {
+        return Ok(false)
+    }
+    let mut next = first
+    put_inline_path(mut root, collection, key, data, mut next)
+}
+
+/// Install a prepared tree without allocating. Reuse the Arc of each
+/// uniquely held page while its ancestors stay unique. A shape change
+/// takes the prepared child list and a shared page takes its replacement.
+pub fn install_planned(mut root: Arc[Page], take replacement: Arc[Page]) {
+    if stamp(root.image) == stamp(replacement.image) {
+        return ()
+    }
+    let mut pending: Option[Arc[Page]] = Some(take replacement)
+    let changed = arc.with_unique(mut root, scoped fn(mut installed: Page) -> bool {
+        let candidate = option.unwrap(replace(mut pending, None))
+        match arc.try_unwrap(take candidate) {
+            Error(take shared) => {
+                pending = Some(take shared)
+                false
+            },
+            Ok(take page) => {
+                let mut fresh = take page
+                if level(installed.image) == level(fresh.image) && list.len(installed.kids) == list.len(fresh.kids) {
+                    while let Some(take descendant) = list.pop(mut fresh.kids) {
+                        let slot = list.len(fresh.kids)
+                        install_planned(mut installed.kids[slot], take descendant)
+                    }
+                    fresh.kids = replace(mut installed.kids, list.new())
+                }
+                installed = take fresh
+                true
+            },
+        }
+    })
+    if changed != Some(true) {
+        root = option.unwrap(replace(mut pending, None))
+    }
+}
+
+type CursorSlot: send {
+    page: Arc[Page],
+    next_slot: u64
+}
+
+pub opaque type Cursor: send {
+    path: List[CursorSlot],
+    key_buffer: Bytes,
+    has_prefix: bool,
+    reverse: bool
+}
+
+pub type CursorRow: send {
+    key: Bytes,
+    value: Arc[Bytes],
+    collection: Option[Arc[Page]]
+}
+
+fn cursor_path(mut cursor: Cursor, root: Arc[Page], boundary: Option[Bytes], inclusive: bool) {
+    let mut walking = arc.share(root)
+    while count(walking.image) != 0 {
+        let n = count(walking.image)
+        if level(walking.image) == 0 {
+            let position = match boundary {
+                None => if cursor.reverse {
+                    n
+                } else {
+                    0u64
+                },
+                Some(key) => {
+                    let (slot, hit) = search(walking.image, key)
+                    if hit && cursor.reverse == inclusive {
+                        slot + 1
+                    } else {
+                        slot
+                    }
+                },
+            }
+            list.push(mut cursor.path, CursorSlot(page: take walking, next_slot: position))
+            return ()
+        }
+        let selected = match boundary {
+            None => if cursor.reverse {
+                n - 1
+            } else {
+                0u64
+            },
+            Some(key) => option.unwrap(descend(walking.image, key)),
+        }
+        let descendant = arc.share(walking.kids[selected])
+        let following = if cursor.reverse {
+            selected
+        } else {
+            selected + 1
+        }
+        list.push(mut cursor.path, CursorSlot(page: take walking, next_slot: following))
+        walking = take descendant
+    }
+}
+
+pub fn cursor_open(root: Arc[Page], boundary: Option[Bytes], inclusive: bool, reverse: bool) -> Cursor {
+    let mut cursor = Cursor(path: list.new(), key_buffer: list.new(), has_prefix: false, reverse: reverse)
+    cursor_path(mut cursor, root, boundary, inclusive)
+    take cursor
+}
+
+fn cursor_row(page: Arc[Page], slot: u64) -> CursorRow {
+    let at = entry_at(page.image, slot)
+    let key = read_slot_key(page.image, slot, at)
+    let cell_offset = at + 2 + u16_at(page.image.raw, at)
+    let shared = if page.image.raw[cell_offset] == 0 {
+        let width = u16_at(page.image.raw, cell_offset + 1)
+        let inline: Bytes = clone(list.slice(page.image.raw, cell_offset + 3, cell_offset + 3 + width))
+        arc.new(take inline)
+    } else {
+        let edge = ref_at(page.image.raw, cell_offset + 1)
+        arc.share(page.blobs[int.widen(edge.body)])
+    }
+    let collection: Option[Arc[Page]] = if page.image.domain == CollectionMap {
+        Some(arc.share(page.kids[slot]))
+    } else {
+        None
+    }
+    CursorRow(key: take key, value: take shared, collection: take collection)
+}
+
+fn cursor_step(mut cursor: Cursor) -> Option[u64] {
+    while list.len(cursor.path) != 0 {
+        let top = list.len(cursor.path) - 1
+        let n = count(cursor.path[top].page.image)
+        let candidate = cursor.path[top].next_slot
+        if (cursor.reverse && candidate == 0) || (!cursor.reverse && candidate == n) {
+            cursor.has_prefix = false
+            let _ = list.pop(mut cursor.path)
+            continue
+        }
+        let selected = if cursor.reverse {
+            candidate - 1
+        } else {
+            candidate
+        }
+        cursor.path[top].next_slot = if cursor.reverse {
+            selected
+        } else {
+            selected + 1
+        }
+        if level(cursor.path[top].page.image) == 0 {
+            return Some(selected)
+        }
+        let descendant = arc.share(cursor.path[top].page.kids[selected])
+        cursor_path(mut cursor, descendant, None, true)
+    }
+    None
+}
+
+pub fn cursor_next(mut cursor: Cursor) -> Option[CursorRow] {
+    let Some(slot) = cursor_step(mut cursor) else {
+        return None
+    }
+    Some(cursor_row(cursor.path[list.len(cursor.path) - 1].page, slot))
+}
+
+/// Advance to a leaf slot and return its owned key with `leading` prepended.
+pub fn cursor_next_key(mut cursor: Cursor, leading: Bytes) -> Option[(Bytes, u64)] {
+    let Some(slot) = cursor_step(mut cursor) else {
+        return None
+    }
+    let image = cursor.path[list.len(cursor.path) - 1].page.image
+    let at = entry_at(image, slot)
+    let prefix = u16_at(image.raw, 4)
+    let suffix = u16_at(image.raw, at)
+    let mut key: Bytes = list.with_capacity(list.len(leading) + prefix + suffix)
+    list.append(mut key, leading)
+    list.append(mut key, list.slice(image.raw, HEADER, HEADER + prefix))
+    list.append(mut key, list.slice(image.raw, at + 2, at + 2 + suffix))
+    Some((take key, slot))
+}
+
+/// Borrow the value at a slot returned by `cursor_next_key` on this leaf.
+pub fn cursor_value(cursor: Cursor, slot: u64) -> Option[View[Bytes]] in cursor {
+    let Some(top) = list.last(cursor.path) else {
+        return None
+    }
+    value_at(top.page, slot)
+}
+
+/// Decode from the positioned leaf with a key buffer shared across advances.
+pub fn cursor_read[T](mut cursor: Cursor, visit: scoped[view] fn(Bytes, Bytes) -> T) -> Option[T] {
+    let Some(slot) = cursor_step(mut cursor) else {
+        return None
+    }
+    let page = cursor.path[list.len(cursor.path) - 1].page
+    let at = entry_at(page.image, slot)
+    let prefix = u16_at(page.image.raw, 4)
+    let suffix = u16_at(page.image.raw, at)
+    let raw_suffix = list.slice(page.image.raw, at + 2, at + 2 + suffix)
+    let Some(raw) = value_at(page, slot) else {
+        fail("page cursor is not on a row")
+    }
+    if prefix == 0 {
+        return Some(visit(raw_suffix, raw))
+    }
+    if cursor.has_prefix {
+        list.truncate(mut cursor.key_buffer, prefix)
+    } else {
+        list.clear(mut cursor.key_buffer)
+        list.append(mut cursor.key_buffer, list.slice(page.image.raw, HEADER, HEADER + prefix))
+        cursor.has_prefix = true
+    }
+    list.append(mut cursor.key_buffer, raw_suffix)
+    Some(visit(cursor.key_buffer, raw))
+}
+
+type WalkFrame: send {
+    page: Arc[Page],
+    slot: u64,
+    whole: bool
+}
+
+/// A sorted walk that can consume a complete remaining subtree at once.
+pub opaque type Walk: send {
+    path: List[WalkFrame]
+}
+
+pub type Subtree {
+    stamp: u64,
+    level: u8
+}
+
+pub fn walk_begin(root: Arc[Page]) -> Walk {
+    let mut path: List[WalkFrame] = list.new()
+    if count(root.image) != 0 {
+        list.push(mut path, WalkFrame(page: arc.share(root), slot: 0, whole: true))
+    }
+    Walk(path: take path)
+}
+
+pub fn walk_empty() -> Walk {
+    Walk(path: list.new())
+}
+
+pub fn walk_key(walk: Walk) -> Option[Bytes] {
+    let Some(top) = list.last(walk.path) else {
+        return None
+    }
+    if top.whole {
+        return Some(extreme_key(top.page, false))
+    }
+    key_at(top.page.image, top.slot)
+}
+
+pub fn walk_subtree(walk: Walk) -> Option[Subtree] {
+    let Some(top) = list.last(walk.path) else {
+        return None
+    }
+    if !top.whole {
+        return None
+    }
+    Some(Subtree(stamp: stamp(top.page.image), level: level(top.page.image)))
+}
+
+pub fn walk_subtree_high(walk: Walk) -> Option[Bytes] {
+    let Some(top) = list.last(walk.path) else {
+        return None
+    }
+    if top.whole {
+        Some(extreme_key(top.page, true))
+    } else {
+        None
+    }
+}
+
+pub fn walk_subtree_charge(walk: Walk) -> u64 {
+    let Some(top) = list.last(walk.path) else {
+        return 0
+    }
+    let (_, charge) = totals(top.page)
+    charge
+}
+
+pub fn walk_value(walk: Walk) -> Option[View[Bytes]] in walk {
+    let Some(top) = list.last(walk.path) else {
+        return None
+    }
+    if top.whole {
+        None
+    } else {
+        value_at(top.page, top.slot)
+    }
+}
+
+pub fn walk_blob_stamp(walk: Walk) -> u64 {
+    let Some(top) = list.last(walk.path) else {
+        return 0
+    }
+    if top.whole {
+        return 0
+    }
+    if let Some(BlobEdge(edge)) = owning_edge(top.page.image, top.slot) {
+        edge.stamp
+    } else {
+        0
+    }
+}
+
+pub fn walk_owned_value(walk: Walk) -> Option[Arc[Bytes]] {
+    let Some(top) = list.last(walk.path) else {
+        return None
+    }
+    if top.whole {
+        return None
+    }
+    if let Some(BlobEdge(edge)) = owning_edge(top.page.image, top.slot) {
+        return body(top.page, edge.body)
+    }
+    let Some(value) = value_at(top.page, top.slot) else {
+        return None
+    }
+    let owned: Bytes = clone(value)
+    Some(arc.new(take owned))
+}
+
+pub fn walk_expand(mut walk: Walk) {
+    let n = list.len(walk.path)
+    if n == 0 {
+        return
+    }
+    let top = n - 1
+    walk.path[top].whole = false
+    if level(walk.path[top].page.image) != 0 {
+        let first = arc.share(walk.path[top].page.kids[0u64])
+        walk.path[top].slot = 1
+        list.push(mut walk.path, WalkFrame(page: take first, slot: 0, whole: true))
+    }
+}
+
+pub fn walk_next(mut walk: Walk) {
+    let n = list.len(walk.path)
+    if n == 0 {
+        return
+    }
+    let top = n - 1
+    if !walk.path[top].whole {
+        walk.path[top].slot += 1
+        if walk.path[top].slot < count(walk.path[top].page.image) {
+            return
+        }
+    }
+    let _ = list.pop(mut walk.path)
+    while list.len(walk.path) != 0 {
+        let parent = list.len(walk.path) - 1
+        let slot = walk.path[parent].slot
+        if slot < count(walk.path[parent].page.image) {
+            let descendant = arc.share(walk.path[parent].page.kids[slot])
+            walk.path[parent].slot += 1
+            list.push(mut walk.path, WalkFrame(page: take descendant, slot: 0, whole: true))
+            return ()
+        }
+        let _ = list.pop(mut walk.path)
+    }
 }

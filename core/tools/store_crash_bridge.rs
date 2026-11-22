@@ -54,7 +54,34 @@ struct Bridge {
     orphan_end: bool,
     orphan_end_path: Option<String>,
     checkpoint_reopen: bool,
+    fork_observation: Option<ForkObservation>,
 }
+
+#[derive(Default)]
+struct ForkObservation {
+    image: u8,
+    synced: bool,
+    child_returned: bool,
+}
+
+// Walk the segment's wire envelopes independently of the store reader.
+fn fork_frame_start(frames: &[u8]) -> Option<usize> {
+    let mut offset = 0;
+    while frames.len() - offset >= 16 {
+        let frames = &frames[offset..];
+        let kind = u16::from_le_bytes(frames[..2].try_into().unwrap());
+        let len = u32::from_le_bytes(frames[4..8].try_into().unwrap()) as usize;
+        let payload = frames.get(16..16 + len)?;
+        if kind == 0x0013 {
+            assert_eq!(frames[2..4], [1, 0]);
+            assert_eq!(payload, b"\x01\0\0\0\0\0\0\0\x02\0\0\0\0\0\0\0\x04\0beta");
+            return Some(offset);
+        }
+        offset += 16 + len;
+    }
+    None
+}
+
 impl Bridge {
     fn exists(&self, name: &str) -> bool {
         self.fs.snapshot().names.contains_key(name)
@@ -107,11 +134,20 @@ impl Bridge {
                     self.acked = true;
                 } else if &data[..len] == b"ARM" {
                     self.armed = true;
+                } else if &data[..len] == b"CHILD RETURNED" {
+                    if let Some(fork) = &mut self.fork_observation {
+                        fork.child_returned = true;
+                    }
                 } else if let Some(version) = data[..len].strip_prefix(b"ACK ") {
                     let version: u64 = std::str::from_utf8(version)
                         .expect("ACK is ASCII")
                         .parse()
                         .expect("ACK version");
+                    if let Some(fork) = &self.fork_observation {
+                        if version == 3 {
+                            assert!(fork.synced, "fork returned before its segment sync");
+                        }
+                    }
                     assert!(
                         version >= self.floor,
                         "durability acknowledgments regressed"
@@ -168,17 +204,33 @@ impl Bridge {
                     ..Outcome::default()
                 }
             }
-            1 => {
+            1 | 37 => {
                 let file = self
                     .files
                     .get_mut(&handle)
                     .expect("live provider descriptor");
                 let bytes = self.fs.read(&file.name).unwrap_or(&[]);
-                let count = (data.len() - len).min(bytes.len().saturating_sub(file.cursor));
-                data[len..len + count].copy_from_slice(&bytes[file.cursor..file.cursor + count]);
-                file.cursor += count;
+                let offset = if op == 37 {
+                    let position = u64::from_le_bytes(path.try_into().expect("ReadAt offset"));
+                    usize::try_from(position).unwrap_or(usize::MAX)
+                } else {
+                    file.cursor
+                };
+                let remaining = bytes.get(offset..).unwrap_or(&[]);
+                let count = (data.len() - len).min(remaining.len());
+                data[len..len + count].copy_from_slice(&remaining[..count]);
+                if op == 1 {
+                    file.cursor += count;
+                }
                 Outcome {
                     value: count as u64,
+                    ..Outcome::default()
+                }
+            }
+            47 => {
+                let file = self.files.get(&handle).expect("live stat descriptor");
+                Outcome {
+                    value: self.fs.read(&file.name).unwrap_or(&[]).len() as u64,
                     ..Outcome::default()
                 }
             }
@@ -186,6 +238,22 @@ impl Bridge {
                 let file = self.files.get(&handle).expect("live provider descriptor");
                 let name = file.name.clone();
                 let cursor = file.cursor;
+                if self.phase == 1 && is_segment(&name) {
+                    if let Some(fork) = &self.fork_observation {
+                        if fork.image == 5
+                            && fork.synced
+                            && data[..len].starts_with(&[17, 0])
+                            && data[..len].get(16..20) == Some(&[1, 0, 0, 0])
+                        {
+                            assert!(
+                                fork.child_returned,
+                                "child run did not return before its write"
+                            );
+                            self.crashed = true;
+                            return Self::error(5);
+                        }
+                    }
+                }
                 if self.phase == 1
                     && self.armed
                     && self.sync_failure == 4
@@ -353,7 +421,39 @@ impl Bridge {
                     && self.files[&handle].mode == 1
                     && name.starts_with("j-")
                     && name.ends_with(".end");
+                let fork_start = (self.phase == 1 && is_segment(&name))
+                    .then(|| self.fork_observation.as_ref().filter(|fork| !fork.synced))
+                    .flatten()
+                    .and_then(|_| fork_frame_start(self.fs.read(&name).unwrap()));
+                if let Some(start) = fork_start {
+                    let fork = self.fork_observation.as_ref().unwrap();
+                    if (2..=4).contains(&fork.image) {
+                        // The write was issued, but the Store's sync did not
+                        // succeed. W2 may retain a complete or torn write.
+                        if fork.image == 3 {
+                            let torn = self.fs.read(&name).unwrap()[..start + 7].to_vec();
+                            self.fs.issue(&Op::Write(&name, &torn));
+                        }
+                        self.fs.issue(&Op::Sync(&name));
+                        if fork.image == 4 {
+                            let end = format!("{name}.end");
+                            self.fs.issue(&Op::Write(&end, b"bad END"));
+                            self.fs.issue(&Op::Sync(&end));
+                        }
+                        self.crashed = true;
+                        return Self::error(5);
+                    }
+                }
                 if self.apply(Op::Sync(&name)) {
+                    if fork_start.is_some() {
+                        let fork = self.fork_observation.as_mut().unwrap();
+                        fork.synced = true;
+                        self.floor = 3;
+                        if fork.image == 1 {
+                            self.crashed = true;
+                            return Self::error(5);
+                        }
+                    }
                     if first_crash {
                         // Both inode syncs have finished. Only the END name
                         // survives the first crash, before the directory sync.
@@ -429,8 +529,20 @@ pub extern "C" fn store_crash_new(cut: u64) -> *mut c_void {
         orphan_end: false,
         orphan_end_path: None,
         checkpoint_reopen: false,
+        fork_observation: None,
     }))
     .cast()
+}
+
+/// # Safety
+/// `p` is the live pointer from `store_crash_new` before any provider calls.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn store_crash_journal_fork(p: *mut c_void, image: u8) {
+    let bridge = unsafe { &mut *p.cast::<Bridge>() };
+    bridge.fork_observation = Some(ForkObservation {
+        image,
+        ..ForkObservation::default()
+    });
 }
 
 /// # Safety

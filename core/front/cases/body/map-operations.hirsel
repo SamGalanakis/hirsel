@@ -1,5 +1,6 @@
 // expect: run two_run_keys() = 1140
-// Map contracts: insertion-order storage, linear probing, replacement, removal,
+// expect: run promotion_run() = 128853942
+// Map contracts: insertion-order storage, grouped probing, replacement, removal,
 // regrow/index rebuild, String keys, and the Capacity a refused growth raises.
 // expect: run get_after_insert() = 70
 // expect: run replace() = 1088
@@ -161,4 +162,48 @@ fn two_run_keys() -> u64 {
         order = order * 100 + v
     }
     order
+}
+
+fn promotion_run() -> u64 {
+    let keys: Inline[u64, 129] =[0, 140883, 151652, 192736, 206662, 247746, 378425, 524579, 565695, 578480, 621772, 635359, 693531, 790020, 808295, 825431, 843110, 890746, 897015, 953452, 1017349, 1035718, 1217436, 1273389, 1466025, 1577798, 1646568, 1704529, 1722642, 1739344, 1789028, 1792178, 1795297, 1843958, 1860404, 2161955, 2168252, 2215856, 2365161, 2365770, 2418123, 2419675, 2482144, 2486397, 2517166, 2586830, 2621778, 2741813, 2779107, 2796145, 2797250, 2813696, 2830960, 2865553, 2866786, 3169228, 3204047, 3225181, 3238764, 3259996, 3277850, 3428865, 3446519, 3556861, 3946920, 4102201, 4157211, 4276479, 4382317, 4596153, 4703016, 4800179, 5003994, 5025157, 5066467, 5078247, 5176809, 5177418, 5229771, 5380464, 5398019, 5433426, 5449872, 5490988, 5505010, 5809500, 5823087, 5872739, 5879036, 6015695, 6067089, 6078346, 6182264, 6566088, 6706715, 6723417, 6787118, 6901882, 6914575, 6958006, 6976756, 7014240, 7020541, 7027670, 7217803, 7234505, 7349683, 7401664, 7456546, 7605851, 7609476, 7646935, 7660518, 7663381, 7716471, 7802212, 7812042, 7815033, 7855174, 7856117, 7982503, 8040492, 8226992, 8239941, 8451353, 8469624, 8496126, 8504443, 8543169,]
+    let mut m: Map[u64, u64] = map.new()
+    for i in 0u64 .. 129u64 {
+        map.insert(mut m, keys[i], i + 1)
+    }
+    let first = option.unwrap(map.remove(mut m, keys[0]))
+    let middle = option.unwrap(map.remove(mut m, keys[64]))
+    let bump = scoped fn(mut v: u64) -> u64 {
+        v += 10;
+        v
+    }
+    let last = map.update_or_insert(mut m, keys[128], 7, bump)
+    map.reserve(mut m, 132)
+    let added = map.update_or_insert(mut m, keys[64], 200, bump)
+    if first != 1 || middle != 65 || last != 139 || added != 210 {
+        return 0
+    }
+    let copied: Map[u64, u64] = clone(m)
+    let mut count: u64 = 0
+    let mut sum: u64 = 0
+    for (k, v) in copied {
+        let source: u64 = if count == 127 {
+            64
+        } else if count < 63 {
+            count + 1
+        } else {
+            count + 2
+        }
+        if k != keys[source] {
+            return 0
+        }
+        sum += v
+        count += 1
+    }
+    for k in keys {
+        let _ = map.remove(mut m, k)
+    }
+    let mut empty: Map[u64, u64] = clone(m)
+    map.insert(mut empty, 7, 42)
+    let tail = option.unwrap(map.get(empty, 7))
+    count * 1000000 + sum * 100 + tail
 }

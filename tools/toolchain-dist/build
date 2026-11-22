@@ -44,20 +44,15 @@ def check_glibc(prefix):
             ['readelf', '--wide', '--version-info', path],
             env=dict(os.environ, LC_ALL='C'), text=True,
         ).partition('Version needs section')[2]
-        names = set(re.findall(r'\bName: (GLIBC_\S+)\s+Flags: (\S+)', versions))
+        names = set(re.findall(r'\bName: (GLIBC_\S+)', versions))
         highest = (0, 0, 0)
-        for name, flags in sorted(names):
+        for name in sorted(names):
             if name == 'GLIBC_ABI_DT_RELR':
                 version = (2, 36, 0)
             elif match := re.fullmatch(r'GLIBC_(\d+)\.(\d+)(?:\.(\d+))?', name):
                 version = tuple(int(part or 0) for part in match.groups())
             else:
                 failures.append(f'{relative} requires unknown version {name}')
-                continue
-            # The glibc loader allows a version marked WEAK to be absent.
-            if flags == 'WEAK':
-                if version >= ceiling:
-                    print(f'dist: {relative} uses optional {name}', flush=True)
                 continue
             highest = max(highest, version)
             if version > ceiling:
@@ -67,6 +62,11 @@ def check_glibc(prefix):
             print(f'dist: {relative} requires glibc {version}' if highest != (0, 0, 0) else
                   f'dist: {relative} has no dynamic glibc requirements', flush=True)
     failures.extend(f'{path} is missing or is not ELF' for path in sorted(required - seen))
+    if 'hirsel' in seen:
+        symbols = subprocess.check_output(['readelf', '--wide', '--symbols', prefix / 'hirsel'], text=True)
+        for name in ('pidfd_spawnp', 'pidfd_getpid'):
+            if re.search(rf'\bUND\s+{name}(?:@|\s|$)', symbols):
+                failures.append(f'hirsel has an undefined {name} reference')
     if failures:
         raise SystemExit('\n'.join(failures))
     print(f'dist: glibc {floor} baseline passed', flush=True)
@@ -128,7 +128,7 @@ def witness(output):
 def fresh_witness(prefix):
     """Run the installed CLI in an empty root with a read-only prefix."""
     relocated = '/opt/relocated-hirsel'
-    sandbox = ['bwrap', '--unshare-all', '--die-with-parent', '--clearenv',
+    sandbox = ['bwrap', '--unshare-all', '--die-with-parent',
                '--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp',
                '--dir', '/work', '--chdir', '/work',
                '--ro-bind', '/bin/sh', '/bin/sh', '--ro-bind', str(prefix), relocated,
@@ -137,7 +137,7 @@ def fresh_witness(prefix):
     # Seed only the shared libraries that let the shell and compiler start.
     # In particular, the first root has no development files or linker scripts.
     libraries = set()
-    for executable in (Path('/bin/sh'), prefix / 'hirsel'):
+    for executable in (Path('/bin/sh'), prefix / 'hirsel', prefix / 'lib/libLLVM.so.23.1'):
         dependencies = subprocess.check_output(['ldd', executable], text=True)
         for line in dependencies.splitlines():
             match = re.match(r'\s*(?:\S+ => )?(/\S+) \(', line)
@@ -145,26 +145,12 @@ def fresh_witness(prefix):
                 libraries.add(match[1])
     loader_files = [arg for path in sorted(libraries) for arg in ('--ro-bind', path, path)]
     sequence = 'hirsel new demo && cd demo && hirsel test && hirsel run && hirsel build'
-    refused = subprocess.run([*sandbox, *loader_files, '--', '/bin/sh', '-c', sequence],
-                             capture_output=True, text=True)
-    if (refused.returncode != 1 or 'Created application at demo' not in refused.stdout
-            or 'missing recipe inputs:' not in refused.stdout + refused.stderr
-            or not re.search(r'\b(?:Scrt1|crt1|crti)\.o\b', refused.stdout + refused.stderr)
-            or 'libc6-dev' not in refused.stdout + refused.stderr):
-        raise ValueError(f'fresh root did not diagnose the missing CRT ({refused.returncode})\n'
-                         f'{refused.stdout}{refused.stderr}')
-    print(refused.stdout + refused.stderr, end='', flush=True)
-
-    # Use the build host's system link inputs, still with no compiler or host
-    # linker on PATH. Each sandbox starts with its own empty cache and cwd.
-    system = [arg for directory in ('/usr/lib', '/lib', '/lib64') if Path(directory).is_dir()
-              for arg in ('--ro-bind', directory, directory)]
-    passed = subprocess.run([*sandbox, *system, '--', '/bin/sh', '-c',
+    passed = subprocess.run([*sandbox, *loader_files, '--', '/bin/sh', '-c',
                              f'hirsel --version && hirsel inspect --std --interface && '
                              f'{sequence} && ./program && hirsel check'],
-                            capture_output=True, text=True)
-    if passed.returncode or 'pass executed app@1/tests/test_twice' not in passed.stdout:
-        raise ValueError(f'fresh root with system link inputs failed ({passed.returncode})\n'
+                            capture_output=True, text=True, env={})
+    if passed.returncode or passed.stderr or 'pass executed app@1/tests/test_twice' not in passed.stdout:
+        raise ValueError(f'fresh root acceptance failed ({passed.returncode})\n'
                          f'{passed.stdout}{passed.stderr}')
     lines = passed.stdout.splitlines()
     if not any(line.startswith('std@1/sim/fs/serve\t') for line in lines):

@@ -20,14 +20,10 @@ fn disk_bench_put(mut db: Db, t: Table[u64, DiskAccount], key: u64, balance: u64
     if let Committed(_) = done {} else { fail("disk bench put") }
 }
 
-fn disk_bench_manifest(d: Dir) -> DiskManifest waits {
-    let raw = result.unwrap(disk_read_file(d, "MANIFEST", 67108952))
-    let result = result.unwrap(disk_read_manifest("MANIFEST", raw))
-    let (_, take m) = take result
-    take m
+fn disk_bench_next_pack(d: Dir) -> u64 waits {
+    let (_, manifest) = result.unwrap(read_page_manifest_file(d))
+    manifest.next_pack
 }
-
-fn disk_bench_next_pack(d: Dir) -> u64 waits { disk_bench_manifest(d).next_pack }
 
 // R4/R5 (MEASURE.md, store-build-1010's workload): commit c (from 0) puts Account
 // {id c % 16, balance c, owner "owner000"} at key c % 16 and returns c.
@@ -139,7 +135,7 @@ pub fn disk_bench_main(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, a
     let n: u64 = if million { 1000000 } else { 100000 }
     let child = disk_test_directory(d)
     let mut options = defaults()
-    // The task allowance and resident limit keep their specified defaults.
+    // The journal worker allowance and resident limit keep their defaults.
     let mut db = result.unwrap(open(tasks, child, c, r, options))
     let dictionary: std.codec.Codec[DiskAccount] = std.codec.of()
     result.unwrap(create_table(mut db, spec("accounts", std.codec.key_u64(), dictionary)))
@@ -197,7 +193,7 @@ pub fn disk_bench_main(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, a
         result.unwrap(durable(mut holder[0], cut))
     }
     let elapsed = host.mono_ns(c) - started
-    let stored_rows = std.omap.len(holder[0].heads[0].roots.data)
+    let stored_rows = page_row_count(holder[0].heads[0].roots.collections)
     let expected_count = if indexed { 2 * n } else { n }
     if stored_rows != expected_count { fail("disk bench row count") }
     let mut rendered = string.new()
@@ -232,22 +228,26 @@ pub fn disk_bench_main(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, a
         }
     }
     if let Some(_) = result.unwrap(next(mut rows)) { fail("disk bench extra row") }
-    let manifest = disk_bench_manifest(child)
+    let (id, manifest) = result.unwrap(read_page_manifest_file(child))
     let mut written: u64 = 0
-    let mut nodes: u64 = 0
-    for pack in manifest.packs {
-        if pack.seq >= first_pack {
-            let path = result.unwrap(disk_path("p-", pack.seq, ""))
-            let raw = result.unwrap(disk_read_file(child, path, 67108952))
-            written += list.len(raw)
-            nodes += int.widen(pack.nodes)
+    let mut pages: u64 = 0
+    for seq in first_pack .. manifest.next_pack {
+        let path = result.unwrap(paged_pack_path(seq))
+        let raw = result.unwrap(disk_read_file(child, path, options.pack_bytes + 72))
+        written += list.len(raw)
+        let ctx = result.unwrap(disk_read_header(path, raw, 3, Some(seq), Some(id))).context
+        let mut offset = 72u64
+        while offset < list.len(raw) {
+            let frame = result.unwrap(disk_read_frame(path, ctx, raw, offset))
+            if frame.kind == 0x0021 { pages += 1 }
+            offset = frame.end
         }
     }
     let mut extra = string.new()
     string.push(mut extra, "PACK_BYTES ")
     string.push_u64(mut extra, written)
-    string.push(mut extra, " NEW_NODES ")
-    string.push_u64(mut extra, nodes)
+    string.push(mut extra, " NEW_PAGES ")
+    string.push_u64(mut extra, pages)
     string.push(mut extra, " ACCOUNT ")
     string.push_u64(mut extra, holder[0].resident)
     string.push(mut extra, "\n")

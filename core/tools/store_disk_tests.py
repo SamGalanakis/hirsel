@@ -19,8 +19,9 @@ from store_crash_tests import run_crashes
 # Evaluator instructions measured on the unchanged stress law, plus 25% rounded up.
 INSTRUCTION_ALLOWANCES = {'pack_bound': 1_622_341_249}  # measured 1_297_872_999
 
-LAWS = ('frames', 'manifest', 'nodes', 'graph', 'packs', 'load', 'compact', 'import_read_boundaries',
-        'draft_refusal', 'worker_refusal', 'opening', 'db', 'watermark_reissue', 'db_refusal', 'schema_refusal', 'publish_refusal', 'pack_bound', 'branches', 'migrate')
+LAWS = ('frames', 'paged_manifest', 'page_emission', 'paged_inventory', 'page_location_closure',
+        'paged_generation', 'import_read_boundaries', 'opening', 'db', 'watermark_reissue',
+        'db_refusal', 'schema_refusal', 'publish_refusal', 'pack_bound', 'branches', 'migrate', 'resident_charge')
 
 # Orchestrator ruling: these evaluator assembly defects ride with owner914.
 # Execute and report every law; only this exact failure family is nonblocking.

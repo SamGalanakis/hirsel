@@ -18,11 +18,25 @@ pub enum KeyOp {
     Encode,
     /// Core-private closed cleanup property; no value is inspected at runtime.
     NeedsDrop,
+    Place,
+    Strong,
+    Class,
 }
 impl KeyOp {
+    /// The operation's instance at closed row `ty`.
+    pub(super) fn instance(self, ty: TypeId) -> InstanceKey {
+        InstanceKey {
+            definition: self.definition(),
+            arguments: vec![ty],
+            dictionaries: vec![],
+        }
+    }
     fn definition(self) -> DefPath {
         DefPath::core(match self {
             Self::Hash => "map.$key_hash",
+            Self::Place => "map.$key_place",
+            Self::Strong => "map.$key_strong",
+            Self::Class => "map.$key_class",
             Self::Fold => "map.$key_fold",
             Self::Equal => "map.$key_equal",
             Self::Order => "order.$compare",
@@ -57,7 +71,15 @@ impl KeyOp {
                     never: false,
                 };
             }
-            Self::Hash => {}
+            Self::Class => {
+                return Signature {
+                    params: vec![],
+                    results: vec![Ty::Scalar(Scalar::U8)],
+                    dest: None,
+                    never: false,
+                };
+            }
+            Self::Hash | Self::Place | Self::Strong => {}
             Self::Fold => params.push(Param::Value(Ty::Ptr)),
             Self::Equal | Self::Order | Self::Ordered(_) => params.push(view(ty)),
             Self::Clone | Self::Encode => {
@@ -249,10 +271,10 @@ impl KeyOp {
     pub(super) fn abi(self) -> scalar_abi::SignatureAbi {
         let (params, result) = match self {
             Self::Clone => (vec![false; 2], false),
-            Self::NeedsDrop => (vec![], true),
+            Self::NeedsDrop | Self::Class => (vec![], true),
             Self::Encode => (vec![false; 3], false),
             Self::Equal | Self::Order | Self::Ordered(_) => (vec![true; 2], true),
-            Self::Hash => (vec![true], true),
+            Self::Hash | Self::Place | Self::Strong => (vec![true], true),
             Self::Fold => (vec![true], false),
         };
         scalar_abi::SignatureAbi { params, result }
@@ -260,7 +282,7 @@ impl KeyOp {
     /// The operation's address signature at `ty`, and the signature of its row: the
     /// address one sealed by [`Self::abi`]. Every row of a glue instance, in its own
     /// module and in a caller's, has the sealed one.
-    fn sealed(self, module: &Module, ty: TypeId) -> (Signature, Signature) {
+    pub(super) fn sealed(self, module: &Module, ty: TypeId) -> (Signature, Signature) {
         let place = self.signature(&module.types, ty);
         let mut sealed = place.clone();
         scalar_abi::Plan::signature(module, &mut sealed, &self.abi());
@@ -278,8 +300,11 @@ pub(super) fn signature_id(module: &mut Module, sig: Signature) -> SigId {
 
 /// The core path (module, name) of every glue operation [`KeyOp::named`] reads:
 /// the core operations a body reaches without a declaration (W5's inventory).
-pub const GLUE_OPERATIONS: [(&str, &str); 11] = [
+pub const GLUE_OPERATIONS: [(&str, &str); 14] = [
     ("map", "$key_hash"),
+    ("map", "$key_place"),
+    ("map", "$key_strong"),
+    ("map", "$key_class"),
     ("map", "$key_fold"),
     ("map", "$key_equal"),
     ("order", "$compare"),
@@ -307,6 +332,9 @@ impl KeyOp {
         }
         Some(match (d.modules.as_slice(), d.name.as_str()) {
             ([m], "$key_hash") if m == "map" => Self::Hash,
+            ([m], "$key_place") if m == "map" => Self::Place,
+            ([m], "$key_strong") if m == "map" => Self::Strong,
+            ([m], "$key_class") if m == "map" => Self::Class,
             ([m], "$key_fold") if m == "map" => Self::Fold,
             ([m], "$key_equal") if m == "map" => Self::Equal,
             ([m], "$compare") if m == "order" => Self::Order,
@@ -348,7 +376,7 @@ fn scalar_row(module: &Module, ty: TypeId) -> Option<Scalar> {
 /// These typed recipes expand in the caller and need no intermediate helper body.
 pub(super) fn inline_scalar(module: &Module, ty: TypeId, op: KeyOp) -> bool {
     scalar_row(module, ty).is_some_and(|scalar| match op {
-        KeyOp::Hash => scalar == Scalar::U64,
+        KeyOp::Hash | KeyOp::Place | KeyOp::Strong => scalar == Scalar::U64,
         KeyOp::Equal | KeyOp::Ordered(_) => true,
         _ => false,
     })
@@ -398,10 +426,19 @@ pub(super) fn inline_ordered(module: &Module, body: &mut Body) -> bool {
                 if key.definition.0.package.name != "core" {
                     return None;
                 }
+                let mut hash = RtOp::MapHashWord;
                 let op = if key.definition.0.modules == ["map"] {
                     match key.definition.0.name.as_str() {
                         "$key_equal" => Some(CompareOp::Eq),
                         "$key_hash" => None,
+                        "$key_place" => {
+                            hash = RtOp::MapPlaceWord;
+                            None
+                        }
+                        "$key_strong" => {
+                            hash = RtOp::MapStrongWord;
+                            None
+                        }
                         _ => return None,
                     }
                 } else if key.definition.0.modules == ["order"] {
@@ -438,13 +475,14 @@ pub(super) fn inline_ordered(module: &Module, body: &mut Body) -> bool {
                 };
                 Some((
                     op,
+                    hash,
                     scalar,
                     addresses,
                     call.signature,
                     call.results.get(&body.pools.values).unwrap()[0],
                 ))
             })();
-            if let Some((op, scalar, args, signature, result)) = scalar_call {
+            if let Some((op, hash, scalar, args, signature, result)) = scalar_call {
                 changed = true;
                 let mut values = [ValueId(0); 2];
                 for (i, arg) in args
@@ -495,7 +533,7 @@ pub(super) fn inline_ordered(module: &Module, body: &mut Body) -> bool {
                     let results = PoolRange::push(&mut body.pools.values, [result]);
                     let call = CallId(body.calls.len() as u32);
                     body.calls.push(CallSite {
-                        callee: Callee::Runtime(RtOp::MapHashWord),
+                        callee: Callee::Runtime(hash),
                         signature,
                         args,
                         results,
@@ -525,11 +563,7 @@ pub(super) struct Derive<'a> {
 impl Derive<'_> {
     /// The row of `op` at `ty` in `module`, added signature-only when it is missing.
     fn row(module: &mut Module, ty: TypeId, op: KeyOp) -> FuncId {
-        let key = InstanceKey {
-            definition: op.definition(),
-            arguments: vec![ty],
-            dictionaries: vec![],
-        };
+        let key = op.instance(ty);
         if let Some(i) = module
             .functions
             .iter()
@@ -564,9 +598,9 @@ impl Derive<'_> {
         let (place, sealed) = op.sealed(self.module, ty);
         let old = signature_id(self.module, place);
         self.module.functions[row.index()].signature = old;
-        let mut c = Code::new(if op == KeyOp::NeedsDrop {
+        let mut c = Code::new(if matches!(op, KeyOp::NeedsDrop | KeyOp::Class) {
             &[]
-        } else if op == KeyOp::Hash {
+        } else if matches!(op, KeyOp::Hash | KeyOp::Place | KeyOp::Strong) {
             &[Ty::Ptr]
         } else if op == KeyOp::Fold {
             &[Ty::Ptr, Ty::Ptr]
@@ -575,8 +609,20 @@ impl Derive<'_> {
         } else {
             &[Ty::Ptr, Ty::Ptr]
         });
-        if op == KeyOp::NeedsDrop {
-            let value = c.boolean(self.recipes[ty.index()].drop.is_some());
+        if matches!(op, KeyOp::NeedsDrop | KeyOp::Class) {
+            let value = if op == KeyOp::Class {
+                let class = hirsel_core_layout::map_index::class(&self.module.types[ty.index()]);
+                let bits = match class {
+                    hirsel_core_layout::map_index::Class::Composite => 0,
+                    hirsel_core_layout::map_index::Class::Word(_) => 1,
+                    hirsel_core_layout::map_index::Class::Bytes => 2,
+                };
+                let result = c.value(Ty::Scalar(Scalar::U8));
+                c.inst(Inst::Const { result, bits });
+                result
+            } else {
+                c.boolean(self.recipes[ty.index()].drop.is_some())
+            };
             let returns = PoolRange::push(&mut c.body.pools.values, [value]);
             c.end(Terminator::Return(returns));
             order_instructions(&mut c.body);
@@ -621,8 +667,10 @@ impl Derive<'_> {
             return Ok(row);
         }
         let result = match op {
-            KeyOp::NeedsDrop => unreachable!("cleanup properties return above"),
-            KeyOp::Hash => Some(self.hash_type(&mut c, ty, ps[0])?),
+            KeyOp::NeedsDrop | KeyOp::Class => unreachable!("type properties return above"),
+            KeyOp::Hash | KeyOp::Place | KeyOp::Strong => {
+                Some(self.hash_type(&mut c, ty, ps[0], op)?)
+            }
             KeyOp::Fold => {
                 self.fold_type(&mut c, ty, ps[0], ps[1])?;
                 None
@@ -1198,22 +1246,35 @@ impl Derive<'_> {
         c: &mut Code,
         ty: TypeId,
         place: ValueId,
+        op: KeyOp,
     ) -> Result<ValueId, &'static str> {
-        if let Some(scalar) = scalar_row(self.module, ty) {
+        use hirsel_core_layout::map_index::{Class, class};
+        let class = class(&self.module.types[ty.index()]);
+        if let Class::Word(scalar) = class {
             let word = c.scalar_word(place, scalar);
-            return Ok(self.runtime(c, RtOp::MapHashWord, &[word]).unwrap());
+            let runtime = match op {
+                KeyOp::Place => RtOp::MapPlaceWord,
+                KeyOp::Strong => RtOp::MapStrongWord,
+                _ => RtOp::MapHashWord,
+            };
+            return Ok(self.runtime(c, runtime, &[word]).unwrap());
         }
-        let shape = &self.module.types[ty.index()];
-        if !matches!(shape.repr, LRepr::Region)
-            && let ShapeBody::Record(fields) = &shape.body
-            && let [field] = fields.as_slice()
-            && matches!(&field.ty, FieldTy::Seq(item) if **item == FieldTy::Scalar(Scalar::U8))
-        {
+        if class == Class::Bytes {
             let p = c.field_pointer(self.module, place, ty, None, 0);
             let data = c.read(p, Ty::Ptr);
             let len = c.offset(p, 8);
             let len = c.read(len, Ty::Scalar(Scalar::U64));
-            return Ok(self.runtime(c, RtOp::MapHashBytes, &[data, len]).unwrap());
+            let runtime = match op {
+                KeyOp::Place => RtOp::MapPlaceBytes,
+                KeyOp::Strong => RtOp::MapStrongBytes,
+                _ => RtOp::MapHashBytes,
+            };
+            return Ok(self.runtime(c, runtime, &[data, len]).unwrap());
+        }
+        // The composite branch never uses a fast placement word, even in a
+        // generic body's signatures-only rows.
+        if op == KeyOp::Place {
+            return Ok(c.constant(0));
         }
         let state_ty = self.hash_state_type()?;
         let slot = SlotId(c.body.slots.len() as u32);
@@ -1235,7 +1296,12 @@ impl Derive<'_> {
             result: state,
             address,
         });
-        self.runtime(c, RtOp::MapHashStart, &[state]);
+        let start = if op == KeyOp::Strong {
+            RtOp::MapStrongStart
+        } else {
+            RtOp::MapHashStart
+        };
+        self.runtime(c, start, &[state]);
         let fold = self.function(ty, KeyOp::Fold)?;
         let at = c.address(place, PlaceTy::Declared(ty));
         self.emit_call(c, fold, &[Arg::Address(at), Arg::Value(state)]);

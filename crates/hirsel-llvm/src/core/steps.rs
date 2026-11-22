@@ -402,6 +402,11 @@ fn neutral_runtime(op: RtOp) -> bool {
             | RtOp::MapHashAddWord
             | RtOp::MapHashAddBytes
             | RtOp::MapHashFinish
+            | RtOp::MapPlaceWord
+            | RtOp::MapPlaceBytes
+            | RtOp::MapStrongWord
+            | RtOp::MapStrongBytes
+            | RtOp::MapStrongStart
             | RtOp::Xxh3Short
             | RtOp::Xxh3Stripes
             | RtOp::Sha1Blocks

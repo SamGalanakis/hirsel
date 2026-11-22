@@ -381,6 +381,9 @@ fn served_in(c: Clock, r: Random, tasks: Tasks, n: Net, o: store.Options, f: fn(
 
 fn served_on(take fresh: store.Db, c: Clock, tasks: Tasks, n: Net, r: Random, mut token: Bytes, grouped: u64, f: fn(take Drive) -> () waits) -> bool waits {
     let db = take fresh
+    // The disk fixture drives one connection. Leave room in its existing root
+    // budget for the journal worker and the activation cut's buffer.
+    let driving_bytes = if store.is_disk(db) { 25165824u64 } else { 33554432u64 }
     let (head, inbox): (Sender[runner.Req], Receiver[runner.Req]) = channel.new(64u64)
     let mail = result.unwrap(runner.mailbox(4u64))
     let credential = ingress.credential(r)
@@ -394,7 +397,7 @@ fn served_on(take fresh: store.Db, c: Clock, tasks: Tasks, n: Net, r: Random, mu
         (take to, Some(take hear))
     } else { (take head, None) }
     let d = Drive(head: take to_head, post: runner.post(mail), clock: c, tasks: tasks, net: n, random: r, token: clone(credential), accepted: take grouped_ack)
-    let driving = task.spawn(tasks, bytes 33554432u64, take d, f)
+    let driving = task.spawn(tasks, bytes driving_bytes, take d, f)
     let opened = runner.place_head(take db, code.describe(place), N_PLACE, code.describe(migrate), code.describe(handles), take inbox, take mail, tasks, 1048576u64)
     let drove = task.join(take driving)
     if let Some(take h) = take forwarding { let _ = task.join(take h) }
@@ -1264,10 +1267,9 @@ fn record_is(got: Option[store.Recorded], key: Bytes, arg: u64, entry: u64, toke
     }
 }
 
-// The defaults' checkpoint task (256 MiB) would not fit a native test's 64 MiB limit.
 fn disk_options() -> store.Options {
     let mut o = store.defaults()
-    o.checkpoint_task_bytes = 1048576u64
+
     o.resident_limit = 1048576u64
     o.pack_bytes = 512u64
     o.group_commits = 2u32
@@ -2021,7 +2023,7 @@ fn migration_second_refuses(mut phase: store.Migration) -> Result[(), store.Erro
     }
     match take attempted {
         Ok(take outcome) => take outcome,
-        Error(c) => Error(Full(c)),
+        Error(c) => Error(Full(Allocation(c))),
     }
 }
 
@@ -2176,7 +2178,9 @@ fn test_serve_bounded_and_settled(c: Clock) -> Result[(), ()] waits {
 
 // Place directory laws (RUNNER-SPEC v2.21 §13.6). Each lists one name, "a", over a disk
 // store, so a second live instance of "a" cannot open the store: it is refused `Held`.
-const DIRECTORY_BUDGET: u64 = 41943040u64
+// Retain the fixture's original slack after replacing its 1 MiB checkpoint task
+// with AP16's 16,777,476-byte writer buffer. The enclosing test cap stays 64 MiB.
+const DIRECTORY_BUDGET: u64 = 41943040u64 - 1048576u64 + 16777476u64
 
 fn directory_wire() -> runner.WireConfig {
     let mut wire = runner.wire_defaults(65536u64, N_PLACE)

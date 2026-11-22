@@ -13,7 +13,6 @@ CHECKBOX_TOGGLES = 200
 class Workload:
     size: int
     units: int = 1
-    recorded: bool = False
     go: bool = True
     stages: int = 1
     idle: int = 0
@@ -23,14 +22,14 @@ class Workload:
 WORKLOADS = {
     "independent16": Workload(512, 16),
     "independent256": Workload(32, 256),
-    "pairs": Workload(1024, 16, recorded=True),
+    "pairs": Workload(1024, 16),
     "single_pair": Workload(8192),
-    "fanin": Workload(2048, 16, recorded=True),
+    "fanin": Workload(2048, 16),
     "fanout": Workload(2048, 16),
-    "pipeline": Workload(2048, recorded=True, stages=8),
-    "grain_spawn_join": Workload(8192, recorded=True),
-    "grain_spawn_chain": Workload(512, 16, recorded=True),
-    "spawn_tree": Workload(128, 64, recorded=True),
+    "pipeline": Workload(2048, stages=8),
+    "grain_spawn_join": Workload(8192),
+    "grain_spawn_chain": Workload(512, 16),
+    "spawn_tree": Workload(128, 64),
     "channel_hub": Workload(1024, 16),
     "arc_hub": Workload(2048, 16, go=False),
     "skew": Workload(8192, idle=1000),
@@ -128,33 +127,6 @@ def command(bins, case, language, width, size, grain, *args):
         return [bins / "hirsel/regimes", case, size, grain, *args]
     binary = bins / ("rust/regimes" if language == "Tokio" else "go/runtime")
     return [binary, case, width, size, grain, *args]
-
-
-def ordered_operations(case, size):
-    """Count the explicit spawn, join and channel operations of the workload."""
-    lanes = 16
-    if case in {"independent16", "independent256", "grain_spawn_join", "spawn_tree"}:
-        nodes = 126 if case == "spawn_tree" else WORKLOADS[case].units
-        return size * nodes * 2
-    if case == "grain_spawn_chain":
-        return lanes * 2 * (size + 1)
-    if case in {"pairs", "single_pair", "skew"}:
-        pairs = lanes if case == "pairs" else 1
-        idle = WORKLOADS[case].idle
-        return pairs * (4 * size + 2) + (2 * pairs if pairs > 1 else 3 * idle + 2 if idle else 0)
-    if case == "fanin":
-        return lanes * (2 * size + 2)
-    if case == "fanout":
-        return lanes * (4 * size + 2) + 2
-    if case == "pipeline":
-        return 18 * size + 18
-    if case == "channel_hub":
-        return lanes * (6 * size + 2) + 2
-    if case == "arc_hub":
-        return lanes * (2 * size + 2)
-    if case == "timers":
-        return 3 * size
-    return None
 
 
 def rate(row):

@@ -689,23 +689,23 @@ fn inline_arrays_hold_n_elements_without_a_block() {
 }
 
 /// Map cleanup uses the same entry offsets and stride as the front's tuple.
-/// For u8/u64, hash @0, state @8, value @16, key @24, stride 32.
-/// For String/u16, the 24-byte key comes first, state @32, value @40, stride 48.
-/// For u16/u8, the two words come first, key @16, value @18, stride 24.
+/// For u8/u64, meta @0, value @8, key @16, stride 24.
+/// For String/u16, the 24-byte key comes first, meta @24, value @32, stride 40.
+/// For u16/u8, meta @0, key @8, value @10, stride 16.
 #[test]
 fn map_entries_share_the_own_tuple_layout() {
     let s = || FieldTy::Seq(Box::new(u(Scalar::U8)));
     let e = |k, v| map_entry(&[], &[], &k, &v);
-    let want = |stride, state, key, value| MapEntry {
+    let want = |stride, meta, key, value| MapEntry {
         stride,
         align: 8,
-        state,
+        meta,
         key,
         value,
     };
-    assert_eq!(e(u(Scalar::U8), u(Scalar::U64)), want(32, 8, 24, 16));
-    assert_eq!(e(s(), u(Scalar::U16)), want(48, 32, 0, 40));
-    assert_eq!(e(u(Scalar::U16), u(Scalar::U8)), want(24, 8, 16, 18));
+    assert_eq!(e(u(Scalar::U8), u(Scalar::U64)), want(24, 0, 16, 8));
+    assert_eq!(e(s(), u(Scalar::U16)), want(40, 24, 0, 32));
+    assert_eq!(e(u(Scalar::U16), u(Scalar::U8)), want(16, 0, 8, 10));
 }
 
 /// MEM-12: sequence headers terminate inline containment. J = Null | Arr(Seq[J])

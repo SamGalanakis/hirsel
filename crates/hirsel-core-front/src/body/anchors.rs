@@ -445,7 +445,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     }
 
     pub(super) fn return_place_anchors(&mut self) {
-        if self.anchors.last == 0 || !self.contains_callback(self.fd.result) {
+        if self.anchors.last == 0 || !self.anchor_tracked(self.fd.result) {
             return;
         }
         let mut roots = std::mem::take(&mut self.anchors.left);
@@ -520,6 +520,41 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             let allowed = self.anchors.union(allowed, initial);
             self.anchors.mut_params.insert(slot, allowed);
             self.vars[slot as usize].as_mut().unwrap().mut_anchor = true;
+        }
+    }
+    /// A scoped `take` or view formal written `T in a` reads `a`, not itself
+    /// (OWN-19): moving it into a result anchored to `a` keeps that anchor.
+    pub(super) fn written_parameter_anchors(
+        &mut self,
+        index: usize,
+        slot: u32,
+        ty: TyId,
+        mode: Mode,
+    ) {
+        if !matches!(mode, Mode::Take | Mode::View) || self.type_kind(ty) != Kind::Scoped {
+            return;
+        }
+        let Some(&parameters) = self
+            .kids(self.header)
+            .iter()
+            .find(|&&c| self.kind(c) == NodeKind::Parameters)
+        else {
+            return;
+        };
+        let Some(&ty_node) = self
+            .kids(parameters)
+            .get(index)
+            .and_then(|&p| self.kids(p).first())
+        else {
+            return;
+        };
+        if !is_type_node(self.kind(ty_node)) && self.kind(ty_node) != NodeKind::Anchor {
+            return;
+        }
+        if let Some(fact) = self.written_anchors(ty_node)
+            && fact != 0
+        {
+            self.replace_slot_anchors(slot, fact);
         }
     }
     pub(super) fn opened_region_anchors(&mut self, slot: u32) {

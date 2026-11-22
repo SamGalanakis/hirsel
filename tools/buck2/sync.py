@@ -508,6 +508,11 @@ def adapted_citations_present() -> list[str]:
     return sorted(path for path in cited if READS.is_file(ROOT / path))
 
 
+def distribution_license_paths() -> list[str]:
+    sources = json.loads(READS.text(ROOT / "tools/toolchain-dist/notice-sources.json"))
+    return sorted({path for runtime in sources["host_runtimes"].values() for path in runtime["texts"]})
+
+
 def first_party(meta: dict) -> str:
     packages = {p["id"]: p for p in meta["packages"]}
     nodes = {n["id"]: n for n in meta["resolve"]["nodes"]}
@@ -525,7 +530,7 @@ def first_party(meta: dict) -> str:
     out.append("\n" + call("hirsel_script_test", name="test-buck2-client", script="tools/tests/buck2_client.py",
                            data=["//tools/buck2:bootstrap.py", "//tools/buck2:bootstrap_store.py", "//tools/buck2:bootstrap_llvm.py",
                                  "//tools/buck2:client.py", "//tools/buck2:generated.py", "//tools/buck2:merging.py",
-                                 "//tools/buck2:llvm-cxx-headers-lock.json", "//tools/buck2:llvm-runtime-lock.json",
+                                 "//tools/buck2:llvm-cxx-headers-lock.json",
                                  "//tools/buck2:pins.json", "tools/native-toolchain/llvm-23.lock"]))
     out.append("\n" + call("hirsel_script_test", name="test-native-scratch-tools", script="tools/tests/buck2_sync.py",
                            args=["AtomicScratch", "ProductionFeatures", "CargoUnits", "ExecutorConfiguration"],
@@ -661,6 +666,7 @@ def first_party(meta: dict) -> str:
                             bin_exes={"hirsel": "//:hirsel-core-driver-bin-hirsel"},
                             files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic",
                                        "HIRSEL_CORE_RT_ARCHIVES": "//:hirsel-core-rt-archives",
+                                       "HIRSEL_LINK_KIT": "//tools/buck2/native-toolchain:kit",
                                        "HIRSEL_TOOLCHAIN_ARM": "//tools/buck2/native-toolchain:arm",
                                        "HIRSEL_TOOLCHAIN_QEMU": "//tools/buck2/native-toolchain:qemu"},
                             data=Raw('glob(["core/core/**", "core/std/**", "docs/spec/**"]) + ["core/tools/case_progress.py", "docs/PRIMER.md"]')))
@@ -792,9 +798,8 @@ def first_party(meta: dict) -> str:
                             args=["--present", *adapted_citations_present()],
                             data=["tools/tests/distribution_notices.py", "NOTICES.md", "Cargo.lock", "//third-party:NOTICES.md",
                                   "tools/native-toolchain/llvm-23.lock", "//tools/toolchain-dist:notice-sources.json",
-                                  *("//tools/toolchain-dist:licenses/" + name for name in (
-                                      "libc6-dev.copyright", "gcc-13-base.copyright", "common-licenses/LGPL-2.1",
-                                      "common-licenses/GPL-2", "common-licenses/GPL-3"))],
+                                  *("//tools/toolchain-dist:" + path.removeprefix("tools/toolchain-dist/")
+                                    for path in distribution_license_paths())],
                             files_env={"HIRSEL_DISTRIBUTION_NOTICES": "//tools/toolchain-dist:notices.py",
                                        "HIRSEL_TOOLCHAIN_BUNDLE": "//:hirsel-toolchain"}))
     out.append("\n" + call("hirsel_script_test", name="core-evaluator", script="core/tools/gate_evaluator.py",
@@ -810,7 +815,7 @@ def first_party(meta: dict) -> str:
                                        "HIRSEL_SDK_TYPESCRIPT": "//tools/buck2:sdk-typescript",
                                        "HIRSEL_SDK_NODE_TYPES": "//tools/buck2:sdk-node-types",
                                        "HIRSEL_SDK_UNDICI_TYPES": "//tools/buck2:sdk-undici-types"},
-                            data=Raw('glob(["core/core/**", "core/std/**", "core/programs/store/tests/**", "sdk/client/*.ts", "sdk/client/tests/*", "sdk/client/package.json", "sdk/client/tsconfig.json", "sdk/client/README.md", "core/tools/sdk_package.py", "core/tools/std_native.py", "core/tools/std_native_owners.json"]) + ["crates/hirsel-core-driver/src/sdk_codec.js", "core/programs/store/runner.hirsel", "core/programs/store/store.hirsel", "core/programs/store/ingress.hirsel", "core/programs/store/triggers.hirsel"] + ["core/tools/case_progress.py"]')))
+                            data=Raw('glob(["core/core/**", "core/std/**", "core/programs/store/tests/**", "core/programs/store/*.hirsel", "sdk/client/*.ts", "sdk/client/tests/*", "sdk/client/package.json", "sdk/client/tsconfig.json", "sdk/client/README.md", "core/tools/sdk_package.py", "core/tools/std_native.py", "core/tools/std_native_owners.json"]) + ["crates/hirsel-core-driver/src/sdk_codec.js", "core/programs/store/hirsel.toml"] + ["core/tools/case_progress.py"]')))
     # CONC-10 event order: the evaluator against native cranelift under the poll recorder's FIFO choice.
     out.append("\n" + call("hirsel_script_test", name="core-event-order", script="crates/hirsel-core-rt/test-event-order.py",
                             host=True,
@@ -916,7 +921,7 @@ def first_party(meta: dict) -> str:
                                           "schedule-runtime.a": "//:core-scripted-runtime-pic"},
                                 files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic",
                                            "HIRSEL_CORE_RT_RECORD_ARCHIVE": "//:core-driver-record-runtime-pic"},
-                                data=Raw('glob(["core/programs/ffi_laws/**", "core/programs/sqlite/**", "core/core/**", "core/std/**", "core/programs/store/tests/**", "crates/hirsel-core-rt/include/**", "crates/hirsel-core-rt/testdata/tls/alpha*.pem", "crates/hirsel-core-rt/testdata/tls/ca.pem"]) + ["core/tools/std_native.py", "core/tools/std_native_owners.json", "core/tools/std_host.c", "core/tools/std_schedule.c", "core/tools/case_progress.py", "crates/hirsel-core-driver/src/sdk_codec.js", "core/programs/store/runner.hirsel", "core/programs/store/store.hirsel", "core/programs/store/ingress.hirsel", "core/programs/store/triggers.hirsel"]')))
+                                data=Raw('glob(["core/programs/ffi_laws/**", "core/programs/sqlite/**", "core/core/**", "core/std/**", "core/programs/store/tests/**", "core/programs/store/*.hirsel", "crates/hirsel-core-rt/include/**", "crates/hirsel-core-rt/testdata/tls/alpha*.pem", "crates/hirsel-core-rt/testdata/tls/ca.pem"]) + ["core/tools/std_native.py", "core/tools/std_native_owners.json", "core/tools/std_host.c", "core/tools/std_schedule.c", "core/tools/case_progress.py", "crates/hirsel-core-driver/src/sdk_codec.js", "core/programs/store/hirsel.toml"]')))
     out.append("\n" + call("hirsel_script_test", name="test-measurement-artifacts", script="tools/tests/measurement_artifacts.py",
                             data=["core/tools/measurement_artifacts.py", "core/tools/std_native.py", "core/tools/case_progress.py"]))
     out.append("\n" + call("hirsel_script_test", name="test-core-sweep", script="tools/tests/core_sweep.py",
@@ -1121,18 +1126,14 @@ def native_toolchain_pins() -> str:
     records = [line.split() for line in READS.text(directory / "llvm-23.lock").splitlines()
                if line and not line.startswith("#")]
     scalars = {row[0]: " ".join(row[1:]) for row in records if row[0] != "deb"}
-    lld_sha, lld_size, lld_asset = scalars["static_lld"].split()
-    llvm = [{"url": f"{scalars['deb_pool']}/{asset}",
-             "sha256": sha, "size": int(size)}
-            for key, name, arch, sha, size, asset in (row for row in records if row[0] == "deb")]
-    runtime = json.loads(READS.text(HERE / "llvm-runtime-lock.json"))["debs"]
-    llvm += [{"url": row["urls"][0].replace("http:", "https:"), "sha256": row["sha256"], "size": row["size"]}
-             for row in runtime]
+    def llvm_asset(name):
+        sha, size, asset = scalars[name].split()
+        return {"url": f"{scalars['asset_pool']}/{asset}", "sha256": sha, "size": int(size)}
     pins = json.loads(READS.text(directory / "native.lock.json"))
     valgrind_runtime = pins.pop("valgrind_runtime")
     link_kit = pins.pop("link_kit")
-    return (HEADER + "LLVM_DEBS = " + json.dumps(llvm, indent=4)
-            + "\nSTATIC_LLD = " + json.dumps({"url": f"{scalars['deb_pool']}/{lld_asset}", "sha256": lld_sha, "size": int(lld_size)}, indent=4)
+    return (HEADER + "BOOTSTRAP_LLVM = " + json.dumps(llvm_asset("bootstrap_llvm"), indent=4)
+            + "\nSTATIC_LLD = " + json.dumps(llvm_asset("static_lld"), indent=4)
             + "\nVALGRIND_DEBS = " + json.dumps(valgrind_runtime, indent=4)
             + "\nLINK_KIT = " + json.dumps(link_kit, indent=4)
             + "\nNATIVE = " + json.dumps({k: v for k, v in pins.items() if k != "schema"}, indent=4) + "\n")

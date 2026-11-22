@@ -219,21 +219,46 @@ pub fn emit_program_parts(
     held: &mut dyn Held,
     lend: Lend<'_>,
 ) -> Result<Program, String> {
-    loader::program(
-        lower_program_units(units, target)?,
-        exports,
-        target,
-        jobs,
-        held,
-        None,
-        lend,
-    )
+    lower_program(units, target)?.emit(exports, jobs, held, lend)
 }
 
-fn lower_program_units<'a>(
-    units: &[Unit<'a>],
+/// A release program's units built as LLVM modules for `target`. They no
+/// longer read the Core modules and facts they were built from, so a caller
+/// may drop those before [`Lowered::emit`] runs the optimiser and the code
+/// generator, which [`emit_program_parts`] runs at once.
+pub struct Lowered {
+    units: Vec<loader::ProgramUnit>,
     target: hirsel_core_layout::Target,
-) -> Result<Vec<loader::ProgramUnit<'a>>, String> {
+}
+
+pub fn lower_program(
+    units: &[Unit<'_>],
+    target: hirsel_core_layout::Target,
+) -> Result<Lowered, String> {
+    Ok(Lowered {
+        units: lower_program_units(units, target)?,
+        target,
+    })
+}
+
+impl Lowered {
+    /// Optimise the whole program and generate it in parts, as
+    /// [`emit_program_parts`] does.
+    pub fn emit(
+        self,
+        exports: &[String],
+        jobs: u32,
+        held: &mut dyn Held,
+        lend: Lend<'_>,
+    ) -> Result<Program, String> {
+        loader::program(self.units, exports, self.target, jobs, held, None, lend)
+    }
+}
+
+fn lower_program_units(
+    units: &[Unit<'_>],
+    target: hirsel_core_layout::Target,
+) -> Result<Vec<loader::ProgramUnit>, String> {
     let context = units
         .iter()
         .any(|unit| matches!(unit, Unit::Core { .. }))
@@ -270,7 +295,7 @@ fn lower_program_units<'a>(
                 )
                 .map_err(|e| e.to_string())?,
             )),
-            Unit::Text(ir) => lowered.push(loader::ProgramUnit::Text(ir)),
+            Unit::Text(ir) => lowered.push(loader::ProgramUnit::Text((*ir).to_owned())),
         }
     }
     Ok(lowered)

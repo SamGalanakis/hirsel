@@ -51,9 +51,9 @@ pub(crate) fn decoded_closure_hash(
     ))
 }
 
-pub const VERSION: u16 = 2;
-const BODY_MAGIC: &[u8] = b"HIRBODY\0\x02\x00";
-pub const BODY_HASH_DOMAIN: &str = "hirsel.code-body.v2";
+pub const VERSION: u16 = 3;
+const BODY_MAGIC: &[u8] = b"HIRBODY\0\x03\x00";
+pub const BODY_HASH_DOMAIN: &str = "hirsel.code-body.v3";
 const ANNEX_MAGIC: &[u8] = b"HIRANNEX\0\x01\x00";
 const SIGNATURE_DOMAIN: &str = "hirsel.code-signature.v2";
 
@@ -1710,10 +1710,10 @@ fn f0 = n0 g0 {
 ",
         );
         let encoded = encode(&module, FuncId(0));
-        // Literal v2 wire fields and hashes derived independently from PROG-10.
+        // Literal v3 wire fields and hashes derived independently from PROG-10.
         // SHA-256 frames the domain and payload with u64le lengths.
         let body = hex(concat!(
-            "484952424f4459000200",               // HIRBODY, NUL, u16le version 2
+            "484952424f4459000300",               // HIRBODY, NUL, u16le version 3
             "000100010009000000",                 // types, () -> u64 signature, statics
             "010c61707040312f6d61696e2f66000000", // instance app@1/main/f
             "01000000010100010000",               // one function and block, const v0
@@ -1724,24 +1724,33 @@ fn f0 = n0 g0 {
         let hash = encoded.hash();
         assert_eq!(
             hash.0.as_slice(),
-            hex("1d2085dbdf9eab841d96b70d5c63b07f6f3a3f58dc0ec6ae4c9eeb27be8398be")
+            hex("70d217292a1c1b58a5875c3697c24c54fdbf94b7dda75ef63ff5260f5d688cf3")
         );
         let identity = module.identity(module.functions[0].instance);
-        let addresses = crate::code_addresses([identity.clone()], |_| {
-            Some(crate::CodeRow {
-                body: hash,
-                slots: vec![],
-            })
-        })
+        let addresses = crate::address::code_groups(
+            [identity.clone()],
+            |_| {
+                Some(crate::CodeRow {
+                    body: hash,
+                    slots: vec![],
+                })
+            },
+            |group, _| {
+                assert_eq!(
+                    group.0.as_slice(),
+                    hex("d190a1b6ef77e6cf37ea63faa2441f1ba3ba00efabf32a4f00022566354b15e0"),
+                )
+            },
+        )
         .unwrap();
         let address = addresses[&identity];
         assert_eq!(
             address.0.as_slice(),
-            hex("436fff16f259a64a36fe60690cfffe04764d09b13854a38736e83576960aa996")
+            hex("0a30531a567deac330fdd29690c48f2af408b21df2b2cbc06b5dc2f15b587048")
         );
         assert_eq!(
             crate::code_revision(address).0.as_slice(),
-            hex("e5a1c671c97634303ffcc3c4ce955f4125e81e5e50a1e87883553d66ffcba257")
+            hex("fcd105fff20b0fbaf91b5312af005b5aed9bf772bfa79d66a3d9a8b4f4eb5662")
         );
         let widen = Identity::plain(DefPath::core("float.widen"));
         assert_eq!(

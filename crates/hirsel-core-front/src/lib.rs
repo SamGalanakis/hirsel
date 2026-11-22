@@ -44,6 +44,7 @@ use hirsel_core_resolve::{
 };
 use hirsel_core_syntax::{Item, NodeId, Span, Symbol, SyntaxFile};
 use std::collections::HashMap;
+use std::hash::BuildHasher;
 
 /// One module of the program, already parsed.
 pub struct ModuleInput {
@@ -119,11 +120,13 @@ pub struct Program<'a> {
     pub constant_parts: Rows<ConstValue>,
     pub(crate) constant_strings: Rows<Vec<u8>>,
     pub(crate) constant_ids: Rows<Option<u32>>,
-    pub by_path: HashMap<DefPath, Def>,
+    /// This program's own definitions by path. A path lives once, in its
+    /// row: an entry is hashed and compared through its row's path.
+    by_path: hashbrown::HashTable<Def>,
     pub by_definition: Rows<Option<Def>>,
     pub(crate) core_operations: Rows<Option<u16>>,
     pub(crate) library_paths: Option<std::sync::Arc<hirsel_core_ids::published::Map<DefPath, Def>>>,
-    core_never: Option<(ModuleId, Symbol)>,
+    core_never: Option<DefinitionId>,
     /// Refusals of declarations and signatures, and the resolver's.
     pub refusals: Vec<Refusal>,
     pub gaps: Vec<Gap>,
@@ -172,38 +175,112 @@ pub const PRELUDE: [&str; 15] = [
     "OutOfTime",
     "Arc",
 ];
-/// The items body lowering calls by a path it builds from a callee the body
-/// resolves, keeping the callee's package and modules and replacing its name:
-/// (package name, module, callee, the names it builds). A body that names the
-/// callee reads those items, though no resolved name of the body reaches them,
-/// so its reuse key hashes their closures (the driver's `Keys::for_body`).
-/// Lowering builds no other path: a new one is added here first.
-pub const SIBLING_READS: [(&str, &str, &str, &[&str]); 6] = [
-    // `list.push` grows a full list by calling `list.grow` (body/lists.rs).
-    ("core", "list", "push", &["grow"]),
-    (
-        "core",
-        "heap",
-        "push",
-        &["prepare_push", "finish_prepared_push"],
-    ),
-    (
-        "core",
-        "deque",
-        "push_front",
-        &["prepare_push", "finish_prepared_push"],
-    ),
-    (
-        "core",
-        "deque",
-        "push_back",
-        &["prepare_push", "finish_prepared_push"],
-    ),
-    ("core", "map", "insert", &["probe_insert"]),
-    // `codec.of[T]` at a built-in T calls T's maker (body/calls.rs `codec_of`,
-    // and body/templates.rs `codec_maker` at an instance).
-    ("std", "codec", "of", &body::BUILTIN_CODEC_MAKERS),
-];
+/// A core function body lowering calls by a path it builds, never through a
+/// resolved name of the body. Lowering finds one only through
+/// `Program::core_helper`, and the driver's reuse key hashes the closure of each
+/// in [`SIBLING_READS`]' row of the callee being lowered, or its absence, so a
+/// lowering site that calls a helper missing from its callee's row is the one
+/// read the key does not cover.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CoreHelper {
+    ListGrow,
+    ListGrowBy,
+    HeapPreparePush,
+    HeapFinishPreparedPush,
+    DequePreparePush,
+    DequeFinishPreparedPush,
+    MapProbeStaged,
+    MapCommitCrowded,
+    MapCommit,
+}
+impl CoreHelper {
+    /// The helper's module in core and its name there.
+    pub const fn path(self) -> (&'static str, &'static str) {
+        match self {
+            Self::ListGrow => ("list", "grow"),
+            Self::ListGrowBy => ("list", "grow_by"),
+            Self::HeapPreparePush => ("heap", "prepare_push"),
+            Self::HeapFinishPreparedPush => ("heap", "finish_prepared_push"),
+            Self::DequePreparePush => ("deque", "prepare_push"),
+            Self::DequeFinishPreparedPush => ("deque", "finish_prepared_push"),
+            Self::MapProbeStaged => ("map", "probe_staged"),
+            Self::MapCommitCrowded => ("map", "commit_crowded"),
+            Self::MapCommit => ("map", "commit"),
+        }
+    }
+}
+/// What lowering a [`SIBLING_READS`] callee reads beyond the body's names.
+pub enum SiblingReads {
+    /// Core helpers lowering calls ([`CoreHelper`]).
+    Core(&'static [CoreHelper]),
+    /// Functions of one module of the callee's package, by name: std's built-in
+    /// codec makers beside `codec.of`.
+    Named(&'static str, &'static [&'static str]),
+}
+impl SiblingReads {
+    /// Each read as (module, name) in the callee's package, in key order.
+    pub fn paths(&self) -> impl Iterator<Item = (&'static str, &'static str)> + '_ {
+        let (core, named) = match *self {
+            Self::Core(helpers) => (helpers, None),
+            Self::Named(module, names) => (&[][..], Some((module, names))),
+        };
+        core.iter().map(|h| h.path()).chain(
+            named
+                .into_iter()
+                .flat_map(|(module, names)| names.iter().map(move |&name| (module, name))),
+        )
+    }
+}
+/// The items body lowering calls when it lowers a resolved callee:
+/// (package, callee module, callee, reads). A body that names the callee reads
+/// those items, though no resolved name of the body reaches them, so its reuse
+/// key hashes their closures (`Keys::for_body`). Lowering builds no other path:
+/// a new one is added here first.
+pub const SIBLING_READS: [(&str, &str, &str, SiblingReads); 11] = {
+    use CoreHelper::*;
+    use SiblingReads::*;
+    [
+        ("core", "list", "push", Core(&[ListGrow])),
+        (
+            "core",
+            "heap",
+            "push",
+            Core(&[HeapPreparePush, HeapFinishPreparedPush]),
+        ),
+        (
+            "core",
+            "deque",
+            "push_front",
+            Core(&[DequePreparePush, DequeFinishPreparedPush]),
+        ),
+        (
+            "core",
+            "deque",
+            "push_back",
+            Core(&[DequePreparePush, DequeFinishPreparedPush]),
+        ),
+        (
+            "core",
+            "map",
+            "insert",
+            Core(&[MapProbeStaged, MapCommitCrowded, MapCommit]),
+        ),
+        // `codec.of[T]` at a built-in T calls T's maker (body/calls.rs `codec_of`,
+        // and body/templates.rs `codec_maker` at an instance).
+        (
+            "std",
+            "codec",
+            "of",
+            Named("codec", &body::BUILTIN_CODEC_MAKERS),
+        ),
+        ("core", "list", "reserve", Core(&[ListGrow, ListGrowBy])),
+        ("core", "list", "append", Core(&[ListGrowBy])),
+        ("core", "list", "fill", Core(&[ListGrowBy])),
+        // String push and reserve use the List[u8] append and reserve kernels.
+        ("core", "string", "push", Core(&[ListGrowBy])),
+        ("core", "string", "reserve", Core(&[ListGrow, ListGrowBy])),
+    ]
+};
 /// Tuple codec row construction reads these protocol signatures even when the
 /// source never calls `codec.of`; the driver's prelude component records them.
 pub const TUPLE_CODEC_READS: [&str; 3] = ["take_with", "put_with", "schema_of"];
@@ -369,7 +446,9 @@ impl<'a> Program<'a> {
         *self.core_declarations[slot].get_or_init(|| self.core_decl_uncached(name))
     }
     /// The core function `module.name`, when the program has core.
-    pub(crate) fn core_fn(&self, module: &str, name: &str) -> Option<usize> {
+    /// The function `helper` names in core, if core defines it.
+    pub(crate) fn core_helper(&self, helper: CoreHelper) -> Option<usize> {
+        let (module, name) = helper.path();
         let key = self.index.core?;
         let package = &self.index.packages[key.0 as usize];
         let path = DefPath(hirsel_core_ids::ItemPath {
@@ -380,12 +459,8 @@ impl<'a> Program<'a> {
             modules: vec![module.into()],
             name: name.into(),
         });
-        match self
-            .by_path
-            .get(&path)
-            .or_else(|| self.library_paths.as_ref().and_then(|p| p.get(&path)))?
-        {
-            Def::Fn(f) => Some(*f as usize),
+        match self.def(&path)? {
+            Def::Fn(f) => Some(f as usize),
             Def::Type(_) => None,
         }
     }
@@ -460,14 +535,39 @@ impl<'a> Program<'a> {
     }
     fn core_decl_uncached(&self, name: &str) -> Option<DeclId> {
         let path = prelude_path(self.index, name)?;
-        match self
-            .by_path
-            .get(&path)
-            .or_else(|| self.library_paths.as_ref().and_then(|p| p.get(&path)))?
-        {
-            Def::Type(d) => Some(*d),
+        match self.def(&path)? {
+            Def::Type(d) => Some(d),
             Def::Fn(_) => None,
         }
+    }
+    /// The path of a definition's row.
+    pub(crate) fn def_path(&self, def: Def) -> &DefPath {
+        def_path(&self.decls, &self.fns, def)
+    }
+    /// The definition `path` names, in this program or its library.
+    pub(crate) fn def(&self, path: &DefPath) -> Option<Def> {
+        let hash = rustc_hash::FxBuildHasher.hash_one(path);
+        self.by_path
+            .find(hash, |&d| self.def_path(d) == path)
+            .copied()
+            .or_else(|| self.library_paths.as_ref()?.get(path).copied())
+    }
+    /// Register `def` under its row's path unless the path names one already.
+    pub(crate) fn add_path(&mut self, def: Def) {
+        let (decls, fns) = (&self.decls, &self.fns);
+        let path = def_path(decls, fns, def);
+        let hash = rustc_hash::FxBuildHasher.hash_one(path);
+        if let hashbrown::hash_table::Entry::Vacant(entry) = self.by_path.entry(
+            hash,
+            |&d| def_path(decls, fns, d) == path,
+            |&d| rustc_hash::FxBuildHasher.hash_one(def_path(decls, fns, d)),
+        ) {
+            entry.insert(def);
+        }
+    }
+    /// This program's own definitions with their paths, in no order.
+    pub(crate) fn own_paths(&self) -> impl Iterator<Item = (&DefPath, Def)> {
+        self.by_path.iter().map(|&d| (self.def_path(d), d))
     }
 
     /// Resolve every item, then publish summaries and signatures (slice a).
@@ -583,7 +683,7 @@ impl<'a> Program<'a> {
                 ids.resize(index.definitions.len(), None);
                 ids
             },
-            by_path: HashMap::new(),
+            by_path: hashbrown::HashTable::new(),
             library_paths: library.map(|l| std::sync::Arc::new(l.paths.clone())),
             core_never: index
                 .symbols
@@ -594,7 +694,7 @@ impl<'a> Program<'a> {
                         .find("core")
                         .and_then(|name| index.core_module(name)),
                 )
-                .map(|(name, module)| (module, name)),
+                .and_then(|(name, module)| index.definition(module, name)),
             by_definition: {
                 let mut rows = library.map_or_else(Rows::default, |l| {
                     Rows::overlay(std::sync::Arc::clone(&l.definitions))
@@ -653,45 +753,37 @@ impl<'a> Program<'a> {
     }
 
     pub(crate) fn is_core_never(&self, id: DefinitionId) -> bool {
-        self.core_never.is_some_and(|(module, name)| {
-            let definition = self.index.get(id);
-            definition.name == name && definition.site.module == module
-        })
+        self.core_never == Some(id)
     }
     pub fn decl(&self, path: &DefPath) -> Option<&TypeDecl> {
-        match self
-            .by_path
-            .get(path)
-            .or_else(|| self.library_paths.as_ref().and_then(|p| p.get(path)))?
-        {
+        match self.def(path)? {
             Def::Type(d) => Some(&self.decls[d.index()]),
             Def::Fn(_) => None,
         }
     }
     /// The row of the function `path` names, in this program or its library.
     pub fn function_id(&self, path: &DefPath) -> Option<usize> {
-        match self
-            .by_path
-            .get(path)
-            .or_else(|| self.library_paths.as_ref().and_then(|p| p.get(path)))?
-        {
-            Def::Fn(f) => Some(*f as usize),
+        match self.def(path)? {
+            Def::Fn(f) => Some(f as usize),
             Def::Type(_) => None,
         }
     }
     pub fn function(&self, path: &DefPath) -> Option<&FnDecl> {
-        match self
-            .by_path
-            .get(path)
-            .or_else(|| self.library_paths.as_ref().and_then(|p| p.get(path)))?
-        {
-            Def::Fn(f) => Some(&self.fns[*f as usize]),
+        match self.def(path)? {
+            Def::Fn(f) => Some(&self.fns[f as usize]),
             Def::Type(_) => None,
         }
     }
     /// The kind of a closed type (OWN-3).
     pub fn kind(&self, ty: TyId) -> Kind {
         decls::kind(&self.decls, &self.types, ty, &[])
+    }
+}
+
+fn def_path<'r>(decls: &'r Rows<TypeDecl>, fns: &'r Rows<FnDecl>, def: Def) -> &'r DefPath {
+    match def {
+        Def::Type(d) => &decls[d.index()].path,
+        Def::Fn(f) => &fns[f as usize].path,
     }
 }
 

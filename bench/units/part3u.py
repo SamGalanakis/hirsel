@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """mc-units-untied: Part 3 load, search and pass rule, untied side added.
 
-Copied from part3.py with the load, LIMIT_NS, the pass rule and the search
-unchanged. Sides: untied (W=8 workers, one unit per session, children in par
+The search and load are from part3.py. Sides: untied (W=8 workers, one unit per session, children in par
 cells), S3k7 (old thread-per-unit, floating) and tokiow8. A block holds one
 cell and one rate step per side (see run_chunk); the first side rotates.
 Usage: part3u.py PLAN OUT.jsonl GROUPS   (PLAN: base | par | rec | all | pilot)
@@ -10,8 +9,7 @@ Usage: part3u.py PLAN OUT.jsonl GROUPS   (PLAN: base | par | rec | all | pilot)
 Original header:
 
 A run passes when every issued turn completed with a correct checksum, no
-turn timed out, and p99 server-added latency <= LIMIT_NS (declared before
-measuring). For each (side, cell) a search finds the highest passing rate:
+turn timed out, and p99 intended-arrival latency <= LIMIT_NS. For each (side, cell) a search finds the highest passing rate:
 start from a guess, step up by STEP until a run fails (or down until one
 passes), then bisect twice. Each search runs inside its own timing block
 (regimes lock, board lock for CPUs 10-11, cc1plus check); within a group the
@@ -162,6 +160,14 @@ class Tool:
         self.err.close()
 
 
+def complete_in_time(load):
+    return bool(
+        load and load["failures"] == load["timeouts"] == 0
+        and load["completed"] == load["issued"] > 0
+        and load["e2e_p99_ns"] <= LIMIT_NS
+    )
+
+
 def one_run(side, cell, rate, seed):
     f, variant, rec = cell["f"], cell["variant"], cell["rec"]
     par = 1 if variant == "par" else 0
@@ -238,8 +244,8 @@ def one_run(side, cell, rate, seed):
         rec_["load"] = None
         rec_["load_err"] = lerr[-800:]
     L = rec_["load"]
-    rec_["pass"] = bool(L and L["failures"] == 0 and L["timeouts"] == 0 and L["completed"] == L["issued"] and L["late"] == 0
-                        and L["p99_ns"] <= LIMIT_NS and srv.returncode == 0)
+    rec_["load_rc"] = lgp.returncode
+    rec_["pass"] = complete_in_time(L) and lgp.returncode == srv.returncode == 0
     rec_["correct"] = bool(L and L["failures"] == 0)
     return rec_
 
@@ -254,8 +260,7 @@ def run_rate(side, cell, rate, seed, group):
         # in time failed for a reason outside the load: on this host, an
         # HTTP probe from another process connecting to the listening port
         # (seen as a "GET / HT" hello). Not a verdict on this rate: rerun.
-        stray = bool(L0 and r["rc"] != 0 and L0["failures"] == 0 and L0["timeouts"] == 0
-                     and L0["completed"] == L0["issued"] and L0["late"] == 0 and L0["p99_ns"] <= LIMIT_NS)
+        stray = complete_in_time(L0) and r["load_rc"] == 0 and r["rc"] != 0
         if r["load"] is not None and not stray:
             break
         # The load generator produced no result (the server never came

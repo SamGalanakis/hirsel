@@ -148,6 +148,7 @@ def main():
 
         def test_env_and_registered_products_work_away_from_the_checkout(self):
             runtime = Path(os.environ['HIRSEL_CORE_RT_ARCHIVE']).resolve()
+            kit = Path(os.environ['HIRSEL_LINK_KIT']).resolve()
             with tempfile.TemporaryDirectory(prefix='hirsel-installed-') as temporary:
                 work = Path(temporary)
                 app, root = work / 'app', work / 'toolchain'
@@ -163,7 +164,8 @@ def main():
                 initial = json.loads(invoke(compiler, 'env', '--json').stdout)
                 self.assertIsNone(initial['installed_root'])
                 self.assertIsNone(initial['runtime'])
-                published = json.loads(invoke(compiler, 'std-product', '--install', str(root), '--runtime', str(runtime)).stdout)
+                published = json.loads(invoke(compiler, 'std-product', '--install', str(root),
+                                              '--runtime', str(runtime), '--link-kit', str(kit)).stdout)
                 environment = json.loads(invoke(installed, 'env', '--json').stdout)
                 self.assertEqual(Path(environment['installed_root']), root)
                 self.assertEqual(Path(environment['package_cache']), root / 'core-packages')
@@ -174,7 +176,7 @@ def main():
                 invoke(installed, 'new', str(app))
                 product = json.loads(invoke(installed, 'check', str(app), '--json').stdout)
                 self.assertTrue(product['accepted'])
-                self.assertEqual(product['files'], 1)
+                self.assertEqual(product['files'], 2)  # main.hirsel and tests.hirsel
                 self.assertEqual(product['diagnostics'], [])
                 for engine in ['cranelift', 'llvm']:
                     built = json.loads(invoke(installed, 'build', str(app), '--backend', engine,
@@ -192,7 +194,8 @@ def main():
                 self.assertTrue(json.loads(invoke(installed, 'check', str(app), '--json').stdout)['accepted'])
                 selection = moved / 'hirsel-core-toolchain.json'
                 previous = selection.read_bytes()
-                invoke(installed, 'std-product', '--install', str(moved), '--runtime', str(work / 'missing.a'), expected=2)
+                invoke(installed, 'std-product', '--install', str(moved), '--runtime', str(work / 'missing.a'),
+                       '--link-kit', str(kit), expected=2)
                 self.assertEqual(selection.read_bytes(), previous)
 
         def test_a_copied_install_runs_in_a_clean_environment_with_nothing_outside_its_prefix(self):
@@ -200,6 +203,7 @@ def main():
             # every native tool and library from that prefix or the system,
             # with no environment variable, no checkout and no cc on PATH.
             runtime = Path(os.environ['HIRSEL_CORE_RT_ARCHIVE']).resolve()
+            kit = Path(os.environ['HIRSEL_LINK_KIT']).resolve()
             with tempfile.TemporaryDirectory(prefix='hirsel-prefix-') as temporary:
                 work = Path(temporary)
                 root, decoy, home = work / 'toolchain', work / 'path-bin', work / 'home'
@@ -210,7 +214,8 @@ def main():
                 for tool in ['cc', 'gcc', 'clang', 'ld', 'ld.lld']:
                     (decoy / tool).write_text('#!/bin/sh\necho ' + tool + ' >> ' + repr(str(found)) + '\nexit 1\n')
                     (decoy / tool).chmod(0o755)
-                install = self.progress.run([str(compiler), 'std-product', '--install', str(root), '--runtime', str(runtime)],
+                install = self.progress.run([str(compiler), 'std-product', '--install', str(root),
+                                             '--runtime', str(runtime), '--link-kit', str(kit)],
                                          cwd=work, capture_output=True, text=True)
                 self.assertEqual(install.returncode, 0, install.stdout + install.stderr)
                 clean = {'PATH': str(decoy) + ':/usr/bin:/bin', 'HOME': str(home)}

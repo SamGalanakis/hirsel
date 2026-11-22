@@ -243,6 +243,7 @@ def main():
         debs[key] = Path(path)
     output = args.output
     output.mkdir(parents=True)
+    shutil.copy2(lld, output / "ld.lld")
     pins = json.loads(args.pins.read_text())
     manifest = {
         "schema": 1,
@@ -365,6 +366,8 @@ def main():
             run([ar, "rcsD", directory / "libunwind.a", *objects])
             record("libunwind.a", source="libunwind " + " ".join(UNWIND_SOURCES), flags=UNWIND_FLAGS,
                    c_flags=UNWIND_C_FLAGS, cxx_flags=UNWIND_CXX_FLAGS, headers="libc6-dev and linux-libc-dev at the floor")
+            (directory / "libgcc_s.so").write_text("INPUT(libunwind.a)\n")
+            record("libgcc_s.so", source="Linker script selecting the kit's LLVM unwinder")
             # C cleanup frames in static glibc use this personality. The Rust
             # runtime supplies its own language personality and builtins; never
             # resolve this remaining symbol from the host's libgcc_eh.
@@ -382,6 +385,7 @@ def main():
                 "options": target["options"],
                 "start": ["Scrt1.o", "crti.o", "crtbeginS.o"],
                 "unwind": "libunwind.a",
+                "unwind_script": "libgcc_s.so",
                 "libraries": [f"lib/{sonames[library]}" for library in LINK_ORDER],
                 "nonshared": "libc_nonshared.a",
                 "end": ["crtendS.o", "crtn.o"],

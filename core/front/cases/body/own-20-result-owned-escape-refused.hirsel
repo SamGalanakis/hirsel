@@ -1,0 +1,32 @@
+// OWN-20: a scoped result may read only the parameters and regions its result type
+// names. Each body below returns a view of an owned `take` formal, which drops at the
+// return, through a result anchored to another parameter; each is refused at the
+// written result type, whatever shape carries the view.
+// expect: refuse OWN-20 at 10:47
+// expect: refuse OWN-20 at 14:49
+// expect: refuse OWN-20 at 18:49
+// expect: refuse OWN-20 at 22:48
+// expect: refuse OWN-20 at 30:49
+fn bare(outer: String, take short: String) -> View[String] in outer {
+    string.slice(short, 0, 0)
+}
+
+fn option(outer: String, take short: String) -> Option[View[String]] in outer {
+    Some(string.slice(short, 0, 0))
+}
+
+fn result(outer: String, take short: String) -> Result[View[String], Capacity] in outer {
+    Ok(string.slice(short, 0, 0))
+}
+
+fn tuple(outer: String, take short: String) -> (View[String], u64) in outer {
+    (string.slice(short, 0, 0), 1)
+}
+
+scoped type Line {
+    text: View[String],
+}
+
+fn record(outer: String, take short: String) -> Line in outer {
+    Line(text: string.slice(short, 0, 0))
+}

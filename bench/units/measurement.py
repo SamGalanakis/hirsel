@@ -1,0 +1,230 @@
+"""Server CPU admission and task ownership for the fair benchmark."""
+from collections import Counter
+from contextlib import ExitStack, contextmanager
+from datetime import datetime, timedelta
+from itertools import count
+import os
+from pathlib import Path
+import re
+import select
+import signal
+import subprocess
+import time
+
+from receipt import measurement_slot
+
+MEASUREMENT_SECONDS = 240
+IDLE_LIMIT = .05
+MIN_ARM_NS = 1_000_000_000
+FOREIGN_SHARE_LIMIT = .015
+TRACE_IDS = count(1)
+FORK = re.compile(r"sched:sched_process_fork:.*?\bpid=(\d+).*?\bchild_pid=(\d+)")
+SWITCH = re.compile(
+    r"\[(\d+)\]\s+(\d+)\.(\d+):\s+sched:sched_switch:\s+(.*?):(\d+)\s+\[\d+\]\s+\S+"
+    r"\s+==>\s+(.*?):(\d+)\s+\[\d+\]"
+)
+
+
+def cpu_ticks(cpus):
+    wanted = set(cpus)
+    rows = {}
+    for line in Path("/proc/stat").read_text().splitlines():
+        name, *values = line.split()
+        if not name.startswith("cpu") or not name[3:].isdigit() or int(name[3:]) not in wanted:
+            continue
+        user, nice, system, idle, iowait, irq, softirq, steal, *_ = map(int, values)
+        busy = user + nice + system + irq + softirq + steal
+        rows[int(name[3:])] = (busy, busy + idle + iowait)
+    if rows.keys() != wanted:
+        raise RuntimeError("server CPUs missing from /proc/stat")
+    return rows
+
+
+def idle_sample(cpus):
+    start = cpu_ticks(cpus)
+    time.sleep(1)
+    end = cpu_ticks(cpus)
+    busy = {}
+    for cpu in cpus:
+        busy_ticks = end[cpu][0] - start[cpu][0]
+        total_ticks = end[cpu][1] - start[cpu][1]
+        busy[cpu] = busy_ticks / total_ticks if total_ticks else 1
+    return busy
+
+
+def board_window_open():
+    current = datetime.now().astimezone()
+    start = current.replace(hour=2, minute=45, second=0, microsecond=0)
+    end = start.replace(hour=4, minute=0)
+    if current >= end:
+        start += timedelta(days=1)
+    return (start - current).total_seconds() >= MEASUREMENT_SECONDS
+
+
+def check_ack(fd):
+    ready, _, _ = select.select([fd], [], [], 5)
+    if not ready or os.read(fd, 128).strip(b"\0\r\n ") != b"ack":
+        raise RuntimeError("scheduler trace did not acknowledge recording")
+
+
+@contextmanager
+def record_tasks(path, cpus):
+    ctl_r, ctl_w = os.pipe()
+    ack_r, ack_w = os.pipe()
+    with path.with_suffix(".log").open("wb") as log:
+        try:
+            child = subprocess.Popen(
+                ["perf", "record", "-N", "-a", "-C", ",".join(map(str, sorted(set(cpus)))),
+                 "--clockid", "mono", "-m", "1024", "--delay=-1", "--control", f"fd:{ctl_r},{ack_w}",
+                 "-e", "sched:sched_switch,sched:sched_process_fork", "-o", path],
+                pass_fds=(ctl_r, ack_w), stdout=log, stderr=log,
+            )
+            os.close(ctl_r)
+            os.close(ack_w)
+            ctl_r = ack_w = None
+            try:
+                os.write(ctl_w, b"enable\n")
+                check_ack(ack_r)
+                yield
+            finally:
+                if child.poll() is None:
+                    try:
+                        os.write(ctl_w, b"stop\n")
+                    except BrokenPipeError:
+                        pass
+                try:
+                    status = child.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    name = subprocess.check_output(
+                        ["ps", "-o", "comm=", "-p", str(child.pid)], text=True).strip()
+                    if name != "perf":
+                        raise RuntimeError(f"unexpected scheduler trace command {name!r}")
+                    child.send_signal(signal.SIGINT)
+                    status = child.wait(timeout=5)
+                if status:
+                    raise RuntimeError(f"scheduler trace exited {status}, see {path.with_suffix('.log')}")
+        finally:
+            for fd in (ctl_r, ctl_w, ack_r, ack_w):
+                if fd is not None:
+                    os.close(fd)
+
+
+def classify_tasks(path, cpu_sets, windows, start, end, busy_ticks):
+    """Charge each sched-switch interval to the arm and CPU set it overlaps."""
+    cpus = set(cpu_sets["server"]) | set(cpu_sets["load"])
+    seen = [Counter() for _ in windows]
+    successors = []
+    running = {}
+    lost = 0
+
+    def account(cpu, tid, command, left, right):
+        if tid == 0:
+            return
+        for arm, intervals in zip(windows, seen, strict=True):
+            elapsed = min(right, arm["end_ns"]) - max(left, arm["start_ns"])
+            if elapsed > 0:
+                intervals[cpu, tid, command] += elapsed
+
+    command = ["perf", "script", "--ns", "--show-lost-events", "-i", path,
+               "-F", "trace:cpu,time,event,trace"]
+    with subprocess.Popen(command, stdout=subprocess.PIPE, text=True) as reader:
+        for line in reader.stdout:
+            if "PERF_RECORD_LOST" in line or "LOST" in line:
+                lost += 1
+            if matched := FORK.search(line):
+                successors.append(tuple(map(int, matched.groups())))
+            elif matched := SWITCH.search(line):
+                cpu, seconds, fraction, previous, previous_pid, next_name, next_pid = matched.groups()
+                cpu = int(cpu)
+                if cpu not in cpus:
+                    continue
+                timestamp = int(seconds) * 1_000_000_000 + int(fraction.ljust(9, "0"))
+                last, _, _ = running.get(cpu, (start, previous_pid, previous))
+                account(cpu, int(previous_pid), previous, last, timestamp)
+                running[cpu] = timestamp, int(next_pid), next_name
+        if reader.wait():
+            raise RuntimeError(f"could not decode scheduler trace {path}")
+
+    for cpu, (timestamp, pid, command) in running.items():
+        account(cpu, pid, command, timestamp, end)
+    unobserved = sorted(cpu for cpu in cpus if cpu not in running and busy_ticks.get(cpu, 0))
+    arms = {}
+    for arm, intervals in zip(windows, seen, strict=True):
+        owned = set(arm["pids"])
+        # perf sorts records by their common monotonic timestamps.
+        for parent, child in successors:
+            if parent in owned:
+                owned.add(child)
+        duration = arm["end_ns"] - arm["start_ns"]
+        foreign = Counter()
+        local = Counter()
+        for (cpu, tid, _), elapsed in intervals.items():
+            (local if tid in owned else foreign)[cpu] += elapsed
+        normalized = {
+            role: sum(foreign[cpu] for cpu in cpu_sets[role]) / (duration * len(cpu_sets[role]))
+            if duration > 0 and cpu_sets[role] else None
+            for role in ("server", "load")
+        }
+        complete = (start <= arm["start_ns"] < arm["end_ns"] <= end
+                    and not lost and not unobserved and sum(local.values()) > 0)
+        arms[arm["side"]] = {
+            "start_ns": arm["start_ns"], "end_ns": arm["end_ns"], "duration_ns": duration,
+            "pids": arm["pids"], "owned_cpu_ns": dict(local),
+            "foreign_cpu_ns": {cpu: foreign[cpu] for cpu in sorted(cpus)},
+            "foreign_share": normalized, "trace_complete": complete,
+            "admitted": (complete and duration >= MIN_ARM_NS
+                         and all(value is not None and value < FOREIGN_SHARE_LIMIT
+                                 for value in normalized.values())),
+        }
+    return {"arm_cpu": arms, "lost_notices": lost, "unobserved_busy_cpus": unobserved}
+
+
+@contextmanager
+def hold(receipt, *, cpu_sets, output, lock_paths, gap, compiler_processes):
+    observed = sorted(set(cpu_sets["server"]) | set(cpu_sets["load"]))
+    while True:
+        if board_window_open():
+            busy = idle_sample(observed)
+            if max(busy.values()) < IDLE_LIMIT:
+                locks = ExitStack()
+                try:
+                    for path in lock_paths:
+                        locks.enter_context(measurement_slot(Path(path), blocking=False))
+                except BlockingIOError:
+                    locks.close()
+                except BaseException:
+                    locks.close()
+                    raise
+                else:
+                    if board_window_open():
+                        break
+                    locks.close()
+            else:
+                print(f"Waiting for idle server and load CPUs, max busy {max(busy.values()):.1%}, "
+                      f"one-minute load {os.getloadavg()[0]:.2f}", flush=True)
+        time.sleep(gap)
+
+    trace = output / f"schedule-{next(TRACE_IDS)}.perf.data"
+    with locks:
+        started = time.monotonic()
+        receipt.update(started=datetime.now().astimezone().isoformat(), arm_pids=[], arm_windows=[],
+                       foreign_share_limit=FOREIGN_SHARE_LIMIT, clean=False, cpu_trace=trace.name, idle_cpu_busy=busy, board_window_open=True,
+                       load_start=os.getloadavg()[0], cc1plus_start=compiler_processes())
+        try:
+            with record_tasks(trace, observed):
+                before = cpu_ticks(observed)
+                receipt["timed_start_ns"] = time.monotonic_ns()
+                try:
+                    yield True
+                finally:
+                    receipt["timed_end_ns"] = time.monotonic_ns()
+                    after = cpu_ticks(observed)
+                    receipt["busy_ticks"] = {cpu: after[cpu][0] - before[cpu][0] for cpu in observed}
+        finally:
+            receipt.update(hold_s=time.monotonic() - started, load_end=os.getloadavg()[0],
+                           finished=datetime.now().astimezone().isoformat(),
+                           cc1plus_end=compiler_processes())
+    receipt.update(classify_tasks(trace, cpu_sets, receipt["arm_windows"],
+                                  receipt["timed_start_ns"], receipt["timed_end_ns"], receipt["busy_ticks"]))
+    receipt["clean"] = (receipt["hold_s"] < MEASUREMENT_SECONDS and bool(receipt["arm_cpu"])
+                        and all(arm["admitted"] for arm in receipt["arm_cpu"].values()))

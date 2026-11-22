@@ -699,31 +699,44 @@ void generate_all(const TargetMachine &tm, std::vector<Miss> &misses, unsigned j
 // or one naming a symbol module assembly sets, is lent as a declaration.
 void lent_bodies(const Module &m, const StringMap<std::string> &sets, size_t limit, StringRef own,
                  SmallVectorImpl<char> &out) {
+    // Only the bodies lent are cloned: a whole library's copy would hold every
+    // body it keeps as a declaration through the clone.
+    DenseSet<const Function *> lent;
+    for (const Function &f : m) {
+        if (f.isDeclaration()) continue;
+        size_t size = 0;
+        bool named = false;
+        for (const BasicBlock &b : f)
+            for (const Instruction &i : b) {
+                ++size;
+                for (const Use &op : i.operands())
+                    if (auto *g = dyn_cast<GlobalVariable>(op.get()); g && sets.count(g->getName())) named = true;
+            }
+        if (!named && size <= limit) lent.insert(&f);
+    }
     ValueToValueMapTy map;
-    std::unique_ptr<Module> p = CloneModule(m, map);
+    std::unique_ptr<Module> p = CloneModule(m, map, [&](const GlobalValue *g) {
+        auto *f = dyn_cast<Function>(g);
+        return !f || lent.count(f);
+    });
     p->setModuleInlineAsm(ArrayRef<Module::GlobalAsmFragment>());
     for (GlobalVariable &g : p->globals()) {
         if (g.isDeclaration()) continue;
         g.setLinkage(GlobalValue::LinkOnceODRLinkage);
         g.setVisibility(GlobalValue::HiddenVisibility);
     }
-    for (Function &f : *p) {
+    for (const Function &f : m) {
         if (f.isDeclaration()) continue;
-        size_t size = 0;
-        bool lent = true;
-        for (BasicBlock &b : f)
-            for (Instruction &i : b) {
-                ++size;
-                for (const Use &op : i.operands())
-                    if (auto *g = dyn_cast<GlobalVariable>(op.get()); g && sets.count(g->getName())) lent = false;
-            }
+        auto *c = cast<Function>(map[&f]);
         if (f.hasLocalLinkage()) {
-            f.setName(f.getName() + own);
-            f.setLinkage(GlobalValue::ExternalLinkage);
-            f.setVisibility(GlobalValue::HiddenVisibility);
+            c->setName(f.getName() + own);
+            c->setLinkage(GlobalValue::ExternalLinkage);
+            c->setVisibility(GlobalValue::HiddenVisibility);
         }
-        if (lent && size <= limit) f.setLinkage(GlobalValue::AvailableExternallyLinkage);
-        else f.deleteBody();
+        // A body not cloned is a declaration already; dropping it also clears
+        // what the clone copied onto it (its metadata, prefix and prologue).
+        if (lent.count(&f)) c->setLinkage(GlobalValue::AvailableExternallyLinkage);
+        else c->deleteBody();
     }
     bitcode(*p, out);
 }

@@ -250,58 +250,46 @@ workload's seed interval. A wrong receipt fails the sample.
 | `sockets64`, `sockets1024` | One TCP request. Each connection sends a little-endian seed and gets the transformed u64 back. A disjoint Tokio generator connects all sockets before releasing the closed-loop request stream. Report request-phase throughput and nearest-rank p50/p99 round trip latency. The server and generator verify the same receipt. |
 | `checkbox` | One Returned toggle under `wire-load converge` with 64 clients, 200 toggles per client and pace 1,000. Grain stays native to the checkbox application. The checksum is the sum of bytes of the final board. The loader checks each subscriber and the fresh snapshot against the XOR oracle and the runner checks the receipt against the prescribed input bits. |
 
-Use the release compiler and the two testing archives from the build below.
-Both report pool counters when width exceeds one. Recorded pairs, fan-in, pipeline and spawn cases use a recording build
-(`hirsel build --recording` / `hirsel run --record` and `hirsel replay`). With
-the recording build, width 1 writes chooser 0 and widths above 1 write chooser
-2. The Tokio comparison remains untaped. The checkout's checkbox entry has no
-graceful completion for sealing a recording, so the service row runs untaped.
+Build with the release compiler and shipping runtime archive. The runner
+sets `HIRSEL_UNTIED` to the selected width and checks the unit pool receipt.
+The ports use connections between units and join owned helpers. Arc hub
+keeps its shared allocation and all 16 tasks inside one unit because an Arc
+cannot cross units. The checkbox fixture runs the existing application in
+one owned unit with its original unit-local store and WebSocket tasks.
 
 ```sh
 taskset -c "$build_cpus" python3 tools/buck2/prepare.py
 taskset -c "$build_cpus" .buck2/bin/buck2 build -j2 \
   --target-platforms //tools/buck2:release --show-full-output \
-  //:hirsel-core-driver-bin-hirsel //:hirsel-core-rt-test-pool-archives \
-  //:hirsel-core-rt-test-pool-record-archives
+  //:hirsel-core-driver-bin-hirsel //:hirsel-core-rt-archives
 taskset -c "$build_cpus" ./bench/multicore/build.py --regimes \
-  --out "$benchmark_bins" --hirsel "$release_driver" --runtime "$test_pool_archive" \
-  --recording-runtime "$test_pool_record_archive" --go "$go"
+  --out "$benchmark_bins" --hirsel "$release_driver" --runtime "$shipping_archive" --go "$go"
 
-# Use the lane's assigned values. Build and measurement run sequentially.
 rounds=(0 64 640 6400 64000)
-taskset -c "$measure_cpus" ./bench/multicore/run.py --regimes \
+taskset -c "$assigned_cpus" ./bench/multicore/run.py --regimes \
   --case calibrate --workers 1 --size 4000 --repeats 1 --rounds "${rounds[@]}" \
   --bins "$benchmark_bins" --out "$calibration_dir" --lock "$lane_lock" \
   --build-cpus "$build_cpus" --measure-cpus "$measure_cpus"
 
-for mode in untaped recorded; do
-  taskset -c "$assigned_cpus" ./bench/multicore/run.py --regimes --mode "$mode" \
-    --workers "${workers[@]}" --rounds "${rounds[@]}" --bins "$benchmark_bins" \
-    --build-cpus "$build_cpus" --measure-cpus "$measure_cpus" --load-cpus "$load_cpus" \
-    --lock "$lane_lock" --out "$evidence_dir/$mode"
-done
-./bench/multicore/run.py --regimes --read "$evidence_dir"/{untaped,recorded}/samples.json \
-  --crossover-width 8
+taskset -c "$assigned_cpus" ./bench/multicore/run.py --regimes \
+  --workers "${workers[@]}" --rounds "${rounds[@]}" --bins "$benchmark_bins" \
+  --build-cpus "$build_cpus" --measure-cpus "$measure_cpus" --load-cpus "$load_cpus" \
+  --lock "$lane_lock" --out "$evidence_dir"
+./bench/multicore/run.py --regimes --read "$evidence_dir/samples.json" --crossover-width 8
 
-# Select the three measured cases with the lowest width-8 speedup.
-taskset -c "$assigned_cpus" ./bench/multicore/run.py --regimes --profile --languages Hirsel \
+taskset -c "$assigned_cpus" ./bench/multicore/run.py --regimes --profile --languages Hirsel Tokio \
   --case "$case" --grain-ns "$grain" --rounds "$round_count" --workers 8 --repeats 1 \
   --bins "$benchmark_bins" --out "$profile_dir" --lock "$lane_lock" \
   --build-cpus "$build_cpus" --measure-cpus "$measure_cpus" --load-cpus "$load_cpus"
 ```
 
-Each repetition runs Hirsel followed by Tokio and then Go where available,
-under one lock. The default repeats widths 1, 4 and 8 three times and other
-widths once. Report measured SMT activity. Use assigned physical cores for
-both server and loader. For the socket rows throughput excludes connection
-setup. For checkbox it spans the convergence driver's lifetime. Process-tree
-wall time, user instructions and RSS are retained independently. For live
-services these count the server process tree and therefore exclude the load
-generator. The sequencer counters report service time under the token and
-publication-to-acquisition time for queued hand-offs. The hand-off interval
-excludes any wait before publication. Acquisitions per explicit workload
-operation use the source-level operation count, since the testing archive
-has no total for implicit charge, refund, dispatch and cleanup events.
+Each repetition pairs the ports under one lock and alternates the order.
+The default repeats widths 1, 4 and 8 three times and other widths once.
+For sockets, throughput covers the request phase. For checkbox, it spans
+the convergence driver's lifetime. Process-tree wall time, user instructions
+and RSS are retained independently. For live services these counters cover
+the server process tree. The runner also records worker settings and SMT
+activity.
 
 For a guarded block, select its cases with `--case` and pass
 `--block-process-check cc1plus`. The runner holds the named lock across the

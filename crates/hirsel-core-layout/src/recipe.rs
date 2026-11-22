@@ -1428,8 +1428,8 @@ fn array_element(shapes: &[Shape], ty: &FieldTy) -> bool {
 
 /// One `Map[K, V]` entry slot. The carrier is {entries, slots, capacity} (u64
 /// each): `slots` entries were inserted since the storage was made, in insertion
-/// order, at `entries + i × stride`. The entry tuple holds a u64 hash, a u64
-/// state (1 live, 0 removed), the key and the value. The removed entry's key
+/// order, at `entries + i × stride`. The entry tuple holds a u64 placement
+/// meta (nonzero live, zero removed), the key and the value. The removed entry's key
 /// and value have already been cleaned (SEM-5). Growth copies the live entries in order, so `slots` restarts at the
 /// live count. The live count and the lookup index follow the `capacity` entries
 /// in the same block, private to the map operations; cleanup reads only entries
@@ -1438,7 +1438,7 @@ fn array_element(shapes: &[Shape], ty: &FieldTy) -> bool {
 pub struct MapEntry {
     pub stride: u64,
     pub align: u64,
-    pub state: u64,
+    pub meta: u64,
     pub key: u64,
     pub value: u64,
 }
@@ -1446,7 +1446,6 @@ pub struct MapEntry {
 pub fn map_entry(shapes: &[Shape], recipes: &[Recipe], k: &FieldTy, v: &FieldTy) -> MapEntry {
     let word = (8, 8, 8);
     let measured = [
-        word,
         word,
         field_size(shapes, recipes, k),
         field_size(shapes, recipes, v),
@@ -1457,9 +1456,9 @@ pub fn map_entry(shapes: &[Shape], recipes: &[Recipe], k: &FieldTy, v: &FieldTy)
     MapEntry {
         stride: align_up(end, align),
         align,
-        state: offsets[1],
-        key: offsets[2],
-        value: offsets[3],
+        meta: offsets[0],
+        key: offsets[1],
+        value: offsets[2],
     }
 }
 

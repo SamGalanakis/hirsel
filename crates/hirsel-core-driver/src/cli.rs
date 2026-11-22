@@ -45,6 +45,7 @@ pub enum OptionId {
     Runtime,
     LogicalChargeReport,
     Cc,
+    LinkKit,
     Target,
     Emulator,
     Sysroot,
@@ -538,6 +539,13 @@ static OPTIONS: &[OptionSpec] = &[
         ["core-product", "std-product"],
         "Register new products and an optional runtime in an installation root."
     ),
+    option!(
+        LinkKit,
+        ["--link-kit"],
+        Some("DIRECTORY"),
+        ["core-product", "std-product"],
+        "Install the pinned link kit alongside the host runtime."
+    ),
     option!(Help, ["--help", "-h"], None, [], "Show this help."),
     option!(
         ProfTasks,
@@ -830,17 +838,8 @@ static OPTIONS: &[OptionSpec] = &[
         Cc,
         ["--cc"],
         Some("PROGRAM"),
-        [
-            "build",
-            "run",
-            "replay",
-            "test",
-            "core-product",
-            "std-product",
-            "sdk",
-            "call"
-        ],
-        "Select the C linker driver; an install records it for its requests."
+        ["build", "run", "replay", "test", "sdk", "call"],
+        "Select the C linker driver for this request."
     ),
     option!(
         Target,

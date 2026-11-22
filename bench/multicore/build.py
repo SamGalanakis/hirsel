@@ -112,7 +112,8 @@ def time_rust_kernel(text, case):
 ''' + after)
 
 
-def build_rust(out, game, standard, s0=False, s8u=False, regimes=False):
+def build_rust(out, game, standard, s0=False, s8u=False, regimes=False, *,
+               prefix=(ROOT / "tools/capped",), jobs=2):
     path = out / "rust"
     path.mkdir(exist_ok=True)
     crate = BENCH / "rust"
@@ -125,10 +126,10 @@ def build_rust(out, game, standard, s0=False, s8u=False, regimes=False):
     else:
         binaries = ["--bin", "runtime"]
     cargo = subprocess.check_output(
-        [str(ROOT / "tools/capped"), "cargo", "build", "--release", "--locked", "-j2",
+        [*prefix, "cargo", "build", "--release", "--locked", f"-j{jobs}",
          "--manifest-path", str(crate / "Cargo.toml"), "--target-dir", str(out / "cargo"),
          *binaries, "--message-format=json"],
-        cwd=crate, env=os.environ | {"HIRSEL_MEMORY_LIMIT": "2G", "HIRSEL_JOBS": "2"},
+        cwd=crate, env=os.environ | {"HIRSEL_MEMORY_LIMIT": "2G", "HIRSEL_JOBS": str(jobs)},
         text=True,
     )
     externs = {}
@@ -211,18 +212,15 @@ def hirsel_inputs(src):
 
 
 def build_hirsel(out, compiler, runtime, engine, s0=False, s8u=False, regimes=False, *,
-                 recording_runtime=None):
+                 prefix=(ROOT / "tools/capped",), jobs=1):
     path = out / "hirsel"
     path.mkdir(exist_ok=True)
     llvm = ROOT / "tools/buck2/toolchains/llvm-files"
-    env = os.environ | {"HIRSEL_MEMORY_LIMIT": "2G", "HIRSEL_JOBS": "1"}
+    env = os.environ | {"HIRSEL_MEMORY_LIMIT": "2G", "HIRSEL_JOBS": str(jobs)}
     env["LD_LIBRARY_PATH"] = os.pathsep.join(filter(None, [
         str(llvm / "lib"), os.environ.get("LD_LIBRARY_PATH")
     ]))
     succeeded = True
-    replay = out / "regimes-replay.json"
-    if regimes:
-        replay.unlink(missing_ok=True)
     for src in sorted((BENCH / "hirsel").glob("*.hirsel")):
         case = src.stem
         if (case == "regimes") != regimes:
@@ -255,7 +253,7 @@ def build_hirsel(out, compiler, runtime, engine, s0=False, s8u=False, regimes=Fa
         if regimes:
             grants += ["--grant", "Net=Listen 127.0.0.1/32 0-65535"]
         command = [
-            ROOT / "tools/capped", compiler, "build", *common, *grants,
+            *prefix, compiler, "build", *common, *grants,
             "--runtime", runtime, "--json", "-o", path / case,
         ]
         with log.open("wb") as file:
@@ -264,29 +262,19 @@ def build_hirsel(out, compiler, runtime, engine, s0=False, s8u=False, regimes=Fa
             succeeded = False
             (path / case).unlink(missing_ok=True)
             print(f"Hirsel {case}: exit {result.returncode}; see {log}", flush=True)
-        if regimes and recording_runtime and result.returncode == 0:
-            recorded = path / "regimes-recording"
-            archive = ["--runtime", recording_runtime]
-            with (out / "hirsel-regimes-recording.log").open("wb") as file:
-                result = subprocess.run(
-                    list(map(str, [ROOT / "tools/capped", compiler, "build", *common, *grants,
-                                   *archive, "--recording", "--json", "-o", recorded])),
-                    env=env, stdout=file, stderr=subprocess.STDOUT,
-                )
-            if result.returncode:
-                succeeded = False
-                recorded.unlink(missing_ok=True)
-                print(f"Hirsel recording build: exit {result.returncode}; see its log", flush=True)
-            else:
-                replay.write_text(json.dumps(list(map(str, [compiler, "replay", *common, *archive]))))
     return succeeded
 
 
-def build_checkbox(out, compiler, runtime):
-    wire_target = out / "wire"
-    env = os.environ | {"HIRSEL_MEMORY_LIMIT": "2G", "HIRSEL_JOBS": "2"}
-    run([ROOT / "tools/capped", "cargo", "build", "-j2", "--release", "--locked", "--bins",
-         "--manifest-path", ROOT / "bench/wire/Cargo.toml", "--target-dir", wire_target], env=env)
+def build_wire(out, *, prefix=(ROOT / "tools/capped",), jobs=2):
+    env = os.environ | {"HIRSEL_MEMORY_LIMIT": "2G", "HIRSEL_JOBS": str(jobs)}
+    run([*prefix, "cargo", "build", f"-j{jobs}", "--release", "--locked", "--bins",
+         "--manifest-path", ROOT / "bench/wire/Cargo.toml", "--target-dir", out / "wire"], env=env)
+
+
+def build_checkbox(out, compiler, runtime, *, prefix=(ROOT / "tools/capped",), jobs=2, wire=True):
+    if wire:
+        build_wire(out, prefix=prefix, jobs=jobs)
+    env = os.environ | {"HIRSEL_MEMORY_LIMIT": "2G", "HIRSEL_JOBS": str(jobs)}
     spec = importlib.util.spec_from_file_location(
         "checkbox_run", ROOT / "core/programs/checkbox/run.py")
     checkbox = importlib.util.module_from_spec(spec)
@@ -301,11 +289,11 @@ def build_checkbox(out, compiler, runtime):
     clang = ROOT / "tools/buck2/toolchains/llvm-files/bin/clang"
     with (work / "build.log").open("wb") as log:
         binary = checkbox.build(
-            compiler, work, web, listen, prefix=(ROOT / "tools/capped",),
+            compiler, work, web, listen, prefix=prefix,
             flags=("--backend", "llvm", "--release", "--runtime", runtime, "--cc", clang, "--json"),
-            stdout=log, env=env,
+            stdout=log, env=env, entry="shipping_benchmark",
         )
-    run([ROOT / "tools/capped", compiler, "sdk", "ts", binary, "--out", web,
+    run([*prefix, compiler, "sdk", "ts", binary, "--out", web,
          "--n-place", checkbox.N_PLACE, "--runtime", runtime, "--cc", clang], env=env)
     run(["node", "--input-type=module", "-e", """
 import { writeFile } from 'node:fs/promises';
@@ -335,9 +323,7 @@ def main():
     parser.add_argument("--go", default="go")
     parser.add_argument("--goose", type=Path, help="Goose compiler built from d5ae5bbd")
     parser.add_argument("--hirsel", type=Path, help="release Hirsel driver")
-    parser.add_argument("--runtime", type=Path, help="native runtime archive (testing for --regimes)")
-    parser.add_argument("--recording-runtime", type=Path,
-                        help="testing runtime with recording enabled for recorded --regimes runs")
+    parser.add_argument("--runtime", type=Path, help="native runtime archive (shipping archive for --regimes)")
     parser.add_argument("--engine", choices=["llvm", "cranelift"], default="llvm")
     selection = parser.add_mutually_exclusive_group()
     selection.add_argument("--languages", nargs="+", choices=["rust", "go", "hirsel", "goose"])
@@ -346,8 +332,6 @@ def main():
     selection.add_argument("--s0", action="store_true", help="build only the S0 Hirsel, Tokio and Rust fixtures")
     selection.add_argument("--standard-rust", action="store_true", help="build published Rust data inputs and phase timings")
     options = parser.parse_args()
-    if options.recording_runtime and not options.regimes:
-        parser.error("--recording-runtime requires --regimes")
     if options.regimes:
         languages = ["rust", "go", "hirsel"]
     elif options.s8u:
@@ -376,7 +360,6 @@ def main():
             succeeded = build_hirsel(
                 out, options.hirsel.resolve(), options.runtime.resolve(), options.engine,
                 options.s0, options.s8u, options.regimes,
-                recording_runtime=options.recording_runtime.resolve() if options.recording_runtime else None,
             )
         elif language == "goose":
             build_goose(out, options.goose.resolve())

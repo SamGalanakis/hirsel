@@ -967,6 +967,11 @@ pub enum RtOp {
     MapHashAddWord,
     MapHashAddBytes,
     MapHashFinish,
+    MapPlaceWord,
+    MapPlaceBytes,
+    MapStrongWord,
+    MapStrongBytes,
+    MapStrongStart,
     /// The SHA-256 compression of whole blocks into an eight-word state (crate docs, "SHA-256").
     Sha256Blocks,
     /// The next cell of a `Causes` chain, or null (crate docs, "Causes").
@@ -1594,9 +1599,13 @@ impl RtOp {
                 vec![V(p), V(u64_), V(p), V(u64_)],
                 vec![Ty::Scalar(Scalar::I8)],
             ),
-            RtOp::MapHashBytes => (vec![V(p), V(u64_)], vec![u64_]),
-            RtOp::MapHashWord => (vec![V(u64_)], vec![u64_]),
-            RtOp::MapHashStart => (vec![V(p)], vec![]),
+            RtOp::MapHashBytes | RtOp::MapPlaceBytes | RtOp::MapStrongBytes => {
+                (vec![V(p), V(u64_)], vec![u64_])
+            }
+            RtOp::MapHashWord | RtOp::MapPlaceWord | RtOp::MapStrongWord => {
+                (vec![V(u64_)], vec![u64_])
+            }
+            RtOp::MapHashStart | RtOp::MapStrongStart => (vec![V(p)], vec![]),
             RtOp::MapHashAddWord => (vec![V(p), V(u64_)], vec![]),
             RtOp::MapHashAddBytes => (vec![V(p), V(p), V(u64_)], vec![]),
             RtOp::MapHashFinish => (vec![V(p)], vec![u64_]),
@@ -1929,6 +1938,11 @@ impl RtOp {
             | RtOp::MapHashAddWord
             | RtOp::MapHashAddBytes
             | RtOp::MapHashFinish
+            | RtOp::MapPlaceWord
+            | RtOp::MapPlaceBytes
+            | RtOp::MapStrongWord
+            | RtOp::MapStrongBytes
+            | RtOp::MapStrongStart
             | RtOp::Xxh3Short
             | RtOp::Xxh3Stripes
             | RtOp::Sha1Blocks

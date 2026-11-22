@@ -254,11 +254,12 @@ impl Headers {
     pub(crate) fn publish(
         &self,
         writer: &mut impl hirsel_core_ids::published::Publisher,
+        outward: &[bool],
     ) -> io::Result<Self> {
         Ok(Self {
             rows: writer.table(&self.rows)?,
             names: writer.map(&self.names)?,
-            closures: writer.table(&self.closures)?,
+            closures: writer.outward_table(&self.closures, outward)?,
             prelude: self.prelude,
         })
     }
@@ -380,11 +381,11 @@ impl SignatureReads {
 }
 
 /// What a form's lowering reads beyond its names.
-/// One `hirsel_core_front::SIBLING_READS` callee: its row, its module, and
-/// the hash of its siblings' closures once a body names it.
+/// One `hirsel_core_front::SIBLING_READS` callee: its row, its package's root
+/// module, and the hash of the read closures once a body names the callee.
 struct Siblings {
     row: usize,
-    module: ModuleId,
+    root: ModuleId,
     hash: std::cell::OnceCell<ContentHash>,
 }
 /// Each core operation whose lowering resolves sibling definitions.
@@ -401,13 +402,12 @@ fn forms(index: &NameIndex) -> (Vec<(DefinitionId, usize)>, Vec<Siblings>) {
         for p in index.packages.iter().filter(|p| p.name == package) {
             if let Some(id) = index
                 .child(p.root, module)
-                .and_then(|m| index.definition(m, name).map(|id| (m, id)))
+                .and_then(|m| index.definition(m, name))
             {
-                let (module, id) = id;
                 forms.push((id, siblings.len()));
                 siblings.push(Siblings {
                     row,
-                    module,
+                    root: p.root,
                     hash: Default::default(),
                 });
             }
@@ -441,8 +441,11 @@ impl Siblings {
     ) -> impl Iterator<Item = Option<DefinitionId>> + 'a {
         hirsel_core_front::SIBLING_READS[self.row]
             .3
-            .iter()
-            .map(|name| index.definition(self.module, index.symbols.find(name)?))
+            .paths()
+            .map(|(module, name)| {
+                let module = index.child(self.root, index.symbols.find(module)?)?;
+                index.definition(module, index.symbols.find(name)?)
+            })
     }
 }
 
@@ -1197,9 +1200,7 @@ impl Keys {
             Target::Definition(d) => {
                 row.push(0);
                 row.extend_from_slice(&self.definition_identity(index, d)?.0);
-                row.push(u8::from(
-                    index.modules[index.get(d).site.module.0 as usize].foreign,
-                ));
+                row.push(u8::from(index.definition_is_foreign(d)));
             }
             Target::Module(m) => {
                 row.push(1);

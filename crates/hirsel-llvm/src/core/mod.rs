@@ -782,6 +782,7 @@ fn emit_module(
             inline: match definition.as_str() {
                 "core@1/string/push_char" => Inline::Always,
                 "core@1/string/push_scalar" => Inline::Never,
+                "core@1/map/placement" | "core@1/map/probe" => Inline::Always,
                 // pivot.rs leaves the recursive sample to the inliner.
                 "core@1/list/median3_rec" => Inline::Default,
                 "std@1/float/shortest64" | "std@1/float/push_fixed64" => Inline::Always,
@@ -828,6 +829,7 @@ fn emit_module(
                 }
                 _ => Inline::Default,
             },
+            map_probe: definition == "core@1/map/probe",
             carriers: carriers(module, &recipes, role_facts, FuncId(i as u32), sig, &locals),
             subprogram: function_debug.map(|d| d.scope),
             level,
@@ -1005,6 +1007,10 @@ fn emit_module(
                     e.debug_location = function_debug.map(|d| d.location(body.inst_anchors[index]));
                     if let Some(fill) = fill {
                         e.bulk_fill(fill)?;
+                        for index in b.insts.start as usize..(b.insts.start + b.insts.len) as usize
+                        {
+                            e.ends_after(index);
+                        }
                         break;
                     }
                     if let Some(group) = groups.get(&index) {
@@ -2010,22 +2016,58 @@ impl FunctionEmitter<'_> {
         );
     }
 
-    /// Starts tracking which slots may be live at `block`'s entry.
+    /// Starts tracking which slots may be live at `block`'s entry, and ends
+    /// the scoped slots `block` no longer needs.
     fn enter_block(&mut self, block: usize) {
         self.live = Some(self.scoped.may_live_at(block));
+        let ends = self.scoped.ends_at_entry(block);
+        for slot in 0..self.scoped.slots.len() {
+            if ends[slot / 64] & (1 << (slot % 64)) != 0 {
+                self.end_slot(slot);
+            }
+        }
     }
 
-    fn inst(&mut self, inst: &Inst, index: usize) -> Result<()> {
-        self.anchor = self.body.inst_anchors[index];
-        if let (Inst::StorageLive { slot } | Inst::StorageDead { slot }, Some(live)) =
-            (inst, self.live.as_mut())
-        {
-            let (word, bit) = (slot.index() / 64, 1u64 << (slot.index() % 64));
-            if matches!(inst, Inst::StorageLive { .. }) {
-                live[word] |= bit;
-            } else {
-                live[word] &= !bit;
+    /// Ends a scoped slot's storage, unless it is known to have ended.
+    fn end_slot(&mut self, slot: usize) {
+        let (word, bit) = (slot / 64, 1u64 << (slot % 64));
+        if let Some(live) = self.live.as_mut() {
+            if live[word] & bit == 0 {
+                return;
             }
+            live[word] &= !bit;
+        }
+        let home = Value::from(Local::Slot(slot));
+        self.runtime_void("llvm.lifetime.end.p0", &[ptr(home)]);
+    }
+
+    /// Emits instruction `index`, then ends the scoped slots it was the last
+    /// to need.
+    fn inst(&mut self, inst: &Inst, index: usize) -> Result<()> {
+        self.inst_body(inst, index)?;
+        self.ends_after(index);
+        Ok(())
+    }
+
+    fn ends_after(&mut self, index: usize) {
+        let ends: Vec<usize> = self.scoped.ends_after(index).collect();
+        for slot in ends {
+            self.end_slot(slot);
+        }
+    }
+
+    fn inst_body(&mut self, inst: &Inst, index: usize) -> Result<()> {
+        self.anchor = self.body.inst_anchors[index];
+        if let Inst::StorageDead { slot } = *inst {
+            if self.scoped.slots[slot.index()] {
+                self.end_slot(slot.index());
+            } else if let Some(live) = self.live.as_mut() {
+                live[slot.index() / 64] &= !(1u64 << (slot.index() % 64));
+            }
+            return Ok(());
+        }
+        if let (Inst::StorageLive { slot }, Some(live)) = (inst, self.live.as_mut()) {
+            live[slot.index() / 64] |= 1u64 << (slot.index() % 64);
         }
         match *inst {
             // Its literal stands at each use.
@@ -2218,10 +2260,6 @@ impl FunctionEmitter<'_> {
             Inst::StorageLive { slot } if self.scoped.slots[slot.index()] => {
                 let home = Value::from(Local::Slot(slot.index()));
                 self.runtime_void("llvm.lifetime.start.p0", &[ptr(home)]);
-            }
-            Inst::StorageDead { slot } if self.scoped.slots[slot.index()] => {
-                let home = Value::from(Local::Slot(slot.index()));
-                self.runtime_void("llvm.lifetime.end.p0", &[ptr(home)]);
             }
             // FORM v1c: a mark is the evaluator's alone; no code.
             Inst::StorageLive { .. }

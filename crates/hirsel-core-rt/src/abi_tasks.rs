@@ -27,7 +27,7 @@ pub(crate) fn task_child(
     // SAFETY: spawner and child share the same run-owned provider configuration.
     context.run = unsafe { (*parent).run };
     // SAFETY: the immutable key was set before the parent started.
-    context.map_hash_key = unsafe { (*parent).map_hash_key };
+    context.set_map_keys(unsafe { (*parent).map_keys() });
     // SAFETY: child inherits recording; spawn replaces the pointer before publication.
     context.events = unsafe { (*parent).events };
     // SAFETY: every task borrows the root run's provider-file registry.

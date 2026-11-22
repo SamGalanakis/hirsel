@@ -20,6 +20,12 @@ enum ListStorage {
     Dynamic(ValueId),
 }
 
+enum ListGrowth {
+    Raise,
+    ReturnCapacity(AddressId, TypeId),
+    Call { grow: usize, single: bool },
+}
+
 #[derive(Clone)]
 pub(super) struct ListPlan {
     /// The edge owning the storage block: `Seq` of the element, or a map's `Map`.
@@ -613,6 +619,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         n: NodeId,
     ) -> Option<ListPlan> {
         let logical = self.layout_size(item, true, n)?;
+        self.list_plan_with_logical(item, logical, count, extra, n)
+    }
+
+    pub(super) fn list_plan_with_logical(
+        &mut self,
+        item: TyId,
+        logical: ValueId,
+        count: ValueId,
+        extra: Option<ValueId>,
+        n: NodeId,
+    ) -> Option<ListPlan> {
         let stride = self.layout_size(item, false, n)?;
         let (raw_charge, mul_overflow) =
             self.list_arith(ArithOp::Mul, ArithMode::Checked, count, logical, n);
@@ -720,7 +737,41 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         ask: Ask,
         n: NodeId,
     ) -> Option<()> {
-        self.list_room(item, header, additional, ask, None, n)
+        self.list_room(item, header, additional, ask, ListGrowth::Raise, n)
+    }
+
+    /// `list.reserve`, `list.fill` and `list.append`: [`Self::list_reserve`]
+    /// whose growth arm is one cold call to core's `grow_by[T](xs, additional)`,
+    /// so every such site shares one growth body per element
+    /// type. The callee makes exactly the inline arm's decisions (it is that
+    /// arm, expanded once), charges no step (a core body), raises with the
+    /// caller's site word, and its failure takes this node's cleanup. A frame
+    /// list keeps its inline arm (`grow` would free its frame bytes), and so
+    /// do the growth helpers' own bodies.
+    pub(super) fn list_reserve_shared(
+        &mut self,
+        item: TyId,
+        header: ValueId,
+        additional: ValueId,
+        ask: Ask,
+        n: NodeId,
+    ) -> Option<()> {
+        let path = &self.p.fns[self.definition].path;
+        let in_growth = path.is_core("list.grow") || path.is_core("list.grow_by");
+        let growth = if in_growth || self.frame_list(header).is_some() {
+            ListGrowth::Raise
+        } else {
+            let single = ask == Ask::Reserve && self.growth.recent_one == Some(additional);
+            let helper = if single {
+                crate::CoreHelper::ListGrow
+            } else {
+                crate::CoreHelper::ListGrowBy
+            };
+            self.p
+                .core_helper(helper)
+                .map_or(ListGrowth::Raise, |grow| ListGrowth::Call { grow, single })
+        };
+        self.list_room(item, header, additional, ask, growth, n)
     }
 
     /// `list.try_reserve`: `list_reserve` with the refusal as `Error(c)`.
@@ -749,7 +800,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             header,
             additional,
             Ask::Reserve,
-            Some((to, cap_id)),
+            ListGrowth::ReturnCapacity(to, cap_id),
             n,
         )?;
         let value = self.pointer(to, n);
@@ -757,15 +808,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         Some(value)
     }
 
-    /// The growth both share. With `to`, a refusal stores `Error(c)` there and
-    /// success `Ok(())`; without, a refusal raises.
+    /// Test for room before taking the growth path.
     fn list_room(
         &mut self,
         item: TyId,
         header: ValueId,
         additional: ValueId,
         ask: Ask,
-        to: Option<(AddressId, TypeId)>,
+        mode: ListGrowth,
         n: NodeId,
     ) -> Option<()> {
         let carrier = self.list_carrier(item, n)?;
@@ -787,8 +837,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         };
         let growth = self.new_block(&[]);
         let success = self.new_block(&[]);
-        let u64t = Ty::Scalar(Scalar::U64);
-        let refused = self.new_block(&[u64t, u64t]);
         // Growth is amortized and rare except for fill: that edge is cold.
         let yes = self.edge(growth, &[]);
         self.b.edges[yes.index()].cold = ask != Ask::Fill;
@@ -802,6 +850,35 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Some(n),
         );
         self.start(growth);
+        if let ListGrowth::Call { grow, single } = mode {
+            // Filling a fresh list is construction. Keep that allocation in
+            // the caller, where its header and the other live inputs can
+            // stay in registers. Growing existing storage still takes the
+            // cold shared call.
+            let initial = if ask == Ask::Fill {
+                let zero = self.konst(Ty::Scalar(Scalar::U64), 0, n)?;
+                let allocated = self.list_compare(CompareOp::Ne, old_cap, zero, n);
+                let existing = self.new_block(&[]);
+                let initial = self.new_block(&[]);
+                self.list_branch(allocated, existing, initial, n);
+                self.start(existing);
+                Some(initial)
+            } else {
+                None
+            };
+            let args = [Some(header), Some(additional)];
+            self.true_arm(true, |cx| {
+                cx.emit_call(grow, &[item], &args[..if single { 1 } else { 2 }], UNIT, n)
+            });
+            self.jump(success, &[], n);
+            let Some(initial) = initial else {
+                self.start(success);
+                return Some(());
+            };
+            self.start(initial);
+        }
+        let u64t = Ty::Scalar(Scalar::U64);
+        let refused = self.new_block(&[u64t, u64t]);
         let storage = self.list_storage(item, n)?;
         match storage {
             ListStorage::Stored => {}
@@ -830,7 +907,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let [requested, available] = self.block_params(refused)[..] else {
             unreachable!("the refusal block takes the charge and the room")
         };
-        let Some((to, cap_id)) = to else {
+        let ListGrowth::ReturnCapacity(to, cap_id) = mode else {
             self.raise_capacity(requested, available, n);
             self.start(success);
             return Some(());
@@ -1058,7 +1135,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         };
         let rep = self.rep_at(item, n)?;
         // `list.grow` is a sibling read of `list.push` (`crate::SIBLING_READS`).
-        let Some(grow) = self.p.core_fn("list", "grow") else {
+        let Some(grow) = self.p.core_helper(crate::CoreHelper::ListGrow) else {
             self.gap(n, "push without core's list.grow is not built");
             return None;
         };
@@ -1122,7 +1199,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let carrier = self.list_carrier(item, n)?;
         let old_len = self.carrier_word(header, carrier, SeqWord::Len, n);
         let count = self.carrier_word(source, carrier, SeqWord::Len, n);
-        self.list_reserve(item, header, count, Ask::Bounded, n)?;
+        self.list_reserve_shared(item, header, count, Ask::Bounded, n)?;
         let zero = self.konst(Ty::Scalar(Scalar::U64), 0, n)?;
         let copying = self.list_compare(CompareOp::Ne, count, zero, n);
         let copy = self.new_block(&[]);
@@ -1555,7 +1632,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     ) -> Option<()> {
         let carrier = self.list_carrier(item, n)?;
         let old_len = self.carrier_word(header, carrier, SeqWord::Len, n);
-        self.list_reserve(item, header, count, Ask::Fill, n)?;
+        self.list_reserve_shared(item, header, count, Ask::Fill, n)?;
         let zero = self.konst(Ty::Scalar(Scalar::U64), 0, n)?;
         let filling = self.list_compare(CompareOp::Ne, count, zero, n);
         let fill = self.new_block(&[]);

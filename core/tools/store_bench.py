@@ -42,7 +42,7 @@ def main():
         frozen = out / 'store.hirsel'
         frozen.write_text(source.read_text())
         for item in manifest['packages'][-1]['sources']:
-            if item['modules'] == ['store']:
+            if Path(item['file']).name == 'store.hirsel':
                 item['file'] = str(frozen)
         manifest['packages'][-1]['sources'].append(dict(file=str(ROOT / 'core/programs/store/bench.hirsel'),
                                                        modules=['bench'], signatures=False))

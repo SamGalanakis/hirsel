@@ -31,8 +31,7 @@ impl FunctionEmitter<'_> {
         )]
     }
 
-    pub(super) fn map_hash_word(&mut self, word: &Value) -> Value {
-        let key = memory_layout::CONTEXT_MAP_HASH_KEY;
+    pub(super) fn map_hash_word(&mut self, word: &Value, key: usize) -> Value {
         // CAP-8 prepares the lanes before the task enters generated code.
         // The lanes stay immutable throughout that task.
         let memory = Memory {
@@ -57,6 +56,129 @@ impl FunctionEmitter<'_> {
         let left = self.bin(Binary::Xor, &Type::I64, &v0, &v1);
         let right = self.bin(Binary::Xor, &Type::I64, &v2, &v3);
         self.bin(Binary::Xor, &Type::I64, &left, &right)
+    }
+
+    fn map_fast_salt(&mut self, index: usize) -> Value {
+        let at = self.field_pointer(&CONTEXT, memory_layout::CONTEXT_MAP_FAST_SALT + index * 8);
+        let memory = Memory {
+            invariant: self.facts,
+            ..Memory::aligned(8)
+        };
+        self.load_with(&Type::I64, &at, &memory)
+    }
+
+    fn map_product_halves(&mut self, a: &Value, b: &Value) -> [Value; 2] {
+        let wide = Type::Int(128);
+        let a = self.zext(&Type::I64, a, &wide);
+        let b = self.zext(&Type::I64, b, &wide);
+        let product = self.bin(Binary::Mul, &wide, &a, &b);
+        let low = self.cast(Cast::Trunc, &wide, &product, &Type::I64);
+        let high = self.bin(Binary::LShr, &wide, &product, &int(64));
+        let high = self.cast(Cast::Trunc, &wide, &high, &Type::I64);
+        [low, high]
+    }
+
+    fn map_fold(&mut self, a: &Value, b: &Value) -> Value {
+        let [low, high] = self.map_product_halves(a, b);
+        self.bin(Binary::Xor, &Type::I64, &low, &high)
+    }
+
+    pub(super) fn map_place_word(&mut self, word: &Value) -> Value {
+        let salt = self.map_fast_salt(0);
+        let mixed = self.bin(Binary::Xor, &Type::I64, word, &salt);
+        self.map_fold(&mixed, &int(hirsel_core_layout::map_index::MIX))
+    }
+
+    pub(super) fn map_place_bytes(&mut self, data: &Value, len: &Value) -> Value {
+        let u = Type::I64;
+        let s0 = self.map_fast_salt(0);
+        let s1 = self.map_fast_salt(1);
+        let early = self.current.expect("a runtime operation is in a block");
+        let id = self.counter();
+        let head = Label::new("map_bytes_head", id);
+        let chunk = Label::new("map_bytes_chunk", id);
+        let tail = Label::new("map_bytes_tail", id);
+        let next_data = self.fresh();
+        let next_len = self.fresh();
+        let next_z = self.fresh();
+        self.br(head);
+        self.block(head);
+        let p = self.emit(Operation::Phi(
+            &Type::Ptr,
+            &[(data.clone(), early), (next_data.into(), chunk)],
+        ));
+        let n = self.emit(Operation::Phi(
+            &u,
+            &[(len.clone(), early), (next_len.into(), chunk)],
+        ));
+        let z = self.emit(Operation::Phi(&u, &[(s0, early), (next_z.into(), chunk)]));
+        let more = self.cmp(Predicate::Ugt, &u, &n, &int(16));
+        self.cond(&more, chunk, tail);
+        self.block(chunk);
+        let low = self.load(&u, &p, 1);
+        let high_at = self.offset(&p, 8);
+        let high = self.load(&u, &high_at, 1);
+        let a = self.bin(Binary::Xor, &u, &z, &low);
+        let b = self.bin(Binary::Xor, &u, &s1, &high);
+        let [low, high] = self.map_product_halves(&a, &b);
+        self.emit_to(next_z, Operation::Binary(Binary::Xor, &u, &low, &high));
+        self.emit_to(
+            next_data,
+            Operation::Gep {
+                ty: &Type::I8,
+                base: &p,
+                indices: &[(Type::I64, int(16))],
+                inbounds: false,
+            },
+        );
+        self.emit_to(next_len, Operation::Binary(Binary::Sub, &u, &n, &int(16)));
+        self.br(head);
+        self.block(tail);
+
+        let above_eight = self.cmp(Predicate::Ugt, &u, &n, &int(8));
+        let low_len = self.select(&u, &above_eight, &int(8), &n);
+        let w0 = self.map_place_tail(&p, &low_len);
+        let high_at = self.offset(&p, 8);
+        let remaining = self.bin(Binary::Sub, &u, &n, &int(8));
+        let high_len = self.select(&u, &above_eight, &remaining, &int(0));
+        let w1 = self.map_place_tail(&high_at, &high_len);
+        let a = self.bin(Binary::Xor, &u, &z, &w0);
+        let b = self.bin(Binary::Xor, &u, &s1, &w1);
+        let b = self.bin(Binary::Add, &u, &b, len);
+        let t = self.map_fold(&a, &b);
+        self.map_fold(&t, &int(hirsel_core_layout::map_index::MIX))
+    }
+
+    fn map_place_tail(&mut self, p: &Value, len: &Value) -> Value {
+        let u = Type::I64;
+        let mut word = int(0);
+        let mut consumed = int(0);
+        for bytes in [8, 4, 2, 1] {
+            let initial = self.current.expect("a tail load is in a block");
+            let id = self.counter();
+            let load = Label::new("map_tail_load", id);
+            let done = Label::new("map_tail_done", id);
+            let next = self.bin(Binary::Add, &u, &consumed, &int(bytes));
+            let enough = self.cmp(Predicate::Uge, &u, len, &next);
+            self.cond(&enough, load, done);
+            self.block(load);
+            let at = self.offset_by(p, &consumed);
+            let ty = Type::Int(8 * bytes as u32);
+            let element = self.load(&ty, &at, 1);
+            let element = if bytes == 8 {
+                element
+            } else {
+                self.zext(&ty, &element, &u)
+            };
+            let shift = self.bin(Binary::Shl, &u, &consumed, &int(3));
+            let part = self.bin(Binary::Shl, &u, &element, &shift);
+            let combined = self.bin(Binary::Or, &u, &word, &part);
+            self.br(done);
+            self.block(done);
+            consumed = self.emit(Operation::Phi(&u, &[(consumed, initial), (next, load)]));
+            word = self.emit(Operation::Phi(&u, &[(word, initial), (combined, load)]));
+        }
+        word
     }
 
     fn sip_round(&mut self, [v0, v1, v2, v3]: &mut [Value; 4]) {

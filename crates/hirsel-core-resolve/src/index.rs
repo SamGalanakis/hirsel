@@ -156,7 +156,6 @@ pub struct Module {
     pub parent: Option<ModuleId>,
     pub name: Symbol,
     pub depth: u32,
-    pub foreign: bool,
     merge: Rows,
 }
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
@@ -186,16 +185,25 @@ pub struct NameIndex {
     extensions: Table<ModuleId>,
     prelude: Map<Symbol, DefinitionId>,
     pub core: Option<PackageKey>,
+    // Module ordinals beyond the last foreign module are ordinary modules.
+    foreign_modules: Vec<bool>,
     pub diagnostics: Vec<Refusal>,
 }
 impl NameIndex {
+    /// Which definitions other packages can name: the public ones.
+    pub fn outward(&self) -> Vec<bool> {
+        self.definitions.iter().map(|d| d.public).collect()
+    }
     pub fn publish(&self, writer: &mut impl Publisher) -> std::io::Result<Self> {
         let mut result = self.clone();
         result.symbols = Arc::new(self.symbols.publish(writer)?);
         result.modules = writer.table(&self.modules)?;
         result.packages = writer.table(&self.packages)?;
-        result.definitions = writer.table(&self.definitions)?;
-        result.members = writer.map(&self.members)?;
+        let outward = self.outward();
+        result.definitions = writer.outward_table(&self.definitions, &outward)?;
+        result.members = writer.outward_map(&self.members, &|d: &DefinitionId| {
+            outward.get(d.0 as usize).copied().unwrap_or(false)
+        })?;
         result.clone_items = writer.map(&self.clone_items)?;
         result.children = writer.map(&self.children)?;
         result.package_ids = writer.map(&self.package_ids)?;
@@ -233,6 +241,7 @@ impl NameIndex {
             extensions: Table::default(),
             prelude: Map::default(),
             core: None,
+            foreign_modules: vec![],
             diagnostics: vec![],
         }
     }
@@ -247,7 +256,6 @@ impl NameIndex {
             parent: None,
             name,
             depth: 0,
-            foreign: false,
             merge: Rows::default(),
         });
         self.packages.push(Package {
@@ -273,7 +281,7 @@ impl NameIndex {
     pub fn add_module(&mut self, package: PackageKey, path: &[Symbol]) -> ModuleId {
         let mut parent = self.packages[package.0 as usize].root;
         for &name in path {
-            if let Some(&id) = self.children.get(&(parent, name)) {
+            if let Some(id) = self.child(parent, name) {
                 parent = id;
                 continue;
             }
@@ -283,7 +291,6 @@ impl NameIndex {
                 parent: Some(parent),
                 name,
                 depth: self.modules[parent.0 as usize].depth + 1,
-                foreign: false,
                 merge: Rows::default(),
             });
             self.children.insert((parent, name), id);
@@ -315,7 +322,13 @@ impl NameIndex {
         parent
     }
     pub fn child(&self, parent: ModuleId, name: Symbol) -> Option<ModuleId> {
-        self.children.get(&(parent, name)).copied()
+        // A module added by this request has no children in the image.
+        let key = (parent, name);
+        if (parent.0 as usize) < self.modules.base_len() {
+            self.children.get(&key).copied()
+        } else {
+            self.children.own_get(&key).copied()
+        }
     }
     pub fn module_at(&self, package: &PackageId, modules: &[String]) -> Option<ModuleId> {
         let key = self.package(
@@ -364,6 +377,28 @@ impl NameIndex {
             span: Span::default(),
         });
         self.diagnostics.push(refusal);
+    }
+    #[inline]
+    pub fn has_foreign_modules(&self) -> bool {
+        !self.foreign_modules.is_empty()
+    }
+    #[inline]
+    pub fn module_is_foreign(&self, module: ModuleId) -> bool {
+        self.foreign_modules
+            .get(module.0 as usize)
+            .copied()
+            .unwrap_or(false)
+    }
+    #[inline]
+    pub fn definition_is_foreign(&self, id: DefinitionId) -> bool {
+        self.has_foreign_modules() && self.module_is_foreign(self.get(id).site.module)
+    }
+    pub(crate) fn mark_foreign_module(&mut self, module: ModuleId) {
+        let id = module.0 as usize;
+        if id >= self.foreign_modules.len() {
+            self.foreign_modules.resize(id + 1, false);
+        }
+        self.foreign_modules[id] = true;
     }
     pub fn module_package(&self, module: ModuleId) -> PackageKey {
         self.modules[module.0 as usize].package
@@ -425,7 +460,7 @@ impl NameIndex {
         ns: Namespace,
         constructor: bool,
     ) -> Option<(DefinitionId, &Definition)> {
-        let id = *self.members.get(&(module, name))?;
+        let id = self.definition(module, name)?;
         let d = self.get(id);
         (match ns {
             Namespace::Type => d.kind == DefinitionKind::Type,
@@ -692,14 +727,8 @@ impl NameIndex {
                 .iter()
                 .map(|(_, &d)| d)
                 .find(|&d| self.get(d).site.module == module && self.get(d).name == name)
-        } else if module.0 as usize >= self.modules.base_len() {
-            // New modules cannot have members in the published prefix.
-            match self.members.entry((module, name)) {
-                std::collections::hash_map::Entry::Occupied(e) => Some(*e.get()),
-                std::collections::hash_map::Entry::Vacant(_) => None,
-            }
         } else {
-            self.members.get(&(module, name)).copied()
+            self.definition(module, name)
         };
         if let Some(old) = old {
             let mut r = Refusal::new("LANG-7", site, "duplicate definition");
@@ -815,7 +844,12 @@ impl NameIndex {
         })
     }
     pub fn definition(&self, module: ModuleId, name: Symbol) -> Option<DefinitionId> {
-        self.members.get(&(module, name)).copied()
+        let key = (module, name);
+        if (module.0 as usize) < self.modules.base_len() {
+            self.members.get(&key).copied()
+        } else {
+            self.members.own_get(&key).copied()
+        }
     }
 }
 /// The last name of a clone body's parameter type (`Map` in `x: core.Map[K, V]`).

@@ -1,12 +1,10 @@
 //! Part 3 open-loop load generator. Arrivals are Poisson at `rate` turns/s,
 //! with one burst (rate * burst_x for burst_len s starting at burst_at s).
-//! Each arrival goes to a session (uniform, or skew: half to session 0);
-//! a session runs its turns one at a time; queueing inside the server counts
-//! in the latency, and a server that falls behind leaves turns late.
-//! Server-added latency = (completion - ready) - tool held ns, where ready is
-//! the later of the intended arrival and the session's previous reply: the
-//! wait behind the session's own previous turn (mostly its tool holds) is not
-//! the server's. The old measure from the intended arrival is kept as e2e_*.
+//! The dispatcher offers every arrival independently of the replies. In
+//! pipeline mode each connection also writes independently of its reader;
+//! otherwise the queued turn still carries its original intended time.
+//! End-to-end latency is the full interval from intended arrival to reply.
+//! Server-added latency excludes per-connection queueing and tool hold time.
 //! Every reply's checksum is checked against the digest table.
 //! Usage: loadgen key=value... ; prints one JSON line.
 use std::collections::HashMap;
@@ -62,6 +60,49 @@ fn wait_for(target: u64) {
     while now_ns() < target { std::hint::spin_loop(); }
 }
 
+async fn pipeline(
+    stream: &mut tokio::net::TcpStream,
+    mut work: mpsc::UnboundedReceiver<Work>,
+    table: &[[u64; 3]],
+    deadline: u64,
+) -> (Vec<Rec>, u64) {
+    let (mut reader, mut writer) = stream.split();
+    let (sent, mut pending) = mpsc::unbounded_channel();
+    let write = async move {
+        while let Some(Work::Turn(turn, intended)) = work.recv().await {
+            let started = now_ns();
+            writer.write_all(&turn.encode()).await?;
+            if sent.send((turn, intended, started)).is_err() {
+                break;
+            }
+        }
+        Ok::<(), std::io::Error>(())
+    };
+    let mut recs = Vec::new();
+    let read = async {
+        let mut prev_done = 0;
+        let mut reply = [0; REPLY];
+        while let Some((turn, intended, started)) = pending.recv().await {
+            reader.read_exact(&mut reply).await?;
+            let done = now_ns();
+            let (held, ok) = check_reply(&reply, turn, table);
+            recs.push(Rec { id: turn.id, intended, ready: intended.max(prev_done), sent: started, done, held, ok });
+            prev_done = done;
+        }
+        Ok::<(), std::io::Error>(())
+    };
+    let until = tokio::time::Instant::now() + std::time::Duration::from_nanos(deadline.saturating_sub(now_ns()));
+    let result = tokio::time::timeout_at(until, async { tokio::try_join!(write, read) }).await;
+    (recs, u64::from(!matches!(result, Ok(Ok(_)))))
+}
+
+fn check_reply(reply: &[u8; REPLY], turn: Turn, table: &[[u64; 3]]) -> (u64, bool) {
+    let id = u64::from_le_bytes(reply[0..8].try_into().unwrap());
+    let acc = u64::from_le_bytes(reply[8..16].try_into().unwrap());
+    let held = u64::from_le_bytes(reply[16..24].try_into().unwrap());
+    (held, id == turn.id && acc == turn.expected(table))
+}
+
 fn main() {
     let kv: HashMap<String, String> = std::env::args().skip(1)
         .map(|a| { let (k, v) = a.split_once('=').unwrap(); (k.to_string(), v.to_string()) }).collect();
@@ -72,6 +113,7 @@ fn main() {
     let reserved_hot: u64 = get("reserved_hot", "0").parse().unwrap();
     let hot = get("hot", "0") == "1";
     let close_after_drain = get("close_after_drain", "0") == "1";
+    let pipelined = get("pipeline", "0") == "1";
     let detail = kv.contains_key("slow_turns");
     let churn_per_s: u64 = get("churn_per_s", "0").parse().unwrap();
     let rate: f64 = get("rate", "1000").parse().unwrap();
@@ -89,6 +131,7 @@ fn main() {
     assert!(reserved_hot < sessions && (!hot || (ready_ack && reserved_hot > 0)));
     assert!(skew_clients < sessions && (reserved_hot == 0 || skew_clients == 0));
     assert!(churn_per_s == 0 || (ready_ack && reserved_hot == 0 && !close_after_drain));
+    assert!(!pipelined || (!hot && churn_per_s == 0));
     let table = Arc::new(digest_table(&tool_data()));
 
     let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(threads).enable_all().build().unwrap();
@@ -132,6 +175,14 @@ fn main() {
         let churn = churn.clone();
         let is_hot = hot && (sid as u64) < reserved_hot;
         handles.push(rt.spawn(async move {
+            if pipelined {
+                let (recs, timeouts) = pipeline(&mut st, rx, &table, deadline).await;
+                if let Some(drain) = drain {
+                    drain.wait().await;
+                }
+                drop(st);
+                return (recs, timeouts, 0, if detail { now_ns() } else { 0 });
+            }
             let mut recs: Vec<Rec> = Vec::new();
             let mut timeouts = 0u64;
             let mut reply = [0u8; REPLY];
@@ -181,10 +232,7 @@ fn main() {
                 match tokio::time::timeout(std::time::Duration::from_nanos(left), io).await {
                     Ok(Ok(())) => {
                         let done = now_ns();
-                        let id = u64::from_le_bytes(reply[0..8].try_into().unwrap());
-                        let acc = u64::from_le_bytes(reply[8..16].try_into().unwrap());
-                        let held = u64::from_le_bytes(reply[16..24].try_into().unwrap());
-                        let ok = id == turn.id && acc == turn.expected(&table);
+                        let (held, ok) = check_reply(&reply, turn, &table);
                         recs.push(Rec { id: turn.id, intended, ready: intended.max(prev_done), sent, done, held, ok });
                         prev_done = done;
                     }
@@ -278,13 +326,14 @@ fn main() {
             }
             if *hot_count != 0 {
                 if r.ok && r.done < end { hot_completed += 1; }
-            } else if r.intended >= warm_ns {
+            } else {
+                let turn_e2e = r.done - r.intended;
+                e2e.push(turn_e2e);
+                if r.intended < warm_ns { continue; }
                 lat.push(added);
                 if max_added_turn.is_none_or(|(max, _)| added > max) {
                     max_added_turn = Some((added, r));
                 }
-                let turn_e2e = (r.done - r.intended).saturating_sub(r.held);
-                e2e.push(turn_e2e);
                 if skew_clients != 0 {
                     if (client as u64) < skew_clients {
                         skew_e2e.push(turn_e2e);

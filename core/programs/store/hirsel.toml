@@ -8,6 +8,10 @@ std = { major = 1 }
 
 [sources]
 "store.hirsel" = "store"
+"store-pages.hirsel" = "store"
+"store-manifest.hirsel" = "store"
+"store-locations.hirsel" = "store"
+"store-packs.hirsel" = "store"
 "main.hirsel" = "main"
 "ingress.hirsel" = "ingress"
 "triggers.hirsel" = "triggers"
@@ -43,7 +47,19 @@ limit = 536870912
 [tests.runs."store@1/store/journal_frame_size_boundary"]
 limit = 536870912
 
+[tests.runs."store@1/store/journal_test_cap_restart"]
+limit = 536870912
+
+[tests.runs."store@1/store/journal_test_cap_calls"]
+limit = 536870912
+
 [tests.runs."store@1/store/journal_frame_oversize"]
+limit = 536870912
+
+[tests.runs."store@1/store/journal_test_fork_meta_limit"]
+limit = 536870912
+
+[tests.runs."store@1/store/journal_test_fork_pack_lists"]
 limit = 536870912
 
 [tool.workloads]

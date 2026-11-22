@@ -1,0 +1,472 @@
+// AP16. Records refer to frames and holders by stamp or durable identity.
+// They hold no Arc share of a page or blob.
+type IncomingEdge: key = PageSource(u64) | HolderSource(u8, u64, u8) | ListSource(u8)
+
+type FrameLocation: shareable + send {
+    place: std.page.PagePtr,
+    class: u8,
+    // A page's resident image capacity (AP15). A blob's charge is its
+    // body length, place.len - 8, so this is 0 for class 1.
+    image: u16,
+    outgoing: List[u64],
+    incoming: List[IncomingEdge]
+}
+
+// images is the sum of every record's frame charge: the resident report's
+// page images and blob bodies, each once by stamp (AP15). A record is
+// charged when it is added and refunded when its last incoming edge goes.
+type PageLocations: send {
+    frames: DiskIndex[FrameLocation],
+    packs: DiskIndex[PagePack],
+    images: u64
+}
+
+fn new_page_locations() -> PageLocations {
+    PageLocations(frames: disk_index(), packs: disk_index(), images: 0)
+}
+
+fn share_page_locations(known: PageLocations) -> PageLocations {
+    PageLocations(frames: disk_index_share(known.frames), packs: disk_index_share(known.packs), images: known.images)
+}
+
+fn frame_charge(location: FrameLocation) -> u64 {
+    if location.class == 1 {
+        let width: u64 = int.widen(location.place.len)
+        return width - 8
+    }
+    int.widen(location.image)
+}
+
+fn image_width(image: std.page.Image) -> u16 {
+    let width = list.capacity(std.page.payload(image))
+    if width > 65535 { fail("store: page image above 65,535 bytes") }
+    int.truncate(width)
+}
+
+fn resident_location_charge(known: PageLocations) -> u64 {
+    int.saturating_add(known.images, location_storage_charge(known))
+}
+
+fn location_storage_charge(known: PageLocations) -> u64 {
+    // FrameLocation is PagePtr (36), class (1), image (2) and two List headers (48).
+    // PagePack is class (1), frames (4), live (8) and payload bytes (8).
+    let records = std.omap.storage_charge(known.frames.values, 8, 87)
+    let packs = std.omap.storage_charge(known.packs.values, 8, 21)
+    let mut total = int.saturating_add(records, packs)
+    let root = std.omap.root(known.frames.values)
+    if let Some(node) = root {
+        total = int.saturating_add(total, location_edge_charge(node))
+    }
+    total
+}
+
+fn location_edge_charge(n: Arc[std.omap.Node[u64, FrameLocation]]) -> u64 {
+    let mut total = 0u64
+    for slot in 0u64 .. std.omap.node_count(n) {
+        if let Some(record) = std.omap.node_value(n, slot) {
+            let outgoing = 8 * list.capacity(record.outgoing)
+            // IncomingEdge's largest payload has u8, u64, u8 and a tag.
+            let incoming = round8(18 * list.capacity(record.incoming))
+            total = int.saturating_add(total, int.saturating_add(outgoing, incoming))
+        } else if let Some(child) = std.omap.node_child(n, slot) {
+            total = int.saturating_add(total, location_edge_charge(child))
+        }
+    }
+    total
+}
+
+fn live_pack_sequences(known: PageLocations) -> List[u64] {
+    let mut result: List[u64] = list.new()
+    let mut cursor = std.omap.range(known.packs.values, Unbounded, Unbounded)
+    while let Some((seq, pack)) = std.omap.next(mut cursor) {
+        if pack.live != 0 {
+            list.push(mut result, seq)
+        }
+    }
+    take result
+}
+
+fn published_page_pointer(known: PageLocations, root: PageTree) -> std.page.PagePtr {
+    published_tree_pointer(known, root.root)
+}
+
+fn published_tree_pointer(known: PageLocations, root: Arc[std.page.Page]) -> std.page.PagePtr {
+    let stamp = std.page.stamp(std.page.image_of(root))
+    if stamp == 0 {
+        return std.page.unlocated(0)
+    }
+    let Some(record) = disk_index_get(known.frames, stamp) else {
+        fail("store: missing published root")
+    }
+    record.place
+}
+
+fn published_page_roots(known: PageLocations, roots: PageRoots) -> LocatedRoots {
+    LocatedRoots(collections: published_page_pointer(known, roots.collections), streams: published_page_pointer(known, roots.streams), catalog: published_page_pointer(known, roots.catalog))
+}
+
+fn add_page_source(mut known: PageLocations, stamp: u64, source: IncomingEdge) -> Result[(), Error] {
+    if stamp != 0 {
+        let changed = capacity(disk_index_update(mut known.frames, stamp, fn(mut location: FrameLocation) {
+            list.push(mut location.incoming, source)
+        }))?
+        if let None = changed {
+            fail("store: missing live frame")
+        }
+    }
+    Ok(())
+}
+
+fn add_location(mut known: PageLocations, ptr: std.page.PagePtr, class: u8, image: u16, take outgoing: List[u64]) -> Result[(), Error] {
+    // Its children already have records. The caller walks in postorder.
+    for child in outgoing {
+        add_page_source(mut known, child, PageSource(ptr.stamp))?
+    }
+    let item = FrameLocation(place: ptr, class: class, image: image, outgoing: take outgoing, incoming: list.new())
+    let charge = frame_charge(item)
+    capacity(disk_index_put(mut known.frames, ptr.stamp, take item))?
+    known.images = int.saturating_add(known.images, charge)
+    Ok(())
+}
+
+fn add_location_holder(mut known: PageLocations, kind: u8, holder: u64, roots: LocatedRoots) -> Result[(), Error] {
+    add_page_source(mut known, roots.collections.stamp, HolderSource(kind, holder, 0))?
+    add_page_source(mut known, roots.streams.stamp, HolderSource(kind, holder, 1))?
+    add_page_source(mut known, roots.catalog.stamp, HolderSource(kind, holder, 2))
+}
+
+// Rebuild the installed generation's metadata from the validated postorder.
+// List-only retirements have already been removed by open and are absent here.
+fn rebuild_page_locations(validated: ValidatedPageManifest) -> Result[PageLocations, Error] {
+    let mut known = new_page_locations()
+    for (seq, pack) in validated.inventory {
+        let mut loaded: PagePack = clone(pack)
+        loaded.live = 0
+        capacity(disk_index_put(mut known.packs, seq, loaded))?
+    }
+    for stamp in validated.graph.postorder {
+        let Some(ptr) = map.get(validated.graph.stamps, stamp) else {
+            fail("store: missing validated location")
+        }
+        let Some(frame) = map.get(validated.graph.frames, stamp) else {
+            fail("store: missing validated frame")
+        }
+        let class = option.unwrap(capacity(disk_index_update(mut known.packs, ptr.pack, fn(mut pack: PagePack) -> u8 {
+            let width: u64 = int.widen(ptr.len)
+            pack.live += width
+            pack.class
+        }))?)
+        let mut outgoing: List[u64] = list.new()
+        let mut image = 0u16
+        if let ReadPage(raw, kids, blobs) = frame {
+            // Attach moves this image into its page unchanged.
+            image = image_width(raw)
+            for child in kids {
+                if child != 0 {
+                    list.push(mut outgoing, child)
+                }
+            }
+            list.append(mut outgoing, blobs)
+        }
+        add_location(mut known, ptr, class, image, take outgoing)?
+    }
+    for item in validated.manifest.branches {
+        add_location_holder(mut known, 0, int.widen(item.id), item.roots)?
+    }
+    for slot in 0u64 .. list.len(validated.manifest.pins) {
+        add_location_holder(mut known, 1, slot, validated.manifest.pins[slot].roots)?
+    }
+    add_page_source(mut known, validated.manifest.pack_root.stamp, ListSource(0))?
+    add_page_source(mut known, validated.manifest.retirement_root.stamp, ListSource(1))?
+    Ok(take known)
+}
+
+// The candidate can drop an incoming edge only after all of its additions.
+// If this was the last edge, remove the record, debit its pack and cascade.
+fn remove_page_source(mut known: PageLocations, stamp: u64, source: IncomingEdge) -> Result[(), Error] {
+    if stamp == 0 {
+        return Ok(())
+    }
+    let dead = capacity(disk_index_update(mut known.frames, stamp, fn(mut location: FrameLocation) -> bool {
+        for slot in 0u64 .. list.len(location.incoming) {
+            if location.incoming[slot] == source {
+                let _ = list.swap_remove(mut location.incoming, slot)
+                return list.len(location.incoming) == 0
+            }
+        }
+        fail("store: missing incoming edge")
+    }))?
+    if let Some(true) = dead {
+        let location = option.unwrap(capacity(disk_index_remove(mut known.frames, stamp))?)
+        known.images -= frame_charge(location)
+        if location.place.pack != 0 {
+            let _ = capacity(disk_index_update(mut known.packs, location.place.pack, fn(mut pack: PagePack) {
+                let width: u64 = int.widen(location.place.len)
+                pack.live -= width
+            }))?
+        }
+        for child in location.outgoing {
+            remove_page_source(mut known, child, PageSource(stamp))?
+        }
+    }
+    Ok(())
+}
+
+fn relocation_ancestors(known: PageLocations, bodies: List[u64]) -> Map[u64, ()] {
+    let mut marked: Map[u64, ()] = map.new()
+    let mut pending: List[u64] = clone(bodies)
+    while let Some(stamp) = list.pop(mut pending) {
+        if map.contains(marked, stamp) {
+            continue
+        }
+        let Some(location) = disk_index_get(known.frames, stamp) else {
+            fail("store: missing relocation frame")
+        }
+        if location.place.pack == 0 {
+            continue
+        }
+        map.insert(mut marked, stamp, ())
+        for source in location.incoming {
+            if let PageSource(parent) = source {
+                list.push(mut pending, parent)
+            }
+        }
+    }
+    take marked
+}
+
+fn record_fresh_tree(mut known: PageLocations, root: Arc[std.page.Page], class: u8) -> Result[(), Error] {
+    let image = std.page.image_of(root)
+    let stamp = std.page.stamp(image)
+    if stamp == 0 || map_has_location(known, stamp) {
+        return Ok(())
+    }
+    let mut outgoing: List[u64] = list.new()
+    for slot in 0u64 .. std.page.count(image) {
+        match std.page.owning_edge(image, slot) {
+            Some(PageEdge(child)) => {
+                if child.stamp != 0 {
+                    let descendant = option.unwrap(std.page.child(root, slot))
+                    record_fresh_tree(mut known, descendant, class)?
+                    list.push(mut outgoing, child.stamp)
+                }
+            },
+            Some(BlobEdge(reference)) => {
+                if !map_has_location(known, reference.stamp) {
+                    // An unwritten blob's place carries its frame length, so
+                    // its charge is known before the layout locates it.
+                    let mut place = std.page.unlocated(reference.stamp)
+                    place.len = int.truncate(8 + reference.len)
+                    add_location(mut known, place, 1, 0, list.new())?
+                }
+                list.push(mut outgoing, reference.stamp)
+            },
+            None => (),
+        }
+    }
+    add_location(mut known, std.page.unlocated(stamp), class, image_width(image), take outgoing)
+}
+
+type HeldPage: shareable + send {
+    source: IncomingEdge,
+    root: Arc[std.page.Page]
+}
+
+fn candidate_page_locations(installed: PageLocations, before: Map[IncomingEdge, u64], after: List[HeldPage]) -> Result[PageLocations, Error] {
+    let mut candidate = share_page_locations(installed)
+    let mut stamps: Map[IncomingEdge, u64] = map.new()
+    for held in after {
+        let stamp = std.page.stamp(std.page.image_of(held.root))
+        map.insert(mut stamps, held.source, stamp)
+        if stamp != map.get_or(before, held.source, 0) {
+            record_fresh_tree(mut candidate, held.root, 0)?
+            add_page_source(mut candidate, stamp, held.source)?
+        }
+    }
+    for (source, stamp) in before {
+        if stamp != map.get_or(stamps, source, 0) {
+            remove_page_source(mut candidate, stamp, source)?
+        }
+    }
+    Ok(take candidate)
+}
+
+fn change_list_root(mut candidate: PageLocations, before: Arc[std.page.Page], after: Arc[std.page.Page], which: u8) -> Result[(), Error] {
+    let old_stamp = std.page.stamp(std.page.image_of(before))
+    let new_stamp = std.page.stamp(std.page.image_of(after))
+    if old_stamp == new_stamp {
+        return Ok(())
+    }
+    record_fresh_tree(mut candidate, after, 2)?
+    add_page_source(mut candidate, new_stamp, ListSource(which))?
+    remove_page_source(mut candidate, old_stamp, ListSource(which))
+}
+
+fn map_has_location(known: PageLocations, stamp: u64) -> bool {
+    match disk_index_get(known.frames, stamp) {
+        Some(_) => true,
+        None => false,
+    }
+}
+
+type PageWrite: send {
+    stamp: u64,
+    body: Arc[std.page.Page]
+}
+
+type BlobWrite: send {
+    stamp: u64,
+    body: Arc[Bytes]
+}
+
+type CutFrames: send {
+    emitted: Map[u64, ()],
+    pages: List[PageWrite],
+    blobs: List[BlobWrite]
+}
+
+fn requires_emit(known: PageLocations, marked: Map[u64, ()], stamp: u64) -> bool {
+    if stamp == 0 {
+        return false
+    }
+    let Some(location) = disk_index_get(known.frames, stamp) else {
+        fail("store: missing planned frame")
+    }
+    location.place.pack == 0 || map.contains(marked, stamp)
+}
+
+// The marks include the whole ancestor closure. An installed, unmarked
+// page therefore has no selected descendant. Each marked frame emits once.
+fn plan_tree_frames(known: PageLocations, marked: Map[u64, ()], root: Arc[std.page.Page], mut output: CutFrames) {
+    let image = std.page.image_of(root)
+    let stamp = std.page.stamp(image)
+    if !requires_emit(known, marked, stamp) || map.contains(output.emitted, stamp) {
+        return
+    }
+    map.insert(mut output.emitted, stamp, ())
+    for slot in 0u64 .. std.page.count(image) {
+        match std.page.owning_edge(image, slot) {
+            Some(PageEdge(child)) => {
+                if child.stamp != 0 {
+                    let body = option.unwrap(std.page.child(root, slot))
+                    plan_tree_frames(known, marked, body, mut output)
+                }
+            },
+            Some(BlobEdge(reference)) => {
+                if requires_emit(known, marked, reference.stamp) && !map.contains(output.emitted, reference.stamp) {
+                    let body = option.unwrap(std.page.body(root, reference.body))
+                    list.push(mut output.blobs, BlobWrite(stamp: reference.stamp, body: take body))
+                    map.insert(mut output.emitted, reference.stamp, ())
+                }
+            },
+            None => (),
+        }
+    }
+    list.push(mut output.pages, PageWrite(stamp: stamp, body: arc.share(root)))
+}
+
+fn check_page_location_closure() -> Result[(), Error] {
+    let mut installed = new_page_locations()
+    capacity(disk_index_put(mut installed.packs, 1, PagePack(class: 1, frames: 1, live: 10, payload_bytes: 10)))?
+    capacity(disk_index_put(mut installed.packs, 2, PagePack(class: 0, frames: 2, live: 66, payload_bytes: 66)))?
+    add_location(mut installed, std.page.PagePtr(pack: 1, offset: 72, len: 10, checksum: 1, stamp: 1), 1, 0, list.new())?
+    for parent in 2u64 .. 4 {
+        let mut outgoing: List[u64] = list.with_capacity(1)
+        list.push(mut outgoing, 1)
+        let ptr = std.page.PagePtr(pack: 2, offset: 72 + 49 * (parent - 2), len: 33, checksum: parent, stamp: parent)
+        add_location(mut installed, ptr, 0, 0, take outgoing)?
+        add_page_source(mut installed, parent, HolderSource(0, parent, 0))?
+    }
+    let mut moved: List[u64] = list.with_capacity(1)
+    list.push(mut moved, 1)
+    let marked = relocation_ancestors(installed, moved)
+    if map.len(marked) != 3 || !map.contains(marked, 1) || !map.contains(marked, 2) || !map.contains(marked, 3) {
+        return Error(Foreign)
+    }
+    let mut candidate = share_page_locations(installed)
+    let mut outgoing: List[u64] = list.with_capacity(1)
+    list.push(mut outgoing, 1)
+    add_location(mut candidate, std.page.unlocated(4), 0, 0, take outgoing)?
+    add_page_source(mut candidate, 4, HolderSource(0, 2, 0))?
+    remove_page_source(mut candidate, 2, HolderSource(0, 2, 0))?
+    let after = relocation_ancestors(candidate, moved)
+    if map.len(after) != 2 || !map.contains(after, 1) || !map.contains(after, 3) {
+        return Error(Foreign)
+    }
+    let Some(body) = disk_index_get(candidate.frames, 1) else {
+        return Error(Foreign)
+    }
+    let Some(old_pack) = disk_index_get(installed.packs, 2) else {
+        return Error(Foreign)
+    }
+    let Some(new_pack) = disk_index_get(candidate.packs, 2) else {
+        return Error(Foreign)
+    }
+    if list.len(body.incoming) != 2 || old_pack.live != 66 || new_pack.live != 33 {
+        return Error(Foreign)
+    }
+    Ok(())
+}
+
+type DiskIndex[T: shareable + send]: send {
+    values: std.omap.OMap[u64, T],
+    ids: u64
+}
+
+fn disk_index[T: shareable + send]() -> DiskIndex[T] {
+    DiskIndex(values: std.omap.new(), ids: 0)
+}
+
+fn disk_index_share[T: shareable + send](table_index: DiskIndex[T]) -> DiskIndex[T] {
+    DiskIndex(values: std.omap.snapshot(table_index.values), ids: table_index.ids)
+}
+
+fn disk_index_get[T: shareable + send](table_index: DiskIndex[T], key: u64) -> Option[View[T]] in table_index {
+    std.omap.get(table_index.values, key)
+}
+
+fn disk_index_put[T: shareable + send](mut table_index: DiskIndex[T], key: u64, take value: T) -> Result[(), Capacity] {
+    // A cut edits one candidate many times. The owned insert copies a node
+    // shared with the installed generation once and then edits it in place.
+    let held = replace(mut table_index.values, std.omap.new())
+    let (take values, _) = std.omap.insert_owned(mut table_index.ids, take held, key, take value)
+    table_index.values = take values
+    Ok(())
+}
+
+fn disk_index_update[T: shareable + send, R](mut table_index: DiskIndex[T], key: u64, body: scoped[view] fn(mut T) -> R) -> Result[Option[R], Capacity] {
+    let copied_value: T = match disk_index_get(table_index, key) {
+        Some(old) => clone(old),
+        None => return Ok(None)
+    }
+    let mut value = take copied_value
+    let answer = body(mut value)
+    disk_index_put(mut table_index, key, take value)?
+    Ok(Some(take answer))
+}
+
+fn disk_index_remove[T: shareable + send](mut table_index: DiskIndex[T], key: u64) -> Result[Option[T], Capacity] {
+    let copied_value: T = match disk_index_get(table_index, key) {
+        Some(old) => clone(old),
+        None => return Ok(None)
+    }
+    let value = take copied_value
+    table_index.values = std.omap.remove(mut table_index.ids, table_index.values, key)
+    Ok(Some(take value))
+}
+
+fn disk_index_len[T: shareable + send](table_index: DiskIndex[T]) -> u64 {
+    std.omap.len(table_index.values)
+}
+
+pub fn disk_law_page_location_closure() -> bool {
+    match check_page_location_closure() {
+        Ok(()) => true,
+        Error(_) => false,
+    }
+}
+
+@test
+fn disk_test_page_location_closure() -> Result[(), Error] {
+    check_page_location_closure()
+}

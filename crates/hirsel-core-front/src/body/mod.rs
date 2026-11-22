@@ -200,6 +200,8 @@ pub struct Emitter {
     constant_statics: HashMap<crate::ConstValue, hirsel_core_ir::StaticId>,
     /// Some layout or recipe was refused and its rows taken back.
     refused: bool,
+    /// Some row asked for a hook or a tuple codec (body/row_closures.rs).
+    hooked: bool,
 }
 
 /// How a value of a type is carried in a body (crate docs, "Values, slots and
@@ -569,6 +571,7 @@ impl Emitter {
         }
         let hooks = std::mem::take(&mut s.hooks);
         let tuples = std::mem::take(&mut s.tuple_codecs);
+        self.hooked |= !hooks.is_empty() || !tuples.is_empty();
         for (row, hook, f, arguments) in hooks {
             // A generic row's finalizer or clone body is its template's instance at the
             // row's arguments, materialized as any other generic callee.

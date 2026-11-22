@@ -49,6 +49,26 @@ core@1/code/identity
 # DECISIONS.md 2026-11-16 (code.revision ruled, V4): store's runner records the
 # revision of the entry that ran in each call record (RUNNER-SPEC R5, §7).
 core@1/code/revision
+# 2026-11-23, driver-reds-followup-1802: Store's clock and idle-stop laws.
+core@1/clock/advance_to # Advance monotonic time to the next runner deadline.
+core@1/clock/idle # Observe the next deadline after runnable tasks settle.
+core@1/clock/set_wall # Move wall time independently in the trigger laws.
+core@1/core/ClockHand # Own the virtual clock's control handle.
+core@1/provide/clock # Give the runner a virtual clock with a fixed origin.
+# 2026-11-23, driver-reds-followup-1802: Store's idle law supplies a listener with no clients.
+core@1/core/Call # Carry a pending accept while the virtual clock advances.
+core@1/core/Handshake # Payload of the modeled Net reply type.
+core@1/core/NetOp # Distinguish listen, accept and release on the modeled listener.
+core@1/core/NetReply # Return the listener and the controlled accept timeout.
+core@1/core/Part # Payload of the modeled Net release operation.
+core@1/core/Served # Own the listener's provider port.
+core@1/core/Withdrawn # Result of replying to a call that may have been cancelled.
+core@1/provide/Reply # Encode the response to the pending Net call.
+core@1/provide/net # Create the modeled Net and its provider port.
+core@1/provide/net_op # Read the pending operation from a provider call.
+core@1/provide/net_reply # Encode a typed Net reply for the provider port.
+core@1/provide/next # Receive the next call on the modeled listener.
+core@1/provide/reply # Finish the call with the controlled listener result.
 core@1/core/$clone
 core@1/core/$needs_drop
 core@1/core/Arc
@@ -67,6 +87,8 @@ core@1/core/Closed
 core@1/core/Deque
 core@1/core/Dest
 core@1/core/Dir
+# 2026-11-23, driver-reds-followup-1802: release the scrub's pack lease before checkpointing.
+core@1/core/drop
 core@1/core/Env
 core@1/core/Exit
 core@1/core/FixedSpan

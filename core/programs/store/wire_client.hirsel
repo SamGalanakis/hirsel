@@ -220,17 +220,27 @@ pub fn next(c: Conn) -> Result[runner.Frame, ReceiveError] waits {
     }
 }
 
+// The reader drops the credit receiver as it ends, so a closed credit channel with nothing
+// queued means the connection has ended, though `wake` keeps the queue itself open.
 pub fn try_next(c: Conn) -> Result[runner.Frame, ReceiveError] {
-    let _ = channel.try_send(c.credit, ())
+    let ended = match channel.try_send(c.credit, ()) { Error(Closed(_)) => true, _ => false }
     loop {
-        match channel.try_receive(c.from) { Ok(Got(take f)) => return Ok(take f), Ok(Woke(_)) => (), Ok(Gone) => return Error(Closed), Error(e) => return Error(e) }
+        match channel.try_receive(c.from) {
+            Ok(Got(take f)) => return Ok(take f),
+            Ok(Woke(_)) => (),
+            Ok(Gone) => return Error(Closed),
+            Error(Empty) => return if ended { Error(Closed) } else { Error(Empty) },
+            Error(e) => return Error(e),
+        }
     }
 }
 
 // The next frame, the reader's end, or a Woke an alarm posted. A credit already
 // outstanding is kept, so a Woke never leaves a second read owed.
 pub fn wait(c: Conn) -> Incoming waits {
-    let _ = channel.try_send(c.credit, ())
+    if let Error(Closed(_)) = channel.try_send(c.credit, ()) {
+        return match channel.try_receive(c.from) { Ok(take i) => take i, Error(_) => Gone }
+    }
     match channel.receive(c.from) { Ok(take i) => take i, Error(_) => Gone }
 }
 

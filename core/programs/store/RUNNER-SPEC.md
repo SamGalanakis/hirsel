@@ -24,7 +24,7 @@ The v2.2 and v2.3 texts are RUNNER-SPEC-v2.2.md and RUNNER-SPEC-v2.3.md. **v2.4*
 
 ## CHANGES-v2.27.1 (the place fixture is built; lane clock-fixture-1738)
 
-§12.3's fixture is built as the module `fixture` (fixture.hirsel). The text now states the signatures as built. `test_fixture_granted` in runner_calls.hirsel **RUN**s it natively: a Caller-bearing transact, a granted entry with `wire` set, and the same entry `Refused(NotAllowed)` without it. The evaluator path still waits on W8a.
+§12.3's fixture is built as the module `fixture` (fixture.hirsel). The text now states the signatures as built. `test_fixture_granted` in runner_calls.hirsel **RUN**s it natively: a Caller-bearing transact, a granted entry with `wire` set, and the same entry `Refused(NotAllowed)` without it. The evaluator path still waits on W8a. **UNTESTED**: `subscribe`, `seen_at`, `status`, every `Deadline` path and dropping a `Fixture` without `end`.
 
 | # | Point | Decision | What v2.27.1 says | Basis |
 |---|---|---|---|---|
@@ -33,6 +33,7 @@ The v2.2 and v2.3 texts are RUNNER-SPEC-v2.2.md and RUNNER-SPEC-v2.3.md. **v2.4*
 | 3 | Not `send` | **AS BUILT** | `Fixture` and `Client` own task handles, which are not `send` (CONC-2), as `places.Directory` does | §12.3 |
 | 4 | The client's credential | **DECIDED here; reversible** | `client` takes the Hello token. Without one, a place whose `wire` binds a credential gives the session no Caller | §12.3 |
 | 5 | Query entries | **AS BUILT** | A query `Callee` is `Callee[A, ()]`: its described result is the unit schema, and its rows arrive in Batches | §12.3 |
+| 6 | Start's allowance and an idle client at end | **AS BUILT** | `start` returns `Full` when the root allowance cannot hold the place (a Memory or Temp place needs about 1.1 GiB). A client left open at `end` makes the result `Forced` at the grace deadline | §12.3 |
 
 ## CHANGES-v2.27 (amendments to v2.26 from astra's attack, platform-spec-attack-1748/REPORT.md; lane platform-spec-amend-1755)
 
@@ -275,7 +276,7 @@ v2.15 adds §12 for gap study 1117's items 1, 2 and 5 (`GAPS.md` from gap-study-
 | 5 | Manifest | **NEW; extends D1** | Written by `hirsel build --manifest`, from the preview launch with an empty old list, so there is no second entry list and no second hash. | §12.2; launch.md |
 | 6 | Preview | **NEW** | The new executable answers the old entry list with the session's own `Placed` function. Schema readiness is reported as unknown. It is advisory (ENDSTATE: no deploy gate). | §12.2 |
 | 7 | Confirmation | **NEW** | `hirsel confirm` reads the status route and compares the identity and `release_digest`. | §12.2 |
-| 8 | Fixture | **NEW** | `runner.fixture` runs `operate` over the wire path, with typed calls, durable replies, `seen_at`, relative bounds on the place's clock and full release. It is native-only until W8a. | §12.3; DECISIONS 2026-11-17 |
+| 8 | Fixture | **NEW** | The `fixture` module runs `operate` over the wire path, with typed calls, durable replies, `seen_at`, relative bounds on the place's clock and full release. It is native-only until W8a. | §12.3; DECISIONS 2026-11-17 |
 | 9 | Laws | **NEW O26–O35** | §8. The service-operations brief uses L26–L35 for these laws. | — |
 
 **Decision log.**
@@ -1291,7 +1292,7 @@ Unchanged from v2.1. v2.2 takes no new mechanism from outside. V1's session time
 | health route (v2.15) | SpacetimeDB crates/client-api/src/routes/health.rs:9-42 (opened) | ADAPTED as `GET /hirsel/status`. The weakness: it reports node and control-database reachability, not whether this database has activated, so a 200 does not say which code runs. Here the body carries the launch identity and `release_digest`, and 200 means `Ready` only |
 | pre-publish plan (v2.15) | SpacetimeDB crates/cli/src/subcommands/publish.rs:885-970 (opened) | ADAPTED as `hirsel preview`. The weakness: the plan is computed by the server against the live database, so planning needs a write-capable endpoint. Here the new executable answers the old entry list with no store, and schema readiness is said to be unknown instead |
 | evaluate then finish push (v2.15) | Convex npm-packages/convex/src/cli/lib/deploy2.ts:90-100 (opened) | NOT TAKEN: a server-side evaluation step is a rollout service Hirsel does not run. `confirm` reads the outcome instead |
-| test server with explicit Close (v2.15) | Go src/net/http/httptest/server.go:266-290, Close :482 (opened) | ADAPTED as `runner.fixture`. The weakness: `Close` is a method the test must remember to call, and a forgotten one leaks the listener. Here dropping the fixture also cancels and joins its task group, and the durable version is part of each answer |
+| test server with explicit Close (v2.15) | Go src/net/http/httptest/server.go:266-290, Close :482 (opened) | ADAPTED as the `fixture` module. The weakness: `Close` is a method the test must remember to call, and a forgotten one leaks the listener. Here dropping the fixture also cancels and joins its task group, and the durable version is part of each answer |
 | test fixtures (v2.15) | Goose docs/testing.md, "Fixture layout" (opened) | NOT TAKEN: Goose's fixtures are compiler fixtures, inputs and expected outputs for the compiler. It has no runtime fixture that starts a served program, so there is nothing to adapt for §12.3 |
 | release manifest and preview (v2.15) | Goose docs/packages.md §1 "Running and building" and §4 "Publishing" (opened) | NOT TAKEN: Goose pins package versions for a build and publishes a package by a repository tag. It has no record of a deployed program's entries or grants and no upgrade preview, so §12.2 follows SpacetimeDB's pre-publish plan instead |
 | orderly shutdown: send quit messages, then wait (v2.15) | Goose docs/goose_spec.md:4547-4550, `thread_wait` (opened) | ADAPTED as `Close` to every session and the head, then joins. The weakness: Goose's wait has no deadline, so one stuck worker holds the shutdown. Here D bounds it, and cancellation ends the rest |
@@ -1503,6 +1504,7 @@ pub fn end(take f: Fixture, within_ms: u64) -> Result[Ended, FixtureError] waits
 **Start.** `start` requires the backing to be `Memory` or `Temp` and `listen` to be 127.0.0.1 port 0. It refuses anything else with `Start(Missing("backing"))` or `Start(Missing("listen"))`.
 - It makes the root with `status_root()`, spawns `operate` in its own task group, and takes the `watch` receiver from the one-use handoff. It receives phases until `Ready`. The fixture keeps a handle to the root for `status`.
 - A `StartError` is returned as `Start(e)`.
+- The place's task group is spawned with `try_spawn`, so a test whose root allowance is too small gets `Full(cap)`. A `Memory` or `Temp` place reserves its backing's resident limit, which is 1 GiB under `store.defaults()`, so its test needs about 1.1 GiB of allowance (a per-test `limit` in hirsel.toml).
 - If `within_ms` passes first, the result is `Deadline(within_ms)`. It is returned after the fixture has stopped `operate` and released everything it made.
 
 **Typed calls.**
@@ -1517,11 +1519,11 @@ pub fn end(take f: Fixture, within_ms: u64) -> Result[Ended, FixtureError] waits
 
 **The batch at or after a version.** `seen_at(c, sub, v, within_ms)` returns the subscription's full row set as of the first Batch at a version ≥ v. That is L6+L7's count form. It applies Batches in order, as the client cache does. If the last Batch the client applied is already at or after v, the result is as of that Batch. A subscription that is `Ended` gives `Closed`.
 
-**End.** `end` sends the stop and waits for `operate`'s `Ended`. The drain closes every session, so a `Client` used afterwards gets `Closed`, and `operate` removes the `Temp` subdirectory. It returns `Ended`. If `within_ms` passes, the result is `Deadline(within_ms)`, returned after the group is cancelled and joined. **Dropping a `Fixture` without `end`** cancels and joins its task group (CONC-8). That drops the listener and the `Db` (a crash cut, §1.10), and `operate`'s cleanup removes the `Temp` subdirectory. Every resource the fixture made is released on either path.
+**End.** `end` sends the stop and waits for `operate`'s `Ended`. The drain closes every session, so a `Client` used afterwards gets `Closed`, and `operate` removes the `Temp` subdirectory. It returns `Ended`. A `Client` still open at `end` holds its session until the drain's grace deadline, so `Ended` is then `Forced`; close clients first for `Stopped`. If `within_ms` passes, the result is `Deadline(within_ms)`, returned after the group is cancelled and joined. **Dropping a `Fixture` without `end`** cancels and joins its task group (CONC-8). That drops the listener and the `Db` (a crash cut, §1.10), and `operate`'s cleanup removes the `Temp` subdirectory. Every resource the fixture made is released on either path.
 
 **Grants.** A test that uses the fixture needs `Net` (listen and connect on 127.0.0.1), `Tasks`, `Clock` and `Random`, plus `Dir` for `Temp`. It receives them as ordinary capability parameters (PROG-4) and places them in `PlaceConfig`.
 
-**Engines.** The fixture runs on Cranelift, LLVM and the evaluator. Evaluator fixtures explicitly grant W8a's model network, which supplies their controlled network and virtual clock. Native fixtures use the granted loopback network.
+**Engines.** Native fixtures run on Cranelift and LLVM over the granted loopback network. Evaluator fixtures will grant W8a's model network, which supplies their controlled network and virtual clock; that path is **unbuilt** until W8a.
 
 **The runner's own harness.** `runner_calls.hirsel`'s `served` and `served_on` drive the head over the wire with `wire_client`, using the production `serve_connection` owner. The evaluator runs those same fixtures on its model network. Subscription-pressure laws additionally hold a joined publisher inbox undrained until their drain step. The in-process client/session seam is deleted.
 

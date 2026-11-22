@@ -118,7 +118,10 @@ pub fn start[G: send, H: send, S: send](take p: runner.PlaceConfig[G, H, S], wit
     let (me, events): (Sender[PlaceEvent], Receiver[PlaceEvent]) = channel.new(16u64)
     let job = PlaceJob(config: take p, stop: take stop_from, status: latest.handle(root), to: channel.sender(me), need: need)
     let run: fn(take PlaceJob[G, H, S]) -> () waits = run_place
-    let place = task.spawn(tasks, bytes int.saturating_add(need, OWN_BYTES), take job, run)
+    let place = match task.try_spawn(tasks, bytes int.saturating_add(need, OWN_BYTES), take job, run) {
+        Ok(take spawned) => take spawned,
+        Error((cap, _)) => return Error(Full(cap)),
+    }
     let alarm = std.clock.alarm(tasks, clock, deadline, me, Expired)
     loop {
         match channel.receive(events) {

@@ -1434,9 +1434,11 @@ pub fn law_fixture_granted(clock: Clock, random: Random, tasks: Tasks, net: Net)
     let without_wire = result.unwrap(fixture.start(fixture_settings(clock, random, tasks, net, None), 5000u64))
     let mut d = result.unwrap(fixture.client(without_wire, None, 5000u64))
     let ping_refused = match result.unwrap(fixture.call(mut d, ping_entry, 9u64, 2000u32)).answer { Refused(NotAllowed) => true, _ => false }
+    // The client stays open across end: the drain ends its session, so the next call is Closed.
+    let bare_stopped = match fixture.end(take without_wire, 5000u64) { Ok(_) => true, Error(_) => false }
+    let after_end = match fixture.call(mut d, ping_entry, 9u64, 2000u32) { Error(Closed) => true, _ => false }
     fixture.close(take d)
-    let bare_stopped = match fixture.end(take without_wire, 5000u64) { Ok(Stopped(None)) => true, _ => false }
-    put_durable && ping_ran && wired_stopped && ping_refused && bare_stopped
+    put_durable && ping_ran && wired_stopped && ping_refused && bare_stopped && after_end
 }
 
 @test

@@ -558,8 +558,7 @@ def _toolchain_bundle_impl(ctx):
                  prof_recording_runtimes["x86_64"][DefaultInfo].default_outputs[0],
                  prof_recording_runtimes["aarch64"][DefaultInfo].default_outputs[0],
                  hidden = ctx.attrs._llvm_libraries[DefaultInfo].default_outputs),
-        # Bundling lowers both shipping and recording std for each target.
-        env = {"HIRSEL_MEMORY_LIMIT": "8G", "HIRSEL_JOBS": "1"},
+        env = {"HIRSEL_MEMORY_LIMIT": PRODUCT_MEMORY_LIMIT, "HIRSEL_JOBS": "1"},
         category = "toolchain_bundle",
     )
     return [

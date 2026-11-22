@@ -3042,6 +3042,7 @@ pub opaque type Table[K, V]: send {
     epoch: u64,
     complete: bool,
     catalog_key: Arc[Bytes],
+    catalog_page: Arc[Bytes],
     key: std.codec.Key[K],
     readers: Arc[Readers[V]],
     indexes: List[IndexOf[V]]
@@ -3051,6 +3052,7 @@ pub opaque type Shape[K, V]: shareable + send {
     store: StoreId,
     id: u32,
     catalog_key: Arc[Bytes],
+    catalog_page: Arc[Bytes],
     key: std.codec.Key[K],
     readers: Arc[Readers[V]]
 }
@@ -3059,6 +3061,7 @@ pub opaque type Index[J, K, V]: shareable + send {
     store: StoreId,
     id: u32,
     catalog_key: Arc[Bytes],
+    catalog_page: Arc[Bytes],
     table: u32,
     key: std.codec.Key[J],
     primary: std.codec.Key[K],
@@ -3124,11 +3127,11 @@ pub opaque type Rows[K, V]: send {
 // write, since it does not carry the table's registered index extractors.
 pub fn query_table[K, V](t: Table[K, V]) -> Table[K, V] {
     Table(store: t.store, id: t.id, epoch: t.epoch, complete: false,
-        catalog_key: arc.share(t.catalog_key), key: t.key, readers: arc.share(t.readers), indexes: list.new())
+        catalog_key: arc.share(t.catalog_key), catalog_page: arc.share(t.catalog_page), key: t.key, readers: arc.share(t.readers), indexes: list.new())
 }
 
 pub fn shape[K, V](t: Table[K, V]) -> Shape[K, V] {
-    Shape(store: t.store, id: t.id, catalog_key: arc.share(t.catalog_key), key: t.key, readers: arc.share(t.readers))
+    Shape(store: t.store, id: t.id, catalog_key: arc.share(t.catalog_key), catalog_page: arc.share(t.catalog_page), key: t.key, readers: arc.share(t.readers))
 }
 
 fn decoded[T](take r: Result[T, std.codec.DecodeError]) -> Result[T, Error] {
@@ -3205,7 +3208,7 @@ pub fn fetch_bytes[K, V](tx: Tx, t: Shape[K, V], k: K) -> Result[Option[View[Byt
     if !same(tx.store, t.store) {
         return Error(Foreign)
     }
-    readable(tx.roots, t.catalog_key, t.id)?
+    readable(tx.roots, t.catalog_key, t.catalog_page, t.id)?
     let mut p: Bytes = list.with_capacity(12)
     list.put_word_be(mut p, t.id)
     std.codec.encode_key(t.key, k, mut p)
@@ -3324,7 +3327,7 @@ fn open_range[K, V](tx: Tx, t: Shape[K, V], lo: Bound[K], hi: Bound[K], reverse:
     if !same(tx.store, t.store) {
         return Error(Foreign)
     }
-    readable(tx.roots, t.catalog_key, t.id)?
+    readable(tx.roots, t.catalog_key, t.catalog_page, t.id)?
     let low = lower_bytes(t.id, typed_bound(t.key, lo)?, false)?
     let high = lower_bytes(t.id, typed_bound(t.key, hi)?, true)?
     let tree = transaction_collection_pages(tx)?
@@ -3342,7 +3345,7 @@ pub fn get_bytes[K, V](s: Snapshot, t: Shape[K, V], k: K) -> Result[Option[View[
     if !same(s.store, t.store) {
         return Error(Foreign)
     }
-    readable(s.roots, t.catalog_key, t.id)?
+    readable(s.roots, t.catalog_key, t.catalog_page, t.id)?
     let mut p = prefixed(t.id, 8)?
     std.codec.encode_key(t.key, k, mut p)
     Ok(get_page_row(s.roots.collections, p))
@@ -3360,7 +3363,7 @@ pub fn scan_bytes[K, V](s: Snapshot, t: Shape[K, V], lo: Bound[K], hi: Bound[K])
     if !same(s.store, t.store) {
         return Error(Foreign)
     }
-    readable(s.roots, t.catalog_key, t.id)?
+    readable(s.roots, t.catalog_key, t.catalog_page, t.id)?
     let low = lower_bytes(t.id, typed_bound(t.key, lo)?, false)?
     let high = lower_bytes(t.id, typed_bound(t.key, hi)?, true)?
     let id = prefix(t.id)?
@@ -3398,7 +3401,7 @@ pub fn scan[K, V](s: Snapshot, t: Shape[K, V], lo: Bound[K], hi: Bound[K]) -> Re
     if !same(s.store, t.store) {
         return Error(Foreign)
     }
-    readable(s.roots, t.catalog_key, t.id)?
+    readable(s.roots, t.catalog_key, t.catalog_page, t.id)?
     let cursor = scan_raw(s, t.id, typed_bound(t.key, lo)?, typed_bound(t.key, hi)?)?
     Ok(table_rows(s, t, take cursor))
 }
@@ -3407,7 +3410,7 @@ pub fn scan_reverse[K, V](s: Snapshot, t: Shape[K, V], lo: Bound[K], hi: Bound[K
     if !same(s.store, t.store) {
         return Error(Foreign)
     }
-    readable(s.roots, t.catalog_key, t.id)?
+    readable(s.roots, t.catalog_key, t.catalog_page, t.id)?
     let low = lower_bytes(t.id, typed_bound(t.key, lo)?, false)?
     let high = lower_bytes(t.id, typed_bound(t.key, hi)?, true)?
     let cursor = reverse_byte_cursor(s.roots.collections, low, high)?
@@ -3418,7 +3421,7 @@ pub fn count[K, V](s: Snapshot, t: Shape[K, V], lo: Bound[K], hi: Bound[K]) -> R
     if !same(s.store, t.store) {
         return Error(Foreign)
     }
-    readable(s.roots, t.catalog_key, t.id)?
+    readable(s.roots, t.catalog_key, t.catalog_page, t.id)?
     let low = lower_bytes(t.id, typed_bound(t.key, lo)?, false)?
     let high = lower_bytes(t.id, typed_bound(t.key, hi)?, true)?
     count_page_rows(s.roots.collections, t.id, low, high)
@@ -3551,7 +3554,7 @@ pub fn lookup[J, K, V](tx: Tx, ix: Index[J, K, V], lo: Bound[J], hi: Bound[J]) -
     if !same(tx.store, ix.store) {
         return Error(Foreign)
     }
-    readable(tx.roots, ix.catalog_key, ix.id)?
+    readable(tx.roots, ix.catalog_key, ix.catalog_page, ix.id)?
     let low = index_bound(ix.id, ix.key, lo, false)?
     let high = index_bound(ix.id, ix.key, hi, true)?
     note_read(tx, Span(copied(low)?, copied(high)?))?
@@ -3565,7 +3568,7 @@ pub fn find[J, K, V](s: Snapshot, ix: Index[J, K, V], lo: Bound[J], hi: Bound[J]
     if !same(s.store, ix.store) {
         return Error(Foreign)
     }
-    readable(s.roots, ix.catalog_key, ix.id)?
+    readable(s.roots, ix.catalog_key, ix.catalog_page, ix.id)?
     let cursor = byte_cursor(s.roots.collections, Included(index_bound(ix.id, ix.key, lo, false)?), index_bound(ix.id, ix.key, hi, true)?)?
     indexed_rows(s.roots.collections, ix, take cursor)
 }
@@ -3585,7 +3588,7 @@ pub fn scan_page[K, V](s: Snapshot, t: Shape[K, V], lo: Bound[K], hi: Bound[K], 
     if !same(s.store, t.store) {
         return Error(Foreign)
     }
-    readable(s.roots, t.catalog_key, t.id)?
+    readable(s.roots, t.catalog_key, t.catalog_page, t.id)?
     let high = lower_bytes(t.id, typed_bound(t.key, hi)?, true)?
     let cursor = byte_cursor(s.roots.collections, Included(lower_bytes(t.id, typed_bound(t.key, lo)?, false)?), high)?
     read_page(s, t.id, take high, table_rows(s, t, take cursor), l)
@@ -3596,13 +3599,13 @@ pub fn find_page[J, K, V](s: Snapshot, ix: Index[J, K, V], lo: Bound[J], hi: Bou
     if !same(s.store, ix.store) {
         return Error(Foreign)
     }
-    readable(s.roots, ix.catalog_key, ix.id)?
+    readable(s.roots, ix.catalog_key, ix.catalog_page, ix.id)?
     let high = index_bound(ix.id, ix.key, hi, true)?
     let cursor = byte_cursor(s.roots.collections, Included(index_bound(ix.id, ix.key, lo, false)?), high)?
     read_page(s, ix.id, take high, indexed_rows(s.roots.collections, ix, take cursor)?, l)
 }
 
-fn resume_here(s: Snapshot, store: StoreId, id: u32, catalog_key: Bytes, r: Resume, limits: Limits) -> Result[bool, Error] {
+fn resume_here(s: Snapshot, store: StoreId, id: u32, catalog_key: Bytes, seen: Bytes, r: Resume, limits: Limits) -> Result[bool, Error] {
     if !same(s.store, store) {
         return Error(Foreign)
     }
@@ -3613,12 +3616,12 @@ fn resume_here(s: Snapshot, store: StoreId, id: u32, catalog_key: Bytes, r: Resu
         return Error(Stale(r.source))
     }
     page_limits(limits)?
-    readable(s.roots, catalog_key, id)?
+    readable(s.roots, catalog_key, seen, id)?
     Ok(true)
 }
 
 pub fn scan_next[K, V](s: Snapshot, t: Shape[K, V], take r: Resume, l: Limits) -> Result[Resumed[K, V], Error] {
-    if !resume_here(s, t.store, t.id, t.catalog_key, r, l)? {
+    if !resume_here(s, t.store, t.id, t.catalog_key, t.catalog_page, r, l)? {
         return Ok(Moved(s.head))
     }
     let Resume(store: _, open: _, branch: _, version: _, source: _, high: take high, last: take last) = take r
@@ -3627,7 +3630,7 @@ pub fn scan_next[K, V](s: Snapshot, t: Shape[K, V], take r: Resume, l: Limits) -
 }
 
 pub fn find_next[J, K, V](s: Snapshot, ix: Index[J, K, V], take r: Resume, l: Limits) -> Result[Resumed[K, V], Error] {
-    if !resume_here(s, ix.store, ix.id, ix.catalog_key, r, l)? {
+    if !resume_here(s, ix.store, ix.id, ix.catalog_key, ix.catalog_page, r, l)? {
         return Ok(Moved(s.head))
     }
     let Resume(store: _, open: _, branch: _, version: _, source: _, high: take high, last: take last) = take r
@@ -4163,6 +4166,7 @@ fn stage_table[K, V](mut plan: SchemaPlan, name: String, take key: std.codec.Key
     let resolved = readers(value, c, number)?
     let catalog = index_catalog_in(plan.roots.catalog, c.id)?
     let key_handle = catalog_key_handle(take k)?
+    let seen = catalog_page(plan.roots.catalog)?
     if !found {
         list.push(mut c.schemas, ValueSchema(number: number, fingerprint: fp, schema: take schema))
         c.next += 1
@@ -4173,7 +4177,7 @@ fn stage_table[K, V](mut plan: SchemaPlan, name: String, take key: std.codec.Key
         let next_id = plan.next_table
         keep_schema(mut plan, take roots, live, next_id)?
     }
-    Ok(Table(store: plan.store, id: c.id, epoch: c.epoch, complete: list.len(catalog) == 0, catalog_key: take key_handle, key: key, readers: take resolved, indexes: list.new()))
+    Ok(Table(store: plan.store, id: c.id, epoch: c.epoch, complete: list.len(catalog) == 0, catalog_key: take key_handle, catalog_page: take seen, key: key, readers: take resolved, indexes: list.new()))
 }
 
 pub fn schema_table[K, V](source: Schema, take name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[Table[K, V], Error] {
@@ -4196,7 +4200,7 @@ fn catalog_handle[K, V](store_id: StoreId, catalog: PageTree, writable_handle: b
             let number = prior.number
             let resolved = readers(value, c, number)?
             let complete = writable_handle && list.len(index_catalog_in(catalog, c.id)?) == 0
-            return Ok(Table(store: store_id, id: c.id, epoch: c.epoch, complete: complete, catalog_key: catalog_key_handle(take k)?, key: key, readers: take resolved, indexes: list.new()))
+            return Ok(Table(store: store_id, id: c.id, epoch: c.epoch, complete: complete, catalog_key: catalog_key_handle(take k)?, catalog_page: catalog_page(catalog)?, key: key, readers: take resolved, indexes: list.new()))
         }
     }
     Error(Schema(int.widen(c.next)))
@@ -4309,7 +4313,7 @@ fn catalog_index[J, K, V](store_id: StoreId, catalog: PageTree, mut t: Table[K, 
     }
     t.complete = complete
     t.epoch = catalog_entry_in(catalog, t.catalog_key)?.epoch
-    Ok(Index(store: t.store, id: c.id, catalog_key: catalog_key_handle(take k)?, table: t.id, key: key, primary: t.key, readers: arc.share(t.readers)))
+    Ok(Index(store: t.store, id: c.id, catalog_key: catalog_key_handle(take k)?, catalog_page: catalog_page(catalog)?, table: t.id, key: key, primary: t.key, readers: arc.share(t.readers)))
 }
 
 pub fn drop_table[K, V](mut db: Db, take t: Table[K, V]) -> Result[Ticket, Error] waits {
@@ -6501,7 +6505,28 @@ fn catalog_key_handle(take key: Bytes) -> Result[Arc[Bytes], Error] {
     Ok(arc.new(take key))
 }
 
-fn readable(roots: Roots, key: Bytes, id: u32) -> Result[(), Error] {
+// The catalog root page bytes a handle resolved against, for `readable`: empty
+// when the root is a branch or holds a BLOB cell, whose lookup reads more than
+// the root's bytes.
+fn catalog_page(catalog: PageTree) -> Result[Arc[Bytes], Error] {
+    let image = std.page.image_of(catalog.root)
+    if std.page.level(image) != 0 {
+        return Ok(arc.new(list.new()))
+    }
+    if let Some(_) = std.page.body(catalog.root, 0) {
+        return Ok(arc.new(list.new()))
+    }
+    Ok(arc.new(copied(std.page.payload(image))?))
+}
+
+// I3's catalog check. `page` is the catalog root page the handle was resolved
+// against when that root was one leaf without BLOB cells, and empty otherwise.
+// A lookup in such a leaf reads only its bytes, so a root with the same bytes
+// lists the handle's id under its key and the lookup is skipped.
+fn readable(roots: Roots, key: Bytes, page: Bytes, id: u32) -> Result[(), Error] {
+    if std.page.payload(std.page.image_of(roots.catalog.root)) == page {
+        return Ok(())
+    }
     match get_page_row(roots.catalog, key) {
         Some(raw) => {
             if list.len(raw) < 5 {

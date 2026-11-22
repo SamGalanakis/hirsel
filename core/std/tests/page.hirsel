@@ -67,6 +67,52 @@ fn pack_list_leaf() -> bool {
     check_leaf(expected, 12, Unprefixed, 3, hex("000300000006010000000000000601000000000000"), 4, hex("010100000009040000000000000904000000000000")) && check.xxh3(expected, 0, 89) == 0x94793e19991ff346
 }
 
+fn keyed(suffix: String) -> Bytes {
+    let mut key = hex("6b6b6b6b6b6b6b6b")
+    list.append(mut key, hex(suffix))
+    take key
+}
+
+// Oracle: the first slot at or above key is the number of stored keys below it
+// in byte order, and it is a hit when one equals it.
+fn bisects(image: page.Image, stored: List[Bytes], key: Bytes) -> bool {
+    let mut below = 0u64
+    let mut hit = false
+    for k in stored {
+        match list.compare_bytes(k, key) {
+            Less => {
+                below += 1
+            },
+            Equal => {
+                hit = true
+            },
+            Greater => (),
+        }
+    }
+    page.search(image, key) == (below, hit)
+}
+
+// Suffixes after an eight-byte page prefix that differ only in trailing zero
+// bytes or in width, at most eight bytes and past eight.
+// expect: run search_short_suffixes() = true
+fn search_short_suffixes() -> bool {
+    let suffixes = ["", "00", "0000", "01", "0100", "0102030405060708", "010203040506070809", "ff", "ff00ff"]
+    let mut rows: List[page.Entry] = list.new()
+    let mut stored: List[Bytes] = list.new()
+    for s in suffixes {
+        list.push(mut rows, inline_row(keyed(string.from(s)), hex("00")))
+        list.push(mut stored, keyed(string.from(s)))
+    }
+    let image = result.unwrap(page.decode(clone(page.payload(result.unwrap(page.encode(rows, 0, 1, Collection)))), Collection))
+    let probes = ["", "00", "000000", "0000", "0001", "01", "0101", "0100", "00ff", "02", "0102030405060707", "0102030405060708", "0102030405060709", "01020304050607", "010203040506070800", "010203040506070809", "fe", "ff", "ff00", "ff00ff", "ff00ff00", "ffff"]
+    for s in probes {
+        if !bisects(image, stored, keyed(string.from(s))) {
+            return false
+        }
+    }
+    bisects(image, stored, hex("6b6b6b6b6b6b6b")) && bisects(image, stored, hex("6b6b6b6b6b6b6b6a")) && bisects(image, stored, hex("6b6b6b6b6b6b6b6c")) && bisects(image, stored, hex("6b6b6b6b6b6b6b6aff"))
+}
+
 fn branch_ok(image: page.Image, slot: u64, key: Bytes, ptr: page.PagePtr) -> bool {
     let row = option.unwrap(page.entry(image, slot))
     match row.cell {

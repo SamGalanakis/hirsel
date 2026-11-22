@@ -12,6 +12,7 @@
 //! none of the closure's rows and none of its argument-free instances or row-free
 //! signatures, the same build finds the same things, so it makes the same rows,
 //! functions and signatures in the same order, each numbered past the module's own.
+//! Its recipes are the closure's: each was resolved by row name from those rows alone.
 //!
 //! A closure that asked for no hook and no tuple codec is the layout's walk alone: rows
 //! only, each made from its type and named by it. When the module holds some of its
@@ -53,8 +54,8 @@ struct Closure {
     source_signatures: Vec<Option<SigId>>,
     interned: Vec<((Signature, super::scalar_abi::SignatureAbi), SigId)>,
     abis: Vec<(SigId, super::scalar_abi::SignatureAbi)>,
-    /// How many of `types` had recipes when the build ended.
-    recipes: usize,
+    /// The recipes of the first rows of `types`, as the build ended with them.
+    recipes: Vec<hirsel_core_layout::Recipe>,
     /// The argument-free instances and row-free signatures, which a module may hold
     /// already.
     open_instances: Vec<usize>,
@@ -110,7 +111,7 @@ impl Emitter {
         };
         match built.flatten() {
             Some(closure) if self.holds_none_of(&closure) && self.recipes_ready(p, &closure) => {
-                Some(self.copy_closure(p, &closure))
+                Some(self.copy_closure(&closure))
             }
             Some(closure) => match self.held_rows(&closure) {
                 Some(held) => Some(self.copy_over(&closure, &held)),
@@ -185,13 +186,13 @@ impl Emitter {
     /// refused extension leaves the build to run as before.
     fn recipes_ready(&mut self, p: &Program, c: &Closure) -> bool {
         let rows = self.module.types.len();
-        if c.recipes == 0 || self.recipes.len() == rows {
+        if c.recipes.is_empty() || self.recipes.len() == rows {
             return true;
         }
         self.recipe(p, TypeId(rows as u32 - 1), rows).is_some()
     }
 
-    fn copy_closure(&mut self, p: &Program, c: &Closure) -> TypeRef {
+    fn copy_closure(&mut self, c: &Closure) -> TypeRef {
         let rows = self.module.types.len() as u32;
         let functions = self.module.functions.len() as u32;
         let instances = self.module.instances.len() as u32;
@@ -226,19 +227,19 @@ impl Emitter {
                 body: None,
                 versioned: f.versioned,
             }));
-        // The fresh build's recipes covered its first `c.recipes` rows, each made from
-        // those rows alone: extend over exactly them, then add the rest.
-        for i in 0..c.recipes {
-            let s = shape_at(i);
-            self.types.insert(s.name.clone(), TypeRef(rows + i as u32));
-            self.module.types.push(s);
+        // The fresh build's recipes covered its first rows, each made from those rows
+        // alone and resolved by row name, as an extension over them here resolves
+        // them: the module's recipes reach its last row (`recipes_ready`), so they are
+        // the closure's, numbered past the module's.
+        if !c.recipes.is_empty() {
+            debug_assert_eq!(self.recipes.len(), rows as usize);
+            self.recipes.extend(c.recipes.iter().map(|r| {
+                let mut r = r.clone();
+                r.map_refs(|x| TypeRef(x.0 + rows));
+                r
+            }));
         }
-        if c.recipes > 0 {
-            let last = self.module.types.len();
-            let extended = self.recipe(p, TypeId(last as u32 - 1), last).is_some();
-            debug_assert!(extended, "the fresh build extended these recipes");
-        }
-        for i in c.recipes..c.types.len() {
+        for i in 0..c.types.len() {
             let s = shape_at(i);
             self.types.insert(s.name.clone(), TypeRef(rows + i as u32));
             self.module.types.push(s);
@@ -330,7 +331,7 @@ impl Closure {
         });
         Some(Closure {
             row,
-            recipes: e.recipes.len(),
+            recipes: e.recipes,
             source_signatures: (0..functions)
                 .map(|f| e.source_signatures.get(FuncId(f as u32)))
                 .collect(),

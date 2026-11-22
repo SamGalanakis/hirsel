@@ -1664,7 +1664,7 @@ function advance(now) {
 }
 function frame() { lastFrame = performance.now(); advance(lastFrame); requestAnimationFrame(frame); }
 /* watchdog: where frames are not being produced (headless capture), keep the fixed-step clock going */
-setInterval(() => { const now = performance.now(); if (!reduced && !document.hidden && now - lastFrame > 60) advance(now); }, 33);
+if (!reduced) setInterval(() => { const now = performance.now(); if (!document.hidden && now - lastFrame > 60) advance(now); }, 33);
 /* a hidden tab draws nothing; on return the clock picks up where it was, not where the wall clock is */
 document.addEventListener('visibilitychange', () => { last = null; acc = 0; });
 

@@ -7020,7 +7020,14 @@ fn wire_read[C: send](take x: WireRead[C]) -> () waits {
     let mut r = take initial
     let mut probing = false
     loop {
-        if let Error(_) = channel.receive(credits) { return }
+        match channel.try_receive(credits) {
+            Ok(_) => {},
+            Error(Closed) => return,
+            Error(Empty) => {
+                if let Error(_) = std.wsock.settle(mut r) { wire_return_reader(to, wire_close_control(1013u16), take r); return }
+                if let Error(_) = channel.receive(credits) { return }
+            },
+        }
         let next: WireInput = loop {
             let end = std.clock.deadline_after_ms(host.mono_ns(clock), config.idle_ms)
             let packet = loop {

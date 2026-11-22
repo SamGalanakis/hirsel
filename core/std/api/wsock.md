@@ -20,24 +20,34 @@ failure or cancellation. The runner calls `hello_accepted` only after decoding
 and admitting Hello; `welcomed` clears the separate Hello deadline.
 
 `server` consumes a Socket and pending lease, validates the bounded request
-and source, writes the 101 response and returns `Upgraded`. Its reader retains
-the original 8192-byte input buffer and consumed cursor, including frame
-read-ahead. Its timers start Hello at the completed 101. `server_with` calls a
+and source, writes the 101 response and returns `Upgraded`. Its reader keeps
+only the request's frame read-ahead, copied into storage of exactly its length
+and charged to the connection; the 8192-byte request buffer is released. Its timers start Hello at the completed 101. `server_with` calls a
 source policy after sanitization and before 101, under the original accept
 deadline; refusal is 503. `hello_deadline` exposes the fixed Hello deadline to
 the runner owner. `refuse_socket` sends a bounded HTTP refusal while keeping
 its socket halves inside wsock. `client` uses sixteen
 bytes from host.random for its challenge, requires hirsel.2, rejects extensions,
-and retains response read-ahead. It returns `Connected` and a client encoder.
+and keeps response read-ahead the same way. It returns `Connected` and a client encoder.
 
-`read` drives the pure decoder over the ReadHalf with 8192-byte scratch.
+`read` drives the pure decoder over the ReadHalf. An idle reader holds no
+receive buffer: `refill` returns its input, waits with `host.recv_ready`
+([NET-1](../../../docs/spec/net.md#net-1-socket-operation-declarations)), and
+only then checks out an 8192-byte loan for one `recv_bounded`. The loan is
+charged to the limit current in the calling task (MEM-19, MEM-20), so a
+connection pays for a loan only while it holds one; there is no shared buffer
+pool. A receive that times out before the deadline is stale readiness: the
+loan returns and the reader waits again. A refused loan is `Allocation`.
+`settle` trades a loan that still holds unread read-ahead for storage of only
+the unread tail, for an owner about to park the reader.
 An incomplete message has a 30-second deadline from its first partial frame.
 Arriving bytes and interleaved controls leave that deadline fixed. Expiry
 returns `Protocol(1001)`.
 `decode_buffered` and `refill` separate parsing from socket waits. Assembly
 allocates in the task calling `decode_buffered`. The runner moves the reader to
-its shared transport allocation task for this step and refills the scratch in
-the reader child. Moving the resulting message preserves its allocation charge.
+its shared transport allocation task for this step, refills in the reader
+child, and settles there before waiting for read credit, so loans and tails
+are charged to the reader child. Moving the resulting message preserves its allocation charge.
 
 `outbound` and `encode` run at the allocating owner. The client encoder requests
 four fresh host.random bytes on every frame, including controls. An encoded

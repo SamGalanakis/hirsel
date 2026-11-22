@@ -564,11 +564,42 @@ pub fn decode_buffered(mut r: Reader) -> Result[Option[websocket.Event], Error] 
     }
 }
 
-/// Reuses the reader's fixed scratch after decode_buffered returns None.
-pub fn refill(mut r: Reader, deadline: Until) -> Result[(), Error] waits {
-    list.clear(mut r.input)
+/// Bytes lent per receive. A reader holds a loan only between readiness and
+/// the point where its decoded bytes are used up or settled.
+const SCRATCH: u64 = 8192
+
+/// The unread bytes of input from at, in storage of exactly their length.
+fn unread(input: Bytes, at: u64) -> Result[Bytes, Error] {
+    let mut kept: Bytes = list.new()
+    if at < list.len(input) {
+        if let Error(c) = list.try_reserve(mut kept, list.len(input) - at) {
+            return Error(Allocation(c))
+        }
+        list.append(mut kept, list.slice(input, at, list.len(input)))
+    }
+    Ok(take kept)
+}
+
+/// Trades a receive loan holding read-ahead for connection-owned storage of
+/// only the unread tail, so a reader parked by its owner holds no loan. With
+/// nothing unread it releases the input. Call it before a wait the owner
+/// controls; refill returns the loan itself before waiting for readiness.
+pub fn settle(mut r: Reader) -> Result[(), Error] {
+    if list.capacity(r.input) == list.len(r.input) - r.cursor {
+        return Ok(())
+    }
+    let kept = unread(r.input, r.cursor)?
+    r.input = take kept
     r.cursor = 0
-    let max = list.capacity(r.input)
+    Ok(())
+}
+
+/// Called after decode_buffered returns None, which leaves no unread input.
+/// Returns the reader's input before waiting for readiness with no buffer,
+/// then checks out an 8192-byte loan for one bounded receive. A receive that
+/// times out before the deadline is stale readiness: its loan returns and the
+/// reader waits again.
+pub fn refill(mut r: Reader, deadline: Until) -> Result[(), Error] waits {
     let read_until = match r.message_end {
         Some(end) => match deadline {
             At(_, earlier) => if earlier < end {
@@ -580,19 +611,40 @@ pub fn refill(mut r: Reader, deadline: Until) -> Result[(), Error] waits {
         },
         None => deadline
     }
-    match host.recv_bounded(mut r.half, mut r.input, max, read_until) {
-        Ok(0) => Error(Eof),
-        Ok(_) => Ok(()),
-        Error(TimedOut) => if message_expired(r, host.mono_ns(r.clock)) {
+    loop {
+        let _ = replace(mut r.input, list.new())
+        r.cursor = 0
+        let ready = match host.recv_ready(mut r.half, read_until) {
+            Ok(()) => true,
+            Error(TimedOut) => false,
+            Error(e) => return Error(Network(e))
+        }
+        if ready {
+            let mut loan: Bytes = list.new()
+            if let Error(c) = list.try_reserve(mut loan, SCRATCH) {
+                return Error(Allocation(c))
+            }
+            match host.recv_bounded(mut r.half, mut loan, SCRATCH, read_until) {
+                Ok(0) => return Error(Eof),
+                Ok(_) => {
+                    r.input = take loan
+                    return Ok(())
+                },
+                Error(TimedOut) => if !expired(read_until) {
+                    continue
+                },
+                Error(e) => return Error(Network(e))
+            }
+        }
+        return if message_expired(r, host.mono_ns(r.clock)) {
             Error(Protocol(1001u16))
         } else {
             Error(Network(TimedOut))
-        },
-        Error(e) => Error(Network(e))
+        }
     }
 }
 
-/// Reads one protocol event with bounded 8192-byte scratch. An incomplete
+/// Reads one protocol event, lending 8192-byte scratch only after readiness. An incomplete
 /// message has one absolute deadline across reads and intervening controls.
 pub fn read(mut r: Reader, deadline: Until) -> Result[websocket.Event, Error] waits {
     loop {
@@ -826,7 +878,8 @@ fn upgrade_request(take request: Request, take slot: Pending, peer: Ip, ingress:
                 return Error(Http(503))
             }
             send_response(mut writer, response, string.as_bytes(""), deadline)?
-            Ok(Upgraded(reader: Reader(half: take reader, input: take input, cursor: end, decoder: websocket.decoder(Server, config.max_frame), clock, message_end: None), writer: Writer(half: take writer, buffer: write_buffer()), source: ip, timers: timers(config, host.mono_ns(clock)), pending: take slot))
+            let kept = unread(input, end)?
+            Ok(Upgraded(reader: Reader(half: take reader, input: take kept, cursor: 0, decoder: websocket.decoder(Server, config.max_frame), clock, message_end: None), writer: Writer(half: take writer, buffer: write_buffer()), source: ip, timers: timers(config, host.mono_ns(clock)), pending: take slot))
         },
         Refused(code) => {
             let _ = refuse(mut writer, code, deadline)
@@ -866,7 +919,10 @@ pub fn client(take socket: Socket, host_name: Bytes, config: Config, clock: Cloc
             return Error(Network(TimedOut))
         }
         match websocket.client(input, key, true) {
-            Ready(end, true) => return Ok(Connected(reader: Reader(half: take input_half, input: take input, cursor: end, decoder: websocket.decoder(Client, config.max_frame), clock, message_end: None), writer: Writer(half: take output_half, buffer: write_buffer()), outgoing: outbound(Client, config, Some(random))?, timers: timers(config, host.mono_ns(clock)))),
+            Ready(end, true) => {
+                let kept = unread(input, end)?
+                return Ok(Connected(reader: Reader(half: take input_half, input: take kept, cursor: 0, decoder: websocket.decoder(Client, config.max_frame), clock, message_end: None), writer: Writer(half: take output_half, buffer: write_buffer()), outgoing: outbound(Client, config, Some(random))?, timers: timers(config, host.mono_ns(clock))))
+            },
             Ready(_, false) => return Error(Http(400)),
             Failed(code) => return Error(Http(code)),
             Pending => {}

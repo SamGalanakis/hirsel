@@ -74,7 +74,7 @@ fn board(tx: store.Tx, h: Handles, take _arg: ()) -> Result[store.runner.Cover, 
 
 fn place(mut registry: Registry) -> Result[(), store.runner.RegisterError] {
     store.runner.transact(mut registry, code.describe(toggle), 65536u64, store.runner.DEFAULT_STEPS)?
-    store.runner.query(mut registry, code.describe(board), 1048576u64, store.runner.DEFAULT_STEPS)
+    store.runner.query(mut registry, code.describe(board), std.codec.key_u32(), std.codec.of_bytes(), 1048576u64, store.runner.DEFAULT_STEPS)
 }
 
 fn asset(path: Bytes) -> Option[std.wsock.Asset] {

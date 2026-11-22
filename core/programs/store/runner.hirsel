@@ -714,12 +714,14 @@ fn adapt_granted[G: send, A, R](take j: Job[G, A, R]) -> Outcome waits {
     match take ran { Ok(take o) => take o, Error(e) => Failed(OutOfTime(e.steps)) }
 }
 
-// Key = identity ++ fingerprint(A) ++ fingerprint(reply), each fingerprint u64 little-endian.
-// The reply is the type the Returned bytes carry: Result[R, E] for transact, R for compute
-// and granted (RUNNER-SPEC v2.11.2), so a change to E alone changes the Key.
+// Key = identity ++ fingerprint(A) ++ fingerprint(result), each fingerprint u64 little-endian.
+// Calls describe their Returned payload. Queries describe the ordered key and current value.
 fn described[A, R](identity: View[Bytes], revision: Option[View[Bytes]], kind: Kind, ca: std.codec.Codec[A], cr: std.codec.Codec[R]) -> Result[(Bytes, Exported), std.codec.EncodeError] {
+    described_result(identity, revision, kind, ca, std.codec.schema(cr)?)
+}
+
+fn described_result[A](identity: View[Bytes], revision: Option[View[Bytes]], kind: Kind, ca: std.codec.Codec[A], take result: Bytes) -> Result[(Bytes, Exported), std.codec.EncodeError] {
     let args = std.codec.schema(ca)?
-    let result = std.codec.schema(cr)?
     let mut key: Bytes = list.with_capacity(list.len(identity) + 16u64)
     list.append(mut key, identity)
     let args_fp = std.codec.fingerprint_of(args)
@@ -1208,6 +1210,7 @@ pub fn register_attempt[G: send, H: send, F, A: codec, R: codec](mut registered:
 pub opaque type Cover: send {
     low: Bytes,
     high: Bytes,
+    schemas: Arc[store.RowSchemas],
     value: own[send] fn(store.Change) -> Result[Option[Bytes], store.Error]
 }
 
@@ -1219,7 +1222,7 @@ pub fn cover[K, V](t: store.Shape[K, V], lo: store.Bound[K], hi: store.Bound[K])
     }
     let mine: store.Shape[K, V] = clone(t)
     let made = fn(c: store.Change) -> Result[Option[Bytes], store.Error] { store.published_value(mine, c) }
-    Ok(Cover(low: take low, high: take high, value: made))
+    Ok(Cover(low: take low, high: take high, schemas: store.row_schemas(t), value: made))
 }
 
 // What a query run at a Snapshot gives the publisher: its Cover and read set, an Outcome
@@ -1245,7 +1248,7 @@ fn query_body[H, A](body: QueryBody[H, A], tx: store.Tx, h: H, caller: Caller, t
 // fault, or exhaustion after entry, ends the subscription with Failed. The run is isolated
 // inside `look`'s body, so `look` returns the reads it made before it stopped: that partial
 // read log is the ended entry (§3 "Ended entries"). `caller` is the subscribing session's.
-fn adapt_query[H: send, A](body: QueryBody[H, A], ca: std.codec.Codec[A], s: store.Snapshot, h: H, caller: Caller, arg: Bytes, n: u64, steps: u64, prior: store.Snapshot, old: Option[View[Cover]], sub: u32, rows: Log[Row]) -> Queried {
+fn adapt_query[H: send, A](body: QueryBody[H, A], ca: std.codec.Codec[A], schemas: store.RowSchemas, s: store.Snapshot, h: H, caller: Caller, arg: Bytes, n: u64, steps: u64, prior: store.Snapshot, old: Option[View[Cover]], sub: u32, rows: Log[Row]) -> Queried {
     let looked = bound bytes n {
         store.look(s, None, scoped fn(tx: store.Tx) -> Result[Cover, Queried] {
           let ran = isolate(fn() -> Result[Result[Cover, Queried], OutOfTime] {
@@ -1256,6 +1259,9 @@ fn adapt_query[H: send, A](body: QueryBody[H, A], ca: std.codec.Codec[A], s: sto
                     Error(c) => return Ok(Error(Stopped(Failed(OutOfBytes(room(c)))))),
                 },
                 Error(e) => return Ok(Error(Stopped(Refused(Malformed(bad(e)))))),
+            }
+            if c.schemas.key != schemas.key || c.schemas.value != schemas.value {
+                fail("runner: query Cover schema does not match registration")
             }
             let projected = match old {
                 Some(previous) => rerun_rows(prior, previous, s, c, sub, rows),
@@ -1295,22 +1301,37 @@ fn adapt_query[H: send, A](body: QueryBody[H, A], ca: std.codec.Codec[A], s: sto
 // Rule 2's two query kinds. `query` registers a caller-independent body, which has no Caller
 // parameter; `query_as` registers a caller-dependent one, which takes the Caller. The kind is
 // the body's type, so a body that reads the Caller cannot be registered with `query`.
-pub fn query[G: send, H: send, A: codec](mut r: Registry[G, H], f: StaticFn[fn(store.Tx, H, take A) -> Result[Cover, Capacity]], n: u64, s: u64) -> Result[(), RegisterError] {
-    register_query(mut r, Plain(f), n, s)
+pub fn query[G: send, H: send, A: codec, K, V](mut r: Registry[G, H], f: StaticFn[fn(store.Tx, H, take A) -> Result[Cover, Capacity]], ck: std.codec.Key[K], cv: std.codec.Codec[V], n: u64, s: u64) -> Result[(), RegisterError] {
+    register_query(mut r, Plain(f), ck, cv, n, s)
 }
 
-pub fn query_as[G: send, H: send, A: codec](mut r: Registry[G, H], f: StaticFn[fn(store.Tx, H, Caller, take A) -> Result[Cover, Capacity]], n: u64, s: u64) -> Result[(), RegisterError] {
-    register_query(mut r, As(f), n, s)
+pub fn query_as[G: send, H: send, A: codec, K, V](mut r: Registry[G, H], f: StaticFn[fn(store.Tx, H, Caller, take A) -> Result[Cover, Capacity]], ck: std.codec.Key[K], cv: std.codec.Codec[V], n: u64, s: u64) -> Result[(), RegisterError] {
+    register_query(mut r, As(f), ck, cv, n, s)
 }
 
-// A query's rows travel in Batches under their tables' codecs, so its described result is
-// the unit schema.
-fn register_query[G: send, H: send, A: codec](mut r: Registry[G, H], body: QueryBody[H, A], n: u64, s: u64) -> Result[(), RegisterError] {
+fn query_codecs[K, V](ck: std.codec.Key[K], cv: std.codec.Codec[V]) -> Result[store.RowSchemas, std.codec.EncodeError] {
+    Ok(store.RowSchemas(key: std.codec.key_schema(ck)?, value: std.codec.schema(cv)?))
+}
+
+fn encode_query_schemas(schemas: store.RowSchemas) -> Result[Bytes, std.codec.EncodeError] {
+    let c: std.codec.Codec[store.RowSchemas] = std.codec.of()
+    let mut out: Bytes = list.new()
+    std.codec.encode(c, schemas, mut out)?
+    Ok(take out)
+}
+
+// The bytes hashed into a query's result fingerprint and sent in Describe.
+pub fn query_result_schema[K, V](ck: std.codec.Key[K], cv: std.codec.Codec[V]) -> Result[Bytes, std.codec.EncodeError] {
+    encode_query_schemas(query_codecs(ck, cv)?)
+}
+
+fn register_query[G: send, H: send, A: codec, K, V](mut r: Registry[G, H], body: QueryBody[H, A], ck: std.codec.Key[K], cv: std.codec.Codec[V], n: u64, s: u64) -> Result[(), RegisterError] {
     let ca: std.codec.Codec[A] = std.codec.of()
-    let cr: std.codec.Codec[()] = std.codec.of_unit()
+    let schemas = query_codecs(ck, cv) ?=> |_| Bounds
+    let result = encode_query_schemas(schemas) ?=> |_| Bounds
     let described_query = match body {
-        Plain(f) => described(code.identity(f), code.revision(f), Query, ca, cr),
-        As(f) => described(code.identity(f), code.revision(f), Query, ca, cr),
+        Plain(f) => described_result(code.identity(f), code.revision(f), Query, ca, take result),
+        As(f) => described_result(code.identity(f), code.revision(f), Query, ca, take result),
     }
     let (take key, take d) = match take described_query {
         Ok(take kd) => take kd,
@@ -1318,7 +1339,7 @@ fn register_query[G: send, H: send, A: codec](mut r: Registry[G, H], body: Query
     }
     register_check(mut r, key, ca, n, s)?
     let made = fn(at: store.Snapshot, h: H, caller: Caller, arg: Bytes, prior: store.Snapshot, old: Option[View[Cover]], sub: u32, rows: Log[Row]) -> Queried {
-        adapt_query(body, ca, at, h, caller, arg, n, s, prior, old, sub, rows)
+        adapt_query(body, ca, schemas, at, h, caller, arg, n, s, prior, old, sub, rows)
     }
     insert(mut r, take key, take d, Query(n, s, made))
 }
@@ -5446,11 +5467,11 @@ fn q_range_prefix(tx: store.Tx, h: Qh, take limit: u32) -> Result[Cover, Capacit
 }
 
 fn subs_place(mut r: Registry[(), Qh]) -> Result[(), RegisterError] {
-    query(mut r, code.describe(q1), 65536u64, DEFAULT_STEPS)?
-    query(mut r, code.describe(qf), 65536u64, DEFAULT_STEPS)?
-    query(mut r, code.describe(q_late), 65536u64, DEFAULT_STEPS)?
-    query(mut r, code.describe(q_moving), 65536u64, DEFAULT_STEPS)?
-    query(mut r, code.describe(q_range_prefix), 65536u64, DEFAULT_STEPS)
+    query(mut r, code.describe(q1), std.codec.key_u64(), std.codec.of_u64(), 65536u64, DEFAULT_STEPS)?
+    query(mut r, code.describe(qf), std.codec.key_u64(), std.codec.of_u64(), 65536u64, DEFAULT_STEPS)?
+    query(mut r, code.describe(q_late), std.codec.key_u64(), std.codec.of_u64(), 65536u64, DEFAULT_STEPS)?
+    query(mut r, code.describe(q_moving), std.codec.key_u64(), std.codec.of_u64(), 65536u64, DEFAULT_STEPS)?
+    query(mut r, code.describe(q_range_prefix), std.codec.key_u64(), std.codec.of_u64(), 65536u64, DEFAULT_STEPS)
 }
 
 fn subs_handles(mut db: store.Db) -> Result[Qh, store.Error] waits {
@@ -5461,8 +5482,8 @@ fn subs_handles(mut db: store.Db) -> Result[Qh, store.Error] waits {
 
 fn query_key(f: StaticFn[fn(store.Tx, Qh, take u32) -> Result[Cover, Capacity]]) -> Bytes {
     let ca: std.codec.Codec[u32] = std.codec.of()
-    let cr: std.codec.Codec[()] = std.codec.of_unit()
-    let (take k, _) = result.unwrap(described(code.identity(f), None, Query, ca, cr))
+    let result_schema = result.unwrap(query_result_schema(std.codec.key_u64(), std.codec.of_u64()))
+    let (take k, _) = result.unwrap(described_result(code.identity(f), None, Query, ca, take result_schema))
     k
 }
 
@@ -6626,7 +6647,7 @@ fn accounts_q(tx: store.Tx, h: Ah, take _arg: u32) -> Result[Cover, Capacity] {
 }
 
 fn accounts_place(mut r: Registry[(), Ah]) -> Result[(), RegisterError] {
-    query(mut r, code.describe(accounts_q), 65536u64, DEFAULT_STEPS)
+    query(mut r, code.describe(accounts_q), std.codec.key_u64(), std.codec.make(new_put, new_take, new_schema, 16u64), 65536u64, DEFAULT_STEPS)
 }
 
 fn push_bytes(mut out: Bytes, x: u8, n: u64) {
@@ -6688,8 +6709,8 @@ pub fn law_rows_normalized(c: Clock, r: Random) -> bool waits {
         Error(_) => return false,
     }
     let ca: std.codec.Codec[u32] = std.codec.of()
-    let cr: std.codec.Codec[()] = std.codec.of_unit()
-    let (take key, _) = result.unwrap(described(code.identity(code.describe(accounts_q)), None, Query, ca, cr))
+    let result_schema = result.unwrap(query_result_schema(std.codec.key_u64(), nc))
+    let (take key, _) = result.unwrap(described_result(code.identity(code.describe(accounts_q)), None, Query, ca, take result_schema))
     let mut b = Board(r: take reg, h: take h, base: store.snapshot(db), newest: None, subs: subscriptions())
     // G3: the initial result, from span_changes, holds row 1 normalized from schema 0.
     let initial = at_base(mut b, 0u64, 7u32, take key, no_arg())
@@ -6721,7 +6742,7 @@ fn faulting_new_take(b: Bytes, mut at: u64) -> Result[New, std.codec.DecodeError
 }
 
 fn projection_place(mut r: Registry[(), Ah]) -> Result[(), RegisterError] {
-    query(mut r, code.describe(accounts_q), 65536u64, 4096u64)
+    query(mut r, code.describe(accounts_q), std.codec.key_u64(), std.codec.make(new_put, new_take, new_schema, 16u64), 65536u64, 4096u64)
 }
 
 fn faulting_projection(c: Clock, r: Random, balance: u64) -> bool waits {
@@ -6737,7 +6758,8 @@ fn faulting_projection(c: Clock, r: Random, balance: u64) -> bool waits {
     let h = Ah(t: store.shape(current))
     let reg = result.unwrap(placed(code.describe(projection_place), 1048576u64))
     let ca: std.codec.Codec[u32] = std.codec.of()
-    let (take key, _) = result.unwrap(described(code.identity(code.describe(accounts_q)), None, Query, ca, std.codec.of_unit()))
+    let result_schema = result.unwrap(query_result_schema(std.codec.key_u64(), nc))
+    let (take key, _) = result.unwrap(described_result(code.identity(code.describe(accounts_q)), None, Query, ca, take result_schema))
     let mut b = Board(r: take reg, h: take h, base: store.snapshot(db), newest: None, subs: subscriptions())
     let o = at_base(mut b, 1u64, 7u32, take key, no_arg())
     !o.reset && list.len(o.rows) == 0u64 && list.len(o.complete) == 0u64

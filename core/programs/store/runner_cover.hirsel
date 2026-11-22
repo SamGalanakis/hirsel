@@ -36,16 +36,16 @@ fn span(tx: store.Tx, h: Hc, take n: u64) -> Result[runner.Cover, Capacity] {
 
 // The query's bound also holds the rows it projects into the initial Batch: 1,954 in mode 1.
 fn place(mut r: Spans) -> Result[(), runner.RegisterError] {
-    runner.query(mut r, code.describe(span), 524288u64, runner.DEFAULT_STEPS)
+    runner.query(mut r, code.describe(span), std.codec.key_u64(), std.codec.of_u64(), 524288u64, runner.DEFAULT_STEPS)
 }
 
-// identity ++ fingerprint(A) ++ fingerprint(()), as a client builds a query's key.
+// identity ++ fingerprint(A) ++ fingerprint(row schemas), as a client builds a query's key.
 fn k_span() -> Bytes {
     let mut key: Bytes = list.new()
     list.append(mut key, code.identity(code.describe(span)))
     std.codec.put_u64(result.unwrap(std.codec.fingerprint(std.codec.of_u64())), mut key)
-    let unit: std.codec.Codec[()] = std.codec.of_unit()
-    std.codec.put_u64(result.unwrap(std.codec.fingerprint(unit)), mut key)
+    let result_schema = result.unwrap(runner.query_result_schema(std.codec.key_u64(), std.codec.of_u64()))
+    std.codec.put_u64(std.codec.fingerprint_of(result_schema), mut key)
     key
 }
 

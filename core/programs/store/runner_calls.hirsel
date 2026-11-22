@@ -147,8 +147,8 @@ fn place(mut r: Calls) -> Result[(), runner.RegisterError] {
     runner.transact(mut r, code.describe(flood), 524288u64, runner.DEFAULT_STEPS)?
     runner.transact(mut r, code.describe(hung), 65536u64, 65536u64)?
     runner.compute(mut r, code.describe(answer), 65536u64, runner.DEFAULT_STEPS)?
-    runner.query(mut r, code.describe(everything), 65536u64, runner.DEFAULT_STEPS)?
-    runner.query_as(mut r, code.describe(mine), 65536u64, runner.DEFAULT_STEPS)
+    runner.query(mut r, code.describe(everything), std.codec.key_u64(), std.codec.of_u64(), 65536u64, runner.DEFAULT_STEPS)?
+    runner.query_as(mut r, code.describe(mine), std.codec.key_u64(), std.codec.of_u64(), 65536u64, runner.DEFAULT_STEPS)
 }
 
 // subs_wired's query: keys 0 to 1,000 of "data".
@@ -164,16 +164,21 @@ fn mine(tx: store.Tx, h: Hd, caller: runner.Caller, take _arg: u32) -> Result[ru
     runner.cover(store.shape(h.t), Included(low), Included(1000u64))
 }
 
+fn query_key(id: View[Bytes]) -> Bytes {
+    let mut key: Bytes = list.new()
+    list.append(mut key, id)
+    std.codec.put_u64(result.unwrap(std.codec.fingerprint(std.codec.of_u32())), mut key)
+    let result_schema = result.unwrap(runner.query_result_schema(std.codec.key_u64(), std.codec.of_u64()))
+    std.codec.put_u64(std.codec.fingerprint_of(result_schema), mut key)
+    key
+}
+
 fn k_mine() -> Bytes {
-    let ca: std.codec.Codec[u32] = std.codec.of()
-    let cr: std.codec.Codec[()] = std.codec.of_unit()
-    key_of(code.identity(code.describe(mine)), ca, cr)
+    query_key(code.identity(code.describe(mine)))
 }
 
 fn k_everything() -> Bytes {
-    let ca: std.codec.Codec[u32] = std.codec.of()
-    let cr: std.codec.Codec[()] = std.codec.of_unit()
-    key_of(code.identity(code.describe(everything)), ca, cr)
+    query_key(code.identity(code.describe(everything)))
 }
 
 const N_PLACE: u64 = 1048576u64

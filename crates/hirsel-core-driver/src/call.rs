@@ -130,9 +130,8 @@ fn run_with(
         })?;
     let flags: Vec<String> = call.cloned().collect();
     let args = Schema::read(&entry.args)?;
-    let result = Schema::read(&entry.result)?;
     if flags.iter().any(|f| f == "--help" || f == "-h") {
-        print!("{}", entry_help(name, entry, &args, &result));
+        print!("{}", entry_help(name, entry, &args)?);
         return Ok(0);
     }
     if entry.kind == 2 {
@@ -141,6 +140,7 @@ fn run_with(
         )
         .into());
     }
+    let result = Schema::read(&entry.result)?;
     // Every argument is typed before the Frame probe or any connection.
     let argument = arguments(&args, &flags)?;
     let url = Url::parse(
@@ -323,21 +323,35 @@ fn listing(description: &Describe, entries: &[(String, &Exported)]) -> Result<St
     );
     for (name, entry) in entries {
         let args = Schema::read(&entry.args)?;
-        let result = Schema::read(&entry.result)?;
+        let (result, _) = result_types(entry)?;
         let flags = flag_lines(&args).join(" ");
         out.push_str(&format!(
             "  {name} ({}) {}{}-> {}\n",
             KINDS[entry.kind as usize],
             flags,
             if flags.is_empty() { "" } else { " " },
-            type_name(&result.root, &result.definitions)
+            result
         ));
     }
     out.push_str("\nUse -- ENTRY --help for one entry's flags and types.\n");
     Ok(out)
 }
 
-fn entry_help(name: &str, entry: &Exported, args: &Schema, result: &Schema) -> String {
+fn result_types(entry: &Exported) -> Result<(String, Vec<Schema>), Error> {
+    let name = |schema: &Schema| type_name(&schema.root, &schema.definitions);
+    if entry.kind == 2 {
+        let (key, row) = entry.row_schemas()?;
+        Ok((
+            format!("rows[{}, {}]", name(&key), name(&row)),
+            vec![key, row],
+        ))
+    } else {
+        let result = Schema::read(&entry.result)?;
+        Ok((name(&result), vec![result]))
+    }
+}
+
+fn entry_help(name: &str, entry: &Exported, args: &Schema) -> Result<String, Error> {
     let mut out = format!("{name} ({})\n", KINDS[entry.kind as usize]);
     let flags = flag_lines(args);
     if flags.is_empty() {
@@ -346,11 +360,9 @@ fn entry_help(name: &str, entry: &Exported, args: &Schema, result: &Schema) -> S
     for flag in flags {
         out.push_str(&format!("  {flag}\n"));
     }
-    out.push_str(&format!(
-        "returns {}\n",
-        type_name(&result.root, &result.definitions)
-    ));
-    for schema in [args, result] {
+    let (result, result_schemas) = result_types(entry)?;
+    out.push_str(&format!("returns {result}\n"));
+    for schema in std::iter::once(args).chain(&result_schemas) {
         for d in &schema.definitions {
             out.push_str(&format!(
                 "  {} = {}\n",
@@ -360,7 +372,7 @@ fn entry_help(name: &str, entry: &Exported, args: &Schema, result: &Schema) -> S
         }
     }
     out.push_str("Composite values are JSON; see docs/spec/sdk.md, \"Calling an entry from the terminal\".\n");
-    out
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------

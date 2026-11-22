@@ -26,7 +26,8 @@ retain every tag, including Some(None) and Some(unit). Nominal `via` types
 expose their representation type.
 
 `entries.js` exports the Want list, launch identity and `bind(client)`, whose
-result supplies `call.<name>` and `subscribe.<name>` entry stubs. Names are the
+result supplies `call.<name>`, `subscribe.<name>` and `subscribeDecoded.<name>`
+entry stubs. Names are the
 percent-decoded final component of an entry's definition identity. Duplicate
 names cause `DuplicateStubName(a, b)` before any output is written.
 
@@ -37,12 +38,22 @@ callback. The runtime removes the matching subscription before delivering the
 decoded `Ended` reason once. An empty completed Batch delivers `[]` to `onRows`.
 Reset and reconnect resubscribe without calling `onEnd`.
 
+Use `api.subscribeDecoded.<name>(args, onRows, onEnd?)` for typed rows. Each
+row has `sub`, the numeric `table` id, the decoded `key`, and `value` as an
+`Option` of the decoded row type. The wrapper reads the four-byte table id
+and decodes the remaining key bytes with the table's ordered key codec.
+`codec.js` exports the key and row value codecs as `Key<i>` and `RowValue<i>`
+for the query at index `i` in `want`. Use `api.subscribe.<name>` for wire rows.
+
+For a query, `Described.result` is the ordered key schema and the value schema
+in that order, each encoded as `std.codec` Bytes. `result_fp` fingerprints
+that pair so changing either schema changes the Want.
+
 Compute and Granted calls return `Promise<Outcome<R>>`. Transact calls return
 `Promise<Outcome<Result<R, E>>>`: the Returned payload contains the complete
 Result tag and payload, including a typed Error after an aborted transaction.
-Described.result is the exact Returned payload schema, including Result for
-Transact. There is no separate error schema. The child fingerprints this full
-result schema, so changing E changes result_fp too.
+For calls, Described.result is the exact Returned payload schema. The child
+fingerprints the full Result for Transact, so changing E changes result_fp too.
 
 The launch identity contains digest bytes, target and `n_place`. Fingerprints
 come from the described program; the generator does not implement fingerprinting.

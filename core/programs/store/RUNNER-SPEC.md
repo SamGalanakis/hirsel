@@ -32,7 +32,7 @@ The v2.2 and v2.3 texts are RUNNER-SPEC-v2.2.md and RUNNER-SPEC-v2.3.md. **v2.4*
 | 2 | Typed entries | **AS BUILT** | `transact_entry` takes the registry's Caller-bearing signature `fn(mut store.Tx, H, Caller, take A) -> Result[R, E]`. `granted_entry` is in the API block. Every key comes from `runner.attempt_key` over the codecs that registration fingerprints | §12.3 |
 | 3 | Not `send` | **AS BUILT** | `Fixture` and `Client` own task handles, which are not `send` (CONC-2), as `places.Directory` does | §12.3 |
 | 4 | The client's credential | **DECIDED here; reversible** | `client` takes the Hello token. Without one, a place whose `wire` binds a credential gives the session no Caller | §12.3 |
-| 5 | Query entries | **AS BUILT** | A query `Callee` is `Callee[A, ()]`: its described result is the unit schema, and its rows arrive in Batches | §12.3 |
+| 5 | Query entries | **AS BUILT** | A query `Callee` is `Callee[A, ()]`. Its described result encodes the ordered key and current value schemas, and its rows arrive in Batches. | §12.3 |
 | 6 | Start's allowance and an idle client at end | **AS BUILT** | `start` returns `Full` when the root allowance cannot hold the place (a Memory or Temp place needs about 1.1 GiB). A client left open at `end` makes the result `Forced` at the grace deadline | §12.3 |
 
 ## CHANGES-v2.27 (amendments to v2.26 from astra's attack, platform-spec-attack-1748/REPORT.md; lane platform-spec-amend-1755)
@@ -587,7 +587,7 @@ STORE-SPEC is at v2.8: nothing in v2.8 changes the runner. The pending v2.9 item
    - **query_as:** `fn(Tx, H, Caller, take A) -> Result[Cover, Capacity]`, caller-dependent: the body receives the subscribing session's Caller at subscribe, at every rerun and at repair (v2.25). Both query kinds are read-only by type: a view `Tx` cannot `put` (OWN-5, RUN p18 `query_writes`). A query that reads the Caller must be registered with `query_as`, and its type makes `query` refuse it;
    - **granted:** `fn(G, Caller, take A) -> Result[R, Capacity] waits`, only in a `Registry[G, H]` (v2.24: the Caller). Over the wire only when the place has a `Wire[G]`, which needs `G: plain + send`; each call runs with its own copy of `G` (rule 13, CHANGES-v2.24).
    - `H: send` is the place's handles (its Tables and Indexes), passed by view, so an entry cannot keep it (RUN p18). A, R and E are `codec`. PROG-9 refuses a generic function.
-3. **Key** = `code.identity(f) ++ fingerprint(A) ++ fingerprint(R)`. **A key is registered at most once** (§1.2).
+3. **Key** = `code.identity(f) ++ fingerprint(A) ++ fingerprint(result)`. For a query, the result bytes encode the ordered key schema followed by the current value schema as two length-prefixed Bytes. **A key is registered at most once** (§1.2).
 4. **One generic adapter per kind.** It decodes the argument, calls the body and encodes the result inside `bound bytes n` + `isolate`. The codecs come from `std.codec.of`. The encode is inside both because R is app data with no size bound and its codec may run app code (`via`); outside, a large R faults the caller's task instead of giving that call `Failed(OutOfBytes)`. Built cost: +696 instr per call (v2.3).
 5. **Every send ends in exactly one Outcome on the wire** (§1.3, §2 V1–V5). A send is one `Call` frame the session reads; two `Call` frames for one `(stream, p)` on one session are two sends, even when the second arrives before the first's Outcome (a local join, V2). A send's one Outcome is a V1 refusal at arrival, its own `Abandoned` at its own deadline, or the head's answer if the send is still owed when that answer arrives. A head answer for a position with no owed send goes to no one. A send whose session ends (crash, `Close`, exit) has no Outcome; the client's send after reconnecting is a new send (v2.5). The session refuses a malformed key or argument, a budget it cannot grant, an expired request and a full slot table before forwarding, so those refusals record nothing.
 6. **One worker per stream** (H1–H4). Within one open, the head runs at most one call per `(caller key ‖ stream)` (v2.15: the caller key, not the principal). Across opens, LOCK gives a single opener.
@@ -640,8 +640,8 @@ pub const DEFAULT_STEPS: u64 = 1 << 30
 pub const DONE_MAX: u64 = 8192         // v2.11: an encoded `Done` row's bound (§1.3)
 pub fn compute[G: send, H: send, A: codec, R: codec](mut r: Registry[G, H], f: StaticFn[fn(take A) -> Result[R, Capacity]], n: u64, s: u64) -> Result[(), RegisterError]
 pub fn transact[G: send, H: send, A: codec, R: codec, E: codec](mut r: Registry[G, H], f: StaticFn[fn(mut Tx, H, Caller, take A) -> Result[R, E]], n: u64, s: u64) -> Result[(), RegisterError]
-pub fn query[G: send, H: send, A: codec](mut r: Registry[G, H], f: StaticFn[fn(Tx, H, take A) -> Result[Cover, Capacity]], n: u64, s: u64) -> Result[(), RegisterError]
-pub fn query_as[G: send, H: send, A: codec](mut r: Registry[G, H], f: StaticFn[fn(Tx, H, Caller, take A) -> Result[Cover, Capacity]], n: u64, s: u64) -> Result[(), RegisterError]   // v2.25: the Caller
+pub fn query[G: send, H: send, A: codec, K, V](mut r: Registry[G, H], f: StaticFn[fn(Tx, H, take A) -> Result[Cover, Capacity]], key: Key[K], value: Codec[V], n: u64, s: u64) -> Result[(), RegisterError]
+pub fn query_as[G: send, H: send, A: codec, K, V](mut r: Registry[G, H], f: StaticFn[fn(Tx, H, Caller, take A) -> Result[Cover, Capacity]], key: Key[K], value: Codec[V], n: u64, s: u64) -> Result[(), RegisterError]
 pub fn caller_key(c: Caller, mut out: Bytes) -> Result[(), Capacity]   // v2.15: u8 issuer ‖ u8 len ‖ subject
 pub fn granted[G: send, H: send, A: codec, R: codec](mut r: Registry[G, H], f: StaticFn[fn(G, Caller, take A) -> Result[R, Capacity] waits], n: u64, s: u64) -> Result[(), RegisterError]   // v2.24: the Caller
 pub opaque type Wire[G: send]: send   // v2.24: the place's wire grant and its Caller binding; made only by `wire`, whose bound is the guarantee
@@ -1488,8 +1488,8 @@ pub fn start[G: send, H: send, S: send](take p: PlaceConfig[G, H, S], within_ms:
 pub fn compute_entry[A: codec, R: codec](f: StaticFn[fn(take A) -> Result[R, Capacity]]) -> Callee[A, R]
 pub fn transact_entry[H, A: codec, R: codec, E: codec](f: StaticFn[fn(mut store.Tx, H, Caller, take A) -> Result[R, E]]) -> Callee[A, Result[R, E]]
 pub fn granted_entry[G, A: codec, R: codec](f: StaticFn[fn(G, Caller, take A) -> Result[R, Capacity] waits]) -> Callee[A, R]
-pub fn query_entry[H, A: codec](f: StaticFn[fn(store.Tx, H, take A) -> Result[Cover, Capacity]]) -> Callee[A, ()]
-pub fn query_as_entry[H, A: codec](f: StaticFn[fn(store.Tx, H, Caller, take A) -> Result[Cover, Capacity]]) -> Callee[A, ()]
+pub fn query_entry[H, A: codec, K, V](f: StaticFn[fn(store.Tx, H, take A) -> Result[Cover, Capacity]], key: Key[K], value: Codec[V]) -> Callee[A, ()]
+pub fn query_as_entry[H, A: codec, K, V](f: StaticFn[fn(store.Tx, H, Caller, take A) -> Result[Cover, Capacity]], key: Key[K], value: Codec[V]) -> Callee[A, ()]
 pub fn client(f: Fixture, take token: Option[Bytes], within_ms: u64) -> Result[Client, CallError] waits
 pub fn call[A: codec, R: codec](mut c: Client, e: Callee[A, R], take a: A, deadline_ms: u32) -> Result[Replied[R], CallError] waits
 pub fn subscribe[A: codec](mut c: Client, e: Callee[A, ()], take a: A, within_ms: u64) -> Result[u32, CallError] waits
@@ -1508,7 +1508,7 @@ pub fn end(take f: Fixture, within_ms: u64) -> Result[Ended, FixtureError] waits
 - If `within_ms` passes first, the result is `Deadline(within_ms)`. It is returned after the fixture has stopped `operate` and released everything it made.
 
 **Typed calls.**
-- `compute_entry`, `transact_entry`, `granted_entry`, `query_entry` and `query_as_entry` compute the entry's key with `runner.attempt_key`: identity and the fingerprints of the codecs registration describes. A transact entry's reply codec is `Result[R, E]`, and a query's is the unit codec. So a typed `Callee` cannot name another key.
+- Fixture entry builders compute the key from the identity and the schemas that registration describes. A transact entry uses the `Result[R, E]` codec. A query entry uses its registered ordered key and current value schemas.
 - A `granted_entry` (v2.24) call succeeds only against a fixture whose `PlaceConfig.wire` is `Some`, and is `Refused(NotAllowed)` otherwise.
 - `client` connects one wire client to `status.addr`, with a `Hello` that carries `token` and lists the place's entries in registration order, and owns one stream. A place whose `wire` binds a credential needs the token to give the session a Caller.
 - `call` assigns the next position by WIRE's client rules (P1–P3). It encodes `a` and sends one `Call` with `deadline_ms`. It returns when that send's Outcome row arrives, and V1 makes the place answer by `deadline_ms` (`Abandoned` at the latest). A transact `Returned` is decoded as `Result[R, E]`. A broken connection is `Closed`. A `Callee` whose key the place does not export is answered `Refused(NoEntry)` without a send.

@@ -3352,10 +3352,13 @@ fn test_node_ids(c: Clock) -> Result[(), ()] {
     }
 }
 
+pub type RowSchemas: codec + shareable + send { key: Bytes, value: Bytes }
+
 pub opaque type Readers[V]: shareable + send {
     codec: std.codec.Codec[V],
     current: u16,
-    older: List[Option[std.codec.Reader[V]]]
+    older: List[Option[std.codec.Reader[V]]],
+    schemas: Arc[RowSchemas]
 }
 
 type IndexOf[V]: send {
@@ -3458,6 +3461,10 @@ pub fn query_table[K, V](t: Table[K, V]) -> Table[K, V] {
 
 pub fn shape[K, V](t: Table[K, V]) -> Shape[K, V] {
     Shape(store: t.store, id: t.id, catalog_key: arc.share(t.catalog_key), catalog_page: arc.share(t.catalog_page), key: t.key, readers: arc.share(t.readers))
+}
+
+pub fn row_schemas[K, V](t: Shape[K, V]) -> Arc[RowSchemas] {
+    arc.share(t.readers.schemas)
 }
 
 fn decoded[T](take r: Result[T, std.codec.DecodeError]) -> Result[T, Error] {
@@ -4465,7 +4472,7 @@ fn stage_create_table[K, V](mut plan: SchemaPlan, take s: TableSpec[K, V]) -> Re
     keep_schema(mut plan, take roots, live, index_id)
 }
 
-fn readers[V](value: std.codec.Codec[V], c: Catalog, current: u16) -> Result[Arc[Readers[V]], Error] {
+fn readers[V](value: std.codec.Codec[V], c: Catalog, current: u16, schema: Bytes) -> Result[Arc[Readers[V]], Error] {
     let mut older: List[Option[std.codec.Reader[V]]] = list.with_capacity(int.widen(c.next))
     for _ in 0u64 .. int.widen(c.next) {
         list.push(mut older, None)
@@ -4481,7 +4488,8 @@ fn readers[V](value: std.codec.Codec[V], c: Catalog, current: u16) -> Result[Arc
             let _ = list.set(mut older, int.widen(old.number), Some(take resolved))
         }
     }
-    Ok(arc.new(Readers(codec: value, current: current, older: take older)))
+    let schemas = arc.new(RowSchemas(key: copied(c.key)?, value: copied(schema)?))
+    Ok(arc.new(Readers(codec: value, current: current, older: take older, schemas: take schemas)))
 }
 
 fn index_catalog(db: Db, id: u32) -> Result[List[Catalog], Error] {
@@ -4535,7 +4543,7 @@ fn stage_table[K, V](mut plan: SchemaPlan, name: String, take key: std.codec.Key
         }
     }
     // Resolve before publishing a schema addition: Schema is always without effect.
-    let resolved = readers(value, c, number)?
+    let resolved = readers(value, c, number, schema)?
     let catalog = index_catalog_in(plan.roots.catalog, c.id)?
     let key_handle = catalog_key_handle(take k)?
     let seen = catalog_page(plan.roots.catalog)?
@@ -4572,7 +4580,7 @@ fn catalog_handle[K, V](store_id: StoreId, catalog: PageTree, writable_handle: b
     for prior in c.schemas {
         if prior.fingerprint == fp && prior.schema == schema {
             let number = prior.number
-            let resolved = readers(value, c, number)?
+            let resolved = readers(value, c, number, schema)?
             let complete = writable_handle && list.len(index_catalog_in(catalog, c.id)?) == 0
             return Ok(Table(store: store_id, id: c.id, epoch: c.epoch, complete: complete, catalog_key: catalog_key_handle(take k)?, catalog_page: catalog_page(catalog)?, key: key, readers: take resolved, indexes: list.new()))
         }

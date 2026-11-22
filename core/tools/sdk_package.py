@@ -58,6 +58,7 @@ def check(root, compiler, runtime, node_dist, tool_tarballs):
         executable = work / 'fixture'
         subprocess.run([compiler, 'build', '--source-core', '--inputs', inputs, '--runtime', runtime,
                         '--entry', 'store@1/packed_consumer/main', '--grant', 'Stdout',
+                        '--grant', 'Clock', '--grant', 'Random', '--grant', 'Tasks',
                         '--store', work / 'store', '-o', executable], cwd=work, check=True)
         subprocess.run([compiler, 'sdk', 'ts', executable, '--output', consumer / 'generated',
                         '--runtime', runtime], cwd=work, check=True)
@@ -86,7 +87,8 @@ def check(root, compiler, runtime, node_dist, tool_tarballs):
                            f'--allow-fs-write={standalone}']
         subprocess.run([*standalone_node, standalone / 'node_modules/typescript/bin/tsc',
                         '--strict', '--module', 'NodeNext', '--target', 'ES2022',
-                        '--outDir', compiled, 'consumer.ts'], cwd=standalone, env=env, check=True)
+                        '--outDir', compiled, 'consumer.ts', 'generated/browser.ts'],
+                       cwd=standalone, env=env, check=True)
         for module in (standalone / 'generated').glob('*.js'):
             shutil.copyfile(module, compiled / 'generated' / module.name)
         shutil.copyfile(consumer / 'payload.bin', compiled / 'payload.bin')

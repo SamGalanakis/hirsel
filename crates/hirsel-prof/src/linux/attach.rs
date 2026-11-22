@@ -35,9 +35,44 @@ pub fn attach(
     let profile = ProfileWriter::create(options.out)?;
     let interrupt = Interrupt::register()?;
     let (mut group, events, fallback) = open_perf(pid, cpus, options, false)?;
-    let start = perf::monotonic_ns()?;
-    let instant = Instant::now();
-    group.enable(0)?;
+    // Keep metadata flowing while the CPU sampling events stay disabled.
+    group
+        .open_tracking(pid_arg)
+        .map_err(|err| perf::open_error(err, perf::TRACKING))?;
+    let snapshot_time = perf::monotonic_ns()?;
+    let threads = procfs::threads(pid)?;
+    let mut open_tids = HashSet::from([pid]);
+    let open_tid = |group: &mut perf::PerfGroup,
+                    open_tids: &mut HashSet<u32>,
+                    tid,
+                    sampling_started|
+     -> Result<()> {
+        if !open_tids.insert(tid) {
+            return Ok(());
+        }
+        let from = group.size();
+        let opened = group
+            .open_tracking(tid as i32)
+            .map_err(|err| (err, perf::TRACKING))
+            .and_then(|()| open_rings(group, tid, cpus, &events, options, false));
+        match opened {
+            Ok(()) => {
+                if sampling_started {
+                    group.enable(from)?;
+                }
+            }
+            Err((err, _)) if err.raw_os_error() == Some(libc::ESRCH) => {
+                group.truncate(from);
+                open_tids.remove(&tid);
+            }
+            Err((err, event)) => return Err(perf::open_error(err, event).into()),
+        }
+        Ok(())
+    };
+    for &(tid, _) in &threads {
+        open_tid(&mut group, &mut open_tids, tid, false)?;
+    }
+    let maps = procfs::mappings(pid)?;
     let proc = procfs::process(pid);
     let (path, mut exe) = procfs::executable(pid)?;
     let provenance = Provenance::load(&path, &mut exe, resolve)?;
@@ -51,30 +86,6 @@ pub fn attach(
             .collect::<Vec<_>>(),
     )?;
     let cwd = std::fs::read_link(proc.join("cwd")).unwrap_or_else(|_| Path::new(".").to_owned());
-    // The leader records mapping and task changes before we discover the
-    // existing process state. Open additional rings for already-live threads.
-    let threads = procfs::threads(pid)?;
-    let maps = procfs::mappings(pid)?;
-    let snapshot_time = perf::monotonic_ns()?;
-    let mut open_tids = HashSet::from([pid]);
-    let open_tid = |group: &mut perf::PerfGroup, open_tids: &mut HashSet<u32>, tid| -> Result<()> {
-        if !open_tids.insert(tid) {
-            return Ok(());
-        }
-        let from = group.size();
-        match open_rings(group, tid, cpus, &events, options, false) {
-            Ok(()) => group.enable(from)?,
-            Err((err, _)) if err.raw_os_error() == Some(libc::ESRCH) => {
-                group.truncate(from);
-                open_tids.remove(&tid);
-            }
-            Err((err, event)) => return Err(perf::open_error(err, event).into()),
-        }
-        Ok(())
-    };
-    for &(tid, _) in &threads {
-        open_tid(&mut group, &mut open_tids, tid)?;
-    }
     let mut import = Import::new(
         profile.connection(),
         pid,
@@ -92,13 +103,16 @@ pub fn attach(
             }
             import.record(record)
         };
+    let start = perf::monotonic_ns()?;
+    let instant = Instant::now();
+    group.enable(0)?;
     while !exit.ready()?
         && !interrupt.ready()?
         && duration.is_none_or(|elapsed| instant.elapsed() < elapsed)
     {
         for record in group.collect(false)? {
             if record.pid == pid && matches!(record.kind, Kind::Fork { .. }) {
-                open_tid(&mut group, &mut open_tids, record.tid)?;
+                open_tid(&mut group, &mut open_tids, record.tid, true)?;
             } else if record.pid == pid && record.tid != pid && matches!(record.kind, Kind::Exit) {
                 group.remove_tid(record.tid)?;
                 open_tids.remove(&record.tid);

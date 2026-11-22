@@ -1949,6 +1949,7 @@ pub(crate) mod tests {
         request
     }
     include!("core_ops_native.rs");
+    include!("prof_native.rs");
     include!("provider_m3_native.rs");
     include!("list_native.rs");
     include!("numeric_native.rs");

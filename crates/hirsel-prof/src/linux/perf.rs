@@ -8,10 +8,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::profile::Result;
 
-const SAMPLE_FIELDS: u64 = (1 << 0) // IP
-    | (1 << 1) // TID
-    | (1 << 2) // TIME
-    | (1 << 7) // CPU
+const RECORD_ID: u64 = (1 << 1) | (1 << 2) | (1 << 7); // TID, TIME, CPU
+const SAMPLE_FIELDS: u64 = RECORD_ID | (1 << 0) // IP
     | (1 << 8) // PERIOD
     | (1 << 12) // REGS_USER
     | (1 << 13); // STACK_USER
@@ -58,6 +56,15 @@ pub(crate) const CPU_CLOCK: Event = Event {
     unit: "nanoseconds",
     kind: 1,
     config: 0,
+};
+
+// PERF_COUNT_SW_DUMMY does not sample. An enabled event still delivers mmap,
+// comm and task records, including while the sampling events are disabled.
+pub(crate) const TRACKING: Event = Event {
+    name: "mapping tracking",
+    unit: "",
+    kind: 1,
+    config: 9,
 };
 
 pub(crate) fn events(list: &str) -> Result<Vec<Event>> {
@@ -192,22 +199,52 @@ impl PerfGroup {
         event: Event,
         settings: PerfSettings,
     ) -> io::Result<()> {
-        let mut flags = (1 << 0) | (1 << 5) | (1 << 6) | (1 << 10) | (1 << 18) | (1 << 25);
-        if settings.enable_on_exec && cpu != -1 {
-            flags |= (1 << 1) | (1 << 35); // Inherit within the thread group.
-        }
-        if settings.sideband {
+        self.add(tid, cpu, event, Some(settings))
+    }
+
+    pub(crate) fn open_tracking(&mut self, tid: i32) -> io::Result<()> {
+        self.add(tid, -1, TRACKING, None)?;
+        self.rings
+            .last()
+            .expect("new tracking ring")
+            .control(PERF_ENABLE)
+    }
+
+    fn add(
+        &mut self,
+        tid: i32,
+        cpu: i32,
+        event: Event,
+        settings: Option<PerfSettings>,
+    ) -> io::Result<()> {
+        let mut flags = (1 << 0) | (1 << 5) | (1 << 6) | (1 << 18) | (1 << 25);
+        if settings.as_ref().is_none_or(|settings| settings.sideband) {
             flags |= (1 << 8) | (1 << 9) | (1 << 13) | (1 << 23) | (1 << 24);
         }
-        if settings.enable_on_exec {
-            flags |= 1 << 12;
-        }
+        let (freq, sample_type, sample_regs_user, sample_stack_user) =
+            if let Some(settings) = settings {
+                flags |= 1 << 10; // Frequency, rather than a fixed period.
+                if settings.enable_on_exec {
+                    flags |= 1 << 12;
+                    if cpu != -1 {
+                        flags |= (1 << 1) | (1 << 35); // Inherit within the thread group.
+                    }
+                }
+                (
+                    settings.freq,
+                    SAMPLE_FIELDS,
+                    REGISTERS,
+                    settings.stack_bytes,
+                )
+            } else {
+                (0, RECORD_ID, 0, 0)
+            };
         let attr = PerfAttr {
             kind: event.kind,
             size: size_of::<PerfAttr>() as u32,
             config: event.config,
-            freq: settings.freq,
-            sample_type: SAMPLE_FIELDS,
+            freq,
+            sample_type,
             read_format: 0,
             flags,
             wakeup_events: 1,
@@ -215,8 +252,8 @@ impl PerfGroup {
             config1: 0,
             config2: 0,
             branch_sample_type: 0,
-            sample_regs_user: REGISTERS,
-            sample_stack_user: settings.stack_bytes,
+            sample_regs_user,
+            sample_stack_user,
             clockid: libc::CLOCK_MONOTONIC,
         };
         // SAFETY: the kernel reads a properly laid out, initialized attribute.

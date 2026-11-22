@@ -206,7 +206,7 @@ pub(super) fn open_rings(
                     PerfSettings {
                         freq: options.freq,
                         stack_bytes: options.stack_bytes,
-                        sideband: index == 0,
+                        sideband: enable_on_exec && index == 0,
                         enable_on_exec,
                     },
                 )

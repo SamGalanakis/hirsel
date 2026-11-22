@@ -3,6 +3,12 @@
 # The profiler exercises perf_event_open on a child of the test process.
 HOST_TEST_BINARIES = ["hirsel-prof-unittest"]
 
+PERF_TEST_CASES = {
+    "hirsel-core-driver-unittest": [
+        "native::tests::profiler_attach_uses_snapshot_before_sampling_existing_mappings",
+    ],
+}
+
 # These laws execute sealed memfds. The native host supports them, but the
 # bwrap profile used for loopback isolation denies execveat on a memfd.
 NATIVE_EXEC_TEST_CASES = [

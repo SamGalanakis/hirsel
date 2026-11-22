@@ -34,9 +34,10 @@ The command writes a [portable SQLite profile](profiling.md) after the
 process exits. The sampler resolves verified detached DWARF, embedded DWARF
 and ELF symbols.
 
-`prof attach` samples a running process without stopping it. It ends the
-capture after `--duration`, at process exit, or on Ctrl+C. `--debug` selects a
-detached DWARF file to verify when the executable has no embedded DWARF.
+`prof attach` snapshots mappings before sampling a running process without
+stopping it. It ends the capture after `--duration`, at process exit, or on
+Ctrl+C. `--debug` selects a detached DWARF file to verify when the executable
+has no embedded DWARF.
 
 Start with `prof summary` for data quality and the five hottest functions
 per event. Use `prof schema` for tables and columns, and `prof sql` for

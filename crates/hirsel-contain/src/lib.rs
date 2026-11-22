@@ -1146,5 +1146,8 @@ fn init(plan: &Plan, status: RawFd) -> ! {
     }
 }
 
+#[cfg(all(test, feature = "contain"))]
+mod contain;
+
 #[cfg(test)]
 mod laws;

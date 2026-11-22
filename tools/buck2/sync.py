@@ -623,6 +623,11 @@ def first_party(meta: dict) -> str:
                 binary = f"{name}-unittest"
                 out.append("\n" + call("hirsel_test", name=binary, deps=test_deps,
                                         **test_attrs(binary, src), **attrs))
+                if name == "hirsel-contain":
+                    # Boat runs this harness in delegated systemd user scopes.
+                    out.append("\n" + call("hirsel_test", name="contain", deps=test_deps,
+                                            harness_only=True,
+                                            **{**attrs, "features": sorted(set(features) | {"contain"})}))
         own = [f"//:{name}"] if lib else []
         if lib and lib.get("test", True) and not guarded(pathlib.Path(lib["src_path"])):
             unguarded.append(relative(pathlib.Path(lib["src_path"])))

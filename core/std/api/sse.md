@@ -21,11 +21,23 @@ with borrowed UTF-8 bytes for the event name, folded data and last event
 ID each time a blank line dispatches an event. The default name is
 `message`. Invalid UTF-8 units become U+FFFD. Each line, folded data
 buffer, event name and ID is bounded by `max_bytes`. A bound failure
-returns `TooLarge` and ends parsing.
+returns `Error(Decode(TooLarge, bytes))` and ends parsing.
+
+The callback returns a `FeedControl[E]`. Use `Continue` to keep parsing,
+`Stop` to return `Ok(Stopped(bytes))`, or `Fail(error)` to return
+`Error(Callback(error, bytes))` with the original error. When the decoder
+reads the whole fragment, `feed` returns `Ok(Consumed(bytes))`.
+
+Each byte count measures the consumed prefix of the fragment passed to
+that call. On `Stop` or `Fail` it includes the event's blank line, including
+both bytes of a CRLF present in that fragment. A CR at the end of a
+fragment dispatches immediately, and the decoder skips a following LF if
+fed again. After stopping or failing from the callback, the caller can
+resume at the reported offset or discard the decoder.
 
 `last_event_id(decoder)` borrows the ID committed by the latest blank
 line. `retry_ms(decoder)` returns the latest ASCII-digit retry value in
-milliseconds, if one was supplied. A digit value outside u64 returns
-`TooLarge`. `finish(mut decoder)` discards an unfinished block at EOF
+milliseconds, if one was supplied. A retry value outside u64 ends
+parsing with `TooLarge`. `finish(mut decoder)` discards an unfinished block at EOF
 and keeps the committed ID and retry value. The caller decides when to
 reconnect and what to send as Last-Event-ID.

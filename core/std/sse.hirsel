@@ -4,6 +4,12 @@ pub opaque type EventBuf: send {
 
 pub type SseError: key = Field | Utf8 | TooLarge
 
+pub type FeedControl[E] = Continue | Stop | Fail(E)
+
+pub type FeedProgress: key = Consumed(u64) | Stopped(u64)
+
+pub type FeedError[E] = Decode(SseError, u64) | Callback(E, u64)
+
 pub fn buffer(size: u64) -> EventBuf {
     let data: Bytes = list.with_capacity(size)
     EventBuf(data: take data)
@@ -214,27 +220,31 @@ fn retry_digits(value: Bytes) -> Result[Option[u64], SseError] {
     }
 }
 
-fn dispatch(mut d: Decoder, on_event: scoped fn(Bytes, Bytes, Bytes)) {
+fn dispatch[E](mut d: Decoder, on_event: scoped fn(Bytes, Bytes, Bytes) -> FeedControl[E]) -> FeedControl[E] {
     if d.id_changed {
         let next = replace(mut d.pending_id, list.new())
         d.pending_id = replace(mut d.last_id, take next)
         list.clear(mut d.pending_id)
         d.id_changed = false
     }
-    if list.len(d.data) != 0 {
+    let control = if list.len(d.data) != 0 {
         let name = if list.len(d.name) == 0 {
             string.as_bytes("message")
         } else {
             view d.name
         }
-        on_event(name, list.slice(d.data, 0, list.len(d.data) - 1), d.last_id)
+        let control = on_event(name, list.slice(d.data, 0, list.len(d.data) - 1), d.last_id)
         list.clear(mut d.data)
+        take control
+    } else {
+        Continue
     }
     list.clear(mut d.name)
+    take control
 }
 
 // WHATWG HTML, "Interpreting an event stream". Field names are case-sensitive.
-fn decode_line(mut d: Decoder, on_event: scoped fn(Bytes, Bytes, Bytes)) -> Result[(), SseError] {
+fn decode_line[E](mut d: Decoder, on_event: scoped fn(Bytes, Bytes, Bytes) -> FeedControl[E]) -> Result[FeedControl[E], SseError] {
     let end = list.len(d.line)
     let mut start: u64 = 0
     if d.first_line {
@@ -244,8 +254,7 @@ fn decode_line(mut d: Decoder, on_event: scoped fn(Bytes, Bytes, Bytes)) -> Resu
         d.first_line = false
     }
     if start == end {
-        dispatch(mut d, on_event)
-        return Ok(())
+        return Ok(dispatch(mut d, on_event))
     }
     let colon = match list.find_byte(d.line, start, end, b':') {
         Some(at) => at,
@@ -275,37 +284,55 @@ fn decode_line(mut d: Decoder, on_event: scoped fn(Bytes, Bytes, Bytes)) -> Resu
             d.retry = Some(n)
         }
     }
-    Ok(())
+    Ok(Continue)
 }
 
-/// Emits only complete events. The views passed to on_event live for the callback.
-pub fn feed(mut d: Decoder, input: Bytes, on_event: scoped fn(Bytes, Bytes, Bytes)) -> Result[(), SseError] {
+/// Emits complete events until input ends or on_event returns Stop or Fail.
+/// Every outcome reports the number of bytes consumed from input.
+pub fn feed[E](mut d: Decoder, input: Bytes, on_event: scoped fn(Bytes, Bytes, Bytes) -> FeedControl[E]) -> Result[FeedProgress, FeedError[E]] {
     if d.stopped {
-        return Error(TooLarge)
+        return Error(Decode(TooLarge, 0))
     }
-    for c in input {
+    let end = list.len(input)
+    let mut consumed: u64 = 0
+    while consumed < end {
+        let c = input[consumed]
         if d.skip_lf {
             d.skip_lf = false
             if c == b'\n' {
+                consumed += 1
                 continue
             }
         }
         if c == b'\r' || c == b'\n' {
-            if let Error(e) = decode_line(mut d, on_event) {
-                d.stopped = true
-                return Error(e)
+            consumed += 1
+            d.skip_lf = c == b'\r' && consumed == end
+            if c == b'\r' && consumed < end && input[consumed] == b'\n' {
+                consumed += 1
             }
-            d.skip_lf = c == b'\r'
+            let control = match decode_line(mut d, on_event) {
+                Ok(take control) => take control,
+                Error(e) => {
+                    d.stopped = true
+                    return Error(Decode(e, consumed))
+                },
+            }
             list.clear(mut d.line)
+            match control {
+                Continue => (),
+                Stop => return Ok(Stopped(consumed)),
+                Fail(take e) => return Error(Callback(take e, consumed)),
+            }
         } else {
             if list.len(d.line) == d.max_bytes {
                 d.stopped = true
-                return Error(TooLarge)
+                return Error(Decode(TooLarge, consumed))
             }
             let _ = list.push(mut d.line, c)
+            consumed += 1
         }
     }
-    Ok(())
+    Ok(Consumed(consumed))
 }
 
 /// Discards an unfinished event at EOF. Committed reconnect state survives.

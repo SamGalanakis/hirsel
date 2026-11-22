@@ -38,6 +38,8 @@ The client refuses other transfer codings.
 
 `read(mut connection, mut into)` appends up to the supplied buffer's spare
 capacity and returns the number of bytes appended. Zero means body EOF.
+A buffer with no spare capacity, such as a fresh `list.new()`, returns
+`NoSpace` without reading; reserve room first with `list.with_capacity`.
 `body_max` bounds the total decoded bytes, including for close-delimited
 bodies. The reader stores at most 8192 wire bytes and 8192 bytes of head,
 with up to 64 fields in one head. It consumes chunk extensions and trailers

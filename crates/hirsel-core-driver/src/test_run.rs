@@ -118,6 +118,22 @@ impl TestOutcome {
     }
 }
 
+/// What a run's nonzero exit status means (PROG-3), for the driver's line on
+/// a run or test that did not succeed. The run writes nothing for an `Error`,
+/// so this line is the only report of one.
+pub(crate) fn outcome_text(status: std::process::ExitStatus) -> String {
+    use std::os::unix::process::ExitStatusExt;
+    match (status.code(), status.signal()) {
+        (Some(code @ 1..=100), _) => format!("returned an error, exit status {code}"),
+        (Some(101), _) => "failed, exit status 101".into(),
+        (Some(102), _) => "stopped, exit status 102".into(),
+        (Some(103), _) => "did not start, exit status 103".into(),
+        (Some(code), _) => format!("ended with exit status {code}"),
+        (None, Some(signal)) => format!("was terminated by signal {signal}"),
+        (None, None) => "ended without an exit status".into(),
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Source {
     Cached,

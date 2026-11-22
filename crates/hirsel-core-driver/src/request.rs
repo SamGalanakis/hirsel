@@ -1185,17 +1185,24 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                             if passed {
                                 println!("pass {source} {label} ({wall_ms:.3} ms)");
                             } else {
-                                let reason = if outcome.timed_out {
+                                let mut reason = if outcome.timed_out {
                                     "execution timed out".to_owned()
-                                } else if outcome.output.stderr.is_empty() {
-                                    "error".to_owned()
                                 } else {
-                                    String::from_utf8_lossy(&outcome.output.stderr)
-                                        .lines()
-                                        .collect::<Vec<_>>()
-                                        .join(" | ")
+                                    crate::test_run::outcome_text(outcome.output.status)
                                 };
+                                if !outcome.output.stderr.is_empty() {
+                                    reason.push_str(": ");
+                                    reason.push_str(
+                                        &String::from_utf8_lossy(&outcome.output.stderr)
+                                            .lines()
+                                            .collect::<Vec<_>>()
+                                            .join(" | "),
+                                    );
+                                }
                                 println!("fail {source} {label}: {reason} ({wall_ms:.3} ms)");
+                                for line in String::from_utf8_lossy(&outcome.output.stdout).lines() {
+                                    println!("  stdout: {line}");
+                                }
                             }
                         } else {
                             println!("pass {source} {label}");
@@ -1346,10 +1353,8 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         image: image.map(|i| hex(i.identity)),
         native,
         stopped: stopped.or_else(|| {
-            // Behind a reported refusal the instance stop is its consequence.
             reach
                 .as_ref()
-                .filter(|r| r.diagnostics.is_empty() && r.incomplete.is_empty())
                 .and_then(|r| r.instances.as_ref().err())
                 .filter(|e| !matches!(e, crate::InstanceStop::Resource { .. }))
                 .map(|e| format!("instances: {e}"))
@@ -1506,7 +1511,11 @@ fn finish(
         for r in &output.resources {
             eprintln!("{}: resource {}", sources.render(&r.primary), r.message);
         }
-        if let Some(stop) = &output.stopped {
+        // Behind a printed refusal an instance stop is its consequence.
+        if let Some(stop) = &output.stopped
+            && (output.diagnostics.is_empty() && output.incomplete.is_empty()
+                || !stop.starts_with("instances: "))
+        {
             eprintln!("{stop}");
         }
         if command != "run" && command != "replay" {
@@ -1532,12 +1541,13 @@ fn finish(
             {
                 cmd.env("HIRSEL_RECORD", record);
             }
-            Some(
-                cmd.status()
-                    .map_err(|e| format!("run execution {runner:?}: {e}"))?
-                    .code()
-                    .unwrap_or(102),
-            )
+            let status = cmd
+                .status()
+                .map_err(|e| format!("run execution {runner:?}: {e}"))?;
+            if !status.success() {
+                eprintln!("hirsel: main {}", crate::test_run::outcome_text(status));
+            }
+            Some(status.code().unwrap_or(102))
         } else {
             None
         }

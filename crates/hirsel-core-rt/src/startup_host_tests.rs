@@ -23,10 +23,25 @@ impl Fixture {
     ) -> u8 {
         use std::os::unix::ffi::OsStrExt;
         let root = self.root.path().as_os_str().as_bytes();
-        let dirs: Vec<_> = (0..directories)
-            .map(|_| View {
-                data: root.as_ptr(),
-                len: root.len(),
+        let dirs = vec![root; directories];
+        self.run_in(kinds, &dirs, std::ptr::null(), root_limit, probe, entry)
+    }
+    /// A run granted `directories`, opened by `directory_ops` (none: never opened).
+    fn run_in(
+        &self,
+        kinds: &[u8],
+        directories: &[&[u8]],
+        directory_ops: *const DirectoryOperations,
+        root_limit: u64,
+        probe: impl FnOnce(&OsProvider, u64) -> io::Result<()>,
+        entry: crate::process::Entry,
+    ) -> u8 {
+        use std::os::unix::ffi::OsStrExt;
+        let dirs: Vec<_> = directories
+            .iter()
+            .map(|path| View {
+                data: path.as_ptr(),
+                len: path.len(),
             })
             .collect();
         let marker = self.root.path().join("main-ran");
@@ -62,7 +77,7 @@ impl Fixture {
             })
             .collect();
         let input = OsConfig {
-            directory_ops: std::ptr::null(),
+            directory_ops,
             process_ops: std::ptr::null(),
             socket_activation: std::ptr::null(),
             secret_grants: core::ptr::null(),
@@ -179,6 +194,35 @@ fn missing_grant_is_a_named_not_started_refusal() {
     assert_eq!(
         fixture.stderr(),
         b"not started: grant `scratch` is not in the run's configuration\n"
+    );
+    assert!(!fixture.root.path().join("main-ran").exists());
+}
+/// Bug: a directory grant that could not be opened was refused with the bare
+/// OS error, naming no path. The refusal names the grant as configured and,
+/// for a relative one, the path it resolves to against the run's working
+/// directory (PROG-4: a test's relative directory grant).
+#[test]
+fn unopenable_directory_grant_names_its_path_and_resolution() {
+    let fixture = Fixture::new();
+    let missing = b"npb-1621-no-such-directory";
+    let status = fixture.run_in(
+        &[DIR],
+        &[missing],
+        &hirsel_core_os_directory_ops,
+        4096,
+        |_, _| panic!("an unopened Dir cannot probe"),
+        entered,
+    );
+    assert_eq!(status, 103);
+    let resolved = std::env::current_dir()
+        .unwrap()
+        .join("npb-1621-no-such-directory");
+    assert_eq!(
+        String::from_utf8(fixture.stderr()).unwrap(),
+        format!(
+            "not started: directory grant `npb-1621-no-such-directory` ({}): No such file or directory (os error 2)\n",
+            resolved.display()
+        )
     );
     assert!(!fixture.root.path().join("main-ran").exists());
 }

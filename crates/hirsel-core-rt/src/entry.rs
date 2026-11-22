@@ -331,6 +331,9 @@ pub(crate) fn prepare_hex<const N: usize>(text: &[u8]) -> io::Result<[u8; N]> {
 }
 pub(crate) enum StartupError {
     Io(io::Error),
+    /// A directory grant that could not be opened: its path as configured,
+    /// and the path it resolves to when that is relative.
+    Directory(std::path::PathBuf, io::Error),
     MissingGrant(usize),
     MissingSecret(usize),
     NetRules,
@@ -346,7 +349,9 @@ impl From<io::Error> for StartupError {
 impl StartupError {
     fn into_io(self) -> io::Error {
         match self {
-            Self::Io(error) | Self::UnsupportedHostOpenat2(error) => error,
+            Self::Io(error) | Self::Directory(_, error) | Self::UnsupportedHostOpenat2(error) => {
+                error
+            }
             Self::MissingGrant(_)
             | Self::MissingSecret(_)
             | Self::NetRules
@@ -511,7 +516,9 @@ impl OsProcess {
             } else if !describe_mode && let Some(operations) = directory_ops {
                 for index in 0..input.directories_len {
                     let path = Path::new(OsStr::from_bytes(bytes(*input.directories.add(index))));
-                    dirs.push((operations.grant)(&mut os, path)?);
+                    let handle = (operations.grant)(&mut os, path)
+                        .map_err(|error| StartupError::Directory(path.to_owned(), error))?;
+                    dirs.push(handle);
                 }
             }
             let host_scratch = if host_control.is_some() {
@@ -1035,6 +1042,19 @@ pub(crate) unsafe fn report_startup(error: StartupError, stderr: i32, names: *co
             line.extend_from_slice(
                 format!("host grants could not be configured: {error}\n").as_bytes(),
             );
+        }
+        StartupError::Directory(path, error) => {
+            line.extend_from_slice(b"directory grant `");
+            line.extend_from_slice(path.as_os_str().as_bytes());
+            line.push(b'`');
+            if path.is_relative()
+                && let Ok(cwd) = std::env::current_dir()
+            {
+                line.extend_from_slice(b" (");
+                line.extend_from_slice(cwd.join(path).as_os_str().as_bytes());
+                line.push(b')');
+            }
+            line.extend_from_slice(format!(": {error}\n").as_bytes());
         }
     }
     // SAFETY: the configured diagnostic fd and line live through this write.

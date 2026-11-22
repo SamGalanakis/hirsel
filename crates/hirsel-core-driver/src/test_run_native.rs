@@ -2261,6 +2261,21 @@ __attribute__((constructor)) static void init(void) { write(2, "ctor\n", 5); }
     }
 }
 
+/// Bug: `hirsel run` of a `main` that returns `Error(e)` exited 1 with no
+/// output, since the run writes nothing for an error outcome (PROG-3). The
+/// driver names the outcome on stderr and passes the status through.
+#[test]
+fn run_names_an_error_outcome_the_run_does_not_report() {
+    let law = PackageLaw::new();
+    law.manifest("app", "app", 1, "[sources]\n\"main.hirsel\" = \"main\"\n");
+    law.write("app/main.hirsel", "pub fn main() -> Result[(), ()] { Error(()) }\n");
+    let (status, stdout, stderr) = law.run(&["run", "app"]);
+    assert_eq!(status, Some(1), "{stdout}\n{stderr}");
+    let stderr: Vec<_> =
+        stderr.lines().filter(|line| !line.starts_with("hirsel: created hirsel.lock")).collect();
+    assert_eq!(stderr, ["hirsel: main returned an error, exit status 1"]);
+}
+
 #[test]
 fn simulation_runs_fresh_seeds_and_reproduces_one_failure() {
     let law = PackageLaw::new();
@@ -2301,7 +2316,7 @@ fn seeded(e: Env) -> Result[(), ()] {
     let (status, stdout, stderr) = law.run(&["test", "app", "--seed", "1"]);
     assert_eq!(status, Some(1), "{stdout}\n{stderr}");
     assert!(
-        stdout.contains("fail executed app@1/main/seeded (seed 1): error"),
+        stdout.contains("fail executed app@1/main/seeded (seed 1): returned an error, exit status 1"),
         "{stdout}"
     );
     assert_eq!(stdout.lines().count(), 1, "{stdout}");

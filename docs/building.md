@@ -86,6 +86,13 @@ with explicit rules ([Net sockets](spec/net.md)). Env requires
 `--grant 'Env=<pattern>[,<pattern>]'`, where a pattern is a variable name or a prefix
 followed by `*` ([Env](../core/std/api/env.md)). A missing grant is refused before native code is emitted, naming the parameter
 and the option it needs. Everything after `--` is passed to the program as `Args`.
+`run` exits with the program's status. A `main` that returns `Error` writes
+nothing of its own ([PROG-3](spec/programs.md)), so for every nonzero status `run`
+adds one stderr line naming the outcome, for example
+`hirsel: main returned an error, exit status 1`. A directory grant that cannot be
+opened stops the program before `main` with status 103 and
+``not started: directory grant `PATH` (RESOLVED): ERROR``, where the resolved path
+appears for a relative grant.
 
 The installation invokes its own `bin/ld.lld` using the link recipe captured at
 packaging. `--cc PROGRAM` selects a C driver to supply another recipe.
@@ -149,6 +156,9 @@ capabilities as for `run`. A test receives only the grants its parameters take.
 `--filter TEXT` selects the tests whose full definition
 path contains TEXT, and `--test-timeout SECONDS` bounds each test's execution. An
 earlier failure does not stop later tests, and no matching test exits 2.
+A failing row names the outcome (`returned an error, exit status N`, `failed`,
+`stopped`, `did not start` or the terminating signal), then the test's stderr, and
+the lines below it repeat the test's stdout.
 Hirsel reuses passing results for capability-free native tests with matching code
 and configuration, and each row says `cached` or `executed`.
 Use `--rerun` to execute every selected test and refresh passing results.

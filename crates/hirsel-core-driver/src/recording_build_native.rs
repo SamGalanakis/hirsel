@@ -2354,8 +2354,8 @@ fn rejected() -> Result[(), ()] { Error(()) }
             .collect::<String>()
     };
 
-    let executed = "pass executed app@1/main/good\nfail executed app@1/main/rejected: error\n";
-    let cached = "pass cached app@1/main/good\nfail executed app@1/main/rejected: error\n";
+    let executed = "pass executed app@1/main/good\nfail executed app@1/main/rejected: returned an error, exit status 1\n";
+    let cached = "pass cached app@1/main/good\nfail executed app@1/main/rejected: returned an error, exit status 1\n";
     assert_eq!(run(&["-j", "1"], 1), executed);
     assert_eq!(run(&["-j", "2"], 1), cached);
     assert_eq!(run(&["--rerun"], 1), executed);

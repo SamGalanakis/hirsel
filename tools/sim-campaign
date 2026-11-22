@@ -2,8 +2,8 @@
 """Run disjoint sim.world seed ranges on Boat using a prebuilt Hirsel test.
 
 Dispatch exits 0 for a complete passing campaign, 1 for failing seeds, and 2
-for an incomplete campaign or dispatch error. Call dispatch directly when its
-verdict determines the caller's status.
+for an incomplete campaign or dispatch error. A batch denied a spare start
+exits 75. Call dispatch directly when its verdict determines the caller's status.
 """
 import argparse
 from bisect import bisect_right
@@ -135,6 +135,8 @@ def dispatch_campaign(args, executable=None, laws=None):
         with subprocess.Popen(command, stdout=subprocess.PIPE, text=True) as boat:
             complete, failed = record(db, args.campaign, ranges, boat.stdout, results, executable, laws)
             status = boat.wait()
+    if laws is not None and status == os.EX_TEMPFAIL:
+        return status
     if status:
         print(f"sim-campaign: Boat dispatcher exited {status}", file=sys.stderr)
         return 2

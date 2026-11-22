@@ -98,5 +98,32 @@ if (( status == 0 && boat_status != 0 )); then
   step="Boat screen and containment"
   status=$boat_status
 fi
+
+run_vopr() (
+  local output compiler ledger vopr
+  vopr="$run/vopr"
+  ledger=${HIRSEL_VOPR_LEDGER:-/workspace/code/hirsel-briefs/vopr/seeds.sqlite}
+  mkdir -p "$vopr" "$(dirname "$ledger")" || return
+  taskset -c 8-11 python3 tools/buck2/prepare.py || return
+  output=$(taskset -c 8-11 .buck2/bin/buck2 build -j4 --show-json-output //:hirsel-toolchain) || return
+  compiler=$(python3 -c 'import json, sys; print(json.load(sys.stdin)["root//:hirsel-toolchain"])' <<<"$output") || return
+  taskset -c 8-11 python3 core/tools/sim_campaign.py --compiler "$checkout/$compiler/hirsel" \
+    --work "$vopr/prepared" || return
+  cd "$vopr" || return
+  exec taskset -c 8-11 "$checkout/tools/sim-campaign" batch "$(basename "$run")" prepared/manifest.json \
+    --ledger "$ledger" --results results.jsonl
+)
+
+vopr_status=0
+run_vopr >>"$run/run.log" 2>&1 || vopr_status=$?
+if (( vopr_status == 75 )); then
+  echo "VOPR deferred until a spare Boat start is available." >>"$run/run.log"
+elif (( vopr_status != 0 )); then
+  printf 'VOPR campaign exited %s. See %s/vopr.\n' "$vopr_status" "$run" >>"$run/run.log"
+  if (( status == 0 )); then
+    step="VOPR campaign"
+    status=$vopr_status
+  fi
+fi
 echo "$run"
 exit "$status"

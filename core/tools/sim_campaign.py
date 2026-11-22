@@ -203,6 +203,7 @@ def prepare(compiler, work, kind, group, jobs, seeds):
         if not rows[definition]['passed']:
             print(f'{law}: preparation seed 0 failed; see {report}', flush=True)
         laws.append({'law': law, 'executable': str(binary), 'seeds': seeds})
+    shutil.rmtree(scratch / 'objects')
     return laws
 
 

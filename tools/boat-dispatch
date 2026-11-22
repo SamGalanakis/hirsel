@@ -39,6 +39,10 @@ CONTAIN_COMMAND = (
 )
 
 
+class StartUnavailable(ValueError):
+    pass
+
+
 @dataclass(frozen=True)
 class Input:
     root: Path
@@ -297,25 +301,26 @@ class LocalBudget:
 
     def reserve(self, limits, job_class):
         day = datetime.now(timezone.utc).date().isoformat()
+        unavailable = StartUnavailable if job_class == "vopr" else ValueError
         with self.db:
             count = self.db.execute("SELECT starts FROM days WHERE utc = ?", (day,)).fetchone()
             windows = limits["starts"]
             active_limit = min(ACTIVE_LIMIT, limits["maxActiveSandboxes"])
             if ((count and count[0] >= DAY_LIMIT) or windows["day"]["used"] >= DAY_LIMIT
                     or windows["day"]["remaining"] <= 0):
-                raise ValueError(f"Boat daily start limit reached ({DAY_LIMIT}); run locally")
+                raise unavailable(f"Boat daily start limit reached ({DAY_LIMIT}); run locally")
             for window in ("hour", "minute"):
                 if windows[window]["remaining"] <= 0:
-                    raise ValueError(f"Boat {window} start limit reached; run locally")
+                    raise unavailable(f"Boat {window} start limit reached; run locally")
             if limits["activeSandboxes"] >= active_limit:
-                raise ValueError("Boat active VM limit reached; run locally")
+                raise unavailable("Boat active VM limit reached; run locally")
             if job_class == "vopr" and (
                 max(count[0] if count else 0, windows["day"]["used"]) >= DAY_LIMIT - LAW_DAY_RESERVE
                 or windows["day"]["remaining"] <= LAW_DAY_RESERVE
                 or any(windows[window]["remaining"] <= 1 for window in ("hour", "minute"))
                 or limits["activeSandboxes"] >= active_limit - 1
             ):
-                raise ValueError("Boat VOPR deferred to preserve start capacity for laws")
+                raise StartUnavailable("Boat VOPR deferred to preserve start capacity for laws")
             # Count an attempt before contacting Boat. If creation is ambiguous, keep it charged.
             self.db.execute("INSERT INTO days VALUES (?, 1) "
                             "ON CONFLICT(utc) DO UPDATE SET starts = starts + 1", (day,))
@@ -335,7 +340,7 @@ class LocalBudget:
                 try:
                     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 except BlockingIOError:
-                    raise ValueError("Boat VOPR deferred while law shards are pending") from None
+                    raise StartUnavailable("Boat VOPR deferred while law shards are pending") from None
                 yield
         else:
             yield
@@ -543,6 +548,9 @@ def main():
     try:
         with ExitStack() as stack:
             return run(args, parser, stack)
+    except StartUnavailable as error:
+        print(f"boat-dispatch: {error}", file=sys.stderr)
+        return os.EX_TEMPFAIL
     except (OSError, TypeError, KeyError, ValueError, sqlite3.Error,
             subprocess.CalledProcessError) as error:
         print(f"boat-dispatch: {error}", file=sys.stderr)

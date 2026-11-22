@@ -12,6 +12,54 @@ TOOLS = Path(__file__).resolve().parents[1]
 
 
 class BoardFreshnessTest(unittest.TestCase):
+    def test_vopr_runs_after_board_and_preserves_its_verdict(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            main = base / "main"
+            main.mkdir()
+            subprocess.run(["git", "init", "-q", main], check=True)
+            subprocess.run(["git", "-C", main, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.com",
+                            "commit", "--allow-empty", "-qm", "Measured commit"], check=True)
+            subprocess.run(["git", "-C", main, "update-ref", "refs/remotes/origin/main", "HEAD"], check=True)
+            (base / "baseline-refused").touch()
+            taskset = base / "taskset"
+            taskset.write_text(r'''#!/bin/bash
+shift 2
+case "$1 $2 $3" in
+  git*) exit 0 ;;
+  'python3 bench/awfy/screen.py prepare') mkdir -p "$4" ;;
+  'python3 bench/awfy/board.py '*) touch "${HIRSEL_BOARD_BASE}/board-completed" ;;
+  'python3 tools/buck2/prepare.py ') exit 0 ;;
+  '.buck2/bin/buck2 build -j4') echo '{"root//:hirsel-toolchain":"prefix"}' ;;
+  'python3 core/tools/sim_campaign.py --compiler') exit 0 ;;
+  */tools/boat-dispatch\ *) exit 0 ;;
+  */tools/sim-campaign\ batch\ *)
+    [[ -f "${HIRSEL_BOARD_BASE}/board-completed" && "$4" == prepared/manifest.json ]] || exit 90
+    exit "$FIXTURE_VOPR_STATUS" ;;
+  *) exit 91 ;;
+esac
+''')
+            taskset.chmod(0o755)
+            for campaign_status, expected in ((0, 0), (1, 1), (75, 0)):
+                with self.subTest(campaign_status=campaign_status):
+                    (base / "board-completed").unlink(missing_ok=True)
+                    # Keep the existing two setup phases on the stub's first-run path.
+                    (base / "last-screen-inputs").unlink(missing_ok=True)
+                    result = subprocess.run(
+                        [TOOLS / "nightly-board.sh"], capture_output=True, text=True,
+                        env=os.environ | {"HIRSEL_BOARD_BASE": str(base),
+                                          "HIRSEL_BOARD_CURRENT": str(base / "CURRENT-BOARD.md"),
+                                          "HIRSEL_VOPR_LEDGER": str(base / "seeds.sqlite"),
+                                          "FIXTURE_VOPR_STATUS": str(campaign_status),
+                                          "PATH": f"{base}:{os.environ['PATH']}"},
+                    )
+                    self.assertEqual(result.returncode, expected, result.stderr)
+                    log = (Path(result.stdout.strip()) / "run.log").read_text()
+                    if campaign_status == 1:
+                        self.assertIn("VOPR campaign exited 1", log)
+                    if campaign_status == 75:
+                        self.assertIn("VOPR deferred", log)
+
     def test_failed_fetch_preserves_last_complete_and_alerts_when_stale(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)

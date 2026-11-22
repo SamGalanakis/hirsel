@@ -1668,7 +1668,7 @@ fn link_objects(
     // enters by its digest, and the runtime headers by the compiler identity,
     // which embeds them.
     let link_key = match assembly {
-        Some(assembly) => key("hirsel.recipe-final-link.v2", &assembly)?,
+        Some(assembly) => key("hirsel.recipe-final-link.v3", &assembly)?,
         None => key(
             "hirsel.core-executable.v7",
             &(
@@ -1816,13 +1816,12 @@ fn link_objects(
         let mut runtime_sources = sources.clone();
         let spawns_units =
             crate::native_entry::retain_referenced(&mut runtime_sources, &inputs[1..])?;
-        let source_identity = assembly.map_or(sources_digest, |(root, _)| root);
         let write_entry = |live_sites: Option<&BTreeSet<u64>>| -> Result<(), NativeStop> {
             let bytes = entry_plan
                 .emit(
                     &options.target,
                     &runtime_sources,
-                    source_identity,
+                    sources_digest,
                     &revision.0,
                     &revisions,
                     (live_sites, spawns_units),

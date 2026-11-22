@@ -427,8 +427,9 @@ gives `TimedOut`. Either way the child is unchanged and `p` still owns it.
 process ID, so it never reaches another process. `Ok(())` says the request was made. A
 `Proc` whose termination is cached sends nothing and returns `Ok(())` at once. `signal`
 completes at its issue. There is no operation on arbitrary process IDs, process groups or a
-detached child. A lifetime limit is library code: signal `SigTerm`, wait with a deadline,
-then signal `SigKill` and wait.
+detached child. The standard library implements a lifetime limit by waiting until a deadline
+for natural exit, then sending `SigTerm` and allowing a grace period before sending `SigKill`
+and waiting to reap. See [`exec.run_until`](../../core/std/api/exec.md).
 
 Laws:
 

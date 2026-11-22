@@ -1,0 +1,98 @@
+fn drive(take world: sim.world.World) waits {
+    let mut w = take world
+    sim.world.run(mut w)
+}
+
+fn drain_bytes(s: String) -> Bytes {
+    let source = string.as_bytes(s)
+    let mut result: Bytes = list.with_capacity(list.len(source))
+    list.append(mut result, source)
+    result
+}
+
+// A parent stop at time 5 starts the bounded wait. The child ignores
+// SIGTERM at deadline 12, then is killed and reaped at 12 + 3.
+// expect: run run_until_escalates(tasks) = true
+fn run_until_escalates(tasks: Tasks) -> bool waits {
+    let (world, time) = sim.world.new(1, 0, 0)
+    let driver = task.spawn(tasks, bytes 0, take world, drive)
+    let (parent, trigger) = provide.process()
+    let alarm = sim.io.stop_at(tasks, time, 5, take trigger)
+    let (e, port) = provide.exec(bytes 32)
+    let program = sim.exec.Program(name: "stubborn", exit: IgnoreTerm, stdout: list.new(), stderr: list.new())
+    let server = task.spawn(tasks, bytes 4096, sim.exec.Server(program: take program, time: time, port: take port), sim.exec.serve)
+    let l = Launch(program: "stubborn", args: list.new(), env: list.new(), dir: "work", path: "", stdin: Discard, stdout: Discard, stderr: Discard)
+    let Spawned(take proc, _, _, _) = result.unwrap(exec.spawn(e, l))
+    let mut child = take proc
+    host.stopped(parent)
+    let stopped = match exec.run_until(mut child, time, 12, 3) {
+        Ok(outcome) => match (outcome.stage, outcome.termination) {
+            (Killed, Signalled(9)) => host.mono_ns(time) == 15,
+            _ => false,
+        },
+        _ => false,
+    }
+    let _ = take child
+    let report = result.unwrap(task.join(take server))
+    result.unwrap(task.join(take alarm))
+    result.unwrap(task.join(take driver))
+    stopped && report.terms == 1 && report.kills == 1 && report.term_at == Some(12) && report.killed_at == Some(15) && report.reaped_at == Some(15)
+}
+
+type CloseAt: send {
+    stdin: WriteHalf,
+    time: Clock
+}
+
+fn close_at_eight(take job: CloseAt) waits {
+    let CloseAt(stdin: take input, time) = take job
+    host.sleep_until(time, 8)
+    let _ = take input
+}
+
+// This child exits naturally when stdin closes at 8, before deadline 12.
+// run_until must return then and send neither signal.
+// expect: run run_until_exits_early(tasks) = true
+fn run_until_exits_early(tasks: Tasks) -> bool waits {
+    let (world, time) = sim.world.new(1, 0, 0)
+    let driver = task.spawn(tasks, bytes 0, take world, drive)
+    let (e, port) = provide.exec(bytes 64)
+    let program = sim.exec.Program(name: "input", exit: Input(list.new()), stdout: list.new(), stderr: list.new())
+    let server = task.spawn(tasks, bytes 4096, sim.exec.Server(program: take program, time: time, port: take port), sim.exec.serve)
+    let l = Launch(program: "input", args: list.new(), env: list.new(), dir: "work", path: "", stdin: Piped, stdout: Discard, stderr: Discard)
+    let Spawned(take proc, take stdin, _, _) = result.unwrap(exec.spawn(e, l))
+    let input = option.unwrap(take stdin)
+    let closer = task.spawn(tasks, bytes 0, CloseAt(stdin: take input, time: time), close_at_eight)
+    let mut child = take proc
+    let early = match exec.run_until(mut child, time, 12, 3) {
+        Ok(outcome) => match (outcome.stage, outcome.termination) {
+            (Exited, Exited(0)) => host.mono_ns(time) == 8,
+            _ => false,
+        },
+        _ => false,
+    }
+    let _ = take child
+    let report = result.unwrap(task.join(take server))
+    result.unwrap(task.join(take closer))
+    result.unwrap(task.join(take driver))
+    early && report.terms == 0 && report.kills == 0 && report.reaped_at == Some(8)
+}
+
+// The child waits for empty stdin before exiting. The collector must close
+// that pipe and drain both outputs to EOF, including bytes beyond the caps.
+// expect: run output_drains_past_limits(tasks) = true
+fn output_drains_past_limits(tasks: Tasks) -> bool waits {
+    let (time, hand) = provide.clock(0, 0)
+    let _ = take hand
+    let (e, port) = provide.exec(bytes 256)
+    let program = sim.exec.Program(name: "report", exit: Input(list.new()), stdout: drain_bytes("hello"), stderr: drain_bytes("oops"))
+    let server = task.spawn(tasks, bytes 4096, sim.exec.Server(program: take program, time: time, port: take port), sim.exec.serve)
+    let l = Launch(program: "report", args: list.new(), env: list.new(), dir: "work", path: "", stdin: Piped, stdout: Piped, stderr: Piped)
+    let captured = result.unwrap(exec.output(tasks, e, l, bytes 2, bytes 0, Never))
+    let report = result.unwrap(task.join(take server))
+    let exited = match captured.termination {
+        Exited(0) => true,
+        _ => false,
+    }
+    exited && captured.stdout.data == string.as_bytes("he") && captured.stdout.truncated && list.len(captured.stderr.data) == 0 && captured.stderr.truncated && report.stdout_bytes == 5 && report.stderr_bytes == 4
+}

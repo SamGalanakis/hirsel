@@ -1,0 +1,217 @@
+/// When a model program finishes without a signal.
+pub type Behavior: send = Immediate(u8) | Input(Bytes) | IgnoreTerm
+
+/// A one-child program served on an Exec port. Each output contains a fixed
+/// stream of bytes available at launch. Input programs compare all stdin
+/// bytes and exit 0 on an exact match at EOF, or 1 otherwise.
+pub type Program: send {
+    name: String,
+    exit: Behavior,
+    stdout: Bytes,
+    stderr: Bytes
+}
+
+/// Committed lifecycle events and pipe bytes, measured on the supplied clock.
+pub type Report {
+    terms: u64,
+    kills: u64,
+    term_at: Option[u64],
+    killed_at: Option[u64],
+    reaped_at: Option[u64],
+    stdout_bytes: u64,
+    stderr_bytes: u64
+}
+
+pub type Server: send {
+    program: Program,
+    time: Clock,
+    port: Served[ExecOp]
+}
+
+type Child {
+    started: bool,
+    status: Option[Termination],
+    input_at: u64,
+    input_matches: bool,
+    out_at: u64,
+    err_at: u64
+}
+
+fn answer(mut port: Served[ExecOp], take call: Call[ExecOp], r: ExecReply) -> bool {
+    match provide.reply(mut port, take call, provide.exec_reply(r)) {
+        Ok(()) => true,
+        Error(_) => false,
+    }
+}
+
+fn piped(s: Stdio, id: u64) -> u64 {
+    match s {
+        Piped => id,
+        Discard => 0,
+    }
+}
+
+fn at_eof(program: Program, state: Child) -> Option[Termination] {
+    match program.exit {
+        Input(expected) => Some(Exited(if state.input_matches && state.input_at == list.len(expected) {
+            0
+        } else {
+            1
+        })),
+        _ => state.status,
+    }
+}
+
+fn start(program: Program, mut state: Child, stdin: Stdio, stdout: Stdio, stderr: Stdio, n: u64, mut port: Served[ExecOp], take call: Call[ExecOp]) {
+    let name = string.as_bytes(program.name)
+    if state.started || n != list.len(name) {
+        let _ = answer(mut port, take call, Failed(Denied))
+        return
+    }
+    let mut requested: Bytes = list.with_capacity(n)
+    provide.payload(call, 0, mut requested)
+    if requested != name {
+        let _ = answer(mut port, take call, Failed(Denied))
+        return
+    }
+    if answer(mut port, take call, Started(proc: 1, stdin: piped(stdin, 2), stdout: piped(stdout, 3), stderr: piped(stderr, 4))) {
+        state.started = true
+        match program.exit {
+            Immediate(code) => {
+                state.status = Some(Exited(code))
+            },
+            Input(_) => {
+                if piped(stdin, 2) == 0 {
+                    state.status = at_eof(program, state)
+                }
+            },
+            _ => (),
+        }
+    }
+}
+
+fn transfer(source: Bytes, at: u64, max: u64, mut port: Served[ExecOp], mut call: Call[ExecOp]) -> u64 {
+    let end = order.min(int.saturating_add(at, max), list.len(source))
+    provide.fill(mut port, mut call, list.slice(source, at, end))
+}
+
+fn read_pipe(program: Program, mut state: Child, pipe: u64, max: u64, mut port: Served[ExecOp], take call: Call[ExecOp]) {
+    let mut c = take call
+    let staged = if pipe == 3 {
+        transfer(program.stdout, state.out_at, max, mut port, mut c)
+    } else {
+        transfer(program.stderr, state.err_at, max, mut port, mut c)
+    }
+    if answer(mut port, take c, Count(staged)) {
+        if pipe == 3 {
+            state.out_at += staged
+        } else {
+            state.err_at += staged
+        }
+    }
+}
+
+fn prefix_matches(expected: Bytes, at: u64, incoming: Bytes) -> bool {
+    let n = list.len(incoming)
+    n <= list.len(expected) - at && list.slice(expected, at, at + n) == incoming
+}
+
+fn write_pipe(program: Program, mut state: Child, n: u64, mut port: Served[ExecOp], take call: Call[ExecOp]) {
+    if let Some(_) = state.status {
+        let _ = answer(mut port, take call, IoFailed(Reset))
+        return
+    }
+    if let Input(expected) = program.exit {
+        let mut received: Bytes = list.with_capacity(n)
+        provide.payload(call, 1, mut received)
+        provide.payload(call, 2, mut received)
+        let matches = state.input_matches && prefix_matches(expected, state.input_at, received)
+        if answer(mut port, take call, Count(n)) {
+            state.input_matches = matches
+            if matches {
+                state.input_at += n
+            }
+        }
+    } else {
+        let _ = answer(mut port, take call, Count(n))
+    }
+}
+
+fn signal(program: Program, mut state: Child, time: Clock, mut report: Report, s: Signal, mut port: Served[ExecOp], take call: Call[ExecOp]) {
+    if !answer(mut port, take call, Done) {
+        return
+    }
+    if let Some(_) = state.status {
+        return
+    }
+    match s {
+        SigTerm => {
+            report.terms += 1
+            report.term_at = Some(host.mono_ns(time))
+            match program.exit {
+                IgnoreTerm => (),
+                _ => {
+                    state.status = Some(Signalled(15))
+                },
+            }
+        },
+        SigKill => {
+            report.kills += 1
+            report.killed_at = Some(host.mono_ns(time))
+            state.status = Some(Signalled(9))
+        },
+        SigInt => {
+            state.status = Some(Signalled(2))
+        },
+    }
+}
+
+/// Serves one matching launch and keeps its pipe prefixes until consumed
+/// or released. Spawn selects by program name. Args, env and cwd have no
+/// behavioral effect. SIGINT and SIGKILL terminate a running model. SIGTERM
+/// terminates it except under IgnoreTerm. Drive the clock with sim.world.run.
+pub fn serve(take server: Server) -> Report waits {
+    let Server(program: take program, time, port: take served) = take server
+    let mut port = take served
+    let mut state = Child(started: false, status: None, input_at: 0, input_matches: true, out_at: 0, err_at: 0)
+    let mut report = Report(terms: 0, kills: 0, term_at: None, killed_at: None, reaped_at: None, stdout_bytes: 0, stderr_bytes: 0)
+    let mut awaiting: Option[Call[ExecOp]] = None
+    while let Some(take call) = provide.next(mut port) {
+        match provide.exec_op(call) {
+            Spawn(program: n, stdin: stdin, stdout: stdout, stderr: stderr, args: _, env: _, dir: _, path: _) => start(program, mut state, stdin, stdout, stderr, n, mut port, take call),
+            Await(proc: _) => {
+                awaiting = Some(take call)
+            },
+            Signal(proc: _, signal: s) => signal(program, mut state, time, mut report, s, mut port, take call),
+            Recv(pipe: pipe, max: max, room: _) => read_pipe(program, mut state, pipe, max, mut port, take call),
+            Send(pipe: _, prefix: prefix, tail: tail) => write_pipe(program, mut state, prefix + tail, mut port, take call),
+            Released(id: id, part: part) => {
+                let _ = take call
+                match (id, part) {
+                    (2, Write) => {
+                        if let None = state.status {
+                            state.status = at_eof(program, state)
+                        }
+                    },
+                    (1, Whole) => {
+                        awaiting = None
+                        if let None = state.status {
+                            state.status = Some(Signalled(9))
+                        }
+                    },
+                    _ => (),
+                }
+            },
+        }
+        if let Some(status) = state.status {
+            if let Some(take waiter) = replace(mut awaiting, None) {
+                if answer(mut port, take waiter, Ended(status)) {
+                    report.reaped_at = Some(host.mono_ns(time))
+                }
+            }
+        }
+    }
+    report.stdout_bytes = state.out_at
+    report.stderr_bytes = state.err_at
+    report
+}

@@ -1,0 +1,126 @@
+// Child lifecycle and pipe collection over the core Exec capability.
+/// The last stage reached before the child was reaped.
+pub type RunStage = Exited | Terminated | Killed
+
+pub type RunResult: send {
+    termination: Termination,
+    stage: RunStage
+}
+
+/// Waits for a natural exit until the absolute monotonic deadline. On
+/// timeout, sends SIGTERM and allows grace_ns more time, then sends
+/// SIGKILL and waits for the reaped status. The last wait has no deadline.
+/// Other signal and wait errors leave the Proc with the caller.
+pub fn run_until(mut p: Proc, c: Clock, deadline_ns: u64, grace_ns: u64) -> Result[RunResult, ExecError] waits {
+    match exec.wait(mut p, At(c, deadline_ns)) {
+        Ok(status) => return Ok(RunResult(termination: status, stage: Exited)),
+        Error(TimedOut) => (),
+        Error(e) => return Error(e),
+    }
+    exec.signal(mut p, SigTerm)?
+    let escalation = int.saturating_add(deadline_ns, grace_ns)
+    match exec.wait(mut p, At(c, escalation)) {
+        Ok(status) => return Ok(RunResult(termination: status, stage: Terminated)),
+        Error(TimedOut) => (),
+        Error(e) => return Error(e),
+    }
+    exec.signal(mut p, SigKill)?
+    let reaped = exec.wait(mut p, Never)?
+    Ok(RunResult(termination: reaped, stage: Killed))
+}
+
+/// A pipe's captured prefix and whether the child wrote more bytes.
+pub type Capture: send {
+    data: Bytes,
+    truncated: bool
+}
+
+/// The reaped termination and the two captures.
+pub type Output: send {
+    termination: Termination,
+    stdout: Capture,
+    stderr: Capture
+}
+
+pub type OutputError = Process(ExecError) | Stdout(NetError) | Stderr(NetError) | Worker(JoinError)
+
+type ReadPipe: send {
+    pipe: ReadHalf,
+    keep: u64,
+    until: Until
+}
+
+const SCRATCH: u64 = 4096
+
+fn collect_pipe(take work: ReadPipe) -> Result[Capture, NetError] waits {
+    let ReadPipe(pipe: take half, keep, until) = take work
+    let mut pipe = take half
+    let mut data: Bytes = list.with_capacity(keep)
+    while list.len(data) < keep {
+        let room = keep - list.len(data)
+        if host.recv_bounded(mut pipe, mut data, room, until)? == 0 {
+            return Ok(Capture(data: take data, truncated: false))
+        }
+    }
+    let mut scratch: Bytes = list.with_capacity(SCRATCH)
+    let mut truncated = false
+    while host.recv_bounded(mut pipe, mut scratch, SCRATCH, until)? != 0 {
+        truncated = true
+        list.clear(mut scratch)
+    }
+    Ok(Capture(data: take data, truncated: truncated))
+}
+
+fn reader(tasks: Tasks, take pipe: Option[ReadHalf], keep: u64, until: Until) -> Option[Task[Result[Capture, NetError]]] {
+    match take pipe {
+        None => None,
+        Some(take half) => {
+            let rounded = int.saturating_add(keep, 7) / 8 * 8
+            let room = int.saturating_add(rounded, SCRATCH)
+            Some(task.spawn(tasks, bytes room, ReadPipe(pipe: take half, keep: keep, until: until), collect_pipe))
+        }
+    }
+}
+
+fn collect(take handle: Option[Task[Result[Capture, NetError]]], stdout: bool) -> Result[Capture, OutputError] waits {
+    match take handle {
+        None => Ok(Capture(data: list.new(), truncated: false)),
+        Some(take worker) => {
+            match task.join(take worker) {
+                Ok(Ok(take capture)) => Ok(take capture),
+                Ok(Error(e)) => Error(if stdout {
+                    Stdout(e)
+                } else {
+                    Stderr(e)
+                }),
+                Error(take e) => Error(Worker(take e)),
+            }
+        },
+    }
+}
+
+fn close_input(take input: Option[WriteHalf]) {}
+
+/// Spawns the supplied launch, closes its stdin, and drains both piped
+/// outputs concurrently. An unpiped output is empty. Beyond each limit,
+/// drops bytes while still draining to EOF. Uses until for wait and reads.
+/// Alloc: each piped stream gets a task, its rounded capture limit and
+/// 4096 bytes of scratch. The returned captures retain their own storage.
+pub fn output(tasks: Tasks, e: Exec, l: Launch, bytes stdout_max: u64, bytes stderr_max: u64, until: Until) -> Result[Output, OutputError] waits {
+    let spawned = match exec.spawn(e, l) {
+        Ok(take child) => take child,
+        Error(error) => return Error(Process(error)),
+    }
+    let Spawned(take child, take input, take out, take err) = take spawned
+    let mut p = take child
+    close_input(take input)
+    let out_job = reader(tasks, take out, stdout_max, until)
+    let err_job = reader(tasks, take err, stderr_max, until)
+    let termination = match exec.wait(mut p, until) {
+        Ok(status) => status,
+        Error(error) => return Error(Process(error)),
+    }
+    let stdout = collect(take out_job, true)?
+    let stderr = collect(take err_job, false)?
+    Ok(Output(termination: termination, stdout: take stdout, stderr: take stderr))
+}

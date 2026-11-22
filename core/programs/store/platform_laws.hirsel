@@ -1,0 +1,627 @@
+// Laws of the platform host (RUNNER-SPEC §14.7: L39, L41, L42, L43, L45) over the faked
+// launcher. Each law drives the host through the session's requests and events. Its oracle
+// is the outcome the cited rule states: which serving launches the launcher is asked for,
+// at which generation, and what each wake row then holds. A started serving launch stands
+// for the place that runs the due trigger; the place itself is the runner's (L44's harness).
+const T0: u64 = 1700000000000u64
+
+const SECOND_NS: u64 = 1000000000u64
+
+fn expect(ok: bool, take what: String) {
+    if !ok {
+        fail(take what)
+    }
+}
+
+fn must[T](take r: Result[T, Refused], take what: String) -> T {
+    match take r {
+        Ok(take v) => take v,
+        Error(_) => fail(take what)
+    }
+}
+
+type Rig {
+    h: Host,
+    f: launcher.Fake,
+    now: Now,
+    starts: List[launcher.Child]
+}
+
+fn uncontained() -> launcher.Bindings {
+    launcher.Bindings(store: string.new(), dirs: list.new(), net: list.new())
+}
+
+fn unlimited() -> launcher.Limits {
+    launcher.Limits(memory: None, cpu: None, pids: None)
+}
+
+fn image() -> Bytes {
+    let mut b: Bytes = list.with_capacity(32u64)
+    for _ in 0u64 .. 32u64 {
+        list.push(mut b, 7u8)
+    }
+    b
+}
+
+fn image_two() -> Bytes {
+    let mut b: Bytes = list.with_capacity(32u64)
+    for _ in 0u64 .. 32u64 {
+        list.push(mut b, 9u8)
+    }
+    b
+}
+
+// Hands each request to the fake launcher in order and applies each event it answers in
+// stream order; the host's answering requests join the end of the queue.
+fn pump(mut r: Rig, take reqs: List[launcher.Request]) waits {
+    let mut queue = take reqs
+    let mut i = 0u64
+    while i < list.len(queue) {
+        let req: launcher.Request = clone(queue[i])
+        i += 1u64
+        if let Start(l) = req {
+            list.push(mut r.starts, launcher.Child(group: clone(l.group), role: launcher.role_of(l.mode)))
+        }
+        let events = launcher.handle(mut r.f, take req)
+        for e in events {
+            let more = event(mut r.h, clone(e), r.now)
+            for m in more {
+                list.push(mut queue, clone(m))
+            }
+        }
+    }
+}
+
+fn feed(mut r: Rig, take events: List[launcher.Event]) waits {
+    let mut reqs: List[launcher.Request] = list.new()
+    for e in events {
+        let more = event(mut r.h, clone(e), r.now)
+        for m in more {
+            list.push(mut reqs, clone(m))
+        }
+    }
+    pump(mut r, take reqs)
+}
+
+fn rig_on(take db: store.Db, f: launcher.Fake, max_places: u64, now: Now) -> Rig waits {
+    let (h, hello) = must(open(take db, Config(max_places: max_places, idle_ms: 1000u64)), "open")
+    let mut r = Rig(h: take h, f: clone(f), now: now, starts: list.new())
+    pump(mut r, take hello)
+    r
+}
+
+fn rig(c: Clock, rnd: Random, max_places: u64) -> Rig waits {
+    rig_on(store.memory(c, rnd, store.defaults()), launcher.fake(), max_places, Now(wall_ms: T0, mono_ns: SECOND_NS))
+}
+
+// Ends the host process: only its store and the launcher survive.
+fn restart(take r: Rig, max_places: u64) -> Rig waits {
+    let Rig(h: take h, f: take f, now: now, starts: _) = take r
+    rig_on(close(take h), f, max_places, now)
+}
+
+fn add(mut r: Rig, name: String, tenant: String) waits {
+    let spec = NewGroup(name: string.from(name), tenant: string.from(tenant), workdir: string.from(name), author: Trusted, label: Uncontained, listen: "127.0.0.1:0", bindings: uncontained(), limits: unlimited(), assembly: image(), activation: 1u64)
+    let reqs = must(add_group(mut r.h, spec), "add_group")
+    pump(mut r, take reqs)
+}
+
+fn op_wake(mut r: Rig, name: String) waits {
+    let reqs = must(wake(mut r.h, name, r.now), "operator wake")
+    pump(mut r, take reqs)
+}
+
+fn at_wall(mut r: Rig, wall_ms: u64) waits {
+    r.now = Now(wall_ms: wall_ms, mono_ns: r.now.mono_ns)
+    let reqs = tick(mut r.h, r.now)
+    pump(mut r, take reqs)
+}
+
+fn at_mono(mut r: Rig, mono_ns: u64) waits {
+    r.now = Now(wall_ms: r.now.wall_ms, mono_ns: mono_ns)
+    let reqs = tick(mut r.h, r.now)
+    pump(mut r, take reqs)
+}
+
+// The serving gens started for a group, in launch order.
+fn gens(r: Rig, name: String) -> List[u64] {
+    let mut out: List[u64] = list.new()
+    for c in r.starts {
+        if c.group.name == name {
+            if let Serving(g) = c.role {
+                list.push(mut out, g)
+            }
+        }
+    }
+    out
+}
+
+fn last(r: Rig, name: String) -> launcher.Child {
+    let mut found: Option[launcher.Child] = None
+    for c in r.starts {
+        if c.group.name == name {
+            found = Some(clone(c))
+        }
+    }
+    match take found {
+        Some(take c) => take c,
+        None => fail("no launch for the group")
+    }
+}
+
+fn finish(mut r: Rig, c: launcher.Child, exit: launcher.Status, report: Option[Option[u64]]) waits {
+    let events = launcher.end(mut r.f, c, exit, report)
+    feed(mut r, take events)
+}
+
+// The group's current child stops cleanly with its next due time.
+fn idle_stop(mut r: Rig, name: String, due: Option[u64]) waits {
+    let c = last(r, name)
+    finish(mut r, c, Code(0i32), Some(due))
+}
+
+fn is_dirty(r: Rig, name: String, g: u64) -> bool {
+    match wake_row(r.h, name) {
+        Some(w) => match w.wake {
+            Dirty(a) => a == g,
+            _ => false
+        },
+        None => false
+    }
+}
+
+fn is_clean(r: Rig, name: String) -> bool {
+    match wake_row(r.h, name) {
+        Some(w) => match w.wake {
+            Clean(_) => true,
+            _ => false
+        },
+        None => false
+    }
+}
+
+fn one(a: u64) -> List[u64] {
+    let mut out: List[u64] = list.new()
+    list.push(mut out, a)
+    out
+}
+
+fn two(a: u64, b: u64) -> List[u64] {
+    let mut out = one(a)
+    list.push(mut out, b)
+    out
+}
+
+fn gone_row(h: Host, name: String) -> bool {
+    match wake_row(h, name) {
+        Some(_) => false,
+        None => true
+    }
+}
+
+fn launches(r: Rig, name: String) -> u64 {
+    list.len(gens(r, name))
+}
+
+// A group whose place is cold with a trigger due at `due`.
+fn cold_due(mut r: Rig, name: String, tenant: String, due: u64) waits {
+    add(mut r, name, tenant)
+    op_wake(mut r, name)
+    idle_stop(mut r, name, Some(due))
+}
+
+// L39 `wake_due_after_unload` (§14.3, §14.4): the due-time wait is one absolute wall-time
+// alarm on the due index's minimum, re-armed when an earlier deadline arrives, so nothing
+// polls. A place that stops with `Stopped(Some(t + 2000))` is started after t + 2 s with no
+// arrival; a second place's earlier deadline is not held behind a wait armed at t + 60 s,
+// nor lost while the index is empty.
+@test
+fn wake_due_after_unload(c: Clock, rnd: Random, tasks: Tasks) -> Result[(), ()] waits {
+    let (vc, hand) = provide.clock(SECOND_NS, T0)
+    let mut ticks = take hand
+    let (to, from): (Sender[Alarm], Receiver[Alarm]) = channel.new(4u64)
+    let mut w = waiter()
+    let mut r = rig(c, rnd, 4u64)
+    // The first place: its trigger is due at t + 2 s.
+    cold_due(mut r, "a", "t", T0 + 2000u64)
+    rearm(mut w, r.h, tasks, vc, to)
+    expect(armed_at(w) == Some(T0 + 2000u64), "L39: the wait is not armed on the due time")
+    let _ = clock.idle(mut ticks)
+    clock.set_wall(mut ticks, T0 + 1999u64)
+    let _ = clock.idle(mut ticks)
+    if let Ok(_) = channel.try_receive(from) {
+        fail("L39: the wait woke before the due time")
+    }
+    clock.set_wall(mut ticks, T0 + 2000u64)
+    let _ = clock.idle(mut ticks)
+    let Ok(DueAt(fired)) = channel.try_receive(from) else {
+        fail("L39: no wake at the due time")
+    }
+    at_wall(mut r, fired)
+    expect(gens(r, "a") == two(1u64, 2u64), "L39: the due place was not started")
+    expect(is_dirty(r, "a", 2u64), "L39: the due place is not Dirty")
+    // An armed wait at t + 60 s does not hold back a deadline at t + 2 s.
+    clock.set_wall(mut ticks, T0 + 3000u64)
+    r.now = Now(wall_ms: T0 + 3000u64, mono_ns: r.now.mono_ns)
+    idle_stop(mut r, "a", Some(T0 + 60000u64))
+    rearm(mut w, r.h, tasks, vc, to)
+    expect(armed_at(w) == Some(T0 + 60000u64), "L39: the wait is not on the later deadline")
+    cold_due(mut r, "b", "t", T0 + 5000u64)
+    rearm(mut w, r.h, tasks, vc, to)
+    expect(armed_at(w) == Some(T0 + 5000u64), "L39: the earlier deadline waits for the old one")
+    clock.set_wall(mut ticks, T0 + 5000u64)
+    let _ = clock.idle(mut ticks)
+    let Ok(DueAt(second)) = channel.try_receive(from) else {
+        fail("L39: no wake at the second due time")
+    }
+    expect(second == T0 + 5000u64, "L39: the second place woke at the wrong time")
+    at_wall(mut r, second)
+    expect(gens(r, "b") == two(1u64, 2u64) && launches(r, "a") == 2u64, "L39: the wrong place was started")
+    // With the index empty, no wait is armed; a place that then stops with a due time arms it.
+    let mut r2 = rig(c, rnd, 4u64)
+    add(mut r2, "c", "t")
+    op_wake(mut r2, "c")
+    rearm(mut w, r2.h, tasks, vc, to)
+    expect(armed_at(w) == None, "L39: a wait is armed with no due row")
+    r2.now = Now(wall_ms: T0 + 6000u64, mono_ns: r2.now.mono_ns)
+    idle_stop(mut r2, "c", Some(T0 + 8000u64))
+    rearm(mut w, r2.h, tasks, vc, to)
+    expect(armed_at(w) == Some(T0 + 8000u64), "L39: the wait was armed only at start")
+    clock.set_wall(mut ticks, T0 + 8000u64)
+    let _ = clock.idle(mut ticks)
+    let Ok(DueAt(third)) = channel.try_receive(from) else {
+        fail("L39: no wake after an empty index")
+    }
+    at_wall(mut r2, third)
+    expect(gens(r2, "c") == two(1u64, 2u64), "L39: the place due after an empty index was not started")
+    disarm(mut w)
+    Ok(())
+}
+
+// Two live places and a third due one under `max_places` 2.
+fn capacity_case(c: Clock, rnd: Random) -> Rig waits {
+    let mut r = rig(c, rnd, 2u64)
+    cold_due(mut r, "c", "t", T0 + 1000u64)
+    add(mut r, "a", "t")
+    add(mut r, "b", "t")
+    op_wake(mut r, "a")
+    op_wake(mut r, "b")
+    at_wall(mut r, T0 + 1000u64)
+    expect(launches(r, "c") == 1u64, "L41: a third place started past max_places")
+    expect(is_clean(r, "c"), "L41: the refused place's row left Clean")
+    r
+}
+
+// L41 `wake_dirty_capacity` (§14.2, §14.3): the check comes before Dirty; a due wake that
+// finds no slot is queued and retried on every change that can make room; a restart rebuilds
+// it from the due index; one tenant's full quota holds back no other tenant; and an operator
+// request with no slot is answered Full.
+@test
+fn wake_dirty_capacity(c: Clock, rnd: Random) -> Result[(), ()] waits {
+    // A row leaving Dirty makes room.
+    let mut r = capacity_case(c, rnd)
+    idle_stop(mut r, "a", None)
+    expect(gens(r, "c") == two(1u64, 2u64) && is_dirty(r, "c", 2u64), "L41: the queued place did not start when a slot freed")
+    // Raising max_places makes room.
+    let mut raised = capacity_case(c, rnd)
+    let more = must(set_max_places(mut raised.h, 3u64, raised.now), "raise max_places")
+    pump(mut raised, take more)
+    expect(gens(raised, "c") == two(1u64, 2u64), "L41: raising max_places did not start the queued place")
+    // Raising a full tenant's quota makes room.
+    let mut quota = rig(c, rnd, 10u64)
+    let set = must(set_quota(mut quota.h, "t", Quota(groups: 10u64, live: 2u64), quota.now), "quota")
+    pump(mut quota, take set)
+    cold_due(mut quota, "c", "t", T0 + 1000u64)
+    add(mut quota, "a", "t")
+    add(mut quota, "b", "t")
+    op_wake(mut quota, "a")
+    op_wake(mut quota, "b")
+    at_wall(mut quota, T0 + 1000u64)
+    expect(launches(quota, "c") == 1u64, "L41: a place started past its tenant's live quota")
+    let lifted = must(set_quota(mut quota.h, "t", Quota(groups: 10u64, live: 3u64), quota.now), "raise quota")
+    pump(mut quota, take lifted)
+    expect(gens(quota, "c") == two(1u64, 2u64), "L41: raising the quota did not start the queued place")
+    // A host restart rebuilds the queued wake from the due index.
+    let queued = capacity_case(c, rnd)
+    let mut back = restart(take queued, 2u64)
+    expect(launches(back, "a") == 0u64 && launches(back, "b") == 0u64 && launches(back, "c") == 0u64, "L41: the restart probed a live or queued place")
+    idle_stop_child(mut back, "a", 1u64)
+    expect(gens(back, "c") == one(2u64), "L41: the restart lost the queued wake")
+    // A queued place of a full tenant does not hold back another tenant's due place.
+    let mut mixed = rig(c, rnd, 10u64)
+    let cap = must(set_quota(mut mixed.h, "full", Quota(groups: 10u64, live: 1u64), mixed.now), "quota")
+    pump(mut mixed, take cap)
+    cold_due(mut mixed, "c", "full", T0 + 1000u64)
+    cold_due(mut mixed, "d", "other", T0 + 1000u64)
+    add(mut mixed, "a", "full")
+    op_wake(mut mixed, "a")
+    at_wall(mut mixed, T0 + 1000u64)
+    expect(launches(mixed, "c") == 1u64, "L41: the full tenant's place started")
+    expect(gens(mixed, "d") == two(1u64, 2u64), "L41: the full tenant's queued place held back another tenant")
+    // An operator request that finds no slot is answered Full.
+    let mut full = capacity_case(c, rnd)
+    match wake(mut full.h, "c", full.now) {
+        Error(Full(Count(2u64))) => (),
+        _ => fail("L41: an operator request with no slot was not answered Full"),
+    }
+    Ok(())
+}
+
+// After a restart the rig records no launch of the adopted child; this ends it by gen.
+fn idle_stop_child(mut r: Rig, name: String, gen: u64) waits {
+    let row = must(group_row(r.h, name), "group row")
+    let Some(grp) = row else {
+        fail("no group")
+    }
+    finish(mut r, child_of(name, grp.incarnation, gen), Code(0i32), Some(None))
+}
+
+fn crash(mut r: Rig, name: String) waits {
+    let c = last(r, name)
+    finish(mut r, c, Signal(9i32), None)
+}
+
+// L42 `wake_only_clean_stop` (§14.4, §14.5): only a clean Stopped writes Clean. A kill, a
+// Forced end and an exit 0 without a report leave the row Dirty and start a probe, also
+// across a host restart; a place that crashes after every start is restarted at once, then
+// after 1 s, 2 s and 4 s, arrivals start nothing extra meanwhile, and a clean report resets
+// the delay.
+@test
+fn wake_only_clean_stop(c: Clock, rnd: Random) -> Result[(), ()] waits {
+    let mut r = rig(c, rnd, 4u64)
+    add(mut r, "killed", "t")
+    add(mut r, "forced", "t")
+    add(mut r, "silent", "t")
+    op_wake(mut r, "killed")
+    op_wake(mut r, "forced")
+    op_wake(mut r, "silent")
+    let ch_killed = last(r, "killed")
+    finish(mut r, ch_killed, Signal(9i32), None)
+    let ch_forced = last(r, "forced")
+    finish(mut r, ch_forced, Code(70i32), None)
+    let ch_silent = last(r, "silent")
+    finish(mut r, ch_silent, Code(0i32), None)
+    expect(is_dirty(r, "killed", 2u64) && gens(r, "killed") == two(1u64, 2u64), "L42: a killed child's row was not probed Dirty")
+    expect(is_dirty(r, "forced", 2u64) && gens(r, "forced") == two(1u64, 2u64), "L42: a Forced child's row was not probed Dirty")
+    expect(is_dirty(r, "silent", 2u64) && gens(r, "silent") == two(1u64, 2u64), "L42: an exit 0 with no report wrote Clean")
+    // Each one left Dirty with no child across a host restart is probed, and its due trigger runs.
+    let ch_killed_again = last(r, "killed")
+    let _ = launcher.end(mut r.f, ch_killed_again, Signal(9i32), None)
+    let mut back = restart(take r, 4u64)
+    expect(back.h.probes == 1u64 && gens(back, "killed") == one(3u64), "L42: a row left Dirty across a restart was not probed")
+    idle_stop(mut back, "killed", Some(T0 + 500u64))
+    at_wall(mut back, T0 + 500u64)
+    expect(gens(back, "killed") == two(3u64, 4u64), "L42: the probed place's due trigger did not run")
+    // Backoff: at once, then 1 s, 2 s, 4 s.
+    let mut b = rig(c, rnd, 4u64)
+    add(mut b, "crashy", "t")
+    op_wake(mut b, "crashy")
+    crash(mut b, "crashy")
+    expect(launches(b, "crashy") == 2u64, "L42: the first crash was not restarted at once")
+    let start = b.now.mono_ns
+    let mut base = start
+    let mut d = SECOND_NS
+    for _ in 0u64 .. 3u64 {
+        crash(mut b, "crashy")
+        let n = launches(b, "crashy")
+        expect(timers(b.h).mono_ns == Some(base + d), "L42: the backoff delay is not 1 s, 2 s, 4 s")
+        let target = last(b, "crashy").group
+        let events = launcher.connect(mut b.f, target)
+        feed(mut b, take events)
+        at_mono(mut b, base + d - 1u64)
+        expect(launches(b, "crashy") == n, "L42: an arrival or an early tick started a failing place")
+        at_mono(mut b, base + d)
+        expect(launches(b, "crashy") == n + 1u64, "L42: the backoff retry did not start")
+        base = base + d
+        d = d * 2u64
+    }
+    // A clean report resets the delay.
+    let served = last(b, "crashy").group
+    launcher.accept(mut b.f, served)
+    idle_stop(mut b, "crashy", None)
+    expect(is_clean(b, "crashy"), "L42: the clean report did not write Clean")
+    op_wake(mut b, "crashy")
+    let n = launches(b, "crashy")
+    crash(mut b, "crashy")
+    expect(launches(b, "crashy") == n + 1u64, "L42: a clean report did not reset the backoff")
+    Ok(())
+}
+
+fn an_attempt() -> launcher.Attempt {
+    launcher.Attempt(hi: 1u64, lo: 2u64)
+}
+
+fn answer(mut r: Rig, ch: launcher.Child, take said: runner.HostReply) waits {
+    let mut events: List[launcher.Event] = list.new()
+    list.push(mut events, Placed(clone(ch), take said))
+    feed(mut r, take events)
+}
+
+// L43 `wake_generation_fence` (§14.3, §14.5): a report carries its child's identity, so a
+// stale or discarded child's end never clears the row, and a launch lost with its session
+// never runs after recovery started its successor.
+@test
+fn wake_generation_fence(c: Clock, rnd: Random) -> Result[(), ()] waits {
+    // Committed cutover: OLD's late clean report changes nothing; NEW's idle stop writes Clean.
+    let mut r = rig(c, rnd, 4u64)
+    add(mut r, "g", "t")
+    op_wake(mut r, "g")
+    let old = last(r, "g")
+    let go = must(deploy(mut r.h, "g", an_attempt(), image_two(), 2u64, image_two()), "deploy")
+    pump(mut r, take go)
+    let candidate = last(r, "g")
+    expect(gens(r, "g") == two(1u64, 2u64) && is_dirty(r, "g", 1u64), "L43: the candidate did not start at gen + 1 under Dirty(g)")
+    answer(mut r, old, PlaceInstalled(2u64, true))
+    expect(is_dirty(r, "g", 2u64), "L43: the commit did not write Dirty(c)")
+    finish(mut r, old, Code(0i32), Some(None))
+    expect(is_dirty(r, "g", 2u64) && launches(r, "g") == 2u64, "L43: OLD's late clean report cleared the row")
+    finish(mut r, candidate, Code(0i32), Some(None))
+    expect(is_clean(r, "g"), "L43: NEW's idle stop did not write Clean")
+    // Refused cutover: NEW's end changes nothing; OLD's later clean report writes Clean.
+    let mut d = rig(c, rnd, 4u64)
+    add(mut d, "g", "t")
+    op_wake(mut d, "g")
+    let serving = last(d, "g")
+    let tried = must(deploy(mut d.h, "g", an_attempt(), image_two(), 2u64, image_two()), "deploy")
+    pump(mut d, take tried)
+    let discarded = last(d, "g")
+    answer(mut d, serving, PlaceDrift)
+    expect(is_dirty(d, "g", 1u64), "L43: a refused cutover moved the row")
+    match deploy_outcome(d.h, "g") {
+        Some(Failed(why)) => expect(why == "drift", "L43: the refused deploy's reason"),
+        _ => fail("L43: the refused deploy's outcome is not recorded")
+    }
+    finish(mut d, discarded, Code(0i32), Some(None))
+    expect(is_dirty(d, "g", 1u64) && launches(d, "g") == 2u64, "L43: the discarded candidate's end changed the row or started a probe")
+    finish(mut d, serving, Code(0i32), Some(None))
+    expect(is_clean(d, "g"), "L43: OLD's clean report after the refusal did not write Clean")
+    // Lost acknowledgement, the launcher read the launch: after Hello the host adopts it.
+    let mut read = rig(c, rnd, 4u64)
+    add(mut read, "g", "t")
+    let sent = must(wake(mut read.h, "g", read.now), "wake")
+    for q in sent {
+        if let Start(l) = q {
+            list.push(mut read.starts, launcher.Child(group: clone(l.group), role: launcher.role_of(l.mode)))
+        }
+        let _ = launcher.handle(mut read.f, clone(q))
+    }
+    let hello = reconnect(read.h)
+    pump(mut read, take hello)
+    expect(gens(read, "g") == one(1u64) && is_dirty(read, "g", 1u64), "L43: an adopted launch was probed again")
+    // Lost acknowledgement, the launcher never read it: the host probes at gen + 1, and the
+    // lost launch's report cannot clear the row.
+    let mut lost = rig(c, rnd, 4u64)
+    add(mut lost, "g", "t")
+    let dropped = must(wake(mut lost.h, "g", lost.now), "wake")
+    let _ = take dropped
+    let again = reconnect(lost.h)
+    pump(mut lost, take again)
+    expect(gens(lost, "g") == one(2u64) && is_dirty(lost, "g", 2u64), "L43: the lost launch was not probed at gen + 1")
+    let Some(grp) = must(group_row(lost.h, "g"), "group row") else {
+        fail("no group")
+    }
+    let mut stale: List[launcher.Event] = list.new()
+    list.push(mut stale, Ended(child_of("g", grp.incarnation, 1u64), launcher.End(status: Code(0i32), report: Some(None), readable: false)))
+    feed(mut lost, take stale)
+    expect(is_dirty(lost, "g", 2u64) && gens(lost, "g") == one(2u64), "L43: the lost launch's report cleared the row")
+    // Re-added group: the old incarnation's late report is ignored.
+    let mut re = rig(c, rnd, 4u64)
+    add(mut re, "g", "t")
+    op_wake(mut re, "g")
+    let first = last(re, "g")
+    let gone = must(remove(mut re.h, "g", Keep), "remove")
+    pump(mut re, take gone)
+    finish(mut re, first, Code(0i32), Some(None))
+    expect(gone_row(re.h, "g"), "L43: the retired group's rows remain")
+    add(mut re, "g", "t")
+    op_wake(mut re, "g")
+    let second = last(re, "g")
+    expect(second.group.incarnation != first.group.incarnation, "L43: a re-added group reused its incarnation")
+    let mut late: List[launcher.Event] = list.new()
+    list.push(mut late, Ended(clone(first), launcher.End(status: Code(0i32), report: Some(None), readable: false)))
+    feed(mut re, take late)
+    expect(is_dirty(re, "g", 1u64), "L43: the old incarnation's late report cleared the re-added group")
+    Ok(())
+}
+
+// Writes `n` Clean groups straight into the catalog, `due` of them overdue.
+fn seed_clean(mut r: Rig, n: u64, due: u64) waits {
+    let mut done = 0u64
+    while done < n {
+        let upto = if n - done > 1000u64 {
+            done + 1000u64
+        } else {
+            n
+        }
+        let lo = done
+        let made = {
+            let t = view r.h.t
+            store.run(mut r.h.db, None, scoped fn(mut tx: store.Tx) -> Result[(), Refused] {
+                for i in lo .. upto {
+                    let mut name = string.from("bulk-")
+                    string.push_uint(mut name, i, 10u32, 6u64, '0')
+                    let g = GroupRow(tenant: "bulk", workdir: string.from(name), author: Trusted, label: Uncontained, listen: "127.0.0.1:0", bindings: uncontained(), limits: unlimited(), assembly: image(), activation: 1u64, retained: list.new(), incarnation: 1000000u64 + i, retiring: None)
+                    st(store.put(mut tx, t.groups, name, g))?
+                    let at: Option[u64] = if i < due {
+                        Some(T0 + 10u64)
+                    } else {
+                        Some(T0 + 86400000u64)
+                    }
+                    st(store.put(mut tx, t.wake, name, WakeRow(wake: Clean(at), gen: 1u64)))?
+                    if let Some(when) = at {
+                        st(store.put(mut tx, t.due, DueKey(at: when, name: string.from(name)), 0u8))?
+                    }
+                }
+                Ok(())
+            })
+        }
+        let _ = must(decided(mut r.h.db, take made), "seed")
+        done = upto
+    }
+}
+
+// L45 `wake_probe_bound` (§14.2, §14.5): a restart probes exactly the Dirty rows with no
+// child, counted apart from its due wakes, never scans the Clean rows for probes, refuses a
+// bound below `dirty`, adopts a child that outlived only the host, and a retired failing
+// group gives up its slot.
+@test
+fn wake_probe_bound(c: Clock, rnd: Random) -> Result[(), ()] waits {
+    let mut r = rig(c, rnd, 5u64)
+    add(mut r, "k1", "t")
+    add(mut r, "k2", "t")
+    add(mut r, "k3", "t")
+    op_wake(mut r, "k1")
+    op_wake(mut r, "k2")
+    op_wake(mut r, "k3")
+    seed_clean(mut r, 10000u64, 2u64)
+    // The three are killed while no host watches.
+    let ch_k1 = last(r, "k1")
+    let _ = launcher.end(mut r.f, ch_k1, Signal(9i32), None)
+    let ch_k2 = last(r, "k2")
+    let _ = launcher.end(mut r.f, ch_k2, Signal(9i32), None)
+    let ch_k3 = last(r, "k3")
+    let _ = launcher.end(mut r.f, ch_k3, Signal(9i32), None)
+    r.now = Now(wall_ms: T0 + 20u64, mono_ns: r.now.mono_ns)
+    let mut back = restart(take r, 5u64)
+    expect(back.h.probes == 3u64, "L45: the restart did not probe exactly the Dirty rows")
+    expect(gens(back, "k1") == one(2u64) && gens(back, "k2") == one(2u64) && gens(back, "k3") == one(2u64), "L45: a Dirty row was not probed")
+    expect(back.h.due_wakes == 2u64, "L45: the overdue Clean rows were not woken as due wakes")
+    expect(list.len(back.starts) == 5u64, "L45: the restart started a row that was neither Dirty nor due")
+    match set_max_places(mut back.h, 4u64, back.now) {
+        Error(Busy(5u64)) => (),
+        _ => fail("L45: a bound below dirty was not refused Busy"),
+    }
+    // Host-only restart: G keeps serving, is adopted, no probe starts, its report writes Clean.
+    let mut s = rig(c, rnd, 4u64)
+    add(mut s, "g", "t")
+    for _ in 0u64 .. 6u64 {
+        op_wake(mut s, "g")
+        idle_stop(mut s, "g", None)
+    }
+    op_wake(mut s, "g")
+    expect(is_dirty(s, "g", 7u64), "L45: setup did not reach the serving generation")
+    let serving = last(s, "g")
+    let mut kept = restart(take s, 4u64)
+    expect(kept.h.probes == 0u64 && list.len(kept.starts) == 0u64, "L45: a live child was probed after a host restart")
+    finish(mut kept, serving, Code(0i32), Some(None))
+    expect(is_clean(kept, "g"), "L45: the adopted child's clean report did not write Clean")
+    // Retirement: A fails every start and holds the one slot; B's due wake is queued; retiring
+    // A answers Retired, frees the slot, and B starts.
+    let mut t = rig(c, rnd, 1u64)
+    cold_due(mut t, "b", "t", T0 + 1000u64)
+    add(mut t, "a", "t")
+    op_wake(mut t, "a")
+    crash(mut t, "a")
+    crash(mut t, "a")
+    at_wall(mut t, T0 + 1000u64)
+    expect(launches(t, "b") == 1u64, "L45: B started while A held the slot")
+    let out = must(remove(mut t.h, "a", Delete), "retire")
+    pump(mut t, take out)
+    expect(gone_row(t.h, "a"), "L45: the retired group's rows remain")
+    expect(gens(t, "b") == two(1u64, 2u64), "L45: retiring the failing group did not free its slot")
+    match retirement(t.h, "a") {
+        Some(Retired(disposition: Delete, ..)) => (),
+        _ => fail("L45: the retirement's disposition was not recorded"),
+    }
+    Ok(())
+}

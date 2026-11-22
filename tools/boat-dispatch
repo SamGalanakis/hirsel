@@ -1,0 +1,482 @@
+#!/usr/bin/env python3
+"""Run locally built Hirsel artifacts on Boat."""
+import argparse
+from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import datetime, timezone
+import fcntl
+import gzip
+import hashlib
+import json
+import os
+from pathlib import Path, PurePosixPath
+import re
+import shlex
+import shutil
+import signal
+import sqlite3
+import stat
+import subprocess
+import sys
+import tarfile
+import tempfile
+import uuid
+
+SNAPSHOT = "hirsel-runner-base"
+DAY_LIMIT = 200
+ACTIVE_LIMIT = 100
+SOURCE_PATHS = ("core/core", "core/std", "core/programs", "core/tools",
+                "bench/awfy/hirsel", "bench/awfy/*.py", "tools/capped")
+SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT)
+
+
+@dataclass(frozen=True)
+class Input:
+    root: Path
+    worktree: bool
+
+    def files(self):
+        if not self.root.is_dir():
+            raise ValueError(f"not an input directory: {self.root}")
+        if not self.worktree:
+            check_input(PurePosixPath(self.root.name))
+            if (self.root / ".git").exists():
+                raise ValueError("use --worktree to stage selected inputs from a worktree")
+            yield from tree_files(self.root, PurePosixPath("."))
+            return
+
+        if os.environ.get("HIRSEL_BOAT_PREFIX"):
+            prefix = Path(os.environ["HIRSEL_BOAT_PREFIX"]).resolve()
+        else:
+            target = subprocess.check_output(
+                [".buck2/bin/buck2", "targets", "--target-platforms",
+                 "//tools/buck2:release", "--show-full-simple-output", "//:hirsel-toolchain"],
+                cwd=self.root, text=True).strip()
+            prefix = self.root / target
+        if not os.access(prefix / "hirsel", os.X_OK) or not (
+                prefix / "hirsel-core-toolchain.json").is_file():
+            raise ValueError(f"materialize //:hirsel-toolchain for release in {self.root} first")
+        yield from tree_files(prefix.resolve(), PurePosixPath("toolchain"))
+        tracked = subprocess.check_output(
+            ["git", "ls-files", "-z", "--deduplicate", "--", *SOURCE_PATHS,
+             ":(exclude,glob)**/*.md", ":(exclude,glob)**/*.sqlite*"], cwd=self.root)
+        for entry in sorted(filter(None, tracked.split(b"\0"))):
+            path = PurePosixPath(os.fsdecode(entry))
+            yield self.root, path, path
+
+
+def tree_files(root, destination):
+    if destination != PurePosixPath("."):
+        yield root, PurePosixPath("."), destination
+    for file in sorted(root.rglob("*")):
+        relative = file.relative_to(root)
+        yield root, relative, destination / relative
+
+
+def check_input(path):
+    for part in path.parts:
+        name = part.lower()
+        if (name in {".git", "buck-out", ".ssh", ".aws", ".gnupg", ".config", ".kube",
+                     ".netrc", ".git-credentials", ".npmrc", ".pypirc", "credentials", "secrets",
+                     "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa", "id_xmss"}
+                or name == ".env" or name.startswith(".env.")
+                or name.endswith((".pem", ".key", ".p12", ".pfx", ".db", ".db-wal", ".db-shm"))
+                or ".sqlite" in name):
+            raise ValueError(f"local-only input in bundle: {path}")
+
+
+class ArchiveWriter:
+    def __init__(self, output=None):
+        self.digest = hashlib.sha256()
+        self.output = output
+
+    def write(self, data):
+        self.digest.update(data)
+        if self.output is not None:
+            self.output.write(data)
+        return len(data)
+
+
+def archive(inputs, output=None):
+    writer = ArchiveWriter(output)
+    with tarfile.open(fileobj=writer, mode="w|") as tar:
+        for root, path, destination in inputs.files():
+            check_input(destination)
+            source = root / path
+            if path.parts and source.parent.resolve() != source.parent:
+                raise ValueError(f"symlinked parent in inputs: {source}")
+            metadata = source.lstat()
+            entry = tarfile.TarInfo(str(destination))
+            entry.mode = stat.S_IMODE(metadata.st_mode) & 0o777
+            if stat.S_ISDIR(metadata.st_mode):
+                entry.type = tarfile.DIRTYPE
+                tar.addfile(entry)
+            elif stat.S_ISLNK(metadata.st_mode):
+                link = source.readlink()
+                resolved = source.resolve()
+                if link.is_absolute() or not resolved.is_relative_to(root):
+                    raise ValueError(f"symlink leaves its bundle: {source}")
+                check_input(resolved.relative_to(root))
+                entry.type = tarfile.SYMTYPE
+                entry.linkname = str(link)
+                tar.addfile(entry)
+            elif stat.S_ISREG(metadata.st_mode):
+                entry.size = metadata.st_size
+                with os.fdopen(os.open(source, os.O_RDONLY | os.O_NOFOLLOW), "rb") as file:
+                    tar.addfile(entry, file)
+            else:
+                raise ValueError(f"unsupported bundle input: {source}")
+    return writer.digest.hexdigest()
+
+
+@contextmanager
+def exclusive(path):
+    with path.open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
+def stage(cache, inputs):
+    digest = archive(inputs)
+    cached = cache / f"{digest}.tar.gz"
+    with exclusive(cache / f"{digest}.lock"):
+        if not cached.is_file():
+            with tempfile.NamedTemporaryFile(dir=cache, prefix="staging-") as tmp:
+                # The temporary name stays invisible to readers until the gzip is complete.
+                with gzip.GzipFile(filename="", mode="wb", fileobj=tmp,
+                                   compresslevel=3, mtime=0) as output:
+                    if archive(inputs, output) != digest:
+                        raise ValueError(f"bundle changed while staging: {inputs.root}")
+                tmp.flush()
+                # Link before closing so the temporary name is cleaned up on errors.
+                os.link(tmp.name, cached)
+    return cached
+
+
+@dataclass(frozen=True)
+class Job:
+    lane: str
+    inputs: Input
+    command: str
+    seconds: int
+    fetch: tuple
+
+    def __post_init__(self):
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,119}", self.lane):
+            raise ValueError(f"invalid Boat lane name: {self.lane!r}")
+        if not isinstance(self.command, str) or not self.command.strip():
+            raise ValueError(f"{self.lane} needs a command")
+
+
+def fetch_spec(value, base):
+    if not isinstance(value, str):
+        raise ValueError("fetch entries must be REMOTE:LOCAL strings")
+    remote, sep, local = value.partition(":")
+    path = PurePosixPath(remote)
+    if not sep or not path.parts or path.is_absolute() or ".." in path.parts or not local:
+        raise ValueError(f"expected a bundle-relative path and local directory: {value!r}")
+    return path, (base / local).resolve()
+
+
+def manifest_jobs(path):
+    base = path.parent.resolve()
+    entries = json.loads(path.read_text())
+    if not isinstance(entries, list) or not entries:
+        raise ValueError("manifest must be a nonempty JSON array of timed jobs")
+    jobs = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ValueError("manifest entries must be job objects")
+        worktree = "worktree" in entry
+        if worktree == ("bundle" in entry):
+            raise ValueError("each job needs exactly one of worktree or bundle")
+        directory = base / entry["worktree" if worktree else "bundle"]
+        seconds = entry["seconds"]
+        if type(seconds) is not int or seconds <= 0:
+            raise ValueError("manifest job seconds must be a positive integer")
+        fetch = entry.get("fetch", [])
+        if not isinstance(fetch, list):
+            raise ValueError("manifest job fetch must be an array")
+        jobs.append(Job(entry["lane"], Input(directory.resolve(), worktree), entry["command"],
+                        seconds, tuple(fetch_spec(spec, base) for spec in fetch)))
+    return jobs
+
+
+def batches(jobs, capacity):
+    """Pack serial jobs into the minimum number of VMs for the given estimates."""
+    ordered = sorted(jobs, key=lambda job: -job.seconds)
+    if ordered[0].seconds > capacity:
+        raise ValueError(f"{ordered[0].lane} has a shard larger than {capacity}s")
+    greedy = []
+    free = []
+    for job in ordered:
+        for slot, remaining in enumerate(free):
+            if job.seconds <= remaining:
+                greedy[slot].append(job)
+                free[slot] -= job.seconds
+                break
+        else:
+            greedy.append([job])
+            free.append(capacity - job.seconds)
+    lower = max(1, (sum(job.seconds for job in jobs) + capacity - 1) // capacity,
+                sum(job.seconds * 2 > capacity for job in jobs))
+    for count in range(lower, len(greedy)):
+        buckets = [[] for _ in range(count)]
+        free = [capacity] * count
+        failed = set()
+
+        def fit(index):
+            if index == len(ordered):
+                return True
+            key = index, tuple(sorted(free))
+            if key in failed:
+                return False
+            job = ordered[index]
+            seen = set()
+            for slot, remaining in enumerate(free):
+                if remaining >= job.seconds and remaining not in seen:
+                    seen.add(remaining)
+                    free[slot] -= job.seconds
+                    buckets[slot].append(job)
+                    if fit(index + 1):
+                        return True
+                    buckets[slot].pop()
+                    free[slot] = remaining
+            failed.add(key)
+            return False
+
+        if fit(0):
+            return buckets
+    return greedy
+
+
+class LocalBudget:
+    def __init__(self, state):
+        self.state = state
+        self.db = sqlite3.connect(state / "starts.sqlite" if state else ":memory:")
+        self.db.execute("CREATE TABLE IF NOT EXISTS days (utc TEXT PRIMARY KEY, starts INTEGER)")
+
+    def reserve(self, limits):
+        day = datetime.now(timezone.utc).date().isoformat()
+        with self.db:
+            count = self.db.execute("SELECT starts FROM days WHERE utc = ?", (day,)).fetchone()
+            windows = limits["starts"]
+            if ((count and count[0] >= DAY_LIMIT) or windows["day"]["used"] >= DAY_LIMIT
+                    or windows["day"]["remaining"] <= 0):
+                raise ValueError(f"Boat daily start limit reached ({DAY_LIMIT}); run locally")
+            for window in ("hour", "minute"):
+                if windows[window]["remaining"] <= 0:
+                    raise ValueError(f"Boat {window} start limit reached; run locally")
+            if limits["activeSandboxes"] >= min(ACTIVE_LIMIT, limits["maxActiveSandboxes"]):
+                raise ValueError("Boat active VM limit reached; run locally")
+            # Count an attempt before contacting Boat. If creation is ambiguous, keep it charged.
+            self.db.execute("INSERT INTO days VALUES (?, 1) "
+                            "ON CONFLICT(utc) DO UPDATE SET starts = starts + 1", (day,))
+
+    @contextmanager
+    def admission(self):
+        if self.state is None:
+            yield
+        else:
+            with exclusive(self.state / "start.lock"):
+                yield
+
+
+def boat(*args, **kwargs):
+    return subprocess.run(["boat", "--no-update", *args], start_new_session=True, **kwargs)
+
+
+def write_log(invoke, log, *args, **kwargs):
+    with log.open("wb") as output:
+        return invoke(*args, stdout=output, stderr=subprocess.STDOUT, **kwargs).returncode
+
+
+def create_vm(invoke, lane, ttl, vm, log):
+    command = ("--json", "new", "--type", "default", "--no-env",
+               "--from", SNAPSHOT, "--name", lane, "--ttl", str(ttl))
+    result = invoke(*command, capture_output=True)
+    malformed = False
+    for line in result.stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            malformed = True
+            continue
+        if event.get("event") == "created":
+            vm.append(event["id"])
+        if event.get("event") == "error":
+            print(event["error"], file=sys.stderr)
+    if log is not None:
+        (log / "create.jsonl").write_bytes(result.stdout)
+    if result.returncode or malformed or len(vm) != 1:
+        raise ValueError(f"Boat creation failed: {result.stderr.decode(errors='replace').strip()}")
+
+
+def execute(invoke, vm, jobs, archives, log):
+    root = f"/tmp/hirsel-boat-{uuid.uuid4().hex}"
+    unpacked = set()
+    status = 0
+    previous = ""
+    for index, job in enumerate(jobs, 1):
+        archive_file = archives[job.inputs]
+        stage_dir = f"{root}/{archive_file.stem}"
+        if archive_file not in unpacked:
+            unpack = f"mkdir -p -m 700 -- {stage_dir} && tar -xzf - -C {stage_dir}"
+            with archive_file.open("rb") as contents:
+                uploaded = write_log(invoke, log / f"upload-{index}.log", "ssh", vm, unpack,
+                                     stdin=contents)
+            if uploaded:
+                raise ValueError(f"Boat bundle upload exited {uploaded}; see {log}")
+            unpacked.add(archive_file)
+
+        work = f"{root}/job-{index}"
+        cleanup = f"rm -rf -- {previous} && " if previous else ""
+        command = (f"{cleanup}cp -a --reflink=auto -- {stage_dir} {work} && cd {work} && "
+                   'export PATH="$PWD/toolchain:$PATH" && ulimit -Sn "$(ulimit -Hn)" && '
+                   f"exec bash -c {shlex.quote(job.command)}")
+        run_log = log / f"{index}-{job.lane}.log"
+        print(f"Boat {vm}: {job.lane} -> {run_log}", file=sys.stderr, flush=True)
+        ran = write_log(invoke, run_log, "ssh", vm, command, stdin=subprocess.DEVNULL)
+        with run_log.open("rb") as saved:
+            shutil.copyfileobj(saved, sys.stdout.buffer)
+        sys.stdout.buffer.flush()
+        if ran:
+            print(f"Boat {vm}: {job.lane} exited {ran}", file=sys.stderr)
+        status = status or ran
+        for remote, local in job.fetch:
+            local.mkdir(parents=True, exist_ok=True)
+            fetched = invoke("scp", "-r", f"{vm}:{work}/{remote}", str(local)).returncode
+            status = status or fetched
+        previous = work
+    return status
+
+
+def dispatch(groups, ttl, state, invoke, dry_run=False):
+    archives = {}
+    if not dry_run:
+        cache = state / "bundles"
+        cache.mkdir(mode=0o700, exist_ok=True)
+        for job in (job for group in groups for job in group):
+            if job.inputs not in archives:
+                archives[job.inputs] = stage(cache, job.inputs)
+
+    budget = LocalBudget(state)
+    status = 0
+    interrupted = None
+    critical = False
+
+    def on_signal(signum, _frame):
+        nonlocal interrupted
+        interrupted = interrupted or signum
+        if not critical:
+            raise KeyboardInterrupt
+
+    for signum in SIGNALS:
+        signal.signal(signum, on_signal)
+    try:
+        for group in groups:
+            vm = []
+            log = None
+            try:
+                with budget.admission():
+                    limits = invoke("--json", "limits", "--all", check=True, capture_output=True)
+                    budget.reserve(json.loads(limits.stdout))
+                    if not dry_run:
+                        log = Path(tempfile.mkdtemp(prefix=f"boat-{group[0].lane}-", dir=Path.cwd()))
+                    critical = True
+                    create_vm(invoke, group[0].lane, ttl, vm, log)
+                    critical = False
+                    if interrupted:
+                        raise KeyboardInterrupt
+                if dry_run:
+                    summary = ", ".join(f"{job.lane}:{job.seconds}s" for job in group)
+                    print(f"{vm[0]} ({sum(job.seconds for job in group)}s): {summary}")
+                else:
+                    ran = execute(invoke, vm[0], group, archives, log)
+                    status = status or ran
+            finally:
+                critical = True
+                for vm_id in vm:
+                    deleted = invoke("--json", "delete", vm_id, "--yes", capture_output=True)
+                    if log is not None:
+                        (log / "delete.json").write_bytes(deleted.stdout)
+                    if deleted.returncode:
+                        raise ValueError(f"could not confirm deletion of {vm_id}: "
+                                         f"{deleted.stderr.decode(errors='replace').strip()}")
+                critical = False
+            if interrupted:
+                raise KeyboardInterrupt
+    except KeyboardInterrupt:
+        return 128 + (interrupted or signal.SIGINT)
+    finally:
+        for signum in SIGNALS:
+            signal.signal(signum, signal.SIG_DFL)
+        budget.db.close()
+    return status
+
+
+class DryRunBoat:
+    def __init__(self):
+        self.started = 0
+
+    def __call__(self, *args, **_kwargs):
+        match args[:2]:
+            case ("--json", "limits"):
+                data = {"activeSandboxes": 0, "maxActiveSandboxes": ACTIVE_LIMIT,
+                        "starts": {"day": {"used": self.started, "remaining": DAY_LIMIT - self.started},
+                                   "hour": {"remaining": 60}, "minute": {"remaining": 12}}}
+            case ("--json", "new"):
+                self.started += 1
+                data = {"event": "created", "id": f"dry-run-{self.started}"}
+            case ("--json", "delete"):
+                data = {}
+            case _:
+                raise ValueError(f"unsupported dry-run Boat command: {args}")
+        return subprocess.CompletedProcess(args, 0, json.dumps(data).encode(), b"")
+
+
+def positive(value):
+    number = int(value)
+    if number <= 0:
+        raise argparse.ArgumentTypeError("expected a positive number of seconds")
+    return number
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("lane", nargs="?")
+    parser.add_argument("directory", nargs="?", type=Path)
+    parser.add_argument("command", nargs="?")
+    parser.add_argument("--worktree", action="store_true", help="stage a built Buck2 worktree")
+    parser.add_argument("--fetch", action="append", default=[], metavar="REMOTE:LOCAL")
+    parser.add_argument("--manifest", type=Path, help="JSON array of timed jobs")
+    parser.add_argument("--batch-seconds", type=positive, default=900, help="estimated runtime per VM")
+    parser.add_argument("--ttl", type=positive, default=os.environ.get("HIRSEL_BOAT_TTL", "3600"))
+    parser.add_argument("--dry-run", action="store_true", help="simulate VM starts without contacting Boat")
+    args = parser.parse_args()
+    try:
+        if args.manifest:
+            if args.lane or args.worktree or args.fetch:
+                parser.error("--manifest supplies its own lanes, inputs, commands and fetch paths")
+            if args.batch_seconds >= args.ttl:
+                parser.error("--ttl must leave room beyond --batch-seconds for setup and upload")
+            jobs = manifest_jobs(args.manifest)
+        else:
+            if not all((args.lane, args.directory, args.command)):
+                parser.error("supply LANE DIRECTORY COMMAND or --manifest")
+            jobs = [Job(args.lane, Input(args.directory.resolve(), args.worktree), args.command, 0,
+                        tuple(fetch_spec(value, Path.cwd()) for value in args.fetch))]
+        groups = batches(jobs, args.batch_seconds)
+        if args.dry_run:
+            return dispatch(groups, args.ttl, None, DryRunBoat(), dry_run=True)
+        state = Path.home() / ".local/state/hirsel-boat"
+        state.mkdir(mode=0o700, parents=True, exist_ok=True)
+        return dispatch(groups, args.ttl, state, boat)
+    except (OSError, TypeError, KeyError, ValueError, sqlite3.Error,
+            subprocess.CalledProcessError) as error:
+        print(f"boat-dispatch: {error}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

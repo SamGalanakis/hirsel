@@ -168,9 +168,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 }
             }
             TyKind::Adt(..) if self.text_like(t) => {
-                if let (Some(x), Some(y)) = (self.carrier(a, n), self.carrier(b, n)) {
-                    self.bytes(x, y, join, n);
-                }
+                let x = self.carrier(a, n);
+                let y = self.carrier(b, n);
+                self.bytes(x, y, join, n);
             }
             TyKind::Adt(..) if self.is_text(t) => {
                 if let (Some(x), Some(y)) = (self.text_bytes(a, n), self.text_bytes(b, n)) {
@@ -311,20 +311,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             if self.p.decls[d.index()].role == Some(Role::Text))
     }
     /// The data pointer and length of the byte carrier at `at`.
-    fn carrier(&mut self, at: AddressId, n: NodeId) -> Option<[ValueId; 2]> {
-        let u64t = Ty::Scalar(Scalar::U64);
-        let mut out = [None; 2];
-        for (k, (offset, t)) in [(0, Ty::Ptr), (8, u64t)].into_iter().enumerate() {
-            let o = self.konst(u64t, offset, n)?;
-            let word = self.address(
-                AddressBase::Address(at),
-                &[Step::Byte(o)],
-                PlaceTy::Value(t),
-                n,
-            );
-            out[k] = Some(self.read_bits(word, t, n));
-        }
-        Some([out[0]?, out[1]?])
+    fn carrier(&mut self, at: AddressId, n: NodeId) -> [ValueId; 2] {
+        let PlaceTy::Declared(carrier) = self.b.addresses[at.index()].ty else {
+            unreachable!("a byte carrier is a declared sequence row")
+        };
+        let header = self.pointer(at, n);
+        [
+            self.carrier_word(header, carrier, SeqWord::Data, n),
+            self.carrier_word(header, carrier, SeqWord::Len, n),
+        ]
     }
     /// The bytes and length of the `Text` whose locator is at `at`: its W-wide length
     /// is followed by its bytes.

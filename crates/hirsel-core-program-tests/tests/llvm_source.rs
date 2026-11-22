@@ -16,6 +16,64 @@ include!("support/flow.rs");
 mod llvm_codegen;
 
 #[test]
+fn byte_word_hash_and_comparison_lengths_use_sequence_tbaa() {
+    let source = r#"
+fn word(b: Bytes, at: u64) -> u32 { list.word_le(b, at) }
+fn short(b: Bytes) -> u64 { check.xxh3_short(b) }
+fn stripes(mut acc: Inline[u64, 8], b: Bytes, key: Inline[u8, 192], at: u64) {
+    check.xxh3_stripes(mut acc, b, key, at)
+}
+fn sha1_probe(mut h: Inline[u32, 5], b: Bytes) { sha1.blocks(mut h, b) }
+fn sha256_probe(mut h: Inline[u32, 8], b: Bytes, at: u64, count: u64) {
+    sha256.blocks(mut h, b, at, count)
+}
+fn bytes_eq(a: Bytes, b: Bytes) -> bool { a == b }
+fn strings_lt(a: String, b: String) -> bool { a < b }
+"#;
+    let (program, names) = hirsel_core_program_tests::SourceProgram::lower(source, None);
+    let ir =
+        emit_ir_for_test_with_facts(&program, Target::X86_64Linux, false, false, true).unwrap();
+    let (seq_type, _) = ir
+        .lines()
+        .find_map(|line| line.split_once(" = !{!\"seq words\","))
+        .unwrap();
+    let access = format!(" = !{{{seq_type}, {seq_type}, i64 0}}");
+    let seq_access = ir
+        .lines()
+        .find_map(|line| line.strip_suffix(&access))
+        .unwrap();
+    let metadata = format!("!tbaa {seq_access}");
+    for (name, lengths) in [
+        ("word", 1),
+        ("short", 1),
+        ("stripes", 1),
+        ("sha1_probe", 1),
+        ("sha256_probe", 1),
+        ("bytes_eq", 2),
+        ("strings_lt", 2),
+    ] {
+        let link = symbol(&program, names[name]);
+        let body = [format!("@{link}.infallible("), format!("@{link}(")]
+            .into_iter()
+            .find_map(|symbol| {
+                let header = ir
+                    .lines()
+                    .find(|line| line.starts_with("define ") && line.contains(&symbol))?;
+                let (_, definition) = ir.split_once(header)?;
+                definition.split_once("\n}").map(|(body, _)| body)
+            })
+            .unwrap();
+        assert_eq!(
+            body.lines()
+                .filter(|line| line.contains("load i64,") && line.contains(&metadata))
+                .count(),
+            lengths,
+            "{name} sequence length loads:{body}"
+        );
+    }
+}
+
+#[test]
 fn scalar_record_calls_agree_with_evaluator() {
     let source = r#"
 type Single { n: u64 }

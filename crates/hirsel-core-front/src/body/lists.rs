@@ -230,11 +230,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if !self.live() {
             return None;
         }
-        let scalar = self.word_scalar(result, n)?;
-        let len = self.read_sequence_word(header, 8, Ty::Scalar(Scalar::U64), n);
-        self.require_word_range(at, len, scalar, n)?;
+        let word = self.word_scalar(result, n)?;
+        let carrier = self.list_carrier(scalar(Scalar::U8), n)?;
+        let len = self.carrier_word(header, carrier, SeqWord::Len, n);
+        self.require_word_range(at, len, word, n)?;
         let data = self.read_sequence_word(header, 0, Ty::Ptr, n);
-        Some(self.read_word(data, at, scalar, big_endian, n))
+        Some(self.read_word(data, at, word, big_endian, n))
     }
 
     pub(super) fn inline_word(
@@ -1049,10 +1050,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let u64_ = Ty::Scalar(Scalar::U64);
         let (data, len) = match inline_len {
             Some(len) => (input, len),
-            None => (
-                self.read_sequence_word(input, 0, Ty::Ptr, n),
-                self.read_sequence_word(input, 8, u64_, n),
-            ),
+            None => {
+                let carrier = self.list_carrier(scalar(Scalar::U8), n)?;
+                (
+                    self.read_sequence_word(input, 0, Ty::Ptr, n),
+                    self.carrier_word(input, carrier, SeqWord::Len, n),
+                )
+            }
         };
         let max = self.konst(u64_, 240, n)?;
         let valid = self.list_compare(CompareOp::Le, len, max, n);
@@ -1075,7 +1079,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         n: NodeId,
     ) -> Option<ValueId> {
         let u64_ = Ty::Scalar(Scalar::U64);
-        let len = self.read_sequence_word(header, 8, u64_, n);
+        let carrier = self.list_carrier(scalar(Scalar::U8), n)?;
+        let len = self.carrier_word(header, carrier, SeqWord::Len, n);
         let mask = self.konst(u64_, 63, n)?;
         let zero = self.konst(u64_, 0, n)?;
         let tail = self.value(u64_);
@@ -1174,8 +1179,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         header: ValueId,
         n: NodeId,
     ) -> Option<ValueId> {
+        let carrier = self.list_carrier(scalar(Scalar::U8), n)?;
         let data = self.read_sequence_word(header, 0, Ty::Ptr, n);
-        let len = self.read_sequence_word(header, 8, Ty::Scalar(Scalar::U64), n);
+        let len = self.carrier_word(header, carrier, SeqWord::Len, n);
         self.runtime_row(
             hirsel_core_ir::RtOp::Sha1Blocks,
             &[Arg::Value(state), Arg::Value(data), Arg::Value(len)],
@@ -1195,7 +1201,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         n: NodeId,
     ) -> Option<ValueId> {
         let u64_ = Ty::Scalar(Scalar::U64);
-        let len = self.read_sequence_word(header, 8, u64_, n);
+        let carrier = self.list_carrier(scalar(Scalar::U8), n)?;
+        let len = self.carrier_word(header, carrier, SeqWord::Len, n);
         let block = self.konst(u64_, 64, n)?;
         let (bytes, overflow) = self.list_arith(ArithOp::Mul, ArithMode::Checked, count, block, n);
         let no_overflow = self.emit_unary(UnaryOp::Not, BOOL, overflow, n)?;

@@ -29,6 +29,7 @@ pub mod latest;
 pub mod limit;
 pub mod net;
 pub mod os;
+pub mod os_exec;
 mod os_net;
 mod os_resolve;
 mod os_sync;

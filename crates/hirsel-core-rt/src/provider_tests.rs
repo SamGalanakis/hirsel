@@ -1288,3 +1288,322 @@ fn literal_failure_messages_keep_static_backing_and_render_one_line_with_their_s
 
 #[path = "rule_provider_tests.rs"]
 mod rule_provider_tests;
+
+#[test]
+fn exec_supervisor_preserves_inputs_and_only_reaps_its_children() {
+    use std::process::Command;
+    const PROBE: &str = "HIRSEL_EXEC_SUPERVISOR_TEST_IMAGE";
+    if let Some(image) = std::env::var_os(PROBE) {
+        exec_supervisor_law(std::path::Path::new(&image));
+        return;
+    }
+    let fixture = tempfile::tempdir().unwrap();
+    let source = fixture.path().join("state.c");
+    let image = fixture.path().join("state");
+    std::fs::write(
+        &source,
+        r#"
+#define _GNU_SOURCE
+#include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/prctl.h>
+#include <sys/ptrace.h>
+#include <sys/stat.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+
+extern char **environ;
+
+int main(int argc, char **argv) {
+    if (argc == 2 && !strcmp(argv[1], "hold")) {
+        dprintf(1, "ready\n");
+        for (;;) pause();
+    }
+    if (argc == 2 && !strcmp(argv[1], "orphan")) {
+        pid_t pid = fork();
+        if (pid < 0) return 20;
+        if (pid == 0) {
+            for (;;) pause();
+        }
+        dprintf(1, "%d\n", pid);
+        return 0;
+    }
+    if (argc != 3 || strcmp(argv[0], "probe argv0") || strcmp(argv[1], "literal *")) return 1;
+    if (!environ[0] || strcmp(environ[0], "A=fixed") ||
+        !environ[1] || strcmp(environ[1], "Z=caller") || environ[2]) return 2;
+    char path[4096];
+    if (!getcwd(path, sizeof path) || strcmp(path, argv[2])) return 3;
+    for (int fd = 0; fd < 3; ++fd) {
+        struct stat status;
+        if (fstat(fd, &status) || !S_ISFIFO(status.st_mode) ||
+            (fcntl(fd, F_GETFL) & O_NONBLOCK)) return 4;
+    }
+    DIR *directory = opendir("/proc/self/fd");
+    if (!directory) return 5;
+    struct dirent *entry;
+    while ((entry = readdir(directory))) {
+        int fd = atoi(entry->d_name);
+        if (fd > 2 && fd != dirfd(directory)) return 6;
+    }
+    closedir(directory);
+
+    struct sigaction action;
+    if (sigaction(SIGPIPE, NULL, &action) || action.sa_handler != SIG_DFL ||
+        sigaction(SIGINT, NULL, &action) || action.sa_handler != SIG_DFL) return 7;
+    sigset_t blocked;
+    if (sigprocmask(0, NULL, &blocked) || !sigisemptyset(&blocked)) return 8;
+    int death = 0;
+    if (prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) != 1 ||
+        prctl(PR_GET_PDEATHSIG, &death, 0, 0, 0) || death != SIGKILL) return 9;
+
+    pid_t parent = getppid();
+    snprintf(path, sizeof path, "/proc/%d/mem", parent);
+    if (open(path, O_RDONLY) >= 0 || (errno != EACCES && errno != EPERM)) return 10;
+    snprintf(path, sizeof path, "/proc/%d/fd/42", parent);
+    if (open(path, O_RDONLY) >= 0 || (errno != EACCES && errno != EPERM)) return 11;
+    if (ptrace(PTRACE_SEIZE, parent, 0, 0) != -1 || errno != EPERM) return 12;
+    int parent_fd = syscall(SYS_pidfd_open, parent, 0);
+    if (parent_fd < 0) return 13;
+    if (syscall(SYS_pidfd_getfd, parent_fd, 42, 0) != -1 || errno != EPERM) return 14;
+    close(parent_fd);
+    char input[2] = {0};
+    if (read(0, input, sizeof input) != 1 || input[0] != 'x' || read(0, input, 1) != 0) return 15;
+    if (write(1, "out", 3) != 3 || write(2, "err", 3) != 3) return 16;
+    return 37;
+}
+"#,
+    )
+    .unwrap();
+    let compiled = Command::new("cc")
+        .arg(&source)
+        .arg("-o")
+        .arg(&image)
+        .output()
+        .unwrap();
+    assert!(
+        compiled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+
+    // Isolate the run-wide subreaper, signal dispositions and dumpability
+    // from the parallel provider harness.
+    let checked = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "provider_tests::exec_supervisor_preserves_inputs_and_only_reaps_its_children",
+            "--nocapture",
+        ])
+        .env(PROBE, image)
+        .output()
+        .unwrap();
+    assert!(
+        checked.status.success(),
+        "Exec law child {:?}\n{}\n{}",
+        checked.status,
+        String::from_utf8_lossy(&checked.stdout),
+        String::from_utf8_lossy(&checked.stderr)
+    );
+}
+
+fn exec_supervisor_law(image: &std::path::Path) {
+    use crate::os_exec::{SetupStep, Signal, SpawnInput, Supervisor, Termination};
+    use std::{
+        ffi::CString,
+        io::{Read, Write},
+        os::fd::{AsRawFd, FromRawFd},
+        sync::Arc,
+    };
+
+    fn wait(process: &mut crate::os_exec::Process) -> Termination {
+        let mut event = libc::pollfd {
+            fd: process.pidfd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: the owned process pins the fd and poll pins the event.
+        assert_eq!(unsafe { libc::poll(&mut event, 1, -1) }, 1);
+        process.try_wait().unwrap().unwrap()
+    }
+
+    fn read(pipe: OwnedFd) -> String {
+        // SAFETY: this fixture exclusively owns the parent's pipe end.
+        assert_eq!(
+            unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_SETFL, 0) },
+            0
+        );
+        let mut result = String::new();
+        File::from(pipe).read_to_string(&mut result).unwrap();
+        result
+    }
+
+    fn reaped(pidfd: &OwnedFd) {
+        // SAFETY: siginfo is the output buffer for the process pinned by pidfd.
+        unsafe {
+            let mut info: libc::siginfo_t = std::mem::zeroed();
+            assert_eq!(
+                libc::waitid(
+                    libc::P_PIDFD,
+                    pidfd.as_raw_fd() as u32,
+                    &mut info,
+                    libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+                ),
+                -1
+            );
+        }
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD)
+        );
+    }
+
+    let system = image.parent().unwrap();
+    let make = |argument: &str, piped| SpawnInput {
+        image: Arc::new(File::open(image).unwrap().into()),
+        interpreter: None,
+        cwd: File::open(system).unwrap().into(),
+        argv: if argument == "literal *" {
+            vec![
+                CString::new("probe argv0").unwrap(),
+                CString::new(argument).unwrap(),
+                CString::new(system.as_os_str().as_encoded_bytes()).unwrap(),
+            ]
+        } else {
+            vec![
+                CString::new("probe argv0").unwrap(),
+                CString::new(argument).unwrap(),
+            ]
+        },
+        envp: vec![
+            CString::new("A=fixed").unwrap(),
+            CString::new("Z=caller").unwrap(),
+        ],
+        piped,
+    };
+
+    // SAFETY: this isolated run owns its dispositions and current mask.
+    unsafe {
+        assert_ne!(libc::signal(libc::SIGPIPE, libc::SIG_IGN), libc::SIG_ERR);
+        assert_ne!(libc::signal(libc::SIGINT, libc::SIG_IGN), libc::SIG_ERR);
+        let mut blocked = std::mem::zeroed();
+        assert_eq!(libc::sigfillset(&mut blocked), 0);
+        assert_eq!(
+            libc::pthread_sigmask(libc::SIG_BLOCK, &blocked, std::ptr::null_mut()),
+            0
+        );
+    }
+    let supervisor = Supervisor::start(|| Ok(())).unwrap();
+    let sentinel = File::open(image).unwrap();
+    // SAFETY: isolate the high descriptor in this run for the FD leak tests.
+    let sentinel = unsafe {
+        let fd = libc::fcntl(sentinel.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 42);
+        assert_eq!(fd, 42);
+        assert_eq!(libc::fcntl(fd, libc::F_SETFD, 0), 0);
+        OwnedFd::from_raw_fd(fd)
+    };
+
+    let check = |input| {
+        let mut started = supervisor.spawn(input).unwrap();
+        let mut stdin = File::from(started.stdin.take().unwrap());
+        stdin.write_all(b"x").unwrap();
+        drop(stdin);
+        assert_eq!(read(started.stdout.take().unwrap()), "out");
+        assert_eq!(read(started.stderr.take().unwrap()), "err");
+        assert_eq!(wait(&mut started.process), Termination::Exited(37));
+        let pinned = crate::entry::duplicate(started.process.pidfd()).unwrap();
+        reaped(&pinned);
+        assert_eq!(
+            started.process.try_wait().unwrap(),
+            Some(Termination::Exited(37))
+        );
+        started.process.signal(Signal::Kill).unwrap();
+    };
+    check(make("literal *", [true; 3]));
+    let original = [0, 1, 2].map(|fd| crate::entry::duplicate(fd).unwrap());
+    let close_standard = || {
+        // SAFETY: this isolated run owns all three standard fd slots.
+        for fd in 0..=2 {
+            assert_eq!(unsafe { libc::close(fd) }, 0);
+        }
+    };
+    let restore_standard = || {
+        for (fd, saved) in original.iter().enumerate() {
+            // SAFETY: saved holds the original of each standard fd.
+            assert_eq!(
+                unsafe { libc::dup2(saved.as_raw_fd(), fd as i32) },
+                fd as i32
+            );
+        }
+    };
+    close_standard();
+    let low_image_cwd = make("literal *", [true; 3]);
+    assert_eq!(
+        (
+            low_image_cwd.image.as_raw_fd(),
+            low_image_cwd.cwd.as_raw_fd()
+        ),
+        (0, 1)
+    );
+    check(low_image_cwd);
+    restore_standard();
+
+    let low_report_stdio = make("literal *", [true; 3]);
+    close_standard();
+    check(low_report_stdio);
+    restore_standard();
+
+    for step in [
+        SetupStep::Stdio,
+        SetupStep::Cwd,
+        SetupStep::Close,
+        SetupStep::Signals,
+        SetupStep::Exec,
+    ] {
+        let error = supervisor
+            .spawn_with(make("hold", [false; 3]), Some(step))
+            .err()
+            .unwrap();
+        assert_eq!(
+            (error.step, error.error.raw_os_error()),
+            (Some(step), Some(libc::EIO))
+        );
+        assert!(supervisor.child_pids().is_empty());
+    }
+
+    let mut signalled = supervisor.spawn(make("hold", [false; 3])).unwrap();
+    signalled.process.signal(Signal::Term).unwrap();
+    assert_eq!(
+        wait(&mut signalled.process),
+        Termination::Signalled(libc::SIGTERM as u8)
+    );
+    drop(signalled);
+
+    let orphaning = supervisor
+        .spawn(make("orphan", [false, true, false]))
+        .unwrap();
+    let mut orphaning = orphaning;
+    // The orphan still has stdout open until the subreaper kills it.
+    let orphan = read(orphaning.stdout.take().unwrap())
+        .trim()
+        .parse::<i32>()
+        .unwrap();
+    assert_eq!(wait(&mut orphaning.process), Termination::Exited(0));
+    drop(orphaning);
+    assert_eq!(supervisor.orphan_checks(), vec![(orphan, true)]);
+
+    let dropped = supervisor.spawn(make("hold", [false; 3])).unwrap();
+    let dropped_fd = crate::entry::duplicate(dropped.process.pidfd()).unwrap();
+    drop(dropped);
+    let during_stop = supervisor.spawn(make("hold", [false; 3])).unwrap();
+    let during_stop_fd = crate::entry::duplicate(during_stop.process.pidfd()).unwrap();
+    drop(supervisor);
+    reaped(&dropped_fd);
+    reaped(&during_stop_fd);
+    drop(during_stop);
+    drop(sentinel);
+}

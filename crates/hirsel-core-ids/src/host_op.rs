@@ -71,6 +71,9 @@ pub const SCRAM_VERIFY: u8 = 69;
 // A Net port: its sockets and listeners are the port's (core.md, Provide).
 pub const PROVIDE_NET: u8 = 70;
 pub const CALL_SECRET: u8 = 71;
+pub const EXEC_SPAWN: u8 = 72;
+pub const EXEC_WAIT: u8 = 73;
+pub const EXEC_SIGNAL: u8 = 74;
 
 /// A bit of the guest's Dir designation. Providers and tapes use only the underlying handle.
 pub const DIR_READ_ONLY: u64 = 1 << 62;

@@ -1062,7 +1062,7 @@ A claim is scoped by its principal. The application decides the principal and th
 **Worked example: Standard Webhooks.** The app's grant holds one `Secret` per sender, granted for `verify` only (`--grant 'Secret:hook=env:WEBHOOK_KEY verify'`, hmac), and a `Clock`. The binding lists `webhook-id`, `webhook-timestamp` and `webhook-signature`.
 
 ```hirsel unbuilt
-type Hooks: plain + send { hook: Secret, clock: Clock }
+type Hooks: send { hook: Secret, clock: Clock }
 fn claim_hook(g: Hooks, r: ClaimRequest) -> Result[Claimed, ()] waits
 ```
 

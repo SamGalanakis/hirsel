@@ -1154,6 +1154,76 @@ fn sealed_secret_from_unit(tasks: Tasks) -> bool waits {
     result.unwrap(checked)
 }
 
+// Probe a 4392-byte bound: Ok when nothing else is charged in it, else the
+// bytes still free (conn.new(1, bytes 4320) requests 4392).
+fn free_of_4392() -> u64 {
+    let available: Result[(Client[u64], Inbox[u64]), Capacity] = conn.new(1, bytes 4320)
+    match available {
+        Ok(take pair) => {
+            let _ = take pair
+            4392
+        },
+        Error(c) => c.available
+    }
+}
+
+// An hourly refresh for a day: each pencil sealed to alpha.test charges
+// round_up_8((32 + 10) + 6 + 32) = 80 bytes while held (TLS-5) and refunds them
+// on its last drop, so every hour sees 4312 free and the day ends at 4392.
+// expect: run hourly_seal_stays_flat() = true
+fn hourly_seal_stays_flat() -> bool {
+    let checked = bound bytes 4392 {
+        let mut flat = true
+        for _hour in 0u64 .. 24 {
+            let s = sealed_pencil(string.from("alpha.test"))
+            flat = flat && free_of_4392() == 4312
+            let _ = take s
+        }
+        flat && free_of_4392() == 4392
+    }
+    result.unwrap(checked)
+}
+
+// A narrowed designation keeps the sealed bytes: the seal's 80 and the
+// narrow's round_up_8((32 + 10) + 32) = 80 stay charged after the sealed
+// holder drops, a shared holder adds nothing, and the last drop refunds all.
+// expect: run narrow_outlives_seal() = true
+fn narrow_outlives_seal() -> bool {
+    let checked = bound bytes 4392 {
+        let s = sealed_pencil(string.from("alpha.test"))
+        let n = result.unwrap(secret.narrow(s, string.from("alpha.test")))
+        let _ = take s
+        let shared = secret.share(n)
+        let both = free_of_4392() == 4232
+        let _ = take n
+        let one = free_of_4392() == 4232
+        let usable = match secret.narrow(shared, string.from("alpha.test")) {
+            Ok(take again) => {
+                let _ = take again
+                true
+            },
+            Error(_) => false
+        }
+        let _ = take shared
+        both && one && usable && free_of_4392() == 4392
+    }
+    result.unwrap(checked)
+}
+
+// A secret sealed in a unit and received by the parent refunds its 80 bytes
+// in the parent's bound when the parent drops it.
+// expect: run unit_seal_refunds_in_parent(tasks) = true
+fn unit_seal_refunds_in_parent(tasks: Tasks) -> bool waits {
+    let checked = bound bytes 4392 {
+        let worker = result.unwrap(task.spawn_unit(tasks, bytes 4096, 0u64, seal_for_unit))
+        let received = result.unwrap(task.join(take worker))
+        let held = free_of_4392() == 4312
+        let _ = take received
+        held && free_of_4392() == 4392
+    }
+    result.unwrap(checked)
+}
+
 // Sends "Auth " ‖ pencil ‖ "\r\n" on a served alpha.test stream; a pencil
 // sealed to beta.test is Denied there for both sinks, and a plain half
 // Denies both for the alpha.test one. The plain socket's halves drop first.

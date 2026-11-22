@@ -63,6 +63,7 @@ tags!(Handle {
     9 => Flow,
     10 => Client,
     11 => Inbox,
+    12 => Secret,
 });
 
 tags!(Repr {
@@ -376,6 +377,7 @@ tags!(RtOp {
     63 => MapStrongBytes,
     64 => MapStrongStart,
     65 => ReceiveRec { item },
+    66 => SecretShare,
 });
 
 tags!(HostOp {

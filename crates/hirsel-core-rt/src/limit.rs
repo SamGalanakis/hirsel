@@ -628,6 +628,11 @@ impl Payer {
         Ok(())
     }
 
+    /// Whether both payers belong to one unit's limit table.
+    pub(crate) fn same_domain(self, other: Payer) -> bool {
+        std::ptr::eq(self.domain(), other.domain())
+    }
+
     /// The helper reads this after all of its tasks have ended.
     pub(crate) fn run_owned(self) -> u64 {
         self.domain().run_owned.load(Ordering::Relaxed)

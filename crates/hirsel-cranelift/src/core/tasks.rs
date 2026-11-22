@@ -237,13 +237,13 @@ impl Function<'_, '_, '_> {
                 )?;
                 0
             }
-            RtOp::LaunchHandle => {
-                outputs[0] = self.c_call(
-                    "hirsel_core_launch_handle",
-                    &[P, U],
-                    &[U],
-                    &[self.context, args[0]],
-                )?[0];
+            RtOp::LaunchHandle | RtOp::SecretShare => {
+                let name = if matches!(op, RtOp::SecretShare) {
+                    "hirsel_core_secret_share"
+                } else {
+                    "hirsel_core_launch_handle"
+                };
+                outputs[0] = self.c_call(name, &[P, U], &[U], &[self.context, args[0]])?[0];
                 1
             }
             RtOp::DescribeEmit => {

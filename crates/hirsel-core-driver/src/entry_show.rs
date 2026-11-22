@@ -87,7 +87,7 @@ impl Describe<'_> {
             Some(Role::List) => return Shown::List(Box::new(self.ty(args[0]))),
             Some(Role::Box) => return Shown::Boxed(Box::new(self.ty(args[0]))),
             // TLS-5: a run diagnostic prints `[secret]` for every secret.
-            Some(Role::Capability) if decl.path.is_core("core.Secret") => {
+            Some(Role::Secret) => {
                 return Shown::Text("[secret]".into());
             }
             Some(_) => return opaque(),

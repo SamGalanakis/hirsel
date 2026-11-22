@@ -517,6 +517,7 @@ unsafe extern "C" fn invoke(
                                     origin: crate::secret::Origin::Granted(0),
                                     policy: hirsel_core_net::SecretPolicy::default(),
                                     bytes: None,
+                                    seal: None,
                                 }
                             } else if run.mode == 0 {
                                 (*(handle as *const crate::secret::Granted)).secret.clone()
@@ -533,6 +534,7 @@ unsafe extern "C" fn invoke(
                                     policy: hirsel_core_net::SecretPolicy::parse(&record.patterns)
                                         .unwrap(),
                                     bytes: None,
+                                    seal: None,
                                 }
                             };
                             secret.origin = crate::secret::Origin::Granted(ordinal_of(h) as u64);

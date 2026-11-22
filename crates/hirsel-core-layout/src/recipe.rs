@@ -1391,7 +1391,8 @@ fn measure<'r>(
             | Handle::Latest
             | Handle::Client
             | Handle::Inbox
-            | Handle::Flow,
+            | Handle::Flow
+            | Handle::Secret,
         ) => (POINTER, POINTER, 8),
         FieldTy::Handle(Handle::Sender | Handle::Receiver) => (POINTER, POINTER, 24),
         FieldTy::Seq(_) | FieldTy::Map(..) | FieldTy::FrozenBytes => (SEQ_CARRIER, POINTER, 24),
@@ -1420,7 +1421,8 @@ fn array_element(shapes: &[Shape], ty: &FieldTy) -> bool {
             | Handle::Inbox
             | Handle::Socket
             | Handle::HostFile
-            | Handle::Flow,
+            | Handle::Flow
+            | Handle::Secret,
         ) => false,
         _ => true,
     }
@@ -1585,7 +1587,8 @@ fn drops(shapes: &[Shape], ty: &FieldTy, drop: &dyn Fn(TypeRef) -> bool) -> bool
             | Handle::Causes
             | Handle::Socket
             | Handle::HostFile
-            | Handle::Flow,
+            | Handle::Flow
+            | Handle::Secret,
         ) => true,
         FieldTy::Array(e, n) => *n > 0 && drops(shapes, e, drop),
         _ => false,

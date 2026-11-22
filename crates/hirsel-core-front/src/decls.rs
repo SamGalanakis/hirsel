@@ -179,6 +179,8 @@ pub enum Role {
     Map,
     Region,
     Capability,
+    /// `Secret` (TLS-5): a capability that is a resource, one holder of a designation.
+    Secret,
     Task,
     Sender,
     Receiver,
@@ -258,7 +260,8 @@ impl Role {
             "Into" | "Port" | "Sink" => Role::FlowEndpoint,
 
             "Dir" | "Net" | "Clock" | "Random" | "Stdout" | "Stderr" | "Stdin" | "Env"
-            | "Process" | "Tasks" | "Secret" | "Foreign" | "Exec" => Role::Capability,
+            | "Process" | "Tasks" | "Foreign" | "Exec" => Role::Capability,
+            "Secret" => Role::Secret,
             _ => return None,
         })
     }
@@ -295,7 +298,8 @@ impl Role {
             | Role::Latest
             | Role::Client
             | Role::Inbox
-            | Role::Flow => Kind::Resource,
+            | Role::Flow
+            | Role::Secret => Kind::Resource,
         }
     }
 }
@@ -2294,6 +2298,7 @@ impl Program<'_> {
             let mut params = 0u64;
             let mut h = match decl.role {
                 Some(Role::Capability) => H_CAPABILITY,
+                Some(Role::Secret) => H_CAPABILITY | H_RESOURCE,
                 Some(
                     Role::Task
                     | Role::Sender
@@ -3102,7 +3107,7 @@ fn nominal_bounds(decl: &TypeDecl, meet: impl Fn() -> u16, at: impl Fn(usize) ->
         Some(Role::Arc) => SHAREABLE | SEND | (meet() & (KEY | ORDERED)),
         Some(Role::Box) => meet() & (SHAREABLE | SEND | KEY | ORDERED),
         Some(Role::Sender | Role::Receiver | Role::HostFile | Role::Latest | Role::Inbox) => SEND,
-        Some(Role::Client) => SEND | CROSS,
+        Some(Role::Client | Role::Secret) => SEND | CROSS,
         Some(Role::Socket) if matches!(decl.path.0.name.as_str(), "Socket" | "Listener") => {
             SEND | CROSS
         }

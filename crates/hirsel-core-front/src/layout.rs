@@ -370,7 +370,8 @@ impl<T: TyRead> Shapes<'_, T> {
                         | Role::Client
                         | Role::Inbox
                         | Role::Causes
-                        | Role::Flow),
+                        | Role::Flow
+                        | Role::Secret),
                     ) => {
                         let handle = match role {
                             Role::Sender => Handle::Sender,
@@ -382,6 +383,7 @@ impl<T: TyRead> Shapes<'_, T> {
                             Role::HostFile => Handle::HostFile,
                             Role::Socket => Handle::Socket,
                             Role::Flow => Handle::Flow,
+                            Role::Secret => Handle::Secret,
                             _ => Handle::Causes,
                         };
                         let body = record(vec![("handle", FieldTy::Handle(handle))]);
@@ -658,6 +660,7 @@ impl<T: TyRead> Shapes<'_, T> {
                 Some(Role::HostFile) => FieldTy::Handle(Handle::HostFile),
                 Some(Role::Socket) => FieldTy::Handle(Handle::Socket),
                 Some(Role::Flow) => FieldTy::Handle(Handle::Flow),
+                Some(Role::Secret) => FieldTy::Handle(Handle::Secret),
                 Some(Role::Causes) => FieldTy::Handle(Handle::Causes),
                 Some(Role::Text) => {
                     if compact {

@@ -1,4 +1,6 @@
-//! TLS-5. Secret storage is never a language carrier.
+//! TLS-5. Secret storage is never a language carrier. Each `Secret` value is one
+//! holder of a designation slot; the last holder's drop releases the slot and its
+//! charge, and the last designation of sealed bytes refunds the seal.
 use crate::{
     Context,
     entry::{SecretOperations, hirsel_core_capability_handle},
@@ -7,7 +9,10 @@ use crate::{
     provider::{Buffer, IoError, Outcome, Provider, Request, STEP_DONE, Step, Wait},
 };
 use hirsel_core_net::{Name, Pattern, SecretGrant, SecretPolicy, SecretSource, SecretUse};
-use std::{io::Read, sync::Arc};
+use std::{
+    io::Read,
+    sync::{Arc, Mutex, Weak},
+};
 use zeroize::{Zeroize, Zeroizing};
 
 #[derive(Clone, Copy)]
@@ -21,6 +26,8 @@ pub(crate) struct Secret {
     pub(crate) origin: Origin,
     pub(crate) policy: SecretPolicy,
     pub(crate) bytes: Option<Arc<Zeroizing<Vec<u8>>>>,
+    /// A sealed secret's charge, shared by every designation of its bytes.
+    pub(crate) seal: Option<Arc<ChargeCell>>,
 }
 
 pub(crate) struct Granted {
@@ -54,6 +61,7 @@ impl Granted {
                 origin: Origin::Granted(index),
                 policy: SecretPolicy::parse(&record.patterns)?,
                 bytes: Some(Arc::new(bytes)),
+                seal: None,
             },
             record,
         })
@@ -91,7 +99,7 @@ pub(crate) struct TlsWrite {
     pub(crate) binding: hirsel_core_net::scram::Binding,
 }
 
-struct Charge(Payer, u64);
+pub(crate) struct Charge(Payer, u64);
 
 impl Drop for Charge {
     fn drop(&mut self) {
@@ -99,22 +107,169 @@ impl Drop for Charge {
     }
 }
 
+/// A charge that the release of its designation, or of the last designation of
+/// sealed bytes, refunds. When the unit whose limit paid it ends first, its owner
+/// takes the charge over (CONC-15).
+pub(crate) struct ChargeCell(Mutex<Option<Charge>>);
+
+// SAFETY: an outstanding charge pins its payer slot, and a refund settles from
+// any unit (MEM-20).
+unsafe impl Send for ChargeCell {}
+// SAFETY: the charge is reached only under its mutex.
+unsafe impl Sync for ChargeCell {}
+
+impl ChargeCell {
+    fn new(charge: Charge) -> Arc<Self> {
+        Arc::new(Self(Mutex::new(Some(charge))))
+    }
+}
+
+/// A designation still held when the unit that paid for it ended, and its bytes.
+pub(crate) type HandedOver = Vec<(Weak<ChargeCell>, u64)>;
+
+/// The owner's end take: each designation still held keeps its charge, now
+/// paid by the owner's part of the helper's charge.
+pub(crate) fn take_over(handed: &HandedOver, mut payer: impl FnMut(u64) -> Payer) {
+    for (cell, bytes) in handed {
+        if let Some(cell) = cell.upgrade() {
+            let mut charge = cell.0.lock().unwrap();
+            if charge.is_none() {
+                *charge = Some(Charge(payer(*bytes), *bytes));
+            }
+        }
+    }
+}
+
+struct Entry {
+    secret: Secret,
+    /// `None` for a grant registered by the launcher, which is never released.
+    holders: Option<u64>,
+    /// What `narrow` or `provide.secret` admitted for this designation.
+    charge: Option<Arc<ChargeCell>>,
+}
+
 #[derive(Default)]
 pub(crate) struct Secrets {
-    entries: Vec<(Secret, Option<Charge>)>,
+    entries: Vec<Option<Entry>>,
+    free: Vec<usize>,
     seals: u64,
 }
 
 impl Secrets {
     pub(crate) fn register(&mut self, secret: Secret) -> u64 {
-        self.push(secret, None)
+        self.insert(Entry {
+            secret,
+            holders: None,
+            charge: None,
+        })
     }
 
     fn push(&mut self, secret: Secret, charge: Option<Charge>) -> u64 {
-        let index = self.entries.len() as u64;
-        self.entries.push((secret, charge));
-        DYNAMIC_GRANT | index
+        self.insert(Entry {
+            secret,
+            holders: Some(1),
+            charge: charge.map(ChargeCell::new),
+        })
     }
+
+    fn insert(&mut self, entry: Entry) -> u64 {
+        // A slot is never recorded, only its designation's origin, so reuse is
+        // invisible to replay (recording.md, Credentials).
+        let index = match self.free.pop() {
+            Some(index) => {
+                self.entries[index] = Some(entry);
+                index
+            }
+            None => {
+                self.entries.push(Some(entry));
+                self.entries.len() - 1
+            }
+        };
+        DYNAMIC_GRANT | index as u64
+    }
+
+    fn entry(&mut self, handle: u64) -> &mut Entry {
+        self.entries[(handle & !DYNAMIC_GRANT) as usize]
+            .as_mut()
+            .unwrap_or_else(|| crate::process::stop(b"SecretSlot"))
+    }
+
+    /// Remove one holder; the last one's entry comes back to be dropped
+    /// outside the table's lock.
+    fn release(&mut self, handle: u64) -> Option<Entry> {
+        let entry = self.entry(handle);
+        let holders = entry.holders.as_mut()?;
+        *holders -= 1;
+        if *holders != 0 {
+            return None;
+        }
+        let index = (handle & !DYNAMIC_GRANT) as usize;
+        self.free.push(index);
+        self.entries[index].take()
+    }
+
+    /// At a helper's end: each charge that `payer`'s domain paid for a
+    /// designation still held. Its old charge comes back to be dropped,
+    /// refunding this domain, outside the table's lock.
+    pub(crate) fn hand_over(&mut self, payer: Payer) -> (HandedOver, Vec<Charge>) {
+        let mut handed = Vec::new();
+        let mut refunds = Vec::new();
+        for entry in self.entries.iter().flatten() {
+            for cell in [&entry.charge, &entry.secret.seal].into_iter().flatten() {
+                let mut charge = cell.0.lock().unwrap();
+                if charge.as_ref().is_some_and(|c| c.0.same_domain(payer)) {
+                    let c = charge.take().unwrap();
+                    handed.push((Arc::downgrade(cell), c.1));
+                    refunds.push(c);
+                }
+            }
+        }
+        (handed, refunds)
+    }
+}
+
+/// Release one holder of a Secret (TLS-5). Not a provider operation: no
+/// replay point, no step, no frame.
+/// # Safety
+/// Context is running and the handle is a live Secret holder of this run.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_secret_drop(context: *mut Context, handle: u64) {
+    if handle & DYNAMIC_GRANT == 0 {
+        return;
+    }
+    // SAFETY: the run's grants outlive its units.
+    let entry = unsafe {
+        (*(*context).host_files)
+            .registry
+            .run_grants()
+            .secrets
+            .lock()
+            .unwrap()
+            .release(handle)
+    };
+    drop(entry);
+}
+
+/// `secret.share`: one more holder of the same designation.
+/// # Safety
+/// Context is running and the handle is a live Secret holder of this run.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_secret_share(context: *mut Context, handle: u64) -> u64 {
+    if handle & DYNAMIC_GRANT != 0 {
+        // SAFETY: the run's grants outlive its units.
+        let mut secrets = unsafe {
+            (*(*context).host_files)
+                .registry
+                .run_grants()
+                .secrets
+                .lock()
+                .unwrap()
+        };
+        if let Some(holders) = &mut secrets.entry(handle).holders {
+            *holders += 1;
+        }
+    }
+    handle
 }
 
 pub(crate) unsafe fn resolve(context: *const Context, handle: u64) -> Secret {
@@ -126,8 +281,8 @@ pub(crate) unsafe fn resolve(context: *const Context, handle: u64) -> Secret {
                 .secrets
                 .lock()
                 .unwrap()
-                .entries[(handle & !DYNAMIC_GRANT) as usize]
-                .0
+                .entry(handle)
+                .secret
                 .clone()
         } else {
             let grant = hirsel_core_capability_handle(context, handle) as *const Granted;
@@ -173,7 +328,7 @@ pub(crate) const INVALID: Outcome = Outcome {
 
 fn admit(payer: Payer, policies: &[Pattern], len: u64) -> Result<Charge, Outcome> {
     let size = SecretGrant::logical_size(policies, len);
-    match payer.admit_run_owned(size) {
+    match payer.admit(size) {
         Ok(()) => Ok(Charge(payer, size.unwrap())),
         Err(c) => Err(Outcome {
             error: IoError { tag: 2, code: 0 },
@@ -224,8 +379,9 @@ pub unsafe extern "C" fn hirsel_core_secret_seal(
                 origin,
                 policy,
                 bytes: Some(owned),
+                seal: Some(ChargeCell::new(charge)),
             },
-            Some(charge),
+            None,
         );
         Outcome {
             value,

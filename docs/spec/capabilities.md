@@ -38,7 +38,9 @@ authority: what such a capability reaches is only what the program that answers 
 reaches (CAP-1), and a virtual `Net` never authorizes a granted `Secret`
 ([TLS-5](tls.md#tls-5-secrets)). A capability that holds state is a
 resource ([OWN-3](ownership.md#own-3-kinds)); one that only designates authority is plain,
-and copying it copies the designation, never the thing designated. Each capability type
+and copying it copies the designation, never the thing designated. A `Secret` is a
+resource: each holder keeps its bytes and charges until it is dropped
+([TLS-5](tls.md#tls-5-secrets)). Each capability type
 declares whether it is `send` ([CONC-2](tasks.md#conc-2-the-send-bound)).
 
 ```hirsel

@@ -359,6 +359,11 @@ impl FunctionEmitter<'_> {
                 &[U],
                 &[ptr(CONTEXT), u(&args[0])],
             ),
+            RtOp::SecretShare => self.native_call(
+                "hirsel_core_secret_share",
+                &[U],
+                &[ptr(CONTEXT), u(&args[0])],
+            ),
             RtOp::DescribeEmit => self.native_call(
                 "hirsel_core_describe_emit",
                 &[B],

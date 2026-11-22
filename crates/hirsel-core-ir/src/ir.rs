@@ -929,6 +929,8 @@ pub enum RtOp {
     },
     /// `conn.client`: one more client of the same connection.
     ConnClient,
+    /// `secret.share` (TLS-5): one more holder of the designation, as its key.
+    SecretShare,
     /// `conn.send`: 0 accepted, 1 closed (the item stays in its place).
     ConnSend {
         item: TypeId,
@@ -1594,7 +1596,7 @@ impl RtOp {
             RtOp::ArgsLen => (vec![V(u64_)], vec![u64_]),
             RtOp::ArgsGet => (vec![V(u64_), V(u64_)], vec![p]),
             RtOp::LaunchWord => (vec![V(u64_), V(u64_)], vec![u64_]),
-            RtOp::LaunchHandle => (vec![V(u64_)], vec![u64_]),
+            RtOp::LaunchHandle | RtOp::SecretShare => (vec![V(u64_)], vec![u64_]),
             RtOp::FrameRecord => (vec![V(u64_)], vec![p]),
             RtOp::Returnable(op) => {
                 let host = RtOp::Host(op).signature();
@@ -1932,6 +1934,7 @@ impl RtOp {
             | RtOp::ArgsGet
             | RtOp::LaunchWord
             | RtOp::LaunchHandle
+            | RtOp::SecretShare
             | RtOp::DescribeEmit
             | RtOp::Flow(_)
             | RtOp::Host(_)

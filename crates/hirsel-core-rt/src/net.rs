@@ -960,6 +960,7 @@ pub unsafe extern "C" fn hirsel_core_host_send_secret(
                 origin: secret.origin,
                 policy: hirsel_core_net::SecretPolicy::exactly(&write.name),
                 bytes: secret.bytes.clone(),
+                seal: secret.seal.clone(),
             })
         };
         let bytes = match (&narrowed, &secret.bytes) {

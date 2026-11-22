@@ -14,7 +14,7 @@ on a TLS stream whose verified name the secret permits.
 ## Types
 
 Module `tls` declares `connect` and `send_secret`. Module `secret` declares `seal`,
-`narrow`, `render`, the MAC sink and the SCRAM sink (TLS-6).
+`narrow`, `share`, `render`, the MAC sink and the SCRAM sink (TLS-6).
 
 ```hirsel
 pub type Trust = System | Roots(Bytes)
@@ -28,12 +28,15 @@ an existing `NetError` case with its existing meaning.
 
 | type | kind | bounds | logical size | cleanup |
 |---|---|---|---|---|
-| `Secret` | plain | `shareable`, `send` | 8 | capability |
+| `Secret` | resource, mechanical | `send` | 8 | releases one holder (TLS-5) |
 
 `Secret` is a capability type ([CAP-2](capabilities.md#cap-2-capabilities-are-opaque)).
 It designates bytes that let a program act as an account. It has neither `key` nor
 `codec`. So no program can compare two secrets, encode one, or store one in a type that
-declares `codec` ([OWN-4](ownership.md#own-4-bounds)).
+declares `codec` ([OWN-4](ownership.md#own-4-bounds)). Unlike the other capabilities it is
+a resource ([OWN-3](ownership.md#own-3-kinds)) that holds run-owned storage, so `let` moves
+it, dropping it releases that storage (TLS-5), and no `Rc` or `Arc` payload holds one. It
+crosses to another unit as a handle ([CONC-15](tasks.md#conc-15-units)).
 
 ### TLS-1: Client handshake
 
@@ -258,6 +261,7 @@ When they come, the client key is a `Secret` that only the provider reads.
 ```hirsel core
 pub fn seal(take b: Bytes, to: String) -> Result[Secret, (SecretError, Bytes)]
 pub fn narrow(s: Secret, to: String) -> Result[Secret, SecretError]
+pub fn share(s: Secret) -> Secret
 pub fn render(s: Secret) -> View[String] in s
 pub fn send_secret(mut w: WriteHalf, before: Bytes, s: Secret, after: Bytes, until: Until) -> Result[(), NetError] waits
 pub type SecretError = Invalid | Capacity(Capacity)
@@ -276,26 +280,52 @@ pub type SecretError = Invalid | Capacity(Capacity)
   `Secret:<parameter>` names the `main` parameter. The launcher reads the environment
   variable or the file once, before the run starts. If the source is missing or empty,
   the run does not start (exit 103). The bytes are kept in run-owned host memory. They
-  are zeroed when the run ends and are never charged to a limit. The program receives a
+  are zeroed when the run ends and are never charged to a limit, and releasing a holder
+  of a granted secret never releases them. The program receives a
   designation, never the bytes. `to` is the list of name patterns the secret may be sent
   to (TLS-3 pattern syntax), optionally followed by a use word (the MAC sink, below).
 - **`secret.seal`.** This takes bytes the program already holds, such as a token a
   server minted during the run, together with a `to` pattern list. It moves them into
-  run-owned storage that is charged to the caller's limit until the run ends, as
-  `net.narrow` charges rule storage. Sealing admits that charge using the length of
-  `b` before copying. A malformed pattern list returns `Error((Invalid, b))`. If
+  run-owned storage charged to the caller's current limit. Sealing admits
+  `round_up_8(pattern_bytes + len(b) + 32)` using the length of `b` before copying.
+  `pattern_bytes` is the sum, over the patterns, of 32 plus the bytes of the name for a
+  DNS name or a wildcard's suffix, and 32 for an IP literal or `*`. A malformed pattern list returns `Error((Invalid, b))`. If
   admission refuses, sealing returns `Error((Capacity(c), b))` with the requested
   charge and available space. Either refusal returns the original bytes with their
   original payer and charge. The call admits nothing and retains neither the bytes
   nor the policy. On success, sealing copies the bytes, then zeroes and refunds the
   owned source storage. A sealed secret that crosses to another unit
-  ([CONC-15](tasks.md#conc-15-units)) designates the same bytes, keeps its `to`
-  patterns, and stays charged until the run ends. The program can still access any
-  copies it made before sealing.
+  ([CONC-15](tasks.md#conc-15-units)) designates the same bytes and keeps its `to`
+  patterns. The program can still access any copies it made before sealing.
 
 `secret.narrow` keeps the patterns of `s` that the new list also covers, using TLS-3's
 intersection, and designates the same bytes. If the intersection is empty, the result
-is `Invalid`.
+is `Invalid`. It admits `round_up_8(pattern_bytes + 32)` for the new designation, and a
+refusal returns `Capacity(c)`.
+
+**Holders and release.** Each `Secret` value is one **holder** of a **designation**: the
+bytes it designates together with its `to` text. `seal`, `narrow` and `provide.secret`
+([core](core.md#provide)) each make a new designation with one holder.
+`secret.share(s)` returns one more holder of the designation of `s`, as `share` adds a
+holder of an `Rc` ([MEM-16](memory.md#mem-16-counting)): it admits nothing, never fails
+and never waits. Dropping a `Secret` removes its holder. When the last holder of a
+designation is dropped, the designation is **released**: the charge that `narrow` or
+`provide.secret` admitted for it is refunded. The bytes of a sealed secret stay while
+any designation of them is held, since `narrow` and `provide.secret` designate the same
+bytes. When the last of them is released, the runtime zeroes the bytes and refunds the
+charge that `seal` admitted. So a program that seals a fresh token every hour and drops
+the old one holds the storage of one token, not of every token it has sealed.
+
+A release is not a provider operation: it passes no replay point, takes no step, cannot
+fail and adds no frame to a recording. A designation is recorded by its origin (the
+grant, or the order of its seal), never by where the runtime keeps it, so a release
+changes no recorded value ([recording](../recording.md#credentials)). Each charge is paid
+by the limit that admitted it ([MEM-19](budgets.md#mem-19-limits)). A refund from
+another unit reaches that limit as any cross-unit refund does
+([MEM-20](budgets.md#mem-20-limit-records-and-hand-over)). When a helper unit ends while a
+designation it made is still held, in it or in another unit, the designation's charges
+stay with the helper's owner, as the charges of its open connections do
+([CONC-15](tasks.md#conc-15-units)), until the designation is released.
 
 **No cleartext accessor.** No operation returns a secret's bytes, their length, any
 unkeyed digest of them, or the result of comparing them. The MAC sink's keyed tag and

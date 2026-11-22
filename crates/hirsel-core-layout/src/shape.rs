@@ -260,6 +260,8 @@ pub enum Handle {
     Socket,
     /// Owner-only graph, mechanically discarding buffers on cleanup.
     Flow,
+    /// One holder of a `Secret` designation (TLS-5): cleaning it releases the holder.
+    Secret,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]

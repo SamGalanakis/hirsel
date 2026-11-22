@@ -137,7 +137,10 @@ struct World {
     random: u8,
     network: Network,
     grant_charges: Vec<(Limit, u64)>,
-    secrets: Vec<EvalSecret>,
+    /// Secret designations by key; a released one is `None` (TLS-5).
+    secrets: Vec<Option<EvalSlot>>,
+    /// Each sealed secret's charge, refunded once no designation holds its token.
+    seals: Vec<(std::sync::Weak<()>, Limit, u64)>,
     tls_writes: BTreeMap<u64, (Name, bool, hirsel_core_net::scram::Binding)>,
     next_scram: u64,
     scrams: BTreeMap<u64, ([u8; 32], Limit)>,
@@ -428,6 +431,14 @@ enum Due {
 struct EvalSecret {
     policy: SecretPolicy,
     bytes: Arc<Zeroizing<Vec<u8>>>,
+    /// The seal's token, shared by every designation of the bytes.
+    seal: Arc<()>,
+}
+
+struct EvalSlot {
+    secret: EvalSecret,
+    holders: u64,
+    charge: (Limit, u64),
 }
 
 type DirKey = (u64, Vec<u8>);
@@ -1787,6 +1798,15 @@ fn run_world(
         bytes.copy_from_slice(&mach.mem[split(destination.unwrap()).0].bytes);
     }
     for (l, n) in std::mem::take(&mut mach.world.grant_charges) {
+        l.find().subtract(n);
+    }
+    for slot in std::mem::take(&mut mach.world.secrets)
+        .into_iter()
+        .flatten()
+    {
+        slot.charge.0.find().subtract(slot.charge.1);
+    }
+    for (_, l, n) in std::mem::take(&mut mach.world.seals) {
         l.find().subtract(n);
     }
     // Refunds still pending when the run ends count toward its final use.
@@ -3232,9 +3252,7 @@ impl Machine<'_> {
                 if let Err(available) = self.admit_charge(payer, charge, size.is_none()) {
                     return Some(Ok(vec![charge, 2, 0, available]));
                 }
-                let key = self.world.secrets.len() as u64;
-                self.world.secrets.push(secret);
-                self.world.grant_charges.push((payer.clone(), charge));
+                let key = self.designate(secret, (payer.clone(), charge));
                 ok(key, 0)
             }
             HostOp::CallPayload => {
@@ -4423,7 +4441,7 @@ impl Machine<'_> {
         let (policy, len) = if op == HostOp::SecretSeal {
             (policy, self.load(a[0] + 8, 8))
         } else {
-            let Some(parent) = self.world.secrets.get(a[0] as usize) else {
+            let Some(parent) = self.secret(a[0]) else {
                 return vec![0, 1, 0, 0];
             };
             let Some(intersection) = parent.policy.intersect(&policy) else {
@@ -4437,7 +4455,7 @@ impl Machine<'_> {
         if let Err(available) = self.admit_charge(payer, charge, size.is_none()) {
             return vec![charge, 2, 0, available];
         }
-        let bytes = if op == HostOp::SecretSeal {
+        let (bytes, seal) = if op == HostOp::SecretSeal {
             let data = self.load(a[0], 8);
             let bytes = Zeroizing::new(self.carrier_bytes(a[0]).to_vec());
             if !bytes.is_empty() && self.load(a[0] + 16, 8) != 0 {
@@ -4445,18 +4463,78 @@ impl Machine<'_> {
                 use zeroize::Zeroize;
                 self.mem[block].bytes[offset..offset + bytes.len()].zeroize();
             }
-            Arc::new(bytes)
+            let seal = Arc::new(());
+            self.world
+                .seals
+                .push((Arc::downgrade(&seal), payer.clone(), charge));
+            let key = self.designate(
+                EvalSecret {
+                    policy,
+                    bytes: Arc::new(bytes),
+                    seal,
+                },
+                (payer.clone(), 0),
+            );
+            return vec![key, 0, 0, 0];
         } else {
-            self.world.secrets[a[0] as usize].bytes.clone()
+            let parent = self.secret(a[0]).unwrap();
+            (parent.bytes.clone(), parent.seal.clone())
         };
-        let key = self.world.secrets.len() as u64;
-        self.world.secrets.push(EvalSecret { policy, bytes });
-        self.world.grant_charges.push((payer.clone(), charge));
+        let payer = payer.clone();
+        let key = self.designate(
+            EvalSecret {
+                policy,
+                bytes,
+                seal,
+            },
+            (payer, charge),
+        );
         vec![key, 0, 0, 0]
     }
 
+    fn secret(&self, key: u64) -> Option<&EvalSecret> {
+        let slot = self.world.secrets.get(key as usize)?.as_ref()?;
+        Some(&slot.secret)
+    }
+
+    /// A new designation with one holder (native `Secrets::push`).
+    fn designate(&mut self, secret: EvalSecret, charge: (Limit, u64)) -> u64 {
+        self.world.secrets.push(Some(EvalSlot {
+            secret,
+            holders: 1,
+            charge,
+        }));
+        self.world.secrets.len() as u64 - 1
+    }
+
+    fn secret_share(&mut self, key: u64) -> u64 {
+        self.world.secrets[key as usize].as_mut().unwrap().holders += 1;
+        key
+    }
+
+    /// Release one holder; the last refunds the designation's charge, and the
+    /// last designation of sealed bytes refunds the seal (TLS-5).
+    fn secret_drop(&mut self, key: u64) {
+        let slot = self.world.secrets[key as usize].as_mut().unwrap();
+        slot.holders -= 1;
+        if slot.holders != 0 {
+            return;
+        }
+        let slot = self.world.secrets[key as usize].take().unwrap();
+        let (l, n) = slot.charge;
+        self.refund(l, n);
+        drop(slot.secret);
+        let (released, held): (Vec<_>, Vec<_>) = std::mem::take(&mut self.world.seals)
+            .into_iter()
+            .partition(|(token, ..)| token.strong_count() == 0);
+        self.world.seals = held;
+        for (_, l, n) in released {
+            self.refund(l, n);
+        }
+    }
+
     fn secret_mac(&mut self, op: HostOp, a: &[u64]) -> Vec<u64> {
-        let secret = &self.world.secrets[a[0] as usize];
+        let secret = self.secret(a[0]).unwrap();
         let signing = op == HostOp::SecretHmac;
         let needed = if signing {
             SecretUse::Mac
@@ -4488,7 +4566,7 @@ impl Machine<'_> {
         if *spent {
             return Ok(vec![0, 5, 0, 0]);
         }
-        let Some(secret) = self.world.secrets.get(a[2] as usize) else {
+        let Some(secret) = self.secret(a[2]) else {
             return Ok(vec![0, 1, 0, 0]);
         };
         if !secret
@@ -4503,6 +4581,7 @@ impl Machine<'_> {
         let narrowed = EvalSecret {
             policy: SecretPolicy::exactly(name),
             bytes: secret.bytes.clone(),
+            seal: secret.seal.clone(),
         };
         let before = self.carrier_bytes(a[1]).to_vec();
         let after = self.carrier_bytes(a[3]).to_vec();
@@ -4532,7 +4611,7 @@ impl Machine<'_> {
         let Some((name, spent, binding)) = self.world.tls_writes.get(&(key & !3)) else {
             return Ok(vec![0, 1, 0, 0]);
         };
-        let secret = &self.world.secrets[args[1] as usize];
+        let secret = self.secret(args[1]).unwrap();
         if !secret
             .policy
             .patterns
@@ -5636,6 +5715,10 @@ impl Machine<'_> {
                 self.socket_drop(self.load(at, 8));
                 false
             }
+            FieldTy::Handle(Handle::Secret) => {
+                self.secret_drop(self.load(at, 8));
+                false
+            }
             // The provider closes the file and ignores the outcome (core.md,
             // MEM-24); the trace records the close by its handle.
             FieldTy::Handle(Handle::HostFile) => {
@@ -6415,6 +6498,7 @@ impl Machine<'_> {
             RtOp::ArgsGet => vec![self.world.args.get(a[1] as usize).copied().unwrap_or(0)],
             RtOp::LaunchWord => vec![self.world.launch.as_ref().unwrap().word(a[0], a[1])],
             RtOp::LaunchHandle => vec![0],
+            RtOp::SecretShare => vec![self.secret_share(a[0])],
             RtOp::DescribeEmit => {
                 if self.world.launch.as_ref().unwrap().is_describe() {
                     let (bytes, _, _, _) = self.carrier(a[0]);

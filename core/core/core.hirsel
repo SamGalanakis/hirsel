@@ -118,7 +118,7 @@ pub opaque type Process
 
 pub opaque type Tasks
 
-pub opaque type Secret
+pub opaque resource type Secret
 
 pub opaque type Foreign[I]
 

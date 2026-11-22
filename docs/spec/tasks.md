@@ -408,7 +408,7 @@ reaches another unit only as the `x` of a `spawn_unit`, as a helper's result at 
 as an item of a connection ([CONC-17](#conc-17-connections)), and each of these has a
 `cross` type ([CONC-2](#conc-2-the-send-bound)). A plain value is copied. A `List` or
 `String` crosses as a copy of its content: its old storage is refunded where it was charged,
-and the copy is charged where it arrives. A client, socket or listener moves as a handle.
+and the copy is charged where it arrives. A client, socket, listener or `Secret` moves as a handle.
 The **content charge** of a value is the sum, over the lists and strings it holds, of
 length × element size rounded up to 8.
 
@@ -433,7 +433,8 @@ and the root observes the request at a cancellation point
 helper, waits for its end with cancellation shielded, and drops its result or causes. Once
 `join` returns or that cleaning ends, all of the task charge has been refunded to the limit
 that admitted it, except the charges for the result's content, any delivered causes, and
-each connection the helper made that is still open (CONC-17). These charges are refunded
+each connection the helper made that is still open (CONC-17) and each `Secret` designation
+it made that is still held ([TLS-5](tls.md#tls-5-secrets)). These charges are refunded
 when their owners are cleaned.
 
 A unit's **entry** is its function `f`, its argument `x`, its root limit `n` and its root

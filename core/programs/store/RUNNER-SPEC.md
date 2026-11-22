@@ -2,7 +2,7 @@
 
 **Tree:** `62f15988b85ca4afdb6d37e0ff324d9072274615` (detached), 18 crates. The checker was rebuilt there (BUILD SUCCEEDED). Every v2.2 probe was checked and run on it. **v2.3** adds R0's built figures (runner-build-1033, landed bf7cf64f, measured there and at 71b306f0) and three probes run at 62f15988 (p19 split and few-registration variants).
 
-**Store:** written against **STORE-SPEC v2.7** (`STORE-SPEC.md` from store-spec-1001, CHANGES-v2.4 to v2.7: G1–G4, H1–H5, I1–I5, J1). The landed store is S1 (603a2274); S1.1 (`look`, `changes`, Shape reads) is being built.
+**Store:** written against **STORE-SPEC v2.7** ([`STORE-SPEC.md`](STORE-SPEC.md) beside this file, written by store-spec-1001; CHANGES-v2.4 to v2.7: G1–G4, H1–H5, I1–I5, J1). The landed store is S1 (603a2274); S1.1 (`look`, `changes`, Shape reads) is being built.
 
 **Review answered:** runner-spec-review-1028/ADVICE.md (findings 1–7 and every "Model and law gaps" line).
 

@@ -213,6 +213,129 @@ fn unaligned_word(b: Bytes, at: u64) -> u64 { list.word_le(b, at) }
 }
 
 #[test]
+fn counted_list_fills_use_memset_and_preserve_the_source_step() {
+    let source = r#"
+fn fill_bytes(mut xs: Bytes, count: u64, byte: u8) { list.fill(mut xs, count, byte) }
+fn zero(mut xs: List[u64], count: u64) { list.fill(mut xs, count, 0) }
+fn other(mut xs: List[u64], count: u64, value: u64) { list.fill(mut xs, count, value) }
+fn exercise(budget: u64, count: u64) -> u64 {
+    let filled = bound steps budget {
+        let mut xs: List[u64] = list.with_capacity(8)
+        list.push(mut xs, 65)
+        list.fill(mut xs, count, 0)
+        take xs
+    }
+    match take filled {
+        Ok(take xs) => {
+            let mut sum = xs[0] * 100 + list.len(xs)
+            for i in 1u64 .. list.len(xs) { sum += xs[i] }
+            sum
+        },
+        Error(e) => 9000u64 + e.steps,
+    }
+}
+"#;
+    let (program, names) = hirsel_core_program_tests::SourceProgram::lower(source, None);
+    let ir =
+        emit_ir_for_test_with_facts(&program, Target::X86_64Linux, false, false, true).unwrap();
+    verify_ir(&ir);
+    let instruction = "call void @llvm.memset.p0.i64";
+    let body = |name| emitted_body(&ir, &symbol(&program, names[name]));
+    assert!(
+        body("fill_bytes").contains(instruction),
+        "{}",
+        body("fill_bytes")
+    );
+    assert!(
+        body("zero")
+            .lines()
+            .any(|line| line.contains(instruction) && line.contains(", i8 0,")),
+        "{}",
+        body("zero")
+    );
+    assert!(!body("other").contains(instruction), "{}", body("other"));
+
+    let function = names["exercise"];
+    // Capacity and push take two steps. The third appends count zeros
+    // after the 65 prefix, including when count is zero.
+    let inputs = [(2, 3, 9002), (2, 0, 9002), (3, 0, 6501), (3, 3, 6504)];
+    let cases = inputs.map(|(steps, count, _)| Case {
+        function,
+        args: vec![steps, count],
+        limit: 4096,
+        injection: None,
+    });
+    let expected = inputs.map(|(_, _, value)| eval::Outcome::Returned(vec![value]));
+    for (case, outcome) in cases.iter().zip(&expected) {
+        assert_eq!(
+            eval::run(&program, function, &case.args, case.limit).outcome,
+            *outcome
+        );
+    }
+    let cranelift = program.cranelift_object("x86_64-unknown-linux-gnu", false, false, false);
+    let llvm = program.llvm_program(Target::X86_64Linux, false, false, &[function]);
+    for (mode, object) in [(Optimization::None, cranelift), (Optimization::Speed, llvm)] {
+        let reports = execute_object(&program, &cases, "", "", mode, Some(object));
+        for (report, outcome) in reports.into_iter().zip(&expected) {
+            assert_eq!(&report.outcome, outcome);
+        }
+    }
+}
+
+#[test]
+fn counted_list_fill_slices_use_memset_after_the_range_check() {
+    let source = r#"
+fn slice_byte(mut xs: Bytes, at: u64, count: u64, byte: u8) {
+    list.fill_slice(mut xs, at, count, byte)
+}
+fn slice_zero(mut xs: List[u32], at: u64, count: u64) {
+    list.fill_slice(mut xs, at, count, 0)
+}
+fn exercise_slice(at: u64, count: u64) -> u32 {
+    let mut xs: List[u32] = list.with_capacity(4)
+    list.fill(mut xs, 4, 9)
+    list.fill_slice(mut xs, at, count, 0)
+    xs[0] * 1000u32 + xs[1] * 100u32 + xs[2] * 10u32 + xs[3]
+}
+"#;
+    let (program, names) = hirsel_core_program_tests::SourceProgram::lower(source, None);
+    let ir =
+        emit_ir_for_test_with_facts(&program, Target::X86_64Linux, false, false, true).unwrap();
+    verify_ir(&ir);
+    for name in ["slice_byte", "slice_zero"] {
+        let body = emitted_body(&ir, &symbol(&program, names[name]));
+        assert!(body.contains("call void @llvm.memset.p0.i64"), "{body}");
+    }
+    let function = names["exercise_slice"];
+    let cases = [(1, 2), (4, 0), (1, u64::MAX)].map(|(at, count)| Case {
+        function,
+        args: vec![at, count],
+        limit: 4096,
+        injection: None,
+    });
+    // [9, 0, 0, 9], the unchanged [9, 9, 9, 9], and a wrapping end.
+    let expected = [
+        eval::Outcome::Returned(vec![9009]),
+        eval::Outcome::Returned(vec![9999]),
+        eval::Outcome::Failed(vec!["Bounds".into()]),
+    ];
+    for (case, outcome) in cases.iter().zip(&expected) {
+        assert_eq!(
+            eval::run(&program, function, &case.args, case.limit).outcome,
+            *outcome
+        );
+    }
+    let cranelift = program.cranelift_object("x86_64-unknown-linux-gnu", false, false, false);
+    let llvm = program.llvm_program(Target::X86_64Linux, false, false, &[function]);
+    for (mode, object) in [(Optimization::None, cranelift), (Optimization::Speed, llvm)] {
+        let reports = execute_object(&program, &cases, "", "", mode, Some(object));
+        for (report, outcome) in reports.into_iter().zip(&expected) {
+            assert_eq!(&report.outcome, outcome);
+        }
+    }
+}
+
+#[test]
 fn scalar_record_calls_agree_with_evaluator() {
     let source = r#"
 type Single { n: u64 }

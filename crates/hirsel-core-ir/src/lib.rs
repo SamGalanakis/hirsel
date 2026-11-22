@@ -1092,6 +1092,7 @@ pub mod decode;
 pub mod eval;
 pub mod extent;
 pub mod failure;
+pub mod fills;
 mod ir;
 pub mod native_layout;
 pub mod normal;

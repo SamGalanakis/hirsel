@@ -965,6 +965,7 @@ fn emit_module(
                     }
                 }
             }
+            let fills = hirsel_core_ir::fills::fills(body);
             e.br(Label::block(0u32));
             for (i, b) in body.blocks.iter().enumerate() {
                 e.block(Label::block(i));
@@ -986,6 +987,7 @@ fn emit_module(
                 }
                 let ending = forwarding.ending(module, &recipes, sig, e.constants, i);
                 let mut returned = false;
+                let fill = fills.get(i).copied().flatten();
                 let groups = &step_groups[i];
                 let skipped = groups
                     .values()
@@ -997,6 +999,10 @@ fn emit_module(
                         continue;
                     }
                     e.debug_location = function_debug.map(|d| d.location(body.inst_anchors[index]));
+                    if let Some(fill) = fill {
+                        e.bulk_fill(fill)?;
+                        break;
+                    }
                     if let Some(group) = groups.get(&index) {
                         e.step_effect_group(*group, |anchor| {
                             function_debug.map(|d| d.location(anchor))

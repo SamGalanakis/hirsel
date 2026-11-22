@@ -432,6 +432,24 @@ pub(super) fn during_steal(ix: usize) {
     }
 }
 
+// Publish after the search missed but before it relinquishes its role.
+// The other worker is in epoll with no timeout, and this one is preparing
+// to park on its thread handle. Only the final queue check can recover.
+pub(super) fn before_search_exit() {
+    if me().is_none()
+        || lock().case != "wake_as_last_searcher_parks"
+        || !FLAG[1].raw()
+        || FLAG[3].raw()
+    {
+        return;
+    }
+    assert_eq!(pool().searching.raw(), 1);
+    assert!(pool().poller_blocked.raw());
+    FLAG[3].store(true, Ordering::SeqCst);
+    while !FLAG[2].load(Ordering::SeqCst) {}
+    assert_eq!(pool().queued.raw(), 1);
+}
+
 fn short(f: &'static str) -> &'static str {
     f.rsplit('/').next().unwrap_or(f)
 }
@@ -1280,6 +1298,34 @@ const HOST_THRESHOLD: u64 = 2_000;
 const TICKS: u32 = 40;
 
 pub(super) static CASES: &[Case] = &[
+    Case {
+        name: "wake_as_last_searcher_parks",
+        workers: 2,
+        units: 1,
+        body: |_| {
+            wait_flag(0);
+            FLAG[1].store(true, Ordering::SeqCst);
+            wait_flag(2);
+            assert!(FLAG[3].load(Ordering::SeqCst));
+            served(0, "the last searcher served the wake before parking");
+            0
+        },
+        producers: &[("publisher", || {
+            let p = pool();
+            // Wake the parked worker once while the other holds epoll.
+            while !p.poller_blocked.load(Ordering::SeqCst) || p.nsleep.load(Ordering::SeqCst) == 0 {
+                sleep_producer(now() + 300);
+            }
+            FLAG[0].store(true, Ordering::SeqCst);
+            wake_id(0);
+            producer_wait_flag(3);
+            wake_id(0);
+            FLAG[2].store(true, Ordering::SeqCst);
+        })],
+        goals: 0b1,
+        params: |_| {},
+        pct: None,
+    },
     // 1. Stale sleep bound (go/VERIFY.md "Poller sleep race"). One unit
     // alternates a short computation with a short sleep, TICKS times. Each
     // sleep's deadline becomes the poller's `poll_until`; when the poller
@@ -1802,7 +1848,7 @@ pub(super) fn run_one(case: &Case, seed: u64, out: &str) -> ! {
         next_timer: super::AtomicU64::new(u64::MAX),
         stop: super::AtomicBool::new(false),
         last_poll: super::AtomicU64::new(0),
-        spin_ns: 5_000,
+        max_spin_ns: 5_000,
         connection_spins: 8,
         spin_poll_ns: 20_000,
         slice_ns: 500_000,
@@ -2108,6 +2154,11 @@ mod tests {
             );
         }
         eprintln!("{case}: {ran} schedules hold the law ({secs:.1}s)");
+    }
+
+    #[test]
+    fn wake_as_last_searcher_parks() {
+        check("wake_as_last_searcher_parks");
     }
 
     #[test]

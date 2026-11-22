@@ -80,9 +80,9 @@ pub(crate) fn spin() -> bool {
 // unit, and the unit takes the queue at its next switch. Timers of parked
 // units sit in one shared heap.
 //
-// Idle workers: a searcher watches the queued count for a few microseconds,
-// then parks on its own handle. A wake hands one parked worker the searching
-// role, so a burst of newly runnable units wakes one worker at a time.
+// Idle workers: a speculative searcher starts with a short probe and spins
+// longer when its previous probe found work. A wake hands a parked worker
+// the search role for immediate work discovery.
 use std::cell::{RefCell as URefCell, UnsafeCell};
 use std::collections::BTreeSet;
 use sync::{AtomicBool, AtomicPtr, AtomicU8, AtomicU32, AtomicUsize};
@@ -361,7 +361,7 @@ struct Pool {
     next_timer: AtomicU64,
     stop: AtomicBool,
     last_poll: AtomicU64,
-    spin_ns: u64,
+    max_spin_ns: u64,
     connection_spins: u64,
     slice_ns: u64,
     poll_every_ns: u64,
@@ -1403,6 +1403,44 @@ unsafe fn run_unit(p: &Pool, ix: usize, up: UP, host: &mut *mut u8) {
     }
 }
 
+/// A speculative search may lose the race for a slot. The worker can then
+/// take the poll turn or register as a sleeper and recheck the queues.
+fn try_search(p: &Pool) -> bool {
+    let searching = p.searching.load(Ordering::Relaxed);
+    searching < p.w.div_ceil(2)
+        && p.searching
+            .compare_exchange(
+                searching,
+                searching + 1,
+                Ordering::SeqCst,
+                Ordering::Relaxed,
+            )
+            .is_ok()
+}
+
+const SHORT_SPIN_NS: u64 = 1_000;
+
+fn spin_for_work(p: &Pool, ix: usize, budget: u64) -> Option<UP> {
+    let start = now();
+    let mut pauses = 1;
+    loop {
+        if p.queued.load(Ordering::SeqCst) != 0
+            && let Some(unit) = find(p, ix)
+        {
+            return Some(unit);
+        }
+        for _ in 0..pauses {
+            std::hint::spin_loop();
+        }
+        let t = now();
+        if t - start >= budget || p.stop.load(Ordering::Relaxed) {
+            return None;
+        }
+        poll_due(p, t, p.spin_poll_ns);
+        pauses = (pauses * 2).min(16);
+    }
+}
+
 /// Returns true when a spare took over this slot, false on pool shutdown.
 fn run_slot(p: &'static Pool, ix: usize) -> bool {
     #[cfg(test)]
@@ -1415,6 +1453,8 @@ fn run_slot(p: &'static Pool, ix: usize) -> bool {
     *p.threads[ix].lock().unwrap() = Some(sync::thread::current());
     // A wake handed this worker the search role (already counted).
     let mut handed = false;
+    let short_spin = p.max_spin_ns.min(SHORT_SPIN_NS);
+    let mut spin_budget = short_spin;
     loop {
         if !handed && let Some(u) = find(p, ix) {
             keep_poller(p);
@@ -1431,32 +1471,30 @@ fn run_slot(p: &'static Pool, ix: usize) -> bool {
             }
             break;
         }
-        // Search: at most half the workers at once. A searcher watches the
-        // queued count without taking queue locks, and polls only when no
-        // worker is blocked in the poller.
+        let has_search = std::mem::take(&mut handed);
         let mut got = None;
-        if std::mem::take(&mut handed) || 2 * p.searching.fetch_add(1, Ordering::SeqCst) < p.w {
-            let t0 = now();
-            let mut i = 0u32;
-            loop {
-                if p.queued.load(Ordering::SeqCst) > 0
-                    && let Some(u) = find(p, ix)
-                {
-                    got = Some(u);
-                    break;
-                }
-                i = i.wrapping_add(1);
-                if i % 64 == 0 {
-                    let t = now();
-                    if t - t0 > p.spin_ns || p.stop.load(Ordering::Relaxed) {
-                        break;
-                    }
-                    poll_due(p, t, p.spin_poll_ns);
-                }
-                std::hint::spin_loop();
+        if has_search || (spin_budget != 0 && try_search(p)) {
+            got = if has_search {
+                // This wake already reserved our search role. The queues
+                // may have drained before the OS ran us.
+                find(p, ix)
+            } else {
+                let found = spin_for_work(p, ix, spin_budget);
+                spin_budget = if found.is_some() {
+                    p.max_spin_ns
+                } else {
+                    short_spin
+                };
+                found
+            };
+            #[cfg(test)]
+            if got.is_none() {
+                check::before_search_exit();
             }
+            // The final ready checks below must follow this decrement. A
+            // publisher that sees us counted may skip its notification.
+            p.searching.fetch_sub(1, Ordering::SeqCst);
         }
-        p.searching.fetch_sub(1, Ordering::SeqCst);
         if let Some(u) = got {
             // The last searcher to find work wakes another if work remains,
             // or if workers sleep and nobody watches the poller.
@@ -1614,7 +1652,7 @@ pub(crate) fn launch(
         stop: AtomicBool::new(false),
         last_poll: AtomicU64::new(0),
         connection_spins: env_u64("HIRSEL_UNTIED_CONN_SPINS", 16).min(128),
-        spin_ns: env_u64("HIRSEL_UNTIED_SPIN_US", 5) * 1000,
+        max_spin_ns: env_u64("HIRSEL_UNTIED_SPIN_US", 5).saturating_mul(1000),
         spin_poll_ns: env_u64("HIRSEL_UNTIED_SPIN_POLL_US", 20) * 1000,
         slice_ns: env_u64("HIRSEL_UNTIED_SLICE_US", 500) * 1000,
         poll_every_ns: env_u64("HIRSEL_UNTIED_POLL_US", 100) * 1000,

@@ -288,11 +288,7 @@ fn a_body_record_with_another_module_part_misses_its_object() {
             .live(&path)
             .unwrap();
         let head = store.get_body_head(record).unwrap().unwrap().head().to_vec();
-        let (forged, part, bytes) = Store::frame_body(&head, |b| {
-            b.extend_from_slice(&other);
-            Ok(())
-        })
-        .unwrap();
+        let (forged, part, bytes) = Store::frame_body(&head, &other);
         assert_ne!(part, check(SHAPE, "store").definitions[&path].ir_hash());
         store.write_framed(forged, &bytes).unwrap();
         check_index::forge(&store, |_, leaves| {

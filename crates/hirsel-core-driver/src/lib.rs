@@ -368,9 +368,16 @@ mod body {
         pub(crate) fn frame(&mut self) -> io::Result<Vec<u8>> {
             let head = encode(&DiskCheckRef::of(self)?)?;
             let ir = self.ir.get().expect("a fresh product holds its IR");
-            let (record, ir_hash, bytes) = Store::frame_body(&head, |bytes| {
-                hirsel_core_front::cost_scope!("encoding", "canonical key encoding");
-                bincode::serialize_into(&mut *bytes, ir).map_err(io::Error::other)
+            thread_local! {
+                static SCRATCH: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+            }
+            let (record, ir_hash, bytes) = SCRATCH.with_borrow_mut(|scratch| {
+                scratch.clear();
+                {
+                    hirsel_core_front::cost_scope!("encoding", "canonical key encoding");
+                    bincode::serialize_into(&mut *scratch, ir).map_err(io::Error::other)?;
+                }
+                Ok::<_, io::Error>(Store::frame_body(&head, scratch))
             })?;
             self.record = record;
             self.ir_hash = ir_hash;

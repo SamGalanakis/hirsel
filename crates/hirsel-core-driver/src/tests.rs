@@ -365,11 +365,7 @@ fn a_body_record_reads_back_only_whole() {
     expected.extend(prefix_check.to_le_bytes());
     expected.extend(twox_hash::XxHash3_64::oneshot(ir).to_le_bytes());
     expected.extend(address.0);
-    let framed = Store::frame_body(head, |b| {
-        b.extend_from_slice(ir);
-        Ok(())
-    })
-    .unwrap();
+    let framed = Store::frame_body(head, ir);
     assert_eq!(framed, (address, ir_hash, expected.clone()));
     let read = |bytes: &[u8]| {
         std::fs::write(store.path(address), bytes).unwrap();

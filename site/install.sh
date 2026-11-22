@@ -4,7 +4,7 @@ set -u
 # tools/toolchain-dist/build reads this assignment for the release gate.
 glibc_floor=2.28
 release_url=https://github.com/SamGalanakis/hirsel/releases
-release_api=https://api.github.com/repos/SamGalanakis/hirsel/releases/latest
+release_api=https://api.github.com/repos/SamGalanakis/hirsel/releases
 target=x86_64-unknown-linux-gnu
 modify_path=true
 uninstall=false
@@ -135,14 +135,96 @@ fetch() {
     esac
 }
 
+release_page() {
+    LC_ALL=C awk -v best="$1" '
+        function compare_text(a, b) {
+            return "x" a == "x" b ? 0 : ("x" a > "x" b ? 1 : -1)
+        }
+        function compare_number(a, b) {
+            if (length(a) != length(b)) return length(a) - length(b)
+            return compare_text(a, b)
+        }
+        function precedence(a, b,    a_pre, b_pre, av, bv, an, bn, i, order) {
+            sub(/\+.*/, "", a); sub(/\+.*/, "", b)
+            a_pre = index(a, "-"); b_pre = index(b, "-")
+            # Once a stable release exists, only stable releases are eligible.
+            if ((a_pre == 0) != (b_pre == 0)) return a_pre ? -1 : 1
+            split(substr(a, 2), av, /[.-]/)
+            split(substr(b, 2), bv, /[.-]/)
+            for (i = 1; i <= 3; i++) {
+                order = compare_number(av[i], bv[i])
+                if (order) return order
+            }
+            if (!a_pre) return 0
+            an = split(substr(a, a_pre + 1), av, /\./)
+            bn = split(substr(b, b_pre + 1), bv, /\./)
+            for (i = 1; i <= an && i <= bn; i++) {
+                if (av[i] ~ digits && bv[i] ~ digits) order = compare_number(av[i], bv[i])
+                else if (av[i] ~ digits) order = -1
+                else if (bv[i] ~ digits) order = 1
+                else order = compare_text(av[i], bv[i])
+                if (order) return order
+            }
+            return an - bn
+        }
+        BEGIN {
+            digits = "^[0-9]+$"
+            number = "(0|[1-9][0-9]*)"
+            pre = "(" number "|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
+            build = "[0-9A-Za-z-]+"
+            semver = "^v" number "\\." number "\\." number \
+                "(-" pre "(\\." pre ")*)?([+]" build "(\\." build ")*)?$"
+        }
+        # Scan JSON strings whole so that only keys of a release object count.
+        {
+            while (match($0, /[^[:space:]]/)) {
+                $0 = substr($0, RSTART)
+                if (!match($0, /^("([^"\\]|\\.)*"|[][{}:,]|-?[0-9][0-9.eE+-]*|true|false|null)/)) {
+                    invalid = 1; exit
+                }
+                token = substr($0, 1, RLENGTH)
+                $0 = substr($0, RLENGTH + 1)
+                if (closed || (!depth && token != "[") ||
+                    (depth == 1 && token != "{" && token != "]" && token != ",")) {
+                    invalid = 1; exit
+                }
+                if (depth == 1 && token == "{") count++
+                if (depth == 2 && key == "\"tag_name\"" && previous == ":") {
+                    tag = substr(token, 2, length(token) - 2)
+                    if (token ~ /^"/ && tag ~ semver) {
+                        order = best == "" ? 1 : precedence(tag, best)
+                        if (order > 0 || (order == 0 && compare_text(tag, best) > 0)) best = tag
+                    }
+                }
+                if (token == "[" || token == "{") depth++
+                if (token == "]" || token == "}") depth--
+                if (!depth) closed = 1
+                key = previous
+                previous = token
+            }
+        }
+        END {
+            if (invalid || !closed) exit 1
+            printf "%d %s\n", count, best
+        }
+    ' "$download_dir/releases"
+}
+
 download_dir=$(mktemp -d "${TMPDIR:-/tmp}/hirsel-install.XXXXXXXX") || fail 'cannot create download directory'
 version=${HIRSEL_VERSION:-}
 if [ -z "$version" ]; then
     case ${HIRSEL_DOWNLOAD_BASE:-} in
         file://*) fail 'set HIRSEL_VERSION for local release artifacts' ;;
     esac
-    fetch "$release_api" "$download_dir/latest" || fail 'cannot find the latest release'
-    version=$(sed -n 's/^[[:space:]]*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' "$download_dir/latest")
+    page=1
+    while :; do
+        fetch "$release_api?per_page=100&page=$page" "$download_dir/releases" || fail 'cannot list GitHub releases'
+        result=$(release_page "$version") || fail 'cannot read the GitHub releases list'
+        version=${result#* }
+        [ "${result%% *}" -eq 100 ] || break
+        page=$((page + 1))
+    done
+    [ -n "$version" ] || fail 'no Hirsel release published yet'
 fi
 version=${version#v}
 printf '%s\n' "$version" |

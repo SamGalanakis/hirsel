@@ -9,6 +9,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - name: Check installer release resolution
+        run: dash tools/toolchain-dist/check-installer
       - name: Build and qualify the Linux distribution
         env:
           RELEASE_TAG: ${{ github.ref_name }}

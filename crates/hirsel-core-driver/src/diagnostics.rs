@@ -215,6 +215,8 @@ fn name_hint(index: &NameIndex, refusal: &Refusal) -> Option<DiagnosticHint> {
                     "listen" | "connect" | "accept" | "recv_bounded" | "send_pair"
                 )
                 && let Some(host) = index.module_at(&module.package, &["host".into()])
+                && let Some(head) = index.symbols.find("host")
+                && index.module_head(from, head) == Some(host)
                 && let Some(symbol) = index.symbols.find(&lookup.written)
                 && visible_member(index, from, host, symbol, *namespace, *constructor).is_some()
             {

@@ -8,3 +8,9 @@ fn indirect(f: fn(u64) -> u64) -> u64 { f() }
 // expect: message LANG-11 at 3:26 | Expected signature: app@1/main/port(value: u16) -> u16
 // expect: refuse LANG-11 at 4:43
 // expect: message LANG-11 at 4:43 | Expected signature: fn(u64) -> u64
+// library: std
+fn upgraded(s: std.upgrade.Socket) {}
+fn wrong_socket(s: Socket) { upgraded(s) }
+// expect: refuse LANG-11 at 13:39
+// expect: message LANG-11 at 13:39 | expected `std@1/upgrade/Socket`, found `core@1/core/Socket`
+// expect: message LANG-11 at 13:39 | Expected signature: app@1/main/upgraded(s: std@1/upgrade/Socket) -> ()

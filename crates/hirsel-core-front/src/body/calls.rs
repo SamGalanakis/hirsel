@@ -223,11 +223,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
 
     pub(super) fn shown_callee(&self, callee: DiagnosticCallee) -> String {
         use std::fmt::Write;
-        let DiagnosticCallee::Named(index) = callee else {
-            let DiagnosticCallee::Value(ty) = callee else {
-                unreachable!()
-            };
-            return self.shown(ty);
+        let index = match callee {
+            DiagnosticCallee::Named(index) => index,
+            DiagnosticCallee::Value(ty) => return self.shown(ty),
         };
         let function = &self.p.fns[index];
         let symbols = &self.p.index.symbols;

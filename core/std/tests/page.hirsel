@@ -373,6 +373,29 @@ fn bulk_borrow_tail() -> bool {
     }
 }
 
+// A bulk leaf with one inline row and one row over the inline limit. Layout
+// from the page format: a 24-byte header (level 0, n 2, no common prefix,
+// stamp 101, heap 78), then 0x78 inline "ab" at 24 (2+1 key, 1 tag, 2 width,
+// 2 bytes) and 0x79 as a blob cell at 32 (2+1 key, tag 1, 42-byte ref), then
+// the slots 24 and 32. The blob draws stamp 100 before the leaf draws 101.
+// Catches a blob cell written with the wrong ref or at the wrong offset.
+// expect: run bulk_blob_leaf() = true
+fn bulk_blob_leaf() -> bool {
+    let mut rows: List[page.Row] = list.new()
+    list.push(mut rows, page.Row(key: hex("78"), value: hex("6162"), charge: 1))
+    list.push(mut rows, page.Row(key: hex("79"), value: hex("78797a"), charge: 1))
+    let mut next = 100u64
+    let root = option.unwrap(result.unwrap(page.bulk(rows, Unprefixed, 2, mut next)))
+    let mut expected = hex("000002000000000065000000000000004e00000000000000")
+    list.append(mut expected, hex("01007800020061620100790164000000000000000300000000000000"))
+    let mut sum: Bytes = list.with_capacity(8)
+    list.fill(mut sum, 8, 0)
+    list.set_word_le(mut sum, 0, check.xxh3(hex("78797a"), 0, 3))
+    list.append(mut expected, sum)
+    list.append(mut expected, hex("00000000000000000000000000000000000018002000"))
+    page.payload(page.image_of(root)) == expected && option.unwrap(page.lookup(root, hex("79"))) == hex("78797a") && option.unwrap(page.lookup(root, hex("78"))) == hex("6162")
+}
+
 // expect: run split_and_branch_delete() = true
 fn split_and_branch_delete() -> bool {
     let mut next = 100u64

@@ -205,6 +205,24 @@ The command validates the run and prints its commit and the reason it was
 promoted. It also accepts a clean wrapper run directory and updates
 `~/.local/share/hirsel-board/last-complete.json` atomically.
 
+## Screen two revisions on Boat
+
+The screen checks one Hirsel workload per runtime family: AWFY Bounce,
+AWFY pool/index List and LangArena CLBG::Nbody. It reports user instructions,
+stripped executable bytes and peak RSS per workload for both revisions on
+one VM. Every sample must pass the board's workload check.
+
+Prepare each revision in a clean local checkout. Use the same pinned AWFY
+and LangArena checkouts as the nightly board.
+
+```sh
+taskset -c 8-11 python3 bench/awfy/screen.py prepare "$prepared" --awfy "$awfy" --langarena "$langarena"
+taskset -c 8-11 python3 bench/awfy/screen.py run "$out" --base "$base" --candidate "$candidate" --awfy "$awfy"
+```
+
+The screen prints the table and saves it in the Boat job logs under `$out`.
+The nightly board supplies the full peer comparison.
+
 ## Run the on-demand comparisons
 
 Use a clean candidate and the pinned peer checkouts. Fetch locked Cargo

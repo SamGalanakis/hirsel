@@ -35,7 +35,7 @@ def group_inputs(module):
     return manifest
 
 
-def build_hirsel(out, artifacts, rows, env=None, *, debug_lines=False):
+def build_hirsel(out, artifacts, rows, env=None, *, debug_lines=False, directory_grant=None):
     if env is None:
         env = capped_env(out)
     for module, mib in sorted({(group(row["name"]), root_mib(row["name"])) for row in rows}):
@@ -49,7 +49,8 @@ def build_hirsel(out, artifacts, rows, env=None, *, debug_lines=False):
             "--inputs", manifest, "--entry", f"langarena@1/{module}/main",
             "--store", out / "store", "--backend", "llvm", "--release",
             "--runtime", artifacts["runtime"], "--cc", llvm_path() / "bin/clang",
-            "--dir", out, "--grant", "Stdout", *task_grant, "--limit", str(mib << 20),
+            "--dir", out if directory_grant is None else directory_grant,
+            "--grant", "Stdout", *task_grant, "--limit", str(mib << 20),
             "--json", "-o", binary,
         ]
         if debug_lines:

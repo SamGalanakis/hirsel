@@ -414,6 +414,14 @@ struct LayerLaw {
     /// Requests logged Fast that did not install, or logged Fallback that
     /// installed: (sequence, step, store).
     refused: Vec<String>,
+    /// Declared-state records compared byte for byte across the two stores.
+    records: usize,
+}
+/// The declared-state record a store selects: its key and its file's bytes.
+fn layer_record(store: &Path) -> Option<(ContentHash, Vec<u8>)> {
+    let store = crate::store::Store::new(store).unwrap();
+    let key = store.selection(crate::layers::SELECTION).unwrap()?;
+    Some((key, std::fs::read(store.path(key)).unwrap()))
 }
 /// Run one sequence; return each step's failures of the law and, separately, the
 /// steps whose roots differ while everything else agrees.
@@ -465,6 +473,22 @@ fn run_sequence(
             dir.path().join("disk"),
             options("disk", req),
                     );
+        // The two stores saw the same requests, so a record one shape keys
+        // holds the same bytes in both: its name is not its content's hash,
+        // and nothing else would tell two writers' records apart.
+        if let (Some(resident), Some(disk)) = (
+            layer_record(&dir.path().join("resident")),
+            layer_record(&dir.path().join("disk")),
+        ) && resident.0 == disk.0
+        {
+            law.records += 1;
+            if resident.1 != disk.1 {
+                failures.push(format!(
+                    "{} step {n}: the declared-state record {:?} has unlike bytes in the resident and disk stores",
+                    seq.name, resident.0
+                ));
+            }
+        }
         if n == 0 {
             first_shape = resident_answer.layer.shape;
             continue;
@@ -560,6 +584,7 @@ fn run_sequences(seqs: Vec<Seq>, backend: Option<Backend>, unequal_roots: &[&str
     for (table, (compared, unequal)) in &law.tables {
         eprintln!("LAYER-LAW {table}: {compared} installed requests, {unequal} unequal");
     }
+    eprintln!("LAYER-BYTES {} records compared across stores", law.records);
     for class in &law.classes {
         eprintln!("LAYER-CLASS {class}");
     }

@@ -2,6 +2,7 @@
 """Build and run the matched Hirsel goal board. Keep outputs outside the checkout."""
 import argparse
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
+from datetime import datetime, time as time_of_day
 from decimal import Decimal
 from io import StringIO
 import importlib.util
@@ -11,6 +12,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import shlex
 import signal
 import socket
 import subprocess
@@ -20,9 +22,12 @@ import time
 
 import arena
 import build
+import comparison
+import comparison_units
 import measure
 import receipt
 from receipt import measurement_slot, write as write_json
+from comparison import SPECTRALNORM, SPECTRALNORM_CHECKSUM, spectralnorm_marker
 from bench_cpus import add_cpu_sets, sibling_cpus, smt_activity, validate_cpu_sets
 
 ROOT = build.ROOT
@@ -198,12 +203,15 @@ def instruction_keys():
 
 
 class Board:
-    def __init__(self, out, commit):
+    def __init__(self, out, commit, *, persist=True):
         self.out = out
+        self.persist = persist
         self.report = {"commit": commit, "pins": PINS, "notes": NOTES, "rows": [], "failures": {},
                        "instruction_receipt": receipt.make_receipt(instruction_keys())}
 
     def save(self):
+        if not self.persist:
+            return
         observed = {(row["goal"], row["row"]): row for row in self.report["rows"]}
         expected = [
             {"goal": goal, "row": name, "status": (
@@ -377,10 +385,12 @@ class Board:
             self.save()
 
 
-def sample_runtime(row, commands, directory, samples_dir, env, siblings, index, label):
+def sample_runtime(row, commands, directory, samples_dir, env, siblings, index, label, *, extended=False):
     samples = {}
     order = ("rust", "hirsel", "goose") if index % 2 == 0 else ("goose", "hirsel", "rust")
     for side in order:
+        if extended:
+            require_comparison_window()
         command, marker = commands[side]
         target = samples_dir.with_name(f"{samples_dir.name}-{side}")
         if side == "hirsel":
@@ -415,10 +425,14 @@ def matmul_notes(name):
                 "All workers share the measurement CPU.")
 
 
-def runtime_rows(board, suite, directory, upstream, tools, *, config=None, startup=False):
+def runtime_rows(board, suite, directory, upstream, tools, *, config=None, startup=False, extended=False):
     goal = measure.SUITES[suite]
     rows = (measure.arena_rows(directory, config) if config is not None
             else measure.runtime_cases(suite, directory, upstream))
+    if extended:
+        rows = list(rows)
+        if sorted(name for name, _ in rows) != sorted(EXPECTED[goal]):
+            raise ValueError(f"{goal}: required distinct workloads")
     fixture = receipt.runtime_fixture(suite, directory, upstream, config=config)
     startup_name, startup_label = STARTUP[suite]
     samples_dir = board.out / "runtime" / ("Startup" if startup else goal)
@@ -432,14 +446,15 @@ def runtime_rows(board, suite, directory, upstream, tools, *, config=None, start
         row = receipt.runtime_case(suite, name, directory, *commands["hirsel"], fixture, tools)
         title, label = ("Startup", startup_label) if startup else (goal, name)
         target = samples_dir / name.replace("::", "-")
-        samples = sample_runtime(row, commands, directory, target, env, siblings, index, f"{title}/{label}")
+        samples = sample_runtime(row, commands, directory, target, env, siblings, index,
+                                 f"{title}/{label}", extended=extended)
         if not startup:
             board.report["instruction_receipt"]["rows"].append(row)
         if all(sample["verified"] for sample in samples.values()):
             verified.append(name)
         metrics = ("seconds",) if startup else ("seconds", "instructions") if suite == "arena" else ("instructions",)
         board.row(title, label, samples, metrics, notes=matmul_notes(name))
-        if suite != "arena" and name == startup_name:
+        if not extended and suite != "arena" and name == startup_name:
             board.row("Startup", startup_label,
                       {side: sample.copy() for side, sample in samples.items()}, ("seconds",))
     return verified
@@ -496,27 +511,42 @@ def compile_commands(out):
             executable, target / "release/benchmarks")
 
 
-def prepare_compile(out, artifacts, env):
-    out.mkdir()
+def stage_arena_cargo(out):
     rust = out / "rust"
     source = ROOT / "core/langarena/rust"
     rust.mkdir()
     for name in ("Cargo.toml", "Cargo.lock"):
         shutil.copyfile(source / name, rust / name)
     shutil.copytree(source / "src", rust / "src")
-    target = out / "target"
-    fetch(rust, env)
-    run(cargo("build", "-j2", *compile_profile(target)), cwd=rust, env=cargo_scope(env))
-    run(cargo("clean", "--release", "--target-dir", target, "-p", "benchmarks"), cwd=rust, env=cargo_scope(env))
+    return rust
 
+
+def prime_cargo(operation, profile, rust, target, package, env, *, release=False, jobs=2):
+    run(cargo(operation, f"-j{jobs}", *profile), cwd=rust, env=cargo_scope(env))
+    run(cargo("clean", *(("--release",) if release else ()), "--target-dir", target, "-p", package),
+        cwd=rust, env=cargo_scope(env))
+
+
+def prepare_compile(out, artifacts, env):
+    out.mkdir()
+    rust = stage_arena_cargo(out)
+    target = out / "target"
+    prime_cargo("build", compile_profile(target), rust, target, "benchmarks", env, release=True)
     prepare_hirsel_compile(out, artifacts, env)
     return compile_commands(out)
 
 
-def prepare_hirsel_compile(out, artifacts, env):
+def publish_std(out, artifacts, env):
+    run([artifacts["compiler"], "std-product", "--store", out / "packages",
+         "--runtime", artifacts["runtime"]], env=env)
+
+
+def prepare_hirsel_compile(out, artifacts, env, *, packages=None):
     suite = load("arena_suite", ROOT / "core/langarena/run.py")
-    packages = out / "packages"
-    run([artifacts["compiler"], "std-product", "--store", packages, "--runtime", artifacts["runtime"]], env=env)
+    if packages is None:
+        publish_std(out, artifacts, env)
+    else:
+        (out / "packages").symlink_to(packages, target_is_directory=True)
     helper = out / "helper.hirsel"
     shutil.copyfile(ROOT / "core/langarena/helper.hirsel", helper)
     manifest = suite.inputs(ROOT, "helper", helper)
@@ -542,23 +572,37 @@ def edit_checksum(path, old, new):
     path.write_text(source.replace(old, new))
 
 
+def edit_arena_hirsel(path):
+    edit_checksum(path, "helper.checksum_f64(float.sqrt(vbv / vv))",
+                  "Ok(int.wrapping_add(helper.checksum_f64(float.sqrt(vbv / vv))?, 1u32))")
+
+
+def edit_arena_rust(rust):
+    edit_checksum(rust / "src/benchmarks/spectralnorm.rs", "helper::checksum_f64(result_value)",
+                  "helper::checksum_f64(result_value).wrapping_add(1)")
+
+
+def verify_output(command, cwd, env):
+    result = subprocess.run([CAP, *command], env=env, cwd=cwd, capture_output=True)
+    return {"returncode": result.returncode, "stdout": result.stdout.decode(),
+            "stderr": result.stderr.decode()}
+
+
 def compile_rows(board, out, prepared, fixture, tools):
     rust, clbg, hirsel, cargo_build, exe, rust_exe = prepared
     env = build.capped_env(out)
     config = out / "fixture.json"
     shutil.copyfile(fixture, config)
     tasks = receipt.read(config)
-    name, expected = "CLBG::Spectralnorm", 1051192944
+    name, expected = SPECTRALNORM, SPECTRALNORM_CHECKSUM
     task = next(row for row in tasks if row["name"] == name)
     if task["checksum"] != expected:
         raise ValueError(f"{name}: expected the pinned cold checksum {expected}")
     siblings = sibling_cpus(os.sched_getaffinity(0))
     for mode in ("cold", "edit"):
         if mode == "edit":
-            edit_checksum(clbg, "helper.checksum_f64(float.sqrt(vbv / vv))",
-                          "Ok(int.wrapping_add(helper.checksum_f64(float.sqrt(vbv / vv))?, 1u32))")
-            edit_checksum(rust / "src/benchmarks/spectralnorm.rs", "helper::checksum_f64(result_value)",
-                          "helper::checksum_f64(result_value).wrapping_add(1)")
+            edit_arena_hirsel(clbg)
+            edit_arena_rust(rust)
             expected += 1
             task["checksum"] = expected
             config = out / "fixture-edit.json"
@@ -596,13 +640,10 @@ def compile_rows(board, out, prepared, fixture, tools):
                 rebuilt = any(message["reason"] == "compiler-artifact" and message["target"]["name"] == "benchmarks"
                               and message["executable"] and message["fresh"] is False for message in messages)
                 sample["rebuilt_crate"] = bool(rebuilt)
-            verify = subprocess.run([CAP, executable, config.name, name], env=env, cwd=out,
-                                    capture_output=True, text=True)
-            (target / "verification").write_text(verify.stdout + verify.stderr)
-            marker = re.escape(name) + (f" checksum={expected} expected={expected} status=OK" if side == "hirsel"
-                                       else r": OK in [0-9.]+s")
-            sample["verified"] = verify.returncode == 0 and any(
-                re.fullmatch(marker, line) for line in verify.stdout.splitlines())
+            verify = verify_output([executable, config.name, name], out, env)
+            (target / "verification").write_text(verify["stdout"] + verify["stderr"])
+            marker = spectralnorm_marker(side, expected)
+            sample["verified"] = measure.matches_output(verify, marker)
             if not sample["verified"]:
                 sample["status"] = "wrong-result"
             elif sample.get("std_lowered"):
@@ -618,14 +659,243 @@ def compile_rows(board, out, prepared, fixture, tools):
                     "argv": list(map(str, command)),
                     "build_record": record, "image_sha256": record["image_sha256"],
                     "affinity": sorted(os.sched_getaffinity(0)), "marker": marker + "\n",
-                    "stdout": verify.stdout, "sample": sample, **fixture_id, **tools,
+                    "stdout": verify["stdout"], "sample": sample, **fixture_id, **tools,
                 })
         board.row("Compile", label, samples, ("seconds", *COUNTERS))
         if mode == "cold" and not all(sample.get("verified") for sample in samples.values()):
             raise ValueError("cannot measure a warm edit without two verified cold builds")
 
 
-def prepare_checkbox(out, artifacts, env, *, wire_tools=None):
+def arena_editors(out, rust, goose_source):
+    goose_checksum = goose_source.with_name("spectralnorm.goose")
+    return {
+        "hirsel": lambda: edit_arena_hirsel(out / "clbg.hirsel"),
+        "rust": lambda: edit_arena_rust(rust),
+        "goose": lambda: edit_checksum(goose_checksum, "return checksum_f64(result_value);",
+                                       "return checksum_f64(result_value) + 1;"),
+    }
+
+
+def prepare_comparison_compile(out, recipe, args, artifacts, goose, packages, env):
+    out.mkdir()
+    check = recipe == "arena-check"
+    release = recipe.endswith("-release")
+    target = out / "target"
+    commands, images = {}, {}
+    package = "benchmarks"
+    if recipe == "awfy-release":
+        rust = out / "rust"
+        rust.mkdir()
+        build.stage_awfy_rust(args.resid / "bench/v2/t1-awfy/rust", rust / "src")
+        package = "awfy-board"
+        (rust / "Cargo.toml").write_text('[package]\nname = "awfy-board"\nversion = "0.0.0"\nedition = "2021"\n')
+        run(cargo("generate-lockfile", "--offline"), cwd=rust, env=cargo_scope(env))
+        shutil.copytree(build.HERE / "hirsel", out / "hirsel-src")
+        shutil.copytree(build.HERE / "goose", out / "goose-src")
+        manifest = out / "inputs.json"
+        write_json(manifest, build.awfy_manifest((out / "hirsel-src").glob("*.hirsel")))
+        goose_source = out / "goose-src/harness.goose"
+        images["hirsel"] = out / "hirsel-harness"
+        commands["hirsel"] = build.awfy_hirsel_command(artifacts, out, "harness", manifest, images["hirsel"])
+        # Add the same published std/core dependency state as the other release arm.
+        commands["hirsel"] += ["--core-product", packages]
+        edit = {
+            "hirsel": lambda: edit_checksum(out / "hirsel-src/harness.hirsel",
+                                            r'"verified\n"', r'"verified board-edit\n"'),
+            "rust": lambda: edit_checksum(rust / "src/main.rs", 'runtime: {}us", name, us',
+                                          'runtime: {}us board-edit", name, us'),
+            "goose": lambda: edit_checksum(goose_source, r'"verified\n"', r'"verified board-edit\n"'),
+        }
+    else:
+        rust = stage_arena_cargo(out)
+        prepare_hirsel_compile(out, artifacts, env, packages=packages)
+        shutil.copytree(args.goose / "bench/kostya/goose/src", out / "goose-src")
+        goose_source = out / "goose-src/main.goose"
+        _, _, command, _, image, _ = compile_commands(out)
+        if check:
+            command = ["./pinned-compiler", "check", "--inputs", "inputs.json", "--core-product", "packages",
+                       "--store", "store", "--entry", "langarena@1/suite/main", "--json"]
+        elif not release:
+            command[command.index("llvm")] = "cranelift"
+            command.remove("--release")
+        commands["hirsel"] = command
+        images["hirsel"] = None if check else image
+        edit = arena_editors(out, rust, goose_source)
+
+    profile = compile_profile(target) if release else [
+        "--offline", "--locked", "--target-dir", target, "--config", "profile.dev.incremental=true"]
+    operation = "check" if check else "build"
+    if package == "benchmarks":
+        prime_cargo(operation, profile, rust, target, package, env, release=release, jobs=4)
+    else:
+        # AWFY has no dependencies to prime.
+        if target.exists():
+            raise ValueError("AWFY Cargo target must be empty before the cold build")
+    commands["rust"] = cargo(operation, "-j1", "--message-format=json", *profile)
+    images["rust"] = None if check else target / ("release" if release else "debug") / package
+    images["goose"] = None if check else out / ("goose-harness" if package == "awfy-board" else "goose")
+    goose_env = env | {"GOOSE_HOME": str(out / "goose-home")}
+    if check:
+        commands["goose"] = [goose, "check", "--stats", goose_source]
+    elif release:
+        cflags = build.AWFY_GOOSE_CFLAGS if package == "awfy-board" else ()
+        stages = build.goose_release_commands(goose, goose_source, images["goose"], cflags)
+        commands["goose"] = ["sh", "-ec", " && ".join(shlex.join(map(str, command)) for command in stages)]
+    else:
+        commands["goose"] = [goose, "build", "-O0", "--debug", "--standalone",
+                             "--cc", build.llvm_path() / "bin/clang", "-o", images["goose"], goose_source]
+    plan = {
+        side: (commands[side], rust if side == "rust" else out, images[side],
+               cargo_scope(env) if side == "rust" else goose_env if side == "goose" else env, edit[side])
+        for side in measure.SIDES
+    }
+    return plan, package
+
+
+def hirsel_build_evidence(path, check, manifest, image, cwd):
+    report = json.loads(path.read_text())
+    ok = (report["accepted"] is True and report["stopped"] is None
+          and not any(report[key] for key in ("diagnostics", "incomplete", "resources")))
+    if check:
+        own_sources = manifest["packages"][-1]["sources"]
+        correct_files = (report["files"] == len(own_sources) and report["source_bytes"] ==
+                         sum(Path(source["file"]).stat().st_size for source in own_sources))
+        return {"rebuilt": ok and correct_files and report["rechecked"] > 0,
+                "front_only": report["native"] is None,
+                "rechecked_bodies": report["rechecked"], "source_files": report["files"],
+                "expected_source_files": len(own_sources), "source_bytes": report["source_bytes"],
+                "check_root": report["root"]}
+    native = report["native"] or {}
+    return {
+        "rebuilt": (ok and native.get("linked") is True and native.get("compiled", 0) > 0
+                    and (cwd / native["executable"]).resolve() == image.resolve() and image.is_file()),
+        "compiled_parts": native.get("compiled"),
+        "release_std_lowered": native.get("reach", {}).get("std_lowered"),
+    }
+
+
+def cargo_build_evidence(path, package, check, image):
+    messages = [json.loads(line) for line in path.read_text().splitlines()]
+    artifacts = [line for line in messages if line["reason"] == "compiler-artifact"]
+    own = [line for line in artifacts if line["target"]["name"] == package and "bin" in line["target"]["kind"]]
+    dependency_work = [line["target"]["name"] for line in artifacts if line not in own and not line["fresh"]]
+    rebuilt = len(own) == 1 and own[0]["fresh"] is False and any(
+        line["reason"] == "build-finished" and line["success"] is True for line in messages)
+    if check:
+        metadata = rebuilt and own[0]["executable"] is None and any(
+            filename.endswith(".rmeta") and Path(filename).is_file() for filename in own[0]["filenames"])
+        return {"rebuilt": bool(metadata), "front_only": bool(metadata), "dependency_work": dependency_work}
+    return {"rebuilt": rebuilt and own[0]["executable"] == str(image) and image.is_file(),
+            "dependency_work": dependency_work}
+
+
+def goose_build_evidence(target, check, image):
+    if not check:
+        return {"rebuilt": image.is_file() and os.access(image, os.X_OK)}
+    output = (target / "stdout").read_text() + "\n" + (target / "stderr").read_text()
+    files = re.search(r"^parsed ok: \d+ top-level declarations, (\d+) file\(s\)$", output, re.M)
+    verified = files is not None and int(files[1]) > 1 and re.search(r"^typechecked ok: ", output, re.M)
+    return {"rebuilt": bool(verified), "front_only": bool(verified),
+            "source_files": int(files[1]) if files else None}
+
+
+def compile_verification(out, recipe, side, image, mode, args, env):
+    if recipe == "awfy-release":
+        return {name: verify_output([image, *commands[side][0][1:]], out, env)
+                for name, commands in measure.runtime_cases("awfy", out, args.awfy)}
+    checksum = SPECTRALNORM_CHECKSUM + (mode == "edit")
+    config = out / f"fixture-{mode}.json"
+    if not config.exists():
+        task, = [row for row in receipt.read(args.langarena / "run.js") if row["name"] == SPECTRALNORM]
+        write_json(config, [dict(task, iterations=1, warmup_iterations=0, checksum=checksum)])
+    result = verify_output([image, config.name, SPECTRALNORM], out, env)
+    return {SPECTRALNORM: result | {"expected_checksum": checksum}}
+
+
+def native_objects(package_store):
+    # The installed image keeps each newly emitted library object in its native store.
+    objects = set()
+    for directory in package_store.resolve().rglob("native"):
+        for path in directory.iterdir():
+            if path.is_file() and re.fullmatch(r"[0-9a-f]{64}", path.name):
+                with path.open("rb") as binary:
+                    header = binary.read(18)
+                if header[:6] == b"\x7fELF\x02\x01" and header[16:18] == b"\x01\0":
+                    objects.add(path)
+    return objects
+
+
+def measure_comparison_compile(evidence, out, recipe, prepared, args, modes):
+    plan, package = prepared
+    check = recipe == "arena-check"
+    siblings = sibling_cpus(os.sched_getaffinity(0))
+    manifest = receipt.read(out / "inputs.json")
+    cold, check_root = {}, None
+    for mode in modes:
+        mode_id = f"{recipe}/{mode}"
+        samples = evidence["samples"][mode_id] = {}
+        order = measure.SIDES if mode == "cold" else measure.SIDES[::-1]
+        for side in order:
+            require_comparison_window()
+            command, cwd, image, env, edit = plan[side]
+            env = env | {"HIRSEL_MEMORY_LIMIT": "2G", "HIRSEL_JOBS": "1"}
+            cache = "empty application state" if mode == "cold" else "reuse successful cold application state"
+            if side == "goose":
+                cache = "full recheck" if check else "full rebuild"
+            elif side == "rust":
+                cache += (", dependencies primed" if package == "benchmarks" else ", no dependencies")
+            elif recipe == "arena-dev":
+                cache += ", installed product; Cranelift library and app work included together"
+            meta = {"commit": evidence["commit"], "mode": mode_id, "cache": cache,
+                    "command": list(map(str, command)), "command_line": shlex.join(map(str, command)),
+                    "affinity": sorted(os.sched_getaffinity(0)), "cwd": str(cwd)}
+            if mode == "edit" and not cold.get(side):
+                samples[side] = meta | {"status": "no qualified cold build"}
+                continue
+            try:
+                if mode == "edit":
+                    edit()
+                if image is not None:
+                    image.unlink(missing_ok=True)
+                    if side == "goose":
+                        image.with_suffix(".c").unlink(missing_ok=True)
+                target = out / f"{mode}-{side}"
+                dev_hirsel = side == "hirsel" and recipe == "arena-dev"
+                before = native_objects(out / "packages") if dev_hirsel else set()
+                with smt_activity(siblings, f"{mode_id}/{side}") as busy:
+                    sample = measure.core_measure.sample(command, target, env=env, cycles=True,
+                                                         cwd=cwd, pmu_times=True)
+                sample.update(meta, smt_busy_percent=busy)
+                if dev_hirsel:
+                    sample["cranelift_library_objects_written"] = len(native_objects(out / "packages") - before)
+                samples[side] = sample
+                if sample["status"] not in ("ok", "missing-counter"):
+                    continue
+                if side == "hirsel":
+                    sample.update(hirsel_build_evidence(target / "stdout", check, manifest, image, cwd))
+                    if recipe.endswith("-release") and sample["release_std_lowered"] != 0:
+                        sample["status"] = "release std was not prebuilt"
+                    if check:
+                        if mode == "cold":
+                            check_root = sample["check_root"]
+                        elif sample["check_root"] == check_root:
+                            sample["status"] = "check root did not change after the edit"
+                elif side == "rust":
+                    sample.update(cargo_build_evidence(target / "stdout", package, check, image))
+                    if sample["dependency_work"]:
+                        sample["status"] = "Cargo dependencies were not fully primed"
+                else:
+                    sample.update(goose_build_evidence(target, check, image))
+                if not check and sample["rebuilt"]:
+                    sample["verification"] = compile_verification(out, recipe, side, image, mode, args, env)
+                if mode == "cold":
+                    cold[side] = (sample["status"] in ("ok", "missing-counter")
+                                  and comparison.compile_oracle(sample, side, recipe, mode))
+            except (OSError, ValueError, KeyError, RuntimeError, subprocess.SubprocessError) as error:
+                samples[side] = samples.get(side, meta) | {"status": str(error)}
+
+
+def prepare_checkbox(out, artifacts, env, *, wire_tools=None, jobs=2):
     checkbox = load("checkbox_run", ROOT / "core/programs/checkbox/run.py")
     out.mkdir()
     web = out / "web"
@@ -653,7 +923,7 @@ await writeFile(process.argv[2], Frame.encode({tag:"Hello", values:[{tag:"None"}
 ''', web, wants], env=env)
     if wire_tools is None:
         target = out / "wire-target"
-        run(cargo("build", "--release", "--locked", "-j2", "--target-dir", target),
+        run(cargo("build", "--release", "--locked", f"-j{jobs}", "--target-dir", target),
             cwd=ROOT / "bench/wire", env=cargo_scope(env))
         wire_tools = target / "release"
     return checkbox, executable, address, wants, wire_tools
@@ -709,15 +979,18 @@ def private_server(command, address, out, env, cpu):
                         pass
 
 
-def checkbox_rows(board, out, prepared, server_cpu, loader_cpu):
+def checkbox_rows(board, out, prepared, server_cpu, loader_cpu, *, extended=False):
     checkbox, executable, address, wants, tools = prepared
     env = build.capped_env(out)
     overrides = ["--per-ip-sessions", "20000", "--principal-rate", "1000000000"]
     siblings = sibling_cpus((server_cpu, loader_cpu))
     clients, toggles = CHECKBOX_CLIENTS, 200
-    for index, (mode, metric) in enumerate(CHECKBOX_METRICS.items()):
+    modes = ((mode, CHECKBOX_METRICS[mode]) for mode in comparison.CHECKBOX_ROWS) if extended else CHECKBOX_METRICS.items()
+    for index, (mode, metric) in enumerate(modes):
         samples = {}
         for side in (("hirsel", "rust") if index % 2 == 0 else ("rust", "hirsel")):
+            if extended:
+                require_comparison_window()
             directory = out / f"{mode}-{side}"
             directory.mkdir()
             if side == "hirsel":
@@ -748,6 +1021,8 @@ def checkbox_rows(board, out, prepared, server_cpu, loader_cpu):
                     sample = json.loads(result.stdout)
                     valid = result.returncode == 0 and sample["complete"] and sample["connections"] == clients
                     samples[side] = sample | {"status": "ok" if valid else "incomplete-memory"}
+                    if extended:
+                        samples[side]["returncode"] = result.returncode
             except (OSError, ValueError, RuntimeError) as error:
                 samples[side] = {"status": str(error)}
             finally:
@@ -759,12 +1034,12 @@ def checkbox_rows(board, out, prepared, server_cpu, loader_cpu):
         board.row("Checkbox", f"{mode}, {clients} clients", samples, (metric,))
 
 
-def prepare_arena(out, args, compiler, artifacts, env):
+def prepare_arena(out, args, compiler, artifacts, env, *, jobs=2):
     out.mkdir()
     rust = args.langarena / "rust"
     target = out / "rust-target"
     fetch(rust, env)
-    run(cargo("build", "--release", "--locked", "--offline", "-j2", "--target-dir", target),
+    run(cargo("build", "--release", "--locked", "--offline", f"-j{jobs}", "--target-dir", target),
         cwd=rust, env=cargo_scope(env))
     shutil.copy2(target / "release/benchmarks", out / "rust")
     build.goose_executable(compiler, args.goose / "bench/kostya/goose/src/main.goose", out / "goose", env)
@@ -777,50 +1052,77 @@ def prepare_arena(out, args, compiler, artifacts, env):
     return rows
 
 
-def run_board(board, args):
-    out = board.out
-    board.report["commit"] = git(ROOT, "rev-parse", "HEAD")
+def required_peers(selected):
+    peers = set()
+    if selected & {"runtime-memory", "compile", "image-size"}:
+        peers.update(("awfy", "resid", "goose"))
+    if selected & {"runtime-memory", "compile", "check"}:
+        peers.update(("langarena", "goose"))
+    return peers
+
+
+def validate_sources(args, selected):
     if git(ROOT, "status", "--porcelain"):
         raise ValueError("run the board from a clean Hirsel checkout")
+    peers = required_peers(selected)
     for name, commit in PINS.items():
+        if name not in peers:
+            continue
         checkout = getattr(args, name)
         if git(checkout, "rev-parse", "HEAD") != commit or git(checkout, "status", "--porcelain", "--untracked-files=no"):
             raise ValueError(f"{checkout} must have unmodified tracked sources at {commit}")
 
-    env = build.capped_env(out, "8G", "2")
-    artifact_file = out / "toolchain.json"
+
+def prepare_toolchain(artifact_file, env, *, jobs):
     run([sys.executable, ROOT / "tools/buck2/prepare.py"], env=env)
     with artifact_file.open("wb") as stdout:
-        run([sys.executable, ROOT / "core/tools/measurement_artifacts.py", "--threads", "2"],
+        run([sys.executable, ROOT / "core/tools/measurement_artifacts.py", "--threads", str(jobs)],
             env=env, stdout=stdout)
     artifacts = json.loads(artifact_file.read_text())
-    tools = receipt.release_tools(artifacts)
-    board.report["toolchain"] = artifacts
+    return artifacts, receipt.release_tools(artifacts)
+
+
+def compiler_versions():
     versions = {"awfy_rustc": ["rustc"], "cargo_rustc": ["rustc", "+1.99.0"],
                 "cargo": cargo(), "hirsel_clang": [build.llvm_path() / "bin/clang"],
                 "goose_clang": ["clang"], "perf": ["perf"]}
-    board.report["compiler_versions"] = {
+    return {
         tool: subprocess.check_output([*command, "--version"], text=True).splitlines()[0]
         for tool, command in versions.items()
     }
+
+
+def prepare_goose(out, args, env, *, jobs):
     goose_dir = out / "goose-build"
     run(["cmake", "-S", args.goose, "-B", goose_dir, "-DCMAKE_BUILD_TYPE=Release"], env=env)
-    run(["cmake", "--build", goose_dir, "--parallel", "2", "--target", "goose"], env=env)
-    goose = goose_dir / "goose"
+    run(["cmake", "--build", goose_dir, "--parallel", str(jobs), "--target", "goose"], env=env)
+    return goose_dir / "goose"
 
-    awfy = out / "awfy"
-    awfy.mkdir()
-    settings = argparse.Namespace(out=awfy, artifacts=artifact_file, upstream=args.awfy, goose=goose,
+
+def prepare_awfy(out, args, goose, artifact_file, env, *, matched):
+    out.mkdir()
+    entries = ("harness", "pools", "pool_index") if matched else ("harness",)
+    settings = argparse.Namespace(out=out, artifacts=artifact_file, upstream=args.awfy, goose=goose,
                                   rust=args.resid / "bench/v2/t1-awfy/rust", env=env, hello=False,
-                                  hirsel_entries=("harness", "pools", "pool_index"),
-                                  goose_entries=("harness", "pools", "pool_index"))
+                                  hirsel_entries=entries, goose_entries=entries)
+    for builder in (build.rust, build.goose, build.hirsel):
+        builder(settings, matched=matched)
+    return out
 
-    def build_awfy():
-        for builder in (build.rust, build.goose, build.hirsel):
-            builder(settings, matched=True)
-        return awfy
 
-    awfy_ready = board.attempt("AWFY build", build_awfy)
+def run_board(board, args):
+    out = board.out
+    board.report["commit"] = git(ROOT, "rev-parse", "HEAD")
+    validate_sources(args, {"runtime-memory"})
+    env = build.capped_env(out, "8G", "2")
+    artifact_file = out / "toolchain.json"
+    artifacts, tools = prepare_toolchain(artifact_file, env, jobs=2)
+    board.report["toolchain"] = artifacts
+    board.report["compiler_versions"] = compiler_versions()
+    goose = prepare_goose(out, args, env, jobs=2)
+    awfy = out / "awfy"
+    awfy_ready = board.attempt("AWFY build", lambda: prepare_awfy(
+        awfy, args, goose, artifact_file, env, matched=True))
     arena_dir = out / "arena"
     arena_rows = board.attempt("LangArena build", prepare_arena, arena_dir, args, goose, artifacts, env)
     compile_dir = out / "compile"
@@ -851,6 +1153,214 @@ def run_board(board, args):
             os.sched_setaffinity(0, args.measure_cpus[:2])
             board.attempt("Checkbox measurement", checkbox_rows, board, checkbox_dir, checkbox_ready,
                           *args.measure_cpus[:2])
+
+
+def require_comparison_window():
+    local = datetime.now().time()
+    if time_of_day(2, 45) <= local < time_of_day(4):
+        raise ValueError("measurement embargo 02:45–04:00 local time")
+
+
+def attempt_comparison(evidence, label, operation, *args, **kwargs):
+    try:
+        return operation(*args, **kwargs)
+    except (OSError, ValueError, RuntimeError, KeyError, TypeError, subprocess.SubprocessError) as error:
+        print(f"{label}: {error}", file=sys.stderr, flush=True)
+        evidence["failures"][label] = str(error)
+
+
+def anchor_present(commit, anchor):
+    return subprocess.run(["git", "merge-base", "--is-ancestor", anchor, commit], cwd=ROOT,
+                          check=False).returncode == 0
+
+
+def tag_samples(samples, commit, mode):
+    return {side: sample | {"commit": commit, "mode": mode} for side, sample in samples.items()}
+
+
+def record_comparison_runtime(evidence, rows):
+    for row in rows:
+        if row["goal"] in comparison.RUNTIME_SUITES:
+            evidence["runtime"][f"{row['goal']}/{row['row']}"] = tag_samples(
+                row["samples"], row["commit"], "runtime")
+
+
+def record_comparison_size(evidence, awfy, upstream, verified):
+    result = (measure.size_board(awfy, upstream) if verified is None
+              else measure.verified_sizes(awfy, sorted(verified)))
+    evidence["size"] = {key: result[key] for key in ("strip_version", "strip_flags", "verified_workloads")}
+    evidence["size"]["verified_workloads"].sort()
+    evidence["size"]["anchor_present"] = anchor_present(evidence["commit"], "97ad0db8")
+    evidence["samples"]["size"] = tag_samples(
+        {side: {"status": "ok", **image} for side, image in result["images"].items()},
+        evidence["commit"], "stripped")
+
+
+def collect_units(evidence, out, args):
+    if "units" not in evidence["families"]:
+        return
+    producer = ROOT / "bench/units/fair.py"
+    if args.units_receipt:
+        evidence["units"] = {"path": str(args.units_receipt), "source": "imported"}
+    elif not producer.is_file():
+        evidence["units"] = {"reason": "bench/units/fair.py is absent at this revision"}
+        return
+    elif os.environ.get("HIRSEL_BOARD_UNITS_AUTHORIZED") != "1":
+        evidence["units"] = {"reason": "owner-qualified CPU allocation and 2 GiB scopes were not authorized"}
+        return
+    else:
+        require_comparison_window()
+        destination = out / "units"
+        command = ["taskset", "-c", "26-27", sys.executable, producer, "--full", "--cells", "a1,regimes",
+                   "--out", destination, "--deadline-seconds", str(args.units_deadline_seconds)]
+        with (out / "units.log").open("wb") as log:
+            result = subprocess.run(command, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT)
+        evidence["units"] = {
+            "path": str(destination / "fair.json"), "source": "invoked", "exit_status": result.returncode,
+            "command": list(map(str, command)), "log": str(out / "units.log"),
+        }
+    path = Path(evidence["units"]["path"])
+    if path.is_file():
+        evidence["units"]["sha256"] = build.sha256(path)
+
+
+def comparison_report(evidence):
+    units_rows = []
+    if "units" in evidence["families"]:
+        units = evidence.get("units", {})
+        try:
+            if "path" not in units:
+                raise ValueError(units.get("reason", "owner export collection did not complete"))
+            if units.get("exit_status", 0) != 0:
+                raise ValueError(f"owner producer exited {units['exit_status']}")
+            path = Path(units["path"])
+            if build.sha256(path) != units["sha256"]:
+                raise ValueError("owner export changed since collection")
+            units_rows = comparison_units.import_rows(path, evidence["commit"])
+            units = units | {"status": ("qualified" if all(row["status"] == "ok" for row in units_rows)
+                                        else "incomplete")}
+        except (OSError, ValueError, KeyError, TypeError, ArithmeticError) as error:
+            reason = str(error)
+            status = "incomplete" if units.get("source") == "imported" else "pending"
+            units = units | {"status": status, "reason": reason}
+            units_rows = [comparison_units.missing_row(key, reason, status=status)
+                          for key in comparison_units.expected(tmpfs_matched=True)]
+        evidence = evidence | {"units": units}
+    return comparison.summary(evidence, units_rows)
+
+
+def save_comparison(out, evidence):
+    report = comparison_report(evidence)
+    write_json(out / "comparison.json", report)
+    (out / "comparison.md").write_text(comparison.markdown(report))
+    return report
+
+
+def run_comparison(out, args):
+    families = args.comparison_family or comparison.FAMILIES
+    commit = git(ROOT, "rev-parse", "HEAD")
+    evidence = {
+        "version": comparison.VERSION, "commit": commit, "families": families, "pins": PINS,
+        "build_cpus": sorted(args.build_cpus), "measure_cpus": args.measure_cpus,
+        "build_jobs": 4, "build_memory_limit_bytes": 8 << 30, "measurement_memory_limit_bytes": 2 << 30,
+        "runtime": {}, "samples": {}, "failures": {}, "command": list(sys.argv),
+        "started": datetime.now().astimezone().isoformat(),
+    }
+    selected = set(families)
+    try:
+        validate_sources(args, selected)
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        evidence["failures"]["Input verification"] = str(error)
+    else:
+        if selected - {"units"}:
+            attempt_comparison(evidence, "Board measurement", measure_comparison_board, evidence, out, args, selected)
+        # The owner has separate CPU admission and takes both locks itself.
+        attempt_comparison(evidence, "Units collection", collect_units, evidence, out, args)
+    evidence["finished"] = datetime.now().astimezone().isoformat()
+    report = save_comparison(out, evidence)
+    print(out / "comparison.md", flush=True)
+    return 0 if report["selection_complete"] else 1
+
+
+def measure_comparison_board(evidence, out, args, selected):
+    require_comparison_window()
+    # Keep the Cargo shim in the board's process-tree scope.
+    env = build.capped_env(out, "8G", "4") | {"KILN_CARGO_SCOPE": "hirsel-board"}
+    artifact_file = out / "toolchain.json"
+    artifacts, tools = prepare_toolchain(artifact_file, env, jobs=4)
+    evidence["toolchain"] = artifacts
+    needs_peers = bool(selected - {"units", "checkbox"})
+    goose = prepare_goose(out, args, env, jobs=4) if needs_peers else None
+    if needs_peers:
+        evidence["compiler_versions"] = compiler_versions()
+    runtime = "runtime-memory" in selected
+    size = "image-size" in selected
+    awfy_dir, arena_dir, checkbox_dir = (out / name for name in ("awfy", "arena", "checkbox"))
+    board = Board(out, evidence["commit"], persist=False)
+    awfy = attempt_comparison(evidence, "AWFY build", prepare_awfy, awfy_dir, args, goose,
+                              artifact_file, env, matched=runtime) if runtime or size else None
+    arena_ready = attempt_comparison(evidence, "LangArena build", prepare_arena,
+                                     arena_dir, args, goose, artifacts, env, jobs=4) if runtime else None
+    checkbox = attempt_comparison(evidence, "Checkbox build", prepare_checkbox,
+                                  checkbox_dir, artifacts, env, jobs=4) if "checkbox" in selected else None
+    if "checkbox" in selected:
+        evidence["checkbox_anchor_present"] = anchor_present(evidence["commit"], "83faae1e")
+    recipes = {}
+    for family in comparison.BUILD_ROWS:
+        if family in selected:
+            for _, _, recipe, mode in comparison.BUILD_ROWS[family]:
+                recipes.setdefault(recipe, []).append(mode)
+    compiled = {}
+    if recipes:
+        deps = out / "compile-dependencies"
+        deps.mkdir()
+        attempt_comparison(evidence, "Publish compile products", publish_std, deps, artifacts, env)
+        if "Publish compile products" not in evidence["failures"]:
+            for recipe in recipes:
+                compiled[recipe] = attempt_comparison(
+                    evidence, f"{recipe} preparation", prepare_comparison_compile,
+                    out / recipe, recipe, args, artifacts, goose, deps / "packages", env)
+    with comparison_measurement_hold(args, evidence):
+        verified = None
+        if awfy and runtime:
+            verified = attempt_comparison(evidence, "AWFY original", runtime_rows, board, "awfy", awfy_dir,
+                                          args.awfy, tools, extended=True)
+            attempt_comparison(evidence, "AWFY pool/index", runtime_rows, board, "pool", awfy_dir,
+                               args.awfy, tools, extended=True)
+        if arena_ready:
+            attempt_comparison(evidence, "LangArena runtime", runtime_rows, board, "arena", arena_dir,
+                               None, tools, config=arena_dir / "run.js", extended=True)
+        record_comparison_runtime(evidence, board.report["rows"])
+        if awfy and size and (not runtime or sorted(verified or []) == sorted(EXPECTED["AWFY original"])):
+            attempt_comparison(evidence, "Image size", record_comparison_size,
+                               evidence, awfy_dir, args.awfy, verified)
+        for recipe, prepared in compiled.items():
+            if prepared:
+                attempt_comparison(evidence, f"{recipe} measurement", measure_comparison_compile,
+                                   evidence, out / recipe, recipe, prepared, args, recipes[recipe])
+        if checkbox:
+            os.sched_setaffinity(0, args.measure_cpus[:2])
+            attempt_comparison(evidence, "Checkbox memory", checkbox_rows, board, checkbox_dir, checkbox,
+                               *args.measure_cpus[:2], extended=True)
+            for row in board.report["rows"]:
+                if row["goal"] == "Checkbox":
+                    mode = row["row"].split(",")[0]
+                    evidence["samples"][mode] = tag_samples(row["samples"], row["commit"], mode)
+    evidence["failures"].update(board.report["failures"])
+
+
+@contextmanager
+def comparison_measurement_hold(args, evidence):
+    with measurement_slot(LOCK.with_name("hirsel-mc-regimes.lock")), measurement_slot(args.lock):
+        require_comparison_window()
+        evidence["hold"] = {"started": datetime.now().astimezone().isoformat(),
+                            "locks": [str(LOCK.with_name("hirsel-mc-regimes.lock")), str(args.lock)]}
+        os.sched_setaffinity(0, {args.measure_cpus[0]})
+        try:
+            yield
+        finally:
+            os.sched_setaffinity(0, args.build_cpus)
+            evidence["hold"]["finished"] = datetime.now().astimezone().isoformat()
 
 
 def validate_baseline(path, report):
@@ -894,6 +1404,25 @@ def rebaseline(run):
 
 
 def main():
+    if sys.argv[1:2] == ["render-comparison"]:
+        parser = argparse.ArgumentParser(prog=f"{sys.argv[0]} render-comparison",
+                                         description="Validate and render a comparison evidence directory")
+        parser.add_argument("run", type=Path)
+        parser.add_argument("--revision", help="require this exact candidate commit")
+        args = parser.parse_args(sys.argv[2:])
+        try:
+            evidence = receipt.read(args.run / "comparison.json")
+            if not re.fullmatch(r"[0-9a-f]{40}", evidence["commit"]) or (
+                    args.revision and evidence["commit"] != args.revision):
+                raise ValueError("comparison revision mismatch")
+            if evidence["pins"] != PINS:
+                raise ValueError("comparison peer pins mismatch")
+            report = comparison_report(evidence)
+            print(comparison.markdown(report), end="")
+            return 0 if report["selection_complete"] else 1
+        except (*receipt.INVALID_RECEIPT, ArithmeticError) as error:
+            print(f"comparison refused: {error}", file=sys.stderr)
+            return receipt.REFUSED
     if sys.argv[1:2] == ["rebaseline"]:
         parser = argparse.ArgumentParser(prog=f"{sys.argv[0]} rebaseline",
                                          description="Promote a complete, clean board and clear a promotion hold")
@@ -910,17 +1439,47 @@ def main():
     parser.add_argument("--baseline", type=lambda path: Path(path).resolve(),
                         help="prior complete board.json for instruction, size and checkbox gates")
     for name in PINS:
-        parser.add_argument(f"--{name}", type=lambda path: Path(path).resolve(), required=True,
+        parser.add_argument(f"--{name}", type=lambda path: Path(path).resolve(),
                             help=f"clean checkout at {PINS[name]}")
+    parser.add_argument("--comparison", action="store_true", help="run the extended comparison board")
+    parser.add_argument("--comparison-family", action="append", choices=comparison.FAMILIES,
+                        help="measure a selected family; repeat to select several")
+    parser.add_argument("--units-receipt", type=lambda path: Path(path).resolve(),
+                        help="use a qualified same-revision fair.json")
+    parser.add_argument("--units-deadline-seconds", type=int, help="owner producer measurement budget")
     add_cpu_sets(parser)
     parser.add_argument("--lock", type=Path, default=LOCK)
     args = parser.parse_args()
     validate_cpu_sets(parser, args, width=2)
+    families = args.comparison_family or comparison.FAMILIES
+    peers = required_peers(set(families)) if args.comparison else set(PINS)
+    for peer in PINS:
+        if peer in peers and getattr(args, peer) is None:
+            parser.error(f"--{peer} is required for these rows")
+    if args.comparison:
+        if args.baseline:
+            parser.error("--baseline applies to the nightly board")
+        if len(set(families)) != len(families):
+            parser.error("select each comparison family once")
+        if (args.units_receipt or args.units_deadline_seconds is not None) and "units" not in families:
+            parser.error("units options require the units family")
+        if args.units_deadline_seconds is not None and args.units_deadline_seconds < 1:
+            parser.error("--units-deadline-seconds must be positive")
+        if (set(args.build_cpus) != set(range(8, 12)) or set(args.measure_cpus) != set(range(16, 20))):
+            parser.error("comparison uses build CPUs 8-11 and measurement CPUs 16-19")
+        if args.lock.resolve() != LOCK.resolve():
+            parser.error("comparison requires the shared hirsel-board.lock")
+        if args.units_deadline_seconds is None:
+            args.units_deadline_seconds = 14400
+    elif args.comparison_family or args.units_receipt or args.units_deadline_seconds is not None:
+        parser.error("comparison options require --comparison")
     os.sched_setaffinity(0, args.build_cpus)
     out = args.out.resolve()
     if out.is_relative_to(ROOT):
         parser.error("use a new evidence directory outside the checkout")
     out.mkdir(parents=True)
+    if args.comparison:
+        return run_comparison(out, args)
     board = Board(out, None)
     board.save()
     board.attempt("Board", run_board, board, args)

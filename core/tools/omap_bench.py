@@ -109,46 +109,55 @@ def measure(argv, directory, env, tag, expected, recording=False, host_directory
 
     The target reports its own monotonic operation duration. The post-DONE gate
     pins roots until both counters and VmHWM have been read, excluding final drops.
+    With events=None, run only the gate protocol for an instrumented target.
     """
     work = directory / tag
     work.mkdir()
     host = host_directory or directory / 'host'
     host.mkdir(exist_ok=True)
-    for path in [host / 'gate', work / 'control', work / 'ack']:
+    use_perf = recording or events is not None
+    paths = [host / 'gate']
+    if use_perf:
+        paths.extend([work / 'control', work / 'ack'])
+    for path in paths:
         path.unlink(missing_ok=True)
         os.mkfifo(path)
     gate = os.open(host / 'gate', os.O_RDWR)
-    controls = [os.open(work / name, os.O_RDWR | os.O_NONBLOCK) for name in ['control', 'ack']]
+    controls = [os.open(path, os.O_RDWR | os.O_NONBLOCK) for path in paths[1:]]
     perf = work / ('perf.data' if recording else 'perf.tsv')
-    mode = (['record', '-e', 'instructions:u', '-c', '100000' if 'insert' in tag else '10000',
-             '--call-graph', 'fp'] if recording else ['stat', '-x', '\t', '-e', events])
     wait_load()
     with (work / 'stderr').open('w') as err:
-        command_line = [ROOT / 'tools/capped', 'taskset', '-c', '16', 'perf', *mode,
-                        '-D', '-1', '--control=fifo:' + str(work / 'control') + ',' + str(work / 'ack'),
-                        '-o', perf, '--', sys.executable, Path(__file__).resolve(),
-                        '--exec-child', work / 'pid', *argv]
+        command_line = [ROOT / 'tools/capped', 'taskset', '-c', '16']
+        if use_perf:
+            mode = (['record', '-e', 'instructions:u', '-c', '100000' if 'insert' in tag else '10000',
+                     '--call-graph', 'fp'] if recording else ['stat', '-x', '\t', '-e', events])
+            command_line += ['perf', *mode, '-D', '-1',
+                             '--control=fifo:' + str(work / 'control') + ',' + str(work / 'ack'),
+                             '-o', perf, '--']
+        command_line += [sys.executable, Path(__file__).resolve(), '--exec-child', work / 'pid', *argv]
         process = subprocess.Popen(list(map(str, command_line)), env=env, stdout=subprocess.PIPE,
                                    stderr=err, text=True, bufsize=1)
         ready = process.stdout.readline()
         if ready != 'READY\n':
             raise RuntimeError('target did not become ready: ' + ready + (work / 'stderr').read_text())
         pid = int((work / 'pid').read_text())
-        # Setup may finish at the end of capped's 100 ms CPU quota period.
-        # Both periods pass while the target is gated and counters are off.
-        time.sleep(0.2)
-        start_resident = resident(pid)
-        Path('/proc', str(pid), 'clear_refs').write_text('5\n')
-        counter_command(controls, 'enable')
+        start_resident = None
+        if use_perf:
+            # Setup may finish at the end of capped's 100 ms CPU quota period.
+            # Both periods pass while the target is gated and counters are off.
+            time.sleep(0.2)
+            start_resident = resident(pid)
+            Path('/proc', str(pid), 'clear_refs').write_text('5\n')
+            counter_command(controls, 'enable')
         os.write(gate, b's')
         done = process.stdout.readline()
         match = re.fullmatch(r'DONE (\d+) (\d+)\n', done)
+        peak = None
         if match:
-            counter_command(controls, 'disable')
-            peak = resident(pid)
+            if use_perf:
+                counter_command(controls, 'disable')
+                peak = resident(pid)
             os.write(gate, b'f')
-        else:
-            peak = None
         remainder = process.stdout.read()
         code = process.wait()
     os.close(gate)
@@ -163,10 +172,12 @@ def measure(argv, directory, env, tag, expected, recording=False, host_directory
             counts[cols[2]] = int(cols[0].replace(',', ''))
     instructions = next((int(line.split('\t')[0].replace(',', '')) for line in raw.splitlines()
                          if '\tinstructions:u\t' in line and line.split('\t')[0].replace(',', '').isdigit()), None)
-    ok = code == 0 and match is not None and (expected is None or int(match[1]) == expected) and (recording or instructions is not None)
+    ok = (code == 0 and match is not None and (expected is None or int(match[1]) == expected)
+          and (not use_perf or recording or instructions is not None))
     row = dict(tag=tag, exit=code, complete=ok, instructions=instructions, counts=counts,
-               wall_ns=int(match[2]) if match else None,
-               resident_before_kib=start_resident['VmRSS'], peak_rss_kib=peak['VmHWM'] if peak else None,
+               wall_ns=int(match[2]) if match and use_perf else None,
+               resident_before_kib=start_resident['VmRSS'] if start_resident else None,
+               peak_rss_kib=peak['VmHWM'] if peak else None,
                censored=None if ok else (work / 'stderr').read_text()[-1000:])
     if recording and ok:
         result = subprocess.run(['perf', 'report', '--stdio', '--no-children', '-i', str(perf),

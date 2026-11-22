@@ -282,6 +282,84 @@ fn exercise(budget: u64, count: u64) -> u64 {
     }
 }
 
+// A zero fill of at least ZERO_FILL_MIN bytes goes to rt.zero_bytes, which may
+// leave never-backed pages alone. Storage that held other values must still
+// read back as zeros, and the bytes before `at` and past the fill are kept:
+// a skipped written page, a span measured from the block instead of `at`, or a
+// count taken as bytes leaves 0xAB words or a lost prefix here. The expected
+// value is the spec's: fill appends n copies after the existing elements, so
+// every element matches and the length is prefix + count.
+#[test]
+fn large_zero_fills_overwrite_written_storage() {
+    let source = r#"
+fn words(n: u64, prefix: u64) -> u64 {
+    let mut xs: List[u64] = list.with_capacity(n)
+    list.fill(mut xs, n, 0xABABABABABABABAB)
+    list.clear(mut xs)
+    list.fill(mut xs, prefix, 7)
+    list.fill(mut xs, n - prefix - 1, 0)
+    let mut bad: u64 = 0
+    for i in 0u64 .. list.len(xs) {
+        let want: u64 = if i < prefix { 7 } else { 0 }
+        if xs[i] != want { bad += 1 }
+    }
+    bad * 1000000 + list.len(xs)
+}
+fn octets(n: u64, prefix: u64) -> u64 {
+    let mut b: Bytes = list.with_capacity(n)
+    list.fill(mut b, n, 0xAB)
+    list.clear(mut b)
+    list.fill(mut b, prefix, 7)
+    list.fill(mut b, n - prefix - 2, 0)
+    let mut bad: u64 = 0
+    for i in 0u64 .. list.len(b) {
+        let want: u8 = if i < prefix { 7 } else { 0 }
+        if b[i] != want { bad += 1 }
+    }
+    bad * 1000000 + list.len(b)
+}
+fn fresh(n: u64) -> u64 {
+    let mut xs: List[u64] = list.with_capacity(n)
+    list.fill(mut xs, n, 0)
+    let mut bad: u64 = 0
+    for i in 0u64 .. list.len(xs) {
+        if xs[i] != 0 { bad += 1 }
+    }
+    bad * 1000000 + list.len(xs)
+}
+"#;
+    let (program, names) = hirsel_core_program_tests::SourceProgram::lower(source, None);
+    // 32768 words are 256 KiB, 200003 bytes end inside a page, and each
+    // prefix starts the fill inside the first page.
+    let inputs = [
+        ("words", vec![32768, 3], 32767),
+        ("octets", vec![200003, 5], 200001),
+        ("fresh", vec![32768], 32768),
+    ];
+    let cases = inputs.clone().map(|(name, args, _)| Case {
+        function: names[name],
+        args,
+        limit: 4 << 20,
+        injection: None,
+    });
+    let expected = inputs.map(|(_, _, value)| eval::Outcome::Returned(vec![value]));
+    for (case, outcome) in cases.iter().zip(&expected) {
+        assert_eq!(
+            eval::run(&program, case.function, &case.args, case.limit).outcome,
+            *outcome
+        );
+    }
+    let functions = cases.each_ref().map(|case| case.function);
+    let cranelift = program.cranelift_object("x86_64-unknown-linux-gnu", false, false, false);
+    let llvm = program.llvm_program(Target::X86_64Linux, false, false, &functions);
+    for (mode, object) in [(Optimization::None, cranelift), (Optimization::Speed, llvm)] {
+        let reports = execute_object(&program, &cases, "", "", mode, Some(object));
+        for (report, outcome) in reports.into_iter().zip(&expected) {
+            assert_eq!(&report.outcome, outcome);
+        }
+    }
+}
+
 #[test]
 fn counted_list_fill_slices_use_memset_after_the_range_check() {
     let source = r#"

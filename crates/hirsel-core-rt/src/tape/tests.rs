@@ -2166,6 +2166,116 @@ fn exec_close_rows_diverge_and_impossible_spawn_issues_no_handles() {
 }
 
 #[test]
+fn unix_tape_replays_hand_encoded_stream_and_connected_datagram_rows() {
+    // The Net grant is ordinal 1. Each creation consumes the next ordinal.
+    // Root and path have varint lengths, backlog is little-endian u16, and
+    // Never contributes one zero byte before the send's length and payload.
+    let rows: &[(u8, u64, &[u8], u64)] = &[
+        (UNIX_LISTEN, 1, b"\x01r\x04sock\x34\x12", 2),
+        (UNIX_CONNECT, 1, b"\x01r\x04sock\x00", 3),
+        (UNIX_ACCEPT, 2, b"\x00", 4),
+        (DATAGRAM_OPEN, 1, b"", 5),
+        (DATAGRAM_CONNECT, 5, b"\x01r\x04sock", 0),
+        (DATAGRAM_SEND, 5, b"\x00\x03abc", 0),
+    ];
+    let h = header(REVISION);
+    let mut encoder = Encoder::default();
+    let mut data = encoder
+        .frame(&Frame::Grant {
+            gap: 0,
+            kind: crate::entry::NET,
+            args: None,
+        })
+        .0;
+    for &(op, object, args, value) in rows {
+        data.extend(
+            encoder
+                .frame(&Frame::Op {
+                    task: 0,
+                    op,
+                    object,
+                    args: Args::Literal(args.to_vec()),
+                    out: Out {
+                        value,
+                        ..Out::default()
+                    },
+                })
+                .0,
+        );
+    }
+    data.extend(
+        encoder
+            .frame(&Frame::End {
+                gap: 2,
+                ending: ending(),
+            })
+            .0,
+    );
+    let tape_bytes = [
+        block(&h.tape_id, 0, 0, &h.encode(REVISION).unwrap()),
+        block(&h.tape_id, END, 1, &data),
+    ]
+    .concat();
+    let mut store = Store::with(&tape_bytes);
+    let no_host = Counted::new(None);
+    let mut context = crate::Context::new(1000);
+    let mut local = hirsel_core_net::Sockets::default();
+    let mut unix = crate::unix_net::UnixRequest {
+        os: &crate::os_unix::OPERATIONS,
+        root: "r",
+        path: "sock",
+        backlog: 0x1234,
+        authorized: true,
+        until: None,
+        sockets: &raw mut local,
+        connecting: None,
+        target: None,
+        retry: None,
+    };
+    // SAFETY: the store, provider state and request carriers outlive each call.
+    unsafe {
+        let (tape, _) =
+            Tape::open(REVISION, store.dir(), b"t", Mode::Replay, &h, &expect()).unwrap();
+        let (provider, net) = tape
+            .on_tape(crate::entry::NET, (no_host.provider(), 0))
+            .unwrap();
+        for &(op, object, _, value) in rows {
+            let mut bytes = *b"abc";
+            let buffer = if op == DATAGRAM_SEND {
+                Buffer {
+                    data: bytes.as_mut_ptr(),
+                    len: bytes.len(),
+                    capacity: 0,
+                }
+            } else {
+                empty_buffer()
+            };
+            let mut r = request(op, 0, handle_like(net, object), &[], buffer);
+            r.path = (&raw mut unix).cast();
+            let out = hirsel_core_host(&mut context, &provider, &mut r);
+            assert_eq!(
+                (out.status, out.error, out.value),
+                (
+                    0,
+                    IoError::OK,
+                    if value == 0 {
+                        0
+                    } else {
+                        handle_like(net, value)
+                    }
+                ),
+                "op {op}"
+            );
+            if value != 0 {
+                assert!(crate::tape::typed_socket(&provider, out.value));
+            }
+        }
+        assert_eq!(tape.end(&ending()), Ok(()));
+    }
+    assert_eq!(no_host.calls.get(), 0);
+}
+
+#[test]
 fn unix_tape_rejects_impossible_packet_before_appending() {
     let make = |flag, written, payload: &[u8], outcome| {
         let mut bytes = vec![flag];

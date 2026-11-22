@@ -405,6 +405,7 @@ fn neutral_runtime(op: RtOp) -> bool {
             | RtOp::Xxh3Short
             | RtOp::Xxh3Stripes
             | RtOp::Sha1Blocks
+            | RtOp::ZeroBytes
             | RtOp::Sha256Blocks
             | RtOp::Ed25519Verify
             | RtOp::P256Verify

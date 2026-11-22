@@ -7,19 +7,182 @@ use std::path::Path;
 
 use rusqlite::{Connection, params};
 
+use crate::memory::MemoryEvent;
 use crate::profile::{Result, Unsigned};
 
 const MAGIC: &[u8; 8] = b"HIRSOBS1";
 const END: u16 = u16::MAX - 1;
 const LOSS: u16 = u16::MAX;
-pub(crate) const MAPPING: u16 = 12;
+type Task = (u64, u64);
+
+pub(crate) enum RecordKind {
+    Task {
+        task: Task,
+        parent: Task,
+    },
+    State {
+        task: Task,
+        state: &'static str,
+        reason: Option<&'static str>,
+        object: u64,
+    },
+    DispatchBegin {
+        task: Task,
+        worker: i64,
+    },
+    DispatchEnd {
+        task: Task,
+        worker: i64,
+    },
+    Wake {
+        task: Task,
+        source: &'static str,
+        from: Task,
+        object: u64,
+    },
+    HostBegin {
+        task: Task,
+        site: u64,
+    },
+    HostEnd {
+        task: Task,
+        site: u64,
+    },
+    IoBegin {
+        token: u64,
+        task: Task,
+        operation: u8,
+        site: u64,
+    },
+    IoCallback {
+        token: u64,
+        phase: usize,
+        elapsed: u64,
+    },
+    IoPending {
+        token: u64,
+        elapsed: u64,
+    },
+    IoEnd {
+        token: u64,
+        bytes: u64,
+        tag: u8,
+        code: u32,
+        status: u8,
+    },
+    Mapping(Vec<u8>),
+    Memory {
+        event: MemoryEvent,
+        stack: Vec<u8>,
+    },
+    End,
+    Loss(u64),
+}
+
+impl RecordKind {
+    fn decode(kind: u16, words: &[u64], bytes: Vec<u8>) -> Result<Self> {
+        let record = match (kind, words, bytes.is_empty()) {
+            (1, &[unit, task, parent_unit, parent_task], true) => Self::Task {
+                task: (unit, task),
+                parent: (parent_unit, parent_task),
+            },
+            (2, &[unit, task, state, reason, object], true) => {
+                const STATES: &[&str] =
+                    &["ready", "running", "waiting", "flow", "provider", "ended"];
+                const REASONS: &[Option<&str>] = &[
+                    None,
+                    Some("channel_recv"),
+                    Some("channel_send"),
+                    Some("join"),
+                    Some("timer"),
+                    Some("latest"),
+                    Some("provider_io"),
+                    Some("step_slice"),
+                ];
+                Self::State {
+                    task: (unit, task),
+                    state: STATES
+                        .get(usize::try_from(state)?)
+                        .ok_or("invalid observed task state")?,
+                    reason: *REASONS
+                        .get(usize::try_from(reason)?)
+                        .ok_or("invalid observed wait reason")?,
+                    object,
+                }
+            }
+            (3, &[unit, task, worker], true) => Self::DispatchBegin {
+                task: (unit, task),
+                worker: i64::try_from(worker)?,
+            },
+            (4, &[unit, task, worker], true) => Self::DispatchEnd {
+                task: (unit, task),
+                worker: i64::try_from(worker)?,
+            },
+            (5, &[unit, task, source, source_unit, source_task, object], true) => {
+                const SOURCES: &[&str] = &["", "task", "timer", "net", "cancel", "unknown"];
+                Self::Wake {
+                    task: (unit, task),
+                    source: SOURCES
+                        .get(usize::try_from(source)?)
+                        .filter(|s| !s.is_empty())
+                        .ok_or("invalid observed wake source")?,
+                    from: (source_unit, source_task),
+                    object,
+                }
+            }
+            (6, &[unit, task, site], true) => Self::HostBegin {
+                task: (unit, task),
+                site,
+            },
+            (7, &[unit, task, site], true) => Self::HostEnd {
+                task: (unit, task),
+                site,
+            },
+            (8, &[token, unit, task, operation, site], true) => Self::IoBegin {
+                token,
+                task: (unit, task),
+                operation: u8::try_from(operation)?,
+                site,
+            },
+            (9, &[token, phase @ 1..=5, elapsed], true) => Self::IoCallback {
+                token,
+                phase: (phase - 1) as usize,
+                elapsed,
+            },
+            (9, &[_, _, _], true) => return Err("invalid observed callback phase".into()),
+            (10, &[token, elapsed], true) => Self::IoPending { token, elapsed },
+            (11, &[token, bytes, tag, code, status], true) => Self::IoEnd {
+                token,
+                bytes,
+                tag: u8::try_from(tag)?,
+                code: u32::try_from(code)?,
+                status: u8::try_from(status)?,
+            },
+            (12, [], _) => Self::Mapping(bytes),
+            (16..=21, _, _) => Self::Memory {
+                event: MemoryEvent::decode(kind, words)?,
+                stack: bytes,
+            },
+            (END, [], true) => Self::End,
+            (LOSS, &[lost], true) => Self::Loss(lost),
+            (END | LOSS, _, _) => return Err("invalid runtime observation footer".into()),
+            (1..=12, _, _) => {
+                return Err(format!("invalid runtime observation payload for kind {kind}").into());
+            }
+            _ => {
+                return Err(
+                    format!("unassigned runtime observation kind {kind} in HIRSOBS1").into(),
+                );
+            }
+        };
+        Ok(record)
+    }
+}
 
 pub(crate) struct Record {
     pub ts: u64,
     pub tid: u32,
-    pub kind: u16,
-    pub words: Vec<u64>,
-    pub bytes: Vec<u8>,
+    pub kind: RecordKind,
 }
 
 pub(crate) struct Observation {
@@ -51,44 +214,42 @@ impl Observation {
             let kind = u16::from_le_bytes(header[12..14].try_into()?);
             let words = usize::from(u16::from_le_bytes(header[14..16].try_into()?));
             let bytes = u32::from_le_bytes(header[16..20].try_into()?) as usize;
-            if (0..=12).contains(&kind) && kind != MAPPING && bytes != 0
-                || words * 8 + bytes > 64 * 1024 - header.len()
-            {
+            if (0..12).contains(&kind) && bytes != 0 {
                 return Err("invalid runtime observation record length".into());
             }
-            let mut data = vec![0; words * 8 + bytes];
+            let word_bytes = words * 8;
+            let size = word_bytes
+                .checked_add(bytes)
+                .filter(|&size| size <= 64 * 1024 - header.len())
+                .ok_or("invalid runtime observation record length")?;
+            let mut data = vec![0; size];
             if !read_record_part(&mut file, &mut data)? {
                 break;
             }
-            let words = data[..words * 8]
+            let bytes = if bytes == 0 {
+                Vec::new()
+            } else {
+                data.split_off(word_bytes)
+            };
+            let words = data
                 .chunks_exact(8)
                 .map(|word| u64::from_le_bytes(word.try_into().unwrap()))
                 .collect::<Vec<_>>();
-            match (kind, words.as_slice(), bytes) {
-                (END, [], 0) => {
+            match RecordKind::decode(kind, &words, bytes)? {
+                RecordKind::End => {
                     if file.read(&mut [0])? != 0 {
                         return Err("data after runtime observation end".into());
                     }
                     trace.complete = true;
                     break;
                 }
-                (LOSS, [lost], 0) => {
+                RecordKind::Loss(lost) => {
                     trace.lost = trace
                         .lost
-                        .checked_add(*lost)
-                        .ok_or("runtime loss count overflows")?
+                        .checked_add(lost)
+                        .ok_or("runtime loss count overflows")?;
                 }
-                (LOSS | END, _, _) => return Err("invalid runtime observation footer".into()),
-                _ => {
-                    let bytes = data.split_off(words.len() * 8);
-                    trace.records.push(Record {
-                        ts,
-                        tid,
-                        kind,
-                        words,
-                        bytes,
-                    });
-                }
+                kind => trace.records.push(Record { ts, tid, kind }),
             }
         }
         // Stable order breaks a timestamp tie only within one worker. The
@@ -100,9 +261,7 @@ impl Observation {
     pub(crate) fn store(&self, db: &Connection) -> Result<()> {
         let mut import = Import::new(db);
         for record in &self.records {
-            if !crate::memory::MemoryImport::accepts(record.kind) {
-                import.record(record)?;
-            }
+            import.record(record)?;
         }
         for (token, timing) in std::mem::take(&mut import.io) {
             import.io_timing(token, timing)?;
@@ -112,7 +271,7 @@ impl Observation {
                 "runtime_events",
                 self.records
                     .iter()
-                    .filter(|record| record.kind != MAPPING)
+                    .filter(|record| !matches!(record.kind, RecordKind::Mapping(_)))
                     .count() as u64,
             ),
             ("runtime_events_lost", self.lost),
@@ -151,8 +310,6 @@ fn attribute_host_samples(db: &Connection) -> Result<()> {
     Ok(())
 }
 
-type Task = (u64, u64);
-
 #[derive(Default)]
 struct Timing {
     callbacks: [u64; 5],
@@ -165,7 +322,7 @@ struct Import<'a> {
     // The most recent non-running scheduler state and the active dispatch
     // have different end points. Dispatch is paired on its actual OS thread.
     states: HashMap<Task, i64>,
-    dispatches: HashMap<(Task, u32, u64), i64>,
+    dispatches: HashMap<(Task, u32, i64), i64>,
     host: HashMap<u32, (i64, Task, u64)>,
     io: HashMap<u64, Timing>,
     unpaired: u64,
@@ -209,43 +366,29 @@ impl<'a> Import<'a> {
     fn record(&mut self, record: &Record) -> Result<()> {
         let time = Unsigned(record.ts);
         let tid = record.tid;
-        match (record.kind, record.words.as_slice()) {
-            (1, &[unit, task, parent_unit, parent_task]) => {
-                let id = self.task((unit, task))?;
-                let parent = self.task((parent_unit, parent_task))?;
+        match record.kind {
+            RecordKind::Task { task, parent } => {
+                let id = self.task(task)?;
+                let parent = self.task(parent)?;
                 self.db.execute(
                     "UPDATE task SET start_ns=?2,parent_id=?3 WHERE id=?1",
                     (id, time, parent),
                 )?;
             }
-            (2, &[unit, task, state, reason, object]) => {
-                const STATES: &[&str] =
-                    &["ready", "running", "waiting", "flow", "provider", "ended"];
-                const REASONS: &[Option<&str>] = &[
-                    None,
-                    Some("channel_recv"),
-                    Some("channel_send"),
-                    Some("join"),
-                    Some("timer"),
-                    Some("latest"),
-                    Some("provider_io"),
-                    Some("step_slice"),
-                ];
-                let state = STATES
-                    .get(usize::try_from(state)?)
-                    .ok_or("invalid observed task state")?;
-                let reason = REASONS
-                    .get(usize::try_from(reason)?)
-                    .ok_or("invalid observed wait reason")?;
-                let key = (unit, task);
+            RecordKind::State {
+                task: key,
+                state,
+                reason,
+                object,
+            } => {
                 if let Some(previous) = self.states.remove(&key) {
                     self.close_slice(previous, time)?;
                 }
                 let id = self.task(key)?;
-                if *state == "ended" {
+                if state == "ended" {
                     self.db
                         .execute("UPDATE task SET end_ns=?2 WHERE id=?1", (id, time))?;
-                } else if *state != "running" {
+                } else if state != "running" {
                     let object = (object != 0).then_some(Unsigned(object));
                     self.db.execute(
                         "INSERT INTO task_slice(task_id,tid,state,wait_reason,object_id,start_ns)
@@ -255,8 +398,7 @@ impl<'a> Import<'a> {
                     self.states.insert(key, self.db.last_insert_rowid());
                 }
             }
-            (3, &[unit, task, worker]) => {
-                let key = (unit, task);
+            RecordKind::DispatchBegin { task: key, worker } => {
                 if let Some(previous) = self.states.remove(&key) {
                     self.close_slice(previous, time)?;
                 }
@@ -264,7 +406,7 @@ impl<'a> Import<'a> {
                 self.db.execute(
                     "INSERT INTO task_slice(task_id,tid,worker_id,state,start_ns)
                      VALUES (?1,?2,?3,'running',?4)",
-                    (id, tid, i64::try_from(worker)?, time),
+                    (id, tid, worker, time),
                 )?;
                 if self
                     .dispatches
@@ -274,20 +416,20 @@ impl<'a> Import<'a> {
                     self.unpaired += 1;
                 }
             }
-            (4, &[unit, task, worker]) => {
-                match self.dispatches.remove(&((unit, task), tid, worker)) {
+            RecordKind::DispatchEnd { task, worker } => {
+                match self.dispatches.remove(&(task, tid, worker)) {
                     Some(id) => self.close_slice(id, time)?,
                     None => self.unpaired += 1,
                 }
             }
-            (5, &[unit, task, source, source_unit, source_task, object]) => {
-                const SOURCES: &[&str] = &["", "task", "timer", "net", "cancel", "unknown"];
-                let source = SOURCES
-                    .get(usize::try_from(source)?)
-                    .filter(|s| !s.is_empty())
-                    .ok_or("invalid observed wake source")?;
-                let from = self.task((source_unit, source_task))?;
-                let to = self.task((unit, task))?;
+            RecordKind::Wake {
+                task,
+                source,
+                from,
+                object,
+            } => {
+                let from = self.task(from)?;
+                let to = self.task(task)?;
                 let object = (object != 0).then_some(Unsigned(object));
                 self.db.execute(
                     "INSERT INTO causal_edge(src_kind,src_id,dst_task_id,object_id,ts_ns)
@@ -295,8 +437,7 @@ impl<'a> Import<'a> {
                     (source, from, to, object, time),
                 )?;
             }
-            (6, &[unit, task, site]) => {
-                let key = (unit, task);
+            RecordKind::HostBegin { task: key, site } => {
                 let id = self.task(key)?;
                 self.db.execute(
                     "INSERT INTO host_stack_interval(tid,task_id,site,start_ns) VALUES (?1,?2,?3,?4)",
@@ -310,8 +451,8 @@ impl<'a> Import<'a> {
                     self.unpaired += 1;
                 }
             }
-            (7, &[unit, task, site]) => match self.host.remove(&tid) {
-                Some((id, key, at)) if key == (unit, task) && at == site => {
+            RecordKind::HostEnd { task, site } => match self.host.remove(&tid) {
+                Some((id, key, at)) if key == task && at == site => {
                     self.db.execute(
                         "UPDATE host_stack_interval SET end_ns=?2 WHERE id=?1",
                         (id, time),
@@ -319,21 +460,26 @@ impl<'a> Import<'a> {
                 }
                 _ => self.unpaired += 1,
             },
-            (8, &[token, unit, task, operation, site]) => {
-                let id = self.task((unit, task))?;
+            RecordKind::IoBegin {
+                token,
+                task,
+                operation,
+                site,
+            } => {
+                let id = self.task(task)?;
                 self.db.execute(
                     "INSERT INTO io_op(token,task_id,operation,site,start_ns) VALUES (?1,?2,?3,?4,?5)",
-                    (Unsigned(token), id, u8::try_from(operation)?, Unsigned(site), time),
+                    (Unsigned(token), id, operation, Unsigned(site), time),
                 )?;
                 self.io.insert(token, Timing::default());
             }
-            (9, &[token, phase, elapsed]) => {
+            RecordKind::IoCallback {
+                token,
+                phase,
+                elapsed,
+            } => {
                 if let Some(timing) = self.io.get_mut(&token) {
-                    let phase = phase
-                        .checked_sub(1)
-                        .and_then(|i| usize::try_from(i).ok())
-                        .and_then(|i| timing.callbacks.get_mut(i))
-                        .ok_or("invalid observed callback phase")?;
+                    let phase = &mut timing.callbacks[phase];
                     *phase = phase
                         .checked_add(elapsed)
                         .ok_or("callback time overflows")?;
@@ -341,7 +487,7 @@ impl<'a> Import<'a> {
                     self.unpaired += 1;
                 }
             }
-            (10, &[token, elapsed]) => {
+            RecordKind::IoPending { token, elapsed } => {
                 if let Some(timing) = self.io.get_mut(&token) {
                     timing.pending = timing
                         .pending
@@ -351,25 +497,27 @@ impl<'a> Import<'a> {
                     self.unpaired += 1;
                 }
             }
-            (11, &[token, bytes, tag, code, status]) => {
+            RecordKind::IoEnd {
+                token,
+                bytes,
+                tag,
+                code,
+                status,
+            } => {
                 if let Some(timing) = self.io.remove(&token) {
                     self.io_timing(token, timing)?;
                     self.db.execute(
                         "UPDATE io_op SET end_ns=?2,bytes=?3,error_tag=?4,error_code=?5,status=?6 WHERE token=?1",
-                        (Unsigned(token), time, Unsigned(bytes), u8::try_from(tag)?, u32::try_from(code)?, u8::try_from(status)?),
+                        (Unsigned(token), time, Unsigned(bytes), tag, code, status),
                     )?;
                 } else {
                     self.unpaired += 1;
                 }
             }
-            (MAPPING, []) | (16..=31, _) => {}
-            _ => {
-                return Err(format!(
-                    "invalid runtime observation kind or payload {}",
-                    record.kind
-                )
-                .into());
-            }
+            RecordKind::Mapping(_)
+            | RecordKind::Memory { .. }
+            | RecordKind::End
+            | RecordKind::Loss(_) => {}
         }
         Ok(())
     }

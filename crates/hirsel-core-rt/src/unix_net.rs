@@ -22,22 +22,84 @@ pub(crate) struct UnixRequest<'a> {
     pub retry: Option<u64>,
 }
 
+pub(crate) const SERVED_UNIX_LISTEN: u64 = 10;
+pub(crate) const SERVED_DATAGRAM_RECV: u64 = 17;
+
+#[derive(Clone, Copy)]
+pub(crate) enum UnixField {
+    Listener,
+    Datagram,
+    Root(UnixDirection),
+    Path,
+    Backlog,
+    Bytes,
+    Room,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UnixHandle {
+    Stream,
+    Listener,
+    Datagram,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UnixReply {
+    Created(UnixHandle),
+    Done,
+    Packet,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct UnixOperation {
+    pub served: u64,
+    pub fields: &'static [UnixField],
+    pub reply: UnixReply,
+}
+
+impl UnixOperation {
+    pub(crate) fn describe(operation: u8) -> Option<Self> {
+        use UnixDirection::{Bind, Connect, Listen, Send};
+        use UnixField::*;
+        use UnixReply::{Created, Done, Packet};
+        // Served NetOp tags and fields follow their declaration in core.md.
+        let (served, fields, reply): (_, &[_], _) = match operation {
+            UNIX_CONNECT => (9, &[Root(Connect), Path], Created(UnixHandle::Stream)),
+            UNIX_LISTEN => (
+                SERVED_UNIX_LISTEN,
+                &[Root(Listen), Path, Backlog],
+                Created(UnixHandle::Listener),
+            ),
+            UNIX_ACCEPT => (11, &[Listener], Created(UnixHandle::Stream)),
+            DATAGRAM_OPEN => (12, &[], Created(UnixHandle::Datagram)),
+            DATAGRAM_BIND => (13, &[Root(Bind), Path], Created(UnixHandle::Datagram)),
+            DATAGRAM_CONNECT => (14, &[Datagram, Root(Send), Path], Done),
+            DATAGRAM_SEND => (15, &[Datagram, Bytes], Done),
+            DATAGRAM_SEND_TO => (16, &[Datagram, Root(Send), Path, Bytes], Done),
+            DATAGRAM_RECV => (SERVED_DATAGRAM_RECV, &[Datagram, Room], Packet),
+            _ => return None,
+        };
+        Some(Self {
+            served,
+            fields,
+            reply,
+        })
+    }
+
+    fn direction(self) -> Option<UnixDirection> {
+        self.fields.iter().find_map(|field| match *field {
+            UnixField::Root(direction) => Some(direction),
+            _ => None,
+        })
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct Datagram {
     rules: u64,
     provider: Provider,
     bound: bool,
     connected: bool,
-}
-
-fn direction(op: u8) -> Option<UnixDirection> {
-    match op {
-        UNIX_CONNECT => Some(UnixDirection::Connect),
-        UNIX_LISTEN => Some(UnixDirection::Listen),
-        DATAGRAM_BIND => Some(UnixDirection::Bind),
-        DATAGRAM_CONNECT | DATAGRAM_SEND_TO => Some(UnixDirection::Send),
-        _ => None,
-    }
 }
 
 unsafe fn str_operand<'a>(carrier: *const Buffer) -> Option<&'a str> {
@@ -79,11 +141,18 @@ unsafe fn call(
         let (Some(root), Some(path)) = (str_operand(root), str_operand(path)) else {
             return DENIED;
         };
-        let new_datagram = matches!(operation, DATAGRAM_OPEN | DATAGRAM_BIND);
-        let new_handle =
-            new_datagram || matches!(operation, UNIX_CONNECT | UNIX_LISTEN | UNIX_ACCEPT);
-        let (rules, provider, key, state_ok) = match operation {
-            UNIX_CONNECT | UNIX_LISTEN | DATAGRAM_OPEN | DATAGRAM_BIND => {
+        let description = UnixOperation::describe(operation).unwrap();
+        let target = description.fields.first();
+        let (rules, provider, key, state_ok) = match target {
+            Some(UnixField::Listener) => (0, net::socket_provider(context, handle), handle, true),
+            Some(UnixField::Datagram) => {
+                let _commit = crate::sequencer::enter();
+                let state = (&(*files).datagrams)[&handle];
+                let state_ok = (operation != DATAGRAM_RECV || state.bound)
+                    && (operation != DATAGRAM_SEND || state.connected);
+                (state.rules, state.provider, handle, state_ok)
+            }
+            _ => {
                 let provider = *hirsel_core_capability_provider(context, handle);
                 let key = hirsel_core_capability_handle(context, handle);
                 #[cfg(feature = "record")]
@@ -96,18 +165,10 @@ unsafe fn call(
                 let rules = key;
                 (rules, provider, key, true)
             }
-            UNIX_ACCEPT => (0, net::socket_provider(context, handle), handle, true),
-            _ => {
-                let _commit = crate::sequencer::enter();
-                let state = (&(*files).datagrams)[&handle];
-                let state_ok = (operation != DATAGRAM_RECV || state.bound)
-                    && (operation != DATAGRAM_SEND || state.connected);
-                (state.rules, state.provider, handle, state_ok)
-            }
         };
         let served = crate::provide::owns(&provider);
         let authorized = state_ok
-            && direction(operation).is_none_or(|dir| {
+            && description.direction().is_none_or(|dir| {
                 !root.is_empty()
                     && path.len() <= hirsel_core_net::unix::MAX_PATH_BYTES
                     && valid_relative_path(path.as_bytes())
@@ -140,10 +201,8 @@ unsafe fn call(
         };
         #[cfg(feature = "record")]
         let provider = if let Some(tape) = (*files).net_tape.filter(|_| !served)
-            && !matches!(
-                operation,
-                UNIX_CONNECT | UNIX_LISTEN | DATAGRAM_OPEN | DATAGRAM_BIND
-            ) {
+            && matches!(target, Some(UnixField::Listener | UnixField::Datagram))
+        {
             request.handle = tape.handle(key);
             tape.provider
         } else {
@@ -151,12 +210,13 @@ unsafe fn call(
         };
         let mut outcome = hirsel_core_host(context, &provider, &mut request);
         if outcome.status == 0 && outcome.error == IoError::OK {
+            let new_handle = matches!(description.reply, UnixReply::Created(_));
             #[cfg(feature = "record")]
             if new_handle && let Some(tape) = (*files).net_tape.filter(|_| !served) {
                 outcome = tape.carrier(outcome);
             }
             let _commit = crate::sequencer::enter();
-            if new_datagram {
+            if description.reply == UnixReply::Created(UnixHandle::Datagram) {
                 (*files).datagrams.insert(
                     outcome.value,
                     Datagram {
@@ -168,7 +228,7 @@ unsafe fn call(
                 );
             } else if operation == DATAGRAM_CONNECT {
                 (*files).datagrams.get_mut(&handle).unwrap().connected = true;
-            } else if operation == DATAGRAM_RECV {
+            } else if description.reply == UnixReply::Packet {
                 (*operand).len = request.buffer.len;
                 outcome.written = u64::from(outcome.kind);
             }

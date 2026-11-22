@@ -139,28 +139,39 @@ fn slots_forget_ring[T](mut s: Slots[T], head: u64)
 // Stable sort on the shape of Rust's driftsort (library/core/src/slice/sort/stable/
 // drift.rs, quicksort.rs and merge.rs at a7c37f9f): Powersort merge order over logical
 // runs. A run shorter than min_good stays unsorted until a stable quicksort with a
-// branchless partition sorts it, so random input is one quicksort. Between operations
-// every element is in xs. Scratch, indexed like xs, holds elements only inside one
-// merge, insertion, small sort or partition, and Hole.active describes which.
+// branchless partition sorts it. Between operations every element is in xs.
+// Scratch holds elements during one merge, insertion, small sort or partition,
+// and Hole.active describes which.
 pub fn sort_stable[T](mut xs: List[T], before: scoped fn(T, T) -> Order) {
     let n = list.len(xs)
     if n < 2 {
         return
     }
-    let scratch: Slots[T] = slots_new(n)
-    let mut g = Hole(xs: view xs, scratch: take scratch, active: idle())
-    if n <= insertion_len() {
-        insertion_sort_hole(mut g, 0, n, before)
-    } else {
-        drift(mut g, 0, n, n <= 2 * small_len(), before)
+    if n <= 20 {
+        // Each swap uses a local slot and restores both elements before the
+        // next comparison, which can fail.
+        for i in 1 .. n {
+            let mut j = i
+            while j > 0 && precedes(xs[j], xs[j - 1], before) {
+                list.swap(mut xs, j, j - 1)
+                j -= 1
+            }
+        }
+        return
     }
+    // Keep full-width partitions for small lists. For larger lists, half the
+    // length suffices to merge any two adjacent sorted runs.
+    let scratch_len = if n <= 128 {
+        n
+    } else if n <= 256 {
+        128
+    } else {
+        n / 2
+    }
+    let scratch: Slots[T] = slots_new(scratch_len)
+    let mut g = Hole(xs: view xs, scratch: take scratch, scratch_len, active: idle())
+    drift(mut g, 0, n, n <= 2 * small_len(), before)
     let _ = take g
-}
-
-// Whole lists this short are sorted by insertion, as Rust's (stable/mod.rs
-// MAX_LEN_ALWAYS_INSERTION_SORT).
-fn insertion_len() -> u64 {
-    20
 }
 
 // Quicksort leaves and eager runs this short go to small_sort. Rust's
@@ -281,19 +292,19 @@ fn reverse_run[T](mut g: Hole[T], lo: u64, hi: u64) {
     let mut a = lo
     let mut b = hi - 1
     while a < b {
-        slots_list_move(g.xs, a, view g.scratch.raw, lo, 1)
+        slots_list_move(g.xs, a, view g.scratch.raw, 0, 1)
         slots_list_move(g.xs, b, g.xs, a, 1)
-        slots_list_move(view g.scratch.raw, lo, g.xs, b, 1)
+        slots_list_move(view g.scratch.raw, 0, g.xs, b, 1)
         a += 1
         b -= 1
     }
 }
 
-// Two unsorted runs join lazily while they fit in scratch, which here is always.
+// Two unsorted runs join lazily while they fit in scratch.
 // Otherwise each unsorted side is quicksorted and the two merge (drift.rs `logical_merge`).
 fn logical_merge[T](mut g: Hole[T], lo: u64, hi: u64, left: u64, right: u64, before: scoped fn(T, T) -> Order) -> u64 {
     let size = hi - lo
-    if (left & 1) == 0 && (right & 1) == 0 {
+    if size <= g.scratch_len && (left & 1) == 0 && (right & 1) == 0 {
         return size << 1
     }
     let mid = lo + (left >> 1)
@@ -322,16 +333,16 @@ fn merge[T](mut g: Hole[T], lo0: u64, mid: u64, hi0: u64, before: scoped fn(T, T
     }
     let hi = gallop_right(g.xs, mid, hi0, before)
     if mid - lo <= hi - mid {
-        slots_list_move(g.xs, lo, view g.scratch.raw, lo, mid - lo)
-        g.active = Active(op: 1, a: lo, b: mid, c: mid, d: 0, e: 0)
+        slots_list_move(g.xs, lo, view g.scratch.raw, 0, mid - lo)
+        g.active = Active(op: 1, a: 0, b: mid - lo, c: mid, d: 0, e: 0)
         merge_up(mut g.active, g.xs, view g.scratch.raw, hi, before)
         let st = g.active
         if st.a < st.b {
             slots_list_move(view g.scratch.raw, st.a, g.xs, st.c - (st.b - st.a), st.b - st.a)
         }
     } else {
-        slots_list_move(g.xs, mid, view g.scratch.raw, mid, hi - mid)
-        g.active = Active(op: 2, a: mid, b: mid, c: hi, d: 0, e: 0)
+        slots_list_move(g.xs, mid, view g.scratch.raw, 0, hi - mid)
+        g.active = Active(op: 2, a: mid, b: 0, c: hi - mid, d: 0, e: 0)
         merge_down(mut g.active, g.xs, view g.scratch.raw, lo, before)
         let st = g.active
         if st.b < st.c {
@@ -395,31 +406,23 @@ fn merge_down[T](mut st: Active, xs: View[List[T]], s: View[List[T]], lo: u64, b
     }
 }
 
-fn insertion_sort_hole[T](mut g: Hole[T], lo: u64, hi: u64, before: scoped fn(T, T) -> Order) {
-    let mut i = lo + 1
-    while i < hi {
-        insert_tail(mut g.active, g.xs, view g.scratch.raw, lo, i, before)
-        i += 1
-    }
-}
-
-// Inserting xs[i] is merge_down of [lo, i) with the one-element run scratch[i, i + 1).
+// Inserting xs[i] is merge_down of [lo, i) with the one-element run scratch[0, 1).
 fn insert_tail[T](mut st: Active, xs: View[List[T]], s: View[List[T]], lo: u64, i: u64, before: scoped fn(T, T) -> Order) {
     let prev = int.wrapping_sub(i, 1)
     if !precedes(slots_list_view(xs, i), slots_list_view(xs, prev), before) {
         return
     }
-    slots_list_move(xs, i, s, i, 1)
+    slots_list_move(xs, i, s, 0, 1)
     slots_list_move(xs, prev, xs, i, 1)
     st.op = 2
     st.a = prev
-    st.b = i
-    st.c = int.wrapping_add(i, 1)
-    while st.a > lo && precedes(slots_list_view(s, i), slots_list_view(xs, int.wrapping_sub(st.a, 1)), before) {
+    st.b = 0
+    st.c = 1
+    while st.a > lo && precedes(slots_list_view(s, 0), slots_list_view(xs, int.wrapping_sub(st.a, 1)), before) {
         slots_list_move(xs, int.wrapping_sub(st.a, 1), xs, st.a, 1)
         st.a = int.wrapping_sub(st.a, 1)
     }
-    slots_list_move(s, i, xs, st.a, 1)
+    slots_list_move(s, 0, xs, st.a, 1)
     st.op = 0
 }
 
@@ -524,11 +527,11 @@ fn sort4_stable[T](xs: View[List[T]], s: View[List[T]], v: u64, before: scoped f
     } else {
         unknown_right
     }
-    slots_list_move(xs, least, s, v, 1)
-    slots_list_move(xs, second, s, v1, 1)
-    slots_list_move(xs, third, s, v2, 1)
-    slots_list_move(xs, most, s, v3, 1)
-    slots_list_move(s, v, xs, v, 4)
+    slots_list_move(xs, least, s, 0, 1)
+    slots_list_move(xs, second, s, 1, 1)
+    slots_list_move(xs, third, s, 2, 1)
+    slots_list_move(xs, most, s, 3, 1)
+    slots_list_move(s, 0, xs, v, 4)
 }
 
 // smallsort.rs `bidirectional_merge` of the sorted runs xs [lo, mid) and [mid, hi):
@@ -537,11 +540,12 @@ fn sort4_stable[T](xs: View[List[T]], s: View[List[T]], v: u64, before: scoped f
 // cursors at the end; here the rounds stop when either run is empty, and the other
 // run's remainder fills the gap, so any comparator leaves a permutation.
 fn bidirectional_merge[T](mut g: Hole[T], lo: u64, mid: u64, hi: u64, before: scoped fn(T, T) -> Order) {
-    slots_list_move(g.xs, lo, view g.scratch.raw, lo, hi - lo)
-    g.active = Active(op: 4, a: lo, b: mid, c: mid, d: hi, e: mid)
-    merge_both(mut g.active, g.xs, view g.scratch.raw, mid, before)
+    let split = mid - lo
+    slots_list_move(g.xs, lo, view g.scratch.raw, 0, hi - lo)
+    g.active = Active(op: 4, a: 0, b: split, c: split, d: hi - lo, e: int.wrapping_sub(lo, split))
+    merge_both(mut g.active, g.xs, view g.scratch.raw, before)
     let st = g.active
-    let to = int.wrapping_sub(int.wrapping_add(st.a, st.c), mid)
+    let to = int.wrapping_add(int.wrapping_add(st.a, st.c), st.e)
     let left = int.wrapping_sub(st.b, st.a)
     if left != 0 {
         slots_list_move(view g.scratch.raw, st.a, g.xs, to, left)
@@ -553,10 +557,10 @@ fn bidirectional_merge[T](mut g: Hole[T], lo: u64, mid: u64, hi: u64, before: sc
     g.active = idle()
 }
 
-// Left run scratch [a, b), right run [c, d); the front fills xs from a + c - mid and
-// the back down from b + d - mid. Equal keys take the left at the front and the right
+// Left run scratch [a, b), right run [c, d); the front fills xs from a + c + e and
+// the back down from b + d + e. Equal keys take the left at the front and the right
 // at the back, so they keep their order.
-fn merge_both[T](mut st: Active, xs: View[List[T]], s: View[List[T]], mid: u64, before: scoped fn(T, T) -> Order) {
+fn merge_both[T](mut st: Active, xs: View[List[T]], s: View[List[T]], before: scoped fn(T, T) -> Order) {
     while st.a < st.b && st.c < st.d {
         let take_left = !precedes(slots_list_view(s, st.c), slots_list_view(s, st.a), before)
         let at = if take_left {
@@ -564,7 +568,7 @@ fn merge_both[T](mut st: Active, xs: View[List[T]], s: View[List[T]], mid: u64, 
         } else {
             st.c
         }
-        slots_list_move(s, at, xs, int.wrapping_sub(int.wrapping_add(st.a, st.c), mid), 1)
+        slots_list_move(s, at, xs, int.wrapping_add(int.wrapping_add(st.a, st.c), st.e), 1)
         let step: u64 = if take_left {
             1
         } else {
@@ -583,7 +587,7 @@ fn merge_both[T](mut st: Active, xs: View[List[T]], s: View[List[T]], mid: u64, 
         } else {
             l
         }
-        slots_list_move(s, from, xs, int.wrapping_sub(int.wrapping_sub(int.wrapping_add(st.b, st.d), mid), 1), 1)
+        slots_list_move(s, from, xs, int.wrapping_sub(int.wrapping_add(int.wrapping_add(st.b, st.d), st.e), 1), 1)
         let back: u64 = if take_right {
             1
         } else {
@@ -712,21 +716,21 @@ fn median3[T](xs: View[List[T]], a: u64, b: u64, c: u64, before: scoped fn(T, T)
 }
 
 // Stable partition of xs [lo, hi) around xs[p] (quicksort.rs `stable_partition`).
-// Each scanned element moves to scratch: left ones up from lo, right ones down
-// from hi - 1; then both blocks return, the right one reversed. Returns the left
+// Each scanned element moves to scratch: left ones up from 0, right ones down
+// from size - 1; then both blocks return, the right one reversed. Returns the left
 // count and the pivot's new index. Normally keys before the pivot go left and the pivot
 // goes right; an equal partition sends left every key the pivot does not precede, the
 // pivot included.
 fn partition_hole[T](mut g: Hole[T], lo: u64, hi: u64, p: u64, equal: bool, before: scoped fn(T, T) -> Order) -> (u64, u64) {
     let size = hi - lo
     // The right element scanned at index i goes to scratch t - i + left.
-    let t = lo + hi - 1
+    let t = hi - 1
     g.active = Active(op: 3, a: lo, b: size, c: lo, d: 0, e: 0)
     partition_scan(mut g.active, g.xs, view g.scratch.raw, false, p, p, t, equal, before)
     // The pivot is never compared with itself.
     let left_before = g.active.d
     let at = if equal {
-        lo + g.active.d
+        g.active.d
     } else {
         t - p + g.active.d
     }
@@ -739,13 +743,13 @@ fn partition_hole[T](mut g: Hole[T], lo: u64, hi: u64, p: u64, equal: bool, befo
     let left = g.active.d
     g.active = idle()
     if left != 0 {
-        slots_list_move(view g.scratch.raw, lo, g.xs, lo, left)
+        slots_list_move(view g.scratch.raw, 0, g.xs, lo, left)
     }
     let mut k: u64 = 0
     let right = size - left
     // k < right <= hi - lo, so neither index wraps; checked steps would keep
     // this copy from vectorizing.
-    let back = hi - 1
+    let back = size - 1
     let front = lo + left
     while k < right {
         slots_list_move(view g.scratch.raw, int.wrapping_sub(back, k), g.xs, int.wrapping_add(front, k), 1)
@@ -809,10 +813,10 @@ fn partition_scan[T](mut st: Active, xs: View[List[T]], s: View[List[T]], pivot_
     }
 }
 
-// Left keys go to scratch up from st.a, right keys down from t - st.c.
+// Left keys go to scratch up from 0, right keys down from t - st.c.
 fn partition_one[T](mut st: Active, xs: View[List[T]], s: View[List[T]], t: u64, left: bool) {
-    let base = if left {
-        st.a
+    let base: u64 = if left {
+        0
     } else {
         int.wrapping_sub(t, st.c)
     }
@@ -887,10 +891,10 @@ fn precedes[T](a: T, b: T, before: scoped fn(T, T) -> Order) -> bool {
 // op 1 (merge_up): scratch [a, b) to xs ending at c.
 // op 2 (merge_down and insertion): scratch [b, c) to xs from a.
 // op 3 (partition of b elements from a, scanned up to c, d of them left):
-// scratch [a, a + d) to xs [a, a + d), and the c - a - d right ones, which end at
-// a + b, to xs from a + d.
-// op 4 (bidirectional merge split at e): scratch [a, b) then [c, d) to xs from
-// a + c - e.
+// scratch [0, d) to xs [a, a + d), and the c - a - d right ones, which end at
+// b, to xs from a + d.
+// op 4 (bidirectional merge, e is the wrapping output base): scratch [a, b)
+// then [c, d) to xs from a + c + e.
 type Active {
     op: u64,
     a: u64,
@@ -907,6 +911,7 @@ fn idle() -> Active {
 scoped type Hole[T] {
     xs: View[List[T]],
     scratch: Slots[T],
+    scratch_len: u64,
     active: Active
 } drop(g) {
     let st = g.active
@@ -922,15 +927,15 @@ scoped type Hole[T] {
         }
     } else if st.op == 3 {
         if st.d != 0 {
-            slots_list_move(view g.scratch.raw, st.a, g.xs, st.a, st.d)
+            slots_list_move(view g.scratch.raw, 0, g.xs, st.a, st.d)
         }
         let right = int.wrapping_sub(int.wrapping_sub(st.c, st.a), st.d)
         if right != 0 {
-            let from = int.wrapping_sub(int.wrapping_add(st.a, st.b), right)
+            let from = int.wrapping_sub(st.b, right)
             slots_list_move(view g.scratch.raw, from, g.xs, int.wrapping_add(st.a, st.d), right)
         }
     } else if st.op == 4 {
-        let to = int.wrapping_sub(int.wrapping_add(st.a, st.c), st.e)
+        let to = int.wrapping_add(int.wrapping_add(st.a, st.c), st.e)
         let left = int.wrapping_sub(st.b, st.a)
         if left != 0 {
             slots_list_move(view g.scratch.raw, st.a, g.xs, to, left)

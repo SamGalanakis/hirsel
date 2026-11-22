@@ -18,7 +18,7 @@ raised it:
 | cause | raised by |
 |---|---|
 | `Overflow` | checked integer arithmetic, conversion and shift counts ([SEM-1](semantics.md#sem-1-integers)) |
-| `Bounds` | indexing and slicing out of range; `channel.new(0)` |
+| `Bounds` | indexing and slicing out of range; `channel.new(0)`; `conn.new` with `cap` 0, and a connection send whose item's content charge exceeds the connection's room ([CONC-17](tasks.md#conc-17-connections)) |
 | `Division` | integer division or remainder by zero |
 | `Unwrap` | [`option.unwrap`](../../core/core/option.hirsel) of `None`, [`result.unwrap`](../../core/core/result.hirsel) of `Error` ([core](core.md#contracts-the-signatures-do-not-state)) |
 | `Fail(text)` | `fail(msg)`, which has type `Never`; a foreign call refused by its handle checks, with one of the fixed texts `foreign handle released`, `foreign handle in use`, `foreign handle of another kind` and `foreign pointer already held` ([FFI-6](foreign.md#ffi-6-handles)), or `foreign call needs a host Dir` (the `sqlite` package's slice 2) |

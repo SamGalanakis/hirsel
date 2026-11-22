@@ -392,6 +392,46 @@ fn find_binary_differential() -> bool {
     string.find(hay, 0, periodic) == find_oracle(hay, 0, periodic)
 }
 
+// Equal endpoints alone can be false matches. The true match can start in
+// the last lane of an aligned group or in the overlapping final group.
+// expect: run find_short_endpoint_groups() = true
+fn find_short_endpoint_groups() -> bool {
+    let lengths: Inline[u64, 8] =[125, 126, 127, 128, 129, 158, 159, 160]
+    for n in lengths {
+        for shape in 0u64 .. 3 {
+            let pat = if shape == 0 {
+                "ab"
+            } else if shape == 1 {
+                "aba"
+            } else {
+                "abaaaaaa"
+            }
+            let mut hay = if shape == 0 {
+                let mut decoys = string.from("zbzb")
+                string.push(mut decoys, string.repeat("z", n - 4))
+                take decoys
+            } else {
+                string.repeat("a", n)
+            }
+            for start in 0u64 .. 3 {
+                if string.find(hay, start, pat) != None {
+                    return false
+                }
+            }
+            string.push(mut hay, pat)
+            if n % 2 == 0 {
+                string.push(mut hay, string.repeat("z", 128))
+            }
+            for start in 0u64 .. 3 {
+                if string.find(hay, start, pat) != find_oracle(hay, start, pat) {
+                    return false
+                }
+            }
+        }
+    }
+    true
+}
+
 // expect: run starts_with_prefix() = true
 fn starts_with_prefix() -> bool {
     let data = string.as_bytes("xabcdefgh")

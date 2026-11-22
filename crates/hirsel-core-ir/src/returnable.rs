@@ -69,8 +69,7 @@ fn refusal(module: &Module, f: &Function, body: &Body) -> Option<Refusal> {
     if sig.never {
         return Some(Refusal::Never);
     }
-    if f.versioned || sig.has_vectors() || body.values.iter().any(|t| matches!(t, Ty::Vector(_)))
-    {
+    if f.versioned || sig.has_vectors() || body.values.iter().any(|t| matches!(t, Ty::Vector(_))) {
         return Some(Refusal::Vectors);
     }
     for inst in &body.insts {
@@ -533,7 +532,9 @@ fn homed_slots(
             gen_at(&mut now, bi, insts.len());
             for (j, inst) in insts.iter().enumerate().rev() {
                 match *inst {
-                    Inst::StorageLive { slot } | Inst::StorageDead { slot } => cut(&mut now, slot.index()),
+                    Inst::StorageLive { slot } | Inst::StorageDead { slot } => {
+                        cut(&mut now, slot.index())
+                    }
                     _ => gen_at(&mut now, bi, j),
                 }
                 if let Some(f) = inst.fail(b) {
@@ -567,7 +568,11 @@ fn homed_slots(
     homed
 }
 
-fn place_layout(module: &Module, recipes: &[hirsel_core_layout::Recipe], t: PlaceTy) -> Option<(u64, u64)> {
+fn place_layout(
+    module: &Module,
+    recipes: &[hirsel_core_layout::Recipe],
+    t: PlaceTy,
+) -> Option<(u64, u64)> {
     match t {
         PlaceTy::Value(Ty::Scalar(s)) => Some((s.size(), s.size())),
         PlaceTy::Value(Ty::Ptr) => Some((8, 8)),
@@ -615,7 +620,8 @@ fn shape(
                 values.iter().filter(|&&v| v == d).count() > usize::from(based(address))
             }
             _ => operands(body, inst).0.contains(&d.index()),
-        }) || (0..body.blocks.len()).any(|bi| terminator_uses(body, bi).contains(&d.index()));
+        }) || (0..body.blocks.len())
+            .any(|bi| terminator_uses(body, bi).contains(&d.index()));
         if stray {
             return Err(Refusal::ResultPlace);
         }
@@ -1113,7 +1119,10 @@ fn build(old: &Body, s: &Shape, root: bool, results_ty: &[Ty], calls: &Calls) ->
         let (callee, signature) = match site {
             Site::Leaf(op) => {
                 args.insert(0, Arg::Value(child));
-                (Callee::Runtime(RtOp::Returnable(op)), (calls.returnable)(op))
+                (
+                    Callee::Runtime(RtOp::Returnable(op)),
+                    (calls.returnable)(op),
+                )
             }
             Site::Callee(g) => {
                 args.push(Arg::Value(child));
@@ -1219,7 +1228,9 @@ fn build(old: &Body, s: &Shape, root: bool, results_ty: &[Ty], calls: &Calls) ->
                     info.base = match info.base {
                         AddressBase::Slot(slot) => slot_base[slot.index()],
                         AddressBase::Value(v) => AddressBase::Value(b.get(v)),
-                        AddressBase::Address(x) => AddressBase::Address(*fresh.get(&x).unwrap_or(&x)),
+                        AddressBase::Address(x) => {
+                            AddressBase::Address(*fresh.get(&x).unwrap_or(&x))
+                        }
                     };
                     let steps: Vec<Step> = info
                         .steps
@@ -1414,8 +1425,14 @@ fn build(old: &Body, s: &Shape, root: bool, results_ty: &[Ty], calls: &Calls) ->
             }
             Terminator::Return(r) => {
                 if let Some((to, from, bytes)) = dest_out {
-                    b.emit(Inst::Address { address: to, fail: None });
-                    b.emit(Inst::Address { address: from, fail: None });
+                    b.emit(Inst::Address {
+                        address: to,
+                        fail: None,
+                    });
+                    b.emit(Inst::Address {
+                        address: from,
+                        fail: None,
+                    });
                     b.emit(Inst::Copy { to, from, bytes });
                 }
                 let values: Vec<ValueId> = r
@@ -1509,7 +1526,10 @@ fn spawns(module: &Module) -> Vec<Spawn> {
         for inst in &body.insts {
             let Inst::Call { call } = *inst else { continue };
             let c = &body.calls[call.index()];
-            if !matches!(c.callee, Callee::Runtime(RtOp::Spawn { .. } | RtOp::SpawnUnit { .. })) {
+            if !matches!(
+                c.callee,
+                Callee::Runtime(RtOp::Spawn { .. } | RtOp::SpawnUnit { .. })
+            ) {
                 continue;
             }
             let args = c.args.get(&body.pools.args).unwrap_or_default();
@@ -1680,7 +1700,9 @@ pub fn apply(module: &mut Module) -> Applied {
             }
         }
         // What remains waits on itself through a cycle.
-        let cyclic: Vec<usize> = (0..n).filter(|&f| ok[f] && !shapes.contains_key(&f)).collect();
+        let cyclic: Vec<usize> = (0..n)
+            .filter(|&f| ok[f] && !shapes.contains_key(&f))
+            .collect();
         if cyclic.is_empty() {
             break;
         }
@@ -1841,7 +1863,10 @@ pub fn apply(module: &mut Module) -> Applied {
         if let Some(&(v, _)) = variant.get(&f) {
             let body = module.functions[v.index()].body.as_mut().unwrap();
             for inst in &mut body.insts {
-                if let Inst::FunctionRef { result: r, function } = inst
+                if let Inst::FunctionRef {
+                    result: r,
+                    function,
+                } = inst
                     && *r == result
                 {
                     *function = id;
@@ -1876,7 +1901,14 @@ pub fn report(module: &Module, applied: &Applied) -> String {
     for (f, z) in &applied.sizes {
         s.push_str(&format!(
             "  area f{} {}: {} = word 16 + child {} + slots {} of {} + dest {} + demoted {}\n",
-            f.0, name(*f), z.area, z.child, z.slots, z.all_slots, z.dest, z.demoted
+            f.0,
+            name(*f),
+            z.area,
+            z.child,
+            z.slots,
+            z.all_slots,
+            z.dest,
+            z.demoted
         ));
     }
     s

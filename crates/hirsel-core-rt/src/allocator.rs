@@ -28,7 +28,10 @@ pub(crate) fn allocate_raw(layout: Layout) -> NonNull<u8> {
             }
         }
     };
-    NonNull::new(pointer).unwrap_or_else(|| crate::process::stop(b"HostMemory"))
+    let pointer = NonNull::new(pointer).unwrap_or_else(|| crate::process::stop(b"HostMemory"));
+    #[cfg(feature = "allocation-count")]
+    crate::allocation_count::allocated();
+    pointer
 }
 /// # Safety
 /// Original exclusively owned base from allocate_raw.

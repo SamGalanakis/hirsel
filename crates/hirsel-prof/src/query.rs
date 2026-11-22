@@ -215,7 +215,7 @@ fn fraction(numerator: u64, denominator: u64, multiplier: f64) -> Value {
 }
 
 fn events(db: &Connection, primary: &str) -> Result<BTreeSet<String>> {
-    let mut stmt = db.prepare("SELECT DISTINCT event FROM sample_counter ORDER BY event")?;
+    let mut stmt = db.prepare("SELECT DISTINCT event FROM cpu_sample ORDER BY event")?;
     let mut names = stmt
         .query_map([], |row| row.get(0))?
         .collect::<rusqlite::Result<BTreeSet<_>>>()?;
@@ -296,7 +296,6 @@ const TABLES: &[&str] = &[
     "frame",
     "callsite",
     "cpu_sample",
-    "sample_counter",
     "source_snippet",
     "fn_cpu_summary",
     "line_cpu_summary",
@@ -360,9 +359,9 @@ impl Total {
 
 const CHAIN: &str = "
     leaf_weights(leaf, weight, samples) AS (
-        SELECT s.callsite_id,u64_sum(c.value),count(*)
-        FROM cpu_sample s JOIN sample_counter c ON c.sample_id=s.id
-        WHERE c.event=?1 GROUP BY s.callsite_id
+        SELECT s.callsite_id,u64_sum(s.period),count(*)
+        FROM cpu_sample s
+        WHERE s.event=?1 GROUP BY s.callsite_id
     ),
     chain(leaf, site) AS (
         SELECT leaf,leaf FROM leaf_weights
@@ -732,9 +731,8 @@ mod tests {
                  (1,1,'math.hirsel',7,0),(2,1,'math.hirsel',12,0),(3,NULL,'loop.hirsel',3,0);
              INSERT INTO callsite VALUES (1,NULL,1,0),(2,1,2,1),(3,NULL,3,0);
              INSERT INTO cpu_sample VALUES
-                 (1,1,1,NULL,NULL,0,2,'0x20',11,'fiber','fiber_root'),
-                 (2,2,1,NULL,NULL,0,3,'0x30',5,'fiber','fiber_root');
-             INSERT INTO sample_counter VALUES (1,'cycles',11),(2,'cycles',5);",
+                 (1,1,1,NULL,NULL,0,2,'0x20','cycles',11,'fiber','fiber_root'),
+                 (2,2,1,NULL,NULL,0,3,'0x30','cycles',5,'fiber','fiber_root');",
         )
         .unwrap();
 
@@ -806,8 +804,7 @@ mod tests {
              INSERT INTO frame VALUES (1,NULL,NULL,1,'math.hirsel',1,1,0),
                                       (2,NULL,NULL,2,'math.hirsel',2,1,1);
              INSERT INTO callsite VALUES (1,NULL,1,0), (2,1,2,1);
-             INSERT INTO cpu_sample VALUES (1,1,1,NULL,NULL,0,2,'0x10',9007199254740993,'fiber','fiber_root');
-             INSERT INTO sample_counter VALUES (1,'instructions',9007199254740993);
+             INSERT INTO cpu_sample VALUES (1,1,1,NULL,NULL,0,2,'0x10','instructions',9007199254740993,'fiber','fiber_root');
              INSERT INTO source_snippet VALUES ('math.hirsel',1,2,'fn recur() {\n}\n');",
         ).unwrap();
         writer

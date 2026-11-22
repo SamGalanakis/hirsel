@@ -1,6 +1,5 @@
 // n=5, input keys [2,1,2,0,1]. Stable output ids [3,1,4,0,2].
-// Short lists sort by insertion. Each call after the first of an insertion holds the
-// inserted element in scratch; the larger cases below fail inside merges and partitions.
+// Short lists sort by insertion. The larger cases below fail inside merges and partitions.
 resource type SortItem {
     out: Stdout,
     id: u64,
@@ -144,29 +143,34 @@ fn comparator_fail_8(out: Stdout) -> u64 {
     sort_fail_at(out, 8)
 }
 
-// Admission of five resource holders is exactly 5*8. It precedes every comparator
+// Admission of 21 resource holders is exactly 21*8. It precedes every comparator
 // call and element move, so the audit's cleanup sees the source order intact.
 resource type SourceOrderAudit {
     out: Stdout,
     values: List[SortItem]
 } drop(t) {
-    let mut ids: u64 = 0
+    let mut valid = list.len(t.values) == 21
+    let mut id: u64 = 0
     for x in t.values {
-        ids = ids * 10 + x.id
+        valid = valid && x.id == id
+        id += 1
     }
-    let _ = stdout.write(t.out, if list.len(t.values) == 5 && ids == 1234 {
+    let _ = stdout.write(t.out, if valid {
         "ok"
     } else {
         "bad"
     })
 }
 
-// expect: stdout "okXXXXX"
-// expect: run scratch_capacity_atomic(out) = 40
+// expect: stdout "okXXXXXXXXXXXXXXXXXXXXX"
+// expect: run scratch_capacity_atomic(out) = 168
 fn scratch_capacity_atomic(out: Stdout) -> u64 {
     refused_request(isolate(fn() -> Result[(), Capacity] {
-        let SortAudit(out: o, values: take values) = sort_audit(out)
-        let mut audit = result.unwrap(SourceOrderAudit(out: o, values: take values))
+        let mut values: List[SortItem] = list.with_capacity(21)
+        for id in 0u64 .. 21 {
+            list.push(mut values, result.unwrap(SortItem(out, id, key: 21 - id)))
+        }
+        let mut audit = result.unwrap(SourceOrderAudit(out, values: take values))
         bound bytes 0 {
             list.sort_stable(mut audit.values, fn(a: SortItem, b: SortItem) -> Order {
                 let called: Option[u64] = None
@@ -178,7 +182,7 @@ fn scratch_capacity_atomic(out: Stdout) -> u64 {
 }
 
 // n=7 keys [3,2,1,0,3,2,1], stable ids [3,2,6,1,5,0,4].
-// 15 calls. Calls 3, 5-6, 9-10 and 12-15 hold an inserted element in scratch.
+// 15 calls cover both a completed insertion and an insertion interrupted by failure.
 resource type SevenAudit {
     out: Stdout,
     values: List[SortItem]

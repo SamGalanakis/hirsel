@@ -89,10 +89,26 @@ def fixture(upstream):
     return text
 
 
+def awfy_manifest(sources):
+    spec = inputs(ROOT, "harness")
+    spec["packages"][-1].update(package={"name": "awfy", "version": "1"}, sources=[
+        {"file": str(source), "modules": [source.stem], "signatures": False}
+        for source in sorted(sources)
+    ])
+    return spec
+
+
+def awfy_hirsel_command(artifacts, out, module, manifest, binary):
+    return [
+        artifacts["compiler"], "build", "--inputs", str(manifest),
+        "--entry", f"awfy@1/{module}/main", "--store", str(out / "store"),
+        "--backend", "llvm", "--release", "--debug-lines", "on", "--runtime", artifacts["runtime"],
+        "--cc", str(llvm_path() / "bin/clang"), "--grant", "Stdout", "--json", "-o", str(binary),
+    ]
+
+
 def hirsel(args, matched=False):
     artifacts = json.loads(args.artifacts.read_text())
-    compiler, runtime = (artifacts[key] for key in ("compiler", "runtime"))
-    spec = inputs(ROOT, "harness")
     rap_data = args.out / "rap.json"
     rap_data.write_bytes(fixture(args.upstream).encode("utf-8"))
     rap_digest = sha256(rap_data)
@@ -108,23 +124,13 @@ def hirsel(args, matched=False):
             "trees.towers_benchmark(disks)": "linked_small.towers_benchmark(disks)",
         })
         sources += [harness, *variants.glob("*.hirsel")]
-    spec["packages"][-1].update(package={"name": "awfy", "version": "1"}, sources=[
-        {"file": str(source), "modules": [source.stem], "signatures": False}
-        for source in sorted(sources)
-    ])
     out = args.out
     manifest = out / "hirsel-inputs.json"
-    manifest.write_text(json.dumps(spec))
+    manifest.write_text(json.dumps(awfy_manifest(sources)))
     env = getattr(args, "env", capped_env(out))
     for module in args.hirsel_entries:
         binary = out / f"hirsel-{module}"
-        command = [
-            compiler, "build", "--inputs", str(manifest),
-            "--entry", f"awfy@1/{module}/main", "--store", str(out / "store"),
-            "--backend", "llvm", "--release", "--debug-lines", "on", "--runtime", runtime,
-            "--cc", str(llvm_path() / "bin/clang"),
-            "--grant", "Stdout", "--json", "-o", str(binary),
-        ]
+        command = awfy_hirsel_command(artifacts, out, module, manifest, binary)
         provenance = native_provenance(command, manifest) | {"rap_sha256": rap_digest}
         result = subprocess.run([ROOT / "tools/capped", *command],
                                 env=env, stdout=subprocess.PIPE)
@@ -143,13 +149,18 @@ def port(source, destination, replacements):
     destination.write_text(body)
 
 
-def goose_executable(compiler, source, output, env, cflags=()):
+AWFY_GOOSE_CFLAGS = ("-ffp-contract=off", "-gline-tables-only")
+
+
+def goose_release_commands(compiler, source, output, cflags=()):
     generated = output.with_suffix(".c")
-    command = [ROOT / "tools/capped"]
-    subprocess.run([*command, compiler, "-O2", "--standalone", "-o", generated, source],
-                   env=env, check=True)
-    subprocess.run([*command, "clang", "-O2", "-w", *cflags, generated, "-o", output,
-                    "-lm", "-pthread", "-ldl"], env=env, check=True)
+    return ([compiler, "-O2", "--standalone", "-o", generated, source],
+            ["clang", "-O2", "-w", *cflags, generated, "-o", output, "-lm", "-pthread", "-ldl"])
+
+
+def goose_executable(compiler, source, output, env, cflags=()):
+    for command in goose_release_commands(compiler, source, output, cflags):
+        subprocess.run([ROOT / "tools/capped", *command], env=env, check=True)
 
 
 def goose(args, matched=False):
@@ -165,12 +176,11 @@ def goose(args, matched=False):
     env = getattr(args, "env", capped_env(args.out))
     for module in args.goose_entries:
         goose_executable(args.goose, source / f"{module}.goose", args.out / f"goose-{module}",
-                         env, ("-ffp-contract=off", "-gline-tables-only"))
+                         env, AWFY_GOOSE_CFLAGS)
 
 
-def rust(args, matched=False):
-    source = args.out / "rust-src"
-    shutil.copytree(args.rust / "src", source)
+def stage_awfy_rust(port_root, source):
+    shutil.copytree(port_root / "src", source)
     main = source / "main.rs"
     port(main, main, {
         "fn run(name: &str, inner: i32)": "fn run(name: &str, inner: i32, input: &str)",
@@ -256,6 +266,12 @@ pub fn queens_inner(inner: i32) -> bool { (0..inner).all(|_| queens()) }""":
             "pub fn inner(inner: i32, input: &str) -> bool {\n    crate::small::verify_numbers(inner, input, 10000, |count| {",
         "s.start()": "s.start(count)",
     })
+    return main
+
+
+def rust(args, matched=False):
+    source = args.out / "rust-src"
+    main = stage_awfy_rust(args.rust, source)
     sources = [("harness", main)]
     if getattr(args, "hello", True):
         sources.append(("hello", HERE / "hello.rs"))

@@ -5,7 +5,7 @@
 pub const TAG: u8 = 0xff;
 pub const POINTS_TAG: u8 = 0xfe;
 /// The linked entry checks the native runtime ABI through its source table decoder.
-pub const POINTS_TABLE_SYMBOL: &str = "hirsel_core_annex_source_table_v4";
+pub const POINTS_TABLE_SYMBOL: &str = "hirsel_core_annex_source_table_v5";
 pub const TABLE_SYMBOL: &str = "hirsel_core_relative_source_table_v3";
 /// Every linked site word is below this bound, so code materialises it as a
 /// sign-extended 32-bit immediate. A word is the file's first site plus a
@@ -58,12 +58,15 @@ pub fn position(markers: &[u8], offset: usize) -> (usize, usize) {
 
 const POINTS_PER_BLOCK: usize = 64;
 const BLOCK_OFFSET_BYTES: usize = size_of::<u64>();
+const INLINE_COLUMNS: u64 = 64;
 
 /// Encode sorted, unique positions in site order. A directory gives the
-/// offset of each block relative to the byte after the tag. Inside a block,
-/// a ULEB128 word with low bit zero advances the column by the upper bits.
-/// A word with low bit one advances the line and takes the next word as its
-/// absolute column. Each block starts from line and column zero.
+/// offset of each block relative to the byte after the tag. A byte from 1
+/// through 63 advances the column on the same line. Bytes 64 through 255
+/// advance the line by the upper two bits and give the one-based column
+/// in the lower six bits plus one. Zero introduces a ULEB128 word whose low
+/// bit selects a column delta or a line delta with a following absolute column.
+/// Each block starts from line and column zero.
 pub fn encode_points(points: &[(u32, u32)]) -> Vec<u8> {
     let directory = points.len().div_ceil(POINTS_PER_BLOCK) * BLOCK_OFFSET_BYTES;
     let mut output = Vec::with_capacity(1 + directory + points.len());
@@ -75,11 +78,22 @@ pub fn encode_points(points: &[(u32, u32)]) -> Vec<u8> {
         output[slot..slot + BLOCK_OFFSET_BYTES].copy_from_slice(&offset.to_le_bytes());
         let (mut last_line, mut last_column) = (0, 0);
         for &(line, column) in points {
-            if line == last_line {
-                push_uleb(&mut output, u64::from(column - last_column) << 1);
+            let lines = u64::from(line - last_line);
+            let column_value = u64::from(column);
+            if lines == 0 {
+                let delta = u64::from(column - last_column);
+                if (1..INLINE_COLUMNS).contains(&delta) {
+                    output.push(delta as u8);
+                } else {
+                    output.push(0);
+                    push_uleb(&mut output, delta << 1);
+                }
+            } else if lines <= 3 && (1..=INLINE_COLUMNS).contains(&column_value) {
+                output.push((lines * INLINE_COLUMNS + column_value - 1) as u8);
             } else {
-                push_uleb(&mut output, (u64::from(line - last_line) << 1) | 1);
-                push_uleb(&mut output, u64::from(column));
+                output.push(0);
+                push_uleb(&mut output, (lines << 1) | 1);
+                push_uleb(&mut output, column_value);
             }
             (last_line, last_column) = (line, column);
         }
@@ -94,13 +108,23 @@ pub fn point_position(points: &[u8], ordinal: usize) -> (usize, usize) {
     let mut bytes = &points[offset as usize..];
     let (mut line, mut column) = (0, 0);
     for _ in 0..=ordinal % POINTS_PER_BLOCK {
-        let marker = take_uleb(&mut bytes);
-        let delta = marker >> 1;
-        if marker & 1 == 0 {
-            column += delta;
+        let (&code, rest) = bytes.split_first().unwrap();
+        bytes = rest;
+        let code = u64::from(code);
+        if code == 0 {
+            let marker = take_uleb(&mut bytes);
+            let delta = marker >> 1;
+            if marker & 1 == 0 {
+                column += delta;
+            } else {
+                line += delta;
+                column = take_uleb(&mut bytes);
+            }
+        } else if code < INLINE_COLUMNS {
+            column += code;
         } else {
-            line += delta;
-            column = take_uleb(&mut bytes);
+            line += code / INLINE_COLUMNS;
+            column = code % INLINE_COLUMNS + 1;
         }
     }
     (line as usize, column as usize)

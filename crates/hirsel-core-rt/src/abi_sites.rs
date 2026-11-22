@@ -7,8 +7,8 @@ use hirsel_core_layout::source_positions;
 #[unsafe(export_name = "hirsel_core_relative_source_table_v3")]
 pub static RELATIVE_SOURCE_TABLE_V1: u8 = source_positions::TAG;
 
-#[unsafe(export_name = "hirsel_core_annex_source_table_v4")]
-pub static ANNEX_SOURCE_TABLE_V4: u8 = source_positions::POINTS_TAG;
+#[unsafe(export_name = "hirsel_core_annex_source_table_v5")]
+pub static ANNEX_SOURCE_TABLE_V5: u8 = source_positions::POINTS_TAG;
 
 #[repr(C)]
 pub struct SourceView {

@@ -504,7 +504,11 @@ impl OwnedNet {
                 *send_tail
             });
             (&raw mut (*this).network).write(NetworkRequest {
-                send_tail: if send_tail.is_null() { ptr::null() } else { tail },
+                send_tail: if send_tail.is_null() {
+                    ptr::null()
+                } else {
+                    tail
+                },
                 address: Address::default(),
                 sockets: &raw mut (*files).sockets,
                 until: deadline(context, until_kind, clock, deadline_ns),
@@ -607,8 +611,17 @@ pub(crate) unsafe fn owned_op(
         let mut state = std::mem::MaybeUninit::<OwnedNet>::uninit();
         let this = state.as_mut_ptr();
         let routing = match OwnedNet::init(
-            this, context, op, key, operand, send_tail, max_receive, until_kind, clock,
-            deadline_ns, site,
+            this,
+            context,
+            op,
+            key,
+            operand,
+            send_tail,
+            max_receive,
+            until_kind,
+            clock,
+            deadline_ns,
+            site,
         ) {
             Ok(routing) => routing,
             Err(outcome) => return outcome,
@@ -646,8 +659,17 @@ unsafe fn returnable_op(
         let this: *mut OwnedNet = crate::tasks::held_wait();
         let outcome = if *word == 0 {
             if let Err(outcome) = OwnedNet::init(
-                this, context, op, key, operand, send_tail, max_receive, until_kind, clock,
-                deadline_ns, site,
+                this,
+                context,
+                op,
+                key,
+                operand,
+                send_tail,
+                max_receive,
+                until_kind,
+                clock,
+                deadline_ns,
+                site,
             ) {
                 return outcome.outcome();
             }

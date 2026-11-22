@@ -309,11 +309,11 @@ operations it names; nothing else about them may be inferred from an implementat
   `list.sort_stable(mut xs, before)` permutes `xs` so that no element is followed by one
   that `before` orders `Less` than it, keeping the original order of elements it orders
   `Equal`; when `before` is not a total preorder the result is still a permutation of `xs`.
-  For two or more elements it admits one scratch block of `len` elements as a `List[T]`
-  ([MEM-24](budgets.md#mem-24-logical-charges)) before moving any, and refunds it before it
-  returns; a refused scratch leaves `xs` unchanged. A failure inside `before` leaves `xs` holding
-  every element it had, in an unspecified order, refunds the scratch and propagates. The
-  number and order of calls to `before` is unspecified.
+  Lists of up to 20 elements need no scratch admission. For longer lists it admits one
+  scratch block as a `List[T]` ([MEM-24](budgets.md#mem-24-logical-charges)) before moving any,
+  and refunds it before it returns. A refused scratch leaves `xs` unchanged. A failure
+  inside `before` leaves `xs` holding every element it had, in an unspecified order,
+  refunds the scratch and propagates. The number and order of calls to `before` is unspecified.
 - **Deques and heaps.** `deque.push_back` and `deque.push_front` add at either end of a
   `Deque[T]`, and `heap.push` adds to a `Heap[T]`; a refused growth leaves the collection
   unchanged and `x` untaken. `deque.pop_front`, `deque.pop_back` and `heap.pop` remove and

@@ -369,6 +369,7 @@ tags!(RtOp {
     56 => SpawnUnit { x, r },
     57 => FrameRecord,
     58 => Returnable(part0),
+    59 => ZeroBytes,
 });
 
 tags!(Wait {

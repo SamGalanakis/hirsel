@@ -21,6 +21,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -30,6 +31,7 @@ from std_native import wait_load
 ROOT = Path(__file__).resolve().parents[2]
 COMPILER_TARGET = '//:hirsel-core-driver-bin-hirsel'
 RUNTIME_TARGET = '//:hirsel-core-rt-archives'
+ALLOCATION_RUNTIME_TARGET = '//:hirsel-core-rt-allocation-count-archives'
 PLATFORM = 'x86_64-unknown-linux-gnu'
 RUNTIME_VIEW = 'buck-out/v2/art/root/*/__hirsel-core-rt-archives__/hirsel-core-rt-archives/' + PLATFORM + '/libhirsel_core_rt.a'
 # Six directories below the checkout, as Buck's buck-out/v2/art/root/<cfg>/__<target>__/.
@@ -106,6 +108,9 @@ def check(path, recorded):
     path = Path(path).absolute()
     wanted = {Path(recorded['compiler']).absolute(): recorded['compiler_sha256'],
               Path(recorded['runtime']).absolute(): recorded['runtime_archive_sha256']}.get(path)
+    if wanted is None and 'allocation_runtime' in recorded:
+        if path == Path(recorded['allocation_runtime']).absolute():
+            wanted = recorded['allocation_runtime_sha256']
     if wanted is None:
         raise ValueError(f'{path} is not a pinned path of this identity; execute only its compiler or runtime')
     actual = sha256(path)
@@ -114,19 +119,38 @@ def check(path, recorded):
     return actual
 
 
-def build(threads=None):
-    """Buck locates cached outputs or builds exactly the canonical targets."""
+def build_outputs(targets, threads):
     with contextlib.redirect_stdout(sys.stderr):
         wait_load()
     command = [str(ROOT / '.buck2/bin/buck2'), 'build', '--target-platforms',
-               '//tools/buck2:release', COMPILER_TARGET, RUNTIME_TARGET, '--show-json-output']
+               '//tools/buck2:release', *targets, '--show-json-output']
     if threads is not None:
         command += ['--num-threads', str(threads)]
     completed = subprocess.run(command, cwd=ROOT, stdout=subprocess.PIPE, text=True, check=True)
     outputs = json.loads(completed.stdout)
-    compiler = ROOT / outputs['root' + COMPILER_TARGET]
-    runtime = ROOT / outputs['root' + RUNTIME_TARGET] / PLATFORM / 'libhirsel_core_rt.a'
-    return compiler, runtime
+    return {target: ROOT / outputs['root' + target] for target in targets}
+
+
+def allocation_linker(cc, directory):
+    """Sample the count at the same stdout boundaries as the shipping run."""
+    support = directory / 'allocation_count.o'
+    subprocess.run([cc, '-c', '-O2', '-Wall', '-Wextra', '-Werror',
+                    ROOT / 'core/tools/measurement_allocation_count.c', '-o', support], check=True)
+    wrapper = directory / 'allocation-cc'
+    wrapper.write_text('#!/bin/sh\nexec ' + shlex.quote(str(cc)) + ' "$@" '
+                       + shlex.quote(str(support)) + ' -Wl,--wrap=write\n')
+    wrapper.chmod(0o755)
+    return wrapper
+
+
+def phase_allocations(stderr):
+    counts = re.findall(r'^BENCH_ALLOCATIONS (READY|DONE) (\d+)$', stderr, re.M)
+    if [phase for phase, _ in counts] != ['READY', 'DONE']:
+        raise ValueError('expected one allocation count at READY and one at DONE')
+    start, end = (int(value) for _, value in counts)
+    if end < start:
+        raise ValueError('allocation count went backwards')
+    return end - start
 
 
 def main():
@@ -137,6 +161,8 @@ def main():
     p.add_argument('--runtime-profile', choices=['ordinary-release', 'checked', 'unknown'])
     p.add_argument('--diagnostic', action='store_true')
     p.add_argument('--threads', type=int, help='limit Buck parallelism when building')
+    p.add_argument('--allocation-counter', action='store_true',
+                   help='also build and pin the separate allocation-counting runtime')
     p.add_argument('--check', type=Path, metavar='PATH',
                    help='re-hash PATH and fail unless it matches --identity; call right before each batch')
     p.add_argument('--identity', type=Path, metavar='JSON', help='an earlier output of this tool, for --check')
@@ -144,6 +170,8 @@ def main():
     if bool(args.check) != bool(args.identity):
         p.error('--check and --identity go together')
     if args.check:
+        if args.allocation_counter:
+            p.error('--allocation-counter builds an archive and cannot be combined with --check')
         try:
             print(f'ok {check(args.check, json.loads(args.identity.read_text()))} {args.check}')
         except (OSError, ValueError, KeyError) as error:
@@ -152,8 +180,15 @@ def main():
     if bool(args.compiler) != bool(args.runtime):
         p.error('supply both --compiler and --runtime, or neither to build/locate them')
     try:
+        targets = []
         if args.compiler is None:
-            args.compiler, args.runtime = build(args.threads)
+            targets.extend([COMPILER_TARGET, RUNTIME_TARGET])
+        if args.allocation_counter:
+            targets.append(ALLOCATION_RUNTIME_TARGET)
+        outputs = build_outputs(targets, args.threads) if targets else {}
+        if args.compiler is None:
+            args.compiler = outputs[COMPILER_TARGET]
+            args.runtime = outputs[RUNTIME_TARGET] / PLATFORM / 'libhirsel_core_rt.a'
             args.compiler_profile = 'release'
         result = identity(args.compiler, args.runtime, args.compiler_profile,
                           args.runtime_profile, args.diagnostic)
@@ -162,6 +197,10 @@ def main():
                       compiler_source=str(args.compiler.absolute()), runtime_source=str(args.runtime.absolute()),
                       pins=str(ROOT / PINS), compiler_target=COMPILER_TARGET,
                       runtime_archive_target=RUNTIME_TARGET, target=PLATFORM)
+        if args.allocation_counter:
+            source = outputs[ALLOCATION_RUNTIME_TARGET] / PLATFORM / 'libhirsel_core_rt.a'
+            archive, digest = pin(source, 'runtime', 'libhirsel_core_rt-allocation-count', '.a', 0o444)
+            result.update(allocation_runtime=str(archive), allocation_runtime_sha256=digest)
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         p.error(str(error))
     print(json.dumps(result, indent=2))

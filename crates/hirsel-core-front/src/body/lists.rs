@@ -1581,6 +1581,32 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.list_arith(ArithOp::Mul, ArithMode::Wrapping, old_len, stride, n);
             let base = self.address(AddressBase::Value(data), &[Step::Byte(offset)], place, n);
             let base = self.pointer(base, n);
+            if let (Rep::Scalar(ty @ Ty::Scalar(s)), Some(value)) = (rep, value)
+                && !matches!(s, Scalar::Bool | Scalar::Char | Scalar::F32 | Scalar::F64)
+            {
+                // A large fill with integer zero writes the same bytes through
+                // rt.zero_bytes, which leaves never-backed pages untouched
+                // (hirsel-core-ir crate docs, "Zero fill").
+                let (bytes, _) =
+                    self.list_arith(ArithOp::Mul, ArithMode::Wrapping, count, stride, n);
+                let least =
+                    self.konst(Ty::Scalar(Scalar::U64), hirsel_core_ir::ZERO_FILL_MIN, n)?;
+                let large = self.list_compare(CompareOp::Ge, bytes, least, n);
+                let none = self.konst(ty, 0, n)?;
+                let zeroes = self.list_compare(CompareOp::Eq, value, none, n);
+                let both = self.list_bool(BinaryOp::BitAnd, large, zeroes, n);
+                let zero_fill = self.new_block(&[]);
+                let stores = self.new_block(&[]);
+                self.list_branch(both, zero_fill, stores, n);
+                self.start(zero_fill);
+                self.runtime_row(
+                    hirsel_core_ir::RtOp::ZeroBytes,
+                    &[Arg::Value(data), Arg::Value(base), Arg::Value(bytes)],
+                    n,
+                )?;
+                self.jump(commit, &[], n);
+                self.start(stores);
+            }
             let one = self.konst(Ty::Scalar(Scalar::U64), 1, n)?;
             let test = self.new_block(&[Ty::Scalar(Scalar::U64)]);
             let store = self.new_block(&[]);

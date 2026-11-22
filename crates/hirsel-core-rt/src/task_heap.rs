@@ -234,6 +234,17 @@ fn dedicated_index(payload: NonNull<u8>) -> &'static Mutex<Option<DedicatedIndex
     &SHARDS[(slice ^ (slice >> 6) ^ (slice >> 12)) % SHARDS.len()]
 }
 
+/// Whether `payload` starts a dedicated mapping's block: a private anonymous
+/// mapping that this heap made with `mmap` and owns whole.
+pub(crate) fn is_dedicated(payload: NonNull<u8>) -> bool {
+    payload.addr().get() & (SLAB - 1) == 0
+        && dedicated_index(payload)
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|index| index.contains_key(&payload.addr().get()))
+}
+
 #[cold]
 fn dedicated_page(payload: NonNull<u8>) -> PagePointer {
     dedicated_index(payload)
@@ -603,15 +614,10 @@ impl Local<'_> {
 
 #[inline(always)]
 fn finish_allocation(pointer: NonNull<u8>, class: Class) -> NonNull<u8> {
-    #[cfg(any(test, feature = "charge-observation"))]
-    crate::peak::allocated(pointer.as_ptr(), class.stride);
-    #[cfg(feature = "prof")]
-    crate::mem_prof::alloc(
-        pointer.as_ptr(),
-        class.stride,
-        crate::mem_prof::Backing::TaskHeap,
-    );
-    #[cfg(not(any(test, feature = "charge-observation")))]
+    #[cfg(feature = "allocation-count")]
+    crate::allocation_count::allocated();
+    crate::backing_observation::observe!(allocate, pointer.as_ptr(), class.stride, TaskHeap);
+    #[cfg(not(any(test, feature = "charge-observation", feature = "prof")))]
     let _ = class;
     pointer
 }
@@ -1375,10 +1381,7 @@ pub(crate) unsafe fn try_grow_in_place(
             allocation_check::resized(payload, slots.checked_bytes, bytes, kind);
             slots.checked_bytes = bytes;
         }
-        #[cfg(any(test, feature = "charge-observation"))]
-        crate::peak::resized(payload.as_ptr(), class.stride);
-        #[cfg(feature = "prof")]
-        crate::mem_prof::resize(payload.as_ptr(), old_bytes, class.stride);
+        crate::backing_observation::observe!(resize, payload.as_ptr(), old_bytes, class.stride);
         true
     }
 }
@@ -1402,10 +1405,11 @@ pub(crate) unsafe fn release_page(
 ) {
     // SAFETY: the outstanding slot pins the page through publication.
     let heap = unsafe { &page.as_ref().heap };
-    #[cfg(any(test, feature = "charge-observation"))]
-    crate::peak::deallocated(payload.as_ptr());
-    #[cfg(feature = "prof")]
-    crate::mem_prof::free(payload.as_ptr(), unsafe { Page::class(page) }.stride);
+    crate::backing_observation::observe!(
+        free,
+        payload.as_ptr(),
+        unsafe { Page::class(page) }.stride,
+    );
     #[cfg(feature = "memcheck")]
     // SAFETY: the outstanding slot pins its immutable kind.
     unsafe {

@@ -68,17 +68,47 @@ struct Script {
 }
 const SCRIPT: [Script; 6] = [
     // recv_exact(8): a short read of 3 after a spurious wake ...
-    Script { ready_in_issue: false, pending_resumes: 1, bytes: 3, cancel: false },
+    Script {
+        ready_in_issue: false,
+        pending_resumes: 1,
+        bytes: 3,
+        cancel: false,
+    },
     // ... and the rest, with readiness given before the stack is returned.
-    Script { ready_in_issue: true, pending_resumes: 0, bytes: 5, cancel: false },
+    Script {
+        ready_in_issue: true,
+        pending_resumes: 0,
+        bytes: 5,
+        cancel: false,
+    },
     // send_pair(carrier, tail).
-    Script { ready_in_issue: false, pending_resumes: 0, bytes: 0, cancel: false },
+    Script {
+        ready_in_issue: false,
+        pending_resumes: 0,
+        bytes: 0,
+        cancel: false,
+    },
     // recv_exact(12): 4 more.
-    Script { ready_in_issue: false, pending_resumes: 0, bytes: 4, cancel: false },
+    Script {
+        ready_in_issue: false,
+        pending_resumes: 0,
+        bytes: 4,
+        cancel: false,
+    },
     // recv: EOF.
-    Script { ready_in_issue: false, pending_resumes: 0, bytes: 0, cancel: false },
+    Script {
+        ready_in_issue: false,
+        pending_resumes: 0,
+        bytes: 0,
+        cancel: false,
+    },
     // The second client's receive, cancelled after issue.
-    Script { ready_in_issue: false, pending_resumes: 0, bytes: 0, cancel: true },
+    Script {
+        ready_in_issue: false,
+        pending_resumes: 0,
+        bytes: 0,
+        cancel: true,
+    },
 ];
 
 fn log(s: String) {
@@ -96,7 +126,10 @@ fn script_of(request: *mut Request) -> (usize, Script) {
 unsafe extern "C" fn p_wait(_: *mut u8, request: *mut Request, _: u64) -> Wait {
     let (op, _) = script_of(request);
     log(format!("W{op}"));
-    Wait { kind: WAIT_READY, deadline_ns: 0 }
+    Wait {
+        kind: WAIT_READY,
+        deadline_ns: 0,
+    }
 }
 unsafe extern "C" fn p_issue(_: *mut u8, request: *mut Request, token: u64) -> Step {
     let (op, script) = script_of(request);
@@ -110,7 +143,10 @@ unsafe extern "C" fn p_issue(_: *mut u8, request: *mut Request, token: u64) -> S
     } else {
         PENDING.store(token, Ordering::SeqCst);
     }
-    Step { kind: STEP_PENDING, ..Step::default() }
+    Step {
+        kind: STEP_PENDING,
+        ..Step::default()
+    }
 }
 static RESUMES: Mutex<Vec<u8>> = Mutex::new(Vec::new());
 unsafe extern "C" fn p_resume(_: *mut u8, request: *mut Request, token: u64) -> Step {
@@ -129,7 +165,10 @@ unsafe extern "C" fn p_resume(_: *mut u8, request: *mut Request, token: u64) -> 
         if seen <= script.pending_resumes {
             log(format!("R{op} pending len={}", b.len));
             PENDING.store(token, Ordering::SeqCst);
-            return Step { kind: STEP_PENDING, ..Step::default() };
+            return Step {
+                kind: STEP_PENDING,
+                ..Step::default()
+            };
         }
         let value = if (*request).operation == crate::provider::SEND_PAIR {
             let tail = *(*request).path.cast::<*const Buffer>();
@@ -148,7 +187,10 @@ unsafe extern "C" fn p_resume(_: *mut u8, request: *mut Request, token: u64) -> 
         };
         Step {
             kind: STEP_DONE,
-            outcome: Outcome { value, ..Outcome::default() },
+            outcome: Outcome {
+                value,
+                ..Outcome::default()
+            },
             deadline_ns: 0,
         }
     }
@@ -156,13 +198,19 @@ unsafe extern "C" fn p_resume(_: *mut u8, request: *mut Request, token: u64) -> 
 unsafe extern "C" fn p_abort(_: *mut u8, request: *mut Request, _: u64, reason: u8) -> Outcome {
     let (op, _) = script_of(request);
     log(format!("A{op} reason={reason}"));
-    Outcome { error: IoError { tag: 7, code: 0 }, ..Outcome::default() }
+    Outcome {
+        error: IoError { tag: 7, code: 0 },
+        ..Outcome::default()
+    }
 }
 unsafe extern "C" fn p_deliver(_: *mut u8, request: *mut Request, outcome: Outcome) -> Outcome {
     let (op, _) = script_of(request);
     // SAFETY: pinned through delivery.
     let len = unsafe { (*request).buffer.len };
-    log(format!("D{op} value={} error={} len={len}", outcome.value, outcome.error.tag));
+    log(format!(
+        "D{op} value={} error={} len={len}",
+        outcome.value, outcome.error.tag
+    ));
     outcome
 }
 const PROVIDER: Provider = Provider {
@@ -221,20 +269,39 @@ unsafe fn boundary(
             MOVED.store(true, Ordering::SeqCst);
         }
         let site = OPS.lock().unwrap().len() as u64 - 1;
-        let tail = Buffer { data: TAIL.as_ptr().cast_mut(), len: 3, capacity: 0 };
+        let tail = Buffer {
+            data: TAIL.as_ptr().cast_mut(),
+            len: 3,
+            capacity: 0,
+        };
         match (job.returnable, send) {
             (true, false) => crate::net::hirsel_core_host_recv_bounded_rec(
                 context, word, KEY, carrier, max, 0, 0, 0, site,
             ),
             (true, true) => crate::net::hirsel_core_host_send_pair_rec(
-                context, word, KEY | 1, carrier, &tail, 0, 0, 0, site,
+                context,
+                word,
+                KEY | 1,
+                carrier,
+                &tail,
+                0,
+                0,
+                0,
+                site,
             ),
             (false, false) => {
                 crate::net::hirsel_core_host_recv_bounded(context, KEY, carrier, max, 0, 0, 0, site)
             }
-            (false, true) => {
-                crate::net::hirsel_core_host_send_pair(context, KEY | 1, carrier, &tail, 0, 0, 0, site)
-            }
+            (false, true) => crate::net::hirsel_core_host_send_pair(
+                context,
+                KEY | 1,
+                carrier,
+                &tail,
+                0,
+                0,
+                0,
+                site,
+            ),
         }
     }
 }
@@ -243,12 +310,25 @@ unsafe fn boundary(
 /// `want` bytes. False: EOF, an error, or (with its word set) a park.
 /// # Safety
 /// As `boundary`.
-unsafe fn recv_exact(context: *mut Context, job: &Job, word: *mut u64, carrier: *mut Buffer, want: usize) -> bool {
+unsafe fn recv_exact(
+    context: *mut Context,
+    job: &Job,
+    word: *mut u64,
+    carrier: *mut Buffer,
+    want: usize,
+) -> bool {
     // SAFETY: by the contract.
     unsafe {
         // The boundary writes both the word and the carrier.
         while word.read_volatile() != 0 || (&raw const (*carrier).len).read_volatile() < want {
-            let out = boundary(context, job, word, carrier, false, (want - (*carrier).len) as u64);
+            let out = boundary(
+                context,
+                job,
+                word,
+                carrier,
+                false,
+                (want - (*carrier).len) as u64,
+            );
             if *word != 0 || out.error != IoError::OK || out.status != 0 || out.value == 0 {
                 return false;
             }
@@ -271,7 +351,11 @@ unsafe extern "C" fn client(context: *mut Context, _: *mut u8, input: *mut u8) -
         // zeroed, so a fresh start sets its state and clears its callee's
         // word before the callee's first call.
         if (*a).word == 0 {
-            (*a).lender = Buffer { data: job.bytes, len: 0, capacity: CAP };
+            (*a).lender = Buffer {
+                data: job.bytes,
+                len: 0,
+                capacity: CAP,
+            };
             (*a).phase = 0;
             (*a).child = 0;
         }
@@ -281,7 +365,14 @@ unsafe extern "C" fn client(context: *mut Context, _: *mut u8, input: *mut u8) -
             let more = match phase {
                 0 => recv_exact(context, job, &raw mut (*a).child, &raw mut (*a).lender, 8),
                 1 => {
-                    let out = boundary(context, job, &raw mut (*a).child, &raw mut (*a).lender, true, 0);
+                    let out = boundary(
+                        context,
+                        job,
+                        &raw mut (*a).child,
+                        &raw mut (*a).lender,
+                        true,
+                        0,
+                    );
                     (*a).child == 0 && out.error == IoError::OK
                 }
                 2 => recv_exact(context, job, &raw mut (*a).child, &raw mut (*a).lender, 12),
@@ -317,8 +408,16 @@ unsafe extern "C" fn scribbler(_: *mut Context, _: *mut u8, _: *mut u8) -> u8 {
 }
 
 fn layout(bytes: usize) -> TaskLayout {
-    let value = |bytes| ValueLayout { bytes, align: 8, logical: 0, clean: None };
-    TaskLayout { input: value(bytes), result: value(0) }
+    let value = |bytes| ValueLayout {
+        bytes,
+        align: 8,
+        logical: 0,
+        clean: None,
+    };
+    TaskLayout {
+        input: value(bytes),
+        result: value(0),
+    }
 }
 unsafe fn join(context: *mut Context, task: *mut Task, logged: bool) {
     let mut unit = 0u8;
@@ -361,7 +460,13 @@ fn run_form(returnable: bool) -> (Vec<String>, Vec<usize>, Vec<usize>, u64) {
                 done: &mut done,
             };
             let client_task = hirsel_core_spawn(
-                context, 0, 64, (&mut job as *mut Job).cast(), client, layout(size_of::<Job>()), 0,
+                context,
+                0,
+                64,
+                (&mut job as *mut Job).cast(),
+                client,
+                layout(size_of::<Job>()),
+                0,
             )
             .task;
             // While the client waits, the root keeps running a fresh task that
@@ -397,7 +502,13 @@ fn run_form(returnable: bool) -> (Vec<String>, Vec<usize>, Vec<usize>, u64) {
                 done: &mut done2,
             };
             let second = hirsel_core_spawn(
-                context, 0, 64, (&mut job2 as *mut Job).cast(), client, layout(size_of::<Job>()), 0,
+                context,
+                0,
+                64,
+                (&mut job2 as *mut Job).cast(),
+                client,
+                layout(size_of::<Job>()),
+                0,
             )
             .task;
             while !FLAG[1].load(Ordering::SeqCst) {
@@ -413,10 +524,15 @@ fn run_form(returnable: bool) -> (Vec<String>, Vec<usize>, Vec<usize>, u64) {
     let mut out = (Vec::new(), Vec::new(), 0u64);
     let mut context = Context::new(1 << 20);
     let mut files = crate::host_file::Files::default();
-    files.connected.insert(KEY, (crate::net::Address::default(), PROVIDER));
+    files
+        .connected
+        .insert(KEY, (crate::net::Address::default(), PROVIDER));
     context.host_files = &mut files;
     crate::causes::task_start(&mut context).unwrap();
-    let mut input = Root { returnable, out: &mut out };
+    let mut input = Root {
+        returnable,
+        out: &mut out,
+    };
     // SAFETY: Root, its outputs and the context outlive the run.
     let failed = unsafe {
         run_root(
@@ -448,7 +564,10 @@ pub(super) fn body(_: u32) -> u8 {
     let stackful = run_form(false);
     let returnable = run_form(true);
     FLAG[0].store(true, Ordering::SeqCst);
-    assert!(returnable.3 > 0, "the returnable client never returned its stack");
+    assert!(
+        returnable.3 > 0,
+        "the returnable client never returned its stack"
+    );
     assert_eq!(stackful.3, 0);
     assert_eq!(
         (&returnable.0, &returnable.1, &returnable.2),
@@ -467,14 +586,23 @@ pub(super) fn handoff_body(_: u32) -> u8 {
     let returnable = run_form(true);
     let moved = MOVED.load(Ordering::SeqCst);
     FLAG[0].store(true, Ordering::SeqCst);
-    assert!(returnable.3 > 0, "the returnable client never returned its stack");
-    assert!(moved, "the returnable client never resumed on another thread");
+    assert!(
+        returnable.3 > 0,
+        "the returnable client never returned its stack"
+    );
+    assert!(
+        moved,
+        "the returnable client never resumed on another thread"
+    );
     assert_eq!(
         (&returnable.0, &returnable.1, &returnable.2),
         (&stackful.0, &stackful.1, &stackful.2),
         "after a hand-off, the returnable form's provider sequence and carrier lengths differ from the stackful form's"
     );
-    served(0, "the returnable client resumed on another thread and matched the stackful one");
+    served(
+        0,
+        "the returnable client resumed on another thread and matched the stackful one",
+    );
     0
 }
 

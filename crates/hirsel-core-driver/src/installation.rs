@@ -477,10 +477,10 @@ pub(crate) fn prebuild_release(
     let product = crate::Driver::default().check(request, meter)?;
     let identity =
         |bytes: &[u8]| crate::tool_inputs::runtime_identity(ContentHash::of_bytes(bytes));
-    let mut variants = vec![(identity(runtime), false), (identity(runtime), true)];
-    variants.extend(recording.map(|bytes| (identity(bytes), false)));
+    let mut runtimes = vec![identity(runtime)];
+    runtimes.extend(recording.map(identity));
     product
-        .prebuild_release_std(target, &variants)
+        .prebuild_release_std(target, &runtimes)
         .map_err(|stop| io::Error::other(format!("prebuilding the release std: {stop}")))?;
     meter.finish("std product/release prebuild");
     Ok(())

@@ -234,6 +234,14 @@ pub fn release_site_owner(item: &DefPath) -> DefPath {
     owner
 }
 
+/// Synthetic DWARF file identity for release-code locations numbered by
+/// the instructions that use them. The link binds those ordinals to sources.
+pub fn release_debug_owner(item: &DefPath) -> DefPath {
+    let mut owner = release_site_owner(item);
+    owner.0.modules.insert(0, "$debug".into());
+    owner
+}
+
 /// The symbol of the site numbered `ordinal` among those of `item`'s owner
 /// ([`release_site_owner`]).
 pub fn release_site_symbol(item: &DefPath, ordinal: u32) -> String {

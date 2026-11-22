@@ -15,6 +15,30 @@ LLVM's inline stack-probe loops can use a temporary CFA register (`r11` on
 x86-64 and `x9` on AArch64). A sample inside such a range with that register
 absent is `eval_error` with stack root `failed`.
 
+Across 26 x86-64 AWFY and LangArena executables, LLVM and fiber unwind
+metadata added 112,792 bytes of `.eh_frame` (4.26% of Hirsel function text)
+and 11,680 bytes of `.eh_frame_hdr`. Every one of the 1,408 Hirsel function
+symbols in those images had FDE coverage. The largest instruction increase
+across the 72 checked workloads was 0.0793%.
+
+## DWARF and symbol resolution
+
+Both compilers extract source-relative debug rows when they emit native code.
+The LLVM release cache identifies locations by emitted instruction order, so
+source-coordinate edits can reuse code while rebinding its debug rows.
+The link step resolves these rows to file, line and column, with the inlined
+call chain and Hirsel definition path where available. It writes a separate
+ELF DWARF file beside the executable. A GNU build ID selects
+`.build-id/XX/REST.debug`, where `XX` is the first byte in hex. If the image
+has no GNU build ID, its exact byte digest selects `.hirsel-debug/DIGEST.debug`.
+`--debug-lines on` also embeds the DWARF. Object emission is the same with
+either flag setting.
+
+A resolver reports `full_dwarf` when the image embeds DWARF or the detached
+file matches its GNU build ID or exact image digest. `symtab_only` provides
+ELF function names when the image has a symbol table. `offsets_only` reports
+the mapping and relative PC when neither source is available.
+
 ## Profile file
 
 A `.hprof` is a self-contained SQLite database with `application_id =

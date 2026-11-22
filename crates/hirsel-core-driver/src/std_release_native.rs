@@ -192,7 +192,7 @@ fn a_separate_std_is_the_std_products_alone() {
             let runtime = crate::tool_inputs::runtime_identity(hirsel_core_ids::ContentHash::of_bytes(
                 &std::fs::read(&options.runtime).unwrap(),
             ));
-            product.prebuild_release_std(&options.target, &[(runtime, options.debug_lines)]).unwrap();
+            product.prebuild_release_std(&options.target, &[runtime]).unwrap();
         }
         let code = crate::code_store::CodeStore::new(dir.path().join(name).join("code"));
         let reached = product.reachable(&entry, options.instance_limit).unwrap();

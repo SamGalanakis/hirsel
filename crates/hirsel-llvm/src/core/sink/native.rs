@@ -3,6 +3,8 @@
 //! order. Forward locals are typed placeholders replaced at their definition.
 use super::*;
 use crate::construction::{self as llvm, Api, Output, Raw};
+use hirsel_core_ids::DefPath;
+use hirsel_core_ir::source::{ReleaseSite, release_debug_owner};
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -36,7 +38,34 @@ enum TempSlot {
     Defined(Raw),
 }
 
-pub(crate) struct NativeSink {
+#[derive(Default)]
+struct ReleaseDebug<'a> {
+    items: &'a [DefPath],
+    pending: HashMap<usize, (u32, u32, usize)>,
+    ordinals: HashMap<(u32, u32), u32>,
+    next: HashMap<DefPath, u32>,
+    sites: Vec<ReleaseSite>,
+}
+
+impl ReleaseDebug<'_> {
+    fn line(&mut self, item: u32, start: u32) -> u64 {
+        let ordinal = self.ordinals.entry((item, start)).or_insert_with(|| {
+            let item = &self.items[item as usize];
+            let next = self.next.entry(release_debug_owner(item)).or_default();
+            let ordinal = *next;
+            *next += 1;
+            self.sites.push(ReleaseSite {
+                item: item.clone(),
+                start,
+                ordinal,
+            });
+            ordinal
+        });
+        u64::from(*ordinal) + 1
+    }
+}
+
+pub(crate) struct NativeSink<'a> {
     context: Rc<llvm::Context>,
     api: &'static Api,
     unit: Raw,
@@ -48,8 +77,9 @@ pub(crate) struct NativeSink {
     bound: HashMap<Local, Local>,
     blocks: HashMap<Label, Raw>,
     name: String,
+    release_debug: Option<ReleaseDebug<'a>>,
 }
-impl Drop for NativeSink {
+impl Drop for NativeSink<'_> {
     fn drop(&mut self) {
         if !self.unit.is_null() {
             // SAFETY: the sink exclusively owns its unit until `finish`.
@@ -57,7 +87,7 @@ impl Drop for NativeSink {
         }
     }
 }
-impl NativeSink {
+impl<'a> NativeSink<'a> {
     pub fn new(context: Rc<llvm::Context>) -> Self {
         Self {
             api: context.api,
@@ -71,7 +101,38 @@ impl NativeSink {
             bound: HashMap::new(),
             blocks: HashMap::new(),
             name: String::new(),
+            release_debug: None,
         }
+    }
+
+    pub fn release(context: Rc<llvm::Context>, items: &'a [DefPath]) -> Self {
+        let mut sink = Self::new(context);
+        sink.release_debug = Some(ReleaseDebug {
+            items,
+            ..ReleaseDebug::default()
+        });
+        sink
+    }
+
+    pub fn take_debug_sites(&mut self) -> Vec<ReleaseSite> {
+        self.release_debug.take().unwrap().sites
+    }
+
+    fn debug_location(&mut self, id: usize) -> Raw {
+        if let Some(debug) = &mut self.release_debug
+            && let Some((item, start, scope)) = debug.pending.remove(&id)
+        {
+            let line = debug.line(item, start);
+            self.metadata(
+                id,
+                &Metadata::Location {
+                    line,
+                    scope,
+                    column: 1,
+                },
+            );
+        }
+        self.md(id)
     }
     /// The finished module, or the first global referenced but never defined.
     pub fn finish(mut self) -> std::result::Result<llvm::NativeModule, String> {
@@ -383,7 +444,7 @@ impl NativeSink {
     }
 }
 
-impl Sink for NativeSink {
+impl Sink for NativeSink<'_> {
     fn global(&mut self, g: &Global) {
         let ty = self.ty(&g.ty);
         let init = g
@@ -467,6 +528,14 @@ impl Sink for NativeSink {
                 } => {
                     let scope = self.md(*scope);
                     (api.di_location)(u, *line as u32, *column, scope)
+                }
+                Metadata::ReleaseLocation { item, start, scope } => {
+                    self.release_debug
+                        .as_mut()
+                        .unwrap()
+                        .pending
+                        .insert(id, (*item, *start, *scope));
+                    return;
                 }
                 Metadata::LexicalBlockFile { scope, file } => {
                     let (scope, file) = (self.md(*scope), self.md(*file));
@@ -736,7 +805,7 @@ impl Sink for NativeSink {
             }
         };
         if let Some(location) = location {
-            let location = self.md(location);
+            let location = self.debug_location(location);
             // SAFETY: a location node of this unit on its instruction.
             unsafe { (api.location)(u, value, location) }
         }

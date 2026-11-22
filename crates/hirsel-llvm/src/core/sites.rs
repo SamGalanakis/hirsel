@@ -147,6 +147,7 @@ pub(super) fn debug_plan(
     step_dispatch: &[Option<FuncId>],
     failures: &failure::Failures,
     call_layouts: &hirsel_core_ir::native_layout::CallLayouts,
+    release: bool,
     next: &mut usize,
     sink: &mut dyn Sink,
 ) -> DebugPlan {
@@ -157,6 +158,7 @@ pub(super) fn debug_plan(
         id
     };
     let mut files = std::collections::BTreeMap::new();
+    let mut owners = std::collections::BTreeMap::new();
     for body in module.functions.iter().filter_map(|f| f.body.as_ref()) {
         for anchor in body
             .inst_anchors
@@ -165,9 +167,19 @@ pub(super) fn debug_plan(
             .chain(body.blocks.iter().filter_map(|b| b.anchor.as_ref()))
         {
             files.entry(anchor.item.0).or_insert_with(|| {
-                node(Metadata::File {
-                    filename: module.items[anchor.item.index()].to_string(),
-                })
+                let item = &module.items[anchor.item.index()];
+                if release {
+                    let owner = hirsel_core_ir::source::release_debug_owner(item);
+                    *owners.entry(owner.clone()).or_insert_with(|| {
+                        node(Metadata::File {
+                            filename: owner.to_string(),
+                        })
+                    })
+                } else {
+                    node(Metadata::File {
+                        filename: item.to_string(),
+                    })
+                }
             });
         }
     }
@@ -179,9 +191,12 @@ pub(super) fn debug_plan(
     let generated_file = node(Metadata::File {
         filename: "<generated>".into(),
     });
-    let unit = node(Metadata::CompileUnit {
-        file: files.values().next().copied().unwrap_or(generated_file),
-    });
+    let file = if release {
+        generated_file
+    } else {
+        files.values().next().copied().unwrap_or(generated_file)
+    };
+    let unit = node(Metadata::CompileUnit { file });
     let flag = |key: &str, value| Metadata::Tuple {
         distinct: false,
         items: vec![
@@ -234,10 +249,7 @@ pub(super) fn debug_plan(
             column: 0,
             scope,
         });
-        let mut scopes = first
-            .into_iter()
-            .map(|anchor| (anchor.item.0, scope))
-            .collect::<std::collections::BTreeMap<_, _>>();
+        let mut scopes = std::collections::BTreeMap::from([(file, scope)]);
         let mut locations = std::collections::BTreeMap::new();
         for anchor in body
             .inst_anchors
@@ -245,19 +257,25 @@ pub(super) fn debug_plan(
             .flatten()
             .chain(body.blocks.iter().filter_map(|b| b.anchor.as_ref()))
         {
-            let scope = *scopes.entry(anchor.item.0).or_insert_with(|| {
-                node(Metadata::LexicalBlockFile {
-                    scope,
-                    file: files[&anchor.item.0],
-                })
-            });
+            let file = files[&anchor.item.0];
+            let scope = *scopes
+                .entry(file)
+                .or_insert_with(|| node(Metadata::LexicalBlockFile { scope, file }));
             locations
                 .entry((anchor.item.0, anchor.start))
                 .or_insert_with(|| {
-                    node(Metadata::Location {
-                        line: u64::from(anchor.start) + 1,
-                        column: 1,
-                        scope,
+                    node(if release {
+                        Metadata::ReleaseLocation {
+                            item: anchor.item.0,
+                            start: anchor.start,
+                            scope,
+                        }
+                    } else {
+                        Metadata::Location {
+                            line: u64::from(anchor.start) + 1,
+                            column: 1,
+                            scope,
+                        }
                     })
                 });
         }

@@ -1436,9 +1436,9 @@ fn answer_hit(
     let rendered = hit.render();
     let mut stopped = None;
     let native = match (output_path, &hit.executable) {
-        (Some(path), Some(bytes)) => {
+        (Some(path), Some(binary)) => {
             let product = hit.build(path).expect("a stored executable has its build");
-            match crate::native::deliver(path, bytes) {
+            match binary.deliver(path) {
                 Ok(()) => Some(product),
                 Err(error) => {
                     stopped = Some(crate::native::output_stop(&error));

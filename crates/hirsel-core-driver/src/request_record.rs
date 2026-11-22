@@ -210,7 +210,7 @@ pub(crate) struct Value {
 pub(crate) struct Hit {
     pub(crate) value: Value,
     names: Vec<String>,
-    pub(crate) executable: Option<Vec<u8>>,
+    pub(crate) executable: Option<crate::native_debug::NativeImage>,
 }
 
 /// The value stored under `key`, when the current limits cover its own and a
@@ -249,8 +249,11 @@ pub(crate) fn lookup(
     let executable = match (&value.native, &request.native_store) {
         (None, _) => None,
         (Some(native), Some(native_store)) => {
-            match Store::new(native_store)?.get(native.identity)? {
-                Some(bytes) => Some(bytes),
+            match crate::native_debug::NativeImage::load(
+                &Store::new(native_store)?,
+                native.identity,
+            )? {
+                Some(binary) => Some(binary),
                 None => return Ok(Err(Miss::Executable)),
             }
         }

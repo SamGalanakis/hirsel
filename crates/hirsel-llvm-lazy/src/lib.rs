@@ -159,6 +159,7 @@ impl Held for Unheld {
 pub struct ReleaseUnit {
     module: construction::NativeModule,
     pub sites: Vec<hirsel_core_ir::source::ReleaseSite>,
+    pub debug_sites: Vec<hirsel_core_ir::source::ReleaseSite>,
 }
 
 impl ReleaseUnit {
@@ -169,10 +170,14 @@ impl ReleaseUnit {
     ) -> Result<Self, String> {
         let context = std::rc::Rc::new(construction::Context::with_anonymous_locals(true)?);
         let neutral = core::step_neutral_program(&[module]);
-        let (module, sites) =
+        let (module, sites, debug_sites) =
             core::emit_release_unit(module, context, facts, observe_charge, &neutral)
                 .map_err(|error| error.to_string())?;
-        Ok(Self { module, sites })
+        Ok(Self {
+            module,
+            sites,
+            debug_sites,
+        })
     }
 
     /// What the unit's module records before whole-program optimisation.

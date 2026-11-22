@@ -25,7 +25,7 @@ fn unit_key(
     )
 }
 
-/// A part's key: the compiler, libLLVM, target and debug lines
+/// A part's key: the compiler, libLLVM and target
 /// (`generator`), the target machine's settings as libLLVM states them
 /// (`machine`: CPU, features, relocation and code model, codegen options), and
 /// the part's key (`ir`: what its bitcode records), which is all a part's
@@ -41,7 +41,7 @@ fn part_key(
     )
 }
 
-/// A release tail's key: the compiler, libLLVM, target and debug lines
+/// A release tail's key: the compiler, libLLVM and target
 /// (`generator`), the machine text and the linkage the definition's part
 /// does not keep (`key`), and the key of the part at the cut (`ir`), which is
 /// all the tail's output is a function of.
@@ -147,8 +147,9 @@ struct Parts {
     schema: u32,
     parts: Vec<ContentHash>,
     sites: Vec<hirsel_core_ir::source::ReleaseSite>,
+    debug_sites: Vec<hirsel_core_ir::source::ReleaseSite>,
 }
-const PARTS_SCHEMA: u32 = 3;
+const PARTS_SCHEMA: u32 = 4;
 
 type Held = (
     crate::store::Bare,
@@ -299,7 +300,7 @@ pub(super) fn emit_release_image(
         crate::native_facts::get(store, facts_key, &refs, &[])?;
     let target =
         hirsel_core_layout::Target::from_triple(&options.target).expect("supported native target");
-    let generator = (compiler, llvm, &options.target, options.debug_lines);
+    let generator = (compiler, llvm, &options.target);
     let unit = unit_key(
         &(
             &generator,
@@ -322,13 +323,14 @@ pub(super) fn emit_release_image(
     };
     let mut held = Vec::new();
     let mut sites = Vec::new();
+    let mut debug_sites = Vec::new();
     let mut lowered = None;
     let mut optimized_key = None;
     if let Some((record, objects)) = load_parts(store, &shared, unit)? {
         sites = record.sites;
+        debug_sites = record.debug_sites;
         held = objects;
     } else if closed_executable
-        && !options.debug_lines
         && target == hirsel_core_layout::Target::X86_64Linux
         && std::env::var_os("HIRSEL_LLVM_PRINTED_ORACLE").is_none()
     {
@@ -339,6 +341,7 @@ pub(super) fn emit_release_image(
         )
         .map_err(emit)?;
         sites = std::mem::take(&mut release.sites);
+        debug_sites = std::mem::take(&mut release.debug_sites);
         let key = crate::native::key(
             "hirsel.core-release-ir.v2",
             &(
@@ -352,6 +355,7 @@ pub(super) fn emit_release_image(
         )?;
         if let Some((mut record, objects)) = load_parts(store, &shared, key)? {
             record.sites.clone_from(&sites);
+            record.debug_sites.clone_from(&debug_sites);
             store.put_keyed(unit, &encode(&record)?)?;
             held = objects;
         } else {
@@ -367,7 +371,7 @@ pub(super) fn emit_release_image(
                 module,
                 facts,
                 observe_charge: options.logical_charge_report.is_some(),
-                debug_lines: options.debug_lines,
+                debug_lines: true,
             })
             .collect::<Vec<_>>();
         let mut parts = Vec::new();
@@ -401,8 +405,7 @@ pub(super) fn emit_release_image(
             .map(|(part, &key)| (part.name.as_str(), key))
             .collect::<Vec<_>>();
         let cut = |object: &[u8], parts: &[(&str, ContentHash)]| {
-            hirsel_llvm_lazy::core::split_native_object(object, parts, options.debug_lines)
-                .map_err(emit)
+            hirsel_llvm_lazy::core::split_native_object(object, parts, true).map_err(emit)
         };
         let mut made = match program.objects.as_slice() {
             [object] => cut(object, &missed)?,
@@ -430,11 +433,13 @@ pub(super) fn emit_release_image(
             schema: PARTS_SCHEMA,
             parts,
             sites: Vec::new(),
+            debug_sites: Vec::new(),
         };
         if let Some(key) = optimized_key {
             store.put_keyed(key, &encode(&record)?)?;
         }
         record.sites.clone_from(&sites);
+        record.debug_sites.clone_from(&debug_sites);
         store.put_keyed(unit, &encode(&record)?)?;
     }
     let mut private_variants = modules
@@ -465,6 +470,7 @@ pub(super) fn emit_release_image(
         closed_image: contained,
         launch_digest_unused,
         release_sites: sites,
+        release_debug_sites: debug_sites,
     })
 }
 

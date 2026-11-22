@@ -251,14 +251,13 @@ impl CheckProduct {
     }
 
     /// Lower and publish the release std of this product's library image for
-    /// release builds on `target` in each of `variants` (the identity of the
-    /// runtime archive linked, and whether debug lines are on), into the
+    /// release builds on `target` for each runtime archive, into the
     /// image's own store, which every build over the image reads first. A
     /// variant with a side already there keeps it.
     pub(crate) fn prebuild_release_std(
         &self,
         target: &str,
-        variants: &[(ContentHash, bool)],
+        runtimes: &[ContentHash],
     ) -> Result<(), NativeStop> {
         let image = self
             .image
@@ -266,10 +265,9 @@ impl CheckProduct {
             .ok_or_else(|| NativeStop::Entry("the release std is an image's".into()))?;
         let store = Store::new(&image.store_root().join(PREBUILT))?;
         let side = self.image_side()?;
-        for &(runtime, debug_lines) in variants {
+        for &runtime in runtimes {
             let generator = Generator {
                 target,
-                debug_lines,
                 observe_charge: false,
                 runtime,
             };
@@ -483,7 +481,7 @@ fn lower(
             module: &module,
             facts: &facts[0],
             observe_charge: options.observe_charge,
-            debug_lines: options.debug_lines,
+            debug_lines: true,
         }],
         &exports,
         target,
@@ -502,8 +500,7 @@ fn lower(
         .map(|(part, &key)| (part.name.as_str(), key))
         .collect::<Vec<_>>();
     let cut = |object: &[u8], parts: &[(&str, ContentHash)]| {
-        hirsel_llvm_lazy::core::split_native_object(object, parts, options.debug_lines)
-            .map_err(emit)
+        hirsel_llvm_lazy::core::split_native_object(object, parts, true).map_err(emit)
     };
     let mut objects = match program.objects.as_slice() {
         [object] => cut(object, &named)?,
@@ -573,7 +570,6 @@ fn lower(
 /// whatever a program's own limit.
 struct Generator<'a> {
     target: &'a str,
-    debug_lines: bool,
     observe_charge: bool,
     runtime: ContentHash,
 }
@@ -586,7 +582,6 @@ impl<'a> Generator<'a> {
     fn of(options: &'a NativeOptions, runtime: ContentHash) -> Self {
         Self {
             target: &options.target,
-            debug_lines: options.debug_lines,
             observe_charge: options.logical_charge_report.is_some(),
             runtime,
         }
@@ -605,7 +600,6 @@ impl<'a> Generator<'a> {
                 llvm,
                 self.runtime,
                 self.target,
-                self.debug_lines,
                 self.observe_charge,
                 !hirsel_llvm_lazy::core::facts_enabled(),
             ),

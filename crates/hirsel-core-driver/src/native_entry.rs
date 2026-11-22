@@ -47,6 +47,7 @@ pub(crate) struct Plan<'a> {
     cleanup: Option<String>,
     launch_digest_unused: bool,
     release_sites: &'a [hirsel_core_ir::source::ReleaseSite],
+    pub(crate) release_debug_sites: &'a [hirsel_core_ir::source::ReleaseSite],
     root_limit: u64,
     grant_mask: u64,
     net_rules: &'a [hirsel_core_net::GrantRule],
@@ -194,6 +195,7 @@ impl<'a> Plan<'a> {
             parameters,
             launch_digest_unused: launch_digest_unused && cleanup.is_none(),
             release_sites: &[],
+            release_debug_sites: &[],
             cleanup,
             root_limit: options.root_limit,
             grant_mask,
@@ -227,8 +229,10 @@ impl<'a> Plan<'a> {
     pub(crate) fn with_release_sites(
         mut self,
         sites: &'a [hirsel_core_ir::source::ReleaseSite],
+        debug_sites: &'a [hirsel_core_ir::source::ReleaseSite],
     ) -> Self {
         self.release_sites = sites;
+        self.release_debug_sites = debug_sites;
         self
     }
 
@@ -242,6 +246,7 @@ impl<'a> Plan<'a> {
         &self,
         target: &str,
         sources: &SourceMap,
+        source_identity: hirsel_core_ids::ContentHash,
         revision: &[u8; 32],
         revisions: &[(String, [u8; 32])],
     ) -> Result<Vec<u8>> {
@@ -264,6 +269,7 @@ impl<'a> Plan<'a> {
         adapter::emit(&mut object, self, entry, signature)?;
         start::emit(&mut object, self, &data, entry, waits)?;
         let mut product = object.finish();
+        crate::native_debug::add_source_note(&mut product.object, source_identity);
         sites::define(&mut product.object, sources)?;
         sites::define_release(&mut product.object, sources, self.release_sites)?;
         product.object.write().map_err(error)

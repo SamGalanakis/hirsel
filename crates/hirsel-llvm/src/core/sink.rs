@@ -678,6 +678,11 @@ pub(super) enum Metadata {
         column: u32,
         scope: usize,
     },
+    ReleaseLocation {
+        item: u32,
+        start: u32,
+        scope: usize,
+    },
     LexicalBlockFile {
         scope: usize,
         file: usize,
@@ -986,6 +991,7 @@ impl Sink for TextSink {
                     .unwrap()
                 }
             }
+            Metadata::ReleaseLocation { .. } => unreachable!("release sites use the native sink"),
             Metadata::LexicalBlockFile { scope, file } => write!(
                 out,
                 "!DILexicalBlockFile(scope: !{scope}, file: !{file}, discriminator: 0)"

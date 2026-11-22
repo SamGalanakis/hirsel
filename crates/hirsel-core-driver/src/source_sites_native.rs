@@ -38,6 +38,14 @@ fn failure_sites_rebind(backend: Backend, optimize: bool, debug_lines: bool) {
             let file = object::File::parse(bytes.as_slice()).unwrap();
             assert!(file.sections().all(|s| !s.name().unwrap().starts_with(".debug")),
                 "release without line rows must not link a debug object");
+            let crate::native_debug::SymbolSource::DetachedDwarf(rows) =
+                crate::native_debug::resolve_symbols(&built.executable, &bytes, None).unwrap()
+            else {
+                panic!("missing detached source locations");
+            };
+            let positions = crate::native_debug::source_positions(&rows).unwrap();
+            assert!(positions.contains(&("app@1/main.hirsel".to_string(), line, 5)),
+                "detached line table lost the raising expression: {positions:?}");
         }
     };
     let cold = check(source).build(&entry, &options).unwrap();

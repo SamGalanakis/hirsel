@@ -2,6 +2,7 @@
 //! No code object is opened or changed here.
 use super::{elf, error};
 use gimli::write::{self, Address, AttributeValue, FileId, LineProgram, LineString, UnitEntryId};
+use hirsel_core_ids::DefPath;
 use hirsel_core_ir::source::*;
 use rustc_hash::FxHashMap;
 
@@ -51,16 +52,26 @@ impl FileIndex {
 struct Sources<'a> {
     map: &'a SourceMap,
     files: FxHashMap<u32, FileIndex>,
+    release: FxHashMap<DefPath, Vec<Option<(ItemSource, u32)>>>,
 }
 impl Sources<'_> {
     fn position(
         &mut self,
-        items: &[Option<ItemSource>],
+        items: &[DefPath],
         location: Option<NativeLocation>,
         lines: &mut LineProgram,
     ) -> Option<Position> {
         let location = location?;
-        let item = items[location.item as usize]?;
+        let owner = &items[location.item as usize];
+        let (item, start) = if let Some(&item) = self.map.items.get(owner) {
+            (item, location.start)
+        } else {
+            self.release
+                .get(owner)?
+                .get(location.start as usize)
+                .copied()
+                .flatten()?
+        };
         let index = self.files.entry(item.file).or_insert_with(|| {
             let source = &self.map.files[item.file as usize];
             let id = lines.add_file(
@@ -70,7 +81,7 @@ impl Sources<'_> {
             );
             FileIndex::new(id, &source.text)
         });
-        let offset = item.file_offset as usize + location.start as usize;
+        let offset = item.file_offset as usize + start as usize;
         if let Some(points) = self
             .map
             .points
@@ -109,22 +120,25 @@ fn location(unit: &mut write::Unit, id: UnitEntryId, p: Option<Position>, call: 
     }
 }
 
-fn range(unit: &mut write::Unit, id: UnitEntryId, ranges: &[CodeRange], base: usize) {
+fn range(
+    unit: &mut write::Unit,
+    id: UnitEntryId,
+    ranges: &[CodeRange],
+    address: impl Fn(CodeRange) -> Option<Address>,
+) {
+    let ranges = ranges
+        .iter()
+        .filter_map(|&r| {
+            Some(write::Range::StartLength {
+                begin: address(r)?,
+                length: r.end - r.begin,
+            })
+        })
+        .collect::<Vec<_>>();
     if ranges.is_empty() {
         return;
     }
-    let ranges = unit.ranges.add(write::RangeList(
-        ranges
-            .iter()
-            .map(|r| write::Range::StartLength {
-                begin: Address::Symbol {
-                    symbol: base + r.section as usize,
-                    addend: r.begin as i64,
-                },
-                length: r.end - r.begin,
-            })
-            .collect(),
-    ));
+    let ranges = unit.ranges.add(write::RangeList(ranges));
     unit.get_mut(id)
         .set(gimli::DW_AT_ranges, AttributeValue::RangeListRef(ranges));
 }
@@ -132,6 +146,7 @@ fn range(unit: &mut write::Unit, id: UnitEntryId, ranges: &[CodeRange], base: us
 pub(crate) fn bind<'a>(
     products: impl IntoIterator<Item = &'a NativeDebug>,
     sources: &SourceMap,
+    release: &[ReleaseSite],
     target: &str,
 ) -> Result<Vec<u8>, String> {
     let architecture = match hirsel_core_layout::Target::from_triple(target) {
@@ -139,11 +154,87 @@ pub(crate) fn bind<'a>(
         Some(hirsel_core_layout::Target::Aarch64Linux) => object::Architecture::Aarch64,
         None => return Err(format!("no native debug target {target}")),
     };
-    let mut object = object::write::Object::new(
+    let mut object = debug_object(architecture);
+    let mut symbols = Vec::new();
+    let mut dwarf = unit(products, sources, release, |section| {
+        let index = symbols.len();
+        symbols.push(object.add_symbol(object::write::Symbol {
+            name: section.symbol.as_bytes().to_vec(),
+            value: 0,
+            size: 0,
+            kind: object::SymbolKind::Unknown,
+            scope: object::SymbolScope::Linkage,
+            weak: false,
+            section: object::write::SymbolSection::Undefined,
+            flags: object::SymbolFlags::None,
+        }));
+        Some(Address::Symbol {
+            symbol: index,
+            addend: 0,
+        })
+    });
+    let mut sections = write::Sections::new(elf::Section::default());
+    dwarf.write(&mut sections).map_err(error)?;
+    elf::write_sections(&mut object, &sections, &symbols)?;
+    object.write().map_err(error)
+}
+
+fn debug_object(architecture: object::Architecture) -> object::write::Object<'static> {
+    object::write::Object::new(
         object::BinaryFormat::Elf,
         architecture,
         object::Endianness::Little,
-    );
+    )
+}
+
+pub(crate) fn bind_linked<'a>(
+    products: impl IntoIterator<Item = &'a NativeDebug>,
+    sources: &SourceMap,
+    release: &[ReleaseSite],
+    image: &[u8],
+) -> Result<Vec<u8>, String> {
+    use object::{Object as _, ObjectSymbol as _};
+    let file = object::File::parse(image).map_err(error)?;
+    let symbols = file
+        .symbols()
+        .filter_map(|symbol| {
+            let name = symbol.name().ok()?;
+            (name.starts_with("__hirsel_debug_") && symbol.section_index().is_some())
+                .then_some((name, symbol.address()))
+        })
+        .collect::<FxHashMap<_, _>>();
+    let mut dwarf = unit(products, sources, release, |section| {
+        symbols
+            .get(section.symbol.as_str())
+            .copied()
+            .map(Address::Constant)
+    });
+    let mut object = debug_object(file.architecture());
+    let mut sections = write::Sections::new(write::EndianVec::new(gimli::LittleEndian));
+    dwarf.write(&mut sections).map_err(error)?;
+    sections.for_each(|id, section| {
+        if !section.slice().is_empty() {
+            let index = object.add_section(
+                vec![],
+                id.name().as_bytes().to_vec(),
+                object::SectionKind::Debug,
+            );
+            object.append_section_data(index, section.slice(), 1);
+        }
+        Ok::<_, String>(())
+    })?;
+    super::detached::Identity::of(&file, image)
+        .map_err(error)?
+        .write_note(&mut object);
+    object.write().map_err(error)
+}
+
+fn unit<'a>(
+    products: impl IntoIterator<Item = &'a NativeDebug>,
+    sources: &SourceMap,
+    release: &[ReleaseSite],
+    mut section_address: impl FnMut(&CodeSection) -> Option<Address>,
+) -> write::DwarfUnit {
     let encoding = gimli::Encoding {
         format: gimli::Format::Dwarf32,
         version: 5,
@@ -170,50 +261,50 @@ pub(crate) fn bind<'a>(
     let mut sources = Sources {
         map: sources,
         files: FxHashMap::default(),
+        release: FxHashMap::default(),
     };
-    let mut symbols = Vec::new();
+    for binding in release {
+        let item = sources.map.items.get(&binding.item).copied();
+        let rows = sources
+            .release
+            .entry(release_debug_owner(&binding.item))
+            .or_default();
+        debug_assert_eq!(rows.len(), binding.ordinal as usize);
+        rows.push(item.map(|item| (item, binding.start)));
+    }
     let mut unit_ranges = Vec::new();
     let mut abstracts = FxHashMap::default();
     for product in products {
-        let base = symbols.len();
-        for section in &product.sections {
-            if section.size != 0 {
+        let addresses = product
+            .sections
+            .iter()
+            .map(&mut section_address)
+            .collect::<Vec<_>>();
+        for (section, &begin) in product.sections.iter().zip(&addresses) {
+            if let Some(begin) = begin.filter(|_| section.size != 0) {
                 unit_ranges.push(write::Range::StartLength {
-                    begin: Address::Symbol {
-                        symbol: symbols.len(),
-                        addend: 0,
-                    },
+                    begin,
                     length: section.size,
                 });
             }
-            symbols.push(object.add_symbol(object::write::Symbol {
-                name: section.symbol.as_bytes().to_vec(),
-                value: 0,
-                size: 0,
-                kind: object::SymbolKind::Unknown,
-                scope: object::SymbolScope::Linkage,
-                weak: false,
-                section: object::write::SymbolSection::Undefined,
-                flags: object::SymbolFlags::None,
-            }));
         }
-        let items = product
-            .items
-            .iter()
-            .map(|item| sources.map.items.get(item).copied())
-            .collect::<Vec<_>>();
+        let address = |r: CodeRange| match addresses[r.section as usize]? {
+            Address::Constant(base) => Some(Address::Constant(base + r.begin)),
+            Address::Symbol { symbol, addend } => Some(Address::Symbol {
+                symbol,
+                addend: addend + r.begin as i64,
+            }),
+        };
         let mut positions = FxHashMap::default();
         let mut position = |loc: Option<NativeLocation>, lines: &mut LineProgram| {
             *positions
                 .entry(loc)
-                .or_insert_with(|| sources.position(&items, loc, lines))
+                .or_insert_with(|| sources.position(&product.items, loc, lines))
         };
         for sequence in &product.sequences {
             let r = sequence.range;
-            lines.begin_sequence(Some(Address::Symbol {
-                symbol: base + r.section as usize,
-                addend: r.begin as i64,
-            }));
+            let Some(begin) = address(r) else { continue };
+            lines.begin_sequence(Some(begin));
             for row in &sequence.rows {
                 let p = position(row.source, &mut lines);
                 let target = lines.row();
@@ -273,7 +364,7 @@ pub(crate) fn bind<'a>(
             }
             location(&mut dwarf.unit, id, declaration, false);
             location(&mut dwarf.unit, id, position(scope.call, &mut lines), true);
-            range(&mut dwarf.unit, id, &scope.ranges, base);
+            range(&mut dwarf.unit, id, &scope.ranges, address);
         }
         for (scope, id) in product.scopes.iter().zip(&scopes) {
             if let Some(origin) = scope.origin {
@@ -292,10 +383,7 @@ pub(crate) fn bind<'a>(
             .set(gimli::DW_AT_ranges, AttributeValue::RangeListRef(ranges));
     }
     dwarf.unit.line_program = lines;
-    let mut sections = write::Sections::new(elf::Section::default());
-    dwarf.write(&mut sections).map_err(error)?;
-    elf::write_sections(&mut object, &sections, &symbols)?;
-    object.write().map_err(error)
+    dwarf
 }
 
 #[cfg(test)]

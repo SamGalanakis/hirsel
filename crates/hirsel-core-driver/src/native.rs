@@ -353,7 +353,7 @@ fn emit_unit(
                 optimize: options.optimize
                     || instance.definition.package_is("core", "1")
                     || instance.definition.package_is("std", "1"),
-                debug_lines: options.debug_lines,
+                debug_lines: true,
             },
             object_key,
             options.logical_charge_report.is_some(),
@@ -369,12 +369,10 @@ fn emit_unit(
                 hirsel_llvm_lazy::core::Optimization::None
             },
             options.logical_charge_report.is_some(),
-            options.debug_lines,
+            true,
         )
         .map_err(|e| e.to_string())
-        .and_then(|bytes| {
-            hirsel_llvm_lazy::core::finish_native_object(bytes, object_key, options.debug_lines)
-        }),
+        .and_then(|bytes| hirsel_llvm_lazy::core::finish_native_object(bytes, object_key, true)),
     }
 }
 
@@ -390,7 +388,6 @@ pub(crate) fn environment(options: &NativeOptions, runtime: ContentHash) -> io::
         &options.target,
         options.backend,
         options.optimize,
-        options.debug_lines,
         options.logical_charge_report.is_some(),
         !options.foreign_grants.is_empty(),
         matches!(options.backend, Backend::Llvm) && !hirsel_llvm_lazy::core::facts_enabled(),
@@ -532,6 +529,7 @@ struct Emitted {
     closed_image: bool,
     launch_digest_unused: bool,
     release_sites: Vec<hirsel_core_ir::source::ReleaseSite>,
+    release_debug_sites: Vec<hirsel_core_ir::source::ReleaseSite>,
 }
 
 impl CheckProduct {
@@ -1469,6 +1467,7 @@ fn direct_link(
     support_libs: &[&str],
     output: &Path,
     optimize: bool,
+    debug_lines: bool,
 ) -> Result<(), NativeStop> {
     // The editor runs under an empty environment, in an empty directory of
     // its own: a script's relative name finds nothing there
@@ -1482,6 +1481,9 @@ fn direct_link(
     if optimize {
         // Keep the executable's code revision even when no tape reads it.
         process.args(["--gc-sections", "--undefined=hirsel_code_revision"]);
+    }
+    if !debug_lines {
+        process.arg("--strip-debug");
     }
     let mut inserted = false;
     for argument in &recipe.args {
@@ -1678,10 +1680,11 @@ fn link_objects(
         )?,
     };
     let store = Store::new(&options.store)?;
-    let (bytes, linked) = if let Some(bytes) = cached(&store, link_key)? {
-        (bytes, false)
+    use crate::native_debug::NativeImage;
+    let (binary, linked) = if let Some(binary) = NativeImage::load(&store, link_key)? {
+        (binary, false)
     } else {
-        let mut sources = sources()?;
+        let sources = sources()?;
         let temp = store.scratch()?;
         let entry = temp.path().join("entry.o");
         // The entry's and the described instances' revisions are a function
@@ -1697,7 +1700,7 @@ fn link_objects(
             .collect();
         let output = temp.path().join("program");
         let compiled = objects.iter().filter(|o| o.compiled).count();
-        let debug = if options.debug_lines {
+        let rows = {
             let mut rows = Vec::with_capacity(objects.len());
             let mut refused = Vec::new();
             for object in objects {
@@ -1715,16 +1718,10 @@ fn link_objects(
             if !refused.is_empty() {
                 return Ok(Linked::Damaged(refused, compiled, counters));
             }
-            let debug = crate::native_debug::bind_side_products(
-                rows.iter().map(|d| &**d),
-                &sources,
-                &options.target,
-            )
-            .map_err(|error| NativeStop::Link(format!("native debug binding: {error}")))?;
-            Some(debug)
-        } else {
-            None
+            rows
         };
+        let debug_rows = || rows.iter().map(|d| &**d);
+        let bind_error = |error| NativeStop::Link(format!("native debug binding: {error}"));
         let expected_link = recipe.identity;
         let recapture = || {
             let recipe = crate::tool_inputs::recapture_link_recipe(&options.link, &options.target)
@@ -1807,12 +1804,27 @@ fn link_objects(
                 std::os::fd::AsRawFd::as_raw_fd(file)
             ))
         }));
-        crate::native_entry::retain_referenced(&mut sources, &inputs[1..])?;
+        let mut runtime_sources = sources.clone();
+        crate::native_entry::retain_referenced(&mut runtime_sources, &inputs[1..])?;
+        let source_identity = assembly.map_or(sources_digest, |(root, _)| root);
         let bytes = entry_plan
-            .emit(&options.target, &sources, &revision.0, &revisions)
+            .emit(
+                &options.target,
+                &runtime_sources,
+                source_identity,
+                &revision.0,
+                &revisions,
+            )
             .map_err(|error| NativeStop::Link(format!("entry object: {error}")))?;
         std::fs::write(&entry, bytes)?;
-        if let Some(debug) = debug {
+        if options.debug_lines {
+            let debug = crate::native_debug::bind_side_products(
+                debug_rows(),
+                &sources,
+                entry_plan.release_debug_sites,
+                &options.target,
+            )
+            .map_err(bind_error)?;
             let debug_path = temp.path().join("debug.o");
             std::fs::write(&debug_path, debug)?;
             inputs.push(debug_path);
@@ -1827,6 +1839,7 @@ fn link_objects(
                 DIRECT_LINK_SUPPORT_LIBS,
                 &output,
                 options.optimize,
+                options.debug_lines,
             )
         };
         if let Err(first) = link(&recipe) {
@@ -1854,8 +1867,16 @@ fn link_objects(
         drop((unit, files));
         let bytes = std::fs::read(output)?;
         crate::native_entry::check_linked_sites(&bytes).map_err(NativeStop::Link)?;
-        publish(&store, link_key, &bytes)?;
-        (bytes, true)
+        let debug = crate::native_debug::bind_detached(
+            debug_rows(),
+            &sources,
+            entry_plan.release_debug_sites,
+            &bytes,
+        )
+        .map_err(bind_error)?;
+        let binary = NativeImage { bytes, debug };
+        binary.publish(&store, link_key)?;
+        (binary, true)
     };
     // The reach record names the stored executable; an output failure
     // below leaves both reusable.
@@ -1869,8 +1890,9 @@ fn link_objects(
         identity: link_key,
         address,
         recipe: assembly.map(|(root, _)| root),
-        assembly: assembly
-            .map(|(root, toolchain)| recipe_build::AssemblyRecord::new(root, toolchain, &bytes)),
+        assembly: assembly.map(|(root, toolchain)| {
+            recipe_build::AssemblyRecord::new(root, toolchain, &binary.bytes)
+        }),
         revision,
         compiled: objects.iter().filter(|o| o.compiled).count(),
         linked,
@@ -1880,7 +1902,7 @@ fn link_objects(
     };
     // Copy from integrity-checked bytes even on a hit; a damaged materialized file
     // is never trusted as the executable cache product.
-    match deliver(&options.output, &bytes) {
+    match binary.deliver(&options.output) {
         Ok(()) => Ok(Linked::Built(product)),
         Err(error) => Err(NativeStop::Output {
             product: Box::new(product),
@@ -2282,7 +2304,13 @@ fn f5 = n5 g5 extern
             .unwrap()
             .with_foreign([&leaf]);
             let startup = plan
-                .emit(TARGET, &Default::default(), &[0; 32], &[])
+                .emit(
+                    TARGET,
+                    &Default::default(),
+                    ContentHash::default(),
+                    &[0; 32],
+                    &[],
+                )
                 .unwrap();
             std::fs::write(path("unit.o"), object.bytes).unwrap();
             std::fs::write(path("startup.o"), startup).unwrap();
@@ -2292,7 +2320,15 @@ fn f5 = n5 g5 extern
                 .unwrap();
             inputs.push(options.runtime.clone());
             let output = path("program");
-            direct_link(&recipe, &inputs, DIRECT_LINK_SUPPORT_LIBS, &output, false).unwrap();
+            direct_link(
+                &recipe,
+                &inputs,
+                DIRECT_LINK_SUPPORT_LIBS,
+                &output,
+                false,
+                false,
+            )
+            .unwrap();
             run_clean(&output, 0);
         }
     }

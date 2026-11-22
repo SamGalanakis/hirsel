@@ -4,6 +4,136 @@ fn link_rebinds_rows_and_inline_calls_without_changing_native_code() {
 }
 
 #[test]
+fn native_symbol_tiers_follow_the_elf_identity() {
+    use super::{NativeImage, SymbolSource, bind_detached, resolve_symbols, source_positions};
+    use hirsel_core_ir::source::*;
+    use object::{Object as _, ObjectSection as _};
+    use std::{fs, path::PathBuf, process::Command};
+
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path();
+    let bin = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin");
+    let source = root.join("main.s");
+    let object = root.join("main.o");
+    let image = root.join("main");
+    fs::write(
+        &source,
+        "\
+        .text\n.globl start\n.type start, %function\n.globl __hirsel_debug_test\n\
+        start:\n__hirsel_debug_test:\nret\n.size start, .-start\n",
+    )
+    .unwrap();
+    assert!(
+        Command::new(bin.join("clang"))
+            .arg("-c")
+            .arg(&source)
+            .arg("-o")
+            .arg(&object)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let map = SourceMap {
+        files: vec![SourceFile {
+            path: "app@1/main.hirsel".into(),
+            text: "\n x".into(),
+        }],
+        items: [(
+            hirsel_core_ids::DefPath::from_full("app@1/main/main").unwrap(),
+            ItemSource {
+                file: 0,
+                file_offset: 0,
+            },
+        )]
+        .into(),
+        ..Default::default()
+    };
+    let debug = NativeDebug {
+        items: map.items.keys().cloned().collect(),
+        sections: vec![CodeSection {
+            symbol: "__hirsel_debug_test".into(),
+            size: 1,
+        }],
+        sequences: vec![LineSequence {
+            range: CodeRange {
+                section: 0,
+                begin: 0,
+                end: 1,
+            },
+            rows: vec![LineRow {
+                offset: 0,
+                source: Some(NativeLocation { item: 0, start: 2 }),
+            }],
+        }],
+        ..Default::default()
+    };
+    let mut old_debug = None;
+    for style in ["--build-id=0x123456", "--build-id=none"] {
+        assert!(
+            Command::new(bin.join("ld.lld"))
+                .arg(style)
+                .args(["-e", "start", "-o"])
+                .arg(&image)
+                .arg(&object)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let bytes = fs::read(&image).unwrap();
+        let elf = object::File::parse(bytes.as_slice()).unwrap();
+        assert!(
+            elf.sections()
+                .all(|s| !s.name().unwrap().starts_with(".debug"))
+        );
+        let explicit = root.join("saved.debug");
+        if let Some(previous) = &old_debug {
+            fs::write(&explicit, previous).unwrap();
+            assert_eq!(
+                resolve_symbols(&image, &bytes, Some(&explicit))
+                    .unwrap()
+                    .tier(),
+                "symtab_only"
+            );
+        }
+        let debug = bind_detached([&debug], &map, &[], &bytes).unwrap();
+        let binary = NativeImage { bytes, debug };
+        binary.deliver(&image).unwrap();
+        let SymbolSource::DetachedDwarf(rows) =
+            resolve_symbols(&image, &binary.bytes, None).unwrap()
+        else {
+            panic!("missing side product for {style}")
+        };
+        assert_eq!(
+            source_positions(&rows).unwrap(),
+            [("app@1/main.hirsel".into(), 2, 2)]
+        );
+        if style.ends_with("123456") {
+            assert_eq!(
+                fs::read(root.join(".build-id/12/3456.debug")).unwrap(),
+                rows
+            );
+        }
+        old_debug = Some(rows);
+    }
+    let stripped = root.join("stripped");
+    assert!(
+        Command::new(bin.join("llvm-objcopy"))
+            .arg("--strip-all")
+            .arg(&image)
+            .arg(&stripped)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert_eq!(
+        resolve_symbols(&stripped, &fs::read(&stripped).unwrap(), None)
+            .unwrap()
+            .tier(),
+        "offsets_only"
+    );
+}
+
+#[test]
 fn native_fiber_boundary_has_no_caller() {
     use crate::{CheckRequest, Driver, Meter, native::tests::native_options};
     use gimli::{

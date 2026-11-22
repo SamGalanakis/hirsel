@@ -30,7 +30,7 @@ mod executable;
 mod flow;
 mod instances;
 mod native;
-mod native_debug;
+pub mod native_debug;
 mod native_entry;
 mod native_facts;
 mod native_object;

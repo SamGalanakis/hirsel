@@ -615,7 +615,7 @@ static OPTIONS: &[OptionSpec] = &[
         ["--debug-lines"],
         Some("on|off"),
         ["build", "run", "replay", "test", "sdk"],
-        "Emit native line tables; default off on every profile. Failure positions stay enabled."
+        "Embed DWARF in the executable (default off). Builds also write detached DWARF. Failure positions stay enabled."
     ),
     option!(
         Backend,

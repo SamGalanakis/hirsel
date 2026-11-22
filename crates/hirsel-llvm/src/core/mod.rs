@@ -581,6 +581,7 @@ fn emit_module(
             &items.step_dispatch,
             &failures,
             &call_layouts,
+            provided.release_sites,
             &mut next_scope,
             sink,
         )
@@ -1143,8 +1144,12 @@ pub(crate) fn emit_release_unit(
     roles: &hirsel_core_ir::roles::Facts,
     observe_charge: bool,
     neutral: &BTreeSet<hirsel_core_ids::ContentHash>,
-) -> Result<(crate::construction::NativeModule, Vec<source::ReleaseSite>)> {
-    let mut native = sink::native::NativeSink::new(context);
+) -> Result<(
+    crate::construction::NativeModule,
+    Vec<source::ReleaseSite>,
+    Vec<source::ReleaseSite>,
+)> {
+    let mut native = sink::native::NativeSink::release(context, &module.items);
     let versions = versions::program(&[module]);
     let sites = emit_module(
         module,
@@ -1155,7 +1160,7 @@ pub(crate) fn emit_release_unit(
             batch_steps: true,
             test_hooks: cfg!(test),
             relocatable_sites: true,
-            debug_lines: false,
+            debug_lines: true,
             fixed_sites: &[],
         },
         EmissionFacts {
@@ -1167,7 +1172,8 @@ pub(crate) fn emit_release_unit(
         },
         &mut native,
     )?;
-    Ok((native.finish().map_err(Error::Llvm)?, sites))
+    let debug_sites = native.take_debug_sites();
+    Ok((native.finish().map_err(Error::Llvm)?, sites, debug_sites))
 }
 
 #[cfg(hirsel_lazy_core)]

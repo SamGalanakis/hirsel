@@ -115,7 +115,7 @@ pub(crate) fn binding_case() {
                 sources.files[0].text.insert_str(0, "\n\n");
                 sources.items.values_mut().next().unwrap().file_offset += 2;
             }
-            let bytes = bind([&first, &second], &sources, target).unwrap();
+            let bytes = bind([&first, &second], &sources, &[], target).unwrap();
             let file = object::File::parse(bytes.as_slice()).unwrap();
             assert!(file.section_by_name(".text").is_none());
             let line = if moved { 6 } else { 4 };
@@ -238,15 +238,13 @@ fn indexed_scalar_positions_match_the_source_map() {
     let mut sources = Sources {
         map: &map,
         files: FxHashMap::default(),
+        release: FxHashMap::default(),
     };
     let positions = map.positions();
     for byte in text.char_indices().map(|(i, _)| i).chain([text.len()]) {
         let position = sources
             .position(
-                &[Some(ItemSource {
-                    file: 0,
-                    file_offset: 0,
-                })],
+                &product.items,
                 Some(NativeLocation {
                     item: 0,
                     start: byte as u32,

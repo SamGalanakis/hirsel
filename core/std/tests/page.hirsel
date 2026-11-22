@@ -1,0 +1,422 @@
+fn digit(x: u8) -> u8 {
+    if x <= b'9' {
+        x - b'0'
+    } else {
+        x - b'a' + 10
+    }
+}
+
+fn hex(s: String) -> Bytes {
+    let raw = string.as_bytes(s)
+    let mut out: Bytes = list.with_capacity(list.len(raw) / 2)
+    for i in 0u64 .. list.len(raw) / 2 {
+        list.push(mut out, digit(raw[2 * i]) * 16 + digit(raw[2 * i + 1]))
+    }
+    out
+}
+
+fn be(n: u64) -> Bytes {
+    let mut raw: Bytes = list.with_capacity(8)
+    list.fill(mut raw, 8, 0)
+    list.set_word_be(mut raw, 0, n)
+    raw
+}
+
+fn inline_row(take key: Bytes, take value: Bytes) -> page.Entry {
+    page.Entry(key: take key, cell: InlineValue(take value))
+}
+
+fn branch_row(take key: Bytes, ptr: page.PagePtr) -> page.Entry {
+    page.Entry(key: take key, cell: Child(page.Branch(child: ptr, rows: 2, charge: 172)))
+}
+
+fn unpacked(image: page.Image, slot: u64, key: Bytes, value: Bytes) -> bool {
+    match page.entry(image, slot) {
+        Some(row) => match row.cell {
+            InlineValue(b) => row.key == key && b == value,
+            _ => false,
+        },
+        None => false,
+    }
+}
+
+fn check_leaf(expected: Bytes, id: u64, domain: page.Domain, k0: u64, v0: Bytes, k1: u64, v1: Bytes) -> bool {
+    let mut rows: List[page.Entry] = list.with_capacity(2)
+    list.push(mut rows, inline_row(be(k0), clone(v0)))
+    list.push(mut rows, inline_row(be(k1), clone(v1)))
+    let encoded = result.unwrap(page.encode(rows, 0, id, domain))
+    let decoded = result.unwrap(page.decode(clone(expected), domain))
+    page.payload(encoded) == expected && page.stamp(decoded) == id && page.level(decoded) == 0 && page.count(decoded) == 2 && unpacked(decoded, 0, be(k0), v0) && unpacked(decoded, 1, be(k1), v1)
+}
+
+// expect: run leaf_a() = true
+fn leaf_a() -> bool {
+    let expected = hex("000002000700000005000000000000003700000000000000000000000000000100010006000000070000000100020006000000090000001f002b00")
+    check_leaf(expected, 5, Collection, 1, hex("000007000000"), 2, hex("000009000000")) && check.xxh3(expected, 0, 59) == 0x7ea83212bab36260
+}
+
+// expect: run leaf_b() = true
+fn leaf_b() -> bool {
+    let expected = hex("0000020007000000070000000000000037000000000000000000000000000001000300060000000b00000001000400060000000d0000001f002b00")
+    check_leaf(expected, 7, Collection, 3, hex("00000b000000"), 4, hex("00000d000000")) && check.xxh3(expected, 0, 59) == 0x5b7778306daed154
+}
+
+// expect: run pack_list_leaf() = true
+fn pack_list_leaf() -> bool {
+    let expected = hex("00000200070000000c000000000000005500000000000000000000000000000100030015000003000000060100000000000006010000000000000100040015000101000000090400000000000009040000000000001f003a00")
+    check_leaf(expected, 12, Unprefixed, 3, hex("000300000006010000000000000601000000000000"), 4, hex("010100000009040000000000000904000000000000")) && check.xxh3(expected, 0, 89) == 0x94793e19991ff346
+}
+
+fn branch_ok(image: page.Image, slot: u64, key: Bytes, ptr: page.PagePtr) -> bool {
+    let row = option.unwrap(page.entry(image, slot))
+    match row.cell {
+        Child(b) => b.child == ptr && b.rows == 2 && b.charge == 172 && row.key == key,
+        _ => false,
+    }
+}
+
+// expect: run branch() = true
+fn branch() -> bool {
+    let expected = hex("010002000800000009000000000000008c0000000000000000000000000000030000030000000000000048000000000000003b0000006062b3ba1232a87e05000000000000000200000000000000ac000000000000000000030000000000000093000000000000003b00000054d1ae6d3078775b07000000000000000200000000000000ac0000000000000020005600")
+    let a = page.PagePtr(pack: 3, offset: 72, len: 59, checksum: 0x7ea83212bab36260, stamp: 5)
+    let b = page.PagePtr(pack: 3, offset: 147, len: 59, checksum: 0x5b7778306daed154, stamp: 7)
+    let ptr = hex("030000000000000048000000000000003b0000006062b3ba1232a87e0500000000000000")
+    let mut rows: List[page.Entry] = list.with_capacity(2)
+    list.push(mut rows, branch_row(list.new(), a))
+    list.push(mut rows, branch_row(result.unwrap(page.separator(be(2), be(3))), b))
+    let encoded = result.unwrap(page.encode(rows, 1, 9, Collection))
+    let decoded = result.unwrap(page.decode(clone(expected), Collection))
+    page.payload(encoded) == expected && page.level(decoded) == 1 && page.stamp(decoded) == 9 && page.count(decoded) == 2 && branch_ok(decoded, 0, list.new(), a) && branch_ok(decoded, 1, be(3), b) && page.descend(decoded, list.new()) == Some(0) && page.descend(decoded, be(2)) == Some(0) && page.descend(decoded, be(3)) == Some(1) && page.descend(decoded, be(4)) == Some(1) && page.encode_ptr(a) == ptr && result.unwrap(page.decode_ptr(ptr)) == a
+}
+
+fn reference_blob() -> page.BlobRef {
+    page.BlobRef(stamp: 11, len: 1025, checksum: 0x15f1400e215dacb1, pack: 4, offset: 72, body: 0)
+}
+
+fn value_bytes() -> Bytes {
+    let mut b: Bytes = list.with_capacity(1025)
+    list.fill(mut b, 2, 0)
+    for i in 0u64 .. 1023 {
+        let byte: u8 = int.narrow(i % 251)
+        list.push(mut b, byte)
+    }
+    b
+}
+
+fn blob_ref_bytes() -> Bytes {
+    hex("0b000000000000000104000000000000b1ac5d210e40f115040000000000000048000000000000000000")
+}
+
+// expect: run blob_payload() = true
+fn blob_payload() -> bool {
+    let value = value_bytes()
+    let mut expected = hex("0b00000000000000")
+    list.append(mut expected, value)
+    let decoded = result.unwrap(page.decode_blob(clone(expected)))
+    let ref_bytes = blob_ref_bytes()
+    let r = reference_blob()
+    result.unwrap(page.encode_blob(11, value)) == expected && list.len(expected) == 1033 && decoded.stamp == 11 && decoded.value == value && check.xxh3(decoded.value, 0, 1025) == r.checksum && page.encode_ref(r) == ref_bytes && result.unwrap(page.decode_ref(ref_bytes)) == r
+}
+
+// expect: run blob_leaf() = true
+fn blob_leaf() -> bool {
+    let r = reference_blob()
+    let mut expected = hex("00000100010000000d00000000000000460000000000000078000001")
+    list.append(mut expected, blob_ref_bytes())
+    list.append(mut expected, hex("1900"))
+    let mut rows: List[page.Entry] = list.new()
+    list.push(mut rows, page.Entry(key: hex("78"), cell: BlobValue(r)))
+    let decoded = result.unwrap(page.decode(clone(expected), Unprefixed))
+    let actual = result.unwrap(page.encode(rows, 0, 13, Unprefixed))
+    let row = option.unwrap(page.entry(decoded, 0))
+    match row.cell {
+        BlobValue(b) => b == r && row.key == hex("78") && page.payload(actual) == expected && page.stamp(decoded) == 13 && page.count(decoded) == 1,
+        _ => false,
+    }
+}
+
+fn malformed(raw: Bytes, domain: page.Domain) -> bool {
+    if let Error(MalformedPage) = page.decode(clone(raw), domain) {
+        true
+    } else {
+        false
+    }
+}
+
+// expect: run malformed_slots() = true
+fn malformed_slots() -> bool {
+    let good = hex("000002000700000005000000000000003700000000000000000000000000000100010006000000070000000100020006000000090000001f002b00")
+    let mut alias: Bytes = clone(good)
+    let mut dangling: Bytes = clone(good)
+    let mut wide: Bytes = clone(good)
+    list.set_word_le(mut alias, 57, 31u16)
+    list.set_word_le(mut dangling, 57, 55u16)
+    list.set_word_le(mut wide, 31, 4090u16)
+    for n in 0u64 .. list.len(good) {
+        if !malformed(list.slice(good, 0, n), Collection) {
+            return false
+        }
+    }
+    malformed(alias, Collection) && malformed(dangling, Collection) && malformed(wide, Collection) && malformed(good, CollectionMap)
+}
+
+fn model(old: List[(u64, u64)], key: u64, value: u64, deleting: bool) -> List[(u64, u64)] {
+    let mut out: List[(u64, u64)] = list.with_capacity(list.len(old) + 1)
+    let mut pending = !deleting
+    for row in old {
+        if pending && key <= row.0 {
+            list.push(mut out, (key, value))
+            pending = false
+        }
+        if row.0 != key {
+            list.push(mut out, row)
+        }
+    }
+    if pending {
+        list.push(mut out, (key, value))
+    }
+    out
+}
+
+fn model_key(key: u64) -> Bytes {
+    if key < 6 {
+        be(key)
+    } else {
+        be(0x0102030400000000 + key)
+    }
+}
+
+fn model_value(value: u64) -> Bytes {
+    let mut raw: Bytes = list.with_capacity(96)
+    list.put_word_le(mut raw, value)
+    list.fill(mut raw, 88, int.truncate(value))
+    raw
+}
+
+fn matches_model(image: page.Image, rows: List[(u64, u64)]) -> bool {
+    let n = list.len(rows)
+    if page.count(image) != n || page.stamp(image) != 17 {
+        return false
+    }
+    for i in 0u64 .. n {
+        let pair = rows[i]
+        let key = model_key(pair.0)
+        if page.search(image, key) != (i, true) || !unpacked(image, i, key, model_value(pair.1)) {
+            return false
+        }
+    }
+    true
+}
+
+fn compare_sealed(holder: Arc[page.Page], rows: List[(u64, u64)]) -> bool {
+    let (take sealed, _) = result.unwrap(page.seal(holder))
+    let decoded = result.unwrap(page.decode(clone(page.payload(sealed)), Collection))
+    let raw = page.payload(sealed)
+    let n = list.len(rows)
+    // All keys have width eight. With both domains represented their first bytes
+    // differ. On one side the keys vary only in the last byte.
+    let p = if n == 1 {
+        8u64
+    } else if rows[0u64].0 < 6 && rows[n - 1].0 >= 6 {
+        0u64
+    } else {
+        7u64
+    }
+    let wire_prefix: u16 = list.word_le(raw, 4)
+    let wire_dead: u16 = list.word_le(raw, 6)
+    let prefix: u64 = int.widen(wire_prefix)
+    prefix == p && wire_dead == 0 && list.len(raw) == 24 + p + n * (7 + 8 - p + 96) && matches_model(decoded, rows)
+}
+
+// expect: run edit_model() = true
+fn edit_model() -> bool {
+    for seed in 1u64 .. 5 {
+        let mut rng = seed
+        let mut holder = page.empty(0, 17, Collection)
+        let mut rows: List[(u64, u64)] = list.new()
+        for step in 0u64 .. 240 {
+            rng = int.wrapping_add(int.wrapping_mul(rng, 6364136223846793005), 1442695040888963407)
+            let key = (rng >> 32u64) % 12
+            let deleting = (rng >> 40u64) % 4 == 0
+            let wire_key = model_key(key)
+            if deleting {
+                let mut expected: page.Edit = AbsentKey
+                for row in rows {
+                    if row.0 == key {
+                        expected = Changed
+                    }
+                }
+                if page.delete(mut holder, wire_key) != expected {
+                    return false
+                }
+            } else if result.unwrap(page.put(mut holder, inline_row(take wire_key, model_value(step)), None, None)) != Changed {
+                return false
+            }
+            rows = model(rows, key, step, deleting)
+            if !matches_model(page.image_of(holder), rows) {
+                return false
+            }
+            if step % 19 == 0 && list.len(rows) > 0 && !compare_sealed(holder, rows) {
+                return false
+            }
+        }
+    }
+    true
+}
+
+fn body_number(image: page.Image, slot: u64, id: u64) -> u16 {
+    let row = option.unwrap(page.entry(image, slot))
+    match row.cell {
+        BlobValue(blob) => if blob.stamp == id {
+            blob.body
+        } else {
+            65535
+        },
+        _ => 65535,
+    }
+}
+
+fn blob_row(key: u64, id: u64) -> page.Entry {
+    page.Entry(key: be(key), cell: BlobValue(page.BlobRef(stamp: id, len: 1, checksum: 0, pack: 0, offset: 0, body: 65535)))
+}
+
+// expect: run private_blob_slots() = true
+fn private_blob_slots() -> bool {
+    let mut holder = page.empty(0, 19, Collection)
+    let first = arc.new(hex("f1"))
+    let last = arc.new(hex("f3"))
+    let middle = arc.new(hex("f2"))
+    if result.unwrap(page.put(mut holder, blob_row(1, 11), None, Some(arc.share(first)))) != Changed || result.unwrap(page.put(mut holder, blob_row(3, 13), None, Some(arc.share(last)))) != Changed || result.unwrap(page.put(mut holder, blob_row(2, 12), None, Some(arc.share(middle)))) != Changed {
+        return false
+    }
+    let held = arc.share(holder)
+    if page.delete(mut holder, be(1)) != Shared || page.count(page.image_of(held)) != 3 {
+        return false
+    }
+    drop(take held)
+    if page.delete(mut holder, be(1)) != Changed || body_number(page.image_of(holder), 0, 12) != 0 || body_number(page.image_of(holder), 1, 13) != 1 || page.body(holder, 2) != None {
+        return false
+    }
+    // Replace one live blob with an inline row, then append another out of slot order.
+    if result.unwrap(page.put(mut holder, inline_row(be(2), hex("aa")), None, None)) != Changed || result.unwrap(page.put(mut holder, blob_row(0, 11), None, Some(arc.share(first)))) != Changed {
+        return false
+    }
+    let (take image, take order) = result.unwrap(page.seal(holder))
+    let disk = result.unwrap(page.decode(clone(page.payload(image)), Collection))
+    let zero = option.unwrap(page.body(holder, 0))
+    let one = option.unwrap(page.body(holder, 1))
+    list.len(order) == 2 && order[0u64] == 1 && order[1u64] == 0 && body_number(disk, 0, 11) == 0 && body_number(disk, 2, 13) == 1 && zero == last && one == first
+}
+
+fn long_key(byte: u8, common: bool) -> Bytes {
+    let mut key: Bytes = list.with_capacity(4096)
+    if !common {
+        list.push(mut key, byte)
+    }
+    list.fill(mut key, 4095, 0)
+    if common {
+        list.push(mut key, byte)
+    }
+    key
+}
+
+fn bulk_rows(n: u64, common: bool) -> List[page.Row] {
+    let mut rows: List[page.Row] = list.with_capacity(n)
+    for i in 0u64 .. n {
+        let mut value: Bytes = list.with_capacity(1024)
+        list.fill(mut value, 1024, 255)
+        list.push(mut rows, page.Row(key: long_key(int.narrow(i), common), value: take value, charge: 5182))
+    }
+    rows
+}
+
+fn child_stamp(root: Arc[page.Page], at: u64) -> u64 {
+    let node = option.unwrap(page.child(root, at))
+    page.stamp(page.image_of(node))
+}
+
+// expect: run bulk_merge_tail() = true
+fn bulk_merge_tail() -> bool {
+    let mut next = 100u64
+    let root = option.unwrap(result.unwrap(page.bulk(bulk_rows(3, true), Unprefixed, 1024, mut next)))
+    let image = page.image_of(root)
+    if next != 107 || page.stamp(image) != 103 || page.level(image) != 1 || page.count(image) != 3 || list.len(page.payload(image)) != 4289 {
+        return false
+    }
+    for i in 0u64 .. 3 {
+        let leaf = option.unwrap(page.child(root, i))
+        let data = page.image_of(leaf)
+        let key = long_key(int.narrow(i), true)
+        if page.stamp(data) != 100 + i || page.count(data) != 1 || list.len(page.payload(data)) != 5151 || page.search(data, key) != (0, true) || page.descend(image, key) != Some(i) {
+            return false
+        }
+    }
+    true
+}
+
+// expect: run bulk_borrow_tail() = true
+fn bulk_borrow_tail() -> bool {
+    // With one-byte separators, 24 + 56n + (n - 1) fits 71 children.
+    let mut next = 100u64
+    let root = option.unwrap(result.unwrap(page.bulk(bulk_rows(72, false), Unprefixed, 1024, mut next)))
+    let a = option.unwrap(page.child(root, 0))
+    let b = option.unwrap(page.child(root, 1))
+    let image = page.image_of(root)
+    let right_first = option.unwrap(page.entry(page.image_of(b), 0))
+    let root_second = option.unwrap(page.entry(image, 1))
+    if next != 245 || page.level(image) != 2 || page.stamp(image) != 174 || page.count(image) != 2 || page.count(page.image_of(a)) != 70 || page.count(page.image_of(b)) != 2 || child_stamp(a, 69) != 169 || child_stamp(b, 0) != 170 || list.len(right_first.key) != 0 || root_second.key != hex("46") {
+        return false
+    }
+    match root_second.cell {
+        Child(desc) => desc.child.stamp == 173 && desc.rows == 2 && desc.charge == 10364 && page.descend(image, long_key(69, false)) == Some(0) && page.descend(image, long_key(70, false)) == Some(1),
+        _ => false,
+    }
+}
+
+// expect: run split_and_branch_delete() = true
+fn split_and_branch_delete() -> bool {
+    let mut next = 100u64
+    let mut root = option.unwrap(result.unwrap(page.bulk(bulk_rows(3, true), Unprefixed, 1024, mut next)))
+    let leaf = option.unwrap(page.child(root, 2))
+    let row = branch_row(long_key(3, true), page.unlocated(102))
+    if result.unwrap(page.put(mut root, row, Some(arc.share(leaf)), None)) != Split || page.count(page.image_of(root)) != 3 || page.delete(mut root, list.new()) != Changed {
+        return false
+    }
+    let slot0 = option.unwrap(page.entry(page.image_of(root), 0))
+    if list.len(slot0.key) != 0 || child_stamp(root, 0) != 101 || child_stamp(root, 1) != 102 {
+        return false
+    }
+    if page.delete(mut root, long_key(2, true)) != Changed {
+        return false
+    }
+    let (take sealed, _) = result.unwrap(page.seal(root))
+    page.count(sealed) == 1 && list.len(page.payload(sealed)) == 80 && child_stamp(root, 0) == 101
+}
+
+// expect: run collection_map_leaf() = true
+fn collection_map_leaf() -> bool {
+    // u32 key 1, empty CollectionRoot, table, Memory, B+ pages.
+    let mut descriptor: Bytes = list.with_capacity(56)
+    list.fill(mut descriptor, 52, 0)
+    list.append(mut descriptor, hex("01000000"))
+    let mut expected = hex("00000100040000000e000000000000005900000000000000000000010000003800")
+    list.append(mut expected, descriptor)
+    list.append(mut expected, hex("1c00"))
+    let mut rows: List[page.Entry] = list.new()
+    list.push(mut rows, inline_row(hex("00000001"), clone(descriptor)))
+    let encoded = result.unwrap(page.encode(rows, 0, 14, CollectionMap))
+    let decoded = result.unwrap(page.decode(clone(expected), CollectionMap))
+    if page.payload(encoded) != expected || !unpacked(decoded, 0, hex("00000001"), descriptor) {
+        return false
+    }
+    let mut kids: List[Arc[page.Page]] = list.new()
+    list.push(mut kids, page.empty(0, 0, Collection))
+    let root = result.unwrap(page.attach(take decoded, take kids, list.new()))
+    let mut wrong: Bytes = clone(expected)
+    wrong[86u64] = 1
+    child_stamp(root, 0) == 0 && (if let Error(UnsupportedPage) = page.decode(take wrong, CollectionMap) {
+        true
+    } else {
+        false
+    })
+}

@@ -353,6 +353,90 @@ fn profiler_times_provider_callbacks_separately_from_pending() {
 }
 
 #[test]
+fn profiler_replays_an_explicit_inputs_entry_and_checks_its_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let request = source_request(
+        "pub fn recorded() -> Result[(), Exit] { Ok(()) }\n\
+         pub fn other() -> Result[(), Exit] { Error(Exit(status: 7)) }\n",
+        dir.path(),
+    );
+    let manifest = dir.path().join("inputs.json");
+    std::fs::write(&manifest, serde_json::to_vec(&request.inputs).unwrap()).unwrap();
+    let tape = dir.path().join("run.tape");
+    let compiler =
+        PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang");
+    let store = dir.path().join("store");
+    let args = |command: &[&str], runtime: &Path, entry: &str, options: &[&str]| {
+        command
+            .iter()
+            .copied()
+            .chain([
+                "--inputs",
+                manifest.to_str().unwrap(),
+                "--entry",
+                entry,
+                "--backend",
+                "cranelift",
+                "--source-core",
+                "--cc",
+                compiler.to_str().unwrap(),
+                "--runtime",
+                runtime.to_str().unwrap(),
+                "--store",
+                store.to_str().unwrap(),
+            ])
+            .chain(options.iter().copied())
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    let recorded = "app@1/main/recorded";
+    let (code, _, error) = process::tape_request(
+        &args(
+            &["run"],
+            &env_record_runtime(),
+            recorded,
+            &["--record", tape.to_str().unwrap()],
+        ),
+        dir.path(),
+    );
+    assert_eq!(code, Some(0), "{error}");
+    let original = std::fs::read(&tape).unwrap();
+
+    let replay = |entry, output: &Path| {
+        process::tape_request(
+            &args(
+                &["prof", "replay"],
+                &env_observe_runtime(),
+                entry,
+                &[
+                    "--tape",
+                    tape.to_str().unwrap(),
+                    "--tasks",
+                    "--out",
+                    output.to_str().unwrap(),
+                ],
+            ),
+            dir.path(),
+        )
+    };
+    let profile = dir.path().join("replay.hprof");
+    let (code, _, error) = replay(recorded, &profile);
+    assert_eq!(code, Some(0), "{error}");
+    let result = hirsel_prof::query(&profile, hirsel_prof::Query::Summary, 1).unwrap();
+    assert_eq!(result.quality["capture_mode"], "replay");
+
+    let refused = dir.path().join("refused.hprof");
+    let (code, _, error) = replay("app@1/main/other", &refused);
+    assert_eq!(code, Some(2), "{error}");
+    assert!(
+        error.lines().any(|line| line == "replay: refused: code"),
+        "{error}"
+    );
+    assert!(!refused.exists());
+    assert_eq!(std::fs::read(&tape).unwrap(), original);
+}
+
+#[test]
 fn profiler_replay_memory_peaks_match_the_runtime_metrics() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")

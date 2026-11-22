@@ -259,7 +259,9 @@ in the wait, issue, resume, deliver and abort callbacks contributes to
 ## Tape replay
 
 `hirsel prof replay --tape TAPE --tasks` records the same runtime task
-observations during serial replay. The regular replay verifier checks
+observations during serial replay. For an executable built with
+`--inputs MANIFEST --entry DEFINITION`, pass the same two options to replay.
+The entry is a full definition path. The regular replay verifier checks
 revision, event positions and outcome. A refusal or divergence leaves no
 profile. Replay records no CPU samples. Its I/O timing describes the
 replay callbacks and passes through the tape provider.

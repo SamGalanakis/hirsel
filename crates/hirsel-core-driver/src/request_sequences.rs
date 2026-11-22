@@ -653,13 +653,13 @@ pub fn value(p:P)->u64{p.value}"###)), src("hook_a", "core_hook_a.hirsel", false
         seq("clone_body", vec![
         check(vec![
             core(vec![src("deque", "core_deque.hirsel", true, repo("core/core/deque.hirsel", "", ""))]),
-            pkg("app", &["core"], vec![src("a", "app_a.hirsel", false, lit(r###"fn f(x:Deque[u8])->Result[Deque[u8],Capacity]{clone(x)}"###))])]),
+            pkg("app", &["core"], vec![src("a", "app_a.hirsel", false, lit(r###"fn f(x:Deque[u8])->Deque[u8]{clone(x)}"###))])]),
         check(vec![
             core(vec![src("deque", "core_deque.hirsel", true, repo("core/core/deque.hirsel", r###"clone[T](d: Deque[T]) {
     let count = list.len(d.ring.raw)"###, r###"clone[T](d: Deque[T]) {
     let _=0u8
     let count = list.len(d.ring.raw)"###))]),
-            pkg("app", &["core"], vec![src("a", "app_a.hirsel", false, lit(r###"fn f(x:Deque[u8])->Result[Deque[u8],Capacity]{clone(x)}"###))])])]),
+            pkg("app", &["core"], vec![src("a", "app_a.hirsel", false, lit(r###"fn f(x:Deque[u8])->Deque[u8]{clone(x)}"###))])])]),
         seq("clone_winner_order", vec![
         check(vec![
             core(vec![src("held", "core_held.hirsel", false, lit(r###"pub type P { value:u64 }
@@ -1390,13 +1390,13 @@ pub fn f()->u8{2u8}"###)), src("b", "b.hirsel", false, lit(r###"fn use(x:a.R){}"
         check(vec![
             core(vec![src("held", "core_held.hirsel", true, lit(r###"pub type P{x:u8}
 pub fn make(x:u8)->P{P(x:x)}
-pub fn value(p:P)->u8{p.x}"###)), src("hook", "core_hook.hirsel", true, lit(r###"clone(p:held.P){Ok(held.make(held.value(p)))}"###))]),
-            pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"pub fn use[T](x:T)->u8{7u8}"###)), src("b", "b.hirsel", false, lit(r###"fn f(x:core.held.P)->Result[core.held.P,Capacity]{let _=a.use(x);clone(x)}"###))])]),
+pub fn value(p:P)->u8{p.x}"###)), src("hook", "core_hook.hirsel", true, lit(r###"clone(p:held.P){held.make(held.value(p))}"###))]),
+            pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"pub fn use[T](x:T)->u8{7u8}"###)), src("b", "b.hirsel", false, lit(r###"fn f(x:core.held.P)->core.held.P{let _=a.use(x);clone(x)}"###))])]),
         check(vec![
             core(vec![src("held", "core_held.hirsel", true, lit(r###"pub type P{x:u8}
 pub fn make(x:u8)->P{P(x:x)}
-pub fn value(p:P)->u8{let x=p.x; x}"###)), src("hook", "core_hook.hirsel", true, lit(r###"clone(p:held.P){Ok(held.make(held.value(p)))}"###))]),
-            pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"pub fn use[T](x:T)->u8{7u8}"###)), src("b", "b.hirsel", false, lit(r###"fn f(x:core.held.P)->Result[core.held.P,Capacity]{let _=a.use(x);clone(x)}"###))])])]),
+pub fn value(p:P)->u8{let x=p.x; x}"###)), src("hook", "core_hook.hirsel", true, lit(r###"clone(p:held.P){held.make(held.value(p))}"###))]),
+            pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"pub fn use[T](x:T)->u8{7u8}"###)), src("b", "b.hirsel", false, lit(r###"fn f(x:core.held.P)->core.held.P{let _=a.use(x);clone(x)}"###))])])]),
         seq("declaration_pass_order", vec![
         check(vec![
             core(vec![]),

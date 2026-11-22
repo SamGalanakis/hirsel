@@ -113,16 +113,14 @@ fn emit_pack_frame(mut out: Bytes, context: DiskContext, frame: PackFrame, known
             std.check.xxh3(body, 0, list.len(body))
         },
         PageBody(page) => {
-            let raw = disk_allocation(scoped fn() -> Result[Bytes, Error] {
-                page_result(std.page.seal_located(page, scoped fn(stamp: u64) -> std.page.PagePtr {
-                    let Some(location) = disk_index_get(known.frames, stamp) else {
-                        fail("store: missing emitted child")
-                    }
-                    location.place
-                }))
-            })?
-            list.append(mut out, raw)
-            std.check.xxh3(raw, 0, list.len(raw))
+            // The pack buffer already has room for the planned PAGE.
+            page_result(std.page.seal_located(mut out, page, scoped fn(stamp: u64) -> std.page.PagePtr {
+                let Some(location) = disk_index_get(known.frames, stamp) else {
+                    fail("store: missing emitted child")
+                }
+                location.place
+            }))?
+            std.check.xxh3(out, offset + 16, list.len(out))
         },
     }
     let bound_checksum = disk_allocation(scoped fn() -> Result[u64, Error] {

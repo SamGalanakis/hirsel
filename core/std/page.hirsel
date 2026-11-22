@@ -779,12 +779,12 @@ fn write_blob(mut raw: Bytes, at: u64, blob: BlobRef) -> u64 {
     at + 1 + REF_BYTES
 }
 
-fn header(mut raw: Bytes, lvl: u8, id: u64, n: u64, p: u64, heap: u64) {
-    raw[0u64] = lvl
-    put16(mut raw, 2, n)
-    put16(mut raw, 4, p)
-    list.set_word_le(mut raw, 8, id)
-    put32(mut raw, 16, heap)
+fn header(mut raw: Bytes, start: u64, lvl: u8, id: u64, n: u64, p: u64, heap: u64) {
+    raw[start] = lvl
+    put16(mut raw, start + 2, n)
+    put16(mut raw, start + 4, p)
+    list.set_word_le(mut raw, start + 8, id)
+    put32(mut raw, start + 16, heap)
 }
 
 fn first_key_slot(lvl: u8) -> u64 {
@@ -812,6 +812,11 @@ fn compressed(sum: u64, keys: u64, p: u64) -> u64 {
 
 /// Canonical size for layout planning without allocating a canonical image.
 pub fn sealed_size(image: Image) -> u64 {
+    let (size, _) = sealed_shape(image)
+    size
+}
+
+fn sealed_shape(image: Image) -> (u64, u64) {
     let n = count(image)
     let first = first_key_slot(level(image))
     let p = u16_at(image.raw, 4)
@@ -821,12 +826,12 @@ pub fn sealed_size(image: Image) -> u64 {
         sum += entry_size(image, slot)
     }
     if keyed == 0 {
-        return HEADER + sum
+        return (HEADER + sum, 0)
     }
     let left = entry_at(image, first)
     let right = entry_at(image, n - 1)
     let extension = common_prefix(list.slice(image.raw, left + 2, left + 2 + u16_at(image.raw, left)), list.slice(image.raw, right + 2, right + 2 + u16_at(image.raw, right)))
-    compressed(sum, keyed, p + extension)
+    (compressed(sum, keyed, p + extension), extension)
 }
 
 fn pack_entries(rows: List[Entry], lvl: u8, id: u64, domain: Domain) -> Result[Image, Error] {
@@ -844,7 +849,7 @@ fn pack_entries(rows: List[Entry], lvl: u8, id: u64, domain: Domain) -> Result[I
     let slot_start = size - 2 * n
     let mut raw: Bytes = list.with_capacity(size)
     list.fill(mut raw, size, 0)
-    header(mut raw, lvl, id, n, p, slot_start)
+    header(mut raw, 0, lvl, id, n, p, slot_start)
     if p != 0 {
         list.copy_from_slice(mut raw, HEADER, list.slice(rows[first].key, 0, p))
     }
@@ -957,7 +962,7 @@ fn check_attachment(image: Image, kids: List[Arc[Page]], blobs: List[Arc[Bytes]]
 pub fn empty(lvl: u8, id: u64, domain: Domain) -> Arc[Page] {
     let mut raw: Bytes = list.with_capacity(HEADER)
     list.fill(mut raw, HEADER, 0)
-    header(mut raw, lvl, id, 0, 0, HEADER)
+    header(mut raw, 0, lvl, id, 0, 0, HEADER)
     arc.new(Page(image: Image(raw: take raw, domain: domain), kids: list.new(), blobs: list.new(), rows: 0, charge: 0))
 }
 
@@ -970,44 +975,30 @@ fn rows_of(image: Image) -> List[Entry] {
     rows
 }
 
-/// Write a fresh canonical image and return the old body indices in disk order.
-/// The caller can use this permutation to emit or reorder the blob edges.
-/// Live entries are copied from the image in place; the prefix grows to the
-/// common prefix of the first and last keys, as sealed_size counts it.
-pub fn seal(page: Arc[Page]) -> Result[(Image, List[u16]), Error] {
-    let image = view page.image
+// Emit relative page offsets into the appended span, even when the page
+// starts after a pack header and other frames.
+fn write_sealed(mut raw: Bytes, image: Image, size: u64, extension: u64, patch: scoped fn(mut Bytes, u64)) {
+    let start = list.len(raw)
     let n = count(image)
     let lvl = level(image)
-    let id = stamp(image)
-    if id == 0 || n == 0 || n > (PAGE_MAX - HEADER) / 7 {
-        return Error(MalformedPage)
-    }
-    let size = sealed_size(image)
-    if !legal(lvl, n, size) {
-        return Error(PageLimit)
-    }
     let first = first_key_slot(lvl)
     let p = u16_at(image.raw, 4)
-    let (extension, sealed_prefix) = if first >= n {
-        (0u64, 0u64)
+    let sealed_prefix = if first < n {
+        p + extension
     } else {
-        let left = entry_at(image, first)
-        let right = entry_at(image, n - 1)
-        let grown = common_prefix(list.slice(image.raw, left + 2, left + 2 + u16_at(image.raw, left)), list.slice(image.raw, right + 2, right + 2 + u16_at(image.raw, right)))
-        (grown, p + grown)
+        0
     }
     let slot_start = size - 2 * n
-    let mut raw: Bytes = list.with_capacity(size)
     list.fill(mut raw, size, 0)
-    header(mut raw, lvl, id, n, sealed_prefix, slot_start)
+    header(mut raw, start, lvl, stamp(image), n, sealed_prefix, slot_start)
     if sealed_prefix != 0 {
         let left = entry_at(image, first)
-        list.copy_from_slice(mut raw, HEADER, list.slice(image.raw, HEADER, HEADER + p))
-        list.copy_from_slice(mut raw, HEADER + p, list.slice(image.raw, left + 2, left + 2 + extension))
+        list.copy_from_slice(mut raw, start + HEADER, list.slice(image.raw, HEADER, HEADER + p))
+        list.copy_from_slice(mut raw, start + HEADER + p, list.slice(image.raw, left + 2, left + 2 + extension))
     }
-    let mut at = HEADER + sealed_prefix
+    let mut at = start + HEADER + sealed_prefix
     for slot in 0u64 .. n {
-        put16(mut raw, slot_start + 2 * slot, at)
+        put16(mut raw, start + slot_start + 2 * slot, at - start)
         let source = entry_at(image, slot)
         let stored = u16_at(image.raw, source)
         let cut = if slot < first {
@@ -1019,53 +1010,74 @@ pub fn seal(page: Arc[Page]) -> Result[(Image, List[u16]), Error] {
         put16(mut raw, at, suffix)
         list.copy_from_slice(mut raw, at + 2, list.slice(image.raw, source + 2 + cut, source + 2 + stored))
         let cell = source + 2 + stored
+        let dest = at + 2 + suffix
         let width = cell_size(image.raw, lvl, cell)
-        list.copy_from_slice(mut raw, at + 2 + suffix, list.slice(image.raw, cell, cell + width))
-        at += 2 + suffix + width
+        list.copy_from_slice(mut raw, dest, list.slice(image.raw, cell, cell + width))
+        patch(mut raw, dest)
+        at = dest + width
     }
-    let mut sealed = Image(raw: take raw, domain: image.domain)
-    let mut bodies: List[u16] = list.with_capacity(list.len(page.blobs))
-    for slot in 0u64 .. n {
-        if let Some(field) = blob_field(sealed, slot) {
-            list.push(mut bodies, int.truncate(u16_at(sealed.raw, field)))
-            put16(mut sealed.raw, field, list.len(bodies) - 1)
-        }
-    }
-    Ok((take sealed, take bodies))
 }
 
-/// Seal a page for disk and fill its edges from the selected generation's
-/// locations. BLOB locations carry the value checksum and payload length.
-pub fn seal_located(page: Arc[Page], locate: scoped[view] fn(u64) -> PagePtr) -> Result[Bytes, Error] {
-    let (take sealed, _) = seal(page)?
-    let mut image = take sealed
-    for slot in 0u64 .. count(image) {
-        let at = entry_at(image, slot)
-        let value = at + 2 + u16_at(image.raw, at)
-        match owning_edge(image, slot) {
-            Some(PageEdge(edge)) => {
-                let ptr = if edge.stamp == 0 {
-                    unlocated(0)
-                } else {
-                    locate(edge.stamp)
-                }
-                let field = if level(image) == 0 {
-                    value + 3
-                } else {
-                    value
-                }
-                put_ptr(mut image.raw, field, ptr)
-            },
-            Some(BlobEdge(edge)) => {
-                let loc = locate(edge.stamp)
-                let relocated = BlobRef(stamp: edge.stamp, len: edge.len, checksum: loc.checksum, pack: loc.pack, offset: loc.offset, body: edge.body)
-                put_ref(mut image.raw, value + 1, relocated)
-            },
-            None => (),
-        }
+fn checked_sealed_shape(image: Image) -> Result[(u64, u64), Error] {
+    let n = count(image)
+    if stamp(image) == 0 || n == 0 || n > (PAGE_MAX - HEADER) / 7 {
+        return Error(MalformedPage)
     }
-    let Image(raw: take raw, ..) = take image
-    Ok(take raw)
+    let (size, extension) = sealed_shape(image)
+    if !legal(level(image), n, size) {
+        return Error(PageLimit)
+    }
+    Ok((size, extension))
+}
+
+/// Write a fresh canonical image and return the old body indices in disk order.
+pub fn seal(page: Arc[Page]) -> Result[(Image, List[u16]), Error] {
+    let image = view page.image
+    let (size, extension) = checked_sealed_shape(image)?
+    let mut raw: Bytes = list.with_capacity(size)
+    let mut bodies: List[u16] = list.with_capacity(list.len(page.blobs))
+    let is_leaf = level(image) == 0
+    write_sealed(mut raw, image, size, extension, scoped fn(mut out: Bytes, value: u64) {
+        if is_leaf && out[value] == 1 {
+            let field = value + 41
+            list.push(mut bodies, int.truncate(u16_at(out, field)))
+            put16(mut out, field, list.len(bodies) - 1)
+        }
+    })
+    Ok((Image(raw: take raw, domain: image.domain), take bodies))
+}
+
+/// Append a canonical PAGE to the pack buffer, filling edges from the
+/// selected generation and numbering its blob references in slot order.
+pub fn seal_located(mut raw: Bytes, page: Arc[Page], locate: scoped[view] fn(u64) -> PagePtr) -> Result[(), Error] {
+    let image = view page.image
+    let (size, extension) = checked_sealed_shape(image)?
+    let branch = level(image) != 0
+    let collection_map = image.domain == CollectionMap
+    let mut next_body = 0u16
+    write_sealed(mut raw, image, size, extension, scoped fn(mut out: Bytes, value: u64) {
+        if branch || collection_map {
+            let field = if branch {
+                value
+            } else {
+                value + 3
+            }
+            let child_stamp = ptr_at(out, field).stamp
+            let ptr = if child_stamp == 0 {
+                unlocated(0)
+            } else {
+                locate(child_stamp)
+            }
+            put_ptr(mut out, field, ptr)
+        } else if out[value] == 1 {
+            let field = value + 1
+            let edge = ref_at(out, field)
+            let loc = locate(edge.stamp)
+            put_ref(mut out, field, BlobRef(stamp: edge.stamp, len: edge.len, checksum: loc.checksum, pack: loc.pack, offset: loc.offset, body: next_body))
+            next_body += 1
+        }
+    })
+    Ok(())
 }
 
 fn blob_field(image: Image, slot: u64) -> Option[u64] {
@@ -1462,7 +1474,7 @@ fn bulk_leaf(rows: List[Row], lo: u64, hi: u64, inline: u64, domain: Domain, mut
     let slot_start = size - 2 * n
     let mut raw: Bytes = list.with_capacity(size)
     list.fill(mut raw, size, 0)
-    header(mut raw, 0, id, n, p, slot_start)
+    header(mut raw, 0, 0, id, n, p, slot_start)
     if p != 0 {
         list.copy_from_slice(mut raw, HEADER, list.slice(rows[lo].key, 0, p))
     }
@@ -1743,7 +1755,7 @@ fn pack_leaf_section(image: Image, incoming: Entry, body_index: Option[u16], ent
     let slot_start = size - 2 * n
     let mut raw: Bytes = list.with_capacity(size)
     list.fill(mut raw, size, 0)
-    header(mut raw, 0, id, n, prefix, slot_start)
+    header(mut raw, 0, 0, id, n, prefix, slot_start)
     copy_slot_key(mut raw, HEADER, image, incoming.key, entries[lo], 0, prefix)
     let mut at = HEADER + prefix
     for i in lo .. hi {

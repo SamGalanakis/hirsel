@@ -6701,7 +6701,7 @@ impl Machine<'_> {
             }
             // Only the release lowering of a native program forms these
             // (returnable.rs); the evaluator runs the module before it.
-            RtOp::FrameRecord | RtOp::Returnable(_) => {
+            RtOp::FrameRecord | RtOp::Returnable(_) | RtOp::ReceiveRec { .. } => {
                 unreachable!("returnable waits are native-only")
             }
         })

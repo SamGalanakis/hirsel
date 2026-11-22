@@ -1685,6 +1685,20 @@ pub(super) static CASES: &[Case] = &[
         params: |r| PARAM[0].store(r(3_000, 6_000), Ordering::Relaxed),
         pct: None,
     },
+    // 18. A receiver that returned its stack at a channel receive is woken
+    // by each send after another task reused and overwrote that stack, and
+    // cancelled while parked. What it receives equals the stackful
+    // receiver's (`units_returnable_check.rs`).
+    Case {
+        name: "returnable_receive",
+        workers: 2,
+        units: 1,
+        body: returnable::receive_body,
+        producers: &[],
+        goals: 0b1,
+        params: |_| {},
+        pct: None,
+    },
     Case {
         name: "conn_flat_slot_reuse",
         workers: 3,
@@ -2173,6 +2187,10 @@ mod tests {
     #[test]
     fn handoff_returnable() {
         check("handoff_returnable");
+    }
+    #[test]
+    fn returnable_receive() {
+        check("returnable_receive");
     }
 
     #[test]

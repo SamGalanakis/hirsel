@@ -287,6 +287,7 @@ impl FunctionEmitter<'_> {
                 | RtOp::ChannelNew { .. }
                 | RtOp::Send { .. }
                 | RtOp::Receive { .. }
+                | RtOp::ReceiveRec { .. }
                 | RtOp::Spawn { .. }
                 | RtOp::SpawnUnit { .. }
                 | RtOp::ConnNew { .. }
@@ -581,6 +582,12 @@ impl FunctionEmitter<'_> {
                 },
                 &[B, K],
                 &[ptr(CONTEXT), p(&args[0]), p(&args[1]), u(&at)],
+            ),
+            // Never fused: a receive run cannot span a park that returns.
+            RtOp::ReceiveRec { .. } => self.native_call(
+                "hirsel_core_receive_rec",
+                &[B, K],
+                &[ptr(CONTEXT), p(&args[0]), p(&args[1]), p(&args[2]), u(&at)],
             ),
             RtOp::TrySend { .. } => {
                 self.native_call("hirsel_core_try_send", &[K], &[p(&args[0]), p(&args[1])])

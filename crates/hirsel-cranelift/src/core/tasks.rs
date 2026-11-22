@@ -148,6 +148,7 @@ impl Function<'_, '_, '_> {
             | RtOp::ChannelNew { .. }
             | RtOp::Send { .. }
             | RtOp::Receive { .. }
+            | RtOp::ReceiveRec { .. }
             | RtOp::Spawn { .. }
             | RtOp::SpawnUnit { .. }
             | RtOp::ConnNew { .. }
@@ -840,6 +841,17 @@ impl Function<'_, '_, '_> {
                     &[P, P, P, U],
                     &[B, K],
                     &[self.context, args[0], args[1], site],
+                )?;
+                self.call_failure(values[1], call.fail)?;
+                outputs[0] = values[0];
+                1
+            }
+            RtOp::ReceiveRec { .. } => {
+                let values = self.c_call(
+                    "hirsel_core_receive_rec",
+                    &[P, P, P, P, U],
+                    &[B, K],
+                    &[self.context, args[0], args[1], args[2], site],
                 )?;
                 self.call_failure(values[1], call.fail)?;
                 outputs[0] = values[0];

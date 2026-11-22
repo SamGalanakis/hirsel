@@ -357,20 +357,62 @@ pub unsafe extern "C" fn hirsel_core_receive(
     destination: *mut u8,
     site: u64,
 ) -> Transfer {
+    // SAFETY: forwarded.
+    unsafe { receive::<false>(context, ptr::null_mut(), channel, destination, site) }
+}
+
+/// `hirsel_core_receive` that may park with the stack given back
+/// (`RtOp::ReceiveRec`). A zero word makes the receive; a nonzero one resumes
+/// it after a returnable park, at the commit loop: a delegate serves only a
+/// requester blocked in its call, so the resume makes no second offer. A park
+/// leaves the word 1 and initializes nothing; the frames above return to the
+/// task's entry, and the wake makes the call again.
+///
+/// # Safety
+/// As for hirsel_core_receive; `word` is the caller's site word.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_receive_rec(
+    context: *mut Context,
+    word: *mut u64,
+    channel: *mut Channel,
+    destination: *mut u8,
+    site: u64,
+) -> Transfer {
+    // SAFETY: forwarded.
+    unsafe { receive::<true>(context, word, channel, destination, site) }
+}
+
+/// # Safety
+/// As for hirsel_core_receive; with REC, `word` as hirsel_core_receive_rec.
+#[inline(always)]
+unsafe fn receive<const REC: bool>(
+    context: *mut Context,
+    word: *mut u64,
+    channel: *mut Channel,
+    destination: *mut u8,
+    site: u64,
+) -> Transfer {
     // SAFETY: receiver keeps the queue alive across each suspension.
     unsafe {
-        let Some(_held) = tasks::delegate(
-            context,
-            tasks::RECEIVE,
-            channel.cast(),
-            destination,
-            serve_receive,
-        ) else {
-            return Transfer {
-                transferred: true,
-                status: 0,
+        let _held = if REC && *word != 0 {
+            *word = 0;
+            None
+        } else {
+            let Some(held) = tasks::delegate(
+                context,
+                tasks::RECEIVE,
+                channel.cast(),
+                destination,
+                serve_receive,
+            ) else {
+                return Transfer {
+                    transferred: true,
+                    status: 0,
+                };
             };
+            Some(held)
         };
+        let returnable = REC && tasks::returnable_waits();
         let mut _resumed = None;
         loop {
             let _commit = tasks::before_commit();
@@ -392,6 +434,18 @@ pub unsafe extern "C" fn hirsel_core_receive(
                     (*channel).id,
                     hirsel_core_layout::event::CHANNEL_CLOSED,
                 );
+                return Transfer {
+                    transferred: false,
+                    status: 0,
+                };
+            }
+            if returnable {
+                tasks::park_returnable_in(
+                    &raw mut (*channel).receive_waiters,
+                    #[cfg(feature = "prof")]
+                    (crate::prof::Reason::ChannelRecv, (*channel).id),
+                );
+                *word = 1;
                 return Transfer {
                     transferred: false,
                     status: 0,

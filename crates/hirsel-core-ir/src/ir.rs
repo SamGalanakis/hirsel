@@ -1032,6 +1032,13 @@ pub enum RtOp {
     /// then the provider row's operands. The word is 1 when the task parked
     /// and the outcome is not yet delivered, else 0 with the row's outcome.
     Returnable(HostOp),
+    /// `Receive` that may park with the stack given back (`crate::returnable`):
+    /// a leading pointer to the caller's child word, then `Receive`'s operands.
+    /// The word is 1 when the task parked and nothing is received yet, else 0
+    /// with `Receive`'s outcome.
+    ReceiveRec {
+        item: TypeId,
+    },
 }
 
 /// The provider operations, numbered as the run time's `HirselCoreHostRequest`
@@ -1539,6 +1546,7 @@ impl RtOp {
             RtOp::Send { item } => (vec![V(p), take(item)], vec![bool_]),
             RtOp::TrySend { item } => (vec![V(p), take(item)], vec![u8_]),
             RtOp::Receive { item } => (vec![V(p), out(item)], vec![bool_]),
+            RtOp::ReceiveRec { item } => (vec![V(p), V(p), out(item)], vec![bool_]),
             RtOp::TryReceive { item } => (vec![V(p), out(item)], vec![u8_]),
             RtOp::LatestNew { .. } => (vec![V(p)], vec![p, u64_]),
             RtOp::ConnNew { .. } => (vec![V(u64_), V(u64_)], vec![p, p, u64_]),
@@ -1856,6 +1864,7 @@ impl RtOp {
                 | RtOp::ChannelNew { .. }
                 | RtOp::Send { .. }
                 | RtOp::Receive { .. }
+                | RtOp::ReceiveRec { .. }
                 | RtOp::ConnNew { .. }
                 | RtOp::ConnSend { .. }
                 | RtOp::ConnTrySend { .. }
@@ -1879,6 +1888,7 @@ impl RtOp {
             | RtOp::Send { item }
             | RtOp::TrySend { item }
             | RtOp::Receive { item }
+            | RtOp::ReceiveRec { item }
             | RtOp::TryReceive { item }
             | RtOp::LatestNew { item } => vec![item],
             RtOp::LaunchTarget { view } => vec![view],

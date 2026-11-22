@@ -375,6 +375,7 @@ tags!(RtOp {
     62 => MapStrongWord,
     63 => MapStrongBytes,
     64 => MapStrongStart,
+    65 => ReceiveRec { item },
 });
 
 tags!(HostOp {

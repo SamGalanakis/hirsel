@@ -576,3 +576,71 @@ fn test_paged_collection_paths() -> Result[(), Error] {
     }
     Ok(())
 }
+
+fn check_shrunk_collection(db: Db, rows: Table[u64, Bytes], wide: Bytes, short: Bytes) -> Result[(), Error] {
+    let tree = db.heads[0u64].roots.collections
+    let Some(root) = std.page.collection_child(tree.root, prefix(rows.id)?) else { return Error(Missing("collection")) }
+    let image = std.page.image_of(root)
+    if std.page.level(image) != 0 || std.page.count(image) != 5 || std.page.sealed_size(image) != 3758 {
+        return Error(Missing("merged root leaf"))
+    }
+    let s = snapshot(db)
+    let reader = shape(rows)
+    if get(s, reader, 0)? != Some(clone(short)) { return Error(Missing("overwritten row")) }
+    for key in 1u64 .. 5 {
+        if get(s, reader, key)? != Some(clone(wide)) { return Error(Missing("unchanged row")) }
+    }
+    Ok(())
+}
+
+@test
+fn test_paged_shrinking_overwrite(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let dir = disk_test_directory(d)
+    let mut options = defaults()
+    options.pack_bytes = 4096
+    let mut db = open(tasks, dir, c, r, options)?
+    create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_bytes()))?
+    let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    let seq = db.file_seq
+    let mut wide: Bytes = list.with_capacity(914)
+    list.fill(mut wide, 914, b'w')
+    let short = string.as_bytes("s")
+
+    // AP3: 24-byte header, 7 common key bytes, and 8 bytes per slot
+    // including its one-byte key suffix. A typed value adds six bytes.
+    // Five 920-byte values force a split, with the leftmost minimax cut 2/3.
+    let filled = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+        for key in 0u64 .. 5 { put(mut tx, rows, key, wide)? }
+        Ok(())
+    })?
+    if let Committed(_) = take filled {} else { return Error(Missing("initial commit")) }
+    {
+        let Some(root) = std.page.collection_child(db.heads[0u64].roots.collections.root, prefix(rows.id)?) else {
+            return Error(Missing("collection"))
+        }
+        let image = std.page.image_of(root)
+        if std.page.level(image) != 1 || std.page.count(image) != 2 {
+            return Error(Missing("two-leaf tree"))
+        }
+        let left = option.unwrap(std.page.child(root, 0))
+        let right = option.unwrap(std.page.child(root, 1))
+        if std.page.sealed_size(std.page.image_of(left)) != 1887 || std.page.sealed_size(std.page.image_of(right)) != 2815 {
+            return Error(Missing("2/3 split"))
+        }
+    }
+
+    // The overwrite leaves the left leaf at 31 + 2*8 + 920 + 7 = 974,
+    // below 1024. AP3 joins it with the right leaf and collapses the root:
+    // 31 + 5*8 + 4*920 + 7 = 3758 bytes, within 4096.
+    let shrunk = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] { put(mut tx, rows, 0, short) })?
+    let Committed(done) = take shrunk else { return Error(Missing("overwrite commit")) }
+    durable(mut db, done.ticket)?
+    if db.file_seq != seq { return Error(Missing("uncovered journal")) }
+    check_shrunk_collection(db, rows, wide, short)?
+    close(take db)?
+
+    let mut reopened = open(tasks, dir, c, r, options)?
+    let replayed_rows = table(mut reopened, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    check_shrunk_collection(reopened, replayed_rows, wide, short)?
+    close(take reopened)
+}

@@ -66,6 +66,8 @@ mod numeric_glue;
 mod ops;
 mod patterns;
 mod places;
+mod row_closures;
+pub(crate) use row_closures::RowClosures;
 mod scalar_abi;
 mod simd;
 mod slots;
@@ -196,6 +198,8 @@ pub struct Emitter {
     /// `module.statics` rows by their bytes.
     statics: HashMap<Vec<u8>, hirsel_core_ir::StaticId>,
     constant_statics: HashMap<crate::ConstValue, hirsel_core_ir::StaticId>,
+    /// Some layout or recipe was refused and its rows taken back.
+    refused: bool,
 }
 
 /// How a value of a type is carried in a body (crate docs, "Values, slots and
@@ -509,8 +513,7 @@ impl Emitter {
         if program_type && let Some(&row) = self.program_type_rows.get(&ty) {
             return Some(row);
         }
-        let row = self.shaped(p, t, |s| s.shape(ty))?;
-        let row = TypeId(row.0);
+        let row = TypeId(self.closed_row(p, t, ty)?.0);
         self.remember_generic_types(p, t, ty);
         if program_type {
             self.program_type_rows.insert(ty, row);
@@ -560,6 +563,7 @@ impl Emitter {
         };
         let r = f(&mut s);
         if r.is_none() {
+            self.refused = true;
             s.truncate(mark);
             self.program_type_rows.retain(|_, row| row.index() < mark);
         }
@@ -636,6 +640,7 @@ impl Emitter {
                 }) {
                 Ok(()) => {}
                 Err(_) => {
+                    self.refused = true;
                     self.module.types.truncate(mark);
                     self.types.retain(|_, r| (r.0 as usize) < mark);
                     self.program_type_rows.retain(|_, row| row.index() < mark);

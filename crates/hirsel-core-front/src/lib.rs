@@ -144,6 +144,8 @@ pub struct Program<'a> {
     /// Published type spellings shared by body arenas; local types stay local.
     layout_type_names: std::sync::OnceLock<Vec<std::sync::OnceLock<String>>>,
     recipe_layouts: std::sync::Mutex<layout::RecipeLayouts>,
+    /// Closed rows' closures as a fresh body builds them (body/row_closures.rs).
+    row_closures: body::RowClosures,
     flow_holds: std::sync::OnceLock<Vec<std::sync::OnceLock<(u8, u64)>>>,
     closed_type_facts: std::sync::OnceLock<Vec<body::ClosedTypeFacts>>,
     foreign_names: std::sync::OnceLock<foreign::Names>,
@@ -545,6 +547,7 @@ impl<'a> Program<'a> {
             tuple_codec_protocol: std::sync::OnceLock::new(),
             layout_type_names: std::sync::OnceLock::new(),
             recipe_layouts: Default::default(),
+            row_closures: Default::default(),
             flow_holds: std::sync::OnceLock::new(),
             closed_type_facts: std::sync::OnceLock::new(),
             foreign_names: std::sync::OnceLock::new(),

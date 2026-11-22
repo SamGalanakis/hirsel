@@ -374,3 +374,39 @@ fn a_resident_driver_builds_each_universe_like_a_fresh_one() {
     assert_eq!(snapshot(&a, "app@1/main/root"), fresh_a, "retained A");
     assert_eq!(snapshot(&b, "app@1/main/root"), fresh_b, "retained B");
 }
+
+const CODEC_TYPES: &str = "type Rec { a: u64, b: List[u8] }\n";
+const CODEC_BODIES: [&str; 4] = [
+    "fn one(x: List[Rec]) -> u64 { 1u64 }\n",
+    "fn two(m: Option[u8], x: List[Rec]) -> u64 { 2u64 }\n",
+    "fn three(t: (u64, Rec), x: List[Rec], y: Option[Rec]) -> u64 { 3u64 }\n",
+    "fn four(y: Option[Rec], x: List[Rec]) -> u64 { 4u64 }\n",
+];
+
+/// A row closure is built once per program and copied into later bodies
+/// (body/row_closures.rs). Law: every body's module, structural codec hooks
+/// included, is the module the body lowers to in a program holding it alone, where
+/// nothing is copied. Oracle: that program's fresh build. Bodies name `List[Rec]`
+/// after other rows, so a copy lands at an offset; red on a copy numbered or hooked
+/// apart from the build it stands for.
+#[test]
+fn a_copied_row_closure_is_the_fresh_build() {
+    let all = format!("{CODEC_TYPES}{}", CODEC_BODIES.concat());
+    let dir = tempfile::tempdir().unwrap();
+    let together = check(&all, dir.path(), &mut Driver::default());
+    let mut hooked = false;
+    for body in CODEC_BODIES {
+        let name = body[3..body.find('(').unwrap()].to_owned();
+        let path = DefPath::from_full(&format!("app@1/main/{name}")).unwrap();
+        let alone_dir = tempfile::tempdir().unwrap();
+        let alone = check(
+            &format!("{CODEC_TYPES}{body}"),
+            alone_dir.path(),
+            &mut Driver::default(),
+        );
+        let fresh = alone.definitions[&path].ir().unwrap();
+        hooked |= fresh.types.iter().any(|s| s.codec.is_some());
+        assert_eq!(together.definitions[&path].ir().unwrap(), fresh, "{name}");
+    }
+    assert!(hooked, "no body names a codec hook");
+}

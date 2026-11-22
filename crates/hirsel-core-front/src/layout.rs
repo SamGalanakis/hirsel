@@ -102,7 +102,9 @@ impl<T: TyRead> Shapes<'_, T> {
     /// generic body reaches it at the instance's argument row. Every such row of a body
     /// module gets it here, since a closed row's hook is part of it in the closure hash. A
     /// row holding a parameter gets one where an instance asks for it (body/mod.rs
-    /// `structural_codec`); closed tuple components carry their derived hooks too.
+    /// `structural_codec`); closed tuple components carry their derived hooks too. A body
+    /// naming a closed row whose closure another body built copies that closure, hooks
+    /// included, numbered after its own rows (body/row_closures.rs): the rows this builds.
     fn structural_codec(
         &mut self,
         r: TypeRef,

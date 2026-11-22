@@ -234,7 +234,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let carrier = self.list_carrier(scalar(Scalar::U8), n)?;
         let len = self.carrier_word(header, carrier, SeqWord::Len, n);
         self.require_word_range(at, len, word, n)?;
-        let data = self.read_sequence_word(header, 0, Ty::Ptr, n);
+        let data = self.carrier_word(header, carrier, SeqWord::Data, n);
         Some(self.read_word(data, at, word, big_endian, n))
     }
 

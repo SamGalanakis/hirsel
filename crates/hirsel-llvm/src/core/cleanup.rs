@@ -54,6 +54,7 @@ pub(super) fn glue_emitter<'a>(
         receive_loops: Default::default(),
         facts,
         aliases: None,
+        pointer_origins: Box::default(),
         caller_site,
         debug_location: None,
         anchor: None,

@@ -656,7 +656,7 @@ these steps:
    now be strong, and place. If that placement is Crowded, promote and place again. The
    placement then gives a bucket to commit.
 4. **Commit.** Write the key and value into slot `used` (`push_entry`) if they are not already
-   there. Then `install(b, p, used)` and `advance`: `used` and the live count each grow by 1. `update_or_insert` then calls
+   there. Then `install(m, b, p, used)` and `advance`: `used` and the live count each grow by 1. `update_or_insert` then calls
    its callback exactly once, on the entry it found or committed.
 
 **Staging and custody** ([MEM-31](memory.md#mem-31-construction-in-place)). The compiler's

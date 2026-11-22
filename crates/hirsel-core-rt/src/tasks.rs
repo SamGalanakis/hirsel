@@ -1632,7 +1632,7 @@ impl Scheduler {
             self.readies.port_pending.store(false, Ordering::Relaxed);
             // SAFETY: the run pins its unit; no task runs.
             unsafe {
-                crate::units_lang::pump(&mut *self.lang);
+                (*self.lang).pump_ready();
                 let sockets = (*self.lang).socket_registry;
                 if self.net != sockets
                     && let Some(poller) = sockets.as_ref().and_then(|s| s.active_poller())
@@ -4663,6 +4663,35 @@ pub unsafe fn run_root(
     result_bytes: usize,
     provider: SchedulerProvider,
 ) -> u8 {
+    // SAFETY: the caller pins all root operands for the run.
+    unsafe {
+        run_root_with_unit(
+            context,
+            body,
+            argument,
+            destination,
+            input_bytes,
+            result_bytes,
+            provider,
+            None,
+        )
+    }
+}
+
+/// # Safety
+/// As for `run_root`. A helper's caller keeps its unit for this run and owns it
+/// again after the root returns.
+#[allow(clippy::too_many_arguments)]
+pub(crate) unsafe fn run_root_with_unit(
+    context: *mut Context,
+    body: Body,
+    argument: *mut u8,
+    destination: *mut u8,
+    input_bytes: usize,
+    result_bytes: usize,
+    provider: SchedulerProvider,
+    unit: Option<&mut crate::units_lang::LangUnit>,
+) -> u8 {
     crate::os_sync::check_fork();
     let workers = worker_count();
     #[cfg(feature = "prof")]
@@ -4703,7 +4732,10 @@ pub unsafe fn run_root(
         lang: ptr::null_mut(),
         lang_owned: false,
     };
-    run.lang = crate::units_lang::adopt(&run.readies);
+    if let Some(unit) = unit {
+        unit.attach(&run.readies);
+        run.lang = unit;
+    }
     // A helper's entry can carry sockets already registered for this unit.
     // SAFETY: the caller pins the context and its registry through the run.
     if let Some(files) = unsafe { (*context).host_files.as_mut() }
@@ -4849,7 +4881,7 @@ pub unsafe fn run_root(
         }
         (*context).events = 0;
         if run.lang_owned {
-            crate::units_lang::drop_root_unit(run.lang);
+            crate::units_lang::LangUnit::end_root(run.lang);
         }
         drop(registered);
         root.failed

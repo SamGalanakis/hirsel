@@ -8,7 +8,8 @@ guarantee it asks of v1 binds v1.
 ## Reservation clauses
 
 Each clause is numbered as in the risk audit it comes from; R25 and R26 come from the
-review of compact sequences. Clauses R3, R5, R8, R11,
+review of compact sequences, and R28 and R29 from the verification-seam review, ruled on
+2026-11-22, which also amended R5's *Later* list. Clauses R3, R5, R8, R11,
 R14, R15, R18, R19, R21 and R23 are quoted from that audit, and R13 restates its clause
 with registration; the line after each says where
 v1 meets it.
@@ -52,8 +53,8 @@ any foreign package that has not been audited under FFI-1; v1 admits audited, pi
 only, and runs them in process with no containment. Moving only the `waits` calls out of
 process is not such a boundary, because one package may use a handle from both kinds of
 call, and neither process could use the other's C pointers or byte loans; a provider contract that records a foreign call so that replay admits it; native time
-and memory budgets with `sqlite3_interrupt` or a progress handler as fuel; a cause of its own
-for a refused handle, in place of `Fail` texts; varargs, arbitrary pointers, dynamic loading and
+and memory budgets with `sqlite3_interrupt` or a progress handler as fuel; a typed reading
+of a refused handle; varargs, arbitrary pointers, dynamic loading and
 macOS.
 
 **R6.** `String`/`List` and `Text`/`FixedSpan` are distinct types; compact fields declare
@@ -189,7 +190,10 @@ exactly the capabilities in its arguments, and an owning closure captures none (
 LANG-14), so a later declared facade restricts only what v1 already passes explicitly.
 CAP-7.
 
-**R20 (amended).** Every allocation is charged to the current limit, except collection growth, which keeps its storage's limit (MEM-26, MEM-27); a bound scope covers
+**R20 (amended).** Every allocation, collection growth included, is charged to the current limit (MEM-26,
+MEM-27): growth admits the full new charge from the current limit while the old storage
+stays charged, then refunds the old charge to its payer, and refusal preserves the
+collection and its old charge; a bound scope covers
 own, counted, region and task storage; its reservation debits the parent and all of its
 cleanup precedes its refund. *Amended clause:* values a scope funded may leave it; at exit
 the scope's limit record is handed over to its parent, which already holds those bytes,
@@ -249,6 +253,18 @@ child's death certain when the host kills the run, which v1 gives only on a best
 ([EXEC-6](exec.md#exec-6-dropping-a-proc-kills-its-child)). *v1:* no profile is contained, and an `Exec` grant confers what its
 programs can do ([EXEC-1](exec.md#exec-1-an-exec-grant-confers-what-its-programs-can-do-and-hirsel-does-not-confine-them));
 a contained kind adds a profile kind and changes nothing EXEC-1 to EXEC-8 specify.
+
+**R28 (claims and verdicts).** A later claim form is written with contextual words in
+positions v1 refuses, and never changes whether a program that does not use it is accepted
+or what any program does. No verification verdict, from a test, a model checker, a solver
+or a prover, is an input to acceptance, lowering, code identity, replay or any observable
+of SEM-8, and no program reads one. *v1:* LANG-2, LANG-5, PROG-6, SEM-8, MEM-28, MEM-30,
+CAP-9. "Contracts and facts" stays under "Not in v1".
+
+**R29 (the causes are these eight).** No later version adds, removes or changes a case of
+`CauseKind`. A later refusal, and a later claim checked at run time that does not hold,
+raises `Fail(text)`. A later typed reading of a failure is a core function over `Cause`.
+*v1:* FAIL-2; LANG-17's exhaustive `match`.
 
 ## Hooks for later libraries
 

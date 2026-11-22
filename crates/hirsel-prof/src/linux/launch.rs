@@ -36,6 +36,7 @@ impl SuspendedLaunchedProcess {
         path: &Path,
         arguments: &[String],
         record: Option<&OsStr>,
+        observation: Option<&Path>,
     ) -> io::Result<Self> {
         let program = CString::new(path.as_os_str().as_bytes())?;
         let arguments = arguments
@@ -49,7 +50,7 @@ impl SuspendedLaunchedProcess {
 
         let mut env = Vec::new();
         for (key, value) in std::env::vars_os() {
-            if record.is_some() && key == "HIRSEL_RECORD" {
+            if (record.is_some() && key == "HIRSEL_RECORD") || key == "HIRSEL_PROFILE" {
                 continue;
             }
             let mut entry = key.into_encoded_bytes();
@@ -60,6 +61,11 @@ impl SuspendedLaunchedProcess {
         if let Some(record) = record {
             let mut entry = b"HIRSEL_RECORD=".to_vec();
             entry.extend_from_slice(record.as_bytes());
+            env.push(CString::new(entry)?);
+        }
+        if let Some(observation) = observation {
+            let mut entry = b"HIRSEL_PROFILE=".to_vec();
+            entry.extend_from_slice(observation.as_os_str().as_bytes());
             env.push(CString::new(entry)?);
         }
         let envp: Vec<_> = env

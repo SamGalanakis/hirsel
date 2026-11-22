@@ -356,6 +356,8 @@ pub(crate) unsafe fn run_with_map_hash_key(
     // SAFETY: the caller pins the same operands as hirsel_core_run.
     unsafe {
         let _pipe_policy = PipePolicy::enter();
+        #[cfg(feature = "prof")]
+        let _worker_profile = crate::prof::Worker::enter();
         let mut context = Context::with_unit_heap(config.root_limit);
         context.run = config;
         context.map_hash_key = hirsel_core_layout::map_hash::PreparedKey::new(&key);

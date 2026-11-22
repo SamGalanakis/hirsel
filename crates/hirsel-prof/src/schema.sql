@@ -57,7 +57,8 @@ CREATE TABLE cpu_sample (
     id INTEGER PRIMARY KEY,
     ts_ns ANY NOT NULL,
     thread_id INTEGER NOT NULL REFERENCES thread,
-    task_id INTEGER,
+    task_id INTEGER REFERENCES task,
+    host_stack_interval_id INTEGER REFERENCES host_stack_interval,
     cpu INTEGER NOT NULL,
     callsite_id INTEGER NOT NULL REFERENCES callsite,
     raw_pc_hex TEXT NOT NULL,
@@ -116,3 +117,64 @@ CREATE TABLE codegen_remark (
 
 CREATE INDEX cpu_sample_callsite ON cpu_sample(callsite_id);
 CREATE INDEX fn_cpu_summary_event ON fn_cpu_summary(event);
+
+CREATE TABLE task (
+    id INTEGER PRIMARY KEY,
+    unit_id ANY NOT NULL,
+    runtime_id ANY NOT NULL,
+    parent_id INTEGER REFERENCES task,
+    start_ns ANY,
+    end_ns ANY,
+    UNIQUE (unit_id, runtime_id)
+) STRICT;
+
+CREATE TABLE task_slice (
+    id INTEGER PRIMARY KEY,
+    task_id INTEGER NOT NULL REFERENCES task,
+    tid INTEGER,
+    worker_id INTEGER,
+    state TEXT NOT NULL,
+    wait_reason TEXT,
+    object_id ANY,
+    start_ns ANY NOT NULL,
+    end_ns ANY
+) STRICT;
+
+CREATE TABLE causal_edge (
+    id INTEGER PRIMARY KEY,
+    src_kind TEXT NOT NULL,
+    src_id INTEGER REFERENCES task,
+    dst_task_id INTEGER NOT NULL REFERENCES task,
+    object_id ANY,
+    ts_ns ANY NOT NULL
+) STRICT;
+
+CREATE TABLE host_stack_interval (
+    id INTEGER PRIMARY KEY,
+    tid INTEGER NOT NULL,
+    task_id INTEGER REFERENCES task,
+    site ANY NOT NULL,
+    start_ns ANY NOT NULL,
+    end_ns ANY
+) STRICT;
+CREATE INDEX host_stack_at ON host_stack_interval(tid,start_ns);
+
+CREATE TABLE io_op (
+    token ANY PRIMARY KEY,
+    task_id INTEGER REFERENCES task,
+    operation INTEGER NOT NULL,
+    site ANY NOT NULL,
+    start_ns ANY NOT NULL,
+    end_ns ANY,
+    wait_callback_ns ANY NOT NULL DEFAULT 0,
+    issue_callback_ns ANY NOT NULL DEFAULT 0,
+    resume_callback_ns ANY NOT NULL DEFAULT 0,
+    deliver_callback_ns ANY NOT NULL DEFAULT 0,
+    abort_callback_ns ANY NOT NULL DEFAULT 0,
+    callback_ns ANY NOT NULL DEFAULT 0,
+    pending_ns ANY NOT NULL DEFAULT 0,
+    bytes ANY,
+    error_tag INTEGER,
+    error_code INTEGER,
+    status INTEGER
+) STRICT, WITHOUT ROWID;

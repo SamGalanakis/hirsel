@@ -61,6 +61,7 @@ pub enum OptionId {
     Metrics,
     ProfileFront,
     ProfOut,
+    ProfTasks,
     ProfFrequency,
     ProfPmu,
     ProfStackBytes,
@@ -135,7 +136,7 @@ commands! {
     "deploy", "deploy RECIPE --control SOCKET --code-store DIR [options]", "Submit a recipe and its missing code objects to a host.";
     "run", "run [package-dir] [options] [-- arguments...]", "Build and run a native executable.";
     "prof", "prof <command>", "Capture or inspect a CPU profile.";
-    "prof run", "prof run [package-dir] [build-opts] [--out FILE.hprof] [--freq 997] [--pmu LIST] [--stack-bytes 32768] [-- args...]", "Build and sample a native executable from exec until exit.";
+    "prof run", "prof run [package-dir] [build-opts] [--tasks] [--out FILE.hprof] [--freq 997] [--pmu LIST] [--stack-bytes 32768] [-- args...]", "Build and sample a native executable from exec until exit.";
     "prof attach", "prof attach <PID> [--duration SECS] [--freq 997] [--pmu LIST] [--debug PATH] [--out FILE.hprof]", "Snapshot mappings, then sample a running Linux process without stopping it.";
     "prof summary", "prof summary <FILE.hprof> [--json]", "Report capture quality and the five hottest functions per event.";
     "prof schema", "prof schema <FILE.hprof> [--json]", "List the profile's tables and columns.";
@@ -534,6 +535,13 @@ static OPTIONS: &[OptionSpec] = &[
         "Register new products and an optional runtime in an installation root."
     ),
     option!(Help, ["--help", "-h"], None, [], "Show this help."),
+    option!(
+        ProfTasks,
+        ["--tasks"],
+        None,
+        ["prof run"],
+        "Capture runtime task, wake, host-stack and I/O observations."
+    ),
     option!(
         ProfOut,
         ["--out"],

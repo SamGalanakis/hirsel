@@ -1,5 +1,7 @@
 //! Native tasks and their pinned-fiber dispatchers. Queue links, wait state and result storage
 //! are prepaid at spawn. Only blocking or explicit checkpoints switch stacks.
+#[cfg(feature = "prof")]
+use crate::prof::{self, Kind as ProfKind, Reason, WakeSource};
 use crate::{
     Capacity, Context, abi_tasks as abi,
     block::Block,
@@ -345,12 +347,17 @@ impl Waiters {
     ///
     /// # Safety
     /// The active commit owns the pinned queue and the scheduling state.
-    pub(crate) unsafe fn wake_all(queue: *mut Self) -> usize {
+    pub(crate) unsafe fn wake_all(
+        queue: *mut Self,
+        #[cfg(feature = "prof")] source: (WakeSource, *mut Task, u64),
+    ) -> usize {
         let mut count = 0;
         // SAFETY: each removal leaves the successor at the head.
         unsafe {
             while !(*queue).first.is_null() {
                 let task = (*queue).first;
+                #[cfg(feature = "prof")]
+                prof_wake(task, source.0, source.1, source.2);
                 Self::remove(task);
                 (*(*task).run).ready(task);
                 count += 1;
@@ -844,6 +851,11 @@ impl FlowWaiter {
         // SAFETY: the owner pins its task and the run until it is resumed.
         // Only the pinned worker consumes the mailbox, after its own switch.
         let pool = unsafe { &*(*WORKER.get()).pool };
+        #[cfg(feature = "prof")]
+        // SAFETY: the waiting owner's live flow pins the destination task.
+        unsafe {
+            prof_wake(self.task.0, WakeSource::Unknown, ptr::null_mut(), 0)
+        };
         pool.units.fetch_add(1, Ordering::AcqRel);
         pool.queues[self.worker]
             .lock()
@@ -861,6 +873,8 @@ pub(crate) fn park_flow() {
     let task = CURRENT.get();
     // SAFETY: the active owner's stack is pinned to this worker.
     unsafe {
+        #[cfg(feature = "prof")]
+        prof_state(task, State::Flow, Reason::None, 0);
         (*task).state = State::Flow;
         switch_to_idle(task);
     }
@@ -1246,6 +1260,8 @@ impl TimerHeap {
 }
 
 struct Scheduler {
+    #[cfg(feature = "prof")]
+    prof_id: u64,
     pool: Option<NonNull<Pool>>,
     share_heap: bool,
     deferred: *mut Task,
@@ -1307,6 +1323,15 @@ pub(crate) unsafe fn task_waits_for_join(task: *const Task) -> bool {
     unsafe { (*task).state == State::Waiting }
 }
 
+// Time the actual callback, preserving which provider the operation calls.
+macro_rules! provider_callback {
+    ($token:expr, $phase:ident, $call:expr) => {{
+        #[cfg(feature = "prof")]
+        let _callback = prof::Callback::begin($token, prof::Phase::$phase);
+        $call
+    }};
+}
+
 impl Scheduler {
     /// Whether something beyond a task's own tape observes Arc count events:
     /// the provider's event sink or a test schedule.
@@ -1342,8 +1367,26 @@ impl Scheduler {
         next
     }
     unsafe fn ready(&mut self, task: *mut Task) {
+        // SAFETY: the scheduler owns this unqueued task.
+        unsafe {
+            self.ready_with_reason(
+                task,
+                #[cfg(feature = "prof")]
+                Reason::None,
+            )
+        };
+    }
+
+    #[inline(always)]
+    unsafe fn ready_with_reason(
+        &mut self,
+        task: *mut Task,
+        #[cfg(feature = "prof")] reason: Reason,
+    ) {
         // SAFETY: scheduler owns task; only unqueued tasks can enter the run queue.
         unsafe {
+            #[cfg(feature = "prof")]
+            prof_state(task, State::Ready, reason, 0);
             (*task).state = State::Ready;
             if self.pool.is_some() {
                 self.publish(task, false);
@@ -1535,6 +1578,8 @@ impl Scheduler {
             if (*task).state == State::Waiting
                 && cancel_takes_effect(&*(*task).context, cancel_flag(task))
             {
+                #[cfg(feature = "prof")]
+                prof_wake(task, WakeSource::Cancel, ptr::null_mut(), 0);
                 Waiters::remove(task);
                 self.ready(task);
             }
@@ -1717,7 +1762,12 @@ impl Scheduler {
                         {
                             group.consume_input();
                             group.cancel_wait((*(*target).operation).request);
-                            self.runnable(target, OperationState::ReadyToIssue);
+                            self.runnable(
+                                target,
+                                OperationState::ReadyToIssue,
+                                #[cfg(feature = "prof")]
+                                Wake::Ready,
+                            );
                         }
                         Turn::Done(_)
                             if (*target).state == State::Provider
@@ -1899,9 +1949,44 @@ impl Scheduler {
         }
     }
 
-    unsafe fn runnable(&mut self, task: *mut Task, state: OperationState) {
+    unsafe fn runnable(
+        &mut self,
+        task: *mut Task,
+        state: OperationState,
+        #[cfg(feature = "prof")] wake: Wake,
+    ) {
         // SAFETY: the task is parked; its operation frame is pinned.
         unsafe {
+            #[cfg(feature = "prof")]
+            if prof::enabled() {
+                let op = &mut *(*task).operation;
+                prof::pending(op.token, std::mem::take(&mut op.prof_pending));
+                let request = &*op.request;
+                use crate::provider as host;
+                let source = match wake {
+                    Wake::Cancel => WakeSource::Cancel,
+                    Wake::Timer => WakeSource::Timer,
+                    Wake::Ready
+                        if crate::os::owns(&op.provider)
+                            && (host::unix_operation(request.operation)
+                                || matches!(
+                                    request.operation,
+                                    host::CONNECT
+                                        | host::ACCEPT
+                                        | host::RECV_BOUNDED
+                                        | host::SEND_PAIR
+                                        | host::TLS_CONNECT
+                                        | host::SEND_SECRET
+                                        | host::SCRAM
+                                        | host::RESOLVE
+                                )) =>
+                    {
+                        WakeSource::Net
+                    }
+                    _ => WakeSource::Unknown,
+                };
+                prof_wake(task, source, ptr::null_mut(), op.token);
+            }
             self.parked.remove((*(*task).operation).token);
             self.timers.remove(task);
             (*(*task).operation).state = state;
@@ -1929,6 +2014,10 @@ impl Scheduler {
             if wake == Wake::Cancel && !(*op).observes_cancel {
                 return false;
             }
+            #[cfg(feature = "prof")]
+            if wake != Wake::Parked {
+                prof::pending((*op).token, std::mem::take(&mut (*op).prof_pending));
+            }
             let _callback = CallbackTask::new(task);
             let p = (*op).provider;
             let (request, token) = ((*op).request, (*op).token);
@@ -1943,20 +2032,29 @@ impl Scheduler {
                             if starting {
                                 FIRST_WAITS.set((FIRST_WAITS.get().0, FIRST_WAITS.get().1 + 1));
                             }
-                            (p.wait)(p.state, request, token)
+                            provider_callback!(token, Wait, (p.wait)(p.state, request, token))
                         }
                     };
                     // A cancel in W still runs wait at the wake (REPLAY-SPEC §3).
                     // Cancellation wins even if the callback returns Ready.
                     if wake == Wake::Cancel {
                         if (*request).operation == crate::foreign::helpers::WAIT_OP {
-                            (p.abort)(p.state, request, token, ABORT_CANCEL);
+                            provider_callback!(
+                                token,
+                                Abort,
+                                (p.abort)(p.state, request, token, ABORT_CANCEL)
+                            );
                         }
                         #[cfg(feature = "record")]
                         if let Some(group) = (*task).group {
                             group.cancel_wait(request);
                         }
-                        self.runnable(task, OperationState::ReadyToDeliver(None));
+                        self.runnable(
+                            task,
+                            OperationState::ReadyToDeliver(None),
+                            #[cfg(feature = "prof")]
+                            wake,
+                        );
                         return false;
                     }
                     match w.kind {
@@ -1969,7 +2067,12 @@ impl Scheduler {
                             if let Some(group) = (*task).group {
                                 group.wake(request);
                             }
-                            self.runnable(task, OperationState::ReadyToIssue);
+                            self.runnable(
+                                task,
+                                OperationState::ReadyToIssue,
+                                #[cfg(feature = "prof")]
+                                wake,
+                            );
                             return false;
                         }
                         WAIT_UNTIL => {
@@ -1978,6 +2081,10 @@ impl Scheduler {
                         }
                         WAIT_PARK => self.timers.remove(task),
                         _ => crate::process::stop(b"Provider"),
+                    }
+                    #[cfg(feature = "prof")]
+                    if (*op).prof_pending == 0 {
+                        (*op).prof_pending = prof::timing_start();
                     }
                     self.parked.insert(token, task);
                     if starting {
@@ -1989,7 +2096,11 @@ impl Scheduler {
                     match wake {
                         Wake::Parked => self.settle(task),
                         Wake::Ready => {
-                            let step = (p.resume)(p.state, request, token);
+                            let step = provider_callback!(
+                                token,
+                                Resume,
+                                (p.resume)(p.state, request, token)
+                            );
                             self.stepped(task, step);
                         }
                         Wake::Cancel | Wake::Timer => {
@@ -1998,8 +2109,17 @@ impl Scheduler {
                             } else {
                                 ABORT_DEADLINE
                             };
-                            let outcome = (p.abort)(p.state, request, token, reason);
-                            self.runnable(task, OperationState::ReadyToDeliver(Some(outcome)));
+                            let outcome = provider_callback!(
+                                token,
+                                Abort,
+                                (p.abort)(p.state, request, token, reason)
+                            );
+                            self.runnable(
+                                task,
+                                OperationState::ReadyToDeliver(Some(outcome)),
+                                #[cfg(feature = "prof")]
+                                wake,
+                            );
                         }
                     }
                     false
@@ -2014,10 +2134,17 @@ impl Scheduler {
         // SAFETY: as wake_operation.
         unsafe {
             match step.kind {
-                STEP_DONE => {
-                    self.runnable(task, OperationState::ReadyToDeliver(Some(step.outcome)))
-                }
+                STEP_DONE => self.runnable(
+                    task,
+                    OperationState::ReadyToDeliver(Some(step.outcome)),
+                    #[cfg(feature = "prof")]
+                    Wake::Ready,
+                ),
                 STEP_PENDING => {
+                    #[cfg(feature = "prof")]
+                    {
+                        (*(*task).operation).prof_pending = prof::timing_start();
+                    }
                     self.parked.insert((*(*task).operation).token, task);
                     self.timers.remove(task);
                     (*(*task).operation).state = OperationState::Issued {
@@ -2054,6 +2181,8 @@ impl Scheduler {
 /// One provider operation, stored on its task's pinned stack. Each transition
 /// owns the right to issue, resume, abort or deliver through this state.
 pub(crate) struct Operation {
+    #[cfg(feature = "prof")]
+    prof_pending: u64,
     provider: crate::provider::Provider,
     request: *mut crate::provider::Request,
     token: u64,
@@ -2389,6 +2518,25 @@ pub(crate) fn check_idle_tls() {
     crate::sequencer::check_no_owner();
 }
 
+macro_rules! provider_outcome {
+    ($token:expr, $call:expr) => {{
+        let outcome = $call;
+        #[cfg(feature = "prof")]
+        prof::append(
+            ProfKind::IoEnd,
+            &[
+                $token,
+                outcome.written,
+                u64::from(outcome.error.tag),
+                u64::from(outcome.error.code),
+                u64::from(outcome.status),
+            ],
+            &[],
+        );
+        outcome
+    }};
+}
+
 /// W and I of one operation (REPLAY-SPEC section 3, driver steps 2 to 6). Runs
 /// in the task; `wait`, `resume` and `abort` run with no task current, and
 /// `deliver` once. Returns what `deliver` returned and records in `issued`
@@ -2428,21 +2576,42 @@ pub(crate) unsafe fn provider_operation(
     let task = CURRENT.get();
     // SAFETY: provider contract; request pinned by the caller through delivery.
     unsafe {
+        #[cfg(feature = "prof")]
+        {
+            let [unit, id] = prof_key(task);
+            prof::append(
+                ProfKind::IoBegin,
+                &[
+                    token,
+                    unit,
+                    id,
+                    u64::from((*request).operation),
+                    (*request).site,
+                ],
+                &[],
+            );
+        }
         if task.is_null() {
-            return slow(
-                context,
-                task,
-                provider,
-                request,
+            return provider_outcome!(
                 token,
-                Start::Alone,
-                issued,
+                slow(
+                    context,
+                    task,
+                    provider,
+                    request,
+                    token,
+                    Start::Alone,
+                    issued,
+                )
             );
         }
         #[cfg(test)]
         if SCHEDULER_ENTRY.get() {
             let start = Start::Entry(None);
-            return slow(context, task, provider, request, token, start, issued);
+            return provider_outcome!(
+                token,
+                slow(context, task, provider, request, token, start, issued)
+            );
         }
         #[cfg(test)]
         FIRST_WAITS.set((FIRST_WAITS.get().0 + 1, FIRST_WAITS.get().1));
@@ -2455,9 +2624,15 @@ pub(crate) unsafe fn provider_operation(
             ptr::fn_addr_eq(provider.wait, crate::os::WAIT)
                 && ptr::fn_addr_eq(provider.deliver, crate::provider::DELIVER),
         ) {
-            operation::<OsCalls>(context, task, provider, request, token, issued)
+            provider_outcome!(
+                token,
+                operation::<OsCalls>(context, task, provider, request, token, issued)
+            )
         } else {
-            operation::<PointerCalls>(context, task, provider, request, token, issued)
+            provider_outcome!(
+                token,
+                operation::<PointerCalls>(context, task, provider, request, token, issued)
+            )
         }
     }
 }
@@ -2478,14 +2653,18 @@ unsafe fn operation<C: Calls>(
     unsafe {
         CALLBACK_TASK.set(task);
         CURRENT.set(ptr::null_mut());
-        let wait = C::wait(provider, request, token);
+        let wait = provider_callback!(token, Wait, C::wait(provider, request, token));
         CURRENT.set(task);
         CALLBACK_TASK.set(ptr::null_mut());
         if wait.kind != WAIT_READY {
             let start = Start::Entry(Some(wait));
             return slow(context, task, provider, request, token, start, issued);
         }
-        let step = crate::provider::issue(provider, request, token);
+        let step = provider_callback!(
+            token,
+            Issue,
+            crate::provider::issue(provider, request, token)
+        );
         if step.kind != STEP_DONE {
             let start = Start::Issued(step);
             return slow(context, task, provider, request, token, start, issued);
@@ -2493,7 +2672,7 @@ unsafe fn operation<C: Calls>(
         if let Some(issued) = issued {
             *issued = Some(step.outcome);
         }
-        C::deliver(provider, request, step.outcome)
+        provider_callback!(token, Deliver, C::deliver(provider, request, step.outcome))
     }
 }
 /// How `operation` calls a provider's `wait` and `deliver`. A form may contain
@@ -2607,7 +2786,11 @@ unsafe fn slow(
         if let Some(issued) = issued {
             *issued = Some(outcome);
         }
-        (provider.deliver)(provider.state, request, outcome)
+        provider_callback!(
+            token,
+            Deliver,
+            (provider.deliver)(provider.state, request, outcome)
+        )
     }
 }
 /// Where an operation that does not finish at once leaves the fast path.
@@ -2632,6 +2815,8 @@ unsafe fn parked(
     start: Start,
 ) -> Option<crate::provider::Outcome> {
     let mut op = Operation {
+        #[cfg(feature = "prof")]
+        prof_pending: 0,
         provider: *provider,
         request,
         token,
@@ -2661,7 +2846,11 @@ unsafe fn parked(
                 Some(step) => step,
                 None => match op.state {
                     OperationState::ReadyToIssue => {
-                        crate::provider::issue(&op.provider, request, token)
+                        provider_callback!(
+                            token,
+                            Issue,
+                            crate::provider::issue(&op.provider, request, token)
+                        )
                     }
                     OperationState::ReadyToDeliver(outcome) => break outcome,
                     _ => unreachable!("resumed provider operation has no next action"),
@@ -2715,6 +2904,22 @@ unsafe fn park_operation(task: *mut Task) {
         let op = (*task).operation;
         if matches!((*op).state, OperationState::Issued { .. }) {
             (*(*task).run).parked.insert((*op).token, task);
+        }
+        #[cfg(feature = "prof")]
+        {
+            (*op).prof_pending = if (*op).entered.is_some()
+                || matches!((*op).state, OperationState::Issued { .. })
+            {
+                prof::timing_start()
+            } else {
+                0
+            };
+            let reason = if (*(*op).request).operation == crate::provider::SLEEP_UNTIL {
+                Reason::Timer
+            } else {
+                Reason::ProviderIo
+            };
+            prof_state(task, State::Provider, reason, (*op).token);
         }
         (*task).state = State::Provider;
         switch_to_idle(task);
@@ -2813,26 +3018,34 @@ unsafe fn alone(
             }
         }
     };
+    let wait = |deadline| {
+        #[cfg(feature = "prof")]
+        let start = prof::timing_start();
+        let ready = block(deadline);
+        #[cfg(feature = "prof")]
+        prof::pending(token, start);
+        ready
+    };
     // SAFETY: provider contract; request pinned by the caller.
     unsafe {
         loop {
-            let w = (p.wait)(p.state, request, token);
+            let w = provider_callback!(token, Wait, (p.wait)(p.state, request, token));
             match w.kind {
                 WAIT_READY => break,
                 WAIT_UNTIL => {
-                    block(Some(w.deadline_ns));
+                    wait(Some(w.deadline_ns));
                 }
                 WAIT_PARK => {
                     // Only the program readies a cell's wait, and no other task runs.
                     if crate::provide::owns(p) && !crate::provide::quiesce(&|t| t == token) {
                         crate::process::stop(b"Deadlock");
                     }
-                    block(None);
+                    wait(None);
                 }
                 _ => crate::process::stop(b"Provider"),
             }
         }
-        let mut step = crate::provider::issue(p, request, token);
+        let mut step = provider_callback!(token, Issue, crate::provider::issue(p, request, token));
         loop {
             match step.kind {
                 STEP_DONE => return Some(step.outcome),
@@ -2843,10 +3056,15 @@ unsafe fn alone(
                         crate::process::stop(b"Deadlock");
                     }
                     let deadline = (step.deadline_ns != 0).then_some(step.deadline_ns);
-                    if block(deadline) {
-                        step = (p.resume)(p.state, request, token);
+                    if wait(deadline) {
+                        step =
+                            provider_callback!(token, Resume, (p.resume)(p.state, request, token));
                     } else {
-                        return Some((p.abort)(p.state, request, token, ABORT_DEADLINE));
+                        return Some(provider_callback!(
+                            token,
+                            Abort,
+                            (p.abort)(p.state, request, token, ABORT_DEADLINE)
+                        ));
                     }
                 }
                 _ => crate::process::stop(b"Provider"),
@@ -3228,6 +3446,8 @@ unsafe fn poll_turn(task: *mut Task) {
                 || (*run).readies.as_ref().pending.load(Ordering::Acquire)
             {
                 (*task).state = State::Ready;
+                #[cfg(feature = "prof")]
+                prof_state(task, State::Ready, Reason::None, 0);
                 (*run).publish(task, true);
                 switch_to_idle(task);
             }
@@ -3243,6 +3463,8 @@ unsafe fn poll_turn(task: *mut Task) {
         }
         if !(*run).head.is_null() || !(*run).deferred.is_null() {
             (*task).state = State::Ready;
+            #[cfg(feature = "prof")]
+            prof_state(task, State::Ready, Reason::None, 0);
             (*task).ready = ptr::null_mut();
             if (*run).deferred_tail.is_null() {
                 (*run).deferred = task;
@@ -3266,6 +3488,75 @@ pub(crate) fn capacity_refused(requested: u64, available: u64) -> Capacity {
         available,
     }
 }
+#[cfg(feature = "prof")]
+unsafe fn prof_key(task: *mut Task) -> [u64; 2] {
+    if task.is_null() {
+        return [0, 0];
+    }
+    // SAFETY: caller pins the task and its scheduler. Both keys are immutable.
+    unsafe { [(*(*task).run).prof_id, (*task).id] }
+}
+
+#[cfg(feature = "prof")]
+pub(crate) fn prof_current_task() -> [u64; 2] {
+    let task = CURRENT.get();
+    // SAFETY: either binding pins the task through the active callback or dispatch.
+    unsafe {
+        prof_key(if task.is_null() {
+            CALLBACK_TASK.get()
+        } else {
+            task
+        })
+    }
+}
+
+#[cfg(feature = "prof")]
+unsafe fn prof_created(task: *mut Task, parent: *mut Task) {
+    // SAFETY: caller pins both task keys.
+    let ([unit, id], [parent_unit, parent_id]) = unsafe { (prof_key(task), prof_key(parent)) };
+    prof::append(ProfKind::Task, &[unit, id, parent_unit, parent_id], &[]);
+}
+
+#[cfg(feature = "prof")]
+unsafe fn prof_state(task: *mut Task, state: State, reason: Reason, object: u64) {
+    // SAFETY: the transition pins the task.
+    let [unit, id] = unsafe { prof_key(task) };
+    prof::append(
+        ProfKind::State,
+        &[unit, id, state as u64, reason as u64, object],
+        &[],
+    );
+}
+
+#[cfg(feature = "prof")]
+unsafe fn prof_dispatch(task: *mut Task, entering: bool) {
+    if task.is_null() {
+        return;
+    }
+    let worker = WORKER.get();
+    // SAFETY: the current thread owns the Worker binding.
+    let index = unsafe { worker.as_ref().map_or(0, |worker| worker.index) } as u64;
+    // SAFETY: the dispatch pins the task.
+    let [unit, id] = unsafe { prof_key(task) };
+    let kind = if entering {
+        ProfKind::DispatchBegin
+    } else {
+        ProfKind::DispatchEnd
+    };
+    prof::append(kind, &[unit, id, index], &[]);
+}
+
+#[cfg(feature = "prof")]
+unsafe fn prof_wake(task: *mut Task, kind: WakeSource, source: *mut Task, object: u64) {
+    // SAFETY: the wake pins the destination and optional source.
+    let ([unit, id], [src_unit, src_id]) = unsafe { (prof_key(task), prof_key(source)) };
+    prof::append(
+        ProfKind::Wake,
+        &[unit, id, kind as u64, src_unit, src_id, object],
+        &[],
+    );
+}
+
 struct CallbackTask(*mut Task);
 impl CallbackTask {
     fn new(task: *mut Task) -> Self {
@@ -3455,13 +3746,40 @@ pub(crate) fn identity() -> u64 {
 /// # Safety
 /// Called on the active fiber, with no Rust references held to scheduler/task state.
 pub unsafe fn checkpoint() {
+    // SAFETY: this passes the same active fiber and pinned state.
+    unsafe {
+        checkpoint_inner(
+            #[cfg(feature = "prof")]
+            Reason::None,
+        )
+    }
+}
+
+/// # Safety
+/// As for checkpoint, after installing a new step slice.
+pub(crate) unsafe fn step_checkpoint() {
+    // SAFETY: this passes the same active fiber and pinned state.
+    unsafe {
+        checkpoint_inner(
+            #[cfg(feature = "prof")]
+            Reason::StepSlice,
+        )
+    }
+}
+
+#[inline(always)]
+unsafe fn checkpoint_inner(#[cfg(feature = "prof")] reason: Reason) {
     let _commit = crate::sequencer::enter();
     let task = CURRENT.get();
     // SAFETY: saving exactly this fiber; idle and task stacks stay mapped.
     unsafe {
         if !task.is_null() {
             let run = (*task).run;
-            (*run).ready(task);
+            (*run).ready_with_reason(
+                task,
+                #[cfg(feature = "prof")]
+                reason,
+            );
             switch_to_idle(task);
         }
     }
@@ -3483,6 +3801,12 @@ pub(crate) unsafe fn checkpoint_at(now: u64) {
 /// one call each: both run on the unit's stack between switches.
 #[inline(never)]
 fn leave_task_tls() {
+    #[cfg(feature = "prof")]
+    {
+        let task = CURRENT.get();
+        // SAFETY: CURRENT pins the outgoing task.
+        unsafe { prof_dispatch(task, false) };
+    }
     CURRENT.set_here(ptr::null_mut());
     crate::fiber::guard_here((0, 0));
 }
@@ -3490,6 +3814,11 @@ fn leave_task_tls() {
 /// `task` is the resuming task, pinned by its run.
 #[inline(never)]
 unsafe fn enter_task_tls(task: *mut Task) {
+    #[cfg(feature = "prof")]
+    // SAFETY: the switch pins the resuming task.
+    unsafe {
+        prof_dispatch(task, true)
+    };
     CURRENT.set_here(task);
     // SAFETY: by the contract.
     crate::fiber::guard_here(unsafe { (*task).stack.as_ref().unwrap().bounds() });
@@ -3601,18 +3930,34 @@ pub(crate) unsafe fn park_unit_alone(task: *mut Task, spin: impl FnOnce() -> boo
 /// # Safety
 /// The active task owns the commit and holds the condition's owner alive
 /// across suspension. No references to scheduler/task state survive the switch.
-pub(crate) unsafe fn park(queue: *mut Waiters) -> crate::sequencer::Guard {
+pub(crate) unsafe fn park(
+    queue: *mut Waiters,
+    #[cfg(feature = "prof")] wait: (Reason, u64),
+) -> crate::sequencer::Guard {
     // SAFETY: the active task and queue meet the contract.
-    unsafe { park_for(CURRENT.get(), queue) }
+    unsafe {
+        park_for(
+            CURRENT.get(),
+            queue,
+            #[cfg(feature = "prof")]
+            wait,
+        )
+    }
 }
 
 /// # Safety
 /// As for `park`, with the active task passed by the caller.
-pub(crate) unsafe fn park_for(task: *mut Task, queue: *mut Waiters) -> crate::sequencer::Guard {
+pub(crate) unsafe fn park_for(
+    task: *mut Task,
+    queue: *mut Waiters,
+    #[cfg(feature = "prof")] wait: (Reason, u64),
+) -> crate::sequencer::Guard {
     let commit = crate::sequencer::enter();
     // SAFETY: the condition was checked in this commit and the queue is pinned.
     unsafe {
         if !task.is_null() {
+            #[cfg(feature = "prof")]
+            prof_state(task, State::Waiting, wait.0, wait.1);
             (*task).state = State::Waiting;
             Waiters::push(queue, task);
             switch_to_idle(task);
@@ -3650,7 +3995,11 @@ pub(crate) unsafe fn event_wake_waiters_for(
             } else {
                 record_folded(task, kind, object, value);
             }
-            let _wakes = Waiters::wake_all(queue);
+            let _wakes = Waiters::wake_all(
+                queue,
+                #[cfg(feature = "prof")]
+                (WakeSource::Task, task, object),
+            );
             #[cfg(feature = "testing")]
             if matches!(kind, PUBLISH | RECEIVE)
                 && let Some(pool) = (*(*task).run).pool
@@ -3853,6 +4202,8 @@ unsafe extern "C" fn start(first: *mut u8, _: *mut u8) -> ! {
         });
         let _commit = before_commit();
         record_event(task, END, (*task).id, (*task).failed as u64);
+        #[cfg(feature = "prof")]
+        prof_state(task, State::Ended, Reason::None, 0);
         (*task).state = State::Ended;
         #[cfg(feature = "record")]
         if let Some(group) = (*task).group
@@ -3860,7 +4211,11 @@ unsafe extern "C" fn start(first: *mut u8, _: *mut u8) -> ! {
         {
             *members -= 1;
         }
-        Waiters::wake_all(&raw mut (*task).waiters);
+        Waiters::wake_all(
+            &raw mut (*task).waiters,
+            #[cfg(feature = "prof")]
+            (WakeSource::Task, task, (*task).id),
+        );
         switch_to_idle(task);
         std::hint::unreachable_unchecked();
     }
@@ -3937,8 +4292,12 @@ pub unsafe fn run_root(
 ) -> u8 {
     crate::os_sync::check_fork();
     let workers = worker_count();
+    #[cfg(feature = "prof")]
+    let _worker_profile = prof::Worker::enter();
     crate::fiber::arm();
     let mut run = Scheduler {
+        #[cfg(feature = "prof")]
+        prof_id: prof::run_id(),
         pool: None,
         share_heap: workers == 1,
         deferred: ptr::null_mut(),
@@ -4066,12 +4425,16 @@ pub unsafe fn run_root(
             .as_ref()
             .unwrap()
             .prepare(start, root_pointer.cast(), ptr::null_mut());
+        #[cfg(feature = "prof")]
+        prof_created(root_pointer, ptr::null_mut());
         run.all = root_pointer;
         root.arc_hooks = run.arc_hooks(&root);
         if let Some(pool) = pool.as_deref().filter(|pool| !pool.serial_replay) {
             root.arc_runtime = run.arc_observed();
             root.worker = Some(0);
             pool.homes[0].store(1, Ordering::Relaxed);
+            #[cfg(feature = "prof")]
+            prof_state(root_pointer, State::Ready, Reason::None, 0);
             root.state = State::Ready;
             let domain = &pool.domains[&root.domain];
             domain.ready.store(1, Ordering::Relaxed);
@@ -4122,6 +4485,8 @@ unsafe impl Send for RunPtr {}
 
 impl RunPtr {
     fn worker(self, root: TaskPtr, pool: &Pool, index: usize, stop_fd: i32) {
+        #[cfg(feature = "prof")]
+        let _worker_profile = prof::Worker::enter();
         crate::fiber::arm();
         let previous_fd = crate::fiber::set_stop_fd(stop_fd);
         pool.threads[index].set(std::thread::current()).unwrap();
@@ -4292,9 +4657,13 @@ impl RunPtr {
                 dispatch_sample.take(task);
                 CURRENT.set(task);
                 (*task).state = State::Running;
+                #[cfg(feature = "prof")]
+                prof_dispatch(task, true);
                 abi::task_resume((*task).context);
                 crate::fiber::guard((*task).stack.as_ref().unwrap().bounds());
                 hirsel_stack::switch(idle, (*task).sp);
+                #[cfg(feature = "prof")]
+                prof_dispatch(task, false);
                 crate::fiber::guard((0, 0));
                 crate::limit::Funding::unbind();
                 CURRENT.set(previous);
@@ -4403,11 +4772,15 @@ impl RunPtr {
                 }
                 (*task).state = State::Running;
                 CURRENT.set(task);
+                #[cfg(feature = "prof")]
+                prof_dispatch(task, true);
                 abi::task_resume((*task).context);
                 crate::fiber::guard((*task).stack.as_ref().unwrap().bounds());
                 crate::sequencer::to_fiber(commit, || {
                     hirsel_stack::switch(&raw mut (*worker).idle, (*task).sp);
                 });
+                #[cfg(feature = "prof")]
+                prof_dispatch(task, false);
                 crate::fiber::guard((0, 0));
                 let commit = crate::sequencer::enter();
                 crate::limit::Funding::unbind();
@@ -4673,6 +5046,8 @@ unsafe fn spawn_in(
         if (*run).measure {
             (*task).enqueued_at = crate::os::monotonic_ns();
         }
+        #[cfg(feature = "prof")]
+        prof_created(task, CURRENT.get());
         (*run).ready(task);
         event(SPAWN, (*task).id, bytes);
         Spawned { task, available: 0 }
@@ -4839,7 +5214,11 @@ pub unsafe extern "C" fn hirsel_core_join(
             if (*task).state == State::Ended {
                 break commit;
             }
-            _resumed = Some(park(&raw mut (*task).waiters));
+            _resumed = Some(park(
+                &raw mut (*task).waiters,
+                #[cfg(feature = "prof")]
+                (Reason::Join, (*task).id),
+            ));
         };
         let failed = (*task).failed != 0;
         let causes = std::mem::take(&mut (*(*task).context).causes);
@@ -4872,7 +5251,11 @@ unsafe fn abandon_begin(context: *mut Context, task: *mut Task) -> *mut crate::c
             if (*task).state == State::Ended {
                 break;
             }
-            _resumed = Some(park(&raw mut (*task).waiters));
+            _resumed = Some(park(
+                &raw mut (*task).waiters,
+                #[cfg(feature = "prof")]
+                (Reason::Join, (*task).id),
+            ));
         }
         event(JOIN, (*task).id, 2);
         (*task).cursor = 0;
@@ -4967,15 +5350,28 @@ pub(crate) unsafe fn host_operation(
     ) -> crate::provider::Outcome,
 ) -> crate::provider::Outcome {
     // SAFETY: the provider's operands remain live and its callback cannot suspend.
-    unsafe { on_host_stack(false, || operation(state, request)) }
+    unsafe {
+        on_host_stack(
+            false,
+            #[cfg(feature = "prof")]
+            (*request).site,
+            || operation(state, request),
+        )
+    }
 }
 
 /// # Safety
 /// The callback cannot re-enter the scheduler, suspend or unwind across its
 /// host-stack frame. All borrowed operands stay live until the call returns.
-pub(crate) unsafe fn on_host_stack<T>(require_stack: bool, call: impl FnOnce() -> T) -> T {
+pub(crate) unsafe fn on_host_stack<T>(
+    require_stack: bool,
+    #[cfg(feature = "prof")] site: u64,
+    call: impl FnOnce() -> T,
+) -> T {
     let task = CURRENT.get();
     if task.is_null() {
+        #[cfg(feature = "prof")]
+        let _interval = prof::HostInterval::begin(prof_current_task(), site);
         if !require_stack {
             return call();
         }
@@ -4988,7 +5384,11 @@ pub(crate) unsafe fn on_host_stack<T>(require_stack: bool, call: impl FnOnce() -
     unsafe {
         let stock = worker_stock((*task).run);
         let host = (*stock).take();
+        #[cfg(feature = "prof")]
+        let interval = prof::HostInterval::begin(prof_current_task(), site);
         let result = host.call(call);
+        #[cfg(feature = "prof")]
+        drop(interval);
         (*stock).recycle(host);
         result
     }
@@ -5055,6 +5455,8 @@ mod ready_routing_laws {
                 site: 0,
             };
             let mut run = Scheduler {
+                #[cfg(feature = "prof")]
+                prof_id: prof::run_id(),
                 pool: None,
                 share_heap: false,
                 deferred: ptr::null_mut(),
@@ -5095,6 +5497,8 @@ mod ready_routing_laws {
             };
             let mut operations: Vec<_> = (0..n)
                 .map(|i| Operation {
+                    #[cfg(feature = "prof")]
+                    prof_pending: 0,
                     provider,
                     request: &mut request,
                     token: i as u64 + 1,

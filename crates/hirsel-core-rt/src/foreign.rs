@@ -31,7 +31,14 @@ pub unsafe extern "C" fn hirsel_core_foreign_stack(
     result: u8,
 ) -> u64 {
     // SAFETY: the thunk is synchronous and the caller pins its arguments.
-    unsafe { tasks::on_host_stack(true, || invoke(thunk, args, result)) }
+    unsafe {
+        tasks::on_host_stack(
+            true,
+            #[cfg(feature = "prof")]
+            0,
+            || invoke(thunk, args, result),
+        )
+    }
 }
 
 /// Enter a C call that may wait on this run's helper pool.
@@ -151,7 +158,12 @@ impl Run {
                     .unwrap()
                     .call(context, call, cancellable, site)
             } else {
-                tasks::on_host_stack(true, || call.issue())
+                tasks::on_host_stack(
+                    true,
+                    #[cfg(feature = "prof")]
+                    site,
+                    || call.issue(),
+                )
             }
         }
     }

@@ -149,6 +149,7 @@ impl ProfileWriter {
         self.db.execute_batch(
             "INSERT INTO run_meta SELECT 'samples_total', count(*) FROM cpu_sample;
              INSERT INTO run_meta SELECT 'stacks_truncated', count(*) FROM cpu_sample WHERE stack_root = 'truncated';
+             INSERT INTO run_meta SELECT 'unknown_mapping', count(*) FROM cpu_sample WHERE unwind_status = 'unknown_mapping';
              INSERT INTO run_meta SELECT 'unwind_failed', count(*) FROM cpu_sample WHERE stack_root = 'failed';
              INSERT INTO run_meta SELECT 'host_root_samples', count(*) FROM cpu_sample WHERE stack_root = 'host';
              INSERT INTO run_meta SELECT 'unresolved_samples', count(*)
@@ -218,8 +219,8 @@ mod tests {
              INSERT INTO frame VALUES (1,NULL,NULL,1,'workload.hirsel',1,1,0),
                                       (2,NULL,NULL,2,'workload.hirsel',2,1,0);
              INSERT INTO callsite VALUES (1,NULL,1,0), (2,1,1,1), (3,2,2,2);
-             INSERT INTO cpu_sample VALUES (1,1,1,NULL,0,2,'0x10',3,'fiber','fiber_root'),
-                                           (2,2,1,NULL,0,3,'0x20',5,'fiber','fiber_root');
+             INSERT INTO cpu_sample VALUES (1,1,1,NULL,NULL,0,2,'0x10',3,'fiber','fiber_root'),
+                                           (2,2,1,NULL,NULL,0,3,'0x20',5,'fiber','fiber_root');
              INSERT INTO sample_counter VALUES (1,'cycles',3), (2,'cycles',5);",
         )
         .unwrap();

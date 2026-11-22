@@ -10,6 +10,7 @@ use super::import::Import;
 use super::launch::SuspendedLaunchedProcess;
 use super::perf::{self, Event, PerfGroup, PerfSettings};
 use super::procfs::Identity;
+use crate::observation::{MAPPING, Observation};
 use crate::profile::{ProfileWriter, Result, RunMeta};
 
 /// The settings common to launching or attaching to a native process.
@@ -24,6 +25,7 @@ pub struct Launch<'a> {
     pub executable: &'a Path,
     pub arguments: &'a [String],
     pub record: Option<&'a OsStr>,
+    pub observation: Option<&'a Path>,
     pub source_root: &'a Path,
 }
 
@@ -33,15 +35,33 @@ pub fn run(
     options: &CaptureOptions<'_>,
     resolve: impl FnOnce(&Path, &[u8]) -> io::Result<SymbolSource>,
 ) -> Result<ExitStatus> {
-    let cpus = perf::online_cpus()?;
     perf::validate_settings(options.freq, options.stack_bytes)?;
     let path = launch.executable.canonicalize()?;
     let mut executable = File::open(&path)?;
     let provenance = Provenance::load(&path, &mut executable, resolve)?;
     let profile = ProfileWriter::create(options.out)?;
-    let mut child = SuspendedLaunchedProcess::fork(&path, launch.arguments, launch.record)?;
+    // Validate an explicit event list even when the runtime stream can
+    // carry on without perf.
+    perf::events(options.pmu.unwrap_or("cycles"))?;
+    let mut child =
+        SuspendedLaunchedProcess::fork(&path, launch.arguments, launch.record, launch.observation)?;
     let pid = child.pid() as u32;
-    let (mut group, events, fallback) = open_perf(pid, &cpus, options, true)?;
+    let sampling = perf::online_cpus().and_then(|cpus| open_perf(pid, &cpus, options, true));
+    let (mut group, event, fallback) = match sampling {
+        Ok((group, events, fallback)) => (Some(group), events[0], fallback),
+        Err(error) if launch.observation.is_some() => {
+            let mut tracker = PerfGroup::new();
+            match tracker.open_tracking(pid as i32) {
+                Ok(()) => (Some(tracker), perf::RUNTIME, error.to_string()),
+                Err(track) => (
+                    None,
+                    perf::RUNTIME,
+                    format!("{error}; mapping tracking: {track}"),
+                ),
+            }
+        }
+        Err(error) => return Err(error),
+    };
     let start = perf::monotonic_ns()?;
     child
         .resume()
@@ -54,19 +74,33 @@ pub fn run(
         provenance.identity,
     );
     import.source_remarks()?;
-    let mut status = None;
-    while status.is_none() {
-        for record in group.collect(false)? {
+    let status = loop {
+        if let Some(group) = &mut group {
+            for record in group.collect(false)? {
+                import.record(record)?;
+            }
+        }
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if let Some(group) = &group {
+            group.wait()?;
+        } else {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    };
+    let end = perf::monotonic_ns()?;
+    if let Some(group) = &mut group {
+        for record in group.collect(true)? {
             import.record(record)?;
         }
-        status = child.try_wait()?;
-        if status.is_none() {
-            group.wait()?;
-        }
     }
-    let end = perf::monotonic_ns()?;
-    for record in group.collect(true)? {
-        import.record(record)?;
+    if let Some(path) = launch.observation {
+        let observations = Observation::read(path)?;
+        if group.is_none() {
+            seed_mappings(&mut import, &observations)?;
+        }
+        observations.store(profile.connection())?;
     }
     import.close(end)?;
     let samples_lost = import.samples_lost;
@@ -86,11 +120,26 @@ pub fn run(
             samples_lost,
             freq: options.freq,
             fallback,
-            event: events[0],
+            event,
             provenance,
         },
     )?;
-    Ok(status.expect("child status"))
+    Ok(status)
+}
+
+fn seed_mappings(import: &mut Import<'_>, observations: &Observation) -> Result<()> {
+    let mut maps = observations
+        .records
+        .iter()
+        .filter(|record| record.kind == MAPPING)
+        .peekable();
+    let Some(time) = maps.peek().map(|record| record.ts) else {
+        return Ok(());
+    };
+    let bytes = maps
+        .flat_map(|record| record.bytes.iter().copied().chain([b'\n']))
+        .collect::<Vec<_>>();
+    import.initialize(Vec::new(), super::procfs::parse_mappings(&bytes)?, time)
 }
 
 pub(super) struct Provenance {
@@ -284,6 +333,7 @@ int main(void) {
                 executable: &executable,
                 arguments: &[],
                 record: None,
+                observation: None,
                 source_root: dir.path(),
             },
             &CaptureOptions {

@@ -2141,6 +2141,11 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = |name| dir.path().join(name);
         let mut options = native_options(Backend::Cranelift, dir.path());
+        if profile {
+            options.runtime = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(std::env::var_os("HIRSEL_CORE_RT_PROF_ARCHIVE").unwrap());
+        }
         options.foreign_grants.insert("ffi_laws@1/laws/Laws".into());
         let Link::Driver(cc) = &options.link else {
             unreachable!()
@@ -2232,7 +2237,7 @@ static const char abi[sizeof(ABI) - 1] = ABI;
         archives
             .admit(archive, &leaf, TARGET, None, || Ok(bytes))
             .unwrap();
-        let module = hirsel_core_ir::text::parse(
+        let mut module = hirsel_core_ir::text::parse(
             r#"
 core v1
 type t0 = own "Result" | Ok { } | Error { }
@@ -2305,6 +2310,38 @@ fn f5 = n5 g5 extern
 "#,
         )
         .unwrap();
+        let mut sources = hirsel_core_ir::source::SourceMap::default();
+        if profile {
+            use hirsel_core_ir::{
+                Anchor, Inst, ItemId,
+                source::{ItemSource, SourceFile},
+            };
+            module.items.push(entry.clone());
+            let item = ItemId((module.items.len() - 1) as u32);
+            let body = module.functions[0].body.as_mut().unwrap();
+            let at = body
+                .insts
+                .iter()
+                .position(|inst| matches!(inst, Inst::Call { call } if call.index() == 0))
+                .unwrap();
+            body.inst_anchors.resize(body.insts.len(), None);
+            body.inst_anchors[at] = Some(Anchor {
+                item,
+                start: 5,
+                end: 6,
+            });
+            sources.files.push(SourceFile {
+                path: "fixture.hirsel".into(),
+                text: "fixture call".into(),
+            });
+            sources.items.insert(
+                entry.clone(),
+                ItemSource {
+                    file: 0,
+                    file_offset: 3,
+                },
+            );
+        }
         let plan_abi = EntryAbi {
             recipe: hirsel_core_layout::compute(&module.types)
                 .unwrap()
@@ -2339,13 +2376,7 @@ fn f5 = n5 g5 extern
             .unwrap()
             .with_foreign([&leaf]);
             let startup = plan
-                .emit(
-                    TARGET,
-                    &Default::default(),
-                    ContentHash::default(),
-                    &[0; 32],
-                    &[],
-                )
+                .emit(TARGET, &sources, ContentHash::default(), &[0; 32], &[])
                 .unwrap();
             std::fs::write(path("unit.o"), object.bytes).unwrap();
             std::fs::write(path("startup.o"), startup).unwrap();
@@ -2366,7 +2397,8 @@ fn f5 = n5 g5 extern
             .unwrap();
             if profile {
                 let profile_path = dir.path().join(format!("foreign-{backend:?}.hprof"));
-                let report = capture_native_profile(&output, &profile_path);
+                let raw = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
+                let report = capture_native_profile(&output, &profile_path, Some(raw.path()));
                 let db = report.connection();
                 let host: i64 = db.query_row(
                     "SELECT count(*) FROM cpu_sample s JOIN callsite c ON c.id=s.callsite_id
@@ -2374,6 +2406,22 @@ fn f5 = n5 g5 extern
                      WHERE f.name='hfl_profile_hot' AND s.stack_root='host' AND s.unwind_status='ok'",
                     [], |row| row.get(0),
                 ).unwrap();
+                let attributed: i64 = db
+                    .query_row(
+                        "SELECT count(*) FROM cpu_sample s JOIN callsite c ON c.id=s.callsite_id
+                     JOIN frame fr ON fr.id=c.frame_id JOIN function f ON f.id=fr.function_id
+                     JOIN host_stack_interval h ON h.id=s.host_stack_interval_id
+                     JOIN task t ON t.id=s.task_id
+                     WHERE f.name='hfl_profile_hot' AND s.stack_root='host' AND
+                           s.unwind_status='ok' AND t.runtime_id=0 AND h.task_id=t.id AND h.site=9",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    attributed, host,
+                    "{backend:?}: host interval pairs the root with the call at site 1 + 3 + 5"
+                );
                 if host == 0 {
                     let counts: String = db.query_row(
                         "SELECT COALESCE(group_concat(unwind_status || '/' || stack_root || '=' || n), '')

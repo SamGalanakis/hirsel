@@ -53,6 +53,7 @@ impl Sampling {
 pub(crate) struct Run {
     sampling: Sampling,
     source_root: PathBuf,
+    tasks: bool,
 }
 
 impl Run {
@@ -60,21 +61,31 @@ impl Run {
         let mut run = Self {
             sampling: Sampling::default(),
             source_root: invocation.positional.as_deref().unwrap_or(".").into(),
+            tasks: false,
         };
         for (id, value) in invocation.options.extract_if(.., |(option, _)| {
             matches!(
                 option,
-                OptionId::ProfOut
+                OptionId::ProfTasks
+                    | OptionId::ProfOut
                     | OptionId::ProfFrequency
                     | OptionId::ProfPmu
                     | OptionId::ProfStackBytes
             )
         }) {
-            run.sampling
-                .apply(id, value.expect("profile option takes a value"))?;
+            if id == OptionId::ProfTasks {
+                run.tasks = true;
+            } else {
+                run.sampling
+                    .apply(id, value.expect("profile option takes a value"))?;
+            }
         }
         invocation.command = crate::cli::named("run")?;
         Ok(run)
+    }
+
+    pub(crate) fn observes(&self) -> bool {
+        self.tasks
     }
 
     pub(crate) fn capture(
@@ -83,11 +94,13 @@ impl Run {
         arguments: &[String],
         record: Option<&str>,
     ) -> Result<ExitStatus> {
+        let raw = self.tasks.then(tempfile::NamedTempFile::new).transpose()?;
         let status = hirsel_prof::run(
             &Launch {
                 executable,
                 arguments,
                 record: record.map(OsStr::new),
+                observation: raw.as_ref().map(tempfile::NamedTempFile::path),
                 source_root: &self.source_root,
             },
             &self.sampling.options(),

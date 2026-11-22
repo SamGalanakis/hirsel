@@ -14,7 +14,7 @@ The native unwind records mark where a stack walk ends at a fiber boundary.
 ## CPU profiles
 
 ```text
-hirsel prof run [package-dir] [build-opts] [--out FILE.hprof] [--freq 997] [--pmu LIST] [--stack-bytes 32768] [-- args...]
+hirsel prof run [package-dir] [build-opts] [--tasks] [--out FILE.hprof] [--freq 997] [--pmu LIST] [--stack-bytes 32768] [-- args...]
 hirsel prof attach <PID> [--duration SECS] [--freq 997] [--pmu LIST] [--debug PATH] [--out FILE.hprof]
 hirsel prof summary <FILE.hprof> [--json]
 hirsel prof schema <FILE.hprof> [--json]
@@ -32,7 +32,10 @@ For each target, `core-product --install` and `std-product --install` accept
 the profiling and combined profiling/recording archives. `hirsel env` lists
 both archive paths. `hirsel --version` reports their content identities.
 
-`prof run` takes the native build options of `run`. It passes arguments after
+`prof run` takes the native build options of `run`. Its `--tasks` option selects the
+profiling runtime and adds task, wake, host-stack and provider I/O rows.
+When CPU sampling is unavailable, a task capture still runs and reports the
+perf diagnostic in its quality header. It passes arguments after
 `--` to the executable, leaves its standard streams connected, and returns
 its exit status. `--out` names the profile and defaults to `profile.hprof`.
 The command writes a [portable SQLite profile](profiling.md) after the

@@ -612,6 +612,8 @@ pub unsafe extern "C" fn hirsel_core_os_run_recording(
     // SAFETY: process startup is single-threaded before any task or grant snapshot.
     unsafe {
         if let Some((path, mode)) = pinned_replay(&*input) {
+            #[cfg(feature = "prof")]
+            let _profile = crate::prof::Run::start();
             return run_taped(
                 input, names, sources, entry, path, mode, identity, revision, None,
             );
@@ -630,6 +632,8 @@ pub unsafe extern "C" fn hirsel_core_os_run_recording(
                 Err(_) => return process::NOT_STARTED,
             },
         };
+        #[cfg(feature = "prof")]
+        let _profile = crate::prof::Run::start();
         super::writer::start();
         // A recorded run is its root alone: helper units run on their own
         // threads and are not recorded (see units.rs, "A unit recording").
@@ -688,6 +692,8 @@ pub unsafe extern "C" fn hirsel_core_os_replay(
     identity: *const libc::c_char,
     revision: *const [u8; 32],
 ) -> u8 {
+    #[cfg(feature = "prof")]
+    let _profile = crate::prof::Run::start();
     // SAFETY: every pointer is a borrowed generated startup operand.
     unsafe {
         run_taped(

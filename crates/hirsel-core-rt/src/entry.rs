@@ -979,6 +979,8 @@ unsafe fn run_os_with_sources(
     launch_metadata: fn(&str, u64, bool) -> Metadata,
     foreign_waits: Option<bool>,
 ) -> u8 {
+    #[cfg(feature = "prof")]
+    let _profile = crate::prof::Run::start();
     if let Some(w) = crate::units::workers() {
         struct Shared(*const View, *const crate::abi_sites::SourceTable);
         // SAFETY: the caller pins the tables for the whole launch.

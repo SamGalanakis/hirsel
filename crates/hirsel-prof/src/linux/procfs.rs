@@ -39,9 +39,12 @@ pub(crate) fn threads(pid: u32) -> Result<Vec<(u32, String)>> {
 }
 
 pub(crate) fn mappings(pid: u32) -> Result<Vec<Mapping>> {
+    parse_mappings(&fs::read(process(pid).join("maps"))?)
+}
+
+pub(crate) fn parse_mappings(bytes: &[u8]) -> Result<Vec<Mapping>> {
     use std::os::unix::ffi::OsStrExt;
 
-    let bytes = fs::read(process(pid).join("maps"))?;
     let mut result = Vec::new();
     for mut line in bytes
         .split(|&byte| byte == b'\n')

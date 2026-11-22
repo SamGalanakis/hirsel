@@ -289,7 +289,13 @@ pub unsafe extern "C" fn hirsel_core_send(
                         status: 0,
                     };
                 }
-                _ => _resumed = Some(tasks::park(&raw mut (*channel).send_waiters)),
+                _ => {
+                    _resumed = Some(tasks::park(
+                        &raw mut (*channel).send_waiters,
+                        #[cfg(feature = "prof")]
+                        (crate::prof::Reason::ChannelSend, (*channel).id),
+                    ))
+                }
             }
         }
     }
@@ -387,7 +393,11 @@ pub unsafe extern "C" fn hirsel_core_receive(
                     status: 0,
                 };
             }
-            _resumed = Some(tasks::park(&raw mut (*channel).receive_waiters));
+            _resumed = Some(tasks::park(
+                &raw mut (*channel).receive_waiters,
+                #[cfg(feature = "prof")]
+                (crate::prof::Reason::ChannelRecv, (*channel).id),
+            ));
         }
     }
 }

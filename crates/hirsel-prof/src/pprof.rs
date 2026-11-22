@@ -324,7 +324,7 @@ mod tests {
              INSERT INTO frame VALUES (1,1,32,1,'fixture.hirsel',10,1,0),
                                       (2,1,32,2,'fixture.hirsel',13,3,1);
              INSERT INTO callsite VALUES (1,NULL,1,0), (2,1,2,1);
-             INSERT INTO cpu_sample VALUES (1,1,1,NULL,0,2,'0x1020',23,'fiber','fiber_root');
+             INSERT INTO cpu_sample VALUES (1,1,1,NULL,NULL,0,2,'0x1020',23,'fiber','fiber_root');
              INSERT INTO sample_counter VALUES (1,'instructions',23);",
             )
             .unwrap();

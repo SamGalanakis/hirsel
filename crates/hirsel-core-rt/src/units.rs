@@ -1531,6 +1531,8 @@ fn run_slot(p: &'static Pool, ix: usize) -> bool {
 }
 
 fn worker_main(p: &'static Pool, mut slot: Option<usize>, mut spare: Option<Arc<Spare>>) {
+    #[cfg(feature = "prof")]
+    let _worker_profile = crate::prof::Worker::enter();
     crate::fiber::arm();
     if slot.is_none() {
         TURNS.set(INJECTOR_EVERY - 1);

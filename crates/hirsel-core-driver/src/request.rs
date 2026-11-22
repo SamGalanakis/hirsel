@@ -452,6 +452,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             | Opt::TapeRetention
             | Opt::CallTimeout
             | Opt::ProfOut
+            | Opt::ProfTasks
             | Opt::ProfFrequency
             | Opt::ProfPmu
             | Opt::ProfStackBytes
@@ -598,6 +599,9 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     }
     let executable = std::env::current_exe()?;
     let installed = crate::installation::Installed::discover(&executable)?;
+    let observe = profile
+        .as_ref()
+        .is_some_and(crate::prof_command::Run::observes);
     let env_recording_runtime = installed
         .as_ref()
         .and_then(|installed| installed.recording_runtime(&target));
@@ -606,7 +610,9 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             core_product = Some(installed.cache());
         }
         if runtime.is_none() {
-            runtime = if needs_recording {
+            runtime = if observe {
+                installed.prof_runtime(&target, needs_recording)
+            } else if needs_recording {
                 installed.recording_runtime(&target)
             } else {
                 installed.runtime(&target)
@@ -731,7 +737,9 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     };
     let select_runtime = || -> Result<PathBuf, Box<dyn std::error::Error>> {
         let archive = runtime.as_deref().ok_or_else(|| {
-            if needs_recording {
+            if observe {
+                format!("no profiling runtime archive for {target}; pass --runtime with a profiling archive")
+            } else if needs_recording {
                 format!("no recording runtime archive for {target}; pass --runtime with a recording archive")
             } else {
                 "build/run/test requires --runtime <core runtime archive>".into()
@@ -740,6 +748,15 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         if explicit_runtime {
             let bytes = std::fs::read(archive)?;
             crate::installation::check_runtime(archive, &bytes, needs_recording)?;
+            if observe
+                && !crate::installation::archive_defines_symbol(&bytes, b"hirsel_core_prof_runtime")
+            {
+                return Err(format!(
+                    "this profile requires a profiling runtime archive: {}",
+                    archive.display()
+                )
+                .into());
+            }
         }
         Ok(archive.to_owned())
     };

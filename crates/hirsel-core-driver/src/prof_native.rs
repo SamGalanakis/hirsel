@@ -1,9 +1,14 @@
-fn capture_native_profile(program: &Path, out: &Path) -> hirsel_prof::Profile {
+fn capture_native_profile(
+    program: &Path,
+    out: &Path,
+    observation: Option<&Path>,
+) -> hirsel_prof::Profile {
     let status = hirsel_prof::run(
         &hirsel_prof::Launch {
             executable: program,
             arguments: &[],
             record: None,
+            observation,
             source_root: program.parent().unwrap(),
         },
         &hirsel_prof::CaptureOptions {
@@ -172,9 +177,30 @@ pub fn main(tasks: Tasks) -> Result[(), Exit] waits {
         let mut options = native_options(backend, dir.path());
         options.instance_limit = 512;
         options.grant_mask = 1 << grant_kind("Tasks").unwrap();
+        options.runtime = root.join(std::env::var_os("HIRSEL_CORE_RT_PROF_ARCHIVE").unwrap());
         let built = product.build(&entry, &options).unwrap();
-        let profile = capture_native_profile(&built.executable, &dir.path().join("fibers.hprof"));
+        let raw = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
+        let profile = capture_native_profile(
+            &built.executable,
+            &dir.path().join("fibers.hprof"),
+            Some(raw.path()),
+        );
         let db = profile.connection();
+        let handoffs: i64 = db
+            .query_row(
+                "SELECT count(*) FROM causal_edge e JOIN task src ON src.id=e.src_id
+             JOIN task dst ON dst.id=e.dst_task_id
+             JOIN task_slice w ON w.task_id=dst.id AND w.object_id=e.object_id
+             WHERE e.src_kind='task' AND src.runtime_id=4 AND dst.runtime_id=3
+               AND w.wait_reason='channel_recv' AND e.ts_ns BETWEEN w.start_ns AND w.end_ns",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            handoffs, 6,
+            "{backend:?}: beta wakes alpha on each return handoff"
+        );
         let tier: String = db
             .query_row(
                 "SELECT value FROM run_meta WHERE key='symbol_tier'",
@@ -248,4 +274,76 @@ pub fn main(tasks: Tasks) -> Result[(), Exit] waits {
 #[test]
 fn profiler_labels_foreign_callback_as_host_stack() {
     shared_foreign_thunk_fixture(true);
+}
+
+#[test]
+fn profiler_times_provider_callbacks_separately_from_pending() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let source = r#"pub fn main(c: Clock) -> Result[(), Exit] waits {
+        host.sleep_until(c, host.mono_ns(c) + 100000000u64)
+        Ok(())
+    }"#;
+    let mut request = source_request(source, dir.path());
+    request.inputs.packages[1] =
+        PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+    let product = Driver::default()
+        .check(request, &mut Meter::new(false))
+        .unwrap();
+    assert!(product.accepted());
+    let mut options = native_options(Backend::Cranelift, dir.path());
+    options.runtime = root.join(std::env::var_os("HIRSEL_CORE_RT_PROF_ARCHIVE").unwrap());
+    options.grant_mask = 1 << grant_kind("Clock").unwrap();
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let built = product.build(&entry, &options).unwrap();
+    let raw = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
+    let profile = capture_native_profile(
+        &built.executable,
+        &dir.path().join("io.hprof"),
+        Some(raw.path()),
+    );
+    let db = profile.connection();
+    let (span, callbacks, pending, wait, issue, deliver, status, error): (
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+    ) = db
+        .query_row(
+            "SELECT end_ns-start_ns,callback_ns,pending_ns,wait_callback_ns,
+                    issue_callback_ns,deliver_callback_ns,status,error_tag
+             FROM io_op WHERE operation=?1",
+            [hirsel_core_ids::host_op::SLEEP_UNTIL],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!((status, error), (0, 0));
+    assert!(wait > 0 && issue > 0 && deliver > 0);
+    assert_eq!(callbacks, wait + issue + deliver);
+    assert!(pending > 0 && callbacks + pending <= span);
+    let timer: i64 = db
+        .query_row(
+            "SELECT count(*) FROM causal_edge e JOIN task_slice w
+           ON w.task_id=e.dst_task_id AND w.object_id=e.object_id
+         WHERE e.src_kind='timer' AND w.wait_reason='timer'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(timer, 1);
 }

@@ -171,3 +171,32 @@ profiling archive without paying for that startup path.
 The chosen archive's content identity participates in native object, release
 part, release std and executable assembly cache keys. Runtime archive
 selection preserves semantic code addresses and `hirsel_code_revision`.
+
+## Task, host-stack and I/O observations
+
+`hirsel prof run --tasks` adds task lifetimes, state and dispatch intervals,
+measured wakes, host-stack intervals and provider I/O operations. A task row
+has a scheduler-local runtime ID and a profile-wide ID. A causal edge records
+the witnessed source, destination and object. Timer, external and unresolved
+wakes end the measured chain. Latest reads and publishes do not park.
+
+Each worker appends to two preallocated host chunks outside the program's
+memory budget. `HIRSEL_PROFILE_CHUNK_BYTES` sets each chunk's size in
+bytes for all runtime streams, from 65,536 bytes (the default) to 67,108,864
+bytes. A drain thread writes sealed chunks. A full buffer drops the
+new record and the profile reports the per-worker total as
+`runtime_events_lost`. An incomplete stream reports that its final loss count
+may be missing. Observations take no scheduler turn and add no tape event.
+
+For a host-stack sample, import pairs the thread ID and monotonic timestamp
+with the calling task and source site in `host_stack_interval`. The launch
+records executable mappings from `/proc/self/maps` before program operations.
+Live profiles use perf mapping records for libraries loaded by audited C.
+If sampling fails, the profiler tries a mapping-only perf event. If that also
+fails, only the startup mappings are available. A PC outside the known
+mappings has status `unknown_mapping`.
+
+`io_op` records the request's site, delivered byte count and error. Time spent
+in the wait, issue, resume, deliver and abort callbacks contributes to
+`callback_ns`. Time waiting for readiness or a deadline contributes to
+`pending_ns`. The total operation interval can also include scheduler delay.

@@ -1,5 +1,6 @@
 //! Portable CPU profiles for Hirsel.
 
+mod observation;
 mod pprof;
 mod profile;
 mod query;

@@ -239,8 +239,9 @@ class Resolution:
             if name == 'hirsel-core-rt':
                 # The unit harness includes Openat2 recording cases. Keep the
                 # default archive separate and resolve record's optional deps.
+                # The same harness exercises the runtime profiler's chunks.
                 record = ['--features', 'record']
-                modes = [(False, []), (True, record), (False, record)]
+                modes = [(False, []), (True, ['--features', 'record,prof']), (False, record)]
             for testing, feature_args in modes:
                 builds.append((member, testing, feature_args))
                 for config in self.platforms.values():

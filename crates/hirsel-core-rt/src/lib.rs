@@ -308,5 +308,8 @@ pub mod abi_sites;
 mod sites_tests;
 
 #[cfg(feature = "prof")]
+pub(crate) mod prof;
+
+#[cfg(feature = "prof")]
 #[unsafe(no_mangle)]
 pub static hirsel_core_prof_runtime: u8 = 1;

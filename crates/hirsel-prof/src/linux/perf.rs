@@ -51,6 +51,14 @@ pub(crate) struct Event {
     config: u64,
 }
 
+// Runtime timing does not open a sampling event.
+pub(crate) const RUNTIME: Event = Event {
+    name: "runtime",
+    unit: "nanoseconds",
+    kind: 0,
+    config: 0,
+};
+
 pub(crate) const CPU_CLOCK: Event = Event {
     name: "cpu-clock",
     unit: "nanoseconds",

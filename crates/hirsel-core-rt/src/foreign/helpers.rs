@@ -60,6 +60,8 @@ struct Call {
     shared: *const Shared,
     invocation: Invocation,
     cancel: *const AtomicBool,
+    #[cfg(feature = "prof")]
+    profile: ([u64; 2], u64),
     next: Option<Link>,
     token: u64,
     outside: Option<Outside>,
@@ -107,6 +109,8 @@ impl Helpers {
             shared: &*self.shared,
             invocation,
             cancel,
+            #[cfg(feature = "prof")]
+            profile: (tasks::prof_current_task(), site),
             next: None,
             token: 0,
             outside: None,
@@ -213,6 +217,8 @@ impl State {
 
 impl Shared {
     fn run(&self) {
+        #[cfg(feature = "prof")]
+        let _worker_profile = crate::prof::Worker::enter();
         loop {
             let (index, link, invocation, cancelled) = {
                 let mut state = self.state.lock().unwrap();
@@ -245,6 +251,12 @@ impl Shared {
                     invocation.rollback();
                     provider::CANCELLED
                 } else {
+                    #[cfg(feature = "prof")]
+                    let _interval = {
+                        // The running slot keeps the caller's profile data pinned.
+                        let (task, site) = (*link.0).profile;
+                        crate::prof::HostInterval::begin(task, site)
+                    };
                     invocation.issue()
                 }
             };

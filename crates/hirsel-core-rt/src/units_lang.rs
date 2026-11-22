@@ -554,7 +554,11 @@ unsafe fn on_take(u: &mut LangUnit, took: Took, id: usize, wake_inboxes: bool) {
                         take_sockets(u, &*h);
                     }
                     if wake_inboxes {
-                        Waiters::wake_all(&raw mut (*h).waiters);
+                        Waiters::wake_all(
+                            &raw mut (*h).waiters,
+                            #[cfg(feature = "prof")]
+                            (crate::prof::WakeSource::Unknown, ptr::null_mut(), 0),
+                        );
                     }
                 }
             }
@@ -566,14 +570,22 @@ unsafe fn on_take(u: &mut LangUnit, took: Took, id: usize, wake_inboxes: bool) {
                 }
                 if let Some(w) = u.sends.remove(&s) {
                     (*w).settled = Some(took);
-                    Waiters::wake_all(&raw mut (*w).waiters);
+                    Waiters::wake_all(
+                        &raw mut (*w).waiters,
+                        #[cfg(feature = "prof")]
+                        (crate::prof::WakeSource::Unknown, ptr::null_mut(), 0),
+                    );
                 }
             }
             Took::HelperEnd => {
                 if let Some(&h) = u.helpers.get(&id) {
                     end_take(u, &mut *h);
                     (*h).ended = true;
-                    Waiters::wake_all(&raw mut (*h).waiters);
+                    Waiters::wake_all(
+                        &raw mut (*h).waiters,
+                        #[cfg(feature = "prof")]
+                        (crate::prof::WakeSource::Unknown, ptr::null_mut(), 0),
+                    );
                 }
             }
             Took::LastRelease => u.refund_retained(id),
@@ -853,7 +865,12 @@ pub unsafe extern "C" fn hirsel_core_conn_send(
                 commit = tasks::before_commit_for(task);
                 continue;
             }
-            commit = tasks::park_for(task, &raw mut frame.waiters);
+            commit = tasks::park_for(
+                task,
+                &raw mut frame.waiters,
+                #[cfg(feature = "prof")]
+                (crate::prof::Reason::Join, 0),
+            );
         }
     }
 }
@@ -952,7 +969,12 @@ pub unsafe extern "C" fn hirsel_core_conn_receive(
                 commit = tasks::before_commit_for(task);
                 continue;
             }
-            commit = tasks::park_for(task, &raw mut (*inbox).waiters);
+            commit = tasks::park_for(
+                task,
+                &raw mut (*inbox).waiters,
+                #[cfg(feature = "prof")]
+                (crate::prof::Reason::None, 0),
+            );
         }
     }
 }
@@ -981,7 +1003,11 @@ pub unsafe extern "C" fn hirsel_core_inbox_drop(context: *mut Context, inbox: *m
                 commit = tasks::before_commit();
                 continue;
             }
-            commit = tasks::park(&raw mut h.waiters);
+            commit = tasks::park(
+                &raw mut h.waiters,
+                #[cfg(feature = "prof")]
+                (crate::prof::Reason::Join, 0),
+            );
         }
         u.waits -= 1;
         (*context).cancel_shield -= 1;
@@ -1456,7 +1482,11 @@ unsafe fn wait_end(context: *mut Context, h: *mut HelperH, site: u64, shielded: 
                 return true;
             }
             drop(commit);
-            commit = tasks::park(&raw mut (*h).waiters);
+            commit = tasks::park(
+                &raw mut (*h).waiters,
+                #[cfg(feature = "prof")]
+                (crate::prof::Reason::Join, 0),
+            );
         }
     }
 }

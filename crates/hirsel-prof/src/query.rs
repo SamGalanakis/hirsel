@@ -159,11 +159,21 @@ fn quality(db: &Connection) -> Result<Value> {
             warnings.push(label);
         }
     }
+    if header.get("runtime_events_lost").is_some() && count("runtime_events_lost")? != 0 {
+        warnings.push("lost_runtime_events");
+    }
+    if header.get("runtime_trace_complete").is_some() && count("runtime_trace_complete")? == 0 {
+        warnings.push("incomplete_runtime_trace");
+    }
+    if header.get("runtime_unpaired_events").is_some() && count("runtime_unpaired_events")? != 0 {
+        warnings.push("unpaired_runtime_events");
+    }
+    let has_runtime = header.get("runtime_events").is_some() && count("runtime_events")? != 0;
     header.insert("unresolved_pct".into(), fraction(unresolved, total, 100.0));
     header.insert("host_stack_share".into(), fraction(host, total, 1.0));
     header.insert(
         "verdict".into(),
-        json!(if total == 0 {
+        json!(if total == 0 && !has_runtime && warnings.is_empty() {
             "empty"
         } else if warnings.is_empty() {
             "healthy"
@@ -221,6 +231,11 @@ const TABLES: &[&str] = &[
     "fn_cpu_summary",
     "line_cpu_summary",
     "codegen_remark",
+    "task",
+    "task_slice",
+    "causal_edge",
+    "host_stack_interval",
+    "io_op",
 ];
 
 fn schema(db: &Connection, limit: usize) -> Result<Value> {
@@ -600,7 +615,7 @@ mod tests {
              INSERT INTO frame VALUES (1,NULL,NULL,1,'math.hirsel',1,1,0),
                                       (2,NULL,NULL,2,'math.hirsel',2,1,1);
              INSERT INTO callsite VALUES (1,NULL,1,0), (2,1,2,1);
-             INSERT INTO cpu_sample VALUES (1,1,1,NULL,0,2,'0x10',9007199254740993,'fiber','fiber_root');
+             INSERT INTO cpu_sample VALUES (1,1,1,NULL,NULL,0,2,'0x10',9007199254740993,'fiber','fiber_root');
              INSERT INTO sample_counter VALUES (1,'instructions',9007199254740993);
              INSERT INTO source_snippet VALUES ('math.hirsel',1,2,'fn recur() {\n}\n');",
         ).unwrap();

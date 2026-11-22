@@ -8,7 +8,7 @@ use std::path::Path;
 use rusqlite::{Connection, params};
 
 use crate::memory::MemoryEvent;
-use crate::profile::{Result, Unsigned};
+use crate::profile::{Result, Timestamp, Unsigned};
 
 const MAGIC: &[u8; 8] = b"HIRSOBS1";
 const END: u16 = u16::MAX - 1;
@@ -357,14 +357,14 @@ impl<'a> Import<'a> {
         Ok(Some(id))
     }
 
-    fn close_slice(&mut self, id: i64, end: Unsigned) -> Result<()> {
+    fn close_slice(&mut self, id: i64, end: Timestamp) -> Result<()> {
         self.db
             .execute("UPDATE task_slice SET end_ns=?2 WHERE id=?1", (id, end))?;
         Ok(())
     }
 
     fn record(&mut self, record: &Record) -> Result<()> {
-        let time = Unsigned(record.ts);
+        let time = Timestamp(record.ts);
         let tid = record.tid;
         match record.kind {
             RecordKind::Task { task, parent } => {

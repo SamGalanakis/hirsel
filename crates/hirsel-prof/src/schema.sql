@@ -1,5 +1,5 @@
 PRAGMA application_id = 0x48505246;
-PRAGMA user_version = 2;
+PRAGMA user_version = 3;
 
 CREATE TABLE run_meta (
     key TEXT PRIMARY KEY,
@@ -221,3 +221,121 @@ CREATE TABLE io_op (
     status INTEGER
 ) STRICT, WITHOUT ROWID;
 CREATE INDEX peak_snapshot_scope ON peak_snapshot(scope_id, metric);
+
+CREATE INDEX task_slice_by_start ON task_slice(task_id, start_ns);
+CREATE INDEX task_slice_by_end ON task_slice(task_id, end_ns);
+CREATE INDEX causal_edge_by_destination ON causal_edge(dst_task_id, ts_ns);
+
+CREATE VIEW task_wait_episode AS
+WITH waits AS (
+    SELECT id, task_id, state, wait_reason, object_id, start_ns, end_ns AS slice_end_ns
+    FROM task_slice WHERE state IN ('waiting', 'provider')
+), candidates AS (
+    SELECT w.id AS episode_id, c.id, c.src_kind, c.src_id, c.ts_ns,
+           count(*) OVER (PARTITION BY w.id) AS wakes,
+           count(*) OVER (PARTITION BY c.id) AS episodes
+    FROM waits w JOIN causal_edge c
+      ON c.dst_task_id = w.task_id AND c.ts_ns BETWEEN w.start_ns AND w.slice_end_ns
+     AND (w.object_id IS NULL OR c.object_id IS NULL OR w.object_id = c.object_id)
+), paired AS (
+    SELECT w.*, c.id AS wake_id, c.src_kind AS wake_kind, c.src_id AS source_task_id,
+           c.ts_ns AS wake_ns,
+           CASE
+               WHEN w.slice_end_ns IS NULL THEN 'open_wait'
+               WHEN w.start_ns >= w.slice_end_ns THEN 'timestamp_tie'
+               WHEN coalesce((SELECT value FROM run_meta WHERE key = 'runtime_trace_complete'), 0) != 1
+                 OR coalesce((SELECT value FROM run_meta WHERE key = 'runtime_events_lost'), 0) != 0
+                    THEN 'incomplete_trace'
+               WHEN c.id IS NULL THEN
+                   CASE WHEN EXISTS (SELECT 1 FROM candidates WHERE episode_id = w.id)
+                       THEN 'ambiguous_wake' ELSE 'missing_wake' END
+               WHEN c.ts_ns = w.start_ns OR c.ts_ns = w.slice_end_ns THEN 'timestamp_tie'
+               WHEN NOT EXISTS (
+                   SELECT 1 FROM task_slice s
+                   WHERE s.task_id = w.task_id AND s.state = 'ready' AND s.start_ns = w.slice_end_ns
+               ) THEN 'missing_ready'
+               WHEN c.src_kind <> 'task' THEN c.src_kind
+               WHEN c.src_id IS NULL THEN 'missing_source'
+           END AS boundary
+    FROM waits w LEFT JOIN candidates c
+      ON c.episode_id = w.id AND c.wakes = 1 AND c.episodes = 1
+)
+SELECT id, task_id, state, wait_reason, object_id, start_ns,
+       CASE WHEN boundary IS NULL OR boundary IN ('timer','net','cancel','unknown','missing_source')
+            THEN wake_ns ELSE slice_end_ns END AS end_ns,
+       slice_end_ns, wake_id, wake_kind, source_task_id, wake_ns, boundary
+FROM paired;
+
+CREATE VIEW task_wait_critical_path AS
+WITH RECURSIVE
+episodes AS MATERIALIZED (SELECT * FROM task_wait_episode),
+sources AS (
+    SELECT e.id, min(s.id) AS slice_id
+    FROM episodes e JOIN task_slice s
+      ON e.boundary IS NULL AND s.task_id = e.source_task_id AND s.state = 'running'
+     AND s.start_ns < e.wake_ns AND e.wake_ns < s.end_ns
+    GROUP BY e.id HAVING count(*) = 1
+),
+predecessors AS (
+    SELECT s.id, min(p.id) AS slice_id
+    FROM task_slice s JOIN task_slice p
+      ON p.task_id = s.task_id AND p.start_ns < s.start_ns AND p.end_ns >= s.start_ns
+    GROUP BY s.id HAVING count(*) = 1
+),
+links AS (
+    SELECT id, slice_id, 1 AS follows_wake FROM sources
+    UNION ALL
+    SELECT id, slice_id, 0 FROM predecessors
+),
+walk(root_id, root_task_id, slice_id, depth, floor_ns, start_ns, end_ns) AS (
+    SELECT id, task_id, id, 0, start_ns, start_ns, end_ns
+    FROM episodes WHERE start_ns < end_ns
+    UNION ALL
+    SELECT w.root_id, w.root_task_id, n.id, w.depth + l.follows_wake,
+           CASE l.follows_wake WHEN 1 THEN w.start_ns ELSE w.floor_ns END,
+           max(n.start_ns, CASE l.follows_wake WHEN 1 THEN w.start_ns ELSE w.floor_ns END),
+           min(coalesce(e.end_ns, n.end_ns),
+               CASE l.follows_wake WHEN 1 THEN w.end_ns ELSE w.start_ns END)
+    FROM walk w JOIN links l ON l.id = w.slice_id
+    JOIN task_slice n ON n.id = l.slice_id
+    LEFT JOIN episodes e ON e.id = n.id
+    WHERE w.start_ns < w.end_ns
+      AND n.start_ns < CASE l.follows_wake WHEN 1 THEN w.end_ns ELSE w.start_ns END
+      AND coalesce(e.end_ns, n.end_ns) >
+          CASE l.follows_wake WHEN 1 THEN w.start_ns ELSE w.floor_ns END
+      AND (l.follows_wake = 0 OR EXISTS (
+           SELECT 1 FROM episodes here WHERE here.id = w.slice_id AND here.wake_ns = w.end_ns
+      ))
+),
+points AS (
+    SELECT root_id, start_ns AS point FROM walk WHERE start_ns < end_ns
+    UNION
+    SELECT root_id, end_ns FROM walk WHERE start_ns < end_ns
+),
+spans AS (
+    SELECT root_id, point AS start_ns,
+           lead(point) OVER (PARTITION BY root_id ORDER BY point) AS end_ns
+    FROM points
+),
+cover AS (
+    SELECT w.root_id, w.root_task_id, w.slice_id, w.depth, s.start_ns, s.end_ns,
+           row_number() OVER (PARTITION BY s.root_id, s.start_ns ORDER BY w.depth DESC) AS rank
+    FROM spans s JOIN walk w ON w.root_id = s.root_id
+      AND w.start_ns <= s.start_ns AND s.end_ns <= w.end_ns
+)
+SELECT c.root_id, c.root_task_id, c.slice_id, c.depth, s.task_id, s.state,
+       s.wait_reason, s.object_id, e.source_task_id, c.start_ns, c.end_ns,
+       CASE
+           WHEN s.state IN ('waiting', 'provider') THEN coalesce(e.boundary,
+               CASE WHEN sources.id IS NULL THEN 'missing_or_ambiguous_source_interval'
+                    ELSE 'missing_predecessor' END)
+           WHEN s.state = 'flow' THEN 'flow'
+       END AS boundary
+FROM cover c JOIN task_slice s ON s.id = c.slice_id
+LEFT JOIN episodes e ON e.id = c.slice_id
+LEFT JOIN sources ON sources.id = c.slice_id
+WHERE rank = 1
+UNION ALL
+SELECT id, task_id, id, 0, task_id, state, wait_reason, object_id, source_task_id,
+       start_ns, NULL, boundary
+FROM episodes WHERE end_ns IS NULL;

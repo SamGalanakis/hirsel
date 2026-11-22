@@ -303,6 +303,8 @@ const TABLES: &[&str] = &[
     "task",
     "task_slice",
     "causal_edge",
+    "task_wait_episode",
+    "task_wait_critical_path",
     "host_stack_interval",
     "io_op",
     "peak_snapshot",

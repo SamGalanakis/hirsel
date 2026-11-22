@@ -167,6 +167,10 @@ pub fn frame_schema(
                     "ingress",
                     include_str!("../../../core/programs/store/ingress.hirsel"),
                 ),
+                (
+                    "triggers",
+                    include_str!("../../../core/programs/store/triggers.hirsel"),
+                ),
             ][..],
             vec![core.clone(), std.clone()],
             false,
@@ -177,12 +181,13 @@ pub fn frame_schema(
         let mut sources = Vec::new();
         for (module, text) in texts {
             let file = directory.join(format!("{module}.hirsel"));
+            std::fs::create_dir_all(file.parent().expect("a schema source has a parent"))?;
             std::fs::write(&file, text)?;
             sources.push(ModuleSource {
                 foreign: false,
                 captured: None,
                 file,
-                modules: vec![(*module).into()],
+                modules: module.split('/').map(str::to_owned).collect(),
                 signatures,
             });
         }

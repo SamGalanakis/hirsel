@@ -438,7 +438,7 @@ def source_manifest(root, package, modules, source, *, replace=False):
     if package == 'store':
         packages.append({'package': {'name': 'store', 'version': '1'}, 'dependencies': [core, std],
                          'sources': [{'file': str(root / 'core/programs/store' / (name + '.hirsel')),
-                                      'modules': [name], 'signatures': False} for name in ['runner', 'store', 'ingress']]})
+                                      'modules': [name], 'signatures': False} for name in ['runner', 'store', 'ingress', 'triggers']]})
     files = next(p['sources'] for p in packages if p['package']['name'] == package)
     if replace:
         original = next(f for f in files if f['modules'] == modules)

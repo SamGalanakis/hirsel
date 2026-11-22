@@ -45,7 +45,7 @@ const WRAP_7: &str = "pub fn main() -> Result[(), Exit] { if entry() == 7 { Ok((
 const WRAP_8: &str = "pub fn main() -> Result[(), Exit] { if entry() == 8 { Ok(()) } else { Error(Exit(status: 1)) } }\n";
 const WRAP_1002: &str = "pub fn main() -> Result[(), Exit] { if entry(1) == 1002 { Ok(()) } else { Error(Exit(status: 1)) } }\n";
 const LINES: &str = "fn entry(x: u64) -> u64 {\n    let xs = [1u64, 2u64, 3u64];\n    xs[x] + x * 1000u64\n}\n";
-const S45: &str = "fn entry() -> u64 { let r: Result[List[u64], Capacity] = list.with_capacity(1); match r { Ok(_) => 7, Error(_) => 8 } }\n";
+const S45: &str = "fn entry() -> u64 { let mut xs: List[u64] = list.new(); match list.try_reserve(mut xs, 1) { Ok(()) => 7, Error(_) => 8 } }\n";
 
 const GENERATED_CLOSURE: &str =
     "fn entry() -> u64 { let x = 7u64; let f = fn(n: u64) -> u64 { n }; f(x) }\n";

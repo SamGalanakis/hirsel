@@ -40,7 +40,7 @@ fn size(src: Source) -> u64 {
 }
 
 fn counted() -> u64 {
-    let mut src: Source = Count(4)
+    let mut src = Count(4)
     bump(mut src)
     bump(mut src)
     size(src)
@@ -112,7 +112,7 @@ fn guarded() -> u64 {
 }
 
 fn boxed() -> u64 {
-    let mut b: Box[Source] = box.new(Count(7))
+    let mut b = box.new(Count(7))
     match b {
         Count(mut n) => {
             n += 1

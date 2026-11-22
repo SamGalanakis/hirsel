@@ -136,16 +136,16 @@ fn f() -> u64 { width.bits }                              // refused: LANG-7, wi
 ```hirsel
 fn f(x: u64) -> u64 { let x = x + 1; x }                  // refused: LANG-7, shadows x
 ```
-```hirsel unbuilt
+```hirsel
 type Job = Done | Running
 fn local() -> Job { let j = Done; j }                     // Job's: the module comes first
 fn reply() -> DirReply { let r: DirReply = Done; r }      // selected by the expected type
 fn ended(r: DirReply) -> bool { match r { Done => true, _ => false } }
 ```
-```hirsel unbuilt
-fn f() -> u64 { let _ = Done; 0 }                         // refused: LANG-7, three prelude types declare Done
+```hirsel
+fn f() -> u64 { let _ = Done; 0 }                         // refused: LANG-7, several prelude types declare Done
 ```
-```hirsel unbuilt
+```hirsel
 fn f() -> u64 { let _ = NotUtf8; 0 }                      // refused: LANG-7, env.EnvError is not in scope
 fn g() -> env.EnvError { let e: env.EnvError = NotUtf8; e } // the fix: an expected type
 ```

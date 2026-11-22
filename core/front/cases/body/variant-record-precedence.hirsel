@@ -1,0 +1,15 @@
+// expect: accept
+type Stat {
+    size: u64
+}
+
+type R = Stat(Stat)
+
+fn record() -> Stat {
+    let s = Stat(size: 2)
+    s
+}
+
+fn variant(s: Stat) -> R {
+    Stat(s)
+}

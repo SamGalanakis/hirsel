@@ -271,6 +271,78 @@ fn prelude_path(index: &NameIndex, name: &str) -> Option<DefPath> {
 }
 
 impl<'a> Program<'a> {
+    /// LANG-7: infer a bare constructor in the current module, then the
+    /// prelude. At either level, a record takes precedence over variants.
+    fn bare_constructor(
+        &self,
+        from: ModuleId,
+        name: Symbol,
+    ) -> Result<(DeclId, Option<u32>), String> {
+        let text = self.index.symbols.text(name);
+        let mut best = None;
+        let mut ambiguous = false;
+        let mut elsewhere = None;
+        for id in self.index.constructor_candidates(from, name) {
+            let Some(Def::Type(d)) = self.by_definition[id.0 as usize] else {
+                continue;
+            };
+            let decl = &self.decls[d.index()];
+            let case = match &decl.body {
+                DeclBody::Record(_) => None,
+                DeclBody::Variant(cases) => {
+                    let Some(i) = cases.iter().position(|c| c.name == text) else {
+                        continue;
+                    };
+                    Some(i as u32)
+                }
+                DeclBody::Alias(_) => continue,
+            };
+            let outside = decl.site.module != from;
+            if outside && (decl.opaque || !self.index.is_prelude(id)) {
+                if case.is_some() && !decl.opaque {
+                    elsewhere.get_or_insert(d);
+                }
+                continue;
+            }
+            let rank = (outside, case.is_some());
+            match best {
+                Some((first, other, _)) if first == rank => ambiguous |= other != d,
+                Some((first, _, _)) if first < rank => {}
+                _ => {
+                    best = Some((rank, d, case));
+                    ambiguous = false;
+                }
+            }
+        }
+        if ambiguous {
+            return Err(format!(
+                "two visible types declare the variant `{text}` at the same level"
+            ));
+        }
+        if let Some((_, d, case)) = best {
+            return Ok((d, case));
+        }
+        if let Some(d) = elsewhere {
+            let decl = &self.decls[d.index()];
+            let path = &decl.path.0;
+            let package = self.index.module_package(decl.site.module);
+            let qualify = package != self.index.module_package(from)
+                && Some(package) != self.index.core
+                && path.modules.first() != Some(&path.package.name);
+            let spelling = qualify
+                .then_some(path.package.name.as_str())
+                .into_iter()
+                .chain(path.modules.iter().map(String::as_str))
+                .chain(std::iter::once(path.name.as_str()))
+                .collect::<Vec<_>>()
+                .join(".");
+            return Err(format!(
+                "variant `{text}` is outside the current module and prelude. Use `{spelling}` as its expected type"
+            ));
+        }
+        Err(format!("no visible type declares `{text}`"))
+    }
+
     /// The core prelude type named `name`, when the program has core. `name` is
     /// one of [`PRELUDE`].
     pub(crate) fn core_decl(&self, name: &str) -> Option<DeclId> {

@@ -535,45 +535,43 @@ impl ConstCx<'_, '_> {
                 (d, None, ty)
             }
             Target::ContextualConstructor { name } => {
+                let from = self.p.modules[self.at.module as usize].id;
                 let text = self.p.index.symbols.text(name);
-                let (d, ty) = if let Some(ty) = want {
+                if let Some(ty) = want {
                     let TyKind::Adt(d, _) = *self.p.types.kind(ty) else {
                         return self.mismatch(n, "constant constructor has another type");
                     };
-                    (d, Some(ty))
-                } else {
-                    let from = self.p.modules[self.at.module as usize].id;
-                    let mut found = None;
-                    for id in self.p.index.constructor_candidates(from, name) {
-                        let Some(Def::Type(d)) = self.p.by_definition[id.0 as usize] else {
-                            continue;
-                        };
-                        if found.is_some_and(|other| other != d) {
-                            return self.fail(n, "constant constructor is ambiguous");
-                        }
-                        found = Some(d);
+                    let visible = self.p.index.constructor_candidates(from, name).any(|id| {
+                        matches!(self.p.by_definition[id.0 as usize], Some(Def::Type(e)) if e == d)
+                    });
+                    if !visible {
+                        return self.fail(n, "constant constructor is not visible");
                     }
-                    let d = found?;
+                    let DeclBody::Variant(cs) = &self.p.decls[d.index()].body else {
+                        return self.mismatch(n, "constant constructor has another type");
+                    };
+                    let Some(i) = cs.iter().position(|c| c.name == text) else {
+                        return self.mismatch(n, "constant constructor has another type");
+                    };
+                    (d, Some(i as u32), Some(ty))
+                } else {
+                    let (d, case) = match self.p.bare_constructor(from, name) {
+                        Ok(found) => found,
+                        Err(message) => {
+                            self.p.refusals.push(refusal(
+                                "LANG-7",
+                                self.p.site(self.at, n),
+                                message,
+                            ));
+                            return None;
+                        }
+                    };
                     let ty = self.p.decls[d.index()]
                         .generics
                         .is_empty()
                         .then(|| self.p.types.mk(TyKind::Adt(d, vec![])));
-                    (d, ty)
-                };
-                let from = self.p.modules[self.at.module as usize].id;
-                if !self.p.index.constructor_candidates(from, name).any(|id| matches!(self.p.by_definition[id.0 as usize], Some(Def::Type(e)) if e == d)) {
-                    return self.fail(n, "constant constructor is not visible");
+                    (d, case, ty)
                 }
-                let case = match &self.p.decls[d.index()].body {
-                    DeclBody::Variant(cs) => {
-                        cs.iter().position(|c| c.name == text).map(|i| i as u32)
-                    }
-                    _ => None,
-                };
-                if case.is_none() {
-                    return self.mismatch(n, "constant constructor has another type");
-                }
-                (d, case, ty)
             }
             Target::Missing => return None,
             _ => return self.fail(n, "a constant expression cannot call a function"),

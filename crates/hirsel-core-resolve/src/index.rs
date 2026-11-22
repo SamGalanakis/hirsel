@@ -472,6 +472,9 @@ impl NameIndex {
                     .map(|&(_, d)| d),
             )
     }
+    pub fn is_prelude(&self, id: DefinitionId) -> bool {
+        self.prelude.get(&self.get(id).name) == Some(&id)
+    }
     pub fn constructor_candidates(
         &self,
         from: ModuleId,
@@ -485,12 +488,16 @@ impl NameIndex {
                     && !d.opaque
                     && self.reachable_from(own, self.module_package(d.site.module))
         });
-        let record = self
-            .member_row(from, name, Namespace::Type, true)
-            .or_else(|| self.prelude_row(name, Namespace::Type, true))
+        let member = self.member_row(from, name, Namespace::Type, true);
+        let prelude = self
+            .prelude_row(name, Namespace::Type, true)
+            .filter(|&(id, _)| member.map(|(local, _)| local) != Some(id));
+        let records = member
+            .into_iter()
+            .chain(prelude)
             .filter(|&(_, d)| d.variants.start == d.variants.end)
             .map(|(id, _)| id);
-        variants.chain(record)
+        variants.chain(records)
     }
     pub fn members_named(
         &self,

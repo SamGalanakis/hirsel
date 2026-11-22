@@ -1,7 +1,6 @@
 # Prop
 
-[API overview](../API.md). Specified, not built: every fence below is `hirsel unbuilt`.
-The design record is roadmap item 13a.
+[API overview](../API.md). The design record is roadmap item 13a.
 
 `std.prop` checks a law against generated values. When the law fails, it shrinks
 the failing case to a minimal one. A generator draws its choices from an explicit
@@ -17,10 +16,10 @@ test's ([PROG-4](../../../docs/spec/programs.md#prog-4-tests)).
 
 ## Generators
 
-```hirsel unbuilt
+```hirsel
 pub opaque type Source
 pub type Gen[T] { draw: own fn(mut Source) -> T, show: own fn(T, mut String) }
-pub fn make[T](draw: own fn(mut Source) -> T, show: own fn(T, mut String)) -> Gen[T]
+pub fn make[T](take draw_fn: own fn(mut Source) -> T, take show_fn: own fn(T, mut String)) -> Gen[T]
 pub fn draw[T](mut s: Source, g: Gen[T]) -> T
 ```
 
@@ -67,6 +66,27 @@ Replay. When the case replays a tape, draw j reads tape value v_j:
 
 ### Combinators
 
+```hirsel
+pub fn bool_() -> Gen[bool]
+pub fn u64_in(lo: u64, hi: u64) -> Gen[u64]
+pub fn i64_in(lo: i64, hi: i64) -> Gen[i64]
+pub fn u8_any() -> Gen[u8]
+pub fn char_in(lo: char, hi: char) -> Gen[char]
+pub fn ascii() -> Gen[char]
+pub fn bytes_of(min: u64, max: u64) -> Gen[Bytes]
+pub fn string_of(take chars: Gen[char], min: u64, max: u64) -> Gen[String]
+pub fn list_of[T](take g: Gen[T], min: u64, max: u64) -> Gen[List[T]]
+pub fn option_of[T](take g: Gen[T]) -> Gen[Option[T]]
+pub fn one_of[T](take gs: List[Gen[T]]) -> Gen[T]
+pub fn pair[A, B](take a: Gen[A], take b: Gen[B]) -> Gen[(A, B)]
+pub fn triple[A, B, C](take a: Gen[A], take b: Gen[B], take c: Gen[C]) -> Gen[(A, B, C)]
+pub fn just[T: plain + inert](value: T) -> Gen[T]
+pub fn map[A, B](take g: Gen[A], take transform: own fn(A) -> B) -> Gen[B]
+pub fn map_shown[A, B](take g: Gen[A], take transform: own fn(A) -> B, take show_fn: own fn(B, mut String)) -> Gen[B]
+pub fn bind[A, B](take g: Gen[A], take next_gen: own fn(A) -> Gen[B]) -> Gen[B]
+pub fn filter[T](take g: Gen[T], take pred: own fn(T) -> bool) -> Gen[T]
+```
+
 Each row gives a combinator's choices and the value of each choice index. Index 0
 is always the simplest value.
 
@@ -106,7 +126,9 @@ Notes on the rows:
 - **Span labels.** Labels below 2^32 belong to std.prop. A user generator labels its own spans at 2^32 and above.
 - **`map` rendering.** `map` renders the value it mapped from, as `map(<value>)`.
 
-Rendering:
+Rendering in counterexample reports uses the consumed choice tape. For a
+combinator whose display depends on the draw, call `report` with its
+counterexample. Its standalone `Gen.show` prints `<generated>`.
 
 - `bool_` and the integer generators render their literals.
 - `char_in` and `ascii` render a quoted char.
@@ -114,22 +136,28 @@ Rendering:
 
 ## Running a property
 
-```hirsel unbuilt
+```hirsel
 pub type Config {
     seed: u64, cases: u64, max_choices: u64, max_rejects: u64, max_shrinks: u64,
     gen_steps: u64, case_steps: u64, case_bytes: u64,
     sim_seed: Option[u64], replay: Option[String]
 }
 pub fn config() -> Config
-pub fn replay(take c: Config, token: String) -> Config
-pub type Case[T] { value: T, index: u64, world_seed: u64, tasks: Tasks }
-pub type Outcome = Passed { cases: u64 } | GaveUp { cases: u64, rejected: u64 } | Falsified(Found)
+pub fn replay(take c: Config, text: String) -> Config
+pub type Outcome = Passed(u64) | GaveUp(u64, u64) | Falsified(Found)
 pub opaque type Found
 pub fn search[T](c: Config, g: Gen[T], law: own fn(T) -> Result[(), String]) -> Outcome
 pub fn check[T](c: Config, g: Gen[T], law: own fn(T) -> Result[(), String]) -> Result[(), ()]
-pub fn check_tasks[T: send](tasks: Tasks, c: Config, g: Gen[T], law: fn(take Case[T]) -> Result[(), String] waits) -> Result[(), ()] waits
 pub fn report(f: Found, mut out: String)
 pub fn token(f: Found, mut out: String)
+```
+
+`Passed(cases)` counts valid cases, and `GaveUp(cases, rejected)` also counts
+discarded cases.
+
+```hirsel unbuilt
+pub type Case[T] { value: T, index: u64, world_seed: u64, tasks: Tasks }
+pub fn check_tasks[T: send](tasks: Tasks, c: Config, g: Gen[T], law: fn(take Case[T]) -> Result[(), String] waits) -> Result[(), ()] waits
 pub fn world_seed(sim: u64, index: u64) -> u64
 ```
 

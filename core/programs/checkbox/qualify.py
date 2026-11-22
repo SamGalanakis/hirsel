@@ -65,9 +65,9 @@ def scratch_sources(work, case, mutant):
     if case == "toggle_no_rerun":
         # Wire-only witness in the scratch server. An empty key cannot be a
         # data-tree key. Count one marker after each query body returns a Cover.
-        original = "        Some(Query(_, _, go)) => go(s, h, arg, prior, old, sub, rows),"
+        original = "        Some(Query(_, _, go)) => go(s, h, input.caller, input.arg, prior, old, sub, rows),"
         marker = """        Some(Query(_, _, go)) => {
-            let answer = go(s, h, arg, prior, old, sub, rows)
+            let answer = go(s, h, input.caller, input.arg, prior, old, sub, rows)
             if let Covered(_) = answer {
                 log.append(rows, Row(sub: sub, key: list.new(), value: None))
             }

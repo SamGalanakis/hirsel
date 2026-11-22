@@ -622,7 +622,7 @@ def save_row(rows, row, output):
         output.write_text(json.dumps(rows, indent=2) + '\n')
 
 
-def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, timeout=30, evaluator=None, target=None, emulator=None, sysroot=None, compare_revisions=False, typescript=None, node='node', schedule_runtime=None, record_runtime=None):
+def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, timeout=30, evaluator=None, target=None, emulator=None, sysroot=None, compare_revisions=False, typescript=None, node='node', schedule_runtime=None, record_runtime=None, llvm_profile='release'):
     rows = []
     requested_engines = set(engines)
     engines = list(engines)
@@ -651,7 +651,7 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                 if engine == 'evaluator' and 'evaluator' not in requested_engines and not case.evaluator_only:
                     continue
                 row = dict(test=case.name, file=str(case.file.relative_to(root)), line=case.line,
-                           engine=engine, profile=None if engine == 'evaluator' else 'release' if engine == 'llvm' else 'dev',
+                           engine=engine, profile=None if engine == 'evaluator' else llvm_profile if engine == 'llvm' else 'dev',
                            call=case.call, expected=case.expected, ran=False, passed=False, applicable=True,
                            cause=None, owner=None, native_only=False)
                 # The evaluator models tasks and the clock (virtual time); a law
@@ -831,7 +831,7 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                     command.extend(['--target', target])
                 if emulator:
                     command.extend(['--emulator', str(emulator), '--sysroot', str(sysroot)])
-                if engine == 'llvm':
+                if engine == 'llvm' and llvm_profile == 'release':
                     command.append('--release')
                 # All engines read this manifest's checkout sources, as the
                 # resident evaluator does, including temporary @test bodies.
@@ -926,6 +926,7 @@ def main():
     parser.add_argument('--evaluator', type=Path, help='test-only hirsel-core-contract-eval backend')
     parser.add_argument('--root', type=Path, default=ROOT)
     parser.add_argument('--backend', choices=['all', 'evaluator', 'both', 'cranelift', 'llvm'], default='both')
+    parser.add_argument('--llvm-profile', choices=['dev', 'release'], default='release')
     parser.add_argument('--filter', action='append', default=[])
     parser.add_argument('--report', type=Path)
     parser.add_argument('--typescript', type=Path, help='generated codec.js ES module; run its codec corpus partner')
@@ -949,7 +950,8 @@ def main():
                args.emulator.resolve() if args.emulator else None, args.sysroot.resolve() if args.sysroot else None,
                typescript=args.typescript, node=args.node,
                schedule_runtime=args.schedule_runtime.resolve() if args.schedule_runtime else None,
-               record_runtime=args.record_runtime.resolve() if args.record_runtime else None)
+               record_runtime=args.record_runtime.resolve() if args.record_runtime else None,
+               llvm_profile=args.llvm_profile)
     ran = {(row['test'], row['file']) for row in rows if row['ran']}
     empty = [selector for selector in args.filter
              if not any(matches_filter(root, case, selector) and

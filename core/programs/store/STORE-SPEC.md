@@ -671,7 +671,7 @@ pub fn next_indexed[K, V](mut r: IndexRows[K, V]) -> Result[Option[(K, V)], Erro
 
 ### 1.4 No key scopes (v2.30 AN1)
 
-The store does no authorization. A Tx may read and write every key of its store, and a program decides access itself from the Caller the runner gives it. A handle from another store is still `Foreign` (§1.12).
+The store does no authorization. A Tx may read and write every key of its store, and a program decides access itself from the Caller the runner gives it. A `transact` or `granted` body receives the calling session's Caller. A query receives one only when it is registered as caller-dependent (`runner.query_as`, body `fn(Tx, H, Caller, take A)`, RUNNER-SPEC v2.25 rule 2). The runner then gives the body the subscribing session's bound Caller at its first run, at every rerun and at every repair. A caller-independent query (`runner.query`, body `fn(Tx, H, take A)`) receives no Caller. In both kinds each subscription keeps its own Cover and read set, so no query result passes between subscriptions. Nothing in the store changes: the Tx, `look` and the read set are the same for both kinds. A handle from another store is still `Foreign` (§1.12).
 
 ### 1.5 Snapshots and queries on any task (row 4)
 

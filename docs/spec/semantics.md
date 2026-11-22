@@ -19,7 +19,9 @@ refused at the call. `int.narrow` fails with `Overflow`, `int.try_narrow` return
 as its high and low halves. The bit counts are `int.leading_zeros`, the zero bits above the
 highest one bit, `int.trailing_zeros`, the zero bits below the lowest one bit, and
 `int.count_ones`, the one bits; each returns a `u32`, the first two the width for 0, and
-reads a signed value's two's-complement bits. These are all of core's bit operations
+reads a signed value's two's-complement bits. `int.rotate_left(x, n)` and
+`int.rotate_right(x, n)` rotate those bits by the `u32` count `n` modulo the width, and
+`int.swap_bytes(x)` reverses their byte order, so it is `x` on an 8-bit type; none fails. These are all of core's bit operations
 besides the operators of [LANG-21](language.md#lang-21-operators).
 
 ```hirsel

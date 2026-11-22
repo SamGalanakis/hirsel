@@ -509,7 +509,7 @@ fn operate_prepare[G: send, H: send, S: send](p: PlaceConfig[G, H, S]) -> Result
 // starts a task under `bytes n` that holds the grant. A transact slot has two: the
 // session's check (rule 5: decode the argument, keep nothing) and the head's run, with the
 // entry's step bound and its code.revision, which each call record carries (R5, §7).
-type Slot[G: send, H: send]: send = Compute(own[send] fn(Bytes) -> Outcome) | Granted(own[send] fn(Tasks, take JobGrant[G], take Caller, take Bytes, take Option[JobReport]) -> Result[Task[Outcome], Capacity]) | Transact(u64, u64, Option[Bytes], own[send] fn(Bytes) -> Option[Refusal], own[send] fn(mut store.Tx, H, Caller, Bytes) -> Ran) | Query(u64, u64, own[send] fn(store.Snapshot, H, Bytes, store.Snapshot, Option[View[Cover]], u32, Log[Row]) -> Queried) | Fenced(u64, u64, own[send] fn(mut store.Tx, triggers.Attempt, Bytes) -> Result[Bytes, store.Error])
+type Slot[G: send, H: send]: send = Compute(own[send] fn(Bytes) -> Outcome) | Granted(own[send] fn(Tasks, take JobGrant[G], take Caller, take Bytes, take Option[JobReport]) -> Result[Task[Outcome], Capacity]) | Transact(u64, u64, Option[Bytes], own[send] fn(Bytes) -> Option[Refusal], own[send] fn(mut store.Tx, H, Caller, Bytes) -> Ran) | Query(u64, u64, own[send] fn(store.Snapshot, H, Caller, Bytes, store.Snapshot, Option[View[Cover]], u32, Log[Row]) -> Queried) | Fenced(u64, u64, own[send] fn(mut store.Tx, triggers.Attempt, Bytes) -> Result[Bytes, store.Error])
 
 pub opaque type Registry[G: send, H: send]: send {
     slots: Map[Bytes, Slot[G, H]],
@@ -1118,18 +1118,29 @@ type Viewed { cover: Cover, reads: List[store.Read] }
 
 type Queried = Covered(Viewed) | Stopped(Outcome) | Faulted(Outcome, List[store.Read]) | Lost(store.Error)
 
-// The query adapter: decode A and call f inside `look`, all inside `bound bytes n`. A fault,
-// or exhaustion after entry, ends the subscription with Failed. The run is isolated inside
-// `look`'s body, so `look` returns the reads it made before it stopped: that partial read
-// log is the ended entry (§3 "Ended entries").
-fn adapt_query[H: send, A](f: StaticFn[fn(store.Tx, H, take A) -> Result[Cover, Capacity]], ca: std.codec.Codec[A], s: store.Snapshot, h: H, arg: Bytes, n: u64, steps: u64, prior: store.Snapshot, old: Option[View[Cover]], sub: u32, rows: Log[Row]) -> Queried {
-    let body = code.callable(f)
+// A query body of either registration kind (rule 2). A `Plain` body never receives the
+// Caller, so its result is a function of the snapshot and the argument alone; an `As` body
+// receives the Caller of the session whose subscription it runs for, at every run.
+type QueryBody[H, A] = Plain(StaticFn[fn(store.Tx, H, take A) -> Result[Cover, Capacity]]) | As(StaticFn[fn(store.Tx, H, Caller, take A) -> Result[Cover, Capacity]])
+
+fn query_body[H, A](body: QueryBody[H, A], tx: store.Tx, h: H, caller: Caller, take a: A) -> Result[Cover, Capacity] {
+    match body {
+        Plain(f) => code.callable(f)(tx, h, take a),
+        As(f) => code.callable(f)(tx, h, caller, take a),
+    }
+}
+
+// The query adapter: decode A and call the body inside `look`, all inside `bound bytes n`. A
+// fault, or exhaustion after entry, ends the subscription with Failed. The run is isolated
+// inside `look`'s body, so `look` returns the reads it made before it stopped: that partial
+// read log is the ended entry (§3 "Ended entries"). `caller` is the subscribing session's.
+fn adapt_query[H: send, A](body: QueryBody[H, A], ca: std.codec.Codec[A], s: store.Snapshot, h: H, caller: Caller, arg: Bytes, n: u64, steps: u64, prior: store.Snapshot, old: Option[View[Cover]], sub: u32, rows: Log[Row]) -> Queried {
     let looked = bound bytes n {
         store.look(s, None, scoped fn(tx: store.Tx) -> Result[Cover, Queried] {
           let ran = isolate(fn() -> Result[Result[Cover, Queried], OutOfTime] {
            bound steps steps {
             let c = match std.codec.decode(ca, arg) {
-                Ok(take a) => match body(tx, h, take a) {
+                Ok(take a) => match query_body(body, tx, h, caller, take a) {
                     Ok(take value) => take value,
                     Error(c) => return Ok(Error(Stopped(Failed(OutOfBytes(room(c)))))),
                 },
@@ -1170,26 +1181,43 @@ fn adapt_query[H: send, A](f: StaticFn[fn(store.Tx, H, take A) -> Result[Cover, 
     }
 }
 
+// Rule 2's two query kinds. `query` registers a caller-independent body, which has no Caller
+// parameter; `query_as` registers a caller-dependent one, which takes the Caller. The kind is
+// the body's type, so a body that reads the Caller cannot be registered with `query`.
+pub fn query[G: send, H: send, A: codec](mut r: Registry[G, H], f: StaticFn[fn(store.Tx, H, take A) -> Result[Cover, Capacity]], n: u64, s: u64) -> Result[(), RegisterError] {
+    register_query(mut r, Plain(f), n, s)
+}
+
+pub fn query_as[G: send, H: send, A: codec](mut r: Registry[G, H], f: StaticFn[fn(store.Tx, H, Caller, take A) -> Result[Cover, Capacity]], n: u64, s: u64) -> Result[(), RegisterError] {
+    register_query(mut r, As(f), n, s)
+}
+
 // A query's rows travel in Batches under their tables' codecs, so its described result is
 // the unit schema.
-pub fn query[G: send, H: send, A: codec](mut r: Registry[G, H], f: StaticFn[fn(store.Tx, H, take A) -> Result[Cover, Capacity]], n: u64, s: u64) -> Result[(), RegisterError] {
+fn register_query[G: send, H: send, A: codec](mut r: Registry[G, H], body: QueryBody[H, A], n: u64, s: u64) -> Result[(), RegisterError] {
     let ca: std.codec.Codec[A] = std.codec.of()
     let cr: std.codec.Codec[()] = std.codec.of_unit()
-    let (take key, take d) = match described(code.identity(f), code.revision(f), Query, ca, cr) {
+    let described_query = match body {
+        Plain(f) => described(code.identity(f), code.revision(f), Query, ca, cr),
+        As(f) => described(code.identity(f), code.revision(f), Query, ca, cr),
+    }
+    let (take key, take d) = match take described_query {
         Ok(take kd) => take kd,
         Error(_) => return Error(Bounds),
     }
     register_check(mut r, key, ca, n, s)?
-    let made = fn(at: store.Snapshot, h: H, arg: Bytes, prior: store.Snapshot, old: Option[View[Cover]], sub: u32, rows: Log[Row]) -> Queried {
-        adapt_query(f, ca, at, h, arg, n, s, prior, old, sub, rows)
+    let made = fn(at: store.Snapshot, h: H, caller: Caller, arg: Bytes, prior: store.Snapshot, old: Option[View[Cover]], sub: u32, rows: Log[Row]) -> Queried {
+        adapt_query(body, ca, at, h, caller, arg, n, s, prior, old, sub, rows)
     }
     insert(mut r, take key, take d, Query(n, s, made))
 }
 
 // ---- The publisher's subscriptions (G2, G3). A subscription keeps its Cover and read set at
 // the base, never its rows (F4): rows are enumerated from the snapshots the publisher holds.
-// Fields drop in reverse order: return the room after freeing the argument and key.
-pub opaque type SubscriptionInput: send { room: Option[SubscriptionLease], key: Bytes, arg: Bytes }
+// Fields drop in reverse order: return the room after freeing the Caller, argument and key.
+// `caller` is the subscribing session's, the one a caller-dependent query runs with at
+// subscribe, at every rerun and at repair (rule 2).
+pub opaque type SubscriptionInput: send { room: Option[SubscriptionLease], key: Bytes, arg: Bytes, caller: Caller }
 
 resource type SubscriptionLease: send { refund: Sender[u64], charge: u64 } drop(lease) {
     let _ = channel.try_send(lease.refund, lease.charge)
@@ -1552,9 +1580,9 @@ fn owe(mut owes: List[Owe], who: u64, version: u64) -> u64 {
     i
 }
 
-fn run_query[G: send, H: send](r: Registry[G, H], h: H, s: store.Snapshot, key: Bytes, arg: Bytes, prior: store.Snapshot, old: Option[View[Cover]], sub: u32, rows: Log[Row]) -> Queried {
-    match map.get(r.slots, key) {
-        Some(Query(_, _, go)) => go(s, h, arg, prior, old, sub, rows),
+fn run_query[G: send, H: send](r: Registry[G, H], h: H, s: store.Snapshot, input: SubscriptionInput, prior: store.Snapshot, old: Option[View[Cover]], sub: u32, rows: Log[Row]) -> Queried {
+    match map.get(r.slots, input.key) {
+        Some(Query(_, _, go)) => go(s, h, input.caller, input.arg, prior, old, sub, rows),
         _ => Stopped(Refused(NoEntry)),
     }
 }
@@ -1598,7 +1626,15 @@ fn cover_rows(s: store.Snapshot, c: Cover, sub: u32, out: Log[Row]) -> Result[()
 
 // G3: the query runs at the base, and its whole result goes in one owe naming it complete.
 fn at_base[G: send, H: send](mut b: Board[G, H], who: u64, sub: u32, take key: Bytes, take arg: Bytes) -> Owe {
-    at_base_generation(mut b, who, sub, 0u64, SubscriptionInput(room: None, key: take key, arg: take arg))
+    at_base_generation(mut b, who, sub, 0u64, SubscriptionInput(room: None, key: take key, arg: take arg, caller: law_caller(who)))
+}
+
+// The in-file laws' sessions: session `who` is bound to its own Caller, as a session without
+// a binding is to its fresh anonymous one (issuer 1).
+fn law_caller(who: u64) -> Caller {
+    let mut subject: Bytes = list.new()
+    std.codec.put_u64(who, mut subject)
+    store.Caller(issuer: 1u8, subject: take subject)
 }
 
 fn at_base_generation[G: send, H: send](mut b: Board[G, H], who: u64, sub: u32, generation: u64, take input: SubscriptionInput) -> Owe {
@@ -1612,7 +1648,7 @@ fn at_base_generation[G: send, H: send](mut b: Board[G, H], who: u64, sub: u32, 
             return take o
         },
     }
-    match run_query(b.r, b.h, b.base, input.key, input.arg, b.base, None, sub, rows) {
+    match run_query(b.r, b.h, b.base, input, b.base, None, sub, rows) {
         Covered(take v) => {
             let Viewed(cover: take c, reads: take reads) = take v
             match add_subscription(mut b.subs, who, sub, generation, take input, Some(take c), take reads) {
@@ -1796,7 +1832,7 @@ fn advance_sub[G: send, H: send](b: Board[G, H], newest: store.Snapshot, d: List
         Error(f) => return Some((generation, EndSub(Refused(Budget(room(f)))))),
     }
     let advanced = if read {
-        match run_query(b.r, b.h, newest, entry.input.key, entry.input.arg, b.base, cover_view(entry.cover), id.sub, rows) {
+        match run_query(b.r, b.h, newest, entry.input, b.base, cover_view(entry.cover), id.sub, rows) {
             Covered(take v) => Refreshed(take v, take rows),
             Stopped(take why) => EndSub(take why),
             Faulted(take why, take reads) => EndRead(take why, take reads),
@@ -1926,7 +1962,7 @@ pub opaque type Release: send {
 // without selection, which v1 lacks.
 pub opaque type PubIn: send { e: ToPub }
 
-type ToPub: send = Released(Release) | Joined(Join) | Subscribed(u64, u32, Bytes, Bytes) | WireSubscribed(u64, u32, u64, SubscriptionInput) | Unsubscribed(u64, u32) | Left(u64) | Halt | Drained
+type ToPub: send = Released(Release) | Joined(Join) | Subscribed(u64, u32, Caller, Bytes, Bytes) | WireSubscribed(u64, u32, u64, SubscriptionInput) | Unsubscribed(u64, u32) | Left(u64) | Halt | Drained
 
 // A session's join, on its first Subscribe: where its content goes, and where the
 // publisher answers with the id it mints for the session.
@@ -4254,8 +4290,8 @@ fn publisher[G: send, H: send](take r: Registry[G, H], take h: H, take base: sto
                 }
                 if let Some(sender) = wake { let _ = channel.try_send(sender, wire_event(JoinReady)) }
             },
-            Subscribed(who, sub, take key, take arg) =>
-                publish_subscription(mut b, mut joined, mut owes, who, sub, 0u64, take key, take arg),
+            Subscribed(who, sub, take caller, take key, take arg) =>
+                publish_wire_subscription(mut b, mut joined, mut owes, who, sub, 0u64, SubscriptionInput(room: None, key: take key, arg: take arg, caller: take caller)),
             WireSubscribed(who, sub, generation, take input) =>
                 publish_wire_subscription(mut b, mut joined, mut owes, who, sub, generation, take input),
             Unsubscribed(who, sub) => { let _ = remove_sub(mut b.subs, who, sub) },
@@ -4292,10 +4328,6 @@ fn fence_round(mut joined: List[Joiner], take fenced: Fenced, b: u64, mut rounds
         i += 1u64
     }
     if !round_advance(mut rounds, b, list.len(joined)) { fail("release check: no round Arc for the round") }
-}
-
-fn publish_subscription[G: send, H: send](mut b: Board[G, H], mut joined: List[Joiner], mut owes: List[Owe], who: u64, sub: u32, generation: u64, take key: Bytes, take arg: Bytes) {
-    publish_wire_subscription(mut b, mut joined, mut owes, who, sub, generation, SubscriptionInput(room: None, key: take key, arg: take arg))
 }
 
 fn publish_wire_subscription[G: send, H: send](mut b: Board[G, H], mut joined: List[Joiner], mut owes: List[Owe], who: u64, sub: u32, generation: u64, take input: SubscriptionInput) {
@@ -5201,7 +5233,7 @@ pub fn law_subscribe_order(c: Clock, r: Random) -> bool waits {
     let mut queue: List[ToPub] = list.new()
     list.push(mut queue, Joined(Join(to: take ev_to, told: take told_to, mark: None, closed: None, identity: None, fence: None, progress: None, taken: None, first: None)))
     list.push(mut queue, Released(Release(version: v1, snapshot: Some(take c1), answers: list.new())))
-    list.push(mut queue, Subscribed(1u64, 1u32, query_key(code.describe(q1)), no_arg()))
+    list.push(mut queue, Subscribed(1u64, 1u32, law_caller(1u64), query_key(code.describe(q1)), no_arg()))
     list.push(mut queue, Released(Release(version: v2, snapshot: Some(take c2), answers: list.new())))
     list.push(mut queue, Released(Release(version: store.version(outside), snapshot: Some(take outside), answers: list.new())))
     list.push(mut queue, Halt)
@@ -5333,8 +5365,8 @@ fn retired_at_publisher(c: Clock, r: Random, tasks: Tasks, woken: bool) -> bool 
     let f = join_as(to, take f_to, None)
     let k1 = query_key(code.describe(q1))
     let mut queue: List[ToPub] = list.new()
-    list.push(mut queue, Subscribed(l, 1u32, clone(k1), no_arg()))
-    list.push(mut queue, Subscribed(m, 1u32, clone(k1), no_arg()))
+    list.push(mut queue, Subscribed(l, 1u32, law_caller(l), clone(k1), no_arg()))
+    list.push(mut queue, Subscribed(m, 1u32, law_caller(m), clone(k1), no_arg()))
     list.push(mut queue, Released(Release(version: v1, snapshot: Some(take c1), answers: list.new())))
     for take e in queue {
         if let Error(_) = channel.send(to, PubIn(e: take e)) {
@@ -5350,7 +5382,7 @@ fn retired_at_publisher(c: Clock, r: Random, tasks: Tasks, woken: bool) -> bool 
         list.push(mut quiet, Drained)
     } else {
         list.push(mut quiet, Unsubscribed(f, 9u32))
-        list.push(mut quiet, Subscribed(m, 2u32, clone(k1), no_arg()))
+        list.push(mut quiet, Subscribed(m, 2u32, law_caller(m), clone(k1), no_arg()))
     }
     for take e in quiet {
         if let Error(_) = channel.send(to, PubIn(e: take e)) {
@@ -5526,6 +5558,8 @@ fn retired_session(c: Clock, r: Random, tasks: Tasks, end: u64) -> bool waits {
     let mut service = wire_service_seed(take reg, r, None, head, c, tasks, wire_defaults(1048576u64, 1048576u64), "fixture")
     service.context.marked = true
     service.context.phase = 3u8
+    // Past hello every session holds a Caller; a Subscribe without one ends it (1008).
+    service.context.caller = Some(law_caller(7u64))
     service.context.me = Some(channel.sender(inbox))
     service.context.publisher = Some(channel.sender(to))
     let k1 = query_key(code.describe(q1))
@@ -5855,7 +5889,7 @@ fn stale_trace(c: Clock, r: Random, tasks: Tasks) -> bool waits {
         Error(_) => return false,
     }
     let mut queue: List[ToPub] = list.new()
-    list.push(mut queue, Subscribed(s, 1u32, query_key(code.describe(q1)), no_arg()))
+    list.push(mut queue, Subscribed(s, 1u32, law_caller(s), query_key(code.describe(q1)), no_arg()))
     list.push(mut queue, Released(Release(version: vc, snapshot: Some(take cs), answers: list.new())))
     for take e in queue {
         if let Error(_) = channel.send(to, PubIn(e: take e)) {
@@ -7478,19 +7512,19 @@ fn subscription_room(limit: u64, max_subs: u64) -> Result[SubscriptionRoom, Capa
     Ok(SubscriptionRoom(to: take to, from: take from, slots: slots, limit: limit - (64u64 + slots * 8u64), held: 0u64, used: 0u64))
 }
 
-fn subscription_hold(mut quota: SubscriptionRoom, take key: Bytes, take arg: Bytes) -> Result[SubscriptionInput, Capacity] {
+fn subscription_hold(mut quota: SubscriptionRoom, take caller: Caller, take key: Bytes, take arg: Bytes) -> Result[SubscriptionInput, Capacity] {
     while let Ok(charge) = channel.try_receive(quota.from) {
         quota.held -= charge
         quota.used -= 1u64
     }
     // Include the lease record. One refund fits for every issued lease.
-    let charge = wire_round(list.capacity(key)) + wire_round(list.capacity(arg)) + 64u64
+    let charge = wire_round(list.capacity(key)) + wire_round(list.capacity(arg)) + wire_round(list.capacity(caller.subject)) + 64u64
     let available = quota.limit - quota.held
     if quota.used == quota.slots || charge > available { return Error(Capacity(requested: charge, available: available)) }
     let lease = match SubscriptionLease(refund: channel.sender(quota.to), charge: charge) { Ok(take l) => take l, Error((c, _)) => return Error(c) }
     quota.held += charge
     quota.used += 1u64
-    Ok(SubscriptionInput(room: Some(take lease), key: take key, arg: take arg))
+    Ok(SubscriptionInput(room: Some(take lease), key: take key, arg: take arg, caller: take caller))
 }
 
 // The copier carries the plain bound into sessions that also support
@@ -8209,8 +8243,12 @@ fn wire_plan_subscribe[G: send, H: send](mut s: WireSession[G, H], sub: u32, slo
             Error(_) => return Ok(SubscriptionRefusal(sub, Refused(Overloaded))),
         }
     }
+    let caller: Caller = match s.caller {
+        Some(held) => clone(held),
+        None => return Error(1008u16),
+    }
     let mut quota = option.unwrap(replace(mut s.subscription_room, None))
-    let held = subscription_hold(mut quota, take key, take arg)
+    let held = subscription_hold(mut quota, take caller, take key, take arg)
     s.subscription_room = Some(take quota)
     match take held {
         Ok(take input) => Ok(PlannedSubscribe(sub, take input)),
@@ -8739,18 +8777,20 @@ fn wire_check_live[G: send, H: send](s: WireSession[G, H], f: Frame) -> Option[u
 
 // Publisher harness: a joined inbox whose consumer the law can hold still.
 // This fixture does not create a session or a second call transport.
-pub type FixtureOwner { inbox: Receiver[WireEvent], out: Sender[Down], from: Receiver[Down], post: Sender[PubIn], who: u64, progress: Sender[()] }
+// The owner subscribes as `caller`, the Caller a session binds at Hello.
+pub type FixtureOwner { inbox: Receiver[WireEvent], out: Sender[Down], from: Receiver[Down], post: Sender[PubIn], who: u64, progress: Sender[()], caller: Caller }
 
-pub fn fixture_owner(pub_in: Sender[PubIn]) -> FixtureOwner waits {
+pub fn fixture_owner(pub_in: Sender[PubIn], take caller: Caller) -> FixtureOwner waits {
     let (to, inbox): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(64u64)
     let (progressed, progress): (Sender[()], Receiver[()]) = channel.new(1u64)
     let who = join_with(pub_in, take to, None, Some(take progress))
     let (out, from): (Sender[Down], Receiver[Down]) = channel.new(64u64)
-    FixtureOwner(inbox: take inbox, out: take out, from: take from, post: channel.sender(pub_in), who: who, progress: take progressed)
+    FixtureOwner(inbox: take inbox, out: take out, from: take from, post: channel.sender(pub_in), who: who, progress: take progressed, caller: take caller)
 }
 
 pub fn fixture_subscribe(owner: FixtureOwner, sub: u32, take key: Bytes, take arg: Bytes) -> () waits {
-    let _ = channel.send(owner.post, PubIn(e: Subscribed(owner.who, sub, take key, take arg)))
+    let copied: Caller = clone(owner.caller)
+    let _ = channel.send(owner.post, PubIn(e: Subscribed(owner.who, sub, take copied, take key, take arg)))
 }
 
 pub fn fixture_unsubscribe(owner: FixtureOwner, sub: u32) -> () waits {

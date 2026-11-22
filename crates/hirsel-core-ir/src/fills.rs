@@ -1,26 +1,34 @@
-//! The producer's effect-free byte store loop can use libc's bulk fill even
-//! when dev code uses the single-pass register allocator.
-use super::*;
+//! A counted store loop with no per-element effects can emit one bulk fill.
+use crate::{
+    AddressBase, AddressId, ArithMode, ArithOp, Body, CompareOp, Inst, PlaceTy, Step, Terminator,
+    ValueId, failure, ir::for_each_successor,
+};
+use hirsel_core_layout::{Scalar, Ty};
 
 #[derive(Clone, Copy)]
-pub(super) struct ByteFill {
+pub struct Fill {
     pub index: ValueId,
     pub bound: ValueId,
     pub base: ValueId,
-    pub byte: ValueId,
+    /// A runtime byte for u8, or None for a scalar with zero bits.
+    pub byte: Option<ValueId>,
     pub store: AddressId,
+    pub stride: u64,
+    pub offset: ValueId,
+    pub next: ValueId,
 }
 
-pub(super) fn byte_fills(body: &Body) -> Vec<Option<ByteFill>> {
+/// The effect-free fill body at each block, when there is one.
+pub fn fills(body: &Body) -> Vec<Option<Fill>> {
     if !body.blocks.iter().any(|b| {
-        matches!(b.insts.get(&body.insts), Some([_, _, Inst::Store { value, .. }, _]) if body.values[value.index()] == Ty::Scalar(Scalar::U8))
+        matches!(b.insts.get(&body.insts), Some([_, _, Inst::Store { value, .. }, _]) if matches!(body.values[value.index()], Ty::Scalar(_)))
     }) {
         return Vec::new();
     }
-    let constants = c::failure::constants(body);
+    let constants = failure::constants(body);
     let mut predecessors = vec![0usize; body.blocks.len()];
-    for edge in &body.edges {
-        predecessors[edge.target.index()] += 1;
+    for block in 0..body.blocks.len() {
+        for_each_successor(body, block, |next| predecessors[next.index()] += 1);
     }
     body.blocks
         .iter()
@@ -55,14 +63,26 @@ pub(super) fn byte_fills(body: &Body) -> Vec<Option<ByteFill>> {
             else {
                 return None;
             };
-            if predecessors[block] != 1
+            let Ty::Scalar(scalar) = body.values[byte.index()] else {
+                return None;
+            };
+            let stride = constants[stride.index()]?;
+            if stride != scalar.size() {
+                return None;
+            }
+            let byte = if scalar == Scalar::U8 {
+                Some(*byte)
+            } else {
+                (constants[byte.index()] == Some(0)).then_some(())?;
+                None
+            };
+            if block == 0
+                || predecessors[block] != 1
                 || b.params.len != 0
                 || address != store
                 || index != incremented
-                || constants[stride.index()] != Some(1)
                 || constants[one.index()] != Some(1)
                 || body.values[index.index()] != Ty::Scalar(Scalar::U64)
-                || body.values[byte.index()] != Ty::Scalar(Scalar::U8)
             {
                 return None;
             }
@@ -70,7 +90,7 @@ pub(super) fn byte_fills(body: &Body) -> Vec<Option<ByteFill>> {
             let AddressBase::Value(base) = a.base else {
                 return None;
             };
-            if a.ty != PlaceTy::Value(Ty::Scalar(Scalar::U8))
+            if a.ty != PlaceTy::Value(Ty::Scalar(scalar))
                 || a.steps.get(&body.pools.steps)? != [Step::Byte(*offset)]
             {
                 return None;
@@ -107,17 +127,22 @@ pub(super) fn byte_fills(body: &Body) -> Vec<Option<ByteFill>> {
             };
             if left != index
                 || tested != *condition
+                || bound == offset
+                || bound == next
                 || body.edges[yes.index()].target.index() != block
                 || body.edges[no.index()].target.index() == block
             {
                 return None;
             }
-            Some(ByteFill {
+            Some(Fill {
                 index: *index,
                 bound: *bound,
                 base,
-                byte: *byte,
+                byte,
                 store: *store,
+                stride,
+                offset: *offset,
+                next: *next,
             })
         })
         .collect()

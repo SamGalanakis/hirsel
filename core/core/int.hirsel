@@ -33,6 +33,12 @@ pub fn trailing_zeros[T: integer](x: T) -> u32
 
 pub fn count_ones[T: integer](x: T) -> u32
 
+pub fn rotate_left[T: integer](x: T, n: u32) -> T
+
+pub fn rotate_right[T: integer](x: T, n: u32) -> T
+
+pub fn swap_bytes[T: integer](x: T) -> T
+
 pub fn widen[T: integer, U: integer](x: T) -> U
 
 pub fn narrow[T: integer, U: integer](x: T) -> U

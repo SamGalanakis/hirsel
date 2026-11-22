@@ -793,6 +793,40 @@ impl FunctionEmitter<'_> {
         self.br(ready);
         self.block(ready);
     }
+    pub(super) fn bulk_fill(&mut self, fill: hirsel_core_ir::fills::Fill) -> Result<()> {
+        // The header proved index < bound. The recognized loop had only its
+        // store and unit increment. Its stores cover a single contiguous
+        // extent, so the fill can write those bytes before taking the same
+        // backedge with bound, leaving the final address and values intact.
+        let index = self.numeric(fill.index);
+        let bound = self.numeric(fill.bound);
+        let base = self.numeric(fill.base);
+        let stride = int(fill.stride);
+        let start = self.bin(Binary::Mul, &Type::I64, &index, &stride);
+        let to = self.offset_by(&base, &start);
+        let remaining = self.bin(Binary::Sub, &Type::I64, &bound, &index);
+        let bytes = self.bin(Binary::Mul, &Type::I64, &remaining, &stride);
+        let byte = fill
+            .byte
+            .map_or_else(|| int(0), |value| self.numeric(value));
+        self.intrinsic(
+            "llvm.memset.p0.i64",
+            Type::Void,
+            &[
+                ptr(to),
+                arg(Type::I8, byte),
+                word(bytes),
+                arg(Type::I1, FALSE),
+            ],
+        );
+        let last = self.bin(Binary::Sub, &Type::I64, &bound, &int(1));
+        let offset = self.bin(Binary::Mul, &Type::I64, &last, &stride);
+        self.put(fill.offset, &offset);
+        self.project(fill.store, None)?;
+        self.put(fill.next, &bound);
+        Ok(())
+    }
+
     pub(super) fn storage(&mut self, inst: &Inst, index: usize) -> Result<()> {
         match *inst {
             Inst::Alloc {

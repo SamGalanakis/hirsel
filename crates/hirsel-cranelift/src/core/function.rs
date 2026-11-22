@@ -118,7 +118,7 @@ pub(super) fn emit(
             }
         }
     }
-    let fills = super::loops::byte_fills(body);
+    let fills = c::fills::fills(body);
     let mut definitions = vec![0u32; body.addresses.len()];
     let mut defined_in = vec![usize::MAX; body.addresses.len()];
     for (block, row) in body.blocks.iter().enumerate() {
@@ -316,10 +316,16 @@ pub(super) fn emit(
                 let index = f.get(fill.index);
                 let bound = f.get(fill.bound);
                 let base = f.get(fill.base);
-                let to = f.b.ins().iadd(base, index);
-                let bytes = f.b.ins().isub(bound, index);
-                let byte = f.get(fill.byte);
-                let byte = f.resize(byte, types::I32, false);
+                let offset = f.b.ins().imul_imm(index, fill.stride as i64);
+                let to = f.b.ins().iadd(base, offset);
+                let remaining = f.b.ins().isub(bound, index);
+                let bytes = f.b.ins().imul_imm(remaining, fill.stride as i64);
+                let byte = if let Some(value) = fill.byte {
+                    let byte = f.get(value);
+                    f.resize(byte, types::I32, false)
+                } else {
+                    f.b.ins().iconst(types::I32, 0)
+                };
                 f.c_call(
                     "memset",
                     &[Ty::Ptr, Ty::Scalar(Scalar::U32), Ty::Scalar(Scalar::U64)],

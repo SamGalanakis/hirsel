@@ -1912,6 +1912,42 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             let count = self.numeric_convert(ty, mode, count, n)?;
             return self.numeric_binary(ty, BinaryOp::Shl, vals[0]?, count, n);
         }
+        if matches!(name, "rotate_left" | "rotate_right") {
+            // A right rotation by n is the left rotation by -n; the width divides
+            // 2^32, so negating the u32 count before the mask keeps it modulo the width.
+            let u32_ = Ty::Scalar(Scalar::U32);
+            let count = if name == "rotate_right" {
+                let zero = self.konst(u32_, 0, n)?;
+                self.numeric_arith(u32_, ArithOp::Sub, zero, vals[1]?, n)?
+            } else {
+                vals[1]?
+            };
+            let mask = self.konst(u32_, u64::from(width - 1), n)?;
+            let count = self.numeric_binary(u32_, BinaryOp::BitAnd, count, mask, n)?;
+            let mode = if width <= 32 {
+                ConvertMode::Truncate
+            } else {
+                ConvertMode::Widen
+            };
+            let count = self.numeric_convert(ty, mode, count, n)?;
+            return self.numeric_binary(ty, BinaryOp::Rotl, vals[0]?, count, n);
+        }
+        if name == "swap_bytes" {
+            let operand = vals[0]?;
+            if !self.live() {
+                return None;
+            }
+            let result = self.value(ty);
+            self.inst(
+                Inst::ScalarUnary {
+                    result,
+                    op: hirsel_core_ir::ScalarUnaryOp::SwapBytes,
+                    operand,
+                },
+                n,
+            );
+            return Some(result);
+        }
         if matches!(name, "leading_zeros" | "trailing_zeros" | "count_ones") {
             let operand = vals[0]?;
             if !self.live() {

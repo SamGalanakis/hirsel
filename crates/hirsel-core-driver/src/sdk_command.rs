@@ -180,8 +180,11 @@ pub fn frame_schema(
         std::fs::create_dir_all(&directory)?;
         let mut sources = Vec::new();
         for (module, text) in texts {
+            // Nested modules (std's `sim/fs`) are paths, as in the bundled product manifest.
             let file = directory.join(format!("{module}.hirsel"));
-            std::fs::create_dir_all(file.parent().expect("a schema source has a parent"))?;
+            if let Some(parent) = file.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
             std::fs::write(&file, text)?;
             sources.push(ModuleSource {
                 foreign: false,

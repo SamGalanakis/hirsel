@@ -1,0 +1,801 @@
+type Choice {
+    value: u64,
+    limit: u64
+}
+
+type Span {
+    label: u64,
+    start: u64,
+    end: u64
+}
+
+pub opaque type Source {
+    pcg: rand.Pcg,
+    prefix: Option[List[u64]],
+    tape: List[Choice],
+    spans: List[Span],
+    max_choices: u64,
+    overrun: bool,
+    invalid: bool,
+    rendering: bool,
+    rendered: Option[String]
+}
+
+pub type Gen[T] {
+    draw: own fn(mut Source) -> T,
+    show: own fn(T, mut String)
+}
+
+pub fn make[T](take draw_fn: own fn(mut Source) -> T, take show_fn: own fn(T, mut String)) -> Gen[T] {
+    Gen(draw: take draw_fn, show: take show_fn)
+}
+
+pub fn draw[T](mut s: Source, g: Gen[T]) -> T {
+    if !s.rendering {
+        return (g.draw)(mut s)
+    }
+    // A custom generator owns the presentation of its final value.
+    s.rendering = false
+    let value = (g.draw)(mut s)
+    s.rendering = true
+    take value
+}
+
+fn source(seed: u64, index: u64, max_choices: u64, prefix: Option[List[u64]]) -> Source {
+    let replay_prefix: Option[List[u64]] = clone(prefix)
+    Source(pcg: rand.new(seed, index), prefix: take replay_prefix, tape: list.new(), spans: list.new(), max_choices, overrun: false, invalid: false, rendering: false, rendered: None)
+}
+
+// After a discard, return zero without advancing either input stream.
+fn ready(mut s: Source) -> bool {
+    if s.overrun || s.invalid {
+        return false
+    }
+    let i = list.len(s.tape)
+    let past_prefix = match s.prefix {
+        Some(values) => i >= list.len(values),
+        None => false,
+    }
+    s.overrun = i >= s.max_choices || past_prefix
+    !s.overrun
+}
+
+fn replay_choice(s: Source, limit: u64) -> Option[u64] {
+    if let Some(values) = s.prefix {
+        let value = values[list.len(s.tape)]
+        return Some(if limit == 0 || value < limit {
+            value
+        } else {
+            0
+        })
+    }
+    None
+}
+
+fn record(mut s: Source, value: u64, limit: u64) -> u64 {
+    list.push(mut s.tape, Choice(value, limit))
+    value
+}
+
+pub fn below(mut s: Source, n: u64) -> u64 {
+    if !ready(mut s) {
+        return 0
+    }
+    if n == 0 {
+        let _ = string.as_bytes("")[0]
+    }
+    if let Some(value) = replay_choice(s, n) {
+        return record(mut s, value, n)
+    }
+    let limit = if rand.below(mut s.pcg, 4) == 0 {
+        order.min(n, 16)
+    } else {
+        n
+    }
+    let value = rand.below(mut s.pcg, limit)
+    record(mut s, value, n)
+}
+
+pub fn word(mut s: Source) -> u64 {
+    if !ready(mut s) {
+        return 0
+    }
+    let value = match replay_choice(s, 0) {
+        Some(value) => value,
+        None => rand.next(mut s.pcg),
+    }
+    record(mut s, value, 0)
+}
+
+pub fn weighted(mut s: Source, k: u64, n: u64) -> bool {
+    if !ready(mut s) {
+        return false
+    }
+    if n == 0 || k > n {
+        let _ = string.as_bytes("")[0]
+    }
+    let value = match replay_choice(s, 2) {
+        Some(value) => value,
+        None => if rand.below(mut s.pcg, n) < k {
+            1
+        } else {
+            0
+        },
+    }
+    record(mut s, value, 2) != 0
+}
+
+pub fn span[T](mut s: Source, label: u64, body: scoped fn(mut Source) -> T) -> T {
+    if s.invalid || s.overrun {
+        return body(mut s)
+    }
+    let i = list.len(s.spans)
+    let start = list.len(s.tape)
+    list.push(mut s.spans, Span(label, start, end: start))
+    let value = body(mut s)
+    s.spans[i].end = list.len(s.tape)
+    take value
+}
+
+pub fn reject(mut s: Source) {
+    s.invalid = true
+}
+
+fn require_range(ok: bool) {
+    if !ok {
+        let _ = string.as_bytes("")[0]
+    }
+}
+
+fn inclusive(mut s: Source, distance: u64) -> u64 {
+    if distance == 18446744073709551615 {
+        word(mut s)
+    } else {
+        below(mut s, distance + 1)
+    }
+}
+
+fn show_unsigned(value: u64, mut out: String) {
+    string.push_u64(mut out, value)
+}
+
+fn show_signed(value: i64, mut out: String) {
+    string.push_i64(mut out, value)
+}
+
+pub fn bool_() -> Gen[bool] {
+    make(fn(mut s: Source) -> bool {
+        below(mut s, 2) != 0
+    }, fn(value: bool, mut out: String) {
+        string.push(mut out, if value {
+            "true"
+        } else {
+            "false"
+        })
+    })
+}
+
+pub fn u64_in(lo: u64, hi: u64) -> Gen[u64] {
+    require_range(lo <= hi)
+    let distance = hi - lo
+    make(fn(mut s: Source) -> u64 {
+        lo + inclusive(mut s, distance)
+    }, show_unsigned)
+}
+
+const SIGN_BIT: u64 = 0x8000000000000000
+
+const SIGNED_MIN: i64 = -9223372036854775808
+
+fn signed_rank(x: i64) -> u64 {
+    if x < 0 {
+        int.narrow(x - SIGNED_MIN)
+    } else {
+        let n: u64 = int.narrow(x)
+        SIGN_BIT + n
+    }
+}
+
+fn signed_value(rank: u64) -> i64 {
+    if rank < SIGN_BIT {
+        let n: i64 = int.narrow(rank)
+        SIGNED_MIN + n
+    } else {
+        int.narrow(rank - SIGN_BIT)
+    }
+}
+
+fn zigzag(index: u64, origin: u64, left: u64, right: u64) -> u64 {
+    let both = order.min(left, right)
+    if index > both * 2 {
+        if right > left {
+            origin + (index - both)
+        } else {
+            origin - (index - both)
+        }
+    } else if index % 2 == 0 {
+        origin - index / 2
+    } else {
+        origin + index / 2 + 1
+    }
+}
+
+pub fn i64_in(lo: i64, hi: i64) -> Gen[i64] {
+    require_range(lo <= hi)
+    let first = signed_rank(lo)
+    let last = signed_rank(hi)
+    let origin = order.max(first, order.min(SIGN_BIT, last))
+    make(fn(mut s: Source) -> i64 {
+        let index = inclusive(mut s, last - first)
+        signed_value(zigzag(index, origin, origin - first, last - origin))
+    }, show_signed)
+}
+
+pub fn u8_any() -> Gen[u8] {
+    make(fn(mut s: Source) -> u8 {
+        int.narrow(below(mut s, 256))
+    }, fn(value: u8, mut out: String) {
+        string.push_u64(mut out, int.widen(value))
+    })
+}
+
+fn scalar_rank(c: char) -> u64 {
+    let code: u64 = int.widen(char.to_u32(c))
+    if code >= 0xe000 {
+        code - 0x800
+    } else {
+        code
+    }
+}
+
+fn push_escaped(mut out: String, c: char, quote: char) {
+    if c == quote || c == '\\' {
+        string.push_char(mut out, '\\')
+        string.push_char(mut out, c)
+    } else if char.to_u32(c) < 32 || char.to_u32(c) == 127 {
+        string.push(mut out, "\\u{")
+        string.push_uint(mut out, int.widen(char.to_u32(c)), 16, 0, '0')
+        string.push_char(mut out, '}')
+    } else {
+        string.push_char(mut out, c)
+    }
+}
+
+fn show_char(c: char, mut out: String) {
+    string.push_char(mut out, '\'')
+    push_escaped(mut out, c, '\'')
+    string.push_char(mut out, '\'')
+}
+
+pub fn char_in(lo: char, hi: char) -> Gen[char] {
+    let first = scalar_rank(lo)
+    let last = scalar_rank(hi)
+    require_range(first <= last)
+    make(fn(mut s: Source) -> char {
+        let rank = first + below(mut s, last - first + 1)
+        let code = if rank >= 0xd800 {
+            rank + 0x800
+        } else {
+            rank
+        }
+        option.unwrap(char.from_u32(int.narrow(code)))
+    }, show_char)
+}
+
+pub fn ascii() -> Gen[char] {
+    char_in(' ', '~')
+}
+
+fn display[T](value: T, mut out: String) {
+    string.push(mut out, "<generated>")
+}
+
+fn show_part[T](mut s: Source, g: Gen[T], mut out: String) -> T {
+    let value = (g.draw)(mut s)
+    if s.rendering {
+        let saved = replace(mut s.rendered, None)
+        match take saved {
+            Some(text) => string.push(mut out, text),
+            None => (g.show)(value, mut out),
+        }
+    }
+    take value
+}
+
+fn show_open(s: Source, mut out: String, text: String) {
+    if s.rendering {
+        string.push(mut out, text)
+    }
+}
+
+fn show_close(mut s: Source, take text: String, close: String) {
+    if s.rendering {
+        let mut rendered = take text
+        string.push(mut rendered, close)
+        s.rendered = Some(take rendered)
+    }
+}
+
+pub fn list_of[T](take g: Gen[T], min: u64, max: u64) -> Gen[List[T]] {
+    require_range(min <= max)
+    make(fn(mut s: Source) -> List[T] {
+        let mut values: List[T] = list.new()
+        let mut text = string.new()
+        show_open(s, mut text, "[")
+        for i in 0u64 .. max {
+            let element = span(mut s, 1, fn(mut src: Source) -> Option[T] {
+                if i >= min && !weighted(mut src, 7, 8) {
+                    return None
+                }
+                if i != 0 {
+                    show_open(src, mut text, ", ")
+                }
+                Some(show_part(mut src, g, mut text))
+            })
+            match take element {
+                Some(take v) => list.push(mut values, take v),
+                None => break,
+            }
+            if s.invalid || s.overrun {
+                break
+            }
+        }
+        show_close(mut s, take text, "]")
+        take values
+    }, display)
+}
+
+pub fn bytes_of(min: u64, max: u64) -> Gen[Bytes] {
+    list_of(u8_any(), min, max)
+}
+
+fn collect_chars(chars: List[char]) -> String {
+    let mut out = string.new()
+    for c in chars {
+        string.push_char(mut out, c)
+    }
+    take out
+}
+
+fn show_string(value: String, mut out: String) {
+    string.push_char(mut out, '"')
+    let mut at: u64 = 0
+    while let Some((c, next)) = string.next_scalar(value, at) {
+        push_escaped(mut out, c, '"')
+        at = next
+    }
+    string.push_char(mut out, '"')
+}
+
+pub fn string_of(take chars: Gen[char], min: u64, max: u64) -> Gen[String] {
+    map_shown(list_of(take chars, min, max), collect_chars, show_string)
+}
+
+pub fn option_of[T](take g: Gen[T]) -> Gen[Option[T]] {
+    make(fn(mut s: Source) -> Option[T] {
+        let mut text = string.new()
+        if below(mut s, 2) == 0 {
+            show_close(mut s, take text, "None")
+            return None
+        }
+        show_open(s, mut text, "Some(")
+        let value = span(mut s, 2, fn(mut src: Source) -> T {
+            show_part(mut src, g, mut text)
+        })
+        show_close(mut s, take text, ")")
+        Some(take value)
+    }, display)
+}
+
+pub fn one_of[T](take gs: List[Gen[T]]) -> Gen[T] {
+    require_range(list.len(gs) != 0)
+    make(fn(mut s: Source) -> T {
+        let i = below(mut s, list.len(gs))
+        let mut text = string.new()
+        let value = span(mut s, 3, fn(mut src: Source) -> T {
+            show_part(mut src, gs[i], mut text)
+        })
+        show_close(mut s, take text, "")
+        take value
+    }, display)
+}
+
+pub fn pair[A, B](take a: Gen[A], take b: Gen[B]) -> Gen[(A, B)] {
+    make(fn(mut s: Source) -> (A, B) {
+        let mut text = string.new()
+        show_open(s, mut text, "(")
+        let first = span(mut s, 4, fn(mut src: Source) -> A {
+            show_part(mut src, a, mut text)
+        })
+        show_open(s, mut text, ", ")
+        let second = span(mut s, 4, fn(mut src: Source) -> B {
+            show_part(mut src, b, mut text)
+        })
+        show_close(mut s, take text, ")")
+        (take first, take second)
+    }, display)
+}
+
+pub fn triple[A, B, C](take a: Gen[A], take b: Gen[B], take c: Gen[C]) -> Gen[(A, B, C)] {
+    make(fn(mut s: Source) -> (A, B, C) {
+        let mut text = string.new()
+        show_open(s, mut text, "(")
+        let first = span(mut s, 4, fn(mut src: Source) -> A {
+            show_part(mut src, a, mut text)
+        })
+        show_open(s, mut text, ", ")
+        let second = span(mut s, 4, fn(mut src: Source) -> B {
+            show_part(mut src, b, mut text)
+        })
+        show_open(s, mut text, ", ")
+        let third = span(mut s, 4, fn(mut src: Source) -> C {
+            show_part(mut src, c, mut text)
+        })
+        show_close(mut s, take text, ")")
+        (take first, take second, take third)
+    }, display)
+}
+
+pub fn just[T: plain + inert](value: T) -> Gen[T] {
+    make(fn(mut s: Source) -> T {
+        value
+    }, display)
+}
+
+pub fn map[A, B](take g: Gen[A], take transform: own fn(A) -> B) -> Gen[B] {
+    make(fn(mut s: Source) -> B {
+        let mut text = string.new()
+        show_open(s, mut text, "map(")
+        let value = show_part(mut s, g, mut text)
+        let mapped = transform(value)
+        show_close(mut s, take text, ")")
+        take mapped
+    }, display)
+}
+
+pub fn map_shown[A, B](take g: Gen[A], take transform: own fn(A) -> B, take show_fn: own fn(B, mut String)) -> Gen[B] {
+    make(fn(mut s: Source) -> B {
+        transform(draw(mut s, g))
+    }, take show_fn)
+}
+
+pub fn bind[A, B](take g: Gen[A], take next_gen: own fn(A) -> Gen[B]) -> Gen[B] {
+    make(fn(mut s: Source) -> B {
+        let first = draw(mut s, g)
+        let next = next_gen(first)
+        let mut text = string.new()
+        let value = span(mut s, 5, fn(mut src: Source) -> B {
+            show_part(mut src, next, mut text)
+        })
+        show_close(mut s, take text, "")
+        take value
+    }, display)
+}
+
+pub fn filter[T](take g: Gen[T], take pred: own fn(T) -> bool) -> Gen[T] {
+    make(fn(mut s: Source) -> T {
+        let mut attempts: u64 = 0
+        loop {
+            let mut text = string.new()
+            let value = span(mut s, 6, fn(mut src: Source) -> T {
+                show_part(mut src, g, mut text)
+            })
+            if pred(value) {
+                show_close(mut s, take text, "")
+                break take value
+            }
+            attempts += 1
+            if attempts == 3 {
+                reject(mut s)
+                break take value
+            }
+        }
+    }, display)
+}
+
+pub type Config {
+    seed: u64,
+    cases: u64,
+    max_choices: u64,
+    max_rejects: u64,
+    max_shrinks: u64,
+    gen_steps: u64,
+    case_steps: u64,
+    case_bytes: u64,
+    sim_seed: Option[u64],
+    replay: Option[String]
+}
+
+pub fn config() -> Config {
+    Config(seed: 0, cases: 100, max_choices: 4096, max_rejects: 1000, max_shrinks: 1000, gen_steps: 1000000, case_steps: 10000000, case_bytes: 262144, sim_seed: None, replay: None)
+}
+
+pub fn replay(take c: Config, text: String) -> Config {
+    let mut next = take c
+    next.replay = Some(string.from(text))
+    take next
+}
+
+pub type Outcome = Passed(u64) | GaveUp(u64, u64) | Falsified(Found)
+
+pub opaque type Found {
+    index: u64,
+    tape: List[Choice],
+    cases: u64,
+    shrinks: u64,
+    sim_seed: Option[u64],
+    rendered: String,
+    message: String
+}
+
+type Replay {
+    index: u64,
+    values: List[u64]
+}
+
+fn put_uleb(mut data: Bytes, n: u64) {
+    let mut left = n
+    while left >= 128 {
+        list.push(mut data, int.narrow((left & 127) | 128))
+        left >>= 7
+    }
+    list.push(mut data, int.narrow(left))
+}
+
+fn read_uleb(data: Bytes, mut at: u64) -> Option[u64] {
+    let mut n: u64 = 0
+    for i in 0u64 .. 10 {
+        if at >= list.len(data) {
+            return None
+        }
+        let byte = data[at]
+        at += 1
+        if i == 9 && byte > 1 {
+            return None
+        }
+        let chunk: u64 = int.widen(byte & 127)
+        n |= chunk << (i * 7)
+        if byte < 128 {
+            return if i != 0 && byte == 0 {
+                None
+            } else {
+                Some(n)
+            }
+        }
+    }
+    None
+}
+
+fn bad_token() -> Never {
+    fail("prop: config: bad replay token")
+}
+
+fn parse_token(text: String, max_choices: u64) -> Replay {
+    let data = match base64.decode(string.as_bytes(text)) {
+        Some(take value) => take value,
+        None => bad_token(),
+    }
+    if list.len(data) == 0 || data[0] != 1 {
+        bad_token()
+    }
+    let mut at: u64 = 1
+    let index = match read_uleb(data, mut at) {
+        Some(n) => n,
+        None => bad_token(),
+    }
+    let count = match read_uleb(data, mut at) {
+        Some(n) => n,
+        None => bad_token(),
+    }
+    if count > max_choices || count > list.len(data) - at {
+        bad_token()
+    }
+    let mut values: List[u64] = list.with_capacity(count)
+    for _ in 0u64 .. count {
+        match read_uleb(data, mut at) {
+            Some(n) => list.push(mut values, n),
+            None => bad_token(),
+        }
+    }
+    if at != list.len(data) {
+        bad_token()
+    }
+    Replay(index, values: take values)
+}
+
+pub fn token(f: Found, mut out: String) {
+    let mut data: Bytes = list.new()
+    list.push(mut data, 1u8)
+    put_uleb(mut data, f.index)
+    put_uleb(mut data, list.len(f.tape))
+    for choice in f.tape {
+        put_uleb(mut data, choice.value)
+    }
+    string.push(mut out, base64.encode_string(data))
+}
+
+fn push_excerpt(mut out: String, text: String) {
+    if string.byte_len(text) <= 1024 {
+        string.push(mut out, text)
+        return
+    }
+    let data = string.as_bytes(text)
+    let mut end: u64 = 1021
+    while data[end] & 0xc0 == 0x80 {
+        end -= 1
+    }
+    string.push(mut out, string.slice(text, 0, end))
+    string.push(mut out, "…")
+}
+
+fn excerpt(text: String) -> String {
+    let mut out = string.new()
+    push_excerpt(mut out, text)
+    take out
+}
+
+pub fn report(f: Found, mut out: String) {
+    string.push(mut out, "prop: falsified: ")
+    if let Some(seed) = f.sim_seed {
+        string.push(mut out, "sim seed ")
+        string.push_u64(mut out, seed)
+        string.push(mut out, "; ")
+    }
+    string.push(mut out, "reproduce: prop.replay(cfg, \"")
+    token(f, mut out)
+    string.push(mut out, "\"); after ")
+    string.push_u64(mut out, f.cases)
+    string.push(mut out, " cases, ")
+    string.push_u64(mut out, f.shrinks)
+    string.push(mut out, " shrinks: ")
+    string.push(mut out, f.rendered)
+    string.push(mut out, "; law: ")
+    string.push(mut out, f.message)
+}
+
+fn config_bytes(requested: u64) -> Never {
+    let mut text = string.from("prop: config: case_bytes ")
+    string.push_u64(mut text, requested)
+    string.push(mut text, " refused")
+    fail(take text)
+}
+
+fn generation_failed(index: u64) -> Never {
+    let mut text = string.from("prop: generator failed at case ")
+    string.push_u64(mut text, index)
+    fail(take text)
+}
+
+fn primary_message(causes: Causes) -> String {
+    for cause in causes {
+        return match cause.kind {
+            Fail(text) => excerpt(text),
+            Overflow => string.from("Overflow"),
+            Bounds => string.from("Bounds"),
+            Division => string.from("Division"),
+            Unwrap => string.from("Unwrap"),
+            Cancelled => string.from("Cancelled"),
+            Capacity(_) => string.from("Capacity"),
+            OutOfTime => string.from("OutOfTime"),
+        }
+    }
+    string.from("failed")
+}
+
+fn generate[T](cfg: Config, g: Gen[T], index: u64, prefix: Option[List[u64]]) -> Option[(T, Source)] {
+    let run = isolate(fn() -> Result[(T, Source), OutOfTime] {
+        bound steps cfg.gen_steps {
+            let mut s = source(cfg.seed, index, cfg.max_choices, prefix)
+            let value = draw(mut s, g)
+            (take value, take s)
+        }
+    })
+    match take run {
+        Ok(Ok(Ok((take value, take s)))) => Some((take value, take s)),
+        _ => None,
+    }
+}
+
+fn case_failure[T](cfg: Config, v: T, law: own fn(T) -> Result[(), String]) -> Option[String] {
+    let run = bound bytes cfg.case_bytes {
+        isolate(fn() -> Result[Result[(), String], OutOfTime] {
+            bound steps cfg.case_steps {
+                law(v)
+            }
+        })
+    }
+    match take run {
+        Error(_) => config_bytes(cfg.case_bytes),
+        Ok(Error(_)) => Some(string.from("Capacity")),
+        Ok(Ok(Error(causes))) => Some(primary_message(causes)),
+        Ok(Ok(Ok(Error(_)))) => Some(string.from("OutOfTime")),
+        Ok(Ok(Ok(Ok(Error(text))))) => Some(excerpt(text)),
+        Ok(Ok(Ok(Ok(Ok(()))))) => None,
+    }
+}
+
+fn render_at[T](cfg: Config, g: Gen[T], index: u64, tape: List[Choice]) -> String {
+    let mut values: List[u64] = list.with_capacity(list.len(tape))
+    for choice in tape {
+        list.push(mut values, choice.value)
+    }
+    let prefix = Some(take values)
+    let run = isolate(fn() -> Result[String, OutOfTime] {
+        bound steps cfg.gen_steps {
+            let mut s = source(cfg.seed, index, cfg.max_choices, prefix)
+            s.rendering = true
+            let mut text = string.new()
+            let _ = show_part(mut s, g, mut text)
+            excerpt(text)
+        }
+    })
+    match take run {
+        Ok(Ok(Ok(take text))) => take text,
+        _ => string.from("<rendering failed>"),
+    }
+}
+
+fn found[T](cfg: Config, g: Gen[T], take s: Source, index: u64, cases: u64, take message: String) -> Found {
+    let Source(tape: take tape, ..) = take s
+    let rendered = render_at(cfg, g, index, tape)
+    Found(index, tape: take tape, cases, shrinks: 0, sim_seed: cfg.sim_seed, rendered: take rendered, message: take message)
+}
+
+fn replay_one[T](cfg: Config, g: Gen[T], law: own fn(T) -> Result[(), String], text: String) -> Outcome {
+    let Replay(index, values: take values) = parse_token(text, cfg.max_choices)
+    let prefix = Some(take values)
+    let Some((take value, take s)) = generate(cfg, g, index, prefix) else {
+        generation_failed(index)
+    }
+    if !s.overrun && !s.invalid {
+        if let Some(take message) = case_failure(cfg, value, law) {
+            return Falsified(found(cfg, g, take s, index, 1, take message))
+        }
+    }
+    fail("prop: replay token no longer fails")
+}
+
+pub fn search[T](c: Config, g: Gen[T], law: own fn(T) -> Result[(), String]) -> Outcome {
+    if let Some(text) = c.replay {
+        return replay_one(c, g, law, text)
+    }
+    let empty: Option[List[u64]] = None
+    let mut cases: u64 = 0
+    let mut rejected: u64 = 0
+    let mut index: u64 = 0
+    while cases < c.cases {
+        let Some((take value, take s)) = generate(c, g, index, empty) else {
+            generation_failed(index)
+        }
+        if s.overrun || s.invalid {
+            rejected += 1
+            if rejected > c.max_rejects {
+                return GaveUp(cases, rejected)
+            }
+        } else {
+            cases += 1
+            if let Some(take message) = case_failure(c, value, law) {
+                return Falsified(found(c, g, take s, index, cases, take message))
+            }
+        }
+        index += 1
+    }
+    Passed(cases)
+}
+
+pub fn check[T](c: Config, g: Gen[T], law: own fn(T) -> Result[(), String]) -> Result[(), ()] {
+    let outcome = search(c, g, law)
+    let mut out = string.new()
+    match outcome {
+        Passed(_) => return Ok(()),
+        GaveUp(cases, rejected) => {
+            string.push(mut out, "prop: gave up after ")
+            string.push_u64(mut out, cases)
+            string.push(mut out, " cases, ")
+            string.push_u64(mut out, rejected)
+            string.push(mut out, " rejected")
+        },
+        Falsified(f) => report(f, mut out),
+    }
+    fail(take out)
+}

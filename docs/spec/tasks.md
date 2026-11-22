@@ -6,8 +6,8 @@ A **task** is a sequential computation with its own stack, limit and regions. Ta
 created only through a `Tasks` capability ([CAP-1](capabilities.md#cap-1-authority-is-explicit)).
 A task's handle is a resource that is not `send`, so it stays in the task that spawned it,
 and a task ends only after cleaning its handles (CONC-8): no task outlives its spawner.
-A value passes from one task to another only by moving through a spawn, a channel or a
-join. A flow stage ([CONC-14](#conc-14-flows)) receives and sends plain values through its flow's ports. The only program memory two tasks can both read is the immutable payload of an `Arc`
+A value passes from one task to another only by moving through a spawn, a channel, a
+connection ([CONC-17](#conc-17-connections)) or a join. A flow stage ([CONC-14](#conc-14-flows)) receives and sends plain values through its flow's ports. The only program memory two tasks can both read is the immutable payload of an `Arc`
 (CONC-11). Whether tasks and stages run in parallel is the engine's choice
 ([SEM-8](semantics.md#sem-8-determinism)), except in a run that CONC-10 leaves unspecified.
 
@@ -21,8 +21,25 @@ A plain `fn` is `send`; an owning closure is `own[send] fn` when every capture i
 ([LANG-13](language.md#lang-13-callables)). Never `send`: `Rc`, region values, regions,
 scoped values, builders and task handles. The check reads declarations and capture lists only.
 
+`cross` is the narrower bound of values that may move to another unit
+([CONC-15](#conc-15-units)); declaring `cross` also declares `send`. These are `cross`: the
+plain types, except those that hold a raw foreign handle; a tuple or array whose element
+types are `cross`; `String`;
+`List[T]` when `T` is plain and `cross`; `Client[T]` ([CONC-17](#conc-17-connections));
+`Socket` and `Listener`; the capability types; `Args`, `Child`, `Unique`, `Site` and
+`StaticFn`; and plain `fn`s. An own or resource record is `cross` when it declares the bound
+and each field type is `cross`; a nominal variant type is `cross` only when it is plain.
+Nothing else is: not owning closures, `Arc`, `Box`, `Map`, `Causes`, `Sender`, `Receiver`,
+`Latest`, `Inbox`, `HostFile`, `ReadHalf` or `WriteHalf`.
+
 ```hirsel
 type Job: send { id: u64, name: String }
+```
+```hirsel
+type Ask: cross { n: u64, reply: Client[u64] }
+```
+```hirsel
+type Hello: cross { back: Inbox[u64] }                 // refused: CONC-2, Inbox is not cross
 ```
 ```hirsel
 type Node: shareable { label: String }
@@ -380,4 +397,135 @@ fn run() -> Result[u64, Wire] waits {
   match flow.finish(take f) { _ => () }
   Ok(sum)                                                  // 42, at every worker count
 }
+```
+
+### CONC-15: Units
+
+A **unit** is a set of tasks that shares no mutable memory with any other unit. The run's
+entry task is the root of the first unit, and `task.spawn` and `task.try_spawn` add the child
+to the spawner's unit, so a program that never calls `task.spawn_unit` is one unit. A value
+reaches another unit only as the `x` of a `spawn_unit`, as a helper's result at its join, or
+as an item of a connection ([CONC-17](#conc-17-connections)), and each of these has a
+`cross` type ([CONC-2](#conc-2-the-send-bound)). A plain value is copied. A `List` or
+`String` crosses as a copy of its content: its old storage is refunded where it was charged,
+and the copy is charged where it arrives. A client, socket or listener moves as a handle.
+The **content charge** of a value is the sum, over the lists and strings it holds, of
+length × element size rounded up to 8.
+
+`task.spawn_unit(tasks, bytes n, take x, f) -> Result[Task[R], (Capacity, X)]`, where
+`X` and `R` are `cross` and `f: fn(take X) -> R waits` is a plain callable as in
+[CONC-3](#conc-3-spawn), starts a task that runs `f(take x)` as the root of a new unit, a
+**helper** owned by the spawner's unit. It first admits the task charge, 256 + size(R) + 32
++ `n` ([MEM-24](budgets.md#mem-24-logical-charges)), against the spawner's current limit,
+and then admits `x`'s content charge against `n`. Either refusal returns `Error((c, x))`,
+where `c` gives that admission's requested and available bytes, and leaves `x` as it was.
+Otherwise `x`'s content is charged to the helper's root limit of `n`. An `X` or `R` that is
+not `cross` is refused at the call.
+
+The helper's `Task[R]` is a task handle (CONC-1). `task.join` waits for the helper to end and
+returns `Ok(r)`, `Failed(causes)` or `Cancelled(causes)` as [CONC-6](#conc-6-join) says, with
+the kinds and sites of the helper's causes. `task.cancel` asks the helper's root to cancel,
+and the root observes the request at a cancellation point
+([CONC-7](#conc-7-cancellation-points)). Cleaning an unjoined helper handle cancels the
+helper, waits for its end with cancellation shielded, and drops its result or causes. Once
+`join` returns or that cleaning ends, all of the task charge has been refunded to the limit
+that admitted it, except the result's content charge, which stays charged there until the
+result is dropped, and the charge of each connection the helper made that is still open
+(CONC-17).
+
+This clause fixes no order between the actions of different units, and does not say when an
+action in one unit becomes visible in another.
+
+```hirsel
+type Table: cross { rows: List[u64] }
+fn grow(tasks: Tasks, take t: Table) -> Result[Task[Table], (Capacity, Table)] {
+  task.spawn_unit(tasks, bytes 4096, take t, fn(take v: Table) -> Table {
+    let mut u = take v
+    list.push(mut u.rows, 1)
+    take u
+  })
+}
+```
+```hirsel
+type Config: shareable + send { routes: List[String] }
+fn watch(tasks: Tasks, take a: Arc[Config]) -> Result[Task[u64], (Capacity, Arc[Config])] {
+  task.spawn_unit(tasks, bytes 4096, take a, fn(take c: Arc[Config]) -> u64 { list.len(c.routes) })
+}                                                          // refused: CONC-15, Arc is not cross
+```
+
+### CONC-17: Connections
+
+A **connection** carries items of a `cross` type `T` from any unit to the one unit that holds
+its inbox. `Client[T]` and `Inbox[T]` are mechanical resources
+([MEM-24](budgets.md#mem-24-logical-charges)). A client is `cross`; an inbox is `send` but not
+`cross`, so it stays in the unit that made it, and nothing makes a second inbox.
+
+`conn.new(cap: u64, bytes b: u64) -> Result[(Client[T], Inbox[T]), Capacity]` admits
+64 + `cap` × size(T) + `b` from the current limit and returns the connection's first client
+and its inbox. A `cap` of 0 is a failure with cause `Bounds`. The connection holds at most
+`cap` items, and its **room** of `b` bytes holds their content
+([CONC-15](#conc-15-units)). `conn.client(c)` returns another client of the same connection
+and admits nothing.
+
+`conn.send(c, take x) -> Result[(), Closed[T]] waits` fails with cause `Bounds` when `x`'s
+content charge exceeds `b`. It answers `Closed(x)` once the inbox has been cleaned. The
+connection accepts `x` only while fewer than `cap` items are queued and the room's free bytes
+hold `x`'s content charge; acceptance moves `x` into the connection and refunds its old
+storage where it was charged. Until then the send waits. The wait is a cancellation point
+([CONC-7](#conc-7-cancellation-points)), and a send cancelled there is not accepted.
+`conn.try_send(c, take x) -> Result[(), SendError[T]]` decides as `send` does, but never
+waits and is not a cancellation point: it returns `Full(x)` where `send` would wait.
+
+`conn.receive(i) -> Result[T, InboxError] waits`, where `InboxError = Closed |
+Capacity(Capacity)`, takes the item at the front of the queue. It admits the item's content
+charge into the current limit and refunds it to the room; when the limit cannot admit the
+charge, it returns `Capacity` with the requested and available bytes and leaves the item at
+the front. Items leave the inbox in the order the connection accepted them. With no item
+queued it returns `Closed` once every client has been cleaned, and otherwise waits; the wait
+is a cancellation point. `conn.try_receive(i) -> Result[T, InboxPoll]`, where `InboxPoll =
+Empty | Closed | Capacity(Capacity)`, decides as `receive` does, but never waits and is not
+a cancellation point: it returns `Empty` where `receive` would wait. This clause does not say
+when an item accepted from another unit, or the cleaning of the last client in another unit,
+is seen by the inbox's unit.
+
+Cleaning the inbox seals the connection: every later send and every waiting send answers
+`Closed(x)`. The cleaning waits for the seal with cancellation shielded, then drops every
+item not received, last accepted first, as [CONC-9](#conc-9-queue-drop) says for a channel.
+After the inbox and every client have been cleaned, the connection's charge is refunded to
+the limit that admitted it. When the last of them is cleaned in the unit that holds that
+limit, the refund is complete when that cleaning ends.
+
+A request that wants a reply carries a client of the asker's own inbox:
+
+```hirsel
+type Ask: cross { n: u64, reply: Client[u64] }
+fn serve(i: Inbox[Ask]) -> u64 waits {
+  let mut total: u64 = 0
+  loop {
+    match conn.receive(i) {
+      Ok(take a) => {
+        total += a.n
+        let _ = conn.send(a.reply, total)
+      },
+      Error(Capacity(_)) => {},
+      Error(Closed) => break,
+    }
+  }
+  total
+}
+fn ask(c: Client[Ask], n: u64) -> Option[u64] waits {
+  let made: Result[(Client[u64], Inbox[u64]), Capacity] = conn.new(1, bytes 0)
+  match made {
+    Ok((take reply, take back)) => match conn.send(c, Ask(n: n, reply: take reply)) {
+      Ok(()) => match conn.receive(back) { Ok(t) => Some(t), Error(_) => None },
+      Error(_) => None,
+    },
+    Error(_) => None,
+  }
+}
+```
+```hirsel
+fn open() {
+  let r: Result[(Client[Arc[u64]], Inbox[Arc[u64]]), Capacity] = conn.new(1, bytes 0)
+}                                                          // refused: LANG-12, Arc is not cross
 ```

@@ -32,7 +32,8 @@ fn unknown() -> u64 { missing() }                       // refused: LANG-7, miss
 | `deque` | [deque](../../core/core/deque.hirsel) | Deques and heaps, MEM-24 |
 | `heap` | [heap](../../core/core/heap.hirsel) | Deques and heaps, MEM-24 |
 | `seq`, `indexed`, `writer` | [seq](../../core/core/seq.hirsel), [indexed](../../core/core/indexed.hirsel), [writer](../../core/core/writer.hirsel) | MEM-4, MEM-12 |
-| `task`, `channel` | [task](../../core/core/task.hirsel), [channel](../../core/core/channel.hirsel) | CONC-1 to CONC-11 |
+| `task`, `channel` | [task](../../core/core/task.hirsel), [channel](../../core/core/channel.hirsel) | CONC-1 to CONC-11, CONC-15 |
+| `conn` | [conn](../../core/core/conn.hirsel) | CONC-17 |
 | `latest` | [latest](../../core/core/latest.hirsel) | CONC-13 |
 | `log` | [log](../../core/core/log.hirsel) | MEM-29 |
 | `code` | [code](../../core/core/code.hirsel) | PROG-9 |
@@ -53,6 +54,7 @@ and the bodiless declarations of the core files. A bound column never lists `pla
 `List[T]` and `Box[T]` are own and never `plain`, whatever `T` is. "When T" means the type
 has each of the listed bounds exactly when every type argument has that bound; `packed`
 and `streamable` are never listed either, since MEM-12 says which types have them, nor
+`cross`, which [CONC-2](tasks.md#conc-2-the-send-bound) gives, nor
 `integer` and `float`, which hold exactly for the integer and the float types; a holds
 entry "T's" is the union of its type arguments' holds sets. Tuples, `Option` and `Result`
 take their kind and copyability from OWN-3 and their other bounds componentwise; `Inline`
@@ -96,6 +98,7 @@ the format's u32 field. Fixed-width scalar and key writers return unit.
 | `Task[R]` | resource, mechanical | none | 8 | resource, and R's |
 | `Sender[T]`, `Receiver[T]` | resource, mechanical | `send` | 24 | resource |
 | `Latest[T]` | resource, mechanical | `send` | 8 | resource |
+| `Client[T]`, `Inbox[T]` | resource, mechanical | `send` | 8 | resource |
 | `Flow` | resource, mechanical | none | 8 | resource |
 | `Sink[T]`, `Into[T]`, `Port[T]` | plain | `shareable`, `send` | 8 | nothing |
 | `HostFile` | resource, mechanical | `send` | 8 | resource |
@@ -306,7 +309,11 @@ operations it names; nothing else about them may be inferred from an implementat
   every `T` fits in `U`, and `int.truncate` only where `U` is no wider than `T`
   ([SEM-1](semantics.md#sem-1-integers)); `int.narrow` fails with `Overflow`; `int.truncate` keeps
   the low bits of the destination's width. `wrapping_neg` and `wrapping_shl` work modulo 2^width, `wrapping_shl` taking
-  its count modulo the width. `int.abs(a)` is `a` on an unsigned type; on a signed type it is `-a` for
+  its count modulo the width. `int.rotate_left(x, n)` and `int.rotate_right(x, n)` rotate the
+  width's bits of `x` (a signed `x` by its two's-complement bits) by the `u32` count `n` modulo
+  the width, and `int.swap_bytes(x)` reverses the bytes of `x`, so it returns `x` on an 8-bit type.
+  None of the three fails or admits bytes, and each call takes one Step
+  ([MEM-30](budgets.md#mem-30-step-bounds)), whatever the count. `int.abs(a)` is `a` on an unsigned type; on a signed type it is `-a` for
   a negative `a` and `a` otherwise, so `int.abs(MIN)` fails with `Overflow` at the call, as `-MIN` does. `checked_div` returns `None` for a zero divisor and for `MIN /
   -1`. `int.mul_wide(a, b)` returns the high and low halves of the exact 128-bit product.
   `int.parse` reads ASCII decimal digits, with one leading `-` for a signed `T` and no other

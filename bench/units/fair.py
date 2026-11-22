@@ -213,7 +213,7 @@ def regime_pair(out, bins, case, grain, width, index, reverse, cpu_sets, profile
             for arm in order:
                 path, row = run.observe_regime(
                     bins, point, case, arm.capitalize(), cpus, cpu_sets["load"], work.size, rounds,
-                    wanted, profile=profile, launch_loader=scope,
+                    wanted, profile=profile, allow_smt=True, launch_loader=scope,
                     launch_measurement=partial(measure_regime, controller=cpu_sets["controller"]))
                 cpu = None
                 if (path / "rss.txt").is_file():

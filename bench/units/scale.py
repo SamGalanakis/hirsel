@@ -360,7 +360,7 @@ class Runner:
                               (word.split("=") for word in summary.split()[1:]))
                          if summary else {})
         full_pass = bool(
-            complete_in_time(result) and load.returncode == server.returncode == 0
+            complete_in_time(result) and not load_timeout and load.returncode == server.returncode == 0
             and result["issued"] == server_counts.get("turns")
         )
         if memory is not None:

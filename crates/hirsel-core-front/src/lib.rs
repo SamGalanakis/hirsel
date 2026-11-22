@@ -44,6 +44,7 @@ use hirsel_core_resolve::{
 };
 use hirsel_core_syntax::{Item, NodeId, Span, Symbol, SyntaxFile};
 use std::collections::HashMap;
+use std::hash::BuildHasher;
 
 /// One module of the program, already parsed.
 pub struct ModuleInput {
@@ -119,11 +120,13 @@ pub struct Program<'a> {
     pub constant_parts: Rows<ConstValue>,
     pub(crate) constant_strings: Rows<Vec<u8>>,
     pub(crate) constant_ids: Rows<Option<u32>>,
-    pub by_path: HashMap<DefPath, Def>,
+    /// This program's own definitions by path. A path lives once, in its
+    /// row: an entry is hashed and compared through its row's path.
+    by_path: hashbrown::HashTable<Def>,
     pub by_definition: Rows<Option<Def>>,
     pub(crate) core_operations: Rows<Option<u16>>,
     pub(crate) library_paths: Option<std::sync::Arc<hirsel_core_ids::published::Map<DefPath, Def>>>,
-    core_never: Option<(ModuleId, Symbol)>,
+    core_never: Option<DefinitionId>,
     /// Refusals of declarations and signatures, and the resolver's.
     pub refusals: Vec<Refusal>,
     pub gaps: Vec<Gap>,
@@ -456,12 +459,8 @@ impl<'a> Program<'a> {
             modules: vec![module.into()],
             name: name.into(),
         });
-        match self
-            .by_path
-            .get(&path)
-            .or_else(|| self.library_paths.as_ref().and_then(|p| p.get(&path)))?
-        {
-            Def::Fn(f) => Some(*f as usize),
+        match self.def(&path)? {
+            Def::Fn(f) => Some(f as usize),
             Def::Type(_) => None,
         }
     }
@@ -536,14 +535,39 @@ impl<'a> Program<'a> {
     }
     fn core_decl_uncached(&self, name: &str) -> Option<DeclId> {
         let path = prelude_path(self.index, name)?;
-        match self
-            .by_path
-            .get(&path)
-            .or_else(|| self.library_paths.as_ref().and_then(|p| p.get(&path)))?
-        {
-            Def::Type(d) => Some(*d),
+        match self.def(&path)? {
+            Def::Type(d) => Some(d),
             Def::Fn(_) => None,
         }
+    }
+    /// The path of a definition's row.
+    pub(crate) fn def_path(&self, def: Def) -> &DefPath {
+        def_path(&self.decls, &self.fns, def)
+    }
+    /// The definition `path` names, in this program or its library.
+    pub(crate) fn def(&self, path: &DefPath) -> Option<Def> {
+        let hash = rustc_hash::FxBuildHasher.hash_one(path);
+        self.by_path
+            .find(hash, |&d| self.def_path(d) == path)
+            .copied()
+            .or_else(|| self.library_paths.as_ref()?.get(path).copied())
+    }
+    /// Register `def` under its row's path unless the path names one already.
+    pub(crate) fn add_path(&mut self, def: Def) {
+        let (decls, fns) = (&self.decls, &self.fns);
+        let path = def_path(decls, fns, def);
+        let hash = rustc_hash::FxBuildHasher.hash_one(path);
+        if let hashbrown::hash_table::Entry::Vacant(entry) = self.by_path.entry(
+            hash,
+            |&d| def_path(decls, fns, d) == path,
+            |&d| rustc_hash::FxBuildHasher.hash_one(def_path(decls, fns, d)),
+        ) {
+            entry.insert(def);
+        }
+    }
+    /// This program's own definitions with their paths, in no order.
+    pub(crate) fn own_paths(&self) -> impl Iterator<Item = (&DefPath, Def)> {
+        self.by_path.iter().map(|&d| (self.def_path(d), d))
     }
 
     /// Resolve every item, then publish summaries and signatures (slice a).
@@ -659,7 +683,7 @@ impl<'a> Program<'a> {
                 ids.resize(index.definitions.len(), None);
                 ids
             },
-            by_path: HashMap::new(),
+            by_path: hashbrown::HashTable::new(),
             library_paths: library.map(|l| std::sync::Arc::new(l.paths.clone())),
             core_never: index
                 .symbols
@@ -670,7 +694,7 @@ impl<'a> Program<'a> {
                         .find("core")
                         .and_then(|name| index.core_module(name)),
                 )
-                .map(|(name, module)| (module, name)),
+                .and_then(|(name, module)| index.definition(module, name)),
             by_definition: {
                 let mut rows = library.map_or_else(Rows::default, |l| {
                     Rows::overlay(std::sync::Arc::clone(&l.definitions))
@@ -729,45 +753,37 @@ impl<'a> Program<'a> {
     }
 
     pub(crate) fn is_core_never(&self, id: DefinitionId) -> bool {
-        self.core_never.is_some_and(|(module, name)| {
-            let definition = self.index.get(id);
-            definition.name == name && definition.site.module == module
-        })
+        self.core_never == Some(id)
     }
     pub fn decl(&self, path: &DefPath) -> Option<&TypeDecl> {
-        match self
-            .by_path
-            .get(path)
-            .or_else(|| self.library_paths.as_ref().and_then(|p| p.get(path)))?
-        {
+        match self.def(path)? {
             Def::Type(d) => Some(&self.decls[d.index()]),
             Def::Fn(_) => None,
         }
     }
     /// The row of the function `path` names, in this program or its library.
     pub fn function_id(&self, path: &DefPath) -> Option<usize> {
-        match self
-            .by_path
-            .get(path)
-            .or_else(|| self.library_paths.as_ref().and_then(|p| p.get(path)))?
-        {
-            Def::Fn(f) => Some(*f as usize),
+        match self.def(path)? {
+            Def::Fn(f) => Some(f as usize),
             Def::Type(_) => None,
         }
     }
     pub fn function(&self, path: &DefPath) -> Option<&FnDecl> {
-        match self
-            .by_path
-            .get(path)
-            .or_else(|| self.library_paths.as_ref().and_then(|p| p.get(path)))?
-        {
-            Def::Fn(f) => Some(&self.fns[*f as usize]),
+        match self.def(path)? {
+            Def::Fn(f) => Some(&self.fns[f as usize]),
             Def::Type(_) => None,
         }
     }
     /// The kind of a closed type (OWN-3).
     pub fn kind(&self, ty: TyId) -> Kind {
         decls::kind(&self.decls, &self.types, ty, &[])
+    }
+}
+
+fn def_path<'r>(decls: &'r Rows<TypeDecl>, fns: &'r Rows<FnDecl>, def: Def) -> &'r DefPath {
+    match def {
+        Def::Type(d) => &decls[d.index()].path,
+        Def::Fn(f) => &fns[f as usize].path,
     }
 }
 

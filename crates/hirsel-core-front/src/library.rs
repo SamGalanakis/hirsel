@@ -47,6 +47,9 @@ impl<T> Rows<T> {
     pub fn push(&mut self, row: T) {
         self.own.push(row);
     }
+    pub fn reserve(&mut self, additional: usize) {
+        self.own.reserve(additional);
+    }
     pub fn iter(&self) -> impl Iterator<Item = &T> {
         self.base.iter().chain(&self.own)
     }
@@ -126,6 +129,10 @@ impl Library {
 }
 impl Program<'_> {
     pub fn into_library(self) -> Library {
+        let mut paths = self.library_paths.as_deref().cloned().unwrap_or_default();
+        for (p, d) in self.own_paths() {
+            paths.insert(p.clone(), d);
+        }
         Library {
             has_test_functions: self.has_test_functions,
             types: Arc::new(self.types),
@@ -135,13 +142,7 @@ impl Program<'_> {
             constant_parts: self.constant_parts.freeze(),
             constant_strings: self.constant_strings.freeze(),
             constant_ids: self.constant_ids.freeze(),
-            paths: {
-                let mut paths = self.library_paths.as_deref().cloned().unwrap_or_default();
-                for (p, d) in self.by_path {
-                    paths.insert(p, d);
-                }
-                paths
-            },
+            paths,
             modules: self.modules.len(),
             definitions: self.by_definition.freeze(),
             core_operations: self.core_operations.freeze(),

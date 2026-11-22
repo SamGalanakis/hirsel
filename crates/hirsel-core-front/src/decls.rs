@@ -3,10 +3,11 @@
 
 use crate::types::*;
 use crate::{Gap, ItemRef, Program, refusal};
-use hirsel_core_ids::DefPath;
+use hirsel_core_ids::{DefPath, ItemPath};
 use hirsel_core_layout::{Recipe, Scalar, Width};
 use hirsel_core_resolve::{DefinitionId, Site, Target};
 use hirsel_core_syntax::{NodeId, NodeKind, Symbol};
+use std::hash::BuildHasher;
 
 /// Bound bits (OWN-4).
 pub const PLAIN: u16 = 1;
@@ -527,7 +528,18 @@ impl Program<'_> {
     pub(crate) fn register(&mut self) {
         let mut attributes = rustc_hash::FxHashMap::default();
         let mut members = rustc_hash::FxHashMap::default();
+        let items = self.modules[self.library_modules..]
+            .iter()
+            .map(|m| m.syntax.items().len())
+            .sum();
+        let (decls, fns) = (&self.decls, &self.fns);
+        self.by_path.reserve(items, |&d| {
+            rustc_hash::FxBuildHasher.hash_one(crate::def_path(decls, fns, d))
+        });
+        self.fns.reserve(items);
+        self.decls.reserve(items);
         for (m, module) in self.modules.iter().enumerate().skip(self.library_modules) {
+            let mut module_path = None;
             for (i, item) in module.syntax.items().enumerate() {
                 let root = item.tree.node(item.root);
                 let Some(name) = root.token else { continue };
@@ -557,10 +569,17 @@ impl Program<'_> {
                     }
                     continue;
                 }
-                let Some(definition) = self.index.definition(module.id, item.symbol(name)) else {
+                let name = item.symbol(name);
+                let Some(definition) = self.index.definition(module.id, name) else {
                     continue;
                 };
-                let path = self.index.definition_path(definition);
+                let module_path =
+                    module_path.get_or_insert_with(|| self.index.module_path(module.id));
+                let path = DefPath(ItemPath {
+                    package: module_path.package.clone(),
+                    modules: module_path.modules.clone(),
+                    name: self.index.symbols.text(name).into(),
+                });
                 let site = Site {
                     module: module.id,
                     source: Some(module.source),
@@ -677,7 +696,7 @@ impl Program<'_> {
                             .find(|&c| item.tree.node(c).kind == NodeKind::Block);
                         self.fns.push(FnDecl {
                             is_test,
-                            path: path.clone(),
+                            path,
                             result_site: site,
                             site,
                             at,
@@ -694,7 +713,7 @@ impl Program<'_> {
                             drop_of: None,
                             clone_of: None,
                         });
-                        self.by_path.entry(path).or_insert(Def::Fn(id));
+                        self.add_path(Def::Fn(id));
                         self.by_definition[definition.0 as usize] = Some(Def::Fn(id));
                         continue;
                     }
@@ -742,7 +761,7 @@ impl Program<'_> {
                 };
                 let structural = is_core_prelude(&path, &["Option", "Result"]);
                 self.decls.push(TypeDecl {
-                    path: path.clone(),
+                    path,
                     site,
                     at,
                     repr,
@@ -764,7 +783,7 @@ impl Program<'_> {
                     }),
                     summary: Summary::default(),
                 });
-                self.by_path.entry(path).or_insert(Def::Type(id));
+                self.add_path(Def::Type(id));
                 self.by_definition[definition.0 as usize] = Some(Def::Type(id));
             }
         }
@@ -1505,8 +1524,8 @@ impl Program<'_> {
         }
         let arg_tys: Vec<TyId> = args.iter().map(|a| a.0).collect();
         let role = d.role;
-        if let Some(marker) = crate::foreign::Marker::of(d)
-            && let [ty] = arg_tys.as_slice()
+        if let [ty] = arg_tys.as_slice()
+            && let Some(marker) = crate::foreign::Marker::of(d)
         {
             self.pending.push(Pending::ForeignMarker {
                 marker,

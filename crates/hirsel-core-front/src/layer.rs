@@ -314,7 +314,7 @@ impl<'a> Program<'a> {
             by_path: {
                 // The program's map has no order; the record's rows are sorted
                 // by path, as a published image map's are.
-                let mut rows: Vec<_> = self.by_path.iter().map(|(p, d)| (p.clone(), *d)).collect();
+                let mut rows: Vec<_> = self.own_paths().map(|(p, d)| (p.clone(), d)).collect();
                 rows.sort_unstable_by(|a, b| a.0.cmp(&b.0));
                 rows
             },
@@ -398,7 +398,9 @@ impl<'a> Program<'a> {
         d.core_operations
             .into_iter()
             .for_each(|r| p.core_operations.push(r));
-        p.by_path = d.by_path.into_iter().collect();
+        for (_, def) in d.by_path {
+            p.add_path(def);
+        }
         p.alias_state = d.alias_state;
         // PROG-4 runs again: its reference rule reads every item's resolved
         // names, bodies included, so it is not a function of the shape. It also
@@ -413,7 +415,7 @@ impl<'a> Program<'a> {
         fn rows<T: std::fmt::Debug>(rows: impl Iterator<Item = T>) -> Vec<String> {
             rows.map(|r| format!("{r:?}")).collect()
         }
-        let mut by_path = rows(self.by_path.iter());
+        let mut by_path = rows(self.own_paths());
         by_path.sort();
         vec![
             (

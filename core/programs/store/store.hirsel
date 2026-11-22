@@ -1514,16 +1514,9 @@ fn settle_draft[R, A](mut db: Db, i: u64, take ran: Ran[R, A]) -> Result[Admitte
     settled.live = int.saturating_add(db.resident, added)
     if let Some(take frame) = replace(mut settled.frame, None) {
         let mut raw = take frame
-        let context = DiskContext(store: db.store, role: 2, seq: db.file_seq)
-        let checked = disk_allocation(scoped fn() -> Result[u64, Error] {
-            capacity(disk_check(context, db.file_end, list.slice(raw, 0, 8), list.slice(raw, 16, list.len(raw))))
-        })
-        let checksum = match take checked {
-            Ok(sum) => sum,
-            Error(Full(Allocation(c))) => return Ok(OverLimit(take settled, Allocation(c))),
-            Error(take problem) => return Error(take problem),
+        if let Error(c) = seal_frame(mut raw, DiskContext(store: db.store, role: 2, seq: db.file_seq), db.file_end) {
+            return Ok(OverLimit(take settled, Allocation(c)))
         }
-        list.set_word_le(mut raw, 8, checksum)
         settled.frame = Some(take raw)
     }
     if over_bound(db, settled) {
@@ -2773,7 +2766,7 @@ fn encode_frame(ci: CallInfo, ops: List[DataOp], streams: List[DataOp], call: Op
         }
     }
     let slots = data_order(ops)?
-    let mut out: Bytes = list.with_capacity(16 + size)
+    let mut out: Bytes = list.with_capacity(16 + size + BINDING_BYTES)
     le(mut out, 0x0011, 2)?
     le(mut out, 1, 2)?
     le(mut out, size, 4)?
@@ -2784,9 +2777,7 @@ fn encode_frame(ci: CallInfo, ops: List[DataOp], streams: List[DataOp], call: Op
     le(mut out, sections, 1)?
     if data { encode_data_ops(mut out, ops, slots)? }
     if stream { encode_stream_ops(mut out, streams, call, settlement)? }
-    let context = DiskContext(store: ci.id.store, role: 2, seq: seq)
-    let seal = disk_check(context, offset, list.slice(out, 0, 8), list.slice(out, 16, list.len(out)))?
-    list.set_word_le(mut out, 8, seal)
+    seal_frame(mut out, DiskContext(store: ci.id.store, role: 2, seq: seq), offset)?
     Ok(take out)
 }
 
@@ -8035,17 +8026,43 @@ fn disk_fault(file: String, at: u64, why: Why) -> Error {
     Corrupt(Fault(file: take name, offset: at, why: why))
 }
 
+// Every check starts with the store, file role, file sequence and offset.
+const BINDING_BYTES: u64 = 33
+
+fn put_binding(mut out: Bytes, ctx: DiskContext, offset: u64) -> Result[(), Capacity] {
+    le(mut out, ctx.store.hi, 8)?
+    le(mut out, ctx.store.lo, 8)?
+    le(mut out, int.widen(ctx.role), 1)?
+    le(mut out, ctx.seq, 8)?
+    le(mut out, offset, 8)
+}
+
 fn disk_check_start(ctx: DiskContext, offset: u64, head: Bytes) -> Result[std.check.Xxh3, Capacity] {
-    let mut binding: Bytes = list.with_capacity(33)
-    le(mut binding, ctx.store.hi, 8)?
-    le(mut binding, ctx.store.lo, 8)?
-    le(mut binding, int.widen(ctx.role), 1)?
-    le(mut binding, ctx.seq, 8)?
-    le(mut binding, offset, 8)?
+    let mut binding: Bytes = list.with_capacity(BINDING_BYTES)
+    put_binding(mut binding, ctx, offset)?
     let mut state = std.check.start()
-    std.check.add(mut state, binding, 0, 33)
+    std.check.add(mut state, binding, 0, BINDING_BYTES)
     std.check.add(mut state, head, 0, 8)
     Ok(take state)
+}
+
+// Writes the check of a frame laid out as head[0..8], check[8..16] and
+// payload[16..]. The binding goes past the payload, into capacity the caller
+// reserved, and is hashed from there, so sealing allocates nothing and needs no
+// allocation isolation when a commit seals its frame at the file end.
+fn seal_frame(mut out: Bytes, ctx: DiskContext, offset: u64) -> Result[(), Capacity] {
+    let end = list.len(out)
+    if list.capacity(out) - end < BINDING_BYTES {
+        fail("store: frame has no room for its check binding")
+    }
+    put_binding(mut out, ctx, offset)?
+    let mut state = std.check.start()
+    std.check.add(mut state, out, end, end + BINDING_BYTES)
+    std.check.add(mut state, out, 0, 8)
+    std.check.add(mut state, out, 16, end)
+    list.truncate(mut out, end)
+    list.set_word_le(mut out, 8, std.check.finish(state))
+    Ok(())
 }
 
 fn disk_check(ctx: DiskContext, offset: u64, head: Bytes, payload: Bytes) -> Result[u64, Capacity] {
@@ -8055,14 +8072,13 @@ fn disk_check(ctx: DiskContext, offset: u64, head: Bytes, payload: Bytes) -> Res
 }
 
 fn disk_seal(ctx: DiskContext, offset: u64, kind: u16, flags: u16, payload: Bytes) -> Result[Bytes, Capacity] {
-    let mut out: Bytes = list.with_capacity(16 + list.len(payload))
+    let mut out: Bytes = list.with_capacity(16 + list.len(payload) + BINDING_BYTES)
     le(mut out, int.widen(kind), 2)?
     le(mut out, int.widen(flags), 2)?
     le(mut out, list.len(payload), 4)?
     le(mut out, 0, 8)?
     list.append(mut out, payload)
-    let checksum = disk_check(ctx, offset, list.slice(out, 0u64, 8u64), payload)?
-    list.set_word_le(mut out, 8, checksum)
+    seal_frame(mut out, ctx, offset)?
     Ok(take out)
 }
 
@@ -8391,7 +8407,7 @@ fn disk_put_name(mut out: Bytes, name: String) -> Result[(), Capacity] {
 
 fn encode_fork(context: DiskContext, offset: u64, head: Head) -> Result[Bytes, Capacity] {
     let size = 18 + string.byte_len(head.name)
-    let mut out: Bytes = list.with_capacity(16 + size)
+    let mut out: Bytes = list.with_capacity(16 + size + BINDING_BYTES)
     le(mut out, 0x0013, 2)?
     le(mut out, 1, 2)?
     le(mut out, size, 4)?
@@ -8400,8 +8416,7 @@ fn encode_fork(context: DiskContext, offset: u64, head: Head) -> Result[Bytes, C
     le(mut out, int.widen(head.parent), 4)?
     le(mut out, head.forked_at, 8)?
     disk_put_name(mut out, head.name)?
-    let checksum = disk_check(context, offset, list.slice(out, 0, 8), list.slice(out, 16, list.len(out)))?
-    list.set_word_le(mut out, 8, checksum)
+    seal_frame(mut out, context, offset)?
     Ok(take out)
 }
 

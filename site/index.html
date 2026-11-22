@@ -82,7 +82,7 @@ header .gh:active svg{transform:scale(.92);transition-duration:var(--t-press)}
 
 .panel{position:fixed;left:max(48px,var(--sal));top:50%;transform:translateY(-50%);width:340px;z-index:2}
 .panel h2{margin:0;font:400 31px/1.1 "Archivo Black","Arial Black",Inter,system-ui,sans-serif;font-synthesis:none;letter-spacing:-.025em;text-wrap:balance}
-.panel .body{margin:20px 0 0;font-size:16px;line-height:1.58;color:#2b2a26;max-width:34ch;text-wrap:pretty}
+.panel .body{margin:0;font-size:16px;line-height:1.58;color:#2b2a26;max-width:34ch;text-wrap:pretty}
 .panel .body p{margin:0}
 .panel .body .half{margin-top:12px}
 .panel .body .half b{font-weight:600;color:var(--ink);text-transform:capitalize}
@@ -94,19 +94,34 @@ header .gh:active svg{transform:scale(.92);transition-duration:var(--t-press)}
 .det button:hover,.det button:focus-visible{color:var(--ink);border-bottom-color:var(--ink)}
 .det button:hover svg,.det button:focus-visible svg{transform:rotate(-60deg)}
 /* the deep dive: closed, one more quiet row like Replay; open, the property as Hirsel source on oat */
-.deep{padding-top:14px}
+/* In words, in code: two readings of one slot. Both stand in the same grid cell, so the slot is
+   always as tall as the taller of the two and switching moves nothing; only opacity changes. The
+   outgoing reading leaves quickly, the incoming one follows a beat behind, so they never mix. */
+.slot{display:grid;margin-top:20px}
+.slot>*{grid-area:1/1;min-width:0}
+.panel .body,.panel .code{transition:opacity 120ms var(--ease),visibility 0s linear 120ms}
+.panel.code-on .body,.panel:not(.code-on) .code{opacity:0;visibility:hidden}
+.panel:not(.code-on) .body,.panel.code-on .code{transition:opacity 200ms var(--ease) 70ms,visibility 0s}
+.deep{display:flex;gap:18px;padding-top:14px}
 .det:not([hidden])+.deep{padding-top:10px}
-.deep>button{display:inline-flex;align-items:center;gap:7px;font-size:14px;font-weight:500;color:var(--mute);border-bottom:1px solid var(--rule);padding-bottom:1px;transition:color var(--t-state) var(--ease),border-color var(--t-state) var(--ease)}
-.deep>button:hover,.deep>button:focus-visible,.deep>button[aria-expanded="true"]{color:var(--ink);border-bottom-color:var(--ink)}
-.deep>button svg{width:9px;height:9px;flex:none;transition:transform var(--t-state) var(--ease)}
-.deep>button[aria-expanded="true"] svg{transform:rotate(90deg)}
-.code{margin-top:12px;padding:10px 12px 11px;background:var(--ground);border-radius:6px;overflow:hidden}
-.code pre{margin:0;font:400 11.5px/1.6 ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,"DejaVu Sans Mono","Liberation Mono",monospace;color:var(--ink);white-space:pre-wrap;overflow-wrap:anywhere;tab-size:2}
-/* a line too long for the column wraps under itself, so every line still starts flush */
-.code pre span{display:block;padding-left:2ch;text-indent:-2ch}
-.code pre .no{color:var(--red)}
+.deep button{position:relative;font-size:14px;font-weight:500;color:var(--mute);padding:3px 0 4px;transition:color var(--t-state) var(--ease)}
+.deep button::after{content:"";position:absolute;left:0;right:0;bottom:0;height:1.5px;background:currentColor;transform:scaleX(0);transform-origin:left;opacity:.35;transition:transform var(--t-state) var(--ease),opacity var(--t-state) var(--ease)}
+.deep button:hover,.deep button:focus-visible,.deep button[aria-pressed="true"]{color:var(--ink)}
+.deep button:hover::after,.deep button:focus-visible::after{transform:scaleX(1)}
+.deep button[aria-pressed="true"]::after{transform:scaleX(1);opacity:1}
+.deep button[aria-pressed="true"]{cursor:default}
+/* the snippet: set in the page's own ink on the cream, no box. Keywords carry weight, comments and
+   prompts step back to the muted grey, the one refusal or failure is the hill's red. Lines keep
+   their exact spacing; a size is fitted so code lines hold whole, and only a line still too long
+   breaks, at a space, under a hanging indent. */
+.slot>.body,.code{align-self:start;overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:var(--rule) transparent}
+.slot>.more{-webkit-mask-image:linear-gradient(#000 calc(100% - 28px),transparent);mask-image:linear-gradient(#000 calc(100% - 28px),transparent)}
+.code pre{margin:0;font:400 13px/1.62 ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,"DejaVu Sans Mono","Liberation Mono",monospace;color:var(--ink);tab-size:2;font-variant-ligatures:none}
+.code pre>span{display:block;white-space:pre-wrap;overflow-wrap:normal;word-break:normal;padding-left:2ch;text-indent:-2ch}
+.code .k{font-weight:600}
+.code .c,.code .p{color:var(--mute)}
+.code pre .no,.code pre .no *{color:var(--red)}
 .code pre ::selection{background:rgba(203,39,31,.18)}
-.panel.open{overflow:auto;overscroll-behavior:contain}
 .walk{display:flex;justify-content:space-between;gap:16px;margin-top:28px;padding-top:16px;border-top:1px solid var(--rule);font-size:14px;font-weight:500}
 .walk button{color:var(--mute);transition:color var(--t-state) var(--ease)} .walk button:hover,.walk button:focus-visible{color:var(--ink)}
 .walk .ar{display:inline-block;font-style:normal;transition:transform var(--t-state) var(--ease)}
@@ -148,12 +163,15 @@ header .gh:active svg{transform:scale(.92);transition-duration:var(--t-press)}
   .land .in::after{content:"";position:absolute;inset:-10px -12px -8px}
   .panel{left:max(16px,var(--sal));right:max(16px,var(--sar));top:auto;bottom:calc(var(--bar) + var(--sab) + 12px);transform:none;width:auto;max-height:52vh;overflow:auto;overscroll-behavior:contain}
   .panel h2{font-size:24px}
-  .panel .body{margin-top:10px;font-size:15px;line-height:1.5;max-width:none}
+  .slot{margin-top:10px}
+  .panel .body{font-size:15px;line-height:1.5;max-width:none}
   .panel .body .half{margin-top:8px}
   .det{margin-top:8px}
-  .deep{padding-top:8px}
+  .deep{padding:8px 0 6px;gap:22px}
   .det:not([hidden])+.deep{padding-top:6px}
-  .code{margin-top:10px}
+  /* a thumb-sized target round each word, without moving the row */
+  .deep button::before{content:"";position:absolute;inset:-12px -11px -6px}
+  .code pre{line-height:1.55}
   .walk{display:none}
 }
 /* a phone walks the hill from the bottom, under the thumb: back, where you are (which opens the
@@ -222,7 +240,7 @@ header .menu:active{background:rgba(17,17,15,.06)}
   /* no travel: state still changes colour and weight, nothing slides or turns */
   header .strip button::after{transition:opacity var(--t-state) var(--ease)}
   .land .in span,.walk .ar,header .gh svg,.det button svg,.bar .ar{transform:none!important}
-  .deep>button svg{transition:none}
+  .panel .body,.panel .code,.panel:not(.code-on) .body,.panel.code-on .code{transition:none}
   .list,.list:not([open]){transform:none;transition:opacity var(--t-state) var(--ease),overlay var(--t-state) allow-discrete,display var(--t-state) allow-discrete}
   .list:not([open]){opacity:0}
   @starting-style{.list[open]{opacity:0}}
@@ -330,14 +348,17 @@ html,body{height:auto;overflow:auto}
 
 <section class="panel" id="panel" aria-live="polite" hidden>
   <h2 id="pTitle"></h2>
-  <div class="body" id="pBody"></div>
+  <div class="slot" id="slot">
+    <div class="body" id="pBody"></div>
+    <div class="code" id="code" role="region" aria-label="In code"><pre id="codeTxt"></pre></div>
+  </div>
   <div class="det" id="det" hidden>
     <!-- On the real site the run could be streamed over SSE from a seeded simulation on the server. -->
     <button id="replayBtn"><svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2.75 8a5.25 5.25 0 1 0 1.6-3.78"/><path d="M2.6 1.9v2.9h2.9"/></svg>Replay the run</button>
   </div>
-  <div class="deep" id="deep">
-    <button id="codeBtn" aria-expanded="false" aria-controls="code">In code<svg viewBox="0 0 10 10" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 2 6.5 5l-3 3"/></svg></button>
-    <div class="code" id="code" role="region" aria-labelledby="codeBtn" hidden><pre id="codeTxt"></pre></div>
+  <div class="deep" id="deep" role="group" aria-label="Read this">
+    <button id="wordsBtn" data-r="words" aria-pressed="true" aria-controls="pBody">In words</button>
+    <button id="codeBtn" data-r="code" aria-pressed="false" aria-controls="code">In code</button>
   </div>
   <div class="walk">
     <button id="prevBtn"><i class="ar" aria-hidden="true">&larr;</i> <span></span></button>
@@ -664,9 +685,8 @@ function geom(view, pe) {
   pe = pe || $('panel'); const by = g.rTo + RIDGE_B() + 12;
   pe.style.top = STACK ? '' : Math.round(H / 2) + 'px'; pe.style.maxHeight = '';
   const pn = pe.getBoundingClientRect(); g.pn = pn;
-  /* side by side, the scene balances the words alone: the In code row and its snippet hang below
-     them and move nothing. Stacked, the scene stands above the whole panel, open or closed. */
-  g.ph = STACK ? pn.height : pn.height - pe.querySelector('.deep').getBoundingClientRect().height;
+  /* the panel is one height in words or in code (its slot holds the taller of the two) */
+  g.ph = pn.height;
   if (STACK) { const m = MOB ? 16 : 32; g.box = { x: m, y: by, w: W - 2 * m, h: pn.top - 14 - by }; }
   else { const x0 = pn.right + (W <= 1000 ? 44 : 64); g.box = { x: x0, y: by, w: W - 48 - x0, h: H - 52 - by }; }
   return g;
@@ -688,7 +708,7 @@ function ghostOf(v) {
     ghost.querySelectorAll('[id]').forEach(el => el.removeAttribute('id'));
     ghost.setAttribute('aria-hidden', 'true'); ghost.inert = true; ghost.style.visibility = 'hidden';
     ghost.querySelectorAll('*').forEach(el => { el.style.opacity = el.style.transform = ''; });
-    ghost.classList.remove('open'); ghost.style.maxHeight = '';
+    ghost.style.maxHeight = '';
     document.body.append(ghost);
   }
   ghost.hidden = false; fillPanel(ghost, v);
@@ -711,12 +731,10 @@ function skyNow() {
   ghost.hidden = true;
   return SKY = Math.max(B.minSky, Math.round(sky));
 }
-/* side by side: the words' top edge stays where it was without the In code row, so the row and an
-   open snippet hang below them. Centred on the same middle as before while the whole panel fits,
-   which keeps the closed panel on the very pixels it had; pinned and scrolling once it does not. */
+/* side by side: the panel stands on the scene's middle while it fits; pinned and scrolling once it does not */
 function placePanel(pe) {
-  const mid = +pe.dataset.mid, ph = +pe.dataset.ph, full = ph + pe.querySelector('.deep').getBoundingClientRect().height, top = mid - ph / 2;
-  if (top + full <= H - 16) { pe.style.top = mid + 'px'; pe.style.transform = 'translateY(calc(-50% + ' + (full - ph) / 2 + 'px))'; pe.style.maxHeight = ''; }
+  const mid = +pe.dataset.mid, ph = +pe.dataset.ph, top = Math.max(16, mid - ph / 2);
+  if (top + ph <= H - 16) { pe.style.top = mid + 'px'; pe.style.transform = ''; pe.style.maxHeight = ''; }
   else { pe.style.top = top + 'px'; pe.style.transform = 'none'; pe.style.maxHeight = (H - top - 16) + 'px'; }
 }
 /* place a view under that ridge: the text column and the scene share one middle, set halfway down
@@ -734,8 +752,6 @@ function fit(v, g, sc) {
       sc = SC[v](g); sc.g = g; continue;
     }
     const M = rTo + RIDGE_B() + Math.max(0, room / 2) + bd.Hc / 2;
-    /* the words keep the middle they had; the panel's top is pinned there, so an open snippet
-       grows down, and scrolls inside the panel once it reaches the foot of the window */
     if (!STACK) { pe.dataset.mid = Math.round(M); pe.dataset.ph = g.ph; placePanel(pe); }
     g = { ...g, rTo, box: { ...b, y: b.y + M - (t0 + t1) / 2 } }; sc = SC[v](g); sc.g = g; return sc;
   }
@@ -1586,7 +1602,7 @@ function setView(v, first) {
   if (first) {
     const lk = document.querySelector('header .links'), wk = $('panel').querySelector('.walk');
     if (v === 'hill') textIn([...$('land').children, lk], [8, 36, 42, 54, 60]);
-    else textIn([$('wm'), $('idx'), lk, $('pTitle'), $('pBody'), $('det'), $('deep'), wk, $('bar')], [8, 12, 16, 30, 35, 40, 42, 45, 45]);
+    else textIn([$('wm'), $('idx'), lk, $('pTitle'), $('slot'), $('det'), $('deep'), wk, $('bar')], [8, 12, 16, 30, 35, 40, 42, 45, 45]);
   }
   if (instant) { pan = panB; rb = rbB; }
   if (!instant) plan();
@@ -1648,13 +1664,13 @@ function advance(now) {
 }
 function frame() { lastFrame = performance.now(); advance(lastFrame); requestAnimationFrame(frame); }
 /* watchdog: where frames are not being produced (headless capture), keep the fixed-step clock going */
-setInterval(() => { const now = performance.now(); if (!reduced && !document.hidden && now - lastFrame > 60) advance(now); }, 33);
+if (!reduced) setInterval(() => { const now = performance.now(); if (!document.hidden && now - lastFrame > 60) advance(now); }, 33);
 /* a hidden tab draws nothing; on return the clock picks up where it was, not where the wall clock is */
 document.addEventListener('visibilitychange', () => { last = null; acc = 0; });
 
 /* ---------- page ---------- */
 const $ = id => document.getElementById(id);
-/* In code: closed on every load, then the reader's choice holds from view to view */
+/* In words or in code: words on every load, then the reader's choice holds from view to view */
 let codeOpen = false;
 const strip = $('strip'), idxBtns = [...strip.querySelectorAll('button')], list = $('list'), listBtns = [...list.querySelectorAll('ol button')], ticks = [...$('ticks').children];
 /* words arrive as the flock settles, on the flock's own tick clock: the old text goes at once and
@@ -1691,12 +1707,56 @@ function fillPanel(root, v) {
   wb[1].hidden = !nx; wb[1].querySelector('span').textContent = nx ? COPY[nx][0] : '';
   wb[2].hidden = !!nx;
   q('.det').hidden = v !== 'deterministic' || reduced;
-  /* the snippet: one line per span, set as text; the stand-in always measures it closed */
-  const k = CODE[v], open = codeOpen && root === $('panel'), pre = q('pre');
-  pre.replaceChildren(...k.src.map((l, j) => { const sp = document.createElement('span'); sp.textContent = l; if (k.no.includes(j)) sp.className = 'no'; return sp; }));
-  q('.code').hidden = !open; q('.deep>button').setAttribute('aria-expanded', open ? 'true' : 'false');
-  root.classList.toggle('open', open);
+  /* the snippet: one line per span, its tokens set as text; both readings are always laid out */
+  const k = CODE[v], pre = q('pre');
+  pre.replaceChildren(...k.src.map((l, j) => { const sp = document.createElement('span'); sp.append(...codeLine(l)); if (k.no.includes(j)) sp.className = 'no'; return sp; }));
+  fitCode(root);
+  root.classList.toggle('code-on', codeOpen);
+  root.querySelectorAll('.deep button').forEach(b => b.setAttribute('aria-pressed', (b.dataset.r === 'code') === codeOpen ? 'true' : 'false'));
 }
+/* quiet colouring, in the page's own three inks: keywords weighted, comments and shell prompts
+   muted. A source line is split, never rewritten: its pieces join back to exactly the line. */
+const KW = new Set(['fn', 'let', 'take', 'type', 'region', 'bound', 'match', 'bytes', 'send']);
+function codeLine(l) {
+  const out = [], put = (t, c) => { if (!t) return; if (!c) { out.push(document.createTextNode(t)); return; } const e = document.createElement('span'); e.className = c; e.textContent = t; out.push(e); };
+  let src = l, tail = '';
+  if (l.startsWith('$ ')) {
+    const h = l.indexOf(' #'); put('$', 'p');
+    const cmd = h > 0 ? l.slice(1, h) : l.slice(1); put(cmd); if (h > 0) put(l.slice(h), 'c');
+    return out;
+  }
+  const c = l.indexOf('//'); if (c >= 0) { src = l.slice(0, c); tail = l.slice(c); }
+  for (const m of src.split(/(\b[a-z]+\b)/)) put(m, KW.has(m) ? 'k' : '');
+  put(tail, 'c');
+  return out;
+}
+/* one mono size for every snippet at this width: as large as the base while the longest code line
+   holds whole, down to a floor; a line still too long (a transcript's output) breaks at a space.
+   Stacked, a snippet taller than the room the panel has scrolls inside itself, under a fade. */
+const CODE_LONGEST = Math.max(...Object.values(CODE).flatMap(k => k.src.map(l => l.length).filter(n => n <= 48)));
+let codeFit = '';
+function fitCode(root) {
+  const box = root.querySelector('.code'), pre = box.firstChild, base = MOB ? 12 : 13, floor = 11;
+  const w = root.querySelector('.slot').clientWidth, key = w + ':' + base;
+  if (!w) return;
+  if (codeFit.split('|')[0] !== key) {
+    pre.style.fontSize = '100px'; const probe = document.createElement('span');
+    probe.style.cssText = 'position:absolute;visibility:hidden;white-space:pre'; probe.textContent = 'x'.repeat(40); pre.append(probe);
+    const adv = probe.getBoundingClientRect().width / 40 / 100; probe.remove();
+    codeFit = key + '|' + Math.max(floor, Math.min(base, Math.floor(w / (CODE_LONGEST * adv) * 4) / 4));
+  }
+  pre.style.fontSize = codeFit.split('|')[1] + 'px';
+  const reads = [root.querySelector('.body'), box];
+  reads.forEach(el => { el.style.maxHeight = ''; });
+  /* stacked, the panel has a ceiling: a reading taller than the room left under the heading and
+     the switch scrolls inside its slot, so the heading never scrolls away */
+  if (STACK && root === $('panel')) {
+    const cap = parseFloat(getComputedStyle(root).maxHeight), over = cap ? root.scrollHeight - cap : 0;
+    if (over > 0) { const room = root.querySelector('.slot').offsetHeight - over; reads.forEach(el => { el.style.maxHeight = room + 'px'; }); }
+  }
+  reads.forEach(fadeMore);
+}
+function fadeMore(el) { el.classList.toggle('more', el.scrollTop + el.clientHeight < el.scrollHeight - 1); }
 function renderDom(v, quiet) {
   const hill = v === 'hill', i = VIEWS.indexOf(v), c = COPY[v], wasHill = $('panel').hidden;
   $('wm').hidden = hill; $('idx').hidden = hill; $('land').hidden = !hill; $('panel').hidden = hill;
@@ -1714,7 +1774,7 @@ function renderDom(v, quiet) {
   $('det').hidden = v !== 'deterministic' || reduced;
   if (quiet) return;
   if (hill) textIn([...$('land').children], 26, 5);
-  else textIn([...(wasHill ? [$('wm'), $('idx')] : []), $('pTitle'), $('pBody'), $('det'), $('deep'), $('panel').querySelector('.walk'), ...(wasHill ? [$('bar')] : [])], view === null || arr >= 0 ? 20 : 30, 5);
+  else textIn([...(wasHill ? [$('wm'), $('idx')] : []), $('pTitle'), $('slot'), $('det'), $('deep'), $('panel').querySelector('.walk'), ...(wasHill ? [$('bar')] : [])], view === null || arr >= 0 ? 20 : 30, 5);
 }
 function go(d) { setView(VIEWS[Math.max(0, Math.min(VIEWS.length - 1, VIEWS.indexOf(view) + d))]); }
 
@@ -1768,43 +1828,18 @@ $('replayBtn').addEventListener('click', () => {
   /* the mark turns back once, as the run does */
   const ic = $('replayBtn').querySelector('svg'); if (ic && ic.animate) ic.animate([{ transform: 'rotate(0)' }, { transform: 'rotate(-360deg)' }], { duration: 700, easing: EASE });
 });
-/* In code: on a side-by-side layout the snippet unrolls below the words and nothing else moves;
-   stacked, the scene above walks to the room the panel leaves it */
-let codeAnim = null;
-$('codeBtn').addEventListener('click', () => {
-  codeOpen = !codeOpen;
-  const pe = $('panel'), box = $('code'), side = !STACK && !reduced && !!box.animate;
-  if (codeAnim) { codeAnim.cancel(); codeAnim = null; }
-  renderDom(view, true);
-  if (STACK) relayout();
-  /* while the box unrolls or folds, the words hold their top edge; once it rests, the panel is placed */
-  else if (side) { const top = +pe.dataset.mid - pe.dataset.ph / 2; pe.style.top = top + 'px'; pe.style.transform = 'none'; pe.style.maxHeight = (H - top - 16) + 'px'; }
-  else placePanel(pe);
-  /* a panel too short for the snippet scrolls to it, never past the row that opened it */
-  if (codeOpen && pe.scrollHeight > pe.clientHeight + 1) {
-    const btn = $('codeBtn'), to = Math.min(box.offsetTop + box.offsetHeight + 12 - pe.clientHeight, btn.offsetTop - 8);
-    if (to > pe.scrollTop) pe.scrollTo({ top: to, behavior: reduced ? 'auto' : 'smooth' });
-  }
-  if (reduced || !box.animate) return;
-  const fold = [{ height: 0, opacity: 0, marginTop: 0, paddingTop: 0, paddingBottom: 0 }];
-  if (codeOpen) {
-    codeAnim = box.animate(STACK ? [{ opacity: 0 }, { opacity: 1 }] : fold.concat({ height: box.offsetHeight + 'px', opacity: 1 }), { duration: 260, easing: EASE });
-  } else if (side) {
-    box.hidden = false;
-    codeAnim = box.animate([{ height: box.offsetHeight + 'px', opacity: 1 }].concat(fold), { duration: 200, easing: EASE });
-  }
-  if (codeAnim) codeAnim.onfinish = () => { codeAnim = null; if (!codeOpen) box.hidden = true; if (!STACK) placePanel(pe); };
+/* In words, in code: the same slot read two ways; switching fades one reading for the other and
+   moves nothing, so neither the panel nor the flock changes place */
+$('deep').addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  const on = b.dataset.r === 'code'; if (on === codeOpen) return;
+  codeOpen = on; const pe = $('panel'); pe.classList.toggle('code-on', on);
+  pe.querySelectorAll('.deep button').forEach(x => x.setAttribute('aria-pressed', x === b ? 'true' : 'false'));
 });
-/* re-place the current view for a panel that changed height: the flock walks to its new ground */
-function relayout() {
-  if (reduced) { rebuild(); return; }
-  if (tr < 1) { refit = true; return; }
-  const keepT = sT;
-  fading = [{ sc: scene, t: sT, g: 1, o: 1 }];
-  snap = rend.map(r => ({ ...r }));
-  scene = build(view); bindScene(scene, assign(scene, snap));
-  panA = pan; rbA = rb; panB = scene.g.pTo; rbB = scene.g.rTo; sT = keepT; tr = 0; plan();
-}
+let ptrFocus = null;
+$('panel').addEventListener('pointerdown', e => { ptrFocus = e.target.closest('button,a'); });
+$('panel').addEventListener('keydown', e => { if (e.key === 'Tab') ptrFocus = null; });
+[$('pBody'), $('code')].forEach(el => el.addEventListener('scroll', () => fadeMore(el), { passive: true }));
 addEventListener('hashchange', () => { const h = viewOf(location.hash.slice(1)); if (list.open) list.close(); if (VIEWS.includes(h)) setView(h); });
 addEventListener('keydown', e => {
   swiped = false;
@@ -1814,7 +1849,11 @@ addEventListener('keydown', e => {
     if (d) { e.preventDefault(); listBtns[(k + d + listBtns.length) % listBtns.length].focus(); }
     return;
   }
-  if (e.target.closest && e.target.closest('input,textarea')) return; if (e.key === 'ArrowRight') go(1); if (e.key === 'ArrowLeft') go(-1);
+  if (e.target.closest && e.target.closest('input,textarea')) return;
+  /* a panel control pressed with the pointer lets go of focus when the keys walk on, so the walk
+     does not light a keyboard ring on a button the reader never reached by keyboard */
+  if ((e.key === 'ArrowRight' || e.key === 'ArrowLeft') && ptrFocus && document.activeElement === ptrFocus) ptrFocus.blur();
+  if (e.key === 'ArrowRight') go(1); if (e.key === 'ArrowLeft') go(-1);
 });
 /* swipe: a sideways stroke walks one view, left on and right back, through the same go() as every
    other control. A stroke must commit sideways early (otherwise it is the panel's scroll), go far

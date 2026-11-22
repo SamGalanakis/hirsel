@@ -47,7 +47,8 @@ using hirsel_llvm::versionLoop;
 // Let LLVM use the checked end to discharge redundant guards first. A
 // surviving end check for adjacent offsets can use a length limit without
 // replacing checks that already share an end offset with the loop.
-static void fixedWidthChecks(Function &F) {
+extern "C" void hirsel_llvm_fixed_width_checks(LLVMValueRef Raw) {
+  auto &F = *unwrap<Function>(Raw);
   using namespace llvm::PatternMatch;
     for (BasicBlock &BB : F) {
       auto *Branch = dyn_cast<CondBrInst>(BB.getTerminator());
@@ -59,16 +60,19 @@ static void fixedWidthChecks(Function &F) {
       if (!match(Condition, m_c_And(Within, NoOverflow)) || End != Sum) continue;
 
       // InstCombine has flattened (base + start) + width. The two offsets
-      // still differ by one word, so their ordered range test can use start.
+      // differ by a positive constant. A defined start makes the original
+      // checked end equivalent to start <= length - width when length >= width.
       Value *Base;
       const APInt *StartOffset, *EndOffset;
       if (!match(End, m_Add(m_Value(Base), m_APInt(EndOffset))) ||
           !match(Start, m_NUWAddLike(m_Specific(Base), m_APInt(StartOffset))) ||
-          EndOffset->ule(*StartOffset) || *EndOffset - *StartOffset != 8)
+          EndOffset->ule(*StartOffset))
         continue;
+      APInt Delta = *EndOffset - *StartOffset;
+      if (Delta.ugt(64)) continue;
 
       IRBuilder<> B(Branch);
-      Value *Width = ConstantInt::get(End->getType(), 8);
+      Value *Width = ConstantInt::get(End->getType(), Delta);
       Value *HasWidth = B.CreateICmpUGE(Length, Width);
       Value *Limit = B.CreateSub(Length, Width);
       Branch->setCondition(B.CreateAnd(HasWidth, B.CreateICmpULE(Start, Limit)));
@@ -1696,7 +1700,7 @@ struct ReleaseTail {
   void run(Function &F) {
     Passes.run(F, FAM);
     FAM.invalidate(F, PreservedAnalyses::none());
-    fixedWidthChecks(F);
+    hirsel_llvm_fixed_width_checks(wrap(&F));
     finishReads(F, FAM, Clean);
     lowerX86IndexStrides(F);
     reuseStepFlags(F);

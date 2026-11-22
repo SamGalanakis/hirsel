@@ -242,7 +242,9 @@ allocator chunk size becomes a logical capacity (MEM-28).
 
 **R27.** A contained child process will be a separate kind of launch profile, one that the
 host confines to the profile's files, network and descendants and that is refused where the
-host cannot enforce it. *v1:* no profile is contained, and an `Exec` grant confers what its
+host cannot enforce it. It would also tear down every descendant, through containment the run
+owns and a child cannot leave, such as a delegated cgroup or a PID namespace, and confirm that
+the containment is empty before reporting completion. *v1:* no profile is contained, and an `Exec` grant confers what its
 programs can do ([EXEC-1](exec.md#exec-1-an-exec-grant-confers-what-its-programs-can-do-and-hirsel-does-not-confine-them));
 a contained kind adds a profile kind and changes nothing EXEC-1 to EXEC-8 specify.
 

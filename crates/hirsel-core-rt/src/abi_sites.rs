@@ -7,8 +7,8 @@ use hirsel_core_layout::source_positions;
 #[unsafe(export_name = "hirsel_core_relative_source_table_v3")]
 pub static RELATIVE_SOURCE_TABLE_V1: u8 = source_positions::TAG;
 
-#[unsafe(export_name = "hirsel_core_annex_source_table_v5")]
-pub static ANNEX_SOURCE_TABLE_V5: u8 = source_positions::POINTS_TAG;
+#[unsafe(export_name = "hirsel_core_annex_source_table_v6")]
+pub static ANNEX_SOURCE_TABLE_V6: u8 = source_positions::POINTS_TAG;
 
 #[repr(C)]
 pub struct SourceView {
@@ -28,7 +28,7 @@ impl SourceView {
 pub struct SourceFile {
     pub path: SourceView,
     pub source: SourceView,
-    /// The site word of this file's first byte; rows ascend.
+    /// The file's first site word, including any unbound ordinals; rows ascend.
     pub start: u64,
 }
 #[repr(C)]
@@ -43,7 +43,7 @@ pub struct SourceTable {
 /// The process is exclusively borrowed before run. A nonnull table, its arrays
 /// and file bytes remain immutable and pinned through reporting. Each relative
 /// range is within the allocation starting at `files`. Every nonzero
-/// cause site designates a UTF-8 boundary of a file in this linked table.
+/// cause site designates a bound ordinal or a UTF-8 boundary in a linked file.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_os_process_set_sources(
     process: *mut OsProcess,
@@ -77,7 +77,7 @@ pub(crate) unsafe fn format_site(site: u64, sources: *const SourceTable) -> Opti
         let (line, column) = if let Some(markers) = source.strip_prefix(&[source_positions::TAG]) {
             source_positions::position(markers, offset)
         } else if let Some(points) = source.strip_prefix(&[source_positions::POINTS_TAG]) {
-            source_positions::point_position(points, offset)
+            source_positions::point_position(points, offset)?
         } else {
             let prefix = &source[..offset];
             let line = prefix.iter().filter(|&&b| b == b'\n').count() + 1;

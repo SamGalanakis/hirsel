@@ -4,7 +4,16 @@ use object::{Object as _, ObjectSymbol as _};
 
 use hirsel_core_ir::source::{site_item_symbol, site_symbol};
 use object::ObjectSection as _;
-use std::{collections::HashSet, fs::File, path::PathBuf};
+use std::{
+    collections::{BTreeSet, HashSet},
+    fs::File,
+    path::PathBuf,
+};
+
+fn allocatable<'data>(section: &impl object::ObjectSection<'data>) -> bool {
+    matches!(section.flags(), object::SectionFlags::Elf { sh_flags, .. }
+        if sh_flags.0 & object::elf::SHF_ALLOC.0 != 0)
+}
 
 /// Keep the runtime binders used by the actual link inputs. The separate
 /// DWARF object is already bound against the complete source map.
@@ -20,9 +29,7 @@ pub(crate) fn retain_referenced(
         let cache = object::read::ReadCache::new(File::open(input)?);
         let object = object::File::parse(&cache).map_err(std::io::Error::other)?;
         for section in object.sections() {
-            if !matches!(section.flags(), object::SectionFlags::Elf { sh_flags, .. }
-                if sh_flags.0 & object::elf::SHF_ALLOC.0 != 0)
-            {
+            if !allocatable(&section) {
                 continue;
             }
             for (_, relocation) in section.relocations() {
@@ -64,6 +71,44 @@ pub(crate) fn retain_referenced(
         item.file = file_numbers[item.file as usize].expect("retained source file");
     }
     Ok(())
+}
+
+/// Site relocations in a GC link with `--emit-relocs`. Absolute symbols
+/// themselves survive GC even when the last reference to one was discarded.
+pub(crate) fn live_site_words(bytes: &[u8]) -> Result<BTreeSet<u64>> {
+    let file = object::File::parse(bytes).map_err(error)?;
+    let mut live = BTreeSet::new();
+    for section in file.sections().filter(allocatable) {
+        for (_, relocation) in section.relocations() {
+            let object::RelocationTarget::Symbol(index) = relocation.target() else {
+                continue;
+            };
+            let symbol = file.symbol_by_index(index).map_err(error)?;
+            let name = symbol.name_bytes().map_err(error)?;
+            if site_item_symbol(name).is_none() {
+                continue;
+            }
+            let invalid = || {
+                format!(
+                    "linked site relocation against {} is not an absolute site word",
+                    String::from_utf8_lossy(name)
+                )
+            };
+            if symbol.section() != object::SymbolSection::Absolute
+                || relocation.kind() != object::RelocationKind::Absolute
+                || relocation.has_implicit_addend()
+            {
+                return Err(invalid());
+            }
+            let site = symbol
+                .address()
+                .checked_add_signed(relocation.addend())
+                .filter(|site| (1..hirsel_core_layout::source_positions::SITE_END).contains(site))
+                .ok_or_else(invalid)?;
+            live.insert(site);
+        }
+    }
+    Ok(live)
 }
 
 /// Each item's symbol is its first site word: its file's first site plus the

@@ -440,9 +440,10 @@ fn write_page_cut(d: Dir, id: StoreId, base: PageRetryBase, holders: List[HeldPa
     Ok(WrittenPageCut(layout: take cut, buffers: take buffers))
 }
 
-fn write_page_cut_with_relocation(d: Dir, id: StoreId, base: PageRetryBase, holders: List[HeldPage], installed: PagedLists, carried: List[u64], first_pack: u64, cap: u64, mut next_stamp: u64) -> Result[WrittenPageCut, Error] waits {
+fn prepare_page_cut[T](base: PageLocations, mut next_stamp: u64,
+    attempt: scoped fn(Map[u64, ()], Option[View[Log[bool]]], mut u64) -> Result[T, Error] waits) -> Result[T, Error] waits {
     let selected = disk_allocation(scoped fn() -> Result[Map[u64, ()], Error] {
-        Ok(relocation_ancestors(base.locations, moved_frames(base.locations, false)))
+        Ok(relocation_ancestors(base, moved_frames(base, false)))
     })
     let marks = match take selected {
         Ok(take ready) => take ready,
@@ -453,7 +454,7 @@ fn write_page_cut_with_relocation(d: Dir, id: StoreId, base: PageRetryBase, hold
         Ok(log.new())
     })
     if let Ok(take observed) = take observer {
-        let first = write_page_cut(d, id, base, holders, installed, carried, first_pack, cap, marks, Some(view observed), mut next_stamp)
+        let first = attempt(marks, Some(view observed), mut next_stamp)
         let relocated = log.finish(take observed)
         match take first {
             Ok(take cut) => return Ok(take cut),
@@ -465,7 +466,8 @@ fn write_page_cut_with_relocation(d: Dir, id: StoreId, base: PageRetryBase, hold
             Error(take problem) => return Error(take problem),
         }
     }
-    write_page_cut(d, id, base, holders, installed, carried, first_pack, cap, map.new(), None, mut next_stamp)
+    let _ = take marks
+    attempt(map.new(), None, mut next_stamp)
 }
 
 fn locate_page_cut(mut manifest: PageManifest, layout: PagedCutLayout, roots: List[PageRoots], next_stamp: u64, account: u64) {
@@ -544,7 +546,7 @@ fn check_paged_generation(d: Dir) -> Result[(), Error] waits {
     list.push(mut all, take roots)
     let base = page_retry_base(new_page_locations(), map.new(), holders, all)?
     let installed = PagedLists(packs: std.page.empty(0, 0, Unprefixed), retired: std.page.empty(0, 0, Unprefixed))
-    let written = write_page_cut_with_relocation(directory, id, base, holders, installed, list.new(), 1, 512, mut next_stamp)?
+    let written = write_page_cut(directory, id, base, holders, installed, list.new(), 1, 512, map.new(), None, mut next_stamp)?
     let WrittenPageCut(layout: take layout, buffers: take reserved) = take written
     let mut buffers = take reserved
     let mut manifest = page_manifest_empty()
@@ -606,6 +608,93 @@ fn law_leaf_cell(raw: Bytes, slot: u64) -> u64 {
     let slots = list.len(raw) - 2 * read_le(raw, 2, 2)
     let at = read_le(raw, slots + 2 * slot, 2)
     at + 2 + read_le(raw, at, 2)
+}
+
+// L41(vii). Three equal-sized blobs fit in one pack. Deleting two selects
+// the pack for relocation, but the mandatory layout keeps the last blob in it.
+@test
+fn disk_test_relocation_late_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let directory = disk_test_directory(d)
+    let mut options = defaults()
+    options.pack_bytes = 4096
+    let mut db = open(tasks, directory, c, r, options)?
+    let codec = std.codec.of_bytes()
+    let _ = create_table(mut db, spec("values", std.codec.key_u64(), codec))?
+    let t = table(mut db, "values", std.codec.key_u64(), codec)?
+    let old_blob_pack = db.disk[0u64].pages.next_pack
+    let initial = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+        for k in 1u64 .. 4 {
+            let mut value: Bytes = list.with_capacity(1024)
+            list.fill(mut value, 1024, int.truncate(k))
+            put(mut tx, t, k, value)?
+        }
+        Ok(())
+    })?
+    if let Committed(_) = initial {} else { return Error(Foreign) }
+    let _ = checkpoint(mut db)?
+    let (_, take old) = read_page_manifest_file(directory)?
+    let old_name = paged_pack_path(old_blob_pack)?
+    let original = disk_read_paged_file(directory, old_name, 4096)?
+    let payload = 1038u64 // 8 stamp bytes, 6 codec bytes and 1024 value bytes.
+    if list.len(original) != 72 + 3 * (16 + payload) { return Error(Foreign) }
+
+    let edited = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+        let _ = delete(mut tx, t, 2)?
+        let _ = delete(mut tx, t, 3)?
+        Ok(())
+    })?
+    if let Committed(_) = edited {} else { return Error(Foreign) }
+    let first_path = paged_pack_path(old.next_pack)?
+    let refused_watermarks: Log[u64] = log.new()
+    let _ = disk_cut_state(mut db, NoHolderChange,
+        scoped fn(mut raw: Bytes, context: DiskContext, fence: u32) -> Result[(), Error] waits {
+            let first = disk_read_paged_file(directory, first_path, 4096)?
+            if read_le(first, 72, 2) == 0x0022 {
+                // The optional blob has already been renamed. Cap the real
+                // MANIFEST checksum allocation for this layout only.
+                log.append(refused_watermarks, read_le(raw, 112, 8))
+                let refused = bound bytes 0 { seal_page_manifest_file(mut raw, context, fence) }
+                match take refused {
+                    Ok(Error(Full(Allocation(problem)))) => return Error(Full(Allocation(problem))),
+                    _ => return Error(Foreign),
+                }
+            }
+            seal_page_manifest_file(mut raw, context, fence)
+        })?
+    let watermarks = log.finish(take refused_watermarks)
+    if list.len(watermarks) != 1 { return Error(Foreign) }
+    close(take db)?
+
+    let raw = disk_read_paged_file(directory, "MANIFEST", 387)?
+    let (id, take published) = read_page_manifest_file(directory)?
+    if published.generation != old.generation + 1 || published.first_live != old.first_live + 1
+        || published.branches[0u64].version != old.branches[0u64].version + 1
+        || published.pack_root.stamp < watermarks[0u64] || published.next_stamp <= published.pack_root.stamp {
+        return Error(Foreign)
+    }
+    let replacement = disk_read_paged_file(directory, first_path, 4096)?
+    if read_le(replacement, 72, 2) != 0x0021 || disk_read_paged_file(directory, old_name, 4096)? != original {
+        return Error(Foreign)
+    }
+    let collection_map = law_pointed_payload(directory, raw, 274, 4096)?
+    let values = law_pointed_payload(directory, collection_map, law_leaf_cell(collection_map, 0) + 3, 4096)?
+    let cell = law_leaf_cell(values, 0)
+    if read_le(values, 2, 2) != 1 || values[cell] != 1 || read_le(values, cell + 25, 8) != old_blob_pack {
+        return Error(Foreign)
+    }
+    let checked = validate_page_manifest(directory, id, take published)?
+    let Some(blob_pack) = map.get(checked.inventory, old_blob_pack) else { return Error(Foreign) }
+    if blob_pack.class != 1 || blob_pack.frames != 3 || blob_pack.live != payload || blob_pack.payload_bytes != 3 * payload {
+        return Error(Foreign)
+    }
+    let reopened = open(tasks, directory, c, r, options)?
+    let held = snapshot(reopened)
+    let sh = shape(t)
+    let Some(value) = get(held, sh, 1)? else { return Error(Foreign) }
+    if list.len(value) != 1024 || value[0u64] != 1 || get(held, sh, 2)? != None || get(held, sh, 3)? != None {
+        return Error(Foreign)
+    }
+    close(take reopened)
 }
 
 fn check_blob_threshold(d: Dir, c: Clock, r: Random, tasks: Tasks, cutoff: u64) -> Result[(), Error] waits {

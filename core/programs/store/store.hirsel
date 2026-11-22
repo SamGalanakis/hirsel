@@ -559,7 +559,7 @@ fn this_open(db: Db, s: Snapshot) -> Result[(), Error] {
 // A cut-made operation reserves its holder storage before the cut and
 // changes the installed holder records only after publication.
 fn cut_install(mut db: Db, take planned: HolderDelta) -> Result[Ticket, Error] waits {
-    if is_disk(db) { return disk_cut_state(mut db, take planned) }
+    if is_disk(db) { return disk_cut_state(mut db, take planned, seal_page_manifest_file) }
     prepare_holder_slot(mut db, planned)?
     let proposed = disk_allocation(scoped fn() -> Result[State, Error] {
         capacity(state_with_delta(db, planned))
@@ -10111,7 +10111,8 @@ fn cut_participants(db: Db, delta: HolderDelta) -> Result[CutParticipants, Error
 }
 
 fn fill_cut_manifest(mut raw: Bytes, db: Db, delta: HolderDelta, generation: u64, seq: u64, prev_first: u64,
-    layout: PagedCutLayout, next_stamp: u64, account: u64) -> Result[(), Error] {
+    layout: PagedCutLayout, next_stamp: u64, account: u64,
+    seal: scoped fn(mut Bytes, DiskContext, u32) -> Result[(), Error] waits) -> Result[(), Error] waits {
     let tables = match delta { ReplaceMain(main, _) => main.tables, _ => db.next_table }
     let manifest = PageManifest(generation: generation, fence: db.fence, inline: db.heads[0u64].roots.collections.inline,
         next_stamp: next_stamp, next_branch: db.next_branch, next_table: tables, next_pack: layout.lists.run_packs.next_pack,
@@ -10140,7 +10141,7 @@ fn fill_cut_manifest(mut raw: Bytes, db: Db, delta: HolderDelta, generation: u64
     visit_cut_pins(db, delta, mut raw, scoped fn(mut buffer: Bytes, held: Pin) -> Result[(), Error] {
         append_page_manifest_pin(mut buffer, held.name, held.branch, held.version, published_page_roots(layout.locations, held.roots))
     })?
-    seal_page_manifest_file(mut raw, context, db.fence)
+    seal(mut raw, context, db.fence)
 }
 
 fn cut_retirement(layout: PagedCutLayout, holders: List[HeldPage], lease: Option[Arc[ExportLease]], first: u64, end: u64)
@@ -10180,7 +10181,14 @@ fn cut_io_error(mut db: Db, take problem: Error) -> Error {
     }
 }
 
-fn disk_cut_state(mut db: Db, take delta: HolderDelta) -> Result[Ticket, Error] waits {
+type PreparedDiskCut {
+    pages: PageDisk,
+    removals: DiskRemovals,
+    manifest: Bytes
+}
+
+fn disk_cut_state(mut db: Db, take delta: HolderDelta,
+    seal: scoped fn(mut Bytes, DiskContext, u32) -> Result[(), Error] waits) -> Result[Ticket, Error] waits {
     healthy(db)?
     db.since_cut = 0
     let last = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq))
@@ -10206,25 +10214,34 @@ fn disk_cut_state(mut db: Db, take delta: HolderDelta) -> Result[Ticket, Error] 
     let cap = match target { Some(wanted) => wanted.pack, None => db.disk[0u64].options.pack_bytes }
     let d = db.disk[0u64].d
     let mut next_stamp = stamp_after(db.next_node)?
-    let attempt = write_page_cut_with_relocation(d, id, base, holders, db.disk[0u64].pages.lists,
-        db.disk[0u64].pages.carried, db.disk[0u64].pages.next_pack, cap, mut next_stamp)
+    let attempt = {
+        let installed = view db.disk[0u64].pages
+        let prev_first = match installed.deferred { Some(low) => low, None => db.disk[0u64].record_cut }
+        prepare_page_cut(base.locations, mut next_stamp,
+            scoped fn(marks: Map[u64, ()], relocated: Option[View[Log[bool]]], mut stamp: u64) -> Result[PreparedDiskCut, Error] waits {
+                let written = write_page_cut(d, id, base, holders, installed.lists, installed.carried,
+                    installed.next_pack, cap, marks, relocated, mut stamp)?
+                let WrittenPageCut(layout: take layout, buffers: take reserved) = take written
+                let PackBuffers(out: take out, ..) = take reserved
+                let mut manifest = take out
+                let (take pages, take removals) = disk_allocation(scoped fn() -> Result[(PageDisk, DiskRemovals), Error] {
+                    cut_retirement(layout, holders, db.disk[0u64].lease, prev_first, seq)
+                })?
+                fill_cut_manifest(mut manifest, db, delta, generation, seq, prev_first, layout, stamp, base.account, seal)?
+                Ok(PreparedDiskCut(pages: take pages, removals: take removals, manifest: take manifest))
+            })
+    }
     db.next_node = next_stamp - 1
-    let written = match take attempt {
+    let prepared = match take attempt {
         Ok(take cut) => take cut,
         Error(take problem) => return Error(cut_io_error(mut db, take problem)),
     }
-    let WrittenPageCut(layout: take layout, buffers: take reserved) = take written
-    let mut buffers = take reserved
-    let prev_first = match db.disk[0u64].pages.deferred { Some(low) => low, None => db.disk[0u64].record_cut }
-    let (take pages, take removals) = disk_allocation(scoped fn() -> Result[(PageDisk, DiskRemovals), Error] {
-        cut_retirement(layout, holders, db.disk[0u64].lease, prev_first, seq)
-    })?
+    let PreparedDiskCut(pages: take pages, removals: take removals, manifest: take manifest) = take prepared
     // The records name exactly the frames reachable from the participants
     // and the two list roots, so their running charge is the AP15 report.
     let resident_pages = resident_location_charge(pages.locations)
-    fill_cut_manifest(mut buffers.out, db, delta, generation, seq, prev_first, layout, next_stamp, base.account)?
-    if let Some(wanted) = target { validate_new_page_manifest(d, id, buffers.out, wanted)? }
-    if let Error(take problem) = publish_page_manifest_bytes(d, buffers.out) {
+    if let Some(wanted) = target { validate_new_page_manifest(d, id, manifest, wanted)? }
+    if let Error(take problem) = publish_page_manifest_bytes(d, manifest) {
         return Error(cut_io_error(mut db, take problem))
     }
 

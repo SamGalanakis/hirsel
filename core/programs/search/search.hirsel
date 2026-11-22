@@ -1,0 +1,315 @@
+type PostingKey {
+    term: String,
+    id: u64
+}
+
+type Document[M: codec]: codec {
+    length: u64,
+    metadata: M
+}
+
+type Stats: codec {
+    documents: u64,
+    tokens: u64
+}
+
+pub opaque type Spec[M: codec] {
+    name: String,
+    documents: std.codec.Codec[Document[M]]
+}
+
+pub fn spec[M: codec](name: String) -> Spec[M] {
+    Spec(name: string.from(name), documents: std.codec.of())
+}
+
+pub opaque type Index[M: codec] {
+    tokenizer: Tokenizer,
+    documents: store.Table[u64, Document[M]],
+    forward: store.Table[u64, List[String]],
+    postings: store.Table[PostingKey, u64],
+    frequencies: store.Table[String, u64],
+    stats: store.Table[u8, Stats]
+}
+
+pub opaque type Bm25 {
+    k1: f64,
+    b: f64
+}
+
+pub type Hit {
+    id: u64,
+    score: f64
+}
+
+fn encode_posting(k: PostingKey, mut out: Bytes) {
+    std.codec.put_key_string(k.term, mut out)
+    std.codec.put_key_u64(k.id, mut out)
+}
+
+fn decode_posting(raw: Bytes, mut at: u64) -> Result[PostingKey, std.codec.DecodeError] {
+    let term = std.codec.take_key_string(raw, mut at)?
+    let id = std.codec.take_key_u64(raw, mut at)?
+    Ok(PostingKey(term: take term, id: id))
+}
+
+fn posting_schema(mut s: std.codec.Schema) -> Result[(), std.codec.EncodeError] {
+    std.codec.schema_tuple(mut s, 2)?
+    std.codec.schema_string(mut s)
+    std.codec.schema_u64(mut s)
+    Ok(())
+}
+
+fn posting_key() -> std.codec.Key[PostingKey] {
+    std.codec.key_make(encode_posting, decode_posting, posting_schema)
+}
+
+fn table_name(name: String, suffix: String) -> String {
+    let mut full = string.from(name)
+    string.push(mut full, suffix)
+    take full
+}
+
+pub fn install[M: codec](mut migration: store.Migration, layout: Spec[M]) -> Result[(), store.Error] {
+    let forward: std.codec.Codec[List[String]] = std.codec.of_list()
+    let stats: std.codec.Codec[Stats] = std.codec.of()
+    store.migration_create_table(mut migration, store.spec(table_name(layout.name, ".documents"), std.codec.key_u64(), layout.documents))?
+    store.migration_create_table(mut migration, store.spec(table_name(layout.name, ".forward"), std.codec.key_u64(), forward))?
+    store.migration_create_table(mut migration, store.spec(table_name(layout.name, ".postings"), posting_key(), std.codec.of_u64()))?
+    store.migration_create_table(mut migration, store.spec(table_name(layout.name, ".frequencies"), std.codec.key_string(), std.codec.of_u64()))?
+    store.migration_create_table(mut migration, store.spec(table_name(layout.name, ".stats"), std.codec.key_u8(), stats))
+}
+
+pub fn open[M: codec](schema: store.Schema, layout: Spec[M], take analyzer: Tokenizer) -> Result[Index[M], store.Error] {
+    let forward_codec: std.codec.Codec[List[String]] = std.codec.of_list()
+    let stats_codec: std.codec.Codec[Stats] = std.codec.of()
+    let documents = store.schema_table(schema, table_name(layout.name, ".documents"), std.codec.key_u64(), layout.documents)?
+    let forward = store.schema_table(schema, table_name(layout.name, ".forward"), std.codec.key_u64(), forward_codec)?
+    let postings = store.schema_table(schema, table_name(layout.name, ".postings"), posting_key(), std.codec.of_u64())?
+    let frequencies = store.schema_table(schema, table_name(layout.name, ".frequencies"), std.codec.key_string(), std.codec.of_u64())?
+    let stats = store.schema_table(schema, table_name(layout.name, ".stats"), std.codec.key_u8(), stats_codec)?
+    Ok(Index(tokenizer: take analyzer, documents: take documents, forward: take forward, postings: take postings, frequencies: take frequencies, stats: take stats))
+}
+
+fn corpus_stats(take row: Option[Stats]) -> Stats {
+    match take row {
+        Some(take stats) => take stats,
+        None => Stats(documents: 0, tokens: 0)
+    }
+}
+
+fn remove_posting[M: codec](mut tx: store.Tx, index: Index[M], id: u64, term: String) -> Result[(), store.Error] {
+    let key = PostingKey(term: clone(term), id: id)
+    let _ = store.delete(mut tx, index.postings, key)?
+    let df = option.unwrap(store.fetch(tx, store.shape(index.frequencies), term)?)
+    if df == 1 {
+        let _ = store.delete(mut tx, index.frequencies, term)?
+    } else {
+        store.put(mut tx, index.frequencies, term, df - 1)?
+    }
+    Ok(())
+}
+
+pub fn upsert[M: codec](mut tx: store.Tx, index: Index[M], id: u64, text: String, take metadata: M) -> Result[(), store.Error] {
+    let tokens = tokenize(index.tokenizer, text)
+    let length = list.len(tokens)
+    let mut counts: Map[String, u64] = map.new()
+    for take token in take tokens {
+        map.update_or_insert(mut counts, take token, 0u64, scoped fn(mut tf: u64) {
+            tf += 1
+        })
+    }
+    let mut stats = corpus_stats(store.fetch(tx, store.shape(index.stats), 0u8)?)
+    let previous = store.fetch(tx, store.shape(index.documents), id)?
+    if let Some(doc) = previous {
+        stats.tokens -= doc.length
+        let old_terms = option.unwrap(store.fetch(tx, store.shape(index.forward), id)?)
+        for term in old_terms {
+            if !map.contains(counts, term) {
+                remove_posting(mut tx, index, id, term)?
+            }
+        }
+    } else {
+        stats.documents += 1
+    }
+    let postings = store.shape(index.postings)
+    let frequencies = store.shape(index.frequencies)
+    let mut unique: List[String] = list.with_capacity(map.len(counts))
+    for take (take term, tf) in take counts {
+        let key = PostingKey(term: clone(term), id: id)
+        let old = store.fetch(tx, postings, key)?
+        if old == None {
+            let df = match store.fetch(tx, frequencies, term)? {
+                Some(df) => df,
+                None => 0u64
+            }
+            store.put(mut tx, index.frequencies, term, df + 1)?
+        }
+        if old != Some(tf) {
+            store.put(mut tx, index.postings, key, tf)?
+        }
+        list.push(mut unique, take term)
+    }
+    stats.tokens += length
+    let doc = Document(length: length, metadata: take metadata)
+    store.put(mut tx, index.documents, id, doc)?
+    store.put(mut tx, index.forward, id, unique)?
+    store.put(mut tx, index.stats, 0u8, stats)
+}
+
+pub fn delete[M: codec](mut tx: store.Tx, index: Index[M], id: u64) -> Result[bool, store.Error] {
+    let doc = match store.fetch(tx, store.shape(index.documents), id)? {
+        Some(take doc) => take doc,
+        None => return Ok(false)
+    }
+    let terms = option.unwrap(store.fetch(tx, store.shape(index.forward), id)?)
+    for term in terms {
+        remove_posting(mut tx, index, id, term)?
+    }
+    let mut stats = option.unwrap(store.fetch(tx, store.shape(index.stats), 0u8)?)
+    stats.documents -= 1
+    stats.tokens -= doc.length
+    let _ = store.delete(mut tx, index.documents, id)?
+    let _ = store.delete(mut tx, index.forward, id)?
+    store.put(mut tx, index.stats, 0u8, stats)?
+    Ok(true)
+}
+
+pub fn defaults() -> Bm25 {
+    Bm25(k1: 1.2, b: 0.75)
+}
+
+pub fn bm25(k1: f64, b: f64) -> Option[Bm25] {
+    if std.float.is_finite(k1) && float.ge(k1, 0.0) && float.ge(b, 0.0) && float.le(b, 1.0) {
+        Some(Bm25(k1: k1, b: b))
+    } else {
+        None
+    }
+}
+
+// Reduce ln(1 + x) to e*ln(2) + 2*atanh(z), with z <= 1/3.
+// The omitted tail after 18 terms is less than 2e-19.
+fn log_one_plus(x: f64) -> f64 {
+    let (exponent, z) = if float.le(x, 1.0) {
+        (0u64, x / (2.0 + x))
+    } else {
+        let bits = float.to_bits64(1.0 + x)
+        let exponent = (bits >> 52) - 1023
+        let mantissa = float.from_bits64((bits & 0x000fffffffffffff) | 0x3ff0000000000000)
+        (exponent, (mantissa - 1.0) / (mantissa + 1.0))
+    }
+    let ratio = z * z
+    let mut sum = z
+    let mut power = z
+    for i in 1u64 .. 18 {
+        power *= ratio
+        let denominator: f64 = float.from_int(2 * i + 1)
+        sum += power / denominator
+    }
+    let e: f64 = float.from_int(exponent)
+    e * 0.6931471805599453 + 2.0 * sum
+}
+
+fn hit_order(left: Hit, right: Hit) -> Order {
+    if float.gt(left.score, right.score) || (float.eq(left.score, right.score) && left.id < right.id) {
+        Less
+    } else if float.lt(left.score, right.score) || left.id > right.id {
+        Greater
+    } else {
+        Equal
+    }
+}
+
+// The root of this heap is the worst retained hit.
+fn keep_hit(mut hits: List[Hit], k: u64, hit: Hit) {
+    let n = list.len(hits)
+    if n < k {
+        list.push(mut hits, hit)
+        let mut child = n
+        while child != 0 {
+            let parent = (child - 1) / 2
+            if hit_order(hits[child], hits[parent]) != Greater {
+                break
+            }
+            list.swap(mut hits, child, parent)
+            child = parent
+        }
+    } else if hit_order(hit, hits[0]) == Less {
+        let _ = list.set(mut hits, 0, hit)
+        let mut parent: u64 = 0
+        while parent < n / 2 {
+            let mut child = 2 * parent + 1
+            if child + 1 < n && hit_order(hits[child + 1], hits[child]) == Greater {
+                child += 1
+            }
+            if hit_order(hits[child], hits[parent]) != Greater {
+                break
+            }
+            list.swap(mut hits, parent, child)
+            parent = child
+        }
+    }
+}
+
+type Candidate = Rejected | Eligible(f64, f64)
+
+pub fn query[M: codec](snapshot: store.Snapshot, index: Index[M], text: String, k: u64, params: Bm25, allows: scoped fn(u64, M) -> bool) -> Result[List[Hit], store.Error] {
+    let mut hits: List[Hit] = list.new()
+    if k == 0 {
+        return Ok(take hits)
+    }
+    let stats = corpus_stats(store.get(snapshot, store.shape(index.stats), 0u8)?)
+    if stats.tokens == 0 {
+        return Ok(take hits)
+    }
+    let n: f64 = float.from_int(stats.documents)
+    let tokens: f64 = float.from_int(stats.tokens)
+    let mean = tokens / n
+    let docs = store.shape(index.documents)
+    let frequencies = store.shape(index.frequencies)
+    let postings = store.shape(index.postings)
+    let mut terms: std.set.Set[String] = std.set.new()
+    let mut candidates: Map[u64, Candidate] = map.new()
+    for take term in tokenize(index.tokenizer, text) {
+        if !std.set.insert(mut terms, clone(term)) {
+            continue
+        }
+        let df = match store.get(snapshot, frequencies, term)? {
+            Some(df) => df,
+            None => continue
+        }
+        let df_f: f64 = float.from_int(df)
+        let absent: f64 = float.from_int(stats.documents - df)
+        let weight = log_one_plus((absent + 0.5) / (df_f + 0.5))
+        let low = PostingKey(term: clone(term), id: 0)
+        let high = PostingKey(term: take term, id: 18446744073709551615)
+        let mut rows = store.scan(snapshot, postings, Included(take low), Included(take high))?
+        while let Some((key, tf)) = store.next(mut rows)? {
+            let id = key.id
+            if !map.contains(candidates, id) {
+                let doc = option.unwrap(store.get(snapshot, docs, id)?)
+                let candidate = if allows(id, doc.metadata) {
+                    let length: f64 = float.from_int(doc.length)
+                    Eligible(1.0 - params.b + params.b * (length / mean), 0.0)
+                } else {
+                    Rejected
+                }
+                map.insert(mut candidates, id, candidate)
+            }
+            let frequency: f64 = float.from_int(tf)
+            let _ = map.update(mut candidates, id, scoped fn(mut candidate: Candidate) {
+                if let Eligible(norm, score) = candidate {
+                    let scale = params.k1 + 1.0
+                    let contribution = weight * (frequency / (frequency / scale + (params.k1 / scale) * norm))
+                    candidate = Eligible(norm, score + contribution)
+                }
+            })
+        }
+    }
+    for (id, candidate) in candidates {
+        if let Eligible(_, score) = candidate {
+            keep_hit(mut hits, k, Hit(id: id, score: score))
+        }
+    }
+    std.list.sort(mut hits, hit_order)
+    Ok(take hits)
+}

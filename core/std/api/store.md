@@ -206,7 +206,7 @@ a closed rotation sender poisons the Db and takes no Cut.
 ## M1 target (not yet built)
 
 Nothing in this section is on main. It is the store's M1 surface, specified in
-STORE-SPEC v2.34 §11 (AP1–AP21, L37–L51), and the M1 implementation slices flip
+STORE-SPEC v2.35 §11 (AP1–AP21, L37–L51), and the M1 implementation slices flip
 it to built. Everything above describes the store as built.
 
 - **Pages.** Every tree becomes a B+ tree of packed pages (`Arc[Page]`, 4 KiB
@@ -215,7 +215,10 @@ it to built. Everything above describes the store as built.
   (AP2, AP3).
 - **Format 3.** A format-2 directory is `Unsupported(format)`, with no migration.
   The new kinds are PAGE, BLOB, FORK and MANIFEST 0x0031. NODE 0x0020 and
-  MANIFEST 0x0030 are retired and refused whatever their MUST bit (AP1).
+  MANIFEST 0x0030 are retired and refused whatever their MUST bit (AP1). The
+  MANIFEST's pack and retirement lists are page trees in their own packs, so
+  the MANIFEST holds only fixed fields and branch and pin records, and no cut
+  is ever refused for MANIFEST size (AP4, AP14).
 - **Per-collection roots.** `Roots` is `{collections, streams, catalog}`, where
   `collections` maps a table or index id to a `CollectionRoot` with its root
   `PagePtr`, exact row count and row charge, and the map leaf owns that root
@@ -225,8 +228,10 @@ it to built. Everything above describes the store as built.
   logical key (`id u32 BE ‖ encoded key`), the bytes this page calls the physical
   data-tree key. Pages store only the suffix past the id and the page prefix
   (AP5).
-- **Values.** A stored value up to 1024 bytes is inline. A longer one is a
-  `BlobRef` to an immutable BLOB in a blob pack. Writes are limited by
+- **Values.** A stored value up to the store's inline threshold is inline, and
+  a longer one is a `BlobRef` to an immutable BLOB in a blob pack. A new store's
+  threshold is 1024 bytes; an existing store keeps the threshold its MANIFEST
+  records (0–1024). A collection-map descriptor is always inline. Writes are limited by
   `VALUE_LIMIT` = 16,711,680 bytes (`Limit(Value)`); readers check only format
   3's fixed decode ceiling, so a value stored under a larger limit stays
   readable (AP4, AP8).
@@ -235,7 +240,9 @@ it to built. Everything above describes the store as built.
   failed, aborted, stopped or refused body leaves the head untouched. A
   writer-side apply on a published head makes every fallible step first
   (AP9, AP10). `migrate` sorts its output, refuses duplicate keys with
-  `Exists`, and builds bottom-up (AP13).
+  `Exists`, and builds bottom-up. It charges its workspace and its catalog
+  rows while it collects, and publishes only if the exact account of the roots
+  it would publish fits (AP13).
 - **Reads.** `fetch_bytes(tx, t, k)` and `get_bytes(s, t, k)` return the raw
   stored bytes as `Option[View[Bytes]]` anchored to the Tx or Snapshot. The owned
   `fetch` and `get` decode from the view, transcoding old-schema rows.
@@ -247,11 +254,13 @@ it to built. Everything above describes the store as built.
 - **Accounts.** Admission counts each distinct row version (tree, logical key,
   stored value) once across every branch head, pin and in-flight fork, at
   `entry(k, v)`, plus 126 bytes per distinct collection. The figure does not
-  depend on page layout or history. `resident_limit` bounds this figure alone:
-  journal frames sent and not yet acked are bounded separately by
-  `FRAME_LIMIT` = 16,777,296 bytes, and a commit that would pass it waits for
-  acks instead of failing. So a delete-only commit is never refused, on disk or
-  in memory, and a delayed cut ack never erases newer charges.
+  depend on page layout or history. `resident_limit` bounds this figure alone.
+  Journal frames handed to the worker and not yet acked are bounded separately
+  by `FRAME_LIMIT` = 16,777,296 bytes, and a commit that would pass it waits for
+  acks instead of failing; the frame being built and the worker's group buffer
+  have their own fixed bounds. No single figure bounds the store's process
+  memory. A delete-only commit is never refused, on disk or in memory, and a
+  delayed cut ack never erases newer charges.
   `accounts(db)` returns `{logical, exact, frames, resident}`; resident page
   memory is reported, not admitted, and can exceed `logical` when roots diverge
   (AP15).
@@ -262,11 +271,12 @@ it to built. Everything above describes the store as built.
   prepared before the frame is sent and returns with nothing sent; a failed send
   poisons the Db.
   A fork from an older Snapshot still makes a cut. The empty name is allowed.
-  A fork past the id counter is `Limit(Ids)`, and past the 16 MiB branch and
-  pin records' 16 MiB share, or past the share left for the MANIFEST's pack
-  lists, `Limit(Manifest)` (AP4, AP17–AP19).
-- **Install.** A release install edits each collection by replace, remove,
-  create-empty or keep. A schema-only change to a populated table keeps its rows,
+  A fork past the id counter is `Limit(Ids)`. A fork or `pin` whose record
+  would take the branch and pin records past 16 MiB is `Limit(Manifest)`; the
+  pack lists never cause it (AP4, AP17–AP19).
+- **Install.** A release install edits each collection by remove (a dropped id,
+  with its empty drop record), replace (a created id; zero rows give an empty
+  collection) or keep (no range). A schema-only change to a populated table keeps its rows,
   index ranges and root stamps (§11.1).
 - **Constants.** `FRAME_LIMIT: u64 = 16777296` joins `VALUE_LIMIT`.
 - **Errors.** `Limit` gains `Ids` and `Manifest`; every other case is unchanged.

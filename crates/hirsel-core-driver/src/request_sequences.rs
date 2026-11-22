@@ -2059,8 +2059,8 @@ fn request_sequences_recheck_edit_paths() {
         (Edit::Rename("app@1/api/new"), "api.hirsel", RENAMED),
         (Edit::Move, "moved.hirsel", RENAMED),
     ];
-    let req = |file, text| {
-        check(app(&[
+    let with = |spare: bool, file, text| {
+        let mut files = vec![
             (file, "api", text),
             (
                 "read.hirsel",
@@ -2068,17 +2068,23 @@ fn request_sequences_recheck_edit_paths() {
                 "fn first() { let _ = api.value(0u8) }\nfn second() { let _ = api.value(1u8) }",
             ),
             ("spare.hirsel", "spare", "fn value() -> u8 { 9u8 }"),
-        ]))
+        ];
+        files.truncate(if spare { 3 } else { 2 });
+        check(app(&files))
     };
+    let req = |file, text| with(true, file, text);
+    // Before the body edit, a request without `spare` publishes into the same
+    // store, as `hirsel run` leaves the test sources out: the edit still
+    // rechecks only the edited body, not `spare` that request did not hold.
+    let steps = edits.iter().flat_map(|(edit, file, text)| {
+        let other = matches!(edit, Edit::Body(_)).then(|| (None, with(false, "api.hirsel", TRIVIA)));
+        other.into_iter().chain([(Some(edit), req(file, text))])
+    });
     let dir = tempfile::tempdir().unwrap();
     let mut failures = Vec::new();
     let mut written = BTreeSet::new();
     let mut resident = Driver::default();
-    for (edit, req) in std::iter::once((None, req("api.hirsel", BASE))).chain(
-        edits
-            .iter()
-            .map(|(edit, file, text)| (Some(edit), req(file, text))),
-    ) {
+    for (edit, req) in std::iter::once((None, req("api.hirsel", BASE))).chain(steps) {
         let inputs = materialize(&req, false, dir.path(), &mut written);
         for (store, driver) in [
             ("resident", &mut resident),

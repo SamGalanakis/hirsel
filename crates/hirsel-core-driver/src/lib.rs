@@ -1196,6 +1196,11 @@ impl Driver {
                 let bytes = product.frame()?;
                 let record = product.record;
                 publication.bodies.push((record, bytes));
+                // The copies of a duplicate definition share a key; none is
+                // found by it.
+                if !duplicated.contains(&path) {
+                    publication.keyed.push((path.clone(), key_hash, record));
+                }
                 publication.rows.insert(
                     path,
                     check_index::Row {
@@ -1304,9 +1309,11 @@ fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Option<T> {
         .deserialize(bytes)
         .ok()
 }
-/// A body record of the prior publication, when its live row and its
-/// content both carry the current key. Anything else is a miss. Only its head
-/// is read; its IR is read on demand.
+/// A body record checked under the current key: the one the prior
+/// publication's live row names when the row carries the key, else the one
+/// the key's pointer names, which an earlier request of another shape wrote.
+/// The record's own path and key must match; anything else is a miss. Only
+/// its head is read; its IR is read on demand.
 fn prior_definition(
     store: &Store,
     prior: &check_index::ProgramIndex,
@@ -1314,13 +1321,14 @@ fn prior_definition(
     key: &DefinitionKey,
     key_hash: ContentHash,
 ) -> io::Result<Option<DefinitionProduct>> {
-    if prior
-        .live(path)
-        .is_none_or(|(row_key, _)| row_key != key_hash)
-    {
+    let record = match prior.live(path) {
+        Some((row_key, record)) if row_key == key_hash => Some(record),
+        _ => check_index::keyed_record(store, path, key_hash)?,
+    };
+    let Some(record) = record else {
         return Ok(None);
-    }
-    Ok(recorded_definition(store, prior, path)?.filter(|product| product.key == *key))
+    };
+    Ok(body_record(store, record, path)?.filter(|product| product.key == *key))
 }
 /// The body record a live row of the prior publication names, when it is
 /// the record of `path`. Its key is the key under the prior shape.
@@ -1329,10 +1337,18 @@ fn recorded_definition(
     prior: &check_index::ProgramIndex,
     path: &DefPath,
 ) -> io::Result<Option<DefinitionProduct>> {
-    hirsel_core_front::cost_scope!("non-check", "prior body record read");
     let Some((_, record)) = prior.live(path) else {
         return Ok(None);
     };
+    body_record(store, record, path)
+}
+/// The body record `record`, when it is the record of `path`.
+fn body_record(
+    store: &Store,
+    record: ContentHash,
+    path: &DefPath,
+) -> io::Result<Option<DefinitionProduct>> {
+    hirsel_core_front::cost_scope!("non-check", "prior body record read");
     let Some(head) = store.get_body_head(record)? else {
         return Ok(None);
     };

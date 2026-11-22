@@ -13,12 +13,16 @@ body once. Each body owns its CoreIR module and signature-only callee rows. Synt
 name rows, successful bodies and diagnostics move into shared in-memory products.
 Each checked body is one content-addressed record, and its address is the body
 product's content hash. A persistent 16-way index over definition paths holds one
-small row per body (its definition-key hash and record address) or a tombstone for
-a path that left a file of the request; file records hold each module's namespace
-map and anchor map. One rename of the `program-index` selection publishes the
-root node, rows, tombstones and maps together. A request reads the whole index,
-never a whole product, and writes only the records that changed. Disk reads check
-version, length and checksum. Lookups treat a tombstone as not found.
+small row per live definition of the request (its definition-key hash and record
+address); file records hold each module's namespace map and anchor map. One
+rename of the `program-index-v2` selection publishes the root node, rows and maps
+together, so the index holds the last request's rows alone. Each checked body
+also writes a key pointer, addressed by its path and key hash, to its record: a
+body whose row misses (another request, such as `run` without the test sources
+or `test` without an entry, published last) is found by its key, and the record's
+own path and key must match. A request reads the whole index, never a whole
+product, and writes only the records that changed. Disk reads check version,
+length and checksum.
 Resolver scratch is not retained or encoded; definition keys retain its observed
 lookup fingerprint and one hash of the transitive signature components. A body's
 own part of its key is its item's source bytes: record sites and IR anchors are

@@ -623,10 +623,27 @@ fn warm_and_body_edits_reuse_signature_readers_on_disk() {
         .check(request(&b, dir.path()), &mut Meter::new(false))
         .unwrap();
     assert!(disk_warm.rechecked.is_empty());
+    // Back to `a`: its `callee` was checked under this key, so the store
+    // answers by key though the index holds `b`'s row, and the record is `a`'s.
     let disk_edit = Driver::default()
         .check(request(a, dir.path()), &mut Meter::new(false))
         .unwrap();
-    assert_eq!(names(&disk_edit), ["callee"]);
+    assert!(disk_edit.rechecked.is_empty(), "{:?}", disk_edit.rechecked);
+    let callee = disk_edit
+        .definitions
+        .values()
+        .find(|d| d.definition.0.name == "callee")
+        .unwrap();
+    assert_eq!(
+        eval::run(
+            callee.ir().unwrap(),
+            callee.check.function.unwrap(),
+            &[],
+            1_000_000
+        )
+        .outcome,
+        eval::Outcome::Returned(vec![1])
+    );
 }
 #[test]
 fn signature_edits_recheck_readers_and_leave_independent_bodies() {
@@ -2427,8 +2444,8 @@ fn edit_kinds_publish_the_fresh_build() {
         // Every write the request made. With under 48 rows the trie is the
         // root over one leaf per first nibble of H(path): each changed row
         // rewrites its leaf. Records: the rechecked bodies, the changed file
-        // records, those leaves and the root; then the selection. Nothing is
-        // synced (`store`).
+        // records, those leaves and the root, then each rechecked body's key
+        // pointer; then the selection. Nothing is synced (`store`).
         let leaves: std::collections::BTreeSet<u8> = built
             .rechecked
             .iter()
@@ -2442,7 +2459,8 @@ fn edit_kinds_publish_the_fresh_build() {
                     >> 4
             })
             .collect();
-        let mut expected = vec![store::Durable::Record; rechecked.len() + files + leaves.len() + 1];
+        let mut expected =
+            vec![store::Durable::Record; 2 * rechecked.len() + files + leaves.len() + 1];
         expected.push(store::Durable::Selection);
         assert_eq!(writes, expected, "{kind}: writes");
     }

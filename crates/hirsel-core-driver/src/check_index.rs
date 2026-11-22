@@ -78,6 +78,27 @@ pub(crate) fn key_hash(key: &crate::DefinitionKey) -> io::Result<ContentHash> {
         [&encode(key)?[..]],
     ))
 }
+/// The address of the pointer from a definition's key to its body record.
+/// The index holds the rows of the last request alone, so a body another
+/// request checked (`run` without test sources, `test` without an entry) is
+/// found by its key, whichever request published last.
+fn key_pointer(path: &DefPath, key: ContentHash) -> io::Result<ContentHash> {
+    Ok(ContentHash::of_parts(
+        "hirsel.definition-key-record.v1",
+        [&encode(path)?[..], &key.0[..]],
+    ))
+}
+/// The body record a request checked `path` into under the key `key`. The
+/// caller verifies the record's own path and key; a damaged pointer is a miss.
+pub(crate) fn keyed_record(
+    store: &Store,
+    path: &DefPath,
+    key: ContentHash,
+) -> io::Result<Option<ContentHash>> {
+    Ok(store
+        .get(key_pointer(path, key)?)?
+        .and_then(|bytes| Some(ContentHash(bytes.try_into().ok()?))))
+}
 fn path_hash(path: &DefPath) -> io::Result<[u8; 32]> {
     Ok(ContentHash::of_parts("hirsel.program-index.path.v1", [&encode(path)?[..]]).0)
 }
@@ -147,6 +168,8 @@ pub(crate) struct Publication {
     /// Body records framed when their body was checked.
     pub bodies: Vec<(ContentHash, Vec<u8>)>,
     pub rows: BTreeMap<DefPath, Row>,
+    /// The key pointer of each body checked by this request: path, key, record.
+    pub keyed: Vec<(DefPath, ContentHash, ContentHash)>,
     /// One record per source file, in normalised source order.
     pub files: Vec<FileRecord>,
 }
@@ -156,6 +179,7 @@ impl Publication {
             shape: ContentHash::default(),
             bodies: vec![],
             rows: BTreeMap::new(),
+            keyed: vec![],
             files: vec![],
         }
     }
@@ -192,6 +216,10 @@ impl Publication {
         }
         for (hash, bytes) in &writes {
             store.write_framed(*hash, bytes)?;
+        }
+        // After the records they name.
+        for (path, key, record) in &self.keyed {
+            store.put_keyed(key_pointer(path, *key)?, &record.0)?;
         }
         if changed {
             store.select(SELECTION, root)?;

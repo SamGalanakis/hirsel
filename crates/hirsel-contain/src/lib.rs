@@ -40,6 +40,9 @@ use std::os::unix::process::ExitStatusExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::ExitStatus;
 
+#[cfg(test)]
+hirsel_guard::install!();
+
 /// A child's mode: a row of launch.md "Child modes".
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub enum Mode {

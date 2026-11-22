@@ -201,6 +201,12 @@ pub struct Task {
     layout: TaskLayout,
     failed: u8,
     record: Option<Block>,
+    /// The returnable form's frame record: the owned operation state and the
+    /// represented frames, at one address from the first call until the end.
+    frame: Option<FrameRecord>,
+    /// Set by a returnable wait that parked: the body returned through its
+    /// represented frames, and the stack holds nothing live.
+    stackless: bool,
     /// The abandoning parent's cleanup frame, once the task has ended.
     holder: std::mem::MaybeUninit<crate::counted::Holder>,
     /// How far the result's cleanup has got.
@@ -2528,21 +2534,30 @@ pub(crate) fn check_idle_tls() {
     crate::sequencer::check_no_owner();
 }
 
-macro_rules! provider_outcome {
+/// The end of operation `token`'s profile span.
+#[cfg(feature = "prof")]
+fn prof_io_end(token: u64, outcome: &crate::provider::Outcome) {
+    prof::append(
+        ProfKind::IoEnd,
+        &[
+            token,
+            outcome.written,
+            u64::from(outcome.error.tag),
+            u64::from(outcome.error.code),
+            u64::from(outcome.status),
+        ],
+        &[],
+    );
+}
+/// `$call`'s outcome, ending its profile span when it was delivered; a
+/// returnable park ends it at the resume that delivers.
+macro_rules! provider_outcome_opt {
     ($token:expr, $call:expr) => {{
-        let outcome = $call;
+        let outcome: Option<crate::provider::Outcome> = $call;
         #[cfg(feature = "prof")]
-        prof::append(
-            ProfKind::IoEnd,
-            &[
-                $token,
-                outcome.written,
-                u64::from(outcome.error.tag),
-                u64::from(outcome.error.code),
-                u64::from(outcome.status),
-            ],
-            &[],
-        );
+        if let Some(outcome) = &outcome {
+            prof_io_end($token, outcome);
+        }
         outcome
     }};
 }
@@ -2579,6 +2594,34 @@ pub(crate) unsafe fn provider_operation(
     request: *mut crate::provider::Request,
     issued: Option<&mut Option<crate::provider::Outcome>>,
 ) -> crate::provider::Outcome {
+    // SAFETY: forwarded; the stackful form always ends with an outcome.
+    unsafe {
+        provider_operation_in::<false>(context, provider, request, issued)
+            .unwrap_or_else(|| unreachable!("a stackful operation never returns parked"))
+    }
+}
+/// `provider_operation` in the returnable form: None means the operation
+/// parked with its state in the task's frame record, and the caller returns
+/// through its represented frames (`hirsel_core_frame_record`).
+/// # Safety
+/// As `provider_operation`; the request lives in the current task's frame
+/// record, which exists.
+#[inline(always)]
+pub(crate) unsafe fn provider_operation_returnable(
+    context: *mut Context,
+    provider: &crate::provider::Provider,
+    request: *mut crate::provider::Request,
+) -> Option<crate::provider::Outcome> {
+    // SAFETY: forwarded.
+    unsafe { provider_operation_in::<true>(context, provider, request, None) }
+}
+#[inline(always)]
+unsafe fn provider_operation_in<const RETURNABLE: bool>(
+    context: *mut Context,
+    provider: &crate::provider::Provider,
+    request: *mut crate::provider::Request,
+    issued: Option<&mut Option<crate::provider::Outcome>>,
+) -> Option<crate::provider::Outcome> {
     let token = TOKENS.fetch_add(1, Ordering::Relaxed);
     if token == u64::MAX {
         crate::process::stop(b"HostHandles");
@@ -2602,9 +2645,9 @@ pub(crate) unsafe fn provider_operation(
             );
         }
         if task.is_null() {
-            return provider_outcome!(
+            return provider_outcome_opt!(
                 token,
-                slow(
+                Some(slow(
                     context,
                     task,
                     provider,
@@ -2612,15 +2655,15 @@ pub(crate) unsafe fn provider_operation(
                     token,
                     Start::Alone,
                     issued,
-                )
+                ))
             );
         }
         #[cfg(test)]
         if SCHEDULER_ENTRY.get() {
             let start = Start::Entry(None);
-            return provider_outcome!(
+            return provider_outcome_opt!(
                 token,
-                slow(context, task, provider, request, token, start, issued)
+                off_fast_path::<RETURNABLE>(context, task, provider, request, token, start, issued)
             );
         }
         #[cfg(test)]
@@ -2634,15 +2677,35 @@ pub(crate) unsafe fn provider_operation(
             ptr::fn_addr_eq(provider.wait, crate::os::WAIT)
                 && ptr::fn_addr_eq(provider.deliver, crate::provider::DELIVER),
         ) {
-            provider_outcome!(
+            provider_outcome_opt!(
                 token,
-                operation::<OsCalls>(context, task, provider, request, token, issued)
+                operation::<OsCalls, RETURNABLE>(context, task, provider, request, token, issued)
             )
         } else {
-            provider_outcome!(
+            provider_outcome_opt!(
                 token,
-                operation::<PointerCalls>(context, task, provider, request, token, issued)
+                operation::<PointerCalls, RETURNABLE>(context, task, provider, request, token, issued)
             )
+        }
+    }
+}
+/// Leave the fast path in the form the caller runs.
+#[inline(always)]
+unsafe fn off_fast_path<const RETURNABLE: bool>(
+    context: *mut Context,
+    task: *mut Task,
+    provider: &crate::provider::Provider,
+    request: *mut crate::provider::Request,
+    token: u64,
+    start: Start,
+    issued: Option<&mut Option<crate::provider::Outcome>>,
+) -> Option<crate::provider::Outcome> {
+    // SAFETY: forwarded.
+    unsafe {
+        if RETURNABLE {
+            returnable(context, task, provider, request, token, start)
+        } else {
+            Some(slow(context, task, provider, request, token, start, issued))
         }
     }
 }
@@ -2651,14 +2714,14 @@ pub(crate) unsafe fn provider_operation(
 /// # Safety
 /// As `provider_operation`; `task` is the current task.
 #[inline(always)]
-unsafe fn operation<C: Calls>(
+unsafe fn operation<C: Calls, const RETURNABLE: bool>(
     context: *mut Context,
     task: *mut Task,
     provider: &crate::provider::Provider,
     request: *mut crate::provider::Request,
     token: u64,
     issued: Option<&mut Option<crate::provider::Outcome>>,
-) -> crate::provider::Outcome {
+) -> Option<crate::provider::Outcome> {
     // SAFETY: provider contract; request pinned by the caller through delivery.
     unsafe {
         CALLBACK_TASK.set(task);
@@ -2668,7 +2731,7 @@ unsafe fn operation<C: Calls>(
         CALLBACK_TASK.set(ptr::null_mut());
         if wait.kind != WAIT_READY {
             let start = Start::Entry(Some(wait));
-            return slow(context, task, provider, request, token, start, issued);
+            return off_fast_path::<RETURNABLE>(context, task, provider, request, token, start, issued);
         }
         let step = provider_callback!(
             token,
@@ -2677,12 +2740,12 @@ unsafe fn operation<C: Calls>(
         );
         if step.kind != STEP_DONE {
             let start = Start::Issued(step);
-            return slow(context, task, provider, request, token, start, issued);
+            return off_fast_path::<RETURNABLE>(context, task, provider, request, token, start, issued);
         }
         if let Some(issued) = issued {
             *issued = Some(step.outcome);
         }
-        provider_callback!(token, Deliver, C::deliver(provider, request, step.outcome))
+        Some(provider_callback!(token, Deliver, C::deliver(provider, request, step.outcome)))
     }
 }
 /// How `operation` calls a provider's `wait` and `deliver`. A form may contain
@@ -2786,6 +2849,22 @@ unsafe fn slow(
             Start::Alone => alone(context, &provider, request, token),
             start => parked(task, &provider, request, token, start),
         };
+        delivered(context, &provider, request, token, outcome, issued)
+    }
+}
+/// The end of an operation that left the fast path, in either form.
+/// # Safety
+/// As `slow`; the operation has ended.
+unsafe fn delivered(
+    context: *mut Context,
+    provider: &crate::provider::Provider,
+    request: *mut crate::provider::Request,
+    #[cfg_attr(not(feature = "prof"), allow(unused_variables))] token: u64,
+    outcome: Option<crate::provider::Outcome>,
+    issued: Option<&mut Option<crate::provider::Outcome>>,
+) -> crate::provider::Outcome {
+    // SAFETY: forwarded.
+    unsafe {
         let Some(outcome) = outcome else {
             // The scheduler failed the operation in W because a request is
             // pending and unshielded; observing it records the cause.
@@ -2801,6 +2880,78 @@ unsafe fn slow(
             Deliver,
             (provider.deliver)(provider.state, request, outcome)
         )
+    }
+}
+/// The returnable form of `slow` with a scheduler: the operation's state is
+/// built in the task's frame record, and a park returns None instead of
+/// switching, so the caller gives its stack back through its represented frames.
+#[cold]
+#[inline(never)]
+unsafe fn returnable(
+    context: *mut Context,
+    task: *mut Task,
+    provider: &crate::provider::Provider,
+    request: *mut crate::provider::Request,
+    token: u64,
+    start: Start,
+) -> Option<crate::provider::Outcome> {
+    // SAFETY: the record outlives every park; the scheduler clears no field.
+    unsafe {
+        let op = (*task)
+            .frame
+            .as_ref()
+            .unwrap_or_else(|| crate::process::stop(b"FrameRecord"))
+            .operation();
+        op.write(Operation::new(task, provider, request, token));
+        match (*op).begin(start) {
+            Next::Park => {
+                park_returnable(task, op);
+                None
+            }
+            Next::Done(produced) => {
+                Some(delivered(context, &(*op).provider, request, token, produced, None))
+            }
+        }
+    }
+}
+/// Resume a returnable operation the scheduler made runnable: the same step
+/// the stackful form takes after its switch back. None means it parked again.
+/// # Safety
+/// The current task's operation is the one in its frame record.
+pub(crate) unsafe fn resume_returnable(context: *mut Context) -> Option<crate::provider::Outcome> {
+    // The stackful form holds this commit from its resume through delivery.
+    let _commit = crate::sequencer::enter();
+    // SAFETY: by the contract.
+    unsafe {
+        let task = CURRENT.get();
+        let op = (*task).operation;
+        debug_assert!(op == (*task).frame.as_ref().unwrap().operation().cast());
+        match (*op).advance(None) {
+            Next::Park => {
+                park_returnable(task, op);
+                None
+            }
+            Next::Done(produced) => {
+                (*task).operation = ptr::null_mut();
+                let request = (*op).request;
+                let outcome = delivered(context, &(*op).provider, request, (*op).token, produced, None);
+                #[cfg(feature = "prof")]
+                prof_io_end((*op).token, &outcome);
+                Some(outcome)
+            }
+        }
+    }
+}
+/// Park as `park_operation` does, in the same order, but leave the switch to
+/// `start`, after the represented frames have returned. The commit stays held
+/// until the dispatcher's, as across the stackful form's switch.
+unsafe fn park_returnable(task: *mut Task, op: *mut Operation) {
+    // SAFETY: the active task owns its operation and record.
+    unsafe {
+        (*task).operation = op;
+        mark_parked(task);
+        (*task).stackless = true;
+        std::mem::forget(crate::sequencer::enter());
     }
 }
 /// Where an operation that does not finish at once leaves the fast path.
@@ -2824,71 +2975,113 @@ unsafe fn parked(
     token: u64,
     start: Start,
 ) -> Option<crate::provider::Outcome> {
-    let mut op = Operation {
-        #[cfg(feature = "prof")]
-        prof_pending: 0,
-        provider: *provider,
-        request,
-        token,
-        state: OperationState::Waiting,
-        // SAFETY: the current fiber owns the context and the request.
-        observes_cancel: unsafe {
-            crate::provider::cancellation_point((*request).operation)
-                && (*(*task).context).cancel_shield == 0
-                && (*(*task).context).finalizing == 0
-        },
-        entered: None,
-    };
+    // SAFETY: the current fiber owns the context and the request.
+    let mut op = unsafe { Operation::new(task, provider, request, token) };
     // SAFETY: the frame outlives every park; the scheduler clears no field.
     unsafe {
-        let mut step = match start {
-            Start::Entry(entered) => {
-                op.entered = entered;
-                (*task).operation = &mut op;
-                park_operation(task);
-                None
+        let mut next = op.begin(start);
+        loop {
+            match next {
+                Next::Park => {
+                    (*task).operation = &mut op;
+                    park_operation(task);
+                    next = op.advance(None);
+                }
+                Next::Done(produced) => {
+                    (*task).operation = ptr::null_mut();
+                    return produced;
+                }
             }
-            Start::Issued(step) => Some(step),
+        }
+    }
+}
+/// Where one step of a parked operation leaves it.
+enum Next {
+    /// It waits for the scheduler's next verdict.
+    Park,
+    /// It ended: a missing outcome is the unissued operation's cancellation.
+    Done(Option<crate::provider::Outcome>),
+}
+impl Operation {
+    /// # Safety
+    /// The current fiber owns the task's context and the request.
+    unsafe fn new(
+        task: *mut Task,
+        provider: &crate::provider::Provider,
+        request: *mut crate::provider::Request,
+        token: u64,
+    ) -> Self {
+        Self {
+            #[cfg(feature = "prof")]
+            prof_pending: 0,
+            provider: *provider,
+            request,
+            token,
+            state: OperationState::Waiting,
+            // SAFETY: by the contract.
+            observes_cancel: unsafe {
+                crate::provider::cancellation_point((*request).operation)
+                    && (*(*task).context).cancel_shield == 0
+                    && (*(*task).context).finalizing == 0
+            },
+            entered: None,
+        }
+    }
+    /// The operation's first step off the fast path.
+    /// # Safety
+    /// The request is pinned; the operation is not yet parked.
+    unsafe fn begin(&mut self, start: Start) -> Next {
+        match start {
+            Start::Entry(entered) => {
+                self.entered = entered;
+                Next::Park
+            }
+            // SAFETY: forwarded.
+            Start::Issued(step) => unsafe { self.advance(Some(step)) },
             Start::Alone => unreachable!("an operation alone never parks"),
-        };
-        let produced = loop {
-            let step = match step.take() {
+        }
+    }
+    /// One step of a parked operation, from `step` or, with none, from the
+    /// scheduler's verdict: both forms (stackful and returnable) take it.
+    /// # Safety
+    /// The request is pinned; the scheduler has made the task runnable.
+    unsafe fn advance(&mut self, step: Option<Step>) -> Next {
+        // SAFETY: by the contract.
+        unsafe {
+            let step = match step {
                 Some(step) => step,
-                None => match op.state {
+                None => match self.state {
                     OperationState::ReadyToIssue => {
                         provider_callback!(
-                            token,
+                            self.token,
                             Issue,
-                            crate::provider::issue(&op.provider, request, token)
+                            crate::provider::issue(&self.provider, self.request, self.token)
                         )
                     }
-                    OperationState::ReadyToDeliver(outcome) => break outcome,
+                    OperationState::ReadyToDeliver(outcome) => return Next::Done(outcome),
                     _ => unreachable!("resumed provider operation has no next action"),
                 },
             };
             match step.kind {
-                STEP_DONE => break Some(step.outcome),
+                STEP_DONE => Next::Done(Some(step.outcome)),
                 STEP_PENDING => {
                     // Sync disables cancellation after issue. A submitted
                     // foreign call decides the race with cancellation when
                     // its helper takes custody of the pinned frame.
                     if matches!(
-                        (*request).operation,
+                        (*self.request).operation,
                         SYNC | SYNC_DIR | crate::foreign::helpers::WAIT_OP
                     ) {
-                        op.observes_cancel = false;
+                        self.observes_cancel = false;
                     }
-                    op.state = OperationState::Issued {
+                    self.state = OperationState::Issued {
                         deadline: step.deadline_ns,
                     };
-                    (*task).operation = &mut op;
-                    park_operation(task);
+                    Next::Park
                 }
                 _ => crate::process::stop(b"Provider"),
             }
-        };
-        (*task).operation = ptr::null_mut();
-        produced
+        }
     }
 }
 /// Test-only: make the scheduler call the first `wait` (switch out and back),
@@ -2911,6 +3104,14 @@ unsafe fn park_operation(task: *mut Task) {
     // SAFETY: the active task switches to its scheduler, which reads the
     // operation before any other task runs.
     unsafe {
+        mark_parked(task);
+        switch_to_idle(task);
+    }
+}
+/// The scheduler-visible half of a park, shared by both forms.
+unsafe fn mark_parked(task: *mut Task) {
+    // SAFETY: as park_operation.
+    unsafe {
         let op = (*task).operation;
         if matches!((*op).state, OperationState::Issued { .. }) {
             (*(*task).run).parked.insert((*op).token, task);
@@ -2932,7 +3133,6 @@ unsafe fn park_operation(task: *mut Task) {
             prof_state(task, State::Provider, reason, (*op).token);
         }
         (*task).state = State::Provider;
-        switch_to_idle(task);
     }
 }
 /// An operation with no scheduler (a direct ABI caller, or run teardown): no
@@ -4193,6 +4393,106 @@ pub unsafe extern "C" fn hirsel_core_check_cancel(context: *mut Context, site: u
     }
 }
 
+/// Give a task that returned its stack a fresh one to resume on: its body
+/// starts again and its represented frames replay to the parked operation.
+/// # Safety
+/// The task is runnable, off-CPU and has no stack.
+unsafe fn mount(task: *mut Task, stack: Stack) {
+    // SAFETY: by the contract; the stack is idle.
+    unsafe {
+        (*task).sp = stack.prepare(start, task.cast(), ptr::null_mut());
+        (*task).stack = Some(stack);
+    }
+}
+/// Take back the stack of a task that parked in the returnable form.
+/// # Safety
+/// The task has just switched out of `start` for the last time on this stack.
+unsafe fn unmount(task: *mut Task) -> Stack {
+    // SAFETY: by the contract, nothing on the stack is live.
+    unsafe {
+        (*task).stackless = false;
+        let stack = (*task).stack.take().unwrap();
+        #[cfg(any(test, debug_assertions, feature = "testing"))]
+        stack.poison_above((*task).sp);
+        (*task).sp = ptr::null_mut();
+        stack
+    }
+}
+/// A task's frame record for the returnable form (DESIGN "Eager records"):
+/// one zeroed allocation made at the root's first call, at a stable address
+/// until the task ends. Its header holds the owned operation state; the area
+/// after it holds the represented frames the compiler lays out.
+pub(crate) struct FrameRecord {
+    base: NonNull<u8>,
+    size: usize,
+}
+/// The record's header: one operation and the owned helper state it borrows.
+#[repr(C, align(64))]
+pub(crate) struct FrameHeader {
+    operation: std::mem::MaybeUninit<Operation>,
+    pub(crate) net: std::mem::MaybeUninit<crate::net::OwnedNet>,
+}
+const FRAME_HEADER: usize = size_of::<FrameHeader>();
+/// Live frame-record bytes, for the memory figures.
+pub(crate) static FRAME_BYTES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+impl FrameRecord {
+    fn layout(size: usize) -> Layout {
+        Layout::from_size_align(FRAME_HEADER + size, align_of::<FrameHeader>())
+            .unwrap_or_else(|_| crate::process::stop(b"FrameRecord"))
+    }
+    fn new(size: usize) -> Self {
+        // SAFETY: the layout has a nonzero size (the header).
+        let base = unsafe { std::alloc::alloc_zeroed(Self::layout(size)) };
+        let base = NonNull::new(base).unwrap_or_else(|| crate::process::stop(b"HostMemory"));
+        FRAME_BYTES.fetch_add(FRAME_HEADER + size, Ordering::Relaxed);
+        Self { base, size }
+    }
+    pub(crate) fn header(&self) -> *mut FrameHeader {
+        self.base.as_ptr().cast()
+    }
+    fn operation(&self) -> *mut Operation {
+        // SAFETY: the header is in bounds; MaybeUninit is repr(transparent).
+        unsafe { (&raw mut (*self.header()).operation).cast() }
+    }
+    fn area(&self) -> *mut u8 {
+        // SAFETY: the area follows the header in the same allocation.
+        unsafe { self.base.as_ptr().add(FRAME_HEADER) }
+    }
+}
+impl Drop for FrameRecord {
+    fn drop(&mut self) {
+        FRAME_BYTES.fetch_sub(FRAME_HEADER + self.size, Ordering::Relaxed);
+        // SAFETY: allocated in `new` with this layout; nothing borrows it now.
+        unsafe { dealloc(self.base.as_ptr(), Self::layout(self.size)) }
+    }
+}
+/// The current task's frame record of `size` area bytes: made zeroed at the
+/// root's first call, and the same one at each resume, so a represented
+/// frame reads back what it stored before its task returned the stack.
+/// # Safety
+/// Called by a returnable root, in a task, with the same size each time.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_frame_record(_: *mut Context, size: u64) -> *mut u8 {
+    let task = CURRENT.get();
+    if task.is_null() {
+        crate::process::stop(b"FrameRecord");
+    }
+    let size = usize::try_from(size).unwrap_or_else(|_| crate::process::stop(b"FrameRecord"));
+    // SAFETY: CURRENT pins the task, and only its own fiber touches the record.
+    unsafe {
+        let record = (*task).frame.get_or_insert_with(|| FrameRecord::new(size));
+        debug_assert_eq!(record.size, size);
+        record.area()
+    }
+}
+/// The current task's frame-record header, when it runs a returnable root.
+pub(crate) fn frame_header() -> Option<*mut FrameHeader> {
+    let task = CURRENT.get();
+    // SAFETY: CURRENT pins the task.
+    unsafe { task.as_ref()?.frame.as_ref().map(FrameRecord::header) }
+}
+
 unsafe extern "C" fn start(first: *mut u8, _: *mut u8) -> ! {
     let task = first.cast::<Task>();
     crate::sequencer::release_handed();
@@ -4204,6 +4504,13 @@ unsafe extern "C" fn start(first: *mut u8, _: *mut u8) -> ! {
             (*task).result.as_ptr(),
             (*task).input.as_ptr(),
         );
+        if (*task).stackless {
+            // The body returned through its represented frames from a park
+            // (`park_returnable`); the dispatcher takes this stack back.
+            switch_to_idle(task);
+            std::hint::unreachable_unchecked();
+        }
+        (*task).frame = None;
         // The hand-over and END share one hold of the token.
         let _handover = (*task).record.is_some().then(|| {
             let commit = crate::sequencer::enter();
@@ -4417,6 +4724,8 @@ pub unsafe fn run_root(
         },
         failed: 0,
         record: None,
+        frame: None,
+        stackless: false,
         holder: std::mem::MaybeUninit::uninit(),
         cursor: 0,
     });
@@ -4671,6 +4980,9 @@ impl RunPtr {
                 };
                 #[cfg(feature = "testing")]
                 dispatch_sample.take(task);
+                if (*task).stack.is_none() {
+                    mount(task, (*worker_stock(self.0)).take());
+                }
                 CURRENT.set(task);
                 (*task).state = State::Running;
                 #[cfg(feature = "prof")]
@@ -4687,7 +4999,14 @@ impl RunPtr {
                     State::Ended => {
                         (*worker_stock(self.0)).recycle((*task).stack.take().unwrap());
                     }
-                    State::Provider if (*run).wake_operation(task, Wake::Parked) => direct = task,
+                    State::Provider => {
+                        if (*task).stackless {
+                            (*worker_stock(self.0)).recycle(unmount(task));
+                        }
+                        if (*run).wake_operation(task, Wake::Parked) {
+                            direct = task;
+                        }
+                    }
                     _ => {}
                 }
                 if !worker.is_null()
@@ -4786,6 +5105,9 @@ impl RunPtr {
                     pool.homes[(*worker).index].fetch_add(1, Ordering::Relaxed);
                     (*task).worker = Some((*worker).index);
                 }
+                if (*task).stack.is_none() {
+                    mount(task, (*worker).stock.take_shared(&pool.spare));
+                }
                 (*task).state = State::Running;
                 CURRENT.set(task);
                 #[cfg(feature = "prof")]
@@ -4810,7 +5132,14 @@ impl RunPtr {
                             pool.wake_workers();
                         }
                     }
-                    State::Provider if (*run).wake_operation(task, Wake::Parked) => direct = task,
+                    State::Provider => {
+                        if (*task).stackless {
+                            ended = Some(unmount(task));
+                        }
+                        if (*run).wake_operation(task, Wake::Parked) {
+                            direct = task;
+                        }
+                    }
                     _ => {}
                 }
                 // The commit keeps custody with this dispatcher until the
@@ -5019,6 +5348,8 @@ unsafe fn spawn_in(
             layout,
             failed: 0,
             record: Some(record),
+            frame: None,
+            stackless: false,
             holder: std::mem::MaybeUninit::uninit(),
             cursor: 0,
         });
@@ -5574,6 +5905,8 @@ mod ready_routing_laws {
                         },
                         failed: 0,
                         record: None,
+                        frame: None,
+                        stackless: false,
                         holder: std::mem::MaybeUninit::uninit(),
                         cursor: 0,
                     })

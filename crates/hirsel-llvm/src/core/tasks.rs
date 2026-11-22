@@ -103,7 +103,9 @@ impl FunctionEmitter<'_> {
             &CallAttrs::default(),
         )
     }
-    fn host_call(&mut self, op: HostOp, args: &[Value]) -> Vec<Value> {
+    /// `rec` is the returnable form's word (`RtOp::Returnable`): its row
+    /// takes the word after the context and has the `_rec` symbol.
+    fn host_call(&mut self, op: HostOp, args: &[Value], rec: Option<Value>) -> Vec<Value> {
         let operand = args.get(1).cloned().unwrap_or(Value::Null);
         let mode = args.get(2).cloned().unwrap_or(int(0));
         let at = self.site_word();
@@ -181,6 +183,7 @@ impl FunctionEmitter<'_> {
             | HostOp::NetSplit
             | HostOp::NetJoin => {
                 let mut operands = vec![ptr(CONTEXT)];
+                operands.extend(rec.clone().map(ptr));
                 for (p, value) in RtOp::Host(op).signature().params.iter().zip(args) {
                     let hirsel_core_ir::Param::Value(t) = p else {
                         unreachable!()
@@ -197,7 +200,12 @@ impl FunctionEmitter<'_> {
                     });
                 }
                 operands.push(word(at));
-                self.native_call(op.adapter_symbol(), &results, &operands)
+                if rec.is_some() {
+                    let symbol = format!("{}_rec", op.adapter_symbol());
+                    self.native_call(&symbol, &results, &operands)
+                } else {
+                    self.native_call(op.adapter_symbol(), &results, &operands)
+                }
             }
             HostOp::ReadAt | HostOp::WriteAt => self.native_call(
                 "hirsel_core_host_at",
@@ -350,7 +358,11 @@ impl FunctionEmitter<'_> {
                 &[P],
                 &[ptr(CONTEXT), u(&args[0]), u(&args[1])],
             ),
-            RtOp::Host(op) => self.host_call(op, &args),
+            RtOp::Host(op) => self.host_call(op, &args, None),
+            RtOp::Returnable(op) => self.host_call(op, &args[1..], Some(args[0].clone())),
+            RtOp::FrameRecord => {
+                self.native_call("hirsel_core_frame_record", &[P], &[ptr(CONTEXT), u(&args[0])])
+            }
             RtOp::CauseNext => self.native_call("hirsel_core_cause_next", &[P], &[p(&args[0])]),
             RtOp::CauseValue => self.native_call("hirsel_core_cause_value", &[P], &[p(&args[0])]),
             RtOp::MapHashBytes => self.map_hash(

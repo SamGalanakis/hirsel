@@ -367,6 +367,8 @@ tags!(RtOp {
     54 => ConnReceive { item },
     55 => ConnTryReceive { item },
     56 => SpawnUnit { x, r },
+    57 => FrameRecord,
+    58 => Returnable(part0),
 });
 
 tags!(HostOp {

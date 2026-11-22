@@ -71,6 +71,8 @@ use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
 #[path = "units_conn_check.rs"]
 mod conn;
+#[path = "units_returnable_check.rs"]
+mod returnable;
 use std::fmt::Write as _;
 use std::panic::Location;
 use std::sync::atomic::Ordering;
@@ -1647,6 +1649,20 @@ pub(super) static CASES: &[Case] = &[
         },
         pct: None,
     },
+    // 16. A client that returned its stack at an owned receive boundary is
+    // woken by its provider after another task reused and overwrote that
+    // stack (mc-units-receive-park). Its provider sequence and carrier
+    // lengths equal the stackful client's (`units_returnable_check.rs`).
+    Case {
+        name: "returnable_stack_reuse",
+        workers: 2,
+        units: 1,
+        body: returnable::body,
+        producers: &[("provider", returnable::producer)],
+        goals: 0b1,
+        params: |_| {},
+        pct: None,
+    },
     Case {
         name: "conn_flat_slot_reuse",
         workers: 3,
@@ -2128,6 +2144,11 @@ mod tests {
     fn conn_slot_reuse() {
         check("conn_slot_reuse");
     }
+    #[test]
+    fn returnable_stack_reuse() {
+        check("returnable_stack_reuse");
+    }
+
     #[test]
     fn conn_flat_slot_reuse() {
         check("conn_flat_slot_reuse");

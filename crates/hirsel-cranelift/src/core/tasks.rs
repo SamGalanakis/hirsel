@@ -142,6 +142,7 @@ impl Function<'_, '_, '_> {
         let mut outputs = [Value::from_u32(0); 8];
         let site = match op {
             RtOp::Host(_)
+            | RtOp::Returnable(_)
             | RtOp::CheckCancel
             | RtOp::Join { .. }
             | RtOp::ChannelNew { .. }
@@ -494,6 +495,42 @@ impl Function<'_, '_, '_> {
                 } else {
                     n
                 }
+            }
+            RtOp::FrameRecord => {
+                outputs[0] = self.c_call(
+                    "hirsel_core_frame_record",
+                    &[P, U],
+                    &[P],
+                    &[self.context, args[0]],
+                )?[0];
+                1
+            }
+            RtOp::Returnable(op) => {
+                // The host row with the record word after the context.
+                let symbol = match op {
+                    HostOp::RecvBounded => "hirsel_core_host_recv_bounded_rec",
+                    HostOp::SendPair => "hirsel_core_host_send_pair_rec",
+                    _ => unreachable!("only owned waits have a returnable form"),
+                };
+                let signature = op_signature(op);
+                let count = signature.len();
+                let mut params = vec![P, P];
+                params.extend(signature);
+                params.push(U);
+                let mut operands = vec![self.context];
+                operands.extend_from_slice(&args[..count + 1]);
+                operands.push(site);
+                let values = self.c_call(
+                    symbol,
+                    &params,
+                    &[U, K, Ty::Scalar(Scalar::U32), U, K],
+                    &operands,
+                )?;
+                self.call_failure(values[4], call.fail)?;
+                for i in 0..4 {
+                    outputs[i] = values[i];
+                }
+                4
             }
             RtOp::CompareBytes => {
                 outputs[0] = self.c_call(

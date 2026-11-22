@@ -6598,6 +6598,11 @@ impl Machine<'_> {
                 self.event(TRY_RECEIVE, self.chan_id(i), status);
                 vec![status]
             }
+            // Only the release lowering of a native program forms these
+            // (returnable.rs); the evaluator runs the module before it.
+            RtOp::FrameRecord | RtOp::Returnable(_) => {
+                unreachable!("returnable waits are native-only")
+            }
         })
     }
 

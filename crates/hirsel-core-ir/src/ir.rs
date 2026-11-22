@@ -1012,6 +1012,15 @@ pub enum RtOp {
     P256Verify,
     /// Verify a DER P-256 ECDSA signature over a message with SHA-256.
     P256VerifyDer,
+    /// The running task's frame record (`crate::returnable`): `size` zeroed
+    /// bytes allocated at the first call and the same bytes at every later
+    /// one, freed when the task ends.
+    FrameRecord,
+    /// An owned wait of `HostOp` that may park with the stack given back
+    /// (`crate::returnable`): a leading pointer to the caller's child word,
+    /// then the provider row's operands. The word is 1 when the task parked
+    /// and the outcome is not yet delivered, else 0 with the row's outcome.
+    Returnable(HostOp),
 }
 
 /// The provider operations, numbered as the run time's `HirselCoreHostRequest`
@@ -1557,6 +1566,13 @@ impl RtOp {
             RtOp::ArgsGet => (vec![V(u64_), V(u64_)], vec![p]),
             RtOp::LaunchWord => (vec![V(u64_), V(u64_)], vec![u64_]),
             RtOp::LaunchHandle => (vec![V(u64_)], vec![u64_]),
+            RtOp::FrameRecord => (vec![V(u64_)], vec![p]),
+            RtOp::Returnable(op) => {
+                let host = RtOp::Host(op).signature();
+                let mut params = vec![V(p)];
+                params.extend(host.params);
+                (params, host.results)
+            }
             RtOp::LaunchTarget { view } => (vec![out(view)], vec![]),
             RtOp::DescribeEmit => (vec![V(p)], vec![bool_]),
             RtOp::Flow(_) => (vec![V(p), V(p), V(p)], vec![]),
@@ -1828,7 +1844,7 @@ impl RtOp {
                 | RtOp::SpawnUnit { .. }
                 | RtOp::IsolateCatch
                 | RtOp::Flow(_)
-        ) || matches!(self, RtOp::Host(_))
+        ) || matches!(self, RtOp::Host(_) | RtOp::Returnable(_))
     }
 
     pub fn types(self) -> Vec<TypeId> {
@@ -1878,6 +1894,8 @@ impl RtOp {
             | RtOp::DescribeEmit
             | RtOp::Flow(_)
             | RtOp::Host(_)
+            | RtOp::FrameRecord
+            | RtOp::Returnable(_)
             | RtOp::IsolateEnter
             | RtOp::IsolateLeave
             | RtOp::IsolateCatch

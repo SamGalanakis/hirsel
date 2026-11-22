@@ -450,6 +450,146 @@ unsafe fn address_op(
         AddressOutcome::new(outcome, network.address)
     }
 }
+/// An owned network operation's state: the request and everything it
+/// borrows through delivery (the network request, the paired-send tail and
+/// the provider value), initialized in place so its internal pointers hold.
+/// The stackful rows keep it on the task's stack; the returnable rows keep it
+/// in the task's frame record (`tasks::FrameHeader`), where a parked task
+/// leaves it when it gives its stack back. Tape keys follow the request's
+/// address, which is the same for the operation's whole life in either place.
+#[repr(C)]
+pub(crate) struct OwnedNet {
+    network: NetworkRequest,
+    request: Request,
+    tail: Buffer,
+    provider: Provider,
+}
+/// How an owned operation was routed, which only an accept's delivery reads:
+/// a served listener's port, or the CLI's net tape.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Routing {
+    served: Option<Provider>,
+    #[cfg(feature = "record")]
+    taped: bool,
+}
+impl OwnedNet {
+    /// Build the state at `this`. Err is an outcome that ends the operation
+    /// before entry (a spent write half).
+    /// # Safety
+    /// `this` is writable and stays put until delivery; operands as the rows.
+    #[allow(clippy::too_many_arguments)]
+    #[inline(always)]
+    unsafe fn init(
+        this: *mut Self,
+        context: *mut Context,
+        op: u8,
+        key: u64,
+        operand: *const Buffer,
+        send_tail: *const Buffer,
+        max_receive: u64,
+        until_kind: u8,
+        clock: u64,
+        deadline_ns: u64,
+        site: u64,
+    ) -> Result<Routing, AddressOutcome> {
+        unsafe {
+            let files = (*context).host_files;
+            if op == SEND_PAIR && write_spent(files, key) {
+                return Err(AddressOutcome::new(RESET, Address::default()));
+            }
+            let tail = &raw mut (*this).tail;
+            tail.write(if send_tail.is_null() {
+                empty_buffer()
+            } else {
+                *send_tail
+            });
+            (&raw mut (*this).network).write(NetworkRequest {
+                send_tail: if send_tail.is_null() { ptr::null() } else { tail },
+                address: Address::default(),
+                sockets: &raw mut (*files).sockets,
+                until: deadline(context, until_kind, clock, deadline_ns),
+                backlog: 0,
+                connecting: None,
+                denied: false,
+                direction: (key & 3) as u8,
+                os: &crate::os_net::OPERATIONS,
+                tls: &raw mut (*files).tls,
+                pending_write: false,
+                max_receive,
+            });
+            let mut buffer = if operand.is_null() {
+                empty_buffer()
+            } else {
+                *operand
+            };
+            let served = served_socket(context, key);
+            if op == RECV_BOUNDED && !served.as_ref().is_some_and(crate::provide::exec_port) {
+                let max = usize::try_from(max_receive).unwrap_or(usize::MAX);
+                buffer.capacity = buffer.capacity.min(buffer.len.saturating_add(max));
+            }
+            #[cfg(feature = "record")]
+            let (provider, handle, taped) = match (*files).net_tape.filter(|_| served.is_none()) {
+                Some(tape) => (tape.provider, tape.handle(key), true),
+                None => (socket_provider(context, key), key, false),
+            };
+            #[cfg(not(feature = "record"))]
+            let (provider, handle) = (socket_provider(context, key), key);
+            (&raw mut (*this).provider).write(provider);
+            (&raw mut (*this).request).write(Request {
+                operation: op,
+                mode: 0,
+                handle,
+                path: (&raw mut (*this).network).cast(),
+                path_len: size_of::<NetworkRequest>(),
+                buffer,
+                site,
+            });
+            Ok(Routing {
+                served,
+                #[cfg(feature = "record")]
+                taped,
+            })
+        }
+    }
+    /// The delivered outcome, with the receive length written back to the
+    /// language carrier and a served listener's accepted socket routed to its
+    /// port.
+    /// # Safety
+    /// `operand` is the carrier the operation was built from, pinned and
+    /// writable for a receive.
+    #[inline(always)]
+    unsafe fn finish(
+        this: *mut Self,
+        context: *mut Context,
+        operand: *mut Buffer,
+        routing: Routing,
+        outcome: Outcome,
+    ) -> AddressOutcome {
+        unsafe {
+            let op = (*this).request.operation;
+            let files = (*context).host_files;
+            #[cfg(feature = "record")]
+            let outcome = match (*files).net_tape {
+                Some(tape) if op == ACCEPT && routing.taped => tape.carrier(outcome),
+                _ => outcome,
+            };
+            if op == RECV_BOUNDED {
+                (*operand).len = (*this).request.buffer.len;
+            }
+            if let Some(provider) = routing.served
+                && op == ACCEPT
+                && outcome.status == 0
+                && outcome.error == IoError::OK
+            {
+                let _commit = crate::sequencer::enter();
+                (*files)
+                    .connected
+                    .insert(outcome.value, ((*this).network.address, provider));
+            }
+            AddressOutcome::new(outcome, (*this).network.address)
+        }
+    }
+}
 #[allow(clippy::too_many_arguments)]
 pub(crate) unsafe fn owned_op(
     context: *mut Context,
@@ -464,77 +604,133 @@ pub(crate) unsafe fn owned_op(
     site: u64,
 ) -> AddressOutcome {
     unsafe {
-        let files = (*context).host_files;
-        #[cfg(feature = "record")]
-        let tape = (*files).net_tape;
-        if op == SEND_PAIR && write_spent(files, key) {
-            return AddressOutcome::new(RESET, Address::default());
-        }
-        let mut network = NetworkRequest {
-            send_tail,
-            address: Address::default(),
-            sockets: &raw mut (*files).sockets,
-            until: deadline(context, until_kind, clock, deadline_ns),
-            backlog: 0,
-            connecting: None,
-            denied: false,
-            direction: (key & 3) as u8,
-            os: &crate::os_net::OPERATIONS,
-            tls: &raw mut (*files).tls,
-            pending_write: false,
-            max_receive,
+        let mut state = std::mem::MaybeUninit::<OwnedNet>::uninit();
+        let this = state.as_mut_ptr();
+        let routing = match OwnedNet::init(
+            this, context, op, key, operand, send_tail, max_receive, until_kind, clock,
+            deadline_ns, site,
+        ) {
+            Ok(routing) => routing,
+            Err(outcome) => return outcome,
         };
-        let mut buffer = if operand.is_null() {
-            empty_buffer()
-        } else {
-            *operand
+        let outcome = hirsel_core_host(context, &(*this).provider, &raw mut (*this).request);
+        OwnedNet::finish(this, context, operand, routing, outcome)
+    }
+}
+/// The returnable form of `owned_op`, for a wait the compiler proved is an
+/// owned boundary: every frame up to the task's root is represented in its
+/// frame record, and `word` is the calling frame's resume word there. A
+/// fresh call (`*word == 0`) issues as `owned_op` does; if the operation
+/// parks it sets the word, and the caller returns through its represented
+/// frames with the dummy outcome. Called again with the word set, after the
+/// scheduler made the task runnable, it continues the same operation:
+/// nothing is moved, admitted, polled or debited twice.
+/// # Safety
+/// As `owned_op`; `word` lives in the current task's frame record, and a
+/// resume passes the operands the parked call passed.
+#[allow(clippy::too_many_arguments)]
+unsafe fn returnable_op(
+    context: *mut Context,
+    word: *mut u64,
+    op: u8,
+    key: u64,
+    operand: *mut Buffer,
+    send_tail: *const Buffer,
+    max_receive: u64,
+    until_kind: u8,
+    clock: u64,
+    deadline_ns: u64,
+    site: u64,
+) -> Outcome {
+    unsafe {
+        let Some(header) = crate::tasks::frame_header() else {
+            crate::process::stop(b"FrameRecord");
         };
-        let served = served_socket(context, key);
-        if op == RECV_BOUNDED && !served.as_ref().is_some_and(crate::provide::exec_port) {
-            let max = usize::try_from(max_receive).unwrap_or(usize::MAX);
-            buffer.capacity = buffer.capacity.min(buffer.len.saturating_add(max));
-        }
-        let mut request = Request {
-            operation: op,
-            mode: 0,
-            handle: key,
-            path: (&mut network as *mut NetworkRequest).cast(),
-            path_len: size_of::<NetworkRequest>(),
-            buffer,
-            site,
-        };
-        #[cfg(feature = "record")]
-        let outcome = if let Some(tape) = tape.filter(|_| served.is_none()) {
-            request.handle = tape.handle(key);
-            let outcome = hirsel_core_host(context, &tape.provider, &mut request);
-            if op == ACCEPT {
-                tape.carrier(outcome)
-            } else {
-                outcome
+        let this: *mut OwnedNet = (&raw mut (*header).net).cast();
+        let outcome = if *word == 0 {
+            if let Err(outcome) = OwnedNet::init(
+                this, context, op, key, operand, send_tail, max_receive, until_kind, clock,
+                deadline_ns, site,
+            ) {
+                return outcome.outcome();
             }
+            crate::provider::returnable(context, &(*this).provider, &raw mut (*this).request)
         } else {
-            let provider = socket_provider(context, key);
-            hirsel_core_host(context, &provider, &mut request)
+            crate::tasks::resume_returnable(context)
         };
-        #[cfg(not(feature = "record"))]
-        let outcome = {
-            let provider = socket_provider(context, key);
-            hirsel_core_host(context, &provider, &mut request)
-        };
-        if op == RECV_BOUNDED {
-            (*operand).len = request.buffer.len;
+        match outcome {
+            Some(outcome) => {
+                *word = 0;
+                // Only an accept reads the routing, and it is never returnable.
+                OwnedNet::finish(this, context, operand, Routing::default(), outcome).outcome()
+            }
+            None => {
+                *word = 1;
+                Outcome::default()
+            }
         }
-        if let Some(provider) = served
-            && op == ACCEPT
-            && outcome.status == 0
-            && outcome.error == IoError::OK
-        {
-            let _commit = crate::sequencer::enter();
-            (*files)
-                .connected
-                .insert(outcome.value, (network.address, provider));
-        }
-        AddressOutcome::new(outcome, network.address)
+    }
+}
+/// # Safety
+/// As `hirsel_core_host_recv_bounded`; `word` as `returnable_op`.
+#[allow(clippy::too_many_arguments)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_host_recv_bounded_rec(
+    context: *mut Context,
+    word: *mut u64,
+    key: u64,
+    operand: *mut Buffer,
+    max_receive: u64,
+    until_kind: u8,
+    clock: u64,
+    deadline_ns: u64,
+    site: u64,
+) -> Outcome {
+    unsafe {
+        returnable_op(
+            context,
+            word,
+            RECV_BOUNDED,
+            key,
+            operand,
+            ptr::null(),
+            max_receive,
+            until_kind,
+            clock,
+            deadline_ns,
+            site,
+        )
+    }
+}
+/// # Safety
+/// As `hirsel_core_host_send_pair`; `word` as `returnable_op`.
+#[allow(clippy::too_many_arguments)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_host_send_pair_rec(
+    context: *mut Context,
+    word: *mut u64,
+    key: u64,
+    prefix: *const Buffer,
+    tail: *const Buffer,
+    until_kind: u8,
+    clock: u64,
+    deadline_ns: u64,
+    site: u64,
+) -> Outcome {
+    unsafe {
+        returnable_op(
+            context,
+            word,
+            SEND_PAIR,
+            key,
+            prefix.cast_mut(),
+            tail,
+            0,
+            until_kind,
+            clock,
+            deadline_ns,
+            site,
+        )
     }
 }
 /// # Safety
@@ -687,7 +883,7 @@ pub(crate) unsafe fn socket_provider(context: *mut Context, key: u64) -> Provide
                     .get(&(key & !3))
                     .copied()
             })
-            .unwrap_or(*(*(*context).run).provider)
+            .unwrap_or_else(|| *(*(*context).run).provider)
     }
 }
 

@@ -1197,9 +1197,7 @@ impl Keys {
             Target::Definition(d) => {
                 row.push(0);
                 row.extend_from_slice(&self.definition_identity(index, d)?.0);
-                row.push(u8::from(
-                    index.modules[index.get(d).site.module.0 as usize].foreign,
-                ));
+                row.push(u8::from(index.definition_is_foreign(d)));
             }
             Target::Module(m) => {
                 row.push(1);

@@ -280,7 +280,7 @@ impl NameIndex {
                 path.extend(s.modules.iter().map(|n| self.symbols.find(n).unwrap()));
                 let module = self.add_module(p, &path);
                 if s.foreign {
-                    self.modules[module.0 as usize].foreign = true;
+                    self.mark_foreign_module(module);
                 }
                 modules.push(module);
             }

@@ -141,14 +141,14 @@ impl Program<'_> {
     /// A successful make gives the run a release obligation, including when
     /// retained source never calls that release explicitly.
     pub(crate) fn foreign_release_for(&self, make: usize) -> Option<usize> {
-        if !self.index.modules[self.fns[make].site.module.0 as usize].foreign {
+        if !self.index.module_is_foreign(self.fns[make].site.module) {
             return None;
         }
         self.checked_foreign_headers().calls.get(&make)?.release
     }
 
     pub fn foreign_function_header(&self, function: &FnDecl) -> Option<(DefPath, String)> {
-        if !self.index.modules[function.site.module.0 as usize].foreign {
+        if !self.index.module_is_foreign(function.site.module) {
             return None;
         }
         let interface = Marker::Interface.argument(self, function.params.first()?.ty)?;
@@ -163,7 +163,7 @@ impl Program<'_> {
 
     /// The C ABI of a module whose declarations have passed FFI-2 and FFI-4 to FFI-6.
     pub fn foreign_abi(&self, module: ModuleId) -> Option<Vec<AbiSignature>> {
-        if !self.index.modules[module.0 as usize].foreign || !self.refusals.is_empty() {
+        if !self.index.module_is_foreign(module) || !self.refusals.is_empty() {
             return None;
         }
         let kind_name = |ty| {
@@ -235,7 +235,7 @@ impl Program<'_> {
         let mut headers = CheckedHeaders::default();
         let names = &mut headers.names;
         let mut refusals = Vec::new();
-        if !self.index.modules.iter().any(|module| module.foreign) {
+        if !self.index.has_foreign_modules() {
             return (headers, refusals);
         }
         let mut interfaces = BTreeMap::new();
@@ -243,7 +243,7 @@ impl Program<'_> {
         let mut releases = BTreeMap::new();
         for (function, fd) in self.fns.iter().enumerate() {
             let module = fd.site.module;
-            if !self.index.modules[module.0 as usize].foreign {
+            if !self.index.module_is_foreign(module) {
                 continue;
             }
             let shape = headers.calls.entry(function).or_insert_with(|| CallShape {
@@ -396,14 +396,14 @@ impl Program<'_> {
             return None;
         };
         let decl = &self.decls[d.index()];
-        let module = &self.index.modules[decl.site.module.0 as usize];
+        let module = decl.site.module;
         (decl.public
             && decl.opaque
             && decl.repr == Repr::Own
             && args.is_empty()
             && matches!(&decl.body, DeclBody::Record(fields) if fields.is_empty())
-            && !module.foreign
-            && module.package == self.index.module_package(foreign))
+            && !self.index.module_is_foreign(module)
+            && self.index.module_package(module) == self.index.module_package(foreign))
         .then_some(*d)
     }
 
@@ -563,7 +563,7 @@ impl Program<'_> {
             }
         }
         for fd in self.fns.iter().skip(self.fns.base_len()) {
-            if fd.drop_of.is_some() || self.index.modules[fd.site.module.0 as usize].foreign {
+            if fd.drop_of.is_some() || self.index.module_is_foreign(fd.site.module) {
                 continue;
             }
             let item = self.item(fd.at);

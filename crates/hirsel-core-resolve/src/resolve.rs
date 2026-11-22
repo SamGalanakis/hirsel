@@ -212,13 +212,13 @@ impl ResolutionScratch {
             },
         };
         if Some(package) != index.core
-            && !index.modules[module.0 as usize].foreign
             && item.tree.node(item.root).kind == NodeKind::Function
             && !item
                 .tree
                 .children(item.root)
                 .iter()
                 .any(|&c| item.tree.node(c).kind == NodeKind::Block)
+            && !index.module_is_foreign(module)
         {
             let end = item.tree.node(item.root).origin.span.end;
             r.out.diagnostics.push(
@@ -838,15 +838,17 @@ impl<'a> Resolver<'a, '_> {
             })
     }
     fn foreign_use(&mut self, n: NodeId, name: TokenId, target: Target, callee: bool) -> Target {
+        if !self.index.has_foreign_modules() {
+            return target;
+        }
         let Target::Definition(id) = target else {
             return target;
         };
         let declared = self.index.get(id).site;
-        let module = &self.index.modules[declared.module.0 as usize];
-        if !module.foreign {
+        if !self.index.module_is_foreign(declared.module) {
             return target;
         }
-        let message = if module.package != self.package {
+        let message = if self.index.module_package(declared.module) != self.package {
             "a foreign function is private to its package"
         } else if !callee {
             "a foreign function is only called"

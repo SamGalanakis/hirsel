@@ -156,7 +156,6 @@ pub struct Module {
     pub parent: Option<ModuleId>,
     pub name: Symbol,
     pub depth: u32,
-    pub foreign: bool,
     merge: Rows,
 }
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
@@ -186,6 +185,8 @@ pub struct NameIndex {
     extensions: Table<ModuleId>,
     prelude: Map<Symbol, DefinitionId>,
     pub core: Option<PackageKey>,
+    // Module ordinals beyond the last foreign module are ordinary modules.
+    foreign_modules: Vec<bool>,
     pub diagnostics: Vec<Refusal>,
 }
 impl NameIndex {
@@ -233,6 +234,7 @@ impl NameIndex {
             extensions: Table::default(),
             prelude: Map::default(),
             core: None,
+            foreign_modules: vec![],
             diagnostics: vec![],
         }
     }
@@ -247,7 +249,6 @@ impl NameIndex {
             parent: None,
             name,
             depth: 0,
-            foreign: false,
             merge: Rows::default(),
         });
         self.packages.push(Package {
@@ -283,7 +284,6 @@ impl NameIndex {
                 parent: Some(parent),
                 name,
                 depth: self.modules[parent.0 as usize].depth + 1,
-                foreign: false,
                 merge: Rows::default(),
             });
             self.children.insert((parent, name), id);
@@ -364,6 +364,28 @@ impl NameIndex {
             span: Span::default(),
         });
         self.diagnostics.push(refusal);
+    }
+    #[inline]
+    pub fn has_foreign_modules(&self) -> bool {
+        !self.foreign_modules.is_empty()
+    }
+    #[inline]
+    pub fn module_is_foreign(&self, module: ModuleId) -> bool {
+        self.foreign_modules
+            .get(module.0 as usize)
+            .copied()
+            .unwrap_or(false)
+    }
+    #[inline]
+    pub fn definition_is_foreign(&self, id: DefinitionId) -> bool {
+        self.has_foreign_modules() && self.module_is_foreign(self.get(id).site.module)
+    }
+    pub(crate) fn mark_foreign_module(&mut self, module: ModuleId) {
+        let id = module.0 as usize;
+        if id >= self.foreign_modules.len() {
+            self.foreign_modules.resize(id + 1, false);
+        }
+        self.foreign_modules[id] = true;
     }
     pub fn module_package(&self, module: ModuleId) -> PackageKey {
         self.modules[module.0 as usize].package

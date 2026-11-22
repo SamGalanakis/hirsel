@@ -14,6 +14,7 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 PRIMER = ROOT / "docs" / "PRIMER.md"
 INDEX = ROOT / "core" / "std" / "API-INDEX.md"
+GITHUB_STD = b"https://github.com/samgalanakis/hirsel/blob/main/core/std/"
 HTML = ROOT / "site" / "index.html"
 ALTERNATE = '  <link rel="alternate" type="text/markdown" href="/primer.md">\n'
 ANCHOR = '  <link rel="canonical" href="https://hirsel.ai/">\n'
@@ -41,10 +42,12 @@ def html(current: str) -> str:
 
 def outputs() -> dict:
     primer = PRIMER.read_bytes()
+    index = INDEX.read_bytes().replace(b"](api/", b"](" + GITHUB_STD + b"api/")
+    index = index.replace(b"](API.md)", b"](" + GITHUB_STD + b"API.md)")
     return {
         ROOT / "site" / "primer.md": primer,
         ROOT / "skills" / "hirsel" / "references" / "PRIMER.md": primer,
-        ROOT / "site" / "api-index.md": INDEX.read_bytes(),
+        ROOT / "site" / "api-index.md": index,
         ROOT / "site" / "llms.txt": LLMS.encode(),
         HTML: html(HTML.read_text()).encode(),
     }

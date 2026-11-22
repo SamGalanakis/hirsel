@@ -8,6 +8,8 @@ pub mod abi;
 pub mod abi_host;
 pub mod abi_layout;
 pub mod abi_tasks;
+#[cfg(feature = "allocation-count")]
+mod allocation_count;
 mod allocator;
 pub mod block;
 pub mod causes;

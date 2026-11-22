@@ -21,6 +21,7 @@ prof = []
 testing = []
 memcheck = []
 charge-observation = []
+allocation-count = []
 mimalloc = ["dep:libmimalloc-sys"]
 
 [lints.rust]

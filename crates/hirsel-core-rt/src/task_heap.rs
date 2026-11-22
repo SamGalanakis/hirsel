@@ -603,6 +603,8 @@ impl Local<'_> {
 
 #[inline(always)]
 fn finish_allocation(pointer: NonNull<u8>, class: Class) -> NonNull<u8> {
+    #[cfg(feature = "allocation-count")]
+    crate::allocation_count::allocated();
     #[cfg(any(test, feature = "charge-observation"))]
     crate::peak::allocated(pointer.as_ptr(), class.stride);
     #[cfg(feature = "prof")]

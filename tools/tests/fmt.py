@@ -36,14 +36,29 @@ class ChangedCases(unittest.TestCase):
         self.base = self.git('rev-parse', 'HEAD').strip()
         self.git('update-ref', 'refs/remotes/origin/main', self.base)
         formatter = str(Path(os.environ.get('HIRSEL_TEST_CASE_FORMATTER', '/formatter-not-built')).resolve())
+        compiler = self.write('.buck2/bin/hirsel', '#!/bin/sh\nexit 0\n')
+        compiler.chmod(0o755)
         buck = self.write('.buck2/bin/buck2', '''#!/usr/bin/env python3
 import json, sys
 if sys.argv[1] == 'uquery':
  print(json.dumps({'root//:test': {'crate_root': 'src/lib.rs', 'edition': '2024'}}))
 else:
- print(json.dumps({'root//:hirsel-core-syntax-bin-hirsel-core-syntax': FORMATTER}))
-'''.replace('FORMATTER', repr(formatter)))
+ target = sys.argv[-1]
+ executables = {'root//:hirsel-core-syntax-bin-hirsel-core-syntax': FORMATTER,
+                'root//:hirsel-core-driver-bin-hirsel': COMPILER}
+ print(json.dumps({target: executables[target]}))
+'''.replace('FORMATTER', repr(formatter)).replace('COMPILER', repr(str(compiler))))
         self.write('tools/buck2/sync.py', '')
+        self.write('tools/site_sync.py', '')
+        self.write('core/std/API-INDEX.md', 'current')
+        self.write('core/tools/std_api_index.py', '''import os, subprocess, sys
+from pathlib import Path
+
+assert sys.argv[1:] == ['--check']
+subprocess.run([os.environ['HIRSEL']], check=True)
+index = Path(__file__).resolve().parents[1] / 'std/API-INDEX.md'
+sys.exit(index.read_text() != 'current')
+''')
         rustfmt = self.write('.buck2/bin/rustfmt', '#!/bin/sh\nexit 0\n')
         buck.chmod(0o755)
         rustfmt.chmod(0o755)
@@ -99,6 +114,11 @@ else:
 
     def test_no_changed_cases_do_not_build_a_formatter(self):
         self.assertEqual(self.run_fmt('--check'), 0)
+
+    def test_stale_std_index_fails_without_changing_it(self):
+        index = self.write('core/std/API-INDEX.md', 'stale')
+        self.assertEqual(self.run_fmt('--check'), 1)
+        self.assertEqual(index.read_text(), 'stale')
 
     def test_refusal_fixtures_are_preserved_even_when_their_syntax_parses(self):
         for text in ['// expect: refuse LANG-5 at 2:7\nfn f(\n',

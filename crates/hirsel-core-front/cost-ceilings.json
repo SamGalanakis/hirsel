@@ -1,16 +1,39 @@
 {
-  "policy": "Compare observations against the committed ceilings. Proposed ceilings use a 2% margin and measured residual floors. The fixed budget stays 60000.",
-  "finished_budget_per_line": 60000,
+  "policy": "Compare observations against the committed ceilings. Proposed ceilings use a 2% margin and measured residual floors. Finished budgets are fixed.",
+  "finished_budget_per_token": {
+    "m1": 6650.42500978056,
+    "std": 7699.115044247787,
+    "product": {
+      "bfs-idiomatic": 6051.919956733369,
+      "bfs-matched": 6051.919956733369,
+      "generics-idiomatic": 5777.9014750904535,
+      "generics-matched": 5777.9014750904535,
+      "lru-idiomatic": 6222.036378841731,
+      "lru-matched": 6222.036378841731,
+      "files-idiomatic": 6099.044309296264,
+      "files-matched": 6099.044309296264,
+      "json-idiomatic": 6678.651685393258,
+      "json-matched": 6678.651685393258,
+      "pipeline-idiomatic": 6130.120481927711,
+      "pipeline-matched": 6130.120481927711,
+      "request-scratch-idiomatic": 5789.473684210527,
+      "request-scratch-matched": 5789.473684210527,
+      "rope-idiomatic": 5938.194304180974,
+      "rope-matched": 5938.194304180974,
+      "versions-idiomatic": 5972.068277543782,
+      "versions-matched": 5972.068277543782
+    }
+  },
   "corpora": {
     "m1": {
-      "check_lower_per_line": 18100,
-      "whole_request_per_line": 33100,
-      "whole_process_per_line": 33200
+      "check_lower_per_token": 1991.0108454670742,
+      "whole_request_per_token": 3641.0198334232127,
+      "whole_process_per_token": 3652.0198933429206
     },
     "std": {
-      "check_lower_per_line": 15400,
-      "whole_request_per_line": 29400,
-      "whole_process_per_line": 29500
+      "check_lower_per_token": 1804.996861776437,
+      "whole_request_per_token": 3445.9030997550162,
+      "whole_process_per_token": 3457.6238585977203
     },
     "product": {
       "instructions_per_token": {
@@ -19,58 +42,58 @@
       },
       "entries": {
         "bfs-idiomatic": {
-          "marginal_per_line": 48100
+          "marginal_per_token": 4878.376161837069
         },
         "bfs-matched": {
-          "marginal_per_line": 48200
+          "marginal_per_token": 4888.518316019683
         },
         "generics-idiomatic": {
-          "marginal_per_line": 53000
+          "marginal_per_token": 5111.825552138664
         },
         "generics-matched": {
-          "marginal_per_line": 53000
+          "marginal_per_token": 5111.825552138664
         },
         "lru-idiomatic": {
-          "marginal_per_line": 45100
+          "marginal_per_token": 4673.0348886086595
         },
         "lru-matched": {
-          "marginal_per_line": 45100
+          "marginal_per_token": 4673.0348886086595
         },
         "files-idiomatic": {
-          "marginal_per_line": 56700
+          "marginal_per_token": 5756.009334889148
         },
         "files-matched": {
-          "marginal_per_line": 56700
+          "marginal_per_token": 5756.009334889148
         },
         "json-idiomatic": {
-          "marginal_per_line": 52100
+          "marginal_per_token": 4851.51376146789
         },
         "json-matched": {
-          "marginal_per_line": 52100
+          "marginal_per_token": 4851.51376146789
         },
         "pipeline-idiomatic": {
-          "marginal_per_line": 51000
+          "marginal_per_token": 5207.85498489426
         },
         "pipeline-matched": {
-          "marginal_per_line": 51000
+          "marginal_per_token": 5207.85498489426
         },
         "request-scratch-idiomatic": {
-          "marginal_per_line": 50300
+          "marginal_per_token": 4846.458383019318
         },
         "request-scratch-matched": {
-          "marginal_per_line": 50300
+          "marginal_per_token": 4846.458383019318
         },
         "rope-idiomatic": {
-          "marginal_per_line": 47800
+          "marginal_per_token": 4725.6597645148195
         },
         "rope-matched": {
-          "marginal_per_line": 47900
+          "marginal_per_token": 4735.546082013804
         },
         "versions-idiomatic": {
-          "marginal_per_line": 46100
+          "marginal_per_token": 4593.557735176103
         },
         "versions-matched": {
-          "marginal_per_line": 46100
+          "marginal_per_token": 4593.557735176103
         }
       }
     }

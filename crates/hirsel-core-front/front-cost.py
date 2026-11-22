@@ -133,7 +133,7 @@ def suite_edit(compiler, runtime, out, tools, profile_front=False, prepare=True)
 def run(compiler, runtime, out, ceilings=None, tools=None, image_profiler=None, report_only=False):
     tools = tools or request_cost.toolchain(ROOT)
     rows = {}
-    for name, lines, product, metrics, process in GUARD['sample_sources'](compiler, out):
+    for name, product, metrics, _ in GUARD['sample_sources'](compiler, out):
         if product['diagnostics'] or product['incomplete'] or not product['accepted']:
             raise ValueError(name + ': source corpus did not check to the end')
         rows[name] = front(metrics)

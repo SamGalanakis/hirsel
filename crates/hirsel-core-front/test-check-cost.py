@@ -177,22 +177,22 @@ class ReportOnly(unittest.TestCase):
         import contextlib
         import io
         run = GUARD['run']
-        metrics = dict(instructions=100, stages=[dict(name='check/lower', instructions=90)])
+        metrics = dict(tokens=1, instructions=100, stages=[dict(name='check/lower', instructions=90)])
         product = dict(diagnostics=[], incomplete=[])
-        limits = dict(corpora=dict(m1=dict(code_lines=1, check_lower_per_line=50,
-                     whole_request_per_line=60, whole_process_per_line=70)),
+        limits = dict(corpora=dict(m1=dict(check_lower_per_token=50,
+                     whole_request_per_token=60, whole_process_per_token=70)),
                      completion_forecast=dict(m1=dict(complete_bodies=1, bodies=1,
-                         missing_check_lower_per_line=0, additional_publication_per_line=0)),
-                     finished_budget_per_line=60000, policy='explain the rise')
+                         missing_check_lower_per_token=0, additional_publication_per_token=0)),
+                     finished_budget_per_token={'m1': 60000}, policy='explain the rise')
         def samples(*_, **__):
-            return [('m1', 1, product, metrics, 120)]
+            return [('m1', product, metrics, 120)]
         with patch.dict(run.__globals__, sample_sources=samples, ANCHOR_RESIDUAL={}):
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
-                with self.assertRaisesRegex(ValueError, '90.00 instructions/line'):
+                with self.assertRaisesRegex(ValueError, '90.00 instructions/token'):
                     run(None, None, limits)
                 run(None, None, limits, report_only=True)
-            self.assertIn('whole process: 120.00 instructions/line exceeds 70', output.getvalue())
+            self.assertIn('whole process: 120.00 instructions/token exceeds 70', output.getvalue())
             metrics['counter_refusal'] = 'counter unavailable'
             with self.assertRaisesRegex(ValueError, 'counter unavailable'):
                 run(None, None, limits, report_only=True)
@@ -222,33 +222,35 @@ class ProcessCeiling(unittest.TestCase):
         self.assertEqual(proposed, {'fixed std': 51, 'fixed core': 52})
 
     def test_startup_regression_fails_when_driver_cost_is_unchanged(self):
-        metrics = {'instructions': 10000, 'stages': [{'name': 'check/lower', 'instructions': 5000}]}
-        ceiling = {'code_lines': 1000, 'check_lower_per_line': 5,
-                   'whole_request_per_line': 10, 'whole_process_per_line': 30}
+        metrics = {'tokens': 1000, 'instructions': 10000, 'stages': [{'name': 'check/lower', 'instructions': 5000}]}
+        ceiling = {'check_lower_per_token': 5,
+                   'whole_request_per_token': 10, 'whole_process_per_token': 30}
         check = GUARD['check_ceiling']
-        self.assertEqual(check(metrics, 1000, ceiling, 30000)[2], [])
-        errors = check(metrics, 1000, ceiling, 30001)[2]
+        self.assertEqual(check(metrics, ceiling, 30000)[2], [])
+        errors = check(metrics, ceiling, 30001)[2]
         self.assertEqual(len(errors), 1)
         self.assertIn('whole process', errors[0])
         with self.assertRaisesRegex(ValueError, 'does not cover'):
-            check(metrics, 1000, ceiling, 9999)
+            check(metrics, ceiling, 9999)
 
-    def test_source_growth_uses_actual_lines_and_keeps_numeric_limits(self):
-        metrics = {'instructions': 10000, 'stages': [{'name': 'check/lower', 'instructions': 5000}]}
-        ceiling = {'code_lines': 1000, 'check_lower_per_line': 5,
-                   'whole_request_per_line': 10, 'whole_process_per_line': 30}
+    def test_source_growth_uses_actual_tokens_and_keeps_numeric_limits(self):
+        metrics = {'tokens': 1000, 'instructions': 10000, 'stages': [{'name': 'check/lower', 'instructions': 5000}]}
+        ceiling = {'check_lower_per_token': 5,
+                   'whole_request_per_token': 10, 'whole_process_per_token': 30}
         check = GUARD['check_ceiling']
-        self.assertEqual(check(metrics, 1001, ceiling, 30030)[2], [])
-        errors = check(metrics, 1001, ceiling, 30031)[2]
+        metrics['tokens'] = 1001
+        self.assertEqual(check(metrics, ceiling, 30030)[2], [])
+        errors = check(metrics, ceiling, 30031)[2]
         self.assertEqual(len(errors), 1)
         self.assertIn('whole process', errors[0])
-        with self.assertRaisesRegex(ValueError, 'no code lines'):
-            check(metrics, 0, ceiling, 30000)
+        metrics['tokens'] = 0
+        with self.assertRaisesRegex(ValueError, 'no semantic tokens'):
+            check(metrics, ceiling, 30000)
 
     def test_finished_budget_is_independent_of_current_work_ceiling(self):
         forecast = GUARD['finished_forecast']
-        projection = {'missing_check_lower_per_line': 1000,
-                      'additional_publication_per_line': 500}
+        projection = {'missing_check_lower_per_token': 1000,
+                      'additional_publication_per_token': 500}
         value, failures = forecast(58_500_000, 1000, projection, 60000)
         self.assertEqual(value, 60000)
         self.assertEqual(failures, [])
@@ -256,7 +258,7 @@ class ProcessCeiling(unittest.TestCase):
         _, failures = forecast(58_500_001, 1000, projection, 60000)
         self.assertEqual(len(failures), 1)
         self.assertIn('budget 60000', failures[0])
-        projection['additional_publication_per_line'] = -1
+        projection['additional_publication_per_token'] = -1
         with self.assertRaisesRegex(ValueError, 'negative missing work'):
             forecast(1, 1000, projection, 60000)
 
@@ -268,24 +270,24 @@ class ProcessCeiling(unittest.TestCase):
         self.assertEqual(len(errors), 1)
         self.assertIn('budget 60000', errors[0])
         self.assertEqual(len(check(70_000_001, 10_000_000, 1000, 60_000, 60_000)[1]), 2)
-        for process, fixed, lines in [(1, 2, 1), (1, 0, 1), (2, 1, 0)]:
+        for process, fixed, tokens in [(1, 2, 1), (1, 0, 1), (2, 1, 0)]:
             with self.assertRaisesRegex(ValueError, 'invalid fixed/marginal'):
-                check(process, fixed, lines, 60000, 60000)
+                check(process, fixed, tokens, 60000, 60000)
 
     def test_named_anchor_residual_does_not_hide_a_new_regression_or_budget_miss(self):
-        metrics = {'instructions': 11000, 'stages': [{'name': 'check/lower', 'instructions': 6000}]}
-        ceiling = {'check_lower_per_line': 5, 'whole_request_per_line': 10,
-                   'whole_process_per_line': 30}
+        metrics = {'tokens': 1000, 'instructions': 11000, 'stages': [{'name': 'check/lower', 'instructions': 6000}]}
+        ceiling = {'check_lower_per_token': 5, 'whole_request_per_token': 10,
+                   'whole_process_per_token': 30}
         check = GUARD['check_ceiling']
-        self.assertEqual(check(metrics, 1000, ceiling, 31000, 1000)[2], [])
-        # The allowance is an absolute frozen-corpus count, not a growing per-line exemption.
+        self.assertEqual(check(metrics, ceiling, 31000, 1000)[2], [])
+        # The allowance is an absolute frozen-corpus count, not a growing per-token exemption.
         metrics['stages'][0]['instructions'] += 1
-        self.assertIn('check/lower', check(metrics, 1000, ceiling, 31000, 1000)[2][0])
+        self.assertIn('check/lower', check(metrics, ceiling, 31000, 1000)[2][0])
         metrics['stages'][0]['instructions'] -= 1
-        self.assertIn('whole process', check(metrics, 1000, ceiling, 31001, 1000)[2][0])
+        self.assertIn('whole process', check(metrics, ceiling, 31001, 1000)[2][0])
         with self.assertRaisesRegex(ValueError, 'negative recorded'):
-            check(metrics, 1000, ceiling, 31000, -1)
-        projection = {'missing_check_lower_per_line': 0, 'additional_publication_per_line': 0}
+            check(metrics, ceiling, 31000, -1)
+        projection = {'missing_check_lower_per_token': 0, 'additional_publication_per_token': 0}
         self.assertEqual(len(GUARD['finished_forecast'](60000001, 1000, projection, 60000)[1]), 1)
 
     def test_a_new_partial_body_cannot_qualify_as_a_cheaper_finished_check(self):

@@ -6,8 +6,7 @@ compiler from exec through its answer, then an acknowledged disable excludes
 optional time-metrics formatting and writing. Startup and publication remain
 counted. No /usr/bin/time process is counted. Wall and child peak RSS come from
 the capped harness. Native residual is 12 instructions; proposed ceilings keep
-both the existing 2% allowance and at least that absolute residual. The
-finished budget remains 60000.
+both the existing 2% allowance and at least that absolute residual.
 """
 import argparse
 import copy
@@ -22,14 +21,14 @@ import time
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'core/tools'))
-from measure import read_json, sample, source_lines
+from measure import read_json, sample
 
 # Frozen, absolute allowances owned by core-check-index-912. They never scale
 # with source growth and never apply to the fixed finished-process budget.
 ANCHOR_RESIDUAL = {'m1': 3371157, 'std': 973518}
 PROCESS_RESIDUAL = 12
 COMPLETE = dict(complete_bodies=1, bodies=1,
-                missing_check_lower_per_line=0, additional_publication_per_line=0)
+                missing_check_lower_per_token=0, additional_publication_per_token=0)
 
 
 def margin(value):
@@ -39,7 +38,7 @@ def margin(value):
 def semantic_tokens(metrics):
     tokens = metrics['tokens']
     if tokens <= 0:
-        raise ValueError('front has no semantic tokens')
+        raise ValueError('no semantic tokens')
     return tokens
 
 
@@ -55,7 +54,7 @@ def process_instructions(path):
     return int(values[0])
 
 
-def check_ceiling(metrics, lines, ceiling, process, anchor_residual=0):
+def check_ceiling(metrics, ceiling, process, anchor_residual=0):
     if metrics.get('counter_refusal'):
         raise ValueError(metrics['counter_refusal'])
     stages = {s['name']: s['instructions'] for s in metrics['stages']}
@@ -63,23 +62,22 @@ def check_ceiling(metrics, lines, ceiling, process, anchor_residual=0):
     total = metrics.get('instructions')
     if lower is None or total is None:
         raise ValueError('instruction counter produced no complete sample')
-    if lines <= 0:
-        raise ValueError('corpus contains no code lines')
+    tokens = semantic_tokens(metrics)
     if process < total:
         raise ValueError('process counter does not cover the driver interval')
     if anchor_residual < 0:
         raise ValueError('negative recorded anchor residual')
     failures = []
     for name, instructions, maximum in [
-        ('check/lower', lower, ceiling.get('check_lower_per_line', float('inf'))),
-        ('driver request', total, ceiling.get('whole_request_per_line', float('inf'))),
-        ('whole process', process, ceiling.get('whole_process_per_line', float('inf'))),
+        ('check/lower', lower, ceiling.get('check_lower_per_token', float('inf'))),
+        ('driver request', total, ceiling.get('whole_request_per_token', float('inf'))),
+        ('whole process', process, ceiling.get('whole_process_per_token', float('inf'))),
     ]:
         adjusted = instructions - anchor_residual
-        if adjusted > maximum * lines:
+        if adjusted / tokens > maximum:
             context = ' beyond the named anchor residual' if anchor_residual else ''
-            failures.append(f'{name}: {adjusted / lines:.2f} instructions/line{context} exceeds {maximum}')
-    return lower / lines, total / lines, failures
+            failures.append(f'{name}: {adjusted / tokens:.2f} instructions/token{context} exceeds {maximum}')
+    return lower / tokens, total / tokens, failures
 
 
 
@@ -90,18 +88,18 @@ def completion_errors(product, projection):
     return []
 
 
-def finished_forecast(process, lines, projection, budget):
+def finished_forecast(process, tokens, projection, budget):
     # Keep the fixed language budget independent of the current-work ceilings.
     # The missing-work terms come from the recorded construct/payload profile;
     # startup and all current work always use this invocation's process counter.
-    body = projection['missing_check_lower_per_line']
-    publication = projection['additional_publication_per_line']
+    body = projection['missing_check_lower_per_token']
+    publication = projection['additional_publication_per_token']
     if body < 0 or publication < 0:
         raise ValueError('completion forecast has negative missing work')
-    forecast = process / lines + body + publication
+    forecast = process / tokens + body + publication
     failures = []
     if forecast > budget:
-        failures.append(f'finished whole process forecast: {forecast:.2f} instructions/line exceeds budget {budget}')
+        failures.append(f'finished whole process forecast: {forecast:.2f} instructions/token exceeds budget {budget}')
     return forecast, failures
 
 
@@ -119,9 +117,6 @@ def sample_sources(compiler, output, profile_front=False, *, names=('m1', 'std')
         directory = output / name
         directory.mkdir()
         (directory / 'inputs.json').write_text(json.dumps(inputs))
-        files = {Path(s['file']) for p in inputs['packages'] for s in p['sources']}
-        lines = sum(source_lines(p) for p in sorted(files))
-        (directory / 'code-lines.txt').write_text(str(lines) + '\n')
         env = os.environ | {'HIRSEL_MEMORY_LIMIT': '2G', 'HIRSEL_JOBS': '1'}
         admit()
         command = [str(compiler), 'check',
@@ -141,44 +136,47 @@ def sample_sources(compiler, output, profile_front=False, *, names=('m1', 'std')
             raise ValueError(f'{name}: driver did not return a check result')
         metrics = read_json(directory / 'metrics.json')
         process = observed['instructions']
-        yield name, lines, product, metrics, process
+        yield name, product, metrics, process
 
 
 def run(compiler, output, ceilings, request_compiler=None, report_only=False):
     failures, observations, proposed, floors = [], {}, {}, {}
     library_tokens = {}
     names = ('m1', 'std', 'core') if request_compiler is not None else ('m1', 'std')
-    for name, lines, product, metrics, process in sample_sources(compiler, output, names=names):
-        if request_compiler is not None and name in ('std', 'core'):
-            library_tokens[name] = semantic_tokens(metrics)
+    budgets = ceilings['finished_budget_per_token']
+    for name, product, metrics, process in sample_sources(compiler, output, names=names):
         if name == 'core':
             if metrics.get('counter_refusal') or completion_errors(product, COMPLETE):
                 raise ValueError('core: could not measure tokens for the fixed core request')
+            library_tokens[name] = semantic_tokens(metrics)
             continue
         ceiling = ceilings['corpora'].get(name, {})
         residual = ANCHOR_RESIDUAL.get(name, 0)
-        lower, total, errors = check_ceiling(metrics, lines, ceiling, process, residual)
+        lower, total, errors = check_ceiling(metrics, ceiling, process, residual)
+        tokens = metrics['tokens']
+        if name == 'std':
+            library_tokens[name] = tokens
         if residual:
             print(f'{name}: KNOWN EXCESS core-check-index-912: {residual} absolute anchor instructions; budget uses the full process')
-        print(f'{name}: {lines} code lines; check/lower {lower:.2f}; driver request {total:.2f}; whole process {process / lines:.2f} instructions/line')
+        print(f'{name}: {tokens} semantic tokens; check/lower {lower:.2f}; driver request {total:.2f}; whole process {process / tokens:.2f} instructions/token')
         projection = COMPLETE
         completion = completion_errors(product, projection)
         failures.extend(f'{name}: {error}' for error in completion)
-        forecast, budget_errors = finished_forecast(
-            process, lines, projection, ceilings['finished_budget_per_line'])
+        forecast, budget_errors = finished_forecast(process, tokens, projection, budgets[name])
         print(f"{name}: finished whole process forecast {forecast:.2f}; "
-              f"budget {ceilings['finished_budget_per_line']} instructions/line; "
+              f"budget {budgets[name]} instructions/token; "
               f"current corpus complete: {not (product['diagnostics'] or product['incomplete'])}")
         failures.extend(f'{name}: {e}' for e in errors + budget_errors)
         raw = {stage['name']: stage['instructions'] for stage in metrics['stages']}
-        values = dict(check_lower_per_line=(raw['check/lower'] - residual) / lines,
-                      whole_request_per_line=(metrics['instructions'] - residual) / lines,
-                      whole_process_per_line=(process - residual) / lines)
-        observations[name] = dict(code_lines=lines, process=process, metrics=metrics,
+        values = dict(check_lower_per_token=max(0, raw['check/lower'] - residual),
+                      whole_request_per_token=max(0, metrics['instructions'] - residual),
+                      whole_process_per_token=max(0, process - residual))
+        observations[name] = dict(tokens=tokens, process=process, metrics=metrics,
                                   diagnostics=product['diagnostics'], incomplete=product['incomplete'])
         if not completion:
-            floors[name] = {key: max(0, value) + PROCESS_RESIDUAL / lines for key, value in values.items()}
-            proposed[name] = {key: max(margin(max(0, value)), floors[name][key]) for key, value in values.items()}
+            floors[name] = {key: (value + PROCESS_RESIDUAL) / tokens for key, value in values.items()}
+            proposed[name] = {key: max(instruction_rate_ceiling(value, tokens), floors[name][key])
+                              for key, value in values.items()}
     if request_compiler is not None:
         errors, observed, limits = run_product(request_compiler, output / 'product', ceilings, library_tokens)
         failures.extend(errors)
@@ -187,7 +185,10 @@ def run(compiler, output, ceilings, request_compiler=None, report_only=False):
             name: (row['instructions'] + PROCESS_RESIDUAL) / row['tokens']
             for name, row in observed['fixed'].items()
         })
-        floors['product']['entries'] = {row['entry']: dict(marginal_per_line=row['marginal'] + 2 * PROCESS_RESIDUAL / row['own_lines']) for row in observed['entries']}
+        floors['product']['entries'] = {
+            row['entry']: dict(marginal_per_token=(row['process'] - row['fixed'] + 2 * PROCESS_RESIDUAL) / row['own_tokens'])
+            for row in observed['entries']
+        }
     print('COST_REPORT ' + json.dumps(dict(target='core-check-cost', findings=failures, observations=observations, ceilings=proposed, floors=floors)), flush=True)
     if failures:
         message = '\n'.join(failures) + '\n' + ceilings['policy']
@@ -198,15 +199,15 @@ def run(compiler, output, ceilings, request_compiler=None, report_only=False):
 
 
 
-def product_ceiling(process, fixed, lines, ceiling, budget):
-    if fixed <= 0 or lines <= 0 or process < fixed:
+def product_ceiling(process, fixed, tokens, ceiling, budget):
+    if fixed <= 0 or tokens <= 0 or process < fixed:
         raise ValueError('invalid fixed/marginal product sample')
-    marginal = (process - fixed) / lines
+    marginal = (process - fixed) / tokens
     failures = []
     if marginal > ceiling:
-        failures.append(f'marginal {marginal:.2f} exceeds observation ceiling {ceiling}')
+        failures.append(f'marginal {marginal:.2f} instructions/token exceeds observation ceiling {ceiling}')
     if marginal > budget:
-        failures.append(f'marginal {marginal:.2f} exceeds budget {budget}')
+        failures.append(f'marginal {marginal:.2f} instructions/token exceeds budget {budget}')
     return marginal, failures
 
 
@@ -248,7 +249,7 @@ def product_sample(compiler, inputs, entry, mode, directory, cache):
         raise ValueError(f'{directory.name}: product did not check exactly the program sources: {result}')
     if result['library_bodies_after_check'] != 0:
         raise ValueError('check-only request unexpectedly loaded library bodies')
-    return observed['instructions']
+    return observed['instructions'], semantic_tokens(read_json(directory / 'metrics.json'))
 
 
 def run_product(compiler, directory, ceilings, library_tokens):
@@ -281,29 +282,30 @@ def run_product(compiler, directory, ceilings, library_tokens):
         if mode == 'core':
             request['packages'] = [p for p in request['packages'] if p['package']['name'] != 'std']
             request['packages'][-1]['dependencies'] = [request['core']]
-        instructions = product_sample(compiler, request, 'empty@1/main/main', mode,
-                                      directory / ('fixed-' + mode), cache)
+        instructions, _ = product_sample(compiler, request, 'empty@1/main/main', mode,
+                                         directory / ('fixed-' + mode), cache)
         fixed['fixed ' + mode] = dict(instructions=instructions, tokens=library_tokens[mode])
     failures, fixed_proposals = fixed_product_costs(fixed, limits)
     fixed_std = fixed['fixed std']['instructions']
+    budgets = ceilings['finished_budget_per_token']['product']
     rows = []
     for entry in manifest['entries']:
         name = entry['workload'] + '-' + entry['variant']
         request = m1.inputs_for(manifest, entry, ROOT)
-        own = {Path(s['file']) for p in request['packages']
-               if p['package']['name'] not in ['core', 'std'] for s in p['sources']}
-        lines = sum(source_lines(p) for p in sorted(own))
         path = entry['package']['name'] + '@1/' + entry['module'] + '/' + entry['function']
-        process = product_sample(compiler, request, path, 'std', directory / name, cache)
-        marginal, errors = product_ceiling(process, fixed_std, lines,
-            limits.get('entries', {}).get(name, {}).get('marginal_per_line', float('inf')), ceilings['finished_budget_per_line'])
-        rows.append(dict(entry=name, own_lines=lines, process=process,
+        process, tokens = product_sample(compiler, request, path, 'std', directory / name, cache)
+        marginal, errors = product_ceiling(process, fixed_std, tokens,
+            limits.get('entries', {}).get(name, {}).get('marginal_per_token', float('inf')), budgets[name])
+        rows.append(dict(entry=name, own_tokens=tokens, process=process,
                          fixed=fixed_std, marginal=marginal))
-        print(f'product {name}: {lines} own lines; process {process}; fixed {fixed_std}; marginal {marginal:.2f}')
+        print(f'product {name}: {tokens} own tokens; process {process}; fixed {fixed_std}; marginal {marginal:.2f} instructions/token')
         failures.extend(f'product {name}: {e}' for e in errors)
     (directory / 'results.json').write_text(json.dumps(dict(fixed=fixed, entries=rows), indent=2) + '\n')
     proposals = {'instructions_per_token': fixed_proposals}
-    proposals['entries'] = {row['entry']: dict(marginal_per_line=margin(row['marginal'])) for row in rows}
+    proposals['entries'] = {
+        row['entry']: dict(marginal_per_token=instruction_rate_ceiling(row['process'] - row['fixed'], row['own_tokens']))
+        for row in rows
+    }
     return failures, dict(fixed=fixed, entries=rows), proposals
 
 

@@ -18,6 +18,7 @@ pub(crate) const SIGNATURE_BYTES: u64 = 32;
 #[repr(C)]
 pub(crate) struct ScramRequest<'a> {
     pub(crate) send: SendRequest,
+    derive: fn(&mut Self),
     pub(crate) client_first: &'a [u8],
     pub(crate) server_first: &'a [u8],
     transcript: Transcript<'a>,
@@ -40,7 +41,9 @@ impl ScramRequest<'_> {
 /// # Safety
 /// The request points at a pinned ScramRequest and this is its issue callback.
 pub(crate) unsafe fn issue(request: &Request) {
-    unsafe { (*request.path.cast_mut().cast::<ScramRequest<'_>>()).derive() };
+    // SAFETY: the SCRAM adapter pins the request and installs the callback.
+    let scram = unsafe { &mut *request.path.cast_mut().cast::<ScramRequest<'_>>() };
+    (scram.derive)(scram);
 }
 
 struct Charge(Payer);
@@ -242,6 +245,7 @@ pub unsafe extern "C" fn hirsel_core_scram_sha256(
                 committed: 0,
                 narrowed: None,
             },
+            derive: ScramRequest::derive,
             client_first,
             server_first,
             transcript,

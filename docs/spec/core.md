@@ -309,7 +309,11 @@ operations it names; nothing else about them may be inferred from an implementat
   every `T` fits in `U`, and `int.truncate` only where `U` is no wider than `T`
   ([SEM-1](semantics.md#sem-1-integers)); `int.narrow` fails with `Overflow`; `int.truncate` keeps
   the low bits of the destination's width. `wrapping_neg` and `wrapping_shl` work modulo 2^width, `wrapping_shl` taking
-  its count modulo the width. `int.abs(a)` is `a` on an unsigned type; on a signed type it is `-a` for
+  its count modulo the width. `int.rotate_left(x, n)` and `int.rotate_right(x, n)` rotate the
+  width's bits of `x` (a signed `x` by its two's-complement bits) by the `u32` count `n` modulo
+  the width, and `int.swap_bytes(x)` reverses the bytes of `x`, so it returns `x` on an 8-bit type.
+  None of the three fails or admits bytes, and each call takes one Step
+  ([MEM-30](budgets.md#mem-30-step-bounds)), whatever the count. `int.abs(a)` is `a` on an unsigned type; on a signed type it is `-a` for
   a negative `a` and `a` otherwise, so `int.abs(MIN)` fails with `Overflow` at the call, as `-MIN` does. `checked_div` returns `None` for a zero divisor and for `MIN /
   -1`. `int.mul_wide(a, b)` returns the high and low halves of the exact 128-bit product.
   `int.parse` reads ASCII decimal digits, with one leading `-` for a signed `T` and no other

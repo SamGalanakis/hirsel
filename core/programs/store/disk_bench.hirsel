@@ -54,8 +54,8 @@ fn disk_bench_journal(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, mo
     let t = result.unwrap(table(mut db, "accounts", std.codec.key_u64(), dictionary))
     let mut n = 0u64
     while n < 64 {
-        let ticket = disk_bench_commit(mut db, t, n)
-        result.unwrap(durable(mut db, ticket))
+        let committed = disk_bench_commit(mut db, t, n)
+        result.unwrap(durable(mut db, committed))
         n += 1
     }
     let mut gate = result.unwrap(host.open(d, "gate", Read))
@@ -67,8 +67,8 @@ fn disk_bench_journal(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, mo
     if mode == "R4" {
         for _ in 0u64 .. 10000 {
             reported += n
-            let ticket = disk_bench_commit(mut db, t, n)
-            result.unwrap(durable(mut db, ticket))
+            let committed = disk_bench_commit(mut db, t, n)
+            result.unwrap(durable(mut db, committed))
             n += 1
         }
     } else {
@@ -152,7 +152,7 @@ pub fn disk_bench_main(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, a
     let first_pack = disk_bench_next_pack(child)
     if mode == "R6" {
         for i in 0u64 .. 64 {
-            let k = sm(i) % n
+            let k = splitmix64(i) % n
             disk_bench_put(mut db, t, k, 100000 + i)
         }
     }
@@ -198,7 +198,7 @@ pub fn disk_bench_main(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, a
         let mut balance = k
         if mode == "R6" {
             for i in 0u64 .. 64 {
-                if sm(i) % n == k { balance = 100000 + i }
+                if splitmix64(i) % n == k { balance = 100000 + i }
             }
         }
         if row.0 != k || row.1.id != k || row.1.balance != int.narrow(balance) || row.1.owner != "owner000" {

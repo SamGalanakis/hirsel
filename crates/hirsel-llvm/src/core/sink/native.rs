@@ -687,6 +687,10 @@ impl Sink for NativeSink {
                             0,
                         );
                     }
+                    if let Some(tag) = attrs.tbaa {
+                        let tag = self.md(tag);
+                        (api.attach)(u, call, TBAA, tag);
+                    }
                     self.scopes(call, &attrs.scopes);
                     call
                 }

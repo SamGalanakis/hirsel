@@ -571,6 +571,7 @@ pub(super) struct CallAttrs {
     pub tail: bool,
     pub inline: Inline,
     pub scopes: Option<Scoped>,
+    pub tbaa: Option<usize>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
@@ -1167,6 +1168,9 @@ impl Sink for TextSink {
                 }
                 if attrs.step_neutral {
                     out.push_str(" \"hirsel-step-neutral\"");
+                }
+                if let Some(tag) = attrs.tbaa {
+                    write!(out, ", !tbaa !{tag}").unwrap();
                 }
                 scopes(out, &attrs.scopes);
             }

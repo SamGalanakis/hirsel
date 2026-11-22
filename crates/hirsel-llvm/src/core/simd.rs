@@ -53,7 +53,10 @@ impl FunctionEmitter<'_> {
         let a = self.numeric(first);
         let b = second.map(|v| self.numeric(v));
         let value = match op {
-            From | Lanes => self.load(&ty, &a, 1),
+            From | Lanes => {
+                let memory = self.lane_load_memory(first, shape.size());
+                self.load_with(&ty, &a, &memory)
+            }
             Cast => {
                 let from = super::ty(first_ty);
                 if from == ty {
@@ -134,6 +137,34 @@ impl FunctionEmitter<'_> {
         };
         self.put(result, &value);
         Ok(())
+    }
+
+    fn lane_load_memory(&self, first: ValueId, bytes: u64) -> Memory {
+        use storage::PointerOrigin;
+
+        let origin = self.pointer_origins.get(first.index()).copied().flatten();
+        let address = match origin {
+            Some(PointerOrigin::Address(address)) => Some(address),
+            _ => None,
+        };
+        // Scopes describe whole scalar buffers. For an Inline source, its
+        // physical scalar array must cover the load. A static byte array is
+        // immutable and covers the load when it holds at least this width.
+        let data = address.is_some_and(|a| self.scalar_buffer(a))
+            || self
+                .inline_scalar_extent(AddressBase::Value(first))
+                .is_some_and(|n| bytes <= n)
+            || matches!(origin, Some(PointerOrigin::Static(id))
+                if matches!(&self.module.statics[id.index()], Static::Bytes { bytes: data, .. }
+                    if bytes <= data.len() as u64));
+        Memory {
+            align: 1,
+            tbaa: data.then_some(alias::DATA_ACCESS),
+            scopes: address
+                .filter(|_| data)
+                .and_then(|a| self.access_facts(&[a])),
+            ..Memory::default()
+        }
     }
 
     fn splat(&mut self, ty: &Type, lane: &Type, count: u64, value: &Value) -> Value {
@@ -297,26 +328,65 @@ impl FunctionEmitter<'_> {
     pub(super) fn put_lanes(&mut self, to: AddressId, vector: ValueId, count: ValueId) {
         let vector_ty = self.vty(vector);
         let ty = ty(vector_ty);
+        let width = size(vector_ty);
+        let constant = self.constants[count.index()];
+        if constant == Some(0) {
+            return;
+        }
         let dest = self.address(to);
         let vector = self.numeric(vector);
         let count = self.numeric(count);
-        let full = self.cmp(Predicate::Eq, &Type::I64, &count, &int(size(vector_ty)));
+        // PutLanes reaches only the checked or reserved range in a scalar
+        // buffer. Its prefix copy reads a fresh private LLVM stack temporary.
+        let data = self.facts && self.scalar_buffer(to);
+        let memory = Memory {
+            align: 1,
+            scopes: data.then(|| self.access_facts(&[to])).flatten(),
+            tbaa: data.then_some(alias::DATA_ACCESS),
+            ..Memory::default()
+        };
+        if let Some(constant) = constant {
+            if constant == width {
+                self.store_with(&ty, &vector, &dest, &memory);
+            } else {
+                self.put_lanes_prefix(&ty, &vector, &dest, count, &memory);
+            }
+            return;
+        }
+        let full = self.cmp(Predicate::Eq, &Type::I64, &count, &int(width));
         let id = self.counter();
         let wide = Label::new("put_lanes_full", id);
         let prefix = Label::new("put_lanes_prefix", id);
         let done = Label::new("put_lanes_done", id);
         self.cond(&full, wide, prefix);
         self.block(wide);
-        self.store(&ty, &vector, &dest, 1);
+        self.store_with(&ty, &vector, &dest, &memory);
         self.br(done);
         self.block(prefix);
-        let scratch = self.temp(ty.clone());
-        self.store(&ty, &vector, &scratch, 8);
-        self.runtime_void(
-            "llvm.memcpy.p0.p0.i64",
-            &super::abi::memcpy(&dest, &scratch, count),
-        );
+        self.put_lanes_prefix(&ty, &vector, &dest, count, &memory);
         self.br(done);
         self.block(done);
+    }
+
+    fn put_lanes_prefix(
+        &mut self,
+        ty: &Type,
+        vector: &Value,
+        dest: &Value,
+        count: Value,
+        memory: &Memory,
+    ) {
+        let scratch = self.temp(ty.clone());
+        self.store(ty, vector, &scratch, 8);
+        self.runtime(
+            "llvm.memcpy.p0.p0.i64",
+            Type::Void,
+            &super::abi::memcpy(dest, &scratch, count),
+            &CallAttrs {
+                scopes: memory.scopes.clone(),
+                tbaa: memory.tbaa,
+                ..CallAttrs::default()
+            },
+        );
     }
 }

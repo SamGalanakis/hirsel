@@ -105,6 +105,66 @@ fn inline_word(a: Inline[u8, 12]) -> u32 { inline.word_be(a, 1) }
 }
 
 #[test]
+fn simd_lanes_memory_keeps_data_facts_and_constant_width_stores() {
+    let source = r#"
+fn overwrite(mut dst: Bytes, at: u64, array: Inline[u8, 16]) -> u64 {
+    let previous: Simd[u8, 16] = list.lanes(dst, at)
+    let replacement: Simd[u8, 16] = simd.from(array)
+    list.set_lanes(mut dst, at, replacement)
+    simd.bitmask(previous)
+}
+fn append_full(mut dst: Bytes, byte: u8) {
+    let lanes: Simd[u8, 16] = simd.splat(byte)
+    list.put_lanes(mut dst, lanes, 16)
+}
+fn append_prefix(mut dst: Bytes, byte: u8, count: u64) {
+    let lanes: Simd[u8, 16] = simd.splat(byte)
+    list.put_lanes(mut dst, lanes, count)
+}
+"#;
+    let (program, names) = hirsel_core_program_tests::SourceProgram::lower(source, None);
+    let ir =
+        emit_ir_for_test_with_facts(&program, Target::X86_64Linux, false, false, true).unwrap();
+    verify_ir(&ir);
+    let data = storage_access_tag(&ir, "scalar data");
+    let scoped = |line: &str| line.contains("!alias.scope") && line.contains("!noalias");
+    let overwrite = emitted_body(&ir, &symbol(&program, names["overwrite"]));
+    let lane_loads = overwrite
+        .lines()
+        .filter(|line| line.contains("load <16 x i8>,") && line.contains("align 1,"));
+    // Step batching may clone these reads. Check their tags in every copy,
+    // including scoped Bytes loads and unscoped Inline loads.
+    assert!(lane_loads.clone().any(scoped), "{overwrite}");
+    assert!(lane_loads.clone().any(|line| !scoped(line)), "{overwrite}");
+    assert!(
+        lane_loads.clone().all(|line| line.contains(&data)),
+        "{overwrite}"
+    );
+    for name in ["overwrite", "append_full"] {
+        let body = emitted_body(&ir, &symbol(&program, names[name]));
+        assert!(
+            !body.contains("put_lanes_full"),
+            "{name} still branches on a constant count:{body}"
+        );
+        assert!(
+            body.lines().any(|line| line.contains("store <16 x i8>")
+                && line.contains(&data)
+                && scoped(line)),
+            "{name}:{body}"
+        );
+    }
+    let prefix = emitted_body(&ir, &symbol(&program, names["append_prefix"]));
+    assert!(
+        prefix
+            .lines()
+            .any(|line| line.contains("call void @llvm.memcpy.p0.p0.i64")
+                && line.contains(&data)
+                && scoped(line)),
+        "{prefix}"
+    );
+}
+
+#[test]
 fn scalar_record_calls_agree_with_evaluator() {
     let source = r#"
 type Single { n: u64 }

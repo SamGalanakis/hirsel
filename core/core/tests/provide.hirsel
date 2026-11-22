@@ -1781,20 +1781,27 @@ fn timeout_then_spent(take timed: Timed) -> bool waits {
         _ => false
     }
     let spent_plain = match host.send_pair(mut writer, string.as_bytes("unreachable"), empty, Never) {
-        Error(Denied) => true,
+        Error(Reset) => true,
         _ => false
     }
     let spent_secret = match tls.send_secret(mut writer, empty, token, empty, Never) {
-        Error(Denied) => true,
+        Error(Reset) => true,
+        _ => false
+    }
+    let client_first = string.as_bytes("n,,n=user,r=abc")
+    let server_first = string.as_bytes("r=abcd,s=c2FsdA==,i=4096")
+    let spent_scram = match secret.scram_sha256(mut writer, token, client_first, server_first, empty, empty, Never) {
+        Error(Net(Reset)) => true,
         _ => false
     }
     let _ = take r
     let _ = take writer
-    expired && issued && spent_plain && spent_secret
+    expired && issued && spent_plain && spent_secret && spent_scram
 }
 
-// The expired send queues nothing and leaves the half usable. Once the
-// server takes and fails a send, the caller cannot use the half again.
+// TLS-5/TL13. Later sends on a spent write half give Reset. An expired
+// deadline before issue leaves the half usable. A failed issued SendSecret
+// spends the served half because the reply carries no committed count (NOTES 33).
 // expect: run net_secret_spends_after_issue(tasks) = true
 fn net_secret_spends_after_issue(tasks: Tasks) -> bool waits {
     let (v, hand) = provide.clock(10, 0)

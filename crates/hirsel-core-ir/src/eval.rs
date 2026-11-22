@@ -3884,12 +3884,7 @@ impl Machine<'_> {
             return Ok(vec![0, 1, 0, 0]);
         };
         if *spent {
-            let error = if self.port_socket(key, 3).is_some() {
-                1
-            } else {
-                5
-            };
-            return Ok(vec![0, error, 0, 0]);
+            return Ok(vec![0, 5, 0, 0]);
         }
         let Some(secret) = self.world.secrets.get(a[2] as usize) else {
             return Ok(vec![0, 1, 0, 0]);
@@ -3959,9 +3954,6 @@ impl Machine<'_> {
         }
         if spent {
             self.refund(payer, CHARGE);
-            if self.port_socket(key, 3).is_some() {
-                return Ok(vec![0, 1, 0, 0]);
-            }
             return Ok(vec![0, 5, 0, 5]);
         }
         if let Err(cancelled) = self.check_cancel(t) {
@@ -4060,12 +4052,7 @@ impl Machine<'_> {
                     .get(&(a[0] & !3))
                     .is_some_and(|record| record.1) =>
             {
-                let error = if self.port_socket(a[0], 3).is_some() {
-                    1
-                } else {
-                    5
-                };
-                return Ok(vec![0, error, 0, 0]);
+                return Ok(vec![0, 5, 0, 0]);
             }
             _ => {}
         }

@@ -419,7 +419,12 @@ pub(crate) unsafe fn owned_op(
         #[cfg(feature = "record")]
         let tape = (*files).net_tape;
         if op == SEND_PAIR && write_spent(files, key) {
-            return AddressOutcome::new(RESET, Address::default());
+            let error = if served_socket(context, key).is_some() {
+                DENIED
+            } else {
+                RESET
+            };
+            return AddressOutcome::new(error, Address::default());
         }
         let mut network = NetworkRequest {
             send_tail,
@@ -665,7 +670,7 @@ pub unsafe extern "C" fn hirsel_core_host_send_secret(
                 return DENIED;
             }
             if write.spent {
-                return RESET;
+                return if served { DENIED } else { RESET };
             }
             if !secret
                 .policy
@@ -741,11 +746,11 @@ pub(crate) unsafe fn send_sink(context: *mut Context, mut request: Request) -> O
             provider
         };
         let outcome = hirsel_core_host(context, &provider, &mut request);
-        let committed = (*request.path.cast::<crate::secret::SendRequest>()).committed;
+        let send = &*request.path.cast::<crate::secret::SendRequest>();
         // A server reports no committed count: any failure after issue may
-        // follow a partial forward, so it spends a served half (NOTES 33).
+        // follow a partial forward. A queued call has taken its narrowed Secret.
         if (outcome.status != 0 || outcome.error != IoError::OK)
-            && (served || outcome.written != 0 || committed != 0)
+            && (served && send.narrowed.is_none() || outcome.written != 0 || send.committed != 0)
         {
             spend_write(files, key);
         }

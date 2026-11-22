@@ -731,6 +731,9 @@ pub(crate) unsafe fn step(request: *mut Request, token: u64, first: bool) -> Ste
     unsafe {
         let request = &mut *request;
         let n = &mut *request.path.cast_mut().cast::<NetworkRequest>();
+        if first && request.operation == SEND_SECRET && deadline(n.until, token) == Due::Passed {
+            return finish(request, n, signal(6));
+        }
         let drained = first
             && request.operation == RECV_BOUNDED
             && request.buffer.len < request.buffer.capacity

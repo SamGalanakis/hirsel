@@ -1762,3 +1762,62 @@ fn narrowed_net(tasks: Tasks) -> bool waits {
     }
     dialed && whole && redialed && shaken && halves && client && quiet
 }
+
+fn timeout_then_spent(take timed: Timed) -> bool waits {
+    let Timed(n, v) = take timed
+    let address = Addr(ip: V4(2130706433), port: 443)
+    let socket = result.unwrap(host.connect(n, address, Never))
+    let offer: List[String] = list.new()
+    let (r, w, _) = result.unwrap(tls.connect(n, take socket, "alpha.test", System, offer, Never))
+    let mut writer = take w
+    let token = sealed_pencil("alpha.test")
+    let empty: Bytes = list.new()
+    let expired = match tls.send_secret(mut writer, string.as_bytes("not queued"), token, empty, At(v, host.mono_ns(v))) {
+        Error(TimedOut) => true,
+        _ => false
+    }
+    let issued = match tls.send_secret(mut writer, string.as_bytes("A"), token, string.as_bytes("E"), Never) {
+        Error(Refused) => true,
+        _ => false
+    }
+    let spent_plain = match host.send_pair(mut writer, string.as_bytes("unreachable"), empty, Never) {
+        Error(Denied) => true,
+        _ => false
+    }
+    let spent_secret = match tls.send_secret(mut writer, empty, token, empty, Never) {
+        Error(Denied) => true,
+        _ => false
+    }
+    let _ = take r
+    let _ = take writer
+    expired && issued && spent_plain && spent_secret
+}
+
+// The expired send queues nothing and leaves the half usable. Once the
+// server takes and fails a send, the caller cannot use the half again.
+// expect: run net_secret_spends_after_issue(tasks) = true
+fn net_secret_spends_after_issue(tasks: Tasks) -> bool waits {
+    let (v, hand) = provide.clock(10, 0)
+    let _ = take hand
+    let (n, s) = provide.net(bytes 128)
+    let mut port = take s
+    let child = task.spawn(tasks, bytes 65536, Timed(n: n, v: v), timeout_then_spent)
+    let dialed = net_connect(mut port, 11, 443)
+    let secured = answer_handshake(mut port, 11)
+    let Some(take call) = provide.next(mut port) else { return false }
+    let shape = match provide.net_op(call) {
+        SendSecret(socket, before, after) => socket == 11 && before == 1 && after == 1,
+        _ => false
+    }
+    let mut p: Bytes = list.with_capacity(16)
+    provide.payload(call, 0, mut p)
+    let hidden = list.len(p) == 0 && secret.render(provide.secret(call)) == "[secret]"
+    provide.payload(call, 1, mut p)
+    provide.payload(call, 2, mut p)
+    let envelope = list.len(p) == 2 && p[0] == b'A' && p[1] == b'E'
+    let failed = net_answer(mut port, take call, Failed(Refused))
+    let read = net_released(mut port, 11, 1)
+    let write = net_released(mut port, 11, 2)
+    let client = result.unwrap(task.join(take child))
+    dialed && secured && shape && hidden && envelope && failed && read && write && client
+}

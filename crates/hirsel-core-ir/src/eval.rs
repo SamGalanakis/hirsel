@@ -2128,6 +2128,11 @@ impl Machine<'_> {
             timers.push((at, k));
         }
     }
+    fn remove_cell_timer(&mut self, c: usize, k: usize) {
+        if let VirtualCell::Clock { timers, .. } = &mut self.world.cells[c] {
+            timers.retain(|&(_, task)| task != k);
+        }
+    }
     fn ready_provider(&mut self, k: usize) {
         if self.sched.tasks[k].state == State::Provider {
             self.sched.tasks[k].state = State::Ready;
@@ -2211,7 +2216,7 @@ impl Machine<'_> {
         out: Option<u64>,
         live: bool,
     ) -> X<Vec<u64>> {
-        self.port_call_with(t, c, words, fields, out, live, None, None)
+        self.port_call_with(t, c, words, fields, out, live, &mut None, None)
     }
 
     /// `port_call` for a Net call, with its `until` (NOTES 35) and, for a
@@ -2227,7 +2232,7 @@ impl Machine<'_> {
         fields: Vec<Vec<u8>>,
         out: Option<u64>,
         live: bool,
-        secret: Option<EvalSecret>,
+        secret: &mut Option<EvalSecret>,
         deadline: Option<Due>,
     ) -> X<Vec<u64>> {
         let VirtualCell::Port { vocab, sealed, .. } = &self.world.cells[c] else {
@@ -2275,7 +2280,7 @@ impl Machine<'_> {
                 held: false,
                 answer: None,
                 finished: false,
-                secret,
+                secret: secret.take(),
             },
         );
         let servers: Vec<usize> = servers.iter().map(|&(k, _)| k).collect();
@@ -2309,6 +2314,9 @@ impl Machine<'_> {
                 None => None,
             };
             self.park(Some(Wait::Network(host)));
+            if let Some(Due::Cell(clock, _)) = deadline {
+                self.remove_cell_timer(clock, t.k);
+            }
             if std::mem::take(&mut self.sched.tasks[t.k].cancelled) {
                 let cell = &mut self.world.cells[c];
                 let call = cell.port().0.get_mut(&id).unwrap();
@@ -3579,7 +3587,7 @@ impl Machine<'_> {
             HostOp::Resolve | HostOp::RecvBounded | HostOp::SendPair => self.until(a, 3),
             _ => None,
         };
-        self.port_call_with(t, c, w, fields, out, live, None, deadline)
+        self.port_call_with(t, c, w, fields, out, live, &mut None, deadline)
     }
 
     /// `net.join` on a served Net socket's live halves (native
@@ -3829,6 +3837,9 @@ impl Machine<'_> {
                 None => None,
             };
             self.park(Some(Wait::Network(host)));
+            if let Some(Due::Cell(clock, _)) = deadline {
+                self.remove_cell_timer(clock, t.k);
+            }
             if std::mem::take(&mut self.sched.tasks[t.k].cancelled) {
                 break model.abort(token, true);
             }
@@ -3973,7 +3984,7 @@ impl Machine<'_> {
         let row = match self.check_cancel(t).and_then(|()| {
             let deadline = self.until(a, 6);
             let fields = vec![vec![], canonical, wire];
-            self.port_call_with(t, c, w, fields, None, live, None, deadline)
+            self.port_call_with(t, c, w, fields, None, live, &mut None, deadline)
         }) {
             Ok(row) => row,
             Err(stop) => {
@@ -4098,7 +4109,12 @@ impl Machine<'_> {
             return Ok(vec![0, 1, 0, 0]);
         };
         if *spent {
-            return Ok(vec![0, 5, 0, 0]);
+            let error = if self.port_socket(key, 3).is_some() {
+                1
+            } else {
+                5
+            };
+            return Ok(vec![0, error, 0, 0]);
         }
         let Some(secret) = self.world.secrets.get(a[2] as usize) else {
             return Ok(vec![0, 1, 0, 0]);
@@ -4127,11 +4143,11 @@ impl Machine<'_> {
             let mut w = [0; 8];
             w[..4].copy_from_slice(&[7, id, before.len() as u64, after.len() as u64]);
             let fields = vec![vec![], before, after];
-            let row = self.check_cancel(t).and_then(|()| {
-                let deadline = self.until(a, 4);
-                self.port_call_with(t, c, w, fields, None, live, Some(narrowed), deadline)
-            });
-            if !matches!(&row, Ok(row) if row[1] == 0) {
+            self.check_cancel(t)?;
+            let deadline = self.until(a, 4);
+            let mut secret = Some(narrowed);
+            let row = self.port_call_with(t, c, w, fields, None, live, &mut secret, deadline);
+            if secret.is_none() && !matches!(&row, Ok(row) if row[1] == 0) {
                 self.world.tls_writes.get_mut(&(key & !3)).unwrap().1 = true;
             }
             return row;
@@ -4185,6 +4201,9 @@ impl Machine<'_> {
         }
         if spent {
             self.refund(payer, CHARGE);
+            if self.port_socket(key, 3).is_some() {
+                return Ok(vec![0, 1, 0, 0]);
+            }
             return Ok(vec![0, 5, 0, 5]);
         }
         if let Err(cancelled) = self.check_cancel(t) {
@@ -4204,14 +4223,15 @@ impl Machine<'_> {
                 w[..4].copy_from_slice(&[5, id, (joined.len() - at) as u64, 0]);
                 let fields = vec![vec![], joined[at..].to_vec(), vec![]];
                 let deadline = self.until(args, 6);
-                let row = match self.port_call_with(t, c, w, fields, None, live, None, deadline) {
-                    Ok(row) => row,
-                    Err(stop) => {
-                        self.refund(payer, CHARGE);
-                        self.world.tls_writes.get_mut(&(key & !3)).unwrap().1 = true;
-                        return Err(stop);
-                    }
-                };
+                let row =
+                    match self.port_call_with(t, c, w, fields, None, live, &mut None, deadline) {
+                        Ok(row) => row,
+                        Err(stop) => {
+                            self.refund(payer, CHARGE);
+                            self.world.tls_writes.get_mut(&(key & !3)).unwrap().1 = true;
+                            return Err(stop);
+                        }
+                    };
                 if row[1] != 0 {
                     self.refund(payer, CHARGE);
                     self.world.tls_writes.get_mut(&(key & !3)).unwrap().1 = true;
@@ -4298,7 +4318,12 @@ impl Machine<'_> {
                     .get(&(a[0] & !3))
                     .is_some_and(|record| record.1) =>
             {
-                return Ok(vec![0, 5, 0, 0]);
+                let error = if self.port_socket(a[0], 3).is_some() {
+                    1
+                } else {
+                    5
+                };
+                return Ok(vec![0, error, 0, 0]);
             }
             _ => {}
         }

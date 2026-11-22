@@ -21,6 +21,7 @@ POSTGRES = (
     'startup_ready_deadline', 'fatal_error_during_sync',
 )
 DIRECT = {
+    'exec:output_drains_past_limits',
     'exec:run_until_escalates',
     'exec:run_until_exits_early',
     'prop:prop_tasks_script_shrink_replay',

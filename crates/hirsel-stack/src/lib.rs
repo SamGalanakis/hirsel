@@ -29,6 +29,9 @@ macro_rules! x86_switch {
         #[unsafe(naked)]
         pub unsafe extern "C" fn $name(_save: *mut *mut u8, _to: *mut u8) {
             core::arch::naked_asm!(
+                ".cfi_startproc",
+                ".cfi_def_cfa rsp, 0",
+                ".cfi_undefined rip",
                 $update,
                 "push rbp",
                 "push rbx",
@@ -51,6 +54,7 @@ macro_rules! x86_switch {
                 "pop rbx",
                 "pop rbp",
                 "ret",
+                ".cfi_endproc",
             )
         }
     };
@@ -60,7 +64,16 @@ x86_switch!(switch, "");
 #[cfg(target_arch = "x86_64")]
 #[unsafe(naked)]
 unsafe extern "C" fn fiber_start() {
-    core::arch::naked_asm!("mov rdi, r12", "mov rsi, r13", "call r14", "ud2")
+    core::arch::naked_asm!(
+        ".cfi_startproc",
+        ".cfi_def_cfa rsp, 0",
+        ".cfi_undefined rip",
+        "mov rdi, r12",
+        "mov rsi, r13",
+        "call r14",
+        "ud2",
+        ".cfi_endproc",
+    )
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -81,6 +94,9 @@ pub fn initial_frame(entry: Entry, first: *mut u8, second: *mut u8) -> [u64; 20]
 #[unsafe(naked)]
 pub unsafe extern "C" fn switch(_save: *mut *mut u8, _to: *mut u8) {
     core::arch::naked_asm!(
+        ".cfi_startproc",
+        ".cfi_def_cfa sp, 0",
+        ".cfi_undefined x30",
         "sub sp, sp, #160",
         "stp x19, x20, [sp, #0]",
         "stp x21, x22, [sp, #16]",
@@ -107,13 +123,23 @@ pub unsafe extern "C" fn switch(_save: *mut *mut u8, _to: *mut u8) {
         "ldp d14, d15, [sp, #144]",
         "add sp, sp, #160",
         "ret",
+        ".cfi_endproc",
     )
 }
 
 #[cfg(target_arch = "aarch64")]
 #[unsafe(naked)]
 unsafe extern "C" fn fiber_start() {
-    core::arch::naked_asm!("mov x0, x19", "mov x1, x20", "blr x21", "brk #0")
+    core::arch::naked_asm!(
+        ".cfi_startproc",
+        ".cfi_def_cfa sp, 0",
+        ".cfi_undefined x30",
+        "mov x0, x19",
+        "mov x1, x20",
+        "blr x21",
+        "brk #0",
+        ".cfi_endproc",
+    )
 }
 
 /// One client request: `VALGRIND_DO_CLIENT_REQUEST_EXPR(default, code, a1, a2, a3, a4, 0)`.

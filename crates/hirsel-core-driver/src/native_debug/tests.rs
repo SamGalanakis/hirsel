@@ -4,6 +4,73 @@ fn link_rebinds_rows_and_inline_calls_without_changing_native_code() {
 }
 
 #[test]
+fn native_fiber_boundary_has_no_caller() {
+    use crate::{CheckRequest, Driver, Meter, native::tests::native_options};
+    use gimli::{
+        BaseAddresses, CfaRule, EhFrame, LittleEndian, Register, RegisterRule, UnwindContext,
+        UnwindSection as _,
+    };
+    use object::{Object as _, ObjectSection as _, ObjectSymbol as _};
+    use std::path::Path;
+
+    let directory = tempfile::tempdir().unwrap();
+    let app = directory.path();
+    let core = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core");
+    std::fs::write(
+        app.join("main.hirsel"),
+        "pub fn main() -> Result[(), Exit] { Ok(()) }\n",
+    )
+    .unwrap();
+    let request = CheckRequest::program(app, &core, &app.join("store")).unwrap();
+    let product = Driver::default()
+        .check(request, &mut Meter::new(false))
+        .unwrap();
+    let entry = hirsel_core_ids::DefPath::from_full("app@1/main/main").unwrap();
+    let options = native_options(crate::native::Backend::Llvm, app);
+    let built = product.build(&entry, &options).unwrap();
+    let bytes = std::fs::read(built.executable).unwrap();
+    let elf = object::File::parse(bytes.as_slice()).unwrap();
+    let section = elf.section_by_name(".eh_frame").unwrap();
+    let base = BaseAddresses::default().set_eh_frame(section.address());
+    let eh = EhFrame::new(section.data().unwrap(), LittleEndian);
+    let (sp, ra) = match elf.architecture() {
+        object::Architecture::X86_64 => (Register(7), Register(16)),
+        object::Architecture::Aarch64 => (Register(31), Register(30)),
+        arch => panic!("unsupported test host {arch:?}"),
+    };
+    for marker in ["fiber_start", "switch"] {
+        let function = elf
+            .symbols()
+            .find(|s| {
+                s.kind() == object::SymbolKind::Text
+                    && s.name()
+                        .is_ok_and(|name| name.contains("hirsel_stack") && name.contains(marker))
+            })
+            .unwrap_or_else(|| panic!("missing {marker}"));
+        let fde = eh
+            .fde_for_address(&base, function.address(), EhFrame::cie_from_offset)
+            .unwrap();
+        let mut context = UnwindContext::new();
+        let row = fde
+            .unwind_info_for_address(
+                &eh,
+                &base,
+                &mut context,
+                function.address() + function.size() - 1,
+            )
+            .unwrap();
+        assert_eq!(
+            *row.cfa(),
+            CfaRule::RegisterAndOffset {
+                register: sp,
+                offset: 0
+            }
+        );
+        assert_eq!(row.register(ra), Some(RegisterRule::Undefined));
+    }
+}
+
+#[test]
 fn llvm_unwind_covers_live_whole_split_and_reused_code() {
     use gimli::{BaseAddresses, CieOrFde, EhFrame, LittleEndian, UnwindSection as _};
     use hirsel_core_ids::ContentHash;

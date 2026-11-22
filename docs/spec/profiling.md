@@ -8,6 +8,13 @@ Linker garbage collection discards the unwind records of discarded code.
 Release builds can reuse whole modules on both architectures. x86-64 ELF
 also supports splitting and reusing individual definitions.
 
+Both architectures mark `fiber_start` and `switch` as stack boundaries. Their
+unwind records use the active stack pointer as the CFA and mark the return
+address undefined. An unwinder stops there, including during a stack switch.
+LLVM's inline stack-probe loops can use a temporary CFA register (`r11` on
+x86-64 and `x9` on AArch64). A sample inside such a range with that register
+absent is `eval_error` with stack root `failed`.
+
 ## Profile file
 
 A `.hprof` is a self-contained SQLite database with `application_id =

@@ -508,6 +508,10 @@ fn unknown_keys(table: &Table, prefix: &str, shape: Shape, unknown: &mut Vec<Str
             | (Archive, "target" | "file" | "sha256")
             | (Workspace, "members")
             | (WorkspacePackage, "charge") => continue,
+            (Tests | Run, "grant" | "dir") => {
+                unknown.push(format!("{path}. Use `{key}s`"));
+                continue;
+            }
             _ => {
                 unknown.push(path);
                 continue;

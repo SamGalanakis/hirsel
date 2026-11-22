@@ -370,6 +370,75 @@ def main():
             self.assertIn('core@1/core/Bytes\tpub type Bytes = List[u8]', lines)
             self.assertTrue(any(line.startswith('core@1/map/get\t') for line in lines))
 
+        def test_check_includes_manifest_test_sources_and_explains_test_keys(self):
+            with tempfile.TemporaryDirectory(prefix='hirsel-check-test-sources-') as temporary:
+                app = Path(temporary) / 'app'
+                created = self.progress.run([str(compiler), 'new', str(app)], cwd=ROOT,
+                                            capture_output=True, text=True)
+                self.assertEqual(created.returncode, 0, created.stderr)
+                manifest = app / 'hirsel.toml'
+                config = manifest.read_text()
+                manifest.write_text(config.replace('[tests]\n', '[tests]\ngrant = ["Stdout"]\n'))
+                refused = self.progress.run([str(compiler), 'check'], cwd=app,
+                                            capture_output=True, text=True)
+                self.assertEqual(refused.returncode, 2, refused.stdout + refused.stderr)
+                self.assertIn('unknown key tests.grant. Use `grants`', refused.stderr)
+                manifest.write_text(config)
+                (app / 'tests.hirsel').write_text(
+                    '@test fn bad() -> Result[(), ()] { true }\n')
+                checked = self.progress.run([str(compiler), 'check', '--json'], cwd=app,
+                                            capture_output=True, text=True)
+                self.assertEqual(checked.returncode, 1, checked.stdout + checked.stderr)
+                diagnostics = json.loads(checked.stdout)['diagnostics']
+                self.assertTrue(any(row['primary']['module'] == 'tests.hirsel'
+                                    and row['rule'] == 'LANG-11' for row in diagnostics),
+                                diagnostics)
+
+        def test_primer_file_http_and_simulated_clock_examples(self):
+            runtime = Path(os.environ['HIRSEL_CORE_RT_ARCHIVE']).resolve()
+            primer = (ROOT / 'docs/PRIMER.md').read_text()
+
+            def examples(title):
+                section = primer.split(title + '\n', 1)[1].split('\n## ', 1)[0]
+                source = re.search(r'^```hirsel\n(.*?)^```$', section, re.M | re.S).group(1)
+                table = re.search(r'^```text\n(.*?)^```$', section, re.M | re.S)
+                return source, table.group(1).removeprefix('[tests]\n') if table else None
+
+            samples = [
+                ('## 11. A command that reads a file', 'main.hirsel', 'reads_utf8'),
+                ('## 12. An HTTP server and client test', 'main.hirsel', 'get_hello'),
+                ('## 13. A test with a simulated clock', 'tests.hirsel', 'wakes_at_the_deadline'),
+            ]
+            with tempfile.TemporaryDirectory(prefix='hirsel-primer-') as temporary:
+                for title, filename, test in samples:
+                    with self.subTest(example=title):
+                        app = Path(temporary) / test
+                        created = self.progress.run([str(compiler), 'new', str(app)], cwd=ROOT,
+                                                    capture_output=True, text=True)
+                        self.assertEqual(created.returncode, 0, created.stderr)
+                        source, settings = examples(title)
+                        (app / filename).write_text(source)
+                        manifest = app / 'hirsel.toml'
+                        config = manifest.read_text()
+                        if settings is None:
+                            settings = 'limit = 67108864\ngrants = ["Tasks"]\n'
+                        config = config.replace('[tests]\nlimit = 67108864\n',
+                                                '[tests]\n' + settings)
+                        manifest.write_text(config)
+                        common = ['--runtime', str(runtime), '--libraries', str(ROOT / 'core')]
+                        tested = self.progress.run(
+                            [str(compiler), 'test', '--filter', '/' + test, *common], cwd=app,
+                            capture_output=True, text=True)
+                        self.assertEqual(tested.returncode, 0, tested.stdout + tested.stderr)
+                        self.assertIn('/' + test, tested.stdout)
+                        if test == 'reads_utf8':
+                            (app / 'note.txt').write_text('hello\n')
+                            ran = self.progress.run(
+                                [str(compiler), 'run', *common, '--dir', '.', '--grant', 'Stdout',
+                                 '--', 'note.txt'], cwd=app, capture_output=True, text=True)
+                            self.assertEqual(ran.returncode, 0, ran.stderr)
+                            self.assertEqual(ran.stdout, 'hello\n')
+
         def test_cross_runner_replacement_and_invalid_sysroot_are_not_cached(self):
             arm = Path(os.environ['HIRSEL_TOOLCHAIN_ARM']).resolve()
             qemu = Path(os.environ['HIRSEL_TOOLCHAIN_QEMU']).resolve() / 'qemu-aarch64'

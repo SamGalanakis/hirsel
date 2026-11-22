@@ -642,7 +642,7 @@ def first_party(meta: dict) -> str:
                                        "HIRSEL_CORE_RT_ARCHIVES": "//:hirsel-core-rt-archives",
                                        "HIRSEL_TOOLCHAIN_ARM": "//tools/buck2/native-toolchain:arm",
                                        "HIRSEL_TOOLCHAIN_QEMU": "//tools/buck2/native-toolchain:qemu"},
-                            data=Raw('glob(["core/core/**", "core/std/**", "docs/spec/**"]) + ["core/tools/case_progress.py"]')))
+                            data=Raw('glob(["core/core/**", "core/std/**", "docs/spec/**"]) + ["core/tools/case_progress.py", "docs/PRIMER.md"]')))
     for engine in ("cranelift", "llvm"):
         # host: the files program's cases open a Dir, which needs the host's openat2.
         out.append("\n" + call("hirsel_script_test", name="core-m1-" + engine, script="core/tools/m1.py", host=True,

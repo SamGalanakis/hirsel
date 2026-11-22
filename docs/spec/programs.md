@@ -34,8 +34,9 @@ A program's entry is a `pub fn main` named by its manifest. Its parameters are c
 types ([CAP-4](capabilities.md#cap-4-entry-grants)) and `Args`, all unmarked. `Args` is an
 opaque plain type designating the run's argument strings, which are host memory outside
 every limit and live for the whole run ([core](core.md#built-in-types)), read with
-`args.len(a)` and `args.get(a, i) -> Option[View[String]] in a`. Its result is `Result[(), E]` for any `E`. The
-run's configuration supplies the root limit ([MEM-19](budgets.md#mem-19-limits)). The run
+`args.len(a)` and `args.get(a, i) -> Option[View[String]] in a`. Index zero is the
+first program argument supplied after `--`. The executable name is outside `Args`.
+Its result is `Result[(), E]` for any `E`. The run's configuration supplies the root limit ([MEM-19](budgets.md#mem-19-limits)). The run
 ends when `main` returns and its cleanup is done: `Ok(())` is success, `Error(e)` is an
 error outcome carrying `e`, a failure is a failure outcome
 ([FAIL-14](failure.md#fail-14-failure-boundary)).
@@ -84,8 +85,8 @@ configuration does for `main` ([CAP-4](capabilities.md#cap-4-entry-grants),
 [MEM-19](budgets.md#mem-19-limits)), and a test whose run does not start fails. The package
 declares that configuration beside the manifest that names `main` (PROG-3): one root limit
 and one set of grants for its tests, any part of which a named test's own configuration
-replaces, and its test sources, which join the package's modules in its test runs and in no
-other build. A configuration naming a test the package does not have is refused. Of the
+replaces, and its test sources. Test sources join the package's modules for `hirsel check`
+and `hirsel test`. Only test runs build those sources into an executable. A configuration naming a test the package does not have is refused. Of the
 declared grants a test is granted only those its parameters take, so a test without
 parameters is granted nothing and no test's configuration changes another test's run. Each
 test run starts in a working directory of its own, empty when the run starts, and a relative
@@ -101,6 +102,10 @@ reuses any other outcome. A test function can be named, called or taken as a val
 another test function, and a value so taken may be passed on and called anywhere, as any function value;
 otherwise it is an ordinary function of its module (PROG-2), so it may call that module's
 private functions.
+
+In `hirsel.toml`, use plural `grants` and `dirs` in `[tests]` or an individual
+test's run table. The `test` command accepts `--grant` and `--dir` when the package
+has no manifest test configuration.
 
 ```hirsel
 @test

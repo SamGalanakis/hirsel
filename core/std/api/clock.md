@@ -9,7 +9,9 @@ reading and completion. No allocation or ambient clock authority is introduced.
 
 `deadline_after_ms` adds milliseconds to an absolute monotonic nanosecond
 reading. The conversion and sum saturate at the maximum u64. It reads
-no clock and allocates nothing.
+no clock and allocates nothing. For example, call
+`clock.deadline_after_ms(host.mono_ns(c), 5)` for five milliseconds after the
+current reading. `clock.deadline_after_ms(2_000_000, 5)` returns `7_000_000`.
 
 `alarm` spawns a child with a 4096-byte limit and its own sender handle. The
 child sleeps until the absolute monotonic deadline on the supplied `Clock`,

@@ -32,7 +32,7 @@ ada grace 2
 Outcome: success.
 
 Every outside effect comes in as a parameter: `main` writes only because it receives
-`Stdout`. `main` is always `waits`, since it may wait (LANG-8). It returns
+`Stdout`. The entry `main` may wait with or without the `waits` marker (LANG-8). It returns
 `Result[(), E]`, and `Ok(())` exits 0 (PROG-3, CAP-1, CAP-4).
 
 ## 2. What is not there
@@ -338,16 +338,165 @@ sources call the package's `pub` definitions by module path, as in `main.twice(2
 
 ```sh
 hirsel new app && cd app
-hirsel check                       # prints file:line:col: RULE message
+hirsel check                       # check program and test sources
 hirsel explain OWN-7               # the rule a refusal cites, with an example
 hirsel test                        # every @test, each in its own process
 hirsel run --grant Stdout -- a b   # build and run; grants are explicit
 hirsel build --release -o program  # a native executable
-hirsel inspect --std --interface   # every public std declaration
+hirsel inspect --core --interface  # public core declarations
+hirsel inspect --std --interface   # public std declarations
 hirsel fmt .                       # canonical formatting
 ```
 
 When `check` refuses, read its rule ID first. The ID names the one rule broken and its
 site, and `hirsel explain` gives the rule's exact statement. Fix that site, then check
-again. Look up an operation with `hirsel inspect --std --interface`, never by guessing a
-method name. `hirsel primer` (or `hirsel explain primer`) prints this document.
+again. Look up an operation with `hirsel inspect --core --interface` or
+`hirsel inspect --std --interface`. `hirsel primer` (or `hirsel explain primer`) prints this document.
+
+## 11. A command that reads a file
+
+Save this as `main.hirsel` in a package created with `hirsel new`. Index zero in
+`Args` is the first argument after `--`. The `Dir` grants access to names under
+the directory supplied with `--dir`.
+
+```hirsel
+pub fn main(argv: Args, files: Dir, out: Stdout) -> Result[(), Exit] waits {
+    let Some(path) = args.get(argv, 0) else {
+        fail("give a file name after --")
+    }
+    let text = result.unwrap(std.file.read_string(files, path))
+    result.unwrap(stdout.write(out, text))
+    Ok(())
+}
+
+@test
+fn reads_utf8(files: Dir, out: Stdout) -> Result[(), ()] waits {
+    result.unwrap(std.file.write(files, "note.txt", b"hello\n"))
+    let text = result.unwrap(std.file.read_string(files, "note.txt"))
+    if text != "hello\n" {
+        fail("wrong file contents")
+    }
+    result.unwrap(stdout.write(out, text))
+    Ok(())
+}
+```
+
+In `hirsel.toml`, set these keys in the existing `[tests]` table. The test
+starts in an empty directory, so `dirs = ["."]` grants that directory.
+
+```text
+[tests]
+limit = 67108864
+dirs = ["."]
+grants = ["Stdout"]
+```
+
+```sh
+printf 'hello\n' > note.txt
+hirsel run --dir . --grant Stdout -- note.txt
+hirsel test
+```
+
+## 12. An HTTP server and client test
+
+Put the server and test in `main.hirsel`. The test listens on port zero and
+connects to the bound address returned by `host.listen`.
+
+```hirsel
+fn hello(req: std.http.Request, scratch: Region, mut out: std.http.Responder, state: ()) -> Result[std.http.Outcome, std.http.HandlerError] {
+    Ok(Reply(std.http.response(200, b"hello", true)?))
+}
+
+type Server: send {
+    listener: Listener,
+    clock: Clock,
+    tasks: Tasks
+}
+
+fn serve(take job: Server) waits {
+    let Server(listener: take listener, clock: c, tasks) = take job
+    let mut listeners: List[Listener] = list.new()
+    list.push(mut listeners, take listener)
+    let mut builder: std.router.Builder[()] = std.router.builder()
+    result.unwrap(std.router.add(mut builder, "GET", "/", std.router.raw(hello)))
+    let routes = result.unwrap(std.router.build(take builder))
+    let cfg = std.http.Config(ingress: list.new(), sockets_max: 2, http_max: 2, upgrades_max: 0, conns_max: 2, ip_sockets_max: 2, refuse_max: 1, refuse_ms: 500, inbox_cap: 4, head_max: 1024, fields_max: 8, pipeline_max: 1024, body_inline: 1024, body_max: 1024, out_cap: 256, handler_bytes: 4096, first_head_ms: 1500, idle_ms: 1500, head_ms: 1500, body_ms: 1500, handler_ms: 1500, write_ms: 1500, drain_ms: 100, linger_ms: 100, drain_max: 1024, streams_max: 0, state_max: 0, reads_max: 0, heartbeat_ms: 0, lease_ms: 0,)
+    result.unwrap(std.http.serve(take listeners, c, tasks, take cfg, take routes, ()))
+}
+
+pub fn main(n: Net, c: Clock, tasks: Tasks) -> Result[(), Exit] waits {
+    let (take listener, _) = result.unwrap(host.listen(n, Addr(ip: V4(2130706433), port: 8080), 8))
+    serve(Server(listener: take listener, clock: c, tasks))
+    Ok(())
+}
+
+@test
+fn get_hello(n: Net, c: Clock, tasks: Tasks) -> Result[(), ()] waits {
+    let (take listener, addr) = result.unwrap(host.listen(n, Addr(ip: V4(2130706433), port: 0), 8))
+    let server = task.spawn(tasks, bytes 16777216, Server(listener: take listener, clock: c, tasks), serve)
+    let deadline = clock.deadline_after_ms(host.mono_ns(c), 5000)
+    let req = std.http_client.Request(method: "GET", target: "/", headers: list.new(), body: Fixed(0))
+    let mut client = result.unwrap(std.http_client.dial(n, addr, "127.0.0.1", c, req, deadline))
+    result.unwrap(std.http_client.finish_request(mut client, 1024))
+    if std.http_client.status(std.http_client.head(client)) != 200 {
+        fail("expected 200")
+    }
+    let mut body: Bytes = list.with_capacity(16)
+    while result.unwrap(std.http_client.read(mut client, mut body)) != 0 {}
+    if body != b"hello" {
+        fail("wrong response body")
+    }
+    std.http_client.close(take client)
+    let _ = task.cancel_join(take server)
+    Ok(())
+}
+```
+
+In the test manifest, port zero requests an ephemeral port, so the loopback
+Listen grant covers the full port range. Connect also covers the range where
+the OS can select the server port.
+
+```text
+[tests]
+limit = 67108864
+grants = ["Clock", "Tasks", "Net=Listen 127.0.0.1/32 0-65535;Connect 127.0.0.1/32 1-65535"]
+```
+
+```sh
+hirsel test
+hirsel run --grant Clock --grant Tasks --grant 'Net=Listen 127.0.0.1/32 8080-8080'
+```
+
+## 13. A test with a simulated clock
+
+A virtual clock starts at a reading you choose. `clock.deadline_after_ms`
+takes an absolute monotonic reading in nanoseconds first and a duration in
+milliseconds second. For example, `clock.deadline_after_ms(2_000_000, 5)`
+returns `7_000_000`. A test can advance the clock to a pending deadline without
+sleeping for that duration on the host.
+
+```hirsel
+fn wait(take c: Clock) -> u64 waits {
+    host.sleep_until(c, clock.deadline_after_ms(host.mono_ns(c), 5))
+    host.mono_ns(c)
+}
+
+@test
+fn wakes_at_the_deadline(tasks: Tasks) -> Result[(), ()] waits {
+    let (c, take control) = provide.clock(2_000_000, 0)
+    let mut hand = take control
+    let child = task.spawn(tasks, bytes 4096, c, wait)
+    let Some(deadline) = clock.idle(mut hand) else {
+        fail("expected a waiting task")
+    }
+    clock.advance_to(mut hand, deadline)
+    if result.unwrap(task.join(take child)) != 7_000_000 {
+        fail("wrong wake time")
+    }
+    Ok(())
+}
+```
+
+Save this as `tests.hirsel` in the package from `hirsel new`. Add `grants =
+["Tasks"]` to its `[tests]` table and run `hirsel test`. The test creates its
+own `Clock` with `provide.clock`.

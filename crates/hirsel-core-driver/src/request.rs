@@ -477,7 +477,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                 }
                 crate::package_lock::Lock::compare(&resolved, package_mode)?
                     .commit(&resolved.workspace)?;
-                let include_tests = test_command
+                let include_tests = matches!(command, "check" | "test")
                     || inspection
                         .as_ref()
                         .is_some_and(|option| option.includes_tests());
@@ -887,7 +887,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                 configured.foreign.clear();
                 configured.exec.clear();
                 if explicit_limit || !configured.is_empty() {
-                    return Err("the package's manifest declares its tests' run configuration; test takes no --limit, --dir or --grant".into());
+                    return Err("this package declares [tests] in hirsel.toml. Set limit, dirs and grants there".into());
                 }
                 runs
             }

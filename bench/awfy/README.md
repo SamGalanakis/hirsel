@@ -235,7 +235,7 @@ single observations.
 
 | Row | Metric boundary and qualification |
 | --- | --- |
-| LangArena dev compile | Whole-suite Cranelift, Cargo dev and Goose debug C build/link. The one-iteration Spectralnorm checksum is 1,051,192,944 cold and 1,051,192,945 after a one-body edit. Hirsel starts with a published product and reports Cranelift library objects written. Goose rebuilds the suite on the edit. |
+| LangArena dev compile | Whole-suite Cranelift, Cargo dev and Goose debug C build/link. The one-iteration Spectralnorm checksum is 1,051,192,944 cold and 1,051,192,945 after a one-body edit. Hirsel starts with a published product and reports the combined app and library unit count and object writes to the published store. Goose rebuilds the suite on the edit. |
 | LangArena check | The same staged application and edit, with dedicated check stores. Hirsel must check application bodies and accept the entry and source manifest. Cargo must produce fresh application metadata. Goose checks the suite and its imports in full on both passes. |
 | LangArena release compile | Whole-suite LLVM, Cargo release and Goose emission plus Clang compile/link, with the same Spectralnorm oracles. |
 | AWFY original-14 release compile | Original harness only, with the board's LLVM and Goose/Clang flags and an isolated dependency-free Cargo package for the Rust port. Each executable must pass all 14 reference workloads. The edit adds an exact `board-edit` marker to the verified-success line. |

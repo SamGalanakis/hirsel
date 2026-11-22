@@ -122,3 +122,117 @@ fn prop_case_steps() -> bool {
     }
     false
 }
+
+// Catches continuing to alternate after the shorter side of the range is exhausted.
+// expect: run prop_zigzag() = true
+fn prop_zigzag() -> bool {
+    let expected: Inline[i64, 8] =[0, 1, -1, 2, -2, 3, 4, 5]
+    let g = i64_in(-2, 5)
+    for i in 0u64 .. 8 {
+        let mut tape: List[u64] = list.new()
+        list.push(mut tape, i)
+        let mut s = source(0, 0, 1, Some(take tape))
+        if draw(mut s, g) != expected[i] || s.overrun || list.len(s.tape) != 1 {
+            return false
+        }
+    }
+    true
+}
+
+// Catches interpreting zero as the beginning of the negative side or the midpoint.
+// expect: run prop_clamped_origin() = true
+fn prop_clamped_origin() -> bool {
+    let mut tape: List[u64] = list.new()
+    list.push(mut tape, 0)
+    let mut s = source(0, 0, 1, Some(take tape))
+    draw(mut s, i64_in(3, 9)) == 3
+}
+
+// Catches drawing a flag before min, outside its element span, or at max.
+// expect: run prop_list_flags() = true
+fn prop_list_flags() -> bool {
+    let g = list_of(u64_in(0, 9), 1, 3)
+    let mut short_tape: List[u64] = list.new()
+    list.push(mut short_tape, 4)
+    list.push(mut short_tape, 1)
+    list.push(mut short_tape, 7)
+    list.push(mut short_tape, 0)
+    let mut short = source(0, 0, 8, Some(take short_tape))
+    let small = draw(mut short, g)
+    let mut long_tape: List[u64] = list.new()
+    list.push(mut long_tape, 4)
+    list.push(mut long_tape, 1)
+    list.push(mut long_tape, 7)
+    list.push(mut long_tape, 1)
+    list.push(mut long_tape, 2)
+    let mut long = source(0, 0, 8, Some(take long_tape))
+    let large = draw(mut long, g)
+    !short.overrun && !long.overrun && list.len(small) == 2 && small[0] == 4 && small[1] == 7 && list.len(large) == 3 && large[0] == 4 && large[1] == 7 && large[2] == 2 && list.len(short.tape) == 4 && list.len(long.tape) == 5 && list.len(short.spans) == 3 && short.spans[0].end == 1 && short.spans[1].label == 1 && short.spans[1].start == 1 && short.spans[1].end == 3
+}
+
+// Catches counting UTF-16 surrogate code points as scalar choices.
+// expect: run prop_char_surrogates() = true
+fn prop_char_surrogates() -> bool {
+    let mut tape: List[u64] = list.new()
+    list.push(mut tape, 1)
+    let mut s = source(0, 0, 1, Some(take tape))
+    let g = char_in('\u{d7ff}', '\u{e000}')
+    draw(mut s, g) == '\u{e000}' && s.tape[0].limit == 2
+}
+
+// Catches drawing the selection inside the span or using the first branch.
+// expect: run prop_one_of_span() = true
+fn prop_one_of_span() -> bool {
+    let mut gs: List[Gen[u64]] = list.new()
+    list.push(mut gs, u64_in(10, 19))
+    list.push(mut gs, u64_in(90, 99))
+    let mut tape: List[u64] = list.new()
+    list.push(mut tape, 1)
+    list.push(mut tape, 3)
+    let mut s = source(0, 0, 2, Some(take tape))
+    draw(mut s, one_of(take gs)) == 93 && list.len(s.spans) == 1 && s.spans[0].label == 3 && s.spans[0].start == 1 && s.spans[0].end == 2
+}
+
+fn reject_value(value: u64) -> bool {
+    false
+}
+
+// Catches missing, extra, or accepted retries and rejects that count as valid cases.
+// expect: run prop_filter_rejects() = true
+fn prop_filter_rejects() -> bool {
+    let g = filter(u64_in(0, 9), reject_value)
+    let mut tape: List[u64] = list.new()
+    list.push(mut tape, 1)
+    list.push(mut tape, 2)
+    list.push(mut tape, 3)
+    let mut s = source(0, 0, 5, Some(take tape))
+    let _ = draw(mut s, g)
+    if !s.invalid || s.overrun || list.len(s.tape) != 3 || list.len(s.spans) != 3 {
+        return false
+    }
+    let mut c = config()
+    c.cases = 1
+    c.max_rejects = 1
+    match search(c, g, law_returns_error) {
+        GaveUp(n, rejected) => n == 0 && rejected == 2,
+        _ => false,
+    }
+}
+
+fn same_mapped_value(value: u64) -> u64 {
+    0
+}
+
+fn list_law_returns_error(value: List[u64]) -> Result[(), String] {
+    Error(string.from("always false"))
+}
+
+// Catches printing the mapped value in place of the original choice, including inside a list.
+// expect: run prop_map_preimage() = true
+fn prop_map_preimage() -> bool {
+    let g = list_of(map(u64_in(0, 9), same_mapped_value), 1, 1)
+    if let Falsified(result) = search(replay(config(), "AQABBw=="), g, list_law_returns_error) {
+        return result.rendered == "[map(7)]"
+    }
+    false
+}

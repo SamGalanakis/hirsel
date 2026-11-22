@@ -66,6 +66,27 @@ Replay. When the case replays a tape, draw j reads tape value v_j:
 
 ### Combinators
 
+```hirsel
+pub fn bool_() -> Gen[bool]
+pub fn u64_in(lo: u64, hi: u64) -> Gen[u64]
+pub fn i64_in(lo: i64, hi: i64) -> Gen[i64]
+pub fn u8_any() -> Gen[u8]
+pub fn char_in(lo: char, hi: char) -> Gen[char]
+pub fn ascii() -> Gen[char]
+pub fn bytes_of(min: u64, max: u64) -> Gen[Bytes]
+pub fn string_of(take chars: Gen[char], min: u64, max: u64) -> Gen[String]
+pub fn list_of[T](take g: Gen[T], min: u64, max: u64) -> Gen[List[T]]
+pub fn option_of[T](take g: Gen[T]) -> Gen[Option[T]]
+pub fn one_of[T](take gs: List[Gen[T]]) -> Gen[T]
+pub fn pair[A, B](take a: Gen[A], take b: Gen[B]) -> Gen[(A, B)]
+pub fn triple[A, B, C](take a: Gen[A], take b: Gen[B], take c: Gen[C]) -> Gen[(A, B, C)]
+pub fn just[T: plain + inert](value: T) -> Gen[T]
+pub fn map[A, B](take g: Gen[A], take transform: own fn(A) -> B) -> Gen[B]
+pub fn map_shown[A, B](take g: Gen[A], take transform: own fn(A) -> B, take show_fn: own fn(B, mut String)) -> Gen[B]
+pub fn bind[A, B](take g: Gen[A], take next_gen: own fn(A) -> Gen[B]) -> Gen[B]
+pub fn filter[T](take g: Gen[T], take pred: own fn(T) -> bool) -> Gen[T]
+```
+
 Each row gives a combinator's choices and the value of each choice index. Index 0
 is always the simplest value.
 
@@ -105,7 +126,9 @@ Notes on the rows:
 - **Span labels.** Labels below 2^32 belong to std.prop. A user generator labels its own spans at 2^32 and above.
 - **`map` rendering.** `map` renders the value it mapped from, as `map(<value>)`.
 
-Rendering:
+Rendering in counterexample reports uses the consumed choice tape. For a
+combinator whose display depends on the draw, call `report` with its
+counterexample. Its standalone `Gen.show` prints `<generated>`.
 
 - `bool_` and the integer generators render their literals.
 - `char_in` and `ascii` render a quoted char.

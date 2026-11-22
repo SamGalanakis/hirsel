@@ -633,6 +633,7 @@ dependencies = [
  "cranelift-frontend",
  "cranelift-module",
  "cranelift-object",
+ "gimli",
  "hirsel-core-ids",
  "hirsel-core-ir",
  "hirsel-core-layout",

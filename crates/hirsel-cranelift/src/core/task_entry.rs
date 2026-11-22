@@ -125,7 +125,7 @@ impl Glues {
             b.ins().return_(&[status]);
             b.seal_all_blocks();
             b.finalize(object.target_config());
-            observer.define(object, f, context).map_err(error)?;
+            tables.define(observer, object, f, context)?;
         }
         Ok(())
     }

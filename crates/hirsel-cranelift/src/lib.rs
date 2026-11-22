@@ -5,5 +5,6 @@
 hirsel_guard::install!();
 
 pub mod core;
+pub mod unwind;
 
 mod object;

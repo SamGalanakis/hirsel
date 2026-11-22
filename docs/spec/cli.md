@@ -1,6 +1,6 @@
 # Command-line interface
 
-Native binaries built with `--backend llvm` include `.eh_frame` unwind
+Native binaries from both backends include `.eh_frame` unwind
 information. Native builds write detached DWARF alongside the executable.
 `--debug-lines on` also embeds DWARF. Failure positions are available in
 either mode.

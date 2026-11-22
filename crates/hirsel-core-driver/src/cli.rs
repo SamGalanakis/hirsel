@@ -622,7 +622,7 @@ static OPTIONS: &[OptionSpec] = &[
         ["--backend"],
         Some("cranelift|llvm"),
         ["build", "publish", "run", "replay", "test", "sdk"],
-        "Select the native engine (dev defaults to Cranelift). LLVM includes unwind tables with fiber boundaries."
+        "Select the native engine (dev defaults to Cranelift). Both include unwind tables with fiber boundaries."
     ),
     option!(
         Runtime,

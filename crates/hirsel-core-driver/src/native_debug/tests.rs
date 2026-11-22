@@ -333,3 +333,107 @@ fn llvm_unwind_covers_live_whole_split_and_reused_code() {
         }
     }
 }
+
+#[test]
+fn cranelift_unwind_links_into_pie_from_whole_and_cached_objects() {
+    use gimli::{BaseAddresses, EhFrame, LittleEndian, UnwindSection as _};
+    use hirsel_core_ids::ContentHash;
+    use hirsel_core_ir::text;
+    use hirsel_core_layout::Target;
+    use object::{Object as _, ObjectSection as _, ObjectSymbol as _};
+    use std::{path::PathBuf, process::Command};
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = crate::Store::new(&dir.path().join("objects")).unwrap();
+    let bin = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin");
+    let header = "core v1\nsig g0 = () -> (u64)\ninst n0 = app@1/main/live [] []\ninst n1 = app@1/main/dead [] []\n";
+    let live = "fn f0 = n0 g0 {\nb0():\n  v0: u64 = const 11\n  return v0\n}\n";
+    let dead = "fn f1 = n1 g0 {\nb0():\n  v0: u64 = const 29\n  return v0\n}\n";
+    let whole = text::parse(&format!("{header}{live}{dead}")).unwrap();
+    let live_name = whole.identity(whole.functions[0].instance).symbol();
+    let dead_name = whole.identity(whole.functions[1].instance).symbol();
+    for target in [Target::X86_64Linux, Target::Aarch64Linux] {
+        let options = hirsel_cranelift::core::Options {
+            target: target.triple(),
+            optimize: false,
+            debug_lines: false,
+        };
+        let modes: &[bool] = if target == Target::X86_64Linux {
+            &[false, true]
+        } else {
+            &[false]
+        };
+        for &split in modes {
+            let input = if split {
+                vec![
+                    text::parse(&format!("{header}{live}")).unwrap(),
+                    text::parse(&format!("{header}{}", dead.replace("fn f1", "fn f0"))).unwrap(),
+                ]
+            } else {
+                vec![whole.clone()]
+            };
+            let mut keys = Vec::new();
+            let mut cold = Vec::new();
+            for (index, module) in input.iter().enumerate() {
+                let key = ContentHash::of_bytes(format!("{target:?}/{split}/{index}").as_bytes());
+                let object = hirsel_cranelift::core::emit_object(module, &options, key).unwrap();
+                crate::native_object::publish(&store, key, &object).unwrap();
+                let path = dir.path().join(format!("unit{index}.o"));
+                std::fs::write(&path, object.bytes).unwrap();
+                keys.push(key);
+                cold.push(path);
+            }
+            let warm = keys
+                .into_iter()
+                .map(|key| {
+                    let (bare, _, _) = crate::native_object::load(&store, key).unwrap().unwrap();
+                    crate::native_object::path(&store, bare.address)
+                })
+                .collect::<Vec<_>>();
+            for paths in [cold, warm] {
+                let executable = dir.path().join("image");
+                let linked = Command::new(bin.join("ld.lld"))
+                    .args([
+                        "-pie",
+                        "--gc-sections",
+                        "--eh-frame-hdr",
+                        "-e",
+                        &live_name,
+                        "-o",
+                    ])
+                    .arg(&executable)
+                    .args(paths)
+                    .output()
+                    .unwrap();
+                assert!(
+                    linked.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&linked.stderr)
+                );
+                let bytes = std::fs::read(executable).unwrap();
+                let elf = object::File::parse(bytes.as_slice()).unwrap();
+                assert_eq!(elf.kind(), object::ObjectKind::Dynamic);
+                let frame = elf.section_by_name(".eh_frame").unwrap();
+                let base = BaseAddresses::default().set_eh_frame(frame.address());
+                let eh = EhFrame::new(frame.data().unwrap(), LittleEndian);
+                assert_eq!(elf.symbol_by_name(&dead_name).is_none(), split);
+                let names: &[&str] = if split {
+                    &[&live_name]
+                } else {
+                    &[&live_name, &dead_name]
+                };
+                for name in names {
+                    let symbol = elf.symbol_by_name(name).unwrap();
+                    let fde = eh
+                        .fde_for_address(&base, symbol.address(), EhFrame::cie_from_offset)
+                        .unwrap();
+                    assert_eq!(
+                        (fde.initial_address(), fde.len()),
+                        (symbol.address(), symbol.size())
+                    );
+                    assert_eq!(fde.cie().fde_address_encoding().unwrap().0, 0x1b);
+                }
+            }
+        }
+    }
+}

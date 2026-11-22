@@ -8,6 +8,10 @@ Linker garbage collection discards the unwind records of discarded code.
 Release builds can reuse whole modules on both architectures. x86-64 ELF
 also supports splitting and reusing individual definitions.
 
+Cranelift emits `.eh_frame` for every native definition, including the entry
+adapter and foreign-call glue. It uses PC-relative FDE addresses so the
+same objects link into position-independent executables on both targets.
+
 Both architectures mark `fiber_start` and `switch` as stack boundaries. Their
 unwind records use the active stack pointer as the CFA and mark the return
 address undefined. An unwinder stops there, including during a stack switch.
@@ -20,6 +24,8 @@ metadata added 112,792 bytes of `.eh_frame` (4.26% of Hirsel function text)
 and 11,680 bytes of `.eh_frame_hdr`. Every one of the 1,408 Hirsel function
 symbols in those images had FDE coverage. The largest instruction increase
 across the 72 checked workloads was 0.0793%.
+With Cranelift's unwind writer also enabled, the same release comparison
+had a maximum instruction increase of 0.0201%.
 
 ## DWARF and symbol resolution
 

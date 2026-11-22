@@ -5,6 +5,7 @@ use hirsel_cranelift::core::memory_layout as abi;
 
 pub(super) fn emit(
     object: &mut ObjectModule,
+    unwind: &mut Unwind,
     plan: &Plan<'_>,
     entry: FuncId,
     signature: ir::Signature,
@@ -92,5 +93,5 @@ pub(super) fn emit(
     f.b.ins().return_(&[status]);
     f.b.seal_all_blocks();
     f.b.finalize(f.object.target_config());
-    object.define_function(entry, &mut context).map_err(error)
+    unwind.define(object, entry, &mut context).map_err(error)
 }

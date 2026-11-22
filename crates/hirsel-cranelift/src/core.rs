@@ -108,9 +108,25 @@ pub(super) struct Tables<'a> {
     trace_drops: bool,
     observe_charge: bool,
     debug: bool,
+    unwind: std::cell::RefCell<crate::unwind::Unwind>,
     site_symbols: std::cell::RefCell<std::collections::HashMap<ItemId, cranelift_module::DataId>>,
     site_constants: std::cell::RefCell<sites::Constants>,
     runtimes: std::cell::RefCell<calls::Imports>,
+}
+
+impl Tables<'_> {
+    fn define(
+        &self,
+        observer: &impl profile::Observer,
+        object: &mut ObjectModule,
+        function: cranelift_module::FuncId,
+        context: &mut cranelift_codegen::Context,
+    ) -> Result<()> {
+        observer.define(object, function, context).map_err(error)?;
+        self.unwind
+            .borrow_mut()
+            .record(object.isa(), function, context)
+    }
 }
 
 pub(crate) fn isa(options: &Options<'_>) -> Result<cranelift_codegen::isa::OwnedTargetIsa> {
@@ -445,6 +461,7 @@ fn emit(
         trace_drops,
         observe_charge,
         debug: options.debug_lines,
+        unwind: std::cell::RefCell::new(crate::unwind::Unwind::new(object.isa())?),
         site_symbols: Default::default(),
         site_constants: Default::default(),
         runtimes: Default::default(),
@@ -468,9 +485,7 @@ fn emit(
         let builder = FunctionBuilder::new(&mut context.func, builder_context);
         function::emit(&mut object, builder, f, sig, &tables)?;
         drop(build);
-        observer
-            .define(&mut object, functions[index], context)
-            .map_err(error)?;
+        tables.define(observer, &mut object, functions[index], context)?;
         if options.debug_lines {
             debug_functions.push(debug::function(
                 input,
@@ -486,6 +501,7 @@ fn emit(
     let _write = observer.enter("object_write");
     tables.site_constants.borrow().define(&mut object)?;
     let mut product = object.finish();
+    tables.unwind.into_inner().write(&mut product)?;
     let debug = options
         .debug_lines
         .then(|| debug::finish(input, &mut product, debug_functions, object_key));

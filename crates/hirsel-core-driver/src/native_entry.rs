@@ -10,6 +10,7 @@ use cranelift_module::{DataDescription, DataId, FuncId, Linkage, Module as _};
 use cranelift_object::{ObjectBuilder, ObjectModule};
 use hirsel_core_ir::source::SourceMap;
 use hirsel_core_layout::{Fixed, Layout};
+use hirsel_cranelift::unwind::Unwind;
 use serde::Serialize;
 use std::os::unix::ffi::OsStrExt;
 
@@ -251,7 +252,8 @@ impl<'a> Plan<'a> {
         revisions: &[(String, [u8; 32])],
     ) -> Result<Vec<u8>> {
         let mut object = object(target)?;
-        let waits = foreign::emit(&mut object, &self.foreign)?;
+        let mut unwind = Unwind::new(object.isa()).map_err(error)?;
+        let waits = foreign::emit(&mut object, &mut unwind, &self.foreign)?;
         let data = data::write(&mut object, self, sources)?;
         data::bytes(
             &mut object,
@@ -266,9 +268,10 @@ impl<'a> Plan<'a> {
         let entry = object
             .declare_function("__hirsel_entry", Linkage::Local, &signature)
             .map_err(error)?;
-        adapter::emit(&mut object, self, entry, signature)?;
-        start::emit(&mut object, self, &data, entry, waits)?;
+        adapter::emit(&mut object, &mut unwind, self, entry, signature)?;
+        start::emit(&mut object, &mut unwind, self, &data, entry, waits)?;
         let mut product = object.finish();
+        unwind.write(&mut product).map_err(error)?;
         crate::native_debug::add_source_note(&mut product.object, source_identity);
         sites::define(&mut product.object, sources)?;
         sites::define_release(&mut product.object, sources, self.release_sites)?;

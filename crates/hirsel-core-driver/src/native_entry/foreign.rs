@@ -31,13 +31,17 @@ impl<'a> Function<'a> {
     }
 }
 
-pub(super) fn emit(object: &mut ObjectModule, functions: &[Function<'_>]) -> Result<bool> {
+pub(super) fn emit(
+    object: &mut ObjectModule,
+    unwind: &mut Unwind,
+    functions: &[Function<'_>],
+) -> Result<bool> {
     let mut entries = Vec::with_capacity(functions.len());
     let mut kinds = BTreeMap::new();
     let mut waits = false;
     for (index, function) in functions.iter().enumerate() {
         let parsed = Abi::parse(function.header).ok_or("invalid checked foreign header")?;
-        let thunk = thunk(object, &function.c_symbol, index, &parsed)?;
+        let thunk = thunk(object, unwind, &function.c_symbol, index, &parsed)?;
         let mut release = false;
         for argument in parsed.arguments() {
             if let Argument::Handle {
@@ -59,7 +63,7 @@ pub(super) fn emit(object: &mut ObjectModule, functions: &[Function<'_>]) -> Res
     }
     for (index, (function, parsed, thunk, release)) in entries.into_iter().enumerate() {
         let descriptor = descriptor(object, index, &parsed, thunk, release, &kinds)?;
-        slot(object, &function.hirsel_symbol, &parsed, descriptor)?;
+        slot(object, unwind, &function.hirsel_symbol, &parsed, descriptor)?;
     }
     Ok(waits)
 }
@@ -142,7 +146,13 @@ fn define(object: &mut ObjectModule, name: &str, data: &DataDescription) -> Resu
     Ok(id)
 }
 
-fn thunk(object: &mut ObjectModule, name: &str, index: usize, parsed: &Abi<'_>) -> Result<FuncId> {
+fn thunk(
+    object: &mut ObjectModule,
+    unwind: &mut Unwind,
+    name: &str,
+    index: usize,
+    parsed: &Abi<'_>,
+) -> Result<FuncId> {
     let mut context = object.make_context();
     context.func.signature = signature(object, &[I64], Some(I64));
     let id = object
@@ -210,11 +220,17 @@ fn thunk(object: &mut ObjectModule, name: &str, index: usize, parsed: &Abi<'_>) 
     f.b.ins().return_(&[word]);
     f.b.seal_all_blocks();
     f.b.finalize(f.object.target_config());
-    object.define_function(id, &mut context).map_err(error)?;
+    unwind.define(object, id, &mut context).map_err(error)?;
     Ok(id)
 }
 
-fn slot(object: &mut ObjectModule, name: &str, parsed: &Abi<'_>, descriptor: DataId) -> Result<()> {
+fn slot(
+    object: &mut ObjectModule,
+    unwind: &mut Unwind,
+    name: &str,
+    parsed: &Abi<'_>,
+    descriptor: DataId,
+) -> Result<()> {
     let params = std::iter::once(Param::Value(Ty::Scalar(Scalar::U64)))
         .chain(parsed.arguments().map(|arg| match arg {
             Argument::Scalar(s) => Param::Value(Ty::Scalar(s)),
@@ -312,7 +328,7 @@ fn slot(object: &mut ObjectModule, name: &str, parsed: &Abi<'_>, descriptor: Dat
     }
     f.b.seal_all_blocks();
     f.b.finalize(f.object.target_config());
-    object.define_function(id, &mut context).map_err(error)
+    unwind.define(object, id, &mut context).map_err(error)
 }
 
 fn option(f: &mut Code<'_, '_>, dest: Value, bits: Value) -> Result<()> {

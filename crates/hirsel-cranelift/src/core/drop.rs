@@ -516,7 +516,7 @@ impl Glues {
         g.b.seal_all_blocks();
         g.b.finalize(g.object.target_config());
         drop(build);
-        observer.define(object, function, context).map_err(error)
+        tables.define(observer, object, function, context)
     }
     fn emit_buffer(
         &self,
@@ -562,7 +562,7 @@ impl Glues {
         g.b.seal_all_blocks();
         g.b.finalize(g.object.target_config());
         drop(build);
-        observer.define(object, function, context).map_err(error)
+        tables.define(observer, object, function, context)
     }
     fn emit_one(
         &self,
@@ -662,7 +662,7 @@ impl Glues {
         g.b.seal_all_blocks();
         g.b.finalize(g.object.target_config());
         drop(build);
-        observer.define(object, function, context).map_err(error)
+        tables.define(observer, object, function, context)
     }
 }
 

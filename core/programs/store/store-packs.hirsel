@@ -77,11 +77,11 @@ fn apply_pack_layout(mut known: PageLocations, layout: PackRun) -> Result[(), Er
         for slot in planned.first .. planned.end {
             let frame = layout.frames[slot]
             let place = std.page.PagePtr(pack: planned.seq, offset: offset, len: int.truncate(frame.size), checksum: 0, stamp: frame.stamp)
-            let old = option.unwrap(capacity(disk_index_update(mut known.frames, frame.stamp, fn(mut location: FrameLocation) -> std.page.PagePtr {
+            let old = option.unwrap(capacity(disk_index_update(mut known.frames, frame.stamp, frame_edge_charge, fn(mut location: FrameLocation) -> std.page.PagePtr {
                 replace(mut location.place, place)
             }))?)
             if old.pack != 0 {
-                let _ = capacity(disk_index_update(mut known.packs, old.pack, fn(mut pack: PagePack) {
+                let _ = capacity(disk_index_update(mut known.packs, old.pack, pack_edge_charge, fn(mut pack: PagePack) {
                     let width: u64 = int.widen(old.len)
                     pack.live -= width
                 }))?
@@ -90,7 +90,7 @@ fn apply_pack_layout(mut known: PageLocations, layout: PackRun) -> Result[(), Er
         }
         let frame_count: u32 = int.truncate(planned.end - planned.first)
         let record = PagePack(class: layout.class, frames: frame_count, live: planned.payload_bytes, payload_bytes: planned.payload_bytes)
-        capacity(disk_index_put(mut known.packs, planned.seq, record))?
+        capacity(disk_index_put(mut known.packs, planned.seq, record, pack_edge_charge))?
     }
     Ok(())
 }
@@ -135,7 +135,7 @@ fn emit_pack_frame(mut out: Bytes, context: DiskContext, frame: PackFrame, known
 fn install_emitted_place(mut known: PageLocations, located: std.page.PagePtr) -> Result[(), Error] {
     let updated = disk_allocation(scoped fn() -> Result[DiskIndex[FrameLocation], Error] {
         let mut frames = disk_index_share(known.frames)
-        let _ = capacity(disk_index_update(mut frames, located.stamp, fn(mut location: FrameLocation) {
+        let _ = capacity(disk_index_update(mut frames, located.stamp, frame_edge_charge, fn(mut location: FrameLocation) {
             location.place = located
         }))?
         Ok(take frames)

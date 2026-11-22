@@ -5,9 +5,17 @@ pub opaque type Node[K: ordered + shareable + send, V: shareable + send]: sharea
     stamp: u64,
     depth: u64,
     size: u64,
+    storage: Storage,
     rows: List[Arc[Entry[K, V]]],
     kids: List[Arc[Node[K, V]]],
     lows: Option[Arc[List[Separator[K, V]]]]
+}
+
+// Size-independent allocation charges. Entry and decoded key charges use the
+// widths supplied by the owner when it reads the total.
+type Storage: shareable + send {
+    fixed: u64,
+    decoded: u64
 }
 
 pub opaque type OMap[K: ordered + shareable + send, V: shareable + send]: shareable + send {
@@ -134,8 +142,42 @@ pub fn node_child[K: ordered + shareable + send, V: shareable + send](n: Arc[Nod
     }
 }
 
-/// MEM-24 storage of one tree. Entry-owned allocations are counted by its owner.
+/// MEM-24 storage of one tree in O(1). The owner counts entry-owned allocations.
 pub fn storage_charge[K: ordered + shareable + send, V: shareable + send](m: OMap[K, V], key_bytes: u64, value_bytes: u64) -> u64 {
+    let node = match m.head {
+        Some(n) => n,
+        None => return 0,
+    }
+    let entry_bytes = storage_round(int.saturating_add(8, int.saturating_add(key_bytes, value_bytes)))
+    let decoded_bytes = storage_round(int.saturating_add(8, key_bytes))
+    int.saturating_add(node.storage.fixed, int.saturating_add(int.saturating_mul(node.size, entry_bytes), int.saturating_mul(node.storage.decoded, decoded_bytes)))
+}
+
+// The counted node header is 112 bytes, including its cached Storage.
+fn leaf_storage[K: ordered + shareable + send, V: shareable + send](rows: List[Arc[Entry[K, V]]]) -> Storage {
+    Storage(fixed: 112 + 8 * list.capacity(rows), decoded: 0)
+}
+
+fn branch_storage[K: ordered + shareable + send, V: shareable + send](kids: List[Arc[Node[K, V]]], lows: Option[Arc[List[Separator[K, V]]]]) -> Storage {
+    let mut fixed = 112 + 8 * list.capacity(kids)
+    let mut decoded = 0u64
+    if let Some(keys) = lows {
+        fixed += 32 + 16 * list.capacity(keys)
+        for slot in 0u64 .. list.len(keys) {
+            if let Decoded(_) = keys[slot] {
+                decoded += 1
+            }
+        }
+    }
+    for kid in kids {
+        fixed = int.saturating_add(fixed, kid.storage.fixed)
+        decoded += kid.storage.decoded
+    }
+    Storage(fixed: fixed, decoded: decoded)
+}
+
+/// Traversal of MEM-24 storage for laws that check the cached total.
+pub fn scan_storage_charge[K: ordered + shareable + send, V: shareable + send](m: OMap[K, V], key_bytes: u64, value_bytes: u64) -> u64 {
     match m.head {
         Some(node) => node_storage_charge(node, key_bytes, value_bytes),
         None => 0,
@@ -147,8 +189,8 @@ fn storage_round(total: u64) -> u64 {
 }
 
 fn node_storage_charge[K: ordered + shareable + send, V: shareable + send](n: Arc[Node[K, V]], key_bytes: u64, value_bytes: u64) -> u64 {
-    // Three u64s, two List headers, an optional Arc, and the counted header.
-    let mut total = 96 + 8 * (list.capacity(n.rows) + list.capacity(n.kids))
+    // Five u64s, two List headers, an optional Arc, and the counted header.
+    let mut total = 112 + 8 * (list.capacity(n.rows) + list.capacity(n.kids))
     let entry_bytes = storage_round(int.saturating_add(8, int.saturating_add(key_bytes, value_bytes)))
     total = int.saturating_add(total, int.saturating_mul(list.len(n.rows), entry_bytes))
     if let Some(lows) = n.lows {
@@ -200,8 +242,9 @@ fn load_branch[K: ordered + shareable + send, V: shareable + send](id: u64, low_
         depth = n.depth + 1
         list.push(mut cs, arc.share(n))
     }
-    let lows = arc.new(take ks)
-    arc.new(Node(stamp: id, depth, size, rows: list.new(), kids: take cs, lows: Some(take lows)))
+    let lows = Some(arc.new(take ks))
+    let storage = branch_storage(cs, lows)
+    arc.new(Node(stamp: id, depth, size, storage, rows: list.new(), kids: take cs, lows: take lows))
 }
 
 /// Bottom-up build from strictly increasing keys and equally many values.
@@ -439,7 +482,8 @@ fn insert_node[K: ordered + shareable + send, V: shareable + send](mut ids: u64,
                 1u64
             }
             ids += 1
-            let h: Arc[Node[K, V]] = arc.new(Node(stamp: ids, depth: n.depth, size, rows: list.new(), kids: take cs, lows: take lows))
+            let storage = branch_storage(cs, lows)
+            let h: Arc[Node[K, V]] = arc.new(Node(stamp: ids, depth: n.depth, size, storage, rows: list.new(), kids: take cs, lows: take lows))
             return Pieces(first: take h, second: None)
         }
         split_branches(mut ids, take cs)
@@ -448,7 +492,8 @@ fn insert_node[K: ordered + shareable + send, V: shareable + send](mut ids: u64,
 
 fn pack_leaf[K: ordered + shareable + send, V: shareable + send](id: u64, take rows: List[Arc[Entry[K, V]]]) -> Arc[Node[K, V]] {
     let size = list.len(rows)
-    arc.new(Node(stamp: id, depth: 0, size, rows: take rows, kids: list.new(), lows: None))
+    let storage = leaf_storage(rows)
+    arc.new(Node(stamp: id, depth: 0, size, storage, rows: take rows, kids: list.new(), lows: None))
 }
 
 fn fresh_branch[K: ordered + shareable + send, V: shareable + send](mut ids: u64, take cs: List[Arc[Node[K, V]]]) -> Arc[Node[K, V]] {
@@ -528,7 +573,8 @@ fn pack_branch[K: ordered + shareable + send, V: shareable + send](mut ids: u64,
         size += c.size
     }
     ids += 1
-    arc.new(Node(stamp: ids, depth, size, rows: list.new(), kids: take cs, lows: take lows))
+    let storage = branch_storage(cs, lows)
+    arc.new(Node(stamp: ids, depth, size, storage, rows: list.new(), kids: take cs, lows: take lows))
 }
 
 // Transfer a temporary leaf's entries into the final halves. No payload clone.
@@ -606,8 +652,7 @@ fn owned_map[K: ordered + shareable + send, V: shareable + send](mut ids: u64, t
     let OMap(head: old) = take m
     let changed = match take old {
         None => {
-            let empty: Node[K, V] = Node(stamp: 0, depth: 0, size: 0, rows: list.new(), kids: list.new(), lows: None)
-            let h = arc.new(take empty)
+            let h: Arc[Node[K, V]] = pack_leaf(0, list.new())
             owned_arc(mut ids, mut replaced, take h, incoming)
         },
         Some(take h) => owned_arc(mut ids, mut replaced, take h, incoming)
@@ -686,6 +731,7 @@ fn edit_owned_arc[K: ordered + shareable + send, V: shareable + send](mut ids: u
         if width > 32 {
             Some(split_owned_node(mut ids, mut node))
         } else {
+            refresh_storage(mut node)
             None
         }
     })
@@ -803,8 +849,18 @@ fn split_owned_node[K: ordered + shareable + send, V: shareable + send](mut ids:
         Some(fresh_keys(kids))
     }
     ids += 1
-    let right = Node(stamp: ids, depth: node.depth, size, rows: take rows, kids: take kids, lows: take lows)
+    let mut right = Node(stamp: ids, depth: node.depth, size, storage: Storage(fixed: 0, decoded: 0), rows: take rows, kids: take kids, lows: take lows)
+    refresh_storage(mut node)
+    refresh_storage(mut right)
     arc.new(take right)
+}
+
+fn refresh_storage[K: ordered + shareable + send, V: shareable + send](mut node: Node[K, V]) {
+    node.storage = if node.depth == 0 {
+        leaf_storage(node.rows)
+    } else {
+        branch_storage(node.kids, node.lows)
+    }
 }
 
 fn child_index_node[K: ordered + shareable + send, V: shareable + send](n: Node[K, V], k: K) -> u64 {

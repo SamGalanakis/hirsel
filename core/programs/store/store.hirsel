@@ -11658,7 +11658,7 @@ fn cut_retirement(layout: PagedCutLayout, holders: List[HeldPage], lease: Option
         if pack_leased(lease, seq) {
             list.push(mut carried, seq)
         } else {
-            let _ = capacity(disk_index_remove(mut locations.packs, seq))?
+            let _ = capacity(disk_index_remove(mut locations.packs, seq, pack_edge_charge))?
             list.push(mut packs, seq)
         }
     }
@@ -12554,7 +12554,7 @@ fn law_resident_scan(db: Db) -> bool {
         list.push(mut roots, share_roots(held.roots))
     }
     let images = resident_images(roots, Some(view db.disk[0u64].pages.lists))
-    accounts(db).resident == int.saturating_add(images, location_storage_charge(db.disk[0u64].pages.locations))
+    accounts(db).resident == int.saturating_add(images, scan_location_storage_charge(db.disk[0u64].pages.locations))
 }
 
 fn law_empty_collection_pages() -> Result[List[Arc[std.page.Page]], Error] {
@@ -12624,13 +12624,27 @@ fn law_resident_name(lead: String, slot: u64) -> String {
     take name
 }
 
+// A copied leaf keeps its rows but drops the installed leaf's spare slots.
+fn law_location_cow_charge() -> Result[bool, Error] {
+    let mut installed = new_page_locations()
+    for stamp in 1u64 .. 3 {
+        add_location(mut installed, std.page.unlocated(stamp), 0, 0, list.new())?
+    }
+    let mut candidate = share_page_locations(installed)
+    add_page_source(mut candidate, 1, HolderSource(0, 0, 0))?
+    let before = std.omap.storage_charge(installed.frames.values, 8, 87)
+    let after = std.omap.storage_charge(candidate.frames.values, 8, 87)
+    Ok(before > after && resident_location_charge(installed) == scan_location_storage_charge(installed)
+        && resident_location_charge(candidate) == scan_location_storage_charge(candidate))
+}
+
 // Wrong implementations caught: a record charged twice when a second holder
 // reaches it, a refund missed when unpin, delete_branch or a commit retires
 // the last path to a page, a blob charged per leaf instead of per stamp, a
 // relocation that charges a moved frame again, and an open whose seed
 // disagrees with the pages a journal replay replaced.
 pub fn disk_law_resident_charge(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
-    if !law_empty_collection_resident() {
+    if !law_empty_collection_resident() || !result.unwrap(law_location_cow_charge()) {
         return false
     }
     let mut options = defaults()
@@ -12639,6 +12653,16 @@ pub fn disk_law_resident_charge(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bo
     let mut db = result.unwrap(open(tasks, d, c, r, options))
     result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_string())))
     let mut t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_string()))
+    let _ = result.unwrap(checkpoint(mut db))
+    let before = accounts(db).resident
+    let installed = share_page_locations(db.disk[0].pages.locations)
+    let _ = result.unwrap(checkpoint(mut db))
+    let frame_ids = db.disk[0].pages.locations.frames.ids
+    let pack_ids = db.disk[0].pages.locations.packs.ids
+    if before != accounts(db).resident || installed.frames.ids != frame_ids
+        || installed.packs.ids != pack_ids || !law_resident_scan(db) {
+        return false
+    }
     let mut forked = 0u64
     let mut held = 0u64
     let mut state = 1721u64

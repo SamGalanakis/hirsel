@@ -2,7 +2,7 @@
 """Build, run and record the matched Hirsel and Tokio comparison."""
 import argparse
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import datetime
 from functools import partial
 import hashlib
 from itertools import count
@@ -13,7 +13,6 @@ import signal
 from statistics import median
 import subprocess
 import sys
-import threading
 import time
 
 import scale
@@ -25,13 +24,14 @@ sys.path.insert(0, str(ROOT / "core/tools"))
 sys.path.insert(0, str(ROOT / "bench/awfy"))
 from receipt import measurement_slot, read, release_tools, write
 from bench_cpus import cpu_list
+from measurement import hold as measurement_hold
 
 from bench.multicore import build, regimes, run
 
 CPU_DEFAULTS = {
-    "server": (0, 8, 1, 9, 2, 10, 3, 11),
-    "load": (16, 17, 18, 19),
-    "helper": (24, 25),
+    "server": (0, 1, 2, 3, 16, 17, 18, 19),
+    "load": (24, 25),
+    "helper": (26, 27),
     "controller": (26, 27),
 }
 MEASURE_CPUS = set().union(*CPU_DEFAULTS.values())
@@ -73,8 +73,7 @@ def build_command(arguments, *, local=False, env=None, **kwargs):
     env = os.environ | (env or {})
     if local:
         env.update(HIRSEL_JOBS="4", UNITS_BUILD_UNDER_CAP="1")
-        arguments = ("taskset", "-c", BUILD_CPUS, ROOT / "tools/capped",
-                     "flock", scale.REGIMES, "timeout", "--kill-after=5s", "220s", *arguments)
+        arguments = ("taskset", "-c", BUILD_CPUS, ROOT / "tools/capped", *arguments)
     return subprocess.run(list(map(str, arguments)), cwd=ROOT, env=env,
                           check=True, text=True, **kwargs)
 
@@ -167,50 +166,10 @@ def prepare(cache, commit, suites, cases):
     return {name: recorded[name] for names in need.values() for name in names}
 
 
-def eligible():
-    current = now()
-    start = current.replace(hour=2, minute=45, second=0, microsecond=0)
-    end = start.replace(hour=4, minute=0)
-    if current >= end:
-        start += timedelta(days=1)
-    return os.getloadavg()[0] <= 8 and (start - current).total_seconds() >= 240
-
-
-@contextmanager
-def guarded_hold(hold):
-    while not eligible():
-        print(f"Waiting for the measurement window, one-minute load {os.getloadavg()[0]:.2f}",
-              file=sys.stderr, flush=True)
-        time.sleep(scale.HOLDS_GAP_S)
-    with measurement_slot(Path(scale.REGIMES)), measurement_slot(Path(scale.BOARD)):
-        started = time.monotonic()
-        hold.update(started=now().isoformat(), load_start=os.getloadavg()[0],
-                    cc1plus_start=scale.cc1plus(), board_window_open=eligible())
-        done = threading.Event()
-
-        def watch_load():
-            while not done.wait(0.2):
-                if (load := os.getloadavg()[0]) > 8:
-                    hold["load_exceeded"] = load
-                    return
-
-        usable = hold["board_window_open"] and not hold["cc1plus_start"]
-        watcher = threading.Thread(target=watch_load) if usable else None
-        if watcher:
-            watcher.start()
-        try:
-            yield usable
-        finally:
-            done.set()
-            if watcher:
-                watcher.join()
-            hold.update(hold_s=time.monotonic() - started, finished=now().isoformat(),
-                        load_end=os.getloadavg()[0], cc1plus_end=scale.cc1plus())
-
-
-def clean_hold(hold):
-    return (hold["board_window_open"] and hold["cc1plus_start"] == hold["cc1plus_end"] == []
-            and hold["hold_s"] < 240 and hold["load_end"] <= 8 and "load_exceeded" not in hold)
+def guard(cpu_sets, output):
+    return partial(measurement_hold, cpu_sets=cpu_sets, output=output,
+                   lock_paths=(scale.REGIMES, scale.BOARD), gap=scale.HOLDS_GAP_S,
+                   compiler_processes=scale.cc1plus)
 
 
 def scope(cpus, command, *, limit=55):
@@ -222,7 +181,9 @@ def scope(cpus, command, *, limit=55):
 
 def measure_regime(directory, cpus, command, profile=False, cycles=False, *, controller):
     events = "instructions:u,duration_time,cycles:u"
-    launcher = ["taskset", "-c", mask(cpus), "/usr/bin/time", "-f", "%U %S\n%M",
+    launcher = ["sh", "-c", 'printf "%s\n" "$$" > "$1"; shift; exec "$@"',
+                "measured", directory / "timed.pid",
+                "taskset", "-c", mask(cpus), "/usr/bin/time", "-f", "%U %S\n%M",
                 "-o", directory / "rss.txt", *command]
     if profile:
         return scope(mask(controller), ["perf", "record", "-N", "--clockid", "mono", "--sample-cpu",
@@ -245,25 +206,24 @@ def regime_pair(out, bins, case, grain, width, index, reverse, cpu_sets, profile
         point.mkdir()
         hold = {"case": case, "grain_ns": grain, "width": width, "order": order}
         samples = {}
-        with guarded_hold(hold) as usable:
-            if usable:
-                for arm in order:
-                    if "load_exceeded" in hold:
-                        break
-                    path, row = run.observe_regime(
-                        bins, point, case, arm.capitalize(), cpus, cpu_sets["load"], work.size, rounds,
-                        wanted, profile=profile, launch_loader=scope,
-                        launch_measurement=partial(measure_regime, controller=cpu_sets["controller"]))
-                    cpu = None
-                    if (path / "rss.txt").is_file():
-                        lines = (path / "rss.txt").read_text().splitlines()
-                        if len(lines) >= 2 and row.get("iterations"):
-                            cpu = sum(map(float, lines[-2].split())) * 1e6 / row["iterations"]
-                    sample = row | {"cpu_us_per_turn": cpu, "path": str(path.relative_to(out))}
-                    if row["status"] == "ok" and not profile:
-                        sample["work_per_s"] = regimes.rate(row)
-                    samples[arm] = sample
-        hold["clean"] = clean_hold(hold) and len(samples) == 2
+        with guard(cpu_sets, point)(hold):
+            for arm in order:
+                path, row = run.observe_regime(
+                    bins, point, case, arm.capitalize(), cpus, cpu_sets["load"], work.size, rounds,
+                    wanted, profile=profile, launch_loader=scope,
+                    launch_measurement=partial(measure_regime, controller=cpu_sets["controller"]))
+                cpu = None
+                if (path / "rss.txt").is_file():
+                    lines = (path / "rss.txt").read_text().splitlines()
+                    if len(lines) >= 2 and row.get("iterations"):
+                        cpu = sum(map(float, lines[-2].split())) * 1e6 / row["iterations"]
+                sample = row | {"cpu_us_per_turn": cpu, "path": str(path.relative_to(out))}
+                if row["status"] == "ok" and not profile:
+                    sample["work_per_s"] = regimes.rate(row)
+                samples[arm] = sample
+                if (path / "timed.pid").exists():
+                    hold["arm_pids"].append(int((path / "timed.pid").read_text()))
+        hold["clean"] = hold["clean"] and len(samples) == 2
         write(point / "pair.json", {"hold": hold, "samples": samples})
         time.sleep(scale.HOLDS_GAP_S)
         if hold["clean"]:
@@ -450,7 +410,7 @@ def matched_a1(runner, raw, cell_name, cell, offer, repeats, phase, profile=None
 
 def run_a1(report, cache, full, repeats, reverse, cpu_sets):
     scale.PORT, scale.TOOL_PORT = pick_ports()
-    runner = A1Runner(cache / "a1", report.out, hold_guard=guarded_hold,
+    runner = A1Runner(cache / "a1", report.out, hold_guard=guard(cpu_sets, report.out),
                       cpu_sets={role: mask(cpus) for role, cpus in cpu_sets.items()})
     for storage, software in ([("ext4", False), ("tmpfs", False), ("ext4", True)]
                               if full else [("ext4", False)]):
@@ -552,9 +512,11 @@ def main():
             or args.deadline_seconds is not None and args.deadline_seconds < 1):
         parser.error("repeats and deadline must be positive")
     cpu_sets = {role: getattr(args, f"{role}_cpus") for role in CPU_DEFAULTS}
-    assigned = [cpu for cpus in cpu_sets.values() for cpu in cpus]
-    if set(assigned) - MEASURE_CPUS or len(assigned) != len(set(assigned)):
-        parser.error("CPU sets must be disjoint and use only 0-3, 8-11, 16-19 and 24-27")
+    server, load, helper, controller = map(set, cpu_sets.values())
+    if set().union(server, load, helper, controller) - MEASURE_CPUS:
+        parser.error("measurement CPUs must be in 0-3, 16-19 or 24-27")
+    if server & (load | helper | controller) or load & (helper | controller):
+        parser.error("server and load CPUs must be disjoint from the other roles")
     if len(cpu_sets["server"]) != 8:
         parser.error("the server CPU set must contain eight CPUs")
     controller = set(cpu_sets["controller"])

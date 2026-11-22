@@ -15,8 +15,7 @@ fi
 if [[ ${UNITS_BUILD_UNDER_CAP:-0} != 1 ]]; then
     root=$(cd "$(dirname "$0")/../.." && pwd)
     export HIRSEL_JOBS=4 UNITS_BUILD_UNDER_CAP=1
-    exec "$root/tools/capped" flock /run/user/1000/hirsel-mc-regimes.lock \
-        timeout --kill-after=5s 220s "$0" "$@"
+    exec "$root/tools/capped" "$0" "$@"
 fi
 
 scratch=$(realpath -m "$1")

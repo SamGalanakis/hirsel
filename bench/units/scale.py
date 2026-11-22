@@ -21,7 +21,7 @@ import time
 
 from blocks import BOARD, REGIMES, board_window_ok, cpuset
 from part3u import (
-    LOAD, PARTITIONS, RUN, SERVER, SYNCS, TOOL_DELAY_US, complete_in_time, search_steps,
+    PARTITIONS, RUN, SYNCS, TOOL_DELAY_US, complete_in_time, search_steps,
 )
 
 
@@ -29,7 +29,9 @@ PORT = 28200
 # Session units behind the single listening port.
 SESSION_UNITS = 8
 TOOL_PORT = 28190
-TOOL = "24-25"
+SERVER = "0-3,16-19"
+LOAD = "24-25"
+TOOL = "26-27"
 CONTROLLER = "26-27"
 NOFILE = 524288
 CPU_HZ = os.sysconf("SC_CLK_TCK")
@@ -71,10 +73,6 @@ class PortBusy(RuntimeError):
     pass
 
 
-class TimingLoadExceeded(RuntimeError):
-    pass
-
-
 def stop_at_deadline(*_):
     raise Deadline
 
@@ -83,7 +81,7 @@ def stop_at_deadline(*_):
 def timing_hold(receipt):
     # Check again after the blocking acquisitions because the board window
     # can close while another lane owns the lock.
-    while not board_window_ok() or os.getloadavg()[0] > 8:
+    while not board_window_ok():
         time.sleep(HOLDS_GAP_S)
     with open(REGIMES, "a") as regimes, open(BOARD, "a") as board:
         fcntl.flock(regimes, fcntl.LOCK_EX)
@@ -94,8 +92,7 @@ def timing_hold(receipt):
             receipt["cc1plus_start"] = cc1plus()
             receipt["board_window_open"] = board_window_ok()
             receipt["load_start"] = os.getloadavg()[0]
-            yield (not receipt["cc1plus_start"] and receipt["board_window_open"]
-                   and receipt["load_start"] <= 8)
+            yield receipt["board_window_open"]
         finally:
             try:
                 receipt["cc1plus_end"] = cc1plus()
@@ -257,9 +254,6 @@ class Runner:
         marker = self.scratch / "load-phase"
         try:
             while time.monotonic() - started < 35:
-                if self.active_hold is not None and os.getloadavg()[0] > 8:
-                    self.active_hold["load_exceeded"] = os.getloadavg()[0]
-                    raise TimingLoadExceeded("one-minute load exceeded 8")
                 sample = proc_sample(server_pid)
                 if sample:
                     samples.append(sample)
@@ -330,6 +324,8 @@ class Runner:
         tool0 = proc_sample(tool_pid)
         with (self.scratch / "server.err").open("w+") as err:
             server = launch(server_argv, server_pidfile, env=env, stderr=err)
+            if self.active_hold is not None and "arm_pids" in self.active_hold:
+                self.active_hold["arm_pids"].append(server.pid)
             try:
                 load = launch(pinned(load_cpus, lg_argv), load_pidfile, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                 try:
@@ -419,16 +415,13 @@ class Runner:
                             for side, rate, seed in items:
                                 tag = f"{phase}-{cell_name}-{os.getpid()}-{self.hold}-{side.replace(' ', '_')}"
                                 records.append(self.trial(tag, side, cell, rate, seed, tool, profile))
-            except TimingLoadExceeded:
-                pass
             except PortBusy as error:
                 receipt["port_conflict"] = str(error)
             finally:
                 self.active_hold = None
-                clean = bool(receipt.get("board_window_open") and receipt.get("cc1plus_start") == []
-                             and receipt.get("cc1plus_end") == [] and "port_conflict" not in receipt
-                             and "load_exceeded" not in receipt and receipt.get("load_end", 0) <= 8
-                             and receipt.get("hold_s", 240) < 240 and len(records) == len(items))
+                clean = (receipt.get("clean", receipt.get("board_window_open", False))
+                         and "port_conflict" not in receipt and receipt.get("hold_s", 240) < 240
+                         and len(records) == len(items))
                 for r in records:
                     out.write(json.dumps(r | receipt | {"discarded": not clean}) + "\n")
                 out.write(json.dumps(receipt | {"hold_summary": True, "discarded": not clean}) + "\n")

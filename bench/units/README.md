@@ -9,9 +9,8 @@ taskset -c 26-27 bench/units/fair.py --cells a1,regimes --full --out "$results/f
 ```
 
 The runner builds the current commit with Buck2 and the capped benchmark
-recipes on CPUs 8–11 at four jobs. Local builds take the regime lock in
-holds of at most about four minutes. The runner verifies cached executable
-hashes before use.
+recipes on CPUs 8–11 at four jobs. Builds take neither measurement lock.
+The runner verifies cached executable hashes before use.
 `--cache` defaults to `fair-bin-cache` beside the output directory. Use
 the same parent directory for both quick runs to share the cache. Each
 output directory must be new and outside the checkout.
@@ -31,17 +30,20 @@ output directory must be new and outside the checkout.
   of paired samples with `--repeats`. Full defaults to one pair per regime
   point. The measurement wait defaults to 30 minutes for quick and four
   hours for full. `--deadline-seconds` overrides that bound after builds.
-- The controller takes the regime lock before the board lock. It waits
-  outside the locks while host load exceeds 8 or a hold would overlap
-  02:45–04:00 local time. Both boundaries check for `cc1plus`. A hold that
-  crosses the load limit or sees a compiler at either boundary is discarded.
-  The runner alternates arm order and waits at least 15 seconds between
-  holds. It pins the server, load generator and helper to their assigned CPU
-  sets. The receipt records the observed host checks for every attempted hold.
+- Before taking the locks, the runner samples `/proc/stat` for one second
+  and requires every server CPU to be under 5% busy. The controller takes
+  the regime lock before the board lock and releases both after the timed
+  pair. Holds avoid 02:45–04:00 local time and are separated by at least
+  15 seconds. The runner records host load and `pgrep -x cc1plus` at both
+  boundaries. Neither reading is an admission or discard rule.
+- A scheduler trace checks which tasks ran on the server CPUs during the
+  timed pair. Activity by a task outside the two arms discards the hold.
+  Missing scheduler ownership evidence also leaves the hold unqualified.
+  Raw receipts list foreign tasks, lost events and the opening idle sample.
 - Use `--server-cpus`, `--load-cpus`, `--helper-cpus` and
-  `--controller-cpus` to select disjoint masks. The defaults are server
-  0–3 and 8–11 in interleaved order, load generator 16–19, helper 24–25 and
-  controller 26–27. CPUs 4–7, 12–15, 20–23 and 28–31 are excluded.
+  `--controller-cpus` to select masks. The defaults are server 0–3 and
+  16–19 on CCD0, load generator 24–25, and helper and controller 26–27.
+  Builds use only 8–11. CPUs 4–7, 12–15, 20–23 and 28–31 are excluded.
 
 A1 clients schedule requests independently of replies. An A1 pass requires
 intended-arrival p99 at most 5 ms, an independently correct reply for every

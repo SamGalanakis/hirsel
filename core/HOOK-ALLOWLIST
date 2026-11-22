@@ -177,11 +177,15 @@ core@1/float/total_order
 core@1/float/trunc
 core@1/float/widen
 core@1/heap/Heap
+# DECISIONS.md 2026-11-22 (driver-lib-reds-1732, store plain-data primitives).
+core@1/heap/finish_prepared_push
 core@1/heap/grow
 core@1/heap/len
 core@1/heap/new
 core@1/heap/peek
 core@1/heap/pop
+# DECISIONS.md 2026-11-22 (driver-lib-reds-1732, store plain-data primitives).
+core@1/heap/prepare_push
 core@1/heap/push
 core@1/heap/slots_free
 core@1/heap/slots_move
@@ -250,9 +254,14 @@ core@1/list/Slots
 core@1/list/append
 core@1/list/capacity
 core@1/list/clear
+# DECISIONS.md 2026-11-22 (driver-lib-reds-1732, store plain-data primitives).
+core@1/list/compare_bytes
+core@1/list/copy_within
 core@1/list/fill
 core@1/list/get
 core@1/list/grow
+# DECISIONS.md 2026-11-22 (driver-lib-reds-1732, the cold growth arm of reserve).
+core@1/list/grow_by
 core@1/list/len
 core@1/list/new
 core@1/list/pop
@@ -281,6 +290,8 @@ core@1/list/slots_view
 core@1/list/sort_stable
 core@1/list/sum
 core@1/list/swap
+# DECISIONS.md 2026-11-22 (driver-lib-reds-1732, store plain-data primitives).
+core@1/list/truncate
 core@1/list/with_capacity
 # DECISIONS.md 2026-11-19 (dedup-1357 rank 10, endian words).
 core@1/list/word_be
@@ -313,7 +324,6 @@ core@1/map/slot_meta
 core@1/map/copy_entry
 core@1/map/placement
 core@1/map/growth_target
-core@1/map/probe_limit
 core@1/map/probe
 core@1/map/probe_staged
 core@1/map/vacancy
@@ -350,7 +360,11 @@ core@1/map/take_entry
 # MEM-21 / R1 (3d1bbe30): reserve with the same inline refusal as before R1.
 core@1/map/try_reserve
 core@1/map/update
+# DECISIONS.md 2026-11-22 (driver-lib-reds-1732, store plain-data primitives).
+core@1/map/update_or_insert
 core@1/map/with_value
+# DECISIONS.md 2026-11-22 (driver-lib-reds-1732, store plain-data primitives).
+core@1/option/copied
 core@1/option/unwrap
 core@1/order/$compare
 core@1/order/$ge

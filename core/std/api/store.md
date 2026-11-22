@@ -206,7 +206,7 @@ a closed rotation sender poisons the Db and takes no Cut.
 ## M1 target (not yet built)
 
 Nothing in this section is on main. It is the store's M1 surface, specified in
-STORE-SPEC v2.38 §11 (AP1–AP21, L37–L51), and the M1 implementation slices flip
+STORE-SPEC v2.39 §11 (AP1–AP21, L37–L51), and the M1 implementation slices flip
 it to built. Everything above describes the store as built.
 
 - **Pages.** Every tree becomes a B+ tree of packed pages (`Arc[Page]`, 4 KiB

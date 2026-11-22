@@ -142,18 +142,34 @@ impl CheckRequest {
         Ok(manifest)
     }
 
-    pub fn libraries(libraries: &Path, store: &Path) -> io::Result<Self> {
-        let core = if libraries == Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core") {
-            PackageProduct::bundled_manifest(&libraries.join("core"))
-        } else {
-            PackageManifest::directory(&libraries.join("core"), package("core"), true)?
+    fn library_packages(
+        libraries: Option<&Path>,
+        needs_std: bool,
+    ) -> io::Result<Vec<PackageManifest>> {
+        let core = match libraries {
+            Some(root) => PackageManifest::directory(&root.join("core"), package("core"), true)?,
+            None => PackageProduct::bundled_manifest(Path::new("core/core")),
         };
-        let std = Self::source_std(&libraries.join("std"))?;
+        let mut packages = vec![core];
+        if needs_std {
+            packages.push(match libraries {
+                Some(root) => Self::source_std(&root.join("std"))?,
+                None => PackageProduct::bundled_std_manifest(Path::new("core/std")),
+            });
+        }
+        Ok(packages)
+    }
+
+    pub fn libraries(libraries: &Path, store: &Path) -> io::Result<Self> {
+        Self::library_request(Some(libraries), store)
+    }
+
+    pub(crate) fn library_request(libraries: Option<&Path>, store: &Path) -> io::Result<Self> {
         Ok(Self {
             manifest: None,
             inputs: CorpusManifest {
                 core: package("core"),
-                packages: vec![core, std],
+                packages: Self::library_packages(libraries, true)?,
             },
             store: store.to_owned(),
             library: LibraryInput::Sources,
@@ -161,9 +177,7 @@ impl CheckRequest {
         })
     }
     pub fn with_image(dir: &Path, store: &Path, image: Arc<CoreImage>) -> io::Result<Self> {
-        let libraries = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core");
-        let mut request =
-            Self::from_app(package_dir::PackageDir::open(dir)?, &libraries, store, true)?;
+        let mut request = Self::from_app(package_dir::PackageDir::open(dir)?, None, store, true)?;
         if !request.use_image(image)? {
             return Err(io::Error::other(
                 "the image holds packages outside the request",
@@ -173,36 +187,33 @@ impl CheckRequest {
     }
 
     pub fn program(dir: &Path, libraries: &Path, store: &Path) -> io::Result<Self> {
-        Self::from_app(package_dir::PackageDir::open(dir)?, libraries, store, true)
+        Self::from_app(
+            package_dir::PackageDir::open(dir)?,
+            Some(libraries),
+            store,
+            true,
+        )
     }
 
     pub fn directory(dir: &Path, libraries: &Path, store: &Path) -> io::Result<Self> {
-        Self::from_app(package_dir::PackageDir::open(dir)?, libraries, store, false)
+        Self::from_app(
+            package_dir::PackageDir::open(dir)?,
+            Some(libraries),
+            store,
+            false,
+        )
     }
 
     pub(crate) fn from_app(
         app: package_dir::PackageDir,
-        libraries: &Path,
+        libraries: Option<&Path>,
         store: &Path,
         program: bool,
     ) -> io::Result<Self> {
-        let default = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core");
-        let bundled = program
-            && (product::normalized(libraries) == product::normalized(&default)
-                || product::normalized(libraries) == product::normalized(Path::new("core")));
-        let core = if bundled || libraries == default {
-            PackageProduct::bundled_manifest(&libraries.join("core"))
-        } else {
-            PackageManifest::directory(&libraries.join("core"), package("core"), true)?
-        };
-        let mut packages = vec![core];
-        if app.needs_std() {
-            packages.push(if bundled {
-                PackageProduct::bundled_std_manifest(&libraries.join("std"))
-            } else {
-                Self::source_std(&libraries.join("std"))?
-            });
-        }
+        let libraries = libraries.filter(|root| {
+            !program || product::normalized(root) != product::normalized(Path::new("core"))
+        });
+        let mut packages = Self::library_packages(libraries, app.needs_std())?;
         packages.extend(app.dependencies);
         packages.push(app.package);
         Ok(Self {

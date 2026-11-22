@@ -4,15 +4,18 @@
 `--check` reports files that are not formatted and fails, as `cargo fmt --check`.
 rustfmt starts from each target's root file and follows its modules.
 Changed new-language sources are checked, never rewritten, and the primer's copies
-(tools/site_sync.py --check) must match docs/PRIMER.md. Refusal/gap fixtures
+(tools/site_sync.py --check) must match docs/PRIMER.md. The std operation index
+must match the current compiler's interface. Refusal/gap fixtures
 are excluded by explicit expectation comments to preserve diagnostic coordinates.
 """
 
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
 import sys
+import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
 BUCK2 = ROOT / '.buck2/bin/buck2'
@@ -41,19 +44,23 @@ def changed_cases():
                   and not is_refusal_fixture(path))
 
 
+def build_executable(target):
+    built = subprocess.check_output([str(BUCK2), 'build', '--show-json-output', target],
+                                    cwd=ROOT, text=True)
+    return ROOT / json.loads(built)[target]
+
+
+def check_std_index():
+    compiler = build_executable('root//:hirsel-core-driver-bin-hirsel')
+    with tempfile.TemporaryDirectory(prefix='hirsel-api-index-') as work:
+        return subprocess.run([sys.executable, str(ROOT / 'core/tools/std_api_index.py'), '--check'],
+                              cwd=work, env=dict(os.environ, HIRSEL=str(compiler))).returncode
+
+
 def check_cases(paths):
     if not paths:
         return 0
-    synced = subprocess.run([sys.executable, str(ROOT / 'tools/buck2/sync.py'), '--if-stale'], cwd=ROOT)
-    if synced.returncode:
-        return synced.returncode
-    target = 'root//:hirsel-core-syntax-bin-hirsel-core-syntax'
-    built = subprocess.run([str(BUCK2), 'build', '--show-json-output', target],
-                           cwd=ROOT, capture_output=True, text=True)
-    if built.returncode:
-        print(built.stdout + built.stderr, file=sys.stderr, end='')
-        return built.returncode
-    executable = ROOT / json.loads(built.stdout)[target]
+    executable = build_executable('root//:hirsel-core-syntax-bin-hirsel-core-syntax')
     status = 0
     for signatures in (True, False):
         selected = [p for p in paths if (Path(p).parts[:2] == ('core', 'core')) == signatures]
@@ -89,9 +96,16 @@ def main():
     for edition, files in sorted(roots.items()):
         command = [str(RUSTFMT), '--edition', edition, *rustfmt_flags, *sorted(files)]
         status = subprocess.run(command, cwd=ROOT).returncode or status
-    # The primer's site and skill copies are byte-identical to docs/PRIMER.md.
-    synced = subprocess.run([sys.executable, str(ROOT / 'tools/site_sync.py'), '--check'], cwd=ROOT).returncode
-    return status or synced or check_cases(changed_cases())
+    site = subprocess.run([sys.executable, str(ROOT / 'tools/site_sync.py'), '--check'], cwd=ROOT)
+    if status or site.returncode:
+        return status or site.returncode
+    synced = subprocess.run([sys.executable, str(ROOT / 'tools/buck2/sync.py'), '--if-stale'], cwd=ROOT)
+    if synced.returncode:
+        return synced.returncode
+    try:
+        return check_std_index() or check_cases(changed_cases())
+    except subprocess.CalledProcessError as error:
+        return error.returncode
 
 
 if __name__ == '__main__':

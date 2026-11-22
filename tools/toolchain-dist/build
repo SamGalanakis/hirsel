@@ -160,12 +160,15 @@ def fresh_witness(prefix):
     system = [arg for directory in ('/usr/lib', '/lib', '/lib64') if Path(directory).is_dir()
               for arg in ('--ro-bind', directory, directory)]
     passed = subprocess.run([*sandbox, *system, '--', '/bin/sh', '-c',
-                             f'hirsel --version && {sequence} && ./program && hirsel check'],
+                             f'hirsel --version && hirsel inspect --std --interface && '
+                             f'{sequence} && ./program && hirsel check'],
                             capture_output=True, text=True)
     if passed.returncode or 'pass executed app@1/tests/test_twice' not in passed.stdout:
         raise ValueError(f'fresh root with system link inputs failed ({passed.returncode})\n'
                          f'{passed.stdout}{passed.stderr}')
     lines = passed.stdout.splitlines()
+    if not any(line.startswith('std@1/sim/fs/serve\t') for line in lines):
+        raise ValueError('fresh root std interface omitted the public sim.fs.serve declaration')
     registration = json.loads((prefix / 'hirsel-core-toolchain.json').read_text())
     runtimes = [f'{name} {target} {Path(archive).parent.name}'
                 for field, name in [('runtimes', 'runtime'), ('recording_runtimes', 'recording runtime')]

@@ -322,13 +322,13 @@ type N = Lit(i64)
 fn ev(n: N) -> i64 { match n { Lit(x) => x } }
 fn f(take o: Option[Box[N]]) -> i64 { ev(option.unwrap(take o)) }  // refused: LANG-11, at take o: T is N
 ```
-```hirsel unbuilt
+```hirsel
 fn fits(s: String) -> bool { match (int.parse(s) : Result[u8, ParseError]) { Ok(_) => true, Error(_) => false } }
 fn first(s: String) -> Result[u64, ParseError] { let n = (int.parse(s) : Result[u64, ParseError])?; Ok(n + 1) }
 fn none_first(v: Option[u64]) -> bool { (None : Option[u64]) == v }
 fn empty() -> u64 { list.len((list.new() : List[u64])) }
 ```
-```hirsel unbuilt
+```hirsel
 fn widen(x: u8) -> u64 { (x : u64) }                      // refused: LANG-11, at x: u8 is not u64
 ```
 ```hirsel unbuilt

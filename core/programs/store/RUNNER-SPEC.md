@@ -32,7 +32,7 @@ At width 8 the 64-client checkbox sent 3,944 to 12,937 whole-board repairs, abou
 
 **Decision log.**
 - **Item 1.** The other places a fix could go were the publisher and the inbox. Publisher-side coalescing per session would make the publisher hold rows for a full inbox, against ruling C (§3 item 4: "The publisher holds no subscription rows for a full inbox"). A bigger inbox would add a second bound beside 1+q and still storm at a larger burst. Taking the backlog keeps one account: the C events were already charged to the session, and the staged output stays under `budget`. /wholehog: one job per run of queued Updates is the clean end state; nothing else changes. Reversible: the take is owner-local.
-- **Measured** (lane checkbox-repair-1670 REPORT.md, the same CPUs and host for each pair): width 4 on CPUs 0-3, 1,486 repairs before and 15 after; width 8 on 0-3 and 24-27, 914 and 6; width 8 on 0-3 and 8-11, 3,944 and 192. Width 1 sends 0 before and after. Every client converged to the same checksum. The repairs that remain are owners that were descheduled for more than C rounds, the slow readers §3 repairs.
+- **Measured** (lane checkbox-repair-1670 REPORT.md, the same CPUs and host for each pair): width 4 on CPUs 0-3, 1,486 repairs before and 15 after; width 8 on 0-3 and 24-27, 914 and 6; width 8 on 0-3 and 8-11, 3,944 and 192. Width 1 sends 0 before and after. Every client converged to the same checksum. The repairs that remain are not attributed: they move with host load, from 6 to 192 across the pairs, and a `Sent` between Updates still ends a take run.
 
 ## CHANGES-v2.25 (two query kinds: `query` does not depend on the Caller, `query_as` does; lane runner-query-caller-1608)
 

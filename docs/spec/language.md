@@ -88,10 +88,26 @@ most once on a declaration; a second occurrence is refused under LANG-7 at that 
 with the first occurrence as the causal site. Live fields of a record have distinct names; a
 duplicate is refused under LANG-7 at the later field, with the first occurrence as the
 causal site. Live variants of a variant type have distinct names; a duplicate is refused
-under LANG-7 at the later variant, with the first occurrence as the causal site. Variants are
-written bare (`Ok(x)`, `None`) and selected by the expected type; with none, a variant names
-the one visible type that declares it, and a variant two visible types declare is refused
-here. A dotted path never names a variant. Core roles (`Result`, `Capacity`, the capability types) are fixed by definition
+under LANG-7 at the later variant, with the first occurrence as the causal site.
+
+Variants are written bare (`Ok(x)`, `None`). Where a constructor or pattern has an expected
+type ([LANG-11](#lang-11-typing-is-local); a pattern's is its scrutinee's), the variant is
+selected from that type, whichever module, package or core module declares it, when the type
+is visible there and not opaque ([PROG-2](programs.md#prog-2-visibility)). With no expected
+type, or one that is still a hole, a bare value name that names no local, function or
+constant resolves as a bare type name does: in the current module, then in the
+prelude, and nowhere else. The current module includes its private types; a sibling module, a
+dependency and a core module other than the prelude are outside, and an opaque type supplies
+no constructor outside its module. At the first of those two levels that has a constructor of
+that name, it is the record type of that name if that level declares one, and otherwise the
+variant of the one type there that declares it. Two types at that level that declare it are
+refused here, at the constructor, even when the other level has one too. A name neither level
+has is refused here, and when a visible type elsewhere declares the variant the refusal names
+that type's path and the fix, an expected type written with it, as `let j: work.Job = Done`
+or `(Done : work.Job)`. So a variant added to core or a dependency never takes over or refuses
+a constructor the current module declares, and a bare variant without an expected type reads
+exactly as a bare type name does (the order at the start of this rule). A dotted path never
+names a variant. Core roles (`Result`, `Capacity`, the capability types) are fixed by definition
 path, never by spelling.
 
 ```hirsel
@@ -119,6 +135,19 @@ fn f() -> u64 { width.bits }                              // refused: LANG-7, wi
 ```
 ```hirsel
 fn f(x: u64) -> u64 { let x = x + 1; x }                  // refused: LANG-7, shadows x
+```
+```hirsel unbuilt
+type Job = Done | Running
+fn local() -> Job { let j = Done; j }                     // Job's: the module comes first
+fn reply() -> DirReply { let r: DirReply = Done; r }      // selected by the expected type
+fn ended(r: DirReply) -> bool { match r { Done => true, _ => false } }
+```
+```hirsel unbuilt
+fn f() -> u64 { let _ = Done; 0 }                         // refused: LANG-7, three prelude types declare Done
+```
+```hirsel unbuilt
+fn f() -> u64 { let _ = NotUtf8; 0 }                      // refused: LANG-7, env.EnvError is not in scope
+fn g() -> env.EnvError { let e: env.EnvError = NotUtf8; e } // the fix: an expected type
 ```
 
 ### LANG-8: Signatures

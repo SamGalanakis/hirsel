@@ -689,8 +689,36 @@ pub fn connect_starttls(net: Net, tls_trust: Trust, config: Config) -> Result[Co
     connect_with(net, tls_trust, config, StartTls)
 }
 
+/// One IP literal or one DNS name of LDH labels (RFC 1123 2.1), each 1 to 63
+/// bytes with no hyphen at either end, at most 253 bytes in all. The cancel
+/// key's `tls_send(<host>)` policy is built from this text, so a comma, a
+/// wildcard or a space would name another peer.
+fn valid_host(host: String) -> bool {
+    let raw = string.as_bytes(host)
+    if let Ok(_) = std.net.parse_ip(raw) {
+        return true
+    }
+    let n = list.len(raw)
+    if n == 0 || n > 253 {
+        return false
+    }
+    let mut start = 0u64
+    for i in 0u64 .. n + 1 {
+        if i == n || raw[i] == b'.' {
+            let length = i - start
+            if length == 0 || length > 63 || raw[start] == b'-' || raw[i - 1] == b'-' {
+                return false
+            }
+            start = i + 1
+        } else if !std.int.is_ascii_digit(raw[i]) && !std.int.is_ascii_alpha(raw[i]) && raw[i] != b'-' {
+            return false
+        }
+    }
+    true
+}
+
 fn connect_with(net: Net, tls_trust: Trust, config: Config, mode: TlsMode) -> Result[Conn, Error] waits {
-    if !valid_startup_value(config.user) || !valid_startup_value(config.database) {
+    if !valid_host(config.host) || !valid_startup_value(config.user) || !valid_startup_value(config.database) {
         return Error(InvalidRequest)
     }
     let until = At(config.clock, config.deadline)

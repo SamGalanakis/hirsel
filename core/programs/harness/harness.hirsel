@@ -597,15 +597,6 @@ pub fn adopt(mut tx: store.Tx, h: Handles, take p: Prefix) -> Result[(), Refused
     kept(store.put(mut tx, h.views, 0u64, Status("idle")))
 }
 
-fn digest(raw: Bytes) -> Bytes {
-    let d = std.sha256.hash(raw)
-    let mut out: Bytes = list.with_capacity(32u64)
-    for i in 0u64 .. 32u64 {
-        list.push(mut out, d[i])
-    }
-    take out
-}
-
 fn blob_key(hash: Bytes) -> String {
     let digits = string.as_bytes("0123456789abcdef")
     let mut key = string.into_bytes("sha256/")
@@ -1465,6 +1456,7 @@ fn step_round[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut
             let live = current_remote(tx, h, e.cutoff, call.name)?
             if let (Some(_), Some(_)) = (a.mcp_peer, live) {
                 open = true
+                working = true
                 e.repeat = Once
                 e.deadline = now(mut tx) + a.limits.tool_ms
                 seal(mut tx, h, w, key, take e)?
@@ -1925,19 +1917,16 @@ fn remote_effect[G: send](snap: store.Snapshot, h: Handles, e: Effect, c: Call, 
         return Failed("MCP deadline elapsed before send")
     }
     let deadline = std.clock.deadline_after_ms(host.mono_ns(peer.clock), e.deadline - wall)
-    match mcp_tools.call(peer, row, clone(raw), INLINE_LIMIT, deadline) {
-        Ok(take out) => if list.len(out) > INLINE_LIMIT {
-            Failed("result too large")
-        } else {
-            Returned(Inline(take out))
-        },
-        Error(Unavailable) => InDoubt,
-        Error(BadArguments) => Failed("invalid MCP arguments"),
-        Error(Refused(take why)) => Failed(take why),
-    }
+    let reply = mcp_tools.call(peer, row, clone(raw), mcp_tools.REPLY_LIMIT, deadline)
+    tool_result(port, a, take reply)
 }
 
-fn tool_result[G: send](port: G, a: Agent[G], take body: Bytes) -> Outcome waits {
+fn tool_result[G: send](port: G, a: Agent[G], take reply: Result[Bytes, Fault]) -> Outcome waits {
+    let body = match take reply {
+        Ok(take output) => take output,
+        Error(Unavailable) => return InDoubt,
+        Error(take fault) => return Failed(fault_text(take fault)),
+    }
     if list.len(body) <= INLINE_LIMIT {
         return Returned(Inline(take body))
     }
@@ -2010,11 +1999,7 @@ pub fn effect_with_preview[G: send, F](ctx: store.runner.TriggerContext, port: G
                 return Ok(Lost)
             }
             let go = code.callable(f)
-            Tool(match go(port, clone(raw)) {
-                Ok(take out) => tool_result(port, a, take out),
-                Error(Unavailable) => InDoubt,
-                Error(take fault) => Failed(fault_text(take fault)),
-            })
+            Tool(tool_result(port, a, go(port, clone(raw))))
         }
         let _ = take progress
         take outcome

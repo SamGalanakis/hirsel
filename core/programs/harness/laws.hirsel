@@ -14,11 +14,11 @@ type Services: send { model: Sender[ModelAsk], tool: Sender[ToolAsk], blobs: Opt
 type Grants: send { context: store.runner.TriggerContext, model: Sender[ModelAsk], tool: Sender[ToolAsk], blobs: Option[BlobFixture] }
 
 type BlobCut: send = BlobWritten | PlaceEnded
-type BlobFixture: send { net: Net, tasks: Tasks, clock: Clock, random: Random, cut: Option[Sender[BlobCut]] }
+type BlobFixture: send { net: Net, tasks: Tasks, clock: Clock, random: Random, cut: Option[Sender[BlobCut]], peer: Option[(Addr, Net)] }
 
 fn copy_blob_fixture(b: BlobFixture) -> BlobFixture {
     let cut = match b.cut { Some(s) => Some(channel.sender(s)), None => None }
-    BlobFixture(net: b.net, tasks: b.tasks, clock: b.clock, random: b.random, cut: take cut)
+    BlobFixture(net: b.net, tasks: b.tasks, clock: b.clock, random: b.random, cut: take cut, peer: b.peer)
 }
 
 fn blob_grant(s: Services) -> Option[BlobFixture] {
@@ -1210,7 +1210,7 @@ fn blob_server(take setup: BlobServer) -> std.sim.s3.Report waits {
     std.sim.s3.serve(cfg, mut plan, clock, take port)
 }
 
-fn blob_fixture(tasks: Tasks, clock: Clock, random: Random) -> (BlobFixture, Task[std.sim.s3.Report]) {
+fn blob_fixture(tasks: Tasks, clock: Clock, random: Random, capacity: u64) -> (BlobFixture, Task[std.sim.s3.Report]) {
     let address = Addr(ip: V4(127u32 << 24 | 1u32), port: 8080u16)
     let mut network = std.sim.net.new(std.sim.net.defaults())
     let mut ips: List[Ip] = list.new()
@@ -1229,10 +1229,10 @@ fn blob_fixture(tasks: Tasks, clock: Clock, random: Random) -> (BlobFixture, Tas
     let verify = result.unwrap(secret.derive_hmac_sha256(service_key, list.new(), string.as_bytes("aws4_request"), "verify"))
     let cfg = std.sim.s3.Config(address, cut: None, network: take network, after_resolve: None,
         credential: take scope, signing_key: take verify,
-        faults: list.new(), exists_status: 412u16, fragment_bytes: 8192u64, max_body: BLOB_SIZE)
+        faults: list.new(), exists_status: 412u16, fragment_bytes: 8192u64, max_body: capacity)
     let (network_grant, port) = provide.net(bytes 262144u64)
     let server = task.spawn(tasks, bytes 8388608u64, BlobServer(config: take cfg, clock, port: take port), blob_server)
-    (BlobFixture(net: network_grant, tasks, clock, random, cut: None), take server)
+    (BlobFixture(net: network_grant, tasks, clock, random, cut: None, peer: None), take server)
 }
 
 fn blob_client(f: BlobFixture) -> Result[std.object.Client, harness.Fault] waits {
@@ -1378,7 +1378,7 @@ fn law_blob_results(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net
 
     let (first_dir, disk) = mount(tasks, clock, std.sim.fs.new(), std.sim.world.plan(0u64))
     seed_session(first_dir, clock, random, tasks)
-    let (take cutting, first_server) = blob_fixture(tasks, clock, random)
+    let (take cutting, first_server) = blob_fixture(tasks, clock, random, BLOB_SIZE)
     let (stop, stop_in): (Sender[()], Receiver[()]) = channel.new(1u64)
     let (checkpoint, checkpoints): (Sender[BlobCut], Receiver[BlobCut]) = channel.new(1u64)
     let mut cut_fixture = take cutting
@@ -1409,7 +1409,7 @@ fn law_blob_results(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net
     let mut name = string.with_capacity(32u64)
     let clean = result.unwrap(host.mkdtemp(parent, mut name))
     seed_session(clean, clock, random, tasks)
-    let (fixture, server) = blob_fixture(tasks, clock, random)
+    let (fixture, server) = blob_fixture(tasks, clock, random, BLOB_SIZE)
     // A Served port closes at quiescence. Keep it available while the
     // place is idle and while its journal is reopened for readback.
     let (world, _) = std.sim.world.new(2u64, 0u64, 0u64)

@@ -1,0 +1,10 @@
+// The byte digest used for tool identities, approvals and blob references.
+
+pub fn digest(raw: Bytes) -> Bytes {
+    let d = std.sha256.hash(raw)
+    let mut out: Bytes = list.with_capacity(32u64)
+    for i in 0u64 .. 32u64 {
+        list.push(mut out, d[i])
+    }
+    take out
+}

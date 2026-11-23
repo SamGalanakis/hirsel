@@ -11,6 +11,7 @@ store = { major = 1, path = "../store" }
 [sources]
 "harness.hirsel" = "harness"
 "waits.hirsel" = "harness"
+"tool_hash.hirsel" = "harness"
 "mcp.hirsel" = "mcp_tools"
 "provider.hirsel" = "provider"
 "preview.hirsel" = "preview"
@@ -25,6 +26,7 @@ dirs = ["."]
 
 [tests.sources]
 "laws.hirsel" = "laws"
+"mcp_laws.hirsel" = "laws"
 "provider_laws.hirsel" = "provider_laws"
 "gateway_laws.hirsel" = "gateway_laws"
 "route_laws.hirsel" = "gateway_laws"

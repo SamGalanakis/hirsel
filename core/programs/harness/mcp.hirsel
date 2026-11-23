@@ -40,22 +40,13 @@ pub fn reserved(name: String) -> bool {
     string.starts_with(name, "mcp__")
 }
 
-fn key_digest(raw: Bytes) -> Bytes {
-    let hash = std.sha256.hash(raw)
-    let mut out: Bytes = list.with_capacity(32u64)
-    for i in 0u64 .. 32u64 {
-        list.push(mut out, hash[i])
-    }
-    take out
-}
-
 pub fn offered_name(server: String, name: String) -> String {
     let mut key: Bytes = list.new()
     std.codec.put_key_string(server, mut key)
     std.codec.put_key_string(name, mut key)
     let mut out = string.into_bytes("mcp__")
     let start = list.len(out)
-    std.base64.encode(key_digest(key), mut out)
+    std.base64.encode(harness.digest(key), mut out)
     // SHA-256 is 32 bytes and produces one padding byte in Base64.
     let end = list.len(out) - 1u64
     list.truncate(mut out, end)
@@ -134,7 +125,7 @@ pub fn listing(server: String, pages: List[String]) -> Result[Listing, ()] {
             let mut fingerprint_bytes: Bytes = list.new()
             std.codec.put_key_string(server, mut fingerprint_bytes)
             list.append(mut fingerprint_bytes, string.as_bytes(raw))
-            map.insert(mut rows, take key, Remote(server: clone(server), definition: clone(raw), about: take description, input: string.from(mcp.metadata.tool_schema(tool)), fingerprint: key_digest(fingerprint_bytes)))
+            map.insert(mut rows, take key, Remote(server: clone(server), definition: clone(raw), about: take description, input: string.from(mcp.metadata.tool_schema(tool)), fingerprint: harness.digest(fingerprint_bytes)))
         }
     }
     Ok(Listing(server: clone(server), rows: take rows))
@@ -169,18 +160,20 @@ pub fn server_id(remote: Remote) -> View[String] in remote {
     view remote.server
 }
 
-pub type Fault: send = BadArguments | Refused(String) | Unavailable
+// The MCP envelope can hold results larger than the journal's inline limit.
+// The effect's grant also bounds the allocations used to parse it.
+pub const REPLY_LIMIT: u64 = 1048576u64
 
 fn notice(_event: mcp.client.Notice) -> bool {
     true
 }
 
-pub fn discover(peer: Peer, server: String, limit: u64, deadline: u64) -> Result[Listing, Fault] waits {
+pub fn discover(peer: Peer, server: String, limit: u64, deadline: u64) -> Result[Listing, harness.Fault] waits {
     let mut pages: List[String] = list.new()
     let mut cursors: Map[String, bool] = map.new()
     let mut params: mcp.rpc.Fields = map.new()
     loop {
-        let body = std.result.map_err(mcp.client.call(peer.net, peer.clock, peer.endpoint, None, peer.identity, TextId("list"), "tools/list", take params, limit, limit, deadline, notice), fn(take issue) -> Fault {
+        let body = std.result.map_err(mcp.client.call(peer.net, peer.clock, peer.endpoint, None, peer.identity, TextId("list"), "tools/list", take params, limit, limit, deadline, notice), fn(take issue) -> harness.Fault {
             wire_fault(take issue)
         })?
         let Ok(fields) = mcp.rpc.object(body) else {
@@ -206,15 +199,17 @@ pub fn discover(peer: Peer, server: String, limit: u64, deadline: u64) -> Result
     }
 }
 
-fn wire_fault(issue: mcp.client.Error) -> Fault {
+fn wire_fault(issue: mcp.client.Error) -> harness.Fault {
     match issue {
-        InvalidRequest => BadArguments,
+        InvalidRequest => BadArgs("invalid MCP arguments"),
+        Transport(TooLarge) => TooLarge,
+        Event(TooLarge) => TooLarge,
         Remote(failure) => Refused(clone(failure.message)),
         _ => Unavailable,
     }
 }
 
-fn result_text(body: String) -> Result[Bytes, Fault] {
+fn result_text(body: String) -> Result[Bytes, harness.Fault] {
     let Ok(fields) = mcp.rpc.object(body) else {
         return Error(Unavailable)
     }
@@ -253,14 +248,14 @@ fn result_text(body: String) -> Result[Bytes, Fault] {
 
 // The one Outside body for every catalog row. Keep the RPC call bounded by
 // the effect deadline and let the harness's Once policy handle doubt.
-pub fn call(peer: Peer, remote: Remote, take args: Bytes, limit: u64, deadline: u64) -> Result[Bytes, Fault] waits {
+pub fn call(peer: Peer, remote: Remote, take args: Bytes, limit: u64, deadline: u64) -> Result[Bytes, harness.Fault] waits {
     let Ok(take arguments) = string.from_utf8(take args) else {
-        return Error(BadArguments)
+        return Error(BadArgs("invalid MCP arguments"))
     }
     let Ok(tool) = mcp.metadata.definition(remote.definition) else {
         return Error(Refused("invalid MCP definition"))
     }
-    let reply = std.result.map_err(mcp.client.call_tool(peer.net, peer.clock, peer.endpoint, None, peer.identity, TextId("call"), tool, take arguments, None, limit, limit, deadline, notice), fn(take issue) -> Fault {
+    let reply = std.result.map_err(mcp.client.call_tool(peer.net, peer.clock, peer.endpoint, None, peer.identity, TextId("call"), tool, take arguments, None, limit, limit, deadline, notice), fn(take issue) -> harness.Fault {
         wire_fault(take issue)
     })?
     result_text(reply)

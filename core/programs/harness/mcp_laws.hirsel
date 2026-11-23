@@ -1,0 +1,180 @@
+// Scripted MCP transport and blob-settlement law.
+
+const MCP_BLOB_SIZE: u64 = 102400u64
+
+fn mcp_peer(g: Grants, id: String) -> Option[mcp_tools.Peer] {
+    let Some(f) = view g.blobs else { return None }
+    let Some((at, network)) = f.peer else { return None }
+    if id != "fixture" { return None }
+    Some(mcp_tools.Peer(net: network, clock: f.clock,
+        endpoint: mcp.client.Endpoint(address: at, authority: "127.0.0.1", target: "/mcp", origin: "http://127.0.0.1", security: Plain),
+        identity: mcp.rpc.Identity(name: "harness-law", version: "1")))
+}
+
+fn mcp_blob_model(g: Grants, take r: harness.Request) -> Result[harness.Answer, harness.Fault] waits {
+    let name = mcp_tools.offered_name("fixture", "echo")
+    let mut offered = false
+    for t in r.tools {
+        if t.name == name { offered = true }
+    }
+    let mut answer = scripted_model(g, take r)?
+    if list.len(answer.calls) == 0u64 { return Ok(take answer) }
+    if !offered { return Error(Refused("missing MCP tool")) }
+    answer.calls[0u64].name = take name
+    Ok(take answer)
+}
+
+fn mcp_blob_agent() -> harness.Agent[Grants] {
+    let mut a = harness.agent("mcp-blob", "scripted", code.describe(mcp_blob_model))
+    a.mcp_peer = Some(code.describe(mcp_peer))
+    a.store_result = Some(code.describe(stage_blob))
+    a
+}
+
+fn mcp_blob_wiring() -> Result[harness.Wiring, harness.Refused] {
+    harness.wiring(code.describe(mcp_blob_advance), code.describe(mcp_blob_effect))
+}
+
+fn mcp_blob_advance(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take wake: harness.Wake) -> Result[(), harness.Refused] {
+    harness.advance(mut tx, h, mcp_blob_agent(), mcp_blob_wiring()?, take wake)
+}
+
+fn mcp_blob_effect(g: Grants, caller: store.Caller, take key: harness.EffectKey) -> Result[harness.Worked, Capacity] waits {
+    harness.effect(g.context, g, take key, mcp_blob_agent(), code.describe(mcp_blob_settle))
+}
+
+fn mcp_blob_settle(mut tx: store.Tx, a: store.triggers.Attempt, take m: harness.Settle) -> Result[harness.Filed, store.Error] {
+    let w = mcp_blob_wiring() ?=> |_| Missing("MCP blob wiring")
+    harness.settle(mut tx, mcp_blob_agent(), w, a, take m)
+}
+
+fn mcp_blob_place(mut r: store.runner.Registry[Grants, harness.Handles]) -> Result[(), store.runner.RegisterError] {
+    store.runner.transact(mut r, code.describe(mcp_blob_advance), BYTES, store.runner.DEFAULT_STEPS)?
+    store.runner.granted(mut r, code.describe(mcp_blob_effect), 8388608u64, store.runner.DEFAULT_STEPS)?
+    harness.register(mut r, BYTES, store.runner.DEFAULT_STEPS)?
+    let f: own[send] fn(mut store.Tx, store.triggers.Attempt, take harness.Settle) -> Result[harness.Filed, store.Error] = mcp_blob_settle
+    store.runner.register_attempt(mut r, code.describe(mcp_blob_settle), take f, BYTES, store.runner.DEFAULT_STEPS)?
+    let views: std.codec.Codec[harness.View] = std.codec.of()
+    store.runner.query_as(mut r, code.describe(harness.window), std.codec.key_u64(), views, BYTES, store.runner.DEFAULT_STEPS)
+}
+
+fn seed_mcp_blob(dir: Dir, clock: Clock, random: Random, tasks: Tasks, caller: store.Caller) waits {
+    let mut db = result.unwrap(store.open(tasks, dir, clock, random, store.triggers.law_options()))
+    result.unwrap(store.run_migration(mut db, tasks, code.describe(harness.migrate)))
+    update_catalog(mut db, OLD_SCHEMA)
+    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    let w = result.unwrap(mcp_blob_wiring())
+    let committed = result.unwrap(store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), harness.Refused] {
+        harness.set_reader(mut tx, h, caller, true)?
+        harness.open_session(mut tx, h, "scripted", All)?
+        let Placed(0u64) = harness.submit(mut tx, h, mcp_blob_agent(), w, caller, harness.Submit(client_key: "mcp-blob", text: "echo"))? else { return Error(Conflict) }
+        Ok(())
+    }))
+    let Committed(done) = take committed else { fail("seed MCP blob session") }
+    result.unwrap(store.durable(mut db, done.ticket))
+    result.unwrap(store.close(take db))
+}
+
+fn read_mcp_request(mut r: ReadHalf, clock: Clock, until: u64) -> bool waits {
+    let mut input: Bytes = list.with_capacity(8192u64)
+    let mut head = std.http1.head()
+    let mut cursor = std.http1.cursor()
+    loop {
+        match std.http1.resume(input, mut head, mut cursor) {
+            Complete => break,
+            Partial => (),
+            _ => return false,
+        }
+        let Ok(size) = host.recv_bounded(mut r, mut input, 8192u64, At(clock, until)) else { return false }
+        if size == 0u64 { return false }
+    }
+    let Ok(ContentLength(size)) = std.http.framing(input, view head, 8192u64 - head.end) else { return false }
+    while list.len(input) < head.end + size {
+        let remaining = head.end + size - list.len(input)
+        let Ok(got) = host.recv_bounded(mut r, mut input, remaining, At(clock, until)) else { return false }
+        if got == 0u64 { return false }
+    }
+    let body = std.http.copy_bytes(list.slice(input, head.end, head.end + size))
+    let Ok(request) = string.from_utf8(take body) else { return false }
+    string.find(request, 0u64, "\"tools/call\"") != None && string.find(request, 0u64, "\"echo\"") != None
+}
+
+fn mcp_status(at: Addr, credential: Bytes, clock: Clock, random: Random, tasks: Tasks, net: Net, socket: std.wsock.Config) -> bool waits {
+    let keys = result.unwrap(store.fixture.entry_keys(code.describe(mcp_blob_place)))
+    let mut client = result.unwrap(store.fixture.client_at(tasks, net, clock, random, keys, socket, at, Some(clone(credential)), 0u64, 3000u64))
+    let codec: std.codec.Codec[harness.View] = std.codec.of()
+    let entry = store.fixture.query_as_entry(code.describe(harness.window), std.codec.key_u64(), codec)
+    let sub = result.unwrap(store.fixture.subscribe(mut client, entry, Status, 3000u64))
+    let image = result.unwrap(store.fixture.seen_at(mut client, sub, 0u64, 3000u64))
+    store.fixture.close(take client)
+    for row in image.rows {
+        if let Some(raw) = row.value {
+            if let Ok(Status(status)) = std.codec.decode(codec, raw) {
+                return status == "calling tools"
+            }
+        }
+    }
+    false
+}
+
+// Hold a real local tools/call response until the live query has inspected
+// status, then send exactly 100 KiB of text and recover the stored result.
+@test
+fn test_mcp_working_and_blob(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), u64] waits {
+    let mut name = string.with_capacity(32u64)
+    let dir = result.unwrap(host.mkdtemp(parent, mut name))
+    let credential = store.ingress.credential(random)
+    seed_mcp_blob(dir, clock, random, tasks, result.unwrap(store.ingress.caller((), credential)))
+    let (take input, at) = result.unwrap(host.listen(net, Addr(ip: V4(0x7f000001u32), port: 0u16), 1u16))
+    let mut listener = take input
+    let (take blobs, server) = blob_fixture(tasks, clock, random, MCP_BLOB_SIZE)
+    let mut fixture = take blobs
+    fixture.peer = Some((at, net))
+    let (world, _) = std.sim.world.new(2u64, 0u64, 0u64)
+    let (done, finishing): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let keeper = task.spawn(tasks, bytes 65536u64, KeepServer(world: take world, real: clock, stop: take finishing), keep_blob_server)
+    let (model, inbox): (Sender[ModelAsk], Receiver[ModelAsk]) = channel.new(1u64)
+    let models = task.spawn(tasks, bytes 65536u64, take inbox, model_service)
+    let (tool, _tools): (Sender[ToolAsk], Receiver[ToolAsk]) = channel.new(1u64)
+    let services = Services(model: take model, tool: take tool, blobs: Some(copy_blob_fixture(fixture)))
+    let w = result.unwrap(mcp_blob_wiring())
+    let mut config = settings_of(code.describe(mcp_blob_place), harness.entries(w), dir, clock, random, tasks, net, take services, Some(IDLE_MS))
+    config.wire = Some(store.ingress.binding())
+    let socket = clone(config.session.socket)
+    let (running, _stop, status) = launch(tasks, take config)
+    let until = std.clock.deadline_after_ms(host.mono_ns(clock), 5000u64)
+    let (take conn, _) = result.unwrap(host.accept(mut listener, At(clock, until)))
+    let (take reader, take output) = net.split(take conn)
+    let mut r = take reader
+    let mut writer = take output
+    if !read_mcp_request(mut r, clock, until) { return Error(1u64) }
+    let Some(address) = latest.read(status).addr else { return Error(2u64) }
+    let working = mcp_status(address, credential, clock, random, tasks, net, socket)
+    let mut body = string.into_bytes("{\"jsonrpc\":\"2.0\",\"id\":\"call\",\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"")
+    list.append(mut body, blob_bytes(MCP_BLOB_SIZE))
+    list.append(mut body, b"\"}]}}")
+    let mut head = string.from("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: ")
+    string.push_u64(mut head, list.len(body))
+    string.push(mut head, "\r\n\r\n")
+    let sent = std.http.write_wire(mut writer, string.as_bytes(head), body, clock, until)
+    drop(take writer)
+    drop(take r)
+    let _ = result.unwrap(result.unwrap(task.join(take running)))
+    result.unwrap(task.join(take models))
+    let reference = option.unwrap(stored_blob(dir, clock, random, tasks, false))
+    let matched = if reference.len == MCP_BLOB_SIZE && reference.mime == BLOB_MIME {
+        let mut client = result.unwrap(blob_client(fixture))
+        let deadline = std.object.deadline_after_ms(client, 1000u64)
+        let retrieved = harness.read_blob(mut client, reference, MCP_BLOB_SIZE, deadline)
+        result.unwrap(take retrieved) == blob_bytes(MCP_BLOB_SIZE)
+    } else { false }
+    drop(take fixture)
+    result.unwrap(channel.send(done, ()))
+    result.unwrap(task.join(take keeper))
+    let report = result.unwrap(task.join(take server))
+    result.unwrap(std.dir.remove_all(parent, name))
+    if !working { return Error(3u64) }
+    if let Error(_) = sent { return Error(4u64) }
+    if !matched || report.writes != 1u64 { return Error(5u64) }
+    Ok(())
+}

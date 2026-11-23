@@ -52,7 +52,7 @@ def main():
         with tempfile.TemporaryDirectory(prefix='wire-w3c-syntax-') as directory:
             work = Path(directory)
             source = work / 'runner.hirsel'
-            marker = 'fn wire_can_read[G: send, H: send](s: WireSession[G, H]) -> bool {'
+            marker = 'fn wire_can_read[G: send, H: send, B: send](s: WireSession[G, H, B]) -> bool {'
             assert text.count(marker) == 1
             source.write_text(text.replace(marker, marker[:-1] + '??? {'))
             result = build(args, source, work / 'build')

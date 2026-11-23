@@ -18,7 +18,7 @@ use rustls::{
     pki_types::ServerName,
 };
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::VecDeque,
     io::{self, Read, Write},
     sync::{Arc, OnceLock},
 };
@@ -42,15 +42,41 @@ struct TrustedRoots {
     store: Arc<RootCertStore>,
 }
 
+/// Only TLS callers install the cache and its destructor. The ordinary
+/// socket and run cleanup paths know only the owner trait.
 #[derive(Default)]
-pub(crate) struct Streams {
-    pub sessions: BTreeMap<u64, Box<dyn SecureStream>>,
+pub(crate) struct LazyCache(Option<Box<dyn CacheOwner>>);
+
+trait CacheOwner: Send {
+    fn cache(&mut self) -> &mut Cache;
+}
+
+impl CacheOwner for Cache {
+    fn cache(&mut self) -> &mut Cache {
+        self
+    }
+}
+
+impl LazyCache {
+    pub(crate) fn existing(&mut self) -> Option<&mut Cache> {
+        self.0.as_mut().map(|owner| owner.cache())
+    }
+
+    pub(crate) fn get(&mut self) -> &mut Cache {
+        self.0
+            .get_or_insert_with(|| Box::new(Cache::default()))
+            .cache()
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct Cache {
     pub system: Arc<OnceLock<Arc<RootCertStore>>>,
     custom_roots: VecDeque<TrustedRoots>,
     clients: VecDeque<(Arc<RootCertStore>, Arc<ClientConfig>)>,
 }
 
-impl Streams {
+impl Cache {
     pub(crate) fn custom_roots(&self, pem: &[u8]) -> Option<(TlsTrust, Arc<RootCertStore>)> {
         self.custom_roots
             .iter()

@@ -124,13 +124,16 @@ unsafe impl Send for RunGrants {}
 // every unit has stopped using its designations.
 unsafe impl Sync for RunGrants {}
 
+pub(crate) type TlsSessions = BTreeMap<u64, Box<dyn crate::net::SecureStream>>;
+
 pub(crate) struct Files {
     pub(crate) sockets: hirsel_core_net::Sockets,
     pub(crate) datagrams: BTreeMap<u64, crate::unix_net::Datagram>,
     pub(crate) exec_pipes: BTreeMap<u64, crate::exec_runtime::HandleCharge>,
     pub(crate) unix_served: BTreeMap<u64, Provider>,
     pub(crate) connected: std::collections::BTreeMap<u64, (crate::net::Address, Provider)>,
-    pub(crate) tls: crate::os_tls::Streams,
+    pub(crate) tls_sessions: TlsSessions,
+    pub(crate) tls_cache: crate::os_tls::LazyCache,
     #[cfg(feature = "record")]
     pub(crate) net_tape: Option<crate::net::SocketTape>,
     #[cfg(feature = "record")]
@@ -276,7 +279,8 @@ impl Files {
             exec_pipes: BTreeMap::new(),
             unix_served: BTreeMap::new(),
             connected: Default::default(),
-            tls: Default::default(),
+            tls_sessions: Default::default(),
+            tls_cache: Default::default(),
             tls_writes: Default::default(),
             #[cfg(feature = "record")]
             net_tape: None,
@@ -290,7 +294,7 @@ impl Files {
 
     pub(crate) unsafe fn close_all(&mut self, context: *mut Context) {
         self.sockets = hirsel_core_net::Sockets::default();
-        self.tls.sessions.clear();
+        self.tls_sessions.clear();
         self.connected.clear();
         self.datagrams.clear();
         self.unix_served.clear();

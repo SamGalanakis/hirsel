@@ -28,6 +28,7 @@ pub(crate) struct HandshakeState {
     pin: TlsTrust,
     pub name: Option<Name>,
     pub roots: Option<Arc<rustls::RootCertStore>>,
+    pub cache: *mut crate::os_tls::LazyCache,
     pub alpn: Vec<Vec<u8>>,
     pub cacheable: bool,
     pub stream: Option<crate::os_tls::Stream>,
@@ -181,7 +182,7 @@ unsafe fn connect(
             }
             let cache = {
                 let _commit = crate::sequencer::enter();
-                (*files).tls.system.clone()
+                (*state.cache).get().system.clone()
             };
             // The first System call can read files. Load them on the caller's
             // stack, outside the scheduler's socket callback and registry lock.
@@ -209,7 +210,7 @@ unsafe fn connect(
                 denied: false,
                 direction: 0,
                 os: &crate::os_net::TLS_OPERATIONS,
-                tls: &raw mut (*files).tls,
+                tls: &raw mut (*files).tls_sessions,
                 tls_send_pending: false,
                 max_receive: 0,
             },
@@ -298,8 +299,11 @@ unsafe fn prepare(
         let alpn = protocols(view_bytes(&alpn)).ok_or_else(|| tls_failure(2, 0))?;
         let pem = if trust == 1 { bytes(roots) } else { &[] };
         let cacheable = pem.len() <= crate::os_tls::CACHED_PEM_BYTES;
+        let cache = &raw mut (*files).tls_cache;
         let cached = if trust == 1 && cacheable {
-            (*files).tls.custom_roots(pem)
+            (*cache)
+                .existing()
+                .and_then(|cache| cache.custom_roots(pem))
         } else {
             None
         };
@@ -329,7 +333,7 @@ unsafe fn prepare(
             return Err(DENIED);
         }
         if remember && let Some(store) = &store {
-            (*files).tls.remember_roots(pem, pin, store.clone());
+            (*cache).get().remember_roots(pem, pin, store.clone());
         }
         Ok((
             address,
@@ -338,6 +342,7 @@ unsafe fn prepare(
                 pin,
                 name: Some(name),
                 roots: store,
+                cache,
                 alpn,
                 cacheable,
                 stream: None,

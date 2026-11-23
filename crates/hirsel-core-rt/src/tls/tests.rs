@@ -376,7 +376,7 @@ fn cert_case(run: &mut Run, name: &[u8], roots: Option<&[u8]>, error: Option<Out
     // The peer's listener and accepted descriptor may disappear concurrently;
     // the remaining descriptors are exactly the run baseline.
     assert!(fds() < before);
-    assert!(run.files.tls.sessions.is_empty());
+    assert!(run.files.tls_sessions.is_empty());
 }
 
 fn validate_no_issue(
@@ -735,7 +735,7 @@ fn release_on_exit(run: &mut Run) {
     assert_eq!(scenario.outcome.error.tag, 7);
     drop(peer);
     assert_eq!(fds(), before);
-    assert!(run.files.tls.sessions.is_empty());
+    assert!(run.files.tls_sessions.is_empty());
 }
 
 fn tls12_round_trip(run: &mut Run) {

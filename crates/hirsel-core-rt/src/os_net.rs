@@ -3,6 +3,7 @@
 use crate::{
     entry::SocketActivation,
     net::{Address, NetworkRequest, RulesStorage},
+    os_tls::system_roots,
     provider::*,
     tls::{HandshakeState, TlsRequest},
 };
@@ -521,7 +522,7 @@ unsafe fn attempt(request: &mut Request, n: &mut NetworkRequest, first: bool) ->
                 let Some(stream) = n
                     .tls
                     .as_mut()
-                    .and_then(|tls| tls.sessions.get_mut(&(key & !3)))
+                    .and_then(|sessions| sessions.get_mut(&(key & !3)))
                 else {
                     return Some(crate::net::DENIED);
                 };
@@ -563,7 +564,7 @@ unsafe fn attempt(request: &mut Request, n: &mut NetworkRequest, first: bool) ->
                 if let Some(stream) = n
                     .tls
                     .as_mut()
-                    .and_then(|tls| tls.sessions.get_mut(&(key & !3)))
+                    .and_then(|sessions| sessions.get_mut(&(key & !3)))
                 {
                     return stream.ready(sockets.fd(key));
                 }
@@ -594,7 +595,7 @@ unsafe fn attempt(request: &mut Request, n: &mut NetworkRequest, first: bool) ->
                 if let Some(stream) = n
                     .tls
                     .as_mut()
-                    .and_then(|tls| tls.sessions.get_mut(&(key & !3)))
+                    .and_then(|sessions| sessions.get_mut(&(key & !3)))
                 {
                     let fd = sockets.fd(key);
                     if let Some(tail) = tail {
@@ -823,7 +824,7 @@ pub(crate) unsafe fn step(request: *mut Request, token: u64, first: bool) -> Ste
             && (*n.sockets).read_drained(request.handle)
             && n.tls
                 .as_ref()
-                .is_none_or(|tls| !tls.sessions.contains_key(&(request.handle & !3)));
+                .is_none_or(|sessions| !sessions.contains_key(&(request.handle & !3)));
         let deadline = if drained {
             let due = deadline(n.until, token);
             // Even a drained reader gets one try at an already-expired deadline.
@@ -878,7 +879,7 @@ pub(crate) unsafe fn abort(request: *mut Request, token: u64, reason: u8) -> Out
             if let Some(stream) = n
                 .tls
                 .as_mut()
-                .and_then(|tls| tls.sessions.get_mut(&(key & !3)))
+                .and_then(|sessions| sessions.get_mut(&(key & !3)))
             {
                 stream.cancel_send();
             }
@@ -894,7 +895,7 @@ unsafe fn tls_step(request: *mut Request, token: u64, first: bool) -> Step {
         let tls = &mut *request.path.cast_mut().cast::<TlsRequest>();
         let key = request.handle;
         let n = &mut tls.network;
-        let streams = &mut *n.tls;
+        let sessions = &mut *n.tls;
         let sockets = &mut *n.sockets;
         let s = &mut *tls.state.cast::<HandshakeState>();
         if first {
@@ -916,19 +917,17 @@ unsafe fn tls_step(request: *mut Request, token: u64, first: bool) -> Step {
             if let Some(outcome) = refusal {
                 return tls_finish(tls, key, outcome);
             }
+            let cache = (*s.cache).get();
             let roots = s.roots.take().unwrap_or_else(|| {
-                if let Some(roots) = streams.system.get() {
+                if let Some(roots) = cache.system.get() {
                     return roots.clone();
                 }
                 let _blocking = crate::units::blocking();
-                streams
-                    .system
-                    .get_or_init(crate::os_tls::system_roots)
-                    .clone()
+                cache.system.get_or_init(system_roots).clone()
             });
             let stream = {
                 let _blocking = crate::units::blocking();
-                streams
+                cache
                     .client_config(roots, std::mem::take(&mut s.alpn), s.cacheable)
                     .and_then(|config| crate::os_tls::Stream::new(s.name.take().unwrap(), config))
             };
@@ -954,7 +953,7 @@ unsafe fn tls_step(request: *mut Request, token: u64, first: bool) -> Step {
                 let binding = binding.bytes();
                 ptr::copy_nonoverlapping(binding.as_ptr(), binding_out.data, binding.len());
                 binding_out.len = binding.len();
-                streams.sessions.insert(key, stream);
+                sessions.insert(key, stream);
                 sockets.split(key);
                 Step {
                     outcome: Outcome {

@@ -187,7 +187,7 @@ pub(crate) struct NetworkRequest {
     pub denied: bool,
     pub direction: u8,
     pub os: &'static crate::os_net::Operations,
-    pub tls: *mut crate::os_tls::Streams,
+    pub tls: *mut crate::host_file::TlsSessions,
     /// TLS SEND_PAIR already committed its entire input and is draining ciphertext.
     pub tls_send_pending: bool,
     /// RECV_BOUNDED's bound, which a served Net's call reports.
@@ -429,7 +429,7 @@ unsafe fn address_op(
             denied: false,
             direction: 0,
             os: &crate::os_net::OPERATIONS,
-            tls: &raw mut (*files).tls,
+            tls: &raw mut (*files).tls_sessions,
             tls_send_pending: false,
             max_receive: 0,
         };
@@ -531,7 +531,7 @@ impl OwnedNet {
                 denied: false,
                 direction: (key & 3) as u8,
                 os: &crate::os_net::OPERATIONS,
-                tls: &raw mut (*files).tls,
+                tls: &raw mut (*files).tls_sessions,
                 tls_send_pending: false,
                 max_receive,
             });
@@ -1090,7 +1090,7 @@ pub unsafe extern "C" fn hirsel_core_host_send_secret(
                 denied: false,
                 direction: 2,
                 os: &crate::os_net::OPERATIONS,
-                tls: &raw mut (*files).tls,
+                tls: &raw mut (*files).tls_sessions,
                 tls_send_pending: false,
                 max_receive: 0,
             },
@@ -1204,7 +1204,7 @@ impl CrossedSocket {
     pub(crate) fn check(files: &crate::host_file::Files, key: u64) {
         if key & 3 != 0
             || files.unix_served.contains_key(&key)
-            || files.tls.sessions.contains_key(&key)
+            || files.tls_sessions.contains_key(&key)
             || files.tls_writes.contains_key(&key)
             || files
                 .connected
@@ -1410,13 +1410,13 @@ pub unsafe extern "C" fn hirsel_core_socket_drop(context: *mut Context, key: u64
         let source = Some(key);
         if let Some(source) = source {
             if source & 3 == 2
-                && let Some(stream) = (*files).tls.sessions.get_mut(&(source & !3))
+                && let Some(stream) = (*files).tls_sessions.get_mut(&(source & !3))
             {
                 stream.shutdown((*files).sockets.fd(source));
             }
             if (*files).sockets.release(source) {
                 (*files).connected.remove(&(key & !3));
-                (*files).tls.sessions.remove(&(source & !3));
+                (*files).tls_sessions.remove(&(source & !3));
             }
         } else {
             (*files).connected.remove(&(key & !3));

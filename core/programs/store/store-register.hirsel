@@ -12,36 +12,23 @@ fn history_fetch_head(mut client: std.object.Client, mut raw_bytes: Bytes, deadl
 }
 
 fn history_write_head(mut client: std.object.Client, precondition: std.object.Precondition, mut raw_bytes: Bytes, mut witness: Bytes, deadline: u64) -> HistoryWrite waits {
-    let mut uncertain = false
-    for _ in 0u64 .. 5 {
-        let (take outcome, take buffer) = std.object.store_if(mut client, "head", precondition, replace(mut raw_bytes, list.new()), deadline)
-        raw_bytes = take buffer
-        match take outcome {
-            Ok(Applied(meta)) => return HistoryApplied(meta.etag),
-            Ok(Mismatch) => {
-                let Ok(tag) = history_fetch_head(mut client, mut witness, deadline) else {
-                    return HistoryUndecided
-                }
-                return if raw_bytes == witness {
-                    HistoryApplied(tag)
-                } else {
-                    HistoryConflict(tag)
-                }
-            },
-            Error(Uncertain(_)) => {
-                uncertain = true
-            },
-            Error(take problem) => return if uncertain {
-                HistoryUndecided
+    let (take outcome, take buffer) = std.object.store_if_retry(mut client, "head", precondition, replace(mut raw_bytes, list.new()), deadline)
+    raw_bytes = take buffer
+    match take outcome {
+        Ok(Applied(meta)) => HistoryApplied(meta.etag),
+        Ok(Mismatch) => {
+            let Ok(tag) = history_fetch_head(mut client, mut witness, deadline) else {
+                return HistoryUndecided
+            }
+            if raw_bytes == witness {
+                HistoryApplied(tag)
             } else {
-                HistoryRefused(take problem)
-            },
-        }
-        if std.object.deadline_after_ms(client, 0) >= deadline {
-            break
-        }
+                HistoryConflict(tag)
+            }
+        },
+        Error(Uncertain(_)) => HistoryUndecided,
+        Error(take problem) => HistoryRefused(take problem),
     }
-    HistoryUndecided
 }
 
 type HistoryRegister {
@@ -97,26 +84,19 @@ fn history_fetch(mut client: std.object.Client, key: String, mut raw: Bytes, dea
 }
 
 fn history_create(mut client: std.object.Client, key: String, mut raw: Bytes, mut compare: Bytes, deadline: u64) -> Result[(), Error] waits {
-    for _ in 0u64 .. 5 {
-        let (take outcome, take buffer) = std.object.store_if(mut client, key, Absent, replace(mut raw, list.new()), deadline)
-        raw = take buffer
-        match take outcome {
-            Ok(Applied(_)) => return Ok(()),
-            Ok(Mismatch) => {
-                let _ = history_fetch(mut client, key, mut compare, deadline)?
-                if raw != compare {
-                    return Error(disk_fault(key, 0, Malformed))
-                }
-                return Ok(())
-            },
-            Error(Uncertain(_)) => (),
-            Error(take problem) => return Error(Remote(take problem)),
-        }
-        if std.object.deadline_after_ms(client, 0) >= deadline {
-            break
-        }
+    let (take outcome, take buffer) = std.object.store_if_retry(mut client, key, Absent, replace(mut raw, list.new()), deadline)
+    raw = take buffer
+    match take outcome {
+        Ok(Applied(_)) => Ok(()),
+        Ok(Mismatch) => {
+            let _ = history_fetch(mut client, key, mut compare, deadline)?
+            if raw != compare {
+                return Error(disk_fault(key, 0, Malformed))
+            }
+            Ok(())
+        },
+        Error(take problem) => Error(Remote(take problem)),
     }
-    Error(Remote(Uncertain(Deadline)))
 }
 
 fn history_register_advance(mut client: std.object.Client, mut register: HistoryRegister, authority: Bytes, mut buffers: HistoryBuffers, deadline: u64) -> Result[HistoryWrite, Error] waits {

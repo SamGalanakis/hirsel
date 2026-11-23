@@ -49,6 +49,7 @@ the operation uses a no-clobber precondition.
 | `store(key, take body, deadline_ns)` | Overwrites a key and returns metadata and the caller's buffer. |
 | `store_no_clobber(key, take body, deadline_ns)` | Conditionally creates the key and returns `Created` or `Exists` with the caller's buffer. |
 | `store_if(key, pre, take body, deadline_ns)` | Sends `If-Match` for `Match(etag)` or `If-None-Match: *` for `Absent`. Returns `Applied(meta)` or `Mismatch` with the original body. |
+| `store_if_retry(key, pre, take body, deadline_ns)` | Also retries uncertain responses within the same attempt budget. An exhausted budget after possible delivery returns `Uncertain`. Resolve `Mismatch` by reading the object. |
 | `list(prefix, after, mut into, deadline_ns)` | Appends one lexical page to a bounded list. `Page.after` is the last returned key. Pass `key_text(Page.after)` to get the next page if `Page.truncated` is true. |
 | `erase(key, deadline_ns)` | Deletes a key. An absent key is success. |
 | `upload(key, mode, deadline_ns)` | Begins a multipart upload and assigns the put-id. |

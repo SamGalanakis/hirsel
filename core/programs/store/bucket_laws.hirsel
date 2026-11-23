@@ -747,3 +747,28 @@ fn bucket_test_m2_paged_recovery(d: Dir, c: Clock, r: Random, tasks: Tasks) -> R
     let _ = bucket_law_finish(take sim)
     recovered
 }
+
+// Q5 shares one attempt budget and the client's backoff even when every
+// conditional response is SlowDown.
+@test
+fn bucket_test_m2_retry_budget(c: Clock, tasks: Tasks) -> Result[(), Error] waits {
+    let mut faults: List[std.sim.s3.Fault] = list.with_capacity(1)
+    list.push(mut faults, SlowDown)
+    let sim = bucket_law_sim(tasks, c, 39, None, take faults)
+    let mut client = bucket_law_client(sim, tasks, "s3.test", 3)?
+    let mut body = string.into_bytes(string.from("proposed head"))
+    let mut witness: Bytes = list.with_capacity(HISTORY_HEAD_LIMIT)
+    let start = host.mono_ns(sim.time)
+    let due = std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS)
+    let outcome = history_write_head(mut client, Absent, mut body, mut witness, due)
+    let elapsed = host.mono_ns(sim.time) - start
+    let _ = take client
+    let report = bucket_law_finish(take sim)
+    if let HistoryUndecided = outcome {} else {
+        fail("a throttled register reached a terminal verdict without evidence")
+    }
+    if elapsed < 1500000000 || report.attempts > 5 || report.writes != 0 || body != string.as_bytes("proposed head") {
+        fail("conditional retries escaped the client's backoff or attempt budget")
+    }
+    Ok(())
+}

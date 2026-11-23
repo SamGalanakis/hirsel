@@ -434,6 +434,7 @@ type Job: send {
     lo: u64,
     hi: u64,
     deadline: u64,
+    retry_uncertain: bool,
     entries: List[Entry]
 }
 
@@ -1894,6 +1895,15 @@ fn resolve_write(mut lane: Lane, mut job: Job, mut read: ReadProgress) -> Resolu
 }
 
 fn retry(mut lane: Lane, mut job: Job) -> Result[Value, Error] waits {
+    let mut uncertain: Option[Reason] = None
+    let result = retry_job(mut lane, mut job, mut uncertain)
+    match (take result, take uncertain) {
+        (Error(_), Some(take reason)) => Error(Uncertain(take reason)),
+        (other, _) => take other,
+    }
+}
+
+fn retry_job(mut lane: Lane, mut job: Job, mut uncertain: Option[Reason]) -> Result[Value, Error] waits {
     let original_entries = list.len(job.entries)
     let initial_tag = if job.op == FetchChanged {
         empty_tag()
@@ -1971,10 +1981,16 @@ fn retry(mut lane: Lane, mut job: Job) -> Result[Value, Error] waits {
                         },
                         Resolve => {
                             if op == PutIf {
-                                return Error(Uncertain(take last))
+                                if !job.retry_uncertain {
+                                    return Error(Uncertain(take last))
+                                }
+                                uncertain = Some(take last)
+                                last = Deadline
+                                throttle = status == 429 || status == 503
+                            } else {
+                                pending = true
+                                ambiguous = true
                             }
-                            pending = true
-                            ambiguous = true
                         },
                         Throttle => {
                             throttle = true
@@ -2223,7 +2239,7 @@ pub fn endpoint_secure(c: Client) -> bool {
 }
 
 fn new_job(op: Operation, take path: String, take data: Bytes, deadline: u64) -> Job {
-    Job(ticket: 0, op, path: take path, query: string.from(""), data: take data, tag: empty_tag(), id: None, lo: 0, hi: MAX_U64, deadline, entries: list.new())
+    Job(ticket: 0, op, path: take path, query: string.from(""), data: take data, tag: empty_tag(), id: None, lo: 0, hi: MAX_U64, deadline, retry_uncertain: false, entries: list.new())
 }
 
 fn submit(input: Sender[LaneMessage], index: u64, take request: Job) -> Option[Reply] waits {
@@ -2363,6 +2379,17 @@ pub fn store_no_clobber(mut c: Client, key: String, take body: Bytes, deadline_n
 /// Conditional PUT. The caller resolves an Uncertain outcome using its own
 /// protocol. The client returns the unmodified body so it can resend it.
 pub fn store_if(mut c: Client, key: String, pre: Precondition, take body: Bytes, deadline_ns: u64) -> (Result[Conditional, Error], Bytes) waits {
+    store_conditional(mut c, key, pre, take body, deadline_ns, false)
+}
+
+/// Conditional PUT with a single retry budget for transport failures and
+/// uncertain responses. Every retry uses the original body and precondition.
+/// The caller inspects the object to resolve Mismatch.
+pub fn store_if_retry(mut c: Client, key: String, pre: Precondition, take body: Bytes, deadline_ns: u64) -> (Result[Conditional, Error], Bytes) waits {
+    store_conditional(mut c, key, pre, take body, deadline_ns, true)
+}
+
+fn store_conditional(mut c: Client, key: String, pre: Precondition, take body: Bytes, deadline_ns: u64, retry_uncertain: bool) -> (Result[Conditional, Error], Bytes) waits {
     let tag = match pre {
         Match(value) => {
             if !strong_tag(value) {
@@ -2374,6 +2401,7 @@ pub fn store_if(mut c: Client, key: String, pre: Precondition, take body: Bytes,
     }
     let mut request = object_job(mut c, PutIf, key, take body, deadline_ns)
     request.tag = tag
+    request.retry_uncertain = retry_uncertain
     let Reply(result: take result, data: take data, ..) = run(mut c, take request)
     let outcome: Result[Conditional, Error] = match take result {
         Ok(Object(take meta)) => Ok(Applied(take meta)),

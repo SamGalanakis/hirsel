@@ -41,6 +41,8 @@ struct Bridge {
     next_file: u64,
     phase: u64,
     cut: u64,
+    damage_seed: Option<u64>,
+    trace_cuts: bool,
     events: u64,
     crashed: bool,
     acked: bool,
@@ -89,7 +91,7 @@ fn fork_frame_start(frames: &[u8]) -> Option<usize> {
 
 impl Bridge {
     fn exists(&self, name: &str) -> bool {
-        self.fs.snapshot().names.contains_key(name)
+        self.fs.inode(name).is_some()
     }
     fn apply(&mut self, op: Op<'_>) -> bool {
         assert!(self.read_only.is_none(), "read-only open issued {op:?}");
@@ -98,6 +100,26 @@ impl Bridge {
         }
         if self.crashed {
             return false;
+        }
+        if self.phase == 1 && self.trace_cuts {
+            let kind = match &op {
+                Op::Create(_) => "create",
+                Op::Write(name, bytes)
+                    if self
+                        .fs
+                        .read(name)
+                        .is_some_and(|old| old.iter().zip(*bytes).any(|(old, new)| old != new)) =>
+                {
+                    "overwrite"
+                }
+                Op::Write(..) => "write",
+                Op::Append(..) => "append",
+                Op::Sync(_) => "sync",
+                Op::Rename(..) => "rename",
+                Op::Remove(_) => "unlink",
+                Op::SyncDir => "sync-dir",
+            };
+            eprintln!("w2-cut {} {kind}", self.events + 1);
         }
         self.fs.issue(&op);
         if self.phase == 1 {
@@ -327,7 +349,12 @@ impl Bridge {
                 if self.phase == 1 && self.armed && self.sync_failure == 5 && is_segment(&name) {
                     self.split_at = cursor;
                 }
-                let append = op == 2 && file.mode == 2;
+                let append = op == 2 && file.mode == 2
+                    || cursor != 0
+                        && self
+                            .fs
+                            .read(&name)
+                            .is_some_and(|bytes| cursor == bytes.len());
                 let applied = if append {
                     self.apply(Op::Append(&name, &data[..written]))
                 } else {
@@ -576,6 +603,8 @@ pub extern "C" fn store_crash_new(cut: u64) -> *mut c_void {
         next_file: 1,
         phase: 0,
         cut,
+        damage_seed: None,
+        trace_cuts: cut == u64::MAX && std::env::var_os("HIRSEL_W2_TRACE_CUTS").is_some(),
         events: 0,
         crashed: false,
         acked: false,
@@ -600,6 +629,26 @@ pub extern "C" fn store_crash_new(cut: u64) -> *mut c_void {
 /// # Safety
 /// `p` is the live pointer from `store_crash_new` before any provider calls.
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn store_crash_damage_seed(p: *mut c_void, seed: u64) {
+    let bridge = unsafe { &mut *p.cast::<Bridge>() };
+    assert!(bridge.cut != u64::MAX);
+    bridge.damage_seed = Some(seed);
+}
+
+/// # Safety
+/// `p` is the live, exclusively accessed pointer from `store_crash_new`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn store_crash_manifest_inode(p: *mut c_void) -> u64 {
+    let bridge = unsafe { &mut *p.cast::<Bridge>() };
+    bridge
+        .fs
+        .inode("MANIFEST")
+        .expect("read-only fixture has a MANIFEST")
+}
+
+/// # Safety
+/// `p` is the live pointer from `store_crash_new` before any provider calls.
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn store_crash_journal_fork(p: *mut c_void, image: u8) {
     let bridge = unsafe { &mut *p.cast::<Bridge>() };
     bridge.fork_observation = Some(ForkObservation {
@@ -619,7 +668,10 @@ pub unsafe extern "C" fn store_crash_phase(p: *mut c_void, phase: u64) {
     if phase >= 2 {
         // The first crash in L25(b) is process-only. The next opener sees
         // the pending rename and must make it durable before any removal.
-        if phase != 3 || !bridge.checkpoint_reopen {
+        if let Some(seed) = bridge.damage_seed.take() {
+            assert_eq!(bridge.events, bridge.cut, "damage cut was not reached");
+            bridge.fs.restart_damaged(bridge.cut, seed);
+        } else if phase != 3 || !bridge.checkpoint_reopen {
             bridge.fs.restart();
         }
         bridge.locks.clear();

@@ -125,5 +125,26 @@ elif (( vopr_status != 0 )); then
     status=$vopr_status
   fi
 fi
+
+run_w2() (
+  local output compiler runtime bridge
+  output=$(taskset -c 8-11 .buck2/bin/buck2 build -j4 --show-json-output \
+    //:hirsel-core-driver-bin-hirsel //:core-scripted-runtime-pic '//:core-store-crash-provider[shared]') || return
+  read -r compiler runtime bridge < <(python3 -c 'import json, sys; j = json.load(sys.stdin); print(*(j["root//:" + target] for target in ("hirsel-core-driver-bin-hirsel", "core-scripted-runtime-pic", "core-store-crash-provider[shared]")))' <<<"$output") || return
+  export LLVM_SYS_231_PREFIX="$checkout/tools/buck2/toolchains/llvm-files"
+  export LD_LIBRARY_PATH="$LLVM_SYS_231_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+  taskset -c 8-11 python3 core/tools/store_crash_tests.py prepare \
+    --compiler "$compiler" --runtime "$runtime" --bridge "$bridge" --bundle "$run/w2" || return
+  exec taskset -c 8-11 tools/boat-dispatch --job-class vopr w2-damage "$run/w2" \
+    "python3 store_crash_tests.py sweep $((started * 4))"
+)
+
+w2_status=0
+run_w2 >>"$run/w2.log" 2>&1 || w2_status=$?
+if (( w2_status == 75 )); then
+  echo "W2 damage sweep deferred until a spare Boat start is available." >>"$run/run.log"
+elif (( w2_status != 0 )); then
+  printf 'W2 damage sweep exited %s. See %s/w2.log.\n' "$w2_status" "$run" >>"$run/run.log"
+fi
 echo "$run"
 exit "$status"

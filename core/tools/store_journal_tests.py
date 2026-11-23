@@ -14,7 +14,7 @@ import tempfile
 
 from std_native import ROOT, Evaluator
 from store_tests import crash_inputs
-from store_crash_tests import checked, run_crashes
+from store_crash_tests import JOURNAL_SCENARIOS as SCENARIOS, checked, run_crashes
 
 # Evaluator instructions measured on the unchanged stress law, plus 25% rounded up.
 INSTRUCTION_ALLOWANCES = {'frame_size_boundary': 1_892_798_149}  # measured 1_514_238_519
@@ -33,8 +33,6 @@ LAW_GROUPS = {
     'runner': ('trigger_transact', 'trigger_granted', 'trigger_snapshot', 'trigger_cancel'),
     'steps': STEP_LAWS,
 }
-SCENARIOS = ('journal', 'journal-group', 'journal-rotate', 'journal-place-split', 'journal-place-idle',
-             'journal-fork')
 FORK_IMAGES = ('journal-fork-ack-cut', 'journal-fork-complete', 'journal-fork-torn', 'journal-fork-bad-end',
                'journal-fork-child-unwritten')
 FAILURES = ('poison-segment', 'poison-end', 'poison-pack', 'poison-write', 'poison-cut',

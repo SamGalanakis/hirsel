@@ -2,12 +2,12 @@
 //!
 //! The crash model keeps inode bytes and directory names as separate durable
 //! domains. `sync` publishes an inode's bytes; `sync_dir` publishes names.
-//! Restart discards every live change that was not published to the matching
-//! durable domain. No store or runner operation is encoded here.
+//! Clean restart discards pending changes. Damaged restart samples which
+//! pending writes and directory operations survive the cut.
 
 #[cfg(feature = "testing")]
 pub mod crash {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     #[derive(Clone, Debug, Eq, PartialEq)]
     pub enum Op<'a> {
@@ -27,12 +27,91 @@ pub mod crash {
     }
 
     #[derive(Clone, Debug, Default)]
+    struct NameChange {
+        removed: Option<(String, u64)>,
+        installed: Option<(String, Option<u64>, u64)>,
+    }
+
+    impl NameChange {
+        fn persist(self, names: &mut BTreeMap<String, u64>) {
+            // A rename is atomic and both ends must have the inode identities
+            // seen when it was issued. Skipping a create cannot revive its inode.
+            if self
+                .removed
+                .as_ref()
+                .is_some_and(|(name, inode)| names.get(name) != Some(inode))
+                || self
+                    .installed
+                    .as_ref()
+                    .is_some_and(|(name, before, _)| names.get(name).copied() != *before)
+            {
+                return;
+            }
+            if let Some((name, _)) = self.removed {
+                names.remove(&name);
+            }
+            if let Some((name, _, inode)) = self.installed {
+                names.insert(name, inode);
+            }
+        }
+    }
+
+    struct Damage(u64);
+
+    impl Damage {
+        fn next(&mut self) -> u64 {
+            // SplitMix64, with wrapping arithmetic for reproducible cuts.
+            self.0 = self.0.wrapping_add(0x9e3779b97f4a7c15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
+            z ^ (z >> 31)
+        }
+
+        fn file(&mut self, durable: &mut Vec<u8>, live: &[u8]) {
+            const SECTOR: usize = 512;
+            if durable == live {
+                return;
+            }
+            let pending = &live[durable.len()..];
+            let (written, zero_fill) = if pending.is_empty() {
+                (0, false)
+            } else {
+                match self.next() % 4 {
+                    0 => (0, false),
+                    1 => ((self.next() % pending.len() as u64) as usize, false),
+                    2 => ((self.next() % pending.len() as u64) as usize, true),
+                    _ => (pending.len(), false),
+                }
+            };
+            // Only a pending overwrite can change bytes below durable EOF.
+            // Each intersecting sector takes its old or new bytes. If the
+            // straddling sector has new suffix bytes, take its new prefix too.
+            let durable_len = durable.len();
+            for (old, new) in durable.chunks_mut(SECTOR).zip(live.chunks(SECTOR)) {
+                let (new_prefix, new_suffix) = new.split_at(old.len());
+                if old != new_prefix
+                    && ((!new_suffix.is_empty() && written > 0) || self.next() & 1 == 0)
+                {
+                    old.copy_from_slice(new_prefix);
+                }
+            }
+            durable.extend_from_slice(&pending[..written]);
+            if zero_fill {
+                durable.resize(durable_len + pending.len(), 0);
+            }
+        }
+    }
+
+    #[derive(Clone, Debug, Default)]
     pub struct FileSystem {
         next_inode: u64,
         live_names: BTreeMap<String, u64>,
         durable_names: BTreeMap<String, u64>,
         live_data: BTreeMap<u64, Vec<u8>>,
         durable_data: BTreeMap<u64, Vec<u8>>,
+        pending_names: Vec<NameChange>,
+        pending_truncations: BTreeSet<u64>,
     }
 
     impl FileSystem {
@@ -50,32 +129,58 @@ pub mod crash {
                     self.next_inode += 1;
                     self.live_names.insert((*name).into(), inode);
                     self.live_data.insert(inode, Vec::new());
+                    self.pending_names.push(NameChange {
+                        installed: Some(((*name).into(), None, inode)),
+                        ..NameChange::default()
+                    });
                 }
                 Op::Write(name, bytes) => {
-                    let inode = self.live_names[name.to_owned()];
+                    let inode = self.live_names[*name];
+                    if self
+                        .durable_data
+                        .get(&inode)
+                        .is_some_and(|old| bytes.len() < old.len())
+                    {
+                        self.pending_truncations.insert(inode);
+                    }
                     self.live_data.insert(inode, bytes.to_vec());
                 }
                 Op::Append(name, bytes) => {
-                    let inode = self.live_names[name.to_owned()];
+                    let inode = self.live_names[*name];
                     self.live_data
                         .get_mut(&inode)
                         .unwrap()
                         .extend_from_slice(bytes);
                 }
                 Op::Sync(name) => {
-                    let inode = self.live_names[name.to_owned()];
+                    let inode = self.live_names[*name];
                     self.durable_data
                         .insert(inode, self.live_data[&inode].clone());
+                    self.pending_truncations.remove(&inode);
                 }
                 Op::Rename(from, to) => {
+                    if from == to {
+                        assert!(self.live_names.contains_key(*from));
+                        return;
+                    }
                     let inode = self.live_names.remove(*from).unwrap();
-                    self.live_names.remove(*to);
-                    self.live_names.insert((*to).into(), inode);
+                    let replaced = self.live_names.insert((*to).into(), inode);
+                    self.pending_names.push(NameChange {
+                        removed: Some(((*from).into(), inode)),
+                        installed: Some(((*to).into(), replaced, inode)),
+                    });
                 }
                 Op::Remove(name) => {
-                    self.live_names.remove(*name).unwrap();
+                    let inode = self.live_names.remove(*name).unwrap();
+                    self.pending_names.push(NameChange {
+                        removed: Some(((*name).into(), inode)),
+                        ..NameChange::default()
+                    });
                 }
-                Op::SyncDir => self.durable_names = self.live_names.clone(),
+                Op::SyncDir => {
+                    self.durable_names = self.live_names.clone();
+                    self.pending_names.clear();
+                }
             }
         }
 
@@ -95,11 +200,36 @@ pub mod crash {
         pub fn restart(&mut self) {
             self.live_names = self.durable_names.clone();
             self.live_data = self.durable_data.clone();
+            self.pending_names.clear();
+            self.pending_truncations.clear();
+        }
+
+        pub fn restart_damaged(&mut self, cut: u64, seed: u64) {
+            let mut damage = Damage(seed ^ cut.wrapping_mul(0xd1342543de82ef95));
+            for change in std::mem::take(&mut self.pending_names) {
+                if damage.next() & 1 == 0 {
+                    change.persist(&mut self.durable_names);
+                }
+            }
+            for &inode in self.durable_names.values() {
+                let durable = self.durable_data.entry(inode).or_default();
+                // Keep the pre-truncate image if a shrink crossed durable EOF.
+                // Later appends to the truncated file are a different extent.
+                if !self.pending_truncations.contains(&inode)
+                    && let Some(live) = self.live_data.get(&inode)
+                {
+                    damage.file(durable, live);
+                }
+            }
+            self.restart();
         }
 
         pub fn read(&self, name: &str) -> Option<&[u8]> {
-            let inode = self.live_names.get(name)?;
-            self.live_data.get(inode).map(Vec::as_slice)
+            self.live_data.get(&self.inode(name)?).map(Vec::as_slice)
+        }
+
+        pub fn inode(&self, name: &str) -> Option<u64> {
+            self.live_names.get(name).copied()
         }
 
         pub fn snapshot(&self) -> Snapshot {

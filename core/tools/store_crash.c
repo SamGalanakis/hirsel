@@ -2,6 +2,7 @@
  * FileSystem; this shim adapts the published provider ABI and runs three phases. */
 #include "hirsel_core_rt_host.h"
 #include "hirsel_core_rt_tasks.h"
+#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -10,6 +11,8 @@
 #include <unistd.h>
 
 extern void *store_crash_new(uint64_t);
+extern void store_crash_damage_seed(void *,uint64_t);
+extern uint64_t store_crash_manifest_inode(void *);
 extern void store_crash_phase(void *, uint64_t);
 extern HirselCoreHostOutcome store_crash_op(void *, uint8_t, uint8_t, uint64_t,
     const uint8_t *, size_t, uint8_t *, size_t, size_t);
@@ -195,7 +198,7 @@ static void diagnostic(void *state,const uint8_t *data,size_t len) {
 uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
     const HirselCoreView *names,const HirselCoreSourceTable *sources,HirselCoreEntry entry) {
     (void)names; (void)sources;
-    if((input->args_len!=2 && input->args_len!=3) || input->parameters_len>16) return 120;
+    if(input->args_len<2 || input->args_len>4 || input->parameters_len>16) return 120;
     char raw_cut[32]={0};
     if(input->args[1].len>=sizeof raw_cut) return 120;
     memcpy(raw_cut,input->args[1].data,input->args[1].len);
@@ -204,7 +207,7 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
     if(input->args[0].len>=sizeof scenario) return 120;
     memcpy(scenario,input->args[0].data,input->args[0].len);
     uint64_t seed=0;
-    if(input->args_len==3) {
+    if(input->args_len>=3) {
         char raw_seed[32]={0};
         if(input->args[2].len>=sizeof raw_seed) return 120;
         memcpy(raw_seed,input->args[2].data,input->args[2].len);
@@ -227,7 +230,20 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
         recovery_failure?ORPHAN_END_SYNC_FAILURE:open_sync_failure?OPEN_MANIFEST_SYNC_FAILURE:0;
     int orphan_end=recovery_failure || !strcmp(scenario,"orphan-end");
     if((failure && failure!=5) || cancellation.enabled || parked.enabled || orphan_end) cut=UINT64_MAX;
+    uint64_t damage_seed=0;
+    if(input->args_len==4) {
+        char raw_damage[32]={0};
+        size_t len=input->args[3].len;
+        if(cut==UINT64_MAX || checkpoint_reopen || len==0 || len>=sizeof raw_damage) return 120;
+        if(input->args[1].len==0 || strspn(raw_cut,"0123456789")!=input->args[1].len) return 120;
+        memcpy(raw_damage,input->args[3].data,len);
+        if(strspn(raw_damage,"0123456789")!=len) return 120;
+        errno=0;
+        damage_seed=strtoull(raw_damage,0,10);
+        if(errno==ERANGE) return 120;
+    }
     void *state=store_crash_new(cut);
+    if(input->args_len==4) store_crash_damage_seed(state,damage_seed);
     store_crash_sync_failure(state,failure);
     if(orphan_end) store_crash_orphan_end(state);
     if(checkpoint_reopen) store_crash_checkpoint_reopen(state);
@@ -246,11 +262,14 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
     static const char *phases[]={"init","write","read","reopen"};
     static const uint64_t reopen_order[]={0,1,3,2};
     int reopen=orphan_end || checkpoint_reopen;
+    int read_only=!strcmp(scenario,"read-only");
+    uint64_t original_manifest=0;
     uint8_t status=0;
     for(uint64_t run=0;run<(reopen && !recovery_failure?4:3);run++) {
         uint64_t phase=reopen?reopen_order[run]:run;
         store_crash_phase(state,phase);
-        if(phase==2 && !strcmp(scenario,"read-only")) store_crash_expect_read_only(state);
+        if(phase==2 && read_only) store_crash_expect_read_only(state);
+        if(phase==1 && read_only && input->args_len==4) original_manifest=store_crash_manifest_inode(state);
         cancellation.phase=phase;
         /* Law 8 opens at midnight, noon and the following midnight. */
         park_wall_ms=!strcmp(scenario,"steps-park")?1000+phase*UINT64_C(43200000):0;
@@ -259,7 +278,11 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
         hold.child_probe=phase==1 && fork_image==5;
         hold.schedule_probe=seed && phase==1 &&
             (!strcmp(scenario,"journal-group") || !strcmp(scenario,"journal-rotate"));
-        const char *expected=store_crash_acked(state)?"new":"prefix";
+        /* This fixture syncs an intentionally corrupt MANIFEST.tmp. Its
+         * rename can survive even if the directory sync never returned. */
+        int torn_manifest=phase==2 && read_only && input->args_len==4
+            && store_crash_manifest_inode(state)!=original_manifest;
+        const char *expected=store_crash_acked(state)||torn_manifest?"new":"prefix";
         char floor[32];
         snprintf(floor,sizeof floor,"%llu",(unsigned long long)store_crash_floor(state));
         const char *fixture=checkpoint_reopen?"checkpoint":scenario;

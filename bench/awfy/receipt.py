@@ -360,6 +360,11 @@ def match_rows(key, left, right):
     candidate_hashes = candidate_identity(right)
     if base_hashes != candidate_hashes and not all(verified_build(row) for row in (left, right)):
         raise ValueError(f"{key} requires a verified build record for a candidate pair")
+    if (left["suite"] != "compile" and left["std_sha256"] != right["std_sha256"]
+            and left["compiler_sha256"] == right["compiler_sha256"]
+            and {"--image", "--source-std"}.isdisjoint(left["flags"])):
+        raise ValueError(f"{key}: changed std with one compiler requires --whole-std on both builds "
+                         "or --source-std on both native commands")
     return base_hashes, candidate_hashes
 
 

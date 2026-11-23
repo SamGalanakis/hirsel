@@ -6,7 +6,9 @@ from pathlib import Path
 import re
 import subprocess
 
-from build import ROOT, capped_env, inputs, llvm_path, native_provenance, write_native_report
+from build import (
+    ROOT, capped_env, inputs, llvm_path, native_provenance, release_input_flags, whole_std_image, write_native_report,
+)
 
 
 def group(name):
@@ -35,18 +37,22 @@ def group_inputs(module):
     return manifest
 
 
-def build_hirsel(out, artifacts, rows, env=None, *, debug_lines=False, directory_grant=None):
+def build_hirsel(out, artifacts, rows, env=None, *, debug_lines=False, directory_grant=None, whole_std=False):
     if env is None:
         env = capped_env(out)
+    library_image = None
     for module, mib in sorted({(group(row["name"]), root_mib(row["name"])) for row in rows}):
         print(f"building {module} at {mib} MiB", flush=True)
         binary = out / f"{module}-{mib}"
         manifest = out / f"{binary.name}-inputs.json"
-        manifest.write_text(json.dumps(group_inputs(module)))
+        manifest_inputs = group_inputs(module)
+        manifest.write_text(json.dumps(manifest_inputs))
+        if whole_std and library_image is None:
+            library_image = whole_std_image(out, manifest_inputs, artifacts, env)
         task_grant = ("--grant", "Tasks") if module == "matmul" else ()
         command = [
             artifacts["compiler"], "build",
-            "--inputs", manifest, "--entry", f"langarena@1/{module}/main",
+            *release_input_flags(manifest, library_image), "--entry", f"langarena@1/{module}/main",
             "--store", out / "store", "--backend", "llvm", "--release",
             "--runtime", artifacts["runtime"], "--cc", llvm_path() / "bin/clang",
             "--dir", out if directory_grant is None else directory_grant,
@@ -88,6 +94,7 @@ def main():
     parser.add_argument("out", type=Path)
     parser.add_argument("--config", type=Path, required=True, help="unchanged upstream run.js")
     parser.add_argument("--artifacts", type=Path)
+    parser.add_argument("--whole-std", action="store_true", help="build and use an explicit image of the manifest's std")
     parser.add_argument("--rust", type=Path)
     parser.add_argument("--debug-lines", action="store_true")
     args = parser.parse_args()
@@ -96,7 +103,8 @@ def main():
     rows = [dict(row, iterations=1, warmup_iterations=0, checksum=0)
             for row in json.loads(args.config.read_text())]
     if args.artifacts:
-        build_hirsel(out, json.loads(args.artifacts.read_text()), rows, debug_lines=args.debug_lines)
+        build_hirsel(out, json.loads(args.artifacts.read_text()), rows,
+                     debug_lines=args.debug_lines, whole_std=args.whole_std)
     if args.rust:
         oracle(out, args.rust.resolve(), rows)
 

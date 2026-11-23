@@ -31,13 +31,17 @@ def sha256(path):
         return hashlib.file_digest(source, "sha256").hexdigest()
 
 
+def is_library(package):
+    return package["package"]["name"] in ("core", "std")
+
+
 def manifest_digests(manifest):
     inputs = json.loads(manifest.read_text())
     std, workload = [], []
     for package in inputs["packages"]:
         for source in package["sources"]:
             source["file"] = sha256(Path(source["file"]))
-        if package["package"]["name"] in ("core", "std"):
+        if is_library(package):
             std.append(package)
         else:
             workload.append(package)
@@ -58,7 +62,7 @@ def native_provenance(command, manifest, *, cwd=None):
     if cwd is None:
         cwd = Path.cwd()
     flags = list(map(str, command[2:]))
-    path_roles = {"--inputs": "manifest", "--store": "store", "--runtime": "runtime",
+    path_roles = {"--inputs": "manifest", "--image": "library", "--store": "store", "--runtime": "runtime",
                   "--dir": "workload directory", "-o": "image"}
     for index, flag in enumerate(flags[:-1]):
         if flag in path_roles:
@@ -81,6 +85,33 @@ def write_native_report(binary, stdout, provenance, *, path=None):
     return report
 
 
+def whole_std_image(out, inputs, artifacts, env):
+    manifest = out / "release-std-inputs.json"
+    image = out / "release-std-image"
+    manifest.write_text(json.dumps(inputs | {"packages": [p for p in inputs["packages"] if is_library(p)]}))
+    result = subprocess.run(
+        [ROOT / "tools/capped", artifacts["compiler"], "image", "--inputs", manifest,
+         "--store", image, "--json"],
+        env=env, stdout=subprocess.PIPE,
+    )
+    report = out / "release-std-build.json"
+    report.write_bytes(result.stdout)
+    result.check_returncode()
+    built = json.loads(result.stdout)
+    if built["accepted"] is not True or not built["image"]:
+        raise ValueError(f"whole std image was not produced: {report}")
+    return image
+
+
+def release_input_flags(manifest, library_image):
+    if library_image is None:
+        return ["--inputs", str(manifest)]
+    inputs = json.loads(manifest.read_text())
+    app = manifest.with_name(f"{manifest.stem}-workload.json")
+    app.write_text(json.dumps(inputs | {"packages": [p for p in inputs["packages"] if not is_library(p)]}))
+    return ["--inputs", str(app), "--image", str(library_image)]
+
+
 def fixture(upstream):
     source = (upstream / "benchmarks/JavaScript/json.js").read_text()
     prefix = "const RAP_BENCHMARK_MINIFIED = "
@@ -98,9 +129,9 @@ def awfy_manifest(sources):
     return spec
 
 
-def awfy_hirsel_command(artifacts, out, module, manifest, binary):
+def awfy_hirsel_command(artifacts, out, module, manifest, binary, *, library_image=None):
     return [
-        artifacts["compiler"], "build", "--inputs", str(manifest),
+        artifacts["compiler"], "build", *release_input_flags(manifest, library_image),
         "--entry", f"awfy@1/{module}/main", "--store", str(out / "store"),
         "--backend", "llvm", "--release", "--debug-lines", "on", "--runtime", artifacts["runtime"],
         "--cc", str(llvm_path() / "bin/clang"), "--grant", "Stdout", "--json", "-o", str(binary),
@@ -126,11 +157,13 @@ def hirsel(args, matched=False):
         sources += [harness, *variants.glob("*.hirsel")]
     out = args.out
     manifest = out / "hirsel-inputs.json"
-    manifest.write_text(json.dumps(awfy_manifest(sources)))
+    inputs = awfy_manifest(sources)
+    manifest.write_text(json.dumps(inputs))
     env = getattr(args, "env", capped_env(out))
+    library_image = whole_std_image(out, inputs, artifacts, env) if getattr(args, "whole_std", False) else None
     for module in args.hirsel_entries:
         binary = out / f"hirsel-{module}"
-        command = awfy_hirsel_command(artifacts, out, module, manifest, binary)
+        command = awfy_hirsel_command(artifacts, out, module, manifest, binary, library_image=library_image)
         provenance = native_provenance(command, manifest) | {"rap_sha256": rap_digest}
         result = subprocess.run([ROOT / "tools/capped", *command],
                                 env=env, stdout=subprocess.PIPE)
@@ -306,6 +339,7 @@ def main():
     parser.add_argument("out", type=Path)
     parser.add_argument("--upstream", type=Path, required=True, help="pinned AWFY checkout")
     parser.add_argument("--artifacts", type=Path, help="JSON from core/tools/measurement_artifacts.py")
+    parser.add_argument("--whole-std", action="store_true", help="build and use an explicit image of the manifest's std")
     parser.add_argument("--hirsel-entries", nargs="+", default=["hello", "harness", "pools"],
                         help="Hirsel entry modules, including pool_index")
     parser.add_argument("--goose-entries", choices=["hello", "harness", "pools", "pool_index"], nargs="+",

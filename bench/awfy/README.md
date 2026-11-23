@@ -306,6 +306,15 @@ and lock. Paths to build directories may differ. Include `--pool-build` for the
 eight matched pool/index rows and `--arena-build` for the 50 LangArena rows.
 Omit `--only` to sample every row in the selected suites.
 
+When std sources change, pass `--whole-std` to both release build adapters.
+Each arm builds an explicit whole-library image from its own source manifest.
+With automatic selection, the compiler uses a whole image when the sources
+match its embedded std and can lower only reachable std bodies otherwise.
+LLVM can inline differently in the two modes. A runtime comparison with
+changed std and one compiler requires matching explicit modes. For a
+source-only comparison, pass `--source-std` to both native build commands
+and give each arm a fresh cache.
+
 ```sh
 python3 bench/awfy/receipt.py sample "$out/base-samples" --artifacts "$base_toolchain" \
   --awfy-build "$base_build" --upstream "$awfy" --cpu "$cpu" --lock "$lock" \
@@ -352,7 +361,7 @@ samples SMT sibling activity. The default uses all 60 pairs. With
 less than that busy percentage on every SMT sibling. Set `--pairs` and
 `--max-attempts` to control the sample size and attempt budget. Use `--aa`
 to measure identical builds deliberately. The command exits 0 if every
-row has enough pairs and its median cycle ratio is at most 1.01x, 1 if a
+row has enough pairs and its median cycle ratio is at most 1.03x, 1 if a
 row exceeds that ratio, or 2 if a row has too few pairs or the comparison
 is refused.
 

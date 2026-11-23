@@ -73,6 +73,17 @@ fn aws_signatures_and_key_rotation(tasks: Tasks) -> bool waits {
     if !correct(keys, SIGNED_AT, vanilla, expected_vanilla, mut scratch, mut out) || !correct(keys, SIGNED_AT, session, expected_session, mut scratch, mut out) {
         return false
     }
+    let (prefix, suffix) = option.unwrap(string.split_once(expected_vanilla, "AKIDEXAMPLE"))
+    let mut compatible = string.from(prefix)
+    string.push(mut compatible, "tid_example-1")
+    string.push(mut compatible, suffix)
+    result.unwrap(sigv4.authorize(keys, SIGNED_AT, SIGNED_AT, "tid_example-1", vanilla, mut scratch, mut out))
+    if out != string.as_bytes(compatible) {
+        return false
+    }
+    if let Error(InvalidRequest) = sigv4.authorize(keys, SIGNED_AT, SIGNED_AT, "bad/id", vanilla, mut scratch, mut out) {} else {
+        return false
+    }
     // Independent Python hashlib.sha256 and hmac.digest over the AWS key
     // and a plaintext canonical request containing the checksum and token.
     if !correct(keys, SIGNED_AT, request(true, true, true), expected_plaintext, mut scratch, mut out) {

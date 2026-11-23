@@ -373,7 +373,7 @@ pub fn authorize(keys: SigningKeys, now_ms: u64, timestamp_ms: u64, access_key: 
         return Error(InvalidRequest)
     }
     for c in string.as_bytes(access_key) {
-        if !int.is_ascii_alpha(c) && !int.is_ascii_digit(c) {
+        if !int.is_ascii_alpha(c) && !int.is_ascii_digit(c) && c != b'_' && c != b'-' {
             return Error(InvalidRequest)
         }
     }

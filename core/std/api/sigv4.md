@@ -32,3 +32,5 @@ timestamp with no eligible cached key.
 
 `share_signer` gives another lane a signer with the same root, scope and
 keys. `refresh` updates the cache for the current wall time without waiting.
+
+Access key IDs may contain ASCII letters, digits, underscores and hyphens.

@@ -34,8 +34,11 @@ platform launcher names one by default: it passes the record it launches to ever
 so a plain restart of the same executable outside the host still reopens its store. An
 operator who installs on a hosted store by hand passes `--hirsel-assembly`<!-- doc-ref: planned -->
 with the record the host should serve, and the allowance that record launches with
-(`--hirsel-n-place`<!-- doc-ref: external -->); without them the install names none, or
-another allowance, and matches no host record ("Place activation" below). The name is the launching principal's statement, as `n_place` is: it selects nothing and grants
+(`--hirsel-n-place`<!-- doc-ref: external -->). A launch that names a record runs at the
+launch's allowance in every mode, as a hosted launch does, and the launcher refuses a name
+without an explicit allowance (RUNNER-SPEC §6 "A named launch runs at the launch's
+allowance"). Without the name the install names none, and with another allowance it
+describes another launch; either matches no host record ("Place activation" below). The name is the launching principal's statement, as `n_place` is: it selects nothing and grants
 nothing, and is compared only as part of `Describe`. A const-parameter mechanism was
 considered and left out: it is a separate language feature and is unnecessary
 for launch configuration. There is no compiler rule naming `runner@1/runner` to
@@ -126,9 +129,10 @@ duplicate registration and timeout errors leave the output destination alone.
 The native launcher consumes the private prefix `--hirsel-describe`<!-- doc-ref: external -->,
 `--hirsel-n-place=<bytes>`<!-- doc-ref: external --> and `--hirsel-assembly=<hex>`<!-- doc-ref: planned -->
 (64 lowercase hex digits; absent means empty) before constructing user `Args`. The allowance defaults
-to 16 MiB. A place launched by the platform host or launcher runs at the
-allowance that option selects. A standalone place runs at its own
-`PlaceConfig.n_place` and ignores the option: its wire configuration must repeat
+to 16 MiB. A place launched by the platform host or launcher, or by any launch that names
+an assembly record, runs at the allowance that option selects; `--hirsel-assembly`<!-- doc-ref: planned -->
+without `--hirsel-n-place`<!-- doc-ref: external --> is refused, exit 64, before user code.
+Any other standalone place runs at its own `PlaceConfig.n_place` and ignores the option: its wire configuration must repeat
 that value or the start is refused `Disagrees` naming both, and `Status` and
 Welcome report it (RUNNER-SPEC §6 "One n_place"). Evaluator and embedded launch configurations carry the same mode and
 allowance explicitly. SDK generation uses the driver's `describe_child` helper;
@@ -156,9 +160,12 @@ A bare install exits 0 whatever host the store belongs to: it skips the current-
 and writes a `Describe` that names no assembly record. That is right for a standalone place
 and wrong for a store a platform host serves, whose group then matches none of its records.
 A hand install meant for a hosted group must launch as one of the records the host can adopt,
-the failed deploy's OLD or NEW that the group still keeps: pass that record's `--hirsel-assembly=<hex>`<!-- doc-ref: planned --> and its allowance
-`--hirsel-n-place=<bytes>`<!-- doc-ref: external -->, and run its exact image. The group's
-`Status.failing[].last` names those candidates when the host finds no match. The group's
+the marked deploy's OLD or NEW that the group still keeps: pass that record's `--hirsel-assembly=<hex>`<!-- doc-ref: planned --> and its allowance
+`--hirsel-n-place=<bytes>`<!-- doc-ref: external -->, and run its exact image. The install then
+registers and writes its `Describe` at that allowance, not at `PlaceConfig.n_place`.
+The group's `Status.failing[].last` names those candidates with their allowances when the
+host finds no match, and keeps that cause ahead of each retry's own refusal or exit status
+until a read matches. The group's
 next retry reads the store and serves that record at the installed activation
 (RUNNER-SPEC §14.3 "Leaving no record"); a group left failing by a decided deploy recovers
 only this way, because a hot deploy needs a live OLD. Both options are run arguments,
@@ -428,8 +435,10 @@ is **Undecided**: a durable state that keeps both OLD's and NEW's roots, under w
 command, ordinary wake, second deploy or retirement may change the group's roots. The host
 decides it only by what the store reports under its `LOCK`, through a recovery probe. The probe is a
 serving launch with no predecessor at a fresh generation. Its pair is saved in the
-pending record as probe intent, never as the group's current pair. Every probe also names the
-attempt's activation `v` as its witness version. The first probe opens NEW's
+pending record as probe intent, never as the group's current pair, and a refused probe's
+cause compares the store's activation with that intent, never with the group's pair: a probe of
+NEW at 10 refused at 3 says it requested 10 and found 3 (RUNNER-SPEC §14.5 "Genesis"). Every
+probe also names the attempt's activation `v` as its witness version. The first probe opens NEW's
 assembly at `v`. An open of NEW at `v` that reports `releases[v].prepared`
 equal to the attempt's prepared digest proves the install (RUNNER-SPEC §14.3; an open at `v`
 with another `prepared` proves this attempt did not install): the host
@@ -452,14 +461,17 @@ image, so a group never returns to `v` from a later activation. `Describe` names
 record, so at most one of OLD's and NEW's matches, and a probe that opens always matches the
 record it opened; when neither matches, nothing is selected, the group's row keeps a durable
 no-record mark (the attempt, the read's activation and the assembly its `Describe` names), and
-the group is failing with the cause `No retained assembly matches the store at activation a`,
-followed by that assembly name (or "names no assembly") and the names of the candidates below. The
-mark, not the start that last failed, carries the cause, so retries refused at the stale
-activation and a host restart keep it. Each retry of a marked group, once refused, reads the
+the group is failing with the cause `No recovery candidate matches the store at activation a`,
+followed by that assembly name (or "names no assembly") and allowance, and the names and
+allowances of the candidates below. The mark, not the start that last failed, carries the
+cause: `Status` formats it from the mark and appends the last start's own refusal or exit
+status, so retries refused at the stale activation, retries that end before they report, and
+a host restart keep it (RUNNER-SPEC §14.5 "Failing and backoff"). Each retry of a marked group, once refused, reads the
 store as the probe does, without the witness row; when the read's image is the `Describe`
 digest of the attempt's OLD or NEW that the group still keeps, one transaction makes that
 record current at the read's activation and writes it into the activation index there, and the
-group relaunches at once (RUNNER-SPEC §14.3 "Leaving no record"). The deploy's outcome and its
+group relaunches at once (RUNNER-SPEC §14.3 "Leaving no record"); the mark then carries no
+cause until the relaunch's open clears it. The deploy's outcome and its
 index entry are not changed, and while nothing matches the selection is left alone. Roots follow RUNNER-SPEC §14.3 "Roots". Any other
 answer (`Held`, a missing image, a failed read, an I/O failure) decides nothing: both roots stay, and the probe is retried under the
 ordinary backoff. Neither a timer nor a retry count decides a root.

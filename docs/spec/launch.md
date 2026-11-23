@@ -131,7 +131,7 @@ The native launcher consumes the private prefix `--hirsel-describe`<!-- doc-ref:
 (64 lowercase hex digits; absent means empty) before constructing user `Args`. The allowance defaults
 to 16 MiB. A place launched by the platform host or launcher, or by any launch that names
 an assembly record, runs at the allowance that option selects; `--hirsel-assembly`<!-- doc-ref: planned -->
-without `--hirsel-n-place`<!-- doc-ref: external --> is refused, exit 64, before user code.
+without `--hirsel-n-place`<!-- doc-ref: external --> is refused before user code, as a malformed private option is.
 Any other standalone place runs at its own `PlaceConfig.n_place` and ignores the option: its wire configuration must repeat
 that value or the start is refused `Disagrees` naming both, and `Status` and
 Welcome report it (RUNNER-SPEC §6 "One n_place"). Evaluator and embedded launch configurations carry the same mode and

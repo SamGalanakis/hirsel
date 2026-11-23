@@ -87,6 +87,24 @@ and the arguments. A stale approval conflicts. The worker checks the catalog
 against the pinned request before using the one static MCP call body. Calls
 use the Once policy and return text content.
 
+## Large Outside results
+
+Outside tool results up to 64 KiB go in the journal. Above that size the
+worker calls the agent's `store_result` function before it settles. The
+assembly gives that function access to its `std.object.Client` and uses
+`harness.store_payload` to write the body with a conditional PUT at
+`sha256/<hex digest>` under the client's bucket prefix. Only the reference
+is settled and appended. A write failure is a tool failure.
+
+`harness.read_blob` takes a caller-supplied byte budget and verifies the
+length and SHA-256 before returning bytes. Use the same bucket and prefix for
+as long as any journal entry can refer to them. If a Once worker dies after
+the object write, the object can remain unreferenced and the effect becomes
+InDoubt on recovery, just as it would after any interrupted dispatch.
+
+An assembly can also stage the result of a parked Inside tool before calling
+`harness.resume`. An Inside tool's direct `Now` result has a 64 KiB limit.
+
 ## System sections and reactions
 
 `agent.sections` is a list of `Section{key, render}`. List order is prompt
@@ -233,7 +251,7 @@ each response chunk to `provider.feed` and asks `provider.answer` at the end.
 | R1 `test_reactions_commit_with_entry` | A reaction's row commits with the entry. A failing reaction leaves the entry, none of its own writes, and a Note naming it. | The rows each reaction writes, by hand. |
 | H1 `test_late_decisions_lapse` | A decision at or after a hold's expiry is Lapsed and the call is denied "approval expired", with or without the expiry timer having run. A timer that runs early changes nothing. | Hand-derived outcomes for hold times of 0 and 24 hours. |
 | K1 `test_parked_call_resumes_once` | An Inside tool that returns Later runs once and stays parked through further wakes. The first resume settles it with the given result and the round goes on; a second resume is ignored. | The tool's own run count and the bytes passed to resume. |
-| J1 `test_round_bytes_bounded` | The transaction that appends a user entry and prepares the model call writes the same bytes after 10 earlier entries as after 1,000, within 64 bytes. | `store.changes` between the snapshots around the transaction. A request body copied into any row or trigger argument would add about 198,000 bytes. |
+| J1 `test_round_bytes_bounded` | Preparing a model call writes the same bytes after 10 entries as after 1,000, within 64 bytes. Settling a 65,537-byte Outside result keeps the journal smaller than the result. Recovery after an acknowledged PUT and before settle produces InDoubt without redispatch. A settled reference reads back byte-for-byte and a body with the wrong digest is refused. | The snapshot diff, recovered journal byte account, scripted dispatch counts and the simulated S3 object at the fixture's independently computed SHA-256 key. |
 | F1 `test_fork_shares_prefix` | A fork cut after a finished tool round holds exactly the parent's entries before the cut and their visible lines, with no run. Its first request after a new submit is those messages plus the new one, under a fresh baseline. A cut inside a tool round (one of two calls answered) conflicts. | The parent log and the lines each entry shows, written by hand. |
 | S1 `test_documented_streams_read` | The Anthropic docs' tool-use stream and an OpenAI tool-call stream read to their documented answer (text, calls, joined arguments, stop reason, usage), fed whole or in pieces of 1, 2, 7 or 61 bytes. | The Anthropic streaming docs' example, copied verbatim, and a stream built from OpenAI's documented chunk schema; the expected answers are read off the fixtures by hand. |
 | S2 `test_answer_needs_terminator` | A stream cut before `message_stop` or `[DONE]`, cut inside a tool argument, or ending in an error event gives no answer. | Each provider's documented success terminator. |

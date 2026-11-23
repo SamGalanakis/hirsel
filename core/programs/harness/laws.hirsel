@@ -10,8 +10,20 @@ const IDLE_MS: u64 = 300u64
 
 type ModelAsk: send = Ask(bool, Sender[harness.Answer]) | Asked(Sender[u64])
 type ToolAsk: send = Run(Bytes, Sender[Bytes]) | Ran(Sender[u64])
-type Services: send { model: Sender[ModelAsk], tool: Sender[ToolAsk] }
-type Grants: send { context: store.runner.TriggerContext, model: Sender[ModelAsk], tool: Sender[ToolAsk] }
+type Services: send { model: Sender[ModelAsk], tool: Sender[ToolAsk], blobs: Option[BlobFixture] }
+type Grants: send { context: store.runner.TriggerContext, model: Sender[ModelAsk], tool: Sender[ToolAsk], blobs: Option[BlobFixture] }
+
+type BlobCut: send = BlobWritten | PlaceEnded
+type BlobFixture: send { net: Net, tasks: Tasks, clock: Clock, random: Random, cut: Option[Sender[BlobCut]] }
+
+fn copy_blob_fixture(b: BlobFixture) -> BlobFixture {
+    let cut = match b.cut { Some(s) => Some(channel.sender(s)), None => None }
+    BlobFixture(net: b.net, tasks: b.tasks, clock: b.clock, random: b.random, cut: take cut)
+}
+
+fn blob_grant(s: Services) -> Option[BlobFixture] {
+    match s.blobs { Some(b) => Some(copy_blob_fixture(b)), None => None }
+}
 
 fn usage() -> harness.Usage { harness.Usage(input: 10u64, output: 5u64) }
 
@@ -63,10 +75,10 @@ fn tool_service(take seed: ToolSeed) -> () waits {
     }
 }
 
-fn copy_services(s: Services) -> Services { Services(model: channel.sender(s.model), tool: channel.sender(s.tool)) }
+fn copy_services(s: Services) -> Services { Services(model: channel.sender(s.model), tool: channel.sender(s.tool), blobs: blob_grant(s)) }
 
 fn make_grants(s: Services, take ctx: store.runner.TriggerContext) -> Result[Grants, Capacity] {
-    Ok(Grants(context: take ctx, model: channel.sender(s.model), tool: channel.sender(s.tool)))
+    Ok(Grants(context: take ctx, model: channel.sender(s.model), tool: channel.sender(s.tool), blobs: blob_grant(s)))
 }
 
 fn scripted_model(g: Grants, take r: harness.Request) -> Result[harness.Answer, harness.Fault] waits {
@@ -88,6 +100,7 @@ fn bump(g: Grants, take args: Bytes) -> Result[Bytes, harness.Fault] waits {
 fn crash_agent() -> harness.Agent[Grants] {
     let mut a = harness.agent("crash", "scripted", code.describe(scripted_model))
     list.push(mut a.tools, harness.outside("bump", "adds one", "{}", Once, code.describe(bump)))
+    a.store_result = Some(code.describe(stage_blob))
     a
 }
 
@@ -213,7 +226,7 @@ pub fn law_once_tool_crash(parent: Dir, clock: Clock, random: Random, tasks: Tas
     let (seen, saw): (Sender[()], Receiver[()]) = channel.new(1u64)
     let models = task.spawn(tasks, bytes 65536u64, take model_in, model_service)
     let tools = task.spawn(tasks, bytes 65536u64, ToolSeed(inbox: take tool_in, seen: take seen), tool_service)
-    let services = Services(model: take model, tool: take tool)
+    let services = Services(model: take model, tool: take tool, blobs: None)
     let (first, stop_first, _) = launch(tasks, settings(dir, clock, random, tasks, net, copy_services(services), None))
     if let Error(_) = channel.receive(saw) { fail("crash: the tool was never called") }
     result.unwrap(channel.send(stop_first, ()))
@@ -239,7 +252,7 @@ pub fn law_once_tool_crash(parent: Dir, clock: Clock, random: Random, tasks: Tas
         && says_done(result.unwrap(store.get(snap, store.shape(h.entries), 4u64)))
     let idle = match session.active_run { None => true, Some(_) => false }
     result.unwrap(store.close(take db))
-    let Services(model: take m, tool: take t) = take services
+    let Services(model: take m, tool: take t, ..) = take services
     let _ = take m
     let _ = take t
     let _ = task.join(take models)
@@ -316,8 +329,8 @@ pub fn law_round_bytes_bounded(parent: Dir, clock: Clock, random: Random, tasks:
 }
 
 @test
-fn test_round_bytes_bounded(parent: Dir, clock: Clock, random: Random, tasks: Tasks) -> Result[(), ()] waits {
-    if law_round_bytes_bounded(parent, clock, random, tasks) { Ok(()) } else { Error(()) }
+fn test_round_bytes_bounded(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
+    if law_round_bytes_bounded(parent, clock, random, tasks) && law_blob_results(parent, clock, random, tasks, net) { Ok(()) } else { Error(()) }
 }
 
 // ---- forks ----
@@ -1158,6 +1171,267 @@ fn unmount(take d: Dir, take server: Task[(std.sim.fs.Fs, std.sim.world.Plan)]) 
     result.unwrap(task.join(take server))
 }
 
+const BLOB_SIZE: u64 = 65537u64
+const BLOB_MIME: String = "application/octet-stream"
+// Python hashlib.sha256(b"A" * 65537).hexdigest().
+const BLOB_KEY: String = "sha256/ac72112c832fa4683b15ebff51a8f5f2ca08226c0d59bdb9ac739c2cdc28a05c"
+const BAD_BLOB_KEY: String = "sha256/0000000000000000000000000000000000000000000000000000000000000000"
+
+fn blob_bytes(size: u64) -> Bytes {
+    let mut body: Bytes = list.with_capacity(size)
+    list.fill(mut body, size, 65u8)
+    take body
+}
+
+fn blob_tools(take inbox: Receiver[ToolAsk]) waits {
+    let mut ran = 0u64
+    while let Ok(take req) = channel.receive(inbox) {
+        match take req {
+            Run(_, take reply) => {
+                ran += 1u64
+                let _ = channel.send(reply, blob_bytes(BLOB_SIZE))
+            },
+            Ran(reply) => { let _ = channel.send(reply, ran) },
+        }
+    }
+}
+
+fn blob_credentials() -> std.cred.Credentials {
+    let raw = string.into_bytes("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY")
+    let root = result.unwrap(secret.seal(take raw, "kdf"))
+    std.cred.from_secret("AKIAIOSFODNN7EXAMPLE", take root, "")
+}
+
+type BlobServer: send { config: std.sim.s3.Config, clock: Clock, port: Served[NetOp] }
+
+fn blob_server(take setup: BlobServer) -> std.sim.s3.Report waits {
+    let BlobServer(config: take cfg, clock, port: take port) = take setup
+    let mut plan = std.sim.world.plan(7u64)
+    std.sim.s3.serve(cfg, mut plan, clock, take port)
+}
+
+fn blob_fixture(tasks: Tasks, clock: Clock, random: Random) -> (BlobFixture, Task[std.sim.s3.Report]) {
+    let address = Addr(ip: V4(127u32 << 24 | 1u32), port: 8080u16)
+    let mut network = std.sim.net.new(std.sim.net.defaults())
+    let mut ips: List[Ip] = list.new()
+    list.push(mut ips, address.ip)
+    std.sim.net.resolve_as(mut network, "bucket.s3.test", take ips)
+    let mut timestamp: Bytes = list.with_capacity(16u64)
+    result.unwrap(std.sigv4.write_date(mut timestamp, host.wall_ms(clock)))
+    let day = result.unwrap(string.from_utf8(clone(list.slice(timestamp, 0u64, 8u64))))
+    let mut scope = string.from("AKIAIOSFODNN7EXAMPLE/")
+    string.push(mut scope, day)
+    string.push(mut scope, "/us-east-1/s3/aws4_request")
+    let credentials_set = blob_credentials()
+    let date_key = result.unwrap(secret.derive_hmac_sha256(credentials_set.secret, string.as_bytes("AWS4"), string.as_bytes(day), "kdf"))
+    let region_key = result.unwrap(secret.derive_hmac_sha256(date_key, list.new(), string.as_bytes("us-east-1"), "kdf"))
+    let service_key = result.unwrap(secret.derive_hmac_sha256(region_key, list.new(), string.as_bytes("s3"), "kdf"))
+    let verify = result.unwrap(secret.derive_hmac_sha256(service_key, list.new(), string.as_bytes("aws4_request"), "verify"))
+    let cfg = std.sim.s3.Config(address, cut: None, network: take network, after_resolve: None,
+        credential: take scope, signing_key: take verify,
+        faults: list.new(), exists_status: 412u16, fragment_bytes: 8192u64, max_body: BLOB_SIZE)
+    let (network_grant, port) = provide.net(bytes 262144u64)
+    let server = task.spawn(tasks, bytes 8388608u64, BlobServer(config: take cfg, clock, port: take port), blob_server)
+    (BlobFixture(net: network_grant, tasks, clock, random, cut: None), take server)
+}
+
+fn blob_client(f: BlobFixture) -> Result[std.object.Client, harness.Fault] waits {
+    let bucket = std.object.Bucket(endpoint: "http://s3.test:8080", aws_region: "us-east-1", bucket: "bucket", prefix: "", style: Virtual)
+    let until = std.clock.deadline_after_ms(host.mono_ns(f.clock), 1000u64)
+    match std.object.start(f.net, f.tasks, take bucket, blob_credentials(), None, System, f.clock, f.random, 1u64, 1048576u64, until) {
+        Ok(take client) => Ok(take client),
+        Error(Retriable(Net(_))) => Error(Refused("blob: simulated S3 resolution failed")),
+        Error(_) => Error(Refused("blob: could not start the object client")),
+    }
+}
+
+fn stage_blob(g: Grants, take body: Bytes) -> Result[harness.BlobRef, harness.Fault] waits {
+    let Some(f) = view g.blobs else { return Error(TooLarge) }
+    let mut client = blob_client(f)?
+    let until = std.object.deadline_after_ms(client, 1000u64)
+    let Blob(take reference) = harness.store_payload(mut client, take body, BLOB_MIME, until)? else {
+        return Error(Refused("blob: an oversized result needs a reference"))
+    }
+    if let Some(cut) = view f.cut {
+        // The test cuts the place after the PUT acknowledgement while
+        // this worker is still waiting and has never called settle.
+        let (hold, parked): (Sender[()], Receiver[()]) = channel.new(1u64)
+        result.unwrap(channel.send(cut, BlobWritten))
+        let _ = channel.receive(parked)
+        drop(take hold)
+        return Error(Unavailable)
+    }
+    Ok(take reference)
+}
+
+fn blob_place(mut r: store.runner.Registry[Grants, harness.Handles]) -> Result[(), store.runner.RegisterError] {
+    store.runner.transact(mut r, code.describe(advance), BYTES, store.runner.DEFAULT_STEPS)?
+    store.runner.granted(mut r, code.describe(effect), 8388608u64, store.runner.DEFAULT_STEPS)?
+    harness.register(mut r, BYTES, store.runner.DEFAULT_STEPS)?
+    let f: own[send] fn(mut store.Tx, store.triggers.Attempt, take harness.Settle) -> Result[harness.Filed, store.Error] = settle
+    store.runner.register_attempt(mut r, code.describe(settle), take f, BYTES, store.runner.DEFAULT_STEPS)
+}
+
+fn blob_settings(dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, take services: Services) -> store.runner.PlaceConfig[Grants, harness.Handles, Services, ()] {
+    settings_of(code.describe(blob_place), harness.entries(result.unwrap(wired())), dir, clock, random, tasks, net, take services, Some(IDLE_MS))
+}
+
+type FirstBlobLife: send { life: Life, checkpoint: Sender[BlobCut] }
+
+fn first_blob_life(take start: FirstBlobLife) waits {
+    let FirstBlobLife(life: take life, checkpoint: take at) = take start
+    let _ = live(take life)
+    let _ = channel.send(at, PlaceEnded)
+}
+
+fn stored_blob(dir: Dir, clock: Clock, random: Random, tasks: Tasks, cut: bool) -> Option[harness.BlobRef] waits {
+    let db = result.unwrap(store.open(tasks, dir, clock, random, store.triggers.law_options()))
+    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    let snap = store.snapshot(db)
+    let run = option.unwrap(result.unwrap(store.get(snap, store.shape(h.runs), 0u64)))
+    let entry = result.unwrap(store.get(snap, store.shape(h.entries), 3u64))
+    let key = harness.EffectKey(run: 0u64, round: 0u64, kind: harness.TOOL, ordinal: 0u64)
+    let tool_row = option.unwrap(result.unwrap(store.get(snap, store.shape(h.effects), key)))
+    if let Some(id) = tool_row.trigger {
+        let ended = result.unwrap(store.triggers.outcome(snap, h.triggers, id))
+        match take ended {
+            Some(Raised(raised_code)) => {
+                let mut why = string.from("blob: granted effect raised ")
+                string.push_u64(mut why, int.widen(raised_code))
+                fail(take why)
+            },
+            Some(OutOfTime(_)) => fail("blob: granted effect ran out of steps"),
+            Some(OutOfBytes(_, _)) => fail("blob: granted effect ran out of bytes"),
+            Some(Cap) => fail("blob: granted effect ran out of capacity"),
+            _ => (),
+        }
+    }
+    if run.spend.known != 30u64 || run.spend.reserved != 0u64 || run.spend.unresolved != 0u64 {
+        let mut why = string.from(if cut { "blob: recovered known spend " } else { "blob: clean known spend " })
+        string.push_u64(mut why, run.spend.known)
+        string.push(mut why, ", reserved ")
+        string.push_u64(mut why, run.spend.reserved)
+        string.push(mut why, ", unresolved ")
+        string.push_u64(mut why, run.spend.unresolved)
+        fail(take why)
+    }
+    let journal_bytes = store.accounts(db).journal
+    if journal_bytes == 0u64 || journal_bytes >= BLOB_SIZE { fail("J1: journal byte count is outside the bound") }
+    result.unwrap(store.close(take db))
+    match take entry {
+        Some(ToolResult(id, InDoubt)) if cut && id == "c1" => None,
+        Some(ToolResult(id, Returned(Blob(take reference)))) if !cut && id == "c1" => Some(take reference),
+        Some(ToolResult(_, Failed(take why))) => fail(take why),
+        _ => fail("blob: wrong outcome in recovered journal"),
+    }
+}
+
+fn check_blob(f: BlobFixture, reference: harness.BlobRef) -> bool waits {
+    let mut client = result.unwrap(blob_client(f))
+    let until = std.object.deadline_after_ms(client, 1000u64)
+    let inline = result.unwrap(harness.store_payload(mut client, blob_bytes(65536u64), BLOB_MIME, until))
+    let Inline(raw) = view inline else { return false }
+    if raw != blob_bytes(65536u64) || reference.len != BLOB_SIZE || reference.mime != BLOB_MIME { return false }
+    let Ok(Blob(reused)) = harness.store_payload(mut client, blob_bytes(BLOB_SIZE), BLOB_MIME, until) else { return false }
+    if reused.digest != reference.digest { return false }
+    let body = result.unwrap(harness.read_blob(mut client, reference, BLOB_SIZE, until))
+    if body != blob_bytes(BLOB_SIZE) { return false }
+    let (written, _) = std.object.store(mut client, BAD_BLOB_KEY, take body, until)
+    let _ = result.unwrap(take written)
+    let mut zeros: Bytes = list.with_capacity(32u64)
+    list.fill(mut zeros, 32u64, 0u8)
+    let wrong = harness.BlobRef(digest: take zeros, len: BLOB_SIZE, mime: BLOB_MIME)
+    match harness.read_blob(mut client, wrong, BLOB_SIZE, until) {
+        Error(Refused(_)) => true,
+        _ => false,
+    }
+}
+
+type KeepServer: send { world: std.sim.world.World, real: Clock, stop: Receiver[()] }
+
+fn keep_blob_server(take input: KeepServer) waits {
+    let KeepServer(world: take world, real, stop: take stop) = take input
+    let mut idle = take world
+    loop {
+        let _ = std.sim.world.step(mut idle)
+        if let Ok(()) = channel.try_receive(stop) { return }
+        std.clock.sleep_ns(real, 1000000u64)
+    }
+}
+
+fn saved_blob(report: std.sim.s3.Report, writes: u64) -> bool {
+    if let Some(saved) = map.get(report.objects, BLOB_KEY) {
+        return report.writes == writes && saved.data == blob_bytes(BLOB_SIZE)
+    }
+    false
+}
+
+// Extend J1 through settlement. The first worker is halted after the blob
+// write. Reopen the cut filesystem and verify that the Once dispatch
+// is in doubt and the body never hits the journal.
+fn law_blob_results(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
+    let (model, model_in): (Sender[ModelAsk], Receiver[ModelAsk]) = channel.new(4u64)
+    let (tool, tool_in): (Sender[ToolAsk], Receiver[ToolAsk]) = channel.new(4u64)
+    let models = task.spawn(tasks, bytes 65536u64, take model_in, model_service)
+    let tools = task.spawn(tasks, bytes 262144u64, take tool_in, blob_tools)
+    let services = Services(model: take model, tool: take tool, blobs: None)
+
+    let (first_dir, disk) = mount(tasks, clock, std.sim.fs.new(), std.sim.world.plan(0u64))
+    seed_session(first_dir, clock, random, tasks)
+    let (take cutting, first_server) = blob_fixture(tasks, clock, random)
+    let (stop, stop_in): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let (checkpoint, checkpoints): (Sender[BlobCut], Receiver[BlobCut]) = channel.new(1u64)
+    let mut cut_fixture = take cutting
+    cut_fixture.cut = Some(channel.sender(checkpoint))
+    let mut cut_services = copy_services(services)
+    cut_services.blobs = Some(take cut_fixture)
+    let config = blob_settings(first_dir, clock, random, tasks, net, take cut_services)
+    let status = result.unwrap(store.runner.status_root())
+    let life = Life(config: take config, stop: take stop_in, status: take status)
+    let first = task.spawn(tasks, bytes 50331648u64, FirstBlobLife(life: take life, checkpoint: take checkpoint), first_blob_life)
+    if let PlaceEnded = result.unwrap(channel.receive(checkpoints)) { fail("blob: place ended before the PUT acknowledgement") }
+    result.unwrap(channel.send(stop, ()))
+    result.unwrap(task.join(take first))
+    if model_asked(services) != 1u64 || tool_ran(services) != 1u64 { fail("blob: missed the cut before settle") }
+    let (take image, _) = unmount(take first_dir, take disk)
+    let orphan = result.unwrap(task.join(take first_server))
+    if !saved_blob(orphan, 1u64) { fail("blob: the acknowledged PUT left no object") }
+    let mut crashed = take image
+    let mut plan = std.sim.world.plan(1u64)
+    std.sim.fs.crash(mut crashed, mut plan)
+    let (reopened, replay) = mount(tasks, clock, take crashed, std.sim.world.plan(0u64))
+    let (second, _stop_second, _) = launch(tasks, blob_settings(reopened, clock, random, tasks, net, copy_services(services)))
+    let _ = result.unwrap(result.unwrap(task.join(take second)))
+    let _ = stored_blob(reopened, clock, random, tasks, true)
+    let _ = unmount(take reopened, take replay)
+    if model_asked(services) != 2u64 || tool_ran(services) != 1u64 { fail("blob: the Once effect dispatched again") }
+
+    let mut name = string.with_capacity(32u64)
+    let clean = result.unwrap(host.mkdtemp(parent, mut name))
+    seed_session(clean, clock, random, tasks)
+    let (fixture, server) = blob_fixture(tasks, clock, random)
+    // A Served port closes at quiescence. Keep it available while the
+    // place is idle and while its journal is reopened for readback.
+    let (world, _) = std.sim.world.new(2u64, 0u64, 0u64)
+    let (done, finishing): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let keeper = task.spawn(tasks, bytes 65536u64, KeepServer(world: take world, real: clock, stop: take finishing), keep_blob_server)
+    let mut clean_services = copy_services(services)
+    clean_services.blobs = Some(copy_blob_fixture(fixture))
+    let (third, _stop_third, _) = launch(tasks, blob_settings(clean, clock, random, tasks, net, take clean_services))
+    let _ = result.unwrap(result.unwrap(task.join(take third)))
+    let reference = option.unwrap(stored_blob(clean, clock, random, tasks, false))
+    let checked = check_blob(fixture, reference) && model_asked(services) == 4u64 && tool_ran(services) == 2u64
+    drop(take services)
+    drop(take fixture)
+    let _ = result.unwrap(task.join(take models))
+    let _ = result.unwrap(task.join(take tools))
+    result.unwrap(std.dir.remove_all(parent, name))
+    result.unwrap(channel.send(done, ()))
+    result.unwrap(task.join(take keeper))
+    let observed = result.unwrap(task.join(take server))
+    checked && saved_blob(observed, 2u64)
+}
+
 type Tally { users: u64, systems: u64, answers: u64, calls: u64, results: u64, returned: u64, resumed: u64, ordered: bool }
 
 fn tally(snap: store.Snapshot, h: harness.Handles, n: u64) -> Tally {
@@ -1248,7 +1522,7 @@ fn matrix_case(clock: Clock, random: Random, tasks: Tasks, net: Net, scenario: M
     let (tool, tool_in): (Sender[ToolAsk], Receiver[ToolAsk]) = channel.new(4u64)
     let models = task.spawn(tasks, bytes 65536u64, MatrixModel(inbox: take model_in, scenario: scenario), matrix_model)
     let tools = task.spawn(tasks, bytes 65536u64, take tool_in, answering_tools)
-    let services = Services(model: take model, tool: take tool)
+    let services = Services(model: take model, tool: take tool, blobs: None)
     let (first_dir, first_server) = mount(tasks, clock, take seeded, take faults)
     let (first, _stop_first, status) = launch(tasks, matrix_settings(scenario, first_dir, clock, random, tasks, net, copy_services(services)))
     let (first_ended, poisoned) = match task.join(take first) {
@@ -1260,7 +1534,7 @@ fn matrix_case(clock: Clock, random: Random, tasks: Tasks, net: Net, scenario: M
     let (image, after) = unmount(take first_dir, take first_server)
     let mut left = take after
     if let Some(_) = std.sim.world.take_fault(mut left, site) {
-        let Services(model: take m, tool: take t) = take services
+        let Services(model: take m, tool: take t, ..) = take services
         let _ = take m
         let _ = take t
         let _ = task.join(take models)
@@ -1292,7 +1566,7 @@ fn matrix_case(clock: Clock, random: Random, tasks: Tasks, net: Net, scenario: M
     }
     result.unwrap(store.close(take db))
     let _ = unmount(take check_dir, take check_server)
-    let Services(model: take m, tool: take t2) = take services
+    let Services(model: take m, tool: take t2, ..) = take services
     let _ = take m
     let _ = take t2
     let _ = task.join(take models)
@@ -1433,7 +1707,7 @@ fn race_case(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, 
     let tool_hold = match late { LateTool => LATE_TOOL_MS, SlowTool => SLOW_TOOL_MS, LateModel => 0u64 }
     let models = task.spawn(tasks, bytes 65536u64, LateModelSeed(inbox: take model_in, clock: clock, hold_ms: model_hold), late_model_service)
     let tools = task.spawn(tasks, bytes 65536u64, LateToolSeed(inbox: take tool_in, clock: clock, hold_ms: tool_hold), late_tool_service)
-    let services = Services(model: take model, tool: take tool)
+    let services = Services(model: take model, tool: take tool, blobs: None)
     let config = settings_of(code.describe(race_place), harness.entries(result.unwrap(race_wired())), dir, clock, random, tasks, net, copy_services(services), Some(IDLE_MS))
     let (life, _stop, _) = launch(tasks, take config)
     let ended = task.join(take life)
@@ -1457,7 +1731,7 @@ fn race_case(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, 
     }
     let raced = Raced(asked: asked, ran: ran, finish: take ending, spend: clone(run.spend), next_pos: session.next_pos, result: take outcome, said: take said)
     result.unwrap(store.close(take db))
-    let Services(model: take m2, tool: take t2) = take services
+    let Services(model: take m2, tool: take t2, ..) = take services
     let _ = take m2
     let _ = take t2
     let _ = task.join(take models)

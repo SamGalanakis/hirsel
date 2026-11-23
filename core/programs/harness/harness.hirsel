@@ -3,8 +3,7 @@
 
 // ---- payloads, entries and receipts ----
 
-// Payloads larger than INLINE_LIMIT will be stored as a BlobRef once
-// std.object lands. Until then an oversized payload is refused at admission.
+// A BlobRef names immutable bytes in the session's object bucket and prefix.
 pub type BlobRef: codec + send { digest: Bytes, len: u64, mime: String }
 pub type Payload: codec + send = Inline(Bytes) | Blob(BlobRef)
 pub const INLINE_LIMIT: u64 = 65536u64
@@ -279,6 +278,8 @@ pub type Agent[G: send]: send {
     route: String,
     model: StaticFn[fn(G, take Request) -> Result[Answer, Fault] waits],
     model_repeat: Repeat,
+    // The app supplies object authority when a result outgrows the journal.
+    store_result: Option[StaticFn[fn(G, take Bytes) -> Result[BlobRef, Fault] waits]],
     tools: List[Tool[G]],
     mcp_peer: Option[StaticFn[fn(G, String) -> Option[mcp_tools.Peer]]],
     gates: List[Gate],
@@ -288,7 +289,7 @@ pub type Agent[G: send]: send {
 }
 
 pub fn agent[G: send](take name: String, take route: String, model: StaticFn[fn(G, take Request) -> Result[Answer, Fault] waits]) -> Agent[G] {
-    Agent(name: take name, route: take route, model: model, model_repeat: Once, tools: list.new(), mcp_peer: None, gates: list.new(),
+    Agent(name: take name, route: take route, model: model, model_repeat: Once, store_result: None, tools: list.new(), mcp_peer: None, gates: list.new(),
         sections: list.new(), reactions: list.new(),
         limits: Limits(rounds: 8u64, calls: 8u64, model_ms: 120000u64, tool_ms: 60000u64, model_reserve: 4096u64,
                         // Gates and sections read rows; opening a table alone takes over
@@ -402,6 +403,45 @@ fn digest(raw: Bytes) -> Bytes {
     let mut out: Bytes = list.with_capacity(32u64)
     for i in 0u64..32u64 { list.push(mut out, d[i]) }
     take out
+}
+
+fn blob_key(hash: Bytes) -> String {
+    let digits = string.as_bytes("0123456789abcdef")
+    let mut key = string.into_bytes("sha256/")
+    for b in hash {
+        list.push(mut key, digits[int.widen(b >> 4u8)])
+        list.push(mut key, digits[int.widen(b & 15u8)])
+    }
+    result.unwrap(string.from_utf8(take key))
+}
+
+// Read through the same bucket and prefix used for the write. The caller
+// supplies its byte budget before the length in the reference can allocate.
+pub fn read_blob(mut client: std.object.Client, reference: BlobRef, max_bytes: u64, deadline_ns: u64) -> Result[Bytes, Fault] waits {
+    if reference.len > max_bytes { return Error(TooLarge) }
+    if list.len(reference.digest) != 32u64 { return Error(Refused("invalid blob digest")) }
+    let (fetched, take body) = std.object.fetch(mut client, blob_key(reference.digest), list.with_capacity(reference.len), deadline_ns)
+    if let Error(_) = fetched { return Error(Unavailable) }
+    if list.len(body) != reference.len || digest(body) != reference.digest {
+        return Error(Refused("blob length or digest mismatch"))
+    }
+    Ok(take body)
+}
+
+// Stage a payload before settling it. A pre-existing key can only be reused
+// after verifying its bytes. A crash before settle may leave an orphan.
+pub fn store_payload(mut client: std.object.Client, take body: Bytes, take mime: String, deadline_ns: u64) -> Result[Payload, Fault] waits {
+    let size = list.len(body)
+    if size <= INLINE_LIMIT { return Ok(Inline(take body)) }
+    let reference = BlobRef(digest: digest(body), len: size, mime: take mime)
+    let (written, _) = std.object.store_no_clobber(mut client, blob_key(reference.digest), take body, deadline_ns)
+    match written {
+        Ok(Created(_)) => (),
+        Ok(Exists) => { let _ = read_blob(mut client, reference, size, deadline_ns)? },
+        Error(TooLarge) => return Error(TooLarge),
+        Error(_) => return Error(Unavailable),
+    }
+    Ok(Blob(take reference))
 }
 
 fn line(e: Entry) -> Option[View] {
@@ -1309,6 +1349,16 @@ fn remote_effect[G: send](snap: store.Snapshot, h: Handles, e: Effect, c: Call, 
     }
 }
 
+fn tool_result[G: send](port: G, a: Agent[G], take body: Bytes) -> Outcome waits {
+    if list.len(body) <= INLINE_LIMIT { return Returned(Inline(take body)) }
+    let Some(save) = a.store_result else { return Failed("result too large") }
+    let save_result = code.callable(save)
+    match save_result(port, take body) {
+        Ok(take reference) => Returned(Blob(take reference)),
+        Error(take fault) => Failed(fault_text(take fault)),
+    }
+}
+
 // The body of the app's granted effect entry: begin, read the sealed cutoff
 // through the fenced snapshot, make the one outside call, settle.
 pub fn effect[G: send, F](ctx: store.runner.TriggerContext, port: G, take key: EffectKey, a: Agent[G], settle_entry: StaticFn[F]) -> Result[Worked, Capacity] waits {
@@ -1339,7 +1389,7 @@ pub fn effect[G: send, F](ctx: store.runner.TriggerContext, port: G, take key: E
             let Inline(raw) = view c.args else { return Ok(Lost) }
             let go = code.callable(f)
             Tool(match go(port, clone(raw)) {
-                Ok(take out) => if list.len(out) > INLINE_LIMIT { Failed("result too large") } else { Returned(Inline(take out)) },
+                Ok(take out) => tool_result(port, a, take out),
                 Error(Unavailable) => InDoubt,
                 Error(take fault) => Failed(fault_text(take fault)),
             })

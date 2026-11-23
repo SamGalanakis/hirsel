@@ -196,7 +196,7 @@ impl FunctionEmitter<'_> {
             }
             self.anchor = row.anchor;
             self.debug_location = location(row.anchor);
-            self.term(&self.body.terminators[b])?;
+            self.term(b)?;
         }
         self.step_labels.clear();
         self.unchecked_steps = false;

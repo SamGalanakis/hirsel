@@ -368,7 +368,11 @@ pub(super) fn emit(
                         .flat_map(|&v| f.parts(v)),
                 );
                 if let Some(record) = signature.record {
-                    abi::load_record(&mut f.b, record, f.record_dest.unwrap(), &mut results);
+                    if body.parked_returns.contains(&BlockId(i as u32)) {
+                        results.extend(record.fields().iter().map(|&(_, t)| f.bits(t, 0)));
+                    } else {
+                        abi::load_record(&mut f.b, record, f.record_dest.unwrap(), &mut results);
+                    }
                 }
                 results.push(f.b.ins().iconst(types::I8, 0));
                 signature.return_(&mut f.b, &results, result_storage);
@@ -493,6 +497,19 @@ impl Function<'_, '_, '_> {
         );
         self.blocks[edge.target.index()]
     }
+    fn bits(&mut self, t: Ty, bits: u64) -> Value {
+        match ty(t) {
+            types::F32 => self
+                .b
+                .ins()
+                .f32const(ir::immediates::Ieee32::with_bits(bits as u32)),
+            types::F64 => self
+                .b
+                .ins()
+                .f64const(ir::immediates::Ieee64::with_bits(bits)),
+            t => self.b.ins().iconst(t, bits as i64),
+        }
+    }
     fn instruction(&mut self, inst: &Inst) -> Result<()> {
         match *inst {
             Inst::Simd {
@@ -506,18 +523,7 @@ impl Function<'_, '_, '_> {
             }
             Inst::PutLanes { to, vector, count } => self.put_lanes(to, vector, count)?,
             Inst::Const { result, bits } => {
-                let t = ty(self.body.values[result.index()]);
-                let v = match t {
-                    types::F32 => self
-                        .b
-                        .ins()
-                        .f32const(ir::immediates::Ieee32::with_bits(bits as u32)),
-                    types::F64 => self
-                        .b
-                        .ins()
-                        .f64const(ir::immediates::Ieee64::with_bits(bits)),
-                    _ => self.b.ins().iconst(t, bits as i64),
-                };
+                let v = self.bits(self.body.values[result.index()], bits);
                 self.set(result, v);
             }
             Inst::LayoutConst { .. } => unreachable!("engine-private operands are resolved"),

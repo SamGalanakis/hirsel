@@ -1533,7 +1533,7 @@ impl FunctionEmitter<'_> {
                             (to, self.step_labels.insert(to, label))
                         })
                         .collect::<Vec<_>>();
-                    self.term(&self.body.terminators[block])?;
+                    self.term(block)?;
                     for (to, label) in old {
                         if let Some(label) = label {
                             self.step_labels.insert(to, label);

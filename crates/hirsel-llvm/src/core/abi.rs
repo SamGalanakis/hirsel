@@ -514,6 +514,29 @@ impl FunctionEmitter<'_> {
         }
         self.return_abi_values(&returned);
     }
+    pub(super) fn return_at(&mut self, block: usize, values: PoolRange<ValueId>) {
+        self.step_refund();
+        if (self.abi.ok.is_some() || self.abi.record.is_some())
+            && self.body.parked_returns.contains(&BlockId(block as u32))
+        {
+            // The caller checks the continuation word before using the
+            // result. Return defined register values without reading its place.
+            self.ret(&self.abi.ty.clone(), &Value::Zero);
+        } else if let Some(ok) = self.abi.ok {
+            self.return_ok(ok);
+        } else if let Some(record) = self.abi.record {
+            let fields = self.load_record(record, &Local::DEST.into());
+            self.return_values(&fields);
+        } else {
+            let values = values
+                .get(&self.body.pools.values)
+                .unwrap()
+                .iter()
+                .map(|v| self.numeric(*v))
+                .collect::<Vec<_>>();
+            self.return_values(&values);
+        }
+    }
     pub(super) fn return_failure(&mut self) {
         if !self.to_raised_exit() {
             self.emit_failure_return();

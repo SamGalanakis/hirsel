@@ -1052,7 +1052,7 @@ fn emit_module(
                     {
                         e.step_dispatch(plan, step_ends[number], number);
                     } else {
-                        e.term(&body.terminators[i])?;
+                        e.term(i)?;
                     }
                 }
             }
@@ -2410,8 +2410,8 @@ impl FunctionEmitter<'_> {
         let to = self.edge(edge);
         self.br(to);
     }
-    fn term(&mut self, term: &Terminator) -> Result<()> {
-        match *term {
+    fn term(&mut self, block: usize) -> Result<()> {
+        match self.body.terminators[block] {
             Terminator::Jump(e) => {
                 let to = self.edge(e);
                 self.br(to);
@@ -2462,23 +2462,7 @@ impl FunctionEmitter<'_> {
                     self.emit_edge(label, a.edge);
                 }
             }
-            Terminator::Return(values) => {
-                self.step_refund();
-                let xs = values
-                    .get(&self.body.pools.values)
-                    .unwrap()
-                    .iter()
-                    .map(|v| self.numeric(*v))
-                    .collect::<Vec<_>>();
-                if let Some(ok) = self.abi.ok {
-                    self.return_ok(ok);
-                } else if let Some(record) = self.abi.record {
-                    let fields = self.load_record(record, &Local::DEST.into());
-                    self.return_values(&fields);
-                } else {
-                    self.return_values(&xs);
-                }
-            }
+            Terminator::Return(values) => self.return_at(block, values),
             Terminator::Unreachable => self.effect(Operation::Unreachable),
             Terminator::Propagate => {
                 self.step_refund();

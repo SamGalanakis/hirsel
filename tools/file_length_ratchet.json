@@ -259,7 +259,9 @@
     "lines": 1233
   },
   "crates/hirsel-core-ir/src/ir.rs": {
-    "lines": 2873
+    "lines": 2877,
+    "raise_revision": 1,
+    "reason": "checkbox-red-1946 marks returnable park exits for native result lowering"
   },
   "crates/hirsel-core-ir/src/lib.rs": {
     "lines": 1145

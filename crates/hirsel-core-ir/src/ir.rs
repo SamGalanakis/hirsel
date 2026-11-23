@@ -2277,6 +2277,10 @@ pub struct Body {
     pub blocks: Vec<Block>,
     /// Parallel to `blocks`.
     pub terminators: Vec<Terminator>,
+    /// Returns to the dispatcher with the result destination still uninitialized.
+    /// Added by returnable lowering after the checked body is assembled.
+    #[serde(skip)]
+    pub parked_returns: std::collections::BTreeSet<BlockId>,
     pub insts: Vec<Inst>,
     /// Parallel to `insts`; None for generated code (no source line).
     pub inst_anchors: Vec<Option<Anchor>>,

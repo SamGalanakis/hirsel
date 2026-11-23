@@ -1160,6 +1160,22 @@ impl Build<'_> {
         self.n.blocks[id.index()].anchor = anchor;
         self.n.terminators[id.index()] = terminator;
     }
+
+    fn return_to_dispatcher(
+        &mut self,
+        block: BlockId,
+        continuation: AddressId,
+        site: ValueId,
+        dummies: &[ValueId],
+    ) {
+        self.emit(Inst::Store {
+            address: continuation,
+            value: site,
+        });
+        let values = PoolRange::push(&mut self.n.pools.values, dummies.iter().copied());
+        self.n.parked_returns.insert(block);
+        self.close(block, Terminator::Return(values), None);
+    }
     /// The body, its blocks' instructions in block order.
     fn finish(mut self) -> Body {
         for (id, insts) in std::mem::take(&mut self.done).into_iter().enumerate() {
@@ -1200,14 +1216,7 @@ fn build(old: &Body, s: &Shape, root: bool, results_ty: &[Ty], calls: &Calls) ->
         n: Body {
             callable_parameters: old.callable_parameters.clone(),
             values: old.values.clone(),
-            slots: vec![],
             addresses: old.addresses.clone(),
-            blocks: vec![],
-            terminators: vec![],
-            insts: vec![],
-            inst_anchors: vec![],
-            calls: vec![],
-            edges: vec![],
             pools: Pools {
                 values: vec![],
                 steps: old.pools.steps.clone(),
@@ -1215,6 +1224,7 @@ fn build(old: &Body, s: &Shape, root: bool, results_ty: &[Ty], calls: &Calls) ->
                 arms: vec![],
             },
             compact_roots: old.compact_roots.clone(),
+            ..Body::default()
         },
         cur: vec![],
         done: vec![],
@@ -1373,11 +1383,6 @@ fn build(old: &Body, s: &Shape, root: bool, results_ty: &[Ty], calls: &Calls) ->
         }
     };
     let sites: Vec<(usize, Site)> = s.sites.iter().map(|(&k, &v)| (k, v)).collect();
-    let number: HashMap<usize, u64> = sites
-        .iter()
-        .enumerate()
-        .map(|(i, (k, _))| (*k, i as u64 + 1))
-        .collect();
     let site_const: Vec<ValueId> = (0..sites.len())
         .map(|i| b.konst(u64_, i as u64 + 1))
         .collect();
@@ -1545,12 +1550,7 @@ fn build(old: &Body, s: &Shape, root: bool, results_ty: &[Ty], calls: &Calls) ->
                         None,
                     );
                     b.local.clear();
-                    b.emit(Inst::Store {
-                        address: own,
-                        value: site_const[number[&k] as usize - 1],
-                    });
-                    let ret = PoolRange::push(&mut b.n.pools.values, dummies.clone());
-                    b.close(gone, Terminator::Return(ret), None);
+                    b.return_to_dispatcher(gone, own, site_const[i], &dummies);
                     b.local.clear();
                     let args: Vec<Arg> = old_args
                         .iter()
@@ -1690,12 +1690,7 @@ fn build(old: &Body, s: &Shape, root: bool, results_ty: &[Ty], calls: &Calls) ->
                     None,
                 );
                 copy_kept(&mut b, k, true);
-                b.emit(Inst::Store {
-                    address: own,
-                    value: site_const[number[&k] as usize - 1],
-                });
-                let ret = PoolRange::push(&mut b.n.pools.values, dummies.clone());
-                b.close(park[i], Terminator::Return(ret), None);
+                b.return_to_dispatcher(park[i], own, site_const[i], &dummies);
                 current = post[i];
                 continue;
             }

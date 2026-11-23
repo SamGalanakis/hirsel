@@ -286,6 +286,9 @@ fn expand(
         anchor: body.blocks[block].anchor,
     });
     body.terminators.push(body.terminators[block].clone());
+    if body.parked_returns.remove(&BlockId(block as u32)) {
+        body.parked_returns.insert(continuation);
+    }
     let rename = Rename {
         values,
         slot: body.slots.len() as u32,
@@ -469,6 +472,9 @@ fn merge_blocks(body: &mut Body) {
             body.blocks[block].insts = PoolRange::new(start, body.insts.len() as u32 - start);
             body.blocks[block].anchor = body.blocks[target].anchor;
             body.terminators[block] = body.terminators[target].clone();
+            if body.parked_returns.remove(&BlockId(target as u32)) {
+                body.parked_returns.insert(BlockId(block as u32));
+            }
             body.blocks[target].insts = PoolRange::EMPTY;
             body.terminators[target] = Terminator::Unreachable;
             incoming[target] = 0;

@@ -349,6 +349,57 @@ fn lower_program_units(
 #[cfg(test)]
 mod tests {
     use crate::core;
+
+    #[test]
+    fn a_parked_return_supplies_registers_without_reading_its_destination() {
+        use hirsel_core_ir::{BlockId, FuncId, text};
+
+        let mut module = text::parse(
+            r#"core v1
+type t0 = own "core@1/core/Result[u64,u8]" | Ok { value: u64 } | Error { code: u8 }
+type t1 = own "Word" { value: u64 }
+sig g0 = () -> () dest t0
+sig g1 = () -> () dest t1
+inst n0 = app@1/main/outcome [] []
+inst n1 = app@1/main/record [] []
+fn f0 = n0 g0 {
+b0(v0: ptr):
+    return
+}
+fn f1 = n1 g1 {
+b0(v0: ptr):
+    return
+}
+"#,
+        )
+        .unwrap();
+        // This is the returnable-lowering contract at a park: the caller has a
+        // continuation to resume, and the callee has produced no result bytes.
+        for function in &mut module.functions {
+            function
+                .body
+                .as_mut()
+                .unwrap()
+                .parked_returns
+                .insert(BlockId(0));
+        }
+        let ir = core::emit_ir(&module).unwrap();
+        for (function, suffix, returned) in [
+            (FuncId(0), ".ok", "ret { i64, i8 } zeroinitializer"),
+            (FuncId(1), ".infallible", "ret i64 zeroinitializer"),
+        ] {
+            let name = format!("@{}{suffix}(", core::symbol(&module, function));
+            let body = ir
+                .split("define ")
+                .find(|body| body.lines().next().is_some_and(|line| line.contains(&name)))
+                .and_then(|body| body.split_once("\n}"))
+                .unwrap()
+                .0;
+            assert!(!body.contains("load "), "{body}");
+            assert!(body.contains(returned), "{body}");
+        }
+    }
+
     #[test]
     fn llvm_is_unmapped_until_first_object_and_loaded_once() {
         let maps = || std::fs::read_to_string("/proc/self/maps").unwrap();

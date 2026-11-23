@@ -28,11 +28,13 @@ record the allowance of the described launch.
 the launch runs ("Assembly records" below), or empty when the launcher names none. One
 executable can be the image of several records (two recipes that differ outside the image,
 or one recipe under two toolchains that give the same bytes), and records differ in what the
-host approved for them, so the record is part of the identity apart from the digest. The
-platform launcher passes the record it launches to every child of it; `hirsel run` and
-`hirsel build --manifest` pass the record they just assembled; an evaluator or embedded
-launch passes it explicitly or leaves it empty. A launch of a bare executable names none. The
-name is the launching principal's statement, as `n_place` is: it selects nothing and grants
+host approved for them, so the record is part of the identity apart from the digest. Only the
+platform launcher names one by default: it passes the record it launches to every child of it.
+`hirsel run`, `hirsel build --manifest`, evaluator, embedded and bare launches leave it empty,
+so a plain restart of the same executable outside the host still reopens its store. An
+operator who installs on a hosted store by hand passes `--hirsel-assembly`<!-- doc-ref: planned -->
+with the record the host should serve; without it the install names none and matches no host
+record. The name is the launching principal's statement, as `n_place` is: it selects nothing and grants
 nothing, and is compared only as part of `Describe`. A const-parameter mechanism was
 considered and left out: it is a separate language feature and is unnecessary
 for launch configuration. There is no compiler rule naming `runner@1/runner` to
@@ -184,7 +186,7 @@ ordinary value codec. Its type, `ReleaseManifest`, is declared with `Describe` a
   the exported entries in registration order. `n_place` is the allowance the
   child ran with. A hosted launch that selects another `--hirsel-n-place`<!-- doc-ref: external -->
   is a different release identity, and Welcome and the status route report it.
-  `assembly` is the record the build assembled.
+  `assembly` is empty.
 - `release` is the preview child's `release`, which it computes with
   `runner.release_digest`: SHA-256 over `u8 17 ‖ "hirsel.release.v1" ‖` the
   value codec's bytes of the registry's exported list. The driver never hashes
@@ -434,10 +436,9 @@ An Installed outcome also records NEW's assembly for `v` in the
 activation index, whatever activation the read reports. In the same transaction the host
 selects the store's current activation with the assembly whose `Describe` digest is the read's
 image, so a group never returns to `v` from a later activation. `Describe` names its assembly
-record, so at most one of OLD's and NEW's matches; when neither does, nothing is selected and
-the group is failing with that cause until an operator deploys or installs. A probe whose open
-does not prove the install serves only if this rule selects its assembly; otherwise the host
-stops it before accepting its `PlaceOpened`. Roots follow RUNNER-SPEC §14.3 "Roots". Any other
+record, so at most one of OLD's and NEW's matches, and a probe that opens always matches the
+record it opened; when neither matches, nothing is selected and the group is failing with that
+cause until an operator deploys or installs. Roots follow RUNNER-SPEC §14.3 "Roots". Any other
 answer (`Held`, a missing image, a failed read, an I/O failure) decides nothing: both roots stay, and the probe is retried under the
 ordinary backoff. Neither a timer nor a retry count decides a root.
 The platform host records the attempt as `Preparing` before its describe, preview and

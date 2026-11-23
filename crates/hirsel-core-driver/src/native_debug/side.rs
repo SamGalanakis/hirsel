@@ -14,13 +14,12 @@ struct Position {
 }
 
 struct FileIndex {
-    id: FileId,
     lines: Vec<usize>,
     // Cumulative excess UTF-8 bytes, indexed at each non-ASCII scalar's end.
     excess: Vec<(usize, usize)>,
 }
 impl FileIndex {
-    fn new(id: FileId, text: &str) -> Self {
+    fn new(text: &str) -> Self {
         let mut lines = vec![0];
         let mut excess = Vec::new();
         let mut total = 0;
@@ -32,26 +31,33 @@ impl FileIndex {
                 excess.push((at + c.len_utf8(), total));
             }
         }
-        Self { id, lines, excess }
+        Self { lines, excess }
     }
     fn excess(&self, byte: usize) -> usize {
         let n = self.excess.partition_point(|&(at, _)| at <= byte);
         n.checked_sub(1).map_or(0, |i| self.excess[i].1)
     }
-    fn position(&self, byte: usize) -> Position {
+    fn position(&self, byte: usize) -> (u64, u64) {
         let line = self.lines.partition_point(|&at| at <= byte) - 1;
         let start = self.lines[line];
-        Position {
-            file: self.id,
-            line: line as u64 + 1,
-            column: (byte - start - (self.excess(byte) - self.excess(start))) as u64 + 1,
-        }
+        (
+            line as u64 + 1,
+            (byte - start - (self.excess(byte) - self.excess(start))) as u64 + 1,
+        )
     }
+}
+
+/// A file some position names: its line-program entry, added on first use,
+/// and its annex points or, failing those, its line index once needed.
+struct File<'a> {
+    id: FileId,
+    points: Option<&'a [(u32, u32)]>,
+    index: Option<FileIndex>,
 }
 
 struct Sources<'a> {
     map: &'a SourceMap,
-    files: FxHashMap<u32, FileIndex>,
+    files: FxHashMap<u32, File<'a>>,
     release: FxHashMap<DefPath, Vec<Option<(ItemSource, u32)>>>,
 }
 impl<'a> Sources<'a> {
@@ -85,15 +91,28 @@ impl<'a> Sources<'a> {
         }
     }
 
+    /// The position of `location` in a product whose items are `items`;
+    /// `owners` remembers each item's map entry across the product's lookups.
     fn position(
         &mut self,
         items: &[DefPath],
+        owners: &mut [Option<Option<ItemSource>>],
         location: Option<NativeLocation>,
         lines: &mut LineProgram,
     ) -> Option<Position> {
         let location = location?;
-        let owner = &items[location.item as usize];
-        let (item, start) = self.resolve(owner, location.start)?;
+        let index = location.item as usize;
+        let map = self.map;
+        let (item, start) =
+            match *owners[index].get_or_insert_with(|| map.items.get(&items[index]).copied()) {
+                Some(item) => (item, location.start),
+                None => self
+                    .release
+                    .get(&items[index])?
+                    .get(location.start as usize)
+                    .copied()
+                    .flatten()?,
+            };
         self.position_at(item, start, lines)
     }
 
@@ -103,29 +122,33 @@ impl<'a> Sources<'a> {
         start: u32,
         lines: &mut LineProgram,
     ) -> Option<Position> {
-        let index = self.files.entry(item.file).or_insert_with(|| {
-            let source = &self.map.files[item.file as usize];
-            let id = lines.add_file(
+        let map = self.map;
+        let source = &map.files[item.file as usize];
+        let file = self.files.entry(item.file).or_insert_with(|| File {
+            id: lines.add_file(
                 LineString::String(source.path.as_bytes().to_vec()),
                 lines.default_directory(),
                 None,
-            );
-            FileIndex::new(id, &source.text)
+            ),
+            points: map.points.get(&source.path).map(Vec::as_slice),
+            index: None,
         });
         let offset = item.file_offset as usize + start as usize;
-        if let Some(points) = self
-            .map
-            .points
-            .get(&self.map.files[item.file as usize].path)
-        {
-            let &(line, column) = points.get(offset)?;
-            return Some(Position {
-                file: index.id,
-                line: u64::from(line),
-                column: u64::from(column),
-            });
-        }
-        Some(index.position(offset))
+        let (line, column) = match file.points {
+            Some(points) => {
+                let &(line, column) = points.get(offset)?;
+                (u64::from(line), u64::from(column))
+            }
+            None => file
+                .index
+                .get_or_insert_with(|| FileIndex::new(&source.text))
+                .position(offset),
+        };
+        Some(Position {
+            file: file.id,
+            line,
+            column,
+        })
     }
 }
 
@@ -393,11 +416,12 @@ fn unit<'a>(
                 addend: addend + r.begin as i64,
             }),
         };
+        let mut owners = vec![None; product.items.len()];
         let mut positions = FxHashMap::default();
         let mut position = |loc: Option<NativeLocation>, lines: &mut LineProgram| {
             *positions
                 .entry(loc)
-                .or_insert_with(|| sources.position(&product.items, loc, lines))
+                .or_insert_with(|| sources.position(&product.items, &mut owners, loc, lines))
         };
         for sequence in &product.sequences {
             let r = sequence.range;

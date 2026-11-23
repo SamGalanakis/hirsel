@@ -280,6 +280,7 @@ fn indexed_scalar_positions_match_the_source_map() {
         let position = sources
             .position(
                 &product.items,
+                &mut vec![None; product.items.len()],
                 Some(NativeLocation {
                     item: 0,
                     start: byte as u32,

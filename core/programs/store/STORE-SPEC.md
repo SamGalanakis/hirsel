@@ -3959,11 +3959,11 @@ Which slots of a snapshot are Hot is fixed when the snapshot is captured. No lat
 - log@1 (Directory) has no NVMe tier: its packs are already local files, and the RAM cache reads them directly.
 
 **Ranges and prefetch (astra #19, Fable F2, F18; Q1).** A miss names the target `PagePtr`, the parent's cache key and slot, and a direction: `Point`, `Forward` or `Backward`.
-- The pager reads the parent page it already holds and adds as hints the next `prefetch` siblings (default 8, proposed) in the direction. A `Point` miss on a leaf has no hints.
+- The pager reads the parent page it already holds and adds as hints the next `prefetch` siblings (default 8, proposed) in the direction. A `Point` miss has no hints.
 - It groups target and hints by pack into half-open byte ranges `[offset, offset + 16 + len)` within one object. It joins neighbours whose gap is ≤ 64 KiB (proposed) into one GET of at most 1 MiB (proposed). A frame larger than 1 MiB is one GET of exactly its range.
 - Each frame in a range is verified on its own by AP20's five checks.
 - A hint is never pinned and never counted against a call. A hint that fails, including a 404, is dropped without a witness and without an error.
-- Only the target's outcome reaches the call.
+- Only the target's outcome reaches the call. The pager inserts the hints and publishes the new `CacheDir` before it completes the target's waiters, so the rerun's attempt sees them.
 
 **Single flight.** Concurrent misses on one key share one GET. Each waiter re-verifies its own edge on completion.
 
@@ -4186,7 +4186,7 @@ pub fn drop_archive(mut db: Db, below: u64) -> Result[(), Error] waits // erase 
   - The CHECKPOINT entry's ARCHIVE frame names it. Kept CHECKPOINT entries form a chain of segments down from the head, so reading the archive never needs LIST.
 - **What reclaim skips.** For a pass with captured floor f:
   - **Rule 1** keeps an entry at position q < f when archive_drop ≤ q, archive_since ≤ q < archive_until, and a segment reachable from the head names its (position, epoch, digest). Every other entry below f goes as before, including off-chain and genesis debris.
-  - Rule 1's LIST starts after `e-<pf>`, where pf is the floor in the MARK of the oldest retained CHECKPOINT. It reads the segments from that checkpoint down to pf, at most `retain` hops. Listing stays bounded by `retain` checkpoint intervals, however large the archive is.
+  - Rule 1's LIST starts after the bare prefix `e-<pf>`, so position pf itself is listed, where pf is the floor in the MARK of the oldest retained CHECKPOINT. It reads the segments from that checkpoint down to pf, at most `retain` hops. Listing stays bounded by `retain` checkpoint intervals, however large the archive is.
   - **Rule 2** is unchanged: off-chain entries above the floor are erased.
   - **Rules 3–5** are unchanged for MANIFESTs, chunks, packs and uploads. A segment is treated like a MANIFEST: it is live while an ARCHIVE frame of a kept or live entry names it, and otherwise erased by rule 3 or 4.
 - **Recovery and followers are unaffected.** §12.3's fetch-hint LIST starts after `e-<c>` with c ≥ floor, so kept entries below the floor are never listed or read by recovery.
@@ -4194,8 +4194,9 @@ pub fn drop_archive(mut db: Db, below: u64) -> Result[(), Error] waits // erase 
 - **Deleting the archive.** `drop_archive(db, below)` raises `archive_drop` to `below` at the next cut, monotonically.
   - Each later pass erases kept entries and segments in [archive_dropped, archive_drop), at most one LIST page (1,000 keys) per pass.
   - The next cut records the progress in `archive_dropped`. A crash repeats deletes, which is harmless because a name never holds two contents.
+  - A segment row below `archive_drop` names an entry that may be gone, and a reader of the archive treats it as erased.
   - An operator may also delete `e-` and `a-` names below `archive_drop` out of band. Names at or above it must not be touched.
-- **Stragglers.** A fenced holder's late PUT of an entry below an already-passed range re-creates an orphan that no later rule-1 listing reaches. It stays until a `drop_archive` range covers it, and it is never read.
+- **Stragglers.** A fenced holder's late PUT of an entry below an already-passed range re-creates an orphan that no later rule-1 listing reaches. It stays until a `drop_archive` range covers it, and it is never read. The same holds for orphans below pf when more than `retain` − 1 cuts pass without a reclaim pass. Re-enabling archival after turning it off never erases what an earlier interval kept, because rule 1 never lists below pf.
 
 ### 13.10 What M3 refuses (Q4)
 

@@ -397,7 +397,9 @@ command, ordinary wake, second deploy or retirement may change the group's roots
 decides it only by what the store reports under its `LOCK`, through a recovery probe. The probe is a
 serving launch with no predecessor at a fresh generation. Its pair is saved in the
 pending record as probe intent, never as the group's current pair. The first probe opens NEW's
-assembly at the attempt's activation `v`. An open of NEW at `v` proves the install: the host
+assembly at the attempt's activation `v`. An open of NEW at `v` that reports `releases[v].prepared`
+equal to the attempt's prepared digest proves the install (RUNNER-SPEC §14.3; an open at `v`
+with another `prepared` proves this attempt did not install): the host
 makes NEW the current assembly and activation, keeps OLD's as retained, and records the
 deploy `Installed`, in one durable transaction, and the probe goes on serving. A refusal
 `PlaceCurrent` naming OLD's recorded activation proves nothing yet: it selects OLD's pair, and
@@ -412,7 +414,8 @@ loss it is aborted: OLD, if it still runs, is sent `HostAbort`, and the failure 
 OLD's answer or end, never before (RUNNER-SPEC §14.3 "Preparing"). A drift retry records
 the original attempt as well as the retry. Its abort releases either pause owner, including
 when the host restarted before OLD took the retry export. An open that proves NEW's
-install must also report the release that the preview reported for NEW and the store ID
+install must also report the release that the preview reported for NEW, the release row's
+`prepared` digest, and the store ID
 recorded for the group. The first accepted `PlaceOpened` binds the group incarnation to
 its store ID in the catalog before the host lets the runner serve. A first open at genesis
 also records the activation the runner installed, replacing the empty-store selection 0.

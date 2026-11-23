@@ -100,7 +100,7 @@ pub fn law_release_proposal_settles(parent: Dir, clock: Clock, random: Random, t
     let again = match settling(mut db2, a, clone(id), Rejected("late")) { Ignored => true, _ => false }
     let h = result.unwrap(store.with_schema(db2, code.describe(harness.handles)))
     let shown = match result.unwrap(store.get(store.snapshot(db2), store.shape(h.entries), 2u64)) {
-        Some(ToolResult(c, Returned(Inline(b)))) => c == "c1" && b == string.into_bytes("release 7"),
+        Some(ToolResult(c, Returned(Inline(b)), _)) => c == "c1" && b == string.into_bytes("release 7"),
         _ => false,
     }
     let none_left = list.len(result.unwrap(release.pending(store.snapshot(db2), t2))) == 0u64

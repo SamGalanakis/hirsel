@@ -735,7 +735,8 @@ fn present[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut s:
         if let Returned(_) = outcome {
             progressed = true
         }
-        let _ = append(mut tx, h, a, mut s, ToolResult(clone(c.id), take outcome))?
+        let shown = presented(a, c, outcome)
+        let _ = append(mut tx, h, a, mut s, ToolResult(clone(c.id), take outcome, take shown))?
     }
     kept(store.put(mut tx, h.session, 0u64, s))?
     run.round = round + 1u64

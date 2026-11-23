@@ -17,27 +17,6 @@ pub fn bounds() -> Bounds {
     Bounds(event_bytes: 1048576u64, body_bytes: 8388608u64, text_bytes: 262144u64, calls: 32u64, args_bytes: 65536u64)
 }
 
-// ---- how outcomes are worded for the model ----
-
-// The one place a tool outcome becomes model-visible text, with whether the
-// provider should see it as an error.
-pub fn worded(o: harness.Outcome) -> (String, bool) {
-    match o {
-        Returned(Inline(b)) => match string.from_utf8(clone(b)) {
-            Ok(take s) => (take s, false),
-            Error(_) => ("the tool returned bytes that are not text", true),
-        },
-        Returned(Blob(r)) => match r.excerpt {
-            Some(text) => (string.from(text), false),
-            None => (cat("the tool returned a stored object of type ", r.mime), false),
-        },
-        Failed(why) => (cat("the tool failed: ", why), true),
-        Denied(why) => (cat("the call was not allowed: ", why), true),
-        InDoubt => ("the call was interrupted and may or may not have taken effect; check before repeating it", true),
-        Gone => ("this tool is no longer available", true),
-    }
-}
-
 fn cat(a: String, b: String) -> String {
     let mut out = string.from(a)
     string.push(mut out, b)
@@ -167,7 +146,7 @@ fn anthropic_body(w: std.json.Writer, mut items: std.json.Items, m: Model, req: 
         let mut i = 0u64
         while i < n {
             match req.messages[i] {
-                ToolResult(_, _) => {
+                ToolResult(_, _, _) => {
                     // Every result for one assistant turn goes in one user message.
                     std.json.element(mw, mut msgs)
                     std.json.object(mw, msgs.depth, fn(ow, mut o) {
@@ -175,8 +154,9 @@ fn anthropic_body(w: std.json.Writer, mut items: std.json.Items, m: Model, req: 
                         std.json.write_member(ow, mut o, "content")
                         std.json.array(ow, o.depth, fn(cw, mut cs) {
                             while i < n {
-                                let ToolResult(id, outcome) = view req.messages[i] else { break }
-                                let (text, is_error) = worded(outcome)
+                                let ToolResult(id, _, shown) = view req.messages[i] else { break }
+                                let text = view shown.text
+                                let is_error = shown.error
                                 std.json.element(cw, mut cs)
                                 std.json.object(cw, cs.depth, fn(rw, mut r) {
                                     member_string(rw, mut r, "type", "tool_result")
@@ -300,8 +280,8 @@ fn openai_body(w: std.json.Writer, mut items: std.json.Items, m: Model, req: har
                         }
                     })
                 },
-                ToolResult(id, outcome) => {
-                    let (text, _) = worded(outcome)
+                ToolResult(id, _, shown) => {
+                    let text = view shown.text
                     std.json.element(mw, mut msgs)
                     std.json.object(mw, msgs.depth, fn(ow, mut o) {
                         member_string(ow, mut o, "role", "tool")

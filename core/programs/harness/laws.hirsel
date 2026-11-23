@@ -83,7 +83,7 @@ fn make_grants(s: Services, take ctx: runner.TriggerContext) -> Result[Grants, C
 
 fn scripted_model(g: Grants, take r: harness.Request, mut draft: Option[harness.preview.Source]) -> Result[harness.Answer, harness.ModelFault] waits {
     let mut after_tool = false
-    for e in r.messages { if let ToolResult(_, _) = e { after_tool = true } }
+    for e in r.messages { if let ToolResult(_, _, _) = e { after_tool = true } }
     let (reply, replied): (Sender[harness.Answer], Receiver[harness.Answer]) = channel.new(1u64)
     if let Error(_) = channel.send(g.model, Ask(after_tool, take reply)) { return Error(Rejected("scripted model unavailable")) }
     match channel.receive(replied) { Ok(take a) => Ok(take a), Error(_) => Error(Rejected("scripted model unavailable")) }
@@ -193,7 +193,7 @@ fn tool_ran(s: Services) -> u64 waits {
 
 fn is_user(e: Option[harness.Entry]) -> bool { match e { Some(User(_)) => true, _ => false } }
 fn asks_tool(e: Option[harness.Entry]) -> bool { match e { Some(Assistant(a)) => list.len(a.calls) == 1u64, _ => false } }
-fn doubted(e: Option[harness.Entry]) -> bool { match e { Some(ToolResult(id, InDoubt)) => id == "c1", _ => false } }
+fn doubted(e: Option[harness.Entry]) -> bool { match e { Some(ToolResult(id, InDoubt, _)) => id == "c1", _ => false } }
 // The first request's baseline: no sections, and the one tool offered.
 fn offers_bump(e: Option[harness.Entry]) -> bool {
     match e {
@@ -345,11 +345,11 @@ fn parent_log() -> List[harness.Entry] {
     let mut log: List[harness.Entry] = list.new()
     list.push(mut log, User("one"))
     list.push(mut log, answer_of("", take one))
-    list.push(mut log, ToolResult("c1", Returned(Inline(string.into_bytes("1")))))
+    list.push(mut log, ToolResult("c1", Returned(Inline(string.into_bytes("1"))), harness.worded(Returned(Inline(string.into_bytes("1"))))))
     list.push(mut log, answer_of("first", list.new()))
     list.push(mut log, User("two"))
     list.push(mut log, answer_of("", take two))
-    list.push(mut log, ToolResult("c2", Returned(Inline(string.into_bytes("2")))))
+    list.push(mut log, ToolResult("c2", Returned(Inline(string.into_bytes("2"))), harness.worded(Returned(Inline(string.into_bytes("2"))))))
     take log
 }
 
@@ -385,7 +385,7 @@ fn line_of(e: harness.Entry) -> Option[harness.View] {
     match e {
         User(t) => Some(Line("user", clone(t))),
         Assistant(a) => Some(Line("assistant", clone(a.text))),
-        ToolResult(id, _) => Some(Line("tool", clone(id))),
+        ToolResult(id, _, _) => Some(Line("tool", clone(id))),
         _ => None,
     }
 }
@@ -968,7 +968,7 @@ pub fn law_parked_call_resumes_once(parent: Dir, clock: Clock, random: Random, t
     let snap = store.snapshot(db)
     let once = match result.unwrap(store.get(snap, store.shape(h.views), 4000u64)) { Some(Status(n)) => n == "x", _ => false }
     let shown = match result.unwrap(store.get(snap, store.shape(h.entries), 2u64)) {
-        Some(ToolResult(id, Returned(Inline(b)))) => id == "c1" && b == string.into_bytes("woke"),
+        Some(ToolResult(id, Returned(Inline(b)), _)) => id == "c1" && b == string.into_bytes("woke"),
         _ => false,
     }
     let run = option.unwrap(result.unwrap(store.get(snap, store.shape(h.runs), 0u64)))
@@ -1287,9 +1287,9 @@ fn stored_blob(dir: Dir, clock: Clock, random: Random, tasks: Tasks, cut: bool) 
     if journal_bytes == 0u64 || journal_bytes >= BLOB_SIZE { fail("J1: journal byte count is outside the bound") }
     result.unwrap(store.close(take db))
     match take entry {
-        Some(ToolResult(id, InDoubt)) if cut && id == "c1" => None,
-        Some(ToolResult(id, Returned(Blob(take reference)))) if !cut && id == "c1" => Some(take reference),
-        Some(ToolResult(_, Failed(take why))) => fail(take why),
+        Some(ToolResult(id, InDoubt, _)) if cut && id == "c1" => None,
+        Some(ToolResult(id, Returned(Blob(take reference)), _)) if !cut && id == "c1" => Some(take reference),
+        Some(ToolResult(_, Failed(take why), _)) => fail(take why),
         _ => fail("blob: wrong outcome in recovered journal"),
     }
 }
@@ -1422,7 +1422,7 @@ fn tally(snap: store.Snapshot, h: harness.Handles, n: u64) -> Tally {
                 t.answers += 1u64
                 t.calls += list.len(a.calls)
             },
-            Some(ToolResult(id, outcome)) => {
+            Some(ToolResult(id, outcome, _)) => {
                 t.results += 1u64
                 let expected = if t.results == 1u64 { "c1" } else { "c2" }
                 if id != expected || t.answers != 1u64 { t.ordered = false }
@@ -1688,7 +1688,7 @@ fn race_case(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, 
     let mut said = string.new()
     for pos in 0u64..session.next_pos {
         match result.unwrap(store.get(snap, store.shape(h.entries), pos)) {
-            Some(ToolResult(_, o)) => { outcome = Some(clone(o)) },
+            Some(ToolResult(_, o, _)) => { outcome = Some(clone(o)) },
             Some(Assistant(a)) => { said = clone(a.text) },
             _ => (),
         }

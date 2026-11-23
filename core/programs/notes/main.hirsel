@@ -163,7 +163,7 @@ fn confirm_delete(tx: store.Tx, ask: harness.Ask) -> harness.Verdict {
 
 // Counts tool results in the transaction that appends each one.
 fn tally(mut tx: store.Tx, at: u64, e: harness.Entry) -> Result[(), harness.Fault] {
-    let ToolResult(_, _) = view e else {
+    let ToolResult(_, _, _) = view e else {
         return Ok(())
     }
     let Ok(t) = tables(store.tx_schema(tx)) else {
@@ -281,7 +281,7 @@ fn call(take id: String, take name: String, take args: String) -> harness.Call {
 
 fn returned(r: harness.Request, id: String) -> String {
     for e in r.messages {
-        if let ToolResult(at, Returned(Inline(b))) = e {
+        if let ToolResult(at, Returned(Inline(b)), _) = e {
             if at == id {
                 if let Ok(take s) = string.from_utf8(clone(b)) {
                     return take s
@@ -299,7 +299,7 @@ fn scripted_model(g: Grants, take r: harness.Request) -> Result[harness.Answer, 
     for e in r.messages {
         match e {
             User(text) => { prompt = string.from(text) },
-            ToolResult(_, _) => { results += 1u64 },
+            ToolResult(_, _, _) => { results += 1u64 },
             _ => (),
         }
     }
@@ -353,7 +353,7 @@ fn scripted_release(r: harness.Request) -> Option[(bool, Option[String])] {
                 written = false;
                 result = None
             },
-            ToolResult(id, outcome) => {
+            ToolResult(id, outcome, _) => {
                 if id == "write" {
                     if let Returned(_) = outcome { written = true }
                 }
@@ -733,8 +733,8 @@ fn show_entry(out: Stdout, e: harness.Entry) -> () waits {
                 emit(out, take s, args_text(c.args))
             }
         },
-        ToolResult(id, o) => {
-            let (words, _) = harness.provider.worded(o)
+        ToolResult(id, _, shown) => {
+            let words = view shown.text
             let mut s = string.from("  result ")
             string.push(mut s, id)
             string.push(mut s, ": ")

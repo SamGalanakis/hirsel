@@ -120,6 +120,11 @@ agent and the wiring:
   folds a fresh baseline, and a repeated open of the same base is a no-op.
   `Agent.prompt_view` seals up to 8 omit ranges into the cutoff for one
   request. `Command::Compact(seed)` opens a frame at the turn boundary.
+- A tool result entry is `ToolResult(id, outcome, presented)`. `present`
+  words each settled outcome once, with `Agent.presenter` (bounded like a
+  gate) or the standard `harness.worded`, and records it in the same
+  transaction. Providers send the recorded text, so resume, resend, forks and
+  releases never change prompt bytes.
 - `Limits.no_progress` (default `Bounded(3)`) stops a run after that many
   consecutive tool rounds with no `Returned` outcome. `Agent.charge` bounds
   model resends: `RequireGuarantee` seals the model effect `Once`,
@@ -327,8 +332,9 @@ each response chunk to `provider.feed` and asks `provider.answer` at the end.
   `is_error` set for failures. Anthropic models configured with `Ephemeral`
   add a cache breakpoint after the system prompt, the final tool definition
   and the final message block. OpenAI gets a system message, assistant
-  arguments as a JSON string, and one `tool` message per result. `worded` is
-  the one place a tool outcome becomes text the model reads. Stored UTF-8
+  arguments as a JSON string, and one `tool` message per result. Both send the
+  recorded `Presented` text and error flag; the provider never words an
+  outcome. Stored UTF-8
   tool results carry a head-and-tail excerpt of at most 4,096 bytes.
 - **Checked fragments.** Tool input schemas and call arguments are raw JSON
   embedded in the body, so `body` checks each one before writing.

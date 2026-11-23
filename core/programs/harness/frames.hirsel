@@ -13,7 +13,7 @@ fn open_frame(mut tx: store.Tx, h: Handles, mut s: Session, take o: FrameOpen) -
         return Ok(false)
     }
     if o.base < s.next_pos {
-        if let Some(ToolResult(_, _)) = kept(store.fetch(tx, store.shape(h.entries), o.base))? {
+        if let Some(ToolResult(_, _, _)) = kept(store.fetch(tx, store.shape(h.entries), o.base))? {
             return Ok(false)
         }
     }
@@ -53,7 +53,7 @@ fn pressed[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], mut s: Session, r
 
 fn is_result(tx: store.Tx, h: Handles, p: u64) -> Result[bool, Refused] {
     match kept(store.fetch(tx, store.shape(h.entries), p))? {
-        Some(ToolResult(_, _)) => Ok(true),
+        Some(ToolResult(_, _, _)) => Ok(true),
         _ => Ok(false),
     }
 }

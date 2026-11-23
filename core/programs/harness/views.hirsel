@@ -5,7 +5,7 @@ fn line(e: Entry) -> Option[View] {
         User(text) => Some(Line("user", clone(text))),
         Inform(text) => Some(Line("info", clone(text))),
         Assistant(answer) => Some(Line("assistant", clone(answer.text))),
-        ToolResult(id, _) => Some(Line("tool", clone(id))),
+        ToolResult(id, _, _) => Some(Line("tool", clone(id))),
         _ => None,
     }
 }

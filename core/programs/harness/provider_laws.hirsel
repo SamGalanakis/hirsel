@@ -133,8 +133,8 @@ fn request() -> harness.Request {
     let mut messages: List[harness.Entry] = list.new()
     list.push(mut messages, User("weather and time in Paris?"))
     list.push(mut messages, Assistant(harness.Answer(text: "", calls: take calls, stop: "tool_use", usage: harness.Usage(input: 0u64, output: 0u64, cache_read: 0u64, cache_write: 0u64, reasoning: 0u64))))
-    list.push(mut messages, ToolResult("t1", Returned(Inline(bytes_of("sunny")))))
-    list.push(mut messages, ToolResult("t2", Failed("clock offline")))
+    list.push(mut messages, ToolResult("t1", Returned(Inline(bytes_of("sunny"))), harness.worded(Returned(Inline(bytes_of("sunny"))))))
+    list.push(mut messages, ToolResult("t2", Failed("clock offline"), harness.worded(Failed("clock offline"))))
     let mut tools: List[harness.ToolDef] = list.new()
     list.push(mut tools, harness.ToolDef(name: "get_weather", about: "weather", input: "{\"type\":\"object\"}", rev: 1u64, catalog: None))
     let mut system: List[String] = list.new()
@@ -554,7 +554,8 @@ fn law_blob_excerpt() -> bool {
     if harness.truncate_middle(text, 26u64) != want { return false }
     let ref = harness.BlobRef(digest: list.new(), len: 34u64, mime: "text/plain", excerpt: Some(clone(excerpt)))
     let mut req = simple_request()
-    list.push(mut req.messages, ToolResult("c", Returned(Blob(take ref))))
+    let shown = harness.worded(Returned(Blob(clone(ref))))
+    list.push(mut req.messages, ToolResult("c", Returned(Blob(take ref)), take shown))
     let m = provider.Model(dialect: OpenAi, name: "m", max_tokens: 64u64, cache_control: Off)
     let Ok(body) = provider.body(m, req) else { return false }
     region r {

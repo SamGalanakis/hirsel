@@ -60,7 +60,15 @@ pub type Patch: codec + send {
     tools: Option[List[ToolDef]]
 }
 
-pub type Entry: codec + send = User(String) | Inform(String) | Assistant(Answer) | ToolResult(String, Outcome) | System(Patch) | Note(String, Bytes)
+// What the model is shown for a tool outcome, recorded with the result entry
+// (ADR 0120): resume, resend, forks and releases read it and never word the
+// outcome again.
+pub type Presented: codec + send {
+    text: String,
+    error: bool
+}
+
+pub type Entry: codec + send = User(String) | Inform(String) | Assistant(Answer) | ToolResult(String, Outcome, Presented) | System(Patch) | Note(String, Bytes)
 
 // ---- the harness tables ----
 pub type Narrow: codec + send = All | Only(List[String])
@@ -527,6 +535,10 @@ pub type Agent[G: send]: send {
     // ignore it.
     model: StaticFn[fn(G, take Request, mut Option[preview.Source]) -> Result[Answer, ModelFault] waits],
     charge: ChargeSafety,
+    // Words a settled outcome for the model, once, in the transaction that
+    // appends the result. Bounded like a gate; absent, failing, overrunning or
+    // oversized, the standard `worded` text is recorded instead.
+    presenter: Option[StaticFn[fn(Call, Outcome) -> Presented]],
     // Asked once per prepare, read-only and bounded like a gate. An invalid
     // open, a failure or an overrun counts as Continue.
     pressure: Option[StaticFn[fn(store.Tx, Pressure) -> Pressed]],
@@ -543,7 +555,7 @@ pub type Agent[G: send]: send {
 }
 
 pub fn agent[G: send](take name: String, take route: String, model: StaticFn[fn(G, take Request, mut Option[preview.Source]) -> Result[Answer, ModelFault] waits]) -> Agent[G] {
-    Agent(name: take name, route: take route, model: model, charge: RequireGuarantee, pressure: None, prompt_view: None, store_result: None, tools: list.new(), mcp_peer: None, gates: list.new(), sections: list.new(), reactions: list.new(), limits: Limits(rounds: 8u64, calls: 8u64, model_ms: 120000u64, tool_ms: 60000u64, model_reserve: 4096u64,
+    Agent(name: take name, route: take route, model: model, charge: RequireGuarantee, presenter: None, pressure: None, prompt_view: None, store_result: None, tools: list.new(), mcp_peer: None, gates: list.new(), sections: list.new(), reactions: list.new(), limits: Limits(rounds: 8u64, calls: 8u64, model_ms: 120000u64, tool_ms: 60000u64, model_reserve: 4096u64,
     // Gates and sections read rows; opening a table alone takes over
     // 10,000 steps.
     inside_bytes: 65536u64, inside_steps: 1000000u64, gate_bytes: 16384u64, gate_steps: 100000u64, section_bytes: 16384u64, section_steps: 100000u64, hold_ms: 86400000u64, ingress: 16u64, no_progress: Bounded(3u64)))
@@ -654,7 +666,7 @@ pub fn export(snap: store.Snapshot, h: Handles, upto: u64) -> Result[Prefix, Ref
                     list.push(mut open, clone(c.id))
                 }
             },
-            ToolResult(id, _) => {
+            ToolResult(id, _, _) => {
                 let mut rest: List[String] = list.new()
                 for o in open {
                     if o != id {

@@ -79,7 +79,7 @@ fn scripted_model(g: Grants, take r: harness.Request, mut sink: Option[harness.p
     let mut tool = "bump"
     for e in r.messages {
         match e {
-            ToolResult(_, _) => return Ok(finished()),
+            ToolResult(_, _, _) => return Ok(finished()),
             User(text) => if text == "tally it" {
                 tool = "tally"
             } else if text == "delegate it" {
@@ -321,7 +321,7 @@ fn log_of(take tool: String, take outcome: harness.Outcome) -> List[Bytes] {
     list.push(mut entries_want, User(take said))
     list.push(mut entries_want, System(harness.Patch(baseline: true, changes: list.new(), tools: Some(take defs))))
     list.push(mut entries_want, Assistant(asking(take tool)))
-    list.push(mut entries_want, ToolResult("c1", take outcome))
+    list.push(mut entries_want, ToolResult("c1", clone(outcome), harness.worded(outcome)))
     list.push(mut entries_want, Assistant(finished()))
     let mut log: List[Bytes] = list.new()
     for e in entries_want {

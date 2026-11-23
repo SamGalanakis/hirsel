@@ -90,7 +90,6 @@ macro_rules! operations {
 }
 
 operations! {
-
     ("bytebuf", "append_inline", Lane::Value, "A", "http-b1-1204", false),
     ("bytebuf", "freeze", Lane::Value, "A", "http-b1-1204", false),
     ("bytebuf", "as_bytes", Lane::Value, "A", "http-b1-1204", false),
@@ -147,6 +146,7 @@ operations! {
     ("char", "to_u32", Lane::Numeric, "A", "core-check-index-912", false),
     ("core", "fail", Lane::Language, "A", "core-check-895", false),
     ("core", "replace", Lane::Value, "A", "core-check-calls-910", false),
+    ("core", "site_word", Lane::Value, "A", "property-corpus", false),
     ("core", "clone", Lane::Language, "A", "core-check-895", false),
     ("core", "clone_in", Lane::Language, "A", "core-check-895", false),
     ("core", "build_in", Lane::Language, "A", "core-check-895", false),

@@ -2596,7 +2596,8 @@ fn provider_samples_match_the_hand_oracle_and_every_closed_row_emits() {
             .unwrap()
             .verify()
             .unwrap();
-        let storage = if matches!(op, HostOp::Listen | HostOp::Accept) {
+        // HirselCoreSpawnOutcome is a 32-byte HirselCoreHostOutcome and three u64 pipes.
+        let storage = if matches!(op, HostOp::Listen | HostOp::Accept | HostOp::ExecSpawn) {
             "sret([56 x i8])"
         } else if op == HostOp::TlsConnect {
             "sret([64 x i8])"

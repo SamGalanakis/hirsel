@@ -34,12 +34,12 @@
     "lines": 1056
   },
   "core/programs/store/platform.hirsel": {
-    "lines": 3967,
-    "reason": "h-release-1895"
+    "lines": 4051,
+    "reason": "store-sync-1906"
   },
   "core/programs/store/platform_laws.hirsel": {
-    "lines": 2019,
-    "reason": "h-release-1895"
+    "lines": 2020,
+    "reason": "store-sync-1906"
   },
   "core/programs/store/runner.hirsel": {
     "lines": 10060

@@ -1421,7 +1421,8 @@ fn seed_clean(mut r: Rig, n: u64, due: u64) waits {
                 Ok(())
             })
         }
-        let _ = must(decided(mut r.h.db, take made), "seed")
+        let _ = must(decided(mut r.h, take made), "seed")
+        must(synced(mut r.h), "seed sync")
         done = upto
     }
 }

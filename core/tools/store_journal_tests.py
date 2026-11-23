@@ -148,6 +148,14 @@ def main():
                                        manifest, step_work, engine, entry='store@1/steps/journal_steps_main',
                                        scenarios=(), environment=env, count_only=('poison-segment', 'steps-park'))
                 rows.append(dict(engine=engine, passed=True, step_cuts=step_cuts))
+                # A platform host turn: answered implies durable at every cut, and a
+                # failed sync answers nothing and leaves no decision after restart.
+                platform_work = work / 'platform'
+                platform_work.mkdir(exist_ok=True)
+                platform_cuts = run_crashes(root, args.compiler, args.runtime, args.bridge, args.cc,
+                                           manifest, platform_work, engine, entry='store@1/platform_crash/platform_crash_main',
+                                           scenarios=('platform-turn',), environment=env, count_only=('poison-segment',))
+                rows.append(dict(engine=engine, passed=True, platform_cuts=platform_cuts))
             except RuntimeError as error:
                 rows.append(dict(engine=engine, passed=False, provider_failure=str(error)))
         if args.report:

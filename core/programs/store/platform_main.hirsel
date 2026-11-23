@@ -367,6 +367,9 @@ pub fn main(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, argv: Args) -> Re
         for req in answer(mut h, mut conns) {
             sent = sent && send_request(mut w, req)
         }
+        if platform.sync_failed(h) {
+            break
+        }
     }
     platform.stop(take driving)
     let _ = task.cancel_join(take collecting)

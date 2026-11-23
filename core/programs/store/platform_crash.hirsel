@@ -1,0 +1,109 @@
+// Module platform_crash (package store): the platform host's turn durability over the W2
+// crash provider (core/tools/store_crash.c), whose restart keeps only synced bytes. A turn's
+// decisions become durable with one sync before any request the turn decided leaves the host.
+//
+// init: the catalog holds group "a". write: after ARM, one turn adds group "b"; the witness
+// prints DONE when the turn returns its requests. read: "a" survives; "b" survives whenever
+// the turn answered, and a turn whose sync failed (poison-segment) answers nothing and leaves
+// no decision after the restart.
+
+fn crash_options() -> store.Options {
+    let mut options = store.defaults()
+    options.resident_limit = 1048576
+    options.pack_bytes = 512
+    options.group_bytes = 1048576
+    options
+}
+
+fn config() -> platform.Config {
+    platform.Config(max_places: 4u64, idle_ms: 1000u64)
+}
+
+fn must[T](take r: Result[T, platform.Refused], take what: String) -> T {
+    match take r {
+        Ok(take v) => take v,
+        Error(_) => fail(take what)
+    }
+}
+
+fn group(name: String) -> platform.NewGroup {
+    let mut image: Bytes = list.with_capacity(32u64)
+    list.fill(mut image, 32u64, 7u8)
+    let bindings = launcher.Bindings(store: string.new(), dirs: list.new(), net: list.new())
+    let limits = launcher.Limits(memory: None, cpu: None, pids: None)
+    platform.NewGroup(name: string.from(name), tenant: "t", workdir: string.from(name), author: Trusted, label: Uncontained, listen: "127.0.0.1:0", bindings: take bindings, limits: limits, assembly: take image, activation: 1u64, args: list.new(), record: None)
+}
+
+fn has(h: platform.Host, name: String) -> bool {
+    for g in platform.group_names(h) {
+        if g == name {
+            return true
+        }
+    }
+    false
+}
+
+// A cut may land anywhere in the write phase; every later step then fails, and the phase
+// ends without answering.
+fn crash_write(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, poisoned: bool) waits {
+    let Ok(take db) = store.open(tasks, d, c, r, crash_options()) else {
+        return
+    }
+    let Ok((take opened, _)) = platform.open(take db, config()) else {
+        return
+    }
+    let mut h = take opened
+    result.unwrap(stdout.write(out, "ARM"))
+    let added = platform.add_group(mut h, group("b"))
+    let answered = match added {
+        Ok(reqs) => list.len(reqs) > 0u64,
+        Error(_) => false,
+    }
+    if poisoned {
+        if answered {
+            fail("a turn whose sync failed answered")
+        }
+        if !platform.sync_failed(h) {
+            fail("a failed sync did not fail the host")
+        }
+        result.unwrap(stdout.write(out, "DONE"))
+    } else if answered {
+        result.unwrap(stdout.write(out, "DONE"))
+    }
+    let _ = store.close(platform.close(take h))
+}
+
+pub fn platform_crash_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Stdout) -> Result[(), Exit] waits {
+    let phase = option.unwrap(args.get(argv, 0))
+    let scenario = option.unwrap(args.get(argv, 1))
+    let expected = option.unwrap(args.get(argv, 2))
+    let poisoned = scenario == "poison-segment"
+    if phase == "init" {
+        let db = result.unwrap(store.open(tasks, d, c, r, crash_options()))
+        let (take opened, _) = must(platform.open(take db, config()), "init open")
+        let mut h = take opened
+        let _ = must(platform.add_group(mut h, group("a")), "init group")
+        result.unwrap(store.close(platform.close(take h)))
+        return Ok(())
+    }
+    if phase == "write" {
+        crash_write(d, c, r, tasks, out, poisoned)
+        return Ok(())
+    }
+    let mut options = crash_options()
+    options.create = false
+    let db = result.unwrap(store.open(tasks, d, c, r, options))
+    let (take h, _) = must(platform.open(take db, config()), "restart open")
+    if !has(h, "a") {
+        fail("the init turn's group was lost")
+    }
+    let b = has(h, "b")
+    if poisoned && b {
+        fail("a turn whose sync failed left its decision")
+    }
+    if !poisoned && expected == "new" && !b {
+        fail("an answered turn's decision was lost")
+    }
+    result.unwrap(store.close(platform.close(take h)))
+    Ok(())
+}

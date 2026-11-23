@@ -335,6 +335,10 @@ pub opaque type Host {
     // Requests decided where no request list is at hand (a failed registration's Close and
     // Release), sent after the input that decided them.
     later: List[launcher.Request],
+    // The last decision of this turn, durable before anything the turn decided leaves;
+    // and whether a sync failed, after which nothing leaves.
+    unsynced: Option[store.Ticket],
+    failed: bool,
 }
 
 const READY_RESET_NS: u64 = 300000000000u64
@@ -423,17 +427,56 @@ fn st[T](take r: Result[T, store.Error]) -> Result[T, Refused] {
     }
 }
 
-// Commits a decision and waits until it is durable; only then may the caller act on it.
-fn decided[R](mut db: store.Db, take attempted: Result[store.Outcome[R, Refused], store.Error]) -> Result[R, Refused] waits {
+// Commits a decision. The caller may act on it within the turn; the turn's end makes it
+// durable before any request or answer it decided leaves the host.
+fn decided[R](mut h: Host, take attempted: Result[store.Outcome[R, Refused], store.Error]) -> Result[R, Refused] {
     match take attempted {
         Ok(Committed(store.Done(value: take value, ticket: ticket, ..))) => {
-            st(store.durable(mut db, ticket))?
+            h.unsynced = Some(ticket)
             Ok(take value)
         },
         Ok(Aborted(store.Undone(value: take why, ..))) => Error(take why),
         Ok(_) => Error(Missing("commit")),
         Error(take e) => Error(Store(take e)),
     }
+}
+
+// Ends a host turn: one sync covers every decision of the turn, since the journal is a
+// FIFO prefix. A failed sync fails the host: nothing that turn or any later one decided
+// leaves, and the restart recovers the durable catalog.
+fn synced(mut h: Host) -> Result[(), Refused] waits {
+    if h.failed {
+        return Error(Missing("a durable catalog"))
+    }
+    let Some(ticket) = replace(mut h.unsynced, None) else {
+        return Ok(())
+    }
+    match store.durable(mut h.db, ticket) {
+        Ok(()) => Ok(()),
+        Error(take e) => {
+            h.failed = true
+            list.clear(mut h.outbox)
+            list.clear(mut h.later)
+            Error(Store(take e))
+        },
+    }
+}
+
+fn turned(mut h: Host, take out: List[launcher.Request]) -> List[launcher.Request] waits {
+    match synced(mut h) {
+        Ok(()) => take out,
+        Error(_) => list.new(),
+    }
+}
+
+fn turned_result[T](mut h: Host, take r: Result[T, Refused]) -> Result[T, Refused] waits {
+    synced(mut h)?
+    take r
+}
+
+// A sync failed: the host must end without sending anything more.
+pub fn sync_failed(h: Host) -> bool {
+    h.failed
 }
 
 // Opens the host on its store: creates the catalog on first use, and returns the host
@@ -456,10 +499,12 @@ pub fn open(take opened: store.Db, first: Config) -> Result[(Host, List[launcher
         }
         Ok(())
     })
-    decided(mut db, take made)?
+    let mut h = Host(db: take db, t: take t, vol: map.new(), queue: list.new(), probes: 0u64, due_wakes: 0u64, arrival_wakes: 0u64, binds_sent: false, clock_s: 0u64, collecting: Unfenced, owners: map.new(), shown: map.new(), outbox: list.new(), later: list.new(), unsynced: None, failed: false)
+    decided(mut h, take made)?
+    synced(mut h)?
     let mut out: List[launcher.Request] = list.new()
     list.push(mut out, Hello)
-    Ok((Host(db: take db, t: take t, vol: map.new(), queue: list.new(), probes: 0u64, due_wakes: 0u64, arrival_wakes: 0u64, binds_sent: false, clock_s: 0u64, collecting: Unfenced, owners: map.new(), shown: map.new(), outbox: list.new(), later: list.new()), take out))
+    Ok((take h, take out))
 }
 
 // The host's store, for a restart: the process ends and only the store survives.
@@ -781,7 +826,7 @@ fn launch_dirty(mut h: Host, name: String, probe: bool, mut out: List[launcher.R
             Ok((g, gen, assembly, activation))
         })
     }
-    let (g, gen, assembly, activation) = decided(mut h.db, take made)?
+    let (g, gen, assembly, activation) = decided(mut h, take made)?
     let c = host_config(h)?
     list.push(mut out, serving_launch(name, g, gen, activation, assembly, c.idle_ms, None))
     let mut v = vol_read(h, name)
@@ -807,7 +852,7 @@ fn activate(mut h: Host, name: String, mut out: List[launcher.Request]) -> Resul
             Ok((g, gen))
         })
     }
-    let (g, gen) = decided(mut h.db, take made)?
+    let (g, gen) = decided(mut h, take made)?
     let c = host_config(h)?
     list.push(mut out, serving_launch(name, g, gen, g.activation, g.assembly, c.idle_ms, None))
     set_run(mut h, name, Some(Run(gen: gen, phase: Requested)))
@@ -990,7 +1035,7 @@ fn apply_end(mut h: Host, name: String, g: GroupRow, gen: u64, e: launcher.End, 
                     mark_clean(mut tx, t, name, gen, next_due)
                 })
             }
-            if let Ok(true) = decided(mut h.db, take made) {
+            if let Ok(true) = decided(mut h, take made) {
                 retry_queue(mut h, now, mut out)
             }
         },
@@ -1134,7 +1179,7 @@ fn commit_cut(mut h: Host, name: String, take cut: Cut, now: Now, mut out: List[
             install_new(mut tx, t, name, take grp, take d)
         })
     }
-    if let Error(_) = decided(mut h.db, take made) {
+    if let Error(_) = decided(mut h, take made) {
         return
     }
     list.push(mut out, cutover_ack(name, cut))
@@ -1169,7 +1214,7 @@ fn abort_cut(mut h: Host, name: String, g: GroupRow, take cut: Cut, why: String,
             put_deploy(mut tx, t, name, d, abort_class(why))
         })
     }
-    if let Error(_) = decided(mut h.db, take made) {
+    if let Error(_) = decided(mut h, take made) {
         return
     }
     discard_cut(mut h, name, g, take cut, now, mut out)
@@ -1224,7 +1269,7 @@ fn drift(mut h: Host, name: String, g: GroupRow, take cut: Cut, now: Now, mut ou
             Ok(Some(d))
         })
     }
-    let retry = match decided(mut h.db, take made) {
+    let retry = match decided(mut h, take made) {
         Ok(Some(take d)) => take d,
         Ok(None) => {
             discard_cut(mut h, name, g, take cut, now, mut out);
@@ -1263,7 +1308,7 @@ fn undecided(mut h: Host, name: String, take cut: Cut, mut out: List[launcher.Re
             put_deploy(mut tx, t, name, d, StoreClass)
         })
     }
-    if let Error(_) = decided(mut h.db, take made) {
+    if let Error(_) = decided(mut h, take made) {
         return
     }
     list.push(mut out, cutover_ack(name, cut))
@@ -1426,7 +1471,7 @@ fn adopt_genesis(mut h: Host, name: String, incarnation: u64, version: u64) -> b
             Ok(true)
         })
     }
-    match decided(mut h.db, take made) {
+    match decided(mut h, take made) {
         Ok(true) => true,
         _ => false,
     }
@@ -1463,7 +1508,7 @@ fn record_store(mut h: Host, name: String, incarnation: u64, ready: runner.Place
             st(store.put(mut tx, t.groups, name, g))
         })
     }
-    decided(mut h.db, take made)
+    decided(mut h, take made)
 }
 
 // The probe of an Undecided deploy answered (launch.md "When the host starts"). Only an
@@ -1512,7 +1557,7 @@ fn settle_probe(mut h: Host, name: String, version: u64, release: Bytes, opened:
             }
         })
     }
-    if let Ok(true) = decided(mut h.db, take made) {
+    if let Ok(true) = decided(mut h, take made) {
         let mut v = vol_read(h, name)
         v.reprobe = true
         vol_put(mut h, name, take v)
@@ -1741,7 +1786,7 @@ fn resume_cuts(mut h: Host, held: List[launcher.CutoverKey], mut out: List[launc
                     put_deploy(mut tx, t, name, row, StoreClass)
                 })
             }
-            let _ = decided(mut h.db, take made)
+            let _ = decided(mut h, take made)
             continue
         }
         list.push(mut resumed, launcher.CutoverKey(old: child_of(name, g.incarnation, d.old), attempt: d.attempt))
@@ -1854,7 +1899,7 @@ pub fn event(mut h: Host, take e: launcher.Event, now: Now) -> List[launcher.Req
     }
     notify(mut h)
     drain_later(mut h, mut out)
-    take out
+    turned(mut h, take out)
 }
 
 fn drain_later(mut h: Host, mut out: List[launcher.Request]) {
@@ -1880,7 +1925,7 @@ pub fn tick(mut h: Host, now: Now) -> List[launcher.Request] waits {
     }
     due_wakes(mut h, now, mut out)
     drain_later(mut h, mut out)
-    take out
+    turned(mut h, take out)
 }
 
 // The due-time wait follows the minimum of the due index without the queued rows; the
@@ -1914,6 +1959,11 @@ pub fn timers(h: Host) -> Timers {
 // Adds a group: `Clean(None)` at gen 0 under a new incarnation (§14.1 "A new group"),
 // then the launcher binds its listener.
 pub fn add_group(mut h: Host, spec: NewGroup) -> Result[List[launcher.Request], Refused] waits {
+    let r = add_group_turn(mut h, spec)
+    turned_result(mut h, take r)
+}
+
+fn add_group_turn(mut h: Host, spec: NewGroup) -> Result[List[launcher.Request], Refused] waits {
     let made = {
         let t = view h.t
         store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[GroupRow, Refused] {
@@ -1937,7 +1987,7 @@ pub fn add_group(mut h: Host, spec: NewGroup) -> Result[List[launcher.Request], 
             Ok(g)
         })
     }
-    let g = decided(mut h.db, take made)?
+    let g = decided(mut h, take made)?
     let mut out: List[launcher.Request] = list.new()
     list.push(mut out, bind_request(spec.name, g))
     Ok(take out)
@@ -1945,6 +1995,11 @@ pub fn add_group(mut h: Host, spec: NewGroup) -> Result[List[launcher.Request], 
 
 // An operator request to a group: wake it first (§14.3); a full host answers `Full`.
 pub fn wake(mut h: Host, name: String, now: Now) -> Result[List[launcher.Request], Refused] waits {
+    let r = wake_turn(mut h, name, now)
+    turned_result(mut h, take r)
+}
+
+fn wake_turn(mut h: Host, name: String, now: Now) -> Result[List[launcher.Request], Refused] waits {
     let mut out: List[launcher.Request] = list.new()
     wake_cause(mut h, name, Operator, now, mut out)?
     Ok(take out)
@@ -1953,6 +2008,11 @@ pub fn wake(mut h: Host, name: String, now: Now) -> Result[List[launcher.Request
 // §14.2 "Lowering the bound": below the current `dirty` is refused `Busy(dirty)`. A raise
 // retries the queue.
 pub fn set_max_places(mut h: Host, n: u64, now: Now) -> Result[List[launcher.Request], Refused] waits {
+    let r = set_max_places_turn(mut h, n, now)
+    turned_result(mut h, take r)
+}
+
+fn set_max_places_turn(mut h: Host, n: u64, now: Now) -> Result[List[launcher.Request], Refused] waits {
     if n == 0u64 {
         return Error(Missing("max_places"))
     }
@@ -1968,13 +2028,18 @@ pub fn set_max_places(mut h: Host, n: u64, now: Now) -> Result[List[launcher.Req
             st(store.put(mut tx, t.config, 0u64, c))
         })
     }
-    decided(mut h.db, take made)?
+    decided(mut h, take made)?
     let mut out: List[launcher.Request] = list.new()
     retry_queue(mut h, now, mut out)
     Ok(take out)
 }
 
 pub fn set_quota(mut h: Host, tenant: String, q: Quota, now: Now) -> Result[List[launcher.Request], Refused] waits {
+    let r = set_quota_turn(mut h, tenant, q, now)
+    turned_result(mut h, take r)
+}
+
+fn set_quota_turn(mut h: Host, tenant: String, q: Quota, now: Now) -> Result[List[launcher.Request], Refused] waits {
     let made = {
         let t = view h.t
         store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[(), Refused] {
@@ -1988,7 +2053,7 @@ pub fn set_quota(mut h: Host, tenant: String, q: Quota, now: Now) -> Result[List
             st(store.put(mut tx, t.quotas, tenant, q))
         })
     }
-    decided(mut h.db, take made)?
+    decided(mut h, take made)?
     let mut out: List[launcher.Request] = list.new()
     retry_queue(mut h, now, mut out)
     Ok(take out)
@@ -2040,7 +2105,7 @@ fn prepare(mut h: Host, name: String, request: Bytes, attempt: launcher.Attempt,
             put_deploy(mut tx, t, name, row, StoreClass)
         })
     }
-    let _ = decided(mut h.db, take made)?
+    let _ = decided(mut h, take made)?
     let mode: launcher.Mode = DescribeMode(attempt)
     let describer = launcher.Child(group: group_of(name, g.incarnation), role: launcher.role_of(mode))
     let mut out: List[launcher.Request] = list.new()
@@ -2362,7 +2427,7 @@ fn fail_request(mut h: Host, d: Bytes, class: operator.Class, why: String) waits
             Ok(Some(clone(r.group)))
         })
     }
-    if let Ok(Some(grp)) = decided(mut h.db, take made) {
+    if let Ok(Some(grp)) = decided(mut h, take made) {
         let mut v = vol_read(h, grp.name)
         v.admit = None
         vol_put(mut h, grp.name, take v)
@@ -2460,7 +2525,7 @@ fn begin(mut h: Host, conn: u64, ask: operator.Ask, d: Bytes, g: launcher.Group,
             Ok(a)
         })
     }
-    let a = match decided(mut h.db, take made) {
+    let a = match decided(mut h, take made) {
         Ok(a) => a,
         Error(e) => {
             refuse(mut h, conn, class_of(e), refused_text(e))
@@ -2556,7 +2621,7 @@ fn reattach(mut h: Host, conn: u64, d: Bytes, r: RequestRow, now: Now, mut out: 
             Ok(a)
         })
     }
-    let a = match decided(mut h.db, take made) {
+    let a = match decided(mut h, take made) {
         Ok(a) => a,
         Error(e) => {
             let _ = map.remove(mut h.owners, d)
@@ -2661,7 +2726,7 @@ pub fn asked(mut h: Host, conn: u64, body: Bytes, now: Now) -> List[launcher.Req
     }
     notify(mut h)
     drain_later(mut h, mut out)
-    out
+    turned(mut h, take out)
 }
 
 // Confirm(D, A, hash): the owner confirms the display whose UTF-8 SHA-256 is `hash`.
@@ -2737,7 +2802,11 @@ pub fn detach(mut h: Host, conn: u64) -> List[launcher.Request] {
 
 // The answers decided since the last call, in order.
 pub fn outgoing(mut h: Host) -> List[Sent] {
-    replace(mut h.outbox, list.new())
+    let sent = replace(mut h.outbox, list.new())
+    if h.failed {
+        return list.new()
+    }
+    sent
 }
 
 // Where the group's latest admission stands, if it has had one since the host started.
@@ -2960,7 +3029,7 @@ fn install_first(mut h: Host, name: String, d: Admitting, key: Bytes, fetch_ns: 
         })
     }
     list.push(mut out, Release(d.attempt))
-    match decided(mut h.db, take made) {
+    match decided(mut h, take made) {
         Ok(()) => {
             let _ = wake_cause(mut h, name, Operator, now, mut out)
         },
@@ -3039,7 +3108,7 @@ fn register(mut h: Host, conn: u64, ask: operator.Ask, d: Bytes, spec: operator.
             Ok((g, a))
         })
     }
-    let (g, a) = match decided(mut h.db, take made) {
+    let (g, a) = match decided(mut h, take made) {
         Ok(pair) => pair,
         Error(e) => {
             refuse(mut h, conn, class_of(e), refused_text(e))
@@ -3430,7 +3499,7 @@ fn prep_finish(mut h: Host, name: String, take p: Prep) waits {
             put_deploy(mut tx, t, name, d, InvalidClass)
         })
     }
-    if let Error(_) = decided(mut h.db, take made) {
+    if let Error(_) = decided(mut h, take made) {
         set_prep(mut h, name, Some(take p));
         return
     }
@@ -3615,7 +3684,7 @@ fn prep_pending(mut h: Host, name: String, take p: Prep, head: u64, digest: Byte
             Ok((g, c, retried))
         })
     }
-    let (g, c, retried) = match decided(mut h.db, take made) {
+    let (g, c, retried) = match decided(mut h, take made) {
         Ok(found) => found,
         Error(_) => {
             prep_fail(mut h, name, take p, "the group changed before the cutover", true, mut out);
@@ -3670,6 +3739,11 @@ fn drop_rows(mut tx: store.Tx, t: Tables, name: String, g: GroupRow, due: Option
 // Removes a group (§14.5 "Removing a group"): a Clean one at once; a Dirty one, failing or
 // not, is retired: a durable mark, then `Retire`, then one transaction at `Retired`.
 pub fn remove(mut h: Host, name: String, disposition: Disposition) -> Result[List[launcher.Request], Refused] waits {
+    let r = remove_turn(mut h, name, disposition)
+    turned_result(mut h, take r)
+}
+
+fn remove_turn(mut h: Host, name: String, disposition: Disposition) -> Result[List[launcher.Request], Refused] waits {
     let made = {
         let t = view h.t
         store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[(GroupRow, bool), Refused] {
@@ -3696,7 +3770,7 @@ pub fn remove(mut h: Host, name: String, disposition: Disposition) -> Result[Lis
             }
         })
     }
-    let (g, gone) = decided(mut h.db, take made)?
+    let (g, gone) = decided(mut h, take made)?
     dequeue(mut h, name)
     let mut out: List[launcher.Request] = list.new()
     let mut v = vol_read(h, name)
@@ -3731,7 +3805,7 @@ fn finish_retire(mut h: Host, grp: launcher.Group, now: Now, mut out: List[launc
             drop_rows(mut tx, t, name, g, None, true, disposition)
         })
     }
-    if let Error(_) = decided(mut h.db, take made) {
+    if let Error(_) = decided(mut h, take made) {
         return
     }
     let _ = map.remove(mut h.vol, name)
@@ -3742,6 +3816,11 @@ fn finish_retire(mut h: Host, grp: launcher.Group, now: Now, mut out: List[launc
 // Makes a recording pin durable. The host calls this before it starts the recorded
 // serving process, so a recording never runs without the pin that names its assembly.
 pub fn keep_pin(mut h: Host, id: Bytes, assembly: Bytes, expires: u64) -> Result[(), Refused] waits {
+    let r = keep_pin_turn(mut h, id, assembly, expires)
+    turned_result(mut h, take r)
+}
+
+fn keep_pin_turn(mut h: Host, id: Bytes, assembly: Bytes, expires: u64) -> Result[(), Refused] waits {
     if list.len(id) != 16u64 {
         return Error(Missing("recording id"))
     }
@@ -3754,12 +3833,17 @@ pub fn keep_pin(mut h: Host, id: Bytes, assembly: Bytes, expires: u64) -> Result
             st(store.put(mut tx, t.pins, id, Pin(assembly: clone(assembly), expires: expires)))
         })
     }
-    decided(mut h.db, take made)
+    decided(mut h, take made)
 }
 
 // An operator removes a recording pin. Replay of that recording then finds it `Gone`, even
 // while another root keeps its image.
 pub fn forget_pin(mut h: Host, id: Bytes) -> Result[(), Refused] waits {
+    let r = forget_pin_turn(mut h, id)
+    turned_result(mut h, take r)
+}
+
+fn forget_pin_turn(mut h: Host, id: Bytes) -> Result[(), Refused] waits {
     let made = {
         let t = view h.t
         store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[(), Refused] {
@@ -3767,7 +3851,7 @@ pub fn forget_pin(mut h: Host, id: Bytes) -> Result[(), Refused] waits {
             Ok(())
         })
     }
-    decided(mut h.db, take made)
+    decided(mut h, take made)
 }
 
 // The pin lookup replay makes first (launch.md "Host assembly"): `Found(assembly)` while

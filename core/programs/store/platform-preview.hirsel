@@ -25,7 +25,7 @@ fn hold(mut h: Host, d: Bytes, diff: launcher.Grants) waits {
             Ok(())
         })
     }
-    if let Error(e) = decided(mut h.db, take made) {
+    if let Error(e) = decided(mut h, take made) {
         fail_request(mut h, d, class_of(e), refused_text(e))
     }
 }
@@ -99,7 +99,7 @@ fn decide(mut h: Host, conn: u64, d: Bytes, diff: launcher.Grants, approve: bool
             Ok(a)
         })
     }
-    let a = match decided(mut h.db, take made) {
+    let a = match decided(mut h, take made) {
         Ok(a) => a,
         Error(e) => {
             let _ = map.remove(mut h.owners, d)

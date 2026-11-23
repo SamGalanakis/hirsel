@@ -142,6 +142,7 @@ pub(crate) fn parse_derived(
         base: 0,
         whitespace: 0,
         depth: 0,
+        delimiter_pos: 0,
         delimiters: smallvec![],
         diagnostics: output.diagnostics,
         resource: None,
@@ -155,6 +156,7 @@ pub(crate) fn parse_derived(
             continue;
         }
         let start = p.pos;
+        p.delimiter_pos = start;
         p.delimiters.clear();
         let diagnostic_start = p.diagnostics.len();
         let file_offset = p.tokens[p.current_index].span.start;
@@ -235,6 +237,7 @@ struct Parser<'a> {
     base: u32,
     whitespace: usize,
     depth: usize,
+    delimiter_pos: usize,
     delimiters: smallvec::SmallVec<[(usize, Symbol); 8]>,
     diagnostics: Vec<Diagnostic>,
     resource: Option<ResourceRefusal>,
@@ -274,15 +277,6 @@ impl Parser<'_> {
     fn bump(&mut self) -> TokenId {
         let id = TokenId(self.index() as u32);
         if !self.eof() {
-            if let Some(close) = closing_delimiter(self.current.symbol) {
-                self.delimiters.push((self.pos, close));
-            } else if self
-                .delimiters
-                .last()
-                .is_some_and(|&(_, close)| self.at(close))
-            {
-                self.delimiters.pop();
-            }
             self.pos += 1;
             self.current_index = self.significant[self.pos];
             self.current = self.tokens[self.current_index];
@@ -306,7 +300,25 @@ impl Parser<'_> {
             self.expected(word)
         }
     }
+    // Only diagnostics and recovery need the delimiter stack. Replay each
+    // consumed token once, retaining recovery's truncations between calls.
+    fn sync_delimiters(&mut self) {
+        for pos in self.delimiter_pos..self.pos {
+            let word = self.tokens[self.significant[pos]].symbol;
+            if let Some(close) = closing_delimiter(word) {
+                self.delimiters.push((pos, close));
+            } else if self
+                .delimiters
+                .last()
+                .is_some_and(|&(_, close)| word == close)
+            {
+                self.delimiters.pop();
+            }
+        }
+        self.delimiter_pos = self.pos;
+    }
     fn expected<T>(&mut self, word: Symbol) -> Parsed<T> {
+        self.sync_delimiters();
         if let Some(&(opener, close)) = self.delimiters.last()
             && (word == close
                 || word == sym::COMMA
@@ -513,11 +525,13 @@ impl Parser<'_> {
             && !(self.at(sym::SCOPED) && self.word(1) == sym::FN)
     }
     fn recover(&mut self, start: usize, item: bool) {
+        self.sync_delimiters();
         let outer = self.delimiters.partition_point(|&(pos, _)| pos < start);
         if self.pos == start && !self.eof() && (item || !self.at(sym::RBRACE)) {
             self.bump();
         }
         while !self.eof() {
+            self.sync_delimiters();
             if self.item_start() && self.newline() {
                 break;
             }
@@ -538,6 +552,7 @@ impl Parser<'_> {
             }
             self.bump();
         }
+        self.sync_delimiters();
         self.delimiters.truncate(outer);
     }
     fn text_token(&self, i: usize) -> &str {

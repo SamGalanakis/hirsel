@@ -177,17 +177,18 @@ impl Poller {
             Backend::Uring(ring) => ring.add(fd, tag),
         }
     }
-    /// Stop watching `fd`. `closing` means the caller then drops the last
-    /// descriptor: an io_uring poll holds its own file reference until the
-    /// kernel retires it, so a listener is shut down first and its address
-    /// is free for rebinding on return, as after an epoll close.
+    /// Stop watching `fd`. `closing` names a listener whose only holder is
+    /// about to close it: an io_uring poll holds its own file reference until
+    /// the kernel retires it, so the listener is shut down first and its
+    /// address is free for rebinding on return, as after an epoll close.
     fn remove(&self, fd: i32, tag: u64, closing: bool) -> io::Result<()> {
         match &self.backend {
             Backend::Epoll(_) => self.epoll_ctl(libc::EPOLL_CTL_DEL, fd, 0, 0),
             Backend::Uring(ring) => {
                 if closing {
-                    // SAFETY: a live descriptor; a receive shutdown changes
-                    // nothing the close that follows does not.
+                    // SAFETY: a live descriptor this process alone holds; a
+                    // receive shutdown changes nothing the close that follows
+                    // does not.
                     unsafe { libc::shutdown(fd, libc::SHUT_RD) };
                 }
                 ring.remove(tag)
@@ -561,6 +562,8 @@ struct Record {
     registered: bool,
     read_drained: bool,
     read_terminal: bool,
+    /// A listener this process created, and so the only holder of its socket.
+    own_listener: bool,
 }
 struct Slot {
     generation: u32,
@@ -631,6 +634,7 @@ impl Sockets {
             registered: false,
             read_drained: false,
             read_terminal: false,
+            own_listener: false,
         })?;
         Some(key | direction)
     }
@@ -732,6 +736,11 @@ impl Sockets {
         let r = self.record_mut(key);
         r.ended = true;
         r.read_drained = false;
+    }
+    /// Mark a listener this process created itself. An inherited one may
+    /// still be listening for its launcher and is never shut down here.
+    pub fn mark_own_listener(&mut self, key: u64) {
+        self.record_mut(key).own_listener = true;
     }
     pub fn split(&mut self, key: u64) -> (u64, u64) {
         self.record_mut(key).owners = 6;
@@ -890,11 +899,11 @@ impl Sockets {
         let record = self.remove_record(index);
         if record.registered {
             // Unregister before dropping the sole descriptor owner.
-            let _ = self
-                .poller
-                .as_ref()
-                .unwrap()
-                .remove(record.fd.as_raw_fd(), tag, true);
+            let _ = self.poller.as_ref().unwrap().remove(
+                record.fd.as_raw_fd(),
+                tag,
+                record.own_listener,
+            );
         }
         true
     }
@@ -911,11 +920,11 @@ impl Drop for Sockets {
             if let Some(r) = slot.record.take() {
                 if r.registered {
                     let tag = Self::registration_tag(self.shared, index, slot.generation);
-                    let _ = self
-                        .poller
-                        .as_ref()
-                        .unwrap()
-                        .remove(r.fd.as_raw_fd(), tag, true);
+                    let _ =
+                        self.poller
+                            .as_ref()
+                            .unwrap()
+                            .remove(r.fd.as_raw_fd(), tag, r.own_listener);
                 }
                 drop(r);
             }
@@ -1004,6 +1013,7 @@ mod tests {
             listener.set_nonblocking(true).unwrap();
             let address = listener.local_addr().unwrap();
             let key = sockets.insert(listener.into()).unwrap();
+            sockets.mark_own_listener(key);
             let mut sockets = std::thread::scope(|scope| {
                 scope
                     .spawn(move || {

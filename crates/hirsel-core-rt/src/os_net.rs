@@ -388,6 +388,7 @@ unsafe fn attempt(request: &mut Request, n: &mut NetworkRequest, first: bool) ->
                     Ok(k) => k,
                     Err(e) => return Some(error(e)),
                 };
+                (*n.sockets).mark_own_listener(key);
                 let fd = (*n.sockets).fd(key);
                 let (a, len) = address(n.address);
                 let result = retry(|| {

@@ -555,6 +555,13 @@ unsafe fn socket_law(law: &str, context: *mut Context, n: u64, clock: u64) {
                     .unwrap();
                 assert_eq!(listener.port, port, "must adopt the host's socket");
                 if law == "inherited_hold" {
+                    // Register the adopted listener with the reactor so its
+                    // release below retires a live registration. Retiring it
+                    // must leave the shared socket accepting for the successor.
+                    (*(*context).host_files)
+                        .sockets
+                        .arm(listener.value, false, 1)
+                        .unwrap();
                     println!("\ninherited listener ready");
                     std::io::stdout().flush().unwrap();
                     std::io::stdin().read_exact(&mut [0]).unwrap();

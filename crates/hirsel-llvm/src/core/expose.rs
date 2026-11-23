@@ -567,6 +567,11 @@ fn price(b: &Body) -> usize {
         .count()
 }
 
+/// The callee price one caller may expose in total. LangArena's cold release
+/// compile spent 1.1G instructions more at 2048 with every Guard B row within
+/// +3% cycles at 128; Richards and Permute run 1-3% fewer instructions at 128.
+const EXPOSE_BUDGET: usize = 128;
+
 pub(super) fn module(module: &Module, preserve_step_trees: bool) -> Option<Module> {
     // Marks have no runtime meaning. Remove them before eligibility, budgets
     // or block merging can let one change the exposed program.
@@ -640,7 +645,7 @@ pub(super) fn module(module: &Module, preserve_step_trees: bool) -> Option<Modul
         let caller_versioned = f.versioned;
         let mut hot = (0..original.blocks.len()).collect::<BTreeSet<_>>();
         let mut body = original.clone();
-        let mut budget = 2048;
+        let mut budget = EXPOSE_BUDGET;
         // A recursive callee unrolls at most 8 copies deep along one chain of
         // expansions (GCC's max-inline-recursive-depth-auto), as LLVM's loop
         // helpers do after O3: unbounded, Havlak's loop nesting pass spent the
@@ -726,7 +731,7 @@ pub(super) fn module(module: &Module, preserve_step_trees: bool) -> Option<Modul
             chain.resize(body.blocks.len(), Some(copies.len() - 1));
             hot.extend(added);
         }
-        if budget != 2048 {
+        if budget != EXPOSE_BUDGET {
             merge_blocks(&mut body);
             let old = std::mem::take(&mut body.insts);
             let anchors = std::mem::take(&mut body.inst_anchors);

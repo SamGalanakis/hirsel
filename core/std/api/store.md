@@ -105,7 +105,7 @@ shared pages by stamp. Each change holds an Arc to its stored value. Deletions h
 are Foreign; branches of one open are allowed. Catalog and stream roots do not
 contribute changes. Page visits are O(k log n), where k counts keys written
 between snapshots, including same-value rewrites. The output uses O(w) storage
-for w keys whose values differ, with w <= k. `changes_page(a, b, lo, hi, limits)`
+for w keys whose values differ, with w <= k. `changes_page(r, a, b, lo, hi, limits)`
 returns the same changes restricted to `[lo, hi)`, one bounded page at a time, with
 the resume key of the next page.
 
@@ -428,7 +428,7 @@ pub opaque type Projector[K, V]          // not send: the source handle, the Pro
 pub type Stepped = Applied(u64) | Passed(u64) | Rebuilt(u32) | Idle   // rows applied; a pass completed at a version; a new generation; nothing to do
 pub type ProjectError[E] = Store(Error) | Apply(E)
 pub fn projector[K, V](mut d: Declare, name: String, source: Table[K, V], from: Source) -> Result[Projector[K, V], Error]
-pub fn step[K, V, E](mut p: Projector[K, V], mut db: Db, limits: Limits,
+pub fn step[K, V, E](mut p: Projector[K, V], mut db: Db, r: Reader, limits: Limits,
         apply: scoped[view] fn(mut Tx, u32, K, Option[V]) -> Result[(), E]) -> Result[Stepped, ProjectError[E]] waits
 pub fn rebuild[K, V](mut p: Projector[K, V], mut db: Db) -> Result[Ticket, Error] waits
 pub fn retire_page[K, V](mut p: Projector[K, V], mut db: Db, limits: Limits,

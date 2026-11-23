@@ -893,6 +893,7 @@ pub fn identity(db: Db) -> StoreId
 - `Memory`: `resident_limit` = share − 1 MiB, and no journal, pack or checkpoint figure is used.
 - `Directory` and `Bucket`: `group_bytes` = 4 MiB, `pack_bytes` = min(64 MiB, share / 16), `checkpoint_bytes` = `pack_bytes`, `journal_limit` = `checkpoint_bytes` + `FRAME_LIMIT`, the cut's working bound = 2⌈r / 11⌉ + 64 KiB (Q1a's term), and `resident_limit` = r, the largest value with r + `journal_limit` + `FRAME_LIMIT` + 2⌈r / 11⌉ + 64 KiB + `pack_bytes` ≤ share. `Bucket` also reserves one object PUT buffer of `pack_bytes`.
 - Every count field (`group_commits`, `retain`, `checkpoint_entries`, `claim_ms`, `head_poll_ms`) keeps its listed default. `create`, `lock_wait_ms`, `expect`, `activation` and `binding` are the caller's.
+- The Tiered byte fields of §13.8 (`cache_bytes`, `writer_pin_bytes`, `dirty_bytes`, `pager_task_bytes`) are not derived by `sized` in v2.57 and keep their §13.8 values; they are reserved only by a store with a Tiered collection. Deriving them from share is open (BUILD-ITEMS), and until then a Tiered place's peak can pass L60's bound by their sum.
 - `sized` refuses when r would be below 1 MiB or any floor (`journal_limit` ≥ `checkpoint_bytes` + `FRAME_LIMIT`) fails: `Shortage{need, have: share, parts}`, where `parts` names each figure with its bytes and `need` is their sum at the floors. With `Overrides`, a `Some` figure replaces its derived value, and the remaining derived figures are computed after it; a sum past `share` is the same `Shortage`. There are no named profiles, and the "default" comments above are the figures for share = 2 GiB.
 
 `open` takes `Random` for the identity: 16 bytes from `host.random(r, mut b)` (host.hirsel:31, landed 1951a976), drawn once at genesis (D7).
@@ -1226,7 +1227,7 @@ pub fn find_next[J, K, V, P](s: Snapshot, ix: Index[J, K, V, P], take r: Resume,
 - **Moved is the stale result.** In process, the caller holds the Snapshot, so the version a continuation names cannot be gone while the caller still has it. What can happen is that a caller passes another Snapshot, for example a newer `snapshot(db)`. Continuing on it would mix two versions in one listing, so it is refused with `Moved`, which carries the version that was passed, and the caller starts again with `scan_page` or `find_page`. A continuation does not keep a Snapshot alive. The caller decides how long its Snapshot lives, and a retained version across restarts is a pin (§1.9).
 - **Not in a transaction.** Pages read a Snapshot only. A transaction's `range` and `lookup` record their whole Span (I1), so a page in a Tx would record reads beyond the rows it returned. A Tx form, if a use appears, is a later addition with its own read-set rule.
 
-- **M3's `Reader` (lane m3-tiered-spec-1981).** M3 gives the Snapshot reads (`get`, `scan`, `find`, `count`, the pages) a per-task `mut r: Reader` first parameter and `waits`. DX changes nothing else about them; the signatures above are the pre-M3 forms with `Shape` replaced by `Table`.
+- **M3's `Reader` (lane m3-tiered-spec-1981).** M3 gives the Snapshot reads (`get`, `scan`, `find`, `count`, the pages, `changes` and `changes_page`) a per-task `r: Reader` first parameter and `waits` (§13.4). DX changes nothing else about them; the signatures above are the pre-M3 forms with `Shape` replaced by `Table`.
 
 ### 1.6 Tickets and durability (row 3)
 
@@ -1473,11 +1474,11 @@ A projector is a library over `changes_page` and `run`, in package `store`. It k
 ```hirsel
 pub type Projection: codec { generation: u32, applied: u64, target: u64, resume: Option[Bytes], retiring: Option[u32] }
 pub type Source = Local | Follower(Follower)
-pub opaque type Projector[K, V]          // not send: the source Table, the cursor table, its Reader (§13.4), the base Snapshot, the pass's target Snapshot
+pub opaque type Projector[K, V]          // not send: the source Table, the cursor table, the base Snapshot, the pass's target Snapshot
 pub type Stepped = Applied(u64) | Passed(u64) | Rebuilt(u32) | Idle
 pub type ProjectError[E] = Store(Error) | Apply(E)
 pub fn projector[K, V](mut d: Declare, name: String, source: Table[K, V], from: Source) -> Result[Projector[K, V], Error]
-pub fn step[K, V, E](mut p: Projector[K, V], mut db: Db, limits: Limits,
+pub fn step[K, V, E](mut p: Projector[K, V], mut db: Db, r: Reader, limits: Limits,   // r reads the source (§13.4): reader(db, ..) for Local, follower_reader(f, ..) for Follower
         apply: scoped[view] fn(mut Tx, u32, K, Option[V]) -> Result[(), E]) -> Result[Stepped, ProjectError[E]] waits
 pub fn rebuild[K, V](mut p: Projector[K, V], mut db: Db) -> Result[Ticket, Error] waits
 pub fn retire_page[K, V](mut p: Projector[K, V], mut db: Db, limits: Limits,
@@ -4064,6 +4065,8 @@ A Tiered frame is never written into a class 0, 1 or 2 pack, and a Memory frame 
 
 **Kinds.** Format 4 adds PACK_INDEX 0x0023 (MUST) and ARCHIVE 0x00E0. Every other kind is as §2.7 and the §11 kinds table.
 
+**Catalog index rows (v2.57, DX Q1 and Q3).** Format 4's catalog row for an index carries, after the fields §1.2 already lists: `kind u8` (0 = Many, 1 = Unique), the payload schema list (u16 count, then each schema as `std.codec` Bytes, append-only), and for `by` and for `project` (absent for `()` and the row) their `code.identity` and `code.revision`, each length-prefixed. A Format 4 catalog without them does not exist: Format 4 is new in M3, so no store carries an index row of the earlier shape.
+
 ### 13.2 Pages, edges and the cache
 
 **Edges.** AP2's `kids: List[Arc[Page]]` becomes `kids: List[Slot]`, and `blobs` becomes `List[BlobSlot]`, with:
@@ -4342,7 +4345,7 @@ pub type TieredRefusal = Memory | Migrate | Export | Install | Authority
 // Error gains:  | Tiered(TieredRefusal)
 ```
 
-- `migrate` (§1.8), `export` (§3.5a) and `install` (§12.7) on a store whose catalog holds a Tiered collection return `Tiered(Migrate)`, `Tiered(Export)` or `Tiered(Install)`. This is checked first, before any staging, upload, journal write or head write, and every byte is left unchanged. Building them is M3b.
+- `migrate_table`, `drop_table` and `rename_table` in a `Migration` (§1.2, v2.57; the store-level `migrate` they replace is deleted), `export` (§3.5a) and `install` (§12.7) on a store whose catalog holds a Tiered collection return `Tiered(Migrate)`, `Tiered(Export)` or `Tiered(Install)`. This is checked first, before any staging, upload, journal write or head write, and every byte is left unchanged. Building them is M3b.
 - `Tiered(Memory)` is the answer for Tiered residency on a memory store.
 - `Tiered(Authority)` is the answer for `archive` on log@1 or memory.
 - Because install is refused, astra #21's Fenced or Undecided install has no M3 case.

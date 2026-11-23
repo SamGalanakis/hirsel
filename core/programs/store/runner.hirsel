@@ -515,6 +515,11 @@ pub fn operate[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, 
                 match take ending {
                     Ok(due) => { next_due = due },
                     Error(take problem) => {
+                        if online {
+                            // A failed head cannot settle calls or participate in a drain.
+                            if let Some(take handle) = replace(mut serving, None) { let _ = task.cancel_join(take handle) }
+                            return Error(take problem)
+                        }
                         if let Some(host) = hosting {
                             let response = match problem {
                                 Open(NotCurrent(Active(version, description))) => {
@@ -541,7 +546,7 @@ pub fn operate[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, 
                             let _ = channel.send(host.answer, take response)
                             if let Ok(()) = channel.receive(host.sent) {}
                         }
-                        if !stopped || online {
+                        if !stopped {
                             if let None = start_failure { start_failure = Some(take problem) }
                         }
                     },
@@ -3420,6 +3425,7 @@ fn serve_head[G: send, H: send](mut head: Head[G, H], take inbox: HeadRequests, 
                     },
                     Error(take why) => Error(take why),
                 }
+                if let Error(Store(Poisoned(e))) = exported { return Error(Poisoned(e)) }
                 let _ = channel.try_send(host_result, take exported)
                 continue
             },

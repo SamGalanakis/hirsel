@@ -919,24 +919,9 @@ fn tally(snap: store.Snapshot, h: harness.Handles, n: u64) -> Tally {
     t
 }
 
-type Cut: send = Reached(bool) | Beyond
+type Cut: send = Reached(bool, bool) | Beyond
 
-// A life that neither stops nor goes idle after its fault is stopped after
-// WATCH_MS, as an operator would; the cut that follows is the crash. In 92
-// of the 217 cases the runner needs this stop: an I/O error leaves the
-// place blocked instead of ending it (REPORT, friction F10).
-const WATCH_MS: u64 = 1000u64
 const MATRIX_IDLE_MS: u64 = 100u64
-type Watch: send { clock: Clock, stop: Sender[()], ended: Receiver[()] }
-fn watchdog(take w: Watch) -> bool waits {
-    let Watch(clock, stop: take stop, ended: take ended) = take w
-    for _ in 0u64 .. WATCH_MS / 50u64 {
-        if let Ok(_) = channel.try_receive(ended) { return false }
-        std.clock.sleep_ns(clock, 50000000u64)
-    }
-    let _ = channel.send(stop, ())
-    true
-}
 
 // Law M1 (astra crash matrix over every filesystem operation): the first
 // life fails its k-th filesystem operation with EIO and ends; the image is
@@ -961,14 +946,13 @@ fn matrix_case(clock: Clock, random: Random, tasks: Tasks, net: Net, site: u64) 
     let tools = task.spawn(tasks, bytes 65536u64, take tool_in, answering_tools)
     let services = Services(model: take model, tool: take tool)
     let (first_dir, first_server) = mount(tasks, clock, take seeded, take faults)
-    let (first, stop_first, _) = launch(tasks, settings(first_dir, clock, random, tasks, net, copy_services(services), Some(MATRIX_IDLE_MS)))
-    let (ended_to, ended) : (Sender[()], Receiver[()]) = channel.new(1u64)
-    let dog = task.spawn(tasks, bytes 65536u64, Watch(clock: clock, stop: take stop_first, ended: take ended), watchdog)
-    let first_out = task.join(take first)
-    let _ = channel.send(ended_to, ())
-    let _ = result.unwrap(task.join(take dog))
-    // A Forced end would mean a client outlived the drain; there is none.
-    if let Ok(Ok(Forced(_))) = first_out { fail("crash matrix: the first life was forced") }
+    let (first, _stop_first, status) = launch(tasks, settings(first_dir, clock, random, tasks, net, copy_services(services), Some(MATRIX_IDLE_MS)))
+    let (first_ended, poisoned) = match task.join(take first) {
+        Ok(Error(Open(Store(Poisoned(Other(5)))))) => (true, match latest.read(status).phase { Ready => true, _ => false }),
+        Ok(Error(_)) => (true, false),
+        Ok(Ok(Stopped(_))) => (true, false),
+        _ => (false, false),
+    }
     let (image, after) = unmount(take first_dir, take first_server)
     let mut left = take after
     if let Some(_) = std.sim.world.take_fault(mut left, site) {
@@ -1013,17 +997,18 @@ fn matrix_case(clock: Clock, random: Random, tasks: Tasks, net: Net, site: u64) 
     let spend = run.spend.known == 15u64 * t.answers && run.spend.reserved == 0u64 && run.spend.unresolved == 4096u64 * doubts
     let idle = match session.active_run { None => true, Some(_) => false }
     let shape = t.ordered && t.users == 1u64 && (!done_ok || (session.next_pos == 5u64 && t.answers == 2u64 && t.results == 1u64))
-    Reached(second_ended && finished && once && model_once && spend && idle && shape)
+    Reached(first_ended && second_ended && finished && once && model_once && spend && idle && shape, poisoned)
 }
 
 @test
 fn test_crash_matrix(clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
     let mut site = 0u64
+    let mut poisoned = 0u64
     loop {
         match matrix_case(clock, random, tasks, net, site) {
             Beyond => break,
-            Reached(true) => (),
-            Reached(false) => {
+            Reached(true, saw_poison) => if saw_poison { poisoned += 1u64 },
+            Reached(false, _) => {
                 let mut why = string.from("crash matrix: a law broke at filesystem operation ")
                 string.push_u64(mut why, site)
                 fail(take why)
@@ -1034,6 +1019,7 @@ fn test_crash_matrix(clock: Clock, random: Random, tasks: Tasks, net: Net) -> Re
     // The run takes 217 operations today; fewer than 20 means the fault
     // plan no longer reaches the place's own writes.
     if site < 20u64 { fail("crash matrix: the faults never reached the run's writes") }
+    if poisoned == 0u64 { fail("crash matrix: no EIO exited an online head with a poison error") }
     Ok(())
 }
 

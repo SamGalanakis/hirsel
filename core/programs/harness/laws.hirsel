@@ -1293,6 +1293,135 @@ fn race_case(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, 
 
 fn spent_as(r: Raced, known: u64, unresolved: u64) -> bool { r.spend.known == known && r.spend.reserved == 0u64 && r.spend.unresolved == unresolved }
 
+fn cancelling(mut db: store.Db, h: harness.Handles, who: store.Caller) -> Result[harness.Finish, harness.Refused] waits {
+    let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[harness.Finish, harness.Refused] {
+        harness.cancel(mut tx, h, who, 0u64)
+    })
+    match take ran {
+        Ok(Committed(done)) => {
+            result.unwrap(store.durable(mut db, done.ticket))
+            Ok(clone(done.value))
+        },
+        Ok(Aborted(store.Undone(value: take why, ..))) => Error(take why),
+        _ => fail("cancel: transaction failed"),
+    }
+}
+
+fn cancel_approval_race(parent: Dir, clock: Clock, random: Random, tasks: Tasks, decide_first: bool) -> bool waits {
+    let mut name = string.with_capacity(32u64)
+    let dir = result.unwrap(host.mkdtemp(parent, mut name))
+    let mut holds: List[u8] = list.new()
+    list.push(mut holds, 1u8)
+    let a = gated(take holds)
+    let mut db = answered(dir, clock, random, tasks, bump_call("{}"))
+    kick(mut db, a)
+    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    let refused = match cancelling(mut db, h, store.Caller(issuer: 2u8, subject: string.into_bytes("alice"))) { Error(NotAllowed) => true, _ => false }
+    let d = decision(harness.approval_key("bump", 1u64, Inline(string.into_bytes("{}"))), true)
+    let was_approved = decide_first && match deciding(mut db, a, alice(), clone(d)) { Ok(Approved) => true, _ => false }
+    let ended = cancelling(mut db, h, alice())
+    let repeated = deciding(mut db, a, alice(), take d)
+    let got = result.unwrap(store.get(store.snapshot(db), store.shape(h.waits), wait_zero()))
+    let race_won = if decide_first {
+        was_approved && match (take repeated, take got) { (Ok(Approved), Some(Decided(_, true))) => true, _ => false }
+    } else {
+        match (take repeated, take got) { (Error(Conflict), Some(Revoked)) => true, _ => false }
+    }
+    result.unwrap(store.close(take db))
+    result.unwrap(std.dir.remove_all(parent, name))
+    refused && race_won && match ended { Ok(Cancelled) => true, _ => false }
+}
+
+type ParkOrder: key = CancelFirst | ResumeFirst | DeadlineFirst
+
+fn cancel_park_race(parent: Dir, clock: Clock, random: Random, tasks: Tasks, ordering: ParkOrder) -> bool waits {
+    let mut name = string.with_capacity(32u64)
+    let dir = result.unwrap(host.mkdtemp(parent, mut name))
+    let mut a = crash_agent()
+    if ordering == DeadlineFirst { a.limits.tool_ms = 0u64 }
+    list.push(mut a.tools, harness.inside("park", "waits for a wake", "{}", code.describe(park)))
+    let mut db = answered(dir, clock, random, tasks, harness.Call(id: "c1", name: "park", args: Inline(string.into_bytes("{}"))))
+    kick(mut db, a)
+    kick(mut db, a)
+    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    let was_parked = match member(db) { Parked => true, _ => false }
+    let first = ordering != CancelFirst || match cancelling(mut db, h, alice()) { Ok(Cancelled) => true, _ => false }
+    let filed = resuming(mut db, a, "woke")
+    let repeated = cancelling(mut db, h, alice())
+    let settled = match (ordering, filed, member(db)) {
+        (CancelFirst, Ignored, Settled(Tool(Failed(why)))) => why == "run cancelled",
+        (ResumeFirst, Recorded, Settled(Tool(Returned(Inline(out))))) => out == string.into_bytes("woke"),
+        (DeadlineFirst, Ignored, Settled(Tool(Failed(why)))) => why == "tool deadline",
+        _ => false,
+    }
+    result.unwrap(store.close(take db))
+    result.unwrap(std.dir.remove_all(parent, name))
+    first && was_parked && settled && match repeated { Ok(Cancelled) => true, _ => false }
+}
+
+// Start from the committed dispatch marker and deliver the model reply
+// through the same runner attempt fence as the real worker.
+fn cancel_model_race(parent: Dir, clock: Clock, random: Random, tasks: Tasks, cancel_first: bool) -> bool waits {
+    let mut name = string.with_capacity(32u64)
+    let dir = result.unwrap(host.mkdtemp(parent, mut name))
+    seed_session(dir, clock, random, tasks)
+    let mut db = result.unwrap(store.open(tasks, dir, clock, random, store.triggers.law_options()))
+    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    let who = store.Caller(issuer: 1u8, subject: list.new())
+    let id = harness.EffectKey(run: 0u64, round: 0u64, kind: harness.MODEL, ordinal: 0u64)
+    let pending = option.unwrap(result.unwrap(store.triggers.next_pending(store.snapshot(db), h.triggers, fn(candidate: store.triggers.Id) -> bool { false })))
+    let marked = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[store.triggers.Attempt, store.triggers.Error] {
+        let Body(attempt) = store.triggers.start(mut tx, h.triggers, pending, list.new())? else { fail("cancel race: no granted attempt") }
+        let mut e = option.unwrap(store.fetch(tx, store.shape(h.effects), id) ?=> Store)
+        e.phase = Dispatched(store.triggers.number(attempt))
+        e.dispatches = 1u64
+        store.put(mut tx, h.effects, id, e) ?=> Store
+        Ok(attempt)
+    })
+    let Ok(Committed(dispatched)) = take marked else { fail("cancel race: dispatch did not commit") }
+    result.unwrap(store.durable(mut db, dispatched.ticket))
+    let first = !cancel_first || match cancelling(mut db, h, who) { Ok(Cancelled) => true, _ => false }
+    let mut reg: store.runner.Registry[Grants, harness.Handles] = store.runner.registry()
+    result.unwrap(place(mut reg))
+    let c: std.codec.Codec[harness.Settle] = std.codec.of()
+    let r: std.codec.Codec[harness.Filed] = std.codec.of()
+    let key = result.unwrap(store.runner.attempt_key(code.describe(settle), c, r))
+    let mut raw: Bytes = list.new()
+    result.unwrap(std.codec.encode(c, harness.Settle(key: id, receipt: Some(Model(scripted_answer(true)))), mut raw))
+    let reply = store.runner.apply_attempt(mut db, reg, h, h.triggers, who, dispatched.value, key, raw)
+    let fenced = match take reply {
+        Ok(Committed(done)) if !cancel_first => {
+            result.unwrap(store.durable(mut db, done.ticket))
+            kick(mut db, crash_agent())
+            true
+        },
+        Ok(Aborted(store.Undone(value: Refusal(Cancelled), ..))) if cancel_first => true,
+        _ => false,
+    }
+    let terminal = cancelling(mut db, h, who)
+    let snap = store.snapshot(db)
+    let stored_run = option.unwrap(result.unwrap(store.get(snap, store.shape(h.runs), 0u64)))
+    let session = option.unwrap(result.unwrap(store.get(snap, store.shape(h.session), 0u64)))
+    let phase_won = match stored_run.phase {
+        Finished(Cancelled) => cancel_first,
+        Finished(Answered) => !cancel_first,
+        _ => false,
+    }
+    let cancel_receipt = match terminal {
+        Ok(Cancelled) => cancel_first,
+        Ok(Answered) => !cancel_first,
+        _ => false,
+    }
+    let final_rows = if cancel_first {
+        stored_run.spend.known == 0u64 && stored_run.spend.unresolved == 4096u64 && session.next_pos == 2u64
+    } else {
+        stored_run.spend.known == 15u64 && stored_run.spend.unresolved == 0u64 && session.next_pos == 3u64
+    }
+    result.unwrap(store.close(take db))
+    result.unwrap(std.dir.remove_all(parent, name))
+    first && fenced && phase_won && cancel_receipt && final_rows && stored_run.spend.reserved == 0u64 && session.active_run == None
+}
+
 // Law D1 (astra: deadline races): a deadline and a reply race for one
 // effect, and the first to commit wins. The model's deadline is 1 s and the
 // tool's 3 s.
@@ -1322,6 +1451,13 @@ pub fn law_deadline_races(parent: Dir, clock: Clock, random: Random, tasks: Task
         && match c.result { Some(Returned(Inline(out))) => out == string.into_bytes("1"), _ => false }
         && match c.finish { Some(Answered) => true, _ => false }
     if !prompt { return 3u64 }
+    if !cancel_approval_race(parent, clock, random, tasks, false) { return 4u64 }
+    if !cancel_approval_race(parent, clock, random, tasks, true) { return 5u64 }
+    if !cancel_park_race(parent, clock, random, tasks, CancelFirst) { return 6u64 }
+    if !cancel_park_race(parent, clock, random, tasks, ResumeFirst) { return 7u64 }
+    if !cancel_park_race(parent, clock, random, tasks, DeadlineFirst) { return 8u64 }
+    if !cancel_model_race(parent, clock, random, tasks, true) { return 9u64 }
+    if !cancel_model_race(parent, clock, random, tasks, false) { return 10u64 }
     0u64
 }
 

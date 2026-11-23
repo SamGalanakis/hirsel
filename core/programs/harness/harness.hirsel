@@ -50,7 +50,7 @@ pub type InboxKey: codec + send { caller: store.Caller, client_key: String }
 pub type Disposition: codec + send = Placed(u64) | Busy
 pub type Received: codec + send { digest: Bytes, disposition: Disposition }
 
-pub type Finish: codec + send = Answered | OutOfRounds | Stopped(String)
+pub type Finish: codec + send = Answered | OutOfRounds | Stopped(String) | Cancelled
 pub type Phase: codec + send = Preparing | AwaitingModel(u64) | AnswerReady(u64) | AwaitingRound(u64, u64) | Finished(Finish)
 // Known spend is settled usage; reserved is the bound held for calls that may
 // still be charged; unresolved is a reservation whose call is in doubt.
@@ -487,12 +487,69 @@ pub fn submit[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, cal
 
 fn finish(mut tx: store.Tx, h: Handles, mut s: Session, id: u64, take r: Run, take why: Finish) -> Result[(), Refused] {
     let mut run = take r
-    let shown = match why { Answered => "answered", OutOfRounds => "out of rounds", Stopped(_) => "stopped" }
+    let shown = match why { Answered => "answered", OutOfRounds => "out of rounds", Stopped(_) => "stopped", Cancelled => "cancelled" }
     run.phase = Finished(take why)
     kept(store.put(mut tx, h.runs, id, run))?
     s.active_run = None
     kept(store.put(mut tx, h.session, 0u64, s))?
     status(mut tx, h, take shown)
+}
+
+// Only the run's caller may cancel. A repeated cancel returns the terminal
+// receipt, even after a later run has taken the session.
+pub fn cancel(mut tx: store.Tx, h: Handles, caller: store.Caller, id: u64) -> Result[Finish, Refused] {
+    let Some(take found) = kept(store.fetch(tx, store.shape(h.runs), id))? else { return Error(Malformed("no such run")) }
+    let mut run = take found
+    if run.caller.issuer != caller.issuer || run.caller.subject != caller.subject { return Error(NotAllowed) }
+    if let Finished(why) = run.phase { return Ok(clone(why)) }
+    let mut s = session_of(tx, h)?
+    if s.active_run != Some(id) { return Error(Malformed("inactive run")) }
+    match run.phase {
+        AwaitingModel(round) => {
+            cancel_effect(mut tx, h, EffectKey(run: id, round: round, kind: MODEL, ordinal: 0u64), mut run.spend)?
+        },
+        AwaitingRound(round, n) => for i in 0u64 .. n {
+            cancel_effect(mut tx, h, EffectKey(run: id, round: round, kind: TOOL, ordinal: i), mut run.spend)?
+        },
+        _ => (),
+    }
+    finish(mut tx, h, mut s, id, take run, Cancelled)?
+    Ok(Cancelled)
+}
+
+fn cancel_effect(mut tx: store.Tx, h: Handles, key: EffectKey, mut spend: Spend) -> Result[(), Refused] {
+    let Some(take found) = kept(store.fetch(tx, store.shape(h.effects), key))? else { return Error(Malformed("effect")) }
+    let mut e = take found
+    let dispatched = match e.phase {
+        Settled(_) => return Ok(()),
+        Doubted => return Ok(()),
+        Held => {
+            let wait = WaitKey(run: key.run, slot: key.ordinal, kind: APPROVAL, generation: key.round)
+            kept(store.put(mut tx, h.waits, wait, Revoked))?
+            false
+        },
+        Dispatched(_) => true,
+        _ => false,
+    }
+    cancel_trigger(mut tx, h, e.trigger)?
+    e.phase = if key.kind == MODEL {
+        spend.reserved -= e.reserve
+        if dispatched { spend.unresolved += e.reserve; Doubted } else { Settled(ModelFailed("run cancelled")) }
+    } else {
+        Settled(Tool(if dispatched { InDoubt } else { Failed("run cancelled") }))
+    }
+    kept(store.put(mut tx, h.effects, key, e))
+}
+
+fn cancel_trigger(mut tx: store.Tx, h: Handles, trigger: Option[store.triggers.Id]) -> Result[(), Refused] {
+    if let Some(id) = trigger {
+        match store.triggers.request_cancel(mut tx, h.triggers, id) {
+            Ok(()) => (),
+            Error(StaleAttempt) => (),
+            Error(_) => return Error(Storage),
+        }
+    }
+    Ok(())
 }
 
 fn tool_of[G: send](a: Agent[G], name: String) -> Option[Tool[G]] {
@@ -662,6 +719,10 @@ pub fn resume[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, key
     match e.phase { Parked => (), _ => return Ok(Ignored) }
     let s = session_of(tx, h)?
     if s.active_run != Some(key.run) { return Ok(Ignored) }
+    if now(mut tx) >= e.deadline {
+        advance(mut tx, h, a, w, Deadline(key))?
+        return Ok(Ignored)
+    }
     let shown = match take outcome {
         Returned(Inline(take b)) => if list.len(b) > INLINE_LIMIT { Failed("result too large") } else { Returned(Inline(take b)) },
         take other => take other,
@@ -929,7 +990,12 @@ fn step_round[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut
                 ran_inside = true
                 e.phase = match run_inside(mut tx, f, key, call.args, a.limits) {
                     Gave(take outcome) => Settled(Tool(take outcome)),
-                    Parks => { open = true; Parked },
+                    Parks => {
+                        open = true
+                        e.deadline = now(mut tx) + a.limits.tool_ms
+                        let _ = armed(store.triggers.write(mut tx, h.triggers, w.entries, w.advance, Deadline(key), At(e.deadline)))?
+                        Parked
+                    },
                 }
                 kept(store.put(mut tx, h.effects, key, e))?
             },
@@ -1004,13 +1070,14 @@ fn present[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut s:
 fn inspect(mut tx: store.Tx, h: Handles, key: EffectKey) -> Result[(), Refused] {
     let Some(take found) = kept(store.fetch(tx, store.shape(h.effects), key))? else { return Ok(()) }
     let mut e = take found
+    if now(mut tx) < e.deadline { return Ok(()) }
     let dispatched = match e.phase {
-        Settled(_) => return Ok(()),
-        Doubted => return Ok(()),
         Dispatched(_) => true,
-        _ => false,
+        Sealed => false,
+        Parked => false,
+        _ => return Ok(()),
     }
-    if let Some(t) = e.trigger { let _ = store.triggers.request_cancel(mut tx, h.triggers, t) }
+    cancel_trigger(mut tx, h, e.trigger)?
     e.phase = if key.kind == MODEL {
         if dispatched { Doubted } else { Settled(ModelFailed("model deadline")) }
     } else {
@@ -1105,6 +1172,7 @@ pub fn settle[G: send](mut tx: store.Tx, a: Agent[G], w: Wiring, attempt: store.
 
 fn settle_in[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, attempt: store.triggers.Attempt, take m: Settle) -> Result[Filed, Refused] {
     let Settle(key: key, receipt: take receipt) = take m
+    if !kept(active(tx, h, key.run))? { return Ok(Ignored) }
     let Some(take found) = kept(store.fetch(tx, store.shape(h.effects), key))? else { return Ok(Ignored) }
     let mut e = take found
     let Some(t) = e.trigger else { return Ok(Ignored) }

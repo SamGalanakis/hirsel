@@ -94,8 +94,13 @@ void hirsel_core_zero_bytes(uint8_t *block, uint8_t *at, uint64_t len);
    context or status; zero blocks read nothing. */
 void hirsel_core_sha256_blocks(uint32_t *state, const uint8_t *data, uint64_t blocks);
 
-/* Extend a finalized CRC-32C. Zero length reads nothing. */
+/* Extend a finalized CRC. Zero length reads nothing. */
 uint32_t hirsel_core_crc32c(uint32_t crc, const uint8_t *data, uint64_t len);
+uint64_t hirsel_core_crc64nvme(uint64_t crc, const uint8_t *data, uint64_t len);
+
+/* Concatenate two finalized checksums of the same algorithm. len_b is in bytes. */
+uint32_t hirsel_core_crc32c_combine(uint32_t a, uint32_t b, uint64_t len_b);
+uint64_t hirsel_core_crc64nvme_combine(uint64_t a, uint64_t b, uint64_t len_b);
 
 /* Signature verification. Returns 1 for a valid signature, 0 otherwise.
    Empty ranges are never read. No context or failure status. */

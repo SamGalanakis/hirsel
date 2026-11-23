@@ -1,5 +1,6 @@
 //! Core operations whose definition is the typed value operation itself.
 use super::*;
+use hirsel_core_ir::RtOp;
 
 impl<'c, 'a> Cx<'c, 'a, '_> {
     /// None means this operation needs a different kernel. Some(None) is a handled
@@ -89,8 +90,28 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 _ => None,
             };
         }
-        if module == ["crc32c"] && name == "update" {
-            return Some(self.crc32c_update(vals[0]?, vals[1]?, n));
+        let checksum = match (module, name) {
+            ([m], "update") if m == "crc32c" => Some((RtOp::Crc32c, Scalar::U32)),
+            ([m], "update") if m == "crc64nvme" => Some((RtOp::Crc64Nvme, Scalar::U64)),
+            _ => None,
+        };
+        if let Some((op, width)) = checksum {
+            return Some(self.crc_update(op, width, vals[0]?, vals[1]?, n));
+        }
+        if name == "combine" {
+            let op = match module {
+                [m] if m == "crc32c" => Some(RtOp::Crc32cCombine),
+                [m] if m == "crc64nvme" => Some(RtOp::Crc64NvmeCombine),
+                _ => None,
+            };
+            if let Some(op) = op {
+                let args = [
+                    Arg::Value(vals[0]?),
+                    Arg::Value(vals[1]?),
+                    Arg::Value(vals[2]?),
+                ];
+                return Some(Some(self.runtime_row(op, &args, n)?[0]));
+            }
         }
         if module == ["sha1"] && name == "blocks" {
             return Some(self.sha1_blocks(vals[0]?, vals[1]?, n));

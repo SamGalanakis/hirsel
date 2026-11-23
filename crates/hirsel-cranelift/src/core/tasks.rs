@@ -607,6 +607,24 @@ impl Function<'_, '_, '_> {
                 outputs[0] = self.c_call("hirsel_core_crc32c", &[W, P, U], &[W], &args[..3])?[0];
                 1
             }
+            RtOp::Crc64Nvme => {
+                outputs[0] = self.c_call("hirsel_core_crc64nvme", &[U, P, U], &[U], &args[..3])?[0];
+                1
+            }
+            RtOp::Crc32cCombine => {
+                outputs[0] =
+                    self.c_call("hirsel_core_crc32c_combine", &[W, W, U], &[W], &args[..3])?[0];
+                1
+            }
+            RtOp::Crc64NvmeCombine => {
+                outputs[0] = self.c_call(
+                    "hirsel_core_crc64nvme_combine",
+                    &[U, U, U],
+                    &[U],
+                    &args[..3],
+                )?[0];
+                1
+            }
             RtOp::Ed25519Verify | RtOp::P256Verify | RtOp::P256VerifyDer => {
                 let name = match op {
                     RtOp::Ed25519Verify => "hirsel_core_ed25519_verify",

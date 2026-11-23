@@ -379,6 +379,9 @@ tags!(RtOp {
     65 => ReceiveRec { item },
     67 => Crc32c,
     66 => SecretShare,
+    68 => Crc64Nvme,
+    69 => Crc32cCombine,
+    70 => Crc64NvmeCombine,
 });
 
 tags!(HostOp {

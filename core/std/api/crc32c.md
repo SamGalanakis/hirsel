@@ -1,9 +1,10 @@
 # CRC-32C
 
-[API overview](../API.md). [Core declaration](../../core/crc32c.hirsel). [IEEE CRC-32](crc32.md).
+[API overview](../API.md). [Core declaration](../../core/crc32c.hirsel). [IEEE CRC-32](crc32.md). [CRC-64/NVME](crc64nvme.md).
 
 ```hirsel
 pub fn crc32c.update(crc: u32, input: Bytes) -> u32
+pub fn crc32c.combine(a: u32, b: u32, len_b: u64) -> u32
 ```
 
 Pass zero to start a CRC-32C checksum, or pass a previous result to continue it.
@@ -17,3 +18,10 @@ the same on every engine and CPU. Native programs select the implementation on
 the first nonempty call and reuse it for the process. x86-64 uses SSE4.2 CRC
 instructions and folds long inputs with PCLMULQDQ when available. AArch64 uses
 the CRC extension when available. Other CPUs use the portable table.
+
+`combine` returns the checksum of two concatenated ranges from their finalized
+checksums, each computed starting at zero, and the byte length of the second
+range. An empty second range has checksum zero and leaves `a` unchanged.
+The operation accepts the full `u64` length range, allocates nothing, and uses one
+step. Set `HIRSEL_CRC=portable` before starting a native program to force the
+portable update implementation.

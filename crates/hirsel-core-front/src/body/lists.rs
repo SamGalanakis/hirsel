@@ -1498,19 +1498,21 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     }
 
     /// Extend over one chunk per step so a budget can stop large checksums.
-    pub(super) fn crc32c_update(
+    pub(super) fn crc_update(
         &mut self,
+        op: hirsel_core_ir::RtOp,
+        width: Scalar,
         crc: ValueId,
         header: ValueId,
         n: NodeId,
     ) -> Option<ValueId> {
-        let u32_ = Ty::Scalar(Scalar::U32);
+        let checksum = Ty::Scalar(width);
         let u64_ = Ty::Scalar(Scalar::U64);
         let data = self.read_sequence_word(header, 0, Ty::Ptr, n);
         let len = self.read_sequence_word(header, 8, u64_, n);
         let zero = self.konst(u64_, 0, n)?;
         let limit = self.konst(u64_, 16 * 1024, n)?;
-        let head = self.new_block(&[u64_, u32_]);
+        let head = self.new_block(&[u64_, checksum]);
         let chunk = self.new_block(&[]);
         let update = self.new_block(&[u64_]);
         let done = self.new_block(&[]);
@@ -1544,7 +1546,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let from = self.address(AddressBase::Value(data), &[Step::Byte(offset)], byte, n);
         let from = self.pointer(from, n);
         let next = self.runtime_row(
-            hirsel_core_ir::RtOp::Crc32c,
+            op,
             &[Arg::Value(crc), Arg::Value(from), Arg::Value(count)],
             n,
         )?[0];

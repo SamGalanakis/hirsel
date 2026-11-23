@@ -6688,18 +6688,22 @@ impl Machine<'_> {
                 );
                 vec![]
             }
-            RtOp::Crc32c => {
-                let mut crc = !(a[0] as u32);
+            RtOp::Crc32c | RtOp::Crc64Nvme => {
+                let (poly, mask) = if op == RtOp::Crc32c {
+                    (0x82f63b78, u64::from(u32::MAX))
+                } else {
+                    (0x9a6c9329ac4bc9b5, u64::MAX)
+                };
+                let mut crc = a[0] ^ mask;
                 if a[2] != 0 {
                     for &byte in self.get(a[1], a[2] as usize) {
-                        crc ^= u32::from(byte);
-                        for _ in 0..8 {
-                            crc = (crc >> 1) ^ (0x82f63b78 & (crc & 1).wrapping_neg());
-                        }
+                        crc = crc_zero_byte(crc ^ u64::from(byte), poly);
                     }
                 }
-                vec![u64::from(!crc)]
+                vec![crc ^ mask]
             }
+            RtOp::Crc32cCombine => vec![crc_combine::<32>(a[0], a[1], a[2], 0x82f63b78)],
+            RtOp::Crc64NvmeCombine => vec![crc_combine::<64>(a[0], a[1], a[2], 0x9a6c9329ac4bc9b5)],
             RtOp::Ed25519Verify | RtOp::P256Verify | RtOp::P256VerifyDer => {
                 use hirsel_core_net::SignatureAlgorithm;
                 let algorithm = match op {
@@ -8254,6 +8258,37 @@ fn sha1_blocks(h: &mut [u32; 5], data: &[u8]) {
 /// `rt.sha256_blocks` (crate docs, "SHA-256"): FIPS 180-4 section 6.2.2 over
 /// each 64-byte block of `data`, in order. The evaluator's own portable
 /// form; the run time's is `hirsel_core_sha256_blocks`.
+fn crc_zero_byte(mut remainder: u64, poly: u64) -> u64 {
+    for _ in 0..8 {
+        remainder = (remainder >> 1) ^ (poly & (remainder & 1).wrapping_neg());
+    }
+    remainder
+}
+
+fn crc_combine<const WIDTH: usize>(mut a: u64, b: u64, mut len_b: u64, poly: u64) -> u64 {
+    // Each column describes what a zero byte does to one bit of the CRC.
+    fn apply<const WIDTH: usize>(columns: &[u64; WIDTH], mut value: u64) -> u64 {
+        let mut result = 0;
+        while value != 0 {
+            result ^= columns[value.trailing_zeros() as usize];
+            value &= value - 1;
+        }
+        result
+    }
+
+    let mut power: [u64; WIDTH] = std::array::from_fn(|bit| crc_zero_byte(1 << bit, poly));
+    while len_b != 0 {
+        if len_b & 1 != 0 {
+            a = apply(&power, a);
+        }
+        len_b >>= 1;
+        if len_b != 0 {
+            power = power.map(|column| apply(&power, column));
+        }
+    }
+    a ^ b
+}
+
 fn sha256_blocks(h: &mut [u32; 8], data: &[u8]) {
     for block in data.as_chunks::<64>().0 {
         let mut w = [0u32; 64];

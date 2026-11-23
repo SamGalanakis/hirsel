@@ -74,6 +74,9 @@ fn runtime_probes() -> Module {
         RtOp::ReceiveRec { item: ITEM },
         RtOp::Crc32c,
         RtOp::SecretShare,
+        RtOp::Crc64Nvme,
+        RtOp::Crc32cCombine,
+        RtOp::Crc64NvmeCombine,
     ]
     .into_iter()
     .chain(HostOp::ALL.iter().copied().map(RtOp::Host))

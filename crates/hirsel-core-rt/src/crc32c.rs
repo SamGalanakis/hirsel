@@ -1,6 +1,6 @@
 use std::sync::OnceLock;
 
-const POLY: u32 = 0x82f63b78;
+use super::crc::CASTAGNOLI as POLY;
 
 const fn advance_bit(crc: u32) -> u32 {
     (crc >> 1) ^ (POLY & (crc & 1).wrapping_neg())
@@ -50,6 +50,9 @@ fn portable(mut crc: u32, bytes: &[u8]) -> u32 {
 type Update = unsafe fn(u32, &[u8]) -> u32;
 
 fn select() -> Update {
+    if super::crc::force_portable() {
+        return portable;
+    }
     #[cfg(target_arch = "x86_64")]
     if std::is_x86_feature_detected!("sse4.2") {
         if std::is_x86_feature_detected!("pclmulqdq") {

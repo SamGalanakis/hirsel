@@ -477,13 +477,15 @@
 //! it to `void hirsel_core_sha256_blocks(uint32_t *, const uint8_t *, uint64_t)`,
 //! with no context or status.
 //!
-//! # CRC-32C
+//! # CRC
 //!
-//! `rt.crc32c(crc, data, len)` extends a finalized Castagnoli CRC over the
-//! readable span. Zero length returns the incoming CRC without reading data.
-//! The row admits no memory, never fails and takes no step itself. Lowering
-//! `crc32c.update` emits a step before calling the kernel on each nonempty
-//! chunk of up to 16 KiB.
+//! `rt.crc32c` and `rt.crc64nvme` extend finalized checksums over readable
+//! spans. Zero length returns the incoming checksum without reading data.
+//! Lowering their update operations emits a step before each nonempty chunk
+//! of up to 16 KiB. The combine rows shift the first checksum through the
+//! second range's byte length and XOR the second checksum. Both inputs must
+//! have been computed from the standard seed. The rows admit no memory, never
+//! fail and take no step themselves.
 //!
 //! # Zero fill
 //!

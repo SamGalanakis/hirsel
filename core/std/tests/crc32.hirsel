@@ -1,3 +1,4 @@
+// test-env: HIRSEL_CRC=portable
 // CRC-32/ISO-HDLC check value (RevEng catalogue), the PNG IEND chunk
 // (W3C PNG, Privacy Considerations example), and RFC 3720 B.4's byte ramp
 // with the IEEE polynomial and expected residue from Python's binascii.crc32.
@@ -116,4 +117,119 @@ fn castagnoli_contract() -> bool {
         }
     }
     castagnoli_steps(buffer)
+}
+
+// aws-checksums tests/crc64_test.c and crc-fast src/test/consts.rs.
+fn nvme_vectors() -> bool {
+    let zero = b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+    let ramp = b"\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f"
+    crc64nvme.update(0, b"123456789") == 0xae8b14860a799888u64 && crc64nvme.update(0, zero) == 0xcf3473434d4ecf3bu64 && crc64nvme.update(0, ramp) == 0xb9d9d4a8492cbd7fu64
+}
+
+fn crc_reference(input: Bytes, poly: u64, mask: u64) -> u64 {
+    let mut value = mask
+    for byte in input {
+        let widened: u64 = int.widen(byte)
+        value = value ^ widened
+        for _ in 0u64 .. 8 {
+            if (value & 1) == 1 {
+                value = (value >> 1) ^ poly
+            } else {
+                value = value >> 1
+            }
+        }
+    }
+    value ^ mask
+}
+
+fn crc_combine_law(input: Bytes, len: u64) -> bool {
+    let nvme = crc_reference(input, 0x9a6c9329ac4bc9b5u64, 0xffffffffffffffffu64)
+    let castagnoli: u32 = int.truncate(crc_reference(input, 0x82f63b78u64, 0xffffffffu64))
+    let mut seed = 0x9c1da457u32
+    for sample in 0u64 .. 26 {
+        seed = seed ^ (seed << 13)
+        seed = seed ^ (seed >> 17)
+        seed = seed ^ (seed << 5)
+        let wide: u64 = int.widen(seed)
+        let split = if sample == 0 {
+            0u64
+        } else if sample == 1 {
+            len
+        } else {
+            wide % (len + 1)
+        }
+        let first = list.slice(input, 0, split)
+        let second = list.slice(input, split, len)
+        let prefix = crc64nvme.update(0, first)
+        let suffix = crc64nvme.update(0, second)
+        let combined = bound steps 1 {
+            crc64nvme.combine(prefix, suffix, len - split)
+        }
+        let Ok(checksum) = combined else {
+            return false
+        }
+        if checksum != nvme || crc64nvme.update(prefix, second) != nvme {
+            return false
+        }
+        if crc32c.combine(crc32c.update(0, first), crc32c.update(0, second), len - split) != castagnoli {
+            return false
+        }
+    }
+    // Zero-byte shift operators exponentiated independently by Gaussian basis
+    // give the right CRC and concatenated CRC for a suffix of u64::MAX zero bytes.
+    crc64nvme.combine(0x1246adba3a993feeu64, 0, 0xffffffffffffffffu64) == 0x1246adba3a993feeu64 && crc32c.combine(0x3a993feeu32, 0x6064a37au32, 0xffffffffffffffffu64) == 0x69af58b9u32
+}
+
+fn nvme_steps(input: Bytes) -> bool {
+    let empty = list.slice(input, 0, 0)
+    let one_chunk = list.slice(input, 1, 16385)
+    let two_chunks = list.slice(input, 1, 16386)
+    let unchanged = bound steps 1 {
+        crc64nvme.update(0x7d25f6a8324c05efu64, empty)
+    }
+    let within = bound steps 2 {
+        crc64nvme.update(0x7d25f6a8324c05efu64, one_chunk)
+    }
+    let exhausted = bound steps 2 {
+        crc64nvme.update(0x7d25f6a8324c05efu64, two_chunks)
+    }
+    let exact = bound steps 3 {
+        crc64nvme.update(0x7d25f6a8324c05efu64, two_chunks)
+    }
+    let Ok(0x7d25f6a8324c05efu64) = unchanged else {
+        return false
+    }
+    let Ok(0xe68402c8169cd272u64) = within else {
+        return false
+    }
+    let Error(OutOfTime(steps: 2)) = exhausted else {
+        return false
+    }
+    let Ok(0xd4080d6374a28c69u64) = exact else {
+        return false
+    }
+    true
+}
+
+// expect: run nvme_and_combine_contract() = true
+fn nvme_and_combine_contract() -> bool {
+    if !nvme_vectors() {
+        return false
+    }
+    let mut buffer: Bytes = list.with_capacity(16386)
+    let mut state = 0xc3513ba7u32
+    for _ in 0u64 .. 16386 {
+        state = state ^ (state << 13)
+        state = state ^ (state >> 17)
+        state = state ^ (state << 5)
+        list.push(mut buffer, int.truncate(state))
+    }
+    // Exercise unaligned updates on both sides of the folding boundaries.
+    for len in 0u64 .. 145 {
+        let slice = list.slice(buffer, 1, len + 1)
+        if crc64nvme.update(0, slice) != crc_reference(slice, 0x9a6c9329ac4bc9b5u64, 0xffffffffffffffffu64) {
+            return false
+        }
+    }
+    nvme_steps(buffer) && crc_combine_law(list.slice(buffer, 1, 4099), 4098)
 }

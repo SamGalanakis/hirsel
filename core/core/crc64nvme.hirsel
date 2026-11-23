@@ -1,0 +1,8 @@
+// Module `crc64nvme`: CRC-64/NVME.
+/// Extend a finalized CRC-64/NVME over input. Pass zero to start a checksum.
+/// Empty input returns crc. Alloc: none. Steps: one per started 16 KiB, plus the call.
+pub fn update(crc: u64, input: Bytes) -> u64
+
+/// Combine the finalized CRC-64/NVME checksums of two adjacent byte ranges.
+/// len_b is the byte length of the second range. Alloc: none. Steps: one.
+pub fn combine(a: u64, b: u64, len_b: u64) -> u64

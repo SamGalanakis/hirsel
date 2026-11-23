@@ -2,3 +2,7 @@
 /// Extend a finalized CRC-32C over input. Pass zero to start a checksum.
 /// Empty input returns crc. Alloc: none. Steps: one per started 16 KiB, plus the call.
 pub fn update(crc: u32, input: Bytes) -> u32
+
+/// Combine the finalized CRC-32C checksums of two adjacent byte ranges.
+/// len_b is the byte length of the second range. Alloc: none. Steps: one.
+pub fn combine(a: u32, b: u32, len_b: u64) -> u32

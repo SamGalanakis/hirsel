@@ -283,8 +283,8 @@ is core's plain record `{ steps: u64 }`.
   step plus any steps taken by the user code it enters. `secret.scram_sha256` takes
   one further step for each PBKDF2 iteration it admits, at the call and before any
   derivation, because an untrusted server chooses the work ([TLS-6](tls.md#tls-6-scram-sha-256)).
-  `crc32c.update` takes one further step before each nonempty 16 KiB chunk,
-  including a final partial chunk. Code an engine adds for drop, clone and growth
+  `crc32c.update` and `crc64nvme.update` take one further step before each nonempty
+  16 KiB chunk, including a final partial chunk. Code an engine adds for drop, clone and growth
   takes no steps. The steps a run takes follow from its source and its values alone.
 - **The current bound.** At each point exactly one step bound is current, or none: the
   innermost enclosing `bound steps` scope's, else the task's root step bound, else none.

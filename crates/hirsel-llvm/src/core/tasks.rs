@@ -473,6 +473,25 @@ impl FunctionEmitter<'_> {
                 &[W],
                 &[arg(Type::I32, args[0].clone()), p(&args[1]), u(&args[2])],
             ),
+            RtOp::Crc64Nvme => self.native_call(
+                "hirsel_core_crc64nvme",
+                &[U],
+                &[u(&args[0]), p(&args[1]), u(&args[2])],
+            ),
+            RtOp::Crc32cCombine => self.native_call(
+                "hirsel_core_crc32c_combine",
+                &[W],
+                &[
+                    arg(Type::I32, args[0].clone()),
+                    arg(Type::I32, args[1].clone()),
+                    u(&args[2]),
+                ],
+            ),
+            RtOp::Crc64NvmeCombine => self.native_call(
+                "hirsel_core_crc64nvme_combine",
+                &[U],
+                &[u(&args[0]), u(&args[1]), u(&args[2])],
+            ),
             RtOp::Ed25519Verify | RtOp::P256Verify | RtOp::P256VerifyDer => {
                 let name = match op {
                     RtOp::Ed25519Verify => "hirsel_core_ed25519_verify",

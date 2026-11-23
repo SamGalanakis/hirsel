@@ -2,6 +2,7 @@
 #include "key.h"
 #include <llvm/ADT/DenseMap.h>
 #include <llvm/ADT/StringMap.h>
+#include <llvm-c/TargetMachine.h>
 #include <llvm/AsmParser/Parser.h>
 #include <llvm/BinaryFormat/Dwarf.h>
 #include <llvm/IR/Constants.h>
@@ -20,6 +21,12 @@
 #include <memory>
 using namespace llvm;
 
+extern "C" LLVMTargetMachineRef hirsel_llvm_release_machine(const char *, const char *, const char *, HirselBuilderOutput *);
+extern "C" void *hirsel_llvm_large_stream(LLVMModuleRef, LLVMTargetMachineRef, char **);
+extern "C" void hirsel_llvm_large_stream_finished(void *, LLVMValueRef);
+extern "C" void hirsel_llvm_large_stream_free(void *);
+extern "C" [[noreturn]] void hirsel_llvm_allocation_failed(const char *);
+
 // Construction mirrors LLParser: a global referenced before its definition is
 // an unnamed i8 placeholder that the definition replaces, so the module lists
 // globals and functions in definition order exactly as the parsed text does.
@@ -31,9 +38,12 @@ struct HirselLlvmBuilder {
     AllocaInst *last_alloca = nullptr;
     StringMap<GlobalVariable *> forward;
     DenseMap<size_t, TrackingMDRef> metadata;
+    // Simplifies each finished body once the unit is large (unit_stream).
+    void *stream = nullptr;
     HirselLlvmBuilder(LLVMContext &c, StringRef name)
         : context(c), module(std::make_unique<Module>(name, c)), builder(c) {}
     ~HirselLlvmBuilder() {
+        if (stream) hirsel_llvm_large_stream_free(stream);
         for (auto &entry : forward) {
             entry.second->replaceAllUsesWith(PoisonValue::get(entry.second->getType()));
             entry.second->eraseFromParent();
@@ -42,7 +52,7 @@ struct HirselLlvmBuilder {
 };
 static void output(HirselBuilderOutput *out, StringRef text, bool failed = false) {
     out->len = text.size(); out->data = static_cast<uint8_t *>(std::malloc(out->len ? out->len : 1));
-    if (!out->data) std::abort();
+    if (!out->data) hirsel_llvm_allocation_failed("Builder output allocation failed");
     std::memcpy(out->data, text.data(), out->len); out->failed = failed;
 }
 static LLVMContextRef context_new(uint8_t anonymous_locals) {
@@ -64,6 +74,17 @@ static LLVMModuleRef unit_take(HirselLlvmBuilder *u, HirselBuilderOutput *out) {
     auto *module = u->module.release(); delete u; output(out, ""); return wrap(module);
 }
 static void module_drop(LLVMModuleRef module) { delete unwrap(module); }
+// Simplify the unit's bodies as they finish once it is large, for the
+// release machine of `triple`, `cpu` and `features`.
+static void unit_stream(HirselLlvmBuilder *u, const char *triple, const char *cpu, const char *features,
+                        HirselBuilderOutput *out) {
+    LLVMTargetMachineRef machine = hirsel_llvm_release_machine(triple, cpu, features, out);
+    if (!machine) return;
+    char *error = nullptr;
+    u->stream = hirsel_llvm_large_stream(wrap(u->module.get()), machine, &error);
+    if (!u->stream) { output(out, error, true); LLVMDisposeMessage(error); return; }
+    output(out, "");
+}
 // The module's key (key.h): what its bitcode records, with no bitcode written.
 static void module_key(LLVMModuleRef module, HirselBuilderOutput *out) {
     hirsel_key::Digest key = hirsel_key::module_key(*unwrap(module));
@@ -155,7 +176,16 @@ static FunctionType *signature(LLVMTypeRef result, LLVMTypeRef const *types, siz
 static LLVMValueRef function(HirselLlvmBuilder *u, const char *name, size_t len, LLVMTypeRef result,
                              LLVMTypeRef const *types, size_t n, unsigned linkage) {
     StringRef symbol(name, len);
-    auto *f = Function::Create(signature(result, types, n), GlobalValue::ExternalLinkage, symbol, *u->module);
+    // A streamed body's passes may have declared this function (an intrinsic
+    // or library call); the definition replaces it as it replaces a forward use.
+    Function *declared = u->stream ? u->module->getFunction(symbol) : nullptr;
+    auto *f = Function::Create(signature(result, types, n), GlobalValue::ExternalLinkage,
+                               declared ? StringRef() : symbol, *u->module);
+    if (declared) {
+        declared->replaceAllUsesWith(f);
+        f->takeName(declared);
+        declared->eraseFromParent();
+    }
     f->setLinkage(linkages[linkage]);
     // The parser assigns the written attributes; intrinsic attributes are
     // reapplied at its end-of-module upgrade (finish_declaration).
@@ -203,6 +233,11 @@ static void subprogram(LLVMValueRef f, LLVMMetadataRef md) { cast<Function>(unwr
 static void begin_body(HirselLlvmBuilder *u, LLVMValueRef f) {
     u->function = cast<Function>(unwrap(f)); u->last_alloca = nullptr;
     u->builder.SetInsertPoint(BasicBlock::Create(u->context, "entry", u->function));
+}
+static void end_body(HirselLlvmBuilder *u) {
+    u->builder.ClearInsertionPoint();
+    if (u->stream) hirsel_llvm_large_stream_finished(u->stream, wrap(u->function));
+    u->function = nullptr;
 }
 static LLVMValueRef parameter(LLVMValueRef f, unsigned index) { return wrap(cast<Function>(unwrap(f))->getArg(index)); }
 static void set_name(LLVMValueRef v, const char *name, size_t len) { unwrap(v)->setName(StringRef(name, len)); }
@@ -357,6 +392,6 @@ extern "C" const HirselLlvmBuilderApi *hirsel_llvm_no_folder_api() {
         atomic_rmw, fence, branch, conditional, switch_value, return_value, unreachable,
         module_asm, metadata_ref, metadata_string, metadata_integer, metadata_tuple, metadata_bind, named_metadata,
         attach, location, metadata_value, di_file, di_compile_unit, di_subroutine_type, di_subprogram, di_location,
-        di_lexical_block_file, shuffle, extract_element, insert_element};
+        di_lexical_block_file, shuffle, extract_element, insert_element, unit_stream, end_body};
     return &api;
 }

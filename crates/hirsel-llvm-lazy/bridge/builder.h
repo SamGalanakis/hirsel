@@ -94,6 +94,8 @@ typedef struct {
     LLVMValueRef (*shuffle)(HirselLlvmBuilder *, LLVMValueRef, LLVMValueRef, const int32_t *, size_t);
     LLVMValueRef (*extract_element)(HirselLlvmBuilder *, LLVMValueRef, unsigned);
     LLVMValueRef (*insert_element)(HirselLlvmBuilder *, LLVMValueRef, LLVMValueRef, unsigned);
+    void (*unit_stream)(HirselLlvmBuilder *, const char *, const char *, const char *, HirselBuilderOutput *);
+    void (*end_body)(HirselLlvmBuilder *);
 } HirselLlvmBuilderApi;
 const HirselLlvmBuilderApi *hirsel_llvm_no_folder_api(void);
 #ifdef __cplusplus

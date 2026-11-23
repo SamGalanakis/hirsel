@@ -27,7 +27,7 @@ COMPOSE_FLAGS = [
 
 cxx_library(
     name = "compose",
-    srcs = ["compose.cpp", "builder.cpp", "parts.cpp", "key.cpp"],
+    srcs = ["compose.cpp", "builder.cpp", "parts.cpp", "key.cpp", "out_of_memory.cpp"],
     headers = {
         "builder.h": "builder.h",
         "key.h": "key.h",

@@ -105,6 +105,9 @@ pub(crate) struct Api {
     pub shuffle: unsafe extern "C" fn(Raw, Raw, Raw, *const i32, usize) -> Raw,
     pub extract_element: unsafe extern "C" fn(Raw, Raw, u32) -> Raw,
     pub insert_element: unsafe extern "C" fn(Raw, Raw, Raw, u32) -> Raw,
+    pub unit_stream:
+        unsafe extern "C" fn(Raw, *const c_char, *const c_char, *const c_char, *mut Output),
+    pub end_body: unsafe extern "C" fn(Raw),
 }
 
 pub(crate) struct Context {
@@ -192,4 +195,64 @@ pub(crate) fn output(out: Output) -> Result<String, String> {
     let (bytes, failed) = output_bytes(out);
     let text = String::from_utf8(bytes).expect("LLVM prints UTF-8");
     if failed { Err(text) } else { Ok(text) }
+}
+
+#[cfg(test)]
+mod tests {
+    const CHILD: &str = "HIRSEL_LLVM_OUT_OF_MEMORY_CHILD";
+
+    // LLVM copies a 1 GiB metadata string past a 256 MiB limit. The source is
+    // a read-only anonymous mapping, which the data limit does not count, so
+    // only LLVM's own copy can reach the limit.
+    #[test]
+    fn llvm_out_of_memory_child() {
+        if std::env::var_os(CHILD).is_none() {
+            return;
+        }
+        let context = super::Context::new().unwrap();
+        let unit = context.unit();
+        let len = 1 << 30;
+        // SAFETY: a fresh private mapping, read as zero bytes and never freed.
+        let text = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_READ,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE,
+                -1,
+                0,
+            )
+        };
+        assert_ne!(text, libc::MAP_FAILED);
+        // SAFETY: the unit is live and the mapping spans `len` bytes.
+        unsafe { (context.api.metadata_string)(unit, text.cast(), len) };
+        unreachable!("LLVM copied 1 GiB under a 256 MiB limit");
+    }
+
+    #[test]
+    fn an_llvm_allocation_past_the_limit_ends_the_process_with_the_guard_message() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "construction::tests::llvm_out_of_memory_child",
+                "--exact",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD, "1")
+            .env("HIRSEL_MEMORY_LIMIT", "256M")
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(
+            output.status.code(),
+            Some(hirsel_guard::EXIT_STATUS),
+            "{stderr}"
+        );
+        assert!(
+            stderr.contains(
+                "hirsel: memory limit 256M reached (HIRSEL_MEMORY_LIMIT); LLVM failed to allocate"
+            ),
+            "{stderr}"
+        );
+    }
 }

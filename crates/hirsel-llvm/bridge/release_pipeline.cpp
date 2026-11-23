@@ -11,6 +11,7 @@
 #include "implied_check.h"
 #include "pass_cost.h"
 
+#include <llvm-c/Core.h>
 #include <llvm-c/TargetMachine.h>
 #include <llvm/ADT/MapVector.h>
 #include <llvm/Analysis/CFG.h>
@@ -24,6 +25,7 @@
 #include <llvm/Bitcode/BitcodeReader.h>
 #include <llvm/Linker/Linker.h>
 #include <llvm/Support/MemoryBuffer.h>
+#include <llvm/Target/TargetMachine.h>
 #include <llvm/Passes/PassBuilder.h>
 #include <llvm/Passes/StandardInstrumentations.h>
 #include <llvm/Transforms/IPO/ElimAvailExtern.h>
@@ -621,22 +623,101 @@ extern "C" void hirsel_llvm_align_release_functions(LLVMModuleRef module) {
     }
 }
 
+namespace {
+
+// Above this scale, speculative inlining and path-sensitive analyses can
+// multiply a module that already occupies hundreds of MiB.
+constexpr size_t MaxFullPipelineInstructions = 1'000'000;
+// A unit the builder found large as it lowered it (LargeStream).
+constexpr StringLiteral LargeReleaseMark = "hirsel.large-release";
+// Preserve call boundaries. Even always-inline helpers can expand this much
+// IR past the memory budget. Std calls use the side's objects.
+constexpr StringLiteral LargeFunctionPasses =
+    "sroa<modify-cfg>,early-cse,instcombine<no-verify-fixpoint>,simplifycfg";
+
+// A release unit's bodies simplified as the builder finishes each one. Raw
+// lowered IR is bulky: on a 10M-instruction unit the large pipeline's
+// function passes keep about 28% of it, so a unit simplified only after
+// lowering holds the whole raw module at once. Once the unit's raw bodies
+// pass the large-unit scale, each finished body, and every body before it,
+// runs those passes; the large pipeline still runs over the whole unit, with
+// every callee resolved. A smaller unit is not touched and keeps the full
+// pipeline.
+class LargeStream {
+    Module &module;
+    TargetMachine *machine;
+    LoopAnalysisManager loops;
+    FunctionAnalysisManager functions;
+    CGSCCAnalysisManager calls;
+    ModuleAnalysisManager modules;
+    PassBuilder builder;
+    FunctionPassManager passes;
+    size_t raw = 0;
+    bool large = false;
+
+    void simplify(Function &f) {
+        passes.run(f, functions);
+        functions.clear(f, f.getName());
+    }
+
+public:
+    LargeStream(Module &module, TargetMachine *machine) : module(module), machine(machine), builder(machine) {
+        builder.registerLoopAnalyses(loops);
+        builder.registerFunctionAnalyses(functions);
+        builder.registerCGSCCAnalyses(calls);
+        builder.registerModuleAnalyses(modules);
+        builder.crossRegisterProxies(loops, functions, calls, modules);
+        // The passes run before the engine sets the target; they fold for its layout.
+        module.setTargetTriple(machine->getTargetTriple());
+        module.setDataLayout(machine->createDataLayout());
+    }
+    ~LargeStream() { delete machine; }
+    Error parse() { return builder.parsePassPipeline(passes, LargeFunctionPasses); }
+
+    void finished(Function &f) {
+        raw += f.getInstructionCount();
+        if (large) return simplify(f);
+        if (raw <= MaxFullPipelineInstructions) return;
+        large = true;
+        module.getOrInsertNamedMetadata(LargeReleaseMark)->addOperand(MDNode::get(module.getContext(), {}));
+        for (Function &body : module)
+            if (!body.isDeclaration()) simplify(body);
+    }
+};
+
+} // namespace
+
+// Takes `machine`; NULL when the pass text does not parse, with `error` set.
+extern "C" void *hirsel_llvm_large_stream(LLVMModuleRef module, LLVMTargetMachineRef machine, char **error) {
+    auto stream = std::make_unique<LargeStream>(*unwrap(module), reinterpret_cast<TargetMachine *>(machine));
+    if (Error e = stream->parse()) {
+        *error = LLVMCreateMessage(toString(std::move(e)).c_str());
+        return nullptr;
+    }
+    return stream.release();
+}
+extern "C" void hirsel_llvm_large_stream_finished(void *stream, LLVMValueRef function) {
+    static_cast<LargeStream *>(stream)->finished(*cast<Function>(unwrap(function)));
+}
+extern "C" void hirsel_llvm_large_stream_free(void *stream) { delete static_cast<LargeStream *>(stream); }
+
+// Whether `module` takes the large pipeline: its builder found it large
+// while lowering it (the mark is removed here), or it is large as it stands.
 extern "C" LLVMBool hirsel_llvm_large_release(LLVMModuleRef module) {
-    // Above this scale, speculative inlining and path-sensitive analyses can
-    // multiply a module that already occupies hundreds of MiB.
-    constexpr size_t MaxFullPipelineInstructions = 1'000'000;
+    Module &m = *unwrap(module);
+    if (NamedMDNode *mark = m.getNamedMetadata(LargeReleaseMark)) {
+        m.eraseNamedMetadata(mark);
+        return 1;
+    }
     size_t count = 0;
-    for (const Function &function : *unwrap(module))
+    for (const Function &function : m)
         if ((count += function.getInstructionCount()) > MaxFullPipelineInstructions) return 1;
     return 0;
 }
 
 extern "C" LLVMErrorRef hirsel_llvm_optimize_large_release(LLVMModuleRef module, LLVMTargetMachineRef machine) {
-    // Preserve call boundaries. Even always-inline helpers can expand this
-    // much IR past the memory budget. Std calls use the side's objects.
     return runPasses(module, machine, "release",
-        "globaldce,function<eager-inv>(sroa<modify-cfg>,early-cse,"
-        "instcombine<no-verify-fixpoint>,simplifycfg),globaldce");
+        ("globaldce,function<eager-inv>(" + LargeFunctionPasses + "),globaldce").str());
 }
 
 extern "C" LLVMErrorRef hirsel_llvm_optimize_release(

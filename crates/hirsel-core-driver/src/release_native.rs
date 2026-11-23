@@ -241,6 +241,10 @@ pub(super) fn emit_release_image(
     ),
 ) -> Result<Emitted, NativeStop> {
     joined.external_call_sites = !options.foreign_grants.is_empty();
+    let _context = hirsel_guard::process_memory_context(format!(
+        "building the release image of {}",
+        instance.definition.0.name
+    ));
     // The bodies a program imports shape its code, so they key its parts.
     let lent_key =
         (!lent.is_empty()).then(|| ContentHash::of_parts("hirsel.core-std-lent.v1", [lent]));
@@ -340,6 +344,8 @@ pub(super) fn emit_release_image(
         &consumed.iter().map(Vec::as_slice).collect::<Vec<_>>(),
     )?;
     drop(consumed);
+    // The Core modules and facts are read only until the unit is lowered.
+    let mut core = Some((modules, facts));
     // Every part, whichever program reached it, is in the shared parts cache.
     let shared = Store::new(&options.parts)?;
     let emit = |message: String| NativeStop::Emit {
@@ -361,12 +367,14 @@ pub(super) fn emit_release_image(
         && target == hirsel_core_layout::Target::X86_64Linux
         && std::env::var_os("HIRSEL_LLVM_PRINTED_ORACLE").is_none()
     {
+        let (modules, facts) = core.as_ref().expect("the Core unit is not yet lowered");
         let mut release = hirsel_llvm_lazy::ReleaseUnit::lower(
             &modules[0],
             &facts[0],
             options.logical_charge_report.is_some(),
         )
         .map_err(emit)?;
+        core = None;
         sites = std::mem::take(&mut release.sites);
         debug_sites = std::mem::take(&mut release.debug_sites);
         let key = crate::native::key(
@@ -406,12 +414,9 @@ pub(super) fn emit_release_image(
         };
         let exports = [instance.symbol()];
         let program = match lowered {
-            Some(release) => {
-                drop(facts);
-                drop(modules);
-                release.emit(&exports, jobs, &mut reuse, lend)
-            }
+            Some(release) => release.emit(&exports, jobs, &mut reuse, lend),
             None => {
+                let (modules, facts) = core.take().expect("the Core unit is not yet lowered");
                 let unit = hirsel_llvm_lazy::Unit::Core {
                     module: &modules[0],
                     facts: &facts[0],

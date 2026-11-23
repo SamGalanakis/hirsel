@@ -30,10 +30,13 @@ use std::sync::atomic::{AtomicU8, Ordering};
 thread_local! {
     static MEMORY_CONTEXT: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
 }
+/// The work a thread without its own context does for the process.
+static PROCESS_CONTEXT: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 
-/// Name the function being instantiated if its compilation reaches the memory limit.
-/// The label is diagnostic context only; no budget or outcome is changed.
-pub fn with_instance_context<R>(name: String, work: impl FnOnce() -> R) -> R {
+/// Name the work under way on this thread, as `doing` ("instantiating
+/// function f"), if it reaches the memory limit. The label is diagnostic
+/// context only; no budget or outcome is changed.
+pub fn with_memory_context<R>(doing: String, work: impl FnOnce() -> R) -> R {
     struct Restore(String);
     impl Drop for Restore {
         fn drop(&mut self) {
@@ -42,8 +45,28 @@ pub fn with_instance_context<R>(name: String, work: impl FnOnce() -> R) -> R {
             });
         }
     }
-    let _restore = Restore(MEMORY_CONTEXT.with(|context| context.replace(name)));
+    let _restore = Restore(MEMORY_CONTEXT.with(|context| context.replace(doing)));
     work()
+}
+
+/// Name the work the process does, as `doing`, for every thread that has no
+/// context of its own (such as the workers a foreign library like LLVM
+/// starts), until the returned value is dropped.
+pub fn process_memory_context(doing: String) -> ProcessMemoryContext {
+    ProcessMemoryContext(swap_process_context(doing))
+}
+/// Restores the previous process context when dropped.
+pub struct ProcessMemoryContext(String);
+impl Drop for ProcessMemoryContext {
+    fn drop(&mut self) {
+        swap_process_context(std::mem::take(&mut self.0));
+    }
+}
+fn swap_process_context(doing: String) -> String {
+    let mut context = PROCESS_CONTEXT
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    std::mem::replace(&mut context, doing)
 }
 
 /// The limit without `HIRSEL_MEMORY_LIMIT`: 4 GiB.
@@ -531,6 +554,26 @@ fn oracle_failed(address: usize) -> ! {
 
 #[cold]
 fn exhausted(size: usize) -> ! {
+    limit_reached(|line| {
+        line.text(b"allocating ")
+            .number(size as u64)
+            .text(b" more bytes failed");
+    })
+}
+
+/// An allocation a foreign library (`library`, such as LLVM) made failed:
+/// the process ends as it ends when the limit refuses a Rust allocation.
+#[cold]
+pub fn foreign_exhausted(library: &[u8], reason: &[u8]) -> ! {
+    limit_reached(|line| {
+        line.text(library)
+            .text(b" failed to allocate (")
+            .text(reason)
+            .text(b")");
+    })
+}
+
+fn limit_reached(failed: impl FnOnce(&mut Line)) -> ! {
     let mut current = libc::rlimit {
         rlim_cur: libc::RLIM_INFINITY,
         rlim_max: libc::RLIM_INFINITY,
@@ -543,22 +586,28 @@ fn exhausted(size: usize) -> ! {
     } else {
         line.size(current.rlim_cur);
     }
-    line.text(b" reached (HIRSEL_MEMORY_LIMIT); allocating ")
-        .number(size as u64)
-        .text(b" more bytes failed");
+    line.text(b" reached (HIRSEL_MEMORY_LIMIT); ");
+    failed(&mut line);
     if let Some(kib) = resident_peak_kib() {
         line.text(b" with a resident peak of ")
             .number(kib >> 10)
             .text(b"M");
     }
+    let mut named = false;
     let _ = MEMORY_CONTEXT.try_with(|context| {
-        if let Ok(name) = context.try_borrow()
-            && !name.is_empty()
+        if let Ok(doing) = context.try_borrow()
+            && !doing.is_empty()
         {
-            line.text(b" while instantiating function ")
-                .text(name.as_bytes());
+            line.text(b" while ").text(doing.as_bytes());
+            named = true;
         }
     });
+    if !named
+        && let Ok(doing) = PROCESS_CONTEXT.try_lock()
+        && !doing.is_empty()
+    {
+        line.text(b" while ").text(doing.as_bytes());
+    }
     line.text(
         b". Under Buck2 the limit is the test's measured reservation \
               (tools/buck2/test_sizes.bzl); report the program that grew rather than raising it.\n",

@@ -62,6 +62,7 @@ extern int hirsel_llvm_emit_parts(LLVMModuleRef module, LLVMTargetMachineRef mac
     const char *own, HirselLlvmDeliver lend, HirselLlvmCode code, char **error);
 extern int hirsel_llvm_generate_parts(LLVMTargetMachineRef machine, const uint8_t *const *codes,
     const size_t *lens, size_t count, unsigned jobs, HirselLlvmDeliver deliver, void *context, char **error);
+extern _Noreturn void hirsel_llvm_allocation_failed(const char *what);
 static pthread_once_t initialized = PTHREAD_ONCE_INIT;
 static void initialize(void) {
     // Dense control flow leaves many copies of the same rematerializable
@@ -82,7 +83,7 @@ static void initialize(void) {
 }
 static void copy(HirselLlvmOutput *out, const void *data, size_t len, uint8_t failed) {
     out->data = malloc(len ? len : 1);
-    if (!out->data) abort();
+    if (!out->data) hirsel_llvm_allocation_failed("Engine output allocation failed");
     memcpy(out->data, data, len); out->len = len; out->failed = failed;
 }
 static void error(HirselLlvmOutput *out, const char *message) {
@@ -491,6 +492,13 @@ static LLVMTargetMachineRef target_machine(const char *triple, const char *cpu, 
         speed ? LLVMCodeGenLevelAggressive : LLVMCodeGenLevelNone, LLVMRelocPIC, LLVMCodeModelDefault);
     if (!machine) error(out, "LLVM could not create the target machine");
     return machine;
+}
+
+// The optimizing machine a release unit's builder simplifies its bodies for
+// (hirsel_llvm_large_stream), the one emit_program optimizes it with.
+LLVMTargetMachineRef hirsel_llvm_release_machine(const char *triple, const char *cpu, const char *features,
+                                                 HirselLlvmOutput *out) {
+    return target_machine(triple, cpu, features, 1, out);
 }
 
 static void emit_program(const HirselLlvmUnit *units, size_t count,

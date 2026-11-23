@@ -105,13 +105,32 @@ impl<'a> NativeSink<'a> {
         }
     }
 
-    pub fn release(context: Rc<llvm::Context>, items: &'a [DefPath]) -> Self {
+    /// A release unit's sink. Once the unit is large it simplifies each body as it
+    /// finishes, for the release machine of x86-64 Linux, the only target release
+    /// units lower for (the builder's `unit_stream`).
+    pub fn release(context: Rc<llvm::Context>, items: &'a [DefPath]) -> super::super::Result<Self> {
         let mut sink = Self::new(context);
         sink.release_debug = Some(ReleaseDebug {
             items,
             ..ReleaseDebug::default()
         });
-        sink
+        let target = hirsel_core_layout::Target::X86_64Linux;
+        let triple = std::ffi::CString::new(target.triple()).unwrap();
+        let cpu = std::ffi::CString::new(target.cpu()).unwrap();
+        let features = std::ffi::CString::new(target.llvm_features()).unwrap();
+        let mut out = Output::default();
+        // SAFETY: the strings outlive the synchronous call on the live unit.
+        unsafe {
+            (sink.api.unit_stream)(
+                sink.unit,
+                triple.as_ptr(),
+                cpu.as_ptr(),
+                features.as_ptr(),
+                &mut out,
+            );
+        }
+        llvm::output(out).map_err(super::super::Error::Llvm)?;
+        Ok(sink)
     }
 
     pub fn take_debug_sites(&mut self) -> Vec<ReleaseSite> {
@@ -602,6 +621,8 @@ impl Sink for NativeSink<'_> {
                 "undefined block {label}"
             );
         }
+        // SAFETY: the unit's finished current function.
+        unsafe { (self.api.end_body)(self.unit) }
     }
     fn block(&mut self, label: Label) {
         let block = self.block_ref(label);

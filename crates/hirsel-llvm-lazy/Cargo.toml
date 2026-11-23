@@ -12,8 +12,6 @@ gimli = { version = "=0.33.0", default-features = false, features = ["read", "st
 object = { version = "=0.40.0", default-features = false, features = ["elf", "read_core", "std", "build"] }
 hirsel-core-ir = { path = "../hirsel-core-ir" }
 hirsel-core-layout = { path = "../hirsel-core-layout" }
+hirsel-guard = { path = "../hirsel-guard" }
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
-
-[dev-dependencies]
-hirsel-guard = { path = "../hirsel-guard" }

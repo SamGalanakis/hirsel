@@ -1168,7 +1168,7 @@ pub(crate) fn emit_release_unit(
     Vec<source::ReleaseSite>,
     Vec<source::ReleaseSite>,
 )> {
-    let mut native = sink::native::NativeSink::release(context, &module.items);
+    let mut native = sink::native::NativeSink::release(context, &module.items)?;
     let versions = versions::program(&[module]);
     let sites = emit_module(
         module,

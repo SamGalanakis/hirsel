@@ -98,12 +98,15 @@ pub fn collect_instances(
         if reached.len() == limit {
             return Err(InstanceStop::Resource { limit, next: key });
         }
-        hirsel_guard::with_instance_context(key.definition.0.name.clone(), || {
-            let reads = dependencies(&key)?;
-            reached.insert(key);
-            pending.extend(reads);
-            Ok(())
-        })?;
+        hirsel_guard::with_memory_context(
+            format!("instantiating function {}", key.definition.0.name),
+            || {
+                let reads = dependencies(&key)?;
+                reached.insert(key);
+                pending.extend(reads);
+                Ok(())
+            },
+        )?;
     }
     Ok(reached.into_iter().collect())
 }

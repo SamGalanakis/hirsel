@@ -226,6 +226,13 @@ fn check_engine(path: &Path, expected: &str) -> Result<(), String> {
     }
     Ok(())
 }
+/// An allocation LLVM could not make ends the process as the memory guard
+/// ends it for a refused Rust allocation.
+unsafe extern "C" fn llvm_out_of_memory(reason: *const libc::c_char) -> ! {
+    // SAFETY: LLVM passes a NUL-terminated reason that outlives the call.
+    let reason = unsafe { std::ffi::CStr::from_ptr(reason) };
+    hirsel_guard::foreign_exhausted(b"LLVM", reason.to_bytes())
+}
 fn load() -> Result<Backend, String> {
     let llvm = CString::new(llvm_library()?.as_os_str().as_bytes()).map_err(|e| e.to_string())?;
     open(&llvm)?;
@@ -268,6 +275,7 @@ fn load() -> Result<Backend, String> {
         unsafe { libc::dlsym(handle, c"hirsel_llvm_std_object_codec_v1".as_ptr()) };
     // SAFETY: the table getter is part of the same embedded component ABI.
     let construction = unsafe { libc::dlsym(handle, c"hirsel_llvm_builder_v1".as_ptr()) };
+    let out_of_memory = unsafe { libc::dlsym(handle, c"hirsel_llvm_out_of_memory_v1".as_ptr()) };
     if compile.is_null()
         || free.is_null()
         || program.is_null()
@@ -275,8 +283,18 @@ fn load() -> Result<Backend, String> {
         || join_lent.is_null()
         || std_object_codec.is_null()
         || construction.is_null()
+        || out_of_memory.is_null()
     {
         return Err(dl_error());
+    }
+    // SAFETY: the same-build installer takes a handler that never returns,
+    // before any LLVM work runs.
+    unsafe {
+        let install = std::mem::transmute::<
+            *mut libc::c_void,
+            unsafe extern "C" fn(unsafe extern "C" fn(*const libc::c_char) -> !),
+        >(out_of_memory);
+        install(llvm_out_of_memory);
     }
     Ok(Backend {
         // SAFETY: same-build functions have the signatures above. They own no

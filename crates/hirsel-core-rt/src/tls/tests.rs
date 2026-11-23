@@ -968,7 +968,7 @@ unsafe extern "C" fn drain_slot(context: *mut Context, _: *mut u8, input: *mut u
 }
 
 fn committed_final_slot(run: &mut Run) {
-    const SIZE: usize = 4 * 16 * 1024;
+    const SIZE: usize = crate::os_tls::TX_RECORDS * 16 * 1024;
     let set_buffer = |fd, option| unsafe {
         let size = 4096i32;
         assert_eq!(

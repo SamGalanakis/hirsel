@@ -9,7 +9,7 @@ use crate::{
 };
 use hirsel_core_net::{Name, TlsTrust, scram::Binding};
 #[cfg(test)]
-pub(crate) use records::TX_TEST_LIMIT;
+pub(crate) use records::{TX_RECORDS, TX_TEST_LIMIT};
 use rustls::{
     CertificateError, ClientConfig, ProtocolVersion, RootCertStore,
     client::{Resumption, Tls12Resumption, UnbufferedClientConnection},
@@ -25,7 +25,7 @@ const RECORD: usize = 16 * 1024;
 const HEADER: usize = 5;
 const MAX_PAYLOAD: usize = RECORD + 2048;
 const MAX_WIRE: usize = HEADER + MAX_PAYLOAD;
-const RX_CAPACITY: usize = 64 * 1024;
+const RX_CAPACITY: usize = 256 * 1024;
 const CACHED_ROOT_BUNDLES: usize = 16;
 const CACHED_CLIENT_CONFIGS: usize = 16;
 const TICKETS_PER_CONFIG: usize = 64;

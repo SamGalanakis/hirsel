@@ -1058,6 +1058,8 @@ The store does no authorization. A Tx may read and write every key of its store,
 
 ### 1.5 Snapshots and queries on any task (row 4)
 
+**v2.56 (not yet built):** every read below takes a per-task `Reader` and waits, and `look`'s body becomes `fn(Tx, E)` with a `shareable` env; §13.4 and §13.3 give the replacing signatures.
+
 ```hirsel
 pub opaque type Snapshot: shareable + send   // StoreId, open number, branch, version, three Arc roots. RUN snapshot_task.
 pub fn snapshot(db: Db) -> Snapshot                  // main branch head
@@ -2412,7 +2414,7 @@ So the payload is 212 + d bytes: 84 of `ExportStamp` (20 + 64), 108 + d of targe
   - in a leaf of the collection map, `kids[i]` is the root page of the collection in slot i. A collection with no rows has the store's one **empty page** `EMPTY` as its kid: a shared `Arc[Page]` with a zero-entry image and stamp 0, which is never written, never counted and never loaded. On disk its root is the all-zero PagePtr (AP20). A map leaf has no blobs: a `CollectionRoot` is always inline (AP7);
   - in any other leaf, `kids` is empty, and `blobs[j]` is the body of the BlobRef whose `body` field is j.
 - Every traversal follows these edges and never a location: reads, the uniqueness walk of AP10, re-stamping, the cut, relocation, reference counts and the account. So a map entry written before any cut, whose PagePtr holds no location, is reached by its kid.
-- **The cut seals; a commit need not (H3; v2.55, Spec Q4).** A page may be unsealed while a body edits it (AP9), and a published in-memory image may stay unsealed after its commit: it may hold free space and dead entries and a shorter prefix than the longest, within a private page's bounds (AP3). The cut seals: every image it encodes is in canonical form, with no free space, no dead entries, the longest common prefix, and bodies numbered in slot order (§3.5, AP3's decode rules). So live commits, journal replay and a MANIFEST load may leave different partitions, images and stamps, and what they guarantee to have in common is logical (AP3, "Live and replay"). Every reader finds entries through the slot array and a body through its `body` field, never by position. A published image is never changed: sealing or editing a shared page copies it. A body's steps follow the layout it reads, so they may differ with how its base was loaded; steps are a per-build fuel bound (MEM-30), not an observable that must match across loads.
+- **The cut seals; a commit need not (H3; v2.55, Spec Q4).** A page may be unsealed while a body edits it (AP9), and a published in-memory image may stay unsealed after its commit: it may hold free space and dead entries and a shorter prefix than the longest, within a private page's bounds (AP3). The cut seals: every image it encodes is in canonical form, with no free space, no dead entries, the longest common prefix, and bodies numbered in slot order (§3.5, AP3's decode rules). So live commits, journal replay and a MANIFEST load may leave different partitions, images and stamps, and what they guarantee to have in common is logical (AP3, "Live and replay"). Every reader finds entries through the slot array and a body through its `body` field, never by position. A published image is never changed: sealing or editing a shared page copies it. A body's steps follow the layout it reads, so they may differ with how its base was loaded; steps are a per-build fuel bound (MEM-30), not an observable that must match across loads. Canonical form is the form of every image a cut writes to disk or uploads in a pack, and M3 needs no more: a Tiered read (§13.2) resolves only such sealed, located pages, and an unsealed in-memory page is always Hot (v2.56).
 - The child and blob locations inside an image (`pack`, `offset`, `len`, `checksum` of each PagePtr and BlobRef) are meaningful only on disk. In memory they hold whatever was loaded, or zero for a page no cut has written. The `stamp` fields are always meaningful.
 - The writer keeps the location table (AP16). The cut fills the location fields from its layout as it encodes each image into its frame.
 
@@ -2565,7 +2567,7 @@ A failure is `Corrupt(Checksum)`. A pack not listed, or an offset at which no fr
 | 36 | 8 | rows u64 | exact row count |
 | 44 | 8 | bytes u64 | row charge of the collection's rows: the sum of `entry(k, v)` (AP15) |
 | 52 | 1 | kind u8 | 1 table, 2 index (as the catalog's kind); other values `Corrupt(Malformed)` |
-| 53 | 1 | residency u8 | 0 = Memory. 1 = Tiered is reserved for M3 and is `Unsupported(0x0021)` in M1 (the kind of the page holding it). Other values are `Corrupt(Malformed)`. |
+| 53 | 1 | residency u8 | 0 = Memory. 1 = Tiered (format 4, §13.1; in format 3 it was `Unsupported(0x0021)`). Other values are `Corrupt(Malformed)`. |
 | 54 | 1 | tree u8 | 0 = B+ pages. 1–255 are reserved (a future per-collection Bε-tree) and are `Unsupported(0x0021)`. |
 | 55 | 1 | zero u8 | non-zero is `Corrupt(Malformed)` |
 
@@ -2765,7 +2767,7 @@ Each failure is `Corrupt(Checksum)`. A pack not listed, or an offset at which no
   - the writer's location table (AP16), at its MEM-24 charges: the record map's, pack inventory's and pack membership index's OMap nodes and rows, each record's out-edge stamps (8 per edge) and incoming list (its entries' storage), and spare capacity in any of them. These are charges, not a reporting unit: the writer's own limit pays them, and they admit nothing against `resident_limit`.
   Reader-only Snapshots are excluded: the Db cannot enumerate them, and their memory is the holder's. The figure is computed by the writer when each cut publishes and at open, and `accounts(db)` returns the latest one. Open scans the resident images and rebuilds the location table. A cut takes the total from the location table, whose records are exactly the frames reachable from the participating holders and the two list roots. Each record carries its frame's charge (a page's image capacity or a blob's body length). The table keeps a running total of the frame and edge list charges as records are inserted, replaced and removed. Each OMap keeps the subtree charges up to date on the nodes the edit touches, including capacity changes when a node is copied. The two methods give the same figure (law `disk_law_resident_charge`), so a cut does no rescan. It admits nothing in M1. It is the figure M3's cache budget bounds, once M3 can evict.
 - **`accounts(db)` reports five numbers, synchronously:** `logical`, the admission figure A; `exact`, whether A is known to equal the logical account (R7): true in exact mode, and after a settle or a published cut, which sets A = X, until a publication whose exact change is unknown clears it. A conservative commit clears it (a delete subtracts nothing though the union may shrink), as do `unpin`, `delete_branch` and `adopt`; a live-head fork keeps it, because it leaves the set of versions unchanged; `frames`, F, the bytes of frames sent and not acked; `journal`, U, the journal bytes that no published cut covers (the journal cap's figure); `resident`, the resident account as of the last published cut or open. The writer holds all five, so no call waits on a task.
-- The two accounts separate cleanly because a page's row charge is in its parent's entry. Eviction (M3) changes the resident account and leaves the logical account alone.
+- The two accounts separate cleanly because a page's row charge is in its parent's entry. Eviction (M3, §13.8) changes the resident account and leaves the logical account alone.
 
 ### 11.12 Checkpoints and relocation
 
@@ -2983,7 +2985,7 @@ where a pack written by H1's singleton rule holds one frame and still counts its
 - Frames that replay creates get no record until the first cut.
 - An open that cannot allocate this state is `Full(Allocation(c))`, as for any other open allocation. That is an allocator refusal, not an admission one (AP15).
 
-**M3 consequence.** Incoming lists are rebuilt at open from a full decode. M3's lazy open cannot rebuild them without reading every pack, so M3 must either persist the reverse edges or find a closure by walking the roots it has loaded. M1's format forecloses neither.
+**M3 consequence.** Incoming lists are rebuilt at open from a full decode. M3's lazy open cannot rebuild them without reading every pack, so M3 must either persist the reverse edges or find a closure by walking the roots it has loaded. M1's format forecloses neither. **v2.56:** Tiered frames live in their own pack classes with no incoming lists; their compaction finds closures by §13.6's top-down probe.
 
 **AP21. Open: validate the format-3 graph, then resolve live edges by location (B3, M3, S6, S7, T12; built).** A parsed MANIFEST and the pages decoded from its files are a **validated inventory and live graph** only after steps 0–4. Every consumer takes that validated value or a projection of it, never the raw MANIFEST fields:
 - writer open, which builds the trees and the location table from it (step 5);
@@ -3143,6 +3145,8 @@ The harnesses are §5's. **S1** is the store's law functions (`law_*`, `disk_law
 - **M6's watermark cases:** `disk_watermark_cut` from f75e9b14 and both its absent and torn variants are ported to reissued table-page, map-page and blob stamps: an interrupted cut writes and syncs a higher-stamped page into an unlisted pack, reopen reissues those stamps, and the reopened store reads M, an old Snapshot of the previous open still reads its M, `changes` between Snapshots of the two opens is `Foreign` in both directions, `pin` and `fork` of the old Snapshot are `Foreign`, and a fresh fork succeeds (S2).
 
 ### 11.16 API surface M1 adds
+
+**v2.56 (not yet built):** `get_bytes`, `scan_bytes`, `ViewRows`, `next_view` and `value_view` are deleted (§13.4); `StoreCapacity` gains `Cache`, `Accounts` gains §13.8's fields, and NoRoom may carry `Cache` (§13.3).
 
 ```text
 pub fn fetch_bytes[K, V](tx: Tx, t: Shape[K, V], k: K) -> Result[Option[View[Bytes]], Error] in tx
@@ -3586,7 +3590,7 @@ pub fn on_unhealthy[M: send](mut db: Db, take to: Sender[M], take m: M) -> Resul
 
 The poll, the Q5 rule and poison set it, and it never returns to `Ok` within an open. `on_unhealthy` registers one message, which the journal task sends on `to` when health first leaves `Ok` (at once if it already has). Delivery is an ordinary channel send into the caller's own inbox, as `clock.alarm` delivers, so an idle receiver wakes on it with no new task primitive. A full or closed channel is the receiver's: the health value stays set and every later store call returns the error. RUNNER-SPEC v2.34 registers the head's inbox and ends the run abnormally on that message (RUNNER §2.1 "Poison and fence"). The value-returning `healthy` of v2.46's text is `health`.
 
-**Local reads.** Plain `snapshot(db)` and every query stay local RAM reads at V, with no request. So a partitioned, unkilled holder serves reads of its own durable or visible state until its next head write or poll reaches the bucket. Under a working path to the bucket, and given a serviced timer, a free lane and a completing request, that lasts at most `head_poll_ms` plus one request's deadline. The bound is liveness, not safety. A client that needs current state uses `fresh` or `fresh_snapshot`. The poll costs one conditional GET per interval per idle holder, nothing while groups flow (an advance confirms the head), and one lane and the head buffer (§12.9).
+**Local reads.** Plain `snapshot(db)` and every query stay local reads at V, with no authority request: RAM for Memory collections, and for Tiered ones (§13) the cache or an immutable pack GET, never `head`. So a partitioned, unkilled holder serves reads of its own durable or visible state until its next head write or poll reaches the bucket. Under a working path to the bucket, and given a serviced timer, a free lane and a completing request, that lasts at most `head_poll_ms` plus one request's deadline. The bound is liveness, not safety. A client that needs current state uses `fresh` or `fresh_snapshot`. The poll costs one conditional GET per interval per idle holder, nothing while groups flow (an advance confirms the head), and one lane and the head buffer (§12.9).
 
 **Holder change.** A claim keeps every commit for which `durable_at(L)` returned, for every level L whose declared `survives` is 2. On objects@1 that is its one level (§12.4).
 
@@ -3771,7 +3775,7 @@ This needs the provider contract (§12.2): with a non-linearizable head, two hol
 - **Replay.** A holder's tape records each authority request and its outcome as any provider operation. Re-execution reads call records from entries exactly as from journal frames, and never calls the authority.
   - No law or rule depends on the order of authority replies relative to other events. Nothing is added to, or depends on, CONC-10, SEM-8, CAP-8 or CAP-9's order.
   - Re-executing a recorded call on a follower whose base is above the call's entry, so the entry is no longer readable, is `Unknown`, not `Different` (Fable 6b).
-- **M3 Tiered paging (Fable F13), recorded so that M3 does not rediscover it.**
+- **M3 Tiered paging (Fable F13), recorded so that M3 does not rediscover it.** v2.56 §13.5 answers each point: holders lease, followers re-base, an expired read is `Reclaimed`, and NVMe is Bucket-only and re-verified.
   - A cold PagePtr resolves through the locator of the checkpoint the reader loaded.
   - A holder Snapshot or a follower that keeps cold pages of a checkpoint that leaves the retained set needs a lease (holder) or a re-base (follower). M3 must specify which.
   - A miss to a reclaimed pack is never "re-run at a new root". ENDSTATE's re-run is at the same root, so the miss is a typed `Reclaimed`.
@@ -3838,3 +3842,389 @@ No oracle reads the store under test. Each law names the bug that turns it red, 
 **L54m, a case of L54:** a pack's `complete` replies 200 with an `Error` body, then `NoSuchUpload` on retry. The store restarts the upload with a fresh id and the same bytes and publishes the cut, or refuses it with `Remote` at the budget, with nothing published and the holder healthy.
 
 Deleted with §11.18: the generation-publish parts of L4, "the fence" and BK5's orphan-pack overwrite. "Reopen after a cut" and "Soak" are kept, restated over entries. §11.19's S2 `read-only` crash law is kept, restated over a log@1 follower. It gains the cut "after `durable` returned and before END was rewritten" (Astra #6), and a cut-only pin whose MANIFEST rename is visible but not yet covered by `sync_dir`, which the follower shows only after its O1 (Astra #19).
+
+## 13. Tiered collections (Store M3, v2.56, not yet built)
+
+M3 lets one collection be larger than RAM. A **Tiered** collection keeps its sealed pages in packs (disk on log@1, the bucket on objects@1 and sim@1) and holds in RAM only its dirty pages, a bounded cache and the pins of calls in flight. A **Memory** collection is M1's, unchanged. Everything here is text only and **not yet built**. It builds on §11 (format 3, now format 4) and §12 (M2) as written, under Sam's 2026-11-23 rulings M3 Q1–Q4, which this section does not reopen.
+
+### 13.0 Scope and the choices that shape it
+
+- **Steps are not an observable across residency (Q1).** A body's steps (MEM-30) follow the layout and the residency it reads. AP2's "steps are a per-build fuel bound" covers this: the same body at the same root may end `Stopped` on one run and finish on another, and nothing else about its outcome may differ. `reexecute` (§12.8) treats an `OutOfSteps` mismatch on a Tiered read as `Unknown`, never as a divergence.
+- **Eviction is never program-visible except through steps.** A call's result, its reads, its refusals and their `Capacity` values are functions of the root it reads and its body, never of what the cache, the NVMe tier or another call left behind (§13.3).
+- **No core or compiler change (Q1).** The resolver, the cache and the pager are pure Hirsel, charged by MEM-30, MEM-19 and MEM-20 like any std code. M3 adds no core primitive and relies on no new ordering rule: it neither adds to nor depends on the CONC-10, SEM-8, CAP-8 or CAP-9 order.
+- **One read API (Q2).** Every Snapshot read waits and takes a per-task `Reader` (§13.4), on every store and every residency. Zero-copy views come only from `look(r, s, ..)` with `fetch_bytes(tx, ..)`. Bare-Snapshot `get_bytes` and `scan_bytes` are deleted. There is no `PinnedView` and no `Error(Cold)`.
+- **A cache refusal is room, not a value (Q3).** `Refused(Cache(c))` is a physical refusal: `serve` maps it to `Served.NoRoom` (settle 2), and it is never committed, recorded or re-executed.
+- **M3b (Q4).** `migrate`, `export` and `install` on a store with a Tiered collection are refused before anything is written (§13.10). Building them is M3b.
+- **Peer mechanisms are named as inspiration only** (astra #25). The birth-interval deadlist follows the OpenZFS deadlist idea, the hot/cold edge follows LeanStore's swizzled pointer, and the cache follows S3-FIFO. Each guarantee below is Hirsel's own and is argued here, not inherited from a peer.
+- **Sizes marked "proposed"** (`prefetch`, the 64 KiB gap and the 1 MiB GET cap) are settings to tune with the laws' layouts. No guarantee depends on their values.
+
+### 13.1 Format 4
+
+**A clean cutover (Fable F24).** M3 is format word **4**. A format-3 directory or prefix opens as `Unsupported(3)` before any write, with every file byte-identical, exactly as L48 treats format 2. There is no dual reader, and format 3 is never written again. Every M1 clause holds in format 4 except where this section changes it.
+
+**Residency.** AP7's `residency u8` takes value 1 = **Tiered**, now legal. 0 = Memory as before, and other values are `Corrupt(Malformed)`. The collection map, `streams` and `catalog` are always Memory.
+
+**Pack classes.** AP14's pack row `class u8` gains two values:
+- 3, Tiered data: PAGE frames of Tiered collections;
+- 4, Tiered blob: BLOB frames of Tiered collections.
+
+A Tiered frame is never written into a class 0, 1 or 2 pack, and a Memory frame never into a class 3 or 4 pack. So Memory packs keep AP16's incoming lists and location table unchanged, and a Tiered pack has no per-frame state in RAM. The pack row grows from 21 to 29 bytes: `class u8, frames u32, live u64, bytes u64, index u64`. `index` is the offset of the pack's first PACK_INDEX frame, and is 0 for classes 0–2.
+
+**PACK_INDEX, kind 0x0023, MUST bit set (Fable F11, astra #14).** It is a required kind: an old reader refuses it as `Unsupported(0x0023)`. Every class 3 and class 4 pack ends with one or more PACK_INDEX frames, each ≤ 1 MiB. Together they list every PAGE or BLOB frame of the pack in offset order, one row per frame:
+
+| Field | Size | Rule |
+|---|---|---|
+| offset | u64 | the frame head's offset; strictly increasing across the pack's rows |
+| len | u32 | the payload length (AP20 `len`) |
+| kind | u8 | PAGE or BLOB |
+| collection | u32 | the owning collection's id |
+| stamp | u64 | a PAGE's header stamp; for a BLOB, the stamp of the leaf that wrote it |
+| shared | u16 | bytes of the previous row's key shared by this row's key; 0 on each frame's first row |
+| suffix | u16 + bytes | the rest of the key |
+
+- The key is a PAGE's low key, or a BLOB's owning row key, with the collection prefix (AP5).
+- Keys are front-coded within one PACK_INDEX frame only, so each frame decodes alone.
+- Each frame's payload starts with `rows u32` and `prev u64`, the offset of the previous PACK_INDEX frame of the pack (0 for the first).
+- **Counted inside `pack_bytes`.** A pack closes before a frame whose payload plus the PACK_INDEX bytes its row adds would take the pack past `pack_bytes`, unless the pack holds no frame yet. The writer adds each row's worst-case encoded size (31 + full key length) to the running total as it admits the frame.
+- A Tiered pack's row `frames` counts PAGE and BLOB frames, not PACK_INDEX frames. `bytes` counts the whole object.
+
+**MANIFEST 0x0031 in format 4.** AP14's `account u64` becomes two fields in its place: `account_memory u64` and `account_tiered u64`. They are the exact logical accounts of the Memory and the Tiered collections at this generation, and the sum is AP15's logical account (astra #20). These fields follow them, in this order:
+
+| Field | Size | Meaning |
+|---|---|---|
+| lineage | PagePtr 36 | root of the lineage tree (§13.6): boundaries and deadlist cells; a class-2 list tree |
+| deferred_frees | PagePtr 36 | root of the deferred-free queue (§13.6); a class-2 list tree |
+| deferred_next | u64 | the next queue sequence number |
+| archive_since | u64 | 0 = archival never on; else the position where it was last turned on (§13.9) |
+| archive_until | u64 | u64 max while on; else the position where it was turned off |
+| archive_drop | u64 | chain entries below this position may be erased (§13.9) |
+| archive_dropped | u64 | how far erasure below `archive_drop` has got |
+
+- The fixed part grows by 128 bytes, and AP4's MANIFEST size expression grows by the same 128.
+- `lineage` and `deferred_frees` are participating roots for AP15, AP16 and the locator.
+- Their pages live in class-2 packs and are read and validated with the other list trees (AP21 step 0).
+
+**FORK and pin watermarks (Fable F7).** FORK's payload (0x0013) gains `watermark u64` after `name`. A pin's journal frame and its MANIFEST pin record gain `watermark u64` after their existing fields, which makes the pin record 130 + n bytes. A watermark is exact:
+- FORK records the writer's stamp counter (`next_stamp`) at the fork's commit;
+- a pin records the counter at the capture of the Snapshot it pins;
+- neither is ever estimated or reconstructed.
+
+**LOCATE coverage (Fable F15, astra #23).** §12.2's locator coverage L ∪ C extends to class 3 and class 4 packs and to the class-2 packs of `lineage` and `deferred_frees`. The locator is unchanged: these packs are depth-0 rows like any other, resolved through §12.2's chunk tree at depth ≥ 1. M3 never reads a locator root as flat pack rows.
+
+**ARCHIVE, kind 0x00E0, 32 bytes, at most one per CHECKPOINT entry (§13.9).** Its fields are `position u64, epoch u64, len u64, digest u64`. It names the archive segment `a-<position>-<epoch>-<digest>` of that checkpoint. It is present only while archival is on, and it follows LOCATE.
+
+**Kinds.** Format 4 adds PACK_INDEX 0x0023 (MUST) and ARCHIVE 0x00E0. Every other kind is as §2.7 and the §11 kinds table.
+
+### 13.2 Pages, edges and the cache
+
+**Edges.** AP2's `kids: List[Arc[Page]]` becomes `kids: List[Slot]`, and `blobs` becomes `List[BlobSlot]`, with:
+- `Slot = Hot(Arc[Page]) | Cold(PagePtr)`;
+- `BlobSlot = Hot(Arc[Bytes]) | Cold(BlobRef)`.
+
+A Memory collection has only Hot slots. In a Tiered collection:
+- a page written since the last cut (dirty) is Hot and has no location;
+- the cut's install (AP16 step 5) publishes a root in which each sealed page of a Tiered collection is reached by a `Cold` slot naming its new location, except the collection root, which `CollectionRoot` names.
+
+Which slots of a snapshot are Hot is fixed when the snapshot is captured. No later event changes it.
+
+**Sealed pages only (AP2, Q4).** M3 resolves a Cold slot only to a frame that a cut sealed and wrote to a pack, which is AP2's canonical form. An unsealed page is always Hot and owned by its `Arc`. So tiering never needs a page to be canonical at a commit.
+
+**The cache.**
+- The **pager** is a task the store starts at open, after AP21's Tasks step. It owns the RAM cache, the NVMe tier and every GET of a Tiered frame.
+- It publishes an immutable `CacheDir` through a `Latest[CacheDir]`. A `CacheDir` is a persistent hash-array-mapped map (32-way, path-copied on change) from the key `(pack seq u64, offset u64)` to `Arc[Frame]` (astra #18).
+- A `Frame` holds the verified payload and the five AP20 facts as read: kind, `len`, checksum and stamp. The fifth fact, the frame check, binds the key.
+- The RAM key needs no epoch or digest, because within one store a pack seq names one object (§12.2) (Fable F1's keying).
+- Eviction is S3-FIFO over unpinned entries: a small FIFO of 10% of `cache_bytes`, a main FIFO, and a ghost list of keys only.
+- **Hits are batched per call** (Fable F29, astra #18). A call sends the pager the set of keys it hit, once, when it ends. The pager raises each key's frequency (capped at 3), so a frame that readers hit but never miss is not evicted as cold.
+
+**Every hit verifies its referring edge (astra #5).** A Cold slot resolved from the cache, from a pin, or from a single-flight waiter's completion compares the cached frame's `len`, checksum, stamp and kind with the referring `PagePtr` (and BlobRef) before use. A mismatch is `Corrupt(Checksum)`, AP20's answer for that edge, and is never a value. Two edges naming one location with different expectations therefore get their own answers, whichever was cached first.
+
+**NVMe tier, Bucket authorities only (Fable F10).** `objects_cache(a: Authority, d: Dir, bytes: u64) -> Authority` grants an objects@1 or sim@1 authority a local directory of at most `bytes`.
+- Entries are keyed by the full immutable name `p-<seq>-<epoch>-<digest>` and the offset, so a key never holds two contents.
+- Every NVMe read re-runs AP20's five checks. A failure deletes the entry and refetches from the bucket. It is never `Corrupt` while the bucket's copy is good.
+- log@1 (Directory) has no NVMe tier: its packs are already local files, and the RAM cache reads them directly.
+
+**Ranges and prefetch (astra #19, Fable F2, F18; Q1).** A miss names the target `PagePtr`, the parent's cache key and slot, and a direction: `Point`, `Forward` or `Backward`.
+- The pager reads the parent page it already holds and adds as hints the next `prefetch` siblings (default 8, proposed) in the direction. A `Point` miss on a leaf has no hints.
+- It groups target and hints by pack into half-open byte ranges `[offset, offset + 16 + len)` within one object. It joins neighbours whose gap is ≤ 64 KiB (proposed) into one GET of at most 1 MiB (proposed). A frame larger than 1 MiB is one GET of exactly its range.
+- Each frame in a range is verified on its own by AP20's five checks.
+- A hint is never pinned and never counted against a call. A hint that fails, including a 404, is dropped without a witness and without an error.
+- Only the target's outcome reaches the call.
+
+**Single flight.** Concurrent misses on one key share one GET. Each waiter re-verifies its own edge on completion.
+
+**Room (Fable F20, astra #17).** The pager inserts a frame only when `cached + pinned + overlap + size ≤ cache_bytes`, evicting unpinned entries first.
+- `overlap` counts evicted frames whose `Arc` count shows another holder, such as an attempt's share or an old `CacheDir`. The pager re-checks them on each request.
+- A target that still does not fit is delivered to the waiting call alone: it lives in that call's pins and is never inserted.
+- The pager's own state (pin map, waiter lists, ghost list, `CacheDir` path copies) is charged to the pager task, whose root limit is `pager_task_bytes` (§13.11).
+
+**The pin partition (Q3, astra #16).** `cache_bytes` (Options, default 268,435,456) is split at open:
+- `writer_pin_bytes` (default 67,108,864, at least 2 × VALUE_LIMIT + 1,048,576, else `Missing("writer_pin_bytes")`) for the Db task's calls;
+- the rest is shared by unpinned frames and reader pins.
+
+`reader(db, pin_bytes)` reserves `pin_bytes` from the rest when the Reader is created, and dropping the Reader returns them. Partitions are fixed. Nothing waits for another partition to drain, and pins never move between partitions.
+
+### 13.3 Execution: the touched-page counter and abort-and-rerun
+
+**The resolver.** Every Tiered edge a body, a cursor or a commit's plan follows goes through one resolver. On the **first touch of a page in an attempt** it does these steps in this order, whether the slot is Hot or Cold (astra #4):
+1. **Count.** It inserts the page's stamp into the attempt's touched set and adds the page's `len` (Hot: its image length) to the attempt's touched bytes. Touched bytes > the attempt's partition (`writer_pin_bytes` for a call, the Reader's `pin_bytes` for a read) ends the attempt with `Refused(Cache(Capacity { requested: touched bytes, available: partition }))`.
+2. **Log.** It appends to the read log, charged as M1 charges it.
+3. **Resolve.** A Hot slot is its `Arc`. A Cold slot is looked up in the attempt's pins, then in the `CacheDir` the attempt read at its start, with the edge verified (§13.2). The frame's `Arc` is appended to the attempt's frame list, which the `Tx` owns, so every view `in tx` has one anchor (OWN-20, astra #15).
+4. **Miss.** Otherwise the attempt's **next step-taking action** is a `try_send` of the miss to the pager on the attempt's preallocated `Sender[PagerReq]` slot (Fable F2). The attempt then ends `Missed`, an internal outcome that is never returned.
+
+A later touch of the same page in the same attempt finds it in the touched set and adds nothing.
+- **Refusal is a function of the root and the body (Fable F3).** Hot and Cold touches count alike, and a hint counts nothing. So whether an attempt is refused, and its `requested`, depend only on the page graph of the root it reads and what the body does, never on the cache.
+- The graph can differ between replicas and across a cut at one version, because AP2 lets unsealed partitions differ (v2.55). This is why the refusal is physical (`NoRoom`), never recorded.
+- **Storage reserved before the body.** The touched set and the frame list are allocated when the attempt starts, with room for `touch_slots` entries (Options, default 4,096), from the call's payer (MEM-19). They grow by doubling, charged like the read log. A growth refusal is `Refused(Allocation(..))` at step 1, before any log append or miss.
+
+**Abort and rerun (Q1, Fable F12, F13).** A body is never `waits` (`scoped[view] fn(Tx) -> R`). A `Missed` attempt is undone (FAIL-16: its writes are dropped, and its staged ops and log are discarded), and the call reruns from the start once the pager has delivered the frame. The delivered target is added to the call's **pins**: a map from key to `Arc[Frame]` in the call's partition that survives between attempts and is released when the call ends.
+
+**The Db task never waits on a miss.**
+- **Attempts 1 and 2: parked.** The call is parked with its pins, and the Db task runs other calls. When the frame arrives, the parked call reruns before any call not yet started, at the **current** head. If the head moved, pins the new attempt does not touch are released when that attempt ends.
+- **Attempt 3 on: held.** The call holds the head. The Db task starts no other call until this call commits, refuses or fails, and every rerun reads the root captured when the call entered held mode. A cut's install that publishes Cold edges for that version does not change the captured root, because `Arc` keeps it.
+- At most one call is held at a time. A parked call that would need pins beyond the writer partition alongside the held call's pins releases all of its pins (all-or-release).
+
+**Termination.** In held mode every attempt either ends, or misses a Cold page not yet pinned, which the next attempt has pinned. The pinned bytes never exceed the touched bytes, which never exceed `writer_pin_bytes`, which holds the call's pins alone. So a held call ends after at most one attempt more than the number of distinct Cold pages it touches. Prefetch along the scan direction usually makes that close to the tree height plus leaves ÷ `prefetch`. Each attempt runs under the call's own step bound (MEM-30). The steps of attempts that did not decide the call are added to `Accounts.rerun_steps`.
+
+**Pins through apply (Fable F13).** A commit's apply (AP9, AP10) touches only planned pages.
+- After the body returns, and before any edit is applied, the **plan** resolves, through the same resolver and counter:
+  - every path to every staged key's leaf;
+  - for each page on each path, its left and right sibling, which is every page a split, merge or redistribution can read.
+- A plan miss is a body miss: the attempt ends `Missed` and reruns.
+- The pins and the attempt's frame list are held until apply has finished and the commit is published. So apply cannot miss.
+
+**No `send` captures in a body (Fable F4, astra #3).** `channel.try_send` takes its `Sender` as a view, so a `scoped[view] fn` body can send through a captured view. No runtime check can see a closure's captures, and Q1 rules out a compiler change. So the ban is carried by the body's type, with one signature on every store (Q2's one-API rule; decision D-M3-1, reversible):
+
+```hirsel
+pub fn run[E: shareable, R, A](mut db: Db, steps: Option[u64], env: E, body: fn(mut Tx, E) -> Result[R, A]) -> Result[Outcome[R, A], Error] waits
+pub fn run_on[E: shareable, R, A](mut db: Db, b: Branch, steps: Option[u64], env: E, body: fn(mut Tx, E) -> Result[R, A]) -> Result[Outcome[R, A], Error] waits
+pub fn look[E: shareable, R](r: Reader, s: Snapshot, steps: Option[u64], env: E, body: fn(Tx, E) -> R) -> Result[Looked[R], Error] waits
+```
+
+- A plain `fn` captures nothing (LANG-13).
+- Its input is `env`, which is `shareable` and so holds no resource (MEM-15). So it holds no `Sender`, `Log`, `Latest` or channel end.
+- These replace the `scoped[view] fn` forms of §1.3 and §1.5. A runner entry body (`serve`) already has this shape.
+- So an aborted attempt leaves no effect behind it except steps and what it leaves in the pager's cache.
+
+**Enclosing step bounds (Fable F27).** Each attempt runs in its own `bound steps` scope with the call's full step budget. `run` called inside an enclosing `bound steps` scope on a Tiered store is `Tiered(Bounded)`, because an enclosing bound would be charged for reruns it cannot see. The Db task itself has no enclosing bound.
+
+**Re-execution (astra #24, Q1).** `reexecute` (§12.8) of a recorded call against a Tiered base reads frames through the pager from immutable packs. It never reads `head`, never claims, and never calls the authority's register. It reruns on a miss like a call.
+- A frame that is absent, or a pack whose name the base's locator no longer reaches, makes the result `Unknown`.
+- So does an `OutOfSteps` that differs from the record, or a `Refused` of any kind.
+- None of these is ever a divergence.
+
+**Refusal mapping (Q3).**
+- `StoreCapacity` gains `Cache(Capacity)`.
+- `Outcome.Refused(Cache(c))` and `Looked.Refused(Cache(c))` report the counter.
+- `serve` maps `Refused(Cache(c))` to `Served.NoRoom(p, Cache(c))` and settles it as AP15 settles NoRoom (settle 2).
+- AP15's "NoRoom is Resident or Allocation" now reads "Resident, Allocation or Cache, never Journal".
+
+### 13.4 The read API (Q2)
+
+```hirsel
+pub opaque type Reader: send                     // not shareable; owns a Latest[CacheDir] reader, a Sender[PagerReq] and its pin reservation (Fable F21)
+pub fn reader(db: Db, pin_bytes: u64) -> Result[Reader, Error]              // Full(Cache(c)) when the reader pool lacks pin_bytes
+pub fn follower_reader(f: Follower, pin_bytes: u64) -> Result[Reader, Error]
+pub fn get[K, V](r: Reader, s: Snapshot, t: Shape[K, V], k: K) -> Result[Option[V], Error] waits
+pub fn scan[K, V](r: Reader, s: Snapshot, t: Shape[K, V], lo: Bound[K], hi: Bound[K]) -> Result[Rows[K, V], Error]
+pub fn find[J, K, V](r: Reader, s: Snapshot, ix: Index[J, K, V], lo: Bound[J], hi: Bound[J]) -> Result[Rows[K, V], Error]
+pub fn next[K, V](r: Reader, mut c: Rows[K, V]) -> Result[Option[(K, V)], Error] waits
+pub fn span_changes(r: Reader, s: Snapshot, lo: Bytes, hi: Bytes) -> Result[List[Change], Error] waits
+pub fn changes(r: Reader, a: Snapshot, b: Snapshot) -> Result[List[Change], Error] waits
+```
+
+- With §13.3's `look`, these replace §1.5's `get`, `scan`, `find`, `look`, `span_changes` and `changes`, and §1.4's `next`, on every store and every residency (Q2: one API, no dual path).
+- `scan` and `find` only build the cursor. `next` reads and waits.
+- `Snapshot` stays `shareable + send` and holds no cache handle.
+- **Bare-Snapshot `get_bytes`, `scan_bytes`, `ViewRows`, `next_view` and `value_view` are deleted** (§11.16). Zero-copy reads are `look(r, s, ..)` bodies calling `fetch_bytes(tx, ..)`, whose views are `in tx` and end with the body.
+- Each wait reads `CacheDir` once, at the start of the attempt, and drops it when the attempt ends. Neither the Reader nor the cursor ever holds a `CacheDir` across `waits` (Q3, astra #17, Fable F23).
+- A cursor between `next` calls holds its position (the last key) and no frames. Each `next` re-descends from its snapshot's root through the resolver. Its pins live only for that `next`.
+- A read's attempts run as §13.3's, against the Reader's partition, with no parked or held state. A read never blocks the Db task.
+- A Reader belongs to one task (CONC-13). Sending it moves it.
+- A Reader made by `reader` reads only Snapshots of its own open, and a `follower_reader` Reader only that follower's. Any other is `Foreign`.
+- On a store with no Tiered collection a read never misses, and its `waits` returns without suspending.
+
+### 13.5 Snapshot lifetime, followers and re-base
+
+**Holder leases (Fable F31, F8.3).** On objects@1 and sim@1, a Snapshot whose root reaches a Cold slot holds a process-local **generation lease** on its MANIFEST generation g, as §12.6's export and scrub leases do. It holds it from capture until the Snapshot's last share drops, or until `lease_ms` (Options, default 300,000) after capture.
+- The holder's reclaim treats a leased generation's MANIFEST, chunks and packs as live.
+- At most `lease_generations` (Options, default 8) generations are leased at once. A capture that would lease one more first expires the oldest lease.
+- `Accounts.leased` reports the bytes of packs live only because of a lease.
+- On log@1, AP16's Remove step defers deleting a pack while a lease names a generation that lists it. The bound is the same.
+
+**Expiry is not a cache event (Fable F3, astra #8).** Once a Snapshot's lease has expired, every resolution of a Cold slot through it is `Reclaimed(floor)`, whether or not the frame is cached, pinned or on NVMe. Hot slots stay readable, because the Snapshot's `Arc` owns them. A read through a live lease that finds a pack absent is decided by this holder from its own lease: the name is live, so the answer is `Corrupt(Fault{.., why: Absent})`, never `Reclaimed` (Fable F8.3).
+
+**The fence has one owner (Fable F9).** A pager GET never decides `Fenced`. A 404 or 403 on a frame that a live lease names goes to the journal task. The journal task takes §12.5's witness and answers `Fenced(e)` (first evidence wins, §12.3) or `Corrupt(.. Absent)`. The pager only forwards.
+
+**Followers (astra #7, Fable F8).** A follower Snapshot carries its **capture** c_f = (position, epoch, digest) of the CHECKPOINT whose MANIFEST its Cold slots come from. The follower's lease is live while c_f is in the retained set the follower last observed: the latest head's checkpoint, or a row of its MARK. After any head read (`catch_up`, `fresh`, the idle poll) that shows c_f gone, the follower marks every Snapshot with that capture expired, and the rule above applies. A 404 on a frame of a live capture takes §12.5's witness against c_f's own tuple:
+- c_f below the head's floor gives `Reclaimed(floor)`;
+- c_f retained gives `Corrupt(.. Absent)`.
+
+**Re-base starts a new stamp domain (Fable F5, astra #9).**
+- When a follower's applied position falls below the head's floor, or it installs a CHECKPOINT instead of replaying GROUPs, it **re-bases**. It takes a new stamp domain: a process-wide counter, like §12.1's follower number. Stamps from replay and stamps from an installed MANIFEST never share a domain.
+- A Snapshot carries its domain. `changes(r, a, b)` across domains is `Foreign`, as across opens (AP6).
+- Old Snapshots keep their pages and capture, and expire by the rule above. A re-base never re-runs a read at the new root: a read through an old Snapshot answers from that Snapshot or is `Reclaimed`.
+- **Prefetch, then swap (Fable F17).** Before publishing the new root, the follower prefetches the top `rebase_levels` levels of each Tiered collection (Options, default 2) into the cache. RAM cache keys are (pack seq, offset), which name the same frame in every domain of one store, so frames already cached stay valid across the re-base.
+
+**RUNNER consumers (Fable F16).** A read that returns `Reclaimed(floor)` ends that read's snapshot, and the caller takes a fresh one. `Remote` or `Io` from a read is the read's error and does not poison the Db. How a runner subscription reacts to these errors is RUNNER-SPEC's to state, and is open item M3-O2.
+
+### 13.6 Deadlists, the probe and compaction
+
+**`live` is advisory, and retirement is decided by the probe.**
+- AP14's per-pack `live` guides which packs a cut compacts. For a Tiered pack it is maintained by the deadlists below, and it may be off in either direction until that pack is next probed.
+- **A Tiered pack is never retired because `live` is 0.** It is retired only when a top-down probe of every frame in its PACK_INDEX finds no positive match in any root (Fable F6, astra #12).
+
+**Boundaries.** Each branch b has an ordered set of boundaries, each with an exact watermark:
+- each pin of b, with the pin's watermark;
+- each fork taken from b: a **parent-side** boundary on b, with FORK's watermark;
+- for a forked branch, its **child-side** boundary, with the same watermark.
+
+A fork is therefore an implicit pin on its parent (Fable F6, astra #10). Boundaries live in the `lineage` tree, keyed `(branch u32, watermark u64, side u8)`.
+
+**Deadlist cells (Fable F33).** A cell is keyed `(branch u32, boundary watermark u64, side u8, birth u32, pack u64)` and holds bytes u64. `birth` is the index of the interval between b's consecutive boundaries that contains the frame's stamp.
+
+**At a cut**, for each Cold edge that a commit since the last cut replaced, with the old PagePtr's (pack, len, stamp) recorded at commit time in the cut's replaced list (Fable F25):
+- if its stamp ≥ the newest boundary watermark of the branch, nothing else can reference it, so `live[pack] −= len`;
+- otherwise the cell (b, newest boundary, side, birth(stamp), pack) gains `len`.
+
+**Dropping a boundary** (unpin, deleting a forked child, or `adopt`) merges each of its cells into b's next older boundary. A merged cell whose birth interval lies wholly after that older boundary's watermark is dead: it moves to `live[pack] −= bytes`. A child-side cell merges into its parent's cells only when the parent side of the same fork is dropped. Until then it stays counted, and the probe settles it.
+
+**Relocation moves cells.** When compaction moves a live frame of stamp s and length n from pack p to pack q, then for each branch b whose head does not match the frame but whose boundary k does (k is the newest such boundary), the cell (b, k, side, birth(s), p) moves n bytes to (.., q). A cell that would go negative is clamped to 0, and p is queued for the repair probe.
+
+**The probe (astra #12, Fable F30).** To decide a frame of pack p with index row (collection, key, stamp, offset), the probe descends, by key, every **participating root**:
+- every branch head;
+- every pin;
+- the base root (AP14);
+- the collection map, `streams` and `catalog`;
+- `lineage`;
+- every subtree queued in `deferred_frees`.
+
+A descent skips a subtree whose root stamp is below the frame's stamp. The stamp order is an invariant, checked at every load: a child's stamp is below its parent's (`Corrupt(Order)`). A **positive match** is a Slot or BlobSlot whose PagePtr or BlobRef names (p, offset) exactly, with `len` and the checksum equal. A BLOB matches only through its owning leaf's BlobRef. A frame with no positive match in any root is dead. The probe reads PACK_INDEX and interior pages through the checkpoint task's own partition, never the writer's. It runs on at most `probe_budget` frames per cut (Options, default 65,536). The cut that finishes a pack's probe sets that pack's `live` to the exact sum of its matched frames.
+
+**Compaction at the cut (AP16 Choose and Plan for Tiered packs).**
+- The cut selects Tiered packs by `live` / `bytes` ascending below `compact_ratio` (Options, default 0.5), then any pack not probed in `repair_cuts` cuts (Options, default 64). The second rule repairs drift in `live` (astra #13).
+- It probes them, and copies the matched frames into fresh class 3 or 4 packs. It rewrites every matched path in every matching root with the new location, as AP16 rewrites old copies and list edits, where the probe's paths take the place of incoming lists.
+- A fully probed pack with no remaining matched frame leaves the lists at this cut, in AP16's removal plan.
+
+**Deferred frees (Fable F26, F34, astra #11).**
+- Dropping a Tiered collection, a Tiered table's rows by `drop_table`, or a branch whose Tiered roots are not otherwise shared, enqueues each released root PagePtr in `deferred_frees`, keyed by `deferred_next`. It reads no page.
+- Each cut drains up to `free_budget` pages (Options, default 4,096). Draining a queued PagePtr reads its page, enqueues its children, and removes the entry. It then applies the deadlist rule above to that frame as a replaced edge of the dropping branch, so frames still shared with a pin or fork go to cells, not to `live`.
+- The queue is a participating root, so no pack it still has to read is retired.
+- The queue, `deferred_next`, every `live` change and every cell change ship in the same MANIFEST generation as the cut that made them. There is no separate cursor.
+
+**Crash and refusal (astra #11).** Each M3 change rides one cut, so AP16's and §12.3's rules decide it:
+
+| Interruption | Result |
+|---|---|
+| planning, probing or draining, or an allocation refusal | the cut is refused and loses nothing (AP16); stamps it drew stay consumed (AP6) |
+| packs, PACK_INDEX, list pages or chunks written, before publication | log@1: the previous MANIFEST and journal recover; objects@1: an uploaded MANIFEST or CHECKPOINT that no head names has no authority. Every output is an orphan, removed by Remove (log@1) or reclaim rules 3–4 (objects@1) |
+| directory rename before its sync, or an Undecided head write | exactly one complete generation recovers by the authority's own rule (§2.6, §12.3); deletion waits |
+| after publication, before RAM install or during Remove | reopen selects the new roots, queue, cells and `live` together. Remove and reclaim resume idempotently, and names under a lease or a retained checkpoint wait |
+
+### 13.7 Lazy open (AP21-T)
+
+**What open validates (Fable F14, astra #6).** On a store with a Tiered collection, AP21 runs steps 0–11 with these changes:
+- **Step 0, metadata, in full.** It validates every list tree, including `lineage` and `deferred_frees`, every class-2 pack, the pack inventory, and (objects@1) the locator's exact coverage L ∪ C (§12.2, §13.1), exactly as AP21 does. A damaged list, retirement entry, boundary, cell or queue entry is `Corrupt` at open.
+- **Tiered pages are not decoded.** It decodes no class 3 or class 4 frame, and builds no incoming list or location record for one.
+- **Steps 4 (Validate) and 6 (Rebuild)** run in full for Memory collections only.
+- **Step 5 (Cleanup)** deletes only names that are absent from the inventory just validated, and runs only after step 3's O1, which on objects@1 means after the claim. Open never deletes a pack that a validated list names.
+- **Step 8 (Account)** takes `account_memory` and `account_tiered` from the MANIFEST and replays the journal's deltas for each class. The Tiered account stays exact or conservative as AP15's mode says.
+
+**Every later load of a Tiered frame checks:**
+- AP20's five checks;
+- the location order rule;
+- the stamp order rule (§13.6);
+- stamp < `next_stamp`;
+- AP3's bounded decode.
+
+A failure is `Corrupt` for that read. It is never a value, and nothing is deleted because of it.
+
+**What lazy open cannot see.** A flipped byte in a frame no read has touched is found at its first load or by scrub (§11.17). A scrub tour covers class 3 and class 4 packs, and checks each pack's `frames` and `bytes` totals and its PACK_INDEX against its frames. Open is O(list trees + locator + Memory collections + journal suffix), not O(1).
+
+### 13.8 Accounting and options
+
+- **Two exact totals (astra #20).** AP15's logical account is `account_memory` + `account_tiered`. Each has its own exact or conservative mode, and the resident admission (AP15) admits against the Memory total alone.
+- **The resident account** is: Memory images and blobs, plus dirty Tiered images, plus `cache_bytes` (reserved at open), plus the pager's and the readers' own state. `resident_limit` must cover `cache_bytes` + 64 MiB, else `Missing("cache_bytes")` at open.
+- **The dirty bound (Fable F19).**
+  - Dirty Tiered page bytes since the last cut reaching `dirty_bytes / 2` start a cut (Options `dirty_bytes`, default 67,108,864).
+  - A commit whose apply would take them past `dirty_bytes` is `Refused(Resident(Capacity { requested, available }))`, which `serve` maps to NoRoom. A cut's install then frees them as Cold edges.
+  - The replaced list (§13.6) is charged with the dirty bytes, 20 bytes per row.
+- `Accounts` gains `tiered: u64, dirty: u64, cached: u64, pinned: u64, leased: u64, rerun_steps: u64`. Its `logical` remains the sum.
+- **New `Options` fields**, with defaults: `cache_bytes` 268,435,456; `writer_pin_bytes` 67,108,864; `dirty_bytes` 67,108,864; `touch_slots` 4,096; `prefetch` 8; `rebase_levels` 2; `lease_ms` 300,000; `lease_generations` 8; `probe_budget` 65,536; `free_budget` 4,096; `compact_ratio` 0.5; `repair_cuts` 64; `pager_task_bytes` 16,777,216. A store with no Tiered collection reserves no cache and starts no pager.
+- **Residency changes.** `set_residency(mut db: Db, id: u32, r: Residency) -> Result[(), Error] waits`, with `Residency = Memory | Tiered`, is a schema commit.
+  - Memory → Tiered takes effect at the next cut, whose install publishes the collection's sealed pages as Cold.
+  - Tiered → Memory first loads every page of the collection through the pager. It is admitted against `resident_limit` from `account_tiered`'s figure for that collection before any change, and a shortfall is `Full(Resident(..))` with nothing changed.
+  - On a memory store, Tiered is `Tiered(Memory)`.
+
+### 13.9 Archival retention (opt-in, default off)
+
+**What it keeps.** On objects@1 and sim@1 a store may keep its committed history past reclaim: every entry on the chain (GROUP, CLAIM and CHECKPOINT objects, the immutable CALL records of §12.2) and the archive segments that name them. It keeps no MANIFEST, chunk or pack. `Log[Event]` leaves are W3's (DX Q2) and are not yet specified. Once W3's `Log` lands, its packed leaves are archived by this same hook: rule 3–4 skip for the packs a kept CHECKPOINT's ARCHIVE segment names. That hook is the only addition W3 will need.
+
+```hirsel
+pub fn archive(mut db: Db, on: bool) -> Result[u64, Error] waits      // the position where it takes effect; Tiered(Authority) on log@1 or memory
+pub fn drop_archive(mut db: Db, below: u64) -> Result[(), Error] waits // erase kept entries below `below`; below ≤ archive_until
+```
+
+- **Durable, not an option.** `archive` is a commit that sets `archive_since` (on) or `archive_until` (off) in the next MANIFEST. A restart with other Options cannot purge the archive. A store that never turns it on has `archive_since` = 0, and §12.6 applies to it unchanged.
+- **Segments.** While archival is on, each cut at position c writes, before its CHECKPOINT entry, the create-only object `a-<c>-<e>-<digest>`.
+  - It is HEADER followed by frames of rows (position u64, epoch u64, digest u64, len u64), ≤ 32,768 rows per 1 MiB frame.
+  - It names every chain entry in [c′, c), where c′ is the previous CHECKPOINT on the chain, so c′'s own entry is included. The holder knows these names exactly from recovery's walk and its own advances.
+  - The CHECKPOINT entry's ARCHIVE frame names it. Kept CHECKPOINT entries form a chain of segments down from the head, so reading the archive never needs LIST.
+- **What reclaim skips.** For a pass with captured floor f:
+  - **Rule 1** keeps an entry at position q < f when archive_drop ≤ q, archive_since ≤ q < archive_until, and a segment reachable from the head names its (position, epoch, digest). Every other entry below f goes as before, including off-chain and genesis debris.
+  - Rule 1's LIST starts after `e-<pf>`, where pf is the floor in the MARK of the oldest retained CHECKPOINT. It reads the segments from that checkpoint down to pf, at most `retain` hops. Listing stays bounded by `retain` checkpoint intervals, however large the archive is.
+  - **Rule 2** is unchanged: off-chain entries above the floor are erased.
+  - **Rules 3–5** are unchanged for MANIFESTs, chunks, packs and uploads. A segment is treated like a MANIFEST: it is live while an ARCHIVE frame of a kept or live entry names it, and otherwise erased by rule 3 or 4.
+- **Recovery and followers are unaffected.** §12.3's fetch-hint LIST starts after `e-<c>` with c ≥ floor, so kept entries below the floor are never listed or read by recovery.
+- **Turning it off.** `archive(db, false)` stops new segments at the next cut. Entries already kept stay kept, because `archive_until` bounds rule 1's skip, until `drop_archive`.
+- **Deleting the archive.** `drop_archive(db, below)` raises `archive_drop` to `below` at the next cut, monotonically.
+  - Each later pass erases kept entries and segments in [archive_dropped, archive_drop), at most one LIST page (1,000 keys) per pass.
+  - The next cut records the progress in `archive_dropped`. A crash repeats deletes, which is harmless because a name never holds two contents.
+  - An operator may also delete `e-` and `a-` names below `archive_drop` out of band. Names at or above it must not be touched.
+- **Stragglers.** A fenced holder's late PUT of an entry below an already-passed range re-creates an orphan that no later rule-1 listing reaches. It stays until a `drop_archive` range covers it, and it is never read.
+
+### 13.10 What M3 refuses (Q4)
+
+```hirsel
+pub type TieredRefusal = Memory | Migrate | Export | Install | Authority | Bounded
+// Error gains:  | Tiered(TieredRefusal)
+```
+
+- `migrate` (§1.8), `export` (§3.5a) and `install` (§12.7) on a store whose catalog holds a Tiered collection return `Tiered(Migrate)`, `Tiered(Export)` or `Tiered(Install)`. This is checked first, before any staging, upload, journal write or head write, and every byte is left unchanged. Building them is M3b.
+- `Tiered(Memory)` is the answer for Tiered residency on a memory store.
+- `Tiered(Authority)` is the answer for `archive` on log@1 or memory.
+- `Tiered(Bounded)` is the answer for `run` inside an enclosing step bound on a Tiered store (§13.3).
+- Because install is refused, astra #21's Fenced or Undecided install has no M3 case.
+
+### 13.11 Memory and steps
+
+| Allocation | Bound | Payer |
+|---|---|---|
+| RAM cache, unpinned + pinned + overlap | `cache_bytes` | the pager task |
+| a call's pins | `writer_pin_bytes` | the call's partition |
+| a Reader's pins | its `pin_bytes` | the Reader's reservation |
+| touched set + frame list per attempt | 24 × `touch_slots`, doubling; refusal `Refused(Allocation)` | the call or read (MEM-19) |
+| one GET range buffer | ≤ 1,048,576, or one frame's length | the pager task |
+| pager state (pin map, waiters, ghost list, `CacheDir` paths) | `pager_task_bytes` | the pager task |
+| dirty Tiered pages + replaced list | `dirty_bytes` | the Db task |
+| probe and drain reads | the checkpoint task's limit | the checkpoint task |
+| NVMe tier | its `objects_cache` bytes | the pager task |
+
+Steps run as §12.9 says: the pager, the checkpoint task and the journal task use their own tasks, outside callers' bounds. A call's attempt is charged to the call. Prefetch, hints and the probe are never charged to a call.
+
+### 13.12 Laws L62–L71
+
+Harness: `tiered_laws.hirsel` over `std.sim.s3` and the §3.9 file-system model. The oracle is an ordered-map model of rows fed the same calls, plus the law's own frame walker, which decodes PAGE, BLOB and PACK_INDEX by §11 and §13.1 and never calls the store's reader. No oracle reads the store under test. Each law names the seeded bug it catches.
+
+| Law | What must hold | Seeded bug it catches |
+|---|---|---|
+| **L62 residency is invisible** | The same body at the same root, run from a cold cache, a warm cache, after eviction, with NVMe hits, and on a follower, returns the same Outcome kind, value, reads and refusal `Capacity` whenever none is `Stopped` | refusal counting misses instead of touches |
+| **L63 abort-and-rerun commits once** | A body that misses k times commits once. The journal holds one GROUP record, and no aborted attempt's write reaches the journal. Held mode ends within distinct Cold pages + 1 attempts | applying a `Missed` attempt's staged ops |
+| **L64 the cache refusal** | A body touching more than `writer_pin_bytes` is `Refused(Cache)` with the same `requested` from cold and warm caches, and `serve` reports `NoRoom(.., Cache)`. One touching less finishes from a cold cache with any `prefetch` | pinning hints into the call's partition |
+| **L65 hits verify their edge** | Two edges name one (pack, offset) with different checksums or stamps. The wrong edge is `Corrupt` whether the frame was cached first by the right edge, pinned, on NVMe or delivered to a waiter | skipping the check on a cache hit |
+| **L66 lifetime and re-base** | An expired holder or follower Snapshot gets `Reclaimed(floor)` through Cold slots, cached or not. A live one with an erased pack gets `Corrupt(Absent)`. Across a re-base, old Snapshots answer from their own pages or `Reclaimed`, and `changes` across domains is `Foreign` | re-reading an expired Snapshot at the new root |
+| **L67 NVMe is never trusted** | Each flipped byte or truncated NVMe entry is refetched and the right value returned. With the bucket copy also bad, the read is `Corrupt` | serving an NVMe entry without the five checks |
+| **L68 lazy open deletes nothing live** | Damaged lists, cells, queue entries or locator rows are `Corrupt` at open with every name kept. Cleanup removes exactly the walker's orphans | cleanup before step 0's validation |
+| **L69 compaction keeps every referenced frame** | Under random forks, pins, drops and compaction, with a crash at each row of §13.6's table on both sides, every frame the walker reaches from any participating root is readable after reopen, and every retired pack is unreachable | retiring a pack on `live == 0` without the probe |
+| **L70 partitions and refusals** | Readers that saturate their pool never delay a writer commit. Dirty bytes never pass `dirty_bytes`. `migrate`, `export` and `install` on a Tiered store are `Tiered(..)` with every byte unchanged | one shared pin pool |
+| **L71 archival** | With archival on, every chain entry below the floor survives reclaim and every off-chain entry is erased. With it never on, the store's names after reclaim equal L58's. `drop_archive(b)` erases exactly the kept names below b, and rule 1's LIST never starts below pf | rule 1 erasing kept entries |

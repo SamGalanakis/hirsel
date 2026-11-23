@@ -1627,6 +1627,7 @@ fn operator_listener_is_private() {
             capacity: 0,
         }
     }
+    crate::openat2_required::require();
     // SAFETY: geteuid has no failure.
     let uid = unsafe { libc::geteuid() };
     let root = carrier(b"test");
@@ -1668,7 +1669,6 @@ fn operator_listener_is_private() {
             "the operator's own UID is admitted"
         );
 
-        // The same listener admitting another UID: the connection is closed, never returned.
         let mut stranger = UnixStream::connect(&bound).unwrap();
         assert_eq!(
             os_unix::accept(&mut files.sockets, fd, only.map(|u| u + 1)).map(|o| o.value),

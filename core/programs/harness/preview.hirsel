@@ -1,7 +1,7 @@
 // Ephemeral gateway preview. Each read has a one-slot reply mailbox. The hub
 // retains the latest bounded draft per active dispatch while it has an observer.
 pub type Key: codec + key + send {
-    dispatch: store.triggers.Id,
+    dispatch: runner.triggers.Id,
     run: u64,
     entry: u64,
     tool: Option[u64],
@@ -18,7 +18,7 @@ pub type Draft: codec + send {
     text: String,
 }
 
-type Input: send = Start(String, store.Caller, Key, u64, Receiver[()]) | Delta(String, Key, u64, u64, u64, String) | Attach(String, store.Caller, Receiver[()], Option[store.client.Signal], Sender[u64]) | Detach(u64) | Revoke(String, store.Caller, Sender[()]) | Read(u64, Sender[Option[Draft]]) | Sweep | Stop
+type Input: send = Start(String, store.Caller, Key, u64, Receiver[()]) | Delta(String, Key, u64, u64, u64, String) | Attach(String, store.Caller, Receiver[()], Option[runner.client.Signal], Sender[u64]) | Detach(u64) | Revoke(String, store.Caller, Sender[()]) | Read(u64, Sender[Option[Draft]]) | Sweep | Stop
 
 pub opaque type Door: send {
     to: Sender[Input],
@@ -82,7 +82,7 @@ type Active {
 type Watching {
     audience: Audience,
     live: Receiver[()],
-    signal: Option[store.client.Signal],
+    signal: Option[runner.client.Signal],
 }
 
 fn open(live: Receiver[()]) -> bool {
@@ -109,7 +109,7 @@ fn notify(watching: Map[u64, Watching], audience: Audience) -> bool {
     for (_, w) in watching {
         if same_audience(w.audience, audience) && open(w.live) {
             any = true
-            if let Some(signal) = view w.signal { let _ = store.client.wake(signal) }
+            if let Some(signal) = view w.signal { let _ = runner.client.wake(signal) }
         }
     }
     any
@@ -139,7 +139,7 @@ fn prune(mut active: Map[Entry, Active], mut watching: Map[u64, Watching]) {
     }
     for (_, w) in watching {
         if map.contains(changed, w.audience) {
-            if let Some(signal) = view w.signal { let _ = store.client.wake(signal) }
+            if let Some(signal) = view w.signal { let _ = runner.client.wake(signal) }
         }
     }
     for entry in closed { let _ = map.remove(mut active, entry) }
@@ -156,7 +156,7 @@ fn revoke_watchers(mut watching: Map[u64, Watching], audience: Audience) {
     for (id, w) in watching {
         if same_audience(w.audience, audience) {
             list.push(mut revoked, id)
-            if let Some(signal) = view w.signal { let _ = store.client.wake(signal) }
+            if let Some(signal) = view w.signal { let _ = runner.client.wake(signal) }
         }
     }
     for id in revoked { let _ = map.remove(mut watching, id) }
@@ -353,7 +353,7 @@ pub fn observe(d: Door, group: String, caller: store.Caller) -> Option[Observer]
     observe_with(d, group, caller, None)
 }
 
-pub fn observe_with(d: Door, group: String, caller: store.Caller, take signal: Option[store.client.Signal]) -> Option[Observer] waits {
+pub fn observe_with(d: Door, group: String, caller: store.Caller, take signal: Option[runner.client.Signal]) -> Option[Observer] waits {
     let (lease, live): (Sender[()], Receiver[()]) = channel.new(1u64)
     let (reply, from): (Sender[u64], Receiver[u64]) = channel.new(1u64)
     if let Error(_) = channel.send(d.to, Attach(string.from(group), clone(caller), take live, take signal, take reply)) {

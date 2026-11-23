@@ -345,7 +345,7 @@ impl PackageDir {
                 continue;
             }
             let root = resolution.published.get(&id).copied();
-            let toolchain_store;
+            let toolchain_package;
             let (content, bindings) = if let Some(member) = resolution.workspace.members.get(&id) {
                 let bindings = member
                     .edges
@@ -360,9 +360,9 @@ impl PackageDir {
                     .collect::<Vec<_>>();
                 (&member.content, bindings)
             } else {
-                let content = if resolution.toolchain_store && id.name == "store" && id.major == 1 {
-                    toolchain_store = crate::installation::Installed::store_package(&id)?;
-                    &toolchain_store
+                let content = if resolution.toolchain.contains(&id) {
+                    toolchain_package = crate::installation::Installed::toolchain_package(&id)?;
+                    &toolchain_package
                 } else {
                     &resolution.libraries[&root.unwrap()].content
                 };
@@ -433,14 +433,15 @@ impl PackageDir {
         };
         let mut roots = BTreeMap::new();
         let mut dependencies = Vec::new();
-        let mut toolchain_store = None;
+        let mut bound = Vec::new();
         for (root, library) in &archive.entries {
             let content = &library.content;
-            if toolchain_store.is_none() {
-                toolchain_store = content.bindings.iter().find_map(|(id, root)| {
-                    (id.name == "store" && id.major == 1 && root.is_none()).then_some(id)
-                });
-            }
+            bound.extend(
+                content
+                    .bindings
+                    .iter()
+                    .filter_map(|(id, root)| root.is_none().then_some(id)),
+            );
             if let Some(previous) = roots.insert(&content.id, root) {
                 return Err(io::Error::other(format!(
                     "{} is bound to both {previous} and {root}",
@@ -451,18 +452,18 @@ impl PackageDir {
                 dependencies.push(manifest(content, *root));
             }
         }
-        if let Some(id) = toolchain_store {
-            if roots.contains_key(id) {
-                return Err(io::Error::other(
-                    "store@1 is bound both to the toolchain and to a published library",
-                ));
+        for id in crate::package_content::toolchain_closure(bound) {
+            if roots.contains_key(&id) {
+                return Err(io::Error::other(format!(
+                    "{id} is bound both to the toolchain and to a published library"
+                )));
             }
-            let store = crate::installation::Installed::store_package(id)?;
+            let supplied = crate::installation::Installed::toolchain_package(&id)?;
             dependencies.push(Self::manifest_from_content(
-                &store,
+                &supplied,
                 &head.id,
                 None,
-                store.bindings.iter().map(|(id, pin)| (id, *pin)),
+                supplied.bindings.iter().map(|(id, pin)| (id, *pin)),
                 None,
             ));
         }

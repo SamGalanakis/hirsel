@@ -1,0 +1,16 @@
+# The store's crash harnesses: programs the crash drivers (core/tools/store_crash_tests.py,
+# store_journal_tests.py, runner_tests.py) build and kill at chosen points.
+[package]
+name = "store_crash"
+major = 1
+charge = "charge-v1"
+
+[dependencies]
+std = { major = 1 }
+store = { major = 1, path = "../store" }
+runner = { major = 1, path = "../runner" }
+platform = { major = 1, path = "../platform" }
+
+[sources]
+"platform_crash.hirsel" = "platform_crash"
+"runner_crash.hirsel" = "runner_crash"

@@ -11,7 +11,7 @@ const IDLE_MS: u64 = 300u64
 type ModelAsk: send = Ask(bool, Sender[harness.Answer]) | Asked(Sender[u64])
 type ToolAsk: send = Run(Bytes, Sender[Bytes]) | Ran(Sender[u64])
 type Services: send { model: Sender[ModelAsk], tool: Sender[ToolAsk], blobs: Option[BlobFixture] }
-type Grants: send { context: store.runner.TriggerContext, model: Sender[ModelAsk], tool: Sender[ToolAsk], blobs: Option[BlobFixture] }
+type Grants: send { context: runner.TriggerContext, model: Sender[ModelAsk], tool: Sender[ToolAsk], blobs: Option[BlobFixture] }
 
 type BlobCut: send = BlobWritten | PlaceEnded
 type BlobFixture: send { net: Net, tasks: Tasks, clock: Clock, random: Random, cut: Option[Sender[BlobCut]], peer: Option[(Addr, Net)] }
@@ -77,7 +77,7 @@ fn tool_service(take seed: ToolSeed) -> () waits {
 
 fn copy_services(s: Services) -> Services { Services(model: channel.sender(s.model), tool: channel.sender(s.tool), blobs: blob_grant(s)) }
 
-fn make_grants(s: Services, take ctx: store.runner.TriggerContext) -> Result[Grants, Capacity] {
+fn make_grants(s: Services, take ctx: runner.TriggerContext) -> Result[Grants, Capacity] {
     Ok(Grants(context: take ctx, model: channel.sender(s.model), tool: channel.sender(s.tool), blobs: blob_grant(s)))
 }
 
@@ -115,45 +115,45 @@ fn effect(g: Grants, caller: store.Caller, take key: harness.EffectKey) -> Resul
     harness.effect(g.context, g, take key, crash_agent(), code.describe(settle), None)
 }
 
-fn settle(mut tx: store.Tx, a: store.triggers.Attempt, take m: harness.Settle) -> Result[harness.Filed, store.Error] {
+fn settle(mut tx: store.Tx, a: runner.triggers.Attempt, take m: harness.Settle) -> Result[harness.Filed, store.Error] {
     let Ok(w) = wired() else { return Error(Missing("harness: wiring")) }
     harness.settle(mut tx, crash_agent(), w, a, take m)
 }
 
-fn place(mut r: store.runner.Registry[Grants, harness.Handles]) -> Result[(), store.runner.RegisterError] {
+fn place(mut r: runner.Registry[Grants, harness.Handles]) -> Result[(), runner.RegisterError] {
     harness.register_standard(mut r, code.describe(advance), code.describe(effect), code.describe(settle), BYTES, BYTES)
 }
 
 // ---- running a place ----
 
-type Life: send { config: store.runner.PlaceConfig[Grants, harness.Handles, Services, ()], stop: Receiver[()], status: Latest[store.runner.Status] }
+type Life: send { config: runner.PlaceConfig[Grants, harness.Handles, Services, ()], stop: Receiver[()], status: Latest[runner.Status] }
 
-fn live(take life: Life) -> Result[store.runner.Ended, store.runner.StartError] waits {
+fn live(take life: Life) -> Result[runner.Ended, runner.StartError] waits {
     let Life(config: take config, stop: take stop, status: take status) = take life
-    store.runner.operate(take config, take stop, status, None)
+    runner.operate(take config, take stop, status, None)
 }
 
-type Registered = StaticFn[fn(mut store.runner.Registry[Grants, harness.Handles]) -> Result[(), store.runner.RegisterError]]
+type Registered = StaticFn[fn(mut runner.Registry[Grants, harness.Handles]) -> Result[(), runner.RegisterError]]
 
-fn settings(dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, take s: Services, idle: Option[u64]) -> store.runner.PlaceConfig[Grants, harness.Handles, Services, ()] {
+fn settings(dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, take s: Services, idle: Option[u64]) -> runner.PlaceConfig[Grants, harness.Handles, Services, ()] {
     settings_of(code.describe(place), harness.entries(result.unwrap(wired())), dir, clock, random, tasks, net, take s, idle)
 }
 
-fn settings_of(registered: Registered, take allowed: store.triggers.Entries, dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, take s: Services, idle: Option[u64]) -> store.runner.PlaceConfig[Grants, harness.Handles, Services, ()] {
-    let config = store.runner.TriggerConfig(entries: take allowed, author: store.Caller(issuer: 0u8, subject: list.new()),
+fn settings_of(registered: Registered, take allowed: runner.triggers.Entries, dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, take s: Services, idle: Option[u64]) -> runner.PlaceConfig[Grants, harness.Handles, Services, ()] {
+    let config = runner.TriggerConfig(entries: take allowed, author: store.Caller(issuer: 0u8, subject: list.new()),
         grants: take s, grant: make_grants, grant_bytes: 65536u64)
-    let mut wire = store.runner.wire_defaults(65536u64, PLACE_BYTES)
+    let mut wire = runner.wire_defaults(65536u64, PLACE_BYTES)
     wire.n_pool = 4194304u64
-    store.runner.PlaceConfig(backing: Disk(dir, store.triggers.law_options()), selection: Reopen, place: registered, n_place: PLACE_BYTES,
+    runner.PlaceConfig(backing: Disk(dir, runner.triggers.law_options()), selection: Reopen, place: registered, n_place: PLACE_BYTES,
         migrate: code.describe(harness.migrate), handles: code.describe(harness.handles), session: wire, max_sessions: 1u64,
         proxies: list.new(), n_publisher: PLACE_BYTES, listen: Addr(ip: V4(0x7f000001u32), port: 0u16),
-        net: net, tasks: tasks, clock: clock, random: random, stop: store.runner.Stop(lag_ms: 0u64, grace_ms: 200u64),
+        net: net, tasks: tasks, clock: clock, random: random, stop: runner.Stop(lag_ms: 0u64, grace_ms: 200u64),
         wire: None, triggers: Some(take config), idle: idle)
 }
 
-fn launch(tasks: Tasks, take config: store.runner.PlaceConfig[Grants, harness.Handles, Services, ()]) -> (Task[Result[store.runner.Ended, store.runner.StartError]], Sender[()], Latest[store.runner.Status]) {
+fn launch(tasks: Tasks, take config: runner.PlaceConfig[Grants, harness.Handles, Services, ()]) -> (Task[Result[runner.Ended, runner.StartError]], Sender[()], Latest[runner.Status]) {
     let (stop_to, stop_from): (Sender[()], Receiver[()]) = channel.new(1u64)
-    let status = result.unwrap(store.runner.status_root())
+    let status = result.unwrap(runner.status_root())
     let life = Life(config: take config, stop: take stop_from, status: latest.handle(status))
     let running = task.spawn(tasks, bytes 50331648u64, take life, live)
     (take running, take stop_to, take status)
@@ -167,7 +167,7 @@ fn seed_session(dir: Dir, clock: Clock, random: Random, tasks: Tasks) -> () wait
 // The submit's trigger names the advance entry of `w`, so the place that
 // runs the session must register that entry.
 fn seed_with(dir: Dir, clock: Clock, random: Random, tasks: Tasks, a: harness.Agent[Grants], w: harness.Wiring) -> () waits {
-    let mut db = result.unwrap(store.open(tasks, dir, clock, random, store.triggers.law_options()))
+    let mut db = result.unwrap(store.open(tasks, dir, clock, random, runner.triggers.law_options()))
     result.unwrap(store.run_migration(mut db, tasks, code.describe(harness.migrate)))
     let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
     let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[harness.Disposition, harness.Refused] {
@@ -233,7 +233,7 @@ pub fn law_once_tool_crash(parent: Dir, clock: Clock, random: Random, tasks: Tas
     let second_ended = match second_join { Ok(Ok(Stopped(_))) => true, _ => false }
     let asked = model_asked(services)
     let ran = tool_ran(services)
-    let db = result.unwrap(store.open(tasks, dir, clock, random, store.triggers.law_options()))
+    let db = result.unwrap(store.open(tasks, dir, clock, random, runner.triggers.law_options()))
     let snap = store.snapshot(db)
     let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
     let session = option.unwrap(result.unwrap(store.get(snap, store.shape(h.session), 0u64)))
@@ -267,7 +267,7 @@ fn test_once_tool_crash(parent: Dir, clock: Clock, random: Random, tasks: Tasks,
 
 // A session with `n` earlier entries, each a 200-byte user line, and no run.
 fn history(dir: Dir, clock: Clock, random: Random, tasks: Tasks, n: u64) -> store.Db waits {
-    let mut db = result.unwrap(store.open(tasks, dir, clock, random, store.triggers.law_options()))
+    let mut db = result.unwrap(store.open(tasks, dir, clock, random, runner.triggers.law_options()))
     result.unwrap(store.run_migration(mut db, tasks, code.describe(harness.migrate)))
     let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
     let filled = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), harness.Refused] {
@@ -355,7 +355,7 @@ fn parent_log() -> List[harness.Entry] {
 }
 
 fn logged(dir: Dir, clock: Clock, random: Random, tasks: Tasks, log: List[harness.Entry]) -> store.Db waits {
-    let mut db = result.unwrap(store.open(tasks, dir, clock, random, store.triggers.law_options()))
+    let mut db = result.unwrap(store.open(tasks, dir, clock, random, runner.triggers.law_options()))
     result.unwrap(store.run_migration(mut db, tasks, code.describe(harness.migrate)))
     let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
     let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
@@ -409,7 +409,7 @@ pub fn law_fork_shares_prefix(parent: Dir, clock: Clock, random: Random, tasks: 
     if let Error(Conflict) = inside { () } else { bad = 1u64 }
     let prefix = match exported(src, 4u64) { Ok(take p) => take p, Error(_) => { bad = 2u64; harness.Prefix(model: "", tools_narrow: All, head_pos: 0u64, entries: list.new(), cuts: list.new()) } }
     result.unwrap(store.close(take src))
-    let mut db = result.unwrap(store.open(tasks, to, clock, random, store.triggers.law_options()))
+    let mut db = result.unwrap(store.open(tasks, to, clock, random, runner.triggers.law_options()))
     result.unwrap(store.run_migration(mut db, tasks, code.describe(harness.migrate)))
     let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
     let adopted = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), harness.Refused] { harness.adopt(mut tx, h, clone(prefix)) })
@@ -650,7 +650,7 @@ fn inside_case(parent: Dir, clock: Clock, random: Random, tasks: Tasks, kind: u8
     let _ = phase_after_derive
     kick(mut db, a)
     result.unwrap(store.close(take db))
-    let reopened = result.unwrap(store.open(tasks, dir, clock, random, store.triggers.law_options()))
+    let reopened = result.unwrap(store.open(tasks, dir, clock, random, runner.triggers.law_options()))
     let h = result.unwrap(store.with_schema(reopened, code.describe(harness.handles)))
     let wrote = match result.unwrap(store.get(store.snapshot(reopened), store.shape(h.views), 999u64)) { Some(_) => true, None => false }
     let phase = member(reopened)
@@ -716,7 +716,7 @@ fn put_shows(mut tx: store.Tx, h: harness.Handles, k: u64, s: Shows) -> Result[(
 }
 
 fn fresh(dir: Dir, clock: Clock, random: Random, tasks: Tasks) -> store.Db waits {
-    let mut db = result.unwrap(store.open(tasks, dir, clock, random, store.triggers.law_options()))
+    let mut db = result.unwrap(store.open(tasks, dir, clock, random, runner.triggers.law_options()))
     result.unwrap(store.run_migration(mut db, tasks, code.describe(harness.migrate)))
     let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
     let filled = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
@@ -859,7 +859,7 @@ fn mark_then_fail(mut tx: store.Tx, at: u64, e: harness.Entry) -> Result[(), har
 pub fn law_reactions_commit_with_entry(parent: Dir, clock: Clock, random: Random, tasks: Tasks) -> bool waits {
     let mut name = string.with_capacity(32u64)
     let dir = result.unwrap(host.mkdtemp(parent, mut name))
-    let mut db = result.unwrap(store.open(tasks, dir, clock, random, store.triggers.law_options()))
+    let mut db = result.unwrap(store.open(tasks, dir, clock, random, runner.triggers.law_options()))
     result.unwrap(store.run_migration(mut db, tasks, code.describe(harness.migrate)))
     let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
     let mut a = crash_agent()
@@ -1028,16 +1028,16 @@ fn matrix_wired() -> Result[harness.Wiring, harness.Refused] {
     harness.wiring(code.describe(matrix_advance), code.describe(matrix_effect))
 }
 
-fn add_matrix_action(mut allowed: store.triggers.Entries) -> Result[store.triggers.Entry[MatrixAction], harness.Refused] {
-    let entry = store.triggers.transact(code.describe(matrix_action)) ?=> |_| Storage
-    store.triggers.allow(mut allowed, entry) ?=> |_| Storage
+fn add_matrix_action(mut allowed: runner.triggers.Entries) -> Result[runner.triggers.Entry[MatrixAction], harness.Refused] {
+    let entry = runner.triggers.transact(code.describe(matrix_action)) ?=> |_| Storage
+    runner.triggers.allow(mut allowed, entry) ?=> |_| Storage
     Ok(take entry)
 }
 
 fn matrix_queue(mut tx: store.Tx, h: harness.Handles, action: MatrixAction) -> Result[(), harness.Refused] {
-    let mut allowed = store.triggers.empty_entries()
+    let mut allowed = runner.triggers.empty_entries()
     let entry = add_matrix_action(mut allowed)?
-    let _ = store.triggers.write(mut tx, h.triggers, allowed, entry, action, AfterCommit) ?=> |_| Storage
+    let _ = runner.triggers.write(mut tx, h.triggers, allowed, entry, action, AfterCommit) ?=> |_| Storage
     Ok(())
 }
 
@@ -1071,17 +1071,17 @@ fn matrix_effect(g: Grants, caller: store.Caller, take key: harness.EffectKey) -
     harness.effect(g.context, g, take key, matrix_agent(), code.describe(matrix_settle), None)
 }
 
-fn matrix_settle(mut tx: store.Tx, attempt: store.triggers.Attempt, take m: harness.Settle) -> Result[harness.Filed, store.Error] {
+fn matrix_settle(mut tx: store.Tx, attempt: runner.triggers.Attempt, take m: harness.Settle) -> Result[harness.Filed, store.Error] {
     let Ok(w) = matrix_wired() else { return Error(Missing("harness: wiring")) }
     harness.settle(mut tx, matrix_agent(), w, attempt, take m)
 }
 
-fn matrix_place(mut r: store.runner.Registry[Grants, harness.Handles]) -> Result[(), store.runner.RegisterError] {
-    store.runner.transact(mut r, code.describe(matrix_action), BYTES, store.runner.DEFAULT_STEPS)?
+fn matrix_place(mut r: runner.Registry[Grants, harness.Handles]) -> Result[(), runner.RegisterError] {
+    runner.transact(mut r, code.describe(matrix_action), BYTES, runner.DEFAULT_STEPS)?
     harness.register_standard(mut r, code.describe(matrix_advance), code.describe(matrix_effect), code.describe(matrix_settle), BYTES, BYTES)
 }
 
-fn matrix_settings(scenario: MatrixScenario, dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, take s: Services) -> store.runner.PlaceConfig[Grants, harness.Handles, Services, ()] {
+fn matrix_settings(scenario: MatrixScenario, dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, take s: Services) -> runner.PlaceConfig[Grants, harness.Handles, Services, ()] {
     if scenario == ToolAndAnswer { return settings(dir, clock, random, tasks, net, take s, Some(MATRIX_IDLE_MS)) }
     let mut allowed = harness.entries(result.unwrap(matrix_wired()))
     let _ = result.unwrap(add_matrix_action(mut allowed))
@@ -1238,11 +1238,11 @@ fn stage_blob(g: Grants, take body: Bytes) -> Result[harness.BlobRef, harness.Fa
     Ok(take reference)
 }
 
-fn blob_place(mut r: store.runner.Registry[Grants, harness.Handles]) -> Result[(), store.runner.RegisterError] {
+fn blob_place(mut r: runner.Registry[Grants, harness.Handles]) -> Result[(), runner.RegisterError] {
     harness.register_standard(mut r, code.describe(advance), code.describe(effect), code.describe(settle), BYTES, 8388608u64)
 }
 
-fn blob_settings(dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, take services: Services) -> store.runner.PlaceConfig[Grants, harness.Handles, Services, ()] {
+fn blob_settings(dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, take services: Services) -> runner.PlaceConfig[Grants, harness.Handles, Services, ()] {
     settings_of(code.describe(blob_place), harness.entries(result.unwrap(wired())), dir, clock, random, tasks, net, take services, Some(IDLE_MS))
 }
 
@@ -1255,7 +1255,7 @@ fn first_blob_life(take start: FirstBlobLife) waits {
 }
 
 fn stored_blob(dir: Dir, clock: Clock, random: Random, tasks: Tasks, cut: bool) -> Option[harness.BlobRef] waits {
-    let db = result.unwrap(store.open(tasks, dir, clock, random, store.triggers.law_options()))
+    let db = result.unwrap(store.open(tasks, dir, clock, random, runner.triggers.law_options()))
     let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
     let snap = store.snapshot(db)
     let run = option.unwrap(result.unwrap(store.get(snap, store.shape(h.runs), 0u64)))
@@ -1263,7 +1263,7 @@ fn stored_blob(dir: Dir, clock: Clock, random: Random, tasks: Tasks, cut: bool) 
     let key = harness.EffectKey(run: 0u64, round: 0u64, kind: harness.TOOL, ordinal: 0u64)
     let tool_row = option.unwrap(result.unwrap(store.get(snap, store.shape(h.effects), key)))
     if let Some(id) = tool_row.trigger {
-        let ended = result.unwrap(store.triggers.outcome(snap, h.triggers, id))
+        let ended = result.unwrap(runner.triggers.outcome(snap, h.triggers, id))
         match take ended {
             Some(Raised(raised_code)) => {
                 let mut why = string.from("blob: granted effect raised ")
@@ -1356,7 +1356,7 @@ fn law_blob_results(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net
     let mut cut_services = copy_services(services)
     cut_services.blobs = Some(take cut_fixture)
     let config = blob_settings(first_dir, clock, random, tasks, net, take cut_services)
-    let status = result.unwrap(store.runner.status_root())
+    let status = result.unwrap(runner.status_root())
     let life = Life(config: take config, stop: take stop_in, status: take status)
     let first = task.spawn(tasks, bytes 50331648u64, FirstBlobLife(life: take life, checkpoint: take checkpoint), first_blob_life)
     if let PlaceEnded = result.unwrap(channel.receive(checkpoints)) { fail("blob: place ended before the PUT acknowledgement") }
@@ -1521,7 +1521,7 @@ fn matrix_case(clock: Clock, random: Random, tasks: Tasks, net: Net, scenario: M
     let ran = tool_ran(services)
     let (finished_image, _) = unmount(take second_dir, take second_server)
     let (check_dir, check_server) = mount(tasks, clock, take finished_image, std.sim.world.plan(0u64))
-    let db = result.unwrap(store.open(tasks, check_dir, clock, random, store.triggers.law_options()))
+    let db = result.unwrap(store.open(tasks, check_dir, clock, random, runner.triggers.law_options()))
     let snap = store.snapshot(db)
     let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
     let session = option.unwrap(result.unwrap(store.get(snap, store.shape(h.session), 0u64)))
@@ -1615,12 +1615,12 @@ fn race_effect(g: Grants, caller: store.Caller, take key: harness.EffectKey) -> 
     harness.effect(g.context, g, take key, race_agent(), code.describe(race_settle), None)
 }
 
-fn race_settle(mut tx: store.Tx, a: store.triggers.Attempt, take m: harness.Settle) -> Result[harness.Filed, store.Error] {
+fn race_settle(mut tx: store.Tx, a: runner.triggers.Attempt, take m: harness.Settle) -> Result[harness.Filed, store.Error] {
     let Ok(w) = race_wired() else { return Error(Missing("harness: wiring")) }
     harness.settle(mut tx, race_agent(), w, a, take m)
 }
 
-fn race_place(mut r: store.runner.Registry[Grants, harness.Handles]) -> Result[(), store.runner.RegisterError] {
+fn race_place(mut r: runner.Registry[Grants, harness.Handles]) -> Result[(), runner.RegisterError] {
     harness.register_standard(mut r, code.describe(race_advance), code.describe(race_effect), code.describe(race_settle), BYTES, BYTES)
 }
 
@@ -1680,7 +1680,7 @@ fn race_case(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, 
     if let Ok(Ok(Stopped(_))) = ended { } else { fail("race: the place did not stop") }
     let asked = model_asked(services)
     let ran = tool_ran(services)
-    let db = result.unwrap(store.open(tasks, dir, clock, random, store.triggers.law_options()))
+    let db = result.unwrap(store.open(tasks, dir, clock, random, runner.triggers.law_options()))
     let snap = store.snapshot(db)
     let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
     let session = option.unwrap(result.unwrap(store.get(snap, store.shape(h.session), 0u64)))
@@ -1780,15 +1780,15 @@ fn cancel_model_race(parent: Dir, clock: Clock, random: Random, tasks: Tasks, ca
     let mut name = string.with_capacity(32u64)
     let dir = result.unwrap(host.mkdtemp(parent, mut name))
     seed_session(dir, clock, random, tasks)
-    let mut db = result.unwrap(store.open(tasks, dir, clock, random, store.triggers.law_options()))
+    let mut db = result.unwrap(store.open(tasks, dir, clock, random, runner.triggers.law_options()))
     let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
     let who = store.Caller(issuer: 1u8, subject: list.new())
     let id = harness.EffectKey(run: 0u64, round: 0u64, kind: harness.MODEL, ordinal: 0u64)
-    let pending = option.unwrap(result.unwrap(store.triggers.next_pending(store.snapshot(db), h.triggers, fn(candidate: store.triggers.Id) -> bool { false })))
-    let marked = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[store.triggers.Attempt, store.triggers.Error] {
-        let Body(attempt) = store.triggers.start(mut tx, h.triggers, pending, list.new())? else { fail("cancel race: no granted attempt") }
+    let pending = option.unwrap(result.unwrap(runner.triggers.next_pending(store.snapshot(db), h.triggers, fn(candidate: runner.triggers.Id) -> bool { false })))
+    let marked = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[runner.triggers.Attempt, runner.triggers.Error] {
+        let Body(attempt) = runner.triggers.start(mut tx, h.triggers, pending, list.new())? else { fail("cancel race: no granted attempt") }
         let mut e = option.unwrap(store.fetch(tx, store.shape(h.effects), id) ?=> Store)
-        e.phase = Dispatched(store.triggers.number(attempt))
+        e.phase = Dispatched(runner.triggers.number(attempt))
         e.dispatches = 1u64
         store.put(mut tx, h.effects, id, e) ?=> Store
         Ok(attempt)
@@ -1796,14 +1796,14 @@ fn cancel_model_race(parent: Dir, clock: Clock, random: Random, tasks: Tasks, ca
     let Ok(Committed(dispatched)) = take marked else { fail("cancel race: dispatch did not commit") }
     result.unwrap(store.durable(mut db, dispatched.ticket))
     let first = !cancel_first || match cancelling(mut db, h, who) { Ok(Cancelled) => true, _ => false }
-    let mut reg: store.runner.Registry[Grants, harness.Handles] = store.runner.registry()
+    let mut reg: runner.Registry[Grants, harness.Handles] = runner.registry()
     result.unwrap(place(mut reg))
     let c: std.codec.Codec[harness.Settle] = std.codec.of()
     let r: std.codec.Codec[harness.Filed] = std.codec.of()
-    let key = result.unwrap(store.runner.attempt_key(code.describe(settle), c, r))
+    let key = result.unwrap(runner.attempt_key(code.describe(settle), c, r))
     let mut raw: Bytes = list.new()
     result.unwrap(std.codec.encode(c, harness.Settle(key: id, receipt: Some(Model(scripted_answer(true)))), mut raw))
-    let reply = store.runner.apply_attempt(mut db, reg, h, h.triggers, who, dispatched.value, key, raw)
+    let reply = runner.apply_attempt(mut db, reg, h, h.triggers, who, dispatched.value, key, raw)
     let fenced = match take reply {
         Ok(Committed(done)) if !cancel_first => {
             result.unwrap(store.durable(mut db, done.ticket))

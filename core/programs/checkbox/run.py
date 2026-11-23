@@ -17,26 +17,11 @@ N_PLACE = "1048576"
 
 
 def inputs(work, source=PROGRAM / "main.hirsel", store_sources=None):
-    directory = PROGRAM.parent / "store"
-    with (directory / "hirsel.toml").open("rb") as manifest_file:
-        manifest = tomllib.load(manifest_file)
-    package = manifest["package"]
+    """Core, std, the store and runner packages with the modules checkbox binds, and checkbox;
+    `store_sources` maps a module name to a replacement file."""
     store_sources = store_sources or {}
     core = {"name": "core", "version": "1"}
     std = {"name": "std", "version": "1"}
-    store = {
-        "package": {"name": package["name"], "version": str(package["major"])},
-        "dependencies": [core] + [
-            {"name": name, "version": str(dep["major"])}
-            for name, dep in manifest["dependencies"].items()
-        ],
-        "sources": [
-            {"file": str(store_sources.get(module, directory / file)),
-             "modules": module.split("."), "signatures": False}
-            for file, module in manifest["sources"].items()
-            if module in ("store", "triggers", "runner", "ingress")
-        ],
-    }
     packages = []
     for name, dependencies in [("core", []), ("std", [core])]:
         packages.append({
@@ -46,11 +31,31 @@ def inputs(work, source=PROGRAM / "main.hirsel", store_sources=None):
                 for file in sorted((ROOT / "core" / name).glob("*.hirsel"))
             ],
         })
-    packages.extend([store, {
+    bound = []
+    for name, modules in (("store", ("store",)), ("runner", ("triggers", "runner", "ingress"))):
+        directory = PROGRAM.parent / name
+        with (directory / "hirsel.toml").open("rb") as manifest_file:
+            manifest = tomllib.load(manifest_file)
+        package = manifest["package"]
+        packages.append({
+            "package": {"name": package["name"], "version": str(package["major"])},
+            "dependencies": [core] + [
+                {"name": name, "version": str(dep["major"])}
+                for name, dep in manifest["dependencies"].items()
+            ],
+            "sources": [
+                {"file": str(store_sources.get(module, directory / file)),
+                 "modules": module.split("."), "signatures": False}
+                for file, module in manifest["sources"].items()
+                if module in modules
+            ],
+        })
+        bound.append(packages[-1]["package"])
+    packages.append({
         "package": {"name": "checkbox", "version": "1"},
-        "dependencies": [core, std, store["package"]],
+        "dependencies": [core, std, *bound],
         "sources": [{"file": str(source), "modules": ["main"], "signatures": False}],
-    }])
+    })
     path = work / "inputs.json"
     path.write_text(json.dumps({"core": core, "packages": packages}) + "\n")
     return path

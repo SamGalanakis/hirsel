@@ -7,6 +7,8 @@ charge = "charge-v1"
 notes = { major = 1, path = "../../notes" }
 std = { major = 1 }
 store = { major = 1, path = "../../store" }
+runner = { major = 1, path = "../../runner" }
+platform = { major = 1, path = "../../platform" }
 harness = { major = 1, path = ".." }
 
 [sources]

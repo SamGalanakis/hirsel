@@ -142,6 +142,7 @@ pub fn frame_schema(
     let core = crate::package("core");
     let std = crate::package("std");
     let store = crate::package("store");
+    let runner = crate::package("runner");
     let sdk = crate::package("sdk");
     let mut packages = Vec::new();
     for (name, texts, dependencies, signatures) in [
@@ -179,35 +180,48 @@ pub fn frame_schema(
             dependencies,
         });
     }
-    let mut sources = Vec::new();
-    let directory = work.join("store");
-    for (file, module, text) in crate::product::bundled::STORE_SOURCES {
-        let file = directory.join(file);
-        std::fs::create_dir_all(file.parent().expect("store source has a directory"))?;
-        std::fs::write(&file, text)?;
-        sources.push(ModuleSource {
-            foreign: false,
-            captured: None,
-            file,
-            modules: module.split('.').map(str::to_owned).collect(),
-            signatures: false,
+    for (package, texts, dependencies) in [
+        (
+            store.clone(),
+            crate::product::bundled::STORE_SOURCES,
+            vec![core.clone(), std.clone()],
+        ),
+        (
+            runner.clone(),
+            crate::product::bundled::RUNNER_SOURCES,
+            vec![core.clone(), std.clone(), store.clone()],
+        ),
+    ] {
+        let directory = work.join(&package.name);
+        let mut sources = Vec::new();
+        for (file, module, text) in texts {
+            let file = directory.join(file);
+            std::fs::create_dir_all(file.parent().expect("a bundled source has a directory"))?;
+            std::fs::write(&file, text)?;
+            sources.push(ModuleSource {
+                foreign: false,
+                captured: None,
+                file,
+                modules: module.split('.').map(str::to_owned).collect(),
+                signatures: false,
+            });
+        }
+        packages.push(PackageManifest {
+            namespace: None,
+            package,
+            sources,
+            dependencies,
         });
     }
-    packages.push(PackageManifest {
-        namespace: None,
-        package: store.clone(),
-        sources,
-        dependencies: vec![core.clone(), std.clone()],
-    });
     let source = work.join("schema.hirsel");
     std::fs::write(
         &source,
-        "pub fn main(out: Stdout) -> Result[(), Exit] waits {\n    let c: std.codec.Codec[store.runner.Frame] = std.codec.of()\n    let schema = std.result.unwrap(std.codec.schema(c))\n    match stdout.write_bytes(out, schema) {\n        Ok(()) => Ok(()),\n        Error(_) => Error(Exit(status: 1))\n    }\n}\n",
+        "pub fn main(out: Stdout) -> Result[(), Exit] waits {\n    let c: std.codec.Codec[runner.Frame] = std.codec.of()\n    let schema = std.result.unwrap(std.codec.schema(c))\n    match stdout.write_bytes(out, schema) {\n        Ok(()) => Ok(()),\n        Error(_) => Error(Exit(status: 1))\n    }\n}\n",
     )?;
     packages.push(PackageManifest {
         namespace: None,
         package: sdk,
-        dependencies: vec![core.clone(), std, store],
+        dependencies: vec![core.clone(), std, store, runner],
         sources: vec![ModuleSource {
             foreign: false,
             captured: None,

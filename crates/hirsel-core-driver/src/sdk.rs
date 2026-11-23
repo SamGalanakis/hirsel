@@ -563,7 +563,7 @@ mod tests {
             "toggle"
         );
         assert_eq!(
-            stub_name(b"\x01store@1/runner_launch/echo(take u64)->u64").unwrap(),
+            stub_name(b"\x01runner@1/runner_launch/echo(take u64)->u64").unwrap(),
             "echo"
         );
         let existing = dir.path().join("existing");

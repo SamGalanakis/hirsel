@@ -165,3 +165,12 @@ fn disk_test_load_path_layout(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
         Error(())
     }
 }
+
+// Runner laws (admission-laws L33) break the frame handoff with this.
+// It disconnects the writer after the runner has admitted a position.
+pub fn fixture_broken_handoff(mut db: Db) {
+    let (to, abandoned): (Sender[JournalMsg], Receiver[JournalMsg]) = channel.new(1)
+    let mut disconnected = Some(take abandoned)
+    disconnected = None
+    db.journal = Some(take to)
+}

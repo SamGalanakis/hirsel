@@ -6,7 +6,7 @@ browsers, along with the TypeScript client runtime.
 The output directory has `package.json` with `"type": "module"`, so Node loads
 the same `.js` files even inside a CommonJS project.
 
-A server using `store.runner` declares `store = { major = 1 }` under
+A server using `runner` declares `runner = { major = 1 }` under
 `[dependencies]` in `hirsel.toml`.
 
 ## 4. Generated code

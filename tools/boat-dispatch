@@ -30,7 +30,7 @@ SOURCE_PATHS = ("core/core", "core/std", "core/programs", "core/tools",
                 "bench/awfy/hirsel", "bench/awfy/*.py", "tools/capped")
 SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT)
 CONTAIN_PATHS = ("crates/hirsel-contain", "crates/hirsel-core-driver",
-                 "core/programs/store/launcher.hirsel")
+                 "core/programs/platform/launcher.hirsel")
 CONTAIN_TARGET = "root//:contain"
 LAUNCHER_TEST_TARGET = "root//:hirsel-core-driver-unittest-harness"
 CONTAIN_COMMAND = (

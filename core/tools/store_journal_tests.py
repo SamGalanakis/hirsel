@@ -13,7 +13,7 @@ import re
 import tempfile
 
 from std_native import ROOT, Evaluator
-from store_tests import inputs
+from store_tests import crash_inputs
 from store_crash_tests import checked, run_crashes
 
 # Evaluator instructions measured on the unchanged stress law, plus 25% rounded up.
@@ -108,7 +108,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix='hirsel-store-journal-') as tmp, contextlib.ExitStack() as resources:
         work = Path(tmp)
         manifest = work / 'inputs.json'
-        manifest.write_text(json.dumps(inputs(root)))
+        manifest.write_text(json.dumps(crash_inputs(root)))
         env = dict(os.environ, XDG_DATA_HOME=str(work / 'data'), XDG_CACHE_HOME=str(work / 'cache'))
         libraries = [str(root / 'tools/buck2/toolchains/llvm-files/lib')]
         if args.bridge:
@@ -121,7 +121,7 @@ def main():
                     parser.error('evaluator backend requires --evaluator')
                 for module, group in LAW_GROUPS.items():
                     for name in group:
-                        result = evaluator.evaluate(manifest, f'store@1/{module}/journal_law_{name}',
+                        result = evaluator.evaluate(manifest, f'{"store" if module == "store" else "runner"}@1/{module}/journal_law_{name}',
                                                     instructions=INSTRUCTION_ALLOWANCES.get(name))
                         try:
                             report = json.loads(result.stdout)
@@ -145,7 +145,7 @@ def main():
                 step_work = work / 'steps'
                 step_work.mkdir(exist_ok=True)
                 step_cuts = run_crashes(root, args.compiler, args.runtime, args.bridge, args.cc,
-                                       manifest, step_work, engine, entry='store@1/steps/journal_steps_main',
+                                       manifest, step_work, engine, entry='runner@1/steps/journal_steps_main',
                                        scenarios=(), environment=env, count_only=('poison-segment', 'steps-park'))
                 rows.append(dict(engine=engine, passed=True, step_cuts=step_cuts))
                 # A platform host turn: answered implies durable at every cut, and a
@@ -153,7 +153,7 @@ def main():
                 platform_work = work / 'platform'
                 platform_work.mkdir(exist_ok=True)
                 platform_cuts = run_crashes(root, args.compiler, args.runtime, args.bridge, args.cc,
-                                           manifest, platform_work, engine, entry='store@1/platform_crash/platform_crash_main',
+                                           manifest, platform_work, engine, entry='store_crash@1/platform_crash/platform_crash_main',
                                            scenarios=('platform-turn',), environment=env, count_only=('poison-segment',))
                 rows.append(dict(engine=engine, passed=True, platform_cuts=platform_cuts))
             except RuntimeError as error:

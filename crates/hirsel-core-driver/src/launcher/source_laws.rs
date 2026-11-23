@@ -327,7 +327,7 @@ fn source_publishes_with_the_normal_checker() {
 }
 
 /// The tree and the source failures share these bytes with
-/// core/programs/store/launcher_wire.hirsel; both were derived by hand from
+/// core/programs/platform/launcher_wire.hirsel; both were derived by hand from
 /// core/std/api/codec.md (records in field order, a string or bytes as a u32 length and
 /// its bytes, a list as a u32 count and its items, a sum as a u32 tag and its payload).
 #[test]

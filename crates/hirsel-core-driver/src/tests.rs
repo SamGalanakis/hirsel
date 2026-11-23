@@ -33,7 +33,7 @@ pub(crate) fn request(source: &str, dir: &Path) -> CheckRequest {
 #[test]
 fn private_runner_launch_hook_is_lowered_and_evaluated() {
     let directory = tempfile::tempdir().unwrap();
-    let runner = include_str!("../../../core/programs/store/runner.hirsel");
+    let runner = include_str!("../../../core/programs/runner/runner.hirsel");
     let source = format!(
         "{runner}\npub fn probe(a: Args) -> u64 {{\n let d = result.unwrap(launch_digest())\n let t = launch_target(a)\n launch_word(0u64, 0u64) + list.len(d) + string.byte_len(t)\n}}\n"
     );
@@ -41,7 +41,7 @@ fn private_runner_launch_hook_is_lowered_and_evaluated() {
     std::fs::write(&path, source).unwrap();
     let product = runner_launch_fixture(directory.path(), Some(&path));
     let identity =
-        hirsel_core_ir::Identity::plain(DefPath::from_full("store@1/runner/probe").unwrap());
+        hirsel_core_ir::Identity::plain(DefPath::from_full("runner@1/runner/probe").unwrap());
     let units = product.units([identity.clone()], 65_536).unwrap();
     let modules = units.modules().unwrap();
     let (module, entry) = hirsel_core_materialize::join(&modules, &identity).unwrap();
@@ -56,11 +56,40 @@ fn runner_launch_fixture(directory: &Path, runner_override: Option<&Path>) -> Ar
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let mut request =
         CheckRequest::libraries(&root.join("core"), &directory.join("store")).unwrap();
-    let mut store = package_dir::PackageDir::open(&root.join("core/programs/store"))
+    // The store package on its own, and the runner package over it as the workspace binds
+    // them: the test reads no other member of the workspace.
+    let store = package_dir::PackageDir::open(&root.join("core/programs/store"))
         .unwrap()
         .package;
+    let directory = root.join("core/programs/runner");
+    let manifest: toml::Table = std::fs::read_to_string(directory.join("hirsel.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let mut runner = hirsel_core_resolve::PackageManifest {
+        namespace: None,
+        package: crate::package("runner"),
+        sources: manifest["sources"]
+            .as_table()
+            .unwrap()
+            .iter()
+            .map(|(file, module)| hirsel_core_resolve::ModuleSource {
+                foreign: false,
+                captured: None,
+                file: directory.join(file),
+                modules: vec![module.as_str().unwrap().into()],
+                signatures: false,
+            })
+            .collect(),
+        dependencies: vec![
+            crate::package("core"),
+            crate::package("std"),
+            crate::package("store"),
+        ],
+    };
+    request.inputs.packages.push(store);
     if let Some(path) = runner_override {
-        let source = store
+        let source = runner
             .sources
             .iter_mut()
             .find(|source| source.modules == ["runner"])
@@ -68,14 +97,14 @@ fn runner_launch_fixture(directory: &Path, runner_override: Option<&Path>) -> Ar
         source.file = path.to_owned();
         source.captured = None;
     }
-    store.sources.push(hirsel_core_resolve::ModuleSource {
+    runner.sources.push(hirsel_core_resolve::ModuleSource {
         foreign: false,
         captured: None,
         file: root.join("crates/hirsel-core-driver/src/testdata/runner_launch.hirsel"),
         modules: vec!["runner_launch".into()],
         signatures: false,
     });
-    request.inputs.packages.push(store);
+    request.inputs.packages.push(runner);
     let product = Driver::default()
         .check(request, &mut Meter::new(false))
         .unwrap();
@@ -95,7 +124,7 @@ fn run_runner_launch(
     describe: bool,
 ) -> eval::Report {
     let identity = hirsel_core_ir::Identity::plain(
-        DefPath::from_full(&format!("store@1/runner_launch/{name}")).unwrap(),
+        DefPath::from_full(&format!("runner@1/runner_launch/{name}")).unwrap(),
     );
     let units = product.units([identity.clone()], 65_536).unwrap();
     let modules = units.modules().unwrap();
@@ -132,7 +161,7 @@ fn runner_describe_launch_is_bounded_and_precedes_serve() {
     let duplicate = run_runner_launch(&product, "law_duplicate", 1024 * 1024, true);
     assert_eq!(duplicate.outcome, eval::Outcome::Returned(vec![2]));
     assert_eq!(&duplicate.stdout[..4], &1u32.to_le_bytes());
-    assert!(duplicate.stdout[8..].starts_with(b"\x01store@1/runner_launch/echo("));
+    assert!(duplicate.stdout[8..].starts_with(b"\x01runner@1/runner_launch/echo("));
     let denied = run_runner_launch(&product, "law_capability", 1024 * 1024, true);
     assert_eq!(denied.outcome, eval::Outcome::Stopped("DescribeCapability"));
     assert!(denied.stdout.is_empty());
@@ -145,7 +174,7 @@ fn runner_describe_launch_is_bounded_and_precedes_serve() {
 fn store_opened_in_describe_mutant_is_caught_by_the_launch_law() {
     let directory = tempfile::tempdir().unwrap();
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let source = std::fs::read_to_string(root.join("core/programs/store/runner.hirsel")).unwrap();
+    let source = std::fs::read_to_string(root.join("core/programs/runner/runner.hirsel")).unwrap();
     let marker = "    if launch_word(5u64, 0u64) == 0u64 {";
     assert!(source.contains(marker));
     let mutant = source.replacen(marker, "    if launch_word(5u64, 0u64) != 0u64 { return start_server() }\n    if launch_word(5u64, 0u64) == 0u64 {", 1);
@@ -187,7 +216,7 @@ fn runner_describe_capture_matches_reply_schema() {
     wire = &wire[8..];
     assert_eq!(count(&mut wire), 2);
     assert_eq!(count(&mut wire), 0); // Described.kind = Compute.
-    assert!(bytes(&mut wire).starts_with(b"\x01store@1/runner_launch/echo("));
+    assert!(bytes(&mut wire).starts_with(b"\x01runner@1/runner_launch/echo("));
     let args = bytes(&mut wire);
     let result = bytes(&mut wire);
     assert_eq!(args, result);
@@ -198,7 +227,7 @@ fn runner_describe_capture_matches_reply_schema() {
     wire = &wire[16..];
     assert!(bytes(&mut wire).is_empty()); // The evaluator fixture has no code revision.
     assert_eq!(count(&mut wire), 1); // Transact.
-    assert!(bytes(&mut wire).starts_with(b"\x01store@1/runner_launch/transaction("));
+    assert!(bytes(&mut wire).starts_with(b"\x01runner@1/runner_launch/transaction("));
     assert_eq!(bytes(&mut wire), &[3, 0, 0, 0, 0, 6]);
     // Result[u64,bool], including its Result opcode 17 and error arm bool=1.
     assert_eq!(bytes(&mut wire), &[3, 0, 0, 0, 0, 17, 6, 1]);

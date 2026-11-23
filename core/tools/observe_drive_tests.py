@@ -50,7 +50,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix='hirsel-observe-drive-') as tmp:
         work = Path(tmp)
         inputs = seeded_inputs(root, work, seeds, args.mix)
-        value, report = evaluate(evaluator, inputs, 'store@1/observe_fixture/law_digest')
+        value, report = evaluate(evaluator, inputs, 'runner@1/observe_fixture/law_digest')
         digest_good = value == 1
         fixture_bodies += report.get('outcome', {}).get('kind') == 'returned'
         failures += not digest_good
@@ -59,7 +59,7 @@ def main():
             (args.artifacts / 'digest.log').write_text(json.dumps(report, indent=2) + '\n')
         for seed in seeds:
             mix = args.mix or MIXES[seed % len(MIXES)]
-            value, report = evaluate(evaluator, inputs, 'store@1/observe_seeds/seed_' + str(seed))
+            value, report = evaluate(evaluator, inputs, 'runner@1/observe_seeds/seed_' + str(seed))
             t = trace(report)
             t['header'].update(has_digest=True, has_ran=True)
             codec = Codec(report.get('stderr', []))

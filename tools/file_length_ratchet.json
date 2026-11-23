@@ -15,29 +15,29 @@
   "core/programs/harness/laws.hirsel": {
     "lines": 1989
   },
+  "core/programs/platform/platform.hirsel": {
+    "lines": 3972,
+    "reason": "release-publish-1912"
+  },
+  "core/programs/platform/platform_laws.hirsel": {
+    "lines": 2020,
+    "reason": "store-sync-1906"
+  },
   "core/programs/postgres/postgres.hirsel": {
     "lines": 1409
+  },
+  "core/programs/runner/runner.hirsel": {
+    "lines": 10184,
+    "reason": "release-publish-1912"
+  },
+  "core/programs/runner/runner_calls.hirsel": {
+    "lines": 2507
   },
   "core/programs/search/unicode.hirsel": {
     "lines": 1936
   },
   "core/programs/sqlite/hirsel_sqlite.c": {
     "lines": 1056
-  },
-  "core/programs/store/platform.hirsel": {
-    "lines": 3972,
-    "reason": "release-publish-1912"
-  },
-  "core/programs/store/platform_laws.hirsel": {
-    "lines": 2020,
-    "reason": "store-sync-1906"
-  },
-  "core/programs/store/runner.hirsel": {
-    "lines": 10184,
-    "reason": "release-publish-1912"
-  },
-  "core/programs/store/runner_calls.hirsel": {
-    "lines": 2507
   },
   "core/programs/store/store-manifest.hirsel": {
     "lines": 2982
@@ -193,7 +193,9 @@
     "lines": 2687
   },
   "crates/hirsel-core-driver/src/tests.rs": {
-    "lines": 4079
+    "lines": 4108,
+    "raise_revision": 1,
+    "reason": "cs-store-split-1935"
   },
   "crates/hirsel-core-driver/src/tool_inputs.rs": {
     "lines": 2523

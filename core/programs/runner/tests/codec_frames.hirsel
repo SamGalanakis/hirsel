@@ -1,4 +1,4 @@
-// Protocol codec laws. std_native.py runs this second corpus root in store@1.
+// Protocol codec laws. std_native.py runs this second corpus root in runner@1.
 fn raw(s: String) -> Bytes {
     let input = string.as_bytes(s)
     let mut out: Bytes = list.new()

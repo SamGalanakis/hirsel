@@ -150,3 +150,8 @@ fn test_idle_keeps_runs(parent: Dir, clock: Clock, random: Random, tasks: Tasks)
     idle_trigger_case(parent, clock, random, tasks, true)
     Ok(())
 }
+
+@test
+fn test_trigger_timer_wall_wait(tasks: Tasks) -> Result[(), ()] waits {
+    if runner.law_trigger_timer_wall_wait(tasks) { Ok(()) } else { Error(()) }
+}

@@ -538,15 +538,6 @@ fn test_after_publication(tasks: Tasks, clock: Clock, random: Random) -> Result[
     if law_after_publication(tasks, clock, random) { Ok(()) } else { Error(()) }
 }
 
-pub fn law_settled_callinfo(d: Dir, clock: Clock, random: Random, tasks: Tasks) -> bool waits {
-    store.law_settled_callinfo(d, clock, random, tasks)
-}
-
-@test
-fn test_settled_callinfo(d: Dir, clock: Clock, random: Random, tasks: Tasks) -> Result[(), ()] waits {
-    if law_settled_callinfo(d, clock, random, tasks) { Ok(()) } else { Error(()) }
-}
-
 // L28 (v2.19, outcome_dropped): a unit the writer drops loses its content and keeps its
 // Outcome rows, which ride in the owner's next Reset; a Dropped never counts toward the
 // protocol-error close, so a second one sends a second Reset rather than closing 1008.

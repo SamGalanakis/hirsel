@@ -14,7 +14,7 @@ fn local_config(supplied: local.Supplied, place_fn: StaticFn[fn(mut Calls) -> Re
     runner.PlaceConfig(backing: Memory, selection: Install, place: place_fn, n_place: N_PLACE,
         migrate: migrate_fn, handles: code.describe(handles), session: local_wire(), max_sessions: 1u64,
         proxies: list.new(), n_publisher: 1048576u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16),
-        net: supplied.net, tasks: supplied.tasks, clock: supplied.clock, random: supplied.random, stop: stop, wire: Some(ingress.binding()), triggers: None, idle: None)
+        net: supplied.net, tasks: supplied.tasks, clock: supplied.clock, random: supplied.random, stop: stop, wire: Some(runner.ingress.binding()), triggers: None, idle: None)
 }
 
 // A place that stops at once.
@@ -253,10 +253,10 @@ fn test_local_idle_unload(parent: Dir, clock: Clock, random: Random, tasks: Task
 // commit's wall time; `kept` reads k back.
 fn keep(mut tx: store.Tx, h: Hd, author: runner.Caller, take k: u64) -> Result[u64, u32] {
     if let Error(_) = store.put(mut tx, h.t, k, k) { return Error(1u32) }
-    let Ok(t) = triggers.tables(store.tx_schema(tx)) else { return Error(2u32) }
+    let Ok(t) = runner.triggers.tables(store.tx_schema(tx)) else { return Error(2u32) }
     let (entries, target) = ping_entries()
     let due = store.info(mut tx).at + 1000u64
-    match triggers.write(mut tx, t, entries, target, k, At(due)) {
+    match runner.triggers.write(mut tx, t, entries, target, k, At(due)) {
         Ok(id) => Ok(id.version),
         Error(_) => Error(3u32),
     }
@@ -289,9 +289,9 @@ fn kept_keys() -> List[Bytes] {
     wanted
 }
 
-fn connect_lease(l: local.Lease, tasks: Tasks, net: Net, clock: Clock, random: Random, wanted: List[Bytes]) -> wire_client.Conn waits {
+fn connect_lease(l: local.Lease, tasks: Tasks, net: Net, clock: Clock, random: Random, wanted: List[Bytes]) -> runner.wire_client.Conn waits {
     let address = option.unwrap(latest.read(local.status(l)).addr)
-    match wire_client.connect(tasks, net, address, clock, random, wanted, Some(ingress.credential(random)), local_wire().socket) {
+    match runner.wire_client.connect(tasks, net, address, clock, random, wanted, Some(runner.ingress.credential(random)), local_wire().socket) {
         Ok(take connected) => take connected,
         Error(_) => fail("local: connection refused"),
     }
@@ -307,7 +307,7 @@ pub fn law_local_reopen_keeps(parent: Dir, clock: Clock, random: Random, tasks: 
     let client = connect_lease(first, tasks, net, clock, random, wanted)
     let before = host.mono_ns(clock)
     let version = ping_call(client, wanted, wanted[0u64], 0u64, 7u64)
-    let _ = wire_client.close(take client)
+    let _ = runner.wire_client.close(take client)
     let _ = take first
     let unloaded = match local.unload(run.door, A) { Ok(done) => match done.ended { Ok(Stopped(_)) => true, _ => false }, Error(_) => false }
     want(host.mono_ns(clock) < before + 1000000000u64, "local: the child was not unloaded before its trigger came due")
@@ -320,17 +320,126 @@ pub fn law_local_reopen_keeps(parent: Dir, clock: Clock, random: Random, tasks: 
         position += 1u64
         host.sleep_until(clock, host.mono_ns(clock) + 10000000u64)
     }
-    let _ = wire_client.close(take reader)
+    let _ = runner.wire_client.close(take reader)
     let _ = take second
     end_local(parent, take run) && unloaded && kept_write
 }
 
 @test
-fn test_trigger_timer_wall_wait(tasks: Tasks) -> Result[(), ()] waits {
-    if runner.law_trigger_timer_wall_wait(tasks) { Ok(()) } else { Error(()) }
-}
-
-@test
 fn test_local_reopen_keeps(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
     if law_local_reopen_keeps(parent, clock, random, tasks, net) { Ok(()) } else { Error(()) }
+}
+
+// The laws' place: one u64 table, "data", and the reads and writes the laws call.
+type Hd: send { t: store.Table[u64, u64] }
+
+type Calls = runner.Registry[(), Hd]
+
+const N_PLACE: u64 = 1048576u64
+
+fn migrate(mut phase: store.Migration) -> Result[(), store.Error] {
+    let codec: std.codec.Codec[u64] = std.codec.of()
+    match store.migration_create_table(mut phase, store.spec("data", std.codec.key_u64(), codec)) {
+        Ok(()) => Ok(()),
+        Error(Exists(_)) => Ok(()),
+        Error(take problem) => Error(take problem),
+    }
+}
+
+fn handles(catalog: store.Schema) -> Result[Hd, store.Error] {
+    let cv: std.codec.Codec[u64] = std.codec.of()
+    let t = store.schema_table(catalog, "data", std.codec.key_u64(), cv)?
+    Ok(Hd(t: t))
+}
+
+fn place(mut r: Calls) -> Result[(), runner.RegisterError] {
+    runner.transact(mut r, code.describe(kept), 65536u64, runner.DEFAULT_STEPS)
+}
+
+// The reply of every transact here: Result[u64, u32].
+fn want(ok: bool, take what: String) {
+    if !ok {
+        fail(take what)
+    }
+}
+
+fn reply() -> std.codec.Codec[Result[u64, u32]] {
+    std.codec.of()
+}
+
+// A key as a client builds it: identity ++ fingerprint(A) ++ fingerprint(reply).
+fn key_of[A, R](id: View[Bytes], ca: std.codec.Codec[A], cr: std.codec.Codec[R]) -> Bytes {
+    let mut key: Bytes = list.new()
+    list.append(mut key, id)
+    std.codec.put_u64(result.unwrap(std.codec.fingerprint(ca)), mut key)
+    std.codec.put_u64(result.unwrap(std.codec.fingerprint(cr)), mut key)
+    key
+}
+
+fn u64_arg(x: u64) -> Bytes {
+    let mut b: Bytes = list.new()
+    std.codec.put_u64(x, mut b)
+    b
+}
+
+fn disk_options() -> store.Options {
+    let mut o = store.defaults()
+    o.resident_limit = 1048576u64
+    o.pack_bytes = 512u64
+    o.group_commits = 2u32
+    o.group_bytes = 1048576u32
+    o
+}
+
+// A granted entry that hands its argument through a channel, so it waits as a granted
+// entry must.
+fn ping(g: (), caller: runner.Caller, take k: u64) -> Result[u64, Capacity] waits {
+    let (to, from): (Sender[u64], Receiver[u64]) = channel.new(1u64)
+    result.unwrap(channel.send(to, k))
+    Ok(result.unwrap(channel.receive(from)))
+}
+
+fn ping_entries() -> (runner.triggers.Entries, runner.triggers.Entry[u64]) {
+    let target: runner.triggers.Entry[u64] = result.unwrap(runner.triggers.granted(code.describe(ping)))
+    let mut entries = runner.triggers.empty_entries()
+    result.unwrap(runner.triggers.allow(mut entries, target))
+    (take entries, take target)
+}
+
+// Returns the ping's result once the run scheduled at `version` has its terminal row, else 0.
+fn ping_outcome(mut tx: store.Tx, h: Hd, author: runner.Caller, take version: u64) -> Result[u64, u32] {
+    let Ok(t) = runner.triggers.tables(store.tx_schema(tx)) else { return Error(1u32) }
+    let info = store.info(mut tx)
+    let id = runner.triggers.Id(store_hi: info.id.store.hi, store_lo: info.id.store.lo, branch: info.id.branch, version: version, index: 0u64)
+    match runner.triggers.fetch_outcome(tx, t, id) {
+        Ok(None) => Ok(0u64),
+        Ok(Some(Returned(raw))) => match std.codec.decode(std.codec.of_u64(), raw) { Ok(value) => Ok(value), _ => Error(3u32) },
+        _ => Error(4u32),
+    }
+}
+
+fn ping_migrate(mut phase: store.Migration) -> Result[(), store.Error] {
+    runner.triggers.migrate(mut phase)?
+    migrate(mut phase)
+}
+
+fn unit_grant(seed: (), take context: runner.TriggerContext) -> Result[(), Capacity] {
+    let _ = take context
+    Ok(())
+}
+
+fn ping_call(client: runner.wire_client.Conn, ping_keys: List[Bytes], key: Bytes, position: u64, arg: u64) -> u64 waits {
+    runner.wire_client.send_frame(client, Call(0u32, position, runner.wire_client.slot(ping_keys, key), 1000u32, u64_arg(arg)))
+    loop {
+        match runner.wire_client.next(client) {
+            Ok(Batch(_, _, _, done)) => for item in done {
+                if item.p == position {
+                    let Returned(raw) = view item.outcome else { fail("local: call not returned") }
+                    match std.codec.decode(reply(), raw) { Ok(Ok(value)) => return value, _ => fail("local: call refused") }
+                }
+            },
+            Ok(_) => (),
+            Error(_) => fail("local: wire call lost"),
+        }
+    }
 }

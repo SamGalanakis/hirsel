@@ -1,4 +1,4 @@
-// Module platform_crash (package store): the platform host's turn durability over the W2
+// Module platform_crash (package store_crash): the platform host's turn durability over the W2
 // crash provider (core/tools/store_crash.c), whose restart keeps only synced bytes. A turn's
 // decisions become durable with one sync before any request the turn decided leaves the host.
 //
@@ -29,8 +29,8 @@ fn must[T](take r: Result[T, platform.Refused], take what: String) -> T {
 fn group(name: String) -> platform.NewGroup {
     let mut image: Bytes = list.with_capacity(32u64)
     list.fill(mut image, 32u64, 7u8)
-    let bindings = launcher.Bindings(store: string.new(), dirs: list.new(), net: list.new())
-    let limits = launcher.Limits(memory: None, cpu: None, pids: None)
+    let bindings = platform.launcher.Bindings(store: string.new(), dirs: list.new(), net: list.new())
+    let limits = platform.launcher.Limits(memory: None, cpu: None, pids: None)
     platform.NewGroup(name: string.from(name), tenant: "t", workdir: string.from(name), author: Trusted, label: Uncontained, listen: "127.0.0.1:0", bindings: take bindings, limits: limits, assembly: take image, activation: 1u64, args: list.new(), record: None)
 }
 

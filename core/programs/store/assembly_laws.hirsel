@@ -254,6 +254,11 @@ pub fn law_settled_callinfo(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool w
     settled_callinfo_case(d, c, r, tasks, false) && settled_callinfo_case(d, c, r, tasks, true)
 }
 
+@test
+fn test_settled_callinfo(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if law_settled_callinfo(d, c, r, tasks) { Ok(()) } else { Error(()) }
+}
+
 fn settled_callinfo_case(d: Dir, c: Clock, r: Random, tasks: Tasks, room_refusal: bool) -> bool waits {
     let dir = disk_test_directory(d)
     let options = journal_crash_options()
@@ -309,12 +314,4 @@ fn settled_callinfo_case(d: Dir, c: Clock, r: Random, tasks: Tasks, room_refusal
     }
     result.unwrap(close(take reopened))
     good
-}
-
-// Disconnect the writer after the runner has admitted a position.
-pub fn fixture_broken_handoff(mut db: Db) {
-    let (to, abandoned): (Sender[JournalMsg], Receiver[JournalMsg]) = channel.new(1)
-    let mut disconnected = Some(take abandoned)
-    disconnected = None
-    db.journal = Some(take to)
 }

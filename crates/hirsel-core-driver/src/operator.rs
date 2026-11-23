@@ -1,5 +1,5 @@
 //! The operator wire on `STATE/operator.sock` (launch.md "The operator socket"), as the CLI
-//! speaks it. These types mirror `core/programs/store/operator.hirsel` and encode in the
+//! speaks it. These types mirror `core/programs/platform/operator.hirsel` and encode in the
 //! same value codec as the launcher session; operator_wire.hirsel holds the byte vectors
 //! both sides check. One connection carries one exchange.
 use crate::code_admission::ObjectKey;
@@ -684,7 +684,7 @@ mod tests {
         }
     }
 
-    // The expected bytes are shared with core/programs/store/operator_wire.hirsel. They were
+    // The expected bytes are shared with core/programs/platform/operator_wire.hirsel. They were
     // derived from core/std/api/codec.md's format by an encoder written apart from both
     // implementations.
     #[test]

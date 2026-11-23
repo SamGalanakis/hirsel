@@ -68,6 +68,20 @@ class FileLengthRatchet(unittest.TestCase):
             committed = json.loads(run('git', 'show', f'HEAD:{RATCHET}').stdout)
             self.assertEqual({path: entry['lines'] for path, entry in committed.items()}, targets)
 
+            # A move keeps the file's cap under its new path and does not lift it.
+            (root / 'moved').mkdir()
+            run('git', 'mv', 'equal.py', 'moved/equal.py')
+            entries = json.loads((root / RATCHET).read_text())
+            entries['moved/equal.py'] = entries.pop('equal.py')
+            (root / RATCHET).write_text(json.dumps(entries))
+            run('git', 'add', RATCHET)
+            run(sys.executable, '-B', CHECK)
+            (root / 'moved/equal.py').write_text('# line\n' * 1201)
+            run('git', 'add', 'moved/equal.py')
+            refused = run(sys.executable, '-B', CHECK, check=False)
+            self.assertIn('moved/equal.py: 1,201 lines, limit 1,200', refused.stderr)
+            self.assertEqual(refused.returncode, 1)
+
 
 if __name__ == '__main__':
     unittest.main()

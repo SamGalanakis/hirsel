@@ -13,6 +13,7 @@
 //! ROOT/runtime/<target>/<hash>/     runtime archives
 //! ROOT/core-packages/               core and std images
 //! ROOT/core-packages/store-1.hpkg   Store package sources
+//! ROOT/core-packages/runner-1.hpkg  Runner package sources
 //! ROOT/hirsel-core-toolchain.json   this selection
 //! ```
 //!
@@ -95,29 +96,31 @@ impl Installed {
         self.root.join("core-packages")
     }
 
-    pub(crate) fn store_package(
+    /// A toolchain package other than std, from `core-packages/<name>-<major>.hpkg`. Its
+    /// bindings must be exactly the toolchain bindings the toolchain names for it.
+    pub(crate) fn toolchain_package(
         id: &crate::package_content::Id,
     ) -> io::Result<crate::package_content::Content> {
-        use crate::package_content::{Id, PackageArchive, check_identity};
+        use crate::package_content::{PackageArchive, check_identity, toolchain_bindings};
 
+        let expected = toolchain_bindings(id)
+            .ok_or_else(|| io::Error::other(format!("the toolchain supplies no {id}")))?;
         let executable = std::env::current_exe()?;
         let installed = Self::discover(&executable)?
-            .ok_or_else(|| io::Error::other("store@1 requires an installed toolchain"))?;
-        let path = installed.cache().join("store-1.hpkg");
+            .ok_or_else(|| io::Error::other(format!("{id} requires an installed toolchain")))?;
+        let path = installed
+            .cache()
+            .join(format!("{}-{}.hpkg", id.name, id.major));
         let mut archive = PackageArchive::open(&path)
-            .map_err(|error| io::Error::other(format!("installed store@1: {error}")))?;
+            .map_err(|error| io::Error::other(format!("installed {id}: {error}")))?;
         let content = archive.entries.remove(&archive.head).unwrap().content;
         check_identity(id, archive.head, &content.id).map_err(io::Error::other)?;
-        if content.bindings
-            != BTreeMap::from([(
-                Id {
-                    name: "std".into(),
-                    major: 1,
-                },
-                None,
-            )])
-        {
-            return Err(io::Error::other("installed store@1 must bind std@1"));
+        if content.bindings != expected {
+            let names: Vec<String> = expected.keys().map(ToString::to_string).collect();
+            return Err(io::Error::other(format!(
+                "installed {id} must bind {}",
+                names.join(" and ")
+            )));
         }
         Ok(content)
     }

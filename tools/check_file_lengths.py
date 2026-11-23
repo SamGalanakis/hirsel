@@ -94,7 +94,25 @@ def parse_ratchet(data):
     return entries
 
 
-def check_transition(root, before, after, paths):
+def renames(root, *args):
+    """New path -> old path for each rename git detects in a diff."""
+    fields = git_paths(root, 'diff', '-M', '--name-status', '-z', *args)
+    moved = {}
+    index = 0
+    while index < len(fields):
+        status = fields[index]
+        if status.startswith(('R', 'C')):
+            if status.startswith('R'):
+                moved[fields[index + 2]] = fields[index + 1]
+            index += 3
+        else:
+            index += 2
+    return moved
+
+
+def check_transition(root, before, after, paths, moved=None):
+    """`moved` maps a renamed path to its old path, whose length and cap it keeps."""
+    moved = moved or {}
     changed = {path for path in paths if is_source(path)}
     if not changed and RATCHET not in paths:
         return True
@@ -108,13 +126,14 @@ def check_transition(root, before, after, paths):
         return False
 
     adjusted = {path for path in old.keys() | new.keys() if old.get(path) != new.get(path)}
-    previous.update(snapshot(root, before, adjusted - changed))
+    previous.update(snapshot(root, before, (adjusted - changed) | {moved[path] for path in changed if path in moved}))
     current.update(snapshot(root, after, adjusted - changed))
     ok = True
     for path in sorted(changed | adjusted):
-        prior = line_count(previous.get(path, b''))
+        source = moved.get(path, path)
+        prior = line_count(previous.get(source, b''))
         lines = line_count(current.get(path, b''))
-        old_entry = old.get(path, {})
+        old_entry = old.get(path, old.get(source, {}))
         new_entry = new.get(path, {})
         old_cap = old_entry.get('lines', LIMIT)
         new_cap = new_entry.get('lines', LIMIT)
@@ -141,7 +160,7 @@ def check_transition(root, before, after, paths):
 
 def check_staged(root):
     paths = git_paths(root, 'diff', '--cached', '--no-renames', '--name-only', '-z')
-    return check_transition(root, 'HEAD', ':0', paths)
+    return check_transition(root, 'HEAD', ':0', paths, renames(root, '--cached'))
 
 
 def check_changed(root):
@@ -152,7 +171,7 @@ def check_changed(root):
         revision = commit.decode()
         parent = revision + '^1'
         paths = git_paths(root, 'diff', '--no-renames', '--name-only', '-z', parent, revision)
-        if not check_transition(root, parent, revision, paths):
+        if not check_transition(root, parent, revision, paths, renames(root, parent, revision)):
             return False
     if not check_staged(root):
         return False

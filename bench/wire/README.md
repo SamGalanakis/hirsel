@@ -34,7 +34,7 @@ with the generated checkbox identities and fingerprints. The benchmark's default
 identities are for its own reference. In particular, its default erased Cover
 fingerprint is zero. Supply the real generated Hello to exercise Hirsel with
 the same driver. The hand codec follows WIRE-SPEC v2, with tests reading W3a's
-canonical `core/programs/store/frame-vectors.json`. The Rust convergence driver
+canonical `core/programs/runner/frame-vectors.json`. The Rust convergence driver
 is a smoke test until the W4c/W6 SDK harness is available. A local Rust smoke
 pass does not qualify the Node/browser `converge` acceptance.
 

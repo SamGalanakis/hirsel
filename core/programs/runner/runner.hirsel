@@ -5127,7 +5127,7 @@ fn trigger_scan_image(d: Dir, c: Clock, r: Random, tasks: Tasks, options: store.
             8u64 => if same_image { ("trigger_law_granted_body", true, 1u64, Held) } else { fail("L40: unexpected parked run") },
             _ => fail("L40: wrong earliest due time"),
         }
-        let mut qualified: String = clone("store@1/runner/")
+        let mut qualified: String = clone("runner@1/runner/")
         string.push(mut qualified, path)
         let expected_kind: Kind = if granted_kind { Granted } else { Transact }
         let bit = 1u64 << int.narrow(row.earliest_due)

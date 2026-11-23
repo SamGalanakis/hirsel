@@ -261,7 +261,7 @@ def env_fixture(file, source):
 def discover(root, filters):
     contracts = []
     files = [p for package in ['core', 'std'] for p in (root / 'core' / package / 'tests').glob('*.hirsel')]
-    files += list((root / 'core/programs/store/tests').glob('*.hirsel'))
+    files += list((root / 'core/programs/runner/tests').glob('*.hirsel'))
     for file in sorted(files):
         source = file.read_text()
         test_of = test_module(root, file, source)
@@ -331,7 +331,7 @@ def discover(root, filters):
             header = re.search(r'\bfn\s+' + re.escape(name) + r'\s*\([^)]*\)([^\{]*)\{', source)
             if header is None:
                 raise ValueError(f'{file}:{line}: no function for {call}')
-            package = 'store' if file.parent == root / 'core/programs/store/tests' else file.relative_to(root).parts[1]
+            package = 'runner' if file.parent == root / 'core/programs/runner/tests' else file.relative_to(root).parts[1]
             case = Contract(file, line, call, expected, bool(re.search(r'\bwaits\b', header[1])), stdout, stderr, first_write, test_of, host_op, package, evaluator_only, engine_fact, schedule, root_limit, evaluator_instructions, run_env, fixture,
                             native_only=native_only)
             schedule = None
@@ -592,13 +592,9 @@ def source_manifest(root, package, modules, source, *, replace=False):
     packages = [
         {'package': core, 'sources': library_sources(root / 'core/core', True), 'dependencies': []},
         {'package': std, 'sources': library_sources(root / 'core/std', False), 'dependencies': [core]}]
-    if package == 'store':
-        directory = root / 'core/programs/store'
-        with (directory / 'hirsel.toml').open('rb') as manifest:
-            sources = tomllib.load(manifest)['sources']
-        packages.append({'package': {'name': 'store', 'version': '1'}, 'dependencies': [core, std],
-                         'sources': [{'file': str(directory / name), 'modules': module.split('.'), 'signatures': False}
-                                     for name, module in sources.items()]})
+    if package == 'runner':
+        from store_tests import inputs
+        packages = inputs(root, package='runner')['packages']
     files = next(p['sources'] for p in packages if p['package']['name'] == package)
     if replace:
         original = next(f for f in files if f['modules'] == modules)
@@ -728,7 +724,7 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
     engines = list(engines)
     typescript_override = typescript
     typescript = typescript or root / 'crates/hirsel-core-driver/src/sdk_codec.js'
-    frame_codegen = typescript_override is None and any(c.package == 'store' and c.call.startswith('ts_frame_') for c in contracts)
+    frame_codegen = typescript_override is None and any(c.package == 'runner' and c.call.startswith('ts_frame_') for c in contracts)
     if frame_codegen and evaluator is None:
         raise ValueError('Frame codec laws require --evaluator to derive runner.Frame')
     if any(c.evaluator_only for c in contracts) and 'evaluator' not in engines:
@@ -798,7 +794,7 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                     generator = case.file.parent / 'vectors' / case.file.stem / 'generate.py'
                     source += '\n' + subprocess.check_output([sys.executable, generator], text=True)
                 if case.call.startswith(('ts_codec_vectors(', 'ts_hirsel_differential(', 'ts_frame_vectors(', 'ts_frame_differential(')):
-                    frame = case.package == 'store'
+                    frame = case.package == 'runner'
                     if frame and protocol_codec is None and typescript_override is None:
                         description_file = work / 'description.bin'
                         def count(n):
@@ -836,7 +832,7 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                         native_options = ['--runtime', str(runtime)] if compiler and runtime else None
                         if native_options and cc:
                             native_options += ['--cc', str(cc)]
-                        built = resident.evaluate(probe_inputs, 'store@1/tests/codec_frames/ts_frame_schema', progress=progress,
+                        built = resident.evaluate(probe_inputs, 'runner@1/tests/codec_frames/ts_frame_schema', progress=progress,
                                                   sdk_out=generated, sdk_describe=description_file,
                                                   sdk_compiler=compiler if native_options else None,
                                                   sdk_native_options=native_options)
@@ -848,7 +844,7 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                         protocol_codec = generated / 'codec.js'
                     module = (typescript_override or protocol_codec) if frame else typescript
                     law = 'vectors' if case.call.startswith(('ts_codec_vectors(', 'ts_frame_vectors(')) else 'differential'
-                    partner_module = root / ('core/programs/store/tests/codec_frames.mjs' if frame else 'core/std/tests/codec.mjs')
+                    partner_module = root / ('core/programs/runner/tests/codec_frames.mjs' if frame else 'core/std/tests/codec.mjs')
                     program = (f'import * as c from {json.dumps(module.resolve().as_uri())};'
                                f'import {{{law}}} from {json.dumps(partner_module.as_uri())};')
                     if frame:
@@ -942,8 +938,8 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                                         'core-check-895' if not row['ran'] else 'core-form-883')
                     save_row(rows, row, output)
                     continue
-                # Store program modules bring their own standalone @tests.
-                if case.package == 'store':
+                # Runner program modules bring their own standalone @tests.
+                if case.package == 'runner':
                     command.extend(['--filter', entry])
                 if target:
                     command.extend(['--target', target])

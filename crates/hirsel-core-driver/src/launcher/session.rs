@@ -1,6 +1,6 @@
 //! The control session between the platform host and the launcher.
 //!
-//! These types mirror `core/programs/store/launcher.hirsel` and encode in its value codec
+//! These types mirror `core/programs/platform/launcher.hirsel` and encode in its value codec
 //! (core/std/api/codec.md): integers little-endian at their width, bool one byte,
 //! String/Bytes/List a u32 count then the contents, Option and sums a u32 tag then the
 //! payload, and records their fields in order. Declared variant order is the tag. Each
@@ -1190,7 +1190,7 @@ mod tests {
         })
     }
 
-    // The expected bytes are shared with core/programs/store/launcher_wire.hirsel. They
+    // The expected bytes are shared with core/programs/platform/launcher_wire.hirsel. They
     // were derived from core/std/api/codec.md's format by an encoder written apart from
     // both implementations.
     #[test]

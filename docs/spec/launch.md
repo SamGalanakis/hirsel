@@ -24,7 +24,7 @@ allowances, so the full identity includes `n_place` independently of the digest.
 Both native and evaluator launchers supply it, and describe reports it. Bindings
 record the allowance of the described launch. A const-parameter mechanism was
 considered and left out: it is a separate language feature and is unnecessary
-for launch configuration. There is no compiler rule naming `store@1/runner` to
+for launch configuration. There is no compiler rule naming `runner@1/runner` to
 require or extract a constant argument.
 
 - To capture the image on Linux, the native launcher opens `/proc/self/exe`
@@ -1148,7 +1148,7 @@ prepare with `Limit(triggers)`. The guard on started granted runs uses the image
 which covers changes in `handles` such as table names, bindings and key codecs.
 
 Laws. Built for both the launcher (`crates/hirsel-core-driver/src/launcher/laws.rs`) and the
-platform host (`core/programs/store/platform.hirsel`, `core/programs/store/platform_laws.hirsel`
+platform host (`core/programs/platform/platform.hirsel`, `core/programs/platform/platform_laws.hirsel`
 covering L39, L41–L43, L45, L48–L49, L51–L52, and `runner.hirsel` L40): `group_one_head`, where a cutover's NEW head opens the store only after
 OLD's head has closed it, and an extra launch of the group is refused `Held`;
 `launcher_restart_stateless`, where a launcher killed at every step of a deploy and

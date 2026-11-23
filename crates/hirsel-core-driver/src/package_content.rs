@@ -12,11 +12,58 @@ const PACKAGE_LIMIT: usize = 4096;
 const ARCHIVE_TAG: &str = "hirsel.package-archive.v1";
 const CHARGE: &str = "charge-v1";
 
+/// The packages the installed toolchain supplies, each with the toolchain packages it binds.
+/// `std@1` is the toolchain's std image; the others are package archives in
+/// `core-packages/<name>-<major>.hpkg`.
+const TOOLCHAIN: &[(&str, u32, &[&str])] = &[
+    ("std", 1, &[]),
+    ("store", 1, &["std"]),
+    ("runner", 1, &["std", "store"]),
+];
+
 pub(crate) fn toolchain_major(name: &str) -> Option<u32> {
-    match name {
-        "std" | "store" => Some(1),
-        _ => None,
+    TOOLCHAIN
+        .iter()
+        .find(|(supplied, _, _)| *supplied == name)
+        .map(|(_, major, _)| *major)
+}
+
+/// The bindings of a toolchain package: each to another toolchain package. None for an
+/// identity the toolchain does not supply.
+pub(crate) fn toolchain_bindings(id: &Id) -> Option<BTreeMap<Id, Option<Root>>> {
+    let (_, _, bound) = TOOLCHAIN
+        .iter()
+        .find(|(name, major, _)| *name == id.name && *major == id.major)?;
+    Some(
+        bound
+            .iter()
+            .map(|name| {
+                (
+                    Id {
+                        name: (*name).into(),
+                        major: toolchain_major(name).expect("a toolchain binding is supplied"),
+                    },
+                    None,
+                )
+            })
+            .collect(),
+    )
+}
+
+/// The toolchain packages, other than std, that `bound` reaches through toolchain bindings,
+/// `bound` included.
+pub(crate) fn toolchain_closure<'a>(bound: impl IntoIterator<Item = &'a Id>) -> BTreeSet<Id> {
+    let mut closure = BTreeSet::new();
+    let mut pending: Vec<Id> = bound.into_iter().cloned().collect();
+    while let Some(id) = pending.pop() {
+        if id.name == "std" || !closure.insert(id.clone()) {
+            continue;
+        }
+        if let Some(bindings) = toolchain_bindings(&id) {
+            pending.extend(bindings.into_keys());
+        }
     }
+    closure
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]

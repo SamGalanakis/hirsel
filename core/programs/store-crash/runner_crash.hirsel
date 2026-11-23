@@ -125,7 +125,7 @@ pub fn host_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, n: Net, 
             migrate: migration, handles: code.describe(handles), session: wire, max_sessions: 4u64,
             proxies: list.new(), n_publisher: 3145728u64,
             listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r,
-            stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(ingress.binding()), triggers: None, idle: None)
+            stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(runner.ingress.binding()), triggers: None, idle: None)
         let ended = runner.operate(take config, take stopping, result.unwrap(runner.status_root()), None) ?=> Start
         Ok(ended)
     }
@@ -229,7 +229,7 @@ fn secret_client(take d: SecretClient) -> String waits {
     let SecretClient(tasks: tasks, net: n, clock: c, random: r, head: take head, post: take post, token: take token) = take d
     let mut keys: List[Bytes] = list.new()
     list.push(mut keys, body_key(0u64))
-    let pair = wire_client.pair(tasks, n, c, r, Some(ingress.binding()), head, post, code.describe(place), keys, Some(take token), 1u64, 2097152u64)
+    let pair = runner.wire_client.pair(tasks, n, c, r, Some(runner.ingress.binding()), head, post, code.describe(place), keys, Some(take token), 1u64, 2097152u64)
     let (take wire, take server) = match take pair {
         Ok(take connected) => take connected,
         Error(Allocation(_)) => return "L31: client allocation refused",
@@ -240,15 +240,15 @@ fn secret_client(take d: SecretClient) -> String waits {
     let _ = take head
     let mut answered = true
     for p in 0u64 .. 2u64 {
-        wire_client.send_frame(wire, Call(7u32, p, 0u32, 5000u32, u64_bytes(p)))
-        let ok = match wire_client.next(wire) {
+        runner.wire_client.send_frame(wire, Call(7u32, p, 0u32, 5000u32, u64_bytes(p)))
+        let ok = match runner.wire_client.next(wire) {
             Ok(Batch(_, _, _, ds)) => list.len(ds) == 1u64 && ds[0u64].stream == 7u32 &&
                 ds[0u64].p == p && same(ds[0u64].outcome, returned(Ok(p))),
             _ => false,
         }
         answered = answered && ok
     }
-    let closed = wire_client.close(take wire)
+    let closed = runner.wire_client.close(take wire)
     let joined = match task.join(take server) { Ok(Ok(())) => true, _ => false }
     if !answered { return "L31: calls did not return" }
     if !closed || !joined { return "L31: connection did not close" }
@@ -297,7 +297,7 @@ fn ack(out: Stdout, v: u64) waits {
 // `armed` is the poison run. It arms the named sync failure once both sessions are up, then
 // sends each call only after the previous one is answered, so a call's commits are the only
 // frames the head has handed the journal when it gates them (see main's poison note).
-type Client { connections: List[wire_client.Conn], calls: List[Pos], out: Stdout, armed: bool }
+type Client { connections: List[runner.wire_client.Conn], calls: List[Pos], out: Stdout, armed: bool }
 
 type Tally { floor: u64, answered: u64, bad: String }
 
@@ -310,17 +310,17 @@ fn later(calls: List[Pos], x: Pos) -> bool {
     false
 }
 
-fn send_call(cn: wire_client.Conn, x: Pos) waits {
+fn send_call(cn: runner.wire_client.Conn, x: Pos) waits {
     let stream: u32 = int.narrow(x.stream)
     let slot: u32 = int.narrow(x.body)
     let request: runner.Frame = Call(stream, x.p, slot, 4294967295u32, u64_bytes(x.k))
-    wire_client.send_frame(cn, take request)
+    runner.wire_client.send_frame(cn, take request)
 }
 
 // One Batch from session i, each of its answers checked and counted; the number of
 // answers, or None once the session ends or sends another frame.
-fn heard(cn: wire_client.Conn, i: u64, calls: List[Pos], out: Stdout, mut t: Tally) -> Option[u64] waits {
-    let b = match wire_client.next(cn) {
+fn heard(cn: runner.wire_client.Conn, i: u64, calls: List[Pos], out: Stdout, mut t: Tally) -> Option[u64] waits {
+    let b = match runner.wire_client.next(cn) {
         Ok(Batch(version, take complete, take rows, take done)) => runner.KeyedBatch(version: version, complete: take complete, rows: take rows, outcomes: keyed(take done)),
         Ok(_) => {
             t.bad = "runner_crash: a frame other than a Batch"
@@ -401,13 +401,13 @@ fn client(take c: Client) -> String waits {
     for cn in connections { let _ = channel.send(cn.to, Close) }
     for cn in connections {
         loop {
-            match wire_client.next(cn) {
+            match runner.wire_client.next(cn) {
                 Ok(_) => if t.bad == "" { t.bad = "runner_crash: an answer after the last" },
                 Error(_) => break,
             }
         }
     }
-    for take cn in connections { let _ = wire_client.close(take cn) }
+    for take cn in connections { let _ = runner.wire_client.close(take cn) }
     if t.bad == "" && t.answered != list.len(calls) {
         t.bad = "unanswered"
     }
@@ -440,7 +440,7 @@ fn accept(take seed: Accept) -> () waits {
         let (socket, peer) = result.unwrap(host.accept(mut l, Never))
         let lease = option.unwrap(result.unwrap(std.wsock.acquire(pool)))
         let up = result.unwrap(std.wsock.server(take socket, take lease, peer.ip, list.new(), config.socket, c, host.mono_ns(c)))
-        let service = runner.wire_place_target(code.describe(place), random, Some(ingress.binding()), head, c, tasks, config, "crash fixture")
+        let service = runner.wire_place_target(code.describe(place), random, Some(runner.ingress.binding()), head, c, tasks, config, "crash fixture")
         let owner = result.unwrap(runner.serve_connection(tasks, take up, take service, post, config, c))
         list.push(mut owners, take owner)
     }
@@ -487,12 +487,12 @@ fn remember(out: Stdout, principal: Bytes) waits {
 }
 
 fn drive(c: Clock, r: Random, tasks: Tasks, n: Net, out: Stdout, port: u16, sessions: u64, take calls: List[Pos], take principal: Option[Bytes], armed: bool) -> String waits {
-    let mut connections: List[wire_client.Conn] = list.new()
-    let credential = match take principal { Some(take given) => take given, None => ingress.credential(r) }
+    let mut connections: List[runner.wire_client.Conn] = list.new()
+    let credential = match take principal { Some(take given) => take given, None => runner.ingress.credential(r) }
     for _ in 0u64 .. sessions {
         let mut keys: List[Bytes] = list.new()
         for body in 0u64 .. 3u64 { list.push(mut keys, body_key(body)) }
-        let cn = result.unwrap(wire_client.connect(tasks, n, Addr(ip: V4(0x7f000001u32), port: port), c, r, keys, Some(clone(credential)), std.wsock.defaults()))
+        let cn = result.unwrap(runner.wire_client.connect(tasks, n, Addr(ip: V4(0x7f000001u32), port: port), c, r, keys, Some(clone(credential)), std.wsock.defaults()))
         remember(out, credential)
         list.push(mut connections, take cn)
     }
@@ -617,7 +617,7 @@ fn activation_pairs(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, out: Stdo
     let settings: runner.PlaceConfig[(), Hd, (), ()] = runner.PlaceConfig(backing: Disk(d, clone(existing)), selection: chosen, place: code.describe(place), n_place: N_PLACE, migrate: code.describe(migrate), handles: code.describe(handles),
         session: wire, max_sessions: 1u64, proxies: list.new(), n_publisher: 1048576u64,
         listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r,
-        stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(ingress.binding()), triggers: None, idle: None)
+        stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(runner.ingress.binding()), triggers: None, idle: None)
     let seed = DeadlinePlace(config: take settings, stop: take stopping, status: result.unwrap(runner.status_root()), watch: take watch)
     let running = task.spawn(tasks, bytes 50331648u64, take seed, deadline_place)
     // A standalone install completes durably without publishing a serving phase.
@@ -692,7 +692,7 @@ fn freeze_until_stop(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, n: 
     let config: runner.PlaceConfig[(), Hd, (), ()] = runner.PlaceConfig(backing: Disk(d, options()), selection: Current(0u64), place: code.describe(place), n_place: N_PLACE, migrate: code.describe(migrate), handles: code.describe(handles),
         session: wire, max_sessions: 1u64, proxies: list.new(), n_publisher: 1048576u64,
         listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r,
-        stop: runner.Stop(lag_ms: 10000u64, grace_ms: 100u64), wire: Some(ingress.binding()), triggers: None, idle: None)
+        stop: runner.Stop(lag_ms: 10000u64, grace_ms: 100u64), wire: Some(runner.ingress.binding()), triggers: None, idle: None)
     let seed = DeadlinePlace(config: take config, stop: take stopping, status: latest.handle(status), watch: take watch)
     let running = task.spawn(tasks, bytes 50331648u64, take seed, deadline_place)
     let phases = result.unwrap(channel.receive(watcher))
@@ -701,11 +701,11 @@ fn freeze_until_stop(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, n: 
     }
     let mut keys: List[Bytes] = list.new()
     list.push(mut keys, body_key(0u64))
-    let credential = ingress.credential(r)
-    let connection = result.unwrap(wire_client.connect(tasks, n, status_address(latest.read(status)), c, r, keys, Some(clone(credential)), wire.socket))
+    let credential = runner.ingress.credential(r)
+    let connection = result.unwrap(runner.wire_client.connect(tasks, n, status_address(latest.read(status)), c, r, keys, Some(clone(credential)), wire.socket))
     remember(out, credential)
     result.unwrap(stdout.write(out, "FREEZE"))
-    wire_client.send_frame(connection, Call(0u32, 0u64, 0u32, 10000u32, u64_bytes(9u64)))
+    runner.wire_client.send_frame(connection, Call(0u32, 0u64, 0u32, 10000u32, u64_bytes(9u64)))
     let watchdog = host.mono_ns(c) + 5000000000u64
     while let Error(_) = stdout.write(out, "FROZEN?") {
         let now = host.mono_ns(c)
@@ -719,7 +719,7 @@ fn freeze_until_stop(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, n: 
         _ => fail("runner-deadline: expected exactly one logically abandoned send"),
     }
     let mut abandoned = 0u64
-    while let Ok(take frame) = wire_client.next(connection) {
+    while let Ok(take frame) = runner.wire_client.next(connection) {
         match frame {
             Batch(_, _, _, done) => for outcome in done {
                 if let Abandoned = outcome.outcome { abandoned += 1u64 } else { fail("runner-deadline: answered a send past the cut") }
@@ -728,7 +728,7 @@ fn freeze_until_stop(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, n: 
         }
     }
     want(abandoned <= 1u64, "runner-deadline: duplicate Abandoned")
-    let _ = wire_client.close(take connection)
+    let _ = runner.wire_client.close(take connection)
     result.unwrap(stdout.write(out, "DONE"))
     ended
 }
@@ -739,7 +739,7 @@ fn deadline_reopen(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args) -> () 
     let mut db = result.unwrap(store.open(tasks, d, c, r, existing))
     let data = result.unwrap(store.with_schema(db, code.describe(handles)))
     let named = option.unwrap(decode_fixture_token(option.unwrap(args.get(argv, 4u64))))
-    let stream = wire_client.stream(result.unwrap(ingress.caller((), named)), 0u32)
+    let stream = runner.wire_client.stream(result.unwrap(runner.ingress.caller((), named)), 0u32)
     want(match result.unwrap(store.get(store.snapshot(db), store.shape(data.t), 0u64)) { None => true, _ => false }, "runner-deadline: frozen effect reached disk")
     let digest = store.request_digest(body_key(0u64), u64_bytes(9u64))
     match result.unwrap(store.admit(mut db, stream, 0u64, digest)) {
@@ -765,7 +765,7 @@ pub fn stop_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Std
                 migrate: code.describe(migrate), handles: code.describe(handles), session: wire, max_sessions: 1u64,
                 proxies: list.new(), n_publisher: 1048576u64,
                 listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r,
-                stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(ingress.binding()), triggers: None, idle: None)
+                stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(runner.ingress.binding()), triggers: None, idle: None)
             let ended = runner.operate(take config, take stopping, result.unwrap(runner.status_root()), None) ?=> Start
             Ok(ended)
         }

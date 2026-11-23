@@ -46,7 +46,7 @@ def main():
         parser.error('select controls explicitly')
     if len(args.mutant or ()) > 3 or len(set(args.mutant or ())) != len(args.mutant or ()):
         parser.error('select at most three distinct controls per land')
-    text = (ROOT / 'core/programs/store/runner.hirsel').read_text()
+    text = (ROOT / 'core/programs/runner/runner.hirsel').read_text()
     rows = []
     if args.syntax_control:
         with tempfile.TemporaryDirectory(prefix='wire-w3c-syntax-') as directory:

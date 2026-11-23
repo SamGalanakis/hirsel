@@ -219,7 +219,7 @@ pub type Services: send {
 }
 
 pub type Grants: send {
-    context: store.runner.TriggerContext,
+    context: runner.TriggerContext,
     helper: Sender[HelperAsk],
     clock: Clock,
     live: Option[Live],
@@ -237,7 +237,7 @@ pub fn copy_live(l: Live, group: String) -> Live {
     Live(net: l.net, address: l.address, key: secret.share(l.key), out: l.out, preview: harness.preview.copy_door(l.preview), group: string.from(group), model: string.from(l.model))
 }
 
-fn make_grants(s: Services, take ctx: store.runner.TriggerContext) -> Result[Grants, Capacity] {
+fn make_grants(s: Services, take ctx: runner.TriggerContext) -> Result[Grants, Capacity] {
     let live = match s.live {
         Some(l) => Some(copy_live(l, l.group)),
         None => None,
@@ -485,7 +485,7 @@ fn effect(g: Grants, caller: store.Caller, take key: harness.EffectKey) -> Resul
     harness.effect(g.context, g, take key, notes_agent(), code.describe(settle), take target)
 }
 
-fn settle(mut tx: store.Tx, a: store.triggers.Attempt, take m: harness.Settle) -> Result[harness.Filed, store.Error] {
+fn settle(mut tx: store.Tx, a: runner.triggers.Attempt, take m: harness.Settle) -> Result[harness.Filed, store.Error] {
     let Ok(w) = wired() else {
         return Error(Missing("harness: wiring"))
     }
@@ -506,25 +506,25 @@ pub fn settle_release_entry(mut tx: store.Tx, h: harness.Handles, caller: store.
     harness.release.dev_settle(mut tx, h, caller, notes_agent(), wired()?, take ask)
 }
 
-pub fn place(mut r: store.runner.Registry[Grants, harness.Handles]) -> Result[(), store.runner.RegisterError] {
+pub fn place(mut r: runner.Registry[Grants, harness.Handles]) -> Result[(), runner.RegisterError] {
     harness.register_standard(mut r, code.describe(advance), code.describe(effect), code.describe(settle), BYTES, BYTES)?
-    store.runner.transact(mut r, code.describe(submit_entry), BYTES, store.runner.DEFAULT_STEPS)?
-    store.runner.transact(mut r, code.describe(decide_entry), BYTES, store.runner.DEFAULT_STEPS)?
-    store.runner.transact(mut r, code.describe(settle_release_entry), BYTES, store.runner.DEFAULT_STEPS)?
+    runner.transact(mut r, code.describe(submit_entry), BYTES, runner.DEFAULT_STEPS)?
+    runner.transact(mut r, code.describe(decide_entry), BYTES, runner.DEFAULT_STEPS)?
+    runner.transact(mut r, code.describe(settle_release_entry), BYTES, runner.DEFAULT_STEPS)?
     let proposals: std.codec.Codec[harness.release.Proposal] = std.codec.of()
-    store.runner.query_as(mut r, code.describe(harness.release.dev_proposals), std.codec.key_bytes(), proposals, BYTES, store.runner.DEFAULT_STEPS)?
-    harness.pending_waits_entry(mut r, BYTES, store.runner.DEFAULT_STEPS)?
+    runner.query_as(mut r, code.describe(harness.release.dev_proposals), std.codec.key_bytes(), proposals, BYTES, runner.DEFAULT_STEPS)?
+    harness.pending_waits_entry(mut r, BYTES, runner.DEFAULT_STEPS)?
     let windows: std.codec.Codec[harness.View] = std.codec.of()
-    store.runner.query_as(mut r, code.describe(harness.window), std.codec.key_u64(), windows, BYTES, store.runner.DEFAULT_STEPS)?
-    store.runner.query_as(mut r, code.describe(harness.history_cuts), std.codec.key_u64(), std.codec.of_u64(), BYTES, store.runner.DEFAULT_STEPS)
+    runner.query_as(mut r, code.describe(harness.window), std.codec.key_u64(), windows, BYTES, runner.DEFAULT_STEPS)?
+    runner.query_as(mut r, code.describe(harness.history_cuts), std.codec.key_u64(), std.codec.of_u64(), BYTES, runner.DEFAULT_STEPS)
 }
 
 // ---- the helper agent: a second place, one session of its own ----
 type HelperGrants: send {
-    context: store.runner.TriggerContext
+    context: runner.TriggerContext
 }
 
-fn helper_grants(s: (), take ctx: store.runner.TriggerContext) -> Result[HelperGrants, Capacity] {
+fn helper_grants(s: (), take ctx: runner.TriggerContext) -> Result[HelperGrants, Capacity] {
     Ok(HelperGrants(context: take ctx))
 }
 
@@ -572,14 +572,14 @@ fn helper_effect(g: HelperGrants, caller: store.Caller, take key: harness.Effect
     harness.effect(g.context, g, take key, helper_agent(), code.describe(helper_settle), None)
 }
 
-fn helper_settle(mut tx: store.Tx, a: store.triggers.Attempt, take m: harness.Settle) -> Result[harness.Filed, store.Error] {
+fn helper_settle(mut tx: store.Tx, a: runner.triggers.Attempt, take m: harness.Settle) -> Result[harness.Filed, store.Error] {
     let Ok(w) = helper_wired() else {
         return Error(Missing("harness: wiring"))
     }
     harness.settle(mut tx, helper_agent(), w, a, take m)
 }
 
-fn helper_place(mut r: store.runner.Registry[HelperGrants, harness.Handles]) -> Result[(), store.runner.RegisterError] {
+fn helper_place(mut r: runner.Registry[HelperGrants, harness.Handles]) -> Result[(), runner.RegisterError] {
     harness.register_standard(mut r, code.describe(helper_advance), code.describe(helper_effect), code.describe(helper_settle), BYTES, BYTES)
 }
 
@@ -596,10 +596,10 @@ pub type HelperSeed: send {
     net: Net
 }
 
-fn helper_settings(dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> store.runner.PlaceConfig[HelperGrants, harness.Handles, (), ()] {
+fn helper_settings(dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> runner.PlaceConfig[HelperGrants, harness.Handles, (), ()] {
     let w = result.unwrap(helper_wired())
-    let config = store.runner.TriggerConfig(entries: harness.entries(w), author: store.Caller(issuer: 0u8, subject: list.new()), grants: (), grant: helper_grants, grant_bytes: 65536u64)
-    store.runner.PlaceConfig(backing: Disk(dir, options()), selection: Reopen, place: code.describe(helper_place), n_place: PLACE_BYTES, migrate: code.describe(harness.migrate), handles: code.describe(harness.handles), session: wire(), max_sessions: 1u64, proxies: list.new(), n_publisher: PLACE_BYTES, listen: loopback(), net: net, tasks: tasks, clock: clock, random: random, stop: store.runner.Stop(lag_ms: 0u64, grace_ms: 200u64), wire: None, triggers: Some(take config), idle: Some(IDLE_MS))
+    let config = runner.TriggerConfig(entries: harness.entries(w), author: store.Caller(issuer: 0u8, subject: list.new()), grants: (), grant: helper_grants, grant_bytes: 65536u64)
+    runner.PlaceConfig(backing: Disk(dir, options()), selection: Reopen, place: code.describe(helper_place), n_place: PLACE_BYTES, migrate: code.describe(harness.migrate), handles: code.describe(harness.handles), session: wire(), max_sessions: 1u64, proxies: list.new(), n_publisher: PLACE_BYTES, listen: loopback(), net: net, tasks: tasks, clock: clock, random: random, stop: runner.Stop(lag_ms: 0u64, grace_ms: 200u64), wire: None, triggers: Some(take config), idle: Some(IDLE_MS))
 }
 
 fn helper_ask(seed: HelperSeed, n: u64, take line: String) -> Result[String, String] waits {
@@ -668,20 +668,20 @@ pub fn loopback() -> Addr {
     Addr(ip: V4(0x7f000001u32), port: 0u16)
 }
 
-pub fn wire() -> store.runner.WireConfig {
-    let mut w = store.runner.wire_defaults(65536u64, PLACE_BYTES)
+pub fn wire() -> runner.WireConfig {
+    let mut w = runner.wire_defaults(65536u64, PLACE_BYTES)
     w.n_pool = 4194304u64
     w
 }
 
 // Runs a place until it is idle: no run can move without a person or a
 // timer, so `operate` returns.
-fn until_idle[G: send, S: send](take config: store.runner.PlaceConfig[G, harness.Handles, S, ()]) -> Result[(), String] waits {
+fn until_idle[G: send, S: send](take config: runner.PlaceConfig[G, harness.Handles, S, ()]) -> Result[(), String] waits {
     let (stop, stopped): (Sender[()], Receiver[()]) = channel.new(1u64)
-    let Ok(status) = store.runner.status_root() else {
+    let Ok(status) = runner.status_root() else {
         return Error("place: status")
     }
-    let ended = store.runner.operate(take config, take stopped, latest.handle(status), None)
+    let ended = runner.operate(take config, take stopped, latest.handle(status), None)
     let _ = take stop
     match ended {
         Ok(Stopped(_)) => Ok(()),
@@ -699,15 +699,15 @@ fn until_idle[G: send, S: send](take config: store.runner.PlaceConfig[G, harness
     }
 }
 
-pub fn settings(take backing: store.runner.Backing, clock: Clock, random: Random, tasks: Tasks, net: Net, take s: Services) -> store.runner.PlaceConfig[Grants, harness.Handles, Services, ()] {
+pub fn settings(take backing: runner.Backing, clock: Clock, random: Random, tasks: Tasks, net: Net, take s: Services) -> runner.PlaceConfig[Grants, harness.Handles, Services, ()] {
     let w = result.unwrap(wired())
     let grant_bytes = if let Some(_) = view s.live {
         LIVE_GRANT_BYTES
     } else {
         65536u64
     }
-    let config = store.runner.TriggerConfig(entries: harness.entries(w), author: store.Caller(issuer: 0u8, subject: list.new()), grants: take s, grant: make_grants, grant_bytes: grant_bytes)
-    store.runner.PlaceConfig(backing: take backing, selection: Reopen, place: code.describe(place), n_place: PLACE_BYTES, migrate: code.describe(migrate), handles: code.describe(harness.handles), session: wire(), max_sessions: 1u64, proxies: list.new(), n_publisher: PLACE_BYTES, listen: loopback(), net: net, tasks: tasks, clock: clock, random: random, stop: store.runner.Stop(lag_ms: 0u64, grace_ms: 200u64), wire: None, triggers: Some(take config), idle: Some(IDLE_MS))
+    let config = runner.TriggerConfig(entries: harness.entries(w), author: store.Caller(issuer: 0u8, subject: list.new()), grants: take s, grant: make_grants, grant_bytes: grant_bytes)
+    runner.PlaceConfig(backing: take backing, selection: Reopen, place: code.describe(place), n_place: PLACE_BYTES, migrate: code.describe(migrate), handles: code.describe(harness.handles), session: wire(), max_sessions: 1u64, proxies: list.new(), n_publisher: PLACE_BYTES, listen: loopback(), net: net, tasks: tasks, clock: clock, random: random, stop: runner.Stop(lag_ms: 0u64, grace_ms: 200u64), wire: None, triggers: Some(take config), idle: Some(IDLE_MS))
 }
 
 // ---- printing ----

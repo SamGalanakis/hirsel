@@ -467,7 +467,7 @@ operations! {
 }
 
 pub(crate) fn binding(f: &FnDecl) -> Option<u16> {
-    if f.path.package_is("store", "1")
+    if f.path.package_is("runner", "1")
         && f.path.0.modules == ["runner"]
         && matches!(
             f.path.0.name.as_str(),

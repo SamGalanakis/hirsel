@@ -1,22 +1,22 @@
 // The operator-side publisher. The app supplies an authenticated WIRE connection and the
 // entries it authorizes for this host. Only the publisher has the operator socket.
 pub type Entries: send {
-    pending: store.client.Callee[(), ()],
-    source: store.client.Callee[Option[String], ()],
-    settle: store.client.Callee[release.Settlement, Result[harness.Filed, harness.Refused]]
+    pending: runner.client.Callee[(), ()],
+    source: runner.client.Callee[Option[String], ()],
+    settle: runner.client.Callee[release.Settlement, Result[harness.Filed, harness.Refused]]
 }
 
 pub type Target: send {
-    group: store.launcher.Group,
+    group: platform.launcher.Group,
     operator_root: String,
 }
 
-pub type Progress: send = Idle | InProgress(Bytes, store.operator.Phase) | Settled(Bytes, release.State)
-pub type Error: send = App(store.client.CallError) | AppRefused(harness.Refused) | Wire | Operator | Refused(store.operator.Class, String)
+pub type Progress: send = Idle | InProgress(Bytes, platform.operator.Phase) | Settled(Bytes, release.State)
+pub type Error: send = App(runner.client.CallError) | AppRefused(harness.Refused) | Wire | Operator | Refused(platform.operator.Class, String)
 
 // A proposal's D remains the same on every host restart. Group incarnation distinguishes
 // a new place that reuses both a group name and an effect key.
-fn request_id(g: store.launcher.Group, id: Bytes) -> Bytes {
+fn request_id(g: platform.launcher.Group, id: Bytes) -> Bytes {
     let mut subject = string.into_bytes("hirsel release proposal v1")
     std.codec.put_key_string(g.name, mut subject)
     std.codec.put_key_u64(g.incarnation, mut subject)
@@ -29,28 +29,28 @@ fn request_id(g: store.launcher.Group, id: Bytes) -> Bytes {
     take short
 }
 
-fn source_input(p: release.Proposal, take files: List[release.File], e: Entries) -> Result[store.launcher.Input, String] {
+fn source_input(p: release.Proposal, take files: List[release.File], e: Entries) -> Result[platform.launcher.Input, String] {
     for grant in p.build.grants {
-        if store.launcher.foreign_or_exec(grant) {
+        if platform.launcher.foreign_or_exec(grant) {
             return Error("a release proposal cannot approve Foreign or Exec")
         }
     }
-    let mut required: List[store.launcher.RequiredEntry] = list.new()
-    list.push(mut required, store.launcher.RequiredEntry(kind: Query, key: store.client.entry_key(e.pending)))
-    list.push(mut required, store.launcher.RequiredEntry(kind: Query, key: store.client.entry_key(e.source)))
-    list.push(mut required, store.launcher.RequiredEntry(kind: Transact, key: store.client.entry_key(e.settle)))
-    let mut submitted: List[store.launcher.SourceFile] = list.with_capacity(list.len(files))
+    let mut required: List[platform.launcher.RequiredEntry] = list.new()
+    list.push(mut required, platform.launcher.RequiredEntry(kind: Query, key: runner.client.entry_key(e.pending)))
+    list.push(mut required, platform.launcher.RequiredEntry(kind: Query, key: runner.client.entry_key(e.source)))
+    list.push(mut required, platform.launcher.RequiredEntry(kind: Transact, key: runner.client.entry_key(e.settle)))
+    let mut submitted: List[platform.launcher.SourceFile] = list.with_capacity(list.len(files))
     for take file in take files {
         let release.File(path: take path, text: take text) = take file
-        list.push(mut submitted, store.launcher.SourceFile(path: take path, content: string.into_bytes(take text)))
+        list.push(mut submitted, platform.launcher.SourceFile(path: take path, content: string.into_bytes(take text)))
     }
-    let tree = store.launcher.Tree(package: string.from(p.build.package), grants: clone(p.build.grants), dirs: clone(p.build.dirs), files: take submitted, required_entries: take required)
-    let codec: std.codec.Codec[store.launcher.Tree] = std.codec.of()
+    let tree = platform.launcher.Tree(package: string.from(p.build.package), grants: clone(p.build.grants), dirs: clone(p.build.dirs), files: take submitted, required_entries: take required)
+    let codec: std.codec.Codec[platform.launcher.Tree] = std.codec.of()
     let mut encoded: Bytes = list.new()
     if let Error(_) = std.codec.encode(codec, tree, mut encoded) {
         return Error("the proposed source tree does not encode")
     }
-    if list.len(encoded) > store.launcher.TREE_BYTES {
+    if list.len(encoded) > platform.launcher.TREE_BYTES {
         return Error("the proposed source tree exceeds the launcher's byte limit")
     }
     Ok(Source(take encoded))
@@ -66,14 +66,14 @@ fn published(activation: u64, assembly: Bytes) -> release.State {
     Published(take text)
 }
 
-fn read_app[A: codec](mut app: store.client.Client, entry: store.client.Callee[A, ()], take arg: A, within_ms: u64) -> Result[store.client.Seen, Error] waits {
-    let sub = store.client.subscribe(mut app, entry, take arg, within_ms) ?=> App
-    let seen = store.client.seen_at(mut app, sub, 0u64, within_ms)
-    store.client.unsubscribe(mut app, sub)
+fn read_app[A: codec](mut app: runner.client.Client, entry: runner.client.Callee[A, ()], take arg: A, within_ms: u64) -> Result[runner.client.Seen, Error] waits {
+    let sub = runner.client.subscribe(mut app, entry, take arg, within_ms) ?=> App
+    let seen = runner.client.seen_at(mut app, sub, 0u64, within_ms)
+    runner.client.unsubscribe(mut app, sub)
     Ok(seen ?=> App)
 }
 
-fn next_proposal(mut app: store.client.Client, e: Entries, within_ms: u64) -> Result[Option[(Bytes, release.Proposal)], Error] waits {
+fn next_proposal(mut app: runner.client.Client, e: Entries, within_ms: u64) -> Result[Option[(Bytes, release.Proposal)], Error] waits {
     let seen = read_app(mut app, e.pending, (), within_ms)?
     if list.len(seen.rows) == 0u64 { return Ok(None) }
     let row = view seen.rows[0u64]
@@ -89,9 +89,9 @@ fn next_proposal(mut app: store.client.Client, e: Entries, within_ms: u64) -> Re
     Error(Wire)
 }
 
-fn settle_app(mut app: store.client.Client, e: Entries, id: Bytes, d: Bytes, take state: release.State, within_ms: u32) -> Result[Progress, Error] waits {
+fn settle_app(mut app: runner.client.Client, e: Entries, id: Bytes, d: Bytes, take state: release.State, within_ms: u32) -> Result[Progress, Error] waits {
     let settlement = release.Settlement(id: clone(id), state: clone(state))
-    let store.client.Replied(answer: take answer, ..) = store.client.call(mut app, e.settle, take settlement, within_ms) ?=> |problem| App(problem)
+    let runner.client.Replied(answer: take answer, ..) = runner.client.call(mut app, e.settle, take settlement, within_ms) ?=> |problem| App(problem)
     match take answer {
         Returned(Ok(_)) => Ok(Settled(clone(d), take state)),
         Returned(Error(take refused)) => Error(AppRefused(take refused)),
@@ -99,7 +99,7 @@ fn settle_app(mut app: store.client.Client, e: Entries, id: Bytes, d: Bytes, tak
     }
 }
 
-fn source_of(mut app: store.client.Client, e: Entries, p: release.Proposal, within_ms: u64) -> Result[Result[store.launcher.Input, String], Error] waits {
+fn source_of(mut app: runner.client.Client, e: Entries, p: release.Proposal, within_ms: u64) -> Result[Result[platform.launcher.Input, String], Error] waits {
     let mut files: List[release.File] = list.new()
     let mut after: Option[String] = None
     let mut size = 4u64
@@ -116,7 +116,7 @@ fn source_of(mut app: store.client.Client, e: Entries, p: release.Proposal, with
         let Some(raw) = row.value else { return Error(Wire) }
         let text = std.codec.decode(std.codec.of_string(), raw) ?=> |_| Wire
         size += 8u64 + string.byte_len(path) + string.byte_len(text)
-        if size > store.launcher.TREE_BYTES {
+        if size > platform.launcher.TREE_BYTES {
             return Ok(Error("the proposed source tree exceeds the launcher's byte limit"))
         }
         after = Some(string.from(path))
@@ -128,9 +128,9 @@ fn source_of(mut app: store.client.Client, e: Entries, p: release.Proposal, with
     Ok(source_input(p, take files, e))
 }
 
-fn ask(net: Net, target: Target, clock: Clock, within_ms: u32, a: store.operator.Ask) -> Result[store.operator.Answer, Error] waits {
+fn ask(net: Net, target: Target, clock: Clock, within_ms: u32, a: platform.operator.Ask) -> Result[platform.operator.Answer, Error] waits {
     let at = At(clock, std.clock.deadline_after_ms(host.mono_ns(clock), int.widen(within_ms)))
-    match store.operator.exchange(net, target.operator_root, a, at) {
+    match platform.operator.exchange(net, target.operator_root, a, at) {
         Some(take answer) => Ok(take answer),
         None => Error(Operator),
     }
@@ -144,7 +144,7 @@ pub fn publisher() -> Publisher { Publisher(pending: None) }
 
 // Run one publisher per group. Reconnect the app's WIRE client when it closes at cutover.
 // After a publisher restart its first poll reads the pending row again.
-pub fn poll(mut worker: Publisher, mut app: store.client.Client, e: Entries, net: Net, target: Target, clock: Clock, within_ms: u32) -> Result[Progress, Error] waits {
+pub fn poll(mut worker: Publisher, mut app: runner.client.Client, e: Entries, net: Net, target: Target, clock: Clock, within_ms: u32) -> Result[Progress, Error] waits {
     if let None = worker.pending {
         let found = next_proposal(mut app, e, int.widen(within_ms))?
         worker.pending = take found
@@ -159,7 +159,7 @@ pub fn poll(mut worker: Publisher, mut app: store.client.Client, e: Entries, net
     Ok(take result)
 }
 
-fn drive(mut app: store.client.Client, e: Entries, net: Net, target: Target, clock: Clock, within_ms: u32, id: Bytes, p: release.Proposal) -> Result[Progress, Error] waits {
+fn drive(mut app: runner.client.Client, e: Entries, net: Net, target: Target, clock: Clock, within_ms: u32, id: Bytes, p: release.Proposal) -> Result[Progress, Error] waits {
     let d = request_id(target.group, id)
     let first = ask(net, target, clock, within_ms, StatusAsk(clone(d)))?
     let submitted = match first {
@@ -167,7 +167,7 @@ fn drive(mut app: store.client.Client, e: Entries, net: Net, target: Target, clo
             Ok(take input) => Some(take input),
             Error(take why) => return settle_app(mut app, e, id, d, Rejected(take why), within_ms),
         },
-        StateAnswer(key, g, Source(b), AwaitInput(_)) if key == d && store.launcher.same_group(g, target.group) => Some(Source(clone(b))),
+        StateAnswer(key, g, Source(b), AwaitInput(_)) if key == d && platform.launcher.same_group(g, target.group) => Some(Source(clone(b))),
         _ => None,
     }
     // AwaitInput after a restart means the launcher lost its attempt. Repeat the original
@@ -177,7 +177,7 @@ fn drive(mut app: store.client.Client, e: Entries, net: Net, target: Target, clo
         None => take first,
     }
     match take state {
-        StateAnswer(key, g, Source(_), take phase) if key == d && store.launcher.same_group(g, target.group) => match take phase {
+        StateAnswer(key, g, Source(_), take phase) if key == d && platform.launcher.same_group(g, target.group) => match take phase {
             InstalledPhase(activation, assembly, _) => settle_app(mut app, e, id, d, published(activation, assembly), within_ms),
             FailedPhase(_, take why, _) => settle_app(mut app, e, id, d, Rejected(take why), within_ms),
             other => Ok(InProgress(take d, take other)),

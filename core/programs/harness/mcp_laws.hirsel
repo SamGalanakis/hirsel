@@ -43,19 +43,19 @@ fn mcp_blob_effect(g: Grants, caller: store.Caller, take key: harness.EffectKey)
     harness.effect(g.context, g, take key, mcp_blob_agent(), code.describe(mcp_blob_settle), None)
 }
 
-fn mcp_blob_settle(mut tx: store.Tx, a: store.triggers.Attempt, take m: harness.Settle) -> Result[harness.Filed, store.Error] {
+fn mcp_blob_settle(mut tx: store.Tx, a: runner.triggers.Attempt, take m: harness.Settle) -> Result[harness.Filed, store.Error] {
     let w = mcp_blob_wiring() ?=> |_| Missing("MCP blob wiring")
     harness.settle(mut tx, mcp_blob_agent(), w, a, take m)
 }
 
-fn mcp_blob_place(mut r: store.runner.Registry[Grants, harness.Handles]) -> Result[(), store.runner.RegisterError] {
+fn mcp_blob_place(mut r: runner.Registry[Grants, harness.Handles]) -> Result[(), runner.RegisterError] {
     harness.register_standard(mut r, code.describe(mcp_blob_advance), code.describe(mcp_blob_effect), code.describe(mcp_blob_settle), BYTES, 8388608u64)?
     let views: std.codec.Codec[harness.View] = std.codec.of()
-    store.runner.query_as(mut r, code.describe(harness.window), std.codec.key_u64(), views, BYTES, store.runner.DEFAULT_STEPS)
+    runner.query_as(mut r, code.describe(harness.window), std.codec.key_u64(), views, BYTES, runner.DEFAULT_STEPS)
 }
 
 fn seed_mcp_blob(dir: Dir, clock: Clock, random: Random, tasks: Tasks, caller: store.Caller) waits {
-    let mut db = result.unwrap(store.open(tasks, dir, clock, random, store.triggers.law_options()))
+    let mut db = result.unwrap(store.open(tasks, dir, clock, random, runner.triggers.law_options()))
     result.unwrap(store.run_migration(mut db, tasks, code.describe(harness.migrate)))
     update_catalog(mut db, OLD_SCHEMA)
     let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
@@ -96,13 +96,13 @@ fn read_mcp_request(mut r: ReadHalf, clock: Clock, until: u64) -> bool waits {
 }
 
 fn mcp_status(at: Addr, credential: Bytes, clock: Clock, random: Random, tasks: Tasks, net: Net, socket: std.wsock.Config) -> bool waits {
-    let keys = result.unwrap(store.fixture.entry_keys(code.describe(mcp_blob_place)))
-    let mut client = result.unwrap(store.fixture.client_at(tasks, net, clock, random, keys, socket, at, Some(clone(credential)), 0u64, 3000u64))
+    let keys = result.unwrap(runner.fixture.entry_keys(code.describe(mcp_blob_place)))
+    let mut client = result.unwrap(runner.fixture.client_at(tasks, net, clock, random, keys, socket, at, Some(clone(credential)), 0u64, 3000u64))
     let codec: std.codec.Codec[harness.View] = std.codec.of()
-    let entry = store.fixture.query_as_entry(code.describe(harness.window), std.codec.key_u64(), codec)
-    let sub = result.unwrap(store.fixture.subscribe(mut client, entry, Status, 3000u64))
-    let image = result.unwrap(store.fixture.seen_at(mut client, sub, 0u64, 3000u64))
-    store.fixture.close(take client)
+    let entry = runner.fixture.query_as_entry(code.describe(harness.window), std.codec.key_u64(), codec)
+    let sub = result.unwrap(runner.fixture.subscribe(mut client, entry, Status, 3000u64))
+    let image = result.unwrap(runner.fixture.seen_at(mut client, sub, 0u64, 3000u64))
+    runner.fixture.close(take client)
     for row in image.rows {
         if let Some(raw) = row.value {
             if let Ok(Status(status)) = std.codec.decode(codec, raw) {
@@ -119,8 +119,8 @@ fn mcp_status(at: Addr, credential: Bytes, clock: Clock, random: Random, tasks: 
 fn test_mcp_working_and_blob(parent: Dir, clock: Clock, random: Random, tasks: Tasks, network: Net) -> Result[(), u64] waits {
     let mut name = string.with_capacity(32u64)
     let dir = result.unwrap(host.mkdtemp(parent, mut name))
-    let credential = store.ingress.credential(random)
-    seed_mcp_blob(dir, clock, random, tasks, result.unwrap(store.ingress.caller((), credential)))
+    let credential = runner.ingress.credential(random)
+    seed_mcp_blob(dir, clock, random, tasks, result.unwrap(runner.ingress.caller((), credential)))
     let (take input, at) = result.unwrap(host.listen(network, Addr(ip: V4(0x7f000001u32), port: 0u16), 1u16))
     let mut listener = take input
     let (take blobs, server) = blob_fixture(tasks, clock, random, MCP_BLOB_SIZE)
@@ -135,8 +135,8 @@ fn test_mcp_working_and_blob(parent: Dir, clock: Clock, random: Random, tasks: T
     let services = Services(model: take model, tool: take tool, blobs: Some(copy_blob_fixture(fixture)))
     let w = result.unwrap(mcp_blob_wiring())
     let mut config = settings_of(code.describe(mcp_blob_place), harness.entries(w), dir, clock, random, tasks, network, take services, Some(IDLE_MS))
-    config.wire = Some(store.runner.wire_bind((), code.describe(store.ingress.caller), 4096u64, 65536u64))
-    let socket = store.runner.wire_defaults(65536u64, PLACE_BYTES).socket
+    config.wire = Some(runner.wire_bind((), code.describe(runner.ingress.caller), 4096u64, 65536u64))
+    let socket = runner.wire_defaults(65536u64, PLACE_BYTES).socket
     let (running, _stop, status) = launch(tasks, take config)
     let until = std.clock.deadline_after_ms(host.mono_ns(clock), 5000u64)
     let (take conn, _) = result.unwrap(host.accept(mut listener, At(clock, until)))

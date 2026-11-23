@@ -12,7 +12,7 @@ This specification covers std `http`, the runner's HTTP bindings and keyed opera
 - ownership arrangement (a): the reader allocates each decoded frame;
 - MEM-19..30, CONC-3..13, CAP-3, CAP-8 and CAP-9.
 
-**Repository citations** are to commit fbdb7d69. RUNNER-SPEC (core/programs/store/RUNNER-SPEC.md) is cited by rule (V1-V5, H1-H4, §3).
+**Repository citations** are to commit fbdb7d69. RUNNER-SPEC (core/programs/runner/RUNNER-SPEC.md) is cited by rule (V1-V5, H1-H4, §3).
 
 **Layers.**
 - **Layer 1, std `http` (§1-§2):** a library over `Net`. It needs no runner.
@@ -1048,7 +1048,7 @@ A query entry returns an opaque `Cover`, not a codec value (RUNNER-SPEC rule 2, 
 
 **Part B, unbuilt.** This section is specified but not built; slices H9 and H12 build it (§7). Part A neither builds nor relies on it.
 
-**Hirsel does not authenticate.** Neither Hirsel nor the runner checks a credential, a signature or a secret for a keyed operation: the application's own claim function (K-2) decides who the principal is, exactly as `Wire.bind` decides the Caller ([RUNNER-SPEC](../../core/programs/store/RUNNER-SPEC.md) v2.24 rule 13, ruling R6).
+**Hirsel does not authenticate.** Neither Hirsel nor the runner checks a credential, a signature or a secret for a keyed operation: the application's own claim function (K-2) decides who the principal is, exactly as `Wire.bind` decides the Caller ([RUNNER-SPEC](../../core/programs/runner/RUNNER-SPEC.md) v2.24 rule 13, ruling R6).
 
 **Purpose.** Some clients bring their own retry key, an opaque string rather than a (stream, position) pair: webhook delivery IDs, payment-style `Idempotency-Key`s, and upstream message IDs. A keyed operation runs a transact entry at most once per **claim** (`op`, principal, key) while the claim is live (K-5).
 

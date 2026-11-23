@@ -17,8 +17,8 @@ capabilities. The driver's internals are in
 ## The installation
 
 Install a Linux release with `curl -fsSL https://hirsel.ai/install.sh | sh` (requires glibc 2.28+).
-An installation is a relocatable prefix containing `hirsel`, the published `core`, `std`, and
-`store@1` packages (including prebuilt release standard-library objects), target runtime archives,
+An installation is a relocatable prefix containing `hirsel`, the published `core`, `std`, `store@1` and
+`runner@1` packages (including prebuilt release standard-library objects), target runtime archives,
 the bundled native link kit (`link/kit/`), `bin/ld.lld`, `libexec/hirsel/`, and the LLVM libraries
 shipped with the compiler. Installed toolchains use the bundled link kit and do **not** require
 host C development packages (`libc6-dev` / `libgcc-N-dev`). Host C development packages are only

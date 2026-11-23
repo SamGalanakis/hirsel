@@ -6,6 +6,7 @@ charge = "charge-v1"
 [dependencies]
 std = { major = 1 }
 store = { major = 1, path = "../store" }
+runner = { major = 1, path = "../runner" }
 harness = { major = 1, path = "../harness" }
 
 [sources]

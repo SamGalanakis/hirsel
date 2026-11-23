@@ -11,7 +11,6 @@ import subprocess
 
 import runner_tests
 import std_native
-from store_tests import inputs as store_inputs
 
 
 ROOT = std_native.ROOT
@@ -20,8 +19,8 @@ DEFAULT_SEEDS = 32
 # These laws drive 10,000 frames per seed. Keep the complete floods in each
 # nightly batch while giving their disjoint ranges fewer seeds.
 FLOOD_SEEDS = {
-    'store@1/runner_calls/law_calls_refusals': 2,
-    'store@1/runner_calls/law_calls_session_charge': 2,
+    'runner@1/runner_calls/law_calls_refusals': 2,
+    'runner@1/runner_calls/law_calls_session_charge': 2,
 }
 POSTGRES = (
     'fragmented_startup_error', 'eof_in_error_response',
@@ -53,7 +52,7 @@ def selected_laws():
     if DIRECT - {case.name for case in laws['contracts'].values()}:
         raise ValueError('a direct simulation law is missing from the contract inventory')
 
-    source = (ROOT / 'core/programs/store/runner_calls.hirsel').read_text()
+    source = (ROOT / 'core/programs/runner/runner_calls.hirsel').read_text()
     runner = {}
     for name in runner_tests.CALLS:
         # Persistent and observed laws require the existing launch/trace adapters.
@@ -64,7 +63,7 @@ def selected_laws():
             continue
         types = [pair.split(':')[1].strip() for pair in signature[1].split(',') if pair.strip()]
         if 'Net' in types:
-            runner[f'store@1/runner_calls/law_{name}'] = types
+            runner[f'runner@1/runner_calls/law_{name}'] = types
     laws['runner'] = runner
     return laws
 
@@ -148,7 +147,7 @@ pub fn campaign_call_{name}(network: Net, time: Clock, tasks: Tasks) -> bool wai
 
 
 def runner_inputs(group, work):
-    inputs = store_inputs(ROOT)
+    inputs = runner_tests.runner_inputs(ROOT)
     sources = inputs['packages'][-1]['sources']
     row = next(row for row in sources if row['modules'] == ['runner_calls'])
     source = Path(row['file']).read_text() + std_native.simulation_support('std.sim')
@@ -160,7 +159,7 @@ def runner_inputs(group, work):
         test = f'campaign_{name}'
         window = 8192 if law in runner_tests.WIDE_WINDOW_LAWS else 8
         source += network_adapter(test, 'std.sim', call, 'true', window)
-        entries[law] = f'store@1/runner_calls/{test}'
+        entries[law] = f'runner@1/runner_calls/{test}'
     path = work / 'runner_calls.hirsel'
     path.write_text(source)
     row['file'] = str(path)

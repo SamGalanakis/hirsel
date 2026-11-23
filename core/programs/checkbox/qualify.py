@@ -20,10 +20,10 @@ SDK_MUTANTS = {"resend_new_p", "skip_resubscribe_after_reset", "clear_on_first_b
 SERVER_EDITS = {
     "bit_order_msb": ("main", "1u8 << int.narrow(i.index & 7u32)", "128u8 >> int.narrow(i.index & 7u32)"),
     "unchecked_u32_arg": ("main", "if i < 1000000 {", "if true {"),
-    "range_in_board": ("main", "    store.runner.cover(store.shape(h.chunks), Unbounded, Unbounded)",
+    "range_in_board": ("main", "    runner.cover(store.shape(h.chunks), Unbounded, Unbounded)",
                       "    let mut rows = result.unwrap(store.range(tx, store.shape(h.chunks), Unbounded, Unbounded))\n"
                       "    while let Some(_) = result.unwrap(store.next_range(mut rows)) {}\n"
-                      "    store.runner.cover(store.shape(h.chunks), Unbounded, Unbounded)"),
+                      "    runner.cover(store.shape(h.chunks), Unbounded, Unbounded)"),
     "no_publish_to_others": ("runner", "        let has_content = next.reset",
                              "        if list.len(rows) == 0u64 && list.len(next.complete) == 0u64 { next.rows = list.new() }\n"
                              "        let has_content = next.reset"),
@@ -34,7 +34,7 @@ SERVER_EDITS = {
                              "        let _ = list.remove(mut live_rows, 0u64)\n"
                              "    }\n"
                              "    let requested = wire_rows_size(live_rows)"),
-    "old_owner_limit": ("main", "max_sessions: store.runner.WIRE_OWNER_LIMIT,",
+    "old_owner_limit": ("main", "max_sessions: runner.WIRE_OWNER_LIMIT,",
                         "max_sessions: 1024u64,"),
 }
 
@@ -58,8 +58,8 @@ def replace(text, before, after):
 def scratch_sources(work, case, mutant):
     paths = {
         "main": PROGRAM / "main.hirsel",
-        "runner": PROGRAM.parent / "store/runner.hirsel",
-        "ingress": PROGRAM.parent / "store/ingress.hirsel",
+        "runner": PROGRAM.parent / "runner/runner.hirsel",
+        "ingress": PROGRAM.parent / "runner/ingress.hirsel",
     }
     changed = {}
     if case == "toggle_no_rerun":

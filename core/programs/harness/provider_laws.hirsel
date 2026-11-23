@@ -397,7 +397,7 @@ fn test_preview_only_provider_text(tasks: Tasks, clock: Clock) -> Result[(), u64
     let caller = store.Caller(issuer: 2u8, subject: bytes_of("owner"))
     let target = harness.preview.target(door, "s0", clock)
     let watch = option.unwrap(harness.preview.observe(door, "s0", caller))
-    let dispatch = store.triggers.Id(store_hi: 1u64, store_lo: 2u64, branch: 0u32, version: 3u64, index: 0u64)
+    let dispatch = runner.triggers.Id(store_hi: 1u64, store_lo: 2u64, branch: 0u32, version: 3u64, index: 0u64)
     let key = harness.preview.Key(dispatch: dispatch, run: 0u64, entry: 2u64, tool: None, attempt: 1u64)
     let mut sink = harness.preview.source(target, caller, key)
     let mut response = string.from("data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"hidden reasoning\"}}]}\n\n")

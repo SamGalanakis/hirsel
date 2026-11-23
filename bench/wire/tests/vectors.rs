@@ -133,7 +133,7 @@ fn frame(name: &str) -> Frame {
 #[test]
 fn frame_vectors_match_w3a_and_decode_strictly() -> Result<()> {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../core/programs/store/frame-vectors.json");
+        .join("../../core/programs/runner/frame-vectors.json");
     let fixtures: serde_json::Value = serde_json::from_slice(&std::fs::read(path)?)?;
     let vectors = fixtures["vectors"].as_array().unwrap();
     for vector in vectors {

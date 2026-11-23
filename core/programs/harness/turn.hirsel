@@ -159,9 +159,9 @@ fn cancel_effect(mut tx: store.Tx, h: Handles, key: EffectKey, mut spend: Spend)
     kept(store.put(mut tx, h.effects, key, e))
 }
 
-fn cancel_trigger(mut tx: store.Tx, h: Handles, trigger: Option[store.triggers.Id]) -> Result[(), Refused] {
+fn cancel_trigger(mut tx: store.Tx, h: Handles, trigger: Option[runner.triggers.Id]) -> Result[(), Refused] {
     if let Some(id) = trigger {
-        match store.triggers.request_cancel(mut tx, h.triggers, id) {
+        match runner.triggers.request_cancel(mut tx, h.triggers, id) {
             Ok(()) => (),
             Error(StaleAttempt) => (),
             Error(_) => return Error(Storage),
@@ -483,8 +483,8 @@ fn narrowed(s: Session, name: String) -> bool {
 
 fn seal(mut tx: store.Tx, h: Handles, w: Wiring, key: EffectKey, take e: Effect) -> Result[(), Refused] {
     let mut sealed = take e
-    let id = armed(store.triggers.write(mut tx, h.triggers, w.entries, w.effect, key, AfterCommit))?
-    let _ = armed(store.triggers.write(mut tx, h.triggers, w.entries, w.advance, Deadline(key), At(sealed.deadline)))?
+    let id = armed(runner.triggers.write(mut tx, h.triggers, w.entries, w.effect, key, AfterCommit))?
+    let _ = armed(runner.triggers.write(mut tx, h.triggers, w.entries, w.advance, Deadline(key), At(sealed.deadline)))?
     sealed.trigger = Some(id)
     sealed.phase = Sealed
     kept(store.put(mut tx, h.effects, key, sealed))
@@ -586,7 +586,7 @@ fn derive[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut s: 
                                 _ => approval_key(t.name, t.rev, call.args),
                             }
                             kept(store.put(mut tx, h.waits, wait, Open(take approval, expires)))?
-                            let _ = armed(store.triggers.write(mut tx, h.triggers, w.entries, w.advance, Expire(wait), At(expires)))?
+                            let _ = armed(runner.triggers.write(mut tx, h.triggers, w.entries, w.advance, Expire(wait), At(expires)))?
                             Held
                         },
                     },
@@ -600,7 +600,7 @@ fn derive[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut s: 
     run.phase = AwaitingRound(round, ordinal)
     kept(store.put(mut tx, h.runs, id, run))?
     status(mut tx, h, "calling tools")?
-    let _ = armed(store.triggers.write(mut tx, h.triggers, w.entries, w.advance, Kick, AfterCommit))?
+    let _ = armed(runner.triggers.write(mut tx, h.triggers, w.entries, w.advance, Kick, AfterCommit))?
     Ok(())
 }
 
@@ -661,7 +661,7 @@ fn step_round[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut
         match run {
             Inside(f) => {
                 if ran_inside {
-                    let _ = armed(store.triggers.write(mut tx, h.triggers, w.entries, w.advance, Kick, AfterCommit))?
+                    let _ = armed(runner.triggers.write(mut tx, h.triggers, w.entries, w.advance, Kick, AfterCommit))?
                     return Ok(())
                 }
                 ran_inside = true
@@ -670,7 +670,7 @@ fn step_round[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut
                     Parks => {
                         open = true
                         e.deadline = now(mut tx) + a.limits.tool_ms
-                        let _ = armed(store.triggers.write(mut tx, h.triggers, w.entries, w.advance, Deadline(key), At(e.deadline)))?
+                        let _ = armed(runner.triggers.write(mut tx, h.triggers, w.entries, w.advance, Deadline(key), At(e.deadline)))?
                         Parked
                     },
                 }
@@ -836,7 +836,7 @@ fn active(tx: store.Tx, h: Handles, run: u64) -> Result[bool, store.Error] {
 // begin(E) records the dispatch before the worker may send. A Once effect
 // whose earlier attempt began and never settled is in doubt at once; it never
 // waits for its deadline and never sends again.
-fn begin(mut tx: store.Tx, attempt: store.triggers.Attempt, take key: EffectKey) -> Result[Permit, store.Error] {
+fn begin(mut tx: store.Tx, attempt: runner.triggers.Attempt, take key: EffectKey) -> Result[Permit, store.Error] {
     let h = handles(store.tx_schema(tx))?
     let Some(take found) = store.fetch(tx, store.shape(h.effects), key)? else {
         return Ok(Shut)
@@ -845,13 +845,13 @@ fn begin(mut tx: store.Tx, attempt: store.triggers.Attempt, take key: EffectKey)
     let Some(t) = e.trigger else {
         return Ok(Shut)
     }
-    if t != store.triggers.run_id(attempt) {
+    if t != runner.triggers.run_id(attempt) {
         return Ok(Shut)
     }
     if !active(tx, h, key.run)? {
         return Ok(Shut)
     }
-    let n = store.triggers.number(attempt)
+    let n = runner.triggers.number(attempt)
     match e.phase {
         Sealed => (),
         Dispatched(prev) => {
@@ -889,25 +889,25 @@ fn resend_reserve(mut tx: store.Tx, h: Handles, id: u64, reserve: u64) -> Result
     store.put(mut tx, h.runs, id, run)
 }
 
-pub fn register[G: send, H: send](mut r: store.runner.Registry[G, H], n: u64, steps: u64) -> Result[(), store.runner.RegisterError] {
-    let f: own[send] fn(mut store.Tx, store.triggers.Attempt, take EffectKey) -> Result[Permit, store.Error] = begin
-    store.runner.register_attempt(mut r, code.describe(begin), take f, n, steps)
+pub fn register[G: send, H: send](mut r: runner.Registry[G, H], n: u64, steps: u64) -> Result[(), runner.RegisterError] {
+    let f: own[send] fn(mut store.Tx, runner.triggers.Attempt, take EffectKey) -> Result[Permit, store.Error] = begin
+    runner.register_attempt(mut r, code.describe(begin), take f, n, steps)
 }
 
 // The entries every harness place registers: the app's advance, its granted
 // effect, and the begin and settle attempts the effect calls. `effect_n` bounds
 // the effect's argument and reply, which grow with blob staging.
-pub fn register_standard[G: send](mut r: store.runner.Registry[G, Handles], advance_entry: StaticFn[fn(mut store.Tx, Handles, store.Caller, take Wake) -> Result[(), Refused]], effect_entry: StaticFn[fn(G, store.Caller, take EffectKey) -> Result[Worked, Capacity] waits], settle_entry: StaticFn[fn(mut store.Tx, store.triggers.Attempt, take Settle) -> Result[Filed, store.Error]], n: u64, effect_n: u64) -> Result[(), store.runner.RegisterError] {
-    let steps = store.runner.DEFAULT_STEPS
-    store.runner.transact(mut r, advance_entry, n, steps)?
-    store.runner.granted(mut r, effect_entry, effect_n, steps)?
+pub fn register_standard[G: send](mut r: runner.Registry[G, Handles], advance_entry: StaticFn[fn(mut store.Tx, Handles, store.Caller, take Wake) -> Result[(), Refused]], effect_entry: StaticFn[fn(G, store.Caller, take EffectKey) -> Result[Worked, Capacity] waits], settle_entry: StaticFn[fn(mut store.Tx, runner.triggers.Attempt, take Settle) -> Result[Filed, store.Error]], n: u64, effect_n: u64) -> Result[(), runner.RegisterError] {
+    let steps = runner.DEFAULT_STEPS
+    runner.transact(mut r, advance_entry, n, steps)?
+    runner.granted(mut r, effect_entry, effect_n, steps)?
     register(mut r, n, steps)?
-    let run = fn(mut tx: store.Tx, a: store.triggers.Attempt, take m: Settle) -> Result[Filed, store.Error] {
+    let run = fn(mut tx: store.Tx, a: runner.triggers.Attempt, take m: Settle) -> Result[Filed, store.Error] {
         let call = code.callable(settle_entry)
         call(mut tx, a, take m)
     }
-    let f: own[send] fn(mut store.Tx, store.triggers.Attempt, take Settle) -> Result[Filed, store.Error] = take run
-    store.runner.register_attempt(mut r, settle_entry, take f, n, steps)
+    let f: own[send] fn(mut store.Tx, runner.triggers.Attempt, take Settle) -> Result[Filed, store.Error] = take run
+    runner.register_attempt(mut r, settle_entry, take f, n, steps)
 }
 
 pub type Settle: codec + send {
@@ -921,7 +921,7 @@ pub type Filed: codec + send = Recorded | Ignored
 // and schedules derivation; a tool receipt settles its member and advances.
 // None records the effect as in doubt. The app's settle entry is a fenced
 // attempt entry whose body calls this; a refusal rolls the transaction back.
-pub fn settle[G: send](mut tx: store.Tx, a: Agent[G], w: Wiring, attempt: store.triggers.Attempt, take m: Settle) -> Result[Filed, store.Error] {
+pub fn settle[G: send](mut tx: store.Tx, a: Agent[G], w: Wiring, attempt: runner.triggers.Attempt, take m: Settle) -> Result[Filed, store.Error] {
     let h = handles(store.tx_schema(tx))?
     match settle_in(mut tx, h, a, w, attempt, take m) {
         Ok(d) => Ok(d),
@@ -930,7 +930,7 @@ pub fn settle[G: send](mut tx: store.Tx, a: Agent[G], w: Wiring, attempt: store.
     }
 }
 
-fn settle_in[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, attempt: store.triggers.Attempt, take m: Settle) -> Result[Filed, Refused] {
+fn settle_in[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, attempt: runner.triggers.Attempt, take m: Settle) -> Result[Filed, Refused] {
     let Settle(key: key, receipt: take receipt) = take m
     if !kept(active(tx, h, key.run))? {
         return Ok(Ignored)
@@ -942,7 +942,7 @@ fn settle_in[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, atte
     let Some(t) = e.trigger else {
         return Ok(Ignored)
     }
-    if t != store.triggers.run_id(attempt) {
+    if t != runner.triggers.run_id(attempt) {
         return Ok(Ignored)
     }
     match e.phase {
@@ -977,7 +977,7 @@ fn settle_in[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, atte
             kept(store.put(mut tx, h.runs, key.run, run))?
             e.phase = Settled(Model(take answer))
             kept(store.put(mut tx, h.effects, key, e))?
-            let _ = armed(store.triggers.write(mut tx, h.triggers, w.entries, w.advance, Kick, AfterCommit))?
+            let _ = armed(runner.triggers.write(mut tx, h.triggers, w.entries, w.advance, Kick, AfterCommit))?
         },
         Some(ModelFailed(take why)) => {
             let reserve = e.reserve

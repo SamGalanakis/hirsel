@@ -147,7 +147,7 @@ pub type Effect: codec + send {
     repeat: Repeat,
     deadline: u64,
     phase: EffectPhase,
-    trigger: Option[store.triggers.Id],
+    trigger: Option[runner.triggers.Id],
     dispatches: u64,
     reserve: u64,
 }
@@ -177,7 +177,7 @@ pub type Handles: send {
     readers: store.Table[Bytes, bool],
     fork_cuts: store.Table[u64, u64],
     mcp_catalog: store.Table[String, mcp_tools.Remote],
-    triggers: store.triggers.Tables,
+    triggers: runner.triggers.Tables,
 }
 
 fn session_name() -> String {
@@ -290,7 +290,7 @@ fn created(take r: Result[(), store.Error]) -> Result[(), store.Error] {
 }
 
 pub fn migrate(mut phase: store.Migration) -> Result[(), store.Error] {
-    store.triggers.migrate(mut phase)?
+    runner.triggers.migrate(mut phase)?
     mcp_tools.migrate(mut phase)?
     let c_session: std.codec.Codec[Session] = std.codec.of()
     let c_entry: std.codec.Codec[Entry] = std.codec.of()
@@ -331,7 +331,7 @@ pub fn handles(schema: store.Schema) -> Result[Handles, store.Error] {
         readers: store.schema_table(schema, "harness.readers", std.codec.key_bytes(), c_reader)?,
         fork_cuts: store.schema_table(schema, "harness.fork_cuts", std.codec.key_u64(), std.codec.of_u64())?,
         mcp_catalog: mcp_tools.catalog(schema)?,
-        triggers: store.triggers.tables(schema)?,
+        triggers: runner.triggers.tables(schema)?,
     ))
 }
 
@@ -461,22 +461,22 @@ pub type Wake: codec + send = Kick | Deadline(EffectKey) | Expire(WaitKey)
 pub type Refused: codec + send = NotAllowed | Conflict | TooLarge | Malformed(String) | Storage
 
 pub opaque type Wiring {
-    entries: store.triggers.Entries,
-    advance: store.triggers.Entry[Wake],
-    effect: store.triggers.Entry[EffectKey]
+    entries: runner.triggers.Entries,
+    advance: runner.triggers.Entry[Wake],
+    effect: runner.triggers.Entry[EffectKey]
 }
 
 pub fn wiring[H, G, R, E, W](advance_fn: StaticFn[fn(mut store.Tx, H, store.Caller, take Wake) -> Result[R, E]], effect_fn: StaticFn[fn(G, store.Caller, take EffectKey) -> Result[W, Capacity] waits]) -> Result[Wiring, Refused] {
-    let a = store.triggers.transact(advance_fn) ?=> |_| Malformed("advance target")
-    let e = store.triggers.granted(effect_fn) ?=> |_| Malformed("effect target")
-    let mut allowed = store.triggers.empty_entries()
-    store.triggers.allow(mut allowed, a) ?=> |_| Malformed("advance target")
-    store.triggers.allow(mut allowed, e) ?=> |_| Malformed("effect target")
+    let a = runner.triggers.transact(advance_fn) ?=> |_| Malformed("advance target")
+    let e = runner.triggers.granted(effect_fn) ?=> |_| Malformed("effect target")
+    let mut allowed = runner.triggers.empty_entries()
+    runner.triggers.allow(mut allowed, a) ?=> |_| Malformed("advance target")
+    runner.triggers.allow(mut allowed, e) ?=> |_| Malformed("effect target")
     Ok(Wiring(entries: take allowed, advance: take a, effect: take e))
 }
 
 // The trigger allowlist the place's TriggerConfig carries.
-pub fn entries(w: Wiring) -> store.triggers.Entries {
+pub fn entries(w: Wiring) -> runner.triggers.Entries {
     clone(w.entries)
 }
 
@@ -487,7 +487,7 @@ fn kept[T](take r: Result[T, store.Error]) -> Result[T, Refused] {
     }
 }
 
-fn armed(take r: Result[store.triggers.Id, store.triggers.Error]) -> Result[store.triggers.Id, Refused] {
+fn armed(take r: Result[runner.triggers.Id, runner.triggers.Error]) -> Result[runner.triggers.Id, Refused] {
     match take r {
         Ok(id) => Ok(id),
         Error(_) => Error(Storage)

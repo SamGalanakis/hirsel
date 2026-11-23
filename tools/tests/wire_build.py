@@ -32,22 +32,22 @@ def main():
                        for path in sorted((ROOT/'core'/name).glob('*.hirsel'))],
         })
     if args.session_only or args.admission_only:
-        directory = ROOT / 'core/programs/store'
-        with (directory / 'hirsel.toml').open('rb') as file:
-            manifest = tomllib.load(file)
-        package = manifest['package']
-        store = {
-            'package': {'name': package['name'], 'version': str(package['major'])},
-            'dependencies': [core] + [{'name': name, 'version': str(dep['major'])}
-                                      for name, dep in manifest['dependencies'].items()],
-            'sources': [{'file': str(directory / file), 'modules': module.split('.'), 'signatures': False}
-                        for file, module in manifest['sources'].items()],
-        }
-        if args.runner:
-            next(source for source in store['sources'] if source['modules'] == ['runner'])['file'] = str(args.runner.resolve())
-        packages.append(store)
+        for directory in (ROOT / 'core/programs/store', ROOT / 'core/programs/runner'):
+            with (directory / 'hirsel.toml').open('rb') as file:
+                manifest = tomllib.load(file)
+            package = manifest['package']
+            sources = [{'file': str(directory / file), 'modules': module.split('.'), 'signatures': False}
+                       for file, module in manifest['sources'].items()]
+            if args.runner and package['name'] == 'runner':
+                next(source for source in sources if source['modules'] == ['runner'])['file'] = str(args.runner.resolve())
+            packages.append({
+                'package': {'name': package['name'], 'version': str(package['major'])},
+                'dependencies': [core] + [{'name': name, 'version': str(dep['major'])}
+                                          for name, dep in manifest['dependencies'].items()],
+                'sources': sources,
+            })
     packages.append({
-        'package': {'name':'wire', 'version':'1'}, 'dependencies':[core, std] + ([{'name':'store', 'version':'1'}] if args.session_only or args.admission_only else []),
+        'package': {'name':'wire', 'version':'1'}, 'dependencies':[core, std] + ([{'name':'store', 'version':'1'}, {'name':'runner', 'version':'1'}] if args.session_only or args.admission_only else []),
         'sources':[{'file':str(ROOT/'core/programs/wire'/f'{name}.hirsel'),
                     'modules':[name], 'signatures':False} for name in (['admission'] if args.admission_only else ['session'] if args.session_only else ['echo','finish'])],
     })

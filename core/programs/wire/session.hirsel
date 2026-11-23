@@ -2,11 +2,11 @@
 // W3c owns the production Hello, principal, entry and durable-call service.
 fn ready(context: ()) -> bool { true }
 
-fn step(mut context: (), mut work: store.runner.WireWork, take input: store.runner.ServiceInput) -> Result[Option[store.runner.Frame], u16] {
+fn step(mut context: (), mut work: runner.WireWork, take input: runner.ServiceInput) -> Result[Option[runner.Frame], u16] {
     match take input {
         WClient(Call(stream, p, _, _, take arg), _) => {
-            let mut done: List[store.runner.Done] = list.new()
-            list.push(mut done, store.runner.Done(stream: stream, p: p, outcome: Returned(take arg)))
+            let mut done: List[runner.Done] = list.new()
+            list.push(mut done, runner.Done(stream: stream, p: p, outcome: Returned(take arg)))
             Ok(Some(Batch(0u64, list.new(), list.new(), take done)))
         },
         WClient(Hello(Some(token), _), _) => {
@@ -18,34 +18,34 @@ fn step(mut context: (), mut work: store.runner.WireWork, take input: store.runn
     }
 }
 
-fn inspect(context: (), frame: store.runner.Frame) -> Option[u16] { None }
+fn inspect(context: (), frame: runner.Frame) -> Option[u16] { None }
 
-fn finish(mut context: ()) -> Option[store.runner.PubIn] { None }
+fn finish(mut context: ()) -> Option[runner.PubIn] { None }
 
-fn service() -> store.runner.Service[()] {
-    store.runner.Service(context: (), step: step, ready: ready, allocate: fn(mut context: (), take plan: store.runner.ServiceAllocation) -> Result[store.runner.ServicePlan, u16] { Error(1013u16) }, finish: finish, check: inspect)
+fn service() -> runner.Service[()] {
+    runner.Service(context: (), step: step, ready: ready, allocate: fn(mut context: (), take plan: runner.ServiceAllocation) -> Result[runner.ServicePlan, u16] { Error(1013u16) }, finish: finish, check: inspect)
 }
 
-fn run(n: Net, tasks: Tasks, clock: Clock, config: store.runner.WireConfig) -> Result[(), Exit] waits {
+fn run(n: Net, tasks: Tasks, clock: Clock, config: runner.WireConfig) -> Result[(), Exit] waits {
     let mut c = config
     c.n_pool = 16777216u64
     let listener = match host.listen(n, Addr(ip: V4(0x7f000001u32), port: 18094u16), 128u16) {
         Ok((take l, _)) => take l,
         Error(_) => return Error(Exit(status: 1u8)),
     }
-    let mail = result.unwrap(store.runner.mailbox(64u64))
-    let to_publisher = store.runner.post(mail)
-    let result = store.runner.serve(take listener, tasks, clock, to_publisher, c, 16u64, list.new(), service)
+    let mail = result.unwrap(runner.mailbox(64u64))
+    let to_publisher = runner.post(mail)
+    let result = runner.serve(take listener, tasks, clock, to_publisher, c, 16u64, list.new(), service)
     match result { Ok(()) => Ok(()), Error(_) => Error(Exit(status: 1u8)) }
 }
 
 
 pub fn main(n: Net, tasks: Tasks, clock: Clock) -> Result[(), Exit] waits {
-    run(n, tasks, clock, store.runner.wire_defaults(65536u64, 0u64))
+    run(n, tasks, clock, runner.wire_defaults(65536u64, 0u64))
 }
 
 pub fn idle(n: Net, tasks: Tasks, clock: Clock) -> Result[(), Exit] waits {
-    let mut config = store.runner.wire_defaults(65536u64, 0u64)
+    let mut config = runner.wire_defaults(65536u64, 0u64)
     config.socket.idle_ms = 100u64
     config.socket.close_ms = 500u64
     run(n, tasks, clock, config)

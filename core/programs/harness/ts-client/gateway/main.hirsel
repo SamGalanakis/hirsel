@@ -3,20 +3,20 @@ fn scripted_revoke_entry(mut tx: store.Tx, h: harness.Handles, caller: store.Cal
     harness.set_reader(mut tx, h, caller, false)
 }
 
-fn scripted_entries(mut r: store.runner.Registry[notes.main.Grants, harness.Handles]) -> Result[(), store.runner.RegisterError] {
+fn scripted_entries(mut r: runner.Registry[notes.main.Grants, harness.Handles]) -> Result[(), runner.RegisterError] {
     notes.main.place(mut r)?
-    store.runner.transact(mut r, code.describe(scripted_revoke_entry), notes.main.BYTES, store.runner.DEFAULT_STEPS)
+    runner.transact(mut r, code.describe(scripted_revoke_entry), notes.main.BYTES, runner.DEFAULT_STEPS)
 }
 
-fn scripted_place(take supplied: store.local.Supplied, s: notes.main.Services) -> Result[store.runner.PlaceConfig[notes.main.Grants, harness.Handles, notes.main.Services, ()], Capacity] {
+fn scripted_place(take supplied: platform.local.Supplied, s: notes.main.Services) -> Result[runner.PlaceConfig[notes.main.Grants, harness.Handles, notes.main.Services, ()], Capacity] {
     let mut config = notes.main.settings(Memory, supplied.clock, supplied.random, supplied.tasks, supplied.net, notes.main.Services(helper: channel.sender(s.helper), clock: s.clock, live: None, stream: notes.main.copy_stream(s.stream, supplied.name)))
-    config.wire = Some(store.runner.wire_bind((), code.describe(store.ingress.caller), 4096u64, 65536u64))
+    config.wire = Some(runner.wire_bind((), code.describe(runner.ingress.caller), 4096u64, 65536u64))
     config.place = code.describe(scripted_entries)
     Ok(take config)
 }
 
-fn scripted_factory() -> store.local.Factory[notes.main.Services] {
-    store.local.seeded_factory(scripted_place)
+fn scripted_factory() -> platform.local.Factory[notes.main.Services] {
+    platform.local.seeded_factory(scripted_place)
 }
 
 type ScriptedWatch: send { door: harness.gateway.Door, out: Stdout, clock: Clock }
@@ -37,16 +37,16 @@ type ScriptedControl: codec { action: String, credential: String, at: u64 }
 
 fn scripted_revoke(d: harness.gateway.Door, credential: Bytes, p: u64, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[u64, String] waits {
     let Ok(take lease) = harness.gateway.route(d, 0u64) else { return Error("could not route revocation") }
-    let Some(address) = latest.read(store.local.status(lease)).addr else { return Error("no place address") }
-    let keys = result.unwrap(store.fixture.entry_keys(code.describe(scripted_entries)))
-    let Ok(take opened) = store.fixture.client_at(tasks, net, clock, random, keys, notes.main.wire().socket, address, Some(clone(credential)), p, notes.main.HTTP_MS) else {
+    let Some(address) = latest.read(platform.local.status(lease)).addr else { return Error("no place address") }
+    let keys = result.unwrap(runner.fixture.entry_keys(code.describe(scripted_entries)))
+    let Ok(take opened) = runner.fixture.client_at(tasks, net, clock, random, keys, notes.main.wire().socket, address, Some(clone(credential)), p, notes.main.HTTP_MS) else {
         return Error("could not connect for revocation")
     }
     let mut client = take opened
-    let entry = store.fixture.transact_entry(code.describe(scripted_revoke_entry))
-    let reply = store.fixture.call(mut client, entry, (), int.truncate(notes.main.HTTP_MS))
-    store.fixture.close(take client)
-    if let Ok(store.fixture.Replied(answer: Returned(Ok(())), ..)) = reply {
+    let entry = runner.fixture.transact_entry(code.describe(scripted_revoke_entry))
+    let reply = runner.fixture.call(mut client, entry, (), int.truncate(notes.main.HTTP_MS))
+    runner.fixture.close(take client)
+    if let Ok(runner.fixture.Replied(answer: Returned(Ok(())), ..)) = reply {
         harness.gateway.nudge(d, 0u64)
         return Ok(0u64)
     }
@@ -98,7 +98,7 @@ pub fn main(out: Stdout, input: Stdin, data: Dir, clock: Clock, random: Random, 
     let Ok((take listener, address)) = host.listen(net, notes.main.loopback(), 16u16) else {
         return notes.main.quit(out, "could not listen for HTTP")
     }
-    let front = harness.gateway_http.Front(bind: code.describe(store.ingress.caller), bind_bytes: 4096u64, bind_steps: 65536u64, authority: string.into_bytes("localhost"), submit: store.client.transact_entry(code.describe(notes.main.submit_entry)), decide: store.client.transact_entry(code.describe(notes.main.decide_entry)), settle: Some(store.client.transact_entry(code.describe(notes.main.settle_release_entry))), keys: result.unwrap(store.client.entry_keys(code.describe(scripted_entries))), socket: notes.main.wire().socket, agent: "scripted", narrow: All, preview: Some(harness.preview.door(hub)), tasks: tasks, clock: clock, random: random, net: net, tail_lines: 4u64, within_ms: notes.main.HTTP_MS, beat_ms: 200u64, conn_bytes: 8388608u64, conns_max: 8u64, head_max: 8192u64, body_max: 65536u64)
+    let front = harness.gateway_http.Front(bind: code.describe(runner.ingress.caller), bind_bytes: 4096u64, bind_steps: 65536u64, authority: string.into_bytes("localhost"), submit: runner.client.transact_entry(code.describe(notes.main.submit_entry)), decide: runner.client.transact_entry(code.describe(notes.main.decide_entry)), settle: Some(runner.client.transact_entry(code.describe(notes.main.settle_release_entry))), keys: result.unwrap(runner.client.entry_keys(code.describe(scripted_entries))), socket: notes.main.wire().socket, agent: "scripted", narrow: All, preview: Some(harness.preview.door(hub)), tasks: tasks, clock: clock, random: random, net: net, tail_lines: 4u64, within_ms: notes.main.HTTP_MS, beat_ms: 200u64, conn_bytes: 8388608u64, conns_max: 8u64, head_max: 8192u64, body_max: 65536u64)
     let served = harness.gateway_http.serve(d, take front, take listener)
     notes.main.count(out, "port ", int.widen(address.port))
     let watching = task.spawn(tasks, bytes 65536u64, ScriptedWatch(door: harness.gateway.copy_door(d), out: out, clock: clock), scripted_downs)

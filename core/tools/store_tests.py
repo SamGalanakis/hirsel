@@ -31,30 +31,63 @@ BYTE_LAWS = ('refused_reply',
              'streams', 'request_digest', 'keyset_pages')
 
 
-def inputs(root, tests=False):
-    """Core, std and the store package; `tests` adds the package's test sources."""
+def inputs(root, tests=False, package='store'):
+    """Core, std and a package of core/programs with the program packages it binds by path,
+    each before the packages that bind it, the selected package last; `tests` adds the
+    selected package's test sources. `package` names the directory (store, runner,
+    platform, store-crash)."""
     packages = []
     for name in ('core', 'std'):
         packages.append({
             'package': {'name': name, 'version': '1'},
             'dependencies': [] if name == 'core' else [{'name': 'core', 'version': '1'}],
             'sources': library_sources(root / 'core' / name, name == 'core')})
-    directory = root / 'core/programs/store'
-    with (directory / 'hirsel.toml').open('rb') as file:
-        manifest = tomllib.load(file)
-    package = manifest['package']
-    listed = dict(manifest['sources'])
-    if tests:
-        listed.update(manifest['tests']['sources'])
-    store = {
-        'package': {'name': package['name'], 'version': str(package['major'])},
-        'dependencies': [{'name': 'core', 'version': '1'}] +
-                        [{'name': name, 'version': str(dep['major'])}
-                         for name, dep in manifest['dependencies'].items()],
-        'sources': [{'file': str(directory / file), 'modules': module.split('.'), 'signatures': False}
-                    for file, module in listed.items()],
-    }
-    return {'core': {'name': 'core', 'version': '1'}, 'packages': packages + [store]}
+    placed = set()
+
+    def place(directory, selected):
+        if directory in placed:
+            return
+        placed.add(directory)
+        with (directory / 'hirsel.toml').open('rb') as file:
+            manifest = tomllib.load(file)
+        for dep in manifest['dependencies'].values():
+            if 'path' in dep:
+                place((directory / dep['path']).resolve(), False)
+        listed = dict(manifest['sources'])
+        if tests and selected:
+            listed.update(manifest.get('tests', {}).get('sources', {}))
+        packages.append({
+            'package': {'name': manifest['package']['name'], 'version': str(manifest['package']['major'])},
+            'dependencies': [{'name': 'core', 'version': '1'}] +
+                            [{'name': name, 'version': str(dep['major'])}
+                             for name, dep in manifest['dependencies'].items()],
+            'sources': [{'file': str(directory / file), 'modules': module.split('.'), 'signatures': False}
+                        for file, module in listed.items()],
+        })
+
+    place((root / 'core/programs' / package).resolve(), True)
+    return {'core': {'name': 'core', 'version': '1'}, 'packages': packages}
+
+
+# The runner package with the test modules its laws name, as the store package listed them.
+LAW_MODULES = (('steps_laws.hirsel', 'steps'), ('signup.hirsel', 'signup'),
+               ('runner_laws.hirsel', 'runner_laws'), ('runner_calls.hirsel', 'runner_calls'))
+
+
+def runner_inputs(root):
+    m = inputs(root, package='runner')
+    m['packages'][-1]['sources'] += [dict(file=str(root / 'core/programs/runner' / file), modules=[module],
+                                          signatures=False) for file, module in LAW_MODULES]
+    return m
+
+
+def crash_inputs(root):
+    """The store_crash package, whose runner_crash and platform_crash modules bind the
+    runner package with the law modules."""
+    m = inputs(root, package='store-crash')
+    runner = next(p for p in m['packages'] if p['package']['name'] == 'runner')
+    runner['sources'] += runner_inputs(root)['packages'][-1]['sources'][len(runner['sources']):]
+    return m
 
 
 def main():

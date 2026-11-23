@@ -168,7 +168,7 @@ raise SystemExit(subprocess.call(job["command"], shell=True, cwd=manifest.parent
 
             for path in ("crates/hirsel-contain/src/lib.rs",
                          "crates/hirsel-core-driver/src/launcher/mod.rs",
-                         "core/programs/store/launcher.hirsel"):
+                         "core/programs/platform/launcher.hirsel"):
                 with self.subTest(path=path):
                     checkpoint = git("rev-parse", "HEAD") + "\n"
                     record.write_text(checkpoint)

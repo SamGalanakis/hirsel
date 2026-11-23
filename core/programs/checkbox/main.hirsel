@@ -20,7 +20,7 @@ type Handles: send {
     chunks: store.Table[u32, Bytes]
 }
 
-type Registry = store.runner.Registry[(), Handles]
+type Registry = runner.Registry[(), Handles]
 
 fn migrate(mut phase: store.Migration) -> Result[(), store.Error] {
     let codec: std.codec.Codec[Bytes] = std.codec.of()
@@ -56,7 +56,7 @@ fn flip(mut data: Bytes, i: Bit) -> bool {
     data[index] & mask != 0u8
 }
 
-fn toggle(mut tx: store.Tx, h: Handles, author: store.runner.Caller, take i: Bit) -> Result[bool, Never] {
+fn toggle(mut tx: store.Tx, h: Handles, author: runner.Caller, take i: Bit) -> Result[bool, Never] {
     let key = chunk(i)
     let old = result.unwrap(store.fetch(tx, store.shape(h.chunks), key))
     let mut data = match take old {
@@ -68,13 +68,13 @@ fn toggle(mut tx: store.Tx, h: Handles, author: store.runner.Caller, take i: Bit
     Ok(checked)
 }
 
-fn board(tx: store.Tx, h: Handles, take _arg: ()) -> Result[store.runner.Cover, Capacity] {
-    store.runner.cover(store.shape(h.chunks), Unbounded, Unbounded)
+fn board(tx: store.Tx, h: Handles, take _arg: ()) -> Result[runner.Cover, Capacity] {
+    runner.cover(store.shape(h.chunks), Unbounded, Unbounded)
 }
 
-fn place(mut registry: Registry) -> Result[(), store.runner.RegisterError] {
-    store.runner.transact(mut registry, code.describe(toggle), 65536u64, store.runner.DEFAULT_STEPS)?
-    store.runner.query(mut registry, code.describe(board), std.codec.key_u32(), std.codec.of_bytes(), 1048576u64, store.runner.DEFAULT_STEPS)
+fn place(mut registry: Registry) -> Result[(), runner.RegisterError] {
+    runner.transact(mut registry, code.describe(toggle), 65536u64, runner.DEFAULT_STEPS)?
+    runner.query(mut registry, code.describe(board), std.codec.key_u32(), std.codec.of_bytes(), 1048576u64, runner.DEFAULT_STEPS)
 }
 
 fn asset(path: Bytes) -> Option[std.wsock.Asset] {
@@ -143,28 +143,28 @@ const STOP_GRACE_MS: u64 = 5000u64
 
 // runner.operate owns the place from store open to store close; a SIGINT or SIGTERM closes
 // `stop` (runner.main), which drains and closes the store.
-fn start(n: Net, directory: Dir, web: Dir, c: Clock, random: Random, tasks: Tasks, a: Args, take stop: Receiver[()]) -> Result[store.runner.Ended, store.runner.MainError] waits {
-    let selection = store.runner.launch_selection(a) ?=> Usage
+fn start(n: Net, directory: Dir, web: Dir, c: Clock, random: Random, tasks: Tasks, a: Args, take stop: Receiver[()]) -> Result[runner.Ended, runner.MainError] waits {
+    let selection = runner.launch_selection(a) ?=> Usage
     let Settings(listen: listen, proxies: take proxies) = settings(a) ?=> Usage
-    let mut session = store.runner.wire_defaults(65536u64, N_PLACE)
+    let mut session = runner.wire_defaults(65536u64, N_PLACE)
     session.site = Some(std.wsock.Site(dir: web, find: asset))
-    let config: store.runner.PlaceConfig[(), Handles, (), ()] = store.runner.PlaceConfig(backing: Disk(directory, store.defaults()),
+    let config: runner.PlaceConfig[(), Handles, (), ()] = runner.PlaceConfig(backing: Disk(directory, store.defaults()),
         selection: selection, place: code.describe(place), n_place: N_PLACE, migrate: code.describe(migrate), handles: code.describe(handles),
-        session: session, max_sessions: store.runner.WIRE_OWNER_LIMIT, proxies: take proxies, n_publisher: 67108864u64,
-        listen: listen, net: n, tasks: tasks, clock: c, random: random, stop: store.runner.Stop(lag_ms: 0u64, grace_ms: STOP_GRACE_MS), wire: Some(store.ingress.binding()), triggers: None, idle: None)
-    let ended = store.runner.operate(take config, take stop, result.unwrap(store.runner.status_root()), None) ?=> Start
+        session: session, max_sessions: runner.WIRE_OWNER_LIMIT, proxies: take proxies, n_publisher: 67108864u64,
+        listen: listen, net: n, tasks: tasks, clock: c, random: random, stop: runner.Stop(lag_ms: 0u64, grace_ms: STOP_GRACE_MS), wire: Some(runner.ingress.binding()), triggers: None, idle: None)
+    let ended = runner.operate(take config, take stop, result.unwrap(runner.status_root()), None) ?=> Start
     Ok(ended)
 }
 
 pub fn main(n: Net, directory: Dir, web: Dir, c: Clock, random: Random, tasks: Tasks, a: Args, process: Process, errors: Stderr) -> Result[(), Exit] waits {
-    store.runner.main(a, process, errors, tasks, code.describe(place), scoped fn(take stop: Receiver[()]) -> Result[store.runner.Ended, store.runner.MainError] waits {
-        if let Some(take candidate) = store.runner.launch_prepare_args(a) ?=> Usage {
-            let store.runner.PrepareArgs(attempt: take attempt, digest: take digest) = take candidate
-            let setup = store.runner.PrepareConfig(scratch: directory, options: store.defaults(),
+    runner.main(a, process, errors, tasks, code.describe(place), scoped fn(take stop: Receiver[()]) -> Result[runner.Ended, runner.MainError] waits {
+        if let Some(take candidate) = runner.launch_prepare_args(a) ?=> Usage {
+            let runner.PrepareArgs(attempt: take attempt, digest: take digest) = take candidate
+            let setup = runner.PrepareConfig(scratch: directory, options: store.defaults(),
                 attempt: take attempt, image_digest: take digest, clock: c, tasks: tasks, n_place: N_PLACE,
                 place: code.describe(place), migrate: code.describe(migrate), handles: code.describe(handles),
-                triggers: store.triggers.empty_entries())
-            return match store.runner.prepare_deploy(setup) { Ok(()) => Ok(Unstarted), Error(_) => Error(Usage(Exit(status: 1u8))) }
+                triggers: runner.triggers.empty_entries())
+            return match runner.prepare_deploy(setup) { Ok(()) => Ok(Unstarted), Error(_) => Error(Usage(Exit(status: 1u8))) }
         }
         start(n, directory, web, c, random, tasks, a, take stop)
     })

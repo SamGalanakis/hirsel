@@ -2,12 +2,12 @@
 
 fn allowed(d: harness.gateway.Door, f: Front, id: u64, identity: Identity) -> Result[(), u16] waits {
     if let Some(take client) = reach(d, f, id, identity, 0u64, false)? {
-        store.client.close(take client)
+        runner.client.close(take client)
     }
     Ok(())
 }
 
-fn checked_status(mut client: store.client.Client, f: Front) -> Result[String, u16] waits {
+fn checked_status(mut client: runner.client.Client, f: Front) -> Result[String, u16] waits {
     let head = read_cover(mut client, f, window_entry(), Status)?
     match visible_status(head) {
         Some(take status) => Ok(take status),
@@ -15,16 +15,16 @@ fn checked_status(mut client: store.client.Client, f: Front) -> Result[String, u
     }
 }
 
-fn read_cover[A: codec](mut client: store.client.Client, f: Front, entry: store.client.Callee[A, ()], take arg: A) -> Result[store.client.Seen, u16] waits {
-    let Ok(sub) = store.client.subscribe(mut client, entry, take arg, f.within_ms) else { return Error(503u16) }
-    let seen = store.client.seen_at(mut client, sub, 0u64, f.within_ms)
-    store.client.unsubscribe(mut client, sub)
+fn read_cover[A: codec](mut client: runner.client.Client, f: Front, entry: runner.client.Callee[A, ()], take arg: A) -> Result[runner.client.Seen, u16] waits {
+    let Ok(sub) = runner.client.subscribe(mut client, entry, take arg, f.within_ms) else { return Error(503u16) }
+    let seen = runner.client.seen_at(mut client, sub, 0u64, f.within_ms)
+    runner.client.unsubscribe(mut client, sub)
     Ok(seen ?=> |_| 503u16)
 }
 
-fn history_page(mut client: store.client.Client, f: Front, before: u64, lines: u64) -> Result[Page, u16] waits {
+fn history_page(mut client: runner.client.Client, f: Front, before: u64, lines: u64) -> Result[Page, u16] waits {
     let mut from = harness.page_from(before, lines)
-    let cuts = store.client.query_as_entry(code.describe(harness.history_cuts), std.codec.key_u64(), std.codec.of_u64())
+    let cuts = runner.client.query_as_entry(code.describe(harness.history_cuts), std.codec.key_u64(), std.codec.of_u64())
     let cut_image = read_cover(mut client, f, cuts, (from, before))?
     for r in cut_image.rows {
         if let Some(raw) = view r.value {
@@ -52,9 +52,9 @@ fn history_page(mut client: store.client.Client, f: Front, before: u64, lines: u
     Ok(Page(from: from, rows: take rows))
 }
 
-fn waits_page(mut client: store.client.Client, f: Front) -> Result[List[harness.PendingWait], u16] waits {
+fn waits_page(mut client: runner.client.Client, f: Front) -> Result[List[harness.PendingWait], u16] waits {
     let codec: std.codec.Codec[harness.Wait] = std.codec.of()
-    let entry = store.client.query_as_entry(code.describe(harness.pending_waits), harness.wait_key(), codec)
+    let entry = runner.client.query_as_entry(code.describe(harness.pending_waits), harness.wait_key(), codec)
     let image = read_cover(mut client, f, entry, ())?
     let _ = checked_status(mut client, f)?
     let mut waits: List[harness.PendingWait] = list.new()
@@ -84,9 +84,9 @@ fn visible_sessions(d: harness.gateway.Door, f: Front, identity: Identity) -> Re
     Ok(take visible)
 }
 
-fn releases_page(mut client: store.client.Client, f: Front) -> Result[List[release.FiledProposal], u16] waits {
+fn releases_page(mut client: runner.client.Client, f: Front) -> Result[List[release.FiledProposal], u16] waits {
     let codec: std.codec.Codec[release.Proposal] = std.codec.of()
-    let entry = store.client.query_as_entry(code.describe(release.dev_proposals), std.codec.key_bytes(), codec)
+    let entry = runner.client.query_as_entry(code.describe(release.dev_proposals), std.codec.key_bytes(), codec)
     let image = read_cover(mut client, f, entry, ())?
     let _ = checked_status(mut client, f)?
     let mut filed: List[release.FiledProposal] = list.new()
@@ -110,7 +110,7 @@ fn release_route(d: harness.gateway.Door, f: Front, id: u64, identity: Identity,
             Error(code) => return reply(mut write, f, code, list.new()),
         }
         let proposals = releases_page(mut client, f)
-        store.client.close(take client)
+        runner.client.close(take client)
         return match take proposals {
             Ok(take filed) => json_reply(mut write, f, 200u16, filed),
             Error(code) => reply(mut write, f, code, list.new()),

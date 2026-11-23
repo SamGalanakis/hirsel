@@ -17,7 +17,7 @@ DOCS = (
     'docs/building.md',
     'docs/PRIMER.md',
     'core/programs/store/STORE-SPEC.md',
-    'core/programs/store/RUNNER-SPEC.md',
+    'core/programs/runner/RUNNER-SPEC.md',
     'core/programs/harness/README.md',
 )
 DRIVER = 'crates/hirsel-core-driver/src/cli.rs'

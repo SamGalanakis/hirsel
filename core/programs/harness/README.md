@@ -328,11 +328,11 @@ each response chunk to `provider.feed` and asks `provider.answer` at the end.
 ## The gateway
 
 `harness.gateway` runs each session as a keyed session of an in-process platform
-host (`store.local`, RUNNER-SPEC §14.9), which keeps the catalog in its own store
+host (`platform.local`, RUNNER-SPEC §14.9), which keeps the catalog in its own store
 and commits a session's rows with its group, so the two never disagree. A place
 unloads only by its own idle stop (§14.4), which never cuts active work: an idle
 session holds no memory. An app gives it the factory that builds a session's
-place (`store.local.seeded_factory`, whose `make` sees the gateway's seed, the
+place (`platform.local.seeded_factory`, whose `make` sees the gateway's seed, the
 services every session's grants are made from), its migration, its store
 options and the idle time.
 
@@ -418,8 +418,8 @@ session's place can unload while its page stays open.
 
 A session ACL denial returns 403 before the front sends any event stream or
 history headers. Denied requests leave a cold place asleep.
-- The front uses `store.ingress.caller` for bearer credentials. Places register
-  `harness.window` and `harness.history_cuts` with `store.runner.query_as`.
+- The front uses `runner.ingress.caller` for bearer credentials. Places register
+  `harness.window` and `harness.history_cuts` with `runner.query_as`.
   Each query reads the Caller's conversation ACL row, including when preview is
   disabled. A denied page is empty and a denied stream ends. An authorized
   stream still needs the Caller to own the run to see its preview. Trusted

@@ -532,26 +532,38 @@ def hirsel_core_image(name, **kwargs):
                 exec_compatible_with = [budget_constraint(pool_budget_name(*PRECHECK_REQUEST))],
                 visibility = ["PUBLIC"], **kwargs)
 
-def _store_package_impl(ctx):
-    sources = ctx.actions.symlinked_dir("store-sources", {
-        src.basename: src
-        for src in ctx.attrs.sources
+# A toolchain package's manifest binds the other toolchain packages it uses from the
+# toolchain, as an installed package does, in place of the workspace's path bindings.
+TOOLCHAIN_BINDINGS = "sed -E 's/^(store|runner) = \\{ major = 1, path = \"[^\"]*\" \\}$/\\1 = { major = 1 }/'"
+
+def _program_sources(ctx, name, sources):
+    # Each package keeps its own directory: core/programs/<package>/<file>.
+    return ctx.actions.symlinked_dir(name, {
+        src.short_path.removeprefix("core/programs/"): src
+        for src in sources
     })
-    archive = ctx.actions.declare_output("store-1.hpkg")
+
+def _store_package_impl(ctx):
+    # The toolchain packages other than std: store@1 and runner@1, which binds store@1 from
+    # the toolchain.
+    sources = _program_sources(ctx, "store-sources", ctx.attrs.sources)
+    packages = ctx.actions.declare_output("packages", dir = True)
     scratch = ctx.actions.declare_output("scratch", dir = True)
     script = ctx.actions.write("pack.sh", [
         "set -eu",
-        'mkdir -p "$4/store"; cp "$2"/* "$4/store/"',
-        '"$1" pack "$4/store" --package-store "$4/packages" --output "$3" > /dev/null',
+        'mkdir -p "$3" "$4/store" "$4/runner"; cp -L "$2"/store/* "$4/store/"; cp -L "$2"/runner/* "$4/runner/"',
+        TOOLCHAIN_BINDINGS + ' "$2/runner/hirsel.toml" > "$4/runner/hirsel.toml"',
+        '"$1" pack "$4/store" --package-store "$4/packages" --output "$3/store-1.hpkg" > /dev/null',
+        '"$1" pack "$4/runner" --package-store "$4/packages" --output "$3/runner-1.hpkg" > /dev/null',
     ])
     ctx.actions.run(
         cmd_args("/bin/sh", script, ctx.attrs.hirsel[DefaultInfo].default_outputs[0],
-                 sources, archive.as_output(), scratch.as_output(),
+                 sources, packages.as_output(), scratch.as_output(),
                  hidden = ctx.attrs._llvm_libraries[DefaultInfo].default_outputs),
         env = {"HIRSEL_MEMORY_LIMIT": PRODUCT_MEMORY_LIMIT, "HIRSEL_JOBS": "1"},
         category = "store_package",
     )
-    return [DefaultInfo(default_output = archive)]
+    return [DefaultInfo(default_output = packages)]
 
 hirsel_store_package = rule(
     impl = _store_package_impl,
@@ -566,7 +578,7 @@ def _toolchain_bundle_impl(ctx):
     # The self-contained installation the driver discovers beside itself: the
     # compiler as `hirsel` with RPATH $ORIGIN/lib, libLLVM and the libraries it
     # loads, ld.lld and the link kit, the runtime archive for each target, and the core and std
-    # images, recorded in hirsel-core-toolchain.json, and the Store archive. The compiler copies
+    # images, recorded in hirsel-core-toolchain.json, and the store and runner archives. The compiler copies
     # itself in; a request from the bundle loads nothing outside it. The bundled compiler then
     # builds the platform host as libexec/hirsel/platform_main (docs/spec/launch.md "Starting
     # the host") and its offline pin reader as libexec/hirsel/pin_reader: their grants name the state directory as /proc/self/cwd, the directory the
@@ -585,18 +597,16 @@ def _toolchain_bundle_impl(ctx):
         '"$1" core-product --install "$root" > /dev/null',
         '"$1" std-product --install "$root" --runtime "$4" --recording-runtime "$6" --prof-runtime "$9" --prof-recording-runtime "${11}" --observed-runtime "${15}" --observed-recording-runtime "${17}" --target x86_64-unknown-linux-gnu --link-kit "$8" > /dev/null',
         '"$1" std-product --install "$root" --runtime "$5" --recording-runtime "$7" --prof-runtime "${10}" --prof-recording-runtime "${12}" --observed-runtime "${16}" --observed-recording-runtime "${18}" --target aarch64-unknown-linux-gnu > /dev/null',
-        'cp "${13}" "$root/core-packages/store-1.hpkg"',
-        'mkdir -p "$TMPDIR/store" "$root/libexec/hirsel"; cp "${14}"/* "$TMPDIR/store/"',
-        '"$root/hirsel" build "$TMPDIR/store" --entry store@1/platform_main/main --grant Clock --grant Random --grant Tasks'
+        'cp "${13}"/store-1.hpkg "${13}"/runner-1.hpkg "$root/core-packages/"',
+        'mkdir -p "$TMPDIR/platform" "$root/libexec/hirsel"; cp -L "${14}"/platform/* "$TMPDIR/platform/"',
+        TOOLCHAIN_BINDINGS + ' "${14}/platform/hirsel.toml" > "$TMPDIR/platform/hirsel.toml"',
+        '"$root/hirsel" build "$TMPDIR/platform" --entry platform@1/platform_main/main --grant Clock --grant Random --grant Tasks'
         + ' --grant "Net=UnixRoot ctl /proc/self/cwd;UnixConnect ctl launcher.sock;UnixListen ctl operator.sock"'
         + ' --dir /proc/self/cwd/catalog --limit {} -o "$root/libexec/hirsel/platform_main" > /dev/null'.format(PLATFORM_HOST_LIMIT),
-        '"$root/hirsel" build "$TMPDIR/store" --entry store@1/platform_main/read_pin --grant Clock --grant Stdout'
+        '"$root/hirsel" build "$TMPDIR/platform" --entry platform@1/platform_main/read_pin --grant Clock --grant Stdout'
         + ' --dir /proc/self/cwd/catalog --limit {} -o "$root/libexec/hirsel/pin_reader" > /dev/null'.format(PLATFORM_HOST_LIMIT),
     ])
-    store_sources = ctx.actions.symlinked_dir("store-sources", {
-        src.basename: src
-        for src in ctx.attrs.store_sources
-    })
+    platform_sources = _program_sources(ctx, "platform-sources", ctx.attrs.platform_sources)
     ctx.actions.run(
         cmd_args("/bin/sh", script, ctx.attrs.hirsel[DefaultInfo].default_outputs[0],
                  bundle.as_output(), scratch.as_output(),
@@ -610,7 +620,7 @@ def _toolchain_bundle_impl(ctx):
                  prof_recording_runtimes["x86_64"][DefaultInfo].default_outputs[0],
                  prof_recording_runtimes["aarch64"][DefaultInfo].default_outputs[0],
                  ctx.attrs.store_package[DefaultInfo].default_outputs[0],
-                 store_sources,
+                 platform_sources,
                  observed_runtimes["x86_64"][DefaultInfo].default_outputs[0],
                  observed_runtimes["aarch64"][DefaultInfo].default_outputs[0],
                  observed_recording_runtimes["x86_64"][DefaultInfo].default_outputs[0],
@@ -635,7 +645,7 @@ hirsel_toolchain_bundle = rule(
         "observed_runtimes": attrs.dep(),
         "observed_recording_runtimes": attrs.dep(),
         "store_package": attrs.dep(),
-        "store_sources": attrs.list(attrs.source()),
+        "platform_sources": attrs.list(attrs.source()),
         "_link_kit": attrs.dep(default = "root//tools/buck2/native-toolchain:kit"),
         "_llvm_libraries": attrs.dep(default = "toolchains//:llvm-libraries"),
     },

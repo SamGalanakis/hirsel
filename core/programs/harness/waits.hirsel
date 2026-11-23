@@ -8,7 +8,7 @@ pub fn cold_reader_allowed(reader: store.ReadOnly, caller: store.Caller) -> Resu
 
 // Pending decisions belong to the active run's caller. The HTTP view
 // includes only Open rows from this cover.
-pub fn pending_waits(tx: store.Tx, h: Handles, caller: store.Caller, take unused: ()) -> Result[store.runner.Cover, Capacity] {
+pub fn pending_waits(tx: store.Tx, h: Handles, caller: store.Caller, take unused: ()) -> Result[runner.Cover, Capacity] {
     let waits = store.shape(h.waits)
     let zero = first_wait(0u64)
     if reader_allowed(tx, h, caller)? {
@@ -16,13 +16,13 @@ pub fn pending_waits(tx: store.Tx, h: Handles, caller: store.Caller, take unused
             if let Some(id) = s.active_run {
                 if let Ok(Some(r)) = store.fetch(tx, store.shape(h.runs), id) {
                     if r.caller.issuer == caller.issuer && r.caller.subject == caller.subject {
-                        return store.runner.cover(waits, Included(first_wait(id)), Included(last_wait(id)))
+                        return runner.cover(waits, Included(first_wait(id)), Included(last_wait(id)))
                     }
                 }
             }
         }
     }
-    store.runner.cover(waits, Included(zero), Excluded(zero))
+    runner.cover(waits, Included(zero), Excluded(zero))
 }
 
 fn first_wait(id: u64) -> WaitKey {
@@ -66,8 +66,8 @@ pub fn pending_approvals(snap: store.Snapshot, h: Handles, caller: store.Caller)
     Ok(take pending)
 }
 
-pub fn pending_waits_entry[G: send](mut r: store.runner.Registry[G, Handles], n: u64, steps: u64) -> Result[(), store.runner.RegisterError] {
+pub fn pending_waits_entry[G: send](mut r: runner.Registry[G, Handles], n: u64, steps: u64) -> Result[(), runner.RegisterError] {
     let codec: std.codec.Codec[Wait] = std.codec.of()
-    store.runner.query_as(mut r, code.describe(pending_waits), wait_key(), codec, n, steps)
+    runner.query_as(mut r, code.describe(pending_waits), wait_key(), codec, n, steps)
 }
 

@@ -12,34 +12,34 @@ sys.path.insert(0, str(ROOT / 'core/tools'))
 from runner_tests import evaluate, manifest
 
 CONTROLS = {
-    'gone_refused_at_session': ('runner', 'store@1/runner/law_gone_slot_v5',
+    'gone_refused_at_session': ('runner', 'runner@1/runner/law_gone_slot_v5',
         'if !known && !map.contains(r.gone, want.key) { return Error(NoEntry) }',
         'if !known { return Error(NoEntry) }'),
-    'commit_then_check': ('runner', 'store@1/runner/law_reply_over_done_max',
+    'commit_then_check': ('runner', 'runner@1/runner/law_reply_over_done_max',
         'Ok(()) => if list.len(out) > DONE_MAX - 20u64 {',
         'Ok(()) => if false {'),
-    'admit_without_digest': ('store', 'store@1/runner/law_request_mismatch_wire',
+    'admit_without_digest': ('store', 'runner@1/runner/law_request_mismatch_wire',
         'if at.digest != d {', 'if false {'),
     # Superseded was deleted. Returned models its erroneous claim of completion;
     # the law requires HistoryUnavailable and unchanged store version and data.
-    'superseded_from_rejected': ('runner', 'store@1/runner/law_history_below_latest',
+    'superseded_from_rejected': ('runner', 'runner@1/runner/law_history_below_latest',
         'HistoryUnavailable => commitless(mut hd, take q, Refused(HistoryUnavailable)),',
         'HistoryUnavailable => commitless(mut hd, take q, Returned(list.new())),')
 }
 
 
 def selected(work, name, module, changed):
-    runner = (ROOT / 'core/programs/store/runner.hirsel').read_text()
+    runner = (ROOT / 'core/programs/runner/runner.hirsel').read_text()
     if module == 'runner':
         runner = changed
     adapted = work / (name + '-runner.hirsel')
-    adapted.write_text(runner + '\n' + (ROOT / 'core/programs/store/admission-laws.hirsel').read_text())
+    adapted.write_text(runner + '\n' + (ROOT / 'core/programs/runner/admission-laws.hirsel').read_text())
     path = manifest(ROOT, work, name, adapted)
     if module != 'runner':
         source = work / (name + '-' + module + '.hirsel')
         source.write_text(changed)
         description = json.loads(path.read_text())
-        next(s for s in description['packages'][-1]['sources'] if s['modules'] == [module])['file'] = str(source)
+        next(s for p in description['packages'] for s in p['sources'] if s['modules'] == [module])['file'] = str(source)
         path.write_text(json.dumps(description))
     return path
 
@@ -60,9 +60,9 @@ def main():
     with tempfile.TemporaryDirectory(prefix='wire-w3c-controls-') as directory:
         work = Path(directory)
         for module in args.syntax_control or []:
-            text = (ROOT / f'core/programs/store/{module}.hirsel').read_text()
-            law = {'runner': 'store@1/runner/law_gone_slot_v5',
-                   'store': 'store@1/runner/law_request_mismatch_wire'}[module]
+            text = (ROOT / 'core/programs' / ('store' if module == 'store' else 'runner') / f'{module}.hirsel').read_text()
+            law = {'runner': 'runner@1/runner/law_gone_slot_v5',
+                   'store': 'runner@1/runner/law_request_mismatch_wire'}[module]
             function = {'runner': 'prepare', 'ingress': 'bind', 'store': 'admit'}[module]
             header = re.search(r'\bfn ' + function + r'[^\n]*\{', text).group()
             assert text.count(header) == 1
@@ -74,7 +74,7 @@ def main():
             print('syntax-' + module + ': ' + ('REFUSED' if refused else 'NOT REFUSED'), flush=True)
         for name in names:
             module, law, old, new = CONTROLS[name]
-            text = (ROOT / f'core/programs/store/{module}.hirsel').read_text()
+            text = (ROOT / 'core/programs' / ('store' if module == 'store' else 'runner') / f'{module}.hirsel').read_text()
             assert text.count(old) == 1, (name, old)
             path = selected(work, name, module, text.replace(old, new))
             value, report = evaluate(args.evaluator.resolve(), path, law)

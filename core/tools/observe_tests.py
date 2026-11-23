@@ -40,7 +40,7 @@ def without_tests(text):
 
 
 def traced_calls(root, work):
-    text = without_tests((root / 'core/programs/store/runner_calls.hirsel').read_text())
+    text = without_tests((root / 'core/programs/runner/runner_calls.hirsel').read_text())
     text = replace(text, 'type Conn =', 'type Transport =')
     text = replace(text, 'type Drive: send {', 'type Drive: send { out: Stdout, err: Stderr,')
     text = text.replace('let d = Drive(', 'let d = Drive(out: out, err: err, ')
@@ -175,7 +175,7 @@ class CallEvaluator:
         self.cc = c_compiler(args)
 
     def __call__(self, inputs_path, definition):
-        if not definition.startswith('store@1/runner_calls/'):
+        if not definition.startswith('runner@1/runner_calls/'):
             return evaluate(self.args.evaluator, inputs_path, definition)
         with Case(f'{definition} [{inputs_path.stem}]', 'cranelift') as progress:
             return self.native(inputs_path, definition, progress)
@@ -206,7 +206,7 @@ class CallEvaluator:
                        '--source-core', '--source-std', '--backend', 'cranelift',
                        '--runtime', str(self.args.runtime.resolve()), '--cc', str(self.cc),
                        '--store', str(store), '--limit', str(64 * 1024 * 1024),
-                       '--entry', 'store@1/observe_entry/main', '-o', str(binary),
+                       '--entry', 'runner@1/observe_entry/main', '-o', str(binary),
                        '--grant', 'Stdout', '--grant', 'Stderr', '--grant', 'Clock', '--grant', 'Random', '--grant', 'Tasks',
                        '--grant', 'Net=Listen 127.0.0.0/8 0-65535;Connect 127.0.0.0/8 0-65535',
                        '--dir', str(dir_for(store))]
@@ -385,7 +385,7 @@ def identity_cases(root, evaluator, work, artifacts, coverage, unavailable):
     rows, bodies = [], 0
     selected = join_manifest(root, work, 'identity')
     for case in JOIN_CASES:
-        value, report = evaluate(evaluator, selected, 'store@1/observe_joins/law_' + case)
+        value, report = evaluate(evaluator, selected, 'runner@1/observe_joins/law_' + case)
         bodies += bool(report.get('outcome'))
         t = trace(report)
         t['header'].update(has_digest=True, has_ran=True)
@@ -419,7 +419,7 @@ def deadline_timing(root, evaluator, work, artifacts, coverage):
         *((root / f'core/programs/observe/{module}.hirsel',
            'observe_fixture' if module == 'fixture' else module) for module in modules),
         (source, 'observe_timing')])
-    value, report = evaluate(evaluator, selected, 'store@1/observe_timing/law_timing')
+    value, report = evaluate(evaluator, selected, 'runner@1/observe_timing/law_timing')
     verdicts = Codec(report.get('stderr', [])).verdicts() if value == 1 else []
     good = value == 1 and any(v['clause'] == 'J5' and v['status'] == 'Held' for v in verdicts)
     for v in verdicts:
@@ -511,7 +511,7 @@ def check_traces(evaluator, root, work, plans, name):
     m = manifest(root, work, name, extra=[
         *((root / f'core/programs/observe/{module}.hirsel', module) for module in modules),
         (source, 'observe_input')])
-    value, report = evaluate(evaluator, m, 'store@1/observe_input/check')
+    value, report = evaluate(evaluator, m, 'runner@1/observe_input/check')
     if value != 1:
         (work / (name + '-error.json')).write_text(json.dumps(report, indent=2) + '\n')
         raise ValueError(f'observer evaluation failed; see {work / (name + "-error.json")}: {report.get("error", report.get("outcome"))}')
@@ -553,7 +553,7 @@ def main():
         m = observed_manifest(root, work) if not args.identity_only else manifest(root, work, 'identity-inputs')
         cases = () if args.identity_only else (args.case or LIVE_CASES)
         for case in cases:
-            value, report = calls(m, 'store@1/runner_calls/law_' + case)
+            value, report = calls(m, 'runner@1/runner_calls/law_' + case)
             bodies += bool(report.get('outcome'))
             try:
                 t = trace(report, live=True)
@@ -591,7 +591,7 @@ def main():
                      'observe/law_closed', 'observe/law_deadline_order', 'observe/law_refusal_order',
                      'observe/law_missing_clock', 'observe_fixture/law_record')
         for case in fixtures:
-            value, report = evaluate(evaluator, m, 'store@1/' + case)
+            value, report = evaluate(evaluator, m, 'runner@1/' + case)
             bodies += bool(report.get('outcome'))
             good = value == 1
             if case == 'observe_fixture/law_record':

@@ -524,10 +524,10 @@ The v2.11.2 text is RUNNER-SPEC-v2.11.2.md.
 | 1 | A transact entry's Key does not cover E | **RULED: `result` is the type the `Returned` bytes carry** | On main the Key is identity ‖ fp(A) ‖ fp(R) (runner.hirsel:129-139). A transact reply is encoded as `Result[R, E]` (`adapt_transact`, runner.hirsel:274, `put_result` with both codecs). schema(E) reaches only `Described.error` (:304-312), and `code.identity` hashes the nominal path and type arguments, not fields (identity.rs:195-201). So changing a nominal E's fields or variants leaves the Key unchanged: a stale client gets `Ready` and misdecodes `Error(E)`. **Now:** `Described.result` and `result_fp` describe and fingerprint the type the `Returned` bytes carry, for every kind. That is `Result[R, E]` for transact, R for compute and granted, and unchanged for query. `Described.error` is removed, because `result` already holds it. The Hello entry `(identity, args_fp, result_fp)` keeps its shape. **/wholehog:** this is the clean end state. Every kind fingerprints what it actually sends; there is no extra field and no special case for transact. No consumer needs E separately: W4b's stubs already decode the whole `Result`, and E is the error arm of its schema. | W4b (source-only); orchestrator |
 
 **Knock-ons, all on main 45a42d05 unless named:**
-- `core/programs/store/runner.hirsel:15`: `Described` loses `error`.
+- `core/programs/runner/runner.hirsel:15`: `Described` loses `error`.
 - `runner.hirsel:129-139`: `described` takes no `error`, and its R is the reply type.
 - `runner.hirsel:304-312`: `transact` passes `Codec[Result[R, E]]` (`std.codec.of()`) as the result codec and drops the separate `schema(ce)`. `adapt_transact` keeps `cr` and `ce` for encoding. The bytes are the same as `of_result`'s (codec.hirsel:667-669).
-- `core/programs/store/runner_laws.hirsel:171`: the `d.error` checks go.
+- `core/programs/runner/runner_laws.hirsel:171`: the `d.error` checks go.
 - `runner_laws.hirsel:254-264`: the Described round-trip loses `error`.
 - `core/tools/runner_tests.py:147-148`: the `describe_without_schemas` mutant's match text changes.
 - W3a's vectors (be3e9ace): any vector holding `Described` or a transact `result_fp`.
@@ -562,7 +562,7 @@ The v2.11 text is RUNNER-SPEC-v2.11.md.
 
 | # | Item | Ruling | What v2.10 says | Basis |
 |---|---|---|---|---|
-| 1 | `Raised(n)` for `Tape` | **ADDED: Tape 9** | The tape lane (1037) gave `Tape` the number 8 in code, with no row here. OutOfTime has held 8 since v2.7. By the table's own rule, a new kind takes the next unused number, so `Tape` takes **9**. These are wire numbers, not core ordinals, which stay Tape 7 and OutOfTime 8. 1051's E6 moves the code to 9. No other kind is missing: FAIL-2's closed list (main 0c18d366, `docs/spec/failure.md`) has nine causes, and the table now has all nine. | §1.1; FAIL-2; `core/programs/store/runner.hirsel:64` |
+| 1 | `Raised(n)` for `Tape` | **ADDED: Tape 9** | The tape lane (1037) gave `Tape` the number 8 in code, with no row here. OutOfTime has held 8 since v2.7. By the table's own rule, a new kind takes the next unused number, so `Tape` takes **9**. These are wire numbers, not core ordinals, which stay Tape 7 and OutOfTime 8. 1051's E6 moves the code to 9. No other kind is missing: FAIL-2's closed list (main 0c18d366, `docs/spec/failure.md`) has nine causes, and the table now has all nine. | §1.1; FAIL-2; `core/programs/runner/runner.hirsel:64` |
 
 The v2.9 text is RUNNER-SPEC-v2.9.md.
 
@@ -699,7 +699,7 @@ STORE-SPEC is at v2.8: nothing in v2.8 changes the runner. The pending v2.9 item
 
 ## 0. Rules (normative)
 
-1. **The runner is a library.** Its module is `runner`, in package `store`. Core gains no runner declaration.
+1. **The runner is a library.** Its module is `runner`, in package `runner`, which binds package `store`. Core gains no runner declaration.
 2. **An entry is a top-level non-generic function registered by its `StaticFn`.** It has one of four kinds:
    - **compute:** `fn(take A) -> Result[R, Capacity]`;
    - **transact:** `fn(mut Tx, H, Caller, take A) -> Result[R, E]` (v2.15: the Caller);
@@ -833,7 +833,7 @@ The budget `n` is set per entry by the place at registration, never by the clien
 **The reply bound (v2.11, F12).** A `Returned(b)` row is encoded as `Done{stream, p, outcome}`: 20 B (stream 4, p 8, Outcome tag 4, Bytes count 4) plus |b|. A reply with |b| > `DONE_MAX − 20` is never sent. It is answered `Failed(OutOfBytes(Room{requested: |b|, available: DONE_MAX − 20}))` instead:
 - **transact:** the check is inside the entry's transaction, before commit. The transaction aborts with no effect, and the head commits the `Failed` reply-only, as for any `Failed` (H2). On the reply-kept-alone path (`Error(E)`), the over-bound `Error` reply is replaced by the same `Failed`, which is kept alone.
 - **compute and granted:** the owner (compute) or the entry's task (granted) checks the encoded reply; nothing is recorded.
-- A recorded reply never exceeds `DONE_MAX`, because `DONE_MAX` changes only with package `store`. So `Duplicate(r)` always fits.
+- A recorded reply never exceeds `DONE_MAX`, because `DONE_MAX` changes only with package `runner`. So `Duplicate(r)` always fits.
 
 **Sends and their Outcomes (v2.5).** Outcome rows carry `(stream, p)`, not a send identity, so the client counts: it holds n open sends of `(stream, p)`, and each row for `(stream, p)` closes one. Since every send of one position is the same request, rows for that position are interchangeable, except `Abandoned`, which the client matches to the send whose deadline it set to pass first. Example: send A (deadline 2 ms) and send B (50 ms) of p on a held head. A gets `Abandoned` at 2 ms. If the head answers at 10 ms, B gets that answer. If it answers at 60 ms, B got `Abandoned` at 50 ms and the answer goes to no one.
 
@@ -1381,7 +1381,7 @@ Each slice is final when it lands, and later slices only add.
 | D3 | Typed error | one commit / two commits | one commit (ACCEPTED as STORE-SPEC F2) | one commit |
 | D4 | Principals and limits | anon only / JWT | anon in rung 1; the numbers are Sam's. **v2.24: superseded by D9.** The runner mints no principal; JWT or any other scheme is an application binding | — |
 | D5 (RULED (a) 2026-11-16, gavel 5; v2.7: MEM-30 `bound steps`, per-entry `s`, `DEFAULT_STEPS`) | A transact body or a query that never returns | (a) core's step bound (MEM-30), `OutOfTime` already declared; (b) ship R1 without it: a body that never yields stops the single worker, so the whole process stops (every session, the head, the publisher) until a watchdog restarts it (v2.4 corrects v2.2, which said sessions keep answering under (b)) | **(a)**; R1 is not blocked, but L7/deadline_hung can be stated and tested only under (a) | (a) is the end state |
-| D6 | Where `runner` lives | package `store` | module `runner` in package `store` | one package |
+| D6 | Where `runner` lives | package `store` | module `runner` in package `store`; since cs-store-split-1935, module `runner` in its own package `runner`, which binds `store` | one package, then split so store users do not compile the runner |
 | D8 (v2.15, v2.19) | What decides a Caller's access to rows | (a) one policy per place, run by the runner, body narrowed to its scope (v2.15 to v2.18); (b) a policy per entry; **(c)** each body reads its own tables with the Caller and refuses in code (Convex); (d) a declarative row filter (SpacetimeDB RLS) | **(c)**, RULED by Sam on 2026-11-19 (ruling C). Access checks are ordinary reads, so they are in the transaction or the read set, and the release check (§3) keeps a removed grant from releasing queued content. (d) is a rule language, which ENDSTATE rules out | (c): no second mechanism beside ordinary code and read sets |
 | D9 (v2.24, RULED R6 by Sam on 2026-11-21) | How a wire call gets authority, and who authenticates | (a) **a copied `G: plain + send` per call; the application binds the Caller** ; (b) one movable `G` consumed by the first call; (c) a shareable `Arc[G]` or a badge per Caller (DROPPED, D3: never to be proposed again); (d) runner-side token checks or policy (DROPPED) | **(a)**. A movable `G` stays trigger-only and never reaches the wire. The runner has no authentication or authorization (rule 13) | (a): authority is a plain value passed like any other argument; access is ordinary application code |
 | D7 (new) | Where compute entries run, given that each needs a Registry | **(a)** each session runs `place` and holds its own Registry (495 B per entry, built; 0.9 ms per connection at 1,000 entries, probe); **(b)** a pool of k compute tasks, each with one Registry, shared by all sessions | **(a)**: the Registry is in the session's account, so memory is bounded per session, and no compute request waits in a queue shared with other sessions. (b) bounds Registry memory by k instead of by connections, at the price of a cross-session queue. v2.4: hang isolation was no argument on the single-worker runtime; v2.7: with D5 (a) built a hung body stops only its own call, so it favours (a). | (a) treats compute like the head treats transact: one account per caller. Revisit only if a place has thousands of entries and thousands of sessions (1,000 × 1,000 ≈ 500 MB). |
@@ -1666,7 +1666,7 @@ pub fn end(take f: Fixture, within_ms: u64) -> Result[Ended, FixtureError] waits
 
 ## 14. Cold places under the platform host (new in v2.26)
 
-A place run by the platform host (docs/spec/launch.md "Platform host and launcher") is **cold by default**: it runs only while it has work, and the host starts it again when work comes. This section is the wake contract between the two. The runner's idle stop and child report, the launcher's side of §14.3-§14.5 (`hirsel launcher`, launch.md "The launcher"), and the platform host (`core/programs/store/platform.hirsel`, `platform_main.hirsel`, `local.hirsel`) are **built**. In-process places run under the same host (§14.9).
+A place run by the platform host (docs/spec/launch.md "Platform host and launcher") is **cold by default**: it runs only while it has work, and the host starts it again when work comes. This section is the wake contract between the two. The runner's idle stop and child report, the launcher's side of §14.3-§14.5 (`hirsel launcher`, launch.md "The launcher"), and the platform host (`core/programs/platform/platform.hirsel`, `platform_main.hirsel`, `local.hirsel`) are **built**. In-process places run under the same host (§14.9).
 
 The rule in one line: a place that a commit has given a future trigger is woken for it, and the host can always tell, from one durable row per place, whether it knows the place's next due time or must start the place to find out.
 

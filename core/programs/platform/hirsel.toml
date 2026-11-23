@@ -1,0 +1,51 @@
+[package]
+name = "platform"
+major = 1
+charge = "charge-v1"
+
+[dependencies]
+std = { major = 1 }
+store = { major = 1, path = "../store" }
+runner = { major = 1, path = "../runner" }
+
+[sources]
+"platform.hirsel" = "platform"
+"platform-preview.hirsel" = "platform"
+"platform-groups.hirsel" = "platform"
+"launcher.hirsel" = "launcher"
+"operator.hirsel" = "operator"
+"platform_main.hirsel" = "platform_main"
+"local.hirsel" = "local"
+"local-api.hirsel" = "local"
+
+[tests]
+limit = 67108864
+grants = ["Clock", "Random", "Tasks", "Env=HIRSEL_TEST_SIM_SEED", "Net=Listen 127.0.0.0/8 0-65535;Connect 127.0.0.0/8 0-65535"]
+dirs = ["."]
+
+[tests.sources]
+"local-laws.hirsel" = "local_laws"
+"launcher_wire.hirsel" = "launcher"
+"operator_wire.hirsel" = "operator"
+"platform_laws.hirsel" = "platform"
+"platform_source_laws.hirsel" = "platform"
+"platform_preview_laws.hirsel" = "platform"
+
+[tests.runs."platform@1/local_laws/test_local_genesis_recovers"]
+limit = 134217728
+
+# The place budget and the host's own catalog store.
+[tests.runs."platform@1/local_laws/test_local_one_head"]
+limit = 134217728
+
+# The place budget and the host's own catalog store.
+[tests.runs."platform@1/local_laws/test_local_route_during_unload"]
+limit = 134217728
+
+# The place budget and the host's own catalog store.
+[tests.runs."platform@1/local_laws/test_local_idle_unload"]
+limit = 134217728
+
+# The place budget and the host's own catalog store.
+[tests.runs."platform@1/local_laws/test_local_reopen_keeps"]
+limit = 134217728

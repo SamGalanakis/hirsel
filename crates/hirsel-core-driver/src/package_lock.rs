@@ -98,19 +98,16 @@ fn make_rows(resolution: &Resolution) -> Rows {
             },
         );
     }
-    if resolution.toolchain_store {
+    for id in &resolution.toolchain {
         rows.insert(
-            Id {
-                name: "store".into(),
-                major: 1,
-            },
+            id.clone(),
             Row {
                 root: None,
                 source: "toolchain".into(),
-                edges: vec![Id {
-                    name: "std".into(),
-                    major: 1,
-                }],
+                edges: crate::package_content::toolchain_bindings(id)
+                    .expect("a resolved toolchain package is supplied")
+                    .into_keys()
+                    .collect(),
             },
         );
     }

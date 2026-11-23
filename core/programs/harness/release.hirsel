@@ -186,7 +186,7 @@ fn tree_of(tx: store.Tx, t: Tables) -> Result[(Bytes, u64), store.Error] {
     let mut size = 4u64
     while let Some((path, text)) = store.next_range(mut rows)? {
         size += 8u64 + string.byte_len(path) + string.byte_len(text)
-        if size > store.launcher.TREE_BYTES {
+        if size > platform.launcher.TREE_BYTES {
             return Error(Limit(Value))
         }
         hash_file(mut hash, path, text)
@@ -285,13 +285,13 @@ pub type DevSettlement: codec + send { id: Bytes, decision: DevDecision }
 pub type FiledProposal: codec + send { id: Bytes, proposal: Proposal }
 
 // The development gateway delegates release decisions to the session's readers.
-pub fn dev_proposals(tx: store.Tx, h: harness.Handles, caller: store.Caller, take unused: ()) -> Result[store.runner.Cover, Capacity] {
+pub fn dev_proposals(tx: store.Tx, h: harness.Handles, caller: store.Caller, take unused: ()) -> Result[runner.Cover, Capacity] {
     let t = tables(store.tx_schema(tx)) ?=> |_| read_failed()
     let shape = store.shape(t.proposals)
     if harness.reader_allowed(tx, h, caller)? {
-        return store.runner.cover(shape, Unbounded, Unbounded)
+        return runner.cover(shape, Unbounded, Unbounded)
     }
-    store.runner.cover(shape, Included(list.new()), Excluded(list.new()))
+    runner.cover(shape, Included(list.new()), Excluded(list.new()))
 }
 
 pub fn dev_settle[G: send](mut tx: store.Tx, h: harness.Handles, caller: store.Caller, a: harness.Agent[G], w: harness.Wiring, take ask: DevSettlement) -> Result[harness.Filed, harness.Refused] {
@@ -309,19 +309,19 @@ pub fn dev_settle[G: send](mut tx: store.Tx, h: harness.Handles, caller: store.C
 
 // WIRE query bodies. An app's query_as entries authorize the Caller before forwarding.
 // Each Cover is published against the same transaction snapshot as the scan that chose it.
-pub fn pending_cover(tx: store.Tx, t: Tables) -> Result[store.runner.Cover, Capacity] {
+pub fn pending_cover(tx: store.Tx, t: Tables) -> Result[runner.Cover, Capacity] {
     let shape = store.shape(t.proposals)
     let mut rows = store.range(tx, shape, Unbounded, Unbounded) ?=> |_| read_failed()
     while let Some((id, proposal)) = store.next_range(mut rows) ?=> |_| read_failed() {
         if let Filed = proposal.state {
-            return store.runner.cover(shape, Included(clone(id)), Included(clone(id)))
+            return runner.cover(shape, Included(clone(id)), Included(clone(id)))
         }
     }
-    store.runner.cover(shape, Included(list.new()), Excluded(list.new()))
+    runner.cover(shape, Included(list.new()), Excluded(list.new()))
 }
 
 // Publish one source row per WIRE query, so a full tree need not fit in one batch.
-pub fn source_cover(tx: store.Tx, t: Tables, after: Option[String]) -> Result[store.runner.Cover, Capacity] {
+pub fn source_cover(tx: store.Tx, t: Tables, after: Option[String]) -> Result[runner.Cover, Capacity] {
     let shape = store.shape(t.files)
     let low: store.Bound[String] = match after {
         Some(path) => Excluded(string.from(path)),
@@ -329,9 +329,9 @@ pub fn source_cover(tx: store.Tx, t: Tables, after: Option[String]) -> Result[st
     }
     let mut rows = store.range(tx, shape, low, Unbounded) ?=> |_| read_failed()
     if let Some((path, _)) = store.next_range(mut rows) ?=> |_| read_failed() {
-        return store.runner.cover(shape, Included(string.from(path)), Included(string.from(path)))
+        return runner.cover(shape, Included(string.from(path)), Included(string.from(path)))
     }
-    store.runner.cover(shape, Included(""), Excluded(""))
+    runner.cover(shape, Included(""), Excluded(""))
 }
 
 fn read_failed() -> Capacity { Capacity(requested: 1u64, available: 0u64) }

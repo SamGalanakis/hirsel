@@ -3,7 +3,7 @@
 
 // With `releases`, the store also has the release module's tables.
 fn answered_with(dir: Dir, clock: Clock, random: Random, tasks: Tasks, releases: bool, take call: harness.Call) -> store.Db waits {
-    let mut db = result.unwrap(store.open(tasks, dir, clock, random, store.triggers.law_options()))
+    let mut db = result.unwrap(store.open(tasks, dir, clock, random, runner.triggers.law_options()))
     if releases {
         result.unwrap(store.run_migration(mut db, tasks, code.describe(release_migrate)))
     } else {

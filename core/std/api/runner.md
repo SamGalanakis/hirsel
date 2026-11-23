@@ -1,12 +1,13 @@
 # Runner
 
-Package `store`, module `runner`, implements RUNNER-SPEC v2.32: the entries
+Package `runner`, module `runner`, implements RUNNER-SPEC v2.32: the entries
 of a place, as a library over v1 (reserved R13), including `Registry[G, H]`, `compute`,
 `granted`, `transact`, `query`/`query_as`, `describe`, `operate`, wire serving, triggers,
 and cold-wake/deploy lifecycles.
 
-To use `store.runner`, add `store = { major = 1 }` under `[dependencies]` in
-`hirsel.toml`. The installed Hirsel toolchain supplies the package.
+To use `runner`, add `runner = { major = 1 }` under `[dependencies]` in
+`hirsel.toml`. The installed Hirsel toolchain supplies the package and the
+`store@1` it binds.
 
 ## No authentication, no authorization
 
@@ -265,9 +266,9 @@ run, so a scenario's second crash is not covered. The gone case is not built yet
 
 `place(mut r)` is the user's function that registers every entry. An owning
 closure is never shareable, so every task that runs entries runs `place` itself.
-Laws and cases: `core/programs/store/runner_laws.hirsel` (R0),
-`core/programs/store/runner_calls.hirsel` (R1) and
-`core/programs/store/runner_crash.hirsel` (R1b, native only), run by
+Laws and cases: `core/programs/runner/runner_laws.hirsel` (R0),
+`core/programs/runner/runner_calls.hirsel` (R1) and
+`core/programs/store-crash/runner_crash.hirsel` (R1b, native only), run by
 `core/tools/runner_tests.py` on the evaluator: R1 in `//:core-runner-r1`, and R0 and R1b in `//:core-runner-r0`.
 Natively they run with the rest of the store package under
 `hirsel test core/programs/store` (`//:core-store-s1`); `runner_tests.py`
@@ -275,7 +276,7 @@ keeps the native cases that test cannot express.
 The hand-derived `frame_vectors` law and its `tag_order`, `complete_omitted` and
 `refusal_tag_inserted` mutants run with R0, or alone with
 `//:core-runner-wire`. The byte
-fixtures in `core/programs/store/frame-vectors.json` are frozen against
+fixtures in `core/programs/runner/frame-vectors.json` are frozen against
 RUNNER-SPEC v2.11.4's R2 contract and Outcome/Refusal tags, including F9-F12.
 
 WIRE W3b uses reader-funded decoded frames. With payload cap m and q queued

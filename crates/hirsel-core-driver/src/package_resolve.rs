@@ -11,7 +11,8 @@ type Declarations = BTreeMap<Root, (Id, SourceLocation)>;
 pub(crate) struct Resolution {
     pub(crate) workspace: Workspace,
     pub(crate) libraries: Libraries,
-    pub(crate) toolchain_store: bool,
+    /// The toolchain packages other than std that the workspace's closure binds.
+    pub(crate) toolchain: BTreeSet<Id>,
     pub(crate) published: BTreeMap<Id, Root>,
     pub(crate) store: PackageStore,
     declarations: Declarations,
@@ -297,27 +298,31 @@ impl Resolution {
         }
 
         let paths = best_paths(&workspace, &libraries);
-        let store_id = Id {
-            name: "store".into(),
-            major: 1,
-        };
-        let toolchain_store = workspace
+        let bound = workspace
             .members
             .values()
-            .any(|member| matches!(member.edges.get(&store_id), Some(Edge::Toolchain)))
-            || libraries
-                .values()
-                .any(|library| library.content.bindings.get(&store_id) == Some(&None));
-        if toolchain_store
-            && (workspace.members.contains_key(&store_id)
-                || incoming(&workspace, &libraries)
+            .flat_map(|member| {
+                member
+                    .edges
                     .iter()
-                    .any(|(id, _)| id == &store_id))
-        {
-            return Err(
-                "store@1 is bound both to the toolchain and to a member or published library"
-                    .into(),
-            );
+                    .filter_map(|(id, edge)| matches!(edge, Edge::Toolchain).then_some(id))
+            })
+            .chain(libraries.values().flat_map(|library| {
+                library
+                    .content
+                    .bindings
+                    .iter()
+                    .filter_map(|(id, root)| root.is_none().then_some(id))
+            }));
+        let toolchain = crate::package_content::toolchain_closure(bound);
+        let published = incoming(&workspace, &libraries);
+        if let Some(id) = toolchain.iter().find(|id| {
+            workspace.members.contains_key(id) || published.iter().any(|(bound, _)| bound == *id)
+        }) {
+            return Err(format!(
+                "{id} is bound both to the toolchain and to a member or published library"
+            )
+            .into());
         }
         let mut all = BTreeMap::<Id, BTreeSet<Root>>::new();
         for (id, root) in incoming(&workspace, &libraries) {
@@ -326,7 +331,7 @@ impl Resolution {
         let mut resolution = Self {
             workspace,
             libraries,
-            toolchain_store,
+            toolchain,
             store,
             declarations: declared,
             published: BTreeMap::new(),

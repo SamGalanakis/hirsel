@@ -12,6 +12,7 @@ import re
 import socket
 import struct
 import subprocess
+import sys
 import tempfile
 
 BODY = 8 * 1024 * 1024
@@ -221,6 +222,42 @@ def profile(args, work, results):
                                           ns=ns, profile=str(path.resolve()))), file=results, flush=True)
 
 
+def owned_by(pid, peer):
+    """Whether the client end of the accepted loopback connection `peer` is a
+    socket held by process `pid`."""
+    remote, local = peer.getpeername(), peer.getsockname()
+    ends = [f"{struct.unpack('<I', socket.inet_aton(host))[0]:08X}:{port:04X}" for host, port in (remote, local)]
+    with open("/proc/net/tcp") as table:
+        inode = next((row[9] for row in map(str.split, table) if row[1:3] == ends), None)
+    if inode is None:
+        return False
+    target = f"socket:[{inode}]"
+    for fd in os.listdir(f"/proc/{pid}/fd"):
+        try:
+            if os.readlink(f"/proc/{pid}/fd/{fd}") == target:
+                return True
+        except FileNotFoundError:
+            pass
+    return False
+
+
+def accept_from(listener, pid):
+    """The next connection the process `pid` made. Any other local process may
+    connect to a fresh loopback listener (some agents probe every one they
+    see); such a connection is logged and closed, never read as the client's."""
+    while True:
+        peer, address = listener.accept()
+        if owned_by(pid, peer):
+            return peer
+        with peer:
+            peer.settimeout(0.1)
+            try:
+                head = peer.recv(80)
+            except OSError:
+                head = b""
+        print(f"skipped a connection from {address} not made by the client: {head!r}", file=sys.stderr, flush=True)
+
+
 def acknowledge_put(peer):
     head = bytearray()
     while len(head) < len(PUT_START):
@@ -229,7 +266,7 @@ def acknowledge_put(peer):
             break
         head.extend(chunk)
     if head != PUT_START:
-        raise RuntimeError(f"peer received {len(head)}/{len(PUT_START)} bytes before PUT acknowledgement")
+        raise RuntimeError(f"peer received {len(head)}/{len(PUT_START)} bytes before PUT acknowledgement, not the PUT start: {bytes(head)!r}")
     peer.sendall(b"x")
     # Leave the connection open without reading any more of the body.
 
@@ -254,7 +291,7 @@ def abort_trials(args, work, results):
                         for trial in range(args.samples):
                             if not args.check:
                                 timing_window()
-                            peer, _ = listener.accept()
+                            peer = accept_from(listener, process.pid)
                             with peer:
                                 peer.settimeout(10)
                                 acknowledge_put(peer)

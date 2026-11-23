@@ -412,68 +412,67 @@ so a place has no store numbers to choose. `Overrides` holds an `Option` per fig
 and each `Some` replaces the derived value. The result must still fit `share`. A
 `Shortage { need, have, parts }` names every part of the requirement with its bytes,
 so the diagnostic shows which figure to raise. There are no named profiles.
+A store with a Tiered collection carves its cache, writer pins, dirty bytes and pager
+state out of `resident_limit` by one equation (STORE-SPEC v2.60 §1.1 "The Tiered
+plan"); a store without one reserves none of them.
 
 ## Projectors: durable derived state from `changes`
 
 A **projector** keeps derived state, such as a search index, embeddings or a
-cross-place projection, current with a source table. It tails source commits through
-`changes_page`. It writes its derived rows and its cursor in **one** transaction of
-the derived store, so after a crash the derived state is either fully at the cursor or
-not written at all (STORE-SPEC v2.57 §1.14).
+cross-place projection, current with a source table. It reads source changes through
+`changes_page` and writes derived rows and its cursor row in **one** transaction of
+the derived store. Readers see one complete **image** at a time: never a half-applied
+pass (STORE-SPEC v2.60 §1.14).
 
 ```hirsel
-pub type Projection: codec { generation: u32, applied: u64, target: u64, resume: Option[Bytes], retiring: Option[u32] }
+pub type Binding: codec { store: StoreId, branch: u32, table: u32 }
+pub type Image: codec { generation: u32, position: u64, slot: u8 }
+pub type Pass: codec { generation: u32, target: u64, resume: Option[Bytes] }
+pub type Projection: codec { binding: Option[Binding], image: Option[Image], pass: Option[Pass],
+        retiring: Option[u32], next: u32, again: bool }
 pub type Source = Local | Follower(Follower)
-pub opaque type Projector[K, V]          // not send: the source handle, the Projection's table, the base Snapshot, the pass's target Snapshot
-pub type Stepped = Applied(u64) | Passed(u64) | Rebuilt(u32) | Idle   // rows applied; a pass completed at a version; a new generation; nothing to do
-pub type ProjectError[E] = Store(Error) | Apply(E)
-pub fn projector[K, V](mut d: Declare, name: String, source: Table[K, V], from: Source) -> Result[Projector[K, V], Error]
-pub fn step[K, V, E](mut p: Projector[K, V], mut db: Db, r: Reader, limits: Limits,
-        apply: scoped[view] fn(mut Tx, u32, K, Option[V]) -> Result[(), E]) -> Result[Stepped, ProjectError[E]] waits
+pub opaque type ProjectionDecl: shareable + inert + send
+pub opaque type Projector[K, V]          // not send
+pub type Delta[K, V] { generation: u32, at: u64, key: K, value: Option[V] }
+pub type Fold[E: inert, K, V, A] { env: E, apply: fn(mut Tx, E, Delta[K, V]) -> Result[(), A], drop: fn(mut Tx, E, u32, Limits) -> Result[bool, A] }
+pub type Stepped = Updated(u64) | Paged(u64) | Published(u64) | Dropped(u32) | Reloaded | Idle
+pub type ProjectError[A] = Store(Error) | Apply(A)
+pub fn projection(mut d: Declare, name: String) -> Result[ProjectionDecl, Error]
+pub fn projector[K, V](decl: ProjectionDecl, source: Table[K, V], from: Source, r: Reader) -> Projector[K, V]
+pub fn step[K, V, E: inert, A](mut p: Projector[K, V], mut db: Db, limits: Limits, fold: Fold[E, K, V, A]) -> Result[Stepped, ProjectError[A]] waits
 pub fn rebuild[K, V](mut p: Projector[K, V], mut db: Db) -> Result[Ticket, Error] waits
-pub fn retire_page[K, V](mut p: Projector[K, V], mut db: Db, limits: Limits,
-        drop: scoped[view] fn(mut Tx, u32, Limits) -> Result[bool, Error]) -> Result[bool, Error] waits
+pub fn binding[K, V](source: Table[K, V], b: Branch) -> Binding
+pub fn live(row: Projection, b: Binding) -> Option[u32]
 ```
 
-- **The cursor.** `projector` declares the reserved table
-  `hirsel.projections: Table[String, Projection]` in the derived store and binds the
-  row `name`. The derived store is `db`. `Local` means the source table is in `db`
-  itself. `Follower(f)` means the source is another store, read through its M2
-  follower.
-- **A step.** The step takes the base snapshot B and the pass's target T (the newest
-  source snapshot when the pass began), and reads one page of
-  `changes_page(B, T, source span, after resume, limits)`. In one `run` on `db` it calls
-  `apply(tx, generation, k, value)` for each change, a deletion being `None`, and then
-  writes the Projection with `resume` set to the page's next key. At the last page it
-  writes `applied = T.version` and `resume = None`. A pass begun after a restart
-  resumes at the stored `resume` only when its T is the stored `target`; with a newer
-  T it starts again at the first key, because the keys below `resume` were applied
-  at the old target's values. If the body returns `Error(e)`,
-  nothing commits and `step` returns `Apply(e)` with the cursor unchanged.
-- **The apply contract: idempotent per key.** `apply` must leave the derived state
-  determined by (generation, k, value) alone. Applying a change that the state already
-  reflects changes nothing. A derived aggregate keeps each key's contribution in a
-  derived row keyed by k, and replaces it. That is why a base older than the cursor is
-  safe: re-applying a change is a no-op.
-- **The base.** For `Local`, the base is the pin `hirsel.projector.<name>`. It moves to T
-  only after the transaction that sets `applied = T.version` is durable. A crash
-  between the two leaves the older pin, and the next pass re-applies from it. For
-  `Follower`, the base is the newest retained checkpoint at or below `applied`
-  (`follower_floor`, STORE-SPEC §12.5). A missing base (`Reclaimed`, a dropped pin)
-  starts a rebuild, and the step reports `Rebuilt(g)`.
-- **A lost target.** A pass's target lives in memory. After a restart, the pass resumes
-  only if its new target is the stored `target`; otherwise it begins again at its first
-  key with the new target and the same base, and every re-applied key is a no-op.
-- **Rebuild.** `rebuild` commits `{generation + 1, applied: 0, resume: None, retiring:
-  Some(old)}`. From then on the base is the empty snapshot, so a pass is the whole source
-  at T, read in pages. A full rebuild never builds a list larger than one page. Derived
-  tables key their rows by generation. Readers read the **live generation** from the
-  cursor row: `generation` once `applied` > 0, and `retiring` while the rebuild's first
-  pass is open, so no reader sees a half-built generation. `retire_page` deletes one
-  bounded page of the retiring generation through `drop`, only once `applied` > 0, and
-  clears `retiring` when it returns `false`.
-- **Outside effects.** An `apply` that calls out (an embedding API, an LLM, another
-  place) runs at least once per change and may run again after a crash or a lost
-  target. Make such effects idempotent, for example by keying them by
-  (generation, k, value digest).
-- Laws: L72 `projector_converges`, L73 `projector_bounded` (STORE-SPEC v2.57 §1.14).
+- **Declare, then make the handle.** `projection` declares the reserved table
+  `hirsel.projections` in the derived store's `Declare` and returns a shareable, inert
+  declaration that can live in a place's H. `projector` makes the task-local handle from
+  it, the source Table (in `db` for `Local`, read through an M2 follower for `Follower`)
+  and a Reader.
+- **The row binds its source.** The row records the source's StoreId, branch and table
+  id. A handle on another source retires the image and rebuilds, and `live` returns None
+  until then. Each commit re-reads the row and writes nothing if it changed since the
+  step loaded it (`Reloaded`), so two handles never overwrite each other.
+- **One published image.** `live(row, binding(source, b))` names the image's generation,
+  or None before the first publish or when the row is bound to another source. A reader
+  keeps the declaration and the source Table in its inert env and reads the row and the
+  derived rows in one snapshot.
+- **A step** does one thing: if the source has changed since the image and one page
+  holds every change, it applies them to the image's generation in one commit
+  (`Updated`); otherwise it builds a new generation from the empty snapshot in pages
+  (`Paged`) and its last page publishes it whole (`Published`); or it drops one page of
+  a retired generation (`Dropped`). A source with no net change returns `Idle` with no
+  commit. A diff is only ever taken from the exact source version the image holds; when
+  that version can no longer be read, the step rebuilds.
+- **`apply` and `drop`** are plain functions with an `inert` `env`, like every `run`
+  body, because the store may abort and rerun a body. `apply` must leave the derived
+  state determined by (generation, key, value).
+- **Rebuild.** `rebuild` records a request; requests made while a build is running
+  give one more build after it publishes.
+- **Outside effects.** A body cannot call out. Write an outbox row in `apply`, keyed by
+  (binding, generation, `at`, key), and have a separate worker call out and delete the
+  row once acknowledged: delivery is at least once, and the receiver deduplicates by
+  that key. A projector delivers net changes; to see every event, tail an append-only
+  table or Log keyed by sequence.
+- Laws: L72 `projector_converges`, L73 `projector_bounded` (STORE-SPEC v2.60 §1.14).

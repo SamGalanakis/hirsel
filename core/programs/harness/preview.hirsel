@@ -1,0 +1,338 @@
+// Ephemeral gateway preview. Each read has a one-slot reply mailbox. The hub
+// retains the latest bounded draft per active dispatch while it has an observer.
+pub type Key: codec + key + send {
+    dispatch: store.triggers.Id,
+    run: u64,
+    entry: u64,
+    tool: Option[u64],
+    attempt: u64,
+}
+
+pub type Draft: codec + send {
+    key: Key,
+    seq: u64,
+    produced_ns: u64,
+    text: String,
+}
+
+type Input: send = Start(String, store.Caller, Key, Receiver[()]) | Delta(Key, u64, u64, String) | Attach(String, store.Caller, Receiver[()], Sender[u64]) | Detach(u64) | Revoke(String, store.Caller, Sender[()]) | Read(u64, Sender[Option[Draft]]) | Stop
+
+pub opaque type Door: send {
+    to: Sender[Input],
+    text_bytes: u64
+}
+
+pub opaque type Hub {
+    door: Door,
+    actor: Task[()]
+}
+
+pub opaque type Target: send {
+    door: Door,
+    group: String,
+    clock: Clock
+}
+
+pub opaque type Source: send {
+    door: Door,
+    lease: Sender[()],
+    key: Key,
+    seq: u64,
+    clock: Clock
+}
+
+pub opaque type Observer {
+    door: Door,
+    lease: Sender[()],
+    id: u64
+}
+
+type Active {
+    group: String,
+    caller: store.Caller,
+    key: Key,
+    live: Receiver[()],
+    seq: u64,
+    produced_ns: u64,
+    text: String,
+    changed: u64,
+}
+
+type Watching {
+    group: String,
+    caller: store.Caller,
+    id: u64,
+    live: Receiver[()]
+}
+
+fn open(live: Receiver[()]) -> bool {
+    match channel.try_receive(live) {
+        Error(Empty) => true,
+        _ => false
+    }
+}
+
+fn same_caller(a: store.Caller, b: store.Caller) -> bool {
+    a.issuer == b.issuer && a.subject == b.subject
+}
+
+fn audience(watching: List[Watching], group: String, caller: store.Caller) -> bool {
+    for w in watching {
+        if w.group == group && same_caller(w.caller, caller) && open(w.live) {
+            return true
+        }
+    }
+    false
+}
+
+fn remove_at[T](mut xs: List[T], i: u64) {
+    let last = list.len(xs) - 1u64
+    if i != last {
+        list.swap(mut xs, i, last)
+    }
+    let _ = list.pop(mut xs)
+}
+
+fn prune(mut active: List[Active], mut watching: List[Watching], detached: Option[u64]) {
+    let mut i = 0u64
+    while i < list.len(watching) {
+        if detached == Some(watching[i].id) || !open(watching[i].live) {
+            remove_at(mut watching, i)
+        } else {
+            i += 1u64
+        }
+    }
+    let mut j = 0u64
+    while j < list.len(active) {
+        if !open(active[j].live) {
+            remove_at(mut active, j)
+        } else {
+            if !audience(watching, active[j].group, active[j].caller) {
+                active[j].text = string.new()
+                active[j].changed = 0u64
+            }
+            j += 1u64
+        }
+    }
+}
+
+fn revoke_watchers(mut watching: List[Watching], group: String, caller: store.Caller) {
+    let mut i = 0u64
+    while i < list.len(watching) {
+        if watching[i].group == group && same_caller(watching[i].caller, caller) {
+            remove_at(mut watching, i)
+        } else {
+            i += 1u64
+        }
+    }
+}
+
+fn same_entry(a: Key, b: Key) -> bool {
+    a.run == b.run && a.entry == b.entry && a.tool == b.tool
+}
+
+fn starts(mut active: List[Active], take group: String, take caller: store.Caller, key: Key, take live: Receiver[()]) {
+    let mut i = 0u64
+    while i < list.len(active) {
+        let old = active[i].key
+        if active[i].group != group || !same_entry(old, key) {
+            i += 1u64;
+            continue
+        }
+        if old.dispatch == key.dispatch && old.attempt >= key.attempt {
+            return
+        }
+        if old.dispatch.store_hi == key.dispatch.store_hi && old.dispatch.store_lo == key.dispatch.store_lo {
+            if old.dispatch.version > key.dispatch.version || (old.dispatch.version == key.dispatch.version && old.dispatch.index > key.dispatch.index) {
+                return
+            }
+        }
+        remove_at(mut active, i)
+    }
+    list.push(mut active, Active(group: take group, caller: take caller, key: key, live: take live, seq: 0u64, produced_ns: 0u64, text: string.new(), changed: 0u64))
+}
+
+fn on_delta(mut active: List[Active], watching: List[Watching], limit: u64, changed: u64, key: Key, seq: u64, produced: u64, take text: String) {
+    for i in 0u64 .. list.len(active) {
+        if active[i].key != key || !open(active[i].live) {
+            continue
+        }
+        if active[i].seq >= seq || !audience(watching, active[i].group, active[i].caller) {
+            return
+        }
+        let added = string.byte_len(text)
+        if seq != active[i].seq + 1u64 || string.byte_len(active[i].text) + added > limit {
+            active[i].text = string.new()
+        }
+        active[i].seq = seq
+        active[i].produced_ns = produced
+        active[i].changed = changed
+        string.push(mut active[i].text, text)
+        return
+    }
+}
+
+fn draft_for(active: List[Active], watching: List[Watching], id: u64) -> Option[Draft] {
+    for w in watching {
+        if w.id != id {
+            continue
+        }
+        let mut newest = 0u64
+        let mut at: Option[u64] = None
+        for i in 0u64 .. list.len(active) {
+            let a = view active[i]
+            if a.group == w.group && same_caller(a.caller, w.caller) && a.changed > newest && open(a.live) {
+                newest = a.changed
+                at = Some(i)
+            }
+        }
+        let Some(i) = at else {
+            return None
+        }
+        let a = view active[i]
+        return Some(Draft(key: a.key, seq: a.seq, produced_ns: a.produced_ns, text: string.from(a.text)))
+    }
+    None
+}
+
+fn receive_all(take job: (Receiver[Input], u64)) -> () waits {
+    let (take inbox, limit) = take job
+    let mut active: List[Active] = list.new()
+    let mut watching: List[Watching] = list.new()
+    let mut next = 0u64
+    let mut changed = 0u64
+    while let Ok(take input) = channel.receive(inbox) {
+        match take input {
+            Start(take group, take caller, key, take live) => {
+                prune(mut active, mut watching, None)
+                starts(mut active, take group, take caller, key, take live)
+            },
+            Delta(key, seq, produced, take text) => {
+                changed += 1u64
+                on_delta(mut active, watching, limit, changed, key, seq, produced, take text)
+            },
+            Attach(take group, take caller, take live, reply) => {
+                prune(mut active, mut watching, None)
+                next += 1u64
+                list.push(mut watching, Watching(group: take group, caller: take caller, id: next, live: take live))
+                let _ = channel.send(reply, next)
+            },
+            Detach(id) => prune(mut active, mut watching, Some(id)),
+            Revoke(group, caller, reply) => {
+                revoke_watchers(mut watching, group, caller)
+                prune(mut active, mut watching, None)
+                let _ = channel.send(reply, ())
+            },
+            Read(id, reply) => {
+                prune(mut active, mut watching, None)
+                let _ = channel.send(reply, draft_for(active, watching, id))
+            },
+            Stop => return,
+        }
+    }
+}
+
+pub fn start(tasks: Tasks, bytes_budget: u64, text_bytes: u64) -> Hub {
+    let (to, inbox): (Sender[Input], Receiver[Input]) = channel.new(64u64)
+    let limit = if text_bytes < 16384u64 {
+        text_bytes
+    } else {
+        16384u64
+    }
+    let port = Door(to: take to, text_bytes: limit)
+    Hub(door: take port, actor: task.spawn(tasks, bytes bytes_budget, (take inbox, limit), receive_all))
+}
+
+pub fn door(h: Hub) -> Door {
+    copy_door(h.door)
+}
+
+pub fn copy_door(d: Door) -> Door {
+    Door(to: channel.sender(d.to), text_bytes: d.text_bytes)
+}
+
+pub fn stop(take h: Hub) -> () waits {
+    let Hub(door: take d, actor: take actor) = take h
+    let _ = channel.send(d.to, Stop)
+    let _ = task.join(take actor)
+}
+
+// Register only after the durable worker has its attempt permit. Dropping the
+// source before settle closes its lease even if the worker exits early.
+pub fn target(d: Door, group: String, clock: Clock) -> Target {
+    Target(door: copy_door(d), group: string.from(group), clock: clock)
+}
+
+pub fn source(t: Target, caller: store.Caller, key: Key) -> Option[Source] {
+    let d = view t.door
+    let (lease, live): (Sender[()], Receiver[()]) = channel.new(1u64)
+    if let Error(_) = channel.try_send(d.to, Start(string.from(t.group), clone(caller), key, take live)) {
+        return None
+    }
+    Some(Source(door: copy_door(d), lease: take lease, key: key, seq: 0u64, clock: t.clock))
+}
+
+// Keep only a UTF-8 tail of a very large delta. On a lost delta the next
+// sequence replaces the draft so unrelated spans never concatenate.
+pub fn delta(mut p: Source, text: String) {
+    let n = string.byte_len(text)
+    if n == 0u64 || p.door.text_bytes == 0u64 {
+        return
+    }
+    let raw = string.as_bytes(text)
+    let mut from = if n > p.door.text_bytes {
+        n - p.door.text_bytes
+    } else {
+        0u64
+    }
+    while from < n && (raw[from] & 192u8) == 128u8 {
+        from += 1u64
+    }
+    if n > p.door.text_bytes {
+        p.seq += 1u64
+    }
+    p.seq += 1u64
+    let _ = bound bytes p.door.text_bytes + 4096u64 {
+        let shown = string.from(string.slice(text, from, n))
+        let _ = channel.try_send(p.door.to, Delta(p.key, p.seq, host.mono_ns(p.clock), take shown))
+    }
+}
+
+pub fn observe(d: Door, group: String, caller: store.Caller) -> Option[Observer] waits {
+    let (lease, live): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let (reply, from): (Sender[u64], Receiver[u64]) = channel.new(1u64)
+    if let Error(_) = channel.send(d.to, Attach(string.from(group), clone(caller), take live, take reply)) {
+        return None
+    }
+    let Ok(id) = channel.receive(from) else {
+        return None
+    }
+    Some(Observer(door: copy_door(d), lease: take lease, id: id))
+}
+
+pub fn unobserve(take obs: Observer) -> () waits {
+    let Observer(door: take d, lease: take lease, id: id) = take obs
+    let _ = take lease
+    let _ = channel.send(d.to, Detach(id))
+}
+
+// Call after changing the place's binding or read policy. Existing watchers
+// clear their drafts on the next read and a new watcher must bind again.
+pub fn revoke(d: Door, group: String, caller: store.Caller) -> () waits {
+    let (reply, from): (Sender[()], Receiver[()]) = channel.new(1u64)
+    if let Error(_) = channel.send(d.to, Revoke(string.from(group), clone(caller), take reply)) {
+        return
+    }
+    let _ = channel.receive(from)
+}
+
+pub fn read(obs: Observer) -> Option[Draft] waits {
+    let (reply, from): (Sender[Option[Draft]], Receiver[Option[Draft]]) = channel.new(1u64)
+    if let Error(_) = channel.send(obs.door.to, Read(obs.id, take reply)) {
+        return None
+    }
+    match channel.receive(from) {
+        Ok(take latest) => take latest,
+        Error(_) => None
+    }
+}

@@ -14,7 +14,9 @@
 // DELETE /sessions/{id}; POST /sessions/{id}/messages takes a JSON `harness.Submit`;
 // POST /sessions/{id}/decisions a JSON `harness.Decision`; GET /sessions/{id}/events is
 // the transcript as server-sent events, one JSON `Shown` per changed row and a comment
-// as a heartbeat.
+// as a heartbeat. A bearer-authenticated stream on a preview-enabled front
+// also gets named "preview" snapshots and "preview-clear" events. Each
+// snapshot replaces the draft. Its transcript row at key.entry + 1 supersedes it.
 
 // One transcript row as a stream sends it: its position and its view.
 pub type Shown: codec + send { at: u64, line: harness.View }
@@ -26,7 +28,7 @@ pub type Front: send {
     submit: store.fixture.Callee[harness.Submit, Result[harness.Disposition, harness.Refused]],
     decide: store.fixture.Callee[harness.Decision, Result[harness.Ruling, harness.Refused]],
     shown: store.fixture.Callee[(), ()], keys: List[Bytes], socket: std.wsock.Config,
-    agent: String, narrow: harness.Narrow,
+    agent: String, narrow: harness.Narrow, preview: Option[preview.Door],
     tasks: Tasks, clock: Clock, random: Random, net: Net,
     within_ms: u64, poll_ms: u64, beat_ms: u64, conn_bytes: u64, conns_max: u64, head_max: u64, body_max: u64,
 }
@@ -35,9 +37,13 @@ pub opaque type Served { halt: Sender[()], accepting: Task[()] }
 
 fn copy_front(f: Front) -> Front {
     Front(submit: clone(f.submit), decide: clone(f.decide), shown: clone(f.shown), keys: clone(f.keys), socket: clone(f.socket),
-        agent: string.from(f.agent), narrow: clone(f.narrow), tasks: f.tasks, clock: f.clock, random: f.random, net: f.net,
+        agent: string.from(f.agent), narrow: clone(f.narrow), preview: copy_preview(f.preview), tasks: f.tasks, clock: f.clock, random: f.random, net: f.net,
         within_ms: f.within_ms, poll_ms: f.poll_ms, beat_ms: f.beat_ms, conn_bytes: f.conn_bytes, conns_max: f.conns_max,
         head_max: f.head_max, body_max: f.body_max)
+}
+
+fn copy_preview(p: Option[preview.Door]) -> Option[preview.Door] {
+    match p { Some(d) => Some(preview.copy_door(d)), None => None }
 }
 
 fn deadline_ms(c: Clock, ms: u64) -> u64 { std.clock.deadline_after_ms(host.mono_ns(c), ms) }
@@ -66,12 +72,17 @@ fn reach[T: send](d: harness.gateway.Door[T], f: Front, id: u64, take credential
 type Asker { credential: Bytes, p: u64 }
 
 fn asker(req: Request) -> Result[Asker, u16] {
-    let Some(auth) = field(req, "authorization") else { return Error(401u16) }
-    if list.len(auth) <= 7u64 || !std.http1.equal_ascii(std.http.copy_bytes(list.slice(auth, 0u64, 7u64)), string.as_bytes("Bearer ")) { return Error(401u16) }
-    let Some(take credential) = std.base64.decode(std.http.copy_bytes(list.slice(auth, 7u64, list.len(auth)))) else { return Error(401u16) }
+    let credential = bearer(req)?
     let Some(at) = field(req, "hirsel-position") else { return Error(400u16) }
     let Ok(p) = std.int.parse_uint(text_of(take at), 10) else { return Error(400u16) }
     Ok(Asker(credential: take credential, p: p))
+}
+
+fn bearer(req: Request) -> Result[Bytes, u16] {
+    let Some(auth) = field(req, "authorization") else { return Error(401u16) }
+    if list.len(auth) <= 7u64 || !std.http1.equal_ascii(std.http.copy_bytes(list.slice(auth, 0u64, 7u64)), string.as_bytes("Bearer ")) { return Error(401u16) }
+    let Some(take credential) = std.base64.decode(std.http.copy_bytes(list.slice(auth, 7u64, list.len(auth)))) else { return Error(401u16) }
+    Ok(take credential)
 }
 
 fn call_place[T: send, A: codec, R: codec](d: harness.gateway.Door[T], f: Front, id: u64, take who: Asker, e: store.fixture.Callee[A, Result[R, harness.Refused]], take a: A) -> Result[R, u16] waits {
@@ -98,8 +109,9 @@ type Following { client: store.fixture.Client, sub: u32, version: u64, fresh: bo
 // A client following the session's transcript. One opened for a nudge stays at least one
 // beat even if the session looks quiet, so a change whose run has not yet written its
 // busy status is not missed.
-fn follow_from[T: send](d: harness.gateway.Door[T], f: Front, id: u64, wake: bool, nudged: bool) -> Option[Following] waits {
-    let Ok(take opened) = reach(d, f, id, store.ingress.credential(f.random), 0u64, wake) else { return None }
+fn follow_from[T: send](d: harness.gateway.Door[T], f: Front, id: u64, wake: bool, nudged: bool, credential: Option[Bytes]) -> Option[Following] waits {
+    let token: Bytes = match credential { Some(b) => clone(b), None => store.ingress.credential(f.random) }
+    let Ok(take opened) = reach(d, f, id, take token, 0u64, wake) else { return None }
     let mut client = take opened
     let hold_until = if nudged { deadline_ms(f.clock, f.beat_ms) } else { 0u64 }
     match store.fixture.subscribe(mut client, f.shown, (), f.within_ms) {
@@ -118,11 +130,11 @@ fn beat(mut w: WriteHalf, f: Front) -> bool waits {
     send_out(mut w, f, std.sse.into_bytes(take buffer))
 }
 
-fn event_of(take s: Shown) -> Option[Bytes] {
-    let Ok(format) = (std.json.interop() : Result[std.json.Format[Shown], std.json.TypedError]) else { return None }
+fn event_of[V: codec](s: V, name: Option[String]) -> Option[Bytes] {
+    let Ok(format) = (std.json.interop() : Result[std.json.Format[V], std.json.TypedError]) else { return None }
     let Ok(take text) = std.json.to_string(format, s) else { return None }
-    let mut buffer = std.sse.buffer(string.byte_len(text) + 8u64)
-    if let Error(_) = std.sse.event(mut buffer, None, None, string.as_bytes(text)) { return None }
+    let mut buffer = std.sse.buffer(string.byte_len(text) + 40u64)
+    if let Error(_) = std.sse.event(mut buffer, name, None, string.as_bytes(text)) { return None }
     Some(std.sse.into_bytes(take buffer))
 }
 
@@ -148,11 +160,42 @@ fn send_rows(mut w: WriteHalf, f: Front, image: store.fixture.Seen, mut sent: Li
         list.push(mut kept, (at, clone(raw)))
         sent = take kept
         if !same {
-            let Some(take event) = event_of(Shown(at: at, line: take v)) else { return None }
+            let Some(take event) = event_of(Shown(at: at, line: take v), None) else { return None }
             if !send_out(mut w, f, take event) { return None }
         }
     }
     Some(status)
+}
+
+type PreviewWatch { observer: Option[preview.Observer], sent: Option[(preview.Key, u64)] }
+
+fn watching(watch: PreviewWatch) -> bool { match watch.observer { Some(_) => true, None => false } }
+
+fn unwatch(mut watch: PreviewWatch) -> () waits {
+    if let Some(take obs) = replace(mut watch.observer, None) { preview.unobserve(take obs) }
+}
+
+fn clear_preview(mut w: WriteHalf, f: Front, mut watch: PreviewWatch) -> bool waits {
+    if let Some(_) = replace(mut watch.sent, None) {
+        return send_out(mut w, f, string.into_bytes("event: preview-clear\ndata: null\n\n"))
+    }
+    true
+}
+
+fn send_preview(mut w: WriteHalf, f: Front, sent: List[(u64, Bytes)], mut watch: PreviewWatch) -> bool waits {
+    let next = {
+        let Some(obs) = view watch.observer else { return true }
+        preview.read(obs)
+    }
+    let Some(take draft) = take next else { return clear_preview(mut w, f, mut watch) }
+    for row in sent {
+        if row.0 == draft.key.entry + 1u64 { return clear_preview(mut w, f, mut watch) }
+    }
+    let stamp = (draft.key, draft.seq)
+    if let Some((key, seq)) = watch.sent { if key == draft.key && seq == draft.seq { return true } }
+    let Some(take event) = event_of(draft, Some("preview")) else { return false }
+    watch.sent = Some(stamp)
+    send_out(mut w, f, take event)
 }
 
 fn halted(quit: Receiver[()]) -> bool {
@@ -165,9 +208,19 @@ fn halted(quit: Receiver[()]) -> bool {
 // else is followed while the place runs, without starting it. So a quiet session costs a
 // stream no wake, and an open stream never holds the place up. Opening the stream wakes
 // the session once, to send its transcript.
-fn follow[T: send](d: harness.gateway.Door[T], f: Front, id: u64, mut w: WriteHalf, quit: Receiver[()]) -> () waits {
+fn follow[T: send](d: harness.gateway.Door[T], f: Front, id: u64, mut w: WriteHalf, quit: Receiver[()], credential: Option[Bytes]) -> () waits {
+    let mut watch = PreviewWatch(observer: None, sent: None)
+    follow_loop(d, f, id, mut w, quit, credential, mut watch)
+    unwatch(mut watch)
+}
+
+fn follow_loop[T: send](d: harness.gateway.Door[T], f: Front, id: u64, mut w: WriteHalf,
+    quit: Receiver[()], credential: Option[Bytes], mut watch: PreviewWatch) -> () waits {
     let mut last = harness.gateway.marks(d, id)
-    let mut following = follow_from(d, f, id, true, false)
+    let mut following = follow_from(d, f, id, true, false, credential)
+    let group = harness.gateway.name_of(id)
+    let live = if let Some(_) = view f.preview { if let Some(_) = credential { true } else { false } } else { false }
+    let within = if live && f.poll_ms < f.beat_ms { f.poll_ms } else { f.beat_ms }
     let mut sent: List[(u64, Bytes)] = list.new()
     let mut quiet_since = host.mono_ns(f.clock)
     while !halted(quit) {
@@ -176,13 +229,18 @@ fn follow[T: send](d: harness.gateway.Door[T], f: Front, id: u64, mut w: WriteHa
             let mut client = take c
             let seen_marks = harness.gateway.marks(d, id)
             let at = if fresh { 0u64 } else { version + 1u64 }
-            match store.fixture.seen_at(mut client, sub, at, f.beat_ms) {
+            if live && !watching(watch) {
+                if let Some(p) = view f.preview { watch.observer = preview.observe(p, group, store.fixture.bound_caller(client)) }
+            }
+            match store.fixture.seen_at(mut client, sub, at, within) {
                 Ok(take image) => {
                     let next = image.version
                     let Some(status) = send_rows(mut w, f, image, mut sent) else { store.fixture.close(take client); return }
                     if busy(status) || host.mono_ns(f.clock) < hold_until {
                         following = Some(Following(client: take client, sub: sub, version: next, fresh: false, hold_until: hold_until, quiet: !busy(status)))
                     } else {
+                        if !clear_preview(mut w, f, mut watch) { store.fixture.close(take client); return }
+                        unwatch(mut watch)
                         store.fixture.close(take client)
                         last = seen_marks
                         quiet_since = host.mono_ns(f.clock)
@@ -190,8 +248,14 @@ fn follow[T: send](d: harness.gateway.Door[T], f: Front, id: u64, mut w: WriteHa
                 },
                 // No change in a beat: a quiet session past its hold is let go of.
                 Error(Deadline(_)) => {
-                    if !beat(mut w, f) { store.fixture.close(take client); return }
+                    if !send_preview(mut w, f, sent, mut watch) { store.fixture.close(take client); return }
+                    if host.mono_ns(f.clock) - quiet_since >= f.beat_ms * 1000000u64 {
+                        if !beat(mut w, f) { store.fixture.close(take client); return }
+                        quiet_since = host.mono_ns(f.clock)
+                    }
                     if quiet && host.mono_ns(f.clock) >= hold_until {
+                        if !clear_preview(mut w, f, mut watch) { store.fixture.close(take client); return }
+                        unwatch(mut watch)
                         store.fixture.close(take client)
                         last = seen_marks
                         quiet_since = host.mono_ns(f.clock)
@@ -200,7 +264,9 @@ fn follow[T: send](d: harness.gateway.Door[T], f: Front, id: u64, mut w: WriteHa
                     }
                 },
                 Error(_) => {
+                    unwatch(mut watch)
                     store.fixture.close(take client)
+                    if !clear_preview(mut w, f, mut watch) { return }
                     last = seen_marks
                 },
             }
@@ -208,10 +274,10 @@ fn follow[T: send](d: harness.gateway.Door[T], f: Front, id: u64, mut w: WriteHa
             let m = harness.gateway.marks(d, id)
             if m.nudges != last.nudges {
                 last = m
-                following = follow_from(d, f, id, true, true)
+                following = follow_from(d, f, id, true, true, credential)
             } else if m.ups != last.ups {
                 last = m
-                following = follow_from(d, f, id, false, false)
+                following = follow_from(d, f, id, false, false, credential)
             } else {
                 host.sleep_until(f.clock, deadline_ms(f.clock, f.poll_ms))
                 if host.mono_ns(f.clock) - quiet_since >= f.beat_ms * 1000000u64 {
@@ -368,9 +434,16 @@ fn serve_one[T: send](d: harness.gateway.Door[T], f: Front, mut read: ReadHalf, 
     }
     if path[2] == "events" && method == b"GET" {
         if !listed(d, id) { return reply(mut write, f, 404u16, list.new()) }
+        let credential: Option[Bytes] = match f.preview {
+            Some(_) => match field(req, "authorization") {
+                Some(_) => match bearer(req) { Ok(take b) => Some(take b), Error(code) => return reply(mut write, f, code, list.new()) },
+                None => None,
+            },
+            None => None,
+        }
         let head = string.into_bytes(string.from("HTTP/1.1 200 \r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"))
         if !send_out(mut write, f, take head) { return }
-        return follow(d, f, id, mut write, quit)
+        return follow(d, f, id, mut write, quit, credential)
     }
     reply(mut write, f, 404u16, list.new())
 }

@@ -278,6 +278,7 @@ pub type Agent[G: send]: send {
     route: String,
     model: StaticFn[fn(G, take Request) -> Result[Answer, Fault] waits],
     model_repeat: Repeat,
+    preview_model: Option[StaticFn[fn(G, take Request, mut Option[preview.Source]) -> Result[Answer, Fault] waits]],
     // The app supplies object authority when a result outgrows the journal.
     store_result: Option[StaticFn[fn(G, take Bytes) -> Result[BlobRef, Fault] waits]],
     tools: List[Tool[G]],
@@ -289,7 +290,7 @@ pub type Agent[G: send]: send {
 }
 
 pub fn agent[G: send](take name: String, take route: String, model: StaticFn[fn(G, take Request) -> Result[Answer, Fault] waits]) -> Agent[G] {
-    Agent(name: take name, route: take route, model: model, model_repeat: Once, store_result: None, tools: list.new(), mcp_peer: None, gates: list.new(),
+    Agent(name: take name, route: take route, model: model, model_repeat: Once, preview_model: None, store_result: None, tools: list.new(), mcp_peer: None, gates: list.new(),
         sections: list.new(), reactions: list.new(),
         limits: Limits(rounds: 8u64, calls: 8u64, model_ms: 120000u64, tool_ms: 60000u64, model_reserve: 4096u64,
                         // Gates and sections read rows; opening a table alone takes over
@@ -1362,6 +1363,11 @@ fn tool_result[G: send](port: G, a: Agent[G], take body: Bytes) -> Outcome waits
 // The body of the app's granted effect entry: begin, read the sealed cutoff
 // through the fenced snapshot, make the one outside call, settle.
 pub fn effect[G: send, F](ctx: store.runner.TriggerContext, port: G, take key: EffectKey, a: Agent[G], settle_entry: StaticFn[F]) -> Result[Worked, Capacity] waits {
+    effect_with_preview(ctx, port, take key, a, settle_entry, None)
+}
+
+pub fn effect_with_preview[G: send, F](ctx: store.runner.TriggerContext, port: G, take key: EffectKey, a: Agent[G],
+    settle_entry: StaticFn[F], target: Option[preview.Target]) -> Result[Worked, Capacity] waits {
     let permit: Option[Permit] = call_attempt(ctx, code.describe(begin), key)
     match permit {
         Some(Go(_)) => (),
@@ -1374,14 +1380,26 @@ pub fn effect[G: send, F](ctx: store.runner.TriggerContext, port: G, take key: E
     let Ok(Some(take e)) = store.get(snap, store.shape(h.effects), key) else { return Ok(Lost) }
     let receipt: Receipt = if key.kind == MODEL {
         let Ok(take asked) = request(snap, h, key, e.cutoff) else { return Ok(Lost) }
-        let call = code.callable(a.model)
-        match call(port, take asked) {
+        let answered = match (a.preview_model, has_preview(target)) {
+            (Some(streaming), true) => {
+                let mut sink = effect_preview(target, snap, h, ctx, key)
+                let call = code.callable(streaming)
+                call(port, take asked, mut sink)
+            },
+            _ => {
+                let call = code.callable(a.model)
+                call(port, take asked)
+            },
+        }
+        match take answered {
             Ok(take answer) => Model(take answer),
             // Unavailable after the send may have been charged: record doubt.
             Error(Unavailable) => return Ok(doubt(ctx, settle_entry, key)),
             Error(take fault) => ModelFailed(fault_text(take fault)),
         }
     } else {
+        let mut sink = effect_preview(target, snap, h, ctx, key)
+        if let Some(mut p) = sink { preview.delta(mut p, "running tool") }
         let Some(c) = view e.call else { return Ok(Lost) }
         if mcp_tools.reserved(c.name) { Tool(remote_effect(snap, h, e, c, a, port)) }
         else {
@@ -1397,6 +1415,24 @@ pub fn effect[G: send, F](ctx: store.runner.TriggerContext, port: G, take key: E
     }
     let done: Option[Filed] = call_attempt(ctx, settle_entry, Settle(key: key, receipt: Some(take receipt)))
     match done { Some(_) => Ok(Sent), None => Ok(Lost) }
+}
+
+fn has_preview(target: Option[preview.Target]) -> bool { match target { Some(_) => true, None => false } }
+
+fn effect_preview(target: Option[preview.Target], snap: store.Snapshot, h: Handles, ctx: store.runner.TriggerContext, key: EffectKey) -> Option[preview.Source] {
+    let Some(t) = view target else { return None }
+    let Ok(Some(s)) = store.get(snap, store.shape(h.session), 0u64) else { return None }
+    let Ok(Some(r)) = store.get(snap, store.shape(h.runs), key.run) else { return None }
+    let a = store.runner.trigger_attempt(ctx)
+    // Parallel tools point to the first future ToolResult. All results become
+    // visible in the same commit, even if reactions add entries between them.
+    let tool: Option[u64] = if key.kind == MODEL { None } else { Some(key.ordinal) }
+    let key_with_attempt = preview.Key(dispatch: store.triggers.run_id(a), run: key.run,
+        entry: s.next_pos, tool: tool, attempt: store.triggers.number(a))
+    match (bound bytes 16384u64 { preview.source(t, r.caller, key_with_attempt) }) {
+        Ok(take result) => take result,
+        Error(_) => None,
+    }
 }
 
 // ---- reads ----

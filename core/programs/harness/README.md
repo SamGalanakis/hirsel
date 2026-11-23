@@ -201,6 +201,33 @@ committed. Its reads still count in the transaction's read set.
 - **Spend.** Spend is kept as `known` (settled usage), `reserved` (calls in
   flight) and `unresolved` (calls that may have been charged).
 
+## Live preview on the gateway
+
+Start a `harness.preview` hub and pass its door to the HTTP front and the
+worker grants. In the worker, call `effect_with_preview` with a target for the
+session's place name. Set `agent.preview_model` to the streaming adapter,
+which can pass its sink to `provider.ask_with_preview`. Outside tools publish
+a running status keyed by their call ordinal. They never publish arguments
+or results.
+
+On a preview-enabled front, a browser connects to `/sessions/{id}/events`
+with its bearer credential. The place binds it to a Caller. Only the run's
+Caller receives its draft. When an application revokes read access, it can
+call `harness.preview.revoke` to clear that Caller's existing watchers.
+
+Each named `preview` event replaces the draft with a bounded snapshot. The
+key contains the store identity, run, transcript entry, dispatch and attempt.
+A `preview-clear` event removes the draft. A committed row at
+`key.entry + 1` supersedes the draft. Reconnecting starts from the current
+snapshot, if any. Connect without a bearer credential for transcript rows
+alone.
+
+The hub retains at most the configured text bytes for each observed
+dispatch, and each SSE connection pulls one snapshot at a time. Deltas can
+be dropped under load. A gap or a full draft starts a fresh snapshot.
+Dropping the last observer clears the draft. Preview adds no journal writes,
+and the front and workers can be configured without it.
+
 ## Provider wire formats
 
 `provider.hirsel` turns a `harness.Request` into the request body of the

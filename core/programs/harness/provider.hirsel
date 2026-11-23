@@ -518,6 +518,12 @@ fn sent_or(c: std.http_client.Connection, why: String) -> harness.Fault {
 // definite rejection (Refused); a stream that ends without its terminator is
 // doubt (Unavailable).
 pub fn ask(n: Net, clock: Clock, p: Provider, take req: harness.Request) -> Result[harness.Answer, harness.Fault] waits {
+    let mut sink: Option[preview.Source] = None
+    ask_with_preview(n, clock, p, take req, mut sink)
+}
+
+pub fn ask_with_preview(n: Net, clock: Clock, p: Provider, take req: harness.Request,
+    mut sink: Option[preview.Source]) -> Result[harness.Answer, harness.Fault] waits {
     let text = match body(p.model, req) {
         Ok(take t) => take t,
         Error(take why) => return Error(BadArgs(take why)),
@@ -554,11 +560,16 @@ pub fn ask(n: Net, clock: Clock, p: Provider, take req: harness.Request) -> Resu
             Error(_) => return Error(Unavailable),
         }
         if got == 0u64 { return Error(Unavailable) }
-        match feed(mut dec, mut st, chunk) {
-            Ok(true) => break,
-            Ok(false) => list.clear(mut chunk),
+        let from = string.byte_len(st.text)
+        let done = match feed(mut dec, mut st, chunk) {
+            Ok(is_done) => is_done,
             Error(_) => return Error(Unavailable),
         }
+        if let Some(mut preview_out) = sink {
+            preview.delta(mut preview_out, string.slice(st.text, from, string.byte_len(st.text)))
+        }
+        if done { break }
+        list.clear(mut chunk)
     }
     std.sse.finish(mut dec)
     match answer(take st) {

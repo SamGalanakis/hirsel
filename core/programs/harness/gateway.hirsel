@@ -76,7 +76,7 @@ fn catalog_handles(schema: store.Schema) -> Result[Catalog, store.Error] {
 
 // ---- names ----
 
-fn name_of(id: u64) -> String {
+pub fn name_of(id: u64) -> String {
     let mut s = string.from("s")
     string.push_u64(mut s, id)
     s

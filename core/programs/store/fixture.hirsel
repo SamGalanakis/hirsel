@@ -199,6 +199,9 @@ pub fn client_at(tasks: Tasks, net: Net, clock: Clock, random: Random, keys: Lis
         subs: list.new(), version: 0u64, lost: false, generation: 0u64, tasks: tasks, clock: clock))
 }
 
+// Identity returned by the place in Welcome after binding the credential.
+pub fn bound_caller(c: Client) -> store.Caller { clone(c.conn.caller) }
+
 fn find_sub(subs: List[Sub], id: u32) -> Option[u64] {
     for i in 0u64 .. list.len(subs) { if subs[i].id == id { return Some(i) } }
     None

@@ -16,6 +16,7 @@ const EFFECT_GRANT: u64 = 8388608u64
 type Services: send {
     model: Sender[Sender[()]], tallies: Sender[Sender[()]], door: harness.gateway.Door[Services], name: String,
     tasks: Tasks, clock: Clock, random: Random, net: Net,
+    preview: Option[harness.preview.Door], chunks: u64,
 }
 type Grants: send { context: store.runner.TriggerContext, s: Services }
 
@@ -45,6 +46,10 @@ fn ask_service(to: Sender[Sender[()]]) -> Result[(), harness.Fault] waits {
 // The script: once a tool has answered, end with "done"; before that, call the tool the
 // user's message names ("bump it", "tally it", "delegate it").
 fn scripted_model(g: Grants, take r: harness.Request) -> Result[harness.Answer, harness.Fault] waits {
+    if g.s.chunks > 0u64 {
+        let mut sink: Option[harness.preview.Source] = None
+        return streaming_model(g, take r, mut sink)
+    }
     let mut tool = "bump"
     for e in r.messages {
         match e {
@@ -55,6 +60,23 @@ fn scripted_model(g: Grants, take r: harness.Request) -> Result[harness.Answer, 
     }
     ask_service(g.s.model)?
     Ok(asking(string.from(tool)))
+}
+
+fn preview_answer() -> harness.Answer {
+    let mut text = string.with_capacity(10000u64)
+    for i in 0u64 .. 10000u64 { string.push(mut text, "x") }
+    harness.Answer(text: take text, calls: list.new(), stop: "end", usage: usage())
+}
+
+fn streaming_model(g: Grants, take r: harness.Request, mut sink: Option[harness.preview.Source]) -> Result[harness.Answer, harness.Fault] waits {
+    let answer = preview_answer()
+    let width = 10000u64 / g.s.chunks
+    ask_service(g.s.model)?
+    for i in 0u64 .. g.s.chunks {
+        if let Some(mut p) = sink { harness.preview.delta(mut p, string.slice(answer.text, i * width, (i + 1u64) * width)) }
+        if i == 0u64 { ask_service(g.s.model)? }
+    }
+    Ok(take answer)
 }
 
 fn bump(g: Grants, take args: Bytes) -> Result[Bytes, harness.Fault] waits {
@@ -104,7 +126,10 @@ fn advance(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take wake
 }
 
 fn effect(g: Grants, caller: store.Caller, take key: harness.EffectKey) -> Result[harness.Worked, Capacity] waits {
-    harness.effect(g.context, g, take key, gated_agent(), code.describe(settle))
+    let Some(p) = view g.s.preview else { return harness.effect(g.context, g, take key, gated_agent(), code.describe(settle)) }
+    let mut a = gated_agent()
+    a.preview_model = Some(code.describe(streaming_model))
+    harness.effect_with_preview(g.context, g, take key, a, code.describe(settle), Some(harness.preview.target(p, g.s.name, g.s.clock)))
 }
 
 fn settle(mut tx: store.Tx, a: store.triggers.Attempt, take m: harness.Settle) -> Result[harness.Filed, store.Error] {
@@ -138,7 +163,8 @@ fn place(mut r: store.runner.Registry[Grants, harness.Handles]) -> Result[(), st
 
 fn services_of(s: Services, take name: String) -> Services {
     Services(model: channel.sender(s.model), tallies: channel.sender(s.tallies), door: harness.gateway.copy_door(s.door),
-        name: take name, tasks: s.tasks, clock: s.clock, random: s.random, net: s.net)
+        name: take name, tasks: s.tasks, clock: s.clock, random: s.random, net: s.net,
+        preview: match s.preview { Some(p) => Some(harness.preview.copy_door(p)), None => None }, chunks: s.chunks)
 }
 
 fn make_grants(s: Services, take ctx: store.runner.TriggerContext) -> Result[Grants, Capacity] {
@@ -252,7 +278,7 @@ pub fn law_wake_resumes_transcript(parent: Dir, clock: Clock, random: Random, ta
     let (watch, changes): (Sender[store.places.Change], Receiver[store.places.Change]) = channel.new(64u64)
     let way: harness.gateway.Doorway[Services] = harness.gateway.doorway()
     let door = harness.gateway.door_of(way)
-    let seed = Services(model: take asks, tallies: take tallies, door: harness.gateway.door_of(way), name: "", tasks: tasks, clock: clock, random: random, net: net)
+    let seed = Services(model: take asks, tallies: take tallies, door: harness.gateway.door_of(way), name: "", tasks: tasks, clock: clock, random: random, net: net, preview: None, chunks: 0u64)
     let config = harness.gateway.GatewayConfig(root: root, options: store.triggers.law_options(), migrate: code.describe(harness.migrate),
         factory: session_factory, max_sessions: 1u64, place_bytes: 67108864u64, tasks: tasks, clock: clock, random: random, net: net,
         watch: Some(take watch), seed: take seed)
@@ -341,7 +367,7 @@ pub fn law_subagent_once(parent: Dir, clock: Clock, random: Random, tasks: Tasks
     let (watch, changes): (Sender[store.places.Change], Receiver[store.places.Change]) = channel.new(256u64)
     let way: harness.gateway.Doorway[Services] = harness.gateway.doorway()
     let door = harness.gateway.door_of(way)
-    let seed = Services(model: take asks, tallies: take tallies, door: harness.gateway.door_of(way), name: "", tasks: tasks, clock: clock, random: random, net: net)
+    let seed = Services(model: take asks, tallies: take tallies, door: harness.gateway.door_of(way), name: "", tasks: tasks, clock: clock, random: random, net: net, preview: None, chunks: 0u64)
     let config = harness.gateway.GatewayConfig(root: root, options: store.triggers.law_options(), migrate: code.describe(harness.migrate),
         factory: session_factory, max_sessions: 2u64, place_bytes: 134217728u64, tasks: tasks, clock: clock, random: random, net: net,
         watch: Some(take watch), seed: take seed)
@@ -451,14 +477,22 @@ fn json[V: codec](v: V) -> Bytes {
 // Reads the stream until a row shows status `until`, folding each event into `rows` by
 // position; false when the stream ended first.
 fn read_until(mut c: std.http_client.Connection, mut decoder: std.sse.Decoder, mut rows: List[(u64, Bytes)], until: String) -> bool waits {
+    read_until_row(mut c, mut decoder, mut rows, until, 0u64)
+}
+
+fn read_until_row(mut c: std.http_client.Connection, mut decoder: std.sse.Decoder, mut rows: List[(u64, Bytes)], until: String, at: u64) -> bool waits {
     let format: std.json.Format[harness.gateway_http.Shown] = result.unwrap(std.json.interop())
     let mut chunk: Bytes = list.with_capacity(8192u64)
+    let mut reached = false
+    let mut present = false
+    for row in rows { if row.0 == at { present = true } }
     loop {
         match std.http_client.read(mut c, mut chunk) { Ok(0u64) => return false, Ok(_) => (), Error(_) => return false }
-        let mut reached = false
         let fed = std.sse.feed(mut decoder, chunk, fn(name: Bytes, data: Bytes, event_id: Bytes) -> std.sse.FeedControl[()] {
+            if name != b"message" { return Continue }
             let Ok(row) = std.json.decode_typed(format, std.http.copy_bytes(data), 65536u64) else { return Fail(()) }
-            if let Status(text) = row.line { if text == until { reached = true } }
+            if let Status(text) = row.line { reached = text == until }
+            if row.at == at { present = true }
             let mut kept: List[(u64, Bytes)] = list.new()
             while let Some((p, take old)) = list.pop(mut rows) { if p != row.at { list.push(mut kept, (p, take old)) } }
             list.push(mut kept, (row.at, bytes_of(row.line)))
@@ -467,7 +501,7 @@ fn read_until(mut c: std.http_client.Connection, mut decoder: std.sse.Decoder, m
         })
         if let Error(_) = fed { return false }
         list.clear(mut chunk)
-        if reached { return true }
+        if reached && present { return true }
     }
 }
 
@@ -521,7 +555,7 @@ pub fn law_front_holds_stream(parent: Dir, clock: Clock, random: Random, tasks: 
     let (tallies, _held): (Sender[Sender[()]], Receiver[Sender[()]]) = channel.new(4u64)
     let way: harness.gateway.Doorway[Services] = harness.gateway.doorway()
     let door = harness.gateway.door_of(way)
-    let seed = Services(model: take asks, tallies: take tallies, door: harness.gateway.door_of(way), name: "", tasks: tasks, clock: clock, random: random, net: net)
+    let seed = Services(model: take asks, tallies: take tallies, door: harness.gateway.door_of(way), name: "", tasks: tasks, clock: clock, random: random, net: net, preview: None, chunks: 0u64)
     let config = harness.gateway.GatewayConfig(root: root, options: store.triggers.law_options(), migrate: code.describe(harness.migrate),
         factory: session_factory, max_sessions: 1u64, place_bytes: 67108864u64, tasks: tasks, clock: clock, random: random, net: net,
         watch: None, seed: take seed)
@@ -531,7 +565,7 @@ pub fn law_front_holds_stream(parent: Dir, clock: Clock, random: Random, tasks: 
     let front = harness.gateway_http.Front(submit: store.fixture.transact_entry(code.describe(submit_entry)),
         decide: store.fixture.transact_entry(code.describe(decide_entry)),
         shown: store.fixture.query_entry(code.describe(shown), std.codec.key_u64(), views),
-        keys: result.unwrap(store.fixture.entry_keys(code.describe(place))), socket: wire().socket, agent: "scripted", narrow: All,
+        keys: result.unwrap(store.fixture.entry_keys(code.describe(place))), socket: wire().socket, agent: "scripted", narrow: All, preview: None,
         tasks: tasks, clock: clock, random: random, net: net, within_ms: WITHIN_MS, poll_ms: 20u64, beat_ms: 200u64,
         conn_bytes: EFFECT_GRANT, conns_max: 4u64, head_max: 8192u64, body_max: 65536u64)
     let served = harness.gateway_http.serve(door, take front, take listener)
@@ -579,4 +613,132 @@ pub fn law_front_holds_stream(parent: Dir, clock: Clock, random: Random, tasks: 
 fn test_front_holds_stream(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), u64] waits {
     let bad = law_front_holds_stream(parent, clock, random, tasks, net)
     if bad == 0u64 { Ok(()) } else { Error(bad) }
+}
+
+// A browser opens a new stream with no cursor. A preview-enabled front uses
+// its bearer credential to bind the same Caller as the message POST.
+fn browser(net: Net, clock: Clock, port: u16, credential: Bytes) -> Result[std.http_client.Connection, u64] waits {
+    let request = std.http_client.Request(method: "GET", target: "/sessions/0/events", headers: person(credential, 0u64), body: Fixed(0u64))
+    let until = std.clock.deadline_after_ms(host.mono_ns(clock), WITHIN_MS)
+    let Ok(take c) = std.http_client.dial(net, local(port), "127.0.0.1", clock, request, until) else { return Error(1u64) }
+    let mut stream = take c
+    if let Error(_) = std.http_client.finish_request(mut stream, 1073741824u64) { return Error(2u64) }
+    if std.http_client.status(std.http_client.head(stream)) != 200u16 { return Error(3u64) }
+    Ok(take stream)
+}
+
+fn first_draft(mut c: std.http_client.Connection, mut dec: std.sse.Decoder) -> Option[harness.preview.Draft] waits {
+    let format: std.json.Format[harness.preview.Draft] = result.unwrap(std.json.interop())
+    let mut chunk: Bytes = list.with_capacity(8192u64)
+    loop {
+        match std.http_client.read(mut c, mut chunk) { Ok(0u64) => return None, Ok(_) => (), Error(_) => return None }
+        let mut seen: Option[harness.preview.Draft] = None
+        let fed = std.sse.feed(mut dec, chunk, fn(name: Bytes, data: Bytes, event_id: Bytes) -> std.sse.FeedControl[()] {
+            if name == b"preview" {
+                let Ok(take p) = std.json.decode_typed(format, std.http.copy_bytes(data), 65536u64) else { return Fail(()) }
+                seen = Some(take p)
+            }
+            Continue
+        })
+        if let Error(_) = fed { return None }
+        if let Some(take p) = take seen { return Some(take p) }
+        list.clear(mut chunk)
+    }
+}
+
+fn answer_rows() -> List[(u64, Bytes)] {
+    let mut expected: List[(u64, Bytes)] = list.new()
+    list.push(mut expected, row_of(0u64, Status("answered")))
+    list.push(mut expected, row_of(1u64, Line("user", "preview it")))
+    list.push(mut expected, row_of(3u64, Line("assistant", string.from(preview_answer().text))))
+    expected
+}
+
+fn committed_version(dir: Dir) -> u64 waits {
+    let reader = result.unwrap(store.open_read_only(dir, store.triggers.law_options()))
+    store.read_only_version(reader)
+}
+
+fn preview_run(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, chunks: u64, enabled: bool) -> Result[u64, u64] waits {
+    let mut name = string.with_capacity(32u64)
+    let root = result.unwrap(host.mkdtemp(parent, mut name))
+    let hub = harness.preview.start(tasks, 1048576u64, 4096u64)
+    let (asks, inbox): (Sender[Sender[()]], Receiver[Sender[()]]) = channel.new(4u64)
+    let (tallies, _held): (Sender[Sender[()]], Receiver[Sender[()]]) = channel.new(4u64)
+    let way: harness.gateway.Doorway[Services] = harness.gateway.doorway()
+    let door = harness.gateway.door_of(way)
+    let worker_port = if enabled { Some(harness.preview.door(hub)) } else { None }
+    let seed = Services(model: take asks, tallies: take tallies, door: harness.gateway.door_of(way), name: "", tasks: tasks,
+        clock: clock, random: random, net: net, preview: take worker_port, chunks: chunks)
+    let config = harness.gateway.GatewayConfig(root: root, options: store.triggers.law_options(), migrate: code.describe(harness.migrate),
+        factory: session_factory, max_sessions: 1u64, place_bytes: 67108864u64, tasks: tasks, clock: clock, random: random, net: net,
+        watch: None, seed: take seed)
+    let Ok(take g) = harness.gateway.gateway(take way, take config) else { return Error(10u64) }
+    let (listener, at) = result.unwrap(host.listen(net, local(0u16), 16u16))
+    let views: std.codec.Codec[harness.View] = std.codec.of()
+    let front_port = if enabled { Some(harness.preview.door(hub)) } else { None }
+    let front = harness.gateway_http.Front(submit: store.fixture.transact_entry(code.describe(submit_entry)),
+        decide: store.fixture.transact_entry(code.describe(decide_entry)),
+        shown: store.fixture.query_entry(code.describe(shown), std.codec.key_u64(), views),
+        keys: result.unwrap(store.fixture.entry_keys(code.describe(place))), socket: wire().socket, agent: "scripted", narrow: All,
+        preview: take front_port, tasks: tasks, clock: clock, random: random, net: net, within_ms: WITHIN_MS, poll_ms: 10u64,
+        beat_ms: 50u64, conn_bytes: EFFECT_GRANT, conns_max: 4u64, head_max: 8192u64, body_max: 65536u64)
+    let served = harness.gateway_http.serve(door, take front, take listener)
+    let port = at.port
+    let (created, _) = http(net, clock, port, "POST", "/sessions", list.new(), string.into_bytes("preview"))
+    if created != 201u16 { return Error(11u64) }
+    let dir = result.unwrap(std.dir.narrow(root, "s0"))
+    let before = committed_version(dir)
+    let me = store.ingress.credential(random)
+    let (posted, _) = http(net, clock, port, "POST", "/sessions/0/messages", person(me, 0u64), json(harness.Submit(client_key: "p1", text: "preview it")))
+    if posted != 202u16 { return Error(12u64) }
+    let Ok(first) = channel.receive(inbox) else { return Error(14u64) }
+    let mut tab = browser(net, clock, port, me)?
+    let mut decoder = std.sse.decoder(65536u64)
+    let mut rows: List[(u64, Bytes)] = list.new()
+    if !read_until(mut tab, mut decoder, mut rows, "thinking") { return Error(13u64) }
+    let _ = channel.send(first, ())
+    if enabled {
+        let Some(p) = first_draft(mut tab, mut decoder) else { return Error(15u64) }
+        if p.key.run != 0u64 || p.key.entry != 2u64 || p.key.tool != None || p.seq != 1u64 ||
+            p.text != string.slice(preview_answer().text, 0u64, 10000u64 / chunks) { return Error(16u64) }
+    }
+    // Close the original connection while the worker still waits. Reopen only
+    // after all work and the trigger's terminal journal commit are durable.
+    let _ = take tab
+    let Ok(rest) = channel.receive(inbox) else { return Error(17u64) }
+    let _ = channel.send(rest, ())
+    let Some(_) = down_within(door, 0u64, clock) else { return Error(18u64) }
+    let committed = committed_version(dir) - before
+    if committed != 8u64 { return Error(100u64 + committed) }
+    let mut returned = browser(net, clock, port, me)?
+    let mut again_decoder = std.sse.decoder(65536u64)
+    let mut fresh_decoder = std.sse.decoder(65536u64)
+    let mut again: List[(u64, Bytes)] = list.new()
+    let mut fresh: List[(u64, Bytes)] = list.new()
+    if !read_until_row(mut returned, mut again_decoder, mut again, "answered", 3u64) { return Error(1900u64 + list.len(again)) }
+    let mut other = browser(net, clock, port, me)?
+    if !read_until_row(mut other, mut fresh_decoder, mut fresh, "answered", 3u64) { return Error(20u64) }
+    if !same_rows(again, answer_rows()) || !same_rows(fresh, answer_rows()) { return Error(21u64) }
+    let _ = take returned
+    let _ = take other
+    harness.gateway_http.halt(take served)
+    let _ = harness.gateway.stop(take g)
+    harness.preview.stop(take hub)
+    result.unwrap(std.dir.remove_all(parent, name))
+    Ok(committed)
+}
+
+// The cold no-tool turn commits place activation, keyed admission, submit,
+// granted start, begin, settle, advance on the receipt, and the granted
+// trigger's terminal record. Its deadline stays in the future.
+@test
+fn test_preview_journal_and_reconnect(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), u64] waits {
+    let disabled = preview_run(parent, clock, random, tasks, net, 10u64, false)?
+    let short = preview_run(parent, clock, random, tasks, net, 10u64, true)?
+    let long = preview_run(parent, clock, random, tasks, net, 10000u64, true)?
+    if disabled != 8u64 { return Error(100u64 + disabled) }
+    if short != 8u64 { return Error(200u64 + short) }
+    if long != 8u64 { return Error(300u64 + long) }
+    Ok(())
 }

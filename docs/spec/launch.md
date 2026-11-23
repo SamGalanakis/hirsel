@@ -24,7 +24,7 @@ allowances, so the full identity includes `n_place` independently of the digest.
 Both native and evaluator launchers supply it, and describe reports it. Bindings
 record the allowance of the described launch.
 
-`assembly` (STORE-SPEC v2.51; not yet built) is the 32-byte name of the assembly record
+`assembly` (STORE-SPEC v2.51, v2.52; not yet built) is the 32-byte name of the assembly record
 the launch runs ("Assembly records" below), or empty when the launcher names none. One
 executable can be the image of several records (two recipes that differ outside the image,
 or one recipe under two toolchains that give the same bytes), and records differ in what the
@@ -33,8 +33,9 @@ platform launcher names one by default: it passes the record it launches to ever
 `hirsel run`, `hirsel build --manifest`, evaluator, embedded and bare launches leave it empty,
 so a plain restart of the same executable outside the host still reopens its store. An
 operator who installs on a hosted store by hand passes `--hirsel-assembly`<!-- doc-ref: planned -->
-with the record the host should serve; without it the install names none and matches no host
-record. The name is the launching principal's statement, as `n_place` is: it selects nothing and grants
+with the record the host should serve, and the allowance that record launches with
+(`--hirsel-n-place`<!-- doc-ref: external -->); without them the install names none, or
+another allowance, and matches no host record ("Place activation" below). The name is the launching principal's statement, as `n_place` is: it selects nothing and grants
 nothing, and is compared only as part of `Describe`. A const-parameter mechanism was
 considered and left out: it is a separate language feature and is unnecessary
 for launch configuration. There is no compiler rule naming `runner@1/runner` to
@@ -149,7 +150,18 @@ of the same executable reopens its store. `--hirsel-install`<!-- doc-ref: extern
 standalone install and is mutually exclusive with an activation version. Use it
 after `--` with `hirsel run`. The install runs `place` and `migrate`, validates
 both handle sets, commits the activation under the store lock, closes the store
-and exits. Start the executable again to serve. Both options are run arguments,
+and exits. Start the executable again to serve.
+
+A bare install exits 0 whatever host the store belongs to: it skips the current-image guard
+and writes a `Describe` that names no assembly record. That is right for a standalone place
+and wrong for a store a platform host serves, whose group then matches none of its records.
+A hand install meant for a hosted group must launch as one of the group's retained records:
+pass that record's `--hirsel-assembly=<hex>`<!-- doc-ref: planned --> and its allowance
+`--hirsel-n-place=<bytes>`<!-- doc-ref: external -->, and run its exact image. The group's
+`Status.failing[].last` names the retained records when the host finds no match. The group's
+next retry reads the store and serves that record at the installed activation
+(RUNNER-SPEC §14.3 "Leaving no record"); a group left failing by a decided deploy recovers
+only this way, because a hot deploy needs a live OLD. Both options are run arguments,
 which a recording holds like every entry argument. The launcher passes
 `--hirsel-activation`<!-- doc-ref: external --> to serving children.
 
@@ -385,7 +397,8 @@ root reaches. The roots are the union of: the assembly record of each retained a
 each live reservation. An assembly record keeps its image, its recipe and the recipe's closure.
 The host keeps a per-store index from activation version to the assembly record that serves it,
 so the store's `releases` rows keep their format. A decided selection, a commit, an Installed
-outcome (at the attempt's `v`), a genesis adoption and a host-run install write it; a probe's
+outcome (at the attempt's `v`), a genesis adoption, a no-record group's adoption (at the read's
+activation) and a host-run install write it; a probe's
 intent never does (RUNNER-SPEC §14.3 "What serves"), and a recording pin names the assembly record of
 the run it records and is synced before `Pinned` is answered. A retained image carries its runtime. The host reads its recipe envelope to recover
 launch settings and keep referenced objects. A retained digest whose image is missing gives `Unknown(ImageGone)`.
@@ -437,8 +450,17 @@ activation index, whatever activation the read reports. In the same transaction 
 selects the store's current activation with the assembly whose `Describe` digest is the read's
 image, so a group never returns to `v` from a later activation. `Describe` names its assembly
 record, so at most one of OLD's and NEW's matches, and a probe that opens always matches the
-record it opened; when neither matches, nothing is selected and the group is failing with that
-cause until an operator deploys or installs. Roots follow RUNNER-SPEC §14.3 "Roots". Any other
+record it opened; when neither matches, nothing is selected, the group's row keeps a durable
+no-record mark (the attempt, the read's activation and the assembly its `Describe` names), and
+the group is failing with the cause `No retained assembly matches the store at activation a`,
+followed by that assembly name (or "names no assembly") and the retained records' names. The
+mark, not the start that last failed, carries the cause, so retries refused at the stale
+activation and a host restart keep it. Each retry of a marked group, once refused, reads the
+store as the probe does, without the witness row; when the read's image is the `Describe`
+digest of the attempt's OLD or NEW that the group still keeps, one transaction makes that
+record current at the read's activation and writes it into the activation index there, and the
+group relaunches at once (RUNNER-SPEC §14.3 "Leaving no record"). The deploy's outcome and its
+index entry are not changed, and while nothing matches the selection is left alone. Roots follow RUNNER-SPEC §14.3 "Roots". Any other
 answer (`Held`, a missing image, a failed read, an I/O failure) decides nothing: both roots stay, and the probe is retried under the
 ordinary backoff. Neither a timer nor a retry count decides a root.
 The platform host records the attempt as `Preparing` before its describe, preview and

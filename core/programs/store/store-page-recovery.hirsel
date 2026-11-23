@@ -1,0 +1,89 @@
+fn attach_page_graph(mut graph: PageGraph, empty_collection: Arc[std.page.Page]) -> Result[Map[u64, Arc[std.page.Page]], Error] {
+    let mut pages: Map[u64, Arc[std.page.Page]] = map.new()
+    let mut bodies: Map[u64, Arc[Bytes]] = map.new()
+    let stamps = replace(mut graph.postorder, list.new())
+    for stamp in stamps {
+        let frame = option.unwrap(map.remove(mut graph.frames, stamp))
+        match take frame {
+            ReadBlob(take raw) => {
+                let mut moved: Option[Bytes] = Some(take raw)
+                let mut counted = disk_allocation(fn() -> Result[Arc[Bytes], Error] {
+                    let empty: Bytes = list.new()
+                    Ok(arc.new(take empty))
+                })?
+                let attached = arc.with_unique(mut counted, scoped fn(mut body: Bytes) {
+                    body = option.unwrap(replace(mut moved, None))
+                })
+                let _ = option.unwrap(attached)
+                capacity(map.try_reserve(mut bodies, 1))?
+                map.insert(mut bodies, stamp, take counted)
+            },
+            ReadPage(take image, take children, take refs) => {
+                let mut kids: List[Arc[std.page.Page]] = list.new()
+                let mut blobs: List[Arc[Bytes]] = list.new()
+                capacity(list.try_reserve(mut kids, list.len(children)))?
+                capacity(list.try_reserve(mut blobs, list.len(refs)))?
+                for child in children {
+                    let attached = if child == 0 {
+                        arc.share(empty_collection)
+                    } else {
+                        let Some(page) = map.get(pages, child) else {
+                            fail("missing validated child")
+                        }
+                        arc.share(page)
+                    }
+                    list.push(mut kids, take attached)
+                }
+                for body in refs {
+                    let Some(value) = map.get(bodies, body) else {
+                        fail("missing validated body")
+                    }
+                    list.push(mut blobs, arc.share(value))
+                }
+                let page = page_result(capacity(std.page.attach_fallible(take image, take kids, take blobs))?)?
+                capacity(map.try_reserve(mut pages, 1))?
+                map.insert(mut pages, stamp, take page)
+            },
+        }
+    }
+    Ok(take pages)
+}
+
+type LoadedPageStore: send {
+    manifest: PageManifest,
+    holders: List[PageRoots],
+    lists: PagedLists,
+    locations: PageLocations
+}
+
+fn attach_manifest_holders(manifest: PageManifest, pages: Map[u64, Arc[std.page.Page]], empty_collection: Arc[std.page.Page]) -> List[PageRoots] {
+    let mut all: List[PageRoots] = list.with_capacity(list.len(manifest.branches) + list.len(manifest.pins))
+    for item in manifest.branches {
+        list.push(mut all, attach_page_roots(pages, item.roots, manifest.inline, empty_collection))
+    }
+    for held in manifest.pins {
+        list.push(mut all, attach_page_roots(pages, held.roots, manifest.inline, empty_collection))
+    }
+    take all
+}
+
+fn rebuild_page_store(take validated: ValidatedPageManifest) -> Result[LoadedPageStore, Error] {
+    let locations = disk_allocation(scoped fn() -> Result[PageLocations, Error] {
+        rebuild_page_locations(validated)
+    })?
+    let ValidatedPageManifest(manifest: take manifest, graph: take resolved, ..) = take validated
+    let mut graph = take resolved
+    let empty_collection = disk_allocation(fn() -> Result[Arc[std.page.Page], Error] {
+        Ok(std.page.empty(0, 0, Collection))
+    })?
+    let pages = attach_page_graph(mut graph, empty_collection)?
+    let (take holders, take lists) = disk_allocation(scoped fn() -> Result[(List[PageRoots], PagedLists), Error] {
+        let all = attach_manifest_holders(manifest, pages, empty_collection)
+        let list_tree = attach_page_tree(pages, manifest.pack_root, Unprefixed, 1024, None)
+        let retirement_tree = attach_page_tree(pages, manifest.retirement_root, Unprefixed, 1024, None)
+        let PageTree(root: take packs, ..) = take list_tree
+        let PageTree(root: take retired, ..) = take retirement_tree
+        Ok((take all, PagedLists(packs: take packs, retired: take retired)))
+    })?
+    Ok(LoadedPageStore(manifest: take manifest, holders: take holders, lists: take lists, locations: take locations))
+}

@@ -639,13 +639,17 @@ fn scan_pack_frame(mut checked_pack: PackScan, path: String, at: u64, kind: u16,
 }
 
 fn index_page_pack(path: String, id: StoreId, seq: u64, pack: PagePack, next_stamp: u64, raw: Bytes) -> Result[Map[u64, DiskFrame], Error] {
-    let expected_frames: u64 = int.widen(pack.frames)
     let header = disk_read_header(path, raw, 3, Some(seq), Some(id))?
+    index_pack_frames(path, header.context, pack, next_stamp, raw)
+}
+
+fn index_pack_frames(path: String, ctx: DiskContext, pack: PagePack, next_stamp: u64, raw: Bytes) -> Result[Map[u64, DiskFrame], Error] {
+    let expected_frames: u64 = int.widen(pack.frames)
     let mut frames: Map[u64, DiskFrame] = map.new()
     let mut checked_pack = pack_scan(pack.class, next_stamp)
     let mut at = 72u64
     while at < list.len(raw) {
-        let frame = disk_frame_bytes(path, header.context, raw, at)?
+        let frame = disk_frame_bytes(path, ctx, raw, at)?
         let size = frame.end - frame.payload
         let stamp_bytes = list.slice(raw, frame.payload, frame.payload + order.min(size, checked_pack.stamp_at + 8))
         let _ = scan_pack_frame(mut checked_pack, path, at, frame.kind, frame.flags, size, stamp_bytes)?
@@ -666,7 +670,7 @@ type ListedPages {
     live_graph: PageGraph
 }
 
-fn read_list_page(d: Dir, id: StoreId, ptr: std.page.PagePtr) -> Result[std.page.Image, Error] waits {
+fn read_list_page(mut d: Dir, id: StoreId, ptr: std.page.PagePtr) -> Result[(String, std.page.Image), Error] waits {
     let path = paged_pack_path(ptr.pack)?
     let mut opened = match host.open(d, path, Read) {
         Ok(take file) => take file,
@@ -678,9 +682,16 @@ fn read_list_page(d: Dir, id: StoreId, ptr: std.page.PagePtr) -> Result[std.page
     if width > PAGE_LIMIT || ptr.offset > size || 16 + width > size - ptr.offset {
         return Error(disk_fault(path, ptr.offset, Malformed))
     }
-    let context = DiskContext(store: id, role: 3, seq: ptr.pack)
-    let mut raw = read_disk_bytes(mut opened, path, ptr.offset, 16 + width)?
+    let raw = read_disk_bytes(mut opened, path, ptr.offset, 16 + width)?
     disk_io(host.close(take opened))?
+    let image = decode_list_page(path, id, ptr, take raw)?
+    Ok((take path, take image))
+}
+
+fn decode_list_page(path: String, id: StoreId, ptr: std.page.PagePtr, take input: Bytes) -> Result[std.page.Image, Error] {
+    let context = DiskContext(store: id, role: 3, seq: ptr.pack)
+    let width: u64 = int.widen(ptr.len)
+    let mut raw = take input
     disk_allocation(scoped fn() -> Result[(), Error] {
         let head = list.slice(raw, 0, 16)
         let frame = disk_read_frame_head(path, head, ptr.offset)?
@@ -736,15 +747,15 @@ fn page_edge_order(path: String, parent: std.page.PagePtr, child: std.page.PageP
     Ok(())
 }
 
-fn read_list_tree(d: Dir, id: StoreId, manifest: PageManifest, ptr: std.page.PagePtr, expected_level: Option[u8], retired: bool, mut last: Option[u64], mut lists: ListedPages) -> Result[(), Error] waits {
+fn read_page_list[S](mut source: S, id: StoreId, manifest: PageManifest, ptr: std.page.PagePtr, expected_level: Option[u8], retired: bool, mut last: Option[u64], mut lists: ListedPages, load_list_image: scoped[view] fn(mut S, StoreId, std.page.PagePtr) -> Result[(String, std.page.Image), Error] waits) -> Result[(), Error] waits {
     if ptr.stamp == 0 {
         return Ok(())
     }
-    let path = paged_pack_path(ptr.pack)?
     if ptr.pack == 0 || ptr.pack >= manifest.next_pack || ptr.stamp >= manifest.next_stamp {
+        let path = paged_pack_path(ptr.pack)?
         return Error(disk_fault(path, ptr.offset, Malformed))
     }
-    let image = read_list_page(d, id, ptr)?
+    let (take path, take image) = load_list_image(mut source, id, ptr)?
     let height = std.page.level(image)
     if let Some(expected) = expected_level {
         if height != expected {
@@ -777,7 +788,7 @@ fn read_list_tree(d: Dir, id: StoreId, manifest: PageManifest, ptr: std.page.Pag
         match row.cell {
             Child(edge) => {
                 page_edge_order(path, ptr, edge.child)?
-                read_list_tree(d, id, manifest, edge.child, Some(height - 1), retired, mut last, mut lists)?
+                read_page_list(mut source, id, manifest, edge.child, Some(height - 1), retired, mut last, mut lists, load_list_image)?
                 capacity(list.try_reserve(mut kids, 1))?
                 list.push(mut kids, edge.child.stamp)
             },
@@ -871,6 +882,10 @@ fn resolve_blob(packs: Map[u64, LoadedPack], reference: std.page.BlobRef, mut gr
     let Some(pack) = map.get(packs, reference.pack) else {
         return Error(disk_fault(path, reference.offset, Dangling(reference.stamp)))
     }
+    resolve_blob_frame(path, pack, reference, mut graph)
+}
+
+fn resolve_blob_frame(path: String, pack: LoadedPack, reference: std.page.BlobRef, mut graph: PageGraph) -> Result[(), Error] {
     if pack.class != 1 {
         return Error(disk_fault(path, reference.offset, Malformed))
     }
@@ -977,9 +992,10 @@ fn validate_page_manifest(d: Dir, id: StoreId, take manifest: PageManifest) -> R
     let graph = PageGraph(stamps: map.new(), frames: map.new(), postorder: list.new())
     let mut lists = ListedPages(packs: map.new(), retired: map.new(), class_two: map.new(), live_graph: take graph)
     let mut last: Option[u64] = None
-    read_list_tree(d, id, manifest, manifest.pack_root, None, false, mut last, mut lists)?
+    let mut directory = d
+    read_page_list(mut directory, id, manifest, manifest.pack_root, None, false, mut last, mut lists, read_list_page)?
     last = None
-    read_list_tree(d, id, manifest, manifest.retirement_root, None, true, mut last, mut lists)?
+    read_page_list(mut directory, id, manifest, manifest.retirement_root, None, true, mut last, mut lists, read_list_page)?
     for (seq, _) in lists.class_two {
         if map.contains(lists.packs, seq) || map.contains(lists.retired, seq) {
             return Error(disk_fault("MANIFEST", 72, Malformed))
@@ -1068,94 +1084,4 @@ fn publish_page_manifest_bytes(d: Dir, raw: Bytes) -> Result[(), Error] waits {
     disk_write_synced(d, "MANIFEST.tmp", raw)?
     disk_io(host.rename(d, "MANIFEST.tmp", "MANIFEST"))?
     disk_io(host.sync_dir(d))
-}
-
-fn attach_page_graph(mut graph: PageGraph, empty_collection: Arc[std.page.Page]) -> Result[Map[u64, Arc[std.page.Page]], Error] {
-    let mut pages: Map[u64, Arc[std.page.Page]] = map.new()
-    let mut bodies: Map[u64, Arc[Bytes]] = map.new()
-    let stamps = replace(mut graph.postorder, list.new())
-    for stamp in stamps {
-        let frame = option.unwrap(map.remove(mut graph.frames, stamp))
-        match take frame {
-            ReadBlob(take raw) => {
-                let mut moved: Option[Bytes] = Some(take raw)
-                let mut counted = disk_allocation(fn() -> Result[Arc[Bytes], Error] {
-                    let empty: Bytes = list.new()
-                    Ok(arc.new(take empty))
-                })?
-                let attached = arc.with_unique(mut counted, scoped fn(mut body: Bytes) {
-                    body = option.unwrap(replace(mut moved, None))
-                })
-                let _ = option.unwrap(attached)
-                capacity(map.try_reserve(mut bodies, 1))?
-                map.insert(mut bodies, stamp, take counted)
-            },
-            ReadPage(take image, take children, take refs) => {
-                let mut kids: List[Arc[std.page.Page]] = list.new()
-                let mut blobs: List[Arc[Bytes]] = list.new()
-                capacity(list.try_reserve(mut kids, list.len(children)))?
-                capacity(list.try_reserve(mut blobs, list.len(refs)))?
-                for child in children {
-                    let attached = if child == 0 {
-                        arc.share(empty_collection)
-                    } else {
-                        let Some(page) = map.get(pages, child) else {
-                            fail("missing validated child")
-                        }
-                        arc.share(page)
-                    }
-                    list.push(mut kids, take attached)
-                }
-                for body in refs {
-                    let Some(value) = map.get(bodies, body) else {
-                        fail("missing validated body")
-                    }
-                    list.push(mut blobs, arc.share(value))
-                }
-                let page = page_result(capacity(std.page.attach_fallible(take image, take kids, take blobs))?)?
-                capacity(map.try_reserve(mut pages, 1))?
-                map.insert(mut pages, stamp, take page)
-            },
-        }
-    }
-    Ok(take pages)
-}
-
-type LoadedPageStore: send {
-    manifest: PageManifest,
-    holders: List[PageRoots],
-    lists: PagedLists,
-    locations: PageLocations
-}
-
-fn attach_manifest_holders(manifest: PageManifest, pages: Map[u64, Arc[std.page.Page]], empty_collection: Arc[std.page.Page]) -> List[PageRoots] {
-    let mut all: List[PageRoots] = list.with_capacity(list.len(manifest.branches) + list.len(manifest.pins))
-    for item in manifest.branches {
-        list.push(mut all, attach_page_roots(pages, item.roots, manifest.inline, empty_collection))
-    }
-    for held in manifest.pins {
-        list.push(mut all, attach_page_roots(pages, held.roots, manifest.inline, empty_collection))
-    }
-    take all
-}
-
-fn rebuild_page_store(take validated: ValidatedPageManifest) -> Result[LoadedPageStore, Error] {
-    let locations = disk_allocation(scoped fn() -> Result[PageLocations, Error] {
-        rebuild_page_locations(validated)
-    })?
-    let ValidatedPageManifest(manifest: take manifest, graph: take resolved, ..) = take validated
-    let mut graph = take resolved
-    let empty_collection = disk_allocation(fn() -> Result[Arc[std.page.Page], Error] {
-        Ok(std.page.empty(0, 0, Collection))
-    })?
-    let pages = attach_page_graph(mut graph, empty_collection)?
-    let (take holders, take lists) = disk_allocation(scoped fn() -> Result[(List[PageRoots], PagedLists), Error] {
-        let all = attach_manifest_holders(manifest, pages, empty_collection)
-        let list_tree = attach_page_tree(pages, manifest.pack_root, Unprefixed, 1024, None)
-        let retirement_tree = attach_page_tree(pages, manifest.retirement_root, Unprefixed, 1024, None)
-        let PageTree(root: take packs, ..) = take list_tree
-        let PageTree(root: take retired, ..) = take retirement_tree
-        Ok((take all, PagedLists(packs: take packs, retired: take retired)))
-    })?
-    Ok(LoadedPageStore(manifest: take manifest, holders: take holders, lists: take lists, locations: take locations))
 }

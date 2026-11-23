@@ -563,15 +563,8 @@ fn bucket_m2_law_recover(tasks: Tasks, sim: BucketSim) -> Result[(), Error] wait
     let _ = history_fetch(mut client, "head", mut head_buf, due)?
     let captured = history_decode_head(head_buf)?
     let history_head = captured.head
-    let chain = history_suffix(mut client, history_head, history_head.checkpoint, due)?
-    let (take mark, _) = history_checkpoint(mut client, history_head, due)?
-    let manifest = history_read_manifest(mut client, history_head.store, mark, history_head.checkpoint.seq, due)?
-    if manifest.generation != 1 || manifest.next_pack != 1 || manifest.first_live != 1 || list.len(manifest.branches) != 1 || manifest.branches[0].version != 0 {
-        fail("recovery did not load the genesis MANIFEST")
-    }
-    let initial = capacity(main_state(empty_roots(), 0, 0))?
-    let mut replay = journal_replay(take initial, 0)?
-    history_apply_suffix(mut client, history_head, history_head.checkpoint.seq, chain, mut replay, 1048576, due)?
+    let mut source = ObjectPackRead(client: take client, locator: HistoryLocator(rows: map.new(), chunks: list.new(), last_pack: 0), deadline: due)
+    let replay = history_paged_capture(mut source, history_head, 1048576)?
     if replay.state.tips[0].head != 1 {
         fail("recovery did not apply exactly the published suffix")
     }
@@ -642,4 +635,115 @@ fn bucket_test_m2_reclaim_candidates() -> Result[(), Error] {
         fail("the pass retained a name known to be dead")
     }
     Ok(())
+}
+
+fn bucket_m2_pack_value() -> Bytes {
+    let mut out: Bytes = list.with_capacity(2048)
+    list.fill(mut out, 2048, 70u8)
+    take out
+}
+
+fn bucket_m2_seed_checkpoint(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let mut db = open(tasks, d, c, r, defaults())?
+    let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_bytes()))?
+    let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    let data = bucket_m2_pack_value()
+    let outcome = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+        put(mut tx, rows, 7, data)
+    })?
+    if let Committed(_) = outcome {} else {
+        fail("the checkpoint fixture refused its row")
+    }
+    let _ = checkpoint(mut db)?
+    close(take db)
+}
+
+fn bucket_m2_object_header(mut raw: Bytes, id: StoreId, role: u8, seq: u64) -> Result[(), Error] {
+    let mut header: Bytes = list.with_capacity(72 + BINDING_BYTES)
+    capacity(history_append_header(mut header, DiskContext(store: id, role, seq), 1))?
+    for at in 0u64 .. 72 {
+        raw[at] = header[at]
+    }
+    Ok(())
+}
+
+fn bucket_m2_pack_entry(mut raw: Bytes, id: StoreId, manifest: HistoryRef, refs: List[HistoryRef]) -> Result[HistoryRef, Error] {
+    let ctx = DiskContext(store: id, role: 2, seq: 1)
+    let empty = HistoryRef(seq: 0, epoch: 0, len: 0, digest: 0)
+    history_packet_header(mut raw, ctx, 1, empty)?
+    list.fill(mut raw, 16, 0u8)
+    list.put_word_le(mut raw, manifest.seq)
+    list.put_word_le(mut raw, manifest.epoch)
+    list.put_word_le(mut raw, manifest.digest)
+    list.put_word_le(mut raw, manifest.len)
+    list.put_word_le(mut raw, 1u64)
+    list.push(mut raw, 0u8)
+    list.put_word_le(mut raw, 0u32)
+    capacity(history_seal(mut raw, ctx, 112, 0x0090))?
+    let at = list.len(raw)
+    list.fill(mut raw, 16, 0u8)
+    for item in refs {
+        history_ref_encode(mut raw, item)
+    }
+    capacity(history_seal(mut raw, ctx, at, 0x00C0))?
+    Ok(history_new_ref(1, 1, raw))
+}
+
+fn bucket_m2_read_packs(d: Dir, tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits {
+    let (id, take selected) = read_page_manifest_file(d)?
+    let validated = validate_page_manifest(d, id, take selected)?
+    let ValidatedPageManifest(manifest: take initial, inventory: take inventory, ..) = take validated
+    let mut manifest = take initial
+    manifest.first_live = 1
+    manifest.prev_first = 1
+    manifest.retirement_root = std.page.unlocated(0)
+    let mut client = bucket_law_client(sim, tasks, "s3.test", 3)?
+    let due = std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS)
+    let mut refs: List[HistoryRef] = list.with_capacity(map.len(inventory))
+    let mut kinds = 0u8
+    for (seq, pack) in inventory {
+        kinds |= 1u8 << pack.class
+        let file = paged_pack_path(seq)?
+        let mut raw = disk_read_paged_file(d, file, 1048576)?
+        bucket_m2_object_header(mut raw, id, 3, seq)?
+        let item = history_new_ref(seq, 1, raw)
+        let name = history_key("p-", item)
+        let mut buffer: Bytes = list.with_capacity(item.len)
+        history_create(mut client, name, mut raw, mut buffer, due)?
+        list.push(mut refs, item)
+    }
+    if kinds != 7 {
+        fail("the checkpoint fixture missed a pack class")
+    }
+    list.sort(mut refs, fn(a: HistoryRef, b: HistoryRef) -> Order {
+        order.compare(a.seq, b.seq)
+    })
+    let mut raw_manifest = disk_page_manifest_bytes(id, manifest)?
+    bucket_m2_object_header(mut raw_manifest, id, 1, manifest.generation)?
+    let base = history_new_ref(manifest.generation, 1, raw_manifest)
+    let mut compare: Bytes = list.with_capacity(65536)
+    history_create(mut client, history_key("m-", base), mut raw_manifest, mut compare, due)?
+    let mut raw_entry: Bytes = list.with_capacity(65536)
+    let entry_ref = bucket_m2_pack_entry(mut raw_entry, id, base, refs)?
+    history_create(mut client, history_key("e-", entry_ref), mut raw_entry, mut compare, due)?
+    let head = HistoryHead(store: id, pair: HistoryPair(epoch: 1, holder: StoreId(hi: 17, lo: 18)), activation: 0, entry: entry_ref, checkpoint: entry_ref, floor: 1, binding:[0; 32])
+    let mut source = ObjectPackRead(client: take client, locator: HistoryLocator(rows: map.new(), chunks: list.new(), last_pack: 0), deadline: due)
+    let replay = history_paged_capture(mut source, head, 1048576)?
+    let root = view replay.state.tips[0]
+    let snap = Snapshot(store: id, open: 0, branch: 0, head: root.head, roots: share_roots(root.roots))
+    let rows = catalog_handle(id, root.roots.catalog, false, string.from("rows"), std.codec.key_u64(), std.codec.of_bytes())?
+    if version(snap) != 2 || get(snap, shape(rows), 7)? != Some(bucket_m2_pack_value()) {
+        fail("the object checkpoint did not reconstruct its row")
+    }
+    Ok(())
+}
+
+@test
+fn bucket_test_m2_paged_recovery(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let directory = disk_test_directory(d)
+    bucket_m2_seed_checkpoint(directory, c, r, tasks)?
+    let sim = bucket_law_sim(tasks, c, 5, None, list.new())
+    let recovered = bucket_m2_read_packs(directory, tasks, sim)
+    let _ = bucket_law_finish(take sim)
+    recovered
 }

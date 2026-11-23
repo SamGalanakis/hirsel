@@ -304,12 +304,19 @@ fn terminal_prefix_is_derived_after_generic_substitution() {
     assert_eq!(report.outcome, eval::Outcome::Returned(vec![45]));
     assert_eq!(report.used, 0);
     let recipes = hirsel_core_layout::compute(&module.types).unwrap();
+    let tested_elements: Vec<_> = module
+        .instances
+        .iter()
+        .filter(|key| key.definition.0.name == "buffered")
+        .map(|key| &key.arguments)
+        .collect();
     let mut checked = 0;
     for function in &module.functions {
         let key = &module.instances[function.instance.index()];
-        if !matches!(key.definition.0.name.as_str(), "wrap" | "buffered")
-            || module.argument_names(key).is_empty()
-        {
+        let tested = matches!(key.definition.0.name.as_str(), "wrap" | "buffered")
+            || ((key.definition.is_core("list.grow") || key.definition.is_core("list.grow_by"))
+                && tested_elements.contains(&&key.arguments));
+        if !tested || key.arguments.is_empty() {
             continue;
         }
         let plain = module.argument_names(key) == ["u64"];
@@ -753,6 +760,7 @@ fn f{entry} = n{instance} g{g} {{
 "#,
             target.0, signature.0
         );
+        let fixed_map = source.contains("Map[u64,u64]");
         let fixture = if source.contains("FixedSpan[")
             || source.contains("SeqSpan[")
             || source.contains("IndexedSpan[")
@@ -845,34 +853,29 @@ fn f{entry} = n{instance} g{g} {{
                 .replace("store a2, v9", "store a2, v3")
                 .replace("store a4, v6\n  store a5, v7\n  store a6, v8", &build)
                 .replace(&format!("drop a0 t{list}"), "free v4 charge v0")
-        } else if source.contains("Map[u64,u64]") {
+        } else if fixed_map {
             let mut addresses = String::new();
             let mut build = String::new();
-            // SipHash-1-3 under the evaluator's zero key, with the matching
-            // private index words after the entry rows and metadata.
+            // The grouped index in docs/internal/map-index.md. Capacity 3 has
+            // three 24-byte entries, a 32-byte header and one 80-byte group.
+            // The zero run key gives fast tags 0x73 for 7 and 0x28 for 13.
             for (i, (offset, bits)) in [
-                (0, 0x6634b0bda4fe8a7bu64),
-                (8, 1),
-                (16, 7),
-                (24, 70),
-                (32, 0x157dbcb1260ec7ee),
-                (40, 0),
-                (48, 11),
-                (56, 110),
-                (64, 0x53d1166d79c4dddf),
-                (72, 1),
-                (80, 13),
-                (88, 130),
-                (96, 2),  // live count differs from the three occupied slots
-                (104, 8), // cached index length, independent of capacity=3
-                (112, 0),
-                (120, 0),
-                (128, 0),
-                (136, 0x6634b0bda4fe8a79),
-                (144, 0),
-                (152, 0),
-                (160, 0x157dbcb1260ec7ea),
-                (168, 0x53d1166d79c4dddb),
+                (0, 0xe79c3eee84e3236cu64),
+                (8, 7),
+                (16, 70),
+                (24, 0), // dead slot; key and value remain in the bytes
+                (32, 11),
+                (40, 110),
+                (48, 0x516fc537802c5bf1),
+                (56, 13),
+                (64, 130),
+                (72, 2), // live count and three zero words: mask, mode, reserved
+                (80, 0),
+                (88, 0),
+                (96, 0),
+                (104, 0xffff_ffff_ffff_2873),
+                (112, u64::MAX),
+                (120, 2u64 << 32), // bucket 0 names slot 0, bucket 1 names slot 2
             ]
             .into_iter()
             .enumerate()
@@ -885,7 +888,7 @@ fn f{entry} = n{instance} g{g} {{
             fixture
                 .replace(
                     "v0: u64 = const 24",
-                    "v0: u64 = const 96\n  v11: u64 = const 176",
+                    "v0: u64 = const 96\n  v11: u64 = const 184",
                 )
                 .replace(
                     &format!("alloc for {edge} v0 align 8 charge v0"),
@@ -913,7 +916,12 @@ fn f{entry} = n{instance} g{g} {{
         };
         let fixture = text::parse(&format!("{}{fixture}", text::print(module))).unwrap();
         wf::module(&fixture).unwrap();
-        let report = eval::run(&fixture, FuncId(entry as u32), &[], 1_000_000);
+        let entry = FuncId(entry as u32);
+        let report = if fixed_map {
+            eval::run_map_hash(&fixture, entry, &[], 1_000_000, [0; 16]).0
+        } else {
+            eval::run(&fixture, entry, &[], 1_000_000)
+        };
         assert_eq!(report.outcome, expected, "{source}");
         assert_eq!(report.used, 0, "{source}: list storage leaked");
     }

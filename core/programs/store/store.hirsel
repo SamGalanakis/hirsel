@@ -2039,8 +2039,7 @@ pub fn durable_now(mut db: Db, t: Ticket) -> Result[bool, Error] {
     if covered(db, t.mark) {
         return Ok(true)
     }
-    let Some(state) = view db.disk else { return Ok(true) }
-    let pending = channel.try_receive(state.acks)
+    let pending = match db.disk { Some(state) => channel.try_receive(state.acks), None => return Ok(true) }
     match take pending {
         Ok(take ack) => journal_ack(mut db, take ack)?,
         Error(Empty) => {},

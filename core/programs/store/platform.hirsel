@@ -30,6 +30,10 @@ pub type GroupRow: codec + send {
     retained: List[Bytes],
     incarnation: u64,
     retiring: Option[Disposition],
+    // The program's arguments, passed to every serving start of the group.
+    args: List[String],
+    // Whether its serving starts are recorded, and where.
+    record: Option[operator.Record],
 }
 
 // Which of an Undecided deploy's two recorded pairs the group's next probe opens: NEW's
@@ -151,6 +155,8 @@ pub type NewGroup: send {
     limits: launcher.Limits,
     assembly: Bytes,
     activation: u64,
+    args: List[String],
+    record: Option[operator.Record],
 }
 
 pub type Queued: send {
@@ -289,6 +295,8 @@ pub opaque type Host {
     due_wakes: u64,
     arrival_wakes: u64,
     binds_sent: bool,
+    // The wall clock of the input being handled, in Unix seconds: a recording pin's start.
+    clock_s: u64,
     collecting: Collecting,
     // The operator connection that owns each attached request, the phase last sent to it,
     // and the answers not yet written.
@@ -422,7 +430,7 @@ pub fn open(take opened: store.Db, first: Config) -> Result[(Host, List[launcher
     decided(mut db, take made)?
     let mut out: List[launcher.Request] = list.new()
     list.push(mut out, Hello)
-    Ok((Host(db: take db, t: take t, vol: map.new(), queue: list.new(), probes: 0u64, due_wakes: 0u64, arrival_wakes: 0u64, binds_sent: false, collecting: Unfenced, owners: map.new(), shown: map.new(), outbox: list.new(), later: list.new()), take out))
+    Ok((Host(db: take db, t: take t, vol: map.new(), queue: list.new(), probes: 0u64, due_wakes: 0u64, arrival_wakes: 0u64, binds_sent: false, clock_s: 0u64, collecting: Unfenced, owners: map.new(), shown: map.new(), outbox: list.new(), later: list.new()), take out))
 }
 
 // The host's store, for a restart: the process ends and only the store survives.
@@ -450,7 +458,50 @@ fn bind_request(name: String, g: GroupRow) -> launcher.Request {
 
 fn serving_launch(name: String, g: GroupRow, gen: u64, activation: u64, assembly: Bytes, idle: u64, candidate: Option[u64]) -> launcher.Request {
     let mode: launcher.Mode = ServingMode(gen, launcher.Serve(activation: activation, idle: idle, candidate: candidate))
-    Start(launcher.Launch(group: group_of(name, g.incarnation), assembly: clone(assembly), workdir: string.from(g.workdir), args: list.new(), mode: mode, recording: None))
+    let recording: Option[launcher.Recording] = match g.record {
+        Some(r) => {
+            let id = recording_id(g.incarnation, gen)
+            let destination = joined(joined(joined(r.dir, "/"), hex_of(id)), ".tape")
+            Some(launcher.Recording(id: take id, destination: take destination))
+        },
+        None => None,
+    }
+    Start(launcher.Launch(group: group_of(name, g.incarnation), assembly: clone(assembly), workdir: string.from(g.workdir), args: clone(g.args), mode: mode, recording: take recording))
+}
+
+// A serving start's recording ID (launch.md "Recording a group"): its group's incarnation
+// and its generation, each little-endian u64. Incarnations are never reused and a group's
+// generations only grow, so no two starts share one, and a start sent again after a host
+// restart names the pin its first sending committed.
+fn recording_id(incarnation: u64, gen: u64) -> Bytes {
+    let mut b: Bytes = list.with_capacity(16u64)
+    for i in 0u64 .. 8u64 {
+        list.push(mut b, int.narrow((incarnation >> (8u64 * i)) & 255u64))
+    }
+    for i in 0u64 .. 8u64 {
+        list.push(mut b, int.narrow((gen >> (8u64 * i)) & 255u64))
+    }
+    b
+}
+
+fn hex_of(b: Bytes) -> String {
+    let digits = "0123456789abcdef"
+    let mut out = string.new()
+    for x in b {
+        let v: u64 = int.widen(x)
+        out = joined(joined(out, string.slice(digits, v >> 4u64, (v >> 4u64) + 1u64)), string.slice(digits, v & 15u64, (v & 15u64) + 1u64))
+    }
+    out
+}
+
+// A recorded group's serving start at `gen` is pinned in the transaction that allocates
+// `gen`, so no recording runs before the pin that names its assembly is durable.
+fn pin_start(mut tx: store.Tx, t: Tables, g: GroupRow, gen: u64, assembly: Bytes, now_s: u64) -> Result[(), Refused] {
+    let retention = match g.record {
+        Some(r) => r.retention_s,
+        None => return Ok(()),
+    }
+    st(store.put(mut tx, t.pins, recording_id(g.incarnation, gen), Pin(assembly: clone(assembly), expires: now_s + retention)))
 }
 
 fn child_of(name: String, incarnation: u64, gen: u64) -> launcher.Child {
@@ -690,11 +741,13 @@ fn mark_clean(mut tx: store.Tx, t: Tables, name: String, g: u64, next_due: Optio
 }
 
 fn launch_dirty(mut h: Host, name: String, probe: bool, mut out: List[launcher.Request]) -> Result[(), Refused] waits {
+    let now_s = h.clock_s
     let made = {
         let t = view h.t
         store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[(GroupRow, u64, Bytes, u64), Refused] {
             let (g, gen) = remark(mut tx, t, name)?
             let (assembly, activation) = probe_pair(tx, t, name, g)?
+            pin_start(mut tx, t, g, gen, assembly, now_s)?
             Ok((g, gen, assembly, activation))
         })
     }
@@ -715,10 +768,13 @@ fn launch_dirty(mut h: Host, name: String, probe: bool, mut out: List[launcher.R
 
 // A cold group's wake (§14.3, the Cold row): the check, `Dirty(gen + 1)`, a launch.
 fn activate(mut h: Host, name: String, mut out: List[launcher.Request]) -> Result[(), Refused] waits {
+    let now_s = h.clock_s
     let made = {
         let t = view h.t
         store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[(GroupRow, u64), Refused] {
-            mark_dirty(mut tx, t, name)
+            let (g, gen) = mark_dirty(mut tx, t, name)?
+            pin_start(mut tx, t, g, gen, g.assembly, now_s)?
+            Ok((g, gen))
         })
     }
     let (g, gen) = decided(mut h.db, take made)?
@@ -1543,6 +1599,7 @@ fn bind_failed(mut h: Host, g: launcher.Group, why: String) waits {
 
 // Applies one launcher event in stream order, and returns the requests it decided.
 pub fn event(mut h: Host, take e: launcher.Event, now: Now) -> List[launcher.Request] waits {
+    h.clock_s = now.wall_ms / 1000u64
     let mut out: List[launcher.Request] = list.new()
     match take e {
         Inventory(children, readable, held) => reconcile(mut h, children, readable, held, now, mut out),
@@ -1588,6 +1645,7 @@ fn drain_later(mut h: Host, mut out: List[launcher.Request]) {
 
 // Due times and backoff retries that have come.
 pub fn tick(mut h: Host, now: Now) -> List[launcher.Request] waits {
+    h.clock_s = now.wall_ms / 1000u64
     let mut out: List[launcher.Request] = list.new()
     let mut retry: List[String] = list.new()
     for (name, v) in h.vol {
@@ -1649,7 +1707,7 @@ pub fn add_group(mut h: Host, spec: NewGroup) -> Result[List[launcher.Request], 
                 }
             }
             let mut meta = meta_of(tx, t)?
-            let g = GroupRow(tenant: string.from(spec.tenant), workdir: string.from(spec.workdir), author: spec.author, label: spec.label, listen: string.from(spec.listen), bindings: clone(spec.bindings), limits: spec.limits, assembly: clone(spec.assembly), activation: spec.activation, retained: list.new(), incarnation: meta.next_incarnation, retiring: None)
+            let g = GroupRow(tenant: string.from(spec.tenant), workdir: string.from(spec.workdir), author: spec.author, label: spec.label, listen: string.from(spec.listen), bindings: clone(spec.bindings), limits: spec.limits, assembly: clone(spec.assembly), activation: spec.activation, retained: list.new(), incarnation: meta.next_incarnation, retiring: None, args: clone(spec.args), record: clone(spec.record))
             meta.next_incarnation += 1u64
             st(store.put(mut tx, t.meta, 0u64, meta))?
             st(store.put(mut tx, t.groups, spec.name, g))?
@@ -2293,6 +2351,7 @@ fn digest_bytes(text: String) -> Bytes {
 // One frame from operator connection `conn` (launch.md "The operator socket"). Answers
 // go out through `answers`; a malformed or out-of-phase frame ends only this exchange.
 pub fn asked(mut h: Host, conn: u64, body: Bytes, now: Now) -> List[launcher.Request] waits {
+    h.clock_s = now.wall_ms / 1000u64
     let mut out: List[launcher.Request] = list.new()
     let Some(ask) = operator.decode_ask(body) else {
         refuse(mut h, conn, ProtocolClass, "the frame is not one operator request")
@@ -2738,7 +2797,7 @@ fn registered_row(spec: operator.Registration, incarnation: u64) -> GroupRow {
     } else {
         Untrusted
     }
-    GroupRow(tenant: string.from(spec.tenant), workdir: string.from(spec.workdir), author: author, label: spec.label, listen: string.from(spec.listen), bindings: clone(spec.bindings), limits: spec.limits, assembly: list.new(), activation: 0u64, retained: list.new(), incarnation: incarnation, retiring: None)
+    GroupRow(tenant: string.from(spec.tenant), workdir: string.from(spec.workdir), author: author, label: spec.label, listen: string.from(spec.listen), bindings: clone(spec.bindings), limits: spec.limits, assembly: list.new(), activation: 0u64, retained: list.new(), incarnation: incarnation, retiring: None, args: clone(spec.args), record: clone(spec.record))
 }
 
 // Whether a catalog group already holds store directory `path`.
@@ -3215,6 +3274,7 @@ fn prep_placed(mut h: Host, name: String, take p: Prep, reply: runner.HostReply,
 // v = head + 1. Only then does the candidate start and OLD get the cutover.
 fn prep_pending(mut h: Host, name: String, take p: Prep, head: u64, digest: Bytes, mut out: List[launcher.Request]) waits {
     let activation = head + 1u64
+    let now_s = h.clock_s
     let made = {
         let t = view h.t
         let q = view p
@@ -3255,6 +3315,7 @@ fn prep_pending(mut h: Host, name: String, take p: Prep, head: u64, digest: Byte
             d.activation = activation
             d.candidate = c
             d.outcome = Pending
+            pin_start(mut tx, t, g, c, d.assembly, now_s)?
             put_deploy(mut tx, t, name, d, StoreClass)?
             Ok((g, c))
         })

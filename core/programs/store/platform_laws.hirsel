@@ -315,7 +315,7 @@ fn restart(take r: Rig, max_places: u64) -> Rig waits {
 }
 
 fn add(mut r: Rig, name: String, tenant: String) waits {
-    let spec = NewGroup(name: string.from(name), tenant: string.from(tenant), workdir: string.from(name), author: Trusted, label: Uncontained, listen: "127.0.0.1:0", bindings: uncontained(), limits: unlimited(), assembly: image(), activation: 1u64)
+    let spec = NewGroup(name: string.from(name), tenant: string.from(tenant), workdir: string.from(name), author: Trusted, label: Uncontained, listen: "127.0.0.1:0", bindings: uncontained(), limits: unlimited(), assembly: image(), activation: 1u64, args: list.new(), record: None)
     let reqs = must(add_group(mut r.h, spec), "add_group")
     pump(mut r, take reqs)
 }
@@ -1161,7 +1161,7 @@ fn seed_clean(mut r: Rig, n: u64, due: u64) waits {
                 for i in lo .. upto {
                     let mut name = string.from("bulk-")
                     string.push_uint(mut name, i, 10u32, 6u64, '0')
-                    let g = GroupRow(tenant: "bulk", workdir: string.from(name), author: Trusted, label: Uncontained, listen: "127.0.0.1:0", bindings: uncontained(), limits: unlimited(), assembly: image(), activation: 1u64, retained: list.new(), incarnation: 1000000u64 + i, retiring: None)
+                    let g = GroupRow(tenant: "bulk", workdir: string.from(name), author: Trusted, label: Uncontained, listen: "127.0.0.1:0", bindings: uncontained(), limits: unlimited(), assembly: image(), activation: 1u64, retained: list.new(), incarnation: 1000000u64 + i, retiring: None, args: list.new(), record: None)
                     st(store.put(mut tx, t.groups, name, g))?
                     let at: Option[u64] = if i < due {
                         Some(T0 + 10u64)
@@ -1310,7 +1310,7 @@ fn helpers_started(r: Rig) -> u64 {
 // A group g serving at gen 1 whose cgroup memory is `memory`, by `author`.
 fn admission_case(c: Clock, rnd: Random, memory: Option[u64], author: Author) -> Rig waits {
     let mut r = rig(c, rnd, 4u64)
-    let spec = NewGroup(name: "g", tenant: "t", workdir: "g", author: author, label: Uncontained, listen: "127.0.0.1:0", bindings: uncontained(), limits: launcher.Limits(memory: memory, cpu: None, pids: None), assembly: image(), activation: 1u64)
+    let spec = NewGroup(name: "g", tenant: "t", workdir: "g", author: author, label: Uncontained, listen: "127.0.0.1:0", bindings: uncontained(), limits: launcher.Limits(memory: memory, cpu: None, pids: None), assembly: image(), activation: 1u64, args: list.new(), record: None)
     let reqs = must(add_group(mut r.h, spec), "add_group")
     pump(mut r, take reqs)
     op_wake(mut r, "g")
@@ -1516,7 +1516,7 @@ fn operator_request_identity(c: Clock, rnd: Random) -> Result[(), ()] waits {
 }
 
 fn registration(name: String, label: launcher.Label, store_dir: String) -> operator.Registration {
-    operator.Registration(name: string.from(name), tenant: "t", workdir: string.from(name), trusted: true, label: label, listen: "127.0.0.1:0", bindings: launcher.Bindings(store: string.from(store_dir), dirs: list.new(), net: list.new()), limits: unlimited())
+    operator.Registration(name: string.from(name), tenant: "t", workdir: string.from(name), trusted: true, label: label, listen: "127.0.0.1:0", bindings: launcher.Bindings(store: string.from(store_dir), dirs: list.new(), net: list.new()), limits: unlimited(), args: list.new(), record: None)
 }
 
 // Registers `spec` under request `d` with NEW attested, on a new connection; the rig's
@@ -1580,6 +1580,40 @@ fn serving_at(r: Rig, name: String, activation: u64, assembly: Bytes) -> bool {
     false
 }
 
+// Whether group `name`'s first serving start carried its arguments and a recording whose
+// pin, committed before the start, names the start's assembly until its 60 s retention ends.
+fn recorded_start(r: Rig, name: String) -> bool {
+    for l in r.sent {
+        if let ServingMode(gen, _) = l.mode {
+            if l.group.name != name {
+                continue
+            }
+            let Some(rec) = l.recording else {
+                return false
+            }
+            let mut want_id: Bytes = list.new()
+            for i in 0u64 .. 8u64 {
+                list.push(mut want_id, int.narrow((l.group.incarnation >> (8u64 * i)) & 255u64))
+            }
+            for i in 0u64 .. 8u64 {
+                list.push(mut want_id, int.narrow((gen >> (8u64 * i)) & 255u64))
+            }
+            let now_s = r.now.wall_ms / 1000u64
+            let found = match resolve_pin(r.h, rec.id, now_s + 59u64) {
+                Ok(Found(a)) => a == l.assembly,
+                _ => false
+            }
+            let gone = match resolve_pin(r.h, rec.id, now_s + 60u64) {
+                Ok(Gone) => true,
+                _ => false
+            }
+            let args_ok = list.len(l.args) == 1u64 && l.args[0u64] == "--port"
+            return rec.id == want_id && string.starts_with(rec.destination, "/tapes/") && string.ends_with(rec.destination, ".tape") && found && gone && args_ok
+        }
+    }
+    false
+}
+
 // L51 `operator_register` (launch.md "Registering a group"): a Register binds the group's
 // listener before it opens the first release's admission, which has no OLD; nothing reaches
 // the group until that release is assembled. The assembled release is Installed at
@@ -1591,7 +1625,10 @@ fn serving_at(r: Rig, name: String, activation: u64, assembly: Bytes) -> bool {
 fn operator_register(c: Clock, rnd: Random) -> Result[(), ()] waits {
     let mut r = rig(c, rnd, 4u64)
     let d1 = request_id(1u64)
-    let reg = register_as(mut r, d1, registration("g", Uncontained, "s1"))
+    let mut recorded = registration("g", Uncontained, "s1")
+    list.push(mut recorded.args, "--port")
+    recorded.record = Some(operator.Record(dir: "/tapes", retention_s: 60u64))
+    let reg = register_as(mut r, d1, clone(recorded))
     expect(bind_then_admit(r, "g") && admits(r) == 1u64, "L51: the first admission was not opened after the Bind, with no OLD")
     let early = begin_new(mut r, false)
     expect(errored(r, early, UnknownGroupClass) && admits(r) == 1u64 && list.len(r.starts) == 0u64, "L51: a Begin reached a registering group")
@@ -1604,7 +1641,8 @@ fn operator_register(c: Clock, rnd: Random) -> Result[(), ()] waits {
     expect(is_installed(phase_on(r, reg)) && rooted_at(r, image_two(), 0u64), "L51: the assembled first release was not Installed at activation 0")
     expect(released(r, a), "L51: the first release's attempt was not released")
     expect(serving_at(r, "g", 0u64, image_two()), "L51: the group's genesis did not start serving at activation 0")
-    let again = register_as(mut r, d1, registration("g", Uncontained, "s1"))
+    expect(recorded_start(r, "g"), "L51: the genesis start lost its arguments, or ran unrecorded or before its pin")
+    let again = register_as(mut r, d1, take recorded)
     expect(is_installed(phase_on(r, again)) && admits(r) == 1u64, "L51: a repeated Register admitted again or lost its outcome")
     let other = register_as(mut r, d1, registration("g", Uncontained, "s9"))
     expect(errored(r, other, ConflictClass), "L51: the same request ID with other content was not a Conflict")
@@ -1618,6 +1656,21 @@ fn operator_register(c: Clock, rnd: Random) -> Result[(), ()] waits {
     expect(is_failed(phase_on(r, bad), InvalidClass) && closed(r, "h") && is_none(must(group_row(r.h, "h"), "row")), "L51: a failed registration kept its group or listener")
     let _ = register_as(mut r, request_id(4u64), registration("h", Uncontained, "s3"))
     expect(admits(r) == 3u64, "L51: the name of a failed registration did not register again")
+    // An upload cut off before its end releases its attempt; the same Register takes it
+    // again under a fresh attempt, still with no OLD, and nothing starts.
+    let cut = register_as(mut r, request_id(6u64), registration("p", Uncontained, "s6"))
+    let a6 = r.a
+    hang_up(mut r, cut)
+    let _ = register_as(mut r, request_id(6u64), registration("p", Uncontained, "s6"))
+    let mut no_old = 0u64
+    for q in r.asked {
+        if let Admit(g, _, _, ap) = q {
+            if g.name == "p" && is_none(ap.old) {
+                no_old += 1u64
+            }
+        }
+    }
+    expect(released(r, a6) && !same_attempt(a6, r.a) && no_old == 2u64 && !serving_at(r, "p", 0u64, image_two()), "L51: a cut-off registration did not admit again under a fresh attempt with no OLD")
     // The listener cannot be bound: the registration fails the same way.
     let _ = register_as(mut r, request_id(5u64), registration("m", Contained, "s5"))
     expect(is_failed(status_of(mut r, request_id(5u64)), InvalidClass) && closed(r, "m") && is_none(must(group_row(r.h, "m"), "row")), "L51: an unbound registration kept its group")

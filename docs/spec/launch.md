@@ -646,7 +646,7 @@ answered `Error(Protocol)` and closes only that exchange.
 | 4 Status(D) | Returns State, or `Error(UnknownRequest)`. Does no work. |
 | 5 ResolvePin(I) | Returns Pin, looked up at the host's wall clock in Unix seconds, or `Error(Store)`. |
 | 6 LookupGroup(name) | Returns GroupInfo(G) for the registered incarnation, or `Error(UnknownGroup)`, also while the group is still registering. |
-| 7 Register(D, registration, input, foreign, exec) | `registration` is (name, tenant, workdir, trusted, label, listen, bindings, limits). Registers a new group and deploys its first release, below. `input`, `foreign` and `exec` are Begin's. |
+| 7 Register(D, registration, input, foreign, exec) | `registration` is (name, tenant, workdir, trusted, label, listen, bindings, limits, args, record), with `record` an `Option` of (dir, retentionSeconds). Registers a new group and deploys its first release, below. `input`, `foreign` and `exec` are Begin's. |
 
 | Host → operator | Payload and rule |
 |---|---|
@@ -705,6 +705,14 @@ running, which is `Error(Busy)`; a registration whose input outlived its deadlin
 and frees the name. A second group naming a store directory another group already holds is
 `Error(Conflict)`. A Register before the host has reconciled with the launcher is
 `Error(Busy)`.
+
+**Recording a group.** A group's `args` are the program's arguments in every serving start.
+A group registered with a `record` has every serving start recorded: its 16-byte recording
+ID is the group's incarnation and the start's generation, each a little-endian u64, so no
+two starts share one and a start sent again after a host restart names the same pin; its
+destination is `dir/<ID in lowercase hex>.tape`. The pin (ID → assembly, expiry = the
+host's wall clock in Unix seconds + retentionSeconds) is written in the transaction that
+allocates the start's generation, so no recording runs before its pin is durable.
 
 ### The launcher
 

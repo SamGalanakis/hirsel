@@ -13,9 +13,17 @@
 // hash H is 32 bytes. A known D names the same group and input for its whole life.
 pub const MAX_FRAME: u64 = 16777216u64
 
+// A recorded group's tapes: each serving start writes `dir`/<recording ID in hex>.tape,
+// and its pin lasts `retention_s` seconds from the start.
+pub type Record: codec + send {
+    dir: String,
+    retention_s: u64
+}
+
 // A group the operator registers (launch.md "Registering a group"): its catalog name, the
 // tenant it is charged to, its working directory, whether its author is a trusted publisher,
-// its containment label, listener address, approved store, Dir and Net bindings and limits.
+// its containment label, listener address, approved store, Dir and Net bindings and limits,
+// the program's arguments for every serving start, and whether those starts are recorded.
 pub type Registration: codec + send {
     name: String,
     tenant: String,
@@ -24,7 +32,9 @@ pub type Registration: codec + send {
     label: launcher.Label,
     listen: String,
     bindings: launcher.Bindings,
-    limits: launcher.Limits
+    limits: launcher.Limits,
+    args: List[String],
+    record: Option[Record]
 }
 
 // One operator request. Tags: 0 Begin, 1 Data, 2 EndInput, 3 Confirm, 4 Status,

@@ -27,6 +27,8 @@ type Rig {
     starts: List[launcher.Child],
     // Every Start the host sent, as sent.
     sent: List[launcher.Launch],
+    // Every request the host sent, in order.
+    asked: List[launcher.Request],
     d: Option[Driver]
 }
 
@@ -62,6 +64,7 @@ fn pump(mut r: Rig, take reqs: List[launcher.Request]) waits {
     while i < list.len(queue) {
         let req: launcher.Request = clone(queue[i])
         i += 1u64
+        list.push(mut r.asked, clone(req))
         if let Start(l) = req {
             list.push(mut r.starts, launcher.Child(group: clone(l.group), role: launcher.role_of(l.mode)))
             list.push(mut r.sent, clone(l))
@@ -121,7 +124,7 @@ fn feed(mut r: Rig, take events: List[launcher.Event]) waits {
 
 fn rig_on(take db: store.Db, f: launcher.Fake, max_places: u64, now: Now) -> Rig waits {
     let (h, hello) = must(open(take db, Config(max_places: max_places, idle_ms: 1000u64)), "open")
-    let mut r = Rig(h: take h, f: clone(f), now: now, starts: list.new(), sent: list.new(), d: None)
+    let mut r = Rig(h: take h, f: clone(f), now: now, starts: list.new(), sent: list.new(), asked: list.new(), d: None)
     pump(mut r, take hello)
     r
 }
@@ -132,7 +135,7 @@ fn rig(c: Clock, rnd: Random, max_places: u64) -> Rig waits {
 
 // Ends the host process: only its store and the launcher survive.
 fn restart(take r: Rig, max_places: u64) -> Rig waits {
-    let Rig(h: take h, f: take f, now: now, starts: _, sent: _, d: _) = take r
+    let Rig(h: take h, f: take f, now: now, starts: _, sent: _, asked: _, d: _) = take r
     rig_on(close(take h), f, max_places, now)
 }
 
@@ -176,7 +179,9 @@ fn last(r: Rig, name: String) -> launcher.Child {
     let mut found: Option[launcher.Child] = None
     for c in r.starts {
         if c.group.name == name {
-            found = Some(clone(c))
+            if let Serving(_) = c.role {
+                found = Some(clone(c))
+            }
         }
     }
     match take found {
@@ -475,17 +480,123 @@ fn answer(mut r: Rig, ch: launcher.Child, take said: runner.HostReply) waits {
 
 // Ends the host process and the launcher: only the catalog survives.
 fn restart_bare(take r: Rig, max_places: u64) -> Rig waits {
-    let Rig(h: take h, f: _, now: now, starts: _, sent: _, d: _) = take r
+    let Rig(h: take h, f: _, now: now, starts: _, sent: _, asked: _, d: _) = take r
     rig_on(close(take h), launcher.fake(), max_places, now)
 }
 
-// A group serving at gen 1 and a deploy decided but not yet sent: its Start and cutover.
+// NEW's release, as its preview reports it and as a store at NEW's activation 2 reports it.
+fn release_two() -> Bytes {
+    bytes_of(32u64, 5u8)
+}
+
+// The release a store reports at `version`: NEW's at 2, OLD's (unrecorded) otherwise.
+fn release_at(version: u64) -> Bytes {
+    if version == 2u64 {
+        release_two()
+    } else {
+        bytes_of(32u64, 3u8)
+    }
+}
+
+fn describe_of(digest: Bytes) -> runner.Describe {
+    runner.Describe(digest: clone(digest), target: "t", n_place: 1u64, exported: list.new())
+}
+
+// OLD's describe child's answer.
+fn describe_answer() -> Bytes {
+    let c: std.codec.Codec[runner.Describe] = std.codec.of()
+    let mut out: Bytes = list.new()
+    let _ = std.codec.encode(c, describe_of(image()), mut out)
+    out
+}
+
+// A preview child's answer naming image `digest` with `release`, for OLD's empty list.
+fn preview_answer(digest: Bytes, release: Bytes) -> Bytes {
+    let c: std.codec.Codec[runner.Preview] = std.codec.of()
+    let mut out: Bytes = list.new()
+    let _ = std.codec.encode(c, runner.Preview(describe: describe_of(digest), release: clone(release), answers: list.new()), mut out)
+    out
+}
+
+fn helper_child(old: launcher.Child, take m: launcher.Mode) -> launcher.Child {
+    launcher.Child(group: clone(old.group), role: launcher.role_of(m))
+}
+
+// A helper child answers on its standard output and exits 0.
+fn helper_answers(mut r: Rig, c: launcher.Child, take said: Bytes) waits {
+    let mut events: List[launcher.Event] = list.new()
+    list.push(mut events, Answered(clone(c), take said))
+    feed(mut r, take events)
+    finish(mut r, c, Code(0i32), None)
+}
+
+fn old_says(mut r: Rig, old: launcher.Child, take said: runner.HostReply) waits {
+    let mut events: List[launcher.Event] = list.new()
+    list.push(mut events, Placed(clone(old), take said))
+    feed(mut r, take events)
+}
+
+// A deploy of NEW (image_two, target "t", one place) through OLD's describe and the
+// preview's answer `preview`, which the host checks before it asks OLD to export.
+fn to_export(mut r: Rig, old: launcher.Child, take preview: Bytes) waits {
+    let go = must(deploy(mut r.h, "g", an_attempt(), image_two(), image_two(), "t", 1u64), "deploy")
+    pump(mut r, take go)
+    helper_answers(mut r, helper_child(old, DescribeMode(an_attempt())), describe_answer())
+    helper_answers(mut r, helper_child(old, PreviewMode(an_attempt(), list.new())), take preview)
+}
+
+// The deploy prepared: OLD exports head 1, NEW's prepare child exits 0, and OLD keeps the
+// import. Gives what OLD's import answer asks for (the candidate's Start and the cutover),
+// not yet sent.
+fn prepared(mut r: Rig, old: launcher.Child) -> List[launcher.Request] waits {
+    to_export(mut r, old, preview_answer(image_two(), release_two()))
+    old_says(mut r, old, PlaceExported(1u64, "export-1"))
+    finish(mut r, helper_child(old, PrepareMode(an_attempt(), "export-1")), Code(0i32), None)
+    apply(mut r, Got(Placed(clone(old), PlaceImported(image_two()))))
+}
+
+// What OLD was asked: 1 an export, 2 a cutover, 3 an abort, 0 anything else.
+fn command_kind(q: launcher.Request) -> u64 {
+    match q {
+        Command(_, HostExport(_, _)) => 1u64,
+        Command(_, HostCutover(_, _, _, _)) => 2u64,
+        Command(_, HostAbort(_)) => 3u64,
+        _ => 0u64,
+    }
+}
+
+// How many of the rig's requests were OLD commands of `kind`.
+fn asked_of(r: Rig, kind: u64) -> u64 {
+    let mut n = 0u64
+    for q in r.asked {
+        if command_kind(q) == kind {
+            n += 1u64
+        }
+    }
+    n
+}
+
+fn failed_with(r: Rig, why: String) -> bool {
+    match deploy_outcome(r.h, "g") {
+        Some(Failed(w)) => w == why,
+        _ => false
+    }
+}
+
+fn still_preparing(r: Rig) -> bool {
+    match deploy_outcome(r.h, "g") {
+        Some(Preparing) => true,
+        _ => false
+    }
+}
+
+// A group serving at gen 1 and a deploy prepared but not yet sent: its Start and cutover.
 fn cut_case(c: Clock, rnd: Random) -> (Rig, launcher.Child, List[launcher.Request]) waits {
     let mut r = rig(c, rnd, 4u64)
     add(mut r, "g", "t")
     op_wake(mut r, "g")
     let old = last(r, "g")
-    let go = must(deploy(mut r.h, "g", an_attempt(), image_two(), 2u64, image_two()), "deploy")
+    let go = prepared(mut r, old)
     (take r, old, take go)
 }
 
@@ -513,7 +624,7 @@ fn wake_generation_fence(c: Clock, rnd: Random) -> Result[(), ()] waits {
     add(mut r, "g", "t")
     op_wake(mut r, "g")
     let old = last(r, "g")
-    let go = must(deploy(mut r.h, "g", an_attempt(), image_two(), 2u64, image_two()), "deploy")
+    let go = prepared(mut r, old)
     pump(mut r, take go)
     let candidate = last(r, "g")
     expect(gens(r, "g") == two(1u64, 2u64) && is_dirty(r, "g", 1u64), "L43: the candidate did not start at gen + 1 under Dirty(g)")
@@ -528,7 +639,7 @@ fn wake_generation_fence(c: Clock, rnd: Random) -> Result[(), ()] waits {
     add(mut d, "g", "t")
     op_wake(mut d, "g")
     let serving = last(d, "g")
-    let tried = must(deploy(mut d.h, "g", an_attempt(), image_two(), 2u64, image_two()), "deploy")
+    let tried = prepared(mut d, serving)
     pump(mut d, take tried)
     let discarded = last(d, "g")
     answer(mut d, serving, PlaceDrift)
@@ -594,7 +705,8 @@ fn wake_generation_fence(c: Clock, rnd: Random) -> Result[(), ()] waits {
 // candidate's Start and the cutover, so a host lost at any point resumes the attempt with
 // the identical command and OLD installs once: lost before Start, before forwarding, during
 // the install, and after OLD's answer but before the commit. A launcher lost after OLD
-// installed leaves nothing that proves the install: the row is Undecided and probed.
+// installed leaves nothing that proves the install: the row is Undecided and probed. A
+// host lost while the deploy is Preparing sends no cutover and aborts OLD's export first.
 @test
 fn cutover_survives_host_loss(c: Clock, rnd: Random) -> Result[(), ()] waits {
     // Before Start: nothing reached the launcher.
@@ -651,7 +763,7 @@ fn cutover_survives_host_loss(c: Clock, rnd: Random) -> Result[(), ()] waits {
     let mut u2 = restart(take u, 4u64)
     expect(is_dirty(u2, "g", 1u64) && launcher.held(u2.f) == 1u64, "L44 Uncertain: decided before the candidate opened")
     let mut opened: List[launcher.Event] = list.new()
-    list.push(mut opened, Placed(clone(new6), PlaceOpened(runner.PlaceReady(version: 2u64, store_hi: 0u64, store_lo: 0u64, release: image_two(), retain_from: 0u64, ready_ns: 0u64))))
+    list.push(mut opened, Placed(clone(new6), PlaceOpened(runner.PlaceReady(version: 2u64, store_hi: 0u64, store_lo: 0u64, release: release_two(), retain_from: 0u64, ready_ns: 0u64))))
     feed(mut u2, take opened)
     expect(is_dirty(u2, "g", 2u64) && committed_once(u2), "L44 Uncertain: the candidate's open at v did not commit")
     // Launcher lost after OLD installed: no child and no held answer survive.
@@ -688,6 +800,26 @@ fn cutover_survives_host_loss(c: Clock, rnd: Random) -> Result[(), ()] waits {
         _ => false
     }
     expect(abandoned && rooted_at(at_old, image(), 1u64) && is_dirty(at_old, "g", 4u64) && list.len(status(at_old.h).failing) == 0u64, "L44 launcher loss, store at OLD: OLD's open did not abandon the deploy with OLD's root kept")
+    // Lost while preparing: OLD exported and NEW's prepare child runs. The Preparing row
+    // proves no cutover was sent, so the new session starts no candidate and sends no
+    // cutover; it aborts OLD's export, and records the failure only on OLD's answer.
+    let mut pr = rig(c, rnd, 4u64)
+    add(mut pr, "g", "t")
+    op_wake(mut pr, "g")
+    let old8 = last(pr, "g")
+    to_export(mut pr, old8, preview_answer(image_two(), release_two()))
+    old_says(mut pr, old8, PlaceExported(1u64, "export-1"))
+    let mut pr2 = restart(take pr, 4u64)
+    expect(list.len(gens(pr2, "g")) == 0u64 && asked_of(pr2, 2u64) == 0u64 && asked_of(pr2, 3u64) == 1u64 && still_preparing(pr2) && is_dirty(pr2, "g", 1u64), "L44 while preparing: the new session started a candidate, sent a cutover, did not abort OLD's export, or decided before OLD answered")
+    old_says(mut pr2, old8, PlaceAborted)
+    expect(failed_with(pr2, "interrupted before the cutover") && rooted_at(pr2, image(), 1u64) && is_dirty(pr2, "g", 1u64), "L44 while preparing: OLD's abort answer did not fail the deploy with OLD's root kept")
+    // A preview that does not describe NEW's image stops the deploy before OLD exports.
+    let mut pv = rig(c, rnd, 4u64)
+    add(mut pv, "g", "t")
+    op_wake(mut pv, "g")
+    let old9 = last(pv, "g")
+    to_export(mut pv, old9, preview_answer(image(), release_two()))
+    expect(asked_of(pv, 1u64) == 0u64 && failed_with(pv, "preview does not describe the selected assembly") && gens(pv, "g") == one(1u64), "L44 preview mismatch: OLD was asked to export, or the deploy did not fail")
     Ok(())
 }
 
@@ -761,7 +893,7 @@ fn place_answers(mut r: Rig, store_at: u64) waits {
         fail("no serving start to answer")
     }
     let reply: runner.HostReply = if selected == store_at {
-        PlaceOpened(runner.PlaceReady(version: store_at, store_hi: 0u64, store_lo: 0u64, release: list.new(), retain_from: 0u64, ready_ns: 0u64))
+        PlaceOpened(runner.PlaceReady(version: store_at, store_hi: 0u64, store_lo: 0u64, release: release_at(store_at), retain_from: 0u64, ready_ns: 0u64))
     } else {
         PlaceCurrent(store_at, list.new())
     }

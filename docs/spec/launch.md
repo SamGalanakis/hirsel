@@ -395,6 +395,11 @@ open proves `v` was never installed, and then the deploy is recorded failed (`no
 after recovery`) with OLD's roots kept. Any other answer (`Held`, a missing image, an unknown
 activation, an I/O failure) decides nothing: both roots stay, and the probe is retried under the
 ordinary backoff. Neither a timer nor a retry count decides a root.
+The platform host records the attempt as `Preparing` before its describe, preview and
+prepare children and OLD's export. A `Preparing` row proves no cutover was sent, so after a host
+loss it is aborted: OLD, if it still runs, is sent `HostAbort`, and the failure is recorded on
+OLD's answer or end, never before (RUNNER-SPEC §14.3 "Preparing"). An open that proves NEW's
+install must also report the release that the preview reported for NEW.
 The platform host's catalog keeps the attempt's pending row from before the candidate's start
 to the cutover's decision, with the exact cutover command it sent; a new session sends that
 command again and the launcher answers it from what it kept, so a host lost at any point in

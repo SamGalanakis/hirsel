@@ -2238,19 +2238,23 @@ fn apply_put(mut tx: Tx, take p: Bytes, take val: Bytes, tail: bool) -> Result[(
         let Some(child) = std.page.collection_child(tx.roots.collections.root, list.slice(p, 0, 4)) else {
             return Error(Stale(list.word_be(p, 0)))
         }
+        // Both retention modes find the previous charge, so a body takes the
+        // same steps on a live store and on a replay fork that retains rows;
+        // the selection takes none.
+        let previous = match op_slot(tx.ops, p) {
+            Some(slot) => match data_row(tx.ops.rows, slot).value {
+                Some(value) => entry(p, staged_bytes(value)),
+                None => 0,
+            },
+            None => match std.page.lookup(child, list.slice(p, 4, list.len(p))) {
+                Some(value) => entry(p, value),
+                None => 0,
+            },
+        }
         let old = if tx.retain_old {
             0u64
         } else {
-            match op_slot(tx.ops, p) {
-                Some(slot) => match data_row(tx.ops.rows, slot).value {
-                    Some(value) => entry(p, staged_bytes(value)),
-                    None => 0,
-                },
-                None => match std.page.lookup(child, list.slice(p, 4, list.len(p))) {
-                    Some(value) => entry(p, value),
-                    None => 0,
-                },
-            }
+            previous
         }
         let child_depth: u64 = int.widen(std.page.level(std.page.image_of(child)))
         (old, tree_height(tx.roots.collections) + child_depth + 1)
@@ -2279,11 +2283,15 @@ fn delete_bytes(mut tx: Tx, id: u32, key: Bytes) -> Result[bool, Error] {
 
 fn delete_refund(tx: Tx, key: Bytes) -> Option[u64] {
     match transaction_row(tx, key) {
-        Some(v) => Some(if tx.retain_old {
-            0u64
-        } else {
-            entry(key, v)
-        }),
+        Some(v) => {
+            // As in apply_put: both retention modes take the same steps.
+            let previous = entry(key, v)
+            Some(if tx.retain_old {
+                0u64
+            } else {
+                previous
+            })
+        },
         None => None
     }
 }
@@ -2428,13 +2436,15 @@ fn stream_write(mut tx: Tx, take key: Bytes, take value: Bytes, call_size: u64) 
         return Error(Limit(Transaction))
     }
     let charge = entry(key, value)
+    // As in apply_put: both retention modes take the same steps.
+    let previous = match transaction_stream(tx, key) {
+        Some(old) => entry(key, old),
+        None => 0
+    }
     let old_charge = if tx.retain_old {
         0u64
     } else {
-        match transaction_stream(tx, key) {
-            Some(old) => entry(key, old),
-            None => 0
-        }
+        previous
     }
     let height = tree_height(tx.roots.streams)
     let _ = reserve_ids(mut tx, height)?
@@ -3845,10 +3855,12 @@ fn delete_impl[K, V](mut tx: Tx, t: Table[K, V], key: Bytes) -> Result[bool, Err
             None => return Ok(false)
         }
         let value = row_value(t.readers, t.id, raw)?
+        // As in apply_put: both retention modes take the same steps.
+        let previous = entry(p, raw)
         (take value, if tx.retain_old {
             0u64
         } else {
-            entry(p, raw)
+            previous
         })
     }
     let mut frame = tx.frame_bytes
@@ -5300,6 +5312,69 @@ pub fn law_rollback_on_overrun(c: Clock) -> bool waits {
 @test
 fn test_rollback_on_overrun(c: Clock) -> Result[(), ()] waits {
     if law_rollback_on_overrun(c) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+// For each bound in 0..`top`, whether a bounded body that deletes row 2 and
+// writes rows 3 and 5 returns, on a store with rows 1..64
+// whose old rows are retained (a pin) or not.
+fn retention_outcomes(c: Clock, retained: bool, top: u64) -> List[bool] waits {
+    let mut db = test_db(c, 1073741824)
+    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
+    let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    let seeded = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+        for k in 1u64 .. 65 {
+            put(mut tx, t, k, k)?
+        }
+        Ok(())
+    }))
+    match take seeded {
+        Committed(_) => (),
+        _ => fail("retention seed"),
+    }
+    if retained {
+        let held = snapshot(db)
+        let _ = result.unwrap(pin(mut db, "held", held))
+    }
+    let mut out: List[bool] = list.new()
+    for b in 0u64 .. top {
+        let ran = result.unwrap(run(mut db, None, scoped fn(mut tx: Tx) -> Result[bool, Error] {
+            let bounded = rollback_writes_on_overrun(mut tx, b, scoped fn(mut w: Tx) -> Result[(), Error] {
+                let _ = delete(mut w, t, 2)?
+                put(mut w, t, 3, 30)?
+                put(mut w, t, 5, 50)
+            })
+            let returned = match bounded {
+                Ok(_) => true,
+                Error(_) => false,
+            }
+            // Abort, so every bound starts from the same rows.
+            Error(Missing(if returned { "returned" } else { "overran" }))
+        }))
+        match take ran {
+            Aborted(Undone(value: Missing(why), ..)) => list.push(mut out, why == "returned"),
+            _ => fail("retention run"),
+        }
+    }
+    take out
+}
+
+// Re-executing a body on a replay fork runs it with old rows retained, where
+// the live run may not have. Its metered steps must not depend on that, or a
+// tight bound gives the two runs different outcomes. Oracle: the outcome of
+// each bound without retention; the bound sweeps past the body's whole cost.
+pub fn law_retention_keeps_steps(c: Clock) -> bool waits {
+    let live = retention_outcomes(c, false, 1200)
+    let held = retention_outcomes(c, true, 1200)
+    live[1199] && live == held
+}
+
+@test
+fn test_retention_keeps_steps(c: Clock) -> Result[(), ()] waits {
+    if law_retention_keeps_steps(c) {
         Ok(())
     } else {
         Error(())

@@ -1,7 +1,7 @@
-use hirsel_core_net::{SignatureAlgorithm, verify_signature};
+use hirsel_core_net::{verify_ed25519, verify_p256_asn1, verify_p256_fixed};
 
 macro_rules! verifier {
-    ($name:ident, $algorithm:ident) => {
+    ($name:ident, $verify:ident) => {
         /// Verify a signature over the message. Returns 1 on success and 0 otherwise.
         ///
         /// # Safety
@@ -25,8 +25,7 @@ macro_rules! verifier {
                     unsafe { std::slice::from_raw_parts(data, len as usize) }
                 }
             };
-            u64::from(verify_signature(
-                SignatureAlgorithm::$algorithm,
+            u64::from($verify(
                 range(key, key_len),
                 range(msg, msg_len),
                 range(sig, sig_len),
@@ -35,6 +34,6 @@ macro_rules! verifier {
     };
 }
 
-verifier!(hirsel_core_ed25519_verify, Ed25519);
-verifier!(hirsel_core_p256_verify, P256Fixed);
-verifier!(hirsel_core_p256_verify_der, P256Der);
+verifier!(hirsel_core_ed25519_verify, verify_ed25519);
+verifier!(hirsel_core_p256_verify, verify_p256_fixed);
+verifier!(hirsel_core_p256_verify_der, verify_p256_asn1);

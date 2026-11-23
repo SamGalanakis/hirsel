@@ -138,7 +138,9 @@ pub use reactor::{
 /// mc-units-untied: kernel waits (epoll_wait or io_uring_enter) made by run reactors.
 pub static EPOLL_WAITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 mod signature;
-pub use signature::{SignatureAlgorithm, verify_signature};
+pub use signature::{
+    SignatureAlgorithm, verify_ed25519, verify_p256_asn1, verify_p256_fixed, verify_signature,
+};
 mod split_mix;
 pub use split_mix::SplitMix64;
 pub mod scram;

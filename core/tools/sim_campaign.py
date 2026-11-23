@@ -17,13 +17,13 @@ import std_native
 ROOT = std_native.ROOT
 SEED = 'HIRSEL_TEST_SIM_SEED'
 DEFAULT_SEEDS = 32
-PACKAGE_LAWS = ('store',)
+PACKAGE_LAWS = ('store', 'harness', 'platform')
 SEEDED_TEST = re.compile(r'^@test\s+fn (\w+)\(([^)]*)\)', re.M)
-# These laws drive 10,000 frames per seed. Keep the complete floods in each
-# nightly batch while giving their disjoint ranges fewer seeds.
+# Keep the 10,000-frame floods and the real-time hedge deadlines intact.
 FLOOD_SEEDS = {
     'runner@1/runner_calls/law_calls_refusals': 2,
     'runner@1/runner_calls/law_calls_session_charge': 2,
+    'harness@1/provider_laws/test_warm_and_hedge': 3,
 }
 POSTGRES = (
     'fragmented_startup_error', 'eof_in_error_response',

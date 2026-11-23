@@ -116,14 +116,15 @@ fn mcp_status(at: Addr, credential: Bytes, clock: Clock, random: Random, tasks: 
 // Hold a real local tools/call response until the live query has inspected
 // status, then send exactly 100 KiB of text and recover the stored result.
 @test
-fn test_mcp_working_and_blob(parent: Dir, clock: Clock, random: Random, tasks: Tasks, network: Net) -> Result[(), u64] waits {
+fn test_mcp_working_and_blob(parent: Dir, clock: Clock, random: Random, tasks: Tasks, network: Net, seed_grant: Env) -> Result[(), u64] waits {
     let mut name = string.with_capacity(32u64)
     let dir = result.unwrap(host.mkdtemp(parent, mut name))
     let credential = runner.ingress.credential(random)
     seed_mcp_blob(dir, clock, random, tasks, result.unwrap(runner.ingress.caller((), credential)))
     let (take input, at) = result.unwrap(host.listen(network, Addr(ip: V4(0x7f000001u32), port: 0u16), 1u16))
     let mut listener = take input
-    let (take blobs, server) = blob_fixture(tasks, clock, random, MCP_BLOB_SIZE)
+    let seed = match std.sim.world.test_seed(seed_grant) { Some(n) => n, None => 7u64 }
+    let (take blobs, server) = blob_fixture(tasks, clock, random, MCP_BLOB_SIZE, seed)
     let mut fixture = take blobs
     fixture.peer = Some((at, network))
     let (world, _) = std.sim.world.new(2u64, 0u64, 0u64)
@@ -354,9 +355,19 @@ fn reconcile_place(mut r: runner.Registry[Grants, harness.Handles]) -> Result[()
 }
 
 @test
-fn test_wave2_catalog_reconcile_outside_crash(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), u64] waits {
-    let mut name = string.with_capacity(32u64)
-    let dir = result.unwrap(host.mkdtemp(parent, mut name))
+fn test_wave2_catalog_reconcile_outside_crash(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, seed_grant: Env) -> Result[(), u64] waits {
+    let seed = std.sim.world.test_seed(seed_grant)
+    let (dir, take first_disk, take name): (Dir, Option[Task[(std.sim.fs.Fs, std.sim.world.Plan)]], Option[String]) = match seed {
+        Some(n) => {
+            let (d, take serving) = mount(tasks, clock, std.sim.fs.new(), std.sim.world.plan(n))
+            (d, Some(take serving), None)
+        },
+        None => {
+            let mut scratch = string.with_capacity(32u64)
+            let d = result.unwrap(host.mkdtemp(parent, mut scratch))
+            (d, None, Some(take scratch))
+        },
+    }
     let w = result.unwrap(reconcile_wired())
     seed_with(dir, clock, random, tasks, reconcile_agent(), w)
     let (model, model_in): (Sender[ModelAsk], Receiver[ModelAsk]) = channel.new(4u64)
@@ -370,11 +381,22 @@ fn test_wave2_catalog_reconcile_outside_crash(parent: Dir, clock: Clock, random:
     result.unwrap(channel.send(stop, ()))
     let _ = result.unwrap(result.unwrap(task.join(take first)))
 
-    let (second, _stop, _) = launch(tasks, settings_of(code.describe(reconcile_place), harness.entries(w), dir, clock, random, tasks, net, copy_services(services), Some(IDLE_MS)))
+    let (reopened, take second_disk): (Dir, Option[Task[(std.sim.fs.Fs, std.sim.world.Plan)]]) = match take first_disk {
+        None => (dir, None),
+        Some(take serving) => {
+            let (take image, _) = unmount(take dir, take serving)
+            let mut crashed = take image
+            let mut plan = std.sim.world.plan(option.unwrap(seed))
+            std.sim.fs.crash(mut crashed, mut plan)
+            let (d, take replay) = mount(tasks, clock, take crashed, take plan)
+            (d, Some(take replay))
+        },
+    }
+    let (second, _stop, _) = launch(tasks, settings_of(code.describe(reconcile_place), harness.entries(w), reopened, clock, random, tasks, net, copy_services(services), Some(IDLE_MS)))
     let _ = result.unwrap(result.unwrap(task.join(take second)))
     let asked = model_asked(services)
     let dispatched = tool_ran(services)
-    let db = result.unwrap(store.open(tasks, dir, clock, random, runner.triggers.law_options()))
+    let db = result.unwrap(store.open(tasks, reopened, clock, random, runner.triggers.law_options()))
     let snap = store.snapshot(db)
     let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
     let s = option.unwrap(result.unwrap(store.get(snap, store.shape(h.session), 0u64)))
@@ -397,7 +419,10 @@ fn test_wave2_catalog_reconcile_outside_crash(parent: Dir, clock: Clock, random:
     drop(take services)
     result.unwrap(task.join(take models))
     result.unwrap(task.join(take tools))
-    result.unwrap(std.dir.remove_all(parent, name))
+    if let Some(take serving) = take second_disk {
+        let _ = unmount(take reopened, take serving)
+    }
+    if let Some(take scratch) = take name { result.unwrap(std.dir.remove_all(parent, scratch)) }
     if asked != 2u64 || dispatched != 3u64 { return Error(1u64) }
     if verified != 3u64 { return Error(2u64) }
     if !finished || s.next_pos != 7u64 { return Error(3u64) }

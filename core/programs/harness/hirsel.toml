@@ -38,7 +38,7 @@ platform = { major = 1, path = "../platform" }
 
 [tests]
 limit = 268435456
-grants = ["Clock", "Random", "Tasks", "Net=Listen 127.0.0.0/8 0-65535;Connect 127.0.0.0/8 0-65535"]
+grants = ["Clock", "Random", "Tasks", "Env=HIRSEL_TEST_SIM_SEED", "Net=Listen 127.0.0.0/8 0-65535;Connect 127.0.0.0/8 0-65535"]
 dirs = ["."]
 
 [tests.sources]

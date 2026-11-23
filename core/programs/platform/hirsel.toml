@@ -30,6 +30,7 @@ dirs = ["."]
 "operator_wire.hirsel" = "operator"
 "platform_laws.hirsel" = "platform"
 "platform_recovery_laws.hirsel" = "platform"
+"platform_sim_laws.hirsel" = "platform"
 "platform_source_laws.hirsel" = "platform"
 "platform_preview_laws.hirsel" = "platform"
 

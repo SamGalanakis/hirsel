@@ -324,8 +324,9 @@ pub fn law_round_bytes_bounded(parent: Dir, clock: Clock, random: Random, tasks:
 }
 
 @test
-fn test_round_bytes_bounded(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
-    if law_round_bytes_bounded(parent, clock, random, tasks) && law_blob_results(parent, clock, random, tasks, net) { Ok(()) } else { Error(()) }
+fn test_round_bytes_bounded(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, seed_grant: Env) -> Result[(), ()] waits {
+    if law_round_bytes_bounded(parent, clock, random, tasks)
+        && law_blob_results(parent, clock, random, tasks, net, std.sim.world.test_seed(seed_grant)) { Ok(()) } else { Error(()) }
 }
 
 // ---- forks ----
@@ -1174,15 +1175,15 @@ fn blob_credentials() -> std.cred.Credentials {
     std.cred.from_secret("AKIAIOSFODNN7EXAMPLE", take root, "")
 }
 
-type BlobServer: send { config: std.sim.s3.Config, clock: Clock, port: Served[NetOp] }
+type BlobServer: send { config: std.sim.s3.Config, clock: Clock, port: Served[NetOp], seed: u64 }
 
 fn blob_server(take setup: BlobServer) -> std.sim.s3.Report waits {
-    let BlobServer(config: take cfg, clock, port: take port) = take setup
-    let mut plan = std.sim.world.plan(7u64)
+    let BlobServer(config: take cfg, clock, port: take port, seed) = take setup
+    let mut plan = std.sim.world.plan(seed)
     std.sim.s3.serve(cfg, mut plan, clock, take port)
 }
 
-fn blob_fixture(tasks: Tasks, clock: Clock, random: Random, capacity: u64) -> (BlobFixture, Task[std.sim.s3.Report]) {
+fn blob_fixture(tasks: Tasks, clock: Clock, random: Random, capacity: u64, seed: u64) -> (BlobFixture, Task[std.sim.s3.Report]) {
     let address = Addr(ip: V4(127u32 << 24 | 1u32), port: 8080u16)
     let mut network = std.sim.net.new(std.sim.net.defaults())
     let mut ips: List[Ip] = list.new()
@@ -1203,7 +1204,7 @@ fn blob_fixture(tasks: Tasks, clock: Clock, random: Random, capacity: u64) -> (B
         credential: take scope, signing_key: take verify,
         faults: list.new(), exists_status: 412u16, fragment_bytes: 8192u64, max_body: capacity)
     let (network_grant, port) = provide.net(bytes 262144u64)
-    let server = task.spawn(tasks, bytes 8388608u64, BlobServer(config: take cfg, clock, port: take port), blob_server)
+    let server = task.spawn(tasks, bytes 8388608u64, BlobServer(config: take cfg, clock, port: take port, seed), blob_server)
     (BlobFixture(net: network_grant, tasks, clock, random, cut: None, peer: None), take server)
 }
 
@@ -1337,7 +1338,8 @@ fn saved_blob(report: std.sim.s3.Report, writes: u64) -> bool {
 // Extend J1 through settlement. The first worker is halted after the blob
 // write. Reopen the cut filesystem and verify that the Once dispatch
 // is in doubt and the body never hits the journal.
-fn law_blob_results(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
+fn law_blob_results(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, seed: Option[u64]) -> bool waits {
+    let wire_seed = match seed { Some(n) => n, None => 7u64 }
     let (model, model_in): (Sender[ModelAsk], Receiver[ModelAsk]) = channel.new(4u64)
     let (tool, tool_in): (Sender[ToolAsk], Receiver[ToolAsk]) = channel.new(4u64)
     let models = task.spawn(tasks, bytes 65536u64, take model_in, model_service)
@@ -1346,7 +1348,7 @@ fn law_blob_results(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net
 
     let (first_dir, disk) = mount(tasks, clock, std.sim.fs.new(), std.sim.world.plan(0u64))
     seed_session(first_dir, clock, random, tasks)
-    let (take cutting, first_server) = blob_fixture(tasks, clock, random, BLOB_SIZE)
+    let (take cutting, first_server) = blob_fixture(tasks, clock, random, BLOB_SIZE, wire_seed)
     let (stop, stop_in): (Sender[()], Receiver[()]) = channel.new(1u64)
     let (checkpoint, checkpoints): (Sender[BlobCut], Receiver[BlobCut]) = channel.new(1u64)
     let mut cut_fixture = take cutting
@@ -1365,7 +1367,7 @@ fn law_blob_results(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net
     let orphan = result.unwrap(task.join(take first_server))
     if !saved_blob(orphan, 1u64) { fail("blob: the acknowledged PUT left no object") }
     let mut crashed = take image
-    let mut plan = std.sim.world.plan(1u64)
+    let mut plan = std.sim.world.plan(match seed { Some(n) => n, None => 1u64 })
     std.sim.fs.crash(mut crashed, mut plan)
     let (reopened, replay) = mount(tasks, clock, take crashed, std.sim.world.plan(0u64))
     let (second, _stop_second, _) = launch(tasks, blob_settings(reopened, clock, random, tasks, net, copy_services(services)))
@@ -1377,7 +1379,7 @@ fn law_blob_results(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net
     let mut name = string.with_capacity(32u64)
     let clean = result.unwrap(host.mkdtemp(parent, mut name))
     seed_session(clean, clock, random, tasks)
-    let (fixture, server) = blob_fixture(tasks, clock, random, BLOB_SIZE)
+    let (fixture, server) = blob_fixture(tasks, clock, random, BLOB_SIZE, wire_seed)
     // A Served port closes at quiescence. Keep it available while the
     // place is idle and while its journal is reopened for readback.
     let (world, _) = std.sim.world.new(2u64, 0u64, 0u64)
@@ -1479,7 +1481,7 @@ fn approval_rows(snap: store.Snapshot, h: harness.Handles, answers: u64) -> bool
 // its 4096 reserve unresolved; the run finishes and the session is idle; an
 // Answered run has the complete transcript in order. The approval and park
 // scenario adds one approval, one resumed tool, and a patch from the reaction.
-fn matrix_case(clock: Clock, random: Random, tasks: Tasks, net: Net, scenario: MatrixScenario, site: u64) -> Cut waits {
+fn matrix_case(clock: Clock, random: Random, tasks: Tasks, net: Net, scenario: MatrixScenario, site: u64, cut_seed: u64) -> Cut waits {
     let (seed_dir, seed_server) = mount(tasks, clock, std.sim.fs.new(), std.sim.world.plan(0u64))
     if scenario == ToolAndAnswer { seed_session(seed_dir, clock, random, tasks) }
     else { seed_with(seed_dir, clock, random, tasks, matrix_agent(), result.unwrap(matrix_wired())) }
@@ -1510,7 +1512,7 @@ fn matrix_case(clock: Clock, random: Random, tasks: Tasks, net: Net, scenario: M
         return Beyond
     }
     let mut cut = take image
-    let mut cutting = std.sim.world.plan(site + 1u64)
+    let mut cutting = std.sim.world.plan(cut_seed)
     std.sim.fs.crash(mut cut, mut cutting)
     let (second_dir, second_server) = mount(tasks, clock, take cut, std.sim.world.plan(0u64))
     let (second, _stop_second, _) = launch(tasks, matrix_settings(scenario, second_dir, clock, random, tasks, net, copy_services(services)))
@@ -1562,7 +1564,7 @@ fn check_matrix(clock: Clock, random: Random, tasks: Tasks, net: Net, scenario: 
     let mut site = 0u64
     let mut poisoned = 0u64
     loop {
-        match matrix_case(clock, random, tasks, net, scenario, site) {
+        match matrix_case(clock, random, tasks, net, scenario, site, site + 1u64) {
             Beyond => break,
             Reached(true, saw_poison) => if saw_poison { poisoned += 1u64 },
             Reached(false, _) => {
@@ -1579,7 +1581,24 @@ fn check_matrix(clock: Clock, random: Random, tasks: Tasks, net: Net, scenario: 
 }
 
 @test
-fn test_crash_matrix(clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
+fn test_crash_matrix(clock: Clock, random: Random, tasks: Tasks, net: Net, seed_grant: Env) -> Result[(), ()] waits {
+    if let Some(seed) = std.sim.world.test_seed(seed_grant) {
+        // The ordinary law sweeps every site. A campaign seed samples a
+        // scenario, EIO site and crash image, with a reached site required.
+        let mut plan = std.sim.world.plan(seed)
+        let scenario = if std.sim.world.pick(mut plan, 2u64) == 0u64 { ToolAndAnswer } else { ApprovalAndPark }
+        let site = std.sim.world.pick(mut plan, 256u64)
+        let cut_seed = std.sim.world.pick(mut plan, 0xffffffffffffffffu64)
+        match matrix_case(clock, random, tasks, net, scenario, site, cut_seed) {
+            Reached(true, _) => return Ok(()),
+            Reached(false, _) => return Error(()),
+            Beyond => (),
+        }
+        match matrix_case(clock, random, tasks, net, scenario, site % 20u64, cut_seed) {
+            Reached(true, _) => return Ok(()),
+            _ => return Error(()),
+        }
+    }
     check_matrix(clock, random, tasks, net, ToolAndAnswer)
     check_matrix(clock, random, tasks, net, ApprovalAndPark)
     Ok(())

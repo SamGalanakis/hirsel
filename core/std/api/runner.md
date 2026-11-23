@@ -1,9 +1,9 @@
 # Runner
 
-Package `store`, module `runner`, implements RUNNER-SPEC v2.4 R0 and R1: the entries
-of a place, as a library over v1 (reserved R13). R0 has `Registry[G, H]`, `compute`,
-`granted`, `describe`, `call`, `start` and `finish`. R1 adds `transact`, the head
-(`place_head`), its internal publisher, and sessions (`connect`, `ask`, `hang_up`).
+Package `store`, module `runner`, implements RUNNER-SPEC v2.32: the entries
+of a place, as a library over v1 (reserved R13), including `Registry[G, H]`, `compute`,
+`granted`, `transact`, `query`/`query_as`, `describe`, `operate`, wire serving, triggers,
+and cold-wake/deploy lifecycles.
 
 To use `store.runner`, add `store = { major = 1 }` under `[dependencies]` in
 `hirsel.toml`. The installed Hirsel toolchain supplies the package.
@@ -127,7 +127,7 @@ is `Refused(NotAllowed)`, as it is with a `runner.wire_bind` wire, which binds b
 that task, and a task that fails or is cancelled gives `Failed(Raised)`. A key that
 names no entry of the kind being asked for gives `NoEntry`.
 
-`transact(mut r, f, n)` registers a body `fn(mut store.Tx, H, take A) -> Result[R, E]`.
+`transact(mut r, f, n, s)` registers a body `fn(mut store.Tx, H, Caller, take A) -> Result[R, E]`.
 Only the head runs it, in a store run under the entry's n: `Ok` commits and its
 reply is written with the effects; `Error` aborts the effects and the store keeps the
 reply alone in the aborted run's frame (STORE-SPEC F2).
@@ -242,14 +242,14 @@ position, the larger of 1 and its unanswered sends, at most 1 + q in all: a join
 send takes a slot, and a re-send of an Abandoned position whose slot is still held
 reuses it. `hang_up()` closes the session.
 
-`Frame` is the dormant WIRE-SPEC v2 wire envelope. Its declared variants fix tags
+`Frame` is the WIRE-SPEC v2 wire envelope. Its declared variants fix tags
 0 through 8: Hello, Call, Subscribe, Unsubscribe, Welcome, Placed, Batch, Ended,
 Reset. `Want`, `Entry`, `Done` and `Row` are its codec payload types. Welcome carries
 the Caller, q, budget, executable digest, target and n_place. Batch carries the
 version, completing subscription ids, rows and outcomes, in that order. A Row key
 is the logical key, with big-endian table and integer key components;
 its optional value contains the current value codec's bytes without a stored
-schema prefix. The session still uses `Told`; wire serving is a later slice.
+schema prefix. Wire serving runs over `runner.serve` / `runner.operate` (below).
 Outcome tags are Returned 0, Failed 1, Refused 2, Abandoned 3 and InDoubt 4.
 Refusal appends RequestMismatch 6 and HistoryUnavailable 7 after NotAllowed 5.
 

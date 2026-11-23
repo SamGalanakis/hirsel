@@ -199,21 +199,21 @@ identities, and checked on every read. A damaged unit, or a frame under another
 key, is prelinked again. A fresh store links through the same unit, so a primed
 store's executable is a fresh store's; it is not byte-equal to a link of the
 separate objects (`ld -r` renumbers local and section symbols).
-`--debug-lines on|off` controls native line tables for build, run and test.
-Line tables default to off on every profile and both engines. Use
-`--debug-lines on` to opt in.
+`--debug-lines on|off` controls whether native DWARF5 line tables are embedded in
+the executable for build, run and test. Native builds always emit debug rows and write
+a detached DWARF debug file beside the executable; `--debug-lines on` additionally
+embeds DWARF in the executable itself (see `docs/spec/cli.md`).
 `explain debug-lines` describes the same choice. Native object and link keys
-include the choice. With rows off no debug object is linked; failure-site symbols,
-source tables and exact failure reports stay enabled.
-Native body products contain clean ELF code and, when requested, a separate
+include the choice; failure-site symbols, source tables and exact failure reports stay
+enabled either way.
+Native body products contain clean ELF code and a separate
 record of machine ranges, item-relative byte offsets and inline scopes. The
 object keys contain no absolute source position. One shared link-time writer
 resolves those records against the current checked source snapshot and writes
 one DWARF5 debug object.
-The engines publish clean ELF bytes and their optional rows together; link inputs
+The engines publish clean ELF bytes and their rows together; link inputs
 are never rewritten. LLVM extracts rows once when it first produces an object;
-Cranelift publishes its machine rows directly. Default-off builds emit, decode
-and bind no row metadata. Moving an unchanged item
+Cranelift publishes its machine rows directly. Moving an unchanged item
 therefore rechecks and compiles no existing body; only the link product changes.
 Published source text has its own indexed rows and never requires decoding a
 library AST or reopening source files. Installed products contain those bytes.
@@ -262,8 +262,8 @@ operand, filled from `Config.grants[i]` in declaration order. The standalone
 bootstrap calls the runtime's OS process constructor with ordered kind/ordinal
 requirements. `--dir <path>` supplies a directory, in Dir parameter order;
 relative paths are resolved at executable startup. Repeat the option for more
-directories. `--grant <kind>` explicitly supplies Net, Clock, Random, Stdout,
-Stderr, Stdin, Env, Process or Tasks. Args is always present, including empty argv.
+directories. `--grant <kind>` explicitly supplies `Net`, `Clock`, `Random`, `Stdout`,
+`Stderr`, `Stdin`, `Env`, `Process`, `Tasks`, `Secret`, `Cred`, `Foreign`, or `Exec`. Args is always present, including empty argv.
 These options configure the built executable and are part of its link cache key.
 For example, `hirsel run ... --dir . --grant Stdout -- input.txt normal`
 grants the current directory and stdout and passes two program arguments.
@@ -401,8 +401,10 @@ private helpers. `--filter <substring>` matches the full definition path; the
 driver visits matching paths in lexical order. No matching test exits 2.
 
 Each selected test builds through the ordinary reachable closure and runs in
-its own process. The mandatory `--limit` supplies each run's root limit; `--dir`
-and `--grant` configure capabilities exactly as for `run`. The typed API exposes
+its own process. When `hirsel.toml` declares `[tests]`, its `limit`, `dirs`, and `grants`
+keys configure the run (and CLI `--limit`/`--dir`/`--grant` are refused); otherwise `--limit`
+is mandatory and supplies each run's root limit while `--dir` and `--grant` configure
+capabilities exactly as for `run`. The typed API exposes
 `CheckProduct::tests` and `run_test(test, options)`, allowing each invocation its
 own explicit configuration. A run stop ends only that test's process. All later
 tests still run after an error, failure, stop, setup refusal or build refusal.
@@ -445,8 +447,9 @@ with exit 2. Arguments after run's `--` belong to the program.
 `new <package-dir>` creates a new-source application. `new <package-dir> --lib`
 creates a public `lib.hirsel` and an example `main.hirsel` that calls it. Both
 check, build, and run with the ordinary directory interface. Existing directories
-are refused without changing their contents. Native build/run still require an
-explicit runtime archive until installed-root selection is configured.
+are refused without changing their contents. Installed toolchains select their
+registered runtime archive and link kit automatically; uninstalled source builds
+require an explicit `--runtime` archive.
 
 `env --json` reports the executable, optional installation root, selected package
 cache and actual product roots, target and selected runtime. Explicit
@@ -461,10 +464,11 @@ no environment variable, no checkout and no C driver.
     ROOT/hirsel                      this compiler, its RPATH patched to $ORIGIN/lib
     ROOT/lib/                        libLLVM.so.23.1 and the libraries it loads from the pinned tree
     ROOT/bin/ld.lld                  the link editor
+    ROOT/libexec/hirsel/             the platform host and pin_reader binaries
     ROOT/link/<target>.json          the bundle-relative link recipe
     ROOT/link/kit/                   the startup objects and link-only libraries
     ROOT/runtime/<target>/<hash>/    runtime archives, by content
-    ROOT/core-packages/              the core and std images
+    ROOT/core-packages/              the core, std, and store-1.hpkg images
     ROOT/hirsel-core-toolchain.json  the selection, committed last
 
 The system supplies runtime libraries such as glibc and libstdc++. Installing

@@ -10,10 +10,22 @@
 <p align="center">
   <a href="https://hirsel.ai"><b>hirsel.ai</b></a>
   &nbsp;·&nbsp;
+  <a href="docs/PRIMER.md">Primer</a>
+  &nbsp;·&nbsp;
   <a href="docs/spec/index.md">Spec</a>
+  &nbsp;·&nbsp;
+  <a href="core/std/API-INDEX.md">Std API</a>
   &nbsp;·&nbsp;
   <a href="docs/building.md">Building</a>
 </p>
+
+## Install
+
+```sh
+curl -fsSL https://hirsel.ai/install.sh | sh
+```
+
+See [docs/building.md](docs/building.md) for CLI commands, capabilities, testing, recording/replay, and building from source.
 
 ## License
 

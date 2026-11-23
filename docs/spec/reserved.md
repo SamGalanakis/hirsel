@@ -257,7 +257,7 @@ platform launcher's `contained` label ([launch](launch.md#containment-r27)) is t
 containment, applied to every process that runs an authority group's code: the install child of
 genesis and standalone install, the describe, preview, prepare and serving children, and
 every descendant they start, `Exec` tools included, each with its mode's authority. No group whose author is outside the operator's first-party authors runs
-before it is built; until then only `uncontained` first-party groups run. The launcher's containment is built (launch.md "Containment (R27)"), except for `Net` bindings, which a contained child cannot yet hold; until the launcher admits contained groups through it, this still holds.
+before it is built; until then only `uncontained` first-party groups run. The launcher's containment is built (launch.md "Containment (R27)") and admits contained groups when `--cgroup-root` is configured, except for `Net` bindings, which a contained child cannot yet hold.
 
 **R28 (claims and verdicts).** A later claim form is written with contextual words in
 positions v1 refuses, and never changes whether a program that does not use it is accepted

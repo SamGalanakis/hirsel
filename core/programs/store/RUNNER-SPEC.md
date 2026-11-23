@@ -1382,7 +1382,7 @@ Keyset pages are a store read. They are specified in STORE-SPEC v2.25 §1.5 and 
 
 ```hirsel
 pub type Step: send = Recovering | Activating | Publishing | Listening(Addr)
-pub type Phase: send = Starting(Step) | Ready | Draining
+pub type Phase: send = Starting(Step) | Ready | Paused | Draining
 pub type Status: shareable + send { phase: Phase, digest: Bytes, target: String, n_place: u64, release: Bytes, activation: u64, store_id: (u64, u64), retain_from: u64, addr: Option[Addr] }   // v2.21: activation; v2.31: store_id, retain_from (§14.9)
 pub type Stop: codec + send { lag_ms: u64, grace_ms: u64 }
 pub type Backing: send = Memory | Disk(Dir, store.Options) | Temp(Dir)
@@ -1391,19 +1391,21 @@ pub type TriggerConfig[G: send, S: send]: send {
     grant: fn(S, take TriggerContext) -> Result[G, Capacity] waits, grant_bytes: u64,
 }
 pub type PlaceConfig[G: send, H: send, S: send, B: send]: send {
-    backing: Backing, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64,
-    handles: StaticFn[fn(mut store.Db) -> Result[H, store.Error] waits], query_handles: StaticFn[fn(H) -> H],
+    backing: Backing, selection: Selection,
+    place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64,
+    migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error]],
+    handles: StaticFn[fn(store.Schema) -> Result[H, store.Error]],
     session: WireConfig, max_sessions: u64, proxies: List[std.wsock.Prefix], n_publisher: u64,
     listen: Addr, net: Net, tasks: Tasks, clock: Clock, random: Random, stop: Stop,
     triggers: Option[TriggerConfig[G, S]],
     idle: Option[u64],   // the idle stop (§14.4); a wake launch's idle time replaces it
     wire: Option[Wire[G, B]],   // v2.24: None refuses wire calls to Granted entries and gives every session a fresh anonymous Caller; v2.28: so does a `wire_bind` wire's missing grant half, though it binds
 }
-pub type StartError: send = Open(OpenError) | Listen(NetError) | Missing(String) | Full(Capacity)   // OpenError is place_head's: Store | Place
+pub type StartError: send = Open(OpenError) | Listen(NetError) | Missing(String) | Exceeds(Bound) | Disagrees(Differ) | Full(Capacity)   // OpenError is place_head's: Store | Place
 pub type Ended: codec + send = Stopped(Option[u64]) | Unstarted | Forced(u64)   // Stopped carries next_due; Unstarted is a stop before Ready (§14.4)
 
 pub fn status_root() -> Result[Latest[Status], Capacity]
-pub fn operate[G: send, H: send, S: send](take p: PlaceConfig[G, H, S], take stop: Receiver[()], status: Latest[Status], take watch: Option[Sender[Receiver[Phase]]]) -> Result[Ended, StartError] waits
+pub fn operate[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, B], take stop: Receiver[()], status: Latest[Status], take watch: Option[Sender[Receiver[Phase]]]) -> Result[Ended, StartError] waits
 pub fn release_digest(exported: List[Exported]) -> Result[Bytes, Capacity]
 ```
 
@@ -1604,14 +1606,14 @@ pub fn end(take f: Fixture, within_ms: u64) -> Result[Ended, FixtureError] waits
 
 - **The host stop source** is `host.stopped(p: Process)` under the existing `Process` capability, per DECISIONS, 2026-11-18 "service-ops host stop source".
 - **The status route's contract** (outward-facing: proxies and supervisors will read it). `GET /hirsel/status` with 200/503 and the JSON fields above. Reversible until the route ships in a release.
-- **The new CLI verbs** (outward-facing): `hirsel build --manifest`, `hirsel manifest show`, `hirsel preview` and `hirsel confirm`.
+- **The new CLI verbs** (outward-facing): `hirsel build --manifest` and `hirsel manifest show` (built); `hirsel preview` and `hirsel confirm` (unbuilt).
 - **Readiness through the route** is decided here, for the reasons above. Reversible: the route is one raw handler over `status`.
 - **`Overloaded` for drain refusals** is decided here. A `Draining` refusal would append tag 8 and change frame-vectors.json, and it would ask the client for the same action. Reversible until a client needs to tell the two apart.
 - **The manifest from the build** is decided here, and extends D1. Reversible: the manifest is one file that one command writes.
 
 ## 14. Cold places under the platform host (new in v2.26)
 
-A place run by the platform host (docs/spec/launch.md "Platform host and launcher") is **cold by default**: it runs only while it has work, and the host starts it again when work comes. This section is the wake contract between the two. The runner's idle stop and child report are **built**, and so is the launcher's side of §14.3-§14.5 (`hirsel launcher`, launch.md "The launcher"); the platform host is not. In-process places run under the same host (§14.9).
+A place run by the platform host (docs/spec/launch.md "Platform host and launcher") is **cold by default**: it runs only while it has work, and the host starts it again when work comes. This section is the wake contract between the two. The runner's idle stop and child report, the launcher's side of §14.3-§14.5 (`hirsel launcher`, launch.md "The launcher"), and the platform host (`core/programs/store/platform.hirsel`, `platform_main.hirsel`, `local.hirsel`) are **built**. In-process places run under the same host (§14.9).
 
 The rule in one line: a place that a commit has given a future trigger is woken for it, and the host can always tell, from one durable row per place, whether it knows the place's next due time or must start the place to find out.
 

@@ -181,8 +181,8 @@ ordinary value codec. Its type, `ReleaseManifest`, is declared with `Describe` a
   sorted bytewise: a kind name as `--grant` takes it (`Clock`, `Random`, …),
   `Net=` or `Env=` followed by the rule or pattern text `--grant` takes, `Foreign=`
   followed by the interface's definition path `D` (`Foreign=sqlite@1/sqlite/Sqlite`), `Exec=`
-followed by the profile file path and the profile names as `--grant` took them (unbuilt,
-[EXEC-1](exec.md#exec-1-an-exec-grant-confers-what-its-programs-can-do-and-hirsel-does-not-confine-them)), and
+  followed by the profile file path and the profile names as `--grant` took them
+  ([EXEC-1](exec.md#exec-1-an-exec-grant-confers-what-its-programs-can-do-and-hirsel-does-not-confine-them)), and
   `Dir=` followed by the path `--dir` took. The strings are a display of the recipe's grant bindings
   (below), which say which parameter receives each one. A directory path stays as
   given. It is resolved against the launch's working directory at startup, which
@@ -229,7 +229,7 @@ gives the parameter's ordinal, its kind, and the values that parameter receives,
 with their count: each directory path a `Dir` parameter takes, each rule text a `Net`
 parameter takes, or the one interface definition identity a `Foreign` parameter takes.
 A `Foreign` binding then holds the SHA-256 and byte length of the selected archive. An
-`Exec` parameter (unbuilt) takes the profile file path as given and the selected profile
+`Exec` parameter takes the profile file path as given and the selected profile
 names, and its binding then holds the grant's policy digest
 ([EXEC-2](exec.md#exec-2-launch-profiles-and-narrowing)). That digest covers each image pin
 and every launch constraint, so replacing the profile file changes what the binding
@@ -272,7 +272,7 @@ A recipe that grants `Foreign=D` is deployed only when the request passes `--gra
 itself, and the deploy's output shows, before any child runs,
 the interface, target, selected archive digest and recipe of each such grant
 ([FFI-4](foreign.md#ffi-4-the-foreign-capability)). A recipe that grants `Exec=FILE NAME`
-(unbuilt) is deployed only when the request passes that grant itself. The host then loads the
+is deployed only when the request passes that grant itself. The host then loads the
 policy from `FILE`, resolved against the place's working directory, and compares its digest
 with the binding's before any child of the attempt runs. Preview, prepare and serving each
 check the digest again, and refuse to start on a different one
@@ -468,6 +468,8 @@ and host stores follow the publication order above. Pre-1.0, no recipe had been 
 nothing migrates.
 
 ## Preview launch
+
+*(Note: `hirsel build --manifest` and `hirsel manifest show` are built; the standalone `hirsel preview` and `hirsel confirm` CLI verbs below remain unbuilt.)*
 
 `hirsel preview --exe NEW NEW.manifest OLD.manifest` compares two releases
 without a store, a listener or a write grant. It refuses with exit 2 when NEW's
@@ -756,10 +758,11 @@ activation, assembly and report.
 
 - `hirsel register RECIPE --state S --group NAME --listen ADDR --store DIR --code-store DIR
   [--tenant T] [--workdir DIR] [--uncontained] [--trusted] [--dir D]... [--net RULE]...
-  [--host-memory BYTES] [--pids N] [--cpu QUOTA/PERIOD] [--grant G]... [--record DIR
+  [--memory BYTES] [--pids N] [--cpu QUOTA/PERIOD] [--grant G]... [--record DIR
   [--tape-retention DAYS]] [-- ARGS...]` sends Register with the attested recipe from the
   code store.
-- `hirsel deploy RECIPE --state S --group NAME --code-store DIR [--grant G]...` resolves G with
+- `hirsel deploy RECIPE --state S --group NAME --code-store DIR [--grant G]...
+  [--grant-added] [--request-id HEX]` resolves G with
   LookupGroup, or with `--request-id` from the request's own Status, then sends Begin.
   `hirsel deploy --state S --status D` sends only Status.
 
@@ -1036,8 +1039,9 @@ argument schema). A report above the prepare child's bound fails
 prepare with `Limit(triggers)`. The guard on started granted runs uses the image digest,
 which covers changes in `handles` such as table names, bindings and key codecs.
 
-Laws. Built for the launcher (crates/hirsel-core-driver/src/launcher/laws.rs), with the
-host's half unbuilt: `group_one_head`, where a cutover's NEW head opens the store only after
+Laws. Built for both the launcher (`crates/hirsel-core-driver/src/launcher/laws.rs`) and the
+platform host (`core/programs/store/platform.hirsel`, `core/programs/store/platform_laws.hirsel`
+covering L39, L41–L43, L45, L48–L49, L51–L52, and `runner.hirsel` L40): `group_one_head`, where a cutover's NEW head opens the store only after
 OLD's head has closed it, and an extra launch of the group is refused `Held`;
 `launcher_restart_stateless`, where a launcher killed at every step of a deploy and
 restarted gives the host's reconciliation the same result as the host's records alone,
@@ -1057,7 +1061,6 @@ for every mode but serving), and leave no process after it ends, and where a lau
 killed while they run is replaced by one that reports them ended only after their
 containers are empty; `child_mode_authority`'s containment half, where a prepare child can
 write only its export directory; and `contained_refused_uncontainable`, where a launcher on
-a host without the mechanism admits no contained group. Unbuilt: the host's halves of the
-laws above, among them `collect_reservation_handoff`'s, where a deploy's reservation is
-released between the host's `CollectBegin` and its root read and the pending record's image
-can still be opened after collection; and `trigger_scan_classes` (RUNNER-SPEC §14.7, L40).
+a host without the mechanism admits no contained group. The platform host suite
+(`platform_laws.hirsel`) also covers `collect_reservation_handoff`'s host half,
+admit-after-collect, store-identity enforcement, and drift-retry pause recovery.

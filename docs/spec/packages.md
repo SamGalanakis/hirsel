@@ -17,8 +17,6 @@ same local workspace or a published library fixed by its root. The canonical lib
 ([launch](launch.md#release-recipe-and-host-assembly)). A library root names source, and R names
 assembled code.
 
-It is unbuilt design: the built `hirsel` reads `manifest.json`, and this chapter replaces it.
-
 ## 1. Canonical library content
 
 A **published library** is one package's canonical content, its **encoding** `C`, and its
@@ -130,7 +128,7 @@ store. It refuses, and its first failure is reported in these words:
 | a text that is not UTF-8 | `bad text at byte <offset>` |
 | a package or binding name outside `[a-z][a-z0-9_]*` or over 64 bytes, a package named `core` or `std` | `bad package name "<name>"` |
 | a charge policy other than `charge-v1` | `unknown charge policy "<text>"` |
-| a binding of `core`; a tag other than 0 or 1; a tag 0 on anything but `std` major 1; a tag 1 on `std` | `bad binding <name>@<major>` |
+| a binding of `core`; a tag other than 0 or 1; a tag 0 on anything but `std` or `store` major 1; a tag 1 on `std` or `store` | `bad binding <name>@<major>` |
 | two bindings with one name, at any majors, since source names a dependency by name alone | `two bindings of <name>` |
 | bindings, files, foreign modules or rows out of order or repeated | `<part> out of order at <the later item>`, with part `bindings`, `files`, `foreign modules` or `archive rows` |
 | no files | `no files` |

@@ -29,7 +29,11 @@ The launcher can grant a `Secret` from the environment or a file. Use
 `secret.seal` to transfer owned bytes into secret storage. If sealing refuses, its
 `Error((reason, bytes))` gives back the original bytes. Use `secret.narrow`
 to restrict the permitted names. `secret.render` always returns `[secret]`.
-A grant or seal whose `to` text ends in `mac` or `verify` also lets the secret key an
-HMAC-SHA256 ([HMAC](hmac.md#secret-keys)).
+A grant or seal whose `to` text enables cryptographic uses also lets the secret key
+HMAC-SHA256 (`mac`/`verify`, `secret.verify_hmac_sha256`, [HMAC](hmac.md#secret-keys)),
+KDF derivation (`secret.derive_hmac_sha256`), AEAD wrap/unwrap (`secret.wrap`/`secret.unwrap`),
+asymmetric signing (`secret.sign`), and SCRAM-SHA-256 (`secret.scram_sha256`,
+`secret.scram_final_len`, `secret.scram_verify`). For dynamic credential grants (`Cred`),
+see [cred.md](cred.md).
 
 For HTTP/1.1 over TLS, use [the HTTP client](http_client.md).

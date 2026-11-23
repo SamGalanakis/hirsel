@@ -275,7 +275,8 @@ fn leak(s: String) -> u64 {
 ## 8. Capabilities and `waits`
 
 Files, directories, network, clocks, randomness, standard streams, environment variables,
-processes and tasks are reached only through capability parameters (CAP-1). A function
+secrets, credentials, foreign interfaces, child processes (`Exec`), and tasks are reached
+only through capability parameters (CAP-1; full list in [capabilities](spec/capabilities.md)). A function
 holds exactly the authority it is passed, and no constant holds any (CAP-1, CAP-3).
 `main`'s parameters are granted at launch with `--grant` and `--dir` (CAP-4).
 

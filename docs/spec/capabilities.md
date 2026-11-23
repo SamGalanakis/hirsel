@@ -4,9 +4,9 @@
 
 Files, directories, network, processes, clocks, randomness, standard streams, environment
 variables, tasks, credentials ([`Secret`](tls.md#tls-5-secrets)), credential sources
-([`Cred`](tls.md#tls-7-credential-grants), unbuilt), native code
+([`Cred`](tls.md#tls-7-credential-grants)), native code
 ([`Foreign[I]`](foreign.md#ffi-4-the-foreign-capability)) and child processes
-([`Exec`](exec.md#exec-2-launch-profiles-and-narrowing), unbuilt) are reached only
+([`Exec`](exec.md#exec-2-launch-profiles-and-narrowing)) are reached only
 through operations that take a capability argument.
 These capability values are the only way a program affects or observes the world outside
 its values. A function holds authority only through its parameters (CAP-3). Top-level `const` values cannot hold capabilities.
@@ -31,7 +31,7 @@ A `Secret` can also be sealed from bytes the program already holds
 ([TLS-5](tls.md#tls-5-secrets)). Sealing gives the program no authority it did not have
 before, because it already held those bytes. A capability is also made by **virtual
 construction**: `provide.dir`, `provide.net`, `provide.stdout`, `provide.stderr`,
-`provide.clock`, `provide.random`, `provide.process` and, unbuilt, `provide.exec`
+`provide.clock`, `provide.random`, `provide.process` and `provide.exec`
 ([EXEC-8](exec.md#exec-8-exec-at-the-replay-point-and-served-exec)) ([core](core.md#provide)) each make
 a fresh capability whose provider is local state of the run, with the endpoint that answers
 it (a `Served` port, a `ClockHand` or a `StopTrigger`). Virtual construction grants no host
@@ -76,8 +76,7 @@ The only capabilities a run starts with are the arguments of `main`
 ([PROG-3](programs.md#prog-3-entry)). The run's configuration grants each parameter. A
 `Secret` parameter is granted from an environment variable or a file that the launcher
 reads before the run starts ([TLS-5](tls.md#tls-5-secrets)), and a `Cred` parameter from a
-credential source that only the provider contacts ([TLS-7](tls.md#tls-7-credential-grants),
-unbuilt); a run
+credential source that only the provider contacts ([TLS-7](tls.md#tls-7-credential-grants)); a run
 whose configuration does not grant one of them, or whose provider cannot give one on this
 host (a `Dir`'s minimum host, [core](core.md#contracts-the-signatures-do-not-state)), does not start: it runs no
 program code and has no host effect, and reports as
@@ -196,7 +195,7 @@ read-only access, a `Net` to a subset of its rules (including its `Tls` rules,
 [TLS-3](tls.md#tls-3-authority)), a `Secret` to fewer destination names, an `Env` to fewer
 variable names ([env](../../core/std/api/env.md)), a `Tasks` to a
 child limit, an `Exec` to fewer profiles, argument forms, environment keys or cwd labels
-([EXEC-2](exec.md#exec-2-launch-profiles-and-narrowing), unbuilt). A narrowed
+([EXEC-2](exec.md#exec-2-launch-profiles-and-narrowing)). A narrowed
 capability never permits more than its source. No operation widens a capability or
 combines two into more than either.
 
@@ -265,7 +264,7 @@ Neither reaches the program.
 A replay compares the program against the recording it is given, and does not establish
 which execution produced it. A recording is a file of the recording user, so any process of
 that user can rewrite it, including a child of a run granted `Exec`
-([EXEC-8](exec.md#exec-8-exec-at-the-replay-point-and-served-exec), unbuilt). A deployment that
+([EXEC-8](exec.md#exec-8-exec-at-the-replay-point-and-served-exec)). A deployment that
 needs recording integrity against such a child keeps the recording where the child cannot write
 it, or does not record that run.
 

@@ -1,10 +1,10 @@
 # Store
 
 Package `store`, root module `store` (reached as `store.x`, LANG-7), implements the M4 store in Hirsel over
-copy-on-write B+ trees of packed pages. Each table and index has its own
-tree. The S1 package has memory stores, typed tables and
+copy-on-write B+ trees of packed pages (STORE-SPEC v2.44). Each table and index has its own
+tree. The package provides memory and Format-3 disk/bucket stores, typed tables and
 indexes, isolated transactions, read sets, frozen cursors and snapshots,
-CallInfo, followers, resident admission and foreign-handle checks.
+CallInfo, followers, resident admission, online scrub, offline read-only opens, and foreign-handle checks.
 
 An installed Hirsel toolchain supplies `store@1`. In `hirsel.toml`, add
 `store = { major = 1 }` under `[dependencies]`.
@@ -86,7 +86,7 @@ The transaction limit is 16,777,280 COMMIT payload bytes, excluding the 16-byte
 head. Body-time arithmetic enforces it before publishing. The account uses the
 stored value's length, including its schema number, when subtracting an old row.
 
-The disk contract follows STORE-SPEC v2.40 §11.
+The disk contract follows STORE-SPEC v2.44 §11.
 `open(tasks, dir, clock, random, options)` validates the options, locks the
 directory, and validates the selected manifest and page graph before removing
 unreachable files. It replays the journal and rotates to a new segment.
@@ -315,9 +315,19 @@ STORE-SPEC §11 specifies the paged store, scoped views and journaled forks.
   `resident_limit`, `pack_bytes`, `checkpoint_bytes` and `journal_limit`, and
   install checks exactly those before activation; a refusal is
   `FullNew(cause)` with OLD still selected (AP1b).
+- **Online scrub (v2.42, §11.17).** `begin_scrub` leases the packs referenced by the
+  current generation, and `scrub_step` rereads them from disk under a byte budget,
+  verifying frame envelopes and reachable pointers without writing or repairing.
+- **Bucket authority (v2.43, §11.18).** `open_bucket` stores packs and `MANIFEST-<gen:020>`
+  generations in an S3-compatible bucket via `std.object`, fencing a second writer with
+  no-clobber conditional puts while keeping the journal local.
+- **Offline read-only open (v2.44, §11.19).** `open_read_only` and `open_bucket_read_only`
+  open a Format-3 Directory store or current Bucket mirror without writing, exposing
+  `read_only_table`, `read_only_get`, and `read_only_version`.
 - **Constants and options.** `FRAME_LIMIT: u64 = 16777296` joins `VALUE_LIMIT`.
-  `Options` gains `journal_limit: u64` and loses `checkpoint_task_bytes`.
-- **Errors.** `Limit` gains `Ids` and `Manifest`. Every capacity refusal carries
+  `Options` includes `journal_limit: u64` and `authority: Authority` (`Directory() | Bucket(std.object.Bucket)`).
+- **Errors.** `Limit` includes `Ids`, `Manifest`, and `Triggers`. `Error` includes
+  `Fenced(u64)` and `Remote(std.object.Error)`. Every capacity refusal carries
   `StoreCapacity = Journal(Capacity) | Resident(Capacity) | Allocation(Capacity)`,
   naming the resource that refused: `Error.Full`, `Outcome.Refused`,
   `Looked.Refused`, `Served.NoRoom` (resident or allocation only) and

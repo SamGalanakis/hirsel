@@ -16,7 +16,7 @@ serializes profile writers. Do not edit the tree between PGO passes.
 
 Training checks the retained native hello source and builds it with Cranelift and LLVM. Each command uses tools/capped and must return zero with a nonempty `.profraw`. The default CPU is 8; timing cores 12-15 and 28-31 are refused. The program cache is disabled. The matching profile tools come from the pinned Rust llvm-tools archive. `--profdata` can select an installed matching tool.
 
-The PGO pipeline retains the existing tsrs training structure: instrument, run ordinary source commands, require nonempty profiles, merge, and rebuild with matching symbol metadata. Its training corpus is temporary until the new core has native programs. No compiler performance claim follows from this deletion.
+The PGO pipeline retains the existing tsrs training structure: instrument, run ordinary source commands, require nonempty profiles, merge, and rebuild with matching symbol metadata.
 
 `NOTICES.md` at the repository root is the distribution's notice inventory. It is
 generated, never edited: `tools/toolchain-dist/notices.py --write [--bundle DIR]`

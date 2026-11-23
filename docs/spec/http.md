@@ -1,6 +1,6 @@
 # HTTP
 
-This specification covers std `http`, the runner's HTTP bindings and keyed operations. It is a design: nothing in it is built yet, and each rule's slice in §7 says what builds it.
+This specification covers std `http`, the runner's HTTP bindings and keyed operations. Layer 1 (`std.http` and companion modules) is built; Part B (keyed operations) remains design, and each rule's slice in §7 tracks what builds it.
 
 - **Part A** is §0-§3 and §5-§8: std `http`, streams, runner bindings, outside inputs and cutover.
 - **Part B** is §4 and the slices H9 and H12: keyed operations. §4 and every rule, row, law and decision marked "Part B" are unbuilt and may still change, and nothing in Part A depends on them.
@@ -123,7 +123,7 @@ Module `std.http` of package `std`. It replaces every other HTTP/1.1 server path
 
 ### HTTP-1: The server, its task group and its limits
 
-`http.serve(take ls: List[Listener], c: Clock, cfg: Config, router: Router[S], state: S) -> Result[(), ServeError] waits`. The `Listener`s come from `Net`; `S: shareable + send` is the handlers' shared state. One call serves all of a process's listeners. Hirsel's runner makes exactly one call, so its caps are process-wide; a program that calls `serve` twice gets two independent sets of caps.
+`http.serve[S: shareable + send](take listeners: List[Listener], c: Clock, tasks: Tasks, take cfg: Config, take routes: router.Router[S], take state: S) -> Result[(), ServeError] waits`. The `Listener`s come from `Net`; `S: shareable + send` is the handlers' shared state. One call serves all of a process's listeners. Hirsel's runner makes exactly one call, so its caps are process-wide; a program that calls `serve` twice gets two independent sets of caps.
 
 **The task group.** `serve` follows RUNNER-SPEC §3's session pattern.
 - **Supervisor**: the `serve` task itself. It waits only on its inbox (capacity `inbox_cap`). Its events are `Accepted(socket, peer)` from the acceptors, `Promote` requests from connections (HTTP-10), `ReadSlot` and `ReadDone` from connections serving a one-shot read (B-11), `Established` from upgraded protocols, and `Ended(slot)` from every task it spawned.
@@ -137,6 +137,7 @@ Module `std.http` of package `std`. It replaces every other HTTP/1.1 server path
 
 | Field | Meaning | Value set by Hirsel's runner (§3) |
 |---|---|---|
+| `ingress` | Trusted proxy prefixes (`List[wsock.Prefix]`) for `X-Forwarded-For` source-IP resolution | configured proxies |
 | `sockets_max` | Admitted sockets this `serve` owns, counted from the supervisor's admission at `Accepted` until the socket's last task ends: connection, stream and upgraded alike. A refused socket is never admitted, so it is not counted here; refusal tasks are their own population, at most `refuse_max` | 4096 |
 | `http_max` | Connection tasks, each holding C for its whole life, first request and keep-alive alike | 1024 |
 | `upgrades_max` | Upgraded protocol tasks | 3072 |

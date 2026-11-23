@@ -126,9 +126,7 @@ archives = [
 A published library's content `C` holds each foreign module's prefix, its archive table and
 the archives' bytes ([packages](packages.md#1-canonical-library-content)), so its root pins
 exactly the audited archives. The pin covers every byte the linker reads, because FFI-3 admits
-only self-contained archives whose members are inside those bytes. Until the built `hirsel` reads `hirsel.toml`, the same table sits
-in `manifest.json` as a `"foreign": {"symbols", "archives": [{"target", "file", "sha256"}]}`
-object on the module's source entry, with the same rules.
+only self-contained archives whose members are inside those bytes.
 
 ```hirsel unbuilt
 // native.hirsel, module native of package sqlite, marked foreign

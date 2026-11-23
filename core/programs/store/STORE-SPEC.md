@@ -6,7 +6,7 @@ v2.43 (lane store-bucket-1836): **built.** Rows 11 and 12 are built for one auth
 
 v2.42 (lane store-scrub-1786, store durability round 2 item 4): **built.** §11.17 adds an online scrub. `begin_scrub` leases the packs the current generation lists, and `scrub_step` rereads them from disk under a byte budget, apart from every resident page. It checks each frame's envelope, and each reachable frame against the pointer the generation holds to it. It reports faults with their generation, file, offset and kind. It never repairs and never writes. See CHANGES-v2.42.
 
-v2.41 (Store M1-4). The store opens and writes format 3. The format-3 contract is §11. M1-7 is part of this slice after R1 failed Guard B on the page-copy candidate. AP9 stages row and stream writes on immutable heads, and AP10 applies the staged operations on the writer. The journaled fork (AP17–AP19) is planned. M1-6 adds the public scoped-view API (AP12).
+v2.41 (Store M1-4): **built.** The store opens and writes format 3 (superseding the "not yet built" tags on v2.32–v2.40 below). The format-3 contract is §11. M1-7 is part of this slice after R1 failed Guard B on the page-copy candidate. AP9 stages row and stream writes on immutable heads, and AP10 applies the staged operations on the writer. The journaled fork (AP17–AP19) and the public scoped-view API (M1-6, AP12) are built.
 
 v2.40 (lane store-spec-v240-1693, from store-c-review-1692 findings 1–13 and the orchestrator's two capacity rulings of 2026-11-22): text only, **not yet built**. §11 is corrected so M1-4 can be built from it:
 - PREPARED's 0x0081 payload has a format-3 layout carrying NEW's four limits (AP1b).

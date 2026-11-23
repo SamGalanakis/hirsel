@@ -16,15 +16,14 @@ capabilities. The driver's internals are in
 
 ## The installation
 
-An installation is a relocatable prefix containing `hirsel`, the published core and
-std packages, target runtime archives, the native link recipe, `bin/ld.lld` and
-the LLVM libraries shipped with the compiler. Linux supplies the dynamic loader
-and system shared libraries. Native links also need the glibc CRT objects and GCC
-support libraries at the paths selected by the distribution's link recipe.
-
-On Debian and Ubuntu install `libc6-dev` and `libgcc-N-dev`, where `N` is the GCC
-major version in that recipe. On Fedora install `glibc-devel` and `gcc`. If these
-files are missing, Hirsel names the first missing input before invoking the linker.
+Install a Linux release with `curl -fsSL https://hirsel.ai/install.sh | sh` (requires glibc 2.28+).
+An installation is a relocatable prefix containing `hirsel`, the published `core`, `std`, and
+`store@1` packages (including prebuilt release standard-library objects), target runtime archives,
+the bundled native link kit (`link/kit/`), `bin/ld.lld`, `libexec/hirsel/`, and the LLVM libraries
+shipped with the compiler. Installed toolchains use the bundled link kit and do **not** require
+host C development packages (`libc6-dev` / `libgcc-N-dev`). Host C development packages are only
+needed when linking with a custom `--cc` driver outside the bundled link kit. If any link input is
+missing, Hirsel names the first missing input before invoking the linker.
 
 `hirsel --version` prints the toolchain version, compiler identity and registered
 runtime archive identities by target.
@@ -70,8 +69,10 @@ that omit function bodies.
 `hirsel build DIR -o OUT` builds a native executable from the definitions `main`
 reaches; `hirsel run DIR [-- arguments...]` builds it and runs it. Development builds
 default to Cranelift and `--release` to LLVM; `--backend cranelift|llvm` selects the
-engine explicitly. `--debug-lines on` emits native line tables; failure positions are
-reported either way.
+engine explicitly. Native builds always emit debug rows and write detached DWARF
+alongside the executable; `--debug-lines on` additionally embeds DWARF in the
+executable (see [CLI specification](spec/cli.md)). Failure positions are reported
+either way.
 
 ```sh
 hirsel build app --release -o hello
@@ -80,11 +81,10 @@ hirsel run app --dir . --grant Stdout -- input.txt normal
 
 `main` receives its authority as parameters ([CAP-4](spec/capabilities.md#cap-4-entry-grants)).
 `--dir PATH` grants a confined directory, one per Dir parameter in order, and
-`--grant KIND` grants Clock, Random, Stdout, Stderr, Stdin, Process or
-Tasks. Net requires `--grant 'Net=<dir> <prefix>/<len> <lo>-<hi>[;<rule>]'`
-with explicit rules ([Net sockets](spec/net.md)). Env requires
-`--grant 'Env=<pattern>[,<pattern>]'`, where a pattern is a variable name or a prefix
-followed by `*` ([Env](../core/std/api/env.md)). A missing grant is refused before native code is emitted, naming the parameter
+`--grant KIND` grants `Clock`, `Random`, `Stdout`, `Stderr`, `Stdin`, `Process`, or
+`Tasks`, as well as parameterized rules for `Net` (TCP/UDP/TLS/Resolve and Unix-domain
+sockets, [Net sockets](spec/net.md)), `Env` ([Env](../core/std/api/env.md)), `Secret`,
+`Cred`, `Foreign`, and `Exec` (run `hirsel help run` for exact syntax). A missing grant is refused before native code is emitted, naming the parameter
 and the option it needs. Everything after `--` is passed to the program as `Args`.
 `run` exits with the program's status. A `main` that returns `Error(e)` writes
 `e` as Hirsel source after `error: `, with every `Secret` shown as `[secret]`; an
@@ -115,7 +115,7 @@ hirsel replay app --tape session.tape
 hirsel tape show session.tape --include-credentials
 hirsel replay app --tape session.tape --diagnose
 hirsel build app --recording -o app-rec
-hirsel test app --limit 64M --replay
+hirsel test app --limit 67108864 --replay
 ```
 
 Recording is an optional switch, off by default, independent of `--release`
@@ -140,8 +140,9 @@ llvm-symbolizer --obj=./program "$(printf '%#x' "$((pc - load_bias - 1))")"
 
 Use the return PC and load bias from the same panic. Frames from other shared
 objects need the corresponding object and mapping from the process.
-The trace can stop at the first generated Hirsel frame. Build with
-`--debug-lines on` to resolve that frame to a Hirsel source position.
+The trace can stop at the first generated Hirsel frame. Detached DWARF is written
+alongside native executables by default; pass `--debug-lines on` to also embed DWARF
+in the executable for self-contained symbolization.
 
 ## Run tests
 
@@ -164,7 +165,16 @@ A failing row names the outcome (`returned an error, exit status N`, `failed`,
 the lines below it repeat the test's stdout.
 Hirsel reuses passing results for capability-free native tests with matching code
 and configuration, and each row says `cached` or `executed`.
-Use `--rerun` to execute every selected test and refresh passing results.
+Use `--rerun` to execute every selected test and refresh passing results, `-j N` to
+run tests in parallel, and `--sim` / `--seed` / `--seeds` / `--property-corpus` for
+deterministic simulation and property campaigns.
+
+Additional CLI commands cover package workflows (`lock`, `fetch`, `pack`, `publish`,
+`--locked`, `--frozen`; [Packages](spec/packages.md)), inspection and profiling
+(`inspect`, `prof`, `primer`; [Profiling](spec/profiling.md)), resident builds
+(`serve`, `--resident`), TypeScript SDK generation and RPC calls (`sdk ts`, `call`),
+and platform hosting (`host`, `launcher`, `register`, `deploy`, `manifest show`;
+[Launch](spec/launch.md), [CLI](spec/cli.md)).
 
 ## Limits
 

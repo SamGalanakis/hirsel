@@ -37,7 +37,7 @@ These goals decide between designs. A rule that would break one of them is wrong
    values passed as parameters ([capabilities](capabilities.md)). These bounds bind the
    program's own code. A child process started through an `Exec` grant holds its OS user's
    authority, and a recording of such a run is only as intact as that user's files
-   ([EXEC-1](exec.md#exec-1-an-exec-grant-confers-what-its-programs-can-do-and-hirsel-does-not-confine-them), unbuilt).
+   ([EXEC-1](exec.md#exec-1-an-exec-grant-confers-what-its-programs-can-do-and-hirsel-does-not-confine-them)).
 5. **Deterministic.** Given the same outside inputs and limits, every run that no run
    stop ends, and that reaches no foreign code, behaves identically on every engine and build ([SEM-8](semantics.md#sem-8-determinism)),
    including where it runs out of memory ([MEM-24](budgets.md#mem-24-logical-charges)).
@@ -53,15 +53,18 @@ These goals decide between designs. A rule that would break one of them is wrong
 | [Syntax](syntax.md) | LANG-1 to LANG-5 |
 | [Language](language.md) | LANG-6 to LANG-21 |
 | [Ownership](ownership.md) | OWN-1 to OWN-26 |
-| [Memory](memory.md) | MEM-1 to MEM-18, MEM-29 |
+| [Memory](memory.md) | MEM-1 to MEM-18, MEM-29, MEM-31 to MEM-32 |
 | [Budgets](budgets.md) | MEM-19 to MEM-28, MEM-30 |
 | [Failure](failure.md) | FAIL-1 to FAIL-16 |
-| [Tasks](tasks.md) | CONC-1 to CONC-13 |
+| [Tasks](tasks.md) | CONC-1 to CONC-15, CONC-17 |
 | [Capabilities](capabilities.md) | CAP-1 to CAP-9 |
 | [Semantics](semantics.md) | SEM-1 to SEM-11 |
 | [Programs](programs.md) | PROG-1 to PROG-6, PROG-9 to PROG-11 |
 | [Diagnostics](diagnostics.md) | PROG-7 and PROG-8 |
+| [CLI](cli.md) | |
+| [Profiling](profiling.md) | |
 | [Packages](packages.md) | |
+| [Launch](launch.md) | |
 | [Foreign calls](foreign.md) | FFI-1 to FFI-9 |
 | [Process creation](exec.md) | EXEC-1 to EXEC-8 |
 | [Core library](core.md) | |
@@ -88,10 +91,10 @@ The [Net socket declarations and ownership rules](net.md) define the network
 capability and its explicit grant syntax.
 The [TLS and secrets specification](tls.md) defines the client TLS provider
 operations and `Secret`.
-The [HTTP specification](http.md) defines std `http`, the runner's HTTP bindings
-and keyed operations. It is unbuilt design.
+The [HTTP specification](http.md) defines std `http` (built, Layer 1), the runner's HTTP bindings
+and keyed operations (Part B, design).
 The [packages specification](packages.md) defines `hirsel.toml`, `hirsel.lock`, local
-workspaces, library roots and package archives. It is unbuilt design.
+workspaces, library roots and package archives.
 The [Regex specification](regex.md) defines std `regex`, regular expressions over
 `String` with the Rust `regex` crate's syntax and meaning.
 The [Unicode text specification](unicode.md) defines std's Unicode character classification,
@@ -101,8 +104,7 @@ and [shrinking and replaying them with `std.prop`](../../core/std/api/prop.md#sc
 
 The [process creation specification](exec.md) defines the `Exec` capability over
 operator-approved launch profiles, spawning, waiting, signalling, killing a dropped child,
-and served Exec. It is unbuilt design, as are the Net chapter's Unix-domain socket
-rules, NET-12 to NET-14.
+and served Exec; the Net chapter defines Unix-domain socket rules, NET-12 to NET-14.
 
 The [foreign calls specification](foreign.md) defines foreign modules over pinned native
 archives, the `Foreign[I]` capability, the call ABI and its handles, and the `sqlite` package.

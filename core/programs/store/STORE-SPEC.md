@@ -1,4 +1,6 @@
-# STORE-SPEC v2.55: the M4 store library (lane store-spec-1001)
+# STORE-SPEC v2.56: the M4 store library (lane store-spec-1001)
+
+v2.56 (lane m3-tiered-spec-1981, Store M3; Sam's 2026-11-23 rulings M3 Q1–Q4 and the archival addition): text only, **not yet built**. §13 specifies Tiered, larger-than-RAM collections on format 4. They answer astra m3-review-astra-1941 and Fable m3-review-fable-1942. Steps are a per-build bound and are not observable across residency. A per-attempt touched-page counter decides `Refused(Cache)`, which `serve` maps to NoRoom. A cold miss aborts the attempt and reruns it, and bodies become plain `fn`s with a `shareable` env. Every Snapshot read takes a per-task `Reader` and waits. Holder leases, follower stamp domains and probe-gated compaction keep reclaim safe. Archival retention is opt-in and durable, and is off by default. `migrate`, `export` and `install` on a Tiered store are refused until M3b. Laws L62–L71. Reversible: the spec only.
 
 v2.55 (lane store-runner-soften-1974, Sam's 2026-11-23 Spec Q1, Q4 and Q5): text only, **not yet built**. `rollback_writes_on_overrun` is specified in §1.3 by bounds (O(1) entry, O(depth) reads, O(rows + depth) merge) and collapses the layer an overrun or refusal froze, so overruns do not deepen reads; no count is pinned (Q1). The cut seals pages and a commit need not; live and replayed trees share rows, snapshot answers and the account, not partitions, images or stamps (AP2, AP3; Q4). A `memory` store has no frame and no transaction size limit, and L29 is the journal's law alone (Q4). HEAD's 32-byte `image` is renamed `binding` and holds the runner's release identity digest, not the digest of the encoded `Describe`, so builds of the same code by other backends open one store; L54's histories match by identity, and two records of one identity are chosen by the deploy's outcome (Q5, RUNNER v2.42). Reversible: the spec only.
 
@@ -133,6 +135,18 @@ v2.29 (RUNNER-SPEC v2.18, lane caller-scope-1128, astra's third attack, ATTACK-3
 - **Two RUNNER-SPEC slices consume this version.** AM3 and AM8 are small and are built first, as slice RA. RS then takes AM1, AM2 and AM4–AM7, and RR builds on AM8 (RUNNER-SPEC §9). Neither RS nor RR waits on the other.
 
 v2.28 (RUNNER-SPEC v2.17, lane caller-scope-1128, astra's second attack, ATTACK-2): text and format; no store has been deployed, so the cutover is a fresh store. `serve` runs an admitted position: it runs the policy and the body as two isolated executions over one snapshot and writes the reply, and the record when there is one, in the body's transaction; a fault keeps the run's digest in a `Pending` that `conclude` writes with the fixed reply (AL1). A duplicate returns the stored reply with its scope digest (AL2). The scope digest begins with the StoreId (AL3). `migrate` is its own phase over a `Migration`, and `Schema` only opens (AL4). The CALL section carries the authority bytes (AL5). The sizes follow the 32-byte scope digest, and `serve` keeps no read log (AL6).
+
+## CHANGES-v2.56 (m3-tiered-spec-1981: Store M3, Tiered collections; not yet built)
+
+| Item | Change | Where |
+|---|---|---|
+| M3 | Tiered residency on format 4. Added: PACK_INDEX 0x0023 (MUST), pack classes 3 and 4, split exact accounts, `lineage`, `deferred_frees` and archive fields in the MANIFEST, and FORK and pin watermarks. Also specified: the cache and pager, the touched-page counter and abort-and-rerun, the `Reader` read API, leases and follower re-base, probe-gated compaction, AP21-T, the dirty bound, archival retention, the M3b refusals, and laws L62–L71 | §13 |
+| Q1 | Steps are not observable across residency. `reexecute` treats a Tiered `OutOfSteps` mismatch as `Unknown`. Bodies are plain `fn(mut Tx, E)` with a `shareable` env, so they capture no `send` resource (D-M3-1, reversible) | §13.0, §13.3 |
+| Q2 | One `waits` read API with a per-task `Reader`. Bare-Snapshot `get_bytes`, `scan_bytes`, `ViewRows`, `next_view` and `value_view` are deleted | §1.5, §11.16, §13.4 |
+| Q3 | `StoreCapacity.Cache` maps to `Served.NoRoom`. The writer/reader pin partition is fixed, and a `CacheDir` is held for one attempt | §13.2, §13.3 |
+| Q4 | `migrate`, `export` and `install` on a Tiered store return `Tiered(..)` before any write | §13.10 |
+| AP2 | Canonical form is the form of every image a cut writes or uploads. Tiered reads resolve only sealed, located pages | AP2, §13.2 |
+| Archival | `archive` and `drop_archive`, the `a-` segments, the ARCHIVE frame 0x00E0, and how reclaim rule 1 skips kept entries | §13.9 |
 
 ## CHANGES-v2.55 (store-runner-soften-1974: Spec Q1, Q4, Q5; with RUNNER v2.42; not yet built)
 

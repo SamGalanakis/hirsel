@@ -391,18 +391,22 @@ fn start_text(e: runner.StartError) -> String {
 }
 
 // A child ended, after operate returned. A route waiting on its group makes a clean end
-// readable, so the host starts the next child at once (§14.3).
+// readable, so the host starts the next child at once (§14.3). A start that failed refuses
+// the routes waiting on its group only when the host does not start the group again at
+// once: a first failure is retried at once, and a start at 0 refused because genesis had
+// already run relaunches at the store's activation (§14.5 "Genesis").
 fn on_down[T: send](mut a: Actor[T], name: String, gen: u64, take ended: Result[runner.Ended, runner.StartError]) waits {
     let Some(i) = kid_of(a, name, gen) else { return }
     let mut k = list.remove(mut a.kids, i)
     if let Some(take t) = replace(mut k.task, None) { let _ = task.join(take t) }
     a.used -= k.charge
     let mut events: List[launcher.Event] = list.new()
+    let mut failed: Option[String] = None
     if !k.ready {
         if let Error(Open(NotCurrent(Active(version, description)))) = ended {
             list.push(mut events, Placed(clone(k.child), PlaceCurrent(version, clone(description))))
         }
-        if let Error(e) = ended { refuse_routes(mut a, name, Failed(start_text(e))) }
+        if let Error(e) = ended { failed = Some(start_text(e)) }
     }
     let readable = !a.halting && routed(a, name)
     list.push(mut events, Ended(clone(k.child), end_of(ended, readable)))
@@ -425,6 +429,9 @@ fn on_down[T: send](mut a: Actor[T], name: String, gen: u64, take ended: Result[
         for take r in platform.event(mut a.h, take e, n) { list.push(mut reqs, take r) }
     }
     apply(mut a, take reqs)
+    if let Some(take why) = take failed {
+        if !group_has_kid(a, name) { refuse_routes(mut a, name, Failed(take why)) }
+    }
 }
 
 // ---- the door's requests ----

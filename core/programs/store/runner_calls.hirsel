@@ -2684,6 +2684,10 @@ type LocalRun { local: local.Local, door: local.Door, dir_name: String, changes:
 fn start_local(parent: Dir, make: fn(take local.Supplied) -> Result[runner.PlaceConfig[(), Hd, (), ()], Capacity], idle_ms: u64, clock: Clock, random: Random, tasks: Tasks, net: Net) -> LocalRun waits {
     let mut dir_name = string.with_capacity(32u64)
     let dir = result.unwrap(host.mkdtemp(parent, mut dir_name))
+    start_local_in(dir, take dir_name, make, idle_ms, clock, random, tasks, net)
+}
+
+fn start_local_in(dir: Dir, take dir_name: String, make: fn(take local.Supplied) -> Result[runner.PlaceConfig[(), Hd, (), ()], Capacity], idle_ms: u64, clock: Clock, random: Random, tasks: Tasks, net: Net) -> LocalRun waits {
     let (watch, changes): (Sender[local.Change], Receiver[local.Change]) = channel.new(16u64)
     let making: local.Factory[()] = local.factory(make)
     let config = local.Config(root: dir, options: disk_options(), factory: take making, seed: (), max_places: 1u64, idle_ms: idle_ms,
@@ -2817,6 +2821,38 @@ pub fn law_local_idle_unload(parent: Dir, clock: Clock, random: Random, tasks: T
     let _ = next_change(run.changes)
     let unloaded_ok = match next_change(run.changes) { Down(unloaded) => match unloaded.ended { Ok(Stopped(_)) => true, _ => false }, Up(_) => false }
     end_local(parent, take run) && reopened && unloaded_ok
+}
+
+// §14.5 "Genesis" (§14.9): a place whose genesis installed the store's activation, while
+// its host holds no activation for the group, serves on its next route. A task cannot be
+// killed in-process, so the law makes the crash's durable state directly: the store at
+// root/a activated by this image's genesis, and a host catalog that never recorded it
+// (root/host removed, then the group added again). Wrong implementation: the start at 0 is
+// refused NotCurrent(Active(1)), the route is refused, and every later start at 0 fails
+// the same way, so the place never serves without an operator.
+pub fn law_local_genesis_recovers(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
+    let run = start_local(parent, quick_place, 60000u64, clock, random, tasks, net)
+    let first = match local.route(run.door, "a") { Ok(take held) => take held, Error(_) => fail("local: first route refused") }
+    let installed = latest.read(local.status(first)).activation
+    let _ = take first
+    let LocalRun(local: take made, door: _, dir_name: take dir_name, changes: _) = take run
+    let _ = local.stop(take made)
+    let dir = result.unwrap(std.dir.narrow(parent, dir_name))
+    result.unwrap(std.dir.remove_all(dir, "host"))
+    let again = start_local_in(dir, take dir_name, quick_place, 60000u64, clock, random, tasks, net)
+    let answered = match local.route(again.door, "a") {
+        Ok(take held) => {
+            let s = latest.read(local.status(held))
+            match s.phase { Ready => s.activation == installed, _ => false }
+        },
+        Error(_) => false,
+    }
+    end_local(parent, take again) && installed == 1u64 && answered
+}
+
+@test
+fn test_local_genesis_recovers(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
+    if law_local_genesis_recovers(parent, clock, random, tasks, net) { Ok(()) } else { Error(()) }
 }
 
 @test

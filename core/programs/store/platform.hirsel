@@ -290,6 +290,9 @@ type Vol {
     // The probe was answered with the other pair's activation: its end starts the next
     // probe at once, outside backoff.
     reprobe: bool,
+    // The running start's own refusal (§14.5 "Genesis"), kept for its end, which names
+    // only an exit status.
+    cause: Option[String],
     prep: Option[Prep],
     admit: Option[Admitting]
 }
@@ -557,7 +560,7 @@ pub fn wake_row(h: Host, name: String) -> Option[WakeRow] {
 }
 
 fn empty_vol() -> Vol {
-    Vol(run: None, cut: None, count: 0u64, retry_at: None, failing: false, last: string.new(), reprobe: false, prep: None, admit: None)
+    Vol(run: None, cut: None, count: 0u64, retry_at: None, failing: false, last: string.new(), reprobe: false, cause: None, prep: None, admit: None)
 }
 
 // The volatile state of one group, by value: read it, change it, put it back.
@@ -940,6 +943,7 @@ fn clean_report(e: launcher.End) -> Option[Option[u64]] {
 // The authoritative child ended (§14.3 table, the last two columns; §14.4, §14.5).
 fn apply_end(mut h: Host, name: String, g: GroupRow, gen: u64, e: launcher.End, now: Now, mut out: List[launcher.Request]) waits {
     let mut v = vol_read(h, name)
+    let cause = replace(mut v.cause, None)
     let ready_ns: Option[u64] = match v.run {
         Some(r) => match r.phase {
             Ready(at) => Some(at),
@@ -985,7 +989,11 @@ fn apply_end(mut h: Host, name: String, g: GroupRow, gen: u64, e: launcher.End, 
                 v.count = 0u64
             }
             vol_put(mut h, name, take v)
-            unsuccessful(mut h, name, status_text(e.status), true, now, mut out)
+            let why = match take cause {
+                Some(take said) => take said,
+                None => status_text(e.status),
+            }
+            unsuccessful(mut h, name, why, true, now, mut out)
         },
     }
 }
@@ -1353,12 +1361,73 @@ fn placed(mut h: Host, c: launcher.Child, reply: runner.HostReply, now: Now, mut
                         settle_probe(mut h, name, ready.version, ready.release, true)
                     },
                     PlaceStoreMismatch(ehi, elo, ahi, alo) => unsuccessful(mut h, name, runner.store_mismatch((ehi, elo), (ahi, alo)), false, now, mut out),
-                    PlaceCurrent(version, _) => settle_probe(mut h, name, version, list.new(), false),
+                    PlaceCurrent(version, _) => {
+                        if adopt_genesis(mut h, name, g.incarnation, version) {
+                            let mut v = vol_read(h, name)
+                            v.reprobe = true
+                            vol_put(mut h, name, take v)
+                        } else {
+                            settle_probe(mut h, name, version, list.new(), false)
+                            let mut v = vol_read(h, name)
+                            if !v.reprobe {
+                                v.cause = Some(not_current(version, g.activation))
+                                vol_put(mut h, name, take v)
+                            }
+                        }
+                    },
                     _ => (),
                 }
             }
         },
     }
+}
+
+// §14.5 "Genesis": the group's genesis start installs the store's first activation under
+// LOCK before the host records it on that start's PlaceOpened, so a crash between them
+// leaves the store activated and the group at 0, and every start at 0 is refused
+// NotCurrent(Active(v)). The refusal names v: the group records it once, and the start's
+// end relaunches at v outside backoff. The open at v still proves it: that start compares
+// the store's Describe with its own and only its PlaceOpened records the store. A group
+// with a recorded activation never adopts, so a store another image activated keeps the
+// group failing with the refusal as its cause.
+fn adopt_genesis(mut h: Host, name: String, incarnation: u64, version: u64) -> bool waits {
+    if version == 0u64 {
+        return false
+    }
+    let made = {
+        let t = view h.t
+        store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[bool, Refused] {
+            let Some(found) = st(store.fetch(tx, store.shape(t.groups), name))? else {
+                return Ok(false)
+            }
+            if found.incarnation != incarnation || found.activation != 0u64 {
+                return Ok(false)
+            }
+            if let Some(_) = found.retiring {
+                return Ok(false)
+            }
+            let mut g = found
+            g.activation = version
+            st(store.put(mut tx, t.groups, name, g))?
+            Ok(true)
+        })
+    }
+    match decided(mut h.db, take made) {
+        Ok(true) => true,
+        _ => false,
+    }
+}
+
+fn not_current(found: u64, selected: u64) -> String {
+    let mut out = string.from("NotCurrent: the store is at activation ")
+    string.push_uint(mut out, found, 10u32, 1u64, '0')
+    if found == selected {
+        string.push(mut out, " under another image")
+    } else {
+        string.push(mut out, ", the host selected ")
+        string.push_uint(mut out, selected, 10u32, 1u64, '0')
+    }
+    out
 }
 
 // Record the first accepted PlaceOpened before any decision that depends on the store.

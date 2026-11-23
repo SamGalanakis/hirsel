@@ -50,6 +50,9 @@ dirs = ["."]
 "platform_laws.hirsel" = "platform"
 "bucket_laws.hirsel" = "store"
 
+[tests.runs."store@1/runner_calls/test_local_genesis_recovers"]
+limit = 134217728
+
 [tests.runs."store@1/store/frame_size_boundary"]
 limit = 134217728
 

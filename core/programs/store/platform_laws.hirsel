@@ -643,6 +643,156 @@ fn wake_only_clean_stop(c: Clock, rnd: Random, tasks: Tasks) -> Result[(), ()] w
     Ok(())
 }
 
+// A group added for its genesis at activation 0, as `store.local` adds every group.
+fn add_genesis(mut r: Rig, name: String) waits {
+    let spec = NewGroup(name: string.from(name), tenant: "t", workdir: string.from(name), author: Trusted, label: Uncontained, listen: "127.0.0.1:0", bindings: uncontained(), limits: unlimited(), assembly: image(), activation: 0u64, args: list.new(), record: None)
+    let reqs = must(add_group(mut r.h, spec), "add_group")
+    pump(mut r, take reqs)
+}
+
+fn activation_of(r: Rig, name: String) -> u64 {
+    match group_row(r.h, name) {
+        Ok(Some(g)) => g.activation,
+        _ => fail("no group row")
+    }
+}
+
+// The group's last serving start answers under STORE's LOCK, as `head_prepare` does: the
+// store is at `store_at` and the start selected another activation, or (same version) the
+// store was activated by another image.
+fn answer_current(mut r: Rig, name: String, store_at: u64) waits {
+    let ch = last(r, name)
+    let mut events: List[launcher.Event] = list.new()
+    list.push(mut events, Placed(take ch, PlaceCurrent(store_at, list.new())))
+    feed(mut r, take events)
+}
+
+// The group's last serving start opened the store at `version` and reached Ready.
+fn answer_opened(mut r: Rig, name: String, version: u64) waits {
+    let ch = last(r, name)
+    let mut events: List[launcher.Event] = list.new()
+    list.push(mut events, Placed(take ch, PlaceOpened(runner.PlaceReady(version: version, store_hi: 1u64, store_lo: 2u64, release: release_at(version), retain_from: 0u64, ready_ns: 0u64))))
+    feed(mut r, take events)
+}
+
+fn with_pair(take l: List[Pair], gen: u64, activation: u64) -> List[Pair] {
+    let mut out = take l
+    list.push(mut out, Pair(gen: gen, activation: activation, assembly: image()))
+    out
+}
+
+fn last_activation(r: Rig) -> Option[u64] {
+    let mut found: Option[u64] = None
+    for l in r.sent {
+        if let ServingMode(_, serve) = l.mode {
+            found = Some(serve.activation)
+        }
+    }
+    found
+}
+
+fn failing_cause(r: Rig, name: String) -> Option[String] {
+    for f in status(r.h).failing {
+        if f.name == name {
+            return Some(string.from(f.last))
+        }
+    }
+    None
+}
+
+// The rest of the window after the probe at 0 was answered PlaceCurrent(1): its end
+// relaunches at once at the recorded activation, outside backoff, and that start's open
+// records the store, serves, and its clean report writes Clean.
+fn serves_after_adoption(mut r: Rig, name: String, what: String) waits {
+    let probe = last(r, name)
+    let n = launches(r, name)
+    finish(mut r, probe, Code(1i32), None)
+    let mut why = string.from(what)
+    string.push(mut why, ": the probe's end did not relaunch at once at the store's activation")
+    expect(activation_of(r, name) == 1u64 && launches(r, name) == n + 1u64 && last_activation(r) == Some(1u64), take why)
+    expect(list.len(status(r.h).failing) == 0u64, "activation window: an adopted activation was counted as a failing start")
+    answer_opened(mut r, name, 1u64)
+    let stored = match group_row(r.h, name) {
+        Ok(Some(g)) => g.store_id == Some((1u64, 2u64)),
+        _ => false
+    }
+    expect(stored, "activation window: the open at the adopted activation did not record the store")
+    idle_stop(mut r, name, None)
+    expect(is_clean(r, name), "activation window: the recovered place's clean report did not write Clean")
+}
+
+// `activation_window_recovers` (§14.5 "Genesis"): a group's genesis start installs the
+// store's first activation (version 0 + 1 = 1, `head_prepare`) before the host records it on
+// the start's PlaceOpened, so a crash in between leaves the store at 1 and the group at 0,
+// and every later start at 0 is refused NotCurrent(Active(1)). After each crash point the
+// group serves again with no operator or deploy input: the start at 0 answered
+// PlaceCurrent(1) records 1 once, its end relaunches at 1 at once, and that open records the
+// store. A store at 1 that refuses the start at 1 too (another image activated it) keeps the
+// group failing on backoff with the refusal as its cause, never readopted.
+@test
+fn activation_window_recovers(c: Clock, rnd: Random) -> Result[(), ()] waits {
+    // The host lives through the crash.
+    let mut r = rig(c, rnd, 4u64)
+    add_genesis(mut r, "g")
+    op_wake(mut r, "g")
+    crash(mut r, "g")
+    expect(starts_are(r, with_pair(with_pair(list.new(), 1u64, 0u64), 2u64, 0u64)), "activation window: the crash was not probed at 0")
+    answer_current(mut r, "g", 1u64)
+    expect(activation_of(r, "g") == 1u64, "activation window: PlaceCurrent(1) at 0 did not record activation 1")
+    serves_after_adoption(mut r, "g", "host lives")
+    expect(starts_are(r, with_pair(with_pair(with_pair(list.new(), 1u64, 0u64), 2u64, 0u64), 3u64, 1u64)), "activation window: the starts were not (1, 0), (2, 0), (3, 1)")
+    // The host restarts before it sees the crash.
+    let mut b = rig(c, rnd, 4u64)
+    add_genesis(mut b, "g")
+    op_wake(mut b, "g")
+    let first = last(b, "g")
+    let _ = launcher.end(mut b.f, first, Signal(9i32), None)
+    let mut back = restart(take b, 4u64)
+    expect(starts_are(back, with_pair(list.new(), 2u64, 0u64)), "activation window, host restart: the restart did not probe at 0")
+    answer_current(mut back, "g", 1u64)
+    serves_after_adoption(mut back, "g", "host restart")
+    expect(starts_are(back, with_pair(with_pair(list.new(), 2u64, 0u64), 3u64, 1u64)), "activation window, host restart: the starts were not (2, 0), (3, 1)")
+    // The host restarts after the adoption committed and before it saw the probe's end.
+    let mut a = rig(c, rnd, 4u64)
+    add_genesis(mut a, "g")
+    op_wake(mut a, "g")
+    crash(mut a, "g")
+    answer_current(mut a, "g", 1u64)
+    let probe = last(a, "g")
+    let _ = launcher.end(mut a.f, probe, Code(1i32), None)
+    let mut later = restart(take a, 4u64)
+    expect(starts_are(later, with_pair(list.new(), 3u64, 1u64)), "activation window, restart after adoption: the next start was not (3, 1)")
+    answer_opened(mut later, "g", 1u64)
+    idle_stop(mut later, "g", None)
+    expect(is_clean(later, "g"), "activation window, restart after adoption: the clean report did not write Clean")
+    // Another image's store: the start at 1 is refused too, and nothing readopts.
+    let mut o = rig(c, rnd, 4u64)
+    add_genesis(mut o, "g")
+    op_wake(mut o, "g")
+    crash(mut o, "g")
+    answer_current(mut o, "g", 1u64)
+    let adopted = last(o, "g")
+    finish(mut o, adopted, Code(1i32), None)
+    answer_current(mut o, "g", 1u64)
+    let second = last(o, "g")
+    finish(mut o, second, Code(1i32), None)
+    expect(activation_of(o, "g") == 1u64, "activation window, other image: the activation changed again")
+    // The crash at gen 1 counted once, so this second unsuccessful start waits 1 s.
+    expect(gens(o, "g") == with_gen(two(1u64, 2u64), 3u64), "activation window, other image: the refused start was not held on backoff")
+    let cause = match failing_cause(o, "g") {
+        Some(why) => why,
+        None => fail("activation window, other image: the group is not failing")
+    }
+    expect(string.starts_with(cause, "NotCurrent"), "activation window, other image: the failing cause is not the store's refusal")
+    Ok(())
+}
+
+fn with_gen(take l: List[u64], g: u64) -> List[u64] {
+    let mut out = take l
+    list.push(mut out, g)
+    out
+}
+
 // OLD answers the cutover the launcher forwarded to it.
 fn answer(mut r: Rig, ch: launcher.Child, take said: runner.HostReply) waits {
     let events = launcher.cutover_reply(mut r.f, ch, take said)

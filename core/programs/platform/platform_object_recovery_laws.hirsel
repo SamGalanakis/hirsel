@@ -1,0 +1,125 @@
+type RecoveryBucket {
+    endpoint: std.sim.s3.Endpoint,
+    time: Clock,
+    server: Task[std.sim.s3.Report],
+    clock_task: Task[()],
+    stopping: Sender[()]
+}
+
+type RecoveryBucketClock: send {
+    world: std.sim.world.World,
+    stop_from: Receiver[()],
+    real: Clock
+}
+
+fn recovery_bucket_clock(take fixture: RecoveryBucketClock) waits {
+    let RecoveryBucketClock(world: take initial, stop_from: take stop_from, real) = take fixture
+    let mut world = take initial
+    loop {
+        if std.sim.world.step(mut world) { continue }
+        if let Ok(()) = channel.try_receive(stop_from) { return }
+        host.sleep_until(real, clock.deadline_after_ms(host.mono_ns(real), 1))
+    }
+}
+
+fn recovery_bucket(tasks: Tasks, real: Clock) -> RecoveryBucket {
+    let seed = 1123u64
+    let address = Addr(ip: V4(2130706433), port: 8080)
+    let mut network = std.sim.net.new(std.sim.net.defaults())
+    let mut peers: List[Ip] = list.with_capacity(1)
+    list.push(mut peers, address.ip)
+    std.sim.net.resolve_as(mut network, "bucket.s3.test", take peers)
+    // Public AWS SigV4 documentation example.
+    let sample: Inline[u8, 32] =[219, 184, 147, 172, 192, 16, 150, 73, 24, 241, 253, 67, 58, 221, 135, 199, 14, 139, 13, 182, 190, 48, 193, 251, 234, 254, 250, 94, 198, 186, 131, 120]
+    let mut signing_bytes: Bytes = list.with_capacity(32)
+    let _ = bytebuf.append_inline(mut signing_bytes, sample, 0, 32)
+    let signing_key = result.unwrap(secret.seal(take signing_bytes, "verify"))
+    let config = std.sim.s3.Config(address, cut: None, network: take network, after_resolve: None, credential: "AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request", signing_key: take signing_key,
+        faults: list.new(), exists_status: 412, fragment_bytes: 4096, max_body: 1048576)
+    let (take world, time) = std.sim.world.new(seed, 0, 1369353600000)
+    let (stopping, stop_from): (Sender[()], Receiver[()]) = channel.new(1)
+    let clock_task = task.spawn(tasks, bytes 65536, RecoveryBucketClock(world: take world, stop_from: take stop_from, real), recovery_bucket_clock)
+    let (endpoint, take server) = std.sim.s3.start_service(tasks, take config, std.sim.world.plan(seed), time, 1048576, 16777216)
+    RecoveryBucket(endpoint, time, server: take server, clock_task: take clock_task, stopping: take stopping)
+}
+
+fn recovery_bucket_client(s: RecoveryBucket, tasks: Tasks, seed: u64) -> store.Authority waits {
+    let sample = string.into_bytes(string.from("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"))
+    let root = result.unwrap(secret.seal(take sample, "kdf"))
+    let credentials = std.cred.from_secret("AKIAIOSFODNN7EXAMPLE", take root, "")
+    let opts = std.object.Bucket(endpoint: "http://s3.test:8080", aws_region: "us-east-1", bucket: "bucket", prefix: "", style: Virtual)
+    let lanes = std.object.LaneConfig(requested_lanes: 1, lane_bytes: 1048576)
+    let deadline = clock.deadline_after_ms(host.mono_ns(s.time), 30000)
+    let client = result.unwrap(std.object.start_simulated(s.endpoint, tasks, take opts, take credentials, s.time, provide.random(seed), lanes, deadline))
+    store.object_authority(take client, "bucket", 30000)
+}
+
+fn object_install_noop(mut _phase: store.Migration) -> Result[(), store.Error] {
+    Ok(())
+}
+
+fn object_install_at(mut db: store.Db, tasks: Tasks, activation: u64, description: runner.Describe) -> Result[Bytes, store.Error] waits {
+    let identity = result.unwrap(runner.identity_digest(description))
+    let mut encoded: Bytes = list.new()
+    let description_codec: std.codec.Codec[runner.Describe] = std.codec.of()
+    std.codec.encode(description_codec, description, mut encoded) ?=> |_| Limit(Value)
+    let record = runner.ReleaseRecord(release: list.new(), digest: clone(description.digest), binding: clone(identity), n_place: description.n_place, prepared: list.new())
+    let mut staged = store.stage_migration(db, tasks, code.describe(object_install_noop))?
+    let release_codec: std.codec.Codec[runner.ReleaseRecord] = std.codec.of()
+    store.stage_activation(mut staged, activation, None, encoded, release_codec, record)?
+    store.install_bound_activation(mut db, take staged, activation, identity)?
+    Ok(take identity)
+}
+
+fn read_bucket_activation(mut readers: store.Followers, tasks: Tasks, fixture: RecoveryBucket, seed: u64, opts: store.Options) -> Result[(u64, Bytes), store.Error] waits {
+    let f = store.follower(mut readers, tasks, recovery_bucket_client(fixture, tasks, seed), fixture.time, opts)?
+    runner.follower_release(f, 10)
+}
+
+fn object_adoption_trace(c: Clock, rnd: Random, tasks: Tasks, sim: RecoveryBucket) -> Result[(), store.Error] waits {
+    let mut options = result.unwrap(store.sized(Bucket(std.object.LaneConfig(requested_lanes: 1, lane_bytes: 1048576)), 2147483648u64))
+    options.group_bytes = 65536
+    options.head_poll_ms = 10000
+    let mut bare = store.open_authority(tasks, recovery_bucket_client(sim, tasks, 1), c, rnd, options)?
+    let _ = store.create_table(mut bare, store.spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
+    let rows = store.table(mut bare, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    for k in 0u64 .. 9 {
+        let wrote = store.run(mut bare, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] { store.put(mut tx, rows, k, k) })?
+        if let Committed(_) = wrote {} else { fail("T1 bucket fixture put was refused") }
+    }
+    let mut description = describe_of(image())
+    description.n_place = 524288
+    let _ = object_install_at(mut bare, tasks, 11, description)?
+    let store_id = store.identity(bare)
+    store.close(take bare)?
+    options.expect = Some(store_id)
+    options.create = false
+    let mut readers = store.followers()
+    let (unmatched, take first_read) = read_bucket_activation(mut readers, tasks, sim, 2, options)?
+    description.n_place = 1048576
+    let binding = result.unwrap(runner.identity_digest(description))
+    let mut host_test = trace_probe_authority(c, rnd, (store_id.hi, store_id.lo), binding, binding, false)
+    trace_current(mut host_test, unmatched, take first_read)
+    expect(unmatched == 11 && rooted_at(host_test, image(), 3), "T1 bucket: the unmatched release moved the host")
+    expect(collection_keeps(mut host_test, true, true), "T1 bucket: an unmatched release lost a candidate")
+
+    let mut hand = store.open_authority(tasks, recovery_bucket_client(sim, tasks, 3), c, rnd, options)?
+    let _ = object_install_at(mut hand, tasks, 12, description)?
+    store.close(take hand)?
+    let (adopted, take installed_read) = read_bucket_activation(mut readers, tasks, sim, 4, options)?
+    trace_current(mut host_test, adopted, take installed_read)
+    expect(adopted == 12 && rooted_at(host_test, image(), 12) && last_activation(host_test) == Some(12), "T1 bucket: OLD was not relaunched at 12")
+    expect(collection_keeps(mut host_test, false, true), "T1 bucket: adoption did not leave OLD as the only root")
+    Ok(())
+}
+
+@test
+fn bucket_hand_install_adopts_at_12(c: Clock, rnd: Random, tasks: Tasks) -> Result[(), store.Error] waits {
+    let fixture = recovery_bucket(tasks, c)
+    let outcome = object_adoption_trace(c, rnd, tasks, fixture)
+    let RecoveryBucket(server: take server, clock_task: take clock_task, stopping: take stopping, ..) = take fixture
+    result.unwrap(channel.send(stopping, ()))
+    let _ = result.unwrap(task.join(take server))
+    result.unwrap(task.join(take clock_task))
+    outcome
+}

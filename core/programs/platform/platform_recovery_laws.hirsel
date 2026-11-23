@@ -89,6 +89,10 @@ fn trace_read(id: u8, n_place: u64) -> Bytes {
 }
 
 fn trace_probe(c: Clock, rnd: Random, shared: bool, retain_r: bool) -> Rig waits {
+    trace_probe_authority(c, rnd, (1, 2), bytes_of(32, 1), bytes_of(32, if shared { 1u8 } else { 2u8 }), retain_r)
+}
+
+fn trace_probe_authority(c: Clock, rnd: Random, expected: (u64, u64), old_identity: Bytes, new_identity: Bytes, retain_r: bool) -> Rig waits {
     let (take setup, _, _) = cut_case(c, rnd)
     let mut r = take setup
     let made = {
@@ -99,11 +103,12 @@ fn trace_probe(c: Clock, rnd: Random, shared: bool, retain_r: bool) -> Rig waits
             let mut g = g0
             let mut d = d0
             g.activation = 3u64
+            g.store_id = Some(expected)
             if retain_r { retain_release(mut g, bytes_of(32u64, 6u8)) }
             d.activation = 10u64
             d.outcome = Undecided(ProbeNew)
-            d.old_binding = Some(Binding(identity: bytes_of(32u64, 1u8), n_place: 1048576u64))
-            d.binding = Some(Binding(identity: bytes_of(32u64, if shared { 1u8 } else { 2u8 }), n_place: 1048576u64))
+            d.old_binding = Some(Binding(identity: clone(old_identity), n_place: 1048576u64))
+            d.binding = Some(Binding(identity: clone(new_identity), n_place: 1048576u64))
             index_release(mut tx, t, g, 3u64, g.assembly)?
             st(store.put(mut tx, t.groups, "g", g))?
             st(store.put(mut tx, t.deploys, "g", d))

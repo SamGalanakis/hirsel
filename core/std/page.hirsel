@@ -70,7 +70,11 @@ pub opaque type Page: shareable + send {
     kids: List[Arc[Page]],
     blobs: List[Arc[Bytes]],
     rows: u64,
-    charge: u64
+    charge: u64,
+    // This page's own image may be out of canonical form (AP3).
+    loose: bool,
+    // A page under this one may be loose; when clear, none is.
+    loose_below: bool
 }
 
 pub type Row: shareable + send {
@@ -241,7 +245,7 @@ pub fn body(page: Arc[Page], at: u16) -> Option[Arc[Bytes]] {
 pub fn copy_with_stamp(page: Arc[Page], id: u64) -> Arc[Page] {
     let mut raw: Bytes = clone(page.image.raw)
     list.set_word_le(mut raw, 8, id)
-    arc.new(Page(image: Image(raw: take raw, domain: page.image.domain), kids: clone(page.kids), blobs: clone(page.blobs), rows: page.rows, charge: page.charge))
+    arc.new(Page(image: Image(raw: take raw, domain: page.image.domain), kids: clone(page.kids), blobs: clone(page.blobs), rows: page.rows, charge: page.charge, loose: page.loose, loose_below: page.loose_below))
 }
 
 pub fn value_at(page: Arc[Page], slot: u64) -> Option[View[Bytes]] in page {
@@ -366,9 +370,11 @@ fn changed_totals(mut page: Page, old_rows: u64, old_charge: u64, rows: u64, cha
     page.charge = int.saturating_add(page.charge - old_charge, charge)
 }
 
-fn new_page(take image: Image, take kids: List[Arc[Page]], take blobs: List[Arc[Bytes]]) -> Page {
+// A built or loaded image is canonical; `loose_below` marks kids that an edit
+// may have left loose.
+fn new_page(take image: Image, take kids: List[Arc[Page]], take blobs: List[Arc[Bytes]], loose_below: bool) -> Page {
     let (rows, charge) = image_totals(image)
-    Page(image: take image, kids: take kids, blobs: take blobs, rows: rows, charge: charge)
+    Page(image: take image, kids: take kids, blobs: take blobs, rows: rows, charge: charge, loose: false, loose_below: loose_below)
 }
 
 fn slots(image: Image) -> u64 {
@@ -887,7 +893,7 @@ pub fn encode(rows: List[Entry], lvl: u8, id: u64, domain: Domain) -> Result[Ima
 /// Attach the loader's already resolved edges, in slot and body order.
 pub fn attach(take image: Image, take kids: List[Arc[Page]], take blobs: List[Arc[Bytes]]) -> Result[Arc[Page], Error] {
     check_attachment(image, kids, blobs)?
-    Ok(arc.new(new_page(take image, take kids, take blobs)))
+    Ok(arc.new(new_page(take image, take kids, take blobs, false)))
 }
 
 /// Attach without copying the adopted image, returning an allocation refusal.
@@ -898,7 +904,7 @@ pub fn attach_fallible(take image: Image, take kids: List[Arc[Page]], take blobs
     // Allocate the counted node inside a read-only failure boundary, then
     // move the validated owners into it while it is still unique.
     let reserved = isolate(fn() -> Arc[Page] {
-        arc.new(Page(image: Image(raw: list.new(), domain: Unprefixed), kids: list.new(), blobs: list.new(), rows: 0, charge: 0))
+        arc.new(Page(image: Image(raw: list.new(), domain: Unprefixed), kids: list.new(), blobs: list.new(), rows: 0, charge: 0, loose: false, loose_below: false))
     })
     let mut resident = match take reserved {
         Ok(Ok(take allocated)) => take allocated,
@@ -912,7 +918,7 @@ pub fn attach_fallible(take image: Image, take kids: List[Arc[Page]], take blobs
             fail("page: counted allocation failed")
         },
     }
-    let mut ready: Option[Page] = Some(new_page(take image, take kids, take blobs))
+    let mut ready: Option[Page] = Some(new_page(take image, take kids, take blobs, false))
     let moved = arc.with_unique(mut resident, scoped fn(mut destination: Page) {
         destination = option.unwrap(replace(mut ready, None))
     })
@@ -963,7 +969,7 @@ pub fn empty(lvl: u8, id: u64, domain: Domain) -> Arc[Page] {
     let mut raw: Bytes = list.with_capacity(HEADER)
     list.fill(mut raw, HEADER, 0)
     header(mut raw, 0, lvl, id, 0, 0, HEADER)
-    arc.new(Page(image: Image(raw: take raw, domain: domain), kids: list.new(), blobs: list.new(), rows: 0, charge: 0))
+    arc.new(Page(image: Image(raw: take raw, domain: domain), kids: list.new(), blobs: list.new(), rows: 0, charge: 0, loose: false, loose_below: false))
 }
 
 fn rows_of(image: Image) -> List[Entry] {
@@ -1050,23 +1056,53 @@ fn sealed_image(image: Image, bodies_held: u64) -> Result[(Image, List[u16]), Er
     Ok((Image(raw: take raw, domain: image.domain), take bodies))
 }
 
-/// Put each page stamped `from` or later, reached through such pages, in its
-/// canonical image (AP3): no dead space, entries packed in slot order under
-/// the longest common prefix, blob bodies numbered in slot order. A commit's
-/// edits and a load of that commit then leave the same images, and a body's
-/// steps over them (MEM-30) do not depend on how its base was loaded.
-pub fn canonicalize(mut root: Arc[Page], from: u64) -> Result[(), Error] {
-    if stamp(root.image) < from {
+/// Put each loose page in its canonical image (AP3): no dead space, entries
+/// packed in slot order under the longest common prefix, blob bodies
+/// numbered in slot order. A commit's edits and a load of that commit then
+/// leave the same images, and a body's steps over them (MEM-30) do not depend
+/// on how its base was loaded. Builders and writes that keep a page canonical
+/// leave it unmarked, so only pages an edit left loose are rewritten.
+pub fn canonicalize(mut root: Arc[Page]) -> Result[(), Error] {
+    if !root.loose && !root.loose_below {
         return Ok(())
     }
-    // A page stamped from `from` on was made or restamped by these edits; one a
-    // draft still shares with its base is copied before it is rewritten.
+    // A loose page a draft still shares is copied before it is rewritten.
     arc.update(mut root, scoped fn(mut page: Page) -> Result[(), Error] {
-        for slot in 0u64 .. list.len(page.kids) {
-            canonicalize(mut page.kids[slot], from)?
+        if page.loose_below {
+            for slot in 0u64 .. list.len(page.kids) {
+                canonicalize(mut page.kids[slot])?
+            }
+            page.loose_below = false
         }
-        canonical_page(mut page)
+        if page.loose {
+            canonical_page(mut page)?
+            page.loose = false
+        }
+        Ok(())
     })
+}
+
+/// Whether every page under root is in its canonical image and unmarked (AP3).
+pub fn canonical(root: Arc[Page]) -> Result[bool, Error] {
+    if root.loose || root.loose_below {
+        return Ok(false)
+    }
+    for kid in root.kids {
+        if !canonical(kid)? {
+            return Ok(false)
+        }
+    }
+    if count(root.image) == 0 {
+        return Ok(list.len(root.image.raw) == HEADER)
+    }
+    let (image, bodies) = sealed_image(root.image, list.len(root.blobs))?
+    for i in 0u64 .. list.len(bodies) {
+        let numbered: u64 = int.widen(bodies[i])
+        if numbered != i {
+            return Ok(false)
+        }
+    }
+    Ok(image.raw == root.image.raw)
 }
 
 fn canonical_page(mut page: Page) -> Result[(), Error] {
@@ -1357,11 +1393,33 @@ fn private_put(mut page: Page, incoming: Entry, kid: Option[Arc[Page]], blob: Op
     if !absent(blob) && absent(old_body) {
         list.reserve(mut page.blobs, 1)
     }
+    // A canonical page keeps its form when the entry is an inline value or a
+    // child edge, shares the prefix and joins at least one key: the prefix
+    // then stays the longest common one.
+    let keyed = n - order.min(first_key_slot(lvl), n)
+    let in_place = match incoming.cell {
+        InlineValue(_) => page.image.domain != CollectionMap,
+        BlobValue(_) => false,
+        Child(_) => true,
+    }
+    let canonical_write = !page.loose && in_place && absent(old_body) && (hit || keyed != 0)
     match take replacement {
         Some(take rebuilt) => {
             page.image = take rebuilt
+            // A rebuild keeps the body numbering, which need not follow slot order.
+            page.loose = page.loose || !absent(blob) || list.len(page.blobs) != 0
         },
-        None => write_slot(mut page.image, incoming, slot, hit, p, old_size, needed, body_index),
+        None => if canonical_write {
+            let old_len = list.len(page.image.raw)
+            if packed > old_len {
+                list.reserve(mut page.image.raw, order.min(PRIVATE_MAX, order.max(2 * old_len, packed)) - old_len)
+            }
+            let at = canonical_space(mut page.image, slot, hit, old_size, width, packed)
+            let _ = write_entry(mut page.image.raw, at, p, incoming, body_index)
+        } else {
+            write_slot(mut page.image, incoming, slot, hit, p, old_size, needed, body_index)
+            page.loose = true
+        },
     }
     if let Some(k) = kid {
         if hit {
@@ -1400,6 +1458,7 @@ fn private_delete(mut page: Page, key: Bytes) {
     if !hit {
         return ()
     }
+    page.loose = true
     let (old_rows, old_charge) = stored_totals(page.image, slot)
     let mut dead = u16_at(page.image.raw, 6) + entry_size(page.image, slot)
     if let Some(at) = blob_field(page.image, slot) {
@@ -1536,7 +1595,7 @@ fn bulk_leaf(rows: List[Row], lo: u64, hi: u64, inline: u64, domain: Domain, mut
         }
     }
     let image = Image(raw: take raw, domain: domain)
-    let root = arc.new(new_page(take image, list.new(), take blobs))
+    let root = arc.new(new_page(take image, list.new(), take blobs, false))
     Ok(Built(root: take root, first: clone(rows[lo].key), last: clone(rows[hi - 1].key), rows: hi - lo, charge: charge))
 }
 
@@ -1576,7 +1635,7 @@ fn bulk_branch(nodes: List[Built], seps: List[Bytes], lo: u64, hi: u64, domain: 
     }
     let id = draw(mut next)
     let image = pack_entries(entries, lvl, id, domain)?
-    let root = arc.new(Page(image: take image, kids: take kids, blobs: list.new(), rows: rows, charge: charge))
+    let root = arc.new(Page(image: take image, kids: take kids, blobs: list.new(), rows: rows, charge: charge, loose: false, loose_below: false))
     Ok(Built(root: take root, first: clone(nodes[lo].first), last: clone(nodes[hi - 1].last), rows: rows, charge: charge))
 }
 
@@ -1948,7 +2007,7 @@ fn build_section(items: List[PageSlot], domain: Domain, lvl: u8, lo: u64, hi: u6
         list.push(mut rows, take row)
     }
     let image = pack_entries(rows, lvl, id, domain)?
-    Ok(arc.new(new_page(take image, take kids, take blobs)))
+    Ok(arc.new(new_page(take image, take kids, take blobs, true)))
 }
 
 fn build_pieces(items: List[PageSlot], domain: Domain, lvl: u8, mut next: u64) -> Result[List[Arc[Page]], Error] {
@@ -2060,7 +2119,7 @@ fn build_leaf_piece(page: Page, incoming: PageSlot, entries: List[PackedSlot], s
             list.push(mut kids, take kid)
         }
     }
-    arc.new(new_page(take image, take kids, take blobs))
+    arc.new(new_page(take image, take kids, take blobs, page.image.domain == CollectionMap))
 }
 
 fn split_insert(page: Page, incoming: PageSlot, mut next: u64) -> Result[List[Arc[Page]], Error] {
@@ -2094,7 +2153,11 @@ fn insert_private(mut page: Page, incoming: PageSlot, private_from: u64, mut nex
         return Ok((None, edit == Shrunk))
     }
     let (take revised, shrank) = insert_path(mut page.kids[slot], incoming, private_from, mut next)?
+    if page.kids[slot].loose || page.kids[slot].loose_below {
+        page.loose_below = true
+    }
     if let Some(parts) = view revised {
+        page.loose_below = true
         if !shrank {
             return Ok((adopt_children(mut page, slot, parts, mut next)?, false))
         }
@@ -2197,7 +2260,11 @@ fn remove_private(mut page: Page, key: Bytes, private_from: u64, mut next: u64) 
         return Ok(None)
     }
     let revised = remove_path(mut page.kids[slot], key, private_from, mut next)?
+    if page.kids[slot].loose || page.kids[slot].loose_below {
+        page.loose_below = true
+    }
     if let Some(parts) = revised {
+        page.loose_below = true
         if list.len(parts) == 1 {
             page.kids[slot] = arc.share(parts[0])
             return rebalance_child(mut page, slot, mut next)
@@ -2312,6 +2379,9 @@ fn insert_value(mut root: Arc[Page], key: Bytes, value: Bytes, shared: Option[Vi
 fn collection_private(mut page: Page, key: Bytes, private_from: u64, mut next: u64, edit: scoped fn(mut Arc[Page], mut u64) -> Result[(), Error]) -> Result[(), Error] {
     if let Some(slot) = descend(page.image, key) {
         edit_collection(mut page.kids[slot], key, private_from, mut next, edit)?
+        if page.kids[slot].loose || page.kids[slot].loose_below {
+            page.loose_below = true
+        }
         refresh_child(mut page, slot)
         return Ok(())
     }
@@ -2320,6 +2390,9 @@ fn collection_private(mut page: Page, key: Bytes, private_from: u64, mut next: u
         return Error(MalformedPage)
     }
     edit(mut page.kids[slot], mut next)?
+    if page.kids[slot].loose || page.kids[slot].loose_below {
+        page.loose_below = true
+    }
     refresh_collection(mut page, slot)
     Ok(())
 }
@@ -2369,6 +2442,10 @@ type InlineFit {
 }
 
 fn inline_leaf_fit(page: Page, key: Bytes, data: Bytes, has_sibling: bool) -> Option[InlineFit] {
+    // canonical_space edits a canonical leaf only.
+    if page.loose {
+        return None
+    }
     let (slot, hit) = search(page.image, key)
     let p = u16_at(page.image.raw, 4)
     let key_width = list.len(key)
@@ -2466,14 +2543,11 @@ fn canonical_space(mut image: Image, slot: u64, hit: bool, old_size: u64, size: 
     } else {
         n + 1
     }
-    for i in 0u64 .. total {
-        if i != slot {
-            let field = new_heap + 2 * i
-            let offset = u16_at(image.raw, field)
-            if offset > at || (!hit && offset == at) {
-                put16(mut image.raw, field, offset + size - old_size)
-            }
-        }
+    // Entries sit in slot order, so exactly the slots after this one move.
+    for i in slot + 1 .. total {
+        let field = new_heap + 2 * i
+        let offset = u16_at(image.raw, field)
+        put16(mut image.raw, field, offset + size - old_size)
     }
     put16(mut image.raw, new_heap + 2 * slot, at)
     put16(mut image.raw, 2, total)

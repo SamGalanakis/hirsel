@@ -1,13 +1,13 @@
-// AP3 in memory: every page a commit or a cut stamped from `from` on takes its
-// canonical image, the one a load of that state builds.
-fn canonical_roots(mut roots: Roots, from: u64) -> Result[(), Error] {
-    page_result(std.page.canonicalize(mut roots.collections.root, from))?
-    page_result(std.page.canonicalize(mut roots.streams.root, from))?
-    page_result(std.page.canonicalize(mut roots.catalog.root, from))
+// AP3 in memory: every page a commit or a cut left loose takes its canonical
+// image, the one a load of that state builds.
+fn canonical_roots(mut roots: Roots) -> Result[(), Error] {
+    page_result(std.page.canonicalize(mut roots.collections.root))?
+    page_result(std.page.canonicalize(mut roots.streams.root))?
+    page_result(std.page.canonicalize(mut roots.catalog.root))
 }
 
-fn canonical_tree(mut tree: PageTree, from: u64) -> Result[(), Error] {
-    page_result(std.page.canonicalize(mut tree.root, from))
+fn canonical_tree(mut tree: PageTree) -> Result[(), Error] {
+    page_result(std.page.canonicalize(mut tree.root))
 }
 
 // The least step bound under which fetching key `k` returns.
@@ -64,7 +64,14 @@ fn layout_commits(mut db: Db, held: bool) -> bool waits {
     let mut raw: Bytes = list.with_capacity(65536)
     list.fill(mut raw, 65536, 97u8)
     let large = result.unwrap(string.from_utf8(take raw))
-    let steps = [0u8, 1u8, 2u8, 3u8, 3u8, 3u8, 4u8, 4u8]
+    // Then single-row commits run past several leaf splits.
+    let mut steps: List[u8] = list.with_capacity(409)
+    for step in [0u8, 1u8, 2u8, 3u8, 3u8, 3u8, 4u8, 4u8, 5u8] {
+        list.push(mut steps, step)
+    }
+    for _ in 0u64 .. 400 {
+        list.push(mut steps, 3u8)
+    }
     let mut fresh = 5000u64
     for step in steps {
         if held && step == 0u8 {
@@ -92,7 +99,8 @@ fn layout_commits(mut db: Db, held: bool) -> bool waits {
                     }
                 },
                 3u8 => put(mut tx, t, fresh, fresh)?,
-                _ => put(mut tx, t, fresh - 4000, fresh)?,
+                4u8 => put(mut tx, t, fresh - 4000, fresh)?,
+                _ => put(mut tx, big, 2, "a longer small value")?,
             }
             Ok(())
         }))
@@ -105,12 +113,19 @@ fn layout_commits(mut db: Db, held: bool) -> bool waits {
     true
 }
 
+// Every page a head reaches is in its canonical image and unmarked (AP3).
+fn heads_canonical(db: Db) -> bool {
+    let roots = view db.heads[0u64].roots
+    result.unwrap(std.page.canonical(roots.collections.root)) && result.unwrap(std.page.canonical(roots.streams.root)) && result.unwrap(std.page.canonical(roots.catalog.root))
+}
+
 // MEM-30: a body's steps follow from its source and its values, and the page
 // layout it reads is one of those values. A re-execution reads a base that a
 // checkpoint, a MANIFEST load or journal recovery may have rebuilt, so every
 // load path must leave the layout the live commits left, and so must commits
 // made while a pin shares their pages. Oracle: the fetch step thresholds of
-// the live store, compared across the four load paths and the pinned run.
+// the live store, compared across the four load paths and the pinned run,
+// and each head's pages against their sealed images.
 pub fn disk_law_load_path_layout(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
     let dir = disk_test_directory(d)
     let mut db = result.unwrap(open(tasks, dir, c, r, defaults()))
@@ -118,14 +133,18 @@ pub fn disk_law_load_path_layout(d: Dir, c: Clock, r: Random, tasks: Tasks) -> b
         return false
     }
     let live = layout_thresholds(mut db)
+    let mut sealed = heads_canonical(db)
     result.unwrap(close(take db))
     let mut replayed_db = result.unwrap(open(tasks, dir, c, r, defaults()))
     let replayed = layout_thresholds(mut replayed_db)
+    sealed = sealed && heads_canonical(replayed_db)
     let _ = result.unwrap(checkpoint(mut replayed_db))
     let cut = layout_thresholds(mut replayed_db)
+    sealed = sealed && heads_canonical(replayed_db)
     result.unwrap(close(take replayed_db))
     let mut loaded_db = result.unwrap(open(tasks, dir, c, r, defaults()))
     let loaded = layout_thresholds(mut loaded_db)
+    sealed = sealed && heads_canonical(loaded_db)
     result.unwrap(close(take loaded_db))
     let pinned_dir = disk_test_directory(d)
     let mut held_db = result.unwrap(open(tasks, pinned_dir, c, r, defaults()))
@@ -133,8 +152,9 @@ pub fn disk_law_load_path_layout(d: Dir, c: Clock, r: Random, tasks: Tasks) -> b
         return false
     }
     let held = layout_thresholds(mut held_db)
+    sealed = sealed && heads_canonical(held_db)
     result.unwrap(close(take held_db))
-    live == replayed && live == cut && live == loaded && live == held
+    sealed && live == replayed && live == cut && live == loaded && live == held
 }
 
 @test

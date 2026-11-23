@@ -116,6 +116,12 @@ pub(crate) static MATERIALISED: Memo<
     crate::instances::Materialised,
 > = Memo::new();
 
+/// The last accepted recipe header walk for an entry and its check inputs.
+pub(crate) static RECIPE_REACH: Memo<
+    ContentHash,
+    Arc<std::sync::Mutex<Option<crate::reachability::RecipeGraph>>>,
+> = Memo::new();
+
 /// The site items each link input references, by the input's content key.
 pub(crate) static REFERENCED: Memo<
     (hirsel_core_ids::ContentHash, u64),
@@ -254,6 +260,7 @@ pub(crate) static RESOLVED: Memo<
 /// Drop every memo entry the request numbered `request` did not use.
 fn sweep(request: u64) {
     MATERIALISED.sweep(request);
+    RECIPE_REACH.sweep(request);
     REFERENCED.sweep(request);
     OBJECT_RECORDS.sweep(request);
     DEBUG_POSITIONS.sweep(request);

@@ -376,6 +376,48 @@ fn a_resident_driver_builds_each_universe_like_a_fresh_one() {
     assert_eq!(snapshot(&b, "app@1/main/root"), fresh_b, "retained B");
 }
 
+#[test]
+fn a_resident_recipe_reaches_added_and_removed_calls_like_a_fresh_walk() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut driver = Driver::default();
+    let entry = DefPath::from_full("app@1/main/root").unwrap();
+    let mut record = None;
+    let mut previous = None;
+    for (body, bodies, reuse) in [
+        ("1u64", 1, false),
+        ("2u64", 1, true),
+        ("leaf()", 2, false),
+        ("leaf() + 2u64", 2, true),
+        ("3u64", 1, false),
+    ] {
+        let source = format!("fn leaf() -> u64 {{ 9u64 }}\nfn root() -> u64 {{ {body} }}\n");
+        let current = check(&source, dir.path(), &mut driver);
+        let reached = current
+            .reachable_recipe_record(&entry, 256, &mut record)
+            .unwrap();
+        let fresh_dir = tempfile::tempdir().unwrap();
+        let fresh = check(&source, fresh_dir.path(), &mut Driver::default());
+        let fresh = fresh.reachable(&entry, 256).unwrap();
+        assert!(reached.accepted() && fresh.accepted(), "{body}");
+        assert_eq!(
+            reached.instances.unwrap(),
+            fresh.instances.unwrap(),
+            "{body}"
+        );
+        assert_eq!(reached.bodies, bodies, "{body}");
+        assert_eq!(reached.bodies, fresh.bodies, "{body}");
+        assert_eq!(reached.declarations, fresh.declarations, "{body}");
+        assert_eq!(reached.graph, fresh.graph, "{body}");
+        let graph = reached.graph.unwrap();
+        assert_eq!(
+            previous.as_ref().is_some_and(|p| Arc::ptr_eq(p, &graph)),
+            reuse,
+            "{body}"
+        );
+        previous = Some(graph);
+    }
+}
+
 const CODEC_TYPES: &str =
     "type Rec { a: u64, b: List[u8] }\ntype In { a: u64 }\ntype Out { i: In, b: u64 }\n";
 const CODEC_BODIES: [&str; 7] = [

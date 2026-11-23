@@ -1311,7 +1311,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
                 Some(Ok(options))
                     if recipe_command || (command == "run" && !grants.foreign.is_empty()) =>
                 {
-                    product.reachable(entry, options.instance_limit)?
+                    product.reachable_recipe(entry, options.instance_limit)?
                 }
                 Some(Ok(options)) => product.reachable_for(entry, options)?,
                 _ => product.reachable(entry, 65_536)?,

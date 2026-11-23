@@ -662,6 +662,9 @@ impl<'a> WalkRows<'a> {
         self.record(path);
         self.product.definitions.contains_key(path)
     }
+    pub(crate) fn is_current(&self, path: &DefPath, row: &Row) -> bool {
+        row.own != Some(ContentHash::default()) && current(self.product, self.base, path, row)
+    }
 }
 fn live(product: &CheckProduct, base: usize, path: &DefPath) -> Row {
     let id = product.headers.id(path);

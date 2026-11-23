@@ -32,11 +32,50 @@ pub struct Reachable<'a> {
     pub counters: crate::reach::ReachCounters,
     pub(crate) materialized: crate::instances::InstanceSet,
     /// The header walk's nodes, when this walk ran it.
-    pub(crate) graph: Option<Graph>,
+    pub(crate) graph: Option<Arc<Graph>>,
     /// The build's native inputs, when `reachable_for` collected this set.
     pub(crate) native: Option<crate::native::NativeInputs>,
     /// A Cranelift development request's reach record.
     pub(crate) reach: Option<crate::reach::Use>,
+}
+
+/// A complete recipe header walk. The instance walk still supplies the
+/// current bodies. Its result and the source constants are the graph roots.
+pub(crate) struct RecipeGraph {
+    instances: Vec<Identity>,
+    constants: Vec<DefPath>,
+    rows: rustc_hash::FxHashMap<DefPath, crate::reach::Row>,
+    graph: Arc<Graph>,
+    counts: (usize, usize),
+}
+
+impl RecipeGraph {
+    fn reuse(
+        &mut self,
+        product: &CheckProduct,
+        instances: &[Identity],
+        constants: &[DefPath],
+        image: Option<&crate::image::ImageDirectory>,
+    ) -> io::Result<bool> {
+        if self.instances != instances || self.constants != constants {
+            return Ok(false);
+        }
+        let mut rows = crate::reach::WalkRows::new(product);
+        for (path, row) in &self.rows {
+            if rows.is_current(path, row) {
+                continue;
+            }
+            for body in [false, true] {
+                if let Some(edges) = self.graph.get(&(path.clone(), body))
+                    && *edges != product.expand(&mut rows, path, body, image, false)?
+                {
+                    return Ok(false);
+                }
+            }
+        }
+        self.rows.extend(rows.rows);
+        Ok(true)
+    }
 }
 impl Reachable<'_> {
     /// The bodyless foreign definitions selected by this entry's checked slot closure.
@@ -260,7 +299,40 @@ impl Reached<'_> {
 }
 impl CheckProduct {
     pub fn reachable(&self, entry: &DefPath, limit: usize) -> io::Result<Reachable<'_>> {
-        hirsel_core_ids::published::catch_io(|| self.reachable_inner(entry, limit, None))
+        hirsel_core_ids::published::catch_io(|| self.reachable_inner(entry, limit, None, None))
+    }
+
+    pub(crate) fn reachable_recipe(
+        &self,
+        entry: &DefPath,
+        limit: usize,
+    ) -> io::Result<Reachable<'_>> {
+        if !crate::resident::serving() {
+            return self.reachable(entry, limit);
+        }
+        let key = crate::native::key(
+            "hirsel.recipe-reach.v1",
+            &(
+                self.environment,
+                self.image.as_ref().map(|image| image.identity),
+                entry,
+                limit,
+            ),
+        )?;
+        let record = crate::resident::RECIPE_REACH
+            .get_or(Some(key), || Ok::<_, io::Error>(Arc::default()))?;
+        self.reachable_recipe_record(entry, limit, &mut record.lock().unwrap())
+    }
+
+    pub(crate) fn reachable_recipe_record(
+        &self,
+        entry: &DefPath,
+        limit: usize,
+        record: &mut Option<RecipeGraph>,
+    ) -> io::Result<Reachable<'_>> {
+        hirsel_core_ids::published::catch_io(|| {
+            self.reachable_inner(entry, limit, None, Some(record))
+        })
     }
     /// The build's reachable set for `options`. A Cranelift development build
     /// reads its reach record: if every row it holds is live, the walk's result
@@ -283,13 +355,14 @@ impl CheckProduct {
         let inputs = crate::native::native_inputs(self, options)?;
         let mut reached = hirsel_core_ids::published::catch_io(|| {
             let Some(records) = inputs.records.as_ref() else {
-                return self.reachable_inner(entry, options.instance_limit, None);
+                return self.reachable_inner(entry, options.instance_limit, None, None);
             };
             let Some(selection) = crate::reach::selection(self, records, entry, options)? else {
                 return self.reachable_inner(
                     entry,
                     options.instance_limit,
                     Some((records, None, damaged)),
+                    None,
                 );
             };
             let loaded = crate::reach::load(&records.store, selection)?;
@@ -357,6 +430,7 @@ impl CheckProduct {
                     Some((prior.as_ref(), &changed, &constants)),
                     damaged,
                 )),
+                None,
             )?;
             reached.counters.record_bytes = record_bytes as u64;
             let complete = reached.accepted() && reached.first_stops.is_empty();
@@ -493,6 +567,7 @@ impl CheckProduct {
             Option<(Option<&crate::reach::Reach>, &[bool], &[DefPath])>,
             &BTreeSet<Identity>,
         )>,
+        mut recipe_record: Option<&mut Option<RecipeGraph>>,
     ) -> io::Result<Reachable<'_>> {
         let mut materialized = crate::instances::InstanceSet::for_reach();
         let roots = [Identity::plain(entry.clone())];
@@ -549,37 +624,51 @@ impl CheckProduct {
                 }
             }
         }
+        let clean =
+            self.diagnostics.is_empty() && self.incomplete.is_empty() && self.resources.is_empty();
+        let mut recipe_counts = None;
+        let mut recipe_rows = None;
         let graph = match reuse {
             Some(_) => None,
             None => {
-                let mut rows = crate::reach::WalkRows::new(self);
-                let mut pending = BTreeSet::from([(entry.clone(), true)]);
-                // A glue instance has no definition; the hooks its body calls
-                // are reached instances of their own.
-                pending.extend(
-                    instances
-                        .iter()
-                        .flatten()
-                        .filter(|i| !hirsel_core_front::is_glue(&i.definition))
-                        .map(|i| (i.definition.clone(), true)),
-                );
-                pending.extend(constants.iter().map(|c| (c.clone(), false)));
-                let mut graph = Graph::new();
-                while let Some(node) = pending.pop_first() {
-                    if graph.contains_key(&node) {
-                        continue;
+                if clean
+                    && let (Some(Some(record)), Ok(instances)) =
+                        (recipe_record.as_deref_mut(), &instances)
+                    && record.reuse(self, instances, &constants, image_directory.as_deref())?
+                {
+                    recipe_counts = Some(record.counts);
+                    Some(Arc::clone(&record.graph))
+                } else {
+                    let mut rows = crate::reach::WalkRows::new(self);
+                    let mut pending = BTreeSet::from([(entry.clone(), true)]);
+                    // A glue instance has no definition; the hooks its body calls
+                    // are reached instances of their own.
+                    pending.extend(
+                        instances
+                            .iter()
+                            .flatten()
+                            .filter(|i| !hirsel_core_front::is_glue(&i.definition))
+                            .map(|i| (i.definition.clone(), true)),
+                    );
+                    pending.extend(constants.iter().map(|c| (c.clone(), false)));
+                    let mut graph = Graph::new();
+                    while let Some(node) = pending.pop_first() {
+                        if graph.contains_key(&node) {
+                            continue;
+                        }
+                        let (edges, unavailable) = self.expand(
+                            &mut rows,
+                            &node.0,
+                            node.1,
+                            image_directory.as_deref(),
+                            instances.is_err(),
+                        )?;
+                        pending.extend(edges.iter().filter(|e| !graph.contains_key(e)).cloned());
+                        graph.insert(node, (edges, unavailable));
                     }
-                    let (edges, unavailable) = self.expand(
-                        &mut rows,
-                        &node.0,
-                        node.1,
-                        image_directory.as_deref(),
-                        instances.is_err(),
-                    )?;
-                    pending.extend(edges.iter().filter(|e| !graph.contains_key(e)).cloned());
-                    graph.insert(node, (edges, unavailable));
+                    recipe_rows = Some(rows.rows);
+                    Some(Arc::new(graph))
                 }
-                Some(graph)
             }
         };
         let reached = match (&graph, reuse) {
@@ -587,15 +676,13 @@ impl CheckProduct {
             (None, Some(prior)) => Reached::Record(prior),
             (None, None) => unreachable!("a walk without a graph reuses the record's"),
         };
-        let (bodies_len, declarations_len) = match &reached {
+        let (bodies_len, declarations_len) = recipe_counts.unwrap_or_else(|| match &reached {
             Reached::Graph(graph) => {
                 let bodies = graph.keys().filter(|(_, b)| *b).count();
                 (bodies, graph.len() - bodies)
             }
             Reached::Record(prior) => prior.counts(),
-        };
-        let clean =
-            self.diagnostics.is_empty() && self.incomplete.is_empty() && self.resources.is_empty();
+        });
         let mut first_stops = BTreeMap::new();
         // Each stop's site, to render the leading one.
         let mut stop_sites: BTreeMap<String, Site> = BTreeMap::new();
@@ -604,7 +691,7 @@ impl CheckProduct {
         let mut resources: Vec<ResourceRefusal> = vec![];
         // A reused graph is an accepted record's: its bodies, the image's and
         // the request's, carried no refusal, and the product has none.
-        if !(clean && matches!(reached, Reached::Record(_))) {
+        if recipe_counts.is_none() && !(clean && matches!(reached, Reached::Record(_))) {
             let owners: BTreeMap<_, _> = self
                 .headers
                 .rows
@@ -700,7 +787,13 @@ impl CheckProduct {
                 .cloned()
                 .collect();
         }
-        for path in reached.unavailable() {
+        let unavailable = if recipe_counts.is_some() {
+            Vec::new()
+        } else {
+            reached.unavailable()
+        };
+        let complete_graph = unavailable.is_empty();
+        for path in unavailable {
             if let Some(h) = self.headers.get(&path) {
                 stop_sites.entry(path.to_string()).or_insert(h.site);
                 first_stops.entry(path.to_string()).or_insert(GapStop {
@@ -783,6 +876,23 @@ impl CheckProduct {
                 })
             })
             .transpose()?;
+        if let (Some(record), Some(rows), Some(graph), Ok(instances)) =
+            (recipe_record, recipe_rows, &graph, &instances)
+            && clean
+            && complete_graph
+            && diagnostics.is_empty()
+            && incomplete.is_empty()
+            && resources.is_empty()
+            && first_stops.is_empty()
+        {
+            *record = Some(RecipeGraph {
+                instances: instances.clone(),
+                constants,
+                rows,
+                graph: Arc::clone(graph),
+                counts: (bodies_len, declarations_len),
+            });
+        }
         Ok(Reachable {
             bodies: bodies_len,
             declarations: declarations_len,

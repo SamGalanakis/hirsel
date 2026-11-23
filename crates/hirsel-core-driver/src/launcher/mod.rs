@@ -7,6 +7,7 @@
 //! endpoint notice is reported, as one ordered event stream. The launcher keeps no record
 //! that a decision reads again: what it knows of its children is in memory and reaches a
 //! new host through the inventory that answers `Hello`.
+mod admit;
 mod cgroup;
 #[cfg(test)]
 mod laws;
@@ -19,8 +20,8 @@ use hirsel_core_ids::launch::LAUNCH_IMAGE_ENV;
 use ready::{CHANGE, Epoll, READ, WRITE, Watch};
 
 use session::{
-    Attempt, Bindings, Child, ChildState, End, Event, Group, HostCommand, HostReply, Label, Launch,
-    Limits, Mode, Phase, Refusal, Request, Role, Status, Wire,
+    Approvals, Attempt, Bindings, Child, ChildState, End, Event, Failure, Group, HostCommand,
+    HostReply, Input, Label, Launch, Limits, Mode, Phase, Refusal, Request, Role, Status, Wire,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -32,9 +33,51 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
+use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
+pub(crate) use admit::{Admission, deploy_foreign_lines, grants_added, limits, read_recipe};
 use stores::Stores;
+
+/// Create `path` as a directory only its owner can enter, or check that it is one.
+pub(crate) fn private_dir(path: PathBuf) -> io::Result<PathBuf> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    match std::fs::DirBuilder::new().mode(0o700).create(&path) {
+        Ok(()) => (),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => (),
+        Err(error) => return Err(error),
+    }
+    let meta = std::fs::symlink_metadata(&path)?;
+    if !meta.is_dir() || meta.permissions().mode() & 0o077 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "host directory must be private",
+        ));
+    }
+    path.canonicalize()
+}
+
+/// Bind a control socket at `path` that only its owner can connect to. A stale socket
+/// nobody answers on is replaced; a live one is in use.
+pub(crate) fn bind_control(path: &Path) -> io::Result<UnixListener> {
+    use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        if !meta.file_type().is_socket() || UnixStream::connect(path).is_ok() {
+            return Err(io::ErrorKind::AddrInUse.into());
+        }
+        std::fs::remove_file(path)?;
+    }
+    let listener = UnixListener::bind(path)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    listener.set_nonblocking(true)?;
+    Ok(listener)
+}
+
+/// Concurrent admissions; a further `Admit` fails until one ends.
+const ADMISSIONS: usize = 4;
+
+/// The staging bound of the launcher's code store.
+const STAGING_BYTES: u64 = 512 << 20;
 
 /// Lock `state`, recover any containers, then serve the control session on `SOCKET`.
 pub(crate) fn run(
@@ -51,13 +94,21 @@ pub(crate) fn run(
             _ => return Err("unexpected launcher option".into()),
         }
     }
-    let state = crate::host::private_dir(state.ok_or("--state DIR is required")?)?;
+    let state = private_dir(state.ok_or("--state DIR is required")?)?;
     let control = control.ok_or("--control SOCKET is required")?;
-    let recipe_bytes = crate::host::limits().recipe_bytes;
+    let mut admission = None;
     let mut launcher = Launcher::new(&state, cgroup_root.as_deref(), || {
-        Stores::open(&state, recipe_bytes)
+        let stores = Stores::open(&state, limits().recipe_bytes)?;
+        admission = Some(Admission::open(
+            &state,
+            stores.records(),
+            limits(),
+            STAGING_BYTES,
+        )?);
+        Ok(stores)
     })?;
-    launcher.listen(crate::host::bind_control(&control)?)?;
+    launcher.admit_with(admission.expect("opened with the stores"))?;
+    launcher.listen(bind_control(&control)?)?;
     loop {
         launcher.wait_turn(None)?;
     }
@@ -96,6 +147,8 @@ struct Conn {
     input: Vec<u8>,
     output: Vec<u8>,
     closed: bool,
+    /// Reading is held back while an admission's input waits for its worker.
+    paused: bool,
 }
 
 impl Conn {
@@ -107,16 +160,18 @@ impl Conn {
             input: Vec::new(),
             output: Vec::new(),
             closed: false,
+            paused: false,
         })
     }
 
     fn watch(&mut self) -> io::Result<()> {
+        let read = if self.paused { 0 } else { READ };
         let interest = if self.closed {
             0
         } else if self.output.is_empty() {
-            READ
+            read
         } else {
-            READ | WRITE
+            read | WRITE
         };
         self.watch.set(interest)
     }
@@ -330,6 +385,24 @@ struct Kept {
     process: Option<Process>,
 }
 
+/// A cutover forwarded to OLD, kept from first forward until the host's `CutoverAck`.
+struct Forwarded {
+    command: HostCommand,
+    reply: Option<HostReply>,
+}
+
+/// Admission state: the stores, the running workers, and the notes they send.
+struct Admitting {
+    admission: Arc<Admission>,
+    workers: BTreeMap<Attempt, admit::Worker>,
+    next: u64,
+    notes: mpsc::Receiver<admit::Note>,
+    sender: mpsc::Sender<admit::Note>,
+    wake: File,
+    waker: Arc<File>,
+    _watch: Watch,
+}
+
 pub(crate) struct Launcher<I> {
     images: I,
     containment: Option<hirsel_contain::Host>,
@@ -342,6 +415,8 @@ pub(crate) struct Launcher<I> {
     fenced: bool,
     reservations: BTreeMap<Attempt, BTreeSet<[u8; 32]>>,
     deferred: Vec<Attempt>,
+    admitting: Option<Admitting>,
+    cutovers: BTreeMap<(Child, Attempt), Forwarded>,
     control_watch: Option<Watch>,
     control: Option<UnixListener>,
     session: Option<Conn>,
@@ -527,6 +602,8 @@ impl<I: Images> Launcher<I> {
             fenced: false,
             reservations: BTreeMap::new(),
             deferred: Vec::new(),
+            admitting: None,
+            cutovers: BTreeMap::new(),
             control_watch: None,
             control: None,
             session: None,
@@ -544,15 +621,27 @@ impl<I: Images> Launcher<I> {
         Ok(())
     }
 
+    /// Admit releases with `admission`'s stores; without it every `Admit` fails.
+    pub(crate) fn admit_with(&mut self, admission: Admission) -> io::Result<()> {
+        let (wake, write) = pipe()?;
+        let mut watch = self.epoll.watch(wake.as_raw_fd());
+        watch.set(READ)?;
+        let (sender, notes) = mpsc::channel();
+        self.admitting = Some(Admitting {
+            admission: Arc::new(admission),
+            workers: BTreeMap::new(),
+            next: 0,
+            notes,
+            sender,
+            wake,
+            waker: admit::waker(write)?,
+            _watch: watch,
+        });
+        Ok(())
+    }
+
     /// Keep the objects that `attempt` synced until the host releases it. Admission calls
     /// this once steps 1-3 of "Durable publication" are synced.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "admission streams into the launcher with P3's platform host"
-        )
-    )]
     pub(crate) fn reserve(&mut self, attempt: Attempt, objects: BTreeSet<[u8; 32]>) {
         self.reservations
             .entry(attempt)
@@ -651,6 +740,9 @@ impl<I: Images> Launcher<I> {
                 self.retired(&group);
             }
             Request::Release(attempt) => {
+                if let Some(admitting) = &mut self.admitting {
+                    admitting.workers.remove(&attempt);
+                }
                 if self.fenced {
                     self.deferred.push(attempt);
                 } else {
@@ -662,7 +754,213 @@ impl<I: Images> Launcher<I> {
                 self.emit(Event::Fenced);
             }
             Request::Collect(roots) => self.collect(&roots),
+            Request::Admit(group, attempt, input, approvals) => {
+                self.admit(group, attempt, input, approvals)
+            }
+            Request::AdmitData(attempt, bytes) => self.admit_data(attempt, &bytes),
+            Request::AdmitEnd(attempt) => self.admit_end(attempt),
+            Request::Assemble(attempt) => self.assemble(attempt),
+            Request::CutoverAck(child, attempt) => drop(self.cutovers.remove(&(child, attempt))),
         }
+    }
+
+    fn admission_failed(&mut self, attempt: Attempt, why: impl Into<String>) {
+        if let Some(admitting) = &mut self.admitting {
+            admitting.workers.remove(&attempt);
+        }
+        self.emit(Event::AdmissionFailed(
+            attempt,
+            Failure::Invalid(why.into()),
+        ));
+    }
+
+    fn admit(&mut self, group: Group, attempt: Attempt, input: Input, approvals: Approvals) {
+        let refusal = match (&self.admitting, self.listener(&group)) {
+            (None, _) => Some("the launcher has no code store"),
+            (_, None) => Some("unknown group"),
+            (_, Some(i)) if self.listeners[i].retiring => Some("the group is retiring"),
+            (Some(a), _) if a.workers.contains_key(&attempt) => Some("the attempt is admitting"),
+            (Some(a), _) if a.workers.len() >= ADMISSIONS => {
+                Some("busy: every admission slot runs")
+            }
+            _ => None,
+        };
+        if let Some(why) = refusal {
+            return self.emit(Event::AdmissionFailed(
+                attempt,
+                Failure::Invalid(why.into()),
+            ));
+        }
+        let root = |r: &[u8]| {
+            <[u8; 32]>::try_from(r)
+                .ok()
+                .map(hirsel_core_ids::ContentHash)
+        };
+        let source = match &input {
+            Input::Attested(r) => root(r).map(admit::Source::Attested),
+            Input::Publication(r) => root(r).map(admit::Source::Publication),
+            Input::Source(_) => {
+                return self.emit(Event::AdmissionFailed(
+                    attempt,
+                    Failure::Invalid("source admission is not built".into()),
+                ));
+            }
+        };
+        let Some(source) = source else {
+            return self.emit(Event::AdmissionFailed(
+                attempt,
+                Failure::Invalid("the recipe root is not 32 bytes".into()),
+            ));
+        };
+        let admitting = self.admitting.as_mut().expect("checked above");
+        let id = admitting.next;
+        admitting.next += 1;
+        let (sender, waker) = (admitting.sender.clone(), admitting.waker.clone());
+        let worker = admit::Worker::spawn(
+            admitting.admission.clone(),
+            &self.epoll,
+            id,
+            attempt,
+            source,
+            approvals,
+            move |note| {
+                let _ = sender.send(note);
+                admit::wake(&waker);
+            },
+        );
+        match worker {
+            Ok(worker) => drop(admitting.workers.insert(attempt, worker)),
+            Err(e) => self.admission_failed(attempt, format!("admission worker: {e}")),
+        }
+    }
+
+    fn admit_data(&mut self, attempt: Attempt, bytes: &[u8]) {
+        let Some(admitting) = &mut self.admitting else {
+            return self.admission_failed(attempt, "the launcher has no code store");
+        };
+        let bound = admitting.admission.input_bound();
+        let why = match admitting.workers.get_mut(&attempt) {
+            None => "unknown attempt",
+            Some(worker) if worker.ending => "input after AdmitEnd",
+            Some(worker) => match &mut worker.conn {
+                None => "a publication takes no input",
+                Some(_) if worker.received.saturating_add(bytes.len() as u64) > bound => {
+                    "admission input exceeds its bound"
+                }
+                Some(conn) => {
+                    worker.received += bytes.len() as u64;
+                    conn.output.extend_from_slice(bytes);
+                    return;
+                }
+            },
+        };
+        self.admission_failed(attempt, why);
+    }
+
+    fn admit_end(&mut self, attempt: Attempt) {
+        match self
+            .admitting
+            .as_mut()
+            .and_then(|a| a.workers.get_mut(&attempt))
+        {
+            Some(worker) => worker.ending = true,
+            None => self.admission_failed(attempt, "unknown attempt"),
+        }
+    }
+
+    fn assemble(&mut self, attempt: Attempt) {
+        match self
+            .admitting
+            .as_mut()
+            .and_then(|a| a.workers.get_mut(&attempt))
+        {
+            Some(worker) if worker.admitted => worker.assemble(),
+            _ => self.admission_failed(attempt, "the attempt is not admitted"),
+        }
+    }
+
+    /// Apply the workers' notes. A note of a cancelled worker is dropped: its assembly
+    /// record is then no reservation's and the next collection may remove it.
+    fn notes(&mut self) {
+        let Some(admitting) = &mut self.admitting else {
+            return;
+        };
+        let mut drained = [0; 64];
+        while matches!((&admitting.wake).read(&mut drained), Ok(n) if n > 0) {}
+        let mut events = Vec::new();
+        let mut reserved = Vec::new();
+        while let Ok(note) = admitting.notes.try_recv() {
+            let (id, attempt) = match &note {
+                admit::Note::Admitted { id, attempt, .. }
+                | admit::Note::Assembled { id, attempt, .. }
+                | admit::Note::Failed(id, attempt, _) => (*id, *attempt),
+            };
+            if admitting.workers.get(&attempt).is_none_or(|w| w.id != id) {
+                continue;
+            }
+            match note {
+                admit::Note::Admitted {
+                    root,
+                    summary,
+                    display,
+                    ..
+                } => {
+                    admitting.workers.get_mut(&attempt).unwrap().admitted = true;
+                    events.push(Event::Admitted(attempt, root, summary, display));
+                }
+                admit::Note::Assembled {
+                    key,
+                    digest,
+                    fetch,
+                    assembly,
+                    ..
+                } => {
+                    admitting.workers.remove(&attempt);
+                    reserved.push((attempt, key));
+                    events.push(Event::Assembled(
+                        attempt,
+                        key.to_vec(),
+                        digest,
+                        fetch,
+                        assembly,
+                    ));
+                }
+                admit::Note::Failed(_, _, why) => {
+                    admitting.workers.remove(&attempt);
+                    events.push(Event::AdmissionFailed(attempt, why));
+                }
+            }
+        }
+        for (attempt, key) in reserved {
+            self.reserve(attempt, BTreeSet::from([key]));
+        }
+        self.out.extend(events);
+    }
+
+    /// Move each attested worker's input and Need.
+    fn pump(&mut self) {
+        let Some(admitting) = &mut self.admitting else {
+            return;
+        };
+        let mut events = Vec::new();
+        for (&attempt, worker) in &mut admitting.workers {
+            for (keys, last) in worker.pump() {
+                events.push(Event::Need(attempt, keys, last));
+            }
+        }
+        self.out.extend(events);
+    }
+
+    /// Whether some attested input waits on its worker past the window, so the session is
+    /// not read until the worker takes it.
+    fn backlogged(&self) -> bool {
+        self.admitting.as_ref().is_some_and(|a| {
+            a.workers.values().any(|w| {
+                w.conn
+                    .as_ref()
+                    .is_some_and(|c| c.output.len() > session::MAX_FRAME)
+            })
+        })
     }
 
     /// End the fence and apply the releases it deferred.
@@ -678,6 +976,11 @@ impl<I: Images> Launcher<I> {
         // without removing anything.
         self.out.clear();
         self.unfence();
+        // A new session ends every reservation and admission of the old one (§14.5).
+        self.reservations.clear();
+        if let Some(admitting) = &mut self.admitting {
+            admitting.workers.clear();
+        }
         let children = self.children.iter().map(|k| k.state.clone()).collect();
         let mut cold = Vec::new();
         for i in 0..self.listeners.len() {
@@ -687,7 +990,8 @@ impl<I: Images> Launcher<I> {
                 cold.push(group);
             }
         }
-        self.emit(Event::Inventory(children, cold));
+        let cutovers = self.cutovers.keys().cloned().collect();
+        self.emit(Event::Inventory(children, cold, cutovers));
     }
 
     fn bind(
@@ -760,6 +1064,13 @@ impl<I: Images> Launcher<I> {
             None => Some(Refusal::UnknownGroup),
             Some(i) if self.listeners[i].retiring => Some(Refusal::Retiring),
             Some(_) if launch.assembly.len() != 32 => Some(Refusal::Mismatch),
+            Some(_)
+                if launch.recording.as_ref().is_some_and(|r| {
+                    r.id.len() != 16 || !matches!(launch.mode, Mode::Serving(..))
+                }) =>
+            {
+                Some(Refusal::Mismatch)
+            }
             Some(_) if matches!(launch.mode, Mode::Install(..)) => Some(Refusal::Unbuilt(
                 "install child: the runtime has no install-only launch".into(),
             )),
@@ -842,6 +1153,11 @@ impl<I: Images> Launcher<I> {
                     .env("HIRSEL_CONTROL_FD", "4")
                     .env("HIRSEL_SCRATCH", &scratch)
                     .env("HIRSEL_HOST_PID", host_pid.to_string());
+                if let Some(recording) = &launch.recording {
+                    command
+                        .env("HIRSEL_RECORD", &recording.destination)
+                        .env("HIRSEL_RECORD_ID", hex(&recording.id));
+                }
                 let (ours, theirs) = UnixStream::pair()?;
                 let (read, write) = pipe()?;
                 slots.push((above_launch_slots(listener.socket.as_raw_fd())?, 3));
@@ -1041,6 +1357,30 @@ impl<I: Images> Launcher<I> {
     }
 
     fn command(&mut self, child: Child, command: &HostCommand) {
+        // A cutover is kept by (OLD, attempt): an identical re-send is forwarded once and
+        // answered with OLD's saved reply.
+        let key = match command {
+            HostCommand::Cutover(a, ..) => <[u8; 16]>::try_from(a.as_slice()).ok().map(|a| {
+                let hi = u64::from_le_bytes(a[..8].try_into().unwrap());
+                let lo = u64::from_le_bytes(a[8..].try_into().unwrap());
+                (child.clone(), Attempt { hi, lo })
+            }),
+            _ => None,
+        };
+        if let Some(key) = &key
+            && let Some(held) = self.cutovers.get(key)
+        {
+            if held.command != *command {
+                return self.emit(Event::Placed(
+                    child,
+                    HostReply::Refused("a different cutover holds this attempt".into()),
+                ));
+            }
+            if let Some(reply) = held.reply.clone() {
+                self.emit(Event::CutoverResult(key.0.clone(), key.1, reply));
+            }
+            return;
+        }
         let endpoint = self
             .child(&child)
             .and_then(|i| self.children[i].process.as_mut())
@@ -1049,6 +1389,15 @@ impl<I: Images> Launcher<I> {
             Some(conn) => {
                 conn.queue(command);
                 conn.flush();
+                if let Some(key) = key {
+                    self.cutovers.insert(
+                        key,
+                        Forwarded {
+                            command: command.clone(),
+                            reply: None,
+                        },
+                    );
+                }
             }
             None => self.emit(Event::Placed(
                 child,
@@ -1070,6 +1419,13 @@ impl<I: Images> Launcher<I> {
         if !self.fenced {
             return self.emit(Event::Collected(0));
         }
+        // No worker writes a record while the roots are read and removed, and every
+        // record already written has its note applied, so its reservation is held.
+        let admission = self.admitting.as_ref().map(|a| a.admission.clone());
+        let _publishing = admission
+            .as_ref()
+            .map(|a| a.publish.lock().unwrap_or_else(|e| e.into_inner()));
+        self.notes();
         let mut keep = BTreeSet::new();
         let mut whole = true;
         for root in roots {
@@ -1110,7 +1466,19 @@ impl<I: Images> Launcher<I> {
         }
         let child = self.children[i].state.child.clone();
         for reply in replies {
-            self.emit(Event::Placed(child.clone(), reply));
+            // OLD's next answer after a forwarded cutover is that cutover's; a held-write
+            // acknowledgement is a notice.
+            if !matches!(reply, HostReply::WriteAck(_))
+                && let Some(((c, a), forwarded)) = self
+                    .cutovers
+                    .iter_mut()
+                    .find(|((c, _), f)| *c == child && f.reply.is_none())
+            {
+                forwarded.reply = Some(reply.clone());
+                self.out.push(Event::CutoverResult(c.clone(), *a, reply));
+            } else {
+                self.out.push(Event::Placed(child.clone(), reply));
+            }
         }
     }
 
@@ -1145,6 +1513,15 @@ impl<I: Images> Launcher<I> {
             report,
             readable: sample,
         };
+        // OLD ended with a forwarded cutover unanswered: the launcher cannot tell whether
+        // it installed, so its saved reply is Uncertain.
+        for ((c, a), forwarded) in &mut self.cutovers {
+            if *c == child && forwarded.reply.is_none() {
+                forwarded.reply = Some(HostReply::Uncertain);
+                self.out
+                    .push(Event::CutoverResult(c.clone(), *a, HostReply::Uncertain));
+            }
+        }
         self.children[i].state.phase = Phase::Exited(end.clone());
         self.emit(Event::Ended(child.clone(), end));
         self.retired(&child.group);
@@ -1169,8 +1546,17 @@ impl<I: Images> Launcher<I> {
                 !listener.reported && !listener.retiring && !self.serving_live(&listener.group);
             self.listeners[i].watch.set(if cold { READ } else { 0 })?;
         }
+        let backlogged = self.backlogged();
         if let Some(conn) = &mut self.session {
+            conn.paused = backlogged;
             conn.watch()?;
+        }
+        if let Some(admitting) = &mut self.admitting {
+            for worker in admitting.workers.values_mut() {
+                if let Some(conn) = &mut worker.conn {
+                    conn.watch()?;
+                }
+            }
         }
         let mut events = [libc::epoll_event { events: 0, u64: 0 }; 64];
         let count = self.epoll.wait(timeout, &mut events)?;
@@ -1212,6 +1598,8 @@ impl<I: Images> Launcher<I> {
         {
             self.accept();
         }
+        self.pump();
+        self.notes();
         self.serve_session();
         Ok(())
     }
@@ -1232,18 +1620,21 @@ impl<I: Images> Launcher<I> {
     }
 
     fn serve_session(&mut self) {
-        let mut requests = Vec::new();
-        if let Some(conn) = &mut self.session {
+        let backlogged = self.backlogged();
+        if let Some(conn) = &mut self.session
+            && !backlogged
+        {
             conn.fill();
-            while let Some(frame) = conn.frame() {
-                match Request::decode(&frame) {
-                    Ok(request) => requests.push(request),
-                    Err(_) => conn.closed = true,
-                }
-            }
         }
-        for request in requests {
-            self.handle(request);
+        // One request at a time: admission input past the window holds the rest back.
+        while !self.backlogged() {
+            let Some(conn) = &mut self.session else { break };
+            let Some(frame) = conn.frame() else { break };
+            match Request::decode(&frame) {
+                Ok(request) => self.handle(request),
+                Err(_) => conn.closed = true,
+            }
+            self.pump();
         }
         if let Some(conn) = &mut self.session {
             for event in self.out.drain(..) {

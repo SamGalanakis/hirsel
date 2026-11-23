@@ -119,6 +119,7 @@ fn launch(image: u8, workdir: &Path, mode: Mode) -> Request {
         workdir: workdir.to_str().unwrap().into(),
         args: vec!["app".into()],
         mode,
+        recording: None,
     })
 }
 
@@ -189,7 +190,7 @@ impl<I: Images> Rig<I> {
 
     fn inventory(&mut self) -> (Vec<ChildState>, Vec<Group>) {
         match self.ask(Request::Hello).as_slice() {
-            [Event::Inventory(children, cold)] => (children.clone(), cold.clone()),
+            [Event::Inventory(children, cold, _)] => (children.clone(), cold.clone()),
             other => panic!("Hello answered {other:?}"),
         }
     }
@@ -334,7 +335,7 @@ int main(int argc, char **argv) {
     fs::set_permissions(&replacement, fs::Permissions::from_mode(0o500)).unwrap();
     let launcher = Launcher::new(&state, None, || {
         Ok(SwapImage {
-            stores: Stores::open(&state, crate::host::limits().recipe_bytes)?,
+            stores: Stores::open(&state, super::limits().recipe_bytes)?,
             replacement,
         })
     })
@@ -348,6 +349,7 @@ int main(int argc, char **argv) {
             workdir: rig.work().to_str().unwrap().into(),
             args: vec![],
             mode: Mode::Serving(generation, serve(0, None)),
+            recording: None,
         })
     };
     let (first, second) = (start(1), start(2));
@@ -511,7 +513,7 @@ fn launcher_restart_stateless() {
     let mut host = connect(&mut launcher);
     assert_eq!(
         exchange(&mut launcher, &mut host, Request::Hello),
-        Event::Inventory(vec![], vec![])
+        Event::Inventory(vec![], vec![], vec![])
     );
     let bind = Request::Bind(
         group(),
@@ -543,7 +545,7 @@ fn launcher_restart_stateless() {
     };
     assert_eq!(
         exchange(&mut launcher, &mut host, Request::Hello),
-        Event::Inventory(vec![live], vec![])
+        Event::Inventory(vec![live], vec![], vec![])
     );
 
     // An end no host saw stays in the inventory until a host acknowledges it.
@@ -555,7 +557,8 @@ fn launcher_restart_stateless() {
         launcher.turn(Duration::from_millis(20)).unwrap();
     }
     let mut host = connect(&mut launcher);
-    let Event::Inventory(children, _) = exchange(&mut launcher, &mut host, Request::Hello) else {
+    let Event::Inventory(children, _, _) = exchange(&mut launcher, &mut host, Request::Hello)
+    else {
         panic!("Hello answered with no inventory");
     };
     assert!(matches!(
@@ -568,7 +571,7 @@ fn launcher_restart_stateless() {
     write_frame(&mut host, &Request::Acknowledge(serving(1))).unwrap();
     assert_eq!(
         exchange(&mut launcher, &mut host, Request::Hello),
-        Event::Inventory(vec![], vec![])
+        Event::Inventory(vec![], vec![], vec![])
     );
 
     // A second launcher on the same state is fenced by the lock while the first lives.
@@ -586,7 +589,10 @@ fn launcher_restart_stateless() {
     ));
     assert_eq!(
         successor.take_events(),
-        [Event::Inventory(vec![], vec![]), Event::Bound(group())]
+        [
+            Event::Inventory(vec![], vec![], vec![]),
+            Event::Bound(group())
+        ]
     );
 }
 
@@ -1001,4 +1007,86 @@ sleep 30 & printf '%s' "$!" > orphan; exit 0
         "grandchild {pid} still exists"
     );
     assert!(directories().is_empty());
+}
+
+/// Admission over the session (launch.md "The launcher", Requests 12-16): the launcher
+/// relays the request and objects to the verifier, answers the verifier's Need as
+/// `Need` events, and reports the verified root; an attested root the recipe does not
+/// hash to refuses before any Need.
+#[test]
+fn session_admission() {
+    use crate::code_admission::ObjectKind;
+    use crate::code_admission::code_store::{Fixture, limits};
+    use std::sync::Arc;
+    let mut rig = rig(&[SLEEP]);
+    rig.bind();
+    let state = rig.work().join("state");
+    let objects = rig.work().join("objects");
+    fs::create_dir_all(&objects).unwrap();
+    let records = Arc::new(crate::host::records::Records::open(&objects).unwrap());
+    let admission = super::Admission::open(&state, records, limits(), 1 << 20).unwrap();
+    rig.launcher.admit_with(admission).unwrap();
+    let fixture = Fixture::leaf();
+    let (root, frame) = fixture.request();
+
+    let admit = |a: u64, root: &[u8]| {
+        Request::Admit(
+            group(),
+            attempt(a),
+            Input::Attested(root.to_vec()),
+            Approvals::default(),
+        )
+    };
+    rig.ask(admit(1, &[7; 32]));
+    rig.ask(Request::AdmitData(attempt(1), frame.clone()));
+    rig.ask(Request::AdmitEnd(attempt(1)));
+    let seen = rig.until(|seen| seen.iter().any(|e| matches!(e, Event::AdmissionFailed(..))));
+    assert!(
+        seen.iter()
+            .all(|e| matches!(e, Event::AdmissionFailed(a, _) if *a == attempt(1))),
+        "a recipe that is not the attested root refuses, with no Need: {seen:?}"
+    );
+
+    rig.ask(admit(2, &root.0));
+    rig.ask(Request::AdmitData(attempt(2), frame));
+    let seen = rig.until(|seen| seen.iter().any(|e| matches!(e, Event::Need(_, _, true))));
+    let mut need = Vec::new();
+    for event in seen {
+        match event {
+            Event::Need(a, keys, _) if a == attempt(2) => need.extend(keys),
+            other => panic!("before the last Need: {other:?}"),
+        }
+    }
+    let mut wanted: Vec<_> = fixture
+        .recipe
+        .groups
+        .iter()
+        .map(|g| (ObjectKind::Group, g.hash))
+        .collect();
+    for body in &fixture.recipe.bodies {
+        wanted.push((ObjectKind::Body, body.body.hash));
+        wanted.push((ObjectKind::Annex, body.annex.hash));
+    }
+    let mut asked: Vec<_> = need.iter().map(|k| (k.kind, k.hash)).collect();
+    asked.sort();
+    wanted.sort();
+    assert_eq!(
+        asked, wanted,
+        "an empty store needs every object of the closure"
+    );
+    rig.ask(Request::AdmitData(attempt(2), fixture.objects(&need)));
+    rig.ask(Request::AdmitEnd(attempt(2)));
+    let seen = rig.until(|seen| !seen.is_empty());
+    match seen.as_slice() {
+        [Event::Admitted(a, verified, summary, _)] => {
+            assert_eq!(*a, attempt(2));
+            assert_eq!(
+                verified[..],
+                root.0,
+                "the verified root is the attested one"
+            );
+            assert_eq!(summary.root_limit, fixture.recipe.launch.root_limit);
+        }
+        other => panic!("after AdmitEnd: {other:?}"),
+    }
 }

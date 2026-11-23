@@ -5,6 +5,8 @@
 //! String/Bytes/List a u32 count then the contents, Option and sums a u32 tag then the
 //! payload, and records their fields in order. Declared variant order is the tag. Each
 //! frame on the socket is a u32 little-endian length followed by one value.
+use crate::code_admission::{ObjectKey, ObjectKind};
+use hirsel_core_ids::ContentHash;
 use std::io::{self, Write};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -84,6 +86,14 @@ impl Mode {
     }
 }
 
+/// A recorded serving launch: the 16-byte recording ID whose catalog pin the host made
+/// durable before this start, and the designated recording destination.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Recording {
+    pub(crate) id: Vec<u8>,
+    pub(crate) destination: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Launch {
     pub(crate) group: Group,
@@ -91,6 +101,7 @@ pub(crate) struct Launch {
     pub(crate) workdir: String,
     pub(crate) args: Vec<String>,
     pub(crate) mode: Mode,
+    pub(crate) recording: Option<Recording>,
 }
 
 impl Launch {
@@ -157,6 +168,44 @@ pub(crate) struct Limits {
     pub(crate) pids: Option<u64>,
 }
 
+/// What an admission verifies: a recipe R the host attests, streamed in `AdmitData`; a
+/// publication R already in the launcher's code store; or source, which is not built.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Input {
+    Attested(Vec<u8>),
+    Publication(Vec<u8>),
+    Source(Vec<u8>),
+}
+
+/// The host's policy for one admission: whether the image records, the Foreign and Exec
+/// approvals, the group's working directory, and the assembly the deploy would replace.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Approvals {
+    pub(crate) recording: bool,
+    pub(crate) foreign: Vec<String>,
+    pub(crate) exec: Vec<String>,
+    pub(crate) workdir: String,
+    pub(crate) old: Option<Vec<u8>>,
+}
+
+/// What the host compares before `Assemble`: the new and old root limits, and whether the
+/// new recipe adds a grant the old one lacks.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Summary {
+    pub(crate) root_limit: u64,
+    pub(crate) old_root_limit: u64,
+    pub(crate) grants_added: bool,
+}
+
+/// Why an admission ended: a policy refusal printed as is, an invalid input or release,
+/// or a failed assembly.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Failure {
+    Denied(String),
+    Invalid(String),
+    Unassembled(String),
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Request {
     Hello,
@@ -171,6 +220,11 @@ pub(crate) enum Request {
     Release(Attempt),
     CollectBegin,
     Collect(Vec<Vec<u8>>),
+    Admit(Group, Attempt, Input, Approvals),
+    AdmitData(Attempt, Vec<u8>),
+    AdmitEnd(Attempt),
+    Assemble(Attempt),
+    CutoverAck(Child, Attempt),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -211,7 +265,7 @@ pub(crate) enum Refusal {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Event {
-    Inventory(Vec<ChildState>, Vec<Group>),
+    Inventory(Vec<ChildState>, Vec<Group>, Vec<(Child, Attempt)>),
     Launched(Child, Phase),
     Refused(Child, Refusal),
     Ended(Child, End),
@@ -224,6 +278,11 @@ pub(crate) enum Event {
     Fenced,
     Collected(u64),
     Answered(Child, Vec<u8>),
+    Need(Attempt, Vec<ObjectKey>, bool),
+    Admitted(Attempt, Vec<u8>, Summary, String),
+    Assembled(Attempt, Vec<u8>, Vec<u8>, u64, u64),
+    AdmissionFailed(Attempt, Failure),
+    CutoverResult(Child, Attempt, HostReply),
 }
 
 fn malformed(what: &'static str) -> io::Error {
@@ -473,6 +532,10 @@ impl Wire for Launch {
         w.bytes(self.workdir.as_bytes());
         w.strings(&self.args);
         self.mode.put(w);
+        w.option(&self.recording, |w, recording| {
+            w.bytes(&recording.id);
+            w.bytes(recording.destination.as_bytes());
+        });
     }
     fn get(r: &mut Reader<'_>) -> io::Result<Self> {
         let group = Group::get(r)?;
@@ -485,6 +548,12 @@ impl Wire for Launch {
             workdir,
             args,
             mode: Mode::get(r)?,
+            recording: r.option(|r| {
+                Ok(Recording {
+                    id: r.bytes()?,
+                    destination: r.string()?,
+                })
+            })?,
         })
     }
 }
@@ -625,6 +694,35 @@ impl Wire for Request {
                     w.bytes(root);
                 }
             }
+            Self::Admit(g, a, input, approvals) => {
+                w.u32(12);
+                g.put(w);
+                a.put(w);
+                let (tag, bytes) = match input {
+                    Input::Attested(r) => (0, r),
+                    Input::Publication(r) => (1, r),
+                    Input::Source(tree) => (2, tree),
+                };
+                w.u32(tag);
+                w.bytes(bytes);
+                w.bool(approvals.recording);
+                w.strings(&approvals.foreign);
+                w.strings(&approvals.exec);
+                w.bytes(approvals.workdir.as_bytes());
+                w.option(&approvals.old, |w, old| w.bytes(old));
+            }
+            Self::AdmitData(a, bytes) => {
+                w.u32(13);
+                a.put(w);
+                w.bytes(bytes);
+            }
+            Self::AdmitEnd(a) => (w.u32(14), a.put(w)).1,
+            Self::Assemble(a) => (w.u32(15), a.put(w)).1,
+            Self::CutoverAck(c, a) => {
+                w.u32(16);
+                c.put(w);
+                a.put(w);
+            }
         }
     }
     fn get(r: &mut Reader<'_>) -> io::Result<Self> {
@@ -662,6 +760,27 @@ impl Wire for Request {
                 let n = r.count(4)?;
                 Self::Collect((0..n).map(|_| r.bytes()).collect::<io::Result<_>>()?)
             }
+            12 => Self::Admit(
+                Group::get(r)?,
+                Attempt::get(r)?,
+                match r.u32()? {
+                    0 => Input::Attested(r.bytes()?),
+                    1 => Input::Publication(r.bytes()?),
+                    2 => Input::Source(r.bytes()?),
+                    _ => return Err(malformed("admission input tag")),
+                },
+                Approvals {
+                    recording: r.bool()?,
+                    foreign: r.strings()?,
+                    exec: r.strings()?,
+                    workdir: r.string()?,
+                    old: r.option(Reader::bytes)?,
+                },
+            ),
+            13 => Self::AdmitData(Attempt::get(r)?, r.bytes()?),
+            14 => Self::AdmitEnd(Attempt::get(r)?),
+            15 => Self::Assemble(Attempt::get(r)?),
+            16 => Self::CutoverAck(Child::get(r)?, Attempt::get(r)?),
             _ => return Err(malformed("request tag")),
         })
     }
@@ -737,7 +856,7 @@ impl Wire for Refusal {
 impl Wire for Event {
     fn put(&self, w: &mut Writer) {
         match self {
-            Self::Inventory(children, readable) => {
+            Self::Inventory(children, readable, cutovers) => {
                 w.u32(0);
                 w.len(children.len());
                 for state in children {
@@ -747,6 +866,11 @@ impl Wire for Event {
                 w.len(readable.len());
                 for g in readable {
                     g.put(w);
+                }
+                w.len(cutovers.len());
+                for (c, a) in cutovers {
+                    c.put(w);
+                    a.put(w);
                 }
             }
             Self::Launched(c, phase) => {
@@ -785,6 +909,56 @@ impl Wire for Event {
                 c.put(w);
                 w.bytes(answer);
             }
+            Self::Need(a, keys, last) => {
+                w.u32(13);
+                a.put(w);
+                w.len(keys.len());
+                for key in keys {
+                    w.u32(match key.kind {
+                        ObjectKind::Group => 0,
+                        ObjectKind::Body => 1,
+                        ObjectKind::Annex => 2,
+                        ObjectKind::ForeignArchive => 3,
+                        ObjectKind::Recipe => unreachable!("a recipe is never needed"),
+                    });
+                    w.bytes(&key.hash.0);
+                }
+                w.bool(*last);
+            }
+            Self::Admitted(a, root, summary, display) => {
+                w.u32(14);
+                a.put(w);
+                w.bytes(root);
+                w.u64(summary.root_limit);
+                w.u64(summary.old_root_limit);
+                w.bool(summary.grants_added);
+                w.bytes(display.as_bytes());
+            }
+            Self::Assembled(a, key, digest, fetch, assembly) => {
+                w.u32(15);
+                a.put(w);
+                w.bytes(key);
+                w.bytes(digest);
+                w.u64(*fetch);
+                w.u64(*assembly);
+            }
+            Self::AdmissionFailed(a, failure) => {
+                w.u32(16);
+                a.put(w);
+                let (tag, why) = match failure {
+                    Failure::Denied(why) => (0, why),
+                    Failure::Invalid(why) => (1, why),
+                    Failure::Unassembled(why) => (2, why),
+                };
+                w.u32(tag);
+                w.bytes(why.as_bytes());
+            }
+            Self::CutoverResult(c, a, reply) => {
+                w.u32(17);
+                c.put(w);
+                a.put(w);
+                reply.put(w);
+            }
         }
     }
     fn get(r: &mut Reader<'_>) -> io::Result<Self> {
@@ -801,7 +975,11 @@ impl Wire for Event {
                     .collect::<io::Result<_>>()?;
                 let n = r.count(4)?;
                 let readable = (0..n).map(|_| Group::get(r)).collect::<io::Result<_>>()?;
-                Self::Inventory(children, readable)
+                let n = r.count(4)?;
+                let cutovers = (0..n)
+                    .map(|_| Ok((Child::get(r)?, Attempt::get(r)?)))
+                    .collect::<io::Result<_>>()?;
+                Self::Inventory(children, readable, cutovers)
             }
             1 => Self::Launched(Child::get(r)?, Phase::get(r)?),
             2 => Self::Refused(Child::get(r)?, Refusal::get(r)?),
@@ -815,6 +993,49 @@ impl Wire for Event {
             10 => Self::Fenced,
             11 => Self::Collected(r.u64()?),
             12 => Self::Answered(Child::get(r)?, r.bytes()?),
+            13 => {
+                let a = Attempt::get(r)?;
+                let n = r.count(8)?;
+                let keys = (0..n)
+                    .map(|_| {
+                        let kind = match r.u32()? {
+                            0 => ObjectKind::Group,
+                            1 => ObjectKind::Body,
+                            2 => ObjectKind::Annex,
+                            3 => ObjectKind::ForeignArchive,
+                            _ => return Err(malformed("needed object tag")),
+                        };
+                        let hash = <[u8; 32]>::try_from(r.bytes()?)
+                            .map_err(|_| malformed("needed object hash"))?;
+                        Ok(ObjectKey {
+                            kind,
+                            hash: ContentHash(hash),
+                        })
+                    })
+                    .collect::<io::Result<_>>()?;
+                Self::Need(a, keys, r.bool()?)
+            }
+            14 => Self::Admitted(
+                Attempt::get(r)?,
+                r.bytes()?,
+                Summary {
+                    root_limit: r.u64()?,
+                    old_root_limit: r.u64()?,
+                    grants_added: r.bool()?,
+                },
+                r.string()?,
+            ),
+            15 => Self::Assembled(Attempt::get(r)?, r.bytes()?, r.bytes()?, r.u64()?, r.u64()?),
+            16 => Self::AdmissionFailed(
+                Attempt::get(r)?,
+                match r.u32()? {
+                    0 => Failure::Denied(r.string()?),
+                    1 => Failure::Invalid(r.string()?),
+                    2 => Failure::Unassembled(r.string()?),
+                    _ => return Err(malformed("admission failure tag")),
+                },
+            ),
+            17 => Self::CutoverResult(Child::get(r)?, Attempt::get(r)?, HostReply::get(r)?),
             _ => return Err(malformed("event tag")),
         })
     }
@@ -874,6 +1095,7 @@ mod tests {
             workdir: "/w".into(),
             args: vec!["a".into()],
             mode,
+            recording: None,
         })
     }
 
@@ -900,7 +1122,7 @@ mod tests {
             ),
             (
                 launch(Mode::Install(1, InstallKind::Genesis)),
-                "030000000100000067030000000000000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f020000002f7701000000010000006100000000010000000000000000000000".into(),
+                "030000000100000067030000000000000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f020000002f770100000001000000610000000001000000000000000000000000000000".into(),
             ),
             (
                 launch(Mode::Serving(
@@ -911,19 +1133,19 @@ mod tests {
                         candidate: Some(6),
                     },
                 )),
-                "030000000100000067030000000000000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f020000002f770100000001000000610100000007000000000000000500000000000000fa00000000000000010000000600000000000000".into(),
+                "030000000100000067030000000000000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f020000002f770100000001000000610100000007000000000000000500000000000000fa0000000000000001000000060000000000000000000000".into(),
             ),
             (
                 launch(Mode::Describe(attempt())),
-                "030000000100000067030000000000000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f020000002f770100000001000000610200000008070605040302011817161514131211".into(),
+                "030000000100000067030000000000000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f020000002f77010000000100000061020000000807060504030201181716151413121100000000".into(),
             ),
             (
                 launch(Mode::Preview(attempt(), vec![1])),
-                "030000000100000067030000000000000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f020000002f7701000000010000006103000000080706050403020118171615141312110100000001".into(),
+                "030000000100000067030000000000000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f020000002f770100000001000000610300000008070605040302011817161514131211010000000100000000".into(),
             ),
             (
                 launch(Mode::Prepare(attempt(), "x".into())),
-                "030000000100000067030000000000000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f020000002f7701000000010000006104000000080706050403020118171615141312110100000078".into(),
+                "030000000100000067030000000000000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f020000002f770100000001000000610400000008070605040302011817161514131211010000007800000000".into(),
             ),
             (
                 Request::Stop(serving()),
@@ -958,6 +1180,64 @@ mod tests {
                 Request::Collect(vec![vec![1, 2]]),
                 "0b00000001000000020000000102".into(),
             ),
+            (
+                Request::Start(Launch {
+                    group: group(),
+                    assembly: (0..32).collect(),
+                    workdir: "/w".into(),
+                    args: vec!["a".into()],
+                    mode: Mode::Serving(
+                        7,
+                        Serve {
+                            activation: 5,
+                            idle: 250,
+                            candidate: None,
+                        },
+                    ),
+                    recording: Some(Recording {
+                        id: vec![0x21; 16],
+                        destination: "/rec".into(),
+                    }),
+                }),
+                "030000000100000067030000000000000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f020000002f770100000001000000610100000007000000000000000500000000000000fa0000000000000000000000010000001000000021212121212121212121212121212121040000002f726563".into(),
+            ),
+            (
+                Request::Admit(
+                    group(),
+                    attempt(),
+                    Input::Attested(vec![0xcc; 32]),
+                    Approvals {
+                        recording: true,
+                        foreign: vec!["f".into()],
+                        exec: vec!["e".into()],
+                        workdir: "/w".into(),
+                        old: Some((0..32).collect()),
+                    },
+                ),
+                "0c00000001000000670300000000000000080706050403020118171615141312110000000020000000cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc01010000000100000066010000000100000065020000002f770100000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f".into(),
+            ),
+            (
+                Request::Admit(
+                    group(),
+                    attempt(),
+                    Input::Publication(vec![1]),
+                    Approvals {
+                        workdir: "/w".into(),
+                        ..Approvals::default()
+                    },
+                ),
+                "0c0000000100000067030000000000000008070605040302011817161514131211010000000100000001000000000000000000020000002f7700000000".into(),
+            ),
+            (
+                Request::AdmitData(attempt(), vec![1, 2]),
+                "0d00000008070605040302011817161514131211020000000102".into(),
+            ),
+            (Request::AdmitEnd(attempt()), "0e00000008070605040302011817161514131211".into()),
+            (Request::Assemble(attempt()), "0f00000008070605040302011817161514131211".into()),
+            (
+                Request::CutoverAck(serving(), attempt()),
+                "100000000100000067030000000000000001000000070000000000000008070605040302011817161514131211".into(),
+            ),
         ];
         let events = [
             (
@@ -977,8 +1257,9 @@ mod tests {
                         },
                     ],
                     vec![group()],
+                    vec![(serving(), attempt())],
                 ),
-                "0000000002000000010000006703000000000000000100000007000000000000000000000001000000670300000000000000040000000807060504030201181716151413121101000000010000000900000000000000000100000001000000670300000000000000",
+                "0000000002000000010000006703000000000000000100000007000000000000000000000001000000670300000000000000040000000807060504030201181716151413121101000000010000000900000000000000000100000001000000670300000000000000010000000100000067030000000000000001000000070000000000000008070605040302011817161514131211",
             ),
             (
                 Event::Launched(serving(), Phase::Started),
@@ -1041,6 +1322,48 @@ mod tests {
             ),
             (Event::Fenced, "0a000000"),
             (Event::Collected(3), "0b0000000300000000000000"),
+            (
+                Event::Need(
+                    attempt(),
+                    vec![
+                        ObjectKey {
+                            kind: ObjectKind::Group,
+                            hash: ContentHash([0xaa; 32]),
+                        },
+                        ObjectKey {
+                            kind: ObjectKind::ForeignArchive,
+                            hash: ContentHash([0xbb; 32]),
+                        },
+                    ],
+                    true,
+                ),
+                "0d00000008070605040302011817161514131211020000000000000020000000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0300000020000000bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb01",
+            ),
+            (
+                Event::Admitted(
+                    attempt(),
+                    vec![0xcc; 32],
+                    Summary {
+                        root_limit: 1024,
+                        old_root_limit: 2048,
+                        grants_added: true,
+                    },
+                    "l".into(),
+                ),
+                "0e0000000807060504030201181716151413121120000000cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc0004000000000000000800000000000001010000006c",
+            ),
+            (
+                Event::Assembled(attempt(), (0..32).collect(), vec![0xdd; 32], 5, 6),
+                "0f0000000807060504030201181716151413121120000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20000000dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd05000000000000000600000000000000",
+            ),
+            (
+                Event::AdmissionFailed(attempt(), Failure::Denied("no".into())),
+                "100000000807060504030201181716151413121100000000020000006e6f",
+            ),
+            (
+                Event::CutoverResult(serving(), attempt(), HostReply::Installed(4, true)),
+                "11000000010000006703000000000000000100000007000000000000000807060504030201181716151413121105000000040000000000000001",
+            ),
         ];
         for (value, expected) in &requests {
             assert_eq!(value.encode(), hex(expected), "{value:?}");

@@ -335,7 +335,7 @@ fn bind_request(name: String, g: GroupRow) -> launcher.Request {
 
 fn serving_launch(name: String, g: GroupRow, gen: u64, activation: u64, assembly: Bytes, idle: u64, candidate: Option[u64]) -> launcher.Request {
     let mode: launcher.Mode = ServingMode(gen, launcher.Serve(activation: activation, idle: idle, candidate: candidate))
-    Start(launcher.Launch(group: group_of(name, g.incarnation), assembly: clone(assembly), workdir: string.from(g.workdir), args: list.new(), mode: mode))
+    Start(launcher.Launch(group: group_of(name, g.incarnation), assembly: clone(assembly), workdir: string.from(g.workdir), args: list.new(), mode: mode, recording: None))
 }
 
 fn child_of(name: String, incarnation: u64, gen: u64) -> launcher.Child {
@@ -1177,7 +1177,7 @@ fn bind_failed(mut h: Host, g: launcher.Group, why: String) {
 pub fn event(mut h: Host, take e: launcher.Event, now: Now) -> List[launcher.Request] waits {
     let mut out: List[launcher.Request] = list.new()
     match take e {
-        Inventory(children, readable) => reconcile(mut h, children, readable, now, mut out),
+        Inventory(children, readable, _) => reconcile(mut h, children, readable, now, mut out),
         Launched(c, Started) => launched(mut h, c),
         Launched(c, Exited(fin)) => ended(mut h, c, fin, now, mut out),
         Refused(c, why) => refused(mut h, c, why, now, mut out),
@@ -1194,7 +1194,12 @@ pub fn event(mut h: Host, take e: launcher.Event, now: Now) -> List[launcher.Req
         Closed(_) => (),
         Retired(g) => finish_retire(mut h, g, now, mut out),
         Placed(c, reply) => placed(mut h, c, reply, now, mut out),
+        CutoverResult(c, _, reply) => placed(mut h, c, reply, now, mut out),
         Answered(_, _) => (),
+        Need(_, _, _) => (),
+        Admitted(_, _, _, _) => (),
+        Assembled(_, _, _, _, _) => (),
+        AdmissionFailed(_, _) => (),
         Fenced => (),
         Collected(_) => (),
     }

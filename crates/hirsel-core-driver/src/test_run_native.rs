@@ -2201,7 +2201,7 @@ pub fn main(f: Foreign[laws.Laws]) -> Result[(), Exit] {
                 let (_, approved, _) = peer.deploy_permission(Duration::from_secs(10), 4096).unwrap();
                 assert_eq!(approved, BTreeSet::from(["ffi_laws@1/laws/Laws".into()]));
                 let admission = AdmissionStore::open(&state.join("code"), 1 << 20).unwrap();
-                match admission.admit_for_runtime(&mut peer, &limits, &NativeSemantics, true, Some(&approved), None) {
+                match admission.admit_for_runtime(&mut peer, &limits, &NativeSemantics, true, Some(&approved), None, None) {
                     Err(AdmissionError::RecordingForeign(reason)) => {
                         assert_eq!(reason, REFUSAL);
                         peer.refuse_before_need(&reason).unwrap();

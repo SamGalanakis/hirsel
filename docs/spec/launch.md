@@ -539,15 +539,38 @@ so keeping it is caching, not state. Its operations are these:
 session of RUNNER-SPEC §14.5. It holds the launcher lock and the groups' listeners, starts
 children according to each group's label, and collects unused objects. `Bind` supplies
 the group's approved store, Dir and Net bindings and its cgroup limits. `Start` selects
-the child's mode. Publishing and assembling are pending. Admission reserves objects through
-the in-process `reserve` call. Install starts are refused because the runtime has no
-install-only mode. The launcher waits on a single epoll set for its control session,
+the child's mode, and a serving `Start` may name a recording (its 16-byte recording ID
+and destination), which the child receives as `HIRSEL_RECORD` and `HIRSEL_RECORD_ID`.
+Install starts are refused because the runtime has no install-only mode. The launcher waits on a single epoll set for its control session,
 cold listeners, child endpoints, pidfds and cgroup population changes.
 
-- **Publish and assemble.** It admits recipes (steps 1-8 above), publishes source for
-  untrusted authors, and assembles images. It writes objects with the "Durable publication"
-  order above, steps 1-3. Step 4, the pending record, is a host catalog row, which the host
-  commits only after the launcher has answered that steps 1-3 are synced.
+- **Publish and assemble.** It admits recipes (steps 1-8 above) and assembles images. It
+  writes objects with the "Durable publication" order above, steps 1-3. Step 4, the pending
+  record, is a host catalog row, which the host commits only after the launcher has
+  answered that steps 1-3 are synced. Admission runs on the control session, one attempt
+  per deploy attempt, at most four at once:
+  1. `Admit(group, attempt, input, approvals)` opens it. The input is `Attested(root)`,
+     whose recipe and objects the host relays from its client, or `Publication(root)`,
+     whose objects the launcher reads from its own code store. `Source` input (publishing
+     source for an untrusted author) is refused: it is not built.
+  2. For an attested input the host sends the exchange bytes of "Admission" above (the
+     request frame, then object frames) in bounded `AdmitData` chunks and closes them
+     with `AdmitEnd`. The launcher feeds them to the verifier unchanged and answers each
+     Need of the verifier as `Need(attempt, keys, last)` events of at most 65536 keys. A
+     recipe whose hash is not the attested root is refused before any Need, and so is any
+     input after the verifier's final tag. The launcher reads the session no further
+     while a verifier has a frame of input it has not taken, so a slow upload bounds the
+     launcher's buffer; children's ends are still reported while it waits, and later
+     requests wait only until the verifier takes that frame.
+  3. `Admitted(attempt, root, summary, display)` reports the verified root, its root and
+     memory limits beside the approved OLD recipe's, whether it adds a grant, and the
+     approval text (foreign archives and `Exec` profiles). The host decides the approvals
+     from it.
+  4. `Assemble(attempt)` builds and syncs the image and its assembly record, and
+     `Assembled(attempt, assembly, digest, fetch, bytes)` answers it. The launcher then
+     holds a reservation of the assembly for the attempt until the host releases it.
+  `AdmissionFailed(attempt, failure)` (`Denied`, `Invalid` or `Unassembled`) ends an
+  attempt at any step. `Release(attempt)` or a new session cancels a running attempt.
 - **Launch.** It starts a group's children: install (genesis and standalone install),
   describe, preview, prepare and serving. Each child runs a retained image by digest, from
   the image store, in the group's working directory, with the authority of its mode

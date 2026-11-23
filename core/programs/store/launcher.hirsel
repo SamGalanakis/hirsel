@@ -46,6 +46,13 @@ pub type Serve: codec + send {
 // list; prepare carries the export name OLD answered.
 pub type Mode: codec + send = InstallMode(u64, InstallKind) | ServingMode(u64, Serve) | DescribeMode(Attempt) | PreviewMode(Attempt, Bytes) | PrepareMode(Attempt, String)
 
+// A recorded serving launch: the 16-byte recording ID whose catalog pin the host made
+// durable before this start, and the designated recording destination.
+pub type Recording: codec + send {
+    id: Bytes,
+    destination: String
+}
+
 // `assembly` is the 32-byte name of the assembly record the child runs. `workdir` is the
 // group's working directory; `args` are the program's arguments after the runtime prefix.
 pub type Launch: codec + send {
@@ -53,7 +60,44 @@ pub type Launch: codec + send {
     assembly: Bytes,
     workdir: String,
     args: List[String],
-    mode: Mode
+    mode: Mode,
+    recording: Option[Recording]
+}
+
+// What an admission verifies: a recipe R the host attests, streamed in `AdmitData`; a
+// publication R already in the launcher's code store; or source, which is not built.
+pub type Input: codec + send = Attested(Bytes) | Publication(Bytes) | Source(Bytes)
+
+// The host's policy for one admission: whether the image records, the approved Foreign
+// grants and Exec requests, the group's working directory, and the assembly a deploy
+// would replace.
+pub type Approvals: codec + send {
+    recording: bool,
+    foreign: List[String],
+    exec: List[String],
+    workdir: String,
+    old: Option[Bytes]
+}
+
+// One object the launcher needs, by kind and 32-byte hash.
+pub type Wanted: codec + send = GroupKey(Bytes) | BodyKey(Bytes) | AnnexKey(Bytes) | ArchiveKey(Bytes)
+
+// What the host compares before `Assemble`: the new and old root limits, and whether the
+// new recipe adds a grant the old one lacks.
+pub type Summary: codec + send {
+    root_limit: u64,
+    old_root_limit: u64,
+    grants_added: bool
+}
+
+// Why an admission ended: a policy refusal printed as is, an invalid input or release,
+// or a failed assembly.
+pub type Failure: codec + send = Denied(String) | Invalid(String) | Unassembled(String)
+
+// A cutover the launcher forwarded to OLD and still holds, by (OLD, attempt).
+pub type CutoverKey: codec + send {
+    old: Child,
+    attempt: Attempt
 }
 
 // A group's containment label, fixed in its catalog row (launch.md "Containment (R27)").
@@ -93,6 +137,16 @@ pub type Request: codec + send = Hello
     | Release(Attempt) | CollectBegin
 // The full root set: assembly record names.
     | Collect(List[Bytes])
+// Begin admitting an attempt for a group under the host's approvals.
+    | Admit(Group, Attempt, Input, Approvals)
+// The next bounded chunk of an attested admission's exchange bytes.
+    | AdmitData(Attempt, Bytes)
+// The attempt's input is complete; trailing or missing bytes fail it.
+    | AdmitEnd(Attempt)
+// Assemble the verified release after the host's checks.
+    | Assemble(Attempt)
+// The host's decision on this cutover is durable: forget its saved result.
+    | CutoverAck(Child, Attempt)
 
 pub type Status: codec + send = Code(i32) | Signal(i32)
 
@@ -115,8 +169,9 @@ pub type ChildState: codec + send {
 pub type Refusal: codec + send = Held | Retiring | UnknownGroup | Mismatch | Image(String) | Spawn(String) | Unbuilt(String)
 
 pub type Event: codec + send =
-// The answer to Hello: every child the launcher has and every readable cold listener.
-Inventory(List[ChildState], List[Group])
+// The answer to Hello: every child the launcher has, every readable cold listener, and
+// every cutover it still holds.
+Inventory(List[ChildState], List[Group], List[CutoverKey])
 // The answer to Start, and to a repeated Start with the same identity.
     | Launched(Child, Phase) | Refused(Child, Refusal) | Ended(Child, End) | Arrived(Group) | Bound(Group) | BindFailed(Group, String) | Closed(Group) | Retired(Group)
 // A serving child's answer or notice on its private endpoint.
@@ -124,6 +179,16 @@ Inventory(List[ChildState], List[Group])
 // A describe or preview child's answer, read from its standard output after it exited 0
 // and before its `Ended`.
     | Answered(Child, Bytes)
+// The objects an attested admission still needs; `last` marks the set's final part.
+    | Need(Attempt, List[Wanted], bool)
+// The release R is verified, with its summary and the confirmation text to show.
+    | Admitted(Attempt, Bytes, Summary, String)
+// Publication through the assembly record is synced: assembly name, image digest, fetch
+// and assembly times in nanoseconds. The launcher holds the attempt's reservation.
+    | Assembled(Attempt, Bytes, Bytes, u64, u64)
+    | AdmissionFailed(Attempt, Failure)
+// OLD's answer to the cutover forwarded for this attempt, or Uncertain if OLD ended first.
+    | CutoverResult(Child, Attempt, runner.HostReply)
 
 pub fn role_of(m: Mode) -> Role {
     match m {
@@ -292,7 +357,7 @@ pub fn handle(mut f: Fake, take r: Request) -> List[Event] {
                     f.listeners[i].reported = true
                 }
             }
-            push_event(mut out, Inventory(take states, take readable))
+            push_event(mut out, Inventory(take states, take readable, list.new()))
         },
         Bind(take g, _, Contained, _, _) => push_event(mut out, BindFailed(take g, "contained: the fake has no containment host")),
         Bind(take g, _, Uncontained, _, _) => {
@@ -360,6 +425,11 @@ pub fn handle(mut f: Fake, take r: Request) -> List[Event] {
             f.fenced = false
             push_event(mut out, Collected(0u64))
         },
+        Admit(_, take a, _, _) => push_event(mut out, AdmissionFailed(take a, Invalid("the fake has no admission"))),
+        AdmitData(_, _) => (),
+        AdmitEnd(_) => (),
+        Assemble(take a) => push_event(mut out, AdmissionFailed(take a, Invalid("the fake has no admission"))),
+        CutoverAck(_, _) => (),
     }
     take out
 }

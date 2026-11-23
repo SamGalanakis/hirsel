@@ -2,7 +2,7 @@
 
 mod closure;
 #[cfg(test)]
-mod code_store;
+pub(crate) mod code_store;
 mod exchange;
 #[cfg(test)]
 mod operation_tags;
@@ -346,7 +346,7 @@ impl AdmissionStore {
         limits: &AdmissionLimits,
         semantics: &impl BackendSemantics,
     ) -> Result<AdmittedRelease<'_>, AdmissionError> {
-        self.admit_for_runtime(connection, limits, semantics, false, None, None)
+        self.admit_for_runtime(connection, limits, semantics, false, None, None, None)
     }
 
     pub(crate) fn admit_for_runtime(
@@ -357,11 +357,17 @@ impl AdmissionStore {
         recording: bool,
         approved_foreign: Option<&std::collections::BTreeSet<String>>,
         approved_exec: Option<(&std::collections::BTreeSet<String>, &Path)>,
+        attested: Option<ContentHash>,
     ) -> Result<AdmittedRelease<'_>, AdmissionError> {
         let deadline = deadline(limits)?;
         let mut exchange = Exchange::new(connection, deadline);
         let (root, recipe_bytes) = exchange.recipe(limits.recipe_bytes)?;
         check_hash(Recipe::hash(&recipe_bytes), root)?;
+        if attested.is_some_and(|attested| attested != root) {
+            return Err(AdmissionError::Malformed(
+                "the recipe is not the attested root",
+            ));
+        }
 
         let mut budget = budget(limits, Some(deadline));
         let recipe = Recipe::decode(&recipe_bytes, &mut budget)?;

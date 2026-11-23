@@ -8,9 +8,10 @@ use hirsel_core_ids::ContentHash;
 use std::collections::BTreeSet;
 use std::io;
 use std::path::Path;
+use std::sync::Arc;
 
 pub(crate) struct Stores {
-    records: Records,
+    records: Arc<Records>,
     code: CodeStore,
     recipe_bytes: usize,
 }
@@ -22,10 +23,17 @@ impl Stores {
         let objects = state.join("objects");
         std::fs::create_dir_all(&objects)?;
         Ok(Self {
-            records: Records::open(&objects)?,
+            records: Arc::new(Records::open(&objects)?),
             code: CodeStore::new(state.join("code")),
             recipe_bytes,
         })
+    }
+}
+
+impl Stores {
+    /// The assembly records, which admission writes and launches read.
+    pub(crate) fn records(&self) -> Arc<Records> {
+        self.records.clone()
     }
 }
 
@@ -35,7 +43,7 @@ impl Images for Stores {
             .records
             .assembly(ContentHash(assembly))
             .map_err(|e| format!("assembly record: {e}"))?;
-        let recipe = crate::host::read_recipe(&self.code, record.recipe, self.recipe_bytes)
+        let recipe = super::read_recipe(&self.code, record.recipe, self.recipe_bytes)
             .map_err(|e| format!("recipe: {e}"))?;
         let verified = self
             .records

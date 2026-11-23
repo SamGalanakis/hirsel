@@ -108,6 +108,18 @@ impl ControlConnection {
         self.stream.write_all(&length.to_le_bytes())?;
         self.stream.write_all(reason.as_bytes())
     }
+    /// After a verified admission, the input must end here: one more byte is trailing
+    /// input, and no end before `timeout` is a missing boundary.
+    pub(crate) fn finished(&mut self, timeout: std::time::Duration) -> Result<(), AdmissionError> {
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .ok_or(AdmissionError::Limit(Limit::Deadline))?;
+        match Exchange::on(&mut self.stream, deadline).read(&mut [0])? {
+            0 => Ok(()),
+            _ => Err(AdmissionError::Malformed("trailing admission input")),
+        }
+    }
+
     /// Accept on the host's control listener. The filesystem permissions of
     /// that listener are the authority check for a raw recipe request.
     pub fn accept(control: &UnixListener) -> io::Result<Self> {

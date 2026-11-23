@@ -334,7 +334,34 @@ fn try_conn(d: Drive, q: u64, n_session: u64) -> Option[Conn] waits {
 }
 
 fn conn(d: Drive, q: u64) -> Conn waits {
-    option.unwrap(try_conn(d, q, 2097152u64))
+    let (take cn, take h) = paired(wire_client.pair(d.tasks, d.net, d.clock, d.random, Some(ingress.binding()), d.head, d.post,
+        code.describe(place), client_keys(), Some(clone(d.token)), q, 2097152u64))
+    Socket(take cn, take h)
+}
+
+// A fixture connection, or the law's failure naming why it could not be made.
+fn paired(take r: Result[(wire_client.Conn, Task[Result[(), std.wsock.Error]]), std.wsock.Error]) -> (wire_client.Conn, Task[Result[(), std.wsock.Error]]) {
+    match take r {
+        Ok(take pair) => take pair,
+        Error(e) => fail(wsock_text("calls: connect: ", e)),
+    }
+}
+
+fn wsock_text(take prefix: String, e: std.wsock.Error) -> String {
+    let mut line = take prefix
+    match e {
+        Allocation(k) => {
+            string.push(mut line, "allocation requested ")
+            string.push_u64(mut line, k.requested)
+        },
+        Network(_) => string.push(mut line, "network"),
+        Http(status) => { string.push(mut line, "http "); string.push_u64(mut line, int.widen(status)) },
+        Protocol(code) => { string.push(mut line, "protocol "); string.push_u64(mut line, int.widen(code)) },
+        Eof => string.push(mut line, "eof"),
+        Configuration => string.push(mut line, "configuration"),
+        Busy => string.push(mut line, "busy"),
+    }
+    line
 }
 
 // A call with its deadline `after` ns from now.
@@ -408,12 +435,49 @@ fn served_on(take fresh: store.Db, c: Clock, tasks: Tasks, n: Net, r: Random, mu
     if let Some(take h) = take forwarding { let _ = task.join(take h) }
     match opened {
         Ok(()) => (),
-        Error(_) => return false,
+        Error(e) => fail(opened_text(e)),
     }
-    match drove {
+    match take drove {
         Ok(()) => true,
-        Error(_) => false,
+        Error(Failed(take cs)) => fail(cause_text("calls: the driver failed: ", cs)),
+        Error(Cancelled(take cs)) => fail(cause_text("calls: the driver was cancelled: ", cs)),
     }
+}
+
+// The head's refusal, named for stderr.
+fn opened_text(e: runner.OpenError) -> String {
+    string.from(match e {
+        Store(_) => "calls: place_head: store error",
+        Place(_) => "calls: place_head: place registration failed",
+        Migrate(_) => "calls: place_head: migration failed",
+        NotCurrent(_) => "calls: place_head: activation is not current",
+        IdentityUnknown => "calls: place_head: image identity is unavailable",
+        PublisherStopped => "calls: place_head: publisher stopped",
+    })
+}
+
+// A failed task's primary cause, carried to the law's own failure so stderr names it.
+fn cause_text(take prefix: String, cs: Causes) -> String {
+    let mut line = take prefix
+    for c in cs {
+        match c.kind {
+            Fail(m) => string.push(mut line, m),
+            Overflow => string.push(mut line, "Overflow"),
+            Bounds => string.push(mut line, "Bounds"),
+            Division => string.push(mut line, "Division"),
+            Unwrap => string.push(mut line, "Unwrap"),
+            Cancelled => string.push(mut line, "Cancelled"),
+            Capacity(k) => {
+                string.push(mut line, "Capacity requested ")
+                string.push_u64(mut line, k.requested)
+                string.push(mut line, " available ")
+                string.push_u64(mut line, k.available)
+            },
+            OutOfTime => string.push(mut line, "OutOfTime"),
+        }
+        break
+    }
+    line
 }
 
 // Hold the initial concurrency group until every socket owner has admitted it.
@@ -656,7 +720,7 @@ pub fn law_calls_duplicate(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool wa
 fn anonymous_reply(d: Drive) -> Option[u64] waits {
     let requested = client_keys()
     let unbound: Option[runner.Wire[()]] = None
-    let (take wire, take session) = result.unwrap(wire_client.pair(d.tasks, d.net, d.clock, d.random, take unbound, d.head, d.post,
+    let (take wire, take session) = paired(wire_client.pair(d.tasks, d.net, d.clock, d.random, take unbound, d.head, d.post,
         code.describe(place), requested, Some(clone(d.token)), 0u64, 2097152u64))
     wire_client.send_frame(wire, Call(7u32, 0u64, wire_client.slot(requested, k_write()), 10000u32, u64_arg(5u64)))
     let observed = match wire_client.next(wire) {
@@ -704,7 +768,7 @@ fn drive_granted_copies(take d: Drive) -> () waits {
     config.socket.max_frame = 32768u64
     config.n_granted = 131072u64
     let grant = runner.wire(WireStamp(clock: d.clock, offset: 40u64), None, 0u64, 0u64)
-    let (take wire, take session) = result.unwrap(wire_client.pair_config(d.tasks, d.net, d.clock, d.random, Some(take grant), d.head, d.post,
+    let (take wire, take session) = paired(wire_client.pair_config(d.tasks, d.net, d.clock, d.random, Some(take grant), d.head, d.post,
         code.describe(stamp_place), requested, None, config, 2097152u64))
     // The supplied offset is 40. Each call independently returns offset + input.
     for p in 0u64 .. 2u64 {

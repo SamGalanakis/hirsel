@@ -895,15 +895,17 @@ unsafe fn tls_step(request: *mut Request, token: u64, first: bool) -> Step {
             Ok(Ok(())) => {
                 let protocol = &mut *tls.protocol_out;
                 let out = std::slice::from_raw_parts_mut(protocol.data, protocol.capacity);
-                let (len, binding) = stream.handshake_result(out, &mut *tls.peer_out);
+                let (len, binding, stream) =
+                    match s.stream.take().unwrap().finish(out, &mut *tls.peer_out) {
+                        Ok(result) => result,
+                        Err(outcome) => return tls_finish(tls, key, outcome),
+                    };
                 protocol.len = len;
                 let binding_out = &mut *tls.binding_out;
                 let binding = binding.bytes();
                 ptr::copy_nonoverlapping(binding.as_ptr(), binding_out.data, binding.len());
                 binding_out.len = binding.len();
-                streams
-                    .sessions
-                    .insert(key, Box::new(s.stream.take().unwrap()));
+                streams.sessions.insert(key, stream);
                 sockets.split(key);
                 Step {
                     outcome: Outcome {

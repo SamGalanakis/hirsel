@@ -132,8 +132,8 @@ The halves from `tls.connect` are ordinary halves. The rules of
   send, and before `close_notify`. `Ok(n)` means `n` bytes are committed. If the deadline
   passes or cancellation arrives after some bytes were committed, the send returns
   `Ok(n)`. If it committed zero bytes, it returns `TimedOut` or `Aborted`. The session
-  holds at most one record (16 KiB of plaintext) of committed ciphertext beyond what
-  the socket has accepted. The next send or drop flushes it first. Each byte reaches
+  holds at most the connection's slot cap of committed ciphertext beyond what the
+  socket has accepted. The next send or drop flushes it first. Each byte reaches
   the peer exactly once when the caller continues from the returned count.
 - **Both directions.** One TLS session serves both halves. The provider serialises the
   two halves' use of it, but only inside a callback and never across a wait. So a

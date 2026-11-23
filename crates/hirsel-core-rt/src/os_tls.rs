@@ -1,22 +1,31 @@
-//! The OS provider's rustls session. Socket reads and writes never block.
+//! The OS provider's TLS sessions. Socket reads and writes never block.
+mod records;
+mod rustls_stream;
+
 use crate::{
     net::{SecureStream, tls_failure},
     os_net,
     provider::*,
 };
 use hirsel_core_net::{Name, TlsTrust, scram::Binding};
+#[cfg(test)]
+pub(crate) use records::TX_TEST_LIMIT;
 use rustls::{
-    CertificateError, ClientConfig, ClientConnection, RootCertStore,
-    client::{Resumption, Tls12Resumption},
+    CertificateError, ClientConfig, ProtocolVersion, RootCertStore,
+    client::{Resumption, Tls12Resumption, UnbufferedClientConnection},
     pki_types::ServerName,
 };
 use std::{
     collections::{BTreeMap, VecDeque},
-    io::{self, IoSlice, Read, Write},
+    io::{self, Read, Write},
     sync::{Arc, OnceLock},
 };
 
 const RECORD: usize = 16 * 1024;
+const HEADER: usize = 5;
+const MAX_PAYLOAD: usize = RECORD + 2048;
+const MAX_WIRE: usize = HEADER + MAX_PAYLOAD;
+const RX_CAPACITY: usize = 64 * 1024;
 const CACHED_ROOT_BUNDLES: usize = 16;
 const CACHED_CLIENT_CONFIGS: usize = 16;
 const TICKETS_PER_CONFIG: usize = 64;
@@ -82,6 +91,7 @@ impl Streams {
             Resumption::disabled()
         };
         config.alpn_protocols = alpn;
+        config.enable_secret_extraction = true;
         let config = Arc::new(config);
         if cacheable {
             if self.clients.len() == CACHED_CLIENT_CONFIGS {
@@ -93,11 +103,7 @@ impl Streams {
     }
 }
 
-pub(crate) struct Stream {
-    connection: ClientConnection,
-    read_error: Option<Outcome>,
-    write_error: Option<Outcome>,
-}
+pub(crate) struct Stream(rustls_stream::RustlsStream);
 
 impl Stream {
     pub(crate) fn new(name: Name, config: Arc<ClientConfig>) -> Result<Self, Outcome> {
@@ -107,171 +113,104 @@ impl Stream {
                 ServerName::try_from(dns.to_string()).map_err(|_| tls_failure(1, 0))?
             }
         };
-        let connection = ClientConnection::new(config, server_name).map_err(protocol_error)?;
-        Ok(Self {
-            connection,
-            read_error: None,
-            write_error: None,
-        })
+        let connection =
+            UnbufferedClientConnection::new(config, server_name).map_err(protocol_error)?;
+        Ok(Self(rustls_stream::RustlsStream::new(connection)))
     }
 
     /// Pending carries the desired direction, false for read or true for write.
     pub(crate) fn handshake(&mut self, fd: i32) -> Result<Result<(), bool>, Outcome> {
-        let mut io = SocketIo(fd);
-        loop {
-            if !flush(&mut self.connection, &mut io).map_err(transport)? {
-                return Ok(Err(true));
-            }
-            if !self.connection.is_handshaking() {
-                return Ok(Ok(()));
-            }
-            match self.connection.read_tls(&mut io) {
-                Ok(0) => return Err(tls_failure(5, 0)),
-                Ok(_) => process(&mut self.connection, &mut io)?,
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(Err(false)),
-                Err(error) => return Err(transport(error)),
-            }
-        }
+        self.0.advance(&mut SocketIo(fd), true)
     }
 
-    pub(crate) fn handshake_result(
-        &self,
+    pub(crate) fn finish(
+        self,
         protocol: &mut [u8],
         peer: &mut [u8; 32],
-    ) -> (usize, Binding) {
-        let chosen = self.connection.alpn_protocol().unwrap_or_default();
-        protocol[..chosen.len()].copy_from_slice(chosen);
-        let leaf = &self.connection.peer_certificates().unwrap()[0];
+    ) -> Result<(usize, Binding, Box<dyn SecureStream>), Outcome> {
+        let chosen = self.0.connection.alpn_protocol().unwrap_or_default();
+        let len = chosen.len();
+        protocol[..len].copy_from_slice(chosen);
+        let leaf = &self.0.connection.peer_certificates().unwrap()[0];
         peer.copy_from_slice(sha256(leaf.as_ref()).as_ref());
-        (
-            chosen.len(),
-            certificate_binding(leaf.as_ref()).unwrap_or_default(),
-        )
+        let binding = certificate_binding(leaf.as_ref()).unwrap_or_default();
+        let stream: Box<dyn SecureStream> =
+            if self.0.connection.protocol_version() == Some(ProtocolVersion::TLSv1_3) {
+                let (secrets, kernel) = self
+                    .0
+                    .connection
+                    .dangerous_into_kernel_connection()
+                    .map_err(protocol_error)?;
+                Box::new(records::Records::new(secrets, kernel, self.0.rx)?)
+            } else {
+                Box::new(self.0)
+            };
+        Ok((len, binding, stream))
     }
 }
 
-impl SecureStream for Stream {
-    fn receive(&mut self, fd: i32, plaintext: &mut [u8]) -> Option<Outcome> {
-        if let Some(error) = self.read_error {
-            return Some(error);
-        }
-        if plaintext.is_empty() {
-            return Some(count(0));
-        }
-        let mut io = SocketIo(fd);
-        loop {
-            match self.connection.reader().read(plaintext) {
-                Ok(n) => return Some(count(n)),
-                Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
-                    let error = tls_failure(6, 0);
-                    self.read_error = Some(error);
-                    return Some(error);
-                }
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
-                Err(error) => return Some(transport(error)),
-            }
-            match self.connection.read_tls(&mut io) {
-                Ok(0) => {}
-                Ok(_) => {
-                    if let Err(error) = process(&mut self.connection, &mut io) {
-                        self.read_error = Some(error);
-                        return Some(error);
-                    }
-                    // A receive can help with writes generated by the session.
-                    if let Err(error) = flush(&mut self.connection, &mut io) {
-                        self.write_error = Some(transport(error));
-                    }
-                }
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return None,
-                Err(error) => return Some(transport(error)),
-            }
+/// One runtime-owned byte slot, with a cursor for nonblocking socket I/O.
+struct Slot {
+    bytes: Box<[u8]>,
+    start: usize,
+    end: usize,
+}
+
+impl Slot {
+    fn new(capacity: usize) -> Self {
+        Self {
+            bytes: vec![0; capacity].into_boxed_slice(),
+            start: 0,
+            end: 0,
         }
     }
 
-    fn ready(&mut self, fd: i32) -> Option<Outcome> {
-        let ready = Some(count(0));
-        if self.read_error.is_some() {
-            return ready;
-        }
-        let mut io = SocketIo(fd);
-        loop {
-            match self.connection.process_new_packets() {
-                Ok(state) if state.plaintext_bytes_to_read() > 0 || state.peer_has_closed() => {
-                    return ready;
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    let _ = self.connection.write_tls(&mut io);
-                    self.read_error = Some(protocol_error(error));
-                    return ready;
-                }
-            }
-            match self.connection.read_tls(&mut io) {
-                // End of stream: the receive reports a close or truncation.
-                Ok(0) => return ready,
-                Ok(_) => {
-                    if let Err(error) = flush(&mut self.connection, &mut io) {
-                        self.write_error = Some(transport(error));
-                    }
-                }
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return None,
-                Err(error) => {
-                    self.read_error = Some(transport(error));
-                    return ready;
-                }
-            }
+    fn consume(&mut self, n: usize) {
+        Self::consume_cursor(&mut self.start, &mut self.end, n);
+    }
+
+    fn consume_cursor(start: &mut usize, end: &mut usize, n: usize) {
+        *start += n;
+        if *start == *end {
+            *start = 0;
+            *end = 0;
         }
     }
 
-    fn send(&mut self, fd: i32, prefix: &[u8], tail: &[u8]) -> Option<Outcome> {
-        if let Some(error) = self.write_error {
-            return Some(error);
+    fn compact(&mut self) {
+        if self.start != 0 {
+            self.bytes.copy_within(self.start..self.end, 0);
+            self.end -= self.start;
+            self.start = 0;
         }
-        let mut io = SocketIo(fd);
-        if prefix.is_empty() && tail.is_empty() {
-            return match flush(&mut self.connection, &mut io) {
-                Ok(true) => Some(count(0)),
-                Ok(false) => None,
-                Err(error) => Some(transport(error)),
-            };
-        }
-        let mut written = 0;
-        for part in [prefix, tail] {
-            for record in part.chunks(RECORD) {
-                match flush(&mut self.connection, &mut io) {
-                    Ok(true) => {}
-                    Ok(false) => return (written != 0).then(|| count(written)),
-                    Err(error) => {
-                        let error = transport(error);
-                        self.write_error = Some(error);
-                        return Some(if written == 0 { error } else { count(written) });
-                    }
-                }
-                match self.connection.writer().write(record) {
-                    Ok(n) => {
-                        written += n;
-                        if n < record.len() {
-                            return Some(count(written));
-                        }
-                    }
-                    Err(error) => {
-                        let error = transport(error);
-                        self.write_error = Some(error);
-                        return Some(if written == 0 { error } else { count(written) });
-                    }
-                }
-            }
-        }
-        if let Err(error) = flush(&mut self.connection, &mut io) {
-            self.write_error = Some(transport(error));
-        }
-        Some(count(written))
     }
 
-    fn shutdown(&mut self, fd: i32) {
-        self.connection.send_close_notify();
-        let _ = self.connection.write_tls(&mut SocketIo(fd));
+    fn read(&mut self, socket: &mut SocketIo) -> io::Result<usize> {
+        self.compact();
+        let space = &mut self.bytes[self.end..];
+        if space.is_empty() {
+            return Err(io::Error::from(io::ErrorKind::InvalidData));
+        }
+        let n = socket.read(space)?;
+        self.end += n;
+        Ok(n)
     }
+
+    fn flush(&mut self, socket: &mut SocketIo) -> io::Result<bool> {
+        while self.start < self.end {
+            match socket.write(&self.bytes[self.start..self.end]) {
+                Ok(0) => return Err(io::Error::from(io::ErrorKind::WriteZero)),
+                Ok(n) => self.consume(n),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(false),
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(true)
+    }
+}
+
+fn payload_len(header: &[u8]) -> usize {
+    usize::from(u16::from_be_bytes([header[3], header[4]]))
 }
 
 pub(crate) fn system_roots() -> Arc<RootCertStore> {
@@ -289,27 +228,6 @@ fn count(value: usize) -> Outcome {
         value: value as u64,
         ..Outcome::default()
     }
-}
-
-fn flush(connection: &mut ClientConnection, fd: &mut SocketIo) -> io::Result<bool> {
-    while connection.wants_write() {
-        match connection.write_tls(fd) {
-            Ok(0) => return Err(io::Error::from(io::ErrorKind::WriteZero)),
-            Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(false),
-            Err(error) => return Err(error),
-        }
-    }
-    Ok(true)
-}
-
-fn process(connection: &mut ClientConnection, fd: &mut SocketIo) -> Result<(), Outcome> {
-    if let Err(error) = connection.process_new_packets() {
-        // Send a queued alert if the socket can accept it now.
-        let _ = connection.write_tls(fd);
-        return Err(protocol_error(error));
-    }
-    Ok(())
 }
 
 fn protocol_error(error: rustls::Error) -> Outcome {
@@ -359,16 +277,6 @@ impl Write for SocketIo {
         })
         .map(|n| n as usize)
         .map_err(io::Error::from_raw_os_error)
-    }
-
-    fn write_vectored(&mut self, buf: &[IoSlice<'_>]) -> io::Result<usize> {
-        // IoSlice's Unix ABI is iovec. sendmsg borrows the array for this call.
-        let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
-        msg.msg_iov = buf.as_ptr().cast_mut().cast();
-        msg.msg_iovlen = buf.len();
-        os_net::retry(|| unsafe { libc::sendmsg(self.0, &msg, libc::MSG_NOSIGNAL) })
-            .map(|n| n as usize)
-            .map_err(io::Error::from_raw_os_error)
     }
 
     fn flush(&mut self) -> io::Result<()> {

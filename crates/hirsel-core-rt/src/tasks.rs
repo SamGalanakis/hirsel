@@ -22,10 +22,13 @@ use std::{
 };
 
 mod frame;
+mod transfer;
 use frame::FrameRecord;
 pub(crate) use frame::held_wait;
 #[cfg(test)]
 pub(crate) use frame::{FRAME_HEADER, hirsel_core_frame_record};
+pub use transfer::hirsel_core_transfer;
+use transfer::{Moved, ZeroBlock};
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -211,12 +214,12 @@ pub struct Task {
     /// Set by a returnable wait that parked: the body returned through its
     /// represented frames, and the stack holds nothing live.
     stackless: bool,
-    /// The input a transfer moved the task's job into (`hirsel_core_transfer`),
-    /// read by the body in place of `input` from then on.
-    moved: Option<ZeroBlock>,
-    /// A transfer made by the running body: its new input and body, taken by
-    /// `start` once the body has returned through its frames.
-    transfer: Option<(ZeroBlock, Body)>,
+    /// What the body reads in place of `input` once a transfer has moved
+    /// the task's job (`hirsel_core_transfer`).
+    moved: Moved,
+    /// A transfer made by the running body: its new input, body and resume
+    /// glue, taken by `start` once the body has returned through its frames.
+    transfer: Option<(ZeroBlock, Body, Option<Body>)>,
     /// The abandoning parent's cleanup frame, once the task has ended.
     holder: std::mem::MaybeUninit<crate::counted::Holder>,
     /// How far the result's cleanup has got.
@@ -4658,61 +4661,6 @@ pub(crate) fn zero_block(context: &Context, bytes: usize) -> NonNull<u8> {
     drop(stack_like);
     base
 }
-/// A task input a transfer moved its job into: a zero-charge block, like the
-/// frame record, freed when the task ends or makes its next transfer.
-pub(crate) struct ZeroBlock {
-    base: NonNull<u8>,
-}
-impl ZeroBlock {
-    /// # Safety
-    /// `context` is the running task's; nothing reads the block now.
-    unsafe fn release(self, context: &Context) {
-        let base = self.base;
-        std::mem::forget(self);
-        // SAFETY: a zero-charge block of this context's heap.
-        unsafe { crate::block::free_with(base, 0, Some(context)) }
-    }
-}
-impl Drop for ZeroBlock {
-    /// A task torn down without ending its body gives the block back with no
-    /// context, as its frame record does.
-    fn drop(&mut self) {
-        // SAFETY: a zero-charge block; nothing reads it now.
-        unsafe { crate::block::free(self.base, 0) }
-    }
-}
-/// Move the running task's job, `bytes` packed as a task input (the code word,
-/// then the job), into a fresh zero-charge input, and make `body` the task's
-/// body once the current one has returned through its frames (`start`). The
-/// caller's frames return at once and touch nothing after; `start` frees the
-/// frame record (and an earlier moved input) before it enters `body` on the
-/// same stack.
-/// It declines, leaving the job where it is, when the task waits stackfully:
-/// it has no frame record, or it is replaying (`returnable_waits`).
-/// # Safety
-/// Called by a represented transfer site, with `input` holding `bytes`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_core_transfer(
-    context: *mut Context,
-    input: *const u8,
-    bytes: u64,
-    body: Body,
-) -> u8 {
-    if !returnable_waits() {
-        return 0;
-    }
-    let task = CURRENT.get();
-    let bytes = usize::try_from(bytes).unwrap_or_else(|_| crate::process::stop(b"Transfer"));
-    // SAFETY: CURRENT pins the task, and only its own fiber touches it; the
-    // block holds `bytes` writable bytes.
-    unsafe {
-        let base = zero_block(&*context, bytes.max(8));
-        ptr::copy_nonoverlapping(input, base.as_ptr(), bytes);
-        debug_assert!((*task).transfer.is_none());
-        (*task).transfer = Some((ZeroBlock { base }, body));
-    }
-    1
-}
 /// A returnable row's result: the delivered `value` with the caller's child
 /// word 0, or `parked` with the word 1 when the wait gave the stack back.
 /// # Safety
@@ -4731,18 +4679,37 @@ unsafe extern "C" fn start(first: *mut u8, _: *mut u8) -> ! {
     // its result is initialized only on status zero.
     unsafe {
         loop {
-            let input = match &(*task).moved {
-                Some(moved) => moved.base.as_ptr(),
-                None => (*task).input.as_ptr(),
+            let input = match &mut (*task).moved {
+                Moved::Spawned => (*task).input.as_ptr(),
+                Moved::Block { block, .. } => block.base.as_ptr(),
+                Moved::Consumed { code } => (&raw mut *code).cast(),
             };
             (*task).failed = ((*task).body)((*task).context, (*task).result.as_ptr(), input);
             if (*task).stackless {
                 // The body returned through its represented frames from a park
                 // (`park_returnable`); the dispatcher takes this stack back.
+                // A root whose job is dead after a park gives its moved input
+                // back now, keeping only the code word its resume glue reads.
+                // The park's commit is held, so nothing runs the task first.
+                if let Moved::Block {
+                    resume: Some(resume),
+                    ..
+                } = (*task).moved
+                {
+                    let Moved::Block { block, .. } =
+                        std::mem::replace(&mut (*task).moved, Moved::Spawned)
+                    else {
+                        std::hint::unreachable_unchecked()
+                    };
+                    let code = block.base.as_ptr().cast::<u64>().read();
+                    block.release(&*(*task).context);
+                    (*task).moved = Moved::Consumed { code };
+                    (*task).body = resume;
+                }
                 switch_to_idle(task);
                 std::hint::unreachable_unchecked();
             }
-            let Some((moved, body)) = (*task).transfer.take() else {
+            let Some((moved, body, resume)) = (*task).transfer.take() else {
                 break;
             };
             // The body returned through its frames from a transfer site
@@ -4754,16 +4721,20 @@ unsafe extern "C" fn start(first: *mut u8, _: *mut u8) -> ! {
             }
             // The spawn input, its job moved out, is kept to the task's end,
             // so its observed backing is freed when it always was.
-            if let Some(old) = (*task).moved.replace(moved) {
-                old.release(context);
+            let fresh = Moved::Block {
+                block: moved,
+                resume,
+            };
+            if let Moved::Block { block, .. } = std::mem::replace(&mut (*task).moved, fresh) {
+                block.release(context);
             }
             (*task).body = body;
         }
         if let Some(record) = (*task).frame.take() {
             record.release(&*(*task).context);
         }
-        if let Some(moved) = (*task).moved.take() {
-            moved.release(&*(*task).context);
+        if let Moved::Block { block, .. } = std::mem::replace(&mut (*task).moved, Moved::Spawned) {
+            block.release(&*(*task).context);
         }
         // The hand-over and END share one hold of the token.
         let _handover = (*task).record.is_some().then(|| {
@@ -5016,7 +4987,7 @@ pub(crate) unsafe fn run_root_with_unit(
         record: None,
         frame: None,
         stackless: false,
-        moved: None,
+        moved: Moved::Spawned,
         transfer: None,
         holder: std::mem::MaybeUninit::uninit(),
         cursor: 0,
@@ -5648,7 +5619,7 @@ unsafe fn spawn_in(
             record: Some(record),
             frame: None,
             stackless: false,
-            moved: None,
+            moved: Moved::Spawned,
             transfer: None,
             holder: std::mem::MaybeUninit::uninit(),
             cursor: 0,
@@ -6253,7 +6224,7 @@ mod ready_routing_laws {
                         record: None,
                         frame: None,
                         stackless: false,
-                        moved: None,
+                        moved: Moved::Spawned,
                         transfer: None,
                         holder: std::mem::MaybeUninit::uninit(),
                         cursor: 0,

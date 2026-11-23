@@ -1058,8 +1058,8 @@ pub enum RtOp {
     /// `x` input the leading address takes into new zero-charge task input,
     /// with the code word after it, and make the task's body enter that code
     /// through the transfer glue of `(x, r)` once its current frames have
-    /// returned. True when the runtime took the input; false, with the input
-    /// left in place, when the task has no frame record or is replaying.
+    /// returned; a nonzero `u8` says the root reads none of it once parked,
+    /// so it is freed then. True when taken; false (no frame record, replay).
     Transfer {
         x: TypeId,
         r: TypeId,
@@ -1715,7 +1715,7 @@ impl RtOp {
             RtOp::LaunchWord => (vec![V(u64_), V(u64_)], vec![u64_]),
             RtOp::LaunchHandle | RtOp::SecretShare => (vec![V(u64_)], vec![u64_]),
             RtOp::FrameRecord => (vec![V(u64_), V(u8_), V(u8_)], vec![p]),
-            RtOp::Transfer { x, .. } => (vec![take(x), V(p)], vec![Ty::Scalar(Scalar::Bool)]),
+            RtOp::Transfer { x, .. } => (vec![take(x), V(p), V(u8_)], vec![bool_]),
             RtOp::Returnable(wait) => {
                 let row = wait.row().signature();
                 let mut params = vec![V(p)];

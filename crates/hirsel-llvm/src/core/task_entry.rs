@@ -22,6 +22,23 @@ pub(super) fn task_entry_name(x: TypeId, r: TypeId) -> String {
 pub(super) fn transfer_entry_name(x: TypeId, r: TypeId) -> String {
     format!("core_transfer_entry_{}_{}", x.0, r.0)
 }
+/// The glue a transfer root resumes through once the runtime has freed its
+/// moved input (`hirsel_core_transfer`): the code word is the input's only
+/// word, and the job is read from a zero area that is never freed.
+pub(super) fn transfer_resume_name(x: TypeId, r: TypeId) -> String {
+    format!("core_transfer_resume_{}_{}", x.0, r.0)
+}
+fn transfer_zero_name(x: TypeId) -> String {
+    format!("core_transfer_zero_{}", x.0)
+}
+/// Which entry a glue is: a spawned task's, a transfer root's, or a transfer
+/// root's resume after its job was freed.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Glue {
+    Task,
+    Transfer,
+    Resume,
+}
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit(
     module: &Module,
@@ -41,15 +58,46 @@ pub(super) fn emit(
         .filter_map(|f| f.body.as_ref())
         .flat_map(|b| b.calls.iter())
         .filter_map(|c| match c.callee {
-            Callee::Runtime(RtOp::Spawn { x, r } | RtOp::SpawnUnit { x, r }) => Some((x, r, true)),
-            Callee::Runtime(RtOp::Transfer { x, r }) => Some((x, r, false)),
+            Callee::Runtime(RtOp::Spawn { x, r } | RtOp::SpawnUnit { x, r }) => {
+                Some(vec![(x, r, Glue::Task)])
+            }
+            Callee::Runtime(RtOp::Transfer { x, r }) => {
+                Some(vec![(x, r, Glue::Transfer), (x, r, Glue::Resume)])
+            }
             _ => None,
         })
+        .flatten()
         .collect::<BTreeSet<_>>();
+    // A resumed root takes its job from a zero area at least as large as the
+    // job, so whatever the root's entry reads of it is in bounds; it reads
+    // nothing it uses (`returnable::job_dead`).
+    let zeros = pairs
+        .iter()
+        .filter(|&&(_, _, g)| g == Glue::Resume)
+        .map(|&(x, _, _)| x)
+        .collect::<BTreeSet<_>>();
+    for x in zeros {
+        let (bytes, _, _) = hirsel_core_layout::field_size(
+            &module.types,
+            recipes,
+            &hirsel_core_layout::FieldTy::Inline(hirsel_core_layout::TypeRef(x.0)),
+        );
+        sink.global(&Global {
+            name: transfer_zero_name(x).into(),
+            linkage: Linkage::Private,
+            constant: true,
+            externally_initialized: false,
+            ty: Type::bytes(bytes.max(8)),
+            init: Some(Value::Zero),
+            align: 8,
+            absolute_symbol: false,
+        });
+    }
     let input = Value::Local(Local::INPUT);
     let body = Body::default();
     let result = Value::Local(Local::RESULT);
-    for (x, r, environment) in pairs {
+    for (x, r, glue) in pairs {
+        let environment = glue == Glue::Task;
         let xc = module.types[x.index()].carried;
         let rc = module.types[r.index()].carried;
         let fields = match rc {
@@ -66,10 +114,10 @@ pub(super) fn emit(
         };
         let abi = abi::Return::core_record(target, &fields, returned, true);
         sink.begin_function(
-            &if environment {
-                task_entry_name(x, r)
-            } else {
-                transfer_entry_name(x, r)
+            &match glue {
+                Glue::Task => task_entry_name(x, r),
+                Glue::Transfer => transfer_entry_name(x, r),
+                Glue::Resume => transfer_resume_name(x, r),
             },
             &FnSig::plain(Type::I8, [Type::Ptr, Type::Ptr, Type::Ptr]),
             &[Local::CONTEXT, Local::RESULT, Local::INPUT],
@@ -88,7 +136,10 @@ pub(super) fn emit(
             &mut *items,
         );
         let code = e.load(&Type::Ptr, &input, 8);
-        let data = e.offset(&input, input_offset(module, recipes, x));
+        let data = match glue {
+            Glue::Resume => Value::global(transfer_zero_name(x)),
+            _ => e.offset(&input, input_offset(module, recipes, x)),
+        };
         let mut args = vec![ptr(CONTEXT)];
         if matches!(rc, Carried::Address) && returned.is_none() {
             args.push(ptr(result.clone()));

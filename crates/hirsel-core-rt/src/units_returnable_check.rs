@@ -689,7 +689,15 @@ mod receiving {
                 *SETUP.lock().unwrap() = Some(a as usize);
             }
             let packed = (&raw const (*a).code).cast::<u8>();
-            if hirsel_core_transfer(context, packed, (8 + size_of::<Job>()) as u64, glue) != 0 {
+            if hirsel_core_transfer(
+                context,
+                packed,
+                (8 + size_of::<Job>()) as u64,
+                glue,
+                None,
+                0,
+            ) != 0
+            {
                 TRANSFERS.fetch_add(1, Ordering::SeqCst);
                 // The site's word, as a represented caller stores it.
                 (*a).word = 1;

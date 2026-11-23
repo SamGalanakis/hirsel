@@ -32,6 +32,8 @@
 use crate::extent::{operands, terminator_uses};
 use homes::homed_slots;
 mod homes;
+mod job;
+use job::transfer_job;
 mod sites;
 mod spawns;
 use crate::*;
@@ -176,75 +178,6 @@ fn tail_like(module: &Module, f: &Function, body: &Body, k: usize) -> bool {
             _ => return false,
         }
     }
-}
-
-/// The job a transfer moves, when `g` can be a task's root on its own: it
-/// takes one declared job and returns through its result place, and the job
-/// holds nothing that borrows the frames the transfer gives back.
-fn transfer_job(
-    module: &Module,
-    recipes: &[hirsel_core_layout::RecipeRow],
-    g: FuncId,
-) -> Option<(TypeId, u64)> {
-    let sig = &module.signatures[module.functions[g.index()].signature.index()];
-    let [
-        Param::Address {
-            place: PlaceTy::Declared(job),
-            loan: Loan::Take,
-        },
-    ] = sig.params[..]
-    else {
-        return None;
-    };
-    if sig.never || sig.dest.is_none() || !sig.results.is_empty() {
-        return None;
-    }
-    let (size, align) = place_layout(module, recipes, PlaceTy::Declared(job))?;
-    if align > ALIGN {
-        return None;
-    }
-    let mut seen = BTreeSet::new();
-    let mut rows = vec![job.index()];
-    let mut fields: Vec<&hirsel_core_layout::FieldTy> = vec![];
-    while let Some(t) = rows.pop() {
-        if !seen.insert(t) {
-            continue;
-        }
-        let shape = &module.types[t];
-        if matches!(
-            shape.repr,
-            hirsel_core_layout::Repr::Scoped | hirsel_core_layout::Repr::Region
-        ) {
-            return None;
-        }
-        match &shape.body {
-            hirsel_core_layout::Body::Record(fs) => fields.extend(fs.iter().map(|f| &f.ty)),
-            hirsel_core_layout::Body::Variant(cases) => {
-                fields.extend(cases.iter().flat_map(|c| c.fields.iter().map(|f| &f.ty)))
-            }
-        }
-        fields.extend(shape.held.as_ref());
-        while let Some(field) = fields.pop() {
-            use hirsel_core_layout::FieldTy as F;
-            match field {
-                F::Borrow | F::View(_) | F::Locator(_) | F::RegionRef(_) => return None,
-                F::Inline(x) | F::Box(x) | F::Rc(x) | F::Arc(x) | F::Link(x) => {
-                    rows.push(x.0 as usize)
-                }
-                F::Seq(e)
-                | F::Array(e, _)
-                | F::FixedSpan(e)
-                | F::SeqSpan(e)
-                | F::IndexedSpan(e) => fields.push(e),
-                F::Map(k, v) => {
-                    fields.push(k);
-                    fields.push(v);
-                }
-                F::Scalar(_) | F::Fn | F::OwnFn | F::Handle(_) | F::Text | F::FrozenBytes => {}
-            }
-        }
-    }
-    Some((job, size))
 }
 
 /// Whether `f`'s own body makes an owned wait (a returnable row, [`Wait`]).
@@ -881,6 +814,9 @@ pub struct Sizes {
     /// Channel receives that are sites, and those the shape left stackful.
     pub receives: u64,
     pub stackful_receives: u64,
+    /// Nothing reads the job after a site: a transfer root's moved input may
+    /// be freed at its first park ([`job::job_dead`]).
+    pub job_dead: bool,
 }
 
 fn place_layout(
@@ -945,6 +881,7 @@ fn shape(
     let (prologue, _) = prologue_plan(body);
     let wanted: BTreeSet<usize> = sites.keys().copied().collect();
     let live = live_after(body, &wanted);
+    let job_dead = job::job_dead(body, dest.map(|d| d.0), &live);
     let mut demote = vec![false; nv];
     let mut addresses = BTreeMap::new();
     // An address needed after a site is evaluated again at the resume, under
@@ -1066,6 +1003,7 @@ fn shape(
             .values()
             .filter(|s| matches!(s, Site::Leaf(RtOp::ReceiveRec { .. })))
             .count() as u64,
+        job_dead,
         ..Sizes::default()
     };
     let homed = homed_slots(body, &module.signatures, &wanted, &live);
@@ -1248,8 +1186,9 @@ struct Calls<'a> {
     variant: &'a dyn Fn(FuncId) -> (FuncId, SigId),
     returnable: &'a dyn Fn(RtOp) -> SigId,
     frame_record: SigId,
-    /// A transfer target's root, and the transfer op and its signature.
-    transfer: &'a dyn Fn(FuncId) -> (FuncId, RtOp, SigId),
+    /// A transfer target's root, the transfer op and its signature, and
+    /// whether the root's job is dead once it parks ([`Sizes::job_dead`]).
+    transfer: &'a dyn Fn(FuncId) -> (FuncId, RtOp, SigId, bool),
 }
 
 /// The variant of `old` with shape `s`. A root makes its record with
@@ -1565,7 +1504,7 @@ fn build(old: &Body, s: &Shape, root: bool, results_ty: &[Ty], calls: &Calls) ->
                     // Hand the job to `g`'s root, then return at once; nothing
                     // resumes this site, since the task's body is now that root.
                     // Declined, the call is made as written.
-                    let (target, op, signature) = (calls.transfer)(g);
+                    let (target, op, signature, dead) = (calls.transfer)(g);
                     let old_args = old_call.args.get(&old.pools.args).unwrap_or_default();
                     let Some(&Arg::Address(job)) = old_args.get(1) else {
                         unreachable!("a transfer target takes one job")
@@ -1575,9 +1514,12 @@ fn build(old: &Body, s: &Shape, root: bool, results_ty: &[Ty], calls: &Calls) ->
                         result: code,
                         function: target,
                     });
+                    let dead = b.konst(Ty::Scalar(Scalar::U8), u64::from(dead));
                     let moved = b.value(Ty::Scalar(Scalar::Bool));
-                    let args =
-                        PoolRange::push(&mut b.n.pools.args, [Arg::Address(job), Arg::Value(code)]);
+                    let args = PoolRange::push(
+                        &mut b.n.pools.args,
+                        [Arg::Address(job), Arg::Value(code), Arg::Value(dead)],
+                    );
                     let out = PoolRange::push(&mut b.n.pools.values, [moved]);
                     b.n.calls.push(CallSite {
                         callee: Callee::Runtime(op),
@@ -2376,7 +2318,7 @@ pub fn apply(module: &mut Module) -> Applied {
     }
     // A transfer target's root: `g`'s body as a root, with `g`'s signature,
     // entered through the transfer's glue with no step window of its own.
-    let mut transfer_root: BTreeMap<usize, (FuncId, RtOp, SigId)> = BTreeMap::new();
+    let mut transfer_root: BTreeMap<usize, (FuncId, RtOp, SigId, bool)> = BTreeMap::new();
     for &g in &targets {
         let canonical = &module.functions[g];
         let sig = &module.signatures[canonical.signature.index()];
@@ -2408,7 +2350,7 @@ pub fn apply(module: &mut Module) -> Applied {
             ContentHash::of_parts("hirsel.returnable.transfer.v1", [identity.0.as_slice()]),
         );
         let transfer_sig = sig_id(module, op.signature());
-        transfer_root.insert(g, (id, op, transfer_sig));
+        transfer_root.insert(g, (id, op, transfer_sig, shapes[&g].sizes.job_dead));
         applied.transfers.push((FuncId(g as u32), shapes[&g].sizes));
     }
     let lookup = |g: FuncId| variant[&g.index()];
@@ -2426,7 +2368,7 @@ pub fn apply(module: &mut Module) -> Applied {
         let results = &module.signatures[module.functions[f].signature.index()].results;
         bodies.push((id, build(old, &shapes[&f], false, results, &calls)));
     }
-    for (&g, &(id, _, _)) in &transfer_root {
+    for (&g, &(id, ..)) in &transfer_root {
         let old = forms[g].as_ref().unwrap();
         let results = &module.signatures[module.functions[g].signature.index()].results;
         bodies.push((id, build(old, &shapes[&g], true, results, &calls)));
@@ -2504,7 +2446,7 @@ pub fn apply(module: &mut Module) -> Applied {
         *function = id;
         let result = *result;
         let copies = variant.get(&f).map(|&(v, _)| v);
-        let moved = transfer_root.get(&f).map(|&(t, _, _)| t);
+        let moved = transfer_root.get(&f).map(|&(t, ..)| t);
         for v in copies.into_iter().chain(moved) {
             let body = module.functions[v.index()].body.as_mut().unwrap();
             for inst in &mut body.insts {
@@ -2554,7 +2496,7 @@ pub fn report(module: &Module, applied: &Applied) -> String {
     }
     for (f, z) in &applied.transfers {
         s.push_str(&format!(
-            "  transfer root f{} {}: area {} = word 8 + child {} + slots {} of {} + dest {} + demoted {}\n",
+            "  transfer root f{} {}: area {} = word 8 + child {} + slots {} of {} + dest {} + demoted {}; job dead {}\n",
             f.0,
             name(*f),
             z.area,
@@ -2562,7 +2504,8 @@ pub fn report(module: &Module, applied: &Applied) -> String {
             z.slots,
             z.all_slots,
             z.dest,
-            z.demoted
+            z.demoted,
+            z.job_dead
         ));
     }
     for (f, z) in &applied.sizes {

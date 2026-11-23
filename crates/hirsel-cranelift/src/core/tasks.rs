@@ -465,17 +465,16 @@ impl Function<'_, '_, '_> {
                 let (packed, offset) = self.task_input(x, args[1], args[0])?;
                 let (bytes, _) = place::storage(self.input, self.layouts, PlaceTy::Declared(x))?;
                 let bytes = self.b.ins().iconst(types::I64, (bytes + offset) as i64);
-                let glue = self.calls.reference(
-                    self.object,
-                    &mut self.b,
-                    self.task_entries.transfers[&(x, r)],
-                );
+                let entry = self.task_entries.transfers[&(x, r)];
+                let glue = self.calls.reference(self.object, &mut self.b, entry);
                 let glue = self.b.ins().func_addr(types::I64, glue);
+                // No resume glue: the root keeps its moved input to its end.
+                let none = self.b.ins().iconst(types::I64, 0);
                 outputs[0] = self.c_call(
                     "hirsel_core_transfer",
-                    &[P, P, U, P],
+                    &[P, P, U, P, P, K],
                     &[B],
-                    &[self.context, packed, bytes, glue],
+                    &[self.context, packed, bytes, glue, none, args[2]],
                 )?[0];
                 1
             }

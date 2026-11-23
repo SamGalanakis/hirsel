@@ -424,6 +424,8 @@ impl FunctionEmitter<'_> {
                         p(&packed),
                         u(&int(bytes + offset)),
                         ptr(Value::global(task_entry::transfer_entry_name(x, r))),
+                        ptr(Value::global(task_entry::transfer_resume_name(x, r))),
+                        zeroext(Type::I8, args[2].clone()),
                     ],
                 )
             }

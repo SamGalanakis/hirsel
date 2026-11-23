@@ -20,7 +20,7 @@ from store_crash_tests import checked, run_crashes
 INSTRUCTION_ALLOWANCES = {'frame_size_boundary': 1_892_798_149}  # measured 1_514_238_519
 
 LAWS = ('end', 'payload', 'segment', 'apply', 'recovery', 'bootstrap', 'worker',
-        'db', 'end_storage', 'recorded', 'options', 'call_vector', 'recorded_barrier', 'rotation', 'changes_checkpoint', 'frame_size_boundary', 'frame_oversize', 'drop', 'ack_channel', 'recorded_fork', 'streams', 'step_stop', 'place', 'place_idle')
+        'db', 'end_storage', 'recorded', 'options', 'call_vector', 'recorded_barrier', 'rotation', 'changes_checkpoint', 'frame_size_boundary', 'frame_oversize', 'drop', 'ack_channel', 'recorded_fork', 'streams', 'step_stop', 'place_idle')
 TRIGGER_LAWS = ('trigger_revision',)
 STEP_LAWS = (
     'steps_reexecution', 'steps_own_rows', 'steps_typed_error', 'steps_fingerprint',
@@ -33,7 +33,7 @@ LAW_GROUPS = {
     'runner': ('trigger_transact', 'trigger_granted', 'trigger_snapshot', 'trigger_cancel'),
     'steps': STEP_LAWS,
 }
-SCENARIOS = ('journal', 'journal-group', 'journal-rotate', 'journal-place', 'journal-place-split', 'journal-place-idle',
+SCENARIOS = ('journal', 'journal-group', 'journal-rotate', 'journal-place-split', 'journal-place-idle',
              'journal-fork')
 FORK_IMAGES = ('journal-fork-ack-cut', 'journal-fork-complete', 'journal-fork-torn', 'journal-fork-bad-end',
                'journal-fork-child-unwritten')
@@ -47,6 +47,9 @@ def provider_checks(executable, engine, env):
         checked([str(executable), scenario, 'count'], env, engine=engine)
         rows.append(dict(scenario=scenario, passed=True))
     print(f'{engine}: {len(FAILURES)} named I/O failure laws passed', flush=True)
+    # Drift guard 4: syncs and END opens per §3.2, checked by store_crash.c.
+    checked([str(executable), 'journal-sync-count', 'count'], env, engine=engine)
+    rows.append(dict(scenario='journal-sync-count', passed=True))
     count = checked([str(executable), 'journal-cancel', 'count'], env, engine=engine)
     match = re.fullmatch(r'cuts ([0-9]+)\n', count.stdout)
     if match is None or int(match[1]) == 0:

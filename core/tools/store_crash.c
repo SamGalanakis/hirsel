@@ -24,6 +24,7 @@ extern uint8_t store_crash_crashed(void *);
 extern void store_crash_checkpoint_reopen(void *);
 extern void store_crash_expect_read_only(void *);
 extern void store_crash_journal_fork(void *, uint8_t);
+extern void store_crash_armed_io(void *, uint64_t *);
 extern uint8_t hirsel_core_test_run_scripted(const HirselCoreProcessConfig *, HirselCoreEntry, uint64_t);
 _Static_assert(sizeof(HirselCoreHostOutcome)==32, "provider outcome ABI");
 
@@ -49,8 +50,9 @@ static void cancel_wait(HirselCoreContext *ctx) {
  * itself. Each issue while the write phase's journal worker lives is one cut;
  * that cut cancels the worker alone, so a sync it issued is in flight and the
  * store's head survives to see the worker end. Resume answers the outcome
- * computed at issue. The worker is the spawn of reserve + 65536 bytes. */
-enum { JOURNAL_WORKER_BYTES=16777296+65536 };
+ * computed at issue. The worker is the spawn of group_bytes + 65536 bytes,
+ * with journal_crash_options' group_bytes of 1 MiB. */
+enum { JOURNAL_WORKER_BYTES=1048576+65536 };
 static struct {
     int enabled, fired;
     uint64_t phase, target, issued, token[64];
@@ -297,6 +299,17 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
         }
         if(checkpoint_reopen && (phase==1 || (phase==3 && !open_sync_failure)) && !store_crash_crashed(state)) {
             fprintf(stderr,"checkpoint double crash was not reached in phase %s\n",phases[phase]);status=120;break;
+        }
+        /* STORE-SPEC §2.4, §3.2 Syncs: 16 frameless wakes do no I/O; four commits
+         * at group_commits 2 are two groups, then one idle END; close with d
+         * unchanged writes no END; END rewrites never reopen the END file. */
+        if(phase==1 && !strcmp(scenario,"journal-sync-count")) {
+            uint64_t io[4]; store_crash_armed_io(state,io);
+            if(io[0]!=0 || io[1]!=1 || io[2]!=2 || io[3]!=0) {
+                fprintf(stderr,"sync count: %llu END opens, %llu END syncs, %llu segment syncs, %llu other syncs; want 0 1 2 0\n",
+                    (unsigned long long)io[0],(unsigned long long)io[1],(unsigned long long)io[2],(unsigned long long)io[3]);
+                status=120;break;
+            }
         }
         if(phase==1 && uncut && !reopen && !store_crash_acked(state)) {
             fprintf(stderr,"uncut store run did not acknowledge its checkpoint\n");status=120;break;

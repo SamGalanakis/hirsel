@@ -2051,96 +2051,6 @@ fn covered(db: Db, mark: Mark) -> bool {
     }
 }
 
-type PlaceReply[Q, R, A] {
-    request: Q,
-    outcome: Result[Outcome[R, A], Error],
-    ticket: Option[Ticket]
-}
-
-fn place_ticket[R, A](outcome: Result[Outcome[R, A], Error]) -> Option[Ticket] {
-    match outcome {
-        Ok(Committed(done)) => Some(done.ticket),
-        Ok(Aborted(undone)) => undone.ticket,
-        _ => None
-    }
-}
-
-// `receive` blocks for the first request and probes for subsequent ready
-// requests. One transaction runs per request. Delivery owns the request and
-// outcome, so a disconnected client can drop its reply locally.
-pub fn write_place[S, Q, R, A](mut db: Db, mut source: S, receive: fn(Db, mut S, bool) -> Option[Q] waits, body: fn(mut Tx, S, Q) -> Result[R, A], deliver: fn(mut S, take Q, take Result[Outcome[R, A], Error]) waits) -> Result[(), Error] waits {
-    let disk = list.len(db.disk) != 0
-    let max_frames: u64 = if disk {
-        int.widen(db.disk[0].options.group_commits)
-    } else {
-        1
-    }
-    let max_bytes: u64 = if disk {
-        int.widen(db.disk[0].options.group_bytes)
-    } else {
-        0
-    }
-    let mut replies: List[Option[PlaceReply[Q, R, A]]] = list.with_capacity(max_frames)
-    while let Some(take first) = receive(db, mut source, true) {
-        let mut pending_request = Some(take first)
-        let mut last: Option[Ticket] = None
-        let start = db.acked_bytes + db.inflight
-        let mut cut: Result[(), Error] = Ok(())
-        while let Some(take request) = replace(mut pending_request, None) {
-            let polled = journal_poll(mut db)
-            let outcome: Result[Outcome[R, A], Error] = match take polled {
-                Error(take e) => Error(take e),
-                Ok(()) => append_transaction(mut db, 0, None, None, scoped fn(mut tx: Tx) -> Result[R, A] {
-                    body(mut tx, source, request)
-                })
-            }
-            let commit_ticket = place_ticket(outcome)
-            if let Some(t) = commit_ticket {
-                last = Some(t)
-            }
-            list.push(mut replies, Some(PlaceReply(request: take request, outcome: take outcome, ticket: commit_ticket)))
-            cut = maybe_checkpoint(mut db)
-            if let Error(_) = cut {
-                break
-            }
-            if let Some(_) = db.poison {
-                break
-            }
-            // The journal separates a frame that crosses the byte bound
-            // from the preceding group before writing either group.
-            if list.len(replies) == max_frames || db.acked_bytes + db.inflight - start >= max_bytes {
-                break
-            }
-            pending_request = receive(db, mut source, false)
-        }
-        let settled = match last {
-            Some(t) => durable(mut db, t),
-            None => healthy(db)
-        }
-        if let Error(Poisoned(_)) = settled {
-            // A cut can latch poison before durable takes journal acks.
-            // Apply any already queued prefix without retrying an I/O.
-            let _ = journal_poll(mut db)
-        }
-        let acked_sequence = db.journaled
-        for i in 0u64 .. list.len(replies) {
-            let pending = option.unwrap(list.set(mut replies, i, None))
-            let PlaceReply(request: take request, outcome: take outcome, ticket: commit_ticket) = take pending
-            if let Some(Ticket(store: _, open: _, mark: Journal(sequence))) = commit_ticket {
-                if disk && sequence > acked_sequence {
-                    deliver(mut source, take request, Error(Poisoned(option.unwrap(db.poison))))
-                    continue
-                }
-            }
-            deliver(mut source, take request, take outcome)
-        }
-        list.clear(mut replies)
-        settled?
-        cut?
-    }
-    Ok(())
-}
-
 pub fn close(take db: Db) -> Result[(), Error] waits {
     let mut owned = take db
     let mut failure: Option[Error] = None
@@ -12375,7 +12285,7 @@ fn open_started(tasks: Tasks, d: Dir, c: Clock, options: Options, take session: 
     let JournalChannels(frames: take frames, queued: take queued, acks: take journal_acks, received: take journal_received, ready: take ready, waiting: take waiting, written_send: take written_send, written_receive: take written_receive) = take channels
     let written_worker = channel.sender(written_send)
     let reserve: u64 = int.widen(options.group_bytes)
-    let input = JournalWorker(d: d, store: id, seq: seq, segment: take segment, end_file: take end_file, group_commits: options.group_commits, group_bytes: options.group_bytes, receive: take queued, send: take journal_acks, ready: take ready, written: take written_worker)
+    let input = JournalWorker(store: id, seq: seq, segment: take segment, end_file: take end_file, group_commits: options.group_commits, group_bytes: options.group_bytes, receive: take queued, send: take journal_acks, ready: take ready, written: take written_worker)
     let writer = match task.try_spawn(tasks, bytes reserve + 65536, take input, journal_worker) {
         Ok(take running) => take running,
         Error((problem, _)) => return Error(Full(Allocation(problem))),
@@ -15563,7 +15473,6 @@ type JournalMsg: send = Frame(Bytes, u64) | Rotate(HostFile, HostFile) | Barrier
 type WriteNotice: send = Written | WriteFailed(IoError)
 
 type JournalWorker: send {
-    d: Dir,
     store: StoreId,
     seq: u64,
     segment: HostFile,
@@ -15579,8 +15488,7 @@ type JournalWorker: send {
 type JournalBuffers {
     group: Bytes,
     end_bytes: Bytes,
-    binding: Bytes,
-    name: String
+    binding: Bytes
 }
 
 fn journal_set(mut raw: Bytes, at: u64, value: u64, width: u64) {
@@ -15603,12 +15511,14 @@ fn journal_buffers(reserve: u64) -> Result[JournalBuffers, Capacity] {
     list.fill(mut end_bytes, 96, 0u8)
     let mut binding: Bytes = list.with_capacity(33)
     list.fill(mut binding, 33, 0u8)
-    let name = string.with_capacity(32)
-    Ok(JournalBuffers(group: take group, end_bytes: take end_bytes, binding: take binding, name: take name))
+    Ok(JournalBuffers(group: take group, end_bytes: take end_bytes, binding: take binding))
 }
 
-// END's bytes, checksum binding and name all reuse storage admitted at spawn.
-fn journal_write_end(d: Dir, id: StoreId, seq: u64, end: u64, mut end_file: Option[HostFile], mut raw: Bytes, mut binding: Bytes, mut name: String) -> Result[(), Error] waits {
+// END's bytes and checksum binding reuse storage admitted at spawn. The END
+// file is a fixed 96 bytes, rewritten in place through the handle opened when
+// its segment was created; a torn rewrite fails its checksum like a torn
+// truncate-and-write would, and only loses detection (§3.4 step 5).
+fn journal_write_end(id: StoreId, seq: u64, end: u64, mut end_file: HostFile, mut raw: Bytes, mut binding: Bytes) -> Result[(), Error] waits {
     journal_set(mut binding, 0, id.hi, 8)
     journal_set(mut binding, 8, id.lo, 8)
     journal_set(mut binding, 16, 4, 1)
@@ -15635,37 +15545,27 @@ fn journal_write_end(d: Dir, id: StoreId, seq: u64, end: u64, mut end_file: Opti
     journal_set(mut binding, 25, 72, 8)
     let end_check = journal_fixed_check(binding, raw, 72, 8)
     journal_set(mut raw, 80, end_check, 8)
-    string.truncate(mut name, 0)
-    string.push(mut name, "j-")
-    string.push_u64(mut name, seq)
-    string.push(mut name, ".end")
-    let previous = replace(mut end_file, None)
-    if let Some(take file) = take previous {
-        disk_io(host.close(take file))?
-    }
-    let mut file = disk_io(host.open(d, name, Write))?
-    match host.write(mut file, raw) {
+    match host.write_at(mut end_file, 0, raw) {
         Ok(()) => {},
         Error(e) => return Error(Io(e.error))
     }
-    disk_io(host.sync(mut file))?
-    end_file = Some(take file)
-    Ok(())
+    disk_io(host.sync(mut end_file))
 }
 
 fn journal_loop(take input: JournalWorker, take scratch: JournalBuffers) -> Result[(), Error] waits {
-    let JournalWorker(d: d, store: id, seq: initial_seq, segment: take segment, end_file: take end_file, group_commits: max_frames, group_bytes: max_bytes, receive: take receive, send: take send, ready: _, written: take notices) = take input
+    let JournalWorker(store: id, seq: initial_seq, segment: take segment, end_file: take end_file, group_commits: max_frames, group_bytes: max_bytes, receive: take receive, send: take send, ready: _, written: take notices) = take input
     let mut segment_file = take segment
-    let mut end_file_slot = Some(take end_file)
+    let mut end_handle = take end_file
     let mut seq = initial_seq
     let mut end = 72u64
+    // The d the END file holds: 72 from segment creation.
+    let mut end_named = 72u64
     let mut written = 0u64
     let mut groups = 0u64
-    let JournalBuffers(group: take reserved, end_bytes: take initial_end, binding: take initial_binding, name: take initial_name) = take scratch
+    let JournalBuffers(group: take reserved, end_bytes: take initial_end, binding: take initial_binding) = take scratch
     let mut buffer = take reserved
     let mut end_bytes = take initial_end
     let mut binding = take initial_binding
-    let mut end_name = take initial_name
     let group_limit: u64 = int.widen(max_bytes)
     let mut deferred: Option[JournalMsg] = None
     loop {
@@ -15678,7 +15578,10 @@ fn journal_loop(take input: JournalWorker, take scratch: JournalBuffers) -> Resu
                         next_message = Some(take msg)
                     },
                     Error(Empty) => {
-                        journal_write_end(d, id, seq, end, mut end_file_slot, mut end_bytes, mut binding, mut end_name)?
+                        if end != end_named {
+                            journal_write_end(id, seq, end, mut end_handle, mut end_bytes, mut binding)?
+                            end_named = end
+                        }
                         groups = 0
                     },
                     Error(Closed) => {}
@@ -15779,27 +15682,23 @@ fn journal_loop(take input: JournalWorker, take scratch: JournalBuffers) -> Resu
             Some(_) => true,
             None => false
         }
-        if idle || closing || rotate_now || groups == 64 {
-            journal_write_end(d, id, seq, end, mut end_file_slot, mut end_bytes, mut binding, mut end_name)?
+        // An END that would repeat the d already named writes nothing.
+        if (idle || closing || rotate_now || groups == 64) && end != end_named {
+            journal_write_end(id, seq, end, mut end_handle, mut end_bytes, mut binding)?
+            end_named = end
             groups = 0
         }
         if let Some((take new_file, take new_end)) = take rotating {
             disk_io(host.close(take segment_file))?
-            let previous_end = replace(mut end_file_slot, None)
-            if let Some(take old_end) = take previous_end {
-                disk_io(host.close(take old_end))?
-            }
+            disk_io(host.close(replace(mut end_handle, take new_end)))?
             segment_file = take new_file
-            end_file_slot = Some(take new_end)
             seq += 1
             end = 72
+            end_named = 72
         }
         if closing {
             disk_io(host.close(take segment_file))?
-            let previous_end = replace(mut end_file_slot, None)
-            if let Some(take old_end) = take previous_end {
-                disk_io(host.close(take old_end))?
-            }
+            disk_io(host.close(take end_handle))?
             return Ok(())
         }
     }
@@ -15864,7 +15763,7 @@ fn journal_worker_case(d: Dir, tasks: Tasks, mode: u64) -> bool waits {
     } else {
         100u32
     }
-    let input = JournalWorker(d: d, store: id, seq: 7, segment: take segment, end_file: take end_file, group_commits: max_frames, group_bytes: max_bytes, receive: take receive, send: take acks, ready: take ready, written: take written_send)
+    let input = JournalWorker(store: id, seq: 7, segment: take segment, end_file: take end_file, group_commits: max_frames, group_bytes: max_bytes, receive: take receive, send: take acks, ready: take ready, written: take written_send)
     let reserve: u64 = int.widen(max_bytes)
     let worker = if mode == 0 || mode == 2 {
         task.spawn(tasks, bytes reserve + 65536, take input, journal_worker_zero)
@@ -16052,11 +15951,12 @@ fn journal_test_db(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] 
 pub fn journal_law_end_storage(d: Dir) -> bool waits {
     let id = StoreId(hi: 1, lo: 2)
     let mut scratch = result.unwrap(journal_buffers(1024))
-    let mut file: Option[HostFile] = None
     for seq in[7u64, 257u64] {
+        let mut file = result.unwrap(host.open(d, result.unwrap(disk_path("j-", seq, ".end")), Write))
         let attempt = bound bytes 0 {
-            journal_write_end(d, id, seq, 198, mut file, mut scratch.end_bytes, mut scratch.binding, mut scratch.name)
+            journal_write_end(id, seq, 198, mut file, mut scratch.end_bytes, mut scratch.binding)
         }
+        result.unwrap(host.close(take file))
         match take attempt {
             Ok(Ok(())) => {},
             _ => return false
@@ -17026,80 +16926,13 @@ fn journal_is_poisoned[T](take response: Result[T, Error]) -> bool {
     }
 }
 
-type JournalPlace {
-    rows: Table[u64, u64],
-    out: Option[Stdout],
-    requests: Receiver[u64],
-    delivered: u64,
-    committed: u64
-}
-
-fn journal_place_receive(db: Db, mut place: JournalPlace, wait: bool) -> Option[u64] waits {
-    if wait {
-        match channel.receive(place.requests) {
-            Ok(key) => Some(key),
-            Error(_) => None
-        }
-    } else {
-        match channel.try_receive(place.requests) {
-            Ok(key) => Some(key),
-            Error(_) => None
-        }
-    }
-}
-
-fn journal_place_requests(total_count: u64) -> Receiver[u64] waits {
-    let (send, requests): (Sender[u64], Receiver[u64]) = channel.new(total_count)
-    for key in 0u64 .. total_count {
-        result.unwrap(channel.send(send, key))
-    }
-    take requests
-}
-
-fn journal_place_put(mut tx: Tx, place: JournalPlace, key: u64) -> Result[u64, Error] {
-    let value = key + 10
-    put(mut tx, place.rows, key, value)?
-    Ok(value)
-}
-
-fn journal_place_deliver(mut place: JournalPlace, take key: u64, take outcome: Result[Outcome[u64, Error], Error]) waits {
-    if key != place.delivered {
-        fail("place delivered out of order")
-    }
-    place.delivered += 1
-    match take outcome {
-        Ok(Committed(done)) => {
-            if done.value != key + 10 {
-                fail("place returned another request's value")
-            }
-            place.committed += 1
-            if let Some(out) = place.out {
-                journal_note(out, key + 2)
-            }
-        },
-        Error(Poisoned(Other(125))) => {},
-        _ => fail("unexpected place outcome")
-    }
-}
-
-pub fn journal_law_place(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
-    let options = journal_crash_options()
-    let mut db = result.unwrap(open(tasks, d, c, r, options))
-    let table_ticket = result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
-    result.unwrap(durable(mut db, table_ticket))
-    let rows = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
-    let mut place = JournalPlace(rows: rows, out: None, requests: journal_place_requests(6), delivered: 0, committed: 0)
-    result.unwrap(write_place(mut db, mut place, journal_place_receive, journal_place_put, journal_place_deliver))
-    result.unwrap(close(take db))
-    place.delivered == 6 && place.committed == 6
-}
-
-@test
-fn journal_test_place(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
-    if journal_law_place(disk_test_directory(d), c, r, tasks) {
-        Ok(())
-    } else {
-        Error(())
+fn journal_put_ticket(mut db: Db, t: Table[u64, u64], key: u64) -> Result[Ticket, Error] waits {
+    let committed = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+        put(mut tx, t, key, key + 10)
+    })?
+    match take committed {
+        Committed(done) => Ok(done.ticket),
+        _ => fail("journal commit refused")
     }
 }
 
@@ -17107,9 +16940,14 @@ fn journal_place_idle_turn(take signal: Receiver[()]) waits {
     result.unwrap(channel.receive(signal))
 }
 
-fn journal_place_idle(d: Dir, tasks: Tasks, mut db: Db, take rows: Table[u64, u64], out: Option[Stdout]) -> Result[bool, Error] waits {
-    let mut place = JournalPlace(rows: take rows, out: out, requests: journal_place_requests(1), delivered: 0, committed: 0)
-    write_place(mut db, mut place, journal_place_receive, journal_place_put, journal_place_deliver)?
+// group_commits = 1: the group ends at its cap without finding the queue
+// empty, so the next probe must find it empty and write END before waiting.
+fn journal_place_idle(d: Dir, tasks: Tasks, mut db: Db, t: Table[u64, u64], out: Option[Stdout]) -> Result[bool, Error] waits {
+    let saved = journal_put_ticket(mut db, t, 0)?
+    durable(mut db, saved)?
+    if let Some(o) = out {
+        journal_note(o, db.heads[0].head)
+    }
     // Give the ready journal task a scheduler turn with its sender still open.
     let (wake, signal): (Sender[()], Receiver[()]) = channel.new(1)
     let turn = task.spawn(tasks, bytes 4096, take signal, journal_place_idle_turn)
@@ -17118,7 +16956,7 @@ fn journal_place_idle(d: Dir, tasks: Tasks, mut db: Db, take rows: Table[u64, u6
     let boundary = disk_end(d, db.store, db.file_seq)?
     // HEADER (72) + empty COMMIT with DATA section (42) + the put's
     // overhead (9), table-prefixed u64 key (12), and schema-tagged row (10).
-    Ok(place.delivered == 1 && place.committed == 1 && boundary == Some(145u64))
+    Ok(boundary == Some(145u64))
 }
 
 pub fn journal_law_place_idle(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
@@ -17128,7 +16966,7 @@ pub fn journal_law_place_idle(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool
     let commit_ticket = result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
     result.unwrap(durable(mut db, commit_ticket))
     let rows = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
-    let good = result.unwrap(journal_place_idle(d, tasks, mut db, take rows, None))
+    let good = result.unwrap(journal_place_idle(d, tasks, mut db, rows, None))
     result.unwrap(close(take db))
     good
 }
@@ -17217,6 +17055,41 @@ fn journal_poison_write(mut db: Db, t: Table[u64, u64], out: Stdout, scenario: S
     true
 }
 
+// A Barrier-only group: the journal wakes, finds no frame, answers Written.
+fn journal_frameless_wakes(db: Db, wakes: u64) -> Result[(), Error] waits {
+    for _ in 0u64 .. wakes {
+        if let Some(sender) = db.journal {
+            result.unwrap(channel.send(sender, Barrier))
+        }
+        if let Some(receiver) = db.written {
+            match result.unwrap(channel.receive(receiver)) {
+                Written => {},
+                WriteFailed(e) => return Error(Poisoned(e))
+            }
+        }
+    }
+    Ok(())
+}
+
+// §2.4 and §3.2's Syncs table, counted by the provider after ARM (store_crash.c
+// checks the totals). Frameless wakes do no I/O. Four commits sent before one
+// durable, with group_commits = 2, are two groups: two segment syncs, then one
+// END sync when the queue is found empty. Close leaves d where that END put it,
+// so it writes no END. The END file is opened only when its segment is created.
+fn journal_sync_count(take db: Db, t: Table[u64, u64], out: Stdout) -> Result[(), Error] waits {
+    let mut owned = take db
+    result.unwrap(stdout.write(out, "ARM"))
+    journal_frameless_wakes(owned, 8)?
+    let mut last = journal_put_ticket(mut owned, t, 0)?
+    for k in 1u64 .. 4 {
+        last = journal_put_ticket(mut owned, t, k)?
+    }
+    durable(mut owned, last)?
+    journal_note(out, owned.heads[0].head)
+    journal_frameless_wakes(owned, 8)?
+    close(take owned)
+}
+
 fn journal_crash_write(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, scenario: String) -> Result[(), Error] waits {
     let mut options = journal_crash_options()
     if scenario == "journal-place-idle" {
@@ -17231,30 +17104,24 @@ fn journal_crash_write(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, s
         return journal_crash_fork_write(take db, t, out, fork_case)
     }
     if scenario == "journal-place-idle" {
-        if !journal_place_idle(d, tasks, mut db, take t, Some(out))? {
+        if !journal_place_idle(d, tasks, mut db, t, Some(out))? {
             fail("exact-cap reply left a stale END while idle")
         }
         return close(take db)
     }
+    // group_bytes = 100 defers B to its own group; that group's sync fails
+    // (split) or B's write is short (short). A alone is acknowledged.
     if scenario == "journal-place-split" || scenario == "journal-place-short" {
         result.unwrap(stdout.write(out, "ARM"))
-        let mut place = JournalPlace(rows: t, out: Some(out), requests: journal_place_requests(2), delivered: 0, committed: 0)
-        let served = write_place(mut db, mut place, journal_place_receive, journal_place_put, journal_place_deliver)
-        if !journal_is_poisoned(take served) || !journal_is_poisoned(close(take db)) {
+        let a = journal_put_ticket(mut db, t, 0)?
+        let a_version = db.heads[0].head
+        let b = journal_put_ticket(mut db, t, 1)?
+        durable(mut db, a)?
+        journal_note(out, a_version)
+        if !journal_is_poisoned(durable(mut db, b)) || !journal_is_poisoned(close(take db)) {
             fail("byte split lost the journal's first error")
         }
-        if place.delivered == 2 && place.committed == 1 {
-            return Ok(())
-        }
-        return Error(Poisoned(Other(125)))
-    }
-    if scenario == "journal-place" {
-        let mut place = JournalPlace(rows: t, out: Some(out), requests: journal_place_requests(6), delivered: 0, committed: 0)
-        write_place(mut db, mut place, journal_place_receive, journal_place_put, journal_place_deliver)?
-        if place.delivered != 6 || place.committed != 6 {
-            fail("place did not deliver all requests")
-        }
-        return close(take db)
+        return Ok(())
     }
     if scenario == "poison-cut" {
         result.unwrap(stdout.write(out, "ARM"))
@@ -17276,6 +17143,9 @@ fn journal_crash_write(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, s
             fail("cut close lost first error")
         }
         return Ok(())
+    }
+    if scenario == "journal-sync-count" {
+        return journal_sync_count(take db, t, out)
     }
     if scenario == "poison-segment" || scenario == "poison-end" || scenario == "poison-pack" || scenario == "poison-write" {
         if !journal_poison_write(mut db, t, out, scenario) {
@@ -17507,6 +17377,8 @@ fn journal_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, minimum: u64, s
         2u64
     } else if scenario == "journal" {
         8u64
+    } else if scenario == "journal-sync-count" {
+        5u64
     } else {
         7u64
     }

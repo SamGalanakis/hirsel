@@ -50,6 +50,9 @@ struct Bridge {
     failed_syncs: u64,
     split_syncs: u64,
     segment_syncs: u64,
+    /// After ARM in the write phase: `.end` opens, END syncs, segment syncs
+    /// and other syncs (files and directories).
+    armed_io: [u64; 4],
     split_at: usize,
     random: u8,
     orphan_end: bool,
@@ -177,6 +180,25 @@ impl Bridge {
         if self.crashed {
             return Self::error(5);
         }
+        if self.phase == 1 && self.armed {
+            let slot = match op {
+                0 if path.ends_with(b".end") => Some(0),
+                16 => self.files.get(&handle).map(|file| {
+                    if file.name.ends_with(".end") {
+                        1
+                    } else if is_segment(&file.name) {
+                        2
+                    } else {
+                        3
+                    }
+                }),
+                17 => Some(3),
+                _ => None,
+            };
+            if let Some(slot) = slot {
+                self.armed_io[slot] += 1;
+            }
+        }
         let name = || {
             std::str::from_utf8(path)
                 .expect("Hirsel String path")
@@ -241,10 +263,15 @@ impl Bridge {
                     ..Outcome::default()
                 }
             }
-            2 => {
+            2 | 38 => {
                 let file = self.files.get(&handle).expect("live provider descriptor");
                 let name = file.name.clone();
-                let cursor = file.cursor;
+                let cursor = if op == 38 {
+                    let position = u64::from_le_bytes(path.try_into().expect("WriteAt offset"));
+                    usize::try_from(position).expect("WriteAt offset fits")
+                } else {
+                    file.cursor
+                };
                 if self.phase == 1 && is_segment(&name) {
                     if let Some(fork) = &self.fork_observation {
                         if fork.image == 5
@@ -300,7 +327,7 @@ impl Bridge {
                 if self.phase == 1 && self.armed && self.sync_failure == 5 && is_segment(&name) {
                     self.split_at = cursor;
                 }
-                let append = file.mode == 2;
+                let append = op == 2 && file.mode == 2;
                 let applied = if append {
                     self.apply(Op::Append(&name, &data[..written]))
                 } else {
@@ -312,7 +339,9 @@ impl Bridge {
                 if !applied {
                     return Self::error(5);
                 }
-                self.files.get_mut(&handle).unwrap().cursor += written;
+                if op == 2 {
+                    self.files.get_mut(&handle).unwrap().cursor += written;
+                }
                 Outcome {
                     written: written as u64,
                     ..if short {
@@ -556,6 +585,7 @@ pub extern "C" fn store_crash_new(cut: u64) -> *mut c_void {
         failed_syncs: 0,
         split_syncs: 0,
         segment_syncs: 0,
+        armed_io: [0; 4],
         split_at: 0,
         random: 1,
         orphan_end: false,
@@ -624,7 +654,7 @@ pub unsafe extern "C" fn store_crash_op(
     };
     // Capacity zero can still borrow static input bytes, as specified by the
     // host ABI. The provider only writes the spare space of Read/Random.
-    if op == 2 || op == 12 || op == 13 {
+    if op == 2 || op == 38 || op == 12 || op == 13 {
         let source = if len == 0 {
             &[]
         } else {
@@ -757,4 +787,13 @@ pub unsafe extern "C" fn store_crash_signal_exit(p: *mut c_void) {
 pub unsafe extern "C" fn store_crash_checkpoint_reopen(p: *mut c_void) {
     // SAFETY: the wrapper owns p exclusively before invoking any provider.
     unsafe { (*p.cast::<Bridge>()).checkpoint_reopen = true };
+}
+
+/// # Safety
+/// `p` is live and quiescent; `out` points to four writable u64s.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn store_crash_armed_io(p: *const c_void, out: *mut u64) {
+    // SAFETY: the wrapper reads between synchronous runs into its own array.
+    let io = unsafe { (*p.cast::<Bridge>()).armed_io };
+    unsafe { std::ptr::copy_nonoverlapping(io.as_ptr(), out, 4) };
 }

@@ -580,7 +580,7 @@ impl CheckProduct {
         let runtime = inputs.toolchain.runtime;
         let std = std_release::std_side(&units, &root, options, runtime)?;
         units.retain(|identity, _| identity == &root || !std.roots.contains(identity));
-        recipe_build::bind_annexes(&mut units, &BTreeMap::new(), &std.points, true)?;
+        recipe_build::bind_annexes(&mut units, &BTreeMap::new(), &std.points, true, None)?;
         let store = Store::new(&options.store)?;
         Ok(
             recipe_build::release_objects(units, &root, std, options, runtime, &store, false)?
@@ -1053,9 +1053,12 @@ impl CheckProduct {
             image.as_ref(),
             options,
             sources,
-            || match &source_rows {
-                Some(rows) => self.source_map(rows),
-                None => self.source_map(&rows()?),
+            || {
+                let map = match &source_rows {
+                    Some(rows) => self.source_map(rows),
+                    None => self.source_map(&rows()?),
+                };
+                Ok((std::sync::Arc::new(map?), None))
             },
             inputs.toolchain.image,
             inputs.recipe.clone(),
@@ -1672,7 +1675,10 @@ fn link_objects(
     image: Option<&Store>,
     options: &NativeOptions,
     sources_digest: ContentHash,
-    sources: impl FnOnce() -> io::Result<hirsel_core_ir::source::SourceMap>,
+    sources: impl FnOnce() -> io::Result<(
+        std::sync::Arc<hirsel_core_ir::source::SourceMap>,
+        Option<ContentHash>,
+    )>,
     toolchain: ContentHash,
     recipe: crate::tool_inputs::LinkRecipe,
     closed_image: bool,
@@ -1724,7 +1730,7 @@ fn link_objects(
     let (binary, linked) = if let Some(binary) = NativeImage::load(&store, link_key)? {
         (binary, false)
     } else {
-        let sources = sources()?;
+        let (sources, sources_key) = sources()?;
         let temp = store.scratch()?;
         let entry = temp.path().join("entry.o");
         // The entry's and the described instances' revisions are a function
@@ -1852,7 +1858,7 @@ fn link_objects(
             .chain(separate.iter().map(|o| (o.identity, o.check)))
             .collect();
         let (runtime_sources, spawns_units) =
-            crate::native_entry::runtime_sources(&sources, &inputs[1..], &keys)?;
+            crate::native_entry::runtime_sources(&sources, sources_key, &inputs[1..], &keys)?;
         let write_entry = |live_sites: Option<&BTreeSet<u64>>| -> Result<(), NativeStop> {
             let bytes = entry_plan
                 .emit(

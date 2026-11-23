@@ -18,19 +18,29 @@ fn allocatable<'data>(section: &impl object::ObjectSection<'data>) -> bool {
 /// Keep the runtime binders used by the actual link inputs and report whether
 /// those inputs call the unit spawn ABI. The separate DWARF object is already
 /// bound against the complete source map.
+/// With the key of `sources` (`recipe_build::bind_annexes`) a resident
+/// compiler remembers the result by that key and what the inputs reference.
 pub(crate) fn runtime_sources(
     sources: &SourceMap,
+    map: Option<hirsel_core_ids::ContentHash>,
     inputs: &[PathBuf],
     keys: &[(hirsel_core_ids::ContentHash, u64)],
-) -> std::io::Result<(SourceMap, bool)> {
+) -> std::io::Result<(std::sync::Arc<SourceMap>, bool)> {
     let scans = inputs
         .iter()
         .zip(keys)
         .map(|(input, key)| crate::resident::REFERENCED.get_or(Some(*key), || referenced(input)))
         .collect::<std::io::Result<Vec<_>>>()?;
+    let key = map.map(|map| (map, scans.iter().map(|scan| scan.digest).collect()));
+    crate::resident::RUNTIME_SOURCES.get_or(key, || Ok(filter(sources, &scans)))
+}
+
+/// The part of `sources` the inputs whose `scans` are given reference, and
+/// whether they spawn units.
+fn filter(sources: &SourceMap, scans: &[Referenced]) -> (std::sync::Arc<SourceMap>, bool) {
     let spawns_units = scans.iter().any(|scan| scan.spawns_units);
     if sources.items.is_empty() {
-        return Ok((sources.clone(), spawns_units));
+        return (std::sync::Arc::new(sources.clone()), spawns_units);
     }
     let names: HashSet<&[u8]> = scans
         .iter()
@@ -73,22 +83,24 @@ pub(crate) fn runtime_sources(
     for item in items.values_mut() {
         item.file = file_numbers[item.file as usize].expect("retained source file");
     }
-    Ok((
-        SourceMap {
+    (
+        std::sync::Arc::new(SourceMap {
             files,
             items,
             points: sources.points.clone(),
-        },
+        }),
         spawns_units,
-    ))
+    )
 }
 
 /// The site items an input object's allocated sections reference, and
-/// whether they call the unit spawn ABI: a function of the object's bytes.
+/// whether they call the unit spawn ABI: a function of the object's bytes;
+/// and the digest of both.
 #[derive(Clone)]
 pub(crate) struct Referenced {
     items: std::sync::Arc<[Vec<u8>]>,
     spawns_units: bool,
+    digest: hirsel_core_ids::ContentHash,
 }
 
 fn referenced(input: &PathBuf) -> std::io::Result<Referenced> {
@@ -116,9 +128,16 @@ fn referenced(input: &PathBuf) -> std::io::Result<Referenced> {
             }
         }
     }
+    let mut items: Vec<_> = items.into_iter().collect();
+    items.sort_unstable();
+    let digest = hirsel_core_ids::ContentHash::of_parts(
+        "hirsel.site-references.v1",
+        std::iter::once(&[u8::from(spawns_units)][..]).chain(items.iter().map(Vec::as_slice)),
+    );
     Ok(Referenced {
-        items: items.into_iter().collect(),
+        items: items.into(),
         spawns_units,
+        digest,
     })
 }
 

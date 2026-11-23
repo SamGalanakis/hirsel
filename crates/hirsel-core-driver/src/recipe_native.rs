@@ -442,14 +442,9 @@ fn memo_key(
 
 impl Memos {
     /// The bound module of the unit `identity` whose memo is `memo`, decoded
-    /// from its stored body and annex as its preparation made it, its items
-    /// bound in `bindings`.
-    fn module(
-        &self,
-        identity: &Identity,
-        memo: &Memo,
-        bindings: &mut BTreeMap<DefPath, ItemSource>,
-    ) -> Result<Module, NativeStop> {
+    /// from its stored body and annex as its preparation made it. Its items
+    /// are bound in the source map as its memo's (`bind_annexes`).
+    fn module(&self, identity: &Identity, memo: &Memo) -> Result<Module, NativeStop> {
         use std::io::Read;
         let read = |kind: ObjectKind, (hash, len): (ContentHash, u64)| {
             let mut bytes = Vec::new();
@@ -479,7 +474,7 @@ impl Memos {
         )
         .map_err(refused)?;
         let symbol = hirsel_core_ir::symbol(identity.digest());
-        bind_module(&mut module, &annex, bindings, Some(&symbol));
+        bind_module(&mut module, &annex, Some(&symbol));
         Ok(module)
     }
 
@@ -1334,13 +1329,12 @@ fn site_item(site: &Site) -> DefPath {
 }
 
 /// The anchor of `site` in a unit whose source items are `items`, adding its
-/// item on first sight. Keyed by the borrowed site, so each distinct site
-/// builds its DefPath once.
+/// item on first sight: the unit's own with a unit `symbol`, else the site's.
+/// Keyed by the borrowed site, so each distinct site builds its DefPath once.
 fn anchor<'a>(
     seen: &mut HashMap<(&'a str, u32, u32), ItemId>,
     added: &mut Vec<(ItemId, &'a Site)>,
     items: &mut Vec<DefPath>,
-    bindings: &mut BTreeMap<DefPath, ItemSource>,
     unit: Option<&str>,
     site: Option<&'a Site>,
 ) -> Option<hirsel_core_ir::Anchor> {
@@ -1349,13 +1343,10 @@ fn anchor<'a>(
         .entry((site.file.as_str(), site.line, site.column))
         .or_insert_with(|| {
             let index = ItemId(items.len() as u32);
-            let mut item = site_item(site);
-            if let Some(unit) = unit {
-                let binding = bindings[&item];
-                item = unit_item(unit, index);
-                bindings.insert(item.clone(), binding);
-            }
-            items.push(item);
+            items.push(match unit {
+                Some(unit) => unit_item(unit, index),
+                None => site_item(site),
+            });
             added.push((index, site));
             index
         });
@@ -1368,21 +1359,77 @@ fn anchor<'a>(
 
 /// Bind each unit's annex sites to source items, and the source map of every
 /// site the units, `memos` and `extra` (a separately lowered std's sites)
-/// name. Also each unit's binding as its memo keeps it ([`Memo`]), for each
-/// unit with a memo key. A memo's sites and items enter the map as its
-/// unit's binding gave them; its module is bound only if it is decoded
-/// ([`Publication::memo_module`]).
+/// name, with each relocated unit's and memo's own items bound as their
+/// sites. Also each relocated unit's binding as its memo keeps it ([`Memo`]).
+/// A memo's sites and items enter the map as its unit's binding gave them;
+/// its module is bound only if it is decoded ([`Publication::memo_module`]).
+/// With `remember` (the key of `extra`'s std, if any) a relocated map is
+/// keyed by what it is a function of, and a resident compiler remembers it.
 pub(super) fn bind_annexes(
     units: &mut BTreeMap<Identity, Unit>,
     memos: &Hits,
     extra: &BTreeMap<String, Vec<(u32, u32)>>,
     relocate: bool,
-) -> Result<(SourceMap, BTreeMap<Identity, Bound>), NativeStop> {
+    remember: Option<Option<ContentHash>>,
+) -> Result<Bindings, NativeStop> {
     if !relocate && !memos.is_empty() {
         return Err(NativeStop::Entry(
             "unit memos bind only relocated units".into(),
         ));
     }
+    let mut bound = BTreeMap::new();
+    for (identity, unit) in units.iter_mut() {
+        // Cached objects reference a unit's local site numbers. The final link
+        // binds those symbols to the current recipe's absolute positions.
+        let symbol = relocate.then(|| hirsel_core_ir::symbol(identity.digest()));
+        let added = bind_module(&mut unit.module, &unit.annex, symbol.as_deref());
+        if relocate {
+            bound.insert(identity.clone(), Bound::of(&unit.annex, added));
+        }
+    }
+    // A unit's sites and items are its binding's; a memo's are its stored
+    // body's and annex's.
+    let key = remember
+        .filter(|_| relocate)
+        .map(|std| {
+            let prepared: Vec<_> = bound
+                .iter()
+                .map(|(identity, bound)| (identity, &bound.points, &bound.anchored))
+                .collect();
+            let remembered: Vec<_> = memos
+                .iter()
+                .map(|(identity, (_, memo))| (identity, memo.body.0, memo.annex.0))
+                .collect();
+            key("hirsel.recipe-source-map.v1", &(std, prepared, remembered))
+        })
+        .transpose()?;
+    let sources = crate::resident::SOURCE_MAPS.get_or(key, || {
+        source_map(units, &bound, memos, extra).map(Arc::new)
+    })?;
+    Ok(Bindings {
+        sources,
+        key,
+        bound,
+    })
+}
+
+/// A program's bound source map, and its key when it is remembered
+/// ([`bind_annexes`]); and each relocated unit's binding.
+pub(super) struct Bindings {
+    pub(super) sources: Arc<SourceMap>,
+    pub(super) key: Option<ContentHash>,
+    pub(super) bound: BTreeMap<Identity, Bound>,
+}
+
+/// The source map of every site `units`, `memos` and `extra` name, with the
+/// items of each unit's binding in `bound` and of each memo bound as their
+/// sites.
+fn source_map(
+    units: &BTreeMap<Identity, Unit>,
+    bound: &BTreeMap<Identity, Bound>,
+    memos: &Hits,
+    extra: &BTreeMap<String, Vec<(u32, u32)>>,
+) -> Result<SourceMap, NativeStop> {
     let mut points = BTreeMap::<String, BTreeSet<(u32, u32)>>::new();
     for (file, at) in extra {
         points
@@ -1442,25 +1489,10 @@ pub(super) fn bind_annexes(
         sources.points.insert(path, points);
     }
     sources.items = items.into_iter().collect();
-    let mut bound = BTreeMap::new();
-    for (identity, unit) in units {
-        // Cached objects reference a unit's local site numbers. The final link
-        // binds those symbols to the current recipe's absolute positions.
-        let symbol = relocate.then(|| hirsel_core_ir::symbol(identity.digest()));
-        let added = bind_module(
-            &mut unit.module,
-            &unit.annex,
-            &mut sources.items,
-            symbol.as_deref(),
-        );
-        if unit.memo.is_some() {
-            bound.insert(identity.clone(), Bound::of(&unit.annex, added));
-        }
+    if bound.is_empty() && memos.is_empty() {
+        return Ok(sources);
     }
-    if memos.is_empty() {
-        return Ok((sources, bound));
-    }
-    // Bind memo coordinates by their file and ordinal. Looking up a
+    // Bind unit items by their site's file and ordinal. Looking up a
     // synthetic DefPath for every coordinate would allocate it again.
     let files: HashMap<_, _> = sources
         .files
@@ -1473,10 +1505,18 @@ pub(super) fn bind_annexes(
             )
         })
         .collect();
-    for (identity, (_, memo)) in memos {
+    let bindings = bound
+        .iter()
+        .map(|(identity, bound)| (identity, &bound.points, &bound.anchored))
+        .chain(
+            memos
+                .iter()
+                .map(|(identity, (_, memo))| (identity, &memo.points, &memo.anchored)),
+        );
+    for (identity, sites, anchored) in bindings {
         let symbol = hirsel_core_ir::symbol(identity.digest());
-        for &(index, point) in &memo.anchored {
-            let (file, line, column) = &memo.points[point as usize];
+        for &(index, point) in anchored {
+            let (file, line, column) = &sites[point as usize];
             let (file, points) = files[file.as_str()];
             let file_offset = points
                 .binary_search(&(*line, *column))
@@ -1490,7 +1530,7 @@ pub(super) fn bind_annexes(
             );
         }
     }
-    Ok((sources, bound))
+    Ok(sources)
 }
 
 /// Every site of `annex`, in body order.
@@ -1518,12 +1558,11 @@ fn unit_item(symbol: &str, index: ItemId) -> DefPath {
 }
 
 /// Anchor `module`'s sites to source items and apply its annex's hints; with
-/// a unit `symbol`, each site's item is the unit's own, bound in `bindings`
-/// as the site's. The items added, by index, with their sites.
+/// a unit `symbol`, each site's item is the unit's own. The items added, by
+/// index, with their sites.
 fn bind_module<'a>(
     module: &mut Module,
     annex: &'a Annex,
-    bindings: &mut BTreeMap<DefPath, ItemSource>,
     symbol: Option<&str>,
 ) -> Vec<(ItemId, &'a Site)> {
     let mut items = HashMap::new();
@@ -1537,7 +1576,6 @@ fn bind_module<'a>(
                 &mut items,
                 &mut added,
                 &mut module.items,
-                bindings,
                 symbol,
                 site.as_ref(),
             );
@@ -1547,7 +1585,6 @@ fn bind_module<'a>(
                 &mut items,
                 &mut added,
                 &mut module.items,
-                bindings,
                 symbol,
                 site.as_ref(),
             );
@@ -1705,7 +1742,7 @@ impl CheckProduct {
                 prepare_unit(instance.ir()?, instance.function, &positions),
             );
         }
-        bind_annexes(&mut units, &BTreeMap::new(), &BTreeMap::new(), true)?;
+        bind_annexes(&mut units, &BTreeMap::new(), &BTreeMap::new(), true, None)?;
         let target = hirsel_core_layout::Target::from_triple(&options.target)
             .filter(|_| options.backend.supports_target(&options.target))
             .ok_or_else(|| {
@@ -1836,11 +1873,16 @@ impl Publication {
             ),
         );
         let no_points = BTreeMap::new();
-        let (mut sources, mut bound) = bind_annexes(
+        let Bindings {
+            sources,
+            key: sources_key,
+            mut bound,
+        } = bind_annexes(
             &mut self.units,
             &self.memos,
             std.as_ref().map_or(&no_points, |std| &std.points),
             true,
+            Some(std.as_ref().map(|std| std.key)),
         )?;
         let root = &self.units[entry];
         let (abi, cleanup) = bound_entry_abi(&decl, &entry.definition, &root.module, FuncId(0))
@@ -1950,7 +1992,7 @@ impl Publication {
                         let (object_key, decoded) = if memo.object.0 == emitter {
                             (memo.object.1, None)
                         } else {
-                            let module = index.module(identity, memo, &mut sources.items)?;
+                            let module = index.module(identity, memo)?;
                             let key = unit_object_key(emitter, identity, &module, &memo.builtins)?;
                             (key, Some(module))
                         };
@@ -1962,9 +2004,7 @@ impl Publication {
                             identity,
                             || match decoded {
                                 Some(module) => Ok(Cow::Owned(module)),
-                                None => index
-                                    .module(identity, memo, &mut sources.items)
-                                    .map(Cow::Owned),
+                                None => index.module(identity, memo).map(Cow::Owned),
                             },
                         )?);
                         let memo = if memo.object.0 == emitter {
@@ -2022,7 +2062,7 @@ impl Publication {
             None,
             &options,
             sources_digest,
-            || Ok(sources),
+            || Ok((sources, sources_key)),
             tools.image,
             link,
             closed_image,

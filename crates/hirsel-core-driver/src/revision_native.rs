@@ -572,7 +572,7 @@ fn link_weak_adapter_order(
         None,
         options,
         crate::reach::sources_digest(product, &rows).unwrap(),
-        || product.source_map(&rows),
+        || Ok((std::sync::Arc::new(product.source_map(&rows)?), None)),
         inputs.toolchain.image,
         inputs.recipe.clone(),
         false,

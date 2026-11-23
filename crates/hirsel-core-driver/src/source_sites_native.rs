@@ -351,7 +351,7 @@ fn failure_sites_discarded_by_linker() {
         None,
         &options,
         ContentHash::default(),
-        || Ok(sources),
+        || Ok((std::sync::Arc::new(sources), None)),
         inputs.toolchain.image,
         inputs.recipe.clone(),
         false,

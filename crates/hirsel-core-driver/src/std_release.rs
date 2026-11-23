@@ -283,10 +283,14 @@ fn lower(
         return Ok((key, record, 0));
     }
     let reached: Vec<Identity> = units.keys().cloned().collect();
-    let points =
-        super::recipe_build::bind_annexes(&mut units, &BTreeMap::new(), &BTreeMap::new(), false)?
-            .0
-            .points;
+    let bindings = super::recipe_build::bind_annexes(
+        &mut units,
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        false,
+        None,
+    )?;
+    let points = std::sync::Arc::unwrap_or_clone(bindings.sources).points;
     let mut modules: Vec<_> = units
         .values()
         .map(|unit| Cow::Borrowed(&unit.module))

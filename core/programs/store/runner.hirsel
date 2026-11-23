@@ -3669,6 +3669,7 @@ type TriggerAction: send =
     Invoke(triggers.Attempt, Bytes, Bytes, Sender[Result[Outcome, TriggerCallError]])
     | Boundary(triggers.Attempt, Sender[Result[(), TriggerCallError]])
     | MarkHold(triggers.Attempt, u64, Bytes, Bytes, Sender[Result[(), TriggerCallError]])
+    | Snap(triggers.Attempt, Sender[Result[store.Snapshot, TriggerCallError]])
 
 pub opaque type TriggerInput: send { action: TriggerAction }
 
@@ -3692,6 +3693,15 @@ pub fn trigger_call(ctx: TriggerContext, take key: Bytes, take arg: Bytes) -> Re
 pub fn trigger_boundary(ctx: TriggerContext) -> Result[(), TriggerCallError] waits {
     trigger_request(ctx, (), fn(a: triggers.Attempt, take p: (), take to: Sender[Result[(), TriggerCallError]]) -> TriggerAction {
         Boundary(a, take to)
+    })
+}
+
+// A granted run reads the store through a read-only snapshot taken by the
+// head after the release gate and the attempt fence. A fenced-out attempt
+// gets StaleAttempt and never sees a snapshot.
+pub fn trigger_snapshot(ctx: TriggerContext) -> Result[store.Snapshot, TriggerCallError] waits {
+    trigger_request(ctx, (), fn(a: triggers.Attempt, take p: (), take to: Sender[Result[store.Snapshot, TriggerCallError]]) -> TriggerAction {
+        Snap(a, take to)
     })
 }
 
@@ -4162,6 +4172,16 @@ fn answer_trigger[G: send, H: send](mut hd: Head[G, H], drive: Box[TriggerDrive[
             }
             let _ = channel.send(answer, take reply)
         },
+        Snap(a, take answer) => {
+            let reply: Result[store.Snapshot, TriggerCallError] = if stopped { Error(Closed) } else {
+                let seen = store.snapshot(hd.db)
+                match checked_boundary(triggers.boundary(seen, drive.tables, a)) {
+                    Ok(()) => Ok(seen),
+                    Error(take problem) => Error(take problem),
+                }
+            }
+            let _ = channel.send(answer, take reply)
+        },
     }
     Ok(())
 }
@@ -4487,6 +4507,76 @@ pub fn journal_law_trigger_granted(d: Dir, c: Clock, r: Random, tasks: Tasks) ->
 @test
 fn journal_test_trigger_granted(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
     if journal_law_trigger_granted(d, c, r, tasks) { Ok(()) } else { Error(()) }
+}
+
+fn trigger_law_snap[G: send, H: send](mut head: Head[G, H], a: triggers.Attempt) -> Result[store.Snapshot, TriggerCallError] waits {
+    let (to, from): (Sender[Result[store.Snapshot, TriggerCallError]], Receiver[Result[store.Snapshot, TriggerCallError]]) = channel.new(1u64)
+    let msg = box.new(TriggerInput(action: Snap(a, take to)))
+    result.unwrap(trigger_message(mut head, take msg, false))
+    result.unwrap(channel.receive(from))
+}
+
+// RUNNER-SPEC L47. The arming transaction writes row 9 = 4242. Attempt 1 is
+// cut at its first boundary; after reopen, attempt 2 waits at its boundary.
+// The oracle is the row the test wrote and the attempt numbers it observed:
+// attempt 1's Snap is refused, attempt 2's snapshot holds row 9.
+pub fn journal_law_trigger_snapshot(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    let dir = triggers.law_directory(d)
+    let mut initial = result.unwrap(store.open(tasks, dir, c, r, triggers.law_options()))
+    result.unwrap(store.run_migration(mut initial, tasks, code.describe(trigger_law_migrate)))
+    let t = result.unwrap(store.with_schema(initial, code.describe(triggers.tables)))
+    let h = result.unwrap(store.with_schema(initial, code.describe(trigger_law_handles)))
+    let target: triggers.Entry[u64] = result.unwrap(triggers.granted(code.describe(trigger_law_granted_body)))
+    let mut allowed = triggers.empty_entries()
+    result.unwrap(triggers.allow(mut allowed, target))
+    let armed = store.run(mut initial, None, scoped fn(mut tx: store.Tx) -> Result[triggers.Id, triggers.Error] {
+        result.unwrap(store.put(mut tx, h.effects, 9u64, 4242u64))
+        triggers.write(mut tx, t, allowed, target, 7u64, AfterCommit)
+    })
+    let committed = result.unwrap(trigger_commit(take armed))
+    result.unwrap(store.durable(mut initial, committed.ticket))
+    let (first_to, first_inbox): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(4u64)
+    let first_allowed: triggers.Entries = clone(allowed)
+    let (take first_head, take first_published) = trigger_law_initial(take initial, c, tasks, take first_to, take first_allowed)
+    let mut running_head = take first_head
+    if !result.unwrap(advance_triggers(mut running_head)) { return false }
+    let pending = result.unwrap(channel.receive(first_inbox))
+    let TriggerMessage(first_request) = view pending else { return false }
+    let Boundary(old, _) = view first_request.action else { return false }
+    if triggers.number(old) != 1u64 { return false }
+    let Head(db: take before, trigger_drive: take active, ..) = take running_head
+    let _ = stop_triggers(option.unwrap(take active))
+    result.unwrap(store.close(take before))
+
+    let reopened = result.unwrap(store.open(tasks, dir, c, r, triggers.law_options()))
+    let (to, inbox): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(4u64)
+    let (take built, take published) = trigger_law_initial(take reopened, c, tasks, take to, take allowed)
+    let mut head = take built
+    if !result.unwrap(advance_triggers(mut head)) { return false }
+    let boundary = result.unwrap(channel.receive(inbox))
+    let TriggerMessage(take check) = take boundary else { return false }
+    let live = match view check.action { Boundary(a, _) => a, _ => return false }
+    if triggers.number(live) != 2u64 { return false }
+    match trigger_law_snap(mut head, old) { Error(StaleAttempt) => (), _ => return false }
+    let Ok(seen) = trigger_law_snap(mut head, live) else { return false }
+    if result.unwrap(store.get(seen, store.shape(head.h.effects), 9u64)) != Some(4242u64) { return false }
+    result.unwrap(trigger_message(mut head, take check, false))
+    let inbound = result.unwrap(channel.receive(inbox))
+    let TriggerMessage(take request) = take inbound else { return false }
+    result.unwrap(trigger_message(mut head, take request, false))
+    let scope_end = result.unwrap(channel.receive(inbox))
+    let TriggerDone(a, take answer) = take scope_end else { return false }
+    if triggers.number(a) != 2u64 { return false }
+    result.unwrap(trigger_done(mut head, a, take answer, false))
+    if trigger_law_value(head) != Some(7u64) { return false }
+    let Head(db: take kept, ..) = take head
+    result.unwrap(store.close(take kept))
+    true
+}
+
+@test
+fn journal_test_trigger_snapshot(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if journal_law_trigger_snapshot(d, c, r, tasks) { Ok(()) } else { Error(()) }
 }
 
 fn trigger_scan_law_unchanged(mut tx: store.Tx, h: TriggerLawTables, author: Caller, take value: u64) -> Result[u64, u64] { Ok(value) }

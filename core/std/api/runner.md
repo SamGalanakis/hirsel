@@ -382,7 +382,9 @@ snapshot or `triggers.fetch_outcome` in a transaction.
 
 A grant callback receives the attempt’s `TriggerContext`. The run uses `trigger_call` to
 invoke a fenced transaction and `trigger_boundary` to check its attempt and
-any committed cancel request before an outside step. `trigger_hold` commits a
+any committed cancel request before an outside step. `trigger_snapshot` returns a
+read-only store snapshot for the current attempt, so the run can read rows off
+the write lock; a stale or cancelled attempt gets an error instead. `trigger_hold` commits a
 request fingerprint hold. An operator or activation entry uses
 `triggers.request_cancel` or `triggers.release` in a transaction. Passing a
 revision to release changes the stamp and clears the hold together. The next

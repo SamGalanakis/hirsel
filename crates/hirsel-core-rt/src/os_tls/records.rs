@@ -28,12 +28,27 @@ thread_local! {
 
 struct TrafficKey {
     key: LessSafeKey,
+    /// AES-GCM that seals straight from the caller's bytes into the slot.
+    #[cfg(target_arch = "x86_64")]
+    out_of_place: Option<super::gcm::SealKey>,
     iv: Iv,
     seq: u64,
 }
 
 impl TrafficKey {
-    fn new((seq, secret): (u64, ConnectionTrafficSecrets)) -> Result<Self, Outcome> {
+    fn new(secrets: (u64, ConnectionTrafficSecrets)) -> Result<Self, Outcome> {
+        Self::with(secrets, false)
+    }
+
+    /// A send key, which seals AES-GCM out of place where the CPU allows.
+    fn sending(secrets: (u64, ConnectionTrafficSecrets)) -> Result<Self, Outcome> {
+        Self::with(secrets, true)
+    }
+
+    fn with(
+        (seq, secret): (u64, ConnectionTrafficSecrets),
+        sending: bool,
+    ) -> Result<Self, Outcome> {
         let (algorithm, key, iv) = match secret {
             ConnectionTrafficSecrets::Aes128Gcm { key, iv } => (&aead::AES_128_GCM, key, iv),
             ConnectionTrafficSecrets::Aes256Gcm { key, iv } => (&aead::AES_256_GCM, key, iv),
@@ -42,10 +57,22 @@ impl TrafficKey {
             }
             _ => return Err(tls_failure(4, 0)),
         };
+        #[cfg(target_arch = "x86_64")]
+        let out_of_place = (sending && algorithm != &aead::CHACHA20_POLY1305)
+            .then(|| super::gcm::SealKey::new(key.as_ref()))
+            .flatten();
+        #[cfg(not(target_arch = "x86_64"))]
+        let _ = sending;
         let key = LessSafeKey::new(
             UnboundKey::new(algorithm, key.as_ref()).map_err(|_| tls_failure(4, 0))?,
         );
-        Ok(Self { key, iv, seq })
+        Ok(Self {
+            key,
+            #[cfg(target_arch = "x86_64")]
+            out_of_place,
+            iv,
+            seq,
+        })
     }
 
     fn nonce(&mut self) -> aead::Nonce {
@@ -61,10 +88,16 @@ impl TrafficKey {
         let (header, body) = slot.bytes[slot.end..end].split_at_mut(HEADER);
         let [hi, lo] = (payload as u16).to_be_bytes();
         header.copy_from_slice(&[APPLICATION, 3, 3, hi, lo]);
+        let nonce = self.nonce();
+        #[cfg(target_arch = "x86_64")]
+        if let Some(key) = &self.out_of_place {
+            key.seal(*nonce.as_ref(), header, input, kind, body);
+            slot.end = end;
+            return Ok(());
+        }
         let (plain, tag) = body.split_at_mut(input.len() + 1);
         plain[..input.len()].copy_from_slice(input);
         plain[input.len()] = kind;
-        let nonce = self.nonce();
         let sealed = self
             .key
             .seal_in_place_separate_tag(nonce, Aad::from(header), plain)
@@ -112,7 +145,7 @@ impl Records {
                 kernel,
                 fragment: Vec::new(),
             },
-            tx_key: TrafficKey::new(secrets.tx)?,
+            tx_key: TrafficKey::sending(secrets.tx)?,
             rx_key: TrafficKey::new(secrets.rx)?,
             tx_limit,
             rx_limit: limit,
@@ -130,7 +163,7 @@ impl Records {
     fn update_tx(&mut self) -> Result<(), Outcome> {
         self.tx_key
             .seal(&mut self.tx, HANDSHAKE, &[KEY_UPDATE, 0, 0, 1, 0])?;
-        self.tx_key = TrafficKey::new(
+        self.tx_key = TrafficKey::sending(
             self.handshake
                 .kernel
                 .update_tx_secret()

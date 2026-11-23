@@ -1,4 +1,5 @@
 //! The OS provider's TLS sessions. Socket reads and writes never block.
+mod gcm;
 mod records;
 mod rustls_stream;
 

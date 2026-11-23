@@ -237,7 +237,11 @@ impl Emitter {
         let unbound = |f: &Option<FuncRef>| f.is_some_and(|f| f.0 == u32::MAX);
         let mut types = Vec::with_capacity(self.module.types.len() - m.rows);
         for s in &self.module.types[m.rows..] {
-            if s.finalizer.is_some() || unbound(&s.clone) || unbound(&s.codec) {
+            if s.finalizer.is_some()
+                || unbound(&s.clone)
+                || unbound(&s.codec)
+                || unbound(&s.key_codec)
+            {
                 return None;
             }
             if !s.numbered() {
@@ -246,7 +250,10 @@ impl Emitter {
             }
             let mut s = Shape::clone(s);
             s.map_refs(&mut |r| TypeRef(below(r.0, rows)));
-            for f in [&mut s.clone, &mut s.codec].into_iter().flatten() {
+            for f in [&mut s.clone, &mut s.codec, &mut s.key_codec]
+                .into_iter()
+                .flatten()
+            {
                 f.0 = below(f.0, functions);
             }
             types.push(Row::new(s));
@@ -443,7 +450,12 @@ impl Emitter {
             }
             let mut s = Shape::clone(&c.types[i]);
             s.map_refs(&mut |r| at[r.index()]);
-            for hook in [&mut s.finalizer, &mut s.clone, &mut s.codec] {
+            for hook in [
+                &mut s.finalizer,
+                &mut s.clone,
+                &mut s.codec,
+                &mut s.key_codec,
+            ] {
                 if let Some(f) = hook {
                     *f = FuncRef(func_at[f.0 as usize].0);
                 }
@@ -459,6 +471,7 @@ impl Emitter {
             hook(s.finalizer) == own.finalizer
                 && hook(s.clone) == own.clone
                 && hook(s.codec) == own.codec
+                && hook(s.key_codec) == own.key_codec
         });
         let held_functions_agree = (0..c.functions.len())
             .filter(|&i| func_at[i].0 < functions)
@@ -559,9 +572,14 @@ impl Emitter {
             }
             let mut s = Shape::clone(&c.types[i]);
             s.map_refs(&mut |r| TypeRef(r.0 + rows));
-            for f in [&mut s.finalizer, &mut s.clone, &mut s.codec]
-                .into_iter()
-                .flatten()
+            for f in [
+                &mut s.finalizer,
+                &mut s.clone,
+                &mut s.codec,
+                &mut s.key_codec,
+            ]
+            .into_iter()
+            .flatten()
             {
                 f.0 += functions;
             }
@@ -645,10 +663,12 @@ impl Closure {
             || e.module.functions.iter().any(|f| f.body.is_some());
         let unbound = |f: &Option<FuncRef>| f.is_some_and(|f| f.0 == u32::MAX);
         if reached_body_state
-            || e.module
-                .types
-                .iter()
-                .any(|s| s.finalizer.is_some() || unbound(&s.clone) || unbound(&s.codec))
+            || e.module.types.iter().any(|s| {
+                s.finalizer.is_some()
+                    || unbound(&s.clone)
+                    || unbound(&s.codec)
+                    || unbound(&s.key_codec)
+            })
         {
             return None;
         }

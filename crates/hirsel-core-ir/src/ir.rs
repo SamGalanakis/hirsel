@@ -2270,7 +2270,7 @@ pub struct ClosureHook {
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct ClosureRow {
     pub shape: Shape,
-    pub hooks: [Option<ClosureHook>; 3],
+    pub hooks: [Option<ClosureHook>; 4],
 }
 
 /// The rows a root row reaches, independent of any module's numbering: positions are
@@ -2430,11 +2430,16 @@ impl Module {
             // A codec maker is selected by the checking context. It is type
             // metadata and contributes no layout or calling-convention facts.
             let codec = shape.codec.take();
+            let key_codec = shape.key_codec.take();
             let hooks = [
                 hook(shape.finalizer.take())?,
                 hook(shape.clone.take())?,
                 match kind {
                     ClosureKind::Full => hook(codec)?,
+                    ClosureKind::Abi => None,
+                },
+                match kind {
+                    ClosureKind::Full => hook(key_codec)?,
                     ClosureKind::Abi => None,
                 },
             ];

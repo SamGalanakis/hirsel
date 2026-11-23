@@ -1291,6 +1291,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     return;
                 }
             }
+            if ordered_codec::is_key_of(&p.fns[f].path)
+                && !ordered_codec::admitted(&p.decls, &mut self.t, t)
+            {
+                self.refuse("LANG-12", use_site, "the type has no ordered key codec");
+                return;
+            }
             let g = &p.fns[f].generics[i];
             let missing =
                 crate::decls::missing_bounds(&p.decls, &self.t, t, &self.params, g.bounds);
@@ -1608,6 +1614,26 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return self.frame_string_copy(vals[0]?, len, result, n);
         }
         let codec = is_codec_of(&g.path);
+        let ordered = ordered_codec::is_key_of(&g.path);
+        if ordered && !has_param(&self.t, types[0]) {
+            let ty = types[0];
+            let Some(row) = self.e.type_row(self.p, &mut self.t, ty) else {
+                self.gap(n, "ordered key type layout is not built");
+                return None;
+            };
+            let Ok((signature, abi)) = self.e.signature_inst(self.p, &mut self.t, f, types) else {
+                self.gap(n, "ordered key codec layout is not built");
+                return None;
+            };
+            let signature = self.e.sig_abi(signature, abi);
+            return match ordered_codec::maker(&mut self.e.module, &g.path, row, signature) {
+                Ok(maker) => self.call_maker(maker, result, n),
+                Err(_) => {
+                    self.refuse("LANG-12", n, "the type has no ordered key codec");
+                    None
+                }
+            };
+        }
         if codec && let Some(value) = self.codec_of(&g.path, types, vals, result, n) {
             return value;
         }
@@ -1627,14 +1653,18 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if !self.live() {
             return None;
         }
-        if codec {
+        if codec || ordered {
             // `of` at a type parameter P: the instance's P chooses the maker (9.1).
             let Some(row) = self.e.type_row(self.p, &mut self.t, types[0]) else {
                 self.gap(n, "codec type layout is not built");
                 return None;
             };
             if let Some(call) = self.e.generic_calls.get_mut(&func) {
-                call.operation = Some(CallOperation::CodecOf(row));
+                call.operation = Some(if ordered {
+                    CallOperation::KeyCodecOf(row)
+                } else {
+                    CallOperation::CodecOf(row)
+                });
             }
         }
         if !g.generics.is_empty() && g.body.is_none() && g.path.package_is("core", "1") {

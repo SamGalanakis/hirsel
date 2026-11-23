@@ -437,6 +437,8 @@ pub struct Shape {
     /// `std.codec.of` calls at it. Unlike the finalizer it is no dependency of a unit
     /// that only holds the row; only a call reaches it.
     pub codec: Option<FuncRef>,
+    /// The ordered key maker that `std.codec.key_of` selects for this row.
+    pub key_codec: Option<FuncRef>,
     /// `grant bytes n` (MEM-27).
     pub grant: u64,
     /// The row has the `send` bound (CONC-2): a value of it may arrive from
@@ -464,6 +466,7 @@ impl Shape {
         self.finalizer.is_some()
             || self.clone.is_some()
             || self.codec.is_some()
+            || self.key_codec.is_some()
             || self.held.as_ref().is_some_and(FieldTy::names_row)
             || match &self.body {
                 Body::Record(fields) => fields.iter().any(|x| x.ty.names_row()),

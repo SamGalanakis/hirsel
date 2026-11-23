@@ -352,6 +352,7 @@ fn option(f: &mut Code<'_, '_>, dest: Value, bits: Value) -> Result<()> {
         finalizer: None,
         clone: None,
         codec: None,
+        key_codec: None,
         grant: 0,
         send: true,
         held: None,

@@ -253,6 +253,9 @@ fn shape(s: &Shape) -> String {
     if let Some(f) = s.codec {
         out += &format!(" codec f{}", f.0);
     }
+    if let Some(f) = s.key_codec {
+        out += &format!(" key_codec f{}", f.0);
+    }
     if s.grant != 0 {
         out += &format!(" grant {}", s.grant);
     }
@@ -1240,6 +1243,11 @@ impl<'a> Line<'a> {
         } else {
             None
         };
+        let key_codec = if self.eat("key_codec") {
+            Some(FuncRef(self.id('f')?))
+        } else {
+            None
+        };
         let grant = if self.eat("grant") { self.num()? } else { 0 };
         let send = self.eat("send");
         let held = if self.eat("held") {
@@ -1268,6 +1276,7 @@ impl<'a> Line<'a> {
             finalizer,
             clone,
             codec,
+            key_codec,
             grant,
             send,
             held,

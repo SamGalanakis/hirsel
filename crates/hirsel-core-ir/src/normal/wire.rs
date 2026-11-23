@@ -658,9 +658,10 @@ pub(super) fn encode_closure(rows: &[ClosureRow], out: &mut Write<'_, '_, '_>) {
     out.count(rows.len());
     for row in rows {
         row.shape.write(out);
-        for hook in &row.hooks {
-            hook.write(out);
-        }
+        let [finalizer, clone, codec, key_codec] = &row.hooks;
+        finalizer.write(out);
+        clone.write(out);
+        write_codecs(codec, key_codec, out);
     }
 }
 
@@ -751,6 +752,16 @@ impl Wire for CompactRoot {
     }
 }
 
+// The two bits name the optional codec makers. Shapes with only a value
+// codec keep the encoding of its Option.
+fn write_codecs<T: Wire>(codec: &Option<T>, key: &Option<T>, out: &mut Write<'_, '_, '_>) {
+    let flags = u8::from(codec.is_some()) | (u8::from(key.is_some()) << 1);
+    flags.write(out);
+    for maker in codec.iter().chain(key) {
+        maker.write(out);
+    }
+}
+
 impl Wire for Shape {
     fn write(&self, out: &mut Write<'_, '_, '_>) {
         let Self {
@@ -761,6 +772,7 @@ impl Wire for Shape {
             finalizer,
             clone,
             codec,
+            key_codec,
             grant,
             send,
             held,
@@ -772,14 +784,14 @@ impl Wire for Shape {
         if out.closure {
             finalizer.write(out);
             clone.write(out);
-            codec.write(out);
+            write_codecs(codec, key_codec, out);
             grant.write(out);
             send.write(out);
             held.write(out);
             return;
         }
         held.write(out);
-        let hooks = [finalizer, clone, codec];
+        let hooks = [finalizer, clone, codec, key_codec];
         let prior = std::mem::replace(&mut out.module.metadata, true);
         let module = out.module.module;
         for hook in hooks.into_iter().filter_map(|f| *f) {
@@ -806,21 +818,35 @@ impl Wire for Shape {
         }
         finalizer.write(out);
         clone.write(out);
-        codec.write(out);
+        write_codecs(codec, key_codec, out);
         grant.write(out);
         send.write(out);
     }
 
     fn read(input: &mut Read<'_, '_>) -> DecodeResult<Self> {
+        let name = Wire::read(input)?;
+        let repr = Wire::read(input)?;
+        let carried = Wire::read(input)?;
+        let body = Wire::read(input)?;
+        let held = Wire::read(input)?;
+        let finalizer = Wire::read(input)?;
+        let clone = Wire::read(input)?;
+        let flags = u8::read(input)?;
+        if flags > 3 {
+            return Err(invalid("invalid codec maker flags"));
+        }
+        let codec = (flags & 1 != 0).then(|| Wire::read(input)).transpose()?;
+        let key_codec = (flags & 2 != 0).then(|| Wire::read(input)).transpose()?;
         Ok(Self {
-            name: Wire::read(input)?,
-            repr: Wire::read(input)?,
-            carried: Wire::read(input)?,
-            body: Wire::read(input)?,
-            held: Wire::read(input)?,
-            finalizer: Wire::read(input)?,
-            clone: Wire::read(input)?,
-            codec: Wire::read(input)?,
+            name,
+            repr,
+            carried,
+            body,
+            held,
+            finalizer,
+            clone,
+            codec,
+            key_codec,
             grant: Wire::read(input)?,
             send: Wire::read(input)?,
         })

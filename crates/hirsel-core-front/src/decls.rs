@@ -1056,6 +1056,7 @@ impl Program<'_> {
                                     "a field default requires a codec declaration",
                                 ));
                             } else {
+                                self.decls[d.index()].codec_mut().defaulted_fields = true;
                                 self.check_field_default(at, default, ty);
                             }
                         }

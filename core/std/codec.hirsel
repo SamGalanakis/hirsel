@@ -2528,11 +2528,58 @@ pub fn read_at[T](r: Reader[T], b: Bytes, start: u64) -> Result[T, DecodeError] 
 // Unsigned integers big-endian at their width; signed ones the same with the sign bit
 // flipped; bool one byte, 0 or 1; String and Bytes their bytes with each 0x00 written
 // 0x00 0xff, then 0x00 0x00. A key schema is a schema whose version byte is 4.
+/// Reverses the order of its value. Value codecs write the wrapped value.
+pub type Desc[T]: codec + key + ordered via T(to: desc_value, from: make_desc) {
+    value: T
+}
+
+fn desc_value[T](x: Desc[T]) -> View[T] in x {
+    view x.value
+}
+
+fn make_desc[T](take x: T) -> Result[Desc[T], DecodeError] {
+    Ok(Desc(value: take x))
+}
+
 /// The key codec of T. Generated key codecs and the built-in ones below are the makers.
 pub opaque type Key[T] {
     encoder: fn(T, mut Bytes) -> (),
     decoder: fn(Bytes, mut u64) -> Result[T, DecodeError],
     describer: fn(mut Schema) -> Result[(), EncodeError]
+}
+
+/// The ordered key codec of T. The checker selects the maker per instance.
+pub fn key_of[T]() -> Key[T] {
+    key_of()
+}
+
+fn key_unit() -> Key[()] {
+    key_make(put_unit, take_unit, fn(mut s: Schema) -> Result[(), EncodeError] {
+        schema_unit(mut s)
+        Ok(())
+    })
+}
+
+fn put_key_desc[T](x: Desc[T], key: Key[T], mut out: Bytes) {
+    let mut raw: Bytes = list.new()
+    put_key_with(x.value, key, mut raw)
+    for byte in raw {
+        list.push(mut out, byte ^ 0xff)
+    }
+}
+
+fn take_key_desc[T](b: Bytes, mut at: u64, key: Key[T]) -> Result[Desc[T], DecodeError] {
+    let mut raw: Bytes = clone(b)
+    for i in at .. list.len(raw) {
+        let byte = raw[i] ^ 0xff
+        let _ = list.set(mut raw, i, byte)
+    }
+    let value = take_key_with(raw, mut at, key)?
+    Ok(Desc(value: take value))
+}
+
+fn schema_desc(mut s: Schema) {
+    opcode(mut s, 21)
 }
 
 /// A key codec from its parts. Ex: `codec.key_make(id_put, id_take, id_schema)`

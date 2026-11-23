@@ -254,7 +254,12 @@ pub fn join(units: &[Unit<'_>], entry: &Identity) -> Result<(Module, FuncId), St
             }
             let mut shape = Shape::clone(&unit.module.types[i]);
             shape.map_refs(&mut |r| TypeRef(map.types[r.index()].0));
-            for hook in [&mut shape.finalizer, &mut shape.clone, &mut shape.codec] {
+            for hook in [
+                &mut shape.finalizer,
+                &mut shape.clone,
+                &mut shape.codec,
+                &mut shape.key_codec,
+            ] {
                 *hook = hook.map(|f| FuncRef(map.functions[f.0 as usize].0));
             }
             out.types[map.types[i].index()] = Row::new(shape);

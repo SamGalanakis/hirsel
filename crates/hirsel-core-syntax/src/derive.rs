@@ -1488,6 +1488,13 @@ impl<'a> Gen<'a> {
     /// definition is already written), every entry in declared order with tombstones, `close`.
     fn schema_body(&mut self) -> String {
         let (c, decl) = (self.c, self.decl);
+        // The standard descending key wrapper is transparent in value schemas.
+        if self.path == "std.codec.Desc"
+            && let Some(v) = &decl.via
+        {
+            let representation = self.of(v.wire);
+            return format!("    {c}schema_of(mut s$, {representation})\n");
+        }
         let mut s = format!(
             "    {c}define(mut s$, \"{}\", {})?\n",
             self.path,

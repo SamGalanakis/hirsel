@@ -41,17 +41,18 @@ impl<'a> Reader<'a> {
             Err("Malformed: trailing bytes".into())
         }
     }
-    fn ty(&mut self) -> Result<Value, Error> {
+    fn ty(&mut self, key: bool) -> Result<Value, Error> {
         let op = self.byte()?;
         Ok(match op {
             0..=13 | 20 => json!([op]),
-            14 | 16 => json!([op, self.ty()?]),
-            15 | 17 => json!([op, self.ty()?, self.ty()?]),
+            14 | 16 => json!([op, self.ty(key)?]),
+            21 if key => json!([op, self.ty(key)?]),
+            15 | 17 => json!([op, self.ty(key)?, self.ty(key)?]),
             18 => {
                 let n = self.count()?;
                 let mut types = Vec::new();
                 for _ in 0..n {
-                    types.push(self.ty()?);
+                    types.push(self.ty(key)?);
                 }
                 json!([op, types])
             }
@@ -87,7 +88,7 @@ impl Schema {
             let name = r.name()?;
             let args = r.count()?;
             for _ in 0..args {
-                let _ = r.ty()?;
+                let _ = r.ty(key)?;
             }
             let kind = r.byte()?;
             let body = match kind {
@@ -95,8 +96,9 @@ impl Schema {
                     let n = r.count()?;
                     let mut fields = Vec::new();
                     for _ in 0..n {
-                        fields
-                            .push(json!({"removed":r.removed()?,"name":r.name()?,"type":r.ty()?}));
+                        fields.push(
+                            json!({"removed":r.removed()?,"name":r.name()?,"type":r.ty(key)?}),
+                        );
                     }
                     json!(fields)
                 }
@@ -109,18 +111,18 @@ impl Schema {
                         let n = r.count()?;
                         let mut fields = Vec::new();
                         for _ in 0..n {
-                            fields.push(r.ty()?);
+                            fields.push(r.ty(key)?);
                         }
                         variants.push(json!({"removed":removed,"name":name,"fields":fields}));
                     }
                     json!(variants)
                 }
-                2 => r.ty()?,
+                2 => r.ty(key)?,
                 _ => return Err("Malformed: schema definition kind".into()),
             };
             definitions.push(json!({"name":name,"kind":kind,"body":body}));
         }
-        let root = r.ty()?;
+        let root = r.ty(key)?;
         r.done()?;
         Ok(Self {
             root,
@@ -219,6 +221,7 @@ impl Schema {
             ),
             19 => format!("{prefix}Def{}", t[1]),
             20 => "never".into(),
+            21 => format!("{{ value: {} }}", Self::typescript(&t[1], prefix)),
             _ => unreachable!(),
         }
     }

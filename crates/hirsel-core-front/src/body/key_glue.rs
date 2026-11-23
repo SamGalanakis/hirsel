@@ -806,6 +806,11 @@ impl Derive<'_> {
         if matches!(self.recipes[ty.index()].layout, Layout::Compact(_)) {
             return self.order_located(c, &FieldTy::Inline(TypeRef(ty.0)), a, b, different);
         }
+        let (a, b) = if super::ordered_codec::is_desc_row(&self.module.types[ty.index()].name) {
+            (b, a)
+        } else {
+            (a, b)
+        };
         match self.module.types[ty.index()].body.clone() {
             ShapeBody::Record(fs) => {
                 for (i, f) in fs.iter().enumerate() {
@@ -934,9 +939,9 @@ impl Derive<'_> {
         &mut self,
         c: &mut Code,
         field: &FieldTy,
-        blobs: [ValueId; 2],
+        mut blobs: [ValueId; 2],
         mut ats: [ValueId; 2],
-        widths: [ValueId; 2],
+        mut widths: [ValueId; 2],
         different: BlockId,
     ) -> Result<[ValueId; 2], &'static str> {
         match field {
@@ -1006,8 +1011,18 @@ impl Derive<'_> {
                 };
                 match self.module.types[ty.index()].body.clone() {
                     ShapeBody::Record(fields) => {
+                        let inverted =
+                            super::ordered_codec::is_desc_row(&self.module.types[ty.index()].name);
+                        if inverted {
+                            blobs.swap(0, 1);
+                            ats.swap(0, 1);
+                            widths.swap(0, 1);
+                        }
                         for f in &fields {
                             ats = self.order_packed(c, &f.ty, blobs, ats, widths, different)?;
+                        }
+                        if inverted {
+                            ats.swap(0, 1);
                         }
                     }
                     ShapeBody::Variant(cases) => {
@@ -1337,6 +1352,7 @@ impl Derive<'_> {
                 finalizer: None,
                 clone: None,
                 codec: None,
+                key_codec: None,
                 grant: 0,
                 send: false,
                 held: None,

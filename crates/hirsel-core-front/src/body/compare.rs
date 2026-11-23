@@ -279,7 +279,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         eq_only: bool,
         n: NodeId,
     ) {
-        match self.p.decls[d.index()].body.clone() {
+        let decl = &self.p.decls[d.index()];
+        let (a, b) = if super::ordered_codec::is_desc(&decl.path) {
+            (b, a)
+        } else {
+            (a, b)
+        };
+        match decl.body.clone() {
             DeclBody::Record(fs) => {
                 for (i, f) in fs.iter().enumerate() {
                     let x = subst(&mut self.t, f.ty, args);

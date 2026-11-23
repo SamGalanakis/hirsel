@@ -54,7 +54,9 @@
     "lines": 4741
   },
   "core/std/codec.hirsel": {
-    "lines": 2831
+    "lines": 2878,
+    "raise_revision": 1,
+    "reason": "w3a-b-codec-changes-2008"
   },
   "core/std/float.hirsel": {
     "lines": 3331
@@ -96,7 +98,9 @@
     "lines": 1044
   },
   "core/std/tests/codec.hirsel": {
-    "lines": 2611
+    "lines": 2680,
+    "raise_revision": 1,
+    "reason": "w3a-b-codec-changes-2008"
   },
   "core/std/tests/http_connection.hirsel": {
     "lines": 1728
@@ -210,9 +214,9 @@
     "lines": 2523
   },
   "crates/hirsel-core-front/src/body/calls.rs": {
-    "lines": 2589,
-    "raise_revision": 1,
-    "reason": "conc-shared-payloads-1993"
+    "lines": 2619,
+    "raise_revision": 2,
+    "reason": "w3a-b-codec-changes-2008"
   },
   "crates/hirsel-core-front/src/body/closures.rs": {
     "lines": 2983
@@ -226,7 +230,9 @@
     "reason": "w3a-b-sized-2009"
   },
   "crates/hirsel-core-front/src/body/key_glue.rs": {
-    "lines": 2851
+    "lines": 2866,
+    "raise_revision": 1,
+    "reason": "w3a-b-codec-changes-2008"
   },
   "crates/hirsel-core-front/src/body/lists.rs": {
     "lines": 2354
@@ -235,7 +241,9 @@
     "lines": 1325
   },
   "crates/hirsel-core-front/src/body/mod.rs": {
-    "lines": 3178
+    "lines": 3185,
+    "raise_revision": 1,
+    "reason": "w3a-b-codec-changes-2008"
   },
   "crates/hirsel-core-front/src/body/patterns.rs": {
     "lines": 2578
@@ -246,25 +254,27 @@
     "reason": "conc-shared-payloads-1993"
   },
   "crates/hirsel-core-front/src/body/templates.rs": {
-    "lines": 1395,
-    "raise_revision": 1,
-    "reason": "conc-shared-payloads-1993"
+    "lines": 1437,
+    "raise_revision": 2,
+    "reason": "w3a-b-codec-changes-2008"
   },
   "crates/hirsel-core-front/src/body/values.rs": {
     "lines": 1217
   },
   "crates/hirsel-core-front/src/body/writers.rs": {
-    "lines": 2531
+    "lines": 2532,
+    "raise_revision": 1,
+    "reason": "w3a-b-codec-changes-2008"
   },
   "crates/hirsel-core-front/src/decls.rs": {
-    "lines": 3821,
-    "raise_revision": 1,
-    "reason": "conc-shared-payloads-1993"
+    "lines": 3822,
+    "raise_revision": 2,
+    "reason": "w3a-b-codec-changes-2008"
   },
   "crates/hirsel-core-front/src/layout.rs": {
-    "lines": 1035,
-    "raise_revision": 1,
-    "reason": "conc-shared-payloads-1993"
+    "lines": 1047,
+    "raise_revision": 2,
+    "reason": "w3a-b-codec-changes-2008"
   },
   "crates/hirsel-core-front/src/tests.rs": {
     "lines": 1512
@@ -284,9 +294,9 @@
     "lines": 1233
   },
   "crates/hirsel-core-ir/src/ir.rs": {
-    "lines": 2477,
-    "raise_revision": 3,
-    "reason": "w3a-b-sized-2009"
+    "lines": 2482,
+    "raise_revision": 4,
+    "reason": "w3a-b-codec-changes-2008"
   },
   "crates/hirsel-core-ir/src/lib.rs": {
     "lines": 1145
@@ -301,9 +311,9 @@
     "lines": 1576
   },
   "crates/hirsel-core-ir/src/text.rs": {
-    "lines": 2441,
-    "raise_revision": 2,
-    "reason": "w3a-b-sized-2009"
+    "lines": 2450,
+    "raise_revision": 3,
+    "reason": "w3a-b-codec-changes-2008"
   },
   "crates/hirsel-core-ir/src/wf.rs": {
     "lines": 1905
@@ -314,7 +324,9 @@
     "reason": "conc-shared-payloads-1993"
   },
   "crates/hirsel-core-layout/src/tests.rs": {
-    "lines": 1469
+    "lines": 1471,
+    "raise_revision": 1,
+    "reason": "w3a-b-codec-changes-2008"
   },
   "crates/hirsel-core-net/src/reactor.rs": {
     "lines": 2003
@@ -414,7 +426,9 @@
     "lines": 1978
   },
   "crates/hirsel-core-syntax/src/derive.rs": {
-    "lines": 1704
+    "lines": 1711,
+    "raise_revision": 1,
+    "reason": "w3a-b-codec-changes-2008"
   },
   "crates/hirsel-core-syntax/src/parser.rs": {
     "lines": 1694

@@ -13,7 +13,7 @@ function stringBytes(value) {
 class Reader {
   constructor(bytes) {
     if (!(bytes instanceof Uint8Array)) throw new TypeError('expected Uint8Array');
-    this.bytes = bytes; this.at = 0;
+    this.bytes = bytes; this.at = 0; this.inverted = false;
     this.view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   }
   take(n) {
@@ -21,12 +21,15 @@ class Reader {
     const at = this.at; this.at += n; return at;
   }
   count() { return this.view.getUint32(this.take(4), true); }
-  byte() { return this.bytes[this.take(1)]; }
+  byte() { return this.bytes[this.take(1)] ^ (this.inverted ? 255 : 0); }
   done() { if (this.at !== this.bytes.length) throw new Malformed('trailing bytes'); }
 }
 class Writer {
-  constructor() { this.parts = []; this.size = 0; }
-  put(bytes) { this.parts.push(bytes); this.size += bytes.length; }
+  constructor() { this.parts = []; this.size = 0; this.inverted = false; }
+  put(bytes) {
+    this.parts.push(this.inverted ? Uint8Array.from(bytes, byte => byte ^ 255) : bytes);
+    this.size += bytes.length;
+  }
   count(n) {
     if (!Number.isInteger(n) || n < 0 || n > 0xffffffff) throw new RangeError('u32 count');
     const b = new Uint8Array(4); new DataView(b.buffer).setUint32(0, n, true); this.put(b);
@@ -43,6 +46,7 @@ function readInteger(op, r, key) {
   const [width, signed] = integer[op], at = r.take(width);
   let n = width === 8 ? r.view.getBigUint64(at, !key) : BigInt(width === 4 ? r.view.getUint32(at, !key) : width === 2 ? r.view.getUint16(at, !key) : r.view.getUint8(at));
   const bits = BigInt(width * 8);
+  if (r.inverted) n ^= (1n << bits) - 1n;
   if (signed) { if (key) n ^= 1n << (bits - 1n); n = BigInt.asIntN(Number(bits), n); }
   return width === 8 ? n : Number(n);
 }
@@ -108,6 +112,11 @@ function read(t, defs, r, key) {
     if (op === 16) return tag === 0 ? {tag:'None'} : {tag:'Some',value:read(t[1],defs,r,key)};
     return {tag:tag === 0 ? 'Ok' : 'Error',value:read(t[tag + 1],defs,r,key)};
   }
+  if (op === 21 && key) {
+    r.inverted = !r.inverted;
+    try { return {value: read(t[1],defs,r,key)}; }
+    finally { r.inverted = !r.inverted; }
+  }
   if (op === 18) return t[1].map(part => read(part,defs,r,key));
   const d = defs[t[1]];
   if (d.kind === 2) return read(d.body,defs,r,key);
@@ -153,6 +162,12 @@ function write(t, defs, value, w, key) {
     const names = op === 16 ? ['None','Some'] : ['Ok','Error'], tag = names.indexOf(value?.tag);
     if (tag < 0) throw new TypeError('unknown tag'); w.count(tag);
     if (op === 17 || tag === 1) write(t[op === 16 ? 1 : tag + 1],defs,value.value,w,key); return;
+  }
+  if (op === 21 && key) {
+    w.inverted = !w.inverted;
+    try { write(t[1],defs,value.value,w,key); }
+    finally { w.inverted = !w.inverted; }
+    return;
   }
   if (op === 18) {
     if (!Array.isArray(value) || value.length !== t[1].length) throw new TypeError('tuple arity');

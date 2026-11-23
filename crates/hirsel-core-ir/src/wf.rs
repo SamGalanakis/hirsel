@@ -106,7 +106,7 @@ pub fn module(m: &Module) -> R {
                 || format!("t{i}: only core declares a clone body, on an own row"),
             )?;
         }
-        if let Some(f) = t.codec {
+        for f in [t.codec, t.key_codec].into_iter().flatten() {
             // A codec type's maker (SEM-10): `() -> Codec[T]`, its result a declared row.
             let sig = m
                 .functions
@@ -116,7 +116,7 @@ pub fn module(m: &Module) -> R {
                 sig.is_some_and(|s| {
                     s.params.is_empty() && s.results.is_empty() && s.dest.is_some()
                 }),
-                || format!("t{i}: codec maker is not () -> Codec[T]"),
+                || format!("t{i}: codec maker must return its codec and take no arguments"),
             )?;
         }
     }

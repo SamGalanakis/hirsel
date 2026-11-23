@@ -47,6 +47,7 @@ pub struct GenericTemplate {
     pub types: BTreeMap<TypeId, NameRecipe>,
     pub calls: BTreeMap<FuncId, GenericCall>,
     pub codecs: BTreeMap<TypeId, CodecRecipe>,
+    pub key_codecs: BTreeMap<TypeId, (DefPath, codec_glue::Rows)>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -171,6 +172,7 @@ pub enum CallOperation {
     Key(key_glue::KeyOp, TypeId),
     /// `std.codec.of[T]()` at T's row: the call is of T's codec maker ([`codec_maker`]).
     CodecOf(TypeId),
+    KeyCodecOf(TypeId),
 }
 
 /// The instance `identity` of the generic body `function` of `source`, whose type
@@ -353,7 +355,7 @@ fn import(module: &mut Module, names: &mut Names, closure: &Closure) -> Result<T
         let row = &closure.rows[position];
         let mut shape = row.shape.clone();
         shape.map_refs(&mut |r| TypeRef(rows[r.index()].0));
-        let [finalizer, clone, codec] = &row.hooks;
+        let [finalizer, clone, codec, key_codec] = &row.hooks;
         shape.finalizer = finalizer
             .as_ref()
             .map(|hook| FuncRef(import_hook(module, &rows, hook).0));
@@ -361,6 +363,9 @@ fn import(module: &mut Module, names: &mut Names, closure: &Closure) -> Result<T
             .as_ref()
             .map(|hook| FuncRef(import_hook(module, &rows, hook).0));
         shape.codec = codec
+            .as_ref()
+            .map(|hook| FuncRef(import_hook(module, &rows, hook).0));
+        shape.key_codec = key_codec
             .as_ref()
             .map(|hook| FuncRef(import_hook(module, &rows, hook).0));
         module.types[id.index()] = hirsel_core_layout::Row::new(shape);
@@ -440,6 +445,14 @@ pub(super) fn codec_maker(
     };
     let mut definition = of.clone();
     definition.0.name = maker.into();
+    Ok(codec_maker_row(module, definition, signature))
+}
+
+pub(super) fn codec_maker_row(
+    module: &mut Module,
+    definition: DefPath,
+    signature: SigId,
+) -> FuncId {
     let key = InstanceKey {
         definition,
         arguments: vec![],
@@ -450,7 +463,7 @@ pub(super) fn codec_maker(
         .iter()
         .position(|f| module.instances[f.instance.index()] == key)
     {
-        return Ok(FuncId(row as u32));
+        return FuncId(row as u32);
     }
     let instance = InstanceId(module.instances.len() as u32);
     module.instances.push(key);
@@ -460,7 +473,7 @@ pub(super) fn codec_maker(
         signature,
         body: None,
     });
-    Ok(FuncId(module.functions.len() as u32 - 1))
+    FuncId(module.functions.len() as u32 - 1)
 }
 
 /// std's maker of each built-in type, by the type's row name: a scalar, `()`, String
@@ -520,6 +533,7 @@ struct Substitution<'a> {
     call_names: &'a BTreeMap<FuncId, GenericCall>,
     nested: &'a BTreeMap<FuncId, GenericTemplate>,
     codecs: &'a BTreeMap<TypeId, CodecRecipe>,
+    key_codecs: &'a BTreeMap<TypeId, (DefPath, codec_glue::Rows)>,
     error: Option<String>,
     types: HashMap<TypeId, TypeId>,
     functions: HashMap<FuncId, FuncId>,
@@ -570,6 +584,16 @@ impl Substitution<'_> {
             && let Some(recipe) = self.codecs.get(&old).cloned()
         {
             shape.codec = self.codec(recipe).map(|f| FuncRef(f.0));
+        }
+        shape.key_codec = shape
+            .key_codec
+            .map(|f| FuncRef(self.function(FuncId(f.0)).0));
+        if shape.key_codec.is_none()
+            && let Some((of, rows)) = self.key_codecs.get(&old).cloned()
+        {
+            shape.key_codec = self
+                .composite_codec(&of, rows, ordered_codec::available)
+                .map(|f| FuncRef(f.0));
         }
         self.module.types[row.index()] = hirsel_core_layout::Row::new(shape);
         crate::layout::word_carriage(&mut self.module.types, row.index());
@@ -632,32 +656,40 @@ impl Substitution<'_> {
                 });
                 Some(f)
             }
-            CodecRecipe::Tuple { of, mut rows } => {
-                rows.tuple = self.ty(rows.tuple);
-                for part in &mut rows.parts {
-                    part.ty = self.ty(part.ty);
-                }
-                if !rows.parts.iter().all(|p| available(self.module, p.ty)) {
-                    return None;
-                }
-                rows.codec = self.ty(rows.codec);
-                rows.decoded = self.ty(rows.decoded);
-                rows.written = self.ty(rows.written);
-                rows.bytes = self.ty(rows.bytes);
-                rows.schema = self.ty(rows.schema);
-                for part in &mut rows.parts {
-                    part.codec = self.ty(part.codec);
-                    part.decoded = self.ty(part.decoded);
-                }
-                Some(super::codec_glue::row(
-                    self.module,
-                    &of,
-                    &rows,
-                    super::codec_glue::CodecOp::Of,
-                ))
-            }
+            CodecRecipe::Tuple { of, rows } => self.composite_codec(&of, rows, available),
         }
     }
+
+    fn composite_codec(
+        &mut self,
+        of: &DefPath,
+        mut rows: codec_glue::Rows,
+        available: impl Fn(&Module, TypeId) -> bool,
+    ) -> Option<FuncId> {
+        rows.tuple = self.ty(rows.tuple);
+        for part in &mut rows.parts {
+            part.ty = self.ty(part.ty);
+        }
+        if !rows.parts.iter().all(|p| available(self.module, p.ty)) {
+            return None;
+        }
+        rows.codec = self.ty(rows.codec);
+        rows.decoded = self.ty(rows.decoded);
+        rows.written = self.ty(rows.written);
+        rows.bytes = self.ty(rows.bytes);
+        rows.schema = self.ty(rows.schema);
+        for part in &mut rows.parts {
+            part.codec = self.ty(part.codec);
+            part.decoded = self.ty(part.decoded);
+        }
+        Some(codec_glue::row(
+            self.module,
+            of,
+            &rows,
+            codec_glue::CodecOp::Of,
+        ))
+    }
+
     /// The template field `ty` at the instance's arguments, written as a source row
     /// writes it (FORM #109): a row held inline whose type a holder writes otherwise
     /// (a parameter's scalar, list, box, region value, ..) becomes its `held` field,
@@ -788,10 +820,14 @@ impl Substitution<'_> {
                     return row;
                 }
             }
-            Some(CallOperation::CodecOf(ty)) => {
+            Some(operation @ (CallOperation::CodecOf(ty) | CallOperation::KeyCodecOf(ty))) => {
                 let signature = self.signature(function.signature);
                 let ty = self.ty(ty);
-                return match codec_maker(self.module, &key.definition, ty, signature) {
+                let maker = match operation {
+                    CallOperation::KeyCodecOf(_) => ordered_codec::maker,
+                    _ => codec_maker,
+                };
+                return match maker(self.module, &key.definition, ty, signature) {
                     Ok(row) => {
                         self.functions.insert(old, row);
                         row
@@ -913,6 +949,7 @@ fn fill(
         call_names: &template.calls,
         nested: &template.nested,
         codecs: &template.codecs,
+        key_codecs: &template.key_codecs,
         error: None,
         types: HashMap::default(),
         functions: [(source, target)].into_iter().collect(),
@@ -1122,6 +1159,9 @@ impl Emitter {
             return;
         }
         self.generic_names.insert(row, NameRecipe::of(p, t, ty));
+        if let Some(recipe) = self.ordered_codec_rows(p, t, ty, row) {
+            self.generic_key_codecs.insert(row, recipe);
+        }
         let arity = self.generic_names[&row]
             .0
             .iter()
@@ -1331,6 +1371,7 @@ mod tests {
             finalizer: None,
             clone: None,
             codec: None,
+            key_codec: None,
             grant: 0,
             send: false,
             held: None,
@@ -1366,6 +1407,7 @@ mod tests {
             finalizer: None,
             clone: None,
             codec: None,
+            key_codec: None,
             grant: 0,
             send: false,
             held: None,

@@ -43,6 +43,7 @@ fn job_cleanup() -> Vec<u32> {
         finalizer: None,
         clone: None,
         codec: None,
+        key_codec: None,
         grant: 0,
         send: true,
         held: None,

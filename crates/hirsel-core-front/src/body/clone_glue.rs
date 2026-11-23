@@ -768,6 +768,7 @@ mod kernel_clone_tests {
                 finalizer,
                 clone: None,
                 codec: None,
+                key_codec: None,
                 grant: 0,
                 send: false,
                 held: None,

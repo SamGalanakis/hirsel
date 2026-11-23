@@ -100,6 +100,7 @@ pub(crate) struct Shapes<'p, T: TyRead> {
     pub codecs: &'p crate::StructuralCodecs,
     /// Closed codec tuples get their hook even when no source call requests it.
     pub tuple_codecs: Vec<(TypeRef, TyId)>,
+    pub key_codecs: Vec<(TypeRef, TyId)>,
 }
 
 /// A row's declared function: its finalizer (`Shape::finalizer`), its clone body
@@ -179,12 +180,19 @@ impl<T: TyRead> Shapes<'_, T> {
                 finalizer: None,
                 clone: None,
                 codec: None,
+                key_codec: None,
                 grant: 0,
                 send: false,
                 held: None,
             },
         );
         Row::make_mut(&mut self.shapes[r.index()]).send = self.declares_send(ty);
+        if self.module
+            && !has_param(&*self.types, ty)
+            && crate::body::ordered_codec::composite(self.decls, self.types, ty)
+        {
+            self.key_codecs.push((r, ty));
+        }
         let (repr, body, finalizer, held) = match self.types.kind(ty).clone() {
             TyKind::Scalar(s) => (
                 LRepr::Own,
@@ -515,6 +523,7 @@ impl<T: TyRead> Shapes<'_, T> {
                 finalizer: None,
                 clone: None,
                 codec: None,
+                key_codec: None,
                 grant: 0,
                 send: false,
                 held: None,
@@ -611,6 +620,7 @@ impl<T: TyRead> Shapes<'_, T> {
         self.of.retain(|_, r| (r.0 as usize) < mark);
         self.hooks.retain(|(r, ..)| (r.0 as usize) < mark);
         self.tuple_codecs.retain(|(r, _)| (r.0 as usize) < mark);
+        self.key_codecs.retain(|(r, _)| (r.0 as usize) < mark);
     }
 
     /// The table block of a `SeqIndex` of `elem` (MEM-12, MEM-24): the sequence's
@@ -640,6 +650,7 @@ impl<T: TyRead> Shapes<'_, T> {
                 finalizer: None,
                 clone: None,
                 codec: None,
+                key_codec: None,
                 grant: 0,
                 send: false,
                 held: None,
@@ -888,6 +899,7 @@ pub(crate) fn recipes(p: &mut Program) {
         hooks: vec![],
         codecs: &crate::StructuralCodecs::NONE,
         tuple_codecs: vec![],
+        key_codecs: vec![],
     };
     let mut roots = vec![];
     for (i, decl) in s.decls.own_iter().enumerate() {

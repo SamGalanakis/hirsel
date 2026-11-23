@@ -67,6 +67,7 @@ mod lists;
 mod maps;
 mod numeric_glue;
 mod ops;
+pub(crate) mod ordered_codec;
 mod patterns;
 mod places;
 mod row_closures;
@@ -195,6 +196,7 @@ pub struct Emitter {
     recipe_scratch: hirsel_core_layout::RecipeScratch,
     generic_names: std::collections::BTreeMap<TypeId, NameRecipe>,
     generic_codecs: std::collections::BTreeMap<TypeId, templates::CodecRecipe>,
+    generic_key_codecs: std::collections::BTreeMap<TypeId, (DefPath, codec_glue::Rows)>,
     generic_calls: std::collections::BTreeMap<FuncId, GenericCall>,
     /// Per row, whether cleaning it may run code (memoised [`Self::runs_code`]).
     runs: Vec<[Option<bool>; 2]>,
@@ -571,6 +573,7 @@ impl Emitter {
             hooks: vec![],
             codecs: p.structural_codecs(),
             tuple_codecs: vec![],
+            key_codecs: vec![],
         };
         let r = f(&mut s);
         if r.is_none() {
@@ -580,6 +583,7 @@ impl Emitter {
         }
         let hooks = std::mem::take(&mut s.hooks);
         let tuples = std::mem::take(&mut s.tuple_codecs);
+        let keys = std::mem::take(&mut s.key_codecs);
         for (row, hook, f, arguments) in hooks {
             // A generic row's finalizer or clone body is its template's instance at the
             // row's arguments, materialized as any other generic callee.
@@ -619,6 +623,9 @@ impl Emitter {
         }
         for (row, ty) in tuples {
             self.tuple_codec(p, t, ty, TypeId(row.0));
+        }
+        for (row, ty) in keys {
+            self.ordered_codec(p, t, ty, TypeId(row.0));
         }
         r
     }
@@ -2630,6 +2637,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
                     types: self.e.generic_names.clone(),
                     calls: self.e.generic_calls.clone(),
                     codecs: self.e.generic_codecs.clone(),
+                    key_codecs: self.e.generic_key_codecs.clone(),
                 };
                 self.out.template = Some(template);
             }

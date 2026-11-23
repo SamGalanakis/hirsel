@@ -1828,11 +1828,13 @@ fn class_of(e: Refused) -> operator.Class {
     }
 }
 
+// A cutover OLD answered Drift (its store moved past the export) or refused outright: the
+// first conflicts with the store's state, the second is OLD's diagnostic of an invalid import.
 fn abort_class(why: String) -> operator.Class {
     if why == "drift" {
         ConflictClass
     } else {
-        DeniedClass
+        InvalidClass
     }
 }
 
@@ -2456,6 +2458,14 @@ fn admitted(mut h: Host, a: launcher.Attempt, root: Bytes, summary: launcher.Sum
     }
     let denied = why != ""
     let confirming = !denied && display != ""
+    let owner = owner_of(h, request)
+    if confirming && is_none(owner) {
+        // Nobody is attached to confirm the text: the attempt is released, and an identical
+        // Begin repeats admission and is shown the display.
+        vol_put(mut h, name, take v)
+        list.push(mut out, Release(a))
+        return
+    }
     if denied {
         d.stage = Rejected(string.from(why))
         list.push(mut out, Release(a))
@@ -2471,7 +2481,7 @@ fn admitted(mut h: Host, a: launcher.Attempt, root: Bytes, summary: launcher.Sum
     if denied {
         fail_request(mut h, request, DeniedClass, why)
     } else if confirming {
-        if let Some(conn) = owner_of(h, request) {
+        if let Some(conn) = owner {
             say(mut h, conn, DisplayAnswer(clone(request), a, clone(root), string.from(display)), false)
         }
     }

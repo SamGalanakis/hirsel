@@ -1375,6 +1375,31 @@ fn deploy_admission_policy(c: Clock, rnd: Random) -> Result[(), ()] waits {
     let a4 = r3.a
     send(mut r3, c3, ConfirmAsk(d4, a4, digest_bytes("foreign: lib")))
     expect(asked_of(r3, 4u64) == 1u64, "confirm: the hash of the exact text assembles")
+    // A complete input whose owner left before the display: nobody can confirm it, so the
+    // attempt is released, and the same Begin is shown the display under a fresh attempt.
+    let mut r6 = admission_case(c, rnd, None, Trusted)
+    let gone = begin_new(mut r6, false)
+    let d6: Bytes = clone(r6.req)
+    let a6 = r6.a
+    send(mut r6, gone, EndAsk(clone(d6), a6))
+    hang_up(mut r6, gone)
+    let mut late: List[launcher.Event] = list.new()
+    list.push(mut late, Admitted(a6, image_two(), summary_of(1u64, 1u64, false), "foreign: lib"))
+    feed(mut r6, take late)
+    expect(released(r6, a6), "confirm: an unowned confirmation kept its attempt")
+    let back = begin_with(mut r6, d6, Attested(image_two()), false)
+    let a7 = r6.a
+    let mut again6: List[launcher.Event] = list.new()
+    list.push(mut again6, Admitted(a7, image_two(), summary_of(1u64, 1u64, false), "foreign: lib"))
+    feed(mut r6, take again6)
+    let mut shown6 = false
+    for x in got_on(r6, back) {
+        if let DisplayAnswer(_, _, _, text) = x {
+            shown6 = text == "foreign: lib"
+        }
+    }
+    expect(!same_attempt(a6, a7) && shown6, "confirm: the reattached Begin was not shown the display")
+    unplug(mut r6)
     assembled_new(mut r3)
     expect(still_preparing(r3) && asked_of(r3, 5u64) == 2u64 && helpers_started(r3) == 1u64, "confirm: the assembled deploy prepares after its row is durable")
     // A slow upload: the verifier asked for objects in two parts and half are sent; another
@@ -1454,7 +1479,7 @@ fn released(r: Rig, a: launcher.Attempt) -> bool {
 // is lost gets the recorded outcome and admits nothing; the same D with other content is a
 // Conflict; an upload whose connection closes before its end releases its attempt, and the
 // same Begin admits again under a fresh attempt; Status(D) still reports an installed
-// request after a later request of the group.
+// request after a later deploy of the group.
 @test
 fn operator_request_identity(c: Clock, rnd: Random) -> Result[(), ()] waits {
     let mut r = rig(c, rnd, 4u64)
@@ -1479,7 +1504,13 @@ fn operator_request_identity(c: Clock, rnd: Random) -> Result[(), ()] waits {
     let second: Bytes = clone(b.req)
     let _ = begin_with(mut b, second, Attested(image_two()), false)
     expect(admits(b) == 2u64 && !same_attempt(a1, b.a), "L49: the repeated Begin did not admit again under a fresh attempt")
-    expect(is_installed(status_of(mut b, first)), "L49: Status lost the installed request after a later request of the group")
+    // The second request reaches its own deploy row; the first's Status is unchanged.
+    let mut ev: List[launcher.Event] = list.new()
+    list.push(mut ev, Admitted(b.a, image_two(), summary_of(1u64, 1u64, false), ""))
+    feed(mut b, take ev)
+    assembled_new(mut b)
+    expect(still_preparing(b), "L49: the second request did not reach its deploy row")
+    expect(is_installed(status_of(mut b, first)), "L49: Status lost the installed request after a later deploy")
     unplug(mut b)
     Ok(())
 }

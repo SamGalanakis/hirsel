@@ -1037,21 +1037,39 @@ fn committed_final_slot(run: &mut Run) {
 }
 
 fn tls13_record_rejection(run: &mut Run) {
-    for oversized in [false, true] {
+    for (length, header_only, alert) in [
+        (None, false, AlertDescription::BadRecordMac),
+        (Some(16_640u16), false, AlertDescription::BadRecordMac),
+        (Some(16_641), false, AlertDescription::RecordOverflow),
+        (Some(16_641), true, AlertDescription::RecordOverflow),
+        (Some(18_432), true, AlertDescription::RecordOverflow),
+    ] {
         let (port, peer) = serve(listener(), certificate_config(&[]), move |mut server| {
             server_handshake(&mut server).unwrap();
+            assert_eq!(
+                server.conn.protocol_version(),
+                Some(rustls::ProtocolVersion::TLSv1_3)
+            );
             server.write_all(b"ok").unwrap();
-            let alert = if oversized {
-                server.sock.write_all(&[23, 3, 3, 0x48, 0]).unwrap();
-                AlertDescription::RecordOverflow
+            if let Some(length) = length {
+                let [hi, lo] = length.to_be_bytes();
+                let mut wire = vec![23, 3, 3, hi, lo];
+                if !header_only {
+                    wire.resize(5 + usize::from(length), 0);
+                }
+                server.sock.write_all(&wire).unwrap();
+                if header_only {
+                    // Keep the read half open to receive the alert. EOF makes
+                    // this case fail even if the client waits for the body.
+                    server.sock.shutdown(std::net::Shutdown::Write).unwrap();
+                }
             } else {
                 let mut wire = Vec::new();
                 server.conn.writer().write_all(b"tampered").unwrap();
                 server.conn.write_tls(&mut wire).unwrap();
                 *wire.last_mut().unwrap() ^= 1;
                 server.sock.write_all(&wire).unwrap();
-                AlertDescription::BadRecordMac
-            };
+            }
             let error = server.read(&mut [0]).unwrap_err();
             assert_eq!(
                 error

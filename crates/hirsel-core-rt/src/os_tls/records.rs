@@ -15,6 +15,7 @@ const NEW_SESSION_TICKET: u8 = 4;
 const KEY_UPDATE: u8 = 24;
 const TAG: usize = 16;
 const WIRE: usize = HEADER + RECORD + 1 + TAG;
+const MAX_CIPHERTEXT: usize = RECORD + 256;
 pub(crate) const TX_RECORDS: usize = 16;
 const CONTROL_HEADROOM: usize = 64;
 pub(super) const TX_SLOT: usize = TX_RECORDS * WIRE + CONTROL_HEADROOM;
@@ -251,7 +252,7 @@ impl Records {
             let input = &self.rx.bytes[self.rx.start..self.rx.end];
             if input.len() >= HEADER {
                 let len = payload_len(input);
-                if len >= MAX_PAYLOAD {
+                if len > MAX_CIPHERTEXT {
                     return Err(ReadEnd::Local(AlertDescription::RecordOverflow));
                 }
                 if input[0] != APPLICATION {

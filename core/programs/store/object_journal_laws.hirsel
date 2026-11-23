@@ -204,3 +204,43 @@ fn bucket_test_m2_reclaim_execution(c: Clock, r: Random, tasks: Tasks) -> Result
     let _ = bucket_law_finish(take sim)
     reclaimed
 }
+
+fn pending_pack_name(seq: u64, epoch: u64) -> String {
+    history_key("p-", HistoryRef(seq, epoch, len: 0, digest: seq))
+}
+
+fn object_reclaim_upload_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits {
+    let client = bucket_law_client_lanes(sim, tasks, "s3.test", 1, true, 1)?
+    let mut options = result.unwrap(sized(Bucket(bucket_law_lanes(1)), 2147483648u64))
+    options.group_bytes = 65536
+    options.head_poll_ms = 10000
+    let seed = open_authority(tasks, object_authority(take client, "bucket", BUCKET_LAW_OP_MS), c, r, options)?
+    close(take seed)?
+    let mut pending = bucket_law_client_lanes(sim, tasks, "s3.test", 2, true, 1)?
+    let deadline = std.object.deadline_after_ms(pending, BUCKET_LAW_OP_MS)
+    // All 16 entries of the first page belong to the current epoch.
+    for k in 1u64 .. 18 {
+        let _ = std.object.upload(mut pending, pending_pack_name(k, 2), NoClobber, deadline) ?=> Remote
+    }
+    let _ = std.object.upload(mut pending, pending_pack_name(20, 1), NoClobber, deadline) ?=> Remote
+    let _ = std.object.upload(mut pending, pending_pack_name(21, 3), NoClobber, deadline) ?=> Remote
+    let current_client = bucket_law_client_lanes(sim, tasks, "s3.test", 3, true, 1)?
+    let mut writer = open_authority(tasks, object_authority(take current_client, "bucket", BUCKET_LAW_OP_MS), c, r, options)?
+    if claim_of(writer)?.epoch != 2 { fail("multipart fixture has the wrong holder") }
+    let _ = checkpoint(mut writer)?
+    reclaim_barrier(writer)?
+    close(take writer)
+}
+
+@test
+fn bucket_test_m2_reclaim_uploads(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let sim = bucket_law_sim(tasks, c, 2009, None, list.new())
+    let outcome = object_reclaim_upload_law(c, r, tasks, sim)
+    let report = bucket_law_finish(take sim)
+    outcome?
+    if list.len(report.pending) != 18 || list.contains(report.pending, pending_pack_name(20, 1)) ||
+        !list.contains(report.pending, pending_pack_name(21, 3)) {
+        fail("upload reclaim applied the wrong epoch rule or stopped on the first page")
+    }
+    Ok(())
+}

@@ -552,14 +552,47 @@ fn list_uploads(uploads: Map[String, Upload], query: Map[String, String]) -> Res
     } else {
         1000
     }
+    let marker = match map.get(query, "key-marker") {
+        Some(raw) => {
+            let Some(take decoded) = decode(raw) else {
+                return error(400, "InvalidArgument")
+            }
+            take decoded
+        },
+        None => string.new(),
+    }
+    let upload_marker = match map.get(query, "upload-id-marker") {
+        Some(raw) => {
+            let Some(take decoded) = decode(raw) else {
+                return error(400, "InvalidArgument")
+            }
+            take decoded
+        },
+        None => string.new(),
+    }
+    let mut all = sorted_keys(uploads)
+    list.sort(mut all, scoped fn(a: String, b: String) -> Order {
+        let first = option.unwrap(map.get(uploads, a))
+        let second = option.unwrap(map.get(uploads, b))
+        let by_key = order.compare(first.key, second.key)
+        if by_key == Equal {
+            order.compare(a, b)
+        } else {
+            by_key
+        }
+    })
     let mut xml = string.from("<ListMultipartUploadsResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">")
     element(mut xml, "Prefix", prefix)
     let mut body = string.from("")
     let mut count = 0u64
     let mut truncated = false
-    for id in sorted_keys(uploads) {
+    let mut last_key = string.new()
+    let mut last_id = string.new()
+    for id in all {
         let upload = option.unwrap(map.get(uploads, id))
-        if string.starts_with(upload.key, prefix) {
+        let by_key = order.compare(upload.key, marker)
+        let beyond = by_key == Greater || (by_key == Equal && order.compare(id, upload_marker) == Greater)
+        if string.starts_with(upload.key, prefix) && beyond {
             if count == limit {
                 truncated = true
                 break
@@ -568,6 +601,8 @@ fn list_uploads(uploads: Map[String, Upload], query: Map[String, String]) -> Res
             element(mut body, "Key", upload.key)
             element(mut body, "UploadId", id)
             string.push(mut body, "</Upload>")
+            last_key = clone(upload.key)
+            last_id = clone(id)
             count += 1
         }
     }
@@ -576,6 +611,10 @@ fn list_uploads(uploads: Map[String, Upload], query: Map[String, String]) -> Res
     } else {
         "false"
     })
+    if truncated {
+        element(mut xml, "NextKeyMarker", last_key)
+        element(mut xml, "NextUploadIdMarker", last_id)
+    }
     string.push(mut xml, body)
     string.push(mut xml, "</ListMultipartUploadsResult>")
     reply(200, xml)

@@ -57,6 +57,7 @@ the operation uses a no-clobber precondition.
 | `complete(take upload, deadline_ns)` | Publishes the multipart object. In `NoClobber` mode it sends `If-None-Match: *`. |
 | `abort(take upload, deadline_ns)` | Stops a multipart upload. An absent upload is success. |
 | `pending_uploads(prefix, mut into, deadline_ns)` | Appends handles for up to 16 multipart uploads still pending under the prefix and returns true when more remain. Abort them and list again. |
+| `pending_uploads_page(prefix, after, mut into, deadline_ns)` | Lists pending upload handles with their relative object keys. Pass the returned cursor to continue. `None` marks the final page. |
 
 A retried multipart initiation can leave a pending upload if the first
 reply was lost. It publishes no object. The owner of the prefix can

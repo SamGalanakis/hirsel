@@ -183,6 +183,28 @@ fn reclaim_capture(mut client: std.object.Client, fixed: ObjectReclaimCapture, d
         chain: take exact_names, live: take keep, leased: map.new()))
 }
 
+fn history_abort_reclaimed_uploads(mut lane: ObjectJournalSession, pass: ReclaimPass, deadline: u64) -> Result[(), Error] waits {
+    let mut after: Option[std.object.UploadCursor] = None
+    loop {
+        let mut uploads: List[std.object.PendingUpload] = list.new()
+        let page = match std.object.pending_uploads_page(mut lane.client, "p-", after, mut uploads, deadline) {
+            Ok(take marker) => take marker,
+            Error(take problem) => return Error(Remote(take problem)),
+        }
+        history_probe_writer(mut lane.client, mut lane.register, mut lane.buffers, deadline)?
+        for take upload in take uploads {
+            let std.object.PendingUpload(key: take name, handle: take handle) = take upload
+            if history_dead_upload(pass, name) {
+                if let Error(take problem) = std.object.abort(mut lane.client, take handle, deadline) {
+                    return Error(Remote(take problem))
+                }
+            }
+        }
+        after = take page
+        if let None = after { return Ok(()) }
+    }
+}
+
 fn history_execute_reclaim(mut lane: ObjectJournalSession, fixed: ObjectReclaimCapture) -> Result[(), Error] waits {
     let deadline = std.object.deadline_after_ms(lane.client, lane.op_ms)
     history_probe_writer(mut lane.client, mut lane.register, mut lane.buffers, deadline)?
@@ -205,7 +227,7 @@ fn history_execute_reclaim(mut lane: ObjectJournalSession, fixed: ObjectReclaimC
             }
         }
         if !page.truncated {
-            return Ok(())
+            return history_abort_reclaimed_uploads(mut lane, pass, deadline)
         }
         let following = std.object.key_text(page.after)
         if order.compare(following, after) != Greater {

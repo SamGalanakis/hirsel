@@ -438,7 +438,7 @@ type Job: send {
     entries: List[Entry]
 }
 
-type Value: send = Object(Meta) | Existing | NotModified | BucketSetting(String) | Listed(Page) | Initiated(String) | Pending(List[String], List[String], bool)
+type Value: send = Object(Meta) | Existing | NotModified | BucketSetting(String) | Listed(Page) | Initiated(String) | Pending(List[String], List[String], bool, Option[UploadCursor])
 
 type Reply: send {
     lane: u64,
@@ -1028,7 +1028,19 @@ fn parse_pending(body: Bytes, prefix: String) -> Exchange {
         }
         at = last
     }
-    Received(Pending(take keys, take ids, more))
+    let cursor: Option[UploadCursor] = match (xml_field(text, "NextKeyMarker"), xml_field(text, "NextUploadIdMarker")) {
+        (Some(raw_key), Some(raw_id)) if more => {
+            let (Ok(take key), Ok(take id)) = (xml_decoded(raw_key), xml_decoded(raw_id)) else {
+                return Invalid(Fatal(Malformed))
+            }
+            if !string.starts_with(key, prefix) || id == "" {
+                return Invalid(Fatal(Malformed))
+            }
+            Some(UploadCursor(key: take key, id: take id))
+        },
+        _ => None,
+    }
+    Received(Pending(take keys, take ids, more, take cursor))
 }
 
 fn status_failure(status: u16, body: Bytes) -> Failure {
@@ -2477,34 +2489,86 @@ pub fn upload(mut c: Client, key: String, mode: Mode, deadline_ns: u64) -> Resul
 
 const PENDING_PAGE: u64 = 16
 
-/// Appends handles for up to 16 multipart uploads still pending under the
-/// prefix, for `abort`. The result is true when more remain: abort these
-/// and list again.
-pub fn pending_uploads(mut c: Client, prefix: String, mut into: List[Upload], deadline_ns: u64) -> Result[bool, Error] waits {
+pub opaque type UploadCursor: send {
+    key: String,
+    id: String
+}
+
+pub type PendingUpload: send {
+    key: String,
+    handle: Upload
+}
+
+fn upload_listing(mut c: Client, prefix: String, after: Option[UploadCursor], deadline_ns: u64) -> Result[Value, Error] waits {
     let path = request_path(c.requests.bucket, "", true)
     let mut request = new_job(ListUploads, take path, list.new(), deadline_ns)
-    let mut query = string.from("max-uploads=")
+    let mut query = string.new()
+    if let Some(marker) = after {
+        string.push(mut query, "key-marker=")
+        encode(mut query, string.as_bytes(marker.key), false)
+        string.push_char(mut query, '&')
+    }
+    string.push(mut query, "max-uploads=")
     string.push_u64(mut query, PENDING_PAGE)
     string.push(mut query, "&prefix=")
     encode(mut query, string.as_bytes(c.requests.bucket.prefix), false)
     encode(mut query, string.as_bytes(prefix), false)
+    if let Some(marker) = after {
+        string.push(mut query, "&upload-id-marker=")
+        encode(mut query, string.as_bytes(marker.id), false)
+    }
     string.push(mut query, "&uploads=")
     request.query = take query
     let Reply(result: take result, ..) = run(mut c, take request)
-    match take result {
-        Ok(Pending(take keys, take ids, more)) => {
-            let mut k = 0u64
-            for take id in take ids {
-                let target = request_path(c.requests.bucket, keys[k], false)
-                let put_id = fresh_id(c.requests.random, mut c.requests.entropy)
-                list.push(mut into, Upload(path: take target, upload_id: take id, put_id, mode: Overwrite, parts: list.new()))
-                k += 1
-            }
-            Ok(more)
-        },
-        Error(take e) => Error(take e),
-        _ => Error(Fatal(Malformed)),
+    take result
+}
+
+fn pending_handle(mut c: Client, key: String, take id: String) -> Upload {
+    let path = request_path(c.requests.bucket, key, false)
+    let put_id = fresh_id(c.requests.random, mut c.requests.entropy)
+    Upload(path: take path, upload_id: take id, put_id, mode: Overwrite, parts: list.new())
+}
+
+/// Appends handles for up to 16 multipart uploads still pending under the
+/// prefix, for `abort`. The result is true when more remain.
+pub fn pending_uploads(mut c: Client, prefix: String, mut into: List[Upload], deadline_ns: u64) -> Result[bool, Error] waits {
+    let listed = upload_listing(mut c, prefix, None, deadline_ns)?
+    let Pending(take keys, take ids, more, _) = take listed else {
+        return Error(Fatal(Malformed))
     }
+    let mut i = 0u64
+    for take id in take ids {
+        list.push(mut into, pending_handle(mut c, keys[i], take id))
+        i += 1
+    }
+    Ok(more)
+}
+
+/// Lists a page of pending uploads together with their relative object keys.
+/// Pass the returned cursor to continue, even if every upload on this page
+/// must be kept. None marks the final page.
+pub fn pending_uploads_page(mut c: Client, prefix: String, after: Option[UploadCursor], mut into: List[PendingUpload], deadline_ns: u64) -> Result[Option[UploadCursor], Error] waits {
+    let listed = upload_listing(mut c, prefix, after, deadline_ns)?
+    let Pending(take keys, take ids, more, take cursor) = take listed else {
+        return Error(Fatal(Malformed))
+    }
+    if more {
+        let Some(marker) = view cursor else {
+            return Error(Fatal(Malformed))
+        }
+        if let Some(previous) = after {
+            if marker.key == previous.key && marker.id == previous.id {
+                return Error(Fatal(Malformed))
+            }
+        }
+    }
+    let mut i = 0u64
+    for take id in take ids {
+        let handle = pending_handle(mut c, keys[i], take id)
+        list.push(mut into, PendingUpload(key: string.from(keys[i]), handle: take handle))
+        i += 1
+    }
+    Ok(take cursor)
 }
 
 fn upload_query(u: Upload, number: u64) -> String {

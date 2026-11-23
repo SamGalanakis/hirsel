@@ -1,4 +1,10 @@
-# STORE-SPEC v2.44: the M4 store library (lane store-spec-1001)
+# STORE-SPEC v2.47: the M4 store library (lane store-spec-1001)
+
+v2.47 (lane store-m2-spec-1940, Store M2): text only, **not yet built**. It fixes the two blind re-checks of v2.46 (astra m2-recheck-astra-1932, Fable m2-recheck-fable-1933); Sam's rulings Q1–Q5 stand. HEAD names the latest entry by its own epoch, reclaim derives the chain it erases from, an install whose head write is Fenced or Undecided has an unknown outcome, the live client is qualified, the locator is a tree, and a Fenced store reaches an idle runner. See CHANGES-v2.47.
+
+v2.46 (lane store-m2-spec-1930, Store M2): text only, **not yet built**. It applies Sam's rulings Q1–Q5 of 2026-11-23 (DECISIONS.md, "Store M2 gavel rulings") and the fixes from the astra attack (m2-attack-1924) and the Fable review (m2-fable-1926) to v2.45. §12 is the contract for authorities: one grant keeps the whole history; a conditional replace of the history head is the fence; a claim is one GET and one head replace, then a CLAIM entry; every head write resolves an unknown outcome by an exact resend (the Q5 rule); each authority declares named levels, and the runner releases at the strongest; followers replace §11.19's read-only open. objects@1 runs only on a provider whose conditional head write is linearizable (§12.2). §11.18's Bucket layout is deleted with no compatibility reader. See CHANGES-v2.46.
+
+v2.45 (lane store-m2-spec-1919): text only, never built, superseded by v2.46.
 
 v2.44 (lane store-readonly-open-1860): **built.** AP21 validates format-3 opens, export preparation and install output. §11.19 adds an offline reader for Directory stores and current Bucket mirrors.
 
@@ -112,7 +118,63 @@ v2.29 (RUNNER-SPEC v2.18, lane caller-scope-1128, astra's third attack, ATTACK-3
 
 v2.28 (RUNNER-SPEC v2.17, lane caller-scope-1128, astra's second attack, ATTACK-2): text and format; no store has been deployed, so the cutover is a fresh store. `serve` runs an admitted position: it runs the policy and the body as two isolated executions over one snapshot and writes the reply, and the record when there is one, in the body's transaction; a fault keeps the run's digest in a `Pending` that `conclude` writes with the fixed reply (AL1). A duplicate returns the stored reply with its scope digest (AL2). The scope digest begins with the StoreId (AL3). `migrate` is its own phase over a `Migration`, and `Schema` only opens (AL4). The CALL section carries the authority bytes (AL5). The sizes follow the 32-byte scope digest, and `serve` keeps no read log (AL6).
 
-## CHANGES-v2.43 (store-bucket-1836: §11.18, built)
+## CHANGES-v2.47 (store-m2-spec-1940: §12, not yet built; fixes v2.46)
+
+Two blind re-checks of v2.46 (astra `m2-recheck-astra-1932`, numbered #1–#23; Fable `m2-recheck-fable-1933`, L/S/A ids) found three blockers on their own. Sam's rulings Q1–Q5 stand. Nothing here is built, so each format change below defines a never-built kind afresh or allocates a new one; no store holds v2.46 bytes.
+
+| Id | v2.46 defect | v2.47 rule | Where |
+|---|---|---|---|
+| B1 (astra #1, Fable L1) | A claim copied the head's position but HEAD had no epoch for the latest entry, so after a claim the latest entry could not be named | HEAD gains `entry_epoch` (a claim copies it, an advance sets it) and `image`; it is 136 B. When `position = c_position` the entry and checkpoint references must be equal. LINK and CLAIM epoch rules. Head buffers 131,552 B. L60 gains the claim-over-GROUP and double-claim vectors | §12.2, §12.9, L60 |
+| B2 (astra #3, Fable S1, A1) | Reclaim's rule 2 took chain names from recovery's walk, which names nothing below the open's base checkpoint, so with `retain` ≥ 3 it erased live entries | Rule 2's range is max(floor, c₀ + 1)..P with names from recovery's walk and the holder's own advances; [floor, c₀] waits for rule 1. G, N and the floor come from the last Advanced CHECKPOINT, captured at pass start. Charge 24 × (P − c₀) | §12.6, §12.9, L58 |
+| B3 (astra #2) | A Fenced activation head write reported "nothing activated" although the activation could have applied before the other holder's claim | Fenced or Undecided at the activation head write means unknown. OLD stops; reconciliation is a qualified read comparing `releases[v + 1]`'s digest with the attempt's. Only a failure before the head write proves nothing activated | §12.7, L54, RUNNER §14.3 |
+| astra #4 | A CHECKPOINT's own operation (delete, pin, activation) had no defined place in the state it certifies | A CHECKPOINT at c certifies the state after its own operation, from the settled prefix through c − 1 | §12.2 |
+| astra #5, #21, Fable L3 | A rejected image or identity could depose the serving holder; an empty namespace with an expected identity made a new store | `Options.image`; opening checks before any write; no head with `expect` is `NotFound`; claim recovers read-only before its replace | §1.1, §12.1, §12.3, L61 |
+| astra #6, Fable L2 | A crash before the genesis head left keys that refused every later genesis | Genesis ignores debris-shaped keys of epoch 1 | §12.3, L54 |
+| astra #7 | Export wrote a directory the prepare opener could not read | The scratch is an ordinary log@1 image with one segment `j-<c>` | §12.7, L61 |
+| astra #8, Fable A2 | The 404 witness lacked the evidence for its verdict | The verdict is by the follower's capture against the head's retained set; a lost witness retries to the deadline | §12.5, L59 |
+| astra #9, #10, Fable open question | Class-2 packs had no read bound; a legal commit could make every covering locator too large; the unreached-row check assumed an unstated invariant | A locator tree (role 8 chunks, MARK `depth`); the read order with each allocation bounded first; leaf rows must equal L ∪ C | §2.7, §12.2, §12.9, L60 |
+| astra #11, Fable A3 | A fresh read could race the terminal result of its own advance | One owner per advance; first evidence wins; an acked ticket stays Ok | §12.3, §12.5, L57 |
+| astra #12, Fable A4 | Two-level sim had no protocol | Register is the strongest level; weaker levels have their own barrier events; readers see the strongest prefix | §12.4, L55, L56 |
+| astra #13, Fable L5 | A won replace did not mean a returned Db; the loop kept deposing fresh claimants | Same-pair retry only; a changed pair returns `Lost`; budget bounds every request; L52 counts fences separately | §12.3, L52 |
+| astra #14, Fable L6 | A fence never reached an idle runner | `health(db)` watch cell; RUNNER ends abnormally on it | §12.3, RUNNER §2.1 |
+| astra #15 | Follower API had unreachable results and missing inputs | `Unseen`; fallible `snapshot_follower`; `follower_index` takes `index`'s inputs; `Missing("schema")` | §1.1, §12.5 |
+| astra #16 | v2.46 dropped AUTHORITY `style` and grew 0x0050's payload | AUTHORITY is the new kind 0x00D0 with `style`; 0x0050 is retired | §2.7, §12.2 |
+| astra #17, Fable S2 | Qualification read the recorded endpoint and counted unknown Tigris locations as Single-region; ETag non-recurrence unstated | The live client is qualified at every open, https only, exact hosts; Tigris by an exact allow-list of observed `GetBucketLocation` replies, shipped empty; AWS only without KMS or SSE-C; the residual ETag assumption stated | §12.2 |
+| astra #18 | Multipart completion was retried like a PUT | 200-with-Error is an error; 409 or `NoSuchUpload` restarts the upload with a fresh id | §12.2, L54m |
+| astra #19 | The log follower could show a MANIFEST a power cut takes back | O1 (`sync_dir`) before reading | §12.5 |
+| astra #20 | Standalone import made an empty store visible first | Import is genesis with the imported base | §12.7 |
+| astra #22, Fable nit | A random follower number could not guarantee `Foreign` | A process-wide counter | §12.1 |
+| astra #23 | `position` needed a table of issued tickets | `Mark.Journal` carries branch and version | §1.6, §12.5 |
+| Fable L4 | Recovery was serial and fetched the suffix twice | LIST as a fetch hint, prefix reads of 112 B, the chain from the head decides | §12.3 |
+| Fable nits | 2 × `ENTRY_LIMIT` reserved; poll cost and interaction; failed-poll count; `retain: u32`; AWS hosts | 2 × (112 + `group_bytes`) plus a charged on-demand singleton; the poll stops when the place is closed and during a cut; `Ok(n)` counts failed polls; `retain: u8`; non-standard AWS hosts stated as unqualified | §1.1, §12.2, §12.3, §12.9 |
+| Fable L6 (callers) | The deleted read-only API's callers were not listed | Six callers listed with their destination | §11.19 |
+
+## CHANGES-v2.46 (store-m2-spec-1930: §12, not yet built; supersedes v2.45)
+
+v2.45 was never applied. Its design is part of v2.46: one opener over an `Authority` value (`open`, `open_bucket` and `memory` deleted), the whole history in the authority, the head as fence, per-authority levels, `Follower` in place of §11.19, reclaim from history, and laws L52–L60. The items below are where v2.46 differs from or adds to v2.45.
+
+| # | Item | Verdict | What v2.46 does | Where |
+|---|---|---|---|---|
+| AV1 | Q1: the v2.43 hybrid, cut shape and trigger | **ADOPTED** | No compatibility reader. Genesis refuses a non-empty prefix. objects@1 keeps the full history. Cuts are AP16's paused cut: a CHECKPOINT at c names the state after c − 1. New trigger `checkpoint_entries`. Non-blocking uploads and two-level authorities are deferred. | §11.18, §12.2 |
+| AV2 | Q2: release level | **ADOPTED** | The runner releases at the strongest level. `release_level` is gone. `position` waits `durable`. | §1.6, §12.4 |
+| AV3 | Q3: no leases, idle poll | **ADOPTED** | Queries are RAM reads. `fresh` and `fresh_snapshot` each cost one head GET. The idle head poll runs every `head_poll_ms` on the monotonic clock, and a foreign head makes the holder sticky `Fenced`. | §12.3, §12.5 |
+| AV4 | Q4: claim shape | **REPLACED v2.45's claim** | A claim is GET plus one conditional head replace that bumps (epoch, holder) at position p, then a CLAIM entry at p + 1. `head.epoch ≥ entry epoch`. Bounded `Lost` retry until `claim_ms`. Identity, AUTHORITY, declaration, activation and provider are checked first. | §12.1, §12.3 |
+| AV5 | Q5: unknown outcomes | **REPLACED v2.45's resolution** | Every head write, genesis included, resolves Uncertain by an exact resend. On 412 it GETs the head and compares exact bytes: own bytes mean Advanced, other bytes mean Fenced or Lost, and a failed GET means Undecided with the claim dead. New `std.object.store_if`, which never resolves. | §12.2, §12.3 |
+| AV6 | Frame binding was circular (the name held a digest of bytes whose checks bound the name) | **FIXED** | Frames keep §2.1's binding (seq = position, generation or pack seq). The object digest is xxh3-64 over the whole object, carried in the name and in references. HEADER role, seq and epoch must match the name. | §12.2 |
+| AV7 | A PagePtr names only a seq; a cold reader could not find packs | **FIXED: LOCATE** | A CHECKPOINT entry's LOCATE rows list (seq, epoch, len, digest) for every reachable pack, class-2 and inherited ones included. The rows are checked both ways against AP21. | §2.7, §12.2 |
+| AV8 | HEAD and AUTHORITY layouts, the empty base | **FIXED** | HEAD is 96 B, twelve u64 with `floor` and the checkpoint name. Overflow is `Limit(Ids)`. AUTHORITY carries a level declaration. Genesis writes an empty MANIFEST and CHECKPOINT entry 1. | §2.7, §12.2, §12.3 |
+| AV9 | The floor could move down and revive a checkpoint | **FIXED** | MARK lists the retained set. The new set is the latest k of the old set ∪ {c}, so the floor is monotonic. | §12.6 |
+| AV10 | 409 read as Mismatch | **FIXED** | 409 is retried with the same tag and body. 412 is Mismatch or Exists. | §12.2 |
+| AV11 | Followers had no table binder, shared open numbers, and read 404 ambiguously | **FIXED** | `follower_table`, `follower_index` and `follower_branch`. Open numbers are 2⁶³ \| r. A 404 takes a second witness: `Reclaimed` or `Corrupt(.. Absent)`. Catch-up publishes atomically. | §1.12, §12.1, §12.5 |
+| AV12 | A log@1 follower stopped at END | **FIXED** | It reads offline under writer exclusion, as §3.4 steps 4–6, past END to the first bad frame, syncing each segment as step 5 does. | §12.5 |
+| AV13 | Install and import were one operation | **SPLIT** | A prepared install is a CHECKPOINT advance on the validated head, with `activation` in HEAD. Standalone import is genesis of a new store. Export captures one head and restarts whole on `Fenced`. | §12.6, §12.7 |
+| AV14 | Provider consistency | **NEW contract** | objects@1 requires a linearizable conditional head write. AWS S3, Tigris Single- and Multi-region, and `std.sim.s3` qualify. Tigris Global and Dual-region and unknown endpoints are `Unqualified`. The dev bucket is Global. | §12.2 |
+| AV15 | Memory and steps of the new buffers | **FIXED** | Two entry buffers and two head buffers are reserved at open. Chain list, fetch, LOCATE and LIST allocations are charged and refused before requests. Store work runs on store tasks. | §12.9 |
+| AV16 | Laws L52–L60 | **TIGHTENED** | Each law has an independent oracle (register history, sim ground truth, hand-built bytes) and the bug it alone catches. Added L58b. | §12.10 |
+
+Reversible: every item before 1.0 (no old-format readers). Q1–Q5 are Sam's rulings.
+
+## CHANGES-v2.43 (store-bucket-1836: §11.18, built; superseded by v2.46)
 
 | # | Item | Verdict | What v2.43 does | Where |
 |---|---|---|---|---|
@@ -586,7 +648,7 @@ Each review item and each orchestrator item has a verdict: ACCEPTED (with the fi
   8. pins;
   9. forks;
   10. incremental checkpoints.
-- Rows 11 (claims and epoch fencing) and 12 (object-backed authorities) are built for a bucket authority (v2.43, §11.18). §2.9 says what is still open: leases, and durability levels above a local sync.
+- Rows 11 (claims and epoch fencing) and 12 (object-backed authorities) are specified for every authority by v2.46 (§12): the history head is the fence, and levels are per authority. §2.9 says what is still open.
 - Rows 13 and 14 are never built:
   - a rename is a migrate;
   - internal state lives in its own trees and frame kinds, never in a reserved key space.
@@ -660,16 +722,20 @@ pub type Options {
     pack_bytes: u64,          // default 64 MiB: a pack closes before a NODE that would take it past this many bytes, unless it holds no NODE yet (H1)
     resident_limit: u64,      // default 1 GiB (GUESS, R8): the accounted resident bytes a Db admits (§1.11)
     checkpoint_task_bytes: u64, // default 262,400,276: the checkpoint task's root limit, max(pack_bytes, 64 MiB + 88) + 2⌈resident_limit / 11⌉ + 64 KiB (Q1a)
-    authority: Authority,
+    retain: u8,               // v2.47: CHECKPOINT entries in the retained set, 1–255, default 2, 0 is Missing("retain") (§12.6); objects@1 and sim@1 only
+    checkpoint_entries: u64,  // v2.46: a cut runs when this many entries follow the latest CHECKPOINT, default 4096, at least 1 (§12.2)
+    claim_ms: u64,            // v2.46: how long `open` retries a lost claim, local monotonic clock, default 30,000; 0 = one attempt (§12.3)
+    head_poll_ms: u64,        // v2.46: the idle head poll's interval, default 1,000, at least 1 (§12.3)
+    expect: Option[StoreId],  // v2.46: open only this store; another is `Foreign` before any write (§12.1)
+    activation: Option[u64],  // v2.46: open only at this activation; another is `NotCurrent` before any write (§12.1)
+    image: Option[Digest],  // v2.47: open only when the active image is this Describe digest; another is `NotCurrent` before any write (§12.1)
 }
-pub type Authority: send = Directory() | Bucket(std.object.Bucket)   // defaults() gives Directory(). Bucket holds the bucket's config, never a live client (row 12, §11.18); `open` and `open_export` refuse it with `Unsupported(1)`, and `open_bucket` opens it. A `memory` store has no authority and ignores the field. Options is `send` because Bucket holds Strings, and is cloned where it was copied
+pub opaque type Authority: send   // v2.46 §12.1: the granted keeper of the history; config only, never a credential in program bytes
 pub type StoreId { hi: u64, lo: u64 }
 pub fn defaults() -> Options
 
 pub opaque type Db                         // not send: holds Task handles (CONC-1/2). RUN db_task.
-pub fn open(tasks: Tasks, d: Dir, c: Clock, r: Random, o: Options) -> Result[Db, Error] waits
-pub fn open_bucket(tasks: Tasks, d: Dir, c: Clock, r: Random, o: Options, take client: std.object.Client, op_ms: u64) -> Result[Db, Error] waits   // §11.18
-pub fn memory(c: Clock, r: Random, o: Options) -> Db   // no directory and no tasks; durable(t) is Ok at once
+pub fn open(tasks: Tasks, a: Authority, c: Clock, r: Random, o: Options) -> Result[Db, Error] waits   // v2.46: opens; a writer open of objects@1 or sim@1 claims (§12.3)
 pub fn close(take db: Db) -> Result[(), Error] waits   // §1.10: always consumes, always releases and joins
 pub fn identity(db: Db) -> StoreId
 ```
@@ -678,8 +744,8 @@ pub fn identity(db: Db) -> StoreId
 
 ```hirsel
 pub type Error =
-      Held                         // another writer holds LOCK
-    | NotFound                     // no MANIFEST and create is false
+      Held                         // another writer holds LOCK (log@1; objects@1 has no Held, a later claim deposes, §12.3)
+    | NotFound                     // no MANIFEST (log@1) or no head (objects@1) and create is false; or no head while `o.expect` or `o.activation ≠ 0` is set (§12.1)
     | Corrupt(Fault)               // bytes from disk failed a check (§2.8)
     | Unsupported(u64)             // a format number other than 1, or an unknown MUST kind (value = kind)
     | Io(IoError)                  // a host operation failed before anything was published
@@ -691,12 +757,22 @@ pub type Error =
     | Decode(codec.DecodeError)    // a stored row failed its codec: only a schema bug in user code
     | Exists(String) | Missing(String)
     | Diverged(u32)                // adopt: main moved after the branch forked (branch id)
-    | Foreign                      // a handle of another store, or a Snapshot or Ticket of another open (§1.12); a bucket that holds another store (§11.18)
-    | Fenced(u64)                  // another writer claimed the bucket store; the value is this writer's epoch (§11.18)
-    | Remote(std.object.Error)     // a bucket operation failed; the writer stops until reopened (§11.18)
+    | Foreign                      // a handle of another store, or a Snapshot or Ticket of another open (§1.12); an authority that holds another store (§12.1)
+    | Fenced(u64)                  // another holder's bytes are in the head; the value is this holder's epoch. Whether an outstanding group applied is unknown until the next claim (§12.3)
+    | Lost                         // open's claim lost: another claimant won, a genesis race was lost, or `claim_ms` ran out (§12.3)
+    | Undecided                    // a head write's outcome stayed unknown after the Q5 rule; the claim is dead and only a later claim decides (§12.3)
+    | Remote(std.object.Error)     // an authority request failed before any byte of it could have applied; the holder stops until reopened (§12.3)
+    | NoLevel(String)              // the authority declares no level of this name (§12.4)
+    | Declared(String)             // the grant's level declaration differs from the store's at this level name; nothing written (§12.1, §12.4)
+    | NotCurrent(u64)              // `Options.activation` differs from the head's; the value is the head's (§12.1)
+    | Unqualified(String)          // the object provider does not give a linearizable conditional head write (§12.2)
+    | Behind(Position)             // a follower reached its deadline; the value is its applied Position on that branch (§12.5)
+    | Gone(u32)                    // the branch of a Position was deleted or adopted (§12.5)
+    | Unseen(u32)                  // v2.47: a follower's deadline passed before it applied the branch's creation (§12.5)
+    | Reclaimed(u64)               // a follower needed an object that reclaim removed; the value is the new floor (§12.5, §12.6)
 pub type Limit = Key | Value | Transaction | Name
 pub type Fault { file: String, offset: u64, why: Why }
-pub type Why = Checksum | Truncated | Flags | Kind(u64) | Header | Gap(u64) | Order | Dangling(u64) | Malformed
+pub type Why = Checksum | Truncated | Flags | Kind(u64) | Header | Gap(u64) | Order | Dangling(u64) | Malformed | Absent   // Absent (v2.46): a named object that is still live is missing (§12.5)
 ```
 
 There is **no `Cancelled` case.** A cancellation is a failure that `isolate` does not catch, so it never reaches a caller as a value (C5, §3.7).
@@ -928,7 +1004,7 @@ pub fn find_next[J, K, V](s: Snapshot, ix: Index[J, K, V], take r: Resume, l: Li
 ### 1.6 Tickets and durability (row 3)
 
 ```hirsel
-pub type Mark = Journal(u64) | Cut(u64)     // journal frame sequence, or checkpoint generation
+pub type Mark = Journal(u64, u32, u64) | Cut(u64)   // v2.47: journal frame sequence with the commit's branch id and version (§12.5); or checkpoint generation
 pub type Ticket { store: StoreId, open: u64, mark: Mark }
 pub fn durable(mut db: Db, t: Ticket) -> Result[(), Error] waits
 pub fn checkpoint(mut db: Db) -> Result[Ticket, Error] waits
@@ -941,6 +1017,17 @@ pub fn checkpoint(mut db: Db) -> Result[Ticket, Error] waits
 - `durable` returns `Foreign` for a ticket of another store, or of another open of this store. What an earlier open's commit became is decided by the reopened state, not by its ticket.
 - In a `memory` store, `durable` is `Ok` at once and promises nothing.
 - `flush` is gone (C7): every frame is in the journal's queue as soon as `run` returns, so there is nothing for a flush to hand over.
+
+**Levels (v2.46, §12.4).** Each authority declares an ordered list of named levels, recorded at genesis and compared at every open. D[L] is the prefix of the commit order durable at L, and the prefixes nest (stronger is shorter). `durable(t)` is `durable_at(t, strongest)`, so the promise above is the strongest level's, and the runner releases replies, batches and Positions at it (Q2).
+
+```hirsel
+pub opaque type Level: send                                          // bound to its StoreId and declaration; no equality, no order
+pub fn level(db: Db, name: String) -> Result[Level, Error]           // NoLevel(name) if undeclared; never remapped
+pub fn levels(db: Db) -> List[String]                                // weakest first
+pub fn durable_at(mut db: Db, t: Ticket, l: Level) -> Result[(), Error] waits   // Foreign for another store's Level
+pub type Position { store: StoreId, branch: u32, version: u64 }      // a branch version; valid across opens and machines
+pub fn position(mut db: Db, t: Ticket) -> Result[Position, Error] waits   // a Journal ticket only (Cut: Missing("position")); waits durable(t); the branch and version recorded at issue
+```
 
 ### 1.7 CallInfo (row 5)
 
@@ -1124,7 +1211,7 @@ When the Db is poisoned, step 1 is skipped: anything still queued is dropped by 
 ### 1.12 Handles and their store
 
 - `StoreId` is the 16-byte identity in every file header (§2.3).
-- `open` is the number of the first journal segment this open created. Segments are never reused, so it is unique per open of a store.
+- `open` is the open's number: on log@1, the first journal segment this open created; on objects@1 and sim@1, a writer open's epoch; for a follower, `2⁶³ | n` with n from a process-wide counter (§12.1, v2.47). Segments and epochs are never reused and stay below 2⁶³, so it is unique per open of a store, and a follower's never equals a writer's.
 - A handle is checked against the Db or Snapshot it is used with before anything is read or written:
   - `Table`, `Index`, `Shape` and `Branch` must name the same `StoreId`. A Table, Shape or Index from an earlier open of the same store is valid, because every use checks its id against the catalog it reads, and writes check the epoch too (`Stale`, I3).
   - A `Snapshot` passed to `fork` or `pin`, and every `Ticket`, must also carry this open's number.
@@ -1191,10 +1278,12 @@ All integers are little-endian unless marked BE. "str" means a u16 length follow
 
 | File | Role | Contents | Written |
 |---|---|---|---|
-| `MANIFEST` | 1 | HEADER, then exactly one MANIFEST frame; unknown kinds per §2.7 may come before or after it, within `UNKNOWN_ROOM` (V1). A Bucket store's adds CLAIM and AUTHORITY after it (§11.18) | `.tmp`, sync, rename, sync_dir; a Bucket store publishes `MANIFEST-<gen:020>` to the bucket first |
+| `MANIFEST` | 1 | HEADER, then exactly one MANIFEST frame; unknown kinds per §2.7 may come before or after it, within `UNKNOWN_ROOM` (V1). | `.tmp`, sync, rename, sync_dir (log@1); on objects@1 the bytes are `m-<generation>-<epoch>-<digest>`, created once and named by a CHECKPOINT entry's MARK (§12.2) |
 | `j-<seq>` | 2 | HEADER, then COMMIT frames | created at open and at each cut; appended by the journal task |
 | `p-<seq>` | 3 | HEADER, then NODE frames, children first | `.tmp`, sync, rename, sync_dir |
 | `j-<seq>.end` | 4 | HEADER, END | created with its segment; rewritten whole (open `Write` truncates) and synced by the journal task |
+
+objects@1 has its own names (§12.2): entries (role 2), MANIFESTs (role 1), packs (role 3), `head` (role 7) and locator chunks (role 8, v2.47).
 
 ### 2.3 HEADER (kind 0x0001, MUST): the first frame of every file, 56-byte payload
 
@@ -1202,11 +1291,11 @@ All integers are little-endian unless marked BE. "str" means a u16 length follow
 |---|---|---|---|
 | 0 | 8 | magic | `HIRSTORE`, else `Header` |
 | 8 | 4 | format u32 | 2 (v2.30 AN2); any other value is `Unsupported(format)` |
-| 12 | 1 | role u8 | 1 manifest, 2 journal segment, 3 pack, 4 end file; must match the file's name |
-| 13 | 1 | authority u8 | 0 = local directory. 1 = bucket, only in a Bucket store's MANIFEST (§11.18); packs and segments keep 0. 2–255 are `Unsupported` |
+| 12 | 1 | role u8 | 1 manifest, 2 journal segment (and an objects@1 entry), 3 pack, 4 end file, 7 the objects@1 `head` (v2.46), 8 an objects@1 locator chunk (v2.47); must match the file's or object's name |
+| 13 | 1 | authority u8 | 0 = log (unchanged for every existing directory store), 1 = objects, 2 = sim (§12.1), the same in every file of the store; a memory store writes no file. 3–255 are `Unsupported` |
 | 14 | 2 | zero | |
 | 16 | 16 | identity | equal to the manifest's, else `Header` (a file from another store) |
-| 32 | 8 | epoch u64 | 0. A Bucket store carries its epoch in CLAIM (§11.18); non-zero is `Unsupported` |
+| 32 | 8 | epoch u64 | 0, except in every objects@1 object (entry, MANIFEST, pack, `head`), where it is the creating epoch (≥ 1) and must match the object's name (§12.2); non-zero elsewhere is `Unsupported` |
 | 40 | 8 | seq u64 | manifest generation, segment number or pack number (role 4: its segment's); must match the file name |
 | 48 | 8 | prev_end u64 | segment only: the valid byte length of segment seq − 1, or 0 when the manifest's cut covers it. 0 for other roles. |
 
@@ -1327,10 +1416,15 @@ A reader walks every frame from offset 72 to the end of the file. Exactly one is
 | 0x0012 | END | j-*.end, after HEADER | 1 | 8 | v1 |
 | 0x0020 | NODE | p-* | 1 | 32 × (4096 + 1 MiB + 16) + 12 | v1 |
 | 0x0030 | MANIFEST | MANIFEST | 1 | 64 MiB | v1 |
-| 0x0040 | CLAIM | MANIFEST of a Bucket store, after MANIFEST | 1 | 24 | v2.43, §11.18 |
-| 0x0050 | AUTHORITY | MANIFEST of a Bucket store, after CLAIM | 1 | 64 KiB | v2.43, §11.18 |
+| 0x0040 | CLAIM | an objects@1 CLAIM entry, after LINK | 1 | 24 | v2.46, §12.2 |
+| 0x0050 | AUTHORITY (v2.43) | — | 1 | — | retired by v2.47 and never reused: v2.46 grew its payload, which rule 5 forbids; a reader returns `Unsupported(0x0050)` |
 | 0x0060 | PRINCIPAL | — | 0 | — | retired by v2.26 AJ4 and never reused: the caller is the stream key's prefix |
 | 0x0070 | FENCE | MANIFEST | 1 | 4 | v1 |
+| 0x0090 | MARK | an objects@1 CHECKPOINT entry, after LINK | 1 | 8 KiB | v2.46, §12.2 |
+| 0x00A0 | HEAD | the objects@1 `head` object (role 7), after HEADER | 1 | 136 | v2.47, §12.2: `entry_epoch` and `image` added; never built at 96 |
+| 0x00B0 | LINK | every objects@1 entry, right after HEADER | 1 | 24 | v2.46, §12.2 |
+| 0x00C0 | LOCATE | an objects@1 CHECKPOINT entry, after MARK; a locator chunk (role 8), after HEADER | 1 | 1 MiB | v2.46, v2.47 §12.2: the pack locator, a tree |
+| 0x00D0 | AUTHORITY | the `head` object of an objects@1 store, after HEAD | 1 | 64 KiB | v2.47, §12.2: `style`, config and the level declaration |
 | any other | unknown | anywhere after HEADER | 0 | **`UNKNOWN_LIMIT` = 64 KiB** (C3) | skipped |
 | any other | unknown | — | 1 | — | `Unsupported(kind)` |
 
@@ -1372,12 +1466,12 @@ Reason: these bytes passed a 64-bit check bound to their place, so they are the 
 
 ### 2.9 Rows 11 and 12: what is built, and what each still waits for
 
-v2.43 builds both rows for a bucket authority (§11.18). The table keeps what remains open.
+v2.46 specifies both rows for every authority (§12). The table keeps what remains open.
 
 | Row | Built (v2.43) | Still waits for |
 |---|---|---|
-| 11 claims and epoch fencing | CLAIM (epoch u64, holder StoreId) in a Bucket store's MANIFEST; `Error.Fenced(u64)`; the no-clobber publish of each generation is the fence (§11.18) | Leases. A fenced writer learns of the claim at its next publish, not before; a lease would need a clock both writers trust. A Directory store has nothing to fence: `try_lock` on LOCK is released when the process dies. |
-| 12 object authorities and durability levels | HEADER `authority` 1; AUTHORITY (the Bucket config); `open_bucket`; packs and generations in the bucket (§11.18) | Durability levels above a local sync: a commit is durable at the local journal's sync, and in the bucket only at the next cut. Journal-as-objects is post-1.0. The output gate is covered locally: replies are released after `durable` (§1.8). |
+| 11 claims and epoch fencing | v2.46: the conditional head write is the fence; a claim is one GET and one head replace, then a CLAIM entry; `Fenced`, `Lost`, `Undecided` (§12.3) | Nothing. No clock leases (Q3): a fenced holder learns at its next head write or idle poll, and a fresh read costs one head GET. |
+| 12 object authorities and durability levels | v2.46: one `io.authority` grant keeps the whole history; memory@1, log@1, objects@1, sim@1; declared named levels and `durable_at`; the runner releases at the strongest (§12) | Non-blocking cut uploads and two-level `host < bucket` authorities (deferred by Q1). Evaluate-ahead and derived puts by followers (ENDSTATE §machines). A replicated-log authority beside objects@1. |
 
 ---
 
@@ -1394,7 +1488,7 @@ AP1b specifies PREPARED validation and the target limits in §3.5a.
 3. If the body returns `Ok` and the store has a journal, the COMMIT frame is encoded; a `memory` store encodes no frame (Q2). Then the resident account is checked (§1.11). A `Capacity` failure or a passed limit gives `Refused(c)`, and the frame is dropped. The size limit `Limit(Transaction)` was already enforced during the body by arithmetic on the COMMIT payload size against 16,777,280 (U1), so both modes refuse the same transactions by size (L29).
 4. **Publish point:** the branch head becomes the working roots at version + 1. The commit is now visible. If the branch is followed (§1.5), `latest.publish` of its new Snapshot follows at once; it never waits and never fails.
 5. **Handoff:** `send(frame, seq)` on the journal channel (capacity 128). It waits only when the queue is full (§3.3). If the commit triggers a cut, that cut's step 0 then waits for this frame's ack (§3.5, X1).
-6. `run` returns `Committed(Done{value, ticket: {store, open, Journal(seq)}, info, reads})`.
+6. `run` returns `Committed(Done{value, ticket: {store, open, Journal(seq, branch, version)}, info, reads})`.
 
 **The journal task, per group** (§3.3):
 1. Drain: one `receive`, then `try_receive` while the group is under 64 frames and 4 MiB.
@@ -2084,7 +2178,7 @@ Integers are little-endian unless marked BE, as in §2. "str" and "bytes" have �
 | 0x0022 | BLOB | p-* of class 1 | 1 | 8 + 16,711,680 = 16,711,688 | new (AP8) |
 | 0x0030 | MANIFEST (format 2) | — | — | — | **retired; never reused** |
 | 0x0031 | MANIFEST | MANIFEST | 1 | `MANIFEST_LIMIT` = 16,777,368 (AP4) | new (AP14) |
-| 0x0040, 0x0050, 0x0060, 0x0070 | CLAIM, AUTHORITY, PRINCIPAL, FENCE | as §2.7 | as §2.7 | as §2.7 | CLAIM and AUTHORITY built (v2.43, §11.18) |
+| 0x0040, 0x0050, 0x0060, 0x0070 | CLAIM, AUTHORITY, PRINCIPAL, FENCE | as §2.7 | as §2.7 | as §2.7 | CLAIM: v2.46, §12.2; AUTHORITY 0x0050 retired by v2.47; MARK 0x0090, HEAD 0x00A0, LINK 0x00B0, LOCATE 0x00C0 and AUTHORITY 0x00D0 are new kinds of format 3 under rules 1–5 |
 | 0x0080, 0x0082, 0x0083 | export stamp, catalog delta, inventory | EXPORT (role 5), PREPARED (role 6), §3.5a | as built | as built | unchanged payloads |
 | 0x0081 | preparation metadata | PREPARED (role 6) | as built | 1,048,832 (as built) | **payload changed (AP1b, C-1)**: the target loses `checkpoint_task_bytes` and gains NEW's `pack_bytes`, `checkpoint_bytes` and `journal_limit` |
 | 0x0084 | prepared rows | PREPARED (role 6) | as built | 4096 + 16,711,680 + 8 = 16,715,784 (was 4096 + 1 MiB + 8) | payload unchanged |
@@ -2762,7 +2856,7 @@ where a pack written by H1's singleton rule holds one frame and still counts its
 
 **AP21. Open: validate the format-3 graph, then resolve live edges by location (B3, M3, S6, S7, T12; built).** A parsed MANIFEST and the pages decoded from its files are a **validated inventory and live graph** only after steps 0–4. Every consumer takes that validated value or a projection of it, never the raw MANIFEST fields:
 - writer open, which builds the trees and the location table from it (step 5);
-- read-only open, which attaches the holder roots for journal replay (§11.19);
+- a follower, which attaches the holder roots for entry replay, with packs resolved through the checkpoint's LOCATE rows (§12.2, §12.5);
 - cleanup's retirement, which removes a pack only if it is a seq of the validated R that no lease holds, after O1 has selected the MANIFEST;
 - an install's pre-activation check (§11.1 T10), which runs steps 0–4 over the private packs it wrote and the prospective MANIFEST, before the rename and before activation, with NEW's limits;
 - the prepare opener (§3.5a), which runs steps 0–4 over the EXPORT's captured MANIFEST and packs before it replays the export prefix, and removes nothing (v2.40 C-7).
@@ -2998,84 +3092,587 @@ A later version may add these, and a periodic tour with an I/O budget, without a
 - **Clean control.** Before the damage, the same generation reads with no fault, and `checked` equals the sum of the listed packs' file sizes.
 - **A scrub racing compaction.** A tour is begun, then a cut retires every data pack it holds. Each held file still exists, and the tour finishes clean. After the tour is dropped, the next cut leaves exactly the still-listed packs on disk.
 
-### 11.18 Bucket authority (v2.43)
+### 11.18 Bucket authority (v2.43, deleted by v2.46)
 
-A Bucket store keeps its packs and every MANIFEST generation in an S3 bucket through `std.object`. The local directory holds LOCK, the journal and a byte-exact mirror of the packs and the current MANIFEST. Commits are durable at the local journal's sync, as in a Directory store (§1.8). Objects become authoritative at each cut.
+Replaced by §12's objects@1. There is no reader for a v2.43 bucket store.
 
-**Opening.** `open_bucket(tasks, d, c, r, o, take client, op_ms)` takes `o.authority = Bucket(b)` and a started `std.object.Client` for `b` (`Directory()` is `Unsupported(0)`). `open` and `open_export` refuse Bucket with `Unsupported(1)`. Every bucket call gets the deadline `op_ms` from now on the client's clock (`std.object.deadline_after_ms`). The client belongs to the Db from then on.
+### 11.19 Read-only open (v2.44, deleted by v2.46)
 
-**Bucket keys** (under `b.prefix`):
+Replaced by §12.5's `Follower`: `open_read_only`, `open_bucket_read_only`, `ReadOnly`, `read_only_table`, `read_only_get` and `read_only_version` are deleted. A follower over log@1 is the old offline reader, under writer exclusion, reading the last segment past END as §3.4 does (§12.5). Its S2 `read-only` crash law is kept, restated over a follower (§12.10).
 
-| Key | Bytes |
-|---|---|
-| `p-<seq>` | the local pack file `p-<seq>`, byte for byte. Uploaded by `upload(NoClobber)`, 8 MiB parts in batches of 4, and `complete` |
-| `MANIFEST-<gen>` | `gen` as 20 decimal digits. The local MANIFEST file of generation `gen`, byte for byte. Written once by `store_no_clobber` |
+**Callers that move with it (v2.47, Fable L6).** The deleted API has six callers outside the store's implementation. Each moves to a log@1 `follower` under writer exclusion, or to the writer's own Db, in the slice that deletes the API:
 
-**A Bucket store's MANIFEST.** HEADER `authority` is 1, in the MANIFEST only: packs and segments keep 0. After the MANIFEST frame come exactly one CLAIM and one AUTHORITY, both MUST:
-- **CLAIM (0x0040)**, 24 bytes: `epoch u64 LE ‖ holder.hi u64 LE ‖ holder.lo u64 LE`. `epoch` counts the claims of the store from 1. `holder` names the local directory that made the claim: a random StoreId drawn when a fresh directory first opens the store.
-- **AUTHORITY (0x0050)**, at most 64 KiB: `style u8` (0 virtual, 1 path), then `endpoint`, `aws_region`, `bucket` and `prefix`, each a u16 LE length and its bytes. It is config, never a credential.
+| Caller | Uses | Moves to |
+|---|---|---|
+| `core/programs/store/local.hirsel` | 2 | a follower over the place's directory |
+| `core/programs/store/platform.hirsel` | 3 | a follower over the place's directory |
+| `core/programs/harness/gateway_laws.hirsel` | 1 | a follower in the law |
+| `core/programs/harness/waits.hirsel` | 2 | a follower, `catch_up` with a deadline |
+| `core/programs/harness/live-smoke/main.hirsel` | 1 | a follower |
+| `core/std/api/store.md` | 2 | the follower API's text |
 
-An authority-1 MANIFEST without both frames, with epoch 0, or with either frame twice is `Corrupt(Malformed)`. Either frame in another role's file is `Corrupt`. A Directory open of an authority-1 MANIFEST, or a Bucket open of an authority-0 one, is `Unsupported(1)`, so neither authority opens the other's store. Open compares only `bucket` and `prefix` with `b`: a store may be reached through another endpoint. Any other pair is `Foreign`.
+The implementation's own uses (`store.hirsel`, `store-bucket.hirsel`, `bucket_laws.hirsel`) are deleted with the API.
 
-**A cut.** The cut writes its packs and its MANIFEST bytes locally as §11.12 says. Before the local MANIFEST rename, it:
-1. uploads every pack in `[previous next_pack, new next_pack)` from its local file;
-2. publishes `MANIFEST-<gen>` with `store_no_clobber`.
+## 12. Authorities, the claim fence, levels and followers (Store M2, v2.47, not yet built)
 
-Only a created MANIFEST lets the cut go on to the local rename, the segment removal and the ticket. `Exists` means another writer claimed generation `gen`: the cut fails with `Fenced(epoch)`. A failed bucket call fails it with `Remote(e)`. Either one is sticky: `healthy` returns it, and the Db accepts only `close`. Commits already acknowledged stay durable in the local journal, and a reopen of the same directory recovers them while it holds the claim.
+Background, design history and prior art: `/workspace/code/hirsel-briefs/store-m2-spec-1919/DESIGN.md` (v2.45). Where DESIGN and this section differ, this section is the contract. v2.46 applied Sam's rulings Q1–Q5 of 2026-11-23. v2.47 fixes the two blind re-checks of v2.46 (`m2-recheck-astra-1932`, `m2-recheck-fable-1933`). Q1–Q5 stand unchanged. See CHANGES-v2.47.
 
-**An orphan pack.** A pack upload that finds its key taken lists the generations after the writer's own. Any generation at or past the one it is publishing means the writer has been fenced (`Fenced`). None means the pack was left by a writer that lost its claim before publishing it, so no generation references it, and the claim holder overwrites it. A writer that claims a generation always skips every pack number already in the bucket.
+**Citations.** In this section "Astra #n" can name the v2.46 attack (m2-attack-1924, its An) or the v2.47 re-check (m2-recheck-astra-1932, its #n), and "Fable Fn" the v2.46 review while "Fable L/S/A n" the re-check. CHANGES-v2.47's table is the authoritative map from each re-check finding to its rule, and CHANGES-v2.46's from each earlier finding.
 
-**Recovery and the claim**, at every `open_bucket`:
-1. Read the local MANIFEST, if any. Its HEADER `authority` must be 1 and its AUTHORITY must name `b`.
-2. List `MANIFEST-` after the key of the local generation minus one, and take the highest generation. One below the local generation is `Corrupt(Gap)`.
-3. No generation, with no local MANIFEST: with `o.create`, publish genesis as `MANIFEST-1` (epoch 1, a new holder and a new StoreId). If another writer published it first, adopt that one. Without `o.create`: `NotFound`.
-4. Fetch the highest generation and decode it with its frame checks (xxh3-64, §2.1). A local MANIFEST must have the same StoreId (`Foreign`) and the same holder (`Fenced`): another holder's claim after this directory's last generation means the directory's later commits are not the store's.
-5. List `p-` and set `next_pack` past every pack in the bucket.
-6. Claim the next generation: publish it, as a copy of the highest with `epoch + 1`, this holder and the new `next_pack`, by `store_no_clobber`. `Exists` is `Fenced`.
-7. Abort every pending multipart upload under the prefix (`pending_uploads`, `abort`).
-8. A fresh directory fetches each pack the generation lists that it lacks (`.tmp`, sync, rename) and starts its journal at `first_live`.
-9. Write the claimed MANIFEST locally and open as §11 says.
+**One rule about clocks.** No *safety* rule reads a clock. Fencing, freshness, staleness, reclaim and the claim are decided by positions, epochs and register bytes. Two *liveness* rules use the local monotonic clock only:
+- request deadlines (`op_ms`, `deadline_ns`, `claim_ms`);
+- the idle head poll (§12.3).
 
-**Not built.** No bucket key is ever erased: retired packs and old generations stay in the bucket. Export and install of a Bucket store are refused. Leases and durability levels above a local sync are §2.9's.
+Neither compares clocks across machines.
 
-**Laws** (`bucket_laws.hirsel`, over `std.sim.s3`):
-- **L4, a wire cut.** For each request number n, the writer's connections are cut after n requests, with request n + 1 applied silently or dropped. A recovery through an uncut address into a fresh directory sees exactly the rows of the last acknowledged checkpoint, or with an applied final request, of the next one, and leaves no pending upload. The cut writer's directory then reopens only as `Fenced`, because the fresh directory's holder took the store. Wrong writers caught: a MANIFEST published before its packs complete, recovery below the highest generation, a publish without the fence, and a reopen without the holder check.
-- **Reopen after a cut.** At the same cuts, the writer's own directory reopens through the uncut address with every row its journal acknowledged and none it never committed, and its next checkpoint carries them to a fresh directory.
-- **Soak.** `hirsel test --sim --seeds N` runs one cut per seed: the seed picks the cut request, whether it is applied, and which recovery runs, under retriable faults (resets before the body, `InternalError`) on the connections the seed's plan picks.
-- **The fence.** Writer A checkpoints. Writer B opens a fresh directory and claims the next generation. A's next checkpoint is `Fenced` and A stays unhealthy. B's checkpoints go on, reusing the pack number A's late pack took, and recovery sees B's rows.
+### 12.1 The authority
 
-### 11.19 Read-only open (v2.44)
+An authority keeps a store's history. Each store has exactly one, fixed at genesis and recorded in HEADER `authority`: 0 log, 1 objects, 2 sim. A memory store writes no file. The program receives the authority as a value made from a grant:
 
-`open_read_only(d, options)` returns an opaque `ReadOnly` over the recovered
-main branch. Use `read_only_table` to bind a registered key and value codec
-and `read_only_get` to query the captured roots, or `read_only_snapshot` for the
-captured `Snapshot` (its `version` and any Snapshot read). The view exposes no
-writer operations. It stays at its recovered version when a
-later writer commits or checkpoints.
+```hirsel
+pub fn memory_authority() -> Authority                                                        // authority.memory@1
+pub fn log_authority(d: Dir) -> Authority                                                    // authority.log@1
+pub fn object_authority(take c: std.object.Client, level: String, op_ms: u64) -> Authority   // authority.objects@1
+pub fn sim_authority(plan: sim.Plan) -> Authority                                             // authority.sim@1
+```
 
-The caller excludes concurrent writers during recovery to read the offline
-durable state. The opener checks options, refuses an EXPORT directory, reads
-the existing MANIFEST and runs AP21 steps 0–4. A missing MANIFEST is
-`NotFound`, regardless of `options.create`. It attaches the validated roots
-in memory, applies the bounded journal reader with the normal END, prev_end
-and torn-tail rules, and checks the recovered logical account. It rereads the
-MANIFEST and returns `Held` if its bytes changed during recovery. It does
-not open LOCK, issue a sync, clean up, create or rename files, rebuild the
-writer's location table, or start a worker. Validation, allocation and I/O
-failures keep their typed errors.
+**The selection.** Every writer open names what it expects to find. A launch's selection is a value of these three `Options` fields:
+- `o.expect: Option[StoreId]`;
+- `o.activation: Option[u64]`;
+- `o.image: Option[Digest]`, the 32-byte digest (AM8's `Digest`) of the launch's encoded `Describe`. The runner computes it. The store treats it as opaque bytes and only compares them.
 
-`open_bucket_read_only(d, options, mut client, op_ms)` needs the local
-mirror because the bucket holds checkpoint generations and the journal is
-local. It validates the mirror and checks its MANIFEST against the bucket's
-highest generation, byte for byte. A newer remote generation gives `Held`.
-Missing or disagreeing remote bytes fail with a typed error. The client
-lists and fetches without publishing a claim, mirroring packs or aborting
-uploads.
+HEAD records the store identity (in its HEADER), the current `activation` and the current activation's `image` (§12.2). Each is set at genesis and changed only by the head write of an activation CHECKPOINT (§12.7). This applies Astra #5 (v2.47).
 
-The S2 `read-only` crash law compares the directory names and bytes before
-and after read-only open at each cut of a torn MANIFEST publication. Before
-the rename is durable it requires the original checkpoint and journal
-history. Afterward it requires `Corrupt(Truncated)`. The snapshot law
-commits a replacement after open and checks both the original view and a new
-one. The Bucket law recovers a journal-only row and refuses the old mirror
-after another directory advances the remote generation.
+**Opening checks, all made before any write (Q4, Astra #5, #11, #13, #21).** They run on the observed head. With no head, they run before genesis's first create.
+- An authority of another kind than the store's HEADER is `Unsupported(kind)`.
+- If `o.expect = Some(id)`, a head of another identity is `Foreign`. **No head** with `o.expect = Some(_)` is `NotFound`, and genesis never runs. An existing deployment whose grant points at an empty namespace is refused; a new identity is never created in its place.
+- An AUTHORITY frame naming another `bucket` or `prefix` than the live client is `Foreign`. The recorded endpoint may differ from the live one, and is never used to qualify (§12.2).
+- If the grant's level declaration differs from the recorded one (§12.4), the result is `Declared(name)`, naming the first level that differs.
+- If `o.activation = Some(v)` and the head's `activation` ≠ v, the result is `NotCurrent(head.activation)`. No head with `o.activation = Some(v)` and v ≠ 0 is `NotFound`.
+- If `o.image = Some(d)`, the head's `activation` is at least 1 and its `image` ≠ d, the result is `NotCurrent(head.activation)`. A head at activation 0 has no image (genesis records all zeros), and no head has none, so the check does not apply to them: the runner's genesis install sets the first image (§12.7, RUNNER §6). So any open whose launch image is not the active one fails here, `Current(v)` and `Reopen` alike, before it can replace OLD's head.
+- objects@1 only: if the live client's provider is not qualified (§12.2, "Which providers qualify"), the result is `Unqualified(class)`.
+
+None of these is retried by `open`'s claim loop, and none writes a byte.
+
+**Open identity (§1.12, Astra #19, #22).**
+- On log@1 an open's number is the first segment the open creates, as today.
+- On objects@1 and sim@1 a writer open's number is its epoch. Each writer open claims, and epochs never repeat.
+- A follower's number is `2⁶³ | n`, with n drawn from a **process-wide counter** that only rises. Snapshots, resume tokens and shared-view caches are process-local, so a number that cannot repeat within the process is enough. No random draw is involved. Epochs and segment numbers stay below 2⁶³: one that would reach 2⁶³ is `Limit(Ids)` before any write. So a follower's number never equals a writer's.
+
+### 12.2 The history and its names
+
+**log@1 is today's directory store, unchanged in format and GC** (§2–§11, format 3).
+- Its history is the journal and the MANIFEST, and its fence is the OFD lock on LOCK.
+- It writes no CLAIM. `retain`, `checkpoint_entries`, `claim_ms`, `head_poll_ms` and `image` do not apply to it. On log@1 the runner keeps its post-open `Describe` comparison under LOCK, as built.
+- Its one level is `host`, which is today's `durable`. ENDSTATE's `process` level waits until §3.4 keeps valid frames above a segment's synced end.
+
+The rest of this section is objects@1. sim@1 implements the same protocol over its in-process register and object map, with the level rule of §12.4.
+
+**Every objects@1 object is a format-3 file (AP1).**
+- Its HEADER carries `authority` 1 and its creating `epoch`, which is non-zero only on objects@1.
+- Frame checks keep §2.1's 33-byte binding unchanged: `identity ‖ role ‖ seq ‖ offset`, with `seq` the HEADER's (a position, generation or pack seq). **The binding never contains an object name, so it is not circular** (Astra #1, Fable F8).
+- An object's **digest** is xxh3-64 (seed 0) over its complete bytes, from offset 0 to its end, computed after every frame is sealed. The digest appears in the object's name and in whatever references it (LINK, HEAD, MARK, LOCATE). A reader recomputes it over the bytes it read, and a mismatch is `Corrupt(Fault{file: name, offset: 0, why: Checksum})`.
+- A HEADER whose `role`, `seq` or `epoch` differs from the name's is `Corrupt(Header)`. So a copy moved to another position's or epoch's name fails before its digest is compared.
+
+**Names.** All names sit under the AUTHORITY's `prefix`. Numbers are decimal, zero-padded to 20 digits, and digests are 16 lower-case hex digits.
+
+| Key | Role | Bytes | Written by |
+|---|---|---|---|
+| `head` | 7 | HEADER(seq = position) ‖ HEAD ‖ AUTHORITY | genesis: create (`If-None-Match: *`); after that only `store_if` with `Match(t)` (§12.3) |
+| `e-<position>-<epoch>-<digest>` | 2 | one entry: HEADER(seq = position, `prev_end` 0) ‖ LINK ‖ body frames | create-only |
+| `m-<generation>-<epoch>-<digest>` | 1 | a MANIFEST (AP14) | create-only |
+| `p-<seq>-<epoch>-<digest>` | 3 | a pack (class 0, 1 or 2) | create-only multipart (`upload(NoClobber)`, `parts`, `complete`) |
+| `l-<position>-<epoch>-<digest>` | 8 | a locator chunk: HEADER(seq = the position of the CHECKPOINT entry that first wrote it) ‖ one LOCATE frame (v2.47, "The pack locator") | create-only |
+
+- **Create-only everywhere** (Astra #20). Every entry, MANIFEST, pack and chunk is written with `If-None-Match: *`, and a name is never written twice with different bytes:
+  - one holder writes an entry's (position, epoch) once. An epoch has one holder, and a holder that cannot finish an entry write is poisoned, so it never writes that position again;
+  - a holder never reuses a pack seq, a generation or a chunk position within its epoch. Its counters only move up during an open, the seqs of refused cuts included, and the MANIFEST's `next_pack` is at least every seq it used;
+  - a different epoch gives a different name.
+
+  A create answered `Exists` (412) is resolved by one GET. Exactly this holder's bytes are `Created`. Any other bytes are `Corrupt(Fault{file: name, offset: 0, why: Malformed})`, refused before publication. Nothing is ever overwritten.
+- **Multipart completion is not a PUT retry (Astra #18).** `complete` with `If-None-Match: *` has these outcomes:
+  - a well-formed `CompleteMultipartUploadResult` is `Created`;
+  - an HTTP 200 whose body is an `Error` element is that error, never success;
+  - 412 is `Exists` and is resolved by the one GET above;
+  - 409 (`ConditionalRequestConflict`), `NoSuchUpload`, or an `Uncertain` reply resolves as follows. A GET finds the key: exact bytes are `Created`, and other bytes are `Corrupt(.. Malformed)`. NotFound **restarts the upload with a fresh upload id and the same immutable bytes**, within the cut's remaining budget. Replaying a completion on a spent upload id is never done.
+
+  When the budget ends, the cut is refused with `Remote(e)`. Nothing is published, AP16 loses nothing, the holder stays healthy, and the next trigger retries the cut.
+- **The head's bytes differ for every (epoch, holder, position).** The residual assumption is stated as §2.1 states one for checksums: a qualified provider's validator for two distinct head bodies is equal only with negligible probability while an old request can still arrive (Astra #17). Here is why that holds on each qualified provider:
+  - AWS documents the ETag of a single PUT under no encryption or SSE-S3 as the MD5 of the body. A collision between two of the store's own distinct head bodies is in the same class as a frame-checksum collision.
+  - Tigris returns a content ETag, observed in `tigris-cas-1925`.
+
+  An AWS bucket whose default encryption is SSE-KMS, DSSE-KMS or SSE-C does not qualify (below), because AWS does not document its ETag as a digest of the body. Q5's exact readback covers a 412. The validator assumption covers only an `Applied` reply, which is never read back.
+
+**Frames of objects@1** (all MUST, all format 3 under §2.7 rules 1–5):
+
+| Frame | Kind | Payload |
+|---|---|---|
+| CLAIM | 0x0040, 24 B | `epoch u64 ‖ holder.hi u64 ‖ holder.lo u64` (v2.43's layout, unchanged) |
+| AUTHORITY | **0x00D0**, ≤ 64 KiB | `style u8` (0 virtual-hosted, 1 path-style; any other value is `Corrupt(Malformed)`), then `endpoint`, `aws_region`, `bucket` and `prefix`, each a u16 LE length and that many bytes of UTF-8. `endpoint` is 1–2,048 bytes, `aws_region` 0–64, `bucket` 3–63 and `prefix` 0–1,024. Then the **level declaration**: `count u8` (1–16), and for each level, weakest first, `name` (a u16 length and 1–64 bytes of UTF-8, unique) and `survives u8` (0 the process, 1 a host crash, 2 a holder change). On objects@1 `count` is 1 and `survives` is 2. Leftover bytes, a field outside its range, invalid UTF-8, a count of 0 or over 16, a duplicate name, or a `survives` above 2 is `Corrupt(Malformed)`. Genesis refuses a grant whose fields exceed these ranges with `Limit(Name)` before any request. It is config, never a credential. **0x0050, v2.43's AUTHORITY, is retired** (rule 5: a known kind's payload never grows). Its layout is the first five fields above, and v2.43 stores have no reader (§11.18), so a 0x0050 frame is `Unsupported(0x0050)`. |
+| MARK | 0x0090, ≤ 8 KiB | `generation u64 ‖ m_epoch u64 ‖ m_digest u64 ‖ m_len u64` (the MANIFEST's name and length), `floor u64`, `depth u8` (0–3, the locator's depth), `count u32` (0–254), then `count` rows `position u64 ‖ epoch u64 ‖ digest u64 ‖ len u64`. The rows are the **earlier retained checkpoints**, ascending by position, all below this entry's position and at or above `floor` (§12.6). The entry itself is retained implicitly. A MARK is 45 + 32·count bytes, at most 8,173. |
+| HEAD | 0x00A0, **136 B** | thirteen u64 LE, then 32 bytes. In order: `epoch`, `holder.hi`, `holder.lo`, `activation`, `position`, **`entry_epoch`**, `len`, `digest` (the latest entry is `e-<position>-<entry_epoch>-<digest>`, of length `len`), `c_position`, `c_epoch`, `c_len`, `c_digest` (the latest CHECKPOINT entry), `floor`, then **`image`** (32 bytes, §12.1). The store identity is in the HEADER. |
+| LINK | 0x00B0, 24 B | `prev_epoch u64 ‖ prev_len u64 ‖ prev_digest u64`, naming the entry at position − 1. All zero at position 1. |
+| LOCATE | 0x00C0, ≤ 1 MiB | rows of 32 B, at most 32,768 per frame. At depth 0 each row is `seq u64 ‖ epoch u64 ‖ len u64 ‖ digest u64`, naming a pack, ascending strictly by seq. At depth d ≥ 1 each row is `position u64 ‖ epoch u64 ‖ len u64 ‖ digest u64`, naming a depth-(d − 1) chunk object `l-<position>-<epoch>-<digest>` and its length, in seq order of the rows they hold. |
+
+Leaf rows ascend strictly by seq across every chunk of a level, and a reader checks that order across chunk boundaries.
+
+**HEAD rules.** These are checked on every head read, and each failure is `Corrupt(Malformed)` (Fable A3):
+- `epoch ≥ 1`, `position ≥ 1`, `1 ≤ entry_epoch ≤ epoch`, `1 ≤ c_epoch ≤ epoch`, `1 ≤ floor ≤ c_position ≤ position`;
+- `len` and `c_len` are at least 72 + 40 and at most `ENTRY_READ_LIMIT` (below);
+- **when `position = c_position`, (`entry_epoch`, `len`, `digest`) = (`c_epoch`, `c_len`, `c_digest`)**: the latest entry *is* the checkpoint;
+- the head's HEADER `epoch` equals HEAD `epoch`, and its HEADER `seq` equals `position`.
+
+Before writing a head, a holder computes `epoch + 1` (a claim) or `position + 1` (an advance) by checked arithmetic. A claim also needs `position + 1` for its CLAIM entry, so it checks both before step 3. Reaching 2⁶³ is `Limit(Ids)` before any request (Astra #12, #13).
+
+**What each head write sets (Astra #1, Fable L1).**
+- A **claim** copies `position`, `entry_epoch`, `len`, `digest`, every `c_*`, `floor`, `activation` and `image` unchanged, and changes only `epoch` and `holder`.
+- An **advance** sets `position` to p + 1, and `entry_epoch` to its own epoch with the new entry's `len` and `digest`. It changes `c_*` and `floor` only when the entry is a CHECKPOINT, and `activation` and `image` only for an activation CHECKPOINT (§12.7).
+- A claim also copies the AUTHORITY frame **byte for byte** (Fable S2).
+
+So the latest entry's name is always in HEAD: after any number of claims with no advance between them, the latest entry is still `e-<position>-<entry_epoch>-<digest>`.
+
+**Chain rules** (Fable A3). Each is checked on every entry read and is `Corrupt(Malformed)` otherwise:
+- a LINK's `prev_epoch` ≤ its entry's HEADER `epoch`, so epochs never fall along the chain;
+- a CLAIM frame's `epoch` equals its entry's HEADER `epoch`;
+- a CHECKPOINT entry's MARK rows ascend strictly, lie in [`floor`, position), and its `floor` is at least the floor of the CHECKPOINT it succeeds.
+
+**Entries.**
+- A writer creates an entry of at most `ENTRY_LIMIT` = 72 + 40 + max(`group_bytes`, 16 + 16,777,280) bytes for its own `group_bytes`.
+- A reader never needs any open's `group_bytes`. It knows each entry's `len` from its successor's LINK or from HEAD before it fetches.
+- A reader refuses a `len` above `ENTRY_READ_LIMIT` = 72 + 40 + 2³² + 16 + 16,777,280 bytes before allocating (`Corrupt(Malformed)`). That is the largest `ENTRY_LIMIT` any `group_bytes` allows.
+- A reader allocates exactly `len`, charged (§12.9).
+
+| Entry | Frames after LINK | Made by |
+|---|---|---|
+| GROUP | 1..`group_commits` COMMIT, FORK and other journal frames, or one frame larger than `group_bytes` alone (§3.3) | an advance |
+| CLAIM | one CLAIM | the first advance after a claim (§12.3) |
+| CHECKPOINT | one MARK, then one LOCATE (empty at genesis) | a paused cut (AP16), and genesis |
+
+**A CHECKPOINT entry at position c certifies the state after its own cut's operation (Q1, Astra #4, Fable F1).**
+- objects@1 uses AP16's paused cut, never §3.5's concurrent one. No entry is advanced between the moment the cut reads the roots and the moment its CHECKPOINT entry is Advanced.
+- The cut's **input** is the settled state through entry c − 1.
+- Its MANIFEST is that state **after applying the cut's own operation**: `delete_branch` without the branch, `pin` with the pin, a cut-path `fork` with the branch, an activation's graft (§12.7), the first import's rows, or nothing for a plain `checkpoint`.
+- So the state certified at c is the state after entry c. Recovery loads the checkpoint and applies the entries above c.
+- The cost is stated: on objects@1 the pause includes the cut's pack uploads and its two requests, and commits wait for it. Non-blocking background uploads (commits during a cut) are deferred until measured (Q1).
+
+**When a cut runs on objects@1.**
+- It runs as today: after `checkpoint_bytes` of journal frames since the last cut, or on `checkpoint`.
+- It also runs when the number of entries since the latest CHECKPOINT reaches `checkpoint_entries` (default 4096; 0 is `Missing("checkpoint_entries")` at open; Q1, Fable F10).
+- An open whose recovered suffix already holds `checkpoint_entries` or more entries cuts before it returns.
+- A cut refused for memory loses nothing (AP16), and the next trigger retries it.
+
+**The objects@1 MANIFEST.** The MANIFEST bytes are AP14's, with these readings:
+- `first_live` is the CHECKPOINT entry's position c;
+- `prev_first` is the previous retained checkpoint's position (c at genesis);
+- `retired` is always the all-zero root.
+
+Retirement on objects@1 is reclaim's (§12.6): a pack is garbage when no retained checkpoint's locator names it.
+
+**The pack locator (Astra #2, #9, #10; v2.47 makes it a tree).** A PagePtr names a pack by `seq` only. On objects@1 a CHECKPOINT's locator maps each seq to the pack's full name and length.
+- **Shape.** The CHECKPOINT entry holds one LOCATE frame, the locator's root, and MARK `depth` says what its rows name:
+  - At depth 0 the rows are the pack rows themselves, at most 32,768.
+  - At depth d ≥ 1 the rows name chunk objects of depth d − 1. Each chunk holds at most 32,768 rows, ordered by seq.
+  - Depth 3 addresses 32,768⁴ = 2⁶⁰ packs, above any `next_pack` a store can reach before `Limit(Ids)`. So **every covering cut has a representable locator**, whatever `pack_bytes` and the number of live pages. The cut-size refusal of v2.46 (`Limit(Manifest)` for a locator over `ENTRY_LIMIT`) is deleted.
+  - A cut builds the smallest depth that fits. It reuses, by name, every chunk whose rows are unchanged, so its cost is O(changed rows + changed chunks).
+- **Coverage.** The leaf rows are exactly the packs the checkpoint's MANIFEST reaches, inherited packs of older epochs included:
+  - L, every `packs` row (classes 0 and 1);
+  - C, every class-2 pack that holds a page of the `packs` tree (AP21 step 0's C, since `retired` is empty).
+
+  Leaf rows ascend strictly by seq across frames and chunks.
+- **Bootstrap.** HEAD names the latest CHECKPOINT entry. Its MARK names the MANIFEST (generation, epoch, length, digest) and the locator depth. Its LOCATE frame gives the root. A cold reader needs no LIST at any step.
+- **Reading, in this order, each allocation bounded and charged before its own GET (Astra #9):**
+  1. the CHECKPOINT entry, of HEAD's `c_len` (≤ `ENTRY_READ_LIMIT`);
+  2. the MANIFEST, of MARK's `m_len`, refused above AP14's `MANIFEST_LIMIT` before the GET;
+  3. the locator's chunks, each of the length its parent row gives, refused above 72 + 16 + 1 MiB;
+  4. class-2 packs, the list-page reads of AP21 step 0. Each is one `fetch_range` of the PagePtr's 16 + `len` bytes (bounded at 8,400), then each class-2 pack is streamed once through the 65,536-byte chunk buffer with its whole-object length and digest checked against its row as the stream ends;
+  5. class-0/1 packs, each refused before its GET if its row's `len` exceeds AP21 step 1's bound from that pack's `packs` row (its `frames`), then read whole.
+
+  So no pack is read whole before the list rows that bound it are validated.
+- **Checks.**
+  - The set of leaf-row seqs must equal L ∪ C exactly. A missing or extra row is `Corrupt(Malformed)`. This replaces v2.46's "a row whose pack no edge reached", which assumed that every `packs` row keeps a live frame, an invariant AP16 does not state (Fable's open question).
+  - A fetched pack whose length, digest, HEADER `seq` or HEADER `epoch` differs from its row is `Corrupt`.
+  - A PagePtr into a seq with no row is `Dangling(stamp)`.
+  - A chunk whose HEADER `seq` differs from its name's position, or whose rows break the cross-chunk order, is `Corrupt(Malformed)`.
+  - These checks are AP21 steps 0–4 with "the file `p-<seq>`" read as "the object the row names".
+- **Every user.** Recovery, followers, scrub, export and reclaim resolve packs through the locator of the checkpoint they work from, never by listing.
+
+**Provider contract (Astra #8, #17, Fable F2).** objects@1 is safe only on a provider that gives all five of these, across every endpoint and client that can reach the bucket and prefix:
+1. a **linearizable conditional PUT on `head`**: `If-Match: <tag>` applies only if the current head's tag is exactly `tag`, and `If-None-Match: *` applies only if no head exists. Each is evaluated against the latest applied write from any client in any region;
+2. a **linearizable GET of `head`**, whose body and tag come from the same response;
+3. a **validator that does not recur** for distinct bodies while an old request can still arrive, under the residual assumption stated above;
+4. **create-if-absent** for entries, MANIFESTs, packs and chunks (`If-None-Match: *` on PUT and on multipart `complete`);
+5. **read-after-write** by exact key for every acknowledged object, and a LIST that shows every object created before it was issued. LIST is used only by genesis's empty check, by recovery and followers as a fetch hint (§12.3), and as reclaim's candidate source. A lagging LIST only slows a fetch or leaves garbage.
+
+The client maps **412** to `Mismatch` (for `If-Match`) and `Exists` (for `If-None-Match`). A **409** on a conditional PUT (S3's `ConditionalRequestConflict`: a conflicting request was in flight) is **retried with the same tag and body** within the budget, and is never `Mismatch` (Fable F7). Multipart completion has its own rule (above).
+
+**Which providers qualify (Fable S2, Astra #17).** `object_authority` qualifies the **live client** at every open (writer, genesis and follower) before any write. It never uses the AUTHORITY recorded in the head.
+- The live client's endpoint must be `https`. Otherwise the result is `Unqualified("insecure")`, because the service identity is the TLS-authenticated host.
+- The provider is identified by the live client's configured host, matched exactly:
+  - `s3.<region>.amazonaws.com` or `s3.amazonaws.com` is AWS S3;
+  - `fly.storage.tigris.dev` or `t3.storage.dev` is Tigris;
+  - a `std.sim.s3` client is the sim;
+  - any other host, including AWS VPC, dual-stack and FIPS hosts and every S3-compatible service, is `Unqualified("unknown")`.
+- **AWS S3** qualifies when one `GetBucketEncryption` shows no default encryption or SSE-S3 (`AES256`). Conditional writes are evaluated against the bucket's single strongly consistent state. Any other algorithm, or a failed or denied request, is `Unqualified("aws:<reason>")`.
+- **Tigris** qualifies only when one `GetBucketLocation` reply is on an **exact allow-list of replies observed from real buckets**. Tigris documents Multi-region (`usa`, `eur`) and Single-region buckets as "strong consistency globally", and Global and Dual-region buckets as strongly consistent only within a region. Its locations page documents the `GetBucketLocation` reply only for Global (`global`). So:
+  - `global` is `Unqualified("tigris:global")`;
+  - a reply containing a comma (Dual-region) is `Unqualified("tigris:dual-region")`;
+  - a reply on the allow-list qualifies;
+  - every other reply, and an absent, empty, unparseable, failed or denied reply, is `Unqualified("tigris:<reply or reason>")`. An unrecognised value never counts as Single-region.
+
+  The allow-list is a table in the store's source. Each row is a reply string and the probe that observed it on a bucket of a documented Multi-region or Single-region type. **v2.47 ships it empty.** The candidates are `usa`, `eur` and the region codes of Tigris's regions reference. Each enters only after one `GetBucketLocation` on a real bucket of that type (open item; the dev bucket `divine-glitter-523` replies `global` and is refused).
+- A single-endpoint race that one bucket wins 20 times out of 20 shows the operations work, not that they are linearizable across regions, so it never qualifies a bucket type on its own.
+- **`std.sim.s3`** qualifies. It is one map.
+- There is no override flag: a linearizability claim the store cannot check would be a hidden weaker promise.
+
+**`std.object` gains** (Astra #4, #17, #18):
+
+```hirsel
+pub type Conditional = Applied(Meta) | Mismatch
+pub type Precondition = Match(ETag) | Absent
+pub fn store_if(mut c: Client, key: String, pre: Precondition, take body: Bytes, deadline_ns: u64) -> (Result[Conditional, Error], Bytes) waits
+pub fn endpoint_host(c: Client) -> String                                     // the live client's configured host, lower-case
+pub fn endpoint_secure(c: Client) -> bool                                     // https
+pub fn bucket_location(mut c: Client, deadline_ns: u64) -> Result[String, Error] waits     // GetBucketLocation's LocationConstraint
+pub fn bucket_encryption(mut c: Client, deadline_ns: u64) -> Result[String, Error] waits   // GetBucketEncryption's SSEAlgorithm, "" for none
+```
+
+`store_if` retries only three things: what cannot have been delivered (no request byte committed), 409, and 400 `RequestTimeout`. Every other outcome after delivery may have started is returned as it is: `Applied`, `Mismatch` (412), or `Uncertain(reason)` (timeout, reset after the body, 5xx, 503 `SlowDown`, 429). It never resolves by HEAD or by put id, because the store's Q5 rule (§12.3) is the only resolver. `store_no_clobber`'s resolving path stays for callers outside the authority. `complete` gains the 200-with-`Error` and `NoSuchUpload` distinctions above.
+
+### 12.3 Claim, advance and the head poll
+
+**The Q5 rule (one rule for every head write, genesis included).** A head write sends body B with precondition P (`Absent` at genesis, `Match(t)` otherwise):
+- `Applied` → done. The new tag is the response's.
+- `Uncertain` → resend exactly (B, P), within the client's retry budget and the operation's deadline. The bytes and precondition are the same, never a fresh tag.
+- `Mismatch` → GET `head` once:
+  - if its bytes are exactly B, the write is done, continuing from the GET's tag (an earlier send applied);
+  - if they are any other bytes, **this holder's precondition is gone for good**. The current head is not P's, the head is never erased and tags never recur, so no later copy of B can apply. B **may already have applied** before the intervening write (a claim keeps the position, so the history then holds B's entry). The result is `Fenced(e)` for an advance and `Lost` for a claim. No *outstanding* ticket is acked. Whether an advance's group is in the history is decided by the next claim's head, exactly as for `Undecided`.
+- If the budget or deadline runs out, or the GET itself fails, the result is `Undecided`:
+  - for an advance this is sticky: the claim is dead, and the group is never acked by this open;
+  - for a claim, `open` returns `Undecided` having written no entry.
+
+**Safety.** Only this holder produces B: it holds `holder` and a position no one else writes at this epoch. Once B is the head, every later head reaches it through LINK. So "the head is B" proves B is in the history permanently, and acking on that evidence is not "retrying a failed barrier into success" (Q5, Fable F5). The Tigris probe saw exactly these outcomes for injected client timeouts (`tigris-cas-1925`):
+- applied, then 412 with own bytes;
+- not applied, then 200 on resend;
+- an intervening writer, then 412 with other bytes.
+
+**One owner per advance (Astra #11, Fable A3).** The journal task owns each advance's completion, and a completion is irreversible.
+- Evidence comes from the Q5 rule's own replies, from a `fresh_snapshot` GET, or from an idle poll. Each is sent to the journal task, and **the first evidence wins**.
+- If a GET shows this advance's exact bytes, the advance is Advanced and its tickets are acked. A later 412 with another holder's bytes on the still-outstanding resend then makes the holder `Fenced` for all *future* work. It never revokes that success.
+- If the first evidence is another holder's bytes, the advance is `Fenced` and nothing in it is acked.
+
+**Genesis** (no head and `o.create`; Astra #4, #6, #9, #12, #20, #21, Fable L2):
+1. GET `head` returns NotFound. Without `o.create` the result is `NotFound`. Run §12.1's checks for the no-head case, which refuse `o.expect = Some(_)` and `o.activation = Some(v ≠ 0)`. This all happens before any write. A racing `Lost` later can never switch an open that failed these checks onto the claim path.
+2. **Empty namespace, ignoring genesis debris.** LIST the prefix page by page. A key shaped as genesis debris is skipped: `e-<1>-<1>-<digest>`, `m-<1>-<1>-<digest>`, `p-<seq>-<1>-<digest>` or `l-<1>-<1>-<digest>`, with `<1>` the zero-padded 1. Any other key is `Exists("authority")`, and nothing is written.
+   - Debris is what an earlier genesis or import left when it crashed or lost before its head create. No v2.43 key has these shapes (v2.43 wrote `MANIFEST-<gen>` and `p-<seq>`).
+   - A concurrent creator's debris that appears between the GET and the LIST is skipped the same way. Concurrent creators are decided in step 6.
+   - Clearing a prefix that holds other keys is an operator act. There is no reader for v2.43 bytes.
+3. Draw the identity and the holder (16 bytes each, `Random`).
+4. Create the base: the genesis MANIFEST `m-1-1-<d>` (§3.4 step 2's fields in AP14's layout: generation 1, `next_pack` 1, `first_live` 1, `prev_first` 1, empty list roots, main at version 0, `account` 0). **A standalone import** (§12.7) instead creates its validated packs `p-<seq>-1-<d>`, any locator chunks and its MANIFEST here, all at epoch 1.
+5. Create entry 1, `e-1-1-<d₁>`: HEADER(seq 1, epoch 1), LINK(0, 0, 0), MARK{generation 1, epoch 1, the MANIFEST's len and digest; floor 1; depth; no earlier retained}, and the LOCATE root (empty for a plain genesis). **The base is an ordinary CHECKPOINT.**
+6. Create `head` with `Absent`: HEAD{epoch 1, holder, activation 0, position 1, entry_epoch 1, len₁, d₁, c = (1, 1, len₁, d₁), floor 1, image all-zero}, and the grant's AUTHORITY. Apply the Q5 rule.
+   - A loser of a genesis race gets `Lost` and **returns `Lost`**. It never retries into a claim (Fable L5).
+   - The loser's objects are epoch-1 debris that reclaim removes (§12.6) or a later genesis skips.
+7. The first advance is the CLAIM entry at position 2 (below).
+
+So every head names a CHECKPOINT, and HEAD has no "absent checkpoint" encoding. Recovery always starts from a MANIFEST. A crash or `Undecided` anywhere before step 6 leaves only debris, and the next `open` with `create` finishes genesis with no operator. A delayed `Absent` request of the crashed attempt can still apply. That is an ordinary genesis race, and the second opener's step 6 gets `Mismatch` then `Lost`.
+
+**Claim** (every writer `open` of an existing store; Q4, Astra #5, #13, Fable L3, L5). The steps before the replace write nothing:
+1. **GET `head`**: its bytes give tag t₀, epoch e₀ and position p₀.
+2. **Check** §12.1's opening checks on those bytes: identity, AUTHORITY, declaration, activation, image and qualification. Also check that `epoch + 1` and `position + 1` do not reach 2⁶³ (`Limit(Ids)`). Any failure returns with nothing written.
+3. **Recover read-only** from that head (Recovery below, steps 1–4), with no epoch held, into private state. Every failure here (`Full(Allocation(c))`, `Full(Resident(c))`, `Corrupt`, `Remote`) returns with nothing written and the incumbent untouched.
+4. **GET `head`** (bytes, tag t, epoch e, position p). If (e, holder) differs from the pair seen at step 1, the store has another holder since step 1, and the result is `Lost` (below). Otherwise rerun step 2's checks on these bytes.
+5. **Catch up, still writing nothing,** from p₀ to p: apply privately the entries the incumbent advanced since step 1, by Recovery's walk from p down to p₀ + 1. Their LINK chain must reach the entry at p₀ that step 3 verified, otherwise `Corrupt(Malformed)`. Every failure here (`Full`, `Corrupt`, `Remote`) returns with nothing written and the incumbent untouched (Fable L3: a claimant whose `resident_limit` cannot hold the incumbent's grown state never deposes it).
+6. **Replace the head** with `Match(t)`, t from step 4, and HEAD{epoch e + 1, this holder, every other field copied (§12.2)}. Apply the Q5 rule. With step 4 this is Q4's one GET and one conditional replace; the catch-up between them is local work and reads of immutable entries. It immediately fences the old holder: the old holder's next head write gets `Mismatch`, then `Fenced`. If the incumbent advanced after step 4, the replace gets `Mismatch` with the same pair, and the loop (below) retries from step 4.
+7. **The first advance is the CLAIM entry** at p + 1, {e + 1, holder}, through the ordinary advance path. `open` returns once it is Advanced, so a returned Db has its claim recorded in the history.
+   - If this advance is `Fenced`, a later claimant replaced the head after step 4, and `open` returns `Lost`. A claim that wins step 6 but returns no Db is counted in L52 as a fence, not as a successful open (Astra #13).
+   - A crash between steps 6 and 7 leaves a head of epoch e + 1 over an entry of a lower epoch, which the `entry_epoch` rule allows.
+
+**The claim loop (Q4, Fable F4, L5, Astra #13).** Step 6's `Mismatch` has two causes, and the loop treats them differently:
+- If the Q5 rule's GET after the failed replace shows **the same (epoch, holder) as this attempt's step-4 GET**, the incumbent only advanced. The claimant retries from step 4 after a backoff with jitter from `Random` (base 10 ms, doubling, at most 1 s), catching up the new entries first.
+- If the pair **changed**, another claimant won, and `open` returns `Lost` at once. It never deposes a fresh claimant mid-recovery. The launcher decides whether to try again.
+
+Every request and backoff is bounded by the time left of `o.claim_ms` (default 30,000; 0 means one attempt) on the local monotonic clock. When it ends, `open` returns `Lost`.
+
+Progress is conditional, and stated as such. An attempt succeeds when its replace reaches the register before the incumbent's next head write. A holder that writes its head continuously can starve a claimant for the whole `claim_ms`. The remedy is the launcher's: stop the incumbent (RUNNER-SPEC item 5's generation fence). The loop only absorbs a lost race. Validation failures, `Undecided` and `Remote` are not retried.
+
+**Recovery** (objects@1, replacing §3.4 steps 1–5; Fable L4):
+1. From HEAD take `c` and `p`. Allocate the chain list, 24 bytes × (p − c), charged (§12.9). An allocator refusal is `Full(Allocation(c))` before any GET.
+2. **Name the suffix.** The head names entry p as `e-<p>-<entry_epoch>-<digest>`.
+   - As a **fetch hint only**, LIST `e-` keys after `e-<c>` in pages, and `fetch_range` bytes 0..112 (HEADER and LINK) of each listed name on parallel lanes.
+   - Then walk down from p to c + 1 by LINK, using each successor's LINK to name its predecessor. Read the prefix of any name the hint lacked serially.
+   - A listed name that the walk does not reach is ignored. A missing or extra listed name changes only speed. Only the chain from the head is applied.
+   - Record (epoch, len, digest) per position. The LINK at position c + 1 must name the checkpoint (c, c_epoch, c_len, c_digest) that HEAD names. Otherwise the result is `Corrupt(Malformed)`: a CHECKPOINT shortcut outside the chain is refused.
+3. **Load the checkpoint** in the order "Reading" gives (§12.2), then run AP21 steps 0–5 over it.
+4. **Apply** entries c + 1..p in position order. Each is fetched whole, with exactly its recorded `len`, and its digest, HEADER and frames are checked before apply. GROUP frames apply exactly as §3.4 step 6. CLAIM frames change no state. A CHECKPOINT entry above c cannot occur (`Corrupt(Malformed)`), because HEAD names the latest. Fetches may run ahead on parallel lanes, bounded by the per-lane buffer (§12.9).
+5. **Account** as §3.4 step 7. There is no rotation: the next entry is p + 1.
+
+**Advance** (the journal task, one group, replacing §3.3's write and sync for objects@1):
+1. Create the entry at p + 1: LINK to entry p, then the group's frames. The entry write is not a commit point. `Uncertain` and `Exists` resolve as create-only says, and an unresolved failure is `Remote(e)`, sticky poison with nothing acked.
+2. Replace the head with `Match(own last tag)` and the fields §12.2 gives for an advance. Apply the Q5 rule.
+
+| Q5 outcome of the head write | Result | The store |
+|---|---|---|
+| `Applied`, or `Mismatch` with own bytes, or a `fresh_snapshot` or poll GET with own bytes first | Advanced(p + 1) | acks the group's tickets at every declared level reached (§12.4) |
+| `Mismatch` with other bytes, or another holder's bytes seen first | Fenced(e) | sticky. Health becomes `Fenced(e)` (§12.3, "Health"). The Db accepts only `close`, and every outstanding ticket is `Fenced(e)` |
+| failed before any byte of the head write was delivered, after the budget | Refused | sticky poison, `Remote(e)` (§3.8) |
+| budget or deadline exhausted after possible delivery, or the resolving GET failed | Undecided | sticky poison, `Undecided`. The claim is dead, and the group's tickets are never acked by this open |
+
+At most one head write is outstanding. Entry p + 2 may be created while the head write for p + 1 is outstanding. Its LINK names entry p + 1, and if p + 1 ends Fenced or Undecided, entry p + 2 is an orphan.
+
+**Tickets after the open ends (Astra #11).**
+- A ticket for which `durable_at(t, L)` returned `Ok` keeps returning `Ok` at L and at every weaker level, after Fenced or Undecided too. Its commit is in D[L] for good.
+- An **outstanding** ticket (not yet acked at the level asked) of an Undecided or Fenced open is terminal (`Undecided` or `Fenced(e)`) at that level and every stronger one. A ticket acked only at a weaker level is outstanding at the stronger ones.
+- Every ticket is `Foreign` to any other open (§1.6).
+- Whether an outstanding ticket's commit is in the history is decided by the next successful claim's head alone. Its ticket was never acked, so either answer is correct.
+- A client that must not duplicate an effect after an unknown outcome uses its stream position (§1.8) or its own idempotency key. The store gives no per-transaction receipt beyond the call record's life (Astra #18).
+
+**The idle head poll (Q3).** While the holder is healthy and no head write is outstanding, the journal task GETs `head` with `If-None-Match: <own last tag>` once every `o.head_poll_ms` (default 1,000; 0 is `Missing("head_poll_ms")` at open) on the local monotonic clock:
+- 304, or 200 with this holder's own (epoch, holder), changes nothing;
+- 200 with another (epoch, holder) makes the holder `Fenced(e)`, sticky, and publishes it as health;
+- a failed poll changes nothing and is retried at the next tick. It is a read, so it never poisons. Health counts consecutive failed polls, so an operator can see a partitioned holder.
+
+The poll runs only while the Db is open: a runner that unloads the place (`idle_ms`, RUNNER §14.4) closes it, and the poll stops. It does not run during a cut's uploads, because a head write is then imminent and decides the same question.
+
+**Health (Astra #14, Fable L6).**
+
+```hirsel
+pub type Health = Ok(u32) | Fenced(u64) | Undecided | Poisoned(IoError) | Remote(std.object.Error)   // Ok carries consecutive failed polls
+pub fn health(db: Db) -> Health                                              // the current value
+pub fn on_unhealthy[M: send](mut db: Db, take to: Sender[M], take m: M) -> Result[(), Error]   // sends m once, when health leaves Ok
+```
+
+The poll, the Q5 rule and poison set it, and it never returns to `Ok` within an open. `on_unhealthy` registers one message, which the journal task sends on `to` when health first leaves `Ok` (at once if it already has). Delivery is an ordinary channel send into the caller's own inbox, as `clock.alarm` delivers, so an idle receiver wakes on it with no new task primitive. A full or closed channel is the receiver's: the health value stays set and every later store call returns the error. RUNNER-SPEC v2.34 registers the head's inbox and ends the run abnormally on that message (RUNNER §2.1 "Poison and fence"). The value-returning `healthy` of v2.46's text is `health`.
+
+**Local reads.** Plain `snapshot(db)` and every query stay local RAM reads at V, with no request. So a partitioned, unkilled holder serves reads of its own durable or visible state until its next head write or poll reaches the bucket. Under a working path to the bucket, and given a serviced timer, a free lane and a completing request, that lasts at most `head_poll_ms` plus one request's deadline. The bound is liveness, not safety. A client that needs current state uses `fresh` or `fresh_snapshot`. The poll costs one conditional GET per interval per idle holder, nothing while groups flow (an advance confirms the head), and one lane and the head buffer (§12.9).
+
+**Holder change.** A claim keeps every commit for which `durable_at(L)` returned, for every level L whose declared `survives` is 2. On objects@1 that is its one level (§12.4).
+
+### 12.4 Levels (Q2)
+
+| Provider | Levels, weakest first | `survives` | Survives holder change |
+|---|---|---|---|
+| memory@1 | `memory` | 0 | no |
+| log@1 | `host` (`process` later, §12.2) | 1 | a same-host reopen only, which is log@1's only holder change |
+| objects@1 | the one name the grant gives | 2 | yes |
+| sim@1 | the plan's names | the plan's | the plan's |
+
+- **A level is the authority's declaration.** The store does not verify what a bucket replicates. It does fix the declaration: AUTHORITY records the ordered (name, survives) list at genesis, and sim@1 records it in its register. Every open compares the grant's list with it exactly before claiming, and a difference is `Declared(name)` (Astra #13). Removing, renaming, reordering or weakening a level is an incompatible declaration, never a silent remap.
+- D[L] is a prefix of the commit order. For L weaker than L′, D[L′] ⊆ D[L] ⊆ V.
+- `durable_at(t, L)` returns once t's commit, and every commit before it on any branch, is in D[L]. Each level has its own waiter list, woken by that level's own barrier, so an idle last group wakes a stronger waiter when its stronger barrier completes. `durable` is `durable_at` at the strongest level.
+- A `Level` is bound to its StoreId and, by name, to the declaration it was resolved under. Another store's Level is `Foreign`. It has no equality and no order. Levels cross the wire only as names.
+- **The runner's release gate is the strongest level** (Q2). The strongest level of every authority M2 builds survives every holder change that authority supports. Replies, subscription batches, outgoing calls, wakes and portable `Position`s wait for `durable`. There is **no `release_level`** and no weaker runner release. A weaker release needs a real multi-level authority and an epoch-tagged `Position` / `BaseLost` protocol, which are later work. `durable_at` at a weaker level remains for explicit callers, and what they do with the answer is theirs.
+
+**sim@1 with several levels (Astra #12, Fable A4).** sim@1 is the objects@1 protocol plus one in-process barrier per weaker level:
+- **The register is the strongest level.** The head write is the barrier of the strongest level, which must have `survives` 2. Advanced means the head write applied. The register (fence, epoch, the strongest frontier) survives every holder change and crash the plan models.
+- **A weaker level L advances on its own barrier.** That barrier is the sim event "L-sync(position)", which the plan schedules or holds back independently. It marks entries up to that position as in D[L], and never moves the head. Its state belongs to the holder, and a crash keeps it only as far as its `survives` says: 0 loses it with the process, 1 keeps it across a crash of the same holder, and it is never kept across a holder change.
+- **Readers see the strongest prefix.** `fresh`, `fresh_snapshot`, followers and `at_least` read the head, so they target D[strongest]. A held-back strongest barrier with a weaker level ahead makes a fresh follower answer the strongest prefix: with D[durable] = 6 and D[volatile] = 7, the answer is 6.
+- After a crash of the holder with weak state ahead, the next holder claims from the register. That is the strongest prefix plus, if a head write was outstanding, whatever the register applied. The weak tail of the crashed holder is gone.
+
+L55 and L56 run on this plan.
+
+### 12.5 Followers and fresh reads
+
+```hirsel
+pub opaque type Follower                                                     // not send: holds the authority's Client
+pub fn follower(tasks: Tasks, a: Authority, c: Clock, o: Options) -> Result[Follower, Error] waits
+pub fn follower_table[K, V](f: Follower, name: String, take key: codec.Key[K], take value: codec.Codec[V]) -> Result[Table[K, V], Error]
+pub fn follower_index[J, K, V](f: Follower, t: Table[K, V], name: String,
+        by: StaticFn[fn(V) -> Result[J, Capacity]], take key: codec.Key[J]) -> Result[Index[J, K, V], Error]
+pub fn follower_branch(f: Follower, name: String) -> Option[Branch]
+pub fn applied(f: Follower, b: Branch) -> Result[Position, Error]
+pub fn catch_up(mut f: Follower, deadline_ns: u64) -> Result[Position, Error] waits   // main's applied Position
+pub fn at_least(mut f: Follower, p: Position, deadline_ns: u64) -> Result[Snapshot, Error] waits
+pub fn fresh(mut f: Follower, deadline_ns: u64) -> Result[Snapshot, Error] waits
+pub fn snapshot_follower(f: Follower, b: Branch) -> Result[Snapshot, Error]          // Gone(id) for a deleted branch, Foreign for another follower's
+pub fn fresh_snapshot(mut db: Db, deadline_ns: u64) -> Result[Snapshot, Error] waits   // the holder's fresh read
+pub type Position { store: StoreId, branch: u32, version: u64 }
+pub fn position(mut db: Db, t: Ticket) -> Result[Position, Error] waits
+```
+
+- **Binding (Astra #15, #19).** `follower_table`, `follower_index` and `follower_branch` bind over the follower's applied catalog, with the same schema checks as `table`, `index` and `branch` (`Missing`, `Schema`, `Stale`). They never create.
+  - `follower_index` takes the extractor and key codec that `index` takes, and checks the extractor's `code.identity` and the key schema against the catalog's index entry. A mismatch is `Schema(0)`.
+  - `follower_table` with a value schema that the stored list does not hold, which `table` would append with a schema commit, is `Missing("schema")`. A follower never appends.
+  - The handles carry the StoreId and work with the follower's Snapshots, so `get`, `scan`, `find`, `look` and the pages work unchanged. A follower-only process needs no Db.
+- **Starting and catching up.** `follower` runs recovery's steps 1–4 (§12.3) without claiming. `catch_up` runs them again from its applied position up to a freshly read head.
+  - Each run **builds the next state privately and publishes roots and applied position together**. A catch-up that fails, for any reason, leaves the previous published state and its Snapshots intact, so `applied` never moves backwards (Astra #17).
+  - A follower takes no lock, writes nothing, never runs a body and never claims. Only the chain from the head is followed, so an orphan entry, a losing claim's write or a fenced holder's write is never applied.
+  - While a catch-up runs, both the published state and the private one are charged to the follower's `resident_limit` (Astra #9). A refusal is `Full(Resident(c))`, and the published state stays.
+- **Work and charges (MEM-30, Fable F14).** Applying runs on the follower's own task under the follower's allocation (§12.9). A caller of `catch_up`, `at_least` or `fresh` takes the steps of its own call and wait only, never the apply work for another client's lag.
+- **Position (Astra #14, #23).** `Position` is `{store, branch id, version}`. Branch ids are never reused (`next_branch` only rises), and a version on a branch is the same on every machine.
+  - **Domain.** `position(db, t)` is defined for a ticket of a commit. **A `Journal` ticket carries its commit's branch and version** (§1.6, `Mark = Journal(seq, branch, version)`), so the Db keeps no table of issued tickets. It waits `durable(t)` (the strongest level, Q2), then returns them. A saved ticket answers after any number of cuts.
+  - For a `Cut` ticket (`checkpoint`, `pin`, `delete_branch`), `position` returns `Missing("position")`: those operations make no branch version to name. A reader that must observe a pin uses the pin.
+  - A Position of another store is `Foreign`.
+  - `at_least(f, p)` applies until branch `p.branch` holds a version ≥ `p.version`, and returns that branch's Snapshot. The deadline and branch cases go as follows:
+    - If the applied catalog has `next_branch > p.branch` and no branch `p.branch`, the branch was deleted or adopted, and the result is `Gone(p.branch)`.
+    - At the deadline with the branch applied, the result is `Behind(applied(f, branch))`, never an older Snapshot.
+    - At the deadline with `next_branch ≤ p.branch`, the follower has not yet seen the branch's creation, and the result is `Unseen(p.branch)`.
+  - **Read-your-writes** means the snapshot observes a prefix of the history that contains the write. Later commits may have overwritten or deleted the row, with their usual meaning.
+- **What a follower shows.** Only entries the head names, so only D[strongest].
+- **Fresh (Astra #5, #11, Fable F9).**
+  - `fresh(f)` reads the head once and catches up to it. It shows every commit whose Advanced was applied to the register before the call began, because such a head write precedes the GET in the register's linear order.
+  - `fresh_snapshot(db)` on the holder reads the head once and compares **(epoch, holder)**, never the tag, because its own head write may be in flight.
+    - It hands the GET's bytes to the journal task as evidence (§12.3, "One owner per advance") and waits for that task's decision.
+    - Another pair is `Fenced(e)`.
+    - Own bytes for an outstanding advance make that advance Advanced, if no earlier evidence decided it.
+    - It then returns a Snapshot at the holder's **durable** version as of that decision (the last Advanced group), never V. So it never shows a commit that an Undecided group could take back.
+
+    The holder keeps the roots of its last durable version for this and for subscription batches.
+  - Either costs one head GET, plus the entry GETs a follower lacks. There are no leases.
+- **A missing object (Astra #8, #17, Fable A2, F12).** A follower works from one **capture**: the CHECKPOINT c_f its published state was loaded from, and the chain from c_f to its applied head. On NotFound for a named object:
+  - **An entry at position q.** GET `head`. If q < the head's `floor`, the result is `Reclaimed(floor)`. Otherwise the entry is on the chain (every head ever applied is a prefix of every later chain, because a claim keeps the position), so it is live, and the result is `Corrupt(Fault{file: name, offset: 0, why: Absent})`.
+  - **A MANIFEST, pack or chunk named by c_f.** GET `head`, then its CHECKPOINT entry. If c_f's (position, epoch, digest) is that checkpoint or a row of its MARK, c_f is still retained, so everything c_f names is live, and the result is `Corrupt(.. Absent)`. Otherwise c_f has left the retained set, and the result is `Reclaimed(floor)`. The capture's eviction is the reason, whatever any other checkpoint names.
+  - **A witness lost during inspection.** If the head's CHECKPOINT entry is itself NotFound (a newer cut and reclaim raced the witness), take a fresh head GET and decide again. This repeats until the caller's deadline, then the result is `Behind(applied)` with the old state still published.
+  - The previous published state stays readable in every case. `catch_up` after `Reclaimed` restarts from the new head's checkpoint.
+  - A **first `follower` call** has no published state. Its `Reclaimed` returns to the caller, who calls `follower` again.
+  - A start that keeps losing to reclaim on a busy store completes if it finishes within `retain − 1` further checkpoints, and holds only while the holder does not lower `retain`. A slow reader raises `retain` on the holder.
+- **Checks.** A follower checks exactly §2.8's list and §12.2's digest, header, chain and locator checks on every object. It is a reader of outside input, as recovery is.
+- **Resident memory.** A follower keeps the AP15 account under its own `resident_limit`. An apply that would pass it stops the follower with sticky `Full(Resident(c))`. To follow a store, give a follower a `resident_limit` at least the holder's. It is the operator's setting, and the refusal is explicit.
+- **log@1 followers are offline (Astra #6, #19).** The caller excludes the writer for the follower's life. `follower` and `catch_up` read the store exactly as §3.4 steps 2, 2b and 4–6 do, with no lock, no cleanup, no rotation and no write:
+  - **O1 first.** The follower syncs the store directory (`sync_dir`, §3.4 step 2b) before it reads the selected MANIFEST, and a failure is `Io(e)`. Syncing a file handle does not supply the directory barrier, so without O1 a MANIFEST name that a power cut can take back could be shown.
+  - Each segment is synced through its read handle before it is read, as §3.4 step 5 does. A failed sync is `Io(e)`.
+  - **The last segment is read past END's `d` up to the first bad frame**, per §3.4's torn-tail rule.
+
+  So a group whose `durable` returned before END was rewritten is shown, a cut-only change (a pin, an activation) is shown only after its directory entry is durable, and fresh on log@1 equals what a §3.4 recovery would recover at that moment. A follower that cannot get exclusion has no freshness contract and must not be used.
+
+### 12.6 Reclaim
+
+**The retained set and the floor are functions of the latest CHECKPOINT entry alone** (Astra #7, Fable F11):
+- A CHECKPOINT entry's retained set is itself plus the rows of its MARK.
+- A new CHECKPOINT at position c with `retain` = k retains the most recent k of {c} ∪ (the previous CHECKPOINT's retained set). `retain` is an open's option, 1–255, default 2, so a MARK lists at most 254 rows and fits its 8 KiB limit. 0 is `Missing("retain")` at open. The new `floor` is the smallest retained position, and its MARK lists the others.
+- So **the floor never decreases, and a checkpoint that left the retained set never re-enters it**:
+  - a larger `retain` keeps more of the *future* checkpoints and revives none;
+  - a smaller `retain` drops the oldest;
+  - before `retain` checkpoints exist, the set is all of them, down to genesis's entry 1 (floor 1).
+- HEAD carries the latest `floor`.
+
+**Live:**
+- every entry at a position ≥ floor that is on the chain from the head;
+- every MANIFEST a retained MARK names;
+- every locator chunk a retained checkpoint's locator reaches;
+- every pack a retained locator names.
+
+**Who reclaims, and when.** Only a healthy holder reclaims, after one of its CHECKPOINT entries is Advanced, and only from the live set its committed history gives. It stops at `Fenced`, `Undecided` or poison. A listing finds candidates and never decides.
+
+**What it erases (Astra #3, Fable S1, A1).** A pass captures these when it starts, and they stay fixed for the pass:
+- e, the holder's epoch;
+- c₀, the CHECKPOINT this open recovered from (at genesis, 1);
+- P, its last Advanced position;
+- the floor, G and N, the floor, MANIFEST generation and `next_pack` of **its last Advanced CHECKPOINT**, never a cut in flight;
+- the live set of that CHECKPOINT's retained checkpoints.
+
+A pass may overlap the next cut. Names the next cut creates are at or above G and N, and rule 4 never touches them. A pass erases:
+1. entries at positions < floor, of epoch ≤ e;
+2. entries at **max(floor, c₀ + 1) ≤ position ≤ P** whose (position, epoch, digest) is not on the chain, of epoch ≤ e. In that range the chain names are known exactly, from recovery's walk (c₀ + 1..p at open) and from this holder's own advances (p + 1..P). These are a fenced holder's orphans, a dead pipeline's entry and a losing claim's entries. **Positions in [floor, c₀] are never erased by rule 2**, because this open has no chain names there. An orphan there waits until the floor passes it and rule 1 removes it, which takes at most `retain` more checkpoints;
+3. MANIFESTs, chunks and packs of epoch < e that are not live;
+4. MANIFESTs, chunks and packs of epoch e that are not live and whose generation < G, chunk position < the CHECKPOINT's position, or seq < N. Names of epoch e at or above those may belong to a cut in flight or a refused cut, and wait for a later pass;
+5. pending multipart uploads whose key's epoch is < e. Uploads of its own epoch are never aborted, because they may be a live cut's (Fable nit, Astra).
+
+Genesis debris (epoch-1 names that no head references) is erased by rules 1–4 like any orphan. A pass never erases `head`, any name of an epoch above e, or any entry above P.
+
+**Why a stale holder's reclaim is safe.** Holder A at epoch eA is fenced but does not know it, and keeps reclaiming while B, at epoch eB > eA, checkpoints:
+- B recovered from the checkpoint that A's head named, which is A's latest Advanced CHECKPOINT. If A's last head write ended Undecided, A is poisoned and reclaims nothing.
+- B's retained set ⊆ A's retained set ∪ B's new checkpoints. The floor is monotonic, and B starts from A's last MARK.
+- B's new checkpoints name only packs, chunks and MANIFESTs reachable from B's base, which A also keeps live, or names of epoch eB, which A never touches (rule 4, and "above e").
+- A's rule 2 range lies within A's own walk and advances. B's chain at or below A's P equals A's, because B's claim kept A's head. Every entry B adds is above A's P.
+- A erases only names that are not live under A's retained set, and those are not live for B either.
+- A DELETE of A's that reaches the service late cannot remove anything live: a name never holds two contents (§12.2), so the name it deletes is the one A judged dead. A PUT of A's that lands late, after a reclaim erased its name, re-creates the same orphan bytes. Those are never on the chain or in a retained locator, so they are never read, and a later pass removes them. Laws L58 and L58b check this.
+
+This needs the provider contract (§12.2): with a non-linearizable head, two holders could share an epoch.
+
+**Process-local leases on objects@1 (Astra #10, Fable F12).** An export (§3.5a) and a scrub tour (§11.17) on a holder lease the names they captured: the head tag, the CHECKPOINT entry, its MANIFEST, its locator chunks and packs, and, for an export, the entries up to its exact terminal position. That holder's reclaim treats leased names as live. Another holder's reclaim does not see the lease.
+- After a claim by another machine, a leased read can get NotFound. The attempt then takes the witness (§12.5): a head of another (epoch, holder) ends it with `Fenced(e)`, a **typed whole-attempt interruption**.
+- The caller restarts it from a fresh export on the new holder, with empty staging and new validation. An export never resumes at another base.
+- A still-live missing object is `Corrupt(.. Absent)`.
+- Followers hold no lease and may restart (§12.5).
+
+### 12.7 Export, prepared install and standalone import (Astra #2, #7, #15, #20)
+
+- **Export** is a holder operation, as §3.5a's E1–E3. On objects@1 it captures one head, its CHECKPOINT entry c, the MANIFEST, the locator and its packs, and the exact terminal entry position P_x, under the §12.6 lease. It writes the scratch as **an ordinary log@1 directory image (Astra #7)**:
+  - every file gets a directory HEADER (`authority` 0, `epoch` 0) with its frames resealed under §2.1's binding for the scratch file;
+  - packs keep their names' seqs as `p-<seq>`;
+  - the MANIFEST payload is copied unchanged. Its `first_live` is c, and the scratch's one segment is **`j-<c>`**, holding the GROUP frames of entries c + 1..P_x in order. CLAIM entries contribute no frame, and an empty suffix gives an empty segment;
+  - the terminal EXPORT fields name `j-<c>` and its end offset.
+
+  So the unchanged prepare opener (R1, R3) and AP21 read it through their normal entry point. A `Fenced` interruption restarts the whole attempt.
+- **Prepared install is one activation CHECKPOINT advance on the exact validated head.** §3.5a's V3–V6 and C1–C7 run on the holder unchanged, through AP1b, AP21, the exact account, the target limits, the attempt and the digest.
+  - The point of no return is no longer the MANIFEST rename. It is **the head write of the CHECKPOINT entry that names the activation cut**, with `Match(own last tag)`, raising HEAD `activation` to v + 1 and setting HEAD `image` to NEW's `Describe` digest.
+  - That CHECKPOINT certifies the state after the graft (§12.2). The store keeps its identity, streams and positions.
+- **The install's outcomes (Astra #2, Q5):**
+  - **Failure before the head write** (validation, capacity, upload): `FullNew`, `Store(e)` or `Scratch(e)` as §11.1 T10. OLD stays selected and healthy, and the orphaned packs are reclaimed later. This is the only outcome that proves nothing was activated.
+  - **Advanced:** the install succeeds at v + 1.
+  - **`Fenced` or `Undecided` at the head write: the publication outcome is unknown.** A 412 with another holder's bytes means only that someone else holds the store now. The activation may have applied before that holder's claim, which then kept it. OLD's holder stops (both are sticky). The install returns `Store(Fenced(e))` or `Store(Undecided)`, and **both mean unknown**: a caller never reads either as "nothing activated", never reports it so "nothing activated" and never rolls back a selection.
+- **Reconciling an unknown install.** It goes through a qualified read: a claim or a follower `fresh` read of the store's activation rows. The attempt **installed** if and only if `releases[v + 1]` exists and its digest equals this attempt's prepared digest. Comparing the activation number alone is not enough, because another holder may have installed a different v + 1. The attempt was **not installed** if the head's activation is ≤ v, or `releases[v + 1]` holds another digest. RUNNER-SPEC §14.3's `Undecided` path does exactly this through its probe of NEW at v + 1 (RUNNER v2.34).
+- **Standalone import** is a separate operation. It creates a new store, with a new identity, in a namespace granted for it, **through genesis with the imported base** (§12.3 steps 4–6): its validated packs, chunks, MANIFEST and CHECKPOINT entry 1 are created at epoch 1 and resealed for the new identity, and the head create publishes them. So there is no intermediate empty store an opener could take (Astra #20). A crash before the head create leaves genesis debris, and a restarted import skips it and finishes. Import never writes into an existing store's head.
+- Every byte read from an authority is outside input (§2.8). Install's orphan objects after a crash before the head write are epoch-e names below no retained checkpoint, which the next reclaim of a later epoch removes (Fable 6d).
+
+### 12.8 Composition
+
+- **Replay.** A holder's tape records each authority request and its outcome as any provider operation. Re-execution reads call records from entries exactly as from journal frames, and never calls the authority.
+  - No law or rule depends on the order of authority replies relative to other events. Nothing is added to, or depends on, CONC-10, SEM-8, CAP-8 or CAP-9's order.
+  - Re-executing a recorded call on a follower whose base is above the call's entry, so the entry is no longer readable, is `Unknown`, not `Different` (Fable 6b).
+- **M3 Tiered paging (Fable F13), recorded so that M3 does not rediscover it.**
+  - A cold PagePtr resolves through the locator of the checkpoint the reader loaded.
+  - A holder Snapshot or a follower that keeps cold pages of a checkpoint that leaves the retained set needs a lease (holder) or a re-base (follower). M3 must specify which.
+  - A miss to a reclaimed pack is never "re-run at a new root". ENDSTATE's re-run is at the same root, so the miss is a typed `Reclaimed`.
+  - A local NVMe page cache keyed by §12.2's names is safe with no extra rule, because a name never holds two contents. No local copy is ever authoritative.
+
+### 12.9 Memory and steps (MEM-19, MEM-30; Astra #16, Fable F14)
+
+**Program memory of an objects@1 holder, reserved at open** (fixed; an allocator refusal at open is `Full(Allocation(c))`):
+
+| Buffer | Bytes | Why |
+|---|---|---|
+| client lanes | `requested_lanes × lane_bytes` (std.object.start) | as v2.43 |
+| entry buffers | 2 × (112 + `group_bytes`) | one entry being created while the previous group's head write is outstanding. The buffer moves to the request and back, so no third copy exists. A singleton frame over `group_bytes` takes an on-demand buffer of exactly its entry's size, charged and refusable before the frame is accepted (Fable nit). |
+| head buffers | 2 × `HEAD_OBJECT_LIMIT` = 2 × (72 + 16 + 136 + 16 + 65,536) = 131,552 | the body sent, and a GET for the Q5 comparison, a `fresh_snapshot` and the idle poll |
+| `FRAME_LIMIT`, the resident account | as AP15 | unchanged |
+
+**Memory allocated per operation, sized before allocation, charged to the payer named, and refused with `Full(Allocation(c))` before its own request (Astra #9):**
+
+| Allocation | Bytes | Payer |
+|---|---|---|
+| recovery's and a follower's chain list | 24 × (p − c) | the opener; the follower's task |
+| one entry prefix (hint walk) | 112 per lane | the same |
+| one fetched entry | its `len` | the same |
+| the CHECKPOINT entry | HEAD's `c_len` | the same |
+| the MANIFEST | MARK's `m_len`, ≤ `MANIFEST_LIMIT` | the same |
+| a locator chunk | its row's `len`, ≤ 72 + 16 + 1 MiB | the same |
+| a list-page read | ≤ 8,400 | the same |
+| a class-2 pack | the fixed 65,536-byte stream buffer | the same |
+| a class-0/1 pack, one per lane | its row's `len`, ≤ AP21 step 1's bound | the same |
+| reclaim's chain names | 24 × (P − c₀) | the holder's journal task |
+| one LIST page | at most 1,000 keys (std.object `list`) | the caller of the pass or walk |
+| a follower's private roots during catch-up | the AP15 account of the new state, beside the published one | the follower's `resident_limit` |
+
+A reader never holds more than one entry body per lane. The chain list is the only allocation that grows with the suffix. `checkpoint_entries` bounds the suffix in steady state. Repeated claims without a cut each add one CLAIM entry, and the open's cut (§12.2) runs once the suffix reaches `checkpoint_entries`. So a store that keeps crashing before that cut finishes grows the list by 24 bytes per claim, charged and refusable, and never the AP15 account (Astra #16). A Journal ticket carries its own branch and version (§12.5), so nothing grows with issued tickets (Astra #23).
+
+**Host memory behind the provider** (the bucket service, the kernel page cache for log@1) is not charged (MEM-19, CAP-5).
+
+**Steps.** Recovery, apply, validation, advance, poll and reclaim run on the store's own tasks (the opener, the journal task, a follower's apply task), outside every caller's `bound steps` scope. MEM-30 charges a caller only for its own calls and waits, and for the bodies of queries it runs on a Snapshot. So a follower's apply never consumes a caller's steps for another client's lag.
+
+### 12.10 Laws L52–L61
+
+**Where each law runs.**
+- **objects@1 laws** (L52, L53, L54, L57, L58, L60, L61) are cases in the existing `bucket_laws.hirsel` over `std.sim.s3`. Their oracle is the sim's object map and its **head-register history**: every applied conditional write, with its request id. The sim's fault plan injects reply loss, late delivery, 409, 412, 5xx, a 200 carrying an `Error` and `NoSuchUpload` below the real client.
+- **Seam laws** (L55, L56, L59) are in one new file, `authority_laws.hirsel`, over `authority.sim@1` (§12.4), whose ground-truth log is the oracle. L55's log@1 case runs in the existing §3.9 file-system model.
+
+No oracle reads the store under test. Each law names the bug that turns it red, and that bug is seeded only in the law's own review, not as a mutant harness.
+
+| Law | Statement | Oracle | Seeded bug it alone catches |
+|---|---|---|---|
+| **L52 one fence** | With fault-free replies, k = 2..4 claimants race from one head at every interleaving of their GETs and replace that the sim enumerates. Exactly one applied step-6 replace at e + 1, exactly one `Claimed(e + 1)`, and every other claimant `Lost`. Applied replaces and successful opens are counted separately: a claimant whose CLAIM advance is then fenced by a later claim returns `Lost`, with its replace in the register. In the register history, every applied head write's precondition is the tag of the write immediately before it. Under the fault plan the same register property holds, and no two `Claimed` share an epoch. A claimant at position 2⁶³ − 1 is `Limit(Ids)` with nothing written. | register history | a claim that writes the head unconditionally, or conditions on a tag re-read after its validation; a loop that retries into a fresh claimant's epoch |
+| **L53 a fenced holder never acks, and an idle one stops** | A advances, B claims, and A advances or polls. A gets `Fenced(eA)` and stays unhealthy, and no outstanding ticket of A returns `Ok`. In the register history, no head write after B's carries eA. **Idle:** with A's runner idle (an empty inbox), the first successful poll after B's replace sets health to `Fenced`, and the runner head ends abnormally with no clean report and no further reply. A failed poll before it changes nothing and is retried. **Comparison:** with an own advance in flight, a poll that sees A's own new bytes leaves A healthy. | register history; A's ticket results; the runner's end | a holder that conditions its head write on a fresh GET's tag ("refresh-then-CAS"); a poll that compares tags instead of (epoch, holder) (the in-flight case); a fence that never reaches an idle runner |
+| **L54 Q5 resolution** | For each head write n of an advance, and for genesis, claim and an **activation**, the reply is lost with the request (a) applied, (b) dropped, (c) dropped and then overtaken by another holder's claim, (d) applied and then overtaken by another holder's claim, or (e) answered 503 then applied; or the bucket is unreachable for the whole budget. If the store says Advanced (or Claimed, or the install succeeded), the register history holds its exact bytes. In (a), (b) and (e) it says Advanced. In (c) and (d) it says `Fenced` (or `Lost`, or an install's `Store(Fenced(e))`) and acks nothing outstanding. Under `Fenced` or `Undecided`, no outstanding ticket of the group is ever `Ok` for this open, and the overtaking claim's recovered history holds the group exactly when the register applied it ((d) yes, (c) no). For an activation in (d), the reconciliation (§12.7) reports installed and the host's selection becomes v + 1. In (c) it reports not installed and keeps v. **Genesis** under loss never yields a held claim the register did not apply. A crash after each of genesis steps 4 and 5, before step 6, is followed by an `open` with `create` that completes genesis. A concurrent creator's debris appearing between the GET and the LIST is skipped. | register history; the sim's applied flag per request | resolving by tag instead of exact bytes; resending with a fresh tag; acking after a 412 with other bytes; a resolving genesis (`store_no_clobber`'s put-id path); "Fenced means not activated"; refusing genesis debris |
+| **L55 level prefixes and holder change** | In a sim plan with levels `volatile` < `durable` (`survives` 0 and 2), a crash keeps exactly D[durable], and a claim by another holder follows. Every ticket for which `durable_at(durable)` returned is in the recovered history. At every step D[durable] ⊆ D[volatile] ⊆ V, each a prefix. **Interleaving:** `volatile`'s barrier reaches 7 while the head write of 7 is held. The holder crashes, and the next holder's recovered history ends at 6, and the volatile-only 7 is not in it. Reopening with a renamed, reordered or weakened declaration is `Declared`, with nothing written. **The log@1 case:** after a host-crash cut that keeps only fdatasynced bytes, every `durable_at(host)` ticket is present. | sim crash model; §3.9 model; hand-built declarations | acking a level before its barrier; a waiter woken by another level's progress; resolving a Level by ordinal; a weak barrier that moves the head |
+| **L56 releases wait for the strongest level** | A runner place runs over a sim plan whose `durable` barrier is held back while `volatile` advances. No Release, reply, batch or Position leaves while its version is above D[durable], and a fresh follower answers D[durable] (6 while volatile is at 7). When the barrier is released under a fair schedule, the held releases are sent. A crash after the release keeps every released version, and no later commit reuses a released (branch, version). | sim per-level prefix at each send; the client's received Positions | a gate that waits for a weaker level; a gate that never sends; a follower that reads the weak frontier |
+| **L57 fresh and read-your-writes** | (a) `fresh(f)` and `fresh_snapshot(db)` show every commit whose head write the register applied before the call. This is checked while the holder's own head write is in flight, immediately after a claim, and in both orders of a `fresh_snapshot` GET that sees A's bytes and B's later claim: once the GET has decided Advanced, the group's tickets stay `Ok` after A becomes `Fenced`. (b) `at_least(position(t))` on a follower started cold, with an empty LIST, observes a prefix containing t, on t's branch. It gives `Gone` after the branch's deletion, and `Unseen` at a deadline before the branch's creation is applied. `position` on a ticket saved across three cuts gives the hand-derived Position. (c) No follower ever shows an entry the chain does not hold. (d) `applied` never decreases across a failed `catch_up`. | register history; the client's own write; hand-derived branch state | serving cached state as fresh; `fresh_snapshot` returning V; a `Fenced` on the holder's own in-flight tag; revoking an acknowledged ticket; applying listed entries; publishing a partial catch-up; finding the first pack by LIST |
+| **L58 stale reclaim erases nothing live** | A is fenced but unaware. B claims, inherits a pack of A's epoch, writes its own packs and checkpoints, with `retain` going 1 → 3 and 3 → 1 across the claim. A's reclaim runs with deletions held back and delivered after B's checkpoints. **Fresh B:** A runs `retain` 3 with checkpoints at 10 and 20 and non-empty GROUP intervals between them, B claims at 22 (c₀ = 20) and cuts at 24, and an orphan of A's sits at 15 beside the canonical entry. After B's reclaim, a cold follower reads every retained interval (entries 10..24) and rows equal to the hand-derived state. B's recovery and a cold follower find every object that B's retained MARKs and locators name. | sim object map against a walk of B's committed history | a floor that can decrease (`retain` raised revives C1); derived names without the epoch; a reused pack seq within an epoch; rule 2 applied below c₀ |
+| **L59 a missing object is typed and never wrong** | Runs share one follower capture C1. (1) B checkpoints past C1 and reclaims, and the follower gets `Reclaimed(floor)`, then after `catch_up` rows equal to the head's. (2) A pack only C1 names is deleted out of band while C2 retains C1: `Corrupt(.. Absent)`. (3) The same delete after C3 dropped C1: `Reclaimed`. (4) The head's CHECKPOINT entry disappears between the witness's head GET and its entry GET, and the follower takes a fresh head and decides, or returns `Behind` at its deadline. (5) A first `follower` call gets `Reclaimed` and a second call succeeds. In every run the previous Snapshot stays readable. | sim rows at each position; the out-of-band delete | treating NotFound as "no row", as always-Reclaimed, or as always-Corrupt; deciding a pack by another checkpoint's locator |
+| **L60 objects are outside input** | Hand-built bytes: an entry copied to another position's or epoch's name is `Corrupt(Header)`. One flipped byte in an entry, the head, a MANIFEST, a chunk or a pack is `Corrupt` naming that object. A LOCATE row with the wrong len or digest is `Corrupt` before the pack is used. A leaf-row set that differs from L ∪ C by one seq is `Corrupt(Malformed)`. A head with `entry_epoch > epoch`, or with p = c and a differing entry reference, is `Corrupt(Malformed)`, as is a 0x0050 AUTHORITY or a `style` of 2. **Vectors**, hand-derived byte for byte: the genesis head; a claim over genesis; a GROUP at 3 under epoch 2; **a claim over that GROUP (entry_epoch 2 under epoch 3)**; **a second claim with no advance between (epoch 4)**, after which a cold follower names entry 3 from HEAD alone; and a depth-1 locator at `pack_bytes` 1 over 32,769 packs. | the hand-built bytes and hand-derived vectors | a check bound to the name (circular) or not bound to position; a digest not recomputed; a locator trusted without check; a claim that does not preserve `entry_epoch` |
+| **L61 a rejected candidate writes nothing, and export replays** | While OLD serves at v, an open with `Current(v)` and another image, a `Reopen` with another image, an open with another `expect`, an open of an empty namespace with `expect` set, and an open whose recovery is refused for memory each return their refusal (`NotCurrent`, `Foreign`, `NotFound`, `Full`) with the register history unchanged, and OLD stays healthy. An export at c = 20 with (i) an empty suffix, (ii) one GROUP, and (iii) a suffix holding a CLAIM is prepared through the normal prepare entry point, and the prepared heads equal the hand-derived state. | register history; hand-derived state | a check made after the replace; a Describe check left to the runner after open; an export whose `first_live` and segment disagree |
+
+**L58b, a case of L58:** A's entry PUT is delayed past B's reclaim of its name and then lands. The re-created orphan is never on B's chain or in a retained locator, B's recovery and a cold follower never read it, and B's next reclaim removes it. It is checked against the register and the object map.
+
+**L54m, a case of L54:** a pack's `complete` replies 200 with an `Error` body, then `NoSuchUpload` on retry. The store restarts the upload with a fresh id and the same bytes and publishes the cut, or refuses it with `Remote` at the budget, with nothing published and the holder healthy.
+
+Deleted with §11.18: the generation-publish parts of L4, "the fence" and BK5's orphan-pack overwrite. "Reopen after a cut" and "Soak" are kept, restated over entries. §11.19's S2 `read-only` crash law is kept, restated over a log@1 follower. It gains the cut "after `durable` returned and before END was rewritten" (Astra #6), and a cut-only pin whose MANIFEST rename is visible but not yet covered by `sync_dir`, which the follower shows only after its O1 (Astra #19).

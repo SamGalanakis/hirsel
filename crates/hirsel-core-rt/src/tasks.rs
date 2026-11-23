@@ -1417,8 +1417,8 @@ impl Scheduler {
 
     /// Whether `task`'s inline Arc count events must take their hook even
     /// with no posted credit: its tape records them, an open LATEST pair
-    /// closes on them, something else observes them, or a serial run with
-    /// sockets checks for readiness at every event.
+    /// closes on them, or something else observes them. Readiness is not
+    /// taken at an Arc count: a count is not a poll kind.
     fn arc_hooks(
         &self,
         #[cfg_attr(not(feature = "record"), allow(unused_variables))] task: &Task,
@@ -1427,7 +1427,7 @@ impl Scheduler {
         if task.group.is_some() || task.latest_pair {
             return true;
         }
-        self.arc_observed() || (self.pool.is_none() && !self.net.is_null())
+        self.arc_observed()
     }
 
     fn id(&mut self) -> u64 {
@@ -1934,21 +1934,7 @@ impl Scheduler {
         sockets: *mut hirsel_core_net::Sockets,
         poller: Arc<hirsel_core_net::Poller>,
     ) {
-        let attached = self.net == sockets;
         self.net = sockets;
-        // A serial run's tasks all use this thread. Pool tasks keep their hook byte.
-        let mut at = if self.pool.is_none() && !attached {
-            self.all
-        } else {
-            ptr::null_mut()
-        };
-        while !at.is_null() {
-            // SAFETY: this scheduler owns the pinned task list.
-            unsafe {
-                (*at).arc_hooks = self.arc_hooks(&*at);
-                at = (*at).all;
-            }
-        }
         *self.readies.net.lock().unwrap_or_else(|e| e.into_inner()) = Some(poller);
     }
 

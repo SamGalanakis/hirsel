@@ -222,7 +222,7 @@ impl Expand<'_> {
 pub(crate) struct InstanceBody {
     /// The published definition; None for a glue instance.
     pub product: Option<Arc<DefinitionProduct>>,
-    module: Option<Module>,
+    module: Option<Arc<Module>>,
     pub function: hirsel_core_ir::FuncId,
     /// The module's PROG-10 body hash.
     pub body: ContentHash,
@@ -754,7 +754,7 @@ impl CheckProduct {
 /// record and its arguments' closures, which its identity names by hash.
 #[derive(Clone)]
 pub(crate) struct Materialised {
-    module: Option<Module>,
+    module: Option<Arc<Module>>,
     function: hirsel_core_ir::FuncId,
     children: Vec<Child>,
     body: ContentHash,
@@ -838,7 +838,7 @@ fn materialise(
     let body = built.code.hash();
     let described = built.code.described;
     Ok(Materialised {
-        module: built.module,
+        module: built.module.map(Arc::new),
         function: built.function,
         children: built.children,
         body,

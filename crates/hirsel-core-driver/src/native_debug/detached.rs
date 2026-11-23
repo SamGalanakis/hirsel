@@ -48,6 +48,24 @@ impl<'a> Identity<'a> {
         }
     }
 
+    /// The identity `debug`, a detached debug object, was bound to: the
+    /// note [`Self::write_note`] gave it.
+    fn recorded(debug: &object::File<'a>) -> io::Result<Option<Self>> {
+        if let Some(id) = debug.build_id().map_err(io::Error::other)?
+            && !id.is_empty()
+        {
+            return Ok(Some(Self::BuildId(id)));
+        }
+        let Some(section) = debug.section_by_name(IMAGE_NOTE) else {
+            return Ok(None);
+        };
+        let data = section.data().map_err(io::Error::other)?;
+        let header = note_bytes(OWNER, 1, &[]).len();
+        Ok(data
+            .get(header..header + 32)
+            .map(|hash| Self::ImageDigest(ContentHash(hash.try_into().unwrap()))))
+    }
+
     fn matches(&self, file: &object::File<'_>) -> bool {
         match self {
             Self::BuildId(id) => file.build_id().is_ok_and(|actual| actual == Some(*id)),
@@ -93,8 +111,17 @@ pub(crate) fn add_source_note(object: &mut object::write::Object<'_>, source: Co
 
 fn deliver(path: &Path, image: &[u8], debug: &[u8]) -> io::Result<()> {
     use std::io::Write as _;
-    let file = object::File::parse(image).map_err(io::Error::other)?;
-    let target = path.with_file_name(Identity::of(&file, image)?.path());
+    // The debug object records the image's identity; hashing the image again
+    // would only find it.
+    let recorded = object::File::parse(debug).map_err(io::Error::other)?;
+    let identity = match Identity::recorded(&recorded)? {
+        Some(identity) => identity,
+        None => Identity::of(
+            &object::File::parse(image).map_err(io::Error::other)?,
+            image,
+        )?,
+    };
+    let target = path.with_file_name(identity.path());
     let parent = target.parent().unwrap();
     std::fs::create_dir_all(parent)?;
     let mut staged = tempfile::NamedTempFile::new_in(parent)?;

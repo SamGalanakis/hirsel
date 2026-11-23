@@ -12,7 +12,7 @@ import re
 import shlex
 from case_progress import run_case
 
-SCENARIOS = ('checkpoint', 'gap', 'oversize', 'schema', 'refusal', 'genesis', 'branches', 'migrate', 'install')
+SCENARIOS = ('checkpoint', 'gap', 'oversize', 'schema', 'refusal', 'genesis', 'branches', 'migrate', 'install', 'read-only')
 
 
 def checked(command, env=None, *, engine, case=None):

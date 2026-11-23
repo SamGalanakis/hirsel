@@ -5,7 +5,7 @@ use std::{collections::BTreeMap, ffi::c_void, slice};
 #[allow(dead_code)]
 #[path = "../../crates/hirsel-core-rt/src/test_provider.rs"]
 mod test_provider;
-use test_provider::crash::{FileSystem, Op};
+use test_provider::crash::{FileSystem, Op, Snapshot};
 
 const ORPHAN_END_SYNC_FAILURE: u8 = 6;
 /// runner_crash.c's poison-segment: fail the second armed segment sync.
@@ -55,6 +55,7 @@ struct Bridge {
     orphan_end_path: Option<String>,
     checkpoint_reopen: bool,
     fork_observation: Option<ForkObservation>,
+    read_only: Option<Snapshot>,
 }
 
 #[derive(Default)]
@@ -87,6 +88,7 @@ impl Bridge {
         self.fs.snapshot().names.contains_key(name)
     }
     fn apply(&mut self, op: Op<'_>) -> bool {
+        assert!(self.read_only.is_none(), "read-only open issued {op:?}");
         if self.phase == 1 && self.events == self.cut {
             self.crashed = true;
         }
@@ -117,6 +119,10 @@ impl Bridge {
         data: &mut [u8],
         len: usize,
     ) -> Outcome {
+        if self.read_only.is_some() {
+            assert!(op != 4, "read-only open tried to lock");
+            assert!(op != 0 || mode == 0, "read-only open opened a writer");
+        }
         // A crashed process closes descriptors without changing the filesystem.
         if op == 3 {
             if let Some(file) = self.files.remove(&handle) {
@@ -530,6 +536,7 @@ pub extern "C" fn store_crash_new(cut: u64) -> *mut c_void {
         orphan_end_path: None,
         checkpoint_reopen: false,
         fork_observation: None,
+        read_only: None,
     }))
     .cast()
 }
@@ -634,6 +641,15 @@ pub unsafe extern "C" fn store_crash_acked(p: *mut c_void) -> u8 {
 }
 
 /// # Safety
+/// `p` is live, and no provider callback is active.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn store_crash_expect_read_only(p: *mut c_void) {
+    // SAFETY: the C wrapper calls this once, after the simulated restart.
+    let bridge = unsafe { &mut *p.cast::<Bridge>() };
+    bridge.read_only = Some(bridge.fs.snapshot());
+}
+
+/// # Safety
 /// `p` was returned by store_crash_new and has not been freed. All runs and
 /// callbacks have ended, and no pointer into the bridge was exposed to C.
 #[unsafe(no_mangle)]
@@ -644,6 +660,9 @@ pub unsafe extern "C" fn store_crash_free(p: *mut c_void) {
         bridge.files.is_empty(),
         "final run leaked provider file handles"
     );
+    if let Some(before) = &bridge.read_only {
+        assert_eq!(*before, bridge.fs.snapshot(), "read-only directory changed");
+    }
     drop(bridge);
 }
 

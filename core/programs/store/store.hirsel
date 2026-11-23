@@ -510,6 +510,25 @@ pub opaque type Snapshot: shareable + send {
     roots: Roots
 }
 
+/// The main-branch snapshot recovered by a read-only open.
+pub opaque type ReadOnly: shareable + send {
+    snapshot: Snapshot
+}
+
+pub fn read_only_version(reader: ReadOnly) -> u64 {
+    version(reader.snapshot)
+}
+
+pub fn read_only_table[K, V](reader: ReadOnly, take name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[Shape[K, V], Error] {
+    let s = view reader.snapshot
+    let handle = catalog_handle(s.store, s.roots.catalog, false, take name, take key, take value)?
+    Ok(shape(handle))
+}
+
+pub fn read_only_get[K, V](reader: ReadOnly, t: Shape[K, V], key: K) -> Result[Option[V], Error] {
+    get(reader.snapshot, t, key)
+}
+
 pub opaque type ByteRows: send {
     cursor: PageRange
 }
@@ -11318,7 +11337,7 @@ fn disk_start(d: Dir, r: Random, options: Options) -> Result[DiskStartup, Error]
     })?
     let recorded_after = manifested.tips[0u64].head
     let initial = journal_replay(take manifested, loaded.manifest.next_stamp - 1)?
-    let recovered = journal_recover(d, loaded.store, loaded.manifest.first_live, take initial)?
+    let recovered = journal_recover(d, loaded.store, loaded.manifest.first_live, true, take initial)?
     let JournalRecovered(replay: take replay, seq: last_seq, end: last_end, uncovered: uncovered) = take recovered
     let live = journal_account(replay)?
     let JournalReplay(state: take state, next_node: next_node, ..) = take replay
@@ -11647,6 +11666,64 @@ pub fn open(tasks: Tasks, d: Dir, c: Clock, r: Random, options: Options) -> Resu
     open_checks(options)?
     let session = disk_session(d, c, r, options)?
     open_started(tasks, d, c, options, take session, None)
+}
+
+/// Recovers an existing Directory store in memory. The caller must exclude writers
+/// during recovery to observe the offline durable state. Reads after open use only
+/// the captured roots.
+pub fn open_read_only(d: Dir, options: Options) -> Result[ReadOnly, Error] waits {
+    if let Bucket(_) = options.authority {
+        return Error(Unsupported(1))
+    }
+    open_checks(options)?
+    let (take raw, id, take manifest) = read_only_manifest(d)?
+    if let Some(_) = manifest.claim {
+        return Error(Unsupported(1))
+    }
+    let reader = read_only_recover(d, id, take manifest, options.resident_limit)?
+    check_read_only_manifest(d, raw)?
+    Ok(take reader)
+}
+
+fn read_only_manifest(d: Dir) -> Result[(Bytes, StoreId, PageManifest), Error] waits {
+    if disk_exists(d, "EXPORT")? {
+        return Error(ExportDirectory)
+    }
+    let raw = match read_page_manifest_bytes(d) {
+        Ok(take found) => take found,
+        Error(Io(NotFound)) => return Error(NotFound),
+        Error(take problem) => return Error(take problem),
+    }
+    let (id, take manifest) = disk_allocation(scoped fn() -> Result[(StoreId, PageManifest), Error] {
+        disk_read_page_manifest("MANIFEST", raw)
+    })?
+    Ok((take raw, id, take manifest))
+}
+
+fn check_read_only_manifest(d: Dir, raw: Bytes) -> Result[(), Error] waits {
+    if read_page_manifest_bytes(d)? != raw {
+        return Error(Held)
+    }
+    Ok(())
+}
+
+fn read_only_recover(d: Dir, id: StoreId, take manifest: PageManifest, ceiling: u64) -> Result[ReadOnly, Error] waits {
+    let validated = validate_page_manifest(d, id, take manifest)?
+    let ValidatedPageManifest(manifest: take selected, graph: take resolved, ..) = take validated
+    let mut graph = take resolved
+    let empty_collection = disk_allocation(fn() -> Result[Arc[std.page.Page], Error] {
+        Ok(std.page.empty(0, 0, Collection))
+    })?
+    let pages = attach_page_graph(mut graph, empty_collection)?
+    let state = disk_allocation(scoped fn() -> Result[State, Error] {
+        let holders = attach_manifest_holders(selected, pages, empty_collection)
+        capacity(manifest_state(selected, holders))
+    })?
+    let replay = journal_replay(take state, selected.next_stamp - 1)?
+    let recovered = journal_recover(d, id, selected.first_live, false, take replay)?
+    over_ceiling(journal_account(recovered.replay)?, ceiling)?
+    let main = view recovered.replay.state.tips[0u64]
+    Ok(ReadOnly(snapshot: Snapshot(store: id, open: 0, branch: 0, head: main.head, roots: share_roots(main.roots))))
 }
 
 fn open_checks(options: Options) -> Result[(), Error] {
@@ -13567,6 +13644,25 @@ fn crash_install_read(d: Dir, c: Clock, r: Random, tasks: Tasks, required_new: b
 pub fn disk_crash_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Stdout) -> Result[(), Exit] waits {
     let phase = option.unwrap(args.get(argv, 0))
     let scenario = option.unwrap(args.get(argv, 1))
+    if scenario == "read-only" {
+        if phase == "init" {
+            disk_crash_init(d, c, r, tasks, "checkpoint") ?=> |_| Exit(status: 31)
+            return Ok(())
+        }
+        if phase == "write" {
+            return match disk_crash_torn_manifest(d) {
+                Ok(()) => {
+                    let _ = stdout.write(out, "DONE");
+                    Ok(())
+                },
+                Error(Io(_)) => Ok(()),
+                Error(_) => Error(Exit(status: 32)),
+            }
+        }
+        let published = option.unwrap(args.get(argv, 2)) == "new"
+        disk_crash_read_only(d, published) ?=> |_| Exit(status: 33)
+        return Ok(())
+    }
     if scenario == "watermark-absent" || scenario == "watermark-torn" {
         if phase == "write" {
             if let Error(_) = disk_watermark_cut(d, c, r, tasks, scenario == "watermark-torn") {
@@ -13641,6 +13737,71 @@ pub fn disk_crash_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, ou
             _ => Error(Exit(status: 33))
         }
     }
+}
+
+fn disk_crash_torn_manifest(d: Dir) -> Result[(), Error] waits {
+    let raw = read_page_manifest_bytes(d)?
+    let torn = list.slice(raw, 0, list.len(raw) - 1)
+    disk_write_synced(d, "MANIFEST.tmp", torn)?
+    disk_io(host.rename(d, "MANIFEST.tmp", "MANIFEST"))?
+    disk_io(host.sync_dir(d))
+}
+
+fn disk_crash_read_only(d: Dir, torn: bool) -> Result[(), Error] waits {
+    let opened = open_read_only(d, disk_crash_options("checkpoint"))
+    if torn {
+        match opened {
+            Error(Corrupt(f)) => if f.file == "MANIFEST" {
+                if let Truncated = f.why {
+                    return Ok(())
+                }
+            },
+            _ => (),
+        }
+        fail("read-only open accepted a published torn MANIFEST or lost its fault")
+    }
+    let reader = opened?
+    let rows = read_only_table(reader, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    if read_only_version(reader) != 161 {
+        fail("read-only open recovered the wrong journal prefix")
+    }
+    for k in 0u64 .. 96 {
+        let expected = if k < 64 { k + 101 } else { k + 1 }
+        if read_only_get(reader, rows, k)? != Some(expected) {
+            fail("read-only open recovered the wrong row")
+        }
+    }
+    Ok(())
+}
+
+@test
+fn disk_test_read_only_snapshot(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let child = disk_test_directory(d)
+    if let Error(NotFound) = open_read_only(child, defaults()) {} else {
+        fail("read-only open of an empty directory must refuse")
+    }
+    let mut db = open(tasks, child, c, r, defaults())?
+    let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
+    let writable = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    if !typed_put(mut db, writable, 7, 70) {
+        fail("could not commit first row")
+    }
+    durable(mut db, Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq)))?
+    let saved = open_read_only(child, defaults())?
+    let rows = read_only_table(saved, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    if read_only_version(saved) != 2 || read_only_get(saved, rows, 7)? != Some(70u64) {
+        fail("read-only open missed a durable journal row")
+    }
+    if !typed_put(mut db, writable, 7, 71) {
+        fail("could not commit replacement row")
+    }
+    checkpoint(mut db)?
+    close(take db)?
+    let fresh = open_read_only(child, defaults())?
+    if read_only_version(saved) != 2 || read_only_get(saved, rows, 7)? != Some(70u64) || read_only_version(fresh) != 3 || read_only_get(fresh, rows, 7)? != Some(71u64) {
+        fail("read-only reads changed after the writer replaced the row")
+    }
+    Ok(())
 }
 
 // S3 journal payloads are decoded exactly before their effects are applied.
@@ -14439,7 +14600,7 @@ fn journal_apply_commit(file: String, mut replay: JournalReplay, commit: Journal
             i = k
         }
     }
-    if i == total_count || commit.version != replay.state.tips[i].head + 1 {
+    if i == total_count || int.checked_add(replay.state.tips[i].head, 1) != Some(commit.version) {
         return Error(disk_fault(file, 0, Gap(commit.version)))
     }
     journal_apply_ops(file, mut replay.next_node, mut replay.state.tips[i].roots.collections, commit.data)?
@@ -14586,7 +14747,7 @@ type JournalRecovered {
     uncovered: u64
 }
 
-fn journal_recover(d: Dir, id: StoreId, first: u64, take initial: JournalReplay) -> Result[JournalRecovered, Error] waits {
+fn journal_recover(d: Dir, id: StoreId, first: u64, flush: bool, take initial: JournalReplay) -> Result[JournalRecovered, Error] waits {
     let mut replay = take initial
     let mut seq = first
     let mut uncovered = 0u64
@@ -14597,8 +14758,8 @@ fn journal_recover(d: Dir, id: StoreId, first: u64, take initial: JournalReplay)
             Error(NotFound) => return Error(disk_fault(path, 0, Header)),
             Error(e) => return Error(Io(e))
         }
-        let mut source = journal_input(take file, true)?
-        let following = journal_following(d, id, seq, true)?
+        let mut source = journal_input(take file, flush)?
+        let following = journal_following(d, id, seq, flush)?
         let boundary = match following {
             Some(h) => Some(h.prev_end),
             None => disk_end(d, id, seq)?
@@ -14683,23 +14844,23 @@ pub fn journal_law_recovery(d: Dir) -> bool waits {
     result.unwrap(host.close(take newest))
     result.unwrap(host.close(take next_end))
     result.unwrap(disk_write_synced(d, "j-8.end", journal_end_bytes(id, 8, 114)))
-    let all = result.unwrap(journal_recover(d, id, 7, journal_initial()))
+    let all = result.unwrap(journal_recover(d, id, 7, true, journal_initial()))
     if all.seq != 8 || all.end != 114 || all.replay.state.tips[0].head != 2 || all.replay.state.tips[0].at != 102 {
         return false
     }
     let empty: Bytes = list.new()
     result.unwrap(disk_write_synced(d, "j-9", empty))
-    let incomplete = result.unwrap(journal_recover(d, id, 7, journal_initial()))
+    let incomplete = result.unwrap(journal_recover(d, id, 7, true, journal_initial()))
     if incomplete.seq != 8 || incomplete.end != 114 || incomplete.replay.state.tips[0].head != 2 {
         return false
     }
     result.unwrap(disk_write_synced(d, "j-9.end", journal_end_bytes(id, 9, 72)))
-    if !disk_corrupt(journal_recover(d, id, 7, journal_initial())) {
+    if !disk_corrupt(journal_recover(d, id, 7, true, journal_initial())) {
         return false
     }
     result.unwrap(host.remove(d, "j-9.end"))
     result.unwrap(host.remove(d, "j-8"))
-    let previous = result.unwrap(journal_recover(d, id, 7, journal_initial()))
+    let previous = result.unwrap(journal_recover(d, id, 7, true, journal_initial()))
     previous.seq == 7 && previous.end == 114 && previous.replay.state.tips[0].head == 1 && previous.replay.state.tips[0].at == 101
 }
 
@@ -15120,7 +15281,7 @@ fn journal_worker_case(d: Dir, tasks: Tasks, mode: u64) -> bool waits {
     }) {
         return false
     }
-    let all = result.unwrap(journal_recover(d, id, 7, journal_initial()))
+    let all = result.unwrap(journal_recover(d, id, 7, true, journal_initial()))
     if mode == 3 {
         all.seq == 8 && all.end == 156 && all.replay.state.tips[0].head == 3
     } else {
@@ -15297,13 +15458,20 @@ fn journal_worker_zero(take input: JournalWorker) -> Result[(), Error] waits {
 }
 
 fn journal_following(d: Dir, id: StoreId, seq: u64, flush: bool) -> Result[Option[DiskHeader], Error] waits {
-    let next_header = journal_header(d, id, seq + 1, flush)
+    let Some(next_seq) = int.checked_add(seq, 1) else {
+        return Ok(None)
+    }
+    let next_header = journal_header(d, id, next_seq, flush)
     match take next_header {
         Ok(h) => Ok(h),
         Error(Corrupt(_)) => {
-            let next_path = capacity(disk_path("j-", seq + 1, ""))?
-            let beyond_path = capacity(disk_path("j-", seq + 2, ""))?
-            if disk_exists(d, beyond_path)? || disk_end(d, id, seq + 1)? != None {
+            let beyond = if let Some(following_seq) = int.checked_add(next_seq, 1) {
+                disk_exists(d, capacity(disk_path("j-", following_seq, ""))?)?
+            } else {
+                false
+            }
+            if beyond || disk_end(d, id, next_seq)? != None {
+                let next_path = capacity(disk_path("j-", next_seq, ""))?
                 return Error(disk_fault(next_path, 0, Header))
             }
             Ok(None)

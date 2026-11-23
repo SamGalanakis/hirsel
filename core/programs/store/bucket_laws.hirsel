@@ -416,3 +416,30 @@ fn bucket_test_fence(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Er
     }
     Ok(())
 }
+
+@test
+fn bucket_test_read_only_mirror(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let sim = bucket_law_sim(tasks, c, 6, None, list.new())
+    let local = disk_test_directory(d)
+    let mut writer = open_bucket(tasks, local, c, r, bucket_law_options(true), bucket_law_client(sim, tasks, "s3.test", 1)?, BUCKET_LAW_OP_MS)?
+    bucket_law_round(mut writer, 1)?
+    bucket_law_commit(mut writer, 2)?
+    close(take writer)?
+    let options = bucket_law_options(false)
+    let mut client = bucket_law_client(sim, tasks, "s3.test", 2)?
+    let before = read_page_manifest_bytes(local)?
+    let reader = open_bucket_read_only(local, options, mut client, BUCKET_LAW_OP_MS)?
+    let rows = read_only_table(reader, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    if read_only_get(reader, rows, 2)? != Some(bucket_law_value(2)) || read_page_manifest_bytes(local)? != before {
+        fail("read-only Bucket open lost the local journal or replaced the mirror")
+    }
+    // Opening a fresh writer against the Bucket advances its generation.
+    let successor = open_bucket(tasks, disk_test_directory(d), c, r, options, bucket_law_client(sim, tasks, "s3.test", 3)?, BUCKET_LAW_OP_MS)?
+    close(take successor)?
+    if let Error(Held) = open_bucket_read_only(local, options, mut client, BUCKET_LAW_OP_MS) {} else {
+        fail("read-only Bucket open accepted a stale local mirror")
+    }
+    let _ = take client
+    let _ = bucket_law_finish(take sim)
+    Ok(())
+}

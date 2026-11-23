@@ -349,6 +349,45 @@ pub fn open_bucket(tasks: Tasks, d: Dir, c: Clock, r: Random, options: Options, 
     open_started(tasks, d, c, options, DiskSession(lock: take lock, startup: take startup), Some(take writer))
 }
 
+/// Recovers an existing Bucket store's local journal and packs. The local
+/// MANIFEST must match the newest published generation byte for byte.
+pub fn open_bucket_read_only(d: Dir, options: Options, mut client: std.object.Client, op_ms: u64) -> Result[ReadOnly, Error] waits {
+    let Bucket(place) = options.authority else {
+        return Error(Unsupported(0))
+    }
+    open_checks(options)?
+    let (take raw, id, take manifest) = read_only_manifest(d)?
+    let Some(claim) = manifest.claim else {
+        return Error(Unsupported(0))
+    }
+    if !same_place(claim, place) {
+        return Error(Foreign)
+    }
+    let generation = manifest.generation
+    let reader = read_only_recover(d, id, take manifest, options.resident_limit)?
+    check_read_only_manifest(d, raw)?
+    let after = if generation > 1 {
+        manifest_key(generation - 1)
+    } else {
+        string.from("")
+    }
+    let newest = bucket_newest(mut client, op_ms, after)?
+    let Some(current) = newest else {
+        return Error(disk_fault("MANIFEST", 0, Gap(generation)))
+    }
+    if current.number > generation {
+        return Error(Held)
+    }
+    if current.number != generation || current.size != list.len(raw) {
+        return Error(disk_fault("MANIFEST", 0, Malformed))
+    }
+    let key = manifest_key(generation)
+    if bucket_fetch(mut client, op_ms, key, current.size)? != raw {
+        return Error(disk_fault(key, 0, Checksum))
+    }
+    Ok(take reader)
+}
+
 // Uploads one local pack. A pack already at its number was left by a writer
 // that lost the claim before publishing it: no generation references it, so
 // the claim holder overwrites it. Any generation at or past this one means

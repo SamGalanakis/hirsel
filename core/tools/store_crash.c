@@ -22,6 +22,7 @@ extern void store_crash_free(void *);
 extern void store_crash_orphan_end(void *);
 extern uint8_t store_crash_crashed(void *);
 extern void store_crash_checkpoint_reopen(void *);
+extern void store_crash_expect_read_only(void *);
 extern void store_crash_journal_fork(void *, uint8_t);
 extern uint8_t hirsel_core_test_run_scripted(const HirselCoreProcessConfig *, HirselCoreEntry, uint64_t);
 _Static_assert(sizeof(HirselCoreHostOutcome)==32, "provider outcome ABI");
@@ -246,6 +247,7 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
     for(uint64_t run=0;run<(reopen && !recovery_failure?4:3);run++) {
         uint64_t phase=reopen?reopen_order[run]:run;
         store_crash_phase(state,phase);
+        if(phase==2 && !strcmp(scenario,"read-only")) store_crash_expect_read_only(state);
         cancellation.phase=phase;
         /* Law 8 opens at midnight, noon and the following midnight. */
         park_wall_ms=!strcmp(scenario,"steps-park")?1000+phase*UINT64_C(43200000):0;

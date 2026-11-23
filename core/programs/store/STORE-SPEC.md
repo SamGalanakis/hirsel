@@ -1,4 +1,6 @@
-# STORE-SPEC v2.43: the M4 store library (lane store-spec-1001)
+# STORE-SPEC v2.44: the M4 store library (lane store-spec-1001)
+
+v2.44 (lane store-readonly-open-1860): **built.** AP21 validates format-3 opens, export preparation and install output. §11.19 adds an offline reader for Directory stores and current Bucket mirrors.
 
 v2.43 (lane store-bucket-1836): **built.** Rows 11 and 12 are built for one authority, a bucket. §11.18 is the contract: `open_bucket` keeps the packs and every MANIFEST generation in an S3 bucket through `std.object`, the no-clobber publish of `MANIFEST-<gen:020>` fences a second writer, and the CLAIM and AUTHORITY frames ride the MANIFEST. The journal stays local. Directory stores are unchanged.
 
@@ -137,7 +139,7 @@ v2.28 (RUNNER-SPEC v2.17, lane caller-scope-1128, astra's second attack, ATTACK-
 | C-4 | A segment was said to hold at most `checkpoint_bytes` + `FRAME_LIMIT`, which refused rotations, extension frames and torn tails all break | **TARGET, not built** | U is the accepted COMMIT/FORK bytes and the publication limit. A bounded streaming segment reader (65,536-byte chunk plus one `FRAME_LIMIT` frame buffer) keeps the checksum, END, `prev_end` and torn-tail rules for recovery and `recorded`. HEADER/END pairs are counted for open rotations and for cuts. No physical-disk bound is given; one would be a separate contract. | §11.11 AP15 segment reads, Disk |
 | C-5 | The floor proof had no restart precondition, and `checkpoint_bytes` near u64::MAX overflowed the floor and `requested` | **TARGET, not built** | The proof applies to an uninterrupted interval from U = 0 after a published cut. `since` is 0 at open, and U keeps the recovered suffix (worked restart example). The comparison is U > J, then f > J − U, and `requested` saturates. The options step runs before LOCK, so it can be checked without a store, and covers out of range (> 18,446,744,073,692,774,319) and below the floor. The attempt schedule is fixed to 83,886,160 / 167,772,320 / 251,658,480, and L50 (e)'s maximal frame is two puts. | §11.11 AP15; AP21 open order step 0; L28 (d), L50 (e) |
 | C-6 | AP16's plan computed list edits before the data layout, and the optional retry undid only the worklist | **TARGET, not built** | The plan order is H, fresh set, settle (the mandatory retry base), optional relocation, data layout, list edits, list stamps, class-2 layout, buffers; encoding is children first. A refused optional part restores the base, discards dependent state and re-emits from the installed `next_pack`. Leftovers are contiguous, and consumed stamps stay consumed. L41 (vii) adds a refusal after an earlier rename, checked against an independent parse. | §11.12 AP16 step 2, relocation, list edits, refusal; L41 (vii) |
-| C-7 | §3.4's retained order cleaned up before AP21 validated, and the prepare opener and NEW's output were unvalidated | **TARGET, not built** | The open order is restated: options, LOCK, MANIFEST, O1, AP21 steps 0–4, cleanup from the validated result, rebuild, journal, account, rotate, streams, the journal task alone. The inventory excludes members of R that were already unlinked. List reads are bounded (`len` ≤ 8,384 and offset arithmetic) before reading. The prepare opener validates with no cleanup, and NEW's private output and prospective MANIFEST are validated before the rename. Validation, capacity and I/O failures stay distinct. | §11.12 AP21; §11.1 T10; AP16 step 4 |
+| C-7 | §3.4's retained order cleaned up before AP21 validated, and the prepare opener and NEW's output were unvalidated | **built** | The open order is restated: options, LOCK, MANIFEST, O1, AP21 steps 0–4, cleanup from the validated result, rebuild, journal, account, rotate, streams, the journal task alone. The inventory excludes members of R that were already unlinked. List reads are bounded (`len` ≤ 8,384 and offset arithmetic) before reading. The prepare opener validates with no cleanup, and NEW's private output and prospective MANIFEST are validated before the rename. Validation, capacity and I/O failures stay distinct. | §11.12 AP21; §11.1 T10; AP16 step 4 |
 | C-8 | AP1a let a second op of the CALL's stream disagree with the reply, and W2's fallback could pick another refused cut | **TARGET, not built** | Section tags must be ascending and unique, and the call-owning key has exactly one streams op. The built completion/record stream check is kept (`Before(Foreign, None)`). W2 step 2 uses the last *published* generation. L29 (d) adds 337-byte settle 1 and 2 cases comparing every `Recorded` field, duplicate cases, and the two-refused-cuts case. | §11.1 AP1a; L29 (d) |
 | C-9 | L28 (a), L28 (c) and L51 (l) asked for observations their oracles cannot make | **TARGET, not built** | L28 (a) drains before the copy and adds a late insert refusal and crash images across step 4. L28 (c) parses the saved prefix and checks heads through the prepare opener. L51 (l) compares incoming edges as multisets by stable holder identity, through an injective serial-to-name projection, with lease history. | §11.15 L28, L51 |
 | C-10 | The cap check sat "before taking an id", before a transaction's final f was known | **TARGET, not built** | The check runs once the final f is known: after the body returns, before the settle, publication, the frame-room wait and a fork's id. A refused COMMIT may consume private stamps, and step charging is unchanged. | §11.11 AP15; AP17; L50 (e) |
@@ -151,7 +153,7 @@ v2.28 (RUNNER-SPEC v2.17, lane caller-scope-1128, astra's second attack, ATTACK-
 
 | # | Item | Verdict | What v2.39 does | Where |
 |---|---|---|---|---|
-| V1 | v2.38 deleted AP21's validation steps while 18 lines still cite it (finding 1) | **TARGET, not built** | AP21 is restored, steps 0–5: list resolution and the disjointness of listed, retired and reached class-2 seqs below `next_pack`; reached list offsets confirmed as PAGE heads by a streamed file scan; bounded pack reads; one location per reached stamp across both graphs; dead frames never followed. Its output, the validated inventory and live graph, is the only input of open's trees and location table, cleanup's retirement and an install's pre-activation check. Built by the opening task before the writer serves anything; no reserve, plan or hand-off state | AP21, §11.1 install |
+| V1 | v2.38 deleted AP21's validation steps while 18 lines still cite it (finding 1) | **built** | AP21 is restored, steps 0–5: list resolution and the disjointness of listed, retired and reached class-2 seqs below `next_pack`; reached list offsets confirmed as PAGE heads by a streamed file scan; bounded pack reads; one location per reached stamp across both graphs; dead frames never followed. Its output, the validated inventory and live graph, is the only input of open's trees and location table, cleanup's retirement and an install's pre-activation check. Built by the opening task before the writer serves anything; no reserve, plan or hand-off state | AP21, §11.1 install |
 | V2 | a COMMIT's CALL section named its stream independently, so it could name an Admitted put, a delete or nothing that carries the reply (finding 2) | **TARGET, not built: format 3's COMMIT payload changes** | section tag 2 is retired; streams op tag 3 is a put of a Replied value followed by its call (no stream field: the op's key is the stream); at most one per COMMIT; `recorded` sets `CallRecord.stream` from the key. A call commit is 5 + \|stream\| bytes shorter | AP1, AP1a, L29 |
 
 ## CHANGES-v2.38 (gavel ruling 1, option C: §11, not yet built)
@@ -2744,8 +2746,9 @@ where a pack written by H1's singleton rule holds one frame and still counts its
 
 **M3 consequence.** Incoming lists are rebuilt at open from a full decode. M3's lazy open cannot rebuild them without reading every pack, so M3 must either persist the reverse edges or find a closure by walking the roots it has loaded. M1's format forecloses neither.
 
-**AP21. Open: validate the format-3 graph, then resolve live edges by location (B3, M3, S6, S7, T12; restored in v2.39).** A parsed MANIFEST and the pages decoded from its files are a **validated inventory and live graph** only after steps 0–4. Every consumer takes that validated value or a projection of it, never the raw MANIFEST fields:
-- open, which builds the trees and the location table from it (step 5);
+**AP21. Open: validate the format-3 graph, then resolve live edges by location (B3, M3, S6, S7, T12; built).** A parsed MANIFEST and the pages decoded from its files are a **validated inventory and live graph** only after steps 0–4. Every consumer takes that validated value or a projection of it, never the raw MANIFEST fields:
+- writer open, which builds the trees and the location table from it (step 5);
+- read-only open, which attaches the holder roots for journal replay (§11.19);
 - cleanup's retirement, which removes a pack only if it is a seq of the validated R that no lease holds, after O1 has selected the MANIFEST;
 - an install's pre-activation check (§11.1 T10), which runs steps 0–4 over the private packs it wrote and the prospective MANIFEST, before the rename and before activation, with NEW's limits;
 - the prepare opener (§3.5a), which runs steps 0–4 over the EXPORT's captured MANIFEST and packs before it replays the export prefix, and removes nothing (v2.40 C-7).
@@ -3026,3 +3029,38 @@ Only a created MANIFEST lets the cut go on to the local rename, the segment remo
 - **Reopen after a cut.** At the same cuts, the writer's own directory reopens through the uncut address with every row its journal acknowledged and none it never committed, and its next checkpoint carries them to a fresh directory.
 - **Soak.** `hirsel test --sim --seeds N` runs one cut per seed: the seed picks the cut request, whether it is applied, and which recovery runs, under retriable faults (resets before the body, `InternalError`) on the connections the seed's plan picks.
 - **The fence.** Writer A checkpoints. Writer B opens a fresh directory and claims the next generation. A's next checkpoint is `Fenced` and A stays unhealthy. B's checkpoints go on, reusing the pack number A's late pack took, and recovery sees B's rows.
+
+### 11.19 Read-only open (v2.44)
+
+`open_read_only(d, options)` returns an opaque `ReadOnly` over the recovered
+main branch. Use `read_only_table` to bind a registered key and value codec
+and `read_only_get` and `read_only_version` to query the captured roots. The
+view exposes no writer operations. It stays at its recovered version when a
+later writer commits or checkpoints.
+
+The caller excludes concurrent writers during recovery to read the offline
+durable state. The opener checks options, refuses an EXPORT directory, reads
+the existing MANIFEST and runs AP21 steps 0–4. A missing MANIFEST is
+`NotFound`, regardless of `options.create`. It attaches the validated roots
+in memory, applies the bounded journal reader with the normal END, prev_end
+and torn-tail rules, and checks the recovered logical account. It rereads the
+MANIFEST and returns `Held` if its bytes changed during recovery. It does
+not open LOCK, issue a sync, clean up, create or rename files, rebuild the
+writer's location table, or start a worker. Validation, allocation and I/O
+failures keep their typed errors.
+
+`open_bucket_read_only(d, options, mut client, op_ms)` needs the local
+mirror because the bucket holds checkpoint generations and the journal is
+local. It validates the mirror and checks its MANIFEST against the bucket's
+highest generation, byte for byte. A newer remote generation gives `Held`.
+Missing or disagreeing remote bytes fail with a typed error. The client
+lists and fetches without publishing a claim, mirroring packs or aborting
+uploads.
+
+The S2 `read-only` crash law compares the directory names and bytes before
+and after read-only open at each cut of a torn MANIFEST publication. Before
+the rename is durable it requires the original checkpoint and journal
+history. Afterward it requires `Corrupt(Truncated)`. The snapshot law
+commits a replacement after open and checks both the original view and a new
+one. The Bucket law recovers a journal-only row and refuses the old mirror
+after another directory advances the remote generation.

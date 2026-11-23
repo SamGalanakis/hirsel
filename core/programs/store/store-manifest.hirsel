@@ -86,6 +86,8 @@ const AUTHORITY_LIMIT: u64 = 65536
 // The CLAIM and AUTHORITY frames with their heads.
 const BUCKET_FRAMES_LIMIT: u64 = 32 + CLAIM_BYTES + AUTHORITY_LIMIT
 
+const PAGE_MANIFEST_FILE_LIMIT: u64 = 72 + 16 + MANIFEST_LIMIT + 20 + BUCKET_FRAMES_LIMIT + UNKNOWN_ROOM
+
 fn push_authority_text(mut out: Bytes, field: String) -> Result[(), Error] {
     let n = string.byte_len(field)
     if n > 65535 {
@@ -565,7 +567,7 @@ fn read_disk_bytes(mut handle: HostFile, path: String, offset: u64, size: u64) -
     Ok(take raw)
 }
 
-fn read_page_manifest_file(d: Dir) -> Result[(StoreId, PageManifest), Error] waits {
+fn read_page_manifest_bytes(d: Dir) -> Result[Bytes, Error] waits {
     let path = "MANIFEST"
     let mut handle = disk_io(host.open(d, path, Read))?
     let header = read_disk_bytes(mut handle, path, 0, 72)?
@@ -574,14 +576,18 @@ fn read_page_manifest_file(d: Dir) -> Result[(StoreId, PageManifest), Error] wai
         disk_read_header(path, header, 1, None, None)
     })?
     let size = disk_io(host.stat_file(mut handle))?.size
-    let limit = 72 + 16 + MANIFEST_LIMIT + 20 + BUCKET_FRAMES_LIMIT + UNKNOWN_ROOM
-    if size > limit {
-        return Error(disk_fault(path, limit, Malformed))
+    if size > PAGE_MANIFEST_FILE_LIMIT {
+        return Error(disk_fault(path, PAGE_MANIFEST_FILE_LIMIT, Malformed))
     }
     let raw = read_disk_bytes(mut handle, path, 0, size)?
     disk_io(host.close(take handle))?
+    Ok(take raw)
+}
+
+fn read_page_manifest_file(d: Dir) -> Result[(StoreId, PageManifest), Error] waits {
+    let raw = read_page_manifest_bytes(d)?
     disk_allocation(scoped fn() -> Result[(StoreId, PageManifest), Error] {
-        disk_read_page_manifest(path, raw)
+        disk_read_page_manifest("MANIFEST", raw)
     })
 }
 
@@ -1164,6 +1170,17 @@ type LoadedPageStore: send {
     locations: PageLocations
 }
 
+fn attach_manifest_holders(manifest: PageManifest, pages: Map[u64, Arc[std.page.Page]], empty_collection: Arc[std.page.Page]) -> List[PageRoots] {
+    let mut all: List[PageRoots] = list.with_capacity(list.len(manifest.branches) + list.len(manifest.pins))
+    for item in manifest.branches {
+        list.push(mut all, attach_page_roots(pages, item.roots, manifest.inline, empty_collection))
+    }
+    for held in manifest.pins {
+        list.push(mut all, attach_page_roots(pages, held.roots, manifest.inline, empty_collection))
+    }
+    take all
+}
+
 fn rebuild_page_store(take validated: ValidatedPageManifest) -> Result[LoadedPageStore, Error] {
     let locations = disk_allocation(scoped fn() -> Result[PageLocations, Error] {
         rebuild_page_locations(validated)
@@ -1175,13 +1192,7 @@ fn rebuild_page_store(take validated: ValidatedPageManifest) -> Result[LoadedPag
     })?
     let pages = attach_page_graph(mut graph, empty_collection)?
     let (take holders, take lists) = disk_allocation(scoped fn() -> Result[(List[PageRoots], PagedLists), Error] {
-        let mut all: List[PageRoots] = list.with_capacity(list.len(manifest.branches) + list.len(manifest.pins))
-        for item in manifest.branches {
-            list.push(mut all, attach_page_roots(pages, item.roots, manifest.inline, empty_collection))
-        }
-        for held in manifest.pins {
-            list.push(mut all, attach_page_roots(pages, held.roots, manifest.inline, empty_collection))
-        }
+        let all = attach_manifest_holders(manifest, pages, empty_collection)
         let list_tree = attach_page_tree(pages, manifest.pack_root, Unprefixed, 1024, None)
         let retirement_tree = attach_page_tree(pages, manifest.retirement_root, Unprefixed, 1024, None)
         let PageTree(root: take packs, ..) = take list_tree

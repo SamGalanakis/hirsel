@@ -14,7 +14,7 @@ import tempfile
 
 from std_native import ROOT, Evaluator
 from store_tests import inputs
-from store_crash_tests import run_crashes
+from store_crash_tests import SCENARIOS, run_crashes
 
 # Evaluator instructions measured on the unchanged stress law, plus 25% rounded up.
 INSTRUCTION_ALLOWANCES = {'pack_bound': 1_622_341_249}  # measured 1_297_872_999
@@ -45,6 +45,7 @@ def main():
     p.add_argument('--cc', type=Path)
     p.add_argument('--bridge', type=Path, default=os.environ.get('HIRSEL_STORE_CRASH_BRIDGE'))
     p.add_argument('--backend', action='append', choices=['evaluator', 'cranelift', 'llvm', 'llvm-release'])
+    p.add_argument('--crash-scenario', choices=SCENARIOS)
     p.add_argument('--report', type=Path)
     p.add_argument('--test-threads', type=int, choices=[1], default=1)
     args = p.parse_args()
@@ -75,10 +76,13 @@ def main():
                 if args.compiler is None or args.runtime is None or args.bridge is None:
                     p.error('native backends require --compiler, --runtime and --bridge')
                 try:
+                    cases = (args.crash_scenario,) if args.crash_scenario else SCENARIOS
+                    count_only = () if args.crash_scenario else (
+                        'checkpoint-reopen', 'checkpoint-reopen-sync-failure', 'install-refusals',
+                        'watermark-absent', 'watermark-torn')
                     cuts = run_crashes(args.root.resolve(), args.compiler, args.runtime, args.bridge,
-                                       args.cc, crash_manifest, work, engine,
-                                       count_only=('checkpoint-reopen', 'checkpoint-reopen-sync-failure', 'install-refusals',
-                                                   'watermark-absent', 'watermark-torn'))
+                                       args.cc, crash_manifest, work, engine, scenarios=cases,
+                                       count_only=count_only)
                     rows.append(dict(engine=engine, passed=True, crashes=cuts))
                 except RuntimeError as error:
                     rows.append(dict(engine=engine, passed=False, crash_failure=str(error)))

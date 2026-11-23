@@ -1,0 +1,237 @@
+// Laws for the gateway. Each session's place runs in the gateway's directory on a
+// Disk backing, against scripted, test-owned services. See README.md.
+
+const BYTES: u64 = 131072u64
+const PLACE_BYTES: u64 = 1048576u64
+const IDLE_MS: u64 = 300u64
+const WITHIN_MS: u64 = 5000u64
+
+// ---- scripted services ----
+
+type Services: send { model: Sender[Sender[harness.Answer]] }
+type Grants: send { context: store.runner.TriggerContext, model: Sender[Sender[harness.Answer]] }
+
+fn usage() -> harness.Usage { harness.Usage(input: 10u64, output: 5u64) }
+
+fn bump_call() -> harness.Call { harness.Call(id: "c1", name: "bump", args: Inline(string.into_bytes("{}"))) }
+
+fn asking() -> harness.Answer {
+    let mut calls: List[harness.Call] = list.new()
+    list.push(mut calls, bump_call())
+    harness.Answer(text: "", calls: take calls, stop: "end", usage: usage())
+}
+
+fn finished() -> harness.Answer { harness.Answer(text: "done", calls: list.new(), stop: "end", usage: usage()) }
+
+// The model must wait (LANG-8), so the scripted answer comes over a channel from a
+// service that answers every ask the same way; the request picks the answer.
+fn model_service(take inbox: Receiver[Sender[harness.Answer]]) -> () waits {
+    while let Ok(reply) = channel.receive(inbox) { let _ = channel.send(reply, asking()) }
+}
+
+fn scripted_model(g: Grants, take r: harness.Request) -> Result[harness.Answer, harness.Fault] waits {
+    for e in r.messages { if let ToolResult(_, _) = e { return Ok(finished()) } }
+    let (reply, replied): (Sender[harness.Answer], Receiver[harness.Answer]) = channel.new(1u64)
+    if let Error(_) = channel.send(g.model, take reply) { return Error(Unavailable) }
+    match channel.receive(replied) { Ok(take a) => Ok(take a), Error(_) => Error(Unavailable) }
+}
+
+fn bump(g: Grants, take args: Bytes) -> Result[Bytes, harness.Fault] waits {
+    let (reply, replied): (Sender[harness.Answer], Receiver[harness.Answer]) = channel.new(1u64)
+    if let Error(_) = channel.send(g.model, take reply) { return Error(Unavailable) }
+    let _ = channel.receive(replied)
+    Ok(string.into_bytes("1"))
+}
+
+fn hold_bump(tx: store.Tx, ask: harness.Ask) -> harness.Verdict { Hold("bump needs approval") }
+
+// ---- the session place: the agent, its trigger entries and its wire entries ----
+
+fn gated_agent() -> harness.Agent[Grants] {
+    let mut a = harness.agent("gated", "scripted", code.describe(scripted_model))
+    list.push(mut a.tools, harness.outside("bump", "adds one", "{}", Once, code.describe(bump)))
+    list.push(mut a.gates, harness.Gate(name: "hold", check: code.describe(hold_bump)))
+    a
+}
+
+fn wired() -> Result[harness.Wiring, harness.Refused] { harness.wiring(code.describe(advance), code.describe(effect)) }
+
+fn advance(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take wake: harness.Wake) -> Result[(), harness.Refused] {
+    let w = wired()?
+    harness.advance(mut tx, h, gated_agent(), w, take wake)
+}
+
+fn effect(g: Grants, caller: store.Caller, take key: harness.EffectKey) -> Result[harness.Worked, Capacity] waits {
+    harness.effect(g.context, g, take key, gated_agent(), code.describe(settle))
+}
+
+fn settle(mut tx: store.Tx, a: store.triggers.Attempt, take m: harness.Settle) -> Result[harness.Filed, store.Error] {
+    let Ok(w) = wired() else { return Error(Missing("harness: wiring")) }
+    harness.settle(mut tx, gated_agent(), w, a, take m)
+}
+
+fn submit_entry(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take m: harness.Submit) -> Result[harness.Disposition, harness.Refused] {
+    let w = wired()?
+    harness.submit(mut tx, h, gated_agent(), w, caller, take m)
+}
+
+fn decide_entry(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take d: harness.Decision) -> Result[harness.Ruling, harness.Refused] {
+    let w = wired()?
+    harness.decide(mut tx, h, gated_agent(), w, caller, take d)
+}
+
+fn place(mut r: store.runner.Registry[Grants, harness.Handles]) -> Result[(), store.runner.RegisterError] {
+    store.runner.transact(mut r, code.describe(advance), BYTES, store.runner.DEFAULT_STEPS)?
+    store.runner.granted(mut r, code.describe(effect), BYTES, store.runner.DEFAULT_STEPS)?
+    harness.register(mut r, BYTES, store.runner.DEFAULT_STEPS)?
+    let f: own[send] fn(mut store.Tx, store.triggers.Attempt, take harness.Settle) -> Result[harness.Filed, store.Error] = settle
+    store.runner.register_attempt(mut r, code.describe(settle), take f, BYTES, store.runner.DEFAULT_STEPS)?
+    store.runner.transact(mut r, code.describe(submit_entry), BYTES, store.runner.DEFAULT_STEPS)?
+    store.runner.transact(mut r, code.describe(decide_entry), BYTES, store.runner.DEFAULT_STEPS)
+}
+
+fn make_grants(s: Services, take ctx: store.runner.TriggerContext) -> Result[Grants, Capacity] {
+    Ok(Grants(context: take ctx, model: channel.sender(s.model)))
+}
+
+fn wire() -> store.runner.WireConfig {
+    let mut w = store.runner.wire_defaults(65536u64, PLACE_BYTES)
+    w.n_pool = 4194304u64
+    w
+}
+
+// The directory replaces the backing and selection with the listed ones. The binding maps
+// one credential to one Caller across connections, as a browser's login would.
+fn session_place(take supplied: store.places.Supplied, s: Services) -> Result[store.runner.PlaceConfig[Grants, harness.Handles, Services, ()], Capacity] {
+    let w = result.unwrap(wired())
+    let config = store.runner.TriggerConfig(entries: harness.entries(w), author: store.Caller(issuer: 0u8, subject: list.new()),
+        grants: Services(model: channel.sender(s.model)), grant: make_grants, grant_bytes: 65536u64)
+    Ok(store.runner.PlaceConfig(backing: Memory, selection: Reopen, place: code.describe(place), n_place: PLACE_BYTES,
+        migrate: code.describe(harness.migrate), handles: code.describe(harness.handles), session: wire(), max_sessions: 1u64,
+        proxies: list.new(), n_publisher: PLACE_BYTES, listen: Addr(ip: V4(0x7f000001u32), port: 0u16),
+        net: supplied.net, tasks: supplied.tasks, clock: supplied.clock, random: supplied.random, stop: store.runner.Stop(lag_ms: 0u64, grace_ms: 200u64),
+        wire: Some(store.runner.wire_bind((), code.describe(store.ingress.caller), 4096u64, 65536u64)), triggers: Some(take config), idle: Some(IDLE_MS)))
+}
+
+fn session_factory() -> Result[store.places.Factory[Services], Capacity] { store.places.seeded_factory(session_place) }
+
+// ---- driving a session through the gateway ----
+
+fn bytes_of[A: codec](a: A) -> Bytes {
+    let codec: std.codec.Codec[A] = std.codec.of()
+    let mut raw: Bytes = list.new()
+    result.unwrap(std.codec.encode(codec, a, mut raw))
+    take raw
+}
+
+// Routes to a session (waking it), makes one wire call and lets go of the session.
+fn call_routed[A: codec, R: codec](door: harness.gateway.Door[Services], id: u64, credential: Bytes, first_p: u64, e: store.fixture.Callee[A, R], take a: A, tasks: Tasks, clock: Clock, random: Random, net: Net) -> Result[R, u64] waits {
+    let lease = match harness.gateway.route(door, id) { Ok(take l) => take l, Error(Place(_)) => return Error(101u64), Error(_) => return Error(100u64) }
+    let Some(address) = latest.read(store.places.status(lease)).addr else { return Error(102u64) }
+    let Ok(keys) = store.fixture.entry_keys(code.describe(place)) else { return Error(103u64) }
+    let Ok(take c) = store.fixture.client_at(tasks, net, clock, random, keys, wire().socket, address, Some(clone(credential)), first_p, WITHIN_MS) else { return Error(104u64) }
+    let mut client = take c
+    let replied = store.fixture.call(mut client, e, take a, 5000u32)
+    store.fixture.close(take client)
+    let _ = take lease
+    match take replied {
+        Ok(store.fixture.Replied(answer: Returned(take r), ..)) => Ok(take r),
+        Ok(store.fixture.Replied(answer: Failed(_), ..)) => Error(105u64),
+        Ok(store.fixture.Replied(answer: Refused(_), ..)) => Error(106u64),
+        Ok(_) => Error(107u64),
+        Error(_) => Error(108u64),
+    }
+}
+
+// Waits for the session's place to stop by itself.
+fn stopped(changes: Receiver[store.places.Change]) -> bool waits {
+    while let Ok(c) = channel.receive(changes) {
+        if let Down(u) = c { return match u.ended { Ok(Stopped(_)) => true, _ => false } }
+    }
+    false
+}
+
+fn transcript_of(dir: Dir, clock: Clock, random: Random, tasks: Tasks) -> List[Bytes] waits {
+    let db = result.unwrap(store.open(tasks, dir, clock, random, store.triggers.law_options()))
+    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    let snap = store.snapshot(db)
+    let mut out: List[Bytes] = list.new()
+    if let Ok(Some(s)) = store.get(snap, store.shape(h.session), 0u64) {
+        for p in 0u64 .. s.next_pos {
+            if let Ok(Some(e)) = store.get(snap, store.shape(h.entries), p) { list.push(mut out, bytes_of(e)) }
+        }
+    }
+    result.unwrap(store.close(take db))
+    out
+}
+
+// The session's log, derived by hand from the script: the user's message, the first
+// request's baseline offering `bump`, the answer that calls it, its result and the end.
+fn expected_log() -> List[Bytes] {
+    let mut defs: List[harness.ToolDef] = list.new()
+    list.push(mut defs, harness.ToolDef(name: "bump", about: "adds one", input: "{}", rev: 1u64, catalog: None))
+    let mut entries_want: List[harness.Entry] = list.new()
+    list.push(mut entries_want, User("bump it"))
+    list.push(mut entries_want, System(harness.Patch(baseline: true, changes: list.new(), tools: Some(take defs))))
+    list.push(mut entries_want, Assistant(asking()))
+    list.push(mut entries_want, ToolResult("c1", Returned(Inline(string.into_bytes("1")))))
+    list.push(mut entries_want, Assistant(finished()))
+    let mut log: List[Bytes] = list.new()
+    for e in entries_want { list.push(mut log, bytes_of(e)) }
+    log
+}
+
+// Law W1 (wake on demand): a session whose place stopped by itself while a call waits
+// for approval is woken by the route that carries the approval, and resumes: the log
+// read while it was unloaded is unchanged, and the run finishes it exactly as the script
+// says. Oracle: the hand-derived log; the first three entries are the log at unload.
+// The answer is the first check that failed, or 0.
+pub fn law_wake_resumes_transcript(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> u64 waits {
+    let mut name = string.with_capacity(32u64)
+    let root = result.unwrap(host.mkdtemp(parent, mut name))
+    let (asks, inbox): (Sender[Sender[harness.Answer]], Receiver[Sender[harness.Answer]]) = channel.new(4u64)
+    let modelling = task.spawn(tasks, bytes 1048576u64, take inbox, model_service)
+    let (watch, changes): (Sender[store.places.Change], Receiver[store.places.Change]) = channel.new(64u64)
+    let config = harness.gateway.GatewayConfig(root: root, options: store.triggers.law_options(), migrate: code.describe(harness.migrate),
+        factory: session_factory, max_sessions: 1u64, place_bytes: 67108864u64, tasks: tasks, clock: clock, random: random, net: net,
+        watch: Some(take watch), seed: Services(model: take asks))
+    let g = match harness.gateway.gateway(take config) { Ok(take made) => take made, Error(_) => return 1u64 }
+    let door = harness.gateway.door(g)
+    let id = match harness.gateway.create(door, string.into_bytes("first"), Fresh("scripted", All)) { Ok(n) => n, Error(_) => return 2u64 }
+    let submit = store.fixture.transact_entry(code.describe(submit_entry))
+    let credential = store.ingress.credential(random)
+    let placed = match call_routed(door, id, credential, 0u64, submit, harness.Submit(client_key: "k1", text: "bump it"), tasks, clock, random, net) {
+        Ok(Ok(Placed(_))) => true,
+        Error(n) => return n,
+        _ => false,
+    }
+    if !placed { return 3u64 }
+    if !stopped(changes) { return 4u64 }
+    let session_dir = result.unwrap(std.dir.narrow(root, "s0"))
+    let at_unload = transcript_of(session_dir, clock, random, tasks)
+    let want = expected_log()
+    if list.len(at_unload) != 3u64 { return 5u64 }
+    for i in 0u64 .. 3u64 { if at_unload[i] != want[i] { return 6u64 } }
+    let key = harness.approval_key("bump", 1u64, Inline(string.into_bytes("{}")))
+    let decide = store.fixture.transact_entry(code.describe(decide_entry))
+    let d = harness.Decision(run: 0u64, round: 0u64, ordinal: 0u64, key: take key, allow: true)
+    match call_routed(door, id, credential, 1u64, decide, take d, tasks, clock, random, net) {
+        Ok(Ok(Approved)) => (),
+        Ok(_) => return 7u64,
+        Error(n) => return n + 100u64,
+    }
+    if !stopped(changes) { return 8u64 }
+    let _ = harness.gateway.stop(take g)
+    let resumed = transcript_of(session_dir, clock, random, tasks)
+    let _ = task.join(take modelling)
+    result.unwrap(std.dir.remove_all(parent, name))
+    if list.len(resumed) != list.len(want) { return 9u64 }
+    for i in 0u64 .. list.len(want) { if resumed[i] != want[i] { return 10u64 } }
+    0u64
+}
+
+@test
+fn test_wake_resumes_transcript(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), u64] waits {
+    let bad = law_wake_resumes_transcript(parent, clock, random, tasks, net)
+    if bad == 0u64 { Ok(()) } else { Error(bad) }
+}

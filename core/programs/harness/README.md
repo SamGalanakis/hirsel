@@ -238,6 +238,34 @@ each response chunk to `provider.feed` and asks `provider.answer` at the end.
   (`x-api-key`, or `Authorization: Bearer`), and secrets travel only over a
   verified TLS stream, so plain HTTP endpoints cannot carry one.
 
+## The gateway
+
+`harness.gateway` keeps a catalog of sessions and runs each session's place in a
+place directory (RUNNER-SPEC §13) with `idle_ms: None`, so a place unloads only
+by its own idle stop (§14.4), which never cuts active work: an idle session
+holds no memory. An app gives it the factory that builds a session's place
+(`store.places.seeded_factory`, whose `make` sees the gateway's seed, the
+services every session's grants are made from), its migration and its store
+options.
+
+- `create(door, key, Fresh(model, narrow) | Adopt(prefix))` seeds a new
+  session's store, then commits its catalog row; a repeated key returns the
+  same id, and an id is never reused. `Adopt` takes a fork's exported prefix.
+- `route(door, id)` writes Dirty, then opens the session, starting its place
+  if it is unloaded, and returns a lease whose status holds its address. Wire
+  calls go to the place itself. A binding is needed for a caller that
+  reconnects, and its request positions continue across connections.
+- `delete`, `listing` and `stop` do what they say; `delete` refuses a leased
+  session.
+- **Wake.** Each row is `Dirty | Clean(Option[next_due])`. Only a clean stop
+  writes Clean; with a trigger due, a wall alarm wakes the session then. Any
+  other end leaves Dirty and wakes it again, and a restarted gateway wakes
+  every Dirty or due session.
+- **Status.** A session's `Status` view reads "calling tools" while a member
+  of its round can still move by itself, and "waiting" when every open call
+  waits on an approval or a resume, so a client holding the session can let
+  go and the place can stop.
+
 ## Laws
 
 | law | claim | oracle |
@@ -254,6 +282,7 @@ each response chunk to `provider.feed` and asks `provider.answer` at the end.
 | K1 `test_parked_call_resumes_once` | An Inside tool that returns Later runs once and stays parked through further wakes. The first resume settles it with the given result and the round goes on; a second resume is ignored. | The tool's own run count and the bytes passed to resume. |
 | J1 `test_round_bytes_bounded` | Preparing a model call writes the same bytes after 10 entries as after 1,000, within 64 bytes. Settling a 65,537-byte Outside result keeps the journal smaller than the result. Recovery after an acknowledged PUT and before settle produces InDoubt without redispatch. A settled reference reads back byte-for-byte and a body with the wrong digest is refused. | The snapshot diff, recovered journal byte account, scripted dispatch counts and the simulated S3 object at the fixture's independently computed SHA-256 key. |
 | F1 `test_fork_shares_prefix` | A fork cut after a finished tool round holds exactly the parent's entries before the cut and their visible lines, with no run. Its first request after a new submit is those messages plus the new one, under a fresh baseline. A cut inside a tool round (one of two calls answered) conflicts. | The parent log and the lines each entry shows, written by hand. |
+| W1 `test_wake_resumes_transcript` (gateway_laws) | A session whose place stopped by itself while a call waits for approval is woken by the route that carries the approval. The log read while it was unloaded is the first three entries of the finished log, and the run finishes as the script says. | The five-entry log derived by hand from the script. |
 | S1 `test_documented_streams_read` | The Anthropic docs' tool-use stream and an OpenAI tool-call stream read to their documented answer (text, calls, joined arguments, stop reason, usage), fed whole or in pieces of 1, 2, 7 or 61 bytes. | The Anthropic streaming docs' example, copied verbatim, and a stream built from OpenAI's documented chunk schema; the expected answers are read off the fixtures by hand. |
 | S2 `test_answer_needs_terminator` | A stream cut before `message_stop` or `[DONE]`, cut inside a tool argument, or ending in an error event gives no answer. | Each provider's documented success terminator. |
 | W1 `test_request_bodies_follow_wire_format` | Bodies follow each provider's documented message shape: Anthropic groups one turn's tool results into one user message with `is_error`, and OpenAI sends arguments as a string and asks for usage. | The message shapes in each provider's API reference. |

@@ -12,6 +12,7 @@ store = { major = 1, path = "../store" }
 "harness.hirsel" = "harness"
 "mcp.hirsel" = "mcp_tools"
 "provider.hirsel" = "provider"
+"gateway.hirsel" = "gateway"
 
 [tests]
 limit = 268435456
@@ -21,3 +22,4 @@ dirs = ["."]
 [tests.sources]
 "laws.hirsel" = "laws"
 "provider_laws.hirsel" = "provider_laws"
+"gateway_laws.hirsel" = "gateway_laws"

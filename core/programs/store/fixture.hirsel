@@ -177,14 +177,26 @@ const IDLE_MS: u64 = 0xffffffffffffffffu64
 
 pub fn client(f: Fixture, take token: Option[Bytes], within_ms: u64) -> Result[Client, CallError] waits {
     let address = match latest.read(f.status).addr { Some(a) => a, None => return Error(Closed) }
-    let deadline = std.clock.deadline_after_ms(host.mono_ns(f.clock), within_ms)
-    let conn = match wire_client.connect_for(f.tasks, f.net, address, f.clock, f.random, f.keys, take token, f.socket, within_ms, IDLE_MS) {
+    client_at(f.tasks, f.net, f.clock, f.random, f.keys, f.socket, address, take token, 0u64, within_ms)
+}
+
+// The entry keys a client of a place registered by `place` may call.
+pub fn entry_keys[G: send, H: send](place: StaticFn[fn(mut runner.Registry[G, H]) -> Result[(), runner.RegisterError]]) -> Result[List[Bytes], runner.StartError] {
+    place_keys(place)
+}
+
+// A client of a place this fixture did not start, such as a directory's (§13), found by its address.
+// A bound Caller's request positions continue across its connections, so a reconnect
+// starts at the position after its last request (§3 Admission).
+pub fn client_at(tasks: Tasks, net: Net, clock: Clock, random: Random, keys: List[Bytes], socket: std.wsock.Config, address: Addr, take token: Option[Bytes], first_p: u64, within_ms: u64) -> Result[Client, CallError] waits {
+    let deadline = std.clock.deadline_after_ms(host.mono_ns(clock), within_ms)
+    let conn = match wire_client.connect_for(tasks, net, address, clock, random, keys, take token, socket, within_ms, IDLE_MS) {
         Ok(take c) => take c,
-        Error(_) => return if host.mono_ns(f.clock) >= deadline { Error(Deadline(within_ms)) } else { Error(Closed) },
+        Error(_) => return if host.mono_ns(clock) >= deadline { Error(Deadline(within_ms)) } else { Error(Closed) },
     }
-    let keys: List[Bytes] = clone(f.keys)
-    Ok(Client(conn: take conn, keys: take keys, next_p: 0u64, next_sub: 0u32,
-        subs: list.new(), version: 0u64, lost: false, generation: 0u64, tasks: f.tasks, clock: f.clock))
+    let held: List[Bytes] = clone(keys)
+    Ok(Client(conn: take conn, keys: take held, next_p: first_p, next_sub: 0u32,
+        subs: list.new(), version: 0u64, lost: false, generation: 0u64, tasks: tasks, clock: clock))
 }
 
 fn find_sub(subs: List[Sub], id: u32) -> Option[u64] {

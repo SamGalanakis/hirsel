@@ -656,7 +656,7 @@ pub fn loopback() -> Addr {
 }
 
 pub fn wire() -> runner.WireConfig {
-    let mut w = runner.wire_defaults(65536u64, PLACE_BYTES)
+    let mut w = runner.wire_defaults(65536u64)
     w.n_pool = 4194304u64
     w
 }
@@ -681,7 +681,6 @@ fn until_idle[G: send, S: send](take config: runner.PlaceConfig[G, harness.Handl
             Error(take s)
         },
         Error(Exceeds(_)) => Error("place: a bound was exceeded"),
-        Error(Disagrees(_)) => Error("place: its image disagrees with the store"),
         Error(Full(_)) => Error("place: out of capacity"),
     }
 }

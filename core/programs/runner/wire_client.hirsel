@@ -182,7 +182,7 @@ fn server[G: send, H: send, B: send](take seed: Server[G, H, B]) -> Result[(), s
     let lease = option.unwrap(std.wsock.acquire(pending)?)
     let up = std.wsock.server(take socket, take lease, peer.ip, list.new(), config.socket, c, host.mono_ns(c))?
     let service = runner.wire_target_service(random, take session_wire, head, c, tasks, config, "fixture")
-    let placed: Result[own[send] fn(mut runner.WireSession[G, B], take runner.ServiceAllocation) -> Result[runner.ServicePlan, u16], runner.RegisterError] = runner.wire_place_allocator(place, config.n_place)
+    let placed: Result[own[send] fn(mut runner.WireSession[G, B], take runner.ServiceAllocation) -> Result[runner.ServicePlan, u16], runner.RegisterError] = runner.wire_place_allocator(place, 65536u64)
     let allocate = match take placed { Ok(take a) => take a, Error(_) => return Error(Protocol(1013u16)) }
     let h = match runner.serve_connection(tasks, take up, take service, take allocate, post, config, c) { Ok(take h) => take h, Error(cap) => return Error(Allocation(cap)) }
     match task.join(take h) { Ok(take r) => take r, Error(_) => Error(Protocol(1008u16)) }
@@ -193,7 +193,7 @@ pub fn pair[G: send, H: send, B: send](tasks: Tasks, n: Net, c: Clock, random: R
     place: StaticFn[fn(mut runner.Registry[G, H]) -> Result[(), runner.RegisterError]],
     keys: List[Bytes], take token: Option[Bytes], q: u64, n_session: u64)
     -> Result[(Conn, Task[Result[(), std.wsock.Error]]), std.wsock.Error] waits {
-    let mut config = runner.wire_defaults(524288u64, 65536u64)
+    let mut config = runner.wire_defaults(524288u64)
     config.q = q
     config.budget = 65536u64
     config.socket.max_frame = 32768u64

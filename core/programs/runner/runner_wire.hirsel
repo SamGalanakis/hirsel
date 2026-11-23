@@ -97,7 +97,7 @@ fn wire(out: std.wsock.Outbound, x: runner.Frame, expected: Bytes) -> bool {
 }
 
 pub fn law_frame_vectors() -> bool {
-    let out = result.unwrap(std.wsock.outbound(Server, runner.wire_defaults(0u64, 0u64).socket, None))
+    let out = result.unwrap(std.wsock.outbound(Server, runner.wire_defaults(0u64).socket, None))
     // want: identity count 4 + bytes 2 + args_fp 8 LE + result_fp 8 LE = 22
     let c_want: std.codec.Codec[runner.Want] = std.codec.of()
     if !vector(c_want, runner.Want(identity: b("aabb"), args_fp: 0x0102030405060708u64, result_fp: 0x1112131415161718u64), b("02000000aabb08070605040302011817161514131211")) {

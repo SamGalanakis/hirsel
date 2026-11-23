@@ -456,7 +456,6 @@ fn start_text(e: runner.StartError) -> String {
         Listen(_) => string.from("listen"),
         Missing(what) => string.from(what),
         Exceeds(b) => string.from(b.name),
-        Disagrees(d) => string.from(d.name),
         Full(_) => string.from("Full"),
     }
 }

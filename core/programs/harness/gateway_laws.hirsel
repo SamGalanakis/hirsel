@@ -221,7 +221,7 @@ fn make_grants(s: Services, take ctx: runner.TriggerContext) -> Result[Grants, C
 }
 
 fn wire() -> runner.WireConfig {
-    let mut w = runner.wire_defaults(65536u64, PLACE_BYTES)
+    let mut w = runner.wire_defaults(65536u64)
     w.n_pool = 4194304u64
     w
 }

@@ -142,7 +142,7 @@ fn settings(dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, take
 fn settings_of(registered: Registered, take allowed: runner.triggers.Entries, dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, take s: Services, idle: Option[u64]) -> runner.PlaceConfig[Grants, harness.Handles, Services, ()] {
     let config = runner.TriggerConfig(entries: take allowed, author: store.Caller(issuer: 0u8, subject: list.new()),
         grants: take s, grant: make_grants, grant_bytes: 65536u64)
-    let mut wire = runner.wire_defaults(65536u64, PLACE_BYTES)
+    let mut wire = runner.wire_defaults(65536u64)
     wire.n_pool = 4194304u64
     runner.PlaceConfig(backing: Disk(dir, runner.triggers.law_options()), selection: Reopen, place: registered, n_place: PLACE_BYTES,
         migrate: code.describe(harness.migrate), handles: code.describe(harness.handles), session: wire, max_sessions: 1u64,

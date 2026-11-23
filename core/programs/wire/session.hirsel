@@ -41,11 +41,11 @@ fn run(n: Net, tasks: Tasks, clock: Clock, config: runner.WireConfig) -> Result[
 
 
 pub fn main(n: Net, tasks: Tasks, clock: Clock) -> Result[(), Exit] waits {
-    run(n, tasks, clock, runner.wire_defaults(65536u64, 0u64))
+    run(n, tasks, clock, runner.wire_defaults(65536u64))
 }
 
 pub fn idle(n: Net, tasks: Tasks, clock: Clock) -> Result[(), Exit] waits {
-    let mut config = runner.wire_defaults(65536u64, 0u64)
+    let mut config = runner.wire_defaults(65536u64)
     config.socket.idle_ms = 100u64
     config.socket.close_ms = 500u64
     run(n, tasks, clock, config)

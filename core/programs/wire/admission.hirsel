@@ -80,7 +80,7 @@ fn bind_test(random: Random, credential: Bytes) -> Result[runner.Caller, ()] {
 fn server(take seed: Server) -> () waits {
     let Server(net: n, clock: c, tasks: tasks, random: random, args: a, head: take head, post: take post) = take seed
     let listener = match host.listen(n, Addr(ip: V4(0x7f000001u32), port: 18094u16), 128u16) { Ok((take l, _)) => take l, Error(_) => return }
-    let mut config = runner.wire_defaults(1048576u64, 1048576u64)
+    let mut config = runner.wire_defaults(1048576u64)
     config.socket.close_ms = 200u64
     if let Some(mode) = args.get(a, 0u64) {
         if mode == "welcome_with_small_budget" { config.budget = 65536u64 }
@@ -88,7 +88,7 @@ fn server(take seed: Server) -> () waits {
     let make: scoped[view] fn() -> runner.Service[runner.WireSession[Random, Random]] = fn() -> runner.Service[runner.WireSession[Random, Random]] {
         runner.wire_service(random, Some(runner.wire(random, Some(code.describe(bind_test)), 4096u64, 65536u64)), head, c, tasks, config, a)
     }
-    let _ = runner.serve(take listener, tasks, c, post, config, 128u64, list.new(), make, result.unwrap(runner.wire_place_allocator(code.describe(place), config.n_place)))
+    let _ = runner.serve(take listener, tasks, c, post, config, 128u64, list.new(), make, result.unwrap(runner.wire_place_allocator(code.describe(place), 1048576u64)))
 }
 
 // A callback fault ends the owner task under FAIL-14.
@@ -112,7 +112,7 @@ fn fault_listener(n: Net, c: Clock, tasks: Tasks, reject: bool) -> Result[(), Ex
         Error(_) => return Error(Exit(status: 1u8)),
     }
     let mail = result.unwrap(runner.mailbox(1u64))
-    let mut config = runner.wire_defaults(0u64, 0u64)
+    let mut config = runner.wire_defaults(0u64)
     if reject { config.budget = 100u64 }
     match runner.serve(take listener, tasks, c, runner.post(mail), config, 1u64, list.new(), fault_service, fn(mut context: (), take plan: runner.ServiceAllocation) -> Result[runner.ServicePlan, u16] { Error(1013u16) }) {
         Error(Configuration) => if reject { Ok(()) } else { Error(Exit(status: 1u8)) },

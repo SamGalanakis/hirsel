@@ -242,7 +242,7 @@ pub fn main(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, o
     let entries = result.unwrap(trigger_entries(target))
     let trigger_config = runner.TriggerConfig(entries: take entries, author: store.Caller(issuer: 0u8, subject: list.new()),
         grants: take services, grant: make_grants, grant_bytes: 65536u64)
-    let mut wire = runner.wire_defaults(65536u64, PLACE_BYTES)
+    let mut wire = runner.wire_defaults(65536u64)
     wire.n_pool = 4194304u64
     let options = triggers.law_options()
     let settings: runner.PlaceConfig[Grants, Tables, Services, ()] = runner.PlaceConfig(backing: Disk(dir, clone(options)), selection: Current(0u64), place: code.describe(place), n_place: PLACE_BYTES,

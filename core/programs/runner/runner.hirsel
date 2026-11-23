@@ -83,9 +83,7 @@ pub type TriggerConfig[G: send, S: send]: send {
 // `Exceeds` names a PlaceConfig or WireConfig setting, its value and the most this
 // place accepts for it (RUNNER-SPEC §12.1, runner.md "Sizing a place").
 pub type Bound: send { name: String, value: u64, limit: u64 }
-// A configured value that disagrees with the one the place uses.
-pub type Differ: send { name: String, given: u64, used: u64 }
-pub type StartError: send = Open(OpenError) | Listen(NetError) | Missing(String) | Exceeds(Bound) | Disagrees(Differ) | Full(Capacity)
+pub type StartError: send = Open(OpenError) | Listen(NetError) | Missing(String) | Exceeds(Bound) | Full(Capacity)
 pub type Ended: codec + send = Stopped(Option[u64]) | Unstarted | Forced(u64)
 
 // Private runtime-supplied launch metadata. The body is a declaration placeholder;
@@ -235,9 +233,7 @@ const OPERATE_OWN_BYTES: u64 = 262144u64
 pub fn operate_bytes[G: send, H: send, S: send, B: send](p: PlaceConfig[G, H, S, B]) -> Result[u64, Capacity] {
     let launch = launch_env()
     let n_place = if launch.n_place_explicit { launch.n_place } else { p.n_place }
-    let mut session = p.session
-    if launch.n_place_explicit { session.n_place = n_place }
-    let serving = serving_bytes(session, p.max_sessions)?
+    let serving = serving_bytes(p.session, p.max_sessions, n_place)?
     let grant = match p.triggers { Some(config) => config.grant_bytes, None => 0u64 }
     let head = int.saturating_add(head_bytes(p.backing, n_place, p.n_publisher), grant)
     Ok(int.saturating_add(int.saturating_add(head, serving), OPERATE_OWN_BYTES))
@@ -263,12 +259,7 @@ pub fn operate[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, 
         session: wire_config, max_sessions: limit, proxies: take proxies,
         listen: listen, net: net, tasks: tasks, clock: clock, random: random, stop: stop_config, wire: take supplied_wire, triggers: take trigger_config, idle: configured_idle, ..) = take p
     let idle = match launch.idle { Some(ms) => Some(ms), None => configured_idle }
-    if !launch.n_place_explicit && wire_config.n_place != n_place {
-        return Error(Disagrees(Differ(name: string.from("session.n_place"), given: wire_config.n_place, used: n_place)))
-    }
-    let mut session_config = wire_config
-    session_config.n_place = n_place
-    if let Some(take problem) = session_problem(session_config, limit, launch.target.size) { return Error(take problem) }
+    if let Some(take problem) = session_problem(wire_config, limit, launch.target.size) { return Error(take problem) }
     let watch = status_watch(take watching)?
     let mut current = copy_status(latest.read(status))
     let mut opening_read: Bytes = list.new()
@@ -278,7 +269,7 @@ pub fn operate[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, 
     let (head_to, inbox_head): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(64u64)
     let hosting = start_host_control(tasks, clock, n_place, head_to, to)?
     let (finish_to, finish_from): (Sender[()], Receiver[()]) = channel.new(1u64)
-    let serving_total = match serving_bytes(session_config, limit) { Ok(total) => total, Error(cap) => return Error(Full(cap)) }
+    let serving_total = match serving_bytes(wire_config, limit, n_place) { Ok(total) => total, Error(cap) => return Error(Full(cap)) }
     let serve_slots = serve_inbox_capacity(limit)
     // The supervisor allocates this channel before the serving task starts.
     // OwnerReady has the largest message: its tag, id and two senders cost 64 B.
@@ -370,8 +361,8 @@ pub fn operate[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, 
                 if let Some((take listener, take pub_to)) = replace(mut ready, None) {
                     let (take addresses, take session_wire, take from_serve) = option.unwrap(replace(mut unused_listener_inputs, None))
                     let target = string.from(current.target)
-                    let serving_config = ServePlace(listener: take listener, config: session_config, tasks: tasks, clock: clock, random: random, wire: take session_wire,
-                        max_sessions: limit, proxies: take addresses, target: take target, publisher: take pub_to, place: place,
+                    let serving_config = ServePlace(listener: take listener, config: wire_config, tasks: tasks, clock: clock, random: random, wire: take session_wire,
+                        max_sessions: limit, proxies: take addresses, target: take target, publisher: take pub_to, place: place, n_place: n_place,
                         head: channel.sender(head_to), inbox: take from_serve, to: channel.sender(serve_to), events: channel.sender(to), drain: latest.handle(drain),
                         status: latest.handle(status), idle: idle, first_write: match hosting { Some(host) => Some(channel.sender(host.ack)), None => None })
                     let run: fn(take ServePlace[G, H, B]) -> () waits = run_serve_place
@@ -1095,14 +1086,6 @@ pub fn start_text(problem: StartError) -> String {
             string.push_u64(mut line, over.value)
             string.push(mut line, ", above the most this place accepts, ")
             string.push_u64(mut line, over.limit)
-        },
-        Disagrees(differ) => {
-            string.push(mut line, differ.name)
-            string.push(mut line, " is ")
-            string.push_u64(mut line, differ.given)
-            string.push(mut line, " but PlaceConfig.n_place is ")
-            string.push_u64(mut line, differ.used)
-            string.push(mut line, "; pass the same n_place to wire_defaults, PlaceConfig and hirsel sdk ts --n-place")
         },
         Full(cap) => {
             string.push(mut line, "the executable's root limit cannot hold this place: ")
@@ -5263,10 +5246,10 @@ const WIRE_OWNER_TASK_BYTES: u64 = 320u64
 const WIRE_OVERHEAD: u64 = 67108864u64
 const WIRE_SESSION_CEILING: u64 = 16777216u64
 pub const WIRE_POOL_BYTES: u64 = 384u64 * 1024u64 * 1024u64
-pub type WireConfig: send { n_pool: u64, n_granted: u64, max_subs: u64, socket: std.wsock.Config, q: u64, budget: u64, n_service: u64, n_place: u64, site: Option[std.wsock.Site] }
+pub type WireConfig: send { n_pool: u64, n_granted: u64, max_subs: u64, socket: std.wsock.Config, q: u64, budget: u64, n_service: u64, site: Option[std.wsock.Site] }
 
-pub fn wire_defaults(n_service: u64, n_place: u64) -> WireConfig {
-    WireConfig(n_pool: WIRE_POOL_BYTES, n_granted: 0u64, max_subs: 128u64, socket: std.wsock.defaults(), q: 4, budget: 1048576, n_service: n_service, n_place: n_place, site: None)
+pub fn wire_defaults(n_service: u64) -> WireConfig {
+    WireConfig(n_pool: WIRE_POOL_BYTES, n_granted: 0u64, max_subs: 128u64, socket: std.wsock.defaults(), q: 4, budget: 1048576, n_service: n_service, site: None)
 }
 
 fn wire_round(n: u64) -> u64 { (n + 7u64) & 0xfffffffffffffff8u64 }
@@ -5364,7 +5347,7 @@ pub fn writer_bytes() -> u64 { 4096u64 }
 
 // The owner result has charge-v1 size 32. Its 320-byte task
 // record is part of the floor, which also covers its child tasks.
-pub fn serving_bytes(c: WireConfig, owners: u64) -> Result[u64, Capacity] {
+pub fn serving_bytes(c: WireConfig, owners: u64, n_place: u64) -> Result[u64, Capacity] {
     if c.n_granted > WIRE_SESSION_CEILING { return Error(Capacity(requested: c.n_granted, available: WIRE_SESSION_CEILING)) }
     if owners > WIRE_OWNER_LIMIT { return Error(Capacity(requested: owners, available: WIRE_OWNER_LIMIT)) }
     let floors = owners * (WIRE_OWNER_FLOOR + c.n_granted)
@@ -5372,7 +5355,7 @@ pub fn serving_bytes(c: WireConfig, owners: u64) -> Result[u64, Capacity] {
     let metadata = 2097152u64 + owners * 6711u64
     let overhead = if metadata < WIRE_OVERHEAD { metadata } else { WIRE_OVERHEAD }
     // The place's one Registry, built once under bytes n_place for every session.
-    let fixed = match int.checked_add(overhead + floors, c.n_place) { Some(f) => f, None => return Error(Capacity(requested: c.n_place, available: 0xffffffffffffffffu64 - (overhead + floors))) }
+    let fixed = match int.checked_add(overhead + floors, n_place) { Some(f) => f, None => return Error(Capacity(requested: n_place, available: 0xffffffffffffffffu64 - (overhead + floors))) }
     match int.checked_add(fixed, c.n_pool) {
         Some(total) => Ok(total),
         None => Error(Capacity(requested: c.n_pool, available: 0xffffffffffffffffu64 - fixed)),
@@ -6385,7 +6368,7 @@ fn serve_closing(lifecycle: Option[ServeDrain], clock: Clock) -> bool {
 type ServePlace[G: send, H: send, B: send]: send {
     listener: Listener, config: WireConfig, tasks: Tasks, clock: Clock, random: Random, wire: Option[Wire[G, B]],
     max_sessions: u64, proxies: List[std.wsock.Prefix], target: String, publisher: Sender[PubIn],
-    place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], head: Sender[HeadInput],
+    place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, head: Sender[HeadInput],
     inbox: Receiver[ServeInput], to: Sender[ServeInput], events: Sender[LifeEvent], drain: Latest[Option[DrainWindow]], status: Latest[Status], idle: Option[u64], first_write: Option[Sender[u64]],
 }
 
@@ -6397,15 +6380,15 @@ fn run_serve_place[G: send, H: send, B: send](take seed: ServePlace[G, H, B]) ->
 
 fn supervise_serve[G: send, H: send, B: send](take seed: ServePlace[G, H, B]) -> Result[u64, StartError] waits {
     let ServePlace(listener: take listener, config: config, tasks: tasks, clock: clock, random: random, wire: take session_wire,
-        max_sessions: limit, proxies: take proxies, target: take target, publisher: take pub_to, place: place,
+        max_sessions: limit, proxies: take proxies, target: take target, publisher: take pub_to, place: place, n_place: n_place,
         head: take head_to, inbox: take inbox, to: take to, events: take events, drain: take drain, status: take status, idle: idle, first_write: take first_write) = take seed
-    let registered = match placed(place, config.n_place) { Ok(take r) => take r, Error(take problem) => return Error(Open(Place(take problem))) }
+    let registered = match placed(place, n_place) { Ok(take r) => take r, Error(take problem) => return Error(Open(Place(take problem))) }
     let make: scoped[view] fn() -> Service[WireSession[G, B]] = fn() -> Service[WireSession[G, B]] {
         wire_service_with_head(random, copy_wire(session_wire), LifecycleHead(channel.sender(head_to)), clock, tasks, config, clone(target))
     }
     let transport = ServeTransport(listener: take listener, config: config, tasks: tasks, clock: clock,
         limit: limit, proxies: take proxies, publisher: take pub_to, inbox: take inbox, to: take to)
-    match serve_sockets(take transport, Some(ServeDrain(events: take events, window: take drain, status: take status, idle: idle, first_write: take first_write)), make, wire_allocator(take registered)) {
+    match serve_sockets(take transport, Some(ServeDrain(events: take events, window: take drain, status: take status, idle: idle, first_write: take first_write)), make, wire_allocator(take registered, n_place)) {
         Ok(count) => Ok(count), Error(Allocation(cap)) => Error(Full(cap)), Error(Network(problem)) => Error(Listen(problem)), _ => Error(Missing("socket")),
     }
 }
@@ -6557,7 +6540,8 @@ fn start_socket_refusal(tasks: Tasks, take socket: Socket, clock: Clock, at: u64
 
 pub fn serve[C: send](take listener: Listener, tasks: Tasks, clock: Clock, to_publisher: Sender[PubIn], c: WireConfig, max_sessions: u64, take proxies: List[std.wsock.Prefix], make: scoped[view] fn() -> Service[C], take allocate: own[send] fn(mut C, take ServiceAllocation) -> Result[ServicePlan, u16]) -> Result[(), std.wsock.Error] waits {
     if max_sessions == 0u64 || max_sessions > WIRE_OWNER_LIMIT || !wire_configuration(c) { return Error(Configuration) }
-    let required = match serving_bytes(c, max_sessions) { Ok(total) => total, Error(cap) => return Error(Allocation(cap)) }
+    // The caller supplies an allocator that already owns its Registry.
+    let required = match serving_bytes(c, max_sessions, 0u64) { Ok(total) => total, Error(cap) => return Error(Allocation(cap)) }
     let served: Result[Result[(), std.wsock.Error], Capacity] = bound bytes required {
         let (to, inbox): (Sender[ServeInput], Receiver[ServeInput]) = channel.new(serve_inbox_capacity(max_sessions))
         let transport = ServeTransport(listener: take listener, config: c, tasks: tasks, clock: clock,
@@ -6780,7 +6764,7 @@ fn copy_wire[G: send, B: send](supplied: Option[Wire[G, B]]) -> Option[Wire[G, B
 }
 
 pub opaque type WireSession[G: send, B: send]: send {
-    random: Random, wire: Option[Wire[G, B]], head: WireHead, clock: Clock, tasks: Tasks, config: WireConfig, target: String,
+    random: Random, wire: Option[Wire[G, B]], head: WireHead, clock: Clock, tasks: Tasks, config: WireConfig, target: String, n_place: u64,
     me: Option[Sender[WireEvent]], publisher: Option[Sender[PubIn]], caller: Option[Caller],
     // known: per entry, 1 registered, 2 gone, 0 neither (set at Hello from the one Registry).
     phase: u8, wants: List[Want], entries: List[Bytes], known: List[u8], launch: Option[GrantedLaunch[G]], placing: u64,
@@ -6804,7 +6788,7 @@ pub fn wire_service[G: send, B: send](random: Random, take session_wire: Option[
 }
 
 fn wire_service_with_head[G: send, B: send](random: Random, take session_wire: Option[Wire[G, B]], take head: WireHead, clock: Clock, tasks: Tasks, config: WireConfig, take target: String) -> Service[WireSession[G, B]] {
-    let context: WireSession[G, B] = WireSession(random: random, wire: take session_wire, head: take head, clock: clock, tasks: tasks, config: config, target: take target,
+    let context: WireSession[G, B] = WireSession(random: random, wire: take session_wire, head: take head, clock: clock, tasks: tasks, config: config, target: take target, n_place: 0u64,
         me: None, publisher: None, caller: None, phase: 0u8, wants: list.new(), entries: list.new(), known: list.new(), launch: None, placing: 0u64,
         pending: None, held: map.new(), refusals: 0u64, last: 0u64, generation: 0u64,
         joined: None, joining: None, join_lease: None, marked: false, mark: None, subscription: None, subscription_room: None, sub_generation: 0u64, subs: list.new(), pub_subs: list.new(), reset_seen: false,
@@ -7860,7 +7844,7 @@ fn wire_step_input[G: send, B: send](mut s: WireSession[G, B], mut work: WireWor
                         None => return Error(1008u16),
                     }
                     let q: u32 = int.narrow(s.config.q)
-                    return Ok(Some(Welcome(take caller, q, s.config.budget, result.unwrap(launch_digest()), clone(s.target), s.config.n_place)))
+                    return Ok(Some(Welcome(take caller, q, s.config.budget, result.unwrap(launch_digest()), clone(s.target), s.n_place)))
                 }
                 let index = s.placing - 1u64
                 let slot: u32 = int.narrow(index)
@@ -7902,11 +7886,14 @@ pub fn wire_target_service[G: send, B: send](random: Random, take session_wire: 
 // The place's one Registry, built once under `bytes n_place` and owned by the allocation
 // pool's step for every session the pool serves (§3 "One Registry").
 pub fn wire_place_allocator[G: send, H: send, B: send](place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64) -> Result[own[send] fn(mut WireSession[G, B], take ServiceAllocation) -> Result[ServicePlan, u16], RegisterError] {
-    Ok(wire_allocator(placed(place, n_place)?))
+    Ok(wire_allocator(placed(place, n_place)?, n_place))
 }
 
-fn wire_allocator[G: send, H: send, B: send](take r: Registry[G, H]) -> own[send] fn(mut WireSession[G, B], take ServiceAllocation) -> Result[ServicePlan, u16] {
-    fn(mut s: WireSession[G, B], take allocation: ServiceAllocation) -> Result[ServicePlan, u16] { wire_service_allocate(mut s, r, take allocation) }
+fn wire_allocator[G: send, H: send, B: send](take r: Registry[G, H], n_place: u64) -> own[send] fn(mut WireSession[G, B], take ServiceAllocation) -> Result[ServicePlan, u16] {
+    fn(mut s: WireSession[G, B], take allocation: ServiceAllocation) -> Result[ServicePlan, u16] {
+        if let AcceptHello(_) = view allocation { s.n_place = n_place }
+        wire_service_allocate(mut s, r, take allocation)
+    }
 }
 
 resource type WireJoinLease: send { closing: Sender[()], publisher: Sender[PubIn] } drop(lease) {

@@ -1006,7 +1006,7 @@ def frame_module(root):
     lines = ['// Generated from frame-vectors.json by core/tools/runner_tests.py, then',
              '// formatted; the r0 frame_vectors part refuses a stale copy.', helpers, '',
              'pub fn law_frame_vectors() -> bool {',
-             '    let out = result.unwrap(std.wsock.outbound(Server, runner.wire_defaults(0u64, 0u64).socket, None))']
+             '    let out = result.unwrap(std.wsock.outbound(Server, runner.wire_defaults(0u64).socket, None))']
     for v in vectors:
         payload = bytes.fromhex(v['hex'])
         if 'wire_bytes' in v:

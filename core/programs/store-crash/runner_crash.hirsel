@@ -111,7 +111,7 @@ fn hold_install(mut phase: store.Migration) -> Result[(), store.Error] {
 // H4 uses the same registry and durable counter as the W2 crash scenarios.
 pub fn host_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, n: Net, process: Process, errors: Stderr) -> Result[(), Exit] waits {
     let serve = scoped fn(take stopping: Receiver[()]) -> Result[runner.Ended, runner.MainError] waits {
-        let mut wire = runner.wire_defaults(131072u64, N_PLACE)
+        let mut wire = runner.wire_defaults(131072u64)
         wire.n_pool = 4194304u64
         wire.socket.max_frame = 131072u64
         let mut disk = options()
@@ -136,7 +136,7 @@ pub fn host_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, n: Net, 
 pub fn identity_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, n: Net, process: Process, errors: Stderr) -> Result[(), Exit] waits {
     let serve = scoped fn(take stopping: Receiver[()]) -> Result[runner.Ended, runner.MainError] waits {
         let n_place = 524288u64
-        let mut wire = runner.wire_defaults(65536u64, n_place)
+        let mut wire = runner.wire_defaults(65536u64)
         wire.n_pool = 4194304u64
         let mut disk = options()
         disk.lock_wait_ms = 10000u64
@@ -449,7 +449,7 @@ type Accept: send { listener: Listener, input: Stdin, tasks: Tasks, clock: Clock
 fn accept(take seed: Accept) -> () waits {
     let Accept(listener: take listener, input: input, tasks: tasks, clock: c, random: random, head: take head, post: take post, sessions: sessions) = take seed
     let mut l = take listener
-    let mut config = runner.wire_defaults(65536u64, N_PLACE)
+    let mut config = runner.wire_defaults(65536u64)
     // The replay sends up to three calls per owner. Reserve those outcomes
     // within the fixture's 32 KiB frame limit.
     config.q = 2u64
@@ -468,7 +468,7 @@ fn accept(take seed: Accept) -> () waits {
         let lease = option.unwrap(result.unwrap(std.wsock.acquire(pool)))
         let up = result.unwrap(std.wsock.server(take socket, take lease, peer.ip, list.new(), config.socket, c, host.mono_ns(c)))
         let service = runner.wire_target_service(random, Some(runner.ingress.binding()), head, c, tasks, config, "crash fixture")
-        let owner = result.unwrap(runner.serve_connection(tasks, take up, take service, result.unwrap(runner.wire_place_allocator(code.describe(place), config.n_place)), post, config, c))
+        let owner = result.unwrap(runner.serve_connection(tasks, take up, take service, result.unwrap(runner.wire_place_allocator(code.describe(place), N_PLACE)), post, config, c))
         list.push(mut owners, take owner)
     }
     for take owner in owners { let _ = task.join(take owner) }
@@ -646,7 +646,7 @@ fn activation_pairs(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, out: Stdo
     }
     let (stop, stopping): (Sender[()], Receiver[()]) = channel.new(1u64)
     let (watch, watcher): (Sender[Receiver[runner.Phase]], Receiver[Receiver[runner.Phase]]) = channel.new(1u64)
-    let mut wire = runner.wire_defaults(131072u64, N_PLACE)
+    let mut wire = runner.wire_defaults(131072u64)
     wire.n_pool = 4194304u64
     let settings: runner.PlaceConfig[(), Hd, (), ()] = runner.PlaceConfig(backing: Disk(d, clone(existing)), selection: chosen, place: code.describe(place), n_place: N_PLACE, migrate: code.describe(migrate), handles: code.describe(handles),
         session: wire, max_sessions: 1u64, proxies: list.new(), n_publisher: 1048576u64,
@@ -720,7 +720,7 @@ fn unavailable_identity(d: Dir, c: Clock, r: Random, tasks: Tasks, grow: bool, p
 fn freeze_until_stop(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, n: Net, take stopping: Receiver[()], twice: bool) -> runner.Ended waits {
     let (watch, watcher): (Sender[Receiver[runner.Phase]], Receiver[Receiver[runner.Phase]]) = channel.new(1u64)
     let status = result.unwrap(runner.status_root())
-    let mut wire = runner.wire_defaults(131072u64, N_PLACE)
+    let mut wire = runner.wire_defaults(131072u64)
     wire.n_pool = 4194304u64
     wire.socket.max_frame = 65536u64
     let config: runner.PlaceConfig[(), Hd, (), ()] = runner.PlaceConfig(backing: Disk(d, options()), selection: Current(0u64), place: code.describe(place), n_place: N_PLACE, migrate: code.describe(migrate), handles: code.describe(handles),
@@ -793,7 +793,7 @@ pub fn stop_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Std
         result.unwrap(stdout.write(out, "EARLY"))
         host.stopped(process)
         let start = scoped fn(take stopping: Receiver[()]) -> Result[runner.Ended, runner.MainError] waits {
-            let mut wire = runner.wire_defaults(131072u64, N_PLACE)
+            let mut wire = runner.wire_defaults(131072u64)
             wire.n_pool = 4194304u64
             let config: runner.PlaceConfig[(), Hd, (), ()] = runner.PlaceConfig(backing: Disk(d, options()), selection: Current(0u64), place: code.describe(place), n_place: N_PLACE,
                 migrate: code.describe(migrate), handles: code.describe(handles), session: wire, max_sessions: 1u64,

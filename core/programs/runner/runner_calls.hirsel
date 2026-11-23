@@ -772,7 +772,7 @@ fn stamp_place(mut registry: runner.Registry[WireStamp, Hd]) -> Result[(), runne
 fn drive_granted_copies(take d: Drive) -> () waits {
     let mut requested: List[Bytes] = list.new()
     list.push(mut requested, key_of(code.identity(code.describe(stamp_wire)), std.codec.of_u64(), std.codec.of_u64()))
-    let mut config = runner.wire_defaults(524288u64, 65536u64)
+    let mut config = runner.wire_defaults(524288u64)
     config.q = 0u64
     config.budget = 65536u64
     config.socket.max_frame = 32768u64
@@ -1494,7 +1494,7 @@ fn run_managed[G: send, S: send, B: send](take job: ManagedRun[G, S, B]) -> Resu
 fn managed_address(status: runner.Status) -> Addr { option.unwrap(status.addr) }
 
 fn managed_settings(dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, listen: Addr, stop: runner.Stop) -> runner.PlaceConfig[(), Hd, (), ()] {
-    let mut wire = runner.wire_defaults(65536u64, N_PLACE)
+    let mut wire = runner.wire_defaults(65536u64)
     wire.n_pool = 4194304u64
     runner.PlaceConfig(backing: Disk(dir, disk_options()), selection: Current(0u64), place: code.describe(place), n_place: N_PLACE,
         migrate: code.describe(migrate), handles: code.describe(handles), session: wire, max_sessions: 1u64,
@@ -1544,7 +1544,7 @@ fn fixture_place(mut r: Calls) -> Result[(), runner.RegisterError] {
 }
 
 fn fixture_settings(clock: Clock, random: Random, tasks: Tasks, net: Net, take wire: Option[runner.Wire[(), ()]]) -> runner.PlaceConfig[(), Hd, (), ()] {
-    let mut session = runner.wire_defaults(65536u64, N_PLACE)
+    let mut session = runner.wire_defaults(65536u64)
     session.n_pool = 4194304u64
     session.n_granted = 131072u64
     runner.PlaceConfig(backing: Memory, selection: Current(0u64), place: code.describe(fixture_place), n_place: N_PLACE,
@@ -1731,39 +1731,6 @@ pub fn law_restart_reopens(parent: Dir, clock: Clock, random: Random, tasks: Tas
 @test
 fn test_restart_reopens(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
     if law_restart_reopens(parent, clock, random, tasks, net) { Ok(()) } else { Error(()) }
-}
-
-// Start refusals name what to change. Oracle: a wire configuration whose n_place is not
-// PlaceConfig.n_place is refused with both values (RUNNER-SPEC §6 "One n_place").
-fn refused_start(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, wire_n_place: u64, n_place: u64) -> runner.StartError waits {
-    let mut name = string.with_capacity(32u64)
-    let dir = result.unwrap(host.mkdtemp(parent, mut name))
-    let ephemeral = Addr(ip: V4(0x7f000001u32), port: 0u16)
-    let mut settings = managed_settings(dir, clock, random, tasks, net, ephemeral, runner.Stop(lag_ms: 0u64, grace_ms: 1000u64))
-    settings.session.n_place = wire_n_place
-    settings.n_place = n_place
-    let (_held, stop): (Sender[()], Receiver[()]) = channel.new(1u64)
-    let joined = runner.operate(take settings, take stop, result.unwrap(runner.status_root()), None)
-    result.unwrap(std.dir.remove_all(parent, name))
-    let Error(take problem) = take joined else { fail("start refusal: the place started") }
-    take problem
-}
-
-pub fn law_start_refusals(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
-    let split = refused_start(parent, clock, random, tasks, net, 2097152u64, N_PLACE)
-    let both = match split {
-        Disagrees(differ) => differ.name == "session.n_place" && differ.given == 2097152u64 && differ.used == N_PLACE,
-        _ => false,
-    }
-    want(both, "start refusal: a wire n_place unlike PlaceConfig.n_place is not refused with both values")
-    let text = runner.start_text(take split)
-    want(std.string.find(text, 0u64, "2097152") != None && std.string.find(text, 0u64, "1048576") != None, "start refusal: the disagreement message does not name both values")
-    true
-}
-
-@test
-fn test_start_refusals(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
-    if law_start_refusals(parent, clock, random, tasks, net) { Ok(()) } else { Error(()) }
 }
 
 @test

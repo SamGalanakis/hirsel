@@ -5,7 +5,7 @@
 const LOCAL_BUDGET: u64 = 41943040u64 - 1048576u64 + 16777476u64
 
 fn local_wire() -> runner.WireConfig {
-    let mut wire = runner.wire_defaults(65536u64, N_PLACE)
+    let mut wire = runner.wire_defaults(65536u64)
     wire.n_pool = 4194304u64
     wire
 }

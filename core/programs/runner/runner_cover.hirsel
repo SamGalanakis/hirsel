@@ -73,7 +73,7 @@ fn initial(cn: wire_client.Conn, sub: u32, rows: u64) -> () waits {
 fn drive(take d: D) -> () waits {
     let mut keys: List[Bytes] = list.new()
     list.push(mut keys, k_span())
-    let mut config = runner.wire_defaults(131072u64, 65536u64)
+    let mut config = runner.wire_defaults(131072u64)
     config.q = 0u64
     config.budget = 262144u64
     config.socket.max_frame = 131072u64

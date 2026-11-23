@@ -83,7 +83,7 @@ fn idle_trigger_case(parent: Dir, wall_clock: Clock, random: Random, tasks: Task
     let (entries, _) = idle_entries()
     let config = runner.TriggerConfig(entries: take entries, author: store.Caller(issuer: 0u8, subject: list.new()),
         grants: IdleSeed(clock: virtual_time, starts: take starts), grant: idle_grant, grant_bytes: 65536u64)
-    let mut wire = runner.wire_defaults(65536u64, N_PLACE)
+    let mut wire = runner.wire_defaults(65536u64)
     wire.n_pool = 4194304u64
     let settings: runner.PlaceConfig[IdleGrant, Hd, IdleSeed, ()] = runner.PlaceConfig(
         backing: Disk(dir, disk_options()), selection: Current(0u64), place: code.describe(idle_place), n_place: N_PLACE,

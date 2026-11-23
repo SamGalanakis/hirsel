@@ -137,7 +137,7 @@ fn test_mcp_working_and_blob(parent: Dir, clock: Clock, random: Random, tasks: T
     let w = result.unwrap(mcp_blob_wiring())
     let mut config = settings_of(code.describe(mcp_blob_place), harness.entries(w), dir, clock, random, tasks, network, take services, Some(IDLE_MS))
     config.wire = Some(runner.wire_bind((), code.describe(runner.ingress.caller), 4096u64, 65536u64))
-    let socket = runner.wire_defaults(65536u64, PLACE_BYTES).socket
+    let socket = runner.wire_defaults(65536u64).socket
     let (running, _stop, status) = launch(tasks, take config)
     let until = std.clock.deadline_after_ms(host.mono_ns(clock), 5000u64)
     let (take conn, _) = result.unwrap(host.accept(mut listener, At(clock, until)))

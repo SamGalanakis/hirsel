@@ -2,7 +2,7 @@
 // charged as 32. Two connections hold one wire block each, so a third job's
 // 32 bytes do not fit a 64-byte pool until one of the two blocks drops.
 pub fn law_pool_holds_writer_bytes(tasks: Tasks, clock: Clock) -> bool waits {
-    let config = wire_defaults(0u64, 0u64)
+    let config = wire_defaults(0u64)
     let allocated: Result[(Sender[WireAllocation[()]], Task[()]), Capacity] = start_wire_pool(tasks, config, clock, 64u64, 2u64, fn(mut context: (), take plan: ServiceAllocation) -> Result[ServicePlan, u16] { Error(1013u16) })
     let (pool, take pooled_task) = result.unwrap(take allocated)
     let (one_to, one_from): (Sender[Result[Bytes, std.wsock.Error]], Receiver[Result[Bytes, std.wsock.Error]]) = channel.new(1u64)
@@ -148,7 +148,7 @@ fn pool_full_frame() -> Frame {
 }
 
 pub fn law_pool_releases_cancelled_reader(tasks: Tasks, clock: Clock, random: Random, net: Net) -> bool waits {
-    let mut config = wire_defaults(0u64, 0u64)
+    let mut config = wire_defaults(0u64)
     config.socket.pending_max = 2u64
     let pending = result.unwrap(std.wsock.pending(config.socket))
     // A second live lease leaves room for a duplicate refund to add a token.
@@ -217,13 +217,13 @@ fn test_pool_releases_cancelled_reader(tasks: Tasks, clock: Clock, random: Rando
 }
 
 pub fn law_serving_budget() -> bool {
-    let config = wire_defaults(65536u64, 1048576u64)
-    let total = match serving_bytes(config, 10000u64) { Ok(n) => n, Error(_) => return false }
+    let config = wire_defaults(65536u64)
+    let total = match serving_bytes(config, 10000u64, 1048576u64) { Ok(n) => n, Error(_) => return false }
     if total != 1126170624u64 { return false }
-    if let Ok(_) = serving_bytes(config, 10001u64) { return false }
+    if let Ok(_) = serving_bytes(config, 10001u64, 1048576u64) { return false }
     let mut excessive = config
     excessive.n_pool = 0xffffffffffffffffu64
-    if let Error(_) = serving_bytes(excessive, 10000u64) { true } else { false }
+    if let Error(_) = serving_bytes(excessive, 10000u64, 1048576u64) { true } else { false }
 }
 
 pub fn law_subscription_room_refunded() -> bool {

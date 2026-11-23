@@ -876,7 +876,7 @@ fn law_hedge_charge(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net
     let service = HedgeServices(worker: take worker, net: fake, address: address, clock: clock, enabled: enabled)
     let config = runner.TriggerConfig(entries: harness.entries(hedge_wire()), author: store.Caller(issuer: 0u8, subject: b""),
         grants: take service, grant: grant_hedge, grant_bytes: 65536u64)
-    let mut session = runner.wire_defaults(65536u64, HEDGE_ENTRY_BYTES)
+    let mut session = runner.wire_defaults(65536u64)
     session.n_pool = 4194304u64
     let settings: runner.PlaceConfig[HedgeGrants, harness.Handles, HedgeServices, ()] = runner.PlaceConfig(
         backing: Disk(dir, runner.triggers.law_options()), selection: Reopen, place: code.describe(hedge_place), n_place: HEDGE_ENTRY_BYTES,

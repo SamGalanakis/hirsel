@@ -15,6 +15,9 @@
 //! client, under the client's terminal and signals; the server keeps the
 //! program's scratch directory until that client hangs up.
 use crate::request::Outcome;
+use hirsel_core_ids::ContentHash;
+use hirsel_core_resolve::{ModuleId, Resolution, SourceId};
+use hirsel_core_syntax::{Derive, ParseMode, ParseOutput, Symbol, Symbols};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::io::{self, Read, Write};
@@ -24,6 +27,7 @@ use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 const SOCKET: &str = "resident.sock";
@@ -99,10 +103,110 @@ pub(crate) static REFERENCED: Memo<
     crate::native_entry::Referenced,
 > = Memo::new();
 
+#[derive(Clone)]
+struct SourceHash {
+    bytes: Arc<[u8]>,
+    hash: ContentHash,
+}
+
+static SOURCE_HASHES: Memo<PathBuf, SourceHash> = Memo::new();
+
+/// Hash a captured file once per content change. The path selects the
+/// previous capture; an exact byte comparison confirms the hit.
+pub(crate) fn source_hash(path: &Path, bytes: &Arc<[u8]>) -> ContentHash {
+    if !serving() {
+        return ContentHash::of_bytes(bytes);
+    }
+    let request = REQUEST.load(Ordering::Relaxed);
+    let mut entries = SOURCE_HASHES.entries.lock().unwrap();
+    if let Some((prior, used)) = entries.get_mut(path)
+        && prior.bytes == *bytes
+    {
+        *used = request;
+        return prior.hash;
+    }
+    let hash = ContentHash::of_bytes(bytes);
+    entries.insert(
+        path.to_owned(),
+        (
+            SourceHash {
+                bytes: Arc::clone(bytes),
+                hash,
+            },
+            request,
+        ),
+    );
+    hash
+}
+
+#[derive(Clone)]
+struct Parsed {
+    output: Arc<ParseOutput>,
+    added: Arc<[String]>,
+    after: ContentHash,
+}
+
+static PARSED: Memo<ContentHash, Parsed> = Memo::new();
+
+/// The parse stores numeric symbols. The key names all earlier assignments,
+/// and replaying the parse's additions gives later files the same numbers.
+pub(crate) fn parse_file(
+    prefix: &mut ContentHash,
+    symbols: &mut Symbols,
+    hash: ContentHash,
+    bytes: &[u8],
+    mode: ParseMode,
+    derive: Option<&Derive>,
+) -> io::Result<(ContentHash, ParseOutput, bool)> {
+    let style = derive.map(|d| (&d.codec, &d.path));
+    let key = crate::native::key("hirsel.resident-parse.v1", &(*prefix, hash, mode, style))?;
+    let start = symbols.len();
+    let mut miss = false;
+    let parsed = PARSED.get_or(Some(key), || {
+        miss = true;
+        let output = hirsel_core_resolve::parse_module(bytes, mode, symbols, derive);
+        let added: Arc<[String]> = symbol_suffix(symbols, start).into();
+        let after = if added.is_empty() {
+            *prefix
+        } else {
+            crate::native::key("hirsel.resident-symbols.v1", &(*prefix, &added))?
+        };
+        Ok::<_, io::Error>(Parsed {
+            output: Arc::new(output),
+            added,
+            after,
+        })
+    })?;
+    if !miss {
+        for name in parsed.added.iter() {
+            symbols.intern(name);
+        }
+    }
+    *prefix = parsed.after;
+    Ok((key, (*parsed.output).clone(), miss))
+}
+
+pub(crate) fn symbol_suffix(symbols: &Symbols, start: usize) -> Vec<String> {
+    (start..symbols.len())
+        .map(|i| symbols.text(Symbol(i as u32)).to_owned())
+        .collect()
+}
+
+/// File syntax plus its occurrence, the whole request's index shape and
+/// final symbol assignments. Diagnostics with cross-file sites are rebuilt
+/// against the current index.
+pub(crate) static RESOLVED: Memo<
+    (ContentHash, ContentHash, ContentHash, ModuleId, SourceId),
+    Vec<Arc<Resolution>>,
+> = Memo::new();
+
 /// Drop every memo entry the request numbered `request` did not use.
 fn sweep(request: u64) {
     MATERIALISED.sweep(request);
     REFERENCED.sweep(request);
+    SOURCE_HASHES.sweep(request);
+    PARSED.sweep(request);
+    RESOLVED.sweep(request);
 }
 
 /// Whether this process is a resident compiler serving requests.

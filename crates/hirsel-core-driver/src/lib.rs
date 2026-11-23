@@ -698,7 +698,7 @@ impl Driver {
                 };
                 let hash = {
                     hirsel_core_front::cost_scope!("non-check", "source byte hashing");
-                    ContentHash::of_bytes(&bytes)
+                    crate::resident::source_hash(&s.file, &bytes)
                 };
                 bytes_total += bytes.len();
                 let name = s.name(request.manifest.as_deref())?;
@@ -783,13 +783,27 @@ impl Driver {
         let mut symbols = image_directory
             .as_ref()
             .map_or_else(Symbols::default, |i| i.index.symbols.as_ref().clone());
+        let base_symbols = symbols.len();
         for p in &request.inputs.packages {
             p.intern(&mut symbols);
         }
+        let mut symbol_prefix = crate::resident::serving()
+            .then(|| {
+                native::key(
+                    "hirsel.resident-symbols-base.v1",
+                    &(
+                        image.as_ref().map(|i| i.identity),
+                        crate::resident::symbol_suffix(&symbols, base_symbols),
+                    ),
+                )
+            })
+            .transpose()?;
+        let mut parse_keys = Vec::new();
+        let mut parsed_files = Vec::new();
         let mut modules = Vec::with_capacity(sources.len());
         let mut syntax_diagnostics = vec![];
         let mut syntax_resources = vec![];
-        for (file, (path, mode, bytes, _, _)) in sources.iter().enumerate() {
+        for (file, (path, mode, bytes, hash, _)) in sources.iter().enumerate() {
             let derive = request
                 .inputs
                 .packages
@@ -798,8 +812,26 @@ impl Driver {
                 .and_then(|p| {
                     hirsel_core_resolve::codec_derive(&p.package, &p.dependencies, &path.modules)
                 });
-            let output =
-                hirsel_core_resolve::parse_module(bytes, *mode, &mut symbols, derive.as_ref());
+            let (output, parsed) = if let Some(prefix) = &mut symbol_prefix {
+                let (key, output, parsed) = resident::parse_file(
+                    prefix,
+                    &mut symbols,
+                    *hash,
+                    bytes,
+                    *mode,
+                    derive.as_ref(),
+                )?;
+                parse_keys.push(key);
+                (output, parsed)
+            } else {
+                (
+                    hirsel_core_resolve::parse_module(bytes, *mode, &mut symbols, derive.as_ref()),
+                    true,
+                )
+            };
+            if MEASURE && parsed {
+                parsed_files.push((file, bytes.len()));
+            }
             syntax_diagnostics.extend(output.diagnostics.into_iter().map(|d| (file, d)));
             if let Some(r) = output.resource_refusal {
                 syntax_resources.push((file, r.site(), format!("parser resource refusal: {r}")));
@@ -808,21 +840,17 @@ impl Driver {
         }
         meter.finish("parse");
         if MEASURE {
-            meter.result.source_bytes += bytes_total as u64;
-            meter.result.tokens += modules
-                .iter()
-                .map(|syntax| {
-                    syntax
-                        .tree
-                        .tokens
-                        .iter()
-                        .filter(|token| {
-                            !token.kind.is_trivia()
-                                && token.kind != hirsel_core_syntax::TokenKind::Eof
-                        })
-                        .count() as u64
-                })
-                .sum::<u64>();
+            for (file, bytes) in parsed_files {
+                meter.result.source_bytes += bytes as u64;
+                meter.result.tokens += modules[file]
+                    .tree
+                    .tokens
+                    .iter()
+                    .filter(|token| {
+                        !token.kind.is_trivia() && token.kind != hirsel_core_syntax::TokenKind::Eof
+                    })
+                    .count() as u64;
+            }
             meter.finish("front/input counts");
         }
         let symbols = Arc::new(symbols);
@@ -921,14 +949,30 @@ impl Driver {
         let mut resolution_scratch = ResolutionScratch::default();
         let resolutions: Vec<Vec<Arc<Resolution>>> = modules
             .iter()
-            .map(|m| {
-                m.syntax
-                    .items()
-                    .enumerate()
-                    .map(|(i, item)| {
-                        Arc::new(resolution_scratch.resolve(&index, m.id, m.source, i as u32, item))
-                    })
-                    .collect()
+            .enumerate()
+            .map(|(file, m)| {
+                let key = symbol_prefix
+                    .map(|symbols| (publication.shape, parse_keys[file], symbols, m.id, m.source));
+                let resolve = || {
+                    let rows: Vec<_> = m
+                        .syntax
+                        .items()
+                        .enumerate()
+                        .map(|(i, item)| {
+                            Arc::new(
+                                resolution_scratch.resolve(&index, m.id, m.source, i as u32, item),
+                            )
+                        })
+                        .collect();
+                    if key.is_some() && rows.iter().any(|row| !row.diagnostics.is_empty()) {
+                        Err(rows)
+                    } else {
+                        Ok(rows)
+                    }
+                };
+                resident::RESOLVED
+                    .get_or(key, resolve)
+                    .unwrap_or_else(|rows| rows)
             })
             .collect();
         for rows in &resolutions {

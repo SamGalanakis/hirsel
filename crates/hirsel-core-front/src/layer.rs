@@ -205,14 +205,16 @@ struct Free<'p, 'a> {
     symbols: Vec<String>,
     symbol_ids: HashMap<Symbol, u32>,
 }
-impl Free<'_, '_> {
-    fn module(&self, id: ModuleId) -> Option<usize> {
-        self.p.modules.iter().position(|m| m.id == id)
-    }
+/// The input of `site`'s file: a module of two files has two inputs of one id, and
+/// the site's item ordinal and span are its own file's.
+fn file_of(p: &Program, site: &Site) -> Option<usize> {
+    p.modules
+        .iter()
+        .position(|m| m.id == site.module && Some(m.source) == site.source)
 }
 impl Bind for Free<'_, '_> {
     fn site(&mut self, site: &mut Site) -> Option<()> {
-        let m = self.module(site.module)?;
+        let m = file_of(self.p, site)?;
         let modules = self.p.modules;
         let layout = self
             .layouts
@@ -257,7 +259,7 @@ struct Bound<'r, 'p, 'a> {
 }
 impl Bind for Bound<'_, '_, '_> {
     fn site(&mut self, site: &mut Site) -> Option<()> {
-        let m = self.p.modules.iter().position(|m| m.id == site.module)?;
+        let m = file_of(self.p, site)?;
         let syntax = &self.p.modules[m].syntax;
         if site.item as usize >= syntax.items.len() {
             return None;

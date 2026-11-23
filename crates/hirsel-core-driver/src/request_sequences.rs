@@ -746,6 +746,18 @@ fn broken(){let =}"###)), src("b", "b.hirsel", false, lit(r###"fn use(){let _c:s
             std_pkg(),
             pkg("app", &["core", "std"], vec![src("a", "a.hirsel", false, lit(r###"pub type P:codec{x:u64}
 fn broken(){}"###)), src("b", "b.hirsel", false, lit(r###"fn use(){let _c:std.codec.Codec[a.P]=std.codec.of()}"###))])])]),
+        // a.hirsel declares T at item 1, past the one item of a#2.hirsel, a's first file
+        // in source order: the declared record binds each site in its own file
+        // (stale-codec-1910).
+        seq("declared_second_file", vec![
+        check(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"fn g(){}
+pub type T{x:u8}"###)), src("a", "a#2.hirsel", false, lit(r###"fn f(){}"###))])]),
+        check(vec![
+            core(vec![]),
+            pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"fn g(){}
+pub type T{x:u8}"###)), src("a", "a#2.hirsel", false, lit(r###"fn f(){}"###))])])]),
         seq("comptime_absent", vec![
         check(vec![
             core(vec![]),
@@ -1906,6 +1918,7 @@ const GATES: &[(&str, Gate)] = &[
     ("debug_lines", Gate::Fast),
     ("decl_count_fallback", Gate::Fallback),
     ("declaration_pass_order", Gate::Fallback), // 1039: fast; a module of A is refused (v3.1 condition 4)
+    ("declared_second_file", Gate::Fast),
     ("default_argument_absent", Gate::Fallback),
     ("dependency_order", Gate::Fast),
     ("dependency_version", Gate::Fallback),

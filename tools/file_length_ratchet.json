@@ -185,7 +185,7 @@
     "reason": "h-release-1895"
   },
   "crates/hirsel-core-driver/src/request_sequences.rs": {
-    "lines": 2628,
+    "lines": 2641,
     "reason": "stale-codec-1910"
   },
   "crates/hirsel-core-driver/src/reuse.rs": {

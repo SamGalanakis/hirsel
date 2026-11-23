@@ -25,7 +25,9 @@ fn my_agent() -> harness.Agent[Grants] {
 fn wired() -> Result[harness.Wiring, harness.Refused] { harness.wiring(code.describe(advance), code.describe(effect)) }
 ```
 
-`laws.hirsel` holds a complete place.
+`../notes` is a complete program built on the harness: every part an app
+composes, wired into one agent, built with `hirsel build` and run. `laws.hirsel`
+holds the places the laws run.
 
 ## The four forwarding entries
 

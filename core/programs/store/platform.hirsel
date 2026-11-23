@@ -3656,6 +3656,52 @@ pub fn resolve_offline(d: Dir, id: Bytes, now: u64) -> Result[operator.Resolved,
     Ok(pin_answer(store.read_only_get(reader, pins, id)?, now))
 }
 
+// Every group the host lists, retiring ones included.
+pub fn group_names(h: Host) -> List[String] {
+    let mut names: List[String] = list.new()
+    let Ok(take scanned) = store.scan(store.snapshot(h.db), store.shape(h.t.groups), Unbounded, Unbounded) else {
+        return names
+    }
+    let mut rows = take scanned
+    while let Ok(Some((name, _))) = store.next(mut rows) {
+        list.push(mut names, take name)
+    }
+    names
+}
+
+// The serving child the host has accepted as Ready for this group, if any: its gen.
+pub fn serving_ready(h: Host, name: String) -> Option[u64] {
+    match vol_read(h, name).run {
+        Some(r) => match r.phase {
+            Ready(_) => Some(r.gen),
+            _ => None
+        },
+        None => None
+    }
+}
+
+// An operator unload (§14.4 "Unload"): a drain of the group's live serving child. The end
+// it reports is applied as any other end, so a cut run (no clean report) is retried at
+// once and a clean stop writes Clean. A group with no live child is answered `Missing`.
+pub fn unload(mut h: Host, name: String) -> Result[List[launcher.Request], Refused] {
+    let Some(g) = group_row(h, name)? else {
+        return Error(Unknown)
+    }
+    if let Some(_) = g.retiring {
+        return Error(Retiring)
+    }
+    let v = vol_read(h, name)
+    if let Some(_) = v.cut {
+        return Error(Busy(0u64))
+    }
+    let Some(r) = v.run else {
+        return Error(Missing("live"))
+    }
+    let mut out: List[launcher.Request] = list.new()
+    list.push(mut out, Stop(child_of(name, g.incarnation, r.gen)))
+    Ok(take out)
+}
+
 pub fn retirement(h: Host, name: String) -> Option[Retired] {
     match store.get(store.snapshot(h.db), store.shape(h.t.retired), name) {
         Ok(Some(r)) => Some(r),

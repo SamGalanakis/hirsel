@@ -21,6 +21,7 @@ std = { major = 1 }
 "signup.hirsel" = "signup"
 "runner.hirsel" = "runner"
 "places.hirsel" = "places"
+"local.hirsel" = "local"
 "runner_laws.hirsel" = "runner_laws"
 "runner_calls.hirsel" = "runner_calls"
 "wire_client.hirsel" = "wire_client"
@@ -91,3 +92,19 @@ s1 = { module = "main", grants = ["Stdout"] }
 
 [tests.runs."store@1/runner_calls/test_fixture_granted"]
 limit = 1342177280
+
+# The place budget and the host's own catalog store.
+[tests.runs."store@1/runner_calls/test_local_one_head"]
+limit = 134217728
+
+# The place budget and the host's own catalog store.
+[tests.runs."store@1/runner_calls/test_local_route_during_unload"]
+limit = 134217728
+
+# The place budget and the host's own catalog store.
+[tests.runs."store@1/runner_calls/test_local_idle_unload"]
+limit = 134217728
+
+# The place budget and the host's own catalog store.
+[tests.runs."store@1/runner_calls/test_local_reopen_keeps"]
+limit = 134217728

@@ -2660,7 +2660,7 @@ fn directory_wire() -> runner.WireConfig {
     wire
 }
 
-fn directory_config(supplied: places.Supplied, place_fn: StaticFn[fn(mut Calls) -> Result[(), runner.RegisterError]], migrate_fn: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits], stop: runner.Stop) -> runner.PlaceConfig[(), Hd, (), ()] {
+fn directory_config(supplied: local.Supplied, place_fn: StaticFn[fn(mut Calls) -> Result[(), runner.RegisterError]], migrate_fn: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits], stop: runner.Stop) -> runner.PlaceConfig[(), Hd, (), ()] {
     runner.PlaceConfig(backing: Memory, selection: Install, place: place_fn, n_place: N_PLACE,
         migrate: migrate_fn, handles: code.describe(handles), session: directory_wire(), max_sessions: 1u64,
         proxies: list.new(), n_publisher: 1048576u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16),
@@ -2668,35 +2668,36 @@ fn directory_config(supplied: places.Supplied, place_fn: StaticFn[fn(mut Calls) 
 }
 
 // A place that stops at once.
-fn quick_place(take supplied: places.Supplied) -> Result[runner.PlaceConfig[(), Hd, (), ()], Capacity] {
+fn quick_place(take supplied: local.Supplied) -> Result[runner.PlaceConfig[(), Hd, (), ()], Capacity] {
     Ok(directory_config(supplied, code.describe(place), code.describe(migrate), runner.Stop(lag_ms: 0u64, grace_ms: 2000u64)))
 }
 
 // A place whose drain keeps admission open for 400 ms, so an open can arrive during it.
-fn lagged_place(take supplied: places.Supplied) -> Result[runner.PlaceConfig[(), Hd, (), ()], Capacity] {
+fn lagged_place(take supplied: local.Supplied) -> Result[runner.PlaceConfig[(), Hd, (), ()], Capacity] {
     Ok(directory_config(supplied, code.describe(place), code.describe(migrate), runner.Stop(lag_ms: 400u64, grace_ms: 2000u64)))
 }
 
-type DirectoryRun { directory: places.Directory[()], opener: places.Opener[()], dir_name: String, changes: Receiver[places.Change] }
+type LocalRun { local: local.Local, door: local.Door, dir_name: String, changes: Receiver[local.Change] }
 
-fn start_directory(parent: Dir, make: fn(take places.Supplied) -> Result[runner.PlaceConfig[(), Hd, (), ()], Capacity], idle_ms: u64, clock: Clock, random: Random, tasks: Tasks, net: Net) -> DirectoryRun waits {
+// A host with an in-process launcher and one group "a" on disk, whose children idle out
+// after `idle_ms`.
+fn start_local(parent: Dir, make: fn(take local.Supplied) -> Result[runner.PlaceConfig[(), Hd, (), ()], Capacity], idle_ms: u64, clock: Clock, random: Random, tasks: Tasks, net: Net) -> LocalRun waits {
     let mut dir_name = string.with_capacity(32u64)
     let dir = result.unwrap(host.mkdtemp(parent, mut dir_name))
-    let (watch, changes): (Sender[places.Change], Receiver[places.Change]) = channel.new(16u64)
-    let mut listed: List[places.Listed[()]] = list.new()
-    list.push(mut listed, places.Listed(name: string.from("a"), factory: result.unwrap(places.place_factory(make)),
-        backing: Disk(dir, disk_options()), selection: Current(0u64)))
-    let config = places.DirectoryConfig(idle_ms: Some(idle_ms), max_places: 1u64, max_names: 1u64, place_bytes: DIRECTORY_BUDGET, tasks: tasks, clock: clock, random: random, net: net,
-        watch: Some(take watch))
-    let directory = match places.directory(take listed, take config, ()) { Ok(take made) => take made, Error(_) => fail("directory: refused a valid configuration") }
-    let opener = places.opener(directory)
-    DirectoryRun(directory: take directory, opener: take opener, dir_name: take dir_name, changes: take changes)
+    let (watch, changes): (Sender[local.Change], Receiver[local.Change]) = channel.new(16u64)
+    let making: local.Factory[()] = local.factory(make)
+    let config = local.Config(root: dir, options: disk_options(), factory: take making, seed: (), max_places: 1u64, idle_ms: idle_ms,
+        place_bytes: DIRECTORY_BUDGET, tasks: tasks, clock: clock, random: random, net: net, watch: Some(take watch))
+    let made = match local.local(take config) { Ok(take made) => take made, Error(_) => fail("local: refused a valid configuration") }
+    let door = local.door(made)
+    if let Error(_) = local.add(door, "a") { fail("local: add refused") }
+    LocalRun(local: take made, door: take door, dir_name: take dir_name, changes: take changes)
 }
 
-// Stops the directory and expects every place it held to have stopped gracefully.
-fn end_directory(parent: Dir, take run: DirectoryRun) -> bool waits {
-    let DirectoryRun(directory: take directory, opener: _, dir_name: take dir_name, changes: _) = take run
-    let ended = places.stop(take directory)
+// Stops the host and expects every child it held to have stopped gracefully.
+fn end_local(parent: Dir, take run: LocalRun) -> bool waits {
+    let LocalRun(local: take made, door: _, dir_name: take dir_name, changes: _) = take run
+    let ended = local.stop(take made)
     let mut stopped = true
     for unloaded in ended {
         if let Ok(Stopped(_)) = unloaded.ended {} else { stopped = false }
@@ -2705,10 +2706,10 @@ fn end_directory(parent: Dir, take run: DirectoryRun) -> bool waits {
     stopped
 }
 
-fn lease_phase(l: places.Lease) -> runner.Phase { latest.read(places.status(l)).phase }
+fn lease_phase(l: local.Lease) -> runner.Phase { latest.read(local.status(l)).phase }
 
-fn lease_port(l: places.Lease) -> u16 {
-    match latest.read(places.status(l)).addr { Some(address) => address.port, None => 0u16 }
+fn lease_port(l: local.Lease) -> u16 {
+    match latest.read(local.status(l)).addr { Some(address) => address.port, None => 0u16 }
 }
 
 fn wait_draining(status: Latest[runner.Status], clock: Clock) -> () waits {
@@ -2718,16 +2719,16 @@ fn wait_draining(status: Latest[runner.Status], clock: Clock) -> () waits {
     }
 }
 
-fn next_change(changes: Receiver[places.Change]) -> places.Change waits {
-    match channel.receive(changes) { Ok(take change) => take change, Error(_) => fail("directory: watch closed") }
+fn next_change(changes: Receiver[local.Change]) -> local.Change waits {
+    match channel.receive(changes) { Ok(take change) => take change, Error(_) => fail("local: watch closed") }
 }
 
-// Sends the port of the instance this open leased, or 0 if it was refused, and holds the
-// lease until `release` closes, so both opens hold theirs at once.
-type Opening: send { opener: places.Opener[()], port: Sender[u16], release: Receiver[()] }
+// Sends the port of the child this route leased, or 0 if it was refused, and holds the
+// lease until `release` closes, so both routes hold theirs at once.
+type Opening: send { door: local.Door, port: Sender[u16], release: Receiver[()] }
 
 fn open_port(take job: Opening) -> () waits {
-    match places.open(job.opener, "a") {
+    match local.route(job.door, "a") {
         Ok(take held) => {
             let _ = channel.send(job.port, lease_port(held))
             let _ = channel.receive(job.release)
@@ -2736,24 +2737,24 @@ fn open_port(take job: Opening) -> () waits {
     }
 }
 
-fn change_is_up(changes: Receiver[places.Change]) -> bool {
+fn change_is_up(changes: Receiver[local.Change]) -> bool {
     match channel.try_receive(changes) { Ok(Up(_)) => true, _ => false }
 }
 
-fn change_is_down(changes: Receiver[places.Change]) -> bool {
+fn change_is_down(changes: Receiver[local.Change]) -> bool {
     match channel.try_receive(changes) { Ok(Down(_)) => true, _ => false }
 }
 
-// §13.2: concurrent first opens of one name coalesce into one start. Wrong implementation:
-// each open that finds no Ready instance starts one, so two heads run, and the second
-// cannot open the store.
-pub fn law_dir_one_head(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
-    let run = start_directory(parent, quick_place, 60000u64, clock, random, tasks, net)
+// PD1 (§14.9): concurrent first routes to one cold group coalesce into one child. Wrong
+// implementation: each route that finds no Ready child starts one, so two heads run, and
+// the second cannot open the store.
+pub fn law_local_one_head(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
+    let run = start_local(parent, quick_place, 60000u64, clock, random, tasks, net)
     let (port_to, ports): (Sender[u16], Receiver[u16]) = channel.new(2u64)
     let (release_to, release_from): (Sender[()], Receiver[()]) = channel.new(1u64)
     let (second_to, second_from): (Sender[()], Receiver[()]) = channel.new(1u64)
-    let first = task.spawn(tasks, bytes 65536u64, Opening(opener: places.opener(run.directory), port: channel.sender(port_to), release: take release_from), open_port)
-    let second = task.spawn(tasks, bytes 65536u64, Opening(opener: places.opener(run.directory), port: channel.sender(port_to), release: take second_from), open_port)
+    let first = task.spawn(tasks, bytes 65536u64, Opening(door: local.copy_door(run.door), port: channel.sender(port_to), release: take release_from), open_port)
+    let second = task.spawn(tasks, bytes 65536u64, Opening(door: local.copy_door(run.door), port: channel.sender(port_to), release: take second_from), open_port)
     let a = result.unwrap(channel.receive(ports))
     let b = result.unwrap(channel.receive(ports))
     let started = change_is_up(run.changes)
@@ -2762,63 +2763,65 @@ pub fn law_dir_one_head(parent: Dir, clock: Clock, random: Random, tasks: Tasks,
     let _ = take second_to
     let _ = task.join(take first)
     let _ = task.join(take second)
-    end_directory(parent, take run) && started && once && a != 0u16 && a == b
+    end_local(parent, take run) && started && once && a != 0u16 && a == b
 }
 
 @test
-fn test_dir_one_head(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
-    if law_dir_one_head(parent, clock, random, tasks, net) { Ok(()) } else { Error(()) }
+fn test_local_one_head(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
+    if law_local_one_head(parent, clock, random, tasks, net) { Ok(()) } else { Error(()) }
 }
 
-fn close_a(take opener: places.Opener[()]) -> bool waits {
-    match places.close(opener, "a") { Ok(unloaded) => match unloaded.ended { Ok(Stopped(_)) => true, _ => false }, Error(_) => false }
+fn close_a(take door: local.Door) -> bool waits {
+    match local.unload(door, "a") { Ok(unloaded) => match unloaded.ended { Ok(Stopped(_)) => true, _ => false }, Error(_) => false }
 }
 
-// §13.2: an open during a close waits for the close and gets a fresh instance. Wrong
-// implementation: the open is answered with the closing instance, whose phase is Draining.
-pub fn law_dir_open_during_close(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
-    let run = start_directory(parent, lagged_place, 60000u64, clock, random, tasks, net)
-    let first = match places.open(run.opener, "a") { Ok(take held) => take held, Error(_) => fail("directory: first open refused") }
-    let old = places.status(first)
+// PD2 (§14.9): a route during an unload waits for the drain and gets a fresh child.
+// Wrong implementation: the route is answered with the draining child, whose phase is
+// Draining.
+pub fn law_local_route_during_unload(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
+    let run = start_local(parent, lagged_place, 60000u64, clock, random, tasks, net)
+    let first = match local.route(run.door, "a") { Ok(take held) => take held, Error(_) => fail("local: first route refused") }
+    let old = local.status(first)
     let _ = take first
-    let closing = task.spawn(tasks, bytes 65536u64, places.opener(run.directory), close_a)
+    let closing = task.spawn(tasks, bytes 65536u64, local.copy_door(run.door), close_a)
     wait_draining(old, clock)
-    let second = match places.open(run.opener, "a") { Ok(take held) => take held, Error(_) => fail("directory: open during a close refused") }
+    let second = match local.route(run.door, "a") { Ok(take held) => take held, Error(_) => fail("local: route during an unload refused") }
     let fresh = match lease_phase(second) { Ready => true, _ => false }
     let closed = result.unwrap(task.join(take closing))
     let order = change_is_up(run.changes) && change_is_down(run.changes) && change_is_up(run.changes)
     let _ = take second
-    end_directory(parent, take run) && fresh && closed && order
+    end_local(parent, take run) && fresh && closed && order
 }
 
 @test
-fn test_dir_open_during_close(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
-    if law_dir_open_during_close(parent, clock, random, tasks, net) { Ok(()) } else { Error(()) }
+fn test_local_route_during_unload(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
+    if law_local_route_during_unload(parent, clock, random, tasks, net) { Ok(()) } else { Error(()) }
 }
 
-// §13.2 and §13.3: an idle place unloads through operate's drain, and its name opens again
-// only after operate has closed the Db. Wrong implementation: the directory forgets the
-// instance as soon as it asks it to stop, so the reopen finds the store still held.
-pub fn law_dir_idle_unload(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
-    let run = start_directory(parent, lagged_place, 50u64, clock, random, tasks, net)
-    let first = match places.open(run.opener, "a") { Ok(take held) => take held, Error(_) => fail("directory: first open refused") }
-    let old = places.status(first)
+// PD3 (§14.4, §14.9): an idle child unloads through operate's drain, and its group routes
+// again only after operate has closed the store. Wrong implementation: the launcher
+// reports the end as soon as it asks the child to stop, so the next child finds the store
+// still held.
+pub fn law_local_idle_unload(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
+    let run = start_local(parent, lagged_place, 50u64, clock, random, tasks, net)
+    let first = match local.route(run.door, "a") { Ok(take held) => take held, Error(_) => fail("local: first route refused") }
+    let old = local.status(first)
     let _ = take first
     wait_draining(old, clock)
-    let reopened = match places.open(run.opener, "a") {
+    let reopened = match local.route(run.door, "a") {
         Ok(take held) => match lease_phase(held) { Ready => true, _ => false },
         Error(_) => false,
     }
-    // A refused reopen already breaks the law; the watch would never hear the Down.
+    // A refused route already breaks the law; the watch would never hear the Down.
     if !reopened { return false }
     let _ = next_change(run.changes)
     let unloaded_ok = match next_change(run.changes) { Down(unloaded) => match unloaded.ended { Ok(Stopped(_)) => true, _ => false }, Up(_) => false }
-    end_directory(parent, take run) && reopened && unloaded_ok
+    end_local(parent, take run) && reopened && unloaded_ok
 }
 
 @test
-fn test_dir_idle_unload(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
-    if law_dir_idle_unload(parent, clock, random, tasks, net) { Ok(()) } else { Error(()) }
+fn test_local_idle_unload(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
+    if law_local_idle_unload(parent, clock, random, tasks, net) { Ok(()) } else { Error(()) }
 }
 
 // The reopen law's place: `keep` writes k and schedules a ping of k one second after its
@@ -2845,7 +2848,7 @@ fn kept_place(mut r: Calls) -> Result[(), runner.RegisterError] {
     runner.granted(mut r, code.describe(ping), 65536u64, runner.DEFAULT_STEPS)
 }
 
-fn keeping_place(take supplied: places.Supplied) -> Result[runner.PlaceConfig[(), Hd, (), ()], Capacity] {
+fn keeping_place(take supplied: local.Supplied) -> Result[runner.PlaceConfig[(), Hd, (), ()], Capacity] {
     let mut config = directory_config(supplied, code.describe(kept_place), code.describe(ping_migrate), runner.Stop(lag_ms: 0u64, grace_ms: 2000u64))
     let (entries, _) = ping_entries()
     config.triggers = Some(runner.TriggerConfig(entries: take entries, author: store.Caller(issuer: 0u8, subject: list.new()),
@@ -2861,30 +2864,30 @@ fn kept_keys() -> List[Bytes] {
     wanted
 }
 
-fn connect_lease(l: places.Lease, tasks: Tasks, net: Net, clock: Clock, random: Random, wanted: List[Bytes]) -> wire_client.Conn waits {
-    let address = option.unwrap(latest.read(places.status(l)).addr)
+fn connect_lease(l: local.Lease, tasks: Tasks, net: Net, clock: Clock, random: Random, wanted: List[Bytes]) -> wire_client.Conn waits {
+    let address = option.unwrap(latest.read(local.status(l)).addr)
     match wire_client.connect(tasks, net, address, clock, random, wanted, Some(ingress.credential(random)), directory_wire().socket) {
         Ok(take connected) => take connected,
-        Error(_) => fail("directory: connection refused"),
+        Error(_) => fail("local: connection refused"),
     }
 }
 
-// §13.3 and §13.5: a disk place reopened after an unload keeps its committed writes, and a
-// trigger that came due while it was unloaded runs at the reopen. Wrong implementation: the
-// reopen starts on a fresh store (or a fresh selection), losing the write and the trigger.
-pub fn law_dir_reopen_keeps(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
-    let run = start_directory(parent, keeping_place, 60000u64, clock, random, tasks, net)
+// PD4 (§14.4, §14.9): a group routed again after an unload keeps its committed writes, and
+// a trigger that came due while it was unloaded runs. Wrong implementation: the next child
+// starts on a fresh store (or a fresh activation), losing the write and the trigger.
+pub fn law_local_reopen_keeps(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
+    let run = start_local(parent, keeping_place, 60000u64, clock, random, tasks, net)
     let wanted = kept_keys()
-    let first = match places.open(run.opener, "a") { Ok(take held) => take held, Error(_) => fail("directory: first open refused") }
+    let first = match local.route(run.door, "a") { Ok(take held) => take held, Error(_) => fail("local: first route refused") }
     let client = connect_lease(first, tasks, net, clock, random, wanted)
     let before = host.mono_ns(clock)
     let version = ping_call(client, wanted, wanted[0u64], 0u64, 7u64)
     let _ = wire_client.close(take client)
     let _ = take first
-    let unloaded = match places.close(run.opener, "a") { Ok(done) => match done.ended { Ok(Stopped(_)) => true, _ => false }, Error(_) => false }
-    want(host.mono_ns(clock) < before + 1000000000u64, "directory: the place was not unloaded before its trigger came due")
+    let unloaded = match local.unload(run.door, "a") { Ok(done) => match done.ended { Ok(Stopped(_)) => true, _ => false }, Error(_) => false }
+    want(host.mono_ns(clock) < before + 1000000000u64, "local: the child was not unloaded before its trigger came due")
     host.sleep_until(clock, before + 1200000000u64)
-    let second = match places.open(run.opener, "a") { Ok(take held) => take held, Error(_) => fail("directory: reopen refused") }
+    let second = match local.route(run.door, "a") { Ok(take held) => take held, Error(_) => fail("local: second route refused") }
     let reader = connect_lease(second, tasks, net, clock, random, wanted)
     let kept_write = ping_call(reader, wanted, wanted[1u64], 0u64, 7u64) == 7u64
     let mut position = 1u64
@@ -2894,7 +2897,7 @@ pub fn law_dir_reopen_keeps(parent: Dir, clock: Clock, random: Random, tasks: Ta
     }
     let _ = wire_client.close(take reader)
     let _ = take second
-    end_directory(parent, take run) && unloaded && kept_write
+    end_local(parent, take run) && unloaded && kept_write
 }
 
 @test
@@ -2903,6 +2906,6 @@ fn test_trigger_timer_wall_wait(tasks: Tasks) -> Result[(), ()] waits {
 }
 
 @test
-fn test_dir_reopen_keeps(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
-    if law_dir_reopen_keeps(parent, clock, random, tasks, net) { Ok(()) } else { Error(()) }
+fn test_local_reopen_keeps(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
+    if law_local_reopen_keeps(parent, clock, random, tasks, net) { Ok(()) } else { Error(()) }
 }

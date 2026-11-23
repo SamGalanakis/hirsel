@@ -1,4 +1,4 @@
-# RUNNER-SPEC v2.30: entries, calls, sessions, subscriptions and operation of a place (lane runner-spec-1020)
+# RUNNER-SPEC v2.31: entries, calls, sessions, subscriptions and operation of a place (lane runner-spec-1020)
 
 **Tree:** `62f15988b85ca4afdb6d37e0ff324d9072274615` (detached), 18 crates. The checker was rebuilt there (BUILD SUCCEEDED). Every v2.2 probe was checked and run on it. **v2.3** adds R0's built figures (runner-build-1033, landed bf7cf64f, measured there and at 71b306f0) and three probes run at 62f15988 (p19 split and few-registration variants).
 
@@ -21,6 +21,19 @@ Evidence marks:
 **v2.5** answers review 1042 (runner-build-review-1042/ATTACK.md): one send received two Outcomes in the built runner, and no check observed it. Rule 5 now defines a send and its one Outcome. The calls and subscription models gain exactly-once checks (`models/calls25_model.py`, `models/subs25_model.py`), and every model was re-run. The v2.4 text is RUNNER-SPEC-v2.4.md.
 
 The v2.2 and v2.3 texts are RUNNER-SPEC-v2.2.md and RUNNER-SPEC-v2.3.md. **v2.4** rules on R1's five gaps (runner-build-1033, followups.md 2026-11-16 "R1 gaps") against STORE-SPEC v2.9 and REPLAY-SPEC v2.1, by reading; no model behaviour changed, so no model was re-run. Models are in `models/`, their outputs in `models/evidence/`. Probes are in `programs/`, their outcomes in `probes.txt`. The v2 and v2.1 change tables are in CHANGES-HISTORY.md, and the v2.1 text is RUNNER-SPEC-v2.1.md.
+
+## CHANGES-v2.31 (the platform host runs in-process places; lane p6-retire-directory-1886)
+
+The harness gateway runs one place per conversation in its own process, and §14.8 row 9 retires the directory once the platform host covers PD1 to PD4. The host could only launch processes. v2.31 gives it an in-process launcher, so the gateway's sessions become host groups.
+
+| # | Point | Decision | What v2.31 says | Basis |
+|---|---|---|---|---|
+| 1 | In-process places | **NEW: `local`** | §14.9. `local` is the platform host with a launcher that runs each group's place as a task in the host's process, on a disk store under the host's root. It carries out the host's requests itself; the wake row, the generation fence and the clean report are the host's own (§14.1 to §14.5). | §14.8 row 9 |
+| 2 | Unload on request | **NEW: `platform.unload`** | §14.4 "Unload". An operator can ask a live group's serving child to stop by the idle stop's drain; the row then goes `Clean` or `Dirty` by the clean-report rule, so an unload never loses a wake. | the gateway closes a session |
+| 3 | The store's identity in `Status` | **NEW: `Status.store_id`, `Status.retain_from`** | §12.1. `operate` publishes the store's identity and retention start at activation, so an in-process launcher can report `PlaceOpened` as a process child does through its control socket. | §14.9 |
+| 4 | Directory laws | **PORTED: PD1 to PD4 as `local_*`** | §14.9 laws. Same properties, stated against host groups. | §14.8 row 9 |
+
+Reversible: additive. `local` and `platform.unload` have no caller outside the host's own harness and the gateway.
 
 ## CHANGES-v2.30 (the directory lists names at run time and may leave unloading to the place; lane h-gateway-1864)
 
@@ -1676,7 +1689,7 @@ Each law runs in runner_calls (`core-runner-r1`, native only) over one disk-back
 
 ### 13.7 Prior art (each source opened)
 
-- **Cloudflare Durable Objects** (workerd 7c4518fa, src/workerd/server/server/actor.rs). One container per id in one map (`actors`, :118). An idle object is evicted after `IDLE_SHUTDOWN_DELAY` = 10 s (:80, idle timer :1544–1563). Eviction is refused while a strong reference remains, because it "could leave two instances" (:1570–1590); a client handle's drop updates the access time (:2342–2357). A get during retirement waits for it and then starts fresh (:1357–1392). Alarms keep the object's name and wake it after eviction (src/workerd/server/server/factory/worker-factory-actor.c++:691). **Taken:** one instance per id, a lease as the strong reference, wait-then-fresh. **Not taken** by the directory: alarm wake-up; its triggers run at the next open (§13.5). **Taken** by the platform host in v2.26 (§14.9).
+- **Cloudflare Durable Objects** (workerd 7c4518fa, src/workerd/server/server/actor.rs). One container per id in one map (`actors`, :118). An idle object is evicted after `IDLE_SHUTDOWN_DELAY` = 10 s (:80, idle timer :1544–1563). Eviction is refused while a strong reference remains, because it "could leave two instances" (:1570–1590); a client handle's drop updates the access time (:2342–2357). A get during retirement waits for it and then starts fresh (:1357–1392). Alarms keep the object's name and wake it after eviction (src/workerd/server/server/factory/worker-factory-actor.c++:691). **Taken:** one instance per id, a lease as the strong reference, wait-then-fresh. **Not taken** by the directory: alarm wake-up; its triggers run at the next open (§13.5). **Taken** by the platform host in v2.26 (§14.10).
 - **Orleans** (af30f59f). Idle activations are collected after `CollectionAge` (15 min), scanned every `CollectionQuantum` (1 min) (src/Orleans.Runtime/Configuration/Options/GrainCollectionOptions.cs:14–24; Catalog/ActivationCollector.cs ScanStale :243–282). Requests that arrive while an activation deactivates are held and forwarded after it completes, not given the old activation (src/Orleans.Runtime/Catalog/ActivationData.cs:1295–1316, :2335–2360). Under memory pressure it collects regardless of keep-alive (Catalog/ActivationCollector.cs:447). **Taken:** hold opens during deactivation, sweep on a period. **Not taken:** memory-pressure eviction; we refuse when full.
 - **Akka cluster sharding** (49e479e8). Idle passivation with a 120 s default timeout, checked every half the timeout (akka-cluster-sharding/src/main/resources/reference.conf:55, :92; akka-cluster-sharding/src/main/scala/akka/cluster/sharding/internal/EntityPassivationStrategy.scala:147–167). Messages for a passivating entity are buffered and the entity restarts when passivation completes if any arrived (akka-cluster-sharding/src/main/scala/akka/cluster/sharding/Shard.scala:457–459, :820–823, :1044–1060); passivation is ignored while messages are buffered (:976–1000). **Taken:** sweep at half the idle time, buffer and restart. **Not taken:** limit-based passivation (evicting least-recently-used entities); see §13.4.
 
@@ -1769,6 +1782,8 @@ either attempt and answers `PlaceAborted` after applying the abort.
 So an idle stop never cuts a run or a lease that started before it was decided, and nothing starts after it. An active granted run therefore keeps its place up. Without this rule, a drain would cut the run and the next start would run attempt n + 1, so a cold place would churn its attempts.
 
 **Where `idle` comes from.** The platform host sets an idle time for every serving launch of a platform place. The launcher starts the place as a **wake launch**: it puts `--hirsel-wake --hirsel-idle=<ms>`, with a nonzero idle time, in the runtime prefix, before `--hirsel-activation` and the program's arguments, and `runner.main` passes that time to `operate` in place of `PlaceConfig.idle`. An idle time of 0 is refused as `Some(0)` is. Every other launch of `runner.main`, and the fixture, use `PlaceConfig.idle` as given, which is `None` unless the program sets it.
+
+**Unload (v2.31).** `platform.unload(name)` asks a group's live serving child to stop. It is refused `Unknown` for no group, `Retiring` for a group being retired, `Busy` while a cutover holds a candidate, and `Missing("live")` when no child runs. Otherwise the host sends `Stop` to the serving child of the current incarnation and generation, which drains as an idle stop does (§12.1 "Draining"). The end is applied by the clean-report rule below: a clean `Stopped(next_due)` writes `Clean(next_due)`, any other end leaves `Dirty` and probes. An arrival during the drain relaunches at gen + 1 (§14.3, L46). So an unload changes when the place runs, never whether a due trigger runs.
 
 **The clean report (extends §12.1).** `Ended` becomes `Stopped(Option[u64]) | Unstarted | Forced(u64)`. On the drain's finish (§12.1 step 6), after the last commit is durable and before `store.close`, H reads `triggers.next_pending` on its last snapshot with no active run. It sends that row's due time, or `None`, to `operate` in its last message, and `operate` returns `Ok(Stopped(next_due))`. A parked trigger is skipped unless its cancel is requested, as at dispatch: only a release or a cancel, each a transaction through an entry and so a wake, can make it runnable. A run that a drain cut is pending again, so its due time is in the past and the place is woken at once. A head that runs no trigger drive (§12.1: no row and no entry) returns `Stopped(None)`.
 
@@ -1875,7 +1890,33 @@ L40 runs in the runner's prepare harness and L44 in the runner's place harness, 
 | 10 | rule 11 "no guard against our own implementation" | containment and the generation fence | Neither guards our own code. Containment bounds tenant code that is source-compiled but untrusted (T2-Q1). The fence orders reports from processes that really overlap during a cutover. |
 | 11 | "no hidden cap changes an answer" (host rules) | the scan, the probe set and the queued wakes | The scan is exact or fails `Limit(triggers)`. Probes are all `Dirty` rows, which the invariant bounds, and nothing is truncated. A `Full` delay is reported in the host status and changes no trigger's result. |
 
-### 14.9 Prior art (each source opened)
+### 14.9 In-process places (v2.31)
+
+`local` (store/local.hirsel) is the platform host with an in-process launcher. A program that hosts first-party places in its own process, such as the harness gateway, uses it in place of a directory.
+
+**Shape.** `local.local(config)` opens the host's catalog store at `root/host` and starts one actor that owns the `platform.Host` and every place task. The config names the place factory, the seed every start sees, `max_places`, the idle time each start gets, the bytes each place may use and a watch channel. The actor answers the host's requests as a launcher would:
+- `Hello` gets an inventory of the live place tasks; `Bind` is answered `Bound` with no listener (an in-process place takes its connections through `route`).
+- `Start` of a serving child makes the group's workdir under the root and starts the factory's place on `Disk(root/workdir)` at `Current(activation)`, as a hosted child selects (launch.md "Activation"), with the host's idle time as `PlaceConfig.idle`. A repeated `Start` of the same child answers `Launched`; a second child for a group, or any start while the host stops, is refused `Held`. A non-serving start is refused: an in-process host has no deploy.
+- `Stop` and `Kill` both drain the place. A task cannot be killed; `operate` cuts a drain only at its own deadline.
+- `Retire` drains the group's task, and `Close` of a group retired with `Delete` removes its workdir.
+- Deploy, admission and collection requests are answered as by a launcher that holds none (`Fenced`, `Collected(0)`, `AdmissionFailed(Unassembled)`).
+
+**Ends.** When the place reaches `Ready`, the actor checks its `Status.store_id` against the store the host recorded and reports `PlaceOpened`. A mismatch is reported `PlaceStoreMismatch` and the place is stopped. A start that fails `NotCurrent(Active)` is reported `PlaceCurrent`. When `operate` returns, the actor reports the end with the child's `gen`: `Stopped(next_due)` is exit 0 with the report, `Unstarted` is exit 0 with none, and anything else is exit 1. So §14.4's clean-report rule applies unchanged. The listener's readable bit is "a route waits for this group", so a route that arrives during a drain relaunches the place.
+
+**Operations.** `add(name)` adds a trusted, uncontained group with no listener and no limits; `remove(name)` retires it with `Delete` and answers after `Close`. `route(name)` wakes the group and answers with a lease on the place's `Status` once the host has applied its `PlaceOpened` and the place still serves; `peek` answers only a place that is already up and otherwise `Busy`. A lease does not hold the place up: the place's own §14.4 idle check, which counts sessions, decides. `unload(name)` is `platform.unload` and answers with the end. `stop` drains every place and closes the host.
+
+**Fate-sharing.** In-process places share the host's process, so a fault in one ends all. This is allowed only for first-party code: every group `local` adds is trusted and uncontained, and a tenant group runs only through a process launcher (§14.8 row 9).
+
+**Laws (ported from PD1 to PD4).**
+
+| Law | Wrong implementation it catches | Oracle |
+|---|---|---|
+| `local_one_head`: concurrent first routes to one cold group give one child; both are answered by it | each route that finds no ready child starts one, so two heads run and the second cannot open the store | §14.3 |
+| `local_route_during_unload`: a route during an unload waits for the drain and is answered by a fresh child | the route is answered with the draining child | §14.3, §14.4 "Unload" |
+| `local_idle_unload`: an idle child stops by `operate`'s drain, ends `Stopped`, and its group is routed again only after the store is closed | the launcher reports the end when it asks the child to stop, so the next child finds the store held | §14.4 |
+| `local_reopen_keeps`: a group routed again after an unload keeps its committed writes, and a trigger that came due while it was unloaded runs | the next child starts on a fresh store or a fresh activation | §14.1, §14.4 |
+
+### 14.10 Prior art (each source opened)
 
 - **Cloudflare workerd** (e9a7b9c, src/workerd/server/alarm-scheduler.c++). One alarm row per actor, `_cf_ALARM(actor_id, scheduled_time)` (:55-60). At startup it loads every row into memory and arms a timer for each (:81-99). An alarm runs only once the clock reads at least its time, and it re-waits if woken early (:180-192). A failed alarm is retried with backoff, up to `RETRY_MAX_TRIES` (alarm-scheduler.h:54-66, .c++:247-263). **ADOPTED:** one durable due-time row per place, and the clock re-check. **ADAPTED:** a row is `Clean(next_due)` only after a clean stop, and the scan at startup reads only `Dirty` rows, bounded by `max_places`, where workerd holds every alarm in memory (its own TODO, :84-85). **NOT TAKEN:** engine retries. A Hirsel trigger's failure is recorded and consumed, and re-arming is the program's choice (ENDSTATE triggers).
 - **Rivet** (de28d20, rivetkit-rust/packages/rivetkit-core/src/actor/). The actor pushes its next alarm to the engine before it sleeps (schedule.rs:902-916, :956-961). A new generation pushes again, and a stale alarm from an earlier generation "wakes the actor once with nothing due; it never drops a pending alarm" (schedule.rs:918-926). An actor may sleep only with no run handler, no connection and no HTTP request (sleep.rs:218-251). **ADOPTED:** sleep only when no run or connection is active (§14.4), and a generation on each start. **REPLACED:** Rivet tolerates a stale alarm, while §14 fences reports by generation and writes `Clean` only from a clean stop, so a crash leaves `Dirty` and a probe, never a lost wake.

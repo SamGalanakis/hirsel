@@ -58,7 +58,9 @@ pub type OpenError: send = Store(store.Error) | Place(RegisterError) | Migrate(s
 
 pub type Step: send = Recovering | Activating | Publishing | Listening(Addr)
 pub type Phase: send = Starting(Step) | Ready | Draining | Paused
-pub type Status: shareable + send { phase: Phase, digest: Bytes, target: String, n_place: u64, release: Bytes, activation: u64, addr: Option[Addr] }
+// `store_id` and `retain_from` are the opened store's identity and retained head, as a
+// hosted place reports them in `PlaceReady`; an in-process launcher reads them here.
+pub type Status: shareable + send { phase: Phase, digest: Bytes, target: String, n_place: u64, release: Bytes, activation: u64, store_id: (u64, u64), retain_from: u64, addr: Option[Addr] }
 pub type Stop: codec + send { lag_ms: u64, grace_ms: u64 }
 pub type Backing: send = Memory | Disk(Dir, store.Options) | Temp(Dir)
 pub type PlaceConfig[G: send, H: send, S: send, B: send]: send {
@@ -122,7 +124,7 @@ fn launch_owned_target() -> Result[String, Capacity] {
 }
 
 pub fn status_root() -> Result[Latest[Status], Capacity] {
-    let initial = Status(phase: Starting(Recovering), digest: launch_digest()?, target: launch_owned_target()?, n_place: launch_word(0u64, 0u64), release: list.new(), activation: 0u64, addr: None)
+    let initial = Status(phase: Starting(Recovering), digest: launch_digest()?, target: launch_owned_target()?, n_place: launch_word(0u64, 0u64), release: list.new(), activation: 0u64, store_id: (0u64, 0u64), retain_from: 0u64, addr: None)
     let shared = arc.new(take initial)
     Ok(latest.new(take shared))
 }
@@ -232,16 +234,22 @@ fn start_drain(stop: Stop, started: u64, clock: Clock, tasks: Tasks, events: Sen
     Ok(task.spawn(tasks, bytes 4096u64, take alarm, drain_timer))
 }
 
-fn head_bytes(backing: Backing, n_place: u64, n_publisher: u64) -> u64 {
-    let options: store.Options = match backing { Disk(_, options) => clone(options), _ => store.defaults() }
-    let mut total = int.saturating_add(options.resident_limit, int.saturating_add(n_place, n_publisher))
-    let on_disk = match backing { Memory => false, _ => true }
-    if on_disk {
-        let journal: u64 = int.widen(options.group_bytes)
-        total = int.saturating_add(total, order.max(options.pack_bytes, 16777476))
-        total = int.saturating_add(total, if journal > 16777296u64 { journal } else { 16777296u64 })
-    }
+// What a disk store opened with these options holds at most: its resident pages, a pack
+// and a journal group.
+pub fn disk_store_bytes(options: store.Options) -> u64 {
+    let journal: u64 = int.widen(options.group_bytes)
+    let mut total = int.saturating_add(options.resident_limit, order.max(options.pack_bytes, 16777476))
+    total = int.saturating_add(total, if journal > 16777296u64 { journal } else { 16777296u64 })
     int.saturating_add(total, 2097152u64)
+}
+
+fn head_bytes(backing: Backing, n_place: u64, n_publisher: u64) -> u64 {
+    let names = int.saturating_add(n_place, n_publisher)
+    match backing {
+        Memory => int.saturating_add(int.saturating_add(store.defaults().resident_limit, names), 2097152u64),
+        Disk(_, options) => int.saturating_add(disk_store_bytes(options), names),
+        Temp(_) => int.saturating_add(disk_store_bytes(store.defaults()), names),
+    }
 }
 
 // What `operate` spends of its task's bytes (RUNNER-SPEC §13.4): the head's allowance,
@@ -432,6 +440,8 @@ pub fn operate[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, 
             Activated(take release, version, identity, retained) => {
                 current.release = take release
                 current.activation = version
+                current.store_id = identity
+                current.retain_from = retained
                 store_id = identity
                 retain_from = retained
                 if stopped {

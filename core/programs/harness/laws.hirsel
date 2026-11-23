@@ -352,7 +352,7 @@ fn logged(dir: Dir, clock: Clock, random: Random, tasks: Tasks, log: List[harnes
     let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
         for p in 0u64..list.len(log) { store.put(mut tx, h.entries, p, clone(log[p]))? }
         store.put(mut tx, h.session, 0u64, harness.Session(model: "scripted", tools_narrow: All, head_pos: 0u64, next_pos: list.len(log),
-            active_run: None, next_run: 3u64, active_sections_hashes: list.new(), active_tools_hash: list.new()))
+            active_run: None, next_run: 3u64, active_sections_hashes: list.new(), active_tools_hash: list.new(), active_tools_pos: None))
     })
     match take ran { Ok(Committed(_)) => (), _ => fail("logged: fill did not commit") }
     take db

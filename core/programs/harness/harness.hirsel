@@ -391,7 +391,7 @@ pub fn adopt(mut tx: store.Tx, h: Handles, take p: Prefix) -> Result[(), Refused
     if let Some(_) = kept(store.fetch(tx, store.shape(h.session), 0u64))? { return Error(Conflict) }
     let Prefix(model: take model, tools_narrow: take narrow, head_pos: head, entries: take log) = take p
     let mut s = Session(model: take model, tools_narrow: take narrow, head_pos: head, next_pos: 0u64, active_run: None,
-        next_run: 0u64, active_sections_hashes: list.new(), active_tools_hash: list.new())
+        next_run: 0u64, active_sections_hashes: list.new(), active_tools_hash: list.new(), active_tools_pos: None)
     for e in log { let _ = put_entry(mut tx, h, mut s, e)? }
     kept(store.put(mut tx, h.session, 0u64, s))?
     kept(store.put(mut tx, h.views, 0u64, Status("idle")))

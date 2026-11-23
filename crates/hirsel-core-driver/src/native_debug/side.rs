@@ -62,9 +62,11 @@ pub(crate) struct Located {
     at: Option<(u64, u64)>,
 }
 
-/// A product's locations in first-lookup order, each with where it lands
-/// (`crate::resident::DEBUG_POSITIONS`).
-pub(crate) type Locations = std::sync::Arc<[(Option<NativeLocation>, Located)]>;
+/// Where each location of a product's rows lands in one source map
+/// (`crate::resident::DEBUG_POSITIONS`). Which locations a link looks up,
+/// and in what order, depends on the image and on the other products, so
+/// this records where they land, not the lookups.
+pub(crate) type Locations = std::sync::Arc<FxHashMap<Option<NativeLocation>, Located>>;
 
 struct Sources<'a> {
     map: &'a SourceMap,
@@ -474,23 +476,18 @@ fn unit<'a>(
             .zip(shared)
             .map(|(map, shared)| (map, std::sync::Arc::as_ptr(shared) as usize));
         let remembered = key.and_then(|key| crate::resident::DEBUG_POSITIONS.get(&key));
-        let mut replay = remembered.as_ref().map(|(_, locations)| locations.iter());
-        let mut located = Vec::new();
+        let mut located = FxHashMap::default();
         let mut owners = vec![None; product.items.len()];
         let mut positions = FxHashMap::default();
         let mut position = |loc: Option<NativeLocation>, lines: &mut LineProgram| {
             if let Some(&p) = positions.get(&loc) {
                 return p;
             }
-            let at = match replay.as_mut() {
-                Some(replay) => {
-                    let &(at_loc, at) = replay.next().expect("a remembered location");
-                    debug_assert_eq!(at_loc, loc);
-                    at
-                }
+            let at = match remembered.as_ref().and_then(|(_, at)| at.get(&loc)) {
+                Some(&at) => at,
                 None => {
                     let at = sources.locate(&product.items, &mut owners, loc);
-                    located.push((loc, at));
+                    located.insert(loc, at);
                     at
                 }
             };
@@ -571,9 +568,16 @@ fn unit<'a>(
                 );
             }
         }
-        if let (Some(key), Some(shared), None) = (key, shared, remembered) {
-            crate::resident::DEBUG_POSITIONS
-                .insert(key, (std::sync::Arc::clone(shared), located.into()));
+        if let (Some(key), Some(shared)) = (key, shared)
+            && !located.is_empty()
+        {
+            if let Some((_, prior)) = &remembered {
+                located.extend(prior.iter().map(|(&loc, &at)| (loc, at)));
+            }
+            crate::resident::DEBUG_POSITIONS.insert(
+                key,
+                (std::sync::Arc::clone(shared), std::sync::Arc::new(located)),
+            );
         }
     }
     if !unit_ranges.is_empty() {

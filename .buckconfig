@@ -43,7 +43,8 @@ clean_stale_low_disk_adaptive_min_ttl_hours = 1
 clean_stale_low_disk_adaptive_delete_intermediate_within_min_ttl = false
 clean_stale_low_disk_adaptive_unmaterialize_active = false
 [project]
-ignore = .git, buck-out, .buck2, target, tools/buck2/bin
+# Scope cache ignores to the root and Core so measurement fixtures stay visible.
+ignore = .git, buck-out, .buck2, target, tools/buck2/bin, .hirsel-core, core/**/.hirsel-core, core/**/.hirsel-core/**
 [buck2_re_client]
 # Bound the number of remote actions one daemon keeps in flight.
 execution_concurrency_limit = 32

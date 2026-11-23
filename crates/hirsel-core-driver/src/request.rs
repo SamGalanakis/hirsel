@@ -816,13 +816,12 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     let libraries = libraries.as_deref().or_else(|| {
         (installed.is_none() && Path::new("core/std").is_dir()).then_some(Path::new("core"))
     });
+    let directory = dir.as_deref().unwrap_or(Path::new("."));
+    let test_store = crate::store::temporary_test_store(test_command && store.is_none())?;
     let store = store
         .or_else(|| install_root.as_ref().map(|root| root.join("core-packages")))
-        .unwrap_or_else(|| {
-            dir.as_deref()
-                .unwrap_or(Path::new("."))
-                .join(".hirsel-core")
-        });
+        .or_else(|| test_store.as_ref().map(|scratch| scratch.path().to_owned()))
+        .unwrap_or_else(|| directory.join(".hirsel-core"));
     let code_store = CodeStore::for_request(command, code_store, &store);
     let select_link = |cc: Option<PathBuf>| -> Result<Link, Box<dyn std::error::Error>> {
         match (cc, &installed) {
@@ -1472,6 +1471,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
         if let Some(path) = metrics {
             meter.write_metrics(path)?;
         }
+        drop(test_store);
         return conclude(Outcome::Exit(if tests.is_empty() {
             2
         } else {

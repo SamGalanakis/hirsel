@@ -641,8 +641,14 @@ cold listeners, child endpoints, pidfds and cgroup population changes.
   1. The host sends `CollectBegin`. The launcher takes the fence and answers. While it is
      held, the launcher still makes reservations, but it ends none: a release the host
      sends is deferred until the fence ends.
-  2. The host reads the roots from a snapshot taken after that answer, and sends them in
-     `Collect(roots)`.
+  2. The host reads the roots from one catalog snapshot taken after that answer, and
+     sends them in `Collect(roots)`: each group's current and retained assemblies, NEW's
+     assembly of each Preparing, Pending or Undecided deploy (OLD's is the group's current
+     one, so an unresolved deploy keeps both choices), and each unexpired recording pin's.
+     A Failed or Installed deploy row is history and roots nothing. The host starts a
+     collection only after the session's inventory is reconciled, and runs one at a time.
+     If it cannot read the snapshot it sends no `Collect`: the fence stays, nothing is
+     removed, and the fence ends with the session.
   3. The launcher removes each object that neither those roots nor any reservation it holds
      reaches, then ends the fence and applies the deferred releases.
 

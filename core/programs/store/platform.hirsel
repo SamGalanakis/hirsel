@@ -242,6 +242,11 @@ type Vol {
     admit: Option[Admitting]
 }
 
+// A collection the host runs (launch.md "Collect"): asked for and not yet fenced, or
+// fenced with its roots unread because the catalog snapshot could not be read. Such a
+// collection removes nothing, and its fence ends with the launcher session.
+type Collecting = Unfenced | Fencing | FenceStuck(String)
+
 pub opaque type Host {
     db: store.Db,
     t: Tables,
@@ -251,6 +256,7 @@ pub opaque type Host {
     due_wakes: u64,
     arrival_wakes: u64,
     binds_sent: bool,
+    collecting: Collecting,
 }
 
 const READY_RESET_NS: u64 = 300000000000u64
@@ -370,7 +376,7 @@ pub fn open(take opened: store.Db, first: Config) -> Result[(Host, List[launcher
     decided(mut db, take made)?
     let mut out: List[launcher.Request] = list.new()
     list.push(mut out, Hello)
-    Ok((Host(db: take db, t: take t, vol: map.new(), queue: list.new(), probes: 0u64, due_wakes: 0u64, arrival_wakes: 0u64, binds_sent: false), take out))
+    Ok((Host(db: take db, t: take t, vol: map.new(), queue: list.new(), probes: 0u64, due_wakes: 0u64, arrival_wakes: 0u64, binds_sent: false, collecting: Unfenced), take out))
 }
 
 // The host's store, for a restart: the process ends and only the store survives.
@@ -1252,6 +1258,7 @@ fn reconcile(mut h: Host, children: List[launcher.ChildState], readable: List[la
         binds(h, mut out)
         h.binds_sent = true
     }
+    h.collecting = Unfenced
     let mut names: List[String] = list.new()
     for (name, _) in h.vol {
         list.push(mut names, string.from(name))
@@ -1504,8 +1511,12 @@ pub fn event(mut h: Host, take e: launcher.Event, now: Now) -> List[launcher.Req
         Admitted(a, _, summary, display) => admitted(mut h, a, summary, display, mut out),
         Assembled(a, key, digest, _, _) => assembled(mut h, a, key, digest, mut out),
         AdmissionFailed(a, why) => unadmitted(mut h, a, why),
-        Fenced => (),
-        Collected(_) => (),
+        Fenced => fenced(mut h, now, mut out),
+        Collected(_) => {
+            if let Fencing = h.collecting {
+                h.collecting = Unfenced
+            }
+        },
     }
     take out
 }
@@ -1973,6 +1984,100 @@ fn refused_text(e: Refused) -> String {
         Denied(w) => string.from(w),
         Store(_) => "store error",
     }
+}
+
+// Starts a collection (launch.md "Collect"). The launcher takes its fence and answers
+// `Fenced`; the host then reads every root from one catalog snapshot taken after that
+// answer and sends them in `Collect`. One runs at a time, and only after the session's
+// inventory is reconciled.
+pub fn collect(mut h: Host) -> Result[List[launcher.Request], Refused] {
+    if !h.binds_sent {
+        return Error(Busy(0u64))
+    }
+    match h.collecting {
+        Unfenced => (),
+        _ => return Error(Busy(0u64)),
+    }
+    h.collecting = Fencing
+    let mut out: List[launcher.Request] = list.new()
+    list.push(mut out, CollectBegin)
+    Ok(take out)
+}
+
+fn fenced(mut h: Host, now: Now, mut out: List[launcher.Request]) {
+    match h.collecting {
+        Fencing => (),
+        _ => return,
+    }
+    match catalog_roots(h, now.wall_ms / 1000u64) {
+        Ok(roots) => list.push(mut out, Collect(clone(roots))),
+        Error(why) => {
+            h.collecting = FenceStuck(string.from(why))
+        },
+    }
+}
+
+// The collection roots, from one snapshot: each group's current and retained assemblies,
+// NEW's assembly of each Preparing, Pending or Undecided deploy (OLD's is the group's
+// current one, so both choices stay), and each unexpired recording pin's. A Failed or
+// Installed row is history and roots nothing. A read error gives no roots at all.
+fn catalog_roots(h: Host, now_s: u64) -> Result[List[Bytes], String] {
+    let snap = store.snapshot(h.db)
+    let mut roots: List[Bytes] = list.new()
+    {
+        let Ok(take scanned) = store.scan(snap, store.shape(h.t.groups), Unbounded, Unbounded) else {
+            return Error("groups")
+        }
+        let mut rows = take scanned
+        loop {
+            match store.next(mut rows) {
+                Ok(Some((_, g))) => {
+                    list.push(mut roots, clone(g.assembly))
+                    for kept in g.retained {
+                        list.push(mut roots, clone(kept))
+                    }
+                },
+                Ok(None) => break,
+                Error(_) => return Error("groups"),
+            }
+        }
+    }
+    {
+        let Ok(take scanned) = store.scan(snap, store.shape(h.t.deploys), Unbounded, Unbounded) else {
+            return Error("deploys")
+        }
+        let mut rows = take scanned
+        loop {
+            match store.next(mut rows) {
+                Ok(Some((_, d))) => match d.outcome {
+                    Preparing => list.push(mut roots, clone(d.assembly)),
+                    Pending => list.push(mut roots, clone(d.assembly)),
+                    Undecided(_) => list.push(mut roots, clone(d.assembly)),
+                    _ => (),
+                },
+                Ok(None) => break,
+                Error(_) => return Error("deploys"),
+            }
+        }
+    }
+    {
+        let Ok(take scanned) = store.scan(snap, store.shape(h.t.pins), Unbounded, Unbounded) else {
+            return Error("pins")
+        }
+        let mut rows = take scanned
+        loop {
+            match store.next(mut rows) {
+                Ok(Some((_, pin))) => {
+                    if pin.expires > now_s {
+                        list.push(mut roots, clone(pin.assembly))
+                    }
+                },
+                Ok(None) => break,
+                Error(_) => return Error("pins"),
+            }
+        }
+    }
+    Ok(take roots)
 }
 
 // A describe, preview or prepare child of a deploy: no store, listener or endpoint.

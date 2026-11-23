@@ -616,6 +616,37 @@ fn still_preparing(r: Rig) -> bool {
     }
 }
 
+// Runs one collection through the host and gives the roots it named in `Collect`.
+fn collected_roots(mut r: Rig) -> List[Bytes] waits {
+    let go = must(collect(mut r.h), "collect")
+    pump(mut r, take go)
+    let mut roots: Option[List[Bytes]] = None
+    for q in r.asked {
+        if let Collect(named) = q {
+            roots = Some(clone(named))
+        }
+    }
+    match roots {
+        Some(named) => clone(named),
+        None => fail("the collection named no roots")
+    }
+}
+
+fn names_root(roots: List[Bytes], assembly: Bytes) -> bool {
+    for x in roots {
+        if x == assembly {
+            return true
+        }
+    }
+    false
+}
+
+// A collection now keeps NEW's assembly when `new` and OLD's when `old`, and no other.
+fn collection_keeps(mut r: Rig, new: bool, old: bool) -> bool waits {
+    let roots = collected_roots(mut r)
+    names_root(roots, image_two()) == new && names_root(roots, image()) == old
+}
+
 // A group serving at gen 1 and a deploy prepared but not yet sent: its Start and cutover.
 fn cut_case(c: Clock, rnd: Random) -> (Rig, launcher.Child, List[launcher.Request]) waits {
     let mut r = rig(c, rnd, 4u64)
@@ -742,6 +773,7 @@ fn cutover_survives_host_loss(c: Clock, rnd: Random) -> Result[(), ()] waits {
     expect(gens(a, "g") == one(2u64) && launcher.forwards(a.f) == 1u64, "L44: before Start, the candidate or the cutover was not sent again")
     answer(mut a, old, PlaceInstalled(2u64, true))
     expect(is_dirty(a, "g", 2u64) && committed_once(a), "L44 before Start: not one install committed to NEW's root with OLD retained and the hold released")
+    expect(collection_keeps(mut a, true, true), "L44 before Start: a collection did not keep NEW's root and the retained OLD")
     // Before forwarding: the Start reached the launcher, the cutover did not.
     let (r1, old1, go1) = cut_case(c, rnd)
     let mut b = take r1
@@ -752,6 +784,7 @@ fn cutover_survives_host_loss(c: Clock, rnd: Random) -> Result[(), ()] waits {
     expect(list.len(gens(b2, "g")) == 0u64 && launcher.forwards(b2.f) == 1u64, "L44: before forwarding, the candidate started again or the cutover was not sent once")
     answer(mut b2, old1, PlaceInstalled(2u64, true))
     expect(is_dirty(b2, "g", 2u64) && committed_once(b2), "L44 before forwarding: not one install committed to NEW's root with OLD retained and the hold released")
+    expect(collection_keeps(mut b2, true, true), "L44 before forwarding: a collection did not keep NEW's root and the retained OLD")
     // During the install: OLD holds the command when the host is lost.
     let (r2, old2, go2) = cut_case(c, rnd)
     let mut d = take r2
@@ -760,14 +793,16 @@ fn cutover_survives_host_loss(c: Clock, rnd: Random) -> Result[(), ()] waits {
     expect(launcher.forwards(d2.f) == 1u64 && is_dirty(d2, "g", 1u64), "L44: during the install, the re-send reached OLD again or the row moved")
     answer(mut d2, old2, PlaceInstalled(2u64, true))
     expect(is_dirty(d2, "g", 2u64) && committed_once(d2), "L44 during the install: not one install committed to NEW's root with OLD retained and the hold released")
+    expect(collection_keeps(mut d2, true, true), "L44 during the install: a collection did not keep NEW's root and the retained OLD")
     // After OLD's answer, before the commit: the launcher returns the kept answer.
     let (r3, old3, go3) = cut_case(c, rnd)
     let mut e = take r3
     pump(mut e, take go3)
     let _ = launcher.cutover_reply(mut e.f, old3, PlaceInstalled(2u64, true))
     expect(is_dirty(e, "g", 1u64), "L44: the host saw an answer it was not sent")
-    let e2 = restart(take e, 4u64)
+    let mut e2 = restart(take e, 4u64)
     expect(is_dirty(e2, "g", 2u64) && committed_once(e2), "L44 after the answer: not one install committed to NEW's root with OLD retained and the hold released")
+    expect(collection_keeps(mut e2, true, true), "L44 after the answer: a collection did not keep NEW's root and the retained OLD")
     // Both children ended while no host watched, after OLD's answer: their ends wait for
     // the kept answer, which commits, and NEW's clean stop then writes Clean.
     let (r5, old5, go5) = cut_case(c, rnd)
@@ -792,6 +827,7 @@ fn cutover_survives_host_loss(c: Clock, rnd: Random) -> Result[(), ()] waits {
     list.push(mut opened, Placed(clone(new6), PlaceOpened(runner.PlaceReady(version: 2u64, store_hi: 0u64, store_lo: 0u64, release: release_two(), retain_from: 0u64, ready_ns: 0u64))))
     feed(mut u2, take opened)
     expect(is_dirty(u2, "g", 2u64) && committed_once(u2), "L44 Uncertain: the candidate's open at v did not commit")
+    expect(collection_keeps(mut u2, true, true), "L44 Uncertain: a collection did not keep NEW's root and the retained OLD")
     // Launcher lost after OLD installed: no child and no held answer survive.
     let (r4, old4, go4) = cut_case(c, rnd)
     let mut l = take r4
@@ -805,10 +841,12 @@ fn cutover_survives_host_loss(c: Clock, rnd: Random) -> Result[(), ()] waits {
     expect(launcher.forwards(l2.f) == 0u64 && gens(l2, "g") == one(3u64) && is_dirty(l2, "g", 3u64), "L44: after launcher loss the group was not probed once at a new gen without a cutover")
     // The store installed v = 2: the probe opens NEW's pair, and that open installs NEW.
     let mut at_new = take l2
+    expect(collection_keeps(mut at_new, true, true), "L44 launcher loss: an Undecided deploy's collection did not keep both roots")
     expect(starts_are(at_new, one_pair(3u64, 2u64, image_two())), "L44 launcher loss, store at NEW: the probe did not start NEW's assembly at v")
     expect(rooted_at(at_new, image(), 1u64) && launcher.forwards(at_new.f) == 0u64, "L44 launcher loss, store at NEW: the root moved before the probe opened")
     place_answers(mut at_new, 2u64)
     expect(installed_new(at_new, 2u64) && is_dirty(at_new, "g", 3u64) && starts_are(at_new, one_pair(3u64, 2u64, image_two())) && launcher.forwards(at_new.f) == 0u64, "L44 launcher loss, store at NEW: the probe's open did not install NEW once at Dirty(3)")
+    expect(collection_keeps(mut at_new, true, true), "L44 launcher loss, store at NEW: a collection did not keep NEW's root and the retained OLD")
     // The launcher was lost with the cutover forwarded and not yet installed: the store is at
     // OLD's 1. NEW's probe is told so, OLD's pair is probed next, and its open abandons v.
     let (r7, _, go7) = cut_case(c, rnd)
@@ -826,6 +864,7 @@ fn cutover_survives_host_loss(c: Clock, rnd: Random) -> Result[(), ()] waits {
         _ => false
     }
     expect(abandoned && rooted_at(at_old, image(), 1u64) && is_dirty(at_old, "g", 4u64) && list.len(status(at_old.h).failing) == 0u64, "L44 launcher loss, store at OLD: OLD's open did not abandon the deploy with OLD's root kept")
+    expect(collection_keeps(mut at_old, false, true), "L44 launcher loss, store at OLD: a collection did not keep OLD's root alone after the abandon")
     // Lost while preparing: OLD exported and NEW's prepare child runs. The Preparing row
     // proves no cutover was sent, so the new session starts no candidate and sends no
     // cutover; it aborts OLD's export, and records the failure only on OLD's answer.
@@ -836,9 +875,11 @@ fn cutover_survives_host_loss(c: Clock, rnd: Random) -> Result[(), ()] waits {
     to_export(mut pr, old8, preview_answer(image_two(), release_two()))
     old_says(mut pr, old8, PlaceExported(1u64, "export-1"))
     let mut pr2 = restart(take pr, 4u64)
+    expect(collection_keeps(mut pr2, true, true), "L44 while preparing: a collection did not keep the Preparing deploy's NEW and OLD")
     expect(list.len(gens(pr2, "g")) == 0u64 && asked_of(pr2, 2u64) == 0u64 && asked_of(pr2, 3u64) == 1u64 && still_preparing(pr2) && is_dirty(pr2, "g", 1u64), "L44 while preparing: the new session started a candidate, sent a cutover, did not abort OLD's export, or decided before OLD answered")
     old_says(mut pr2, old8, PlaceAborted)
     expect(failed_with(pr2, "interrupted before the cutover") && rooted_at(pr2, image(), 1u64) && is_dirty(pr2, "g", 1u64), "L44 while preparing: OLD's abort answer did not fail the deploy with OLD's root kept")
+    expect(collection_keeps(mut pr2, false, true), "L44 while preparing: the failed deploy's NEW was still a root")
     // A preview that does not describe NEW's image stops the deploy before OLD exports.
     let mut pv = rig(c, rnd, 4u64)
     add(mut pv, "g", "t")
@@ -1106,7 +1147,8 @@ fn admission_case(c: Clock, rnd: Random, memory: Option[u64], author: Author) ->
 // together must fit the group's memory; a grant OLD's recipe lacks needs the operator's
 // approval; nonempty approval text needs the operator's confirmation of exactly that text;
 // an untrusted author publishes source only. A refused admission is released and leaves no
-// Preparing row, no helper child and no Assemble.
+// Preparing row, no helper child and no Assemble. A slow upload waits while another group's
+// child end and a collection go through the host.
 @test
 fn deploy_admission_policy(c: Clock, rnd: Random) -> Result[(), ()] waits {
     // Overlap memory: 60 + 50 > 100 is refused; 50 + 50 fits.
@@ -1135,6 +1177,51 @@ fn deploy_admission_policy(c: Clock, rnd: Random) -> Result[(), ()] waits {
     expect(asked_of(r3, 4u64) == 1u64, "confirm: the exact text assembles")
     assembled_new(mut r3)
     expect(still_preparing(r3) && asked_of(r3, 5u64) == 1u64 && helpers_started(r3) == 1u64, "confirm: the assembled deploy prepares after its row is durable")
+    // A slow upload: the verifier asked for objects in two parts and half are sent; another
+    // group's child ends and a collection runs while the attempt waits for the rest. The
+    // admission keeps its Need parts and still relays the remaining bytes.
+    let mut r5 = admission_case(c, rnd, None, Trusted)
+    add(mut r5, "k", "t")
+    op_wake(mut r5, "k")
+    let other = last(r5, "k")
+    let go5 = must(deploy(mut r5.h, "g", an_attempt(), Attested(image_two()), list.new(), list.new(), false), "deploy")
+    pump(mut r5, take go5)
+    let mut parts: List[launcher.Event] = list.new()
+    let mut first_part: List[launcher.Wanted] = list.new()
+    list.push(mut first_part, BodyKey(bytes_of(32u64, 1u8)))
+    let mut second_part: List[launcher.Wanted] = list.new()
+    list.push(mut second_part, AnnexKey(bytes_of(32u64, 2u8)))
+    list.push(mut parts, Need(an_attempt(), take first_part, false))
+    list.push(mut parts, Need(an_attempt(), take second_part, true))
+    feed(mut r5, take parts)
+    let head = must(deploy_data(mut r5.h, "g", bytes_of(8u64, 1u8)), "deploy_data")
+    pump(mut r5, take head)
+    finish(mut r5, other, Code(0i32), Some(None))
+    expect(is_clean(r5, "k"), "slow upload: the other group's clean end was not applied while the upload waits")
+    expect(collection_keeps(mut r5, false, true), "slow upload: a collection during the upload did not run or rooted the unassembled NEW")
+    let tail = must(deploy_data(mut r5.h, "g", bytes_of(8u64, 2u8)), "deploy_data after the collection")
+    pump(mut r5, take tail)
+    let end = must(deploy_end(mut r5.h, "g"), "deploy_end")
+    pump(mut r5, take end)
+    let waiting = match deploy_admission(r5.h, "g") {
+        Some(Uploading(keys, done)) => done && list.len(keys) == 2u64,
+        _ => false
+    }
+    expect(waiting, "slow upload: the admission lost its Need parts across the end and the collection")
+    let mut sent = 0u64
+    for q in r5.asked {
+        match q {
+            AdmitData(_, _) => {
+                sent += 1u64
+            },
+            AdmitEnd(_) => {
+                sent += 10u64
+            },
+            _ => (),
+        }
+    }
+    expect(sent == 12u64, "slow upload: the host did not relay both chunks and the end")
+    unplug(mut r5)
     // An untrusted author attests nothing.
     let mut r4 = admission_case(c, rnd, None, Untrusted)
     let attested = deploy(mut r4.h, "g", an_attempt(), Attested(image_two()), list.new(), list.new(), false)

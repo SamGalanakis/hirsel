@@ -7,13 +7,16 @@ pub opaque scoped type Ctx[G: send] {
     index: u64,
 }
 
-type Row: codec + send = Started(u64, Bytes) | Finished(Bytes, Bytes)
+type Fingerprint: codec + send { contract: Bytes }
+type Row: codec + send = Started(u64, Fingerprint) | Finished(Fingerprint, Bytes)
 type Mode: codec + send = First | Resend | Lookup
-type Begin: codec + send { index: u64, fingerprint: Bytes, mode: Mode }
+type Begin: codec + send { index: u64, fingerprint: Fingerprint, mode: Mode }
 type Finish: codec + send { step: Begin, raw: Bytes }
 type Command: codec + send = Enter(Begin) | Finalize(Finish)
 type Reply: codec + send = Ready | Replay(Bytes) | Doubt | Held | Capped
 type TxRequest: codec + send { index: u64, arg: Bytes }
+const OUTSIDE: u8 = 0
+const TRANSACTION: u8 = 1
 
 type Tables {
     caps: store.Table[Bytes, u64],
@@ -48,10 +51,6 @@ fn encode[A: codec](a: A) -> Result[Bytes, store.Error] {
     Ok(take raw)
 }
 
-fn stored_bytes(take raw: Result[Bytes, Capacity]) -> Result[Bytes, store.Error] {
-    match take raw { Ok(take data) => Ok(take data), Error(cap) => Error(Full(Allocation(cap))) }
-}
-
 fn decode[A: codec](raw: Bytes) -> Result[A, store.Error] {
     let c: std.codec.Codec[A] = std.codec.of()
     match std.codec.decode(c, raw) {
@@ -60,14 +59,21 @@ fn decode[A: codec](raw: Bytes) -> Result[A, store.Error] {
     }
 }
 
-fn fingerprint(kind: u8, raw: Bytes) -> Result[Bytes, Capacity] {
+fn fingerprint[A, R, E](kind: u8, identity: Bytes, ca: std.codec.Codec[A], cr: std.codec.Codec[R], ce: std.codec.Codec[E], raw: Bytes) -> Result[Fingerprint, std.codec.EncodeError] {
+    let mut contract: Bytes = list.with_capacity(32u64 + list.len(identity))
+    std.codec.put_u64(list.len(identity), mut contract)
+    list.append(mut contract, identity)
+    std.codec.put_u64(std.codec.fingerprint(ca)?, mut contract)
+    std.codec.put_u64(std.codec.fingerprint(cr)?, mut contract)
+    std.codec.put_u64(std.codec.fingerprint(ce)?, mut contract)
     let mut hash = std.sha256.start()
     std.sha256.add_byte(mut hash, kind)
+    std.sha256.add(mut hash, contract, 0u64, list.len(contract))
     std.sha256.add(mut hash, raw, 0u64, list.len(raw))
     let digest = std.sha256.finish(hash)
     let mut result: Bytes = list.with_capacity(32u64)
     for i in 0u64 .. 32u64 { let _ = list.push(mut result, digest[i]) }
-    Ok(take result)
+    Ok(Fingerprint(contract: take result))
 }
 
 fn run_key(a: triggers.Attempt) -> Result[Bytes, store.Error] {
@@ -94,8 +100,8 @@ fn capped(mut tx: store.Tx, t: Tables, a: triggers.Attempt, index: u64) -> Resul
     Ok(true)
 }
 
-fn hold(mut tx: store.Tx, t: Tables, a: triggers.Attempt, index: u64, expected: Bytes, actual: Bytes) -> Result[Reply, store.Error] {
-    trigger_write(triggers.hold(mut tx, t.triggers, a, index, expected, actual))?
+fn hold(mut tx: store.Tx, t: Tables, a: triggers.Attempt, index: u64, expected: Fingerprint, actual: Fingerprint) -> Result[Reply, store.Error] {
+    trigger_write(triggers.hold(mut tx, t.triggers, a, index, expected.contract, actual.contract))?
     Ok(Held)
 }
 
@@ -104,11 +110,11 @@ fn start_outside(mut tx: store.Tx, t: Tables, a: triggers.Attempt, take b: Begin
     let key = row_key(a, b.index)?
     match store.fetch(tx, store.shape(t.rows), key)? {
         Some(Finished(take saved, take raw)) => {
-            if saved != b.fingerprint { return hold(mut tx, t, a, b.index, saved, b.fingerprint) }
+            if saved.contract != b.fingerprint.contract { return hold(mut tx, t, a, b.index, saved, b.fingerprint) }
             return Ok(Replay(take raw))
         },
         Some(Started(previous, take saved)) => {
-            if saved != b.fingerprint { return hold(mut tx, t, a, b.index, saved, b.fingerprint) }
+            if saved.contract != b.fingerprint.contract { return hold(mut tx, t, a, b.index, saved, b.fingerprint) }
             match b.mode {
                 First => return Ok(Doubt),
                 Lookup => return Ok(Ready),
@@ -125,7 +131,7 @@ fn start_outside(mut tx: store.Tx, t: Tables, a: triggers.Attempt, take b: Begin
 fn finish_outside(mut tx: store.Tx, t: Tables, a: triggers.Attempt, take f: Finish) -> Result[Reply, store.Error] {
     let key = row_key(a, f.step.index)?
     let Some(Started(attempt, take saved)) = store.fetch(tx, store.shape(t.rows), key)? else { return Error(Missing("started step")) }
-    if saved != f.step.fingerprint { return hold(mut tx, t, a, f.step.index, saved, f.step.fingerprint) }
+    if saved.contract != f.step.fingerprint.contract { return hold(mut tx, t, a, f.step.index, saved, f.step.fingerprint) }
     match f.step.mode {
         Lookup => (),
         _ => if attempt != triggers.number(a) { return Ok(Doubt) },
@@ -217,18 +223,24 @@ fn reply_value[G: send, R: codec, E: codec](mut ctx: Ctx[G], take reply: Reply) 
     }
 }
 
-fn outside[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], take a: A, f: fn(G, take A) -> Result[R, E] waits, mode: Mode) -> Result[R, StepError[E]] waits {
-    let raw = must(encode(a))
-    let encoded = must(fingerprint(0u8, raw))
-    let before = Begin(index: ctx.index, fingerprint: take encoded, mode: mode)
+fn outside_request[G, A: codec, R: codec, E: codec](index: u64, a: A, f: StaticFn[fn(G, take A) -> Result[R, E] waits], mode: Mode) -> Begin {
+    let ca: std.codec.Codec[A] = std.codec.of()
+    let cr: std.codec.Codec[R] = std.codec.of()
+    let ce: std.codec.Codec[E] = std.codec.of()
+    let encoded = must(fingerprint(OUTSIDE, code.identity(f), ca, cr, ce, must(encode(a))))
+    Begin(index: index, fingerprint: take encoded, mode: mode)
+}
+
+fn outside[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], take a: A, take before: Begin, callback: StaticFn[fn(G, take A) -> Result[R, E] waits]) -> Result[R, StepError[E]] waits {
     let copied: Begin = clone(before)
     let attempted: Result[Reply, StepError[E]] = dispatch(ctx.route, code.describe(control), Enter(take copied))
     match (take attempted)? {
         Ready => (),
         other => return reply_value(mut ctx, take other),
     }
+    let invoke = code.callable(callback)
     let value = match map.get(ctx.grants, ctx.index) {
-        Some(grant) => f(grant, take a),
+        Some(grant) => invoke(grant, take a),
         None => fail("step wrapper: no grant for outside step"),
     }
     let finished = Finish(step: take before, raw: must(encode(value)))
@@ -236,29 +248,35 @@ fn outside[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], take a: A, f:
     reply_value(mut ctx, (take result)?)
 }
 
-pub fn step[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], take a: A, f: fn(G, take A) -> Result[R, E] waits) -> Result[R, StepError[E]] waits {
-    outside(mut ctx, take a, f, First)
+pub fn step[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], take a: A, f: StaticFn[fn(G, take A) -> Result[R, E] waits]) -> Result[R, StepError[E]] waits {
+    let request = outside_request(ctx.index, a, f, First)
+    outside(mut ctx, take a, take request, f)
 }
 
-pub fn resend[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], id: StepId, take a: A, f: fn(G, take A) -> Result[R, E] waits) -> Result[R, StepError[E]] waits {
+pub fn resend[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], id: StepId, take a: A, f: StaticFn[fn(G, take A) -> Result[R, E] waits]) -> Result[R, StepError[E]] waits {
     if id != next_id(ctx) { return Error(StaleAttempt) }
-    outside(mut ctx, take a, f, Resend)
+    let request = outside_request(ctx.index, a, f, Resend)
+    outside(mut ctx, take a, take request, f)
 }
 
-pub fn resolve[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], id: StepId, take a: A, lookup: fn(G, take A) -> Result[R, E] waits) -> Result[R, StepError[E]] waits {
+pub fn resolve[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], id: StepId, take a: A, f: StaticFn[fn(G, take A) -> Result[R, E] waits], lookup: StaticFn[fn(G, take A) -> Result[R, E] waits]) -> Result[R, StepError[E]] waits {
     if id != next_id(ctx) { return Error(StaleAttempt) }
-    outside(mut ctx, take a, lookup, Lookup)
+    let request = outside_request(ctx.index, a, f, Lookup)
+    outside(mut ctx, take a, take request, lookup)
 }
 
 fn transaction_body[A: codec, R: codec, E: codec](mut tx: store.Tx, a: triggers.Attempt, take request: TxRequest, f: StaticFn[fn(mut store.Tx, A) -> Result[R, E]]) -> Result[Reply, store.Error] {
     let t = tables(store.tx_schema(tx))?
     let index = request.index
     if capped(mut tx, t, a, index)? { return Ok(Capped) }
-    let encoded = stored_bytes(fingerprint(1u8, request.arg))?
+    let ca: std.codec.Codec[A] = std.codec.of()
+    let cr: std.codec.Codec[R] = std.codec.of()
+    let ce: std.codec.Codec[E] = std.codec.of()
+    let encoded = fingerprint(TRANSACTION, code.identity(f), ca, cr, ce, request.arg) ?=> |_| Limit(Value)
     let row = row_key(a, index)?
     match store.fetch(tx, store.shape(t.rows), row)? {
         Some(Finished(take saved, take raw)) => {
-            if saved != encoded { return hold(mut tx, t, a, index, saved, encoded) }
+            if saved.contract != encoded.contract { return hold(mut tx, t, a, index, saved, encoded) }
             return Ok(Replay(take raw))
         },
         Some(Started(_, take saved)) => return hold(mut tx, t, a, index, saved, encoded),
@@ -442,9 +460,13 @@ fn law_transaction[F, A: codec](mut law: LawDb, a: triggers.Attempt, index: u64,
     law_answer(mut law, take call)
 }
 
-fn law_begin[A: codec](index: u64, arg: A, mode: Mode) -> Begin {
-    Begin(index: index, fingerprint: result.unwrap(fingerprint(0u8, result.unwrap(encode(arg)))), mode: mode)
+fn law_outside(clock: Clock, take n: u64) -> Result[u64, LawError] waits {
+    // This comment and the line breaks do not appear in the PROG-9 identity.
+    host.sleep_until(clock, host.mono_ns(clock))
+    Ok(n)
 }
+
+fn law_other_outside(clock: Clock, take n: u64) -> Result[u64, LawError] waits { Ok(law_outside(clock, n)? + 1u64) }
 
 fn law_receipt[A: codec](take request: Begin, value: A) -> Command {
     Finalize(Finish(step: take request, raw: result.unwrap(encode(value))))
@@ -477,13 +499,14 @@ pub fn journal_law_steps_reexecution(d: Dir, c: Clock, r: Random, tasks: Tasks) 
     let (take unwrapped_services, take unwrapped_mail, take unwrapped_pay) = signup.scripted_services(tasks)
     let raw_mail: signup.Port = Welcome(channel.sender(unwrapped_services.mail))
     if let Ok(1u64) = signup.send_welcome(raw_mail, "ada@example.test") {} else { return false }
-    let sent = law_begin(0u64, "ada@example.test", First)
+    let send = code.describe(signup.send_welcome)
+    let sent = outside_request(0u64, "ada@example.test", send, First)
     if let Ready = law_control(mut law, first, Enter(clone(sent))) {} else { return false }
     let receipt = signup.send_welcome(mail, "ada@example.test")
     let _ = law_control(mut law, first, law_receipt(take sent, receipt))
     let mut reopened = law_reopen(take law)
     let second = law_attempt(mut reopened, id, string.as_bytes("r1"))
-    let observed = law_control(mut reopened, second, Enter(law_begin(0u64, "ada@example.test", First)))
+    let observed = law_control(mut reopened, second, Enter(outside_request(0u64, "ada@example.test", send, First)))
     let got: Result[u64, signup.WriteError] = law_replay(observed)
     // The next scripted send gets receipt 2. An unwrapped repeat would already
     // have used that receipt and this probe would get 3.
@@ -574,23 +597,89 @@ fn law_release(mut law: LawDb, id: triggers.Id, revision: Bytes) -> () waits {
     law_commit(mut law.db, take released)
 }
 
-// Law 4 releases r1 on r2, then presents a different r2 request at index 0.
-pub fn journal_law_steps_fingerprint(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
+fn law_request_hold(law: LawDb, id: triggers.Id, expected: Fingerprint, actual: Fingerprint) -> bool {
+    let snapshot = store.snapshot(law.db)
+    let mark = result.unwrap(triggers.hold_mark(snapshot, law.triggers, id))
+    let None = result.unwrap(triggers.outcome(snapshot, law.triggers, id)) else { return false }
+    let Some(Request(2u64, 0u64, old, new)) = mark else { return false }
+    old != new && old == expected.contract && new == actual.contract
+}
+
+fn law_fingerprint_arg(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
     let mut law = law_open(d, c, r, tasks)
     let id = law_enroll(mut law, 2u64)
     let first = law_attempt(mut law, id, string.as_bytes("r1"))
-    let _ = law_transaction(mut law, first, 0u64, code.describe(law_bump), 10u64)
+    let f = code.describe(law_bump)
+    let _ = law_transaction(mut law, first, 0u64, f, 10u64)
     let mut reopened = law_reopen(take law)
     if let Held = law_start(mut reopened, id, string.as_bytes("r2")) {} else { return false }
     law_release(mut reopened, id, string.as_bytes("r2"))
     let second = law_attempt(mut reopened, id, string.as_bytes("r2"))
-    if let Held = law_transaction(mut reopened, second, 0u64, code.describe(law_bump), 20u64) {} else { return false }
-    let expected = result.unwrap(fingerprint(1u8, result.unwrap(encode(10u64))))
-    let actual = result.unwrap(fingerprint(1u8, result.unwrap(encode(20u64))))
-    let mark = result.unwrap(triggers.hold_mark(store.snapshot(reopened.db), reopened.triggers, id))
-    if let Some(Request(2u64, 0u64, old, new)) = mark {
-        old == expected && new == actual
-    } else { false }
+    if let Held = law_transaction(mut reopened, second, 0u64, f, 20u64) {} else { return false }
+    let n = std.codec.of_u64()
+    let e: std.codec.Codec[LawError] = std.codec.of()
+    let expected = result.unwrap(fingerprint(TRANSACTION, code.identity(f), n, n, e, result.unwrap(encode(10u64))))
+    let actual = result.unwrap(fingerprint(TRANSACTION, code.identity(f), n, n, e, result.unwrap(encode(20u64))))
+    law_request_hold(reopened, id, expected, actual)
+}
+
+fn law_save_outside(mut law: LawDb, take request: Begin) -> triggers.Id waits {
+    let id = law_enroll(mut law, 1u64)
+    let first = law_attempt(mut law, id, string.as_bytes("r1"))
+    let Ready = law_control(mut law, first, Enter(clone(request))) else { fail("step law: expected a started row") }
+    let saved: Result[u64, LawError] = Ok(23u64)
+    let _ = law_control(mut law, first, law_receipt(take request, saved))
+    id
+}
+
+fn law_fingerprint_hold(mut law: LawDb, saved: Fingerprint, now: Fingerprint) -> bool waits {
+    let id = law_save_outside(mut law, Begin(index: 0u64, fingerprint: clone(saved), mode: First))
+    let second = law_attempt(mut law, id, string.as_bytes("r1"))
+    let Held = law_control(mut law, second, Enter(Begin(index: 0u64, fingerprint: clone(now), mode: First))) else { return false }
+    law_request_hold(law, id, saved, now)
+}
+
+// Law 4. Each schema change preserves the callback identity and argument bytes,
+// as a change to a named type's definition across revisions can do.
+pub fn journal_law_steps_fingerprint(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    if !law_fingerprint_arg(d, c, r, tasks) { return false }
+    let mut law = law_open(d, c, r, tasks)
+    let n = std.codec.of_u64()
+    let changed = std.codec.of_u32()
+    let e: std.codec.Codec[LawError] = std.codec.of()
+    let raw = result.unwrap(encode(6u64))
+    let same = outside_request(0u64, 6u64, code.describe(law_outside), First)
+    let other = outside_request(0u64, 6u64, code.describe(law_other_outside), First)
+    if !law_fingerprint_hold(mut law, same.fingerprint, other.fingerprint) { return false }
+    let identity = code.identity(code.describe(law_outside))
+    let changed_arg = result.unwrap(fingerprint(OUTSIDE, identity, changed, n, e, raw))
+    let changed_result = result.unwrap(fingerprint(OUTSIDE, identity, n, changed, e, raw))
+    let changed_error = result.unwrap(fingerprint(OUTSIDE, identity, n, n, changed, raw))
+    if !law_fingerprint_hold(mut law, same.fingerprint, changed_arg) { return false }
+    if !law_fingerprint_hold(mut law, same.fingerprint, changed_result) { return false }
+    if !law_fingerprint_hold(mut law, same.fingerprint, changed_error) { return false }
+
+    // A compact `fn law_outside(clock:Clock,take n:u64)->Result[u64,LawError] waits`
+    // has these identity bytes by PROG-9. Replay against the commented source above.
+    let mut prior_identity: Bytes = list.new()
+    list.push(mut prior_identity, 1u8)
+    list.append(mut prior_identity, string.as_bytes("store@1/steps/law_outside(core@1/core/Clock,take u64)->core@1/core/Result[u64,store@1/steps/LawError]waits"))
+    let prior = result.unwrap(fingerprint(OUTSIDE, prior_identity, n, n, e, raw))
+    let formatted = law_save_outside(mut law, Begin(index: 0u64, fingerprint: take prior, mode: First))
+    let f = code.describe(law_bump)
+    let prior_outside = result.unwrap(fingerprint(OUTSIDE, code.identity(f), n, n, e, raw))
+    let switched = law_save_outside(mut law, Begin(index: 0u64, fingerprint: clone(prior_outside), mode: First))
+    let mut reopened = law_reopen(take law)
+    let second = law_attempt(mut reopened, switched, string.as_bytes("r1"))
+    if let Held = law_transaction(mut reopened, second, 0u64, f, 6u64) {} else { return false }
+    let tx = result.unwrap(fingerprint(TRANSACTION, code.identity(f), n, n, e, raw))
+    if !law_request_hold(reopened, switched, prior_outside, tx) { return false }
+
+    let formatted_attempt = law_attempt(mut reopened, formatted, string.as_bytes("r1"))
+    let reply = law_control(mut reopened, formatted_attempt, Enter(take same))
+    let saved: Result[u64, LawError] = law_replay(reply)
+    let mark = result.unwrap(triggers.hold_mark(store.snapshot(reopened.db), reopened.triggers, formatted))
+    match (saved, mark) { (Ok(23u64), None) => true, _ => false }
 }
 
 // Law 5. Keep the script alive across the cut, make no result commit on
@@ -602,12 +691,13 @@ pub fn journal_law_steps_in_doubt(d: Dir, c: Clock, r: Random, tasks: Tasks) -> 
     let (take services, take mailing, take billing) = signup.scripted_services(tasks)
     let payment: signup.Port = Billing(channel.sender(services.payment))
     let charge = signup.ChargeRequest(id: StepId(run: id, index: 1u64), card: "scripted-card")
-    if let Ready = law_control(mut law, first, Enter(law_begin(1u64, charge, First))) {} else { return false }
+    let send = code.describe(signup.send_charge)
+    if let Ready = law_control(mut law, first, Enter(outside_request(1u64, charge, send, First))) {} else { return false }
     let original = signup.send_charge(payment, clone(charge))
     let mut reopened = law_reopen(take law)
     let second = law_attempt(mut reopened, id, string.as_bytes("r1"))
-    if let Doubt = law_control(mut reopened, second, Enter(law_begin(1u64, charge, First))) {} else { return false }
-    let lookup = law_begin(1u64, charge, Lookup)
+    if let Doubt = law_control(mut reopened, second, Enter(outside_request(1u64, charge, send, First))) {} else { return false }
+    let lookup = outside_request(1u64, charge, send, Lookup)
     if let Ready = law_control(mut reopened, second, Enter(clone(lookup))) {} else { return false }
     let found = signup.find_charge(payment, take charge)
     let answer = law_control(mut reopened, second, law_receipt(take lookup, found))
@@ -618,7 +708,7 @@ pub fn journal_law_steps_in_doubt(d: Dir, c: Clock, r: Random, tasks: Tasks) -> 
 }
 
 fn law_pending_step(mut law: LawDb, a: triggers.Attempt, index: u64) -> () waits {
-    if let Ready = law_control(mut law, a, Enter(law_begin(index, 6u64, First))) {} else {
+    if let Ready = law_control(mut law, a, Enter(outside_request(index, 6u64, code.describe(law_outside), First))) {} else {
         fail("step law: cannot start the pending step")
     }
 }
@@ -629,7 +719,7 @@ type LateReply: send { attempt: triggers.Attempt, command: Command }
 fn law_reply_after_cut(take waiting: WaitingReply) -> LateReply waits {
     result.unwrap(channel.receive(waiting.until))
     let outcome: Result[u64, LawError] = Ok(11u64)
-    LateReply(attempt: waiting.attempt, command: law_receipt(law_begin(waiting.index, 6u64, First), outcome))
+    LateReply(attempt: waiting.attempt, command: law_receipt(outside_request(waiting.index, 6u64, code.describe(law_outside), First), outcome))
 }
 
 fn law_hold_reply(tasks: Tasks, a: triggers.Attempt, index: u64) -> (Sender[()], Task[LateReply]) {
@@ -657,7 +747,7 @@ pub fn journal_law_steps_sealed(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bo
     let (release, delayed) = law_hold_reply(tasks, old, 0u64)
     let mut reopened = law_reopen(take law)
     let current = law_attempt(mut reopened, id, string.as_bytes("r1"))
-    if let Doubt = law_control(mut reopened, current, Enter(law_begin(0u64, 6u64, First))) {} else { return false }
+    if let Doubt = law_control(mut reopened, current, Enter(outside_request(0u64, 6u64, code.describe(law_outside), First))) {} else { return false }
     let final_bytes = result.unwrap(encode(42u64))
     law_finish(mut reopened, current, Returned(clone(final_bytes)))
     if !law_late(mut reopened, release, take delayed) { return false }
@@ -677,8 +767,8 @@ pub fn journal_law_steps_fence(d: Dir, c: Clock, r: Random, tasks: Tasks) -> boo
     let (release, delayed) = law_hold_reply(tasks, old, 1u64)
     let mut reopened = law_reopen(take law)
     let current = law_attempt(mut reopened, id, string.as_bytes("r1"))
-    if let Doubt = law_control(mut reopened, current, Enter(law_begin(1u64, 6u64, First))) {} else { return false }
-    let retry = law_begin(1u64, 6u64, Resend)
+    if let Doubt = law_control(mut reopened, current, Enter(outside_request(1u64, 6u64, code.describe(law_outside), First))) {} else { return false }
+    let retry = outside_request(1u64, 6u64, code.describe(law_outside), Resend)
     if let Ready = law_control(mut reopened, current, Enter(clone(retry))) {} else { return false }
     if !law_late(mut reopened, release, take delayed) { return false }
     let answer: Result[u64, LawError] = Ok(22u64)
@@ -693,7 +783,7 @@ pub fn journal_law_steps_fence(d: Dir, c: Clock, r: Random, tasks: Tasks) -> boo
     }
     law_commit(mut reopened.db, take cancelled)
     let at = store.version(store.snapshot(reopened.db))
-    let request = Enter(law_begin(2u64, 9u64, First))
+    let request = Enter(outside_request(2u64, 9u64, code.describe(law_outside), First))
     let refused = law_attempt_call(mut reopened, current, code.describe(control), request)
     match take refused { Ok(Aborted(store.Undone(value: Refusal(Cancelled), ticket: None))) => (), _ => return false }
     if store.version(store.snapshot(reopened.db)) != at { return false }

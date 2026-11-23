@@ -180,12 +180,13 @@ pub fn find_charge(port: Port, take request: ChargeRequest) -> Result[u64, Write
 
 fn process(mut ctx: steps.Ctx[Port], take arg: Signup) -> Result[RunResult, steps.StepError[WriteError]] waits {
     let Signup(id: id, email: take email, card: take card) = take arg
-    let _ = steps.step(mut ctx, take email, send_welcome)?
+    let _ = steps.step(mut ctx, take email, code.describe(send_welcome))?
     let charge = ChargeRequest(id: steps.next_id(ctx), card: take card)
     let copied: ChargeRequest = clone(charge)
-    let attempted = steps.step(mut ctx, take copied, send_charge)
+    let send = code.describe(send_charge)
+    let attempted = steps.step(mut ctx, take copied, send)
     let _ = match take attempted {
-        Error(InDoubt(step)) => steps.resolve(mut ctx, step, take charge, find_charge)?,
+        Error(InDoubt(step)) => steps.resolve(mut ctx, step, take charge, send, code.describe(find_charge))?,
         other => (take other)?,
     }
     steps.transaction(mut ctx, id, code.describe(activate))?

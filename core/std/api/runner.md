@@ -446,15 +446,18 @@ cap in the same transaction as the trigger. The granted entry calls
 codec input, and a plain body. The body receives the opaque context and input.
 A callback receives the grant at its own index.
 
-Use `steps.step` for an outside operation. The wrapper makes the started row
+Use `steps.step` with a `StaticFn` for an outside operation. Pass the callback's
+inputs in the step argument. The wrapper makes the started row
 durable before calling and the result row durable before returning a value or
 `Callback(E)`. After a crash the run's next attempt runs the body from the top:
 each finished step returns its recorded result without calling again, and a step
 that started and has no result returns `InDoubt(id)` instead of calling again. When a step returns
-`InDoubt(id)`, `steps.resolve` can record a lookup under `steps.outside_key(id)`.
-Use `steps.resend` only when the program decides to send again. Both calls
-check the same step identity and request fingerprint. A fingerprint mismatch
-places a hold on the run.
+`InDoubt(id)`, `steps.resolve` takes the original callback descriptor and a
+separate static lookup that can record a result under `steps.outside_key(id)`.
+Use `steps.resend` only when the program decides to send again with the original
+callback. Both calls check the step identity and original request fingerprint.
+The fingerprint covers the step kind, callback identity, argument, result and
+error schemas, and encoded argument. A mismatch places a hold on the run.
 
 Use `steps.register_transaction` to register a plain transaction callback as
 an attempt entry. `steps.transaction` commits its result, writes and any

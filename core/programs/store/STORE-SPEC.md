@@ -1138,6 +1138,20 @@ Triggers and the step wrapper are a library over transact entries (ENDSTATE stor
 - **`StaleAttempt`** (a refusal). A granted trigger's attempt n begins with a commit that raises the trigger row's attempt from n − 1 to n. Every transact call the run then makes names (trigger identity, n), and the same transaction checks that the row's attempt is still n. If it is not, the call is refused `StaleAttempt` and commits nothing: no write of the body, no step row, no outcome. The run's terminal commit is fenced the same way. So a run of attempt n whose result arrives after attempt n + 1 has started (a same-process store reopen allows it) changes nothing (ENDSTATE steps, law 7).
 - **Held** (a run state). A trigger row that carries a hold mark is held. The step wrapper commits the mark when a later attempt's step request differs from the step row at its index, holding the attempt, the step index and both request fingerprints (steps, law 4), or when the place's revision has changed since attempt 1's start, holding both revisions (steps, law 9). The commit that writes the mark ends the attempt with no outcome. The place starts no held trigger. Only the program or an operator ends the hold: releasing it lets the next attempt run, and cancelling it ends the run with `Cancelled` (steps, law 7).
 
+**Step request fingerprint (law 4).** An outside step and a transaction step each take a `StaticFn`
+callback `f`. Every started or finished step row records the fingerprint of
+`(kind, code.identity(f), schema(A), schema(R), schema(E), arg_bytes)`. The kind distinguishes
+outside steps from transactions. `A`, `R` and `E` are the argument, result and error types. The
+fingerprint is SHA-256 over the kind byte (0 for outside, 1 for transaction), the length-prefixed
+callback identity, the three codec schema fingerprints, and the encoded argument. The identity
+length and schema fingerprints are u64 little-endian. Whitespace and comments leave the callback
+identity stable. Any captured input must be passed as part of `A`.
+
+A later attempt with a different fingerprint holds the run at that index before replay, decoding
+a saved result, or calling the callback. Resending and resolving an in-doubt outside step check
+the original outside callback's contract. A resolution invokes a separate lookup callback after
+that check.
+
 ---
 
 ## 2. On-disk format

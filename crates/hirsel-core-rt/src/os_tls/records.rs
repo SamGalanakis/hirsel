@@ -27,6 +27,53 @@ thread_local! {
     pub(crate) static TX_TEST_LIMIT: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
 }
 
+#[cfg(all(test, target_arch = "x86_64"))]
+pub(super) fn check_fallback_seal() {
+    let key = [0x42; 32];
+    let iv = [0x5a; 12];
+    let plain = b"fallback";
+    let header = [23, 3, 3, 0, 25];
+    for (algorithm, secret) in [
+        (
+            &aead::AES_256_GCM,
+            ConnectionTrafficSecrets::Aes256Gcm {
+                key: key.into(),
+                iv: iv.into(),
+            },
+        ),
+        (
+            &aead::CHACHA20_POLY1305,
+            ConnectionTrafficSecrets::Chacha20Poly1305 {
+                key: key.into(),
+                iv: iv.into(),
+            },
+        ),
+    ] {
+        let mut sending = TrafficKey::sending((255, secret)).unwrap();
+        assert!(sending.out_of_place.is_none());
+        let opening = LessSafeKey::new(UnboundKey::new(algorithm, &key).unwrap());
+        let mut slot = Slot::new(HEADER + usize::from(header[4]));
+        for seq in 255u64..=257 {
+            sending.seal(&mut slot, APPLICATION, plain).unwrap();
+            assert_eq!(slot.end, slot.bytes.len());
+            assert_eq!(slot.bytes[..HEADER], header);
+            let mut nonce = iv;
+            for (byte, seq_byte) in nonce[4..].iter_mut().zip(seq.to_be_bytes()) {
+                *byte ^= seq_byte;
+            }
+            let opened = opening
+                .open_in_place(
+                    aead::Nonce::assume_unique_for_key(nonce),
+                    Aad::from(header),
+                    &mut slot.bytes[HEADER..slot.end],
+                )
+                .unwrap();
+            assert_eq!(opened, b"fallback\x17");
+            slot.consume(slot.end);
+        }
+    }
+}
+
 struct TrafficKey {
     key: LessSafeKey,
     /// AES-GCM that seals straight from the caller's bytes into the slot.

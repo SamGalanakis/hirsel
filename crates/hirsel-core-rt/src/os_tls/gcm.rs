@@ -87,14 +87,14 @@ impl SealKey {
     }
 
     fn ghash(&self, xi: &mut [u8; BLOCK], bytes: &[u8]) {
-        let whole = bytes.len() / BLOCK * BLOCK;
-        if whole != 0 {
-            // SAFETY: `whole` is a nonzero multiple of the block size within `bytes`.
-            unsafe { gcm_ghash(xi, &self.table, bytes.as_ptr(), whole) };
+        let (blocks, tail) = bytes.as_chunks::<BLOCK>();
+        for block in blocks {
+            // SAFETY: the assembly reads one complete block per call.
+            unsafe { gcm_ghash(xi, &self.table, block.as_ptr(), BLOCK) };
         }
-        if whole != bytes.len() {
+        if !tail.is_empty() {
             let mut last = [0; BLOCK];
-            last[..bytes.len() - whole].copy_from_slice(&bytes[whole..]);
+            last[..tail.len()].copy_from_slice(tail);
             // SAFETY: one block.
             unsafe { gcm_ghash(xi, &self.table, last.as_ptr(), BLOCK) };
         }
@@ -183,10 +183,22 @@ mod tests {
             .collect()
     }
 
-    /// McGrew and Viega, "The Galois/Counter Mode of Operation", test cases 4
-    /// and 16, then ring's in-place seal over every partial-block shape.
+    /// McGrew-Viega cases 4 and 16, Wycheproof multi-block AAD, and ring's
+    /// in-place seal over every partial-block shape.
     #[test]
     fn out_of_place_seal_matches_gcm() {
+        if std::env::var("HIRSEL_TLS_GCM_TEST_FALLBACK").as_deref() == Ok("1") {
+            assert!(
+                !SealKey::supported(),
+                "fallback job requires a CPU without the VAES path"
+            );
+            super::super::records::check_fallback_seal();
+            return;
+        }
+        assert!(
+            SealKey::supported(),
+            "fast GCM conformance requires VAES and VPCLMULQDQ. Set HIRSEL_TLS_GCM_TEST_FALLBACK=1 for the fallback job"
+        );
         let plain = hex(concat!(
             "d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a72",
             "1c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b39"
@@ -211,21 +223,40 @@ mod tests {
                 ),
             ),
         ] {
-            let Some(seal) = SealKey::new(&hex(key)) else {
-                return;
-            };
+            let seal = SealKey::new(&hex(key)).unwrap();
             let (input, extra) = plain.split_at(plain.len() - 1);
             let mut out = vec![0; plain.len() + 16];
             seal.seal(nonce, &aad, input, extra[0], &mut out);
             assert_eq!(out, hex(sealed));
         }
 
+        for line in include_str!("testdata/aes-gcm-multiblock-aad.tsv")
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+        {
+            let [id, key, iv, aad, msg, ct, tag] = line.split('\t').collect::<Vec<_>>()[..] else {
+                panic!("malformed Wycheproof vector: {line}");
+            };
+            let seal = SealKey::new(&hex(key)).unwrap();
+            let msg = hex(msg);
+            let (extra, input) = msg.split_last().unwrap();
+            let mut out = vec![0; msg.len() + super::BLOCK];
+            seal.seal(
+                hex(iv).try_into().unwrap(),
+                &hex(aad),
+                input,
+                *extra,
+                &mut out,
+            );
+            let (ciphertext, actual_tag) = out.split_at(msg.len());
+            assert_eq!(ciphertext, hex(ct), "Wycheproof case {id} ciphertext");
+            assert_eq!(actual_tag, hex(tag), "Wycheproof case {id} tag");
+        }
+
         let header = [23, 3, 3, 0x40, 0x11];
         for (algorithm, key) in [(&AES_128_GCM, [0x42; 32]), (&AES_256_GCM, [0x5a; 32])] {
             let key = &key[..algorithm.key_len()];
-            let Some(seal) = SealKey::new(key) else {
-                return;
-            };
+            let seal = SealKey::new(key).unwrap();
             let ring = LessSafeKey::new(UnboundKey::new(algorithm, key).unwrap());
             for len in (0..=272).chain(16_368..=16_400) {
                 let input: Vec<u8> = (0..len).map(|i| (i * 7 + len) as u8).collect();

@@ -46,7 +46,7 @@ export interface Storage {
   read(): Promise<Installation | null>;
   write(state: Installation): Promise<void>;
 }
-export type State = 'Connecting' | 'Ready' | 'Backoff' | 'Incompatible' | 'Fenced' | 'Retired' | 'StorageUnavailable' | 'Closed';
+export type State = 'Connecting' | 'Ready' | 'Backoff' | 'Incompatible' | 'Unbound' | 'Fenced' | 'Retired' | 'StorageUnavailable' | 'Closed';
 export interface Socket {
   binaryType: string;
   onopen: ((event?: unknown) => void) | null;
@@ -225,7 +225,7 @@ export class Client implements Transport {
     } finally { await lock.release(); }
   }
   private connect(): void {
-    if (['Closed', 'Fenced', 'Retired', 'Incompatible', 'StorageUnavailable'].includes(this.state)) return;
+    if (['Closed', 'Fenced', 'Retired', 'Incompatible', 'Unbound', 'StorageUnavailable'].includes(this.state)) return;
     this.setState('Connecting'); this.welcomed = false; this.placed = 0; this.sent = false;
     for (const sub of this.subs) { sub.id = undefined; sub.complete = false; }
     const epoch = ++this.epoch;
@@ -253,7 +253,9 @@ export class Client implements Transport {
     }); };
     socket.onclose = event => { void this.enqueue(async () => {
       if (epoch !== this.epoch) return;
-      if ([1007, 1008, 1009].includes(event.code)) await this.incompatible(event.code);
+      // Before Welcome, 1008 is the place's binding refusing this Hello's credential.
+      if (event.code === 1008 && !this.welcomed) await this.unbound();
+      else if ([1007, 1008, 1009].includes(event.code)) await this.incompatible(event.code);
       else this.transient();
     }); };
     socket.onerror = () => { void this.enqueue(async () => { if (epoch === this.epoch) this.transient(); }); };
@@ -278,8 +280,15 @@ export class Client implements Transport {
     this.options.onDiagnostic?.(`Incompatible (${code}); reload bindings or reconnect explicitly`);
     this.readyReject(new ClientError('Incompatible'));
   }
+  private async unbound(): Promise<void> {
+    this.cancelTimers(); this.disconnect(); this.setState('Unbound');
+    this.options.onDiagnostic?.(this.credential
+      ? 'Unbound: the place refused this credential (Close 1008 before Welcome)'
+      : 'Unbound: the place binds callers and needs a credential; pass `credential` to Client.open (Close 1008 before Welcome)');
+    this.readyReject(new ClientError('Unbound'));
+  }
   reconnect(): void {
-    if (this.state !== 'Incompatible' && this.state !== 'Backoff') throw new ClientError(this.state);
+    if (this.state !== 'Incompatible' && this.state !== 'Unbound' && this.state !== 'Backoff') throw new ClientError(this.state);
     this.cancelTimers(); this.setState('Connecting');
     this.ready = new Promise((resolve, reject) => {this.readyResolve = resolve; this.readyReject = reject;});
     void this.ready.catch(() => {});

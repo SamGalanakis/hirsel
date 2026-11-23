@@ -229,6 +229,18 @@ export async function laws(codec, only, mutant) {
     gone.server.emit(gone.server.sockets.at(-1),{tag:'Placed',value:{tag:'Gone'}});await settle();await gone.time.advance(120000);
     assert.equal(gone.client.state,'Incompatible');assert.equal(gone.server.sockets.length,2);
   };
+  // Close 1008 before Welcome is the place's binding refusing the Hello: its own terminal
+  // state, not Incompatible, naming the missing credential when none was sent.
+  tests.unbound_before_welcome=async()=>{
+    const refuse=server=>{server.onHello=s=>server.close(s,1008);};
+    for(const given of [undefined,credential]) {
+      const h=await setup(new Memory(),{credential:given,prepare:refuse});await settle();await h.time.advance(120000);
+      assert.equal(h.client.state,'Unbound');assert.equal(h.server.sockets.length,1);
+      assert.equal(h.diagnostics.some(d=>d.includes('pass `credential`')),given===undefined);
+      h.server.onHello=undefined;h.client.reconnect();await ready(h);
+      assert.equal(h.client.state,'Ready');h.server.check();
+    }
+  };
   tests.history_unavailable_retires=async()=>{
     const h=await setup();await ready(h);
     let a=h.client.call(want,bytes(7),x=>x);await settle();h.server.answer(h.server.sockets[0],0,0n,returned(7));await settle();await a;

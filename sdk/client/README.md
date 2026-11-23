@@ -44,7 +44,10 @@ exists. Call arguments and Want bytes are copied before asynchronous work.
 replacement work. Retired streams retain their historical record and are never
 leased again. A later explicit client can allocate another stream.
 
-`Incompatible` is terminal until `reconnect()` or a bindings reload. The original
+`Incompatible` is terminal until `reconnect()` or a bindings reload. `Unbound`
+means the place closed the Hello with 1008 before Welcome: its `PlaceConfig.wire`
+binding refused the credential, or none was given (pass `credential`). It is
+terminal until `reconnect()`. The original
 pending request survives both. `StorageUnavailable` permits no sends; close the
 client and reopen after storage is available. `close()` releases the stream lease
 and preserves pending durable work. Each send checks the installation generation

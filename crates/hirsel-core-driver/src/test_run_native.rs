@@ -2145,11 +2145,10 @@ int fsync(int fd) {
 }
 
 #[test]
-fn foreign_deploy_and_stored_replay_refuse_recording_before_payloads() {
+fn foreign_deploy_and_recording_registration_refuse_before_payloads() {
     use crate::code_admission::{AdmissionError, AdmissionStore, ControlConnection, NativeSemantics};
-    use crate::code_store::{CodeStore, ObjectKind};
-    use hirsel_tape_format::{FORMAT, KIND_RUN, block};
-    use std::{fs, os::unix::net::UnixListener, time::{Duration, Instant}};
+    use crate::code_store::CodeStore;
+    use std::{fs, os::unix::net::UnixStream, time::Duration};
 
     const GRANT: &str = "Foreign=ffi_laws@1/laws/Laws";
     const REFUSAL: &str = "FFI-8: a recording build cannot reach foreign code: ffi_laws@1/main/main reaches ffi_laws@1/native/touch";
@@ -2166,109 +2165,62 @@ pub fn main(f: Foreign[laws.Laws]) -> Result[(), Exit] {
 }
 "#);
     let source = law.path("code-store");
+    // No host ever listens here: each refusal must come before the CLI connects.
     let state = law.path("state");
-    let control = law.path("control");
     let request = |args: &[&str]| {
         let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
         process::tape_request(&args, law.dir.path())
-    };
-    let deploy = |root: &str, granted| {
-        let mut args = vec![
-            "deploy", root, "--control", control.to_str().unwrap(), "--code-store", source.to_str().unwrap(),
-        ];
-        if granted {
-            args.extend(["--grant", GRANT]);
-        }
-        request(&args)
     };
     for engine in ["cranelift", "llvm"] {
         let root = PackageLaw::pass(law.run(&[
             "publish", "ffi_laws", "--backend", engine, "--grant", GRANT,
         ]));
         let root = root.trim();
-        let (status, _, error) = deploy(root, false);
+        let (status, _, error) = request(&[
+            "deploy", root, "--state", state.to_str().unwrap(), "--group", "app",
+            "--code-store", source.to_str().unwrap(),
+        ]);
         assert_eq!(status, Some(2), "{error}");
         assert_eq!(error, format!("deploy: refused: the recipe grants {GRANT}; pass --grant {GRANT}\n"));
-        let host_args = [
-            "host", root, "--state", state.to_str().unwrap(),
-            "--control", control.to_str().unwrap(),
-            "--listen", "127.0.0.1:0", "--code-store", source.to_str().unwrap(),
-            "--record", "recordings",
-        ];
-        PackageLaw::refuse(request(&host_args), REFUSAL);
-        assert_eq!(fs::read_dir(state.join("assemblies")).unwrap().count(), 0);
-        assert_eq!(fs::read_dir(state.join("images")).unwrap().count(), 0);
-        assert_eq!(fs::read_dir(law.path("recordings")).unwrap().count(), 0);
-        fs::remove_file(&control).unwrap();
+        let (status, _, error) = request(&[
+            "register", root, "--state", state.to_str().unwrap(), "--group", "app",
+            "--listen", "127.0.0.1:0", "--store", "store", "--code-store", source.to_str().unwrap(),
+            "--grant", GRANT, "--record", "recordings",
+        ]);
+        assert_eq!(status, Some(2), "{error}");
+        assert_eq!(error, format!("register: refused: {REFUSAL}\n"));
+        assert!(!state.exists() && !law.path("recordings").exists());
 
-        // Exercise the deploy wire refusal with an attested recipe and no
-        // earlier serving image. The host sends the refusal before any Need.
-        let listener = UnixListener::bind(&control).unwrap();
-        listener.set_nonblocking(true).unwrap();
-        std::thread::scope(|scope| {
-            scope.spawn(|| {
-                let deadline = Instant::now() + Duration::from_secs(10);
-                let mut peer = loop {
-                    match ControlConnection::accept(&listener) {
-                        Ok(peer) => break peer,
-                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < deadline => {
-                            std::thread::sleep(Duration::from_millis(5));
-                        }
-                        Err(error) => panic!("deploy client did not connect: {error}"),
-                    }
-                };
-                let mut limits = crate::request::local_admission_limits();
-                limits.timeout = Some(Duration::from_secs(10));
-                limits.outstanding = 4096;
-                let (_, approved, _) = peer.deploy_permission(Duration::from_secs(10), 4096).unwrap();
-                assert_eq!(approved, BTreeSet::from(["ffi_laws@1/laws/Laws".into()]));
-                let admission = AdmissionStore::open(&state.join("code"), 1 << 20).unwrap();
-                match admission.admit_for_runtime(&mut peer, &limits, &NativeSemantics, true, Some(&approved), None, None) {
-                    Err(AdmissionError::RecordingForeign(reason)) => {
-                        assert_eq!(reason, REFUSAL);
-                        peer.refuse_before_need(&reason).unwrap();
-                    }
-                    _ => panic!("recording host admitted foreign code"),
-                }
-            });
-            let (status, output, error) = deploy(root, true);
-            assert_eq!(status, Some(2), "{output}\n{error}");
-            assert!(output.is_empty());
-            assert_eq!(error, format!("deploy: refused: {REFUSAL}\n"));
-        });
-        drop(listener);
-        fs::remove_file(&control).unwrap();
-        assert_eq!(fs::read_dir(state.join("assemblies")).unwrap().count(), 0);
-        assert_eq!(fs::read_dir(state.join("images")).unwrap().count(), 0);
-
-        // Plant a recipe and its record directly in host state, which a
-        // recording host could never have produced. Supply no image.
+        // A recording admission refuses the attested recipe before any Need, so no
+        // object is staged.
         let root = crate::native::recipe_build::parse_root(root).unwrap();
-        let source_store = CodeStore::new(&source);
-        let recipe = fs::read(source_store.path(ObjectKind::Recipe, root)).unwrap();
-        let host_store = CodeStore::new(state.join("code"));
-        assert_eq!(host_store.put(ObjectKind::Recipe, &recipe).unwrap().hash, root);
-        let record = crate::AssemblyRecord::new(root, ContentHash::default(), b"absent image");
-        law.write(&format!("state/assemblies/{}", crate::call::hex(&record.identity.0)),
-            [record.recipe.0, record.toolchain.0, record.digest.0].concat());
-        let tape_id = [42; 16];
-        let pin = [b"HIRPIN\x01\x00".as_slice(), &u64::MAX.to_le_bytes(), &record.identity.0].concat();
-        law.write(&format!("state/pins/{}", crate::call::hex(&tape_id)), pin);
-        let mut header = FORMAT.to_le_bytes().to_vec();
-        header.push(KIND_RUN);
-        header.extend_from_slice(&tape_id);
-        header.push(0); // Identity length.
-        header.extend_from_slice(&[0; 32 + 4 + 8 + 8 + 1]); // Fixed run metadata.
-        header.extend_from_slice(&[34, 0, 32]); // Launch length, number of args, digest length.
-        header.extend_from_slice(&record.digest.0);
-        let mut tape = block(&tape_id, 0, 0, &header);
-        tape.extend_from_slice(b"invalid record bytes");
-        law.write("damaged.tape", tape);
-        let (status, output, error) = request(&["replay", "--state", state.to_str().unwrap(), "--tape", "damaged.tape"]);
-        assert_eq!(status, Some(2), "{output}\n{error}");
-        assert!(output.is_empty());
-        assert_eq!(error, format!("replay: refused: {REFUSAL}\n"));
-        fs::remove_dir_all(&state).unwrap();
+        let (mut client, peer) = UnixStream::pair().unwrap();
+        let code = law.path("host-code");
+        let mut limits = crate::request::local_admission_limits();
+        limits.timeout = Some(Duration::from_secs(10));
+        limits.outstanding = 4096;
+        std::thread::scope(|scope| {
+            let sender = scope.spawn(|| {
+                crate::code_admission::send_release(&mut client, &CodeStore::new(&source), root, &limits)
+            });
+            let approved = BTreeSet::from(["ffi_laws@1/laws/Laws".to_owned()]);
+            let admission = AdmissionStore::open(&code, 1 << 20).unwrap();
+            let mut peer = ControlConnection::local(peer);
+            match admission.admit_for_runtime(&mut peer, &limits, &NativeSemantics, true, Some(&approved), None, None) {
+                Err(AdmissionError::RecordingForeign(reason)) => {
+                    assert_eq!(reason, REFUSAL);
+                    peer.refuse_before_need(&reason).unwrap();
+                }
+                Err(error) => panic!("recording admission failed otherwise: {error}"),
+                Ok(_) => panic!("recording admission admitted foreign code"),
+            }
+            drop(peer);
+            match sender.join().unwrap() {
+                Err(AdmissionError::Refused(reason)) => assert_eq!(reason, REFUSAL),
+                other => panic!("sender saw {other:?}"),
+            }
+        });
+        fs::remove_dir_all(&code).unwrap();
     }
 }
 
@@ -2711,14 +2663,16 @@ fn exec_test_and_deploy_require_the_exact_profile_approval() {
         "--grant",
         "Exec=profiles.toml git",
     ]));
-    let control = law.path("never-opened");
+    let state = law.path("never-opened");
     let args = [
         "deploy",
         root.trim(),
         "--code-store",
         source,
-        "--control",
-        control.to_str().unwrap(),
+        "--state",
+        state.to_str().unwrap(),
+        "--group",
+        "app",
         "--grant",
         "Exec=./profiles.toml git",
     ]

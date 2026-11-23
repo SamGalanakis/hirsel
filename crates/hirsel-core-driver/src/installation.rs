@@ -85,6 +85,10 @@ impl Installed {
         }
         Ok(installed)
     }
+    /// An installed helper program under `libexec/hirsel`.
+    pub(crate) fn libexec(&self, name: &str) -> PathBuf {
+        self.root.join("libexec/hirsel").join(name)
+    }
     pub fn cache(&self) -> PathBuf {
         self.root.join("core-packages")
     }

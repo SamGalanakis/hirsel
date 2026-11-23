@@ -2681,7 +2681,7 @@ fn rejected() -> Result[(), ()] { Error(()) }
 
 #[test]
 fn run_tape_replays_granted_terminal_bits() {
-    use crate::host::terminal_fixture;
+    use crate::terminal_fixture;
     use std::process::Stdio;
 
     let dir = tempfile::tempdir().unwrap();

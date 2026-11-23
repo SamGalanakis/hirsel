@@ -288,7 +288,7 @@ pub(crate) enum Event {
     CutoverResult(Child, Attempt, HostReply),
 }
 
-fn malformed(what: &'static str) -> io::Error {
+pub(crate) fn malformed(what: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, what)
 }
 
@@ -308,33 +308,33 @@ impl<'a> Reader<'a> {
         self.at = end;
         Ok(out)
     }
-    fn u32(&mut self) -> io::Result<u32> {
+    pub(crate) fn u32(&mut self) -> io::Result<u32> {
         Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
     }
-    fn i32(&mut self) -> io::Result<i32> {
+    pub(crate) fn i32(&mut self) -> io::Result<i32> {
         Ok(i32::from_le_bytes(self.take(4)?.try_into().unwrap()))
     }
-    fn u64(&mut self) -> io::Result<u64> {
+    pub(crate) fn u64(&mut self) -> io::Result<u64> {
         Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
     }
-    fn bool(&mut self) -> io::Result<bool> {
+    pub(crate) fn bool(&mut self) -> io::Result<bool> {
         match self.take(1)?[0] {
             0 => Ok(false),
             1 => Ok(true),
             _ => Err(malformed("session bool")),
         }
     }
-    fn bytes(&mut self) -> io::Result<Vec<u8>> {
+    pub(crate) fn bytes(&mut self) -> io::Result<Vec<u8>> {
         let n = self.u32()? as usize;
         Ok(self.take(n)?.to_vec())
     }
-    fn string(&mut self) -> io::Result<String> {
+    pub(crate) fn string(&mut self) -> io::Result<String> {
         String::from_utf8(self.bytes()?).map_err(|_| malformed("session string"))
     }
-    fn strings(&mut self) -> io::Result<Vec<String>> {
+    pub(crate) fn strings(&mut self) -> io::Result<Vec<String>> {
         (0..self.count(4)?).map(|_| self.string()).collect()
     }
-    fn count(&mut self, least: usize) -> io::Result<usize> {
+    pub(crate) fn count(&mut self, least: usize) -> io::Result<usize> {
         // A count can claim no more elements than the bytes left can hold.
         let n = self.u32()? as usize;
         if n.saturating_mul(least) > self.bytes.len() - self.at {
@@ -342,7 +342,10 @@ impl<'a> Reader<'a> {
         }
         Ok(n)
     }
-    fn option<T>(&mut self, f: impl FnOnce(&mut Self) -> io::Result<T>) -> io::Result<Option<T>> {
+    pub(crate) fn option<T>(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> io::Result<T>,
+    ) -> io::Result<Option<T>> {
         match self.u32()? {
             0 => Ok(None),
             1 => f(self).map(Some),
@@ -355,32 +358,32 @@ impl<'a> Reader<'a> {
 pub(crate) struct Writer(pub(crate) Vec<u8>);
 
 impl Writer {
-    fn u32(&mut self, x: u32) {
+    pub(crate) fn u32(&mut self, x: u32) {
         self.0.extend_from_slice(&x.to_le_bytes());
     }
-    fn i32(&mut self, x: i32) {
+    pub(crate) fn i32(&mut self, x: i32) {
         self.0.extend_from_slice(&x.to_le_bytes());
     }
-    fn u64(&mut self, x: u64) {
+    pub(crate) fn u64(&mut self, x: u64) {
         self.0.extend_from_slice(&x.to_le_bytes());
     }
-    fn bool(&mut self, x: bool) {
+    pub(crate) fn bool(&mut self, x: bool) {
         self.0.push(u8::from(x));
     }
-    fn len(&mut self, n: usize) {
+    pub(crate) fn len(&mut self, n: usize) {
         self.u32(u32::try_from(n).expect("session count fits u32"));
     }
-    fn bytes(&mut self, x: &[u8]) {
+    pub(crate) fn bytes(&mut self, x: &[u8]) {
         self.len(x.len());
         self.0.extend_from_slice(x);
     }
-    fn strings(&mut self, strings: &[String]) {
+    pub(crate) fn strings(&mut self, strings: &[String]) {
         self.len(strings.len());
         for text in strings {
             self.bytes(text.as_bytes());
         }
     }
-    fn option<T>(&mut self, x: &Option<T>, f: impl FnOnce(&mut Self, &T)) {
+    pub(crate) fn option<T>(&mut self, x: &Option<T>, f: impl FnOnce(&mut Self, &T)) {
         match x {
             None => self.u32(0),
             Some(value) => {
@@ -655,6 +658,111 @@ impl Wire for HostReply {
     }
 }
 
+impl Wire for Input {
+    fn put(&self, w: &mut Writer) {
+        let (tag, bytes) = match self {
+            Self::Attested(r) => (0, r),
+            Self::Publication(r) => (1, r),
+            Self::Source(tree) => (2, tree),
+        };
+        w.u32(tag);
+        w.bytes(bytes);
+    }
+    fn get(r: &mut Reader<'_>) -> io::Result<Self> {
+        Ok(match r.u32()? {
+            0 => Self::Attested(r.bytes()?),
+            1 => Self::Publication(r.bytes()?),
+            2 => Self::Source(r.bytes()?),
+            _ => return Err(malformed("admission input tag")),
+        })
+    }
+}
+
+impl Wire for Label {
+    fn put(&self, w: &mut Writer) {
+        w.u32(match self {
+            Self::Contained => 0,
+            Self::Uncontained => 1,
+        });
+    }
+    fn get(r: &mut Reader<'_>) -> io::Result<Self> {
+        match r.u32()? {
+            0 => Ok(Self::Contained),
+            1 => Ok(Self::Uncontained),
+            _ => Err(malformed("label tag")),
+        }
+    }
+}
+
+impl Wire for Bindings {
+    fn put(&self, w: &mut Writer) {
+        w.bytes(self.store.as_bytes());
+        w.strings(&self.dirs);
+        w.strings(&self.net);
+    }
+    fn get(r: &mut Reader<'_>) -> io::Result<Self> {
+        Ok(Self {
+            store: r.string()?,
+            dirs: r.strings()?,
+            net: r.strings()?,
+        })
+    }
+}
+
+impl Wire for Limits {
+    fn put(&self, w: &mut Writer) {
+        w.option(&self.memory, |w, &memory| w.u64(memory));
+        w.option(&self.cpu, |w, &(quota, period)| {
+            w.u64(quota);
+            w.u64(period);
+        });
+        w.option(&self.pids, |w, &pids| w.u64(pids));
+    }
+    fn get(r: &mut Reader<'_>) -> io::Result<Self> {
+        Ok(Self {
+            memory: r.option(Reader::u64)?,
+            cpu: r.option(|r| Ok((r.u64()?, r.u64()?)))?,
+            pids: r.option(Reader::u64)?,
+        })
+    }
+}
+
+/// A `List[Wanted]`: each key's kind as a tag, then its 32-byte hash as Bytes.
+pub(crate) fn put_wanted(w: &mut Writer, keys: &[ObjectKey]) {
+    w.len(keys.len());
+    for key in keys {
+        w.u32(match key.kind {
+            ObjectKind::Group => 0,
+            ObjectKind::Body => 1,
+            ObjectKind::Annex => 2,
+            ObjectKind::ForeignArchive => 3,
+            ObjectKind::Recipe => unreachable!("a recipe is never needed"),
+        });
+        w.bytes(&key.hash.0);
+    }
+}
+
+pub(crate) fn get_wanted(r: &mut Reader<'_>) -> io::Result<Vec<ObjectKey>> {
+    let n = r.count(8)?;
+    (0..n)
+        .map(|_| {
+            let kind = match r.u32()? {
+                0 => ObjectKind::Group,
+                1 => ObjectKind::Body,
+                2 => ObjectKind::Annex,
+                3 => ObjectKind::ForeignArchive,
+                _ => return Err(malformed("needed object tag")),
+            };
+            let hash =
+                <[u8; 32]>::try_from(r.bytes()?).map_err(|_| malformed("needed object hash"))?;
+            Ok(ObjectKey {
+                kind,
+                hash: ContentHash(hash),
+            })
+        })
+        .collect()
+}
+
 // Each row supplies the tag to both directions of the codec.
 macro_rules! session_wire {
     ($ty:ty, $error:literal, $w:ident, $r:ident;
@@ -690,37 +798,15 @@ session_wire!(Request, "request tag", w, r;
     1 => Bind(g, address, label, bindings, limits) {
         g.put(w);
         w.bytes(address.as_bytes());
-        w.u32(match label {
-            Label::Contained => 0,
-            Label::Uncontained => 1,
-        });
-        w.bytes(bindings.store.as_bytes());
-        w.strings(&bindings.dirs);
-        w.strings(&bindings.net);
-        w.option(&limits.memory, |w, &memory| w.u64(memory));
-        w.option(&limits.cpu, |w, &(quota, period)| {
-            w.u64(quota);
-            w.u64(period);
-        });
-        w.option(&limits.pids, |w, &pids| w.u64(pids));
+        label.put(w);
+        bindings.put(w);
+        limits.put(w);
     } => Self::Bind(
         Group::get(r)?,
         r.string()?,
-        match r.u32()? {
-            0 => Label::Contained,
-            1 => Label::Uncontained,
-            _ => return Err(malformed("label tag")),
-        },
-        Bindings {
-            store: r.string()?,
-            dirs: r.strings()?,
-            net: r.strings()?,
-        },
-        Limits {
-            memory: r.option(Reader::u64)?,
-            cpu: r.option(|r| Ok((r.u64()?, r.u64()?)))?,
-            pids: r.option(Reader::u64)?,
-        },
+        Label::get(r)?,
+        Bindings::get(r)?,
+        Limits::get(r)?,
     ),
     2 => Close(g) { g.put(w); } => Self::Close(Group::get(r)?),
     3 => Start(launch) { launch.put(w); } => Self::Start(Launch::get(r)?),
@@ -746,13 +832,7 @@ session_wire!(Request, "request tag", w, r;
     12 => Admit(g, a, input, approvals) {
         g.put(w);
         a.put(w);
-        let (tag, bytes) = match input {
-            Input::Attested(r) => (0, r),
-            Input::Publication(r) => (1, r),
-            Input::Source(tree) => (2, tree),
-        };
-        w.u32(tag);
-        w.bytes(bytes);
+        input.put(w);
         w.bool(approvals.recording);
         w.strings(&approvals.foreign);
         w.strings(&approvals.exec);
@@ -761,12 +841,7 @@ session_wire!(Request, "request tag", w, r;
     } => Self::Admit(
         Group::get(r)?,
         Attempt::get(r)?,
-        match r.u32()? {
-            0 => Input::Attested(r.bytes()?),
-            1 => Input::Publication(r.bytes()?),
-            2 => Input::Source(r.bytes()?),
-            _ => return Err(malformed("admission input tag")),
-        },
+        Input::get(r)?,
         Approvals {
             recording: r.bool()?,
             foreign: r.strings()?,
@@ -920,40 +995,9 @@ session_wire!(Event, "event tag", w, r;
     } => Self::Answered(Child::get(r)?, r.bytes()?),
     13 => Need(a, keys, last) {
         a.put(w);
-        w.len(keys.len());
-        for key in keys {
-            w.u32(match key.kind {
-                ObjectKind::Group => 0,
-                ObjectKind::Body => 1,
-                ObjectKind::Annex => 2,
-                ObjectKind::ForeignArchive => 3,
-                ObjectKind::Recipe => unreachable!("a recipe is never needed"),
-            });
-            w.bytes(&key.hash.0);
-        }
+        put_wanted(w, keys);
         w.bool(*last);
-    } => {
-        let a = Attempt::get(r)?;
-        let n = r.count(8)?;
-        let keys = (0..n)
-            .map(|_| {
-                let kind = match r.u32()? {
-                    0 => ObjectKind::Group,
-                    1 => ObjectKind::Body,
-                    2 => ObjectKind::Annex,
-                    3 => ObjectKind::ForeignArchive,
-                    _ => return Err(malformed("needed object tag")),
-                };
-                let hash = <[u8; 32]>::try_from(r.bytes()?)
-                    .map_err(|_| malformed("needed object hash"))?;
-                Ok(ObjectKey {
-                    kind,
-                    hash: ContentHash(hash),
-                })
-            })
-            .collect::<io::Result<_>>()?;
-        Self::Need(a, keys, r.bool()?)
-    },
+    } => Self::Need(Attempt::get(r)?, get_wanted(r)?, r.bool()?),
     14 => Admitted(a, root, summary, display) {
         a.put(w);
         w.bytes(root);

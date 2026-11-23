@@ -46,6 +46,7 @@ dirs = ["."]
 "admission-laws.hirsel" = "runner"
 "runner_wire.hirsel" = "runner_wire"
 "launcher_wire.hirsel" = "launcher"
+"operator_wire.hirsel" = "operator"
 "platform_laws.hirsel" = "platform"
 "bucket_laws.hirsel" = "store"
 

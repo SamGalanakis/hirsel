@@ -12,6 +12,7 @@ mod bootstrap;
 mod cgroup;
 #[cfg(test)]
 mod laws;
+pub(crate) mod objects;
 mod ready;
 pub(crate) mod session;
 mod spawn;
@@ -37,7 +38,7 @@ use std::process::{Command, ExitStatus};
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
-pub(crate) use admit::{Admission, deploy_foreign_lines, grants_added, limits, read_recipe};
+pub(crate) use admit::{Admission, deploy_foreign_lines, limits, read_recipe};
 use stores::Stores;
 
 /// Create `path` as a directory only its owner can enter, or check that it is one.
@@ -185,11 +186,17 @@ enum ImageFile {
     Script,
 }
 
-/// The launcher's content-addressed objects: assembly records and their images.
+/// The launcher's content-addressed objects: assembly records, their images, and the code
+/// objects their recipes list.
 pub(crate) trait Images {
     fn resolve(&self, assembly: [u8; 32]) -> Result<Image, String>;
-    /// Remove every object that no kept assembly record reaches; answer how many.
-    fn collect(&self, keep: &BTreeSet<[u8; 32]>) -> io::Result<u64>;
+    /// Remove every object that no kept assembly record reaches and that `reserved` does
+    /// not hold for an admission in flight; answer how many.
+    fn collect(
+        &self,
+        keep: &BTreeSet<[u8; 32]>,
+        reserved: &dyn Fn(crate::code_admission::ObjectKey) -> bool,
+    ) -> io::Result<u64>;
 }
 
 /// The bound on a wake report (one value-codec `Option[u64]`).
@@ -1293,9 +1300,14 @@ impl<I: Images> Launcher<I> {
                 .env_remove("LISTEN_FDS")
                 .env_remove("LISTEN_PID")
                 .env_remove("LISTEN_FDNAMES")
-                .env_remove("LISTEN_PIDFDID")
-                .env_remove("HIRSEL_RECORD")
-                .env_remove("HIRSEL_RECORD_ID");
+                .env_remove("LISTEN_PIDFDID");
+            // Only a recorded serving start records: its destination was set above, and no
+            // other child inherits one from the launcher's own environment.
+            if launch.recording.is_none() {
+                command
+                    .env_remove("HIRSEL_RECORD")
+                    .env_remove("HIRSEL_RECORD_ID");
+            }
             if serving {
                 command.env("LISTEN_FDS", "1");
             }
@@ -1497,11 +1509,14 @@ impl<I: Images> Launcher<I> {
             keep.extend(objects);
         }
         // A launcher without a whole root set removes nothing.
-        let removed = if whole {
-            self.images.collect(&keep).unwrap_or(0)
-        } else {
-            0
+        // Code objects an admission has reserved but not yet published stay, under the
+        // admission store's collection lock.
+        let removed = match (&admission, whole) {
+            (_, false) => Ok(0),
+            (Some(a), true) => a.under_collection(|reserved| self.images.collect(&keep, reserved)),
+            (None, true) => self.images.collect(&keep, &|_| false),
         };
+        let removed = removed.unwrap_or(0);
         self.unfence();
         self.emit(Event::Collected(removed));
     }

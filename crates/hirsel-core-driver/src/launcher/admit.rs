@@ -3,6 +3,7 @@
 //! state loop keeps serving child ends and fences while an upload or an assembly runs.
 //! The verifier, its reservations and the assembly path are those of local admission; only
 //! the byte transport is the session's `AdmitData` chunks.
+use super::objects::Records;
 use super::session::{Approvals, Attempt, Failure, Summary};
 use super::{Conn, Epoll};
 use crate::code_admission::{
@@ -10,7 +11,6 @@ use crate::code_admission::{
     NativeSemantics, ObjectKey, ObjectKind, send_release,
 };
 use crate::code_store::CodeStore;
-use crate::host::records::Records;
 use crate::native::recipe_build::foreign_grant_lines;
 use crate::{AssemblyRecord, Link, NativeOptions, Publication};
 use hirsel_core_ids::ContentHash;
@@ -115,6 +115,15 @@ impl Admission {
             limits,
             publish: Mutex::new(()),
         })
+    }
+
+    /// Run `action` under the admission store's collection lock, with the code objects
+    /// reserved by admissions in flight.
+    pub(super) fn under_collection<R>(
+        &self,
+        action: impl FnOnce(&dyn Fn(ObjectKey) -> bool) -> R,
+    ) -> R {
+        self.store.under_collection(action)
     }
 
     /// The most exchange bytes an attested admission can take: the recipe and object

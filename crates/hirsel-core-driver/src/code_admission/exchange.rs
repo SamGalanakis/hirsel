@@ -3,10 +3,9 @@ use super::{
     listed_objects, open_object, read_recipe, read_verified,
 };
 use crate::code_store::CodeStore;
-use hirsel_core_ids::{ContentHash, DefPath};
+use hirsel_core_ids::ContentHash;
 use hirsel_core_ir::address::Group;
 use hirsel_core_ir::release_recipe::Recipe;
-use std::collections::BTreeSet;
 use std::io::{self, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::time::Instant;
@@ -25,76 +24,6 @@ impl ControlConnection {
             stream: peer,
             need_sent: false,
         }
-    }
-
-    pub(crate) fn deploy_permission(
-        &mut self,
-        timeout: std::time::Duration,
-        max: usize,
-    ) -> Result<(bool, BTreeSet<String>, BTreeSet<String>), AdmissionError> {
-        let deadline = Instant::now()
-            .checked_add(timeout)
-            .ok_or(AdmissionError::Limit(Limit::Deadline))?;
-        let mut exchange = Exchange::on(&mut self.stream, deadline);
-        let [flags] = exchange.read_array()?;
-        if flags > 7 {
-            return Err(AdmissionError::Malformed("deploy Foreign grants"));
-        }
-        let mut grants = BTreeSet::new();
-        if flags & 2 != 0 {
-            let len = u32::from_le_bytes(exchange.read_array()?) as usize;
-            if len > max || len == 0 {
-                return Err(AdmissionError::Malformed("deploy Foreign grants"));
-            }
-            let mut bytes = vec![0; len];
-            exchange.read_exact(&mut bytes)?;
-            let names = std::str::from_utf8(&bytes)
-                .map_err(|_| AdmissionError::Malformed("deploy Foreign grants"))?;
-            for name in names.split('\n') {
-                if DefPath::from_full(name).is_none() || !grants.insert(name.to_owned()) {
-                    return Err(AdmissionError::Malformed("deploy Foreign grants"));
-                }
-            }
-        }
-        let mut exec = BTreeSet::new();
-        if flags & 4 != 0 {
-            let len = u32::from_le_bytes(exchange.read_array()?) as usize;
-            if len > max || len == 0 {
-                return Err(AdmissionError::Malformed("deploy Exec grants"));
-            }
-            let mut bytes = vec![0; len];
-            exchange.read_exact(&mut bytes)?;
-            let requests: Vec<String> = serde_json::from_slice(&bytes)
-                .map_err(|_| AdmissionError::Malformed("deploy Exec grants"))?;
-            for request in requests {
-                if hirsel_core_net::exec::Request::parse(&request).is_err() || !exec.insert(request)
-                {
-                    return Err(AdmissionError::Malformed("deploy Exec grants"));
-                }
-            }
-        }
-        Ok((flags & 1 != 0, grants, exec))
-    }
-
-    /// Wait for the deploy client to print the admitted pins before running
-    /// any child for this attempt.
-    pub(crate) fn confirm_foreign(
-        &mut self,
-        lines: &[u8],
-        timeout: std::time::Duration,
-    ) -> Result<(), AdmissionError> {
-        let deadline = Instant::now()
-            .checked_add(timeout)
-            .ok_or(AdmissionError::Limit(Limit::Deadline))?;
-        let mut exchange = Exchange::on(&mut self.stream, deadline);
-        let len = u32::try_from(lines.len())
-            .map_err(|_| AdmissionError::Malformed("Foreign confirmation length"))?;
-        exchange.write_frame(&len.to_le_bytes())?;
-        exchange.write_frame(lines)?;
-        if exchange.read_array::<1>()? != [1] {
-            return Err(AdmissionError::Malformed("Foreign confirmation"));
-        }
-        Ok(())
     }
 
     pub(crate) fn refuse_before_need(&mut self, reason: &str) -> io::Result<()> {

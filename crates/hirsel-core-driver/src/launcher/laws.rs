@@ -40,7 +40,11 @@ impl Images for Scripts {
         })
     }
 
-    fn collect(&self, keep: &BTreeSet<[u8; 32]>) -> std::io::Result<u64> {
+    fn collect(
+        &self,
+        keep: &BTreeSet<[u8; 32]>,
+        _: &dyn Fn(crate::code_admission::ObjectKey) -> bool,
+    ) -> std::io::Result<u64> {
         let kept: BTreeSet<_> = keep.iter().map(|&k| name_hex(k)).collect();
         let mut removed = 0;
         for entry in fs::read_dir(&self.objects)? {
@@ -198,9 +202,9 @@ impl<I: Images> Rig<I> {
 
 #[test]
 fn launch_identity_is_the_verified_image() {
+    use super::objects::Records;
     use super::stores::Stores;
     use crate::code_store::{CodeStore, ObjectKind};
-    use crate::host::records::Records;
     use hirsel_core_ids::{ContentHash, DefPath};
     use hirsel_core_ir::{Identity, release_recipe};
     use rustls::crypto::ring::cipher_suite::TLS13_AES_128_GCM_SHA256;
@@ -220,8 +224,12 @@ fn launch_identity_is_the_verified_image() {
             Ok(image)
         }
 
-        fn collect(&self, keep: &BTreeSet<[u8; 32]>) -> std::io::Result<u64> {
-            self.stores.collect(keep)
+        fn collect(
+            &self,
+            keep: &BTreeSet<[u8; 32]>,
+            reserved: &dyn Fn(crate::code_admission::ObjectKey) -> bool,
+        ) -> std::io::Result<u64> {
+            self.stores.collect(keep, reserved)
         }
     }
 
@@ -1024,7 +1032,7 @@ fn session_admission() {
     let state = rig.work().join("state");
     let objects = rig.work().join("objects");
     fs::create_dir_all(&objects).unwrap();
-    let records = Arc::new(crate::host::records::Records::open(&objects).unwrap());
+    let records = Arc::new(super::objects::Records::open(&objects).unwrap());
     let admission = super::Admission::open(&state, records, limits(), 1 << 20).unwrap();
     rig.launcher.admit_with(admission).unwrap();
     let fixture = Fixture::leaf();
@@ -1247,4 +1255,81 @@ fn host_restart_wired() {
         .count();
     assert_eq!(starts, 1, "a host that ended 74 was started again");
     assert_eq!(rig.launcher.bootstrap.as_ref().unwrap().stopped(), Some(74));
+}
+
+/// `launcher_code_collection` (launch.md "The launcher"): a collection keeps each code
+/// object a kept assembly's recipe lists and each object an admission in flight reserved,
+/// and removes every other code object, assembly record and image.
+#[test]
+fn code_collection_keeps_reached_and_reserved_objects() {
+    use super::stores::Stores;
+    use crate::code_admission::ObjectKey;
+    use crate::code_store::{CodeStore, ObjectKind};
+    use hirsel_core_ids::{ContentHash, DefPath};
+    use hirsel_core_ir::Identity;
+    use hirsel_core_ir::release_recipe::{Backend, BodyRef, Launch, Recipe};
+
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path();
+    let stores = Stores::open(state, 1 << 20).unwrap();
+    let code = CodeStore::new(state.join("code"));
+    let put = |kind, bytes: &[u8]| code.put(kind, bytes).unwrap();
+    let group = put(ObjectKind::Group, b"listed group");
+    let body = put(ObjectKind::Body, b"listed body");
+    let annex = put(ObjectKind::Annex, b"listed annex");
+    let reserved = put(ObjectKind::Body, b"reserved body");
+    let garbage = put(ObjectKind::Body, b"unlisted body");
+    let recipe = |groups, bodies| Recipe {
+        entry: Identity::plain(DefPath::from_full("app@1/main/main").unwrap()),
+        address: ContentHash([0; 32]),
+        groups,
+        bodies,
+        foreign_modules: vec![],
+        foreign_archives: vec![],
+        launch: Launch {
+            backend: Backend::Cranelift,
+            target: "x86_64-unknown-linux-gnu".into(),
+            root_limit: 1 << 20,
+            n_place: 1 << 16,
+            exit_status: true,
+            grants: vec![],
+        },
+    };
+    let kept = put(
+        ObjectKind::Recipe,
+        &recipe(vec![group], vec![BodyRef { body, annex }]).encode(),
+    );
+    let dropped = put(ObjectKind::Recipe, &recipe(vec![], vec![]).encode());
+    let assemble = |recipe: ContentHash, image: &[u8]| {
+        let record = crate::AssemblyRecord::new(recipe, ContentHash([0; 32]), image);
+        stores.records().put_assembly(&record, image).unwrap();
+        record
+    };
+    let live = assemble(kept.hash, b"kept image");
+    let old = assemble(dropped.hash, b"dropped image");
+
+    let reserved_key = ObjectKey {
+        kind: ObjectKind::Body,
+        hash: reserved.hash,
+    };
+    let removed = stores
+        .collect(&BTreeSet::from([live.identity.0]), &|key| {
+            key == reserved_key
+        })
+        .unwrap();
+    let held = |kind, hash| code.path(kind, hash).exists();
+    for (kind, object) in [
+        (ObjectKind::Recipe, kept),
+        (ObjectKind::Group, group),
+        (ObjectKind::Body, body),
+        (ObjectKind::Annex, annex),
+        (ObjectKind::Body, reserved),
+    ] {
+        assert!(held(kind, object.hash), "{kind:?} removed");
+    }
+    assert!(!held(ObjectKind::Body, garbage.hash) && !held(ObjectKind::Recipe, dropped.hash));
+    assert!(stores.records().assembly(live.identity).is_ok());
+    assert!(stores.records().assembly(old.identity).is_err());
+    // The dropped record and its image, the unlisted body and the dropped recipe.
+    assert_eq!(removed, 4);
 }

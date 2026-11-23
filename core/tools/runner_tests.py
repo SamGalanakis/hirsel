@@ -17,6 +17,8 @@ RC1's L31 checks that the disk store never writes the plaintext Hello credential
 """
 import argparse
 import base64
+import ctypes
+import ctypes.util
 from contextlib import contextmanager
 import hashlib
 import json
@@ -349,8 +351,7 @@ def l10_holds(values):
 CRASHES = ('runner-cross', 'runner-order')
 POISON = 'poison-segment'
 STOP_CASES = ('runner-deadline', 'runner-stop-early', 'runner-stop-twice')
-HOST_LAWS = ('two_recipes_one_digest', 'installed_before_index', 'pinned_recording_uses_retained_image',
-             'foreign_recording_refused')
+HOST_LAWS = ('two_recipes_one_digest', 'pinned_recording_uses_retained_image', 'foreign_recording_refused')
 
 
 def host_law(args, root, work, engine, name):
@@ -371,7 +372,8 @@ def host_law(args, root, work, engine, name):
     launch_store = work / 'place'
     (launch_store / 'live').mkdir(parents=True)
     state = work / 'host-state'
-    control = work / 'admin.sock'
+    state.mkdir(mode=0o700)
+    operator = state / 'operator.sock'
 
     def publish(n_place):
         command = [compiler, 'publish', '--inputs', str(manifest_path), '--source-core', '--source-std',
@@ -390,15 +392,25 @@ def host_law(args, root, work, engine, name):
     with socket.socket() as probe:
         probe.bind(('127.0.0.1', 0))
         address = f'127.0.0.1:{probe.getsockname()[1]}'
-    command = [compiler, 'host', old_recipe, '--control', str(control), '--state', str(state),
-               '--listen', address, '--workdir', str(launch_store), '--code-store', str(publish_store)]
-    deploy = [compiler, 'deploy', new_recipe, '--control', str(control), '--code-store', str(publish_store)]
+    register = [compiler, 'register', old_recipe, '--state', str(state), '--group', 'app',
+                '--listen', address, '--store', str(work / 'group-store'), '--uncontained', '--trusted',
+                '--workdir', str(launch_store), '--code-store', str(publish_store)]
+    deploy = [compiler, 'deploy', new_recipe, '--state', str(state), '--group', 'app',
+              '--code-store', str(publish_store)]
 
     def ready():
-        with urlopen(f'http://{address}/hirsel/status', timeout=0.2) as response:
-            status = json.load(response)
-        assert status['phase'] == 'ready', status
-        return status
+        deadline = time.monotonic() + 60
+        while True:
+            try:
+                with urlopen(f'http://{address}/hirsel/status', timeout=5) as response:
+                    status = json.load(response)
+                if status['phase'] == 'ready':
+                    return status
+            except OSError:
+                if time.monotonic() > deadline:
+                    raise
+            assert time.monotonic() < deadline, 'the place did not become Ready'
+            time.sleep(0.05)
 
     def welcome_n_place():
         with socket.create_connection(('127.0.0.1', int(address.split(':')[1])), timeout=5) as peer:
@@ -422,24 +434,26 @@ def host_law(args, root, work, engine, name):
                 assert frame[:4] == b'\x04\0\0\0' and len(frame) == length, 'first server frame was not Welcome'
                 return int.from_bytes(frame[-8:], 'little')
 
+    def listening():
+        with socket.socket(socket.AF_UNIX) as peer:
+            try:
+                peer.connect(str(operator))
+                return True
+            except OSError:
+                return False
+
     @contextmanager
-    def running_host(*options):
+    def running_host():
         with tempfile.TemporaryFile(mode='w+') as log:
-            host = subprocess.Popen([*command, *options], stdout=log, stderr=log)
+            host = subprocess.Popen([compiler, 'host', '--state', str(state)], stdout=log, stderr=log)
             try:
                 deadline = time.monotonic() + 120
-                while time.monotonic() < deadline and host.poll() is None:
-                    try:
-                        status = ready() if control.exists() else None
-                    except OSError:
-                        status = None
-                    if status is not None:
-                        break
+                while time.monotonic() < deadline and host.poll() is None and not listening():
                     time.sleep(0.025)
-                else:
+                if not listening():
                     log.seek(0)
-                    raise RuntimeError(f'place did not become Ready: {log.read()}')
-                yield host, status
+                    raise RuntimeError(f'the host did not listen on {operator}: {log.read()}')
+                yield host
             except Exception as error:
                 log.seek(0)
                 detail = log.read().strip()
@@ -453,7 +467,26 @@ def host_law(args, root, work, engine, name):
                     host.kill()
                 host.wait(timeout=15)
 
-    index = state / 'activations'
+    def outcome(command, case):
+        result = checked(command, engine=engine, case=case)
+        request = re.search(r'^request ([0-9a-f]{32})$', result.stderr, re.M)
+        assert request, f'{case} did not name its request first: {result.stderr}'
+        return request.group(1), json.loads(result.stdout.strip().splitlines()[-1])
+
+    def unpinned(tape, copy):
+        # The tape's header block with a fresh tape id, which no catalog has pinned.
+        recorded = tape.read_bytes()
+        length = int.from_bytes(recorded[12:16], 'little')
+        head, payload = recorded[:16], bytearray(recorded[16:16 + length])
+        tape_id = os.urandom(16)
+        payload[3:19] = tape_id
+        xxh3 = ctypes.CDLL(ctypes.util.find_library('xxhash')).XXH3_64bits
+        xxh3.argtypes, xxh3.restype = [ctypes.c_void_p, ctypes.c_size_t], ctypes.c_uint64
+        checked_bytes = tape_id + head + bytes(payload)
+        check = xxh3(checked_bytes, len(checked_bytes))
+        copy.write_bytes(head + bytes(payload) + check.to_bytes(8, 'little'))
+        return copy
+
     if name == 'foreign_recording_refused':
         def framed_hash(domain, payload):
             domain = domain.encode()
@@ -476,120 +509,87 @@ def host_law(args, root, work, engine, name):
                  + b'\x01' + archive + bytes([engine == 'llvm']) + text(target) + bytes(18))
         foreign = framed_hash('hirsel.release-recipe.v2', frame)
         (publish_store / 'recipes' / foreign.hex()).write_bytes(frame)
-        recordings = work / 'recordings'
-        with running_host('--record', str(recordings)) as (_, old):
-            tapes = list(recordings.glob('*.tape'))
-            assert len(tapes) == 1, 'the first activation did not start a recording'
-            tape = tapes[0]
+        with running_host():
+            outcome([*register, '--record', str(work / 'recordings')], f'{name}:register')
+            old = ready()
             foreign_deploy = deploy.copy()
             foreign_deploy[2] = foreign.hex()
-            state_products = {directory: set((state / directory).iterdir())
-                              for directory in ('assemblies', 'images')}
             refused = run_case(f'{name}:deploy', engine, foreign_deploy, capture_output=True, text=True)
-            assert (refused.returncode, refused.stderr.strip()) == (2, f'deploy: refused: {reason}'), refused
-            assert ready()['digest'] == old['digest'], 'the refused deploy changed the active image'
-            for directory, before in state_products.items():
-                assert set((state / directory).iterdir()) == before, f'the refused deploy wrote {directory}'
+            assert refused.returncode == 2 and f'deploy: denied: {reason}' in refused.stderr, refused
+            assert ready()['digest'] == old['digest'], 'the refused deploy changed the serving image'
         assert not (state / 'code' / 'recipes' / foreign.hex()).exists(), 'the refused recipe was published'
-
-        # Change the recording's pinned assembly outside the host. Keep the same
-        # routing digest but withhold its image to check the order of the refusal.
-        pin = state / 'pins' / tape.stem
-        original = pin.read_bytes()
-        assembly = (state / 'assemblies' / original[-32:].hex()).read_bytes()
-        foreign_assembly = foreign + assembly[32:]
-        key = framed_hash('hirsel.assembly-record.v1', foreign_assembly)
-        (state / 'assemblies' / key.hex()).write_bytes(foreign_assembly)
-        (state / 'code' / 'recipes' / foreign.hex()).write_bytes(frame)
-        pin.unlink()
-        pin.write_bytes(original[:-32] + key)
-        (state / 'images' / assembly[-32:].hex()).unlink()
-        recorded = tape.read_bytes()
-        header_size = 16 + int.from_bytes(recorded[12:16], 'little') + 8
-        assert 24 < header_size <= len(recorded), 'the tape has no routing header'
-        tape.write_bytes(recorded[:header_size] + b'invalid record')
-        replay = [compiler, 'replay', '--state', str(state), '--tape', str(tape)]
-        refused = run_case(f'{name}:replay', engine, replay, capture_output=True, text=True)
-        assert (refused.returncode, refused.stderr.strip()) == (2, f'replay: refused: {reason}'), refused
         return
 
     if name == 'pinned_recording_uses_retained_image':
         recordings = work / 'recordings'
-        with running_host('--record', str(recordings)) as (_, old):
+        replay_only = work / 'replay-only'
+        with running_host():
+            outcome([*register, '--record', str(recordings)], f'{name}:register')
+            ready()
             tapes = list(recordings.glob('*.tape'))
             assert len(tapes) == 1, 'the first activation did not start a recording'
             tape = tapes[0]
-            checked(deploy, engine=engine, case=f'{name}:retire-recording')
+            outcome(deploy, f'{name}:retire-recording')
 
-        with running_host() as (_, _):
-            plain_deploy = deploy.copy()
-            plain_deploy[2] = old_recipe
-            checked(plain_deploy, engine=engine, case=f'{name}:assemble-with-plain-runtime')
-            assert ready()['digest'] != old['digest'], 'the second runtime did not change the image'
-            pinned = (state / 'pins' / tape.stem).read_bytes()[-32:].hex()
-            active = (state / 'active').read_bytes()[-32:].hex()
-            recorded_assembly = (state / 'assemblies' / pinned).read_bytes()
-            plain_assembly = (state / 'assemblies' / active).read_bytes()
-            assert recorded_assembly[:32] == plain_assembly[:32], 'toolchain switch changed the recipe'
-            assert recorded_assembly[32:64] != plain_assembly[32:64], 'toolchain fingerprint did not change'
-            checked(deploy, engine=engine, case=f'{name}:retire-last-recorded-activation')
-        assert not any(entry.name.endswith('-0000000000000001') for entry in index.iterdir()), 'recording pin test kept the old activation indexed'
-        assert not any(entry.name.endswith('-0000000000000002') for entry in index.iterdir()), 'the previous recording still roots its image through the index'
+            # The replay prefix has the pin reader but no runtime or linker, so it cannot
+            # assemble. A successful replay can only use the immutable recording image in
+            # the host image store.
+            installed = Path(compiler).parent
+            replay_only.mkdir()
+            shutil.copyfile(compiler, replay_only / 'hirsel')
+            (replay_only / 'hirsel').chmod(0o700)
+            shutil.copyfile(installed / 'hirsel-core-toolchain.json', replay_only / 'hirsel-core-toolchain.json')
+            for directory in ('lib', 'libexec'):
+                (replay_only / directory).symlink_to(installed / directory, target_is_directory=True)
+            replay = [str(replay_only / 'hirsel'), 'replay', '--state', str(state), '--tape', str(tape)]
+            result = checked(replay, engine=engine, case=f'{name}:replay-asked')
+            assert result.stdout.strip() == 'Sealed', 'replay did not seal against the pinned image'
+            gone = [*replay[:-1], str(unpinned(tape, work / 'unpinned.tape'))]
+            refused = run_case(f'{name}:gone-asked', engine, gone, capture_output=True, text=True)
+            assert (refused.returncode, refused.stderr.strip()) == (3, 'Unknown(ImageGone)'), refused
 
-        # The replay launcher has no assembly toolchain. A successful replay
-        # can only use the immutable recording image in the host image store.
-        installed = Path(compiler).parent
-        replay_only = work / 'replay-only'
-        replay_only.mkdir()
-        shutil.copyfile(compiler, replay_only / 'hirsel')
-        (replay_only / 'hirsel').chmod(0o700)
-        (replay_only / 'lib').symlink_to(installed / 'lib', target_is_directory=True)
-        replay = [str(replay_only / 'hirsel'), 'replay', '--state', str(state), '--tape', str(tape)]
-        result = checked(replay, engine=engine, case=f'{name}:replay')
-        assert result.stdout.strip() == 'Sealed', 'replay did not seal against the pinned image'
-        pin = state / 'pins' / tape.stem
-        withheld = work / 'withheld-pin'
-        pin.rename(withheld)
-        try:
-            refused = run_case(f'{name}:missing-pin', engine, replay, capture_output=True, text=True)
-            assert refused.returncode == 3 and refused.stderr.strip() == 'Unknown(ImageGone)', refused.stderr
-        finally:
-            withheld.rename(pin)
+            # A host whose operator socket cannot be reached still holds the state, so the
+            # offline reader must not run beside it.
+            hidden = state / 'operator.sock.hidden'
+            operator.rename(hidden)
+            try:
+                busy = run_case(f'{name}:replay-held', engine, replay, capture_output=True, text=True)
+                assert busy.returncode == 75 and 'temporarily unavailable' in busy.stderr, busy
+            finally:
+                hidden.rename(operator)
+
+        result = checked(replay, engine=engine, case=f'{name}:replay-offline')
+        assert result.stdout.strip() == 'Sealed', 'offline replay did not seal against the pinned image'
+        refused = run_case(f'{name}:gone-offline', engine, gone, capture_output=True, text=True)
+        assert (refused.returncode, refused.stderr.strip()) == (3, 'Unknown(ImageGone)'), refused
         return
 
-    with running_host() as (host, old):
+    with running_host():
+        _, registered = outcome(register, f'{name}:register')
+        assert registered['phase'] == 'installed', registered
+        old = ready()
         assert old['n_place'] == old_n_place, 'OLD started with the wrong allowance'
         assert welcome_n_place() == old_n_place, 'OLD Welcome used the wrong allowance'
-        if name == 'installed_before_index':
-            saved = state / 'saved-activations'
-            index.rename(saved)
-            try:
-                attempt = run_case(name, engine, deploy, capture_output=True, text=True, timeout=150)
-                assert attempt.returncode != 0, 'deploy confirmed with its activation index unavailable'
-                assert host.wait(timeout=15) != 0, 'host continued after losing the index write'
-                assert len(list((state / 'pending').iterdir())) == 1, 'the installed attempt lost its pending root'
-            finally:
-                saved.rename(index)
-        else:
-            deployed = json.loads(checked(deploy, engine=engine, case=f'{name}:deploy').stdout)
-            assert deployed['activation'] == 2, 'cutover did not publish activation 2'
-            assert ready()['n_place'] == new_n_place, 'NEW started with the wrong allowance'
-            assert f'grant Dir={launch_store / "live"}' in deployed['preview'], 'preview resolved Dir outside --workdir'
-            assert (launch_store / 'live' / 'MANIFEST').is_file(), 'place opened outside --workdir'
+        request, deployed = outcome(deploy, f'{name}:deploy')
+        assert deployed['phase'] == 'installed', deployed
+        # launch.md "Registering a group": the first release is activation 0.
+        assert registered['activation'] == 0, registered
+        assert deployed['activation'] > 0, ('the deploy did not publish a later activation', deployed)
+        assert ready()['n_place'] == new_n_place, 'NEW started with the wrong allowance'
+        assert (launch_store / 'live' / 'MANIFEST').is_file(), 'place opened outside --workdir'
+        # The same request again reports its one outcome and starts nothing new.
+        again, resent = outcome([*deploy, '--request-id', request], f'{name}:resend')
+        assert (again, resent) == (request, deployed), 'a resent request changed its outcome'
 
-    with running_host() as (_, new):
+    with running_host():
+        new = ready()
         assert new['n_place'] == new_n_place, 'restart did not recover the installed assembly'
         assert welcome_n_place() == new_n_place, 'recovered Welcome used the wrong allowance'
         assert new['digest'] == old['digest'], 'varying only n_place changed the image digest'
-        assert len(list((state / 'images').iterdir())) == 1, 'the shared image was duplicated or removed'
-        records = sorted(index.iterdir())
-        assert len(records) == 2, 'the activation index did not retain both activations'
-        names = [entry.read_bytes().hex() for entry in records]
-        assert names[0] != names[1], 'one mutable record replaced the two assemblies'
-        for key, recipe in zip(names, (old_recipe, new_recipe), strict=True):
-            assembly = (state / 'assemblies' / key).read_bytes()
-            assert assembly[:32].hex() == recipe, 'activation selected another recipe'
-        assert not list((state / 'pending').iterdir()), 'recovery left an installed pending record'
+        assert len(list((state / 'objects' / 'images').iterdir())) == 1, 'the shared image was duplicated or removed'
+        status = json.loads(checked([compiler, 'deploy', '--state', str(state), '--status', request],
+                                    engine=engine, case=f'{name}:status').stdout)
+        assert status == deployed, 'the recovered host forgot the request outcome'
 
 
 def crashes(args, root, work, engine, name):

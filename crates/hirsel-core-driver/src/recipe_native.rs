@@ -30,7 +30,7 @@ pub struct AssemblyRecord {
 }
 
 impl AssemblyRecord {
-    pub(super) fn new(recipe: ContentHash, toolchain: ContentHash, bytes: &[u8]) -> Self {
+    pub(crate) fn new(recipe: ContentHash, toolchain: ContentHash, bytes: &[u8]) -> Self {
         use sha2::{Digest, Sha256};
         let digest = ContentHash(Sha256::digest(bytes).into());
         let frame = [recipe.0, toolchain.0, digest.0].concat();

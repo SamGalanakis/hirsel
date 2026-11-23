@@ -99,17 +99,19 @@ pub enum OptionId {
     IdleMs,
     Workdir,
     Listen,
-    Scratch,
     GrantAdded,
-    MaxPause,
-    MaxRecipeBytes,
-    MaxClosure,
-    MaxDecodeBytes,
-    StagingBytes,
-    AdmitTimeout,
     HostMemory,
-    StartRetries,
     TapeRetention,
+    GroupName,
+    Tenant,
+    GroupStore,
+    NetRule,
+    Uncontained,
+    Trusted,
+    Pids,
+    Cpu,
+    RequestId,
+    RequestStatus,
     Resident,
     MaxMemory,
     Stop,
@@ -141,9 +143,10 @@ commands! {
     "build", "build [package-dir | --recipe HASH] [options]", "Assemble a native executable from a release recipe.";
     "publish", "publish PACKAGE [options]", "Check a package, publish its code objects and print the recipe hash.";
     "manifest", "manifest show PATH", "Print a release manifest.";
-    "host", "host RECIPE --control SOCKET --state DIR --listen ADDR [options] [-- arguments...]", "Supervise a place and accept deploy requests.";
+    "host", "host --state DIR [--cgroup-root DIR] [--max-places N] [--idle-ms MS]", "Run the launcher and the installed platform host on STATE.";
     "launcher", "launcher --control SOCKET --state DIR [--operator-listen SOCKET --platform-host FILE --max-places N --idle-ms MS] [--cgroup-root DIR]", "Hold the groups' listeners and start their children for the platform host.";
-    "deploy", "deploy RECIPE --control SOCKET --code-store DIR [options]", "Submit a recipe and its missing code objects to a host.";
+    "register", "register RECIPE --state DIR --group NAME --listen ADDR --store DIR --code-store DIR [options] [-- arguments...]", "Add a group to a running host and deploy its first release.";
+    "deploy", "deploy RECIPE --state DIR --group NAME --code-store DIR [options] | deploy --state DIR --status HEX", "Deploy a recipe to a registered group, or report a request.";
     "run", "run [package-dir] [options] [-- arguments...]", "Build and run a native executable.";
     "serve", "serve [package-dir] [--store DIRECTORY] [--max-memory BYTES] [--stop]", "Serve the package's build and run requests from a resident compiler.";
     "prof", "prof <command>", "Capture or inspect a CPU profile.";
@@ -286,28 +289,28 @@ static OPTIONS: &[OptionSpec] = &[
         CodeStore,
         ["--code-store"],
         Some("DIR"),
-        ["build", "publish", "host", "deploy"],
+        ["build", "publish", "register", "deploy"],
         "Select the immutable code store."
     ),
     option!(
         Control,
         ["--control"],
         Some("SOCKET"),
-        ["host", "deploy", "launcher"],
-        "Host control socket."
+        ["launcher"],
+        "Launcher control socket."
     ),
     option!(
         HostState,
         ["--state"],
         Some("DIR"),
-        ["host", "replay", "launcher"],
-        "Private host state directory."
+        ["host", "register", "deploy", "replay", "launcher"],
+        "Private host state directory; the operator socket is STATE/operator.sock."
     ),
     option!(
         CgroupRoot,
         ["--cgroup-root"],
         Some("DIR"),
-        ["launcher"],
+        ["host", "launcher"],
         "Use a delegated cgroup v2 subtree for child lifecycle and contained groups."
     ),
     option!(
@@ -328,43 +331,36 @@ static OPTIONS: &[OptionSpec] = &[
         MaxPlaces,
         ["--max-places"],
         Some("N"),
-        ["launcher"],
+        ["host", "launcher"],
         "Groups the platform host keeps live at once."
     ),
     option!(
         IdleMs,
         ["--idle-ms"],
         Some("MS"),
-        ["launcher"],
+        ["host", "launcher"],
         "Idle time after which a serving group is stopped."
     ),
     option!(
         TapeRetention,
         ["--tape-retention"],
         Some("DAYS"),
-        ["host"],
+        ["register"],
         "Retain a recording's pinned image for this many days. Default 30."
     ),
     option!(
         Workdir,
         ["--workdir"],
         Some("DIR"),
-        ["host"],
-        "Working directory for each place launch."
+        ["register"],
+        "Working directory for the group's children. Default: the current directory."
     ),
     option!(
         Listen,
         ["--listen"],
         Some("ADDR"),
-        ["host"],
-        "TCP address for the inherited listener."
-    ),
-    option!(
-        Scratch,
-        ["--scratch"],
-        Some("DIR"),
-        ["host"],
-        "Private scratch directory for exports and prepare."
+        ["register"],
+        "TCP address of the group's inherited listener."
     ),
     option!(
         GrantAdded,
@@ -374,60 +370,11 @@ static OPTIONS: &[OptionSpec] = &[
         "Allow the proposed recipe to widen grants."
     ),
     option!(
-        MaxPause,
-        ["--max-pause"],
-        Some("MS"),
-        ["host"],
-        "Bound the pre-install write pause. Default 2000 ms."
-    ),
-    option!(
-        MaxRecipeBytes,
-        ["--max-recipe-bytes"],
-        Some("BYTES"),
-        ["host"],
-        "Maximum recipe size."
-    ),
-    option!(
-        MaxClosure,
-        ["--max-closure"],
-        Some("COUNT"),
-        ["host"],
-        "Maximum number of code objects per deploy."
-    ),
-    option!(
-        MaxDecodeBytes,
-        ["--max-decode-bytes"],
-        Some("BYTES"),
-        ["host"],
-        "Cumulative allocation budget for decoding one recipe."
-    ),
-    option!(
-        StagingBytes,
-        ["--staging-bytes"],
-        Some("BYTES"),
-        ["host"],
-        "Total space available for incoming objects."
-    ),
-    option!(
-        AdmitTimeout,
-        ["--admit-timeout"],
-        Some("SECONDS"),
-        ["host", "deploy"],
-        "Deadline for the recipe and Need exchange."
-    ),
-    option!(
         HostMemory,
         ["--memory"],
         Some("BYTES"),
-        ["host"],
-        "Combined limit for serving and candidate launches."
-    ),
-    option!(
-        StartRetries,
-        ["--start-retries"],
-        Some("COUNT"),
-        ["host"],
-        "Retries before reporting a failed start."
+        ["register"],
+        "Memory limit for each of the group's children."
     ),
     option!(
         ReleaseManifest,
@@ -496,8 +443,78 @@ static OPTIONS: &[OptionSpec] = &[
         Record,
         ["--record"],
         Some("TAPE"),
-        ["run", "host"],
-        "Build with recording enabled. Run writes TAPE. Host writes owner-only recordings in TAPE as a directory."
+        ["run", "register"],
+        "Build with recording enabled. Run writes TAPE. Register writes owner-only recordings in TAPE as a directory."
+    ),
+    option!(
+        GroupName,
+        ["--group"],
+        Some("NAME"),
+        ["register", "deploy"],
+        "The group to register or deploy to."
+    ),
+    option!(
+        Tenant,
+        ["--tenant"],
+        Some("NAME"),
+        ["register"],
+        "The tenant that owns the group. Default operator."
+    ),
+    option!(
+        GroupStore,
+        ["--store"],
+        Some("DIR"),
+        ["register"],
+        "The group's durable store directory."
+    ),
+    option!(
+        NetRule,
+        ["--net"],
+        Some("RULE"),
+        ["register"],
+        "Bind a Net grant rule to the group. Repeat for more rules."
+    ),
+    option!(
+        Uncontained,
+        ["--uncontained"],
+        None,
+        ["register"],
+        "Run the group's children without a namespace and cgroup sandbox."
+    ),
+    option!(
+        Trusted,
+        ["--trusted"],
+        None,
+        ["register"],
+        "Let the group's recipes use grants that need operator trust."
+    ),
+    option!(
+        Pids,
+        ["--pids"],
+        Some("N"),
+        ["register"],
+        "Process limit for each of the group's children."
+    ),
+    option!(
+        Cpu,
+        ["--cpu"],
+        Some("QUOTA/PERIOD"),
+        ["register"],
+        "CPU bandwidth for each of the group's children, in microseconds."
+    ),
+    option!(
+        RequestId,
+        ["--request-id"],
+        Some("HEX"),
+        ["register", "deploy"],
+        "Resend this request instead of starting a new one."
+    ),
+    option!(
+        RequestStatus,
+        ["--status"],
+        Some("HEX"),
+        ["deploy"],
+        "Print where a request stands."
     ),
     option!(
         Tape,
@@ -781,14 +798,16 @@ static OPTIONS: &[OptionSpec] = &[
         Dir,
         ["--dir"],
         Some("PATH"),
-        ["build", "publish", "run", "replay", "test"],
+        ["build", "publish", "run", "replay", "test", "register"],
         "Grant a confined directory. Repeat for more directories."
     ),
     option!(
         Grant,
         ["--grant"],
         Some("KIND"),
-        ["build", "publish", "run", "replay", "test", "deploy"],
+        [
+            "build", "publish", "run", "replay", "test", "register", "deploy"
+        ],
         "Grant a capability kind. Net takes explicit Connect, Listen, Tls or Resolve rules separated by semicolons. Env requires Env=<pattern>[,<pattern>]. Repeat for more kinds."
     ),
     option!(
@@ -1208,7 +1227,7 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Action, Stri
             invocation.options.push((OptionId::ProfMem, Some(value)));
             continue;
         }
-        if argument == "--" && matches!(name.as_str(), "run" | "prof run" | "call" | "host") {
+        if argument == "--" && matches!(name.as_str(), "run" | "prof run" | "call" | "register") {
             invocation.arguments.extend(arguments);
             break;
         }

@@ -1,0 +1,114 @@
+// Byte vectors for the operator wire (module operator). The expected bytes were derived from
+// core/std/api/codec.md's format by an encoder written apart from std.codec;
+// crates/hirsel-core-driver/src/operator.rs checks the same bytes in Rust.
+fn digit(x: u8) -> u8 {
+    if x <= b'9' {
+        x - b'0'
+    } else {
+        x - b'a' + 10u8
+    }
+}
+
+fn hex(s: String) -> Bytes {
+    let raw = string.as_bytes(s)
+    let mut out: Bytes = list.with_capacity(list.len(raw) / 2u64)
+    let mut i = 0u64
+    while i < list.len(raw) {
+        list.push(mut out, digit(raw[i]) * 16u8 + digit(raw[i + 1u64]))
+        i += 2u64
+    }
+    out
+}
+
+fn one[T](take x: T) -> List[T] {
+    let mut xs: List[T] = list.new()
+    list.push(mut xs, take x)
+    xs
+}
+
+fn attempt() -> launcher.Attempt {
+    launcher.Attempt(hi: 0x0102030405060708u64, lo: 0x1112131415161718u64)
+}
+
+fn group() -> launcher.Group {
+    launcher.Group(name: "g", incarnation: 3u64)
+}
+
+fn registration() -> Registration {
+    Registration(name: "g", tenant: "t", workdir: "/w", trusted: false, label: Uncontained, listen: "127.0.0.1:9", bindings: launcher.Bindings(store: "/store", dirs: one("data"), net: list.new()), limits: launcher.Limits(memory: Some(4096u64), cpu: None, pids: Some(8u64)), args: one("--port"), record: Some(Record(dir: "/tapes", retention_s: 60u64)))
+}
+
+fn vector_ask(take value: Ask, expected: String) -> bool {
+    let c: std.codec.Codec[Ask] = std.codec.of()
+    let mut out: Bytes = list.new()
+    if let Error(_) = std.codec.encode(c, value, mut out) {
+        return false
+    }
+    let want = hex(expected)
+    if out != want {
+        return false
+    }
+    match std.codec.decode(c, want) {
+        Ok(back) => {
+            let mut again: Bytes = list.new()
+            if let Error(_) = std.codec.encode(c, back, mut again) {
+                return false
+            }
+            again == want
+        },
+        Error(_) => false,
+    }
+}
+
+fn vector_answer(take value: Answer, expected: String) -> bool {
+    let c: std.codec.Codec[Answer] = std.codec.of()
+    let mut out: Bytes = list.new()
+    if let Error(_) = std.codec.encode(c, value, mut out) {
+        return false
+    }
+    let want = hex(expected)
+    if out != want {
+        return false
+    }
+    match std.codec.decode(c, want) {
+        Ok(back) => {
+            let mut again: Bytes = list.new()
+            if let Error(_) = std.codec.encode(c, back, mut again) {
+                return false
+            }
+            again == want
+        },
+        Error(_) => false,
+    }
+}
+
+@test
+fn operator_vectors() -> Result[(), ()] {
+    let mut ok = true
+    ok = vector_ask(BeginAsk(hex("21212121212121212121212121212121"), group(), Attested(hex("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")), true, one("f"), one("e")), "000000001000000021212121212121212121212121212121010000006703000000000000000000000020000000cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc01010000000100000066010000000100000065") && ok
+    ok = vector_ask(DataAsk(hex("21212121212121212121212121212121"), attempt(), hex("0102")), "01000000100000002121212121212121212121212121212108070605040302011817161514131211020000000102") && ok
+    ok = vector_ask(EndAsk(hex("21212121212121212121212121212121"), attempt()), "02000000100000002121212121212121212121212121212108070605040302011817161514131211") && ok
+    ok = vector_ask(ConfirmAsk(hex("21212121212121212121212121212121"), attempt(), hex("dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd")), "0300000010000000212121212121212121212121212121210807060504030201181716151413121120000000dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd") && ok
+    ok = vector_ask(StatusAsk(hex("21212121212121212121212121212121")), "040000001000000021212121212121212121212121212121") && ok
+    ok = vector_ask(ResolveAsk(hex("31313131313131313131313131313131")), "050000001000000031313131313131313131313131313131") && ok
+    ok = vector_ask(LookupAsk("g"), "060000000100000067") && ok
+    ok = vector_ask(RegisterAsk(hex("21212121212121212121212121212121"), registration(), Publication(hex("01")), list.new(), list.new()), "07000000100000002121212121212121212121212121212101000000670100000074020000002f7700010000000b0000003132372e302e302e313a39060000002f73746f7265010000000400000064617461000000000100000000100000000000000000000001000000080000000000000001000000060000002d2d706f727401000000060000002f74617065733c000000000000000100000001000000010000000000000000") && ok
+    ok = vector_answer(StateAnswer(hex("21212121212121212121212121212121"), group(), Attested(hex("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")), AwaitInput(attempt())), "000000001000000021212121212121212121212121212121010000006703000000000000000000000020000000cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc0000000008070605040302011817161514131211") && ok
+    ok = vector_answer(StateAnswer(hex("21212121212121212121212121212121"), group(), Publication(hex("01")), PendingPhase(attempt(), 5u64)), "0000000010000000212121212121212121212121212121210100000067030000000000000001000000010000000105000000080706050403020118171615141312110500000000000000") && ok
+    ok = vector_answer(StateAnswer(hex("21212121212121212121212121212121"), group(), Publication(hex("01")), UndecidedPhase(attempt(), 5u64, "lost")), "0000000010000000212121212121212121212121212121210100000067030000000000000001000000010000000106000000080706050403020118171615141312110500000000000000040000006c6f7374") && ok
+    ok = vector_answer(StateAnswer(hex("21212121212121212121212121212121"), group(), Publication(hex("01")), InstalledPhase(5u64, hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), Report(fetch_ns: Some(7u64), assemble_ns: None, pause: Measured(2000u64), preview: one("p")))), "0000000010000000212121212121212121212121212121210100000067030000000000000001000000010000000107000000050000000000000020000000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0100000007000000000000000000000002000000d007000000000000010000000100000070") && ok
+    ok = vector_answer(StateAnswer(hex("21212121212121212121212121212121"), group(), Publication(hex("01")), InstalledPhase(0u64, hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), Report(fetch_ns: None, assemble_ns: None, pause: StartFailed("x"), preview: list.new()))), "0000000010000000212121212121212121212121212121210100000067030000000000000001000000010000000107000000000000000000000020000000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa000000000000000004000000010000007800000000") && ok
+    ok = vector_answer(StateAnswer(hex("21212121212121212121212121212121"), group(), Publication(hex("01")), FailedPhase(DeniedClass, "no", no_report())), "000000001000000021212121212121212121212121212121010000006703000000000000000100000001000000010800000001000000020000006e6f00000000000000000000000000000000") && ok
+    ok = vector_answer(NeedAnswer(hex("21212121212121212121212121212121"), attempt(), one(GroupKey(hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))), true), "01000000100000002121212121212121212121212121212108070605040302011817161514131211010000000000000020000000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa01") && ok
+    ok = vector_answer(DisplayAnswer(hex("21212121212121212121212121212121"), attempt(), hex("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"), "foreign: x\n"), "0200000010000000212121212121212121212121212121210807060504030201181716151413121120000000cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc0b000000666f726569676e3a20780a") && ok
+    ok = vector_answer(PinAnswer(Found(hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))), "030000000000000020000000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") && ok
+    ok = vector_answer(PinAnswer(Gone), "0300000001000000") && ok
+    ok = vector_answer(ErrorAnswer(NotInstalledClass, "x"), "040000000b0000000100000078") && ok
+    ok = vector_answer(GroupAnswer(group()), "0500000001000000670300000000000000") && ok
+    ok = vector_answer(PartAnswer(10u64, 0u64, hex("0102")), "060000000a000000000000000000000000000000020000000102") && ok
+    if ok {
+        Ok(())
+    } else {
+        Error(())
+    }
+}

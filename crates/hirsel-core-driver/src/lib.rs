@@ -11,18 +11,21 @@ mod entry_show;
 mod exec_launch;
 mod foreign_archive;
 mod foreign_header;
-mod host;
 mod image;
 mod image_index;
 mod image_unit;
 mod inspect;
 pub mod installation;
 pub(crate) mod launcher;
+mod operator;
+mod operator_cli;
 mod product;
 mod property_corpus;
 pub mod sdk;
 pub mod sdk_command;
 mod tape_cli;
+#[cfg(test)]
+mod terminal_fixture;
 pub use product::PackageProduct;
 mod callable_variants;
 #[cfg(test)]

@@ -250,15 +250,15 @@ says which.
 **Working directory.** A directory path in a recipe stays as given. A relative path is resolved
 when the executable starts, against the launch's working directory, which is an input of the
 launch and never of the recipe. `hirsel run` and `hirsel build --manifest` launch in the
-caller's working directory. `hirsel host` launches every child of a place (preview, prepare,
-serving and install) in that place's working directory, set by `--workdir DIR` when the place
-is added to the host. A recipe that moves to another host therefore resolves its relative paths
+caller's working directory. The launcher starts every child of a group (describe, preview,
+prepare and serving) in that group's working directory, set by `hirsel register --workdir DIR`
+when the group is added to the host. A recipe that moves to another host therefore resolves its relative paths
 against that host's place directory, and the deploy preview prints each `Dir` binding with the
 absolute path it resolves to there.
 
-**Authority.** A host takes a recipe only when an authorised deploy request names its R. In
-`hirsel host` that is a request on the control socket, whose filesystem permission is the
-boundary. A request that names a raw R is the caller's explicit statement that a checker it
+**Authority.** A host takes a recipe only when an authorised deploy request names its R. That
+is a request on the host's operator socket ("The operator socket" below), whose directory
+permission and peer-UID check are the boundary. A request that names a raw R is the caller's explicit statement that a checker it
 trusts produced this whole R, its bindings and annexes included; a hash proves only that bytes
 are intact, and never that they were checked. A caller with narrower authority, such as a
 deployment service that only schedules deploys for others, never forwards a raw R. It either
@@ -370,19 +370,22 @@ so the store's `releases` rows keep their format, and a recording pin names the 
 the run it records and is synced before `Pinned` is answered. A retained image carries its runtime. The host reads its recipe envelope to recover
 launch settings and keep referenced objects. A retained digest whose image is missing gives `Unknown(ImageGone)`.
 
-`hirsel host --record DIRECTORY` assembles with the recording runtime, and refuses at
-admission any recipe with a foreign leaf
-([FFI-8](foreign.md#ffi-8-a-program-that-reaches-foreign-code-is-never-recorded-replayed-or-reused)). The host
+`hirsel register ... --record DIRECTORY` registers a recording group ("Recording a group"
+below): every admission for it assembles with the recording runtime and refuses any recipe
+with a foreign leaf
+([FFI-8](foreign.md#ffi-8-a-program-that-reaches-foreign-code-is-never-recorded-replayed-or-reused)),
+and the CLI refuses such a recipe itself before it creates DIRECTORY or sends anything. The host
 assigns each serving process a recording ID and syncs its pin before launching
 the process. A pin names the assembly record and carries its expiry. The
-default retention period is 30 days, set by `--tape-retention DAYS`.
+default retention period is 30 days, set by `register --tape-retention DAYS`.
 `hirsel replay --state HOST_STATE --tape TAPE` resolves the recording ID through
 the pin. It asks a running host with `ResolvePin` on `HOST_STATE/operator.sock`. When no host
 listens there, it takes `HOST_STATE/launcher.lock` and then the catalog's `LOCK`, both without
 waiting, and reads the pin with `libexec/hirsel/pin_reader` (`platform_main/read_pin`), which
 replays the catalog journal read-only and prints `found <assembly hex>` or `gone`. A held lock or a
 host that does not answer exits 75 "temporarily unavailable"; a reader error is an error, never
-`Gone`. Replay then refuses a recipe with a foreign leaf before reading any record of the tape
+`Gone`. A `Gone` pin, or a pinned image no longer in the image store, exits 3
+(`Unknown(ImageGone)`). Replay then refuses a recipe with a foreign leaf before reading any record of the tape
 (FFI-8), and runs the verified image from the host image store. Replay takes the
 arguments and launch metadata from the recording.
 
@@ -483,15 +486,15 @@ checks the grants, the root limit and `release`; `confirm_identity` (L32);
 `place_run_bounded` also covers the preview child, which observes no store or
 listener.
 
-## Platform host and launcher (partly built)
+## Platform host and launcher
 
 This section specifies how many programs from many authors are run on one machine. It was
 ratified as Agent Platform 2027, Topics 2 and 3 (2026-11-22). The launcher is built as
 `hirsel launcher` ("The launcher" below says which of its parts), and the platform host
-and its catalog as the store package's `platform` and `platform_main` modules, which no CLI
-command starts yet. Until the platform host replaces it,
-`hirsel host` is the older single-place supervisor of "Authority" above, and the two run side
-by side. The cold-place wake contract they rely on is RUNNER-SPEC §14.
+and its catalog as the store package's `platform` and `platform_main` modules. `hirsel host`
+starts the pair, and `hirsel register`, `hirsel deploy` and `hirsel replay --state` are its
+operator clients ("The operator CLI" below). The cold-place wake contract they rely on is
+RUNNER-SPEC §14.
 
 ### Authority groups
 
@@ -717,7 +720,41 @@ ID is the group's incarnation and the start's generation, each a little-endian u
 two starts share one and a start sent again after a host restart names the same pin; its
 destination is `dir/<ID in lowercase hex>.tape`. The pin (ID → assembly, expiry = the
 host's wall clock in Unix seconds + retentionSeconds) is written in the transaction that
-allocates the start's generation, so no recording runs before its pin is durable.
+allocates the start's generation, so no recording runs before its pin is durable. Every
+admission for such a group, its registration and each deploy, asks the launcher for a
+recording image (`Approvals.recording`), so each serving start can record; an image the
+recording runtime cannot replay (a Foreign call) is refused before assembly.
+
+### The operator CLI
+
+`hirsel host --state S [--cgroup-root DIR] [--max-places N] [--idle-ms M]` runs the launcher
+of "Starting the host" with `--control S/launcher.sock`, `--operator-listen S/operator.sock`
+and the installation's `libexec/hirsel/platform_main`, and does not return. The state
+directory must be the operator's and mode 0700.
+
+The clients below connect to `S/operator.sock` only after checking that S is owned by their
+own UID with no group or other permission. Each prints `request <D hex>` on stderr before it
+sends anything, generating D unless `--request-id HEX` names it, so a client lost at any point
+can be run again with the same D and reads the recorded outcome. A terminal outcome prints
+one JSON object on stdout: the request, group, incarnation, phase and, when installed, the
+activation, assembly and report.
+
+- `hirsel register RECIPE --state S --group NAME --listen ADDR --store DIR --code-store DIR
+  [--tenant T] [--workdir DIR] [--uncontained] [--trusted] [--dir D]... [--net RULE]...
+  [--host-memory BYTES] [--pids N] [--cpu QUOTA/PERIOD] [--grant G]... [--record DIR
+  [--tape-retention DAYS]] [-- ARGS...]` sends Register with the attested recipe from the
+  code store.
+- `hirsel deploy RECIPE --state S --group NAME --code-store DIR [--grant G]...` resolves G with
+  LookupGroup, or with `--request-id` from the request's own Status, then sends Begin.
+  `hirsel deploy --state S --status D` sends only Status.
+
+Both stream the admission input on AwaitInput, answer each Need with the missing objects,
+and on Display check that the text is the one their own approvals produce, print it, and
+send Confirm with its SHA-256. `Error(Busy)` is retried with the same D for up to 60 s.
+Their exit status is 0 for `Installed` (1 when the pause report is `StartFailed`), 2 for a
+local refusal or a `Failed(Denied)` that is a policy refusal (FFI or Exec), 1 for any other
+`Failed`, and 75 for `Undecided`, for no host listening, or for a connection lost before a
+terminal phase, which prints `outcome unknown: request D`.
 
 ### The launcher
 
@@ -798,7 +835,13 @@ cold listeners, child endpoints, pidfds and cgroup population changes.
      If it cannot read the snapshot it sends no `Collect`: the fence stays, nothing is
      removed, and the fence ends with the session.
   3. The launcher removes each object that neither those roots nor any reservation it holds
-     reaches, then ends the fence and applies the deferred releases.
+     reaches, then ends the fence and applies the deferred releases. A kept assembly record
+     keeps its image and its recipe's closure in the code store (recipe, groups, bodies,
+     annexes, foreign archives). The code store is collected under the admission lock: the
+     launcher first applies the running admissions' notes, keeps every object an admission
+     still holds, and an admission gives up its hold only after its assembly record is put.
+     A publication that no root reaches may therefore be removed before an `Admit` names it;
+     that admission fails (`AdmissionFailed`), and the operator publishes it again.
 
   An object synced under a reservation is therefore either named by a pending row that was
   durable before the host's snapshot, or still reserved when the launcher unlinks. A new
@@ -821,8 +864,8 @@ answers with no child. The host binds the groups' addresses again and probes eve
 authority boundary, as the control socket of "Authority" is. Its filesystem permission
 admits only the host's OS user. Operators and tenants reach the platform through the host,
 which decides and records each request before it asks the launcher. `hirsel host` is this
-pair: the launcher, plus the platform host it starts as its first group. `hirsel deploy`
-sends its request to the host.
+pair: the launcher, plus the platform host it starts as its first group. `hirsel register`
+and `hirsel deploy` send their requests to the host.
 
 **The launcher is the parent, not an `Exec` child.** The host does not start groups
 through an `Exec` grant, and it does not start the launcher as one either. An `Exec`

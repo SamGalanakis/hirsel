@@ -95,8 +95,14 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
         let serve = crate::resident::Serve::read(invocation)?;
         return conclude(Outcome::Exit(crate::resident::run(serve)?));
     }
-    if matches!(command, "host" | "deploy") {
-        return conclude(Outcome::Exit(crate::host::run(invocation)?));
+    if command == "host" {
+        match crate::operator_cli::host(invocation)? {}
+    }
+    if command == "register" {
+        return conclude(Outcome::Exit(crate::operator_cli::register(invocation)?));
+    }
+    if command == "deploy" {
+        return conclude(Outcome::Exit(crate::operator_cli::deploy(invocation)?));
     }
     if command == "replay"
         && invocation
@@ -104,7 +110,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             .iter()
             .any(|(option, _)| *option == Opt::HostState)
     {
-        return conclude(Outcome::Exit(crate::host::replay(invocation)?));
+        return conclude(Outcome::Exit(crate::operator_cli::replay(invocation)?));
     }
     if command == "call" {
         return conclude(Outcome::Exit(crate::call::run(
@@ -459,17 +465,19 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             | Opt::IdleMs
             | Opt::Workdir
             | Opt::Listen
-            | Opt::Scratch
             | Opt::GrantAdded
-            | Opt::MaxPause
-            | Opt::MaxRecipeBytes
-            | Opt::MaxClosure
-            | Opt::MaxDecodeBytes
-            | Opt::StagingBytes
-            | Opt::AdmitTimeout
             | Opt::HostMemory
-            | Opt::StartRetries
             | Opt::TapeRetention
+            | Opt::GroupName
+            | Opt::Tenant
+            | Opt::GroupStore
+            | Opt::NetRule
+            | Opt::Uncontained
+            | Opt::Trusted
+            | Opt::Pids
+            | Opt::Cpu
+            | Opt::RequestId
+            | Opt::RequestStatus
             | Opt::MaxMemory
             | Opt::Stop
             | Opt::CallTimeout

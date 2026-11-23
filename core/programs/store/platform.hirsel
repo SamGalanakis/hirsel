@@ -1847,7 +1847,13 @@ fn start_admission(mut h: Host, name: String, g: GroupRow, d: Bytes, a: launcher
     } else {
         Some(clone(g.assembly))
     }
-    let approvals = launcher.Approvals(recording: false, foreign: clone(foreign), exec: clone(exec), workdir: string.from(g.workdir), old: take old)
+    // A recording group's every image carries the recording runtime, so each serving start
+    // can record (launch.md "Recording a group").
+    let recording = match g.record {
+        Some(_) => true,
+        None => false,
+    }
+    let approvals = launcher.Approvals(recording: recording, foreign: clone(foreign), exec: clone(exec), workdir: string.from(g.workdir), old: take old)
     list.push(mut out, Admit(group_of(name, g.incarnation), a, clone(input), take approvals))
     let mut w = vol_read(h, name)
     w.admit = Some(Admitting(request: clone(d), attempt: a, incarnation: g.incarnation, grant_added: grant_added, stage: Uploading(list.new(), false), summary: None, ended: complete, genesis: genesis))

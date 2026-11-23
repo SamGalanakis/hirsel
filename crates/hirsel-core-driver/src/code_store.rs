@@ -119,7 +119,12 @@ impl CodeStore {
         sync_dir(&self.root)
     }
 
-    pub(crate) fn collect(&self, keep: impl Fn(ObjectKind, ContentHash) -> bool) -> io::Result<()> {
+    /// Remove every object `keep` refuses; answer how many.
+    pub(crate) fn collect(
+        &self,
+        keep: impl Fn(ObjectKind, ContentHash) -> bool,
+    ) -> io::Result<u64> {
+        let mut removed = 0;
         for kind in [
             ObjectKind::Recipe,
             ObjectKind::Group,
@@ -140,11 +145,12 @@ impl CodeStore {
                     && !keep(kind, hash)
                 {
                     fs::remove_file(row.path())?;
+                    removed += 1;
                 }
             }
             sync_dir(&directory)?;
         }
-        Ok(())
+        Ok(removed)
     }
 
     /// Publish one checked object, with an atomic, non-replacing name.

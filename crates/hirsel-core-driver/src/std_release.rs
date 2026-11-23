@@ -572,6 +572,7 @@ impl StdSide {
             reach(named)?
         };
         let mut linked = BTreeMap::new();
+        let mut private_names = None;
         while !next.is_empty() {
             let mut named = Vec::new();
             let mut missed = Vec::new();
@@ -604,8 +605,16 @@ impl StdSide {
                     hirsel_guard::jobs() as u32,
                 )
                 .map_err(emit)?;
+                let private_names = private_names.get_or_insert_with(|| {
+                    parts
+                        .parts
+                        .iter()
+                        .filter(|part| part.strong && !parts.exports.contains(&part.name))
+                        .map(|part| part.name.as_bytes())
+                        .collect()
+                });
                 for (&i, object) in missed.iter().zip(&generated) {
-                    let object = self.finish(i, object).map_err(emit)?;
+                    let object = self.finish(i, object, private_names).map_err(emit)?;
                     named.extend(
                         hirsel_llvm_lazy::core::undefined_symbols(&object.bytes).map_err(emit)?,
                     );
@@ -640,6 +649,7 @@ impl StdSide {
         &self,
         i: usize,
         object: &[u8],
+        private_names: &BTreeSet<&[u8]>,
     ) -> Result<hirsel_core_ir::source::NativeObject, String> {
         let parts = &self.parts;
         let part = &parts.parts[i];
@@ -667,15 +677,9 @@ impl StdSide {
                 ));
             }
         }
-        let renamed: BTreeSet<Vec<u8>> = parts
-            .parts
-            .iter()
-            .filter(|part| part.strong && !parts.exports.contains(&part.name))
-            .map(|part| part.name.clone().into_bytes())
-            .chain(own)
-            .collect();
+        let is_renamed = |name: &[u8]| private_names.contains(name) || own.contains(name);
         let rename = |name: &[u8]| {
-            renamed.contains(name).then(|| {
+            is_renamed(name).then(|| {
                 let mut renamed = name.to_vec();
                 renamed.extend_from_slice(STD_NAMESPACE.as_bytes());
                 renamed
@@ -684,7 +688,7 @@ impl StdSide {
         object.bytes = hirsel_llvm_lazy::core::rename_symbols(&object.bytes, &rename)?;
         if let Some(debug) = &mut object.debug {
             for section in &mut debug.sections {
-                if renamed.contains(section.symbol.as_bytes()) {
+                if is_renamed(section.symbol.as_bytes()) {
                     section.symbol.push_str(STD_NAMESPACE);
                 }
             }

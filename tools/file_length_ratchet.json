@@ -9,14 +9,14 @@
     "lines": 2344
   },
   "core/programs/harness/gateway_laws.hirsel": {
-    "lines": 1489,
+    "lines": 1485,
     "reason": "gateway-push-1905"
   },
   "core/programs/harness/laws.hirsel": {
-    "lines": 2005
+    "lines": 1989
   },
   "core/programs/notes/main.hirsel": {
-    "lines": 1443
+    "lines": 1435
   },
   "core/programs/postgres/postgres.hirsel": {
     "lines": 1409

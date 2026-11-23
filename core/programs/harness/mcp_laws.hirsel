@@ -49,11 +49,7 @@ fn mcp_blob_settle(mut tx: store.Tx, a: store.triggers.Attempt, take m: harness.
 }
 
 fn mcp_blob_place(mut r: store.runner.Registry[Grants, harness.Handles]) -> Result[(), store.runner.RegisterError] {
-    store.runner.transact(mut r, code.describe(mcp_blob_advance), BYTES, store.runner.DEFAULT_STEPS)?
-    store.runner.granted(mut r, code.describe(mcp_blob_effect), 8388608u64, store.runner.DEFAULT_STEPS)?
-    harness.register(mut r, BYTES, store.runner.DEFAULT_STEPS)?
-    let f: own[send] fn(mut store.Tx, store.triggers.Attempt, take harness.Settle) -> Result[harness.Filed, store.Error] = mcp_blob_settle
-    store.runner.register_attempt(mut r, code.describe(mcp_blob_settle), take f, BYTES, store.runner.DEFAULT_STEPS)?
+    harness.register_standard(mut r, code.describe(mcp_blob_advance), code.describe(mcp_blob_effect), code.describe(mcp_blob_settle), BYTES, 8388608u64)?
     let views: std.codec.Codec[harness.View] = std.codec.of()
     store.runner.query_as(mut r, code.describe(harness.window), std.codec.key_u64(), views, BYTES, store.runner.DEFAULT_STEPS)
 }

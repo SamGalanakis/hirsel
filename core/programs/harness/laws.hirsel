@@ -121,11 +121,7 @@ fn settle(mut tx: store.Tx, a: store.triggers.Attempt, take m: harness.Settle) -
 }
 
 fn place(mut r: store.runner.Registry[Grants, harness.Handles]) -> Result[(), store.runner.RegisterError] {
-    store.runner.transact(mut r, code.describe(advance), BYTES, store.runner.DEFAULT_STEPS)?
-    store.runner.granted(mut r, code.describe(effect), BYTES, store.runner.DEFAULT_STEPS)?
-    harness.register(mut r, BYTES, store.runner.DEFAULT_STEPS)?
-    let f: own[send] fn(mut store.Tx, store.triggers.Attempt, take harness.Settle) -> Result[harness.Filed, store.Error] = settle
-    store.runner.register_attempt(mut r, code.describe(settle), take f, BYTES, store.runner.DEFAULT_STEPS)
+    harness.register_standard(mut r, code.describe(advance), code.describe(effect), code.describe(settle), BYTES, BYTES)
 }
 
 // ---- running a place ----
@@ -1081,12 +1077,8 @@ fn matrix_settle(mut tx: store.Tx, attempt: store.triggers.Attempt, take m: harn
 }
 
 fn matrix_place(mut r: store.runner.Registry[Grants, harness.Handles]) -> Result[(), store.runner.RegisterError] {
-    store.runner.transact(mut r, code.describe(matrix_advance), BYTES, store.runner.DEFAULT_STEPS)?
     store.runner.transact(mut r, code.describe(matrix_action), BYTES, store.runner.DEFAULT_STEPS)?
-    store.runner.granted(mut r, code.describe(matrix_effect), BYTES, store.runner.DEFAULT_STEPS)?
-    harness.register(mut r, BYTES, store.runner.DEFAULT_STEPS)?
-    let f: own[send] fn(mut store.Tx, store.triggers.Attempt, take harness.Settle) -> Result[harness.Filed, store.Error] = matrix_settle
-    store.runner.register_attempt(mut r, code.describe(matrix_settle), take f, BYTES, store.runner.DEFAULT_STEPS)
+    harness.register_standard(mut r, code.describe(matrix_advance), code.describe(matrix_effect), code.describe(matrix_settle), BYTES, BYTES)
 }
 
 fn matrix_settings(scenario: MatrixScenario, dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, take s: Services) -> store.runner.PlaceConfig[Grants, harness.Handles, Services, ()] {
@@ -1247,11 +1239,7 @@ fn stage_blob(g: Grants, take body: Bytes) -> Result[harness.BlobRef, harness.Fa
 }
 
 fn blob_place(mut r: store.runner.Registry[Grants, harness.Handles]) -> Result[(), store.runner.RegisterError] {
-    store.runner.transact(mut r, code.describe(advance), BYTES, store.runner.DEFAULT_STEPS)?
-    store.runner.granted(mut r, code.describe(effect), 8388608u64, store.runner.DEFAULT_STEPS)?
-    harness.register(mut r, BYTES, store.runner.DEFAULT_STEPS)?
-    let f: own[send] fn(mut store.Tx, store.triggers.Attempt, take harness.Settle) -> Result[harness.Filed, store.Error] = settle
-    store.runner.register_attempt(mut r, code.describe(settle), take f, BYTES, store.runner.DEFAULT_STEPS)
+    harness.register_standard(mut r, code.describe(advance), code.describe(effect), code.describe(settle), BYTES, 8388608u64)
 }
 
 fn blob_settings(dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, take services: Services) -> store.runner.PlaceConfig[Grants, harness.Handles, Services, ()] {
@@ -1633,11 +1621,7 @@ fn race_settle(mut tx: store.Tx, a: store.triggers.Attempt, take m: harness.Sett
 }
 
 fn race_place(mut r: store.runner.Registry[Grants, harness.Handles]) -> Result[(), store.runner.RegisterError] {
-    store.runner.transact(mut r, code.describe(race_advance), BYTES, store.runner.DEFAULT_STEPS)?
-    store.runner.granted(mut r, code.describe(race_effect), BYTES, store.runner.DEFAULT_STEPS)?
-    harness.register(mut r, BYTES, store.runner.DEFAULT_STEPS)?
-    let f: own[send] fn(mut store.Tx, store.triggers.Attempt, take harness.Settle) -> Result[harness.Filed, store.Error] = race_settle
-    store.runner.register_attempt(mut r, code.describe(race_settle), take f, BYTES, store.runner.DEFAULT_STEPS)
+    harness.register_standard(mut r, code.describe(race_advance), code.describe(race_effect), code.describe(race_settle), BYTES, BYTES)
 }
 
 // Which reply comes after its deadline.

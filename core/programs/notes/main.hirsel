@@ -479,11 +479,7 @@ fn decide_entry(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take
 }
 
 fn place(mut r: store.runner.Registry[Grants, harness.Handles]) -> Result[(), store.runner.RegisterError] {
-    store.runner.transact(mut r, code.describe(advance), BYTES, store.runner.DEFAULT_STEPS)?
-    store.runner.granted(mut r, code.describe(effect), BYTES, store.runner.DEFAULT_STEPS)?
-    harness.register(mut r, BYTES, store.runner.DEFAULT_STEPS)?
-    let f: own[send] fn(mut store.Tx, store.triggers.Attempt, take harness.Settle) -> Result[harness.Filed, store.Error] = settle
-    store.runner.register_attempt(mut r, code.describe(settle), take f, BYTES, store.runner.DEFAULT_STEPS)?
+    harness.register_standard(mut r, code.describe(advance), code.describe(effect), code.describe(settle), BYTES, BYTES)?
     store.runner.transact(mut r, code.describe(submit_entry), BYTES, store.runner.DEFAULT_STEPS)?
     store.runner.transact(mut r, code.describe(decide_entry), BYTES, store.runner.DEFAULT_STEPS)?
     harness.pending_waits_entry(mut r, BYTES, store.runner.DEFAULT_STEPS)?
@@ -553,11 +549,7 @@ fn helper_settle(mut tx: store.Tx, a: store.triggers.Attempt, take m: harness.Se
 }
 
 fn helper_place(mut r: store.runner.Registry[HelperGrants, harness.Handles]) -> Result[(), store.runner.RegisterError] {
-    store.runner.transact(mut r, code.describe(helper_advance), BYTES, store.runner.DEFAULT_STEPS)?
-    store.runner.granted(mut r, code.describe(helper_effect), BYTES, store.runner.DEFAULT_STEPS)?
-    harness.register(mut r, BYTES, store.runner.DEFAULT_STEPS)?
-    let f: own[send] fn(mut store.Tx, store.triggers.Attempt, take harness.Settle) -> Result[harness.Filed, store.Error] = helper_settle
-    store.runner.register_attempt(mut r, code.describe(helper_settle), take f, BYTES, store.runner.DEFAULT_STEPS)
+    harness.register_standard(mut r, code.describe(helper_advance), code.describe(helper_effect), code.describe(helper_settle), BYTES, BYTES)
 }
 
 // The helper's service: it owns the helper place's directory and, per ask,

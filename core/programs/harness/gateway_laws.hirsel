@@ -199,11 +199,7 @@ fn revoke_reader(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, tak
 }
 
 fn place(mut r: store.runner.Registry[Grants, harness.Handles]) -> Result[(), store.runner.RegisterError] {
-    store.runner.transact(mut r, code.describe(advance), BYTES, store.runner.DEFAULT_STEPS)?
-    store.runner.granted(mut r, code.describe(effect), EFFECT_BYTES, store.runner.DEFAULT_STEPS)?
-    harness.register(mut r, BYTES, store.runner.DEFAULT_STEPS)?
-    let f: own[send] fn(mut store.Tx, store.triggers.Attempt, take harness.Settle) -> Result[harness.Filed, store.Error] = settle
-    store.runner.register_attempt(mut r, code.describe(settle), take f, BYTES, store.runner.DEFAULT_STEPS)?
+    harness.register_standard(mut r, code.describe(advance), code.describe(effect), code.describe(settle), BYTES, EFFECT_BYTES)?
     store.runner.transact(mut r, code.describe(submit_entry), BYTES, store.runner.DEFAULT_STEPS)?
     store.runner.transact(mut r, code.describe(decide_entry), BYTES, store.runner.DEFAULT_STEPS)?
     store.runner.transact(mut r, code.describe(revoke_reader), BYTES, store.runner.DEFAULT_STEPS)?

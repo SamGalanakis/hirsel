@@ -3,7 +3,9 @@ type ObjectJournalStart: send {
     register: HistoryRegister,
     authority: Bytes,
     buffers: HistoryBuffers,
-    op_ms: u64
+    op_ms: u64,
+    failed_polls: u32,
+    reclaim: Option[ObjectReclaimCapture]
 }
 
 type ObjectJournalTask: send {
@@ -49,18 +51,19 @@ type ObjectJournalSession {
     authority: Bytes,
     buffers: HistoryBuffers,
     op_ms: u64,
-    failed_polls: u32
+    failed_polls: u32,
+    reclaim: Option[ObjectReclaimCapture]
 }
 
 fn object_journal_begin(take input: ObjectJournalStart) -> ObjectJournalSession {
-    let ObjectJournalStart(requests: take requests, register: take register, authority: take authority, buffers: take buffers, op_ms) = take input
-    ObjectJournalSession(client: std.object.attach(take requests), register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls: 0)
+    let ObjectJournalStart(requests: take requests, register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, reclaim) = take input
+    ObjectJournalSession(client: std.object.attach(take requests), register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, reclaim)
 }
 
 fn object_journal_pause(take active: ObjectJournalSession) -> ObjectJournalStart {
-    let ObjectJournalSession(client: take client, register: take register, authority: take authority, buffers: take buffers, op_ms, ..) = take active
+    let ObjectJournalSession(client: take client, register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, reclaim) = take active
     let (take requests, _) = std.object.split(take client)
-    ObjectJournalStart(requests: take requests, register: take register, authority: take authority, buffers: take buffers, op_ms)
+    ObjectJournalStart(requests: take requests, register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, reclaim)
 }
 
 fn object_journal_advance(mut lane: ObjectJournalSession) -> Result[(), Error] waits {
@@ -85,11 +88,23 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
     let mut deferred: Option[JournalMsg] = None
     let mut idle_position: Option[u64] = None
     loop {
+        if let Some(terminal) = lane.register.terminal {
+            return match terminal {
+                HistoryFault(problem) => Error(clone(problem)),
+                HistoryUnknown => Error(Undecided),
+            }
+        }
         let selected = match replace(mut deferred, None) {
             Some(take pending) => take pending,
             None => match channel.try_receive(input.receive) {
                 Ok(take queued) => take queued,
                 Error(Empty) => {
+                    if let Some(pending_reclaim) = replace(mut lane.reclaim, None) {
+                        if let Error(Fenced(e)) = history_execute_reclaim(mut lane, pending_reclaim) {
+                            return Error(Fenced(e))
+                        }
+                        continue
+                    }
                     if idle_position == None {
                         if let Some(timer) = input.idle {
                             if let Ok(()) = channel.try_send(timer, ()) { idle_position = Some(written) }

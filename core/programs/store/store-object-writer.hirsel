@@ -8,6 +8,7 @@ type ObjectWriterState {
     locator: HistoryLocator,
     level_name: String,
     pair: HistoryPair,
+    recovered: HistoryRef,
     entries: u64,
     failed: Option[Error]
 }
@@ -111,7 +112,7 @@ fn open_object_writer(tasks: Tasks, take config: ObjectAuthorityConfig, c: Clock
     let head = register.head
     let ObjectPackRead(client: take owned_client, locator: take locator, admitted_base: take base, ..) = take reader
     let (take requests, take workers) = std.object.split(take owned_client)
-    let startup = ObjectJournalStart(requests: take requests, register: take register, authority: take metadata, buffers: take workspace, op_ms)
+    let startup = ObjectJournalStart(requests: take requests, register: take register, authority: take metadata, buffers: take workspace, op_ms, failed_polls: 0, reclaim: None)
     if let Error(_) = channel.send(start, take startup) {
         return Error(Io(Closed))
     }
@@ -123,7 +124,7 @@ fn open_object_writer(tasks: Tasks, take config: ObjectAuthorityConfig, c: Clock
     db.fence = fence
     db.file_seq = head.entry.seq
     db.page_resident = resident_location_charge(pages.locations)
-    let object = ObjectWriterState(workers: take workers, tasks, health: take health_state, unhealthy: Some(take health_rx), watch: None, terminal: take health_tx, locator: take locator, level_name: take level_name, pair: head.pair, entries: head.entry.seq - head.checkpoint.seq, failed: None)
+    let object = ObjectWriterState(workers: take workers, tasks, health: take health_state, unhealthy: Some(take health_rx), watch: None, terminal: take health_tx, locator: take locator, level_name: take level_name, pair: head.pair, recovered: head.checkpoint, entries: head.entry.seq - head.checkpoint.seq, failed: None)
     db.disk = Some(DiskState(lock: None, d: None, open: head.pair.epoch, options: take held_options, lease: None, scrubs: list.new(), imported: None, reserving: None, target: None, record_cut: head.checkpoint.seq, recorded_after: recorded_after,
         pages: take pages, bucket: None, object: Some(take object),
         acks: take journal_received, journaled: 0, inflight: 0, uncovered: 0, since_cut: 0, acked_bytes: 0,
@@ -169,10 +170,6 @@ fn object_cut_state(mut db: Db, take delta: HolderDelta, write_seal: scoped fn(m
     }
     let mut lane = object_journal_begin(take owned)
     let outcome = object_cut_work(mut db, mut lane, take delta, write_seal, pack_bytes, limit)
-    let return_io = object_journal_pause(take lane)
-    if let Error(_) = channel.send(resume, take return_io) {
-        return Error(Io(Closed))
-    }
     if let Error(problem) = outcome {
         let dead = match problem {
             Fenced(_) => true,
@@ -181,6 +178,7 @@ fn object_cut_state(mut db: Db, take delta: HolderDelta, write_seal: scoped fn(m
             _ => false,
         }
         if dead {
+            lane.register.terminal = Some(HistoryFault(clone(problem)))
             let saved: Error = clone(problem)
             write_disk(mut db.disk, take saved, scoped fn(mut state: DiskState, take terminal: Error) {
                 if let Some(mut object_writer) = state.object {
@@ -188,6 +186,10 @@ fn object_cut_state(mut db: Db, take delta: HolderDelta, write_seal: scoped fn(m
                 }
             })
         }
+    }
+    let return_io = object_journal_pause(take lane)
+    if let Error(_) = channel.send(resume, take return_io) {
+        return Error(Io(Closed))
     }
     take outcome
 }
@@ -264,6 +266,8 @@ fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: Holde
     db.page_resident = resident_pages
     db.settled = db.changes
     install_holder_delta(mut db, take delta)
+    let authority = object_state(db)
+    lane.reclaim = Some(ObjectReclaimCapture(head: lane.register.head, recovered: authority.recovered, generation, next_pack: disk_state(db).pages.next_pack))
     Ok(Ticket(store: old.store, open: old.pair.epoch, mark: Cut(generation)))
 }
 

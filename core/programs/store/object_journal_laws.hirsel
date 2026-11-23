@@ -21,7 +21,7 @@ fn object_group_law(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error
     }
     let ObjectPackRead(client: take client, ..) = take source
     let (take requests, take lifetime) = std.object.split(take client)
-    let opened = ObjectJournalStart(requests: take requests, register: take held, authority: take metadata, buffers: take workspace, op_ms: BUCKET_LAW_OP_MS)
+    let opened = ObjectJournalStart(requests: take requests, register: take held, authority: take metadata, buffers: take workspace, op_ms: BUCKET_LAW_OP_MS, failed_polls: 0, reclaim: None)
     result.unwrap(channel.send(init, take opened))
     let ObjectJournaled(2, observed_bytes, 2) = result.unwrap(channel.receive(delivered)) else {
         fail("the worker did not acknowledge both frames as one group")
@@ -143,4 +143,64 @@ fn bucket_test_m2_fresh_holder(c: Clock, r: Random, tasks: Tasks) -> Result[(), 
     let outcome = object_fresh_holder_law(c, r, tasks, sim)
     let _ = bucket_law_finish(take sim)
     outcome
+}
+
+fn reclaim_barrier(db: Db) -> Result[(), Error] waits {
+    let (handover, paused): (Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) = channel.new(1)
+    let (resume, resuming): (Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) = channel.new(1)
+    result.unwrap(channel.send(disk_state(db).journal, ObjectPause(take handover, take resuming)))
+    let parked = result.unwrap(channel.receive(paused))
+    let mut lane = object_journal_begin(take parked)
+    let execution = match replace(mut lane.reclaim, None) {
+        Some(pending_reclaim) => history_execute_reclaim(mut lane, pending_reclaim),
+        None => Ok(()),
+    }
+    let returned = object_journal_pause(take lane)
+    result.unwrap(channel.send(resume, take returned))
+    execution
+}
+
+fn object_reclaim_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits {
+    let client = bucket_law_client_lanes(sim, tasks, "s3.test", 1, true, 1)?
+    let mut witness = bucket_law_client_lanes(sim, tasks, "s3.test", 2, true, 1)?
+    let mut options = result.unwrap(sized(Bucket(bucket_law_lanes(1)), 2147483648u64))
+    options.group_bytes = 65536
+    options.head_poll_ms = 10000
+    options.retain = 1
+    let mut writer = open_authority(tasks, object_authority(take client, "bucket", BUCKET_LAW_OP_MS), c, r, options)?
+    let deadline = std.object.deadline_after_ms(witness, BUCKET_LAW_OP_MS)
+    let mut workspace = history_buffers(65536)?
+    let _ = history_fetch(mut witness, "head", mut workspace.witness, deadline)?
+    let old = history_decode_head(workspace.witness)?
+    let (take initial_mark, _) = history_checkpoint(mut witness, old.head, deadline)?
+    let orphan = history_key("e-", HistoryRef(seq: 3, epoch: 1, len: 1, digest: 0x1122))
+    let future = history_key("e-", HistoryRef(seq: 4, epoch: 1, len: 1, digest: 0x3344))
+    let mut candidate = string.into_bytes(string.from("x"))
+    history_create(mut witness, orphan, mut candidate, mut workspace.compare, deadline)?
+    history_create(mut witness, future, mut candidate, mut workspace.compare, deadline)?
+    let _ = create_table(mut writer, spec("kept", std.codec.key_u64(), std.codec.of_u64()))?
+    reclaim_barrier(writer)?
+    let _ = history_fetch(mut witness, "head", mut workspace.witness, deadline)?
+    let current = history_decode_head(workspace.witness)?
+    if current.head.entry.seq != 3 || current.head.floor != 3 { fail("retain-one cut did not move the floor to three") }
+    let obsolete_checkpoint = history_key("e-", old.head.checkpoint)
+    let obsolete_manifest = history_key("m-", initial_mark.manifest)
+    for name in [obsolete_checkpoint, obsolete_manifest, orphan] {
+        if let Error(Remote(NotFound)) = history_fetch(mut witness, name, mut workspace.compare, deadline) {} else {
+            fail("reclaim left a dead key from the captured history")
+        }
+    }
+    let _ = history_fetch(mut witness, future, mut workspace.compare, deadline)?
+    let mut cold = history_reader(take witness, deadline)
+    let restored = history_paged_capture(mut cold, current.head, 1048576)?
+    if restored.state.tips[0].head != 1 { fail("reclaim removed part of the current checkpoint") }
+    close(take writer)
+}
+
+@test
+fn bucket_test_m2_reclaim_execution(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let sim = bucket_law_sim(tasks, c, 534, None, list.new())
+    let reclaimed = object_reclaim_law(c, r, tasks, sim)
+    let _ = bucket_law_finish(take sim)
+    reclaimed
 }

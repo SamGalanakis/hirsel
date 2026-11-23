@@ -859,6 +859,25 @@ impl PackageLaw {
 }
 
 #[test]
+fn package_run_uses_explicit_checkout_std_source() {
+    let mut law = PackageLaw::new();
+    law.write("core/std/source_probe.hirsel", r#"
+pub type Token { amount: u64 }
+pub fn token() -> Token { Token(amount: 271) }
+"#);
+    std::os::unix::fs::symlink(law.libraries.join("core"), law.path("core/core")).unwrap();
+    law.libraries = law.path("core");
+    law.app("app", "[dependencies]\nstd = { major = 1 }\n");
+    law.write("app/main.hirsel", r#"
+fn main() -> Result[(), ()] {
+    let answer: std.source_probe.Token = std.source_probe.token()
+    if answer.amount == 271 { Ok(()) } else { Error(()) }
+}
+"#);
+    PackageLaw::pass(law.run(&["run", "app", "--source-core", "--source-std"]));
+}
+
+#[test]
 fn build_names_unmatched_grant_and_entry() {
     let law = PackageLaw::new();
     law.app("app", "");
@@ -1670,7 +1689,7 @@ fn same_site() -> Result[(), ()] {
         let resolved = crate::package_resolve::Resolution::resolve(workspace,
             crate::package_store::PackageStore::new(Some(law.path("packages"))), false).unwrap();
         let app = crate::package_dir::PackageDir::from_resolution(&resolved, &selected, true).unwrap();
-        let mut request = CheckRequest::from_app(app, Some(&law.libraries), &law.path("address-store"), true).unwrap();
+        let mut request = CheckRequest::from_app(app, Some(&law.libraries), &law.path("address-store")).unwrap();
         request.entry = None;
         let product = Driver::default().check(request, &mut Meter::new(false)).unwrap();
         let path = DefPath::from_full("app@1/tests/same_site").unwrap();

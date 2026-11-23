@@ -185,8 +185,9 @@
     "lines": 4287
   },
   "crates/hirsel-core-driver/src/request.rs": {
-    "lines": 1943,
-    "reason": "h-release-1895"
+    "lines": 1948,
+    "raise_revision": 1,
+    "reason": "m3-s3-slots-2010"
   },
   "crates/hirsel-core-driver/src/request_sequences.rs": {
     "lines": 2641,
@@ -203,7 +204,9 @@
     "lines": 1004
   },
   "crates/hirsel-core-driver/src/test_run_native.rs": {
-    "lines": 2687
+    "lines": 2706,
+    "raise_revision": 1,
+    "reason": "m3-s3-slots-2010"
   },
   "crates/hirsel-core-driver/src/tests.rs": {
     "lines": 4108,

@@ -192,7 +192,7 @@ impl CheckRequest {
         })
     }
     pub fn with_image(dir: &Path, store: &Path, image: Arc<CoreImage>) -> io::Result<Self> {
-        let mut request = Self::from_app(package_dir::PackageDir::open(dir)?, None, store, true)?;
+        let mut request = Self::from_app(package_dir::PackageDir::open(dir)?, None, store)?;
         if !request.use_image(image)? {
             return Err(io::Error::other(
                 "the image holds packages outside the request",
@@ -202,32 +202,18 @@ impl CheckRequest {
     }
 
     pub fn program(dir: &Path, libraries: &Path, store: &Path) -> io::Result<Self> {
-        Self::from_app(
-            package_dir::PackageDir::open(dir)?,
-            Some(libraries),
-            store,
-            true,
-        )
+        Self::directory(dir, libraries, store)
     }
 
     pub fn directory(dir: &Path, libraries: &Path, store: &Path) -> io::Result<Self> {
-        Self::from_app(
-            package_dir::PackageDir::open(dir)?,
-            Some(libraries),
-            store,
-            false,
-        )
+        Self::from_app(package_dir::PackageDir::open(dir)?, Some(libraries), store)
     }
 
     pub(crate) fn from_app(
         app: package_dir::PackageDir,
         libraries: Option<&Path>,
         store: &Path,
-        program: bool,
     ) -> io::Result<Self> {
-        let libraries = libraries.filter(|root| {
-            !program || product::normalized(root) != product::normalized(Path::new("core"))
-        });
         let mut packages = Self::library_packages(libraries, app.needs_std())?;
         packages.extend(app.dependencies);
         packages.push(app.package);

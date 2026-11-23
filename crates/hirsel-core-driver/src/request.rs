@@ -812,9 +812,12 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     } else {
         meter.result.image_selection = Some("source checked: no installed image".into());
     }
-    // An uninstalled compiler can use the current checkout for source checks.
+    let source_libraries = source_core || source_std || libraries.is_some();
+    // A checkout supplies sources when requested. Default native builds
+    // use the bundled libraries even when invoked from the checkout.
     let libraries = libraries.as_deref().or_else(|| {
-        (installed.is_none() && Path::new("core/std").is_dir()).then_some(Path::new("core"))
+        ((source_libraries || installed.is_none()) && Path::new("core/std").is_dir())
+            .then_some(Path::new("core"))
     });
     let directory = dir.as_deref().unwrap_or(Path::new("."));
     let test_store = crate::store::temporary_test_store(test_command && store.is_none())?;
@@ -1047,12 +1050,14 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
         };
         test_owner = Some(app.package.package.clone());
         manifest_runs = app.tests.take();
-        CheckRequest::from_app(
-            app,
-            libraries,
-            &store,
-            native_command || installed.is_some() || inspection.is_some() || image.is_some(),
-        )?
+        let program =
+            native_command || installed.is_some() || inspection.is_some() || image.is_some();
+        let libraries = if source_libraries || !program {
+            libraries
+        } else {
+            None
+        };
+        CheckRequest::from_app(app, libraries, &store)?
     };
     if entry.is_some() {
         request.entry = entry;

@@ -525,8 +525,8 @@ fn object_fixture(tasks: Tasks, seed: u64, tape: String, dialect: u16) -> (objec
     let secret_bytes = string.into_bytes(string.from("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"))
     let root = result.unwrap(secret.seal(take secret_bytes, "kdf"))
     let bucket = object.Bucket(endpoint: string.from("http://s3.test:8080"), aws_region: string.from("us-east-1"), bucket: string.from("bucket"), prefix: string.from(""), style: Virtual)
-    let signer = result.unwrap(sigv4.open(time, take root, "us-east-1", "s3"))
-    let client = result.unwrap(object.start(network, tasks, take bucket, take signer, "AKIAIOSFODNN7EXAMPLE", "", System, time, provide.random(seed), 2, 1048576, 1000000000))
+    let credentials_set = cred.from_secret("AKIAIOSFODNN7EXAMPLE", take root, "")
+    let client = result.unwrap(object.start(network, tasks, take bucket, take credentials_set, None, System, time, provide.random(seed), 2, 1048576, 1000000000))
     (take client, time, take server_task, take driver)
 }
 

@@ -1,0 +1,89 @@
+const PART_BYTES: u64 = 8388608
+
+const PARTS: u64 = 64
+
+fn make_set(mut c: std.object.Client, until: u64) -> Result[(), std.object.Error] waits {
+    let mut u = std.object.upload(mut c, "set", NoClobber, until)?
+    let mut buffers: List[Bytes] = list.with_capacity(8)
+    for _ in 0u64 .. 8 {
+        let mut buf: Bytes = list.with_capacity(PART_BYTES)
+        list.fill(mut buf, PART_BYTES, 165)
+        list.push(mut buffers, take buf)
+    }
+    for _ in 0u64 .. PARTS / 8 {
+        let (sent, returned) = std.object.parts(mut c, mut u, take buffers, until)
+        buffers = take returned
+        if let Error(take e) = take sent {
+            let _ = std.object.abort(mut c, take u, until)
+            return Error(take e)
+        }
+    }
+    let _ = std.object.complete(mut c, take u, until)?
+    Ok(())
+}
+
+fn read_set(mut c: std.object.Client, time: Clock, until: u64, out: Stdout) -> Result[(), Exit] waits {
+    let mut buffers: List[Bytes] = list.with_capacity(PARTS)
+    for _ in 0u64 .. PARTS {
+        list.push(mut buffers, list.with_capacity(PART_BYTES))
+    }
+    let begun = host.mono_ns(time)
+    let (read, payload) = std.object.fetch_parts(mut c, "set", take buffers, until)
+    let elapsed = host.mono_ns(time) - begun
+    if let Ok(info) = read {
+        if info.size != PART_BYTES * PARTS {
+            return Error(Exit(status: 4))
+        }
+    } else {
+        return Error(Exit(status: 4))
+    }
+    for part in payload {
+        if list.len(part) != PART_BYTES || part[0] != 165u8 || part[PART_BYTES - 1] != 165u8 {
+            return Error(Exit(status: 4))
+        }
+    }
+    let mut row = string.from("")
+    string.push_u64(mut row, elapsed)
+    string.push_char(mut row, '\n')
+    let _ = stdout.write(out, row)
+    Ok(())
+}
+
+pub fn main(net: Net, time: Clock, tasks: Tasks, random: Random, root: Secret, a: Args, out: Stdout) -> Result[(), Exit] waits {
+    let Some(operation) = args.get(a, 0) else {
+        return Error(Exit(status: 2))
+    }
+    let Some(lanes_text) = args.get(a, 1) else {
+        return Error(Exit(status: 2))
+    }
+    let Some(endpoint) = args.get(a, 2) else {
+        return Error(Exit(status: 2))
+    }
+    let Some(region_name) = args.get(a, 3) else {
+        return Error(Exit(status: 2))
+    }
+    let Some(bucket_name) = args.get(a, 4) else {
+        return Error(Exit(status: 2))
+    }
+    let Some(prefix) = args.get(a, 5) else {
+        return Error(Exit(status: 2))
+    }
+    let Some(access_id) = args.get(a, 6) else {
+        return Error(Exit(status: 2))
+    }
+    let lanes: u64 = result.unwrap(int.parse(lanes_text))
+    let bucket = std.object.Bucket(endpoint: string.from(endpoint), aws_region: string.from(region_name), bucket: string.from(bucket_name), prefix: string.from(prefix), style: Path)
+    let credentials_set = cred.from_secret(string.from(access_id), secret.share(root), string.new())
+    let end = clock.deadline_after_ms(host.mono_ns(time), 180000)
+    let mut client = match std.object.start(net, tasks, take bucket, take credentials_set, None, System, time, random, lanes, 1048576, end) {
+        Ok(take c) => take c,
+        Error(_) => return Error(Exit(status: 3)),
+    }
+    if operation == "seed" {
+        if let Error(_) = make_set(mut client, end) {
+            return Error(Exit(status: 4))
+        }
+        return Ok(())
+    }
+    read_set(mut client, time, end, out)
+}

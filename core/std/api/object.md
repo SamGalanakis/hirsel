@@ -10,7 +10,7 @@ addresses and TLS verification name. The access key secret stays in a
 `Secret` with the `kdf` use. PUTs and upload parts carry CRC32C. The client
 signs with `UNSIGNED-PAYLOAD` and leaves TLS GET integrity to the record layer.
 
-`start` takes a SigV4 signer, the public access key ID and session token,
+`start` takes `cred.Credentials`, an optional credential grant for refresh,
 a trust policy, a clock, Random and Tasks capabilities, a lane count and
 the admission budget per lane. Each lane owns a connection
 and all of its HTTP buffers. The resolver refreshes DNS at 300-second
@@ -64,7 +64,7 @@ missing object and `Precondition` means a pinned version changed.
 | HTTP 429, or HTTP 503 / XML `SlowDown` | Use throttle backoff for idempotent operations. Resolve conditional PUT and complete by HEAD. |
 | HTTP 400 `RequestTimeout` | Retry. |
 | HTTP 400 `RequestTimeTooSkewed` | Correct the signing time and retry once. |
-| HTTP 403 `ExpiredToken` | Report a fatal credentials error. |
+| HTTP 403 `ExpiredToken` | Refresh and validate new credentials, then retry once. |
 | HTTP 304 or 412 on a no-clobber request | Return `Exists`. Use HEAD when an earlier attempt was uncertain. |
 | HTTP 409 on a pinned range | Retry. |
 | HTTP 404 | Return `NotFound`. Erase and abort succeed. |
@@ -76,3 +76,8 @@ PUT and multipart initiation send the operation's 128-bit random put-id
 as `x-amz-meta-hirsel-put-id`. When resolving a write, HEAD returns
 `Created` for the same put-id and `Exists` for a different or missing
 put-id on the identified object. A missing object permits another attempt.
+
+Dynamic credentials refresh 300 seconds before expiry. A replacement must
+pass a signed HEAD of the bucket. HTTP 403 leaves the active credentials
+in use up to their expiry. Refresh failures wait 100 ms at first and double
+the delay up to expiry. Static credentials enter through `cred.from_secret`.

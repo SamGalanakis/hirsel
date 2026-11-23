@@ -1,0 +1,115 @@
+const PART_BYTES: u64 = 8388608
+
+fn first_byte(data: Bytes, octet: u8) -> bool {
+    if list.len(data) != PART_BYTES {
+        return false
+    }
+    for value in data {
+        if value != octet {
+            return false
+        }
+    }
+    true
+}
+
+fn live_objects(mut c: std.object.Client, until: u64) -> bool waits {
+    let body = string.into_bytes(string.from("Tigris object round trip"))
+    let (stored, back) = std.object.store(mut c, "simple", take body, until)
+    if let Error(_) = stored {
+        return false
+    }
+    let (created, same) = std.object.store_no_clobber(mut c, "conditional", take back, until)
+    if let Ok(Created(_)) = created {} else {
+        return false
+    }
+    let (again, _) = std.object.store_no_clobber(mut c, "conditional", take same, until)
+    if let Ok(Exists) = again {} else {
+        return false
+    }
+    let mut upload = match std.object.upload(mut c, "parts", NoClobber, until) {
+        Ok(take value) => take value,
+        Error(_) => return false,
+    }
+    let mut bodies: List[Bytes] = list.with_capacity(3)
+    for i in 0u64 .. 3 {
+        let mut data: Bytes = list.with_capacity(PART_BYTES)
+        list.fill(mut data, PART_BYTES, int.narrow(i + 1))
+        list.push(mut bodies, take data)
+    }
+    let (written, returned) = std.object.parts(mut c, mut upload, take bodies, until)
+    if let Error(_) = written {
+        let _ = std.object.abort(mut c, take upload, until)
+        return false
+    }
+    if let Ok(Created(meta)) = std.object.complete(mut c, take upload, until) {
+        if meta.size != 3 * PART_BYTES {
+            return false
+        }
+    } else {
+        return false
+    }
+    let mut buffers = take returned
+    for i in 0u64 .. list.len(buffers) {
+        list.clear(mut buffers[i])
+    }
+    let (read, got) = std.object.fetch_parts(mut c, "parts", take buffers, until)
+    if let Ok(info) = read {
+        if info.size != 3 * PART_BYTES {
+            return false
+        }
+    } else {
+        return false
+    }
+    for i in 0u64 .. list.len(got) {
+        if !first_byte(got[i], int.narrow(i + 1)) {
+            return false
+        }
+    }
+    let mut entries: List[std.object.Entry] = list.with_capacity(10)
+    if let Ok(page) = std.object.list(mut c, "", "", mut entries, until) {
+        return !page.truncated && list.len(entries) == 3 && std.object.key_text(entries[0].key) == "conditional" && std.object.key_text(entries[1].key) == "parts" && std.object.key_text(entries[2].key) == "simple"
+    }
+    false
+}
+
+fn erase_live(mut c: std.object.Client, until: u64) -> bool waits {
+    let one = std.object.erase(mut c, "simple", until)
+    let two = std.object.erase(mut c, "conditional", until)
+    let three = std.object.erase(mut c, "parts", until)
+    if let (Ok(()), Ok(()), Ok(())) = (one, two, three) {
+        return true
+    }
+    false
+}
+
+pub fn main(n: Net, c: Clock, tasks: Tasks, random: Random, root: Secret, a: Args, out: Stdout) -> Result[(), Exit] waits {
+    let Some(endpoint) = args.get(a, 0) else {
+        return Error(Exit(status: 2))
+    }
+    let Some(region_name) = args.get(a, 1) else {
+        return Error(Exit(status: 2))
+    }
+    let Some(bucket_name) = args.get(a, 2) else {
+        return Error(Exit(status: 2))
+    }
+    let Some(prefix) = args.get(a, 3) else {
+        return Error(Exit(status: 2))
+    }
+    let Some(access_id) = args.get(a, 4) else {
+        return Error(Exit(status: 2))
+    }
+    let config = std.object.Bucket(endpoint: string.from(endpoint), aws_region: string.from(region_name), bucket: string.from(bucket_name), prefix: string.from(prefix), style: Path)
+    let deadline = clock.deadline_after_ms(host.mono_ns(c), 120000)
+    let set = cred.from_secret(string.from(access_id), secret.share(root), string.new())
+    let mut client = match std.object.start(n, tasks, take config, take set, None, System, c, random, 4, 1048576, deadline) {
+        Ok(take open) => take open,
+        Error(_) => return Error(Exit(status: 3)),
+    }
+    let passed = live_objects(mut client, deadline)
+    let cleaned = erase_live(mut client, clock.deadline_after_ms(host.mono_ns(c), 30000))
+    if !passed || !cleaned {
+        return Error(Exit(status: 4))
+    }
+    let _ = stdout.write(out, "Tigris object round trip passed\n")
+    Ok(())
+}

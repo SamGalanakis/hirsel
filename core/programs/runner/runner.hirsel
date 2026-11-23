@@ -5448,7 +5448,6 @@ fn wire_parse(mut reader: std.wsock.Reader, at: u64, clock: Clock) -> Result[Opt
 fn wire_pool[C: send](take pool: WirePool[C]) -> () waits {
     let WirePool(inbox: take inbox, config: config, clock: clock, service_bytes: service_bytes) = take pool
     let encoder = match std.wsock.outbound(Server, config, None) { Ok(out) => out, Error(_) => return }
-    let (slot, job): (Sender[ServiceAllocationJob[C]], Receiver[ServiceAllocationJob[C]]) = channel.new(1u64)
     while let Ok(take work) = channel.receive(inbox) {
         match take work {
             Decode(take input, at, take to) => {
@@ -5461,11 +5460,12 @@ fn wire_pool[C: send](take pool: WirePool[C]) -> () waits {
                 let _ = channel.try_send(to, take encoded_frame)
             },
             AllocateService(take owned, take plan, take to) => {
-                // A bounded, isolated step: its body takes the job from the slot, so a failure drops the session (None).
-                let _ = channel.try_send(slot, ServiceAllocationJob(service: take owned, plan: take plan))
-                let ran = bound bytes service_bytes { isolate(scoped fn() -> Option[AllocatedState[C]] {
-                    match channel.try_receive(job) { Ok(take next) => Some(wire_allocate_job(take next)), _ => None }
-                }) }
+                // A bounded, isolated step: its body takes the job from a slot charged to the bound, so a failure drops the session (None).
+                let ran = bound bytes service_bytes {
+                    let (slot, job): (Sender[ServiceAllocationJob[C]], Receiver[ServiceAllocationJob[C]]) = channel.new(1u64)
+                    let _ = channel.try_send(slot, ServiceAllocationJob(service: take owned, plan: take plan))
+                    isolate(scoped fn() -> Option[AllocatedState[C]] { match channel.try_receive(job) { Ok(take next) => Some(wire_allocate_job(take next)), _ => None } })
+                }
                 let returned = match take ran { Ok(Ok(Ok(take completed))) => take completed, _ => None }
                 let _ = channel.try_send(to, take returned)
             },

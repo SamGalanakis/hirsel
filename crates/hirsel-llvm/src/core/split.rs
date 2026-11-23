@@ -149,6 +149,16 @@ struct InputSymbol<'a> {
     size: u64,
 }
 
+/// The binding and visibility of a part's copy of a symbol: a global constant becomes a weak
+/// hidden definition; text, locals and weak (shared, carried by every part) constants keep theirs.
+fn copied(y: &InputSymbol, text: bool) -> (u8, u8) {
+    if text || y.bind != raw::STB_GLOBAL {
+        (y.bind, y.other)
+    } else {
+        (raw::STB_WEAK, (y.other & !3) | raw::STV_HIDDEN)
+    }
+}
+
 struct Input<'a> {
     machine: u16,
     flags: u32,
@@ -380,7 +390,7 @@ impl<'i, 'a> Part<'i, 'a> {
     }
 
     /// Copy a section whole with its symbols; its relocations follow from the
-    /// queue. A constant's global symbol becomes a weak hidden definition.
+    /// queue. Its symbols bind as `copied` says.
     fn copy(&mut self, source: usize) -> Result<usize, String> {
         if let Some(&out) = self.copied.get(&source) {
             return Ok(out);
@@ -414,11 +424,7 @@ impl<'i, 'a> Part<'i, 'a> {
         self.queue.push_back(source);
         for &i in &s.symbols {
             let y = &self.input.symbols[i];
-            let (bind, other) = if s.text || y.bind == raw::STB_LOCAL {
-                (y.bind, y.other)
-            } else {
-                (raw::STB_WEAK, (y.other & !3) | raw::STV_HIDDEN)
-            };
+            let (bind, other) = copied(y, s.text);
             let index = self.symbols.len();
             self.symbols.push(Symbol {
                 name: y.name.to_vec(),
@@ -559,20 +565,13 @@ impl<'i, 'a> Part<'i, 'a> {
             at
         });
         self.sections[out].size = self.sections[out].data.len() as u64;
-        let (name, bind, other) = if y.bind == raw::STB_LOCAL {
+        let (bind, other) = copied(y, false);
+        let name = if y.bind == raw::STB_LOCAL {
             // Pool labels are numbered per program; a part's are its own.
             self.pool += 1;
-            (
-                format!(".LCPI0_{}", self.pool - 1).into_bytes(),
-                raw::STB_LOCAL,
-                y.other,
-            )
+            format!(".LCPI0_{}", self.pool - 1).into_bytes()
         } else {
-            (
-                y.name.to_vec(),
-                raw::STB_WEAK,
-                (y.other & !3) | raw::STV_HIDDEN,
-            )
+            y.name.to_vec()
         };
         let index = self.symbols.len();
         self.symbols.push(Symbol {

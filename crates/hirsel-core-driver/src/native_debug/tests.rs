@@ -464,6 +464,130 @@ fn llvm_unwind_covers_live_whole_split_and_reused_code() {
 }
 
 #[test]
+fn llvm_split_parts_share_one_weak_placeholder() {
+    use hirsel_core_ids::ContentHash;
+    use hirsel_core_layout::Target;
+    use hirsel_llvm_lazy::{Lend, Unheld, Unit, core, emit_program_parts};
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    // A placeholder another object may define over (as a `$revision`
+    // carrier is), read by one part and addressed by two others. Exit code:
+    // the value read, plus 10 when both addresses are one address.
+    let ir = r#"
+        @hirsel_slot = weak constant i64 0, align 8
+        define i64 @hirsel_read() noinline nounwind {
+            %v = load i64, ptr @hirsel_slot
+            ret i64 %v
+        }
+        define ptr @hirsel_where_a() noinline nounwind { ret ptr @hirsel_slot }
+        define ptr @hirsel_where_b() noinline nounwind { ret ptr @hirsel_slot }
+        define void @hirsel_entry() noreturn nounwind {
+            %v = call i64 @hirsel_read()
+            %a = call ptr @hirsel_where_a()
+            %b = call ptr @hirsel_where_b()
+            %same = icmp eq ptr %a, %b
+            %ten = select i1 %same, i64 10, i64 0
+            %code = add i64 %v, %ten
+            call void asm sideeffect "syscall", "{rax},{rdi},~{rcx},~{r11},~{memory}"(i64 60, i64 %code)
+            unreachable
+        }"#;
+    let exports = [
+        "hirsel_entry",
+        "hirsel_read",
+        "hirsel_where_a",
+        "hirsel_where_b",
+    ]
+    .map(String::from);
+    let bin = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin");
+    let dir = tempfile::tempdir().unwrap();
+    let assembly = dir.path().join("override.s");
+    std::fs::write(
+        &assembly,
+        ".data\n.globl hirsel_slot\n.type hirsel_slot,@object\n.p2align 3\nhirsel_slot:\n.quad 5\n.size hirsel_slot, 8\n",
+    )
+    .unwrap();
+    let defined = dir.path().join("override.o");
+    let assembled = Command::new(bin.join("clang"))
+        .args(["--target=x86_64-unknown-linux-gnu", "-c"])
+        .arg(&assembly)
+        .arg("-o")
+        .arg(&defined)
+        .status()
+        .unwrap();
+    assert!(assembled.success());
+    let mut generated = Vec::new();
+    for jobs in [0, 1, 2] {
+        let program = emit_program_parts(
+            &[Unit::Text(ir)],
+            &exports,
+            Target::X86_64Linux,
+            jobs,
+            &mut Unheld,
+            Lend::None,
+        )
+        .unwrap();
+        assert_eq!(
+            program.parts.len(),
+            4,
+            "the placeholder kept the module whole"
+        );
+        let names = program
+            .parts
+            .iter()
+            .map(|p| (p.name.as_str(), ContentHash::of_bytes(p.name.as_bytes())))
+            .collect::<Vec<_>>();
+        let objects = match program.objects.as_slice() {
+            [whole] => core::split_native_object(whole, &names, false).unwrap(),
+            objects => objects
+                .iter()
+                .zip(&names)
+                .flat_map(|(bytes, name)| {
+                    core::split_native_object(bytes, std::slice::from_ref(name), false).unwrap()
+                })
+                .collect(),
+        };
+        let paths = objects
+            .iter()
+            .enumerate()
+            .map(|(i, object)| {
+                let path = dir.path().join(format!("j{jobs}-part{i}.o"));
+                std::fs::write(&path, &object.bytes).unwrap();
+                path
+            })
+            .collect::<Vec<_>>();
+        for (overridden, expected) in [(false, 10), (true, 15)] {
+            let image = dir.path().join(format!("j{jobs}-{overridden}"));
+            let link = Command::new(bin.join("ld.lld"))
+                .args(["-e", "hirsel_entry", "-o"])
+                .arg(&image)
+                .args(&paths)
+                .args(overridden.then_some(&defined))
+                .output()
+                .unwrap();
+            assert!(
+                link.status.success(),
+                "{}",
+                String::from_utf8_lossy(&link.stderr)
+            );
+            let status = Command::new(&image).status().unwrap();
+            assert_eq!(
+                status.code(),
+                Some(expected),
+                "jobs {jobs}, override {overridden}"
+            );
+        }
+        if jobs > 0 {
+            generated.push(objects.into_iter().map(|o| o.bytes).collect::<Vec<_>>());
+        }
+    }
+    assert_eq!(
+        generated[0], generated[1],
+        "one and two jobs generate different parts"
+    );
+}
+
+#[test]
 fn cranelift_unwind_links_into_pie_from_whole_and_cached_objects() {
     use gimli::{BaseAddresses, EhFrame, LittleEndian, UnwindSection as _};
     use hirsel_core_ids::ContentHash;

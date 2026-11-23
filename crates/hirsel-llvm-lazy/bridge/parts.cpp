@@ -215,9 +215,20 @@ bool lent_constant(const GlobalVariable &g) {
            !g.isThreadLocal() && !g.hasSection() && !g.hasComdat();
 }
 
+// A constant every object that carries it may define, of which the link keeps
+// one (`weak`, `weak_odr`, `linkonce`, `linkonce_odr`): a lent constant, a
+// descriptor, or a placeholder (`weak`) that another object defines over.
+// Like a local constant, each part that reaches it carries its own copy, under
+// its own linkage and visibility: a placeholder's contents still never fold,
+// and its address stays one address.
+bool shared_constant(const GlobalVariable &g) {
+    return g.hasInitializer() && g.isConstant() && g.isWeakForLinker() && !g.hasCommonLinkage() &&
+           !g.isThreadLocal() && !g.hasSection() && !g.hasComdat();
+}
+
 // Whether a part that reaches `g` carries its initializer whatever it is for:
-// a local constant, or one a library lent.
-bool carried(const GlobalVariable &g) { return g.hasLocalLinkage() || lent_constant(g); }
+// a local constant, or one the link keeps one copy of.
+bool carried(const GlobalVariable &g) { return g.hasLocalLinkage() || shared_constant(g); }
 
 struct References {
     // Whether a definition with external linkage brings its initializer: a
@@ -425,7 +436,10 @@ void with_part(Module &m, Function &f, const StringMap<std::string> &sets, std::
             d->copyAttributesFrom(var);
             d->copyMetadata(var, 0);
             if (var->hasInitializer() && (refs.initializers || carried(*var))) {
-                d->setLinkage(GlobalValue::LinkOnceODRLinkage);
+                // A local constant becomes one weak hidden copy per part; a
+                // shared one keeps its own linkage.
+                d->setLinkage(refs.initializers || var->hasLocalLinkage() ? GlobalValue::LinkOnceODRLinkage
+                                                                          : var->getLinkage());
                 constants.push_back({var, d});
             }
             auto line = sets.find(var->getName());
@@ -536,27 +550,29 @@ std::string machine_text(const TargetMachine &tm) {
 // assembly beyond the site aliases, explicit sections, comdats, aliases,
 // writable or thread-local data, unwinding personalities, named metadata
 // that reaches the object) is not a part's, so such a module is generated
-// and keyed whole.
-std::string unsplittable_content(const Module &m);
-std::string unsplittable(const Module &m) {
+// and keyed whole. With `shared`, a part carries each shared constant it
+// reaches (`shared_constant`), as code generation does; without, only a lent
+// one: a tail's part defines every constant `linkonce_odr`, and a library's
+// lent bodies do too (`lent_bodies`), which would fold a placeholder.
+std::string unsplittable_content(const Module &m, bool shared);
+std::string unsplittable(const Module &m, bool shared) {
     Triple triple(m.getTargetTriple());
     if (triple.getArch() != Triple::x86_64 || !triple.isOSBinFormatELF())
         return "the object split is x86-64 ELF only";
-    return unsplittable_content(m);
+    return unsplittable_content(m, shared);
 }
 
 // Why `m`'s content, whatever its target, cannot be split: `unsplittable`
 // less the target.
-std::string unsplittable_content(const Module &m) {
+std::string unsplittable_content(const Module &m, bool shared) {
     if (!m.alias_empty() || !m.ifunc_empty()) return "aliases";
     if (!m.getComdatSymbolTable().empty()) return "comdats";
     for (const GlobalVariable &g : m.globals()) {
         if (g.hasAppendingLinkage()) return "appending global " + g.getName().str();
         if (g.isDeclaration()) continue;
-        // A part copies each constant it reaches as its own weak hidden
-        // definition, so a constant must be local, or lent under the name its
-        // library's parts define it by: nothing else outside names it.
-        if (lent_constant(g)) continue;
+        // A part copies each constant it reaches as its own weak definition,
+        // so a constant must be local, or one the link keeps one copy of.
+        if (shared ? shared_constant(g) : lent_constant(g)) continue;
         if (!g.isConstant() || !g.hasLocalLinkage() || g.isThreadLocal() || g.hasSection() ||
             g.hasComdat())
             return "data " + g.getName().str();
@@ -820,13 +836,13 @@ extern "C" int hirsel_llvm_emit_parts(LLVMModuleRef module, LLVMTargetMachineRef
         }
     }
     name_from_content(m);
-    bool whole = !unsplittable(m).empty();
+    bool whole = !unsplittable(m, /*shared=*/true).empty();
     if (lend) {
         // A library whose target alone has no split (AArch64) is lent from
         // and generated whole: its local functions become hidden globals, as
         // its parts' are, so the names the lent bodies call are the names the
         // library's link contract gives its object's definitions.
-        if (std::string content = unsplittable_content(m); !content.empty()) {
+        if (std::string content = unsplittable_content(m, /*shared=*/false); !content.empty()) {
             *error = strdup(("a library that lends its bodies is cut per definition: " + content).c_str());
             return 1;
         }
@@ -1347,7 +1363,7 @@ extern "C" void hirsel_llvm_release_tails(LLVMModuleRef module, LLVMTargetMachin
     std::vector<Function *> bodies;
     for (Function &f : m)
         if (!f.isDeclaration()) bodies.push_back(&f);
-    bool keyed = find && unsplittable(m).empty();
+    bool keyed = find && unsplittable(m, /*shared=*/false).empty();
     const bool debug_info = keyed && m.getModuleFlag("Debug Info Version");
     // The pinned reader's UpgradeDebugInfo verifier looks up both names
     // even on x86. A key records the context's kind registry, as the

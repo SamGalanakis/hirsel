@@ -46,28 +46,35 @@ fn filter(sources: &SourceMap, scans: &[Referenced]) -> (std::sync::Arc<SourceMa
         .iter()
         .flat_map(|scan| scan.items.iter().map(Vec::as_slice))
         .collect();
+    let named = named_items(sources, &names);
     let mut last_owner = None;
-    let retained = sources.items.iter().filter(|(item, _)| {
-        let item = *item;
-        if names.contains(site_symbol(item).as_bytes()) {
-            return true;
-        }
-        if !hirsel_core_ir::source::numbers_unit_sites(item) {
-            return false;
-        }
-        // Numbered items of the same unit share one owner symbol and are
-        // adjacent in the source map's item order.
-        let owner = (&item.0.package, item.0.modules.as_slice());
-        if let Some((prior, used)) = last_owner
-            && owner == prior
-        {
-            return used;
-        }
-        let used = names
-            .contains(site_symbol(&hirsel_core_ir::source::release_site_owner(item)).as_bytes());
-        last_owner = Some((owner, used));
-        used
-    });
+    let retained = sources
+        .items
+        .iter()
+        .zip(named)
+        .filter(|((item, _), named)| {
+            let item = *item;
+            if *named {
+                return true;
+            }
+            if !hirsel_core_ir::source::numbers_unit_sites(item) {
+                return false;
+            }
+            // Numbered items of the same unit share one owner symbol and are
+            // adjacent in the source map's item order.
+            let owner = (&item.0.package, item.0.modules.as_slice());
+            if let Some((prior, used)) = last_owner
+                && owner == prior
+            {
+                return used;
+            }
+            let used = names.contains(
+                site_symbol(&hirsel_core_ir::source::release_site_owner(item)).as_bytes(),
+            );
+            last_owner = Some((owner, used));
+            used
+        });
+    let retained = retained.map(|(item, _)| item);
     let mut items: BTreeMap<_, _> = retained.map(|(item, at)| (item.clone(), *at)).collect();
     let mut file_numbers = vec![None; sources.files.len()];
     for item in items.values() {
@@ -91,6 +98,34 @@ fn filter(sources: &SourceMap, scans: &[Referenced]) -> (std::sync::Arc<SourceMa
         }),
         spawns_units,
     )
+}
+
+/// Whether each of `sources`' items, in map order, is one of `names` by its
+/// own site symbol. A symbol is a hash of its item, so the items are split
+/// across this process's processors.
+fn named_items(sources: &SourceMap, names: &HashSet<&[u8]>) -> Vec<bool> {
+    let items: Vec<&hirsel_core_ids::DefPath> = sources.items.keys().collect();
+    let threads = std::thread::available_parallelism().map_or(1, usize::from);
+    let chunk = items.len().div_ceil(threads).max(1024);
+    let named = |items: &[&hirsel_core_ids::DefPath]| -> Vec<bool> {
+        items
+            .iter()
+            .map(|item| names.contains(site_symbol(item).as_bytes()))
+            .collect()
+    };
+    if items.len() <= chunk {
+        return named(&items);
+    }
+    std::thread::scope(|scope| {
+        let parts: Vec<_> = items
+            .chunks(chunk)
+            .map(|part| scope.spawn(move || named(part)))
+            .collect();
+        parts
+            .into_iter()
+            .flat_map(|part| part.join().expect("a site symbol scan panicked"))
+            .collect()
+    })
 }
 
 /// The site items an input object's allocated sections reference, and

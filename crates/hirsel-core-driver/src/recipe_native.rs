@@ -1488,48 +1488,60 @@ fn source_map(
         });
         sources.points.insert(path, points);
     }
-    sources.items = items.into_iter().collect();
-    if bound.is_empty() && memos.is_empty() {
-        return Ok(sources);
-    }
-    // Bind unit items by their site's file and ordinal. Looking up a
-    // synthetic DefPath for every coordinate would allocate it again.
-    let files: HashMap<_, _> = sources
-        .files
-        .iter()
-        .enumerate()
-        .map(|(index, file)| {
-            (
-                file.path.as_str(),
-                (index as u32, &sources.points[&file.path]),
-            )
-        })
-        .collect();
-    let bindings = bound
-        .iter()
-        .map(|(identity, bound)| (identity, &bound.points, &bound.anchored))
-        .chain(
-            memos
-                .iter()
-                .map(|(identity, (_, memo))| (identity, &memo.points, &memo.anchored)),
-        );
-    for (identity, sites, anchored) in bindings {
-        let symbol = hirsel_core_ir::symbol(identity.digest());
-        for &(index, point) in anchored {
-            let (file, line, column) = &sites[point as usize];
-            let (file, points) = files[file.as_str()];
-            let file_offset = points
-                .binary_search(&(*line, *column))
-                .expect("the unit's points were added to the source map");
-            sources.items.insert(
-                unit_item(&symbol, ItemId(index)),
-                ItemSource {
-                    file,
-                    file_offset: file_offset as u32,
-                },
+    if !bound.is_empty() || !memos.is_empty() {
+        // Bind unit items by their site's file and ordinal. Looking up a
+        // synthetic DefPath for every coordinate would allocate it again.
+        let files: HashMap<_, _> = sources
+            .files
+            .iter()
+            .enumerate()
+            .map(|(index, file)| {
+                (
+                    file.path.as_str(),
+                    (index as u32, &sources.points[&file.path]),
+                )
+            })
+            .collect();
+        let bindings = bound
+            .iter()
+            .map(|(identity, bound)| (identity, &bound.points, &bound.anchored))
+            .chain(
+                memos
+                    .iter()
+                    .map(|(identity, (_, memo))| (identity, &memo.points, &memo.anchored)),
             );
+        // Unit items share their package and first module, so their symbol
+        // and then their name order them as the map does; sorted, they join
+        // the site items as one more run rather than by a search per item.
+        let mut units = Vec::new();
+        for (identity, sites, anchored) in bindings {
+            let symbol: std::rc::Rc<str> = hirsel_core_ir::symbol(identity.digest()).into();
+            for &(index, point) in anchored {
+                let (file, line, column) = &sites[point as usize];
+                let (file, points) = files[file.as_str()];
+                let file_offset = points
+                    .binary_search(&(*line, *column))
+                    .expect("the unit's points were added to the source map");
+                units.push((
+                    std::rc::Rc::clone(&symbol),
+                    index.to_string(),
+                    ItemSource {
+                        file,
+                        file_offset: file_offset as u32,
+                    },
+                ));
+            }
         }
+        // Stable, so a later binding of an item replaces an earlier one, as
+        // the map's construction from a sorted sequence keeps the last.
+        units.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
+        items.extend(
+            units
+                .into_iter()
+                .map(|(symbol, name, at)| (unit_item_named(&symbol, name), at)),
+        );
     }
+    sources.items = items.into_iter().collect();
     Ok(sources)
 }
 
@@ -1547,13 +1559,17 @@ fn annex_sites(annex: &Annex) -> impl Iterator<Item = &Site> {
 /// The source item of a relocated unit's item `index`, named by the unit's
 /// `symbol`.
 fn unit_item(symbol: &str, index: ItemId) -> DefPath {
+    unit_item_named(symbol, index.0.to_string())
+}
+
+fn unit_item_named(symbol: &str, name: String) -> DefPath {
     DefPath(hirsel_core_ids::ItemPath {
         package: PackageId {
             name: "source".into(),
             version: "1".into(),
         },
         modules: vec!["unit".into(), symbol.into()],
-        name: index.0.to_string(),
+        name,
     })
 }
 

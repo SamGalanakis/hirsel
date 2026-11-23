@@ -725,17 +725,22 @@ fn message(b: Browser, at: u64, id: u64, key: String, prompt: String) -> Result[
         text: string.from(prompt))), 202u16, json((Placed(id) : harness.Disposition)))
 }
 
-type SeenReply { at: u64, text: String, first_preview_ns: u64 }
+type SeenReply { at: u64, text: String, first_preview_ns: u64, preview_deltas: u64 }
 
 fn browser_reply(mut c: std.http_client.Connection, mut dec: std.sse.Decoder, clock: Clock,
     run: u64, after: u64, until: String, expect_preview: bool) -> Result[SeenReply, String] waits {
     let rows: std.json.Format[harness.gateway_http.Shown] = result.unwrap(std.json.interop())
     let drafts: std.json.Format[harness.preview.Draft] = result.unwrap(std.json.interop())
+    let deltas: std.json.Format[harness.gateway_http.PreviewDelta] = result.unwrap(std.json.interop())
     let mut chunk: Bytes = list.with_capacity(8192u64)
-    let mut reply = SeenReply(at: after, text: "", first_preview_ns: 0u64)
+    let mut reply = SeenReply(at: after, text: "", first_preview_ns: 0u64, preview_deltas: 0u64)
     let mut status = string.new()
-    let mut draft = string.new()
+    let mut batch_ready = false
+    let mut first_text = string.new()
     let mut draft_at = 0u64
+    let mut draft_seq = 0u64
+    let mut draft_offset = 0u64
+    let mut draft = string.new()
     let mut cleared = false
     loop {
         match std.http_client.read(mut c, mut chunk) {
@@ -745,6 +750,7 @@ fn browser_reply(mut c: std.http_client.Connection, mut dec: std.sse.Decoder, cl
         }
         let fed = std.sse.feed(mut dec, chunk, fn(name: Bytes, data: Bytes, event_id: Bytes) -> std.sse.FeedControl[String] {
             if name == b"message" {
+                batch_ready = false
                 let Ok(harness.gateway_http.Shown(at: at, line: take line)) = std.json.decode_typed(rows, std.http.copy_bytes(data), 65536u64)
                     else { return Fail("invalid transcript event") }
                 match take line {
@@ -754,18 +760,36 @@ fn browser_reply(mut c: std.http_client.Connection, mut dec: std.sse.Decoder, cl
                         reply.text = take text
                     },
                 }
+            } else if name == b"batch" {
+                let Ok(version) = string.from_utf8(std.http.copy_bytes(data)) else { return Fail("invalid batch version") }
+                if let Error(_) = std.int.parse_uint(version, 10) { return Fail("invalid batch version") }
+                batch_ready = true
             } else if expect_preview && name == b"preview" {
-                let Ok(harness.preview.Draft(key: key, text: take text, ..)) = std.json.decode_typed(drafts, std.http.copy_bytes(data), 65536u64)
+                let Ok(harness.preview.Draft(key: key, seq: seq, offset: offset, text: take text, ..)) =
+                    std.json.decode_typed(drafts, std.http.copy_bytes(data), 65536u64)
                     else { return Fail("invalid preview event") }
                 if key.run == run && key.tool == None && string.byte_len(text) > 0u64 {
                     if key.entry + 1u64 <= reply.at { return Fail("browser saw a draft after its committed row") }
                     if reply.first_preview_ns == 0u64 {
                         reply.first_preview_ns = host.mono_ns(clock)
-                        draft_at = key.entry + 1u64
-                        draft = take text
+                        if offset != 0u64 { return Fail("first preview started past the answer's first byte") }
+                        first_text = string.from(text)
                     }
+                    draft_at = key.entry + 1u64
+                    draft_seq = seq
+                    draft_offset = offset
+                    draft = take text
                     cleared = false
                 }
+            } else if expect_preview && name == b"preview-delta" && draft_at > 0u64 && !cleared {
+                let Ok(more) = std.json.decode_typed(deltas, std.http.copy_bytes(data), 65536u64)
+                    else { return Fail("invalid preview delta event") }
+                if draft_at <= reply.at || more.seq <= draft_seq || more.at != draft_offset + string.byte_len(draft) {
+                    return Fail("preview delta did not continue the active draft")
+                }
+                string.push(mut draft, more.text)
+                draft_seq = more.seq
+                reply.preview_deltas += 1u64
             } else if name == b"preview-clear" && draft_at > 0u64 { cleared = true }
             Continue
         })
@@ -775,12 +799,16 @@ fn browser_reply(mut c: std.http_client.Connection, mut dec: std.sse.Decoder, cl
             Ok(_) => (),
         }
         list.clear(mut chunk)
-        if status == until && reply.at > after {
+        if batch_ready && status == until && reply.at > after {
             if !expect_preview { return Ok(take reply) }
             if draft_at == 0u64 { return Error("browser received no text preview for the wake answer") }
             if draft_at != reply.at { return Error("preview and committed answer refer to different entries") }
-            if !string.starts_with(reply.text, draft) { return Error("first draft did not match the committed text prefix") }
-            if draft == reply.text { return Error("first preview already held the whole answer") }
+            if !string.starts_with(reply.text, first_text) { return Error("first draft did not match the committed text prefix") }
+            if first_text == reply.text { return Error("first preview already held the whole answer") }
+            let end = draft_offset + string.byte_len(draft)
+            if end > string.byte_len(reply.text) || string.slice(reply.text, draft_offset, end) != draft {
+                return Error("latest draft did not match its place in the committed text")
+            }
             if cleared { return Ok(take reply) }
         }
     }
@@ -887,6 +915,7 @@ fn live_turns(out: Stdout, root: Dir, d: harness.gateway.Door[Services], b: Brow
         return Error("wake answer did not contain the requested numbered explanation")
     }
     count(out, "first preview latency ns: ", resumed.first_preview_ns - started)
+    count(out, "wake answer preview deltas: ", resumed.preview_deltas)
     let woken = live_down(d, b.clock, asleep.ups)?
     count(out, "place ups after wake message: ", woken.ups)
     count(out, "journal commits, wake answer: ", journal(dir) - second)

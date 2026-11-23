@@ -13,6 +13,7 @@ const cancelled = Promise.withResolvers()
 const handler = createMcpHandler(() => {
   const server = new McpServer({ name: 'sdk-server', version: '1' })
   server.registerTool('echo', {
+    description: 'Echo text',
     inputSchema: fromJsonSchema({ type: 'object', properties: { text: { type: 'string', 'x-mcp-header': 'Text' } }, required: ['text'] })
   }, ({ text }) => ({ content: [{ type: 'text', text }] }))
   server.registerTool('failure', {}, () => ({ isError: true, content: [{ type: 'text', text: 'tool failed' }] }))
@@ -33,7 +34,16 @@ const handler = createMcpHandler(() => {
   return server
 }, { legacy: 'reject' })
 
-const http = createServer(toNodeHandler(handler))
+const adapter = toNodeHandler({
+  async fetch(request, options) {
+    const response = await handler.fetch(request, options)
+    if (response.ok && request.headers.get('Mcp-Method') === 'subscriptions/listen') {
+      handler.notify.toolsChanged()
+    }
+    return response
+  }
+})
+const http = createServer(adapter)
 http.listen(0, '127.0.0.1')
 await once(http, 'listening')
 try {

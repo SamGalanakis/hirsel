@@ -100,6 +100,12 @@ fn check_sdk(n: Net, c: Clock, authority: String, port: u16) waits {
     if metadata.tool_name(echo_tool) != "echo" {
         fail("wrong listed tool")
     }
+    let Some(description) = metadata.tool_description(echo_tool) else {
+        fail("missing tool description")
+    }
+    if description != "Echo text" {
+        fail("wrong tool description")
+    }
     let identity = rpc.Identity(name: string.from("hirsel-test"), version: string.from("1"))
     let request_id = option.unwrap(rpc.id_value("2"))
     let echo_result = result.unwrap(client.call_tool(n, c, peer, None, identity, request_id, echo_tool, string.from("{\"text\":\" café \"}"), None, MEMORY, 65536, std.clock.deadline_after_ms(host.mono_ns(c), 5000), ignore_notice))
@@ -128,6 +134,43 @@ fn check_sdk(n: Net, c: Clock, authority: String, port: u16) waits {
         Error(Disconnected) => fail("stream closed before progress"),
         Error(InvalidMessage) => fail("invalid SSE message"),
         _ => fail("SSE stream did not cancel"),
+    }
+    let mut acknowledged = false
+    match invoke(n, c, peer, "subscriptions/listen", "{\"notifications\":{\"toolsListChanged\":true}}", fn(notice: client.Notice) -> bool {
+        let Some(raw_meta) = map.get(notice.params, "_meta") else {
+            fail("missing subscription metadata")
+        }
+        let subscription_meta = result.unwrap(rpc.object(raw_meta))
+        let Some(subscription_id) = map.get(subscription_meta, metadata.SUBSCRIPTION_ID) else {
+            fail("missing subscription ID")
+        }
+        if subscription_id != "1" {
+            fail("wrong subscription ID")
+        }
+        if notice.method == "notifications/subscriptions/acknowledged" {
+            if acknowledged {
+                fail("duplicate subscription acknowledgment")
+            }
+            let Some(raw_filter) = map.get(notice.params, "notifications") else {
+                fail("missing honored filter")
+            }
+            let filter = result.unwrap(rpc.object(raw_filter))
+            let Some(honored) = map.get(filter, "toolsListChanged") else {
+                fail("tool-list filter refused")
+            }
+            if honored != "true" {
+                fail("tool-list filter refused")
+            }
+            acknowledged = true
+            return true
+        }
+        if !acknowledged || notice.method != "notifications/tools/list_changed" {
+            fail("unexpected subscription notification")
+        }
+        false
+    }) {
+        Error(Cancelled) => {},
+        _ => fail("subscription did not deliver a tools-list change"),
     }
     let _ = result.unwrap(invoke(n, c, peer, "server/discover", "{}", ignore_notice))
 }

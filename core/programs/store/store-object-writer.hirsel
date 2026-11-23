@@ -196,6 +196,10 @@ fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: Holde
     let old = lane.register.head
     let seq = history_next_id(old.entry.seq)?
     let generation = history_next_id(db.checkpointed)?
+    let activation = match delta {
+        ReplaceMain(main, _) => main.activation,
+        _ => None,
+    }
     let now = std.object.deadline_after_ms(lane.client, lane.op_ms)
     let (take previous, _) = history_checkpoint(mut lane.client, old, now)?
     let retained = history_retain(previous, old.checkpoint, seq, disk_state(db).options.retain)?
@@ -228,7 +232,7 @@ fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: Holde
         })?
         let locate_root = history_make_locator(mut lane.client, old.store, seq, old.pair.epoch, take refs, mut workspace, now)?
         let installed = history_create_manifest(mut lane.client, old.store, old.pair.epoch, manifest, mut workspace, now)?
-        let advanced = history_publish_checkpoint(mut lane.client, mut lane.register, lane.authority, installed, retained, locate_root, None, mut workspace, now)?
+        let advanced = history_publish_checkpoint(mut lane.client, mut lane.register, lane.authority, installed, retained, locate_root, activation, mut workspace, now)?
         match advanced {
             HistoryApplied(_) => Ok((take pages, take candidate_locator)),
             _ => Error(Undecided),

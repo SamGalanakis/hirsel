@@ -30,6 +30,7 @@ std = { major = 1 }
 "store-object-authority.hirsel" = "store"
 "store-object-open.hirsel" = "store"
 "store-object-cut.hirsel" = "store"
+"store-activation.hirsel" = "store"
 "store-object-journal.hirsel" = "store"
 "store-object-writer.hirsel" = "store"
 "store-levels.hirsel" = "store"

@@ -3003,7 +3003,7 @@ fn head_prepare[G: send, H: send](mut db: store.Db, selection: Selection, persis
     activation_result(store.stage_activation(mut stage, version, current, description, release_codec, record))?
     let h = activation_result(store.with_staged_schema(mut stage, handles))?
     let h2 = activation_result(store.with_staged_schema(mut stage, handles))?
-    if let Error(take problem) = store.install_activation(mut db, take stage) {
+    if let Error(take problem) = store.install_bound_activation(mut db, take stage, version, record.binding) {
         if let Tiered(Install) = problem { return Error(Store(take problem)) }
         if let InstallAt(_) = selection { return Error(InstallUncertain(take problem)) }
         return Error(Store(take problem))

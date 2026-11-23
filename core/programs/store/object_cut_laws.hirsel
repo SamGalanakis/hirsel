@@ -127,3 +127,57 @@ fn bucket_test_m2_pack_emission(c: Clock, r: Random, tasks: Tasks) -> Result[(),
     let _ = bucket_law_finish(take sim)
     outcome
 }
+
+fn bucket_activation_noop(mut _phase: Migration) -> Result[(), Error] {
+    Ok(())
+}
+
+fn object_binding_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits {
+    let client = bucket_law_client_lanes(sim, tasks, "s3.test", 1, true, 1)?
+    let mut options = result.unwrap(sized(Bucket(bucket_law_lanes(0)), 2147483648u64))
+    options.group_bytes = 65536
+    options.head_poll_ms = 10000
+    let mut writer = open_authority(tasks, object_authority(take client, "bucket", BUCKET_LAW_OP_MS), c, r, options)?
+    let _ = create_table(mut writer, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
+    let rows = table(mut writer, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    for k in 0u64 .. 10 {
+        let committed = run(mut writer, None, scoped fn(mut tx: Tx) -> Result[(), Error] {
+            put(mut tx, rows, k, k)
+        })?
+        if let Committed(_) = committed {} else { fail("the fixture write was refused") }
+    }
+    if version(snapshot(writer)) != 11 { fail("the fixture has the wrong install base") }
+    let mut staged = stage_migration(writer, tasks, code.describe(bucket_activation_noop))?
+    let description = string.into_bytes(string.from("release 12"))
+    stage_activation(mut staged, 12, None, description, std.codec.of_u64(), 73u64)?
+    let mut binding: Bytes = list.with_capacity(32)
+    list.fill(mut binding, 32, 91u8)
+    install_bound_activation(mut writer, take staged, 12, binding)?
+    let d = bucket_law_client_lanes(sim, tasks, "s3.test", 2, true, 1)?
+    let mut process = followers()
+    options.expect = Some(identity(writer))
+    let installed = follower(mut process, tasks, object_authority(take d, "bucket", BUCKET_LAW_OP_MS), sim.time, options)?
+    let observed = follower_head(installed)?
+    let captured = snapshot_follower(installed, Branch(store: observed.store, id: 0))?
+    let releases = follower_table(installed, "hirsel.runner.releases", std.codec.key_u64(), std.codec.of_u64())?
+    if observed.activation != 12 || observed.binding != binding || version(captured) != 12 || get(captured, releases, 12)? != Some(73u64) {
+        fail("activation, binding and the release row were not published by one checkpoint")
+    }
+    let bad_client = bucket_law_client_lanes(sim, tasks, "s3.test", 3, true, 1)?
+    options.activation = Some(12)
+    options.binding = Some(list.new())
+    let wrong = open_authority(tasks, object_authority(take bad_client, "bucket", BUCKET_LAW_OP_MS), c, r, options)
+    if let Error(NotCurrent(12)) = wrong {} else { fail("a wrong binding was admitted") }
+    let deadline = clock.deadline_after_ms(host.mono_ns(sim.time), BUCKET_LAW_OP_MS)
+    let clean = fresh_snapshot(mut writer, deadline)?
+    if version(clean) != 12 || claim_of(writer)?.epoch != 1 { fail("a refused binding fenced the incumbent") }
+    close(take writer)
+}
+
+@test
+fn bucket_test_m2_binding(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let sim = bucket_law_sim(tasks, c, 77, None, list.new())
+    let outcome = object_binding_law(c, r, tasks, sim)
+    let _ = bucket_law_finish(take sim)
+    outcome
+}

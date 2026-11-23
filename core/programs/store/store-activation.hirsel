@@ -1,0 +1,97 @@
+fn stage_system_table[K, V](mut plan: SchemaPlan, name: String, key: std.codec.Key[K], value: std.codec.Codec[V]) -> Result[Table[K, V], Error] {
+    let exists = match get_page_row(plan.roots.catalog, table_key(name)?) {
+        Some(_) => true,
+        None => false
+    }
+    if !exists {
+        stage_create_table(mut plan, spec(named(name)?, key, value))?
+    }
+    stage_table(mut plan, name, key, value)
+}
+
+fn stage_system_put[K, V](mut plan: SchemaPlan, t: Table[K, V], k: K, v: V) -> Result[(), Error] {
+    let p = logical_key(t.id, encode_key(t.key, k)?)?
+    let mut raw: Bytes = list.new()
+    capacity(le(mut raw, int.widen(t.readers.current), 2))?
+    std.codec.encode(t.readers.codec, v, mut raw) ?=> |_| Limit(Value)
+    if list.len(raw) > VALUE_LIMIT {
+        return Error(Limit(Value))
+    }
+    let mut live = plan.live
+    if !plan.retained {
+        if let Some(old) = get_page_row(plan.roots.collections, p) {
+            live -= entry(p, old)
+        }
+    }
+    live = int.saturating_add(live, entry(p, raw))
+    over_ceiling(live, plan.ceiling)?
+    let _ = insert_row(mut plan.next_node, mut plan.roots, take p, take raw)?
+    plan.live = live
+    plan.changed = true
+    Ok(())
+}
+
+pub fn stage_activation[V](mut staged: StagedMigration, release_at: u64, previous: Option[Bytes], current: Bytes, codec: std.codec.Codec[V], release: V) -> Result[(), Error] {
+    let activation = stage_system_table(mut staged.plan, "hirsel.runner.activation", std.codec.key_u8(), std.codec.of_bytes())?
+    let releases = stage_system_table(mut staged.plan, "hirsel.runner.releases", std.codec.key_u64(), codec)?
+    if let Some(old) = previous {
+        stage_system_put(mut staged.plan, activation, 1u8, old)?
+    }
+    stage_system_put(mut staged.plan, activation, 0u8, current)?
+    stage_system_put(mut staged.plan, releases, release_at, release)
+}
+
+pub fn install_activation(mut db: Db, take staged: StagedMigration) -> Result[(), Error] waits {
+    if object_writer_open(db) { return Error(Missing("binding")) }
+    install_activation_layout(mut db, take staged, None)
+}
+
+pub fn install_bound_activation(mut db: Db, take staged: StagedMigration, activation: u64, binding: Bytes) -> Result[(), Error] waits {
+    let update = if object_writer_open(db) {
+        if list.len(binding) != 32 { return Error(Missing("binding")) }
+        let Some(expected) = int.checked_add(db.heads[0].head, 1) else { return Error(Limit(Ids)) }
+        if activation != expected { return Error(NotCurrent(db.heads[0].head)) }
+        let mut digest: Inline[u8, 32] =[0; 32]
+        for i in 0u64 .. 32 { digest[i] = binding[i] }
+        Some(HistoryActivation(number: activation, binding: digest))
+    } else {
+        None
+    }
+    install_activation_layout(mut db, take staged, update)
+}
+
+fn install_activation_layout(mut db: Db, take staged: StagedMigration, activation: Option[HistoryActivation]) -> Result[(), Error] waits {
+    require_memory_collections(store_has_tiered(db), Install)?
+    let StagedMigration(plan: take plan) = take staged
+    let old_fence = db.fence
+    if is_disk(db) {
+        db.fence = 1
+    }
+    match publish_schema_plan_binding(mut db, take plan, activation) {
+        Ok(_) => Ok(()),
+        Error(take problem) => {
+            db.fence = old_fence;
+            Error(take problem)
+        }
+    }
+}
+
+fn publish_schema_plan(mut db: Db, take prepared: SchemaPlan) -> Result[Ticket, Error] waits {
+    publish_schema_plan_binding(mut db, take prepared, None)
+}
+
+fn publish_schema_plan_binding(mut db: Db, take prepared: SchemaPlan, activation: Option[HistoryActivation]) -> Result[Ticket, Error] waits {
+    let SchemaPlan(roots: take roots, next_node: ids, next_table: tables, live: live, bindings: take bindings, ..) = take prepared
+    over_ceiling(live, db.ceiling)?
+    // Schema commits are main's (section 1.2). Installed only after the cut.
+    let replacement = ProposedMain(roots: take roots, head: db.heads[0u64].head + 1, at: db.heads[0u64].at, tables: tables, activation)
+    let publication = capacity(prepare_publication(db, 0, replacement.head, replacement.roots, ids))?
+    // Stamps stay consumed on refusal. Table ids publish with the roots.
+    db.next_node = ids
+    for take binding in take bindings {
+        register_index(mut db.indexes, take binding)
+    }
+    let commit_ticket = cut_install(mut db, ReplaceMain(take replacement, None))?
+    publish(take publication)
+    Ok(commit_ticket)
+}

@@ -21,7 +21,6 @@ class BoardFreshnessTest(unittest.TestCase):
             subprocess.run(["git", "-C", main, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.com",
                             "commit", "--allow-empty", "-qm", "Measured commit"], check=True)
             subprocess.run(["git", "-C", main, "update-ref", "refs/remotes/origin/main", "HEAD"], check=True)
-            (base / "baseline-refused").touch()
             taskset = base / "taskset"
             taskset.write_text(r'''#!/bin/bash
 shift 2
@@ -32,7 +31,7 @@ case "$1 $2 $3" in
   'python3 tools/buck2/prepare.py ') exit 0 ;;
   '.buck2/bin/buck2 build -j4') echo '{"root//:hirsel-toolchain":"prefix"}' ;;
   'python3 core/tools/sim_campaign.py --compiler') exit 0 ;;
-  */tools/boat-dispatch\ *) exit 0 ;;
+  */tools/boat-dispatch\ *) exit 7 ;;
   */tools/sim-campaign\ batch\ *)
     [[ -f "${HIRSEL_BOARD_BASE}/board-completed" && "$4" == prepared/manifest.json ]] || exit 90
     exit "$FIXTURE_VOPR_STATUS" ;;
@@ -40,7 +39,7 @@ case "$1 $2 $3" in
 esac
 ''')
             taskset.chmod(0o755)
-            for campaign_status, expected in ((0, 0), (1, 1), (75, 0)):
+            for campaign_status in (0, 1, 75):
                 with self.subTest(campaign_status=campaign_status):
                     (base / "board-completed").unlink(missing_ok=True)
                     # Keep the existing two setup phases on the stub's first-run path.
@@ -53,7 +52,10 @@ esac
                                           "FIXTURE_VOPR_STATUS": str(campaign_status),
                                           "PATH": f"{base}:{os.environ['PATH']}"},
                     )
-                    self.assertEqual(result.returncode, expected, result.stderr)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    current = (base / "CURRENT-BOARD.md").read_text()
+                    self.assertIn(" · Success", current)
+                    self.assertIn(f"Boat exit 7 · VOPR exit {campaign_status}", current)
                     log = (Path(result.stdout.strip()) / "run.log").read_text()
                     if campaign_status == 1:
                         self.assertIn("VOPR campaign exited 1", log)

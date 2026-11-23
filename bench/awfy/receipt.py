@@ -24,15 +24,21 @@ import profile_diff
 from bench_cpus import positive_int, sibling_cpus, smt_activity
 from measurement_artifacts import SHIPPING, check
 
-VERSION = 5
+VERSION = 6
 REFUSED = 2
 INSTRUCTION_LIMIT = Decimal("0.5")
 GUARD_B_CYCLE_RATIO = Decimal("1.03")
 INVALID_RECEIPT = (KeyError, OSError, ValueError, TypeError, AttributeError, re.error)
 ARTIFACT_HASHES = ("compiler_sha256", "runtime_archive_sha256")
-CANDIDATE_HASHES = (*ARTIFACT_HASHES, "std_sha256", "workload_sources_sha256", "image_sha256")
+CANDIDATE_HASHES = (*ARTIFACT_HASHES, "clang_sha256", "std_sha256", "workload_sources_sha256", "image_sha256")
 WORKLOAD_IDENTITY = ("suite", "mode", "flags", "argv", "affinity", "fixture_sha256")
 IDENTITY = (*WORKLOAD_IDENTITY, *CANDIDATE_HASHES)
+
+
+class OlderBoardReceipt(ValueError):
+    def __init__(self, version):
+        self.version = version
+        super().__init__(f"instruction receipt version changed from {version} to {VERSION}")
 
 
 def read(path):
@@ -100,7 +106,7 @@ def verified_build(row):
     record = row.get("build_record")
     if not isinstance(record, dict) or record.get("accepted") is not True or record.get("linked") is not True:
         return False
-    for field in (*ARTIFACT_HASHES, *build.MANIFEST_HASHES, "image_sha256"):
+    for field in (*CANDIDATE_HASHES, "manifest_sha256"):
         value = row.get(field)
         if not isinstance(value, str) or not re.fullmatch("[a-f0-9]{64}", value) or record.get(field) != value:
             return False
@@ -143,6 +149,7 @@ def runtime_case(suite, name, directory, command, marker, fixture, tools):
         "argv": [f"./{binary.name}", *map(str, command[1:])],
         "cwd": str(directory),
         "image_sha256": image,
+        "clang_sha256": provenance["clang_sha256"],
         "build_record": build_record(report),
         "marker": marker.decode(),
         **fixture,
@@ -256,13 +263,14 @@ def sample(args):
 
 def instruction_rows(path, expected=None, *, allow_incomplete=False, compare_baseline=False):
     data = read(path)
-    previous_board = False
     if "instruction_receipt" in data:
         if data["complete"] is not True and not allow_incomplete:
             raise ValueError(f"{path}: incomplete board")
         data = data["instruction_receipt"]
-        previous_board = compare_baseline and data["version"] == 4
-    if data["version"] != VERSION and not previous_board:
+        version = data["version"]
+        if compare_baseline and type(version) is int and 0 < version < VERSION:
+            raise OlderBoardReceipt(version)
+    if data["version"] != VERSION:
         raise ValueError(f"{path}: unsupported instruction receipt")
     declared = data["expected_rows"]
     if (not isinstance(declared, list) or not declared
@@ -279,11 +287,6 @@ def instruction_rows(path, expected=None, *, allow_incomplete=False, compare_bas
             continue
         if key in rows:
             refusals[key] = f"{path}: duplicate row"
-        if previous_board:
-            try:
-                row = board_v4_row(row)
-            except INVALID_RECEIPT as error:
-                refusals[key] = f"{path}: {error}"
         rows[key] = row
     for key in rows.keys() - keys:
         refusals[key] = f"{path}: unexpected row"
@@ -294,22 +297,6 @@ def instruction_rows(path, expected=None, *, allow_incomplete=False, compare_bas
     for key, reason in data["failures"].items():
         refusals[key] = f"{path}: failed sample: {reason}"
     return rows, refusals
-
-
-def board_v4_row(row):
-    # Version 4 used the runtime mode to record Step certification. Version 5
-    # records a release build in either case. Compile modes did not change.
-    certified, mode = row["certified"], row["mode"]
-    if type(certified) is not bool:
-        raise ValueError("invalid Step certification")
-    if row["suite"] != "compile":
-        if mode != ("certified" if certified else "bounded"):
-            raise ValueError("runtime mode disagrees with Step certification")
-        mode = "release"
-    record = row.get("build_record")
-    if record is not None and record.get("certified") is not certified:
-        raise ValueError("build record disagrees with Step certification")
-    return {**row, "mode": mode}
 
 
 def validate_row(key, row):

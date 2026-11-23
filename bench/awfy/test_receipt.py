@@ -32,6 +32,7 @@ class InstructionGuard(unittest.TestCase):
             "affinity": [10],
             "compiler_sha256": "a" * 64,
             "runtime_archive_sha256": "b" * 64,
+            "clang_sha256": "2" * 64,
             "image_sha256": "f" * 64,
             "marker": stdout,
             "stdout": stdout,
@@ -422,7 +423,8 @@ class NativeProvenance(unittest.TestCase):
             data = directory / "rap.json"
             data.write_bytes(b'{"input": 1}')
             toolchain = {"compiler_sha256": build.sha256(compiler), "runtime_archive_sha256": build.sha256(runtime)}
-            command = [compiler, "build", "--release", "--runtime", runtime, "--inputs", manifest, "-o", binary]
+            command = [compiler, "build", "--release", "--runtime", runtime, "--cc", compiler,
+                       "--inputs", manifest, "-o", binary]
             provenance = build.native_provenance(command, manifest)
             provenance["rap_sha256"] = build.sha256(data)
             build.write_native_report(binary, json.dumps({
@@ -434,7 +436,9 @@ class NativeProvenance(unittest.TestCase):
                                     b"verified\n", fixture_identity(manifest, fixture), toolchain)
 
             mandelbrot = row("Mandelbrot")
-            self.assertEqual(mandelbrot["flags"], ["--release", "--runtime", "runtime", "--inputs", "manifest", "-o", "image"])
+            self.assertEqual(mandelbrot["flags"], ["--release", "--runtime", "runtime", "--cc", "clang",
+                                                    "--inputs", "manifest", "-o", "image"])
+            self.assertEqual(mandelbrot["clang_sha256"], build.sha256(compiler))
             json_row = row("Json", '{"input": 1}')
             self.assertEqual(json_row["fixture_files"][str(data)], build.sha256(data))
             self.assertNotEqual(json_row["fixture_sha256"], mandelbrot["fixture_sha256"])

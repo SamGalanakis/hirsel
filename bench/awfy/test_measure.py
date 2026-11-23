@@ -131,8 +131,6 @@ class BoardCompletion(unittest.TestCase):
             base.mkdir(parents=True)
             previous = base / "last-complete.json"
             previous.symlink_to(base / "previous.json")
-            hold = base / "baseline-refused"
-            hold.write_text(str(run) + "\n")
             report = self.board_fixture(path.parent).report | {
                 "complete": True,
                 "exit_status": 2,
@@ -168,12 +166,10 @@ class BoardCompletion(unittest.TestCase):
                         with self.assertRaises(ValueError):
                             rebaseline(run)
                         self.assertEqual(previous.readlink(), base / "previous.json")
-                        self.assertTrue(hold.exists())
 
                 path.write_text(json.dumps(report))
                 self.assertEqual(rebaseline(run), 0)
                 self.assertEqual(previous.readlink(), path)
-                self.assertFalse(hold.exists())
                 self.assertIn("measurement identity changed: affinity, argv, flags", output.getvalue())
 
                 report["instruction_comparison"] = {"status": "Within +2% on every row", "details": [
@@ -209,6 +205,7 @@ class BoardCompletion(unittest.TestCase):
                         "flags": ["--release"], "argv": ["./sample"],
                         "affinity": [10], "compiler_sha256": "a" * 64,
                         "runtime_archive_sha256": "b" * 64, "fixture_sha256": "c" * 64,
+                        "clang_sha256": "2" * 64,
                         "std_sha256": "d" * 64, "workload_sources_sha256": "e" * 64,
                         "image_sha256": "f" * 64,
                         "fixture_files": {"fixture.json": "c" * 64},
@@ -387,6 +384,7 @@ class PairedSampling(unittest.TestCase):
             "key": key, "suite": "awfy", "mode": "release",
             "flags": ["--release"], "argv": ["./sample", "List"], "marker": "verified\n",
             "compiler_sha256": "a" * 64, "runtime_archive_sha256": "b" * 64,
+            "clang_sha256": "2" * 64,
             "fixture_sha256": "c" * 64, "image_sha256": "d" * 64, "std_sha256": "e" * 64,
             "fixture_files": {"rebench.conf": "c" * 64}, "workload_sources_sha256": "f" * 64,
             "manifest_sha256": "1" * 64,

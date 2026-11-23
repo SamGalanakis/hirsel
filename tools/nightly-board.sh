@@ -5,15 +5,22 @@ tools=$(dirname "$(readlink -f "$0")")
 base=${HIRSEL_BOARD_BASE:-"$HOME/.local/share/hirsel-board"}
 current=${HIRSEL_BOARD_CURRENT:-/workspace/code/hirsel-briefs/CURRENT-BOARD.md}
 mkdir -p "$base/runs"
+exec 8>"$base/nightly.lock"
+flock 8
 exec 9>"$base/baseline.lock"
 flock 9
 started=$(date +%s)
 run=$(mktemp -d "$base/runs/$(date -u -d "@$started" +%Y%m%dT%H%M%SZ)-XXXXXX")
 commit=$(git -C "$base/main" rev-parse --verify origin/main 2>/dev/null) || commit=
 step="fetch origin/main"
+boat_status=
+vopr_status=
 record() {
+  local auxiliary=()
+  if [[ -n "$boat_status" ]]; then auxiliary+=(--boat-status "$boat_status"); fi
+  if [[ -n "$vopr_status" ]]; then auxiliary+=(--vopr-status "$vopr_status"); fi
   python3 "$tools/board-freshness.py" --base "$base" --current "$current" \
-    --record "$run" --started "$started" --commit "$commit" --step "$step" "$@"
+    --record "$run" --started "$started" --commit "$commit" --step "$step" "${auxiliary[@]}" "$@"
 }
 # shellcheck disable=SC2317 # Invoked by the EXIT trap.
 finish() {
@@ -72,7 +79,7 @@ for manifest in "$base/peers/langarena/rust/Cargo.toml" "$base/peers/awfy/rust/C
 done
 baseline=()
 if [[ -e "$base/last-complete.json" || -L "$base/last-complete.json" ]]; then
-  baseline=(--baseline "$base/last-complete.json")
+  baseline=(--baseline "$(realpath -m "$base/last-complete.json")")
 fi
 step=board
 record
@@ -83,20 +90,20 @@ taskset -c 8-11,16-17 python3 bench/awfy/board.py "$run/board" \
   "${baseline[@]}" >>"$run/run.log" 2>&1 || status=$?
 if (( status == 2 )); then
   step="board comparison"
-  printf '%s\n' "$run" > "$base/baseline-refused"
-  echo "Comparison refused. Baseline retained until explicit rebaseline." >>"$run/run.log"
+  flock -u 9
+  if [[ -n ${baseline[1]:-} ]] && python3 bench/awfy/board.py rebaseline "$run" \
+      --base "$base" --expected-baseline "${baseline[1]}" >>"$run/run.log" 2>&1; then
+    step="rebaseline"
+    status=0
+  else
+    echo "Comparison refused. Baseline retained." >>"$run/run.log"
+  fi
 elif (( status == 3 )); then
   step="board comparison"
-elif (( status == 0 )) && [[ ! -e "$base/baseline-refused" ]]; then
+elif (( status == 0 )); then
   step="promote baseline"
   ln -s "$run/board/board.json" "$run/complete.json"
   mv -Tf "$run/complete.json" "$base/last-complete.json"
-elif (( status == 0 )); then
-  echo "Promotion held by an earlier refusal. Run board.py rebaseline with a clean run." >>"$run/run.log"
-fi
-if (( status == 0 && boat_status != 0 )); then
-  step="Boat screen and containment"
-  status=$boat_status
 fi
 
 run_vopr() (
@@ -120,11 +127,8 @@ if (( vopr_status == 75 )); then
   echo "VOPR deferred until a spare Boat start is available." >>"$run/run.log"
 elif (( vopr_status != 0 )); then
   printf 'VOPR campaign exited %s. See %s/vopr.\n' "$vopr_status" "$run" >>"$run/run.log"
-  if (( status == 0 )); then
-    step="VOPR campaign"
-    status=$vopr_status
-  fi
 fi
+printf 'Boat exit %s · VOPR exit %s\n' "$boat_status" "$vopr_status" | tee -a "$run/run.log" >&2
 
 run_w2() (
   local output compiler runtime bridge

@@ -204,7 +204,8 @@ try {
   while (await client.loadOlder());
   check("paging after a reset rebuilds the transcript", flat(held(state!)) === flat(await transcript()));
   // Fork the first answer's cutoff after two more turns have reached the source.
-  const forkSession = await command("fork", forkAt);
+  const forkSession = await client.fork(forkAt, "fork");
+  check("a repeated fork key returns the same session", (await client.fork(forkAt, "fork")) === forkSession);
   let forkState: State | null = null;
   forkClient = new Client({ base, session: forkSession, credential: me, onChange: (s) => { forkState = s; } });
   forkClient.start();

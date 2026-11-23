@@ -65,6 +65,7 @@ fn cold_routes(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
     list.push(mut routes, ("GET", "/sessions/0/history?before=2&lines=1", list.new()))
     list.push(mut routes, ("GET", "/sessions/0/events", list.new()))
     list.push(mut routes, ("GET", "/sessions/0/waits", list.new()))
+    list.push(mut routes, ("POST", "/sessions/0/forks", json(harness.gateway_http.ForkAsk(key: "f", cut: 1u64))))
     list.push(mut routes, ("DELETE", "/sessions/0", list.new()))
     let mut failures = 0u64
     for i in 0u64 .. list.len(routes) {
@@ -95,7 +96,7 @@ fn cold_routes(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
     }
     let after = harness.gateway.marks(door, 0u64)
     if after.ups != cold.ups || after.downs != cold.downs {
-        failures = failures | (1u64 << 24u64)
+        failures = failures | (1u64 << 30u64)
     }
     harness.gateway_http.halt(take served)
     let _ = harness.gateway.stop(take g)

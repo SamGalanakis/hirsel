@@ -67,6 +67,21 @@ export class Client {
     return response.json();
   }
 
+  // Forks this session into a new one that shares its entries before `cut` and that this
+  // Caller reads. `key` names the fork, so asking again with the same key returns the same
+  // id. A cut inside a tool round answers 422.
+  async fork(cut: number, key: string): Promise<number> {
+    const r = await fetch(this.url("/forks"), {
+      method: "POST", body: JSON.stringify({ key, cut }),
+      headers: { ...this.headers(), "Content-Type": "application/json" },
+    });
+    if (r.status !== 201) {
+      await r.body?.cancel();
+      throw new Error(`fork: HTTP ${r.status}`);
+    }
+    return r.json();
+  }
+
   private post(path: string, body: string): Promise<{ status: number; body: unknown }> {
     const run = async () => {
       for (let wait = 50; ; wait = Math.min(wait * 2, 2000)) {

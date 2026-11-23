@@ -35,14 +35,6 @@ fn scripted_downs(take watch: ScriptedWatch) -> () waits {
 
 type ScriptedControl: codec { action: String, credential: String, at: u64 }
 
-fn scripted_fork(d: harness.gateway.Door, caller: store.Caller, cut: u64) -> Result[u64, String] waits {
-    match harness.gateway.fork(d, 0u64, cut, b"fork", clone(caller)) {
-        Ok(id) => Ok(id),
-        Error(Place(Failed(_))) => Error("invalid fork cut"),
-        Error(_) => Error("could not create fork"),
-    }
-}
-
 fn scripted_revoke(d: harness.gateway.Door, credential: Bytes, p: u64, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[u64, String] waits {
     let Ok(take lease) = harness.gateway.route(d, 0u64) else { return Error("could not route revocation") }
     let Some(address) = latest.read(store.local.status(lease)).addr else { return Error("no place address") }
@@ -74,12 +66,7 @@ fn scripted_controls(input: Stdin, out: Stdout, data: Dir, d: harness.gateway.Do
             notes.main.emit(out, "control-error ", "invalid credential")
             continue
         }
-        let result = if control.action == "fork" {
-            match store.ingress.caller((), credential) {
-                Ok(caller) => scripted_fork(d, caller, control.at),
-                Error(_) => Error("invalid credential"),
-            }
-        } else if control.action == "revoke" {
+        let result = if control.action == "revoke" {
             scripted_revoke(d, credential, control.at, clock, random, tasks, net)
         } else {
             Error("unknown command")

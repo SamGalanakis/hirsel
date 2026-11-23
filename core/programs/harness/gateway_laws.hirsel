@@ -966,13 +966,11 @@ fn tail_and_history(net: Net, clock: Clock, port: u16, me: Bytes) -> u64 waits {
 // source is deleted. Only its two new entries precede the first cut; paging
 // from the cut yields the source rows.
 fn fork_history(door: harness.gateway.Door, net: Net, clock: Clock, port: u16, me: Bytes) -> u64 waits {
-    let owner = result.unwrap(store.ingress.caller((), me))
-    let Ok(1u64) = harness.gateway.fork(door, 0u64, 5u64, b"fork", take owner) else {
-        return 2u64
-    }
-    if let Error(_) = harness.gateway.delete(door, 0u64) {
-        return 3u64
-    }
+    let (forked, fork_id) = http(net, clock, port, "POST", "/sessions/0/forks", person(me, 0u64), json(harness.gateway_http.ForkAsk(key: "fork", cut: 5u64)))
+    if forked != 201u16 || fork_id != b"1" { return 2u64 }
+    let (inside, _) = http(net, clock, port, "POST", "/sessions/0/forks", person(me, 0u64), json(harness.gateway_http.ForkAsk(key: "inside", cut: 3u64)))
+    if inside != 422u16 { return 16u64 }
+    if let Error(_) = harness.gateway.delete(door, 0u64) { return 3u64 }
     let (posted, _) = http(net, clock, port, "POST", "/sessions/1/messages", person(me, 0u64), json(harness.Submit(client_key: "f1", text: "fork only")))
     if posted != 202u16 { return 4u64 }
     let Some(_) = down_within(door, 1u64, clock) else { return 15u64 }

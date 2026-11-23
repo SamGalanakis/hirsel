@@ -17,7 +17,8 @@
 // the front's `tail_lines`) and every later row as
 // server-sent events, one JSON `Shown` per changed row and a comment as a heartbeat;
 // GET /sessions/{id}/history?before=B&lines=N is one JSON `Page` of earlier rows;
-// GET /sessions/{id}/waits lists pending approvals. After each image's rows comes a
+// GET /sessions/{id}/waits lists pending approvals; POST /sessions/{id}/forks takes a
+// JSON `ForkAsk` and answers the new session's id. After each image's rows comes a
 // "batch" event carrying the store
 // version: a reader applies the rows before it together, and the first batch on a
 // stream completes its image. A bearer-authenticated stream on a preview-enabled front
@@ -43,6 +44,13 @@ pub type PreviewDelta: codec + send {
 pub type Page: codec + send {
     from: u64,
     rows: List[Shown]
+}
+
+// A fork of a session: the cut is the first entry the fork does not share, and `key`
+// names the fork as a creation key does, so a repeated ask returns the same id.
+pub type ForkAsk: codec + send {
+    key: String,
+    cut: u64
 }
 
 // How long a front call waits before connecting to a place again.
@@ -812,6 +820,20 @@ fn serve_one(d: harness.gateway.Door, f: Front, mut read: ReadHalf, mut write: W
                 json_reply(mut write, f, 200u16, ruling)
             },
             Error(code) => reply(mut write, f, code, list.new()),
+        }
+    }
+    if path[2] == "forks" && method == b"POST" {
+        let Some(take ask) = (json_body(req, f) : Option[ForkAsk]) else {
+            return reply(mut write, f, 400u16, list.new())
+        }
+        if let Error(code) = allowed(d, f, id, identity) {
+            return reply(mut write, f, code, list.new())
+        }
+        let ForkAsk(key: take key, cut: cut) = take ask
+        return match harness.gateway.fork(d, id, cut, string.into_bytes(take key), clone(identity.caller)) {
+            Ok(n) => json_reply(mut write, f, 201u16, n),
+            Error(Place(Failed(_))) => reply(mut write, f, 422u16, list.new()),
+            Error(why) => reply(mut write, f, turned(why), list.new()),
         }
     }
     if path[2] == "history" && method == b"GET" {

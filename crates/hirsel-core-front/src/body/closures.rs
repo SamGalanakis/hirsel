@@ -1840,8 +1840,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         // capture reuses it, in whatever block it is reached from. So it is computed in
         // the entry block, which dominates them all, never at that first use.
         let binding = if let Some(environment) = environment {
+            let place = self.rep_at(original.ty, n).and_then(Rep::stored);
             let address = if owning {
-                let place = self.rep(original.ty).ok().and_then(Rep::stored);
                 place.map(|place| {
                     let base = match self.capture_frame.as_ref().unwrap().own_record {
                         Some(base) => base,
@@ -1875,10 +1875,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     address,
                     mode: ReadMode::Bits,
                 });
-                self.rep(original.ty)
-                    .ok()
-                    .and_then(Rep::stored)
-                    .map(|ty| self.entry_address(AddressBase::Value(pointer), &[], ty))
+                place.map(|ty| self.entry_address(AddressBase::Value(pointer), &[], ty))
             };
             Binding::Slot(address)
         } else {

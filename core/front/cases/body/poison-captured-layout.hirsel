@@ -1,0 +1,10 @@
+type Record {
+    bad: Missing,
+    good: u64,
+}
+fn identity(n: u64) -> u64 { n }
+fn read(record: Record) {
+    let _ = scoped fn() -> u64 { identity(record.good) }
+}
+// expect: refuse LANG-7 at 2:10
+// expect: gap values of this type are not built

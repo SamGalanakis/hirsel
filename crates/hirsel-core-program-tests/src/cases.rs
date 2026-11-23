@@ -2166,6 +2166,12 @@ fn refused_pattern_binders_do_not_add_implementation_gaps() {
 }
 
 #[test]
+fn refused_capture_layout_stops_closure_emission() {
+    let failures = run_case(&root().join("cases/body/poison-captured-layout.hirsel"));
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+#[test]
 fn loop_callbacks_preserve_places_and_modes() {
     let failures = run_case(&root().join("cases/body/loop-capture-entry.hirsel"));
     assert!(failures.is_empty(), "{failures:#?}");

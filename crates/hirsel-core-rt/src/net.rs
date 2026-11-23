@@ -468,7 +468,7 @@ unsafe fn address_op(
 /// borrows through delivery (the network request, the paired-send tail and
 /// the provider value), initialized in place so its internal pointers hold.
 /// The stackful rows keep it on the task's stack; the returnable rows keep it
-/// in the task's frame record (`tasks::FrameHeader`), where a parked task
+/// in the task's frame record, where a parked task
 /// leaves it when it gives its stack back. Tape keys follow the request's
 /// address, which is the same for the operation's whole life in either place.
 #[repr(C)]

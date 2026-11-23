@@ -255,7 +255,7 @@ unsafe extern "C" fn client(context: *mut Context, _: *mut u8, input: *mut u8) -
         let c = context;
         let mut local = std::mem::MaybeUninit::<Area>::zeroed();
         let a: *mut Area = if job.returnable {
-            hirsel_core_frame_record(c, size_of::<Area>() as u64).cast()
+            hirsel_core_frame_record(c, size_of::<Area>() as u64, 0, 1).cast()
         } else {
             local.as_mut_ptr()
         };

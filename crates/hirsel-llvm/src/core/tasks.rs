@@ -430,7 +430,12 @@ impl FunctionEmitter<'_> {
             RtOp::FrameRecord => self.native_call(
                 "hirsel_core_frame_record",
                 &[P],
-                &[ptr(CONTEXT), u(&args[0])],
+                &[
+                    ptr(CONTEXT),
+                    u(&args[0]),
+                    zeroext(Type::I8, args[1].clone()),
+                    zeroext(Type::I8, args[2].clone()),
+                ],
             ),
             RtOp::CauseNext => self.native_call("hirsel_core_cause_next", &[P], &[p(&args[0])]),
             RtOp::CauseValue => self.native_call("hirsel_core_cause_value", &[P], &[p(&args[0])]),

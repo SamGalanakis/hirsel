@@ -1038,9 +1038,9 @@ pub enum RtOp {
     P256Verify,
     /// Verify a DER P-256 ECDSA signature over a message with SHA-256.
     P256VerifyDer,
-    /// The running task's frame record (`crate::returnable`): `size` zeroed
-    /// bytes allocated at the first call and the same bytes at every later
-    /// one, freed when the task ends.
+    /// The running task's frame record (`crate::returnable`). Takes the area
+    /// size and `u8` flags for network and connection-send state. Allocated
+    /// on first entry, reused on resume, and freed when the root ends.
     FrameRecord,
     /// A wait that may park with the stack given back (`crate::returnable`):
     /// a leading pointer to the caller's child word, then the wrapped row's
@@ -1714,7 +1714,7 @@ impl RtOp {
             RtOp::ArgsGet => (vec![V(u64_), V(u64_)], vec![p]),
             RtOp::LaunchWord => (vec![V(u64_), V(u64_)], vec![u64_]),
             RtOp::LaunchHandle | RtOp::SecretShare => (vec![V(u64_)], vec![u64_]),
-            RtOp::FrameRecord => (vec![V(u64_)], vec![p]),
+            RtOp::FrameRecord => (vec![V(u64_), V(u8_), V(u8_)], vec![p]),
             RtOp::Transfer { x, .. } => (vec![take(x), V(p)], vec![Ty::Scalar(Scalar::Bool)]),
             RtOp::Returnable(wait) => {
                 let row = wait.row().signature();

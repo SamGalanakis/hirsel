@@ -343,7 +343,7 @@ unsafe extern "C" fn client(context: *mut Context, _: *mut u8, input: *mut u8) -
         let job = &*input.cast::<Job>();
         let mut local = std::mem::MaybeUninit::<Area>::zeroed();
         let a: *mut Area = if job.returnable {
-            hirsel_core_frame_record(context, size_of::<Area>() as u64).cast()
+            hirsel_core_frame_record(context, size_of::<Area>() as u64, 1, 0).cast()
         } else {
             local.as_mut_ptr()
         };
@@ -675,7 +675,7 @@ mod receiving {
             let job = input.cast::<Job>().read();
             let mut local = std::mem::MaybeUninit::<SetupArea>::zeroed();
             let a: *mut SetupArea = if job.returnable {
-                hirsel_core_frame_record(context, size_of::<SetupArea>() as u64).cast()
+                hirsel_core_frame_record(context, size_of::<SetupArea>() as u64, 0, 0).cast()
             } else {
                 local.as_mut_ptr()
             };
@@ -724,7 +724,7 @@ mod receiving {
             let job = &*input.cast::<Job>();
             let mut local = std::mem::MaybeUninit::<Area>::zeroed();
             let a: *mut Area = if job.returnable {
-                hirsel_core_frame_record(context, size_of::<Area>() as u64).cast()
+                hirsel_core_frame_record(context, size_of::<Area>() as u64, 0, 0).cast()
             } else {
                 local.as_mut_ptr()
             };

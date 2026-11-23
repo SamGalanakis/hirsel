@@ -482,9 +482,9 @@ impl Function<'_, '_, '_> {
             RtOp::FrameRecord => {
                 outputs[0] = self.c_call(
                     "hirsel_core_frame_record",
-                    &[P, U],
+                    &[P, U, K, K],
                     &[P],
-                    &[self.context, args[0]],
+                    &[self.context, args[0], args[1], args[2]],
                 )?[0];
                 1
             }

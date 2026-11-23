@@ -21,6 +21,12 @@ use std::{
     time::Duration,
 };
 
+mod frame;
+use frame::FrameRecord;
+pub(crate) use frame::held_wait;
+#[cfg(test)]
+pub(crate) use frame::{FRAME_HEADER, hirsel_core_frame_record};
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct ValueLayout {
@@ -4636,20 +4642,6 @@ unsafe fn unmount(task: *mut Task) -> Stack {
         stack
     }
 }
-/// A task's frame record for the returnable form (DESIGN "Eager records"):
-/// one block of the task's unit heap, funded by the task's payer at zero
-/// logical charge and outside the observed retained backing, like the stack
-/// it stands in for, made at the root's first
-/// call and at a stable address until the task ends or a transfer hands it to
-/// a new root (`hirsel_core_transfer`), which gets a fresh record at its own
-/// first call. Its header holds the
-/// owned operation state; the area after it holds the represented frames the
-/// compiler lays out.
-pub(crate) struct FrameRecord {
-    base: NonNull<u8>,
-    #[cfg(debug_assertions)]
-    size: usize,
-}
 /// One block of the task's unit heap at zero logical charge, outside the
 /// observed retained backing, like the stack the returnable form stands in for.
 pub(crate) fn zero_block(context: &Context, bytes: usize) -> NonNull<u8> {
@@ -4720,115 +4712,6 @@ pub unsafe extern "C" fn hirsel_core_transfer(
         (*task).transfer = Some((ZeroBlock { base }, body));
     }
     1
-}
-/// The record's header: one operation and the state of the one wait in
-/// flight that outlives its stack.
-#[repr(C)]
-pub(crate) struct FrameHeader {
-    operation: std::mem::MaybeUninit<Operation>,
-    pub(crate) held: std::mem::MaybeUninit<HeldWait>,
-}
-/// A task waits at one site at a time, so the waits share their state's room.
-#[repr(C)]
-pub(crate) union HeldWait {
-    net: std::mem::ManuallyDrop<crate::net::OwnedNet>,
-    send: std::mem::ManuallyDrop<crate::units_lang::SendRec>,
-}
-// A waiting send fits in the room the network waits already take.
-const _: () = assert!(
-    size_of::<crate::units_lang::SendRec>() <= size_of::<crate::net::OwnedNet>()
-        && align_of::<crate::units_lang::SendRec>() <= align_of::<crate::net::OwnedNet>()
-);
-pub(crate) const FRAME_HEADER: usize = size_of::<FrameHeader>();
-const _: () = assert!(FRAME_HEADER % 8 == 0 && align_of::<FrameHeader>() <= 8);
-impl FrameRecord {
-    /// A record of `size` area bytes. Only the root's own resume word, the
-    /// area's first, starts zeroed: every other word is written before it is
-    /// read (a caller zeroes its callee's word before each fresh call), so
-    /// testing builds fill the rest to catch a word read before it is set.
-    fn new(context: &Context, size: usize) -> Self {
-        let bytes = FRAME_HEADER
-            .checked_add(size.max(8))
-            .unwrap_or_else(|| crate::process::stop(b"FrameRecord"));
-        let base = zero_block(context, bytes);
-        // SAFETY: the block holds `bytes` writable bytes, the word in bounds.
-        unsafe {
-            #[cfg(any(test, debug_assertions, feature = "testing"))]
-            std::ptr::write_bytes(base.as_ptr(), 0xA5, bytes);
-            base.as_ptr().add(FRAME_HEADER).cast::<u64>().write(0);
-        }
-        Self {
-            base,
-            #[cfg(debug_assertions)]
-            size,
-        }
-    }
-    /// Give the block back through the task's live context.
-    /// # Safety
-    /// `context` is the running task's; nothing borrows the record now.
-    unsafe fn release(self, context: &Context) {
-        let base = self.base;
-        std::mem::forget(self);
-        // SAFETY: a zero-charge block of this context's heap.
-        unsafe { crate::block::free_with(base, 0, Some(context)) }
-    }
-    pub(crate) fn header(&self) -> *mut FrameHeader {
-        self.base.as_ptr().cast()
-    }
-    fn operation(&self) -> *mut Operation {
-        // SAFETY: the header is in bounds; MaybeUninit is repr(transparent).
-        unsafe { (&raw mut (*self.header()).operation).cast() }
-    }
-    fn area(&self) -> *mut u8 {
-        // SAFETY: the area follows the header in the same allocation.
-        unsafe { self.base.as_ptr().add(FRAME_HEADER) }
-    }
-}
-impl Drop for FrameRecord {
-    /// A task torn down without ending its body gives the block back with no
-    /// context: the heap takes it as any other foreign return.
-    fn drop(&mut self) {
-        // SAFETY: a zero-charge block; nothing borrows it now.
-        unsafe { crate::block::free(self.base, 0) }
-    }
-}
-/// The current task's frame record of `size` area bytes: made at the root's
-/// first call, and the same one at each resume, so a represented frame reads
-/// back what it stored before its task returned the stack.
-/// # Safety
-/// Called by a returnable root, in a task, with the same size each time.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_core_frame_record(context: *mut Context, size: u64) -> *mut u8 {
-    let task = CURRENT.get();
-    if task.is_null() {
-        crate::process::stop(b"FrameRecord");
-    }
-    let size = usize::try_from(size).unwrap_or_else(|_| crate::process::stop(b"FrameRecord"));
-    // SAFETY: CURRENT pins the task, and only its own fiber touches the record.
-    unsafe {
-        let record = (*task)
-            .frame
-            .get_or_insert_with(|| FrameRecord::new(&*context, size));
-        #[cfg(debug_assertions)]
-        debug_assert_eq!(record.size, size);
-        record.area()
-    }
-}
-/// The current task's frame-record header, when it runs a returnable root.
-pub(crate) fn frame_header() -> Option<*mut FrameHeader> {
-    let task = CURRENT.get();
-    // SAFETY: CURRENT pins the task.
-    unsafe { task.as_ref()?.frame.as_ref().map(FrameRecord::header) }
-}
-/// The current task's held-wait room, as a `T` of the union.
-/// # Safety
-/// The current task runs a returnable root; `T` is one of `HeldWait`'s cases.
-pub(crate) unsafe fn held_wait<T>() -> *mut T {
-    match frame_header() {
-        // SAFETY: the union's cases start at its address.
-        Some(header) => unsafe { (&raw mut (*header).held).cast() },
-        None => crate::process::stop(b"FrameRecord"),
-    }
 }
 /// A returnable row's result: the delivered `value` with the caller's child
 /// word 0, or `parked` with the word 1 when the wait gave the stack back.

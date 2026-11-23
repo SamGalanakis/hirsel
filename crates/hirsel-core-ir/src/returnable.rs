@@ -32,8 +32,10 @@
 use crate::extent::{operands, terminator_uses};
 use homes::homed_slots;
 mod homes;
+mod sites;
 use crate::*;
 use hirsel_core_ids::ContentHash;
+use sites::{Calling, HeldWait, Site, sites_of};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// Set to any value, the driver leaves every wait stackful.
@@ -62,18 +64,6 @@ pub enum Refusal {
     LiveAddress,
     SlotLayout,
     ResultPlace,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Site {
-    /// A wait made by the runtime: the returnable op the call becomes.
-    Leaf(RtOp),
-    Callee(FuncId),
-    /// A tail call of `g` that hands the task to `g`'s own root
-    /// (`RtOp::Transfer`): the caller's frames return at once, and the record
-    /// they held is freed before `g` runs. Declined (stackfully, in replay) it
-    /// is a plain call of `g`.
-    Transfer(FuncId),
 }
 
 /// Whether the call at instruction `k` of `body` is the last thing its
@@ -870,6 +860,7 @@ struct Shape {
     dest: Option<(ValueId, TypeId, u64, u64)>,
     /// The function's whole area, its own word first.
     area: u64,
+    held: HeldWait,
     sizes: Sizes,
 }
 
@@ -918,14 +909,14 @@ fn round(x: u64, a: u64) -> u64 {
 }
 
 /// The shape of `body`'s variant whose sites are `sites`, with the callee
-/// areas `area`.
+/// layouts `callee`.
 fn shape(
     module: &Module,
     recipes: &[hirsel_core_layout::RecipeRow],
     body: &Body,
     dest: Option<TypeId>,
     sites: BTreeMap<usize, Site>,
-    area: &dyn Fn(FuncId) -> u64,
+    callee: &dyn Fn(FuncId) -> (u64, HeldWait),
 ) -> Result<Shape, Refusal> {
     if sites.is_empty() {
         return Err(Refusal::NoSite);
@@ -1064,14 +1055,7 @@ fn shape(
             }
         }
     }
-    let child = sites
-        .values()
-        .map(|s| match *s {
-            Site::Leaf(_) | Site::Transfer(_) => 8,
-            Site::Callee(g) => area(g),
-        })
-        .max()
-        .unwrap_or(8);
+    let (child, held) = sites::storage(sites.values(), callee);
     let mut at = round(CHILD + child, ALIGN);
     let mut sizes = Sizes {
         child,
@@ -1138,6 +1122,7 @@ fn shape(
         kept_at,
         dest,
         area: round(at, ALIGN),
+        held,
         sizes,
     })
 }
@@ -1310,8 +1295,14 @@ fn build(old: &Body, s: &Shape, root: bool, results_ty: &[Ty], calls: &Calls) ->
     }
     let rec = if root {
         let size = b.konst(u64_, s.area);
+        let flag = Ty::Scalar(Scalar::U8);
+        let net = b.konst(flag, u64::from(s.held == HeldWait::Net));
+        let send = b.konst(flag, u64::from(s.held == HeldWait::Send));
         let rec = b.value(Ty::Ptr);
-        let args = PoolRange::push(&mut b.n.pools.args, [Arg::Value(size)]);
+        let args = PoolRange::push(
+            &mut b.n.pools.args,
+            [Arg::Value(size), Arg::Value(net), Arg::Value(send)],
+        );
         let results = PoolRange::push(&mut b.n.pools.values, [rec]);
         b.n.calls.push(CallSite {
             callee: Callee::Runtime(RtOp::FrameRecord),
@@ -2080,49 +2071,6 @@ fn sig_id(module: &mut Module, s: Signature) -> SigId {
     SigId(module.signatures.len() as u32 - 1)
 }
 
-/// Which calls of a body are sites: callees that can be represented (`ok`),
-/// those that reach an owned wait (`owned`), and the calls that transfer.
-#[derive(Clone, Copy)]
-struct Calling<'a> {
-    ok: &'a [bool],
-    owned: &'a [bool],
-    transfers: &'a BTreeSet<usize>,
-}
-
-fn sites_of(body: &Body, calling: Calling<'_>, receives: bool) -> BTreeMap<usize, Site> {
-    let Calling {
-        ok,
-        owned,
-        transfers,
-    } = calling;
-    let mut sites = BTreeMap::new();
-    for (k, inst) in body.insts.iter().enumerate() {
-        if let Inst::Call { call } = *inst {
-            let c = &body.calls[call.index()];
-            if let Some(op) = leaf(c.callee) {
-                sites.insert(k, Site::Leaf(RtOp::Returnable(op)));
-            } else if let Some(op) = receive(c.callee)
-                && receives
-            {
-                sites.insert(k, Site::Leaf(op));
-            } else if let Callee::Direct(g) = c.callee
-                && ok[g.index()]
-                && (receives || owned[g.index()])
-            {
-                sites.insert(
-                    k,
-                    if transfers.contains(&k) {
-                        Site::Transfer(g)
-                    } else {
-                        Site::Callee(g)
-                    },
-                );
-            }
-        }
-    }
-    sites
-}
-
 /// The shape of `body` with its receives as sites, or, when that is refused,
 /// without them.
 fn shaped(
@@ -2131,16 +2079,16 @@ fn shaped(
     body: &Body,
     dest: Option<TypeId>,
     calling: Calling<'_>,
-    area: &dyn Fn(FuncId) -> u64,
+    callee: &dyn Fn(FuncId) -> (u64, HeldWait),
 ) -> Result<Shape, Refusal> {
     let all = sites_of(body, calling, true);
     let owned = sites_of(body, calling, false);
     if all.len() == owned.len() {
-        return shape(module, recipes, body, dest, owned, area);
+        return shape(module, recipes, body, dest, owned, callee);
     }
     let receives = (all.len() - owned.len()) as u64;
-    shape(module, recipes, body, dest, all, area).or_else(|_| {
-        let mut s = shape(module, recipes, body, dest, owned, area)?;
+    shape(module, recipes, body, dest, all, callee).or_else(|_| {
+        let mut s = shape(module, recipes, body, dest, owned, callee)?;
         s.sizes.stackful_receives = receives;
         Ok(s)
     })
@@ -2232,9 +2180,12 @@ pub fn apply(module: &mut Module) -> Applied {
                     }) {
                         continue;
                     }
-                    let area = |g: FuncId| shapes[&g.index()].area;
+                    let callee = |g: FuncId| {
+                        let s = &shapes[&g.index()];
+                        (s.area, s.held)
+                    };
                     let dest = module.signatures[module.functions[f].signature.index()].dest;
-                    match shaped(module, &recipes, body, dest, calling, &area) {
+                    match shaped(module, &recipes, body, dest, calling, &callee) {
                         Ok(s) => {
                             shapes.insert(f, s);
                             progress = true;
@@ -2310,14 +2261,17 @@ pub fn apply(module: &mut Module) -> Applied {
                 let mut body = forwarded(old);
                 body.calls[indirect.index()].callee = Callee::Direct(callee);
                 body.calls[indirect.index()].signature = module.functions[callee.index()].signature;
-                let area = |g: FuncId| shapes[&g.index()].area;
+                let layout = |g: FuncId| {
+                    let s = &shapes[&g.index()];
+                    (s.area, s.held)
+                };
                 let dest = module.signatures[function.signature.index()].dest;
                 let calling = Calling {
                     ok,
                     owned: &owns,
                     transfers: &BTreeSet::new(),
                 };
-                let s = shaped(module, &recipes, &body, dest, calling, &area)
+                let s = shaped(module, &recipes, &body, dest, calling, &layout)
                     .map_err(Stackful::Entry)?;
                 Ok(Form {
                     entry,

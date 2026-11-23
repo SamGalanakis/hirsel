@@ -1,0 +1,34 @@
+// RFC 7578 section 4 and RFC 2046 section 5.1.1.
+// expect: run multipart_preserves_body_across_every_split() = true
+fn multipart_preserves_body_across_every_split() -> bool {
+    let raw = b"preamble\r\n--a:b \t\r\nContent-Disposition: form-data; name=\"n\"\r\n\r\nX\r\n--a:bX\r\n--a:b\r\ncontent-disposition: form-data; name=f; filename=\"a; b\"\r\nContent-Type: application/octet-stream\r\n\r\n\x00\xff\r\n--a:b--"
+    for split in 0u64 .. list.len(raw) + 1 {
+        let limits = http.MultipartLimits(total: list.len(raw), headers: 128, part: 9)
+        let Ok(take state) = http.multipart(b"Multipart/Form-Data; boundary=\"a:b\"", limits) else {
+            return false
+        }
+        let mut form = take state
+        let mut good = true
+        let mut seen: u64 = 0
+        let accept = scoped fn(metadata: http.MultipartPart, body: Bytes) {
+            if seen == 0 {
+                good = good && metadata.name == b"n" && list.len(metadata.headers) == 1 && body == b"X\r\n--a:bX"
+                if let Some(_) = metadata.filename {
+                    good = false
+                }
+            } else if seen == 1 {
+                good = good && metadata.name == b"f" && list.len(metadata.headers) == 2 && body == b"\x00\xff"
+                if let Some(filename) = metadata.filename {
+                    good = good && filename == b"a; b"
+                } else {
+                    good = false
+                }
+            }
+            seen += 1
+        }
+        if http.multipart_feed(mut form, list.slice(raw, 0, split), accept) != Ok(()) || http.multipart_feed(mut form, list.slice(raw, split, list.len(raw)), accept) != Ok(()) || http.multipart_finish(take form, accept) != Ok(()) || !good || seen != 2 {
+            return false
+        }
+    }
+    true
+}

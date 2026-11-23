@@ -13,7 +13,7 @@ use hirsel_core_net::{
 use std::hash::Hasher;
 use twox_hash::XxHash3_64;
 
-pub const FORMAT: u16 = 11;
+pub const FORMAT: u16 = 12;
 pub const MAGIC: [u8; 3] = *b"HTB";
 /// The tape's last block.
 pub const END: u8 = 2;
@@ -227,16 +227,6 @@ impl<'a> Cursor<'a> {
     }
 }
 
-/// Protected entry input. Tape diagnostics must not print it.
-#[derive(Clone, Copy, Default, Eq, PartialEq)]
-pub struct MapHashKey(pub [u8; 16]);
-
-impl std::fmt::Debug for MapHashKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("[redacted]")
-    }
-}
-
 /// Block 0's payload (section 5.3).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Header {
@@ -258,7 +248,6 @@ pub struct Header {
     /// TLS-7 `Cred` grants, after the Secret grants.
     pub cred_grants: Vec<hirsel_core_net::CredGrant>,
     pub env: Option<EnvSnapshot>,
-    pub map_hash_key: MapHashKey,
 }
 /// The complete encoded header does not fit in block zero.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -487,7 +476,7 @@ impl Header {
         arg: usize,
         grants: usize,
     ) -> Result<usize, HeaderTooLarge> {
-        let mut len = 2 + 1 + 16 + 32 + 4 + 8 + 8 + 1 + 16;
+        let mut len = 2 + 1 + 16 + 32 + 4 + 8 + 8 + 1;
         for field in [identity, arg, grants] {
             if field > MAX_LEN {
                 return Err(HeaderTooLarge);
@@ -550,7 +539,6 @@ impl Header {
         out.push(self.chooser);
         put_bytes(&mut out, &self.arg);
         put_bytes(&mut out, &grants);
-        out.extend_from_slice(&self.map_hash_key.0);
         Ok(out)
     }
     pub fn decode(payload: &[u8]) -> Result<Self, Corrupt> {
@@ -577,7 +565,6 @@ impl Header {
         }
         let arg = c.bytes()?;
         let grants = c.bytes()?;
-        let map_hash_key = MapHashKey(c.fixed()?);
         if (kind == KIND_CALL && !grants.is_empty()) || !c.done() {
             return Err(Corrupt);
         }
@@ -618,7 +605,6 @@ impl Header {
             secret_grants,
             cred_grants,
             env,
-            map_hash_key,
         })
     }
 }
@@ -671,6 +657,8 @@ pub enum Stop {
     Damaged(u64),
     /// A validated block whose bytes break the grammar.
     Corrupt,
+    /// A checked header for a different tape format.
+    UnsupportedFormat(u16),
 }
 impl From<Corrupt> for Stop {
     fn from(_: Corrupt) -> Self {
@@ -787,15 +775,16 @@ fn header_block<E>(
         return Err(Stop::Damaged(0).into());
     }
     let payload = header_payload(&bytes);
-    if let (Some(format), Some(version)) = (format, payload.get(..2))
-        && version != format.to_le_bytes()
-    {
-        return Err(Stop::Corrupt.into());
-    }
     let tape_id = payload
         .get(TAPE_ID_AT..TAPE_ID_AT + 16)
         .ok_or(Stop::Damaged(0))?;
     check_digest(&bytes, tape_id.try_into().unwrap(), 0)?;
+    if let Some(format) = format {
+        let version = u16::from_le_bytes(payload[..2].try_into().unwrap());
+        if version != format {
+            return Err(Stop::UnsupportedFormat(version).into());
+        }
+    }
     Ok(bytes)
 }
 

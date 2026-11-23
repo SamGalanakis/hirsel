@@ -15,6 +15,7 @@
 //! dropping a tape advances its cell's generation, so every handle made
 //! through it then fails before issue and never uses its source.
 mod dispatch;
+mod error;
 mod exec;
 mod managed;
 pub mod run;
@@ -22,6 +23,7 @@ pub(crate) mod schedule;
 mod unix;
 pub(crate) mod writer;
 pub(crate) use dispatch::{exec_rules, narrow_exec, narrow_net, net_rules, owns, source};
+pub use error::{Divergence, Fault, Mismatch, OpenError, Refusal};
 pub use hirsel_tape_format as format;
 #[cfg(test)]
 mod schedule_cases;
@@ -40,81 +42,6 @@ use std::{collections::BTreeMap, ptr, sync::Mutex};
 pub enum Mode {
     Record,
     Replay,
-}
-
-/// Section 4.2's divergence kinds.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Mismatch {
-    Op,
-    Object,
-    Arg,
-    Missing,
-    Extra,
-    /// The replaying domain's outcome differs from END's (v2.3 R9).
-    Outcome,
-    Schedule,
-}
-
-/// Where a replay diverged: `at` is the 1-based position of the frame it was
-/// checked against, counting the frames after block 0 (one past the last frame
-/// when the tape has none left).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Divergence {
-    pub at: u64,
-    pub kind: Mismatch,
-}
-
-/// Why a tape stopped. Every later operation on it fails the same way.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Fault {
-    Diverged(Divergence),
-    /// The tape is cut at the frame in this position.
-    Truncated(u64),
-    Damaged(u64),
-    Corrupt,
-    /// The sink's write failed.
-    Io(IoError),
-    /// The tape was ended or dropped (section 8).
-    Ended,
-}
-impl Fault {
-    /// The fault a block or frame stop gives at frame position `at`.
-    fn stopped(s: Stop, at: u64) -> Self {
-        match s {
-            Stop::Missing => Fault::Diverged(Divergence {
-                at,
-                kind: Mismatch::Missing,
-            }),
-            Stop::Truncated => Fault::Truncated(at),
-            Stop::Damaged(k) => Fault::Damaged(k),
-            Stop::Corrupt => Fault::Corrupt,
-        }
-    }
-}
-
-impl From<Corrupt> for Fault {
-    fn from(_: Corrupt) -> Self {
-        Fault::Corrupt
-    }
-}
-
-/// Section 5.3: open refuses before anything runs.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Refusal {
-    Code,
-    Revision,
-    Arg,
-    Limit,
-    Damaged(u64),
-    HeaderTooLarge,
-}
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum OpenError {
-    Refused(Refusal),
-    /// The tape file could not be created, read or written.
-    Io(IoError),
-    /// The header block itself is cut or breaks the grammar.
-    Unreadable(Fault),
 }
 
 /// What a Replay opener compares with the stored header.
@@ -155,19 +82,6 @@ pub(crate) fn refuse(f: Fault) -> Fault {
 pub(crate) fn last_fault() -> Option<Fault> {
     LAST.get()
 }
-impl std::fmt::Display for Fault {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Fault::Diverged(d) => write!(f, "diverged at {}, {:?}", d.at, d.kind),
-            Fault::Truncated(at) => write!(f, "truncated at {at}"),
-            Fault::Damaged(k) => write!(f, "block {k} damaged"),
-            Fault::Corrupt => f.write_str("corrupt"),
-            Fault::Io(e) => write!(f, "tape write failed ({}, {})", e.tag, e.code),
-            Fault::Ended => f.write_str("ended"),
-        }
-    }
-}
-
 /// The inner (provider, provider-local handle) an object designates.
 #[derive(Clone, Copy)]
 struct Inner {

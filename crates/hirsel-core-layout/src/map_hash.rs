@@ -28,13 +28,6 @@ impl PreparedKey {
         ])
     }
 
-    pub fn to_bytes(self) -> [u8; 16] {
-        let mut key = [0; 16];
-        key[..8].copy_from_slice(&(self.0[0] ^ INITIAL_LANES[0]).to_le_bytes());
-        key[8..].copy_from_slice(&(self.0[1] ^ INITIAL_LANES[1]).to_le_bytes());
-        key
-    }
-
     #[inline]
     pub fn state(self) -> State {
         let [v0, v1, v2, v3] = self.0;

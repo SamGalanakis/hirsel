@@ -382,7 +382,6 @@ unsafe fn record_header(
             secret_grants,
             cred_grants,
             env,
-            map_hash_key: format::MapHashKey((*context).map_hash_key.to_bytes()),
         })
     }
 }
@@ -910,9 +909,8 @@ unsafe fn run_taped(
             if replay.stored.kind != KIND_RUN {
                 return refused(&mut run, OpenError::Unreadable(Fault::Corrupt));
             }
-            let key = replay.stored.map_hash_key.0;
             run.replay = Some(replay);
-            process::run_with_map_hash_key(&config, invoke, key, process::run_plain)
+            process::hirsel_core_run(&config, invoke)
         };
         if let Some((at, err)) = run.record_truncated {
             report_truncation(run.stderr, at, err);
@@ -923,60 +921,6 @@ unsafe fn run_taped(
 
 #[cfg(test)]
 pub(super) fn check_launch_replay() {
-    // The entropy-denial filter is permanent for its thread.
-    std::thread::spawn(check_launch_replay_without_entropy)
-        .join()
-        .unwrap();
-}
-
-#[cfg(test)]
-fn check_launch_replay_without_entropy() {
-    fn deny_getrandom() {
-        let mut filter = [
-            libc::sock_filter {
-                code: (libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16,
-                jt: 0,
-                jf: 0,
-                k: 0,
-            },
-            libc::sock_filter {
-                code: (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16,
-                jt: 0,
-                jf: 1,
-                k: libc::SYS_getrandom as u32,
-            },
-            libc::sock_filter {
-                code: (libc::BPF_RET | libc::BPF_K) as u16,
-                jt: 0,
-                jf: 0,
-                k: libc::SECCOMP_RET_ERRNO | libc::ENOSYS as u32,
-            },
-            libc::sock_filter {
-                code: (libc::BPF_RET | libc::BPF_K) as u16,
-                jt: 0,
-                jf: 0,
-                k: libc::SECCOMP_RET_ALLOW,
-            },
-        ];
-        let program = libc::sock_fprog {
-            len: filter.len() as u16,
-            filter: filter.as_mut_ptr(),
-        };
-        // SAFETY: these calls affect only the fixture thread and the kernel copies the filter.
-        unsafe {
-            assert_eq!(libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0), 0);
-            assert_eq!(
-                libc::prctl(libc::PR_SET_SECCOMP, libc::SECCOMP_MODE_FILTER, &program),
-                0
-            );
-            let mut byte = 0u8;
-            assert_eq!(libc::getrandom((&mut byte as *mut u8).cast(), 1, 0), -1);
-            assert_eq!(
-                std::io::Error::last_os_error().raw_os_error(),
-                Some(libc::ENOSYS)
-            );
-        }
-    }
     #[derive(Debug, PartialEq)]
     struct Snapshot {
         digest: Vec<u8>,
@@ -984,10 +928,10 @@ fn check_launch_replay_without_entropy() {
         n_place: u64,
         describe: u64,
         emitted: bool,
-        key: format::MapHashKey,
     }
+    type HashLanes = [u64; hirsel_core_layout::map_hash::STATE_WORDS];
     thread_local! {
-        static OBSERVED: std::cell::RefCell<Vec<Snapshot>> = const { std::cell::RefCell::new(Vec::new()) };
+        static OBSERVED: std::cell::RefCell<Vec<(Snapshot, HashLanes)>> = const { std::cell::RefCell::new(Vec::new()) };
     }
     unsafe extern "C" fn entry(context: *mut Context, _: *const Config, _: *mut MainResult) -> u8 {
         // SAFETY: process startup pins the context and launch views through entry.
@@ -1000,7 +944,6 @@ fn check_launch_replay_without_entropy() {
                 target: std::slice::from_raw_parts(target.data, target.len).to_vec(),
                 n_place: word(0, 0),
                 describe: word(5, 0),
-                key: format::MapHashKey((*context).map_hash_key.to_bytes()),
                 emitted: process::hirsel_core_describe_emit(
                     context,
                     &Buffer {
@@ -1010,7 +953,8 @@ fn check_launch_replay_without_entropy() {
                     },
                 ),
             };
-            OBSERVED.with_borrow_mut(|seen| seen.push(snapshot));
+            OBSERVED
+                .with_borrow_mut(|seen| seen.push((snapshot, (*context).map_hash_key.state().0)));
         }
         0
     }
@@ -1018,10 +962,24 @@ fn check_launch_replay_without_entropy() {
     let root = scratch.path();
     use std::os::fd::AsRawFd;
     let output = std::fs::File::create(root.join("describe")).unwrap();
-    let path = std::ffi::CString::new(root.join("run.tape").as_os_str().as_bytes()).unwrap();
-    for mode in [0, 1] {
-        if mode == 1 {
-            deny_getrandom();
+    let stderr = std::fs::File::create(root.join("stderr")).unwrap();
+    let path = root.join("run.tape");
+    for (mode, previous_format) in [(0, false), (1, false), (1, true)] {
+        if previous_format {
+            // Keep the Run frames and rewrite block zero in format 11, including
+            // the trailing key and a valid checksum.
+            let bytes = std::fs::read(&path).unwrap();
+            let header_end =
+                format::BLOCK_HEAD + u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+            let mut header = bytes[format::BLOCK_HEAD..header_end].to_vec();
+            header[..2].copy_from_slice(&11u16.to_le_bytes());
+            let tape_id = header[format::TAPE_ID_AT..format::TAPE_ID_AT + 16]
+                .try_into()
+                .unwrap();
+            header.extend_from_slice(&[0; 16]);
+            let mut old = format::block(&tape_id, 0, 0, &header);
+            old.extend_from_slice(&bytes[header_end + format::BLOCK_CHECK..]);
+            std::fs::write(&path, old).unwrap();
         }
         let (target, arguments): (&[u8], &[&[u8]]) = if mode == 0 {
             (
@@ -1046,7 +1004,7 @@ fn check_launch_replay_without_entropy() {
             directories_len: 0,
             grant_mask: 0,
             stdout_fd: output.as_raw_fd(),
-            stderr_fd: 2,
+            stderr_fd: stderr.as_raw_fd(),
             parameters: ptr::null(),
             parameters_len: 0,
             net_rules: ptr::null(),
@@ -1079,26 +1037,32 @@ fn check_launch_replay_without_entropy() {
                 ptr::null(),
                 ptr::null(),
                 entry,
-                path.as_bytes().to_vec(),
+                path.as_os_str().as_bytes().to_vec(),
                 mode,
                 c"launch-case".as_ptr(),
                 &[7; 32],
                 None,
             )
         };
-        assert_eq!(status, 0);
+        assert_eq!(status, u8::from(previous_format));
     }
     let seen = OBSERVED.with(|seen| seen.take());
-    assert_eq!(seen.len(), 2);
-    assert_eq!(seen[0].digest.len(), 32);
-    assert_eq!(seen[0].target, b"record-target");
-    assert_eq!(seen[0].n_place, 73);
-    assert_eq!(seen[0].describe, 1);
-    assert!(seen[0].emitted);
-    let bytes = std::fs::read(root.join("run.tape")).unwrap();
-    let mut data = bytes.as_slice();
-    let (_, header) = Blocks::open(|buf| std::io::Read::read(&mut data, buf)).unwrap();
-    assert_eq!(seen[0].key, header.map_hash_key);
-    assert_eq!(seen[1], seen[0]);
+    let [(recorded, record_key), (replayed, replay_key)] = seen.as_slice() else {
+        panic!("expected entry once during recording and once during replay");
+    };
+    assert_eq!(recorded.digest.len(), 32);
+    assert_eq!(recorded.target, b"record-target");
+    assert_eq!(recorded.n_place, 73);
+    assert_eq!(recorded.describe, 1);
+    assert!(recorded.emitted);
+    assert!(
+        record_key != replay_key,
+        "replay reused the recording's Map key"
+    );
+    assert_eq!(replayed, recorded);
+    assert_eq!(
+        std::fs::read_to_string(root.join("stderr")).unwrap(),
+        "replay: refused: unsupported tape format 11 (expected 12)\n"
+    );
     assert_eq!(std::fs::read(root.join("describe")).unwrap(), b"describe\n");
 }

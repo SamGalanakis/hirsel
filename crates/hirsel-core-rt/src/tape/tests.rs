@@ -446,7 +446,6 @@ pub(super) fn header(build: [u8; 32]) -> Header {
         secret_grants: vec![],
         cred_grants: vec![],
         env: None,
-        map_hash_key: Default::default(),
     }
 }
 pub(super) fn expect() -> Expect<'static> {
@@ -565,10 +564,10 @@ fn xxh3_is_libxxhash_whole_and_in_two_parts() {
 
 /// Wrong implementation caught: any byte of the encoder off the spec (field
 /// order, varint, zig-zag delta, T at a block's first frame, check input).
-/// The oracle is vectors.py's format-5 derivation from REPLAY-SPEC §5,
+/// The oracle is vectors.py's format-12 derivation from REPLAY-SPEC §5,
 /// checked with libxxhash. Its Call header has a 32-byte revision.
 #[test]
-fn the_encoder_writes_the_format_5_model_tape_byte_for_byte() {
+fn the_encoder_writes_the_format_12_model_tape_byte_for_byte() {
     let h = Header {
         kind: KIND_CALL,
         tape_id: std::array::from_fn(|i| i as u8),
@@ -583,7 +582,6 @@ fn the_encoder_writes_the_format_5_model_tape_byte_for_byte() {
         secret_grants: vec![],
         cred_grants: vec![],
         env: None,
-        map_hash_key: Default::default(),
     };
     let mono = |v: u64| Frame::Op {
         task: 0,
@@ -669,7 +667,7 @@ fn network_outcomes_decode_with_exact_payloads() {
 
     let mut encoded_header = header.encode(header.revision).unwrap();
     assert_eq!(Header::decode(&encoded_header).unwrap(), header);
-    let rules_end = encoded_header.len() - size_of_val(&header.map_hash_key.0);
+    let rules_end = encoded_header.len();
     let mut reversed = encoded_header.clone();
     reversed[rules_end - 4..rules_end].copy_from_slice(&[1, 0, 0, 0]);
     assert!(Header::decode(&reversed).is_err(), "reversed range");
@@ -988,10 +986,10 @@ fn record_closes_the_file_when_the_header_write_fails() {
 #[test]
 fn record_refuses_a_header_that_overflows_block_zero_before_creating_the_file() {
     let mut h = header(REVISION);
-    // Format 8 has 72 fixed bytes plus the 16-byte Map hash key,
+    // Format 12 has 72 fixed bytes,
     // 14 identity bytes + 1 length byte, a 3-byte argument length,
     // and a 1-byte empty grants length.
-    const HEADER_BYTES: usize = 72 + 16 + 14 + 1 + 3 + 1;
+    const HEADER_BYTES: usize = 72 + 14 + 1 + 3 + 1;
     h.arg = vec![0; MAX_LEN - HEADER_BYTES];
     let mut store = Box::<Store>::default();
     let (tape, _) =
@@ -1075,7 +1073,6 @@ fn every_one_byte_change_is_refused() {
     for i in 0..t.len() {
         let k = at.iter().rposition(|&b| b <= i).unwrap();
         let in_len = (at[k] + 12..at[k] + 16).contains(&i);
-        let in_format = (BLOCK_HEAD..BLOCK_HEAD + 2).contains(&i);
         for x in [0x01u8, 0x80, 0xff] {
             let mut m = t.clone();
             m[i] ^= x;
@@ -1085,11 +1082,7 @@ fn every_one_byte_change_is_refused() {
                 Err(e) => panic!("byte {i}: {e:?}"),
                 Ok((_, _, verdict)) => verdict.unwrap_err(),
             };
-            let ok = if in_format {
-                r == Fault::Corrupt
-            } else {
-                r == Fault::Damaged(k as u64) || (in_len && matches!(r, Fault::Truncated(_)))
-            };
+            let ok = r == Fault::Damaged(k as u64) || (in_len && matches!(r, Fault::Truncated(_)));
             assert!(ok, "byte {i} ^ {x:#x}: {r:?}");
         }
     }

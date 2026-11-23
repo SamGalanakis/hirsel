@@ -328,10 +328,7 @@ pub unsafe extern "C" fn hirsel_core_run(config: *const Config, entry: Entry) ->
 
 type RunMain<'a> = dyn FnMut(&mut Context) -> (u8, i32) + 'a;
 
-pub(crate) fn run_plain(
-    context: &mut Context,
-    main: &mut RunMain<'_>,
-) -> std::io::Result<(u8, i32)> {
+fn run_plain(context: &mut Context, main: &mut RunMain<'_>) -> std::io::Result<(u8, i32)> {
     Ok(main(context))
 }
 
@@ -368,6 +365,27 @@ unsafe fn with_foreign(
     Ok(result)
 }
 
+fn map_hash_key() -> std::io::Result<[u8; 16]> {
+    let mut key = [0; 16];
+    let mut remaining = &mut key[..];
+    while !remaining.is_empty() {
+        // SAFETY: remaining is a writable slice passed for exactly its length.
+        let n = unsafe { libc::getrandom(remaining.as_mut_ptr().cast(), remaining.len(), 0) };
+        if n < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        if n == 0 {
+            return Err(std::io::Error::from_raw_os_error(libc::EIO));
+        }
+        remaining = &mut remaining[n as usize..];
+    }
+    Ok(key)
+}
+
 // Instantiate startup for each runner so the linker can discard unused
 // foreign setup from executables that use the ordinary entry.
 unsafe fn run_config(
@@ -390,40 +408,6 @@ unsafe fn run_config(
                 return NOT_STARTED;
             }
         };
-        run_with_map_hash_key(config, entry, key, run)
-    }
-}
-
-fn map_hash_key() -> std::io::Result<[u8; 16]> {
-    let mut key = [0; 16];
-    let mut remaining = &mut key[..];
-    while !remaining.is_empty() {
-        // SAFETY: remaining is a writable slice passed for exactly its length.
-        let n = unsafe { libc::getrandom(remaining.as_mut_ptr().cast(), remaining.len(), 0) };
-        if n < 0 {
-            let error = std::io::Error::last_os_error();
-            if error.kind() == std::io::ErrorKind::Interrupted {
-                continue;
-            }
-            return Err(error);
-        }
-        if n == 0 {
-            return Err(std::io::Error::from_raw_os_error(libc::EIO));
-        }
-        remaining = &mut remaining[n as usize..];
-    }
-    Ok(key)
-}
-
-/// Enter with the key restored from a checked Run header.
-pub(crate) unsafe fn run_with_map_hash_key(
-    config: &Config,
-    entry: Entry,
-    key: [u8; 16],
-    run: impl FnOnce(&mut Context, &mut RunMain<'_>) -> std::io::Result<(u8, i32)>,
-) -> u8 {
-    // SAFETY: the caller pins the same operands as hirsel_core_run.
-    unsafe {
         let _pipe_policy = PipePolicy::enter();
         #[cfg(feature = "prof")]
         let _worker_profile = crate::prof::Worker::enter();

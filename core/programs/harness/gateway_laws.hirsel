@@ -218,7 +218,8 @@ fn place(mut r: store.runner.Registry[Grants, harness.Handles]) -> Result[(), st
     store.runner.query(mut r, code.describe(shown), std.codec.key_u64(), views, BYTES, store.runner.DEFAULT_STEPS)?
     store.runner.transact(mut r, code.describe(revoke_reader), BYTES, store.runner.DEFAULT_STEPS)?
     let windows: std.codec.Codec[harness.View] = std.codec.of()
-    store.runner.query_as(mut r, code.describe(harness.window), std.codec.key_u64(), windows, BYTES, store.runner.DEFAULT_STEPS)
+    store.runner.query_as(mut r, code.describe(harness.window), std.codec.key_u64(), windows, BYTES, store.runner.DEFAULT_STEPS)?
+    store.runner.query_as(mut r, code.describe(harness.history_cuts), std.codec.key_u64(), std.codec.of_u64(), BYTES, store.runner.DEFAULT_STEPS)
 }
 
 fn services_of(s: Services, take name: String) -> Services {
@@ -773,10 +774,10 @@ fn down_within(door: harness.gateway.Door[Services], id: u64, clock: Clock) -> O
 // rows, and no start or stop in a quiet second (more than three idle times). The answer
 // is the first check that failed, or 0.
 pub fn law_front_holds_stream(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> u64 waits {
-    tool_stream(parent, clock, random, tasks, net, false)
+    tool_stream(parent, clock, random, tasks, net, false, false)
 }
 
-fn tool_stream(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, enabled: bool) -> u64 waits {
+fn tool_stream(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, enabled: bool, fork: bool) -> u64 waits {
     let mut name = string.with_capacity(32u64)
     let root = result.unwrap(host.mkdtemp(parent, mut name))
     let (asks, inbox): (Sender[Sender[()]], Receiver[Sender[()]]) = channel.new(4u64)
@@ -791,7 +792,7 @@ fn tool_stream(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
         None
     }
     let seed = Services(model: take asks, tallies: take tallies, door: harness.gateway.door_of(way), name: "", tasks: tasks, clock: clock, random: random, net: net, preview: take worker_port, chunks: 0u64)
-    let config = harness.gateway.GatewayConfig(root: root, options: store.triggers.law_options(), migrate: code.describe(harness.migrate), factory: session_factory(), max_sessions: 1u64, idle_ms: IDLE_MS, place_bytes: 67108864u64, tasks: tasks, clock: clock, random: random, net: net, watch: None, seed: take seed)
+    let config = harness.gateway.GatewayConfig(root: root, options: store.triggers.law_options(), migrate: code.describe(harness.migrate), factory: session_factory(), max_sessions: if fork { 2u64 } else { 1u64 }, idle_ms: IDLE_MS, place_bytes: 67108864u64, tasks: tasks, clock: clock, random: random, net: net, watch: None, seed: take seed)
     let g = match harness.gateway.gateway(take way, take config) {
         Ok(take made) => take made,
         Error(_) => return 1u64
@@ -882,6 +883,10 @@ fn tool_stream(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
     if paged != 0u64 {
         return 40u64 + paged
     }
+    if fork {
+        let checked = fork_history(door, root, net, clock, random, tasks, port, me)
+        if checked != 0u64 { return 60u64 + checked }
+    }
     harness.gateway_http.halt(take served)
     let mut tail: Bytes = list.with_capacity(4096u64)
     let ended = loop {
@@ -962,6 +967,58 @@ fn tail_and_history(net: Net, clock: Clock, port: u16, me: Bytes) -> u64 waits {
     0u64
 }
 
+// The source's five entries come from the scripted tool round. A fork owns
+// that pinned prefix even after the source is deleted. Only its two new
+// entries precede the first cut; paging from the cut yields the source rows.
+fn fork_history(door: harness.gateway.Door[Services], root: Dir, net: Net, clock: Clock, random: Random, tasks: Tasks, port: u16, me: Bytes) -> u64 waits {
+    let Some(_) = down_within(door, 0u64, clock) else { return 1u64 }
+    let dir = result.unwrap(std.dir.narrow(root, "s0"))
+    let db = result.unwrap(store.open(tasks, dir, clock, random, store.triggers.law_options()))
+    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    let prefix = result.unwrap(harness.export(store.snapshot(db), h, 5u64))
+    result.unwrap(store.close(take db))
+    let owner = result.unwrap(store.ingress.caller((), me))
+    let Ok(1u64) = harness.gateway.create_visible(door, b"fork", Adopt(take prefix), take owner) else { return 2u64 }
+    if let Error(_) = harness.gateway.delete(door, 0u64) { return 3u64 }
+    let (posted, _) = http(net, clock, port, "POST", "/sessions/1/messages", person(me, 0u64), json(harness.Submit(client_key: "f1", text: "fork only")))
+    if posted != 202u16 { return 4u64 }
+    let Some(_) = down_within(door, 1u64, clock) else { return 15u64 }
+
+    let Ok(take c) = browser_at(net, clock, port, me, "/sessions/1/events?tail=1") else { return 5u64 }
+    let mut stream = take c
+    let mut decoder = std.sse.decoder(65536u64)
+    let mut rows: List[(u64, Bytes)] = list.new()
+    if !read_until_row(mut stream, mut decoder, mut rows, "answered", 8u64) { return 6u64 }
+    let _ = take stream
+    let format: std.json.Format[harness.gateway_http.Page] = result.unwrap(std.json.interop())
+    let (newer, data) = http(net, clock, port, "GET", "/sessions/1/history?before=8&lines=7", person(me, 0u64), list.new())
+    if newer != 200u16 { return 7u64 }
+    let Ok(page) = std.json.decode_typed(format, clone(data), 65536u64) else { return 8u64 }
+    if page.from != 6u64 || list.len(page.rows) != 1u64 || page.rows[0].at != 6u64 { return 9u64 }
+    list.push(mut rows, (6u64, bytes_of(page.rows[0].line)))
+
+    let (older, prior_data) = http(net, clock, port, "GET", "/sessions/1/history?before=6&lines=7", person(me, 0u64), list.new())
+    if older != 200u16 { return 10u64 }
+    let Ok(prior) = std.json.decode_typed(format, clone(prior_data), 65536u64) else { return 11u64 }
+    if prior.from != 1u64 { return 12u64 }
+    for r in prior.rows { list.push(mut rows, (r.at, bytes_of(r.line))) }
+    let mut expected = rows_want("answered", true)
+    list.push(mut expected, row_of(6u64, Line("user", "fork only")))
+    list.push(mut expected, row_of(8u64, Line("assistant", "done")))
+    if !same_rows(rows, expected) { return 13u64 }
+    let mut fresh = result.unwrap(browser_at(net, clock, port, me, "/sessions/1/events"))
+    let mut fresh_decoder = std.sse.decoder(65536u64)
+    let mut full: List[(u64, Bytes)] = list.new()
+    if !read_until_row(mut fresh, mut fresh_decoder, mut full, "answered", 8u64) || !same_rows(full, expected) { return 14u64 }
+    0u64
+}
+
+@test
+fn test_front_fork_history(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), u64] waits {
+    let bad = tool_stream(parent, clock, random, tasks, net, false, true)
+    if bad == 0u64 { Ok(()) } else { Error(bad) }
+}
+
 @test
 fn test_front_holds_stream(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), u64] waits {
     let bad = law_front_holds_stream(parent, clock, random, tasks, net)
@@ -974,7 +1031,7 @@ fn test_front_holds_stream(parent: Dir, clock: Clock, random: Random, tasks: Tas
 
 @test
 fn test_front_shows_tool_progress(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), u64] waits {
-    let bad = tool_stream(parent, clock, random, tasks, net, true)
+    let bad = tool_stream(parent, clock, random, tasks, net, true, false)
     if bad == 0u64 {
         Ok(())
     } else {

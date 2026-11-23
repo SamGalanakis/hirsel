@@ -493,7 +493,8 @@ fn place(mut r: store.runner.Registry[Grants, harness.Handles]) -> Result[(), st
     let views: std.codec.Codec[harness.View] = std.codec.of()
     store.runner.query(mut r, code.describe(shown), std.codec.key_u64(), views, BYTES, store.runner.DEFAULT_STEPS)?
     let windows: std.codec.Codec[harness.View] = std.codec.of()
-    store.runner.query_as(mut r, code.describe(harness.window), std.codec.key_u64(), windows, BYTES, store.runner.DEFAULT_STEPS)
+    store.runner.query_as(mut r, code.describe(harness.window), std.codec.key_u64(), windows, BYTES, store.runner.DEFAULT_STEPS)?
+    store.runner.query_as(mut r, code.describe(harness.history_cuts), std.codec.key_u64(), std.codec.of_u64(), BYTES, store.runner.DEFAULT_STEPS)
 }
 
 // ---- the helper agent: a second place, one session of its own ----

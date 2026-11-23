@@ -323,8 +323,9 @@ options and the idle time.
 one request per connection, and holds each browser's event stream itself, so a
 session's place can unload while its page stays open.
 
-- `GET /sessions`, `POST /sessions` (body: the key; answers the id) and
-  `DELETE /sessions/:id` call the gateway.
+- `GET /sessions` and `DELETE /sessions/:id` call the gateway. `POST /sessions`
+  takes a bearer credential and a creation key. It seeds the new session with
+  that Caller as its first reader and returns the id.
 - `POST /sessions/:id/messages` (a JSON `Submit`, answers 202) and
   `POST /sessions/:id/decisions` (a JSON `Decision`, answers the `Ruling`)
   route to the place, waking it, and call its entry. The browser is the
@@ -344,16 +345,16 @@ session's place can unload while its page stays open.
   bound while it lasts, so later rows only append.
 - `GET /sessions/:id/history?before=B&lines=N` (bearer credential, `N` at most
   256) answers one JSON `Page { from, rows }`: the rows at positions
-  `from <= at < B`, where `from` is `B - N`, at least 1. A reader pages back by
-  passing the previous page's `from` as `before` until `from` is 1. The upper
-  cutoff is the page's own, so rows appended meanwhile never shift a page.
-  Each page is a fresh query under the browser's Caller, so the place's read
-  check runs for every page.
-- A front names the place's view query in `Front.shown`, a
-  `Callee[harness.Window, ()]` registered with `store.runner.query` over
-  `harness.window`: `Status` (row 0), `Tail(n)`, `From(first)` and
-  `Page(before, n)`. The harness has no reader ACL yet; an application that
-  needs one registers the window with `query_as` and refuses there.
+  `from <= at < B`. The page stops at the newest fork cut in the requested
+  range. Passing `from` as the next `before` walks the fork's pinned prefix
+  and any earlier cuts until `from` is 1. Appends never move a page's upper limit.
+- The front uses `store.ingress.caller` for bearer credentials. Places register
+  `harness.window` and `harness.history_cuts` with `store.runner.query_as`.
+  Each query reads the Caller's conversation ACL row, including when preview is
+  disabled. A denied page is empty and a denied stream ends. An authorized
+  stream still needs the Caller to own the run to see its preview. Trusted
+  application code updates membership with `harness.set_reader` and nudges the
+  gateway after the commit so quiet streams check again.
 - While a session is busy, its following stream holds one of the place's wire
   sessions. The gateway's host sets every session's place to four (RUNNER-SPEC
   §14.9), so a page, a status read, a message or a decision never waits for the run.

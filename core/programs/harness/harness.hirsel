@@ -175,6 +175,7 @@ pub type Handles: send {
     waits: store.Table[WaitKey, Wait],
     views: store.Table[u64, View],
     readers: store.Table[Bytes, bool],
+    fork_cuts: store.Table[u64, u64],
     mcp_catalog: store.Table[String, mcp_tools.Remote],
     triggers: store.triggers.Tables,
 }
@@ -306,7 +307,8 @@ pub fn migrate(mut phase: store.Migration) -> Result[(), store.Error] {
     created(store.migration_create_table(mut phase, store.spec(waits_name(), wait_key(), c_wait)))?
     created(store.migration_create_table(mut phase, store.spec(views_name(), std.codec.key_u64(), c_shown)))?
     let c_reader: std.codec.Codec[bool] = std.codec.of()
-    created(store.migration_create_table(mut phase, store.spec("harness.readers", std.codec.key_bytes(), c_reader)))
+    created(store.migration_create_table(mut phase, store.spec("harness.readers", std.codec.key_bytes(), c_reader)))?
+    created(store.migration_create_table(mut phase, store.spec("harness.fork_cuts", std.codec.key_u64(), std.codec.of_u64())))
 }
 
 pub fn handles(schema: store.Schema) -> Result[Handles, store.Error] {
@@ -327,6 +329,7 @@ pub fn handles(schema: store.Schema) -> Result[Handles, store.Error] {
         waits: store.schema_table(schema, waits_name(), wait_key(), c_wait)?,
         views: store.schema_table(schema, views_name(), std.codec.key_u64(), c_shown)?,
         readers: store.schema_table(schema, "harness.readers", std.codec.key_bytes(), c_reader)?,
+        fork_cuts: store.schema_table(schema, "harness.fork_cuts", std.codec.key_u64(), std.codec.of_u64())?,
         mcp_catalog: mcp_tools.catalog(schema)?,
         triggers: store.triggers.tables(schema)?,
     ))
@@ -515,7 +518,8 @@ pub type Prefix: codec + send {
     model: String,
     tools_narrow: Narrow,
     head_pos: u64,
-    entries: List[Entry]
+    entries: List[Entry],
+    cuts: List[u64]
 }
 
 // Exports entries[0..upto) through a snapshot. A cut inside a tool round (an
@@ -557,7 +561,16 @@ pub fn export(snap: store.Snapshot, h: Handles, upto: u64) -> Result[Prefix, Ref
     if list.len(open) > 0u64 {
         return Error(Conflict)
     }
-    Ok(Prefix(model: clone(s.model), tools_narrow: clone(s.tools_narrow), head_pos: s.head_pos, entries: take log))
+    // The fork gets the cuts inside its pinned prefix, even if the source is
+    // itself a fork. A cut is the first row owned by the newer segment.
+    let mut cuts: List[u64] = list.new()
+    if upto > 0u64 {
+        let mut rows = kept(store.scan(snap, store.shape(h.fork_cuts), Unbounded, Included(upto)))?
+        while let Some((cut, _)) = kept(store.next(mut rows))? {
+            list.push(mut cuts, cut)
+        }
+    }
+    Ok(Prefix(model: clone(s.model), tools_narrow: clone(s.tools_narrow), head_pos: s.head_pos, entries: take log, cuts: take cuts))
 }
 
 // Seeds an empty session from a prefix: its entries and their visible lines,
@@ -568,10 +581,17 @@ pub fn adopt(mut tx: store.Tx, h: Handles, take p: Prefix) -> Result[(), Refused
     if let Some(_) = kept(store.fetch(tx, store.shape(h.session), 0u64))? {
         return Error(Conflict)
     }
-    let Prefix(model: take model, tools_narrow: take narrow, head_pos: head, entries: take log) = take p
+    let Prefix(model: take model, tools_narrow: take narrow, head_pos: head, entries: take log, cuts: take cuts) = take p
     let mut s = Session(model: take model, tools_narrow: take narrow, head_pos: head, next_pos: 0u64, active_run: None, next_run: 0u64, active_sections_hashes: list.new(), active_tools_hash: list.new(), active_tools_pos: None)
     for e in log {
         let _ = put_entry(mut tx, h, mut s, e)?
+    }
+    for cut in cuts {
+        kept(store.put(mut tx, h.fork_cuts, cut, cut))?
+    }
+    if s.next_pos > 0u64 {
+        let cut = s.next_pos + 1u64
+        kept(store.put(mut tx, h.fork_cuts, cut, cut))?
     }
     kept(store.put(mut tx, h.session, 0u64, s))?
     kept(store.put(mut tx, h.views, 0u64, Status("idle")))
@@ -2084,9 +2104,26 @@ pub fn page_from(before: u64, lines: u64) -> u64 {
 // Register with query_as so the membership read is tracked for this Caller.
 pub fn window(tx: store.Tx, h: Handles, caller: store.Caller, take w: Window) -> Result[store.runner.Cover, Capacity] {
     let t = store.shape(h.views)
-    let key = reader_key(caller)?
-    if let Ok(Some(true)) = store.fetch(tx, store.shape(h.readers), take key) {
+    if reader_allowed(tx, h, caller)? {
         return visible_window(tx, h, w)
+    }
+    store.runner.cover(t, Included(0u64), Excluded(0u64))
+}
+
+fn reader_allowed(tx: store.Tx, h: Handles, caller: store.Caller) -> Result[bool, Capacity] {
+    let key = reader_key(caller)?
+    Ok(match store.fetch(tx, store.shape(h.readers), take key) {
+        Ok(Some(true)) => true,
+        _ => false,
+    })
+}
+
+// Finds cuts inside the requested page. The page starts at the newest cut,
+// then its cursor moves into the pinned predecessor on the next request.
+pub fn history_cuts(tx: store.Tx, h: Handles, caller: store.Caller, take range: (u64, u64)) -> Result[store.runner.Cover, Capacity] {
+    let t = store.shape(h.fork_cuts)
+    if reader_allowed(tx, h, caller)? {
+        return store.runner.cover(t, Included(range.0), Excluded(range.1))
     }
     store.runner.cover(t, Included(0u64), Excluded(0u64))
 }

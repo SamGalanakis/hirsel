@@ -411,7 +411,7 @@ pub fn law_fork_shares_prefix(parent: Dir, clock: Clock, random: Random, tasks: 
     let mut bad = 0u64
     let inside = exported(src, 6u64)
     if let Error(Conflict) = inside { () } else { bad = 1u64 }
-    let prefix = match exported(src, 4u64) { Ok(take p) => take p, Error(_) => { bad = 2u64; harness.Prefix(model: "", tools_narrow: All, head_pos: 0u64, entries: list.new()) } }
+    let prefix = match exported(src, 4u64) { Ok(take p) => take p, Error(_) => { bad = 2u64; harness.Prefix(model: "", tools_narrow: All, head_pos: 0u64, entries: list.new(), cuts: list.new()) } }
     result.unwrap(store.close(take src))
     let mut db = result.unwrap(store.open(tasks, to, clock, random, store.triggers.law_options()))
     result.unwrap(store.run_migration(mut db, tasks, code.describe(harness.migrate)))

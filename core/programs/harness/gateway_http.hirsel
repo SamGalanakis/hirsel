@@ -706,9 +706,27 @@ fn query_uint(target: Bytes, name: String) -> Option[u64] {
 // the place's read check runs for every page. It wakes the session.
 fn history[T: send](d: harness.gateway.Door[T], f: Front, id: u64, take credential: Bytes, before: u64, lines: u64) -> Result[Page, u16] waits {
     let mut client = reach(d, f, id, take credential, 0u64, true)?
-    let Ok(sub) = store.fixture.subscribe(mut client, window_entry(), Page(before, lines), f.within_ms) else {
+    let mut from = harness.page_from(before, lines)
+    let cuts = store.fixture.query_as_entry(code.describe(harness.history_cuts), std.codec.key_u64(), std.codec.of_u64())
+    let Ok(bounds) = store.fixture.subscribe(mut client, cuts, (from, before), f.within_ms) else {
         store.fixture.close(take client);
-        return Error(403u16)
+        return Error(503u16)
+    }
+    let Ok(cut_image) = store.fixture.seen_at(mut client, bounds, 0u64, f.within_ms) else {
+        store.fixture.close(take client);
+        return Error(503u16)
+    }
+    for r in cut_image.rows {
+        if let Some(raw) = view r.value {
+            if let Ok(cut) = std.codec.decode(std.codec.of_u64(), raw) {
+                if cut > from { from = cut }
+            }
+        }
+    }
+    store.fixture.unsubscribe(mut client, bounds)
+    let Ok(sub) = store.fixture.subscribe(mut client, window_entry(), Page(before, before - from), f.within_ms) else {
+        store.fixture.close(take client);
+        return Error(503u16)
     }
     let seen = store.fixture.seen_at(mut client, sub, 0u64, f.within_ms)
     store.fixture.close(take client)
@@ -729,7 +747,7 @@ fn history[T: send](d: harness.gateway.Door[T], f: Front, id: u64, take credenti
         }
         list.push(mut rows, Shown(at: at, line: take v))
     }
-    Ok(Page(from: harness.page_from(before, lines), rows: take rows))
+    Ok(Page(from: from, rows: take rows))
 }
 
 fn reply(mut w: WriteHalf, f: Front, status: u16, take payload: Bytes) -> () waits {

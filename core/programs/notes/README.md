@@ -70,8 +70,9 @@ The spend is three model rounds of 10 input and 5 output tokens each.
 
 ## The model route
 
-`scripted_model` stands in for the provider, so a run makes no network call
-beyond loopback and needs no key. A deployment's model is a function of the
-same type whose grants carry a `harness.provider.Provider` (its endpoint, and
-its key as a `Secret` the launcher grants), and it returns
-`harness.provider.ask(net, clock, provider, request)`.
+`scripted_model` answers the default run. The manual OpenRouter smoke uses the
+same notes place with a `Secret` grant and calls `harness.provider.ask`. It
+expects one `note_add` call, the matching stored note, and a final `SAVED`
+reply across two streamed requests. Run `../harness/live-smoke.sh` with `hirsel`
+on `PATH`, or set `HIRSEL` to the installed executable. The script sources
+`~/.config/hirsel/openrouter-dev.env` when present and skips without a key.

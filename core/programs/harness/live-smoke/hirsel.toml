@@ -1,0 +1,14 @@
+[package]
+name = "harness_live_smoke"
+major = 1
+charge = "charge-v1"
+
+[dependencies]
+notes = { major = 1, path = "../../notes" }
+
+[sources]
+"main.hirsel" = "main"
+
+[program]
+module = "main"
+function = "main"

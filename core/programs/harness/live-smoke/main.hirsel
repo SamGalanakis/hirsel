@@ -1,0 +1,3 @@
+pub fn main(out: Stdout, data: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, api_key: Secret) -> Result[(), Exit] waits {
+    notes.main.live_smoke(out, data, clock, random, tasks, net, api_key)
+}

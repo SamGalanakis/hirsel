@@ -12,7 +12,7 @@ use crate::code_admission::{
     AdmissionError, AdmissionLimits, AdmissionStore, AdmittedRelease, ControlConnection,
     NativeSemantics, ObjectKey, ObjectKind, send_release,
 };
-use crate::code_store::CodeStore;
+use crate::code_store::{CodeStore, PUBLISH_RECIPE_STAGE};
 use crate::native::recipe_build::foreign_grant_lines;
 use crate::native::recipe_grants::grant_units;
 use crate::{AssemblyRecord, Link, NativeOptions, Publication};
@@ -23,8 +23,9 @@ use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
@@ -462,10 +463,59 @@ impl Wire for Tree {
 /// The most diagnostic bytes a refused compile reports; the rest is cut and marked.
 const DIAGNOSTIC_BYTES: usize = 64 << 10;
 
+/// Leave the group leader waitable until the group is killed, so its PID cannot be
+/// reused between observing its exit and signalling the remaining processes.
+fn wait_for_compile(child: &mut Child, cancel: &AtomicBool) -> io::Result<ExitStatus> {
+    let pid = child.id() as libc::pid_t;
+    while !cancel.load(Ordering::Relaxed) {
+        // SAFETY: waitid writes into a siginfo for our own child without reaping it.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        if result == 0 {
+            if unsafe { info.si_pid() } != 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        } else {
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::Interrupted {
+                return Err(error);
+            }
+        }
+    }
+    // SAFETY: spawn put the unreaped child at the head of its own process group.
+    unsafe { libc::kill(-pid, libc::SIGKILL) };
+    child.wait()
+}
+
+fn source_unit(tree: &Tree) -> String {
+    let package = Path::new(&tree.package);
+    let manifest = package
+        .strip_prefix(".")
+        .unwrap_or(package)
+        .join("hirsel.toml");
+    tree.files
+        .iter()
+        .find(|(name, _)| Path::new(name) == manifest)
+        .and_then(|(_, bytes)| crate::package_manifest::Manifest::parse(bytes, &manifest).ok())
+        .and_then(|manifest| manifest.package)
+        .map_or_else(
+            || format!("package at {:?}", tree.package),
+            |package| package.entry.to_string(),
+        )
+}
+
 /// Publish `tree` into the launcher's code store with `hirsel publish`, run on a fresh copy
 /// of the tree under the host's compiler and package stores, and return its recipe root.
-/// The child inherits the launcher's environment, so the toolchain's memory limit
-/// (`HIRSEL_MEMORY_LIMIT`) bounds it. `None` is a cancel, which kills the child.
+/// The recipe stays private until the compiler exits successfully. The child inherits the
+/// toolchain's memory limit (`HIRSEL_MEMORY_LIMIT`). `None` is a cancelled compile.
 fn publish(
     ad: &Admission,
     tree: &Tree,
@@ -478,8 +528,12 @@ fn publish(
         Ok(dir) => dir,
         Err(e) => return unrun(&e),
     };
+    let source = dir.path().join("tree");
+    if let Err(e) = fs::create_dir(&source) {
+        return unrun(&e);
+    }
     for (path, bytes) in &tree.files {
-        let path = dir.path().join(path);
+        let path = source.join(path);
         let written = fs::create_dir_all(path.parent().expect("a file under the tree"))
             .and_then(|()| fs::File::create_new(&path))
             .and_then(|mut file| file.write_all(bytes));
@@ -523,8 +577,14 @@ fn publish(
         Ok(command) => command,
         Err(e) => return unrun(&e),
     };
+    if cancel.load(Ordering::Relaxed) {
+        return None;
+    }
+    let stage = dir.path().join("code");
     command
-        .current_dir(dir.path())
+        .env(PUBLISH_RECIPE_STAGE, &stage)
+        .current_dir(&source)
+        .process_group(0)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -562,32 +622,56 @@ fn publish(
             .take()
             .map(|p| Box::new(p) as Box<dyn Read + Send>),
     );
-    let status = loop {
-        if cancel.load(Ordering::Relaxed) {
-            let _ = child.kill();
-            let _ = child.wait();
-            return None;
-        }
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
-            Err(e) => return unrun(&e),
-        }
+    let status = match wait_for_compile(&mut child, cancel) {
+        Ok(status) => status,
+        Err(e) => return unrun(&e),
     };
-    let stdout = String::from_utf8_lossy(&stdout.join().unwrap_or_default()).into_owned();
-    let stderr = String::from_utf8_lossy(&stderr.join().unwrap_or_default()).into_owned();
+    let stdout = stdout.join().unwrap_or_default();
+    let stderr = stderr.join().unwrap_or_default();
+    if cancel.load(Ordering::Relaxed) {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&stdout);
+    let stderr = String::from_utf8_lossy(&stderr);
     Some(match status.code() {
         Some(0) => stdout
             .split_whitespace()
             .last()
             .and_then(|root| crate::native::recipe_build::parse_root(root).ok())
-            .ok_or_else(|| Failure::Invalid(format!("publish source printed no recipe: {stdout}"))),
-        Some(hirsel_guard::EXIT_STATUS) => Err(Failure::Exhausted(stderr)),
-        Some(_) => Err(Failure::Uncompiled(stderr)),
+            .ok_or_else(|| Failure::Invalid(format!("publish source printed no recipe: {stdout}")))
+            .and_then(|root| {
+                store_source_recipe(ad, stage, root)
+                    .map_err(|e| Failure::Invalid(format!("publish source: {e}")))
+            }),
+        Some(hirsel_guard::EXIT_STATUS) => Err(Failure::Exhausted(format!(
+            "publish source {}: {stderr}",
+            source_unit(tree)
+        ))),
+        Some(_) => Err(Failure::Uncompiled(stderr.into_owned())),
         None => Err(Failure::Uncompiled(format!(
             "the compiler ended by {status}\n{stderr}"
         ))),
     })
+}
+
+fn store_source_recipe(
+    ad: &Admission,
+    stage: PathBuf,
+    root: ContentHash,
+) -> io::Result<ContentHash> {
+    let mut bytes = Vec::new();
+    let limit = ad.limits.recipe_bytes;
+    CodeStore::new(stage)
+        .open(ObjectKind::Recipe, root)?
+        .take(limit as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > limit {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "recipe exceeds its byte limit",
+        ));
+    }
+    Ok(ad.code.put(ObjectKind::Recipe, &bytes)?.hash)
 }
 
 fn nanos(since: Instant) -> u64 {

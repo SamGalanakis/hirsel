@@ -5,20 +5,27 @@ use super::admit::Tree;
 use super::laws::{Rig, attempt, group};
 use super::session::*;
 use std::collections::BTreeSet;
+use std::fmt::Write;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+enum Compile {
+    Normal,
+    Capped,
+    Held,
+}
+
 /// Submitted source is published by the normal checker under the launcher's own stores
-/// and admitted as that publication; a type error is refused with the checker's
-/// diagnostic and records no recipe. The oracle for both is `hirsel publish` of the
-/// same files under separate stores.
+/// and admitted as that publication. A type error or exhaustion records no recipe.
+/// Releasing an attempt kills the compiler's group and discards its staged recipe.
 #[test]
 fn source_publishes_with_the_normal_checker() {
     use super::stores::Stores;
     use crate::code_store::{CodeStore, ObjectKind};
     use crate::native::tests::process::{CHILD_MARK, request_command_at};
-    use std::sync::Arc;
 
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().to_owned();
@@ -104,8 +111,49 @@ fn source_publishes_with_the_normal_checker() {
     let stores = Stores::open(&state, 1 << 20).unwrap();
     let records = stores.records();
     let compile = Arc::clone(&child);
-    let compiler: super::Compiler =
-        Arc::new(move |args: &[String]| Ok(compile(args, Path::new("/"))));
+    let mode = Arc::new(Mutex::new(Compile::Normal));
+    let next = mode.clone();
+    let pids = root.join("pids");
+    let marker = pids.clone();
+    let compiler: super::Compiler = Arc::new(move |args: &[String]| {
+        let mut command = compile(args, Path::new("/"));
+        match *next.lock().unwrap() {
+            Compile::Normal => Ok(command),
+            Compile::Capped => {
+                let inherited = std::env::var("HIRSEL_MEMORY_LIMIT").ok();
+                let inherited = inherited
+                    .as_deref()
+                    .map_or(hirsel_guard::DEFAULT_LIMIT, |cap| {
+                        hirsel_guard::parse_limit(cap.as_bytes()).unwrap()
+                    });
+                command.env("HIRSEL_MEMORY_LIMIT", inherited.min(8 << 20).to_string());
+                Ok(command)
+            }
+            Compile::Held => {
+                // Hold the command after a real publish creates the recipe. Keep a
+                // descendant alive too, so killing only the group leader fails the law.
+                let mut held = Command::new("sh");
+                held.args([
+                    "-ec",
+                    r#"
+                    marker=$1
+                    shift
+                    "$@"
+                    sleep 30 &
+                    printf '%s %s\n' "$$" "$!" > "$marker.tmp"
+                    mv "$marker.tmp" "$marker"
+                    wait
+                "#,
+                    "publish",
+                ])
+                .arg(&marker)
+                .arg(command.get_program())
+                .args(command.get_args())
+                .envs(command.get_envs().filter_map(|(k, v)| v.map(|v| (k, v))));
+                Ok(held)
+            }
+        }
+    });
     let admission = super::Admission::open(&state, records, super::limits(), 1 << 20)
         .unwrap()
         .compile_with(compiler);
@@ -113,7 +161,7 @@ fn source_publishes_with_the_normal_checker() {
     let mut rig = Rig { dir, launcher };
     rig.launcher.admit_with(admission).unwrap();
     rig.bind();
-    let mut admit = |n: u64, bytes: Vec<u8>| {
+    let admit = |rig: &mut Rig<Stores>, n: u64, bytes: Vec<u8>| {
         rig.ask(Request::Admit(
             group(),
             attempt(n),
@@ -135,7 +183,7 @@ fn source_publishes_with_the_normal_checker() {
         seen
     };
     for n in [1, 2] {
-        let answered = admit(n, tree());
+        let answered = admit(&mut rig, n, tree());
         assert!(
             matches!(answered.as_slice(), [Event::Admitted(a, root, ..)]
                 if *a == attempt(n) && root == &published.0),
@@ -159,7 +207,7 @@ fn source_publishes_with_the_normal_checker() {
             .collect()
     };
     let before = recipes();
-    let answered = admit(3, tree());
+    let answered = admit(&mut rig, 3, tree());
     assert!(
         matches!(answered.as_slice(), [Event::AdmissionFailed(a, Failure::Uncompiled(text))]
             if *a == attempt(3) && text.contains(diagnostic.trim())),
@@ -168,12 +216,81 @@ fn source_publishes_with_the_normal_checker() {
     assert_eq!(recipes(), before, "a refused source recorded a recipe");
     let mut missing_lock = Tree::decode(&tree()).unwrap();
     missing_lock.files.retain(|(path, _)| path != "hirsel.lock");
-    let answered = admit(4, missing_lock.encode());
+    let answered = admit(&mut rig, 4, missing_lock.encode());
     assert!(
         matches!(answered.as_slice(), [Event::AdmissionFailed(a, Failure::Uncompiled(text))]
             if *a == attempt(4) && text.contains("hirsel.lock")),
         "a tree without its frozen lock was not refused: {answered:?}"
     );
+
+    let mut large = String::from("pub fn main() -> Result[(), Exit] { Ok(()) }\n");
+    for n in 0..12_000 {
+        writeln!(large, "pub fn value_{n}() -> u64 {{ {n}u64 }}").unwrap();
+    }
+    fs::write(app.join("main.hirsel"), large).unwrap();
+    *mode.lock().unwrap() = Compile::Capped;
+    let answered = admit(&mut rig, 6, tree());
+    assert!(
+        matches!(answered.as_slice(), [Event::AdmissionFailed(a, Failure::Exhausted(text))]
+            if *a == attempt(6) && text.contains("app@1/main/main")
+                && text.contains("reached (HIRSEL_MEMORY_LIMIT)")),
+        "a capped compile did not report exhaustion for app@1/main/main: {answered:?}"
+    );
+    assert_eq!(recipes(), before, "an exhausted compile recorded a recipe");
+
+    main("Error(Exit(status: 7u8))");
+    *mode.lock().unwrap() = Compile::Held;
+    assert!(
+        rig.ask(Request::Admit(
+            group(),
+            attempt(7),
+            Input::Source(tree()),
+            Approvals::default()
+        ))
+        .is_empty()
+    );
+    let end = Instant::now() + Duration::from_secs(10);
+    let (leader, descendant) = loop {
+        if let Ok(pids) = fs::read_to_string(&pids) {
+            let (leader, descendant) = pids.trim().split_once(' ').unwrap();
+            break (
+                format!("/proc/{leader}/stat"),
+                format!("/proc/{descendant}/stat"),
+            );
+        }
+        assert!(Instant::now() < end, "the held compile never started");
+        rig.launcher.turn(Duration::from_millis(20)).unwrap();
+        assert!(rig.launcher.take_events().is_empty());
+    };
+    let desc_alive = || {
+        // A killed grandchild can remain a zombie until its new parent reaps it.
+        fs::read_to_string(&descendant).is_ok_and(|stat| {
+            stat.rsplit_once(") ")
+                .is_some_and(|(_, s)| !s.starts_with('Z'))
+        })
+    };
+    assert!(Path::new(&leader).exists() && desc_alive());
+    assert!(rig.ask(Request::Release(attempt(7))).is_empty());
+    let source_clean = || fs::read_dir(state.join("source")).unwrap().next().is_none();
+    let end = Instant::now() + Duration::from_secs(10);
+    while Path::new(&leader).exists() || desc_alive() || !source_clean() {
+        assert!(
+            Instant::now() < end,
+            "compile group was not cleaned up: {leader}, {descendant}"
+        );
+        rig.launcher.turn(Duration::from_millis(20)).unwrap();
+        assert!(rig.launcher.take_events().is_empty());
+    }
+    assert_eq!(recipes(), before, "a cancelled compile recorded a recipe");
+    for dir in ["images", "assemblies"] {
+        assert!(
+            fs::read_dir(state.join("objects").join(dir))
+                .unwrap()
+                .next()
+                .is_none()
+        );
+    }
+    *mode.lock().unwrap() = Compile::Normal;
 
     // This is the same checked-in entry and native archive as the FFI law. It is a valid
     // Foreign call with the capability granted. An untrusted tree submits no grant.
@@ -200,7 +317,7 @@ fn source_publishes_with_the_normal_checker() {
             .collect(),
         ..Tree::default()
     };
-    let answered = admit(5, ffi_source.encode());
+    let answered = admit(&mut rig, 5, ffi_source.encode());
     assert!(
         matches!(answered.as_slice(), [Event::AdmissionFailed(a, Failure::Uncompiled(text))]
             if *a == attempt(5) && text.contains("not granted: Foreign[ffi_laws@1/laws/Laws]")),

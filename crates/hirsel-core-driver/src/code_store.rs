@@ -12,6 +12,9 @@ use std::{
 mod watch;
 pub(crate) use watch::{Presence, Watch};
 
+/// A launcher publish writes its recipe here until the compiling process exits.
+pub(crate) const PUBLISH_RECIPE_STAGE: &str = "HIRSEL_PUBLISH_RECIPE_STAGE";
+
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum ObjectKind {
     Body,
@@ -69,6 +72,7 @@ impl ObjectKind {
 pub struct CodeStore {
     root: PathBuf,
     local_build: bool,
+    recipe_stage: Option<PathBuf>,
 }
 
 impl CodeStore {
@@ -76,6 +80,7 @@ impl CodeStore {
         Self {
             root: root.into(),
             local_build: false,
+            recipe_stage: None,
         }
     }
 
@@ -86,7 +91,20 @@ impl CodeStore {
         Self {
             root,
             local_build: true,
+            recipe_stage: None,
         }
+    }
+
+    pub(crate) fn for_request(command: &str, path: Option<PathBuf>, compiler: &Path) -> Self {
+        let mut code = match path {
+            Some(path) => Self::new(path),
+            None if command == "build" => Self::for_build(compiler.join("code-store")),
+            None => Self::new(compiler.join("code-store")),
+        };
+        if command == "publish" {
+            code.recipe_stage = std::env::var_os(PUBLISH_RECIPE_STAGE).map(PathBuf::from);
+        }
+        code
     }
 
     pub(crate) fn local_build(&self) -> bool {
@@ -186,6 +204,11 @@ impl CodeStore {
             hash: kind.hash(bytes),
             len: bytes.len() as u64,
         };
+        if kind == ObjectKind::Recipe
+            && let Some(stage) = &self.recipe_stage
+        {
+            return Self::new(stage).put_addressed(kind, object, bytes);
+        }
         self.put_addressed(kind, object, bytes)
     }
 

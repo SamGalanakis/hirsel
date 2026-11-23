@@ -5830,11 +5830,11 @@ fn check_index_put_refusal(mut db: Db, t: Table[u64, u64], value: u64, frame_lim
     }
 }
 
-fn reject_old_index_value(value: u64) -> Result[Bytes, Capacity] {
+fn reject_old_index_value(value: u64) -> Result[u64, Capacity] {
     if value == 99 {
         return Error(Capacity(requested: 1, available: 0))
     }
-    Ok(key_word(value))
+    Ok(value)
 }
 
 // Catch an error from a new extractor, an old extractor and the last index
@@ -5856,7 +5856,8 @@ pub fn law_index_refusal(c: Clock) -> bool waits {
         return false
     }
     let last_id = t.indexes[2].id
-    t.indexes[2] = IndexOf(id: last_id, extract: reject_old_index_value)
+    let extract = result.unwrap(erase(code.describe(reject_old_index_value), std.codec.key_u64()))
+    t.indexes[2] = IndexOf(id: last_id, extract: take extract)
     if !check_index_put_refusal(mut db, t, 100, false) {
         return false
     }

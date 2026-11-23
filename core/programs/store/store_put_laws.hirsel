@@ -712,6 +712,13 @@ fn quotient(v: u64) -> Result[u64, Capacity] {
     Ok(v / 4)
 }
 
+fn typed_value(s: Snapshot, t: Shape[u64, u64], k: u64) -> u64 {
+    match result.unwrap(get(s, t, k)) {
+        None => 0,
+        Some(v) => v
+    }
+}
+
 // ADVICE 5: a callback copies none of the rows staged before it. Oracle: 64
 // staged rows of 1,000-byte values are 64,000 bytes, so a callback that
 // copied them could not start under a 32 KiB byte bound; one that shares

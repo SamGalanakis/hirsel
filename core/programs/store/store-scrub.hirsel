@@ -19,9 +19,7 @@ type ScrubInput {
     input: JournalInput,
     path: String,
     context: DiskContext,
-    frames: u64,
-    payload_bytes: u64,
-    room: u64
+    checked_pack: PackScan
 }
 
 pub opaque type Scrub {
@@ -130,16 +128,15 @@ fn scrub_next(mut tour: Scrub) -> Result[u64, Error] waits {
         let opened = disk_io(host.open(tour.d, path, Read))?
         let mut input = journal_input(take opened, false)?
         let header = disk_read_header(path, journal_prefix(mut input, path, 0, 72)?, 3, Some(seq), Some(tour.store))?
-        tour.open = Some(ScrubInput(input: take input, path: take path, context: header.context, frames: 0, payload_bytes: 0, room: 0))
+        tour.open = Some(ScrubInput(input: take input, path: take path, context: header.context, checked_pack: pack_scan(class, tour.next_stamp)))
         tour.at = 72
         return Ok(72)
     }
     let at = tour.at
-    let next_stamp = tour.next_stamp
     let frames = tour.packs[tour.position].frames
     let payload_bytes = tour.packs[tour.position].payload_bytes
     let checked = match tour.open {
-        Some(mut reading) => scrub_frame(mut reading, tour.known, seq, class, frames, payload_bytes, at, next_stamp),
+        Some(mut reading) => scrub_frame(mut reading, tour.known, seq, frames, payload_bytes, at),
         None => fail("store: scrub has no open pack"),
     }
     match checked? {
@@ -156,59 +153,41 @@ fn scrub_next(mut tour: Scrub) -> Result[u64, Error] waits {
 
 // None is the pack's end, after its frame count and payload bytes match the
 // record the generation listed.
-fn scrub_frame(mut reading: ScrubInput, known: PageLocations, seq: u64, class: u8, frames: u64, payload_bytes: u64, at: u64, next_stamp: u64) -> Result[Option[u64], Error] waits {
+fn scrub_frame(mut reading: ScrubInput, known: PageLocations, seq: u64, frames: u64, payload_bytes: u64, at: u64) -> Result[Option[u64], Error] waits {
     if at >= reading.input.size {
-        if reading.frames != frames || reading.payload_bytes != payload_bytes {
+        if reading.checked_pack.frames != frames || reading.checked_pack.payload_bytes != payload_bytes {
             return Error(disk_fault(reading.path, at, Malformed))
         }
         return Ok(None)
     }
-    let expected = if class == 1 {
-        0x0022u16
-    } else {
-        0x0021u16
-    }
-    let stamp_at = if class == 1 {
-        0u64
-    } else {
-        8u64
-    }
-    let head = journal_prefix(mut reading.input, reading.path, at, 16)?
-    let frame = disk_read_frame_head(reading.path, head, at)?
-    let keep = if frame.kind == expected {
-        order.min(stamp_at + 8, frame.size)
-    } else {
-        0
-    }
-    let mut signed_prefix = disk_allocation(scoped fn() -> Result[Bytes, Error] {
-        Ok(list.with_capacity(keep))
-    })?
-    let plain = scrub_payload(mut reading.input, reading.path, reading.context, at, head, frame, 8 - stamp_at, mut signed_prefix)?
-    disk_page_kind(reading.path, at, frame.kind, expected, frame.flags)?
-    let end = at + 16 + frame.size
-    if frame.kind == expected {
-        if frame.size < stamp_at + 8 {
-            return Error(disk_fault(reading.path, at, Malformed))
-        }
-        disk_check_stamp(reading.path, at, signed_prefix, stamp_at, next_stamp)?
-        // A frame the generation reaches here must be the one its pointer
-        // names. A dead copy has no record at this place.
-        let stamp: u64 = list.word_le(signed_prefix, stamp_at)
+    let frame = read_pack_frame(mut reading.input, reading.path, reading.context, mut reading.checked_pack, at, true)?
+    // A frame this generation reaches here must match its pointer.
+    if let Some(stamp) = frame.stamp {
         if let Some(record) = disk_index_get(known.frames, stamp) {
             let width: u64 = int.widen(record.place.len)
-            if record.place.pack == seq && record.place.offset == at && (width != frame.size || record.place.checksum != plain) {
+            if record.place.pack == seq && record.place.offset == at && (width != frame.size || record.place.checksum != frame.checksum) {
                 return Error(disk_fault(reading.path, at, Checksum))
             }
         }
-        reading.frames += 1
-        reading.payload_bytes += frame.size
-    } else {
-        reading.room += end - at
-        if reading.room > UNKNOWN_ROOM {
-            return Error(disk_fault(reading.path, at, Malformed))
-        }
     }
-    Ok(Some(end))
+    Ok(Some(at + 16 + frame.size))
+}
+
+type ScannedPackFrame { stamp: Option[u64], size: u64, checksum: u64 }
+
+fn read_pack_frame(mut input: JournalInput, path: String, context: DiskContext, mut checked_pack: PackScan, at: u64, check_pointer: bool) -> Result[ScannedPackFrame, Error] waits {
+    let head = journal_prefix(mut input, path, at, 16)?
+    let frame = disk_read_frame_head(path, head, at)?
+    let keep = if frame.kind == checked_pack.kind { order.min(checked_pack.stamp_at + 8, frame.size) } else { 0 }
+    let (take stamp_bytes, checksum) = if check_pointer && frame.kind == checked_pack.kind {
+        let mut captured = disk_allocation(scoped fn() -> Result[Bytes, Error] { Ok(list.with_capacity(keep)) })?
+        let plain = scrub_payload(mut input, path, context, at, head, frame, 8 - checked_pack.stamp_at, mut captured)?
+        (take captured, plain)
+    } else {
+        (disk_stream_payload(mut input, path, context, at, head, frame, keep)?, 0u64)
+    }
+    let stamp = scan_pack_frame(mut checked_pack, path, at, frame.kind, frame.flags, frame.size, stamp_bytes)?
+    Ok(ScannedPackFrame(stamp, size: frame.size, checksum))
 }
 
 // Streams one payload: its bound check against the head, and the plain xxh3

@@ -610,49 +610,50 @@ fn disk_load_page_pack(d: Dir, id: StoreId, seq: u64, pack: PagePack, next_stamp
     Ok(LoadedPack(class: pack.class, payloads: take payloads, raw: take raw))
 }
 
-fn index_page_pack(path: String, id: StoreId, seq: u64, pack: PagePack, next_stamp: u64, raw: Bytes) -> Result[Map[u64, DiskFrame], Error] {
-    let expected = if pack.class == 0 {
-        0x0021u16
-    } else {
-        0x0022u16
+type PackScan {
+    kind: u16,
+    stamp_at: u64,
+    next_stamp: u64,
+    frames: u64,
+    payload_bytes: u64,
+    unknown_bytes: u64,
+}
+
+fn pack_scan(class: u8, next_stamp: u64) -> PackScan {
+    let (kind, stamp_at) = if class == 1 { (0x0022u16, 0u64) } else { (0x0021u16, 8u64) }
+    PackScan(kind, stamp_at, next_stamp, frames: 0, payload_bytes: 0, unknown_bytes: 0)
+}
+
+fn scan_pack_frame(mut checked_pack: PackScan, path: String, at: u64, kind: u16, flags: u16, size: u64, stamp_bytes: Bytes) -> Result[Option[u64], Error] {
+    disk_page_kind(path, at, kind, checked_pack.kind, flags)?
+    if kind != checked_pack.kind {
+        checked_pack.unknown_bytes += 16 + size
+        if checked_pack.unknown_bytes > UNKNOWN_ROOM { return Error(disk_fault(path, at, Malformed)) }
+        return Ok(None)
     }
+    if size < checked_pack.stamp_at + 8 { return Error(disk_fault(path, at, Malformed)) }
+    disk_check_stamp(path, at, stamp_bytes, checked_pack.stamp_at, checked_pack.next_stamp)?
+    checked_pack.frames += 1
+    checked_pack.payload_bytes += size
+    Ok(Some(list.word_le(stamp_bytes, checked_pack.stamp_at)))
+}
+
+fn index_page_pack(path: String, id: StoreId, seq: u64, pack: PagePack, next_stamp: u64, raw: Bytes) -> Result[Map[u64, DiskFrame], Error] {
     let expected_frames: u64 = int.widen(pack.frames)
     let header = disk_read_header(path, raw, 3, Some(seq), Some(id))?
     let mut frames: Map[u64, DiskFrame] = map.new()
-    let mut entries = 0u64
-    let mut room = 0u64
-    let mut payload_bytes = 0u64
+    let mut checked_pack = pack_scan(pack.class, next_stamp)
     let mut at = 72u64
     while at < list.len(raw) {
         let frame = disk_frame_bytes(path, header.context, raw, at)?
-        disk_page_kind(path, at, frame.kind, expected, frame.flags)?
-        let end = frame.end
-        if frame.kind == expected {
-            let width = end - frame.payload
-            let stamp_at = if pack.class == 0 {
-                8u64
-            } else {
-                0u64
-            }
-            if width < stamp_at + 8 {
-                return Error(disk_fault(path, at, Malformed))
-            }
-            disk_check_stamp(path, at, raw, frame.payload + stamp_at, next_stamp)?
-            entries += 1
-            if entries > expected_frames {
-                return Error(disk_fault(path, at, Malformed))
-            }
-            payload_bytes += width
-        } else {
-            room += end - at
-            if room > UNKNOWN_ROOM {
-                return Error(disk_fault(path, at, Malformed))
-            }
-        }
+        let size = frame.end - frame.payload
+        let stamp_bytes = list.slice(raw, frame.payload, frame.payload + order.min(size, checked_pack.stamp_at + 8))
+        let _ = scan_pack_frame(mut checked_pack, path, at, frame.kind, frame.flags, size, stamp_bytes)?
+        if checked_pack.frames > expected_frames { return Error(disk_fault(path, at, Malformed)) }
         map.insert(mut frames, at, frame)
-        at = end
+        at = frame.end
     }
-    if payload_bytes != pack.payload_bytes || entries != expected_frames {
+    if checked_pack.payload_bytes != pack.payload_bytes || checked_pack.frames != expected_frames {
         return Error(disk_fault(path, at, Malformed))
     }
     Ok(take frames)
@@ -826,50 +827,27 @@ fn check_list_pack(d: Dir, id: StoreId, seq: u64, next_stamp: u64, offsets: List
         order.compare(a, b)
     })
     let mut at = 72u64
-    let mut room = 0u64
     let mut position = 0u64
     let mut live = 0u64
-    let mut payload_bytes = 0u64
-    let mut frames = 0u64
+    let mut checked_pack = pack_scan(2, next_stamp)
     while at < input.size {
-        let head = journal_prefix(mut input, path, at, 16)?
-        let frame = disk_read_frame_head(path, head, at)?
-        let is_page = frame.kind == 0x0021
-        let signed_prefix = disk_stream_payload(mut input, path, header.context, at, head, frame, if is_page {
-            order.min(16, frame.size)
-        } else {
-            0
-        })?
-        disk_page_kind(path, at, frame.kind, 0x0021, frame.flags)?
+        let frame = read_pack_frame(mut input, path, header.context, mut checked_pack, at, false)?
         let end = at + 16 + frame.size
-        if is_page {
-            if frame.size < 16 {
-                return Error(disk_fault(path, at, Malformed))
-            }
-            disk_check_stamp(path, at, signed_prefix, 8, next_stamp)?
-            frames += 1
-            payload_bytes += frame.size
-            if position < list.len(reached) && reached[position] == at {
-                position += 1
-                live += frame.size
-            }
-        } else {
-            room += end - at
-            if room > UNKNOWN_ROOM {
-                return Error(disk_fault(path, at, Malformed))
-            }
+        if frame.stamp != None && position < list.len(reached) && reached[position] == at {
+            position += 1
+            live += frame.size
         }
         if position < list.len(reached) && reached[position] < end {
             return Error(disk_fault(path, reached[position], Malformed))
         }
         at = end
     }
-    if position != list.len(reached) || frames > 4294967295 {
+    if position != list.len(reached) || checked_pack.frames > 4294967295 {
         return Error(disk_fault(path, at, Malformed))
     }
     let JournalInput(file: take handle, ..) = take input
     disk_io(host.close(take handle))?
-    Ok(PagePack(class: 2, frames: int.truncate(frames), live: live, payload_bytes: payload_bytes))
+    Ok(PagePack(class: 2, frames: int.truncate(checked_pack.frames), live: live, payload_bytes: checked_pack.payload_bytes))
 }
 
 type ReadFrame = ReadPage(std.page.Image, List[u64], List[u64]) | ReadBlob(Bytes)

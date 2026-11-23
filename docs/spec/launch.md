@@ -34,7 +34,8 @@ platform launcher names one by default: it passes the record it launches to ever
 so a plain restart of the same executable outside the host still reopens its store. An
 operator who installs on a hosted store by hand passes `--hirsel-assembly`<!-- doc-ref: planned -->
 with the record the host should serve, and the allowance that record launches with
-(`--hirsel-n-place`<!-- doc-ref: external -->). A launch that names a record runs at the
+(`--hirsel-n-place`<!-- doc-ref: external -->), both first on the command line, before
+`--hirsel-install`<!-- doc-ref: external -->, which is a place argument ("Place activation" below). A launch that names a record runs at the
 launch's allowance in every mode, as a hosted launch does, and the launcher refuses a name
 without an explicit allowance (RUNNER-SPEC §6 "A named launch runs at the launch's
 allowance"). Without the name the install names none, and with another allowance it
@@ -128,7 +129,13 @@ duplicate registration and timeout errors leave the output destination alone.
 
 The native launcher consumes the private prefix `--hirsel-describe`<!-- doc-ref: external -->,
 `--hirsel-n-place=<bytes>`<!-- doc-ref: external --> and `--hirsel-assembly=<hex>`<!-- doc-ref: planned -->
-(64 lowercase hex digits; absent means empty) before constructing user `Args`. The allowance defaults
+(64 lowercase hex digits; absent means empty) before constructing user `Args`. The prefix is
+the leading run of arguments that are recognised private launch options: the first argument
+that is not one ends it, and that argument and every one after it become `Args` verbatim, so a
+private option written after a place argument is never read as one. `--hirsel-install`<!-- doc-ref: external -->
+and `--hirsel-activation=<version>`<!-- doc-ref: external --> are place arguments, read from `Args`
+by `runner.launch_selection`, so they come after every private option. A malformed private
+option in the prefix, and a name without an allowance, are refused before user code: the process writes `not started: ` and the reason to standard error and exits 103. The allowance defaults
 to 16 MiB. A place launched by the platform host or launcher, or by any launch that names
 an assembly record, runs at the allowance that option selects; `--hirsel-assembly`<!-- doc-ref: planned -->
 without `--hirsel-n-place`<!-- doc-ref: external --> is refused before user code, as a malformed private option is.
@@ -160,9 +167,18 @@ A bare install exits 0 whatever host the store belongs to: it skips the current-
 and writes a `Describe` that names no assembly record. That is right for a standalone place
 and wrong for a store a platform host serves, whose group then matches none of its records.
 A hand install meant for a hosted group must launch as one of the records the host can adopt,
-the marked deploy's OLD or NEW that the group still keeps: pass that record's `--hirsel-assembly=<hex>`<!-- doc-ref: planned --> and its allowance
-`--hirsel-n-place=<bytes>`<!-- doc-ref: external -->, and run its exact image. The install then
-registers and writes its `Describe` at that allowance, not at `PlaceConfig.n_place`.
+the marked deploy's OLD or NEW that the group still keeps: run its exact image with that
+record's name and allowance first and the install last, for example
+
+```sh
+./place --hirsel-assembly=<OLD-hex> --hirsel-n-place=1048576 --hirsel-install
+```
+
+The install then registers and writes its `Describe` at that allowance, not at `PlaceConfig.n_place`.
+Written in another order (`./place --hirsel-install --hirsel-assembly=<OLD-hex> --hirsel-n-place=1048576`),
+the first argument ends the private prefix, so the name and the allowance are user `Args`
+that `launch_selection` skips: the run is a bare install at `PlaceConfig.n_place`, it exits 0,
+and its `Describe` matches no record.
 The group's `Status.failing[].last` names those candidates with their allowances when the
 host finds no match, and keeps that cause ahead of each retry's own refusal or exit status
 until a read matches. The group's
@@ -470,8 +486,12 @@ a host restart keep it (RUNNER-SPEC §14.5 "Failing and backoff"). Each retry of
 store as the probe does, without the witness row; when the read's image is the `Describe`
 digest of the attempt's OLD or NEW that the group still keeps, one transaction makes that
 record current at the read's activation and writes it into the activation index there, and the
-group relaunches at once (RUNNER-SPEC §14.3 "Leaving no record"); the mark then carries no
-cause until the relaunch's open clears it. The deploy's outcome and its
+group relaunches at once (RUNNER-SPEC §14.3 "Leaving no record"). Adoption turns the mark
+`Adopted`, which clears the previous cause. If the relaunch, or any later start before an open,
+is refused and its read matches no candidate (another install moved the store again), the mark
+is `Unmatched` again with a new cause at the activation that read found, and `Status` shows it.
+A relaunch that dies before it reports leaves the mark `Adopted` and contributes only its own
+exit status. The first accepted `PlaceOpened` clears the mark in either state. The deploy's outcome and its
 index entry are not changed, and while nothing matches the selection is left alone. Roots follow RUNNER-SPEC §14.3 "Roots". Any other
 answer (`Held`, a missing image, a failed read, an I/O failure) decides nothing: both roots stay, and the probe is retried under the
 ordinary backoff. Neither a timer nor a retry count decides a root.
@@ -1049,7 +1069,10 @@ child endpoints, pidfds and cgroup population changes.
 **Restarts.** The launcher keeps no decision record, but a live launcher does know its
 children. The host learns them over the control session: `Hello` ends the old session, and
 its answer is an inventory taken in the launcher's one state loop, after which every event
-follows in order (RUNNER-SPEC §14.5). A **host restart** adopts the live children the
+follows in order (RUNNER-SPEC §14.5). An ended child stays in the inventory until the host
+acknowledges its end, with its exit status, its report, the selection it was launched with and
+the last answer it gave before ending (a `PlaceCurrent` with any read it carries, a refusal or
+`PlaceStoreMismatch`), and the host applies that answer before the end. A **host restart** adopts the live children the
 inventory names, reconciles each pending deploy as "When the host starts" says above, and
 probes only the `Dirty` rows left without a child. A **launcher loss** is fenced by the
 launcher lock. The child identities in the delegated cgroup tree are the process

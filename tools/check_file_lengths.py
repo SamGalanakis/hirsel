@@ -89,6 +89,8 @@ def parse_ratchet(data):
             raise ValueError(f'{RATCHET}: invalid cap for {path}')
         if 'reason' in entry and (not isinstance(entry['reason'], str) or not entry['reason'].strip()):
             raise ValueError(f'{RATCHET}: invalid raise reason for {path}')
+        if 'raise_revision' in entry and (type(entry['raise_revision']) is not int or entry['raise_revision'] < 1):
+            raise ValueError(f'{RATCHET}: invalid raise revision for {path}')
     return entries
 
 
@@ -112,14 +114,19 @@ def check_transition(root, before, after, paths):
     for path in sorted(changed | adjusted):
         prior = line_count(previous.get(path, b''))
         lines = line_count(current.get(path, b''))
-        old_cap = old.get(path, {}).get('lines', LIMIT)
-        new_cap = new.get(path, {}).get('lines', LIMIT)
+        old_entry = old.get(path, {})
+        new_entry = new.get(path, {})
+        old_cap = old_entry.get('lines', LIMIT)
+        new_cap = new_entry.get('lines', LIMIT)
         limit = min(old_cap, new_cap, max(LIMIT, prior))
-        if new_cap > old_cap:
-            initial = RATCHET not in previous and new_cap == prior == lines
-            raised = (after is not None and path in old and path in changed and prior > LIMIT
-                      and new_cap == lines and 'reason' in new[path])
-            if initial or raised:
+        explicit_raise = (new_cap > old_cap
+                          or new_entry.get('raise_revision', 0) > old_entry.get('raise_revision', 0))
+        raised = (after is not None and path in old and path in changed and explicit_raise
+                  and LIMIT < prior < new_cap == lines and 'reason' in new_entry)
+        if raised:
+            limit = new_cap
+        elif new_cap > old_cap:
+            if RATCHET not in previous and new_cap == prior == lines:
                 limit = new_cap
             else:
                 print(f'{RATCHET}: put the growth of {path} and its --raise entry with a lane '
@@ -172,7 +179,7 @@ def main(root):
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument('--update-ratchet', action='store_true', help='lower caps using worktree lengths')
     modes.add_argument('--raise', dest='raise_cap', nargs=2, metavar=('FILE', 'LINES'),
-                       help='raise an existing cap and record the lane reason')
+                       help='raise the limit from the file length in HEAD and record the lane reason')
     parser.add_argument('--reason', help='lane requesting the raise')
     args = parser.parse_args()
     if args.reason is not None and not args.raise_cap:
@@ -194,9 +201,15 @@ def main(root):
             lines = int(lines)
         except ValueError:
             parser.error('LINES must be an integer')
-        if lines <= entries[path]['lines']:
-            parser.error(f'LINES must exceed the current cap of {entries[path]["lines"]}')
-        entries[path] = {'lines': lines, 'reason': args.reason.strip()}
+        prior = line_count(snapshot(root, 'HEAD', {path}).get(path, b''))
+        if prior <= LIMIT:
+            parser.error(f'{path} must exceed {LIMIT:,} lines in HEAD to raise its limit')
+        if lines <= prior:
+            parser.error(f'LINES must exceed the current length of {prior}')
+        # A raise can set a stale cap to the same or a lower number. Record a
+        # fresh revision so an ordinary cap update cannot authorize growth.
+        entries[path] = {'lines': lines, 'reason': args.reason.strip(),
+                         'raise_revision': entries[path].get('raise_revision', 0) + 1}
     write_ratchet(root, entries)
     return 0
 

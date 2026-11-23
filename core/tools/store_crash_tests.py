@@ -42,10 +42,11 @@ def entry_grants(manifest, entry, directory):
     package_path, *modules, function = entry.split('/')
     name, version = package_path.rsplit('@', 1)
     packages = json.loads(manifest.read_text())['packages']
-    source = next(source for package in packages if package['package'] == {'name': name, 'version': version}
-                  for source in package['sources'] if source['modules'] == modules)
-    text = (manifest.parent / source['file']).read_text()
-    signature = re.search(rf'(?m)^\s*pub fn {re.escape(function)}\s*\(([^)]*)\)', text)
+    declaration = re.compile(rf'(?m)^\s*pub fn {re.escape(function)}\s*\(([^)]*)\)')
+    texts = ((manifest.parent / source['file']).read_text() for package in packages
+             if package['package'] == {'name': name, 'version': version}
+             for source in package['sources'] if source['modules'] == modules)
+    signature = next(filter(None, map(declaration.search, texts)), None)
     if signature is None:
         raise ValueError(f'crash entry declaration missing: {entry}')
     grants = []

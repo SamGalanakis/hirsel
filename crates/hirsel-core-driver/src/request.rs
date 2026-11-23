@@ -1541,6 +1541,17 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             first_stops: &r.first_stops,
         }),
     };
+    if command == "build"
+        && let Some(build) = output.native.as_ref().or(undelivered.as_ref())
+    {
+        meter.finish(
+            if build.compiled == 0 && !build.linked && build.reach.std_lowered == 0 {
+                "build store/hit"
+            } else {
+                "build store/miss"
+            },
+        );
+    }
     // A request that stopped is never recorded, except for the output
     // write after a stored build.
     if let Some(key) = key

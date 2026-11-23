@@ -2329,8 +2329,7 @@ fn native_args(root: &Path, output: &str) -> Vec<String> {
     ]
 }
 /// Run `step` against the store `store`, from a run directory `run` that
-/// holds its output file and metrics; return what it answered and whether
-/// the request record answered it.
+/// holds its output file and metrics; return the answer and its reuse stages.
 fn run_step(root: &Path, step: &Step, store: &Path, run: &Path, exe: &Path) -> (Ran, String) {
     let inputs = checkout_for(root, step);
     std::fs::create_dir_all(run.join("out")).unwrap();
@@ -2388,11 +2387,11 @@ fn run_step(root: &Path, step: &Step, store: &Path, run: &Path, exe: &Path) -> (
     let output = std::fs::read(run.join(step.output))
         .ok()
         .map(|bytes| ContentHash::of_bytes(&bytes));
-    // The request record's stages, in the order the request ran them.
+    // Store stages, in the order the request ran them.
     let metrics = std::fs::read_to_string(&metrics).unwrap_or_default();
     let record = metrics
         .split('"')
-        .filter(|name| name.starts_with("request record/"))
+        .filter(|name| name.starts_with("request record/") || name.starts_with("build store/"))
         .collect::<Vec<_>>()
         .join(", ");
     (
@@ -2445,10 +2444,15 @@ fn run_case(case: &Case) -> Vec<String> {
                 case.name, fresh.exit, step.exit
             ));
         }
-        let hit = record.split(", ").any(|stage| stage == "request record/hit");
+        let hit_stage = if step.command == "build" {
+            "build store/hit"
+        } else {
+            "request record/hit"
+        };
+        let hit = record.split(", ").any(|stage| stage == hit_stage);
         if hit != step.hit {
             failures.push(format!(
-                "{} step {n}: the request record {} it ({record}; the step before: {before}), the case says it {}",
+                "{} step {n}: the store {} it ({record}; the step before: {before}), the case says it {}",
                 case.name,
                 if hit { "answered" } else { "did not answer" },
                 if step.hit { "must" } else { "must not" }
@@ -2460,6 +2464,7 @@ fn run_case(case: &Case) -> Vec<String> {
 }
 
 const MAIN: &str = "pub fn main()->Result[(),Exit]{Error(Exit(status:7u8))}";
+const MAIN_GRANTS: &str = "pub fn main(files: Dir, clock: Clock)->Result[(),Exit]{Error(Exit(status:7u8))}";
 const MAIN_B: &str = "pub fn main()->Result[(),Exit]{Error(Exit(status:9u8))}";
 const MAIN_BAD: &str = "pub fn main()->Result[(),Exit]{Error(Exit(status:nope))}";
 /// A memory limit the harness starts under and checking core does not
@@ -2566,14 +2571,14 @@ fn cases() -> Vec<Case> {
         Case { name: "LLVM facts toggle", steps: vec![llvm(build(MAIN)), with(llvm(build(MAIN)), |s| s.env = vec![(hirsel_llvm_lazy::core::NO_FACTS_VARIABLE, Some("1"))]), hit(llvm(build(MAIN)))] },
         // Each native option that changes the executable, after the last.
         Case { name: "native options answer apart", steps: vec![
-            build(MAIN),
-            llvm(build(MAIN)),
-            opt(build(MAIN), &["--release"]),
-            opt(build(MAIN), &["--debug-lines", "on"]),
-            opt(build(MAIN), &["--limit", "1048576"]),
-            opt(build(MAIN), &["--dir", "."]),
-            opt(build(MAIN), &["--grant", "Clock"]),
-            hit(build(MAIN)),
+            build(MAIN_GRANTS),
+            llvm(build(MAIN_GRANTS)),
+            opt(build(MAIN_GRANTS), &["--release"]),
+            opt(build(MAIN_GRANTS), &["--debug-lines", "on"]),
+            opt(build(MAIN_GRANTS), &["--limit", "1048576"]),
+            opt(build(MAIN_GRANTS), &["--dir", "."]),
+            opt(build(MAIN_GRANTS), &["--grant", "Clock"]),
+            hit(build(MAIN_GRANTS)),
         ] },
         // A C driver that links differently: another toolchain.
         Case { name: "toolchain answers apart", steps: vec![

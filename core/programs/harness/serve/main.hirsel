@@ -1,0 +1,145 @@
+const LIMIT: u64 = 536870912u64
+const PLACE_POOL: u64 = 134217728u64
+const HELPER_BYTES: u64 = 67108864u64
+
+fn session(take supplied: store.local.Supplied, s: notes.main.Services) -> Result[store.runner.PlaceConfig[notes.main.Grants, harness.Handles, notes.main.Services, ()], Capacity] {
+    let live = match s.live {
+        Some(l) => Some(notes.main.copy_live(l, supplied.name)),
+        None => None,
+    }
+    let seed = notes.main.Services(helper: channel.sender(s.helper), clock: s.clock, live: take live, stream: notes.main.copy_stream(s.stream, supplied.name))
+    let mut config = notes.main.settings(Memory, supplied.clock, supplied.random, supplied.tasks, supplied.net, take seed)
+    config.wire = Some(store.runner.wire_bind((), code.describe(store.ingress.caller), 4096u64, 65536u64))
+    Ok(take config)
+}
+
+type Host {
+    out: Stdout, input: Stdin, data: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net,
+}
+
+fn listen(h: Host, hub: harness.preview.Hub, model: String, take live: Option[notes.main.Live]) -> Result[(), Exit] waits {
+    let mut helper_name = string.with_capacity(32u64)
+    let Ok(helper_dir) = host.mkdtemp(h.data, mut helper_name) else {
+        return notes.main.quit(h.out, "Use a writable data directory for the gateway.")
+    }
+    let (ask, asks): (Sender[notes.main.HelperAsk], Receiver[notes.main.HelperAsk]) = channel.new(1u64)
+    let helping = task.spawn(h.tasks, bytes HELPER_BYTES, notes.main.HelperSeed(inbox: take asks, dir: helper_dir, clock: h.clock, random: h.random, tasks: h.tasks, net: h.net), notes.main.helper_service)
+    let way = harness.gateway.doorway()
+    let d = harness.gateway.door_of(way)
+    let stream = Some(notes.main.Stream(door: harness.preview.door(hub), group: ""))
+    let seed = notes.main.Services(helper: channel.sender(ask), clock: h.clock, live: take live, stream: take stream)
+    let config = harness.gateway.GatewayConfig(root: h.data, options: notes.main.options(), migrate: code.describe(notes.main.migrate), factory: store.local.seeded_factory(session), max_sessions: 2u64, idle_ms: notes.main.IDLE_MS, place_bytes: PLACE_POOL, tasks: h.tasks, clock: h.clock, random: h.random, net: h.net, watch: None, seed: take seed)
+    let g = match harness.gateway.gateway(take way, take config) {
+        Ok(take started) => take started,
+        Error(Full) => return notes.main.quit(h.out, "Gateway capacity exhausted. Rebuild with --limit 536870912."),
+        Error(_) => return notes.main.quit(h.out, "Could not open the gateway store. Use a writable data directory."),
+    }
+    let Ok((take listener, address)) = host.listen(h.net, notes.main.loopback(), 16u16) else {
+        return notes.main.quit(h.out, "Could not listen on loopback. Check the Net grant.")
+    }
+    let front = harness.gateway_http.Front(bind: code.describe(store.ingress.caller), bind_bytes: 4096u64, bind_steps: 65536u64, authority: string.into_bytes("localhost"), submit: store.client.transact_entry(code.describe(notes.main.submit_entry)), decide: store.client.transact_entry(code.describe(notes.main.decide_entry)), settle: Some(store.client.transact_entry(code.describe(notes.main.settle_release_entry))), keys: result.unwrap(store.client.entry_keys(code.describe(notes.main.place))), socket: notes.main.wire().socket, agent: string.from(model), narrow: All, preview: Some(harness.preview.door(hub)), tasks: h.tasks, clock: h.clock, random: h.random, net: h.net, tail_lines: 64u64, within_ms: notes.main.HTTP_MS, beat_ms: 200u64, conn_bytes: 8388608u64, conns_max: 8u64, head_max: 8192u64, body_max: 65536u64)
+    let served = harness.gateway_http.serve(d, take front, take listener)
+    notes.main.count(h.out, "port ", int.widen(address.port))
+    controls(h, d)
+    harness.gateway_http.halt(take served)
+    let _ = harness.gateway.stop(take g)
+    let _ = take ask
+    let _ = task.join(take helping)
+    Ok(())
+}
+
+fn boot(h: Host, model: String, upstream: Option[(Addr, Secret)]) -> Result[(), Exit] waits {
+    let hub = harness.preview.start(h.tasks, 1048576u64, 4096u64)
+    let live = match upstream {
+        Some((address, key)) => Some(notes.main.Live(net: h.net, address: address, key: secret.share(key), out: h.out, preview: harness.preview.door(hub), group: "", model: string.from(model))),
+        None => None,
+    }
+    let ran = listen(h, hub, model, take live)
+    harness.preview.stop(take hub)
+    take ran
+}
+
+pub fn scripted(out: Stdout, input: Stdin, data: Dir, clock: Clock, random: Random, tasks: Tasks, network: Net) -> Result[(), Exit] waits {
+    notes.main.count(out, "Build with --limit ", LIMIT)
+    boot(Host(out: out, input: input, data: data, clock: clock, random: random, tasks: tasks, net: network), "scripted", None)
+}
+
+pub fn main(out: Stdout, input: Stdin, data: Dir, clock: Clock, random: Random, tasks: Tasks, network: Net, settings: Env, api_key: Secret) -> Result[(), Exit] waits {
+    notes.main.count(out, "Build with --limit ", LIMIT)
+    let model = match env.get(settings, "OPENROUTER_MODEL") {
+        Ok(Some(name)) => string.from(name),
+        _ => string.from(notes.main.LIVE_MODEL),
+    }
+    let until: Until = At(clock, std.clock.deadline_after_ms(host.mono_ns(clock), 5000u64))
+    let Ok(ips) = std.net.lookup(network, notes.main.OPENROUTER, until) else {
+        return notes.main.quit(out, "Could not resolve openrouter.ai. Check your network and restart the gateway.")
+    }
+    for ip in ips {
+        if let V4(_) = ip {
+            let address = Addr(ip: ip, port: 443u16)
+            return boot(Host(out: out, input: input, data: data, clock: clock, random: random, tasks: tasks, net: network), model, Some((address, secret.share(api_key))))
+        }
+    }
+    notes.main.quit(out, "openrouter.ai has no IPv4 address. Check your network and restart the gateway.")
+}
+
+fn controls(h: Host, d: harness.gateway.Door) -> () waits {
+    let mut lines = std.io.lines(Stdin(h.input), 256u64)
+    let mut line = string.new()
+    while let Ok(true) = std.io.read_line(mut lines, mut line) {
+        let Some(text) = string.strip_prefix(line, "diff ") else {
+            notes.main.emit(h.out, "diff-error ", "Send diff SESSION_ID, or close stdin to stop.")
+            continue
+        }
+        let Ok(id) = std.int.parse_uint(text, 10) else {
+            notes.main.emit(h.out, "diff-error ", "Pass a numeric fork session ID.")
+            continue
+        }
+        match cache_diff(h, d, id) {
+            Ok(diff) => {
+                let format: std.json.Format[harness.CacheDiff] = result.unwrap(std.json.interop())
+                notes.main.emit(h.out, "diff ", result.unwrap(std.json.to_string(format, diff)))
+            },
+            Error(why) => notes.main.emit(h.out, "diff-error ", why),
+        }
+    }
+}
+
+fn cache_diff(h: Host, d: harness.gateway.Door, id: u64) -> Result[harness.CacheDiff, String] waits {
+    match harness.gateway.unload(d, id) {
+        Ok(_) => (),
+        Error(Place(Failed(why))) if why == "live" => (),
+        Error(Unknown) => return Error("Create a fork and use its session ID."),
+        Error(_) => return Error("Wait for the fork's reply, then try the cache diff again."),
+    }
+    let dir = std.dir.narrow(h.data, store.local.name_of(id)) ?=> |_| "Could not find the fork's store."
+    let db = store.open(h.tasks, dir, h.clock, h.random, notes.main.options()) ?=> |_| "Close the fork's stream before running the cache diff."
+    let diff = diff_recorded(db)
+    store.close(take db) ?=> |_| "Could not close the fork's store."
+    take diff
+}
+
+fn diff_recorded(db: store.Db) -> Result[harness.CacheDiff, String] waits {
+    let branch = store.main_branch(db)
+    let entry = store.client.transact_entry(code.describe(notes.main.submit_entry))
+    let key = store.client.entry_key(entry)
+    let mut version = store.version(store.snapshot(db))
+    while version > 0u64 {
+        if let Some(call) = store.recorded(db, branch, version) ?=> |_| "Could not read the fork's recorded calls." {
+            if call.record.key == key {
+                let h = store.with_schema(db, code.describe(harness.handles)) ?=> |_| "Could not read the fork's harness schema."
+                let limits = store.Plan(n_e: 1048576u64, s_e: 1048576u64, reply_max: 4096u64)
+                let live = notes.main.notes_agent()
+                let mut candidate = notes.main.notes_agent()
+                list.push(mut candidate.sections, harness.Section(key: "release-preview", render: code.describe(candidate_section)))
+                return Ok(harness.fork_cache_diff(db, branch, version, limits, h, live, candidate) ?=> |_| "Could not project the recorded fork call.")
+            }
+        }
+        version -= 1u64
+    }
+    Error("Send a message to the fork before running the cache diff.")
+}
+
+fn candidate_section(tx: store.Tx) -> Result[Option[String], store.Error] {
+    Ok(Some("In a draft release, summarize the changed notes."))
+}

@@ -289,12 +289,13 @@ pub type Stream: send {
     stop: String,
     input: u64,
     output: u64,
+    cached_input: Option[u64],
     done: bool,
     seen: u64,
 }
 
 pub fn stream(d: Dialect, b: Bounds) -> Stream {
-    Stream(dialect: d, bounds: b, text: string.new(), parts: list.new(), stop: string.new(), input: 0u64, output: 0u64, done: false, seen: 0u64)
+    Stream(dialect: d, bounds: b, text: string.new(), parts: list.new(), stop: string.new(), input: 0u64, output: 0u64, cached_input: None, done: false, seen: 0u64)
 }
 
 pub fn decoder(b: Bounds) -> std.sse.Decoder { std.sse.decoder(b.event_bytes) }
@@ -393,6 +394,7 @@ fn openai_chunk(mut st: Stream, x: std.json.Json) -> Result[(), String] {
     if let Some(take why) = str_at(x, "/choices/0/finish_reason") { st.stop = take why }
     if let Some(n) = u64_at(x, "/usage/prompt_tokens") { st.input = n }
     if let Some(n) = u64_at(x, "/usage/completion_tokens") { st.output = n }
+    if let Some(n) = u64_at(x, "/usage/prompt_tokens_details/cached_tokens") { st.cached_input = Some(n) }
     Ok(())
 }
 
@@ -524,6 +526,14 @@ pub fn ask(n: Net, clock: Clock, p: Provider, take req: harness.Request) -> Resu
 
 pub fn ask_with_preview(n: Net, clock: Clock, p: Provider, take req: harness.Request,
     mut sink: Option[preview.Source]) -> Result[harness.Answer, harness.Fault] waits {
+    let Reported(answer: take a, ..) = ask_reported(n, clock, p, take req, mut sink)?
+    Ok(take a)
+}
+
+pub type Reported { answer: harness.Answer, cached_input: Option[u64] }
+
+pub fn ask_reported(n: Net, clock: Clock, p: Provider, take req: harness.Request,
+    mut sink: Option[preview.Source]) -> Result[Reported, harness.Fault] waits {
     let text = match body(p.model, req) {
         Ok(take t) => take t,
         Error(take why) => return Error(BadArgs(take why)),
@@ -572,8 +582,9 @@ pub fn ask_with_preview(n: Net, clock: Clock, p: Provider, take req: harness.Req
         list.clear(mut chunk)
     }
     std.sse.finish(mut dec)
+    let cached = st.cached_input
     match answer(take st) {
-        Ok(take a) => Ok(take a),
+        Ok(take a) => Ok(Reported(answer: take a, cached_input: cached)),
         Error(_) => Error(Unavailable),
     }
 }

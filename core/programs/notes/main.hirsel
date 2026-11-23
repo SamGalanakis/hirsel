@@ -15,14 +15,6 @@ pub const OPENROUTER: String = "openrouter.ai"
 
 pub const LIVE_MODEL: String = "deepseek/deepseek-v4.1-flash-1017"
 
-pub const LIVE_NOTE: String = "The team meeting moved to Thursday."
-
-pub const LIVE_WARMUP: String = "Reply with READY and nothing else."
-
-pub const LIVE_WAKE: String = "Write exactly eight short numbered lines about the benefits of a well-kept meeting notebook. Start with 1. and include no introduction."
-
-pub const LIVE_PROMPT: String = "Save a new note with the exact text 'The team meeting moved to Thursday.' Use note_add once. After the tool returns, reply with SAVED."
-
 // A small session's store: each place reserves its resident cache, its pack
 // buffer and its journal group up front, and the defaults size those for a
 // large database (1 GiB resident).
@@ -169,23 +161,6 @@ fn confirm_delete(tx: store.Tx, ask: harness.Ask) -> harness.Verdict {
     }
 }
 
-fn confirm_live_add(tx: store.Tx, ask: harness.Ask) -> harness.Verdict {
-    if ask.call.name != "note_add" {
-        return Pass
-    }
-    let Ok(h) = harness.handles(store.tx_schema(tx)) else {
-        return Deny("harness schema unavailable")
-    }
-    let Ok(Some(s)) = store.fetch(tx, store.shape(h.session), 0u64) else {
-        return Deny("harness session unavailable")
-    }
-    if s.model == LIVE_MODEL {
-        Hold("the live smoke requires approval to save a note")
-    } else {
-        Pass
-    }
-}
-
 // Counts tool results in the transaction that appends each one.
 fn tally(mut tx: store.Tx, at: u64, e: harness.Entry) -> Result[(), harness.Fault] {
     let ToolResult(_, _) = view e else {
@@ -226,7 +201,8 @@ pub type Live: send {
     key: Secret,
     out: Stdout,
     preview: harness.preview.Door,
-    group: String
+    group: String,
+    model: String,
 }
 
 // A scripted session's draft: the preview hub and the session's group.
@@ -258,7 +234,7 @@ pub fn copy_stream(s: Option[Stream], group: String) -> Option[Stream] {
 }
 
 pub fn copy_live(l: Live, group: String) -> Live {
-    Live(net: l.net, address: l.address, key: secret.share(l.key), out: l.out, preview: harness.preview.copy_door(l.preview), group: string.from(group))
+    Live(net: l.net, address: l.address, key: secret.share(l.key), out: l.out, preview: harness.preview.copy_door(l.preview), group: string.from(group), model: string.from(l.model))
 }
 
 fn make_grants(s: Services, take ctx: store.runner.TriggerContext) -> Result[Grants, Capacity] {
@@ -319,14 +295,21 @@ fn returned(r: harness.Request, id: String) -> String {
 // Three rounds, chosen by how many tool results the request carries.
 fn scripted_model(g: Grants, take r: harness.Request) -> Result[harness.Answer, harness.Fault] waits {
     let mut results = 0u64
+    let mut prompt = string.new()
     for e in r.messages {
-        if let ToolResult(_, _) = e {
-            results += 1u64
+        match e {
+            User(text) => { prompt = string.from(text) },
+            ToolResult(_, _) => { results += 1u64 },
+            _ => (),
         }
     }
     let mut calls: List[harness.Call] = list.new()
     let mut words = string.new()
-    if let Some((written, result)) = scripted_release(r) {
+    if prompt == "Reply with READY and nothing else." {
+        words = "READY"
+    } else if prompt == "Reply with FORKED and nothing else." {
+        words = "FORKED"
+    } else if let Some((written, result)) = scripted_release(r) {
         if let Some(text) = result {
             words = string.from(text)
         } else if written {
@@ -423,50 +406,37 @@ fn model(g: Grants, take request: harness.Request, mut draft: Option[harness.pre
 }
 
 fn live_model(g: Grants, live: Live, take request: harness.Request, mut draft: Option[harness.preview.Source]) -> Result[harness.Answer, harness.Fault] waits {
-    let mut req = take request
-    let mut replies = 0u64
-    let mut prompt = string.new()
-    for e in req.messages {
-        match e {
-            User(text) => {
-                prompt = string.from(text);
-                replies = 0u64
-            },
-            Assistant(_) => {
-                replies += 1u64
-            },
-            _ => (),
-        }
-    }
-    let limit = if prompt == LIVE_PROMPT {
-        2u64
-    } else if prompt == LIVE_WARMUP || prompt == LIVE_WAKE {
-        1u64
-    } else {
-        0u64
-    }
-    if replies >= limit {
-        return Error(Refused("live smoke request limit"))
-    }
-    if prompt != LIVE_PROMPT || replies > 0u64 {
-        list.clear(mut req.tools)
-    }
-    let m = harness.provider.Model(dialect: OpenAi, name: LIVE_MODEL, max_tokens: 512u64)
+    let m = harness.provider.Model(dialect: OpenAi, name: string.from(live.model), max_tokens: 512u64)
     let endpoint = harness.provider.Endpoint(address: live.address, authority: OPENROUTER, prefix: "/api", security: Https(OPENROUTER, System))
     let p = harness.provider.Provider(model: take m, endpoint: take endpoint, key: secret.share(live.key), bounds: harness.provider.bounds(), deadline_ms: 45000u64)
     emit(live.out, "OpenRouter request attempted", "")
-    let result = harness.provider.ask_with_preview(live.net, g.clock, take p, take req, mut draft)
-    match result {
-        Error(Refused(why)) => emit(live.out, "OpenRouter refused: ", why),
-        Error(BadArgs(why)) => emit(live.out, "OpenRouter request invalid: ", why),
-        Error(Unavailable) => emit(live.out, "OpenRouter stream did not yield an answer", ""),
-        Ok(a) => count(live.out, "OpenRouter reported tokens: ", a.usage.input + a.usage.output),
-        _ => (),
+    let response = harness.provider.ask_reported(live.net, g.clock, take p, take request, mut draft)
+    match take response {
+        Ok(harness.provider.Reported(answer: take a, cached_input: cached)) => {
+            if let Some(hit) = cached {
+                if hit <= a.usage.input {
+                    let mut s = string.from("OpenRouter prompt tokens: hit ")
+                    string.push_u64(mut s, hit)
+                    string.push(mut s, ", miss ")
+                    string.push_u64(mut s, a.usage.input - hit)
+                    emit(live.out, take s, "")
+                }
+            }
+            Ok(take a)
+        },
+        Error(take fault) => {
+            match fault {
+                Refused(why) => emit(live.out, "OpenRouter refused: ", why),
+                BadArgs(why) => emit(live.out, "OpenRouter request invalid: ", why),
+                Unavailable => emit(live.out, "OpenRouter stream did not yield an answer", ""),
+                _ => (),
+            }
+            Error(take fault)
+        },
     }
-    take result
 }
 
-fn notes_agent() -> harness.Agent[Grants] {
+pub fn notes_agent() -> harness.Agent[Grants] {
     let mut a = harness.agent("notes", "notes", code.describe(model))
     list.push(mut a.tools, harness.inside("note_add", "saves a note", "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"}},\"required\":[\"text\"]}", code.describe(note_add)))
     list.push(mut a.tools, harness.inside("note_delete", "deletes a note by id", "{\"id\":\"number\"}", code.describe(note_delete)))
@@ -474,7 +444,6 @@ fn notes_agent() -> harness.Agent[Grants] {
     list.push(mut a.tools, harness.outside("summarize", "asks a helper agent for a one-line summary", "{\"text\":\"string\"}", Once, code.describe(summarize)))
     harness.release.add_tools(mut a)
     list.push(mut a.gates, harness.Gate(name: "confirm_delete", check: code.describe(confirm_delete)))
-    list.push(mut a.gates, harness.Gate(name: "confirm_live_add", check: code.describe(confirm_live_add)))
     list.push(mut a.reactions, harness.After(name: "tally", run: code.describe(tally)))
     list.push(mut a.sections, harness.Section(key: "notes", render: code.describe(notes_section)))
     a

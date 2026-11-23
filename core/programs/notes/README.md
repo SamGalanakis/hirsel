@@ -70,13 +70,5 @@ The spend is three model rounds of 10 input and 5 output tokens each.
 
 ## The model route
 
-`scripted_model` answers the default run. The manual OpenRouter smoke uses the
-same notes tools through the HTTP gateway, with a `Secret` grant for OpenRouter.
-It creates a session over HTTP, approves one `note_add` call, checks the stored
-note and `SAVED` reply, and posts another message after the place unloads. It
-checks that the original SSE connection sees a partial answer before the
-committed reply and prints the first-preview latency and journal commit counts.
-
-Run `../harness/live-smoke.sh` with `hirsel` on `PATH`, or set `HIRSEL` to the
-installed executable. The script sources `~/.config/hirsel/openrouter-dev.env`
-when present and skips without a key.
+`scripted_model` answers the default run. The [development gateway](../harness/README.md) runs the same notes agent with a
+scripted model or OpenRouter.

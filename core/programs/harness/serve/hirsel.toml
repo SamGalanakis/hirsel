@@ -1,5 +1,5 @@
 [package]
-name = "harness_live_smoke"
+name = "harness_dev_serve"
 major = 1
 charge = "charge-v1"
 

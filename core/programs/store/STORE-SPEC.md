@@ -3128,7 +3128,7 @@ Replaced by §12's objects@1. There is no reader for a v2.43 bucket store.
 
 Replaced by §12.5's `Follower`: `open_read_only`, `open_bucket_read_only`, `ReadOnly`, `read_only_table`, `read_only_get` and `read_only_version` are deleted. A follower over log@1 is the old offline reader, under writer exclusion, reading the last segment past END as §3.4 does (§12.5). Its S2 `read-only` crash law is kept, restated over a follower (§12.10).
 
-**Callers that move with it (v2.47, Fable L6).** The deleted API has six callers outside the store's implementation. Each moves to a log@1 `follower` under writer exclusion, or to the writer's own Db, in the slice that deletes the API:
+**Callers that move with it (v2.47, Fable L6).** The deleted API has five callers outside the store's implementation. Each moves to a log@1 `follower` under writer exclusion, or to the writer's own Db, in the slice that deletes the API:
 
 | Caller | Uses | Moves to |
 |---|---|---|
@@ -3136,7 +3136,6 @@ Replaced by §12.5's `Follower`: `open_read_only`, `open_bucket_read_only`, `Rea
 | `core/programs/store/platform.hirsel` | 3 | a follower over the place's directory |
 | `core/programs/harness/gateway_laws.hirsel` | 1 | a follower in the law |
 | `core/programs/harness/waits.hirsel` | 2 | a follower, `catch_up` with a deadline |
-| `core/programs/harness/live-smoke/main.hirsel` | 1 | a follower |
 | `core/std/api/store.md` | 2 | the follower API's text |
 
 The implementation's own uses (`store.hirsel`, `store-bucket.hirsel`, `bucket_laws.hirsel`) are deleted with the API.

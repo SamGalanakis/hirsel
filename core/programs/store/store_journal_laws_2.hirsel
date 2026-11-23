@@ -228,7 +228,7 @@ fn journal_test_fork_threshold(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
         }
         close(take db)?
         let reopened = open(tasks, child, c, r, options)?
-        if option.unwrap(branch(reopened, "beta")).id != 1 || disk_state(reopened).uncovered != expected_journal || get(snapshot_of(reopened, beta)?, shape(rows), 1)? != Some(11u64) {
+        if option.unwrap(branch(reopened, "beta")).id != 1 || disk_state(reopened).uncovered != expected_journal || get(snapshot_of(reopened, beta)?, rows, 1)? != Some(11u64) {
             return Error(Foreign)
         }
         close(take reopened)?
@@ -672,11 +672,11 @@ fn journal_crash_fork_read(mut db: Db, rows: Table[u64, u64], minimum: u64, fork
     if main_version < 1 || main_version > 3 {
         return Ok(false)
     }
-    if get(main, shape(rows), 1)? != (if main_version >= 2 {
+    if get(main, rows, 1)? != (if main_version >= 2 {
         Some(11u64)
     } else {
         None
-    }) || get(main, shape(rows), 2)? != None {
+    }) || get(main, rows, 2)? != None {
         return Ok(false)
     }
     let main_call = recorded(db, main_branch(db), 3)?
@@ -695,7 +695,7 @@ fn journal_crash_fork_read(mut db: Db, rows: Table[u64, u64], minimum: u64, fork
         }
         let child = snapshot_of(db, b)?
         let child_head = version(child)
-        if child_head < 2 || child_head > 4 || get(child, shape(rows), 1)? != Some(11u64) || get(child, shape(rows), 2)? != (if child_head >= 3 {
+        if child_head < 2 || child_head > 4 || get(child, rows, 1)? != Some(11u64) || get(child, rows, 2)? != (if child_head >= 3 {
             Some(22u64)
         } else {
             None
@@ -749,7 +749,7 @@ fn journal_crash_fork_read(mut db: Db, rows: Table[u64, u64], minimum: u64, fork
             return Ok(false)
         }
         durable(mut db, done.ticket)?
-        if get(snapshot_of(db, old)?, shape(rows), 9)? != Some(99u64) || get(snapshot_of(db, gamma)?, shape(rows), 9)? != None {
+        if get(snapshot_of(db, old)?, rows, 9)? != Some(99u64) || get(snapshot_of(db, gamma)?, rows, 9)? != None {
             return Ok(false)
         }
         let _ = delete_branch(mut db, old)?
@@ -773,7 +773,7 @@ fn journal_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, minimum: u64, s
         close(take db)?
         return Ok(valid)
     }
-    let sh = shape(t)
+    let sh = view t
     let head = db.heads[0].head
     let last = if scenario == "orphan-end" || scenario == "poison-cut" || scenario == "poison-segment" || scenario == "poison-end" || scenario == "poison-pack" || scenario == "poison-write" || scenario == "journal-place-idle" || scenario == "journal-place-split" || scenario == "journal-place-short" {
         2u64
@@ -960,7 +960,7 @@ pub fn journal_law_options(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
     if !typed_put(mut db, t, 1, 11) || !typed_put(mut db, t, 2, 22) {
         return false
     }
-    let sh = shape(t)
+    let sh = view t
     result.unwrap(close(take db))
     let reopened = result.unwrap(open(tasks, d, c, r, options))
     let good = result.unwrap(get(snapshot(reopened), sh, 1)) == Some(11u64) && result.unwrap(get(snapshot(reopened), sh, 2)) == Some(22u64)

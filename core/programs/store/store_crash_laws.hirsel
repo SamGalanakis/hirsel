@@ -32,7 +32,7 @@ fn disk_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String, 
     let mut old = true
     let mut new = true
     let t = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
-    let sh = shape(t)
+    let sh = view t
     for k in 0u64 .. 96 {
         let found = get(snapshot(db), sh, k)?
         let old_value: Option[u64] = if scenario == "genesis" {
@@ -85,7 +85,7 @@ fn disk_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String, 
         if !old || db.heads[0].head < 98 || db.heads[0].head > 100 || (required_new && db.heads[0].head != 100) {
             good = false
         }
-        match get(snapshot(db), shape(big), 1)? {
+        match get(snapshot(db), big, 1)? {
             Some(value) => {
                 if db.heads[0].head != 99 || string.byte_len(value) != 1048566 {
                     good = false
@@ -113,7 +113,7 @@ fn disk_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String, 
         let mut whole = false
         if moved && listed == 1 && db.heads[0].head == 98 {
             let mut indexed = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
-            let ix = index(db, mut indexed, "by_v", code.describe(crash_value), std.codec.key_u64())?
+            let ix = index(mut db, indexed, "by_v", code.describe(crash_value), std.codec.key_u64())?
             let mut rows = find(snapshot(db), ix, Unbounded, Unbounded)?
             let mut expect = 0u64
             whole = true
@@ -323,7 +323,7 @@ fn crash_install_refusals(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(
     let reopened = deploy_result(open(tasks, d, c, r, disk_crash_options("install")))?
     let migrated = deploy_result(system_table(reopened, "rows", std.codec.key_u64(), std.codec.of_u64()))?
     let _ = deploy_result(system_table(reopened, "kept", std.codec.key_u64(), std.codec.of_u64()))?
-    if deploy_result(get(snapshot(reopened), shape(migrated), 0u64))? != Some(1077u64) {
+    if deploy_result(get(snapshot(reopened), migrated, 0u64))? != Some(1077u64) {
         fail("fresh export lost the acknowledged row")
     }
     deploy_result(close(take reopened))
@@ -352,7 +352,7 @@ fn crash_install_read(d: Dir, c: Clock, r: Random, tasks: Tasks, required_new: b
     let installed = v == 98
     let activated = system_table(db, "hirsel.runner.activation", std.codec.key_u8(), std.codec.of_bytes())?
     let release = system_table(db, "hirsel.runner.releases", std.codec.key_u64(), std.codec.of_bytes())?
-    let found = option.unwrap(get(snap, shape(activated), 0u8)?)
+    let found = option.unwrap(get(snap, activated, 0u8)?)
     if found != install_fixture_bytes(32u64, if installed {
         66u8
     } else {
@@ -360,7 +360,7 @@ fn crash_install_read(d: Dir, c: Clock, r: Random, tasks: Tasks, required_new: b
     }) || db.fence != 1 {
         return Ok(false)
     }
-    let new_release = get(snap, shape(release), 98u64)?
+    let new_release = get(snap, release, 98u64)?
     if installed {
         if option.unwrap(take new_release) != install_fixture_bytes(32u64, 67u8) || db.next_table != 10u32 {
             return Ok(false)
@@ -370,7 +370,7 @@ fn crash_install_read(d: Dir, c: Clock, r: Random, tasks: Tasks, required_new: b
     }
     let t = system_table(db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     for k in 0u64 .. 96u64 {
-        if get(snap, shape(t), k)? != Some(k + if installed {
+        if get(snap, t, k)? != Some(k + if installed {
             1001u64
         } else {
             1u64
@@ -392,7 +392,7 @@ fn crash_install_read(d: Dir, c: Clock, r: Random, tasks: Tasks, required_new: b
         close(take db)?
         let reopened = open(tasks, d, c, r, disk_crash_options("install"))?
         for k in 0u64 .. 96u64 {
-            if get(snapshot(reopened), shape(t), k)? != Some(k + 1001u64) {
+            if get(snapshot(reopened), t, k)? != Some(k + 1001u64) {
                 return Ok(false)
             }
         }

@@ -68,7 +68,7 @@ pub fn tables(schema: store.Schema) -> Result[Tables, store.Error] {
 }
 
 fn stat(tx: store.Tx, t: Tables, k: u64) -> Result[u64, store.Error] {
-    match store.fetch(tx, store.shape(t.stats), k)? {
+    match store.fetch(tx, t.stats, k)? {
         Some(n) => Ok(n),
         None => Ok(0u64)
     }
@@ -139,7 +139,7 @@ fn note_delete(mut tx: store.Tx, inv: harness.Invoke) -> Result[harness.Reply, h
     let Ok(t) = tables(store.tx_schema(tx)) else {
         return Error(Unavailable)
     }
-    match store.fetch(tx, store.shape(t.notes), id) {
+    match store.fetch(tx, t.notes, id) {
         Ok(Some(_)) => (),
         Ok(None) => return Error(BadArgs("no such note")),
         Error(_) => return Error(Unavailable),
@@ -184,7 +184,7 @@ fn notes_section(tx: store.Tx) -> Result[Option[String], store.Error] {
     let mut out = string.from("Notes:")
     let next = stat(tx, t, NEXT_ID)?
     for id in 0u64 .. next {
-        if let Some(line) = store.fetch(tx, store.shape(t.notes), id)? {
+        if let Some(line) = store.fetch(tx, t.notes, id)? {
             string.push(mut out, "\n")
             string.push_u64(mut out, id)
             string.push(mut out, ". ")
@@ -597,7 +597,7 @@ fn helper_ask(seed: HelperSeed, n: u64, take line: String) -> Result[String, Str
     let Ok(()) = store.run_migration(mut db, seed.tasks, code.describe(harness.migrate)) else {
         return Error("helper: migrate")
     }
-    let Ok(h) = store.with_schema(db, code.describe(harness.handles)) else {
+    let Ok(h) = store.with_schema(mut db, code.describe(harness.handles)) else {
         return Error("helper: schema")
     }
     let Ok(w) = helper_wired() else {
@@ -625,11 +625,11 @@ fn helper_ask(seed: HelperSeed, n: u64, take line: String) -> Result[String, Str
         return Error("helper: reopen")
     }
     let snap = store.snapshot(db2)
-    let Ok(Some(session)) = store.get(snap, store.shape(h.session), 0u64) else {
+    let Ok(Some(session)) = store.get(snap, h.session, 0u64) else {
         return Error("helper: no session")
     }
     let last = session.next_pos - 1u64
-    let answer: Result[String, String] = match store.get(snap, store.shape(h.entries), last) {
+    let answer: Result[String, String] = match store.get(snap, h.entries, last) {
         Ok(Some(Assistant(a))) => Ok(clone(a.text)),
         _ => Error("helper: the run did not end in an answer"),
     }
@@ -779,7 +779,7 @@ fn seed_place(dir: Dir, clock: Clock, random: Random, tasks: Tasks, prompt: Stri
     let Ok(()) = store.run_migration(mut db, tasks, code.describe(migrate)) else {
         return Error("migrate")
     }
-    let Ok(h) = store.with_schema(db, code.describe(harness.handles)) else {
+    let Ok(h) = store.with_schema(mut db, code.describe(harness.handles)) else {
         return Error("schema")
     }
     let Ok(w) = wired() else {
@@ -817,7 +817,7 @@ fn approve(out: Stdout, dir: Dir, clock: Clock, random: Random, tasks: Tasks) ->
         Ok(take v) => take v,
         Error(_) => return Error("open")
     }
-    let Ok(h) = store.with_schema(db, code.describe(harness.handles)) else {
+    let Ok(h) = store.with_schema(mut db, code.describe(harness.handles)) else {
         return Error("schema")
     }
     let snap = store.snapshot(db)
@@ -825,7 +825,7 @@ fn approve(out: Stdout, dir: Dir, clock: Clock, random: Random, tasks: Tasks) ->
     if list.len(waits) != 1u64 { return Error("expected one open approval") }
     let wait = waits[0u64]
     let ek = harness.EffectKey(run: wait.run, round: wait.round, kind: harness.TOOL, ordinal: wait.ordinal)
-    let Ok(Some(held)) = store.get(snap, store.shape(h.effects), ek) else {
+    let Ok(Some(held)) = store.get(snap, h.effects, ek) else {
         return Error("the held call is missing")
     }
     if let Some(c) = held.call {
@@ -858,24 +858,24 @@ fn report(out: Stdout, dir: Dir, clock: Clock, random: Random, tasks: Tasks) -> 
     let Ok(db) = store.open(tasks, dir, clock, random, options()) else {
         return Error("open")
     }
-    let Ok(h) = store.with_schema(db, code.describe(harness.handles)) else {
+    let Ok(h) = harness.handles(store.snapshot_schema(store.snapshot(db))) else {
         return Error("schema")
     }
-    let Ok(t) = store.with_schema(db, code.describe(tables)) else {
+    let Ok(t) = tables(store.snapshot_schema(store.snapshot(db))) else {
         return Error("tables")
     }
     let snap = store.snapshot(db)
-    let Ok(Some(session)) = store.get(snap, store.shape(h.session), 0u64) else {
+    let Ok(Some(session)) = store.get(snap, h.session, 0u64) else {
         return Error("no session")
     }
     emit(out, "transcript:", "")
     for pos in 0u64 .. session.next_pos {
-        if let Ok(Some(e)) = store.get(snap, store.shape(h.entries), pos) {
+        if let Ok(Some(e)) = store.get(snap, h.entries, pos) {
             show_entry(out, e)
         }
     }
     emit(out, "notes:", "")
-    let mut rows = match store.scan(snap, store.shape(t.notes), Unbounded, Unbounded) {
+    let mut rows = match store.scan(snap, t.notes, Unbounded, Unbounded) {
         Ok(take v) => take v,
         Error(_) => return Error("scan")
     }
@@ -885,14 +885,14 @@ fn report(out: Stdout, dir: Dir, clock: Clock, random: Random, tasks: Tasks) -> 
         string.push(mut s, ". ")
         emit(out, take s, text)
     }
-    let counted = match store.get(snap, store.shape(t.stats), RESULTS) {
+    let counted = match store.get(snap, t.stats, RESULTS) {
         Ok(Some(n)) => n,
         _ => 0u64
     }
     let mut tallied = string.from("tool results counted by the reaction: ")
     string.push_u64(mut tallied, counted)
     emit(out, take tallied, "")
-    let Ok(Some(run)) = store.get(snap, store.shape(h.runs), 0u64) else {
+    let Ok(Some(run)) = store.get(snap, h.runs, 0u64) else {
         return Error("no run")
     }
     let mut s = string.from("spend: ")

@@ -31,14 +31,14 @@ pub fn project[G: send](tx: store.Tx, h: Handles, a: Agent[G]) -> Result[Project
     }
     let mut messages: Bytes = list.new()
     if s.frame > 0u64 {
-        let Some(f) = kept(store.fetch(tx, store.shape(h.frames), s.frame))? else {
+        let Some(f) = kept(store.fetch(tx, h.frames, s.frame))? else {
             return Error(Malformed("frame"))
         }
         std.codec.put_key_bytes(string.as_bytes(f.seed), mut messages)
     }
     let mut p = s.frame
     while p < s.next_pos {
-        match kept(store.fetch(tx, store.shape(h.entries), p))? {
+        match kept(store.fetch(tx, h.entries, p))? {
             Some(System(_)) => (),
             Some(Note(_, _)) => (),
             Some(entry) => {

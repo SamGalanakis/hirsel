@@ -205,7 +205,7 @@ pub fn law_reads_ranges(c: Clock) -> bool waits {
     let cv = std.codec.of_u64()
     result.unwrap(create_table(mut db, spec("range-law", std.codec.key_u64(), cv)))
     let t = result.unwrap(table(mut db, "range-law", std.codec.key_u64(), cv))
-    let sh = shape(t)
+    let sh = view t
     for k in 0u64 .. 6 {
         if !typed_put(mut db, t, k, k + 1) {
             return false
@@ -703,7 +703,7 @@ fn quotient(v: u64) -> Result[u64, Capacity] {
     Ok(v / 4)
 }
 
-fn typed_value(s: Snapshot, t: Shape[u64, u64], k: u64) -> u64 {
+fn typed_value(s: Snapshot, t: Table[u64, u64], k: u64) -> u64 {
     match result.unwrap(get(s, t, k)) {
         None => 0,
         Some(v) => v
@@ -722,7 +722,7 @@ fn typed_value(s: Snapshot, t: Shape[u64, u64], k: u64) -> u64 {
 // row 1 as "one", row 2 gone, rows 3, 4 and 64 as staged, row 101 present,
 // and 65 rows in all (64 staged, less row 2, plus rows 100 and 101). The inner callback's bound is below what its enclosing bound has
 // left, since a nested bound cannot grant steps its parent no longer holds.
-fn layered_reads(tx: Tx, sh: Shape[u64, String], big: String) -> Result[bool, Error] {
+fn layered_reads(tx: Tx, sh: Table[u64, String], big: String) -> Result[bool, Error] {
     let mut rows = range(tx, sh, Included(1), Included(200))?
     let mut seen = 0u64
     while let Some(_) = next_range(mut rows)? {
@@ -742,7 +742,7 @@ pub fn law_callback_shares_staged(c: Clock) -> bool waits {
     let mut raw: Bytes = list.with_capacity(1000)
     list.fill(mut raw, 1000, 97u8)
     let big = result.unwrap(string.from_utf8(take raw))
-    let sh = shape(t)
+    let sh = view t
     let out = run(mut db, None, scoped fn(mut tx: Tx) -> Result[bool, Error] {
         for k in 1u64 .. 65 {
             put(mut tx, t, k, big)?

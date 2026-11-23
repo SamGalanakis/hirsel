@@ -374,7 +374,7 @@ pub fn law_request_mismatch_wire(tasks: Tasks, clock: Clock, random: Random) -> 
     let mut ok = w3c_answer(first, 4u64, 0u32, 0u64, w3c_ok(4u64))
     let changed = w3c_send(mut rig, 0u32, 0u64, 0u32, w3c_arg(8u32))
     ok = w3c_answer(changed, 4u64, 0u32, 0u64, Refused(RequestMismatch)) && ok
-    ok = store.version(store.snapshot(rig.head.db)) == 4u64 && result.unwrap(store.get(store.snapshot(rig.head.db), store.shape(rig.head.h.data), 0u64)) == Some(7u32) && ok
+    ok = store.version(store.snapshot(rig.head.db)) == 4u64 && result.unwrap(store.get(store.snapshot(rig.head.db), rig.head.h.data, 0u64)) == Some(7u32) && ok
     w3c_close(take rig)
     ok
 }
@@ -388,7 +388,7 @@ pub fn law_history_below_latest(tasks: Tasks, clock: Clock, random: Random) -> b
     }
     let old = w3c_send(mut rig, 0u32, 0u64, 0u32, w3c_arg(9u32))
     ok = w3c_answer(old, 6u64, 0u32, 0u64, Refused(HistoryUnavailable)) && ok
-    ok = store.version(store.snapshot(rig.head.db)) == 6u64 && result.unwrap(store.get(store.snapshot(rig.head.db), store.shape(rig.head.h.data), 0u64)) == Some(7u32) && ok
+    ok = store.version(store.snapshot(rig.head.db)) == 6u64 && result.unwrap(store.get(store.snapshot(rig.head.db), rig.head.h.data, 0u64)) == Some(7u32) && ok
     w3c_close(take rig)
     ok
 }
@@ -399,7 +399,7 @@ pub fn law_reply_over_done_max(tasks: Tasks, clock: Clock, random: Random) -> bo
     let mut ok = w3c_answer(large, 4u64, 1u32, 0u64, Failed(OutOfBytes(Room(requested: 8173u64, available: 8172u64))))
     let big = w3c_send(mut rig, 2u32, 0u64, 2u32, w3c_arg(8169u32))
     ok = w3c_answer(big, 4u64, 2u32, 0u64, Failed(OutOfBytes(Room(requested: 8173u64, available: 8172u64)))) && ok
-    ok = store.version(store.snapshot(rig.head.db)) == 4u64 && result.unwrap(store.get(store.snapshot(rig.head.db), store.shape(rig.head.h.data), 0u64)) == None && ok
+    ok = store.version(store.snapshot(rig.head.db)) == 4u64 && result.unwrap(store.get(store.snapshot(rig.head.db), rig.head.h.data, 0u64)) == None && ok
     w3c_close(take rig)
     ok
 }
@@ -533,7 +533,7 @@ pub fn law_after_publication(d: Dir, tasks: Tasks, clock: Clock, random: Random)
     let no_outcome = match channel.try_receive(from) { Error(Closed) => true, _ => false }
     let after = store.snapshot(rig.head.db)
     let published = store.version(after) == before + 1u64 &&
-        result.unwrap(store.get(after, store.shape(rig.head.h.data), 0u64)) == Some(7u32)
+        result.unwrap(store.get(after, rig.head.h.data, 0u64)) == Some(7u32)
     let W3cRig(head: take owned, ..) = take rig
     let Head(db: take db, ..) = take owned
     let _ = store.close(take db)

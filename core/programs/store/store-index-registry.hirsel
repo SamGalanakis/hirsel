@@ -1,0 +1,63 @@
+// The registry erases the row type at the stored value encoding. Each
+// extractor uses the same schema readers as the declaration that bound it.
+type RegisteredIndex: send {
+    id: u32,
+    schema: u16,
+    by: Bytes,
+    key: Bytes,
+    extract: own[send] fn(Bytes, Bytes) -> Result[Bytes, Error]
+}
+
+type IndexRegistration: send {
+    table: u32,
+    index: RegisteredIndex
+}
+
+type IndexRegistry: send {
+    entries: Map[(u32, u32, u16), RegisteredIndex]
+}
+
+fn empty_index_registry() -> IndexRegistry {
+    IndexRegistry(entries: map.new())
+}
+
+type RegisteredDecoder[J, V]: send {
+    table: u32,
+    id: u32,
+    decoders: Arc[Readers[V]],
+    by: StaticFn[fn(V) -> Result[J, Capacity]],
+    key: std.codec.Key[J]
+}
+
+fn extract_registered[J, V](decoder: RegisteredDecoder[J, V], raw: Bytes, primary: Bytes) -> Result[Bytes, Error] {
+    let value = row_value(decoder.decoders, decoder.table, raw)?
+    let index_key = capacity((code.callable(decoder.by))(value))?
+    let mut encoded = prefixed(decoder.id, list.len(primary) + 8, false)?
+    std.codec.encode_key(decoder.key, index_key, mut encoded)
+    list.append(mut encoded, primary)
+    Ok(take encoded)
+}
+
+fn bind_index[J, K, V](t: Table[K, V], record: Catalog, by: StaticFn[fn(V) -> Result[J, Capacity]], key: std.codec.Key[J]) -> IndexRegistration {
+    let decoder = RegisteredDecoder(table: t.id, id: record.id, decoders: arc.share(t.readers), by: by, key: key)
+    let extract: own[send] fn(Bytes, Bytes) -> Result[Bytes, Error] = fn(raw: Bytes, primary: Bytes) -> Result[Bytes, Error] {
+        extract_registered(decoder, raw, primary)
+    }
+    IndexRegistration(table: t.id, index: RegisteredIndex(id: record.id, schema: t.readers.current, by: clone(record.by), key: clone(record.key), extract: take extract))
+}
+
+fn register_index(mut registry: IndexRegistry, take binding: IndexRegistration) {
+    let IndexRegistration(table: table_id, index: take bound_index) = take binding
+    let key = (table_id, bound_index.id, bound_index.schema)
+    map.insert(mut registry.entries, key, take bound_index)
+}
+
+fn registered_index(tx: Tx, table_id: u32, schema: u16, record: Catalog) -> Result[View[RegisteredIndex], Error] in tx {
+    let registry = tx.indexes
+    if let Some(bound_index) = map.get(registry.entries, (table_id, record.id, schema)) {
+        if bound_index.by == record.by && bound_index.key == record.key {
+            return Ok(bound_index)
+        }
+    }
+    Error(Stale(table_id))
+}

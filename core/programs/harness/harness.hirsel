@@ -627,7 +627,7 @@ fn armed(take r: Result[runner.triggers.Id, runner.triggers.Error]) -> Result[ru
 }
 
 fn session_of(tx: store.Tx, h: Handles) -> Result[Session, Refused] {
-    match kept(store.fetch(tx, store.shape(h.session), 0u64))? {
+    match kept(store.fetch(tx, h.session, 0u64))? {
         Some(take s) => Ok(take s),
         None => Error(Malformed("no session")),
     }
@@ -635,7 +635,7 @@ fn session_of(tx: store.Tx, h: Handles) -> Result[Session, Refused] {
 
 // Opens the singleton session. Idempotent: an existing session is kept.
 pub fn open_session(mut tx: store.Tx, h: Handles, take model: String, take narrow: Narrow) -> Result[(), Refused] {
-    if let Some(_) = kept(store.fetch(tx, store.shape(h.session), 0u64))? {
+    if let Some(_) = kept(store.fetch(tx, h.session, 0u64))? {
         return Ok(())
     }
     let s = Session(model: take model, tools_narrow: take narrow, admitted: list.new(), frame: 0u64, next_pos: 0u64, active_run: None, next_run: 0u64, next_seq: 0u64, active_sections_hashes: list.new(), active_tools_hash: list.new(), active_tools_pos: None, warm_left: 0u64, warm: None)
@@ -665,7 +665,7 @@ pub type Framed: codec + send {
 // Assistant whose calls do not all have results before `upto`) conflicts: the
 // fork's first request would carry calls with no results.
 pub fn export(snap: store.Snapshot, h: Handles, upto: u64) -> Result[Prefix, Refused] {
-    let Some(s) = kept(store.get(snap, store.shape(h.session), 0u64))? else {
+    let Some(s) = kept(store.get(snap, h.session, 0u64))? else {
         return Error(Malformed("no session"))
     }
     if upto > s.next_pos {
@@ -674,7 +674,7 @@ pub fn export(snap: store.Snapshot, h: Handles, upto: u64) -> Result[Prefix, Ref
     let mut log: List[Entry] = list.with_capacity(upto)
     let mut open: List[String] = list.new()
     for p in 0u64 .. upto {
-        let Some(take e) = kept(store.get(snap, store.shape(h.entries), p))? else {
+        let Some(take e) = kept(store.get(snap, h.entries, p))? else {
             return Error(Malformed("entry"))
         }
         match e {
@@ -704,7 +704,7 @@ pub fn export(snap: store.Snapshot, h: Handles, upto: u64) -> Result[Prefix, Ref
     // itself a fork. A cut is the first row owned by the newer segment.
     let mut cuts: List[u64] = list.new()
     if upto > 0u64 {
-        let mut rows = kept(store.scan(snap, store.shape(h.fork_cuts), Unbounded, Included(upto)))?
+        let mut rows = kept(store.scan(snap, h.fork_cuts, Unbounded, Included(upto)))?
         while let Some((cut, _)) = kept(store.next(mut rows))? {
             list.push(mut cuts, cut)
         }
@@ -713,7 +713,7 @@ pub fn export(snap: store.Snapshot, h: Handles, upto: u64) -> Result[Prefix, Ref
     let mut frames: List[Framed] = list.new()
     let mut frame = 0u64
     if upto > 0u64 {
-        let mut rows = kept(store.scan(snap, store.shape(h.frames), Unbounded, Excluded(upto)))?
+        let mut rows = kept(store.scan(snap, h.frames, Unbounded, Excluded(upto)))?
         while let Some((base, f)) = kept(store.next(mut rows))? {
             list.push(mut frames, Framed(base: base, frame: clone(f)))
             frame = base
@@ -727,7 +727,7 @@ pub fn export(snap: store.Snapshot, h: Handles, upto: u64) -> Result[Prefix, Ref
 // they wrote in the parent stays there. The section and tool hashes start
 // empty, so the fork's first prepare appends a baseline.
 pub fn adopt(mut tx: store.Tx, h: Handles, take p: Prefix) -> Result[(), Refused] {
-    if let Some(_) = kept(store.fetch(tx, store.shape(h.session), 0u64))? {
+    if let Some(_) = kept(store.fetch(tx, h.session, 0u64))? {
         return Error(Conflict)
     }
     let Prefix(model: take model, tools_narrow: take narrow, frame: frame, frames: take frames, entries: take log, cuts: take cuts) = take p

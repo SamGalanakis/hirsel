@@ -9,12 +9,12 @@ pub fn cold_reader_allowed(reader: store.ReadOnly, caller: store.Caller) -> Resu
 // Pending decisions belong to the active run's caller. The HTTP view
 // includes only Open rows from this cover.
 pub fn pending_waits(tx: store.Tx, h: Handles, caller: store.Caller, take unused: ()) -> Result[runner.Cover, Capacity] {
-    let waits = store.shape(h.waits)
+    let waits = view h.waits
     let zero = first_wait(0u64)
     if reader_allowed(tx, h, caller)? {
-        if let Ok(Some(s)) = store.fetch(tx, store.shape(h.session), 0u64) {
+        if let Ok(Some(s)) = store.fetch(tx, h.session, 0u64) {
             if let Some(id) = s.active_run {
-                if let Ok(Some(r)) = store.fetch(tx, store.shape(h.runs), id) {
+                if let Ok(Some(r)) = store.fetch(tx, h.runs, id) {
                     if r.caller.issuer == caller.issuer && r.caller.subject == caller.subject {
                         return runner.cover(waits, Included(first_wait(id)), Included(last_wait(id)))
                     }
@@ -48,16 +48,16 @@ pub fn open_wait(k: WaitKey, take w: Wait) -> Option[PendingWait] {
 pub fn pending_approvals(snap: store.Snapshot, h: Handles, caller: store.Caller) -> Result[List[PendingWait], Refused] {
     let mut pending: List[PendingWait] = list.new()
     let key = reader_key(caller) ?=> |_| NotAllowed
-    if kept(store.get(snap, store.shape(h.readers), key))? != Some(true) {
+    if kept(store.get(snap, h.readers, key))? != Some(true) {
         return Error(NotAllowed)
     }
-    let Some(s) = kept(store.get(snap, store.shape(h.session), 0u64))? else { return Ok(take pending) }
+    let Some(s) = kept(store.get(snap, h.session, 0u64))? else { return Ok(take pending) }
     let Some(id) = s.active_run else { return Ok(take pending) }
-    let Some(r) = kept(store.get(snap, store.shape(h.runs), id))? else { return Ok(take pending) }
+    let Some(r) = kept(store.get(snap, h.runs, id))? else { return Ok(take pending) }
     if r.caller.issuer != caller.issuer || r.caller.subject != caller.subject {
         return Ok(take pending)
     }
-    let mut rows = kept(store.scan(snap, store.shape(h.waits), Included(first_wait(id)), Included(last_wait(id))))?
+    let mut rows = kept(store.scan(snap, h.waits, Included(first_wait(id)), Included(last_wait(id))))?
     while let Some((k, take w)) = kept(store.next(mut rows))? {
         if let Some(take row) = open_wait(k, take w) {
             list.push(mut pending, take row)

@@ -16,7 +16,7 @@ fn status(mut tx: store.Tx, h: Handles, take text: String) -> Result[(), Refused
 
 // Writes the status only when it changes, so a watcher sees no empty update.
 fn show_status(mut tx: store.Tx, h: Handles, take text: String) -> Result[(), Refused] {
-    if let Some(Status(current)) = kept(store.fetch(tx, store.shape(h.views), 0u64))? {
+    if let Some(Status(current)) = kept(store.fetch(tx, h.views, 0u64))? {
         if current == text {
             return Ok(())
         }
@@ -63,7 +63,7 @@ pub fn page_from(before: u64, lines: u64) -> u64 {
 
 // Register with query_as so the membership read is tracked for this Caller.
 pub fn window(tx: store.Tx, h: Handles, caller: store.Caller, take w: Window) -> Result[runner.Cover, Capacity] {
-    let t = store.shape(h.views)
+    let t = view h.views
     if reader_allowed(tx, h, caller)? {
         return visible_window(tx, h, w)
     }
@@ -72,7 +72,7 @@ pub fn window(tx: store.Tx, h: Handles, caller: store.Caller, take w: Window) ->
 
 pub fn reader_allowed(tx: store.Tx, h: Handles, caller: store.Caller) -> Result[bool, Capacity] {
     let key = reader_key(caller)?
-    Ok(match store.fetch(tx, store.shape(h.readers), take key) {
+    Ok(match store.fetch(tx, h.readers, take key) {
         Ok(Some(true)) => true,
         _ => false,
     })
@@ -81,7 +81,7 @@ pub fn reader_allowed(tx: store.Tx, h: Handles, caller: store.Caller) -> Result[
 // Finds cuts inside the requested page. The page starts at the newest cut,
 // then its cursor moves into the pinned predecessor on the next request.
 pub fn history_cuts(tx: store.Tx, h: Handles, caller: store.Caller, take range: (u64, u64)) -> Result[runner.Cover, Capacity] {
-    let t = store.shape(h.fork_cuts)
+    let t = view h.fork_cuts
     if reader_allowed(tx, h, caller)? {
         return runner.cover(t, Included(range.0), Excluded(range.1))
     }
@@ -89,12 +89,12 @@ pub fn history_cuts(tx: store.Tx, h: Handles, caller: store.Caller, take range: 
 }
 
 fn visible_window(tx: store.Tx, h: Handles, w: Window) -> Result[runner.Cover, Capacity] {
-    let t = store.shape(h.views)
+    let t = view h.views
     match w {
         Status => runner.cover(t, Included(0u64), Included(0u64)),
         Transcript => runner.cover(t, Unbounded, Unbounded),
         Tail(n) => {
-            let next = match store.fetch(tx, store.shape(h.session), 0u64) {
+            let next = match store.fetch(tx, h.session, 0u64) {
                 Ok(Some(s)) => s.next_pos + 1u64,
                 _ => 1u64
             }

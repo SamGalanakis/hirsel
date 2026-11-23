@@ -176,14 +176,14 @@ type Rerun = RanTo(Bytes, DataRows) | Halted(Stop) | RoomRefused
 // Section 7 step 3: the body on `base` under the recorded CallInfo, bounded as
 // `serve` bounds it. Nothing is committed; an application error keeps no
 // data writes (F2).
-fn rerun(db: Db, base: Roots, ci: CallInfo, plan: Plan, call: Recorded, body: scoped[view] fn(Recorded, mut Tx) -> Result[Bytes, Bytes]) -> Rerun {
+fn rerun(db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, plan: Plan, call: Recorded, body: scoped[view] fn(Recorded, mut Tx) -> Result[Bytes, Bytes]) -> Rerun {
     let reads: Log[Read] = log.new()
     let issued: Log[u64] = log.new()
     let caught = isolate(fn() -> Result[Result[Finished[Bytes, Bytes], Capacity], OutOfTime] {
         bound steps plan.s_e {
             let drafted = bound bytes plan.n_e {
                 let keep: Option[fn(Bytes) -> bool] = None
-                let staged = draft_body(db, base, ci, keep, reads, issued, scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] {
+                let staged = draft_body(db, registry, base, ci, keep, reads, issued, scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] {
                     body(call, mut tx)
                 })
                 match prepare_metered_pages(take staged) {
@@ -294,10 +294,10 @@ fn replay_source(db: Db, b: Branch, v: u64) -> Result[Result[ReplaySource, Unkno
 
 // RUNNER-SPEC §7: run on a private copy of the attempted base, under the
 // original CallInfo, and compare the committed reply and writes.
-fn replay_run(db: Db, source: ReplaySource, plan: Plan, failed: scoped fn(Stop) -> Bytes, body: scoped[view] fn(Recorded, mut Tx) -> Result[Bytes, Bytes]) -> Result[Verdict, Error] {
+fn replay_run(db: Db, registry: IndexRegistry, source: ReplaySource, plan: Plan, failed: scoped fn(Stop) -> Bytes, body: scoped[view] fn(Recorded, mut Tx) -> Result[Bytes, Bytes]) -> Result[Verdict, Error] {
     let call = view source.call
     let ci = CallInfo(id: CallId(store: db.store, branch: call.branch.id, version: call.base + 1), at: call.at, seed: call.seed)
-    let reran = rerun(db, source.base, ci, plan, call, body)
+    let reran = rerun(db, registry, source.base, ci, plan, call, body)
     let (take output, take writes) = match (call.settle, take reran) {
         (0, RanTo(take output, take writes)) => (take output, take writes),
         (1, Halted(stop)) => (failed(stop), new_data_rows()),
@@ -317,22 +317,33 @@ fn replay_run(db: Db, source: ReplaySource, plan: Plan, failed: scoped fn(Stop) 
 pub fn reexecute(db: Db, b: Branch, v: u64, plan: Plan, failed: scoped fn(Stop) -> Bytes, body: scoped[view] fn(Recorded, mut Tx) -> Result[Bytes, Bytes]) -> Result[Verdict, Error] waits {
     let selected = replay_source(db, b, v)?
     match take selected {
-        Ok(take source) => replay_run(db, source, plan, failed, body),
+        Ok(take source) => replay_run(db, db.indexes, source, plan, failed, body),
         Error(reason) => Ok(Unknown(reason)),
     }
 }
 
 // Select the plan and open fresh handles on the same historical schema the
 // re-execution will read. Preparation runs outside the recorded entry's bounds.
-pub fn reexecute_with[E](db: Db, b: Branch, v: u64, store_error: scoped fn(take Error) -> E, failed: scoped fn(Stop) -> Bytes, prepare: scoped fn(Recorded, Schema, scoped fn(Plan, scoped[view] fn(Recorded, mut Tx) -> Result[Bytes, Bytes]) -> Result[Verdict, Error]) -> Result[Verdict, E]) -> Result[Verdict, E] waits {
+pub fn reexecute_with[E](db: Db, b: Branch, v: u64, store_error: scoped fn(take Error) -> E, failed: scoped fn(Stop) -> Bytes,
+    prepare: scoped fn(Recorded, take Schema, scoped fn(take Schema, Plan, scoped[view] fn(Recorded, mut Tx) -> Result[Bytes, Bytes]) -> Result[Verdict, Error]) -> Result[Verdict, E]) -> Result[Verdict, E] waits {
     let loaded = replay_source(db, b, v) ?=> |e| store_error(take e)
     let source = match take loaded {
         Ok(take source) => take source,
         Error(reason) => return Ok(Unknown(reason)),
     }
-    let schema = Schema(store: db.store, catalog: share_page_tree(source.base.catalog))
-    let rerun_selected = scoped fn(plan: Plan, body: scoped[view] fn(Recorded, mut Tx) -> Result[Bytes, Bytes]) -> Result[Verdict, Error] {
-        replay_run(db, source, plan, failed, body)
+    let schema = Schema(store: db.store, catalog: share_page_tree(source.base.catalog), bindings: Some(log.new()))
+    let rerun_selected = scoped fn(take selected: Schema, plan: Plan, body: scoped[view] fn(Recorded, mut Tx) -> Result[Bytes, Bytes]) -> Result[Verdict, Error] {
+        if !same(selected.store, db.store) || std.page.stamp(std.page.image_of(selected.catalog.root)) != std.page.stamp(std.page.image_of(source.base.catalog.root)) {
+            return Error(Foreign)
+        }
+        let Schema(bindings: take bindings, ..) = take selected
+        let Some(take registration) = take bindings else { return Error(Foreign) }
+        let declared = log.finish(take registration)
+        let mut registry = empty_index_registry()
+        for take binding in take declared {
+            register_index(mut registry, take binding)
+        }
+        replay_run(db, registry, source, plan, failed, body)
     }
-    prepare(source.call, schema, rerun_selected)
+    prepare(source.call, take schema, rerun_selected)
 }

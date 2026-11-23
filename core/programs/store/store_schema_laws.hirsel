@@ -41,7 +41,7 @@ fn typed_error_tail_case(d: Dir, c: Clock, r: Random, tasks: Tasks, bounded: boo
     }
     let rows = if committed {
         let s = snapshot(db)
-        let sh = shape(t)
+        let sh = view t
         (typed_value(s, sh, 1), typed_value(s, sh, 2), typed_value(s, sh, 3), typed_value(s, sh, 4))
     } else {
         (9, 9, 9, 9)
@@ -78,7 +78,7 @@ pub fn law_typed_indexes(c: Clock) -> bool waits {
         }
     }
     let frozen = snapshot(db)
-    let sh = shape(t)
+    let sh = view t
     result.unwrap(create_index(mut db, t, "bucket", code.describe(bucket), std.codec.key_u64()))
     let stale = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
         put(mut tx, t, 1, 99)
@@ -87,9 +87,9 @@ pub fn law_typed_indexes(c: Clock) -> bool waits {
         Ok(Aborted(Undone(value: Stale(_), ticket: None))) => {},
         _ => return false
     }
-    let ix = result.unwrap(index(db, mut t, "bucket", code.describe(bucket), std.codec.key_u64()))
+    let ix = result.unwrap(index(mut db, t, "bucket", code.describe(bucket), std.codec.key_u64()))
     result.unwrap(create_index(mut db, t, "quotient", code.describe(quotient), std.codec.key_u64()))
-    let _ = result.unwrap(index(db, mut t, "bucket", code.describe(bucket), std.codec.key_u64()))
+    let _ = result.unwrap(index(mut db, t, "bucket", code.describe(bucket), std.codec.key_u64()))
     let incomplete = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
         put(mut tx, t, 1, 99)
     })
@@ -97,7 +97,7 @@ pub fn law_typed_indexes(c: Clock) -> bool waits {
         Ok(Aborted(Undone(value: Stale(_), ticket: None))) => {},
         _ => return false
     }
-    let _ = result.unwrap(index(db, mut t, "quotient", code.describe(quotient), std.codec.key_u64()))
+    let _ = result.unwrap(index(mut db, t, "quotient", code.describe(quotient), std.codec.key_u64()))
     if !typed_put(mut db, t, 1, 99) {
         return false
     }
@@ -119,7 +119,7 @@ pub fn law_typed_indexes(c: Clock) -> bool waits {
         return false
     }
     let reads = run(mut db, None, fn(mut tx: Tx) -> Result[u64, Error] {
-        let own = option.unwrap(fetch(tx, shape(t), 1)?)
+        let own = option.unwrap(fetch(tx, t, 1)?)
         let mut cursor = lookup(tx, ix, Included(2), Included(2))?
         let mut total = own
         while let Some((_, v)) = next_indexed(mut cursor)? {
@@ -222,7 +222,7 @@ fn schema_zero_bytes(balance: u64) -> Bytes {
     take raw
 }
 
-fn schema_snapshot_bytes[V](s: Snapshot, sh: Shape[u64, V], expected: Bytes) -> Result[bool, Error] {
+fn schema_snapshot_bytes[V](s: Snapshot, sh: Table[u64, V], expected: Bytes) -> Result[bool, Error] {
     let point = match get_bytes(s, sh, 1)? {
         Some(raw) => raw == expected,
         None => false,
@@ -265,7 +265,7 @@ pub fn law_schema_numbers(c: Clock) -> bool waits {
     if current.readers.current != 1 || version(snapshot(db)) != before_append + 1 {
         return false
     }
-    let sh = shape(current)
+    let sh = view current
     let before = option.unwrap(result.unwrap(get(held, sh, 1)))
     if before.balance != 10 || before.bonus != 7 {
         return false
@@ -273,7 +273,7 @@ pub fn law_schema_numbers(c: Clock) -> bool waits {
     // L40: the raw paths retain the original little-endian schema tag and balance.
     let expected = schema_zero_bytes(10)
     let head = snapshot(db)
-    let old_shape = shape(old)
+    let old_shape = view old
     if !result.unwrap(schema_snapshot_bytes(held, old_shape, expected)) || !result.unwrap(schema_snapshot_bytes(held, sh, expected)) || !result.unwrap(schema_snapshot_bytes(head, sh, expected)) || !result.unwrap(schema_snapshot_bytes(head, old_shape, expected)) {
         return false
     }
@@ -377,7 +377,7 @@ pub fn law_published_value(c: Clock) -> bool waits {
         _ => return false
     }
     let now = snapshot(db)
-    let sh = shape(current)
+    let sh = view current
     let acc = result.unwrap(span_changes(now, result.unwrap(prefix(sh.id)), result.unwrap(prefix(sh.id + 1))))
     if list.len(acc) != 2 || result.unwrap(published_value(sh, acc[0])) != Some(two_words(10, 7)) || result.unwrap(published_value(sh, acc[1])) != Some(two_words(20, 9)) {
         return false
@@ -529,9 +529,9 @@ pub fn law_migrate(c: Clock) -> bool waits {
     }
     result.unwrap(create_table(mut db, take declared))
     let mut t = result.unwrap(table(mut db, "t", std.codec.key_u64(), old_codec()))
-    let ix_a = result.unwrap(index(db, mut t, "by_a", code.describe(old_balance), std.codec.key_u64()))
+    let ix_a = result.unwrap(index(mut db, t, "by_a", code.describe(old_balance), std.codec.key_u64()))
     let mut writer = result.unwrap(table(mut db, "t", std.codec.key_u64(), old_codec()))
-    let _ = result.unwrap(index(db, mut writer, "by_a", code.describe(old_balance), std.codec.key_u64()))
+    let _ = result.unwrap(index(mut db, writer, "by_a", code.describe(old_balance), std.codec.key_u64()))
     let first = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
         put(mut tx, t, 1, OldAccount(balance: 7))?
         put(mut tx, t, 2, OldAccount(balance: 9))
@@ -542,7 +542,7 @@ pub fn law_migrate(c: Clock) -> bool waits {
     }
     let before = snapshot(db)
     let _ = result.unwrap(pin(mut db, "before", before))
-    let old_shape = shape(t)
+    let old_shape: Table[u64, OldAccount] = clone(t)
     if version(before) != 2 || t.id != 1 || ix_a.id != 2 {
         return false
     }
@@ -555,7 +555,7 @@ pub fn law_migrate(c: Clock) -> bool waits {
     if version(snapshot(db)) != 3 || nt.id != 3 {
         return false
     }
-    let ix_b = result.unwrap(index(db, mut nt, "by_b", code.describe(new_bonus), std.codec.key_u64()))
+    let ix_b = result.unwrap(index(mut db, nt, "by_b", code.describe(new_bonus), std.codec.key_u64()))
     let meta = result.unwrap(catalog_entry(db, nt.catalog_key))
     if ix_b.id != 4 || list.len(meta.schemas) != 1 || meta.schemas[0].number != 1 || meta.next != 2 {
         return false
@@ -593,7 +593,7 @@ pub fn law_migrate(c: Clock) -> bool waits {
         },
         None => return false
     }
-    match get(before, shape(nt), 1) {
+    match get(before, nt, 1) {
         Error(Stale(id)) => if id != 3 {
             return false
         },
@@ -603,7 +603,7 @@ pub fn law_migrate(c: Clock) -> bool waits {
         Some(x) => x,
         None => return false
     }
-    match get(held, shape(nt), 1) {
+    match get(held, nt, 1) {
         Error(Stale(_)) => {},
         _ => return false
     }
@@ -664,8 +664,8 @@ pub fn law_migrate(c: Clock) -> bool waits {
         return false
     }
     let mut w = result.unwrap(table(mut db, "w", std.codec.key_u64(), old_codec()))
-    let wa = result.unwrap(index(db, mut w, "by_a", code.describe(old_balance), std.codec.key_u64()))
-    let wt = result.unwrap(index(db, mut w, "by_twice", code.describe(twice_balance), std.codec.key_u64()))
+    let wa = result.unwrap(index(mut db, w, "by_a", code.describe(old_balance), std.codec.key_u64()))
+    let wt = result.unwrap(index(mut db, w, "by_twice", code.describe(twice_balance), std.codec.key_u64()))
     let put_w = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
         put(mut tx, w, 1, OldAccount(balance: 3))
     }))
@@ -768,7 +768,7 @@ fn check_index_put_refusal(mut db: Db, t: Table[u64, u64], value: u64, frame_lim
         let unchanged = write_state(tx) == prior
         tx.extra_bytes = previous_extra
         tx.frame_bytes = previous_frame
-        Ok(rejected && unchanged && fetch(tx, shape(t), 1)? == Some(99u64))
+        Ok(rejected && unchanged && fetch(tx, t, 1)? == Some(99u64))
     }))
     match take out {
         Committed(done) => done.value && db.next_node == watermark,
@@ -795,15 +795,14 @@ pub fn law_index_refusal(c: Clock) -> bool waits {
     result.unwrap(create_index(mut db, t, "a", code.describe(bucket), std.codec.key_u64()))
     result.unwrap(create_index(mut db, t, "b", code.describe(quotient), std.codec.key_u64()))
     result.unwrap(create_index(mut db, t, "c", code.describe(reject_999), std.codec.key_u64()))
-    let a = result.unwrap(index(db, mut t, "a", code.describe(bucket), std.codec.key_u64()))
-    let b = result.unwrap(index(db, mut t, "b", code.describe(quotient), std.codec.key_u64()))
-    let _ = result.unwrap(index(db, mut t, "c", code.describe(reject_999), std.codec.key_u64()))
+    let a = result.unwrap(index(mut db, t, "a", code.describe(bucket), std.codec.key_u64()))
+    let b = result.unwrap(index(mut db, t, "b", code.describe(quotient), std.codec.key_u64()))
+    let _ = result.unwrap(index(mut db, t, "c", code.describe(reject_999), std.codec.key_u64()))
     if !check_index_put_refusal(mut db, t, 999, false) || !check_index_put_refusal(mut db, t, 1999, false) || !check_index_put_refusal(mut db, t, 100, true) {
         return false
     }
-    let last_id = t.indexes[2].id
-    let extract = result.unwrap(erase(code.describe(reject_old_index_value), std.codec.key_u64()))
-    t.indexes[2] = IndexOf(id: last_id, extract: take extract)
+    let (_, take catalog_index) = result.unwrap(read_catalog_index(db.store, db.heads[0].roots.catalog, t, "c", code.describe(reject_999), std.codec.key_u64()))
+    register_index(mut db.indexes, bind_index(t, catalog_index, code.describe(reject_old_index_value), std.codec.key_u64()))
     if !check_index_put_refusal(mut db, t, 100, false) {
         return false
     }
@@ -856,7 +855,7 @@ pub fn law_put_validation(c: Clock) -> bool waits {
     result.unwrap(create_table(mut db, spec("refusing", std.codec.key_u64(), refusing)))
     let mut t = result.unwrap(table(mut db, "refusing", std.codec.key_u64(), refusing))
     result.unwrap(create_index(mut db, t, "a", code.describe(bucket), std.codec.key_u64()))
-    let _ = result.unwrap(index(db, mut t, "a", code.describe(bucket), std.codec.key_u64()))
+    let _ = result.unwrap(index(mut db, t, "a", code.describe(bucket), std.codec.key_u64()))
     let byte_codec = std.codec.of_bytes()
     result.unwrap(create_table(mut db, spec("bytes", std.codec.key_bytes(), byte_codec)))
     let byte_table = result.unwrap(table(mut db, "bytes", std.codec.key_bytes(), byte_codec))
@@ -930,8 +929,8 @@ fn typed_foreign_at(c: Clock, other_id: StoreId) -> bool waits {
     result.unwrap(create_table(mut a, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
     let mut t = result.unwrap(table(mut a, "rows", std.codec.key_u64(), std.codec.of_u64()))
     result.unwrap(create_index(mut a, t, "i", code.describe(bucket), std.codec.key_u64()))
-    let ix = result.unwrap(index(a, mut t, "i", code.describe(bucket), std.codec.key_u64()))
-    let sh = shape(t)
+    let ix = result.unwrap(index(mut a, t, "i", code.describe(bucket), std.codec.key_u64()))
+    let sh = view t
     let other = snapshot(b)
     if !is_foreign(get(other, sh, 1)) || !is_foreign(scan(other, sh, Unbounded, Unbounded)) || !is_foreign(find(other, ix, Unbounded, Unbounded)) {
         return false
@@ -939,7 +938,7 @@ fn typed_foreign_at(c: Clock, other_id: StoreId) -> bool waits {
     if !is_foreign(create_index(mut b, t, "i", code.describe(bucket), std.codec.key_u64())) {
         return false
     }
-    if !is_foreign(index(b, mut t, "i", code.describe(bucket), std.codec.key_u64())) {
+    if !is_foreign(index(mut b, t, "i", code.describe(bucket), std.codec.key_u64())) {
         return false
     }
     let commit_ticket = Ticket(store: a.store, open: 0, mark: Journal(0, 0, 0))
@@ -951,12 +950,12 @@ fn typed_foreign_at(c: Clock, other_id: StoreId) -> bool waits {
         return false
     }
     let out = run(mut b, None, fn(mut tx: Tx) -> Result[(), bool] {
-        let ok = is_foreign(fetch(tx, shape(t), 1)) && is_foreign(put(mut tx, t, 1, 2)) && is_foreign(delete(mut tx, t, 1))
+        let ok = is_foreign(fetch(tx, t, 1)) && is_foreign(put(mut tx, t, 1, 2)) && is_foreign(delete(mut tx, t, 1))
         let lookup_foreign = match lookup(tx, ix, Unbounded, Unbounded) {
             Error(Foreign) => true,
             _ => false
         }
-        let range_foreign = match range(tx, shape(t), Unbounded, Unbounded) {
+        let range_foreign = match range(tx, t, Unbounded, Unbounded) {
             Error(Foreign) => true,
             _ => false
         }

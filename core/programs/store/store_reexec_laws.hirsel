@@ -6,7 +6,7 @@ fn info_entry(mut tx: Tx, t: Table[u64, u64], forced: Option[CallInfo], extra: b
         Some(given) => given,
         None => info(mut tx),
     }
-    let before = match result.unwrap(fetch(tx, shape(t), 9)) {
+    let before = match result.unwrap(fetch(tx, t, 9)) {
         Some(n) => n,
         None => 0u64,
     }
@@ -72,7 +72,7 @@ fn reexecute_kept(mut db: Db, t: Table[u64, u64], plan: Plan) -> bool waits {
         return false
     }
     result.unwrap(durable(mut db, receipt.ticket))
-    if result.unwrap(get(snapshot(db), shape(t), 9)) != Some(8u64) {
+    if result.unwrap(get(snapshot(db), t, 9)) != Some(8u64) {
         return false
     }
     let v = version(snapshot(db))
@@ -100,7 +100,7 @@ fn reexecute_fault_bytes(stop: Stop) -> Bytes {
 }
 
 fn reexecute_fault_entry(mut tx: Tx, t: Table[u64, u64]) -> Result[Bytes, Bytes] {
-    if result.unwrap(fetch(tx, shape(t), 9)) == Some(8u64) {
+    if result.unwrap(fetch(tx, t, 9)) == Some(8u64) {
         result.unwrap(put(mut tx, t, 10, 1))
         fail("re-execution law: raised from the attempted base")
     }
@@ -119,7 +119,7 @@ fn reexecute_failed(mut db: Db, t: Table[u64, u64], plan: Plan) -> bool waits {
         return false
     }
     let attempted = pending_run.attempted
-    if result.unwrap(get(snapshot(db), shape(t), 10)) != None {
+    if result.unwrap(get(snapshot(db), t, 10)) != None {
         return false
     }
     if !set_row(mut db, t, 9, 10) || !set_row(mut db, t, 9, 11) {

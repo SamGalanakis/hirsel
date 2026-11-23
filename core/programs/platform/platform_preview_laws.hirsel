@@ -106,7 +106,7 @@ fn deploy_preview(c: Clock, rnd: Random) -> Result[(), ()] waits {
     expect(is_installed(status_of(mut recovered, publication)), "L54: restart lost the installed result")
     let _ = begin_with(mut recovered, publication, submitted)
     expect(admits(recovered) == 0u64 && committed_once(recovered), "L54: retry after install started another deploy")
-    let shown: operator.Preview = match store.get(store.snapshot(recovered.h.db), store.shape(recovered.h.t.deploys), "g") {
+    let shown: operator.Preview = match store.get(store.snapshot(recovered.h.db), recovered.h.t.deploys, "g") {
         Ok(Some(row)) => clone(row.preview),
         _ => operator.no_preview(),
     }

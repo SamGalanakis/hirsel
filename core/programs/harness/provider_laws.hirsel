@@ -455,7 +455,7 @@ fn retry_advance(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, tak
 }
 
 fn retry_effect(db: store.Db, h: harness.Handles, key: harness.EffectKey) -> harness.Effect {
-    option.unwrap(result.unwrap(store.get(store.snapshot(db), store.shape(h.effects), key)))
+    option.unwrap(result.unwrap(store.get(store.snapshot(db), h.effects, key)))
 }
 
 fn retry_pending(db: store.Db, h: harness.Handles, id: runner.triggers.Id) -> Option[runner.triggers.Pending] {
@@ -473,7 +473,7 @@ fn file_fault(mut db: store.Db, h: harness.Handles, a: harness.Agent[Clock], w: 
             }
         }
         let Body(attempt) = started else { return Error(Missing("started trigger")) }
-        let Some(take saved) = store.fetch(tx, store.shape(h.effects), key)? else { return Error(Missing("model effect")) }
+        let Some(take saved) = store.fetch(tx, h.effects, key)? else { return Error(Missing("model effect")) }
         let mut e = take saved
         e.phase = Dispatched(runner.triggers.number(attempt))
         e.dispatches += 1u64
@@ -510,7 +510,7 @@ fn law_typed_retry(tasks: Tasks, random: Random, seed: u64) -> bool waits {
     let mut hand = take controller
     let mut db = store.memory(time, random, runner.triggers.law_options())
     result.unwrap(store.run_migration(mut db, tasks, code.describe(harness.migrate)))
-    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    let h = result.unwrap(store.with_schema(mut db, code.describe(harness.handles)))
     let w = result.unwrap(harness.wiring(code.describe(retry_advance), code.describe(retry_entry)))
     let mut a = harness.agent("retry", "m", code.describe(retry_model))
     a.charge = BoundedDuplicate(5u64)
@@ -581,7 +581,7 @@ fn test_harness_fixes(tasks: Tasks, random: Random, seed_grant: Env) -> Result[(
 }
 
 fn read_session(db: store.Db, h: harness.Handles) -> harness.Session {
-    option.unwrap(result.unwrap(store.get(store.snapshot(db), store.shape(h.session), 0u64)))
+    option.unwrap(result.unwrap(store.get(store.snapshot(db), h.session, 0u64)))
 }
 
 fn pending_id(db: store.Db, h: harness.Handles, wanted: runner.triggers.Id) -> runner.triggers.Pending {
@@ -642,7 +642,7 @@ fn law_warm_bounds(tasks: Tasks, random: Random, seed: Option[u64]) -> Result[()
     let mut hand = take controller
     let mut db = store.memory(time, random, runner.triggers.law_options())
     result.unwrap(store.run_migration(mut db, tasks, code.describe(harness.migrate)))
-    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    let h = result.unwrap(store.with_schema(mut db, code.describe(harness.handles)))
     let w = result.unwrap(harness.wiring(code.describe(retry_advance), code.describe(retry_entry)))
     let opened = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), harness.Refused] {
         harness.open_session(mut tx, h, "m", All)
@@ -849,7 +849,7 @@ fn hedge_submit(mut tx: store.Tx, h: harness.Handles, i: u64, enabled: bool) -> 
 fn seed_hedge(dir: Dir, clock: Clock, random: Random, tasks: Tasks, enabled: bool) waits {
     let mut db = result.unwrap(store.open(tasks, dir, clock, random, runner.triggers.law_options()))
     result.unwrap(store.run_migration(mut db, tasks, code.describe(harness.migrate)))
-    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    let h = result.unwrap(store.with_schema(mut db, code.describe(harness.handles)))
     let setup = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), harness.Refused] {
         harness.open_session(mut tx, h, "m", All)?
         let count = if enabled { 10u64 } else { 1u64 }
@@ -894,7 +894,7 @@ fn law_hedge_charge(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net
     let _ = take world
     let Ok(_) = ended else { return Error(20u64) }
     let db = result.unwrap(store.open(tasks, dir, clock, random, runner.triggers.law_options()))
-    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    let h = result.unwrap(harness.handles(store.snapshot_schema(store.snapshot(db))))
     let expected = if enabled { 10u64 } else { 1u64 }
     for id in 0u64 .. expected {
         let key = harness.EffectKey(run: id, round: 0u64, kind: harness.MODEL, ordinal: 0u64)
@@ -915,7 +915,7 @@ fn law_hedge_charge(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net
             fail(take message)
         }
         if answer.text != text || e.dispatches != dispatches { return Error(23u64) }
-        let run = option.unwrap(result.unwrap(store.get(store.snapshot(db), store.shape(h.runs), id)))
+        let run = option.unwrap(result.unwrap(store.get(store.snapshot(db), h.runs, id)))
         if run.spend.reserved != 0u64 || run.spend.known != 2u64 || run.spend.unresolved != (dispatches - 1u64) * 2u64 {
             return Error(24u64)
         }

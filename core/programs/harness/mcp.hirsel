@@ -150,7 +150,7 @@ pub fn defer(mut next: Listing, name: String) -> bool {
 pub fn replace(mut tx: store.Tx, table: store.Table[String, Remote], next: Listing) -> Result[(), store.Error] {
     let mut removed: List[String] = list.new()
     {
-        let mut old = store.range(tx, store.shape(table), Unbounded, Unbounded)?
+        let mut old = store.range(tx, table, Unbounded, Unbounded)?
         while let Some((take key, remote)) = store.next_range(mut old)? {
             if remote.server == next.server && !map.contains(next.rows, key) {
                 list.push(mut removed, take key)
@@ -161,7 +161,7 @@ pub fn replace(mut tx: store.Tx, table: store.Table[String, Remote], next: Listi
         let _ = store.delete(mut tx, table, key)?
     }
     for (key, remote) in next.rows {
-        let prior = store.fetch(tx, store.shape(table), key)?
+        let prior = store.fetch(tx, table, key)?
         if let Some(row) = prior {
             if row.fingerprint == remote.fingerprint && row.deferred == remote.deferred {
                 continue

@@ -58,7 +58,7 @@ fn seed_mcp_blob(dir: Dir, clock: Clock, random: Random, tasks: Tasks, caller: s
     let mut db = result.unwrap(store.open(tasks, dir, clock, random, runner.triggers.law_options()))
     result.unwrap(store.run_migration(mut db, tasks, code.describe(harness.migrate)))
     update_catalog(mut db, OLD_SCHEMA)
-    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    let h = result.unwrap(store.with_schema(mut db, code.describe(harness.handles)))
     let w = result.unwrap(mcp_blob_wiring())
     let committed = result.unwrap(store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), harness.Refused] {
         harness.set_reader(mut tx, h, caller, true)?
@@ -192,9 +192,9 @@ fn admission_catalog(mut db: store.Db, h: harness.Handles) waits {
 fn admission_answer(mut db: store.Db, h: harness.Handles, a: harness.Agent[Grants], round: u64, hidden: Option[String]) waits {
     let saved = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
         let key = harness.EffectKey(run: 0u64, round: round, kind: harness.MODEL, ordinal: 0u64)
-        let mut e = option.unwrap(store.fetch(tx, store.shape(h.effects), key)?)
-        let mut s = option.unwrap(store.fetch(tx, store.shape(h.session), 0u64)?)
-        let mut r = option.unwrap(store.fetch(tx, store.shape(h.runs), 0u64)?)
+        let mut e = option.unwrap(store.fetch(tx, h.effects, key)?)
+        let mut s = option.unwrap(store.fetch(tx, h.session, 0u64)?)
+        let mut r = option.unwrap(store.fetch(tx, h.runs, 0u64)?)
         let mut calls: List[harness.Call] = list.new()
         list.push(mut calls, harness.Call(id: "search", name: "tool_search", args: Inline(string.into_bytes("{\"query\":\"audit\"}"))))
         if let Some(name) = hidden {
@@ -215,7 +215,7 @@ fn admission_answer(mut db: store.Db, h: harness.Handles, a: harness.Agent[Grant
 }
 
 fn admission_entry(snap: store.Snapshot, h: harness.Handles, pos: u64) -> harness.Entry {
-    option.unwrap(result.unwrap(store.get(snap, store.shape(h.entries), pos)))
+    option.unwrap(result.unwrap(store.get(snap, h.entries, pos)))
 }
 
 fn admission_bytes(entry: harness.Entry) -> Bytes {
@@ -230,7 +230,7 @@ fn test_wave2_catalog_admission_prefix(parent: Dir, clock: Clock, random: Random
     let mut name = string.with_capacity(32u64)
     let dir = result.unwrap(host.mkdtemp(parent, mut name))
     let mut db = fresh(dir, clock, random, tasks)
-    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    let h = result.unwrap(store.with_schema(mut db, code.describe(harness.handles)))
     let mut a = sectioned(false)
     a.mcp_peer = Some(code.describe(unused_peer))
     admission_catalog(mut db, h)
@@ -241,7 +241,7 @@ fn test_wave2_catalog_admission_prefix(parent: Dir, clock: Clock, random: Random
     if list.len(first.tools) != 3u64 || first.tools[1u64].name != "tool_search" || first.tools[2u64].name != echo { return Error(1u64) }
     let before = store.snapshot(db)
     let key = harness.EffectKey(run: 0u64, round: 0u64, kind: harness.MODEL, ordinal: 0u64)
-    let old = option.unwrap(result.unwrap(store.get(before, store.shape(h.effects), key)))
+    let old = option.unwrap(result.unwrap(store.get(before, h.effects, key)))
     let provider_model = provider.Model(dialect: OpenAi, name: "scripted", max_tokens: 128u64, cache_control: Off)
     let body = result.unwrap(provider.body(provider_model, result.unwrap(harness.request(before, h, key, old))))
 
@@ -264,13 +264,13 @@ fn test_wave2_catalog_admission_prefix(parent: Dir, clock: Clock, random: Random
     let Some(defs) = view patch.tools else { return Error(8u64) }
     if patch.baseline || list.len(patch.changes) != 0u64 || list.len(defs) != 5u64 || defs[3u64].name != alpha || defs[4u64].name != beta { return Error(9u64) }
     let next_key = harness.EffectKey(run: 0u64, round: 1u64, kind: harness.MODEL, ordinal: 0u64)
-    let next = option.unwrap(result.unwrap(store.get(after, store.shape(h.effects), next_key)))
+    let next = option.unwrap(result.unwrap(store.get(after, h.effects, next_key)))
     let request = result.unwrap(harness.request(after, h, next_key, next))
     if next.cutoff.tail_pos != 5u64 || next.cutoff.tools_pos != Some(5u64) || request.system != first.system { return Error(10u64) }
 
     admission_answer(mut db, h, a, 1u64, None)
     let again = store.snapshot(db)
-    let s = option.unwrap(result.unwrap(store.get(again, store.shape(h.session), 0u64)))
+    let s = option.unwrap(result.unwrap(store.get(again, h.session, 0u64)))
     if s.admitted != expected || s.next_pos != 8u64 || s.active_tools_pos != Some(5u64) { return Error(11u64) }
     result.unwrap(store.close(take db))
     result.unwrap(std.dir.remove_all(parent, name))
@@ -398,15 +398,15 @@ fn test_wave2_catalog_reconcile_outside_crash(parent: Dir, clock: Clock, random:
     let dispatched = tool_ran(services)
     let db = result.unwrap(store.open(tasks, reopened, clock, random, runner.triggers.law_options()))
     let snap = store.snapshot(db)
-    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
-    let s = option.unwrap(result.unwrap(store.get(snap, store.shape(h.session), 0u64)))
-    let run = option.unwrap(result.unwrap(store.get(snap, store.shape(h.runs), 0u64)))
+    let h = result.unwrap(harness.handles(store.snapshot_schema(store.snapshot(db))))
+    let s = option.unwrap(result.unwrap(store.get(snap, h.session, 0u64)))
+    let run = option.unwrap(result.unwrap(store.get(snap, h.runs, 0u64)))
     let finished = match run.phase { Finished(Answered) => true, _ => false }
     let mut verified = 0u64
     for ordinal in 0u64 .. 3u64 {
         let key = harness.EffectKey(run: 0u64, round: 0u64, kind: harness.TOOL, ordinal: ordinal)
-        let row = option.unwrap(result.unwrap(store.get(snap, store.shape(h.effects), key)))
-        let entry = result.unwrap(store.get(snap, store.shape(h.entries), 3u64 + ordinal))
+        let row = option.unwrap(result.unwrap(store.get(snap, h.effects, key)))
+        let entry = result.unwrap(store.get(snap, h.entries, 3u64 + ordinal))
         let matched = match (ordinal, view row.phase, take entry) {
             (0u64, Settled(Tool(Returned(Inline(a)))), Some(ToolResult(id, Returned(Inline(b)), _))) => id == "c1" && a == string.into_bytes("recovered") && a == b,
             (1u64, Settled(Tool(Failed(a))), Some(ToolResult(id, Failed(b), _))) => id == "c2" && a == "not dispatched" && a == b,

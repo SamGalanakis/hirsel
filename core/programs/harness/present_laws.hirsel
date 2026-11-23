@@ -25,7 +25,7 @@ fn presenting(q: bool) -> harness.Agent[Grants] {
 // closed and reopened: a crash at that boundary.
 fn crash_kick(take image: store.Db, dir: Dir, clock: Clock, random: Random, tasks: Tasks, a: harness.Agent[Grants]) -> store.Db waits {
     let mut db = take image
-    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    let h = result.unwrap(store.with_schema(mut db, code.describe(harness.handles)))
     let w = result.unwrap(wired())
     let crashed = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), harness.Refused] {
         harness.advance(mut tx, h, a, w, Kick)?

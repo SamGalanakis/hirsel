@@ -111,7 +111,7 @@ fn disk_test_scrub_misdirected(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
         return Error(MigrationFault)
     }
     // Detection only: resident pages still answer.
-    if get(snapshot(db), shape(t), 1999)? != Some(1999u64) {
+    if get(snapshot(db), t, 1999)? != Some(1999u64) {
         return Error(MigrationFault)
     }
     close(take db)

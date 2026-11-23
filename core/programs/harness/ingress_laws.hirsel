@@ -3,7 +3,7 @@
 // ---- session ingress ----
 
 fn lodging(mut db: store.Db, take item: harness.Item, take key: String) -> harness.Disposition waits {
-    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    let h = result.unwrap(store.with_schema(mut db, code.describe(harness.handles)))
     let w = result.unwrap(wired())
     let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[harness.Disposition, harness.Refused] {
         match item {
@@ -15,16 +15,16 @@ fn lodging(mut db: store.Db, take item: harness.Item, take key: String) -> harne
 }
 
 fn disposition(db: store.Db, take key: String) -> Option[harness.Disposition] {
-    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    let h = result.unwrap(harness.handles(store.snapshot_schema(store.snapshot(db))))
     let k = harness.InboxKey(caller: alice(), client_key: take key)
-    match result.unwrap(store.get(store.snapshot(db), store.shape(h.inbox), k)) { Some(r) => Some(clone(r.disposition)), None => None }
+    match result.unwrap(store.get(store.snapshot(db), h.inbox, k)) { Some(r) => Some(clone(r.disposition)), None => None }
 }
 
 fn asked_at(db: store.Db, run: u64, round: u64) -> harness.Request {
-    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    let h = result.unwrap(harness.handles(store.snapshot_schema(store.snapshot(db))))
     let snap = store.snapshot(db)
     let key = harness.EffectKey(run: run, round: round, kind: harness.MODEL, ordinal: 0u64)
-    let Some(e) = result.unwrap(store.get(snap, store.shape(h.effects), key)) else { fail("asked_at: no model effect") }
+    let Some(e) = result.unwrap(store.get(snap, h.effects, key)) else { fail("asked_at: no model effect") }
     result.unwrap(harness.request(snap, h, key, e))
 }
 
@@ -45,7 +45,7 @@ pub fn law_ingress_orders_at_boundaries(parent: Dir, clock: Clock, random: Rando
     let dir = result.unwrap(host.mkdtemp(parent, mut name))
     let mut db = result.unwrap(store.open(tasks, dir, clock, random, runner.triggers.law_options()))
     result.unwrap(store.run_migration(mut db, tasks, code.describe(harness.migrate)))
-    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    let h = result.unwrap(store.with_schema(mut db, code.describe(harness.handles)))
     let opened = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), harness.Refused] { harness.open_session(mut tx, h, "scripted", All) })
     match take opened { Ok(Committed(_)) => (), _ => fail("ingress: open did not commit") }
     let mut bad = 0u64

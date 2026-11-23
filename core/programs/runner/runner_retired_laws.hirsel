@@ -813,7 +813,7 @@ fn new_schema(mut s: std.codec.Schema, dictionary: std.codec.Codec[New]) -> Resu
     Ok(())
 }
 
-type Ah: send { t: store.Shape[u64, New] }
+type Ah: send { t: store.Table[u64, New] }
 
 fn accounts_q(tx: store.Tx, h: Ah, take _arg: u32) -> Result[Cover, Capacity] {
     cover(h.t, Included(1u64), Included(2u64))
@@ -876,7 +876,7 @@ pub fn law_rows_normalized(c: Clock, r: Random) -> bool waits {
         _ => return false,
     }
     let current = result.unwrap(store.table(mut db, "accounts", std.codec.key_u64(), nc))
-    let h = Ah(t: store.shape(current))
+    let h = Ah(t: clone(current))
     let reg = match placed(code.describe(accounts_place), 1048576u64) {
         Ok(take x) => take x,
         Error(_) => return false,
@@ -928,7 +928,7 @@ fn faulting_projection(c: Clock, r: Random, balance: u64) -> bool waits {
         store.put(mut tx, old, 1u64, Old(balance: balance))
     }))
     let current = result.unwrap(store.table(mut db, "accounts", std.codec.key_u64(), nc))
-    let h = Ah(t: store.shape(current))
+    let h = Ah(t: clone(current))
     let reg = result.unwrap(placed(code.describe(projection_place), 1048576u64))
     let ca: std.codec.Codec[u32] = std.codec.of()
     let result_schema = result.unwrap(query_result_schema(std.codec.key_u64(), nc))

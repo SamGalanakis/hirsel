@@ -941,7 +941,7 @@ fn describe_registered[G: send, H: send](launch: LaunchEnv, take r: Registry[G, 
 
 fn current_description(db: store.Db) -> Result[Option[Bytes], store.Error] {
     match store.system_table(db, "hirsel.runner.activation", std.codec.key_u8(), std.codec.of_bytes()) {
-        Ok(take table) => store.get(store.snapshot(db), store.shape(table), 0u8),
+        Ok(take table) => store.get(store.snapshot(db), table, 0u8),
         Error(Missing(_)) => Ok(None),
         Error(take problem) => Error(take problem),
     }
@@ -950,7 +950,7 @@ fn current_description(db: store.Db) -> Result[Option[Bytes], store.Error] {
 fn activation_window(db: store.Db) -> Result[(u64, u64), store.Error] {
     let codec: std.codec.Codec[ReleaseRecord] = std.codec.of()
     let table = store.system_table(db, "hirsel.runner.releases", std.codec.key_u64(), codec)?
-    let mut rows = store.scan(store.snapshot(db), store.shape(table), Unbounded, Unbounded)?
+    let mut rows = store.scan(store.snapshot(db), table, Unbounded, Unbounded)?
     let mut latest: u64 = 0
     let mut previous = 0u64
     let mut live = 0u64
@@ -1364,13 +1364,13 @@ pub opaque type Cover: send {
     value: own[send] fn(store.Change) -> Result[Option[Bytes], store.Error]
 }
 
-pub fn cover[K, V](t: store.Shape[K, V], lo: store.Bound[K], hi: store.Bound[K]) -> Result[Cover, Capacity] {
+pub fn cover[K, V](t: store.Table[K, V], lo: store.Bound[K], hi: store.Bound[K]) -> Result[Cover, Capacity] {
     let (take low, take high) = match store.key_span(t, lo, hi) {
         Ok(Span(take l, take h)) => (take l, take h),
         Error(Full(c)) => return Error(store_capacity(c)),
         _ => fail("runner: a Cover's bounds do not encode"),
     }
-    let mine: store.Shape[K, V] = clone(t)
+    let mine: store.Table[K, V] = clone(t)
     let made = fn(c: store.Change) -> Result[Option[Bytes], store.Error] { store.published_value(mine, c) }
     Ok(Cover(low: take low, high: take high, schemas: store.row_schemas(t), value: made))
 }
@@ -2586,8 +2586,8 @@ fn close_store(take db: store.Db) -> Result[(), OpenError] waits {
     match store.close(take db) { Ok(()) => Ok(()), Error(take problem) => Error(Store(take problem)) }
 }
 
-fn open_handles[H: send](db: store.Db, handles: StaticFn[fn(store.Schema) -> Result[H, store.Error]]) -> Result[H, OpenError] {
-    match store.with_schema(db, handles) {
+fn open_handles[H: send](mut db: store.Db, handles: StaticFn[fn(store.Schema) -> Result[H, store.Error]]) -> Result[H, OpenError] {
+    match store.with_schema(mut db, handles) {
         Ok(take h) => Ok(take h),
         Error(take problem) => Error(Store(take problem)),
     }
@@ -2921,7 +2921,7 @@ fn managed_head[G: send, H: send, S: send](take job: ManagedHead[G, H, S]) -> Re
         }
     } else { list.new() }
     if !head_advance(to, inbox, Activated(clone(release), version, store.identity_words(db), retain_from, take read)) { return head_closed(take db) }
-    let trigger_drive = match open_trigger_drive(db, clock, tasks, channel.sender(head_to), reg.exported, n_place, take triggering) {
+    let trigger_drive = match open_trigger_drive(mut db, clock, tasks, channel.sender(head_to), reg.exported, n_place, take triggering) {
         Ok(take drive) => take drive,
         Error(take problem) => { let _ = close_store(take db); return Error(Open(Store(take problem))) },
     }
@@ -2951,8 +2951,8 @@ fn head_prepare[G: send, H: send](mut db: store.Db, selection: Selection, persis
         let mut local_registry = match placed(place, n_place) { Ok(take registered) => take registered, Error(take problem) => return Error(Place(take problem)) }
         let identity = activation_identity(code.identity(place), code.identity(migrate), code.identity(handles))?
         if let Error(take problem) = store.run_migration(mut db, tasks, migrate) { return Error(Migrate(take problem)) }
-        let h = open_handles(db, handles)?
-        let h2 = open_handles(db, handles)?
+        let h = open_handles(mut db, handles)?
+        let h2 = open_handles(mut db, handles)?
         let release = release_digest(local_registry.exported) ?=> |_| Place(Bounds)
         return Ok((take local_registry, take h, take h2, take release, take identity))
     }
@@ -2995,8 +2995,8 @@ fn head_prepare[G: send, H: send](mut db: store.Db, selection: Selection, persis
         let matches = match prior { Some(row) => row.binding == record.binding, None => false }
         if !matches { return Error(not_current_activation(db, version, take old)) }
         let identity = activation_identity(code.identity(place), code.identity(migrate), code.identity(handles))?
-        let h = open_handles(db, handles)?
-        let h2 = open_handles(db, handles)?
+        let h = open_handles(mut db, handles)?
+        let h2 = open_handles(mut db, handles)?
         let ReleaseRecord(release: take release, ..) = take record
         return Ok((take reg, take h, take h2, take release, take identity))
     }
@@ -3008,8 +3008,8 @@ fn head_prepare[G: send, H: send](mut db: store.Db, selection: Selection, persis
     let version = store.version(store.snapshot(db)) + 1u64
     let release_codec: std.codec.Codec[ReleaseRecord] = std.codec.of()
     activation_result(store.stage_activation(mut stage, version, current, description, release_codec, record))?
-    let h = activation_result(store.with_staged_schema(stage, handles))?
-    let h2 = activation_result(store.with_staged_schema(stage, handles))?
+    let h = activation_result(store.with_staged_schema(mut stage, handles))?
+    let h2 = activation_result(store.with_staged_schema(mut stage, handles))?
     if let Error(take problem) = store.install_activation(mut db, take stage) {
         if let Tiered(Install) = problem { return Error(Store(take problem)) }
         if let InstallAt(_) = selection { return Error(InstallUncertain(take problem)) }
@@ -3149,12 +3149,12 @@ fn prepare_export[G: send, H: send](p: PrepareConfig[G, H], source: store.Prepar
     if let Error(take problem) = activation_identity(code.identity(p.place), code.identity(p.migrate), code.identity(p.handles)) {
         return Error(Open(take problem))
     }
-    let staged = match store.stage_export_migration(source, p.tasks, p.migrate) {
+    let mut staged = match store.stage_export_migration(source, p.tasks, p.migrate) {
         Ok(take staged) => take staged,
         Error(take error) => return Error(Open(Migrate(take error))),
     }
-    let _ = prepare_open_result(store.with_staged_schema(staged, p.handles))?
-    let _ = prepare_open_result(store.with_staged_schema(staged, p.handles))?
+    let _ = prepare_open_result(store.with_staged_schema(mut staged, p.handles))?
+    let _ = prepare_open_result(store.with_staged_schema(mut staged, p.handles))?
     if let Error(take problem) = store.validate_preparation(source, staged) { return Error(Open(Store(take problem))) }
     let (take description, take record) = prepare_activation(registered, p.n_place) ?=> |problem| Open(Place(problem))
     let ReleaseRecord(release: take release, digest: take image, binding: take binding, ..) = take record
@@ -3170,8 +3170,8 @@ fn trigger_scan_limit() -> PrepareError { Deploy(Scratch(Limit(Triggers))) }
 
 fn prepare_trigger_scan[G: send, H: send](source: store.Preparation, staged: store.StagedMigration, reg: Registry[G, H], choices: triggers.Entries, digest: Bytes) -> Result[Bytes, PrepareError] {
     let scanned = isolate(scoped fn() -> Result[Bytes, PrepareError] {
-        let table = prepare_open_result(store.with_staged_schema(staged, code.describe(triggers.pending_table_if_present)))?
         let snapshot = store.staged_snapshot(source, staged)
+        let table = prepare_open_result(triggers.pending_table_if_present(store.snapshot_schema(snapshot)))?
         let rows = match prepare_open_result(triggers.scan_pending(snapshot, table))? {
             Some(take cursor) => collect_trigger_scan(take cursor, source, reg, choices, digest)?,
             None => list.new(),
@@ -4069,8 +4069,8 @@ type TriggerDrive[G: send] {
     timer: Option[ArmedTimer]
 }
 
-fn make_trigger_drive[G: send, S: send](db: store.Db, clock: Clock, tasks: Tasks, take to: Sender[HeadInput], revision: Bytes, take config: TriggerConfig[G, S]) -> Result[Box[TriggerDrive[G]], store.Error] {
-    let tables = store.with_schema(db, code.describe(triggers.tables))?
+fn make_trigger_drive[G: send, S: send](mut db: store.Db, clock: Clock, tasks: Tasks, take to: Sender[HeadInput], revision: Bytes, take config: TriggerConfig[G, S]) -> Result[Box[TriggerDrive[G]], store.Error] {
+    let tables = store.with_schema(mut db, code.describe(triggers.tables))?
     let stamp = copy_bytes(revision)?
     let TriggerConfig(entries: take entries, author: take author, grants: take seed, grant: grant, grant_bytes: allowance) = take config
     let (grants, inbox): (Sender[GrantRequest[G]], Receiver[GrantRequest[G]]) = channel.new(1u64)
@@ -4081,14 +4081,15 @@ fn make_trigger_drive[G: send, S: send](db: store.Db, clock: Clock, tasks: Tasks
     Ok(box.new(take drive))
 }
 
-fn open_trigger_drive[G: send, S: send](db: store.Db, clock: Clock, tasks: Tasks, take to: Sender[HeadInput], exported: List[Exported], n_place: u64, take config: Option[TriggerConfig[G, S]]) -> Result[Option[Box[TriggerDrive[G]]], store.Error] {
+fn open_trigger_drive[G: send, S: send](mut db: store.Db, clock: Clock, tasks: Tasks, take to: Sender[HeadInput], exported: List[Exported], n_place: u64, take config: Option[TriggerConfig[G, S]]) -> Result[Option[Box[TriggerDrive[G]]], store.Error] {
     if let Some(take configured) = take config {
         if !triggers.is_empty(configured.entries) {
-            return Ok(Some(make_trigger_drive(db, clock, tasks, take to, trigger_stamp(exported, n_place)?, take configured)?))
+            return Ok(Some(make_trigger_drive(mut db, clock, tasks, take to, trigger_stamp(exported, n_place)?, take configured)?))
         }
     }
     let snapshot = store.snapshot(db)
-    let Some(take tables) = triggers.tables_for_settlement(store.snapshot_schema(snapshot), snapshot)? else { return Ok(None) }
+    let Some(_) = triggers.tables_for_settlement(store.snapshot_schema(snapshot), snapshot)? else { return Ok(None) }
+    let tables = store.with_schema(mut db, code.describe(triggers.tables))?
     let drive: TriggerDrive[G] = TriggerDrive(tables: take tables, revision: trigger_stamp(exported, n_place)?, clock: clock, tasks: tasks, to: take to,
         entries: triggers.empty_entries(), author: store.Caller(issuer: 0u8, subject: list.new()), grants: None, active: map.new(), timer: None)
     Ok(Some(box.new(take drive)))

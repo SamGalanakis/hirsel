@@ -215,7 +215,7 @@ fn bucket_law_rows(mut db: Db) -> Result[u64, Error] waits {
     let s = snapshot(db)
     let mut got = 0u64
     loop {
-        match get(s, shape(rows), got + 1)? {
+        match get(s, rows, got + 1)? {
             Some(value) => {
                 if value != bucket_law_value(got + 1) {
                     return Error(Foreign)
@@ -744,8 +744,8 @@ fn bucket_m2_read_packs(d: Dir, tasks: Tasks, sim: BucketSim) -> Result[(), Erro
     let replay = history_paged_capture(mut source, head, 1048576)?
     let root = view replay.state.tips[0]
     let snap = Snapshot(store: id, open: 0, branch: 0, head: root.head, roots: share_roots(root.roots), watermark: 1)
-    let rows = catalog_handle(id, root.roots.catalog, false, string.from("rows"), std.codec.key_u64(), std.codec.of_bytes())?
-    if version(snap) != 2 || get(snap, shape(rows), 7)? != Some(bucket_m2_pack_value()) {
+    let rows = catalog_handle(id, root.roots.catalog, string.from("rows"), std.codec.key_u64(), std.codec.of_bytes())?
+    if version(snap) != 2 || get(snap, rows, 7)? != Some(bucket_m2_pack_value()) {
         fail("the object checkpoint did not reconstruct its row")
     }
     Ok(())

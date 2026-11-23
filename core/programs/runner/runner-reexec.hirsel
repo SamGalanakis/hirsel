@@ -23,8 +23,8 @@ pub fn reexecute[G: send, H: send](db: store.Db, branch: store.Branch, version: 
     migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits],
     handles: StaticFn[fn(store.Schema) -> Result[H, store.Error]]) -> Result[store.Verdict, OpenError] waits {
     store.reexecute_with(db, branch, version, scoped fn(take e: store.Error) -> OpenError { Store(take e) }, replay_fault,
-        scoped fn(recorded_entry: store.Recorded, schema: store.Schema,
-            run: scoped fn(store.Plan, scoped[view] fn(store.Recorded, mut store.Tx) -> Result[Bytes, Bytes]) -> Result[store.Verdict, store.Error]) -> Result[store.Verdict, OpenError] {
+        scoped fn(recorded_entry: store.Recorded, take schema: store.Schema,
+            run: scoped fn(take store.Schema, store.Plan, scoped[view] fn(store.Recorded, mut store.Tx) -> Result[Bytes, Bytes]) -> Result[store.Verdict, store.Error]) -> Result[store.Verdict, OpenError] {
             let recorded_code = view recorded_entry.record.code
             if let RecordedCode = mode {
                 let identity = activation_identity(code.identity(place), code.identity(migrate), code.identity(handles))?
@@ -49,7 +49,7 @@ pub fn reexecute[G: send, H: send](db: store.Db, branch: store.Branch, version: 
             if let Some(Malformed(_)) = check(recorded_entry.record.args) { return Ok(Unknown(ArgsUnresolved)) }
             let h = (code.callable(handles))(schema) ?=> Store
             let plan = store.Plan(n_e: n, s_e: s, reply_max: MAX_RETURNED_BYTES + 8u64)
-            Ok(run(plan, scoped fn(record: store.Recorded, mut tx: store.Tx) -> Result[Bytes, Bytes] {
+            Ok(run(take schema, plan, scoped fn(record: store.Recorded, mut tx: store.Tx) -> Result[Bytes, Bytes] {
                 let outcome = go(mut tx, h, caller, record.record.args)
                 encode_entry_reply(mut tx, take outcome)
             }) ?=> Store)

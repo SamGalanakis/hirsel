@@ -23,7 +23,7 @@ fn law_migrate(mut phase: store.Migration) -> Result[(), store.Error] {
 
 fn law_bump(mut tx: store.Tx, add: u64) -> Result[u64, LawError] {
     let t = result.unwrap(law_table(store.tx_schema(tx)))
-    let current = match result.unwrap(store.fetch(tx, store.shape(t), 0u64)) { Some(n) => n, None => 0u64 }
+    let current = match result.unwrap(store.fetch(tx, t, 0u64)) { Some(n) => n, None => 0u64 }
     let next = current + add
     result.unwrap(store.put(mut tx, t, 0u64, next))
     Ok(next)
@@ -59,7 +59,7 @@ fn law_open(parent: Dir, c: Clock, r: Random, tasks: Tasks) -> LawDb waits {
 fn law_open_at(dir: Dir, c: Clock, r: Random, tasks: Tasks, fresh: bool) -> LawDb waits {
     let mut db = result.unwrap(store.open(tasks, dir, c, r, triggers.law_options()))
     if fresh { result.unwrap(store.run_migration(mut db, tasks, code.describe(law_migrate))) }
-    let ts = result.unwrap(store.with_schema(db, code.describe(triggers.tables)))
+    let ts = result.unwrap(store.with_schema(mut db, code.describe(triggers.tables)))
     let mut registry: runner.Registry[(), ()] = runner.registry()
     result.unwrap(register(mut registry, 131072u64, runner.DEFAULT_STEPS))
     result.unwrap(register_transaction(mut registry, code.describe(law_bump), 131072u64, runner.DEFAULT_STEPS))
@@ -72,8 +72,8 @@ fn law_open_at(dir: Dir, c: Clock, r: Random, tasks: Tasks, fresh: bool) -> LawD
 fn law_reopen(take before: LawDb) -> LawDb waits {
     let LawDb(db: take db, dir: dir, clock: c, random: r, tasks: tasks, registered: take registry, triggers: _) = take before
     result.unwrap(store.close(take db))
-    let after = result.unwrap(store.open(tasks, dir, c, r, triggers.law_options()))
-    let ts = result.unwrap(store.with_schema(after, code.describe(triggers.tables)))
+    let mut after = result.unwrap(store.open(tasks, dir, c, r, triggers.law_options()))
+    let ts = result.unwrap(store.with_schema(mut after, code.describe(triggers.tables)))
     LawDb(db: take after, dir: dir, clock: c, random: r, tasks: tasks, registered: take registry, triggers: take ts)
 }
 
@@ -240,8 +240,8 @@ pub fn journal_law_steps_own_rows(d: Dir, c: Clock, r: Random, tasks: Tasks) -> 
     let replay = law_transaction(mut reopened, second, 0u64, code.describe(law_bump), 7u64)
     let live: Result[u64, LawError] = law_replay(effect)
     let saved: Result[u64, LawError] = law_replay(replay)
-    let table = result.unwrap(store.with_schema(reopened.db, code.describe(law_table)))
-    let counter = result.unwrap(store.get(store.snapshot(reopened.db), store.shape(table), 0u64))
+    let table = result.unwrap(store.with_schema(mut reopened.db, code.describe(law_table)))
+    let counter = result.unwrap(store.get(store.snapshot(reopened.db), table, 0u64))
     match (live, saved, counter) { (Ok(7u64), Ok(7u64), Some(7u64)) => true, _ => false }
 }
 
@@ -253,8 +253,8 @@ pub fn journal_law_steps_typed_error(d: Dir, c: Clock, r: Random, tasks: Tasks) 
     let failed = law_transaction(mut law, first, 0u64, code.describe(law_decline), 3u64)
     let mut reopened = law_reopen(take law)
     let second = law_attempt(mut reopened, id, string.as_bytes("r1"))
-    let table = result.unwrap(store.with_schema(reopened.db, code.describe(law_table)))
-    if let None = result.unwrap(store.get(store.snapshot(reopened.db), store.shape(table), 0u64)) {} else { return false }
+    let table = result.unwrap(store.with_schema(mut reopened.db, code.describe(law_table)))
+    if let None = result.unwrap(store.get(store.snapshot(reopened.db), table, 0u64)) {} else { return false }
     let old: Result[Option[Result[u64, LawError]], store.Error] = recorded(reopened.db, StepId(run: id, index: 0u64))
     if let Ok(Some(Error(Declined))) = old {} else { return false }
     // The same callback would succeed against this new value. Replay must
@@ -264,7 +264,7 @@ pub fn journal_law_steps_typed_error(d: Dir, c: Clock, r: Random, tasks: Tasks) 
     let replay = law_transaction(mut reopened, second, 0u64, code.describe(law_decline), 3u64)
     let live: Result[u64, LawError] = law_replay(failed)
     let saved: Result[u64, LawError] = law_replay(replay)
-    let row = result.unwrap(store.get(store.snapshot(reopened.db), store.shape(table), 0u64))
+    let row = result.unwrap(store.get(store.snapshot(reopened.db), table, 0u64))
     match (live, saved, row) { (Error(Declined), Error(Declined), Some(77u64)) => true, _ => false }
 }
 
@@ -504,8 +504,8 @@ pub fn journal_law_steps_transaction_pair(d: Dir, c: Clock, r: Random, tasks: Ta
     let first: Result[u64, LawError] = law_replay(law_transaction(mut law, a, 0u64, code.describe(law_bump), 1u64))
     let second: Result[u64, LawError] = law_replay(law_transaction(mut law, b, 0u64, code.describe(law_bump), 1u64))
     let snapshot = store.snapshot(law.db)
-    let table = result.unwrap(store.with_schema(law.db, code.describe(law_table)))
-    let count = result.unwrap(store.get(snapshot, store.shape(table), 0u64))
+    let table = result.unwrap(store.with_schema(mut law.db, code.describe(law_table)))
+    let count = result.unwrap(store.get(snapshot, table, 0u64))
     match (first, second, count) { (Ok(6u64), Ok(7u64), Some(7u64)) => store.version(snapshot) == before + 2u64, _ => false }
 }
 
@@ -650,9 +650,9 @@ fn law_park_cut(d: Dir, c: Clock, r: Random, tasks: Tasks, phase: String, out: S
     let id = triggers.pending_id(pending)
     let wake = triggers.due_time(pending)
     let snapshot = store.snapshot(law.db)
-    let table = result.unwrap(store.with_schema(law.db, code.describe(law_table)))
-    if result.unwrap(store.get(snapshot, store.shape(table), 0u64)) != Some(1u64) { return false }
-    if result.unwrap(store.get(snapshot, store.shape(table), 1u64)) != Some(wake) { return false }
+    let table = result.unwrap(store.with_schema(mut law.db, code.describe(law_table)))
+    if result.unwrap(store.get(snapshot, table, 0u64)) != Some(1u64) { return false }
+    if result.unwrap(store.get(snapshot, table, 1u64)) != Some(wake) { return false }
     if phase == "write" {
         let early = store.next_call_info(law.db).at < wake
         let trigger_tables = view law.triggers

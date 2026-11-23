@@ -15,8 +15,8 @@ pub fn hand_install_catalog(dir: Dir, c: Clock, rnd: Random, tasks: Tasks, argv:
         let made = {
             let t = view h.t
             store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[(), Refused] {
-                let Some(found) = st(store.fetch(tx, store.shape(t.groups), name))? else { return Error(Unknown) }
-                let Some(w) = st(store.fetch(tx, store.shape(t.wake), name))? else { return Error(Unknown) }
+                let Some(found) = st(store.fetch(tx, t.groups, name))? else { return Error(Unknown) }
+                let Some(w) = st(store.fetch(tx, t.wake, name))? else { return Error(Unknown) }
                 if let Clean(_) = w.wake { let _ = mark_dirty(mut tx, t, name)? }
                 let mut g = found
                 expect(!is_none(g.store_id), "T1: registration did not accept a store ID")
@@ -43,12 +43,12 @@ pub fn hand_install_catalog(dir: Dir, c: Clock, rnd: Random, tasks: Tasks, argv:
         expect(mode == "inspect", "T1: unknown catalog fixture command")
         let g = option.unwrap(must(group_row(h, name), "T1: read group"))
         expect(g.activation == 12u64 && is_none(g.recovery), "T1: the relaunch did not clear the mark at 12")
-        let d = option.unwrap(result.unwrap(store.get(store.snapshot(h.db), store.shape(h.t.deploys), name)))
+        let d = option.unwrap(result.unwrap(store.get(store.snapshot(h.db), h.t.deploys, name)))
         expect(g.assembly == d.old_assembly && !roots_release(g, d.assembly), "T1: failed deploy did not keep OLD alone")
         expect(failed_outcome(d.outcome), "T1: adoption changed the deploy outcome")
-        let selected = result.unwrap(store.get(store.snapshot(h.db), store.shape(h.t.activations), (g.incarnation, 12u64)))
+        let selected = result.unwrap(store.get(store.snapshot(h.db), h.t.activations, (g.incarnation, 12u64)))
         expect(selected == Some(clone(g.assembly)), "T1: activation 12 was not indexed to OLD")
-        let pending = result.unwrap(store.get(store.snapshot(h.db), store.shape(h.t.activations), (g.incarnation, 10u64)))
+        let pending = result.unwrap(store.get(store.snapshot(h.db), h.t.activations, (g.incarnation, 10u64)))
         expect(is_none(pending), "T1: adoption changed the attempt's activation")
     }
     result.unwrap(store.close(close(take h)))
@@ -94,8 +94,8 @@ fn trace_probe(c: Clock, rnd: Random, shared: bool, retain_r: bool) -> Rig waits
     let made = {
         let t = view r.h.t
         store.run(mut r.h.db, None, scoped fn(mut tx: store.Tx) -> Result[(), Refused] {
-            let g0 = option.unwrap(st(store.fetch(tx, store.shape(t.groups), "g"))?)
-            let d0 = option.unwrap(st(store.fetch(tx, store.shape(t.deploys), "g"))?)
+            let g0 = option.unwrap(st(store.fetch(tx, t.groups, "g"))?)
+            let d0 = option.unwrap(st(store.fetch(tx, t.deploys, "g"))?)
             let mut g = g0
             let mut d = d0
             g.activation = 3u64

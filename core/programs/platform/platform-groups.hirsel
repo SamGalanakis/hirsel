@@ -19,7 +19,7 @@ fn add_group_turn(mut h: Host, spec: NewGroup, also: scoped[view] fn(mut store.T
     let made = {
         let t = view h.t
         store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[GroupRow, Refused] {
-            if let Some(_) = st(store.fetch(tx, store.shape(t.groups), spec.name))? {
+            if let Some(_) = st(store.fetch(tx, t.groups, spec.name))? {
                 return Error(Exists)
             }
             let mut u = usage_of(tx, t, spec.tenant)?
@@ -62,14 +62,14 @@ fn remove_turn(mut h: Host, name: String, disposition: Disposition, also: scoped
     let made = {
         let t = view h.t
         store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[(GroupRow, bool), Refused] {
-            let Some(found_g) = st(store.fetch(tx, store.shape(t.groups), name))? else {
+            let Some(found_g) = st(store.fetch(tx, t.groups, name))? else {
                 return Error(Unknown)
             }
             let mut g = found_g
             if let Some(_) = g.retiring {
                 return Error(Retiring)
             }
-            let Some(w) = st(store.fetch(tx, store.shape(t.wake), name))? else {
+            let Some(w) = st(store.fetch(tx, t.wake, name))? else {
                 return Error(Unknown)
             }
             st(also(mut tx))?

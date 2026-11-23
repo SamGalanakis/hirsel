@@ -13,7 +13,7 @@ fn hold(mut h: Host, d: Bytes, diff: launcher.Grants) waits {
         let t = view h.t
         let shown = view diff
         store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[(), Refused] {
-            let Some(found) = st(store.fetch(tx, store.shape(t.requests), d))? else {
+            let Some(found) = st(store.fetch(tx, t.requests, d))? else {
                 return Ok(())
             }
             let mut row = found
@@ -81,10 +81,10 @@ fn decide(mut h: Host, conn: u64, d: Bytes, diff: launcher.Grants, approve: bool
         let t = view h.t
         let approved = view diff
         store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[launcher.Attempt, Refused] {
-            let Some(found) = st(store.fetch(tx, store.shape(t.requests), d))? else {
+            let Some(found) = st(store.fetch(tx, t.requests, d))? else {
                 return Error(Missing("request"))
             }
-            if let Some(x) = st(store.fetch(tx, store.shape(t.active), found.group.name))? {
+            if let Some(x) = st(store.fetch(tx, t.active, found.group.name))? {
                 if x != d {
                     return Error(Busy(0u64))
                 }

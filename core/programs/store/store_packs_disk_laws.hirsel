@@ -313,7 +313,7 @@ fn disk_test_relocation_late_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) 
         }
     }
     let held = snapshot(reopened)
-    let sh = shape(t)
+    let sh = view t
     let Some(value) = get(held, sh, 1)? else {
         return Error(Foreign)
     }
@@ -398,7 +398,7 @@ fn check_blob_threshold(d: Dir, c: Clock, r: Random, tasks: Tasks, cutoff: u64) 
     }
     let again = open(tasks, d, c, r, options)?
     let held = snapshot(again)
-    let sh = shape(shape_table)
+    let sh = view shape_table
     let values_match = get(held, sh, 1)? == Some(clone(inline_value)) && get(held, sh, 2)? == Some(clone(blob_value))
     close(take again)?
     if values_match {

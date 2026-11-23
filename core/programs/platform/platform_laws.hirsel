@@ -1076,7 +1076,7 @@ fn wake_generation_fence(c: Clock, rnd: Random) -> Result[(), ()] waits {
 
 // The deploy row's current attempt.
 fn deploy_attempt(r: Rig) -> launcher.Attempt {
-    match store.get(store.snapshot(r.h.db), store.shape(r.h.t.deploys), "g") {
+    match store.get(store.snapshot(r.h.db), r.h.t.deploys, "g") {
         Ok(Some(d)) => d.attempt,
         _ => fail("no deploy row")
     }

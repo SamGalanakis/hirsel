@@ -94,7 +94,7 @@ fn trigger_write(take changed: Result[(), triggers.Error]) -> Result[(), store.E
 
 fn capped(mut tx: store.Tx, t: Tables, a: triggers.Attempt, index: u64) -> Result[bool, store.Error] {
     let key = run_key(a)?
-    let Some(limit) = store.fetch(tx, store.shape(t.caps), key)? else { return Error(Missing("step cap")) }
+    let Some(limit) = store.fetch(tx, t.caps, key)? else { return Error(Missing("step cap")) }
     if index < limit { return Ok(false) }
     trigger_write(triggers.finish(mut tx, t.triggers, a, Cap))?
     Ok(true)
@@ -108,7 +108,7 @@ fn hold(mut tx: store.Tx, t: Tables, a: triggers.Attempt, index: u64, expected: 
 fn start_outside(mut tx: store.Tx, t: Tables, a: triggers.Attempt, take b: Begin) -> Result[Reply, store.Error] {
     if capped(mut tx, t, a, b.index)? { return Ok(Capped) }
     let key = row_key(a, b.index)?
-    match store.fetch(tx, store.shape(t.rows), key)? {
+    match store.fetch(tx, t.rows, key)? {
         Some(Finished(take saved, take raw)) => {
             if saved.contract != b.fingerprint.contract { return hold(mut tx, t, a, b.index, saved, b.fingerprint) }
             return Ok(Replay(take raw))
@@ -130,7 +130,7 @@ fn start_outside(mut tx: store.Tx, t: Tables, a: triggers.Attempt, take b: Begin
 
 fn finish_outside(mut tx: store.Tx, t: Tables, a: triggers.Attempt, take f: Finish) -> Result[Reply, store.Error] {
     let key = row_key(a, f.step.index)?
-    let Some(Started(attempt, take saved)) = store.fetch(tx, store.shape(t.rows), key)? else { return Error(Missing("started step")) }
+    let Some(Started(attempt, take saved)) = store.fetch(tx, t.rows, key)? else { return Error(Missing("started step")) }
     if saved.contract != f.step.fingerprint.contract { return hold(mut tx, t, a, f.step.index, saved, f.step.fingerprint) }
     match f.step.mode {
         Lookup => (),
@@ -274,7 +274,7 @@ fn transaction_body[A: codec, R: codec, E: codec](mut tx: store.Tx, a: triggers.
     let ce: std.codec.Codec[E] = std.codec.of()
     let encoded = fingerprint(TRANSACTION, code.identity(f), ca, cr, ce, request.arg) ?=> |_| Limit(Value)
     let row = row_key(a, index)?
-    match store.fetch(tx, store.shape(t.rows), row)? {
+    match store.fetch(tx, t.rows, row)? {
         Some(Finished(take saved, take raw)) => {
             if saved.contract != encoded.contract { return hold(mut tx, t, a, index, saved, encoded) }
             return Ok(Replay(take raw))
@@ -306,9 +306,10 @@ pub fn transaction[G: send, A: codec, R: codec, E: codec](mut ctx: Ctx[G], take 
 }
 
 pub fn recorded[R: codec, E: codec](db: store.Db, id: StepId) -> Result[Option[Result[R, E]], store.Error] {
-    let t = store.with_schema(db, code.describe(tables))?
+    let snapshot = store.snapshot(db)
+    let t = tables(store.snapshot_schema(snapshot))?
     let index = encode(id)?
-    match store.get(store.snapshot(db), store.shape(t.rows), index)? {
+    match store.get(snapshot, t.rows, index)? {
         Some(Finished(_, take raw)) => {
             let result: Result[R, E] = decode(raw)?
             Ok(Some(take result))

@@ -18,7 +18,7 @@ pub fn journal_law_trigger_revision(d: Dir, c: Clock, r: Random, tasks: Tasks) -
     let dir = law_directory(d)
     let mut before = result.unwrap(store.open(tasks, dir, c, r, law_options()))
     result.unwrap(store.run_migration(mut before, tasks, code.describe(migrate)))
-    let original = result.unwrap(store.with_schema(before, code.describe(tables)))
+    let original = result.unwrap(store.with_schema(mut before, code.describe(tables)))
     let target: Entry[u64] = result.unwrap(granted(code.describe(sample_granted)))
     let mut allowed = empty_entries()
     result.unwrap(allow(mut allowed, target))
@@ -40,7 +40,7 @@ pub fn journal_law_trigger_revision(d: Dir, c: Clock, r: Random, tasks: Tasks) -
     result.unwrap(store.close(take before))
 
     let mut db = result.unwrap(store.open(tasks, dir, c, r, law_options()))
-    let t = result.unwrap(store.with_schema(db, code.describe(tables)))
+    let t = result.unwrap(store.with_schema(mut db, code.describe(tables)))
     let p = option.unwrap(first(db, t))
     let decision_run = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[Started, Error] {
         start(mut tx, t, p, r2)

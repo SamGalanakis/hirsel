@@ -226,7 +226,7 @@ pub fn journal_law_drop(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits
     if !typed_put(mut db, t, 7, 70) {
         return false
     }
-    let sh = shape(t)
+    let sh = view t
     let _ = take db
     let reopened = result.unwrap(open(tasks, d, c, r, options))
     if reopened.heads[0].head != 1 && reopened.heads[0].head != 2 {
@@ -315,7 +315,7 @@ pub fn law_step_bounds(c: Clock) -> bool waits {
         _ => return false
     }
     let inspected = result.unwrap(look(snapshot(db), None, scoped fn(tx: Tx) -> Result[Option[u64], Error] {
-        fetch(tx, shape(t), 1u64)
+        fetch(tx, t, 1u64)
     }))
     match take inspected {
         Seen(v) => match v.value {

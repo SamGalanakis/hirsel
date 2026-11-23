@@ -104,7 +104,7 @@ fn disk_bench_journal(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, mo
     let s = snapshot(reopened)
     if s.head != closed_at { fail("disk bench replayed version") }
     let mut t2 = result.unwrap(table(mut reopened, "accounts", std.codec.key_u64(), dictionary))
-    let mut rows = result.unwrap(scan(s, shape(t2), Unbounded, Unbounded))
+    let mut rows = result.unwrap(scan(s, t2, Unbounded, Unbounded))
     for k in 0u64 .. 16 {
         let last = (n - 1) - ((n - 1) % 16 + 16 - k) % 16
         let row = option.unwrap(result.unwrap(next(mut rows)))
@@ -153,7 +153,7 @@ pub fn disk_bench_main(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, a
     let mut t = result.unwrap(table(mut db, "accounts", std.codec.key_u64(), dictionary))
     if indexed {
         result.unwrap(create_index(mut db, t, "bucket", code.describe(disk_bench_bucket), std.codec.key_u64()))
-        let _ = result.unwrap(index(db, mut t, "bucket", code.describe(disk_bench_bucket), std.codec.key_u64()))
+        let _ = result.unwrap(index(mut db, t, "bucket", code.describe(disk_bench_bucket), std.codec.key_u64()))
     }
     let catalog_cost = db.resident
     for k in 0u64 .. n { disk_bench_put(mut db, t, k, k) }
@@ -163,7 +163,7 @@ pub fn disk_bench_main(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, a
     let per_row: u64 = if indexed { 196 } else { 110 }
     if db.resident != catalog_cost + n * per_row { fail("disk bench account") }
     let first_pack = disk_bench_next_pack(child)
-    let original_shape = shape(t)
+    let original_shape: Table[u64, DiskAccount] = clone(t)
     let migration = if migrating {
         let mut target = spec("migrated", std.codec.key_u64(), dictionary)
         if indexed {
@@ -234,7 +234,7 @@ pub fn disk_bench_main(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, a
     let sh = if migrating {
         let target = result.unwrap(table(mut holder[0], "migrated", std.codec.key_u64(), dictionary))
         if holder[0].heads[0].head != original_head + 1 { fail("disk bench migrate version") }
-        shape(target)
+        target
     } else {
         take original_shape
     }

@@ -75,7 +75,7 @@ fn object_writer_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Resul
     let successor = open_authority(tasks, object_authority(take next_client, "bucket", BUCKET_LAW_OP_MS), c, r, options)?
     let mut surviving = take successor
     let current = snapshot(surviving)
-    if get(current, shape(rows), 7)? != Some(clone(value)) || current.head != saved.version || claim_of(surviving)?.epoch != 2 {
+    if get(current, rows, 7)? != Some(clone(value)) || current.head != saved.version || claim_of(surviving)?.epoch != 2 {
         fail("a new holder did not recover the durable checkpoint")
     }
     let late = run(mut incumbent, None, scoped fn(mut tx: Tx) -> Result[(), Error] {
@@ -94,7 +94,7 @@ fn object_writer_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Resul
     let mut process = followers()
     let follower_view = follower(mut process, tasks, object_authority(take reader, "bucket", BUCKET_LAW_OP_MS), sim.time, options)?
     let visible = snapshot_follower(follower_view, Branch(store: saved.store, id: 0))?
-    if get(visible, shape(rows), 7)? != Some(clone(value)) || get(visible, shape(rows), 8)? != None {
+    if get(visible, rows, 7)? != Some(clone(value)) || get(visible, rows, 8)? != None {
         fail("the surviving history lost a durable row or exposed a fenced row")
     }
     close(take surviving)

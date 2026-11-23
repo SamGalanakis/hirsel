@@ -263,7 +263,7 @@ fn keep(mut tx: store.Tx, h: Hd, author: runner.Caller, take k: u64) -> Result[u
 }
 
 fn kept(mut tx: store.Tx, h: Hd, author: runner.Caller, take k: u64) -> Result[u64, u32] {
-    match store.fetch(tx, store.shape(h.t), k) { Ok(Some(value)) => Ok(value), Ok(None) => Ok(0u64), Error(_) => Error(1u32) }
+    match store.fetch(tx, h.t, k) { Ok(Some(value)) => Ok(value), Ok(None) => Ok(0u64), Error(_) => Error(1u32) }
 }
 
 fn kept_place(mut r: Calls) -> Result[(), runner.RegisterError] {

@@ -100,7 +100,7 @@ fn corpus_stats(take row: Option[Stats]) -> Stats {
 fn remove_posting[M: codec](mut tx: store.Tx, index: Index[M], id: u64, term: String) -> Result[(), store.Error] {
     let key = PostingKey(term: clone(term), id: id)
     let _ = store.delete(mut tx, index.postings, key)?
-    let df = option.unwrap(store.fetch(tx, store.shape(index.frequencies), term)?)
+    let df = option.unwrap(store.fetch(tx, index.frequencies, term)?)
     if df == 1 {
         let _ = store.delete(mut tx, index.frequencies, term)?
     } else {
@@ -118,11 +118,11 @@ pub fn upsert[M: codec](mut tx: store.Tx, index: Index[M], id: u64, text: String
             tf += 1
         })
     }
-    let mut stats = corpus_stats(store.fetch(tx, store.shape(index.stats), 0u8)?)
-    let previous = store.fetch(tx, store.shape(index.documents), id)?
+    let mut stats = corpus_stats(store.fetch(tx, index.stats, 0u8)?)
+    let previous = store.fetch(tx, index.documents, id)?
     if let Some(doc) = previous {
         stats.tokens -= doc.length
-        let old_terms = option.unwrap(store.fetch(tx, store.shape(index.forward), id)?)
+        let old_terms = option.unwrap(store.fetch(tx, index.forward, id)?)
         for term in old_terms {
             if !map.contains(counts, term) {
                 remove_posting(mut tx, index, id, term)?
@@ -131,8 +131,8 @@ pub fn upsert[M: codec](mut tx: store.Tx, index: Index[M], id: u64, text: String
     } else {
         stats.documents += 1
     }
-    let postings = store.shape(index.postings)
-    let frequencies = store.shape(index.frequencies)
+    let postings = view index.postings
+    let frequencies = view index.frequencies
     let mut unique: List[String] = list.with_capacity(map.len(counts))
     for take (take term, tf) in take counts {
         let key = PostingKey(term: clone(term), id: id)
@@ -157,15 +157,15 @@ pub fn upsert[M: codec](mut tx: store.Tx, index: Index[M], id: u64, text: String
 }
 
 pub fn delete[M: codec](mut tx: store.Tx, index: Index[M], id: u64) -> Result[bool, store.Error] {
-    let doc = match store.fetch(tx, store.shape(index.documents), id)? {
+    let doc = match store.fetch(tx, index.documents, id)? {
         Some(take doc) => take doc,
         None => return Ok(false)
     }
-    let terms = option.unwrap(store.fetch(tx, store.shape(index.forward), id)?)
+    let terms = option.unwrap(store.fetch(tx, index.forward, id)?)
     for term in terms {
         remove_posting(mut tx, index, id, term)?
     }
-    let mut stats = option.unwrap(store.fetch(tx, store.shape(index.stats), 0u8)?)
+    let mut stats = option.unwrap(store.fetch(tx, index.stats, 0u8)?)
     stats.documents -= 1
     stats.tokens -= doc.length
     let _ = store.delete(mut tx, index.documents, id)?
@@ -333,16 +333,16 @@ pub fn query[M: codec](snapshot: store.Snapshot, index: Index[M], text: String, 
     if k == 0 {
         return Ok(take hits)
     }
-    let stats = corpus_stats(store.get(snapshot, store.shape(index.stats), 0u8)?)
+    let stats = corpus_stats(store.get(snapshot, index.stats, 0u8)?)
     if stats.tokens == 0 {
         return Ok(take hits)
     }
     let n: f64 = float.from_int(stats.documents)
     let tokens: f64 = float.from_int(stats.tokens)
     let mean = tokens / n
-    let docs = store.shape(index.documents)
-    let frequencies = store.shape(index.frequencies)
-    let postings = store.shape(index.postings)
+    let docs = view index.documents
+    let frequencies = view index.frequencies
+    let postings = view index.postings
     let mut terms: std.set.Set[String] = std.set.new()
     let mut candidates: Map[u64, Candidate] = map.new()
     for take term in tokenize(index.tokenizer, text) {

@@ -81,7 +81,7 @@ fn position_survives_three_cuts(d: Dir, c: Clock, r: Random, tasks: Tasks, seed_
         fail("log followers did not keep distinct capture identities")
     }
     let source = follower_table(second, "rows", std.codec.key_u64(), std.codec.of_u64())?
-    if get(also, shape(source), 7)? != Some(70) || get(found, shape(source), 7)? != Some(70) {
+    if get(also, source, 7)? != Some(70) || get(found, source, 7)? != Some(70) {
         fail("the follower missed the committed row")
     }
     Ok(())

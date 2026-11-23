@@ -18,7 +18,7 @@ fn packed_reply(take _arg: ()) -> Result[Reply, Capacity] {
 }
 
 fn packed_rows(tx: store.Tx, h: Handles, take _arg: ()) -> Result[runner.Cover, Capacity] {
-    runner.cover(store.shape(h.items), Unbounded, Unbounded)
+    runner.cover(h.items, Unbounded, Unbounded)
 }
 
 fn place(mut registry: runner.Registry[(), Handles]) -> Result[(), runner.RegisterError] {

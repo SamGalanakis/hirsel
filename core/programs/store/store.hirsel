@@ -62,6 +62,7 @@ type Ack: send = Journaled(u64, u64) | Broken(IoError) | ObjectJournaled(u64, u6
 
 pub opaque type Db {
     store: StoreId,
+    indexes: IndexRegistry,
     fence: u32,
     disk: Option[DiskState],
     clock: Clock,
@@ -489,6 +490,7 @@ fn op_slot(ops: DataOps, key: Bytes) -> Option[u64] {
 
 pub opaque scoped type Tx {
     store: StoreId,
+    indexes: View[IndexRegistry],
     roots: Roots,
     ids: u64,
     private_from: u64,
@@ -532,13 +534,13 @@ pub opaque type ReadOnly: shareable + send {
     snapshot: Snapshot
 }
 
-pub fn read_only_table[K, V](reader: ReadOnly, take name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[Shape[K, V], Error] {
+pub fn read_only_table[K, V](reader: ReadOnly, take name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[Table[K, V], Error] {
     let s = view reader.snapshot
-    let handle = catalog_handle(s.store, s.roots.catalog, false, take name, take key, take value)?
-    Ok(shape(handle))
+    let handle = catalog_handle(s.store, s.roots.catalog, take name, take key, take value)?
+    Ok(clone(handle))
 }
 
-pub fn read_only_get[K, V](reader: ReadOnly, t: Shape[K, V], key: K) -> Result[Option[V], Error] {
+pub fn read_only_get[K, V](reader: ReadOnly, t: Table[K, V], key: K) -> Result[Option[V], Error] {
     get(reader.snapshot, t, key)
 }
 
@@ -594,7 +596,7 @@ fn memory_at(c: Clock, id: StoreId, o: Options) -> Db {
 }
 
 fn empty_db(c: Clock, id: StoreId, o: Options) -> Db {
-    Db(store: id, fence: 0, disk: None, clock: c, heads: list.new(), branch_names: map.new(), pins: list.new(), record_bytes: branch_record_bytes("main"), next_pin: 0, next_branch: 1, next_node: 0, next_table: 1, file_seq: 1, file_end: 72, frame_seq: 0, resident: 0, page_resident: 0, changes: 0, settled: 0, ceiling: o.resident_limit, checkpointed: 0, admits: map.new())
+    Db(store: id, indexes: empty_index_registry(), fence: 0, disk: None, clock: c, heads: list.new(), branch_names: map.new(), pins: list.new(), record_bytes: branch_record_bytes("main"), next_pin: 0, next_branch: 1, next_node: 0, next_table: 1, file_seq: 1, file_end: 72, frame_seq: 0, resident: 0, page_resident: 0, changes: 0, settled: 0, ceiling: o.resident_limit, checkpointed: 0, admits: map.new())
 }
 
 pub type Accounts {
@@ -1322,7 +1324,7 @@ fn stage_call[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_repl
     let ci = call_info(db.store, db.heads[i].id, db.heads[i].head + 1, wall, db.heads[i].at)
     let caught = isolate(fn() -> Result[Finished[R, A], OutOfTime] {
         let perform = scoped fn() -> Finished[R, A] {
-            let staged = draft_body(db, db.heads[i].roots, ci, keep_reply, reads, issued, body)
+            let staged = draft_body(db, db.indexes, db.heads[i].roots, ci, keep_reply, reads, issued, body)
             let prepared = if let Some(_) = steps {
                 match prepare_metered_pages(take staged) {
                     Ok(take ready) => take ready,
@@ -1377,12 +1379,12 @@ fn raised_capacity(causes: Causes) -> Option[Capacity] {
     None
 }
 
-fn draft_body[R, A](db: Db, base: Roots, ci: CallInfo, keep_reply: Option[fn(A) -> bool], reads: Log[Read], issued: Log[u64], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Finished[R, A] {
+fn draft_body[R, A](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, keep_reply: Option[fn(A) -> bool], reads: Log[Read], issued: Log[u64], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Finished[R, A] {
     let (frame_bytes, initial_tail) = match db.disk {
         Some(_) => (Some(42u64), OPEN_FRAME_TAIL),
         None => (None, NO_FRAME_TAIL),
     }
-    let mut tx = Tx(store: db.store, roots: share_roots(base), ids: db.next_node, private_from: int.saturating_add(db.next_node, 1), resident: db.resident, retain_old: retaining(db), frame_tail: initial_tail, reads: view reads, issued: view issued, refusal: None, frame_bytes: frame_bytes, wrote: false, ops: empty_ops(), info: ci, stream_ops: empty_ops(), extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, streams: 0)
+    let mut tx = Tx(store: db.store, indexes: view registry, roots: share_roots(base), ids: db.next_node, private_from: int.saturating_add(db.next_node, 1), resident: db.resident, retain_old: retaining(db), frame_tail: initial_tail, reads: view reads, issued: view issued, refusal: None, frame_bytes: frame_bytes, wrote: false, ops: empty_ops(), info: ci, stream_ops: empty_ops(), extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, streams: 0)
     let outcome = body(mut tx)
     if tx.own != 0 {
         fold_own(mut tx)
@@ -1508,7 +1510,7 @@ fn draft_call(db: Db, complete: Completion, ci: CallInfo, plan: Plan, rec: Optio
             let draft = bound bytes plan.n_e {
                 let reads: Log[Read] = log.new()
                 let issued: Log[u64] = log.new()
-                let staged = draft_body(db, db.heads[0].roots, ci, keep, reads, issued, scoped fn(mut tx: Tx) -> Result[Bytes, ServeReply] {
+                let staged = draft_body(db, db.indexes, db.heads[0].roots, ci, keep, reads, issued, scoped fn(mut tx: Tx) -> Result[Bytes, ServeReply] {
                     stage_reply(mut tx, complete, rec, plan.reply_max, body)
                 })
                 let finished = match prepare_metered_pages(take staged) {
@@ -2812,24 +2814,7 @@ pub opaque type Readers[V]: shareable + send {
     schemas: Arc[RowSchemas]
 }
 
-type IndexOf[V]: send {
-    id: u32,
-    extract: own[send] fn(V, Option[u32], Bytes) -> Result[Bytes, Capacity]
-}
-
-pub opaque type Table[K, V]: send {
-    store: StoreId,
-    id: u32,
-    epoch: u64,
-    complete: bool,
-    catalog_key: Arc[Bytes],
-    catalog_page: Arc[Bytes],
-    key: std.codec.Key[K],
-    readers: Arc[Readers[V]],
-    indexes: List[IndexOf[V]]
-}
-
-pub opaque type Shape[K, V]: shareable + send {
+pub opaque type Table[K, V]: shareable + send {
     store: StoreId,
     id: u32,
     catalog_key: Arc[Bytes],
@@ -2912,17 +2897,7 @@ pub opaque type Rows[K, V]: send {
     skip: Option[own[send] fn(Bytes, mut u64) -> Result[(), std.codec.DecodeError]]
 }
 
-// A query only needs the selected incarnation and readers. The copy cannot
-// write, since it does not carry the table's registered index extractors.
-pub fn query_table[K, V](t: Table[K, V]) -> Table[K, V] {
-    Table(store: t.store, id: t.id, epoch: t.epoch, complete: false, catalog_key: arc.share(t.catalog_key), catalog_page: arc.share(t.catalog_page), key: t.key, readers: arc.share(t.readers), indexes: list.new())
-}
-
-pub fn shape[K, V](t: Table[K, V]) -> Shape[K, V] {
-    Shape(store: t.store, id: t.id, catalog_key: arc.share(t.catalog_key), catalog_page: arc.share(t.catalog_page), key: t.key, readers: arc.share(t.readers))
-}
-
-pub fn row_schemas[K, V](t: Shape[K, V]) -> Arc[RowSchemas] {
+pub fn row_schemas[K, V](t: Table[K, V]) -> Arc[RowSchemas] {
     arc.share(t.readers.schemas)
 }
 
@@ -2981,25 +2956,20 @@ fn typed_bound[K](k: std.codec.Key[K], limit: Bound[K]) -> Result[Bound[Bytes], 
     }
 }
 
-fn writable[K, V](tx: Tx, t: Table[K, V]) -> Result[(), Error] {
+fn writable[K, V](tx: Tx, t: Table[K, V]) -> Result[List[Catalog], Error] {
     if !same(tx.store, t.store) {
         return Error(Foreign)
     }
-    if !t.complete {
-        return Error(Stale(t.id))
+    readable(tx.roots, t.catalog_key, t.catalog_page, t.id)?
+    let indexes = index_catalog_in(tx.roots.catalog, t.id)?
+    for record in indexes {
+        let _ = registered_index(tx, t.id, t.readers.current, record)?
     }
-    match get_page_row(tx.roots.catalog, t.catalog_key) {
-        Some(raw) => if read_le(raw, 1, 4) == int.widen(t.id) && read_le(raw, 9, 8) == t.epoch {
-            Ok(())
-        } else {
-            Error(Stale(t.id))
-        },
-        None => Error(Stale(t.id))
-    }
+    Ok(take indexes)
 }
 
 /// Borrow the stored schema tag and codec bytes, including any staged write.
-pub fn fetch_bytes[K, V](tx: Tx, t: Shape[K, V], k: K) -> Result[Option[View[Bytes]], Error] in tx {
+pub fn fetch_bytes[K, V](tx: Tx, t: Table[K, V], k: K) -> Result[Option[View[Bytes]], Error] in tx {
     if !same(tx.store, t.store) {
         return Error(Foreign)
     }
@@ -3010,7 +2980,7 @@ pub fn fetch_bytes[K, V](tx: Tx, t: Shape[K, V], k: K) -> Result[Option[View[Byt
     Ok(fetch_logical(tx, take p))
 }
 
-pub fn fetch[K, V](tx: Tx, t: Shape[K, V], k: K) -> Result[Option[V], Error] {
+pub fn fetch[K, V](tx: Tx, t: Table[K, V], k: K) -> Result[Option[V], Error] {
     match fetch_bytes(tx, t, k)? {
         Some(raw) => Ok(Some(row_value(t.readers, t.id, raw)?)),
         None => Ok(None)
@@ -3062,7 +3032,7 @@ fn apply_edits(mut tx: Tx, take edits: IndexEdits) -> Result[(), Error] {
 // a delete and put are emitted only for distinct keys. Each planned edit can
 // therefore check the original op table while carrying the cumulative frame size.
 // A returned Error leaves all roots, accounting and issued IDs untouched.
-fn put_impl[K, V](mut tx: Tx, t: Table[K, V], take p: Bytes, v: V, tail: bool) -> Result[(), Error] {
+fn put_impl[K, V](mut tx: Tx, t: Table[K, V], indexes: List[Catalog], take p: Bytes, v: V, tail: bool) -> Result[(), Error] {
     // The schema tag and the codec's least length, so a fixed-width value encodes without growing.
     let mut raw: Bytes = list.new()
     let least = 2 + std.codec.least(t.readers.codec)
@@ -3075,27 +3045,28 @@ fn put_impl[K, V](mut tx: Tx, t: Table[K, V], take p: Bytes, v: V, tail: bool) -
     capacity(le(mut raw, int.widen(t.readers.current), 2))?
     std.codec.encode(t.readers.codec, v, mut raw) ?=> |_| Limit(Value)
     let mut frame = put_frame(tx, p, raw, tx.frame_bytes)?
-    if list.len(t.indexes) == 0 {
+    if list.len(indexes) == 0 {
         apply_put(mut tx, take p, take raw, tail)?
     } else {
-        let previous = match transaction_row(tx, p) {
-            Some(old) => Some(row_value(t.readers, t.id, old)?),
-            None => None
-        }
-        let mut edits = IndexEdits(first: None, rest: list.new())
-        for ix in t.indexes {
-            let key = list.slice(p, 4, list.len(p))
-            let index_row = capacity((ix.extract)(v, Some(ix.id), key))?
-            if let Some(value) = previous {
-                let old_row = capacity((ix.extract)(value, Some(ix.id), key))?
-                if old_row == index_row {
-                    continue
+        let edits = {
+            let previous = transaction_row(tx, p)
+            let mut pending = IndexEdits(first: None, rest: list.new())
+            for ix in indexes {
+                let bound_index = registered_index(tx, t.id, t.readers.current, ix)?
+                let key = list.slice(p, 4, list.len(p))
+                let index_row = (bound_index.extract)(raw, key)?
+                if let Some(value) = previous {
+                    let old_row = (bound_index.extract)(value, key)?
+                    if old_row == index_row {
+                        continue
+                    }
+                    append_index_remove(tx, mut pending, take old_row, mut frame)?
                 }
-                append_index_remove(tx, mut edits, take old_row, mut frame)?
+                let empty: Bytes = list.new()
+                frame = put_frame(tx, index_row, empty, frame)?
+                push_index_edit(mut pending, StoreRow(take index_row, take empty))
             }
-            let empty: Bytes = list.new()
-            frame = put_frame(tx, index_row, empty, frame)?
-            push_index_edit(mut edits, StoreRow(take index_row, take empty))
+            take pending
         }
         apply_put(mut tx, take p, take raw, tail)?
         apply_edits(mut tx, take edits)?
@@ -3104,27 +3075,22 @@ fn put_impl[K, V](mut tx: Tx, t: Table[K, V], take p: Bytes, v: V, tail: bool) -
     Ok(())
 }
 
-fn delete_impl[K, V](mut tx: Tx, t: Table[K, V], key: Bytes) -> Result[bool, Error] {
+fn delete_impl[K, V](mut tx: Tx, t: Table[K, V], indexes: List[Catalog], key: Bytes) -> Result[bool, Error] {
     let p = logical_key(t.id, key)?
-    let (take old, refund) = {
-        let raw = match transaction_row(tx, p) {
-            Some(v) => v,
-            None => return Ok(false)
-        }
-        let value = row_value(t.readers, t.id, raw)?
-        // As in apply_put: both retention modes take the same steps.
-        let previous = entry(p, raw)
-        (take value, if tx.retain_old {
-            0u64
-        } else {
-            previous
-        })
-    }
     let mut frame = tx.frame_bytes
-    let mut edits = IndexEdits(first: None, rest: list.new())
-    for ix in t.indexes {
-        let row = capacity((ix.extract)(old, Some(ix.id), key))?
-        append_index_remove(tx, mut edits, take row, mut frame)?
+    let (take edits, refund) = {
+        let Some(old) = transaction_row(tx, p) else {
+            return Ok(false)
+        }
+        let previous = entry(p, old)
+        let refund = if tx.retain_old { 0u64 } else { previous }
+        let mut pending = IndexEdits(first: None, rest: list.new())
+        for ix in indexes {
+            let bound_index = registered_index(tx, t.id, t.readers.current, ix)?
+            let row = (bound_index.extract)(old, key)?
+            append_index_remove(tx, mut pending, take row, mut frame)?
+        }
+        (take pending, refund)
     }
     frame = edit_frame(tx.ops, tx.below, tx.extra_bytes, p, None, frame)?
     apply_edits(mut tx, take edits)?
@@ -3133,15 +3099,15 @@ fn delete_impl[K, V](mut tx: Tx, t: Table[K, V], key: Bytes) -> Result[bool, Err
     Ok(true)
 }
 
-pub fn range[K, V](tx: Tx, t: Shape[K, V], lo: Bound[K], hi: Bound[K]) -> Result[RangeRows[K, V], Error] in tx {
+pub fn range[K, V](tx: Tx, t: Table[K, V], lo: Bound[K], hi: Bound[K]) -> Result[RangeRows[K, V], Error] in tx {
     open_range(tx, t, lo, hi, false)
 }
 
-pub fn range_reverse[K, V](tx: Tx, t: Shape[K, V], lo: Bound[K], hi: Bound[K]) -> Result[RangeRows[K, V], Error] in tx {
+pub fn range_reverse[K, V](tx: Tx, t: Table[K, V], lo: Bound[K], hi: Bound[K]) -> Result[RangeRows[K, V], Error] in tx {
     open_range(tx, t, lo, hi, true)
 }
 
-fn open_range[K, V](tx: Tx, t: Shape[K, V], lo: Bound[K], hi: Bound[K], reverse: bool) -> Result[RangeRows[K, V], Error] in tx {
+fn open_range[K, V](tx: Tx, t: Table[K, V], lo: Bound[K], hi: Bound[K], reverse: bool) -> Result[RangeRows[K, V], Error] in tx {
     if !same(tx.store, t.store) {
         return Error(Foreign)
     }
@@ -3159,7 +3125,7 @@ fn open_range[K, V](tx: Tx, t: Shape[K, V], lo: Bound[K], hi: Bound[K], reverse:
 }
 
 /// Borrow the stored schema tag and codec bytes from a snapshot.
-pub fn get_bytes[K, V](s: Snapshot, t: Shape[K, V], k: K) -> Result[Option[View[Bytes]], Error] in s {
+pub fn get_bytes[K, V](s: Snapshot, t: Table[K, V], k: K) -> Result[Option[View[Bytes]], Error] in s {
     if !same(s.store, t.store) {
         return Error(Foreign)
     }
@@ -3169,7 +3135,7 @@ pub fn get_bytes[K, V](s: Snapshot, t: Shape[K, V], k: K) -> Result[Option[View[
     Ok(get_page_row(s.roots.collections, p))
 }
 
-pub fn get[K, V](s: Snapshot, t: Shape[K, V], k: K) -> Result[Option[V], Error] {
+pub fn get[K, V](s: Snapshot, t: Table[K, V], k: K) -> Result[Option[V], Error] {
     match get_bytes(s, t, k)? {
         Some(raw) => Ok(Some(row_value(t.readers, t.id, raw)?)),
         None => Ok(None)
@@ -3177,7 +3143,7 @@ pub fn get[K, V](s: Snapshot, t: Shape[K, V], k: K) -> Result[Option[V], Error] 
 }
 
 /// Open a forward cursor over the stored values in a snapshot.
-pub fn scan_bytes[K, V](s: Snapshot, t: Shape[K, V], lo: Bound[K], hi: Bound[K]) -> Result[ViewRows, Error] in s {
+pub fn scan_bytes[K, V](s: Snapshot, t: Table[K, V], lo: Bound[K], hi: Bound[K]) -> Result[ViewRows, Error] in s {
     if !same(s.store, t.store) {
         return Error(Foreign)
     }
@@ -3219,7 +3185,7 @@ pub fn value_view(c: ViewRows) -> View[Bytes] in c {
     raw
 }
 
-pub fn scan[K, V](s: Snapshot, t: Shape[K, V], lo: Bound[K], hi: Bound[K]) -> Result[Rows[K, V], Error] {
+pub fn scan[K, V](s: Snapshot, t: Table[K, V], lo: Bound[K], hi: Bound[K]) -> Result[Rows[K, V], Error] {
     if !same(s.store, t.store) {
         return Error(Foreign)
     }
@@ -3228,7 +3194,7 @@ pub fn scan[K, V](s: Snapshot, t: Shape[K, V], lo: Bound[K], hi: Bound[K]) -> Re
     Ok(table_rows(s, t, take cursor))
 }
 
-pub fn scan_reverse[K, V](s: Snapshot, t: Shape[K, V], lo: Bound[K], hi: Bound[K]) -> Result[Rows[K, V], Error] {
+pub fn scan_reverse[K, V](s: Snapshot, t: Table[K, V], lo: Bound[K], hi: Bound[K]) -> Result[Rows[K, V], Error] {
     if !same(s.store, t.store) {
         return Error(Foreign)
     }
@@ -3239,7 +3205,7 @@ pub fn scan_reverse[K, V](s: Snapshot, t: Shape[K, V], lo: Bound[K], hi: Bound[K
     Ok(table_rows(s, t, take cursor))
 }
 
-pub fn count[K, V](s: Snapshot, t: Shape[K, V], lo: Bound[K], hi: Bound[K]) -> Result[u64, Error] {
+pub fn count[K, V](s: Snapshot, t: Table[K, V], lo: Bound[K], hi: Bound[K]) -> Result[u64, Error] {
     if !same(s.store, t.store) {
         return Error(Foreign)
     }
@@ -3249,13 +3215,13 @@ pub fn count[K, V](s: Snapshot, t: Shape[K, V], lo: Bound[K], hi: Bound[K]) -> R
     count_page_rows(s.roots.collections, t.id, low, high)
 }
 
-fn table_rows[K, V](s: Snapshot, t: Shape[K, V], take cursor: ByteRows) -> Rows[K, V] {
+fn table_rows[K, V](s: Snapshot, t: Table[K, V], take cursor: ByteRows) -> Rows[K, V] {
     Rows(cursor: take cursor, table: t.id, key: t.key, readers: arc.share(t.readers), data: share_page_tree(s.roots.collections), skip: None)
 }
 
 // RUNNER-SPEC §4 (R2): a Cover names data-tree key ranges (I1) without reading them. `key_span`
 // gives the Span a fully consumed range over the same bounds covers.
-pub fn key_span[K, V](t: Shape[K, V], lo: Bound[K], hi: Bound[K]) -> Result[Read, Error] {
+pub fn key_span[K, V](t: Table[K, V], lo: Bound[K], hi: Bound[K]) -> Result[Read, Error] {
     Ok(Span(lower_bytes(t.id, typed_bound(t.key, lo)?, false)?, lower_bytes(t.id, typed_bound(t.key, hi)?, true)?))
 }
 
@@ -3287,7 +3253,7 @@ pub fn span_changes(s: Snapshot, lo: Bytes, hi: Bytes) -> Result[List[Change], E
 // schema prefix. An older number is read with its Reader and encoded again, because the old
 // encoding may differ in length and layout. A key of another table (an index row's key
 // included) is Missing("table").
-pub fn published_value[K, V](t: Shape[K, V], c: Change) -> Result[Option[Bytes], Error] {
+pub fn published_value[K, V](t: Table[K, V], c: Change) -> Result[Option[Bytes], Error] {
     let mine = prefix(t.id)?
     if list.len(c.tree_key) < 4 || list.slice(c.tree_key, 0, 4) != list.slice(mine, 0, 4) {
         return Error(Missing("table"))
@@ -3405,7 +3371,7 @@ fn page_limits(limits: Limits) -> Result[(), Error] {
     Ok(())
 }
 
-pub fn scan_page[K, V](s: Snapshot, t: Shape[K, V], lo: Bound[K], hi: Bound[K], l: Limits) -> Result[Page[K, V], Error] {
+pub fn scan_page[K, V](s: Snapshot, t: Table[K, V], lo: Bound[K], hi: Bound[K], l: Limits) -> Result[Page[K, V], Error] {
     page_limits(l)?
     if !same(s.store, t.store) {
         return Error(Foreign)
@@ -3442,7 +3408,7 @@ fn resume_here(s: Snapshot, store: StoreId, id: u32, catalog_key: Bytes, seen: B
     Ok(true)
 }
 
-pub fn scan_next[K, V](s: Snapshot, t: Shape[K, V], take r: Resume, l: Limits) -> Result[Resumed[K, V], Error] {
+pub fn scan_next[K, V](s: Snapshot, t: Table[K, V], take r: Resume, l: Limits) -> Result[Resumed[K, V], Error] {
     if !resume_here(s, t.store, t.id, t.catalog_key, t.catalog_page, r, l)? {
         return Ok(Moved(s.head))
     }
@@ -3709,7 +3675,8 @@ fn remove_store_collection(mut tree: PageTree, id: u32, mut last: u64) -> Result
 
 pub opaque type Schema {
     store: StoreId,
-    catalog: PageTree
+    catalog: PageTree,
+    bindings: Option[Log[IndexRegistration]]
 }
 
 pub opaque type Migration {
@@ -3729,11 +3696,12 @@ type SchemaPlan: send {
     live: u64,
     ceiling: u64,
     retained: bool,
-    changed: bool
+    changed: bool,
+    bindings: List[IndexRegistration]
 }
 
 fn schema_plan(db: Db) -> SchemaPlan {
-    SchemaPlan(store: db.store, roots: share_roots(db.heads[0].roots), next_node: db.next_node, next_table: db.next_table, live: db.resident, ceiling: db.ceiling, retained: retaining(db), changed: false)
+    SchemaPlan(store: db.store, roots: share_roots(db.heads[0].roots), next_node: db.next_node, next_table: db.next_table, live: db.resident, ceiling: db.ceiling, retained: retaining(db), changed: false, bindings: list.new())
 }
 
 fn keep_schema(mut plan: SchemaPlan, take roots: Roots, live: u64, next_table: u32) -> Result[(), Error] {
@@ -3752,17 +3720,28 @@ fn application_name(name: String) -> Result[(), Error] {
     Ok(())
 }
 
-pub fn with_schema[H](db: Db, make: StaticFn[fn(Schema) -> Result[H, Error]]) -> Result[H, Error] {
+pub fn with_schema[H](mut db: Db, make: StaticFn[fn(Schema) -> Result[H, Error]]) -> Result[H, Error] {
     healthy(db)?
-    (code.callable(make))(Schema(store: db.store, catalog: share_page_tree(db.heads[0].roots.catalog)))
+    let (take handles, take bindings) = bind_schema(db.store, db.heads[0].roots.catalog, make)?
+    for take binding in take bindings {
+        register_index(mut db.indexes, take binding)
+    }
+    Ok(take handles)
+}
+
+fn bind_schema[H](id: StoreId, catalog: PageTree, make: StaticFn[fn(Schema) -> Result[H, Error]]) -> Result[(H, List[IndexRegistration]), Error] {
+    let schema = Schema(store: id, catalog: share_page_tree(catalog), bindings: Some(log.new()))
+    let handles = (code.callable(make))(schema)?
+    let Schema(bindings: take bindings, ..) = take schema
+    Ok((take handles, log.finish(option.unwrap(take bindings))))
 }
 
 pub fn snapshot_schema(s: Snapshot) -> Schema {
-    Schema(store: s.store, catalog: share_page_tree(s.roots.catalog))
+    Schema(store: s.store, catalog: share_page_tree(s.roots.catalog), bindings: None)
 }
 
 pub fn tx_schema(tx: Tx) -> Schema {
-    Schema(store: tx.store, catalog: share_page_tree(tx.roots.catalog))
+    Schema(store: tx.store, catalog: share_page_tree(tx.roots.catalog), bindings: None)
 }
 
 type MigrationJob: send {
@@ -3818,17 +3797,26 @@ pub fn run_migration(mut db: Db, tasks: Tasks, configure: StaticFn[fn(mut Migrat
     let StagedMigration(plan: take plan) = stage_migration(db, tasks, configure)?
     if plan.changed {
         let _ = publish_schema_plan(mut db, take plan)?
+    } else {
+        let SchemaPlan(bindings: take bindings, ..) = take plan
+        for take binding in take bindings {
+            register_index(mut db.indexes, take binding)
+        }
     }
     Ok(())
 }
 
 pub fn system_table[K, V](db: Db, name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[Table[K, V], Error] {
     healthy(db)?
-    catalog_handle(db.store, db.heads[0].roots.catalog, false, named(name)?, take key, take value)
+    catalog_handle(db.store, db.heads[0].roots.catalog, named(name)?, take key, take value)
 }
 
-pub fn with_staged_schema[H](staged: StagedMigration, make: StaticFn[fn(Schema) -> Result[H, Error]]) -> Result[H, Error] {
-    (code.callable(make))(Schema(store: staged.plan.store, catalog: share_page_tree(staged.plan.roots.catalog)))
+pub fn with_staged_schema[H](mut staged: StagedMigration, make: StaticFn[fn(Schema) -> Result[H, Error]]) -> Result[H, Error] {
+    let (take handles, take bindings) = bind_schema(staged.plan.store, staged.plan.roots.catalog, make)?
+    for take binding in take bindings {
+        list.push(mut staged.plan.bindings, take binding)
+    }
+    Ok(take handles)
 }
 
 fn stage_system_table[K, V](mut plan: SchemaPlan, name: String, key: std.codec.Key[K], value: std.codec.Codec[V]) -> Result[Table[K, V], Error] {
@@ -3891,13 +3879,16 @@ pub fn install_activation(mut db: Db, take staged: StagedMigration) -> Result[()
 }
 
 fn publish_schema_plan(mut db: Db, take prepared: SchemaPlan) -> Result[Ticket, Error] waits {
-    let SchemaPlan(roots: take roots, next_node: ids, next_table: tables, live: live, ..) = take prepared
+    let SchemaPlan(roots: take roots, next_node: ids, next_table: tables, live: live, bindings: take bindings, ..) = take prepared
     over_ceiling(live, db.ceiling)?
     // Schema commits are main's (section 1.2). Installed only after the cut.
     let replacement = ProposedMain(roots: take roots, head: db.heads[0u64].head + 1, at: db.heads[0u64].at, tables: tables)
     let publication = capacity(prepare_publication(db, 0, replacement.head, replacement.roots, ids))?
     // Stamps stay consumed on refusal. Table ids publish with the roots.
     db.next_node = ids
+    for take binding in take bindings {
+        register_index(mut db.indexes, take binding)
+    }
     let commit_ticket = cut_install(mut db, ReplaceMain(take replacement, None))?
     publish(take publication)
     Ok(commit_ticket)
@@ -4018,7 +4009,6 @@ fn stage_table[K, V](mut plan: SchemaPlan, name: String, take key: std.codec.Key
     }
     // Resolve before publishing a schema addition: Schema is always without effect.
     let resolved = readers(value, c, number, schema)?
-    let catalog = index_catalog_in(plan.roots.catalog, c.id)?
     let key_handle = catalog_key_handle(take k)?
     let seen = catalog_page(plan.roots.catalog)?
     if !found {
@@ -4031,15 +4021,15 @@ fn stage_table[K, V](mut plan: SchemaPlan, name: String, take key: std.codec.Key
         let next_id = plan.next_table
         keep_schema(mut plan, take roots, live, next_id)?
     }
-    Ok(Table(store: plan.store, id: c.id, epoch: c.epoch, complete: list.len(catalog) == 0, catalog_key: take key_handle, catalog_page: take seen, key: key, readers: take resolved, indexes: list.new()))
+    Ok(Table(store: plan.store, id: c.id, catalog_key: take key_handle, catalog_page: take seen, key: key, readers: take resolved))
 }
 
 pub fn schema_table[K, V](source: Schema, take name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[Table[K, V], Error] {
     application_name(name)?
-    catalog_handle(source.store, source.catalog, true, take name, take key, take value)
+    catalog_handle(source.store, source.catalog, take name, take key, take value)
 }
 
-fn catalog_handle[K, V](store_id: StoreId, catalog: PageTree, writable_handle: bool, take name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[Table[K, V], Error] {
+fn catalog_handle[K, V](store_id: StoreId, catalog: PageTree, take name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[Table[K, V], Error] {
     let k = table_key(name)?
     let c = match get_page_row(catalog, k) {
         Some(raw) => decode_catalog(raw)?,
@@ -4055,8 +4045,7 @@ fn catalog_handle[K, V](store_id: StoreId, catalog: PageTree, writable_handle: b
         if prior.fingerprint == fp && prior.schema == schema {
             let number = prior.number
             let resolved = readers(value, c, number, schema)?
-            let complete = writable_handle && list.len(index_catalog_in(catalog, c.id)?) == 0
-            return Ok(Table(store: store_id, id: c.id, epoch: c.epoch, complete: complete, catalog_key: catalog_key_handle(take k)?, catalog_page: catalog_page(catalog)?, key: key, readers: take resolved, indexes: list.new()))
+            return Ok(Table(store: store_id, id: c.id, catalog_key: catalog_key_handle(take k)?, catalog_page: catalog_page(catalog)?, key: key, readers: take resolved))
         }
     }
     Error(Schema(int.widen(c.next)))
@@ -4119,19 +4108,32 @@ fn stage_create_index[J, K, V](mut plan: SchemaPlan, t: Table[K, V], name: Strin
     keep_schema(mut plan, take roots, live, id + 1)
 }
 
-pub fn index[J, K, V](db: Db, mut t: Table[K, V], name: String, by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J]) -> Result[Index[J, K, V], Error] {
+pub fn index[J, K, V](mut db: Db, t: Table[K, V], name: String, by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J]) -> Result[Index[J, K, V], Error] {
     healthy(db)?
-    catalog_index(db.store, db.heads[0].roots.catalog, mut t, name, by, take key)
+    let catalog = view db.heads[0].roots.catalog
+    let (take k, take c) = read_catalog_index(db.store, catalog, t, name, by, key)?
+    let handle = catalog_index_handle(catalog, t, c, take k, key)?
+    register_index(mut db.indexes, bind_index(t, c, by, key))
+    Ok(take handle)
 }
 
-pub fn schema_index[J, K, V](source: Schema, mut t: Table[K, V], name: String, by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J]) -> Result[Index[J, K, V], Error] {
+pub fn schema_index[J, K, V](source: Schema, t: Table[K, V], name: String, by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J]) -> Result[Index[J, K, V], Error] {
     application_name(name)?
-    catalog_index(source.store, source.catalog, mut t, name, by, take key)
+    let (take k, take c) = read_catalog_index(source.store, source.catalog, t, name, by, key)?
+    let handle = catalog_index_handle(source.catalog, t, c, take k, key)?
+    if let Some(bindings) = source.bindings {
+        log.append(bindings, bind_index(t, c, by, key))
+    }
+    Ok(take handle)
 }
 
-pub fn migration_index[J, K, V](phase: Migration, mut t: Table[K, V], name: String, by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J]) -> Result[Index[J, K, V], Error] {
+pub fn migration_index[J, K, V](mut phase: Migration, t: Table[K, V], name: String, by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J]) -> Result[Index[J, K, V], Error] {
     application_name(name)?
-    catalog_index(phase.plan.store, phase.plan.roots.catalog, mut t, name, by, take key)
+    let catalog = view phase.plan.roots.catalog
+    let (take k, take c) = read_catalog_index(phase.plan.store, catalog, t, name, by, key)?
+    let handle = catalog_index_handle(catalog, t, c, take k, key)?
+    list.push(mut phase.plan.bindings, bind_index(t, c, by, key))
+    Ok(take handle)
 }
 
 fn read_catalog_index[J, K, V](store_id: StoreId, catalog: PageTree, t: Table[K, V], name: String, by: StaticFn[fn(V) -> Result[J, Capacity]], key: std.codec.Key[J]) -> Result[(Bytes, Catalog), Error] {
@@ -4151,36 +4153,6 @@ fn read_catalog_index[J, K, V](store_id: StoreId, catalog: PageTree, t: Table[K,
 
 fn catalog_index_handle[J, K, V](catalog: PageTree, t: Table[K, V], c: Catalog, take k: Bytes, take key: std.codec.Key[J]) -> Result[Index[J, K, V], Error] {
     Ok(Index(store: t.store, id: c.id, catalog_key: catalog_key_handle(take k)?, catalog_page: catalog_page(catalog)?, table: t.id, key: key, primary: t.key, readers: arc.share(t.readers)))
-}
-
-fn catalog_index[J, K, V](store_id: StoreId, catalog: PageTree, mut t: Table[K, V], name: String, by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J]) -> Result[Index[J, K, V], Error] {
-    let (take k, take c) = read_catalog_index(store_id, catalog, t, name, by, key)?
-    let mut present = false
-    for old in t.indexes {
-        if old.id == c.id {
-            present = true
-        }
-    }
-    if !present {
-        let extract = erase(by, key)?
-        list.push(mut t.indexes, IndexOf(id: c.id, extract: take extract))
-    }
-    let all = index_catalog_in(catalog, t.id)?
-    let mut complete = true
-    for needed in all {
-        let mut registered = false
-        for old in t.indexes {
-            if old.id == needed.id {
-                registered = true
-            }
-        }
-        if !registered {
-            complete = false
-        }
-    }
-    t.complete = complete
-    t.epoch = catalog_entry_in(catalog, t.catalog_key)?.epoch
-    catalog_index_handle(catalog, t, c, take k, take key)
 }
 
 pub fn drop_table[K, V](mut db: Db, take t: Table[K, V]) -> Result[Ticket, Error] waits {
@@ -4505,17 +4477,17 @@ fn typed_put(mut db: Db, t: Table[u64, u64], k: u64, v: u64) -> bool waits {
 }
 
 pub fn put[K, V](mut tx: Tx, t: Table[K, V], k: K, v: V) -> Result[(), Error] {
-    writable(tx, t)?
+    let indexes = writable(tx, t)?
     let tail = tx.frame_tail == OPEN_FRAME_TAIL
     let mut p = prefixed(t.id, 8, tail)?
     std.codec.encode_key(t.key, k, mut p)
-    put_impl(mut tx, t, take p, v, tail)
+    put_impl(mut tx, t, indexes, take p, v, tail)
 }
 
 pub fn delete[K, V](mut tx: Tx, t: Table[K, V], k: K) -> Result[bool, Error] {
-    writable(tx, t)?
+    let indexes = writable(tx, t)?
     let key = encode_key(t.key, k)?
-    delete_impl(mut tx, t, key)
+    delete_impl(mut tx, t, indexes, key)
 }
 
 type OldAccount {
@@ -4544,7 +4516,8 @@ pub fn look[R](s: Snapshot, steps: Option[u64], body: scoped[view] fn(Tx) -> R) 
     let issued: Log[u64] = log.new()
     let caught = isolate(fn() -> Result[R, OutOfTime] {
         let perform = scoped fn() -> R {
-            let tx = Tx(store: s.store, roots: share_roots(s.roots), ids: 0, private_from: 1, resident: 0, retain_old: false, frame_tail: NO_FRAME_TAIL, reads: view reads, issued: view issued, refusal: None, frame_bytes: None, wrote: false, ops: empty_ops(), info: CallInfo(id: CallId(store: s.store, branch: s.branch, version: s.head), at: 0, seed: 0), stream_ops: empty_ops(), extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, streams: 0)
+            let registry = empty_index_registry()
+            let tx = Tx(store: s.store, indexes: view registry, roots: share_roots(s.roots), ids: 0, private_from: 1, resident: 0, retain_old: false, frame_tail: NO_FRAME_TAIL, reads: view reads, issued: view issued, refusal: None, frame_bytes: None, wrote: false, ops: empty_ops(), info: CallInfo(id: CallId(store: s.store, branch: s.branch, version: s.head), at: 0, seed: 0), stream_ops: empty_ops(), extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, streams: 0)
             body(tx)
         }
         match steps {
@@ -5427,7 +5400,7 @@ pub fn stage_export_migration(source: Preparation, tasks: Tasks, configure: Stat
 
 pub fn export_system_get[K, V](source: Preparation, name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V], at: K) -> Result[Option[V], Error] {
     let selected = system_table(source.db, name, take key, take value)?
-    get(snapshot(source.db), shape(selected), at)
+    get(snapshot(source.db), selected, at)
 }
 
 pub fn staged_snapshot(source: Preparation, staged: StagedMigration) -> Snapshot {

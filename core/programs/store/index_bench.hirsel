@@ -74,7 +74,7 @@ pub fn main(dir: Dir, clock: Clock, random: Random, out: Stdout, argv: Args) -> 
             "i2"
         }
         result.unwrap(store.create_index(mut db, t, name, code.describe(bucket), std.codec.key_u64()))
-        let _ = result.unwrap(store.index(db, mut t, name, code.describe(bucket), std.codec.key_u64()))
+        let _ = result.unwrap(store.index(mut db, t, name, code.describe(bucket), std.codec.key_u64()))
     }
     for i in 0u64 .. 100000 {
         let _ = save(mut db, t, i, i)
@@ -103,7 +103,7 @@ pub fn main(dir: Dir, clock: Clock, random: Random, out: Stdout, argv: Args) -> 
         return Error(Exit(status: 7))
     }
     let snapshot = store.snapshot(db)
-    let shape = store.shape(t)
+    let shape = view t
     for i in 0u64 .. 10000 {
         let a = option.unwrap(result.unwrap(store.get(snapshot, shape, i)))
         if a.id != i || a.balance != int.narrow(i + 100000) || a.owner != "owner000" {

@@ -112,7 +112,7 @@ fn pool_call_queued(tasks: Tasks, clock: Clock, random: Random, network: Net, co
 }
 
 fn pool_durable_add(mut tx: store.Tx, table: store.Table[u64, u32], author: Caller, take value: u32) -> Result[u32, u32] {
-    let old = match store.fetch(tx, store.shape(table), 0u64) {
+    let old = match store.fetch(tx, table, 0u64) {
         Ok(Some(count)) => count,
         Ok(None) => 0u32,
         Error(_) => return Error(1u32),
@@ -200,14 +200,14 @@ pub fn law_pool_releases_cancelled_reader(tasks: Tasks, clock: Clock, random: Ra
     let _ = take pooled_task
 
     let before = store.snapshot(head.db)
-    let untouched = store.version(before) == 1u64 && result.unwrap(store.get(before, store.shape(head.h), 0u64)) == None
+    let untouched = store.version(before) == 1u64 && result.unwrap(store.get(before, head.h, 0u64)) == None
     let _ = take before
     let reply_codec: std.codec.Codec[Result[u32, u32]] = std.codec.of()
     let (take key, _) = result.unwrap(described(code.identity(add), code.revision(add), Transact, std.codec.of_u32(), reply_codec))
     let Call(_, _, _, _, take retry_arg) = result.unwrap(wire_decode(payload)) else { return false }
     let committed = pool_retry(mut head, releases, clone(key), clone(retry_arg), 3u64)
     let replayed = pool_retry(mut head, releases, take key, take retry_arg, 3u64)
-    let one_effect = result.unwrap(store.get(store.snapshot(head.db), store.shape(head.h), 0u64)) == Some(7u32)
+    let one_effect = result.unwrap(store.get(store.snapshot(head.db), head.h, 0u64)) == Some(7u32)
     held && bytes_refunded && slot_returned_once && untouched && committed && replayed && one_effect
 }
 

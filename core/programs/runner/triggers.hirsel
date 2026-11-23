@@ -116,7 +116,7 @@ fn pending_table(source: store.Schema) -> Result[store.Table[Id, Row], store.Err
 pub fn tables(source: store.Schema) -> Result[Tables, store.Error] {
     let mut rows = pending_table(source)?
     let terminal: std.codec.Codec[Terminal] = std.codec.of()
-    let due = store.schema_index(source, mut rows, "due", code.describe(row_due), std.codec.key_u64())?
+    let due = store.schema_index(source, rows, "due", code.describe(row_due), std.codec.key_u64())?
     let outcomes = store.schema_table(source, outcomes_name(), id_key(), terminal)?
     Ok(Tables(rows: take rows, due: take due, outcomes: take outcomes))
 }
@@ -133,7 +133,7 @@ pub fn pending_table_if_present(source: store.Schema) -> Result[PendingTable, st
 
 pub fn scan_pending(s: store.Snapshot, t: PendingTable) -> Result[Option[PendingRows], store.Error] {
     match t.table {
-        Some(table) => Ok(Some(PendingRows(rows: store.scan(s, store.shape(table), Unbounded, Unbounded)?))),
+        Some(table) => Ok(Some(PendingRows(rows: store.scan(s, table, Unbounded, Unbounded)?))),
         None => Ok(None),
     }
 }
@@ -213,8 +213,7 @@ pub fn write[A](mut tx: store.Tx, t: Tables, entries: Entries, target: Entry[A],
     if !listed(entries, target.ref.path, target.ref.schema, target.ref.granted) { return Error(MissingEntry) }
     let info = store.info(mut tx)
     let mut id = Id(store_hi: info.id.store.hi, store_lo: info.id.store.lo, branch: info.id.branch, version: info.id.version, index: 0u64)
-    let shape = store.shape(t.rows)
-    while let Some(_) = stored(store.fetch(tx, shape, id))? {
+    while let Some(_) = stored(store.fetch(tx, t.rows, id))? {
         let Some(next) = int.checked_add(id.index, 1u64) else { return Error(IndexLimit) }
         id.index = next
     }
@@ -268,7 +267,7 @@ pub fn held_on_start(p: Pending, image: Bytes) -> bool {
 }
 
 fn read(tx: store.Tx, t: Tables, id: Id) -> Result[Row, Error] {
-    match stored(store.fetch(tx, store.shape(t.rows), id))? {
+    match stored(store.fetch(tx, t.rows, id))? {
         Some(take row) => Ok(take row),
         None => Error(StaleAttempt),
     }
@@ -298,14 +297,14 @@ pub fn fence(tx: store.Tx, t: Tables, a: Attempt) -> Result[bool, Error] {
 }
 
 pub fn hold_mark(s: store.Snapshot, t: Tables, id: Id) -> Result[Option[Hold], store.Error] {
-    match store.get(s, store.shape(t.rows), id)? {
+    match store.get(s, t.rows, id)? {
         Some(Row(state: Parked(take mark), ..)) => Ok(Some(take mark)),
         _ => Ok(None),
     }
 }
 
 pub fn boundary(s: store.Snapshot, t: Tables, a: Attempt) -> Result[bool, Error] {
-    let row = stored(store.get(s, store.shape(t.rows), a.id))?
+    let row = stored(store.get(s, t.rows, a.id))?
     let Some(value) = row else { return Error(StaleAttempt) }
     if !current_attempt(value, a) { return Error(StaleAttempt) }
     Ok(value.cancel)
@@ -382,11 +381,11 @@ pub fn finish_transact(mut tx: store.Tx, t: Tables, p: Pending, terminal: Termin
 }
 
 pub fn outcome(s: store.Snapshot, t: Tables, id: Id) -> Result[Option[Terminal], store.Error] {
-    store.get(s, store.shape(t.outcomes), id)
+    store.get(s, t.outcomes, id)
 }
 
 pub fn fetch_outcome(tx: store.Tx, t: Tables, id: Id) -> Result[Option[Terminal], store.Error] {
-    store.fetch(tx, store.shape(t.outcomes), id)
+    store.fetch(tx, t.outcomes, id)
 }
 
 pub fn law_options() -> store.Options {

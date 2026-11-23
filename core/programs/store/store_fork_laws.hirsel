@@ -2,7 +2,7 @@ fn range_boundary_points(c: Clock) -> bool waits {
     let mut db = test_db(c, 1073741824)
     result.unwrap(create_table(mut db, spec("boundary", std.codec.key_u64(), std.codec.of_u64())))
     let t = result.unwrap(table(mut db, "boundary", std.codec.key_u64(), std.codec.of_u64()))
-    let sh = shape(t)
+    let sh = view t
     // The review's one-row witness, before any node split can distract from it.
     let witness = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[bool, Error] {
         put(mut tx, t, 32, 7)?
@@ -59,7 +59,7 @@ fn range_boundary_points(c: Clock) -> bool waits {
     }
     result.unwrap(create_table(mut db, spec("other_boundary", std.codec.key_u64(), std.codec.of_u64())))
     let second_table = result.unwrap(table(mut db, "other_boundary", std.codec.key_u64(), std.codec.of_u64()))
-    let second_shape = shape(second_table)
+    let second_shape = view second_table
     let second_witness = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[bool, Error] {
         put(mut tx, second_table, 32, 17)?
         let mut rows = range(tx, second_shape, Included(32), Included(32))?
@@ -74,7 +74,7 @@ fn range_boundary_points(c: Clock) -> bool waits {
     true
 }
 
-fn stale_reads(tx: Tx, sh: Shape[u64, u64], ix: Index[u64, u64, u64], table_id: u32, index_id: u32) -> bool {
+fn stale_reads(tx: Tx, sh: Table[u64, u64], ix: Index[u64, u64, u64], table_id: u32, index_id: u32) -> bool {
     let point = match fetch(tx, sh, 1) {
         Error(Stale(id)) => id == table_id,
         _ => false
@@ -96,12 +96,12 @@ pub fn law_read_liveness(c: Clock) -> bool waits {
     let mut db = test_db(c, 1073741824)
     result.unwrap(create_table(mut db, spec("live", std.codec.key_u64(), std.codec.of_u64())))
     let mut old = result.unwrap(table(mut db, "live", std.codec.key_u64(), std.codec.of_u64()))
-    let old_shape = shape(old)
+    let old_shape: Table[u64, u64] = clone(old)
     if !typed_put(mut db, old, 1, 10) {
         return false
     }
     result.unwrap(create_index(mut db, old, "bucket", code.describe(bucket), std.codec.key_u64()))
-    let old_index = result.unwrap(index(db, mut old, "bucket", code.describe(bucket), std.codec.key_u64()))
+    let old_index = result.unwrap(index(mut db, old, "bucket", code.describe(bucket), std.codec.key_u64()))
     result.unwrap(create_index(mut db, old, "other", code.describe(quotient), std.codec.key_u64()))
     let before = snapshot(db)
     if result.unwrap(get(before, old_shape, 1)) != Some(10u64) {
@@ -119,8 +119,8 @@ pub fn law_read_liveness(c: Clock) -> bool waits {
     result.unwrap(create_table(mut db, spec("live", std.codec.key_u64(), std.codec.of_u64())))
     let mut newer = result.unwrap(table(mut db, "live", std.codec.key_u64(), std.codec.of_u64()))
     result.unwrap(create_index(mut db, newer, "bucket", code.describe(bucket), std.codec.key_u64()))
-    let fresh_index = result.unwrap(index(db, mut newer, "bucket", code.describe(bucket), std.codec.key_u64()))
-    let fresh_shape = shape(newer)
+    let fresh_index = result.unwrap(index(mut db, newer, "bucket", code.describe(bucket), std.codec.key_u64()))
+    let fresh_shape = view newer
     if newer.id != 4 || fresh_index.id != 5 || !typed_put(mut db, newer, 1, 20) {
         return false
     }
@@ -199,7 +199,7 @@ pub fn law_overwrite_account(c: Clock) -> bool waits {
             return false
         }
     }
-    result.unwrap(get(snapshot(db), shape(t), 1)) == Some(100000u64)
+    result.unwrap(get(snapshot(db), t, 1)) == Some(100000u64)
 }
 
 // L30, AA1's trace by hand. Main is at v1 after create_table; b forks there
@@ -214,7 +214,7 @@ pub fn law_branches(c: Clock) -> bool waits {
     let mut db = test_db(c, 1073741824)
     result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
     let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
-    let sh = shape(t)
+    let sh = view t
     if version(snapshot(db)) != 1 {
         return false
     }
@@ -403,7 +403,7 @@ pub fn law_pin_settle(c: Clock) -> bool waits {
     if db.resident != 354 || !typed_put(mut db, t, 1, 7) || db.resident != 354 {
         return false
     }
-    result.unwrap(get(snapshot(db), shape(t), 1)) == Some(7u64)
+    result.unwrap(get(snapshot(db), t, 1)) == Some(7u64)
 }
 
 // AP15. The catalog and descriptor cost 260 and one row version costs 94.
@@ -455,7 +455,7 @@ fn pinned_draft_at_bound(mut db: Db) -> Result[(), Error] waits {
         return Error(Foreign)
     }
     let head = snapshot(db)
-    if cap.requested != 448 || cap.available != 354 || accounts(db).journal != journal || accounts(db).logical != 354 || !accounts(db).exact || version(head) != 5 || get(head, shape(rows), 1)? != Some(1u64) || get(head, shape(rows), 2)? != None {
+    if cap.requested != 448 || cap.available != 354 || accounts(db).journal != journal || accounts(db).logical != 354 || !accounts(db).exact || version(head) != 5 || get(head, rows, 1)? != Some(1u64) || get(head, rows, 2)? != None {
         return Error(Foreign)
     }
     Ok(())
@@ -476,7 +476,7 @@ fn test_pinned_draft_at_bound(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
     let mut reopened = open(tasks, child, c, r, options)?
     let rows = table(mut reopened, "rows", std.codec.key_u64(), std.codec.of_u64())?
     let head = snapshot(reopened)
-    if accounts(reopened).logical != 354 || !accounts(reopened).exact || version(head) != 5 || get(head, shape(rows), 1)? != Some(1u64) || get(head, shape(rows), 2)? != None {
+    if accounts(reopened).logical != 354 || !accounts(reopened).exact || version(head) != 5 || get(head, rows, 1)? != Some(1u64) || get(head, rows, 2)? != None {
         return Error(Foreign)
     }
     close(take reopened)
@@ -496,7 +496,7 @@ pub fn law_fork_shared_head(c: Clock) -> bool waits {
     match fork(mut db, "fork", from) {
         Ok((b, receipt)) => {
             result.unwrap(durable(mut db, receipt))
-            db.resident == 354 && db.checkpointed == cut && journal_mark(receipt) == before + 1 && accounts(db).exact && option.unwrap(branch(db, "fork")).id == b.id && result.unwrap(get(result.unwrap(snapshot_of(db, b)), shape(t), 1)) == Some(1u64)
+            db.resident == 354 && db.checkpointed == cut && journal_mark(receipt) == before + 1 && accounts(db).exact && option.unwrap(branch(db, "fork")).id == b.id && result.unwrap(get(result.unwrap(snapshot_of(db, b)), t, 1)) == Some(1u64)
         },
         _ => false,
     }
@@ -512,7 +512,7 @@ fn fork_tip_round(mut db: Db, from: Snapshot, rows: Table[u64, u64]) -> Result[b
         return Ok(false)
     }
     let tip = snapshot_of(db, child)?
-    Ok(get(tip, shape(rows), 1)? == Some(2u64) && get(from, shape(rows), 1)? == Some(1u64) && accounts(db).logical == before + 94)
+    Ok(get(tip, rows, 1)? == Some(2u64) && get(from, rows, 1)? == Some(1u64) && accounts(db).logical == before + 94)
 }
 
 fn fork_tip_fits(c: Clock, depth: u64, steps: u64) -> bool waits {
@@ -604,7 +604,7 @@ pub fn law_fork_old_snapshot(c: Clock) -> bool waits {
     if let Some(_) = branch(db, "fork") {
         return false
     }
-    db.checkpointed == cut && db.next_branch == next_id + 1 && db.resident == 354 && version(head) == 3 && result.unwrap(get(head, shape(t), 1)) == Some(2u64) && result.unwrap(get(held, shape(t), 1)) == Some(1u64)
+    db.checkpointed == cut && db.next_branch == next_id + 1 && db.resident == 354 && version(head) == 3 && result.unwrap(get(head, t, 1)) == Some(2u64) && result.unwrap(get(held, t, 1)) == Some(1u64)
 }
 
 // L27(c). A pin of the empty table keeps the descriptor and catalog once.
@@ -628,7 +628,7 @@ pub fn law_fork_settle(c: Clock) -> bool waits {
     let settled = db.settled
     let cut = db.checkpointed
     match fork(mut db, "fork", from) {
-        Ok((b, _)) => db.resident == 636 && !accounts(db).exact && db.settled == settled && db.checkpointed == cut && result.unwrap(get(result.unwrap(snapshot_of(db, b)), shape(t), 1)) == Some(4u64) && result.unwrap(get(option.unwrap(pinned(db, "empty")), shape(t), 1)) == None,
+        Ok((b, _)) => db.resident == 636 && !accounts(db).exact && db.settled == settled && db.checkpointed == cut && result.unwrap(get(result.unwrap(snapshot_of(db, b)), t, 1)) == Some(4u64) && result.unwrap(get(option.unwrap(pinned(db, "empty")), t, 1)) == None,
         _ => false,
     }
 }

@@ -502,10 +502,10 @@ pub fn open(take opened: store.Db, first: Config) -> Result[(Host, List[launcher
     let mut db = take opened
     let t = st(make_tables(mut db))?
     let made = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), Refused] {
-        if let None = st(store.fetch(tx, store.shape(t.config), 0u64))? {
+        if let None = st(store.fetch(tx, t.config, 0u64))? {
             st(store.put(mut tx, t.config, 0u64, first))?
         }
-        if let None = st(store.fetch(tx, store.shape(t.meta), 0u64))? {
+        if let None = st(store.fetch(tx, t.meta, 0u64))? {
             st(store.put(mut tx, t.meta, 0u64, Meta(dirty: 0u64, next_incarnation: 1u64, next_attempt: 1u64)))?
         }
         Ok(())
@@ -612,18 +612,18 @@ fn attempt_bytes(a: launcher.Attempt) -> Bytes {
 }
 
 fn group_row(h: Host, name: String) -> Result[Option[GroupRow], Refused] {
-    st(store.get(store.snapshot(h.db), store.shape(h.t.groups), name))
+    st(store.get(store.snapshot(h.db), h.t.groups, name))
 }
 
 fn host_config(h: Host) -> Result[Config, Refused] {
-    match st(store.get(store.snapshot(h.db), store.shape(h.t.config), 0u64))? {
+    match st(store.get(store.snapshot(h.db), h.t.config, 0u64))? {
         Some(c) => Ok(c),
         None => Error(Missing("config"))
     }
 }
 
 pub fn wake_row(h: Host, name: String) -> Option[WakeRow] {
-    match store.get(store.snapshot(h.db), store.shape(h.t.wake), name) {
+    match store.get(store.snapshot(h.db), h.t.wake, name) {
         Ok(Some(w)) => Some(w),
         _ => None
     }
@@ -707,25 +707,25 @@ fn enqueue(mut h: Host, name: String, since: u64) {
 }
 
 fn usage_of(tx: store.Tx, t: Tables, tenant: String) -> Result[Usage, Refused] {
-    match st(store.fetch(tx, store.shape(t.usage), tenant))? {
+    match st(store.fetch(tx, t.usage, tenant))? {
         Some(u) => Ok(u),
         None => Ok(Usage(groups: 0u64, live: 0u64))
     }
 }
 
 fn quota_of(tx: store.Tx, t: Tables, tenant: String) -> Result[Option[Quota], Refused] {
-    st(store.fetch(tx, store.shape(t.quotas), tenant))
+    st(store.fetch(tx, t.quotas, tenant))
 }
 
 fn meta_of(tx: store.Tx, t: Tables) -> Result[Meta, Refused] {
-    match st(store.fetch(tx, store.shape(t.meta), 0u64))? {
+    match st(store.fetch(tx, t.meta, 0u64))? {
         Some(m) => Ok(m),
         None => Error(Missing("meta"))
     }
 }
 
 fn config_of(tx: store.Tx, t: Tables) -> Result[Config, Refused] {
-    match st(store.fetch(tx, store.shape(t.config), 0u64))? {
+    match st(store.fetch(tx, t.config, 0u64))? {
         Some(c) => Ok(c),
         None => Error(Missing("config"))
     }
@@ -733,10 +733,10 @@ fn config_of(tx: store.Tx, t: Tables) -> Result[Config, Refused] {
 
 // §14.2: the capacity and tenant checks come before `Dirty`, in the transaction that writes it.
 fn mark_dirty(mut tx: store.Tx, t: Tables, name: String) -> Result[(GroupRow, u64), Refused] {
-    let Some(g) = st(store.fetch(tx, store.shape(t.groups), name))? else {
+    let Some(g) = st(store.fetch(tx, t.groups, name))? else {
         return Error(Unknown)
     }
-    let Some(w) = st(store.fetch(tx, store.shape(t.wake), name))? else {
+    let Some(w) = st(store.fetch(tx, t.wake, name))? else {
         return Error(Unknown)
     }
     let Clean(due) = w.wake else {
@@ -771,7 +771,7 @@ fn mark_dirty(mut tx: store.Tx, t: Tables, name: String) -> Result[(GroupRow, u6
 // The pair a serving launch of an already Dirty row opens: the group's recorded assembly
 // and activation, or while its deploy is Undecided, the pair that deploy's probe selects.
 fn probe_pair(tx: store.Tx, t: Tables, name: String, g: GroupRow) -> Result[(Bytes, u64, Option[u64]), Refused] {
-    if let Some(d) = st(store.fetch(tx, store.shape(t.deploys), name))? {
+    if let Some(d) = st(store.fetch(tx, t.deploys, name))? {
         match d.outcome {
             Undecided(ProbeNew) => return Ok((clone(d.assembly), d.activation, Some(d.activation))),
             Undecided(ProbeOld) => return Ok((clone(g.assembly), g.activation, Some(d.activation))),
@@ -782,10 +782,10 @@ fn probe_pair(tx: store.Tx, t: Tables, name: String, g: GroupRow) -> Result[(Byt
 }
 
 fn remark(mut tx: store.Tx, t: Tables, name: String) -> Result[(GroupRow, u64), Refused] {
-    let Some(g) = st(store.fetch(tx, store.shape(t.groups), name))? else {
+    let Some(g) = st(store.fetch(tx, t.groups, name))? else {
         return Error(Unknown)
     }
-    let Some(w) = st(store.fetch(tx, store.shape(t.wake), name))? else {
+    let Some(w) = st(store.fetch(tx, t.wake, name))? else {
         return Error(Unknown)
     }
     let Dirty(_) = w.wake else {
@@ -802,10 +802,10 @@ fn remark(mut tx: store.Tx, t: Tables, name: String) -> Result[(GroupRow, u64), 
 
 // §14.4 "Only a clean Stopped writes Clean": the row must be Dirty(g) with the report's g.
 fn mark_clean(mut tx: store.Tx, t: Tables, name: String, g: u64, next_due: Option[u64]) -> Result[bool, Refused] {
-    let Some(grp) = st(store.fetch(tx, store.shape(t.groups), name))? else {
+    let Some(grp) = st(store.fetch(tx, t.groups, name))? else {
         return Ok(false)
     }
-    let Some(w) = st(store.fetch(tx, store.shape(t.wake), name))? else {
+    let Some(w) = st(store.fetch(tx, t.wake, name))? else {
         return Ok(false)
     }
     let Dirty(a) = w.wake else {
@@ -1161,14 +1161,14 @@ fn commit_cut(mut h: Host, name: String, take cut: Cut, now: Now, mut out: List[
     let made = {
         let t = view h.t
         store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[(), Refused] {
-            let Some(found_w) = st(store.fetch(tx, store.shape(t.wake), name))? else {
+            let Some(found_w) = st(store.fetch(tx, t.wake, name))? else {
                 return Error(Unknown)
             }
             let mut w = found_w
-            let Some(grp) = st(store.fetch(tx, store.shape(t.groups), name))? else {
+            let Some(grp) = st(store.fetch(tx, t.groups, name))? else {
                 return Error(Unknown)
             }
-            let Some(d) = st(store.fetch(tx, store.shape(t.deploys), name))? else {
+            let Some(d) = st(store.fetch(tx, t.deploys, name))? else {
                 return Error(Missing("deploy"))
             }
             w.wake = Dirty(candidate)
@@ -1205,7 +1205,7 @@ fn abort_cut(mut h: Host, name: String, g: GroupRow, take cut: Cut, why: String,
     let made = {
         let t = view h.t
         store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[(), Refused] {
-            let Some(found_d) = st(store.fetch(tx, store.shape(t.deploys), name))? else {
+            let Some(found_d) = st(store.fetch(tx, t.deploys, name))? else {
                 return Error(Missing("deploy"))
             }
             let mut d = found_d
@@ -1245,7 +1245,7 @@ fn drift(mut h: Host, name: String, g: GroupRow, take cut: Cut, now: Now, mut ou
         let t = view h.t
         let k = view cut
         store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[Option[DeployRow], Refused] {
-            let Some(found_d) = st(store.fetch(tx, store.shape(t.deploys), name))? else {
+            let Some(found_d) = st(store.fetch(tx, t.deploys, name))? else {
                 return Error(Missing("deploy"))
             }
             let mut d = found_d
@@ -1299,7 +1299,7 @@ fn undecided(mut h: Host, name: String, take cut: Cut, mut out: List[launcher.Re
     let made = {
         let t = view h.t
         store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[(), Refused] {
-            let Some(found_d) = st(store.fetch(tx, store.shape(t.deploys), name))? else {
+            let Some(found_d) = st(store.fetch(tx, t.deploys, name))? else {
                 return Error(Missing("deploy"))
             }
             let mut d = found_d
@@ -1469,7 +1469,7 @@ fn adopt_genesis(mut h: Host, name: String, incarnation: u64, version: u64) -> b
     let made = {
         let t = view h.t
         store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[bool, Refused] {
-            let Some(found) = st(store.fetch(tx, store.shape(t.groups), name))? else {
+            let Some(found) = st(store.fetch(tx, t.groups, name))? else {
                 return Ok(false)
             }
             if found.incarnation != incarnation || found.activation != 0u64 {
@@ -1523,7 +1523,7 @@ fn stop_or_ack(c: launcher.Child, p: launcher.Phase, mut out: List[launcher.Requ
 
 fn dirty_names(h: Host) -> List[String] {
     let mut names: List[String] = list.new()
-    let Ok(take scanned) = store.scan(store.snapshot(h.db), store.shape(h.t.dirty), Unbounded, Unbounded) else {
+    let Ok(take scanned) = store.scan(store.snapshot(h.db), h.t.dirty, Unbounded, Unbounded) else {
         return names
     }
     let mut rows = take scanned
@@ -1534,7 +1534,7 @@ fn dirty_names(h: Host) -> List[String] {
 }
 
 fn binds(h: Host, mut out: List[launcher.Request]) {
-    let Ok(take scanned) = store.scan(store.snapshot(h.db), store.shape(h.t.groups), Unbounded, Unbounded) else {
+    let Ok(take scanned) = store.scan(store.snapshot(h.db), h.t.groups, Unbounded, Unbounded) else {
         return
     }
     let mut rows = take scanned
@@ -1587,7 +1587,7 @@ fn reconcile(mut h: Host, children: List[launcher.ChildState], readable: List[la
             Dirty(a) => a == gen,
             Clean(_) => false
         }
-        let pending: Option[DeployRow] = match store.get(store.snapshot(h.db), store.shape(h.t.deploys), name) {
+        let pending: Option[DeployRow] = match store.get(store.snapshot(h.db), h.t.deploys, name) {
             Ok(Some(d)) => Some(d),
             _ => None
         }
@@ -1661,7 +1661,7 @@ fn resume_cuts(mut h: Host, held: List[launcher.CutoverKey], mut out: List[launc
     let mut rows: List[(String, DeployRow)] = list.new()
     let mut preps: List[(String, DeployRow)] = list.new()
     {
-        let Ok(take scanned) = store.scan(store.snapshot(h.db), store.shape(h.t.deploys), Unbounded, Unbounded) else {
+        let Ok(take scanned) = store.scan(store.snapshot(h.db), h.t.deploys, Unbounded, Unbounded) else {
             return
         }
         let mut found = take scanned
@@ -1705,7 +1705,7 @@ fn resume_cuts(mut h: Host, held: List[launcher.CutoverKey], mut out: List[launc
             let made = {
                 let t = view h.t
                 store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[(), Refused] {
-                    let Some(found_d) = st(store.fetch(tx, store.shape(t.deploys), name))? else {
+                    let Some(found_d) = st(store.fetch(tx, t.deploys, name))? else {
                         return Error(Missing("deploy"))
                     }
                     let mut row = found_d
@@ -1735,7 +1735,7 @@ fn resume_cuts(mut h: Host, held: List[launcher.CutoverKey], mut out: List[launc
 fn due_wakes(mut h: Host, now: Now, mut out: List[launcher.Request]) waits {
     let mut due: List[DueKey] = list.new()
     {
-        let Ok(take scanned) = store.scan(store.snapshot(h.db), store.shape(h.t.due), Unbounded, Unbounded) else {
+        let Ok(take scanned) = store.scan(store.snapshot(h.db), h.t.due, Unbounded, Unbounded) else {
             return
         }
         let mut rows = take scanned
@@ -1860,7 +1860,7 @@ pub fn tick(mut h: Host, now: Now) -> List[launcher.Request] waits {
 // backoff timer follows the earliest retry (§14.3, §14.5).
 pub fn timers(h: Host) -> Timers {
     let mut wall: Option[u64] = None
-    if let Ok(take scanned) = store.scan(store.snapshot(h.db), store.shape(h.t.due), Unbounded, Unbounded) {
+    if let Ok(take scanned) = store.scan(store.snapshot(h.db), h.t.due, Unbounded, Unbounded) {
         let mut rows = take scanned
         while let Ok(Some((k, _))) = store.next(mut rows) {
             if let None = queued_at(h, k.name) {
@@ -1976,7 +1976,7 @@ fn prepare(mut h: Host, name: String, request: Bytes, attempt: launcher.Attempt,
     let made = {
         let t = view h.t
         store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[(), Refused] {
-            let Some(w) = st(store.fetch(tx, store.shape(t.wake), name))? else {
+            let Some(w) = st(store.fetch(tx, t.wake, name))? else {
                 return Error(Unknown)
             }
             let Dirty(a) = w.wake else {
@@ -1986,7 +1986,7 @@ fn prepare(mut h: Host, name: String, request: Bytes, attempt: launcher.Attempt,
                 return Error(Busy(a))
             }
             // An unresolved deploy's row is the only record of its NEW root.
-            if let Some(prior) = st(store.fetch(tx, store.shape(t.deploys), name))? {
+            if let Some(prior) = st(store.fetch(tx, t.deploys, name))? {
                 match prior.outcome {
                     Installed => (),
                     Failed(_) => (),
@@ -2134,7 +2134,7 @@ fn refuse(mut h: Host, conn: u64, class: operator.Class, why: String) {
 }
 
 fn request_row(h: Host, d: Bytes) -> Result[Option[RequestRow], Refused] {
-    st(store.get(store.snapshot(h.db), store.shape(h.t.requests), d))
+    st(store.get(store.snapshot(h.db), h.t.requests, d))
 }
 
 fn report_of(row: DeployRow, pause: operator.Pause) -> operator.Report {
@@ -2156,7 +2156,7 @@ fn admission_of(h: Host, name: String, d: Bytes) -> Option[Admitting] {
 
 // The group's unresolved deploy row, if it runs request d.
 fn deploy_of(h: Host, name: String, d: Bytes) -> Option[DeployRow] {
-    match store.get(store.snapshot(h.db), store.shape(h.t.deploys), name) {
+    match store.get(store.snapshot(h.db), h.t.deploys, name) {
         Ok(Some(row)) if row.request == d => match row.outcome {
             Preparing => Some(clone(row)),
             Pending => Some(clone(row)),
@@ -2259,12 +2259,12 @@ fn fresh_attempt(mut tx: store.Tx, t: Tables) -> Result[launcher.Attempt, Refuse
 
 // Records request d's terminal phase and ends it as the group's active request.
 fn finish_request(mut tx: store.Tx, t: Tables, name: String, d: Bytes, p: operator.Phase) -> Result[(), Refused] {
-    if let Some(found) = st(store.fetch(tx, store.shape(t.requests), d))? {
+    if let Some(found) = st(store.fetch(tx, t.requests, d))? {
         let mut r = found
         r.done = Some(clone(p))
         st(store.put(mut tx, t.requests, d, r))?
     }
-    if let Some(x) = st(store.fetch(tx, store.shape(t.active), name))? {
+    if let Some(x) = st(store.fetch(tx, t.active, name))? {
         if x == d {
             let _ = st(store.delete(mut tx, t.active, name))?
         }
@@ -2293,7 +2293,7 @@ fn fail_request(mut h: Host, d: Bytes, class: operator.Class, why: String) waits
     let made = {
         let t = view h.t
         store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[Option[launcher.Group], Refused] {
-            let Some(r) = st(store.fetch(tx, store.shape(t.requests), d))? else {
+            let Some(r) = st(store.fetch(tx, t.requests, d))? else {
                 return Ok(None)
             }
             if let Some(_) = r.done {
@@ -2303,10 +2303,10 @@ fn fail_request(mut h: Host, d: Bytes, class: operator.Class, why: String) waits
             let Some(RegisterAsk(_, _, _, _, _)) = operator.decode_ask(r.begin) else {
                 return Ok(None)
             }
-            if let Some(_) = st(store.fetch(tx, store.shape(t.wake), r.group.name))? {
+            if let Some(_) = st(store.fetch(tx, t.wake, r.group.name))? {
                 return Ok(None)
             }
-            let Some(g) = st(store.fetch(tx, store.shape(t.groups), r.group.name))? else {
+            let Some(g) = st(store.fetch(tx, t.groups, r.group.name))? else {
                 return Ok(None)
             }
             if g.incarnation != r.group.incarnation {
@@ -2331,7 +2331,7 @@ fn fail_request(mut h: Host, d: Bytes, class: operator.Class, why: String) waits
 // attached, or awaiting input before its deadline. One that lost its input past its
 // deadline fails here.
 fn active_holds(mut h: Host, name: String, d: Bytes, now: Now) -> bool waits {
-    let Ok(Some(other)) = store.get(store.snapshot(h.db), store.shape(h.t.active), name) else {
+    let Ok(Some(other)) = store.get(store.snapshot(h.db), h.t.active, name) else {
         return false
     }
     if other == d {
@@ -2406,7 +2406,7 @@ fn begin(mut h: Host, conn: u64, ask: operator.Ask, d: Bytes, g: launcher.Group,
         let t = view h.t
         let name = view g.name
         store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[launcher.Attempt, Refused] {
-            if let Some(x) = st(store.fetch(tx, store.shape(t.active), name))? {
+            if let Some(x) = st(store.fetch(tx, t.active, name))? {
                 if x != d {
                     return Error(Busy(0u64))
                 }
@@ -2503,7 +2503,7 @@ fn reattach(mut h: Host, conn: u64, d: Bytes, r: RequestRow, now: Now, mut out: 
     let made = {
         let t = view h.t
         store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[launcher.Attempt, Refused] {
-            let Some(found) = st(store.fetch(tx, store.shape(t.requests), d))? else {
+            let Some(found) = st(store.fetch(tx, t.requests, d))? else {
                 return Error(Missing("request"))
             }
             let mut row = found
@@ -2902,13 +2902,13 @@ fn install_first(mut h: Host, name: String, d: Admitting, key: Bytes, fetch_ns: 
     let made = {
         let t = view h.t
         store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[(), Refused] {
-            let Some(found) = st(store.fetch(tx, store.shape(t.groups), name))? else {
+            let Some(found) = st(store.fetch(tx, t.groups, name))? else {
                 return Error(Unknown)
             }
             if found.incarnation != d.incarnation {
                 return Error(Unknown)
             }
-            if let Some(_) = st(store.fetch(tx, store.shape(t.wake), name))? {
+            if let Some(_) = st(store.fetch(tx, t.wake, name))? {
                 return Error(Exists)
             }
             let mut g = found
@@ -2978,7 +2978,7 @@ fn register(mut h: Host, conn: u64, ask: operator.Ask, d: Bytes, spec: operator.
     let made = {
         let t = view h.t
         store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[(GroupRow, launcher.Attempt), Refused] {
-            if let Some(_) = st(store.fetch(tx, store.shape(t.groups), spec.name))? {
+            if let Some(_) = st(store.fetch(tx, t.groups, spec.name))? {
                 return Error(Exists)
             }
             let mut u = usage_of(tx, t, spec.tenant)?
@@ -3024,7 +3024,7 @@ fn registered_row(spec: operator.Registration, incarnation: u64) -> GroupRow {
 
 // Whether a catalog group already holds store directory `path`.
 fn store_owned(h: Host, path: String) -> bool {
-    let Ok(take scanned) = store.scan(store.snapshot(h.db), store.shape(h.t.groups), Unbounded, Unbounded) else {
+    let Ok(take scanned) = store.scan(store.snapshot(h.db), h.t.groups, Unbounded, Unbounded) else {
         return true
     }
     let mut rows = take scanned
@@ -3122,7 +3122,7 @@ fn catalog_roots(h: Host, now_s: u64) -> Result[List[Bytes], String] {
     let snap = store.snapshot(h.db)
     let mut roots: List[Bytes] = list.new()
     {
-        let Ok(take scanned) = store.scan(snap, store.shape(h.t.groups), Unbounded, Unbounded) else {
+        let Ok(take scanned) = store.scan(snap, h.t.groups, Unbounded, Unbounded) else {
             return Error("groups")
         }
         let mut rows = take scanned
@@ -3143,7 +3143,7 @@ fn catalog_roots(h: Host, now_s: u64) -> Result[List[Bytes], String] {
         }
     }
     {
-        let Ok(take scanned) = store.scan(snap, store.shape(h.t.deploys), Unbounded, Unbounded) else {
+        let Ok(take scanned) = store.scan(snap, h.t.deploys, Unbounded, Unbounded) else {
             return Error("deploys")
         }
         let mut rows = take scanned
@@ -3161,7 +3161,7 @@ fn catalog_roots(h: Host, now_s: u64) -> Result[List[Bytes], String] {
         }
     }
     {
-        let Ok(take scanned) = store.scan(snap, store.shape(h.t.pins), Unbounded, Unbounded) else {
+        let Ok(take scanned) = store.scan(snap, h.t.pins, Unbounded, Unbounded) else {
             return Error("pins")
         }
         let mut rows = take scanned
@@ -3348,7 +3348,7 @@ fn prep_finish(mut h: Host, name: String, take p: Prep) waits {
         let t = view h.t
         let shown = view p.preview
         store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[(), Refused] {
-            let Some(found_d) = st(store.fetch(tx, store.shape(t.deploys), name))? else {
+            let Some(found_d) = st(store.fetch(tx, t.deploys, name))? else {
                 return Ok(())
             }
             let mut d = found_d
@@ -3510,7 +3510,7 @@ fn prep_pending(mut h: Host, name: String, take p: Prep, head: u64, digest: Byte
         let t = view h.t
         let q = view p
         store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[(GroupRow, u64, bool), Refused] {
-            let Some(g) = st(store.fetch(tx, store.shape(t.groups), name))? else {
+            let Some(g) = st(store.fetch(tx, t.groups, name))? else {
                 return Error(Unknown)
             }
             if let Some(_) = g.retiring {
@@ -3519,7 +3519,7 @@ fn prep_pending(mut h: Host, name: String, take p: Prep, head: u64, digest: Byte
             if g.incarnation != q.incarnation {
                 return Error(Unknown)
             }
-            let Some(w) = st(store.fetch(tx, store.shape(t.wake), name))? else {
+            let Some(w) = st(store.fetch(tx, t.wake, name))? else {
                 return Error(Unknown)
             }
             let Dirty(a) = w.wake else {
@@ -3528,7 +3528,7 @@ fn prep_pending(mut h: Host, name: String, take p: Prep, head: u64, digest: Byte
             if a != q.old {
                 return Error(Busy(a))
             }
-            let Some(found_d) = st(store.fetch(tx, store.shape(t.deploys), name))? else {
+            let Some(found_d) = st(store.fetch(tx, t.deploys, name))? else {
                 return Error(Missing("deploy"))
             }
             let mut d = found_d
@@ -3578,7 +3578,7 @@ fn prep_pending(mut h: Host, name: String, take p: Prep, head: u64, digest: Byte
 }
 
 pub fn deploy_outcome(h: Host, name: String) -> Option[DeployOutcome] {
-    match store.get(store.snapshot(h.db), store.shape(h.t.deploys), name) {
+    match store.get(store.snapshot(h.db), h.t.deploys, name) {
         Ok(Some(take d)) => {
             let DeployRow(outcome: take o, ..) = take d;
             Some(take o)
@@ -3588,7 +3588,7 @@ pub fn deploy_outcome(h: Host, name: String) -> Option[DeployOutcome] {
 }
 
 fn drop_rows(mut tx: store.Tx, t: Tables, name: String, g: GroupRow, due: Option[u64], dirty: bool, disposition: Disposition) -> Result[(), Refused] {
-    if let Some(d) = st(store.fetch(tx, store.shape(t.active), name))? {
+    if let Some(d) = st(store.fetch(tx, t.active, name))? {
         finish_request(mut tx, t, name, d, FailedPhase(UnknownGroupClass, "the group was removed", operator.no_report()))?
     }
     let _ = st(store.delete(mut tx, t.groups, name))?
@@ -3680,7 +3680,7 @@ fn forget_pin_turn(mut h: Host, id: Bytes) -> Result[(), Refused] waits {
 // `now` is before the expiry, in Unix seconds, and `Gone` from the expiry on or when no
 // pin exists. A store error is an error, never `Gone`.
 pub fn resolve_pin(h: Host, id: Bytes, now: u64) -> Result[operator.Resolved, Refused] {
-    Ok(pin_answer(st(store.get(store.snapshot(h.db), store.shape(h.t.pins), id))?, now))
+    Ok(pin_answer(st(store.get(store.snapshot(h.db), h.t.pins, id))?, now))
 }
 
 // The one pin rule both owners apply: the live host and the offline reader.
@@ -3697,14 +3697,14 @@ fn pin_answer(p: Option[Pin], now: u64) -> operator.Resolved {
 // the live host's lookup at `now`, in Unix seconds. A store error is an error, never Gone.
 pub fn resolve_offline(d: Dir, id: Bytes, now: u64) -> Result[operator.Resolved, store.Error] waits {
     let reader = store.open_read_only(d, result.unwrap(store.sized(Directory, 2147483648u64)))?
-    let pins: store.Shape[Bytes, Pin] = store.read_only_table(reader, "platform.pins", std.codec.key_bytes(), std.codec.of())?
+    let pins: store.Table[Bytes, Pin] = store.read_only_table(reader, "platform.pins", std.codec.key_bytes(), std.codec.of())?
     Ok(pin_answer(store.read_only_get(reader, pins, id)?, now))
 }
 
 // Every group the host lists, retiring ones included.
 pub fn group_names(h: Host) -> List[String] {
     let mut names: List[String] = list.new()
-    let Ok(take scanned) = store.scan(store.snapshot(h.db), store.shape(h.t.groups), Unbounded, Unbounded) else {
+    let Ok(take scanned) = store.scan(store.snapshot(h.db), h.t.groups, Unbounded, Unbounded) else {
         return names
     }
     let mut rows = take scanned
@@ -3749,7 +3749,7 @@ pub fn unload(mut h: Host, name: String) -> Result[List[launcher.Request], Refus
 }
 
 pub fn retirement(h: Host, name: String) -> Option[Retired] {
-    match store.get(store.snapshot(h.db), store.shape(h.t.retired), name) {
+    match store.get(store.snapshot(h.db), h.t.retired, name) {
         Ok(Some(r)) => Some(r),
         _ => None
     }
@@ -3758,10 +3758,10 @@ pub fn retirement(h: Host, name: String) -> Option[Retired] {
 pub fn status(h: Host) -> Status {
     let mut dirty = 0u64
     let mut max_places = 0u64
-    if let Ok(Some(m)) = store.get(store.snapshot(h.db), store.shape(h.t.meta), 0u64) {
+    if let Ok(Some(m)) = store.get(store.snapshot(h.db), h.t.meta, 0u64) {
         dirty = m.dirty
     }
-    if let Ok(Some(c)) = store.get(store.snapshot(h.db), store.shape(h.t.config), 0u64) {
+    if let Ok(Some(c)) = store.get(store.snapshot(h.db), h.t.config, 0u64) {
         max_places = c.max_places
     }
     let mut failing: List[Failing] = list.new()

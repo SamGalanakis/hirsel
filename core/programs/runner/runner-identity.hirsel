@@ -38,7 +38,7 @@ pub type PlaceRead: codec + send {
 fn release_record(db: store.Db, version: u64) -> Result[Option[ReleaseRecord], store.Error] {
     let codec: std.codec.Codec[ReleaseRecord] = std.codec.of()
     let table = store.system_table(db, "hirsel.runner.releases", std.codec.key_u64(), codec)?
-    store.get(store.snapshot(db), store.shape(table), version)
+    store.get(store.snapshot(db), table, version)
 }
 
 // Call under the open store's lock. A failed capture leaves the refusal useful

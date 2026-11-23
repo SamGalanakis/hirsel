@@ -106,7 +106,7 @@ pub fn follower(mut source: Followers, tasks: Tasks, take authority: Authority, 
 
 pub fn follower_table[K, V](f: Follower, name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[Table[K, V], Error] {
     let copied_name = string.from(name)
-    match catalog_handle(f.capture.store, f.capture.state.tips[0].roots.catalog, false, take copied_name, take key, take value) {
+    match catalog_handle(f.capture.store, f.capture.state.tips[0].roots.catalog, take copied_name, take key, take value) {
         Error(Schema(n)) if n != 0 => Error(Missing("schema")),
         other => take other,
     }

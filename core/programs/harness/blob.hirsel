@@ -141,10 +141,10 @@ fn remote_effect[G: send](snap: store.Snapshot, h: Handles, e: Effect, c: Call, 
     let Some(pos) = e.cutoff.tools_pos else {
         return Gone
     }
-    let Ok(pinned) = store.get(snap, store.shape(h.entries), pos) else {
+    let Ok(pinned) = store.get(snap, h.entries, pos) else {
         return InDoubt
     }
-    let Ok(found) = store.get(snap, store.shape(h.mcp_catalog), c.name) else {
+    let Ok(found) = store.get(snap, h.mcp_catalog, c.name) else {
         return InDoubt
     }
     let Some(row) = found else {
@@ -221,7 +221,7 @@ pub fn effect[G: send, F](ctx: runner.TriggerContext, port: G, take key: EffectK
     let Ok(h) = handles(store.snapshot_schema(snap)) else {
         return Ok(Lost)
     }
-    let Ok(Some(take e)) = store.get(snap, store.shape(h.effects), key) else {
+    let Ok(Some(take e)) = store.get(snap, h.effects, key) else {
         return Ok(Lost)
     }
     let receipt: Receipt = if recover {
@@ -283,10 +283,10 @@ fn effect_preview(target: Option[preview.Target], snap: store.Snapshot, h: Handl
     let Some(t) = view target else {
         return None
     }
-    let Ok(Some(s)) = store.get(snap, store.shape(h.session), 0u64) else {
+    let Ok(Some(s)) = store.get(snap, h.session, 0u64) else {
         return None
     }
-    let Ok(Some(r)) = store.get(snap, store.shape(h.runs), key.run) else {
+    let Ok(Some(r)) = store.get(snap, h.runs, key.run) else {
         return None
     }
     let a = runner.trigger_attempt(ctx)

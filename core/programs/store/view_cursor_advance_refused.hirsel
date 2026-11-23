@@ -1,5 +1,5 @@
 // L38: the current value freezes its cursor until the value's last use.
-pub fn rejected(s: store.Snapshot, sh: store.Shape[u64, u64]) -> Result[bool, store.Error] {
+pub fn rejected(s: store.Snapshot, sh: store.Table[u64, u64]) -> Result[bool, store.Error] {
     let mut rows = store.scan_bytes(s, sh, Unbounded, Unbounded)?
     let _ = store.next_view(mut rows)?
     let raw = store.value_view(rows)

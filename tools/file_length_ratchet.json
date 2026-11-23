@@ -29,9 +29,9 @@
     "lines": 1409
   },
   "core/programs/runner/runner.hirsel": {
-    "lines": 8048,
-    "raise_revision": 5,
-    "reason": "m3-s11-refusals-2011"
+    "lines": 8049,
+    "raise_revision": 6,
+    "reason": "m3-s1-read-api-2005"
   },
   "core/programs/runner/runner_calls.hirsel": {
     "lines": 2507

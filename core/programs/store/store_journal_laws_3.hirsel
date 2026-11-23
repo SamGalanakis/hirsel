@@ -448,7 +448,7 @@ fn journal_test_streams(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(),
     }
 }
 
-fn step_row(s: Snapshot, t: Shape[u64, u64], k: u64) -> Option[u64] {
+fn step_row(s: Snapshot, t: Table[u64, u64], k: u64) -> Option[u64] {
     let seen = result.unwrap(look(s, None, scoped fn(tx: Tx) -> Result[Option[u64], Error] {
         fetch(tx, t, k)
     }))
@@ -502,11 +502,11 @@ pub fn journal_law_step_stop(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool 
         return false
     }
     let main = main_branch(db)
-    if let Some(_) = step_row(result.unwrap(snapshot_of(db, main)), shape(t), 7) {
+    if let Some(_) = step_row(result.unwrap(snapshot_of(db, main)), t, 7) {
         return false
     }
     result.unwrap(durable(mut db, earlier))
-    if let Some(_) = step_row(snapshot(db), shape(t), 7) {
+    if let Some(_) = step_row(snapshot(db), t, 7) {
         return false
     }
     // (c): None, then Some with room to finish.
@@ -546,7 +546,7 @@ pub fn journal_law_step_stop(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool 
     let mut after = result.unwrap(open(tasks, dir, c, r, options))
     let t2 = result.unwrap(table(mut after, "steps", std.codec.key_u64(), std.codec.of_u64()))
     let s = snapshot(after)
-    let good = after.heads[0].head == before + 2 && step_row(s, shape(t2), 7) == None && step_row(s, shape(t2), 1) == Some(10u64) && step_row(s, shape(t2), 8) == Some(80u64) && step_row(s, shape(t2), 9) == Some(90u64)
+    let good = after.heads[0].head == before + 2 && step_row(s, t2, 7) == None && step_row(s, t2, 1) == Some(10u64) && step_row(s, t2, 8) == Some(80u64) && step_row(s, t2, 9) == Some(90u64)
     result.unwrap(close(take after))
     good
 }
@@ -719,7 +719,7 @@ pub fn journal_law_rotation(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool w
     result.unwrap(durable(mut db, again))
     result.unwrap(close(take db))
     let reopened = result.unwrap(open(tasks, d, c, r, options))
-    let sh = shape(t)
+    let sh = view t
     for k in 0u64 .. 3 {
         if result.unwrap(get(snapshot(reopened), sh, k)) != Some(k + 10) {
             return false
@@ -803,7 +803,7 @@ pub fn journal_law_changes_checkpoint(d: Dir, c: Clock, r: Random, tasks: Tasks)
             }
         }
     }
-    let sh = shape(t)
+    let sh = view t
     for k in 0u64 .. 4 {
         let old = result.unwrap(get(before, sh, k))
         let new = result.unwrap(get(after, sh, k))

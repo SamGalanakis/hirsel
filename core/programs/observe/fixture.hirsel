@@ -86,7 +86,7 @@ pub fn law_record(out: Stdout, c: Clock, r: Random) -> bool waits {
     })
     match ran { Ok(Committed(_)) => (), _ => return false }
     let held = store.snapshot(db)
-    match store.get(held, store.shape(h.ran), observe.key(0u64, a.stream, a.p)) {
+    match store.get(held, h.ran, observe.key(0u64, a.stream, a.p)) {
         Ok(Some(saved)) => {
             let e: observe.Obs = Ran(observe.Run(stream: observe.own(saved.stream), p: saved.p, digest: digest(entry(), encoded(saved)), version: store.version(held)))
             let co: std.codec.Codec[observe.Obs] = std.codec.of()

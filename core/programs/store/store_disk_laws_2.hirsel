@@ -7,7 +7,7 @@ fn journaled_branch_drop(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[()
     let mut rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     let by = code.describe(crash_value)
     create_index(mut db, rows, "iv", by, std.codec.key_u64())?
-    let ix = index(db, mut rows, "iv", by, std.codec.key_u64())?
+    let ix = index(mut db, rows, "iv", by, std.codec.key_u64())?
     if !typed_put(mut db, rows, 1, 11) {
         return Error(Foreign)
     }
@@ -26,7 +26,7 @@ fn journaled_branch_drop(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[()
     let Committed(_) = updated else {
         return Error(Foreign)
     }
-    let sh = shape(rows)
+    let sh: Table[u64, u64] = clone(rows)
     let first = disk_state(db).pages.next_pack
     let _ = drop_table(mut db, take rows)?
     let after = disk_state(db).pages.next_pack
@@ -100,7 +100,7 @@ pub fn disk_law_migrate(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits
     result.unwrap(with_index(mut declared, "by_a", code.describe(old_balance), std.codec.key_u64()))
     result.unwrap(create_table(mut db, take declared))
     let mut t = result.unwrap(table(mut db, "t", std.codec.key_u64(), old_codec()))
-    let _ = result.unwrap(index(db, mut t, "by_a", code.describe(old_balance), std.codec.key_u64()))
+    let _ = result.unwrap(index(mut db, t, "by_a", code.describe(old_balance), std.codec.key_u64()))
     let first = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
         put(mut tx, t, 1, OldAccount(balance: 7))?
         put(mut tx, t, 2, OldAccount(balance: 9))
@@ -111,7 +111,7 @@ pub fn disk_law_migrate(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits
     }
     result.unwrap(migrate(mut db, take t, new_spec("t", "by_b"), upgrade))
     let mut nt = result.unwrap(table(mut db, "t", std.codec.key_u64(), new_codec()))
-    let _ = result.unwrap(index(db, mut nt, "by_b", code.describe(new_bonus), std.codec.key_u64()))
+    let _ = result.unwrap(index(mut db, nt, "by_b", code.describe(new_bonus), std.codec.key_u64()))
     let late = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
         put(mut tx, nt, 3, NewAccount(balance: 5, bonus: 50))
     }))
@@ -122,7 +122,7 @@ pub fn disk_law_migrate(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits
     result.unwrap(close(take db))
     let mut reopened = result.unwrap(open(tasks, d, c, r, options))
     let mut back = result.unwrap(table(mut reopened, "t", std.codec.key_u64(), new_codec()))
-    let ix = result.unwrap(index(reopened, mut back, "by_b", code.describe(new_bonus), std.codec.key_u64()))
+    let ix = result.unwrap(index(mut reopened, back, "by_b", code.describe(new_bonus), std.codec.key_u64()))
     let listed = result.unwrap(index_catalog(reopened, 3))
     let now = snapshot(reopened)
     let mut leftovers = result.unwrap(scan_raw(now, 1, Unbounded, Unbounded))
@@ -175,7 +175,7 @@ pub fn disk_law_db(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
     }
     result.unwrap(durable(mut db, schema_ticket))
     let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
-    let sh = shape(t)
+    let sh = view t
     if version(snapshot(db)) != 1 || !typed_put(mut db, t, 1, 10) {
         return false
     }
@@ -238,7 +238,7 @@ fn disk_test_db(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] wai
     }
 }
 
-fn disk_watermark_rows(s: Snapshot, sh: Shape[u64, u64], expected: Option[(u64, u64)]) -> Result[bool, Error] {
+fn disk_watermark_rows(s: Snapshot, sh: Table[u64, u64], expected: Option[(u64, u64)]) -> Result[bool, Error] {
     let old = match expected {
         Some((1, v)) => Some(v),
         _ => None
@@ -279,7 +279,7 @@ fn disk_watermark_cut(d: Dir, c: Clock, r: Random, tasks: Tasks, torn: bool) -> 
     let mut db = open(tasks, d, c, r, options)?
     let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
     let t = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
-    let sh = shape(t)
+    let sh = view t
     let (_, take manifest) = disk_read_page_manifest("MANIFEST", disk_read_file(d, "MANIFEST", 4096)?)?
     let segment = capacity(disk_path("j-", db.file_seq, ""))?
     let end = capacity(disk_path("j-", db.file_seq, ".end"))?
@@ -403,7 +403,7 @@ pub fn disk_law_db_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
     }
     result.unwrap(close(take db))
     let reopened = result.unwrap(open(tasks, d, c, r, options))
-    let value = result.unwrap(get(snapshot(reopened), shape(t), 1))
+    let value = result.unwrap(get(snapshot(reopened), t, 1))
     let good = version(snapshot(reopened)) == 3 && value == None
     result.unwrap(close(take reopened))
     if !good {
@@ -629,7 +629,7 @@ pub fn disk_law_pack_bound(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
         return false
     }
     for k in 0u64 .. 36 {
-        match result.unwrap(get(snapshot(reopened), shape(t), k)) {
+        match result.unwrap(get(snapshot(reopened), t, k)) {
             Some(take value) => if value != text {
                 return false
             },

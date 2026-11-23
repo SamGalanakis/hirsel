@@ -23,7 +23,7 @@ fn cancel_warm(mut tx: store.Tx, h: Handles, mut s: Session) -> Result[(), Refus
     match s.warm {
         Some(Waiting(_, id, _)) => cancel_trigger(mut tx, h, Some(id))?,
         Some(Warming(key)) => {
-            if let Some(e) = kept(store.fetch(tx, store.shape(h.effects), key))? {
+            if let Some(e) = kept(store.fetch(tx, h.effects, key))? {
                 cancel_trigger(mut tx, h, e.trigger)?
                 let _ = kept(store.delete(mut tx, h.effects, key))?
             }
@@ -46,7 +46,7 @@ fn warm_wake[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut 
         s.warm_left = 0u64
         return kept(store.put(mut tx, h.session, 0u64, s))
     }
-    let Some(previous) = kept(store.fetch(tx, store.shape(h.effects), model))? else {
+    let Some(previous) = kept(store.fetch(tx, h.effects, model))? else {
         return Error(Malformed("last model effect"))
     }
     let key = EffectKey(run: model.run, round: model.round, kind: WARM, ordinal: s.warm_left)
@@ -76,7 +76,7 @@ fn settle_warm[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, ke
 fn expire_warm(mut tx: store.Tx, h: Handles, mut s: Session, key: EffectKey) -> Result[(), Refused] {
     let Some(Warming(current)) = s.warm else { return Ok(()) }
     if !same_effect(current, key) { return Ok(()) }
-    let Some(e) = kept(store.fetch(tx, store.shape(h.effects), key))? else { return Ok(()) }
+    let Some(e) = kept(store.fetch(tx, h.effects, key))? else { return Ok(()) }
     if now(mut tx) < e.deadline { return Ok(()) }
     cancel_warm(mut tx, h, mut s)?
     kept(store.put(mut tx, h.session, 0u64, s))
@@ -88,7 +88,7 @@ fn same_effect(a: EffectKey, b: EffectKey) -> bool {
 
 fn effect_active(tx: store.Tx, h: Handles, key: EffectKey) -> Result[bool, store.Error] {
     if key.kind != WARM { return active(tx, h, key.run) }
-    let Some(s) = store.fetch(tx, store.shape(h.session), 0u64)? else { return Ok(false) }
+    let Some(s) = store.fetch(tx, h.session, 0u64)? else { return Ok(false) }
     Ok(match s.warm {
         Some(Warming(current)) => s.active_run == None && same_effect(current, key),
         _ => false,

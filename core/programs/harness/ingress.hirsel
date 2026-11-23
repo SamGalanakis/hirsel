@@ -25,7 +25,7 @@ fn lodge[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, take key
         return Error(Malformed("item"))
     }
     let d = digest(raw)
-    if let Some(seen) = kept(store.fetch(tx, store.shape(h.inbox), key))? {
+    if let Some(seen) = kept(store.fetch(tx, h.inbox, key))? {
         if seen.digest != d {
             return Error(Conflict)
         }
@@ -39,14 +39,14 @@ fn lodge[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, take key
     kept(store.put(mut tx, h.inbox, clone(key), Received(digest: take d, disposition: Queued(seq))))?
     kept(store.put(mut tx, h.ingress, seq, Lodged(key: clone(key), item: take item)))?
     advance(mut tx, h, a, w, Kick)?
-    match kept(store.fetch(tx, store.shape(h.inbox), key))? {
+    match kept(store.fetch(tx, h.inbox, key))? {
         Some(r) => Ok(clone(r.disposition)),
         None => Error(Malformed("inbox")),
     }
 }
 
 fn queue_empty(tx: store.Tx, h: Handles) -> Result[bool, Refused] {
-    let Ok(take cursor) = store.range(tx, store.shape(h.ingress), Unbounded, Unbounded) else {
+    let Ok(take cursor) = store.range(tx, h.ingress, Unbounded, Unbounded) else {
         return Error(Storage)
     }
     let mut rows = take cursor
@@ -57,7 +57,7 @@ fn queue_empty(tx: store.Tx, h: Handles) -> Result[bool, Refused] {
 }
 
 fn disposed(mut tx: store.Tx, h: Handles, key: InboxKey, d: Disposition) -> Result[(), Refused] {
-    let Some(take found) = kept(store.fetch(tx, store.shape(h.inbox), key))? else {
+    let Some(take found) = kept(store.fetch(tx, h.inbox, key))? else {
         return Error(Malformed("inbox"))
     }
     let mut r = take found
@@ -68,7 +68,7 @@ fn disposed(mut tx: store.Tx, h: Handles, key: InboxKey, d: Disposition) -> Resu
 // The first `limits.ingress` ingress rows, in enqueue order.
 fn queue_window(tx: store.Tx, h: Handles, l: Limits) -> Result[List[(u64, Lodged)], Refused] {
     let mut out: List[(u64, Lodged)] = list.new()
-    let Ok(take cursor) = store.range(tx, store.shape(h.ingress), Unbounded, Unbounded) else {
+    let Ok(take cursor) = store.range(tx, h.ingress, Unbounded, Unbounded) else {
         return Error(Storage)
     }
     let mut rows = take cursor

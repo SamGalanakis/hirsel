@@ -58,7 +58,7 @@ fn flip(mut data: Bytes, i: Bit) -> bool {
 
 fn toggle(mut tx: store.Tx, h: Handles, author: runner.Caller, take i: Bit) -> Result[bool, Never] {
     let key = chunk(i)
-    let old = result.unwrap(store.fetch(tx, store.shape(h.chunks), key))
+    let old = result.unwrap(store.fetch(tx, h.chunks, key))
     let mut data = match take old {
         Some(take value) => take value,
         None => zero_chunk()
@@ -69,7 +69,7 @@ fn toggle(mut tx: store.Tx, h: Handles, author: runner.Caller, take i: Bit) -> R
 }
 
 fn board(tx: store.Tx, h: Handles, take _arg: ()) -> Result[runner.Cover, Capacity] {
-    runner.cover(store.shape(h.chunks), Unbounded, Unbounded)
+    runner.cover(h.chunks, Unbounded, Unbounded)
 }
 
 fn place(mut registry: Registry) -> Result[(), runner.RegisterError] {

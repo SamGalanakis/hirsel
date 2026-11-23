@@ -106,7 +106,7 @@ fn check_shrunk_collection(db: Db, rows: Table[u64, Bytes], wide: Bytes, short: 
         return Error(Missing("merged root leaf"))
     }
     let s = snapshot(db)
-    let reader = shape(rows)
+    let reader = view rows
     if get(s, reader, 0)? != Some(clone(short)) { return Error(Missing("overwritten row")) }
     for key in 1u64 .. 5 {
         if get(s, reader, key)? != Some(clone(wide)) { return Error(Missing("unchanged row")) }

@@ -48,7 +48,7 @@ fn shape(take n: u64) -> Result[Shape, Capacity] {
 }
 
 fn read(tx: store.Tx, h: H, take _arg: u32) -> Result[runner.Cover, Capacity] {
-    runner.cover(store.shape(h.table), Included(0u64), Included(0u64))
+    runner.cover(h.table, Included(0u64), Included(0u64))
 }
 
 fn retired() -> Bytes {

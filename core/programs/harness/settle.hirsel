@@ -23,7 +23,7 @@ fn settle_in[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, atte
     if !kept(effect_active(tx, h, key))? {
         return Ok(Ignored)
     }
-    let Some(take found) = kept(store.fetch(tx, store.shape(h.effects), key))? else {
+    let Some(take found) = kept(store.fetch(tx, h.effects, key))? else {
         return Ok(Ignored)
     }
     let mut e = take found
@@ -55,7 +55,7 @@ fn settle_in[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, atte
             }
         },
         Some(Model(take answer)) => {
-            let Some(take found_run) = kept(store.fetch(tx, store.shape(h.runs), key.run))? else {
+            let Some(take found_run) = kept(store.fetch(tx, h.runs, key.run))? else {
                 return Ok(Ignored)
             }
             let mut run = take found_run

@@ -3,7 +3,7 @@
 pub fn rollback_writes_on_error[R, E](mut tx: Tx, body: scoped[view] fn(mut Tx) -> Result[R, E]) -> Result[R, E] {
     freeze(mut tx)
     let d = {
-        let mut draft = Tx(store: tx.store, roots: share_roots(tx.roots), ids: tx.ids, private_from: tx.private_from, resident: tx.resident, retain_old: tx.retain_old, frame_tail: tx.frame_tail, reads: tx.reads, issued: tx.issued, refusal: tx.refusal, frame_bytes: tx.frame_bytes, wrote: tx.wrote, ops: empty_ops(), info: tx.info, stream_ops: empty_ops(), extra_bytes: tx.extra_bytes, call: None, below: clone(tx.below), own: 0, rows: tx.rows, streams: tx.streams)
+        let mut draft = Tx(store: tx.store, indexes: tx.indexes, roots: share_roots(tx.roots), ids: tx.ids, private_from: tx.private_from, resident: tx.resident, retain_old: tx.retain_old, frame_tail: tx.frame_tail, reads: tx.reads, issued: tx.issued, refusal: tx.refusal, frame_bytes: tx.frame_bytes, wrote: tx.wrote, ops: empty_ops(), info: tx.info, stream_ops: empty_ops(), extra_bytes: tx.extra_bytes, call: None, below: clone(tx.below), own: 0, rows: tx.rows, streams: tx.streams)
         let result = body(mut draft)
         drafted_tx(take draft, take result)
     }
@@ -157,7 +157,7 @@ pub fn rollback_writes_on_overrun[R, E](mut tx: Tx, steps: u64, body: scoped[vie
     // The work's views anchor it to `tx`: its slot ends, and the bound returns
     // the work's owned parts, before `tx` is written.
     let ran = {
-        let work = Tx(store: tx.store, roots: share_roots(tx.roots), ids: tx.ids, private_from: tx.private_from, resident: tx.resident, retain_old: tx.retain_old, frame_tail: tx.frame_tail, reads: tx.reads, issued: tx.issued, refusal: tx.refusal, frame_bytes: tx.frame_bytes, wrote: tx.wrote, ops: empty_ops(), info: tx.info, stream_ops: empty_ops(), extra_bytes: tx.extra_bytes, call: None, below: clone(tx.below), own: 0, rows: tx.rows, streams: tx.streams)
+        let work = Tx(store: tx.store, indexes: tx.indexes, roots: share_roots(tx.roots), ids: tx.ids, private_from: tx.private_from, resident: tx.resident, retain_old: tx.retain_old, frame_tail: tx.frame_tail, reads: tx.reads, issued: tx.issued, refusal: tx.refusal, frame_bytes: tx.frame_bytes, wrote: tx.wrote, ops: empty_ops(), info: tx.info, stream_ops: empty_ops(), extra_bytes: tx.extra_bytes, call: None, below: clone(tx.below), own: 0, rows: tx.rows, streams: tx.streams)
         bound steps steps {
             let mut draft = take work
             let result = body(mut draft)

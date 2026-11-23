@@ -62,7 +62,7 @@ fn record_store(mut h: Host, name: String, incarnation: u64, ready: runner.Place
     let made = {
         let t = view h.t
         store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[(), Refused] {
-            let Some(found) = st(store.fetch(tx, store.shape(t.groups), name))? else {
+            let Some(found) = st(store.fetch(tx, t.groups, name))? else {
                 return Error(Unknown)
             }
             if found.incarnation != incarnation {
@@ -100,7 +100,7 @@ fn read_place(raw: Bytes) -> Option[runner.PlaceRead] {
 
 fn opens_cutover(h: Host, name: String, ready: runner.PlaceReady) -> bool {
     let Some(read) = read_place(ready.read) else { return false }
-    match store.get(store.snapshot(h.db), store.shape(h.t.deploys), name) {
+    match store.get(store.snapshot(h.db), h.t.deploys, name) {
         Ok(Some(d)) => list.len(d.digest) == 32u64 && read.prepared == d.digest,
         _ => false,
     }
@@ -177,11 +177,11 @@ fn report_recovery(mut h: Host, name: String, gen: u64, version: u64, selected: 
     let made = {
         let t = view h.t
         store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[bool, Refused] {
-            let Some(w) = st(store.fetch(tx, store.shape(t.wake), name))? else { return Ok(false) }
+            let Some(w) = st(store.fetch(tx, t.wake, name))? else { return Ok(false) }
             let Dirty(active) = w.wake else { return Ok(false) }
             if gen != active { return Ok(false) }
-            let Some(found) = st(store.fetch(tx, store.shape(t.groups), name))? else { return Ok(false) }
-            let Some(deploy) = st(store.fetch(tx, store.shape(t.deploys), name))? else { return Ok(false) }
+            let Some(found) = st(store.fetch(tx, t.groups, name))? else { return Ok(false) }
+            let Some(deploy) = st(store.fetch(tx, t.deploys, name))? else { return Ok(false) }
             let mut g = found
             let mut d = deploy
             if let Some(_) = g.retiring { return Ok(false) }
@@ -280,7 +280,7 @@ fn failing_last(h: Host, name: String, outcome: String) -> String {
     let Ok(Some(g)) = group_row(h, name) else { return string.from(outcome) }
     let recovery: Option[Recovery] = clone(g.recovery)
     let Some(Unmatched(attempt, version, binding)) = take recovery else { return string.from(outcome) }
-    let Ok(Some(d)) = store.get(store.snapshot(h.db), store.shape(h.t.deploys), name) else { return string.from(outcome) }
+    let Ok(Some(d)) = store.get(store.snapshot(h.db), h.t.deploys, name) else { return string.from(outcome) }
     if !same_attempt(d.attempt, attempt) { return string.from(outcome) }
     let mut message = string.from("No recovery candidate matches the store at activation ")
     string.push_u64(mut message, version)

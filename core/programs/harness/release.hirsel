@@ -132,7 +132,7 @@ fn path_arg(args: Bytes) -> Result[String, harness.Fault] {
 fn read_source(mut tx: store.Tx, inv: harness.Invoke) -> Result[harness.Reply, harness.Fault] {
     let t = opened(tx)?
     let path = path_arg(inv.args)?
-    match store.fetch(tx, store.shape(t.files), path) {
+    match store.fetch(tx, t.files, path) {
         Ok(Some(take text)) => Ok(Now(string.into_bytes(take text))),
         Ok(None) => Error(Refused("no such source file")),
         Error(_) => Error(Unavailable),
@@ -159,7 +159,7 @@ fn write_source(mut tx: store.Tx, inv: harness.Invoke) -> Result[harness.Reply, 
 
 fn list_source(mut tx: store.Tx, inv: harness.Invoke) -> Result[harness.Reply, harness.Fault] {
     let t = opened(tx)?
-    let Ok(take cursor) = store.range(tx, store.shape(t.files), Unbounded, Unbounded) else {
+    let Ok(take cursor) = store.range(tx, t.files, Unbounded, Unbounded) else {
         return Error(Unavailable)
     }
     let mut rows = take cursor
@@ -180,7 +180,7 @@ fn list_source(mut tx: store.Tx, inv: harness.Invoke) -> Result[harness.Reply, h
 // The tree hash: SHA-256 over every (path, text) in path order, each key-encoded, so two
 // trees hash alike exactly when they hold the same files.
 fn tree_of(tx: store.Tx, t: Tables) -> Result[(Bytes, u64), store.Error] {
-    let mut rows = store.range(tx, store.shape(t.files), Unbounded, Unbounded)?
+    let mut rows = store.range(tx, t.files, Unbounded, Unbounded)?
     let mut hash = std.sha256.start()
     let mut n = 0u64
     let mut size = 4u64
@@ -244,7 +244,7 @@ fn propose_release(mut tx: store.Tx, inv: harness.Invoke) -> Result[harness.Repl
 
 // The host's read: every filed proposal, by its ID.
 pub fn pending(snap: store.Snapshot, t: Tables) -> Result[List[(Bytes, Proposal)], store.Error] {
-    let mut rows = store.scan(snap, store.shape(t.proposals), Unbounded, Unbounded)?
+    let mut rows = store.scan(snap, t.proposals, Unbounded, Unbounded)?
     let mut out: List[(Bytes, Proposal)] = list.new()
     while let Some((take id, take p)) = store.next(mut rows)? {
         if let Filed = p.state {
@@ -257,7 +257,7 @@ pub fn pending(snap: store.Snapshot, t: Tables) -> Result[List[(Bytes, Proposal)
 // The source a proposal names, in path order, or None when the tree has changed since it
 // was filed: the host never publishes source the proposal did not name.
 pub fn source(snap: store.Snapshot, t: Tables, tree: Bytes) -> Result[Option[List[File]], store.Error] {
-    let mut rows = store.scan(snap, store.shape(t.files), Unbounded, Unbounded)?
+    let mut rows = store.scan(snap, t.files, Unbounded, Unbounded)?
     let mut hash = std.sha256.start()
     let mut files: List[File] = list.new()
     while let Some((take path, take text)) = store.next(mut rows)? {
@@ -287,7 +287,7 @@ pub type FiledProposal: codec + send { id: Bytes, proposal: Proposal }
 // The development gateway delegates release decisions to the session's readers.
 pub fn dev_proposals(tx: store.Tx, h: harness.Handles, caller: store.Caller, take unused: ()) -> Result[runner.Cover, Capacity] {
     let t = tables(store.tx_schema(tx)) ?=> |_| read_failed()
-    let shape = store.shape(t.proposals)
+    let shape = view t.proposals
     if harness.reader_allowed(tx, h, caller)? {
         return runner.cover(shape, Unbounded, Unbounded)
     }
@@ -310,7 +310,7 @@ pub fn dev_settle[G: send](mut tx: store.Tx, h: harness.Handles, caller: store.C
 // WIRE query bodies. An app's query_as entries authorize the Caller before forwarding.
 // Each Cover is published against the same transaction snapshot as the scan that chose it.
 pub fn pending_cover(tx: store.Tx, t: Tables) -> Result[runner.Cover, Capacity] {
-    let shape = store.shape(t.proposals)
+    let shape = view t.proposals
     let mut rows = store.range(tx, shape, Unbounded, Unbounded) ?=> |_| read_failed()
     while let Some((id, proposal)) = store.next_range(mut rows) ?=> |_| read_failed() {
         if let Filed = proposal.state {
@@ -322,7 +322,7 @@ pub fn pending_cover(tx: store.Tx, t: Tables) -> Result[runner.Cover, Capacity] 
 
 // Publish one source row per WIRE query, so a full tree need not fit in one batch.
 pub fn source_cover(tx: store.Tx, t: Tables, after: Option[String]) -> Result[runner.Cover, Capacity] {
-    let shape = store.shape(t.files)
+    let shape = view t.files
     let low: store.Bound[String] = match after {
         Some(path) => Excluded(string.from(path)),
         None => Unbounded,
@@ -341,7 +341,7 @@ fn read_failed() -> Capacity { Capacity(requested: 1u64, available: 0u64) }
 // unknown, is Ignored; the proposal row records the decision even when the call has since
 // timed out.
 pub fn settle[G: send](mut tx: store.Tx, h: harness.Handles, t: Tables, a: harness.Agent[G], w: harness.Wiring, id: Bytes, take decided: State) -> Result[harness.Filed, harness.Refused] {
-    let Ok(found) = store.fetch(tx, store.shape(t.proposals), id) else {
+    let Ok(found) = store.fetch(tx, t.proposals, id) else {
         return Error(Storage)
     }
     let Some(take p) = found else {

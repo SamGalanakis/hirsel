@@ -50,7 +50,7 @@ fn idle_net(take seed: (Sender[()], Served[NetOp])) waits {
 fn idle_triggers(dir: Dir, time: Clock, random: Random, tasks: Tasks, due: u64, future: u64) -> triggers.Id waits {
     let mut db = result.unwrap(store.open(tasks, dir, time, random, disk_options()))
     result.unwrap(store.run_migration(mut db, tasks, code.describe(ping_migrate)))
-    let tables = result.unwrap(store.with_schema(db, code.describe(triggers.tables)))
+    let tables = result.unwrap(store.with_schema(mut db, code.describe(triggers.tables)))
     let (entries, target) = idle_entries()
     let schedule = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[triggers.Id, triggers.Error] {
         let id = triggers.write(mut tx, tables, entries, target, 3u64 * IDLE_MS, At(due))?
@@ -134,7 +134,7 @@ fn idle_trigger_case(parent: Dir, wall_clock: Clock, random: Random, tasks: Task
     let _ = take stop_to
     let _ = take started
     let mut db = result.unwrap(store.open(tasks, dir, wall_clock, random, disk_options()))
-    let tables = result.unwrap(store.with_schema(db, code.describe(triggers.tables)))
+    let tables = result.unwrap(store.with_schema(mut db, code.describe(triggers.tables)))
     if let Ok(Some(Returned(raw))) = triggers.outcome(store.snapshot(db), tables, id) {
         want(result.unwrap(std.codec.decode(std.codec.of_u64(), raw)) == 1u64, "idle: the run did not finish on attempt one")
     } else { fail("idle: no terminal result") }

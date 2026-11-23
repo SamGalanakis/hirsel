@@ -9,7 +9,7 @@ fn insert(mut db: store.Db, t: store.Table[u64, Account], i: u64) -> u64 waits {
     let done = result.unwrap(store.run(mut db, None, fn(mut tx: store.Tx) -> Result[u64, store.Error] {
         let a = Account(id: i, balance: int.narrow(i), owner: string.from("owner000"))
         store.put(mut tx, t, i, a)?
-        let back = option.unwrap(store.fetch(tx, store.shape(t), i)?)
+        let back = option.unwrap(store.fetch(tx, t, i)?)
         if back.id != i || back.balance != int.narrow(i) || back.owner != "owner000" {
             fail("store R1 wrong row")
         }
@@ -23,7 +23,7 @@ fn insert(mut db: store.Db, t: store.Table[u64, Account], i: u64) -> u64 waits {
 
 type Reader: send {
     held: store.Snapshot,
-    sh: store.Shape[u64, Account]
+    sh: store.Table[u64, Account]
 }
 
 fn reader(take r: Reader) -> u64 {
@@ -53,7 +53,7 @@ pub fn main(dir: Dir, clock: Clock, random: Random, tasks: Tasks, out: Stdout, a
         }
     }
     let held = store.snapshot(db)
-    let sh = store.shape(t)
+    let sh: store.Table[u64, Account] = clone(t)
     let mut gate = result.unwrap(host.open(dir, "gate", Read))
     let mut byte: Bytes = list.with_capacity(1)
     result.unwrap(stdout.write(out, "READY\n"))

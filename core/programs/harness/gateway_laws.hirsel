@@ -289,13 +289,13 @@ fn stopped(changes: Receiver[platform.local.Change]) -> bool waits {
 }
 
 fn transcript_of(dir: Dir, clock: Clock, random: Random, tasks: Tasks) -> List[Bytes] waits {
-    let db = result.unwrap(store.open(tasks, dir, clock, random, runner.triggers.law_options()))
-    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    let mut db = result.unwrap(store.open(tasks, dir, clock, random, runner.triggers.law_options()))
+    let h = result.unwrap(store.with_schema(mut db, code.describe(harness.handles)))
     let snap = store.snapshot(db)
     let mut out: List[Bytes] = list.new()
-    if let Ok(Some(s)) = store.get(snap, store.shape(h.session), 0u64) {
+    if let Ok(Some(s)) = store.get(snap, h.session, 0u64) {
         for p in 0u64 .. s.next_pos {
-            if let Ok(Some(e)) = store.get(snap, store.shape(h.entries), p) {
+            if let Ok(Some(e)) = store.get(snap, h.entries, p) {
                 list.push(mut out, bytes_of(e))
             }
         }

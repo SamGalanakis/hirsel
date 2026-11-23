@@ -49,7 +49,7 @@ fn mapped[A](take r: Result[A, platform.local.Refused]) -> Result[A, Refused] {
 // Seeds a session's store with its harness session and, for a visible one, its reader.
 fn seeder(take seeding: Seeding, take reader: Option[store.Caller]) -> platform.local.Seed {
     fn(mut db: store.Db) -> Result[(), String] waits {
-        let Ok(h) = store.with_schema(db, code.describe(harness.handles)) else { return Error(string.from("harness schema")) }
+        let Ok(h) = store.with_schema(mut db, code.describe(harness.handles)) else { return Error(string.from("harness schema")) }
         let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), harness.Refused] {
             match seeding {
                 Fresh(model, narrow) => harness.open_session(mut tx, h, clone(model), clone(narrow)),

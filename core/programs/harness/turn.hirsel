@@ -73,7 +73,7 @@ fn finish(mut tx: store.Tx, h: Handles, w: Wiring, mut s: Session, id: u64, take
 // Only the run's caller may cancel. A repeated cancel returns the terminal
 // receipt, even after a later run has taken the session.
 pub fn cancel(mut tx: store.Tx, h: Handles, w: Wiring, caller: store.Caller, id: u64) -> Result[Finish, Refused] {
-    let Some(take found) = kept(store.fetch(tx, store.shape(h.runs), id))? else {
+    let Some(take found) = kept(store.fetch(tx, h.runs, id))? else {
         return Error(Malformed("no such run"))
     }
     let mut run = take found
@@ -101,7 +101,7 @@ pub fn cancel(mut tx: store.Tx, h: Handles, w: Wiring, caller: store.Caller, id:
 }
 
 fn cancel_effect(mut tx: store.Tx, h: Handles, key: EffectKey, mut spend: Spend) -> Result[(), Refused] {
-    let Some(take found) = kept(store.fetch(tx, store.shape(h.effects), key))? else {
+    let Some(take found) = kept(store.fetch(tx, h.effects, key))? else {
         return Error(Malformed("effect"))
     }
     let mut e = take found
@@ -184,10 +184,10 @@ fn current_remote(tx: store.Tx, h: Handles, cutoff: Cutoff, name: String) -> Res
     let Some(pos) = cutoff.tools_pos else {
         return Ok(None)
     }
-    let Some(take row) = kept(store.fetch(tx, store.shape(h.mcp_catalog), name))? else {
+    let Some(take row) = kept(store.fetch(tx, h.mcp_catalog, name))? else {
         return Ok(None)
     }
-    let pinned = kept(store.fetch(tx, store.shape(h.entries), pos))?
+    let pinned = kept(store.fetch(tx, h.entries, pos))?
     if matching_remote(pinned, name, row) {
         Ok(Some(take row))
     } else {
@@ -325,18 +325,18 @@ fn ruled(allow: bool) -> Ruling {
 // arguments conflicts and changes nothing. The first decision wins: a repeat
 // of it returns its ruling, and a different one conflicts.
 pub fn decide[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, caller: store.Caller, take d: Decision) -> Result[Ruling, Refused] {
-    let Some(run) = kept(store.fetch(tx, store.shape(h.runs), d.run))? else {
+    let Some(run) = kept(store.fetch(tx, h.runs, d.run))? else {
         return Error(Malformed("no such run"))
     }
     if run.caller.issuer != caller.issuer || run.caller.subject != caller.subject {
         return Error(NotAllowed)
     }
     let wait = WaitKey(run: d.run, slot: d.ordinal, kind: APPROVAL, generation: d.round)
-    let Some(take found) = kept(store.fetch(tx, store.shape(h.waits), wait))? else {
+    let Some(take found) = kept(store.fetch(tx, h.waits, wait))? else {
         return Error(Malformed("no such hold"))
     }
     let member_key = EffectKey(run: d.run, round: d.round, kind: TOOL, ordinal: d.ordinal)
-    let Some(take m) = kept(store.fetch(tx, store.shape(h.effects), member_key))? else {
+    let Some(take m) = kept(store.fetch(tx, h.effects, member_key))? else {
         return Error(Malformed("no such call"))
     }
     let mut member = take m
@@ -384,7 +384,7 @@ pub fn decide[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, cal
 }
 
 fn lapse(mut tx: store.Tx, h: Handles, wait: WaitKey, member_key: EffectKey) -> Result[(), Refused] {
-    let Some(take m) = kept(store.fetch(tx, store.shape(h.effects), member_key))? else {
+    let Some(take m) = kept(store.fetch(tx, h.effects, member_key))? else {
         return Error(Malformed("no such call"))
     }
     let mut member = take m
@@ -396,7 +396,7 @@ fn lapse(mut tx: store.Tx, h: Handles, wait: WaitKey, member_key: EffectKey) -> 
 // The expiry timer of a hold. A hold that is still open at its expiry lapses;
 // a decided one, or a timer that runs early, changes nothing.
 fn expire(mut tx: store.Tx, h: Handles, wait: WaitKey) -> Result[(), Refused] {
-    let Some(found) = kept(store.fetch(tx, store.shape(h.waits), wait))? else {
+    let Some(found) = kept(store.fetch(tx, h.waits, wait))? else {
         return Ok(())
     }
     let Open(_, expires) = view found else {
@@ -412,7 +412,7 @@ fn expire(mut tx: store.Tx, h: Handles, wait: WaitKey) -> Result[(), Refused] {
 // wakes the park, after authorizing its caller. Only the first resume of a
 // parked call in the active run counts.
 pub fn resume[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, key: EffectKey, take outcome: Outcome) -> Result[Filed, Refused] {
-    let Some(take found) = kept(store.fetch(tx, store.shape(h.effects), key))? else {
+    let Some(take found) = kept(store.fetch(tx, h.effects, key))? else {
         return Ok(Ignored)
     }
     let mut e = take found
@@ -515,7 +515,7 @@ pub fn advance[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, ta
     if s.active_run != Some(id) {
         return Ok(())
     }
-    let Some(take found) = kept(store.fetch(tx, store.shape(h.runs), id))? else {
+    let Some(take found) = kept(store.fetch(tx, h.runs, id))? else {
         return Error(Malformed("active run"))
     }
     let run = take found
@@ -555,7 +555,7 @@ fn prepare[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut s:
 fn derive[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut s: Session, id: u64, take r: Run, round: u64, answered_ms: u64) -> Result[(), Refused] {
     let mut run = take r
     let model_key = EffectKey(run: id, round: round, kind: MODEL, ordinal: 0u64)
-    let Some(e) = kept(store.fetch(tx, store.shape(h.effects), model_key))? else {
+    let Some(e) = kept(store.fetch(tx, h.effects, model_key))? else {
         return Error(Malformed("model effect"))
     }
     let Settled(Model(answer)) = view e.phase else {
@@ -618,7 +618,7 @@ fn step_round[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut
     let mut ran_inside = false
     for i in 0u64 .. n {
         let key = EffectKey(run: id, round: round, kind: TOOL, ordinal: i)
-        let Some(take found) = kept(store.fetch(tx, store.shape(h.effects), key))? else {
+        let Some(take found) = kept(store.fetch(tx, h.effects, key))? else {
             return Error(Malformed("member"))
         }
         let mut e = take found
@@ -753,7 +753,7 @@ fn present[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut s:
     let mut progressed = false
     for i in 0u64 .. n {
         let key = EffectKey(run: id, round: round, kind: TOOL, ordinal: i)
-        let Some(take e) = kept(store.fetch(tx, store.shape(h.effects), key))? else {
+        let Some(take e) = kept(store.fetch(tx, h.effects, key))? else {
             return Error(Malformed("member"))
         }
         let Effect(call: take call, phase: take phase, ..) = take e
@@ -787,7 +787,7 @@ fn present[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut s:
 // the effect's run is asked to cancel and the effect is recorded as in doubt
 // if it was dispatched: a deadline is not a clean timeout.
 fn inspect(mut tx: store.Tx, h: Handles, w: Wiring, key: EffectKey) -> Result[(), Refused] {
-    let Some(take found) = kept(store.fetch(tx, store.shape(h.effects), key))? else {
+    let Some(take found) = kept(store.fetch(tx, h.effects, key))? else {
         return Ok(())
     }
     let mut e = take found
@@ -824,7 +824,7 @@ fn inspect(mut tx: store.Tx, h: Handles, w: Wiring, key: EffectKey) -> Result[()
 
 // A model effect closed without an answer ends its run.
 fn model_closed(mut tx: store.Tx, h: Handles, w: Wiring, key: EffectKey, reserve: u64, doubted: bool) -> Result[(), Refused] {
-    let Some(take found) = kept(store.fetch(tx, store.shape(h.runs), key.run))? else {
+    let Some(take found) = kept(store.fetch(tx, h.runs, key.run))? else {
         return Ok(())
     }
     let mut run = take found
@@ -845,7 +845,7 @@ fn model_closed(mut tx: store.Tx, h: Handles, w: Wiring, key: EffectKey, reserve
 pub type Permit: codec + send = Go(u64) | Doubt | Shut
 
 fn active(tx: store.Tx, h: Handles, run: u64) -> Result[bool, store.Error] {
-    let Some(s) = store.fetch(tx, store.shape(h.session), 0u64)? else {
+    let Some(s) = store.fetch(tx, h.session, 0u64)? else {
         return Ok(false)
     }
     Ok(match s.active_run {
@@ -859,7 +859,7 @@ fn active(tx: store.Tx, h: Handles, run: u64) -> Result[bool, store.Error] {
 // waits for its deadline and never sends again.
 fn begin(mut tx: store.Tx, attempt: runner.triggers.Attempt, take key: EffectKey) -> Result[Permit, store.Error] {
     let h = handles(store.tx_schema(tx))?
-    let Some(take found) = store.fetch(tx, store.shape(h.effects), key)? else {
+    let Some(take found) = store.fetch(tx, h.effects, key)? else {
         return Ok(Shut)
     }
     let mut e = take found
@@ -903,7 +903,7 @@ fn begin(mut tx: store.Tx, attempt: runner.triggers.Attempt, take key: EffectKey
 // settled, so its reservation becomes unresolved; the reserved bound stays
 // held for the new dispatch.
 fn resend_reserve(mut tx: store.Tx, h: Handles, id: u64, reserve: u64) -> Result[(), store.Error] {
-    let Some(take found) = store.fetch(tx, store.shape(h.runs), id)? else {
+    let Some(take found) = store.fetch(tx, h.runs, id)? else {
         return Ok(())
     }
     let mut run = take found
@@ -933,7 +933,7 @@ fn hedge_attempt(mut tx: store.Tx, attempt: runner.triggers.Attempt, take ask: (
     if key.kind != MODEL { return Ok(false) }
     let h = handles(store.tx_schema(tx))?
     if !active(tx, h, key.run)? { return Ok(false) }
-    let Some(take saved) = store.fetch(tx, store.shape(h.effects), key)? else { return Ok(false) }
+    let Some(take saved) = store.fetch(tx, h.effects, key)? else { return Ok(false) }
     let mut e = take saved
     let Repeatable(max) = e.repeat else { return Ok(false) }
     let Dispatched(n) = view e.phase else { return Ok(false) }

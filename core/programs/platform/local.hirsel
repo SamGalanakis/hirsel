@@ -812,10 +812,10 @@ fn open_sessions(mut db: store.Db) -> Result[Sessions, store.Error] waits {
         keys: store.table(mut db, "local.keys", std.codec.key_bytes(), std.codec.of())?,
         meta: store.table(mut db, "local.meta", std.codec.key_u64(), std.codec.of())?)
     let snap = store.snapshot(db)
-    let next_id = match store.get(snap, store.shape(catalog.meta), NEXT_ID)? { Some(n) => n, None => 0u64 }
+    let next_id = match store.get(snap, catalog.meta, NEXT_ID)? { Some(n) => n, None => 0u64 }
     let mut by_id: Map[u64, Bytes] = map.new()
     let mut by_key: Map[Bytes, u64] = map.new()
-    let mut rows = store.scan(snap, store.shape(catalog.sessions), Unbounded, Unbounded)?
+    let mut rows = store.scan(snap, catalog.sessions, Unbounded, Unbounded)?
     while let Some((id, key)) = store.next(mut rows)? {
         map.insert(mut by_key, clone(key), id)
         map.insert(mut by_id, id, clone(key))

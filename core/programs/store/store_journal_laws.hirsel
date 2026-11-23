@@ -145,7 +145,7 @@ pub fn journal_law_bootstrap(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool 
     let mut db = result.unwrap(open(tasks, d, c, r, options))
     result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
     let table_handle = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
-    let sh = shape(table_handle)
+    let sh = view table_handle
     let id = db.store
     let seq = db.file_seq
     let baseline = db.resident
@@ -373,7 +373,7 @@ pub fn journal_law_db(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
     let mut db = result.unwrap(open(tasks, d, c, r, options))
     result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
     let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
-    let sh = shape(t)
+    let sh = view t
     let before = db.file_seq
     let saved = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
         put(mut tx, t, 7, 70)
@@ -679,7 +679,7 @@ fn journal_test_fork_exports(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resul
         return Error(ExportMismatch)
     }
     let recovered = deploy_result(snapshot_of(opened.db, beta))?
-    if deploy_result(get(recovered, shape(rows), 1))? != Some(11u64) {
+    if deploy_result(get(recovered, rows, 1))? != Some(11u64) {
         return Error(ExportMismatch)
     }
     release_export(mut db, attempt)
@@ -720,7 +720,7 @@ fn journal_test_fork_exports(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resul
             return Error(ExportMismatch)
         }
         let recovered_beta = deploy_result(snapshot_of(recovered_image.db, beta))?
-        if deploy_result(get(recovered_beta, shape(rows), 1))? != Some(11u64) {
+        if deploy_result(get(recovered_beta, rows, 1))? != Some(11u64) {
             return Error(ExportMismatch)
         }
     }
@@ -760,7 +760,7 @@ fn journal_test_fork_cost(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(
         return Error(Foreign)
     }
     let on_beta = snapshot_of(db, beta)?
-    if get(on_beta, shape(rows), 0)? != Some(3u64) {
+    if get(on_beta, rows, 0)? != Some(3u64) {
         return Error(Foreign)
     }
     let (_, cut) = fork(mut db, "old", held)?
@@ -839,10 +839,10 @@ fn journal_test_fork_history(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resul
     }
     let rows = deploy_result(table(mut again, "rows", std.codec.key_u64(), std.codec.of_bytes()))?
     let sibling = deploy_result(snapshot_of(again, beta))?
-    let Some(old) = deploy_result(get(snapshot(again), shape(rows), 6))? else {
+    let Some(old) = deploy_result(get(snapshot(again), rows, 6))? else {
         return Error(ExportMismatch)
     }
-    let Some(new) = deploy_result(get(sibling, shape(rows), 6))? else {
+    let Some(new) = deploy_result(get(sibling, rows, 6))? else {
         return Error(ExportMismatch)
     }
     if list.len(old) != 994 || list.len(new) != 994 || old[0] != 0 || new[0] != 1 {
@@ -959,7 +959,7 @@ fn fork_skipped_id(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Erro
     }
     close(take db)?
     let mut reopened = open(tasks, d, c, r, options)?
-    if option.unwrap(branch(reopened, "beta")).id != 2 || accounts(reopened).logical != 354 || get(snapshot_of(reopened, beta)?, shape(rows), 1)? != Some(2u64) {
+    if option.unwrap(branch(reopened, "beta")).id != 2 || accounts(reopened).logical != 354 || get(snapshot_of(reopened, beta)?, rows, 1)? != Some(2u64) {
         return Error(Foreign)
     }
     let recovered = snapshot(reopened)

@@ -41,7 +41,7 @@ fn trigger_entries(target: triggers.Entry[Signup]) -> Result[triggers.Entries, t
 }
 
 fn signup(mut tx: store.Tx, h: Tables, caller: store.Caller, take arg: Signup) -> Result[triggers.Id, WriteError] {
-    if let Some(_) = stored(store.fetch(tx, store.shape(h.accounts), arg.id))? { return Error(Exists) }
+    if let Some(_) = stored(store.fetch(tx, h.accounts, arg.id))? { return Error(Exists) }
     let made: Result[triggers.Entry[Signup], std.codec.EncodeError] = triggers.granted(code.describe(run))
     let target = match take made { Ok(take value) => take value, Error(_) => return Error(Rejected) }
     let entries = match trigger_entries(target) { Ok(take value) => take value, Error(_) => return Error(Rejected) }
@@ -56,7 +56,7 @@ fn signup(mut tx: store.Tx, h: Tables, caller: store.Caller, take arg: Signup) -
 
 pub fn activate(mut tx: store.Tx, id: u64) -> Result[(), WriteError] {
     let table = stored(accounts(store.tx_schema(tx)))?
-    let Some(take found) = stored(store.fetch(tx, store.shape(table), id))? else { return Error(Missing) }
+    let Some(take found) = stored(store.fetch(tx, table, id))? else { return Error(Missing) }
     let mut account = take found
     account.active = true
     stored(store.put(mut tx, table, id, account))
@@ -68,14 +68,15 @@ pub fn enroll(mut tx: store.Tx, id: u64) -> Result[triggers.Id, WriteError] {
 }
 
 pub fn active(db: store.Db, id: u64) -> Result[bool, store.Error] {
-    let h = store.with_schema(db, code.describe(handles))?
-    let row = store.get(store.snapshot(db), store.shape(h.accounts), id)?
+    let snapshot = store.snapshot(db)
+    let h = handles(store.snapshot_schema(snapshot))?
+    let row = store.get(snapshot, h.accounts, id)?
     Ok(match row { Some(account) => account.active, None => false })
 }
 
 fn signup_status(mut tx: store.Tx, h: Tables, caller: store.Caller, take request: StatusRequest) -> Result[Option[bool], WriteError] {
     if let None = stored(triggers.fetch_outcome(tx, h.triggers, request.run))? { return Ok(None) }
-    let row = stored(store.fetch(tx, store.shape(h.accounts), request.id))?
+    let row = stored(store.fetch(tx, h.accounts, request.id))?
     Ok(Some(match row { Some(account) => account.active, None => false }))
 }
 
@@ -284,9 +285,9 @@ pub fn main(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, o
     let _ = wire_client.close(take conn)
     result.unwrap(channel.send(stop, ()))
     if let Ok(Ok(Stopped(_))) = task.join(take running) {} else { fail("sign-up: place did not stop") }
-    let db = result.unwrap(store.open(tasks, dir, clock, random, options))
+    let mut db = result.unwrap(store.open(tasks, dir, clock, random, options))
     let snapshot = store.snapshot(db)
-    let h = result.unwrap(store.with_schema(db, code.describe(handles)))
+    let h = result.unwrap(store.with_schema(mut db, code.describe(handles)))
     let Some(Returned(take outcome)) = result.unwrap(triggers.outcome(snapshot, h.triggers, run_id)) else { fail("sign-up: missing terminal outcome") }
     let result_codec: std.codec.Codec[RunResult] = std.codec.of()
     if let Ok(Active) = std.codec.decode(result_codec, outcome) {} else { fail("sign-up: expected an active outcome") }

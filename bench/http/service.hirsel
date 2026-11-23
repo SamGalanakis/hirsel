@@ -18,7 +18,7 @@ type CounterSource {
     listener: Listener,
     clock: Clock,
     err: Stderr,
-    shape: store.Shape[u64, u64],
+    shape: store.Table[u64, u64],
     buffer: Bytes,
     pending: List[(ReadHalf, WriteHalf)]
 }
@@ -33,7 +33,7 @@ fn put_counter(mut db: store.Db, table: store.Table[u64, u64], value: u64) waits
     }
 }
 
-fn get_counter(db: store.Db, shape: store.Shape[u64, u64]) -> u64 {
+fn get_counter(db: store.Db, shape: store.Table[u64, u64]) -> u64 {
     let read = result.unwrap(store.look(store.snapshot(db), None, fn(tx: store.Tx) -> u64 {
         option.unwrap(result.unwrap(store.fetch(tx, shape, 1u64)))
     }))
@@ -105,7 +105,7 @@ fn place_writer(take job: PlaceJob) waits {
     let ticket = result.unwrap(store.create_table(mut db, store.spec("counter", std.codec.key_u64(), codec)))
     result.unwrap(store.durable(mut db, ticket))
     let table = result.unwrap(store.table(mut db, "counter", std.codec.key_u64(), codec))
-    let shape = store.shape(table)
+    let shape = view table
     put_counter(mut db, table, 0)
     let mut source = CounterSource(listener: take listener, clock: clock, err: err, shape: shape, buffer: list.with_capacity(8), pending: list.with_capacity(1))
     result.unwrap(channel.send(ready, ()))

@@ -1041,18 +1041,11 @@ pub type MainError: send = Usage(Exit) | Start(StartError)
 
 fn push_hex_prefix(mut line: String, digest: Bytes) {
     let short = if list.len(digest) > 6u64 { list.slice(digest, 0u64, 6u64) } else { list.slice(digest, 0u64, list.len(digest)) }
-    match status_hex(copied_bytes(short)) {
+    match status_hex(std.http.copy_bytes(short)) {
         Ok(take hex) => string.push(mut line, hex),
         Error(_) => string.push(mut line, "?"),
     }
 }
-
-fn copied_bytes(raw: View[Bytes]) -> Bytes {
-    let mut out: Bytes = list.with_capacity(list.len(raw))
-    for byte in raw { list.push(mut out, byte) }
-    take out
-}
-
 fn push_store_error(mut line: String, problem: store.Error) {
     match problem {
         Held => string.push(mut line, "the store directory is held by another process (its LOCK)"),
@@ -1079,6 +1072,13 @@ fn push_store_error(mut line: String, problem: store.Error) {
         MigrationFault => string.push(mut line, "the migration faulted"),
         ExportDirectory => string.push(mut line, "an export directory, not a place store"),
         Fenced(_) => string.push(mut line, "another writer claimed the bucket store"),
+        Lost => string.push(mut line, "the bucket store writer claim was lost"),
+        Undecided => string.push(mut line, "the object store head write has an unknown outcome"),
+        Declared(_) => string.push(mut line, "the durability level differs from the store declaration"),
+        NotCurrent(version) => { string.push(mut line, "the store is at activation "); string.push_u64(mut line, version) },
+        Unqualified(_) => string.push(mut line, "the object store provider did not pass conditional write qualification"),
+        HistoryMissing(_, _) => string.push(mut line, "the object store history is missing an object"),
+        Reclaimed(_) => string.push(mut line, "the requested object store history was reclaimed"),
         Remote(_) => string.push(mut line, "a bucket operation failed"),
     }
 }

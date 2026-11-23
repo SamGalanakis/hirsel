@@ -114,6 +114,7 @@ type Generate = unsafe extern "C" fn(
     *mut libc::c_void,
     *mut Output,
 );
+type JoinLent = unsafe extern "C" fn(*const Input, usize, *mut Output);
 pub(crate) enum ProgramUnit {
     Native(crate::construction::NativeModule),
     Text(String),
@@ -122,6 +123,7 @@ struct Backend {
     compile: Compile,
     program: Program,
     generate: Generate,
+    join_lent: JoinLent,
     free: Free,
     construction: &'static crate::construction::Api,
     _image: File,
@@ -259,12 +261,14 @@ fn load() -> Result<Backend, String> {
     let free = unsafe { libc::dlsym(handle, c"hirsel_llvm_output_free_v1".as_ptr()) };
     let program = unsafe { libc::dlsym(handle, c"hirsel_llvm_program_v11".as_ptr()) };
     let generate = unsafe { libc::dlsym(handle, c"hirsel_llvm_generate_v1".as_ptr()) };
+    let join_lent = unsafe { libc::dlsym(handle, c"hirsel_llvm_join_lent_v1".as_ptr()) };
     // SAFETY: the table getter is part of the same embedded component ABI.
     let construction = unsafe { libc::dlsym(handle, c"hirsel_llvm_builder_v1".as_ptr()) };
     if compile.is_null()
         || free.is_null()
         || program.is_null()
         || generate.is_null()
+        || join_lent.is_null()
         || construction.is_null()
     {
         return Err(dl_error());
@@ -277,6 +281,7 @@ fn load() -> Result<Backend, String> {
         program: unsafe { std::mem::transmute::<*mut libc::c_void, Program>(program) },
         // SAFETY: as `program`'s.
         generate: unsafe { std::mem::transmute::<*mut libc::c_void, Generate>(generate) },
+        join_lent: unsafe { std::mem::transmute::<*mut libc::c_void, JoinLent>(join_lent) },
         free: unsafe { std::mem::transmute::<*mut libc::c_void, Free>(free) },
         // SAFETY: the table is static, its types match construction.rs, and the
         // component stays mapped for the process lifetime.
@@ -578,12 +583,15 @@ fn emit(
 ) -> Result<crate::Program, String> {
     // A library defers its parts: a program over it generates the parts it
     // links ([`generate`]).
-    let (lent, limit, lend_to, defer): (&[u8], usize, Option<Deliver>, Option<Code>) = match lend {
-        crate::Lend::None => (&[], 0, None, None),
-        crate::Lend::Borrow(lent) => (lent, 0, None, None),
-        crate::Lend::Lend { limit } => (&[], limit, Some(lend_bodies), Some(defer_part)),
-    };
-    let own = CString::new(crate::LENT_NAMESPACE).unwrap();
+    let (lent, limit, namespace, lend_to, defer): (_, _, _, Option<Deliver>, Option<Code>) =
+        match lend {
+            crate::Lend::None => (&[][..], 0, "", None, None),
+            crate::Lend::Borrow(lent) => (lent, 0, "", None, None),
+            crate::Lend::Lend { limit, namespace } => {
+                (&[], limit, namespace, Some(lend_bodies), Some(defer_part))
+            }
+        };
+    let own = CString::new(namespace).unwrap();
     let triple = CString::new(target.triple()).unwrap();
     let cpu = CString::new(target.cpu()).unwrap();
     let features = CString::new(target.llvm_features()).unwrap();
@@ -659,6 +667,35 @@ fn emit(
         (backend.free)(output.data);
         if output.failed == 0 {
             Ok(receiver.program)
+        } else {
+            Err(String::from_utf8_lossy(&bytes).into_owned())
+        }
+    }
+}
+
+pub(crate) fn join_lent(modules: &[Vec<u8>]) -> Result<Vec<u8>, String> {
+    let backend = backend()?;
+    let inputs: Vec<_> = modules
+        .iter()
+        .map(|module| Input {
+            data: module.as_ptr(),
+            len: module.len(),
+            module: std::ptr::null_mut(),
+        })
+        .collect();
+    let mut output = Output {
+        data: std::ptr::null_mut(),
+        len: 0,
+        failed: 0,
+    };
+    // SAFETY: the slices remain live during the synchronous call, and the
+    // same engine allocates and frees the returned buffer.
+    unsafe {
+        (backend.join_lent)(inputs.as_ptr(), inputs.len(), &mut output);
+        let bytes = std::slice::from_raw_parts(output.data, output.len).to_vec();
+        (backend.free)(output.data);
+        if output.failed == 0 {
+            Ok(bytes)
         } else {
             Err(String::from_utf8_lossy(&bytes).into_owned())
         }

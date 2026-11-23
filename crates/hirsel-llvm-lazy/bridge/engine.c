@@ -88,6 +88,21 @@ static void copy(HirselLlvmOutput *out, const void *data, size_t len, uint8_t fa
 static void error(HirselLlvmOutput *out, const char *message) {
     copy(out, message, strlen(message), 1);
 }
+extern int hirsel_llvm_join_lent(const HirselLlvmUnit *, size_t, HirselLlvmDeliver, void *, char **);
+
+static void deliver_lent(void *out, const uint8_t *data, size_t len) {
+    copy(out, data, len, 0);
+}
+
+__attribute__((visibility("default")))
+void hirsel_llvm_join_lent_v1(const HirselLlvmUnit *units, size_t count, HirselLlvmOutput *out) {
+    char *message = NULL;
+    if (hirsel_llvm_join_lent(units, count, deliver_lent, out, &message)) {
+        error(out, message);
+        free(message);
+    }
+}
+
 __attribute__((visibility("default")))
 void hirsel_llvm_output_free_v1(uint8_t *data) { free(data); }
 

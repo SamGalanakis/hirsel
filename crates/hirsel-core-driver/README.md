@@ -138,9 +138,10 @@ Every LLVM release build, `build`, `run` and `test` alike, is assembled from its
 published recipe over the release std. When the build's library image holds
 the std its std product prebuilt for the build's target and generator, the
 release std is that: every plain std root the image checked whole, with what
-it reaches, less the roots `ALWAYS_IMPORT` holds back, lowered to machine code
-once when the toolchain bundle installs its host target (`std-product
---install`) or on `std-product --store|--image --target TRIPLE`. A build over
+it reaches, less the roots `ALWAYS_IMPORT` holds back. Its modules each run
+the full optimizer and emit machine code when the toolchain installs the
+target (`std-product --install`) or on `std-product --store|--image --target
+TRIPLE`. A build over
 it compiles none of the std. Otherwise the release std is the plain core and
 std instances the program reaches, with what they reach, lowered apart from the
 program and keyed by those instances' content, in the user's cache, where every

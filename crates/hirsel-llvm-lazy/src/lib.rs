@@ -118,7 +118,13 @@ pub enum Lend<'a> {
     /// [`Program::deferred`] its parts, which are not generated.
     Lend {
         limit: usize,
+        namespace: &'a str,
     },
+}
+
+/// Join the bodies lent by independently optimized modules into one import.
+pub fn join_lent(modules: &[Vec<u8>]) -> Result<Vec<u8>, String> {
+    loader::join_lent(modules)
 }
 
 /// What a library's link contract appends to each of its strong definitions

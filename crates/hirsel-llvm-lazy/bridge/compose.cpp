@@ -1,8 +1,14 @@
 #include <llvm-c/Core.h>
+#include <llvm/Bitcode/BitcodeReader.h>
+#include <llvm/Bitcode/BitcodeWriter.h>
+#include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
 #include <llvm/Linker/Linker.h>
 #include <llvm/Support/CBindingWrapping.h>
+#include <llvm/Support/MemoryBuffer.h>
+#include <llvm/Support/raw_ostream.h>
 #include <llvm/Transforms/IPO/MergeFunctions.h>
+#include <cstring>
 
 // One linker composes every unit of a program. LLVMLinkModules2 builds a
 // fresh IRMover per call, and each one rescans the whole destination for its
@@ -16,6 +22,41 @@ extern "C" int hirsel_llvm_compose(void *composer, LLVMModuleRef unit) {
     return static_cast<llvm::Linker *>(composer)->linkInModule(std::unique_ptr<llvm::Module>(llvm::unwrap(unit)));
 }
 extern "C" void hirsel_llvm_composer_free(void *composer) { delete static_cast<llvm::Linker *>(composer); }
+
+struct HirselLlvmUnit { const uint8_t *data; size_t len; LLVMModuleRef module; };
+
+extern "C" int hirsel_llvm_join_lent(const HirselLlvmUnit *units, size_t count,
+    void (*deliver)(void *, const uint8_t *, size_t), void *receiver, char **error) {
+    llvm::LLVMContext context;
+    llvm::Module module("hirsel-lent", context);
+    llvm::Linker linker(module);
+    for (size_t i = 0; i < count; ++i) {
+        llvm::StringRef bytes(reinterpret_cast<const char *>(units[i].data), units[i].len);
+        auto unit = llvm::getLazyBitcodeModule(llvm::MemoryBufferRef(bytes, "hirsel-lent"), context);
+        if (!unit) {
+            *error = strdup(llvm::toString(unit.takeError()).c_str());
+            return 1;
+        }
+        // These bodies have no callers until a program borrows them. Keep
+        // them through this link even though available_externally lets the
+        // linker drop unreferenced definitions.
+        for (llvm::Function &function : **unit)
+            if (function.hasAvailableExternallyLinkage())
+                function.setLinkage(llvm::GlobalValue::ExternalLinkage);
+        if (linker.linkInModule(std::move(*unit))) {
+            *error = strdup("the release std's lent modules do not link");
+            return 1;
+        }
+    }
+    for (llvm::Function &function : module)
+        if (!function.isDeclaration())
+            function.setLinkage(llvm::GlobalValue::AvailableExternallyLinkage);
+    llvm::SmallVector<char, 0> bytes;
+    llvm::raw_svector_ostream out(bytes);
+    llvm::WriteBitcodeToFile(module, out);
+    deliver(receiver, reinterpret_cast<const uint8_t *>(bytes.data()), bytes.size());
+    return 0;
+}
 
 // Every unit of a program emits the drop and compare glue its own types need,
 // so composition renames one body per unit (core_drop_N.1, .2, ...). Merge the

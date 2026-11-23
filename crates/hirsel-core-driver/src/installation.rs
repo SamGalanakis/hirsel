@@ -593,13 +593,7 @@ pub fn publish(
             prebuild(&installed, target, &archive, recipe, meter)?;
         }
     }
-    // The host's release builds take the std prebuilt here. A cross
-    // target's lower the std roots they reach, as its whole-std lowering does
-    // not fit the bundle step's memory limit (AArch64 exceeds 2G).
-    if std
-        && let Some((_, target)) = runtime
-        && target == HOST
-    {
+    if std && let Some((_, target)) = runtime {
         prebuild_release(&product.image, target, meter)?;
     }
     Ok(product)

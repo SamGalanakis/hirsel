@@ -1,9 +1,10 @@
 //! The release std: plain library instances, and every instance they reach,
-//! lowered as one unit apart from the program. Every root is an export; a
+//! lowered apart from the program. Every root is an export; a
 //! program calls it by its symbol and holds none of its bodies. Every
 //! optimised LLVM build takes one, of two kinds:
 //! - prebuilt: `std-product` lowers every plain function its image checked
-//!   whole, less the held roots and what they reach, and generates every
+//!   whole, less the held roots and what they reach, in several modules with
+//!   their dependencies. It runs the full optimizer on each and generates every
 //!   part's machine code into the image's own store ([`PREBUILT`]), once per
 //!   toolchain and target. A build over that image whose units agree with the
 //!   side's takes it, and lowers and generates none of it.
@@ -47,7 +48,7 @@ use hirsel_core_ir::{Callee, FuncId, Identity, Param};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 
-const STD_SCHEMA: u32 = 8;
+const STD_SCHEMA: u32 = 9;
 
 /// The largest body, in LLVM instructions after the std's optimiser, the std
 /// lends a program's inliner. LLVM's inline cost decides each call site; this
@@ -93,6 +94,7 @@ fn library(definition: &DefPath) -> bool {
 #[derive(Serialize, Deserialize)]
 struct StdRecord {
     schema: u32,
+    prebuilt: bool,
     /// The plain roots the side was asked to lower, in identity order.
     requested: Vec<Identity>,
     /// The plain roots the side defines under their instance symbols, in
@@ -107,7 +109,7 @@ struct StdRecord {
     /// The source points the unit's site references name, by file.
     points: BTreeMap<String, Vec<(u32, u32)>>,
     /// The symbols the unit exports, which keep their names.
-    exports: BTreeSet<String>,
+    exports: Vec<BTreeSet<String>>,
     /// The unit's parts, in link order. Each part's bitcode is stored under
     /// [`code_name`]; its object, generated when a program first links the
     /// part ([`StdSide::objects`]), under [`part_name`] in the shared cache.
@@ -122,6 +124,7 @@ struct StdRecord {
 struct StdPart {
     name: String,
     strong: bool,
+    module: usize,
 }
 
 /// A separately lowered release std, as a program's assembly takes it.
@@ -144,6 +147,12 @@ pub(crate) struct StdSide {
 struct SideUnits {
     roots: Vec<Identity>,
     units: BTreeMap<Identity, Unit>,
+}
+
+#[derive(Default)]
+struct ModuleRoots {
+    roots: Vec<Identity>,
+    reached: BTreeSet<Identity>,
 }
 
 /// The plain library roots assigned to the side and the units they reach.
@@ -230,6 +239,14 @@ fn program_side(
 /// The suffix of the std's own hidden names.
 const STD_NAMESPACE: &str = hirsel_llvm_lazy::LENT_NAMESPACE;
 
+fn namespace(module: usize) -> Cow<'static, str> {
+    if module == 0 {
+        Cow::Borrowed(STD_NAMESPACE)
+    } else {
+        Cow::Owned(format!("$part{module}{STD_NAMESPACE}"))
+    }
+}
+
 /// The release std a program's publication assembles against under
 /// `options`' generator: the side `library` (a library image's store)
 /// prebuilt for this generator when each unit it holds that the program also
@@ -250,7 +267,7 @@ pub(crate) fn std_side(
     let (roots, reached) = program_side(units, entry);
     if roots.is_empty() {
         return Ok(StdSide {
-            key: side_key(kin, &[], &[])?,
+            key: side_key(kin, false, &[], &[])?,
             roots: BTreeSet::new(),
             summaries: BTreeMap::new(),
             points: BTreeMap::new(),
@@ -270,7 +287,7 @@ pub(crate) fn std_side(
             .collect(),
     };
     let shared = Store::new(&options.parts)?;
-    let (key, record, lowered) = lower(&generator, kin, side_units, &shared, false)?;
+    let (key, record, lowered) = lower(&generator, kin, side_units, &shared, Vec::new())?;
     side(&shared, key, record, lowered)
 }
 
@@ -341,7 +358,7 @@ impl CheckProduct {
     /// image: every plain root the image checked whole and what it reaches,
     /// less each held root and what it reaches, prepared as a recipe names
     /// them. Reads the library image only.
-    fn image_side(&self) -> Result<SideUnits, NativeStop> {
+    fn image_side(&self) -> Result<(SideUnits, Vec<ModuleRoots>), NativeStop> {
         let plain = self.std_plain_roots()?;
         let mut materialized = crate::instances::InstanceSet::default();
         // A root whose walk stops is left out alone; a program reaching it
@@ -365,8 +382,15 @@ impl CheckProduct {
         }
         let mut reached = BTreeSet::new();
         let mut roots = Vec::new();
+        let mut groups = BTreeMap::<_, ModuleRoots>::new();
         for (root, walked) in walks {
             if !held.contains(&root) {
+                let path = &root.definition.0;
+                let group = groups
+                    .entry((path.package.clone(), path.modules.clone()))
+                    .or_default();
+                group.roots.push(root.clone());
+                group.reached.extend(walked.iter().cloned());
                 reached.extend(walked);
                 roots.push(root);
             }
@@ -392,7 +416,52 @@ impl CheckProduct {
                 super::recipe_build::prepare_unit(instance.ir()?, instance.function, &sources);
             units.insert(identity, unit);
         }
-        Ok(SideUnits { roots, units })
+        let weights: BTreeMap<_, usize> = units
+            .iter()
+            .map(|(identity, unit)| {
+                let size = unit
+                    .module
+                    .functions
+                    .iter()
+                    .filter_map(|f| f.body.as_ref())
+                    .map(|body| body.insts.len())
+                    .sum();
+                (identity, size)
+            })
+            .collect();
+        // Keep siblings together for interprocedural optimization. Place the
+        // largest groups first and count each shared dependency only once
+        // toward the module holding it.
+        let mut groups: Vec<_> = groups.into_values().collect();
+        groups.sort_by_cached_key(|group| {
+            std::cmp::Reverse(
+                group
+                    .reached
+                    .iter()
+                    .map(|identity| weights[identity])
+                    .sum::<usize>(),
+            )
+        });
+        let mut modules: Vec<ModuleRoots> = (0..4).map(|_| ModuleRoots::default()).collect();
+        for group in groups {
+            let module = modules
+                .iter_mut()
+                .min_by_key(|module| {
+                    module
+                        .reached
+                        .union(&group.reached)
+                        .map(|identity| weights[identity])
+                        .sum::<usize>()
+                })
+                .expect("the prebuild partitions its roots");
+            module.roots.extend(group.roots);
+            module.reached.extend(group.reached);
+        }
+        modules.retain(|module| !module.roots.is_empty());
+        for module in &mut modules {
+            module.roots.sort();
+        }
+        Ok((SideUnits { roots, units }, modules))
     }
 
     /// The prebuilt release std of this product's library image for release
@@ -406,10 +475,12 @@ impl CheckProduct {
             .image
             .as_ref()
             .ok_or_else(|| NativeStop::Entry("the release std is an image's".into()))?;
+        let (units, modules) = self.image_side()?;
         Ok(PrebuiltStd {
             target: target.to_owned(),
             store: Store::new(&image.store_root().join(PREBUILT))?,
-            units: self.image_side()?,
+            units,
+            modules,
         })
     }
 }
@@ -420,6 +491,7 @@ pub(crate) struct PrebuiltStd {
     target: String,
     store: Store,
     units: SideUnits,
+    modules: Vec<ModuleRoots>,
 }
 
 impl PrebuiltStd {
@@ -431,7 +503,7 @@ impl PrebuiltStd {
             observe_charge: false,
         };
         let kin = generator.kin()?;
-        let (key, _, _) = lower(&generator, kin, self.units, &self.store, true)?;
+        let (key, _, _) = lower(&generator, kin, self.units, &self.store, self.modules)?;
         self.store.put_keyed(prebuilt_name(kin)?, &encode(&key)?)?;
         Ok(())
     }
@@ -448,18 +520,92 @@ fn lower(
     kin: ContentHash,
     side: SideUnits,
     store: &Store,
-    objects: bool,
+    modules: Vec<ModuleRoots>,
 ) -> Result<(ContentHash, StdRecord, u64), NativeStop> {
-    let SideUnits { roots, mut units } = side;
+    let SideUnits {
+        roots: requested,
+        units,
+    } = side;
+    let prebuilt = !modules.is_empty();
     let owners = units
         .iter()
         .map(|(identity, unit)| Ok((identity.clone(), unit.owner()?)))
         .collect::<io::Result<Vec<_>>>()?;
-    let requested = roots.clone();
-    let key = side_key(kin, &requested, &owners)?;
+    let key = side_key(kin, prebuilt, &requested, &owners)?;
     if let Some(record) = load_record(store, key, kin)? {
         return Ok((key, record, 0));
     }
+    let lent_key = lent_name(key)?;
+    let mut record = StdRecord {
+        schema: STD_SCHEMA,
+        prebuilt,
+        requested,
+        roots: Vec::new(),
+        units: owners,
+        summaries: Vec::new(),
+        points: BTreeMap::new(),
+        exports: Vec::new(),
+        parts: Vec::new(),
+        lent: lent_key,
+    };
+    let mut lent = Vec::new();
+    if prebuilt {
+        for module in modules {
+            let units = module
+                .reached
+                .into_iter()
+                .map(|identity| {
+                    let unit = units[&identity].clone();
+                    (identity, unit)
+                })
+                .collect();
+            lent.push(lower_module(
+                options,
+                module.roots,
+                units,
+                store,
+                key,
+                &mut record,
+            )?);
+        }
+    } else {
+        lent.push(lower_module(
+            options,
+            record.requested.clone(),
+            units,
+            store,
+            key,
+            &mut record,
+        )?);
+    }
+    let lent = if lent.len() == 1 {
+        lent.pop().expect("one module")
+    } else {
+        hirsel_llvm_lazy::join_lent(&lent).map_err(|message| NativeStop::Emit {
+            definition: record.requested[0].definition.clone(),
+            message,
+        })?
+    };
+    record.roots.sort();
+    record.summaries.sort_by_key(|(code, _)| *code);
+    for points in record.points.values_mut() {
+        points.sort_unstable();
+        points.dedup();
+    }
+    store.put_keyed(lent_key, &lent)?;
+    store.put_keyed(key, &encode(&record)?)?;
+    let lowered = record.units.len() as u64;
+    Ok((key, record, lowered))
+}
+
+fn lower_module(
+    options: &Generator<'_>,
+    roots: Vec<Identity>,
+    mut units: BTreeMap<Identity, Unit>,
+    store: &Store,
+    key: ContentHash,
+    record: &mut StdRecord,
+) -> Result<Vec<u8>, NativeStop> {
     let reached: Vec<Identity> = units.keys().cloned().collect();
     let bindings = super::recipe_build::bind_annexes(
         &mut units,
@@ -549,33 +695,39 @@ fn lower(
     .map_err(emit)?;
     drop(facts);
     drop(module);
+    let index = record.exports.len();
     let program = lowered
         .emit(
             &exports,
             hirsel_guard::jobs() as u32,
             &mut hirsel_llvm_lazy::Unheld,
-            hirsel_llvm_lazy::Lend::Lend { limit: LEND_LIMIT },
+            hirsel_llvm_lazy::Lend::Lend {
+                limit: LEND_LIMIT,
+                namespace: &namespace(index),
+            },
         )
         .map_err(emit)?;
-    let parts: Vec<StdPart> = program
-        .deferred
-        .iter()
-        .map(|part| StdPart {
+    if program.deferred.is_empty() {
+        return Err(NativeStop::Entry(
+            "the release std module has no part".into(),
+        ));
+    }
+    if body_keys.is_empty() {
+        return Err(NativeStop::Entry(
+            "the release std module holds no body".into(),
+        ));
+    }
+    let offset = record.parts.len();
+    record.exports.push(exports.into_iter().collect());
+    record
+        .parts
+        .extend(program.deferred.iter().map(|part| StdPart {
             name: part.name.clone(),
             strong: part.strong,
-        })
-        .collect();
-    if objects {
-        let finished = StdParts {
-            key,
-            instance: Some(first.clone()),
-            store: Some(store.clone()),
-            exports: exports.iter().cloned().collect(),
-            parts: parts.clone(),
-        };
-        let private_names = finished.private_names();
-        let target = hirsel_core_layout::Target::from_triple(options.target)
-            .expect("supported native target");
+            module: index,
+        }));
+    if record.prebuilt {
+        let private_names = private_names(&record.parts, &record.exports);
         // Generated in batches, so the objects in hand stay few.
         for (batch, codes) in program.deferred.chunks(256).enumerate() {
             let codes: Vec<&[u8]> = codes.iter().map(|part| part.code.as_slice()).collect();
@@ -583,40 +735,30 @@ fn lower(
                 hirsel_llvm_lazy::generate_parts(&codes, target, hirsel_guard::jobs() as u32)
                     .map_err(emit)?;
             for (j, object) in generated.iter().enumerate() {
-                let i = batch * 256 + j;
-                let object = finished.finish(i, object, &private_names).map_err(emit)?;
-                crate::native_object::publish(store, part_name(key, i)?, &object)?;
+                let i = offset + batch * 256 + j;
+                let part_key = part_name(key, i)?;
+                let object = finish(
+                    part_key,
+                    &record.parts[i],
+                    object,
+                    &record.exports[index],
+                    &private_names[index],
+                )
+                .map_err(emit)?;
+                crate::native_object::publish(store, part_key, &object)?;
             }
         }
     } else {
-        // Each part's object is generated when a program first links it: a
-        // program links few of the unit's parts.
         for (i, part) in program.deferred.iter().enumerate() {
             store.put_keyed(code_name(key, i)?, &part.code)?;
         }
     }
-    if parts.is_empty() {
-        return Err(NativeStop::Entry("the release std has no part".into()));
+    record.roots.extend(roots);
+    record.summaries.extend(codes.into_iter().zip(summaries));
+    for (file, points) in points {
+        record.points.entry(file).or_default().extend(points);
     }
-    if body_keys.is_empty() {
-        return Err(NativeStop::Entry("the release std holds no body".into()));
-    }
-    let lent = lent_name(key)?;
-    store.put_keyed(lent, &program.lent)?;
-    let record = StdRecord {
-        schema: STD_SCHEMA,
-        requested,
-        roots,
-        units: owners,
-        summaries: codes.into_iter().zip(summaries).collect(),
-        points,
-        exports: exports.into_iter().collect(),
-        parts,
-        lent,
-    };
-    store.put_keyed(key, &encode(&record)?)?;
-    let lowered = record.units.len() as u64;
-    Ok((key, record, lowered))
+    Ok(program.lent)
 }
 
 /// What a release std's lowering reads besides its units: the toolchain and
@@ -662,10 +804,11 @@ impl<'a> Generator<'a> {
 /// A side's key: its kin's, its roots', and its own units' content.
 fn side_key(
     kin: ContentHash,
+    prebuilt: bool,
     roots: &[Identity],
     units: &[(Identity, ContentHash)],
 ) -> io::Result<ContentHash> {
-    crate::native::key("hirsel.core-std-side.v2", &(kin, roots, units))
+    crate::native::key("hirsel.core-std-side.v3", &(kin, prebuilt, roots, units))
 }
 
 /// The std side `record`, stored in the shared cache `store` under `key`,
@@ -713,84 +856,71 @@ pub(crate) struct StdParts {
     /// The shared cache holding each part's bitcode, and its object once
     /// generated.
     store: Option<Store>,
-    exports: BTreeSet<String>,
+    exports: Vec<BTreeSet<String>>,
     parts: Vec<StdPart>,
 }
 
-impl StdParts {
-    /// The names of the unit's strong definitions it does not export.
-    fn private_names(&self) -> BTreeSet<&[u8]> {
-        self.parts
-            .iter()
-            .filter(|part| part.strong && !self.exports.contains(&part.name))
-            .map(|part| part.name.as_bytes())
-            .collect()
+fn private_names<'a>(
+    parts: &'a [StdPart],
+    exports: &[BTreeSet<String>],
+) -> Vec<BTreeSet<&'a [u8]>> {
+    let mut names = vec![BTreeSet::new(); exports.len()];
+    for part in parts {
+        if part.strong && !exports[part.module].contains(&part.name) {
+            names[part.module].insert(part.name.as_bytes());
+        }
     }
+    names
+}
 
-    /// Part `i`'s object as a program links it, from the object generated
-    /// from its bitcode: cut, with its debug rows, and its names under the
-    /// link contract. The part defines strong only its own symbol, when its
-    /// record says so, and its debug symbol.
-    fn finish(
-        &self,
-        i: usize,
-        object: &[u8],
-        private_names: &BTreeSet<&[u8]>,
-    ) -> Result<hirsel_core_ir::source::NativeObject, String> {
-        let parts = self;
-        let part = &parts.parts[i];
-        let key = part_name(self.key, i).map_err(|e| e.to_string())?;
-        let mut cut =
-            hirsel_llvm_lazy::core::split_native_object(object, &[(&part.name, key)], true)?;
-        let mut object = cut.pop().ok_or("a release std part cuts to no object")?;
-        let strong = hirsel_llvm_lazy::core::strong_definitions(&object.bytes)?;
-        let own: BTreeSet<Vec<u8>> = strong
-            .into_iter()
-            .filter(|name| {
-                !std::str::from_utf8(name).is_ok_and(|name| parts.exports.contains(name))
-            })
-            .collect();
-        if !part.name.is_empty() {
-            let debug = hirsel_core_ir::source::debug_symbol(key, 0).into_bytes();
-            let mut expected = BTreeSet::from([debug]);
-            if part.strong && !parts.exports.contains(&part.name) {
-                expected.insert(part.name.clone().into_bytes());
-            }
-            if own != expected {
-                return Err(format!(
-                    "release std part {} defines other strong symbols than its record names",
-                    part.name
-                ));
-            }
+/// Cut the object, detach its debug rows and put its private definitions and
+/// references under its module's namespace. A named part defines only its
+/// own symbol, when its record marks it strong, and its debug symbol.
+fn finish(
+    key: ContentHash,
+    part: &StdPart,
+    object: &[u8],
+    exports: &BTreeSet<String>,
+    private_names: &BTreeSet<&[u8]>,
+) -> Result<hirsel_core_ir::source::NativeObject, String> {
+    let mut cut = hirsel_llvm_lazy::core::split_native_object(object, &[(&part.name, key)], true)?;
+    let mut object = cut.pop().ok_or("a release std part cuts to no object")?;
+    let strong = hirsel_llvm_lazy::core::strong_definitions(&object.bytes)?;
+    let own: BTreeSet<Vec<u8>> = strong
+        .into_iter()
+        .filter(|name| !std::str::from_utf8(name).is_ok_and(|name| exports.contains(name)))
+        .collect();
+    if !part.name.is_empty() {
+        let debug = hirsel_core_ir::source::debug_symbol(key, 0).into_bytes();
+        let mut expected = BTreeSet::from([debug]);
+        if part.strong && !exports.contains(&part.name) {
+            expected.insert(part.name.clone().into_bytes());
         }
-        let is_renamed = |name: &[u8]| private_names.contains(name) || own.contains(name);
-        let rename = |name: &[u8]| {
-            is_renamed(name).then(|| {
-                let mut renamed = name.to_vec();
-                renamed.extend_from_slice(STD_NAMESPACE.as_bytes());
-                renamed
-            })
-        };
-        object.bytes = hirsel_llvm_lazy::core::rename_symbols(&object.bytes, &rename)?;
-        if let Some(debug) = &mut object.debug {
-            for section in &mut debug.sections {
-                if is_renamed(section.symbol.as_bytes()) {
-                    section.symbol.push_str(STD_NAMESPACE);
-                }
-            }
+        if own != expected {
+            return Err(format!(
+                "release std part {} defines other strong symbols than its record names",
+                part.name
+            ));
         }
-        Ok(object)
     }
-
-    /// The name a part's symbol has in a program's link: a strong
-    /// definition the unit does not export is in the std's namespace.
-    fn linked(&self, part: &StdPart) -> Vec<u8> {
-        let mut name = part.name.clone().into_bytes();
-        if part.strong && !self.exports.contains(&part.name) {
-            name.extend_from_slice(STD_NAMESPACE.as_bytes());
+    let namespace = namespace(part.module);
+    let is_renamed = |name: &[u8]| private_names.contains(name) || own.contains(name);
+    let rename = |name: &[u8]| {
+        is_renamed(name).then(|| {
+            let mut renamed = name.to_vec();
+            renamed.extend_from_slice(namespace.as_bytes());
+            renamed
+        })
+    };
+    object.bytes = hirsel_llvm_lazy::core::rename_symbols(&object.bytes, &rename)?;
+    if let Some(debug) = &mut object.debug {
+        for section in &mut debug.sections {
+            if is_renamed(section.symbol.as_bytes()) {
+                section.symbol.push_str(&namespace);
+            }
         }
-        name
     }
+    Ok(object)
 }
 
 impl StdSide {
@@ -817,7 +947,14 @@ impl StdSide {
             .parts
             .iter()
             .enumerate()
-            .map(|(i, part)| (parts.linked(part), i))
+            .filter(|(_, part)| !part.name.is_empty())
+            .map(|(i, part)| {
+                let mut name = part.name.clone().into_bytes();
+                if part.strong && !parts.exports[part.module].contains(&part.name) {
+                    name.extend_from_slice(namespace(part.module).as_bytes());
+                }
+                (name, i)
+            })
             .collect();
         let mut taken = vec![false; parts.parts.len()];
         // The parts that define what `names` name, not taken before.
@@ -842,11 +979,9 @@ impl StdSide {
             }
             Ok(next)
         };
-        let mut next = if let [part] = parts.parts.as_slice()
-            && part.name.is_empty()
-        {
-            // A unit generated whole: its one object.
-            vec![0]
+        let mut next = if by_name.is_empty() {
+            // The target emits one whole object per module.
+            (0..parts.parts.len()).collect()
         } else {
             let mut named = Vec::new();
             for object in program {
@@ -889,9 +1024,18 @@ impl StdSide {
                     hirsel_guard::jobs() as u32,
                 )
                 .map_err(emit)?;
-                let private_names = private_names.get_or_insert_with(|| parts.private_names());
+                let private_names = private_names
+                    .get_or_insert_with(|| self::private_names(&parts.parts, &parts.exports));
                 for (&i, object) in missed.iter().zip(&generated) {
-                    let object = parts.finish(i, object, private_names).map_err(emit)?;
+                    let part = &parts.parts[i];
+                    let object = finish(
+                        part_name(self.key, i)?,
+                        part,
+                        object,
+                        &parts.exports[part.module],
+                        &private_names[part.module],
+                    )
+                    .map_err(emit)?;
                     named.extend(
                         hirsel_llvm_lazy::core::undefined_symbols(&object.bytes).map_err(emit)?,
                     );
@@ -900,7 +1044,11 @@ impl StdSide {
                     linked.insert(i, (bare, object.debug, file));
                 }
             }
-            next = reach(named)?;
+            next = if by_name.is_empty() {
+                Vec::new()
+            } else {
+                reach(named)?
+            };
         }
         Ok(linked
             .into_values()
@@ -946,8 +1094,12 @@ fn load_record(store: &Store, key: ContentHash, kin: ContentHash) -> io::Result<
     };
     let sound = record.schema == STD_SCHEMA
         && !record.parts.is_empty()
+        && record
+            .parts
+            .iter()
+            .all(|part| part.module < record.exports.len())
         && record.lent == lent_name(key)?
-        && side_key(kin, &record.requested, &record.units)? == key;
+        && side_key(kin, record.prebuilt, &record.requested, &record.units)? == key;
     Ok(sound.then_some(record))
 }
 

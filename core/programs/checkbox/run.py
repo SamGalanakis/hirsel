@@ -24,19 +24,22 @@ def inputs(work, source=PROGRAM / "main.hirsel", store_sources=None):
     std = {"name": "std", "version": "1"}
     packages = []
     for name, dependencies in [("core", []), ("std", [core])]:
+        library = ROOT / "core" / name
         packages.append({
             "package": {"name": name, "version": "1"}, "dependencies": dependencies,
             "sources": [
-                {"file": str(file), "modules": [file.stem], "signatures": name == "core"}
-                for file in sorted((ROOT / "core" / name).glob("*.hirsel"))
+                {"file": str(file), "modules": list(relative.with_suffix("").parts), "signatures": name == "core"}
+                for file in sorted(library.rglob("*.hirsel"))
+                if (relative := file.relative_to(library)).parts[0] != "tests"
             ],
         })
     bound = []
-    for name, modules in (("store", ("store",)), ("runner", ("triggers", "runner", "ingress"))):
+    for name in ("store", "runner"):
         directory = PROGRAM.parent / name
         with (directory / "hirsel.toml").open("rb") as manifest_file:
             manifest = tomllib.load(manifest_file)
         package = manifest["package"]
+        program = manifest.get("program", {}).get("module")
         packages.append({
             "package": {"name": package["name"], "version": str(package["major"])},
             "dependencies": [core] + [
@@ -47,7 +50,7 @@ def inputs(work, source=PROGRAM / "main.hirsel", store_sources=None):
                 {"file": str(store_sources.get(module, directory / file)),
                  "modules": module.split("."), "signatures": False}
                 for file, module in manifest["sources"].items()
-                if module in modules
+                if module != program
             ],
         })
         bound.append(packages[-1]["package"])

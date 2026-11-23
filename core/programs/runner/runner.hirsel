@@ -62,9 +62,9 @@ pub type Phase: send = Starting(Step) | Ready | Draining | Paused
 // hosted place reports them in `PlaceReady`; an in-process launcher reads them here.
 pub type Status: shareable + send { phase: Phase, digest: Bytes, target: String, n_place: u64, release: Bytes, activation: u64, store_id: (u64, u64), retain_from: u64, addr: Option[Addr] }
 pub type Stop: codec + send { lag_ms: u64, grace_ms: u64 }
-pub type Backing: send = Memory | Disk(Dir, store.Options) | Temp(Dir)
+pub type Backing: send = Memory | Disk(Dir) | Temp(Dir)
 pub type PlaceConfig[G: send, H: send, S: send, B: send]: send {
-    backing: Backing, selection: Selection, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64,
+    backing: Backing, sizes: store.Overrides, selection: Selection, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64,
     migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits], handles: StaticFn[fn(store.Schema) -> Result[H, store.Error]],
     session: WireConfig, max_sessions: u64, proxies: List[std.wsock.Prefix], n_publisher: u64,
     listen: Addr, net: Net, tasks: Tasks, clock: Clock, random: Random, stop: Stop,
@@ -208,49 +208,34 @@ fn start_drain(stop: Stop, started: u64, clock: Clock, tasks: Tasks, events: Sen
     Ok(task.spawn(tasks, bytes 4096u64, take alarm, drain_timer))
 }
 
-// What a disk store opened with these options holds at most: its resident pages, a pack
-// and a journal group.
-pub fn disk_store_bytes(options: store.Options) -> u64 {
-    let journal: u64 = int.widen(options.group_bytes)
-    let mut total = int.saturating_add(options.resident_limit, order.max(options.pack_bytes, 16777476))
-    total = int.saturating_add(total, journal)
-    int.saturating_add(total, 2097152u64)
-}
-
-fn head_bytes(backing: Backing, n_place: u64, n_publisher: u64) -> u64 {
-    let names = int.saturating_add(n_place, n_publisher)
-    match backing {
-        Memory => int.saturating_add(int.saturating_add(result.unwrap(store.sized(Memory, 1074790400u64)).resident_limit, names), 2097152u64),
-        Disk(_, options) => int.saturating_add(disk_store_bytes(options), names),
-        Temp(_) => int.saturating_add(disk_store_bytes(result.unwrap(store.sized(Directory, 2147483648u64))), names),
-    }
-}
-
-// What `operate` spends of its task's bytes (RUNNER-SPEC §13.4): the head's allowance,
-// the serve side's reserve and its inbox, and operate's own inboxes, timers and status copies.
-const OPERATE_OWN_BYTES: u64 = 262144u64
-
-pub fn operate_bytes[G: send, H: send, S: send, B: send](p: PlaceConfig[G, H, S, B]) -> Result[u64, Capacity] {
-    let launch = launch_env()
-    let n_place = if launch.n_place_explicit { launch.n_place } else { p.n_place }
-    let serving = serving_bytes(p.session, p.max_sessions, n_place)?
-    let grant = match p.triggers { Some(config) => config.grant_bytes, None => 0u64 }
-    let head = int.saturating_add(head_bytes(p.backing, n_place, p.n_publisher), grant)
-    Ok(int.saturating_add(int.saturating_add(head, serving), OPERATE_OWN_BYTES))
-}
-
 pub fn operate[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, B], take stop: Receiver[()], status: Latest[Status], take watching: Option[Sender[Receiver[Phase]]]) -> Result[Ended, StartError] waits {
+    operate_with_report(take p, take stop, status, take watching, None)
+}
+
+pub fn operate_report[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, B], take stop: Receiver[()], status: Latest[Status], take watching: Option[Sender[Receiver[Phase]]], errors: Stderr) -> Result[Ended, StartError] waits {
+    operate_with_report(take p, take stop, status, take watching, Some(errors))
+}
+
+fn operate_with_report[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, B], take stop: Receiver[()], status: Latest[Status], take watching: Option[Sender[Receiver[Phase]]], report: Option[Stderr]) -> Result[Ended, StartError] waits {
     let launch = launch_env()
     let n_place = if launch.n_place_explicit { launch.n_place } else { p.n_place }
-    if let Some((attempt, image)) = launch.prepare { return operate_prepare(take p, n_place, attempt, image) }
+    let sized_store = place_store(p, report)
+    let (take options, _, store_bytes) = match take sized_store {
+        Ok(take sized) => take sized,
+        Error(take e) => {
+            if let Some(_) = launch.install { return finish_install(Error(take e)) }
+            return Error(take e)
+        },
+    }
+    if let Some((attempt, image)) = launch.prepare { return operate_prepare(take p, take options, n_place, attempt, image) }
     if let Some(version) = launch.install {
-        let result = operate_install(take p, InstallAt(version), n_place)
+        let result = operate_install(take p, take options, InstallAt(version), n_place)
         return finish_install(take result)
     }
     let installing = match p.selection { Install => true, InstallAt(_) => true, _ => false }
     if installing {
         let selection = p.selection
-        let _ = operate_install(take p, selection, n_place)?
+        let _ = operate_install(take p, take options, selection, n_place)?
         return Ok(Unstarted)
     }
     if p.idle == Some(0u64) { return Error(Missing("idle")) }
@@ -285,14 +270,12 @@ pub fn operate[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, 
         },
         _ => { let _ = channel.try_send(to, StopRequested); None },
     }
-    let grant_bytes = match trigger_config {
-        Some(config) => if triggers.is_empty(config.entries) { 0u64 } else { config.grant_bytes },
-        None => 0u64,
-    }
-    let allowance = int.saturating_add(head_bytes(backing, n_place, n_publisher), grant_bytes)
+
+    let head = place_head_bytes(n_place, n_publisher, trigger_bytes(trigger_config)) ?=> Full
+    let allowance = add_place_bytes(head, store_bytes) ?=> Full
     let activity = cut_activity()?
     let cut = latest.handle(activity.root)
-    let head_job = ManagedHead(backing: take backing, selection: selection, tasks: tasks, clock: clock, random: random, place: place, migrate: migrate, handles: handles,
+    let head_job = ManagedHead(backing: take backing, options: take options, selection: selection, tasks: tasks, clock: clock, random: random, place: place, migrate: migrate, handles: handles,
         n_place: n_place, n_publisher: n_publisher, inbox: take inbox_head, finish_from: take finish_from, to: channel.sender(to), drain: latest.handle(drain),
         head_to: channel.sender(head_to), cut: take activity, triggering: take trigger_config, idle: idle, expected_store: launch.store_id)
     let head_run: fn(take ManagedHead[G, H, S]) -> () waits = head_ended
@@ -568,13 +551,13 @@ pub fn operate[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, 
 
 // Installation shares the serving head's open and activation, then closes the store
 // before it sends proof. No publisher, triggers, or listener start for this launch.
-fn operate_install[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, B], selection: Selection, n_place: u64) -> Result[u64, StartError] waits {
+fn operate_install[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, B], take options: store.Options, selection: Selection, n_place: u64) -> Result[u64, StartError] waits {
     let PlaceConfig(backing: take backing, tasks: tasks, clock: clock, random: random, place: place, migrate: migrate, handles: handles, ..) = take p
-    let persistent = match backing { Disk(_, _) => true, _ => false }
+    let persistent = match backing { Disk(_) => true, _ => false }
     if let InstallAt(_) = selection {
         if !persistent { return Error(Missing("disk store")) }
     }
-    let (take db, take temporary) = open_backing(take backing, tasks, clock, random)?
+    let (take db, take temporary) = open_backing(take backing, options, tasks, clock, random)?
     let mut opened = take db
     let installed: Result[u64, StartError] = match head_prepare(mut opened, selection, persistent, place, migrate, handles, n_place, tasks) {
         Ok(_) => if persistent {
@@ -618,14 +601,24 @@ fn finish_install(take result: Result[u64, StartError]) -> Result[Ended, StartEr
     match take result { Ok(_) => Ok(Unstarted), Error(take problem) => Error(take problem) }
 }
 
-fn operate_prepare[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, B], n_place: u64, attempt: LaunchBytes, image: LaunchBytes) -> Result[Ended, StartError] waits {
+pub fn prepare_place[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, B], take attempt: Bytes, take image: Bytes, errors: Stderr) -> Result[Ended, StartError] waits {
+    let (take options, _, _) = place_store(p, Some(errors))?
+    let n_place = p.n_place
+    prepare_placed(take p, take options, n_place, take attempt, take image)
+}
+
+fn operate_prepare[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, B], take options: store.Options, n_place: u64, attempt: LaunchBytes, image: LaunchBytes) -> Result[Ended, StartError] waits {
+    prepare_placed(take p, take options, n_place, launch_bytes(attempt), launch_bytes(image))
+}
+
+fn prepare_placed[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, B], take options: store.Options, n_place: u64, take attempt: Bytes, take image: Bytes) -> Result[Ended, StartError] waits {
     let PlaceConfig(backing: take backing, place: place, migrate: migrate, handles: handles, clock: clock, tasks: tasks, triggers: take config, ..) = take p
-    let (scratch, options) = match backing { Disk(scratch, options) => (scratch, options), _ => return Error(Missing("scratch")) }
+    let Disk(scratch) = backing else { return Error(Missing("scratch")) }
     let entries = match take config {
         Some(TriggerConfig(entries: take listed, ..)) => take listed,
         None => triggers.empty_entries(),
     }
-    let setup = PrepareConfig(scratch: scratch, options: clone(options), attempt: launch_bytes(attempt), image_digest: launch_bytes(image),
+    let setup = PrepareConfig(scratch: scratch, options: take options, attempt: take attempt, image_digest: take image,
         clock: clock, tasks: tasks, n_place: n_place, place: place, migrate: migrate, handles: handles, triggers: take entries)
     match prepare_deploy(setup) {
         Ok(()) => Ok(Unstarted),
@@ -2853,7 +2846,7 @@ type HeadDrain {
 }
 
 type ManagedHead[G: send, H: send, S: send]: send {
-    backing: Backing, selection: Selection, tasks: Tasks, clock: Clock, random: Random,
+    backing: Backing, options: store.Options, selection: Selection, tasks: Tasks, clock: Clock, random: Random,
     place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]],
     migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits], handles: StaticFn[fn(store.Schema) -> Result[H, store.Error]],
     n_place: u64, n_publisher: u64, inbox: Receiver[HeadInput], finish_from: Receiver[()],
@@ -2873,17 +2866,17 @@ fn head_ended[G: send, H: send, S: send](take job: ManagedHead[G, H, S]) -> () w
     let _ = channel.send(to, HeadEnded(take ended))
 }
 
-fn open_backing(take backing: Backing, tasks: Tasks, clock: Clock, random: Random) -> Result[(store.Db, Option[TemporaryBacking]), StartError] waits {
+fn open_backing(take backing: Backing, options: store.Options, tasks: Tasks, clock: Clock, random: Random) -> Result[(store.Db, Option[TemporaryBacking]), StartError] waits {
     let mut temporary: Option[TemporaryBacking] = None
     let opened: Result[store.Db, store.Error] = match backing {
-        Memory => Ok(store.memory(clock, random, result.unwrap(store.sized(Memory, 1074790400u64)))),
-        Disk(dir, options) => store.open(tasks, dir, clock, random, options),
+        Memory => Ok(store.memory(clock, random, options)),
+        Disk(dir) => store.open(tasks, dir, clock, random, options),
         Temp(parent) => {
             let name = string.with_capacity(32u64)
             let mut cleanup = match TemporaryBacking(dir: parent, name: take name) { Ok(take guard) => take guard, Error((cap, _)) => return Error(Full(cap)) }
             let dir = match std.dir.create_temp(parent, mut cleanup.name) { Ok(dir) => dir, Error(problem) => return Error(Open(Store(Io(problem)))) }
             temporary = Some(take cleanup)
-            store.open(tasks, dir, clock, random, result.unwrap(store.sized(Directory, 2147483648u64)))
+            store.open(tasks, dir, clock, random, options)
         },
     }
     let db = match take opened { Ok(take db) => take db, Error(take problem) => return Error(Open(Store(take problem))) }
@@ -2891,11 +2884,11 @@ fn open_backing(take backing: Backing, tasks: Tasks, clock: Clock, random: Rando
 }
 
 fn managed_head[G: send, H: send, S: send](take job: ManagedHead[G, H, S]) -> Result[Option[u64], StartError] waits {
-    let ManagedHead(backing: take backing, selection: selection, tasks: tasks, clock: clock, random: random, place: place, migrate: migrate, handles: handles,
+    let ManagedHead(backing: take backing, options: take options, selection: selection, tasks: tasks, clock: clock, random: random, place: place, migrate: migrate, handles: handles,
         n_place: n_place, n_publisher: n_publisher, inbox: take inbox, finish_from: take finish_from, to: take to, drain: take drain,
         head_to: take head_to, cut: take cut, triggering: take triggering, idle: idle, expected_store: expected_store) = take job
-    let persistent = match backing { Disk(_, _) => true, _ => false }
-    let (take opened, take temporary) = open_backing(take backing, tasks, clock, random)?
+    let persistent = match backing { Disk(_) => true, _ => false }
+    let (take opened, take temporary) = open_backing(take backing, options, tasks, clock, random)?
     let mut db = take opened
     if let Some(expected) = expected_store {
         let actual = store.identity_words(db)

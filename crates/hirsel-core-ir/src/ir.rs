@@ -1020,6 +1020,8 @@ pub enum RtOp {
     StepLeave,
     /// Close a failed step scope, catching only its own OutOfTime causes.
     StepCatch,
+    /// The current task's original allowance.
+    RootLimit,
     /// Private immutable launch metadata: `(field, index) -> word`.
     LaunchWord,
     /// Private launch target as a borrowed String carrier, anchored to this run.
@@ -1292,6 +1294,7 @@ impl RtOp {
             RtOp::CauseNext | RtOp::CauseValue => (vec![V(p)], vec![p]),
             RtOp::ArgsLen => (vec![V(u64_)], vec![u64_]),
             RtOp::ArgsGet => (vec![V(u64_), V(u64_)], vec![p]),
+            RtOp::RootLimit => (vec![], vec![u64_]),
             RtOp::LaunchWord => (vec![V(u64_), V(u64_)], vec![u64_]),
             RtOp::LaunchHandle | RtOp::SecretShare => (vec![V(u64_)], vec![u64_]),
             RtOp::FrameRecord => (vec![V(u64_), V(u8_), V(u8_)], vec![p]),
@@ -1660,6 +1663,7 @@ impl RtOp {
             | RtOp::CauseValue
             | RtOp::ArgsLen
             | RtOp::ArgsGet
+            | RtOp::RootLimit
             | RtOp::LaunchWord
             | RtOp::LaunchHandle
             | RtOp::SecretShare

@@ -221,9 +221,9 @@
     "lines": 1308
   },
   "crates/hirsel-core-front/src/body/core_ops.rs": {
-    "lines": 4690,
-    "raise_revision": 1,
-    "reason": "conc-shared-payloads-1993"
+    "lines": 4694,
+    "raise_revision": 2,
+    "reason": "w3a-b-sized-2009"
   },
   "crates/hirsel-core-front/src/body/key_glue.rs": {
     "lines": 2851
@@ -276,17 +276,17 @@
     "lines": 1198
   },
   "crates/hirsel-core-ir/src/eval.rs": {
-    "lines": 8497,
-    "raise_revision": 1,
-    "reason": "conc-shared-payloads-1993"
+    "lines": 8486,
+    "raise_revision": 2,
+    "reason": "w3a-b-sized-2009"
   },
   "crates/hirsel-core-ir/src/extent.rs": {
     "lines": 1233
   },
   "crates/hirsel-core-ir/src/ir.rs": {
-    "lines": 2473,
-    "raise_revision": 2,
-    "reason": "conc-shared-payloads-1993"
+    "lines": 2477,
+    "raise_revision": 3,
+    "reason": "w3a-b-sized-2009"
   },
   "crates/hirsel-core-ir/src/lib.rs": {
     "lines": 1145
@@ -301,9 +301,9 @@
     "lines": 1576
   },
   "crates/hirsel-core-ir/src/text.rs": {
-    "lines": 2439,
-    "raise_revision": 1,
-    "reason": "conc-shared-payloads-1993"
+    "lines": 2441,
+    "raise_revision": 2,
+    "reason": "w3a-b-sized-2009"
   },
   "crates/hirsel-core-ir/src/wf.rs": {
     "lines": 1905
@@ -346,7 +346,9 @@
     "lines": 1051
   },
   "crates/hirsel-core-rt/src/limit.rs": {
-    "lines": 1536
+    "lines": 1376,
+    "raise_revision": 1,
+    "reason": "w3a-b-sized-2009"
   },
   "crates/hirsel-core-rt/src/net.rs": {
     "lines": 1582

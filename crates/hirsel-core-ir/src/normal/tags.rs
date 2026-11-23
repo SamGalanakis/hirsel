@@ -389,6 +389,7 @@ tags!(RtOp {
     72 => SharedNew { item },
     73 => SharedShare,
     74 => SharedRelease { item },
+    75 => RootLimit,
 });
 
 tags!(Wait {

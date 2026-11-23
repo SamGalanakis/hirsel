@@ -174,7 +174,7 @@ pub fn start[G: send, H: send, S: send, B: send](take p: runner.PlaceConfig[G, H
     match p.backing {
         Memory => (),
         Temp(_) => (),
-        Disk(_, _) => return Error(Start(Missing("backing")))
+        Disk(_) => return Error(Start(Missing("backing")))
     }
     if !loopback_any(p.listen) {
         return Error(Start(Missing("listen")))
@@ -183,10 +183,13 @@ pub fn start[G: send, H: send, S: send, B: send](take p: runner.PlaceConfig[G, H
         Ok(take k) => take k,
         Error(e) => return Error(Start(e))
     }
-    let need = match runner.operate_bytes(p) {
+    let overhead = match runner.operate_bytes(p) {
         Ok(total) => total,
         Error(cap) => return Error(Full(cap))
     }
+    let store_share = match p.backing { Memory => 1074790400u64, _ => 67108864u64 }
+    let configured = int.checked_add(overhead, store_share + 1048576u64)
+    let Some(need) = configured else { return Error(Full(Capacity(requested: store_share, available: 0))) }
     let root = match runner.status_root() {
         Ok(take made) => take made,
         Error(cap) => return Error(Full(cap))

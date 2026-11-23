@@ -121,12 +121,12 @@ pub fn host_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, n: Net, 
             _ => code.describe(migrate),
         }
         let config: runner.PlaceConfig[(), Hd, (), ()] = runner.PlaceConfig(
-            backing: Disk(d, disk), selection: (runner.launch_selection(argv) ?=> Usage), place: code.describe(place), n_place: N_PLACE,
+            backing: Disk(d), sizes: store.Overrides(resident_limit: Some(disk.resident_limit), journal_limit: Some(disk.journal_limit), checkpoint_bytes: Some(disk.checkpoint_bytes), pack_bytes: Some(disk.pack_bytes), group_bytes: Some(int.widen(disk.group_bytes)), group_commits: Some(disk.group_commits), lock_wait_ms: Some(disk.lock_wait_ms)), selection: (runner.launch_selection(argv) ?=> Usage), place: code.describe(place), n_place: N_PLACE,
             migrate: migration, handles: code.describe(handles), session: wire, max_sessions: 4u64,
             proxies: list.new(), n_publisher: 3145728u64,
             listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r,
             stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(runner.ingress.binding()), triggers: None, idle: None)
-        let ended = runner.operate(take config, take stopping, result.unwrap(runner.status_root()), None) ?=> Start
+        let ended = runner.operate_report(take config, take stopping, result.unwrap(runner.status_root()), None, errors) ?=> Start
         Ok(ended)
     }
     runner.main(argv, process, errors, tasks, code.describe(place), serve)
@@ -141,12 +141,12 @@ pub fn identity_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, n: N
         let mut disk = options()
         disk.lock_wait_ms = 10000u64
         let config: runner.PlaceConfig[(), Hd, (), ()] = runner.PlaceConfig(
-            backing: Disk(d, disk), selection: (runner.launch_selection(argv) ?=> Usage), place: code.describe(place), n_place: n_place,
+            backing: Disk(d), sizes: store.Overrides(resident_limit: Some(disk.resident_limit), journal_limit: Some(disk.journal_limit), checkpoint_bytes: Some(disk.checkpoint_bytes), pack_bytes: Some(disk.pack_bytes), group_bytes: Some(int.widen(disk.group_bytes)), group_commits: Some(disk.group_commits), lock_wait_ms: Some(disk.lock_wait_ms)), selection: (runner.launch_selection(argv) ?=> Usage), place: code.describe(place), n_place: n_place,
             migrate: code.describe(migrate), handles: code.describe(handles), session: wire, max_sessions: 4u64,
             proxies: list.new(), n_publisher: 3145728u64,
             listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r,
             stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(runner.ingress.binding()), triggers: None, idle: None)
-        let ended = runner.operate(take config, take stopping, result.unwrap(runner.status_root()), None) ?=> Start
+        let ended = runner.operate_report(take config, take stopping, result.unwrap(runner.status_root()), None, errors) ?=> Start
         Ok(ended)
     }
     runner.main(argv, process, errors, tasks, code.describe(place), serve)
@@ -648,7 +648,7 @@ fn activation_pairs(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, out: Stdo
     let (watch, watcher): (Sender[Receiver[runner.Phase]], Receiver[Receiver[runner.Phase]]) = channel.new(1u64)
     let mut wire = runner.wire_defaults(131072u64)
     wire.n_pool = 4194304u64
-    let settings: runner.PlaceConfig[(), Hd, (), ()] = runner.PlaceConfig(backing: Disk(d, clone(existing)), selection: chosen, place: code.describe(place), n_place: N_PLACE, migrate: code.describe(migrate), handles: code.describe(handles),
+    let settings: runner.PlaceConfig[(), Hd, (), ()] = runner.PlaceConfig(backing: Disk(d), sizes: store.Overrides(resident_limit: Some(existing.resident_limit), journal_limit: None, checkpoint_bytes: None, pack_bytes: Some(existing.pack_bytes), group_bytes: Some(int.widen(existing.group_bytes)), group_commits: Some(existing.group_commits), lock_wait_ms: Some(existing.lock_wait_ms)), selection: chosen, place: code.describe(place), n_place: N_PLACE, migrate: code.describe(migrate), handles: code.describe(handles),
         session: wire, max_sessions: 1u64, proxies: list.new(), n_publisher: 1048576u64,
         listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r,
         stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(runner.ingress.binding()), triggers: None, idle: None)
@@ -723,7 +723,7 @@ fn freeze_until_stop(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, n: 
     let mut wire = runner.wire_defaults(131072u64)
     wire.n_pool = 4194304u64
     wire.socket.max_frame = 65536u64
-    let config: runner.PlaceConfig[(), Hd, (), ()] = runner.PlaceConfig(backing: Disk(d, options()), selection: Current(0u64), place: code.describe(place), n_place: N_PLACE, migrate: code.describe(migrate), handles: code.describe(handles),
+    let config: runner.PlaceConfig[(), Hd, (), ()] = runner.PlaceConfig(backing: Disk(d), sizes: store.Overrides(resident_limit: Some(1048576u64), journal_limit: None, checkpoint_bytes: Some(4194304u64), pack_bytes: Some(512u64), group_bytes: Some(1048576u64), group_commits: Some(2u32), lock_wait_ms: None), selection: Current(0u64), place: code.describe(place), n_place: N_PLACE, migrate: code.describe(migrate), handles: code.describe(handles),
         session: wire, max_sessions: 1u64, proxies: list.new(), n_publisher: 1048576u64,
         listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r,
         stop: runner.Stop(lag_ms: 10000u64, grace_ms: 100u64), wire: Some(runner.ingress.binding()), triggers: None, idle: None)
@@ -795,12 +795,12 @@ pub fn stop_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Std
         let start = scoped fn(take stopping: Receiver[()]) -> Result[runner.Ended, runner.MainError] waits {
             let mut wire = runner.wire_defaults(131072u64)
             wire.n_pool = 4194304u64
-            let config: runner.PlaceConfig[(), Hd, (), ()] = runner.PlaceConfig(backing: Disk(d, options()), selection: Current(0u64), place: code.describe(place), n_place: N_PLACE,
+            let config: runner.PlaceConfig[(), Hd, (), ()] = runner.PlaceConfig(backing: Disk(d), sizes: store.Overrides(resident_limit: Some(1048576u64), journal_limit: None, checkpoint_bytes: Some(4194304u64), pack_bytes: Some(512u64), group_bytes: Some(1048576u64), group_commits: Some(2u32), lock_wait_ms: None), selection: Current(0u64), place: code.describe(place), n_place: N_PLACE,
                 migrate: code.describe(migrate), handles: code.describe(handles), session: wire, max_sessions: 1u64,
                 proxies: list.new(), n_publisher: 1048576u64,
                 listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r,
                 stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(runner.ingress.binding()), triggers: None, idle: None)
-            let ended = runner.operate(take config, take stopping, result.unwrap(runner.status_root()), None) ?=> Start
+            let ended = runner.operate_report(take config, take stopping, result.unwrap(runner.status_root()), None, errors) ?=> Start
             Ok(ended)
         }
         return runner.main(argv, process, errors, tasks, code.describe(place), start)

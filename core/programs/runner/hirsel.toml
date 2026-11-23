@@ -9,6 +9,7 @@ store = { major = 1, path = "../store" }
 
 [sources]
 "runner.hirsel" = "runner"
+"runner-budget.hirsel" = "runner"
 "runner-identity.hirsel" = "runner"
 "runner-binding.hirsel" = "runner"
 "runner-trigger-context.hirsel" = "runner"
@@ -26,6 +27,7 @@ grants = ["Clock", "Random", "Tasks", "Env=HIRSEL_TEST_SIM_SEED", "Net=Listen 12
 dirs = ["."]
 
 [tests.sources]
+"operate_budget_law.hirsel" = "runner"
 "sizes_law.hirsel" = "runner_laws"
 "steps_laws.hirsel" = "steps"
 "signup.hirsel" = "signup"

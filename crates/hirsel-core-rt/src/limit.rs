@@ -928,10 +928,14 @@ impl Funding {
         // SAFETY: this handle pins its canonical local record.
         unsafe { (*self.fast()).available }
     }
+    pub(crate) fn capacity(&self) -> u64 {
+        // SAFETY: this handle pins its canonical live limit record.
+        unsafe { (*self.payer.get().canonical().links()).live.capacity }
+    }
+
     #[cfg(any(test, feature = "charge-observation"))]
     pub(crate) fn observation_capacity(&self) -> u64 {
-        // SAFETY: the run's root handle pins its canonical live limit record.
-        unsafe { (*self.payer.get().canonical().links()).live.capacity }
+        self.capacity()
     }
     #[cfg(feature = "testing")]
     pub(crate) fn set_test_available(&self, bytes: u64) {

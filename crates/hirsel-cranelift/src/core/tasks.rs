@@ -2,6 +2,7 @@
 //! carriers stay run-owned; only waiting host operations observe failure status.
 mod map_placement;
 
+use super::abi::op_signature;
 use super::function::Function;
 use super::*;
 use cranelift_codegen::ir::{MemFlagsData, Value};
@@ -220,6 +221,10 @@ impl Function<'_, '_, '_> {
                     &[U],
                     &[self.context, args[0]],
                 )?[0];
+                1
+            }
+            RtOp::RootLimit => {
+                outputs[0] = self.c_call("hirsel_core_root_limit", &[P], &[U], &[self.context])?[0];
                 1
             }
             RtOp::LaunchWord => {
@@ -985,16 +990,4 @@ impl Function<'_, '_, '_> {
         }
         Ok(())
     }
-}
-
-fn op_signature(op: HostOp) -> Vec<Ty> {
-    hirsel_core_ir::RtOp::Host(op)
-        .signature()
-        .params
-        .into_iter()
-        .map(|p| match p {
-            hirsel_core_ir::Param::Value(t) => t,
-            _ => unreachable!(),
-        })
-        .collect()
 }

@@ -246,7 +246,7 @@ pub fn main(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, o
     let mut wire = runner.wire_defaults(65536u64)
     wire.n_pool = 4194304u64
     let options = triggers.law_options()
-    let settings: runner.PlaceConfig[Grants, Tables, Services, ()] = runner.PlaceConfig(backing: Disk(dir, clone(options)), selection: Current(0u64), place: code.describe(place), n_place: PLACE_BYTES,
+    let settings: runner.PlaceConfig[Grants, Tables, Services, ()] = runner.PlaceConfig(backing: Disk(dir), sizes: store.Overrides(resident_limit: Some(options.resident_limit), journal_limit: None, checkpoint_bytes: None, pack_bytes: Some(options.pack_bytes), group_bytes: Some(int.widen(options.group_bytes)), group_commits: Some(options.group_commits), lock_wait_ms: Some(options.lock_wait_ms)), selection: Current(0u64), place: code.describe(place), n_place: PLACE_BYTES,
         migrate: code.describe(migrate), handles: code.describe(handles), session: wire, max_sessions: 1u64,
         proxies: list.new(), n_publisher: PLACE_BYTES, listen: Addr(ip: V4(0x7f000001u32), port: 0u16),
         net: net, tasks: tasks, clock: clock, random: random, stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: None, triggers: Some(take trigger_config), idle: None)

@@ -879,7 +879,7 @@ fn law_hedge_charge(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net
     let mut session = runner.wire_defaults(65536u64)
     session.n_pool = 4194304u64
     let settings: runner.PlaceConfig[HedgeGrants, harness.Handles, HedgeServices, ()] = runner.PlaceConfig(
-        backing: Disk(dir, runner.triggers.law_options()), selection: Reopen, place: code.describe(hedge_place), n_place: HEDGE_ENTRY_BYTES,
+        backing: Disk(dir), sizes: store.Overrides(resident_limit: Some(1048576u64), journal_limit: None, checkpoint_bytes: Some(4194304u64), pack_bytes: Some(512u64), group_bytes: Some(1048576u64), group_commits: Some(2u32), lock_wait_ms: None), selection: Reopen, place: code.describe(hedge_place), n_place: HEDGE_ENTRY_BYTES,
         migrate: code.describe(harness.migrate), handles: code.describe(harness.handles), session: take session, max_sessions: 1u64,
         proxies: list.new(), n_publisher: HEDGE_ENTRY_BYTES, listen: loopback, net: net, tasks: tasks,
         clock: clock, random: random, stop: runner.Stop(lag_ms: 0u64, grace_ms: 200u64), wire: None, triggers: Some(take config), idle: Some(300u64))

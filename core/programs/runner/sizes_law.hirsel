@@ -36,7 +36,7 @@ fn derived_budgets() -> Result[(), String] {
     if default_bucket.resident_limit != 49519278u64 { fail("L60: Bucket default lanes") }
 
     let mut opts = store.Overrides(resident_limit: None, journal_limit: None,
-        checkpoint_bytes: None, pack_bytes: None, group_bytes: Some(2097152u64))
+        checkpoint_bytes: None, pack_bytes: None, group_bytes: Some(2097152u64), group_commits: None, lock_wait_ms: None)
     let adjusted = result.unwrap(store.sized_with(Bucket(config), 134217728u64, opts))
     if adjusted.resident_limit != 57504588u64 || adjusted.group_bytes != 2097152u32 {
         fail("L60: Bucket group override changes two entry buffers")

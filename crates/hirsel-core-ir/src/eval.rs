@@ -6602,6 +6602,7 @@ impl Machine<'_> {
             }
             RtOp::ArgsLen => vec![self.world.args.len() as u64],
             RtOp::ArgsGet => vec![self.world.args.get(a[1] as usize).copied().unwrap_or(0)],
+            RtOp::RootLimit => vec![t.limits[0].0.cap],
             RtOp::LaunchWord => vec![self.world.launch.as_ref().unwrap().word(a[0], a[1])],
             RtOp::LaunchHandle => vec![0],
             RtOp::SecretShare => vec![self.secret_share(a[0])],

@@ -1,0 +1,70 @@
+fn empty_place(mut reg: Registry[(), ()]) -> Result[(), RegisterError] { Ok(()) }
+fn empty_migrate(mut m: store.Migration) -> Result[(), store.Error] { Ok(()) }
+fn empty_handles(s: store.Schema) -> Result[(), store.Error] { Ok(()) }
+
+fn budget_config(take disk: Backing, c: Clock, r: Random, tasks: Tasks, n: Net) -> PlaceConfig[(), (), (), ()] {
+    let mut session_sizes = wire_defaults(65536u64)
+    session_sizes.n_pool = 4194304u64
+    PlaceConfig(backing: take disk, sizes: store.derived_sizes(), selection: Reopen, place: code.describe(empty_place), n_place: 262144u64,
+        migrate: code.describe(empty_migrate), handles: code.describe(empty_handles), session: session_sizes, max_sessions: 1u64,
+        proxies: list.new(), n_publisher: 1048576u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16),
+        net: n, tasks: tasks, clock: c, random: r, stop: Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: None, triggers: None, idle: None)
+}
+
+fn refused_budget(take p: PlaceConfig[(), (), (), ()]) -> Result[Ended, StartError] waits {
+    let nested = result.unwrap(bound bytes 0u64 { runtime.root_limit() })
+    if nested != 12582912u64 { fail("L60: scoped child read lost the task's root limit") }
+    let (stopping, stop): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let _ = take stopping
+    operate(take p, take stop, result.unwrap(status_root()), None)
+}
+
+type StopAtReady: send { phases: Receiver[Receiver[Phase]], stop: Sender[()] }
+
+fn stop_at_ready(take ready: StopAtReady) -> bool waits {
+    let StopAtReady(phases: take handoff, stop: take stop) = take ready
+    if let Ok(take phases) = channel.receive(handoff) {
+        while let Ok(phase) = channel.receive(phases) {
+            if let Ready = phase { return match channel.send(stop, ()) { Ok(()) => true, _ => false } }
+        }
+    }
+    false
+}
+
+fn open_sized_place(take config: PlaceConfig[(), (), (), ()]) -> Result[(), String] waits {
+    let tasks = config.tasks
+    let (stopping, stop): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let (watching, phases): (Sender[Receiver[Phase]], Receiver[Receiver[Phase]]) = channel.new(1u64)
+    let stopper = task.spawn(tasks, bytes 4096u64, StopAtReady(phases: take phases, stop: take stopping), stop_at_ready)
+    let ended = operate(take config, take stop, result.unwrap(status_root()), Some(take watching))
+    match take ended {
+        Ok(Stopped(_)) => (),
+        Error(problem) => return Error(start_text(problem)),
+        _ => return Error("L60: place failed to serve and drain"),
+    }
+    if let Ok(true) = task.join(take stopper) { Ok(()) } else { Error("L60: place never reached Ready") }
+}
+
+@test
+fn operate_derived_budgets(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), String] waits {
+    if runtime.root_limit() != 67108864u64 { return Error("L60: executable limit") }
+    let memory = budget_config(Memory, c, r, tasks, n)
+    let (memory_sizes, share, _) = place_store(memory, None) ?=> |problem| start_text(problem)
+    // Head 3,407,872 B, serving 6,625,847 B, operate 262,144 B and main 1 MiB.
+    if share != 55764425u64 || memory_sizes.resident_limit != 54715849u64 { return Error("L60: Memory share") }
+    open_sized_place(take memory)?
+    let disk = budget_config(Temp(d), c, r, tasks, n)
+    let (disk_sizes, disk_share, _) = place_store(disk, None) ?=> |problem| start_text(problem)
+    if disk_share != 55764425u64 || disk_sizes.pack_bytes != 3485276u64 ||
+        disk_sizes.checkpoint_bytes != 3485276u64 || disk_sizes.resident_limit != 12839321u64 {
+        return Error("L60: Directory share")
+    }
+    open_sized_place(take disk)?
+    let low = budget_config(Memory, c, r, tasks, n)
+    let child = task.spawn(tasks, bytes 12582912u64, take low, refused_budget)
+    // The child has 1,238,473 B of share. Memory's keep and minimum require 2 MiB.
+    match task.join(take child) {
+        Ok(Error(Full(cap))) if cap.requested == 2097152u64 && cap.available == 1238473u64 => Ok(()),
+        _ => Error("L60: an infeasible share must be returned as Full"),
+    }
+}

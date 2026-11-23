@@ -347,3 +347,15 @@ pub(super) fn store_record(
             .store(MemFlags::trusted(), value, address, offset as i32);
     }
 }
+
+pub(super) fn op_signature(op: HostOp) -> Vec<Ty> {
+    hirsel_core_ir::RtOp::Host(op)
+        .signature()
+        .params
+        .into_iter()
+        .map(|p| match p {
+            hirsel_core_ir::Param::Value(t) => t,
+            _ => unreachable!(),
+        })
+        .collect()
+}

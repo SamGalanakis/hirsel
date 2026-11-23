@@ -6,6 +6,8 @@ pub type Overrides: send {
     checkpoint_bytes: Option[u64],
     pack_bytes: Option[u64],
     group_bytes: Option[u64],
+    group_commits: Option[u32],
+    lock_wait_ms: Option[u64],
 }
 
 pub type Shortage: send { need: u64, have: u64, parts: List[(String, u64)] }
@@ -14,9 +16,13 @@ const MIB: u64 = 1048576
 const CUT_FIXED_BYTES: u64 = 65536
 const BUCKET_HEAD_BYTES: u64 = 131552
 
+pub fn derived_sizes() -> Overrides {
+    Overrides(resident_limit: None, journal_limit: None,
+        checkpoint_bytes: None, pack_bytes: None, group_bytes: None, group_commits: None, lock_wait_ms: None)
+}
+
 pub fn sized(kind: Kind, share: u64) -> Result[Options, Shortage] {
-    sized_with(kind, share, Overrides(resident_limit: None, journal_limit: None,
-        checkpoint_bytes: None, pack_bytes: None, group_bytes: None))
+    sized_with(kind, share, derived_sizes())
 }
 
 fn size_or(overridden: Option[u64], derived: u64) -> u64 {
@@ -52,6 +58,13 @@ fn largest_resident(room: u64) -> u64 {
 }
 
 pub fn sized_with(kind: Kind, share: u64, o: Overrides) -> Result[Options, Shortage] {
+    let (take options, _) = sized_reservation(kind, share, o)?
+    Ok(take options)
+}
+
+// The task starting the store reserves the plan's actual cost. Explicit
+// overrides may leave some of the share unused.
+pub fn sized_reservation(kind: Kind, share: u64, o: Overrides) -> Result[(Options, u64), Shortage] {
     let mut parts: List[(String, u64)] = list.with_capacity(9)
     let mut checkpoint_budget = 0u64
     let mut journal = 0u64
@@ -92,12 +105,13 @@ pub fn sized_with(kind: Kind, share: u64, o: Overrides) -> Result[Options, Short
         Memory => (),
         _ => add_size(mut parts, "checkpoint_task_work", cut_work(minimum) - CUT_FIXED_BYTES),
     }
-    let total = total_sizes(parts)
-    if !valid || resident < MIB || total == None || size_or(total, 0) > share {
+    let Some(total) = total_sizes(parts) else { return Error(shortage(share, take parts)) }
+    if !valid || resident < MIB || total > share {
         return Error(shortage(share, take parts))
     }
-    Ok(Options(create: true, lock_wait_ms: 0, group_commits: 64, group_bytes: int.truncate(group),
+    let commits = match o.group_commits { Some(n) => n, None => 64u32 }
+    Ok((Options(create: true, lock_wait_ms: size_or(o.lock_wait_ms, 0), group_commits: commits, group_bytes: int.truncate(group),
         checkpoint_bytes: checkpoint_budget, journal_limit: journal, pack_bytes: pack,
         resident_limit: resident, authority: Directory(), expect: None, activation: None,
-        binding: None, claim_ms: 30000, head_poll_ms: 1000, checkpoint_entries: 4096, retain: 2))
+        binding: None, claim_ms: 30000, head_poll_ms: 1000, checkpoint_entries: 4096, retain: 2), total))
 }

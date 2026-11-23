@@ -1,0 +1,74 @@
+// What a disk store opened with these options holds at most: its resident pages, a pack
+// and a journal group.
+pub fn disk_store_bytes(options: store.Options) -> u64 {
+    let journal: u64 = int.widen(options.group_bytes)
+    let mut total = int.saturating_add(options.resident_limit, order.max(options.pack_bytes, 16777476))
+    total = int.saturating_add(total, journal)
+    int.saturating_add(total, 2097152u64)
+}
+
+const PLACE_KEEP: u64 = 1048576
+const HEAD_OWN_BYTES: u64 = 2097152
+const OPERATE_OWN_BYTES: u64 = 262144
+
+fn add_place_bytes(a: u64, b: u64) -> Result[u64, Capacity] {
+    match int.checked_add(a, b) {
+        Some(n) => Ok(n),
+        None => Error(Capacity(requested: b, available: 18446744073709551615u64 - a)),
+    }
+}
+
+fn trigger_bytes[G: send, S: send](config: Option[TriggerConfig[G, S]]) -> u64 {
+    match config {
+        Some(c) if !triggers.is_empty(c.entries) => c.grant_bytes,
+        _ => 0u64,
+    }
+}
+
+fn place_head_bytes(n_place: u64, n_publisher: u64, grant: u64) -> Result[u64, Capacity] {
+    let names = add_place_bytes(n_place, n_publisher)?
+    let head = add_place_bytes(names, HEAD_OWN_BYTES)?
+    add_place_bytes(head, grant)
+}
+
+pub fn operate_bytes[G: send, H: send, S: send, B: send](p: PlaceConfig[G, H, S, B]) -> Result[u64, Capacity] {
+    let launch = launch_env()
+    let n_place = if launch.n_place_explicit { launch.n_place } else { p.n_place }
+    let head = place_head_bytes(n_place, p.n_publisher, trigger_bytes(p.triggers))?
+    let serving = serving_bytes(p.session, p.max_sessions, n_place)?
+    let tasks = add_place_bytes(head, serving)?
+    add_place_bytes(tasks, OPERATE_OWN_BYTES)
+}
+
+fn place_store[G: send, H: send, S: send, B: send](p: PlaceConfig[G, H, S, B], report: Option[Stderr]) -> Result[(store.Options, u64, u64), StartError] waits {
+    let overhead = operate_bytes(p) ?=> Full
+    let reserved = add_place_bytes(overhead, PLACE_KEEP) ?=> Full
+    let limit = runtime.root_limit()
+    let Some(share) = int.checked_sub(limit, reserved) else {
+        return Error(Full(Capacity(requested: reserved, available: limit)))
+    }
+    let kind: store.Kind = match p.backing { Memory => Memory, _ => Directory }
+    match store.sized_reservation(kind, share, p.sizes) {
+        Ok((take options, reserved_store)) => Ok((take options, share, reserved_store)),
+        Error(short) => {
+            if let Some(out) = report {
+                let _ = stderr.write(out, shortage_text(short))
+            }
+            Error(Full(Capacity(requested: short.need, available: short.have)))
+        },
+    }
+}
+
+fn shortage_text(short: store.Shortage) -> String {
+    let mut line = string.from("place store needs ")
+    push_capacity(mut line, Capacity(requested: short.need, available: short.have))
+    for i in 0u64 .. list.len(short.parts) {
+        let part = view short.parts[i]
+        string.push(mut line, " ")
+        string.push(mut line, part.0)
+        string.push(mut line, "=")
+        string.push_u64(mut line, part.1)
+    }
+    string.push(mut line, "\n")
+    take line
+}

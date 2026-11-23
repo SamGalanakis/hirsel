@@ -23,6 +23,7 @@ pub(crate) enum Kernel {
     Net(HostOp),
     SecretSeal,
     SecretRender,
+    RootLimit,
     ArgsLen,
     ArgsGet,
     Env(HostOp),
@@ -132,6 +133,7 @@ operations! {
     ("arc", "share", Lane::Runtime(Kernel::Share(Counted::Arc)), "A", "core-ops-914", false),
     ("arc", "try_unwrap", Lane::Runtime(Kernel::TryUnwrap(Counted::Arc)), "A", "core-ops-914", false),
     ("arc", "with_unique", Lane::Runtime(Kernel::WithUnique(Counted::Arc)), "A", "core-ops-914", false),
+    ("runtime", "root_limit", Lane::Runtime(Kernel::RootLimit), "A", "w3a-b-sized-2009", false),
     ("args", "len", Lane::Runtime(Kernel::ArgsLen), "B", "core-ops-914", false),
     ("args", "get", Lane::Runtime(Kernel::ArgsGet), "B", "core-ops-914", false),
     ("box", "new", Lane::Runtime(Kernel::NewOwner(None)), "A", "core-ops-914", false),
@@ -999,6 +1001,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Kernel::LogNew => self.runtime_log_new(types[0], result, n),
             Kernel::LogAppend => self.runtime_log_append(types[0], vals[0]?, vals[1], n),
             Kernel::LogFinish => self.runtime_log_finish(types[0], vals[0]?, result, n),
+            Kernel::RootLimit => self.runtime_row(RtOp::RootLimit, &[], n).map(|v| v[0]),
             Kernel::CodeIdentity => self.runtime_code_identity(vals[0]?, result, n),
             Kernel::CodeRevision => self.runtime_code_revision(vals[0]?, result, n),
             Kernel::CodeCallable => self.runtime_code_callable(vals[0]?, result, n),
@@ -1789,6 +1792,7 @@ pub(crate) fn assert_no_ambient_input(p: &Program<'_>) {
             | Kernel::LogNew
             | Kernel::LogAppend
             | Kernel::LogFinish
+            | Kernel::RootLimit
             | Kernel::CodeIdentity
             | Kernel::CodeRevision
             | Kernel::CodeCallable

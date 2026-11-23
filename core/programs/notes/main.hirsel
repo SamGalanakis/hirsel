@@ -15,15 +15,13 @@ pub const OPENROUTER: String = "openrouter.ai"
 
 pub const LIVE_MODEL: String = "deepseek/deepseek-v4.1-flash-1017"
 
-// A small session's store: each place reserves its resident cache, its pack
-// buffer and its journal group up front, and the defaults size those for a
-// large database (1 GiB resident).
+// The notes place shares its task with a helper. Keep its resident and journal buffers small.
+fn sizes() -> store.Overrides {
+    store.Overrides(resident_limit: Some(4194304u64), journal_limit: None, checkpoint_bytes: None, pack_bytes: Some(1048576u64), group_bytes: Some(1048576u64), group_commits: None, lock_wait_ms: None)
+}
+
 pub fn options() -> store.Options {
-    let mut o = result.unwrap(store.sized(Directory, 2147483648u64))
-    o.resident_limit = 4194304u64
-    o.pack_bytes = 1048576u64
-    o.group_bytes = 1048576u32
-    o
+    result.unwrap(store.sized_with(Directory, 67108864u64, sizes()))
 }
 
 // ---- the app's own tables ----
@@ -586,7 +584,7 @@ pub type HelperSeed: send {
 fn helper_settings(dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> runner.PlaceConfig[HelperGrants, harness.Handles, (), ()] {
     let w = result.unwrap(helper_wired())
     let config = runner.TriggerConfig(entries: harness.entries(w), author: store.Caller(issuer: 0u8, subject: list.new()), grants: (), grant: helper_grants, grant_bytes: 65536u64)
-    runner.PlaceConfig(backing: Disk(dir, options()), selection: Reopen, place: code.describe(helper_place), n_place: PLACE_BYTES, migrate: code.describe(harness.migrate), handles: code.describe(harness.handles), session: wire(), max_sessions: 1u64, proxies: list.new(), n_publisher: PLACE_BYTES, listen: loopback(), net: net, tasks: tasks, clock: clock, random: random, stop: runner.Stop(lag_ms: 0u64, grace_ms: 200u64), wire: None, triggers: Some(take config), idle: Some(IDLE_MS))
+    runner.PlaceConfig(backing: Disk(dir), sizes: sizes(), selection: Reopen, place: code.describe(helper_place), n_place: PLACE_BYTES, migrate: code.describe(harness.migrate), handles: code.describe(harness.handles), session: wire(), max_sessions: 1u64, proxies: list.new(), n_publisher: PLACE_BYTES, listen: loopback(), net: net, tasks: tasks, clock: clock, random: random, stop: runner.Stop(lag_ms: 0u64, grace_ms: 200u64), wire: None, triggers: Some(take config), idle: Some(IDLE_MS))
 }
 
 fn helper_ask(seed: HelperSeed, n: u64, take line: String) -> Result[String, String] waits {
@@ -693,7 +691,7 @@ pub fn settings(take backing: runner.Backing, clock: Clock, random: Random, task
         65536u64
     }
     let config = runner.TriggerConfig(entries: harness.entries(w), author: store.Caller(issuer: 0u8, subject: list.new()), grants: take s, grant: make_grants, grant_bytes: grant_bytes)
-    runner.PlaceConfig(backing: take backing, selection: Reopen, place: code.describe(place), n_place: PLACE_BYTES, migrate: code.describe(migrate), handles: code.describe(harness.handles), session: wire(), max_sessions: 1u64, proxies: list.new(), n_publisher: PLACE_BYTES, listen: loopback(), net: net, tasks: tasks, clock: clock, random: random, stop: runner.Stop(lag_ms: 0u64, grace_ms: 200u64), wire: None, triggers: Some(take config), idle: Some(IDLE_MS))
+    runner.PlaceConfig(backing: take backing, sizes: sizes(), selection: Reopen, place: code.describe(place), n_place: PLACE_BYTES, migrate: code.describe(migrate), handles: code.describe(harness.handles), session: wire(), max_sessions: 1u64, proxies: list.new(), n_publisher: PLACE_BYTES, listen: loopback(), net: net, tasks: tasks, clock: clock, random: random, stop: runner.Stop(lag_ms: 0u64, grace_ms: 200u64), wire: None, triggers: Some(take config), idle: Some(IDLE_MS))
 }
 
 // ---- printing ----
@@ -921,14 +919,14 @@ pub fn main(out: Stdout, data: Dir, clock: Clock, random: Random, tasks: Tasks, 
     emit(out, "you: ", prompt)
     let (ask, asks): (Sender[HelperAsk], Receiver[HelperAsk]) = channel.new(1u64)
     let helping = task.spawn(tasks, bytes 67108864u64, HelperSeed(inbox: take asks, dir: helper, clock: clock, random: random, tasks: tasks, net: net), helper_service)
-    let first = until_idle(settings(Disk(parent, options()), clock, random, tasks, net, Services(helper: channel.sender(ask), clock: clock, live: None, stream: None)))
+    let first = until_idle(settings(Disk(parent), clock, random, tasks, net, Services(helper: channel.sender(ask), clock: clock, live: None, stream: None)))
     if let Error(take why) = first {
         return quit(out, why)
     }
     if let Error(take why) = approve(out, parent, clock, random, tasks) {
         return quit(out, why)
     }
-    let second = until_idle(settings(Disk(parent, options()), clock, random, tasks, net, Services(helper: channel.sender(ask), clock: clock, live: None, stream: None)))
+    let second = until_idle(settings(Disk(parent), clock, random, tasks, net, Services(helper: channel.sender(ask), clock: clock, live: None, stream: None)))
     if let Error(take why) = second {
         return quit(out, why)
     }

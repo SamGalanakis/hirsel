@@ -144,7 +144,7 @@ fn settings_of(registered: Registered, take allowed: runner.triggers.Entries, di
         grants: take s, grant: make_grants, grant_bytes: 65536u64)
     let mut wire = runner.wire_defaults(65536u64)
     wire.n_pool = 4194304u64
-    runner.PlaceConfig(backing: Disk(dir, runner.triggers.law_options()), selection: Reopen, place: registered, n_place: PLACE_BYTES,
+    runner.PlaceConfig(backing: Disk(dir), sizes: store.Overrides(resident_limit: Some(1048576u64), journal_limit: None, checkpoint_bytes: Some(4194304u64), pack_bytes: Some(512u64), group_bytes: Some(1048576u64), group_commits: Some(2u32), lock_wait_ms: None), selection: Reopen, place: registered, n_place: PLACE_BYTES,
         migrate: code.describe(harness.migrate), handles: code.describe(harness.handles), session: wire, max_sessions: 1u64,
         proxies: list.new(), n_publisher: PLACE_BYTES, listen: Addr(ip: V4(0x7f000001u32), port: 0u16),
         net: net, tasks: tasks, clock: clock, random: random, stop: runner.Stop(lag_ms: 0u64, grace_ms: 200u64),

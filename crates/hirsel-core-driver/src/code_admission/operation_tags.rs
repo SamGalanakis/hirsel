@@ -38,6 +38,7 @@ fn runtime_probes() -> Module {
         RtOp::StepEnter,
         RtOp::StepLeave,
         RtOp::StepCatch,
+        RtOp::RootLimit,
         RtOp::LaunchWord,
         RtOp::LaunchTarget { view: ITEM },
         RtOp::DescribeEmit,

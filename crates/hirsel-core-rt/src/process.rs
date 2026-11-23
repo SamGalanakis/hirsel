@@ -534,6 +534,16 @@ unsafe fn diagnostic(config: &Config, bytes: &[u8]) {
         (config.diagnostic)(config.state, bytes.as_ptr(), bytes.len());
     }
 }
+/// Return the original byte limit of the current task.
+///
+/// # Safety
+/// The generated call supplies a live context for the running task.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_root_limit(context: *const Context) -> u64 {
+    // SAFETY: the generated call runs with its own live context.
+    unsafe { (*context).root_limit }
+}
+
 /// # Safety
 /// Args is the run's live configuration; the returned view stays pinned by it.
 #[unsafe(no_mangle)]

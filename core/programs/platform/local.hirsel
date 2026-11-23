@@ -60,7 +60,7 @@ const LOCAL_BYTES: u64 = 1048576u64
 const NEXT_ID: u64 = 0u64
 
 type Launch[T: send]: send {
-    supplied: Supplied, backing: runner.Backing, selection: runner.Selection, idle: u64, sessions: u64, available: u64,
+    supplied: Supplied, backing: runner.Backing, sizes: store.Overrides, selection: runner.Selection, idle: u64, sessions: u64, available: u64,
     stop: Receiver[()], status: Latest[runner.Status], to: Sender[In], name: String, gen: u64,
 }
 type Started { task: Task[()], charge: u64 }
@@ -166,13 +166,19 @@ pub fn seeded_factory[T: send, G: send, H: send, S: send, B: send](make: fn(take
 }
 
 fn start_made[T: send, G: send, H: send, S: send, B: send](take request: Launch[T], take made: Result[runner.PlaceConfig[G, H, S, B], Capacity]) -> Result[Started, String] {
-    let Launch(supplied: supplied, backing: take backing, selection: selection, idle: idle, sessions: sessions, available: available, stop: take halt, status: take root, to: take to, name: take name, gen: gen) = take request
+    let Launch(supplied: supplied, backing: take backing, sizes: sizes, selection: selection, idle: idle, sessions: sessions, available: available, stop: take halt, status: take root, to: take to, name: take name, gen: gen) = take request
     let mut config = match take made { Ok(take m) => take m, Error(_) => return Error(string.from("Full")) }
     config.backing = take backing
+    config.sizes = sizes
     config.selection = selection
     config.idle = Some(idle)
     config.max_sessions = sessions
-    let need = match runner.operate_bytes(config) { Ok(total) => total, Error(_) => return Error(string.from("Full")) }
+    let overhead = match runner.operate_bytes(config) { Ok(total) => total, Error(_) => return Error(string.from("Full")) }
+    let share = match store.sized_with(Directory, 0u64, sizes) {
+        Error(short) => short.need,
+        Ok(_) => 0u64,
+    }
+    let need = int.saturating_add(overhead, int.saturating_add(share, 1048576u64))
     let charge = int.saturating_add(need, PLACE_TASK_BYTES)
     if charge > available { return Error(string.from("Full")) }
     let job = PlaceJob(config: take config, stop: take halt, status: take root, to: take to, name: take name, gen: gen, need: need)
@@ -279,7 +285,7 @@ fn start[T: send](mut a: Actor[T], take l: launcher.Launch, mut events: List[lau
         Error(_) => { list.push(mut events, Refused(take child, Spawn(string.from("Full")))); return },
     }
     let supplied = Supplied(name: string.from(group.name), tasks: a.tasks, clock: a.clock, random: a.random, net: a.net)
-    let launched: Launch[T] = Launch(supplied: take supplied, backing: Disk(dir, clone(a.options)), selection: selection_of(serve.activation), idle: serve.idle, sessions: a.sessions,
+    let launched: Launch[T] = Launch(supplied: take supplied, backing: Disk(dir), sizes: store.Overrides(resident_limit: Some(a.options.resident_limit), journal_limit: None, checkpoint_bytes: None, pack_bytes: Some(a.options.pack_bytes), group_bytes: Some(int.widen(a.options.group_bytes)), group_commits: Some(a.options.group_commits), lock_wait_ms: Some(a.options.lock_wait_ms)), selection: selection_of(serve.activation), idle: serve.idle, sessions: a.sessions,
         available: a.place_bytes - a.used, stop: take stop_from, status: latest.handle(root), to: channel.sender(a.me), name: string.from(group.name), gen: gen)
     match (a.factory.start)(take launched, a.seed) {
         Ok(take begun) => {

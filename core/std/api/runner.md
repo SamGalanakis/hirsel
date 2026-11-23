@@ -78,11 +78,11 @@ The wire configuration does not carry it: each session takes the head's value
 `launch identity mismatch` diagnostic.
 
 **Sizing `--limit`.** `runner.operate_bytes(config)` is what `operate` spends: the
-head (`n_place`, `n_publisher` and the store's journal reserve), every session's
-reserve up to `max_sessions`, and operate's own 256 KiB. The executable's root
+head (`n_place`, `n_publisher` and its own reserve), every session's
+reserve up to `max_sessions`, and operate's own 256 KiB. The current task's root
 limit (`hirsel build --limit`) must exceed it plus what `main` keeps; a smaller one is
 refused `Full(capacity)` with the requested and available bytes. The store takes the
-rest: `operate` opens it with `store.sized(kind, root limit − operate_bytes − 1 MiB)`
+rest. `operate` opens it with `store.sized_with(kind, root limit − operate_bytes − 1 MiB, sizes)`
 (store.md "Sizing a store"), and `PlaceConfig.sizes` overrides single figures. So
 `--limit` is the one number a place chooses.
 

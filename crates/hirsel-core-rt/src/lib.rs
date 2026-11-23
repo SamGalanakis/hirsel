@@ -143,6 +143,7 @@ pub struct Context {
     pub(crate) frame_lists: frame_list::FrameLists,
     pub(crate) spare_isolate_cell: Option<Box<std::mem::MaybeUninit<causes::Cell>>>,
     pub(crate) foreign: *const foreign::Run,
+    pub(crate) root_limit: u64,
 }
 
 const _: () =
@@ -195,6 +196,7 @@ impl Context {
 
     pub(crate) fn with_funding(current: Funding) -> Self {
         current.normalize();
+        let root_limit = current.capacity();
         static DEFAULT_KEYS: std::sync::OnceLock<MapKeys> = std::sync::OnceLock::new();
         let (map_hash_key, map_fast_salt, map_strong_key) =
             *DEFAULT_KEYS.get_or_init(|| map_keys(&[0; 16]));
@@ -224,12 +226,14 @@ impl Context {
             frame_lists: frame_list::FrameLists::default(),
             spare_isolate_cell: None,
             foreign: std::ptr::null(),
+            root_limit,
         }
     }
 
     #[cfg(feature = "testing")]
     pub fn reset_test_limit(&mut self, bytes: u64) {
         self.current = Funding::root(bytes);
+        self.root_limit = bytes;
         self.current.bind();
     }
     /// Harness-only transfer of an owned descriptor into this run's socket records.

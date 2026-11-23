@@ -11,7 +11,7 @@ fn local_wire() -> runner.WireConfig {
 }
 
 fn local_config(supplied: local.Supplied, place_fn: StaticFn[fn(mut Calls) -> Result[(), runner.RegisterError]], migrate_fn: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits], stop: runner.Stop) -> runner.PlaceConfig[(), Hd, (), ()] {
-    runner.PlaceConfig(backing: Memory, selection: Install, place: place_fn, n_place: N_PLACE,
+    runner.PlaceConfig(backing: Memory, sizes: store.derived_sizes(), selection: Install, place: place_fn, n_place: N_PLACE,
         migrate: migrate_fn, handles: code.describe(handles), session: local_wire(), max_sessions: 1u64,
         proxies: list.new(), n_publisher: 1048576u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16),
         net: supplied.net, tasks: supplied.tasks, clock: supplied.clock, random: supplied.random, stop: stop, wire: Some(runner.ingress.binding()), triggers: None, idle: None)

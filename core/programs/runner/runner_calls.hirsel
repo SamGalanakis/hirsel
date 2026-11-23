@@ -1496,7 +1496,7 @@ fn managed_address(status: runner.Status) -> Addr { option.unwrap(status.addr) }
 fn managed_settings(dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, listen: Addr, stop: runner.Stop) -> runner.PlaceConfig[(), Hd, (), ()] {
     let mut wire = runner.wire_defaults(65536u64)
     wire.n_pool = 4194304u64
-    runner.PlaceConfig(backing: Disk(dir, disk_options()), selection: Current(0u64), place: code.describe(place), n_place: N_PLACE,
+    runner.PlaceConfig(backing: Disk(dir), sizes: store.Overrides(resident_limit: Some(1048576u64), journal_limit: None, checkpoint_bytes: Some(4194304u64), pack_bytes: Some(512u64), group_bytes: Some(1048576u64), group_commits: Some(2u32), lock_wait_ms: None), selection: Current(0u64), place: code.describe(place), n_place: N_PLACE,
         migrate: code.describe(migrate), handles: code.describe(handles), session: wire, max_sessions: 1u64,
         proxies: list.new(), n_publisher: 1048576u64, listen: listen,
         net: net, tasks: tasks, clock: clock, random: random, stop: stop, wire: Some(ingress.binding()), triggers: None, idle: None)
@@ -1547,7 +1547,7 @@ fn fixture_settings(clock: Clock, random: Random, tasks: Tasks, net: Net, take w
     let mut session = runner.wire_defaults(65536u64)
     session.n_pool = 4194304u64
     session.n_granted = 131072u64
-    runner.PlaceConfig(backing: Memory, selection: Current(0u64), place: code.describe(fixture_place), n_place: N_PLACE,
+    runner.PlaceConfig(backing: Memory, sizes: store.derived_sizes(), selection: Current(0u64), place: code.describe(fixture_place), n_place: N_PLACE,
         migrate: code.describe(migrate), handles: code.describe(handles), session: session, max_sessions: 2u64,
         proxies: list.new(), n_publisher: 1048576u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16),
         net: net, tasks: tasks, clock: clock, random: random, stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: take wire, triggers: None, idle: None)

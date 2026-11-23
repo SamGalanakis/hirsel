@@ -143,16 +143,20 @@ const STOP_GRACE_MS: u64 = 5000u64
 
 // runner.operate owns the place from store open to store close; a SIGINT or SIGTERM closes
 // `stop` (runner.main), which drains and closes the store.
-fn start(n: Net, directory: Dir, web: Dir, c: Clock, random: Random, tasks: Tasks, a: Args, take stop: Receiver[()]) -> Result[runner.Ended, runner.MainError] waits {
-    let selection = runner.launch_selection(a) ?=> Usage
-    let Settings(listen: listen, proxies: take proxies) = settings(a) ?=> Usage
+fn config(n: Net, directory: Dir, web: Dir, c: Clock, random: Random, tasks: Tasks, selection: runner.Selection, listen: Addr, take proxies: List[std.wsock.Prefix]) -> runner.PlaceConfig[(), Handles, (), ()] {
     let mut session = runner.wire_defaults(65536u64)
     session.site = Some(std.wsock.Site(dir: web, find: asset))
-    let config: runner.PlaceConfig[(), Handles, (), ()] = runner.PlaceConfig(backing: Disk(directory, result.unwrap(store.sized(Directory, 2147483648u64))),
+    runner.PlaceConfig(backing: Disk(directory), sizes: store.derived_sizes(),
         selection: selection, place: code.describe(place), n_place: N_PLACE, migrate: code.describe(migrate), handles: code.describe(handles),
         session: session, max_sessions: runner.WIRE_OWNER_LIMIT, proxies: take proxies, n_publisher: 67108864u64,
         listen: listen, net: n, tasks: tasks, clock: c, random: random, stop: runner.Stop(lag_ms: 0u64, grace_ms: STOP_GRACE_MS), wire: Some(runner.ingress.binding()), triggers: None, idle: None)
-    let ended = runner.operate(take config, take stop, result.unwrap(runner.status_root()), None) ?=> Start
+}
+
+fn start(n: Net, directory: Dir, web: Dir, c: Clock, random: Random, tasks: Tasks, a: Args, errors: Stderr, take stop: Receiver[()]) -> Result[runner.Ended, runner.MainError] waits {
+    let selected = runner.launch_selection(a) ?=> Usage
+    let Settings(listen: listen, proxies: take proxies) = settings(a) ?=> Usage
+    let configured = config(n, directory, web, c, random, tasks, selected, listen, take proxies)
+    let ended = runner.operate_report(take configured, take stop, result.unwrap(runner.status_root()), None, errors) ?=> Start
     Ok(ended)
 }
 
@@ -160,13 +164,10 @@ pub fn main(n: Net, directory: Dir, web: Dir, c: Clock, random: Random, tasks: T
     runner.main(a, process, errors, tasks, code.describe(place), scoped fn(take stop: Receiver[()]) -> Result[runner.Ended, runner.MainError] waits {
         if let Some(take candidate) = runner.launch_prepare_args(a) ?=> Usage {
             let runner.PrepareArgs(attempt: take attempt, digest: take digest) = take candidate
-            let setup = runner.PrepareConfig(scratch: directory, options: result.unwrap(store.sized(Directory, 2147483648u64)),
-                attempt: take attempt, image_digest: take digest, clock: c, tasks: tasks, n_place: N_PLACE,
-                place: code.describe(place), migrate: code.describe(migrate), handles: code.describe(handles),
-                triggers: runner.triggers.empty_entries())
-            return match runner.prepare_deploy(setup) { Ok(()) => Ok(Unstarted), Error(_) => Error(Usage(Exit(status: 1u8))) }
+            let configured = config(n, directory, web, c, random, tasks, Reopen, Addr(ip: V4(0x7f000001u32), port: 0u16), list.new())
+            return Ok(runner.prepare_place(take configured, take attempt, take digest, errors) ?=> Start)
         }
-        start(n, directory, web, c, random, tasks, a, take stop)
+        start(n, directory, web, c, random, tasks, a, errors, take stop)
     })
 }
 

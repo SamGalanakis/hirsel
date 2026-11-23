@@ -1,0 +1,146 @@
+// Module platform_main (package store): the platform host as a runnable place (docs/spec/
+// launch.md "The platform host"). The launcher starts it as its first group with its catalog
+// store as the granted Dir and the launcher's control socket as its one Unix endpoint.
+//
+// argv: the control socket's root label, its path beneath that root, max_places, idle_ms.
+// The host opens its catalog, connects, sends `Hello`, and then runs one loop: a reader
+// task posts each launcher event into the driver's queue, beside the driver's due-time and
+// backoff alarms, and every request a step decides goes out in order. A lost session ends
+// the host with status 75; the launcher starts it again, and the new session's inventory
+// reconciles (RUNNER-SPEC §14.5).
+const MAX_FRAME: u64 = 16777216u64
+
+type Reader: send {
+    input: ReadHalf,
+    to: Sender[platform.Input]
+}
+
+fn read_exact(mut input: ReadHalf, mut out: Bytes, size: u64) -> bool waits {
+    while list.len(out) < size {
+        let left = size - list.len(out)
+        match host.recv_bounded(mut input, mut out, left, Never) {
+            Ok(n) if n > 0u64 => (),
+            _ => return false,
+        }
+    }
+    true
+}
+
+fn read_event(mut input: ReadHalf) -> Option[launcher.Event] waits {
+    let mut header: Bytes = list.with_capacity(4u64)
+    if !read_exact(mut input, mut header, 4u64) {
+        return None
+    }
+    let mut at = 0u64
+    let size: u64 = match std.codec.take_u32(header, mut at) {
+        Ok(n) => int.widen(n),
+        _ => return None
+    }
+    if size > MAX_FRAME {
+        return None
+    }
+    let mut body: Bytes = list.with_capacity(size)
+    if !read_exact(mut input, mut body, size) {
+        return None
+    }
+    let codec: std.codec.Codec[launcher.Event] = std.codec.of()
+    match std.codec.decode(codec, body) {
+        Ok(take e) => Some(take e),
+        _ => None
+    }
+}
+
+// Posts each event in stream order, then `Lost` when the session ends or sends a frame that
+// does not decode.
+fn read_events(take seed: Reader) -> () waits {
+    let Reader(input: take input, to: take to) = take seed
+    let mut r = take input
+    while let Some(take e) = read_event(mut r) {
+        if let Error(_) = channel.send(to, Got(take e)) {
+            return
+        }
+    }
+    let _ = channel.send(to, Lost)
+}
+
+fn send_request(mut output: WriteHalf, r: launcher.Request) -> bool waits {
+    let codec: std.codec.Codec[launcher.Request] = std.codec.of()
+    let mut body: Bytes = list.new()
+    if let Error(_) = std.codec.encode(codec, r, mut body) {
+        return false
+    }
+    if list.len(body) > MAX_FRAME {
+        return false
+    }
+    let mut header: Bytes = list.new()
+    std.codec.put_u32(int.narrow(list.len(body)), mut header)
+    let mut offset = 0u64
+    while offset < 4u64 + list.len(body) {
+        match host.send_pair(mut output, list.slice(header, std.order.min(offset, 4u64), 4u64), list.slice(body, int.saturating_sub(offset, 4u64), list.len(body)), Never) {
+            Ok(n) if n > 0u64 => {
+                offset += n
+            },
+            _ => return false,
+        }
+    }
+    true
+}
+
+fn number(argv: Args, i: u64) -> Result[u64, Exit] {
+    let Some(s) = args.get(argv, i) else {
+        return Error(Exit(status: 64u8))
+    }
+    match int.parse_uint(s, 10u32) {
+        Ok(n) => Ok(n),
+        Error(_) => Error(Exit(status: 64u8))
+    }
+}
+
+pub fn main(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, argv: Args) -> Result[(), Exit] waits {
+    let Some(root) = args.get(argv, 0u64) else {
+        return Error(Exit(status: 64u8))
+    }
+    let Some(path) = args.get(argv, 1u64) else {
+        return Error(Exit(status: 64u8))
+    }
+    let config = platform.Config(max_places: number(argv, 2u64)?, idle_ms: number(argv, 3u64)?)
+    let db = match store.open(tasks, d, c, r, store.defaults()) {
+        Ok(take db) => take db,
+        Error(_) => return Error(Exit(status: 74u8))
+    }
+    let (take h0, take hello) = match platform.open(take db, config) {
+        Ok(take opened) => take opened,
+        Error(_) => return Error(Exit(status: 74u8))
+    }
+    let socket = match host.connect_unix(n, root, path, Never) {
+        Ok(take s) => take s,
+        Error(_) => return Error(Exit(status: 75u8))
+    }
+    let (take input, take output) = net.split(take socket)
+    let mut w = take output
+    let (to, from): (Sender[platform.Input], Receiver[platform.Input]) = channel.new(64u64)
+    let reading = task.spawn(tasks, bytes 33554432u64, Reader(input: take input, to: channel.sender(to)), read_events)
+    let mut h = take h0
+    let mut driving = platform.driver(tasks, c, take to)
+    let mut sent = true
+    for req in hello {
+        sent = sent && send_request(mut w, req)
+    }
+    platform.settle(mut driving, h)
+    while sent {
+        let next = match channel.receive(from) {
+            Ok(Lost) => break,
+            Ok(take i) => take i,
+            Error(_) => break,
+        }
+        let now = platform.Now(wall_ms: host.wall_ms(c), mono_ns: host.mono_ns(c))
+        let reqs = platform.step(mut h, mut driving, take next, now)
+        for req in reqs {
+            sent = sent && send_request(mut w, req)
+        }
+    }
+    platform.stop(take driving)
+    let _ = task.cancel_join(take reading)
+    let _ = platform.close(take h)
+    Error(Exit(status: 75u8))
+}

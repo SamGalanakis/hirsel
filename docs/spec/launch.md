@@ -458,8 +458,9 @@ listener.
 
 This section specifies how many programs from many authors are run on one machine. It was
 ratified as Agent Platform 2027, Topics 2 and 3 (2026-11-22). The launcher is built as
-`hirsel launcher` ("The launcher" below says which of its parts); the platform host, the
-catalog are not. Until the platform host replaces it,
+`hirsel launcher` ("The launcher" below says which of its parts), and the platform host
+and its catalog as the store package's `platform` and `platform_main` modules, which no CLI
+command starts yet. Until the platform host replaces it,
 `hirsel host` is the older single-place supervisor of "Authority" above, and the two run side
 by side. The cold-place wake contract they rely on is RUNNER-SPEC §14.
 
@@ -531,6 +532,18 @@ that backlog. This holds across a child's end and a host restart; a launcher los
 the backlog with its only holder (RUNNER-SPEC §14.5). The launcher reports the first readable listener of a cold group to the host
 as `Arrived(group)`, and the host wakes the group (RUNNER-SPEC §14.3). Clients find a group's
 address from the host's routing table. The host never proxies bytes.
+
+**Running the host.** The launcher starts the host as its first group. Its granted `Dir`
+is its store, and its one Unix endpoint is the launcher's control socket; its arguments are
+that socket's root label and path, `max_places` and `idle_ms`. The host opens its catalog,
+connects, sends `Hello`, and then runs one loop over one queue. A reader task posts each
+launcher event into the queue in stream order, beside the host's two alarms: one absolute
+wall-time alarm on the earliest due time (RUNNER-SPEC §14.3) and one monotonic alarm on the
+earliest backoff retry (§14.5). After every input the host applies it, sends the requests
+its commit allows in order, and re-arms each alarm on its current minimum, so neither wait
+is armed only at start and nothing polls. A lost session, or a frame that does not decode,
+ends the host with status 75. The launcher starts it again, and the new session's inventory
+reconciles it.
 
 **Quotas.** A start, a deploy or an added group that would exceed its tenant's quota is
 refused with the quota it exceeds. The host never evicts a live group to admit another

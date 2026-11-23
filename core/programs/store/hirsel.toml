@@ -26,6 +26,7 @@ std = { major = 1 }
 "fixture.hirsel" = "fixture"
 "launcher.hirsel" = "launcher"
 "platform.hirsel" = "platform"
+"platform_main.hirsel" = "platform_main"
 
 [program]
 module = "main"

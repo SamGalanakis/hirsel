@@ -1542,53 +1542,93 @@ pub fn status(h: Host) -> Status {
     Status(dirty: dirty, max_places: max_places, probes: h.probes, due_wakes: h.due_wakes, arrival_wakes: h.arrival_wakes, queued: take queued, failing: take failing)
 }
 
-// The due-time wait (§14.3 "Due times"): one absolute wall-time alarm on the minimum of the
-// due index without the queued rows, re-armed whenever that minimum changes, and none when
-// the index is empty. There is no polling: nothing wakes the host before the minimum.
-pub type Alarm: send = DueAt(u64)
+// The host's driver (§14.3 "Due times", §14.5): one queue of inputs, in which the
+// launcher's events arrive in stream order beside the due-time and backoff alarms. The
+// driver owns both waits: after every input it re-arms each on the host's current timer,
+// one absolute wall-time alarm on the minimum of the due index without the queued rows and
+// one monotonic alarm on the earliest backoff retry, and none where there is none. There is
+// no polling: nothing wakes the host before either minimum.
+pub type Input: send = Got(launcher.Event) | DueAt(u64) | RetryAt(u64) | Lost
 
 type Armed {
     at: u64,
     waiting: Task[()]
 }
 
-pub opaque type Waiter {
-    armed: Option[Armed]
+pub opaque type Driver {
+    wall: Option[Armed],
+    mono: Option[Armed],
+    tasks: Tasks,
+    clock: Clock,
+    to: Sender[Input]
 }
 
-pub fn waiter() -> Waiter {
-    Waiter(armed: None)
+pub fn driver(tasks: Tasks, c: Clock, take to: Sender[Input]) -> Driver {
+    Driver(wall: None, mono: None, tasks: tasks, clock: c, to: take to)
 }
 
-pub fn armed_at(w: Waiter) -> Option[u64] {
-    match w.armed {
+// What each wait is armed on.
+pub fn armed(d: Driver) -> Timers {
+    let wall = match d.wall {
         Some(a) => Some(a.at),
         None => None
     }
+    let mono = match d.mono {
+        Some(a) => Some(a.at),
+        None => None
+    }
+    Timers(wall_ms: wall, mono_ns: mono)
 }
 
-pub fn rearm(mut w: Waiter, h: Host, tasks: Tasks, c: Clock, to: Sender[Alarm]) waits {
-    let want = timers(h).wall_ms
-    let prior = replace(mut w.armed, None)
-    if let Some(take armed) = take prior {
-        if Some(armed.at) == want {
-            w.armed = Some(take armed);
-            return
+// Applies one input and re-arms both waits. A due or retry alarm is a tick at `now`.
+pub fn step(mut h: Host, mut d: Driver, take input: Input, now: Now) -> List[launcher.Request] waits {
+    let out = match take input {
+        Got(take e) => event(mut h, take e, now),
+        DueAt(_) => tick(mut h, now),
+        RetryAt(_) => tick(mut h, now),
+        Lost => list.new(),
+    }
+    settle(mut d, h)
+    take out
+}
+
+// Re-arms both waits on the host's timers; the driver calls it after every input, and an
+// operator's request calls it after its commit.
+pub fn settle(mut d: Driver, h: Host) waits {
+    let want = timers(h)
+    let wall = replace(mut d.wall, None)
+    d.wall = arm(take wall, want.wall_ms)
+    if let None = d.wall {
+        if let Some(at) = want.wall_ms {
+            let waiting = std.clock.wall_alarm(d.tasks, d.clock, at, d.to, DueAt(at))
+            d.wall = Some(Armed(at: at, waiting: take waiting))
         }
-        let Armed(at: _, waiting: take running) = take armed
-        let _ = task.cancel_join(take running)
     }
-    let Some(at) = want else {
-        return
+    let mono = replace(mut d.mono, None)
+    d.mono = arm(take mono, want.mono_ns)
+    if let None = d.mono {
+        if let Some(at) = want.mono_ns {
+            let waiting = std.clock.alarm(d.tasks, d.clock, at, d.to, RetryAt(at))
+            d.mono = Some(Armed(at: at, waiting: take waiting))
+        }
     }
-    let waiting = std.clock.wall_alarm(tasks, c, at, to, DueAt(at))
-    w.armed = Some(Armed(at: at, waiting: take waiting))
 }
 
-pub fn disarm(mut w: Waiter) waits {
-    let prior = replace(mut w.armed, None)
-    if let Some(take armed) = take prior {
-        let Armed(at: _, waiting: take running) = take armed
-        let _ = task.cancel_join(take running)
+// Keeps a wait already armed on `want`, and cancels any other.
+fn arm(take prior: Option[Armed], want: Option[u64]) -> Option[Armed] waits {
+    let Some(take held) = take prior else {
+        return None
     }
+    if Some(held.at) == want {
+        return Some(take held)
+    }
+    let Armed(at: _, waiting: take running) = take held
+    let _ = task.cancel_join(take running)
+    None
+}
+
+pub fn stop(take d: Driver) waits {
+    let Driver(wall: take wall, mono: take mono, ..) = take d
+    let _ = arm(take wall, None)
+    let _ = arm(take mono, None)
 }

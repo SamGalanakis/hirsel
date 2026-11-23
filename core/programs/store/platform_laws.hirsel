@@ -24,7 +24,8 @@ type Rig {
     h: Host,
     f: launcher.Fake,
     now: Now,
-    starts: List[launcher.Child]
+    starts: List[launcher.Child],
+    d: Option[Driver]
 }
 
 fn uncontained() -> launcher.Bindings {
@@ -64,7 +65,7 @@ fn pump(mut r: Rig, take reqs: List[launcher.Request]) waits {
         }
         let events = launcher.handle(mut r.f, take req)
         for e in events {
-            let more = event(mut r.h, clone(e), r.now)
+            let more = apply(mut r, Got(clone(e)))
             for m in more {
                 list.push(mut queue, clone(m))
             }
@@ -72,10 +73,42 @@ fn pump(mut r: Rig, take reqs: List[launcher.Request]) waits {
     }
 }
 
+// One input: through the rig's driver when it has one, as the host's main loop does.
+fn apply(mut r: Rig, take input: Input) -> List[launcher.Request] waits {
+    let held = replace(mut r.d, None)
+    match take held {
+        Some(take driven) => {
+            let mut d = take driven
+            let out = step(mut r.h, mut d, take input, r.now)
+            r.d = Some(take d)
+            take out
+        },
+        None => match take input {
+            Got(take e) => event(mut r.h, take e, r.now),
+            _ => tick(mut r.h, r.now),
+        }
+    }
+}
+
+// What the rig's driver has armed.
+fn waits_on(r: Rig) -> Timers {
+    match r.d {
+        Some(d) => armed(d),
+        None => fail("the rig has no driver")
+    }
+}
+
+fn unplug(mut r: Rig) waits {
+    let held = replace(mut r.d, None)
+    if let Some(take d) = take held {
+        stop(take d)
+    }
+}
+
 fn feed(mut r: Rig, take events: List[launcher.Event]) waits {
     let mut reqs: List[launcher.Request] = list.new()
     for e in events {
-        let more = event(mut r.h, clone(e), r.now)
+        let more = apply(mut r, Got(clone(e)))
         for m in more {
             list.push(mut reqs, clone(m))
         }
@@ -85,7 +118,7 @@ fn feed(mut r: Rig, take events: List[launcher.Event]) waits {
 
 fn rig_on(take db: store.Db, f: launcher.Fake, max_places: u64, now: Now) -> Rig waits {
     let (h, hello) = must(open(take db, Config(max_places: max_places, idle_ms: 1000u64)), "open")
-    let mut r = Rig(h: take h, f: clone(f), now: now, starts: list.new())
+    let mut r = Rig(h: take h, f: clone(f), now: now, starts: list.new(), d: None)
     pump(mut r, take hello)
     r
 }
@@ -96,7 +129,7 @@ fn rig(c: Clock, rnd: Random, max_places: u64) -> Rig waits {
 
 // Ends the host process: only its store and the launcher survive.
 fn restart(take r: Rig, max_places: u64) -> Rig waits {
-    let Rig(h: take h, f: take f, now: now, starts: _) = take r
+    let Rig(h: take h, f: take f, now: now, starts: _, d: _) = take r
     rig_on(close(take h), f, max_places, now)
 }
 
@@ -113,13 +146,13 @@ fn op_wake(mut r: Rig, name: String) waits {
 
 fn at_wall(mut r: Rig, wall_ms: u64) waits {
     r.now = Now(wall_ms: wall_ms, mono_ns: r.now.mono_ns)
-    let reqs = tick(mut r.h, r.now)
+    let reqs = apply(mut r, DueAt(wall_ms))
     pump(mut r, take reqs)
 }
 
 fn at_mono(mut r: Rig, mono_ns: u64) waits {
     r.now = Now(wall_ms: r.now.wall_ms, mono_ns: mono_ns)
-    let reqs = tick(mut r.h, r.now)
+    let reqs = apply(mut r, RetryAt(mono_ns))
     pump(mut r, take reqs)
 }
 
@@ -211,21 +244,20 @@ fn cold_due(mut r: Rig, name: String, tenant: String, due: u64) waits {
 }
 
 // L39 `wake_due_after_unload` (§14.3, §14.4): the due-time wait is one absolute wall-time
-// alarm on the due index's minimum, re-armed when an earlier deadline arrives, so nothing
-// polls. A place that stops with `Stopped(Some(t + 2000))` is started after t + 2 s with no
-// arrival; a second place's earlier deadline is not held behind a wait armed at t + 60 s,
-// nor lost while the index is empty.
+// alarm on the due index's minimum, which the host's driver re-arms after every input, so
+// nothing polls. A place that stops with `Stopped(Some(t + 2000))` is started after t + 2 s
+// with no arrival; a second place's earlier deadline is not held behind a wait armed at
+// t + 60 s, nor lost while the index is empty.
 @test
 fn wake_due_after_unload(c: Clock, rnd: Random, tasks: Tasks) -> Result[(), ()] waits {
     let (vc, hand) = provide.clock(SECOND_NS, T0)
     let mut ticks = take hand
-    let (to, from): (Sender[Alarm], Receiver[Alarm]) = channel.new(4u64)
-    let mut w = waiter()
+    let (to, from): (Sender[Input], Receiver[Input]) = channel.new(4u64)
     let mut r = rig(c, rnd, 4u64)
+    r.d = Some(driver(tasks, vc, channel.sender(to)))
     // The first place: its trigger is due at t + 2 s.
     cold_due(mut r, "a", "t", T0 + 2000u64)
-    rearm(mut w, r.h, tasks, vc, to)
-    expect(armed_at(w) == Some(T0 + 2000u64), "L39: the wait is not armed on the due time")
+    expect(waits_on(r).wall_ms == Some(T0 + 2000u64), "L39: the wait is not armed on the due time")
     let _ = clock.idle(mut ticks)
     clock.set_wall(mut ticks, T0 + 1999u64)
     let _ = clock.idle(mut ticks)
@@ -244,11 +276,9 @@ fn wake_due_after_unload(c: Clock, rnd: Random, tasks: Tasks) -> Result[(), ()] 
     clock.set_wall(mut ticks, T0 + 3000u64)
     r.now = Now(wall_ms: T0 + 3000u64, mono_ns: r.now.mono_ns)
     idle_stop(mut r, "a", Some(T0 + 60000u64))
-    rearm(mut w, r.h, tasks, vc, to)
-    expect(armed_at(w) == Some(T0 + 60000u64), "L39: the wait is not on the later deadline")
+    expect(waits_on(r).wall_ms == Some(T0 + 60000u64), "L39: the wait is not on the later deadline")
     cold_due(mut r, "b", "t", T0 + 5000u64)
-    rearm(mut w, r.h, tasks, vc, to)
-    expect(armed_at(w) == Some(T0 + 5000u64), "L39: the earlier deadline waits for the old one")
+    expect(waits_on(r).wall_ms == Some(T0 + 5000u64), "L39: the earlier deadline waits for the old one")
     clock.set_wall(mut ticks, T0 + 5000u64)
     let _ = clock.idle(mut ticks)
     let Ok(DueAt(second)) = channel.try_receive(from) else {
@@ -257,16 +287,16 @@ fn wake_due_after_unload(c: Clock, rnd: Random, tasks: Tasks) -> Result[(), ()] 
     expect(second == T0 + 5000u64, "L39: the second place woke at the wrong time")
     at_wall(mut r, second)
     expect(gens(r, "b") == two(1u64, 2u64) && launches(r, "a") == 2u64, "L39: the wrong place was started")
+    unplug(mut r)
     // With the index empty, no wait is armed; a place that then stops with a due time arms it.
     let mut r2 = rig(c, rnd, 4u64)
+    r2.d = Some(driver(tasks, vc, channel.sender(to)))
     add(mut r2, "c", "t")
     op_wake(mut r2, "c")
-    rearm(mut w, r2.h, tasks, vc, to)
-    expect(armed_at(w) == None, "L39: a wait is armed with no due row")
+    expect(waits_on(r2).wall_ms == None, "L39: a wait is armed with no due row")
     r2.now = Now(wall_ms: T0 + 6000u64, mono_ns: r2.now.mono_ns)
     idle_stop(mut r2, "c", Some(T0 + 8000u64))
-    rearm(mut w, r2.h, tasks, vc, to)
-    expect(armed_at(w) == Some(T0 + 8000u64), "L39: the wait was armed only at start")
+    expect(waits_on(r2).wall_ms == Some(T0 + 8000u64), "L39: the wait was armed only at start")
     clock.set_wall(mut ticks, T0 + 8000u64)
     let _ = clock.idle(mut ticks)
     let Ok(DueAt(third)) = channel.try_receive(from) else {
@@ -274,11 +304,10 @@ fn wake_due_after_unload(c: Clock, rnd: Random, tasks: Tasks) -> Result[(), ()] 
     }
     at_wall(mut r2, third)
     expect(gens(r2, "c") == two(1u64, 2u64), "L39: the place due after an empty index was not started")
-    disarm(mut w)
+    unplug(mut r2)
     Ok(())
 }
 
-// Two live places and a third due one under `max_places` 2.
 fn capacity_case(c: Clock, rnd: Random) -> Rig waits {
     let mut r = rig(c, rnd, 2u64)
     cold_due(mut r, "c", "t", T0 + 1000u64)
@@ -367,7 +396,7 @@ fn crash(mut r: Rig, name: String) waits {
 // after 1 s, 2 s and 4 s, arrivals start nothing extra meanwhile, and a clean report resets
 // the delay.
 @test
-fn wake_only_clean_stop(c: Clock, rnd: Random) -> Result[(), ()] waits {
+fn wake_only_clean_stop(c: Clock, rnd: Random, tasks: Tasks) -> Result[(), ()] waits {
     let mut r = rig(c, rnd, 4u64)
     add(mut r, "killed", "t")
     add(mut r, "forced", "t")
@@ -393,7 +422,10 @@ fn wake_only_clean_stop(c: Clock, rnd: Random) -> Result[(), ()] waits {
     at_wall(mut back, T0 + 500u64)
     expect(gens(back, "killed") == two(3u64, 4u64), "L42: the probed place's due trigger did not run")
     // Backoff: at once, then 1 s, 2 s, 4 s.
+    let (vc, _hand) = provide.clock(SECOND_NS, T0)
+    let (to, _from): (Sender[Input], Receiver[Input]) = channel.new(4u64)
     let mut b = rig(c, rnd, 4u64)
+    b.d = Some(driver(tasks, vc, take to))
     add(mut b, "crashy", "t")
     op_wake(mut b, "crashy")
     crash(mut b, "crashy")
@@ -404,7 +436,7 @@ fn wake_only_clean_stop(c: Clock, rnd: Random) -> Result[(), ()] waits {
     for _ in 0u64 .. 3u64 {
         crash(mut b, "crashy")
         let n = launches(b, "crashy")
-        expect(timers(b.h).mono_ns == Some(base + d), "L42: the backoff delay is not 1 s, 2 s, 4 s")
+        expect(waits_on(b).mono_ns == Some(base + d), "L42: the backoff wait is not armed on 1 s, 2 s, 4 s")
         let target = last(b, "crashy").group
         let events = launcher.connect(mut b.f, target)
         feed(mut b, take events)
@@ -424,6 +456,7 @@ fn wake_only_clean_stop(c: Clock, rnd: Random) -> Result[(), ()] waits {
     let n = launches(b, "crashy")
     crash(mut b, "crashy")
     expect(launches(b, "crashy") == n + 1u64, "L42: a clean report did not reset the backoff")
+    unplug(mut b)
     Ok(())
 }
 

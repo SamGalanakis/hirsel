@@ -376,7 +376,19 @@ fn clear_preview(mut w: WriteHalf, f: Front, mut watch: PreviewWatch) -> bool wa
     true
 }
 
-fn send_preview(mut w: WriteHalf, f: Front, sent: List[(u64, Bytes)], mut watch: PreviewWatch) -> bool waits {
+fn preview_status(mut client: store.fixture.Client, f: Front) -> Option[String] waits {
+    let Ok(sub) = store.fixture.subscribe(mut client, window_entry(), Status, f.within_ms) else {
+        return None
+    }
+    let image = store.fixture.seen_at(mut client, sub, 0u64, f.within_ms)
+    store.fixture.unsubscribe(mut client, sub)
+    match take image {
+        Ok(take head) => visible_status(head),
+        Error(_) => None
+    }
+}
+
+fn send_preview(mut w: WriteHalf, f: Front, mut client: store.fixture.Client, sent: List[(u64, Bytes)], mut watch: PreviewWatch) -> bool waits {
     let next = {
         let Some(obs) = view watch.observer else {
             return true
@@ -392,24 +404,36 @@ fn send_preview(mut w: WriteHalf, f: Front, sent: List[(u64, Bytes)], mut watch:
         }
     }
     let end = draft.offset + string.byte_len(draft.text)
-    if let Some((key, held)) = watch.sent {
-        if key == draft.key && draft.offset <= held && held <= end {
-            if held == end {
-                return true
-            }
-            // Send on the first poll with new bytes. A blocked write keeps this
-            // task from polling, so the hub coalesces further bytes within its cap.
-            let more = PreviewDelta(seq: draft.seq, at: held, text: string.from(string.slice(draft.text, held - draft.offset, end - draft.offset)))
-            let Some(take event) = event_of(more, Some("preview-delta")) else {
-                return false
-            }
-            watch.sent = Some((draft.key, end))
-            return send_out(mut w, f, take event)
-        }
+    let following = watch.sent
+    let start = match following {
+        Some((key, held)) if key == draft.key && draft.offset <= held && held <= end => Some(held),
+        _ => None
     }
-    let Some(take event) = event_of(draft, Some("preview")) else {
+    if start == Some(end) {
+        return true
+    }
+
+    // Read the ACL after fetching the draft. A status image already held by the
+    // follow loop might precede a revocation that raced the hub read.
+    let Some(status) = preview_status(mut client, f) else {
         return false
     }
+    if !busy(status) {
+        return clear_preview(mut w, f, mut watch)
+    }
+
+    let encoded = match start {
+        Some(held) => {
+            let more = PreviewDelta(seq: draft.seq, at: held, text: string.from(string.slice(draft.text, held - draft.offset, end - draft.offset)))
+            event_of(more, Some("preview-delta"))
+        },
+        None => event_of(draft, Some("preview"))
+    }
+    let Some(take event) = take encoded else {
+        return false
+    }
+    // Send on the first eligible poll. A blocked write keeps this task from
+    // polling, so the hub coalesces further bytes within its cap.
     watch.sent = Some((draft.key, end))
     send_out(mut w, f, take event)
 }
@@ -511,7 +535,7 @@ fn follow_loop[T: send](d: harness.gateway.Door[T], f: Front, id: u64, mut w: Wr
                 },
                 // No change in a beat: a quiet session past its hold is let go of.
                 Error(Deadline(_)) => {
-                    if !quiet && !send_preview(mut w, f, sent, mut watch) {
+                    if !quiet && !send_preview(mut w, f, mut client, sent, mut watch) {
                         store.fixture.close(take client);
                         return
                     }

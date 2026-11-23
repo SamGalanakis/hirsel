@@ -1251,6 +1251,8 @@ fn preview_run(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
         let Ok(Ok(())) = call_routed(door, 0u64, me, 1u64, change, (), tasks, clock, random, net) else {
             return Error(42u64)
         }
+        let Ok(rest) = channel.receive(inbox) else { return Error(45u64) }
+        let _ = channel.send(rest, ())
         if !ended_without_rows(mut tab) || !empty_history(net, clock, port, me) {
             return Error(43u64)
         }
@@ -1259,8 +1261,6 @@ fn preview_run(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
             return Error(44u64)
         }
 
-        let Ok(rest) = channel.receive(inbox) else { return Error(45u64) }
-        let _ = channel.send(rest, ())
         let Some(_) = down_within(door, 0u64, clock) else { return Error(46u64) }
         harness.gateway_http.halt(take served)
         let _ = harness.gateway.stop(take g)

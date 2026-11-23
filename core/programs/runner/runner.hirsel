@@ -2773,43 +2773,16 @@ fn forward_first_write(take notice: (Receiver[u64], Sender[HostReply])) -> () wa
 }
 
 fn read_control(mut input: ReadHalf, maximum: u64) -> Option[HostCommand] waits {
-    let mut header: Bytes = list.with_capacity(4u64)
-    if !read_control_bytes(mut input, mut header, 4u64) { return None }
-    let mut at = 0u64
-    let size: u64 = match std.codec.take_u32(header, mut at) { Ok(n) => int.widen(n), _ => return None }
-    if size > maximum { return None }
-    let mut body: Bytes = list.with_capacity(size)
-    if !read_control_bytes(mut input, mut body, size) { return None }
+    let Some(body) = read_frame(mut input, maximum, Never) else { return None }
     let codec: std.codec.Codec[HostCommand] = std.codec.of()
     match std.codec.decode(codec, body) { Ok(take command) => Some(take command), _ => None }
-}
-
-fn read_control_bytes(mut input: ReadHalf, mut out: Bytes, size: u64) -> bool waits {
-    while list.len(out) < size {
-        let left = size - list.len(out)
-        match host.recv_bounded(mut input, mut out, left, Never) {
-            Ok(n) if n > 0u64 => (),
-            _ => return false,
-        }
-    }
-    true
 }
 
 fn send_control(mut output: WriteHalf, host_result: HostReply) -> bool waits {
     let codec: std.codec.Codec[HostReply] = std.codec.of()
     let mut body: Bytes = list.new()
     if let Error(_) = std.codec.encode(codec, host_result, mut body) { return false }
-    let mut header: Bytes = list.new()
-    if list.len(body) > 4294967295u64 { return false }
-    std.codec.put_u32(int.narrow(list.len(body)), mut header)
-    let mut offset = 0u64
-    while offset < 4u64 + list.len(body) {
-        match host.send_pair(mut output, list.slice(header, std.order.min(offset, 4u64), 4u64), list.slice(body, int.saturating_sub(offset, 4u64), list.len(body)), Never) {
-            Ok(n) if n > 0u64 => { offset += n },
-            _ => return false,
-        }
-    }
-    true
+    send_frame(mut output, body, 4294967295u64, Never)
 }
 
 fn host_writer(take writer: HostWriter) -> () waits {

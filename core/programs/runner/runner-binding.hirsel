@@ -26,3 +26,53 @@ fn bound_caller[G: send](tasks: Tasks, take job: BindingJob[G], allowance: u64) 
     }
     match task.join(take handle) { Ok(take caller) => take caller, Error(_) => None }
 }
+
+fn read_exact(mut input: ReadHalf, mut out: Bytes, size: u64, until: Until) -> bool waits {
+    while list.len(out) < size {
+        let left = size - list.len(out)
+        match host.recv_bounded(mut input, mut out, left, until) {
+            Ok(n) if n > 0u64 => (),
+            _ => return false,
+        }
+    }
+    true
+}
+
+// One length-prefixed frame of up to the supplied maximum, or None at the stream's end.
+pub fn read_frame(mut input: ReadHalf, maximum: u64, until: Until) -> Option[Bytes] waits {
+    let mut header: Bytes = list.with_capacity(4u64)
+    if !read_exact(mut input, mut header, 4u64, until) {
+        return None
+    }
+    let mut at = 0u64
+    let size: u64 = match std.codec.take_u32(header, mut at) {
+        Ok(n) => int.widen(n),
+        _ => return None
+    }
+    if size > maximum {
+        return None
+    }
+    let mut body: Bytes = list.with_capacity(size)
+    if !read_exact(mut input, mut body, size, until) {
+        return None
+    }
+    Some(body)
+}
+
+pub fn send_frame(mut output: WriteHalf, body: Bytes, maximum: u64, until: Until) -> bool waits {
+    if list.len(body) > order.min(maximum, 4294967295u64) {
+        return false
+    }
+    let mut header: Bytes = list.new()
+    std.codec.put_u32(int.narrow(list.len(body)), mut header)
+    let mut offset = 0u64
+    while offset < 4u64 + list.len(body) {
+        match host.send_pair(mut output, list.slice(header, std.order.min(offset, 4u64), 4u64), list.slice(body, int.saturating_sub(offset, 4u64), list.len(body)), until) {
+            Ok(n) if n > 0u64 => {
+                offset += n
+            },
+            _ => return false,
+        }
+    }
+    true
+}

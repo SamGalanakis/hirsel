@@ -17,7 +17,7 @@ fn deadline(c: Clock) -> Until { within(c, 5000u64) }
 
 fn within(c: Clock, ms: u64) -> Until { At(c, std.clock.deadline_after_ms(host.mono_ns(c), ms)) }
 
-fn send(mut w: std.wsock.Writer, mut out: std.wsock.Outbound, opcode: u8, payload: Bytes, c: Clock) -> Result[(), std.wsock.Error] waits {
+pub fn send(mut w: std.wsock.Writer, mut out: std.wsock.Outbound, opcode: u8, payload: Bytes, c: Clock) -> Result[(), std.wsock.Error] waits {
     let encoded = std.wsock.encode(mut out, true, opcode, payload)?
     if let Error(_) = std.wsock.stage(mut w, take encoded) { return Error(Protocol(1008u16)) }
     let until = deadline(c)
@@ -25,7 +25,7 @@ fn send(mut w: std.wsock.Writer, mut out: std.wsock.Outbound, opcode: u8, payloa
     Ok(())
 }
 
-fn receive(mut r: std.wsock.Reader, mut w: std.wsock.Writer, mut out: std.wsock.Outbound, c: Clock, until: Until) -> Result[runner.Frame, std.wsock.Error] waits {
+pub fn receive(mut r: std.wsock.Reader, mut w: std.wsock.Writer, mut out: std.wsock.Outbound, c: Clock, until: Until) -> Result[runner.Frame, std.wsock.Error] waits {
     loop {
         match std.wsock.read(mut r, until)? {
             Message(take b) => {
@@ -109,12 +109,10 @@ pub fn connect(tasks: Tasks, n: Net, address: Addr, c: Clock, random: Random, ke
 }
 
 // The Hello exchange completes within `within_ms`, and each later read waits at most `idle_ms`.
-pub fn connect_for(tasks: Tasks, n: Net, address: Addr, c: Clock, random: Random, keys: List[Bytes], take token: Option[Bytes], config: std.wsock.Config, within_ms: u64, idle_ms: u64) -> Result[Conn, std.wsock.Error] waits {
+pub fn open(n: Net, address: Addr, authority: Bytes, c: Clock, random: Random, keys: List[Bytes], take token: Option[Bytes], config: std.wsock.Config, within_ms: u64) -> Result[(std.wsock.Reader, std.wsock.Writer, std.wsock.Outbound, runner.Caller), std.wsock.Error] waits {
     let until = within(c, within_ms)
     let socket = match host.connect(n, address, until) { Ok(take s) => take s, Error(e) => return Error(Network(e)) }
-    let mut host_name: Bytes = list.new()
-    list.append(mut host_name, string.as_bytes("127.0.0.1"))
-    let std.wsock.Connected(reader: take input, writer: take output, outgoing: take outgoing, timers: _) = std.wsock.client(take socket, host_name, config, c, random)?
+    let std.wsock.Connected(reader: take input, writer: take output, outgoing: take outgoing, timers: _) = std.wsock.client(take socket, authority, config, c, random)?
     let mut r = take input
     let mut w = take output
     let mut out = take outgoing
@@ -125,6 +123,11 @@ pub fn connect_for(tasks: Tasks, n: Net, address: Addr, c: Clock, random: Random
     send(mut w, mut out, 2u8, b, c)?
     let who = match receive(mut r, mut w, mut out, c, until)? { Welcome(take p, _, _, _, _, _) => take p, _ => return Error(Protocol(1008u16)) }
     for _ in keys { match receive(mut r, mut w, mut out, c, until)? { Placed(_) => (), _ => return Error(Protocol(1008u16)) } }
+    Ok((take r, take w, take out, take who))
+}
+
+pub fn connect_for(tasks: Tasks, n: Net, address: Addr, c: Clock, random: Random, keys: List[Bytes], take token: Option[Bytes], config: std.wsock.Config, within_ms: u64, idle_ms: u64) -> Result[Conn, std.wsock.Error] waits {
+    let (take r, take w, take out, take who) = open(n, address, string.as_bytes("127.0.0.1"), c, random, keys, take token, config, within_ms)?
     let (to, commands): (Sender[Command], Receiver[Command]) = channel.new(64u64)
     let (frames, from): (Sender[Incoming], Receiver[Incoming]) = channel.new(64u64)
     let wake = channel.sender(frames)

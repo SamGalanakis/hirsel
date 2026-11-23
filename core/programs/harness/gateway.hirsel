@@ -47,6 +47,8 @@ type GwIn: send =
     | AwaitDown(u64, u64, Sender[Result[u64, Refused]])
     | Nudge(u64)
     | Marked(u64, Sender[Marks])
+    | WatchMarks(u64, Sender[()], Sender[u64])
+    | UnwatchMarks(u64, u64)
     | Halt(Sender[List[store.local.Unloaded]])
 
 pub opaque type Gateway[T: send] { to: Sender[GwIn], actor: Task[()] }
@@ -104,7 +106,8 @@ type Actor {
     host: store.local.Local, tasks: Tasks, clock: Clock, random: Random,
     watch: Option[Sender[store.local.Change]], removers: List[Task[()]],
     // Each session's marks since the gateway started, and who waits for its next end.
-    marks: List[(u64, Marks)], waiters: List[(u64, u64, Sender[Result[u64, Refused]])],
+    marks: Map[u64, Marks], watching: Map[u64, Map[u64, Sender[()]]], next_watch: u64,
+    waiters: List[(u64, u64, Sender[Result[u64, Refused]])],
 }
 
 fn forward_changes(take f: Forward) -> () waits {
@@ -237,17 +240,39 @@ fn on_reach(a: Actor, id: u64) -> Result[store.local.Door, Refused] {
 }
 
 fn marks_of(a: Actor, id: u64) -> Marks {
-    for m in a.marks { if m.0 == id { return Marks(ups: m.1.ups, downs: m.1.downs, nudges: m.1.nudges) } }
-    Marks(ups: 0u64, downs: 0u64, nudges: 0u64)
+    match map.get(a.marks, id) {
+        Some(m) => Marks(ups: m.ups, downs: m.downs, nudges: m.nudges),
+        None => Marks(ups: 0u64, downs: 0u64, nudges: 0u64),
+    }
 }
 
 fn downs_of(a: Actor, id: u64) -> u64 { marks_of(a, id).downs }
 
-fn put_marks(mut a: Actor, id: u64, take m: Marks) -> () {
-    let mut kept: List[(u64, Marks)] = list.new()
-    while let Some((at, take old)) = list.pop(mut a.marks) { if at != id { list.push(mut kept, (at, take old)) } }
-    list.push(mut kept, (id, take m))
-    a.marks = take kept
+fn put_marks(mut a: Actor, id: u64, take m: Marks) {
+    map.insert(mut a.marks, id, take m)
+    if let Some(watchers) = map.get(a.watching, id) {
+        for (_, to) in watchers { let _ = channel.try_send(to, ()) }
+    }
+}
+
+fn on_watch(mut a: Actor, id: u64, take notify: Sender[()], reply: Sender[u64]) {
+    a.next_watch += 1u64
+    let mut watchers = match map.remove(mut a.watching, id) {
+        Some(take old) => take old,
+        None => map.new(),
+    }
+    if let Ok(()) = channel.try_send(reply, a.next_watch) {
+        map.insert(mut watchers, a.next_watch, take notify)
+    }
+    if map.len(watchers) > 0u64 { map.insert(mut a.watching, id, take watchers) }
+}
+
+fn on_unwatch(mut a: Actor, id: u64, token: u64) {
+    if let Some(take old) = map.remove(mut a.watching, id) {
+        let mut watchers = take old
+        let _ = map.remove(mut watchers, token)
+        if map.len(watchers) > 0u64 { map.insert(mut a.watching, id, take watchers) }
+    }
 }
 
 fn count_up(mut a: Actor, id: u64) -> () {
@@ -337,7 +362,7 @@ fn run_gateway[T: send](take begin: Begin[T]) -> () waits {
     let forward: fn(take Forward) -> () waits = forward_changes
     let forwarding = task.spawn(tasks, bytes 65536u64, Forward(from: take changes, to: channel.sender(me)), forward)
     let mut a = Actor(db: take db, catalog: take catalog, root: root, options: take options, migrate: migrate, max_sessions: max_sessions, count: 0u64,
-        host: take local_host, tasks: tasks, clock: clock, random: random, watch: take watch, removers: list.new(), marks: list.new(), waiters: list.new())
+        host: take local_host, tasks: tasks, clock: clock, random: random, watch: take watch, removers: list.new(), marks: map.new(), watching: map.new(), next_watch: 0u64, waiters: list.new())
     let _ = take me
     let recovered = recover(mut a)
     let failed = match recovered { Ok(()) => false, Error(_) => true }
@@ -355,6 +380,8 @@ fn run_gateway[T: send](take begin: Begin[T]) -> () waits {
                 AwaitDown(id, after, take reply) => on_await(mut a, id, after, take reply),
                 Nudge(id) => on_nudge(mut a, id),
                 Marked(id, reply) => { let _ = channel.send(reply, marks_of(a, id)) },
+                WatchMarks(id, take notify, reply) => on_watch(mut a, id, take notify, reply),
+                UnwatchMarks(id, token) => on_unwatch(mut a, id, token),
                 Halt(take reply) => { halted = Some(take reply)
                     break },
             }
@@ -485,6 +512,18 @@ pub fn marks[T: send](d: Door[T], id: u64) -> Marks waits {
     match channel.receive(answer) { Ok(m) => m, Error(_) => Marks(ups: 0u64, downs: 0u64, nudges: 0u64) }
 }
 
+// The caller registers before sampling marks. A queued notification is enough
+// because marks contain the cumulative counts.
+pub fn watch_marks[T: send](d: Door[T], id: u64, notify: Sender[()]) -> Option[u64] waits {
+    let (reply, answer): (Sender[u64], Receiver[u64]) = channel.new(1u64)
+    if let Error(_) = channel.send(d.to, WatchMarks(id, channel.sender(notify), take reply)) { return None }
+    match channel.receive(answer) { Ok(token) => Some(token), Error(_) => None }
+}
+
+pub fn unwatch_marks[T: send](d: Door[T], id: u64, token: u64) -> () waits {
+    let _ = channel.send(d.to, UnwatchMarks(id, token))
+}
+
 // Stops every live session through its graceful stop and answers how each ended.
 pub fn stop[T: send](take g: Gateway[T]) -> List[store.local.Unloaded] waits {
     let Gateway(to: take to, actor: take actor) = take g
@@ -521,8 +560,8 @@ pub fn await_down[T: send](d: Door[T], id: u64, after: u64) -> Result[u64, Refus
 // What a child session's place registers for its parent: a submit entry and a query
 // over the ACL-checked transcript, and how to reach it.
 pub type Child: send {
-    submit: store.fixture.Callee[harness.Submit, Result[harness.Disposition, harness.Refused]],
-    shown: store.fixture.Callee[harness.Window, ()], keys: List[Bytes], socket: std.wsock.Config,
+    submit: store.client.Callee[harness.Submit, Result[harness.Disposition, harness.Refused]],
+    shown: store.client.Callee[harness.Window, ()], keys: List[Bytes], socket: std.wsock.Config, authority: Bytes,
     tasks: Tasks, clock: Clock, random: Random, net: Net, within_ms: u64,
 }
 
@@ -557,19 +596,19 @@ type Seen: send = Busy(String, u64) | Ended(String, String)
 fn look[T: send](d: Door[T], id: u64, c: Child, credential: Bytes, take submit: Option[harness.Submit]) -> Result[Seen, harness.Fault] waits {
     let Ok(lease) = route(d, id) else { return Error(Unavailable) }
     let Some(address) = latest.read(store.local.status(lease)).addr else { return Error(Unavailable) }
-    let Ok(take opened) = store.fixture.client_at(c.tasks, c.net, c.clock, c.random, c.keys, c.socket, address, Some(clone(credential)), 0u64, c.within_ms) else { return Error(Unavailable) }
+    let Ok(take opened) = store.client.client_at(c.net, c.clock, c.random, c.keys, c.socket, address, c.authority, Some(clone(credential)), 0u64, c.within_ms) else { return Error(Unavailable) }
     let _ = take lease
     let mut client = take opened
     if let Some(take m) = take submit {
-        let placed = match store.fixture.call(mut client, c.submit, take m, 5000u32) {
-            Ok(store.fixture.Replied(answer: Returned(Ok(_)), ..)) => true,
+        let placed = match store.client.call(mut client, c.submit, take m, 5000u32) {
+            Ok(store.client.Replied(answer: Returned(Ok(_)), ..)) => true,
             _ => false,
         }
-        if !placed { store.fixture.close(take client); return Error(Unavailable) }
+        if !placed { store.client.close(take client); return Error(Unavailable) }
     }
-    let Ok(sub) = store.fixture.subscribe(mut client, c.shown, Transcript, c.within_ms) else { store.fixture.close(take client); return Error(Unavailable) }
-    let seen = store.fixture.seen_at(mut client, sub, 0u64, c.within_ms)
-    store.fixture.close(take client)
+    let Ok(sub) = store.client.subscribe(mut client, c.shown, Transcript, c.within_ms) else { store.client.close(take client); return Error(Unavailable) }
+    let seen = store.client.seen_at(mut client, sub, 0u64, c.within_ms)
+    store.client.close(take client)
     let Ok(image) = take seen else { return Error(Unavailable) }
     let codec: std.codec.Codec[harness.View] = std.codec.of()
     let mut status = string.new()

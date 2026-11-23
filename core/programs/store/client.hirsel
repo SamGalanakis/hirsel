@@ -1,0 +1,405 @@
+// Client for a place's WIRE entries. One-shot callers read and write inline.
+// A following stream can park on transport frames, external changes or its heartbeat.
+pub type CallError: send = Deadline(u64) | Closed | Protocol(String) | Decode(std.codec.DecodeError) | Full(Capacity)
+
+pub type Answer[R] = Returned(R) | Failed(runner.Fault) | Refused(runner.Refusal) | Abandoned
+
+pub type Replied[R] {
+    answer: Answer[R],
+    version: u64
+}
+
+pub type Seen {
+    version: u64,
+    rows: List[runner.Row]
+}
+
+
+type Sub {
+    ready: bool,
+    rows: Map[Bytes, runner.Row],
+}
+
+type In: send = Frame(runner.Frame) | Ping(std.websocket.Control) | Wake | Alarm | Gone
+
+type Pump: send {
+    input: std.wsock.Reader,
+    to: Sender[In],
+    credit: Receiver[()],
+}
+
+type Following {
+    reading: Task[()],
+    from: Receiver[In],
+    sig: Sender[In],
+    credit: Sender[()],
+}
+
+pub opaque type Signal: send { to: Sender[In] }
+
+pub opaque type Client {
+    input: Option[std.wsock.Reader],
+    output: std.wsock.Writer,
+    outgoing: std.wsock.Outbound,
+    following: Option[Following],
+    caller: runner.Caller,
+    keys: List[Bytes],
+    next_p: u64,
+    next_sub: u32,
+    subs: Map[u32, Sub],
+    version: u64,
+    clock: Clock,
+}
+
+// A typed entry: the key registration computes, so a Callee cannot name another key.
+pub opaque type Callee[A, R]: shareable + send {
+    key: Bytes,
+    args: std.codec.Codec[A],
+    reply: std.codec.Codec[R]
+}
+
+fn callee[F, A, R](f: StaticFn[F], args: std.codec.Codec[A], reply: std.codec.Codec[R]) -> Callee[A, R] {
+    let key = match runner.attempt_key(f, args, reply) {
+        Ok(take k) => take k,
+        Error(_) => fail("client: entry schema has no fingerprint")
+    }
+    Callee(key: take key, args: args, reply: reply)
+}
+
+pub fn transact_entry[H, A: codec, R: codec, E: codec](f: StaticFn[fn(mut store.Tx, H, runner.Caller, take A) -> Result[R, E]]) -> Callee[A, Result[R, E]] {
+    callee(f, std.codec.of(), std.codec.of())
+}
+
+fn query_callee[F, A: codec, K, V](f: StaticFn[F], key_codec: std.codec.Key[K], value_codec: std.codec.Codec[V]) -> Callee[A, ()] {
+    let args: std.codec.Codec[A] = std.codec.of()
+    let schema = result.unwrap(runner.query_result_schema(key_codec, value_codec))
+    let identity = code.identity(f)
+    let mut key: Bytes = list.with_capacity(list.len(identity) + 16u64)
+    list.append(mut key, identity)
+    std.codec.put_u64(result.unwrap(std.codec.fingerprint(args)), mut key)
+    std.codec.put_u64(std.codec.fingerprint_of(schema), mut key)
+    Callee(key: take key, args: args, reply: std.codec.of_unit())
+}
+
+pub fn query_entry[H, A: codec, K, V](f: StaticFn[fn(store.Tx, H, take A) -> Result[runner.Cover, Capacity]], key: std.codec.Key[K], value: std.codec.Codec[V]) -> Callee[A, ()] {
+    query_callee(f, key, value)
+}
+
+pub fn query_as_entry[H, A: codec, K, V](f: StaticFn[fn(store.Tx, H, runner.Caller, take A) -> Result[runner.Cover, Capacity]], key: std.codec.Key[K], value: std.codec.Codec[V]) -> Callee[A, ()] {
+    query_callee(f, key, value)
+}
+
+// The place's entry keys in registration order, as its Hello lists them.
+pub fn entry_keys[G: send, H: send](place: StaticFn[fn(mut runner.Registry[G, H]) -> Result[(), runner.RegisterError]]) -> Result[List[Bytes], runner.StartError] {
+    let mut r: runner.Registry[G, H] = runner.registry()
+    let run = code.callable(place)
+    if let Error(e) = run(mut r) {
+        return Error(Open(Place(e)))
+    }
+    let mut described: Bytes = list.new()
+    if let Error(_) = runner.describe(r, mut described) {
+        return Error(Missing("place"))
+    }
+    let codec: std.codec.Codec[List[runner.Described]] = std.codec.of_list()
+    let entries = match std.codec.decode(codec, described) {
+        Ok(take d) => take d,
+        Error(_) => return Error(Missing("place"))
+    }
+    let mut keys: List[Bytes] = list.with_capacity(list.len(entries))
+    for d in entries {
+        let mut key: Bytes = list.with_capacity(list.len(d.identity) + 16u64)
+        list.append(mut key, d.identity)
+        std.codec.put_u64(std.codec.fingerprint_of(d.args), mut key)
+        std.codec.put_u64(std.codec.fingerprint_of(d.result), mut key)
+        list.push(mut keys, take key)
+    }
+    Ok(take keys)
+}
+
+
+pub fn client_at(net: Net, clock: Clock, random: Random, keys: List[Bytes], socket: std.wsock.Config, address: Addr, authority: Bytes, take token: Option[Bytes], first_p: u64, within_ms: u64) -> Result[Client, CallError] waits {
+    let (take input, take output, take outgoing, take caller) = match wire_client.open(net, address, authority, clock, random, keys, take token, socket, within_ms) {
+        Ok(take connected) => take connected,
+        Error(_) => return Error(Closed),
+    }
+    Ok(Client(input: Some(take input), output: take output, outgoing: take outgoing, following: None, caller: take caller,
+        keys: clone(keys), next_p: first_p, next_sub: 0u32, subs: map.new(), version: 0u64, clock: clock))
+}
+
+pub fn bound_caller(c: Client) -> store.Caller { clone(c.caller) }
+
+fn pump(take job: Pump) -> () waits {
+    let Pump(input: take input, to: take to, credit: credit) = take job
+    let mut r = take input
+    let codec: std.codec.Codec[runner.Frame] = std.codec.of()
+    while let Ok(()) = channel.receive(credit) {
+        loop {
+            match std.wsock.read(mut r, Never) {
+                Ok(Message(take data)) => {
+                    if let Ok(take f) = std.codec.decode(codec, data) {
+                        if let Error(_) = channel.send(to, Frame(take f)) { return }
+                        break
+                    }
+                    let _ = channel.send(to, Gone)
+                    return
+                },
+                Ok(Ping(p)) => if let Error(_) = channel.send(to, Ping(p)) { return },
+                Ok(Pong(_)) => (),
+                Ok(Need) => (),
+                _ => { let _ = channel.send(to, Gone); return },
+            }
+        }
+    }
+}
+
+pub fn follow(mut c: Client, tasks: Tasks, reader_bytes: u64) -> Result[Signal, CallError] {
+    let Some(take input) = replace(mut c.input, None) else { return Error(Closed) }
+    let (to, from): (Sender[In], Receiver[In]) = channel.new(4u64)
+    let (credit, credits): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let seed = Pump(input: take input, to: channel.sender(to), credit: take credits)
+    let reading = match task.try_spawn(tasks, bytes reader_bytes, take seed, pump) {
+        Ok(take task) => take task,
+        Error(_) => return Error(Closed),
+    }
+    let waker = Signal(to: channel.sender(to))
+    c.following = Some(Following(reading: take reading, from: take from, sig: take to, credit: take credit))
+    Ok(take waker)
+}
+
+pub fn signal(s: Signal) -> Signal { Signal(to: channel.sender(s.to)) }
+
+pub fn wake(s: Signal) -> bool {
+    match channel.try_send(s.to, Wake) {
+        Error(Closed(_)) => false,
+        _ => true,
+    }
+}
+
+pub fn close(take c: Client) -> () waits {
+    let Client(output: take output, outgoing: take outgoing, following: take following, clock, ..) = take c
+    if let Some(take f) = take following {
+        let Following(reading: take reading, ..) = take f
+        let _ = task.cancel_join(take reading)
+    }
+    let mut w = take output
+    let mut out = take outgoing
+    let _ = wire_client.send(mut w, mut out, 8u8, list.new(), clock)
+}
+
+fn apply(mut c: Client, version: u64, complete: List[u32], take rows: List[runner.Row]) {
+    for id in complete {
+        if let Some(_) = map.remove(mut c.subs, id) {
+            map.insert(mut c.subs, id, Sub(ready: true, rows: map.new()))
+        }
+    }
+    for take row in take rows {
+        let runner.Row(sub, key: take key, value: take value) = take row
+        if let Some(take held) = map.remove(mut c.subs, sub) {
+            let mut s = take held
+            match take value {
+                Some(take data) => map.insert(mut s.rows, clone(key), runner.Row(sub: sub, key: take key, value: Some(take data))),
+                None => { let _ = map.remove(mut s.rows, key) },
+            }
+            map.insert(mut c.subs, sub, take s)
+        }
+    }
+    c.version = version
+}
+
+fn write(mut c: Client, f: runner.Frame) -> Result[(), CallError] waits {
+    let codec: std.codec.Codec[runner.Frame] = std.codec.of()
+    let payload = encoded(codec, f)?
+    match wire_client.send(mut c.output, mut c.outgoing, 2u8, payload, c.clock) {
+        Ok(()) => Ok(()),
+        Error(_) => Error(Closed),
+    }
+}
+
+fn direct(mut c: Client, until: u64, within_ms: u64) -> Result[runner.Frame, CallError] waits {
+    let Some(take input) = replace(mut c.input, None) else { return Error(Closed) }
+    let mut r = take input
+    let heard = wire_client.receive(mut r, mut c.output, mut c.outgoing, c.clock, At(c.clock, until))
+    c.input = Some(take r)
+    match take heard {
+        Ok(take f) => Ok(take f),
+        Error(_) => if host.mono_ns(c.clock) >= until { Error(Deadline(within_ms)) } else { Error(Closed) },
+    }
+}
+
+fn receive_following(c: Client) -> In waits {
+    let next = {
+        let Some(f) = view c.following else { return Gone }
+        if let Error(Closed(_)) = channel.try_send(f.credit, ()) {
+            match channel.try_receive(f.from) { Ok(take next) => take next, _ => Gone }
+        } else {
+            match channel.receive(f.from) { Ok(take next) => take next, _ => Gone }
+        }
+    }
+    take next
+}
+
+fn consume(mut c: Client, take next: In) -> Result[bool, CallError] waits {
+    match take next {
+        Frame(take f) => {
+            let _ = step(mut c, take f, None)?
+            Ok(false)
+        },
+        Ping(p) => {
+            let mut payload: Bytes = list.new()
+            std.websocket.control(p, mut payload)
+            if let Error(_) = wire_client.send(mut c.output, mut c.outgoing, 10u8, payload, c.clock) {
+                return Error(Closed)
+            }
+            Ok(false)
+        },
+        Alarm => Ok(false),
+        Wake => Ok(true),
+        Gone => Error(Closed),
+    }
+}
+
+fn step(mut c: Client, take f: runner.Frame, want: Option[u64]) -> Result[Option[runner.Done], CallError] {
+    match take f {
+        Batch(version, take complete, take rows, take done) => {
+            apply(mut c, version, complete, take rows)
+            for take d in take done {
+                if d.stream == 0u32 && want == Some(d.p) { return Ok(Some(take d)) }
+            }
+        },
+        Ended(sub, _) => { let _ = map.remove(mut c.subs, sub) },
+        Reset(_, _) => return Error(Protocol("Reset")),
+        _ => (),
+    }
+    Ok(None)
+}
+
+// Wait for one transport frame, an external wake, or the caller's timer.
+pub fn wait_for(mut c: Client, tasks: Tasks, at: u64) -> Result[bool, CallError] waits {
+    let alarm = schedule(c, tasks, at)
+    let next = receive_following(c)
+    let _ = task.cancel_join(take alarm)
+    consume(mut c, take next)
+}
+
+fn schedule(c: Client, tasks: Tasks, at: u64) -> Task[()] {
+    let Some(held) = view c.following else { fail("client is not following") }
+    std.clock.alarm(tasks, c.clock, at, held.sig, Alarm)
+}
+
+fn slot_of(c: Client, key: Bytes) -> Option[u32] {
+    let s = wire_client.slot(c.keys, key)
+    if s == 4294967295u32 {
+        None
+    } else {
+        Some(s)
+    }
+}
+
+fn encoded[A](codec: std.codec.Codec[A], a: A) -> Result[Bytes, CallError] {
+    let mut out: Bytes = list.new()
+    match std.codec.encode(codec, a, mut out) {
+        Ok(()) => Ok(take out),
+        Error(_) => Error(Protocol("argument does not encode"))
+    }
+}
+
+
+pub fn call[A: codec, R: codec](mut c: Client, e: Callee[A, R], take a: A, deadline_ms: u32) -> Result[Replied[R], CallError] waits {
+    let Some(slot) = slot_of(c, e.key) else { return Ok(Replied(answer: Refused(NoEntry), version: c.version)) }
+    let arg = encoded(e.args, a)?
+    let p = c.next_p
+    c.next_p += 1u64
+    write(mut c, Call(0u32, p, slot, deadline_ms, take arg))?
+    let ms: u64 = int.widen(deadline_ms)
+    let until = std.clock.deadline_after_ms(host.mono_ns(c.clock), ms)
+    loop {
+        let f = direct(mut c, until, ms)?
+        if let Some(r) = step(mut c, take f, Some(p))? {
+            let answer = match r.outcome {
+                Returned(b) => match std.codec.decode(e.reply, b) {
+                    Ok(take value) => Returned(take value),
+                    Error(d) => return Error(Decode(d)),
+                },
+                Failed(fault) => Failed(fault),
+                Refused(why) => Refused(why),
+                Abandoned => Abandoned,
+                InDoubt => return Error(Protocol("InDoubt")),
+            }
+            return Ok(Replied(answer: take answer, version: c.version))
+        }
+    }
+}
+
+fn opened(c: Client, sub: u32, version: u64) -> Result[bool, CallError] {
+    let Some(s) = map.get(c.subs, sub) else { return Error(Closed) }
+    Ok(s.ready && c.version >= version)
+}
+
+fn wait_until(mut c: Client, sub: u32, version: u64, within_ms: u64) -> Result[(), CallError] waits {
+    let until = std.clock.deadline_after_ms(host.mono_ns(c.clock), within_ms)
+    while !opened(c, sub, version)? {
+        let f = direct(mut c, until, within_ms)?
+        let _ = step(mut c, take f, None)?
+    }
+    Ok(())
+}
+
+pub fn subscribe[A: codec](mut c: Client, e: Callee[A, ()], take a: A, within_ms: u64) -> Result[u32, CallError] waits {
+    let Some(slot) = slot_of(c, e.key) else { return Error(Protocol("entry not in the place")) }
+    let arg = encoded(e.args, a)?
+    let id = c.next_sub
+    c.next_sub += 1u32
+    map.insert(mut c.subs, id, Sub(ready: false, rows: map.new()))
+    write(mut c, Subscribe(id, slot, take arg, None))?
+    wait_until(mut c, id, 0u64, within_ms)?
+    Ok(id)
+}
+
+pub fn unsubscribe(mut c: Client, sub: u32) -> () waits {
+    if let Some(_) = map.remove(mut c.subs, sub) {
+        let _ = write(mut c, Unsubscribe(sub))
+    }
+}
+
+pub fn current(c: Client, sub: u32, version: u64) -> Result[Option[Seen], CallError] {
+    if !opened(c, sub, version)? { return Ok(None) }
+    let s = option.unwrap(map.get(c.subs, sub))
+    let mut rows: List[runner.Row] = list.with_capacity(map.len(s.rows))
+    for (_, row) in s.rows { list.push(mut rows, clone(row)) }
+    std.list.sort(mut rows, fn(a: runner.Row, b: runner.Row) -> Order { list.compare_bytes(a.key, b.key) })
+    Ok(Some(Seen(version: c.version, rows: take rows)))
+}
+
+pub fn seen_at(mut c: Client, sub: u32, version: u64, within_ms: u64) -> Result[Seen, CallError] waits {
+    wait_until(mut c, sub, version, within_ms)?
+    Ok(option.unwrap(current(c, sub, version)?))
+}
+
+pub fn fence[A: codec](mut c: Client, e: Callee[A, ()], take a: A, tasks: Tasks, within_ms: u64) -> Result[Seen, CallError] waits {
+    let Some(slot) = slot_of(c, e.key) else { return Error(Protocol("entry not in the place")) }
+    let arg = encoded(e.args, a)?
+    let id = c.next_sub
+    c.next_sub += 1u32
+    map.insert(mut c.subs, id, Sub(ready: false, rows: map.new()))
+    write(mut c, Subscribe(id, slot, take arg, None))?
+    let until = std.clock.deadline_after_ms(host.mono_ns(c.clock), within_ms)
+    let alarm = schedule(c, tasks, until)
+    let mut pending = false
+    let image = fenced(mut c, id, until, within_ms, mut pending)
+    let _ = task.cancel_join(take alarm)
+    unsubscribe(mut c, id)
+    if pending {
+        let Some(held) = view c.following else { fail("client is not following") }
+        let _ = channel.try_send(held.sig, Wake)
+    }
+    image
+}
+
+fn fenced(mut c: Client, sub: u32, until: u64, within_ms: u64, mut pending: bool) -> Result[Seen, CallError] waits {
+    loop {
+        if let Some(take s) = current(c, sub, 0u64)? { return Ok(take s) }
+        if host.mono_ns(c.clock) >= until { return Error(Deadline(within_ms)) }
+        let next = receive_following(c)
+        pending = consume(mut c, take next)? || pending
+    }
+}

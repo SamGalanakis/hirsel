@@ -18,7 +18,7 @@ pub type Draft: codec + send {
     text: String,
 }
 
-type Input: send = Start(String, store.Caller, Key, u64, Receiver[()]) | Delta(Key, u64, u64, u64, String) | Attach(String, store.Caller, Receiver[()], Sender[u64]) | Detach(u64) | Revoke(String, store.Caller, Sender[()]) | Read(u64, Sender[Option[Draft]]) | Stop
+type Input: send = Start(String, store.Caller, Key, u64, Receiver[()]) | Delta(String, Key, u64, u64, u64, String) | Attach(String, store.Caller, Receiver[()], Option[store.client.Signal], Sender[u64]) | Detach(u64) | Revoke(String, store.Caller, Sender[()]) | Read(u64, Sender[Option[Draft]]) | Sweep | Stop
 
 pub opaque type Door: send {
     to: Sender[Input],
@@ -36,13 +36,17 @@ pub opaque type Target: send {
     clock: Clock
 }
 
-pub opaque type Source: send {
+pub resource type Source: send {
     door: Door,
-    lease: Sender[()],
+    lease: Option[Sender[()]],
+    group: String,
     key: Key,
     seq: u64,
     offset: u64,
     clock: Clock
+} drop(ended) {
+    let _ = replace(mut ended.lease, None)
+    let _ = channel.try_send(ended.door.to, Sweep)
 }
 
 pub opaque type Observer {
@@ -51,9 +55,21 @@ pub opaque type Observer {
     id: u64
 }
 
-type Active {
+type Audience: key {
     group: String,
-    caller: store.Caller,
+    issuer: u8,
+    subject: Bytes,
+}
+
+type Entry: key {
+    group: String,
+    run: u64,
+    entry: u64,
+    tool: Option[u64],
+}
+
+type Active {
+    audience: Audience,
     key: Key,
     live: Receiver[()],
     seq: u64,
@@ -64,10 +80,9 @@ type Active {
 }
 
 type Watching {
-    group: String,
-    caller: store.Caller,
-    id: u64,
-    live: Receiver[()]
+    audience: Audience,
+    live: Receiver[()],
+    signal: Option[store.client.Signal],
 }
 
 fn open(live: Receiver[()]) -> bool {
@@ -77,196 +92,179 @@ fn open(live: Receiver[()]) -> bool {
     }
 }
 
-fn same_caller(a: store.Caller, b: store.Caller) -> bool {
-    a.issuer == b.issuer && a.subject == b.subject
+fn audience_of(group: String, caller: store.Caller) -> Audience {
+    Audience(group: string.from(group), issuer: caller.issuer, subject: clone(caller.subject))
 }
 
-fn audience(watching: List[Watching], group: String, caller: store.Caller) -> bool {
-    for w in watching {
-        if w.group == group && same_caller(w.caller, caller) && open(w.live) {
-            return true
+fn same_audience(a: Audience, b: Audience) -> bool {
+    a.group == b.group && a.issuer == b.issuer && a.subject == b.subject
+}
+
+fn entry_of(group: String, key: Key) -> Entry {
+    Entry(group: string.from(group), run: key.run, entry: key.entry, tool: key.tool)
+}
+
+fn notify(watching: Map[u64, Watching], audience: Audience) -> bool {
+    let mut any = false
+    for (_, w) in watching {
+        if same_audience(w.audience, audience) && open(w.live) {
+            any = true
+            if let Some(signal) = view w.signal { let _ = store.client.wake(signal) }
         }
     }
-    false
+    any
 }
 
-fn remove_at[T](mut xs: List[T], i: u64) {
-    let last = list.len(xs) - 1u64
-    if i != last {
-        list.swap(mut xs, i, last)
-    }
-    let _ = list.pop(mut xs)
-}
-
-fn prune(mut active: List[Active], mut watching: List[Watching], detached: Option[u64]) {
-    let mut i = 0u64
-    while i < list.len(watching) {
-        if detached == Some(watching[i].id) || !open(watching[i].live) {
-            remove_at(mut watching, i)
+fn prune(mut active: Map[Entry, Active], mut watching: Map[u64, Watching]) {
+    let mut gone: List[u64] = list.new()
+    let mut audiences: Map[Audience, bool] = map.new()
+    for (id, w) in watching {
+        if open(w.live) {
+            map.insert(mut audiences, clone(w.audience), true)
         } else {
-            i += 1u64
+            list.push(mut gone, id)
         }
     }
-    let mut j = 0u64
-    while j < list.len(active) {
-        if !open(active[j].live) {
-            remove_at(mut active, j)
-        } else {
-            if !audience(watching, active[j].group, active[j].caller) {
-                active[j].text = string.new()
-                if active[j].key.tool == None {
-                    active[j].changed = 0u64
-                }
-            }
-            j += 1u64
+    for id in gone { let _ = map.remove(mut watching, id) }
+    let mut closed: List[Entry] = list.new()
+    let mut unwatched: List[Entry] = list.new()
+    let mut changed: Map[Audience, bool] = map.new()
+    for (entry, a) in active {
+        if !open(a.live) {
+            map.insert(mut changed, clone(a.audience), true)
+            list.push(mut closed, clone(entry))
+        } else if !map.contains(audiences, a.audience) && string.byte_len(a.text) > 0u64 {
+            list.push(mut unwatched, clone(entry))
         }
+    }
+    for (_, w) in watching {
+        if map.contains(changed, w.audience) {
+            if let Some(signal) = view w.signal { let _ = store.client.wake(signal) }
+        }
+    }
+    for entry in closed { let _ = map.remove(mut active, entry) }
+    for take entry in take unwatched {
+        let mut a = option.unwrap(map.remove(mut active, entry))
+        a.text = string.new()
+        if a.key.tool == None { a.changed = 0u64 }
+        map.insert(mut active, take entry, take a)
     }
 }
 
-fn revoke_watchers(mut watching: List[Watching], group: String, caller: store.Caller) {
-    let mut i = 0u64
-    while i < list.len(watching) {
-        if watching[i].group == group && same_caller(watching[i].caller, caller) {
-            remove_at(mut watching, i)
-        } else {
-            i += 1u64
+fn revoke_watchers(mut watching: Map[u64, Watching], audience: Audience) {
+    let mut revoked: List[u64] = list.new()
+    for (id, w) in watching {
+        if same_audience(w.audience, audience) {
+            list.push(mut revoked, id)
+            if let Some(signal) = view w.signal { let _ = store.client.wake(signal) }
         }
     }
+    for id in revoked { let _ = map.remove(mut watching, id) }
 }
 
-fn same_entry(a: Key, b: Key) -> bool {
-    a.run == b.run && a.entry == b.entry && a.tool == b.tool
-}
-
-fn starts(mut active: List[Active], take group: String, take caller: store.Caller, key: Key, produced: u64, changed: u64, take live: Receiver[()]) {
-    let mut i = 0u64
-    while i < list.len(active) {
-        let old = active[i].key
-        if active[i].group != group || !same_entry(old, key) {
-            i += 1u64;
-            continue
-        }
-        if old.dispatch == key.dispatch && old.attempt >= key.attempt {
-            return
-        }
+fn starts(mut active: Map[Entry, Active], watching: Map[u64, Watching], group: String, caller: store.Caller, key: Key, produced: u64, changed: u64, take live: Receiver[()]) {
+    let entry = entry_of(group, key)
+    if let Some(a) = map.get(active, entry) {
+        let old = a.key
+        if old.dispatch == key.dispatch && old.attempt >= key.attempt { return }
         if old.dispatch.store_hi == key.dispatch.store_hi && old.dispatch.store_lo == key.dispatch.store_lo {
-            if old.dispatch.version > key.dispatch.version || (old.dispatch.version == key.dispatch.version && old.dispatch.index > key.dispatch.index) {
-                return
-            }
+            if old.dispatch.version > key.dispatch.version || (old.dispatch.version == key.dispatch.version && old.dispatch.index > key.dispatch.index) { return }
         }
-        remove_at(mut active, i)
     }
+    let audience = audience_of(group, caller)
+    let _ = notify(watching, audience)
     let state_seq = first_seq(key)
-    list.push(mut active, Active(group: take group, caller: take caller, key: key, live: take live, seq: state_seq, produced_ns: produced, base: 0u64, text: string.new(), changed: if state_seq == 0u64 {
-        0u64
+    map.insert(mut active, take entry, Active(audience: take audience, key: key, live: take live,
+        seq: state_seq, produced_ns: produced, base: 0u64, text: string.new(), changed: if state_seq == 0u64 { 0u64 } else { changed }))
+}
+
+fn on_delta(mut active: Map[Entry, Active], watching: Map[u64, Watching], limit: u64, changed: u64, group: String, key: Key, seq: u64, produced: u64, at: u64, text: String) {
+    let entry = entry_of(group, key)
+    {
+        let Some(a) = map.get(active, entry) else { return }
+        if a.key != key || !open(a.live) || a.seq >= seq || !notify(watching, a.audience) { return }
+    }
+    let mut a = option.unwrap(map.remove(mut active, entry))
+    // A lost delta leaves a hole, so the next delta starts a new UTF-8 tail.
+    if seq != a.seq + 1u64 { a.text = string.new() }
+    if string.byte_len(a.text) == 0u64 { a.base = at }
+    a.seq = seq
+    a.produced_ns = produced
+    a.changed = changed
+    string.push(mut a.text, text)
+    let n = string.byte_len(a.text)
+    if n > limit {
+        let cut = {
+            let raw = string.as_bytes(a.text)
+            let mut from = n - limit
+            while from < n && (raw[from] & 192u8) == 128u8 { from += 1u64 }
+            from
+        }
+        a.text = string.from(string.slice(a.text, cut, n))
+        a.base += cut
+    }
+    map.insert(mut active, take entry, take a)
+}
+
+fn draft_for(active: Map[Entry, Active], watching: Map[u64, Watching], id: u64, limit: u64) -> Option[Draft] {
+    let Some(w) = map.get(watching, id) else { return None }
+    let mut newest = 0u64
+    let mut at: Option[Entry] = None
+    for (entry, a) in active {
+        if same_audience(a.audience, w.audience) && a.changed > newest && open(a.live) {
+            newest = a.changed
+            at = Some(clone(entry))
+        }
+    }
+    let Some(take entry) = take at else { return None }
+    let a = option.unwrap(map.get(active, entry))
+    // The running status is derived from the tool's lease. It needs no text buffer.
+    let (offset, take text) = if a.key.tool != None && string.byte_len(a.text) == 0u64 {
+        if limit < string.byte_len("running tool") { return None }
+        (0u64, string.from("running tool"))
     } else {
-        changed
-    }))
-}
-
-fn on_delta(mut active: List[Active], watching: List[Watching], limit: u64, changed: u64, key: Key, seq: u64, produced: u64, at: u64, take text: String) {
-    for i in 0u64 .. list.len(active) {
-        if active[i].key != key || !open(active[i].live) {
-            continue
-        }
-        if active[i].seq >= seq || !audience(watching, active[i].group, active[i].caller) {
-            return
-        }
-        // A lost delta leaves a hole, so the draft restarts at this delta. Otherwise
-        // the draft keeps its newest `limit` bytes, starting on a character.
-        if seq != active[i].seq + 1u64 {
-            active[i].text = string.new()
-        }
-        if string.byte_len(active[i].text) == 0u64 {
-            active[i].base = at
-        }
-        active[i].seq = seq
-        active[i].produced_ns = produced
-        active[i].changed = changed
-        string.push(mut active[i].text, text)
-        let n = string.byte_len(active[i].text)
-        if n > limit {
-            let cut = {
-                let raw = string.as_bytes(active[i].text)
-                let mut from = n - limit
-                while from < n && (raw[from] & 192u8) == 128u8 {
-                    from += 1u64
-                }
-                from
-            }
-            active[i].text = string.from(string.slice(active[i].text, cut, n))
-            active[i].base += cut
-        }
-        return
+        (a.base, string.from(a.text))
     }
-}
-
-fn draft_for(active: List[Active], watching: List[Watching], id: u64, limit: u64) -> Option[Draft] {
-    for w in watching {
-        if w.id != id {
-            continue
-        }
-        let mut newest = 0u64
-        let mut at: Option[u64] = None
-        for i in 0u64 .. list.len(active) {
-            let a = view active[i]
-            if a.group == w.group && same_caller(a.caller, w.caller) && a.changed > newest && open(a.live) {
-                newest = a.changed
-                at = Some(i)
-            }
-        }
-        let Some(i) = at else {
-            return None
-        }
-        let a = view active[i]
-        // The tool's fixed running status comes from its active lease. It
-        // requires no retained text when nobody is watching.
-        let (offset, text) = if a.key.tool != None && string.byte_len(a.text) == 0u64 {
-            if limit < string.byte_len("running tool") {
-                return None
-            }
-            (0u64, string.from("running tool"))
-        } else {
-            (a.base, string.from(a.text))
-        }
-        return Some(Draft(key: a.key, seq: a.seq, produced_ns: a.produced_ns, offset: offset, text: take text))
-    }
-    None
+    Some(Draft(key: a.key, seq: a.seq, produced_ns: a.produced_ns, offset: offset, text: take text))
 }
 
 fn receive_all(take job: (Receiver[Input], u64)) -> () waits {
     let (take inbox, limit) = take job
-    let mut active: List[Active] = list.new()
-    let mut watching: List[Watching] = list.new()
+    let mut active: Map[Entry, Active] = map.new()
+    let mut watching: Map[u64, Watching] = map.new()
     let mut next = 0u64
     let mut changed = 0u64
     while let Ok(take input) = channel.receive(inbox) {
         match take input {
-            Start(take group, take caller, key, produced, take live) => {
-                prune(mut active, mut watching, None)
+            Start(group, caller, key, produced, take live) => {
+                prune(mut active, mut watching)
                 changed += 1u64
-                starts(mut active, take group, take caller, key, produced, changed, take live)
+                starts(mut active, watching, group, caller, key, produced, changed, take live)
             },
-            Delta(key, seq, produced, at, take text) => {
+            Delta(group, key, seq, produced, at, text) => {
                 changed += 1u64
-                on_delta(mut active, watching, limit, changed, key, seq, produced, at, take text)
+                on_delta(mut active, watching, limit, changed, group, key, seq, produced, at, text)
             },
-            Attach(take group, take caller, take live, reply) => {
-                prune(mut active, mut watching, None)
+            Attach(group, caller, take live, take signal, reply) => {
+                prune(mut active, mut watching)
                 next += 1u64
-                list.push(mut watching, Watching(group: take group, caller: take caller, id: next, live: take live))
+                map.insert(mut watching, next, Watching(audience: audience_of(group, caller), live: take live, signal: take signal))
                 let _ = channel.send(reply, next)
             },
-            Detach(id) => prune(mut active, mut watching, Some(id)),
+            Detach(id) => {
+                let _ = map.remove(mut watching, id)
+                prune(mut active, mut watching)
+            },
             Revoke(group, caller, reply) => {
-                revoke_watchers(mut watching, group, caller)
-                prune(mut active, mut watching, None)
+                revoke_watchers(mut watching, audience_of(group, caller))
+                prune(mut active, mut watching)
                 let _ = channel.send(reply, ())
             },
             Read(id, reply) => {
-                prune(mut active, mut watching, None)
+                prune(mut active, mut watching)
                 let _ = channel.send(reply, draft_for(active, watching, id, limit))
             },
+            Sweep => prune(mut active, mut watching),
             Stop => return,
         }
     }
@@ -317,7 +315,10 @@ pub fn source(t: Target, caller: store.Caller, key: Key) -> Option[Source] {
     if let Error(_) = channel.try_send(d.to, Start(string.from(t.group), clone(caller), key, host.mono_ns(t.clock), take live)) {
         return None
     }
-    Some(Source(door: copy_door(d), lease: take lease, key: key, seq: first_seq(key), offset: 0u64, clock: t.clock))
+    match Source(door: copy_door(d), lease: Some(take lease), group: string.from(t.group), key: key, seq: first_seq(key), offset: 0u64, clock: t.clock) {
+        Ok(take made) => Some(take made),
+        Error(_) => None,
+    }
 }
 
 // Keep only a UTF-8 tail of a very large delta. On a lost delta the next
@@ -344,14 +345,18 @@ pub fn delta(mut p: Source, text: String) {
     p.offset += n
     let _ = bound bytes p.door.text_bytes + 4096u64 {
         let shown = string.from(string.slice(text, from, n))
-        let _ = channel.try_send(p.door.to, Delta(p.key, p.seq, host.mono_ns(p.clock), at, take shown))
+        let _ = channel.try_send(p.door.to, Delta(string.from(p.group), p.key, p.seq, host.mono_ns(p.clock), at, take shown))
     }
 }
 
 pub fn observe(d: Door, group: String, caller: store.Caller) -> Option[Observer] waits {
+    observe_with(d, group, caller, None)
+}
+
+pub fn observe_with(d: Door, group: String, caller: store.Caller, take signal: Option[store.client.Signal]) -> Option[Observer] waits {
     let (lease, live): (Sender[()], Receiver[()]) = channel.new(1u64)
     let (reply, from): (Sender[u64], Receiver[u64]) = channel.new(1u64)
-    if let Error(_) = channel.send(d.to, Attach(string.from(group), clone(caller), take live, take reply)) {
+    if let Error(_) = channel.send(d.to, Attach(string.from(group), clone(caller), take live, take signal, take reply)) {
         return None
     }
     let Ok(id) = channel.receive(from) else {

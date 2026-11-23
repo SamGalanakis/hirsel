@@ -12,7 +12,8 @@
     "lines": 1010
   },
   "core/programs/harness/gateway_laws.hirsel": {
-    "lines": 1497
+    "lines": 1500,
+    "reason": "gateway-push-1905"
   },
   "core/programs/harness/harness.hirsel": {
     "lines": 2149

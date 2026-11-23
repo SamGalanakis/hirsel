@@ -30,3 +30,4 @@ dirs = ["."]
 "provider_laws.hirsel" = "provider_laws"
 "gateway_laws.hirsel" = "gateway_laws"
 "route_laws.hirsel" = "gateway_laws"
+"preview_test.hirsel" = "preview"

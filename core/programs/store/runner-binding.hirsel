@@ -1,0 +1,28 @@
+type BindingJob[G: send]: send {
+    seed: G, bind: StaticFn[fn(G, Bytes) -> Result[Caller, ()] waits], credential: Bytes, steps: u64
+}
+
+fn run_binding[G: send](take job: BindingJob[G]) -> Option[Caller] waits {
+    let BindingJob(seed: take seed, bind: bind, credential: take credential, steps: steps) = take job
+    let invoke = code.callable(bind)
+    let result = bound steps steps { invoke(seed, credential) }
+    match take result {
+        Ok(Ok(take caller)) if caller.issuer != 1u8 => Some(take caller),
+        _ => None,
+    }
+}
+
+// Apply the same credential binding rules for a front that seeds a private
+// session before a place is listening.
+pub fn bind_credential[G: send](tasks: Tasks, take seed: G, bind: StaticFn[fn(G, Bytes) -> Result[Caller, ()] waits], take credential: Bytes, bytes_budget: u64, steps: u64) -> Option[Caller] waits {
+    bound_caller(tasks, BindingJob(seed: take seed, bind: bind, credential: take credential, steps: steps), bytes_budget)
+}
+
+fn bound_caller[G: send](tasks: Tasks, take job: BindingJob[G], allowance: u64) -> Option[Caller] waits {
+    let run: fn(take BindingJob[G]) -> Option[Caller] waits = run_binding
+    let handle = match task.try_spawn(tasks, bytes allowance, take job, run) {
+        Ok(take child) => take child,
+        Error(_) => return None,
+    }
+    match task.join(take handle) { Ok(take caller) => take caller, Error(_) => None }
+}

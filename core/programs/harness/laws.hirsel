@@ -231,3 +231,69 @@ fn test_once_tool_crash(parent: Dir, clock: Clock, random: Random, tasks: Tasks,
     if law_once_tool_crash(parent, clock, random, tasks, net) { Ok(()) } else { Error(()) }
 }
 
+
+// ---- journal bytes ----
+
+// A session with `n` earlier entries, each a 200-byte user line, and no run.
+fn history(dir: Dir, clock: Clock, random: Random, tasks: Tasks, n: u64) -> store.Db waits {
+    let mut db = result.unwrap(store.open(tasks, dir, clock, random, store.triggers.law_options()))
+    result.unwrap(store.run_migration(mut db, tasks, code.describe(harness.migrate)))
+    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    let filled = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), harness.Refused] {
+        harness.open_session(mut tx, h, "scripted", All)?
+        for p in 0u64..n {
+            match store.put(mut tx, h.entries, p, User(string.repeat("x", 200u64))) { Ok(()) => (), Error(_) => return Error(Storage) }
+        }
+        let mut s = match store.fetch(tx, store.shape(h.session), 0u64) { Ok(Some(take s)) => take s, _ => return Error(Storage) }
+        s.next_pos = n
+        match store.put(mut tx, h.session, 0u64, s) { Ok(()) => Ok(()), Error(_) => Error(Storage) }
+    })
+    match take filled { Ok(Committed(_)) => (), _ => fail("history: fill did not commit") }
+    take db
+}
+
+// The bytes one submit transaction writes: the key and value of every row it
+// changed, from the store's own diff of the snapshots around it.
+fn round_bytes(dir: Dir, clock: Clock, random: Random, tasks: Tasks, n: u64) -> u64 waits {
+    let mut db = history(dir, clock, random, tasks, n)
+    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    let w = result.unwrap(wired())
+    let before = store.snapshot(db)
+    let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[harness.Disposition, harness.Refused] {
+        harness.submit(mut tx, h, crash_agent(), w, store.Caller(issuer: 1u8, subject: list.new()), harness.Submit(client_key: "k", text: "bump it"))
+    })
+    match take ran { Ok(Committed(_)) => (), _ => fail("journal: submit did not commit") }
+    let after = store.snapshot(db)
+    let mut total = 0u64
+    for c in result.unwrap(store.changes(before, after)) {
+        total += list.len(c.tree_key)
+        if let Some(v) = c.value { total += list.len(v) }
+    }
+    result.unwrap(store.close(take db))
+    total
+}
+
+// Law J1 (Sam's steer: advance seals only the cutoff): the transaction that
+// appends a user entry and prepares the model call writes the same bytes at
+// 10 earlier entries as at 1,000, up to the patch (the 7-byte user entry and
+// its visible line) and the few varint bytes of the larger positions. Oracle:
+// the store's own diff; a body copied into any row or trigger argument would
+// add about 200 bytes per entry, about 198,000 bytes between the two.
+pub fn law_round_bytes_bounded(parent: Dir, clock: Clock, random: Random, tasks: Tasks) -> bool waits {
+    let mut small_name = string.with_capacity(32u64)
+    let small = result.unwrap(host.mkdtemp(parent, mut small_name))
+    let mut large_name = string.with_capacity(32u64)
+    let large = result.unwrap(host.mkdtemp(parent, mut large_name))
+    let at_10 = round_bytes(small, clock, random, tasks, 10u64)
+    let at_1000 = round_bytes(large, clock, random, tasks, 1000u64)
+    result.unwrap(std.dir.remove_all(parent, small_name))
+    result.unwrap(std.dir.remove_all(parent, large_name))
+    let patch = 64u64
+    let gap = if at_1000 > at_10 { at_1000 - at_10 } else { at_10 - at_1000 }
+    at_10 > 0u64 && gap <= patch
+}
+
+@test
+fn test_round_bytes_bounded(parent: Dir, clock: Clock, random: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if law_round_bytes_bounded(parent, clock, random, tasks) { Ok(()) } else { Error(()) }
+}

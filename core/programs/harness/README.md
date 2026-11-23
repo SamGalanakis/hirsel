@@ -84,5 +84,6 @@ agent and the wiring:
 | law | claim | oracle |
 | --- | --- | --- |
 | C1 `test_once_tool_crash` | A place stopped while a Once tool is in flight reopens without resending the tool. The tool result is InDoubt at once, the model answer is not bought again, and the run ends Answered. | The scripted services' own call counts, which outlive the place, plus the transcript and spend derived by hand from the script. |
+| J1 `test_round_bytes_bounded` | The transaction that appends a user entry and prepares the model call writes the same bytes after 10 earlier entries as after 1,000, within 64 bytes. | `store.changes` between the snapshots around the transaction. A request body copied into any row or trigger argument would add about 198,000 bytes. |
 
-Open: a `std.sim.fs` crash cut at the same boundary.
+Open: a `std.sim.fs` crash cut at the same boundary as C1.

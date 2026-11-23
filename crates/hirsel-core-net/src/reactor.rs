@@ -1,10 +1,14 @@
-//! Persistent edge-triggered interests, adapted from Go runtime/netpoll_epoll.go.
+//! Readiness interests, adapted from Go runtime/netpoll_epoll.go.
 //! Slot generations identify sockets across poll and dispatch.
 //!
-//! Two kernel interfaces carry the same interests: epoll, and io_uring
-//! multishot polls (edge-triggered unless `IORING_POLL_ADD_LEVEL`, as epoll
-//! with `EPOLLET`). One is chosen once per process ([`reactor`]); both turn a
-//! kernel turn into the same `(tag, flags)` events, so dispatch is shared.
+//! Two kernel interfaces carry them. epoll keeps one persistent
+//! edge-triggered interest per descriptor. io_uring arms a one-shot poll per
+//! direction only when a waiter parks there ([`Sockets::arm`]): a poll
+//! completes through task work on the thread that armed it, so a persistent
+//! poll on a socket being read interrupts its reader once per arriving
+//! segment, while a parked waiter is about to sleep anyway. One interface is
+//! chosen once per process ([`reactor`]); both turn a kernel turn into the
+//! same `(tag, flags)` events, so dispatch is shared.
 use std::{
     collections::HashMap,
     io,
@@ -18,6 +22,10 @@ const WAKE: u64 = u64::MAX;
 /// io_uring: the completion of a poll removal, which carries no readiness.
 const REMOVED: u64 = u64::MAX - 1;
 const INTEREST: u32 = (libc::EPOLLIN | libc::EPOLLOUT | libc::EPOLLRDHUP) as u32;
+/// io_uring: a direction's one-shot poll carries its tag with this bit set
+/// for the write direction. Tags never use it: a slot index stays below it
+/// ([`Sockets::insert_record`]) and WAKE and REMOVED are matched first.
+const WRITE_POLL: u64 = 1 << 31;
 
 /// The kernel interface behind the Net transport.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -146,23 +154,24 @@ impl Poller {
     fn new() -> io::Result<Arc<Self>> {
         match reactor()? {
             Reactor::Epoll => Self::new_epoll(),
-            Reactor::IoUring => {
-                let probed = PROBED.lock().unwrap_or_else(|e| e.into_inner()).take();
-                let (ring, wake) = match probed {
-                    Some(probed) => probed,
-                    None => Uring::open()?,
-                };
-                Ok(Arc::new(Self {
-                    backend: Backend::Uring(Box::new(ring)),
-                    wake,
-                    events: Mutex::new(Vec::with_capacity(POLL_BATCH as usize)),
-                    operations: &PollOperations {
-                        poll: Self::poll_uring,
-                        wake: Self::wake_eventfd,
-                    },
-                }))
-            }
+            Reactor::IoUring => Self::new_uring(),
         }
+    }
+    fn new_uring() -> io::Result<Arc<Self>> {
+        let probed = PROBED.lock().unwrap_or_else(|e| e.into_inner()).take();
+        let (ring, wake) = match probed {
+            Some(probed) => probed,
+            None => Uring::open()?,
+        };
+        Ok(Arc::new(Self {
+            backend: Backend::Uring(Box::new(ring)),
+            wake,
+            events: Mutex::new(Vec::with_capacity(POLL_BATCH as usize)),
+            operations: &PollOperations {
+                poll: Self::poll_uring,
+                wake: Self::wake_eventfd,
+            },
+        }))
     }
     fn new_epoll() -> io::Result<Arc<Self>> {
         // SAFETY: creates a new, uniquely owned CLOEXEC descriptor.
@@ -204,7 +213,22 @@ impl Poller {
         checked(unsafe { libc::epoll_ctl(epoll.as_raw_fd(), op, fd, &mut event) })?;
         Ok(())
     }
-    /// Watch `fd` for every direction, edge-triggered, under `tag`.
+    /// Whether a registered descriptor reports every edge without a waiter
+    /// parked, so a drained reader may wait without trying again.
+    fn persistent(&self) -> bool {
+        matches!(self.backend, Backend::Epoll(_))
+    }
+    /// A waiter for this direction of `fd` has just parked under `tag`. Its
+    /// syscall has already returned EAGAIN, and the readiness it waits for
+    /// is reported however soon it arrives.
+    fn park(&self, fd: i32, tag: u64, write: bool) -> io::Result<()> {
+        match &self.backend {
+            Backend::Epoll(_) => Ok(()),
+            Backend::Uring(ring) => ring.park(fd, tag, write),
+        }
+    }
+    /// Watch `fd` for every direction under `tag`: epoll edge-triggered now,
+    /// io_uring once a waiter parks.
     fn add(&self, fd: i32, tag: u64) -> io::Result<()> {
         match &self.backend {
             Backend::Epoll(_) => self.epoll_ctl(
@@ -213,7 +237,10 @@ impl Poller {
                 INTEREST | libc::EPOLLET as u32,
                 tag,
             ),
-            Backend::Uring(ring) => ring.add(fd, tag),
+            Backend::Uring(ring) => {
+                ring.add(tag);
+                Ok(())
+            }
         }
     }
     /// Stop watching `fd`. `closing` names a listener whose only holder is
@@ -270,7 +297,7 @@ impl Poller {
             unreachable!("the pool waits on an epoll poller directly")
         };
         let _turn = self.events.lock().unwrap_or_else(|e| e.into_inner());
-        let n = ring.wait(out, timeout_ms);
+        let n = ring.wait(out, timeout_ms, self.wake.as_raw_fd());
         if out[..n].iter().any(|event| event.u64 == WAKE) {
             self.drain();
         }
@@ -321,7 +348,7 @@ impl Poller {
         events.clear();
         crate::EPOLL_WAITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         events.resize(POLL_BATCH as usize, libc::epoll_event { events: 0, u64: 0 });
-        let len = ring.wait(&mut events, timeout_ms);
+        let len = ring.wait(&mut events, timeout_ms, self.wake.as_raw_fd());
         events.truncate(len);
         if events.iter().any(|event| event.u64 == WAKE) {
             self.drain();
@@ -370,19 +397,24 @@ fn drain(fd: i32) {
     }
 }
 
-/// An io_uring ring holding one multishot poll per watched descriptor.
+/// An io_uring ring: one multishot poll on the wake eventfd, and a one-shot
+/// poll per direction of a watched descriptor while a waiter is parked there.
 /// Setup flags are 0: the driver token migrates between workers, which rules
-/// out `SINGLE_ISSUER` and with it `DEFER_TASKRUN`.
+/// out `SINGLE_ISSUER` and with it `DEFER_TASKRUN`, and `COOP_TASKRUN` would
+/// leave a poll's completion unposted until its arming thread next enters the
+/// kernel, up to a scheduler tick later while that thread computes.
 struct Uring {
     ring: io_uring::IoUring,
     /// Serializes every submission-queue access; completions are read only
     /// under the driver turn.
     sq: Mutex<()>,
-    /// Live polls by tag, for re-arming one the kernel ended. Lock before `sq`.
-    armed: Mutex<HashMap<u64, i32>>,
-    /// Live polls the kernel ended, waiting for completion-queue room to be
-    /// re-armed. Touched only under the driver turn.
-    ended: Mutex<Vec<u64>>,
+    /// Watched tags, with whether each direction's (read, write) one-shot
+    /// poll is in the kernel: set when a parked waiter arms it, cleared when
+    /// its completion is reaped. Lock before `sq`.
+    watched: Mutex<HashMap<u64, [bool; 2]>>,
+    /// The kernel ended the wake eventfd's multishot poll, which waits for
+    /// completion-queue room to be re-armed. Touched only under the driver turn.
+    wake_ended: Mutex<bool>,
 }
 impl Uring {
     const ENTRIES: u32 = 64;
@@ -392,6 +424,8 @@ impl Uring {
     const COMPLETIONS: u32 = 65536;
     #[cfg(test)]
     const COMPLETIONS: u32 = 1024;
+    const READ: u32 = (libc::EPOLLIN | libc::EPOLLRDHUP) as u32;
+    const WRITE: u32 = libc::EPOLLOUT as u32;
 
     /// A ring whose kernel runs multishot polls and bounded waits, with its
     /// wake eventfd already watched. Any refusal (an old kernel, a seccomp
@@ -416,11 +450,11 @@ impl Uring {
         let uring = Uring {
             ring,
             sq: Mutex::new(()),
-            armed: Mutex::new(HashMap::new()),
-            ended: Mutex::new(Vec::new()),
+            watched: Mutex::new(HashMap::new()),
+            wake_ended: Mutex::new(false),
         };
         let wake = eventfd()?;
-        uring.add(wake.as_raw_fd(), WAKE)?;
+        uring.arm_wake(wake.as_raw_fd())?;
         // A multishot poll must report a wake and stay armed.
         let one = 1u64;
         // SAFETY: nonblocking eventfd, readable eight-byte counter.
@@ -466,48 +500,69 @@ impl Uring {
     }
 
     /// The wake eventfd is always writable; only its counter matters.
-    fn interest(tag: u64) -> u32 {
-        if tag == WAKE {
-            libc::EPOLLIN as u32
-        } else {
-            INTEREST
-        }
-    }
-
-    fn arm(&self, fd: i32, tag: u64) -> io::Result<()> {
+    fn arm_wake(&self, fd: i32) -> io::Result<()> {
         use io_uring::{opcode, types};
         self.push(
-            opcode::PollAdd::new(types::Fd(fd), Self::interest(tag))
+            opcode::PollAdd::new(types::Fd(fd), libc::EPOLLIN as u32)
                 .multi(true)
                 .build()
-                .user_data(tag),
+                .user_data(WAKE),
         )
     }
 
-    fn add(&self, fd: i32, tag: u64) -> io::Result<()> {
-        let mut armed = self.armed.lock().unwrap_or_else(|e| e.into_inner());
-        self.arm(fd, tag)?;
-        armed.insert(tag, fd);
+    fn poll_data(tag: u64, write: bool) -> u64 {
+        if write { tag | WRITE_POLL } else { tag }
+    }
+
+    fn add(&self, tag: u64) {
+        let mut watched = self.watched.lock().unwrap_or_else(|e| e.into_inner());
+        watched.insert(tag, [false; 2]);
+    }
+
+    /// Arm this direction's one-shot poll of the watched `tag` unless it is
+    /// already in the kernel. A poll checks readiness as it is armed, so
+    /// bytes that arrived after the waiter's EAGAIN complete it at once.
+    fn park(&self, fd: i32, tag: u64, write: bool) -> io::Result<()> {
+        use io_uring::{opcode, types};
+        let mut watched = self.watched.lock().unwrap_or_else(|e| e.into_inner());
+        let polling = &mut watched.entry(tag).or_default()[usize::from(write)];
+        if *polling {
+            return Ok(());
+        }
+        let interest = if write { Self::WRITE } else { Self::READ };
+        self.push(
+            opcode::PollAdd::new(types::Fd(fd), interest)
+                .build()
+                .user_data(Self::poll_data(tag, write)),
+        )?;
+        *polling = true;
         Ok(())
     }
 
+    /// Stop watching `tag`, cancelling its polls still in the kernel. Each
+    /// holds its own file reference until it is retired.
     fn remove(&self, tag: u64) -> io::Result<()> {
-        let mut armed = self.armed.lock().unwrap_or_else(|e| e.into_inner());
-        if armed.remove(&tag).is_some() {
-            self.push(
-                io_uring::opcode::PollRemove::new(tag)
-                    .build()
-                    .user_data(REMOVED),
-            )?;
+        let mut watched = self.watched.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(polling) = watched.remove(&tag) else {
+            return Ok(());
+        };
+        for (write, polling) in [false, true].into_iter().zip(polling) {
+            if polling {
+                self.push(
+                    io_uring::opcode::PollRemove::new(Self::poll_data(tag, write))
+                        .build()
+                        .user_data(REMOVED),
+                )?;
+            }
         }
         Ok(())
     }
 
     /// One kernel turn into `out`, under the driver turn. A timeout of 0 does
     /// not block and -1 blocks until a completion.
-    fn wait(&self, out: &mut [libc::epoll_event], timeout_ms: i32) -> usize {
+    fn wait(&self, out: &mut [libc::epoll_event], timeout_ms: i32, wake: i32) -> usize {
         let n = self.reap(out);
-        self.rearm_ended();
+        self.rearm_wake(wake);
         if n != 0 {
             return n;
         }
@@ -527,32 +582,27 @@ impl Uring {
         // whatever completions are already posted.
         let _ = entered;
         let n = self.reap(out);
-        self.rearm_ended();
+        self.rearm_wake(wake);
         n
     }
 
-    /// Re-arm ended polls into at most half the completion queue's free room,
-    /// under the driver turn. A ready descriptor posts as soon as its poll is
-    /// armed; re-arming into a full queue ends that poll again at once, and
-    /// the pair would cycle without end.
-    fn rearm_ended(&self) {
-        let mut ended = self.ended.lock().unwrap_or_else(|e| e.into_inner());
-        if ended.is_empty() {
+    /// Re-arm an ended wake poll once the completion queue is at most half
+    /// full, under the driver turn. A ready eventfd posts as soon as its poll
+    /// is armed; re-arming into a full queue ends that poll again at once,
+    /// and the pair would cycle without end.
+    fn rearm_wake(&self, wake: i32) {
+        let mut ended = self.wake_ended.lock().unwrap_or_else(|e| e.into_inner());
+        if !*ended {
             return;
         }
         // SAFETY: the caller holds the driver turn, the only completion reader.
         let mut cq = unsafe { self.ring.completion_shared() };
         cq.sync();
-        let room = (cq.capacity() - cq.len()) / 2;
+        let room = cq.capacity() - cq.len() > cq.len();
         drop(cq);
-        let take = ended.len().min(room);
-        let armed = self.armed.lock().unwrap_or_else(|e| e.into_inner());
-        for tag in ended.drain(..take) {
-            if let Some(&fd) = armed.get(&tag) {
-                // A refused re-arm leaves the descriptor reported ready, so
-                // its waiters retry and see the error from the socket.
-                let _ = self.arm(fd, tag);
-            }
+        // A refused re-arm stays ended and is retried at the next turn.
+        if room && self.arm_wake(wake).is_ok() {
+            *ended = false;
         }
     }
 
@@ -564,38 +614,47 @@ impl Uring {
         let mut n = 0;
         while n < out.len() {
             let Some(cqe) = cq.next() else { break };
-            let tag = cqe.user_data();
-            if tag == REMOVED {
-                continue;
-            }
-            let res = cqe.result();
-            let mut flags = if res > 0 { res as u32 } else { 0 };
-            if !io_uring::cqueue::more(cqe.flags()) {
-                // The kernel ended this poll (a cancel when its submitting
-                // thread exited, or a completion that found the queue full).
-                // Report a live one ready, so its waiters retry, and re-arm
-                // it once the queue has room.
-                if !self
-                    .armed
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .contains_key(&tag)
-                {
-                    continue;
+            let data = cqe.user_data();
+            let (tag, flags) = match data {
+                REMOVED => continue,
+                WAKE => {
+                    if !io_uring::cqueue::more(cqe.flags()) {
+                        // The kernel ended the wake poll (its arming thread
+                        // exited, or the queue was full). Report a wake, so
+                        // its waiter looks, and re-arm once there is room.
+                        *self.wake_ended.lock().unwrap_or_else(|e| e.into_inner()) = true;
+                    }
+                    (WAKE, libc::EPOLLIN as u32)
                 }
-                self.ended
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .push(tag);
-                flags |= (libc::EPOLLIN | libc::EPOLLOUT) as u32;
-            }
-            if flags != 0 {
-                out[n] = libc::epoll_event {
-                    events: flags,
-                    u64: tag,
-                };
-                n += 1;
-            }
+                _ => {
+                    let write = data & WRITE_POLL != 0;
+                    let tag = data & !WRITE_POLL;
+                    let mut watched = self.watched.lock().unwrap_or_else(|e| e.into_inner());
+                    // A removed tag's cancelled poll reports nothing.
+                    let Some(polling) = watched.get_mut(&tag) else {
+                        continue;
+                    };
+                    polling[usize::from(write)] = false;
+                    // A poll that ended without readiness (cancelled because
+                    // its arming thread exited, or refused) reports its
+                    // direction ready: the waiter retries, sees the socket's
+                    // own answer, and parks again from a live thread.
+                    let res = cqe.result();
+                    let flags = if res > 0 {
+                        res as u32
+                    } else if write {
+                        Self::WRITE
+                    } else {
+                        Self::READ
+                    };
+                    (tag, flags)
+                }
+            };
+            out[n] = libc::epoll_event {
+                events: flags,
+                u64: tag,
+            };
+            n += 1;
         }
         n
     }
@@ -728,7 +787,11 @@ impl Sockets {
         let index = if let Some(index) = self.free.pop() {
             index
         } else {
-            let index = u32::try_from(self.slots.len()).ok()?;
+            // Each slot owns a descriptor, and descriptors stay below 2^31
+            // (fs.nr_open), so an io_uring poll's direction bit is free.
+            let index = u32::try_from(self.slots.len())
+                .ok()
+                .filter(|&index| u64::from(index) < WRITE_POLL)?;
             self.slots.push(Slot {
                 generation: 1,
                 record: None,
@@ -838,9 +901,12 @@ impl Sockets {
     pub fn read_drained(&self, key: u64) -> bool {
         self.record(key).read_drained
     }
+    /// Only a persistent interest (epoll) reports the next byte with no
+    /// waiter parked; an io_uring reader always tries its syscall first.
     pub fn mark_read_drained(&mut self, key: u64) {
+        let persistent = self.poller.as_ref().is_some_and(|p| p.persistent());
         let r = self.record_mut(key);
-        if r.registered && !r.read_terminal && !r.reset {
+        if persistent && r.registered && !r.read_terminal && !r.reset {
             r.read_drained = true;
         }
     }
@@ -868,15 +934,22 @@ impl Sockets {
     }
 
     /// Register a socket once and publish this direction's current waiter.
+    /// Only the registry's holder dispatches completions, so a poll armed
+    /// here before the waiter is published still finds it.
     pub fn arm(&mut self, key: u64, write: bool, token: u64) -> io::Result<u64> {
         self.register(key)?;
         let index = ((key >> 2) as u32) as usize;
-        let slot = &mut self.slots[index];
-        let r = slot.record.as_mut().unwrap();
+        let generation = self.slots[index].generation;
+        self.poller.as_ref().unwrap().park(
+            self.fd(key),
+            Self::registration_tag(self.shared, index, generation),
+            write,
+        )?;
+        let r = self.record_mut(key);
         if r.waiters[usize::from(write)].replace(token).is_none() {
             self.waiting += 1;
         }
-        Ok(tag(index, slot.generation))
+        Ok(tag(index, generation))
     }
     pub fn disarm(&mut self, key: u64, write: bool) {
         if self.record_mut(key).waiters[usize::from(write)]
@@ -1086,6 +1159,45 @@ mod tests {
         peer.write_all(b"x").unwrap();
         sockets.arm(key, false, 6).unwrap();
         assert!(readied(&mut sockets, 6), "{:?}", reactor());
+    }
+
+    /// Each direction of a socket waits on its own readiness. A writer that
+    /// parks on a full socket while a reader's wait is already in the kernel
+    /// is woken once the peer drains it, and that wakes no reader, on epoll
+    /// and, where the kernel offers it, on io_uring.
+    #[test]
+    fn a_writer_parked_beside_a_waiting_reader_is_woken_alone() {
+        use std::io::Read;
+        let mut pollers = vec![Poller::new_epoll().unwrap()];
+        if kernel_offers_io_uring() {
+            pollers.push(Poller::new_uring().unwrap());
+        }
+        for poller in pollers {
+            let backend = poller.reactor();
+            let mut sockets = Sockets::default();
+            sockets.poller = Some(poller);
+            let (mut socket, mut peer) = UnixStream::pair().unwrap();
+            socket.set_nonblocking(true).unwrap();
+            peer.set_nonblocking(true).unwrap();
+            let fd = socket.try_clone().unwrap();
+            let key = sockets.insert(fd.into()).unwrap();
+            sockets.arm(key, false, 1).unwrap();
+            // Let any first report settle so the reader's wait is in the kernel.
+            sockets.poll(0, |_| {}).unwrap();
+            sockets.arm(key, false, 1).unwrap();
+            // The writer parks only after its write would block.
+            let chunk = [0u8; 4096];
+            while socket.write(&chunk).is_ok() {}
+            sockets.arm(key, true, 2).unwrap();
+            let mut drain = [0u8; 65536];
+            while peer.read(&mut drain).is_ok() {}
+            let mut woken = Vec::new();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while !woken.contains(&2) && std::time::Instant::now() < deadline {
+                sockets.poll(20, |token| woken.push(token)).unwrap();
+            }
+            assert_eq!(woken, [2], "{backend:?}");
+        }
     }
 
     /// More sockets turn ready at once than the io_uring completion queue

@@ -695,7 +695,7 @@ def save_row(rows, row, output):
         output.write_text(json.dumps(rows, indent=2) + '\n')
 
 
-def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, timeout=30, evaluator=None, target=None, emulator=None, sysroot=None, compare_revisions=False, typescript=None, node='node', schedule_runtime=None, record_runtime=None, llvm_profile='release'):
+def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, timeout=30, evaluator=None, target=None, emulator=None, sysroot=None, compare_revisions=False, typescript=None, node='node', schedule_runtime=None, record_runtime=None, llvm_profile='release', replay=False):
     rows = []
     requested_engines = set(engines)
     engines = list(engines)
@@ -858,9 +858,12 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                     entry = f'{case.package}@1/{case.test_of or ("tests/" + case.file.stem)}/native_contract'
                 inputs = scratch / 'inputs.json'
                 inputs.write_text(json.dumps(source_rows))
+                archive = (record_runtime or runtime) if https or replay else runtime
                 command = [str(compiler), 'run' if https else 'test', '--inputs', str(inputs), '--backend', engine,
-                           '--runtime', str(record_runtime or runtime) if https else str(runtime), '--store', str(work / 'store'), '--json', '--limit', str(case.root_limit),
+                           '--runtime', str(archive), '--store', str(work / 'store'), '--json', '--limit', str(case.root_limit),
                            '-o', str(scratch / 'programs')]
+                if replay:
+                    command.extend(['--replay', '--expect-verdict', 'Sealed', '--rerun'])
                 environment = None
                 if https:
                     tape = scratch / 'https.tape'
@@ -1000,6 +1003,8 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                             row['cause'] = f'with {name}={value}: {cause}'
                             break
                 row['passed'] = row['cause'] is None
+                if replay and row['passed']:
+                    row['replay'] = 'Sealed'
                 if row['cause']:
                     row['owner'] = owner(row['cause'], owners)
                 save_row(rows, row, output)
@@ -1017,6 +1022,7 @@ def main():
     parser.add_argument('--compiler', type=Path)
     parser.add_argument('--runtime', type=Path)
     parser.add_argument('--record-runtime', type=Path, default=os.environ.get('HIRSEL_CORE_RT_RECORD_ARCHIVE'))
+    parser.add_argument('--replay', action='store_true', help='record and replay selected native contracts, requiring Sealed')
     parser.add_argument('--schedule-runtime', type=Path)
     parser.add_argument('--evaluator', type=Path, help='test-only hirsel-core-contract-eval backend')
     parser.add_argument('--root', type=Path, default=ROOT)
@@ -1040,13 +1046,18 @@ def main():
     engines = ['evaluator', 'cranelift', 'llvm'] if args.backend == 'all' else ['cranelift', 'llvm'] if args.backend == 'both' else [args.backend]
     if args.backend != 'evaluator' and (args.compiler is None or args.runtime is None):
         parser.error('native backends require --compiler and --runtime')
+    if args.replay:
+        if args.backend in ('all', 'evaluator') or args.record_runtime is None or not args.filter:
+            parser.error('--replay requires a native backend, --record-runtime and a filter')
+        if any('(https)' in case.call or case.schedule for case in contracts):
+            parser.error('--replay requires contracts that run through hirsel test without a scripted scheduler')
     rows = run(root, args.compiler.resolve() if args.compiler else None, args.runtime.resolve() if args.runtime else None, contracts, engines,
                args.report, owners, args.cc.resolve() if args.cc else None, args.timeout, args.evaluator.resolve() if args.evaluator else None, args.target,
                args.emulator.resolve() if args.emulator else None, args.sysroot.resolve() if args.sysroot else None,
                typescript=args.typescript, node=args.node,
                schedule_runtime=args.schedule_runtime.resolve() if args.schedule_runtime else None,
                record_runtime=args.record_runtime.resolve() if args.record_runtime else None,
-               llvm_profile=args.llvm_profile)
+               llvm_profile=args.llvm_profile, replay=args.replay)
     ran = {(row['test'], row['file']) for row in rows if row['ran']}
     empty = [selector for selector in args.filter
              if not any(matches_filter(root, case, selector) and

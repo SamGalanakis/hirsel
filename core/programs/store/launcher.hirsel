@@ -121,13 +121,30 @@ pub type Approvals: codec + send {
 // One object the launcher needs, by kind and 32-byte hash.
 pub type Wanted: codec + send = GroupKey(Bytes) | BodyKey(Bytes) | AnnexKey(Bytes) | ArchiveKey(Bytes)
 
-// What the host compares before `Assemble`: the new and old root limits, whether the new
-// recipe adds a grant the old one lacks, and the new recipe's target and place allowance,
-// which the host checks NEW's preview against.
+// A grant diff (launch.md "Publish and assemble"): the sorted grant lines a new recipe
+// holds that the old one lacks, and the sorted lines of the old one it drops. A line is one
+// value of a Dir, Net, Env or Foreign grant, one whole Exec, Secret or Cred binding with its
+// policy, or one other capability by name.
+pub type Grants: codec + send {
+    added: List[String],
+    dropped: List[String]
+}
+
+pub fn no_grants() -> Grants {
+    Grants(added: list.new(), dropped: list.new())
+}
+
+pub fn grants_empty(g: Grants) -> bool {
+    list.len(g.added) == 0u64 && list.len(g.dropped) == 0u64
+}
+
+// What the host compares before `Assemble`: the new and old root limits, the grant diff
+// against the old recipe, and the new recipe's target and place allowance, which the host
+// checks NEW's preview against.
 pub type Summary: codec + send {
     root_limit: u64,
     old_root_limit: u64,
-    grants_added: bool,
+    grants: Grants,
     target: String,
     n_place: u64
 }

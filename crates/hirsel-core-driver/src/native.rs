@@ -12,6 +12,8 @@ use std::process::Command;
 mod cleanup;
 #[path = "recipe_native.rs"]
 pub(crate) mod recipe_build;
+#[path = "recipe_grants.rs"]
+pub(crate) mod recipe_grants;
 #[path = "recipe_groups.rs"]
 pub(crate) mod recipe_groups;
 #[path = "release_native.rs"]

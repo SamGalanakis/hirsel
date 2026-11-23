@@ -1,0 +1,142 @@
+// Laws of the platform host's deploy preview and its decision (launch.md "Deploy preview";
+// RUNNER-SPEC §14.7: L48's decision half and L54) over the faked launcher, with their rig
+// helpers.
+
+// A grant diff of at most one added and one removed line; "" is none.
+fn grants_of(added: String, removed: String) -> launcher.Grants {
+    let mut g = launcher.no_grants()
+    if added != "" {
+        list.push(mut g.added, string.from(added))
+    }
+    if removed != "" {
+        list.push(mut g.dropped, string.from(removed))
+    }
+    g
+}
+
+// Whether `p` awaits a decision on exactly the diff `added` and `removed` name.
+fn awaits(p: Option[operator.Phase], added: String, removed: String) -> bool {
+    match p {
+        Some(AwaitDecision(g)) => same_grants(g, grants_of(added, removed)),
+        _ => false,
+    }
+}
+
+// A person decides request d on a new connection; the rig's attempt becomes any the host
+// assigned. Gives the connection.
+fn decide_on(mut r: Rig, d: Bytes, take diff: launcher.Grants, approve: bool) -> u64 waits {
+    r.conns += 1u64
+    let conn = r.conns
+    send(mut r, conn, DecideAsk(clone(d), take diff, approve))
+    if let Some(p) = phase_on(r, conn) {
+        if let Some(a) = attempt_of(p) {
+            r.a = a
+        }
+    }
+    r.conn = conn
+    conn
+}
+
+// The prepare child's trigger report: one held Transact trigger.
+fn trigger_answer() -> Bytes {
+    let c: std.codec.Codec[List[runner.TriggerScanRow]] = std.codec.of_list()
+    let mut rows: List[runner.TriggerScanRow] = list.new()
+    list.push(mut rows, runner.TriggerScanRow(class: Held, kind: Transact, path: bytes_of(4u64, 7u8), schema: bytes_of(4u64, 8u8), count: 2u64, earliest_due: 9u64))
+    let mut out: Bytes = list.new()
+    let _ = std.codec.encode(c, rows, mut out)
+    out
+}
+
+// One exported entry: Transact, `identity` and code revision `revision`.
+fn entry_of(identity: u8, revision: u8) -> runner.Exported {
+    let described = runner.Described(kind: Transact, identity: bytes_of(32u64, identity), args: list.new(), result: list.new())
+    runner.Exported(described: described, args_fp: 0u64, result_fp: 0u64, revision: bytes_of(32u64, revision))
+}
+
+// A Describe of image `digest` exporting `entries`.
+fn describing(digest: Bytes, take entries: List[runner.Exported]) -> runner.Describe {
+    runner.Describe(digest: clone(digest), target: "t", n_place: 1u64, exported: take entries)
+}
+
+// L54 `deploy_preview` (launch.md "Deploy preview"): the deploy's report shows what NEW
+// changes. OLD exports entries 1 and 2 at revision 1, and NEW, a self-edit that swaps the
+// tool entry 2 reaches and adds entry 3, exports 1 at revision 1, 2 at revision 2 and 3:
+// the entry diff is exactly 1 unchanged, 2 changed, 3 added, and entry 4, which only OLD
+// exports, removed. The prepare child's trigger report is the report's, row for row, and
+// a prepare child that exits 0 without one fails the deploy.
+@test
+fn deploy_preview(c: Clock, rnd: Random) -> Result[(), ()] waits {
+    let mut r = rig(c, rnd, 4u64)
+    add(mut r, "g", "t")
+    op_wake(mut r, "g")
+    let old = last(r, "g")
+    admit_new(mut r, summary_of(1u64, 1u64, launcher.no_grants()), "")
+    assembled_new(mut r)
+    let a = r.a
+    let mut was: List[runner.Exported] = list.new()
+    list.push(mut was, entry_of(1u8, 1u8))
+    list.push(mut was, entry_of(2u8, 1u8))
+    list.push(mut was, entry_of(4u8, 1u8))
+    let dc: std.codec.Codec[runner.Describe] = std.codec.of()
+    let mut described: Bytes = list.new()
+    let _ = std.codec.encode(dc, describing(image(), take was), mut described)
+    helper_answers(mut r, helper_child(old, DescribeMode(a)), take described)
+    let mut now: List[runner.Exported] = list.new()
+    list.push(mut now, entry_of(3u8, 1u8))
+    list.push(mut now, entry_of(2u8, 2u8))
+    list.push(mut now, entry_of(1u8, 1u8))
+    let mut answers: List[runner.Entry] = list.new()
+    for _ in 0u64 .. 3u64 {
+        list.push(mut answers, Gone)
+    }
+    let pc: std.codec.Codec[runner.Preview] = std.codec.of()
+    let mut preview_bytes: Bytes = list.new()
+    let _ = std.codec.encode(pc, runner.Preview(describe: describing(image_two(), take now), release: release_two(), answers: take answers), mut preview_bytes)
+    helper_answers(mut r, helper_child(old, PreviewMode(a, list.new())), take preview_bytes)
+    old_says(mut r, old, PlaceExported(1u64, "export-1"))
+    helper_answers(mut r, helper_child(old, PrepareMode(a, "export-1")), trigger_answer())
+    let _ = apply(mut r, Got(Placed(clone(old), PlaceImported(image_two()))))
+    let shown: operator.Preview = match store.get(store.snapshot(r.h.db), store.shape(r.h.t.deploys), "g") {
+        Ok(Some(row)) => clone(row.preview),
+        _ => operator.no_preview(),
+    }
+    let mut want: List[(u8, u64)] = list.new()
+    list.push(mut want, (1u8, 3u64))
+    list.push(mut want, (2u8, 2u64))
+    list.push(mut want, (3u8, 0u64))
+    list.push(mut want, (4u8, 1u64))
+    let mut entries_ok = list.len(shown.entries) == 4u64
+    if entries_ok {
+        for i in 0u64 .. 4u64 {
+            let (id, change) = want[i]
+            let line = shown.entries[i]
+            entries_ok = entries_ok && line.identity == bytes_of(32u64, id) && change_tag(line.change) == change
+        }
+    }
+    expect(entries_ok, "L54: the entry diff is not exactly 1 unchanged, 2 changed, 3 added, 4 removed")
+    let triggers_ok = list.len(shown.triggers) == 1u64 && shown.triggers[0u64].count == 2u64 && shown.triggers[0u64].earliest_due == 9u64 && shown.triggers[0u64].path == bytes_of(4u64, 7u8)
+    expect(triggers_ok, "L54: the report does not carry the prepare child's trigger report")
+    // A prepare child that exits 0 without its report fails the deploy before OLD imports.
+    let mut q = rig(c, rnd, 4u64)
+    add(mut q, "g", "t")
+    op_wake(mut q, "g")
+    let old2 = last(q, "g")
+    to_export(mut q, old2, preview_answer(image_two(), release_two()))
+    old_says(mut q, old2, PlaceExported(1u64, "export-1"))
+    let qa = q.a
+    finish(mut q, helper_child(old2, PrepareMode(qa, "export-1")), Code(0i32), None)
+    expect(asked_of(q, 3u64) == 1u64 && still_preparing(q), "L54: a prepare without its trigger report did not abort OLD's export")
+    old_says(mut q, old2, PlaceAborted)
+    expect(failed_with(q, "prepare ended without its trigger report"), "L54: a prepare without its trigger report went on to the import")
+    Ok(())
+}
+
+// The tag of an entry change: 0 added, 1 removed, 2 changed, 3 unchanged.
+fn change_tag(c: operator.EntryChange) -> u64 {
+    match c {
+        EntryAdded => 0u64,
+        EntryRemoved => 1u64,
+        EntryChanged => 2u64,
+        EntryUnchanged => 3u64,
+    }
+}

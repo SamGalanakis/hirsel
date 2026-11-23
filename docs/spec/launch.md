@@ -663,7 +663,7 @@ answered `Error(Protocol)` and closes only that exchange.
 
 | Operator → host | Payload and rule |
 |---|---|
-| 0 Begin(D, G, input, added, foreign, exec) | `input` is `launcher.Input`: 0 Attested(bytes), 1 Publication(H), 2 Source(tree). `added` approves an added grant. `foreign` and `exec` are the sorted, duplicate-free Foreign definitions and Exec requests the operator approves. A source that is not a tree within 4 MiB is `Invalid`. For an untrusted author the host refuses, as `Denied` and before anything compiles, any input but a source, a source whose tree grants `Foreign` or `Exec`, any approved Foreign or Exec, and a recording group. |
+| 0 Begin(D, G, input, foreign, exec) | `input` is `launcher.Input`: 0 Attested(bytes), 1 Publication(H), 2 Source(tree). `foreign` and `exec` are the sorted, duplicate-free Foreign definitions and Exec requests the operator approves. A source that is not a tree within 4 MiB is `Invalid`. For an untrusted author the host refuses, as `Denied` and before anything compiles, any input but a source, a source whose tree grants `Foreign` or `Exec`, any approved Foreign or Exec, and a recording group. |
 | 1 Data(D, A, bytes) | One nonempty chunk of the admission byte stream, only on the connection that owns D's upload under A. |
 | 2 EndInput(D, A) | Ends that stream. A publication needs neither Data nor EndInput. |
 | 3 Confirm(D, A, displayHash) | Confirms the exact display the client checked, printed and flushed: displayHash is SHA-256 over the display's UTF-8 bytes. Any other hash is `Error(Denied)`. |
@@ -671,10 +671,11 @@ answered `Error(Protocol)` and closes only that exchange.
 | 5 ResolvePin(I) | Returns Pin, looked up at the host's wall clock in Unix seconds, or `Error(Store)`. |
 | 6 LookupGroup(name) | Returns GroupInfo(G) for the registered incarnation, or `Error(UnknownGroup)`, also while the group is still registering. |
 | 7 Register(D, registration, input, foreign, exec) | `registration` is (name, tenant, workdir, trusted, label, listen, bindings, limits, args, record), with `record` an `Option` of (dir, retentionSeconds). Registers a new group and deploys its first release, below. `input`, `foreign` and `exec` are Begin's. |
+| 8 Decide(D, grants, approve) | A person's decision on D, which must be in AwaitDecision on exactly this grant diff ("Deploy preview"); anything else is `Error(Denied)`. An approval repeats D's admission under a fresh A, this connection owning it; a refusal fails D `Denied`. |
 
 | Host → operator | Payload and rule |
 |---|---|
-| 0 State(D, G, input, phase) | A committed snapshot. Phase tags 0 AwaitInput(A), 1 Admitting(A), 2 AwaitConfirm(A), 3 Assembling(A), 4 Preparing(A), 5 Pending(A, v), 6 Undecided(A, v, reason), 7 Installed(v, assembly, report), 8 Failed(class, detail, report). The last two are terminal and end the exchange. A known D keeps the same G and input for its whole life. |
+| 0 State(D, G, input, phase) | A committed snapshot. Phase tags 0 AwaitInput(A), 1 Admitting(A), 2 AwaitConfirm(A), 3 Assembling(A), 4 Preparing(A), 5 Pending(A, v), 6 Undecided(A, v, reason), 7 Installed(v, assembly, report), 8 Failed(class, detail, report), 9 AwaitDecision(grants). Installed and Failed are terminal and end the exchange. AwaitDecision holds no attempt. A known D keeps the same G and input for its whole life. |
 | 1 Need(D, A, keys, last) | One of the launcher's ordered parts of the missing set (`List[Wanted]`, bool). |
 | 2 Display(D, A, R, text) | The exact Foreign and Exec text to confirm, bound to the verified R. No child runs before it is confirmed. |
 | 3 Pin(resolved) | 0 Found(assembly) or 1 Gone. |
@@ -683,8 +684,8 @@ answered `Error(Protocol)` and closes only that exchange.
 | 6 Part(total, offset, bytes) | One in-order chunk of an encoded reply larger than one frame, from offset zero, contiguous, ending exactly at total. |
 
 A report is (fetchNs, assembleNs, pause, preview): two `Option[u64]`, a pause (0 NotStarted,
-1 AwaitWrite, 2 Measured(ns), 3 MeasurementLost, 4 StartFailed(detail)) and an empty
-`List[String]`.
+1 AwaitWrite, 2 Measured(ns), 3 MeasurementLost, 4 StartFailed(detail)) and the deploy's
+preview ("Deploy preview"), whose parts not yet computed when the deploy ended are empty.
 
 **Durable identity.** The catalog keeps one `requests` row per D: its canonical Begin bytes,
 G, input, current attempt, admission deadline and, once decided, its terminal phase, and one
@@ -706,8 +707,10 @@ the request's original deadline (600 s after its first Begin); a request that re
 deadline without input fails durably `Invalid`. A complete input goes on without its
 connection: EOF only detaches the observer, and a later Begin or Status reads the outcome. A
 new launcher session (`Hello`) cancels every running admission; its owner is told
-`Error(Busy)` and resends the same Begin. Admission refusals (overlap memory, an unapproved
-added grant) and `AdmissionFailed` are D's durable `Failed`.
+`Error(Busy)` and resends the same Begin. An admission refusal (overlap memory) and `AdmissionFailed`
+are D's durable `Failed`. A request held in AwaitDecision has no attempt and no deadline: it
+outlives its connection and the host's restart, and ends at a Decide or when a later Begin of
+its group supersedes it (`Failed(Denied)`).
 
 **Registering a group.** A Register is a Begin for a group that does not exist yet, under
 the same durable identity: a known D attaches or is a Conflict exactly as a Begin's. For a new
@@ -762,9 +765,12 @@ activation, assembly and report.
   [--tape-retention DAYS]] [-- ARGS...]` sends Register with the attested recipe from the
   code store.
 - `hirsel deploy RECIPE --state S --group NAME --code-store DIR [--grant G]...
-  [--grant-added] [--request-id HEX]` resolves G with
-  LookupGroup, or with `--request-id` from the request's own Status, then sends Begin.
-  `hirsel deploy --state S --status D` sends only Status.
+  [--approve-grant +LINE|-LINE]... [--request-id HEX]` resolves G with LookupGroup, or with
+  `--request-id` from the request's own Status, then sends Begin. When the request awaits a decision on exactly
+  the diff its `--approve-grant` lines name (`+` for a line gained, `-` for one lost), it
+  sends Decide approving it and goes on; otherwise it prints the state, with the diff, and
+  exits 2. `hirsel deploy --state S --request-id D --refuse-grants` refuses the diff D
+  awaits a decision on. `hirsel deploy --state S --status D` sends only Status.
 
 Both stream the admission input on AwaitInput, answer each Need with the missing objects,
 and on Display check that the text is the one their own approvals produce, print it, and
@@ -773,6 +779,47 @@ Their exit status is 0 for `Installed` (1 when the pause report is `StartFailed`
 local refusal or a `Failed(Denied)` that is a policy refusal (FFI or Exec), 1 for any other
 `Failed`, and 75 for `Undecided`, for no host listening, or for a connection lost before a
 terminal phase, which prints `outcome unknown: request D`.
+
+### Deploy preview
+
+Every deploy carries a preview of what NEW changes against OLD, in three parts. The host
+builds it; the agent or person who proposed the release holds no deploy authority over it.
+
+- **The grant diff.** The launcher's `Admitted` summary names every authority NEW's recipe
+  gains or loses against OLD's approved recipe, as two sorted lists of lines (`added`,
+  `removed`). A line is one value of a `Dir`, `Net`, `Env` or `Foreign` grant (`Dir=/data`,
+  `Net=RULE`), one whole `Exec`, `Secret` or `Cred` binding with its policy digest when it
+  has one (a `Secret` line names its source and patterns, never a secret's value), or one
+  other capability by name (`Clock`). The program's own arguments (`Args`) are not
+  authority and make no line. A registration has no OLD, so its diff is empty.
+- **The entries.** Every entry OLD or NEW exports, by code identity and sorted by it:
+  `added` (OLD lacks it), `removed` (NEW lacks it), and for an entry both export `changed`
+  or `unchanged` by `code.revision` (PROG-9). The revision covers everything the entry
+  reaches, so a release that swaps one function changes exactly the entries that reach it.
+  OLD's side is its describe answer, NEW's the preview child's.
+- **The triggers.** The prepare child's pending trigger report ("Preparing the pending
+  trigger report"), which the launcher relays as that child's answer when it exits 0. A
+  prepare child that exits 0 without one fails the deploy.
+
+The report of every terminal phase carries the preview as far as it was computed.
+
+**Activation.** A deploy whose grant diff is empty assembles and cuts over with no further
+step. A nonempty diff waits for a person's decision, before `Assemble`, because every
+child's authority, the preview child's included, comes from the group's approved bindings
+("Child modes"). The host releases the attempt and records the diff in the request's row,
+in one transaction, and the request's phase is `AwaitDecision(diff)`. The hold has no
+attempt and no deadline, survives its connection and the host's restart, and ends at a
+`Decide` or when a later Begin of the group supersedes it (`Failed(Denied)`). A Decide must
+name exactly the held diff: an approval records it as the request's approved diff and
+repeats the admission under a fresh attempt and deadline, owned by the deciding connection,
+and that admission passes the gate only when it finds the same diff; a refusal fails the
+request `Denied`. Approval comes through the operator client (`--approve-grant`) or any
+caller the gateway lets decide, under the same Caller rules.
+
+Laws: L48 `deploy_admission_policy` (the hold and the decision) and L54 `deploy_preview`
+(the entry diff and the trigger report), in RUNNER-SPEC §14.3; `grant_diff_names_each_authority`
+in the launcher. Unbuilt: sending a release proposal's source (`release.source`) as a
+`Source` Begin, and the candidate re-run on a store fork that reports prompt-cache diffs.
 
 ### The launcher
 
@@ -821,12 +868,13 @@ child endpoints, pidfds and cgroup population changes.
      launcher's buffer; children's ends are still reported while it waits, and later
      requests wait only until the verifier takes that frame.
   3. `Admitted(attempt, root, summary, display)` reports the verified root, its root
-     limit beside the approved OLD recipe's, whether it adds a grant OLD's recipe lacks,
+     limit beside the approved OLD recipe's, the grant diff against OLD's recipe,
      the recipe's target and place allowance, and the approval text (foreign archives and
      `Exec` profiles). The host decides the approvals from it. OLD and NEW serve side by
      side through the cutover, so the two root limits together must fit the group's
-     memory limit, or the host answers `Refused(Memory)`; an added grant the operator did
-     not approve is `Refused(GrantAdded)`. Either refusal releases the attempt. Nonempty
+     memory limit, or the host answers `Refused(Memory)`, which releases the attempt. A
+     nonempty grant diff the operator has not approved releases the attempt and holds the
+     request for a decision ("Deploy preview"). Nonempty
      approval text waits for the operator to confirm exactly that text. An untrusted
      author's deploy is source only, without Foreign or `Exec` grants, and is refused
      before `Admit`. The host checks NEW's preview against the target and allowance.
@@ -1017,7 +1065,8 @@ until the container can enforce NET-6.
 
 The prepare child scans the triggers in the staged store after `migrate` and after opening
 both handle sets. It writes `TRIGGERS` beside `PREPARED` in the export directory before
-syncing `PREPARED`.
+syncing `PREPARED`, and the launcher relays that file as the child's answer when it exits 0
+("Deploy preview").
 
 For each pending trigger row of the staged catalog (`store.triggers.pending`, branch 0), the
 child classifies it against NEW exactly as NEW's head will at dispatch (RUNNER-SPEC §14.6).

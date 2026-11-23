@@ -4,8 +4,8 @@
 //! both sides check. One connection carries one exchange.
 use crate::code_admission::ObjectKey;
 use crate::launcher::session::{
-    Attempt, Bindings, Group, Input, Label, Limits, Reader, Wire, Writer, get_wanted, malformed,
-    put_wanted,
+    Attempt, Bindings, Grants, Group, Input, Label, Limits, Reader, Wire, Writer, get_wanted,
+    malformed, put_wanted,
 };
 use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
@@ -40,7 +40,7 @@ pub(crate) struct Registration {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Ask {
-    Begin(Vec<u8>, Group, Input, bool, Vec<String>, Vec<String>),
+    Begin(Vec<u8>, Group, Input, Vec<String>, Vec<String>),
     Data(Vec<u8>, Attempt, Vec<u8>),
     End(Vec<u8>, Attempt),
     Confirm(Vec<u8>, Attempt, Vec<u8>),
@@ -48,6 +48,8 @@ pub(crate) enum Ask {
     Resolve(Vec<u8>),
     Lookup(String),
     Register(Vec<u8>, Box<Registration>, Input, Vec<String>, Vec<String>),
+    /// A person's decision on a request that awaits one for exactly this grant diff.
+    Decide(Vec<u8>, Grants, bool),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -70,7 +72,103 @@ pub(crate) struct Report {
     pub(crate) fetch_ns: Option<u64>,
     pub(crate) assemble_ns: Option<u64>,
     pub(crate) pause: Pause,
-    pub(crate) preview: Vec<String>,
+    pub(crate) preview: Preview,
+}
+
+/// What a deploy changes (launch.md "Deploy preview").
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Preview {
+    pub(crate) grants: Grants,
+    pub(crate) entries: Vec<EntryLine>,
+    pub(crate) triggers: Vec<TriggerLine>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EntryChange {
+    Added,
+    Removed,
+    Changed,
+    Unchanged,
+}
+
+const ENTRY_CHANGES: [EntryChange; 4] = [
+    EntryChange::Added,
+    EntryChange::Removed,
+    EntryChange::Changed,
+    EntryChange::Unchanged,
+];
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct EntryLine {
+    pub(crate) identity: Vec<u8>,
+    pub(crate) change: EntryChange,
+}
+
+/// One group of pending triggers in the prepare child's report (`runner.TriggerScanRow`):
+/// class tag (0 cancelling, 1 held, 2 gone, 3 changed, 4 unchanged), kind tag (0 compute,
+/// 1 transact, 2 query, 3 granted), path, schema, count and earliest due time.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TriggerLine {
+    pub(crate) class: u32,
+    pub(crate) kind: u32,
+    pub(crate) path: Vec<u8>,
+    pub(crate) schema: Vec<u8>,
+    pub(crate) count: u64,
+    pub(crate) earliest_due: u64,
+}
+
+impl Wire for Preview {
+    fn put(&self, w: &mut Writer) {
+        self.grants.put(w);
+        w.u32(self.entries.len() as u32);
+        for e in &self.entries {
+            w.bytes(&e.identity);
+            w.u32(ENTRY_CHANGES.iter().position(|c| *c == e.change).unwrap() as u32);
+        }
+        w.u32(self.triggers.len() as u32);
+        for t in &self.triggers {
+            w.u32(t.class);
+            w.u32(t.kind);
+            w.bytes(&t.path);
+            w.bytes(&t.schema);
+            w.u64(t.count);
+            w.u64(t.earliest_due);
+        }
+    }
+    fn get(r: &mut Reader<'_>) -> io::Result<Self> {
+        let grants = Grants::get(r)?;
+        let n = r.u32()?;
+        let mut entries = Vec::new();
+        for _ in 0..n {
+            let identity = r.bytes()?;
+            let change = *ENTRY_CHANGES
+                .get(r.u32()? as usize)
+                .ok_or_else(|| malformed("entry change tag"))?;
+            entries.push(EntryLine { identity, change });
+        }
+        let n = r.u32()?;
+        let mut triggers = Vec::new();
+        for _ in 0..n {
+            let class = r.u32()?;
+            let kind = r.u32()?;
+            if class > 4 || kind > 3 {
+                return Err(malformed("trigger report tag"));
+            }
+            triggers.push(TriggerLine {
+                class,
+                kind,
+                path: r.bytes()?,
+                schema: r.bytes()?,
+                count: r.u64()?,
+                earliest_due: r.u64()?,
+            });
+        }
+        Ok(Self {
+            grants,
+            entries,
+            triggers,
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -117,6 +215,8 @@ pub(crate) enum Phase {
     Undecided(Attempt, u64, String),
     Installed(u64, Vec<u8>, Report),
     Failed(Class, String, Report),
+    /// Waits, holding no attempt, for a person's decision on this grant diff.
+    AwaitDecision(Grants),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -170,12 +270,11 @@ impl Wire for Registration {
 impl Wire for Ask {
     fn put(&self, w: &mut Writer) {
         match self {
-            Self::Begin(d, g, input, added, foreign, exec) => {
+            Self::Begin(d, g, input, foreign, exec) => {
                 w.u32(0);
                 w.bytes(d);
                 g.put(w);
                 input.put(w);
-                w.bool(*added);
                 w.strings(foreign);
                 w.strings(exec);
             }
@@ -207,6 +306,12 @@ impl Wire for Ask {
                 w.strings(foreign);
                 w.strings(exec);
             }
+            Self::Decide(d, grants, approve) => {
+                w.u32(8);
+                w.bytes(d);
+                grants.put(w);
+                w.bool(*approve);
+            }
         }
     }
     fn get(r: &mut Reader<'_>) -> io::Result<Self> {
@@ -215,7 +320,6 @@ impl Wire for Ask {
                 r.bytes()?,
                 Group::get(r)?,
                 Input::get(r)?,
-                r.bool()?,
                 r.strings()?,
                 r.strings()?,
             ),
@@ -232,6 +336,7 @@ impl Wire for Ask {
                 r.strings()?,
                 r.strings()?,
             ),
+            8 => Self::Decide(r.bytes()?, Grants::get(r)?, r.bool()?),
             _ => return Err(malformed("operator ask tag")),
         })
     }
@@ -260,7 +365,7 @@ impl Wire for Report {
             Pause::MeasurementLost => w.u32(3),
             Pause::StartFailed(why) => (w.u32(4), w.bytes(why.as_bytes())).1,
         }
-        w.strings(&self.preview);
+        self.preview.put(w);
     }
     fn get(r: &mut Reader<'_>) -> io::Result<Self> {
         Ok(Self {
@@ -274,7 +379,7 @@ impl Wire for Report {
                 4 => Pause::StartFailed(r.string()?),
                 _ => return Err(malformed("operator pause tag")),
             },
-            preview: r.strings()?,
+            preview: Preview::get(r)?,
         })
     }
 }
@@ -310,6 +415,7 @@ impl Wire for Phase {
                 w.bytes(detail.as_bytes());
                 report.put(w);
             }
+            Self::AwaitDecision(grants) => (w.u32(9), grants.put(w)).1,
         }
     }
     fn get(r: &mut Reader<'_>) -> io::Result<Self> {
@@ -323,6 +429,7 @@ impl Wire for Phase {
             6 => Self::Undecided(Attempt::get(r)?, r.u64()?, r.string()?),
             7 => Self::Installed(r.u64()?, r.bytes()?, Report::get(r)?),
             8 => Self::Failed(Class::get(r)?, r.string()?, Report::get(r)?),
+            9 => Self::AwaitDecision(Grants::get(r)?),
             _ => return Err(malformed("operator phase tag")),
         })
     }
@@ -567,7 +674,13 @@ mod tests {
             fetch_ns: None,
             assemble_ns: None,
             pause,
-            preview: Vec::new(),
+            preview: Preview::default(),
+        }
+    }
+    fn grants() -> Grants {
+        Grants {
+            added: vec!["Clock".into()],
+            removed: vec!["Dir=a".into()],
         }
     }
 
@@ -582,11 +695,10 @@ mod tests {
                     d(),
                     group(),
                     Input::Attested(vec![0xcc; 32]),
-                    true,
                     vec!["f".into()],
                     vec!["e".into()],
                 ),
-                "000000001000000021212121212121212121212121212121010000006703000000000000000000000020000000cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc01010000000100000066010000000100000065",
+                "000000001000000021212121212121212121212121212121010000006703000000000000000000000020000000cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc010000000100000066010000000100000065",
             ),
             (
                 Ask::Data(d(), attempt(), vec![1, 2]),
@@ -609,6 +721,10 @@ mod tests {
                 "050000001000000031313131313131313131313131313131",
             ),
             (Ask::Lookup("g".into()), "060000000100000067"),
+            (
+                Ask::Decide(d(), grants(), true),
+                "0800000010000000212121212121212121212121212121210100000005000000436c6f636b01000000050000004469723d6101",
+            ),
             (
                 Ask::Register(
                     d(),
@@ -668,10 +784,27 @@ mod tests {
                         fetch_ns: Some(7),
                         assemble_ns: None,
                         pause: Pause::Measured(2000),
-                        preview: vec!["p".into()],
+                        preview: Preview {
+                            grants: Grants {
+                                added: vec!["Clock".into()],
+                                removed: Vec::new(),
+                            },
+                            entries: vec![EntryLine {
+                                identity: vec![0xee],
+                                change: EntryChange::Changed,
+                            }],
+                            triggers: vec![TriggerLine {
+                                class: 1,
+                                kind: 1,
+                                path: vec![1],
+                                schema: vec![2],
+                                count: 3,
+                                earliest_due: 4,
+                            }],
+                        },
                     },
                 )),
-                "0000000010000000212121212121212121212121212121210100000067030000000000000001000000010000000107000000050000000000000020000000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0100000007000000000000000000000002000000d007000000000000010000000100000070",
+                "0000000010000000212121212121212121212121212121210100000067030000000000000001000000010000000107000000050000000000000020000000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0100000007000000000000000000000002000000d0070000000000000100000005000000436c6f636b000000000100000001000000ee020000000100000001000000010000000100000001010000000203000000000000000400000000000000",
             ),
             (
                 state(Phase::Installed(
@@ -679,7 +812,7 @@ mod tests {
                     vec![0xaa; 32],
                     report(Pause::StartFailed("x".into())),
                 )),
-                "0000000010000000212121212121212121212121212121210100000067030000000000000001000000010000000107000000000000000000000020000000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa000000000000000004000000010000007800000000",
+                "0000000010000000212121212121212121212121212121210100000067030000000000000001000000010000000107000000000000000000000020000000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa000000000000000004000000010000007800000000000000000000000000000000",
             ),
             (
                 state(Phase::Failed(
@@ -687,7 +820,11 @@ mod tests {
                     "no".into(),
                     report(Pause::NotStarted),
                 )),
-                "000000001000000021212121212121212121212121212121010000006703000000000000000100000001000000010800000001000000020000006e6f00000000000000000000000000000000",
+                "000000001000000021212121212121212121212121212121010000006703000000000000000100000001000000010800000001000000020000006e6f00000000000000000000000000000000000000000000000000000000",
+            ),
+            (
+                state(Phase::AwaitDecision(grants())),
+                "00000000100000002121212121212121212121212121212101000000670300000000000000010000000100000001090000000100000005000000436c6f636b01000000050000004469723d61",
             ),
             (
                 Answer::Need(

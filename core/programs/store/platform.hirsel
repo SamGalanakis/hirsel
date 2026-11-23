@@ -73,6 +73,10 @@ pub type DeployRow: codec + send {
     // The launcher's fetch and assembly times for NEW.
     fetch_ns: Option[u64],
     assemble_ns: Option[u64],
+    // What the deploy changes (launch.md "Deploy preview"): the grant diff from admission,
+    // the entry diff from the preview child and the trigger report from the prepare child,
+    // each as far as the deploy got.
+    preview: operator.Preview,
 }
 
 // An operator request's durable record (launch.md "The operator socket"), keyed by its
@@ -80,14 +84,18 @@ pub type DeployRow: codec + send {
 // `begin` is the canonical bytes of its Begin: a Begin with the same D and other bytes is a
 // Conflict. `attempt` is the admission attempt last assigned to it, and `deadline_ms` the
 // wall time after which an admission still missing input fails. `done` is the terminal
-// phase, kept across later deploys, removal and name reuse.
+// phase, kept across later deploys, removal and name reuse. `held` is the grant diff the
+// request awaits a person's decision on, and `approved` the diff a person approved, which
+// its admissions run under.
 pub type RequestRow: codec + send {
     begin: Bytes,
     group: launcher.Group,
     input: launcher.Input,
     attempt: launcher.Attempt,
     deadline_ms: u64,
-    done: Option[operator.Phase]
+    done: Option[operator.Phase],
+    held: Option[launcher.Grants],
+    approved: launcher.Grants
 }
 
 // One answer for an operator connection; `close` ends that connection's exchange after it.
@@ -256,6 +264,12 @@ type Prep {
     // A drift retry's discarded candidate gen, still live: the launcher refuses a second
     // candidate beside it (RUNNER-SPEC §14.3), so the retry's candidate starts after its end.
     discarded: Option[u64],
+    // OLD's exported list from its describe answer, which the entry diff compares NEW's to.
+    old_exported: List[runner.Exported],
+    // The deploy's preview so far.
+    preview: operator.Preview,
+    // The running prepare child has answered its trigger report.
+    scanned: bool,
 }
 
 // Where a deploy's admission stands (launch.md "The launcher", "Publish and assemble"):
@@ -269,8 +283,8 @@ type Admitting {
     request: Bytes,
     attempt: launcher.Attempt,
     incarnation: u64,
-    // The operator approved a grant OLD's recipe lacks.
-    grant_added: bool,
+    // The grant diff against OLD's recipe that the operator approved.
+    approved: launcher.Grants,
     stage: AdmitStage,
     // The verified recipe's summary, from `Admitted`.
     summary: Option[launcher.Summary],
@@ -1227,7 +1241,7 @@ fn drift(mut h: Host, name: String, g: GroupRow, take cut: Cut, now: Now, mut ou
         list.push(mut out, Stop(child_of(name, g.incarnation, c)))
     }
     list.push(mut out, Command(child_of(name, g.incarnation, cut.old), HostExport(attempt_bytes(retry.attempt), true)))
-    let p = Prep(attempt: retry.attempt, retry_of: retry.retry_of, incarnation: g.incarnation, old: cut.old, assembly: clone(retry.assembly), image: clone(retry.image), target: string.new(), n_place: 0u64, stage: Exporting, describe: clone(retry.describe), release: clone(retry.release), helper: None, aborting: false, discarded: discarded)
+    let p = Prep(attempt: retry.attempt, retry_of: retry.retry_of, incarnation: g.incarnation, old: cut.old, assembly: clone(retry.assembly), image: clone(retry.image), target: string.new(), n_place: 0u64, stage: Exporting, describe: clone(retry.describe), release: clone(retry.release), helper: None, aborting: false, discarded: discarded, old_exported: list.new(), preview: clone(retry.preview), scanned: false)
     let mut v = vol_read(h, name)
     v.cut = None
     v.prep = Some(p)
@@ -1694,7 +1708,7 @@ fn resume_cuts(mut h: Host, held: List[launcher.CutoverKey], mut out: List[launc
         let Ok(Some(g)) = group_row(h, name) else {
             continue
         }
-        let p = Prep(attempt: d.attempt, retry_of: d.retry_of, incarnation: g.incarnation, old: d.old, assembly: clone(d.assembly), image: clone(d.image), target: string.new(), n_place: 0u64, stage: Aborting("interrupted before the cutover"), describe: list.new(), release: list.new(), helper: None, aborting: run_gen(h, name) == Some(d.old), discarded: None)
+        let p = Prep(attempt: d.attempt, retry_of: d.retry_of, incarnation: g.incarnation, old: d.old, assembly: clone(d.assembly), image: clone(d.image), target: string.new(), n_place: 0u64, stage: Aborting("interrupted before the cutover"), describe: list.new(), release: list.new(), helper: None, aborting: run_gen(h, name) == Some(d.old), discarded: None, old_exported: list.new(), preview: clone(d.preview), scanned: false)
         if p.aborting {
             list.push(mut out, Command(child_of(name, g.incarnation, d.old), abort_command(d.attempt, d.retry_of)))
         }
@@ -1987,7 +2001,8 @@ pub fn set_quota(mut h: Host, tenant: String, q: Quota, now: Now) -> Result[List
 // child over OLD's exported list, OLD's export, NEW's prepare child on it and OLD's import,
 // checking each answer before the next step. `image` is NEW's image digest and `target`
 // and `n_place` the verified recipe's, which the preview must report.
-fn prepare(mut h: Host, name: String, request: Bytes, attempt: launcher.Attempt, assembly: Bytes, image_digest: Bytes, target: String, n_place: u64, fetch_ns: u64, assemble_ns: u64) -> Result[List[launcher.Request], Refused] waits {
+fn prepare(mut h: Host, name: String, request: Bytes, attempt: launcher.Attempt, assembly: Bytes, image_digest: Bytes, target: String, n_place: u64, grants: launcher.Grants, fetch_ns: u64, assemble_ns: u64) -> Result[List[launcher.Request], Refused] waits {
+    let shown = operator.Preview(grants: clone(grants), entries: list.new(), triggers: list.new())
     let Some(g) = group_row(h, name)? else {
         return Error(Unknown)
     }
@@ -2021,7 +2036,7 @@ fn prepare(mut h: Host, name: String, request: Bytes, attempt: launcher.Attempt,
                     _ => return Error(Busy(a)),
                 }
             }
-            let row = DeployRow(request: clone(request), attempt: attempt, assembly: clone(assembly), image: clone(image_digest), digest: list.new(), release: list.new(), activation: 0u64, old: old, candidate: 0u64, outcome: Preparing, describe: list.new(), retry_of: None, fetch_ns: Some(fetch_ns), assemble_ns: Some(assemble_ns))
+            let row = DeployRow(request: clone(request), attempt: attempt, assembly: clone(assembly), image: clone(image_digest), digest: list.new(), release: list.new(), activation: 0u64, old: old, candidate: 0u64, outcome: Preparing, describe: list.new(), retry_of: None, fetch_ns: Some(fetch_ns), assemble_ns: Some(assemble_ns), preview: clone(shown))
             put_deploy(mut tx, t, name, row, StoreClass)
         })
     }
@@ -2031,7 +2046,7 @@ fn prepare(mut h: Host, name: String, request: Bytes, attempt: launcher.Attempt,
     let mut out: List[launcher.Request] = list.new()
     list.push(mut out, Release(attempt))
     list.push(mut out, helper_launch(name, g, g.assembly, take mode))
-    let p = Prep(attempt: attempt, retry_of: None, incarnation: g.incarnation, old: old, assembly: clone(assembly), image: clone(image_digest), target: string.from(target), n_place: n_place, stage: Describing, describe: list.new(), release: list.new(), helper: Some(take describer), aborting: false, discarded: None)
+    let p = Prep(attempt: attempt, retry_of: None, incarnation: g.incarnation, old: old, assembly: clone(assembly), image: clone(image_digest), target: string.from(target), n_place: n_place, stage: Describing, describe: list.new(), release: list.new(), helper: Some(take describer), aborting: false, discarded: None, old_exported: list.new(), preview: take shown, scanned: false)
     set_prep(mut h, name, Some(take p))
     Ok(take out)
 }
@@ -2043,7 +2058,7 @@ const ADMISSION_MS: u64 = 600000u64
 // Opens the launcher's admission of request d's input under attempt `a` (launch.md "Publish
 // and assemble"), with the group's working directory, OLD's assembly and the operator's
 // Foreign and Exec lines. A publication's input is complete at once.
-fn start_admission(mut h: Host, name: String, g: GroupRow, d: Bytes, a: launcher.Attempt, input: launcher.Input, foreign: List[String], exec: List[String], grant_added: bool, genesis: bool, mut out: List[launcher.Request]) {
+fn start_admission(mut h: Host, name: String, g: GroupRow, d: Bytes, a: launcher.Attempt, input: launcher.Input, foreign: List[String], exec: List[String], approved: launcher.Grants, genesis: bool, mut out: List[launcher.Request]) {
     let complete = match input {
         Attested(_) => false,
         _ => true,
@@ -2062,7 +2077,7 @@ fn start_admission(mut h: Host, name: String, g: GroupRow, d: Bytes, a: launcher
     let approvals = launcher.Approvals(recording: recording, foreign: clone(foreign), exec: clone(exec), workdir: string.from(g.workdir), old: take old)
     list.push(mut out, Admit(group_of(name, g.incarnation), a, clone(input), take approvals))
     let mut w = vol_read(h, name)
-    w.admit = Some(Admitting(request: clone(d), attempt: a, incarnation: g.incarnation, grant_added: grant_added, stage: Uploading(list.new(), false), summary: None, ended: complete, genesis: genesis))
+    w.admit = Some(Admitting(request: clone(d), attempt: a, incarnation: g.incarnation, approved: clone(approved), stage: Uploading(list.new(), false), summary: None, ended: complete, genesis: genesis))
     vol_put(mut h, name, take w)
 }
 
@@ -2166,7 +2181,7 @@ fn request_row(h: Host, d: Bytes) -> Result[Option[RequestRow], Refused] {
 }
 
 fn report_of(row: DeployRow, pause: operator.Pause) -> operator.Report {
-    operator.Report(fetch_ns: row.fetch_ns, assemble_ns: row.assemble_ns, pause: clone(pause), preview: list.new())
+    operator.Report(fetch_ns: row.fetch_ns, assemble_ns: row.assemble_ns, pause: clone(pause), preview: clone(row.preview))
 }
 
 // The admission of request d, if the host runs one.
@@ -2200,6 +2215,9 @@ fn deploy_of(h: Host, name: String, d: Bytes) -> Option[DeployRow] {
 fn phase_of(h: Host, d: Bytes, r: RequestRow) -> operator.Phase {
     if let Some(p) = r.done {
         return clone(p)
+    }
+    if let Some(diff) = r.held {
+        return AwaitDecision(clone(diff))
     }
     let name = string.from(r.group.name)
     if let Some(row) = deploy_of(h, name, d) {
@@ -2368,6 +2386,12 @@ fn active_holds(mut h: Host, name: String, d: Bytes, now: Now) -> bool waits {
     if let Some(_) = r.done {
         return false
     }
+    // A request awaiting a decision holds no attempt and does not hold the group: a later
+    // deploy supersedes it.
+    if !is_none(r.held) {
+        fail_request(mut h, other, DeniedClass, "a later deploy superseded it while it awaited a decision")
+        return false
+    }
     if !is_none(admission_of(h, name, other)) || !is_none(deploy_of(h, name, other)) || !is_none(owner_of(h, other)) {
         return true
     }
@@ -2381,7 +2405,7 @@ fn active_holds(mut h: Host, name: String, d: Bytes, now: Now) -> bool waits {
 // A Begin (launch.md "The operator socket"): a known D with the same bytes attaches to its
 // request, with other bytes is a Conflict; a new D is recorded durably, then the group is
 // woken if cold and its admission opened.
-fn begin(mut h: Host, conn: u64, ask: operator.Ask, d: Bytes, g: launcher.Group, input: launcher.Input, added: bool, foreign: List[String], exec: List[String], now: Now, mut out: List[launcher.Request]) waits {
+fn begin(mut h: Host, conn: u64, ask: operator.Ask, d: Bytes, g: launcher.Group, input: launcher.Input, foreign: List[String], exec: List[String], now: Now, mut out: List[launcher.Request]) waits {
     if list.len(d) != 16u64 {
         refuse(mut h, conn, ProtocolClass, "a request ID is 16 bytes")
         return
@@ -2431,7 +2455,7 @@ fn begin(mut h: Host, conn: u64, ask: operator.Ask, d: Bytes, g: launcher.Group,
                 }
             }
             let a = fresh_attempt(mut tx, t)?
-            st(store.put(mut tx, t.requests, d, RequestRow(begin: clone(canonical), group: clone(g), input: clone(input), attempt: a, deadline_ms: now.wall_ms + ADMISSION_MS, done: None)))?
+            st(store.put(mut tx, t.requests, d, RequestRow(begin: clone(canonical), group: clone(g), input: clone(input), attempt: a, deadline_ms: now.wall_ms + ADMISSION_MS, done: None, held: None, approved: launcher.no_grants())))?
             st(store.put(mut tx, t.active, name, d))?
             Ok(a)
         })
@@ -2444,11 +2468,11 @@ fn begin(mut h: Host, conn: u64, ask: operator.Ask, d: Bytes, g: launcher.Group,
         },
     }
     map.insert(mut h.owners, clone(d), conn)
-    admit_request(mut h, g.name, row, d, a, input, foreign, exec, added, now, mut out)
+    admit_request(mut h, g.name, row, d, a, input, foreign, exec, launcher.no_grants(), now, mut out)
 }
 
 // Wakes a cold group, then opens request d's admission; a wake that cannot start fails d.
-fn admit_request(mut h: Host, name: String, g: GroupRow, d: Bytes, a: launcher.Attempt, input: launcher.Input, foreign: List[String], exec: List[String], added: bool, now: Now, mut out: List[launcher.Request]) waits {
+fn admit_request(mut h: Host, name: String, g: GroupRow, d: Bytes, a: launcher.Attempt, input: launcher.Input, foreign: List[String], exec: List[String], added: launcher.Grants, now: Now, mut out: List[launcher.Request]) waits {
     // A registering group has no place to wake: its admission has no OLD.
     let genesis = registering(h, name)
     if !genesis && is_none(run_gen(h, name)) {
@@ -2467,12 +2491,12 @@ fn registering(h: Host, name: String) -> bool {
     is_none(wake_row(h, name))
 }
 
-// The input and approvals a recorded Begin or Register admits: input, added grant, Foreign
-// and Exec lines.
-fn admission_ask(body: Bytes) -> Option[(launcher.Input, bool, List[String], List[String])] {
+// The input and approvals a recorded Begin or Register admits: input, Foreign and Exec
+// lines.
+fn admission_ask(body: Bytes) -> Option[(launcher.Input, List[String], List[String])] {
     match operator.decode_ask(body) {
-        Some(BeginAsk(_, _, input, added, foreign, exec)) => Some((clone(input), added, clone(foreign), clone(exec))),
-        Some(RegisterAsk(_, _, input, foreign, exec)) => Some((clone(input), false, clone(foreign), clone(exec))),
+        Some(BeginAsk(_, _, input, foreign, exec)) => Some((clone(input), clone(foreign), clone(exec))),
+        Some(RegisterAsk(_, _, input, foreign, exec)) => Some((clone(input), clone(foreign), clone(exec))),
         _ => None,
     }
 }
@@ -2495,7 +2519,8 @@ fn reattach(mut h: Host, conn: u64, d: Bytes, r: RequestRow, now: Now, mut out: 
     let name = string.from(r.group.name)
     let _ = map.remove(mut h.shown, d)
     map.insert(mut h.owners, clone(d), conn)
-    if !is_none(admission_of(h, name, d)) || !is_none(deploy_of(h, name, d)) {
+    // A request awaiting a decision is shown its phase and waits for a Decide.
+    if !is_none(r.held) || !is_none(admission_of(h, name, d)) || !is_none(deploy_of(h, name, d)) {
         return
     }
     if now.wall_ms >= r.deadline_ms {
@@ -2509,7 +2534,7 @@ fn reattach(mut h: Host, conn: u64, d: Bytes, r: RequestRow, now: Now, mut out: 
             return
         },
     }
-    let Some((input, added, foreign, exec)) = admission_ask(r.begin) else {
+    let Some((input, foreign, exec)) = admission_ask(r.begin) else {
         fail_request(mut h, d, StoreClass, "the recorded request does not decode")
         return
     }
@@ -2539,7 +2564,7 @@ fn reattach(mut h: Host, conn: u64, d: Bytes, r: RequestRow, now: Now, mut out: 
             return
         },
     }
-    admit_request(mut h, name, g, d, a, input, foreign, exec, added, now, mut out)
+    admit_request(mut h, name, g, d, a, input, foreign, exec, clone(r.approved), now, mut out)
 }
 
 // The group of request d's upload under attempt `a`, when connection `conn` owns it and
@@ -2587,8 +2612,10 @@ pub fn asked(mut h: Host, conn: u64, body: Bytes, now: Now) -> List[launcher.Req
     match ask {
         // A deploy waits for the session's inventory to be reconciled, so it can neither
         // race the adoption of a pending deploy nor bind a group twice.
-        BeginAsk(_, _, _, _, _, _) if !h.binds_sent => refuse(mut h, conn, BusyClass, "the host is reconciling with the launcher"),
-        BeginAsk(d, g, input, added, foreign, exec) => begin(mut h, conn, ask, d, g, input, added, foreign, exec, now, mut out),
+        BeginAsk(_, _, _, _, _) if !h.binds_sent => refuse(mut h, conn, BusyClass, "the host is reconciling with the launcher"),
+        BeginAsk(d, g, input, foreign, exec) => begin(mut h, conn, ask, d, g, input, foreign, exec, now, mut out),
+        DecideAsk(_, _, _) if !h.binds_sent => refuse(mut h, conn, BusyClass, "the host is reconciling with the launcher"),
+        DecideAsk(d, diff, approve) => decide(mut h, conn, d, diff, approve, now, mut out),
         DataAsk(d, a, chunk) => match upload_of(h, conn, d, a) {
             Some(_) if list.len(chunk) > 0u64 => list.push(mut out, AdmitData(a, clone(chunk))),
             _ => refuse(mut h, conn, ProtocolClass, "no open upload of this request and attempt on this connection"),
@@ -2823,8 +2850,15 @@ fn admitted(mut h: Host, a: launcher.Attempt, root: Bytes, summary: launcher.Sum
             why = "Refused(Memory)"
         }
     }
-    if why == "" && summary.grants_added && !d.grant_added {
-        why = "Refused(GrantAdded)"
+    // Any change of authority, gained or lost, runs only under a person's approval of exactly
+    // that diff (launch.md "Deploy preview"): without one the attempt is released and the
+    // request waits durably for a Decide, so an approval given for another diff approves
+    // nothing.
+    if why == "" && !launcher.grants_empty(summary.grants) && !same_grants(summary.grants, d.approved) {
+        vol_put(mut h, name, take v)
+        list.push(mut out, Release(a))
+        hold(mut h, request, summary.grants)
+        return
     }
     let denied = why != ""
     let confirming = !denied && display != ""
@@ -2882,7 +2916,7 @@ fn assembled(mut h: Host, a: launcher.Attempt, key: Bytes, digest: Bytes, fetch_
         install_first(mut h, name, d, key, fetch_ns, assemble_ns, now, mut out)
         return
     }
-    match prepare(mut h, name, d.request, a, key, digest, summary.target, summary.n_place, fetch_ns, assemble_ns) {
+    match prepare(mut h, name, d.request, a, key, digest, summary.target, summary.n_place, summary.grants, fetch_ns, assemble_ns) {
         Ok(more) => {
             for q in more {
                 list.push(mut out, clone(q))
@@ -2890,7 +2924,7 @@ fn assembled(mut h: Host, a: launcher.Attempt, key: Bytes, digest: Bytes, fetch_
         },
         Error(e) => {
             let mut w = vol_read(h, name)
-            w.admit = Some(Admitting(request: clone(d.request), attempt: a, incarnation: d.incarnation, grant_added: d.grant_added, stage: Rejected(refused_text(e)), summary: Some(clone(summary)), ended: true, genesis: false))
+            w.admit = Some(Admitting(request: clone(d.request), attempt: a, incarnation: d.incarnation, approved: clone(d.approved), stage: Rejected(refused_text(e)), summary: Some(clone(summary)), ended: true, genesis: false))
             vol_put(mut h, name, take w)
             list.push(mut out, Release(a))
             fail_request(mut h, d.request, class_of(e), refused_text(e))
@@ -2921,7 +2955,7 @@ fn install_first(mut h: Host, name: String, d: Admitting, key: Bytes, fetch_ns: 
             g.activation = 0u64
             st(store.put(mut tx, t.groups, name, g))?
             st(store.put(mut tx, t.wake, name, WakeRow(wake: Clean(None), gen: 0u64)))?
-            let report = operator.Report(fetch_ns: Some(fetch_ns), assemble_ns: Some(assemble_ns), pause: NotStarted, preview: list.new())
+            let report = operator.Report(fetch_ns: Some(fetch_ns), assemble_ns: Some(assemble_ns), pause: NotStarted, preview: operator.no_preview())
             finish_request(mut tx, t, name, d.request, InstalledPhase(0u64, clone(key), report))
         })
     }
@@ -3000,7 +3034,7 @@ fn register(mut h: Host, conn: u64, ask: operator.Ask, d: Bytes, spec: operator.
             u.groups += 1u64
             st(store.put(mut tx, t.usage, spec.tenant, u))?
             let a = fresh_attempt(mut tx, t)?
-            st(store.put(mut tx, t.requests, d, RequestRow(begin: clone(canonical), group: group_of(spec.name, g.incarnation), input: clone(input), attempt: a, deadline_ms: now.wall_ms + ADMISSION_MS, done: None)))?
+            st(store.put(mut tx, t.requests, d, RequestRow(begin: clone(canonical), group: group_of(spec.name, g.incarnation), input: clone(input), attempt: a, deadline_ms: now.wall_ms + ADMISSION_MS, done: None, held: None, approved: launcher.no_grants())))?
             st(store.put(mut tx, t.active, spec.name, d))?
             Ok((g, a))
         })
@@ -3014,7 +3048,7 @@ fn register(mut h: Host, conn: u64, ask: operator.Ask, d: Bytes, spec: operator.
     }
     map.insert(mut h.owners, clone(d), conn)
     list.push(mut out, bind_request(spec.name, g))
-    start_admission(mut h, spec.name, g, d, a, input, foreign, exec, false, true, mut out)
+    start_admission(mut h, spec.name, g, d, a, input, foreign, exec, launcher.no_grants(), true, mut out)
 }
 
 // A registering group's catalog row: no assembly yet, activation 0.
@@ -3216,8 +3250,8 @@ fn copy_range(b: Bytes, from: u64, to: u64) -> Bytes {
 }
 
 // OLD's describe answer, a whole `runner.Describe`: the exact bytes of its exported list,
-// which NEW's preview takes as its old list, and the list's length.
-fn old_entries(b: Bytes) -> Option[(Bytes, u64)] {
+// which NEW's preview takes as its old list, and the list.
+fn old_entries(b: Bytes) -> Option[(Bytes, List[runner.Exported])] {
     let mut at = 0u64
     let Ok(_) = std.codec.take_with(b, mut at, std.codec.of_bytes()) else {
         return None
@@ -3236,13 +3270,13 @@ fn old_entries(b: Bytes) -> Option[(Bytes, u64)] {
     if at != list.len(b) {
         return None
     }
-    Some((copy_range(b, from, at), list.len(exported)))
+    Some((copy_range(b, from, at), take exported))
 }
 
 // NEW's preview answer, a whole `runner.Preview`, checked against the selected assembly
 // (image digest, target and allowance), a 32-byte release and one answer per old entry.
-// Gives NEW's exact Describe bytes and its release.
-fn previewed(b: Bytes, p: Prep, count: u64) -> Result[(Bytes, Bytes), String] {
+// Gives NEW's exact Describe bytes, its release and its exported list.
+fn previewed(b: Bytes, p: Prep, count: u64) -> Result[(Bytes, Bytes, List[runner.Exported]), String] {
     let mut at = 0u64
     let Ok(digest) = std.codec.take_with(b, mut at, std.codec.of_bytes()) else {
         return Error("preview: a malformed answer")
@@ -3254,7 +3288,7 @@ fn previewed(b: Bytes, p: Prep, count: u64) -> Result[(Bytes, Bytes), String] {
         return Error("preview: a malformed answer")
     }
     let ce: std.codec.Codec[runner.Exported] = std.codec.of()
-    let Ok(_) = std.codec.take_list(b, mut at, ce) else {
+    let Ok(exported) = std.codec.take_list(b, mut at, ce) else {
         return Error("preview: a malformed answer")
     }
     let described = at
@@ -3277,7 +3311,7 @@ fn previewed(b: Bytes, p: Prep, count: u64) -> Result[(Bytes, Bytes), String] {
     if list.len(answers) != count {
         return Error("preview answer count")
     }
-    Ok((copy_range(b, 0u64, described), release))
+    Ok((copy_range(b, 0u64, described), release, take exported))
 }
 
 // An export directory name: nonempty ASCII letters, digits, `-` and `_`.
@@ -3378,6 +3412,7 @@ fn prep_finish(mut h: Host, name: String, take p: Prep) waits {
     let attempt = p.attempt
     let made = {
         let t = view h.t
+        let shown = view p.preview
         store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[(), Refused] {
             let Some(found_d) = st(store.fetch(tx, store.shape(t.deploys), name))? else {
                 return Ok(())
@@ -3391,6 +3426,7 @@ fn prep_finish(mut h: Host, name: String, take p: Prep) waits {
                 return Ok(())
             }
             d.outcome = Failed(string.from(why))
+            d.preview = clone(shown)
             put_deploy(mut tx, t, name, d, InvalidClass)
         })
     }
@@ -3416,25 +3452,36 @@ fn answered(mut h: Host, c: launcher.Child, said: Bytes, mut out: List[launcher.
     }
     match p.stage {
         Describing => match old_entries(said) {
-            Some((entries, count)) => {
+            Some((entries, exported)) => {
                 let mode: launcher.Mode = PreviewMode(p.attempt, take entries)
                 p.helper = Some(launcher.Child(group: clone(c.group), role: launcher.role_of(mode)))
-                p.stage = Previewing(count)
+                p.stage = Previewing(list.len(exported))
+                p.old_exported = take exported
                 list.push(mut out, helper_launch(name, g, p.assembly, take mode))
                 set_prep(mut h, name, Some(take p))
             },
             None => prep_fail(mut h, name, take p, "describe: OLD's answer is not a Describe", true, mut out),
         },
         Previewing(count) => match previewed(said, p, count) {
-            Ok((describe, release)) => {
+            Ok((describe, release, exported)) => {
                 p.describe = describe
                 p.release = release
+                p.preview.entries = entry_diff(p.old_exported, exported)
                 p.helper = None
                 p.stage = Exporting
                 list.push(mut out, Command(child_of(name, p.incarnation, p.old), HostExport(attempt_bytes(p.attempt), false)))
                 set_prep(mut h, name, Some(take p))
             },
             Error(why) => prep_fail(mut h, name, take p, why, true, mut out),
+        },
+        // The prepare child answers with its trigger report just before it ends.
+        PrepareRunning(_) => match trigger_rows(said) {
+            Some(rows) => {
+                p.preview.triggers = rows
+                p.scanned = true
+                set_prep(mut h, name, Some(take p))
+            },
+            None => prep_fail(mut h, name, take p, "prepare: the trigger report is malformed", true, mut out),
         },
         _ => set_prep(mut h, name, Some(take p)),
     }
@@ -3452,7 +3499,9 @@ fn helper_done(mut h: Host, c: launcher.Child, succeeded: bool, why: String, mut
     }
     p.helper = None
     match p.stage {
-        PrepareRunning(head) => if succeeded {
+        PrepareRunning(head) => if succeeded && !p.scanned {
+            prep_fail(mut h, name, take p, "prepare ended without its trigger report", true, mut out)
+        } else if succeeded {
             p.stage = Importing(head)
             list.push(mut out, Command(child_of(name, p.incarnation, p.old), HostImport(clone(p.describe), clone(p.release), clone(p.image))))
             set_prep(mut h, name, Some(take p))
@@ -3480,6 +3529,7 @@ fn prep_placed(mut h: Host, name: String, take p: Prep, reply: runner.HostReply,
                 let mode: launcher.Mode = PrepareMode(q.attempt, string.from(export))
                 q.helper = Some(launcher.Child(group: group_of(name, q.incarnation), role: launcher.role_of(mode)))
                 q.stage = PrepareRunning(head)
+                q.scanned = false
                 list.push(mut out, helper_launch(name, g, q.assembly, take mode))
                 set_prep(mut h, name, Some(take q))
             } else {
@@ -3558,6 +3608,7 @@ fn prep_pending(mut h: Host, name: String, take p: Prep, head: u64, digest: Byte
             d.activation = activation
             d.candidate = c
             d.outcome = Pending
+            d.preview = clone(q.preview)
             pin_start(mut tx, t, g, c, d.assembly, now_s)?
             let retried = !is_none(d.retry_of)
             put_deploy(mut tx, t, name, d, StoreClass)?

@@ -29,6 +29,7 @@ std = { major = 1 }
 "fixture.hirsel" = "fixture"
 "launcher.hirsel" = "launcher"
 "platform.hirsel" = "platform"
+"platform-preview.hirsel" = "platform"
 "platform_main.hirsel" = "platform_main"
 "operator.hirsel" = "operator"
 
@@ -51,6 +52,7 @@ dirs = ["."]
 "operator_wire.hirsel" = "operator"
 "platform_laws.hirsel" = "platform"
 "platform_source_laws.hirsel" = "platform"
+"platform_preview_laws.hirsel" = "platform"
 "bucket_laws.hirsel" = "store"
 
 [tests.runs."store@1/runner_calls/test_local_genesis_recovers"]

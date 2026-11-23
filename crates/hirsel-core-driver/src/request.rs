@@ -469,7 +469,8 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             | Opt::IdleMs
             | Opt::Workdir
             | Opt::Listen
-            | Opt::GrantAdded
+            | Opt::ApproveGrant
+            | Opt::RefuseGrants
             | Opt::HostMemory
             | Opt::TapeRetention
             | Opt::GroupName

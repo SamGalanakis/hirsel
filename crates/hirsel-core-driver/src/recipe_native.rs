@@ -801,7 +801,7 @@ fn select_archive<'a>(
     })
 }
 
-fn grant_name(kind: GrantKind) -> &'static str {
+pub(super) fn grant_name(kind: GrantKind) -> &'static str {
     GRANT_NAMES[kind as usize]
 }
 

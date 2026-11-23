@@ -1,0 +1,153 @@
+// Module platform, the deploy preview and its decision (launch.md "Deploy preview"): the
+// hold of a request whose grant diff awaits a person, the Decide that ends it, and the
+// entry and trigger parts of a deploy's preview.
+
+fn same_grants(a: launcher.Grants, b: launcher.Grants) -> bool {
+    a.added == b.added && a.dropped == b.dropped
+}
+
+// Request d waits for a person's decision on grant diff `diff`, durably and with no attempt,
+// so a restart or a lost connection keeps the hold (launch.md "Deploy preview").
+fn hold(mut h: Host, d: Bytes, diff: launcher.Grants) waits {
+    let made = {
+        let t = view h.t
+        let shown = view diff
+        store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[(), Refused] {
+            let Some(found) = st(store.fetch(tx, store.shape(t.requests), d))? else {
+                return Ok(())
+            }
+            let mut row = found
+            if let Some(_) = row.done {
+                return Ok(())
+            }
+            row.held = Some(clone(shown))
+            st(store.put(mut tx, t.requests, d, row))?
+            Ok(())
+        })
+    }
+    if let Error(e) = decided(mut h.db, take made) {
+        fail_request(mut h, d, class_of(e), refused_text(e))
+    }
+}
+
+// A Decide (launch.md "Deploy preview"): request d must await a decision on exactly `diff`.
+// A refusal fails it Denied. An approval records the diff and repeats d's admission under it,
+// with a fresh attempt and deadline and `conn` as its owner; an admission that then finds
+// another diff waits again.
+fn decide(mut h: Host, conn: u64, d: Bytes, diff: launcher.Grants, approve: bool, now: Now, mut out: List[launcher.Request]) waits {
+    let r = match request_row(h, d) {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            refuse(mut h, conn, UnknownRequestClass, "no request has this ID")
+            return
+        },
+        Error(_) => {
+            refuse(mut h, conn, StoreClass, "the catalog could not be read")
+            return
+        },
+    }
+    let waiting = match r.held {
+        Some(x) => is_none(r.done) && same_grants(x, diff),
+        None => false,
+    }
+    if !waiting {
+        refuse(mut h, conn, DeniedClass, "the request awaits no decision on this grant diff")
+        return
+    }
+    let _ = map.remove(mut h.shown, d)
+    map.insert(mut h.owners, clone(d), conn)
+    if !approve {
+        fail_request(mut h, d, DeniedClass, "a person refused the grant diff")
+        return
+    }
+    let name = string.from(r.group.name)
+    let g = match group_row(h, name) {
+        Ok(Some(g)) if g.incarnation == r.group.incarnation => g,
+        _ => {
+            fail_request(mut h, d, UnknownGroupClass, "the group was removed")
+            return
+        },
+    }
+    let Some((input, foreign, exec)) = admission_ask(r.begin) else {
+        fail_request(mut h, d, StoreClass, "the recorded request does not decode")
+        return
+    }
+    if let Some((class, why)) = admission_refusal(h, name, g, d, input, foreign, exec) {
+        let _ = map.remove(mut h.owners, d)
+        refuse(mut h, conn, class, why)
+        return
+    }
+    let made = {
+        let t = view h.t
+        let approved = view diff
+        store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[launcher.Attempt, Refused] {
+            let Some(found) = st(store.fetch(tx, store.shape(t.requests), d))? else {
+                return Error(Missing("request"))
+            }
+            if let Some(x) = st(store.fetch(tx, store.shape(t.active), found.group.name))? {
+                if x != d {
+                    return Error(Busy(0u64))
+                }
+            }
+            let mut row = found
+            let a = fresh_attempt(mut tx, t)?
+            row.attempt = a
+            row.deadline_ms = now.wall_ms + ADMISSION_MS
+            row.held = None
+            row.approved = clone(approved)
+            st(store.put(mut tx, t.requests, d, row))?
+            Ok(a)
+        })
+    }
+    let a = match decided(mut h.db, take made) {
+        Ok(a) => a,
+        Error(e) => {
+            let _ = map.remove(mut h.owners, d)
+            refuse(mut h, conn, class_of(e), refused_text(e))
+            return
+        },
+    }
+    admit_request(mut h, name, g, d, a, input, foreign, exec, diff, now, mut out)
+}
+
+// The entry diff (launch.md "Deploy preview"): every entry OLD or NEW exports, by code
+// identity, sorted by identity. An entry both export is changed when its `code.revision`
+// differs; the revision covers everything the entry reaches, so a release that swaps one
+// function shows as changed exactly the entries that reach it.
+fn entry_diff(old: List[runner.Exported], new: List[runner.Exported]) -> List[operator.EntryLine] {
+    let mut lines: List[operator.EntryLine] = list.new()
+    for o in old {
+        let mut change: operator.EntryChange = EntryRemoved
+        for n in new {
+            if n.described.identity == o.described.identity {
+                change = if n.revision == o.revision { EntryUnchanged } else { EntryChanged }
+                break
+            }
+        }
+        list.push(mut lines, operator.EntryLine(identity: clone(o.described.identity), change: change))
+    }
+    for n in new {
+        let mut known = false
+        for o in old {
+            if n.described.identity == o.described.identity {
+                known = true
+                break
+            }
+        }
+        if !known {
+            list.push(mut lines, operator.EntryLine(identity: clone(n.described.identity), change: EntryAdded))
+        }
+    }
+    list.sort(mut lines, fn(a: operator.EntryLine, b: operator.EntryLine) -> Order { order.compare(a.identity, b.identity) })
+    lines
+}
+
+// The prepare child's answer: its whole trigger report (launch.md "Preparing the pending
+// trigger report").
+fn trigger_rows(b: Bytes) -> Option[List[runner.TriggerScanRow]] {
+    let codec: std.codec.Codec[List[runner.TriggerScanRow]] = std.codec.of_list()
+    match std.codec.decode(codec, b) {
+        Ok(take rows) => Some(take rows),
+        Error(_) => None,
+    }
+}

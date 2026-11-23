@@ -12,12 +12,14 @@ store = { major = 1, path = "../store" }
 "harness.hirsel" = "harness"
 "waits.hirsel" = "harness"
 "tool_hash.hirsel" = "harness"
+"harness-project.hirsel" = "harness"
 "mcp.hirsel" = "mcp_tools"
 "provider.hirsel" = "provider"
 "preview.hirsel" = "preview"
 "gateway.hirsel" = "gateway"
 "gateway_http.hirsel" = "gateway_http"
 "gateway_reads.hirsel" = "gateway_http"
+"release.hirsel" = "release"
 
 [tests]
 limit = 268435456
@@ -27,6 +29,7 @@ dirs = ["."]
 [tests.sources]
 "laws.hirsel" = "laws"
 "mcp_laws.hirsel" = "laws"
+"release_laws.hirsel" = "laws"
 "provider_laws.hirsel" = "provider_laws"
 "gateway_laws.hirsel" = "gateway_laws"
 "route_laws.hirsel" = "gateway_laws"

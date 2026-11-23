@@ -101,7 +101,8 @@ pub enum OptionId {
     IdleMs,
     Workdir,
     Listen,
-    GrantAdded,
+    ApproveGrant,
+    RefuseGrants,
     HostMemory,
     TapeRetention,
     GroupName,
@@ -365,11 +366,18 @@ static OPTIONS: &[OptionSpec] = &[
         "TCP address of the group's inherited listener."
     ),
     option!(
-        GrantAdded,
-        ["--grant-added"],
+        ApproveGrant,
+        ["--approve-grant"],
+        Some("+LINE|-LINE"),
+        ["deploy"],
+        "Approve one line of the grant diff a request awaits a decision on: +LINE for an authority the release gains, -LINE for one it loses."
+    ),
+    option!(
+        RefuseGrants,
+        ["--refuse-grants"],
         None,
         ["deploy"],
-        "Allow the proposed recipe to widen grants."
+        "Refuse the grant diff the request named by --request-id awaits a decision on."
     ),
     option!(
         HostMemory,

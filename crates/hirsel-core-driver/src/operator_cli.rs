@@ -6,7 +6,7 @@
 use crate::cli::{Invocation, OptionId as Opt};
 use crate::code_admission::{AdmissionError, ObjectKey, ObjectKind, send_release};
 use crate::code_store::CodeStore;
-use crate::launcher::session::{Attempt, Bindings, Group, Input, Label, Limits};
+use crate::launcher::session::{Attempt, Bindings, Grants, Group, Input, Label, Limits};
 use crate::native::recipe_build::{foreign_grant_refusal, foreign_recording_refusal, parse_root};
 use crate::operator::{self, Answer, Ask, Class, Pause, Phase, Record, Registration, Report};
 use hirsel_core_ids::ContentHash;
@@ -21,6 +21,10 @@ use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+mod preview;
+
+use preview::{approve_grant, decide, grants_json, preview_json};
 
 type Error = Box<dyn std::error::Error>;
 
@@ -263,14 +267,17 @@ fn register_on(invocation: Invocation) -> Result<i32, Error> {
 }
 
 /// `hirsel deploy R --state S --group NAME --code-store DIR [--request-id HEX]
-/// [--grant-added] [--grant ...]` or `hirsel deploy --state S --status HEX`.
+/// [--approve-grant +LINE|-LINE ...] [--grant ...]`, `hirsel deploy --state S --status HEX`,
+/// or a decision on a request that awaits one: `hirsel deploy --state S --request-id HEX
+/// (--approve-grant +LINE|-LINE ... | --refuse-grants)`.
 pub(crate) fn deploy(invocation: Invocation) -> Result<i32, Error> {
     or_unavailable("deploy", deploy_on(invocation))
 }
 
 fn deploy_on(invocation: Invocation) -> Result<i32, Error> {
     let (mut state, mut code, mut name, mut d, mut status) = (None, None, None, None, None);
-    let mut added = false;
+    let mut decision = Grants::default();
+    let mut refuse = false;
     let mut grants = crate::package_dir::Grants::default();
     for (option, value) in invocation.options {
         let text = value.unwrap_or_default();
@@ -280,7 +287,8 @@ fn deploy_on(invocation: Invocation) -> Result<i32, Error> {
             Opt::GroupName => name = Some(text),
             Opt::RequestId => d = Some(text),
             Opt::RequestStatus => status = Some(text),
-            Opt::GrantAdded => added = true,
+            Opt::ApproveGrant => approve_grant(&mut decision, &text)?,
+            Opt::RefuseGrants => refuse = true,
             Opt::Grant => grant(&mut grants, &text)?,
             _ => return Err("unexpected deploy option".into()),
         }
@@ -297,6 +305,19 @@ fn deploy_on(invocation: Invocation) -> Result<i32, Error> {
             .filter(|d| d.len() == 16)
             .ok_or("--status takes 32 hex digits")?;
         return status_of(&state, &d);
+    }
+    decision.added.sort();
+    decision.added.dedup();
+    decision.removed.sort();
+    decision.removed.dedup();
+    if invocation.positional.is_none() && (refuse || decision != Grants::default()) {
+        if refuse && decision != Grants::default() {
+            return Err("--refuse-grants takes no --approve-grant".into());
+        }
+        let d = unhex(&d.ok_or("a decision requires --request-id HEX")?)
+            .filter(|d| d.len() == 16)
+            .ok_or("--request-id takes 32 hex digits")?;
+        return decide(&state, d, decision, refuse);
     }
     let upload = Upload::open(invocation.positional.as_deref(), code)?;
     let approvals = approvals(grants);
@@ -335,11 +356,12 @@ fn deploy_on(invocation: Invocation) -> Result<i32, Error> {
         d.clone(),
         group,
         Input::Attested(upload.root.0.to_vec()),
-        added,
         approvals.foreign.clone(),
         approvals.exec.clone(),
     );
-    Exchange::new(&state, d, "deploy", Some(upload), approvals).run(ask)
+    let mut exchange = Exchange::new(&state, d, "deploy", Some(upload), approvals);
+    exchange.decision = Some(decision);
+    exchange.run(ask)
 }
 
 /// One request and its one reply, on a fresh connection.
@@ -436,7 +458,7 @@ fn report_json(report: &Report) -> serde_json::Value {
         "fetch_ns": report.fetch_ns,
         "assemble_ns": report.assemble_ns,
         "pause": pause,
-        "preview": report.preview,
+        "preview": preview_json(&report.preview),
     })
 }
 
@@ -474,6 +496,9 @@ fn state_json(d: &[u8], group: &Group, phase: &Phase) -> serde_json::Value {
         Phase::Failed(class, detail, report) => serde_json::json!({
             "phase": "failed", "class": class_name(*class), "detail": detail, "report": report_json(report),
         }),
+        Phase::AwaitDecision(grants) => {
+            serde_json::json!({"phase": "awaiting a decision", "grants": grants_json(grants)})
+        }
     };
     for (key, value) in fields.as_object().unwrap() {
         out[key] = value.clone();
@@ -580,6 +605,9 @@ struct Exchange<'a> {
     command: &'static str,
     upload: Option<Upload>,
     approvals: Approvals,
+    /// The grant diff the operator approves, sent as a Decide when the request awaits a
+    /// decision on exactly it.
+    decision: Option<Grants>,
 }
 
 impl<'a> Exchange<'a> {
@@ -596,6 +624,7 @@ impl<'a> Exchange<'a> {
             command,
             upload,
             approvals,
+            decision: None,
         }
     }
 
@@ -626,6 +655,7 @@ impl<'a> Exchange<'a> {
         let out = Arc::new(Mutex::new(reader.try_clone()?));
         out.lock().unwrap().send(ask)?;
         let mut pump: Option<Pump> = None;
+        let mut decided = matches!(ask, Ask::Decide(..));
         let lost = |command: &str, d: &[u8]| {
             eprintln!("{command}: outcome unknown: request {}", hex(d));
             Ok(Some(UNAVAILABLE))
@@ -637,9 +667,14 @@ impl<'a> Exchange<'a> {
             };
             match answer {
                 Answer::State(_, _, _, Phase::AwaitInput(a)) if pump.is_none() => {
-                    if let Some(upload) = &self.upload {
-                        pump = Some(Pump::start(upload, &self.d, a, out.clone())?);
-                    }
+                    let Some(upload) = &self.upload else {
+                        break Err(format!(
+                            "request {} uploads its input; decide it with `hirsel deploy R --request-id HEX --approve-grant ...`",
+                            hex(&self.d)
+                        )
+                        .into());
+                    };
+                    pump = Some(Pump::start(upload, &self.d, a, out.clone())?);
                 }
                 Answer::Need(_, _, keys, last) => {
                     if let Some(p) = &mut pump
@@ -666,6 +701,23 @@ impl<'a> Exchange<'a> {
                     }
                 }
                 Answer::State(d, group, _, phase) => match &phase {
+                    Phase::AwaitDecision(diff) => {
+                        if self.decision.as_ref() == Some(diff) && !decided {
+                            decided = true;
+                            let ask = Ask::Decide(self.d.clone(), diff.clone(), true);
+                            if out.lock().unwrap().send(&ask).is_err() {
+                                break lost(self.command, &self.d);
+                            }
+                            continue;
+                        }
+                        eprintln!(
+                            "{}: request {} awaits a person's decision on its grant diff; approve each line with --request-id and --approve-grant, or refuse it with --refuse-grants",
+                            self.command,
+                            hex(&self.d)
+                        );
+                        println!("{}", state_json(&d, &group, &phase));
+                        break Ok(Some(2));
+                    }
                     Phase::Undecided(..) => {
                         println!("{}", state_json(&d, &group, &phase));
                         break Ok(Some(UNAVAILABLE));

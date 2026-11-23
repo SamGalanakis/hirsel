@@ -10,6 +10,7 @@
 mod admit;
 mod bootstrap;
 mod cgroup;
+mod grants;
 #[cfg(test)]
 mod laws;
 pub(crate) mod objects;
@@ -308,6 +309,10 @@ struct Process {
     /// Standard output of a child with a bounded answer.
     answer: Option<(File, u64)>,
     install_target: Option<u64>,
+    /// A prepare child's `TRIGGERS` file in its export directory, with its bound: the
+    /// child's answer once it has exited 0 (launch.md "Preparing the pending trigger
+    /// report").
+    triggers: Option<(PathBuf, u64)>,
 }
 
 struct Ordinary {
@@ -1216,6 +1221,7 @@ impl<I: Images> Launcher<I> {
         let mut install_target = None;
         let mut input = None;
         let mut export_path = None;
+        let mut triggers = None;
         let scratch = self.scratch_of(&launch.group);
         let host_pid = if listener.label == Label::Contained {
             1
@@ -1296,6 +1302,7 @@ impl<I: Images> Launcher<I> {
                     .arg(&path)
                     .arg(hex(&attempt.bytes()))
                     .arg(hex(&image.digest));
+                triggers = Some((path.join("TRIGGERS"), image.n_place));
                 export_path = Some(path);
             }
             Mode::Install(_, kind) => {
@@ -1413,6 +1420,7 @@ impl<I: Images> Launcher<I> {
             report,
             answer,
             install_target,
+            triggers,
         })
     }
 
@@ -1658,6 +1666,18 @@ impl<I: Images> Launcher<I> {
                 } else {
                     self.emit(Event::Answered(child.clone(), answer));
                 }
+            }
+        }
+        if let Some((path, bound)) = process.triggers.take()
+            && status == Status::Code(0)
+        {
+            // An unreadable or oversized report is no answer: the host then fails the
+            // prepare, which ended without one.
+            let mut answer = Vec::new();
+            let read =
+                File::open(&path).and_then(|file| file.take(bound + 1).read_to_end(&mut answer));
+            if read.is_ok() && answer.len() as u64 <= bound {
+                self.emit(Event::Answered(child.clone(), answer));
             }
         }
         let mut sample = false;

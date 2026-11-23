@@ -563,25 +563,7 @@ fn alice() -> store.Caller { store.Caller(issuer: 1u8, subject: string.into_byte
 // A session whose run 0 has its model answer (one call) committed and not yet
 // derived.
 fn answered(dir: Dir, clock: Clock, random: Random, tasks: Tasks, take call: harness.Call) -> store.Db waits {
-    let mut db = result.unwrap(store.open(tasks, dir, clock, random, store.triggers.law_options()))
-    result.unwrap(store.run_migration(mut db, tasks, code.describe(harness.migrate)))
-    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
-    let filled = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
-        let mut calls: List[harness.Call] = list.new()
-        list.push(mut calls, clone(call))
-        let answer = harness.Answer(text: "", calls: take calls, stop: "tool_use", usage: usage())
-        store.put(mut tx, h.entries, 0u64, User("go"))?
-        store.put(mut tx, h.entries, 1u64, Assistant(clone(answer)))?
-        store.put(mut tx, h.session, 0u64, harness.Session(model: "scripted", tools_narrow: All, head_pos: 0u64, next_pos: 2u64,
-            active_run: Some(0u64), next_run: 1u64, active_sections_hashes: list.new(), active_tools_hash: list.new(), active_tools_pos: None))?
-        store.put(mut tx, h.runs, 0u64, harness.Run(caller: alice(), phase: AnswerReady(0u64), round: 0u64, rounds_left: 4u64,
-            spend: harness.Spend(known: 15u64, reserved: 0u64, unresolved: 0u64)))?
-        let model_key = harness.EffectKey(run: 0u64, round: 0u64, kind: harness.MODEL, ordinal: 0u64)
-        store.put(mut tx, h.effects, model_key, harness.Effect(cutoff: harness.Cutoff(head_pos: 0u64, tail_pos: 0u64, route: "scripted", policy: 0u64, tools_pos: None),
-            call: None, repeat: Once, deadline: 0u64, phase: Settled(Model(take answer)), trigger: None, dispatches: 1u64, reserve: 0u64))
-    })
-    match take filled { Ok(Committed(_)) => (), _ => fail("answered: fill did not commit") }
-    take db
+    answered_with(dir, clock, random, tasks, false, take call)
 }
 
 fn kick(mut db: store.Db, a: harness.Agent[Grants]) -> () waits {

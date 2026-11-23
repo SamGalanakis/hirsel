@@ -1,0 +1,260 @@
+// Module release (package harness): an agent that edits its own harness (fable-design 4.4).
+// The agent edits source rows and files a proposal through Inside tools; it holds no deploy
+// authority. The host place, which alone does, reads the filed proposals with `pending` and
+// `source`, publishes the source, previews and decides the deploy (launch.md "Deploy
+// preview"), and then calls the app's settle entry, which calls `settle` here to give the
+// proposal's parked tool call its result.
+//
+// The app lists the tools with `add_tools` from its `agent()`, so every entry reaches them,
+// creates the tables with `migrate` beside `harness.migrate`, and writes two entries of the
+// forwarding kind: one that calls `settle` after authorizing the host as its caller, and a
+// `project` transact entry that returns `harness.project` for the session.
+
+pub type File: codec + send {
+    path: String,
+    text: String
+}
+
+// Filed until the host settles it: Published with the host's text naming the release, or
+// Rejected with why (the checker's refusal, a refused grant diff, a moved tree).
+pub type State: codec + send = Filed | Published(String) | Rejected(String)
+
+// A proposal: the parked call it settles, the hash of the source tree when it was filed,
+// and the agent's summary.
+pub type Proposal: codec + send {
+    call: harness.EffectKey,
+    tree: Bytes,
+    summary: String,
+    state: State
+}
+
+pub type Tables: send {
+    files: store.Table[String, String],
+    proposals: store.Table[Bytes, Proposal]
+}
+
+fn files_name() -> String {
+    "release.files"
+}
+
+fn proposals_name() -> String {
+    "release.proposals"
+}
+
+pub fn migrate(mut phase: store.Migration) -> Result[(), store.Error] {
+    let c_text: std.codec.Codec[String] = std.codec.of()
+    let c_proposal: std.codec.Codec[Proposal] = std.codec.of()
+    match store.migration_create_table(mut phase, store.spec(files_name(), std.codec.key_string(), c_text)) {
+        Error(Exists(_)) => (),
+        Error(take e) => return Error(take e),
+        Ok(()) => (),
+    }
+    match store.migration_create_table(mut phase, store.spec(proposals_name(), std.codec.key_bytes(), c_proposal)) {
+        Error(Exists(_)) => Ok(()),
+        other => take other,
+    }
+}
+
+pub fn tables(schema: store.Schema) -> Result[Tables, store.Error] {
+    let c_text: std.codec.Codec[String] = std.codec.of()
+    let c_proposal: std.codec.Codec[Proposal] = std.codec.of()
+    Ok(Tables(
+        files: store.schema_table(schema, files_name(), std.codec.key_string(), c_text)?,
+        proposals: store.schema_table(schema, proposals_name(), std.codec.key_bytes(), c_proposal)?,
+    ))
+}
+
+// The four Inside tools.
+pub fn add_tools[G: send](mut a: harness.Agent[G]) {
+    list.push(mut a.tools, harness.inside("read_source", "Reads one source file of this harness.", "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}", code.describe(read_source)))
+    list.push(mut a.tools, harness.inside("write_source", "Writes one source file of this harness; empty text deletes it.", "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"text\":{\"type\":\"string\"}},\"required\":[\"path\",\"text\"]}", code.describe(write_source)))
+    list.push(mut a.tools, harness.inside("list_source", "Lists this harness's source files, one path per line.", "{\"type\":\"object\"}", code.describe(list_source)))
+    list.push(mut a.tools, harness.inside("propose_release", "Proposes the current source as this harness's next release; the result arrives when the host has decided.", "{\"type\":\"object\",\"properties\":{\"summary\":{\"type\":\"string\"}},\"required\":[\"summary\"]}", code.describe(propose_release)))
+}
+
+fn opened(tx: store.Tx) -> Result[Tables, harness.Fault] {
+    match tables(store.tx_schema(tx)) {
+        Ok(take t) => Ok(take t),
+        Error(_) => Error(Unavailable),
+    }
+}
+
+fn arg(args: Bytes, key: String) -> Result[String, harness.Fault] {
+    let Ok(raw) = string.from_utf8(clone(args)) else {
+        return Error(BadArgs("arguments are not UTF-8"))
+    }
+    let Ok(fields) = mcp.rpc.object(raw) else {
+        return Error(BadArgs("arguments are not a JSON object"))
+    }
+    match mcp.rpc.field_text(fields, key) {
+        Some(take v) => Ok(take v),
+        None => {
+            let mut why = string.into_bytes(clone(key))
+            list.extend(mut why, string.into_bytes(" must be a string"))
+            Error(BadArgs(result.unwrap(string.from_utf8(take why))))
+        },
+    }
+}
+
+fn path_arg(args: Bytes) -> Result[String, harness.Fault] {
+    let path = arg(args, "path")?
+    if string.byte_len(path) == 0u64 {
+        return Error(BadArgs("path is empty"))
+    }
+    Ok(path)
+}
+
+fn read_source(mut tx: store.Tx, inv: harness.Invoke) -> Result[harness.Reply, harness.Fault] {
+    let t = opened(tx)?
+    let path = path_arg(inv.args)?
+    match store.fetch(tx, store.shape(t.files), path) {
+        Ok(Some(take text)) => Ok(Now(string.into_bytes(take text))),
+        Ok(None) => Error(Refused("no such source file")),
+        Error(_) => Error(Unavailable),
+    }
+}
+
+fn write_source(mut tx: store.Tx, inv: harness.Invoke) -> Result[harness.Reply, harness.Fault] {
+    let t = opened(tx)?
+    let path = path_arg(inv.args)?
+    let text = arg(inv.args, "text")?
+    let wrote: Result[(), store.Error] = if string.byte_len(text) == 0u64 {
+        match store.delete(mut tx, t.files, path) {
+            Ok(_) => Ok(()),
+            Error(take e) => Error(take e),
+        }
+    } else {
+        store.put(mut tx, t.files, path, text)
+    }
+    match wrote {
+        Ok(_) => Ok(Now(string.into_bytes("written"))),
+        Error(_) => Error(Unavailable),
+    }
+}
+
+fn list_source(mut tx: store.Tx, inv: harness.Invoke) -> Result[harness.Reply, harness.Fault] {
+    let t = opened(tx)?
+    let Ok(take cursor) = store.range(tx, store.shape(t.files), Unbounded, Unbounded) else {
+        return Error(Unavailable)
+    }
+    let mut rows = take cursor
+    let mut out: Bytes = list.new()
+    loop {
+        match store.next_range(mut rows) {
+            Ok(Some((path, _))) => {
+                list.extend(mut out, string.as_bytes(path))
+                list.push(mut out, b'\n')
+            },
+            Ok(None) => break,
+            Error(_) => return Error(Unavailable),
+        }
+    }
+    Ok(Now(take out))
+}
+
+// The tree hash: SHA-256 over every (path, text) in path order, each key-encoded, so two
+// trees hash alike exactly when they hold the same files.
+fn tree_of(tx: store.Tx, t: Tables) -> Result[(Bytes, u64), store.Error] {
+    let mut rows = store.range(tx, store.shape(t.files), Unbounded, Unbounded)?
+    let mut raw: Bytes = list.new()
+    let mut n = 0u64
+    while let Some((path, text)) = store.next_range(mut rows)? {
+        std.codec.put_key_string(path, mut raw)
+        std.codec.put_key_string(text, mut raw)
+        n += 1u64
+    }
+    Ok((sha(raw), n))
+}
+
+fn sha(raw: Bytes) -> Bytes {
+    let d = std.sha256.hash(raw)
+    let mut out: Bytes = list.with_capacity(32u64)
+    for i in 0u64 .. 32u64 {
+        list.push(mut out, d[i])
+    }
+    take out
+}
+
+fn call_id(key: harness.EffectKey) -> Bytes {
+    let mut out: Bytes = list.new()
+    std.codec.put_key_u64(key.run, mut out)
+    std.codec.put_key_u64(key.round, mut out)
+    std.codec.put_key_u8(key.kind, mut out)
+    std.codec.put_key_u64(key.ordinal, mut out)
+    take out
+}
+
+// Files the current tree as a proposal and parks the call until the host settles it.
+fn propose_release(mut tx: store.Tx, inv: harness.Invoke) -> Result[harness.Reply, harness.Fault] {
+    let t = opened(tx)?
+    let summary = arg(inv.args, "summary")?
+    let Ok((tree, n)) = tree_of(tx, t) else {
+        return Error(Unavailable)
+    }
+    if n == 0u64 {
+        return Error(Refused("there is no source to propose"))
+    }
+    let p = Proposal(call: clone(inv.key), tree: take tree, summary: take summary, state: Filed)
+    match store.put(mut tx, t.proposals, call_id(inv.key), p) {
+        Ok(_) => Ok(Later),
+        Error(_) => Error(Unavailable),
+    }
+}
+
+// The host's read: every filed proposal, by its ID.
+pub fn pending(snap: store.Snapshot, t: Tables) -> Result[List[(Bytes, Proposal)], store.Error] {
+    let mut rows = store.scan(snap, store.shape(t.proposals), Unbounded, Unbounded)?
+    let mut out: List[(Bytes, Proposal)] = list.new()
+    while let Some((take id, take p)) = store.next(mut rows)? {
+        if let Filed = p.state {
+            list.push(mut out, (take id, take p))
+        }
+    }
+    Ok(take out)
+}
+
+// The source a proposal names, in path order, or None when the tree has changed since it
+// was filed: the host never publishes source the proposal did not name.
+pub fn source(snap: store.Snapshot, t: Tables, tree: Bytes) -> Result[Option[List[File]], store.Error] {
+    let mut rows = store.scan(snap, store.shape(t.files), Unbounded, Unbounded)?
+    let mut raw: Bytes = list.new()
+    let mut files: List[File] = list.new()
+    while let Some((take path, take text)) = store.next(mut rows)? {
+        std.codec.put_key_string(path, mut raw)
+        std.codec.put_key_string(text, mut raw)
+        list.push(mut files, File(path: take path, text: take text))
+    }
+    if sha(raw) != tree {
+        return Ok(None)
+    }
+    Ok(Some(take files))
+}
+
+// The host's decision on proposal `id`, given to its parked call. The app's settle entry
+// calls this after authorizing its caller as the host. A proposal already settled, or
+// unknown, is Ignored; the proposal row records the decision even when the call has since
+// timed out.
+pub fn settle[G: send](mut tx: store.Tx, h: harness.Handles, t: Tables, a: harness.Agent[G], w: harness.Wiring, id: Bytes, take decided: State) -> Result[harness.Filed, harness.Refused] {
+    let Ok(found) = store.fetch(tx, store.shape(t.proposals), id) else {
+        return Error(Storage)
+    }
+    let Some(take p) = found else {
+        return Ok(Ignored)
+    }
+    let mut row = take p
+    match row.state {
+        Filed => (),
+        _ => return Ok(Ignored),
+    }
+    let outcome: harness.Outcome = match decided {
+        Filed => return Error(Malformed("a settlement must decide the proposal")),
+        Published(text) => Returned(Inline(string.into_bytes(clone(text)))),
+        Rejected(why) => Failed(clone(why)),
+    }
+    row.state = take decided
+    let call: harness.EffectKey = clone(row.call)
+    let Ok(_) = store.put(mut tx, t.proposals, id, row) else {
+        return Error(Storage)
+    }
+    harness.resume(mut tx, h, a, w, call, take outcome)
+}

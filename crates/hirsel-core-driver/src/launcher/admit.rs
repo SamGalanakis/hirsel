@@ -6,7 +6,7 @@
 //! published by `hirsel publish` in a child process under the host's caches, and then
 //! admitted as that publication.
 use super::objects::Records;
-use super::session::{Approvals, Attempt, Failure, Reader, Summary, Wire, Writer};
+use super::session::{Approvals, Attempt, Failure, Grants, Reader, Summary, Wire, Writer};
 use super::{Conn, Epoll};
 use crate::code_admission::{
     AdmissionError, AdmissionLimits, AdmissionStore, AdmittedRelease, ControlConnection,
@@ -14,6 +14,7 @@ use crate::code_admission::{
 };
 use crate::code_store::CodeStore;
 use crate::native::recipe_build::foreign_grant_lines;
+use crate::native::recipe_grants::grant_units;
 use crate::{AssemblyRecord, Link, NativeOptions, Publication};
 use hirsel_core_ids::ContentHash;
 use hirsel_core_ir::decode::DecodeBudget;
@@ -64,15 +65,13 @@ pub(crate) fn read_recipe(code: &CodeStore, root: ContentHash, max: usize) -> io
     )?)
 }
 
-/// Whether `new` holds a grant, or a grant value, that `old` does not.
-pub(crate) fn grants_added(old: &Recipe, new: &Recipe) -> bool {
-    new.launch.grants.iter().any(|grant| {
-        !old.launch.grants.iter().any(|current| {
-            current.kind == grant.kind
-                && current.policy == grant.policy
-                && grant.values.iter().all(|v| current.values.contains(v))
-        })
-    })
+/// The authority `new`'s grants give that `old`'s do not, and the authority they drop.
+pub(crate) fn grant_diff(old: &Recipe, new: &Recipe) -> Grants {
+    let (old, new) = (grant_units(old), grant_units(new));
+    Grants {
+        added: new.difference(&old).cloned().collect(),
+        removed: old.difference(&new).cloned().collect(),
+    }
 }
 
 /// The Foreign confirmation lines a deploy of `recipe` prints before it runs.
@@ -680,7 +679,7 @@ fn summary(ad: &Admission, recipe: &Recipe, old: Option<&[u8]>) -> Result<Summar
             .and_then(|record| read_recipe(&ad.code, record.recipe, ad.limits.recipe_bytes))
             .map_err(|e| Failure::Invalid(format!("old assembly: {e}")))?;
         summary.old_root_limit = old.launch.root_limit;
-        summary.grants_added = grants_added(&old, recipe);
+        summary.grants = grant_diff(&old, recipe);
     }
     Ok(summary)
 }
@@ -741,4 +740,66 @@ pub(super) fn waker(write: std::os::fd::OwnedFd) -> io::Result<Arc<File>> {
 
 pub(super) fn wake(file: &File) {
     let _ = (&*file).write(&[1]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hirsel_core_ids::{ContentHash, DefPath};
+    use hirsel_core_ir::Identity;
+    use hirsel_core_ir::release_recipe::{Backend, GrantBinding, GrantKind, Launch};
+
+    fn recipe(grants: &[(GrantKind, &[&str])]) -> Recipe {
+        Recipe {
+            entry: Identity::plain(DefPath::from_full("app@1/main/main").unwrap()),
+            address: ContentHash::default(),
+            groups: vec![],
+            bodies: vec![],
+            foreign_modules: vec![],
+            foreign_archives: vec![],
+            launch: Launch {
+                backend: Backend::Cranelift,
+                target: "t".into(),
+                root_limit: 1,
+                n_place: 1,
+                exit_status: false,
+                grants: grants
+                    .iter()
+                    .enumerate()
+                    .map(|(ordinal, (kind, values))| GrantBinding {
+                        ordinal: ordinal as u32,
+                        kind: *kind,
+                        values: values.iter().map(|v| (*v).into()).collect(),
+                        archive: None,
+                        policy: None,
+                    })
+                    .collect(),
+            },
+        }
+    }
+
+    // The deploy gate's diff (launch.md "Deploy preview") names every authority gained and
+    // every one lost, value by value. Hand-derived: NEW adds one Net rule beside OLD's,
+    // narrows a Secret's patterns, drops Clock and keeps Dir and Args; so the diff is the
+    // new rule and the new Secret binding gained, the old Secret binding and Clock lost.
+    #[test]
+    fn grant_diff_names_each_authority() {
+        let old = recipe(&[
+            (GrantKind::Net, &["allow tcp a:1"]),
+            (GrantKind::Dir, &["/data"]),
+            (GrantKind::Clock, &["Clock"]),
+            (GrantKind::Secret, &["vault", "api_*"]),
+            (GrantKind::Args, &["Args"]),
+        ]);
+        let new = recipe(&[
+            (GrantKind::Net, &["allow tcp a:1", "allow tcp b:2"]),
+            (GrantKind::Dir, &["/data"]),
+            (GrantKind::Secret, &["vault", "api_key"]),
+            (GrantKind::Args, &["Args"]),
+        ]);
+        let diff = grant_diff(&old, &new);
+        assert_eq!(diff.added, ["Net=allow tcp b:2", "Secret=vault api_key"]);
+        assert_eq!(diff.removed, ["Clock", "Secret=vault api_*"]);
+        assert_eq!(grant_diff(&new, &new), Grants::default());
+    }
 }

@@ -34,11 +34,12 @@
     "lines": 1056
   },
   "core/programs/store/platform.hirsel": {
-    "lines": 3916,
-    "reason": "source-publish-1901"
+    "lines": 3967,
+    "reason": "h-release-1895"
   },
   "core/programs/store/platform_laws.hirsel": {
-    "lines": 1984
+    "lines": 2019,
+    "reason": "h-release-1895"
   },
   "core/programs/store/runner.hirsel": {
     "lines": 10060
@@ -134,7 +135,8 @@
     "lines": 1076
   },
   "crates/hirsel-core-driver/src/cli.rs": {
-    "lines": 1329
+    "lines": 1337,
+    "reason": "h-release-1895"
   },
   "crates/hirsel-core-driver/src/code_admission/code_store.rs": {
     "lines": 1203
@@ -146,17 +148,19 @@
     "lines": 1410
   },
   "crates/hirsel-core-driver/src/launcher/mod.rs": {
-    "lines": 1846
+    "lines": 1866,
+    "reason": "h-release-1895"
   },
   "crates/hirsel-core-driver/src/launcher/session.rs": {
-    "lines": 1497,
-    "reason": "source-publish-1901"
+    "lines": 1502,
+    "reason": "h-release-1895"
   },
   "crates/hirsel-core-driver/src/lib.rs": {
     "lines": 1634
   },
   "crates/hirsel-core-driver/src/native.rs": {
-    "lines": 2978
+    "lines": 2980,
+    "reason": "h-release-1895"
   },
   "crates/hirsel-core-driver/src/product.rs": {
     "lines": 1121
@@ -174,7 +178,8 @@
     "lines": 4287
   },
   "crates/hirsel-core-driver/src/request.rs": {
-    "lines": 1946
+    "lines": 1947,
+    "reason": "h-release-1895"
   },
   "crates/hirsel-core-driver/src/request_sequences.rs": {
     "lines": 2614

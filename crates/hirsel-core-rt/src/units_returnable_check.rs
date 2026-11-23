@@ -617,6 +617,14 @@ pub(super) fn handoff_body(_: u32) -> u8 {
 /// The law: the receiver's log (each item, the close, the cancel) and the
 /// joins equal the stackful receiver's, and equal the sequence worked out by
 /// hand from the script.
+///
+/// `returnable_transfer` runs the same script with each receiver reached
+/// through a transfer (`hirsel_core_transfer`): a setup root keeps the job in
+/// its large record and hands it to the receiver as a fresh root, as a
+/// represented transfer site does. Once entered, the receiver reuses the
+/// freed setup record for a scribbled block, so a resume that entered the
+/// setup body again, or a job read from where the setup kept it, sees the
+/// scribbling.
 mod receiving {
     use super::*;
 
@@ -629,10 +637,85 @@ mod receiving {
         child: u64,
         item: u64,
     }
+    #[derive(Clone, Copy)]
     struct Job {
         returnable: bool,
         channel: *mut crate::channel::Channel,
         parks: *mut u64,
+    }
+
+    /// The setup root's record: large, so its block is a size class of its
+    /// own, with the packed transfer input (code word, then the job) homed in it.
+    #[repr(C)]
+    struct SetupArea {
+        word: u64,
+        pad: [u64; 500],
+        code: u64,
+        job: Job,
+    }
+    /// The setup record's area while its block may be reused, and how many
+    /// transfers were taken.
+    static SETUP: Mutex<Option<usize>> = Mutex::new(None);
+    static TRANSFERS: super::super::seam::AtomicU64 = super::super::seam::AtomicU64::new(0);
+
+    /// The transfer glue: the code word, then the job (`input_offset` 8).
+    unsafe extern "C" fn glue(context: *mut Context, result: *mut u8, input: *mut u8) -> u8 {
+        // SAFETY: the transfer packed a Body code word before the job.
+        unsafe {
+            let code: Body = std::mem::transmute(input.cast::<usize>().read());
+            code(context, result, input.add(8))
+        }
+    }
+
+    /// A root that takes its job into its record and transfers to the
+    /// receiver; stackfully, or when the runtime declines, it calls it.
+    unsafe extern "C" fn setup(context: *mut Context, result: *mut u8, input: *mut u8) -> u8 {
+        // SAFETY: the root pins the job and the channel through the join.
+        unsafe {
+            let job = input.cast::<Job>().read();
+            let mut local = std::mem::MaybeUninit::<SetupArea>::zeroed();
+            let a: *mut SetupArea = if job.returnable {
+                hirsel_core_frame_record(context, size_of::<SetupArea>() as u64).cast()
+            } else {
+                local.as_mut_ptr()
+            };
+            if (*a).word != 0 {
+                SEEN.lock().unwrap().push("setup resumed".into());
+                return 1;
+            }
+            (&raw mut (*a).job).write(job);
+            (*a).code = receiver as *const () as usize as u64;
+            if job.returnable {
+                *SETUP.lock().unwrap() = Some(a as usize);
+            }
+            let packed = (&raw const (*a).code).cast::<u8>();
+            if hirsel_core_transfer(context, packed, (8 + size_of::<Job>()) as u64, glue) != 0 {
+                TRANSFERS.fetch_add(1, Ordering::SeqCst);
+                // The site's word, as a represented caller stores it.
+                (*a).word = 1;
+                return 0;
+            }
+            receiver(context, result, (&raw mut (*a).job).cast())
+        }
+    }
+
+    /// Take a block of the freed setup record's size and scribble it.
+    unsafe fn scribble_setup(context: *mut Context) {
+        let Some(area) = SETUP.lock().unwrap().take() else {
+            return;
+        };
+        let bytes = FRAME_HEADER + size_of::<SetupArea>();
+        // SAFETY: a zero-charge block of this context's heap, freed here.
+        unsafe {
+            let block = zero_block(&*context, bytes);
+            assert_eq!(
+                block.as_ptr() as usize + FRAME_HEADER,
+                area,
+                "the scribbler did not reuse the freed setup record"
+            );
+            std::ptr::write_bytes(block.as_ptr(), 0xEE, bytes);
+            crate::block::free_with(block, 0, Some(&*context));
+        }
     }
 
     unsafe extern "C" fn receiver(context: *mut Context, _: *mut u8, input: *mut u8) -> u8 {
@@ -647,6 +730,9 @@ mod receiving {
             };
             if (*a).word == 0 {
                 (*a).child = 0;
+                if job.returnable {
+                    scribble_setup(context);
+                }
             }
             (*a).word = 0;
             loop {
@@ -684,10 +770,11 @@ mod receiving {
         }
     }
 
-    fn run_form(returnable: bool) -> (Vec<String>, u64) {
+    fn run_form(returnable: bool, transfer: bool) -> (Vec<String>, u64) {
         SEEN.lock().unwrap().clear();
         struct Root {
             returnable: bool,
+            transfer: bool,
             parks: *mut u64,
         }
         unsafe extern "C" fn root(context: *mut Context, _: *mut u8, input: *mut u8) -> u8 {
@@ -711,7 +798,7 @@ mod receiving {
                         0,
                         64,
                         (job as *mut Job).cast(),
-                        receiver,
+                        if root.transfer { setup } else { receiver },
                         layout(size_of::<Job>()),
                         0,
                     )
@@ -765,6 +852,7 @@ mod receiving {
         crate::causes::task_start(&mut context).unwrap();
         let mut input = Root {
             returnable,
+            transfer,
             parks: &mut parks,
         };
         // SAFETY: Root, its outputs and the context outlive the run.
@@ -786,8 +874,21 @@ mod receiving {
     }
 
     pub(in super::super) fn body(_: u32) -> u8 {
-        let stackful = run_form(false);
-        let returnable = run_form(true);
+        law(false)
+    }
+    pub(in super::super) fn transfer_body(_: u32) -> u8 {
+        law(true)
+    }
+    fn law(transfer: bool) -> u8 {
+        TRANSFERS.store(0, Ordering::SeqCst);
+        let stackful = run_form(false, transfer);
+        assert_eq!(TRANSFERS.load(Ordering::SeqCst), 0);
+        let returnable = run_form(true, transfer);
+        assert_eq!(
+            TRANSFERS.load(Ordering::SeqCst),
+            if transfer { 2 } else { 0 },
+            "each returnable setup transfers once"
+        );
         assert!(
             returnable.1 > 0,
             "the returnable receiver never returned its stack"
@@ -817,6 +918,7 @@ mod receiving {
     }
 }
 pub(super) use receiving::body as receive_body;
+pub(super) use receiving::transfer_body as receive_transfer_body;
 
 /// Held while one of the case's threads is inside `hirsel_core_ready`.
 static READYING: super::seam::AtomicBool = super::seam::AtomicBool::new(false);

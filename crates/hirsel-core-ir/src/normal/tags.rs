@@ -382,6 +382,7 @@ tags!(RtOp {
     68 => Crc64Nvme,
     69 => Crc32cCombine,
     70 => Crc64NvmeCombine,
+    71 => Transfer { x, r },
 });
 
 tags!(HostOp {

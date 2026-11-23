@@ -222,6 +222,51 @@ fn stuck(take job: Drain) -> u64 waits {
     }
 }
 
+resource type Mark: send { to: Sender[u64], id: u64 } drop(mark) {
+    let _ = channel.try_send(mark.to, mark.id)
+}
+
+type Phase: send {
+    socket: Socket,
+    from: Receiver[String],
+    marks: Sender[u64],
+}
+
+type Steady: send {
+    from: Receiver[String],
+    early: Mark,
+    late: Mark,
+}
+
+// A setup phase that ends in a tail call of its steady loop: the task is
+// handed to `steady` as its root, so the marks' drops show that the setup
+// mark dropped once, before the loop, and the loop's marks in its order.
+fn phase(take job: Phase) -> Option[u64] waits {
+    let Phase(socket: take socket, from: take from, marks: take marks) = take job
+    let setup = match Mark(to: channel.sender(marks), id: 0u64) { Ok(take m) => take m, Error(_) => return None }
+    let early = match Mark(to: channel.sender(marks), id: 1u64) { Ok(take m) => take m, Error(_) => return None }
+    let late = match Mark(to: channel.sender(marks), id: 2u64) { Ok(take m) => take m, Error(_) => return None }
+    let _ = take marks
+    if !opened(take socket) { return None }
+    let _ = take setup
+    steady(Steady(from: take from, early: take early, late: take late))
+}
+
+fn steady(take job: Steady) -> Option[u64] waits {
+    let Steady(from: take from, early: take early, late: take late) = take job
+    let _ = take early
+    let mut total: u64 = 0
+    loop {
+        match channel.receive(from) {
+            Ok(take s) => { total = total + list.len(string.as_bytes(s)) },
+            Error(_) => {
+                let _ = take late
+                return Some(total)
+            },
+        }
+    }
+}
+
 fn wake(take client: Socket) waits {
     let (read, write) = net.split(take client)
     let _ = take read
@@ -267,6 +312,29 @@ pub fn main(n: Net, tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
     }
     let _ = take held
     result.unwrap(stdout.write(out, stopped));
+    let phase_client = result.unwrap(host.connect(n, addr, Never))
+    let (phase_socket, _) = result.unwrap(host.accept(mut listener, Never))
+    let (phase_to, phase_from): (Sender[String], Receiver[String]) = channel.new(1)
+    let (marks, marked): (Sender[u64], Receiver[u64]) = channel.new(4)
+    let phased = task.spawn(tasks, bytes 65536, Phase(socket: take phase_socket, from: take phase_from, marks: take marks), phase)
+    wake(take phase_client)
+    let mut j: u64 = 1
+    while j <= 2 {
+        let mut item = string.new()
+        string.push_uint(mut item, j, 10u32, 2 * j, '0')
+        result.unwrap(channel.send(phase_to, take item))
+        j += 1
+    }
+    let _ = take phase_to
+    let mut shown = string.new()
+    match task.join(take phased) {
+        Ok(Some(v)) => string.push_uint(mut shown, v, 10u32, 2, ' '),
+        _ => {},
+    }
+    while let Ok(m) = channel.receive(marked) {
+        string.push_uint(mut shown, m, 10u32, 2, ' ')
+    }
+    result.unwrap(stdout.write(out, shown));
     Ok(())
 }
 "#,
@@ -507,7 +575,7 @@ fn std_differential(modes: &[&str]) -> usize {
             if (name, mode) == ("receives", "plain") {
                 assert_eq!(
                     (parts.0, String::from_utf8_lossy(&parts.1)),
-                    (Some(0), "231 Cancelled".into()),
+                    (Some(0), "231 Cancelled 6 0 1 2".into()),
                     "receives: {}",
                     String::from_utf8_lossy(&parts.2)
                 );

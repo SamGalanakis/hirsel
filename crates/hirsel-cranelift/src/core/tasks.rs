@@ -456,6 +456,25 @@ impl Function<'_, '_, '_> {
                     n
                 }
             }
+            RtOp::Transfer { x, r } => {
+                // The job packed as a task input behind the root's code word.
+                let (packed, offset) = self.task_input(x, args[1], args[0])?;
+                let (bytes, _) = place::storage(self.input, self.layouts, PlaceTy::Declared(x))?;
+                let bytes = self.b.ins().iconst(types::I64, (bytes + offset) as i64);
+                let glue = self.calls.reference(
+                    self.object,
+                    &mut self.b,
+                    self.task_entries.transfers[&(x, r)],
+                );
+                let glue = self.b.ins().func_addr(types::I64, glue);
+                outputs[0] = self.c_call(
+                    "hirsel_core_transfer",
+                    &[P, P, U, P],
+                    &[B],
+                    &[self.context, packed, bytes, glue],
+                )?[0];
+                1
+            }
             RtOp::FrameRecord => {
                 outputs[0] = self.c_call(
                     "hirsel_core_frame_record",

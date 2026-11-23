@@ -1699,6 +1699,20 @@ pub(super) static CASES: &[Case] = &[
         params: |_| {},
         pct: None,
     },
+    // 19. The same receivers, each reached through a transfer from a setup
+    // root with a large record, which the receiver reuses for a scribbled
+    // block once entered: what they receive equals the stackful receivers'
+    // (`units_returnable_check.rs`).
+    Case {
+        name: "returnable_transfer",
+        workers: 2,
+        units: 1,
+        body: returnable::receive_transfer_body,
+        producers: &[],
+        goals: 0b1,
+        params: |_| {},
+        pct: None,
+    },
     Case {
         name: "conn_flat_slot_reuse",
         workers: 3,
@@ -2191,6 +2205,10 @@ mod tests {
     #[test]
     fn returnable_receive() {
         check("returnable_receive");
+    }
+    #[test]
+    fn returnable_transfer() {
+        check("returnable_transfer");
     }
 
     #[test]

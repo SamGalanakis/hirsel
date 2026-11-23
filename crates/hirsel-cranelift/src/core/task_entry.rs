@@ -6,33 +6,47 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) struct Glues {
     pub entries: BTreeMap<(TypeId, TypeId), cranelift_module::FuncId>,
+    /// A transfer's entry (`RtOp::Transfer`): a function's own root, which
+    /// takes no environment.
+    pub transfers: BTreeMap<(TypeId, TypeId), cranelift_module::FuncId>,
 }
 impl Glues {
     pub fn declare(object: &mut ObjectModule, input: &c::Module) -> Result<Self> {
-        let pairs = input
-            .functions
-            .iter()
-            .filter_map(|f| f.body.as_ref())
-            .flat_map(|b| b.calls.iter())
-            .filter_map(|c| match c.callee {
-                Callee::Runtime(RtOp::Spawn { x, r } | RtOp::SpawnUnit { x, r }) => Some((x, r)),
-                _ => None,
-            })
-            .collect::<BTreeSet<_>>();
-        let mut out = Self {
-            entries: BTreeMap::new(),
+        let pairs = |transfer: bool| {
+            input
+                .functions
+                .iter()
+                .filter_map(|f| f.body.as_ref())
+                .flat_map(|b| b.calls.iter())
+                .filter_map(|c| match c.callee {
+                    Callee::Runtime(RtOp::Spawn { x, r } | RtOp::SpawnUnit { x, r })
+                        if !transfer =>
+                    {
+                        Some((x, r))
+                    }
+                    Callee::Runtime(RtOp::Transfer { x, r }) if transfer => Some((x, r)),
+                    _ => None,
+                })
+                .collect::<BTreeSet<_>>()
         };
-        for (x, r) in pairs {
-            let f = object
-                .declare_function(
-                    &format!("hirsel.task.entry.{}.{}", x.0, r.0),
-                    Linkage::Local,
-                    &abi::Signature::c(object, &[Ty::Ptr; 3], &[Ty::Scalar(Scalar::U8)]).clif,
-                )
-                .map_err(error)?;
-            out.entries.insert((x, r), f);
-        }
-        Ok(out)
+        let mut declare = |kind: &str, transfer: bool| {
+            let mut glues = BTreeMap::new();
+            for (x, r) in pairs(transfer) {
+                let f = object
+                    .declare_function(
+                        &format!("hirsel.{kind}.entry.{}.{}", x.0, r.0),
+                        Linkage::Local,
+                        &abi::Signature::c(object, &[Ty::Ptr; 3], &[Ty::Scalar(Scalar::U8)]).clif,
+                    )
+                    .map_err(error)?;
+                glues.insert((x, r), f);
+            }
+            Ok::<_, Error>(glues)
+        };
+        Ok(Self {
+            entries: declare("task", false)?,
+            transfers: declare("transfer", true)?,
+        })
     }
     pub fn emit(
         &self,
@@ -41,7 +55,12 @@ impl Glues {
         observer: &impl profile::Observer,
         scratch: &mut Compilation,
     ) -> Result<()> {
-        for (&(x, r), &f) in &self.entries {
+        let glues = self
+            .entries
+            .iter()
+            .map(|(&k, &f)| (k, f, true))
+            .chain(self.transfers.iter().map(|(&k, &f)| (k, f, false)));
+        for ((x, r), f, environment) in glues {
             let context = &mut scratch.codegen;
             object.clear_context(context);
             context.func.signature =
@@ -74,7 +93,12 @@ impl Glues {
                 dest: matches!(rc, Carried::Address).then_some(r),
                 never: false,
             };
-            sig.params.insert(0, Param::Value(Ty::Ptr));
+            // A spawned task's code takes an environment first; a root a
+            // transfer enters is a function's own, with none.
+            if environment {
+                sig.params.insert(0, Param::Value(Ty::Ptr));
+            }
+            let job = usize::from(environment);
             let abi = abi::Signature::new(&sig, object, tables.call_layouts);
             let signature = b.import_signature(abi.clif.clone());
             let mut args = Vec::with_capacity(4);
@@ -82,11 +106,12 @@ impl Glues {
             if abi.dest {
                 args.push(ps[1]);
             }
-            let environment = b.ins().iconst(types::I64, 0);
-            args.push(environment);
+            if environment {
+                args.push(b.ins().iconst(types::I64, 0));
+            }
             match xc {
                 Carried::Address => {
-                    if let Some(record) = abi.param_records[1] {
+                    if let Some(record) = abi.param_records[job] {
                         abi::load_record(&mut b, record, data, &mut args);
                     } else {
                         args.push(data);

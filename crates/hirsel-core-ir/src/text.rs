@@ -332,6 +332,7 @@ fn rt(op: RtOp) -> String {
         RtOp::LaunchTarget { view } => format!("rt.launch_target[t{}]", view.0),
         RtOp::Host(op) => format!("rt.{}", op.name()),
         RtOp::FrameRecord => "rt.frame_record".into(),
+        RtOp::Transfer { x, r } => format!("rt.transfer[t{}, t{}]", x.0, r.0),
         RtOp::Returnable(op) => format!("rt.{}_rec", op.name()),
         RtOp::IsolateEnter => "rt.isolate_enter".into(),
         RtOp::IsolateLeave => "rt.isolate_leave".into(),
@@ -1912,6 +1913,10 @@ impl BodyParser {
                 "spawn_unit" => {
                     let ts = tys(2)?;
                     RtOp::SpawnUnit { x: ts[0], r: ts[1] }
+                }
+                "transfer" => {
+                    let ts = tys(2)?;
+                    RtOp::Transfer { x: ts[0], r: ts[1] }
                 }
                 "latest_publish" => RtOp::LatestPublish,
                 "latest_read" => RtOp::LatestRead,

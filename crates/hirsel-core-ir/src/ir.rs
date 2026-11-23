@@ -1049,6 +1049,16 @@ pub enum RtOp {
     ReceiveRec {
         item: TypeId,
     },
+    /// Hand the running task to a fresh root (`crate::returnable`): copy the
+    /// `x` input the leading address takes into new zero-charge task input,
+    /// with the code word after it, and make the task's body enter that code
+    /// through the transfer glue of `(x, r)` once its current frames have
+    /// returned. True when the runtime took the input; false, with the input
+    /// left in place, when the task has no frame record or is replaying.
+    Transfer {
+        x: TypeId,
+        r: TypeId,
+    },
 }
 
 /// The provider operations, numbered as the run time's `HirselCoreHostRequest`
@@ -1641,6 +1651,7 @@ impl RtOp {
             RtOp::LaunchWord => (vec![V(u64_), V(u64_)], vec![u64_]),
             RtOp::LaunchHandle | RtOp::SecretShare => (vec![V(u64_)], vec![u64_]),
             RtOp::FrameRecord => (vec![V(u64_)], vec![p]),
+            RtOp::Transfer { x, .. } => (vec![take(x), V(p)], vec![Ty::Scalar(Scalar::Bool)]),
             RtOp::Returnable(op) => {
                 let host = RtOp::Host(op).signature();
                 let mut params = vec![V(p)];
@@ -1931,7 +1942,7 @@ impl RtOp {
 
     pub fn types(self) -> Vec<TypeId> {
         match self {
-            RtOp::Spawn { x, r } | RtOp::SpawnUnit { x, r } => vec![x, r],
+            RtOp::Spawn { x, r } | RtOp::SpawnUnit { x, r } | RtOp::Transfer { x, r } => vec![x, r],
             RtOp::Join { r } => vec![r],
             RtOp::ConnNew { item }
             | RtOp::ConnSend { item }

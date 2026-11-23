@@ -16,6 +16,12 @@ pub(super) fn input_offset(
     .1
     .max(8)
 }
+pub(super) fn task_entry_name(x: TypeId, r: TypeId) -> String {
+    format!("core_task_entry_{}_{}", x.0, r.0)
+}
+pub(super) fn transfer_entry_name(x: TypeId, r: TypeId) -> String {
+    format!("core_transfer_entry_{}_{}", x.0, r.0)
+}
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit(
     module: &Module,
@@ -27,20 +33,23 @@ pub(super) fn emit(
     sink: &mut dyn Sink,
     items: &mut Items,
 ) -> Result<()> {
+    // A spawned task's code takes an environment first; a root a transfer
+    // enters (`RtOp::Transfer`) is a function's own, with none.
     let pairs = module
         .functions
         .iter()
         .filter_map(|f| f.body.as_ref())
         .flat_map(|b| b.calls.iter())
         .filter_map(|c| match c.callee {
-            Callee::Runtime(RtOp::Spawn { x, r } | RtOp::SpawnUnit { x, r }) => Some((x, r)),
+            Callee::Runtime(RtOp::Spawn { x, r } | RtOp::SpawnUnit { x, r }) => Some((x, r, true)),
+            Callee::Runtime(RtOp::Transfer { x, r }) => Some((x, r, false)),
             _ => None,
         })
         .collect::<BTreeSet<_>>();
     let input = Value::Local(Local::INPUT);
     let body = Body::default();
     let result = Value::Local(Local::RESULT);
-    for (x, r) in pairs {
+    for (x, r, environment) in pairs {
         let xc = module.types[x.index()].carried;
         let rc = module.types[r.index()].carried;
         let fields = match rc {
@@ -57,7 +66,11 @@ pub(super) fn emit(
         };
         let abi = abi::Return::core_record(target, &fields, returned, true);
         sink.begin_function(
-            &format!("core_task_entry_{}_{}", x.0, r.0),
+            &if environment {
+                task_entry_name(x, r)
+            } else {
+                transfer_entry_name(x, r)
+            },
             &FnSig::plain(Type::I8, [Type::Ptr, Type::Ptr, Type::Ptr]),
             &[Local::CONTEXT, Local::RESULT, Local::INPUT],
             &FnAttrs::private(),
@@ -80,7 +93,9 @@ pub(super) fn emit(
         if matches!(rc, Carried::Address) && returned.is_none() {
             args.push(ptr(result.clone()));
         }
-        args.push(ptr(Value::Null));
+        if environment {
+            args.push(ptr(Value::Null));
+        }
         match xc {
             Carried::Address => {
                 if let Some(record) = argument {

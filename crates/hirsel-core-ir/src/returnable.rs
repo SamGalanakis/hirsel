@@ -66,6 +66,189 @@ enum Site {
     /// A wait made by the runtime: the returnable op the call becomes.
     Leaf(RtOp),
     Callee(FuncId),
+    /// A tail call of `g` that hands the task to `g`'s own root
+    /// (`RtOp::Transfer`): the caller's frames return at once, and the record
+    /// they held is freed before `g` runs. Declined (stackfully, in replay) it
+    /// is a plain call of `g`.
+    Transfer(FuncId),
+}
+
+/// Whether the call at instruction `k` of `body` is the last thing its
+/// function does: it cannot fail, it writes its result into the caller's own
+/// result place (directly, or into a slot then copied whole into it), and only
+/// address arithmetic, that copy and a return of no values follow it. Its
+/// caller then holds nothing live across it and passes its result through
+/// unchanged.
+fn tail_like(module: &Module, f: &Function, body: &Body, k: usize) -> bool {
+    let Inst::Call { call } = body.insts[k] else {
+        return false;
+    };
+    let c = &body.calls[call.index()];
+    let own = &module.signatures[f.signature.index()];
+    let sig = &module.signatures[c.signature.index()];
+    let (Some(r), Some(mine)) = (sig.dest, own.dest) else {
+        return false;
+    };
+    if c.fail.is_some() || r != mine || !sig.results.is_empty() || !own.results.is_empty() {
+        return false;
+    }
+    let d = params(body, 0)[0];
+    let bare = |a: AddressId| {
+        let info = &body.addresses[a.index()];
+        info.steps
+            .get(&body.pools.steps)
+            .unwrap_or_default()
+            .is_empty()
+            && info.ty == PlaceTy::Declared(r)
+    };
+    let Some(&Arg::Address(to)) = c.args.get(&body.pools.args).unwrap_or_default().first() else {
+        return false;
+    };
+    if !bare(to) {
+        return false;
+    }
+    // The slot the callee writes, when it is not the caller's own place.
+    let relay = match body.addresses[to.index()].base {
+        AddressBase::Value(v) if v == d => None,
+        AddressBase::Slot(slot) => Some(slot),
+        _ => return false,
+    };
+    let on_slot = |a: AddressId| {
+        bare(a)
+            && matches!(body.addresses[a.index()].base, AddressBase::Slot(x) if Some(x) == relay)
+    };
+    let pointer_of = |v: ValueId| {
+        body.insts.iter().any(
+            |i| matches!(*i, Inst::Pointer { result, address } if result == v && on_slot(address)),
+        )
+    };
+    let mut copied = false;
+    let Some(mut bi) = body.blocks.iter().position(|b| {
+        (b.insts.start as usize..(b.insts.start + b.insts.len) as usize).contains(&k)
+    }) else {
+        return false;
+    };
+    let mut from = k + 1;
+    let mut seen = BTreeSet::new();
+    loop {
+        if !seen.insert(bi) {
+            return false;
+        }
+        let range = body.blocks[bi].insts;
+        for inst in &body.insts[from..(range.start + range.len) as usize] {
+            match *inst {
+                Inst::Pointer { .. }
+                | Inst::Address { fail: None, .. }
+                | Inst::LayoutConst { .. }
+                | Inst::Const { .. }
+                | Inst::StorageDead { .. } => {}
+                Inst::Copy { to, from, .. } if relay.is_some() && !copied => {
+                    let into_own = bare(to)
+                        && matches!(body.addresses[to.index()].base, AddressBase::Value(v) if v == d);
+                    let out_of_slot = on_slot(from)
+                        || bare(from)
+                            && matches!(body.addresses[from.index()].base, AddressBase::Value(v) if pointer_of(v));
+                    if !into_own || !out_of_slot {
+                        return false;
+                    }
+                    copied = true;
+                }
+                _ => return false,
+            }
+        }
+        match &body.terminators[bi] {
+            Terminator::Jump(e) => {
+                let edge = &body.edges[e.index()];
+                if !edge
+                    .args
+                    .get(&body.pools.values)
+                    .unwrap_or_default()
+                    .is_empty()
+                {
+                    return false;
+                }
+                bi = edge.target.index();
+                from = body.blocks[bi].insts.start as usize;
+            }
+            Terminator::Return(values) => {
+                return values
+                    .get(&body.pools.values)
+                    .unwrap_or_default()
+                    .is_empty()
+                    && copied == relay.is_some();
+            }
+            _ => return false,
+        }
+    }
+}
+
+/// The job a transfer moves, when `g` can be a task's root on its own: it
+/// takes one declared job and returns through its result place, and the job
+/// holds nothing that borrows the frames the transfer gives back.
+fn transfer_job(
+    module: &Module,
+    recipes: &[hirsel_core_layout::Recipe],
+    g: FuncId,
+) -> Option<(TypeId, u64)> {
+    let sig = &module.signatures[module.functions[g.index()].signature.index()];
+    let [
+        Param::Address {
+            place: PlaceTy::Declared(job),
+            loan: Loan::Take,
+        },
+    ] = sig.params[..]
+    else {
+        return None;
+    };
+    if sig.never || sig.dest.is_none() || !sig.results.is_empty() {
+        return None;
+    }
+    let (size, align) = place_layout(module, recipes, PlaceTy::Declared(job))?;
+    if align > ALIGN {
+        return None;
+    }
+    let mut seen = BTreeSet::new();
+    let mut rows = vec![job.index()];
+    let mut fields: Vec<&hirsel_core_layout::FieldTy> = vec![];
+    while let Some(t) = rows.pop() {
+        if !seen.insert(t) {
+            continue;
+        }
+        let shape = &module.types[t];
+        if matches!(
+            shape.repr,
+            hirsel_core_layout::Repr::Scoped | hirsel_core_layout::Repr::Region
+        ) {
+            return None;
+        }
+        match &shape.body {
+            hirsel_core_layout::Body::Record(fs) => fields.extend(fs.iter().map(|f| &f.ty)),
+            hirsel_core_layout::Body::Variant(cases) => {
+                fields.extend(cases.iter().flat_map(|c| c.fields.iter().map(|f| &f.ty)))
+            }
+        }
+        fields.extend(shape.held.as_ref());
+        while let Some(field) = fields.pop() {
+            use hirsel_core_layout::FieldTy as F;
+            match field {
+                F::Borrow | F::View(_) | F::Locator(_) | F::RegionRef(_) => return None,
+                F::Inline(x) | F::Box(x) | F::Rc(x) | F::Arc(x) | F::Link(x) => {
+                    rows.push(x.0 as usize)
+                }
+                F::Seq(e)
+                | F::Array(e, _)
+                | F::FixedSpan(e)
+                | F::SeqSpan(e)
+                | F::IndexedSpan(e) => fields.push(e),
+                F::Map(k, v) => {
+                    fields.push(k);
+                    fields.push(v);
+                }
+                F::Scalar(_) | F::Fn | F::OwnFn | F::Handle(_) | F::Text | F::FrozenBytes => {}
+            }
+        }
+    }
+    Some((job, size))
 }
 
 /// Whether `f`'s own body makes an owned wait (`recv_bounded`, `send_pair`).
@@ -948,7 +1131,7 @@ fn shape(
     let child = sites
         .values()
         .map(|s| match *s {
-            Site::Leaf(_) => 8,
+            Site::Leaf(_) | Site::Transfer(_) => 8,
             Site::Callee(g) => area(g),
         })
         .max()
@@ -1138,6 +1321,8 @@ struct Calls<'a> {
     variant: &'a dyn Fn(FuncId) -> (FuncId, SigId),
     returnable: &'a dyn Fn(RtOp) -> SigId,
     frame_record: SigId,
+    /// A transfer target's root, and the transfer op and its signature.
+    transfer: &'a dyn Fn(FuncId) -> (FuncId, RtOp, SigId),
 }
 
 /// The variant of `old` with shape `s`. A root makes its record with
@@ -1344,6 +1529,7 @@ fn build(old: &Body, s: &Shape, root: bool, results_ty: &[Ty], calls: &Calls) ->
                 let (v, sig) = (calls.variant)(g);
                 (Callee::Direct(v), sig)
             }
+            Site::Transfer(_) => unreachable!("a transfer site makes its own calls"),
         };
         let args = PoolRange::push(&mut b.n.pools.args, args);
         let results = PoolRange::push(&mut b.n.pools.values, results);
@@ -1406,6 +1592,85 @@ fn build(old: &Body, s: &Shape, root: bool, results_ty: &[Ty], calls: &Calls) ->
                     .get(&old.pools.values)
                     .unwrap_or_default()
                     .to_vec();
+                if let Site::Transfer(g) = site {
+                    // Hand the job to `g`'s root, then return at once; nothing
+                    // resumes this site, since the task's body is now that root.
+                    // Declined, the call is made as written.
+                    let (target, op, signature) = (calls.transfer)(g);
+                    let old_args = old_call.args.get(&old.pools.args).unwrap_or_default();
+                    let Some(&Arg::Address(job)) = old_args.get(1) else {
+                        unreachable!("a transfer target takes one job")
+                    };
+                    let code = b.value(Ty::Ptr);
+                    b.emit(Inst::FunctionRef {
+                        result: code,
+                        function: target,
+                    });
+                    let moved = b.value(Ty::Scalar(Scalar::Bool));
+                    let args =
+                        PoolRange::push(&mut b.n.pools.args, [Arg::Address(job), Arg::Value(code)]);
+                    let out = PoolRange::push(&mut b.n.pools.values, [moved]);
+                    b.n.calls.push(CallSite {
+                        callee: Callee::Runtime(op),
+                        signature,
+                        args,
+                        results: out,
+                        fail: None,
+                        cold: false,
+                    });
+                    let c = CallId(b.n.calls.len() as u32 - 1);
+                    b.cur.push((Inst::Call { call: c }, anchor));
+                    let gone = b.block();
+                    let kept = b.block();
+                    let yes = b.edge(gone, vec![], false);
+                    let no = b.edge(kept, vec![], true);
+                    b.close(
+                        current,
+                        Terminator::Branch {
+                            condition: moved,
+                            yes,
+                            no,
+                        },
+                        None,
+                    );
+                    b.local.clear();
+                    b.emit(Inst::Store {
+                        address: own,
+                        value: site_const[number[&k] as usize - 1],
+                    });
+                    let ret = PoolRange::push(&mut b.n.pools.values, dummies.clone());
+                    b.close(gone, Terminator::Return(ret), None);
+                    b.local.clear();
+                    let args: Vec<Arg> = old_args
+                        .iter()
+                        .map(|a| match *a {
+                            Arg::Value(v) => Arg::Value(b.get(v)),
+                            Arg::Address(a) => Arg::Address(a),
+                        })
+                        .collect();
+                    let args = PoolRange::push(&mut b.n.pools.args, args);
+                    let out = PoolRange::push(&mut b.n.pools.values, results.clone());
+                    b.n.calls.push(CallSite {
+                        callee: Callee::Direct(g),
+                        signature: old_call.signature,
+                        args,
+                        results: out,
+                        fail: old_call.fail.map(map),
+                        cold: old_call.cold,
+                    });
+                    let c = CallId(b.n.calls.len() as u32 - 1);
+                    b.cur.push((Inst::Call { call: c }, anchor));
+                    for &r in &results {
+                        b.defined(r);
+                    }
+                    let e = b.edge(post[i], vec![], false);
+                    b.close(kept, Terminator::Jump(e), None);
+                    for x in [resume[i], check[i], park[i]] {
+                        b.close(x, Terminator::Unreachable, None);
+                    }
+                    current = post[i];
+                    continue;
+                }
                 // A fresh call starts with a clear word: the callee reads a
                 // nonzero word as its own resume, and the child area may still
                 // hold what an earlier sibling call kept there.
@@ -1691,6 +1956,8 @@ pub struct Applied {
     pub refused: Vec<(FuncId, Refusal)>,
     /// Spawns whose task entry was replaced by a root variant.
     pub roots: usize,
+    /// Transfer targets given a root of their own, with that root's sizes.
+    pub transfers: Vec<(FuncId, Sizes)>,
     /// Spawns of entries that reach an owned wait but stay stackful.
     pub stackful_roots: usize,
     /// Each such spawn's entry, stored callee and reason.
@@ -1836,7 +2103,21 @@ fn sig_id(module: &mut Module, s: Signature) -> SigId {
     SigId(module.signatures.len() as u32 - 1)
 }
 
-fn sites_of(body: &Body, ok: &[bool], owned: &[bool], receives: bool) -> BTreeMap<usize, Site> {
+/// Which calls of a body are sites: callees that can be represented (`ok`),
+/// those that reach an owned wait (`owned`), and the calls that transfer.
+#[derive(Clone, Copy)]
+struct Calling<'a> {
+    ok: &'a [bool],
+    owned: &'a [bool],
+    transfers: &'a BTreeSet<usize>,
+}
+
+fn sites_of(body: &Body, calling: Calling<'_>, receives: bool) -> BTreeMap<usize, Site> {
+    let Calling {
+        ok,
+        owned,
+        transfers,
+    } = calling;
     let mut sites = BTreeMap::new();
     for (k, inst) in body.insts.iter().enumerate() {
         if let Inst::Call { call } = *inst {
@@ -1851,7 +2132,14 @@ fn sites_of(body: &Body, ok: &[bool], owned: &[bool], receives: bool) -> BTreeMa
                 && ok[g.index()]
                 && (receives || owned[g.index()])
             {
-                sites.insert(k, Site::Callee(g));
+                sites.insert(
+                    k,
+                    if transfers.contains(&k) {
+                        Site::Transfer(g)
+                    } else {
+                        Site::Callee(g)
+                    },
+                );
             }
         }
     }
@@ -1865,12 +2153,11 @@ fn shaped(
     recipes: &[hirsel_core_layout::Recipe],
     body: &Body,
     dest: Option<TypeId>,
-    ok: &[bool],
-    owns: &[bool],
+    calling: Calling<'_>,
     area: &dyn Fn(FuncId) -> u64,
 ) -> Result<Shape, Refusal> {
-    let all = sites_of(body, ok, owns, true);
-    let owned = sites_of(body, ok, owns, false);
+    let all = sites_of(body, calling, true);
+    let owned = sites_of(body, calling, false);
     if all.len() == owned.len() {
         return shape(module, recipes, body, dest, owned, area);
     }
@@ -1941,138 +2228,271 @@ pub fn apply(module: &mut Module) -> Applied {
         }
     }
     // Shapes, callees first; a refusal changes its callers' sites, so start
-    // over until none is refused.
-    let mut shapes: BTreeMap<usize, Shape> = BTreeMap::new();
-    'outer: loop {
-        shapes.clear();
-        loop {
-            let mut progress = false;
-            for f in 0..n {
-                if !ok[f] || shapes.contains_key(&f) {
-                    continue;
-                }
-                let body = forms[f].as_ref().unwrap();
-                if sites_of(body, &ok, &owns, true)
-                    .values()
-                    .any(|s| matches!(*s, Site::Callee(g) if !shapes.contains_key(&g.index())))
-                {
-                    continue;
-                }
-                let area = |g: FuncId| shapes[&g.index()].area;
-                let dest = module.signatures[module.functions[f].signature.index()].dest;
-                match shaped(module, &recipes, body, dest, &ok, &owns, &area) {
-                    Ok(s) => {
-                        shapes.insert(f, s);
-                        progress = true;
+    // over until none is refused. `transfers` names the transfer sites of
+    // each function, by instruction.
+    let compute = |ok: &mut Vec<bool>,
+                   why: &mut BTreeMap<usize, Refusal>,
+                   transfers: &BTreeMap<usize, BTreeSet<usize>>|
+     -> BTreeMap<usize, Shape> {
+        let none = BTreeSet::new();
+        let mut shapes: BTreeMap<usize, Shape> = BTreeMap::new();
+        'outer: loop {
+            shapes.clear();
+            loop {
+                let mut progress = false;
+                for f in 0..n {
+                    if !ok[f] || shapes.contains_key(&f) {
+                        continue;
                     }
-                    Err(r) => {
-                        ok[f] = false;
-                        why.insert(f, r);
-                        continue 'outer;
+                    let body = forms[f].as_ref().unwrap();
+                    let calling = Calling {
+                        ok,
+                        owned: &owns,
+                        transfers: transfers.get(&f).unwrap_or(&none),
+                    };
+                    if sites_of(body, calling, true).values().any(|s| {
+                        matches!(*s, Site::Callee(g) | Site::Transfer(g) if !shapes.contains_key(&g.index()))
+                    }) {
+                        continue;
                     }
+                    let area = |g: FuncId| shapes[&g.index()].area;
+                    let dest = module.signatures[module.functions[f].signature.index()].dest;
+                    match shaped(module, &recipes, body, dest, calling, &area) {
+                        Ok(s) => {
+                            shapes.insert(f, s);
+                            progress = true;
+                        }
+                        Err(r) => {
+                            ok[f] = false;
+                            why.insert(f, r);
+                            continue 'outer;
+                        }
+                    }
+                }
+                if !progress {
+                    break;
                 }
             }
-            if !progress {
+            // What remains waits on itself through a cycle.
+            let cyclic: Vec<usize> = (0..n)
+                .filter(|&f| ok[f] && !shapes.contains_key(&f))
+                .collect();
+            if cyclic.is_empty() {
                 break;
             }
+            for f in cyclic {
+                ok[f] = false;
+                why.insert(f, Refusal::Recursive);
+            }
         }
-        // What remains waits on itself through a cycle.
-        let cyclic: Vec<usize> = (0..n)
-            .filter(|&f| ok[f] && !shapes.contains_key(&f))
-            .collect();
-        if cyclic.is_empty() {
-            break;
-        }
-        for f in cyclic {
-            ok[f] = false;
-            why.insert(f, Refusal::Recursive);
-        }
-    }
+        shapes
+    };
     // Roots. An entry whose symbol selects its body by the step window
     // (MEM-30) gets a root of each body, and the checked root's symbol selects
     // the same way. Represented frames open no step bound, so a resume selects
     // the root the task first entered.
-    let mut roots: Vec<(Spawn, Form, Option<Form>)> = vec![];
     let free_of = |g: FuncId| module.step_free.get(&g).map_or(g, |s| s.body);
-    for spawn in spawns(module) {
-        let selects = module.step_free.get(&spawn.entry).filter(|s| s.dispatch);
-        let form = |entry: FuncId, callee: FuncId| -> Result<Form, Stackful> {
-            // A task whose callee reaches only receives keeps its stack.
-            if !ok[callee.index()] || !owns[callee.index()] {
-                return Err(Stackful::Callee);
-            }
-            let function = &module.functions[entry.index()];
-            let old = function.body.as_ref().unwrap();
-            if let Some(r) = refusal(module, function, old) {
-                return Err(Stackful::Entry(r));
-            }
-            let indirect = if entry == spawn.entry {
-                spawn.indirect
-            } else {
-                let calls: Vec<CallId> = old
-                    .insts
-                    .iter()
-                    .filter_map(|i| match *i {
-                        Inst::Call { call }
-                            if matches!(old.calls[call.index()].callee, Callee::Indirect(_)) =>
-                        {
-                            Some(call)
-                        }
-                        _ => None,
-                    })
-                    .collect();
-                let [call] = calls[..] else {
-                    return Err(Stackful::StepFree);
+    let make_roots = |ok: &[bool], shapes: &BTreeMap<usize, Shape>| {
+        let mut roots: Vec<(Spawn, Form, Option<Form>)> = vec![];
+        let mut stackful = vec![];
+        for spawn in spawns(module) {
+            let selects = module.step_free.get(&spawn.entry).filter(|s| s.dispatch);
+            let form = |entry: FuncId, callee: FuncId| -> Result<Form, Stackful> {
+                // A task whose callee reaches only receives keeps its stack.
+                if !ok[callee.index()] || !owns[callee.index()] {
+                    return Err(Stackful::Callee);
+                }
+                let function = &module.functions[entry.index()];
+                let old = function.body.as_ref().unwrap();
+                if let Some(r) = refusal(module, function, old) {
+                    return Err(Stackful::Entry(r));
+                }
+                let indirect = if entry == spawn.entry {
+                    spawn.indirect
+                } else {
+                    let calls: Vec<CallId> = old
+                        .insts
+                        .iter()
+                        .filter_map(|i| match *i {
+                            Inst::Call { call }
+                                if matches!(
+                                    old.calls[call.index()].callee,
+                                    Callee::Indirect(_)
+                                ) =>
+                            {
+                                Some(call)
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    let [call] = calls[..] else {
+                        return Err(Stackful::StepFree);
+                    };
+                    call
                 };
-                call
+                let mut body = forwarded(old);
+                body.calls[indirect.index()].callee = Callee::Direct(callee);
+                body.calls[indirect.index()].signature = module.functions[callee.index()].signature;
+                let area = |g: FuncId| shapes[&g.index()].area;
+                let dest = module.signatures[function.signature.index()].dest;
+                let calling = Calling {
+                    ok,
+                    owned: &owns,
+                    transfers: &BTreeSet::new(),
+                };
+                let s = shaped(module, &recipes, &body, dest, calling, &area)
+                    .map_err(Stackful::Entry)?;
+                Ok(Form {
+                    entry,
+                    callee,
+                    body,
+                    shape: s,
+                })
             };
-            let mut body = forwarded(old);
-            body.calls[indirect.index()].callee = Callee::Direct(callee);
-            body.calls[indirect.index()].signature = module.functions[callee.index()].signature;
-            let area = |g: FuncId| shapes[&g.index()].area;
-            let dest = module.signatures[function.signature.index()].dest;
-            let s = shaped(module, &recipes, &body, dest, &ok, &owns, &area)
-                .map_err(Stackful::Entry)?;
-            Ok(Form {
-                entry,
-                callee,
-                body,
-                shape: s,
-            })
-        };
-        let checked = form(spawn.entry, spawn.callee);
-        let free = match selects {
-            Some(free) => form(free.body, free_of(spawn.callee)).map(Some),
-            None => Ok(None),
-        };
-        match (checked, free) {
-            (Ok(checked), Ok(free)) => roots.push((spawn, checked, free)),
-            (Err(why), _) | (_, Err(why)) => {
-                if owns[spawn.callee.index()] {
-                    applied.stackful_roots += 1;
-                    applied.stackful.push((spawn.entry, spawn.callee, why));
+            let checked = form(spawn.entry, spawn.callee);
+            let free = match selects {
+                Some(free) => form(free.body, free_of(spawn.callee)).map(Some),
+                None => Ok(None),
+            };
+            match (checked, free) {
+                (Ok(checked), Ok(free)) => roots.push((spawn, checked, free)),
+                (Err(why), _) | (_, Err(why)) => {
+                    if owns[spawn.callee.index()] {
+                        stackful.push((spawn.entry, spawn.callee, why));
+                    }
+                }
+            }
+        }
+        (roots, stackful)
+    };
+    // The functions a root reaches as variants, and the transfer targets
+    // whose own roots it reaches.
+    let reached = |roots: &[(Spawn, Form, Option<Form>)], shapes: &BTreeMap<usize, Shape>| {
+        let mut needed = vec![false; n];
+        let mut targets = BTreeSet::new();
+        let mut work: Vec<(usize, bool)> = roots
+            .iter()
+            .flat_map(|(_, checked, free)| [Some(checked), free.as_ref()])
+            .flatten()
+            .map(|form| (form.callee.index(), false))
+            .collect();
+        while let Some((f, target)) = work.pop() {
+            let fresh = if target {
+                targets.insert(f)
+            } else {
+                !std::mem::replace(&mut needed[f], true)
+            };
+            if !fresh {
+                continue;
+            }
+            for site in shapes[&f].sites.values() {
+                match *site {
+                    Site::Callee(g) => work.push((g.index(), false)),
+                    Site::Transfer(g) => work.push((g.index(), true)),
+                    Site::Leaf(_) => {}
+                }
+            }
+        }
+        (needed, targets)
+    };
+    let mut shapes = compute(&mut ok, &mut why, &BTreeMap::new());
+    let (mut roots, mut stackful) = make_roots(&ok, &shapes);
+    // Transfer sites: a tail call of `g` whose callers are all tail calls up
+    // to the root, so no frame above it holds anything live across it, made
+    // only where the job is smaller than the record it gives back, and only
+    // at the deepest such call on each path.
+    let (needed, _) = reached(&roots, &shapes);
+    let mut callers: BTreeMap<usize, Vec<(Option<usize>, bool)>> = BTreeMap::new();
+    for f in (0..n).filter(|&f| needed[f]) {
+        for (&k, site) in &shapes[&f].sites {
+            if let Site::Callee(g) = *site {
+                let tail = tail_like(module, &module.functions[f], forms[f].as_ref().unwrap(), k);
+                callers.entry(g.index()).or_default().push((Some(f), tail));
+            }
+        }
+    }
+    for (_, checked, free) in &roots {
+        for form in [Some(checked), free.as_ref()].into_iter().flatten() {
+            let entry = &module.functions[form.entry.index()];
+            for (&k, site) in &form.shape.sites {
+                if let Site::Callee(g) = *site {
+                    let tail = tail_like(module, entry, &form.body, k);
+                    callers.entry(g.index()).or_default().push((None, tail));
                 }
             }
         }
     }
-    // Only what a root reaches gets a variant.
-    let mut needed = vec![false; n];
-    let mut work: Vec<usize> = roots
-        .iter()
-        .flat_map(|(_, checked, free)| [Some(checked), free.as_ref()])
-        .flatten()
-        .map(|form| form.callee.index())
-        .collect();
-    while let Some(f) = work.pop() {
-        if std::mem::replace(&mut needed[f], true) {
-            continue;
+    // `tails[f]`: every represented call of `f` is a tail call from a root or
+    // from a function with the same property (callers come first: the calls
+    // form no cycle).
+    let mut tails = vec![false; n];
+    loop {
+        let mut changed = false;
+        for f in 0..n {
+            if !needed[f] || tails[f] {
+                continue;
+            }
+            let all = callers.get(&f).is_some_and(|cs| {
+                cs.iter()
+                    .all(|&(c, tail)| tail && c.is_none_or(|c| tails[c]))
+            });
+            if all {
+                tails[f] = true;
+                changed = true;
+            }
         }
-        for site in shapes[&f].sites.values() {
-            if let Site::Callee(g) = *site {
-                work.push(g.index());
+        if !changed {
+            break;
+        }
+    }
+    let mut candidates: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
+    for f in (0..n).filter(|&f| tails[f]) {
+        let body = forms[f].as_ref().unwrap();
+        for (&k, site) in &shapes[&f].sites {
+            let Site::Callee(g) = *site else { continue };
+            let Some((_, job)) = transfer_job(module, &recipes, g) else {
+                continue;
+            };
+            if tail_like(module, &module.functions[f], body, k)
+                && job < shapes[&f].area.saturating_sub(shapes[&g.index()].area)
+            {
+                candidates.entry(f).or_default().insert(k);
             }
         }
     }
+    // `deeper[g]`: `g` or a function it calls makes a candidate transfer.
+    let mut deeper = vec![false; n];
+    loop {
+        let mut changed = false;
+        for (&f, s) in &shapes {
+            if deeper[f] {
+                continue;
+            }
+            if candidates.contains_key(&f)
+                || s.sites
+                    .values()
+                    .any(|site| matches!(*site, Site::Callee(g) if deeper[g.index()]))
+            {
+                deeper[f] = true;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    let mut transfers = candidates;
+    for (&f, ks) in transfers.iter_mut() {
+        ks.retain(|k| !matches!(shapes[&f].sites[k], Site::Callee(g) if deeper[g.index()]));
+    }
+    transfers.retain(|_, ks| !ks.is_empty());
+    if !transfers.is_empty() {
+        shapes = compute(&mut ok, &mut why, &transfers);
+        (roots, stackful) = make_roots(&ok, &shapes);
+    }
+    let (needed, targets) = reached(&roots, &shapes);
+    applied.stackful_roots += stackful.len();
+    applied.stackful.extend(stackful);
     for (&f, r) in &why {
         applied.refused.push((FuncId(f as u32), *r));
     }
@@ -2083,7 +2503,7 @@ pub fn apply(module: &mut Module) -> Applied {
     // In a fixed order, so the signature table is a function of the module.
     let leaves: Vec<RtOp> = shapes
         .iter()
-        .filter(|(f, _)| needed[**f])
+        .filter(|(f, _)| needed[**f] || targets.contains(*f))
         .map(|(_, s)| s)
         .chain(
             roots
@@ -2095,7 +2515,7 @@ pub fn apply(module: &mut Module) -> Applied {
         .flat_map(|s| s.sites.values())
         .filter_map(|site| match *site {
             Site::Leaf(op) => Some(op),
-            Site::Callee(_) => None,
+            Site::Callee(_) | Site::Transfer(_) => None,
         })
         .collect();
     let mut returnable: HashMap<RtOp, SigId> = HashMap::new();
@@ -2129,18 +2549,62 @@ pub fn apply(module: &mut Module) -> Applied {
         applied.represented.push(FuncId(f as u32));
         applied.sizes.push((FuncId(f as u32), shapes[&f].sizes));
     }
+    // A transfer target's root: `g`'s body as a root, with `g`'s signature,
+    // entered through the transfer's glue with no step window of its own.
+    let mut transfer_root: BTreeMap<usize, (FuncId, RtOp, SigId)> = BTreeMap::new();
+    for &g in &targets {
+        let canonical = &module.functions[g];
+        let sig = &module.signatures[canonical.signature.index()];
+        let Param::Address {
+            place: PlaceTy::Declared(x),
+            ..
+        } = sig.params[0]
+        else {
+            unreachable!("a transfer target takes one job")
+        };
+        let op = RtOp::Transfer {
+            x,
+            r: sig
+                .dest
+                .expect("a transfer target returns through its place"),
+        };
+        let (instance, signature, versioned) =
+            (canonical.instance, canonical.signature, canonical.versioned);
+        let identity = module.code_identity(FuncId(g as u32));
+        let id = FuncId(module.functions.len() as u32);
+        module.functions.push(Function {
+            instance,
+            signature,
+            body: None,
+            versioned,
+        });
+        module.code_variants.insert(
+            id,
+            ContentHash::of_parts("hirsel.returnable.transfer.v1", [identity.0.as_slice()]),
+        );
+        let transfer_sig = sig_id(module, op.signature());
+        transfer_root.insert(g, (id, op, transfer_sig));
+        applied.transfers.push((FuncId(g as u32), shapes[&g].sizes));
+    }
     let lookup = |g: FuncId| variant[&g.index()];
     let ret = |op: RtOp| returnable[&op];
+    let target = |g: FuncId| transfer_root[&g.index()];
     let calls = Calls {
         variant: &lookup,
         returnable: &ret,
         frame_record,
+        transfer: &target,
     };
     let mut bodies = vec![];
     for (&f, &(id, _)) in &variant {
         let old = forms[f].as_ref().unwrap();
         let results = &module.signatures[module.functions[f].signature.index()].results;
         bodies.push((id, build(old, &shapes[&f], false, results, &calls)));
+    }
+    for (&g, &(id, _, _)) in &transfer_root {
+        let old = forms[g].as_ref().unwrap();
+        let results = &module.signatures[module.functions[g].signature.index()].results;
+        bodies.push((id, build(old, &shapes[&g], true, results, &calls)));
     }
     let mut entries: BTreeMap<(FuncId, FuncId), FuncId> = BTreeMap::new();
     let mut root_bodies = vec![];
@@ -2204,9 +2668,9 @@ pub fn apply(module: &mut Module) -> Applied {
             },
         );
     }
-    // A spawning function that is itself represented runs as its variant, so
-    // the variant's reference to the entry is rewritten too. The variant keeps
-    // the original's value numbers.
+    // A spawning function that is itself represented runs as its variant, or
+    // as its transfer root, so their references to the entry are rewritten
+    // too. Both keep the original's value numbers.
     for (f, k, id) in rewrites {
         let body = module.functions[f].body.as_mut().unwrap();
         let Inst::FunctionRef { result, function } = &mut body.insts[k] else {
@@ -2214,7 +2678,9 @@ pub fn apply(module: &mut Module) -> Applied {
         };
         *function = id;
         let result = *result;
-        if let Some(&(v, _)) = variant.get(&f) {
+        let copies = variant.get(&f).map(|&(v, _)| v);
+        let moved = transfer_root.get(&f).map(|&(t, _, _)| t);
+        for v in copies.into_iter().chain(moved) {
             let body = module.functions[v.index()].body.as_mut().unwrap();
             for inst in &mut body.insts {
                 if let Inst::FunctionRef {
@@ -2259,6 +2725,19 @@ pub fn report(module: &Module, applied: &Applied) -> String {
             name(e),
             c.0,
             name(c)
+        ));
+    }
+    for (f, z) in &applied.transfers {
+        s.push_str(&format!(
+            "  transfer root f{} {}: area {} = word 8 + child {} + slots {} of {} + dest {} + demoted {}\n",
+            f.0,
+            name(*f),
+            z.area,
+            z.child,
+            z.slots,
+            z.all_slots,
+            z.dest,
+            z.demoted
         ));
     }
     for (f, z) in &applied.sizes {

@@ -205,6 +205,12 @@ pub struct Task {
     /// Set by a returnable wait that parked: the body returned through its
     /// represented frames, and the stack holds nothing live.
     stackless: bool,
+    /// The input a transfer moved the task's job into (`hirsel_core_transfer`),
+    /// read by the body in place of `input` from then on.
+    moved: Option<ZeroBlock>,
+    /// A transfer made by the running body: its new input and body, taken by
+    /// `start` once the body has returned through its frames.
+    transfer: Option<(ZeroBlock, Body)>,
     /// The abandoning parent's cleanup frame, once the task has ended.
     holder: std::mem::MaybeUninit<crate::counted::Holder>,
     /// How far the result's cleanup has got.
@@ -4580,7 +4586,9 @@ unsafe fn unmount(task: *mut Task) -> Stack {
 /// one block of the task's unit heap, funded by the task's payer at zero
 /// logical charge and outside the observed retained backing, like the stack
 /// it stands in for, made at the root's first
-/// call and at a stable address until the task ends. Its header holds the
+/// call and at a stable address until the task ends or a transfer hands it to
+/// a new root (`hirsel_core_transfer`), which gets a fresh record at its own
+/// first call. Its header holds the
 /// owned operation state; the area after it holds the represented frames the
 /// compiler lays out.
 pub(crate) struct FrameRecord {
@@ -4588,13 +4596,84 @@ pub(crate) struct FrameRecord {
     #[cfg(debug_assertions)]
     size: usize,
 }
+/// One block of the task's unit heap at zero logical charge, outside the
+/// observed retained backing, like the stack the returnable form stands in for.
+pub(crate) fn zero_block(context: &Context, bytes: usize) -> NonNull<u8> {
+    // A zero charge admits nothing, so an injected refusal of real
+    // charges never reaches it; the block pins its payer until freed.
+    let payer = context.payer();
+    payer.pin_zero();
+    // Like the stack it stands in for, the block is not retained backing;
+    // its free, of a block the observer never took, is no event.
+    #[cfg(any(test, feature = "charge-observation"))]
+    let stack_like = crate::peak::StackLike::hold();
+    let base = crate::block::allocate_admitted(context, payer, bytes, 8, crate::block::PLAIN);
+    #[cfg(any(test, feature = "charge-observation"))]
+    drop(stack_like);
+    base
+}
+/// A task input a transfer moved its job into: a zero-charge block, like the
+/// frame record, freed when the task ends or makes its next transfer.
+pub(crate) struct ZeroBlock {
+    base: NonNull<u8>,
+}
+impl ZeroBlock {
+    /// # Safety
+    /// `context` is the running task's; nothing reads the block now.
+    unsafe fn release(self, context: &Context) {
+        let base = self.base;
+        std::mem::forget(self);
+        // SAFETY: a zero-charge block of this context's heap.
+        unsafe { crate::block::free_with(base, 0, Some(context)) }
+    }
+}
+impl Drop for ZeroBlock {
+    /// A task torn down without ending its body gives the block back with no
+    /// context, as its frame record does.
+    fn drop(&mut self) {
+        // SAFETY: a zero-charge block; nothing reads it now.
+        unsafe { crate::block::free(self.base, 0) }
+    }
+}
+/// Move the running task's job, `bytes` packed as a task input (the code word,
+/// then the job), into a fresh zero-charge input, and make `body` the task's
+/// body once the current one has returned through its frames (`start`). The
+/// caller's frames return at once and touch nothing after; `start` frees the
+/// frame record (and an earlier moved input) before it enters `body` on the
+/// same stack.
+/// It declines, leaving the job where it is, when the task waits stackfully:
+/// it has no frame record, or it is replaying (`returnable_waits`).
+/// # Safety
+/// Called by a represented transfer site, with `input` holding `bytes`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_transfer(
+    context: *mut Context,
+    input: *const u8,
+    bytes: u64,
+    body: Body,
+) -> u8 {
+    if !returnable_waits() {
+        return 0;
+    }
+    let task = CURRENT.get();
+    let bytes = usize::try_from(bytes).unwrap_or_else(|_| crate::process::stop(b"Transfer"));
+    // SAFETY: CURRENT pins the task, and only its own fiber touches it; the
+    // block holds `bytes` writable bytes.
+    unsafe {
+        let base = zero_block(&*context, bytes.max(8));
+        ptr::copy_nonoverlapping(input, base.as_ptr(), bytes);
+        debug_assert!((*task).transfer.is_none());
+        (*task).transfer = Some((ZeroBlock { base }, body));
+    }
+    1
+}
 /// The record's header: one operation and the owned helper state it borrows.
 #[repr(C)]
 pub(crate) struct FrameHeader {
     operation: std::mem::MaybeUninit<Operation>,
     pub(crate) net: std::mem::MaybeUninit<crate::net::OwnedNet>,
 }
-const FRAME_HEADER: usize = size_of::<FrameHeader>();
+pub(crate) const FRAME_HEADER: usize = size_of::<FrameHeader>();
 const _: () = assert!(FRAME_HEADER % 8 == 0 && align_of::<FrameHeader>() <= 8);
 impl FrameRecord {
     /// A record of `size` area bytes. Only the root's own resume word, the
@@ -4605,17 +4684,7 @@ impl FrameRecord {
         let bytes = FRAME_HEADER
             .checked_add(size.max(8))
             .unwrap_or_else(|| crate::process::stop(b"FrameRecord"));
-        // A zero charge admits nothing, so an injected refusal of real
-        // charges never reaches it; the block pins its payer until freed.
-        let payer = context.payer();
-        payer.pin_zero();
-        // Like the stack it stands in for, the block is not retained backing;
-        // its free, of a block the observer never took, is no event.
-        #[cfg(any(test, feature = "charge-observation"))]
-        let stack_like = crate::peak::StackLike::hold();
-        let base = crate::block::allocate_admitted(context, payer, bytes, 8, crate::block::PLAIN);
-        #[cfg(any(test, feature = "charge-observation"))]
-        drop(stack_like);
+        let base = zero_block(context, bytes);
         // SAFETY: the block holds `bytes` writable bytes, the word in bounds.
         unsafe {
             #[cfg(any(test, debug_assertions, feature = "testing"))]
@@ -4692,19 +4761,40 @@ unsafe extern "C" fn start(first: *mut u8, _: *mut u8) -> ! {
     // SAFETY: start owns this fiber. The body cleans its input/temporaries;
     // its result is initialized only on status zero.
     unsafe {
-        (*task).failed = ((*task).body)(
-            (*task).context,
-            (*task).result.as_ptr(),
-            (*task).input.as_ptr(),
-        );
-        if (*task).stackless {
-            // The body returned through its represented frames from a park
-            // (`park_returnable`); the dispatcher takes this stack back.
-            switch_to_idle(task);
-            std::hint::unreachable_unchecked();
+        loop {
+            let input = match &(*task).moved {
+                Some(moved) => moved.base.as_ptr(),
+                None => (*task).input.as_ptr(),
+            };
+            (*task).failed = ((*task).body)((*task).context, (*task).result.as_ptr(), input);
+            if (*task).stackless {
+                // The body returned through its represented frames from a park
+                // (`park_returnable`); the dispatcher takes this stack back.
+                switch_to_idle(task);
+                std::hint::unreachable_unchecked();
+            }
+            let Some((moved, body)) = (*task).transfer.take() else {
+                break;
+            };
+            // The body returned through its frames from a transfer site
+            // (`hirsel_core_transfer`): nothing reads its record or its input
+            // now, and the new body makes its own record at its first call.
+            let context = &*(*task).context;
+            if let Some(record) = (*task).frame.take() {
+                record.release(context);
+            }
+            // The spawn input, its job moved out, is kept to the task's end,
+            // so its observed backing is freed when it always was.
+            if let Some(old) = (*task).moved.replace(moved) {
+                old.release(context);
+            }
+            (*task).body = body;
         }
         if let Some(record) = (*task).frame.take() {
             record.release(&*(*task).context);
+        }
+        if let Some(moved) = (*task).moved.take() {
+            moved.release(&*(*task).context);
         }
         // The hand-over and END share one hold of the token.
         let _handover = (*task).record.is_some().then(|| {
@@ -4957,6 +5047,8 @@ pub(crate) unsafe fn run_root_with_unit(
         record: None,
         frame: None,
         stackless: false,
+        moved: None,
+        transfer: None,
         holder: std::mem::MaybeUninit::uninit(),
         cursor: 0,
     });
@@ -5589,6 +5681,8 @@ unsafe fn spawn_in(
             record: Some(record),
             frame: None,
             stackless: false,
+            moved: None,
+            transfer: None,
             holder: std::mem::MaybeUninit::uninit(),
             cursor: 0,
         });
@@ -6146,6 +6240,8 @@ mod ready_routing_laws {
                         record: None,
                         frame: None,
                         stackless: false,
+                        moved: None,
+                        transfer: None,
                         holder: std::mem::MaybeUninit::uninit(),
                         cursor: 0,
                     })

@@ -402,6 +402,21 @@ impl FunctionEmitter<'_> {
             ),
             RtOp::Host(op) => self.host_call(op, &args, None),
             RtOp::Returnable(op) => self.host_call(op, &args[1..], Some(args[0].clone())),
+            RtOp::Transfer { x, r } => {
+                // The job packed as a task input behind the root's code word.
+                let (packed, offset) = self.task_input(x, &args[1], &args[0]);
+                let (bytes, _) = self.place_layout(PlaceTy::Declared(x));
+                self.native_call(
+                    "hirsel_core_transfer",
+                    &[B],
+                    &[
+                        ptr(CONTEXT),
+                        p(&packed),
+                        u(&int(bytes + offset)),
+                        ptr(Value::global(task_entry::transfer_entry_name(x, r))),
+                    ],
+                )
+            }
             RtOp::FrameRecord => self.native_call(
                 "hirsel_core_frame_record",
                 &[P],
@@ -527,7 +542,7 @@ impl FunctionEmitter<'_> {
                         u(&args[3]),
                         u(&args[0]),
                         p(&packed),
-                        ptr(Value::global(format!("core_task_entry_{}_{}", x.0, r.0))),
+                        ptr(Value::global(task_entry::task_entry_name(x, r))),
                         (abi::composite_argument(self.abi.target, 64), descriptor),
                         u(&at),
                     ],
@@ -546,7 +561,7 @@ impl FunctionEmitter<'_> {
                         u(&args[3]),
                         u(&args[0]),
                         p(&packed),
-                        ptr(Value::global(format!("core_task_entry_{}_{}", x.0, r.0))),
+                        ptr(Value::global(task_entry::task_entry_name(x, r))),
                         p(&layout),
                         p(&xc),
                         p(&rc),

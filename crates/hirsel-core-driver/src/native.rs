@@ -1862,7 +1862,7 @@ fn link_objects(
             .collect();
         let (runtime_sources, spawns_units) =
             crate::native_entry::runtime_sources(&sources, sources_key, &inputs[1..], &keys)?;
-        let write_entry = |live_sites: Option<&BTreeSet<u64>>| -> Result<(), NativeStop> {
+        let write_entry = |live_sites: Option<&BTreeSet<u64>>| -> Result<Vec<u8>, NativeStop> {
             let bytes = entry_plan
                 .emit(
                     &options.target,
@@ -1873,8 +1873,8 @@ fn link_objects(
                     (live_sites, spawns_units),
                 )
                 .map_err(|error| NativeStop::Link(format!("entry object: {error}")))?;
-            std::fs::write(&entry, bytes)?;
-            Ok(())
+            std::fs::write(&entry, &bytes)?;
+            Ok(bytes)
         };
         if options.debug_lines {
             let debug = crate::native_debug::bind_side_products(
@@ -1889,12 +1889,45 @@ fn link_objects(
             std::fs::write(&debug_path, debug)?;
             inputs.push(debug_path);
         }
-        let link = |recipe| {
+        // A resident compiler links a development edit by patching its last
+        // link's executable when it can (crate::incremental_link).
+        let incremental = !options.optimize && !options.debug_lines && crate::resident::serving();
+        let patched = std::cell::Cell::new(false);
+        let link = |recipe: &crate::tool_inputs::LinkRecipe| {
             let run = |live_sites: Option<&BTreeSet<u64>>, emit_relocations| {
-                write_entry(live_sites)?;
+                let entry_bytes = write_entry(live_sites)?;
                 let mut inputs = inputs.clone();
                 link_archives.append_link_inputs(&mut inputs, &options.runtime, recipe)?;
                 inputs.push(options.runtime.clone());
+                let objects: Vec<_> =
+                    std::iter::once(crate::incremental_link::Slot::Bytes(&entry_bytes))
+                        .chain(
+                            keys.iter()
+                                .zip(unit.iter().map(|(_, file)| file).chain(&files))
+                                .map(|(key, file)| {
+                                    crate::incremental_link::Slot::Keyed(*key, file)
+                                }),
+                        )
+                        .collect();
+                let frame = key(
+                    "hirsel.incremental-link-frame.v1",
+                    &(
+                        &recipe.identity,
+                        &recipe.linker,
+                        &recipe.args,
+                        support_libs,
+                        &archive_pins,
+                        &options.runtime,
+                        &options.target,
+                    ),
+                )?;
+                if incremental {
+                    let mut resident = crate::incremental_link::RESIDENT.lock().unwrap();
+                    if let Some(image) = resident.patch(frame, &objects)? {
+                        patched.set(true);
+                        return Ok(image);
+                    }
+                }
                 direct_link(
                     recipe,
                     &inputs,
@@ -1903,43 +1936,53 @@ fn link_objects(
                     options.optimize,
                     options.debug_lines,
                     emit_relocations,
-                )
+                )?;
+                let image = std::fs::read(&output)?;
+                if incremental {
+                    let mut resident = crate::incremental_link::RESIDENT.lock().unwrap();
+                    resident.remember(frame, &objects, &image)?;
+                }
+                Ok::<_, NativeStop>(image)
             };
             if options.optimize && !runtime_sources.items.is_empty() {
                 // The probe defines the same symbols and references. Only the
                 // source payload changes between the two links.
-                run(Some(&BTreeSet::new()), true)?;
-                let live = crate::native_entry::live_site_words(&std::fs::read(&output)?)
-                    .map_err(NativeStop::Link)?;
+                let probe = run(Some(&BTreeSet::new()), true)?;
+                let live =
+                    crate::native_entry::live_site_words(&probe).map_err(NativeStop::Link)?;
                 run(Some(&live), false)
             } else {
                 run(None, false)
             }
         };
-        if let Err(first) = link(&recipe) {
-            if matches!(first, NativeStop::Archive(_)) {
-                return Err(first);
+        let linked = match link(&recipe) {
+            Ok(image) => image,
+            Err(first) => {
+                if matches!(first, NativeStop::Archive(_)) {
+                    return Err(first);
+                }
+                let missing = crate::tool_inputs::missing_recipe_inputs(&recipe);
+                if missing.is_empty() {
+                    return Err(first);
+                }
+                let refreshed = recapture()?;
+                let remaining = crate::tool_inputs::missing_recipe_inputs(&refreshed);
+                if !remaining.is_empty() {
+                    return Err(NativeStop::Link(format!(
+                        "direct link refused: missing recipe inputs: {}",
+                        remaining
+                            .iter()
+                            .map(|path| path.display().to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )));
+                }
+                link(&refreshed)?
             }
-            let missing = crate::tool_inputs::missing_recipe_inputs(&recipe);
-            if missing.is_empty() {
-                return Err(first);
-            }
-            let refreshed = recapture()?;
-            let remaining = crate::tool_inputs::missing_recipe_inputs(&refreshed);
-            if !remaining.is_empty() {
-                return Err(NativeStop::Link(format!(
-                    "direct link refused: missing recipe inputs: {}",
-                    remaining
-                        .iter()
-                        .map(|path| path.display().to_string())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )));
-            }
-            link(&refreshed)?;
-        }
+        };
+        counters.link_patched = u64::from(patched.get());
         drop((unit, files));
-        let bytes = std::fs::read(output)?;
+        let bytes = linked;
         crate::native_entry::check_linked_sites(&bytes).map_err(NativeStop::Link)?;
         let debug = crate::native_debug::bind_detached(
             &rows,

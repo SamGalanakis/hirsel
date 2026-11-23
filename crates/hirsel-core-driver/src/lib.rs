@@ -14,6 +14,7 @@ mod foreign_header;
 mod image;
 mod image_index;
 mod image_unit;
+mod incremental_link;
 mod inspect;
 pub mod installation;
 pub(crate) mod launcher;

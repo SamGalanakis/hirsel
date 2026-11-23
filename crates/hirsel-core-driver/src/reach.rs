@@ -630,6 +630,9 @@ pub struct ReachCounters {
     /// Units this build lowered for its release std. Zero when it took the
     /// std from a store, as every build over a prebuilt std product should.
     pub std_lowered: u64,
+    /// One when a resident compiler linked this build by patching its last
+    /// executable in place (`incremental_link`), zero when lld linked it.
+    pub link_patched: u64,
 }
 
 /// The program-index view the walk reads through.

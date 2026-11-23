@@ -6895,7 +6895,11 @@ pub fn wire_defaults(n_service: u64, n_place: u64) -> WireConfig {
 
 fn wire_round(n: u64) -> u64 { (n + 7u64) & 0xfffffffffffffff8u64 }
 
-pub fn reader_bytes() -> u64 { 4096u64 }
+// The reader child's own state, plus its receive loan (std.wsock.refill's 8192
+// bytes) and, while settle copies the unread tail out of that loan, the tail's
+// storage of at most 8192 bytes more (§3, Reader child).
+const WSOCK_LOAN: u64 = 8192u64
+pub fn reader_bytes() -> u64 { 4096u64 + 2u64 * WSOCK_LOAN }
 
 fn wire_outcome_reserve(c: WireConfig) -> u64 {
     (1u64 + c.q) * (DONE_MAX + 36u64)

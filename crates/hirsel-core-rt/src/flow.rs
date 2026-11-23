@@ -218,17 +218,49 @@ pub struct Failure {
     pub halt: Halt,
 }
 
-type Transform<T> = Box<dyn FnMut(u64, &T) -> Result<Option<T>, Halt>>;
+// A cheap four-worker wave costs about 1.3 us above local execution. A
+// 1,024-step mix takes about 1.5 us on one worker, enough to amortize a handoff.
+const BESIDE_MIN_STEPS: u64 = 1024;
+
+type Transform<T> = Box<dyn FnMut(u64, &T) -> (Result<Option<T>, Halt>, bool)>;
 
 struct Stage<T> {
     input: usize,
     output: usize,
-    body: Option<Transform<T>>,
+    body: Transform<T>,
+    /// Whether the last item charged at least BESIDE_MIN_STEPS.
+    expensive: bool,
     /// Only an item awaiting its output credit needs a prepared result. The
     /// input head is still present until that step can commit.
     prepared: Option<Result<Option<T>, Halt>>,
     live: bool,
     failure: Option<Failure>,
+}
+
+impl<T> Stage<T> {
+    fn prepare(&mut self, key: u64, slots: &impl Fifo<T>) {
+        let (result, expensive) = slots.value(|value| (self.body)(key, value));
+        self.prepared = Some(result);
+        self.expensive = expensive;
+    }
+
+    fn beside_item<'a, Q: Fifo<T>>(
+        &self,
+        ports: &'a [Port<T, Q>],
+        input: &[usize],
+    ) -> Option<(u64, &'a Q)> {
+        if !self.expensive || !self.live || self.prepared.is_some() {
+            return None;
+        }
+        match merge_head(ports, input) {
+            Head::Entry {
+                index,
+                key,
+                entry: Entry::Item,
+            } => Some((key, &ports[input[index]].slots)),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -422,6 +454,10 @@ impl<T, Q: Fifo<T>> Reference<T, Q> {
         let output = self.connect(to, cap, physical, context, total)?;
         let input = self.merge();
         let mut body = make();
+        let beside_at = charge
+            .item_steps
+            .checked_sub(BESIDE_MIN_STEPS)
+            .filter(|_| self.beside());
         let mut stage = crate::tasks::private_flow_step(|| crate::Context::new(charge.working));
         stage.primary = Some(crate::causes::Cell::startup(stage.payer()));
         stage.run = context.run;
@@ -429,27 +465,31 @@ impl<T, Q: Fifo<T>> Reference<T, Q> {
         self.stages.push(Stage {
             input,
             output,
-            body: Some(Box::new(move |key, input| {
+            body: Box::new(move |key, input| {
                 crate::tasks::private_flow_step(|| {
                     stage.current.bind();
                     // SAFETY: the reference exclusively owns this context, and no
                     // stage code can park or enter another task.
                     unsafe {
                         if !crate::steps::hirsel_core_step_enter(&mut stage, charge.item_steps) {
-                            return Err(Halt::OutOfTime);
+                            return (Err(Halt::OutOfTime), false);
                         }
                         let result = body(&mut stage, key, input);
+                        let expensive = beside_at
+                            .is_some_and(|at| crate::steps::remaining(&stage).unwrap() <= at);
                         crate::steps::hirsel_core_step_leave(&mut stage);
-                        match stage.causes.iter().next() {
+                        let result = match stage.causes.iter().next() {
                             Some(cause) if cause.kind() == crate::causes::OUT_OF_TIME => {
                                 Err(Halt::OutOfTime)
                             }
                             Some(_) => Err(Halt::Failed),
                             None => result,
-                        }
+                        };
+                        (result, expensive)
                     }
                 })
-            })),
+            }),
+            expensive: false,
             prepared: None,
             live: true,
             failure: None,
@@ -457,7 +497,7 @@ impl<T, Q: Fifo<T>> Reference<T, Q> {
         Ok(self.endpoint(input))
     }
 
-    fn enabled(&mut self, index: usize) -> Option<Head> {
+    fn enabled(&mut self, index: usize, defer_expensive: bool) -> Option<Head> {
         let stage = &mut self.stages[index];
         if !stage.live {
             return None;
@@ -471,11 +511,13 @@ impl<T, Q: Fifo<T>> Reference<T, Q> {
                 key,
                 entry: Entry::Item,
             } => {
-                let slots = &self.ports[input[index]].slots;
-                let prepared = stage.prepared.get_or_insert_with(|| {
-                    slots.value(|value| (stage.body.as_mut().unwrap())(key, value))
-                });
-                if matches!(prepared, Ok(Some(_)))
+                if stage.prepared.is_none() {
+                    if defer_expensive && stage.expensive {
+                        return None;
+                    }
+                    stage.prepare(key, &self.ports[input[index]].slots);
+                }
+                if matches!(stage.prepared, Some(Ok(Some(_))))
                     && self.ports[stage.output].push_status(key) == Push::Full
                 {
                     None
@@ -560,9 +602,8 @@ impl<T, Q: Fifo<T>> Reference<T, Q> {
         }
     }
 
-    /// One step toward the closure. On a worker pool a step whose result is
-    /// known commits first, and otherwise every stage whose head item still
-    /// needs its call runs it on a helper unit at once.
+    /// One step toward the closure. On a worker pool, run cheap calls locally
+    /// and try a parallel wave once only expensive calls remain.
     fn progress(&mut self, beside: bool) -> bool {
         if beside {
             if self.step_ready() {
@@ -586,26 +627,10 @@ impl<T, Q: Fifo<T>> Reference<T, Q> {
         crate::units::running().is_some_and(|_| crate::units::pool().w > 1)
     }
 
-    fn needs_body(&self, index: usize) -> bool {
-        let stage = &self.stages[index];
-        stage.live
-            && stage.prepared.is_none()
-            && matches!(
-                merge_head(&self.ports, &self.merges[stage.input]),
-                Head::Entry {
-                    entry: Entry::Item,
-                    ..
-                }
-            )
-    }
-
     fn step_ready(&mut self) -> bool {
-        let Some((stage, head)) = (0..self.stages.len()).find_map(|stage| {
-            if self.needs_body(stage) {
-                return None;
-            }
-            self.enabled(stage).map(|head| (stage, head))
-        }) else {
+        let Some((stage, head)) = (0..self.stages.len())
+            .find_map(|stage| self.enabled(stage, true).map(|head| (stage, head)))
+        else {
             return false;
         };
         self.step(stage, head);
@@ -613,28 +638,22 @@ impl<T, Q: Fifo<T>> Reference<T, Q> {
     }
 
     fn prepare_beside(&mut self) {
-        let waiting: Vec<bool> = (0..self.stages.len())
-            .map(|stage| self.needs_body(stage))
-            .collect();
-        if waiting.iter().filter(|&&waiting| waiting).count() < 2 {
+        let (ports, merges) = (&self.ports, &self.merges);
+        if self
+            .stages
+            .iter()
+            .filter_map(|stage| stage.beside_item(ports, &merges[stage.input]))
+            .nth(1)
+            .is_none()
+        {
             return;
         }
-        let (ports, merges) = (&self.ports, &self.merges);
         let mut calls: Vec<_> = self
             .stages
             .iter_mut()
-            .zip(waiting)
-            .filter_map(|(stage, waiting)| waiting.then_some(stage))
-            .map(|stage| {
-                let input = &merges[stage.input];
-                let Head::Entry { index, key, .. } = merge_head(ports, input) else {
-                    unreachable!("a waiting stage has an item head")
-                };
-                let slots = &ports[input[index]].slots;
-                move || {
-                    let body = stage.body.as_mut().unwrap();
-                    stage.prepared = Some(slots.value(|value| body(key, value)));
-                }
+            .filter_map(|stage| {
+                let (key, slots) = stage.beside_item(ports, &merges[stage.input])?;
+                Some(move || stage.prepare(key, slots))
             })
             .collect();
         let mut jobs: Vec<&mut dyn FnMut()> = calls
@@ -654,7 +673,7 @@ impl<T, Q: Fifo<T>> Reference<T, Q> {
         if let Some((script, domain)) = crate::tasks::flow_script() {
             use crate::schedule_script::{FlowStep, PausePoint, StepBoundary};
             let enabled: Vec<_> = (0..self.stages.len())
-                .filter_map(|stage| self.enabled(stage).map(|head| (stage, head)))
+                .filter_map(|stage| self.enabled(stage, false).map(|head| (stage, head)))
                 .collect();
             if enabled.is_empty() {
                 return false;
@@ -691,8 +710,8 @@ impl<T, Q: Fifo<T>> Reference<T, Q> {
             script.pause(boundary(StepBoundary::After));
             return true;
         }
-        let Some((stage, head)) =
-            (0..self.stages.len()).find_map(|stage| self.enabled(stage).map(|head| (stage, head)))
+        let Some((stage, head)) = (0..self.stages.len())
+            .find_map(|stage| self.enabled(stage, false).map(|head| (stage, head)))
         else {
             return false;
         };

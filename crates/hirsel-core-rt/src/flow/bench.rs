@@ -26,7 +26,14 @@ fn pipeline(stages: usize, items: u64, rounds: u64) -> u64 {
     for _ in 0..stages {
         to = flow
             .stage_with_size(&context, to, 64, charge(), 0, || {
-                move |_: &mut crate::Context, _, x: &u64| Ok(Some(mix(*x, rounds)))
+                move |stage: &mut crate::Context, _, x: &u64| {
+                    // Native loops charge a step per round. Debit the same
+                    // steps while keeping the Rust mixing loop unchanged.
+                    if !unsafe { crate::steps::scram_iterations(stage, rounds, 0) } {
+                        return Err(Halt::OutOfTime);
+                    }
+                    Ok(Some(mix(*x, rounds)))
+                }
             })
             .unwrap();
     }

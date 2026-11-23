@@ -2,7 +2,8 @@
 //! node charge is logical (MEM-24) and MEM-32 binds only physical layout, so such a
 //! node may sit in the frame: `log.new` admits its 24 bytes from the current limit
 //! and is refused there exactly as on the task heap, and `log.finish` or the
-//! binder's cleanup refunds them. The entries' storage stays on the task heap.
+//! binder's cleanup refunds them. A u64 log can also keep its first four entries
+//! in the frame if every finish binds a List used only for local viewing loops.
 //!
 //! The rule is intraprocedural and syntactic, and anything it does not recognise
 //! escapes. `let x: Log[E] = log.new()` outside a closure, in a body with no
@@ -19,9 +20,11 @@
 //! `log.finish` and of cleanup on every exit edge. A `bound steps` scope counts
 //! steps and leaves that limit current.
 use super::*;
+use hirsel_core_layout::FRAME_LIST_LINK_BYTES;
 
 /// The node's words: the entries' List carrier `{data, len, capacity}`.
 const NODE_WORDS: u64 = 3;
+const ENTRY_WORDS: u64 = 4;
 
 impl<'c, 'a> Cx<'c, 'a, '_> {
     fn is_core_call(&self, value: NodeId, path: &str) -> bool {
@@ -40,7 +43,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     }
 
     /// The binders of this body's logs whose node never leaves it, by the rule above.
-    fn frame_log_candidates(&self) -> HashSet<u32> {
+    fn frame_log_candidates(&self) -> HashMap<u32, bool> {
         let tree = self.item.tree;
         let nodes = self.item.range.nodes.clone();
         let start = nodes.start;
@@ -49,7 +52,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         for id in nodes {
             let n = NodeId(id);
             match tree.node(n).kind {
-                NodeKind::Bound if self.token_text(n) != "steps" => return HashSet::default(),
+                NodeKind::Bound if self.token_text(n) != "steps" => return HashMap::default(),
                 NodeKind::Let => lets.push(n),
                 _ => {}
             }
@@ -74,87 +77,113 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             false
         };
-        let mut found = HashSet::default();
+        let mut found = HashMap::default();
+        let mut finished = HashMap::default();
         for s in lets {
             let kids = self.kids(s);
             if self.kind(kids[0]) == NodeKind::BindPattern
                 && let Some(b) = self.binder(kids[0])
                 && kids.len() > 1
-                && self.is_core_call(kids[kids.len() - 1], "log.new")
                 && !in_closure(s)
             {
-                found.insert(b);
+                let value = kids[kids.len() - 1];
+                if self.is_core_call(value, "log.new") {
+                    found.insert(b, true);
+                } else if self.is_core_call(value, "log.finish") {
+                    finished.insert(b, value);
+                }
             }
         }
         if found.is_empty() {
             return found;
         }
-        let stays = |u: NodeId| -> bool {
-            let Some(p) = up(u) else { return false };
-            let kids = self.kids(p);
-            match self.kind(p) {
-                NodeKind::Call if kids[0] != u => {
-                    let Some(Target::Definition(id)) = self.call_target(kids[0]) else {
-                        return false;
-                    };
-                    let Some(Def::Fn(f)) = self.p.by_definition[id.0 as usize] else {
-                        return false;
-                    };
-                    let Some(arg) = kids[1..].iter().position(|&arg| arg == u) else {
-                        return false;
-                    };
-                    self.p.fns[f as usize]
-                        .params
-                        .get(arg)
-                        .is_some_and(|param| param.mode == Mode::View && !param.bytes)
-                }
-                NodeKind::Unary => match self.token_text(p) {
-                    "view" => true,
-                    "take" => up(p).is_some_and(|c| {
-                        self.is_core_call(c, "log.finish")
-                            && self.kids(c).get(1) == Some(&p)
-                            && !in_closure(c)
-                    }),
-                    _ => false,
-                },
-                _ => false,
-            }
-        };
         let info = &self.p.items[self.at.module as usize][self.at.item as usize];
         for name in &info.resolution.names {
             if let Target::Binder(b) = name.target
-                && found.contains(&b)
-                && !(name.projections.start == name.projections.end && stays(name.node))
+                && (name.projections.start != name.projections.end
+                    || in_closure(name.node)
+                    || !up(name.node).is_some_and(|p| {
+                        self.kind(p) == NodeKind::For && self.kids(p).get(1) == Some(&name.node)
+                    }))
             {
-                found.remove(&b);
+                finished.remove(&b);
+            }
+        }
+        let local_finishes: HashSet<_> = finished.into_values().collect();
+        // Some(false) keeps the node but leaves the entries on the heap.
+        let stays = |u: NodeId| -> Option<bool> {
+            let p = up(u)?;
+            let kids = self.kids(p);
+            match self.kind(p) {
+                NodeKind::Call if kids[0] != u => {
+                    let Target::Definition(id) = self.call_target(kids[0])? else {
+                        return None;
+                    };
+                    let Some(Def::Fn(f)) = self.p.by_definition[id.0 as usize] else {
+                        return None;
+                    };
+                    let arg = kids[1..].iter().position(|&arg| arg == u)?;
+                    let param = self.p.fns[f as usize].params.get(arg)?;
+                    (param.mode == Mode::View && !param.bytes).then_some(true)
+                }
+                NodeKind::Unary => match self.token_text(p) {
+                    "view" => Some(true),
+                    "take" => {
+                        let c = up(p)?;
+                        (self.is_core_call(c, "log.finish")
+                            && self.kids(c).get(1) == Some(&p)
+                            && !in_closure(c))
+                        .then(|| local_finishes.contains(&c))
+                    }
+                    _ => None,
+                },
+                _ => None,
+            }
+        };
+        for name in &info.resolution.names {
+            if let Target::Binder(b) = name.target
+                && let Some(entries) = found.get_mut(&b)
+            {
+                if let Some(local) = (name.projections.start == name.projections.end)
+                    .then(|| stays(name.node))
+                    .flatten()
+                {
+                    *entries &= local;
+                } else {
+                    found.remove(&b);
+                }
             }
         }
         found
     }
 
-    /// Whether the `let` statement `s` binds a log whose node is in the frame.
-    pub(super) fn frame_log_let(&mut self, s: NodeId, pat: NodeId, value: NodeId) -> bool {
+    /// Whether the log has a frame node, and whether its entries can stay there.
+    pub(super) fn frame_log_let(&mut self, s: NodeId, pat: NodeId, value: NodeId) -> Option<bool> {
         if self.kind(s) != NodeKind::Let
             || self.kind(pat) != NodeKind::BindPattern
             || !self.is_core_call(value, "log.new")
         {
-            return false;
+            return None;
         }
-        let Some(b) = self.binder(pat) else {
-            return false;
-        };
+        let b = self.binder(pat)?;
         if self.frame_log_binders.is_none() {
             self.frame_log_binders = Some(self.frame_log_candidates());
         }
-        self.frame_log_binders
-            .as_ref()
-            .is_some_and(|found| found.contains(&b))
+        self.frame_log_binders.as_ref()?.get(&b).copied()
     }
 
     /// The frame bytes of a log node, for `log.new`'s allocation.
     pub(super) fn frame_log_bytes(&mut self, n: NodeId) -> Option<ValueId> {
-        let words = self.t.mk(TyKind::Array(scalar(Scalar::U64), NODE_WORDS));
-        let row = self.place_row(words, "frame log node without a place", n)?;
+        self.frame_log_slot(NODE_WORDS, n)
+    }
+
+    pub(super) fn frame_log_entries(&mut self, n: NodeId) -> Option<ValueId> {
+        self.frame_log_slot(ENTRY_WORDS + FRAME_LIST_LINK_BYTES / 8, n)
+    }
+
+    fn frame_log_slot(&mut self, words: u64, n: NodeId) -> Option<ValueId> {
+        let words = self.t.mk(TyKind::Array(scalar(Scalar::U64), words));
+        let row = self.place_row(words, "frame log storage without a place", n)?;
         let bytes = self.entry_slot(PlaceTy::Declared(row), n);
         Some(self.pointer(bytes, n))
     }

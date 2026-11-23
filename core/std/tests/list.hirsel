@@ -328,6 +328,73 @@ fn log_charges_are_exact() -> bool {
     all && entries && node
 }
 
+fn log_inline_outcomes() -> u64 {
+    let issued: Log[u64] = log.new()
+    let aborted = isolate(fn() {
+        log.append(issued, 1)
+        fail("abort after issuing")
+    })
+    if let Ok(Ok(())) = take aborted {
+        return 0
+    }
+    let stopped = bound steps 1 {
+        log.append(issued, 2)
+        log.append(issued, 9)
+    }
+    if let Ok(()) = stopped {
+        return 0
+    }
+    let entries = log.finish(take issued)
+    let mut seen = 0u64
+    for id in entries {
+        seen = 10 * seen + id
+    }
+    seen
+}
+
+fn log_inline_fifth() -> (u64, u64, u64) {
+    let issued: Log[u64] = log.new()
+    log.append(issued, 1)
+    log.append(issued, 2)
+    log.append(issued, 3)
+    log.append(issued, 4)
+    let stopped = isolate(fn() {
+        log.append(issued, 5)
+    })
+    let (requested, available) = match caught(take stopped) {
+        Some(c) => (c.requested, c.available),
+        None => (0u64, 0u64),
+    }
+    let entries = log.finish(take issued)
+    let mut seen = 0u64
+    for id in entries {
+        seen = 10 * seen + id
+    }
+    (seen, requested, available)
+}
+
+// The fifth entry admits 64 while the 24-byte node, 32-byte entries and
+// 32-byte isolate cell are live. On refusal the prefix stays in the log.
+// expect: run log_inline_entries_survive_stops() = true
+fn log_inline_entries_survive_stops() -> bool {
+    let (denied, refunded) = result.unwrap(bound bytes 151 {
+        let denied = log_inline_fifth()
+        // The caught failure replaces the task's primary cell with the isolate's
+        // 32-byte cell. A 112-byte reserve fits only if the entries were refunded.
+        let mut check: Bytes = list.new()
+        let refunded = match list.try_reserve(mut check, 112) {
+            Ok(()) => true,
+            Error(_) => false,
+        }
+        (denied, refunded)
+    })
+    let growth = result.unwrap(bound bytes 152 {
+        (log_inline_fifth(), log_inline_fifth())
+    })
+    let admitted = (12345u64, 0u64, 0u64)
+    log_inline_outcomes() == 12 && denied == (1234u64, 64u64, 63u64) && refunded && growth == (admitted, admitted)
+}
+
 // An initial capacity of 22 charges 24 bytes. Reserving 22 more after one
 // push doubles it to 44, charging 48 before refunding the original 24.
 fn hinted_buffer_under(limit: u64) -> Result[bool, Capacity] {

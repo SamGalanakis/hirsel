@@ -907,6 +907,7 @@ pub unsafe extern "C" fn hirsel_core_drop_frozen_bytes(
 pub unsafe extern "C" fn hirsel_core_admit_lent_frame(
     context: *const Context,
     frame: NonNull<u8>,
+    bytes: usize,
     charge: u64,
     overflow: bool,
 ) -> Allocation {
@@ -915,7 +916,7 @@ pub unsafe extern "C" fn hirsel_core_admit_lent_frame(
     let payer = task.payer();
     match crate::block::admit_storage(payer, (!overflow).then_some(charge)) {
         Ok(()) => {
-            unsafe { task.frame_lists.insert(frame, payer) };
+            unsafe { task.frame_lists.insert(frame, bytes, payer) };
             Allocation {
                 pointer: frame.as_ptr(),
                 capacity: Capacity {

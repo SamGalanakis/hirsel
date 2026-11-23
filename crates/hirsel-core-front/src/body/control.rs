@@ -135,7 +135,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.frame_string_let(s, pat, value);
         let (t, v) = self.expr_into(value, declared.and_then(expect), to);
         self.frame_string_copies.truncate(frame_copies);
-        self.frame_log_next = false;
+        self.frame_log_next = None;
         let ty = declared.unwrap_or(t);
         let kind = self.type_kind(ty);
         let anchors = if kind == Kind::Scoped {

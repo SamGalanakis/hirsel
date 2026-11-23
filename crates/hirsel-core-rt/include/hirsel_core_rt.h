@@ -220,7 +220,7 @@ void hirsel_core_refund(HirselCoreLimitRecord *original_payer, uint64_t nonzero_
 void hirsel_core_refund_in(const HirselCoreContext *, HirselCoreLimitRecord *original_payer, uint64_t bytes);
 /* Admission without allocation, for storage the caller holds (frame bytes). */
 HirselCoreAllocation hirsel_core_admit(const HirselCoreContext *, uint64_t charge, bool charge_overflow);
-HirselCoreAllocation hirsel_core_admit_lent_frame(const HirselCoreContext *, uint8_t *frame, uint64_t charge, bool charge_overflow);
+HirselCoreAllocation hirsel_core_admit_lent_frame(const HirselCoreContext *, uint8_t *frame, size_t bytes, uint64_t charge, bool charge_overflow);
 uint8_t *hirsel_core_promote_frame_list(const HirselCoreContext *, uint8_t *data, uint64_t capacity, uint64_t len, size_t stride);
 /* Physical backing for a block already admitted by the current task. */
 void *hirsel_core_alloc_admitted(const HirselCoreContext *, HirselCoreLimitRecord *, size_t bytes,

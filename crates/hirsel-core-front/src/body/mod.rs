@@ -1335,9 +1335,9 @@ struct Cx<'c, 'a, 'e> {
     /// The frame bytes of each frame-backed list, by its slot.
     frame_slots: HashMap<SlotId, frame_lists::FrameList>,
     /// Binders of logs whose node never leaves this body (frame_logs.rs).
-    frame_log_binders: Option<HashSet<u32>>,
+    frame_log_binders: Option<HashMap<u32, bool>>,
     /// Set by a candidate's `let` for the `log.new()` it lowers next.
-    frame_log_next: bool,
+    frame_log_next: Option<bool>,
     /// The Log values whose node is in this body's frame, with their entry type.
     frame_logs: HashMap<ValueId, TyId>,
     /// The binders that own a frame node, with their log's entry type.
@@ -1495,7 +1495,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             frame_binders: None,
             frame_slots: HashMap::default(),
             frame_log_binders: None,
-            frame_log_next: false,
+            frame_log_next: None,
             frame_logs: HashMap::default(),
             frame_log_owners: HashMap::default(),
             frame_string_copies: Vec::new(),

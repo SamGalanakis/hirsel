@@ -1998,12 +1998,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let payload = self.layout_size(list, false, n)?;
         // A log whose node never leaves this body keeps it in the frame, charged
         // as on the heap (frame_logs.rs).
-        let place = if std::mem::take(&mut self.frame_log_next) {
+        let framed = self.frame_log_next.take();
+        let place = if framed.is_some() {
             AllocPlace::Frame(self.frame_log_bytes(n)?)
         } else {
             AllocPlace::Current
         };
-        let framed = matches!(place, AllocPlace::Frame(_));
         let node = self.value(Ty::Ptr);
         let available = self.value(Ty::Scalar(Scalar::U64));
         let edge = FieldTy::Box(TypeRef(id.0));
@@ -2022,16 +2022,20 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             n,
         );
         let ok = self.runtime_nonzero(Ty::Ptr, node, n)?;
-        let null = self.konst(Ty::Ptr, 0, n)?;
+        let data = if framed == Some(true) && item == scalar(Scalar::U64) {
+            self.frame_log_entries(n)?
+        } else {
+            self.konst(Ty::Ptr, 0, n)?
+        };
         let zero = self.konst(Ty::Scalar(Scalar::U64), 0, n)?;
         let log = self.runtime_admitted(result, ok, [charge, available], n, |cx, to| {
             // The node itself is the List carrier: {data, len, capacity}.
-            cx.set_carrier_word(node, carrier, SeqWord::Data, null, n);
+            cx.set_carrier_word(node, carrier, SeqWord::Data, data, n);
             cx.set_carrier_word(node, carrier, SeqWord::Cap, zero, n);
             cx.set_carrier_word(node, carrier, SeqWord::Len, zero, n);
             cx.runtime_store(to, &[Step::Field(0)], Ty::Ptr, node, n);
         })?;
-        if framed {
+        if framed.is_some() {
             self.frame_logs.insert(log, item);
         }
         Some(log)
@@ -2057,7 +2061,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         );
         let node = self.read_bits(node_at, Ty::Ptr, n);
         let one = self.konst(Ty::Scalar(Scalar::U64), 1, n)?;
-        self.list_reserve(item, node, one, super::lists::Ask::Bounded, n)?;
+        self.log_reserve(item, node, one, n)?;
         let item_rep = self.rep_at(item, n)?;
         let carrier = self.list_carrier(item, n)?;
         let len = self.carrier_word(node, carrier, SeqWord::Len, n);

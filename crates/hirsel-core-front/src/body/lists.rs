@@ -22,6 +22,7 @@ enum ListStorage {
 
 enum ListGrowth {
     Raise,
+    LogAppend,
     ReturnCapacity(AddressId, TypeId, Option<ValueId>),
     Call { grow: usize, single: bool },
 }
@@ -740,6 +741,21 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.list_room(item, header, additional, ask, ListGrowth::Raise, n)
     }
 
+    pub(super) fn log_reserve(
+        &mut self,
+        item: TyId,
+        header: ValueId,
+        one: ValueId,
+        n: NodeId,
+    ) -> Option<()> {
+        let growth = if item == scalar(Scalar::U64) {
+            ListGrowth::LogAppend
+        } else {
+            ListGrowth::Raise
+        };
+        self.list_room(item, header, one, Ask::Bounded, growth, n)
+    }
+
     /// `list.reserve`, `list.fill` and `list.append`: [`Self::list_reserve`]
     /// whose growth arm is one cold call to core's `grow_by[T](xs, additional)`,
     /// so every such site shares one growth body per element
@@ -906,6 +922,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 len_over,
                 hint,
                 [success, refused],
+                matches!(mode, ListGrowth::LogAppend),
                 n,
             )?;
         }
@@ -946,6 +963,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         len_over: ValueId,
         hint: Option<ValueId>,
         [success, refused]: [BlockId; 2],
+        log_append: bool,
         n: NodeId,
     ) -> Option<()> {
         let zero = self.konst(Ty::Scalar(Scalar::U64), 0, n)?;
@@ -979,6 +997,26 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         // Capacity 0 owns no storage (empty, or static bytes): allocate in the
         // current limit and copy the elements over.
         self.start(current);
+        if log_append {
+            // Only a frame-eligible log starts empty with a nonnull data word.
+            // The first append always reserves four u64s. Once capacity is
+            // nonzero the ordinary Grow path handles spills and prior payers.
+            let data = self.carrier_word(header, carrier, SeqWord::Data, n);
+            let has_frame = self.list_compare(CompareOp::Ne, data, null, n);
+            let [frame, heap] = [(); 2].map(|_| self.new_block(&[]));
+            self.list_branch(has_frame, frame, heap, n);
+            self.start(frame);
+            let (block, available) = self.list_allocate(&plan, AllocPlace::LentFrame(data), n);
+            let ok = self.list_compare(CompareOp::Ne, block, null, n);
+            let [commit, denied] = [(); 2].map(|_| self.new_block(&[]));
+            self.list_branch(ok, commit, denied, n);
+            self.start(denied);
+            self.jump(refused, &[plan.charge, available], n);
+            self.start(commit);
+            self.set_carrier_word(header, carrier, SeqWord::Cap, new_cap, n);
+            self.jump(success, &[], n);
+            self.start(heap);
+        }
         let mut initial = plan.clone();
         if let Some(hint) = hint {
             let limit = self.konst(Ty::Scalar(Scalar::U64), 64, n)?;

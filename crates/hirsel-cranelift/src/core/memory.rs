@@ -181,9 +181,9 @@ impl Function<'_, '_, '_> {
                     );
                     let values = self.c_call(
                         "hirsel_core_admit_lent_frame",
-                        &[p, p, u, boolean],
+                        &[p, p, u, u, boolean],
                         &[p, u, u],
-                        &[ctx, frame, charge, overflow],
+                        &[ctx, frame, size, charge, overflow],
                     )?;
                     [values[0], values[1], values[2]]
                 } else if resource.is_none() && !matches!(place, AllocPlace::Region(_)) {

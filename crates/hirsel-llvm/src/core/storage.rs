@@ -862,6 +862,7 @@ impl FunctionEmitter<'_> {
                         &[
                             ptr(CONTEXT),
                             ptr(frame),
+                            word(size),
                             word(charge),
                             zeroext(Type::I1, overflow),
                         ],

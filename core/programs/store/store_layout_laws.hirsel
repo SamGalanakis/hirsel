@@ -19,6 +19,126 @@ fn fetch_threshold[V](tx: Tx, sh: Shape[u64, V], k: u64) -> u64 {
     low
 }
 
+// The log observes admission even when the enclosing bound has no steps left
+// to finish returning. The transaction aborts so every probe starts fresh.
+fn overrun_probe(mut db: Db, t: Table[u64, u64], rows: u64, outer: u64, inner: u64) -> (bool, bool) waits {
+    let entered: Log[u64] = log.new()
+    let returned: Log[u64] = log.new()
+    let out = result.unwrap(run(mut db, None, scoped fn(mut tx: Tx) -> Result[(), Error] {
+        for k in 1u64 .. rows {
+            put(mut tx, t, k, k)?
+        }
+        let _ = rollback_writes_on_overrun(mut tx, outer, scoped fn(mut w: Tx) -> Result[(), Error] {
+            let stopped = rollback_writes_on_overrun(mut w, inner, scoped fn(mut i: Tx) -> Result[(), Error] {
+                log.append(entered, 1)
+                loop {}
+            })
+            if let Error(OutOfTime(steps: n)) = stopped {
+                if n == inner {
+                    log.append(returned, 1)
+                }
+            }
+            Ok(())
+        })
+        Error(Missing("probe"))
+    }))
+    match take out {
+        Aborted(_) => (list.len(log.finish(take entered)) == 1, list.len(log.finish(take returned)) == 1),
+        _ => fail("overrun admission probe"),
+    }
+}
+
+fn overrun_threshold(mut db: Db, t: Table[u64, u64], rows: u64, inner: u64) -> u64 waits {
+    let mut low = inner
+    let mut high = inner * 2
+    while true {
+        let (entered, _) = overrun_probe(mut db, t, rows, high, inner)
+        if entered {
+            break
+        }
+        if high > 9223372036854775807 {
+            fail("overrun body never admitted")
+        }
+        high *= 2
+    }
+    while low < high {
+        let mid = low + (high - low) / 2
+        let (entered, _) = overrun_probe(mut db, t, rows, mid, inner)
+        if entered {
+            high = mid
+        } else {
+            low = mid + 1
+        }
+    }
+    low
+}
+
+// The admission threshold is independent of the staged row count. Landing
+// at the continuation after an overrun costs the refused call's steps plus
+// the whole reservation. Repeated overruns leave the read cost and rows intact.
+pub fn law_rollback_on_overrun(c: Clock) -> bool waits {
+    let mut db = test_db(c, 1073741824)
+    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
+    let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    let sh = shape(t)
+    let inner = 4000u64
+    let threshold = overrun_threshold(mut db, t, 2, inner)
+    if threshold != overrun_threshold(mut db, t, 65, inner) || overrun_probe(mut db, t, 2, threshold - 1, inner) != (false, true) {
+        return false
+    }
+    let mut low = 0u64
+    let mut high = threshold - 1
+    while low < high {
+        let mid = low + (high - low) / 2
+        let (_, returned) = overrun_probe(mut db, t, 2, mid, inner)
+        if returned {
+            high = mid
+        } else {
+            low = mid + 1
+        }
+    }
+    let spent = low + inner
+    if overrun_probe(mut db, t, 2, spent, inner) != (true, true) || overrun_probe(mut db, t, 2, spent - 1, inner) != (true, false) {
+        return false
+    }
+    let wrote: Log[u64] = log.new()
+    let out = result.unwrap(run(mut db, None, scoped fn(mut tx: Tx) -> Result[bool, Error] {
+        put(mut tx, t, 1, 10)?
+        let read_cost = fetch_threshold(tx, sh, 2)
+        for _ in 0u64 .. 8 {
+            let over = rollback_writes_on_overrun(mut tx, inner, scoped fn(mut w: Tx) -> Result[(), Error] {
+                put(mut w, t, 1, 11)?
+                put(mut w, t, 2, 20)?
+                log.append(wrote, 1)
+                loop {}
+            })
+            match over {
+                Error(OutOfTime(steps: n)) => if n != inner {
+                    return Error(Missing("overrun bound"))
+                },
+                _ => return Error(Missing("overrun")),
+            }
+        }
+        let same_reads = fetch_threshold(tx, sh, 2) == read_cost && fetch(tx, sh, 1)? == Some(10) && fetch(tx, sh, 2)? == None
+        put(mut tx, t, 3, 30)?
+        Ok(same_reads)
+    }))
+    let s = snapshot(db)
+    match take out {
+        Committed(done) => done.value && list.len(log.finish(take wrote)) == 8 && result.unwrap(get(s, sh, 1)) == Some(10) && result.unwrap(get(s, sh, 2)) == None && result.unwrap(get(s, sh, 3)) == Some(30),
+        _ => false,
+    }
+}
+
+@test
+fn test_rollback_on_overrun(c: Clock) -> Result[(), ()] waits {
+    if law_rollback_on_overrun(c) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
 // The fetch threshold of every 17th key of `rows` and of keys 1 and 2 of `large`.
 fn layout_thresholds(mut db: Db) -> List[u64] waits {
     let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))

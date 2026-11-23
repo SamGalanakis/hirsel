@@ -17,6 +17,7 @@ std = { major = 1 }
 "store-bucket.hirsel" = "store"
 "store-layout.hirsel" = "store"
 "store-reexec.hirsel" = "store"
+"store-tx.hirsel" = "store"
 "main.hirsel" = "main"
 
 [program]

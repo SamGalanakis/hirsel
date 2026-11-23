@@ -214,13 +214,14 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
     parked.enabled=!strcmp(scenario,"journal-worker-cancel");
     parked.target=cut;
     int uncut=!strcmp(raw_cut,"count");
-    enum { ORPHAN_END_SYNC_FAILURE=6, OPEN_MANIFEST_SYNC_FAILURE=8 };
+    enum { ORPHAN_END_SYNC_FAILURE=6, OPEN_MANIFEST_SYNC_FAILURE=8, SECOND_SEGMENT_SHORT_WRITE=9 };
     int recovery_failure=!strcmp(scenario,"orphan-end-recovery-sync");
     int open_sync_failure=!strcmp(scenario,"checkpoint-reopen-sync-failure");
     int checkpoint_reopen=open_sync_failure || !strcmp(scenario,"checkpoint-reopen");
     uint8_t failure=(!strcmp(scenario,"poison-segment") || !strcmp(scenario,"poison-cut"))?1:
         !strcmp(scenario,"poison-end")?2:!strcmp(scenario,"poison-pack")?3:
         !strcmp(scenario,"poison-write")?4:!strcmp(scenario,"journal-place-split")?5:
+        !strcmp(scenario,"journal-place-short")?SECOND_SEGMENT_SHORT_WRITE:
         recovery_failure?ORPHAN_END_SYNC_FAILURE:open_sync_failure?OPEN_MANIFEST_SYNC_FAILURE:0;
     int orphan_end=recovery_failure || !strcmp(scenario,"orphan-end");
     if((failure && failure!=5) || cancellation.enabled || parked.enabled || orphan_end) cut=UINT64_MAX;
@@ -278,7 +279,7 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
         if(phase==1 && failure && !recovery_failure && !open_sync_failure && (failure!=5 || uncut) && store_crash_failed_syncs(state)!=1) {
             fprintf(stderr,"named sync failure was not reached\n");status=120;break;
         }
-        if(phase==1 && failure==5 && store_crash_failed_syncs(state) &&
+        if(phase==1 && (failure==5 || failure==SECOND_SEGMENT_SHORT_WRITE) && store_crash_failed_syncs(state) &&
             (store_crash_floor(state)!=2 || !store_crash_acked(state))) {
             fprintf(stderr,"byte split did not settle A as durable and B as failed\n");status=120;break;
         }

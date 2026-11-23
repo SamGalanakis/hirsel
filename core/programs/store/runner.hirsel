@@ -239,7 +239,7 @@ fn start_drain(stop: Stop, started: u64, clock: Clock, tasks: Tasks, events: Sen
 pub fn disk_store_bytes(options: store.Options) -> u64 {
     let journal: u64 = int.widen(options.group_bytes)
     let mut total = int.saturating_add(options.resident_limit, order.max(options.pack_bytes, 16777476))
-    total = int.saturating_add(total, if journal > 16777296u64 { journal } else { 16777296u64 })
+    total = int.saturating_add(total, journal)
     int.saturating_add(total, 2097152u64)
 }
 

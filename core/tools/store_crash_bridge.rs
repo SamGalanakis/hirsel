@@ -10,6 +10,7 @@ use test_provider::crash::{FileSystem, Op, Snapshot};
 const ORPHAN_END_SYNC_FAILURE: u8 = 6;
 /// runner_crash.c's poison-segment: fail the second armed segment sync.
 const SECOND_SEGMENT_SYNC_FAILURE: u8 = 7;
+const SECOND_SEGMENT_SHORT_WRITE: u8 = 9;
 const OPEN_MANIFEST_SYNC_FAILURE: u8 = 8;
 
 #[repr(C)]
@@ -283,6 +284,22 @@ impl Bridge {
                     self.crashed = true;
                     return Self::error(5);
                 }
+                if self.phase == 1
+                    && self.armed
+                    && self.sync_failure == SECOND_SEGMENT_SHORT_WRITE
+                    && is_segment(&name)
+                    && self.segment_syncs == 1
+                {
+                    self.failed_syncs += 1;
+                    assert_eq!(self.failed_syncs, 1, "store retried a short write");
+                    assert!(file.mode == 2 && len > 7);
+                    assert!(self.apply(Op::Append(&name, &data[..7])));
+                    self.files.get_mut(&handle).unwrap().cursor += 7;
+                    return Outcome {
+                        written: 7,
+                        ..Self::error(5)
+                    };
+                }
                 if self.phase == 1 && self.armed && self.sync_failure == 5 && is_segment(&name) {
                     self.split_at = cursor;
                 }
@@ -379,6 +396,14 @@ impl Bridge {
                     .expect("live sync descriptor")
                     .name
                     .clone();
+                if self.phase == 1
+                    && self.armed
+                    && self.sync_failure == SECOND_SEGMENT_SHORT_WRITE
+                    && is_segment(&name)
+                {
+                    assert_eq!(self.failed_syncs, 0, "store synced after a short write");
+                    self.segment_syncs += 1;
+                }
                 let matches = match self.sync_failure {
                     1 => name.starts_with("j-") && !name.ends_with(".end"),
                     2 => name.starts_with("j-") && name.ends_with(".end"),

@@ -38,7 +38,7 @@ SCENARIOS = ('journal', 'journal-group', 'journal-rotate', 'journal-place', 'jou
 FORK_IMAGES = ('journal-fork-ack-cut', 'journal-fork-complete', 'journal-fork-torn', 'journal-fork-bad-end',
                'journal-fork-child-unwritten')
 FAILURES = ('poison-segment', 'poison-end', 'poison-pack', 'poison-write', 'poison-cut',
-            'orphan-end-recovery-sync')
+            'orphan-end-recovery-sync', 'journal-place-short')
 
 
 def provider_checks(executable, engine, env):

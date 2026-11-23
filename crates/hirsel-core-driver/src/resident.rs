@@ -140,12 +140,6 @@ pub(crate) static REFERENCED: Memo<
     crate::native_entry::Referenced,
 > = Memo::new();
 
-/// A recipe's bound source map, by its key (`recipe_build::bind_annexes`).
-pub(crate) static SOURCE_MAPS: Memo<
-    hirsel_core_ids::ContentHash,
-    Arc<hirsel_core_ir::source::SourceMap>,
-> = Memo::new();
-
 /// The part of a remembered source map a link's inputs reference, and whether
 /// they spawn units, by the map's key and the digest of what each input
 /// references.
@@ -278,7 +272,6 @@ fn sweep(request: u64) {
     REFERENCED.sweep(request);
     OBJECT_RECORDS.sweep(request);
     DEBUG_POSITIONS.sweep(request);
-    SOURCE_MAPS.sweep(request);
     RUNTIME_SOURCES.sweep(request);
     SOURCE_HASHES.sweep(request);
     PARSED.sweep(request);

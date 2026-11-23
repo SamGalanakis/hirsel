@@ -633,6 +633,9 @@ pub struct ReachCounters {
     /// One when a resident compiler linked this build by patching its last
     /// executable in place (`incremental_link`), zero when lld linked it.
     pub link_patched: u64,
+    /// One when a resident compiler made this build's source map by
+    /// rebasing its last one (`source_delta`), zero otherwise.
+    pub source_map_rebased: u64,
 }
 
 /// The program-index view the walk reads through.

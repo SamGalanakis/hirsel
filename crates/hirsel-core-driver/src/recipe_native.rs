@@ -16,7 +16,7 @@ use hirsel_core_ir::{
         self as wire, BodyRef, ForeignFunction, ForeignLeaf, ForeignTarget, GrantBinding,
         GrantKind, Launch, ObjectRef, Recipe,
     },
-    source::{ItemSource, SourceFile, SourceMap, anchored_items},
+    source::{SourceMap, anchored_items},
 };
 use hirsel_core_resolve::{ForeignArchiveCapture, ForeignModuleCapture};
 use std::collections::HashMap;
@@ -1352,14 +1352,7 @@ impl Publication {
 }
 
 fn site_item(site: &Site) -> DefPath {
-    DefPath(hirsel_core_ids::ItemPath {
-        package: PackageId {
-            name: "source".into(),
-            version: "1".into(),
-        },
-        modules: vec![site.file.clone()],
-        name: format!("{}_{}", site.line, site.column),
-    })
+    crate::source_delta::site_item(&site.file, site.line, site.column)
 }
 
 /// The anchor of `site` in a unit whose source items are `items`, adding its
@@ -1437,12 +1430,30 @@ pub(super) fn bind_annexes(
             key("hirsel.recipe-source-map.v1", &(std, prepared, remembered))
         })
         .transpose()?;
-    let sources = crate::resident::SOURCE_MAPS.get_or(key, || {
-        source_map(units, &bound, memos, extra).map(Arc::new)
-    })?;
+    let contributions: Vec<_> = bound
+        .iter()
+        .map(|(identity, bound)| (identity, None, &bound.points, &bound.anchored))
+        .chain(memos.iter().map(|(identity, (_, memo))| {
+            let of = Some((memo.body.0, memo.annex.0));
+            (identity, of, &memo.points, &memo.anchored)
+        }))
+        .map(
+            |(identity, of, points, anchored)| crate::source_delta::Contribution {
+                symbol: hirsel_core_ir::symbol(identity.digest()),
+                of,
+                points,
+                anchored,
+            },
+        )
+        .collect();
+    let (sources, made) =
+        crate::source_delta::map(key, remember.flatten(), extra, &contributions, || {
+            source_map(units, &bound, memos, extra)
+        })?;
     Ok(Bindings {
         sources,
         key,
+        rebased: made == crate::source_delta::Made::Rebased,
         bound,
     })
 }
@@ -1452,6 +1463,8 @@ pub(super) fn bind_annexes(
 pub(super) struct Bindings {
     pub(super) sources: Arc<SourceMap>,
     pub(super) key: Option<ContentHash>,
+    /// Whether a resident compiler rebased its last map to make `sources`.
+    pub(super) rebased: bool,
     pub(super) bound: BTreeMap<Identity, Bound>,
 }
 
@@ -1489,94 +1502,18 @@ fn source_map(
             add(file, (*line, *column));
         }
     }
-    let mut sources = SourceMap::default();
-    // Site items differ from each other only in file and name. Files come in
-    // order; ordering each file's items by name gives the map's own order,
-    // so it is built in one pass rather than by a search per site.
-    let mut items = Vec::new();
-    for (path, points) in points {
-        let file = u32::try_from(sources.files.len())
-            .map_err(|_| NativeStop::Entry("source file table exceeds u32".into()))?;
-        let points: Vec<_> = points.into_iter().collect();
-        let first = items.len();
-        for (offset, &(line, column)) in points.iter().enumerate() {
-            let item = site_item(&Site {
-                file: path.clone(),
-                line,
-                column,
-            });
-            items.push((
-                item,
-                ItemSource {
-                    file,
-                    file_offset: u32::try_from(offset).map_err(|_| {
-                        NativeStop::Entry("source position table exceeds u32".into())
-                    })?,
-                },
-            ));
-        }
-        items[first..].sort_unstable_by(|(a, _), (b, _)| a.0.name.cmp(&b.0.name));
-        sources.files.push(SourceFile {
-            path: path.clone(),
-            text: String::new(),
+    let bindings = bound
+        .iter()
+        .map(|(identity, bound)| (identity, &bound.points[..], &bound.anchored[..]))
+        .chain(
+            memos
+                .iter()
+                .map(|(identity, (_, memo))| (identity, &memo.points[..], &memo.anchored[..])),
+        )
+        .map(|(identity, points, anchored)| {
+            (hirsel_core_ir::symbol(identity.digest()), points, anchored)
         });
-        sources.points.insert(path, points);
-    }
-    if !bound.is_empty() || !memos.is_empty() {
-        // Bind unit items by their site's file and ordinal. Looking up a
-        // synthetic DefPath for every coordinate would allocate it again.
-        let files: HashMap<_, _> = sources
-            .files
-            .iter()
-            .enumerate()
-            .map(|(index, file)| {
-                (
-                    file.path.as_str(),
-                    (index as u32, &sources.points[&file.path]),
-                )
-            })
-            .collect();
-        let bindings = bound
-            .iter()
-            .map(|(identity, bound)| (identity, &bound.points, &bound.anchored))
-            .chain(
-                memos
-                    .iter()
-                    .map(|(identity, (_, memo))| (identity, &memo.points, &memo.anchored)),
-            );
-        // Unit items share their package and first module, so their symbol
-        // and then their name order them as the map does; sorted, they join
-        // the site items as one more run rather than by a search per item.
-        let mut units = Vec::new();
-        for (identity, sites, anchored) in bindings {
-            let symbol: std::rc::Rc<str> = hirsel_core_ir::symbol(identity.digest()).into();
-            for &(index, point) in anchored {
-                let (file, line, column) = &sites[point as usize];
-                let (file, points) = files[file.as_str()];
-                let file_offset = points
-                    .binary_search(&(*line, *column))
-                    .expect("the unit's points were added to the source map");
-                units.push((
-                    std::rc::Rc::clone(&symbol),
-                    index.to_string(),
-                    ItemSource {
-                        file,
-                        file_offset: file_offset as u32,
-                    },
-                ));
-            }
-        }
-        // Stable, so a later binding of an item replaces an earlier one, as
-        // the map's construction from a sorted sequence keeps the last.
-        units.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
-        items.extend(
-            units
-                .into_iter()
-                .map(|(symbol, name, at)| (unit_item_named(&symbol, name), at)),
-        );
-    }
-    sources.items = items.into_iter().collect();
-    Ok(sources)
+    crate::source_delta::assemble(points, bindings).map_err(NativeStop::Entry)
 }
 
 /// Every site of `annex`, in body order.
@@ -1593,18 +1530,7 @@ fn annex_sites(annex: &Annex) -> impl Iterator<Item = &Site> {
 /// The source item of a relocated unit's item `index`, named by the unit's
 /// `symbol`.
 fn unit_item(symbol: &str, index: ItemId) -> DefPath {
-    unit_item_named(symbol, index.0.to_string())
-}
-
-fn unit_item_named(symbol: &str, name: String) -> DefPath {
-    DefPath(hirsel_core_ids::ItemPath {
-        package: PackageId {
-            name: "source".into(),
-            version: "1".into(),
-        },
-        modules: vec!["unit".into(), symbol.into()],
-        name,
-    })
+    crate::source_delta::unit_item(symbol, index.0.to_string())
 }
 
 /// Anchor `module`'s sites to source items and apply its annex's hints; with
@@ -1923,6 +1849,7 @@ impl Publication {
         let Bindings {
             sources,
             key: sources_key,
+            rebased,
             mut bound,
         } = bind_annexes(
             &mut self.units,
@@ -1931,6 +1858,7 @@ impl Publication {
             true,
             Some(std.as_ref().map(|std| std.key)),
         )?;
+        counters.source_map_rebased = u64::from(rebased);
         let root = &self.units[entry];
         let (abi, cleanup) = bound_entry_abi(&decl, &entry.definition, &root.module, FuncId(0))
             .map_err(NativeStop::Entry)?;

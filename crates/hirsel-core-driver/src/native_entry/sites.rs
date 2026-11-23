@@ -5,7 +5,7 @@ use object::{Object as _, ObjectSymbol as _};
 use hirsel_core_ir::source::{site_item_symbol, site_symbol};
 use object::ObjectSection as _;
 use std::{
-    collections::{BTreeMap, BTreeSet, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs::File,
     path::PathBuf,
 };
@@ -31,8 +31,79 @@ pub(crate) fn runtime_sources(
         .zip(keys)
         .map(|(input, key)| crate::resident::REFERENCED.get_or(Some(*key), || referenced(input)))
         .collect::<std::io::Result<Vec<_>>>()?;
-    let key = map.map(|map| (map, scans.iter().map(|scan| scan.digest).collect()));
-    crate::resident::RUNTIME_SOURCES.get_or(key, || Ok(filter(sources, &scans)))
+    let digests: Vec<_> = scans.iter().map(|scan| scan.digest).collect();
+    let key = map.map(|map| (map, digests.clone()));
+    crate::resident::RUNTIME_SOURCES.get_or(key, || {
+        // A resident compiler that rebased its map carries over what it kept
+        // of the previous map for the same inputs.
+        let rebased = map
+            .and_then(crate::source_delta::transition)
+            .and_then(|transition| {
+                let (prior, spawns_units) =
+                    crate::resident::RUNTIME_SOURCES.get(&(transition.from, digests))?;
+                Some((rebase(sources, &scans, &prior, &transition)?, spawns_units))
+            });
+        Ok(rebased.unwrap_or_else(|| filter(sources, &scans)))
+    })
+}
+
+/// [`filter`]'s result for `sources` from its result `prior` for the map
+/// `transition` was rebased from: none when the files it keeps would change.
+fn rebase(
+    sources: &SourceMap,
+    scans: &[Referenced],
+    prior: &SourceMap,
+    transition: &crate::source_delta::Transition,
+) -> Option<std::sync::Arc<SourceMap>> {
+    if sources.items.is_empty() {
+        return None;
+    }
+    let names = names(scans);
+    // The kept files, in map order, are a subsequence of the map's.
+    let mut kept = prior.files.iter().enumerate().peekable();
+    let numbers: Vec<Option<u32>> = sources
+        .files
+        .iter()
+        .map(|file| {
+            let (index, _) = kept.next_if(|(_, kept)| kept.path == file.path)?;
+            Some(index as u32)
+        })
+        .collect();
+    let mut items = prior.items.clone();
+    for item in &transition.removed {
+        items.remove(item);
+    }
+    let mut owners = HashMap::new();
+    for item in &transition.bound {
+        let named = names.contains(site_symbol(item).as_bytes())
+            || hirsel_core_ir::source::numbers_unit_sites(item)
+                && *owners
+                    .entry(hirsel_core_ir::source::release_site_owner(item))
+                    .or_insert_with_key(|owner| names.contains(site_symbol(owner).as_bytes()));
+        if named {
+            let mut at = sources.items[item];
+            at.file = numbers[at.file as usize]?;
+            items.insert(item.clone(), at);
+        }
+    }
+    let mut used = vec![false; prior.files.len()];
+    for item in items.values() {
+        used[item.file as usize] = true;
+    }
+    used.iter().all(|&used| used).then(|| {
+        std::sync::Arc::new(SourceMap {
+            files: prior.files.clone(),
+            items,
+            points: sources.points.clone(),
+        })
+    })
+}
+
+fn names(scans: &[Referenced]) -> HashSet<&[u8]> {
+    scans
+        .iter()
+        .flat_map(|scan| scan.items.iter().map(Vec::as_slice))
+        .collect()
 }
 
 /// The part of `sources` the inputs whose `scans` are given reference, and
@@ -42,10 +113,7 @@ fn filter(sources: &SourceMap, scans: &[Referenced]) -> (std::sync::Arc<SourceMa
     if sources.items.is_empty() {
         return (std::sync::Arc::new(sources.clone()), spawns_units);
     }
-    let names: HashSet<&[u8]> = scans
-        .iter()
-        .flat_map(|scan| scan.items.iter().map(Vec::as_slice))
-        .collect();
+    let names = names(scans);
     let named = named_items(sources, &names);
     let mut last_owner = None;
     let retained = sources

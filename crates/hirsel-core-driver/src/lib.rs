@@ -83,6 +83,7 @@ pub use image::{CoreImage, LibraryInput};
 pub use instances::{InstanceStop, Units, collect_instances};
 mod resident;
 mod reuse;
+mod source_delta;
 mod store;
 use bincode::Options;
 pub use meter::{Measurements, Meter, Stage};

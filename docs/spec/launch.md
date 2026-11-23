@@ -264,7 +264,9 @@ are intact, and never that they were checked. A caller with narrower authority, 
 deployment service that only schedules deploys for others, never forwards a raw R. It either
 selects a publication the host has recorded, by its R, or submits source, which the host
 publishes itself with the normal checker, using the host's own compiler caches and package
-images and the bounds below. The operator still approves the grant bindings each deploy would
+images and the bounds below. Its caches may be a resident compiler's memory
+([cli](cli.md#resident-compiler)); a publication is the same R whether a resident or a
+one-shot compiler produced it. The operator still approves the grant bindings each deploy would
 give, as the preview shows them. A recipe that grants `Foreign=D` is deployed only when the
 request passes `--grant Foreign=D` itself, and the deploy's output shows, before any child runs,
 the interface, target, selected archive digest and recipe of each such grant

@@ -106,6 +106,9 @@ pub enum OptionId {
     HostMemory,
     StartRetries,
     TapeRetention,
+    Resident,
+    MaxMemory,
+    Stop,
 }
 struct OptionSpec {
     id: OptionId,
@@ -138,6 +141,7 @@ commands! {
     "launcher", "launcher --control SOCKET --state DIR [--cgroup-root DIR]", "Hold the groups' listeners and start their children for the platform host.";
     "deploy", "deploy RECIPE --control SOCKET --code-store DIR [options]", "Submit a recipe and its missing code objects to a host.";
     "run", "run [package-dir] [options] [-- arguments...]", "Build and run a native executable.";
+    "serve", "serve [package-dir] [--store DIRECTORY] [--max-memory BYTES] [--stop]", "Serve the package's build and run requests from a resident compiler.";
     "prof", "prof <command>", "Capture or inspect a CPU profile.";
     "prof run", "prof run [package-dir] [build-opts] [--tasks] [--out FILE.hprof] [--freq 997] [--pmu LIST] [--stack-bytes 32768] [-- args...]", "Build and sample a native executable from exec until exit.";
     "prof replay", "prof replay [package-dir | --inputs MANIFEST] --tape TAPE [--entry DEFINITION] [--tasks] [--mem[=exact|sampled]] [--out FILE.hprof]", "Profile serial replay through the recording and profiling runtime.";
@@ -542,6 +546,27 @@ static OPTIONS: &[OptionSpec] = &[
     ),
     option!(Help, ["--help", "-h"], None, [], "Show this help."),
     option!(
+        Resident,
+        ["--resident"],
+        None,
+        ["build", "run"],
+        "Serve the request from the package's resident compiler, starting one if none serves it."
+    ),
+    option!(
+        MaxMemory,
+        ["--max-memory"],
+        Some("BYTES"),
+        ["serve"],
+        "Exit once the resident compiler's memory exceeds BYTES after a request (default 1 GiB)."
+    ),
+    option!(
+        Stop,
+        ["--stop"],
+        None,
+        ["serve"],
+        "Stop the package's resident compiler."
+    ),
+    option!(
         ProfTasks,
         ["--tasks"],
         None,
@@ -918,7 +943,8 @@ static OPTIONS: &[OptionSpec] = &[
             "inspect",
             "core-product",
             "std-product",
-            "sdk"
+            "sdk",
+            "serve"
         ],
         "Select the request or product store."
     ),

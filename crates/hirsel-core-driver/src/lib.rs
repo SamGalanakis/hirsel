@@ -73,6 +73,7 @@ pub use diagnostics::{
 };
 pub use image::{CoreImage, LibraryInput};
 pub use instances::{InstanceStop, Units, collect_instances};
+mod resident;
 mod reuse;
 mod store;
 use bincode::Options;

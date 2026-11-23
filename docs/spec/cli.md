@@ -30,6 +30,31 @@ Register the host runtime with `core-product --install` or
 `--runtime ARCHIVE`. The installed compiler links user programs with the
 copied kit and a bundle-relative recipe.
 
+## Resident compiler
+
+`hirsel serve [package-dir]` keeps one compiler process for a store
+(`--store`, or `.hirsel-core` in the package directory). That process
+answers the store's `build` and `run` requests and keeps in memory the
+state those requests derive from unchanged inputs. The process listens
+on `resident.sock` in the store and holds `resident.lock` while it runs.
+
+`hirsel build` and `hirsel run` send their request to the store's
+resident compiler when one is running, and otherwise compile in their
+own process. `--resident` also starts a resident compiler when none
+serves the store, and replaces one that refuses the request. A
+resident compiler runs the request on the same path a one-shot
+compiler takes, with the client's arguments, working directory,
+environment and standard streams. Its output is byte-identical to a
+one-shot build. A `run` request's program runs in the client process,
+under the client's terminal and signals.
+
+A resident compiler refuses a request from another toolchain or another
+environment. The client then compiles in its own process. A refusal for
+another toolchain also stops the server. The server exits after a
+request that leaves it above `--max-memory BYTES` (default 1 GiB)
+resident, and after a request that panics. `hirsel serve --stop`
+stops the store's server.
+
 ## CPU profiles
 
 ```text

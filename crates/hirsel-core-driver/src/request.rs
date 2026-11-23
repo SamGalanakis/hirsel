@@ -54,30 +54,30 @@ pub(crate) fn local_admission_limits() -> crate::code_admission::AdmissionLimits
         timeout: None,
     }
 }
-fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
+fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     let mut invocation = match crate::cli::parse(args.into_iter())? {
         crate::cli::Action::Help(help) => {
             print!("{help}");
-            std::process::exit(0);
+            return conclude(Outcome::Exit(0));
         }
         crate::cli::Action::Version => {
             crate::installation::print_version()?;
-            std::process::exit(0);
+            return conclude(Outcome::Exit(0));
         }
         crate::cli::Action::Invoke(invocation) => invocation,
     };
     match invocation.command.name {
         "prof attach" => {
             crate::prof_command::attach(invocation)?;
-            std::process::exit(0);
+            return conclude(Outcome::Exit(0));
         }
         "prof export" => {
             crate::prof_command::export(invocation)?;
-            std::process::exit(0);
+            return conclude(Outcome::Exit(0));
         }
         name if name.starts_with("prof ") && !matches!(name, "prof run" | "prof replay") => {
             crate::prof_command::query(invocation)?;
-            std::process::exit(0);
+            return conclude(Outcome::Exit(0));
         }
         _ => {}
     }
@@ -88,8 +88,15 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     if command == "launcher" {
         match crate::launcher::run(invocation)? {}
     }
+    if command == "serve" {
+        if crate::resident::serving() {
+            return Err("a resident compiler serves build and run requests only".into());
+        }
+        let serve = crate::resident::Serve::read(invocation)?;
+        return conclude(Outcome::Exit(crate::resident::run(serve)?));
+    }
     if matches!(command, "host" | "deploy") {
-        std::process::exit(crate::host::run(invocation)?);
+        return conclude(Outcome::Exit(crate::host::run(invocation)?));
     }
     if command == "replay"
         && invocation
@@ -97,14 +104,16 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             .iter()
             .any(|(option, _)| *option == Opt::HostState)
     {
-        std::process::exit(crate::host::replay(invocation)?);
+        return conclude(Outcome::Exit(crate::host::replay(invocation)?));
     }
     if command == "call" {
-        std::process::exit(crate::call::run(crate::call::Options::read(invocation)?)?);
+        return conclude(Outcome::Exit(crate::call::run(
+            crate::call::Options::read(invocation)?,
+        )?));
     }
     if command == "sdk" {
         crate::sdk_command::run(crate::sdk_command::Options::read(invocation)?)?;
-        std::process::exit(0);
+        return conclude(Outcome::Exit(0));
     }
     if command == "tape" {
         let path = invocation
@@ -119,7 +128,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             return Err("tape show requires --include-credentials".into());
         }
         crate::tape_cli::show(Path::new(path))?;
-        std::process::exit(0);
+        return conclude(Outcome::Exit(0));
     }
     if command == "manifest" {
         crate::release_manifest::show(Path::new(
@@ -128,7 +137,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                 .as_deref()
                 .ok_or("manifest show requires a path")?,
         ))?;
-        std::process::exit(0);
+        return conclude(Outcome::Exit(0));
     }
     let mut package_mode = crate::package_lock::Mode::default();
     let mut package_store = None;
@@ -181,7 +190,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         } else {
             lock.commit(&resolved.workspace)?;
         }
-        std::process::exit(0);
+        return conclude(Outcome::Exit(0));
     }
     let replay_command = command == "replay";
     if command == "new" {
@@ -206,14 +215,14 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                 "application"
             }
         );
-        std::process::exit(0);
+        return conclude(Outcome::Exit(0));
     }
     if command == "primer" {
         if invocation.positional.is_some() {
             return Err("primer takes no arguments".into());
         }
         print!("{}", crate::cli_tools::PRIMER);
-        std::process::exit(0);
+        return conclude(Outcome::Exit(0));
     }
     if command == "fmt" || command == "explain" {
         use crate::cli::OptionId;
@@ -235,14 +244,14 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                 (false, Some(path)) => crate::cli_tools::format(Path::new(path), action, mode)?,
                 _ => return Err("fmt requires one of FILE, DIR, or --stdin".into()),
             };
-            std::process::exit(status);
+            return conclude(Outcome::Exit(status));
         }
         crate::cli_tools::explain(
             invocation.positional.as_deref(),
             has(OptionId::ListRules),
             has(OptionId::Json),
         )?;
-        std::process::exit(0);
+        return conclude(Outcome::Exit(0));
     }
     let inspection = (command == "inspect")
         .then(|| crate::inspect::Inspection::read(&mut invocation))
@@ -418,6 +427,8 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             Opt::Inputs => manifest = Some(PathBuf::from(value)),
             Opt::Metrics => metrics = Some(PathBuf::from(value)),
             Opt::ProfileFront => profile_front = true,
+            // Routed before the request runs (`resident::submit`).
+            Opt::Resident => {}
             Opt::Image => image_path = Some(PathBuf::from(value)),
             Opt::Help
             | Opt::Interface
@@ -455,6 +466,8 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             | Opt::HostMemory
             | Opt::StartRetries
             | Opt::TapeRetention
+            | Opt::MaxMemory
+            | Opt::Stop
             | Opt::CallTimeout
             | Opt::ProfOut
             | Opt::ProfTasks
@@ -729,7 +742,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                 );
             }
         }
-        std::process::exit(0);
+        return conclude(Outcome::Exit(0));
     }
     if install_root.is_some() && (store.is_some() || image_path.is_some()) {
         return Err("--install cannot be combined with --store or --image".into());
@@ -869,7 +882,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         } else {
             println!("built {}", product.executable.display());
         }
-        std::process::exit(0);
+        return conclude(Outcome::Exit(0));
     }
     if command == "core-product" || command == "std-product" {
         if link_kit.is_some() && (install_root.is_none() || runtime.is_none()) {
@@ -946,7 +959,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         if let Some(path) = metrics {
             meter.write_metrics(path)?;
         }
-        std::process::exit(0);
+        return conclude(Outcome::Exit(0));
     }
     if command != "publish"
         && native_command
@@ -1009,7 +1022,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             "{}",
             crate::foreign_header::header(request.inputs, module, &symbols)?
         );
-        std::process::exit(0);
+        return conclude(Outcome::Exit(0));
     }
     // PROG-4: each test's run configuration, from the package's manifest
     // when it declares one, else from the command line.
@@ -1237,7 +1250,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             if let Some(profile) = &profile {
                 profile.cleanup();
             }
-            std::process::exit(2);
+            return conclude(Outcome::Exit(2));
         }
         if let Some(Ok(options)) = &mut prepared {
             let header =
@@ -1270,7 +1283,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         .map_or_else(|| product.accepted(), |r| r.accepted());
     if accepted && let Some(inspection) = inspection {
         inspection.write(&product, selected_entry.as_ref(), json)?;
-        std::process::exit(0);
+        return conclude(Outcome::Exit(0));
     }
     let native_options = if native_command && (test_command || accepted) {
         let options = prepared.expect("a native command prepares its options")?;
@@ -1416,11 +1429,11 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         if let Some(path) = metrics {
             meter.write_metrics(path)?;
         }
-        std::process::exit(if tests.is_empty() {
+        return conclude(Outcome::Exit(if tests.is_empty() {
             2
         } else {
             i32::from(failed)
-        });
+        }));
     }
     let mut stopped = None;
     // A build whose executable is stored though writing it to the output
@@ -1452,7 +1465,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                         } else {
                             println!("{}", hex(root));
                         }
-                        std::process::exit(0);
+                        return conclude(Outcome::Exit(0));
                     }
                     let recipe = (release_manifest.is_some() || grant_lines)
                         .then(|| publication.recipe.clone());
@@ -1608,7 +1621,7 @@ fn answer_hit(
     run_output: Option<crate::store::Scratch>,
     meter: &mut Meter,
     metrics: Option<PathBuf>,
-) -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
+) -> Result<Outcome, Box<dyn std::error::Error>> {
     let rendered = hit.render();
     let mut stopped = None;
     let native = match (output_path, &hit.executable) {
@@ -1681,10 +1694,10 @@ fn finish(
     run_args: Vec<String>,
     record_path: Option<&str>,
     profile: Option<&crate::prof_command::Run>,
-    run_output: Option<crate::store::Scratch>,
+    mut run_output: Option<crate::store::Scratch>,
     meter: &mut Meter,
     metrics: Option<PathBuf>,
-) -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
+) -> Result<Outcome, Box<dyn std::error::Error>> {
     if json {
         println!("{}", serde_json::to_string(output)?);
     } else {
@@ -1728,26 +1741,34 @@ fn finish(
             );
         }
     }
+    let mut launch = None;
     let run_exit = if command == "run" || command == "replay" {
         if let Some(native) = &output.native {
             let path = std::fs::canonicalize(&native.executable)?;
-            let status = if let Some(profile) = profile {
-                profile.capture(&path, &run_args, record_path)?
-            } else {
-                let mut cmd = runner.command(&path);
-                cmd.args(run_args);
-                if command == "run"
-                    && let Some(record) = record_path
-                {
-                    cmd.env("HIRSEL_RECORD", record);
+            if let Some(profile) = profile {
+                let status = profile.capture(&path, &run_args, record_path)?;
+                if !status.success() {
+                    eprintln!("hirsel: main {}", crate::test_run::outcome_text(status));
                 }
-                cmd.status()
-                    .map_err(|e| format!("run execution {runner:?}: {e}"))?
-            };
-            if !status.success() {
-                eprintln!("hirsel: main {}", crate::test_run::outcome_text(status));
+                Some(status.code().unwrap_or(102))
+            } else {
+                let program = runner.command(&path);
+                let mut argv = vec![program.get_program().to_owned()];
+                argv.extend(program.get_args().map(ToOwned::to_owned));
+                argv.extend(run_args.into_iter().map(Into::into));
+                let env = (command == "run")
+                    .then_some(record_path)
+                    .flatten()
+                    .map(|record| ("HIRSEL_RECORD".into(), record.into()))
+                    .into_iter()
+                    .collect();
+                launch = Some(Launch {
+                    argv,
+                    env,
+                    keep: run_output.take(),
+                });
+                None
             }
-            Some(status.code().unwrap_or(102))
         } else {
             None
         }
@@ -1771,20 +1792,93 @@ fn finish(
         profile.cleanup();
     }
     drop(run_output);
-    // Publication and output are complete. The OS reclaims these in-memory
-    // graphs at exit; the reusable library Driver retains ordinary destruction.
-    std::process::exit(exit)
+    conclude(launch.map_or(Outcome::Exit(exit), Outcome::Launch))
+}
+
+/// What a request leaves for its caller: an exit status, or the program it
+/// built for `run` or `replay`, which the caller runs and whose status is the
+/// request's. A resident compiler's client runs the program itself, so it has
+/// the client's terminal, signals and process group.
+pub enum Outcome {
+    Exit(i32),
+    Launch(Launch),
+}
+/// The program a `run` or `replay` request built: its argument vector (the
+/// runner's, then the executable's, then the request's), the variables it runs
+/// with besides the caller's environment, and the scratch directory that holds
+/// it until it has run.
+pub struct Launch {
+    pub argv: Vec<std::ffi::OsString>,
+    pub env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+    pub(crate) keep: Option<crate::store::Scratch>,
+}
+impl Launch {
+    /// Run the program and return the request's exit status: the program's,
+    /// or 102 when a signal ended it.
+    pub fn execute(
+        argv: &[std::ffi::OsString],
+        env: &[(std::ffi::OsString, std::ffi::OsString)],
+    ) -> Result<i32, Box<dyn std::error::Error>> {
+        let status = std::process::Command::new(&argv[0])
+            .args(&argv[1..])
+            .envs(env.iter().map(|(name, value)| (name, value)))
+            .status()
+            .map_err(|e| format!("run execution {:?}: {e}", argv[0]))?;
+        if !status.success() {
+            eprintln!("hirsel: main {}", crate::test_run::outcome_text(status));
+        }
+        Ok(status.code().unwrap_or(102))
+    }
+}
+
+/// End a request with `outcome`. A one-shot process exits here, running the
+/// program first for a launch: the in-memory graphs are the OS's to reclaim,
+/// with no teardown. A resident compiler answers its client here, before the
+/// request's frames unwind, and the request returns its outcome to the server.
+fn conclude(outcome: Outcome) -> Result<Outcome, Box<dyn std::error::Error>> {
+    if crate::resident::serving() {
+        crate::resident::answer(&outcome);
+        return Ok(outcome);
+    }
+    match outcome {
+        Outcome::Exit(code) => std::process::exit(code),
+        Outcome::Launch(launch) => {
+            let code = Launch::execute(&launch.argv, &launch.env)?;
+            drop(launch);
+            std::process::exit(code)
+        }
+    }
 }
 
 /// Run the request `args` names (the arguments after the program name) and
-/// exit with its status. Process setup (allocator guard, signal dispositions,
-/// inherited descriptors) is the caller's.
+/// exit with its status, through a resident compiler when one serves the
+/// request's store (`crate::resident`). Process setup (allocator guard,
+/// signal dispositions, inherited descriptors) is the caller's.
 pub fn main(args: Vec<String>) -> ! {
+    if let Some(code) = crate::resident::submit(&args) {
+        std::process::exit(code);
+    }
+    let error = match run(args) {
+        Ok(outcome) => match conclude(outcome) {
+            Ok(_) => unreachable!("a one-shot request exits in conclude"),
+            Err(e) => e,
+        },
+        Err(e) => e,
+    };
+    eprintln!("hirsel: {e}", e = error);
+    std::process::exit(2)
+}
+
+/// Serve one request in a resident compiler: [`main`]'s request, with its
+/// error answered as main reports it.
+pub(crate) fn serve(args: Vec<String>) -> Outcome {
     match run(args) {
-        Ok(never) => match never {},
+        Ok(outcome) => outcome,
         Err(e) => {
             eprintln!("hirsel: {e}");
-            std::process::exit(2);
+            let outcome = Outcome::Exit(2);
+            crate::resident::answer(&outcome);
+            outcome
         }
     }
 }

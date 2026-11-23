@@ -105,9 +105,13 @@ fn object_follow_replay(mut source: ObjectPackRead, latest: HistoryHead, previou
 }
 
 fn object_follow_capture(mut source: ObjectPackRead, previous: Option[Arc[FollowCapture]], expected: Option[StoreId], ceiling: u64) -> Result[Option[Arc[FollowCapture]], Error] waits {
-    let mut scratch = disk_allocation(fn() -> Result[Bytes, Error] { Ok(list.with_capacity(HISTORY_HEAD_LIMIT)) })?
+    let mut scratch = disk_allocation(fn() -> Result[Bytes, Error] {
+        Ok(list.with_capacity(HISTORY_HEAD_LIMIT))
+    })?
     let fetched = object_follow_head(mut source, previous, mut scratch)?
-    let Some((take head_capture, tag)) = take fetched else { return Ok(None) }
+    let Some((take head_capture, tag)) = take fetched else {
+        return Ok(None)
+    }
     let latest = head_capture.head
     check_expected_store(expected, latest.store)?
     let old_charge = if let Some(old_capture) = previous {
@@ -116,7 +120,7 @@ fn object_follow_capture(mut source: ObjectPackRead, previous: Option[Arc[Follow
             return Error(disk_fault("head", 72, Order))
         }
         if history_ref_matches(latest.entry, old.current.entry) {
-            let refreshed = FollowCapture(store: latest.store, state: arc.share(old_capture.state), resident: old_capture.resident, remote: Some(ObjectFollowHead(current: latest, tag, next_node: old.next_node)))
+            let refreshed = FollowCapture(store: latest.store, state: arc.share(old_capture.state), resident: old_capture.resident, remote: Some(ObjectFollowHead(current: latest, tag, next_node: old.next_node)), watermark: old_capture.watermark)
             return Ok(Some(arc.new(take refreshed)))
         }
         old_capture.resident
@@ -142,7 +146,7 @@ fn object_follow_capture(mut source: ObjectPackRead, previous: Option[Arc[Follow
     let resident = journal_account(replay)?
     let JournalReplay(state: take built, next_node, ..) = take replay
     let remote = ObjectFollowHead(current: latest, tag, next_node)
-    Ok(Some(arc.new(FollowCapture(store: latest.store, state: arc.new(take built), resident, remote: Some(remote)))))
+    Ok(Some(arc.new(FollowCapture(store: latest.store, state: arc.new(take built), resident, remote: Some(remote), watermark: stamp_after(next_node)?))))
 }
 
 fn object_follow_job(take job: ObjectFollowJob) waits {
@@ -157,7 +161,9 @@ fn object_follow_job(take job: ObjectFollowJob) waits {
 
 fn object_follow_private(tasks: Tasks, mut io: ObjectFollowerIo, take previous: Option[Arc[FollowCapture]], expected: Option[StoreId], ceiling: u64, deadline: u64) -> Result[Option[Arc[FollowCapture]], Error] waits {
     let (response, answer): (Sender[ObjectFollowAnswer], Receiver[ObjectFollowAnswer]) = channel.new(1)
-    let Some(take requests) = replace(mut io.requests, None) else { return Error(Io(Closed)) }
+    let Some(take requests) = replace(mut io.requests, None) else {
+        return Error(Io(Closed))
+    }
     let job = ObjectFollowJob(requests: take requests, previous: take previous, expect: expected, ceiling, deadline, response: take response)
     let first = task.try_spawn(tasks, bytes 18446744073709551327u64, take job, object_follow_job)
     let worker = match take first {

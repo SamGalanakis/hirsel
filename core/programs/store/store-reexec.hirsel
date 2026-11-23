@@ -1,6 +1,5 @@
 // RUNNER-SPEC §7 (R5): a recorded call re-executed on its base, under its
 // recorded CallInfo, compared with what it committed.
-
 pub type Difference = Reply | Writes
 
 pub type UnknownReason = NoEntry | ArgsUnresolved | StateGone | RevisionUnknown | NotRecorded | Effects | AdmissionRefused
@@ -15,9 +14,9 @@ fn recorded_call(id: StoreId, b: Branch, commit: JournalCommit) -> Option[Record
     }
     let context = match section.settlement {
         Some(current) => current,
-        None => Settlement(way: 0, base: commit.version - 1, at: commit.at, seed: call_info(id, b.id, commit.version, commit.at, commit.at).seed)
+        None => Settlement(way: 0, base: commit.version - 1, at: commit.at, seed: call_info(id, b.id, commit.version, commit.at, commit.at).seed, stop: None)
     }
-    Some(Recorded(record: clone(section.record), settle: context.way, branch: b, base: context.base, at: context.at, seed: context.seed))
+    Some(Recorded(record: clone(section.record), settle: context.way, branch: b, base: context.base, at: context.at, seed: context.seed, stop: context.stop))
 }
 
 // The committed frame of `wanted` on `b`, read from the live journal. A
@@ -25,7 +24,9 @@ fn recorded_call(id: StoreId, b: Branch, commit: JournalCommit) -> Option[Record
 fn recorded_commit(db: Db, b: Branch, wanted: u64) -> Result[Option[JournalCommit], Error] waits {
     healthy(db)?
     let i = branch_index(db, b)?
-    let Some(state) = view db.disk else { return Ok(None) }
+    let Some(state) = view db.disk else {
+        return Ok(None)
+    }
     // A version the last cut covers has its frame below record_cut, so the
     // scan from there does not find it.
     if wanted > db.heads[i].head {
@@ -266,7 +267,11 @@ fn same_writes(rows: DataRows, committed: List[JournalOp]) -> Result[bool, Error
     Ok(true)
 }
 
-type ReplaySource { commit: JournalCommit, call: Recorded, base: Roots }
+type ReplaySource {
+    commit: JournalCommit,
+    call: Recorded,
+    base: Roots
+}
 
 fn replay_source(db: Db, b: Branch, v: u64) -> Result[Result[ReplaySource, UnknownReason], Error] waits {
     let Some(commit) = recorded_commit(db, b, v)? else {
@@ -319,8 +324,7 @@ pub fn reexecute(db: Db, b: Branch, v: u64, plan: Plan, failed: scoped fn(Stop) 
 
 // Select the plan and open fresh handles on the same historical schema the
 // re-execution will read. Preparation runs outside the recorded entry's bounds.
-pub fn reexecute_with[E](db: Db, b: Branch, v: u64, store_error: scoped fn(take Error) -> E, failed: scoped fn(Stop) -> Bytes,
-    prepare: scoped fn(Recorded, Schema, scoped fn(Plan, scoped[view] fn(Recorded, mut Tx) -> Result[Bytes, Bytes]) -> Result[Verdict, Error]) -> Result[Verdict, E]) -> Result[Verdict, E] waits {
+pub fn reexecute_with[E](db: Db, b: Branch, v: u64, store_error: scoped fn(take Error) -> E, failed: scoped fn(Stop) -> Bytes, prepare: scoped fn(Recorded, Schema, scoped fn(Plan, scoped[view] fn(Recorded, mut Tx) -> Result[Bytes, Bytes]) -> Result[Verdict, Error]) -> Result[Verdict, E]) -> Result[Verdict, E] waits {
     let loaded = replay_source(db, b, v) ?=> |e| store_error(take e)
     let source = match take loaded {
         Ok(take source) => take source,

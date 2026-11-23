@@ -436,14 +436,14 @@ fn page_retired_manifest_vector() -> Bytes {
         0,
         0,
         0,
-        6,
-        25,
-        182,
-        142,
         254,
-        44,
-        164,
-        111,
+        2,
+        106,
+        147,
+        30,
+        162,
+        242,
+        224,
         72,
         73,
         82,
@@ -452,7 +452,7 @@ fn page_retired_manifest_vector() -> Bytes {
         79,
         82,
         69,
-        3,
+        4,
         0,
         0,
         0,
@@ -674,14 +674,14 @@ fn page_retired_node_vector() -> Bytes {
         0,
         0,
         0,
-        26,
-        24,
-        191,
-        164,
-        51,
-        85,
-        135,
-        166,
+        68,
+        89,
+        139,
+        235,
+        136,
+        58,
+        155,
+        3,
         72,
         73,
         82,
@@ -690,7 +690,7 @@ fn page_retired_node_vector() -> Bytes {
         79,
         82,
         69,
-        3,
+        4,
         0,
         0,
         0,
@@ -773,7 +773,7 @@ fn page_retired_node_vector() -> Bytes {
 fn check_paged_manifest() -> Result[(), Error] {
     let id = StoreId(hi: 1, lo: 2)
     let encoded = disk_page_manifest_bytes(id, page_manifest_empty())?
-    if list.len(encoded) != 387 || std.check.xxh3(encoded, 0, 387) != 0x5a43ba5d27981d2eu64 {
+    if list.len(encoded) != 551 || std.check.xxh3(encoded, 0, 551) != 0xe52e64df25612174u64 {
         return Error(Foreign)
     }
     match disk_read_page_manifest("MANIFEST", page_old_manifest_vector()) {
@@ -795,7 +795,7 @@ fn check_paged_inventory(d: Dir) -> Result[(), Error] waits {
         let Some(list_pack) = map.get(validated.inventory, 2u64) else {
             return Error(Foreign)
         }
-        if data_pack.class != 0 || data_pack.payload_bytes != 33 || list_pack.class != 2 || list_pack.live != 60 || list_pack.payload_bytes != 60 {
+        if data_pack.class != 0 || data_pack.payload_bytes != 33 || list_pack.class != 2 || list_pack.live != 68 || list_pack.payload_bytes != 68 {
             return Error(Foreign)
         }
     }
@@ -878,6 +878,7 @@ fn disk_test_paged_inventory(d: Dir) -> Result[(), Error] waits {
 // Its selected data and its unselected files stay byte-for-byte intact.
 @test
 fn disk_test_format_cutover(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    refuse_frozen_format3(d, c, r, tasks)?
     let directory = disk_test_directory(d)
     let manifest = page_old_manifest_vector()
     let segment = page_old_segment_vector()

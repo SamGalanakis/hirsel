@@ -39,17 +39,18 @@ class Manifest:
         self.retired_rows = {}
         raw = (directory / 'MANIFEST').read_bytes()
         kind, version, width = unpack_from('<HHI', raw, PACK_HEADER)
-        if (kind, version, width) != (0x0031, 1, len(raw) - PACK_HEADER - FRAME_HEADER):
-            raise ValueError('R6 expected a format-3 MANIFEST')
+        disk_format, = unpack_from('<I', raw, 24)
+        if disk_format != 4 or (kind, version, width) != (0x0031, 1, len(raw) - PACK_HEADER - FRAME_HEADER):
+            raise ValueError('R6 expected a format-4 MANIFEST')
         manifest = raw[PACK_HEADER + FRAME_HEADER:]
         self.next_stamp = unpack_from('<Q', manifest, 24)[0]
         self.next_pack = unpack_from('<Q', manifest, 40)[0]
-        branches, branch_id, name_length = unpack_from('<IIH', manifest, 144)
-        roots = 182 + name_length
+        branches, branch_id, name_length = unpack_from('<IIH', manifest, 308)
+        roots = 346 + name_length
         if (branches, branch_id) != (1, 0) or manifest[roots + 108:] != bytes(5):
             raise ValueError('R6 expected only the main branch with no pins')
-        self.walk(manifest, 72, 'pack_list')
-        self.walk(manifest, 108, 'retirement')
+        self.walk(manifest, 236, 'pack_list')
+        self.walk(manifest, 272, 'retirement')
         self.walk(manifest, roots, 'map')
         self.walk(manifest, roots + 36, 'streams')
         self.walk(manifest, roots + 72, 'catalog')

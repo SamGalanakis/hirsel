@@ -174,7 +174,7 @@ fn history_check_list_pack(mut source: ObjectPackRead, id: StoreId, seq: u64, ne
     if std.check.finish(stream.digest) != item.digest {
         return Error(disk_fault(stream.path, 0, Checksum))
     }
-    Ok(PagePack(class: 2, frames: int.truncate(checked_pack.frames), live, payload_bytes: checked_pack.payload_bytes))
+    Ok(PagePack(class: 2, frames: int.truncate(checked_pack.frames), live, payload_bytes: checked_pack.payload_bytes, index: 0))
 }
 
 type LocatedNeed = NeedPage(std.page.PagePtr, std.page.Domain, Option[u8]) | NeedBlob(std.page.BlobRef)
@@ -313,6 +313,7 @@ fn history_graph_order(mut graph: PageGraph) {
 }
 
 fn history_validate_manifest(mut source: ObjectPackRead, id: StoreId, file: String, take manifest: PageManifest) -> Result[ValidatedPageManifest, Error] waits {
+    require_memory_manifest(manifest)?
     let blank = PageGraph(stamps: map.new(), frames: map.new(), postorder: list.new())
     let mut lists = ListedPages(packs: map.new(), retired: map.new(), class_two: map.new(), live_graph: take blank)
     let mut last: Option[u64] = None

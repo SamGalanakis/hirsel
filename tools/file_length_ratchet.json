@@ -44,9 +44,9 @@
     "lines": 2982
   },
   "core/programs/store/store.hirsel": {
-    "lines": 7954,
-    "raise_revision": 2,
-    "reason": "fork-depth-law-2001-fmt"
+    "lines": 8000,
+    "raise_revision": 3,
+    "reason": "m3-s2-format4-2006"
   },
   "core/std/char.hirsel": {
     "lines": 4741

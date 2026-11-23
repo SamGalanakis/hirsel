@@ -735,7 +735,7 @@ fn bucket_m2_read_packs(d: Dir, tasks: Tasks, sim: BucketSim) -> Result[(), Erro
     let id = head.store
     let replay = history_paged_capture(mut source, head, 1048576)?
     let root = view replay.state.tips[0]
-    let snap = Snapshot(store: id, open: 0, branch: 0, head: root.head, roots: share_roots(root.roots))
+    let snap = Snapshot(store: id, open: 0, branch: 0, head: root.head, roots: share_roots(root.roots), watermark: 1)
     let rows = catalog_handle(id, root.roots.catalog, false, string.from("rows"), std.codec.key_u64(), std.codec.of_bytes())?
     if version(snap) != 2 || get(snap, shape(rows), 7)? != Some(bucket_m2_pack_value()) {
         fail("the object checkpoint did not reconstruct its row")
@@ -792,9 +792,7 @@ fn bucket_m2_law_probe(tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits 
     }
     history_qualify(mut old, deadline)?
     history_qualify(mut new_client, deadline)?
-    if !s3_host_matches("s3.us-east-1.amazonaws.com", "us-east-1") ||
-        s3_host_matches("s3.dualstack.us-east-1.amazonaws.com", "us-east-1") ||
-        s3_host_matches("s3.us-east-1.amazonaws.com.example.com", "us-east-1") {
+    if !s3_host_matches("s3.us-east-1.amazonaws.com", "us-east-1") || s3_host_matches("s3.dualstack.us-east-1.amazonaws.com", "us-east-1") || s3_host_matches("s3.us-east-1.amazonaws.com.example.com", "us-east-1") {
         fail("S3 host qualification used a partial match")
     }
     let metadata = history_config_bytes(HistoryConfig(place: std.object.bucket_config(old), level: "bucket"))?
@@ -822,8 +820,7 @@ fn bucket_m2_law_probe(tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits 
     let Some((take capture, tag)) = history_probe_head(mut old, previous.tag, mut first.witness, deadline)? else {
         fail("conditional head probe hid a foreign advance")
     }
-    if capture.head.pair.epoch != 2 || !same(capture.head.pair.holder, holder) ||
-        capture.head.entry.seq != 2 || tag == previous.tag {
+    if capture.head.pair.epoch != 2 || !same(capture.head.pair.holder, holder) || capture.head.entry.seq != 2 || tag == previous.tag {
         fail("conditional head probe returned the wrong capture")
     }
     Ok(())

@@ -42,7 +42,7 @@ fn law_scan_location_pack(mut graph: LawLocationGraph, seq: u64, class: u8, raw:
     } else {
         0x0021u16
     }
-    let mut pack = PagePack(class: class, frames: 0, live: 0, payload_bytes: 0)
+    let mut pack = PagePack(class: class, frames: 0, live: 0, payload_bytes: 0, index: 0)
     let mut at = 72u64
     while at < list.len(raw) {
         let width: u32 = list.word_le(raw, at + 4)
@@ -105,10 +105,10 @@ fn law_read_location_list_row(mut graph: LawLocationGraph, tree: LawLocationTree
         map.insert(mut graph.retired, seq, ())
     } else {
         let value = cell + 3
-        if width != 21 || page[value] > 1 || map.contains(graph.listed, seq) {
+        if width != 29 || page[value] > 1 || map.contains(graph.listed, seq) {
             fail("location law: listed pack row")
         }
-        let pack = PagePack(class: page[value], frames: list.word_le(page, value + 1), live: list.word_le(page, value + 5), payload_bytes: list.word_le(page, value + 13))
+        let pack = PagePack(class: page[value], frames: list.word_le(page, value + 1), live: list.word_le(page, value + 5), payload_bytes: list.word_le(page, value + 13), index: list.word_le(page, value + 21))
         map.insert(mut graph.listed, seq, pack)
     }
 }
@@ -187,7 +187,7 @@ fn law_follow_location(d: Dir, mut graph: LawLocationGraph, ptr: std.page.PagePt
 }
 
 fn law_same_pack(a: PagePack, b: PagePack) -> bool {
-    a.class == b.class && a.frames == b.frames && a.live == b.live && a.payload_bytes == b.payload_bytes
+    a.class == b.class && a.frames == b.frames && a.live == b.live && a.payload_bytes == b.payload_bytes && a.index == b.index
 }
 
 fn law_parse_locations(d: Dir) -> Result[LawLocationGraph, Error] waits {
@@ -197,10 +197,10 @@ fn law_parse_locations(d: Dir) -> Result[LawLocationGraph, Error] waits {
         fail("location law: MANIFEST frame")
     }
     let mut graph = LawLocationGraph(next_pack: list.word_le(raw, 128), next_stamp: list.word_le(raw, 112), physical: map.new(), packs: map.new(), listed: map.new(), retired: map.new(), frames: map.new(), incoming: map.new())
-    law_follow_location(d, mut graph, law_read_location_ptr(raw, 160), 2, LawPacks, LawList(0))?
-    law_follow_location(d, mut graph, law_read_location_ptr(raw, 196), 2, LawRetired, LawList(1))?
-    let branches = read_le(raw, 232, 4)
-    let mut at = 236u64
+    law_follow_location(d, mut graph, law_read_location_ptr(raw, 324), 2, LawPacks, LawList(0))?
+    law_follow_location(d, mut graph, law_read_location_ptr(raw, 360), 2, LawRetired, LawList(1))?
+    let branches = read_le(raw, 396, 4)
+    let mut at = 400u64
     for _ in 0u64 .. branches {
         let id = read_le(raw, at, 4)
         let name_bytes = read_le(raw, at + 4, 2)
@@ -234,7 +234,7 @@ fn law_parse_locations(d: Dir) -> Result[LawLocationGraph, Error] waits {
                 LawData
             }, LawPin(clone(name), tree))?
         }
-        at = roots + 108
+        at = roots + 116
     }
     if at != list.len(raw) {
         fail("location law: trailing MANIFEST bytes")

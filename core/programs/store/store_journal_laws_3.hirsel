@@ -33,23 +33,32 @@ pub fn journal_law_call_vector() -> bool {
     for way in 1u64 .. 3 {
         let settle: u8 = int.truncate(way)
         let record = CallRecord(key: result.unwrap(copied(entry_key)), args: result.unwrap(copied(args)), stream: result.unwrap(copied(stream)), revision: Some(revision_vector()), code: code_vector())
-        let context = Settlement(way: settle, base: 256, at: 1122, seed: 3344)
+        let context = Settlement(way: settle, base: 256, at: 1122, seed: 3344, stop: if way == 1 {
+            Some(Raised)
+        } else {
+            None
+        })
         let shifted = result.unwrap(encode_sections(ci, mut data, streams, Some(CallSection(record: take record, settlement: Some(context))), 7, 72))
         let checksum = if way == 1 {
-            8931551807492595195u64
+            2701735143281265526u64
         } else {
             7804208544902511782u64
         }
-        if list.len(shifted) != 337 || read_le(shifted, 8, 8) != checksum || shifted[312] != settle {
+        let width = if way == 1 {
+            338u64
+        } else {
+            337u64
+        }
+        if list.len(shifted) != width || read_le(shifted, 8, 8) != checksum || shifted[312] != settle {
             return false
         }
         if word_be(shifted, 313) != 256 || word_be(shifted, 321) != 1122 || word_be(shifted, 329) != 3344 {
             return false
         }
-        let call_commit = result.unwrap(journal_decode_commit("j-7", list.slice(shifted, 16, 337)))
+        let call_commit = result.unwrap(journal_decode_commit("j-7", list.slice(shifted, 16, width)))
         match call_commit.call {
             Some(decoded_call) => match decoded_call.settlement {
-                Some(actual) => if actual.way != settle || actual.base != 256 || actual.at != 1122 || actual.seed != 3344 {
+                Some(actual) => if actual.way != settle || actual.base != 256 || actual.at != 1122 || actual.seed != 3344 || (way == 1 && shifted[337] != 1u8) {
                     return false
                 },
                 None => return false,
@@ -140,7 +149,9 @@ fn journal_fixture_call(mut db: Db, i: u64, large: bool, take revision: Option[B
     db.file_end += size
     db.frame_seq += 1
     let commit_ticket = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
-    write_disk(mut db.disk, take raw, scoped fn(mut state: DiskState, take frame_bytes: Bytes) { state.pending = Some(take frame_bytes) })
+    write_disk(mut db.disk, take raw, scoped fn(mut state: DiskState, take frame_bytes: Bytes) {
+        state.pending = Some(take frame_bytes)
+    })
     handoff(mut db)?
     Ok(commit_ticket)
 }
@@ -647,7 +658,7 @@ fn journal_failure_notice(db: Db) -> Option[IoError] {
     }
     if let Some(e) = found {
         if let Some(disk) = db.disk {
-        let sender = view disk.written_send
+            let sender = view disk.written_send
             let _ = channel.try_send(sender, WriteFailed(e))
         }
     }

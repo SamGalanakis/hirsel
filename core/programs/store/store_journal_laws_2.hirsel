@@ -51,19 +51,19 @@ fn journal_test_fork_preparation(c: Clock, d: Dir, r: Random, tasks: Tasks) -> R
     }
 }
 
-// L51(a) and (k). Main is 147 bytes. 44,500 full pins and two
-// 89-byte names take the total to 16,777,069, leaving exactly 147 bytes.
+// L51(a) and (k). Main is 147 bytes. 43,574 full pins and two
+// 123-byte names take the total to 16,777,069, leaving exactly 147 bytes.
 fn fork_limit_manifest() -> PageManifest {
     let mut manifest = page_manifest_empty()
     manifest.fence = 1
     let roots = manifest.branches[0].roots
     let padding = string.repeat("x", 249)
-    for i in 0u64 .. 44500 {
+    for i in 0u64 .. 43574 {
         let name = result.unwrap(disk_path("", 100000 + i, padding))
-        list.push(mut manifest.pins, LocatedPin(name: take name, branch: 0, version: 0, roots: roots))
+        list.push(mut manifest.pins, LocatedPin(name: take name, branch: 0, version: 0, roots: roots, watermark: 1))
     }
-    list.push(mut manifest.pins, LocatedPin(name: string.repeat("b", 89), branch: 0, version: 0, roots: roots))
-    list.push(mut manifest.pins, LocatedPin(name: string.repeat("c", 89), branch: 0, version: 0, roots: roots))
+    list.push(mut manifest.pins, LocatedPin(name: string.repeat("b", 123), branch: 0, version: 0, roots: roots, watermark: 1))
+    list.push(mut manifest.pins, LocatedPin(name: string.repeat("c", 123), branch: 0, version: 0, roots: roots, watermark: 1))
     take manifest
 }
 
@@ -83,7 +83,7 @@ fn journal_test_fork_meta_limit(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
     deploy_result(disk_publish_manifest(child, id, fork_limit_manifest()))?
     let mut attempt: Bytes = list.with_capacity(16)
     list.fill(mut attempt, 16, 2u8)
-    fork_limit_image(child, id, attempt, "betas", 111)?
+    fork_limit_image(child, id, attempt, "betas", 119)?
     match open_export(child, c, attempt, options) {
         Error(Store(Corrupt(Fault(why: Malformed, ..)))) => (),
         _ => fail("export accepted the over-limit FORK"),
@@ -93,14 +93,14 @@ fn journal_test_fork_meta_limit(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
         Error(Corrupt(Fault(why: Malformed, ..))) => (),
         _ => fail("open accepted the over-limit FORK"),
     }
-    fork_limit_image(child, id, attempt, "beta", 110)?
+    fork_limit_image(child, id, attempt, "beta", 118)?
     let exported = open_export(child, c, attempt, options)?
     if exported.db.record_bytes != 16777216 || option.unwrap(branch(exported.db, "beta")).id != 1 {
         fail("export lost the equality FORK")
     }
     deploy_result(disk_io(host.remove(child, "EXPORT")))?
     let mut db = deploy_result(open(tasks, child, c, r, options))?
-    if db.record_bytes != 16777216 || disk_state(db).uncovered != 38 {
+    if db.record_bytes != 16777216 || disk_state(db).uncovered != 46 {
         fail("open lost the equality FORK")
     }
     let beta = option.unwrap(branch(db, "beta"))
@@ -115,20 +115,20 @@ fn journal_test_fork_meta_limit(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
     }
     let (refork, _) = deploy_result(fork(mut db, "beta", held))?
     let _ = deploy_result(checkpoint(mut db))?
-    let manifest = deploy_result(disk_read_file(child, "MANIFEST", 16777476))?
-    if read_le(manifest, 76, 4) != 16777368 {
+    let manifest = deploy_result(disk_read_file(child, "MANIFEST", 16777640))?
+    if read_le(manifest, 76, 4) != 16777532 {
         fail("cut encoded the wrong fork record total")
     }
     let _ = deploy_result(delete_branch(mut db, refork))?
-    let too_long = string.repeat("q", 26)
+    let too_long = string.repeat("q", 18)
     match pin(mut db, too_long, held) {
         Error(Limit(Manifest)) => (),
         _ => fail("over-limit pin was accepted"),
     }
-    let fitting = string.repeat("q", 25)
+    let fitting = string.repeat("q", 17)
     let _ = deploy_result(pin(mut db, fitting, held))?
-    let pinned_manifest = deploy_result(disk_read_file(child, "MANIFEST", 16777476))?
-    if db.record_bytes != 16777216 || read_le(pinned_manifest, 76, 4) != 16777368 {
+    let pinned_manifest = deploy_result(disk_read_file(child, "MANIFEST", 16777640))?
+    if db.record_bytes != 16777216 || read_le(pinned_manifest, 76, 4) != 16777532 {
         fail("cut encoded the wrong pin record total")
     }
     deploy_result(close(take db))
@@ -237,7 +237,7 @@ fn journal_test_fork_threshold(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
 }
 
 // L51(g), at full page size. The distinct blobs force one pack per row and
-// more than one branch of pack-list pages. The manifest still holds 299 bytes.
+// more than one branch of pack-list pages. The manifest still holds 463 bytes.
 @test
 fn journal_test_fork_pack_lists(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     let child = disk_test_directory(d)
@@ -260,8 +260,8 @@ fn journal_test_fork_pack_lists(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
     let first = disk_state(db).pages.next_pack
     let _ = checkpoint(mut db)?
     let after = disk_state(db).pages.next_pack
-    let manifest = disk_read_file(child, "MANIFEST", 387)?
-    if read_le(manifest, 76, 4) != 299 || std.page.level(std.page.image_of(disk_state(db).pages.lists.packs)) < 2 {
+    let manifest = disk_read_file(child, "MANIFEST", 551)?
+    if read_le(manifest, 76, 4) != 463 || std.page.level(std.page.image_of(disk_state(db).pages.lists.packs)) < 2 {
         return Error(Foreign)
     }
     let held = snapshot(db)
@@ -459,11 +459,11 @@ fn journal_poison_write(mut db: Db, t: Table[u64, u64], out: Stdout, scenario: S
 fn journal_frameless_wakes(db: Db, wakes: u64) -> Result[(), Error] waits {
     for _ in 0u64 .. wakes {
         if let Some(disk) = db.disk {
-        let sender = view disk.journal
+            let sender = view disk.journal
             result.unwrap(channel.send(sender, Barrier))
         }
         if let Some(disk) = db.disk {
-        let receiver = view disk.written
+            let receiver = view disk.written
             match result.unwrap(channel.receive(receiver)) {
                 Written => {},
                 WriteFailed(e) => return Error(Poisoned(e))

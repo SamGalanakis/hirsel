@@ -675,16 +675,16 @@ pub fn law_changes(c: Clock) -> bool {
         },
         _ => return false
     }
-    let other_branch = Snapshot(store: b.store, open: b.open, branch: 9, head: b.head, roots: share_roots(b.roots))
+    let other_branch = Snapshot(store: b.store, open: b.open, branch: 9, head: b.head, roots: share_roots(b.roots), watermark: 1)
     if !check_delta(a, other_branch, before, after) {
         return false
     }
-    let other_open = Snapshot(store: b.store, open: 1, branch: 0, head: b.head, roots: share_roots(b.roots))
+    let other_open = Snapshot(store: b.store, open: 1, branch: 0, head: b.head, roots: share_roots(b.roots), watermark: 1)
     if !is_foreign(changes(a, other_open)) {
         return false
     }
     let foreign = raw_test_db(c, 1073741824)
-    let other_store = Snapshot(store: StoreId(hi: 9, lo: 9), open: 0, branch: 0, head: foreign.heads[0].head, roots: share_roots(foreign.heads[0].roots))
+    let other_store = Snapshot(store: StoreId(hi: 9, lo: 9), open: 0, branch: 0, head: foreign.heads[0].head, roots: share_roots(foreign.heads[0].roots), watermark: 1)
     if !is_foreign(changes(a, other_store)) {
         return false
     }
@@ -807,9 +807,9 @@ fn test_look_task(c: Clock, tasks: Tasks) -> Result[(), ()] waits {
 pub fn law_changes_identity(c: Clock) -> bool {
     let db = test_db(c, 1073741824)
     let a = snapshot(db)
-    let other_open = Snapshot(store: a.store, open: 1, branch: 0, head: 0, roots: empty_roots())
-    let other_store = Snapshot(store: StoreId(hi: 9, lo: 9), open: 0, branch: 0, head: 0, roots: empty_roots())
-    let br = Snapshot(store: a.store, open: a.open, branch: 9, head: 0, roots: empty_roots())
+    let other_open = Snapshot(store: a.store, open: 1, branch: 0, head: 0, roots: empty_roots(), watermark: 1)
+    let other_store = Snapshot(store: StoreId(hi: 9, lo: 9), open: 0, branch: 0, head: 0, roots: empty_roots(), watermark: 1)
+    let br = Snapshot(store: a.store, open: a.open, branch: 9, head: 0, roots: empty_roots(), watermark: 1)
     if !is_foreign(changes(a, other_open)) || !is_foreign(changes(a, other_store)) {
         return false
     }

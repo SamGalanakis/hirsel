@@ -25,7 +25,10 @@ pub type Options: send {
     pack_bytes: u64,
     resident_limit: u64,
     authority: StorageKind,
-    expect: Option[StoreId], activation: Option[u64], binding: Option[Bytes], claim_ms: u64
+    expect: Option[StoreId],
+    activation: Option[u64],
+    binding: Option[Bytes],
+    claim_ms: u64
 }
 
 pub fn defaults() -> Options {
@@ -109,7 +112,8 @@ type Pin: shareable + send {
     branch: u32,
     version: u64,
     serial: u64,
-    roots: Roots
+    roots: Roots,
+    watermark: u64
 }
 
 fn main_head(take roots: Roots, head: u64, at: u64) -> Head {
@@ -158,7 +162,7 @@ fn main_state(take roots: Roots, head: u64, at: u64) -> Result[State, Capacity] 
 }
 
 fn share_pin(p: Pin) -> Result[Pin, Capacity] {
-    Ok(Pin(name: string.from(p.name), branch: p.branch, version: p.version, serial: p.serial, roots: share_roots(p.roots)))
+    Ok(Pin(name: string.from(p.name), branch: p.branch, version: p.version, serial: p.serial, roots: share_roots(p.roots), watermark: p.watermark))
 }
 
 fn tip_of(h: Head) -> Tip {
@@ -318,11 +322,11 @@ fn branch_index(db: Db, b: Branch) -> Result[u64, Error] {
 }
 
 fn head_snapshot(db: Db, i: u64) -> Snapshot {
-    snapshot_from(db, i, db.heads[i].head, db.heads[i].roots)
+    snapshot_from(db, i, db.heads[i].head, db.heads[i].roots, int.saturating_add(db.next_node, 1))
 }
 
-fn snapshot_from(db: Db, i: u64, head: u64, roots: Roots) -> Snapshot {
-    Snapshot(store: db.store, open: open_number(db), branch: db.heads[i].id, head: head, roots: share_roots(roots))
+fn snapshot_from(db: Db, i: u64, head: u64, roots: Roots, watermark: u64) -> Snapshot {
+    Snapshot(store: db.store, open: open_number(db), branch: db.heads[i].id, head: head, roots: share_roots(roots), watermark: watermark)
 }
 
 pub type CallId {
@@ -520,7 +524,8 @@ pub opaque type Snapshot: shareable + send {
     open: u64,
     branch: u32,
     head: u64,
-    roots: Roots
+    roots: Roots,
+    watermark: u64
 }
 
 /// The main-branch snapshot recovered by a read-only open.
@@ -539,7 +544,7 @@ pub fn read_only_get[K, V](reader: ReadOnly, t: Shape[K, V], key: K) -> Result[O
 }
 
 pub fn read_only_snapshot(reader: ReadOnly) -> Snapshot {
-    Snapshot(store: reader.snapshot.store, open: reader.snapshot.open, branch: reader.snapshot.branch, head: reader.snapshot.head, roots: share_roots(reader.snapshot.roots))
+    Snapshot(store: reader.snapshot.store, open: reader.snapshot.open, branch: reader.snapshot.branch, head: reader.snapshot.head, roots: share_roots(reader.snapshot.roots), watermark: reader.snapshot.watermark)
 }
 
 pub opaque type ByteRows: send {
@@ -701,7 +706,7 @@ pub fn pinned(db: Db, name: String) -> Option[Snapshot] {
         return None
     }
     let p = db.pins[k]
-    Some(Snapshot(store: db.store, open: open_number(db), branch: p.branch, head: p.version, roots: share_roots(p.roots)))
+    Some(Snapshot(store: db.store, open: open_number(db), branch: p.branch, head: p.version, roots: share_roots(p.roots), watermark: p.watermark))
 }
 
 // Section 1.9 and 1.12: fork and pin take only a Snapshot of this open, whose
@@ -742,7 +747,7 @@ fn branch_record_bytes(name: String) -> u64 {
 }
 
 fn pin_record_bytes(name: String) -> u64 {
-    122 + string.byte_len(name)
+    130 + string.byte_len(name)
 }
 
 fn check_manifest_addition(db: Db, extra: u64) -> Result[(), Error] {
@@ -790,7 +795,7 @@ pub fn fork(mut db: Db, name: String, from: Snapshot) -> Result[(Branch, Ticket)
 }
 
 fn fork_live(mut db: Db, name: String, parent: u64) -> Result[(Branch, Ticket), Error] waits {
-    let size = 34 + string.byte_len(name)
+    let size = 42 + string.byte_len(name)
     let disk = is_disk(db)
     if disk {
         if let Some(over) = journal_refusal(disk_state(db).uncovered, size, disk_state(db).options.journal_limit) {
@@ -803,7 +808,7 @@ fn fork_live(mut db: Db, name: String, parent: u64) -> Result[(Branch, Ticket), 
         let head = Head(id: id, name: string.from(name), parent: source.id, forked_at: source.head, roots: share_roots(source.roots), head: source.head, at: source.at, following: None)
         let frame: Option[Bytes] = if disk {
             let context = DiskContext(store: db.store, role: 2, seq: db.file_seq)
-            Some(capacity(encode_fork(context, db.file_end, head))?)
+            Some(capacity(encode_fork(context, db.file_end, head, stamp_after(db.next_node)?))?)
         } else {
             None
         }
@@ -863,7 +868,7 @@ pub fn adopt(mut db: Db, b: Branch) -> Result[Ticket, Error] waits {
         return Error(Diverged(b.id))
     }
     let merged = ProposedMain(roots: share_roots(db.heads[i].roots), head: db.heads[i].head, at: db.heads[i].at, tables: db.next_table)
-    let publication = capacity(prepare_publication(db, 0, merged.head, merged.roots))?
+    let publication = capacity(prepare_publication(db, 0, merged.head, merged.roots, db.next_node))?
     let commit_ticket = cut_install(mut db, ReplaceMain(take merged, Some(i)))?
     publish(take publication)
     Ok(commit_ticket)
@@ -894,7 +899,7 @@ pub fn pin(mut db: Db, name: String, s: Snapshot) -> Result[Ticket, Error] waits
         return Error(Limit(Ids))
     }
     db.next_pin = following
-    let kept = Pin(name: take owned, branch: s.branch, version: s.head, serial: serial, roots: share_roots(s.roots))
+    let kept = Pin(name: take owned, branch: s.branch, version: s.head, serial: serial, roots: share_roots(s.roots), watermark: s.watermark)
     cut_install(mut db, AddPin(take kept))
 }
 
@@ -930,9 +935,9 @@ type Publication {
 
 // The followed snapshot is allocated before the commit, so publishing it
 // after the commit cannot fail.
-fn prepare_publication(db: Db, i: u64, head: u64, roots: Roots) -> Result[Publication, Capacity] {
+fn prepare_publication(db: Db, i: u64, head: u64, roots: Roots, last_stamp: u64) -> Result[Publication, Capacity] {
     let followed = match db.heads[i].following {
-        Some(handle) => Some((latest.handle(handle), arc.new(snapshot_from(db, i, head, roots)))),
+        Some(handle) => Some((latest.handle(handle), arc.new(snapshot_from(db, i, head, roots, int.saturating_add(last_stamp, 1))))),
         None => None
     }
     Ok(Publication(followed: take followed))
@@ -1001,7 +1006,7 @@ pub opaque type Pending {
     completion: Completion,
     record: Option[CallRecord],
     attempted: CallInfo,
-    would_reply: Option[Bytes],
+    stop: Option[StopKind],
 }
 
 pub type Served = Committed(Receipt) | Kept(Receipt) | Failed(Pending, Stop) | NoRoom(Pending, StoreCapacity)
@@ -1013,7 +1018,7 @@ pub fn next_call_info(db: Db) -> CallInfo {
 }
 
 pub fn untried(take complete: Completion, take rec: Option[CallRecord], attempted: CallInfo) -> Pending {
-    Pending(completion: take complete, record: take rec, attempted: attempted, would_reply: None)
+    Pending(completion: take complete, record: take rec, attempted: attempted, stop: None)
 }
 
 fn registered_completion(db: Db, complete: Completion) -> Result[(), ServeError] {
@@ -1062,10 +1067,7 @@ fn cause_number(causes: Causes) -> u32 {
 fn save_reply(mut tx: Tx, complete: Completion, output: Bytes, rec: Option[CallRecord], settlement: Option[Settlement]) -> Result[(), Error] {
     let size = if let Some(_) = tx.frame_bytes {
         match rec {
-            Some(value) => call_section_bytes(value, match settlement {
-                Some(_) => true,
-                None => false
-            }),
+            Some(value) => call_section_bytes(value, settlement),
             None => 0u64,
         }
     } else {
@@ -1112,28 +1114,31 @@ pub fn serve(mut db: Db, take complete: Completion, plan: Plan, take rec: Option
     let metered = metered_draft(db, complete, attempted, plan, grant, rec, body)
     let DraftedCall(stage: take draft, next_id: next_id) = match take metered {
         Error(AdmissionBytes(problem)) => return Error(Before(Full(Allocation(problem)), None)),
-        Error(DraftStopped(stop)) => return Ok(Failed(untried(take complete, take rec, attempted), stop)),
+        Error(DraftStopped(stop)) => return Ok(stopped_pending(untried(take complete, take rec, attempted), stop)),
         Ok(take draft) => take draft,
     }
     db.next_node = next_id
-    let pending_run = Pending(completion: take complete, record: take rec, attempted: attempted, would_reply: None)
+    let pending_run = Pending(completion: take complete, record: take rec, attempted: attempted, stop: None)
     match take draft {
         Ran(take staged) => finish_served(mut db, take pending_run, take staged, false),
-        Over(Stopped(limit)) => Ok(Failed(take pending_run, OutOfSteps(limit.steps))),
-        Over(Failed(causes)) => Ok(Failed(take pending_run, Raised(cause_number(causes)))),
-        Over(Refused(Allocation(problem))) => Ok(Failed(take pending_run, OutOfBytes(problem))),
-        Over(Aborted(Undone(value: BodyStop(stop), ..))) => Ok(Failed(take pending_run, stop)),
+        Over(Stopped(limit)) => Ok(stopped_pending(take pending_run, OutOfSteps(limit.steps))),
+        Over(Failed(causes)) => Ok(stopped_pending(take pending_run, Raised(cause_number(causes)))),
+        Over(Refused(Allocation(problem))) => Ok(stopped_pending(take pending_run, OutOfBytes(problem))),
+        Over(Aborted(Undone(value: BodyStop(stop), ..))) => Ok(stopped_pending(take pending_run, stop)),
         Over(Aborted(Undone(value: StoreFailure(take problem), ..))) => Error(Before(take problem, None)),
         _ => fail("store: missing staged reply"),
     }
 }
 
-fn served_value(take result: Result[Bytes, ServeReply]) -> Bytes {
-    match take result {
-        Ok(take output) => take output,
-        Error(KeptReply(take output)) => take output,
-        _ => fail("store: invalid staged reply"),
+fn stopped_pending(take pending_run: Pending, stop: Stop) -> Served {
+    let mut pending = take pending_run
+    let kind: StopKind = match stop {
+        Raised(_) => Raised,
+        OutOfSteps(steps) => OutOfSteps(steps),
+        OutOfBytes(_) => OutOfBytes,
     }
+    pending.stop = Some(kind)
+    Failed(take pending, stop)
 }
 
 fn finish_served(mut db: Db, take pending_run: Pending, take staged: Ran[Bytes, ServeReply], retry: bool) -> Result[Served, ServeError] waits {
@@ -1147,12 +1152,7 @@ fn finish_served(mut db: Db, take pending_run: Pending, take staged: Ran[Bytes, 
             }
             Error(Before(Full(Journal(problem)), take pending))
         },
-        OverLimit(take rejected, problem) => {
-            let Ran(value: take would_be, ..) = take rejected
-            let mut held = take pending_run
-            held.would_reply = Some(served_value(take would_be))
-            Ok(NoRoom(take held, problem))
-        },
+        OverLimit(_, problem) => Ok(NoRoom(take pending_run, problem)),
         Ready(take accepted, take publication) => {
             let committed = commit_prepared(mut db, 0, take accepted, take publication)
             serve_after(handoff(mut db))?
@@ -1176,14 +1176,14 @@ pub fn conclude(mut db: Db, take pending_run: Pending, take output: Bytes, reser
     serve_before(check_completion_record(pending_run.completion, pending_run.record))?
     let now = host.wall_ms(db.clock)
     let attempted = pending_run.attempted
-    let way = match pending_run.would_reply {
-        Some(_) => 2u8,
-        None => 1u8
+    let way = match pending_run.stop {
+        Some(_) => 1u8,
+        None => 2u8
     }
     let settlement: Option[Settlement] = if attempted.id.version == 0 {
         None
     } else {
-        Some(Settlement(way: way, base: attempted.id.version - 1, at: attempted.at, seed: attempted.seed))
+        Some(Settlement(way: way, base: attempted.id.version - 1, at: attempted.at, seed: attempted.seed, stop: pending_run.stop))
     }
     let keep: Option[fn(ServeReply) -> bool] = None
     let draft = stage_call(mut db, 0, now, None, keep, pending_run.record, settlement, scoped fn(mut tx: Tx) -> Result[Bytes, ServeReply] {
@@ -1732,7 +1732,7 @@ fn prepare_run_commit[R, A](mut db: Db, i: u64, take ran: Ran[R, A]) -> Result[A
         let Some(roots) = view draft.roots else {
             fail("store: prepared draft has no roots")
         }
-        capacity(prepare_publication(db, i, db.heads[i].head + 1, roots))
+        capacity(prepare_publication(db, i, db.heads[i].head + 1, roots, db.next_node))
     })
     let publication = match take drafted_publication {
         Ok(take plan) => take plan,
@@ -2783,7 +2783,17 @@ fn encode_call(mut payload: Bytes, record: CallRecord, settlement: Option[Settle
             le(mut payload, int.widen(context.way), 1)?
             append_be(mut payload, context.base, 8)?
             append_be(mut payload, context.at, 8)?
-            append_be(mut payload, context.seed, 8)
+            append_be(mut payload, context.seed, 8)?
+            match context.stop {
+                Some(Raised) => le(mut payload, 1, 1),
+                Some(OutOfSteps(steps)) => {
+                    le(mut payload, 2, 1)?
+                    append_be(mut payload, steps, 8)
+                },
+                Some(OutOfBytes) => le(mut payload, 3, 1),
+                Some(Conflict) => le(mut payload, 4, 1),
+                None => Ok(()),
+            }
         }
     }
 }
@@ -2820,11 +2830,7 @@ fn encode_frame(ci: CallInfo, mut ops: DataRows, tail: u64, streams: DataRows, c
         size += data_op_size(operation)
         if let (Some(_), Some(record)) = (view operation.value, view call) {
             if operation.key == record.stream {
-                let shifted = match settlement {
-                    Some(_) => true,
-                    None => false
-                }
-                size += call_section_bytes(record, shifted)
+                size += call_section_bytes(record, settlement)
             }
         }
     }
@@ -3949,7 +3955,7 @@ fn publish_schema_plan(mut db: Db, take prepared: SchemaPlan) -> Result[Ticket, 
     over_ceiling(live, db.ceiling)?
     // Schema commits are main's (section 1.2). Installed only after the cut.
     let replacement = ProposedMain(roots: take roots, head: db.heads[0u64].head + 1, at: db.heads[0u64].at, tables: tables)
-    let publication = capacity(prepare_publication(db, 0, replacement.head, replacement.roots))?
+    let publication = capacity(prepare_publication(db, 0, replacement.head, replacement.roots, ids))?
     // Stamps stay consumed on refusal. Table ids publish with the roots.
     db.next_node = ids
     let commit_ticket = cut_install(mut db, ReplaceMain(take replacement, None))?
@@ -4784,7 +4790,7 @@ fn catalog_recharge(live: u64, roots: Roots, key: Bytes, value: Bytes, retained:
 }
 
 // Format-3 disk framing. STORE-SPEC §11.
-const DISK_FORMAT: u64 = 3
+const DISK_FORMAT: u64 = 4
 
 type DiskContext {
     store: StoreId,
@@ -4870,9 +4876,10 @@ fn disk_kind_limit(kind: u16) -> Option[u64] {
         0x0001 => Some(56),
         0x0011 => Some(16777280),
         0x0012 => Some(8),
-        0x0013 => Some(273),
+        0x0013 => Some(281),
         0x0021 => Some(8384),
         0x0022 => Some(16711688),
+        0x0023 => Some(PACK_INDEX_LIMIT),
         0x0031 => Some(MANIFEST_LIMIT),
         0x0040 => Some(CLAIM_BYTES),
         0x0050 => Some(AUTHORITY_LIMIT),
@@ -4932,10 +4939,10 @@ fn disk_check_frame_kind(file: String, ctx: DiskContext, kind: u16, flags: u16, 
     if kind == 0x0001 && at != 0 {
         return Error(disk_fault(file, at, Header))
     }
-    if ((kind == 0x0011 || kind == 0x0013) && ctx.role != 2) || (kind == 0x0012 && ctx.role != 4) || ((kind == 0x0021 || kind == 0x0022) && ctx.role != 3) || (kind == 0x0031 && ctx.role != 1) {
+    if ((kind == 0x0011 || kind == 0x0013) && ctx.role != 2) || (kind == 0x0012 && ctx.role != 4) || ((kind >= 0x0021 && kind <= 0x0023) && ctx.role != 3) || (kind == 0x0031 && ctx.role != 1) {
         return Error(disk_fault(file, at, Kind(int.widen(kind))))
     }
-    if kind == 0x0013 && flags != 1 {
+    if (kind == 0x0013 || kind == 0x0023) && flags != 1 {
         return Error(disk_fault(file, at, Flags))
     }
     Ok(())
@@ -5057,8 +5064,8 @@ fn disk_put_name(mut out: Bytes, name: String) -> Result[(), Capacity] {
     Ok(list.append(mut out, string.as_bytes(name)))
 }
 
-fn encode_fork(context: DiskContext, offset: u64, head: Head) -> Result[Bytes, Capacity] {
-    let size = 18 + string.byte_len(head.name)
+fn encode_fork(context: DiskContext, offset: u64, head: Head, watermark: u64) -> Result[Bytes, Capacity] {
+    let size = 26 + string.byte_len(head.name)
     let mut out: Bytes = list.with_capacity(16 + size + BINDING_BYTES)
     le(mut out, 0x0013, 2)?
     le(mut out, 1, 2)?
@@ -5068,6 +5075,7 @@ fn encode_fork(context: DiskContext, offset: u64, head: Head) -> Result[Bytes, C
     le(mut out, int.widen(head.parent), 4)?
     le(mut out, head.forked_at, 8)?
     disk_put_name(mut out, head.name)?
+    le(mut out, watermark, 8)?
     seal_frame(mut out, context, offset)?
     Ok(take out)
 }
@@ -5478,7 +5486,7 @@ pub fn export_system_get[K, V](source: Preparation, name: String, take key: std.
 }
 
 pub fn staged_snapshot(source: Preparation, staged: StagedMigration) -> Snapshot {
-    snapshot_from(source.db, 0u64, source.stamp.head, staged.plan.roots)
+    snapshot_from(source.db, 0u64, source.stamp.head, staged.plan.roots, int.saturating_add(staged.plan.next_node, 1))
 }
 
 pub type PreparedTarget: codec + send {
@@ -6406,7 +6414,7 @@ fn manifest_state(m: PageManifest, all: List[Roots]) -> Result[State, Capacity] 
     let mut pins: List[Pin] = list.with_capacity(list.len(m.pins))
     for held in m.pins {
         let serial = list.len(pins)
-        list.push(mut pins, Pin(name: string.from(held.name), branch: held.branch, version: held.version, serial: serial, roots: share_roots(all[k])))
+        list.push(mut pins, Pin(name: string.from(held.name), branch: held.branch, version: held.version, serial: serial, roots: share_roots(all[k]), watermark: held.watermark))
         k += 1
     }
     Ok(State(tips: take tips, pins: take pins, next_branch: m.next_branch, next_table: m.next_table))
@@ -6521,6 +6529,10 @@ fn disk_lock(d: Dir, c: Clock, wait_ms: u64) -> Result[HostFile, Error] waits {
 }
 
 fn disk_session(d: Dir, clock: Clock, r: Random, options: Options) -> Result[DiskSession, Error] waits {
+    // A copied store can lack LOCK. Check its format before creating LOCK.
+    if !disk_exists(d, "LOCK")? && disk_exists(d, "MANIFEST")? {
+        let _ = read_page_manifest_file(d)?
+    }
     let lock = disk_lock(d, clock, options.lock_wait_ms)?
     if disk_exists(d, "EXPORT")? {
         return Error(ExportDirectory)
@@ -6725,7 +6737,7 @@ fn read_only_recover(d: Dir, id: StoreId, take manifest: PageManifest, ceiling: 
     let replay = read_only_state(d, id, take manifest, false)?
     over_ceiling(journal_account(replay)?, ceiling)?
     let main = view replay.state.tips[0u64]
-    Ok(ReadOnly(snapshot: Snapshot(store: id, open: 0, branch: 0, head: main.head, roots: share_roots(main.roots))))
+    Ok(ReadOnly(snapshot: Snapshot(store: id, open: 0, branch: 0, head: main.head, roots: share_roots(main.roots), watermark: stamp_after(replay.next_node)?)))
 }
 
 fn open_checks(options: Options) -> Result[(), Error] {
@@ -6899,7 +6911,8 @@ fn fill_cut_manifest(mut raw: Bytes, db: Db, delta: HolderDelta, generation: u64
         ReplaceMain(main, _) => main.tables,
         _ => db.next_table
     }
-    let manifest = PageManifest(generation: generation, fence: db.fence, inline: db.heads[0u64].roots.collections.inline, next_stamp: next_stamp, next_branch: db.next_branch, next_table: tables, next_pack: layout.lists.run_packs.next_pack, first_live: seq, prev_first: prev_first, account: account, pack_root: published_tree_pointer(layout.locations, layout.lists.roots.packs), retirement_root: published_tree_pointer(layout.locations, layout.lists.roots.retired), branches: list.new(), pins: list.new(), claim: None)
+    let zero = std.page.unlocated(0)
+    let manifest = PageManifest(generation: generation, fence: db.fence, inline: db.heads[0u64].roots.collections.inline, next_stamp: next_stamp, next_branch: db.next_branch, next_table: tables, next_pack: layout.lists.run_packs.next_pack, first_live: seq, prev_first: prev_first, account_memory: account, account_tiered: 0, lineage: zero, deferred_frees: zero, deferred_next: 0, archive_on: 0, archive: zero, archive_drop: 0, sweep: SweepCursor(position: 0, epoch: 0, digest: 0), pack_root: published_tree_pointer(layout.locations, layout.lists.roots.packs), retirement_root: published_tree_pointer(layout.locations, layout.lists.roots.retired), branches: list.new(), pins: list.new(), claim: None)
     let context = DiskContext(store: db.store, role: 1, seq: generation)
     let claim = bucket_claim_of(db)
     begin_page_manifest_file(mut raw, context, match claim {
@@ -6926,7 +6939,7 @@ fn fill_cut_manifest(mut raw: Bytes, db: Db, delta: HolderDelta, generation: u64
     }
     capacity(le(mut raw, pin_count, 4))?
     visit_cut_pins(db, delta, mut raw, scoped fn(mut buffer: Bytes, held: Pin) -> Result[(), Error] {
-        append_page_manifest_pin(mut buffer, held.name, held.branch, held.version, published_page_roots(layout.locations, held.roots))
+        append_page_manifest_pin(mut buffer, held.name, held.branch, held.version, published_page_roots(layout.locations, held.roots), held.watermark)
     })?
     seal(mut raw, context, db.fence)?
     if let Some(held_claim) = claim {
@@ -7144,13 +7157,16 @@ pub type CallRecord: codec + shareable + send {
     code: Bytes
 }
 
+pub type StopKind = Raised | OutOfSteps(u64) | OutOfBytes | Conflict
+
 // The CALL carries the original execution context only when a later frame
 // settles the call. An inline reply uses the context of its own frame.
 type Settlement: shareable + send {
     way: u8,
     base: u64,
     at: u64,
-    seed: u64
+    seed: u64,
+    stop: Option[StopKind]
 }
 
 type CallSection: shareable + send {
@@ -7164,19 +7180,22 @@ pub type Recorded {
     branch: Branch,
     base: u64,
     at: u64,
-    seed: u64
+    seed: u64,
+    stop: Option[StopKind]
 }
 
-fn call_section_bytes(rec: CallRecord, shifted: bool) -> u64 {
+fn call_section_bytes(rec: CallRecord, settlement: Option[Settlement]) -> u64 {
     let revision = match rec.revision {
         Some(raw) => list.len(raw),
         None => 0u64
     }
-    17 + list.len(rec.key) + list.len(rec.args) + revision + list.len(rec.code) + (if shifted {
-        24u64
-    } else {
-        0u64
-    })
+    let extra: u64 = match settlement {
+        Some(Settlement(stop: Some(OutOfSteps(_)), ..)) => 33,
+        Some(Settlement(stop: Some(_), ..)) => 25,
+        Some(_) => 24,
+        None => 0,
+    }
+    17 + list.len(rec.key) + list.len(rec.args) + revision + list.len(rec.code) + extra
 }
 
 // AD1: the CALL revision check. A Some that is not code.revision's 32 bytes is refused
@@ -7225,7 +7244,8 @@ type JournalFork {
     id: u32,
     parent: u32,
     forked_at: u64,
-    name: String
+    name: String,
+    watermark: u64
 }
 
 type JournalEvent = Commit(JournalCommit) | Fork(JournalFork)
@@ -7273,9 +7293,34 @@ fn decode_settlement(file: String, raw: Bytes, mut at: u64, way: u8) -> Result[S
     if list.len(raw) - at < 24 {
         return Error(disk_fault(file, at, Malformed))
     }
-    let context = Settlement(way: way, base: word_be(raw, at), at: word_be(raw, at + 8), seed: word_be(raw, at + 16))
+    let base = word_be(raw, at)
+    let wall = word_be(raw, at + 8)
+    let seed = word_be(raw, at + 16)
     at += 24
-    Ok(context)
+    let stop: Option[StopKind] = if way == 1 {
+        if at == list.len(raw) {
+            return Error(disk_fault(file, at, Malformed))
+        }
+        let tag = raw[at]
+        at += 1
+        match tag {
+            1 => Some(Raised),
+            2 => {
+                if list.len(raw) - at < 8 {
+                    return Error(disk_fault(file, at, Malformed))
+                }
+                let steps = word_be(raw, at)
+                at += 8
+                Some(OutOfSteps(steps))
+            },
+            3 => Some(OutOfBytes),
+            4 => Some(Conflict),
+            _ => return Error(disk_fault(file, at - 1, Malformed)),
+        }
+    } else {
+        None
+    }
+    Ok(Settlement(way: way, base: base, at: wall, seed: seed, stop: stop))
 }
 
 fn decode_call(file: String, raw: Bytes, mut at: u64, take stream: Bytes) -> Result[CallSection, Error] {
@@ -7353,10 +7398,11 @@ fn journal_decode(file: String, kind: u16, raw: Bytes) -> Result[JournalEvent, E
     let parent: u32 = int.truncate(disk_number(file, raw, mut at, 4)?)
     let forked_at = disk_number(file, raw, mut at, 8)?
     let name = disk_name(file, raw, mut at)?
-    if at != list.len(raw) {
+    let watermark = disk_number(file, raw, mut at, 8)?
+    if at != list.len(raw) || watermark == 0 {
         return Error(disk_fault(file, at, Malformed))
     }
-    Ok(Fork(JournalFork(id: id, parent: parent, forked_at: forked_at, name: take name)))
+    Ok(Fork(JournalFork(id: id, parent: parent, forked_at: forked_at, name: take name, watermark: watermark)))
 }
 
 fn journal_torn(why: Why) -> bool {
@@ -7588,7 +7634,7 @@ fn journal_apply(file: String, mut replay: JournalReplay, take event: JournalEve
 }
 
 fn journal_apply_fork(file: String, mut replay: JournalReplay, take encoded: JournalFork) -> Result[(), Error] {
-    let JournalFork(id: id, parent: parent, forked_at: forked_at, name: take name) = take encoded
+    let JournalFork(id: id, parent: parent, forked_at: forked_at, name: take name, ..) = take encoded
     let charge = branch_record_bytes(name)
     if id < replay.state.next_branch || id == 4294967295 || charge > META_LIMIT - replay.record_bytes || map.contains(replay.names, name) {
         return Error(disk_fault(file, 0, Malformed))

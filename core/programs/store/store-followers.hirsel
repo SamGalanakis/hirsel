@@ -16,7 +16,8 @@ type FollowCapture: shareable + send {
     store: StoreId,
     state: Arc[State],
     resident: u64,
-    remote: Option[ObjectFollowHead]
+    remote: Option[ObjectFollowHead],
+    watermark: u64
 }
 
 type FollowBackend = FollowLog(Dir) | FollowObject(ObjectFollowerIo)
@@ -49,8 +50,8 @@ fn log_follow_capture(d: Dir, expected: Option[StoreId], ceiling: u64) -> Result
     let resident = journal_account(replay)?
     over_ceiling(resident, ceiling)?
     check_read_only_manifest(d, raw)?
-    let JournalReplay(state: take state, ..) = take replay
-    Ok(arc.new(FollowCapture(store: id, state: arc.new(take state), resident, remote: None)))
+    let JournalReplay(state: take state, next_node: last_stamp, ..) = take replay
+    Ok(arc.new(FollowCapture(store: id, state: arc.new(take state), resident, remote: None, watermark: stamp_after(last_stamp)?)))
 }
 
 fn log_follow_job(take job: LogFollowJob) waits {
@@ -139,7 +140,7 @@ fn follower_tip(f: Follower, b: Branch) -> Result[View[Tip], Error] in f {
 
 pub fn snapshot_follower(f: Follower, b: Branch) -> Result[Snapshot, Error] {
     let tip = follower_tip(f, b)?
-    Ok(Snapshot(store: b.store, open: f.open, branch: b.id, head: tip.head, roots: share_roots(tip.roots)))
+    Ok(Snapshot(store: b.store, open: f.open, branch: b.id, head: tip.head, roots: share_roots(tip.roots), watermark: f.capture.watermark))
 }
 
 pub fn applied(f: Follower, b: Branch) -> Result[Position, Error] {

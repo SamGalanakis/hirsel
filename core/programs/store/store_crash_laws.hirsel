@@ -864,8 +864,8 @@ fn journal_law_segment_fork(d: Dir) -> bool waits {
     let mut raw = result.unwrap(disk_header_bytes(ctx, 0, 0))
     list.append(mut raw, journal_empty_commit(ctx, 72, 64))
     list.append(mut raw, fork_frame_bytes())
-    let (end, accepted, take events) = result.unwrap(journal_scan_fixture(d, id, raw, Some(152), true))
-    if end != 152 || accepted != 80 || list.len(events) != 2 {
+    let (end, accepted, take events) = result.unwrap(journal_scan_fixture(d, id, raw, Some(160), true))
+    if end != 160 || accepted != 88 || list.len(events) != 2 {
         return false
     }
     let (Commit(previous), Fork(read_fork)) = (events[0], events[1]) else {

@@ -81,12 +81,20 @@ pub fn law_frame_size(c: Clock) -> bool {
     let mut size = Some(42u64)
     let mut model: List[FrameRow] = list.new()
     for slot in 0u64 .. 24 {
-        let width = if slot < 12 { 12u64 } else { 20u64 }
+        let width = if slot < 12 {
+            12u64
+        } else {
+            20u64
+        }
         list.push(mut model, FrameRow(present: false, op: 0, size: 0, key_size: width))
     }
     for step in 0u64 .. 96 {
         let k = splitmix64(step) % 24
-        let id: u32 = if k < 12 { 1 } else { 2 }
+        let id: u32 = if k < 12 {
+            1
+        } else {
+            2
+        }
         let mut key = key_word(k % 12)
         if id == 2 {
             list.append(mut key, key_word(k % 4))
@@ -101,7 +109,11 @@ pub fn law_frame_size(c: Clock) -> bool {
                 model[k].size = 0
             }
         } else {
-            let width = if id == 2 { 0u64 } else { splitmix64(step + 1) % 33 }
+            let width = if id == 2 {
+                0u64
+            } else {
+                splitmix64(step + 1) % 33
+            }
             let mut value: Bytes = list.with_capacity(width)
             list.fill(mut value, width, int.truncate(step))
             size = result.unwrap(edit_frame(ops, below, 0, physical, Some(width), size))
@@ -141,7 +153,11 @@ fn test_memory_no_frame_limit(c: Clock) -> Result[(), Error] {
     let mut db = raw_test_db(c, 1073741824)
     let wrote = execute(mut db, 0, 17, None, fn(mut tx: Tx) -> Result[(), Error] {
         for k in 0u64 .. 16 {
-            let size = if k == 15 { 1048279u64 } else { 1048576u64 }
+            let size = if k == 15 {
+                1048279u64
+            } else {
+                1048576u64
+            }
             let mut value: Bytes = list.with_capacity(size)
             list.fill(mut value, size, 0u8)
             put_bytes(mut tx, 1, key_word(k), value)?
@@ -156,7 +172,6 @@ fn test_memory_no_frame_limit(c: Clock) -> Result[(), Error] {
     }
     Ok(())
 }
-
 
 // T2: key12 rounds to16; schema0's value2+8 rounds to16, schema1's2+16
 // rounds to24. Replacing the old stored row must therefore add exactly8.
@@ -218,7 +233,7 @@ pub fn disk_law_frames() -> bool {
     let id = StoreId(hi: 1, lo: 2)
     let ctx = DiskContext(store: id, role: 3, seq: 7)
     let raw = result.unwrap(disk_header_bytes(ctx, 0, 0))
-    let expected: Inline[u8, 72] =[1, 0, 1, 0, 56, 0, 0, 0, 80, 128, 247, 96, 131, 16, 208, 66, 72, 73, 82, 83, 84, 79, 82, 69, 3, 0, 0, 0, 3, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    let expected: Inline[u8, 72] =[1, 0, 1, 0, 56, 0, 0, 0, 42, 116, 82, 131, 44, 1, 25, 6, 72, 73, 82, 83, 84, 79, 82, 69, 4, 0, 0, 0, 3, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
     if list.len(raw) != 72 {
         return false
     }
@@ -382,23 +397,23 @@ pub fn disk_law_frames() -> bool {
 
 // L37: AP19's beta vector, with the outer checksum from libxxhash.
 fn fork_frame_bytes() -> Bytes {
-    let wire: Inline[u8, 38] =[
+    let wire: Inline[u8, 46] =[
         19,
         0,
         1,
         0,
-        22,
+        30,
         0,
         0,
         0,
-        104,
-        100,
-        110,
-        15,
-        101,
-        85,
-        18,
-        178,
+        38,
+        6,
+        102,
+        238,
+        127,
+        136,
+        112,
+        171,
         1,
         0,
         0,
@@ -421,8 +436,16 @@ fn fork_frame_bytes() -> Bytes {
         101,
         116,
         97,
+        42,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
     ]
-    let mut frame: Bytes = list.with_capacity(38)
+    let mut frame: Bytes = list.with_capacity(46)
     for b in wire {
         list.push(mut frame, b)
     }
@@ -430,23 +453,23 @@ fn fork_frame_bytes() -> Bytes {
 }
 
 fn fork_frame_fields(read_fork: JournalFork) -> bool {
-    read_fork.id == 1 && read_fork.parent == 0 && read_fork.forked_at == 64 && read_fork.name == "beta"
+    read_fork.id == 1 && read_fork.parent == 0 && read_fork.forked_at == 64 && read_fork.name == "beta" && read_fork.watermark == 42
 }
 
 fn fork_frame_vector(id: StoreId) -> bool {
     let beta = Head(id: 1, name: "beta", parent: 0, forked_at: 64, roots: empty_roots(), head: 64, at: 100, following: None)
     let journal_ctx = DiskContext(store: id, role: 2, seq: 7)
-    let encoded = result.unwrap(encode_fork(journal_ctx, 114, beta))
+    let encoded = result.unwrap(encode_fork(journal_ctx, 114, beta, 42))
     let expected = fork_frame_bytes()
-    if list.len(encoded) != 38 {
+    if list.len(encoded) != 46 {
         return false
     }
-    for i in 0u64 .. 38 {
+    for i in 0u64 .. 46 {
         if encoded[i] != expected[i] {
             return false
         }
     }
-    let payload = list.slice(expected, 16, 38)
+    let payload = list.slice(expected, 16, 46)
     let Ok(Fork(read_fork)) = journal_decode("j-7", 0x0013, payload) else {
         return false
     }
@@ -459,7 +482,7 @@ fn fork_frame_vector(id: StoreId) -> bool {
         return false
     }
     let _ = list.set(mut trailing, 18, 255u8)
-    disk_corrupt(journal_decode("j-7", 0x0013, list.slice(trailing, 0, 22)))
+    disk_corrupt(journal_decode("j-7", 0x0013, list.slice(trailing, 0, 29)))
 }
 
 @test

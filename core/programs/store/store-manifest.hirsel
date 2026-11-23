@@ -1,5 +1,7 @@
 const META_LIMIT: u64 = 16777216
-const MANIFEST_FIXED_BYTES: u64 = 152
+
+const MANIFEST_FIXED_BYTES: u64 = 316
+
 const MANIFEST_LIMIT: u64 = MANIFEST_FIXED_BYTES + META_LIMIT
 
 const PAGE_LIMIT: u64 = 8384
@@ -23,48 +25,6 @@ fn paged_pack_path(seq: u64) -> Result[String, Error] {
     disk_allocation(scoped fn() -> Result[String, Error] {
         capacity(disk_path("p-", seq, ""))
     })
-}
-
-type LocatedRoots: shareable + send {
-    collections: std.page.PagePtr,
-    streams: std.page.PagePtr,
-    catalog: std.page.PagePtr
-}
-
-type LocatedBranch: shareable + send {
-    id: u32,
-    name: String,
-    parent: u32,
-    forked_at: u64,
-    version: u64,
-    at: u64,
-    roots: LocatedRoots
-}
-
-type LocatedPin: shareable + send {
-    name: String,
-    branch: u32,
-    version: u64,
-    roots: LocatedRoots
-}
-
-type PageManifest: shareable + send {
-    generation: u64,
-    fence: u32,
-    inline: u64,
-    next_stamp: u64,
-    next_branch: u32,
-    next_table: u32,
-    next_pack: u64,
-    first_live: u64,
-    prev_first: u64,
-    account: u64,
-    pack_root: std.page.PagePtr,
-    retirement_root: std.page.PagePtr,
-    branches: List[LocatedBranch],
-    pins: List[LocatedPin],
-    // A Bucket store's writer claim and authority (CLAIM and AUTHORITY).
-    claim: Option[BucketClaim]
 }
 
 // CLAIM: the writer epoch and the holder, a random identity kept by one local
@@ -162,181 +122,6 @@ fn append_bucket_frames(mut raw: Bytes, context: DiskContext, claim: BucketClaim
     Ok(())
 }
 
-fn page_manifest_empty() -> PageManifest {
-    let zero = std.page.unlocated(0)
-    let roots = LocatedRoots(collections: zero, streams: zero, catalog: zero)
-    let mut branches: List[LocatedBranch] = list.with_capacity(1)
-    list.push(mut branches, LocatedBranch(id: 0, name: "main", parent: 0, forked_at: 0, version: 0, at: 0, roots: roots))
-    PageManifest(generation: 1, fence: 0, inline: 1024, next_stamp: 1, next_branch: 1, next_table: 1, next_pack: 1, first_live: 1, prev_first: 1, account: 0, pack_root: zero, retirement_root: zero, branches: take branches, pins: list.new(), claim: None)
-}
-
-fn page_manifest_size(m: PageManifest) -> u64 {
-    let mut size = MANIFEST_FIXED_BYTES
-    for item in m.branches {
-        size = int.saturating_add(size, branch_record_bytes(item.name))
-    }
-    for held in m.pins {
-        size = int.saturating_add(size, pin_record_bytes(held.name))
-    }
-    size
-}
-
-fn page_manifest_file_size(payload: u64, fence: u32) -> u64 {
-    72 + 16 + payload + (if fence == 0 { 0u64 } else { 20u64 })
-}
-
-fn put_page_ptr(mut out: Bytes, ptr: std.page.PagePtr) {
-    list.put_word_le(mut out, ptr.pack)
-    list.put_word_le(mut out, ptr.offset)
-    list.put_word_le(mut out, ptr.len)
-    list.put_word_le(mut out, ptr.checksum)
-    list.put_word_le(mut out, ptr.stamp)
-}
-
-fn put_located_roots(mut out: Bytes, roots: LocatedRoots) {
-    put_page_ptr(mut out, roots.collections)
-    put_page_ptr(mut out, roots.streams)
-    put_page_ptr(mut out, roots.catalog)
-}
-
-fn append_page_manifest_fields(mut raw: Bytes, m: PageManifest) -> Result[(), Error] {
-    capacity(le(mut raw, m.generation, 8))?
-    capacity(le(mut raw, 4096, 4))?
-    capacity(le(mut raw, 4096, 4))?
-    capacity(le(mut raw, m.inline, 4))?
-    capacity(le(mut raw, FRAME_LIMIT - 16, 4))?
-    capacity(le(mut raw, m.next_stamp, 8))?
-    capacity(le(mut raw, int.widen(m.next_branch), 4))?
-    capacity(le(mut raw, int.widen(m.next_table), 4))?
-    capacity(le(mut raw, m.next_pack, 8))?
-    capacity(le(mut raw, m.first_live, 8))?
-    capacity(le(mut raw, m.prev_first, 8))?
-    capacity(le(mut raw, m.account, 8))?
-    put_page_ptr(mut raw, m.pack_root)
-    put_page_ptr(mut raw, m.retirement_root)
-    Ok(())
-}
-
-fn append_page_manifest_branch(mut raw: Bytes, id: u32, name: String, parent: u32, forked_at: u64, head: u64, at: u64, roots: LocatedRoots) -> Result[(), Error] {
-    capacity(le(mut raw, int.widen(id), 4))?
-    capacity(disk_put_name(mut raw, name))?
-    capacity(le(mut raw, int.widen(parent), 4))?
-    capacity(le(mut raw, forked_at, 8))?
-    capacity(le(mut raw, head, 8))?
-    capacity(le(mut raw, at, 8))?
-    put_located_roots(mut raw, roots)
-    capacity(le(mut raw, 0, 1))
-}
-
-fn append_page_manifest_pin(mut raw: Bytes, name: String, branch_id: u32, held_at: u64, roots: LocatedRoots) -> Result[(), Error] {
-    capacity(disk_put_name(mut raw, name))?
-    capacity(le(mut raw, int.widen(branch_id), 4))?
-    capacity(le(mut raw, held_at, 8))?
-    put_located_roots(mut raw, roots)
-    Ok(())
-}
-
-fn append_page_manifest(mut raw: Bytes, m: PageManifest) -> Result[(), Error] {
-    append_page_manifest_fields(mut raw, m)?
-    capacity(le(mut raw, list.len(m.branches), 4))?
-    for item in m.branches {
-        append_page_manifest_branch(mut raw, item.id, item.name, item.parent, item.forked_at, item.version, item.at, item.roots)?
-    }
-    capacity(le(mut raw, list.len(m.pins), 4))?
-    for held in m.pins {
-        append_page_manifest_pin(mut raw, held.name, held.branch, held.version, held.roots)?
-    }
-    Ok(())
-}
-
-fn read_page_ptr(file: String, raw: Bytes, mut at: u64) -> Result[std.page.PagePtr, Error] {
-    if at > list.len(raw) || list.len(raw) - at < 36 {
-        return Error(disk_fault(file, at, Truncated))
-    }
-    let ptr = std.page.decode_ptr(list.slice(raw, at, at + 36)) ?=> |_| disk_fault(file, at, Malformed)
-    at += 36
-    Ok(ptr)
-}
-
-fn read_located_roots(file: String, raw: Bytes, mut at: u64) -> Result[LocatedRoots, Error] {
-    let collections = read_page_ptr(file, raw, mut at)?
-    let streams = read_page_ptr(file, raw, mut at)?
-    let catalog = read_page_ptr(file, raw, mut at)?
-    Ok(LocatedRoots(collections: collections, streams: streams, catalog: catalog))
-}
-
-fn decode_page_manifest(file: String, raw: Bytes, number: u64) -> Result[PageManifest, Error] {
-    if list.len(raw) > MANIFEST_LIMIT {
-        return Error(disk_fault(file, 0, Malformed))
-    }
-    let mut at = 0u64
-    let generation = disk_number(file, raw, mut at, 8)?
-    let keys = disk_number(file, raw, mut at, 4)?
-    let page_target = disk_number(file, raw, mut at, 4)?
-    let inline = disk_number(file, raw, mut at, 4)?
-    let transaction = disk_number(file, raw, mut at, 4)?
-    if generation != number {
-        return Error(disk_fault(file, 0, Header))
-    }
-    if keys != 4096 || page_target != 4096 || inline > 1024 || transaction != FRAME_LIMIT - 16 {
-        return Error(disk_fault(file, at, Malformed))
-    }
-    let next_stamp = disk_number(file, raw, mut at, 8)?
-    let next_branch: u32 = int.truncate(disk_number(file, raw, mut at, 4)?)
-    let next_table: u32 = int.truncate(disk_number(file, raw, mut at, 4)?)
-    let next_pack = disk_number(file, raw, mut at, 8)?
-    let first_live = disk_number(file, raw, mut at, 8)?
-    let prev_first = disk_number(file, raw, mut at, 8)?
-    let account = disk_number(file, raw, mut at, 8)?
-    if next_stamp == 0 || next_table == 0 || next_pack == 0 || first_live == 0 || prev_first == 0 || prev_first > first_live {
-        return Error(disk_fault(file, at, Malformed))
-    }
-    let pack_root = read_page_ptr(file, raw, mut at)?
-    let retirement_root = read_page_ptr(file, raw, mut at)?
-    let branch_count = disk_count(file, raw, mut at, 143)?
-    if branch_count == 0 {
-        return Error(disk_fault(file, at, Malformed))
-    }
-    let mut branches: List[LocatedBranch] = list.with_capacity(branch_count)
-    for i in 0u64 .. branch_count {
-        let id: u32 = int.truncate(disk_number(file, raw, mut at, 4)?)
-        if (i == 0 && id != 0) || (i != 0 && id <= branches[i - 1].id) {
-            return Error(disk_fault(file, at, Order))
-        }
-        if id >= next_branch {
-            return Error(disk_fault(file, at, Malformed))
-        }
-        let name = disk_name(file, raw, mut at)?
-        let parent: u32 = int.truncate(disk_number(file, raw, mut at, 4)?)
-        let forked_at = disk_number(file, raw, mut at, 8)?
-        let head = disk_number(file, raw, mut at, 8)?
-        let wall = disk_number(file, raw, mut at, 8)?
-        let roots = read_located_roots(file, raw, mut at)?
-        match disk_number(file, raw, mut at, 1)? {
-            0 => (),
-            1 => return Error(Unsupported(0x0031)),
-            _ => return Error(disk_fault(file, at - 1, Malformed)),
-        }
-        list.push(mut branches, LocatedBranch(id: id, name: take name, parent: parent, forked_at: forked_at, version: head, at: wall, roots: roots))
-    }
-    let pin_count = disk_count(file, raw, mut at, 122)?
-    let mut pins: List[LocatedPin] = list.with_capacity(pin_count)
-    for i in 0u64 .. pin_count {
-        let name = disk_name(file, raw, mut at)?
-        if i != 0 && pins[i - 1].name >= name {
-            return Error(disk_fault(file, at, Order))
-        }
-        let branch_id: u32 = int.truncate(disk_number(file, raw, mut at, 4)?)
-        let head = disk_number(file, raw, mut at, 8)?
-        let roots = read_located_roots(file, raw, mut at)?
-        list.push(mut pins, LocatedPin(name: take name, branch: branch_id, version: head, roots: roots))
-    }
-    if at != list.len(raw) {
-        return Error(disk_fault(file, at, Malformed))
-    }
-    Ok(PageManifest(generation: generation, fence: 0, inline: inline, next_stamp: next_stamp, next_branch: next_branch, next_table: next_table, next_pack: next_pack, first_live: first_live, prev_first: prev_first, account: account, pack_root: pack_root, retirement_root: retirement_root, branches: take branches, pins: take pins, claim: None))
-}
-
 fn disk_page_kind(path: String, at: u64, kind: u16, expected: u16, flags: u16) -> Result[(), Error] {
     if kind == 0x0020 || kind == 0x0030 {
         return Error(Unsupported(int.widen(kind)))
@@ -356,6 +141,7 @@ fn disk_page_kind(path: String, at: u64, kind: u16, expected: u16, flags: u16) -
         0x0013 => true,
         0x0021 => true,
         0x0022 => true,
+        0x0023 => true,
         0x0031 => true,
         0x0040 => true,
         0x0050 => true,
@@ -463,7 +249,10 @@ fn fill_page_manifest_file(mut raw: Bytes, id: StoreId, m: PageManifest) -> Resu
         return Error(Limit(Manifest))
     }
     let context = DiskContext(store: id, role: 1, seq: m.generation)
-    let authority: u8 = match m.claim { Some(_) => 1, None => 0 }
+    let authority: u8 = match m.claim {
+        Some(_) => 1,
+        None => 0
+    }
     begin_page_manifest_file(mut raw, context, authority)?
     append_page_manifest(mut raw, m)?
     seal_page_manifest_file(mut raw, context, m.fence)?
@@ -516,20 +305,24 @@ type PagePack: shareable + send {
     class: u8,
     frames: u32,
     live: u64,
-    payload_bytes: u64
+    // PAGE/BLOB payload total for Memory packs, whole object size for Tiered packs.
+    payload_bytes: u64,
+    index: u64
 }
 
 fn pack_record(path: String, at: u64, raw: Bytes) -> Result[PagePack, Error] {
-    if list.len(raw) != 21 || raw[0u64] > 1 {
+    if list.len(raw) != 29 {
         return Error(disk_fault(path, at, Malformed))
     }
     let frames: u32 = list.word_le(raw, 1)
     let live: u64 = list.word_le(raw, 5)
     let payload_bytes: u64 = list.word_le(raw, 13)
-    if live > payload_bytes {
+    let class = raw[0u64]
+    let index_offset: u64 = list.word_le(raw, 21)
+    if live > payload_bytes || class == 2 || class > 4 || (class < 3 && index_offset != 0) || (class >= 3 && (index_offset < 72 || index_offset >= payload_bytes || payload_bytes - index_offset < 28)) {
         return Error(disk_fault(path, at, Malformed))
     }
-    Ok(PagePack(class: raw[0u64], frames: frames, live: live, payload_bytes: payload_bytes))
+    Ok(PagePack(class: class, frames: frames, live: live, payload_bytes: payload_bytes, index: index_offset))
 }
 
 type LoadedPack {
@@ -620,7 +413,11 @@ type PackScan {
 }
 
 fn pack_scan(class: u8, next_stamp: u64) -> PackScan {
-    let (kind, stamp_at) = if class == 1 { (0x0022u16, 0u64) } else { (0x0021u16, 8u64) }
+    let (kind, stamp_at) = if class == 1 {
+        (0x0022u16, 0u64)
+    } else {
+        (0x0021u16, 8u64)
+    }
     PackScan(kind, stamp_at, next_stamp, frames: 0, payload_bytes: 0, unknown_bytes: 0)
 }
 
@@ -628,10 +425,14 @@ fn scan_pack_frame(mut checked_pack: PackScan, path: String, at: u64, kind: u16,
     disk_page_kind(path, at, kind, checked_pack.kind, flags)?
     if kind != checked_pack.kind {
         checked_pack.unknown_bytes += 16 + size
-        if checked_pack.unknown_bytes > UNKNOWN_ROOM { return Error(disk_fault(path, at, Malformed)) }
+        if checked_pack.unknown_bytes > UNKNOWN_ROOM {
+            return Error(disk_fault(path, at, Malformed))
+        }
         return Ok(None)
     }
-    if size < checked_pack.stamp_at + 8 { return Error(disk_fault(path, at, Malformed)) }
+    if size < checked_pack.stamp_at + 8 {
+        return Error(disk_fault(path, at, Malformed))
+    }
     disk_check_stamp(path, at, stamp_bytes, checked_pack.stamp_at, checked_pack.next_stamp)?
     checked_pack.frames += 1
     checked_pack.payload_bytes += size
@@ -653,7 +454,9 @@ fn index_pack_frames(path: String, ctx: DiskContext, pack: PagePack, next_stamp:
         let size = frame.end - frame.payload
         let stamp_bytes = list.slice(raw, frame.payload, frame.payload + order.min(size, checked_pack.stamp_at + 8))
         let _ = scan_pack_frame(mut checked_pack, path, at, frame.kind, frame.flags, size, stamp_bytes)?
-        if checked_pack.frames > expected_frames { return Error(disk_fault(path, at, Malformed)) }
+        if checked_pack.frames > expected_frames {
+            return Error(disk_fault(path, at, Malformed))
+        }
         map.insert(mut frames, at, frame)
         at = frame.end
     }
@@ -814,7 +617,11 @@ fn read_page_list[S](mut source: S, id: StoreId, manifest: PageManifest, ptr: st
                     map.insert(mut lists.retired, seq, ())
                 } else {
                     capacity(map.try_reserve(mut lists.packs, 1))?
-                    map.insert(mut lists.packs, seq, pack_record(path, ptr.offset, raw)?)
+                    let pack = pack_record(path, ptr.offset, raw)?
+                    if pack.class >= 3 {
+                        return Error(Unsupported(0x0023))
+                    }
+                    map.insert(mut lists.packs, seq, pack)
                 }
             },
             BlobValue(_) => return Error(disk_fault(path, ptr.offset, Malformed)),
@@ -858,7 +665,7 @@ fn check_list_pack(d: Dir, id: StoreId, seq: u64, next_stamp: u64, offsets: List
     }
     let JournalInput(file: take handle, ..) = take input
     disk_io(host.close(take handle))?
-    Ok(PagePack(class: 2, frames: int.truncate(checked_pack.frames), live: live, payload_bytes: checked_pack.payload_bytes))
+    Ok(PagePack(class: 2, frames: int.truncate(checked_pack.frames), live: live, payload_bytes: checked_pack.payload_bytes, index: 0))
 }
 
 type ReadFrame = ReadPage(std.page.Image, List[u64], List[u64]) | ReadBlob(Bytes)
@@ -989,6 +796,7 @@ type ValidatedPageManifest {
 }
 
 fn validate_page_manifest(d: Dir, id: StoreId, take manifest: PageManifest) -> Result[ValidatedPageManifest, Error] waits {
+    require_memory_manifest(manifest)?
     let graph = PageGraph(stamps: map.new(), frames: map.new(), postorder: list.new())
     let mut lists = ListedPages(packs: map.new(), retired: map.new(), class_two: map.new(), live_graph: take graph)
     let mut last: Option[u64] = None
@@ -1072,7 +880,7 @@ fn validate_new_page_manifest(d: Dir, id: StoreId, raw: Bytes, target: TargetLim
     if !same(owner, id) {
         return Error(disk_fault("MANIFEST.tmp", 0, Header))
     }
-    let requested = manifest.account
+    let requested = manifest_account(manifest)
     let _ = validate_page_manifest(d, id, take manifest)?
     over_ceiling(requested, target.resident)
 }

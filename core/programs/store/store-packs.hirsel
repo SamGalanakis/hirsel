@@ -91,7 +91,7 @@ fn apply_pack_layout(mut known: PageLocations, layout: PackRun) -> Result[(), Er
             offset += 16 + frame.size
         }
         let frame_count: u32 = int.truncate(planned.end - planned.first)
-        let record = PagePack(class: layout.class, frames: frame_count, live: planned.payload_bytes, payload_bytes: planned.payload_bytes)
+        let record = PagePack(class: layout.class, frames: frame_count, live: planned.payload_bytes, payload_bytes: planned.payload_bytes, index: 0)
         capacity(disk_index_put(mut known.packs, planned.seq, record, pack_edge_charge))?
     }
     Ok(())
@@ -214,16 +214,19 @@ fn moved_frames(known: PageLocations, lists: bool) -> List[u64] {
         }
     }
     // The previous stamp-ordered walk seeded the closure in this order.
-    list.sort(mut moved, fn(a: u64, b: u64) -> Order { order.compare(a, b) })
+    list.sort(mut moved, fn(a: u64, b: u64) -> Order {
+        order.compare(a, b)
+    })
     take moved
 }
 
 fn encode_pack_row(pack: PagePack) -> Bytes {
-    let mut out: Bytes = list.with_capacity(21)
+    let mut out: Bytes = list.with_capacity(29)
     list.push(mut out, pack.class)
     list.put_word_le(mut out, pack.frames)
     list.put_word_le(mut out, pack.live)
     list.put_word_le(mut out, pack.payload_bytes)
+    list.put_word_le(mut out, pack.index)
     take out
 }
 
@@ -438,8 +441,7 @@ fn write_page_cut(d: Dir, id: StoreId, take cut: PagedCutLayout, mut buffers: Pa
     Ok(PagedCutLayout(locations: take known, blobs: take blobs, data_pages: take data_pages, lists: take lists))
 }
 
-fn prepare_page_cut[T](base: PageLocations, mut next_stamp: u64,
-    attempt: scoped fn(Map[u64, ()], Option[View[Log[bool]]], mut u64) -> Result[T, Error] waits) -> Result[T, Error] waits {
+fn prepare_page_cut[T](base: PageLocations, mut next_stamp: u64, attempt: scoped fn(Map[u64, ()], Option[View[Log[bool]]], mut u64) -> Result[T, Error] waits) -> Result[T, Error] waits {
     let selected = disk_allocation(scoped fn() -> Result[Map[u64, ()], Error] {
         Ok(relocation_ancestors(base, moved_frames(base, false)))
     })

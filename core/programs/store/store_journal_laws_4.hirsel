@@ -184,12 +184,12 @@ fn journal_test_cap_calls(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(
     let Abandoned(_) = result.unwrap(admit(mut db, first_stream, 0, digest)) else {
         return Error(())
     }
-    // The 337-byte vector in L29(d) without its 60-byte data section.
+    // The 338-byte vector in L29(d) without its 60-byte data section.
     let settle_refusal = conclude(mut db, take pend, key_word(7), Resident)
     let Error(Before(Full(Journal(problem)), Some(take retry))) = take settle_refusal else {
         return Error(())
     }
-    if problem.requested != 16781669 || problem.available != 16781392 || db.frame_seq != frames || version(snapshot(db)) != before {
+    if problem.requested != 16781670 || problem.available != 16781392 || db.frame_seq != frames || version(snapshot(db)) != before {
         return Error(())
     }
     result.unwrap(checkpoint(mut db))
@@ -202,6 +202,9 @@ fn journal_test_cap_calls(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(
     }
     let observed = result.unwrap(recorded(db, main_branch(db), before + 1))
     let Some(saved) = observed else {
+        return Error(())
+    }
+    if let Some(Raised) = saved.stop {} else {
         return Error(())
     }
     if saved.settle != 1 || saved.base + 1 != attempted.id.version || saved.at != attempted.at || saved.seed != attempted.seed {

@@ -65,6 +65,39 @@ agent and the wiring:
   settled, the results are appended in model order and the next request is
   prepared.
 
+## System sections and reactions
+
+`agent.sections` is a list of `Section{key, render}`. List order is prompt
+order. Each time a request is prepared, every section renders from rows under
+`bound bytes limits.section_bytes` and `bound steps limits.section_steps`.
+A render that returns `None` removes its section. One that fails or overruns
+keeps the text it showed last.
+
+`prepare` then appends the smallest `System(Patch)` entry that brings the log
+to what was rendered, or none if nothing changed:
+
+- A change for a shown key replaces its text in place. A new key is added at
+  the end, and `None` removes a key.
+- If the rendered order differs from that, the patch is a baseline holding
+  every section in order. So is the first request. A baseline that would
+  need a kept section's text is put off to the next request, and the prompt
+  stays as it was.
+- The offered tool definitions (name, about, input, rev, after narrowing) are
+  in every baseline. Otherwise they are included only when they change.
+
+The session row caches each shown section's hash and the tools' hash, so
+planning reads no earlier entry. The worker builds `Request.system` and
+`Request.tools` by folding the System entries up to the cutoff
+(`harness.request`). A resend is therefore built from the log, never from
+the agent's current code. Notes are not sent.
+
+`agent.reactions` is a list of `After{name, run}`. Every reaction runs in the
+transaction that appends an entry, with the entry and its position, under
+`bound bytes limits.inside_bytes`. It may write its own rows and triggers. It
+cannot veto or edit the entry: a failing reaction has its writes rolled back,
+and a `Note("reaction failed", name)` is appended. Reactions do not run for
+that note. Appending entries from a reaction is not built yet.
+
 ## Repair, gates and approvals
 
 Each derived call passes, in order:
@@ -116,6 +149,8 @@ body that writes to the transaction (MEM-30).
 | G1 `test_gates_fold_by_maximum` | Over every sequence of 0 to 3 gates, the verdict is the greatest gate verdict under Pass < Hold < Deny. | The maximum of each sequence's ranks, computed from the sequence itself. |
 | G2 `test_approval_bound_to_arguments` | A held call is approved only by its run's caller and only under the key of the tool, revision and repaired arguments. Keys for the unrepaired arguments or another revision conflict, and a stranger is refused; the call is sealed only after the matching approval. | Keys built by hand from the hand-repaired arguments, and the outcome each decision must have. |
 | I1 `test_inside_rolls_back_on_error` | An Inside tool's writes commit with its result, and a tool that returns an error leaves none of its writes while its failure commits. | The row each tool writes, by hand. |
+| P1 `test_system_patches_fold_to_sections` | Over ten prepares (shows, removals, a failed render, two reorders, a put-off baseline, a narrowing), the fold of the log's System entries is the agent's rendered sections in order, and each prepare appends exactly the smallest patch. | The section texts each step writes and the patch each step must append, by hand. |
+| R1 `test_reactions_commit_with_entry` | A reaction's row commits with the entry. A failing reaction leaves the entry, none of its own writes, and a Note naming it. | The rows each reaction writes, by hand. |
 | J1 `test_round_bytes_bounded` | The transaction that appends a user entry and prepares the model call writes the same bytes after 10 earlier entries as after 1,000, within 64 bytes. | `store.changes` between the snapshots around the transaction. A request body copied into any row or trigger argument would add about 198,000 bytes. |
 
 Open: a `std.sim.fs` crash cut at the same boundary as C1.

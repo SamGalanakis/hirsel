@@ -171,6 +171,13 @@ fn tool_ran(s: Services) -> u64 waits {
 fn is_user(e: Option[harness.Entry]) -> bool { match e { Some(User(_)) => true, _ => false } }
 fn asks_tool(e: Option[harness.Entry]) -> bool { match e { Some(Assistant(a)) => list.len(a.calls) == 1u64, _ => false } }
 fn doubted(e: Option[harness.Entry]) -> bool { match e { Some(ToolResult(id, InDoubt)) => id == "c1", _ => false } }
+// The first request's baseline: no sections, and the one tool offered.
+fn offers_bump(e: Option[harness.Entry]) -> bool {
+    match e {
+        Some(System(p)) => p.baseline && list.len(p.changes) == 0u64 && match p.tools { Some(d) => list.len(d) == 1u64 && d[0].name == "bump", None => false },
+        _ => false,
+    }
+}
 fn says_done(e: Option[harness.Entry]) -> bool { match e { Some(Assistant(a)) => list.len(a.calls) == 0u64 && a.text == "done", _ => false } }
 
 // Law C1 (astra crash matrix: Once tool, place ends after begin): the place
@@ -210,11 +217,12 @@ pub fn law_once_tool_crash(parent: Dir, clock: Clock, random: Random, tasks: Tas
     let run = option.unwrap(result.unwrap(store.get(snap, store.shape(h.runs), 0u64)))
     let finished = match run.phase { Finished(Answered) => true, _ => false }
     let spent = run.spend.known == 30u64 && run.spend.reserved == 0u64 && run.spend.unresolved == 0u64
-    let transcript = session.next_pos == 4u64
+    let transcript = session.next_pos == 5u64
         && is_user(result.unwrap(store.get(snap, store.shape(h.entries), 0u64)))
-        && asks_tool(result.unwrap(store.get(snap, store.shape(h.entries), 1u64)))
-        && doubted(result.unwrap(store.get(snap, store.shape(h.entries), 2u64)))
-        && says_done(result.unwrap(store.get(snap, store.shape(h.entries), 3u64)))
+        && offers_bump(result.unwrap(store.get(snap, store.shape(h.entries), 1u64)))
+        && asks_tool(result.unwrap(store.get(snap, store.shape(h.entries), 2u64)))
+        && doubted(result.unwrap(store.get(snap, store.shape(h.entries), 3u64)))
+        && says_done(result.unwrap(store.get(snap, store.shape(h.entries), 4u64)))
     let idle = match session.active_run { None => true, Some(_) => false }
     result.unwrap(store.close(take db))
     let Services(model: take m, tool: take t) = take services
@@ -490,4 +498,213 @@ pub fn law_inside_rolls_back_on_error(parent: Dir, clock: Clock, random: Random,
 @test
 fn test_inside_rolls_back_on_error(parent: Dir, clock: Clock, random: Random, tasks: Tasks) -> Result[(), ()] waits {
     if law_inside_rolls_back_on_error(parent, clock, random, tasks) { Ok(()) } else { Error(()) }
+}
+
+// ---- system sections and reactions ----
+
+// Each section shows the text in its views row; a missing row removes it and
+// any other row makes its render fail.
+fn section_text(tx: store.Tx, k: u64) -> Result[Option[String], store.Error] {
+    let h = harness.handles(store.tx_schema(tx))?
+    match store.fetch(tx, store.shape(h.views), k)? {
+        Some(Status(text)) => Ok(Some(clone(text))),
+        Some(_) => Error(Missing("section")),
+        None => Ok(None),
+    }
+}
+fn section_a(tx: store.Tx) -> Result[Option[String], store.Error] { section_text(tx, 1000u64) }
+fn section_b(tx: store.Tx) -> Result[Option[String], store.Error] { section_text(tx, 1001u64) }
+fn section_c(tx: store.Tx) -> Result[Option[String], store.Error] { section_text(tx, 1002u64) }
+
+fn sectioned(reversed: bool) -> harness.Agent[Grants] {
+    let mut a = crash_agent()
+    let sa = harness.Section(key: "a", render: code.describe(section_a))
+    let sb = harness.Section(key: "b", render: code.describe(section_b))
+    let sc = harness.Section(key: "c", render: code.describe(section_c))
+    if reversed { list.push(mut a.sections, take sc); list.push(mut a.sections, take sb); list.push(mut a.sections, take sa) }
+    else { list.push(mut a.sections, take sa); list.push(mut a.sections, take sb); list.push(mut a.sections, take sc) }
+    a
+}
+
+type Shows = Show(String) | Hidden | Broken
+
+fn put_shows(mut tx: store.Tx, h: harness.Handles, k: u64, s: Shows) -> Result[(), store.Error] {
+    match s {
+        Show(text) => store.put(mut tx, h.views, k, Status(clone(text))),
+        Hidden => { let _ = store.delete(mut tx, h.views, k)?; Ok(()) },
+        Broken => store.put(mut tx, h.views, k, Line("broken", "")),
+    }
+}
+
+fn fresh(dir: Dir, clock: Clock, random: Random, tasks: Tasks) -> store.Db waits {
+    let mut db = result.unwrap(store.open(tasks, dir, clock, random, store.triggers.law_options()))
+    result.unwrap(store.run_migration(mut db, tasks, code.describe(harness.migrate)))
+    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    let filled = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
+        store.put(mut tx, h.entries, 0u64, User("go"))?
+        store.put(mut tx, h.session, 0u64, harness.Session(model: "scripted", tools_narrow: All, head_pos: 0u64, next_pos: 1u64,
+            active_run: Some(0u64), next_run: 1u64, active_sections_hashes: list.new(), active_tools_hash: list.new()))
+    })
+    match take filled { Ok(Committed(_)) => (), _ => fail("fresh: fill did not commit") }
+    take db
+}
+
+// What one prepare showed: the request's system texts and tool names, and the
+// System entries it appended as (baseline, changes, tools replaced).
+type Prepared { system: List[String], tools: List[String], patches: List[(bool, u64, bool)] }
+
+fn prepared(mut db: store.Db, a: harness.Agent[Grants], round: u64, take shows: List[Shows], narrow: bool) -> Prepared waits {
+    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    let before = option.unwrap(result.unwrap(store.get(store.snapshot(db), store.shape(h.session), 0u64))).next_pos
+    let set = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
+        for i in 0u64..list.len(shows) { put_shows(mut tx, h, 1000u64 + i, shows[i])? }
+        if narrow {
+            let Some(take found) = store.fetch(tx, store.shape(h.session), 0u64)? else { return Error(Missing("session")) }
+            let mut s = take found
+            s.tools_narrow = Only(list.new())
+            store.put(mut tx, h.session, 0u64, s)?
+        }
+        store.put(mut tx, h.runs, 0u64, harness.Run(caller: alice(), phase: Preparing, round: round, rounds_left: 8u64,
+            spend: harness.Spend(known: 0u64, reserved: 0u64, unresolved: 0u64)))
+    })
+    match take set { Ok(Committed(_)) => (), _ => fail("prepared: setup did not commit") }
+    kick(mut db, a)
+    let snap = store.snapshot(db)
+    let after = option.unwrap(result.unwrap(store.get(snap, store.shape(h.session), 0u64))).next_pos
+    let mut patches: List[(bool, u64, bool)] = list.new()
+    for p in before..after {
+        if let Some(System(patch)) = result.unwrap(store.get(snap, store.shape(h.entries), p)) {
+            let replaced = match patch.tools { Some(_) => true, None => false }
+            list.push(mut patches, (patch.baseline, list.len(patch.changes), replaced))
+        }
+    }
+    let key = harness.EffectKey(run: 0u64, round: round, kind: harness.MODEL, ordinal: 0u64)
+    let Some(e) = result.unwrap(store.get(snap, store.shape(h.effects), key)) else { fail("prepared: no model effect") }
+    let asked = result.unwrap(harness.request(snap, h, key, e.cutoff))
+    let mut tools: List[String] = list.new()
+    for t in asked.tools { list.push(mut tools, clone(t.name)) }
+    Prepared(system: clone(asked.system), tools: take tools, patches: take patches)
+}
+
+fn texts3(x: String, y: String, z: String, n: u64) -> List[String] {
+    let mut out: List[String] = list.new()
+    if n > 0u64 { list.push(mut out, clone(x)) }
+    if n > 1u64 { list.push(mut out, clone(y)) }
+    if n > 2u64 { list.push(mut out, clone(z)) }
+    take out
+}
+
+fn shows3(take x: Shows, take y: Shows, take z: Shows) -> List[Shows] {
+    let mut out: List[Shows] = list.new()
+    list.push(mut out, take x)
+    list.push(mut out, take y)
+    list.push(mut out, take z)
+    take out
+}
+
+fn one_patch(p: Prepared, baseline: bool, changes: u64, tools: bool) -> bool {
+    list.len(p.patches) == 1u64 && p.patches[0].0 == baseline && p.patches[0].1 == changes && p.patches[0].2 == tools
+}
+
+// Law P1 (Fable: positional system patches): after each prepare, the fold of
+// every System entry in the log is the list of sections the agent renders
+// now, in the agent's order, with a failed section keeping its last text.
+// Each patch is the smallest one: only changed keys, nothing when nothing
+// changed, and a baseline only when the order changed. Oracle: the section
+// texts each step writes, and the patch each step must append, by hand.
+pub fn law_system_patches_fold_to_sections(parent: Dir, clock: Clock, random: Random, tasks: Tasks) -> u64 waits {
+    let mut name = string.with_capacity(32u64)
+    let dir = result.unwrap(host.mkdtemp(parent, mut name))
+    let mut db = fresh(dir, clock, random, tasks)
+    let ab = sectioned(false)
+    let cb = sectioned(true)
+    let mut bad = 0u64
+    // 1. a and b shown, c absent: the first request is a baseline.
+    let p1 = prepared(mut db, ab, 0u64, shows3(Show("A1"), Show("B1"), Hidden), false)
+    if bad == 0u64 && !(p1.system == texts3("A1", "B1", "", 2u64) && one_patch(p1, true, 2u64, true) && list.len(p1.tools) == 1u64) { bad = 1u64 }
+    // 2. Nothing changed: no patch.
+    let p2 = prepared(mut db, ab, 1u64, shows3(Show("A1"), Show("B1"), Hidden), false)
+    if bad == 0u64 && !(p2.system == texts3("A1", "B1", "", 2u64) && list.len(p2.patches) == 0u64) { bad = 2u64 }
+    // 3. b changes and c appears: two changes in place.
+    let p3 = prepared(mut db, ab, 2u64, shows3(Show("A1"), Show("B2"), Show("C1")), false)
+    if bad == 0u64 && !(p3.system == texts3("A1", "B2", "C1", 3u64) && one_patch(p3, false, 2u64, false)) { bad = 3u64 }
+    // 4. a is removed: one change.
+    let p4 = prepared(mut db, ab, 3u64, shows3(Hidden, Show("B2"), Show("C1")), false)
+    if bad == 0u64 && !(p4.system == texts3("B2", "C1", "", 2u64) && one_patch(p4, false, 1u64, false)) { bad = 4u64 }
+    // 5. b fails and keeps B2; c changes.
+    let p5 = prepared(mut db, ab, 4u64, shows3(Hidden, Broken, Show("C2")), false)
+    if bad == 0u64 && !(p5.system == texts3("B2", "C2", "", 2u64) && one_patch(p5, false, 1u64, false)) { bad = 5u64 }
+    // 6. A release reverses the order, with a back: a baseline in the new order.
+    let p6 = prepared(mut db, cb, 5u64, shows3(Show("A2"), Show("B3"), Show("C2")), false)
+    if bad == 0u64 && !(p6.system == texts3("C2", "B3", "A2", 3u64) && one_patch(p6, true, 3u64, true)) { bad = 6u64 }
+    // 7. Same order, b fails: nothing to patch.
+    let p7 = prepared(mut db, cb, 6u64, shows3(Show("A2"), Broken, Show("C2")), false)
+    if bad == 0u64 && !(p7.system == texts3("C2", "B3", "A2", 3u64) && list.len(p7.patches) == 0u64) { bad = 7u64 }
+    // 8. The order changes back while b fails: the baseline would need b's
+    // text, so it is put off and the prompt stays as it was.
+    let p8 = prepared(mut db, ab, 7u64, shows3(Show("A2"), Broken, Show("C2")), false)
+    if bad == 0u64 && !(p8.system == texts3("C2", "B3", "A2", 3u64) && list.len(p8.patches) == 0u64) { bad = 8u64 }
+    // 9. b renders again: the put-off baseline.
+    let p9 = prepared(mut db, ab, 8u64, shows3(Show("A2"), Show("B3"), Show("C2")), false)
+    if bad == 0u64 && !(p9.system == texts3("A2", "B3", "C2", 3u64) && one_patch(p9, true, 3u64, true)) { bad = 9u64 }
+    // 10. The session narrows its tools to none: a tools-only patch.
+    let p10 = prepared(mut db, ab, 9u64, shows3(Show("A2"), Show("B3"), Show("C2")), true)
+    if bad == 0u64 && !(p10.system == texts3("A2", "B3", "C2", 3u64) && one_patch(p10, false, 0u64, true) && list.len(p10.tools) == 0u64) { bad = 10u64 }
+    result.unwrap(store.close(take db))
+    result.unwrap(std.dir.remove_all(parent, name))
+    bad
+}
+
+@test
+fn test_system_patches_fold_to_sections(parent: Dir, clock: Clock, random: Random, tasks: Tasks) -> Result[(), u64] waits {
+    // The law answers the first step whose request or patch is wrong, or 0.
+    let bad = law_system_patches_fold_to_sections(parent, clock, random, tasks)
+    if bad == 0u64 { Ok(()) } else { Error(bad) }
+}
+
+fn mark_user(mut tx: store.Tx, at: u64, e: harness.Entry) -> Result[(), harness.Fault] {
+    let User(_) = view e else { return Ok(()) }
+    let Ok(h) = harness.handles(store.tx_schema(tx)) else { return Error(Unavailable) }
+    let Ok(()) = store.put(mut tx, h.views, 2000u64 + at, Status("seen")) else { return Error(Unavailable) }
+    Ok(())
+}
+
+fn mark_then_fail(mut tx: store.Tx, at: u64, e: harness.Entry) -> Result[(), harness.Fault] {
+    let Ok(h) = harness.handles(store.tx_schema(tx)) else { return Error(Unavailable) }
+    let Ok(()) = store.put(mut tx, h.views, 3000u64 + at, Status("half")) else { return Error(Unavailable) }
+    Error(Refused("no"))
+}
+
+// Law R1 (Fable: reactions run in the appending transaction): a reaction's
+// writes commit with the entry it reacts to, and a failing reaction can
+// neither veto the entry nor leave a partial write; its failure is a Note.
+// Oracle: the rows each reaction writes, by hand.
+pub fn law_reactions_commit_with_entry(parent: Dir, clock: Clock, random: Random, tasks: Tasks) -> bool waits {
+    let mut name = string.with_capacity(32u64)
+    let dir = result.unwrap(host.mkdtemp(parent, mut name))
+    let mut db = result.unwrap(store.open(tasks, dir, clock, random, store.triggers.law_options()))
+    result.unwrap(store.run_migration(mut db, tasks, code.describe(harness.migrate)))
+    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    let mut a = crash_agent()
+    list.push(mut a.reactions, harness.After(name: "mark", run: code.describe(mark_user)))
+    list.push(mut a.reactions, harness.After(name: "half", run: code.describe(mark_then_fail)))
+    let w = result.unwrap(wired())
+    let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[harness.Disposition, harness.Refused] {
+        harness.open_session(mut tx, h, "scripted", All)?
+        harness.submit(mut tx, h, a, w, alice(), harness.Submit(client_key: "k", text: "hi"))
+    })
+    let placed = match take ran { Ok(Committed(store.Done(value: Placed(_), ..))) => true, _ => false }
+    let snap = store.snapshot(db)
+    let user = match result.unwrap(store.get(snap, store.shape(h.entries), 0u64)) { Some(User(t)) => t == "hi", _ => false }
+    let marked = match result.unwrap(store.get(snap, store.shape(h.views), 2000u64)) { Some(_) => true, None => false }
+    let half = match result.unwrap(store.get(snap, store.shape(h.views), 3000u64)) { Some(_) => true, None => false }
+    let noted = match result.unwrap(store.get(snap, store.shape(h.entries), 1u64)) { Some(Note(why, who)) => why == "reaction failed" && who == string.into_bytes("half"), _ => false }
+    result.unwrap(store.close(take db))
+    result.unwrap(std.dir.remove_all(parent, name))
+    placed && user && marked && !half && noted
+}
+
+@test
+fn test_reactions_commit_with_entry(parent: Dir, clock: Clock, random: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if law_reactions_commit_with_entry(parent, clock, random, tasks) { Ok(()) } else { Error(()) }
 }

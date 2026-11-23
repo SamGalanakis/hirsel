@@ -886,7 +886,7 @@ pub fn disk_law_branches(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wait
     if !typed_put(mut sdb, st, 1, 1) {
         return false
     }
-    let first = Ticket(store: sdb.store, open: open_number(sdb), mark: Journal(sdb.frame_seq))
+    let first = Ticket(store: sdb.store, open: open_number(sdb), mark: Journal(sdb.frame_seq, 0, 0))
     result.unwrap(durable(mut sdb, first))
     let first_snap = snapshot(sdb)
     let _ = result.unwrap(pin(mut sdb, "p", first_snap))

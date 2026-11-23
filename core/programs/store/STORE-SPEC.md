@@ -167,7 +167,7 @@ v2.28 (RUNNER-SPEC v2.17, lane caller-scope-1128, astra's second attack, ATTACK-
 
 ## CHANGES-v2.55 (store-runner-soften-1974: Spec Q1, Q4, Q5; with RUNNER v2.42; not yet built)
 
-L60 now requires `Unsupported(0x0050)` for the retired AUTHORITY, as specified in §12.2. The checked MANIFEST payload limit applies after the object envelope is removed.
+L60 now requires `Unsupported(0x0050)` for the retired AUTHORITY, as specified in §12.2. The checked MANIFEST payload limit applies after the object envelope is removed. One process-owned `Followers` source numbers captures. Branch identity is store-wide.
 
 | Item | Change | Where |
 |---|---|---|
@@ -3442,7 +3442,7 @@ None of these is retried by `open`'s claim loop, and none writes a byte.
 **Open identity (§1.12, Astra #19, #22).**
 - On log@1 an open's number is the first segment the open creates, as today.
 - On objects@1 and sim@1 a writer open's number is its epoch. Each writer open claims, and epochs never repeat.
-- A follower's number is `2⁶³ | n`, with n drawn from a **process-wide counter** that only rises. Snapshots, resume tokens and shared-view caches are process-local, so a number that cannot repeat within the process is enough. No random draw is involved. Epochs and segment numbers stay below 2⁶³: one that would reach 2⁶³ is `Limit(Ids)` before any write. So a follower's number never equals a writer's.
+- A follower's number is `2⁶³ | n`, with n drawn from its process owner's **`Followers` source**, which keeps a counter that only rises. The process owner creates one source and reuses it for every follower. Snapshots, resume tokens and shared-view caches are process-local, so a number that cannot repeat within the process is enough. No random draw is involved. Epochs and segment numbers stay below 2⁶³: one that would reach 2⁶³ is `Limit(Ids)` before any write. So a follower's number never equals a writer's.
 
 ### 12.2 The history and its names
 
@@ -3772,7 +3772,9 @@ L55 and L56 run on this plan.
 
 ```hirsel
 pub opaque type Follower                                                     // not send: holds the authority's Client
-pub fn follower(tasks: Tasks, a: Authority, c: Clock, o: Options) -> Result[Follower, Error] waits
+pub opaque type Followers
+pub fn followers() -> Followers
+pub fn follower(mut source: Followers, tasks: Tasks, a: Authority, c: Clock, o: Options) -> Result[Follower, Error] waits
 // v2.57: follower_table and follower_index are deleted; `declare_follower(f)` binds handles in mode Follower (§1.2)
 pub fn follower_floor(f: Follower, at_most: u64) -> Result[Option[Snapshot], Error] waits   // v2.57 (M2): the newest retained checkpoint at or below a version, for a projector's base (§1.14)
 pub fn follower_branch(f: Follower, name: String) -> Option[Branch]
@@ -3780,7 +3782,7 @@ pub fn applied(f: Follower, b: Branch) -> Result[Position, Error]
 pub fn catch_up(mut f: Follower, deadline_ns: u64) -> Result[Position, Error] waits   // main's applied Position
 pub fn at_least(mut f: Follower, p: Position, deadline_ns: u64) -> Result[Snapshot, Error] waits
 pub fn fresh(mut f: Follower, deadline_ns: u64) -> Result[Snapshot, Error] waits
-pub fn snapshot_follower(f: Follower, b: Branch) -> Result[Snapshot, Error]          // Gone(id) for a deleted branch, Foreign for another follower's
+pub fn snapshot_follower(f: Follower, b: Branch) -> Result[Snapshot, Error]          // Gone(id) for a deleted branch, Unseen(id) before creation, Foreign for another store
 pub fn fresh_snapshot(mut db: Db, deadline_ns: u64) -> Result[Snapshot, Error] waits   // the holder's fresh read
 pub type Position { store: StoreId, branch: u32, version: u64 }
 pub fn position(mut db: Db, t: Ticket) -> Result[Position, Error] waits

@@ -420,8 +420,8 @@ fn journal_test_order_workspace() -> Result[(), ()] {
     let n = 10000u64
     let mut ops = new_data_rows()
     list.reserve(mut ops.rest, n - 2)
-    for position in 0u64 .. n {
-        push_data_row(mut ops, DataOp(key: key_word(n - position), value: None))
+    for slot_order in 0u64 .. n {
+        push_data_row(mut ops, DataOp(key: key_word(n - slot_order), value: None))
     }
     // Independently observe the allocator's grant for the index list. The
     // encoder's ordering pass can fit into that grant without owning any key.
@@ -439,8 +439,8 @@ fn journal_test_order_workspace() -> Result[(), ()] {
     if list.len(slots) != n || list.capacity(slots) < n || 8 * list.capacity(slots) != room {
         return Error(())
     }
-    for position in 0u64 .. n {
-        if slots[position] != n - position - 1 {
+    for slot_order in 0u64 .. n {
+        if slots[slot_order] != n - slot_order - 1 {
             return Error(())
         }
     }

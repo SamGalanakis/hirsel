@@ -4,7 +4,7 @@ pub type StoreId {
     lo: u64
 }
 
-pub type Authority: send = Directory() | Bucket(std.object.Bucket)
+pub type StorageKind: send = Directory() | Bucket(std.object.Bucket)
 
 pub type Caller: codec + send {
     issuer: u8,
@@ -24,11 +24,12 @@ pub type Options: send {
     journal_limit: u64,
     pack_bytes: u64,
     resident_limit: u64,
-    authority: Authority
+    authority: StorageKind,
+    expect: Option[StoreId]
 }
 
 pub fn defaults() -> Options {
-    Options(create: true, lock_wait_ms: 0, group_commits: 64, group_bytes: 4194304, checkpoint_bytes: 67108864, journal_limit: 268435456, pack_bytes: 67108864, resident_limit: 1073741824, authority: Directory())
+    Options(create: true, lock_wait_ms: 0, group_commits: 64, group_bytes: 4194304, checkpoint_bytes: 67108864, journal_limit: 268435456, pack_bytes: 67108864, resident_limit: 1073741824, authority: Directory(), expect: None)
 }
 
 pub type Limit = Key | Value | Transaction | Name | Ids | Manifest | Triggers
@@ -43,7 +44,7 @@ pub type Fault: send {
 
 pub type StoreCapacity: send = Journal(Capacity) | Resident(Capacity) | Allocation(Capacity)
 
-pub type Error: send = Held | NotFound | Corrupt(Fault) | Unsupported(u64) | Io(IoError) | Poisoned(IoError) | Full(StoreCapacity) | Limit(Limit) | Schema(u64) | Stale(u32) | Decode(std.codec.DecodeError) | Exists(String) | Missing(String) | NoLevel(String) | Diverged(u32) | Foreign | MigrationFault | ExportDirectory | Fenced(u64) | Remote(std.object.Error)
+pub type Error: send = Held | NotFound | Corrupt(Fault) | Unsupported(u64) | Io(IoError) | Poisoned(IoError) | Full(StoreCapacity) | Limit(Limit) | Schema(u64) | Stale(u32) | Decode(std.codec.DecodeError) | Exists(String) | Missing(String) | NoLevel(String) | Behind(Position) | Gone(u32) | Unseen(u32) | Diverged(u32) | Foreign | MigrationFault | ExportDirectory | Fenced(u64) | Remote(std.object.Error)
 
 type Roots = PageRoots
 
@@ -332,7 +333,7 @@ pub type CallInfo {
     seed: u64
 }
 
-pub type Mark = Journal(u64) | Cut(u64)
+pub type Mark = Journal(u64, u32, u64) | Cut(u64)
 
 pub type Ticket {
     store: StoreId,
@@ -804,7 +805,7 @@ fn fork_live(mut db: Db, name: String, parent: u64) -> Result[(Branch, Ticket), 
     let store = db.store
     let opened = open_number(db)
     if disk {
-        let preceding = Ticket(store: store, open: opened, mark: Journal(db.frame_seq))
+        let preceding = Ticket(store: store, open: opened, mark: Journal(db.frame_seq, 0, 0))
         durable(mut db, preceding)?
     }
     db.next_branch += 1
@@ -818,7 +819,7 @@ fn fork_live(mut db: Db, name: String, parent: u64) -> Result[(Branch, Ticket), 
     } else {
         db.changes + 1
     }
-    let fork_ticket = Ticket(store: store, open: opened, mark: Journal(sequence))
+    let fork_ticket = Ticket(store: store, open: opened, mark: Journal(sequence, id, head.head))
     if disk {
         durable(mut db, fork_ticket)?
     }
@@ -1633,7 +1634,7 @@ fn prepare_direct_edit[R, A](mut db: Db, i: u64, mut ran: Ran[R, A]) -> Result[b
         return Ok(false)
     }
     let _ = take base
-    let applied = if data_count != 0 {
+    let changed_roots = if data_count != 0 {
         direct_data_edits(mut db, i, ran)?
     } else {
         let op = data_row(ran.replies, 0u64)
@@ -1647,10 +1648,10 @@ fn prepare_direct_edit[R, A](mut db: Db, i: u64, mut ran: Ran[R, A]) -> Result[b
             },
         }
     }
-    if !applied {
+    if !changed_roots {
         ran.roots = Some(share_roots(db.heads[i].roots))
     }
-    Ok(applied)
+    Ok(changed_roots)
 }
 
 // Writes each row in place when every row is an inline put into a collection
@@ -1756,7 +1757,7 @@ fn commit_prepared[R, A](mut db: Db, i: u64, take ran: Ran[R, A], take publicati
     } else {
         db.frame_seq
     }
-    let commit_ticket = Ticket(store: db.store, open: open_number(db), mark: Journal(sent_sequence))
+    let commit_ticket = Ticket(store: db.store, open: open_number(db), mark: Journal(sent_sequence, db.heads[i].id, db.heads[i].head))
     match take value {
         Ok(take v) => Committed(Done(value: take v, ticket: commit_ticket, info: ci, reads: take seen)),
         Error(take a) => Aborted(Undone(value: take a, ticket: Some(commit_ticket)))
@@ -1917,7 +1918,7 @@ fn durable_groups(mut db: Db, t: Ticket) -> Result[u64, Error] waits {
 
 fn covered(db: Db, mark: Mark) -> bool {
     match mark {
-        Journal(n) => match db.disk { Some(state) => state.journaled >= n, None => n == 0 },
+        Journal(n, _, _) => match db.disk { Some(state) => state.journaled >= n, None => n == 0 },
         Cut(n) => db.checkpointed >= n
     }
 }
@@ -1927,7 +1928,7 @@ pub fn close(take db: Db) -> Result[(), Error] waits {
     if !is_disk(owned) { return Ok(()) }
     let mut failure: Option[Error] = None
     if let None = journal_poison(owned) {
-        let last_frame = Ticket(store: owned.store, open: open_number(owned), mark: Journal(owned.frame_seq))
+        let last_frame = Ticket(store: owned.store, open: open_number(owned), mark: Journal(owned.frame_seq, 0, 0))
         if let Error(take e) = durable(mut owned, last_frame) { failure = Some(take e) }
     }
     let connection = replace(mut owned.disk, None)
@@ -2088,9 +2089,9 @@ fn apply_put(mut tx: Tx, take p: Bytes, take val: Bytes, tail: bool) -> Result[(
     }
     let _ = reserve_ids(mut tx, height)?
     let value = stage_value(take val, tx.roots.collections.inline)
-    let position = save_data_op(mut tx.ops, tx.below, false, mut tx.rows, take p, Some(take value))
+    let slot_order = save_data_op(mut tx.ops, tx.below, false, mut tx.rows, take p, Some(take value))
     if tail {
-        tx.frame_tail = position
+        tx.frame_tail = slot_order
     }
     tx.resident = int.saturating_add(int.saturating_sub(tx.resident, old_charge), charge)
     tx.wrote = true
@@ -2454,10 +2455,10 @@ fn test_db(c: Clock, cap: u64) -> Db {
     memory_at(c, StoreId(hi: 1, lo: 2), opts)
 }
 
-// Stages one row in `ops` and returns its slot: `fresh`, the next one, for a
+// Stages one row in `ops` and returns its slot: `next_slot`, the next one, for a
 // key new to the transaction, else OPEN_FRAME_TAIL. A key a layer beneath
 // staged keeps its slot there, so `ops` holds the replacement uncounted.
-fn save_data_op(mut ops: DataOps, below: List[Arc[Staged]], streams: bool, mut fresh: u64, take key: Bytes, take value: Option[StagedValue]) -> u64 {
+fn save_data_op(mut ops: DataOps, below: List[Arc[Staged]], streams: bool, mut next_slot: u64, take key: Bytes, take value: Option[StagedValue]) -> u64 {
     if let Some(slot) = op_slot(ops, key) {
         if slot < 2 {
             ops.rows.first[slot].value = take value
@@ -2477,18 +2478,18 @@ fn save_data_op(mut ops: DataOps, below: List[Arc[Staged]], streams: bool, mut f
             beneath = true
         }
     }
-    let at = fresh
+    let at = next_slot
     if !beneath {
-        fresh += 1
+        next_slot += 1
     }
-    let position = ops.rows.count
-    if position == SCANNED_OPS {
-        for earlier in 0u64 .. position {
+    let slot_order = ops.rows.count
+    if slot_order == SCANNED_OPS {
+        for earlier in 0u64 .. slot_order {
             map.insert(mut ops.slots, clone(data_row(ops.rows, earlier).key), earlier)
         }
     }
-    if position >= SCANNED_OPS {
-        map.insert(mut ops.slots, clone(key), position)
+    if slot_order >= SCANNED_OPS {
+        map.insert(mut ops.slots, clone(key), slot_order)
     }
     push_data_row(mut ops.rows, DataOp(key: take key, value: take value))
     if beneath {
@@ -2558,8 +2559,8 @@ fn newest_layer(below: List[Arc[Staged]], streams: bool, key: Bytes) -> Option[u
 // replay applies them, so a commit splits and merges pages as recovery does.
 fn materialize_rows(mut tree: PageTree, operations: DataRows, first: u64, mut draw: u64) -> Result[(), Error] {
     let order = capacity(data_order(operations))?
-    for position in 0u64 .. operations.count {
-        let op = ordered_row(operations, order, position)
+    for slot_order in 0u64 .. operations.count {
+        let op = ordered_row(operations, order, slot_order)
         match op.value {
             Some(PageValue(raw)) => put_page_row(mut tree, op.key, raw, first, mut draw)?,
             Some(BlobBody(raw)) => put_shared_page_row(mut tree, op.key, raw, first, mut draw)?,
@@ -2651,8 +2652,8 @@ fn data_order(ops: DataRows) -> Result[DataOrder, Capacity] {
     }
     let mut slots: List[u64] = list.new()
     list.try_reserve(mut slots, n)?
-    for position in 0u64 .. n {
-        list.push(mut slots, position)
+    for slot_order in 0u64 .. n {
+        list.push(mut slots, slot_order)
     }
     list.sort(mut slots, scoped fn(a: u64, b: u64) -> Order {
         list.compare_bytes(data_row(ops, a).key, data_row(ops, b).key)
@@ -2660,11 +2661,11 @@ fn data_order(ops: DataRows) -> Result[DataOrder, Capacity] {
     Ok(SortedSlots(take slots))
 }
 
-fn ordered_row(ops: DataRows, order: DataOrder, position: u64) -> View[DataOp] in ops {
+fn ordered_row(ops: DataRows, order: DataOrder, slot_order: u64) -> View[DataOp] in ops {
     let slot = match order {
-        InOrder => position,
-        ReversePair => 1 - position,
-        SortedSlots(slots) => slots[position],
+        InOrder => slot_order,
+        ReversePair => 1 - slot_order,
+        SortedSlots(slots) => slots[slot_order],
     }
     data_row(ops, slot)
 }
@@ -2672,8 +2673,8 @@ fn ordered_row(ops: DataRows, order: DataOrder, position: u64) -> View[DataOp] i
 fn encode_data_ops(mut payload: Bytes, ops: DataRows, order: DataOrder) -> Result[(), Capacity] {
     le(mut payload, 0, 1)?
     le(mut payload, ops.count, 4)?
-    for position in 0u64 .. ops.count {
-        let op = ordered_row(ops, order, position)
+    for slot_order in 0u64 .. ops.count {
+        let op = ordered_row(ops, order, slot_order)
         encode_data_op(mut payload, op.key, op.value)?
     }
     Ok(())
@@ -2709,8 +2710,8 @@ fn encode_stream_ops(mut payload: Bytes, ops: DataRows, call: Option[View[CallRe
     le(mut payload, 1, 1)?
     le(mut payload, ops.count, 4)?
     let order = data_order(ops)?
-    for position in 0u64 .. ops.count {
-        encode_stream_op(mut payload, ordered_row(ops, order, position), call, settlement)?
+    for slot_order in 0u64 .. ops.count {
+        encode_stream_op(mut payload, ordered_row(ops, order, slot_order), call, settlement)?
     }
     Ok(())
 }
@@ -4135,7 +4136,7 @@ pub fn migration_index[J, K, V](phase: Migration, mut t: Table[K, V], name: Stri
     catalog_index(phase.plan.store, phase.plan.roots.catalog, mut t, name, by, take key)
 }
 
-fn catalog_index[J, K, V](store_id: StoreId, catalog: PageTree, mut t: Table[K, V], name: String, by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J]) -> Result[Index[J, K, V], Error] {
+fn read_catalog_index[J, K, V](store_id: StoreId, catalog: PageTree, t: Table[K, V], name: String, by: StaticFn[fn(V) -> Result[J, Capacity]], key: std.codec.Key[J]) -> Result[(Bytes, Catalog), Error] {
     if !same(store_id, t.store) {
         return Error(Foreign)
     }
@@ -4147,6 +4148,15 @@ fn catalog_index[J, K, V](store_id: StoreId, catalog: PageTree, mut t: Table[K, 
     if c.key != (std.codec.key_schema(key) ?=> |_| Schema(0)) || c.by != code.identity(by) || c.owner != t.id {
         return Error(Schema(0))
     }
+    Ok((take k, take c))
+}
+
+fn catalog_index_handle[J, K, V](catalog: PageTree, t: Table[K, V], c: Catalog, take k: Bytes, take key: std.codec.Key[J]) -> Result[Index[J, K, V], Error] {
+    Ok(Index(store: t.store, id: c.id, catalog_key: catalog_key_handle(take k)?, catalog_page: catalog_page(catalog)?, table: t.id, key: key, primary: t.key, readers: arc.share(t.readers)))
+}
+
+fn catalog_index[J, K, V](store_id: StoreId, catalog: PageTree, mut t: Table[K, V], name: String, by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J]) -> Result[Index[J, K, V], Error] {
+    let (take k, take c) = read_catalog_index(store_id, catalog, t, name, by, key)?
     let mut present = false
     for old in t.indexes {
         if old.id == c.id {
@@ -4172,7 +4182,7 @@ fn catalog_index[J, K, V](store_id: StoreId, catalog: PageTree, mut t: Table[K, 
     }
     t.complete = complete
     t.epoch = catalog_entry_in(catalog, t.catalog_key)?.epoch
-    Ok(Index(store: t.store, id: c.id, catalog_key: catalog_key_handle(take k)?, catalog_page: catalog_page(catalog)?, table: t.id, key: key, primary: t.key, readers: arc.share(t.readers)))
+    catalog_index_handle(catalog, t, c, take k, take key)
 }
 
 pub fn drop_table[K, V](mut db: Db, take t: Table[K, V]) -> Result[Ticket, Error] waits {
@@ -4301,12 +4311,12 @@ fn migrate_build[K, V, K2, V2](source: PageTree, take base: Roots, mut ids: u64,
     let table_raw = encode_catalog(Catalog(kind: 1, id: id, owner: 0, epoch: 1, key: (std.codec.key_schema(to.key) ?=> |_| Schema(0)), schemas: take schemas, next: number + 1, by: list.new(), revision: list.new()))?
     let mut edits: List[CatalogWrite] = list.new()
     list.push(mut edits, CatalogWrite(key: copied(target)?, value: take table_raw))
-    let mut position = 1u32
+    let mut slot_order = 1u32
     for ix in to.indexes {
         let ik = catalog_index_key(id, ix.name)?
-        let raw = encode_catalog(Catalog(kind: 2, id: id + position, owner: id, epoch: 1, key: copied(ix.key)?, schemas: list.new(), next: 0, by: copied(ix.by)?, revision: list.new()))?
+        let raw = encode_catalog(Catalog(kind: 2, id: id + slot_order, owner: id, epoch: 1, key: copied(ix.key)?, schemas: list.new(), next: 0, by: copied(ix.by)?, revision: list.new()))?
         list.push(mut edits, CatalogWrite(key: take ik, value: take raw))
-        position += 1
+        slot_order += 1
     }
     let mut live = int.saturating_add(start, 126 * list.len(edits))
     for edit in edits {
@@ -5283,7 +5293,7 @@ pub fn begin_export_copy(mut db: Db, scratch: Dir, take attempt: Bytes, activati
     if let Some(_) = disk_state(db).lease {
         return Error(AttemptBusy)
     }
-    let last = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq))
+    let last = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
     deploy_result(durable(mut db, last))?
     let from = disk_state(db).d
     let raw = deploy_result(disk_read_paged_file(from, "MANIFEST", 72 + 16 + MANIFEST_LIMIT + 20 + UNKNOWN_ROOM))?
@@ -6053,7 +6063,7 @@ fn accept_cutover(mut db: Db, request: Cutover) -> Result[Imported, DeployError]
     if !is_disk(db) {
         return Error(ExportMismatch)
     }
-    let last = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq))
+    let last = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
     deploy_result(durable(mut db, last))?
     let finished = edit_disk(mut db.disk, scoped fn(mut state: DiskState) -> Option[Imported] { replace(mut state.imported, None) })
     let Some(take staged) = take finished else {
@@ -6077,7 +6087,7 @@ pub fn cutover_settled(mut db: Db) -> Result[bool, Error] {
         return Ok(true)
     }
     journal_poll(mut db)?
-    Ok(covered(db, Journal(db.frame_seq)))
+    Ok(covered(db, Journal(db.frame_seq, 0, 0)))
 }
 
 fn install_prepared[V](mut db: Db, request: Cutover, current_activation: u64, old_describe: Bytes, release_codec: std.codec.Codec[V], release_from: fn(PreparedTarget, Inline[u8, 32]) -> Result[V, DeployError], before_cut: scoped fn() -> bool) -> Result[u64, DeployError] waits {
@@ -6340,10 +6350,20 @@ fn manifest_state(m: PageManifest, all: List[Roots]) -> Result[State, Capacity] 
     Ok(State(tips: take tips, pins: take pins, next_branch: m.next_branch, next_table: m.next_table))
 }
 
+fn check_expected_store(expected: Option[StoreId], found: StoreId) -> Result[(), Error] {
+    if let Some(wanted) = expected {
+        if !same(wanted, found) {
+            return Error(Foreign)
+        }
+    }
+    Ok(())
+}
+
 fn disk_start(d: Dir, r: Random, options: Options) -> Result[DiskStartup, Error] waits {
     let selected = read_page_manifest_file(d)
     let mut loaded = match take selected {
         Ok((id, take manifest)) => {
+            check_expected_store(options.expect, id)?
             // Each authority refuses the other's MANIFEST.
             match options.authority {
                 Directory() => if let Some(_) = manifest.claim {
@@ -6357,6 +6377,9 @@ fn disk_start(d: Dir, r: Random, options: Options) -> Result[DiskStartup, Error]
             disk_loaded(id, take validated)?
         },
         Error(Io(NotFound)) => {
+            if let Some(_) = options.expect {
+                return Error(NotFound)
+            }
             if !options.create {
                 return Error(NotFound)
             }
@@ -6588,6 +6611,7 @@ pub fn open_read_only(d: Dir, options: Options) -> Result[ReadOnly, Error] waits
     }
     open_checks(options)?
     let (take raw, id, take manifest) = read_only_manifest(d)?
+    check_expected_store(options.expect, id)?
     if let Some(_) = manifest.claim {
         return Error(Unsupported(1))
     }
@@ -6618,7 +6642,7 @@ fn check_read_only_manifest(d: Dir, raw: Bytes) -> Result[(), Error] waits {
     Ok(())
 }
 
-fn read_only_recover(d: Dir, id: StoreId, take manifest: PageManifest, ceiling: u64) -> Result[ReadOnly, Error] waits {
+fn read_only_state(d: Dir, id: StoreId, take manifest: PageManifest, barriers: bool) -> Result[JournalReplay, Error] waits {
     let validated = validate_page_manifest(d, id, take manifest)?
     let ValidatedPageManifest(manifest: take selected, graph: take resolved, ..) = take validated
     let mut graph = take resolved
@@ -6631,9 +6655,14 @@ fn read_only_recover(d: Dir, id: StoreId, take manifest: PageManifest, ceiling: 
         capacity(manifest_state(selected, holders))
     })?
     let replay = journal_replay(take state, selected.next_stamp - 1)?
-    let recovered = journal_recover(d, id, selected.first_live, false, take replay)?
-    over_ceiling(journal_account(recovered.replay)?, ceiling)?
-    let main = view recovered.replay.state.tips[0u64]
+    let JournalRecovered(replay: take recovered, ..) = journal_recover(d, id, selected.first_live, barriers, take replay)?
+    Ok(take recovered)
+}
+
+fn read_only_recover(d: Dir, id: StoreId, take manifest: PageManifest, ceiling: u64) -> Result[ReadOnly, Error] waits {
+    let replay = read_only_state(d, id, take manifest, false)?
+    over_ceiling(journal_account(replay)?, ceiling)?
+    let main = view replay.state.tips[0u64]
     Ok(ReadOnly(snapshot: Snapshot(store: id, open: 0, branch: 0, head: main.head, roots: share_roots(main.roots))))
 }
 
@@ -6921,7 +6950,7 @@ fn disk_cut_timed(mut db: Db, take delta: HolderDelta, seal: scoped fn(mut Bytes
 fn disk_cut_with_limit(mut db: Db, take delta: HolderDelta, seal: scoped fn(mut Bytes, DiskContext, u32) -> Result[(), Error] waits, target: Option[TargetLimits], pack_bytes: u64, limit: u64, mut timing: Option[CutTiming]) -> Result[Ticket, Error] waits {
     healthy(db)?
     edit_disk(mut db.disk, scoped fn(mut state: DiskState) { state.since_cut = 0 })
-    let last = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq))
+    let last = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
     let observe = match timing {
         Some(_) => true,
         None => false,

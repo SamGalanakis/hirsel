@@ -241,7 +241,7 @@ fn bucket_adopt(mut client: std.object.Client, op_ms: u64, d: Dir, place: std.ob
         },
         None => return Error(Unsupported(0)),
     }
-    let mut fresh = true
+    let mut newer = true
     if let Some(head) = local {
         if !same(head.id, id) {
             return Error(Foreign)
@@ -251,7 +251,7 @@ fn bucket_adopt(mut client: std.object.Client, op_ms: u64, d: Dir, place: std.ob
         if !same(head.holder, remote_holder) {
             return Error(Fenced(remote_epoch))
         }
-        fresh = false
+        newer = false
     }
     // Skip every pack number already used, so an orphan pack left by a
     // crashed writer never meets a later pack's no-clobber upload.
@@ -275,7 +275,7 @@ fn bucket_adopt(mut client: std.object.Client, op_ms: u64, d: Dir, place: std.ob
         return Error(Fenced(claim.epoch))
     }
     bucket_abort_pending(mut client, op_ms)?
-    if fresh {
+    if newer {
         for item in packs {
             let (seq, size) = item
             if seq < live_packs {
@@ -329,6 +329,9 @@ fn bucket_prepare(d: Dir, r: Random, place: std.object.Bucket, create: bool, mut
 }
 
 pub fn open_bucket(tasks: Tasks, d: Dir, c: Clock, r: Random, options: Options, take client: std.object.Client, op_ms: u64) -> Result[Db, Error] waits {
+    if let Some(_) = options.expect {
+        return Error(Unsupported(1))
+    }
     let place: std.object.Bucket = match options.authority {
         Bucket(b) => clone(b),
         Directory() => return Error(Unsupported(0)),

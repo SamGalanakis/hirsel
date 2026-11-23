@@ -919,7 +919,7 @@ fn disk_crash_init(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String) 
                 fail("checkpoint input")
             }
         }
-        let last = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq))
+        let last = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
         durable(mut db, last)?
     }
     close(take db)

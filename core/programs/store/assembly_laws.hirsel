@@ -121,8 +121,8 @@ fn pages_match(s: Snapshot, sh: Shape[u64, u64], ix: Index[u64, u64, u64], index
         if list.len(page.rows) != page_rows || page.byte_count != page_rows * 22 {
             return false
         }
-        for position in 0u64 .. page_rows {
-            if page.rows[position] != expected[offset + position] {
+        for slot_order in 0u64 .. page_rows {
+            if page.rows[slot_order] != expected[offset + slot_order] {
                 return false
             }
         }
@@ -212,10 +212,10 @@ pub fn law_keyset_pages(c: Clock) -> bool waits {
 
     result.unwrap(drop_table(mut db, take original))
     result.unwrap(create_table(mut db, spec("pages", std.codec.key_u64(), std.codec.of_u64())))
-    let mut fresh = result.unwrap(table(mut db, "pages", std.codec.key_u64(), std.codec.of_u64()))
-    result.unwrap(create_index(mut db, fresh, "bucket", code.describe(bucket), std.codec.key_u64()))
-    let fresh_ix = result.unwrap(index(db, mut fresh, "bucket", code.describe(bucket), std.codec.key_u64()))
-    let fresh_shape = shape(fresh)
+    let mut newer = result.unwrap(table(mut db, "pages", std.codec.key_u64(), std.codec.of_u64()))
+    result.unwrap(create_index(mut db, newer, "bucket", code.describe(bucket), std.codec.key_u64()))
+    let fresh_ix = result.unwrap(index(db, mut newer, "bucket", code.describe(bucket), std.codec.key_u64()))
+    let fresh_shape = shape(newer)
     let current = snapshot(db)
     match scan_next(current, fresh_shape, page_token(result.unwrap(scan_page(held, sh, Unbounded, Unbounded, one))), one) {
         Ok(Moved(head)) => if head != version(current) { return false },

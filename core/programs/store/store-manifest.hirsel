@@ -586,8 +586,8 @@ fn read_page_manifest_file(d: Dir) -> Result[(StoreId, PageManifest), Error] wai
     })
 }
 
-fn disk_check_stamp(path: String, at: u64, raw: Bytes, position: u64, next_stamp: u64) -> Result[(), Error] {
-    let stamp: u64 = list.word_le(raw, position)
+fn disk_check_stamp(path: String, at: u64, raw: Bytes, slot_order: u64, next_stamp: u64) -> Result[(), Error] {
+    let stamp: u64 = list.word_le(raw, slot_order)
     if stamp == 0 || stamp >= next_stamp {
         return Error(disk_fault(path, at, Malformed))
     }
@@ -827,22 +827,22 @@ fn check_list_pack(d: Dir, id: StoreId, seq: u64, next_stamp: u64, offsets: List
         order.compare(a, b)
     })
     let mut at = 72u64
-    let mut position = 0u64
+    let mut slot_order = 0u64
     let mut live = 0u64
     let mut checked_pack = pack_scan(2, next_stamp)
     while at < input.size {
         let frame = read_pack_frame(mut input, path, header.context, mut checked_pack, at, false)?
         let end = at + 16 + frame.size
-        if frame.stamp != None && position < list.len(reached) && reached[position] == at {
-            position += 1
+        if frame.stamp != None && slot_order < list.len(reached) && reached[slot_order] == at {
+            slot_order += 1
             live += frame.size
         }
-        if position < list.len(reached) && reached[position] < end {
-            return Error(disk_fault(path, reached[position], Malformed))
+        if slot_order < list.len(reached) && reached[slot_order] < end {
+            return Error(disk_fault(path, reached[slot_order], Malformed))
         }
         at = end
     }
-    if position != list.len(reached) || checked_pack.frames > 4294967295 {
+    if slot_order != list.len(reached) || checked_pack.frames > 4294967295 {
         return Error(disk_fault(path, at, Malformed))
     }
     let JournalInput(file: take handle, ..) = take input

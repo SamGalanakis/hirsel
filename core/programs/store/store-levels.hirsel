@@ -33,3 +33,20 @@ pub fn durable_at(mut db: Db, receipt: Ticket, requested: Level) -> Result[(), E
     }
     durable(mut db, receipt)
 }
+
+pub type Position {
+    store: StoreId,
+    branch: u32,
+    version: u64
+}
+
+pub fn position(mut db: Db, receipt: Ticket) -> Result[Position, Error] waits {
+    if !same(receipt.store, db.store) || receipt.open != open_number(db) {
+        return Error(Foreign)
+    }
+    let Journal(_, branch_id, committed_version) = receipt.mark else {
+        return Error(Missing("position"))
+    }
+    durable(mut db, receipt)?
+    Ok(Position(store: receipt.store, branch: branch_id, version: committed_version))
+}

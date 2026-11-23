@@ -117,11 +117,11 @@ pub fn law_read_liveness(c: Clock) -> bool waits {
         _ => return false
     }
     result.unwrap(create_table(mut db, spec("live", std.codec.key_u64(), std.codec.of_u64())))
-    let mut fresh = result.unwrap(table(mut db, "live", std.codec.key_u64(), std.codec.of_u64()))
-    result.unwrap(create_index(mut db, fresh, "bucket", code.describe(bucket), std.codec.key_u64()))
-    let fresh_index = result.unwrap(index(db, mut fresh, "bucket", code.describe(bucket), std.codec.key_u64()))
-    let fresh_shape = shape(fresh)
-    if fresh.id != 4 || fresh_index.id != 5 || !typed_put(mut db, fresh, 1, 20) {
+    let mut newer = result.unwrap(table(mut db, "live", std.codec.key_u64(), std.codec.of_u64()))
+    result.unwrap(create_index(mut db, newer, "bucket", code.describe(bucket), std.codec.key_u64()))
+    let fresh_index = result.unwrap(index(db, mut newer, "bucket", code.describe(bucket), std.codec.key_u64()))
+    let fresh_shape = shape(newer)
+    if newer.id != 4 || fresh_index.id != 5 || !typed_put(mut db, newer, 1, 20) {
         return false
     }
     let current = snapshot(db)
@@ -655,7 +655,7 @@ fn test_pinned_delete(c: Clock) -> Result[(), ()] waits {
 
 fn mark_is(t: Ticket, n: u64) -> bool {
     match t.mark {
-        Journal(m) => m == n,
+        Journal(m, _, _) => m == n,
         Cut(_) => false
     }
 }

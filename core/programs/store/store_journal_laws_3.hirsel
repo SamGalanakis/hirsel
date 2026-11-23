@@ -139,7 +139,7 @@ fn journal_fixture_call(mut db: Db, i: u64, large: bool, take revision: Option[B
     db.resident = result.unwrap(state_account(replay.state))
     db.file_end += size
     db.frame_seq += 1
-    let commit_ticket = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq))
+    let commit_ticket = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
     write_disk(mut db.disk, take raw, scoped fn(mut state: DiskState, take frame_bytes: Bytes) { state.pending = Some(take frame_bytes) })
     handoff(mut db)?
     Ok(commit_ticket)
@@ -224,7 +224,7 @@ fn put_run(mut db: Db, k: u64, v: u64) -> bool waits {
 
 fn journal_mark(t: Ticket) -> u64 {
     match t.mark {
-        Journal(m) => m,
+        Journal(m, _, _) => m,
         Cut(_) => 0
     }
 }
@@ -472,7 +472,7 @@ pub fn journal_law_step_stop(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool 
     if !typed_put(mut db, t, 1, 10) {
         return false
     }
-    let earlier = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq))
+    let earlier = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
     let before = db.heads[0].head
     let live = db.resident
     let frames = db.frame_seq

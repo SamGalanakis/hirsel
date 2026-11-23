@@ -1,0 +1,192 @@
+pub opaque type Authority = LogAuthority(Dir)
+
+pub fn log_authority(d: Dir) -> Authority {
+    LogAuthority(d)
+}
+
+pub opaque type Followers {
+    issued: u64
+}
+
+pub fn followers() -> Followers {
+    Followers(issued: 0)
+}
+
+type LogCapture: send {
+    store: StoreId,
+    state: State,
+    resident: u64
+}
+
+pub opaque type Follower {
+    open: u64,
+    directory: Dir,
+    tasks: Tasks,
+    clock: Clock,
+    ceiling: u64,
+    capture: LogCapture,
+    stopped: Option[StoreCapacity]
+}
+
+type LogFollowJob: send {
+    directory: Dir,
+    expect: Option[StoreId],
+    ceiling: u64,
+    result: Sender[Result[LogCapture, Error]]
+}
+
+fn log_follow_capture(d: Dir, expected: Option[StoreId], ceiling: u64) -> Result[LogCapture, Error] waits {
+    disk_io(host.sync_dir(d))?
+    let (take raw, id, take manifest) = read_only_manifest(d)?
+    check_expected_store(expected, id)?
+    if let Some(_) = manifest.claim {
+        return Error(Unsupported(1))
+    }
+    let replay = read_only_state(d, id, take manifest, true)?
+    let resident = journal_account(replay)?
+    over_ceiling(resident, ceiling)?
+    check_read_only_manifest(d, raw)?
+    let JournalReplay(state: take state, ..) = take replay
+    Ok(LogCapture(store: id, state: take state, resident))
+}
+
+fn log_follow_job(take job: LogFollowJob) waits {
+    let selected = log_follow_capture(job.directory, job.expect, job.ceiling)
+    let _ = channel.send(job.result, take selected)
+}
+
+fn log_follow_private(tasks: Tasks, d: Dir, expected: Option[StoreId], ceiling: u64) -> Result[LogCapture, Error] waits {
+    let (to, from): (Sender[Result[LogCapture, Error]], Receiver[Result[LogCapture, Error]]) = channel.new(1)
+    let job = LogFollowJob(directory: d, expect: expected, ceiling, result: take to)
+    let first = task.try_spawn(tasks, bytes 18446744073709551327u64, take job, log_follow_job)
+    let worker = match take first {
+        Ok(take running) => take running,
+        Error((problem, take returned)) => {
+            if problem.available < 288 {
+                return Error(Full(Allocation(problem)))
+            }
+            task.spawn(tasks, bytes (problem.available - 288), take returned, log_follow_job)
+        },
+    }
+    match task.join(take worker) {
+        Ok(()) => (),
+        Error(Failed(causes)) => return Error(match raised_capacity(causes) {
+            Some(problem) => Full(Allocation(problem)),
+            None => Io(Closed),
+        }),
+        Error(Cancelled(_)) => return Error(Io(Closed)),
+    }
+    match channel.receive(from) {
+        Ok(take answer) => take answer,
+        Error(_) => Error(Io(Closed)),
+    }
+}
+
+pub fn follower(mut source: Followers, tasks: Tasks, authority: Authority, c: Clock, o: Options) -> Result[Follower, Error] waits {
+    let minted = history_next_id(source.issued)?
+    let LogAuthority(d) = authority
+    let captured = log_follow_private(tasks, d, o.expect, o.resident_limit)?
+    source.issued = minted
+    Ok(Follower(open: HISTORY_OPEN_LIMIT | minted, directory: d, tasks, clock: c, ceiling: o.resident_limit, capture: take captured, stopped: None))
+}
+
+pub fn follower_table[K, V](f: Follower, name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[Table[K, V], Error] {
+    let copied_name = string.from(name)
+    match catalog_handle(f.capture.store, f.capture.state.tips[0].roots.catalog, false, take copied_name, take key, take value) {
+        Error(Schema(n)) if n != 0 => Error(Missing("schema")),
+        other => take other,
+    }
+}
+
+pub fn follower_branch(f: Follower, name: String) -> Option[Branch] {
+    for tip in f.capture.state.tips {
+        if tip.name == name {
+            return Some(Branch(store: f.capture.store, id: tip.id))
+        }
+    }
+    None
+}
+
+fn follower_tip(f: Follower, b: Branch) -> Result[View[Tip], Error] in f {
+    if !same(f.capture.store, b.store) {
+        return Error(Foreign)
+    }
+    for i in 0u64 .. list.len(f.capture.state.tips) {
+        let tip = view f.capture.state.tips[i]
+        if tip.id == b.id {
+            return Ok(tip)
+        }
+    }
+    if b.id < f.capture.state.next_branch {
+        Error(Gone(b.id))
+    } else {
+        Error(Unseen(b.id))
+    }
+}
+
+pub fn snapshot_follower(f: Follower, b: Branch) -> Result[Snapshot, Error] {
+    let tip = follower_tip(f, b)?
+    Ok(Snapshot(store: b.store, open: f.open, branch: b.id, head: tip.head, roots: share_roots(tip.roots)))
+}
+
+pub fn applied(f: Follower, b: Branch) -> Result[Position, Error] {
+    let tip = follower_tip(f, b)?
+    Ok(Position(store: b.store, branch: b.id, version: tip.head))
+}
+
+fn follower_main(f: Follower) -> Branch {
+    Branch(store: f.capture.store, id: 0)
+}
+
+pub fn catch_up(mut f: Follower, deadline_ns: u64) -> Result[Position, Error] waits {
+    if let Some(problem) = f.stopped {
+        return Error(Full(problem))
+    }
+    let previous = applied(f, follower_main(f))?
+    if host.mono_ns(f.clock) >= deadline_ns {
+        return Error(Behind(previous))
+    }
+    let update = log_follow_private(f.tasks, f.directory, Some(f.capture.store), f.ceiling - f.capture.resident)
+    let newer = match take update {
+        Ok(take minted) => take minted,
+        Error(Full(Resident(c))) => {
+            let actual = Capacity(requested: int.saturating_add(f.capture.resident, c.requested), available: f.ceiling)
+            f.stopped = Some(Resident(actual))
+            return Error(Full(Resident(actual)))
+        },
+        Error(take problem) => return Error(take problem),
+    }
+    if host.mono_ns(f.clock) >= deadline_ns {
+        return Error(Behind(previous))
+    }
+    if newer.state.tips[0].head < previous.version {
+        return Error(Diverged(0))
+    }
+    f.capture = take newer
+    applied(f, follower_main(f))
+}
+
+pub fn fresh(mut f: Follower, deadline_ns: u64) -> Result[Snapshot, Error] waits {
+    let _ = catch_up(mut f, deadline_ns)?
+    snapshot_follower(f, follower_main(f))
+}
+
+pub fn at_least(mut f: Follower, p: Position, deadline_ns: u64) -> Result[Snapshot, Error] waits {
+    let b = Branch(store: p.store, id: p.branch)
+    match applied(f, b) {
+        Ok(current) if current.version >= p.version => return snapshot_follower(f, b),
+        Error(Unseen(_)) => (),
+        Error(take problem) => return Error(take problem),
+        _ => (),
+    }
+    // A log follower requires writer exclusion for its life.
+    host.sleep_until(f.clock, deadline_ns)
+    let current = applied(f, b)?
+    Error(Behind(current))
+}
+
+pub fn follower_index[J, K, V](f: Follower, t: Table[K, V], name: String, by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J]) -> Result[Index[J, K, V], Error] {
+    let catalog = view f.capture.state.tips[0].roots.catalog
+    let (take catalog_key, take record) = read_catalog_index(f.capture.store, catalog, t, name, by, key)?
+    catalog_index_handle(catalog, t, record, take catalog_key, take key)
+}

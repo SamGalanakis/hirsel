@@ -17,8 +17,8 @@ pub fn law_drop_recreate(c: Clock) -> bool waits {
         return false
     }
     result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
-    let fresh = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
-    if fresh.id != 2 {
+    let newer = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    if newer.id != 2 {
         return false
     }
     // K2 / runner p17 step4a: the old H's Shape reads a recreated, empty
@@ -34,16 +34,16 @@ pub fn law_drop_recreate(c: Clock) -> bool waits {
         Ok(Aborted(Undone(value: Stale(1), ticket: None))) => {},
         _ => return false
     }
-    if typed_value(snapshot(db), shape(fresh), 1) != 0 || typed_value(held, sh, 1) != 10 {
+    if typed_value(snapshot(db), shape(newer), 1) != 0 || typed_value(held, sh, 1) != 10 {
         return false
     }
-    if !typed_put(mut db, fresh, 1, 20) {
+    if !typed_put(mut db, newer, 1, 20) {
         return false
     }
     let second_saved = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     let second_held = snapshot(db)
     let second_shape = shape(second_saved)
-    result.unwrap(drop_table(mut db, take fresh))
+    result.unwrap(drop_table(mut db, take newer))
     result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
     let third = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     if third.id != 3 {

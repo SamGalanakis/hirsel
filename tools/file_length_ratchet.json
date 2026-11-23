@@ -27,8 +27,9 @@
     "lines": 1409
   },
   "core/programs/runner/runner.hirsel": {
-    "lines": 10184,
-    "reason": "release-publish-1912"
+    "lines": 8058,
+    "raise_revision": 1,
+    "reason": "m2-authority-1980"
   },
   "core/programs/runner/runner_calls.hirsel": {
     "lines": 2507
@@ -43,8 +44,9 @@
     "lines": 2982
   },
   "core/programs/store/store.hirsel": {
-    "lines": 19102,
-    "reason": "store-sync-1906"
+    "lines": 7883,
+    "raise_revision": 1,
+    "reason": "m2-authority-1980"
   },
   "core/std/char.hirsel": {
     "lines": 4741

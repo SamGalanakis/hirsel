@@ -554,7 +554,7 @@ fn disk_test_read_only_snapshot(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
     if !typed_put(mut db, opened_rows, 7, 70) {
         fail("could not commit first row")
     }
-    let last = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq))
+    let last = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
     durable(mut db, last)?
     let saved = open_read_only(child, defaults())?
     let rows = read_only_table(saved, "rows", std.codec.key_u64(), std.codec.of_u64())?
@@ -566,8 +566,8 @@ fn disk_test_read_only_snapshot(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
     }
     checkpoint(mut db)?
     close(take db)?
-    let fresh = open_read_only(child, defaults())?
-    if version(saved.snapshot) != 2 || read_only_get(saved, rows, 7)? != Some(70u64) || version(fresh.snapshot) != 3 || read_only_get(fresh, rows, 7)? != Some(71u64) {
+    let newer = open_read_only(child, defaults())?
+    if version(saved.snapshot) != 2 || read_only_get(saved, rows, 7)? != Some(70u64) || version(newer.snapshot) != 3 || read_only_get(newer, rows, 7)? != Some(71u64) {
         fail("read-only reads changed after the writer replaced the row")
     }
     Ok(())

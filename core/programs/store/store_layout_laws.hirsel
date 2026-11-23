@@ -215,7 +215,7 @@ fn layout_commits(mut db: Db, held: bool) -> bool waits {
     for _ in 0u64 .. 400 {
         list.push(mut steps, 3u8)
     }
-    let mut fresh = 5000u64
+    let mut newer = 5000u64
     for step in steps {
         if held && step == 0u8 {
             let first = snapshot(db)
@@ -241,8 +241,8 @@ fn layout_commits(mut db: Db, held: bool) -> bool waits {
                         k += 7
                     }
                 },
-                3u8 => put(mut tx, t, fresh, fresh)?,
-                4u8 => put(mut tx, t, fresh - 4000, fresh)?,
+                3u8 => put(mut tx, t, newer, newer)?,
+                4u8 => put(mut tx, t, newer - 4000, newer)?,
                 _ => put(mut tx, big, 2, "a longer small value")?,
             }
             Ok(())
@@ -254,7 +254,7 @@ fn layout_commits(mut db: Db, held: bool) -> bool waits {
             Refused(_) => fail("layout transaction refused"),
             _ => fail("layout transaction failed"),
         }
-        fresh += 1
+        newer += 1
     }
     true
 }

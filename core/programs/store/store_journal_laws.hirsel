@@ -600,7 +600,7 @@ pub fn journal_law_recorded_fork(d: Dir, c: Clock, r: Random, tasks: Tasks) -> b
             return false
         }
     }
-    let last = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq))
+    let last = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
     result.unwrap(durable(mut db, last))
     if disk_state(db).journaled != 100 || db.heads[0].head != 101 {
         return false
@@ -732,7 +732,7 @@ fn journal_test_fork_cost(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(
     if !typed_put(mut db, rows, 0, 2) || !typed_put(mut db, rows, 0, 3) {
         return Error(Foreign)
     }
-    let preceding = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq))
+    let preceding = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
     durable(mut db, preceding)?
     let before = accounts(db)
     let old_generation = db.checkpointed
@@ -768,8 +768,8 @@ fn fork_history(mut db: Db) -> Result[Branch, Error] waits {
     let mut value: Bytes = list.with_capacity(994)
     list.fill(mut value, 994, 0u8)
     let first = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
-        for position in 0u64 .. 6 {
-            put(mut tx, rows, 6 - position, value)?
+        for slot_order in 0u64 .. 6 {
+            put(mut tx, rows, 6 - slot_order, value)?
         }
         Ok(())
     })?
@@ -908,7 +908,7 @@ fn journal_test_fork_identity(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
     if historical.id != 2 || again.heads[1].parent != 1 || again.heads[1].forked_at != 0 {
         return Error(Foreign)
     }
-    if let Journal(_) = cut.mark {
+    if let Journal(_, _, _) = cut.mark {
         return Error(Foreign)
     }
     close(take again)?

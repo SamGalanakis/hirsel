@@ -20,6 +20,7 @@ std = { major = 1 }
 "store-reclaim.hirsel" = "store"
 "store-register.hirsel" = "store"
 "store-levels.hirsel" = "store"
+"store-followers.hirsel" = "store"
 "store-layout.hirsel" = "store"
 "store-reexec.hirsel" = "store"
 "store-tx.hirsel" = "store"

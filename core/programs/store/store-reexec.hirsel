@@ -34,7 +34,7 @@ fn recorded_commit(db: Db, b: Branch, wanted: u64) -> Result[Option[JournalCommi
     // Z1: skip the barrier exactly when every frame this Db has sent is acked,
     // so it is written (X1 step 0's condition); never compare a version with
     // `journaled`, which counts frames.
-    if !covered(db, Journal(db.frame_seq)) {
+    if !covered(db, Journal(db.frame_seq, 0, 0)) {
         let _ = channel.send(state.journal, Barrier)
         match result.unwrap(channel.receive(state.written)) {
             Written => (),
@@ -248,9 +248,9 @@ fn same_writes(rows: DataRows, committed: List[JournalOp]) -> Result[bool, Error
         return Ok(false)
     }
     let order = capacity(data_order(rows))?
-    for position in 0u64 .. rows.count {
-        let op = ordered_row(rows, order, position)
-        let other = view committed[position]
+    for slot_order in 0u64 .. rows.count {
+        let op = ordered_row(rows, order, slot_order)
+        let other = view committed[slot_order]
         if op.key != other.key {
             return Ok(false)
         }

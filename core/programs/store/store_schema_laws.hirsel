@@ -942,11 +942,11 @@ fn typed_foreign_at(c: Clock, other_id: StoreId) -> bool waits {
     if !is_foreign(index(b, mut t, "i", code.describe(bucket), std.codec.key_u64())) {
         return false
     }
-    let commit_ticket = Ticket(store: a.store, open: 0, mark: Journal(0))
+    let commit_ticket = Ticket(store: a.store, open: 0, mark: Journal(0, 0, 0))
     if !is_foreign(durable(mut b, commit_ticket)) {
         return false
     }
-    let stale_open = Ticket(store: b.store, open: 9, mark: Journal(0))
+    let stale_open = Ticket(store: b.store, open: 9, mark: Journal(0, 0, 0))
     if !is_foreign(durable(mut b, stale_open)) {
         return false
     }

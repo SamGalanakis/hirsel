@@ -571,6 +571,74 @@ reconciles it.
 refused with the quota it exceeds. The host never evicts a live group to admit another
 (RUNNER-SPEC §13.4, "No eviction").
 
+### The operator socket
+
+The operator talks to the platform host over `STATE/operator.sock`, a filesystem Unix
+stream in the operator-owned state directory (mode 0700; the socket node 0600). It is
+separate from `STATE/launcher.sock`, which stays private to the host: a deploy client never
+opens a launcher session, because a new connection there replaces the session and drops its
+fence. The launcher binds the passive operator listener under its lifetime lock and passes
+it only to the host. The host alone accepts on it, and before it decodes a byte it checks the
+peer's effective UID against the configured operator UID (Linux `SO_PEERCRED`). A
+peer-supplied name, PID, tenant or request ID conveys no authority. No tenant receives either
+endpoint or its directory. (The host's handling is the `operator` module and
+`platform.asked`/`platform.detach`; the accept task over the inherited listener is not yet
+built.)
+
+One connection carries one exchange. Each frame is a little-endian u32 byte length followed
+by exactly one value-codec sum; the length excludes itself and is at most 16 MiB. Tags are
+u32 in each direction's own namespace, in the declared order of `operator.Ask` and
+`operator.Answer`. D is a client-generated random 16-byte request ID (Bytes), A a
+host-generated `Attempt(hi, lo)`, G a `Group(name, incarnation)`, H 32 bytes and I a 16-byte
+recording ID. A wrong length, an unknown tag, trailing bytes or an out-of-phase frame is
+answered `Error(Protocol)` and closes only that exchange.
+
+| Operator → host | Payload and rule |
+|---|---|
+| 0 Begin(D, G, input, added, foreign, exec) | `input` is `launcher.Input`: 0 Attested(bytes), 1 Publication(H), 2 Source(bytes). `added` approves an added grant. `foreign` and `exec` are the sorted, duplicate-free Foreign definitions and Exec requests the operator approves. Source publishing is unbuilt and refused `Unsupported`. |
+| 1 Data(D, A, bytes) | One nonempty chunk of the admission byte stream, only on the connection that owns D's upload under A. |
+| 2 EndInput(D, A) | Ends that stream. A publication needs neither Data nor EndInput. |
+| 3 Confirm(D, A, displayHash) | Confirms the exact display the client checked, printed and flushed: displayHash is SHA-256 over the display's UTF-8 bytes. Any other hash is `Error(Denied)`. |
+| 4 Status(D) | Returns State, or `Error(UnknownRequest)`. Does no work. |
+| 5 ResolvePin(I) | Returns Pin, looked up at the host's wall clock in Unix seconds, or `Error(Store)`. |
+| 6 LookupGroup(name) | Returns GroupInfo(G) for the registered incarnation, or `Error(UnknownGroup)`. |
+
+| Host → operator | Payload and rule |
+|---|---|
+| 0 State(D, G, input, phase) | A committed snapshot. Phase tags 0 AwaitInput(A), 1 Admitting(A), 2 AwaitConfirm(A), 3 Assembling(A), 4 Preparing(A), 5 Pending(A, v), 6 Undecided(A, v, reason), 7 Installed(v, assembly, report), 8 Failed(class, detail, report). The last two are terminal and end the exchange. A known D keeps the same G and input for its whole life. |
+| 1 Need(D, A, keys, last) | One of the launcher's ordered parts of the missing set (`List[Wanted]`, bool). |
+| 2 Display(D, A, R, text) | The exact Foreign and Exec text to confirm, bound to the verified R. No child runs before it is confirmed. |
+| 3 Pin(resolved) | 0 Found(assembly) or 1 Gone. |
+| 4 Error(class, detail) | Class tags 0 Protocol, 1 Denied, 2 UnknownRequest, 3 UnknownGroup, 4 Conflict, 5 Busy, 6 Full, 7 Invalid, 8 Unassembled, 9 Store, 10 Unsupported, 11 NotInstalledAfterRecovery. Failed uses the same classes. An exchange error never changes another request's outcome. |
+| 5 GroupInfo(G) | A group lookup's result. |
+| 6 Part(total, offset, bytes) | One in-order chunk of an encoded reply larger than one frame, from offset zero, contiguous, ending exactly at total. |
+
+A report is (fetchNs, assembleNs, pause, preview): two `Option[u64]`, a pause (0 NotStarted,
+1 AwaitWrite, 2 Measured(ns), 3 MeasurementLost, 4 StartFailed(detail)) and `List[String]`.
+
+**Durable identity.** The catalog keeps one `requests` row per D: its canonical Begin bytes,
+G, input, current attempt, admission deadline and, once decided, its terminal phase, and one
+`active` row per group naming the request that holds it. The first transaction for a new D
+binds it to its Begin bytes and allocates A from a durable counter before any launcher
+request. A Begin whose D is known is looked up before any wake or admission. Different bytes
+for that D are `Error(Conflict)`. Identical bytes return the request's current state and may
+attach to its work: while another connection owns it, this one gets the snapshot and closes.
+Each terminal deploy row and its request's terminal phase are written in one transaction, so a
+retried D after any loss of the host reads the recorded outcome and admits nothing. Terminal
+records outlive later deploys and the group's removal (removal fails the group's open
+request); they are history, never collection roots.
+
+**The disconnect boundary.** Before the input is complete or a required confirmation
+arrives, losing the owning connection makes progress impossible. The host sends
+`Release(A)`, drops the admission, and keeps D waiting for its input. An identical Begin
+takes the upload again under a fresh A and repeats admission and Need from byte zero, under
+the request's original deadline (600 s after its first Begin); a request that reaches its
+deadline without input fails durably `Invalid`. A complete input goes on without its
+connection: EOF only detaches the observer, and a later Begin or Status reads the outcome. A
+new launcher session (`Hello`) cancels every running admission; its owner is told
+`Error(Busy)` and resends the same Begin. Admission refusals (overlap memory, an unapproved
+added grant) and `AdmissionFailed` are D's durable `Failed`.
+
 ### The launcher
 
 The **launcher** is a thin Rust program. It holds no record of its own that a decision reads

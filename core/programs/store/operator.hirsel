@@ -1,0 +1,110 @@
+// Module operator (package store): the operator wire on STATE/operator.sock (docs/spec/
+// launch.md "The operator socket"). One connection carries one exchange: a Begin and the
+// deploy it subscribes to, or one Status, ResolvePin or LookupGroup and its one reply.
+//
+// Each frame is a u32 little-endian length (at most 16 MiB, `MAX_FRAME`), then one
+// value-codec `Ask` (operator to host) or `Answer` (host to operator). Declared variant
+// order fixes the u32 wire tags in each direction; the Rust CLI
+// (crates/hirsel-core-driver/src/operator.rs) mirrors these types, and operator_wire.hirsel
+// holds the byte vectors both sides check.
+//
+// D is the client's random 16-byte request ID, A a host-generated launcher.Attempt, and a
+// hash H is 32 bytes. A known D names the same group and input for its whole life.
+pub const MAX_FRAME: u64 = 16777216u64
+
+// One operator request. Tags: 0 Begin, 1 Data, 2 EndInput, 3 Confirm, 4 Status,
+// 5 ResolvePin, 6 LookupGroup.
+pub type Ask: codec + send =
+// Begin(D, group, input, grant_added, foreign, exec): deploy `input` to the group's current
+// incarnation, approving an added grant and exactly these sorted Foreign and Exec lines.
+BeginAsk(Bytes, launcher.Group, launcher.Input, bool, List[String], List[String])
+// One nonempty chunk of an attested input's admission bytes, on the connection that owns A.
+    | DataAsk(Bytes, launcher.Attempt, Bytes)
+// The attested input is complete.
+    | EndAsk(Bytes, launcher.Attempt)
+// The operator checked, printed and flushed the display whose UTF-8 SHA-256 this is.
+    | ConfirmAsk(Bytes, launcher.Attempt, Bytes)
+// D's committed state, or UnknownRequest. Does no work.
+    | StatusAsk(Bytes)
+// The pin of a 16-byte recording ID at the host's wall clock.
+    | ResolveAsk(Bytes)
+// The registered incarnation of a group name.
+    | LookupAsk(String)
+
+// What a pin lookup finds: the assembly a recording ran, or Gone for an absent, expired
+// or removed pin. A store error is an error, never Gone.
+pub type Resolved: codec + send = Found(Bytes) | Gone
+
+// How a write pause is known in an Installed report.
+pub type Pause: codec + send = NotStarted | AwaitWrite | Measured(u64) | MeasurementLost | StartFailed(String)
+
+// A deploy's timing and preview: fetch and assembly nanoseconds, the write pause, and the
+// preview lines.
+pub type Report: codec + send {
+    fetch_ns: Option[u64],
+    assemble_ns: Option[u64],
+    pause: Pause,
+    preview: List[String]
+}
+
+// The error and failure classes. Tags 0 Protocol, 1 Denied, 2 UnknownRequest,
+// 3 UnknownGroup, 4 Conflict, 5 Busy, 6 Full, 7 Invalid, 8 Unassembled, 9 Store,
+// 10 Unsupported, 11 NotInstalledAfterRecovery.
+pub type Class: codec + send = ProtocolClass | DeniedClass | UnknownRequestClass | UnknownGroupClass | ConflictClass | BusyClass | FullClass | InvalidClass | UnassembledClass | StoreClass | UnsupportedClass | NotInstalledClass
+
+// Where a request stands. Tags 0 AwaitInput(A), 1 Admitting(A), 2 AwaitConfirm(A),
+// 3 Assembling(A), 4 Preparing(A), 5 Pending(A, v), 6 Undecided(A, v, reason),
+// 7 Installed(v, assembly, report), 8 Failed(class, detail, report). The last two are
+// terminal.
+pub type Phase: codec + send = AwaitInput(launcher.Attempt) | AdmittingPhase(launcher.Attempt) | AwaitConfirm(launcher.Attempt) | AssemblingPhase(launcher.Attempt) | PreparingPhase(launcher.Attempt) | PendingPhase(launcher.Attempt, u64) | UndecidedPhase(launcher.Attempt, u64, String) | InstalledPhase(u64, Bytes, Report) | FailedPhase(Class, String, Report)
+
+// One host reply. Tags: 0 State, 1 Need, 2 Display, 3 Pin, 4 Error, 5 GroupInfo, 6 Part.
+pub type Answer: codec + send =
+// State(D, group, input, phase): a committed snapshot.
+StateAnswer(Bytes, launcher.Group, launcher.Input, Phase)
+// Need(D, A, keys, last): one part of the verifier's missing set.
+    | NeedAnswer(Bytes, launcher.Attempt, List[launcher.Wanted], bool)
+// Display(D, A, R, text): the exact Foreign and Exec text to confirm for verified R.
+    | DisplayAnswer(Bytes, launcher.Attempt, Bytes, String)
+    | PinAnswer(Resolved)
+    | ErrorAnswer(Class, String)
+    | GroupAnswer(launcher.Group)
+// Part(total, offset, bytes): one in-order chunk of an encoded reply larger than a frame.
+    | PartAnswer(u64, u64, Bytes)
+
+pub fn terminal(p: Phase) -> bool {
+    match p {
+        InstalledPhase(_, _, _) => true,
+        FailedPhase(_, _, _) => true,
+        _ => false,
+    }
+}
+
+pub fn no_report() -> Report {
+    Report(fetch_ns: None, assemble_ns: None, pause: NotStarted, preview: list.new())
+}
+
+pub fn decode_ask(body: Bytes) -> Option[Ask] {
+    let codec: std.codec.Codec[Ask] = std.codec.of()
+    match std.codec.decode(codec, body) {
+        Ok(take a) => Some(take a),
+        _ => None
+    }
+}
+
+pub fn encode_answer(a: Answer) -> Option[Bytes] {
+    let codec: std.codec.Codec[Answer] = std.codec.of()
+    let mut out: Bytes = list.new()
+    if let Error(_) = std.codec.encode(codec, a, mut out) {
+        return None
+    }
+    Some(out)
+}
+
+// The canonical bytes of a Begin: what a later Begin with the same D must equal.
+pub fn ask_bytes(a: Ask) -> Bytes {
+    let codec: std.codec.Codec[Ask] = std.codec.of()
+    let mut out: Bytes = list.new()
+    let _ = std.codec.encode(codec, a, mut out)
+    out
+}

@@ -27,6 +27,7 @@ std = { major = 1 }
 "launcher.hirsel" = "launcher"
 "platform.hirsel" = "platform"
 "platform_main.hirsel" = "platform_main"
+"operator.hirsel" = "operator"
 
 [program]
 module = "main"

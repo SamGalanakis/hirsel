@@ -29,7 +29,14 @@ type Rig {
     sent: List[launcher.Launch],
     // Every request the host sent, in order.
     asked: List[launcher.Request],
-    d: Option[Driver]
+    d: Option[Driver],
+    // The attempt the host gave the latest Begin, its request ID and its connection.
+    a: launcher.Attempt,
+    req: Bytes,
+    conn: u64,
+    // Operator connections opened, and every answer the host sent on them.
+    conns: u64,
+    got: List[Sent]
 }
 
 fn uncontained() -> launcher.Bindings {
@@ -85,15 +92,179 @@ fn apply(mut r: Rig, take input: Input) -> List[launcher.Request] waits {
     match take held {
         Some(take driven) => {
             let mut d = take driven
-            let out = step(mut r.h, mut d, take input, r.now)
+            let mut out = step(mut r.h, mut d, take input, r.now)
             r.d = Some(take d)
+            hang_ups(mut r, mut out)
             take out
         },
-        None => match take input {
-            Got(take e) => event(mut r.h, take e, r.now),
-            _ => tick(mut r.h, r.now),
+        None => {
+            let mut out = match take input {
+                Got(take e) => event(mut r.h, take e, r.now),
+                _ => tick(mut r.h, r.now),
+            }
+            hang_ups(mut r, mut out)
+            take out
+        },
+    }
+}
+
+// Collects the host's operator answers; each connection an answer closed is closed, as the
+// transport does, and the host's detach requests join `out`.
+fn hang_ups(mut r: Rig, mut out: List[launcher.Request]) {
+    for s in outgoing(mut r.h) {
+        list.push(mut r.got, clone(s))
+        if s.close {
+            for q in detach(mut r.h, s.conn) {
+                list.push(mut out, clone(q))
+            }
         }
     }
+}
+
+// A 16-byte request ID numbered n.
+fn request_id(n: u64) -> Bytes {
+    let mut b: Bytes = list.with_capacity(16u64)
+    for i in 0u64 .. 16u64 {
+        let x: u64 = if i < 8u64 {
+            (n >> (8u64 * i)) & 255u64
+        } else {
+            0u64
+        }
+        list.push(mut b, int.narrow(x))
+    }
+    b
+}
+
+// Sends one operator frame on connection `conn` and runs what the host decided.
+fn send(mut r: Rig, conn: u64, a: operator.Ask) waits {
+    let mut reqs = asked(mut r.h, conn, operator.ask_bytes(a), r.now)
+    hang_ups(mut r, mut reqs)
+    pump(mut r, take reqs)
+}
+
+// The operator closes connection `conn` early.
+fn hang_up(mut r: Rig, conn: u64) waits {
+    let reqs = detach(mut r.h, conn)
+    pump(mut r, take reqs)
+}
+
+// The answers connection `conn` received, in order.
+fn got_on(r: Rig, conn: u64) -> List[operator.Answer] {
+    let mut out: List[operator.Answer] = list.new()
+    for s in r.got {
+        if s.conn == conn {
+            list.push(mut out, clone(s.answer))
+        }
+    }
+    out
+}
+
+fn attempt_of(p: operator.Phase) -> Option[launcher.Attempt] {
+    match p {
+        AwaitInput(a) => Some(a),
+        AdmittingPhase(a) => Some(a),
+        AwaitConfirm(a) => Some(a),
+        AssemblingPhase(a) => Some(a),
+        PreparingPhase(a) => Some(a),
+        PendingPhase(a, _) => Some(a),
+        UndecidedPhase(a, _, _) => Some(a),
+        _ => None,
+    }
+}
+
+// The last phase connection `conn` was sent.
+fn phase_on(r: Rig, conn: u64) -> Option[operator.Phase] {
+    let mut out: Option[operator.Phase] = None
+    for x in got_on(r, conn) {
+        if let StateAnswer(_, _, _, p) = x {
+            out = Some(clone(p))
+        }
+    }
+    out
+}
+
+// The error connection `conn` was sent, if any.
+fn error_on(r: Rig, conn: u64) -> Option[operator.Class] {
+    let mut out: Option[operator.Class] = None
+    for x in got_on(r, conn) {
+        if let ErrorAnswer(c, _) = x {
+            out = Some(c)
+        }
+    }
+    out
+}
+
+// Begins request `d` deploying `input` to group g on a new connection; the rig's attempt
+// becomes the one the host assigned. Gives the connection.
+fn begin_with(mut r: Rig, d: Bytes, input: launcher.Input, grant_added: bool) -> u64 waits {
+    r.conns += 1u64
+    let conn = r.conns
+    let incarnation = match group_row(r.h, "g") {
+        Ok(Some(g)) => g.incarnation,
+        _ => 0u64,
+    }
+    send(mut r, conn, BeginAsk(clone(d), group_of("g", incarnation), clone(input), grant_added, list.new(), list.new()))
+    if let Some(p) = phase_on(r, conn) {
+        if let Some(a) = attempt_of(p) {
+            r.a = a
+        }
+    }
+    r.req = clone(d)
+    r.conn = conn
+    conn
+}
+
+// A new request deploying NEW, attested.
+fn begin_new(mut r: Rig, grant_added: bool) -> u64 waits {
+    let d = request_id(r.conns + 1u64)
+    begin_with(mut r, d, Attested(image_two()), grant_added)
+}
+
+// Status(d) on a new connection.
+fn status_of(mut r: Rig, d: Bytes) -> Option[operator.Phase] waits {
+    r.conns += 1u64
+    let conn = r.conns
+    send(mut r, conn, StatusAsk(clone(d)))
+    phase_on(r, conn)
+}
+
+fn class_bytes(c: operator.Class) -> Bytes {
+    let codec: std.codec.Codec[operator.Class] = std.codec.of()
+    let mut out: Bytes = list.new()
+    let _ = std.codec.encode(codec, c, mut out)
+    out
+}
+
+fn is_failed(p: Option[operator.Phase], class: operator.Class) -> bool {
+    match p {
+        Some(FailedPhase(c, _, _)) => class_bytes(c) == class_bytes(class),
+        _ => false
+    }
+}
+
+fn errored(r: Rig, conn: u64, class: operator.Class) -> bool {
+    match error_on(r, conn) {
+        Some(c) => class_bytes(c) == class_bytes(class),
+        None => false
+    }
+}
+
+fn is_installed(p: Option[operator.Phase]) -> bool {
+    match p {
+        Some(InstalledPhase(_, _, _)) => true,
+        _ => false
+    }
+}
+
+// How many Admit requests the rig's launcher was sent.
+fn admits(r: Rig) -> u64 {
+    let mut n = 0u64
+    for q in r.asked {
+        if let Admit(_, _, _, _) = q {
+            n += 1u64
+        }
+    }
+    n
 }
 
 // What the rig's driver has armed.
@@ -124,7 +295,7 @@ fn feed(mut r: Rig, take events: List[launcher.Event]) waits {
 
 fn rig_on(take db: store.Db, f: launcher.Fake, max_places: u64, now: Now) -> Rig waits {
     let (h, hello) = must(open(take db, Config(max_places: max_places, idle_ms: 1000u64)), "open")
-    let mut r = Rig(h: take h, f: clone(f), now: now, starts: list.new(), sent: list.new(), asked: list.new(), d: None)
+    let mut r = Rig(h: take h, f: clone(f), now: now, starts: list.new(), sent: list.new(), asked: list.new(), d: None, a: launcher.Attempt(hi: 0u64, lo: 0u64), req: list.new(), conn: 0u64, conns: 0u64, got: list.new())
     pump(mut r, take hello)
     r
 }
@@ -135,8 +306,12 @@ fn rig(c: Clock, rnd: Random, max_places: u64) -> Rig waits {
 
 // Ends the host process: only its store and the launcher survive.
 fn restart(take r: Rig, max_places: u64) -> Rig waits {
-    let Rig(h: take h, f: take f, now: now, starts: _, sent: _, asked: _, d: _) = take r
-    rig_on(close(take h), f, max_places, now)
+    let Rig(h: take h, f: take f, now: now, starts: _, sent: _, asked: _, d: _, a: a, req: take req, conn: _, conns: conns, got: _) = take r
+    let mut n = rig_on(close(take h), f, max_places, now)
+    n.a = a
+    n.req = take req
+    n.conns = conns
+    n
 }
 
 fn add(mut r: Rig, name: String, tenant: String) waits {
@@ -468,10 +643,6 @@ fn wake_only_clean_stop(c: Clock, rnd: Random, tasks: Tasks) -> Result[(), ()] w
     Ok(())
 }
 
-fn an_attempt() -> launcher.Attempt {
-    launcher.Attempt(hi: 1u64, lo: 2u64)
-}
-
 // OLD answers the cutover the launcher forwarded to it.
 fn answer(mut r: Rig, ch: launcher.Child, take said: runner.HostReply) waits {
     let events = launcher.cutover_reply(mut r.f, ch, take said)
@@ -480,8 +651,12 @@ fn answer(mut r: Rig, ch: launcher.Child, take said: runner.HostReply) waits {
 
 // Ends the host process and the launcher: only the catalog survives.
 fn restart_bare(take r: Rig, max_places: u64) -> Rig waits {
-    let Rig(h: take h, f: _, now: now, starts: _, sent: _, asked: _, d: _) = take r
-    rig_on(close(take h), launcher.fake(), max_places, now)
+    let Rig(h: take h, f: _, now: now, starts: _, sent: _, asked: _, d: _, a: a, req: take req, conn: _, conns: conns, got: _) = take r
+    let mut n = rig_on(close(take h), launcher.fake(), max_places, now)
+    n.a = a
+    n.req = take req
+    n.conns = conns
+    n
 }
 
 // NEW's release, as its preview reports it and as a store at NEW's activation 2 reports it.
@@ -544,17 +719,16 @@ fn summary_of(root_limit: u64, old_root_limit: u64, grants_added: bool) -> launc
 // The host opens group g's admission of NEW, attested, and the verifier admits it with
 // `summary` and the approval text `display`.
 fn admit_new(mut r: Rig, take summary: launcher.Summary, display: String, grant_added: bool) waits {
-    let go = must(deploy(mut r.h, "g", an_attempt(), Attested(image_two()), list.new(), list.new(), grant_added), "deploy")
-    pump(mut r, take go)
+    let _ = begin_new(mut r, grant_added)
     let mut events: List[launcher.Event] = list.new()
-    list.push(mut events, Admitted(an_attempt(), image_two(), take summary, string.from(display)))
+    list.push(mut events, Admitted(r.a, image_two(), take summary, string.from(display)))
     feed(mut r, take events)
 }
 
 // The launcher assembled NEW (assembly and image both image_two) and holds its reservation.
 fn assembled_new(mut r: Rig) waits {
     let mut events: List[launcher.Event] = list.new()
-    list.push(mut events, Assembled(an_attempt(), image_two(), image_two(), 5u64, 6u64))
+    list.push(mut events, Assembled(r.a, image_two(), image_two(), 5u64, 6u64))
     feed(mut r, take events)
 }
 
@@ -564,8 +738,9 @@ fn assembled_new(mut r: Rig) waits {
 fn to_export(mut r: Rig, old: launcher.Child, take preview: Bytes) waits {
     admit_new(mut r, summary_of(1u64, 1u64, false), "", false)
     assembled_new(mut r)
-    helper_answers(mut r, helper_child(old, DescribeMode(an_attempt())), describe_answer())
-    helper_answers(mut r, helper_child(old, PreviewMode(an_attempt(), list.new())), take preview)
+    let a = r.a
+    helper_answers(mut r, helper_child(old, DescribeMode(a)), describe_answer())
+    helper_answers(mut r, helper_child(old, PreviewMode(a, list.new())), take preview)
 }
 
 // The deploy prepared: OLD exports head 1, NEW's prepare child exits 0, and OLD keeps the
@@ -574,7 +749,8 @@ fn to_export(mut r: Rig, old: launcher.Child, take preview: Bytes) waits {
 fn prepared(mut r: Rig, old: launcher.Child) -> List[launcher.Request] waits {
     to_export(mut r, old, preview_answer(image_two(), release_two()))
     old_says(mut r, old, PlaceExported(1u64, "export-1"))
-    finish(mut r, helper_child(old, PrepareMode(an_attempt(), "export-1")), Code(0i32), None)
+    let a = r.a
+    finish(mut r, helper_child(old, PrepareMode(a, "export-1")), Code(0i32), None)
     apply(mut r, Got(Placed(clone(old), PlaceImported(image_two()))))
 }
 
@@ -1157,6 +1333,9 @@ fn deploy_admission_policy(c: Clock, rnd: Random) -> Result[(), ()] waits {
     expect(rejected_with(r, "Refused(Memory)"), "memory: OLD and NEW together exceed the group's memory")
     expect(asked_of(r, 4u64) == 0u64 && asked_of(r, 5u64) == 1u64, "memory: the refused admission is released, not assembled")
     expect(is_none(deploy_outcome(r.h, "g")) && helpers_started(r) == 0u64, "memory: a refused admission prepares nothing")
+    let refused_id: Bytes = clone(r.req)
+    let seen = is_failed(phase_on(r, r.conn), DeniedClass)
+    expect(seen && is_failed(status_of(mut r, refused_id), DeniedClass), "memory: the refusal is not the request's durable Failed(Denied)")
     admit_new(mut r, summary_of(50u64, 50u64, false), "", false)
     expect(asked_of(r, 4u64) == 1u64, "memory: an admission that fits is assembled")
     // A grant OLD lacks: refused without the operator's approval, assembled with it.
@@ -1170,13 +1349,34 @@ fn deploy_admission_policy(c: Clock, rnd: Random) -> Result[(), ()] waits {
     let mut r3 = admission_case(c, rnd, None, Trusted)
     admit_new(mut r3, summary_of(1u64, 1u64, false), "foreign: lib", false)
     expect(asked_of(r3, 4u64) == 0u64, "confirm: assembled before the confirmation")
-    let wrong = deploy_confirm(mut r3.h, "g", "foreign: other")
-    expect(asked_of(r3, 4u64) == 0u64 && !is_ok(wrong), "confirm: a different text confirms nothing")
-    let go = must(deploy_confirm(mut r3.h, "g", "foreign: lib"), "confirm")
-    pump(mut r3, take go)
-    expect(asked_of(r3, 4u64) == 1u64, "confirm: the exact text assembles")
+    let mut shown = false
+    for x in got_on(r3, r3.conn) {
+        if let DisplayAnswer(_, _, root, text) = x {
+            shown = root == image_two() && text == "foreign: lib"
+        }
+    }
+    expect(shown, "confirm: the operator was not sent the display for verified R")
+    // A hash of other text is refused and ends the exchange, which releases the attempt.
+    let first = r3.conn
+    let d3: Bytes = clone(r3.req)
+    let a3 = r3.a
+    send(mut r3, first, ConfirmAsk(d3, a3, digest_bytes("foreign: other")))
+    expect(asked_of(r3, 4u64) == 0u64 && errored(r3, first, DeniedClass) && asked_of(r3, 5u64) == 1u64, "confirm: a different text confirmed, or its closed exchange kept the attempt")
+    // The same Begin again repeats the admission under a fresh attempt.
+    let before = r3.a
+    let again: Bytes = clone(r3.req)
+    let _ = begin_with(mut r3, again, Attested(image_two()), false)
+    expect(!same_attempt(before, r3.a) && admits(r3) == 2u64, "confirm: the repeated Begin did not admit again under a fresh attempt")
+    let mut events: List[launcher.Event] = list.new()
+    list.push(mut events, Admitted(r3.a, image_two(), summary_of(1u64, 1u64, false), "foreign: lib"))
+    feed(mut r3, take events)
+    let c3 = r3.conn
+    let d4: Bytes = clone(r3.req)
+    let a4 = r3.a
+    send(mut r3, c3, ConfirmAsk(d4, a4, digest_bytes("foreign: lib")))
+    expect(asked_of(r3, 4u64) == 1u64, "confirm: the hash of the exact text assembles")
     assembled_new(mut r3)
-    expect(still_preparing(r3) && asked_of(r3, 5u64) == 1u64 && helpers_started(r3) == 1u64, "confirm: the assembled deploy prepares after its row is durable")
+    expect(still_preparing(r3) && asked_of(r3, 5u64) == 2u64 && helpers_started(r3) == 1u64, "confirm: the assembled deploy prepares after its row is durable")
     // A slow upload: the verifier asked for objects in two parts and half are sent; another
     // group's child ends and a collection runs while the attempt waits for the rest. The
     // admission keeps its Need parts and still relays the remaining bytes.
@@ -1184,25 +1384,30 @@ fn deploy_admission_policy(c: Clock, rnd: Random) -> Result[(), ()] waits {
     add(mut r5, "k", "t")
     op_wake(mut r5, "k")
     let other = last(r5, "k")
-    let go5 = must(deploy(mut r5.h, "g", an_attempt(), Attested(image_two()), list.new(), list.new(), false), "deploy")
-    pump(mut r5, take go5)
+    let up = begin_new(mut r5, false)
     let mut parts: List[launcher.Event] = list.new()
     let mut first_part: List[launcher.Wanted] = list.new()
     list.push(mut first_part, BodyKey(bytes_of(32u64, 1u8)))
     let mut second_part: List[launcher.Wanted] = list.new()
     list.push(mut second_part, AnnexKey(bytes_of(32u64, 2u8)))
-    list.push(mut parts, Need(an_attempt(), take first_part, false))
-    list.push(mut parts, Need(an_attempt(), take second_part, true))
+    list.push(mut parts, Need(r5.a, take first_part, false))
+    list.push(mut parts, Need(r5.a, take second_part, true))
     feed(mut r5, take parts)
-    let head = must(deploy_data(mut r5.h, "g", bytes_of(8u64, 1u8)), "deploy_data")
-    pump(mut r5, take head)
+    let d5: Bytes = clone(r5.req)
+    let a5 = r5.a
+    send(mut r5, up, DataAsk(clone(d5), a5, bytes_of(8u64, 1u8)))
     finish(mut r5, other, Code(0i32), Some(None))
     expect(is_clean(r5, "k"), "slow upload: the other group's clean end was not applied while the upload waits")
     expect(collection_keeps(mut r5, false, true), "slow upload: a collection during the upload did not run or rooted the unassembled NEW")
-    let tail = must(deploy_data(mut r5.h, "g", bytes_of(8u64, 2u8)), "deploy_data after the collection")
-    pump(mut r5, take tail)
-    let end = must(deploy_end(mut r5.h, "g"), "deploy_end")
-    pump(mut r5, take end)
+    send(mut r5, up, DataAsk(clone(d5), a5, bytes_of(8u64, 2u8)))
+    send(mut r5, up, EndAsk(clone(d5), a5))
+    let mut needs = 0u64
+    for x in got_on(r5, up) {
+        if let NeedAnswer(_, _, _, _) = x {
+            needs += 1u64
+        }
+    }
+    expect(needs == 2u64 && is_none(error_on(r5, up)), "slow upload: the operator was not relayed both Need parts")
     let waiting = match deploy_admission(r5.h, "g") {
         Some(Uploading(keys, done)) => done && list.len(keys) == 2u64,
         _ => false
@@ -1224,12 +1429,58 @@ fn deploy_admission_policy(c: Clock, rnd: Random) -> Result[(), ()] waits {
     unplug(mut r5)
     // An untrusted author attests nothing.
     let mut r4 = admission_case(c, rnd, None, Untrusted)
-    let attested = deploy(mut r4.h, "g", an_attempt(), Attested(image_two()), list.new(), list.new(), false)
-    expect(!is_ok(attested) && is_none(deploy_admission(r4.h, "g")), "untrusted: an attested recipe is refused")
+    let denied = begin_new(mut r4, false)
+    expect(errored(r4, denied, DeniedClass) && admits(r4) == 0u64 && is_none(deploy_admission(r4.h, "g")), "untrusted: an attested recipe is refused")
     unplug(mut r)
     unplug(mut r2)
     unplug(mut r3)
     unplug(mut r4)
+    Ok(())
+}
+
+fn released(r: Rig, a: launcher.Attempt) -> bool {
+    for q in r.asked {
+        if let Release(x) = q {
+            if same_attempt(x, a) {
+                return true
+            }
+        }
+    }
+    false
+}
+
+// L49 `operator_request_identity` (launch.md "The operator socket"): a deploy is named by
+// its client's 16-byte request ID D, durably. A Begin retried with the same D after the host
+// is lost gets the recorded outcome and admits nothing; the same D with other content is a
+// Conflict; an upload whose connection closes before its end releases its attempt, and the
+// same Begin admits again under a fresh attempt; Status(D) still reports an installed
+// request after a later request of the group.
+@test
+fn operator_request_identity(c: Clock, rnd: Random) -> Result[(), ()] waits {
+    let mut r = rig(c, rnd, 4u64)
+    add(mut r, "g", "t")
+    op_wake(mut r, "g")
+    let old = last(r, "g")
+    let go = prepared(mut r, old)
+    pump(mut r, take go)
+    answer(mut r, old, PlaceInstalled(2u64, true))
+    let first: Bytes = clone(r.req)
+    expect(is_installed(phase_on(r, r.conn)), "L49: the owner was not sent Installed")
+    let mut b = restart(take r, 4u64)
+    let retry = begin_with(mut b, first, Attested(image_two()), false)
+    expect(is_installed(phase_on(b, retry)) && admits(b) == 0u64, "L49: a Begin retried after host loss admitted again or lost its outcome")
+    let other = begin_with(mut b, first, Attested(image()), false)
+    expect(errored(b, other, ConflictClass) && admits(b) == 0u64, "L49: the same request ID with other content was not a Conflict")
+    let cut = begin_new(mut b, false)
+    let a1 = b.a
+    expect(admits(b) == 1u64, "L49: a new request ID did not admit")
+    hang_up(mut b, cut)
+    expect(released(b, a1), "L49: an upload cut off before its end kept its attempt")
+    let second: Bytes = clone(b.req)
+    let _ = begin_with(mut b, second, Attested(image_two()), false)
+    expect(admits(b) == 2u64 && !same_attempt(a1, b.a), "L49: the repeated Begin did not admit again under a fresh attempt")
+    expect(is_installed(status_of(mut b, first)), "L49: Status lost the installed request after a later request of the group")
+    unplug(mut b)
     Ok(())
 }
 

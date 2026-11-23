@@ -63,7 +63,7 @@ fn seed_mcp_blob(dir: Dir, clock: Clock, random: Random, tasks: Tasks, caller: s
     let committed = result.unwrap(store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), harness.Refused] {
         harness.set_reader(mut tx, h, caller, true)?
         harness.open_session(mut tx, h, "scripted", All)?
-        let Placed(0u64) = harness.submit(mut tx, h, mcp_blob_agent(), w, caller, harness.Submit(client_key: "mcp-blob", text: "echo"))? else { return Error(Conflict) }
+        let Placed(0u64) = harness.submit(mut tx, h, mcp_blob_agent(), w, caller, NextTurn, harness.Submit(client_key: "mcp-blob", text: "echo"))? else { return Error(Conflict) }
         Ok(())
     }))
     let Committed(done) = take committed else { fail("seed MCP blob session") }

@@ -481,7 +481,7 @@ fn settle(mut tx: store.Tx, a: runner.triggers.Attempt, take m: harness.Settle) 
 
 pub fn submit_entry(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take m: harness.Submit) -> Result[harness.Disposition, harness.Refused] {
     let w = wired()?
-    harness.submit(mut tx, h, notes_agent(), w, caller, take m)
+    harness.submit(mut tx, h, notes_agent(), w, caller, NextTurn, take m)
 }
 
 pub fn decide_entry(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take d: harness.Decision) -> Result[harness.Ruling, harness.Refused] {
@@ -609,7 +609,7 @@ fn helper_ask(seed: HelperSeed, n: u64, take line: String) -> Result[String, Str
         if n == 0u64 {
             harness.open_session(mut tx, h, "scripted", All)?
         }
-        harness.submit(mut tx, h, helper_agent(), w, you(), harness.Submit(client_key: clone(client_key), text: clone(line)))
+        harness.submit(mut tx, h, helper_agent(), w, you(), NextTurn, harness.Submit(client_key: clone(client_key), text: clone(line)))
     })
     let Ok(Committed(done)) = take ran else {
         return Error("helper: submit did not commit")
@@ -799,7 +799,7 @@ fn seed_place(dir: Dir, clock: Clock, random: Random, tasks: Tasks, prompt: Stri
         let Ok(()) = store.put(mut tx, t.stats, NEXT_ID, 1u64) else {
             return Error(Storage)
         }
-        harness.submit(mut tx, h, notes_agent(), w, you(), harness.Submit(client_key: "k1", text: string.from(prompt)))
+        harness.submit(mut tx, h, notes_agent(), w, you(), NextTurn, harness.Submit(client_key: "k1", text: string.from(prompt)))
     })
     let Ok(Committed(done)) = take ran else {
         return Error("submit did not commit")

@@ -77,6 +77,7 @@ pub type Session: codec + send {
     next_pos: u64,
     active_run: Option[u64],
     next_run: u64,
+    next_seq: u64,
     active_sections_hashes: List[SectionHash],
     active_tools_hash: Bytes,
     active_tools_pos: Option[u64],
@@ -87,7 +88,29 @@ pub type InboxKey: codec + send {
     client_key: String
 }
 
-pub type Disposition: codec + send = Placed(u64) | Busy
+// Where an admitted item stands. Queued(seq) waits in the ingress; the drain
+// that takes it rewrites the inbox row to Placed(run) when it starts a run,
+// Joined(run) when an Early input joins the running run, or Applied when a
+// command applies. A resubmission answers the current row.
+pub type Disposition: codec + send = Placed(u64) | Queued(u64) | Joined(u64) | Applied
+
+// Early input steers the running run of the same caller at its next prepare;
+// NextTurn input waits for a turn boundary. Early input that no running run of
+// its caller can take is next-turn input by rule.
+pub type When: codec + send = Early | NextTurn
+
+// A session command applies alone at a turn boundary, never mid-turn, ahead of
+// the inputs queued with it.
+pub type Command: codec + send = Narrow(Narrow)
+
+pub type Item: codec + send = Input(When, String) | Command(Command)
+
+// One admitted ingress item, keyed by the session's enqueue_seq. The submitter
+// is `key.caller`.
+pub type Lodged: codec + send {
+    key: InboxKey,
+    item: Item
+}
 
 pub type Received: codec + send {
     digest: Bytes,
@@ -180,6 +203,7 @@ pub type Handles: send {
     session: store.Table[u64, Session],
     entries: store.Table[u64, Entry],
     inbox: store.Table[InboxKey, Received],
+    ingress: store.Table[u64, Lodged],
     runs: store.Table[u64, Run],
     effects: store.Table[EffectKey, Effect],
     waits: store.Table[WaitKey, Wait],
@@ -200,6 +224,10 @@ fn entries_name() -> String {
 
 fn inbox_name() -> String {
     "harness.inbox"
+}
+
+fn ingress_name() -> String {
+    "harness.ingress"
 }
 
 fn runs_name() -> String {
@@ -305,6 +333,7 @@ pub fn migrate(mut phase: store.Migration) -> Result[(), store.Error] {
     let c_session: std.codec.Codec[Session] = std.codec.of()
     let c_entry: std.codec.Codec[Entry] = std.codec.of()
     let c_received: std.codec.Codec[Received] = std.codec.of()
+    let c_lodged: std.codec.Codec[Lodged] = std.codec.of()
     let c_run: std.codec.Codec[Run] = std.codec.of()
     let c_effect: std.codec.Codec[Effect] = std.codec.of()
     let c_wait: std.codec.Codec[Wait] = std.codec.of()
@@ -312,6 +341,7 @@ pub fn migrate(mut phase: store.Migration) -> Result[(), store.Error] {
     created(store.migration_create_table(mut phase, store.spec(session_name(), std.codec.key_u64(), c_session)))?
     created(store.migration_create_table(mut phase, store.spec(entries_name(), std.codec.key_u64(), c_entry)))?
     created(store.migration_create_table(mut phase, store.spec(inbox_name(), inbox_key(), c_received)))?
+    created(store.migration_create_table(mut phase, store.spec(ingress_name(), std.codec.key_u64(), c_lodged)))?
     created(store.migration_create_table(mut phase, store.spec(runs_name(), std.codec.key_u64(), c_run)))?
     created(store.migration_create_table(mut phase, store.spec(effects_name(), effect_key(), c_effect)))?
     created(store.migration_create_table(mut phase, store.spec(waits_name(), wait_key(), c_wait)))?
@@ -325,6 +355,7 @@ pub fn handles(schema: store.Schema) -> Result[Handles, store.Error] {
     let c_session: std.codec.Codec[Session] = std.codec.of()
     let c_entry: std.codec.Codec[Entry] = std.codec.of()
     let c_received: std.codec.Codec[Received] = std.codec.of()
+    let c_lodged: std.codec.Codec[Lodged] = std.codec.of()
     let c_run: std.codec.Codec[Run] = std.codec.of()
     let c_effect: std.codec.Codec[Effect] = std.codec.of()
     let c_wait: std.codec.Codec[Wait] = std.codec.of()
@@ -334,6 +365,7 @@ pub fn handles(schema: store.Schema) -> Result[Handles, store.Error] {
         session: store.schema_table(schema, session_name(), std.codec.key_u64(), c_session)?,
         entries: store.schema_table(schema, entries_name(), std.codec.key_u64(), c_entry)?,
         inbox: store.schema_table(schema, inbox_name(), inbox_key(), c_received)?,
+        ingress: store.schema_table(schema, ingress_name(), std.codec.key_u64(), c_lodged)?,
         runs: store.schema_table(schema, runs_name(), std.codec.key_u64(), c_run)?,
         effects: store.schema_table(schema, effects_name(), effect_key(), c_effect)?,
         waits: store.schema_table(schema, waits_name(), wait_key(), c_wait)?,
@@ -432,6 +464,7 @@ pub type Limits: send {
     section_bytes: u64,
     section_steps: u64,
     hold_ms: u64,
+    ingress: u64,
 }
 
 pub type Agent[G: send]: send {
@@ -455,7 +488,7 @@ pub fn agent[G: send](take name: String, take route: String, model: StaticFn[fn(
     Agent(name: take name, route: take route, model: model, model_repeat: Once, store_result: None, tools: list.new(), mcp_peer: None, gates: list.new(), sections: list.new(), reactions: list.new(), limits: Limits(rounds: 8u64, calls: 8u64, model_ms: 120000u64, tool_ms: 60000u64, model_reserve: 4096u64,
     // Gates and sections read rows; opening a table alone takes over
     // 10,000 steps.
-    inside_bytes: 65536u64, inside_steps: 1000000u64, gate_bytes: 16384u64, gate_steps: 100000u64, section_bytes: 16384u64, section_steps: 100000u64, hold_ms: 86400000u64))
+    inside_bytes: 65536u64, inside_steps: 1000000u64, gate_bytes: 16384u64, gate_steps: 100000u64, section_bytes: 16384u64, section_steps: 100000u64, hold_ms: 86400000u64, ingress: 16u64))
 }
 
 pub fn outside[G: send](take name: String, take about: String, take input: String, repeat: Repeat, f: StaticFn[fn(G, take Bytes) -> Result[Bytes, Fault] waits]) -> Tool[G] {
@@ -517,7 +550,7 @@ pub fn open_session(mut tx: store.Tx, h: Handles, take model: String, take narro
     if let Some(_) = kept(store.fetch(tx, store.shape(h.session), 0u64))? {
         return Ok(())
     }
-    let s = Session(model: take model, tools_narrow: take narrow, head_pos: 0u64, next_pos: 0u64, active_run: None, next_run: 0u64, active_sections_hashes: list.new(), active_tools_hash: list.new(), active_tools_pos: None)
+    let s = Session(model: take model, tools_narrow: take narrow, head_pos: 0u64, next_pos: 0u64, active_run: None, next_run: 0u64, next_seq: 0u64, active_sections_hashes: list.new(), active_tools_hash: list.new(), active_tools_pos: None)
     kept(store.put(mut tx, h.session, 0u64, s))?
     kept(store.put(mut tx, h.views, 0u64, Status("idle")))
 }
@@ -594,7 +627,7 @@ pub fn adopt(mut tx: store.Tx, h: Handles, take p: Prefix) -> Result[(), Refused
         return Error(Conflict)
     }
     let Prefix(model: take model, tools_narrow: take narrow, head_pos: head, entries: take log, cuts: take cuts) = take p
-    let mut s = Session(model: take model, tools_narrow: take narrow, head_pos: head, next_pos: 0u64, active_run: None, next_run: 0u64, active_sections_hashes: list.new(), active_tools_hash: list.new(), active_tools_pos: None)
+    let mut s = Session(model: take model, tools_narrow: take narrow, head_pos: head, next_pos: 0u64, active_run: None, next_run: 0u64, next_seq: 0u64, active_sections_hashes: list.new(), active_tools_hash: list.new(), active_tools_pos: None)
     for e in log {
         let _ = put_entry(mut tx, h, mut s, e)?
     }

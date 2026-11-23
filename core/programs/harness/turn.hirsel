@@ -46,40 +46,9 @@ pub type Submit: codec + send {
     text: String
 }
 
-// Admits a submission. A repeated key with identical bytes returns its
-// recorded disposition; different bytes conflict. A submission that arrives
-// while a run is active is answered Busy and leaves no row, so the same key
-// may be sent again once the run ends.
-pub fn submit[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, caller: store.Caller, take m: Submit) -> Result[Disposition, Refused] {
-    if string.byte_len(m.text) > INLINE_LIMIT {
-        return Error(TooLarge)
-    }
-    let Submit(client_key: take client_key, text: take text) = take m
-    let key = InboxKey(caller: clone(caller), client_key: take client_key)
-    let d = digest(string.as_bytes(text))
-    if let Some(seen) = kept(store.fetch(tx, store.shape(h.inbox), key))? {
-        if seen.digest != d {
-            return Error(Conflict)
-        }
-        return Ok(clone(seen.disposition))
-    }
-    let mut s = session_of(tx, h)?
-    if let Some(_) = s.active_run {
-        return Ok(Busy)
-    }
-    let _ = append(mut tx, h, a, mut s, User(take text))?
-    let id = s.next_run
-    s.next_run = id + 1u64
-    s.active_run = Some(id)
-    let run = Run(caller: clone(caller), phase: Preparing, round: 0u64, rounds_left: a.limits.rounds, spend: Spend(known: 0u64, reserved: 0u64, unresolved: 0u64))
-    kept(store.put(mut tx, h.runs, id, run))?
-    kept(store.put(mut tx, h.session, 0u64, s))?
-    kept(store.put(mut tx, h.inbox, key, Received(digest: take d, disposition: Placed(id))))?
-    advance(mut tx, h, a, w, Kick)?
-    Ok(Placed(id))
-}
-
-fn finish(mut tx: store.Tx, h: Handles, mut s: Session, id: u64, take r: Run, take why: Finish) -> Result[(), Refused] {
+// Ends the run. Queued ingress gets a Kick that commits with the finish, so
+// the boundary runs in the next transaction even after a crash.
+fn finish(mut tx: store.Tx, h: Handles, w: Wiring, mut s: Session, id: u64, take r: Run, take why: Finish) -> Result[(), Refused] {
     let mut run = take r
     let shown = match why {
         Answered => "answered",
@@ -91,12 +60,15 @@ fn finish(mut tx: store.Tx, h: Handles, mut s: Session, id: u64, take r: Run, ta
     kept(store.put(mut tx, h.runs, id, run))?
     s.active_run = None
     kept(store.put(mut tx, h.session, 0u64, s))?
+    if !queue_empty(tx, h)? {
+        let _ = armed(runner.triggers.write(mut tx, h.triggers, w.entries, w.advance, Kick, AfterCommit))?
+    }
     status(mut tx, h, take shown)
 }
 
 // Only the run's caller may cancel. A repeated cancel returns the terminal
 // receipt, even after a later run has taken the session.
-pub fn cancel(mut tx: store.Tx, h: Handles, caller: store.Caller, id: u64) -> Result[Finish, Refused] {
+pub fn cancel(mut tx: store.Tx, h: Handles, w: Wiring, caller: store.Caller, id: u64) -> Result[Finish, Refused] {
     let Some(take found) = kept(store.fetch(tx, store.shape(h.runs), id))? else {
         return Error(Malformed("no such run"))
     }
@@ -120,7 +92,7 @@ pub fn cancel(mut tx: store.Tx, h: Handles, caller: store.Caller, id: u64) -> Re
         },
         _ => (),
     }
-    finish(mut tx, h, mut s, id, take run, Cancelled)?
+    finish(mut tx, h, w, mut s, id, take run, Cancelled)?
     Ok(Cancelled)
 }
 
@@ -501,11 +473,14 @@ fn now(mut tx: store.Tx) -> u64 {
 pub fn advance[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, take wake: Wake) -> Result[(), Refused] {
     let mut s = session_of(tx, h)?
     let Some(id) = s.active_run else {
+        if let Kick = wake {
+            return boundary(mut tx, h, a, w, mut s)
+        }
         return Ok(())
     }
     match wake {
         Deadline(key) => if key.run == id {
-            inspect(mut tx, h, key)?
+            inspect(mut tx, h, w, key)?
         },
         Expire(wait) => if wait.run == id {
             expire(mut tx, h, wait)?
@@ -532,8 +507,9 @@ pub fn advance[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, ta
 fn prepare[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut s: Session, id: u64, take r: Run) -> Result[(), Refused] {
     let mut run = take r
     if run.rounds_left == 0u64 {
-        return finish(mut tx, h, mut s, id, take run, OutOfRounds)
+        return finish(mut tx, h, w, mut s, id, take run, OutOfRounds)
     }
+    steer(mut tx, h, a, mut s, id, run.caller)?
     plan(mut tx, h, a, mut s)?
     kept(store.put(mut tx, h.session, 0u64, clone(s)))?
     let key = EffectKey(run: id, round: run.round, kind: MODEL, ordinal: 0u64)
@@ -560,7 +536,7 @@ fn derive[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut s: 
         return Error(Malformed("model answer"))
     }
     if list.len(answer.calls) == 0u64 {
-        return finish(mut tx, h, mut s, id, take run, Answered)
+        return finish(mut tx, h, w, mut s, id, take run, Answered)
     }
     let mut ordinal = 0u64
     for given in answer.calls {
@@ -765,7 +741,7 @@ fn present[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut s:
 // A deadline fired for one effect. A settled effect is left alone. Otherwise
 // the effect's run is asked to cancel and the effect is recorded as in doubt
 // if it was dispatched: a deadline is not a clean timeout.
-fn inspect(mut tx: store.Tx, h: Handles, key: EffectKey) -> Result[(), Refused] {
+fn inspect(mut tx: store.Tx, h: Handles, w: Wiring, key: EffectKey) -> Result[(), Refused] {
     let Some(take found) = kept(store.fetch(tx, store.shape(h.effects), key))? else {
         return Ok(())
     }
@@ -796,13 +772,13 @@ fn inspect(mut tx: store.Tx, h: Handles, key: EffectKey) -> Result[(), Refused] 
     let reserve = e.reserve
     kept(store.put(mut tx, h.effects, key, e))?
     if key.kind == MODEL {
-        model_closed(mut tx, h, key, reserve, dispatched)?
+        model_closed(mut tx, h, w, key, reserve, dispatched)?
     }
     Ok(())
 }
 
 // A model effect closed without an answer ends its run.
-fn model_closed(mut tx: store.Tx, h: Handles, key: EffectKey, reserve: u64, doubted: bool) -> Result[(), Refused] {
+fn model_closed(mut tx: store.Tx, h: Handles, w: Wiring, key: EffectKey, reserve: u64, doubted: bool) -> Result[(), Refused] {
     let Some(take found) = kept(store.fetch(tx, store.shape(h.runs), key.run))? else {
         return Ok(())
     }
@@ -817,7 +793,7 @@ fn model_closed(mut tx: store.Tx, h: Handles, key: EffectKey, reserve: u64, doub
     } else {
         "model failed"
     }
-    finish(mut tx, h, mut s, key.run, take run, Stopped(why))
+    finish(mut tx, h, w, mut s, key.run, take run, Stopped(why))
 }
 
 // ---- the effect protocol: begin and settle are fenced attempt entries ----

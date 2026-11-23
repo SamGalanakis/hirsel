@@ -186,7 +186,7 @@ fn settle(mut tx: store.Tx, a: runner.triggers.Attempt, take m: harness.Settle) 
 
 fn submit_entry(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take m: harness.Submit) -> Result[harness.Disposition, harness.Refused] {
     let w = wired()?
-    harness.submit(mut tx, h, gated_agent(), w, caller, take m)
+    harness.submit(mut tx, h, gated_agent(), w, caller, NextTurn, take m)
 }
 
 fn decide_entry(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take d: harness.Decision) -> Result[harness.Ruling, harness.Refused] {
@@ -857,10 +857,10 @@ fn tool_stream(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
         if mid_run != 200u16 {
             return 19u64
         }
-        // A message during the run is answered at once: the session has one active run,
-        // so the place says Busy rather than holding the request until the turn ends.
+        // A message during the run is answered at once: it is queued in the session's
+        // ingress (Queued at seq 1) and becomes the next turn when this one ends.
         let (busy, said) = http(net, clock, port, "POST", "/sessions/0/messages", person(me, 2u64), json(harness.Submit(client_key: "k2", text: "again")))
-        if busy != 202u16 || said != json((Busy : harness.Disposition)) {
+        if busy != 202u16 || said != json((Queued(1u64) : harness.Disposition)) {
             return 20u64
         }
         let _ = channel.send(let_go, ())
@@ -872,7 +872,7 @@ fn tool_stream(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
     if !same_rows(rows, rows_want("answered", true)) {
         return 14u64
     }
-    let paged = tail_and_history(net, clock, port, me)
+    let paged = tail_and_history(net, clock, port, me, enabled)
     if paged != 0u64 {
         return 40u64 + paged
     }
@@ -903,63 +903,6 @@ fn tool_stream(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
 // last two entries (positions 3 and 4). Paging back from its oldest row with a pinned
 // cutoff gives the rest, and the stream and pages together are the whole transcript,
 // as the hand-derived rows say. The answer is the first check that failed, or 0.
-fn tail_and_history(net: Net, clock: Clock, port: u16, me: Bytes) -> u64 waits {
-    let Ok(take opened) = browser_at(net, clock, port, me, "/sessions/0/events?tail=2") else {
-        return 1u64
-    }
-    let mut fresh = take opened
-    let mut decoder = std.sse.decoder(65536u64)
-    let mut rows: List[(u64, Bytes)] = list.new()
-    if !read_until_row(mut fresh, mut decoder, mut rows, "answered", 5u64) {
-        return 2u64
-    }
-    let _ = take fresh
-    let mut tail: List[(u64, Bytes)] = list.new()
-    list.push(mut tail, row_of(0u64, Status("answered")))
-    list.push(mut tail, row_of(4u64, Line("tool", "c1")))
-    list.push(mut tail, row_of(5u64, Line("assistant", "done")))
-    if !same_rows(rows, tail) {
-        return 3u64
-    }
-    let format: std.json.Format[harness.gateway_http.Page] = result.unwrap(std.json.interop())
-    let mut before = 4u64
-    let mut pages = 0u64
-    while before > 1u64 {
-        let mut target = string.from("/sessions/0/history?before=")
-        string.push_u64(mut target, before)
-        string.push(mut target, "&lines=2")
-        let (status, body) = http(net, clock, port, "GET", target, person(me, 0u64), list.new())
-        if status != 200u16 {
-            return 4u64
-        }
-        let Ok(page) = std.json.decode_typed(format, clone(body), 65536u64) else {
-            return 5u64
-        }
-        if page.from >= before {
-            return 6u64
-        }
-        for r in page.rows {
-            if r.at < page.from || r.at >= before {
-                return 7u64
-            }
-            list.push(mut rows, (r.at, bytes_of(r.line)))
-        }
-        before = page.from
-        pages += 1u64
-    }
-    if pages != 2u64 {
-        return 8u64
-    }
-    if !same_rows(rows, rows_want("answered", true)) {
-        return 9u64
-    }
-    let (refused, _) = http(net, clock, port, "GET", "/sessions/0/history?before=4&lines=0", person(me, 0u64), list.new())
-    if refused != 400u16 {
-        return 10u64
-    }
-    0u64
-}
-
 // The source's five entries come from the scripted tool round. The fork reads
 // them through the host, which waits for the source's place, still live after
 // its turn, to stop first. A fork owns that pinned prefix even after the

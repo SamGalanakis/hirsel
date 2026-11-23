@@ -1,0 +1,89 @@
+// Offline laws for the session ingress, on the laws.hirsel fixtures.
+
+// ---- session ingress ----
+
+fn lodging(mut db: store.Db, take item: harness.Item, take key: String) -> harness.Disposition waits {
+    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    let w = result.unwrap(wired())
+    let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[harness.Disposition, harness.Refused] {
+        match item {
+            Input(when, text) => harness.submit(mut tx, h, crash_agent(), w, alice(), clone(when), harness.Submit(client_key: clone(key), text: clone(text))),
+            Command(c) => harness.command(mut tx, h, crash_agent(), w, alice(), clone(key), clone(c)),
+        }
+    })
+    match take ran { Ok(Committed(store.Done(value: take d, ..))) => take d, _ => fail("lodging: did not commit") }
+}
+
+fn disposition(db: store.Db, take key: String) -> Option[harness.Disposition] {
+    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    let k = harness.InboxKey(caller: alice(), client_key: take key)
+    match result.unwrap(store.get(store.snapshot(db), store.shape(h.inbox), k)) { Some(r) => Some(clone(r.disposition)), None => None }
+}
+
+fn asked_at(db: store.Db, run: u64, round: u64) -> harness.Request {
+    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    let snap = store.snapshot(db)
+    let key = harness.EffectKey(run: run, round: round, kind: harness.MODEL, ordinal: 0u64)
+    let Some(e) = result.unwrap(store.get(snap, store.shape(h.effects), key)) else { fail("asked_at: no model effect") }
+    result.unwrap(harness.request(snap, h, key, e))
+}
+
+fn says_user(r: harness.Request, text: String) -> bool {
+    let mut found = false
+    for e in r.messages { if let User(t) = view e { if t == text { found = true } } }
+    found
+}
+
+// Law Q1 (ADR 0101: one ordered session ingress): during a run, an Early
+// input from the run's caller is in the very next model request of that run,
+// while a command and a NextTurn input wait. When the run ends, the command
+// applies before the queued input starts the next run, so that run's first
+// request already has the narrowed (empty) tool list. Oracle: the dispositions and requests
+// derived by hand from the four submissions.
+pub fn law_ingress_orders_at_boundaries(parent: Dir, clock: Clock, random: Random, tasks: Tasks) -> u64 waits {
+    let mut name = string.with_capacity(32u64)
+    let dir = result.unwrap(host.mkdtemp(parent, mut name))
+    let mut db = result.unwrap(store.open(tasks, dir, clock, random, runner.triggers.law_options()))
+    result.unwrap(store.run_migration(mut db, tasks, code.describe(harness.migrate)))
+    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    let opened = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), harness.Refused] { harness.open_session(mut tx, h, "scripted", All) })
+    match take opened { Ok(Committed(_)) => (), _ => fail("ingress: open did not commit") }
+    let mut bad = 0u64
+    // 1. An idle session places the first input at once.
+    let first = lodging(mut db, Input(NextTurn, "first"), "f")
+    if bad == 0u64 && !(match first { Placed(0u64) => true, _ => false }) { bad = 1u64 }
+    // 2. During run 0 everything queues, in enqueue order.
+    let steer = lodging(mut db, Input(Early, "steer"), "s")
+    let narrow = lodging(mut db, Command(Narrow(Only(list.new()))), "n")
+    let later = lodging(mut db, Input(NextTurn, "later"), "l")
+    if bad == 0u64 && !(match (steer, narrow, later) { (Queued(1u64), Queued(2u64), Queued(3u64)) => true, _ => false }) { bad = 2u64 }
+    // 3. Run 0's next round: the Early input joins it; the command has not applied.
+    let set = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
+        store.put(mut tx, h.runs, 0u64, harness.Run(caller: alice(), phase: Preparing, round: 1u64, rounds_left: 8u64,
+            spend: harness.Spend(known: 0u64, reserved: 0u64, unresolved: 0u64)))
+    })
+    match take set { Ok(Committed(_)) => (), _ => fail("ingress: setup did not commit") }
+    kick(mut db, crash_agent())
+    let round1 = asked_at(db, 0u64, 1u64)
+    if bad == 0u64 && !(says_user(round1, "steer") && !says_user(round1, "later") && list.len(round1.tools) == 1u64) { bad = 3u64 }
+    if bad == 0u64 && !(match disposition(db, "s") { Some(Joined(0u64)) => true, _ => false }) { bad = 4u64 }
+    if bad == 0u64 && !(match (disposition(db, "n"), disposition(db, "l")) { (Some(Queued(2u64)), Some(Queued(3u64))) => true, _ => false }) { bad = 5u64 }
+    // 4. Run 0 ends; the queued items stay queued until the boundary.
+    let w = result.unwrap(wired())
+    let ended = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[harness.Finish, harness.Refused] { harness.cancel(mut tx, h, w, alice(), 0u64) })
+    match take ended { Ok(Committed(_)) => (), _ => fail("ingress: cancel did not commit") }
+    // 5. The boundary (the Kick finish arms): the command applies, then the later input starts run 1.
+    kick(mut db, crash_agent())
+    if bad == 0u64 && !(match (disposition(db, "n"), disposition(db, "l")) { (Some(Applied), Some(Placed(1u64))) => true, _ => false }) { bad = 6u64 }
+    let run1 = asked_at(db, 1u64, 0u64)
+    if bad == 0u64 && !(says_user(run1, "later") && list.len(run1.tools) == 0u64) { bad = 7u64 }
+    result.unwrap(store.close(take db))
+    result.unwrap(std.dir.remove_all(parent, name))
+    bad
+}
+
+@test
+fn test_ingress_orders_at_boundaries(parent: Dir, clock: Clock, random: Random, tasks: Tasks) -> Result[(), u64] waits {
+    let bad = law_ingress_orders_at_boundaries(parent, clock, random, tasks)
+    if bad == 0u64 { Ok(()) } else { Error(bad) }
+}

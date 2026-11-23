@@ -43,7 +43,7 @@ fn settle_in[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, atte
                 e.phase = Doubted
                 let reserve = e.reserve
                 kept(store.put(mut tx, h.effects, key, e))?
-                model_closed(mut tx, h, key, reserve, true)?
+                model_closed(mut tx, h, w, key, reserve, true)?
             } else {
                 e.phase = Settled(Tool(InDoubt))
                 kept(store.put(mut tx, h.effects, key, e))?
@@ -107,5 +107,5 @@ fn settle_model_fault(mut tx: store.Tx, h: Handles, w: Wiring, key: EffectKey, t
     let reserve = e.reserve
     e.phase = Settled(ModelFailed(take fault))
     kept(store.put(mut tx, h.effects, key, e))?
-    model_closed(mut tx, h, key, reserve, dropped)
+    model_closed(mut tx, h, w, key, reserve, dropped)
 }

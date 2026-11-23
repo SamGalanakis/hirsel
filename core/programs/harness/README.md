@@ -102,9 +102,14 @@ agent and the wiring:
 
 ## How a turn runs
 
-- `submit` appends the user entry, creates the run and calls `advance`. A
-  repeated client key with the same bytes returns its first disposition; a
-  submission during a run is answered `Busy` and leaves no row.
+- `submit(when)` and `command` lodge one row in `harness.ingress`, keyed by
+  a monotonic `enqueue_seq`, answer `Queued(seq)` and call `advance`. A
+  repeated client key with the same bytes returns its current disposition.
+  At a turn boundary (no active run, on `Kick`) every queued command applies
+  first (`Applied`), then the earliest input starts the next run
+  (`Placed(run)`). An `Early` input from the run's caller joins the active
+  run at its next `prepare` (`Joined(run)`); `NextTurn` input waits for the
+  boundary. `finish` arms a `Kick` when the ingress is non-empty.
 - `advance` reads the session row and the active run. To prepare a model
   call it seals an effect row with only a cutoff, `(head_pos, tail_pos,
   route, policy)`, and writes the effect trigger and a deadline trigger. No

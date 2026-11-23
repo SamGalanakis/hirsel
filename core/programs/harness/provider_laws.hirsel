@@ -512,7 +512,7 @@ fn law_typed_retry(tasks: Tasks, random: Random) -> bool waits {
     let caller = store.Caller(issuer: 1u8, subject: b"test")
     let prepared = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), harness.Refused] {
         harness.open_session(mut tx, h, "m", All)?
-        let _ = harness.submit(mut tx, h, a, w, caller, harness.Submit(client_key: "key", text: "weather in San Francisco?"))?
+        let _ = harness.submit(mut tx, h, a, w, caller, NextTurn, harness.Submit(client_key: "key", text: "weather in San Francisco?"))?
         harness.advance(mut tx, h, a, w, Kick)
     })
     let Ok(Committed(_)) = prepared else { fail("retry setup did not commit") }

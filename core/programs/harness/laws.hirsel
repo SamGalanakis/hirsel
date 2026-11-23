@@ -172,7 +172,7 @@ fn seed_with(dir: Dir, clock: Clock, random: Random, tasks: Tasks, a: harness.Ag
     let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
     let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[harness.Disposition, harness.Refused] {
         harness.open_session(mut tx, h, "scripted", All)?
-        harness.submit(mut tx, h, a, w, store.Caller(issuer: 1u8, subject: list.new()), harness.Submit(client_key: "k1", text: "bump it"))
+        harness.submit(mut tx, h, a, w, store.Caller(issuer: 1u8, subject: list.new()), NextTurn, harness.Submit(client_key: "k1", text: "bump it"))
     })
     let done = match take ran { Ok(Committed(row)) => row, _ => fail("seed: submit did not commit") }
     result.unwrap(store.durable(mut db, done.ticket))
@@ -262,7 +262,6 @@ fn test_once_tool_crash(parent: Dir, clock: Clock, random: Random, tasks: Tasks,
     if law_once_tool_crash(parent, clock, random, tasks, net) { Ok(()) } else { Error(()) }
 }
 
-
 // ---- journal bytes ----
 
 // A session with `n` earlier entries, each a 200-byte user line, and no run.
@@ -291,7 +290,7 @@ fn round_bytes(dir: Dir, clock: Clock, random: Random, tasks: Tasks, n: u64) -> 
     let w = result.unwrap(wired())
     let before = store.snapshot(db)
     let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[harness.Disposition, harness.Refused] {
-        harness.submit(mut tx, h, crash_agent(), w, store.Caller(issuer: 1u8, subject: list.new()), harness.Submit(client_key: "k", text: "bump it"))
+        harness.submit(mut tx, h, crash_agent(), w, store.Caller(issuer: 1u8, subject: list.new()), NextTurn, harness.Submit(client_key: "k", text: "bump it"))
     })
     match take ran { Ok(Committed(_)) => (), _ => fail("journal: submit did not commit") }
     let after = store.snapshot(db)
@@ -361,7 +360,7 @@ fn logged(dir: Dir, clock: Clock, random: Random, tasks: Tasks, log: List[harnes
     let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
         for p in 0u64..list.len(log) { store.put(mut tx, h.entries, p, clone(log[p]))? }
         store.put(mut tx, h.session, 0u64, harness.Session(model: "scripted", tools_narrow: All, head_pos: 0u64, next_pos: list.len(log),
-            active_run: None, next_run: 3u64, active_sections_hashes: list.new(), active_tools_hash: list.new(), active_tools_pos: None))
+            active_run: None, next_run: 3u64, next_seq: 0u64, active_sections_hashes: list.new(), active_tools_hash: list.new(), active_tools_pos: None))
     })
     match take ran { Ok(Committed(_)) => (), _ => fail("logged: fill did not commit") }
     take db
@@ -432,7 +431,7 @@ pub fn law_fork_shares_prefix(parent: Dir, clock: Clock, random: Random, tasks: 
     if bad == 0u64 {
         let w = result.unwrap(wired())
         let sent = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[harness.Disposition, harness.Refused] {
-            harness.submit(mut tx, h, crash_agent(), w, alice(), harness.Submit(client_key: "f1", text: "three"))
+            harness.submit(mut tx, h, crash_agent(), w, alice(), NextTurn, harness.Submit(client_key: "f1", text: "three"))
         })
         match take sent { Ok(Committed(_)) => (), _ => { bad = 5u64 } }
     }
@@ -722,7 +721,7 @@ fn fresh(dir: Dir, clock: Clock, random: Random, tasks: Tasks) -> store.Db waits
     let filled = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
         store.put(mut tx, h.entries, 0u64, User("go"))?
         store.put(mut tx, h.session, 0u64, harness.Session(model: "scripted", tools_narrow: All, head_pos: 0u64, next_pos: 1u64,
-            active_run: Some(0u64), next_run: 1u64, active_sections_hashes: list.new(), active_tools_hash: list.new(), active_tools_pos: None))
+            active_run: Some(0u64), next_run: 1u64, next_seq: 0u64, active_sections_hashes: list.new(), active_tools_hash: list.new(), active_tools_pos: None))
     })
     match take filled { Ok(Committed(_)) => (), _ => fail("fresh: fill did not commit") }
     take db
@@ -868,7 +867,7 @@ pub fn law_reactions_commit_with_entry(parent: Dir, clock: Clock, random: Random
     let w = result.unwrap(wired())
     let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[harness.Disposition, harness.Refused] {
         harness.open_session(mut tx, h, "scripted", All)?
-        harness.submit(mut tx, h, a, w, alice(), harness.Submit(client_key: "k", text: "hi"))
+        harness.submit(mut tx, h, a, w, alice(), NextTurn, harness.Submit(client_key: "k", text: "hi"))
     })
     let placed = match take ran { Ok(Committed(store.Done(value: Placed(_), ..))) => true, _ => false }
     let snap = store.snapshot(db)
@@ -983,7 +982,6 @@ pub fn law_parked_call_resumes_once(parent: Dir, clock: Clock, random: Random, t
 fn test_parked_call_resumes_once(parent: Dir, clock: Clock, random: Random, tasks: Tasks) -> Result[(), ()] waits {
     if law_parked_call_resumes_once(parent, clock, random, tasks) { Ok(()) } else { Error(()) }
 }
-
 
 // ---- the crash matrix ----
 
@@ -1709,8 +1707,9 @@ fn race_case(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, 
 fn spent_as(r: Raced, known: u64, unresolved: u64) -> bool { r.spend.known == known && r.spend.reserved == 0u64 && r.spend.unresolved == unresolved }
 
 fn cancelling(mut db: store.Db, h: harness.Handles, who: store.Caller) -> Result[harness.Finish, harness.Refused] waits {
+    let w = wired()?
     let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[harness.Finish, harness.Refused] {
-        harness.cancel(mut tx, h, who, 0u64)
+        harness.cancel(mut tx, h, w, who, 0u64)
     })
     match take ran {
         Ok(Committed(done)) => {

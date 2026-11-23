@@ -17,7 +17,7 @@ fn answered_with(dir: Dir, clock: Clock, random: Random, tasks: Tasks, releases:
         store.put(mut tx, h.entries, 0u64, User("go"))?
         store.put(mut tx, h.entries, 1u64, Assistant(clone(answer)))?
         store.put(mut tx, h.session, 0u64, harness.Session(model: "scripted", tools_narrow: All, head_pos: 0u64, next_pos: 2u64,
-            active_run: Some(0u64), next_run: 1u64, active_sections_hashes: list.new(), active_tools_hash: list.new(), active_tools_pos: None))?
+            active_run: Some(0u64), next_run: 1u64, next_seq: 0u64, active_sections_hashes: list.new(), active_tools_hash: list.new(), active_tools_pos: None))?
         store.put(mut tx, h.runs, 0u64, harness.Run(caller: alice(), phase: AnswerReady(0u64), round: 0u64, rounds_left: 4u64,
             spend: harness.Spend(known: 15u64, reserved: 0u64, unresolved: 0u64)))?
         let model_key = harness.EffectKey(run: 0u64, round: 0u64, kind: harness.MODEL, ordinal: 0u64)

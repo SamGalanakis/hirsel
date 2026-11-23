@@ -385,7 +385,9 @@ export class Client implements Transport {
   private compareIdentity(actual: Identity): void {
     const expected = this.options.identity;
     if (actual.digest.length === 0) this.options.onDiagnostic?.('identity unknown');
-    else if (expected && (!equal(expected.digest, actual.digest) || expected.target !== actual.target || expected.n_place !== actual.n_place))
+    else if (expected && expected.n_place !== actual.n_place)
+      this.options.onDiagnostic?.(`launch identity mismatch: these bindings were generated with n_place ${expected.n_place} and the place serves ${actual.n_place}; regenerate with hirsel sdk ts --n-place ${actual.n_place}`);
+    else if (expected && (!equal(expected.digest, actual.digest) || expected.target !== actual.target))
       this.options.onDiagnostic?.('launch identity mismatch');
   }
   private async allPlaced(): Promise<void> {

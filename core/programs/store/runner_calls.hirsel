@@ -1647,7 +1647,10 @@ fn serve_until_ready(tasks: Tasks, take settings: runner.PlaceConfig[(), Hd, (),
     loop {
         match channel.receive(phases) { Ok(Ready) => break, Ok(Starting(_)) => (), _ => fail("restart: no Ready") }
     }
-    let activation = latest.read(status).activation
+    let observed = latest.read(status)
+    // The launch word is the 16 MiB default here; the place configures N_PLACE.
+    want(observed.n_place == N_PLACE, "restart: Status reports the launch n_place, not the place's")
+    let activation = observed.activation
     result.unwrap(channel.send(stop_to, ()))
     if let Ok(Ok(Stopped(_))) = task.join(take running) {} else { fail("restart: place did not stop cleanly") }
     activation
@@ -1702,33 +1705,46 @@ fn test_restart_reopens(parent: Dir, clock: Clock, random: Random, tasks: Tasks,
     if law_restart_reopens(parent, clock, random, tasks, net) { Ok(()) } else { Error(()) }
 }
 
-// A wire n_place too large for the session ceiling is refused at start, naming the parameter,
-// its value and the largest value that fits. Oracle: the checkbox place serves at 1 MiB with
-// wire_defaults(65536, n), and a session holds n_place twice within its 16 MiB ceiling, so 4 MiB
-// cannot fit and the bound lies between them.
-pub fn law_oversized_n_place(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
+// Start refusals name what to change. Oracles: the checkbox place serves at 1 MiB with
+// wire_defaults(65536, n), and a session holds n_place twice within its 16 MiB ceiling, so
+// 4 MiB cannot fit and the bound lies between them; a wire configuration whose n_place is not
+// PlaceConfig.n_place is refused with both values (RUNNER-SPEC §6 "One n_place").
+fn refused_start(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, wire_n_place: u64, n_place: u64) -> runner.StartError waits {
     let mut name = string.with_capacity(32u64)
     let dir = result.unwrap(host.mkdtemp(parent, mut name))
     let ephemeral = Addr(ip: V4(0x7f000001u32), port: 0u16)
     let mut settings = managed_settings(dir, clock, random, tasks, net, ephemeral, runner.Stop(lag_ms: 0u64, grace_ms: 1000u64))
-    settings.session.n_place = 4194304u64
+    settings.session.n_place = wire_n_place
+    settings.n_place = n_place
     let (_held, stop): (Sender[()], Receiver[()]) = channel.new(1u64)
     let joined = runner.operate(take settings, take stop, result.unwrap(runner.status_root()), None)
     result.unwrap(std.dir.remove_all(parent, name))
-    let Error(take problem) = take joined else { fail("oversized n_place: the place started") }
-    let refused = match problem {
+    let Error(take problem) = take joined else { fail("start refusal: the place started") }
+    take problem
+}
+
+pub fn law_start_refusals(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
+    let oversized = refused_start(parent, clock, random, tasks, net, 4194304u64, 4194304u64)
+    let bounded = match oversized {
         Exceeds(over) => over.name == "n_place" && over.value == 4194304u64 && over.limit >= 1048576u64 && over.limit < 4194304u64,
         _ => false,
     }
-    want(refused, "oversized n_place: the refusal is not Exceeds naming n_place with a bound between 1 MiB and 4 MiB")
-    let text = runner.start_text(take problem)
-    want(std.string.find(text, 0u64, "n_place is 4194304") != None, "oversized n_place: the message does not name the parameter and its value")
+    want(bounded, "start refusal: 4 MiB n_place is not Exceeds naming n_place with a bound between 1 MiB and 4 MiB")
+    want(std.string.find(runner.start_text(take oversized), 0u64, "n_place is 4194304") != None, "start refusal: the n_place message does not name its value")
+    let split = refused_start(parent, clock, random, tasks, net, 2097152u64, N_PLACE)
+    let both = match split {
+        Disagrees(differ) => differ.name == "session.n_place" && differ.given == 2097152u64 && differ.used == N_PLACE,
+        _ => false,
+    }
+    want(both, "start refusal: a wire n_place unlike PlaceConfig.n_place is not refused with both values")
+    let text = runner.start_text(take split)
+    want(std.string.find(text, 0u64, "2097152") != None && std.string.find(text, 0u64, "1048576") != None, "start refusal: the disagreement message does not name both values")
     true
 }
 
 @test
-fn test_oversized_n_place(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
-    if law_oversized_n_place(parent, clock, random, tasks, net) { Ok(()) } else { Error(()) }
+fn test_start_refusals(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
+    if law_start_refusals(parent, clock, random, tasks, net) { Ok(()) } else { Error(()) }
 }
 
 @test

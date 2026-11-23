@@ -111,8 +111,11 @@ duplicate registration and timeout errors leave the output destination alone.
 
 The native launcher consumes the private prefix `--hirsel-describe` and
 `--hirsel-n-place=<bytes>` before constructing user `Args`. The allowance defaults
-to 16 MiB. An ordinary launch can also select its allowance with the latter
-option. Evaluator and embedded launch configurations carry the same mode and
+to 16 MiB. A place launched by the platform host or launcher runs at the
+allowance that option selects. A standalone place runs at its own
+`PlaceConfig.n_place` and ignores the option: its wire configuration must repeat
+that value or the start is refused `Disagrees` naming both, and `Status` and
+Welcome report it (RUNNER-SPEC §6 "One n_place"). Evaluator and embedded launch configurations carry the same mode and
 allowance explicitly. SDK generation uses the driver's `describe_child` helper;
 the CLI and generator share its bounded read, absolute deadline, kill and reap.
 
@@ -165,7 +168,7 @@ ordinary value codec. Its type, `ReleaseManifest`, is declared with `Describe` a
 
 - `describe` is the preview child's `Describe`: digest, target, `n_place` and
   the exported entries in registration order. `n_place` is the allowance the
-  child ran with. An ordinary launch that selects another `--hirsel-n-place`
+  child ran with. A hosted launch that selects another `--hirsel-n-place`
   is a different release identity, and Welcome and the status route report it.
 - `release` is the preview child's `release`, which it computes with
   `runner.release_digest`: SHA-256 over `u8 17 ‖ "hirsel.release.v1" ‖` the

@@ -86,7 +86,9 @@ pub opaque type TriggerContext: send {
 // `Exceeds` names a PlaceConfig or WireConfig setting, its value and the most this
 // place accepts for it (RUNNER-SPEC §12.1, runner.md "Sizing a place").
 pub type Bound: send { name: String, value: u64, limit: u64 }
-pub type StartError: send = Open(OpenError) | Listen(NetError) | Missing(String) | Exceeds(Bound) | Full(Capacity)
+// A configured value that disagrees with the one the place uses.
+pub type Differ: send { name: String, given: u64, used: u64 }
+pub type StartError: send = Open(OpenError) | Listen(NetError) | Missing(String) | Exceeds(Bound) | Disagrees(Differ) | Full(Capacity)
 pub type Ended: codec + send = Stopped(Option[u64]) | Unstarted | Forced(u64)
 
 // Private runtime-supplied launch metadata. The body is a declaration placeholder;
@@ -258,17 +260,23 @@ pub fn operate[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, 
     let launch_idle = launch_word(13u64, 0u64)
     if p.idle == Some(0u64) { return Error(Missing("idle")) }
     if p.stop.grace_ms == 0u64 { return Error(Missing("grace_ms")) }
-    if let Some(take problem) = session_problem(p.session, p.max_sessions) { return Error(take problem) }
     let PlaceConfig(backing: take backing, selection: selection, place: place, migrate: migrate, handles: handles, n_place: configured, n_publisher: n_publisher,
         session: wire_config, max_sessions: limit, proxies: take proxies,
         listen: listen, net: net, tasks: tasks, clock: clock, random: random, stop: stop_config, wire: take supplied_wire, triggers: take trigger_config, idle: configured_idle) = take p
     let idle = if launch_idle != 0u64 { Some(launch_idle) } else { configured_idle }
-    let n_place = if !none(launch_scratch()) { launch_word(0u64, 0u64) } else { configured }
+    // One n_place serves the place (§6 "One n_place"): the launch's under a host, otherwise
+    // PlaceConfig.n_place, which the wire configuration must repeat.
+    let hosted = !none(launch_scratch())
+    if !hosted && wire_config.n_place != configured {
+        return Error(Disagrees(Differ(name: string.from("session.n_place"), given: wire_config.n_place, used: configured)))
+    }
+    let n_place = if hosted { launch_word(0u64, 0u64) } else { configured }
     let mut session_config = wire_config
     session_config.n_place = n_place
     if let Some(take problem) = session_problem(session_config, limit) { return Error(take problem) }
     let watch = status_watch(take watching)?
     let mut current = copy_status(latest.read(status))
+    current.n_place = n_place
     publish_phase(status, watch, mut current, Starting(Recovering))?
     let (to, inbox): (Sender[LifeEvent], Receiver[LifeEvent]) = channel.new(12u64)
     let (head_to, inbox_head): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(64u64)
@@ -1045,6 +1053,14 @@ pub fn start_text(problem: StartError) -> String {
             string.push(mut line, ", above the most this place accepts, ")
             string.push_u64(mut line, over.limit)
             if over.name == "n_place" { string.push(mut line, " (a wire session holds n_place twice within its 16 MiB ceiling; lower n_place or n_service)") }
+        },
+        Disagrees(differ) => {
+            string.push(mut line, differ.name)
+            string.push(mut line, " is ")
+            string.push_u64(mut line, differ.given)
+            string.push(mut line, " but PlaceConfig.n_place is ")
+            string.push_u64(mut line, differ.used)
+            string.push(mut line, "; pass the same n_place to wire_defaults, PlaceConfig and hirsel sdk ts --n-place")
         },
         Full(cap) => {
             string.push(mut line, "the executable's root limit cannot hold this place: ")
@@ -9678,7 +9694,7 @@ fn wire_step_input[G: send, H: send, B: send](mut s: WireSession[G, H, B], mut w
                         None => return Error(1008u16),
                     }
                     let q: u32 = int.narrow(s.config.q)
-                    return Ok(Some(Welcome(take caller, q, s.config.budget, result.unwrap(launch_digest()), clone(s.target), launch_word(0u64, 0u64))))
+                    return Ok(Some(Welcome(take caller, q, s.config.budget, result.unwrap(launch_digest()), clone(s.target), s.config.n_place)))
                 }
                 let index = s.placing - 1u64
                 let slot: u32 = int.narrow(index)

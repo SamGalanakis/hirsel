@@ -241,6 +241,12 @@ export async function laws(codec, only, mutant) {
       assert.equal(h.client.state,'Ready');h.server.check();
     }
   };
+  // The scripted Welcome serves n_place 1024; bindings generated for another value name both.
+  tests.n_place_mismatch_names_both=async()=>{
+    const h=await setup(new Memory(),{identity:{digest:bytes(3),target:'test',n_place:2048n}});await ready(h);
+    const named=h.diagnostics.filter(d=>d.startsWith('launch identity mismatch'));
+    assert.equal(named.length,1);assert(named[0].includes('2048')&&named[0].includes('1024'),named[0]);
+  };
   tests.history_unavailable_retires=async()=>{
     const h=await setup();await ready(h);
     let a=h.client.call(want,bytes(7),x=>x);await settle();h.server.answer(h.server.sockets[0],0,0n,returned(7));await settle();await a;

@@ -53,8 +53,9 @@ exactly; the host passes it and an application does not need it.
 
 **Why a place did not start.** `runner.start_text(problem)` is one line naming a
 `StartError` and what to change; `runner.main` prints it on stderr. `Exceeds(bound)`
-names a setting, its value and the most this place accepts, and `Missing(name)` a
-setting that is zero or too small.
+names a setting, its value and the most this place accepts, `Disagrees(differ)` a
+setting that repeats another with a different value, and `Missing(name)` a setting
+that is zero or too small.
 
 **`PlaceConfig.wire`.** `None` serves anonymous sessions: each Hello gets a fresh
 anonymous Caller and a granted entry is `Refused(NotAllowed)`. `Some(runner.wire(grant,
@@ -69,9 +70,14 @@ bind, ..))` binds the same way and carries no grant, so granted entries stay
 `budget` and `socket.max_frame`. With `wire_defaults(65536, n_place)`, an `n_place` of
 1 MiB fits and 4 MiB does not; a place that does not fit is refused
 `Exceeds(n_place, value, most)`, where `most` is the largest `n_place` this
-configuration fits. `PlaceConfig.n_place` bounds `place` in the head, and launches
-that report a launch identity (`hirsel sdk ts --n-place`, `--hirsel-n-place`) must
-use the same value.
+configuration fits. A standalone place has one `n_place`, `PlaceConfig.n_place`: it
+bounds `place` in the head and every session, and `Status` and Welcome report it.
+The wire configuration must repeat it, and one that does not is refused
+`Disagrees(name, given, used)` with both values. A standalone start ignores
+`--hirsel-n-place`. Under the platform host the recipe's `n_place` (`hirsel publish
+--n-place`) replaces both. Generate the SDK with the same value (`hirsel sdk ts
+--n-place`); a client whose bindings carry another value reports both on its
+`launch identity mismatch` diagnostic.
 
 **Sizing `--limit`.** `runner.operate_bytes(config)` is what `operate` spends: the
 head (`n_place`, `n_publisher` and the store's journal reserve), every session's

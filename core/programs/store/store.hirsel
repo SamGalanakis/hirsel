@@ -421,7 +421,6 @@ fn staged_bytes(value: StagedValue) -> View[Bytes] in value {
 // operations in insertion order.
 type DataRows: shareable + send {
     count: u64,
-    tail_key: Option[u64],
     first: Inline[DataOp, 2],
     rest: List[DataOp]
 }
@@ -431,7 +430,7 @@ fn new_data_rows() -> DataRows {
         DataOp(key: list.new(), value: None),
         DataOp(key: list.new(), value: None),
     ]
-    DataRows(count: 0, tail_key: None, first: take first, rest: list.new())
+    DataRows(count: 0, first: take first, rest: list.new())
 }
 
 fn data_row(rows: DataRows, slot: u64) -> View[DataOp] in rows {
@@ -459,6 +458,10 @@ type DataOps {
 }
 
 const SCANNED_OPS: u64 = 8
+// A journaled draft starts open. The first inserted typed key supplies its row slot.
+// The two sentinels are outside the range of slots in a bounded COMMIT frame.
+const NO_FRAME_TAIL: u64 = 18446744073709551615
+const OPEN_FRAME_TAIL: u64 = NO_FRAME_TAIL - 1
 
 fn empty_ops() -> DataOps {
     DataOps(rows: new_data_rows(), slots: map.new())
@@ -484,7 +487,7 @@ pub opaque scoped type Tx {
     private_from: u64,
     resident: u64,
     retain_old: bool,
-    journaled: bool,
+    frame_tail: u64,
     reads: View[Log[Read]],
     issued: View[Log[u64]],
     refusal: Option[Capacity],
@@ -1251,6 +1254,7 @@ type Prepared[R, A] {
     live: u64,
     frame: Option[Bytes],
     ops: DataRows,
+    frame_tail: u64,
     stream_ops: DataRows,
     first_stamp: u64,
     prepared_roots: bool,
@@ -1322,9 +1326,9 @@ fn raised_capacity(causes: Causes) -> Option[Capacity] {
 }
 
 fn draft_body[R, A](db: Db, i: u64, ci: CallInfo, keep_reply: Option[fn(A) -> bool], reads: Log[Read], issued: Log[u64], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Finished[R, A] {
-    let mut tx = Tx(store: db.store, roots: share_roots(db.heads[i].roots), ids: db.next_node, private_from: int.saturating_add(db.next_node, 1), resident: db.resident, retain_old: retaining(db), journaled: match db.journal {
-        Some(_) => true,
-        None => false,
+    let mut tx = Tx(store: db.store, roots: share_roots(db.heads[i].roots), ids: db.next_node, private_from: int.saturating_add(db.next_node, 1), resident: db.resident, retain_old: retaining(db), frame_tail: match db.journal {
+        Some(_) => OPEN_FRAME_TAIL,
+        None => NO_FRAME_TAIL,
     }, reads: view reads, issued: view issued, refusal: None, frame_bytes: 42, wrote: false, ops: empty_ops(), info: ci, stream_ops: empty_ops(), extra_bytes: 0, call: None)
     let outcome = body(mut tx)
     if let Some(c) = tx.refusal {
@@ -1349,13 +1353,14 @@ fn draft_body[R, A](db: Db, i: u64, ci: CallInfo, keep_reply: Option[fn(A) -> bo
             tx.roots.collections = share_page_tree(db.heads[i].roots.collections)
             tx.roots.catalog = share_page_tree(db.heads[i].roots.catalog)
             tx.ops = empty_ops()
+            tx.frame_tail = NO_FRAME_TAIL
             Error(take a)
         }
     }
-    let Tx(store: _, roots: take roots, ids: _, private_from: first_stamp, resident: live, retain_old: _, journaled: _, reads: _, issued: _, refusal: _, frame_bytes: _, wrote: _, ops: take ops, info: _, stream_ops: take stream_ops, extra_bytes: _, call: take call) = take tx
+    let Tx(store: _, roots: take roots, ids: _, private_from: first_stamp, resident: live, retain_old: _, frame_tail: frame_tail, reads: _, issued: _, refusal: _, frame_bytes: _, wrote: _, ops: take ops, info: _, stream_ops: take stream_ops, extra_bytes: _, call: take call) = take tx
     let DataOps(rows: take rows, slots: _) = take ops
     let DataOps(rows: take stream_rows, slots: _) = take stream_ops
-    Prepared(Prepared(outcome: take value, roots: take roots, live: live, frame: None, ops: take rows, stream_ops: take stream_rows, first_stamp: first_stamp, prepared_roots: false, call: take call))
+    Prepared(Prepared(outcome: take value, roots: take roots, live: live, frame: None, ops: take rows, frame_tail: frame_tail, stream_ops: take stream_rows, first_stamp: first_stamp, prepared_roots: false, call: take call))
 }
 
 fn frame_draft[R, A](db: Db, ci: CallInfo, rec: Option[CallRecord], settlement: Option[Settlement], take finished: Finished[R, A]) -> Result[Finished[R, A], Capacity] {
@@ -1364,7 +1369,7 @@ fn frame_draft[R, A](db: Db, ci: CallInfo, rec: Option[CallRecord], settlement: 
         Prepared(take ready) => {
             let mut prepared = take ready
             if let Some(_) = db.journal {
-                prepared.frame = Some(encode_staged(ci, mut prepared.ops, prepared.stream_ops, prepared.call, rec, settlement, db.file_seq, db.file_end)?)
+                prepared.frame = Some(encode_staged(ci, mut prepared.ops, prepared.frame_tail, prepared.stream_ops, prepared.call, rec, settlement, db.file_seq, db.file_end)?)
             }
             Ok(Prepared(take prepared))
         },
@@ -1393,7 +1398,7 @@ fn finish_stage[R, A](ci: CallInfo, take finished: Finished[R, A], take seen: Li
         RolledBack(take o) => return Over(take o),
         Prepared(take tx) => take tx,
     }
-    let Prepared(outcome: take outcome, roots: take roots, live: live, frame: take frame, ops: take operations, stream_ops: take stream_edits, first_stamp: first_stamp, prepared_roots: prepared_roots, call: _) = take prepared
+    let Prepared(outcome: take outcome, roots: take roots, live: live, frame: take frame, ops: take operations, frame_tail: _, stream_ops: take stream_edits, first_stamp: first_stamp, prepared_roots: prepared_roots, call: _) = take prepared
     let mut admits_rows = stream_edits.count != 0
     if !admits_rows {
         for slot in 0u64 .. operations.count {
@@ -2165,7 +2170,10 @@ fn apply_put(mut tx: Tx, take p: Bytes, take val: Bytes, tail: bool) -> Result[(
     }
     let _ = reserve_ids(mut tx, height)?
     let value = stage_value(take val, tx.roots.collections.inline)
-    save_data_op(mut tx.ops, take p, Some(take value), tail)
+    let position = save_data_op(mut tx.ops, take p, Some(take value))
+    if tail {
+        tx.frame_tail = position
+    }
     tx.resident = int.saturating_add(int.saturating_sub(tx.resident, old_charge), charge)
     tx.wrote = true
     Ok(())
@@ -2196,7 +2204,7 @@ fn delete_refund(tx: Tx, key: Bytes) -> Option[u64] {
 fn apply_delete(mut tx: Tx, take p: Bytes, refund: u64) -> Result[(), Error] {
     let height = collection_write_height(tx.roots.collections, p)
     let _ = reserve_ids(mut tx, height)?
-    save_data_op(mut tx.ops, take p, None, false)
+    let _ = save_data_op(mut tx.ops, take p, None)
     tx.resident = int.saturating_sub(tx.resident, refund)
     Ok(())
 }
@@ -2344,7 +2352,7 @@ fn stream_write(mut tx: Tx, take key: Bytes, take value: Bytes, call_size: u64) 
     let height = tree_height(tx.roots.streams)
     let _ = reserve_ids(mut tx, height)?
     let raw = stage_value(take value, tx.roots.streams.inline)
-    save_data_op(mut tx.stream_ops, take key, Some(take raw), false)
+    let _ = save_data_op(mut tx.stream_ops, take key, Some(take raw))
     tx.resident = int.saturating_add(int.saturating_sub(tx.resident, old_charge), charge)
     tx.extra_bytes = extra
     tx.wrote = true
@@ -2894,28 +2902,26 @@ fn test_foreign(c: Clock) -> Result[(), ()] waits {
     }
 }
 
-fn save_data_op(mut ops: DataOps, take key: Bytes, take value: Option[StagedValue], tail: bool) {
+fn save_data_op(mut ops: DataOps, take key: Bytes, take value: Option[StagedValue]) -> u64 {
     if let Some(slot) = op_slot(ops, key) {
         if slot < 2 {
             ops.rows.first[slot].value = take value
         } else {
             ops.rows.rest[slot - 2].value = take value
         }
-    } else {
-        let position = ops.rows.count
-        if position == SCANNED_OPS {
-            for earlier in 0u64 .. position {
-                map.insert(mut ops.slots, clone(data_row(ops.rows, earlier).key), earlier)
-            }
-        }
-        if position >= SCANNED_OPS {
-            map.insert(mut ops.slots, clone(key), position)
-        }
-        push_data_row(mut ops.rows, DataOp(key: take key, value: take value))
-        if tail {
-            ops.rows.tail_key = Some(position)
+        return OPEN_FRAME_TAIL
+    }
+    let position = ops.rows.count
+    if position == SCANNED_OPS {
+        for earlier in 0u64 .. position {
+            map.insert(mut ops.slots, clone(data_row(ops.rows, earlier).key), earlier)
         }
     }
+    if position >= SCANNED_OPS {
+        map.insert(mut ops.slots, clone(key), position)
+    }
+    push_data_row(mut ops.rows, DataOp(key: take key, value: take value))
+    position
 }
 
 fn transaction_row(tx: Tx, key: Bytes) -> Option[View[Bytes]] in tx {
@@ -3139,21 +3145,21 @@ fn encode_call(mut payload: Bytes, record: CallRecord, settlement: Option[Settle
     }
 }
 
-fn encode_staged(ci: CallInfo, mut ops: DataRows, streams: DataRows, call: Option[CallSection], rec: Option[CallRecord], settlement: Option[Settlement], seq: u64, offset: u64) -> Result[Bytes, Capacity] {
+fn encode_staged(ci: CallInfo, mut ops: DataRows, tail: u64, streams: DataRows, call: Option[CallSection], rec: Option[CallRecord], settlement: Option[Settlement], seq: u64, offset: u64) -> Result[Bytes, Capacity] {
     if let Some(record) = rec {
-        return encode_frame(ci, mut ops, streams, Some(view record), settlement, seq, offset)
+        return encode_frame(ci, mut ops, tail, streams, Some(view record), settlement, seq, offset)
     }
-    encode_sections(ci, mut ops, streams, call, seq, offset)
+    match call {
+        Some(section) => encode_frame(ci, mut ops, tail, streams, Some(view section.record), section.settlement, seq, offset),
+        None => encode_frame(ci, mut ops, tail, streams, None, None, seq, offset),
+    }
 }
 
 fn encode_sections(ci: CallInfo, mut ops: DataRows, streams: DataRows, call: Option[CallSection], seq: u64, offset: u64) -> Result[Bytes, Capacity] {
-    match call {
-        Some(section) => encode_frame(ci, mut ops, streams, Some(view section.record), section.settlement, seq, offset),
-        None => encode_frame(ci, mut ops, streams, None, None, seq, offset),
-    }
+    encode_staged(ci, mut ops, NO_FRAME_TAIL, streams, call, None, None, seq, offset)
 }
 
-fn encode_frame(ci: CallInfo, mut ops: DataRows, streams: DataRows, call: Option[View[CallRecord]], settlement: Option[Settlement], seq: u64, offset: u64) -> Result[Bytes, Capacity] {
+fn encode_frame(ci: CallInfo, mut ops: DataRows, tail: u64, streams: DataRows, call: Option[View[CallRecord]], settlement: Option[Settlement], seq: u64, offset: u64) -> Result[Bytes, Capacity] {
     let data = ops.count != 0 || streams.count == 0
     let stream = streams.count != 0
     let sections = (if data {
@@ -3185,13 +3191,14 @@ fn encode_frame(ci: CallInfo, mut ops: DataRows, streams: DataRows, call: Option
     }
     let order = data_order(ops)?
     let room = 16 + size + BINDING_BYTES
-    let mut out: Bytes = match ops.tail_key {
-        Some(slot) => if slot < 2 {
-            bytebuf.from_tail(mut ops.first[slot].key, room)
-        } else {
-            bytebuf.from_tail(mut ops.rest[slot - 2].key, room)
-        },
-        None => list.with_capacity(room),
+    let mut out: Bytes = if tail == 0 {
+        bytebuf.from_tail(mut ops.first[0].key, room)
+    } else if tail == 1 {
+        bytebuf.from_tail(mut ops.first[1].key, room)
+    } else if tail < OPEN_FRAME_TAIL {
+        bytebuf.from_tail(mut ops.rest[tail - 2].key, room)
+    } else {
+        list.with_capacity(room)
     }
     le(mut out, 0x0011, 2)?
     le(mut out, 1, 2)?
@@ -5240,7 +5247,7 @@ fn test_typed_indexes(c: Clock) -> Result[(), ()] waits {
 
 pub fn put[K, V](mut tx: Tx, t: Table[K, V], k: K, v: V) -> Result[(), Error] {
     writable(tx, t)?
-    let tail = tx.journaled && tx.ops.rows.tail_key == None
+    let tail = tx.frame_tail == OPEN_FRAME_TAIL
     let mut p = prefixed(t.id, 8, tail)?
     std.codec.encode_key(t.key, k, mut p)
     put_impl(mut tx, t, take p, v, tail)
@@ -6514,7 +6521,7 @@ pub fn look[R](s: Snapshot, steps: Option[u64], body: scoped[view] fn(Tx) -> R) 
     let issued: Log[u64] = log.new()
     let caught = isolate(fn() -> Result[R, OutOfTime] {
         let perform = scoped fn() -> R {
-            let tx = Tx(store: s.store, roots: share_roots(s.roots), ids: 0, private_from: 1, resident: 0, retain_old: false, journaled: false, reads: view reads, issued: view issued, refusal: None, frame_bytes: 42, wrote: false, ops: empty_ops(), info: CallInfo(id: CallId(store: s.store, branch: s.branch, version: s.head), at: 0, seed: 0), stream_ops: empty_ops(), extra_bytes: 0, call: None)
+            let tx = Tx(store: s.store, roots: share_roots(s.roots), ids: 0, private_from: 1, resident: 0, retain_old: false, frame_tail: NO_FRAME_TAIL, reads: view reads, issued: view issued, refusal: None, frame_bytes: 42, wrote: false, ops: empty_ops(), info: CallInfo(id: CallId(store: s.store, branch: s.branch, version: s.head), at: 0, seed: 0), stream_ops: empty_ops(), extra_bytes: 0, call: None)
             body(tx)
         }
         match steps {

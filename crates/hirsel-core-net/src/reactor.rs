@@ -344,9 +344,17 @@ struct Uring {
     sq: Mutex<()>,
     /// Live polls by tag, for re-arming one the kernel ended. Lock before `sq`.
     armed: Mutex<HashMap<u64, i32>>,
+    /// Live polls the kernel ended, waiting for completion-queue room to be
+    /// re-armed. Touched only under the driver turn.
+    ended: Mutex<Vec<u64>>,
 }
 impl Uring {
     const ENTRIES: u32 = 64;
+    /// The kernel clamps this to its own maximum (65536 on Linux 6.8). Tests
+    /// use a small queue so a few thousand sockets overflow it.
+    #[cfg(not(test))]
+    const COMPLETIONS: u32 = 65536;
+    #[cfg(test)]
     const COMPLETIONS: u32 = 1024;
 
     /// A ring whose kernel runs multishot polls and bounded waits, with its
@@ -357,6 +365,7 @@ impl Uring {
         let unsupported = || io::Error::from(io::ErrorKind::Unsupported);
         let ring = io_uring::IoUring::builder()
             .setup_cqsize(Self::COMPLETIONS)
+            .setup_clamp()
             .build(Self::ENTRIES)?;
         if !ring.params().is_feature_ext_arg() || !ring.params().is_feature_nodrop() {
             return Err(unsupported());
@@ -372,6 +381,7 @@ impl Uring {
             ring,
             sq: Mutex::new(()),
             armed: Mutex::new(HashMap::new()),
+            ended: Mutex::new(Vec::new()),
         };
         let wake = eventfd()?;
         uring.add(wake.as_raw_fd(), WAKE)?;
@@ -461,6 +471,7 @@ impl Uring {
     /// not block and -1 blocks until a completion.
     fn wait(&self, out: &mut [libc::epoll_event], timeout_ms: i32) -> usize {
         let n = self.reap(out);
+        self.rearm_ended();
         if n != 0 {
             return n;
         }
@@ -479,7 +490,34 @@ impl Uring {
         // A timeout, an interrupt or a full completion queue is a turn with
         // whatever completions are already posted.
         let _ = entered;
-        self.reap(out)
+        let n = self.reap(out);
+        self.rearm_ended();
+        n
+    }
+
+    /// Re-arm ended polls into at most half the completion queue's free room,
+    /// under the driver turn. A ready descriptor posts as soon as its poll is
+    /// armed; re-arming into a full queue ends that poll again at once, and
+    /// the pair would cycle without end.
+    fn rearm_ended(&self) {
+        let mut ended = self.ended.lock().unwrap_or_else(|e| e.into_inner());
+        if ended.is_empty() {
+            return;
+        }
+        // SAFETY: the caller holds the driver turn, the only completion reader.
+        let mut cq = unsafe { self.ring.completion_shared() };
+        cq.sync();
+        let room = (cq.capacity() - cq.len()) / 2;
+        drop(cq);
+        let take = ended.len().min(room);
+        let armed = self.armed.lock().unwrap_or_else(|e| e.into_inner());
+        for tag in ended.drain(..take) {
+            if let Some(&fd) = armed.get(&tag) {
+                // A refused re-arm leaves the descriptor reported ready, so
+                // its waiters retry and see the error from the socket.
+                let _ = self.arm(fd, tag);
+            }
+        }
     }
 
     /// Translate posted completions into `(tag, flags)` events.
@@ -498,13 +536,21 @@ impl Uring {
             let mut flags = if res > 0 { res as u32 } else { 0 };
             if !io_uring::cqueue::more(cqe.flags()) {
                 // The kernel ended this poll (a cancel when its submitting
-                // thread exited, or an overflowing completion queue). Re-arm
-                // a live one and report it ready, so its waiters retry.
-                let armed = self.armed.lock().unwrap_or_else(|e| e.into_inner());
-                let Some(&fd) = armed.get(&tag) else { continue };
-                if self.arm(fd, tag).is_err() {
-                    flags |= libc::EPOLLERR as u32;
+                // thread exited, or a completion that found the queue full).
+                // Report a live one ready, so its waiters retry, and re-arm
+                // it once the queue has room.
+                if !self
+                    .armed
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .contains_key(&tag)
+                {
+                    continue;
                 }
+                self.ended
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(tag);
                 flags |= (libc::EPOLLIN | libc::EPOLLOUT) as u32;
             }
             if flags != 0 {
@@ -1004,6 +1050,72 @@ mod tests {
         peer.write_all(b"x").unwrap();
         sockets.arm(key, false, 6).unwrap();
         assert!(readied(&mut sockets, 6), "{:?}", reactor());
+    }
+
+    /// More sockets turn ready at once than the io_uring completion queue
+    /// holds. Every one must still be reported: none of the edges past the
+    /// queue's capacity may be lost.
+    #[test]
+    fn readiness_beyond_the_completion_queue_is_all_reported() {
+        const SOCKETS: usize = 3 * Uring::COMPLETIONS as usize;
+        let mut limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: plain resource-limit calls on this process.
+        unsafe {
+            assert_eq!(libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit), 0);
+            limit.rlim_cur = limit.rlim_max;
+            assert_eq!(libc::setrlimit(libc::RLIMIT_NOFILE, &limit), 0);
+        }
+        assert!(limit.rlim_cur as usize > 2 * SOCKETS + 64, "{limit:?}");
+        let mut sockets = Sockets::default();
+        let mut peers = Vec::with_capacity(SOCKETS);
+        let mut keys = Vec::with_capacity(SOCKETS);
+        for token in 0..SOCKETS as u64 {
+            let (socket, peer) = UnixStream::pair().unwrap();
+            socket.set_nonblocking(true).unwrap();
+            let key = sockets.insert(socket.into()).unwrap();
+            sockets.arm(key, false, token).unwrap();
+            keys.push(key);
+            peers.push(peer);
+        }
+        // Each registration's first report, before any byte arrived. A reader
+        // woken now finds no byte and waits again, as a real waiter does. The
+        // reactor must settle: no readiness is reported while nothing changes.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut woken = Vec::new();
+        while sockets.poll(0, |token| woken.push(token)).unwrap() != 0 {
+            for token in woken.drain(..) {
+                sockets.arm(keys[token as usize], false, token).unwrap();
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "readiness never settled under {:?}",
+                reactor()
+            );
+        }
+        for peer in &mut peers {
+            peer.write_all(b"x").unwrap();
+        }
+        let mut seen = vec![false; SOCKETS];
+        let mut left = SOCKETS;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while left != 0 && std::time::Instant::now() < deadline {
+            sockets
+                .poll(20, |token| {
+                    let seen = &mut seen[token as usize];
+                    left -= usize::from(!*seen);
+                    *seen = true;
+                })
+                .unwrap();
+        }
+        assert_eq!(
+            left,
+            0,
+            "{left} of {SOCKETS} unreported under {:?}",
+            reactor()
+        );
     }
 
     /// Releasing a listener frees its address on return, as closing it

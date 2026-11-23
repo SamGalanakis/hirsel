@@ -268,8 +268,16 @@ impl Drop for TxSlot {
         let ring = self.ring();
         let mut table = ring.tx();
         table.entries[self.index as usize].held = false;
-        if !table.entries[self.index as usize].busy() {
-            ring.recycle(&mut table, self.index);
+        if table.entries[self.index as usize].busy() {
+            return;
+        }
+        let first = table.idle.is_empty();
+        ring.recycle(&mut table, self.index);
+        drop(table);
+        // A turn already blocked on another thread chose its timeout with no
+        // slot kept; wake it so it bounds the wait for the trim.
+        if first {
+            self.poller.wake();
         }
     }
 }

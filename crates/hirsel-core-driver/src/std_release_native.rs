@@ -523,6 +523,9 @@ fn a_separate_std_is_lowered_once_for_the_roots_a_program_reaches() {
     let mut entries: Map[String, u64] = map.new()
     map.insert(mut entries, "right", 1)
     if let Some(_) = map.get(entries, "right") {{
+        if float.to_bits64(float.exp(0.0)) != 0x3ff0000000000000 {{
+            return None
+        }}
         string.find(s, 0, "right")
     }} else {{
         None
@@ -536,6 +539,7 @@ fn a_separate_std_is_lowered_once_for_the_roots_a_program_reaches() {
         hirsel_core_ir::Identity::plain(DefPath::from_full("std@1/string/split_once").unwrap());
     let first_lane =
         hirsel_core_ir::Identity::plain(DefPath::from_full("core@1/map/first_lane").unwrap());
+    let exp = hirsel_core_ir::Identity::plain(DefPath::from_full("std@1/float/exp").unwrap());
     let mut options = native_options(Backend::Llvm, &dir.path().join(name));
     options.optimize = true;
     options.instance_limit = crate::native::DEFAULT_INSTANCE_LIMIT;
@@ -576,6 +580,7 @@ fn a_separate_std_is_lowered_once_for_the_roots_a_program_reaches() {
             assert_eq!(std.lowered, 0, "a build over the stored side lowers none of it");
         }
         assert!(!std.lent.is_empty(), "the std lends bodies");
+        assert!(std.roots.contains(&exp), "the std side optimises the scalar routine");
         sides.push((std.key, std.codes(), std.lent));
         if cache == "cache-b" {
             // The recipe outlives its inputs: with the program's source and

@@ -12,7 +12,8 @@
 //! ([`callable_variants::takes_code`]), those that make an owned network wait,
 //! whose returnable variants a program builds, and the plain roots called
 //! by program helpers and specialised library instances, so their call
-//! chains can optimise together.
+//! chains can optimise together. Scalar floating-point routines can lend
+//! their separately optimised bodies to call sites that pass only values.
 //!
 //! The unit and a program meet at five contracts:
 //! - callable: each root is defined under its instance symbol, and one
@@ -35,7 +36,7 @@ use super::recipe_build::Unit;
 use super::*;
 use crate::native::{NativeOptions, NativeStop, ObjectProduct};
 use hirsel_core_ir::step_contexts::Summary;
-use hirsel_core_ir::{Callee, FuncId, Identity};
+use hirsel_core_ir::{Callee, FuncId, Identity, Param};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 
@@ -188,9 +189,20 @@ fn program_side(
             let Some(body) = &function.body else { continue };
             for call in &body.calls {
                 if let Callee::Direct(callee) = call.callee {
-                    let callee = unit
-                        .module
-                        .identity(unit.module.functions[callee.index()].instance);
+                    let function = &unit.module.functions[callee.index()];
+                    let signature = &unit.module.signatures[function.signature.index()];
+                    // These calls pass only floating-point values: the side
+                    // can optimise the routine before the caller inlines it.
+                    if signature.dest.is_none()
+                        && matches!(signature.results.as_slice(), [ty] if ty.is_float())
+                        && signature
+                            .params
+                            .iter()
+                            .all(|param| matches!(param, Param::Value(ty) if ty.is_float()))
+                    {
+                        continue;
+                    }
+                    let callee = unit.module.identity(function.instance);
                     if plain(&callee) {
                         local_roots.push(callee);
                     }

@@ -1376,9 +1376,12 @@ fn stage_call[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_repl
     })
     let consumed = log.finish(take issued)
     // An overrun under rollback_writes_on_overrun drops its stamps, so a later
-    // reservation may log a lower end: the watermark is the highest.
+    // reservation may log a lower end: the watermark is the highest. The
+    // comparison takes no step, so each entry costs its loop step alone.
     for n in consumed {
-        db.next_node = order.max(db.next_node, n)
+        if n > db.next_node {
+            db.next_node = n
+        }
     }
     let seen = log.finish(take reads)
     match take caught {
@@ -1564,7 +1567,9 @@ fn draft_call(db: Db, complete: Completion, ci: CallInfo, plan: Plan, rec: Optio
             let CallDraft(finished: take result, reads: take reads, issued: take issued) = take draft
             let consumed = log.finish(take issued)
             for n in consumed {
-                next_id = order.max(next_id, n)
+                if n > next_id {
+                    next_id = n
+                }
             }
             finish_stage(ci, take result, log.finish(take reads))
         },
@@ -18636,6 +18641,105 @@ pub fn law_call_reserve(c: Clock) -> bool waits {
         _ => false,
     }
     kept_inside && reserve_settles_pin(c, 10, plan) && reserve_settles_pin(c, 100000, plan)
+}
+
+// A body that puts one row `k` times, so it logs `k` issued ids, then burns
+// `burn` steps.
+fn latch_body(mut tx: Tx, k: u64, burn: u64) -> Result[Bytes, Bytes] {
+    for i in 0u64 .. k {
+        if let Error(_) = put_bytes(mut tx, 1, key_word(1), key_word(i)) {
+            return Error(key_word(1))
+        }
+    }
+    for _ in 0u64 .. burn {}
+    Ok(key_word(7))
+}
+
+// L33's latch term: the grant of s_e + 6 + n_e / 8 steps covers a body that
+// spends its whole s_e and logs as many issued ids as n_e bytes hold. Here
+// k = 255 puts and the reply's reservation log 256 ids in the least n_e that
+// admits them, 8 bytes each and the draft's other admissions besides, so
+// n_e / 8 is 256 plus a few latches. Oracle, by hand from MEM-30:
+// reconciling the log takes one loop step per entry, 256 steps, and fits; a
+// reconciliation of two steps per entry would need 512, and does not.
+pub fn law_reserve_latches(c: Clock) -> bool waits {
+    let k = 255u64
+    let mut db = raw_test_db(c, 1073741824)
+    let key = key_word(29)
+    let admission = result.unwrap(admit(mut db, key, 0, request_digest(key, key)))
+    let Admitted(take complete) = take admission else {
+        return false
+    }
+    let ci = next_call_info(db)
+    let no_record: Option[CallRecord] = None
+    let s_e = 200000u64
+    // The least n_e that admits the body.
+    let mut low = 1u64
+    let mut high = 65536u64
+    while low < high {
+        let mid = (low + high) / 2
+        let drafted = draft_call(db, complete, ci, Plan(n_e: mid, s_e: s_e, reply_max: 64), no_record, scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] {
+            latch_body(mut tx, k, 0)
+        })
+        match drafted.stage {
+            Ran(_) => {
+                high = mid
+            },
+            _ => {
+                low = mid + 1
+            },
+        }
+    }
+    let plan = Plan(n_e: low, s_e: s_e, reply_max: 64)
+    let Some(grant) = call_reserves(plan) else {
+        return false
+    }
+    // The most steps the body can burn and still return within s_e.
+    let mut least = 0u64
+    let mut most = s_e
+    while least < most {
+        let mid = (least + most + 1) / 2
+        let drafted = draft_call(db, complete, ci, plan, no_record, scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] {
+            latch_body(mut tx, k, mid)
+        })
+        match drafted.stage {
+            Ran(_) => {
+                least = mid
+            },
+            _ => {
+                most = mid - 1
+            },
+        }
+    }
+    let saturated = least
+    let full = draft_call(db, complete, ci, plan, no_record, scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] {
+        latch_body(mut tx, k, saturated)
+    })
+    match full.stage {
+        Ran(_) => (),
+        _ => return false,
+    }
+    let granted = bound steps grant.steps + 1u64 {
+        metered_draft(db, complete, ci, plan, grant, no_record, scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] {
+            latch_body(mut tx, k, saturated)
+        })
+    }
+    match take granted {
+        Ok(Ok(draft)) => match draft.stage {
+            Ran(_) => true,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+@test
+fn test_reserve_latches(c: Clock) -> Result[(), ()] waits {
+    if law_reserve_latches(c) {
+        Ok(())
+    } else {
+        Error(())
+    }
 }
 
 // Build the pinned tree directly so its size does not make the setup a call.

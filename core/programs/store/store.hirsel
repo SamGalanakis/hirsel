@@ -3383,7 +3383,7 @@ pub opaque type Readers[V]: shareable + send {
 
 type IndexOf[V]: send {
     id: u32,
-    extract: own[send] fn(V) -> Result[Bytes, Capacity]
+    extract: own[send] fn(V, Option[u32], Bytes) -> Result[Bytes, Capacity]
 }
 
 pub opaque type Table[K, V]: send {
@@ -3425,7 +3425,7 @@ type IndexSpec[V]: send {
     name: String,
     by: Bytes,
     key: Bytes,
-    extract: own[send] fn(V) -> Result[Bytes, Capacity]
+    extract: own[send] fn(V, Option[u32], Bytes) -> Result[Bytes, Capacity]
 }
 
 pub opaque type TableSpec[K, V]: send {
@@ -3439,13 +3439,21 @@ pub fn spec[K, V](take name: String, take key: std.codec.Key[K], take value: std
     TableSpec(name: take name, key: key, value: value, indexes: list.new())
 }
 
-// The one place an index extractor is erased, for `index` and `with_index`
-// alike: `by`, then the key codec, as the bytes an index entry starts with.
-fn erase[J, V](by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J]) -> Result[own[send] fn(V) -> Result[Bytes, Capacity], Error] {
-    let made: own[send] fn(V) -> Result[Bytes, Capacity] = fn(v: V) -> Result[Bytes, Capacity] {
+// Encode the index key straight into the row key, between the optional
+// collection prefix and the encoded primary key.
+fn erase[J, V](by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J]) -> Result[own[send] fn(V, Option[u32], Bytes) -> Result[Bytes, Capacity], Error] {
+    let made: own[send] fn(V, Option[u32], Bytes) -> Result[Bytes, Capacity] = fn(v: V, collection: Option[u32], primary: Bytes) -> Result[Bytes, Capacity] {
         let j = (code.callable(by))(v)?
-        let mut raw: Bytes = list.new()
+        let mut raw: Bytes = match collection {
+            Some(id) => {
+                let mut row: Bytes = list.with_capacity(12 + list.len(primary))
+                list.put_word_be(mut row, id)
+                take row
+            },
+            None => list.new(),
+        }
         std.codec.encode_key(key, j, mut raw)
+        list.append(mut raw, primary)
         Ok(take raw)
     }
     Ok(take made)
@@ -3580,13 +3588,6 @@ pub fn fetch[K, V](tx: Tx, t: Shape[K, V], k: K) -> Result[Option[V], Error] {
 
 type DataEdit = StoreRow(Bytes, Bytes) | RemoveRow(Bytes, u64)
 
-fn index_logical_key(id: u32, index_part: Bytes, key: Bytes) -> Result[Bytes, Error] {
-    let mut row = prefixed(id, list.len(index_part) + list.len(key))?
-    list.append(mut row, index_part)
-    list.append(mut row, key)
-    Ok(take row)
-}
-
 fn append_index_remove(tx: Tx, mut edits: List[DataEdit], take key: Bytes, mut frame: u64) -> Result[(), Error] {
     if let Some(refund) = delete_refund(tx, key) {
         frame = edit_frame(tx, key, 5 + list.len(key), frame)?
@@ -3626,15 +3627,14 @@ fn put_impl[K, V](mut tx: Tx, t: Table[K, V], take p: Bytes, v: V) -> Result[(),
         let mut edits: List[DataEdit] = list.new()
         for ix in t.indexes {
             let key = list.slice(p, 4, list.len(p))
-            let new_part = capacity((ix.extract)(v))?
+            let index_row = capacity((ix.extract)(v, Some(ix.id), key))?
             if let Some(value) = previous {
-                let old_part = capacity((ix.extract)(value))?
-                if old_part == new_part {
+                let old_row = capacity((ix.extract)(value, Some(ix.id), key))?
+                if old_row == index_row {
                     continue
                 }
-                append_index_remove(tx, mut edits, index_logical_key(ix.id, old_part, key)?, mut frame)?
+                append_index_remove(tx, mut edits, take old_row, mut frame)?
             }
-            let index_row = index_logical_key(ix.id, new_part, key)?
             let empty: Bytes = list.new()
             frame = put_frame(tx, index_row, empty, frame)?
             list.push(mut edits, StoreRow(take index_row, take empty))
@@ -3663,8 +3663,8 @@ fn delete_impl[K, V](mut tx: Tx, t: Table[K, V], key: Bytes) -> Result[bool, Err
     let mut frame = tx.frame_bytes
     let mut edits: List[DataEdit] = list.new()
     for ix in t.indexes {
-        let old_part = capacity((ix.extract)(old))?
-        append_index_remove(tx, mut edits, index_logical_key(ix.id, old_part, key)?, mut frame)?
+        let row = capacity((ix.extract)(old, Some(ix.id), key))?
+        append_index_remove(tx, mut edits, take row, mut frame)?
     }
     frame = edit_frame(tx, p, 5 + list.len(p), frame)?
     apply_edits(mut tx, take edits)?
@@ -4905,8 +4905,7 @@ fn migrate_build[K, V, K2, V2](source: PageTree, take base: Roots, mut ids: u64,
         let mut index_rows: List[std.page.Row] = list.with_capacity(list.len(new_rows))
         for row in new_rows {
             let value = decoded(std.codec.decode(to.value, list.slice(row.value, 2, list.len(row.value))))?
-            let mut indexed = capacity((ix.extract)(value))?
-            list.append(mut indexed, row.key)
+            let indexed = capacity((ix.extract)(value, None, row.key))?
             if list.len(indexed) > 4092 {
                 return Error(Limit(Key))
             }

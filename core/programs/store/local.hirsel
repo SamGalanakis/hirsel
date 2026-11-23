@@ -71,12 +71,17 @@ pub type ColdCheck: send {
     check: StaticFn[fn(store.ReadOnly, store.Caller) -> Result[bool, store.Error]],
 }
 
+// A read of a session's store, run in the host while no child of the session holds it.
+pub type ColdRead: send {
+    arg: Bytes,
+    read: StaticFn[fn(store.ReadOnly, Bytes) -> Result[Bytes, String]]
+}
+
+type ReadReply = Sender[Result[Bytes, Refused]]
+
 type Downs = Sender[Result[u64, Refused]]
-type In: send = Host(platform.Input) | Up(String, u64) | Down(String, u64, Result[runner.Ended, runner.StartError])
-    | Create(Bytes, Seed, Sender[Result[u64, Refused]]) | Delete(u64, Sender[Result[(), Refused]]) | Listing(Sender[List[u64]])
-    | Route(u64, AccessReply) | Access(u64, ColdCheck, bool, AccessReply) | Peek(u64, Sender[Result[Lease, Refused]])
-    | Unload(u64, Sender[Result[Unloaded, Refused]]) | Nudge(u64) | Marked(u64, Sender[Marks])
-    | WatchMarks(u64, Sender[()], Sender[u64]) | UnwatchMarks(u64, u64) | AwaitDown(u64, u64, Downs) | Halt(Sender[List[Unloaded]])
+
+type In: send = Host(platform.Input) | Up(String, u64) | Down(String, u64, Result[runner.Ended, runner.StartError]) | Create(Bytes, Seed, Sender[Result[u64, Refused]]) | Delete(u64, Sender[Result[(), Refused]]) | Listing(Sender[List[u64]]) | Route(u64, AccessReply) | Access(u64, ColdCheck, bool, AccessReply) | Peek(u64, Sender[Result[Lease, Refused]]) | Unload(u64, Sender[Result[Unloaded, Refused]]) | Nudge(u64) | Marked(u64, Sender[Marks]) | WatchMarks(u64, Sender[()], Sender[u64]) | UnwatchMarks(u64, u64) | AwaitDown(u64, u64, Downs) | Read(u64, ColdRead, ReadReply) | Halt(Sender[List[Unloaded]])
 
 type PlaceJob[G: send, H: send, S: send, B: send]: send {
     config: runner.PlaceConfig[G, H, S, B], stop: Receiver[()], status: Latest[runner.Status], to: Sender[In], name: String, gen: u64, need: u64,
@@ -100,10 +105,27 @@ type Actor[T: send] {
     h: platform.Host, driving: platform.Driver, factory: Factory[T], seed: T, root: Dir, options: store.Options,
     migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits], max_sessions: u64, s: Sessions,
     // Each session's marks since the host started, who watches them and who waits for its next end.
-    marks: Map[u64, Marks], watching: Map[u64, Map[u64, Sender[()]]], next_watch: u64, waiters: Map[u64, List[(u64, Downs)]],
-    place_bytes: u64, sessions: u64, used: u64, tasks: Tasks, clock: Clock, random: Random, net: Net, me: Sender[In], watch: Option[Sender[Change]],
-    kids: List[Kid], routes: List[(String, AccessReply)], unloads: List[(String, Sender[Result[Unloaded, Refused]])],
-    removes: List[(String, Sender[Result[(), Refused]])], retiring: List[launcher.Group], halting: bool, unloaded: List[Unloaded],
+    marks: Map[u64, Marks],
+    watching: Map[u64, Map[u64, Sender[()]]],
+    next_watch: u64,
+    waiters: Map[u64, List[(u64, Downs)]],
+    place_bytes: u64,
+    sessions: u64,
+    used: u64,
+    tasks: Tasks,
+    clock: Clock,
+    random: Random,
+    net: Net,
+    me: Sender[In],
+    watch: Option[Sender[Change]],
+    kids: List[Kid],
+    routes: List[(String, AccessReply)],
+    unloads: List[(String, Sender[Result[Unloaded, Refused]])],
+    removes: List[(String, Sender[Result[(), Refused]])],
+    reads: List[(String, ColdRead, ReadReply)],
+    retiring: List[launcher.Group],
+    halting: bool,
+    unloaded: List[Unloaded],
 }
 
 type Begin[T: send]: send { config: Config[T], inbox: Receiver[In], me: Sender[In], ready: Sender[Result[(), Refused]] }
@@ -449,6 +471,7 @@ fn on_down[T: send](mut a: Actor[T], name: String, gen: u64, take ended: Result[
     let mut k = list.remove(mut a.kids, i)
     if let Some(take t) = replace(mut k.task, None) { let _ = task.join(take t) }
     a.used -= k.charge
+    answer_reads(mut a, name)
     let mut events: List[launcher.Event] = list.new()
     let mut failed: Option[String] = None
     if !k.ready {
@@ -561,6 +584,7 @@ fn on_delete[T: send](mut a: Actor[T], id: u64, take reply: Sender[Result[(), Re
         for take (_, r) in take waiting { let _ = channel.try_send(r, Error(Unknown)) }
     }
     list.push(mut a.removes, (string.from(name), take reply))
+    refuse_reads(mut a, name)
     apply(mut a, take reqs)
     refuse_routes(mut a, name, Unknown)
 }
@@ -686,6 +710,63 @@ fn check_cold[T: send](a: Actor[T], name: String, check: ColdCheck) -> Result[()
     }
 }
 
+fn run_read[T: send](a: Actor[T], name: String, r: ColdRead) -> Result[Bytes, Refused] waits {
+    let Ok(dir) = std.dir.narrow(a.root, name) else {
+        return Error(Unknown)
+    }
+    let Ok(take reader) = store.open_read_only(dir, a.options) else {
+        return Error(Failed(string.from("read cold store")))
+    }
+    match code.callable(r.read)(reader, r.arg) {
+        Ok(take out) => Ok(take out),
+        Error(take why) => Error(Failed(take why))
+    }
+}
+
+// A read waits while a child of the session lives. It runs once that child has closed
+// the store, before the host can start the next, so it never reads beside a head.
+fn on_read[T: send](mut a: Actor[T], id: u64, take r: ColdRead, take reply: ReadReply) waits {
+    let name = match listed(a, id) {
+        Ok(take n) => take n,
+        Error(why) => {
+            let _ = channel.try_send(reply, Error(why));
+            return
+        }
+    }
+    if group_has_kid(a, name) {
+        list.push(mut a.reads, (take name, take r, take reply));
+        return
+    }
+    let _ = channel.try_send(reply, run_read(a, name, r))
+}
+
+fn answer_reads[T: send](mut a: Actor[T], name: String) waits {
+    if group_has_kid(a, name) {
+        return
+    }
+    let mut kept: List[(String, ColdRead, ReadReply)] = list.new()
+    while let Some((take at, take r, take reply)) = list.pop(mut a.reads) {
+        if at == name {
+            let _ = channel.try_send(reply, run_read(a, at, r))
+        } else {
+            list.push(mut kept, (take at, take r, take reply))
+        }
+    }
+    a.reads = take kept
+}
+
+fn refuse_reads[T: send](mut a: Actor[T], name: String) {
+    let mut kept: List[(String, ColdRead, ReadReply)] = list.new()
+    while let Some((take at, take r, take reply)) = list.pop(mut a.reads) {
+        if at == name {
+            let _ = channel.try_send(reply, Error(Unknown))
+        } else {
+            list.push(mut kept, (take at, take r, take reply))
+        }
+    }
+    a.reads = take kept
+}
+
 fn on_access[T: send](mut a: Actor[T], id: u64, check: ColdCheck, wake: bool, take reply: AccessReply) waits {
     match on_peek(a, id) {
         Ok(take lease) => { let _ = channel.try_send(reply, Ok(Some(take lease))); return },
@@ -767,10 +848,7 @@ fn run_local[T: send](take begin: Begin[T]) -> () waits {
     let fwd: fn(take Forward) -> () waits = forward_host
     let forwarding = task.spawn(tasks, bytes 65536u64, Forward(from: take host_from, to: channel.sender(me)), fwd)
     let timers = platform.driver(tasks, clock, take host_to)
-    let mut a = Actor(h: take opened_host, driving: take timers, factory: take making, seed: take seed, root: root, options: take options,
-        migrate: migrate, max_sessions: max_places, s: take listed_sessions, marks: map.new(), watching: map.new(), next_watch: 0u64, waiters: map.new(),
-        place_bytes: place_bytes, sessions: sessions, used: 0u64, tasks: tasks, clock: clock, random: random, net: net, me: take me, watch: take watch,
-        kids: list.new(), routes: list.new(), unloads: list.new(), removes: list.new(), retiring: list.new(), halting: false, unloaded: list.new())
+    let mut a = Actor(h: take opened_host, driving: take timers, factory: take making, seed: take seed, root: root, options: take options, migrate: migrate, max_sessions: max_places, s: take listed_sessions, marks: map.new(), watching: map.new(), next_watch: 0u64, waiters: map.new(), place_bytes: place_bytes, sessions: sessions, used: 0u64, tasks: tasks, clock: clock, random: random, net: net, me: take me, watch: take watch, kids: list.new(), routes: list.new(), unloads: list.new(), removes: list.new(), reads: list.new(), retiring: list.new(), halting: false, unloaded: list.new())
     // Hello is answered with an empty inventory, so the host starts every Dirty group and
     // every passed due time (§14.5).
     apply(mut a, take hello)
@@ -799,7 +877,16 @@ fn run_local[T: send](take begin: Begin[T]) -> () waits {
             Marked(id, take reply) => { let _ = channel.try_send(reply, marks_of(a, id)) },
             WatchMarks(id, take notify, take reply) => on_watch(mut a, id, take notify, reply),
             UnwatchMarks(id, token) => on_unwatch(mut a, id, token),
-            AwaitDown(id, after, take reply) => if a.halting { let _ = channel.try_send(reply, Error(Stopping)) } else { on_await(mut a, id, after, take reply) },
+            Read(id, take r, take reply) => if a.halting {
+                let _ = channel.try_send(reply, Error(Stopping))
+            } else {
+                on_read(mut a, id, take r, take reply)
+            },
+            AwaitDown(id, after, take reply) => if a.halting {
+                let _ = channel.try_send(reply, Error(Stopping))
+            } else {
+                on_await(mut a, id, after, take reply)
+            },
             Halt(take reply) => {
                 a.halting = true
                 halted = Some(take reply)
@@ -809,8 +896,15 @@ fn run_local[T: send](take begin: Begin[T]) -> () waits {
         }
         if a.halting && list.len(a.kids) == 0u64 { break }
     }
-    while let Some((_, take r)) = list.pop(mut a.unloads) { let _ = channel.try_send(r, Error(Stopping)) }
-    while let Some((_, take r)) = list.pop(mut a.removes) { let _ = channel.try_send(r, Error(Stopping)) }
+    while let Some((_, take r)) = list.pop(mut a.unloads) {
+        let _ = channel.try_send(r, Error(Stopping))
+    }
+    while let Some((_, take r)) = list.pop(mut a.removes) {
+        let _ = channel.try_send(r, Error(Stopping))
+    }
+    while let Some((_, _, take r)) = list.pop(mut a.reads) {
+        let _ = channel.try_send(r, Error(Stopping))
+    }
     let Actor(h: take ended_host, driving: take ended_timers, unloaded: take unloaded, waiters: take waiters, ..) = take a
     for take (_, waiting) in take waiters {
         for take (_, r) in take waiting { let _ = channel.try_send(r, Error(Stopping)) }
@@ -820,133 +914,4 @@ fn run_local[T: send](take begin: Begin[T]) -> () waits {
     let _ = take inbox
     let _ = task.join(take forwarding)
     if let Some(reply) = take halted { let _ = channel.send(reply, take unloaded) }
-}
-
-// ---- the API ----
-
-// What a host spends: its places' budget, its catalog store, the store a create seeds
-// and its own task.
-pub fn host_bytes(options: store.Options, place_bytes: u64) -> u64 {
-    let stores = int.saturating_add(runner.disk_store_bytes(options), runner.disk_store_bytes(options))
-    int.saturating_add(place_bytes, int.saturating_add(stores, LOCAL_BYTES))
-}
-
-pub fn doorway() -> Doorway {
-    let (to, inbox): (Sender[In], Receiver[In]) = channel.new(256u64)
-    Doorway(to: take to, inbox: take inbox)
-}
-
-pub fn door_of(w: Doorway) -> Door { Door(to: channel.sender(w.to)) }
-
-pub fn local[T: send](take way: Doorway, take config: Config[T]) -> Result[Local, Refused] waits {
-    if config.max_places == 0u64 || config.idle_ms == 0u64 || config.place_bytes == 0u64 || config.sessions == 0u64 { return Error(Full) }
-    let tasks = config.tasks
-    let need = host_bytes(config.options, config.place_bytes)
-    let Doorway(to: take to, inbox: take inbox) = take way
-    let (ready, started): (Sender[Result[(), Refused]], Receiver[Result[(), Refused]]) = channel.new(1u64)
-    let begin = Begin(config: take config, inbox: take inbox, me: channel.sender(to), ready: take ready)
-    let run: fn(take Begin[T]) -> () waits = run_local
-    let actor = match task.try_spawn(tasks, bytes need, take begin, run) {
-        Ok(take spawned) => take spawned,
-        Error(_) => return Error(Full),
-    }
-    match channel.receive(started) {
-        Ok(Ok(())) => Ok(Local(to: take to, actor: take actor)),
-        Ok(Error(take why)) => { let _ = task.join(take actor); Error(take why) },
-        Error(_) => { let _ = task.join(take actor); Error(Stopping) },
-    }
-}
-
-pub fn door(l: Local) -> Door { Door(to: channel.sender(l.to)) }
-
-pub fn copy_door(d: Door) -> Door { Door(to: channel.sender(d.to)) }
-
-pub fn status(l: Lease) -> Latest[runner.Status] { latest.handle(l.status) }
-
-fn ask[A: send](d: Door, take m: In, answer: Receiver[A], take stopped: A) -> A waits {
-    if let Error(_) = channel.send(d.to, take m) { return take stopped }
-    match channel.receive(answer) { Ok(take answered) => take answered, Error(_) => take stopped }
-}
-
-// Creates the session `key` names, or finds it: a new one's store is migrated and seeded
-// before its group is added, and its id is the one its commit takes.
-pub fn create(d: Door, take key: Bytes, take seed: Seed) -> Result[u64, Refused] waits {
-    let (reply, answer): (Sender[Result[u64, Refused]], Receiver[Result[u64, Refused]]) = channel.new(1u64)
-    ask(d, Create(take key, take seed, take reply), answer, Error(Stopping))
-}
-
-// Unlists a session and removes its group, and answers once its child, if any, has
-// drained and its store is deleted.
-pub fn delete(d: Door, id: u64) -> Result[(), Refused] waits {
-    let (reply, answer): (Sender[Result[(), Refused]], Receiver[Result[(), Refused]]) = channel.new(1u64)
-    ask(d, Delete(id, take reply), answer, Error(Stopping))
-}
-
-pub fn listing(d: Door) -> List[u64] waits {
-    let (reply, answer): (Sender[List[u64]], Receiver[List[u64]]) = channel.new(1u64)
-    ask(d, Listing(take reply), answer, list.new())
-}
-
-// Wakes a session if it is unloaded and answers a lease on its Ready child.
-pub fn route(d: Door, id: u64) -> Result[Lease, Refused] waits {
-    let (reply, answer): (AccessReply, Receiver[Result[Option[Lease], Refused]]) = channel.new(1u64)
-    match ask(d, Route(id, take reply), answer, Error(Stopping)) {
-        Ok(take lease) => Ok(option.unwrap(take lease)),
-        Error(take why) => Error(take why),
-    }
-}
-
-// A running child returns a lease for the caller's live authorization. For a
-// cold child, check its durable state before optionally starting it. None
-// acknowledges an allowed cold read that did not request a wake.
-pub fn access(d: Door, id: u64, take check: ColdCheck, wake: bool) -> Result[Option[Lease], Refused] waits {
-    let (reply, answer): (AccessReply, Receiver[Result[Option[Lease], Refused]]) = channel.new(1u64)
-    ask(d, Access(id, take check, wake, take reply), answer, Error(Stopping))
-}
-
-// A lease on the session's child only if it is Ready now; it never starts one (`Busy`).
-pub fn peek(d: Door, id: u64) -> Result[Lease, Refused] waits {
-    let (reply, answer): (Sender[Result[Lease, Refused]], Receiver[Result[Lease, Refused]]) = channel.new(1u64)
-    ask(d, Peek(id, take reply), answer, Error(Stopping))
-}
-
-// Drains the session's live child now, as an operator would, and answers how it ended.
-pub fn unload(d: Door, id: u64) -> Result[Unloaded, Refused] waits {
-    let (reply, answer): (Sender[Result[Unloaded, Refused]], Receiver[Result[Unloaded, Refused]]) = channel.new(1u64)
-    ask(d, Unload(id, take reply), answer, Error(Stopping))
-}
-
-// Tells the host that a front changed a session, so streams that follow it look again.
-pub fn nudge(d: Door, id: u64) -> () waits { let _ = channel.send(d.to, Nudge(id)) }
-
-pub fn marks(d: Door, id: u64) -> Marks waits {
-    let (reply, answer): (Sender[Marks], Receiver[Marks]) = channel.new(1u64)
-    ask(d, Marked(id, take reply), answer, Marks(ups: 0u64, downs: 0u64, nudges: 0u64))
-}
-
-// The caller registers before sampling marks. A queued notification is enough
-// because marks contain the cumulative counts.
-pub fn watch_marks(d: Door, id: u64, notify: Sender[()]) -> Option[u64] waits {
-    let (reply, answer): (Sender[u64], Receiver[u64]) = channel.new(1u64)
-    if let Error(_) = channel.send(d.to, WatchMarks(id, channel.sender(notify), take reply)) { return None }
-    match channel.receive(answer) { Ok(token) => Some(token), Error(_) => None }
-}
-
-pub fn unwatch_marks(d: Door, id: u64, token: u64) -> () waits { let _ = channel.send(d.to, UnwatchMarks(id, token)) }
-
-// Waits until the session's child has ended more than `after` times, and answers how many.
-pub fn await_down(d: Door, id: u64, after: u64) -> Result[u64, Refused] waits {
-    let (reply, answer): (Downs, Receiver[Result[u64, Refused]]) = channel.new(1u64)
-    ask(d, AwaitDown(id, after, take reply), answer, Error(Stopping))
-}
-
-// Drains every live child through its graceful stop, applies each end to the host's
-// catalog and returns how each ended.
-pub fn stop(take l: Local) -> List[Unloaded] waits {
-    let Local(to: take to, actor: take actor) = take l
-    let (reply, answer): (Sender[List[Unloaded]], Receiver[List[Unloaded]]) = channel.new(1u64)
-    let _ = channel.send(to, Halt(take reply))
-    let ended = match channel.receive(answer) { Ok(take done) => take done, Error(_) => list.new() }
-    let _ = task.join(take actor)
-    take ended
 }

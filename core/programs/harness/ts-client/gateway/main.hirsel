@@ -35,16 +35,10 @@ fn scripted_downs(take watch: ScriptedWatch) -> () waits {
 
 type ScriptedControl: codec { action: String, credential: String, at: u64 }
 
-fn scripted_fork(data: Dir, d: harness.gateway.Door, caller: store.Caller, cut: u64, clock: Clock, random: Random, tasks: Tasks) -> Result[u64, String] waits {
-    let _ = harness.gateway.unload(d, 0u64)
-    let Ok(dir) = std.dir.narrow(data, "s0") else { return Error("no fork source") }
-    let Ok(take db) = store.open(tasks, dir, clock, random, notes.main.options()) else { return Error("could not open the fork source") }
-    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
-    let exported = harness.export(store.snapshot(db), h, cut)
-    result.unwrap(store.close(take db))
-    let Ok(take prefix) = take exported else { return Error("invalid fork cut") }
-    match harness.gateway.create_visible(d, b"fork", Adopt(take prefix), clone(caller)) {
+fn scripted_fork(d: harness.gateway.Door, caller: store.Caller, cut: u64) -> Result[u64, String] waits {
+    match harness.gateway.fork(d, 0u64, cut, b"fork", clone(caller)) {
         Ok(id) => Ok(id),
+        Error(Place(Failed(_))) => Error("invalid fork cut"),
         Error(_) => Error("could not create fork"),
     }
 }
@@ -82,7 +76,7 @@ fn scripted_controls(input: Stdin, out: Stdout, data: Dir, d: harness.gateway.Do
         }
         let result = if control.action == "fork" {
             match store.ingress.caller((), credential) {
-                Ok(caller) => scripted_fork(data, d, caller, control.at, clock, random, tasks),
+                Ok(caller) => scripted_fork(d, caller, control.at),
                 Error(_) => Error("invalid credential"),
             }
         } else if control.action == "revoke" {

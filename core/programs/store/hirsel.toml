@@ -24,6 +24,7 @@ std = { major = 1 }
 "runner.hirsel" = "runner"
 "runner-binding.hirsel" = "runner"
 "local.hirsel" = "local"
+"local-api.hirsel" = "local"
 "runner_laws.hirsel" = "runner_laws"
 "runner_calls.hirsel" = "runner_calls"
 "wire_client.hirsel" = "wire_client"

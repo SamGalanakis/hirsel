@@ -317,7 +317,7 @@ STORE-SPEC §11 specifies the paged store, scoped views and journaled forks.
   no-clobber conditional puts while keeping the journal local.
 - **Offline read-only open (v2.44, §11.19).** `open_read_only` and `open_bucket_read_only`
   open a Format-3 Directory store or current Bucket mirror without writing, exposing
-  `read_only_table`, `read_only_get`, and `read_only_version`.
+  `read_only_table`, `read_only_get`, and `read_only_snapshot` (the captured `Snapshot`).
 - **Constants and options.** `FRAME_LIMIT: u64 = 16777296` joins `VALUE_LIMIT`.
   `Options` includes `journal_limit: u64` and `authority: Authority` (`Directory() | Bucket(std.object.Bucket)`).
 - **Errors.** `Limit` includes `Ids`, `Manifest`, and `Triggers`. `Error` includes

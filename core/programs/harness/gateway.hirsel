@@ -101,6 +101,43 @@ fn create_with(d: Door, take key: Bytes, take seeding: Seeding, take reader: Opt
     mapped(store.local.create(d.host, take key, seeder(take seeding, take reader)))
 }
 
+// Exports a cold session's prefix up to the cut `arg` encodes.
+fn export_cold(reader: store.ReadOnly, arg: Bytes) -> Result[Bytes, String] {
+    let c_cut: std.codec.Codec[u64] = std.codec.of()
+    let Ok(upto) = std.codec.decode(c_cut, arg) else {
+        return Error(string.from("fork cut"))
+    }
+    let snap = store.read_only_snapshot(reader)
+    let Ok(h) = harness.handles(store.snapshot_schema(snap)) else {
+        return Error(string.from("harness schema"))
+    }
+    let Ok(prefix) = harness.export(snap, h, upto) else {
+        return Error(string.from("fork cut"))
+    }
+    let c_prefix: std.codec.Codec[harness.Prefix] = std.codec.of()
+    let mut out: Bytes = list.new()
+    if let Error(_) = std.codec.encode(c_prefix, prefix, mut out) {
+        return Error(string.from("fork prefix"))
+    }
+    Ok(take out)
+}
+
+// Forks `source` at `cut` into the visible session `key` names. The prefix is read from
+// the source's committed store once its place, if live, has stopped.
+pub fn fork(d: Door, source: u64, cut: u64, key: Bytes, take caller: store.Caller) -> Result[u64, Refused] waits {
+    let c_cut: std.codec.Codec[u64] = std.codec.of()
+    let mut arg: Bytes = list.new()
+    if let Error(_) = std.codec.encode(c_cut, cut, mut arg) {
+        return Error(Place(Failed(string.from("fork cut"))))
+    }
+    let raw = mapped(store.local.read_cold(d.host, source, store.local.ColdRead(arg: take arg, read: code.describe(export_cold))))?
+    let c_prefix: std.codec.Codec[harness.Prefix] = std.codec.of()
+    let Ok(prefix) = std.codec.decode(c_prefix, raw) else {
+        return Error(Place(Failed(string.from("fork prefix"))))
+    }
+    create_visible(d, key, Adopt(take prefix), take caller)
+}
+
 // Unlists a session, then drains its place and deletes its store.
 pub fn delete(d: Door, id: u64) -> Result[(), Refused] waits { mapped(store.local.delete(d.host, id)) }
 

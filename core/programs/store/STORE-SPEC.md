@@ -3048,8 +3048,9 @@ Only a created MANIFEST lets the cut go on to the local rename, the segment remo
 
 `open_read_only(d, options)` returns an opaque `ReadOnly` over the recovered
 main branch. Use `read_only_table` to bind a registered key and value codec
-and `read_only_get` and `read_only_version` to query the captured roots. The
-view exposes no writer operations. It stays at its recovered version when a
+and `read_only_get` to query the captured roots, or `read_only_snapshot` for the
+captured `Snapshot` (its `version` and any Snapshot read). The view exposes no
+writer operations. It stays at its recovered version when a
 later writer commits or checkpoints.
 
 The caller excludes concurrent writers during recovery to read the offline

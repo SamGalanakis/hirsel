@@ -268,7 +268,7 @@
     "lines": 2181
   },
   "crates/hirsel-core-ir/src/returnable.rs": {
-    "lines": 2736
+    "lines": 2690
   },
   "crates/hirsel-core-ir/src/tests.rs": {
     "lines": 1576
@@ -355,7 +355,7 @@
     "lines": 2650
   },
   "crates/hirsel-core-rt/src/tasks.rs": {
-    "lines": 6520
+    "lines": 6403
   },
   "crates/hirsel-core-rt/src/tasks_tests.rs": {
     "lines": 1302

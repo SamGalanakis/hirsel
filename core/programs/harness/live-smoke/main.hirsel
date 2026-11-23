@@ -219,7 +219,7 @@ fn live_down(d: harness.gateway.Door, clock: Clock, after: u64) -> Result[store.
 }
 
 fn journal(dir: Dir) -> u64 waits {
-    store.read_only_version(result.unwrap(store.open_read_only(dir, notes.main.options())))
+    store.version(store.read_only_snapshot(result.unwrap(store.open_read_only(dir, notes.main.options()))))
 }
 
 fn live_decision(b: Browser) -> Result[harness.Decision, String] waits {

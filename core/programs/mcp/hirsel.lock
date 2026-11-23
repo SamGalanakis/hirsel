@@ -1,0 +1,12 @@
+# hirsel.lock: written by hirsel; do not edit.
+version = 1
+
+[[package]]
+id = "mcp@1"
+source = "member:."
+edges = ["std@1"]
+
+[[package]]
+id = "std@1"
+source = "toolchain"
+edges = []

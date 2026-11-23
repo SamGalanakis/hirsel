@@ -162,7 +162,7 @@ fn explain_library(name: &str, json: bool) -> Result<(), Box<dyn std::error::Err
     if let Some(operation) = name.strip_prefix("net.")
         && matches!(
             operation,
-            "listen" | "connect" | "accept" | "recv_bounded" | "send_pair"
+            "listen" | "connect" | "accept" | "recv_bounded" | "recv_ready" | "send_pair"
         )
     {
         return Err(format!(

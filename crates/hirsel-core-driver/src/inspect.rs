@@ -66,9 +66,11 @@ impl Inspection {
                 _ => unreachable!("only inspect options are extracted"),
             }
         }
-        let [query]: [Query; 1] = queries.try_into().map_err(|_| {
-            "inspect requires exactly one of --interface, --foreign-header, --dependents, --affected-tests or --unused"
-        })?;
+        let query = match queries.len() {
+            0 => Query::Interface,
+            1 => queries.pop().unwrap(),
+            _ => return Err("inspect takes at most one of --interface, --foreign-header, --dependents, --affected-tests or --unused".into()),
+        };
         let json = invocation.options.iter().any(|(id, _)| *id == Json);
         if json && !matches!(query, Query::Interface) {
             return Err("inspect --json requires --interface".into());
@@ -95,7 +97,10 @@ impl Inspection {
             && !matches!(query, Query::ForeignHeader(_))
             && invocation.positional.is_none()
         {
-            return Err("inspect requires a package directory, --core or --std".into());
+            return Err(
+                "inspect requires a package directory, archive, dependency name, --core or --std"
+                    .into(),
+            );
         }
         Ok(Self {
             query,
@@ -237,7 +242,7 @@ fn interface(product: &CheckProduct, package: PackageId) -> Interface<'_> {
     }
 }
 
-fn signature(item: Item<'_>, kind: DefinitionKind, opaque: bool) -> &str {
+pub(crate) fn signature(item: Item<'_>, kind: DefinitionKind, opaque: bool) -> &str {
     let root = item.tree.node(item.root);
     let mut children = item
         .tree
@@ -248,7 +253,7 @@ fn signature(item: Item<'_>, kind: DefinitionKind, opaque: bool) -> &str {
     let (start, end) = if opaque {
         // The name, generics and public bounds describe the nominal type.
         // Fields, variants, aliases and owner codec functions are private.
-        let public = children.find(|n| n.kind == NodeKind::Public).unwrap();
+        let public = children.find(|n| n.kind == NodeKind::Public);
         let end = children
             .filter(|n| matches!(n.kind, NodeKind::Generics | NodeKind::Bounds))
             .last()
@@ -256,7 +261,7 @@ fn signature(item: Item<'_>, kind: DefinitionKind, opaque: bool) -> &str {
                 || item.token_span(root.token.unwrap()).end,
                 |n| n.origin.span.end,
             );
-        (public.origin.span.start, end)
+        (public.map_or(span.start, |n| n.origin.span.start), end)
     } else {
         let end = match kind {
             DefinitionKind::Constant => {

@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use rusqlite::Connection;
 
-use crate::profile::{Result, Unsigned};
+use crate::profile::{Result, Timestamp, Unsigned};
 
 const ALLOC: u16 = 16;
 const PEAK: u16 = 17;
@@ -336,8 +336,8 @@ impl MemoryImport {
                 b.kind,
                 b.task,
                 self.scope_stacks.get(&b.stack).copied().unwrap_or(unknown),
-                Unsigned(b.enter),
-                b.exit.map(Unsigned),
+                Timestamp(b.enter),
+                b.exit.map(Timestamp),
                 b.limit.map(Unsigned),
                 b.peak.map(Unsigned),
                 b.refused,
@@ -405,7 +405,7 @@ impl MemoryImport {
             snapshot_row.execute((
                 peak.metric,
                 peak.scope,
-                Unsigned(peak.ts),
+                Timestamp(peak.ts),
                 Unsigned(peak.bytes),
             ))?;
             let id = db.last_insert_rowid();

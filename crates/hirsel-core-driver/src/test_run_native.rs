@@ -47,14 +47,17 @@ fn prog4_runs(backend: Backend) {
     let mut options = native_options(backend, dir.path());
     let test = |name: &str| DefPath::from_full(&format!("app@1/main/{name}")).unwrap();
     for (name, limit, grants, code, stdout, stderr) in [
-        ("error", 4096, 0, 1, "", ""),
+        // PROG-3: a test run is a run, so `Error(e)`, `E` not `Exit`, writes
+        // `error: ` and `e` as Hirsel source.
+        ("error", 4096, 0, 1, "", "error: ()\n"),
         ("exit_zero", 4096, 0, 1, "", ""),
         ("exit_seven", 4096, 0, 7, "", ""),
         ("failed", 4096, 0, 101, "", "Fail"),
         ("stopped", 4096, 0, 102, "", "run stop: Stack\n"),
         ("own_error", 4096, 0, 101, "", "Division"),
         ("own_success", 288, 0, 0, "", ""),
-        ("allocation", 288, 0, 1, "", ""),
+        // No room beyond main's 288: reserving 8 one-byte elements asks for 8.
+        ("allocation", 288, 0, 1, "", "error: Capacity(requested: 8, available: 0)\n"),
         ("allocation", 296, 0, 0, "", ""),
         ("good", 287, 0, 103, "", "not started: the root limit is below main's startup charge of 288 bytes\n"),
         ("granted", 4096, 0, 103, "", "not started: grant `out` is not in the run's configuration\n"),
@@ -183,7 +186,9 @@ fn prog4_pass_cache(backend: Backend) {
         Backend::Cranelift => Backend::Llvm,
         Backend::Llvm => Backend::Cranelift,
     };
-    for (label, options, identity) in [
+    // Debug lines embed DWARF and change no object (profiling.md), so the pass
+    // recorded without them is the same program's; the others change its code.
+    for (label, options, identity, expected) in [
         (
             "backend",
             NativeOptions {
@@ -191,6 +196,7 @@ fn prog4_pass_cache(backend: Backend) {
                 ..limited.clone()
             },
             None,
+            Source::Executed,
         ),
         (
             "optimize",
@@ -199,6 +205,7 @@ fn prog4_pass_cache(backend: Backend) {
                 ..limited.clone()
             },
             None,
+            Source::Executed,
         ),
         (
             "debug lines",
@@ -207,17 +214,19 @@ fn prog4_pass_cache(backend: Backend) {
                 ..limited.clone()
             },
             None,
+            Source::Cached,
         ),
         (
             "compiler",
             limited.clone(),
             Some(ContentHash::of_bytes(b"test compiler identity")),
+            Source::Executed,
         ),
     ] {
         let old = crate::reuse::TOOLCHAIN.replace(identity);
         let (outcome, source) = run(&product, "good", &options, false);
         crate::reuse::TOOLCHAIN.set(old);
-        assert_eq!(source, Source::Executed, "{label}");
+        assert_eq!(source, expected, "{label}");
         assert!(outcome.passed(), "{label}: {outcome:?}");
     }
 
@@ -585,7 +594,7 @@ limit = {test_limit}
 
     let (status, stdout, stderr) = request(&args(&["--limit", "4096"]));
     assert_ne!(status, Some(0), "{stdout}");
-    assert!(stderr.contains("test takes no --limit"), "{stderr}");
+    assert!(stderr.contains("this package declares [tests] in hirsel.toml"), "{stderr}");
     configure(288, "missing", 296);
     let (status, stdout, stderr) = request(&args(&[]));
     assert_ne!(status, Some(0), "{stdout}");
@@ -829,7 +838,7 @@ impl PackageLaw {
     }
 
     fn fixture(&self, directory: &str, out: &str) -> String {
-        Self::pass(self.with_store(&["pack", directory, "--out", out], "fixtures"))
+        Self::pass(self.with_store(&["pack", directory, "--output", out], "fixtures"))
     }
 
     fn fixture_json(&self) {
@@ -847,6 +856,77 @@ impl PackageLaw {
     fn empty_store(&self) {
         assert!(std::fs::read_dir(self.path("packages")).unwrap().next().is_none());
     }
+}
+
+#[test]
+fn build_names_unmatched_grant_and_entry() {
+    let law = PackageLaw::new();
+    law.app("app", "");
+    PackageLaw::pass(law.run(&["lock", "app"]));
+    for mode in [
+        &["run", "app", "--backend", "cranelift"][..],
+        &["build", "app", "--release"][..],
+    ] {
+        for (option, value, grant) in [
+            ("--grant", "Stderr", "--grant Stderr"),
+            ("--grant", "Env=FOO", "--grant Env"),
+            ("--grant", "Net=Connect 127.0.0.1/32 0-65535", "--grant Net"),
+            (
+                "--grant",
+                "Secret:unused=env:HIRSEL_UNUSED_SECRET mac",
+                "--grant Secret:unused",
+            ),
+            ("--dir", ".", "--dir \".\""),
+        ] {
+            let mut args = mode.to_vec();
+            args.extend([option, value]);
+            let (status, stdout, stderr) = law.run(&args);
+            assert_eq!(status, Some(2), "{stdout}\n{stderr}");
+            assert_eq!(
+                stderr,
+                format!("entry: {grant} has no matching parameter of app@1/main/main\n")
+            );
+            assert!(stdout.is_empty(), "{stdout}");
+        }
+    }
+}
+
+#[test]
+fn run_materializes_only_in_the_cache_by_default() {
+    let law = PackageLaw::new();
+    law.app("app", "");
+    let listing = |directory| {
+        let mut entries = std::fs::read_dir(law.path(directory)).unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        entries.sort();
+        entries
+    };
+    PackageLaw::pass(law.run(&["lock", "app"]));
+    for _ in 0..2 {
+        PackageLaw::pass(law.run(&["run", "app"]));
+        let names = |entries: &[&str]| entries.iter().map(std::ffi::OsString::from).collect::<Vec<_>>();
+        assert_eq!(listing("."), names(&["app", "cache", "compiler-store", "fixtures", "packages"]));
+        assert_eq!(listing("app"), names(&["hirsel.lock", "hirsel.toml", "main.hirsel"]));
+    }
+    PackageLaw::pass(law.run(&["run", "app", "-o", "custom-program"]));
+    assert!(law.path("custom-program").is_file());
+}
+
+#[test]
+fn package_archive_outside_root_explains_workspace() {
+    let law = PackageLaw::new();
+    law.app("app", &format!(
+        "[dependencies]\njson = {{ major = 1, root = \"{PACKAGE_X}\", archive = \"../vendor/jx.hpkg\" }}\n"
+    ));
+    PackageLaw::refuse(
+        law.run(&["lock", "app"]),
+        concat!(
+            "app/hirsel.toml: dependencies.json: archive \"../vendor/jx.hpkg\" is not inside the workspace root. ",
+            "To share an archive across packages, add a parent hirsel.toml with [workspace] and members ",
+            "listing the package directories, then use a relative path within that workspace",
+        ),
+    );
 }
 
 #[test]
@@ -948,15 +1028,31 @@ fn package_bundle(entries: &[&[u8]]) -> Vec<u8> {
 #[test]
 fn package_known_roots() {
     let law = PackageLaw::new();
+    PackageLaw::refuse(law.run(&["pack", "jx", "--out", "jx.hpkg"]),
+        "unknown option `--out` for pack; use help pack");
     law.library("jx", "json", 1, PACKAGE_X_SOURCE, "");
     law.library("jy", "json", 1, PACKAGE_Y_SOURCE, "");
     for (dir, root) in [("jx", PACKAGE_X), ("jy", PACKAGE_Y)] {
         let archive = format!("{dir}.hpkg");
-        let stdout = PackageLaw::pass(law.run(&["pack", dir, "--out", &archive]));
+        let flag = if dir == "jx" { "-o" } else { "--output" };
+        let stdout = PackageLaw::pass(law.run(&["pack", dir, flag, &archive]));
         assert_eq!(stdout, format!("json@1 {root}\n"));
         let content = std::fs::read(law.path(&format!("packages/{}", &root[7..]))).unwrap();
         assert_eq!(content.len(), 72);
     }
+}
+
+#[test]
+fn inspect_reads_a_package_archive_and_a_named_dependency() {
+    let law = PackageLaw::new();
+    law.library("jx", "json", 1, PACKAGE_X_SOURCE, "");
+    law.fixture("jx", "vendored.hpkg");
+    law.app(".", &format!(
+        "[dependencies]\njson = {{ major = 1, root = \"{PACKAGE_X}\", archive = \"vendored.hpkg\" }}\n"
+    ));
+    let expected = "json@1/json/version\tpub fn version() -> u64\n";
+    assert_eq!(PackageLaw::pass(law.run(&["inspect", "vendored.hpkg", "--interface"])), expected);
+    assert_eq!(PackageLaw::pass(law.run(&["inspect", "json"])), expected);
 }
 
 #[test]
@@ -1073,7 +1169,7 @@ fn package_l4_symlink_escape() {
     law.manifest("p", "p", 1, "[sources]\n\"a.hirsel\" = \"a\"\n");
     law.write("outside.hirsel", PACKAGE_MAIN);
     std::os::unix::fs::symlink("../outside.hirsel", law.path("p/a.hirsel")).unwrap();
-    for args in [&["check", "p"][..], &["pack", "p", "--out", "p.hpkg"][..]] {
+    for args in [&["check", "p"][..], &["pack", "p", "--output", "p.hpkg"][..]] {
         PackageLaw::refuse(law.run(args), "p/hirsel.toml: sources: \"a.hirsel\" resolves outside the package");
         assert!(!law.path("p/hirsel.lock").exists());
         assert!(!law.path("p.hpkg").exists());
@@ -1082,10 +1178,10 @@ fn package_l4_symlink_escape() {
     law.write("p/real/a.hirsel", PACKAGE_MAIN);
     std::os::unix::fs::symlink("real/a.hirsel", law.path("p/a.hirsel")).unwrap();
     PackageLaw::pass(law.run(&["check", "p"]));
-    let linked = PackageLaw::pass(law.run(&["pack", "p", "--out", "p.hpkg"]));
+    let linked = PackageLaw::pass(law.run(&["pack", "p", "--output", "p.hpkg"]));
     law.manifest("copy", "p", 1, "[sources]\n\"a.hirsel\" = \"a\"\n");
     law.write("copy/a.hirsel", PACKAGE_MAIN);
-    assert_eq!(linked, PackageLaw::pass(law.run(&["pack", "copy", "--out", "copy.hpkg"])));
+    assert_eq!(linked, PackageLaw::pass(law.run(&["pack", "copy", "--output", "copy.hpkg"])));
 }
 
 #[test]
@@ -1095,7 +1191,7 @@ fn package_l5_test_files_do_not_enter_content() {
         "[tests]\nlimit = 67108864\n[tests.sources]\n\"json_laws.hirsel\" = \"json\"\n");
     law.write("jx/json_laws.hirsel",
         "@test\nfn version_law() -> Result[(), ()] { if version() == 1u64 { Ok(()) } else { Error(()) } }\n");
-    assert_eq!(PackageLaw::pass(law.run(&["pack", "jx", "--out", "jx.hpkg"])), format!("json@1 {PACKAGE_X}\n"));
+    assert_eq!(PackageLaw::pass(law.run(&["pack", "jx", "--output", "jx.hpkg"])), format!("json@1 {PACKAGE_X}\n"));
     let stdout = PackageLaw::pass(law.run(&["test", "jx", "--json"]));
     let results: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     let tests = results["tests"].as_array().unwrap();
@@ -1207,7 +1303,7 @@ fn package_l6_archive_closure_and_atomic_refusal() {
 fn package_l11_store_hits_validate_every_incoming_edge() {
     let law = PackageLaw::new();
     law.library("jx", "json", 1, PACKAGE_X_SOURCE, "");
-    PackageLaw::pass(law.run(&["pack", "jx", "--out", "jx.hpkg"]));
+    PackageLaw::pass(law.run(&["pack", "jx", "--output", "jx.hpkg"]));
     let yaml = format!("yaml = {{ major = 1, root = \"{PACKAGE_X}\" }}");
     let expected = format!("yaml@1: {PACKAGE_X} is json@1");
     law.app("app", &format!("[dependencies]\n{yaml}\n"));
@@ -1215,6 +1311,18 @@ fn package_l11_store_hits_validate_every_incoming_edge() {
     law.app("app", &format!("[dependencies]\njson = {{ major = 1, root = \"{PACKAGE_X}\", archive = \"vendor/jx.hpkg\" }}\n{yaml}\n"));
     PackageLaw::refuse(law.run(&["lock", "app"]), &expected);
     assert!(!law.path("app/hirsel.lock").exists());
+}
+
+#[test]
+fn check_reports_definition_count_on_a_request_hit() {
+    let law = PackageLaw::new();
+    law.app("app", "");
+    law.write("app/main.hirsel", format!("type Pair {{ a: u64, b: u64 }}\n{PACKAGE_MAIN}"));
+    let core = law.path("core-product");
+    for _ in 0..2 {
+        let stdout = PackageLaw::pass(law.run(&["check", "app", "--core-product", core.to_str().unwrap()]));
+        assert_eq!(stdout, "accepted: 1 files, 2 checked definitions\n");
+    }
 }
 
 #[test]
@@ -1651,8 +1759,8 @@ fn package_pack_output_cannot_alias_a_fetched_archive() {
     std::fs::hard_link(law.path("work/json.hpkg"), law.path("output.hpkg")).unwrap();
     let original = std::fs::read(law.path("output.hpkg")).unwrap();
     PackageLaw::refuse(
-        law.run(&["pack", "work", "--out", "output.hpkg"]),
-        "--out output.hpkg is an input of this command",
+        law.run(&["pack", "work", "--output", "output.hpkg"]),
+        "--output output.hpkg is an input of this command",
     );
     assert_eq!(std::fs::read(law.path("output.hpkg")).unwrap(), original);
     assert!(!law.path("work/hirsel.lock").exists());
@@ -1665,7 +1773,7 @@ fn package_pack_output_cannot_alias_an_input() {
     std::fs::hard_link(law.path("jx/json.hirsel"), law.path("linked.hpkg")).unwrap();
     let store_entry = format!("packages/{}", &PACKAGE_X[7..]);
     for out in ["jx/hirsel.toml", "linked.hpkg", "jx/hirsel.lock", &store_entry] {
-        PackageLaw::refuse(law.run(&["pack", "jx", "--out", out]), &format!("--out {out} is an input of this command"));
+        PackageLaw::refuse(law.run(&["pack", "jx", "--output", out]), &format!("--output {out} is an input of this command"));
         assert!(!law.path("jx/hirsel.lock").exists());
         law.empty_store();
     }
@@ -2115,7 +2223,7 @@ pub fn main(f: Foreign[laws.Laws]) -> Result[(), Exit] {
                 let (_, approved, _) = peer.deploy_permission(Duration::from_secs(10), 4096).unwrap();
                 assert_eq!(approved, BTreeSet::from(["ffi_laws@1/laws/Laws".into()]));
                 let admission = AdmissionStore::open(&state.join("code"), 1 << 20).unwrap();
-                match admission.admit_for_runtime(&mut peer, &limits, &NativeSemantics, true, Some(&approved), None) {
+                match admission.admit_for_runtime(&mut peer, &limits, &NativeSemantics, true, Some(&approved), None, None) {
                     Err(AdmissionError::RecordingForeign(reason)) => {
                         assert_eq!(reason, REFUSAL);
                         peer.refuse_before_need(&reason).unwrap();
@@ -2314,7 +2422,7 @@ fn run_writes_main_error_value_then_names_the_outcome() {
         (
             r#"pub fn main() -> Result[(), AppError] {
     let b = string.into_bytes(string.from("pencil"))
-    let key = result.unwrap(secret.seal(take b, string.from("beta.test")))
+    let key = result.unwrap(secret.seal(take b, string.from("tls_send(beta.test)")))
     Error(Config(file: "a\tb.conf", key: key))
 }
 "#,
@@ -2443,6 +2551,116 @@ fn prop_seeds(e: Env, tasks: Tasks) -> Result[(), ()] waits {
             .any(|line| line.starts_with("pass executed app@1/main/prop_seeds (seed 1)")),
         "{stdout}"
     );
+}
+
+#[test]
+fn property_corpus_replays_minimized_case_before_search() {
+    let law = PackageLaw::new();
+    law.manifest(
+        "app",
+        "app",
+        1,
+        "[sources]\n\"main.hirsel\" = \"main\"\n\n[dependencies]\nstd = { major = 1 }\n\n[tests]\nlimit = 1048576\ngrants = [\"Tasks\"]\n",
+    );
+    let source = r#"
+fn classify(message: String) -> u64 {
+    if message == "original assertion" { 31 } else { 82 }
+}
+fn planted(take sample: std.prop.Case[u64]) -> Result[(), String] {
+    if sample.world_seed == 6869612563719971519 && sample.value >= 3 {
+        Error(string.from("original assertion"))
+    } else if sample.world_seed == 6869612563719971519 && sample.value == 0 {
+        Error(string.from("different assertion"))
+    } else {
+        Ok(())
+    }
+}
+@test
+fn property(e: Env, tasks: Tasks) -> Result[(), ()] waits {
+    let seed = option.unwrap(std.sim.world.test_seed(e))
+    let mut c = std.prop.config()
+    c.seed = if seed == 0 { 5 } else { 0 }
+    c.cases = 1
+    c.sim_seed = Some(seed + 123)
+    let key = std.prop.Corpus(generator: 17, label: Some(classify))
+    std.prop.check_tasks_corpus(e, tasks, key, c, std.prop.u64_in(0, 9), planted)
+}
+"#;
+    let run = |seed: &str, code: i32| {
+        let (status, stdout, stderr) = law.run(&[
+            "test", "app", "--property-corpus", "corpus", "--seed", seed, "--json",
+        ]);
+        assert_eq!(status, Some(code), "{stdout}\n{stderr}");
+        let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+        json["tests"][0].clone()
+    };
+    law.write("app/main.hirsel", source);
+    let saved = run("0", 1);
+    assert_eq!(saved["property_corpus"], "saved");
+    let entries: Vec<_> = std::fs::read_dir(law.path("corpus")).unwrap()
+        .map(|entry| entry.unwrap().path()).collect();
+    assert_eq!(entries.len(), 1);
+    let bytes = std::fs::read(&entries[0]).unwrap();
+    let record: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(record["test"], "app@1/main/property");
+    assert_eq!(record["launch_seed"], 0);
+    let input = record["input"].as_str().unwrap();
+    // The data RNG first draws 4. The planted assertion first fails at 3.
+    // AQABAw== is version 1, case 0, one choice, value 3. CgA= is bound 10 and terminator.
+    assert_eq!(input, "17 5 123 1 4096 1000 1000 1000000 10000000 262144 AQABAw== CgA= returned-31");
+    let replayed = run("1", 1);
+    assert_eq!(replayed["property_corpus"], "confirmed");
+    assert!(replayed["stderr"].as_str().unwrap().contains("0 shrinks: 3; law: original assertion"));
+    assert_eq!(std::fs::read(&entries[0]).unwrap(), bytes);
+
+    // Keep the generator and tape but return a second failure from the same law.
+    law.write("app/main.hirsel", source.replace(
+        "Error(string.from(\"original assertion\"))",
+        "Error(string.from(\"different assertion\"))",
+    ));
+    let changed = run("1", 1);
+    assert_eq!(changed["property_corpus"], "changed-failure");
+    assert!(changed["stderr"].as_str().unwrap().contains("returned-82"));
+
+    // Same identity and a bound that would otherwise replace saved 3 by zero.
+    // The old world still fails if the law sees that coerced value.
+    law.write("app/main.hirsel", source
+        .replace("u64_in(0, 9)", "u64_in(0, 2)")
+        .replace("sample.value >= 3", "sample.value == 0"));
+    let stale = run("1", 0);
+    assert_eq!(stale["property_corpus"], "stale");
+    assert!(!entries[0].exists());
+
+    let raised = source.replace(
+        "Error(string.from(\"original assertion\"))",
+        "if 0u64 == 0 { fail(\"raised assertion\") } else { fail(\"raised assertion\") }",
+    );
+    law.write("app/main.hirsel", &raised);
+    let saved_raise = run("0", 1);
+    assert_eq!(saved_raise["property_corpus"], "saved");
+    let raise_bytes = std::fs::read(&entries[0]).unwrap();
+    let raise_record: serde_json::Value = serde_json::from_slice(&raise_bytes).unwrap();
+    assert_eq!(raise_record["site"], "main.hirsel:7:24");
+    let replayed_raise = run("1", 1);
+    assert_eq!(replayed_raise["property_corpus"], "confirmed");
+    assert_eq!(std::fs::read(&entries[0]).unwrap(), raise_bytes);
+
+    law.write("app/main.hirsel", raised.replace("if 0u64 == 0", "if 1u64 == 0"));
+    let changed_site = run("1", 1);
+    assert_eq!(changed_site["property_corpus"], "changed-failure");
+    let changed_record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&entries[0]).unwrap()).unwrap();
+    assert_eq!(changed_record["site"], "main.hirsel:7:58");
+
+    let mut old_record = record;
+    old_record["version"] = 1.into();
+    old_record.as_object_mut().unwrap().remove("site");
+    std::fs::write(&entries[0], serde_json::to_vec(&old_record).unwrap()).unwrap();
+    let replaced = run("0", 1);
+    assert_eq!(replaced["property_corpus"], "stale-and-saved");
+    let current: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&entries[0]).unwrap()).unwrap();
+    assert_eq!(current["version"], 2);
 }
 
 #[test]

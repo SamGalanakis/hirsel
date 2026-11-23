@@ -17,18 +17,44 @@ fn optional_text(actual: Option[View[String]], take expected: Option[String]) ->
 fn host_denied(d: Dir) -> bool waits {
     let mut scratch = string.with_capacity(32)
     for (p, parent, grandparent) in[
-    // Empty, repeated, and dot components.
-    ("", "", ""), ("/", "", ""), ("a/", "", ""), ("/a", "", ""), ("a//b", "", ""), (".", "", ""), ("..", "", ""), ("a/./b", "", ""), ("a/../b", "", ""),
-    // Names with dots, NUL, and non-ASCII text.
-    ("...", "", ""), (".a", "", ""), ("a.", "", ""), ("a\0b", "", ""), ("é", "", ""), ("a", "", ""),
-    // Paths that need a parent precreated.
-    ("a/b", "a", ""), ("a/b/c", "a/b", "a"),
-    // Invalid suffixes and prefixed dot components.
-    ("a/b/", "", ""), ("./a", "", ""), ("../a", "", ""), ("a/.", "", ""), ("a/..", "", ""), ("a/b\0", "", ""), ("é/\0", "", ""),
-    // Valid nested Unicode and dotted names.
-    ("é/子/文", "é/子", "é"), ("a/.../b", "a/...", "a"),
-    // Other valid names and a last dot component.
-    ("a\\b", "", ""), ("a b", "", ""), (".config.toml", "", ""), ("..a", "", ""), ("é/.", "", ""),] {
+        // Empty, repeated, and dot components.
+        ("", "", ""),
+        ("/", "", ""),
+        ("a/", "", ""),
+        ("/a", "", ""),
+        ("a//b", "", ""),
+        (".", "", ""),
+        ("..", "", ""),
+        ("a/./b", "", ""),
+        ("a/../b", "", ""),
+        // Names with dots, NUL, and non-ASCII text.
+        ("...", "", ""),
+        (".a", "", ""),
+        ("a.", "", ""),
+        ("a\0b", "", ""),
+        ("é", "", ""),
+        ("a", "", ""),
+        // Paths that need a parent precreated.
+        ("a/b", "a", ""),
+        ("a/b/c", "a/b", "a"),
+        // Invalid suffixes and prefixed dot components.
+        ("a/b/", "", ""),
+        ("./a", "", ""),
+        ("../a", "", ""),
+        ("a/.", "", ""),
+        ("a/..", "", ""),
+        ("a/b\0", "", ""),
+        ("é/\0", "", ""),
+        // Valid nested Unicode and dotted names.
+        ("é/子/文", "é/子", "é"),
+        ("a/.../b", "a/...", "a"),
+        // Other valid names and a last dot component.
+        ("a\\b", "", ""),
+        ("a b", "", ""),
+        (".config.toml", "", ""),
+        ("..a", "", ""),
+        ("é/.", "", ""),
+    ] {
         if !host_row(d, mut scratch, p, parent, grandparent) {
             return false
         }
@@ -60,7 +86,18 @@ fn host_row(d: Dir, mut scratch: String, p: String, parent: String, grandparent:
 // Kills an offset at the preceding slash, or counting scalars instead of bytes.
 // expect: run fault_offsets() = true
 fn fault_offsets() -> bool {
-    for (p, offset) in[("", 0u64), ("/a", 0u64), ("a//b", 2u64), ("a/./b", 2u64), ("a/..", 2u64), ("a/", 2u64), ("a/b\0c", 3u64), ("é\0x", 2u64), ("é/..", 3u64), ("a//b\0", 2u64),] {
+    for (p, offset) in[
+        ("", 0u64),
+        ("/a", 0u64),
+        ("a//b", 2u64),
+        ("a/./b", 2u64),
+        ("a/..", 2u64),
+        ("a/", 2u64),
+        ("a/b\0c", 3u64),
+        ("é\0x", 2u64),
+        ("é/..", 3u64),
+        ("a//b\0", 2u64),
+    ] {
         match path.check(p) {
             Error(Invalid(at)) => {
                 if at != offset {
@@ -183,7 +220,11 @@ fn component_strip() -> bool {
 // starting buffer models the absence of an initial component.
 // expect: run go_join_relative_paths() = true
 fn go_join_relative_paths() -> bool {
-    for (base, tail, expected) in[("", "a", "a"), ("a", "b", "a/b"), ("", "b", "b"),] {
+    for (base, tail, expected) in[
+        ("", "a", "a"),
+        ("a", "b", "a/b"),
+        ("", "b", "b"),
+    ] {
         let mut out = string.from(base)
         let Ok(()) = path.join(mut out, tail) else {
             return false
@@ -200,7 +241,11 @@ fn go_join_relative_paths() -> bool {
 // test_decompositions_unix, the basename may be hidden and have several dots.
 // expect: run rust_hidden_file_decomposition() = true
 fn rust_hidden_file_decomposition() -> bool {
-    let rows: Inline[(String, String, String, Option[String]), 3] =[("a/.foo", ".foo", ".foo", None), ("a/.rustfmt.toml", ".rustfmt.toml", ".rustfmt", Some("toml")), ("a/.x.y.z", ".x.y.z", ".x.y", Some("z")),]
+    let rows: Inline[(String, String, String, Option[String]), 3] =[
+        ("a/.foo", ".foo", ".foo", None),
+        ("a/.rustfmt.toml", ".rustfmt.toml", ".rustfmt", Some("toml")),
+        ("a/.x.y.z", ".x.y.z", ".x.y", Some("z")),
+    ]
     for (input, name, stem, extension) in rows {
         let extension_matches = match (path.extension(input), extension) {
             (Some(actual), Some(expected)) => actual == expected,

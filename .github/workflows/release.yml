@@ -83,6 +83,10 @@ jobs:
               hirsel test
               hirsel run
               hirsel build
+              sed -i "/^\[dependencies\]/a store = { major = 1 }" hirsel.toml
+              sed -i "/^pub fn main/a\    let _ = store.defaults()" main.hirsel
+              hirsel lock 2>&3
+              hirsel check --locked
               test ! -s /tmp/hirsel-smoke.stderr
             '
 
@@ -102,4 +106,12 @@ jobs:
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
         working-directory: ${{ runner.temp }}/release
-        run: gh release create "$RELEASE_TAG" --verify-tag --generate-notes -- ./hirsel-*.tar.gz ./SHA256SUMS ./install.sh
+        shell: bash
+        run: |
+          version=${RELEASE_TAG%%+*}
+          if [[ "$version" == *-* ]]; then
+            release_flags=(--prerelease --latest=false --notes "Hirsel $RELEASE_TAG.")
+          else
+            release_flags=(--generate-notes)
+          fi
+          gh release create "$RELEASE_TAG" --verify-tag "${release_flags[@]}" -- ./hirsel-*.tar.gz ./SHA256SUMS ./install.sh

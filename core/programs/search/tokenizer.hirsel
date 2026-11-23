@@ -1,0 +1,204 @@
+pub opaque type Tokenizer {
+    stop: std.set.Set[String]
+}
+
+pub fn tokenizer(stop_words: List[String]) -> Tokenizer {
+    let mut stop: std.set.Set[String] = std.set.new()
+    for entry in stop_words {
+        for take word in words(entry) {
+            let _ = std.set.insert(mut stop, take word)
+        }
+    }
+    Tokenizer(stop: take stop)
+}
+
+pub fn tokenize(t: Tokenizer, text: String) -> List[String] {
+    let mut kept: List[String] = list.new()
+    for take token in words(text) {
+        if !std.set.contains(t.stop, token) {
+            list.push(mut kept, take token)
+        }
+    }
+    take kept
+}
+
+type WordClass: key = Other | Letter | Hebrew | Number | Katakana | Connector | MidLetter | MidNumber | MidBoth | Quote | HebrewQuote | Extend | Ignore | Single
+
+fn letter(c: WordClass) -> bool {
+    c == Letter || c == Hebrew
+}
+
+fn regular(c: WordClass) -> bool {
+    letter(c) || c == Number || c == Katakana
+}
+
+fn adjacent(left: WordClass, right: WordClass) -> bool {
+    (left == Connector && (right == Connector || regular(right))) || (regular(left) && right == Connector) || ((letter(left) || left == Number) && (letter(right) || right == Number)) || (left == Katakana && right == Katakana)
+}
+
+fn bridge(left: WordClass, mid: WordClass, right: WordClass) -> bool {
+    (letter(left) && letter(right) && (mid == MidLetter || mid == MidBoth || mid == Quote)) || (left == Number && right == Number && (mid == MidNumber || mid == MidBoth || mid == Quote)) || (left == Hebrew && mid == HebrewQuote && right == Hebrew)
+}
+
+fn next_base(text: String, at: u64) -> WordClass {
+    let mut cursor = at
+    while let Some((scalar, next)) = string.next_scalar(text, cursor) {
+        let kind = word_class(scalar)
+        if kind != Extend && kind != Ignore {
+            return kind
+        }
+        cursor = next
+    }
+    Other
+}
+
+fn words(text: String) -> List[String] {
+    let mut result: List[String] = list.new()
+    let mut word = string.new()
+    let mut prior: WordClass = Other
+    let mut joined = false
+    let mut has_word = false
+    let mut at: u64 = 0
+    while let Some((scalar, next)) = string.next_scalar(text, at) {
+        at = next
+        let kind = word_class(scalar)
+        if kind == Ignore {
+            continue
+        }
+        if kind == Extend {
+            if prior != Other {
+                push_folded(mut word, scalar)
+            }
+            continue
+        }
+        let linked = joined || adjacent(prior, kind)
+        joined = false
+        if kind == MidLetter || kind == MidNumber || kind == MidBoth || kind == Quote || kind == HebrewQuote {
+            joined = bridge(prior, kind, next_base(text, next))
+            if joined {
+                push_folded(mut word, scalar)
+                continue
+            }
+            if prior == Hebrew && kind == Quote {
+                push_folded(mut word, scalar)
+            }
+        }
+        if !linked {
+            if has_word {
+                list.push(mut result, take word)
+                word = string.new()
+            } else {
+                std.string.clear(mut word)
+            }
+            has_word = false
+        }
+        if regular(kind) || kind == Single || kind == Connector {
+            push_folded(mut word, scalar)
+            has_word = has_word || kind != Connector
+            prior = kind
+        } else {
+            prior = Other
+        }
+    }
+    if has_word {
+        list.push(mut result, take word)
+    }
+    take result
+}
+
+fn word_class(c: char) -> WordClass {
+    let code = char.to_u32(c)
+    if code < 128 {
+        if char.is_ascii_alpha(c) {
+            return Letter
+        }
+        if char.is_ascii_digit(c) {
+            return Number
+        }
+        return match c {
+            '"' => HebrewQuote,
+            '\u{27}' => Quote,
+            ',' => MidNumber,
+            ';' => MidNumber,
+            '.' => MidBoth,
+            ':' => MidLetter,
+            '_' => Connector,
+            _ => Other,
+        }
+    }
+    let mut lo: u64 = 0
+    let mut hi = WORD_RANGES_COUNT
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2
+        let (start, end, kind) = WORD_RANGES[mid]
+        if code < start {
+            hi = mid
+        } else if code > end {
+            lo = mid + 1
+        } else {
+            return match kind {
+                0 => Letter,
+                1 => Hebrew,
+                2 => Number,
+                3 => Katakana,
+                4 => Connector,
+                5 => MidLetter,
+                6 => MidNumber,
+                7 => MidBoth,
+                8 => Quote,
+                9 => HebrewQuote,
+                10 => Extend,
+                11 => Ignore,
+                12 => Ignore,
+                _ => fail("unknown word break class")
+            }
+        }
+    }
+    if char.is_letter(c) || char.is_decimal(c) {
+        Single
+    } else {
+        Other
+    }
+}
+
+fn push_folded(mut out: String, c: char) {
+    let code = char.to_u32(c)
+    if code < 128 {
+        string.push_char(mut out, char.to_ascii_lower(c))
+        return
+    }
+    let mut lo: u64 = 0
+    let mut hi = FOLD_RUNS_COUNT
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2
+        let (start, end, delta) = FOLD_RUNS[mid]
+        if code < start {
+            hi = mid
+        } else if code > end {
+            lo = mid + 1
+        } else {
+            let mapped = int.wrapping_add(code, int.truncate(delta))
+            string.push_char(mut out, option.unwrap(char.from_u32(mapped)))
+            return
+        }
+    }
+    lo = 0
+    hi = FOLD_EXPANSIONS_COUNT
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2
+        let (source, first, second, third) = FOLD_EXPANSIONS[mid]
+        if code < source {
+            hi = mid
+        } else if code > source {
+            lo = mid + 1
+        } else {
+            string.push_char(mut out, option.unwrap(char.from_u32(first)))
+            string.push_char(mut out, option.unwrap(char.from_u32(second)))
+            if third != 0 {
+                string.push_char(mut out, option.unwrap(char.from_u32(third)))
+            }
+            return
+        }
+    }
+    string.push_char(mut out, c)
+}

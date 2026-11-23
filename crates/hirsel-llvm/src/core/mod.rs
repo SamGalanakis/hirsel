@@ -726,6 +726,7 @@ fn emit_module(
                 current: None,
                 exits: Vec::new(),
                 exit_live: Some(Vec::new()),
+                raised_exit: None,
                 step_labels: Default::default(),
                 unchecked_steps: false,
                 precharge: None,
@@ -733,6 +734,7 @@ fn emit_module(
                 step_counter: None,
                 neutral_step_call: false,
                 view_invariants: Vec::new(),
+                view_ends_before_exit: false,
                 aliases,
                 pointer_origins: if facts {
                     storage::pointer_origins(body, &module.signatures[f.signature.index()])
@@ -944,8 +946,8 @@ fn emit_module(
             }
             let mut forwarding = forward::Forwarding::native(body, sig, &call_layouts);
             // A view freezes the carrier header throughout the activation, even
-            // across calls through an opaque capture. End the invariant on every
-            // return; retain existing frame-safe tail-call functions unchanged.
+            // across calls through an opaque capture. End the invariant before
+            // returning, and keep frame-safe tail calls in tail position.
             if facts
                 && !(0..body.blocks.len()).any(|b| {
                     forwarding
@@ -970,6 +972,13 @@ fn emit_module(
                         e.view_invariants.push((token, pointer, bytes));
                     }
                 }
+                // The inliner prices a loop body with its exits. Keep the
+                // ends on the incoming paths of an existing scoped exit so
+                // folding the epilogue does not change that decision early.
+                e.view_ends_before_exit = !e.view_invariants.is_empty()
+                    && attrs.inline == Inline::Default
+                    && e.scoped.slots.iter().any(|&scoped| scoped)
+                    && !empty::loop_free(body);
             }
             let fills = hirsel_core_ir::fills::fills(body);
             e.br(Label::block(0u32));
@@ -1058,6 +1067,7 @@ fn emit_module(
                 })?;
             }
             e.finish_exit();
+            e.finish_raised_exit();
             e.sink.end_function();
             e.current = None;
             e.step_counter = None;
@@ -1544,6 +1554,23 @@ fn int(n: impl Into<i128>) -> Value {
     Value::Int(n.into())
 }
 const FALSE: Value = Value::Bool(false);
+const RAISED_EXIT: Label = Label::plain("exit_raised");
+
+struct RaisedExit {
+    live: Option<Vec<u64>>,
+}
+
+fn include_exit_liveness(exit_live: &mut Option<Vec<u64>>, live: &Option<Vec<u64>>) {
+    match (exit_live, live) {
+        (Some(all), Some(live)) => {
+            all.resize(live.len(), 0);
+            for (a, l) in all.iter_mut().zip(live) {
+                *a |= l;
+            }
+        }
+        (exit_live, _) => *exit_live = None,
+    }
+}
 
 struct FunctionEmitter<'a> {
     function: Option<FuncId>,
@@ -1594,6 +1621,7 @@ struct FunctionEmitter<'a> {
     /// scoped slot). The exit ends those slots once and returns.
     exits: Vec<(Option<(Type, Value)>, Label)>,
     exit_live: Option<Vec<u64>>,
+    raised_exit: Option<RaisedExit>,
     step_labels: std::collections::BTreeMap<usize, Label>,
     unchecked_steps: bool,
     precharge: Option<steps::Precharge>,
@@ -1601,6 +1629,7 @@ struct FunctionEmitter<'a> {
     step_counter: Option<Value>,
     neutral_step_call: bool,
     view_invariants: Vec<(Value, Value, u64)>,
+    view_ends_before_exit: bool,
     sink: &'a mut dyn Sink,
     items: &'a mut Items,
     next: usize,
@@ -1721,47 +1750,48 @@ impl FunctionEmitter<'_> {
         self.effect(Operation::Conditional(c, yes, no, false));
     }
     fn ret(&mut self, t: &Type, v: &Value) {
-        self.end_view_invariants();
-        self.flush_steps();
-        if !self.to_exit(Some((t, v))) {
-            self.end_scoped();
-            self.effect(Operation::Return(Some((t, v))));
-        }
+        self.return_from(Some((t, v)));
     }
     fn ret_void(&mut self) {
-        self.end_view_invariants();
-        self.flush_steps();
-        if !self.to_exit(None) {
-            self.end_scoped();
-            self.effect(Operation::Return(None));
-        }
+        self.return_from(None);
     }
-    /// Branches a return to the shared exit when the function has scoped
-    /// slots, so their ends are emitted once rather than before every return.
-    /// A return after a forwarded tail call, or in the entry block, stays put.
+    fn return_from(&mut self, value: Option<(&Type, &Value)>) {
+        if self.view_ends_before_exit {
+            self.end_view_invariants();
+        }
+        if self.to_exit(value) {
+            return;
+        }
+        if !self.view_ends_before_exit {
+            self.end_view_invariants();
+        }
+        self.flush_steps();
+        self.end_scoped();
+        self.effect(Operation::Return(value));
+    }
+    /// Branches a return to the shared exit to end scoped slots and view
+    /// invariants once.
+    /// The raised exit and returns in the entry block or after a forwarded
+    /// tail call stay put.
     fn to_exit(&mut self, v: Option<(&Type, &Value)>) -> bool {
         let Some(from) = self.current else {
             return false;
         };
-        if self.scoped_ended || !self.scoped.slots.iter().any(|&s| s) {
+        if from == RAISED_EXIT
+            || self.scoped_ended
+            || (self.view_invariants.is_empty() && !self.scoped.slots.iter().any(|&s| s))
+        {
             return false;
         }
-        match (&mut self.exit_live, &self.live) {
-            (Some(all), Some(live)) => {
-                all.resize(live.len(), 0);
-                for (a, l) in all.iter_mut().zip(live) {
-                    *a |= l;
-                }
-            }
-            (exit_live, _) => *exit_live = None,
-        }
+        include_exit_liveness(&mut self.exit_live, &self.live);
         self.exits
             .push((v.map(|(t, v)| (t.clone(), v.clone())), from));
+        self.flush_steps();
         self.br(Label::plain("exit"));
         true
     }
-    /// Emits the shared exit, if any return branched to it: ends the scoped
-    /// slots that may be live at a return once, then returns.
+    /// Emits the shared exit, if any return branched to it. Ends the view
+    /// invariants and scoped slots that may be live, then returns.
     fn finish_exit(&mut self) {
         if self.exits.is_empty() {
             return;
@@ -1778,8 +1808,32 @@ impl FunctionEmitter<'_> {
             let v = self.emit(Operation::Phi(&t, &incoming));
             (t, v)
         });
+        if !self.view_ends_before_exit {
+            self.end_view_invariants();
+        }
         self.end_scoped();
         self.effect(Operation::Return(value.as_ref().map(|(t, v)| (t, v))));
+    }
+    /// Keep a raised status out of the ordinary return's result phi so LLVM
+    /// can optimize the normal result and the failure path separately.
+    fn to_raised_exit(&mut self) -> bool {
+        if self.view_ends_before_exit || self.view_invariants.is_empty() {
+            return false;
+        }
+        let exit = self.raised_exit.get_or_insert_with(|| RaisedExit {
+            live: Some(Vec::new()),
+        });
+        include_exit_liveness(&mut exit.live, &self.live);
+        self.br(RAISED_EXIT);
+        true
+    }
+    fn finish_raised_exit(&mut self) {
+        if let Some(exit) = self.raised_exit.take() {
+            self.live = exit.live;
+            self.scoped_ended = false;
+            self.block(RAISED_EXIT);
+            self.emit_failure_return();
+        }
     }
     /// Ends every scoped slot's storage that may be live before a return, once.
     fn end_scoped(&mut self) {

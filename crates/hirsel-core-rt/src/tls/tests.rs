@@ -2,7 +2,8 @@ use super::*;
 use crate::{entry::*, host_file::Files, net::*, tasks::*};
 use hirsel_core_net::{Rule, RuleView, TlsRule};
 use rustls::{
-    ServerConfig, ServerConnection, StreamOwned,
+    AlertDescription, HandshakeKind, ServerConfig, ServerConnection, StreamOwned,
+    SupportedProtocolVersion,
     pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
 };
 use std::{
@@ -225,12 +226,21 @@ fn certificate_config(protocols: &[&[u8]]) -> ServerConfig {
 }
 
 fn certificate_for(leaf: &[u8], key: &[u8], protocols: &[&[u8]]) -> ServerConfig {
+    certificate_for_versions(leaf, key, protocols, rustls::DEFAULT_VERSIONS)
+}
+
+fn certificate_for_versions(
+    leaf: &[u8],
+    key: &[u8],
+    protocols: &[&[u8]],
+    versions: &[&'static SupportedProtocolVersion],
+) -> ServerConfig {
     let cert = CertificateDer::from_pem_slice(leaf).unwrap();
     let key = PrivateKeyDer::from_pem_slice(key).unwrap();
     let mut config = rustls::ServerConfig::builder_with_provider(Arc::new(
         rustls::crypto::ring::default_provider(),
     ))
-    .with_safe_default_protocol_versions()
+    .with_protocol_versions(versions)
     .unwrap()
     .with_no_client_auth()
     .with_single_cert(vec![cert], key)
@@ -262,6 +272,73 @@ fn server_handshake(server: &mut StreamOwned<ServerConnection, TcpStream>) -> st
         server.conn.complete_io(&mut server.sock)?;
     }
     Ok(())
+}
+
+fn resumption(run: &mut Run) {
+    const PROTOCOL: &[u8] = b"http/1.1";
+    let listener = listener();
+    let port = listener.local_addr().unwrap().port();
+    let config = Arc::new(certificate_config(&[PROTOCOL]));
+    let peer = thread::spawn(move || {
+        let kinds = std::array::from_fn::<_, 2, _>(|_| {
+            let (socket, _) = listener.accept().unwrap();
+            let mut server =
+                StreamOwned::new(ServerConnection::new(config.clone()).unwrap(), socket);
+            server_handshake(&mut server).unwrap();
+            server.write_all(b"!").unwrap();
+            server.conn.handshake_kind().unwrap()
+        });
+        let wrong = certificate_for(
+            include_bytes!("../../testdata/tls/beta.pem"),
+            include_bytes!("../../testdata/tls/beta.key.pem"),
+            &[PROTOCOL],
+        );
+        // A replacement server has no corresponding session and must present its leaf.
+        let (socket, _) = listener.accept().unwrap();
+        let mut server = StreamOwned::new(ServerConnection::new(Arc::new(wrong)).unwrap(), socket);
+        assert!(server_handshake(&mut server).is_err());
+        kinds
+    });
+    let digest = ALPHA_DIGEST.trim();
+    let expected =
+        std::array::from_fn(|i| u64::from_str_radix(&digest[i * 16..][..16], 16).unwrap());
+    for _ in 0..2 {
+        let key = run.connect(port);
+        let result = run.upgrade(key, b"alpha.test", Some(CA), &[PROTOCOL]);
+        assert_eq!(
+            (result.outcome.error, result.outcome.written),
+            (IoError::OK, 1)
+        );
+        assert_eq!(result.peer, expected);
+        // The first application read also processes any pending TLS 1.3 tickets.
+        let mut byte = 0;
+        let mut buffer = Buffer {
+            data: &mut byte,
+            len: 0,
+            capacity: 1,
+        };
+        let out = unsafe {
+            hirsel_core_host_recv_bounded(
+                &raw mut *run.context,
+                key | 1,
+                &mut buffer,
+                1,
+                0,
+                0,
+                0,
+                3,
+            )
+        };
+        assert_eq!((out.error, out.value, byte), (IoError::OK, 1, b'!'));
+        run.release_halves(key);
+    }
+    let key = run.connect(port);
+    let result = run.upgrade(key, b"alpha.test", Some(CA), &[PROTOCOL]);
+    assert_error(result.outcome, tls_failure(0, 1));
+    assert_eq!(
+        peer.join().unwrap(),
+        [HandshakeKind::Full, HandshakeKind::Resumed]
+    );
 }
 
 fn fds() -> usize {
@@ -652,6 +729,232 @@ fn release_on_exit(run: &mut Run) {
     assert!(run.files.tls.sessions.is_empty());
 }
 
+fn tls12_round_trip(run: &mut Run) {
+    let mut config = certificate_for_versions(ALPHA, ALPHA_KEY, &[], &[&rustls::version::TLS12]);
+    // Split the server Certificate across wire records.
+    config.max_fragment_size = Some(128);
+    let (port, peer) = serve(listener(), config, |mut server| {
+        server_handshake(&mut server).unwrap();
+        let mut request = [0; 5];
+        server.read_exact(&mut request).unwrap();
+        assert_eq!(&request, b"hello");
+        server.write_all(b"world").unwrap();
+        server.conn.send_close_notify();
+        server.flush().unwrap();
+        assert_eq!(server.read(&mut [0]).unwrap(), 0);
+    });
+    let key = run.connect(port);
+    assert_eq!(
+        run.upgrade(key, b"alpha.test", Some(CA), &[]).outcome.error,
+        IoError::OK
+    );
+    let out = unsafe {
+        hirsel_core_host_send_pair(
+            &raw mut *run.context,
+            key | 2,
+            &input(b"he"),
+            &input(b"llo"),
+            0,
+            0,
+            0,
+            3,
+        )
+    };
+    assert_eq!((out.error, out.value), (IoError::OK, 5));
+    let mut bytes = [0; 8];
+    let (out, n) = read_tls_law(run, key, &mut bytes);
+    assert_eq!(
+        (out.error, out.value, &bytes[..n]),
+        (IoError::OK, 5, b"world".as_slice())
+    );
+    let (eof, n) = read_tls_law(run, key, &mut bytes);
+    assert_eq!((eof.error, eof.value, n), (IoError::OK, 0, 0));
+    run.release_halves(key);
+    peer.join().unwrap();
+}
+
+fn read_tls_law(run: &mut Run, key: u64, bytes: &mut [u8]) -> (Outcome, usize) {
+    let mut destination = Buffer {
+        data: bytes.as_mut_ptr(),
+        len: 0,
+        capacity: bytes.len(),
+    };
+    let out = unsafe {
+        hirsel_core_host_recv_bounded(
+            &raw mut *run.context,
+            key | 1,
+            &mut destination,
+            bytes.len() as u64,
+            0,
+            0,
+            0,
+            4,
+        )
+    };
+    (out, destination.len)
+}
+
+fn feed_wire_record(server: &mut StreamOwned<ServerConnection, TcpStream>, payload_size: usize) {
+    let mut wire = vec![0; 5 + payload_size];
+    server.sock.read_exact(&mut wire[..5]).unwrap();
+    assert_eq!(&wire[..3], &[23, 3, 3]);
+    assert_eq!(
+        u16::from_be_bytes([wire[3], wire[4]]) as usize,
+        payload_size
+    );
+    server.sock.read_exact(&mut wire[5..]).unwrap();
+    let mut bytes = wire.as_slice();
+    while !bytes.is_empty() {
+        assert_ne!(server.conn.read_tls(&mut bytes).unwrap(), 0);
+        server.conn.process_new_packets().unwrap();
+    }
+}
+
+fn tls13_record_boundaries_and_updates(run: &mut Run) {
+    const FIRST: usize = 16 * 1024;
+    const TOTAL: usize = FIRST + 257;
+    const OVERHEAD: usize = 17; // Inner content type and AES-GCM tag.
+    const UPDATE_SIZE: usize = 5 + OVERHEAD;
+    let (sent, wait) = mpsc::channel();
+    let (port, peer) = serve(listener(), certificate_config(&[]), move |mut server| {
+        server_handshake(&mut server).unwrap();
+        assert_eq!(
+            server.conn.protocol_version(),
+            Some(rustls::ProtocolVersion::TLSv1_3)
+        );
+        // Make sure complete_io did not already buffer application records.
+        sent.send(()).unwrap();
+        feed_wire_record(&mut server, FIRST + OVERHEAD);
+        feed_wire_record(&mut server, UPDATE_SIZE);
+        feed_wire_record(&mut server, TOTAL - FIRST + OVERHEAD);
+        let mut bytes = vec![0; TOTAL];
+        server.conn.reader().read_exact(&mut bytes).unwrap();
+        assert!(
+            bytes
+                .iter()
+                .enumerate()
+                .all(|(i, &byte)| byte == (i % 251) as u8)
+        );
+
+        server.conn.refresh_traffic_keys().unwrap();
+        server.conn.writer().write_all(&bytes).unwrap();
+        let mut wire = Vec::new();
+        while server.conn.wants_write() {
+            server.conn.write_tls(&mut wire).unwrap();
+        }
+        // Put both application records in one socket write before the caller reads.
+        server.sock.write_all(&wire).unwrap();
+        sent.send(()).unwrap();
+        feed_wire_record(&mut server, UPDATE_SIZE);
+        feed_wire_record(&mut server, 1 + OVERHEAD);
+        let mut final_byte = [0];
+        server.conn.reader().read_exact(&mut final_byte).unwrap();
+        assert_eq!(&final_byte, b"!");
+    });
+    let key = run.connect(port);
+    crate::os_tls::TX_TEST_LIMIT.with(|limit| limit.set(Some(2)));
+    assert_eq!(
+        run.upgrade(key, b"alpha.test", Some(CA), &[]).outcome.error,
+        IoError::OK
+    );
+    wait.recv().unwrap();
+    let expected: Vec<_> = (0..TOTAL).map(|i| (i % 251) as u8).collect();
+    let out = unsafe {
+        hirsel_core_host_send_pair(
+            &raw mut *run.context,
+            key | 2,
+            &input(&expected),
+            &input(b""),
+            0,
+            0,
+            0,
+            3,
+        )
+    };
+    assert_eq!((out.error, out.value), (IoError::OK, TOTAL as u64));
+    wait.recv().unwrap();
+    let mut bytes = vec![0; TOTAL];
+    let (out, n) = read_tls_law(run, key, &mut bytes);
+    assert_eq!(
+        (out.error, out.value, n),
+        (IoError::OK, TOTAL as u64, TOTAL)
+    );
+    assert_eq!(bytes, expected);
+    let out = unsafe {
+        hirsel_core_host_send_pair(
+            &raw mut *run.context,
+            key | 2,
+            &input(b"!"),
+            &input(b""),
+            0,
+            0,
+            0,
+            5,
+        )
+    };
+    assert_eq!((out.error, out.value), (IoError::OK, 1));
+    peer.join().unwrap();
+    run.release_halves(key);
+}
+
+fn tls13_record_rejection(run: &mut Run) {
+    for oversized in [false, true] {
+        let (port, peer) = serve(listener(), certificate_config(&[]), move |mut server| {
+            server_handshake(&mut server).unwrap();
+            server.write_all(b"ok").unwrap();
+            let alert = if oversized {
+                server.sock.write_all(&[23, 3, 3, 0x48, 0]).unwrap();
+                AlertDescription::RecordOverflow
+            } else {
+                let mut wire = Vec::new();
+                server.conn.writer().write_all(b"tampered").unwrap();
+                server.conn.write_tls(&mut wire).unwrap();
+                *wire.last_mut().unwrap() ^= 1;
+                server.sock.write_all(&wire).unwrap();
+                AlertDescription::BadRecordMac
+            };
+            let error = server.read(&mut [0]).unwrap_err();
+            assert_eq!(
+                error
+                    .get_ref()
+                    .and_then(|error| error.downcast_ref::<rustls::Error>()),
+                Some(&rustls::Error::AlertReceived(alert))
+            );
+        });
+        let key = run.connect(port);
+        assert_eq!(
+            run.upgrade(key, b"alpha.test", Some(CA), &[]).outcome.error,
+            IoError::OK
+        );
+        let mut bytes = [0; 16];
+        let (out, n) = read_tls_law(run, key, &mut bytes);
+        assert_eq!(
+            (out.error, out.value, &bytes[..n]),
+            (IoError::OK, 2, b"ok".as_slice())
+        );
+        for _ in 0..2 {
+            let (out, n) = read_tls_law(run, key, &mut bytes);
+            assert_error(out, tls_failure(4, 0));
+            assert_eq!((out.value, n), (0, 0));
+        }
+        let out = unsafe {
+            hirsel_core_host_send_pair(
+                &raw mut *run.context,
+                key | 2,
+                &input(b"refused"),
+                &input(b""),
+                0,
+                0,
+                0,
+                5,
+            )
+        };
+        assert_error(out, tls_failure(4, 0));
+        run.release_halves(key);
+        peer.join().unwrap();
+    }
+}
+
 #[test]
 fn os_tls_loopback_laws() {
     if std::env::var_os("HIRSEL_TLS_LAWS_CHILD").is_none() {
@@ -670,6 +973,10 @@ fn os_tls_loopback_laws() {
     }
     let mut run = Run::new();
     let baseline = fds();
+    resumption(&mut run);
+    tls12_round_trip(&mut run);
+    tls13_record_boundaries_and_updates(&mut run);
+    tls13_record_rejection(&mut run);
     cert_case(&mut run, b"beta.test", Some(CA), Some(tls_failure(0, 1)));
     assert_eq!(fds(), baseline);
     cert_case(&mut run, b"alpha.test", Some(CA), None);
@@ -942,7 +1249,7 @@ fn rfc_scram_and_normalization(run: &mut Run) {
             false,
         ),
     ] {
-        let secret = run.seal_secret(password, b"alpha.test");
+        let secret = run.seal_secret(password, b"tls_send(alpha.test)");
         let (key, peer) = run.scram_peer(certificate_config(&[]), CA, 106);
         let len = run.scram_len(key, CLIENT_FIRST, SERVER_FIRST);
         assert_eq!((len.error, len.value), (IoError::OK, 106));
@@ -962,7 +1269,7 @@ fn rfc_scram_and_normalization(run: &mut Run) {
             assert_eq!(&observed[proof_at..], suffix);
         }
     }
-    let secret = run.seal_secret(b"pencil", b"alpha.test");
+    let secret = run.seal_secret(b"pencil", b"tls_send(alpha.test)");
     // 2 + 4 + 3 + len("rOprNGfwEbeRWgbNEkqOmore") + 3 + 44.
     let (key, peer) = run.scram_peer(certificate_config(&[]), CA, 80);
     let result = run.scram_send(key, secret, CLIENT_FIRST, &distinct_server);
@@ -973,8 +1280,8 @@ fn rfc_scram_and_normalization(run: &mut Run) {
 }
 
 fn scram_checks(run: &mut Run) {
-    let secret = run.seal_secret(b"pencil", b"alpha.test");
-    let denied = run.seal_secret(b"pencil", b"beta.test");
+    let secret = run.seal_secret(b"pencil", b"tls_send(alpha.test)");
+    let denied = run.seal_secret(b"pencil", b"tls_send(beta.test)");
     let (key, peer) = run.scram_peer(certificate_config(&[]), CA, 0);
     let (server_prefix, _) = SERVER_FIRST.split_at(SERVER_FIRST.len() - b"4096".len());
     let mut count = |field: &[u8], tag| {
@@ -1045,7 +1352,7 @@ fn scram_checks(run: &mut Run) {
 
 fn scram_iteration_steps(run: &mut Run) {
     crate::causes::task_start(&mut run.context).unwrap();
-    let secret = run.seal_secret(b"pencil", b"alpha.test");
+    let secret = run.seal_secret(b"pencil", b"tls_send(alpha.test)");
     for budget in [4097, 4096] {
         let (key, peer) = run.scram_peer(
             certificate_config(&[]),
@@ -1076,7 +1383,7 @@ fn scram_channel_binding(run: &mut Run) {
     const SHA384_KEY: &[u8] = include_bytes!("../../testdata/tls/alpha-sha384.key.pem");
     const ED25519_LEAF: &[u8] = include_bytes!("../../testdata/tls/alpha-ed25519.pem");
     const ED25519_KEY: &[u8] = include_bytes!("../../testdata/tls/alpha-ed25519.key.pem");
-    let secret = run.seal_secret(b"pencil", b"alpha.test");
+    let secret = run.seal_secret(b"pencil", b"tls_send(alpha.test)");
     let original = run.net;
     let new_ca = run.grant("Tls alpha.test 0-65535 Roots=sha256:4398b17f3dee153317fa713ea5d8e105037a1e4e212b6dce9732e60dda880c9b");
     let connecting = run.grant("Connect 127.0.0.0/8 1-65535");
@@ -1145,7 +1452,7 @@ fn expired_secret_send_issues_no_host_tls_bytes() {
         received
     });
     let key = run.connect(port);
-    let sealed = run.seal_secret(b"BCD", b"alpha.test");
+    let sealed = run.seal_secret(b"BCD", b"tls_send(alpha.test)");
     let upgrade = run.upgrade(key, b"alpha.test", Some(CA), &[]);
     assert_eq!(upgrade.outcome.error, IoError::OK);
     let deadline = run.now();

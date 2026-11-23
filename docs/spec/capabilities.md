@@ -38,7 +38,9 @@ authority: what such a capability reaches is only what the program that answers 
 reaches (CAP-1), and a virtual `Net` never authorizes a granted `Secret`
 ([TLS-5](tls.md#tls-5-secrets)). A capability that holds state is a
 resource ([OWN-3](ownership.md#own-3-kinds)); one that only designates authority is plain,
-and copying it copies the designation, never the thing designated. Each capability type
+and copying it copies the designation, never the thing designated. A `Secret` is a
+resource: each holder keeps its bytes and charges until it is dropped
+([TLS-5](tls.md#tls-5-secrets)). Each capability type
 declares whether it is `send` ([CONC-2](tasks.md#conc-2-the-send-bound)).
 
 ```hirsel
@@ -77,7 +79,7 @@ whose configuration does not grant one of them, or whose provider cannot give on
 host (a `Dir`'s minimum host, [core](core.md#contracts-the-signatures-do-not-state)), does not start: it runs no
 program code and has no host effect, and reports as
 [PROG-3](programs.md#prog-3-entry) says. Nothing else in a program receives authority from
-the host.
+the host. A configuration is refused if it supplies a grant with no matching entry parameter.
 
 At native Unix launch, a standard stream may be absent. `EBADF` while acquiring its
 corresponding inherited descriptor (0 for `Stdin`, 1 for `Stdout`, 2 for `Stderr`)
@@ -217,6 +219,14 @@ run's other inputs determine it, so the same choices give the same `receive`,
 result ([CONC-7](tasks.md#conc-7-cancellation-points)). Given the same values at the
 replay point in the same order, the run behaves identically
 ([SEM-8](semantics.md#sem-8-determinism)).
+
+A read readiness wait ([NET-1](net.md#net-1-socket-operation-declarations)) is a provider
+operation of its own, on the half it names. At issue it passes the half and its deadline;
+at delivery it passes only its outcome (ready, `TimedOut`, `Aborted` or an error), with no
+bytes, length or capacity. The receive that follows is a separate operation with its own
+issue and delivery. Served, issue is the port's `Ready(socket)` call and delivery is its
+reply. The wait adds no ordering beyond what these two points already give any receive on
+the same half.
 
 The replay point is a position in every run, not a mechanism: a build without recording
 machinery has the same points and does nothing at them beyond the operation itself. They

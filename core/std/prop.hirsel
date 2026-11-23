@@ -554,7 +554,8 @@ pub opaque type Found {
     shrinks: u64,
     sim_seed: Option[u64],
     rendered: String,
-    message: String
+    message: String,
+    class: FailureClass
 }
 
 type Replay {
@@ -769,7 +770,7 @@ fn render_at[T](cfg: Config, g: Gen[T], index: u64, tape: List[Choice]) -> Strin
     }
 }
 
-type FailureClass: key = Returned | AtSite(u8, Site) | TimedOut | ByteCapacity
+type FailureClass: key = Returned | ReturnedLabel(u64) | AtSite(u8, Site) | TimedOut | ByteCapacity
 
 type FailureInfo {
     class: FailureClass,
@@ -1216,12 +1217,18 @@ fn review_trial(mut shrink: Shrink, take trial: Option[Counterexample]) {
     }
 }
 
-fn counterexample(take s: Source, take failure: FailureInfo) -> Counterexample {
+fn counterexample(take s: Source, take input: FailureInfo, label: Option[fn(String) -> u64]) -> Counterexample {
+    let mut failure = take input
+    if failure.class == Returned {
+        if let Some(classify) = label {
+            failure.class = ReturnedLabel(classify(failure.message))
+        }
+    }
     let Source(tape: take tape, spans: take spans, ..) = take s
     Counterexample(tape: take tape, spans: take spans, failure: take failure)
 }
 
-fn pure_candidate[T](cfg: Config, g: Gen[T], law: own fn(T) -> Result[(), String], index: u64, prefix: Option[List[u64]]) -> Option[Counterexample] {
+fn pure_candidate[T](cfg: Config, g: Gen[T], law: own fn(T) -> Result[(), String], index: u64, prefix: Option[List[u64]], label: Option[fn(String) -> u64]) -> Option[Counterexample] {
     let Some((take value, take s)) = generate(cfg, g, index, prefix) else {
         return None
     }
@@ -1231,13 +1238,13 @@ fn pure_candidate[T](cfg: Config, g: Gen[T], law: own fn(T) -> Result[(), String
     let Some(take info) = case_failure(cfg, value, law) else {
         return None
     }
-    Some(counterexample(take s, take info))
+    Some(counterexample(take s, take info, label))
 }
 
-fn shrink_case[T](cfg: Config, g: Gen[T], law: own fn(T) -> Result[(), String], index: u64, take original: Counterexample) -> (Counterexample, u64) {
+fn shrink_case[T](cfg: Config, g: Gen[T], law: own fn(T) -> Result[(), String], index: u64, take original: Counterexample, label: Option[fn(String) -> u64]) -> (Counterexample, u64) {
     let mut state = Shrink(best: take original, cursor: cursor(1), trials: 0, changed: false)
     while let Some(take values) = next_trial(mut state, cfg.max_shrinks) {
-        let trial = pure_candidate(cfg, g, law, index, Some(take values))
+        let trial = pure_candidate(cfg, g, law, index, Some(take values), label)
         review_trial(mut state, take trial)
     }
     let Shrink(best: take best, trials, ..) = take state
@@ -1245,17 +1252,17 @@ fn shrink_case[T](cfg: Config, g: Gen[T], law: own fn(T) -> Result[(), String], 
 }
 
 fn found[T](cfg: Config, g: Gen[T], index: u64, cases: u64, shrinks: u64, take example: Counterexample) -> Found {
-    let Counterexample(tape: take tape, failure: FailureInfo(message: take message, ..), ..) = take example
+    let Counterexample(tape: take tape, failure: FailureInfo(class, message: take message), ..) = take example
     let rendered = render_at(cfg, g, index, tape)
-    Found(index, tape: take tape, cases, shrinks, sim_seed: cfg.sim_seed, rendered: take rendered, message: take message)
+    Found(index, tape: take tape, cases, shrinks, sim_seed: cfg.sim_seed, rendered: take rendered, message: take message, class)
 }
 
 fn shrink_from[T](cfg: Config, g: Gen[T], law: own fn(T) -> Result[(), String], take values: List[u64]) -> Found {
-    let initial = match pure_candidate(cfg, g, law, 0, Some(take values)) {
+    let initial = match pure_candidate(cfg, g, law, 0, Some(take values), None) {
         Some(take example) => take example,
         None => fail("prop: starting tape does not fail"),
     }
-    let (take smallest, n) = shrink_case(cfg, g, law, 0, take initial)
+    let (take smallest, n) = shrink_case(cfg, g, law, 0, take initial, None)
     found(cfg, g, 0, 1, n, take smallest)
 }
 
@@ -1267,13 +1274,17 @@ fn replay_one[T](cfg: Config, g: Gen[T], law: own fn(T) -> Result[(), String], t
     }
     if !s.overrun && !s.invalid {
         if let Some(take info) = case_failure(cfg, value, law) {
-            return Falsified(found(cfg, g, index, 1, 0, counterexample(take s, take info)))
+            return Falsified(found(cfg, g, index, 1, 0, counterexample(take s, take info, None)))
         }
     }
     fail("prop: replay token no longer fails")
 }
 
 pub fn search[T](c: Config, g: Gen[T], law: own fn(T) -> Result[(), String]) -> Outcome {
+    search_labeled(c, g, law, None)
+}
+
+fn search_labeled[T](c: Config, g: Gen[T], law: own fn(T) -> Result[(), String], label: Option[fn(String) -> u64]) -> Outcome {
     if let Some(text) = c.replay {
         return replay_one(c, g, law, text)
     }
@@ -1293,7 +1304,7 @@ pub fn search[T](c: Config, g: Gen[T], law: own fn(T) -> Result[(), String]) -> 
         } else {
             cases += 1
             if let Some(take info) = case_failure(c, value, law) {
-                let (take smallest, n) = shrink_case(c, g, law, index, counterexample(take s, take info))
+                let (take smallest, n) = shrink_case(c, g, law, index, counterexample(take s, take info, label), label)
                 return Falsified(found(c, g, index, cases, n, take smallest))
             }
         }
@@ -1379,7 +1390,7 @@ pub fn all[T](c: Config, g: Gen[T], law: own fn(T) -> Result[(), String]) -> All
                 } else {
                     run += 1
                     if let Some(take info) = case_failure(c, value, law) {
-                        return Falsified(found(c, g, index, run, 0, counterexample(take s, take info)))
+                        return Falsified(found(c, g, index, run, 0, counterexample(take s, take info, None)))
                     }
                 }
                 let Some(take next) = next_prefix(s.tape) else {
@@ -1453,7 +1464,7 @@ fn task_failure[T: send](tasks: Tasks, cfg: Config, take value: T, index: u64, l
     }
 }
 
-fn tasks_candidate[T: send](tasks: Tasks, cfg: Config, g: Gen[T], law: fn(take Case[T]) -> Result[(), String] waits, index: u64, prefix: Option[List[u64]]) -> Option[Counterexample] waits {
+fn tasks_candidate[T: send](tasks: Tasks, cfg: Config, g: Gen[T], law: fn(take Case[T]) -> Result[(), String] waits, index: u64, prefix: Option[List[u64]], label: Option[fn(String) -> u64]) -> Option[Counterexample] waits {
     let Some((take value, take s)) = generate(cfg, g, index, prefix) else {
         return None
     }
@@ -1463,17 +1474,33 @@ fn tasks_candidate[T: send](tasks: Tasks, cfg: Config, g: Gen[T], law: fn(take C
     let Some(take info) = task_failure(tasks, cfg, take value, index, law) else {
         return None
     }
-    Some(counterexample(take s, take info))
+    Some(counterexample(take s, take info, label))
 }
 
-fn shrink_tasks_case[T: send](tasks: Tasks, cfg: Config, g: Gen[T], law: fn(take Case[T]) -> Result[(), String] waits, index: u64, take original: Counterexample) -> (Counterexample, u64) waits {
+fn shrink_tasks_case[T: send](tasks: Tasks, cfg: Config, g: Gen[T], law: fn(take Case[T]) -> Result[(), String] waits, index: u64, take original: Counterexample, label: Option[fn(String) -> u64]) -> (Counterexample, u64) waits {
     let mut state = Shrink(best: take original, cursor: cursor(1), trials: 0, changed: false)
     while let Some(take values) = next_trial(mut state, cfg.max_shrinks) {
-        let trial = tasks_candidate(tasks, cfg, g, law, index, Some(take values))
+        let trial = tasks_candidate(tasks, cfg, g, law, index, Some(take values), label)
         review_trial(mut state, take trial)
     }
     let Shrink(best: take best, trials, ..) = take state
     (take best, trials)
+}
+
+/// Shrinks a failing task case from an explicit tape at its original index.
+pub fn shrink_tasks_from[T: send](tasks: Tasks, cfg: Config, g: Gen[T], law: fn(take Case[T]) -> Result[(), String] waits, index: u64, values: List[u64]) -> Found waits {
+    let prefix: List[u64] = clone(values)
+    let Some((take value, take s)) = generate(cfg, g, index, Some(take prefix)) else {
+        generation_failed(index)
+    }
+    if !consumed(s, values) {
+        fail("prop: fixed tape did not round trip")
+    }
+    let Some(take info) = task_failure(tasks, cfg, take value, index, law) else {
+        fail("prop: starting tape does not fail")
+    }
+    let (take smallest, n) = shrink_tasks_case(tasks, cfg, g, law, index, counterexample(take s, take info, None), None)
+    found(cfg, g, index, 1, n, take smallest)
 }
 
 fn replay_tasks_one[T: send](tasks: Tasks, cfg: Config, g: Gen[T], law: fn(take Case[T]) -> Result[(), String] waits, text: String) -> Outcome waits {
@@ -1484,13 +1511,17 @@ fn replay_tasks_one[T: send](tasks: Tasks, cfg: Config, g: Gen[T], law: fn(take 
     }
     if !s.overrun && !s.invalid {
         if let Some(take info) = task_failure(tasks, cfg, take value, index, law) {
-            return Falsified(found(cfg, g, index, 1, 0, counterexample(take s, take info)))
+            return Falsified(found(cfg, g, index, 1, 0, counterexample(take s, take info, None)))
         }
     }
     fail("prop: replay token no longer fails")
 }
 
 fn search_tasks[T: send](tasks: Tasks, c: Config, g: Gen[T], law: fn(take Case[T]) -> Result[(), String] waits) -> Outcome waits {
+    search_tasks_labeled(tasks, c, g, law, None)
+}
+
+fn search_tasks_labeled[T: send](tasks: Tasks, c: Config, g: Gen[T], law: fn(take Case[T]) -> Result[(), String] waits, label: Option[fn(String) -> u64]) -> Outcome waits {
     if let Some(text) = c.replay {
         return replay_tasks_one(tasks, c, g, law, text)
     }
@@ -1510,7 +1541,7 @@ fn search_tasks[T: send](tasks: Tasks, c: Config, g: Gen[T], law: fn(take Case[T
         } else {
             cases += 1
             if let Some(take info) = task_failure(tasks, c, take value, index, law) {
-                let (take smallest, n) = shrink_tasks_case(tasks, c, g, law, index, counterexample(take s, take info))
+                let (take smallest, n) = shrink_tasks_case(tasks, c, g, law, index, counterexample(take s, take info, label), label)
                 return Falsified(found(c, g, index, cases, n, take smallest))
             }
         }
@@ -1521,4 +1552,192 @@ fn search_tasks[T: send](tasks: Tasks, c: Config, g: Gen[T], law: fn(take Case[T
 
 pub fn check_tasks[T: send](tasks: Tasks, c: Config, g: Gen[T], law: fn(take Case[T]) -> Result[(), String] waits) -> Result[(), ()] waits {
     finish_check(search_tasks(tasks, c, g, law))
+}
+
+/// Identifies the generator and optionally classifies the law's returned errors.
+pub type Corpus {
+    generator: u64,
+    label: Option[fn(String) -> u64]
+}
+
+fn corpus_input(e: Env) -> Option[String] {
+    match env.get(e, "HIRSEL_TEST_PROPERTY_CORPUS") {
+        Ok(Some(text)) => Some(string.from(text)),
+        _ => None
+    }
+}
+
+fn choice_bounds(tape: List[Choice]) -> String {
+    let mut data: Bytes = list.new()
+    for choice in tape {
+        put_uleb(mut data, choice.limit)
+    }
+    // A zero-choice tape needs a nonempty field.
+    list.push(mut data, 0u8)
+    base64.encode_string(data)
+}
+
+fn corpus_number(mut out: String, n: u64) {
+    string.push_u64(mut out, n)
+    string.push(mut out, " ")
+}
+
+fn corpus_fingerprint(f: Found, mut out: String) {
+    match f.class {
+        Returned => string.push(mut out, "returned"),
+        ReturnedLabel(label) => {
+            string.push(mut out, "returned-")
+            string.push_u64(mut out, label)
+        },
+        AtSite(kind, site) => {
+            string.push(mut out, "raised-")
+            let n: u64 = int.widen(kind)
+            string.push_u64(mut out, n)
+            string.push(mut out, " @")
+            string.push_u64(mut out, site_word(site))
+        },
+        TimedOut => string.push(mut out, "steps"),
+        ByteCapacity => string.push(mut out, "bytes"),
+    }
+}
+
+fn corpus_report(cfg: Config, key: Corpus, f: Found) -> Never {
+    let mut out = string.from("prop-corpus-v2 ")
+    corpus_number(mut out, key.generator)
+    corpus_number(mut out, cfg.seed)
+    match cfg.sim_seed {
+        Some(seed) => corpus_number(mut out, seed),
+        None => string.push(mut out, "- "),
+    }
+    corpus_number(mut out, cfg.cases)
+    corpus_number(mut out, cfg.max_choices)
+    corpus_number(mut out, cfg.max_rejects)
+    corpus_number(mut out, cfg.max_shrinks)
+    corpus_number(mut out, cfg.gen_steps)
+    corpus_number(mut out, cfg.case_steps)
+    corpus_number(mut out, cfg.case_bytes)
+    token(f, mut out)
+    string.push(mut out, " ")
+    string.push(mut out, choice_bounds(f.tape))
+    string.push(mut out, " ")
+    corpus_fingerprint(f, mut out)
+    string.push(mut out, " | ")
+    report(f, mut out)
+    fail(take out)
+}
+
+fn corpus_field(input: String, mut at: u64) -> View[String] in input {
+    let Some((part, next)) = string.next_split(input, at, " ") else {
+        fail("prop: invalid runner corpus input")
+    }
+    at = next
+    part
+}
+
+fn corpus_u64(text: String) -> u64 {
+    let value: Result[u64, ParseError] = int.parse(text)
+    match value {
+        Ok(n) => n,
+        Error(_) => fail("prop: invalid runner corpus number"),
+    }
+}
+
+fn corpus_stale() -> Never {
+    fail("prop-corpus-v2 stale")
+}
+
+fn corpus_replay(input: String, active: Config, key: Corpus) -> (Config, Replay, String) {
+    let mut at: u64 = 0
+    if corpus_u64(corpus_field(input, mut at)) != key.generator {
+        corpus_stale()
+    }
+    let seed = corpus_u64(corpus_field(input, mut at))
+    let sim = corpus_field(input, mut at)
+    let sim_seed: Option[u64] = if sim == "-" {
+        None
+    } else {
+        Some(corpus_u64(sim))
+    }
+    let cases = corpus_u64(corpus_field(input, mut at))
+    let max_choices = corpus_u64(corpus_field(input, mut at))
+    let max_rejects = corpus_u64(corpus_field(input, mut at))
+    let max_shrinks = corpus_u64(corpus_field(input, mut at))
+    let gen_steps = corpus_u64(corpus_field(input, mut at))
+    let case_steps = corpus_u64(corpus_field(input, mut at))
+    let case_bytes = corpus_u64(corpus_field(input, mut at))
+    if max_choices > active.max_choices || gen_steps > active.gen_steps || case_steps > active.case_steps || case_bytes > active.case_bytes {
+        fail("prop: saved case exceeds active replay limits")
+    }
+    let saved_tape = parse_token(corpus_field(input, mut at), max_choices)
+    let bounds = string.from(corpus_field(input, mut at))
+    (Config(seed, cases, max_choices, max_rejects, max_shrinks, gen_steps, case_steps, case_bytes, sim_seed, replay: None), take saved_tape, take bounds)
+}
+
+fn consumed(s: Source, values: List[u64]) -> bool {
+    if s.overrun || s.invalid || list.len(s.tape) != list.len(values) {
+        return false
+    }
+    for i in 0u64 .. list.len(s.tape) {
+        if s.tape[i].value != values[i] {
+            return false
+        }
+    }
+    true
+}
+
+// The ordinary shrinker can repair dependent choices. Corpus replay requires an
+// exact tape, including every draw bound, before the law runs.
+fn corpus_draw[T](cfg: Config, g: Gen[T], saved: Replay, bounds: String) -> (T, Source) {
+    let values: List[u64] = clone(saved.values)
+    let prefix = Some(take values)
+    let Some((take value, take s)) = generate(cfg, g, saved.index, prefix) else {
+        generation_failed(saved.index)
+    }
+    if !consumed(s, saved.values) || choice_bounds(s.tape) != bounds {
+        corpus_stale()
+    }
+    (take value, take s)
+}
+
+fn corpus_finish(cfg: Config, key: Corpus, take outcome: Outcome) -> Result[(), ()] {
+    if let Falsified(f) = outcome {
+        corpus_report(cfg, key, f)
+    }
+    finish_check(take outcome)
+}
+
+pub fn check_corpus[T](e: Env, key: Corpus, c: Config, g: Gen[T], law: own fn(T) -> Result[(), String]) -> Result[(), ()] {
+    let Some(input) = corpus_input(e) else {
+        return check(c, g, law)
+    }
+    if let Some(_) = c.replay {
+        fail("prop: an explicit replay token cannot use the runner corpus")
+    }
+    if input == "search" {
+        return corpus_finish(c, key, search_labeled(c, g, law, key.label))
+    }
+    let (take cfg, take saved, take bounds) = corpus_replay(input, c, key)
+    let (take value, take s) = corpus_draw(cfg, g, saved, bounds)
+    let Some(take info) = case_failure(cfg, value, law) else {
+        corpus_stale()
+    }
+    corpus_report(cfg, key, found(cfg, g, saved.index, 1, 0, counterexample(take s, take info, key.label)))
+}
+
+pub fn check_tasks_corpus[T: send](e: Env, tasks: Tasks, key: Corpus, c: Config, g: Gen[T], law: fn(take Case[T]) -> Result[(), String] waits) -> Result[(), ()] waits {
+    let Some(input) = corpus_input(e) else {
+        return check_tasks(tasks, c, g, law)
+    }
+    if let Some(_) = c.replay {
+        fail("prop: an explicit replay token cannot use the runner corpus")
+    }
+    if input == "search" {
+        return corpus_finish(c, key, search_tasks_labeled(tasks, c, g, law, key.label))
+    }
+    let (take cfg, take saved, take bounds) = corpus_replay(input, c, key)
+    let (take value, take s) = corpus_draw(cfg, g, saved, bounds)
+    let Some(take info) = task_failure(tasks, cfg, take value, saved.index, law) else {
+        corpus_stale()
+    }
+    corpus_report(cfg, key, found(cfg, g, saved.index, 1, 0, counterexample(take s, take info, key.label)))
 }

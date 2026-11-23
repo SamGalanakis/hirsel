@@ -1183,6 +1183,86 @@ fn a_changed_argument_diverges() {
     assert!(obs[4..].iter().all(|o| o.status == STATUS_REFUSED));
 }
 
+#[test]
+fn launcher_reports_the_first_tampered_argument() {
+    const INPUT: &str = "HIRSEL_TEST_TAMPERED_TAPE";
+    if let Some(path) = std::env::var_os(INPUT) {
+        let bytes = std::fs::read(path).unwrap();
+        let mut store = Store::with(&bytes);
+        let host = Counted::new(None);
+        let (tape, _) = unsafe {
+            Tape::open(
+                REVISION,
+                store.dir(),
+                b"t",
+                Mode::Replay,
+                &header(REVISION),
+                &expect(),
+            )
+        }
+        .unwrap();
+        tape.set_replay_abort(ReplayAbort {
+            stderr: 2,
+            sources: ptr::null(),
+            diagnose: false,
+        });
+        scripted_run(&tape, host.provider(), 100, Variant::Same);
+        panic!("the launcher should stop at the tampered read");
+    }
+
+    // Four grants, four clock reads, two writes and two opens precede READ.
+    let (store, _) = record(100);
+    let tape = store.file();
+    let at = boundaries(&tape);
+    let flags = tape[at[1]];
+    let mut frames = Decoder::default()
+        .block(
+            &tape[at[1] + BLOCK_HEAD..at[2] - BLOCK_CHECK],
+            flags & END != 0,
+        )
+        .unwrap();
+    let Frame::Op {
+        op: READ,
+        args: Args::Literal(bytes),
+        ..
+    } = &mut frames[12]
+    else {
+        panic!("expected the first READ at frame 13");
+    };
+    assert_eq!(bytes[0], 100);
+    bytes[0] = 101;
+    let mut encoder = Encoder::default();
+    let payload: Vec<u8> = frames.iter().flat_map(|f| encoder.frame(f).0).collect();
+    let changed = [
+        &tape[..at[1]],
+        &block(&header(REVISION).tape_id, flags, 1, &payload),
+        &tape[at[2]..],
+    ]
+    .concat();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("tape");
+    std::fs::write(&path, changed).unwrap();
+    let output = crate::test_process::command()
+        .args([
+            "--exact",
+            "tape::tests::launcher_reports_the_first_tampered_argument",
+            "--nocapture",
+        ])
+        .env(INPUT, path)
+        .output()
+        .unwrap();
+    let diagnostic = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(output.status.code(), Some(1), "{diagnostic}");
+    // The four grants reserve ordinals 1 through 4. The successful open
+    // supplies file 5. Eight synchronous operations precede the READ issue.
+    assert_eq!(
+        diagnostic,
+        format!(
+            "replay: Diverged(Arg) at 13 [event 17: frame OP; expected task=0 op={READ} object=5 capacity=101; observed task=0 op={READ} object=5 capacity=100]\n"
+        )
+    );
+}
+
 /// v2.3 R9: identical operations, changed result. Wrong implementation
 /// caught: a replay that does not compare END's outcome (the silent case:
 /// it would report the run complete). The hand tape records Failed with

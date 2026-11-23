@@ -140,7 +140,8 @@ def case_tables(mappings, expansions):
 
 
 def inline(name, element, values):
-    return f"const {name}: Inline[{element}, {len(values)}] =[" + ", ".join(map(str, values)) + ",]"
+    rows = "".join(f"    {value},\n" for value in values)
+    return f"const {name}: Inline[{element}, {len(values)}] =[\n{rows}]"
 
 
 def indexed_tables(name, element, tables):

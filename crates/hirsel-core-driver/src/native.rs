@@ -1292,6 +1292,13 @@ pub(super) struct EntryParameter {
     pub(super) ty: String,
     pub(super) name: String,
 }
+impl EntryParameter {
+    pub(super) fn foreign_interface(&self) -> Option<&str> {
+        self.ty
+            .strip_prefix("core@1/core/Foreign[")
+            .and_then(|ty| ty.strip_suffix(']'))
+    }
+}
 pub(crate) type EntryBinding = (DefPath, Result<EntryDecl, String>);
 /// A Cranelift development entry record (`hirsel.core-entry.v1`): the ABI
 /// read from the entry body's module, and the identity of its result cleanup.
@@ -1668,7 +1675,7 @@ fn link_objects(
     // enters by its digest, and the runtime headers by the compiler identity,
     // which embeds them.
     let link_key = match assembly {
-        Some(assembly) => key("hirsel.recipe-final-link.v2", &assembly)?,
+        Some(assembly) => key("hirsel.recipe-final-link.v3", &assembly)?,
         None => key(
             "hirsel.core-executable.v7",
             &(
@@ -1816,13 +1823,12 @@ fn link_objects(
         let mut runtime_sources = sources.clone();
         let spawns_units =
             crate::native_entry::retain_referenced(&mut runtime_sources, &inputs[1..])?;
-        let source_identity = assembly.map_or(sources_digest, |(root, _)| root);
         let write_entry = |live_sites: Option<&BTreeSet<u64>>| -> Result<(), NativeStop> {
             let bytes = entry_plan
                 .emit(
                     &options.target,
                     &runtime_sources,
-                    source_identity,
+                    sources_digest,
                     &revision.0,
                     &revisions,
                     (live_sites, spawns_units),
@@ -2011,7 +2017,7 @@ pub(crate) mod tests {
         let good = dir.path().join("a.hirsel");
         let good_source = b"fn a(){1}";
         std::fs::write(&good, good_source).unwrap();
-        let bad_source = "// header\r\nfn bad() { /* é→😀 */ # }\r\n";
+        let bad_source = "// header\r\nfn bad() { \"  é→😀  \" # }\r\n";
         let request = crate::tests::request(bad_source, dir.path());
         let bad = &request.inputs.packages[0].sources[0].file;
         let manifest = dir.path().join("inputs.json");
@@ -2105,8 +2111,10 @@ pub(crate) mod tests {
         let (status, stdout, stderr) = run(&[], b"// ok\r\n\xff");
         assert_eq!((status, stdout.as_str()), (Some(1), ""));
         assert_eq!(stderr, "<stdin>:2:1-2: LANG-1: source is not UTF-8\n");
-        let (status, stdout, stderr) =
-            run(&[], "// header\r\nfn bad() { /* é→😀 */ # }\r\n".as_bytes());
+        let (status, stdout, stderr) = run(
+            &[],
+            "// header\r\nfn bad() { \"  é→😀  \" # }\r\n".as_bytes(),
+        );
         assert_eq!((status, stdout.as_str()), (Some(1), ""));
         assert!(stderr.contains("<stdin>:2:22-23: LANG-1: "), "{stderr}");
     }
@@ -2597,14 +2605,6 @@ fn f5 = n5 g5 extern
         options.grant_mask = 1 << grant_kind("Stdout").unwrap();
         let granted = product.build(&entry, &options).unwrap();
         run_clean(&granted.executable, 7);
-        options.grant_mask |= 1 << grant_kind("Stderr").unwrap();
-        let changed_grants = product.build(&entry, &options).unwrap();
-        assert_eq!(changed_grants.compiled, 0);
-        assert!(
-            changed_grants.linked,
-            "grant configuration is part of the executable key"
-        );
-        run_clean(&changed_grants.executable, 7);
         let source = "pub fn main(out: Stdout, d: Dir, a: Args, other: Dir, net: Net, clock: Clock, random: Random, err: Stderr, input: Stdin, env: Env, process: Process, tasks: Tasks) -> Result[(), Exit] { Error(Exit(status: 7u8)) }\n";
         let product = driver
             .check(source_request(source, dir.path()), &mut Meter::new(false))
@@ -2621,6 +2621,15 @@ fn f5 = n5 g5 extern
         ];
         let built = product.build(&entry, &options).unwrap();
         run_clean(&built.executable, 7);
+        options.directories.swap(0, 1);
+        let changed_grants = product.build(&entry, &options).unwrap();
+        assert_eq!(changed_grants.compiled, 0);
+        assert!(
+            changed_grants.linked,
+            "grant configuration is part of the executable key"
+        );
+        run_clean(&changed_grants.executable, 7);
+        options.directories.swap(0, 1);
         // Two Dir parameters require two explicit directories, in ordinal order.
         options.directories.pop();
         let refused = product.build(&entry, &options).unwrap();

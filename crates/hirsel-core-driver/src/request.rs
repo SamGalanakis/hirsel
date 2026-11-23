@@ -18,6 +18,7 @@ struct Output<'a> {
     accepted: bool,
     root: String,
     files: usize,
+    checked_definitions: usize,
     rechecked: usize,
     source_bytes: usize,
     diagnostics: Vec<crate::Diagnostic<'a>>,
@@ -84,6 +85,9 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         .then(|| crate::prof_command::Run::read(&mut invocation))
         .transpose()?;
     let command = invocation.command.name;
+    if command == "launcher" {
+        match crate::launcher::run(invocation)? {}
+    }
     if matches!(command, "host" | "deploy") {
         std::process::exit(crate::host::run(invocation)?);
     }
@@ -130,10 +134,8 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     let mut package_store = None;
     let mut pack_out = None;
     for (option, value) in invocation.options.extract_if(.., |(option, _)| {
-        matches!(
-            option,
-            Opt::Locked | Opt::Frozen | Opt::PackageStore | Opt::PackOut
-        )
+        matches!(option, Opt::Locked | Opt::Frozen | Opt::PackageStore)
+            || (command == "pack" && *option == Opt::Output)
     }) {
         match option {
             Opt::Locked if package_mode != crate::package_lock::Mode::Frozen => {
@@ -141,7 +143,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             }
             Opt::Frozen => package_mode = crate::package_lock::Mode::Frozen,
             Opt::PackageStore => package_store = value.map(PathBuf::from),
-            Opt::PackOut => pack_out = value.map(PathBuf::from),
+            Opt::Output => pack_out = value.map(PathBuf::from),
             _ => {}
         }
     }
@@ -164,7 +166,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         )?;
         let lock = crate::package_lock::Lock::compare(&resolved, package_mode)?;
         if let Some(selected) = selected {
-            let out = pack_out.ok_or("pack requires --out FILE")?;
+            let out = pack_out.ok_or("pack requires --output FILE")?;
             let (bytes, archive) = resolved.make_archive(&selected)?;
             let output = crate::package_lock::PackOutput::stage(&resolved, &archive, &lock, &out)?;
             lock.commit(&resolved.workspace)?;
@@ -245,7 +247,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     let inspection = (command == "inspect")
         .then(|| crate::inspect::Inspection::read(&mut invocation))
         .transpose()?;
-    let inspect_library = inspection.as_ref().and_then(|option| option.source_library);
+    let mut inspect_library = inspection.as_ref().and_then(|option| option.source_library);
     let inspect_foreign = inspection
         .as_ref()
         .and_then(crate::inspect::Inspection::foreign_module);
@@ -278,6 +280,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     let mut test_jobs = None;
     let mut test_timeout = None;
     let mut test_sim = false;
+    let mut corpus_path = None;
     let mut test_seeds = None;
     let mut test_seed = None;
     let mut explicit_limit = false;
@@ -336,6 +339,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             Opt::Replay => test_replay = true,
             Opt::Rerun => test_rerun = true,
             Opt::Sim => test_sim = true,
+            Opt::PropertyCorpus => corpus_path = Some(PathBuf::from(value)),
             Opt::SimSeeds => {
                 test_seeds = Some(
                     value
@@ -431,14 +435,13 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             | Opt::FmtStdin
             | Opt::Signatures
             | Opt::ListRules
-            | Opt::SdkOut
-            | Opt::PackOut
             | Opt::PackageStore
             | Opt::Locked
             | Opt::Frozen
             | Opt::Url
             | Opt::Control
             | Opt::HostState
+            | Opt::CgroupRoot
             | Opt::Workdir
             | Opt::Listen
             | Opt::Scratch
@@ -477,6 +480,9 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     if expect_verdict.is_some() && !test_replay {
         return Err("--expect-verdict requires --replay".into());
     }
+    if corpus_path.is_some() && (test_replay || test_seeds.is_some()) {
+        return Err("--property-corpus requires ordinary tests or a single simulation seed".into());
+    }
     test_sim |= test_seed.is_some();
     if !test_sim && test_seeds.is_some() {
         return Err("--seeds requires --sim".into());
@@ -487,7 +493,25 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
     if test_sim && test_replay {
         return Err("choose one of --sim and --replay".into());
     }
-    let app_directory = dir.clone().or_else(|| {
+    let archive = dir.as_deref().filter(|path| {
+        inspection.is_some() && path.extension().is_some_and(|ext| ext == "hpkg") && !path.is_dir()
+    });
+    let dependency = dir
+        .as_deref()
+        .filter(|_| inspection.is_some())
+        .and_then(Path::to_str)
+        .filter(|name| crate::package_dir::package_name(name) && !Path::new(name).exists());
+    let app_directory = if let Some(archive) = archive {
+        archive
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .map(Path::to_owned)
+    } else if dependency.is_some() {
+        Some(PathBuf::from("."))
+    } else {
+        dir.clone()
+    }
+    .or_else(|| {
         (manifest.is_none()
             && recipe_root.is_none()
             && matches!(command, "check" | "build" | "publish" | "run" | "test"))
@@ -501,20 +525,48 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         package_mode.require_workspace("--recipe")?;
     } else if let Some(name) = inspect_library {
         package_mode.require_workspace(if name == "core" { "--core" } else { "--std" })?;
+    } else if let Some(path) = archive {
+        package_mode.require_workspace("an archive path")?;
+        let archive = crate::package_content::PackageArchive::open(path)?;
+        if let Some(module) = inspect_foreign {
+            foreign_symbols = Some(crate::foreign_header::symbol_prefix(
+                archive.entries.values().map(|library| &library.content),
+                module,
+            )?);
+        }
+        workspace_app = Some(crate::package_dir::PackageDir::from_archive(&archive)?);
     } else if matches!(
         command,
         "check" | "build" | "publish" | "run" | "test" | "inspect" | "replay"
     ) {
         if let Some(directory) = &app_directory {
             if let Some(workspace) = crate::package_workspace::Workspace::discover(directory)? {
-                let selected = workspace.selected()?.clone();
+                let member = workspace.selected()?;
+                let selected = if let Some(name) = dependency {
+                    workspace.members[member]
+                        .edges
+                        .keys()
+                        .find(|id| id.name == name)
+                        .ok_or_else(|| format!("{member} has no dependency named {name}"))?
+                } else {
+                    member
+                }
+                .clone();
                 let resolved = crate::package_resolve::Resolution::resolve(
                     workspace,
                     package_store,
                     package_mode == crate::package_lock::Mode::Frozen,
                 )?;
                 if let Some(path) = inspect_foreign {
-                    foreign_symbols = Some(crate::foreign_header::symbol_prefix(&resolved, path)?);
+                    foreign_symbols = Some(crate::foreign_header::symbol_prefix(
+                        resolved
+                            .workspace
+                            .members
+                            .values()
+                            .map(|member| &member.content)
+                            .chain(resolved.libraries.values().map(|library| &library.content)),
+                        path,
+                    )?);
                 }
                 crate::package_lock::Lock::compare(&resolved, package_mode)?
                     .commit(&resolved.workspace)?;
@@ -522,12 +574,20 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                     || inspection
                         .as_ref()
                         .is_some_and(|option| option.includes_tests());
-                workspace_app = Some(crate::package_dir::PackageDir::from_resolution(
-                    &resolved,
-                    &selected,
-                    include_tests,
-                )?);
+                if dependency == Some("std") {
+                    inspect_library = Some("std");
+                    source_core = true;
+                } else {
+                    workspace_app = Some(crate::package_dir::PackageDir::from_resolution(
+                        &resolved,
+                        &selected,
+                        include_tests,
+                    )?);
+                }
             } else {
+                if let Some(name) = dependency {
+                    return Err(format!("cannot resolve dependency {name} without a package manifest in the current directory").into());
+                }
                 package_mode.require_workspace("the directory convention")?;
             }
         } else {
@@ -787,13 +847,11 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         options.logical_charge_report = logical_charge_report;
         options.recording = needs_recording;
         let recipe = release_manifest.as_ref().map(|_| recipe.clone());
-        let prebuilt = installed_std.as_ref().map(|image| {
-            image
-                .store_root()
-                .join(crate::native::std_release::PREBUILT)
-        });
+        let library = installed_std
+            .as_ref()
+            .map(|image| image.store_root().to_owned());
         let product =
-            publication.assemble_with(&options, Default::default(), None, prebuilt.as_deref())?;
+            publication.assemble_with(&options, Default::default(), None, library.as_deref())?;
         if let (Some(path), Some(recipe)) = (release_manifest, recipe) {
             crate::release_manifest::write(
                 &path,
@@ -1039,12 +1097,17 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         }
     }
     meter.finish("startup/discovery");
+    let run_output = (command == "run" && output_path.is_none())
+        .then(|| crate::Store::new(&native_store)?.scratch())
+        .transpose()?;
     // Native options come before the reach: a Cranelift development build
     // walks its instance records, which its options address. An options
     // error is reported only for a request check accepts.
     let mut prepared = if native_command {
         let prepare = || -> Result<_, Box<dyn std::error::Error>> {
-            let default_output = if test_command {
+            let default_output = if let Some(scratch) = &run_output {
+                scratch.path().join("program")
+            } else if test_command {
                 native_store.join("tests")
             } else {
                 PathBuf::from("program")
@@ -1151,6 +1214,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                 run_args,
                 record_path.as_deref(),
                 profile.as_ref(),
+                run_output,
                 &mut meter,
                 metrics,
             );
@@ -1240,7 +1304,15 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             })
             .cloned()
             .collect();
-        let cache = if !test_sim && !test_replay && matches!(runner, crate::Runner::Native) {
+        let corpus = corpus_path
+            .as_deref()
+            .map(crate::property_corpus::Corpus::open)
+            .transpose()?;
+        let cache = if corpus.is_none()
+            && !test_sim
+            && !test_replay
+            && matches!(runner, crate::Runner::Native)
+        {
             TestCache::open(&TestCache::default_root())
         } else {
             None
@@ -1264,6 +1336,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                 cache: cache.as_ref(),
                 rerun: test_rerun,
                 seed,
+                corpus: corpus.as_ref(),
             };
             batch.run(&product, &tests, native_options.as_ref().unwrap(), |test, result| {
             let label = seed.map_or_else(|| test.to_string(), |seed| format!("{test} (seed {seed})"));
@@ -1274,10 +1347,13 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                         .then(|| outcome.wall_time.as_secs_f64() * 1000.0);
                     let source = source.as_str();
                     failed |= !passed;
+                    let corpus_note = outcome.corpus.map_or_else(String::new, |state| {
+                        format!(" [property corpus {state}]")
+                    });
                     if !json {
                         if let Some(wall_ms) = wall_ms {
                             if passed {
-                                println!("pass {source} {label} ({wall_ms:.3} ms)");
+                                println!("pass {source} {label}{corpus_note} ({wall_ms:.3} ms)");
                             } else {
                                 let mut reason = if outcome.timed_out {
                                     "execution timed out".to_owned()
@@ -1293,7 +1369,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                                             .join(" | "),
                                     );
                                 }
-                                println!("fail {source} {label}: {reason} ({wall_ms:.3} ms)");
+                                println!("fail {source} {label}{corpus_note}: {reason} ({wall_ms:.3} ms)");
                                 for line in String::from_utf8_lossy(&outcome.output.stdout).lines() {
                                     println!("  stdout: {line}");
                                 }
@@ -1302,7 +1378,11 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
                             println!("pass {source} {label}");
                         }
                     }
-                    serde_json::json!({"definition":test.to_string(),"passed":passed,"source":source,"status":outcome.output.status.code(),"stdout":String::from_utf8_lossy(&outcome.output.stdout),"stderr":String::from_utf8_lossy(&outcome.output.stderr),"timed_out":outcome.timed_out,"wall_ms":wall_ms})
+                    let mut row = serde_json::json!({"definition":test.to_string(),"passed":passed,"source":source,"status":outcome.output.status.code(),"stdout":String::from_utf8_lossy(&outcome.output.stdout),"stderr":String::from_utf8_lossy(&outcome.output.stderr),"timed_out":outcome.timed_out,"wall_ms":wall_ms});
+                    if let Some(state) = outcome.corpus {
+                        row["property_corpus"] = state.into();
+                    }
+                    row
                 }
                 Err(error) => {
                     failed = true;
@@ -1427,6 +1507,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
             String::new()
         },
         files: product.files.len(),
+        checked_definitions: product.checked_definitions(),
         rechecked: product.rechecked.len(),
         source_bytes: product.bytes,
         diagnostics: if let Some(r) = &reach {
@@ -1485,6 +1566,7 @@ fn run(args: Vec<String>) -> Result<std::convert::Infallible, Box<dyn std::error
         run_args,
         record_path.as_deref(),
         profile.as_ref(),
+        run_output,
         &mut meter,
         metrics,
     )
@@ -1512,6 +1594,7 @@ fn answer_hit(
     run_args: Vec<String>,
     record_path: Option<&str>,
     profile: Option<&crate::prof_command::Run>,
+    run_output: Option<crate::store::Scratch>,
     meter: &mut Meter,
     metrics: Option<PathBuf>,
 ) -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
@@ -1550,6 +1633,7 @@ fn answer_hit(
             String::new()
         },
         files: rendered.files,
+        checked_definitions: rendered.checked_definitions,
         rechecked: 0,
         source_bytes: rendered.source_bytes,
         diagnostics: rendered.diagnostics,
@@ -1569,6 +1653,7 @@ fn answer_hit(
         run_args,
         record_path,
         profile,
+        run_output,
         meter,
         metrics,
     )
@@ -1585,6 +1670,7 @@ fn finish(
     run_args: Vec<String>,
     record_path: Option<&str>,
     profile: Option<&crate::prof_command::Run>,
+    run_output: Option<crate::store::Scratch>,
     meter: &mut Meter,
     metrics: Option<PathBuf>,
 ) -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
@@ -1593,17 +1679,18 @@ fn finish(
     } else {
         for d in &output.diagnostics {
             eprintln!("{}: {} {}", sources.render(&d.primary), d.rule, d.message);
-            for site in &d.causal {
-                eprintln!("  caused by {}", sources.render(site));
+            for cause in &d.causal {
+                eprintln!("  {}: {}", cause.role.label(), sources.render(&cause.site));
             }
-            if let Some(hint) = &d.hint {
-                eprintln!("  {hint}");
+            for suggestion in crate::diagnostics::render_suggestions(&d.fixes, &d.available_members)
+            {
+                eprintln!("  {suggestion}");
             }
         }
         for g in &output.incomplete {
             eprintln!("{}: incomplete {}", sources.render(&g.primary), g.message);
-            for site in &g.causal {
-                eprintln!("  caused by {}", sources.render(site));
+            for cause in &g.causal {
+                eprintln!("  {}: {}", cause.role.label(), sources.render(&cause.site));
             }
         }
         for r in &output.resources {
@@ -1616,7 +1703,8 @@ fn finish(
         {
             eprintln!("{stop}");
         }
-        if command != "run" && command != "replay" {
+        if command != "run" && command != "replay" && (!output.accepted || output.stopped.is_none())
+        {
             println!(
                 "{}: {} files, {} checked definitions",
                 if output.accepted {
@@ -1625,7 +1713,7 @@ fn finish(
                     "not accepted"
                 },
                 output.files,
-                output.rechecked
+                output.checked_definitions
             );
         }
     }
@@ -1671,6 +1759,7 @@ fn finish(
     if let Some(profile) = profile {
         profile.cleanup();
     }
+    drop(run_output);
     // Publication and output are complete. The OS reclaims these in-memory
     // graphs at exit; the reusable library Driver retains ordinary destruction.
     std::process::exit(exit)

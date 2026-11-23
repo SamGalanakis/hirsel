@@ -233,6 +233,24 @@ pub struct Exported {
     pub result_fp: u64,
     pub revision: Vec<u8>,
 }
+
+impl Exported {
+    pub(crate) fn row_schemas(&self) -> Result<(Schema, Schema), Error> {
+        let mut input = Reader {
+            bytes: &self.result,
+            at: 0,
+        };
+        let key_size = input.count()?;
+        let key = Schema::read(input.take(key_size)?)?;
+        let value_size = input.count()?;
+        let value = Schema::read(input.take(value_size)?)?;
+        input.done()?;
+        if !key.key || value.key {
+            return Err("Malformed: query needs an ordered key schema and a value schema".into());
+        }
+        Ok((key, value))
+    }
+}
 pub struct Describe {
     pub digest: Vec<u8>,
     pub target: String,
@@ -340,36 +358,57 @@ pub fn generate(describe: &Describe) -> Result<BTreeMap<String, String>, Error> 
             entry.result_fp
         ));
     }
-    entries.push_str("];\nexport function bind(client) {\nconst call = Object.create(null), subscribe = Object.create(null);\n");
+    entries.push_str("];\nexport function bind(client) {\nconst call = Object.create(null), subscribe = Object.create(null), subscribeDecoded = Object.create(null);\n");
     let mut calls = Vec::new();
     let mut subscriptions = Vec::new();
+    let mut decoded = Vec::new();
     for (i, entry) in describe.exported.iter().enumerate() {
         let args = Schema::read(&entry.args)?;
-        let result = Schema::read(&entry.result)?;
         let arg_name = format!("Args{i}");
-        let result_name = format!("Result{i}");
         js.push_str(&args.javascript(&arg_name));
-        js.push_str(&result.javascript(&result_name));
         dts.push_str(&args.declarations(&arg_name));
-        dts.push_str(&result.declarations(&result_name));
         let name = json!(stub_name(&entry.identity)?);
         if entry.kind == 2 {
+            let (key, row) = entry.row_schemas()?;
+            let key_name = format!("Key{i}");
+            let row_name = format!("RowValue{i}");
+            js.push_str(&key.javascript(&key_name));
+            js.push_str(&row.javascript(&row_name));
+            dts.push_str(&key.declarations(&key_name));
+            dts.push_str(&row.declarations(&row_name));
             entries.push_str(&format!("subscribe[{name}] = (args,onRows,onEnd) => client.subscribe(want[{i}],codec.{arg_name}.encode(args),onRows,onEnd);\n"));
             subscriptions.push(format!(
                 "{name}: (args: codec.{arg_name}, onRows: (rows: Row[]) => void, onEnd?: (reason: SubscriptionEnd) => void) => Subscription"
             ));
+            entries.push_str(&format!("subscribeDecoded[{name}] = (args,onRows,onEnd) => subscribe[{name}](args,rows => onRows(rows.map(row => decodeRow(row,codec.{key_name},codec.{row_name}))),onEnd);\n"));
+            decoded.push(format!(
+                "{name}: (args: codec.{arg_name}, onRows: (rows: DecodedRow<codec.{key_name}, codec.{row_name}>[]) => void, onEnd?: (reason: SubscriptionEnd) => void) => Subscription"
+            ));
         } else {
+            let result = Schema::read(&entry.result)?;
+            let result_name = format!("Result{i}");
+            js.push_str(&result.javascript(&result_name));
+            dts.push_str(&result.declarations(&result_name));
             entries.push_str(&format!("call[{name}] = (args) => client.call(want[{i}],codec.{arg_name}.encode(args),codec.{result_name}.decode);\n"));
             calls.push(format!(
                 "{name}: (args: codec.{arg_name}) => Promise<Outcome<codec.{result_name}>>"
             ));
         }
     }
-    entries.push_str("return {call,subscribe};\n}\n");
+    entries.push_str("return {call,subscribe,subscribeDecoded};\n}\n");
+    if !decoded.is_empty() {
+        entries.push_str("function decodeRow(row,key,value) {\n\
+            if (row.key.length < 4) throw new codec.Malformed('truncated table key');\n\
+            const table = new DataView(row.key.buffer,row.key.byteOffset,4).getUint32(0);\n\
+            return {sub:row.sub,table,key:key.decode(row.key.subarray(4)),\n\
+                value:row.value.tag === 'Some' ? {tag:'Some',value:value.decode(row.value.value)} : row.value};\n\
+            }\n");
+    }
     let entry_dts = format!(
-        "import type * as codec from './codec.js';\nimport type {{Outcome, Row, Subscription, SubscriptionEnd, Transport}} from '@hirsel/client';\nexport const identity: {{readonly digest: Uint8Array; readonly target: string; readonly n_place: bigint}};\nexport const want: Array<{{identity: Uint8Array; args_fp: bigint; result_fp: bigint}}>;\nexport function bind(client: Transport): {{call: {{ {} }}; subscribe: {{ {} }} }};\n",
+        "import type * as codec from './codec.js';\nimport type {{Option, Outcome, Row, Subscription, SubscriptionEnd, Transport}} from './client.js';\nexport const identity: {{readonly digest: Uint8Array; readonly target: string; readonly n_place: bigint}};\nexport const want: Array<{{identity: Uint8Array; args_fp: bigint; result_fp: bigint}}>;\nexport type DecodedRow<K, V> = {{sub: number; table: number; key: K; value: Option<V>}};\nexport function bind(client: Transport): {{call: {{ {} }}; subscribe: {{ {} }}; subscribeDecoded: {{ {} }} }};\n",
         calls.join("; "),
-        subscriptions.join("; ")
+        subscriptions.join("; "),
+        decoded.join("; ")
     );
     Ok(BTreeMap::from([
         ("package.json".into(), "{\"type\":\"module\"}\n".into()),
@@ -377,6 +416,22 @@ pub fn generate(describe: &Describe) -> Result<BTreeMap<String, String>, Error> 
         ("codec.d.ts".into(), dts),
         ("entries.js".into(), entries),
         ("entries.d.ts".into(), entry_dts),
+        (
+            "client.ts".into(),
+            include_str!("../../../sdk/client/client.ts").into(),
+        ),
+        (
+            "browser.ts".into(),
+            include_str!("../../../sdk/client/browser.ts").into(),
+        ),
+        (
+            "node.ts".into(),
+            include_str!("../../../sdk/client/node.ts").into(),
+        ),
+        (
+            "persistence.ts".into(),
+            include_str!("../../../sdk/client/persistence.ts").into(),
+        ),
     ]))
 }
 pub fn write(describe: &Describe, out: &Path) -> Result<(), Error> {
@@ -524,7 +579,7 @@ mod tests {
     fn sdk_generation_preserves_identity_fingerprints_and_entry_kinds() {
         let mut query = entry("m", "rows");
         query.kind = 2;
-        query.result = scalar(13);
+        query.result = [6, 0, 0, 0, 4, 0, 0, 0, 0, 6, 6, 0, 0, 0, 3, 0, 0, 0, 0, 13].to_vec();
         let d = Describe {
             digest: vec![1, 2],
             target: "x86_64-unknown-linux-gnu".into(),
@@ -537,7 +592,8 @@ mod tests {
         assert!(files["entries.js"].contains("call[\"toggle\"]"));
         assert!(files["entries.js"].contains("subscribe[\"rows\"]"));
         assert!(files["codec.d.ts"].contains("export type Args0 = bigint"));
-        assert!(files["codec.d.ts"].contains("export type Result1 = string"));
+        assert!(files["codec.d.ts"].contains("export type Key1 = bigint"));
+        assert!(files["codec.d.ts"].contains("export type RowValue1 = string"));
         assert!(!files["codec.js"].contains("require("));
         assert_eq!(
             serde_json::from_str::<Value>(&files["package.json"]).unwrap()["type"],

@@ -1221,6 +1221,9 @@ struct Ended {
     /// one's key and its retained charge, part of `n`.
     survivors: Vec<(usize, u64)>,
     run_grants: u64,
+    /// The charges of `Secret` designations it paid for that are still held
+    /// (TLS-5): its owner pays them from the end take on.
+    secrets: crate::secret::HandedOver,
 }
 
 struct CrossedCause {
@@ -1518,6 +1521,15 @@ fn helper_main(
         // the owner holds its charge from the end take on. Its own copy here
         // goes back to this helper's limit, which ends with it.
         let survivors = lu.retained.drain().map(|(k, h)| (k, h.bytes)).collect();
+        // Likewise each Secret designation still held elsewhere.
+        let (secrets, refunds) = files
+            .registry
+            .run_grants()
+            .secrets
+            .lock()
+            .unwrap()
+            .hand_over(context.payer());
+        drop(refunds);
         let ended = Ended {
             failed: failed != 0,
             causes: context.causes.iter().map(CrossedCause::pack).collect(),
@@ -1529,6 +1541,7 @@ fn helper_main(
             survivors,
             run_grants: context.payer().run_owned()
                 + lu.run_grants.drain(..).map(|held| held.bytes).sum::<u64>(),
+            secrets,
         };
         let mut ret = Value::empty();
         if failed == 0 {
@@ -1583,6 +1596,7 @@ unsafe fn end_take(u: &mut LangUnit, h: &mut HelperH) {
     if ended.run_grants != 0 {
         u.run_grants.push(held.split(ended.run_grants));
     }
+    crate::secret::take_over(&ended.secrets, |bytes| held.partition(bytes));
     let causes = ended
         .causes
         .iter()

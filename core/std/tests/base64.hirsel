@@ -127,7 +127,14 @@ fn vector_blocks_match_rfc4648() -> bool {
 // The existing canonical cases already check forbidden characters and tail bits.
 // expect: run rust_base64_rejects_bad_quanta() = true
 fn rust_base64_rejects_bad_quanta() -> bool {
-    let cases: Inline[String, 6] =["A", "AAAAA", "A===", "ABCDA===", "AAAAAAAAAAAAAAAAAAAAAAAAAAAA====", "AAAAAAAAAAAAAAAAAAAAAAAAAAA=====",]
+    let cases: Inline[String, 6] =[
+        "A",
+        "AAAAA",
+        "A===",
+        "ABCDA===",
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAA====",
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAA=====",
+    ]
     for input in cases {
         let refused = bound bytes 0 {
             base64.decode(string.as_bytes(input)) == None

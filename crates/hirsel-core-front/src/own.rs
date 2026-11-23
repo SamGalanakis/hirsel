@@ -48,6 +48,7 @@ pub(crate) enum PStep {
     Payload,
     Index {
         collection: crate::types::TyId,
+        index: hirsel_core_syntax::NodeId,
         value: Option<hirsel_core_ir::ValueId>,
     },
     /// Field `.1` of variant `.0`: the payloads of two variants share storage.

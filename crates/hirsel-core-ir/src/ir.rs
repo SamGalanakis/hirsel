@@ -929,6 +929,8 @@ pub enum RtOp {
     },
     /// `conn.client`: one more client of the same connection.
     ConnClient,
+    /// `secret.share` (TLS-5): one more holder of the designation, as its key.
+    SecretShare,
     /// `conn.send`: 0 accepted, 1 closed (the item stays in its place).
     ConnSend {
         item: TypeId,
@@ -1017,6 +1019,8 @@ pub enum RtOp {
     Xxh3Stripes,
     /// Take the socket or read the scratch grant designated by the place host.
     LaunchHandle,
+    /// Extend a finalized Castagnoli CRC over a readable byte range.
+    Crc32c,
     /// Verify a pure Ed25519 signature over a message.
     Ed25519Verify,
     /// Verify a fixed-width P-256 ECDSA signature over a message with SHA-256.
@@ -1045,7 +1049,7 @@ pub enum RtOp {
 /// row [`Wait::row`] with the child word in front.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum Wait {
-    /// An owned network wait (`RecvBounded`, `SendPair`).
+    /// An owned provider wait (one with [`HostOp::returnable_symbol`]).
     Host(HostOp),
     Join {
         r: TypeId,
@@ -1072,7 +1076,7 @@ impl Wait {
     /// The returnable wait of a stackful row, if it has one.
     pub fn of(row: RtOp) -> Option<Wait> {
         Some(match row {
-            RtOp::Host(op @ (HostOp::RecvBounded | HostOp::SendPair)) => Wait::Host(op),
+            RtOp::Host(op) if op.returnable_symbol().is_some() => Wait::Host(op),
             RtOp::Join { r } => Wait::Join { r },
             RtOp::ConnSend { item } => Wait::ConnSend { item },
             RtOp::ConnReceive { item } => Wait::ConnReceive { item },
@@ -1111,6 +1115,8 @@ pub enum HostOp {
     Listen,
     Accept,
     RecvBounded = 27,
+    /// Wait until a read half's next receive has something to report.
+    RecvReady = hirsel_core_ids::host_op::RECV_READY as isize,
     SendPair = 26,
     NetNarrow = 24,
     NetSplit = 25,
@@ -1219,6 +1225,7 @@ impl HostOp {
         HostOp::SecretHmac,
         HostOp::SecretVerifyHmac,
         HostOp::RecvBounded,
+        HostOp::RecvReady,
         HostOp::SendPair,
         HostOp::NetNarrow,
         HostOp::NetNarrowTls,
@@ -1315,6 +1322,7 @@ impl HostOp {
             HostOp::Listen => "host_listen",
             HostOp::Accept => "host_accept",
             HostOp::RecvBounded => "host_recv_bounded",
+            HostOp::RecvReady => "host_recv_ready",
             HostOp::SendPair => "host_send_pair",
             HostOp::NetNarrow => "net_narrow",
             HostOp::ExecNarrow => "exec_narrow",
@@ -1379,6 +1387,7 @@ impl HostOp {
             Self::Listen => "hirsel_core_host_listen",
             Self::Accept => "hirsel_core_host_accept",
             Self::RecvBounded => "hirsel_core_host_recv_bounded",
+            Self::RecvReady => "hirsel_core_host_recv_ready",
             Self::SendPair => "hirsel_core_host_send_pair",
             Self::NetNarrow => "hirsel_core_net_narrow",
             Self::ExecNarrow => "hirsel_core_exec_narrow",
@@ -1435,6 +1444,17 @@ impl HostOp {
             _ => unreachable!(),
         }
     }
+
+    /// The adapter for an owned wait that can return its native stack.
+    pub const fn returnable_symbol(self) -> Option<&'static str> {
+        match self {
+            Self::RecvBounded => Some("hirsel_core_host_recv_bounded_rec"),
+            Self::RecvReady => Some("hirsel_core_host_recv_ready_rec"),
+            Self::SendPair => Some("hirsel_core_host_send_pair_rec"),
+            _ => None,
+        }
+    }
+
     /// Whether the operation waits (a cancellation point, so it can fail).
     pub const fn waits(self) -> bool {
         !matches!(
@@ -1526,6 +1546,7 @@ impl RtOp {
     /// | `sha1_blocks` | state `ptr`, `data: ptr`, `len: u64` | (crate docs, "SHA-1") |
     /// | `zero_bytes` | `block: ptr`, `at: ptr`, `len: u64` | (crate docs, "Zero fill") |
     /// | `sha256_blocks` | state `ptr`, `data: ptr`, `blocks: u64` | (crate docs, "SHA-256") |
+    /// | `crc32c` | `crc: u32`, `data: ptr`, `len: u64` | `u32`: updated CRC-32C |
     /// | `ed25519_verify`, `p256_verify`, `p256_verify_der` | key, message and signature pointer/length pairs (lengths `u64`) | `u64`: 1 if valid, 0 otherwise |
     /// | `cause_next` | cell `ptr` | `ptr`: the next cell, null after the last |
     /// | `cause_value` | cell `ptr` | `ptr`: the cell's `Cause` |
@@ -1626,6 +1647,10 @@ impl RtOp {
             RtOp::Sha1Blocks => (vec![V(p), V(p), V(u64_)], vec![]),
             RtOp::ZeroBytes => (vec![V(p), V(p), V(u64_)], vec![]),
             RtOp::Sha256Blocks => (vec![V(p), V(p), V(u64_)], vec![]),
+            RtOp::Crc32c => {
+                let u32_ = Ty::Scalar(Scalar::U32);
+                (vec![V(u32_), V(p), V(u64_)], vec![u32_])
+            }
             RtOp::Ed25519Verify | RtOp::P256Verify | RtOp::P256VerifyDer => (
                 vec![V(p), V(u64_), V(p), V(u64_), V(p), V(u64_)],
                 vec![u64_],
@@ -1634,7 +1659,7 @@ impl RtOp {
             RtOp::ArgsLen => (vec![V(u64_)], vec![u64_]),
             RtOp::ArgsGet => (vec![V(u64_), V(u64_)], vec![p]),
             RtOp::LaunchWord => (vec![V(u64_), V(u64_)], vec![u64_]),
-            RtOp::LaunchHandle => (vec![V(u64_)], vec![u64_]),
+            RtOp::LaunchHandle | RtOp::SecretShare => (vec![V(u64_)], vec![u64_]),
             RtOp::FrameRecord => (vec![V(u64_)], vec![p]),
             RtOp::Returnable(wait) => {
                 let row = wait.row().signature();
@@ -1719,7 +1744,9 @@ impl RtOp {
                         vec![V(u64_), V(p), V(p), V(Ty::Scalar(Scalar::U16))],
                         outcome,
                     ),
-                    HostOp::UnixAccept => (vec![V(u64_), V(u8_), V(u64_), V(u64_)], outcome),
+                    HostOp::UnixAccept | HostOp::RecvReady => {
+                        (vec![V(u64_), V(u8_), V(u64_), V(u64_)], outcome)
+                    }
                     HostOp::DatagramOpen => (vec![V(u64_)], outcome),
                     HostOp::DatagramBind => (vec![V(u64_), V(p), V(p)], outcome),
                     HostOp::DatagramConnect => (vec![V(u64_), V(p), V(p)], outcome),
@@ -1964,6 +1991,7 @@ impl RtOp {
             | RtOp::Sha1Blocks
             | RtOp::ZeroBytes
             | RtOp::Sha256Blocks
+            | RtOp::Crc32c
             | RtOp::Ed25519Verify
             | RtOp::P256Verify
             | RtOp::P256VerifyDer
@@ -1973,6 +2001,7 @@ impl RtOp {
             | RtOp::ArgsGet
             | RtOp::LaunchWord
             | RtOp::LaunchHandle
+            | RtOp::SecretShare
             | RtOp::DescribeEmit
             | RtOp::Flow(_)
             | RtOp::Host(_)

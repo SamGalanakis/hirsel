@@ -21,6 +21,9 @@ upstream license texts under the bundle's `notices/` directory; see
 | Goose | `src/format.h` and its formatter: the file's own tokens and comments printed in order with the layout between them chosen afresh, token roles taken from the parser, and the result checked against the input's tokens before use; Hirsel combines it with its doc/trivia printer | `crates/hirsel-core-syntax/src/format.rs` | aardappel/goose `d5ae5bbda990923fa4129f969c7f853c20d4d1e6` | Apache-2.0 (text below, without the LLVM exception) |
 | Goose | `stdlib/csv.goose:19-57,60-71` (each_record and format_field) | `core/std/csv.hirsel` | aardappel/goose `d5ae5bbda990923fa4129f969c7f853c20d4d1e6` | Apache-2.0 (text below, without the LLVM exception) |
 | Go standard library | `src/encoding/csv/reader.go:297-460` (strict field scanning), `src/encoding/csv/reader_test.go:40-405` (readTests), `src/encoding/csv/writer_test.go:14-50` (writeTests) | `core/std/csv.hirsel`, `core/std/tests/csv.hirsel` | golang/go `46b62495e1bf4d56e0313320772ae588d9119aed` | BSD-3-Clause (Go) |
+| commonmark.js | Container matching, inline delimiter and bracket processing | `core/std/markdown.hirsel` | commonmark/commonmark.js `898886961b49c1df1175666d03c3ac66c9cc9040` | BSD-2-Clause (CommonMark) |
+| cmark-gfm | Generated HTML entity names and values | `core/std/markdown.hirsel` | github/cmark-gfm `27d942c8b0a62d192f616e5bf3578f4b6a89e180` | BSD-2-Clause (CommonMark) |
+| CommonMark specification | All 0.31.2 Markdown and expected HTML examples | `core/std/tests/markdown.hirsel` | commonmark/commonmark-spec `9103e341a973013013bb1a80e13567007c5cef6f` | CC-BY-SA-4.0 (CommonMark examples) |
 | Go standard library | Reflected IEEE slicing-by-8 construction and recurrence in `src/hash/crc32/crc32_generic.go:60-90` | `core/std/crc32.hirsel` | golang/go `ebe2feefc400f813aefdc8a036e66d2619da6649` | BSD-3-Clause (Go) |
 | OpenTelemetry Protocol | OTLP JSON examples and protoc descriptor field/enum projection | `tools/tests/fixtures/obs-export/{logs,metrics,trace,proto-json-schema}.json`, `tools/obs_export_schema.py` | open-telemetry/opentelemetry-proto `09769935deb8b2ebcf73ad1e2142b691d17bf70b` | Apache-2.0 (text below, without the LLVM exception; also `tools/tests/fixtures/obs-export/LICENSE`) |
 | Go standard library and vendored cryptobyte | `src/crypto/x509/parser.go:38-154,209-247,465-534,1395-1452`, `pkix/pkix.go:28-104`, `src/net/url/url.go:441-649`, vendored `golang.org/x/crypto/cryptobyte/asn1.go:755-835`; TestPKIXNameString (14 rows + input-preservation assertion), TestRDNSequenceString (1), TestParseASN1String (15), TestDomainNameValid (25) | `docs/x509-prior-art.md` | golang/go `ebe2feefc400f813aefdc8a036e66d2619da6649` | BSD-3-Clause (Go) |
@@ -30,6 +33,7 @@ upstream license texts under the bundle's `notices/` directory; see
 | Howard Hinnant | `days_from_civil` and `civil_from_days`, Chrono-Compatible Low-Level Date Algorithms | `core/std/time.hirsel` | [Published reference](https://howardhinnant.github.io/date_algorithms.html#days_from_civil) | Public domain |
 | Go standard library | `src/path/path_test.go:100-106,152-158,168-181,191-205` Split, Ext, Base and Dir vectors restricted to valid paths | `core/std/tests/path.hirsel` | golang/go `46b62495e1bf4d56e0313320772ae588d9119aed` | BSD-3-Clause (Go) |
 | Rust standard library | `library/std/src/path.rs:334-354,2880-2975` last-dot rule for valid names and stem, prefix and extension examples | `core/std/path.hirsel`, `core/std/tests/path.hirsel` | rust-lang/rust `5f4effd579500175af844241eb179e756190f1e7` | MIT (Rust) |
+| fastcdc | v2016 normalization masks and gear table in `src/v2016/mod.rs` | `core/std/cdc.hirsel` | nlfiedler/fastcdc-rs `b025a70229a13d9482c943d27e494c40e84e0892` | MIT, `core/std/api/cdc-LICENSE-MIT.txt` |
 | RustCrypto SHA-1 | SHA instruction round and schedule intrinsics in `sha1/src/compress/{x86_sha,aarch64_sha2}.rs` | `crates/hirsel-core-rt/src/sha1.rs` | RustCrypto/hashes, sha1 0.11.0, `2f00175af936de46b3ddefe65c4de93cb4e876e4` | MIT (RustCrypto) |
 | twox-hash | AVX2 XXH3 multiply and adjacent-lane addition in `src/xxhash3/large/avx2.rs`. Hirsel keeps two accumulator vectors live across multiple stripes. | `crates/hirsel-core-rt/src/xxh3.rs` | shepmaster/twox-hash 2.1.5, `0222275b9e2faaa0a09eead8057753609ff891d1` | MIT (twox-hash) |
 | xxhash-rust | Scalar XXH3 recurrence and default secret in `src/const_xxh3.rs:40-254`, `src/xxh3_common.rs:13-28,34-38,56-59` | `core/std/check.hirsel`, `core/programs/store/xxh3_bench.hirsel` | DoumanAsh/xxhash-rust 0.8.15, `7026cd705195f502283f97aafc9ea41930099c68` | BSL-1.0 |
@@ -562,3 +566,40 @@ LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
 ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+
+## BSD-2-Clause (CommonMark)
+
+Copyright (c) 2014, John MacFarlane
+
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+    * Redistributions of source code must retain the above copyright
+      notice, this list of conditions and the following disclaimer.
+
+    * Redistributions in binary form must reproduce the above
+      copyright notice, this list of conditions and the following
+      disclaimer in the documentation and/or other materials provided
+      with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+## CC-BY-SA-4.0 (CommonMark examples)
+
+Copyright (C) 2014–16 John MacFarlane. The CommonMark 0.31.2 spec examples
+are repackaged as newline-separated JSON pairs inside the Markdown contract
+test. The Markdown and HTML strings retain their original contents. The
+examples are licensed under <https://creativecommons.org/licenses/by-sa/4.0/>.

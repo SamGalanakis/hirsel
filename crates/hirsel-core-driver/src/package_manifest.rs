@@ -409,9 +409,13 @@ fn dependencies(
                 (None, None, None, None, None, Some(true)) if allow_inherited => {
                     Dependency::Inherited
                 }
-                (Some(major), None, None, None, None, None) if name == "std" => {
-                    if major != 1 {
-                        return Err(format!("{field}: the toolchain has std@1, not std@{major}"));
+                (Some(major), None, None, None, None, None) => {
+                    let supplied =
+                        crate::package_content::toolchain_major(&name).ok_or_else(bad_form)?;
+                    if major != supplied {
+                        return Err(format!(
+                            "{field}: the toolchain has {name}@{supplied}, not {name}@{major}"
+                        ));
                     }
                     Dependency::Toolchain(Id {
                         name: name.clone(),

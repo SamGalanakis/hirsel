@@ -291,6 +291,7 @@ fn every_host_row_preserves_c_fields_and_status() {
                     | HostOp::Listen
                     | HostOp::Accept
                     | HostOp::RecvBounded
+                    | HostOp::RecvReady
                     | HostOp::SendPair
                     | HostOp::NetNarrow
                     | HostOp::NetNarrowTls
@@ -391,6 +392,7 @@ fn every_host_row_preserves_c_fields_and_status() {
                     | HostOp::Listen
                     | HostOp::Accept
                     | HostOp::RecvBounded
+                    | HostOp::RecvReady
                     | HostOp::SendPair
                     | HostOp::NetNarrow
                     | HostOp::NetNarrowTls

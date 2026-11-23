@@ -1,0 +1,6 @@
+// expect: refuse LANG-5 at 6:17
+// expect: cause LANG-5 at 6:17 from 6:13
+// expect: role LANG-5 at 6:17 opened_here from 6:13
+// expect: compared LANG-5 at 6:17 | end of file | }
+// expect: fix LANG-5 at 6:17 maybe | }
+fn values() { ()

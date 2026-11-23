@@ -64,6 +64,29 @@ preserves insertion order on write and wire order on read, and rejects
 duplicate names. Floats must be finite. Measurement returns
 `TypedWriteError.NonFinite` before emitting any output.
 
+## JSON Schema
+
+`json.schema(format, annotations, mut out)` appends a JSON Schema draft
+2020-12 document to Bytes. Use an empty list to omit descriptions.
+Each annotation pairs an RFC 6901 JSON Pointer to a schema object with its
+description. For example, `""` selects the root and `"/properties/query"`
+selects the schema for the record's `query` field. Escape `~` as `~0` and
+`/` as `~1` in path segments. If a pointer does not select a schema object or
+appears twice, the call returns `UnknownAnnotation` or `DuplicateAnnotation`
+and leaves `out` intact.
+
+Record schemas set `additionalProperties` to false. Fields with a declared
+default and optional fields may be absent. The interop decoder can also read
+records with extra members. Unit variants are tag strings. Payload variants
+are single-member objects keyed by the tag, and multi-field payloads are
+fixed-length arrays in declaration order. A Result uses an `ok` or `error`
+member. Recursive and shared shapes use local references. A pointer to a
+reference can give that occurrence its own description.
+
+The schema describes parsed JSON values. The decoder also checks the input's
+number spellings, finite float conversion, duplicate members and map keys,
+nesting and allocation limits, and codec `via` constraints.
+
 ## Documents, callback readers and writers
 
 Use `decode` to read one complete value into an owned type. Compose
@@ -100,3 +123,24 @@ Each completed append stays in the output if a later append refuses
 Capacity. A quoted string appends its opening quote, each unescaped run
 or escape, and its closing quote as separate requests. An object member
 writes its key this way before appending the colon.
+
+## JSON Patch
+
+`std.json.patch(r, input, operations)` applies an RFC 6902 array in order.
+Its `add`, `remove`, `replace`, `move`, `copy` and `test` operations take
+RFC 6901 pointers. The empty pointer addresses the root. Array additions
+insert before the given index or append at the array length or `-`.
+A move resolves its destination after removing the source.
+
+The function borrows both inputs. It edits a private tree and publishes the
+result into `r` after all operations have succeeded. `Ok(None)` represents
+a removed root, and a later root add can restore a document in the same
+patch. An error publishes nothing. Operation errors carry a zero-based index.
+An operation can have extra fields. Duplicate required fields and paths to
+ambiguous object members fail.
+
+The `test` operation compares numbers by exact decimal value, strings by
+decoded code points, arrays in order, and objects by their uniquely named
+members in any order. Results keep number spellings, object member order and
+the JSON document's nesting limit. Working allocations include the editable
+tree, copies requested by the patch, and a serialization of the final result.

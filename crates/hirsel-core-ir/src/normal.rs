@@ -60,6 +60,28 @@ const SIGNATURE_DOMAIN: &str = "hirsel.code-signature.v2";
 pub(crate) mod wire;
 use wire::{Read, Tagged, Wire, Write};
 
+/// An operation tag in the normal form consumed by both native engines.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EngineTag {
+    Instruction(u8),
+    Runtime(u8),
+    Host(u8),
+    Flow(u8),
+    Terminator(u8),
+}
+
+impl EngineTag {
+    pub fn is_defined(self) -> bool {
+        match self {
+            Self::Instruction(tag) => Inst::defines_tag(tag),
+            Self::Runtime(tag) => RtOp::defines_tag(tag),
+            Self::Host(tag) => HostOp::defines_tag(tag),
+            Self::Flow(tag) => hirsel_core_layout::flow::Op::defines_tag(tag),
+            Self::Terminator(tag) => Terminator::defines_tag(tag),
+        }
+    }
+}
+
 /// The frozen normal-form tag for an instruction.
 pub fn instruction_tag(instruction: &Inst) -> u8 {
     instruction.tag()

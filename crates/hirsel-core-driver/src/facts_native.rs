@@ -12,7 +12,7 @@ fn program_facts_source_changes(backend: Backend) {
     let mut consumed = Vec::new();
     for (lend, status) in [
         ("string.truncate(mut s, 1)", 1),
-        ("result.unwrap(string.push(mut s, \"x\"))", 4),
+        ("string.push(mut s, \"x\")", 4),
     ] {
         let source = format!("fn caller(mut s: String) {{ lend(mut s) }}\npub fn main() -> Result[(), Exit] {{ let mut s = \"abc\"; caller(mut s); Error(Exit(status: int.truncate(string.byte_len(s)))) }}\nfn lend(mut s: String) {{ {lend} }}\n");
         let mut request = source_request(&source, dir.path());

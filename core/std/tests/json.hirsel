@@ -527,7 +527,18 @@ fn json_test_suite() -> bool {
 // Source: serde_json tests/test.rs, f51fa15a7015c7d02817a46d2db44c899a0016e8, MIT.
 // expect: run serde_json_numbers() = true
 fn serde_json_numbers() -> bool {
-    let valid: Inline[(String, u64), 10] =[("-0", 0x8000000000000000), ("-0.0", 0x8000000000000000), ("-0e2", 0x8000000000000000), ("-0.0e2", 0x8000000000000000), ("-1e-400", 0x8000000000000000), ("-1e-4000000000000000000000000000000000000000000000000", 0x8000000000000000), ("-9223372036854775808", 0xc3e0000000000000), ("9223372036854775807", 0x43e0000000000000), ("18446744073709551615", 0x43f0000000000000), ("2.638344616030823e-256", 0xadfb11e2adb03c3),]
+    let valid: Inline[(String, u64), 10] =[
+        ("-0", 0x8000000000000000),
+        ("-0.0", 0x8000000000000000),
+        ("-0e2", 0x8000000000000000),
+        ("-0.0e2", 0x8000000000000000),
+        ("-1e-400", 0x8000000000000000),
+        ("-1e-4000000000000000000000000000000000000000000000000", 0x8000000000000000),
+        ("-9223372036854775808", 0xc3e0000000000000),
+        ("9223372036854775807", 0x43e0000000000000),
+        ("18446744073709551615", 0x43f0000000000000),
+        ("2.638344616030823e-256", 0xadfb11e2adb03c3),
+    ]
     for row in valid {
         let (input, bits) = row
         match json.decode(input, json.read_f64) {
@@ -537,7 +548,17 @@ fn serde_json_numbers() -> bool {
             Error(_) => fail(string.from(input)),
         }
     }
-    let invalid: Inline[(String, JsonTestExpectation), 9] =[("00", RefuseJsonSyntax), ("0x80", RefuseJsonSyntax), (".0", RefuseJsonSyntax), ("1.e1", RefuseJsonSyntax), ("1e", RefuseJsonSyntax), ("1e+", RefuseJsonSyntax), ("1a", RefuseJsonSyntax), ("100e777777777777777777777777777", RefuseJsonNumber), ("-100e777777777777777777777777777", RefuseJsonNumber),]
+    let invalid: Inline[(String, JsonTestExpectation), 9] =[
+        ("00", RefuseJsonSyntax),
+        ("0x80", RefuseJsonSyntax),
+        (".0", RefuseJsonSyntax),
+        ("1.e1", RefuseJsonSyntax),
+        ("1e", RefuseJsonSyntax),
+        ("1e+", RefuseJsonSyntax),
+        ("1a", RefuseJsonSyntax),
+        ("100e777777777777777777777777777", RefuseJsonNumber),
+        ("-100e777777777777777777777777777", RefuseJsonNumber),
+    ]
     for row in invalid {
         let (input, expected) = row
         if !json_test_case(input, expected) {
@@ -1100,4 +1121,120 @@ fn caught[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
         },
         _ => None,
     }
+}
+
+type SchemaTree: codec = Leaf | Branch(List[SchemaTree])
+
+type SchemaRecord: codec {
+    name: String,
+    wide: u64,
+    payload: Bytes,
+    values: List[i16],
+    choice: ProfileSum,
+    tree: SchemaTree,
+    maybe: Option[bool],
+    score: u8 = 7
+}
+
+type SchemaExample {
+    document: String,
+    validates: bool,
+    decodes: bool
+}
+
+const SCHEMA_EXAMPLES: u64 = 15
+
+fn schema_example(i: u64) -> SchemaExample {
+    match i {
+        0 => SchemaExample(document: "{\"name\":\"a\",\"wide\":18446744073709551615,\"payload\":\"TQ==\",\"values\":[-32768,32767],\"choice\":\"Empty\",\"tree\":\"Leaf\"}", validates: true, decodes: true),
+        1 => SchemaExample(document: "{\"name\":\"a\",\"wide\":0,\"payload\":\"\",\"values\":[],\"choice\":{\"Single\":\"é\"},\"tree\":{\"Branch\":[\"Leaf\",{\"Branch\":[]}]},\"maybe\":null,\"score\":1}", validates: true, decodes: true),
+        2 => SchemaExample(document: "{\"name\":\"a\",\"wide\":1,\"payload\":\"TWE=\",\"values\":[0],\"choice\":{\"Multiple\":[1,true]},\"tree\":\"Leaf\",\"maybe\":false}", validates: true, decodes: true),
+        3 => SchemaExample(document: "{\"name\":\"a\",\"wide\":1,\"payload\":\"TWFu\",\"values\":[],\"choice\":\"Empty\",\"tree\":\"Leaf\",\"extra\":{}}", validates: false, decodes: true),
+        4 => SchemaExample(document: "{\"wide\":1,\"payload\":\"TWFu\",\"values\":[],\"choice\":\"Empty\",\"tree\":\"Leaf\"}", validates: false, decodes: false),
+        5 => SchemaExample(document: "{\"name\":\"a\",\"wide\":18446744073709551616,\"payload\":\"TWFu\",\"values\":[],\"choice\":\"Empty\",\"tree\":\"Leaf\"}", validates: false, decodes: false),
+        6 => SchemaExample(document: "{\"name\":\"a\",\"wide\":1,\"payload\":\"TR==\",\"values\":[],\"choice\":\"Empty\",\"tree\":\"Leaf\"}", validates: false, decodes: false),
+        7 => SchemaExample(document: "{\"name\":\"a\",\"wide\":1,\"payload\":\"TQ==\\n\",\"values\":[],\"choice\":\"Empty\",\"tree\":\"Leaf\"}", validates: false, decodes: false),
+        8 => SchemaExample(document: "{\"name\":\"a\",\"wide\":1,\"payload\":\"\",\"values\":[32768],\"choice\":\"Empty\",\"tree\":\"Leaf\"}", validates: false, decodes: false),
+        9 => SchemaExample(document: "{\"name\":\"a\",\"wide\":1,\"payload\":\"\",\"values\":[],\"choice\":{\"Empty\":null},\"tree\":\"Leaf\"}", validates: false, decodes: false),
+        10 => SchemaExample(document: "{\"name\":\"a\",\"wide\":1,\"payload\":\"\",\"values\":[],\"choice\":{\"Single\":\"ab\"},\"tree\":\"Leaf\"}", validates: false, decodes: false),
+        11 => SchemaExample(document: "{\"name\":\"a\",\"wide\":1,\"payload\":\"\",\"values\":[],\"choice\":{\"Multiple\":[1]},\"tree\":\"Leaf\"}", validates: false, decodes: false),
+        12 => SchemaExample(document: "{\"name\":\"a\",\"wide\":1,\"payload\":\"\",\"values\":[],\"choice\":{\"Multiple\":[1,true,null]},\"tree\":\"Leaf\"}", validates: false, decodes: false),
+        13 => SchemaExample(document: "{\"name\":\"a\",\"wide\":1,\"payload\":\"\",\"values\":[],\"choice\":{\"Multiple\":[1,true],\"extra\":0},\"tree\":\"Leaf\"}", validates: false, decodes: false),
+        14 => SchemaExample(document: "{\"name\":\"a\",\"wide\":1,\"payload\":\"\",\"values\":[],\"choice\":\"Empty\",\"tree\":{\"Branch\":[\"Missing\"]}}", validates: false, decodes: false),
+        _ => fail("JSON Schema example index"),
+    }
+}
+
+fn schema_annotations() -> List[(String, String)] {
+    let mut annotations: List[(String, String)] = list.with_capacity(3)
+    list.push(mut annotations, ("", "Tool arguments"))
+    list.push(mut annotations, ("/properties/name", "A \"quoted\" name\n"))
+    list.push(mut annotations, ("/properties/choice/oneOf/2/properties/Multiple/prefixItems/1", "Switch"))
+    take annotations
+}
+
+fn schema_text(format: json.Format[SchemaRecord]) -> String {
+    let mut out: Bytes = list.new()
+    result.unwrap(json.schema(format, schema_annotations(), mut out))
+    result.unwrap(string.from_utf8(take out))
+}
+
+fn schema_description_at(doc: json.Json, path: String, description: String) -> bool {
+    match json.pointer(doc, path) {
+        Some(Str(content)) => text.as_string(content) == description,
+        _ => false,
+    }
+}
+
+// Draft 2020-12 reference verdicts for these documents live in schema_example.
+// The expected decoder verdict differs only for an extra record member.
+// expect: run typed_json_schema_contract() = true
+fn typed_json_schema_contract() -> bool {
+    let format: json.Format[SchemaRecord] = result.unwrap(json.interop())
+    let schema = schema_text(format)
+    region r {
+        let doc = result.unwrap(json.parse(r, schema))
+        if !schema_description_at(doc, "/description", "Tool arguments") || !schema_description_at(doc, "/properties/name/description", "A \"quoted\" name\n") || !schema_description_at(doc, "/properties/choice/oneOf/2/properties/Multiple/prefixItems/1/description", "Switch") {
+            return false
+        }
+    }
+    let mut out = typed_input("keep")
+    let mut annotations: List[(String, String)] = list.new()
+    list.push(mut annotations, ("/properties/unknown", "Missing"))
+    match json.schema(format, annotations, mut out) {
+        Error(UnknownAnnotation(path)) => if path != "/properties/unknown" {
+            return false
+        },
+        _ => return false,
+    }
+    list.clear(mut annotations)
+    list.push(mut annotations, ("", "One"))
+    list.push(mut annotations, ("", "Two"))
+    match json.schema(format, annotations, mut out) {
+        Error(DuplicateAnnotation(path)) => if path != "" {
+            return false
+        },
+        _ => return false,
+    }
+    if out != typed_input("keep") {
+        return false
+    }
+    for i in 0u64 .. SCHEMA_EXAMPLES {
+        let example = schema_example(i)
+        match json.from_string(format, example.document, 65536) {
+            Ok(value) => {
+                if !example.decodes {
+                    return false
+                }
+                let encoded = result.unwrap(json.to_string(format, value))
+                if let Error(_) = json.from_string(format, encoded, 65536) {
+                    return false
+                }
+            },
+            Error(_) => if example.decodes {
+                return false
+            },
+        }
+    }
+    true
 }

@@ -81,7 +81,8 @@ BUILD_SCRIPT_SOURCES = {
 
 BUILD_SCRIPT_INPUTS = {
     "hirsel-core-diag": ["docs/spec/*.md", "core/front/cases/**/*.hirsel"],
-    "hirsel-core-driver": ["core/core/**", "core/std/*.hirsel", "core/std/sim/*.hirsel"],
+    "hirsel-core-driver": ["core/core/**", "core/std/*.hirsel", "core/std/sim/*.hirsel",
+                          "core/programs/store/*.hirsel", "core/programs/store/hirsel.toml"],
 }
 
 # What each crate's tests read at run time outside their crate: repository
@@ -520,7 +521,7 @@ def first_party(meta: dict) -> str:
     unguarded = []
     out = [
         HEADER,
-        'load("//tools/buck2:defs.bzl", "cargo_platforms", "hirsel_binary", "hirsel_build_script", "hirsel_core_llvm_native_test", "hirsel_core_driver_native_test", "hirsel_core_image", "hirsel_library", "hirsel_pic_staticlib", "hirsel_core_runtime_archives", "hirsel_script_test", "hirsel_test", "hirsel_toolchain_bundle")\n',
+        'load("//tools/buck2:defs.bzl", "cargo_platforms", "hirsel_binary", "hirsel_build_script", "hirsel_core_llvm_native_test", "hirsel_core_driver_native_test", "hirsel_core_image", "hirsel_library", "hirsel_pic_staticlib", "hirsel_core_runtime_archives", "hirsel_script_test", "hirsel_store_package", "hirsel_test", "hirsel_toolchain_bundle")\n',
     ]
 
     out.append("\n" + call("hirsel_core_image", name="hirsel-core-image", srcs=Raw('glob(["core/core/*.hirsel", "core/std/*.hirsel", "core/std/sim/*.hirsel"])')))
@@ -623,6 +624,11 @@ def first_party(meta: dict) -> str:
                 binary = f"{name}-unittest"
                 out.append("\n" + call("hirsel_test", name=binary, deps=test_deps,
                                         **test_attrs(binary, src), **attrs))
+                if name == "hirsel-contain":
+                    # Boat runs this harness in delegated systemd user scopes.
+                    out.append("\n" + call("hirsel_test", name="contain", deps=test_deps,
+                                            harness_only=True,
+                                            **{**attrs, "features": sorted(set(features) | {"contain"})}))
         own = [f"//:{name}"] if lib else []
         if lib and lib.get("test", True) and not guarded(pathlib.Path(lib["src_path"])):
             unguarded.append(relative(pathlib.Path(lib["src_path"])))
@@ -788,11 +794,14 @@ def first_party(meta: dict) -> str:
                             crate_root="tools/tests/test_tool_profile.rs", srcs=["tools/tests/test_tool_profile.rs"],
                             features=[], deps=[], manifest_dir=".", package_name="test-tool-profile",
                             version="0.1.0", edition="2024"))
+    out.append("\n" + call("hirsel_store_package", name="store-package", hirsel="//:hirsel-core-driver-bin-hirsel",
+                            sources=Raw('glob(["core/programs/store/*.hirsel"]) + ["core/programs/store/hirsel.toml"]')))
     out.append("\n" + call("hirsel_toolchain_bundle", name="hirsel-toolchain", hirsel="//:hirsel-core-driver-bin-hirsel",
                             runtimes="//:hirsel-core-rt-archives",
                             recording_runtimes="//:hirsel-core-rt-record-archives",
                             prof_runtimes="//:hirsel-core-rt-prof-archives",
                             prof_recording_runtimes="//:hirsel-core-rt-prof-record-archives",
+                            store_package="//:store-package",
                             visibility=["PUBLIC"]))
     out.append("\n" + call("hirsel_script_test", name="gate-distribution-notices", script="tools/tests/distribution_notices.py",
                             args=["--present", *adapted_citations_present()],

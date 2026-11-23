@@ -910,7 +910,7 @@ def prepare_checkbox(out, artifacts, env, *, wire_tools=None, jobs=2):
     with (out / "build.json").open("wb") as log:
         executable = checkbox.build(artifacts["compiler"], out, web, address, prefix=(CAP,),
                                     flags=release_flags(artifacts), env=env, stdout=log)
-    run([artifacts["compiler"], "sdk", "ts", executable, "--out", web,
+    run([artifacts["compiler"], "sdk", "ts", executable, "--output", web,
          "--n-place", checkbox.N_PLACE, "--runtime", artifacts["runtime"],
          "--cc", build.llvm_path() / "bin/clang"], env=env)
     wants = out / "wants.bin"

@@ -12,7 +12,7 @@ use super::unwind::{Registers, Stack, Step};
 use crate::MemMode;
 use crate::memory::MemoryImport;
 use crate::observation::{Observation, RecordKind};
-use crate::profile::{Result, Unsigned};
+use crate::profile::{Result, Timestamp, Unsigned};
 
 struct ActiveMapping {
     id: i64,
@@ -203,7 +203,7 @@ impl<'a> Import<'a> {
         for (_, thread) in self.threads.drain() {
             self.db.execute(
                 "UPDATE thread SET end_ns=?1 WHERE id=?2",
-                (Unsigned(time), thread.id),
+                (Timestamp(time), thread.id),
             )?;
         }
         Ok(())
@@ -213,7 +213,7 @@ impl<'a> Import<'a> {
         for (_, mapping) in std::mem::take(&mut self.mapping) {
             self.db.execute(
                 "UPDATE mapping SET end_ns=?1 WHERE id=?2",
-                (Unsigned(time), mapping.id),
+                (Timestamp(time), mapping.id),
             )?;
         }
         Ok(())
@@ -223,7 +223,7 @@ impl<'a> Import<'a> {
         if let Some(thread) = self.threads.remove(&tid) {
             self.db.execute(
                 "UPDATE thread SET end_ns=?1 WHERE id=?2",
-                (Unsigned(time), thread.id),
+                (Timestamp(time), thread.id),
             )?;
         }
         Ok(())
@@ -238,7 +238,7 @@ impl<'a> Import<'a> {
         self.close_thread(tid, time)?;
         self.db.execute(
             "INSERT INTO thread(pid,tid,name,start_ns) VALUES (?1,?2,?3,?4)",
-            (self.pid, tid, name, Unsigned(time)),
+            (self.pid, tid, name, Timestamp(time)),
         )?;
         let id = self.db.last_insert_rowid();
         self.threads.insert(
@@ -279,7 +279,7 @@ impl<'a> Import<'a> {
             let previous = self.mapping.remove(&start).expect("existing mapping");
             self.db.execute(
                 "UPDATE mapping SET end_ns=?1 WHERE id=?2",
-                (Unsigned(time), previous.id),
+                (Timestamp(time), previous.id),
             )?;
             if previous.map.start < map.start {
                 let mut left = previous.map.clone();
@@ -309,7 +309,7 @@ impl<'a> Import<'a> {
                 format!("{:#x}", map.start), format!("{:#x}", map.end),
                 Unsigned(map.offset), map.path.to_string_lossy(),
                 image.as_ref().and_then(|image| image.build_id.as_deref()),
-                image.as_ref().map(|image| image.digest.as_str()), Unsigned(time),
+                image.as_ref().map(|image| image.digest.as_str()), Timestamp(time),
             ),
         )?;
         let id = self.db.last_insert_rowid();
@@ -391,7 +391,7 @@ impl<'a> Import<'a> {
         self.db.execute(
             "INSERT INTO cpu_sample(ts_ns,thread_id,cpu,callsite_id,raw_pc_hex,event,period,stack_root,unwind_status)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
-            (Unsigned(time), thread, sample.cpu, site, format!("{:#x}", sample.pc),
+            (Timestamp(time), thread, sample.cpu, site, format!("{:#x}", sample.pc),
              sample.event.name, Unsigned(sample.period), root, status),
         )?;
         Ok(())

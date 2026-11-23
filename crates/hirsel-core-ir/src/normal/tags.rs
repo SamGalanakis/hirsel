@@ -63,6 +63,7 @@ tags!(Handle {
     9 => Flow,
     10 => Client,
     11 => Inbox,
+    12 => Secret,
 });
 
 tags!(Repr {
@@ -376,6 +377,8 @@ tags!(RtOp {
     63 => MapStrongBytes,
     64 => MapStrongStart,
     65 => ReceiveRec { item },
+    67 => Crc32c,
+    66 => SecretShare,
 });
 
 tags!(Wait {
@@ -472,6 +475,7 @@ tags!(HostOp {
     114 => DatagramRecv,
     115 => NetNarrowUnix,
     116 => SleepUntilWall,
+    117 => RecvReady,
 });
 
 tags!(RaiseCause {

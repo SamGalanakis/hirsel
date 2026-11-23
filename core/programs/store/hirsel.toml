@@ -12,6 +12,7 @@ std = { major = 1 }
 "store-manifest.hirsel" = "store"
 "store-locations.hirsel" = "store"
 "store-packs.hirsel" = "store"
+"store-scrub.hirsel" = "store"
 "main.hirsel" = "main"
 "ingress.hirsel" = "ingress"
 "triggers.hirsel" = "triggers"
@@ -22,6 +23,9 @@ std = { major = 1 }
 "runner_laws.hirsel" = "runner_laws"
 "runner_calls.hirsel" = "runner_calls"
 "wire_client.hirsel" = "wire_client"
+"fixture.hirsel" = "fixture"
+"launcher.hirsel" = "launcher"
+"platform.hirsel" = "platform"
 
 [program]
 module = "main"
@@ -38,6 +42,8 @@ dirs = ["."]
 "session-laws.hirsel" = "runner"
 "admission-laws.hirsel" = "runner"
 "runner_wire.hirsel" = "runner_wire"
+"launcher_wire.hirsel" = "launcher"
+"platform_laws.hirsel" = "platform"
 
 [tests.runs."store@1/store/frame_size_boundary"]
 limit = 134217728
@@ -65,3 +71,6 @@ limit = 536870912
 
 [tool.workloads]
 s1 = { module = "main", grants = ["Stdout"] }
+
+[tests.runs."store@1/runner_calls/test_fixture_granted"]
+limit = 1342177280

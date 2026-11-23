@@ -16,17 +16,18 @@ type FrameLocation: shareable + send {
 // page images and blob bodies, each once by stamp (AP15). A record is
 // charged when it is added and refunded when its last incoming edge goes.
 type PageLocations: send {
-    frames: DiskIndex[FrameLocation],
-    packs: DiskIndex[PagePack],
+    frames: DiskIndex[u64, FrameLocation],
+    packs: DiskIndex[u64, PagePack],
+    members: DiskIndex[(u64, u64), ()],
     images: u64
 }
 
 fn new_page_locations() -> PageLocations {
-    PageLocations(frames: disk_index(), packs: disk_index(), images: 0)
+    PageLocations(frames: disk_index(), packs: disk_index(), members: disk_index(), images: 0)
 }
 
 fn share_page_locations(known: PageLocations) -> PageLocations {
-    PageLocations(frames: disk_index_share(known.frames), packs: disk_index_share(known.packs), images: known.images)
+    PageLocations(frames: disk_index_share(known.frames), packs: disk_index_share(known.packs), members: disk_index_share(known.members), images: known.images)
 }
 
 fn frame_charge(location: FrameLocation) -> u64 {
@@ -48,11 +49,19 @@ fn resident_location_charge(known: PageLocations) -> u64 {
 }
 
 fn location_storage_charge(known: PageLocations) -> u64 {
-    // FrameLocation is PagePtr (36), class (1), image (2) and two List headers (48).
-    // PagePack is class (1), frames (4), live (8) and payload bytes (8).
     let records = std.omap.storage_charge(known.frames.values, 8, 87)
     let packs = std.omap.storage_charge(known.packs.values, 8, 21)
-    let mut total = int.saturating_add(records, packs)
+    let members = std.omap.storage_charge(known.members.values, 16, 0)
+    int.saturating_add(int.saturating_add(records, packs), int.saturating_add(members, known.frames.payload))
+}
+
+fn scan_location_storage_charge(known: PageLocations) -> u64 {
+    // FrameLocation is PagePtr (36), class (1), image (2) and two List headers (48).
+    // PagePack is class (1), frames (4), live (8) and payload bytes (8).
+    let records = std.omap.scan_storage_charge(known.frames.values, 8, 87)
+    let packs = std.omap.scan_storage_charge(known.packs.values, 8, 21)
+    let members = std.omap.scan_storage_charge(known.members.values, 16, 0)
+    let mut total = int.saturating_add(int.saturating_add(records, packs), members)
     let root = std.omap.root(known.frames.values)
     if let Some(node) = root {
         total = int.saturating_add(total, location_edge_charge(node))
@@ -64,15 +73,27 @@ fn location_edge_charge(n: Arc[std.omap.Node[u64, FrameLocation]]) -> u64 {
     let mut total = 0u64
     for slot in 0u64 .. std.omap.node_count(n) {
         if let Some(record) = std.omap.node_value(n, slot) {
-            let outgoing = 8 * list.capacity(record.outgoing)
-            // IncomingEdge's largest payload has u8, u64, u8 and a tag.
-            let incoming = round8(18 * list.capacity(record.incoming))
-            total = int.saturating_add(total, int.saturating_add(outgoing, incoming))
+            total = int.saturating_add(total, frame_edge_charge(record))
         } else if let Some(child) = std.omap.node_child(n, slot) {
             total = int.saturating_add(total, location_edge_charge(child))
         }
     }
     total
+}
+
+fn frame_edge_charge(record: FrameLocation) -> u64 {
+    let outgoing = 8 * list.capacity(record.outgoing)
+    // IncomingEdge's largest payload has u8, u64, u8 and a tag.
+    let incoming = round8(18 * list.capacity(record.incoming))
+    int.saturating_add(outgoing, incoming)
+}
+
+fn pack_edge_charge(_pack: PagePack) -> u64 {
+    0
+}
+
+fn member_charge(_member: ()) -> u64 {
+    0
 }
 
 fn live_pack_sequences(known: PageLocations) -> List[u64] {
@@ -107,7 +128,7 @@ fn published_page_roots(known: PageLocations, roots: PageRoots) -> LocatedRoots 
 
 fn add_page_source(mut known: PageLocations, stamp: u64, source: IncomingEdge) -> Result[(), Error] {
     if stamp != 0 {
-        let changed = capacity(disk_index_update(mut known.frames, stamp, fn(mut location: FrameLocation) {
+        let changed = capacity(disk_index_update(mut known.frames, stamp, frame_edge_charge, fn(mut location: FrameLocation) {
             list.push(mut location.incoming, source)
         }))?
         if let None = changed {
@@ -124,7 +145,10 @@ fn add_location(mut known: PageLocations, ptr: std.page.PagePtr, class: u8, imag
     }
     let item = FrameLocation(place: ptr, class: class, image: image, outgoing: take outgoing, incoming: list.new())
     let charge = frame_charge(item)
-    capacity(disk_index_put(mut known.frames, ptr.stamp, take item))?
+    capacity(disk_index_put(mut known.frames, ptr.stamp, take item, frame_edge_charge))?
+    if ptr.pack != 0 {
+        capacity(disk_index_put(mut known.members, (ptr.pack, ptr.stamp), (), member_charge))?
+    }
     known.images = int.saturating_add(known.images, charge)
     Ok(())
 }
@@ -142,7 +166,7 @@ fn rebuild_page_locations(validated: ValidatedPageManifest) -> Result[PageLocati
     for (seq, pack) in validated.inventory {
         let mut loaded: PagePack = clone(pack)
         loaded.live = 0
-        capacity(disk_index_put(mut known.packs, seq, loaded))?
+        capacity(disk_index_put(mut known.packs, seq, loaded, pack_edge_charge))?
     }
     for stamp in validated.graph.postorder {
         let Some(ptr) = map.get(validated.graph.stamps, stamp) else {
@@ -151,7 +175,7 @@ fn rebuild_page_locations(validated: ValidatedPageManifest) -> Result[PageLocati
         let Some(frame) = map.get(validated.graph.frames, stamp) else {
             fail("store: missing validated frame")
         }
-        let class = option.unwrap(capacity(disk_index_update(mut known.packs, ptr.pack, fn(mut pack: PagePack) -> u8 {
+        let class = option.unwrap(capacity(disk_index_update(mut known.packs, ptr.pack, pack_edge_charge, fn(mut pack: PagePack) -> u8 {
             let width: u64 = int.widen(ptr.len)
             pack.live += width
             pack.class
@@ -187,7 +211,7 @@ fn remove_page_source(mut known: PageLocations, stamp: u64, source: IncomingEdge
     if stamp == 0 {
         return Ok(())
     }
-    let dead = capacity(disk_index_update(mut known.frames, stamp, fn(mut location: FrameLocation) -> bool {
+    let dead = capacity(disk_index_update(mut known.frames, stamp, frame_edge_charge, fn(mut location: FrameLocation) -> bool {
         for slot in 0u64 .. list.len(location.incoming) {
             if location.incoming[slot] == source {
                 let _ = list.swap_remove(mut location.incoming, slot)
@@ -197,10 +221,11 @@ fn remove_page_source(mut known: PageLocations, stamp: u64, source: IncomingEdge
         fail("store: missing incoming edge")
     }))?
     if let Some(true) = dead {
-        let location = option.unwrap(capacity(disk_index_remove(mut known.frames, stamp))?)
+        let location = option.unwrap(capacity(disk_index_remove(mut known.frames, stamp, frame_edge_charge))?)
         known.images -= frame_charge(location)
         if location.place.pack != 0 {
-            let _ = capacity(disk_index_update(mut known.packs, location.place.pack, fn(mut pack: PagePack) {
+            let _ = capacity(disk_index_remove(mut known.members, (location.place.pack, stamp), member_charge))?
+            let _ = capacity(disk_index_update(mut known.packs, location.place.pack, pack_edge_charge, fn(mut pack: PagePack) {
                 let width: u64 = int.widen(location.place.len)
                 pack.live -= width
             }))?
@@ -367,8 +392,8 @@ fn plan_tree_frames(known: PageLocations, marked: Map[u64, ()], root: Arc[std.pa
 
 fn check_page_location_closure() -> Result[(), Error] {
     let mut installed = new_page_locations()
-    capacity(disk_index_put(mut installed.packs, 1, PagePack(class: 1, frames: 1, live: 10, payload_bytes: 10)))?
-    capacity(disk_index_put(mut installed.packs, 2, PagePack(class: 0, frames: 2, live: 66, payload_bytes: 66)))?
+    capacity(disk_index_put(mut installed.packs, 1, PagePack(class: 1, frames: 1, live: 10, payload_bytes: 10), pack_edge_charge))?
+    capacity(disk_index_put(mut installed.packs, 2, PagePack(class: 0, frames: 2, live: 66, payload_bytes: 66), pack_edge_charge))?
     add_location(mut installed, std.page.PagePtr(pack: 1, offset: 72, len: 10, checksum: 1, stamp: 1), 1, 0, list.new())?
     for parent in 2u64 .. 4 {
         let mut outgoing: List[u64] = list.with_capacity(1)
@@ -408,54 +433,63 @@ fn check_page_location_closure() -> Result[(), Error] {
     Ok(())
 }
 
-type DiskIndex[T: shareable + send]: send {
-    values: std.omap.OMap[u64, T],
-    ids: u64
+type DiskIndex[K: ordered + shareable + send, T: shareable + send]: send {
+    values: std.omap.OMap[K, T],
+    ids: u64,
+    payload: u64
 }
 
-fn disk_index[T: shareable + send]() -> DiskIndex[T] {
-    DiskIndex(values: std.omap.new(), ids: 0)
+fn disk_index[K: ordered + shareable + send, T: shareable + send]() -> DiskIndex[K, T] {
+    DiskIndex(values: std.omap.new(), ids: 0, payload: 0)
 }
 
-fn disk_index_share[T: shareable + send](table_index: DiskIndex[T]) -> DiskIndex[T] {
-    DiskIndex(values: std.omap.snapshot(table_index.values), ids: table_index.ids)
+fn disk_index_share[K: ordered + shareable + send, T: shareable + send](table_index: DiskIndex[K, T]) -> DiskIndex[K, T] {
+    DiskIndex(values: std.omap.snapshot(table_index.values), ids: table_index.ids, payload: table_index.payload)
 }
 
-fn disk_index_get[T: shareable + send](table_index: DiskIndex[T], key: u64) -> Option[View[T]] in table_index {
+fn disk_index_get[K: ordered + shareable + send, T: shareable + send](table_index: DiskIndex[K, T], key: K) -> Option[View[T]] in table_index {
     std.omap.get(table_index.values, key)
 }
 
-fn disk_index_put[T: shareable + send](mut table_index: DiskIndex[T], key: u64, take value: T) -> Result[(), Capacity] {
+fn disk_index_put[K: ordered + shareable + send, T: shareable + send](mut table_index: DiskIndex[K, T], key: K, take value: T, charge: scoped[view] fn(T) -> u64) -> Result[(), Capacity] {
     // A cut edits one candidate many times. The owned insert copies a node
     // shared with the installed generation once and then edits it in place.
+    let added = charge(value)
     let held = replace(mut table_index.values, std.omap.new())
-    let (take values, _) = std.omap.insert_owned(mut table_index.ids, take held, key, take value)
+    let (take values, take old) = std.omap.insert_owned(mut table_index.ids, take held, clone(key), take value)
+    if let Some(replaced) = old {
+        table_index.payload -= charge(std.omap.replaced_value(replaced))
+    }
+    table_index.payload += added
     table_index.values = take values
     Ok(())
 }
 
-fn disk_index_update[T: shareable + send, R](mut table_index: DiskIndex[T], key: u64, body: scoped[view] fn(mut T) -> R) -> Result[Option[R], Capacity] {
+fn disk_index_update[K: ordered + shareable + send, T: shareable + send, R](mut table_index: DiskIndex[K, T], key: K, charge: scoped[view] fn(T) -> u64, body: scoped[view] fn(mut T) -> R) -> Result[Option[R], Capacity] {
     let copied_value: T = match disk_index_get(table_index, key) {
         Some(old) => clone(old),
         None => return Ok(None)
     }
     let mut value = take copied_value
     let answer = body(mut value)
-    disk_index_put(mut table_index, key, take value)?
+    disk_index_put(mut table_index, key, take value, charge)?
     Ok(Some(take answer))
 }
 
-fn disk_index_remove[T: shareable + send](mut table_index: DiskIndex[T], key: u64) -> Result[Option[T], Capacity] {
-    let copied_value: T = match disk_index_get(table_index, key) {
-        Some(old) => clone(old),
-        None => return Ok(None)
+fn disk_index_remove[K: ordered + shareable + send, T: shareable + send](mut table_index: DiskIndex[K, T], key: K, charge: scoped[view] fn(T) -> u64) -> Result[Option[T], Capacity] {
+    let (take value, removed) = {
+        let Some(old) = disk_index_get(table_index, key) else {
+            return Ok(None)
+        }
+        let copied_value: T = clone(old)
+        (take copied_value, charge(old))
     }
-    let value = take copied_value
     table_index.values = std.omap.remove(mut table_index.ids, table_index.values, key)
+    table_index.payload -= removed
     Ok(Some(take value))
 }
 
-fn disk_index_len[T: shareable + send](table_index: DiskIndex[T]) -> u64 {
+fn disk_index_len[K: ordered + shareable + send, T: shareable + send](table_index: DiskIndex[K, T]) -> u64 {
     std.omap.len(table_index.values)
 }
 

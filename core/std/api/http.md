@@ -74,6 +74,12 @@ unconsumed suffix to the next call. A `Data` result can leave framing bytes for
 the next call. `More` consumes the input and needs more bytes; `Done` preserves
 the pipelined tail. `body_eof(mut decoder)` refuses an incomplete body.
 
+`body_payload(decoder)` reports the current consecutive payload window.
+It gives `None` when framing or completion needs `decode`, and `Some(0)`
+when a close-delimited body has reached its limit and requires EOF.
+`advance_body_payload(mut decoder, n)` accounts for payload delivered
+directly into output. Call it only with a byte count within that window.
+
 Chunk lines include CRLF in their 1024-byte bound. Chunk extensions follow RFC
 9112 section 7.1.1's token and quoted-string syntax, then are discarded. Trailer
 fields follow strict head-field syntax with CRLF and share the original head's
@@ -81,3 +87,29 @@ fields follow strict head-field syntax with CRLF and share the original head's
 retains counts, not the Head or trailer values. A failure remains sticky across
 further reads and EOF, so a handler catching it cannot restore reuse. All of
 these operations allocate nothing and perform no I/O.
+
+## Multipart form data
+
+Call `std.http.multipart` with the request's Content-Type value and
+`MultipartLimits`. Pass each decoded body block to `multipart_feed`.
+For a streamed HTTP body, feed the bytes returned by `http.read`.
+Call `multipart_finish` at EOF. It requires the closing delimiter, with
+optional CRLF at EOF.
+
+The boundary is case-sensitive, may be quoted and must satisfy RFC 2046
+section 5.1.1. The parser discards preamble and epilogue. Each part needs
+one `Content-Disposition: form-data` header with a `name` parameter.
+The callback borrows ordered header fields, the name, an optional filename
+and a binary body slice. Names and filenames retain their bytes after
+quoted-pair decoding. The slice belongs to the parser until the callback
+returns. The parser keeps the current part and any pending delimiter bytes.
+It leaves content and transfer encodings for the caller.
+
+`MultipartLimits.total` includes all decoded body bytes, even preamble,
+delimiters and epilogue. `headers` counts each part's raw header block
+including its terminating empty line. `part` counts each part's payload
+bytes. Missing, oversized and malformed boundaries, a missing final
+boundary, malformed headers and the three limit overflows have typed
+errors. Each feed checks its total byte contribution before passing bytes
+to callbacks. An error is sticky. Parts delivered before an error have
+already been observed by the caller.

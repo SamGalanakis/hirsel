@@ -6,7 +6,7 @@ use rusqlite::{Connection, OpenFlags, ToSql};
 use tempfile::NamedTempFile;
 
 const APPLICATION_ID: i64 = 0x48505246;
-const HPROF_VERSION: i64 = 2;
+const HPROF_VERSION: i64 = 3;
 
 pub(crate) type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -38,6 +38,40 @@ impl ToSql for Unsigned {
             Err(_) => self.0.to_string().into(),
         })
     }
+}
+
+/// Nanoseconds in numeric sort order across SQLite's integer and text ranges.
+#[derive(Clone, Copy)]
+pub(crate) struct Timestamp(pub u64);
+
+impl FromSql for Timestamp {
+    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+        Unsigned::column_result(value).map(|Unsigned(number)| Self(number))
+    }
+}
+
+impl ToSql for Timestamp {
+    fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+        Ok(match i64::try_from(self.0) {
+            Ok(integer) => integer.into(),
+            Err(_) => format!("{:020}", self.0).into(),
+        })
+    }
+}
+
+pub(crate) fn register_elapsed(db: &Connection) -> rusqlite::Result<()> {
+    db.create_scalar_function(
+        "u64_elapsed",
+        2,
+        FunctionFlags::SQLITE_DETERMINISTIC | FunctionFlags::SQLITE_DIRECTONLY,
+        |cx| {
+            let end = cx.get::<Timestamp>(0)?.0;
+            let start = cx.get::<Timestamp>(1)?.0;
+            end.checked_sub(start).map(Timestamp).ok_or_else(|| {
+                rusqlite::Error::UserFunctionError("profile interval ends before it starts".into())
+            })
+        },
+    )
 }
 
 pub(crate) struct UnsignedSum;
@@ -139,12 +173,12 @@ impl ProfileWriter {
             for (key, value) in [
                 ("hprof_version", HPROF_VERSION as u64),
                 ("freq_hz", meta.freq_hz),
-                ("start_ns", meta.start_ns),
-                ("duration_ns", meta.duration_ns),
                 ("samples_lost", meta.samples_lost),
             ] {
                 insert.execute((key, Unsigned(value)))?;
             }
+            insert.execute(("start_ns", Timestamp(meta.start_ns)))?;
+            insert.execute(("duration_ns", Timestamp(meta.duration_ns)))?;
         }
         self.db.execute_batch(
             "INSERT INTO run_meta SELECT 'samples_total', count(*) FROM cpu_sample;
@@ -187,6 +221,8 @@ impl Profile {
                 format!("unsupported .hprof version {version}, expected {HPROF_VERSION}").into(),
             );
         }
+        register_elapsed(&db)?;
+        register_totals(&db)?;
         Ok(Self { db })
     }
 
@@ -362,7 +398,7 @@ mod tests {
         let error = Profile::open(&v1).err().unwrap();
         assert_eq!(
             error.to_string(),
-            "unsupported .hprof version 1, expected 2"
+            "unsupported .hprof version 1, expected 3"
         );
     }
 }

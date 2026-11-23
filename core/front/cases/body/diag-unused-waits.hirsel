@@ -1,0 +1,6 @@
+fn idle() -> u64 waits { 42 }
+
+// expect: refuse LANG-8 at 1:18
+// expect: compared LANG-8 at 1:18 | waits | not waits
+// expect: fix LANG-8 at 1:18 safe |
+// expect: cached

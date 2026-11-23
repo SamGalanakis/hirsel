@@ -205,6 +205,24 @@ The command validates the run and prints its commit and the reason it was
 promoted. It also accepts a clean wrapper run directory and updates
 `~/.local/share/hirsel-board/last-complete.json` atomically.
 
+## Screen two revisions on Boat
+
+The screen checks one Hirsel workload per runtime family: AWFY Bounce,
+AWFY pool/index List and LangArena CLBG::Nbody. It reports user instructions,
+stripped executable bytes and peak RSS per workload for both revisions on
+one VM. Every sample must pass the board's workload check.
+
+Prepare each revision in a clean local checkout. Use the same pinned AWFY
+and LangArena checkouts as the nightly board.
+
+```sh
+taskset -c 8-11 python3 bench/awfy/screen.py prepare "$prepared" --awfy "$awfy" --langarena "$langarena"
+taskset -c 8-11 python3 bench/awfy/screen.py run "$out" --base "$base" --candidate "$candidate" --awfy "$awfy"
+```
+
+The screen prints the table and saves it in the Boat job logs under `$out`.
+The nightly board supplies the full peer comparison.
+
 ## Run the on-demand comparisons
 
 Use a clean candidate and the pinned peer checkouts. Fetch locked Cargo
@@ -288,6 +306,15 @@ and lock. Paths to build directories may differ. Include `--pool-build` for the
 eight matched pool/index rows and `--arena-build` for the 50 LangArena rows.
 Omit `--only` to sample every row in the selected suites.
 
+When std sources change, pass `--whole-std` to both release build adapters.
+Each arm builds an explicit whole-library image from its own source manifest.
+With automatic selection, the compiler uses a whole image when the sources
+match its embedded std and can lower only reachable std bodies otherwise.
+LLVM can inline differently in the two modes. A runtime comparison with
+changed std and one compiler requires matching explicit modes. For a
+source-only comparison, pass `--source-std` to both native build commands
+and give each arm a fresh cache.
+
 ```sh
 python3 bench/awfy/receipt.py sample "$out/base-samples" --artifacts "$base_toolchain" \
   --awfy-build "$base_build" --upstream "$awfy" --cpu "$cpu" --lock "$lock" \
@@ -334,7 +361,7 @@ samples SMT sibling activity. The default uses all 60 pairs. With
 less than that busy percentage on every SMT sibling. Set `--pairs` and
 `--max-attempts` to control the sample size and attempt budget. Use `--aa`
 to measure identical builds deliberately. The command exits 0 if every
-row has enough pairs and its median cycle ratio is at most 1.01x, 1 if a
+row has enough pairs and its median cycle ratio is at most 1.03x, 1 if a
 row exceeds that ratio, or 2 if a row has too few pairs or the comparison
 is refused.
 

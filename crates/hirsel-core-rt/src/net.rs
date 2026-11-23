@@ -157,6 +157,9 @@ impl AddressOutcome {
 /// callbacks independent of a concrete TLS backend.
 pub(crate) trait SecureStream: Send {
     fn receive(&mut self, fd: i32, plaintext: &mut [u8]) -> Option<Outcome>;
+    /// RECV_READY: Some once the next receive has plaintext, end of stream
+    /// or an error to report, None while it would wait.
+    fn ready(&mut self, fd: i32) -> Option<Outcome>;
     fn send(&mut self, fd: i32, prefix: &[u8], tail: &[u8]) -> Option<Outcome>;
     fn shutdown(&mut self, fd: i32);
 }
@@ -527,6 +530,11 @@ impl OwnedNet {
                 *operand
             };
             let served = served_socket(context, key);
+            if op == RECV_READY && served.as_ref().is_some_and(crate::provide::exec_port) {
+                // ExecOp has no readiness call: a served pipe is ready at
+                // once and its receive waits (NET-1).
+                return Err(AddressOutcome::new(Outcome::default(), Address::default()));
+            }
             if op == RECV_BOUNDED && !served.as_ref().is_some_and(crate::provide::exec_port) {
                 let max = usize::try_from(max_receive).unwrap_or(usize::MAX);
                 buffer.capacity = buffer.capacity.min(buffer.len.saturating_add(max));
@@ -722,6 +730,34 @@ pub unsafe extern "C" fn hirsel_core_host_recv_bounded_rec(
     }
 }
 /// # Safety
+/// As `hirsel_core_host_recv_ready`; `word` as `returnable_op`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_host_recv_ready_rec(
+    context: *mut Context,
+    word: *mut u64,
+    key: u64,
+    until_kind: u8,
+    clock: u64,
+    deadline_ns: u64,
+    site: u64,
+) -> Outcome {
+    unsafe {
+        returnable_op(
+            context,
+            word,
+            RECV_READY,
+            key,
+            ptr::null_mut(),
+            ptr::null(),
+            0,
+            until_kind,
+            clock,
+            deadline_ns,
+            site,
+        )
+    }
+}
+/// # Safety
 /// As `hirsel_core_host_send_pair`; `word` as `returnable_op`.
 #[allow(clippy::too_many_arguments)]
 #[unsafe(no_mangle)]
@@ -801,6 +837,33 @@ pub unsafe extern "C" fn hirsel_core_host_recv_bounded(
             operand,
             ptr::null(),
             max_receive,
+            until_kind,
+            clock,
+            deadline_ns,
+            site,
+        )
+        .outcome()
+    }
+}
+/// # Safety
+/// A live read half and optional Clock designation from this run.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_host_recv_ready(
+    context: *mut Context,
+    key: u64,
+    until_kind: u8,
+    clock: u64,
+    deadline_ns: u64,
+    site: u64,
+) -> Outcome {
+    unsafe {
+        owned_op(
+            context,
+            RECV_READY,
+            key,
+            ptr::null_mut(),
+            ptr::null(),
+            0,
             until_kind,
             clock,
             deadline_ns,
@@ -945,7 +1008,7 @@ pub unsafe extern "C" fn hirsel_core_host_send_secret(
             }
             if !secret
                 .policy
-                .patterns
+                .send
                 .iter()
                 .any(|pattern| pattern.covers(&write.name))
             {
@@ -957,6 +1020,7 @@ pub unsafe extern "C" fn hirsel_core_host_send_secret(
                 origin: secret.origin,
                 policy: hirsel_core_net::SecretPolicy::exactly(&write.name),
                 bytes: secret.bytes.clone(),
+                seal: secret.seal.clone(),
             })
         };
         let bytes = match (&narrowed, &secret.bytes) {
@@ -984,7 +1048,7 @@ pub unsafe extern "C" fn hirsel_core_host_send_secret(
                 capacity: 0,
             },
             origin: secret.origin,
-            patterns: secret.policy.patterns,
+            patterns: secret.policy.send,
             committed: 0,
             narrowed,
         };

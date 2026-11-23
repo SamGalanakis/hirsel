@@ -1,25 +1,98 @@
 pub type Reply: codec + send = Value(Option[Option[u32]], u64) | Missing
 
+type Item: codec + send {
+    title: String,
+    done: bool
+}
+
+type Handles: send {
+    items: store.Table[u64, Item]
+}
+
+fn item_codec() -> std.codec.Codec[Item] {
+    std.codec.of()
+}
+
 fn packed_reply(take _arg: ()) -> Result[Reply, Capacity] {
     Ok(Value(Some(None), 9007199254740993u64))
 }
 
-fn place(mut registry: runner.Registry[(), ()]) -> Result[(), runner.RegisterError] {
-    runner.compute(mut registry, code.describe(packed_reply), 1024u64, runner.DEFAULT_STEPS)
+fn packed_rows(tx: store.Tx, h: Handles, take _arg: ()) -> Result[runner.Cover, Capacity] {
+    runner.cover(store.shape(h.items), Unbounded, Unbounded)
 }
 
-fn payload(out: Stdout) -> Result[(), Exit] waits {
+fn place(mut registry: runner.Registry[(), Handles]) -> Result[(), runner.RegisterError] {
+    runner.compute(mut registry, code.describe(packed_reply), 1024u64, runner.DEFAULT_STEPS)?
+    runner.query(mut registry, code.describe(packed_rows), std.codec.key_u64(), item_codec(), 65536u64, runner.DEFAULT_STEPS)
+}
+
+fn migrate(mut phase: store.Migration) -> Result[(), store.Error] {
+    match store.migration_create_table(mut phase, store.spec("items", std.codec.key_u64(), item_codec())) {
+        Ok(()) => Ok(()),
+        Error(Exists(_)) => Ok(()),
+        Error(take e) => Error(take e),
+    }
+}
+
+fn handles(schema: store.Schema) -> Result[Handles, store.Error] {
+    Ok(Handles(items: store.schema_table(schema, "items", std.codec.key_u64(), item_codec())?))
+}
+
+type Publisher: send {
+    head: Sender[runner.Req],
+    post: Sender[runner.PubIn]
+}
+
+fn first_batch(take publisher: Publisher) -> runner.Frame waits {
+    let Publisher(head: take head, post: take post) = take publisher
+    let owner = runner.fixture_owner(post, store.Caller(issuer: 2u8, subject: list.new()))
+    let mut key: Bytes = list.new()
+    list.append(mut key, code.identity(code.describe(packed_rows)))
+    std.codec.put_u64(result.unwrap(std.codec.fingerprint(std.codec.of_unit())), mut key)
+    let result_schema = result.unwrap(runner.query_result_schema(std.codec.key_u64(), item_codec()))
+    std.codec.put_u64(std.codec.fingerprint_of(result_schema), mut key)
+    runner.fixture_subscribe(owner, 0u32, take key, list.new())
+    let frame: runner.Frame = match result.unwrap(runner.fixture_receive(owner)) {
+        Batched(runner.KeyedBatch(version: v, complete: take complete, rows: take rows, outcomes: _)) => Batch(v, take complete, take rows, list.new()),
+        _ => fail("expected the place's initial Batch"),
+    }
+    runner.fixture_close(take owner)
+    let _ = take head
+    take frame
+}
+
+fn payload(out: Stdout, clock: Clock, random: Random, tasks: Tasks) -> Result[(), Exit] waits {
+    let mut db = store.memory(clock, random, store.defaults())
+    result.unwrap(store.create_table(mut db, store.spec("items", std.codec.key_u64(), item_codec())))
+    let items = result.unwrap(store.table(mut db, "items", std.codec.key_u64(), item_codec()))
+    match result.unwrap(store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
+        store.put(mut tx, items, 9007199254740993u64, Item(title: "crème", done: true))
+    })) {
+        Committed(_) => (),
+        _ => fail("expected the fixture row to commit"),
+    }
+    let (head, inbox): (Sender[runner.Req], Receiver[runner.Req]) = channel.new(64u64)
+    let mail = result.unwrap(runner.mailbox(8u64))
+    let job = task.spawn(tasks, bytes 1048576u64, Publisher(head: take head, post: runner.post(mail)), first_batch)
+    result.unwrap(runner.place_head(take db, code.describe(place), 1048576u64, code.describe(migrate), code.describe(handles), take inbox, take mail, tasks, 1048576u64))
+    let batch = result.unwrap(task.join(take job))
     let reply = result.unwrap(packed_reply(()))
     let codec: std.codec.Codec[Reply] = std.codec.of()
+    let mut reply_bytes: Bytes = list.new()
+    result.unwrap(std.codec.encode(codec, reply, mut reply_bytes))
     let mut encoded: Bytes = list.new()
-    result.unwrap(std.codec.encode(codec, reply, mut encoded))
+    result.unwrap(std.codec.put_with(reply_bytes, std.codec.of_bytes(), mut encoded))
+    let frame_codec: std.codec.Codec[runner.Frame] = std.codec.of()
+    result.unwrap(std.codec.encode(frame_codec, batch, mut encoded))
     match stdout.write_bytes(out, encoded) {
         Ok(()) => Ok(()),
         Error(_) => Error(Exit(status: 1))
     }
 }
 
-pub fn main(args: Args, out: Stdout) -> Result[(), Exit] waits {
-    let serve = scoped fn() -> Result[(), Exit] waits { payload(out) }
+pub fn main(args: Args, out: Stdout, clock: Clock, random: Random, tasks: Tasks) -> Result[(), Exit] waits {
+    let serve = scoped fn() -> Result[(), Exit] waits {
+        payload(out, clock, random, tasks)
+    }
     runner.launch_server(args, code.describe(place), serve)
 }

@@ -7,7 +7,7 @@ use crate::{
     provider::*,
 };
 use hirsel_core_net::{GrantRule, Name, TlsTrust, tls};
-use std::ptr;
+use std::{ptr, sync::Arc};
 
 #[repr(C)]
 pub struct TlsRequest {
@@ -27,8 +27,9 @@ const _: () = assert!(size_of::<NetworkRequest>() == 176);
 pub(crate) struct HandshakeState {
     pin: TlsTrust,
     pub name: Option<Name>,
-    pub roots: Option<rustls::RootCertStore>,
+    pub roots: Option<Arc<rustls::RootCertStore>>,
     pub alpn: Vec<Vec<u8>>,
+    pub cacheable: bool,
     pub stream: Option<crate::os_tls::Stream>,
     pub consumed: bool,
 }
@@ -295,7 +296,19 @@ unsafe fn prepare(
         }
         let alpn = protocols(view_bytes(&alpn)).ok_or_else(|| tls_failure(2, 0))?;
         let pem = if trust == 1 { bytes(roots) } else { &[] };
-        let (pin, store) = tls::trust(trust, pem).ok_or_else(|| tls_failure(3, 0))?;
+        let cacheable = pem.len() <= crate::os_tls::CACHED_PEM_BYTES;
+        let cached = if trust == 1 && cacheable {
+            (*files).tls.custom_roots(pem)
+        } else {
+            None
+        };
+        let (pin, store, remember) = match cached {
+            Some((pin, store)) => (pin, Some(store), false),
+            None => {
+                let (pin, store) = tls::trust(trust, pem).ok_or_else(|| tls_failure(3, 0))?;
+                (pin, store.map(Arc::new), cacheable)
+            }
+        };
         let grant = hirsel_core_capability_handle(context, n);
         #[cfg(feature = "record")]
         let rules = {
@@ -314,6 +327,9 @@ unsafe fn prepare(
         }) {
             return Err(DENIED);
         }
+        if remember && let Some(store) = &store {
+            (*files).tls.remember_roots(pem, pin, store.clone());
+        }
         Ok((
             address,
             provider,
@@ -322,6 +338,7 @@ unsafe fn prepare(
                 name: Some(name),
                 roots: store,
                 alpn,
+                cacheable,
                 stream: None,
                 consumed: false,
             },

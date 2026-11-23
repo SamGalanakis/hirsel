@@ -1,0 +1,17 @@
+[package]
+name = "hirsel-contain"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+contain = []
+
+[dependencies]
+libc = { version = "0.2", default-features = false }
+
+[dev-dependencies]
+hirsel-guard = { path = "../hirsel-guard" }
+tempfile = "3"

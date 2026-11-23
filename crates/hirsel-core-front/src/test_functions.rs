@@ -90,7 +90,8 @@ pub(crate) fn check(p: &mut Program<'_>) {
                         p.site(at, named.node),
                         "only another test function may name a test function",
                     );
-                    r.causal.push(p.fns[f as usize].site);
+                    r.causal
+                        .push(hirsel_core_resolve::Cause::declared(p.fns[f as usize].site));
                     p.refusals.push(r);
                 }
             }

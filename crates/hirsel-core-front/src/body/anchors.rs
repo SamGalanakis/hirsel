@@ -769,7 +769,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.refuse_from(
                     "MEM-7",
                     self.span(site),
-                    vec![cause],
+                    vec![Cause::declared(cause)],
                     "a Region opened in the callee cannot be stored in its caller's place",
                 );
                 return;
@@ -781,7 +781,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.refuse_from(
                     "OWN-11",
                     self.span(site),
-                    vec![cause],
+                    vec![Cause::declared(cause)],
                     "a value stored through a `mut` parameter may read only its original anchors",
                 );
             }

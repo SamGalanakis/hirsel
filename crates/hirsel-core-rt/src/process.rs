@@ -123,7 +123,8 @@ pub(crate) fn arm_host_parent() -> std::io::Result<()> {
     let expected = parent
         .to_str()
         .and_then(|pid| pid.parse::<libc::pid_t>().ok())
-        .filter(|pid| *pid > 1)
+        // A contained serving child has the container init as parent.
+        .filter(|pid| *pid > 0)
         .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EINVAL))?;
     // SAFETY: these calls take no memory arguments and affect only this child.
     unsafe {
@@ -241,7 +242,9 @@ pub unsafe extern "C" fn hirsel_core_describe_emit(
 ) -> bool {
     // SAFETY: the launcher pins Config and callback, and the caller pins buffer.
     unsafe {
-        if hirsel_core_launch_word(context, 5, 0) == 0 {
+        if hirsel_core_launch_word(context, 5, 0) == 0
+            && hirsel_core_launch_word(context, 12, 0) == 0
+        {
             return false;
         }
         let config = &*(*context).run;

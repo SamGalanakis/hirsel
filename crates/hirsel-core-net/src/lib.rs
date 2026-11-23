@@ -146,6 +146,31 @@ pub use secret_grant::{
 mod tests {
     use super::*;
     #[test]
+    fn secret_grant_names_destinations_only_inside_tls_send() {
+        // TLS-5: `to <patterns>` is CLI sugar for tls_send(<patterns>), so
+        // `to mac` sends to the host `mac` and grants no MAC use; a bare name
+        // is no policy; the policy is the longest suffix that parses.
+        let policy = |spec: &str| SecretGrant::parse(spec).map(|g| (g.source, g.policy));
+        let pair = |source: &str, policy: &str| Some((source.to_owned(), policy.to_owned()));
+        assert_eq!(
+            policy("Secret:k=env:V to mac"),
+            pair("env:V", "tls_send(mac)")
+        );
+        assert_eq!(
+            policy("Secret:k=env:V to ALPHA.TEST.,10.0.0.7 mac"),
+            pair("env:V", "tls_send(alpha.test,10.0.0.7) mac")
+        );
+        assert_eq!(
+            policy("Secret:k=file:/run/my mac/db wrap sign(ed25519)"),
+            pair("file:/run/my mac/db", "sign(ed25519) wrap")
+        );
+        assert_eq!(policy("Secret:k=env:V alpha.test"), None);
+        assert_eq!(
+            SecretPolicy::parse("tls_send(a.test) tls_send(b.test)"),
+            None
+        );
+    }
+    #[test]
     fn rules_intersect_directions_prefixes_ports_and_validate_boundaries() {
         let parent = Rule::parse("Connect 127.0.0.0/8 20-90").unwrap();
         let child = Rule::parse("Connect 127.0.0.0/16 80-100").unwrap();

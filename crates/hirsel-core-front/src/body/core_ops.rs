@@ -40,6 +40,7 @@ pub(crate) enum Kernel {
     SpawnUnit,
     ConnNew,
     ConnClient,
+    SecretShare,
     ConnSend,
     ConnTrySend,
     ConnReceive,
@@ -300,6 +301,7 @@ operations! {
     ("check", "xxh3_short_inline", Lane::Value, "A", "xxh3-stripes", false),
     ("check", "xxh3_stripes", Lane::Value, "A", "xxh3-stripes", false),
     ("check", "xxh3_stripe", Lane::Value, "A", "xxh3-stripes", false),
+    ("crc32c", "update", Lane::Value, "A", "crc32c-hw-1794", false),
     ("sha1", "blocks", Lane::Value, "A", "sha1-hardware", false),
     ("sha256", "blocks", Lane::Value, "A", "sha256-hardware", false),
     ("sha256", "block", Lane::Value, "A", "sha256-hardware", false),
@@ -371,6 +373,7 @@ operations! {
     ("host", "listen", Lane::Runtime(Kernel::Net(HostOp::Listen)), "B", "wire-w1a-1063", false),
     ("host", "accept", Lane::Runtime(Kernel::Net(HostOp::Accept)), "B", "wire-w1a-1063", false),
     ("host", "recv_bounded", Lane::Runtime(Kernel::Net(HostOp::RecvBounded)), "B", "wire-w1a-1063", false),
+    ("host", "recv_ready", Lane::Runtime(Kernel::Net(HostOp::RecvReady)), "B", "net-ready-wait-1776", false),
     ("host", "send_pair", Lane::Runtime(Kernel::Net(HostOp::SendPair)), "B", "wire-w1a-1063", false),
     ("stdin", "read", Lane::Runtime(Kernel::Net(HostOp::StdinRead)), "B", "stdin-env-1501", false),
     ("stdin", "is_terminal", Lane::Runtime(Kernel::StreamTerminal(0)), "B", "small-host-impl-1576", false),
@@ -391,6 +394,7 @@ operations! {
     ("secret", "scram_final_len", Lane::Runtime(Kernel::Net(HostOp::ScramFinalLen)), "B", "small-host-impl-1576", false),
     ("secret", "scram_verify", Lane::Runtime(Kernel::Net(HostOp::ScramVerify)), "B", "small-host-impl-1576", false),
     ("secret", "render", Lane::Runtime(Kernel::SecretRender), "A", "tls-t4-1447", false),
+    ("secret", "share", Lane::Runtime(Kernel::SecretShare), "B", "secret-resource-1737", false),
     ("net", "split", Lane::Runtime(Kernel::Net(HostOp::NetSplit)), "B", "wire-w1a-1063", false),
     ("net", "join", Lane::Runtime(Kernel::Net(HostOp::NetJoin)), "B", "small-host-impl-1576", false),
     ("provide", "clock", Lane::Runtime(Kernel::Provide(HostOp::ProvideClock)), "B", "provide-r8a-1533", false),
@@ -901,6 +905,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 let [handle, ..] = self.runtime_row(RtOp::ConnClient, &[Arg::Value(handle)], n)?;
                 self.runtime_carrier(result, handle, n)
             }
+            Kernel::SecretShare => {
+                let key = self.runtime_key(vals[0]?, n);
+                let [key, ..] = self.runtime_row(RtOp::SecretShare, &[Arg::Value(key)], n)?;
+                self.secret_carrier(result, key, n)
+            }
             Kernel::ConnSend | Kernel::ConnTrySend => self.runtime_conn_send(
                 kernel == Kernel::ConnSend,
                 types[0],
@@ -1107,6 +1116,16 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     fn runtime_store(&mut self, to: AddressId, steps: &[Step], ty: Ty, value: ValueId, n: NodeId) {
         let address = self.address(AddressBase::Address(to), steps, PlaceTy::Value(ty), n);
         self.inst(Inst::Store { address, value }, n);
+    }
+
+    /// A `Secret` result: a carrier holding the designation's key (TLS-5).
+    fn secret_carrier(&mut self, ty: TyId, key: ValueId, n: NodeId) -> Option<ValueId> {
+        let id = self.runtime_type(ty, n)?;
+        let to = self.new_slot(PlaceTy::Declared(id), n);
+        self.runtime_store(to, &[Step::Field(0)], Ty::Scalar(Scalar::U64), key, n);
+        let value = self.pointer(to, n);
+        self.temp(ty, Some(value));
+        Some(value)
     }
 
     fn runtime_carrier(&mut self, ty: TyId, handle: ValueId, n: NodeId) -> Option<ValueId> {
@@ -1697,6 +1716,7 @@ pub(crate) fn assert_no_ambient_input(p: &Program<'_>) {
             | Kernel::SpawnUnit
             | Kernel::ConnNew
             | Kernel::ConnClient
+            | Kernel::SecretShare
             | Kernel::ConnSend
             | Kernel::ConnTrySend
             | Kernel::ConnReceive
@@ -2708,7 +2728,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 let u8_ = Ty::Scalar(Scalar::U8);
                 let ok = self.runtime_compare(u8_, error, 0, n)?;
                 self.raise_unless(ok, value, written, n);
-                Some(value)
+                self.secret_carrier(result, value, n)
             }
             HostOp::PortReply | HostOp::PortFill => {
                 // A room refusal answers error tag 1: the requested bytes in
@@ -3697,8 +3717,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 | HostOp::DatagramSendTo
                 | HostOp::DatagramRecv
                 | HostOp::RecvBounded
+                | HostOp::RecvReady
                 | HostOp::SendPair
                 | HostOp::SendSecret
+                | HostOp::SecretNarrow
                 | HostOp::NetSplit
                 | HostOp::NetJoin
         ) {
@@ -3732,7 +3754,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     // the operation's failure edge.
                     self.consume(vals[1], n);
                 }
-                HostOp::Accept | HostOp::UnixAccept => {
+                HostOp::Accept | HostOp::UnixAccept | HostOp::RecvReady => {
                     operands.extend(self.net_until(self.p.fns[f].params[1].ty, vals[1]?, n)?)
                 }
                 HostOp::UnixConnect
@@ -3773,7 +3795,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     operands.extend(self.net_until(self.p.fns[f].params[2].ty, vals[2]?, n)?);
                 }
                 HostOp::SendSecret => {
-                    operands.extend([vals[1]?, vals[2]?, vals[3]?]);
+                    let secret = self.runtime_key(vals[2]?, n);
+                    operands.extend([vals[1]?, secret, vals[3]?]);
                     operands.extend(self.net_until(self.p.fns[f].params[4].ty, vals[4]?, n)?);
                 }
                 HostOp::SecretNarrow | HostOp::EnvNarrow => operands.push(vals[1]?),
@@ -3853,7 +3876,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             ok,
             n,
             |cx, to, ty| {
-                if policy_result
+                if op == HostOp::SecretNarrow {
+                    if let Some(at) =
+                        cx.runtime_field(to, &[Step::CaseField { case: 0, field: 0 }], ty, n)
+                    {
+                        cx.runtime_store(at, &[], u, value, n);
+                    }
+                } else if policy_result
                     || matches!(
                         op,
                         HostOp::RecvBounded
@@ -3976,8 +4005,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let mut args = vec![Arg::Value(self.runtime_key(vals[0]?, n))];
         let send = op == HostOp::ScramSha256;
         let before_until = if send { 6 } else { vals.len() };
-        for &value in &vals[1..before_until] {
-            args.push(Arg::Value(value?));
+        for (i, &value) in vals.iter().enumerate().take(before_until).skip(1) {
+            // The SCRAM exchange's `s` is a `Secret` carrier (TLS-5).
+            args.push(Arg::Value(if send && i == 1 {
+                self.runtime_key(value?, n)
+            } else {
+                value?
+            }));
         }
         if send {
             let until = self.net_until(self.p.fns[f].params[6].ty, vals[6]?, n)?;
@@ -4078,7 +4112,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             n,
             |cx, to, ty| {
                 cx.drop_field(Some(source), bytes, n);
-                cx.runtime_case_payload(to, 0, ty, Some(value), n);
+                if let Some(at) =
+                    cx.runtime_field(to, &[Step::CaseField { case: 0, field: 0 }], ty, n)
+                {
+                    cx.runtime_store(at, &[], Ty::Scalar(Scalar::U64), value, n);
+                }
             },
             |cx, to, pair| {
                 let TyKind::Tuple(fields) = cx.t.kind(pair) else {
@@ -4146,13 +4184,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         } else {
             vals[2]?
         };
+        let secret = self.runtime_key(vals[0]?, n);
         let [value, error, ..] = self.runtime_row(
             RtOp::Host(op),
-            &[
-                Arg::Value(vals[0]?),
-                Arg::Value(vals[1]?),
-                Arg::Value(third),
-            ],
+            &[Arg::Value(secret), Arg::Value(vals[1]?), Arg::Value(third)],
             n,
         )?;
         let ok = self.runtime_compare(Ty::Scalar(Scalar::U8), error, 0, n)?;

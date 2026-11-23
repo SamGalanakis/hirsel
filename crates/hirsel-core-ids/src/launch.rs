@@ -11,6 +11,8 @@ use std::{
 use std::sync::{Arc, LazyLock};
 
 pub const DEFAULT_N_PLACE: u64 = 16 * 1024 * 1024;
+/// Private platform transport for the launcher PID, image descriptor and SHA-256.
+pub const LAUNCH_IMAGE_ENV: &str = "HIRSEL_LAUNCH_IMAGE";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Executable {
@@ -58,6 +60,8 @@ pub struct Metadata {
     target: String,
     n_place: u64,
     describe: bool,
+    wake: bool,
+    idle_ms: u64,
     preview: Option<Vec<u8>>,
     preparing: Option<([u8; 16], [u8; 32])>,
 }
@@ -87,6 +91,8 @@ impl Metadata {
             target: target.into(),
             n_place,
             describe,
+            wake: false,
+            idle_ms: 0,
             preview: None,
             preparing: None,
         }
@@ -137,6 +143,20 @@ impl Metadata {
     pub fn describe(&self) -> bool {
         self.describe
     }
+    pub fn is_wake(&self) -> bool {
+        self.wake
+    }
+
+    pub fn idle_ms(&self) -> u64 {
+        self.idle_ms
+    }
+
+    pub fn with_wake(mut self, idle_ms: u64) -> Self {
+        self.wake = true;
+        self.idle_ms = idle_ms;
+        self
+    }
+
     pub fn with_preview(mut self, old: Vec<u8>) -> Self {
         self.preview = Some(old);
         self
@@ -174,6 +194,8 @@ impl Metadata {
                 .preparing
                 .as_ref()
                 .map_or(0, |(_, digest)| byte(digest)),
+            12 => u64::from(self.wake),
+            13 => self.idle_ms,
             _ => 0,
         }
     }

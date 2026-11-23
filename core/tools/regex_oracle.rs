@@ -381,8 +381,8 @@ fn show_groups(mut out: String, g: Groups, n: u64) -> Result[(), Capacity] {
 }
 
 fn observe_match(re: Regex, s: String, at: u64, budget: u64, mut out: String) -> Result[(), Capacity] {
-    let mut c = cache(re, budget)?
-    let mut g = groups(re)?
+    let mut c = cache(re, budget)
+    let mut g = groups(re)
     string.push(mut out, if is_match(re, mut c, s, at) { "y" } else { "n" })
     let m = find(re, mut c, s, at)
     show_span(mut out, m)?
@@ -418,7 +418,7 @@ fn observe_match(re: Regex, s: String, at: u64, budget: u64, mut out: String) ->
         i += 1
     }
     string.push(mut out, "|")
-    string.push_u64(mut out, count(re, mut c, s))
+    Ok(string.push_u64(mut out, count(re, mut c, s)))
 }
 
 fn oracle_match(pattern: String, s: String, at: u64, n: u64, expected: String) -> bool {
@@ -670,7 +670,7 @@ fn oracle_log_count(p: String, expected: u64) -> bool {
             let log = oracle_log()
             let budgets: Inline[u64, 2] = [1048576, 0]
             for budget in budgets {
-                let mut c = result.unwrap(cache(re, budget))
+                let mut c = cache(re, budget)
                 if count(re, mut c, log) != expected {
                     return false
                 }

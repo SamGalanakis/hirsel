@@ -1,0 +1,13 @@
+[package]
+name = "objstore-ceiling"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+io-uring = "0.7"
+libc = "=0.2.190"
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
+rustls = { version = "=0.23.46", default-features = false, features = ["std", "ring", "aws_lc_rs"] }

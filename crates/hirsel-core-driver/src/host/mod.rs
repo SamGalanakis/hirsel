@@ -3,7 +3,7 @@ mod child;
 #[cfg(test)]
 pub(crate) use child::terminal_fixture;
 mod recording;
-mod records;
+pub(crate) mod records;
 
 pub(crate) use recording::replay;
 
@@ -15,26 +15,18 @@ use crate::{
         NativeSemantics, ObjectKey, ReleaseLease, send_release,
     },
     code_store::{CodeStore, ObjectKind},
-    native::recipe_build::{
-        foreign_grant_lines, foreign_grant_refusal, foreign_recording_refusal, parse_root,
-    },
+    native::recipe_build::{foreign_grant_refusal, foreign_recording_refusal, parse_root},
     sdk::{Describe, Reader},
 };
 use hirsel_core_ids::ContentHash;
-use hirsel_core_ir::{
-    decode::DecodeBudget,
-    release_recipe::{GrantKind, Recipe},
-};
+use hirsel_core_ir::release_recipe::{GrantKind, Recipe};
 use records::{Active, Attempt, Deploy, Records, State};
 use std::{
     collections::{BTreeSet, VecDeque},
-    fs::{self, DirBuilder, File, Permissions},
+    fs::{self, File},
     io::{self, Read, Write},
     net::TcpListener,
-    os::unix::{
-        fs::{DirBuilderExt, PermissionsExt},
-        net::{UnixListener, UnixStream},
-    },
+    os::unix::net::UnixStream,
     path::{Path, PathBuf},
     process::Command,
     time::{Duration, Instant},
@@ -44,37 +36,8 @@ type Error = Box<dyn std::error::Error>;
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 const DEPLOY_TIMEOUT: Duration = Duration::from_secs(120);
 
-fn read_recipe(code: &CodeStore, root: ContentHash, max: usize) -> io::Result<Recipe> {
-    let max = max as u64;
-    let mut bytes = Vec::new();
-    code.open(ObjectKind::Recipe, root)?
-        .take(max.saturating_add(1))
-        .read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > max || Recipe::hash(&bytes) != root {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "stored recipe hash or length",
-        ));
-    }
-    Ok(Recipe::decode_retained(
-        &bytes,
-        &mut DecodeBudget::unlimited(),
-    )?)
-}
-
-fn limits() -> AdmissionLimits {
-    AdmissionLimits {
-        recipe_bytes: 16 << 20,
-        closure_objects: 196_608,
-        object_bytes: 512 << 20,
-        decoded_bytes: 2 << 30,
-        members: 65_536,
-        edges: 4 << 20,
-        nesting: 512,
-        outstanding: 196_608,
-        timeout: Some(Duration::from_secs(20)),
-    }
-}
+use crate::launcher::{bind_control, deploy_foreign_lines, grants_added, private_dir};
+pub(crate) use crate::launcher::{limits, read_recipe};
 
 pub(crate) fn run(invocation: Invocation) -> Result<i32, Error> {
     let root = parse_root(
@@ -324,22 +287,6 @@ pub(crate) fn run(invocation: Invocation) -> Result<i32, Error> {
     }
 }
 
-fn private_dir(path: PathBuf) -> io::Result<PathBuf> {
-    match DirBuilder::new().mode(0o700).create(&path) {
-        Ok(()) => (),
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => (),
-        Err(error) => return Err(error),
-    }
-    let meta = fs::symlink_metadata(&path)?;
-    if !meta.is_dir() || meta.permissions().mode() & 0o077 != 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "host directory must be private",
-        ));
-    }
-    path.canonicalize()
-}
-
 fn reset_staging(path: &Path) -> io::Result<()> {
     match fs::remove_dir_all(path) {
         Ok(()) => (),
@@ -347,20 +294,6 @@ fn reset_staging(path: &Path) -> io::Result<()> {
         Err(error) => return Err(error),
     }
     fs::create_dir(path)
-}
-
-fn bind_control(path: &Path) -> io::Result<UnixListener> {
-    use std::os::unix::fs::FileTypeExt;
-    if let Ok(meta) = fs::symlink_metadata(path) {
-        if !meta.file_type().is_socket() || UnixStream::connect(path).is_ok() {
-            return Err(io::ErrorKind::AddrInUse.into());
-        }
-        fs::remove_file(path)?;
-    }
-    let listener = UnixListener::bind(path)?;
-    fs::set_permissions(path, Permissions::from_mode(0o600))?;
-    listener.set_nonblocking(true)?;
-    Ok(listener)
 }
 
 fn bind_listener(address: &str) -> io::Result<TcpListener> {
@@ -551,6 +484,7 @@ impl Host {
                 self.recording.is_some(),
                 Some(&BTreeSet::new()),
                 Some((&BTreeSet::new(), &self.workdir)),
+                None,
             );
             if let Err(AdmissionError::RecordingForeign(reason) | AdmissionError::Refused(reason)) =
                 &admitted
@@ -974,6 +908,7 @@ impl Host {
             self.recording.is_some(),
             Some(&approved),
             Some((&exec, &self.workdir)),
+            None,
         ) {
             Ok(admitted) => admitted,
             Err(error) => {
@@ -1430,25 +1365,6 @@ fn write_frame(peer: &mut UnixStream, value: &[u8]) -> io::Result<()> {
     let size = u32::try_from(value.len()).map_err(|_| io::ErrorKind::InvalidInput)?;
     peer.write_all(&size.to_le_bytes())?;
     peer.write_all(value)
-}
-
-fn deploy_foreign_lines(recipe: &Recipe, root: ContentHash) -> String {
-    let mut output = String::new();
-    for line in foreign_grant_lines(recipe, root) {
-        output.push_str(&line);
-        output.push('\n');
-    }
-    output
-}
-
-fn grants_added(old: &Recipe, new: &Recipe) -> bool {
-    new.launch.grants.iter().any(|grant| {
-        !old.launch.grants.iter().any(|current| {
-            current.kind == grant.kind
-                && current.policy == grant.policy
-                && grant.values.iter().all(|v| current.values.contains(v))
-        })
-    })
 }
 
 fn attempt() -> io::Result<Attempt> {

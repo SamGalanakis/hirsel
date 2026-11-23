@@ -6,7 +6,7 @@
    Stdout 12, Stderr 13, Rename 14, SleepUntil 15, Sync 16, SyncDir 17, Random 18,
    Connect 19, Listen 20, Accept 21, SendPair 26, RecvBounded 27, Stopped 28.
    ReadAt 37, WriteAt 38, Resolve 40, OpenDir 43, Entries 44, NextEntries 45,
-   Stat 46, StatFile 47, CloseEntries 48, SleepUntilWall 77. Positioned requests carry an eight-byte little-endian
+   Stat 46, StatFile 47, CloseEntries 48, SleepUntilWall 77, RecvReady 78. Positioned requests carry an eight-byte little-endian
    offset in path and the original open mode in mode.
    Open modes: Read 0, Write 1, Append 2, CreateNew 3, ReadWrite 4. */
 typedef struct { uint8_t tag; uint32_t code; } HirselCoreIoError;
@@ -248,6 +248,12 @@ HirselCoreAddressOutcome hirsel_core_host_accept(HirselCoreContext *, uint64_t, 
 /* RECV_BOUNDED (27): max_receive clips the request buffer's writable spare
    capacity. The caller's carrier publishes only the delivered length. */
 HirselCoreHostOutcome hirsel_core_host_recv_bounded(HirselCoreContext *, uint64_t, HirselCoreBuffer *, uint64_t max_receive, uint8_t, uint64_t, uint64_t, uint64_t);
+/* RECV_READY (78): no buffer. Completes with status 0 once the read half's
+   next receive has bytes, end of stream or an error to report, and consumes
+   none of them; TimedOut (6) at the deadline. A provider may complete it
+   early (the following receive then waits). Issue and delivery pass the
+   replay point as RECV_BOUNDED's do. */
+HirselCoreHostOutcome hirsel_core_host_recv_ready(HirselCoreContext *, uint64_t, uint8_t, uint64_t, uint64_t, uint64_t);
 /* STDIN_READ (32): append at most the caller's existing spare capacity. */
 HirselCoreHostOutcome hirsel_core_stdin_read(HirselCoreContext *, uint64_t, HirselCoreBuffer *, uint8_t, uint64_t, uint64_t, uint64_t);
 /* Env get and name return a borrowed carrier address in Outcome.value (zero for None). */

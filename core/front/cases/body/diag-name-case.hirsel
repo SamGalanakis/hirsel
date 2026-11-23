@@ -1,0 +1,6 @@
+fn length(xs: List[u64]) -> u64 {
+    list.LEN(xs)
+}
+
+// expect: refuse LANG-7 at 2:5
+// expect: first-fix LANG-7 at 2:5 maybe | len | pub fn len[T](xs: List[T]) -> u64

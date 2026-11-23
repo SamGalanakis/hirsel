@@ -166,8 +166,10 @@ pub fn net_op(c: Call[NetOp]) -> NetOp {
         SendDatagram(datagram: a, len: b)
     } else if t == 16 {
         SendTo(datagram: a, root: b, path: d, len: e)
-    } else {
+    } else if t == 17 {
         RecvDatagram(datagram: a, room: b)
+    } else {
+        Ready(socket: a)
     }
 }
 

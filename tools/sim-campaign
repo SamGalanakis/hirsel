@@ -1,0 +1,216 @@
+#!/usr/bin/env python3
+"""Run disjoint sim.world seed ranges on Boat using a prebuilt Hirsel test.
+
+Dispatch exits 0 for a complete passing campaign, 1 for failing seeds, and 2
+for an incomplete campaign or dispatch error. A batch denied a spare start
+exits 75. Call dispatch directly when its verdict determines the caller's status.
+"""
+import argparse
+from bisect import bisect_right
+from contextlib import closing
+import json
+import os
+from pathlib import Path
+import shlex
+import shutil
+import sqlite3
+import subprocess
+import sys
+import tempfile
+
+
+def allocate(db, campaign, shards, count):
+    return allocate_ranges(db, campaign, ((None, count),) * shards)
+
+
+def allocate_ranges(db, campaign, laws):
+    db.execute("""CREATE TABLE IF NOT EXISTS shards (
+        campaign TEXT, shard INTEGER, first_seed INTEGER, stop_seed INTEGER,
+        executed INTEGER NOT NULL DEFAULT 0, failed INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (campaign, shard)
+    )""")
+    db.execute("""CREATE TABLE IF NOT EXISTS shard_laws (
+        campaign TEXT, shard INTEGER, law TEXT NOT NULL,
+        PRIMARY KEY (campaign, shard),
+        FOREIGN KEY (campaign, shard) REFERENCES shards (campaign, shard)
+    )""")
+    with db:
+        db.execute("BEGIN IMMEDIATE")
+        first = db.execute("SELECT coalesce(max(stop_seed), 1) FROM shards").fetchone()[0]
+        ranges = []
+        for shard, (law, count) in enumerate(laws):
+            stop = first + count
+            db.execute("INSERT INTO shards (campaign, shard, first_seed, stop_seed) VALUES (?, ?, ?, ?)",
+                       (campaign, shard, first, stop))
+            if law is not None:
+                db.execute("INSERT INTO shard_laws VALUES (?, ?, ?)", (campaign, shard, law))
+            ranges.append((first, stop))
+            first = stop
+    return ranges
+
+
+def run_shard(executable, start, stop):
+    for seed in range(start, stop):
+        with tempfile.TemporaryDirectory(prefix="hirsel-sim-") as directory:
+            ran = subprocess.run([executable], cwd=directory, stdin=subprocess.DEVNULL,
+                                 env={"HIRSEL_TEST_SIM_SEED": str(seed)}, capture_output=True)
+        print(json.dumps({"seed": seed, "status": ran.returncode,
+                          "stdout": ran.stdout.decode(errors="replace"),
+                          "stderr": ran.stderr.decode(errors="replace"),
+                          "replay": shlex.join([sys.argv[0], "run", str(executable),
+                                                str(seed), str(seed + 1)])}), flush=True)
+
+
+def record(db, campaign, ranges, output, results, executable, laws=None):
+    observed = {}
+    malformed = False
+    stops = [stop for _, stop in ranges]
+    for line in output:
+        try:
+            row = json.loads(line)
+            seed, status = row["seed"], row["status"]
+            if (type(seed) is not int or type(status) is not int or seed in observed
+                    or not ranges[0][0] <= seed < ranges[-1][1]):
+                raise ValueError("unexpected seed result")
+        except (ValueError, KeyError, TypeError):
+            malformed = True
+            print(line, end="", file=sys.stderr)
+            continue
+        if laws is not None:
+            row["law"], executable, _ = laws[bisect_right(stops, seed)]
+        row["replay"] = shlex.join([str(Path(__file__).resolve()), "run", str(executable),
+                                    str(seed), str(seed + 1)])
+        print(json.dumps(row), file=results, flush=True)
+        observed[seed] = status
+    with db:
+        for shard, (start, stop) in enumerate(ranges):
+            statuses = [observed[seed] for seed in range(start, stop) if seed in observed]
+            db.execute("UPDATE shards SET executed = ?, failed = ? WHERE campaign = ? AND shard = ?",
+                       (len(statuses), sum(status != 0 for status in statuses), campaign, shard))
+    complete = not malformed and len(observed) == ranges[-1][1] - ranges[0][0]
+    return complete, sum(status != 0 for status in observed.values())
+
+
+def dispatch(args):
+    executable = local_executable(args.executable)
+    return dispatch_campaign(args, executable)
+
+
+def local_executable(path):
+    executable = path.resolve(strict=True)
+    if not executable.is_file() or not os.access(executable, os.X_OK):
+        raise ValueError(f"expected a locally built executable: {executable}")
+    return executable
+
+
+def dispatch_campaign(args, executable=None, laws=None):
+    script = Path(__file__).resolve()
+    with (closing(sqlite3.connect(args.ledger)) as db,
+          tempfile.TemporaryDirectory(prefix="sim-campaign-", dir=Path.cwd()) as directory,
+          args.results.open("x") as results):
+        root = Path(directory)
+        bundle = root / "bundle"
+        bundle.mkdir()
+        shutil.copy2(script, bundle / "sim-campaign")
+        if laws is None:
+            ranges = allocate(db, args.campaign, args.shards, args.seeds_per_shard)
+            shutil.copy2(executable, bundle / "law")
+            jobs = [{"lane": f"vopr-{args.campaign}-{shard}", "bundle": "bundle",
+                     "seconds": args.shard_seconds,
+                     "command": f"./sim-campaign run ./law {start} {stop}"}
+                    for shard, (start, stop) in enumerate(ranges)]
+        else:
+            ranges = allocate_ranges(db, args.campaign, [(law, count) for law, _, count in laws])
+            remote = []
+            for index, ((_, binary, _), (start, stop)) in enumerate(zip(laws, ranges, strict=True)):
+                name = f"law-{index}"
+                shutil.copy2(binary, bundle / name)
+                remote.append((name, start, stop))
+            (bundle / "ranges.json").write_text(json.dumps(remote))
+            jobs = [{"lane": f"vopr-{args.campaign}", "bundle": "bundle", "seconds": 900,
+                     "command": "./sim-campaign run-batch ranges.json"}]
+        manifest = root / "shards.json"
+        manifest.write_text(json.dumps(jobs))
+        command = [args.dispatcher, "--job-class", "vopr", "--manifest", manifest]
+        with subprocess.Popen(command, stdout=subprocess.PIPE, text=True) as boat:
+            complete, failed = record(db, args.campaign, ranges, boat.stdout, results, executable, laws)
+            status = boat.wait()
+    if laws is not None and status == os.EX_TEMPFAIL:
+        return status
+    if status:
+        print(f"sim-campaign: Boat dispatcher exited {status}", file=sys.stderr)
+        return 2
+    if not complete:
+        print("sim-campaign: dispatch did not deliver every reserved result", file=sys.stderr)
+        return 2
+    return int(failed > 0)
+
+
+def positive(value):
+    number = int(value)
+    if number < 1:
+        raise argparse.ArgumentTypeError("expected a positive integer")
+    return number
+
+
+def read_laws(path):
+    entries = json.loads(path.read_text())
+    if not isinstance(entries, list) or not entries:
+        raise ValueError("expected a nonempty campaign manifest")
+    laws = []
+    names = set()
+    for entry in entries:
+        law, binary, count = entry["law"], entry["executable"], entry["seeds"]
+        if not isinstance(law, str) or not law or law in names or type(count) is not int or count < 1:
+            raise ValueError(f"invalid campaign law: {entry!r}")
+        laws.append((law, local_executable(path.parent / binary), count))
+        names.add(law)
+    return laws
+
+
+def dispatch_arguments(parser):
+    parser.add_argument("campaign")
+    parser.add_argument("--ledger", type=Path, required=True)
+    parser.add_argument("--results", type=Path, required=True)
+    parser.add_argument("--dispatcher", type=Path, default=Path(__file__).with_name("boat-dispatch"))
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest="command", required=True)
+    run = commands.add_parser("run", help="run a half-open range on a prebuilt test")
+    run.add_argument("executable", type=Path)
+    run.add_argument("start", type=int)
+    run.add_argument("stop", type=int)
+    remote = commands.add_parser("run-batch", help="run prepared ranges inside one VM")
+    remote.add_argument("ranges", type=Path)
+    campaign = commands.add_parser("dispatch", help="reserve ranges and dispatch a campaign")
+    dispatch_arguments(campaign)
+    campaign.add_argument("executable", type=Path)
+    campaign.add_argument("--shards", type=positive, required=True)
+    campaign.add_argument("--seeds-per-shard", type=positive, required=True)
+    campaign.add_argument("--shard-seconds", type=positive, required=True)
+    batch = commands.add_parser("batch", help="reserve a range per law and dispatch on one spare start")
+    dispatch_arguments(batch)
+    batch.add_argument("manifest", type=Path, help="JSON array of law, executable and seeds")
+    args = parser.parse_args()
+    try:
+        if args.command == "run":
+            if not 0 <= args.start < args.stop <= 2**64:
+                parser.error("expected a nonempty u64 seed range")
+            run_shard(args.executable.resolve(strict=True), args.start, args.stop)
+            return 0
+        if args.command == "run-batch":
+            for executable, start, stop in json.loads(args.ranges.read_text()):
+                run_shard(local_executable(args.ranges.parent / executable), start, stop)
+            return 0
+        if args.command == "batch":
+            return dispatch_campaign(args, laws=read_laws(args.manifest))
+        return dispatch(args)
+    except (OSError, OverflowError, TypeError, KeyError, ValueError, sqlite3.Error) as error:
+        print(f"sim-campaign: {error}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

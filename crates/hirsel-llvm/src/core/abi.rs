@@ -515,6 +515,11 @@ impl FunctionEmitter<'_> {
         self.return_abi_values(&returned);
     }
     pub(super) fn return_failure(&mut self) {
+        if !self.to_raised_exit() {
+            self.emit_failure_return();
+        }
+    }
+    pub(super) fn emit_failure_return(&mut self) {
         let abi_ty = self.abi.ty.clone();
         if self.abi.fields.len() == 1 {
             self.ret(&abi_ty, &int(1));

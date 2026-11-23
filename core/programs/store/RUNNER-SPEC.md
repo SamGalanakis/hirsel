@@ -1,4 +1,4 @@
-# RUNNER-SPEC v2.27: entries, calls, sessions, subscriptions and operation of a place (lane runner-spec-1020)
+# RUNNER-SPEC v2.28: entries, calls, sessions, subscriptions and operation of a place (lane runner-spec-1020)
 
 **Tree:** `62f15988b85ca4afdb6d37e0ff324d9072274615` (detached), 18 crates. The checker was rebuilt there (BUILD SUCCEEDED). Every v2.2 probe was checked and run on it. **v2.3** adds R0's built figures (runner-build-1033, landed bf7cf64f, measured there and at 71b306f0) and three probes run at 62f15988 (p19 split and few-registration variants).
 
@@ -22,9 +22,22 @@ Evidence marks:
 
 The v2.2 and v2.3 texts are RUNNER-SPEC-v2.2.md and RUNNER-SPEC-v2.3.md. **v2.4** rules on R1's five gaps (runner-build-1033, followups.md 2026-11-16 "R1 gaps") against STORE-SPEC v2.9 and REPLAY-SPEC v2.1, by reading; no model behaviour changed, so no model was re-run. Models are in `models/`, their outputs in `models/evidence/`. Probes are in `programs/`, their outcomes in `probes.txt`. The v2 and v2.1 change tables are in CHANGES-HISTORY.md, and the v2.1 text is RUNNER-SPEC-v2.1.md.
 
+## CHANGES-v2.27.1 (the place fixture is built; lane clock-fixture-1738)
+
+§12.3's fixture is built as the module `fixture` (fixture.hirsel). The text now states the signatures as built. `test_fixture_granted` in runner_calls.hirsel **RUN**s it natively: a Caller-bearing transact, a granted entry with `wire` set, and the same entry `Refused(NotAllowed)` without it. The evaluator path still waits on W8a. **UNTESTED**: `subscribe`, `seen_at`, `status`, every `Deadline` path and dropping a `Fixture` without `end`.
+
+| # | Point | Decision | What v2.27.1 says | Basis |
+|---|---|---|---|---|
+| 1 | The test-side handle | **DECIDED (brief clock-fixture-1738)** | `Caller` is renamed `Client` and `caller` is renamed `client`, so the name no longer collides with `runner.Caller`, the principal that entries receive | §12.3 |
+| 2 | Typed entries | **AS BUILT** | `transact_entry` takes the registry's Caller-bearing signature `fn(mut store.Tx, H, Caller, take A) -> Result[R, E]`. `granted_entry` is in the API block. Every key comes from `runner.attempt_key` over the codecs that registration fingerprints | §12.3 |
+| 3 | Not `send` | **AS BUILT** | `Fixture` and `Client` own task handles, which are not `send` (CONC-2), as `places.Directory` does | §12.3 |
+| 4 | The client's credential | **DECIDED here; reversible** | `client` takes the Hello token. Without one, a place whose `wire` binds a credential gives the session no Caller | §12.3 |
+| 5 | Query entries | **AS BUILT** | A query `Callee` is `Callee[A, ()]`. Its described result encodes the ordered key and current value schemas, and its rows arrive in Batches. | §12.3 |
+| 6 | Start's allowance and an idle client at end | **AS BUILT** | `start` returns `Full` when the root allowance cannot hold the place (a Memory or Temp place needs about 1.1 GiB). A client left open at `end` makes the result `Forced` at the grace deadline | §12.3 |
+
 ## CHANGES-v2.27 (amendments to v2.26 from astra's attack, platform-spec-attack-1748/REPORT.md; lane platform-spec-amend-1755)
 
-astra attacked v2.26 and ruled "amend first". This first part amends the rules that lanes P1 (idle stop) and P2 (trigger scan) are building now: findings 8, 3 and 6. Text only, **unbuilt**; every changed law is **UNTESTED**.
+This part answers findings 8, 3 and 6 of the v2.26 review. P1's idle stop, startup stop and child report are built. The native `core-runner-r1` checks cover L44, the pre-Ready stop and the child part of L42.
 
 | # | Finding | Decision | What v2.27 says | Basis |
 |---|---|---|---|---|
@@ -46,7 +59,7 @@ astra attacked v2.26 and ruled "amend first". This first part amends the rules t
 
 ## CHANGES-v2.26 (cold places under the platform host: the wake row, the idle stop, the clean report and the deploy trigger scan; lane platform-host-spec-1741)
 
-Agent Platform 2027 (ratified 2026-11-22, Topics 2 and 3) runs places cold by default under a Hirsel platform host (docs/spec/launch.md "Platform host and launcher"). §13.5 said an unloaded place is not woken for a trigger. That rule is reopened for platform places in a new §14. Text only, **unbuilt**; every new law is **UNTESTED**.
+Agent Platform 2027 (ratified 2026-11-22, Topics 2 and 3) runs places cold by default under a Hirsel platform host (docs/spec/launch.md "Platform host and launcher"). §13.5 said an unloaded place is not woken for a trigger. That rule is reopened for platform places in §14, which records the implementation status.
 
 | # | Point | Decision | What v2.26 says | Basis |
 |---|---|---|---|---|
@@ -263,7 +276,7 @@ v2.15 adds §12 for gap study 1117's items 1, 2 and 5 (`GAPS.md` from gap-study-
 | 5 | Manifest | **NEW; extends D1** | Written by `hirsel build --manifest`, from the preview launch with an empty old list, so there is no second entry list and no second hash. | §12.2; launch.md |
 | 6 | Preview | **NEW** | The new executable answers the old entry list with the session's own `Placed` function. Schema readiness is reported as unknown. It is advisory (ENDSTATE: no deploy gate). | §12.2 |
 | 7 | Confirmation | **NEW** | `hirsel confirm` reads the status route and compares the identity and `release_digest`. | §12.2 |
-| 8 | Fixture | **NEW** | `runner.fixture` runs `operate` over the wire path, with typed calls, durable replies, `seen_at`, relative bounds on the place's clock and full release. It is native-only until W8a. | §12.3; DECISIONS 2026-11-17 |
+| 8 | Fixture | **NEW** | The `fixture` module runs `operate` over the wire path, with typed calls, durable replies, `seen_at`, relative bounds on the place's clock and full release. It is native-only until W8a. | §12.3; DECISIONS 2026-11-17 |
 | 9 | Laws | **NEW O26–O35** | §8. The service-operations brief uses L26–L35 for these laws. | — |
 
 **Decision log.**
@@ -574,7 +587,7 @@ STORE-SPEC is at v2.8: nothing in v2.8 changes the runner. The pending v2.9 item
    - **query_as:** `fn(Tx, H, Caller, take A) -> Result[Cover, Capacity]`, caller-dependent: the body receives the subscribing session's Caller at subscribe, at every rerun and at repair (v2.25). Both query kinds are read-only by type: a view `Tx` cannot `put` (OWN-5, RUN p18 `query_writes`). A query that reads the Caller must be registered with `query_as`, and its type makes `query` refuse it;
    - **granted:** `fn(G, Caller, take A) -> Result[R, Capacity] waits`, only in a `Registry[G, H]` (v2.24: the Caller). Over the wire only when the place has a `Wire[G]`, which needs `G: plain + send`; each call runs with its own copy of `G` (rule 13, CHANGES-v2.24).
    - `H: send` is the place's handles (its Tables and Indexes), passed by view, so an entry cannot keep it (RUN p18). A, R and E are `codec`. PROG-9 refuses a generic function.
-3. **Key** = `code.identity(f) ++ fingerprint(A) ++ fingerprint(R)`. **A key is registered at most once** (§1.2).
+3. **Key** = `code.identity(f) ++ fingerprint(A) ++ fingerprint(result)`. For a query, the result bytes encode the ordered key schema followed by the current value schema as two length-prefixed Bytes. **A key is registered at most once** (§1.2).
 4. **One generic adapter per kind.** It decodes the argument, calls the body and encodes the result inside `bound bytes n` + `isolate`. The codecs come from `std.codec.of`. The encode is inside both because R is app data with no size bound and its codec may run app code (`via`); outside, a large R faults the caller's task instead of giving that call `Failed(OutOfBytes)`. Built cost: +696 instr per call (v2.3).
 5. **Every send ends in exactly one Outcome on the wire** (§1.3, §2 V1–V5). A send is one `Call` frame the session reads; two `Call` frames for one `(stream, p)` on one session are two sends, even when the second arrives before the first's Outcome (a local join, V2). A send's one Outcome is a V1 refusal at arrival, its own `Abandoned` at its own deadline, or the head's answer if the send is still owed when that answer arrives. A head answer for a position with no owed send goes to no one. A send whose session ends (crash, `Close`, exit) has no Outcome; the client's send after reconnecting is a new send (v2.5). The session refuses a malformed key or argument, a budget it cannot grant, an expired request and a full slot table before forwarding, so those refusals record nothing.
 6. **One worker per stream** (H1–H4). Within one open, the head runs at most one call per `(caller key ‖ stream)` (v2.15: the caller key, not the principal). Across opens, LOCK gives a single opener.
@@ -627,8 +640,8 @@ pub const DEFAULT_STEPS: u64 = 1 << 30
 pub const DONE_MAX: u64 = 8192         // v2.11: an encoded `Done` row's bound (§1.3)
 pub fn compute[G: send, H: send, A: codec, R: codec](mut r: Registry[G, H], f: StaticFn[fn(take A) -> Result[R, Capacity]], n: u64, s: u64) -> Result[(), RegisterError]
 pub fn transact[G: send, H: send, A: codec, R: codec, E: codec](mut r: Registry[G, H], f: StaticFn[fn(mut Tx, H, Caller, take A) -> Result[R, E]], n: u64, s: u64) -> Result[(), RegisterError]
-pub fn query[G: send, H: send, A: codec](mut r: Registry[G, H], f: StaticFn[fn(Tx, H, take A) -> Result[Cover, Capacity]], n: u64, s: u64) -> Result[(), RegisterError]
-pub fn query_as[G: send, H: send, A: codec](mut r: Registry[G, H], f: StaticFn[fn(Tx, H, Caller, take A) -> Result[Cover, Capacity]], n: u64, s: u64) -> Result[(), RegisterError]   // v2.25: the Caller
+pub fn query[G: send, H: send, A: codec, K, V](mut r: Registry[G, H], f: StaticFn[fn(Tx, H, take A) -> Result[Cover, Capacity]], key: Key[K], value: Codec[V], n: u64, s: u64) -> Result[(), RegisterError]
+pub fn query_as[G: send, H: send, A: codec, K, V](mut r: Registry[G, H], f: StaticFn[fn(Tx, H, Caller, take A) -> Result[Cover, Capacity]], key: Key[K], value: Codec[V], n: u64, s: u64) -> Result[(), RegisterError]
 pub fn caller_key(c: Caller, mut out: Bytes) -> Result[(), Capacity]   // v2.15: u8 issuer ‖ u8 len ‖ subject
 pub fn granted[G: send, H: send, A: codec, R: codec](mut r: Registry[G, H], f: StaticFn[fn(G, Caller, take A) -> Result[R, Capacity] waits], n: u64, s: u64) -> Result[(), RegisterError]   // v2.24: the Caller
 pub opaque type Wire[G: send]: send   // v2.24: the place's wire grant and its Caller binding; made only by `wire`, whose bound is the guarantee
@@ -772,7 +785,7 @@ The budget `n` is set per entry by the place at registration, never by the clien
     - Its events are: client frames from the reader; Batches from the publisher (by `try_send`; the publisher never waits on a session); `Sent` and `Ended` from the children; and deadline expiries.
     - It decides every protocol step: V1, the slot table, owed sends, and the control frames first in its outgoing queue.
     - It hands the writer the next frame by `try_send`, only after `Sent`, so it never waits on the writer.
-  - **Reader** child: it owns the `ReadHalf`, refills fixed scratch, and sends decoded frames to the inbox. The shared allocation task parses the scratch and decodes application frames before returning both by move. When the inbox is full it waits, which stops reading the socket and pushes back on the client.
+  - **Reader** child: it owns the `ReadHalf` and holds no receive buffer while idle. It waits for readiness with no buffer, checks out an 8192-byte loan charged to itself for one receive (`std.wsock.refill`), and sends decoded frames to the inbox. The shared allocation task parses the loan and decodes application frames before returning both by move. Before it waits for read credit, the reader settles: a loan with unread read-ahead becomes storage of exactly the unread tail, charged to the reader, and a loan with nothing unread is released. When the inbox is full it waits, which stops reading the socket and pushes back on the client.
   - **Writer** child (v2.19): it owns the `WriteHalf`, the pending byte cursor, a handle to the place's round register and a handle to its session's fence root (§3 "The release check"). It takes one unit from a capacity-1 channel. After it takes the unit and before the unit's first byte, it applies the release check. If the unit passes, the writer writes it whole and reports `Sent`. A unit it has accepted is finished, whatever commits after. If the unit fails, the writer writes nothing and reports `Dropped` in place of `Sent`. A unit returns to its owner only at `Sent` or `Dropped`, never at channel handoff. Between that report and the next handover the writer holds no unit, and only then does the owner send an `Unsubscribed` or a replacing `Subscribed` to the publisher (§3, "Ended entries").
   - **The owner on `Dropped` (v2.19, v2.19.1, v2.19.2):** it drops every content component it holds: rows, `complete`s and publisher-made `Ended`s, the dropped unit's included. It keeps every Outcome row, the dropped unit's included, and builds one `Reset` that carries them all (§4 "Reset"). It ends every live instance and records the last instance it numbered as **retired** (v2.19.2). Every later `Subscribed` of the session carries that number, and the publisher ends every subscription of the session at or below it before it registers the new one, so a resubscription is never charged on top of the old instances and waits on nothing. Until a `Subscribed` has carried it, the owner also offers `Retire(session, retired)` by `try_send` after each event it takes, every arrival of a retired instance's content included. A bounced `Retire` is offered again at the next event, and nothing waits on it. Content of a retired instance that arrives later is discarded (§3, "Subscription instances"). A `Reset` made this way never counts toward the protocol-error close (1008). The client resubscribes, and each sub completes afresh at a version at or above the fence (§4 "Resume").
   - **Ending:** either child ending (end of stream, a reset, a write error) reports `Ended` and ends the session. To end, the owner cancels both children, then joins them. If the owner is itself cancelled, CONC-8 cleans the two handles one at a time; that is bounded, because the children's waits are unshielded.
@@ -1279,7 +1292,7 @@ Unchanged from v2.1. v2.2 takes no new mechanism from outside. V1's session time
 | health route (v2.15) | SpacetimeDB crates/client-api/src/routes/health.rs:9-42 (opened) | ADAPTED as `GET /hirsel/status`. The weakness: it reports node and control-database reachability, not whether this database has activated, so a 200 does not say which code runs. Here the body carries the launch identity and `release_digest`, and 200 means `Ready` only |
 | pre-publish plan (v2.15) | SpacetimeDB crates/cli/src/subcommands/publish.rs:885-970 (opened) | ADAPTED as `hirsel preview`. The weakness: the plan is computed by the server against the live database, so planning needs a write-capable endpoint. Here the new executable answers the old entry list with no store, and schema readiness is said to be unknown instead |
 | evaluate then finish push (v2.15) | Convex npm-packages/convex/src/cli/lib/deploy2.ts:90-100 (opened) | NOT TAKEN: a server-side evaluation step is a rollout service Hirsel does not run. `confirm` reads the outcome instead |
-| test server with explicit Close (v2.15) | Go src/net/http/httptest/server.go:266-290, Close :482 (opened) | ADAPTED as `runner.fixture`. The weakness: `Close` is a method the test must remember to call, and a forgotten one leaks the listener. Here dropping the fixture also cancels and joins its task group, and the durable version is part of each answer |
+| test server with explicit Close (v2.15) | Go src/net/http/httptest/server.go:266-290, Close :482 (opened) | ADAPTED as the `fixture` module. The weakness: `Close` is a method the test must remember to call, and a forgotten one leaks the listener. Here dropping the fixture also cancels and joins its task group, and the durable version is part of each answer |
 | test fixtures (v2.15) | Goose docs/testing.md, "Fixture layout" (opened) | NOT TAKEN: Goose's fixtures are compiler fixtures, inputs and expected outputs for the compiler. It has no runtime fixture that starts a served program, so there is nothing to adapt for §12.3 |
 | release manifest and preview (v2.15) | Goose docs/packages.md §1 "Running and building" and §4 "Publishing" (opened) | NOT TAKEN: Goose pins package versions for a build and publishes a package by a repository tag. It has no record of a deployed program's entries or grants and no upgrade preview, so §12.2 follows SpacetimeDB's pre-publish plan instead |
 | orderly shutdown: send quit messages, then wait (v2.15) | Goose docs/goose_spec.md:4547-4550, `thread_wait` (opened) | ADAPTED as `Close` to every session and the head, then joins. The weakness: Goose's wait has no deadline, so one stuck worker holds the shutdown. Here D bounds it, and cancellation ends the rest |
@@ -1313,11 +1326,11 @@ pub type PlaceConfig[G: send, H: send, S: send]: send {
     session: WireConfig, max_sessions: u64, proxies: List[std.wsock.Prefix], n_publisher: u64,
     listen: Addr, net: Net, tasks: Tasks, clock: Clock, random: Random, stop: Stop,
     triggers: Option[TriggerConfig[G, S]],
-    idle: Option[u64],   // v2.26 (unbuilt): the idle stop (§14.4); a wake launch's idle time replaces it (v2.27)
+    idle: Option[u64],   // the idle stop (§14.4); a wake launch's idle time replaces it
     wire: Option[Wire[G]],   // v2.24: None refuses wire calls to Granted entries and gives every session a fresh anonymous Caller
 }
 pub type StartError: send = Open(OpenError) | Listen(NetError) | Missing(String) | Full(Capacity)   // OpenError is place_head's: Store | Place
-pub type Ended: codec + send = Stopped(Option[u64]) | Unstarted | Forced(u64)   // v2.26 (unbuilt): Stopped carries next_due, Unstarted is a stop before Ready (§14.4); as built: Stopped | Forced(u64)
+pub type Ended: codec + send = Stopped(Option[u64]) | Unstarted | Forced(u64)   // Stopped carries next_due; Unstarted is a stop before Ready (§14.4)
 
 pub fn status_root() -> Result[Latest[Status], Capacity]
 pub fn operate[G: send, H: send, S: send](take p: PlaceConfig[G, H, S], take stop: Receiver[()], status: Latest[Status], take watch: Option[Sender[Receiver[Phase]]]) -> Result[Ended, StartError] waits
@@ -1327,6 +1340,7 @@ pub fn release_digest(exported: List[Exported]) -> Result[Bytes, Capacity]
 - `operate` refuses `grace_ms = 0` with `Missing("grace_ms")` before it opens anything. A zero bound is a bound that was not given, as in STORE-SPEC W1. Admission closes at min(t₀ + `lag_ms`, D), so a lag that reaches the grace needs no refusal.
 - `Temp(d)` uses `std.dir.create_temp` for a fresh subdirectory of `d`. The head removes a named directory after it closes or drops the store. Cancellation at directory creation's delivery point can leave a directory whose name was never received (the `host.mkdtemp` cancellation prefix). `Disk` takes the store directory itself, already narrowed by the caller (for launch, the `--dir` grant), and removes nothing.
 - (v2.24) A managed wire call to a `Granted` entry runs only when `PlaceConfig.wire` is `Some`; the session starts the entry's task with its own copy of the wire grant and its Caller. With `None` it is refused as `NotAllowed`. `PlaceConfig.triggers` grants a movable `G` only to triggered attempts. (v2.27) The head runs a trigger drive when its entry list is non-empty or its store holds any branch-0 trigger row; an absent configuration is an empty list. It decides once, after `Activating`. With an empty list, a pending row's cancel, hold and release run as at any dispatch, and a row that reaches its entry lookup is consumed with the terminal `Gone`, so removing a place's last trigger entry never strands a committed row. Only `triggers.write` adds a row, and it requires a listed entry, so a store that has no row under an empty list never gets one, and only that place runs no drive. After a durable start, the place invokes the plain grant callback with its seed and the new attempt context in the grant task, then passes the result to the granted entry.
+- (v2.28) **What a granted run may read.** A granted run never holds the `Db`. It reads the store only through `trigger_snapshot(ctx) -> Result[store.Snapshot, TriggerCallError] waits`, which sends `Snap(attempt)` on the head inbox like `trigger_boundary`. The head answers it after the release gate (it makes the last commit durable first) and after the attempt fence: it takes `store.snapshot(db)`, checks `triggers.boundary` on that snapshot, and replies with that same snapshot only if the attempt is current and has no committed cancel. A fenced-out attempt gets `StaleAttempt`, a cancelled one `Cancelled`, a closing head `Closed`; none of them gets a snapshot. The snapshot is read-only (`store.get`, `store.scan`, `store.look`), and it is the head's newest durable version at the moment of the check, so it includes every commit the run made through `trigger_call` before asking. It never sees a later commit. **Replay.** A crash ends the attempt; the next attempt runs the body from the top and asks again, so it re-reads the store at a newer version rather than replaying a recorded read. A run is deterministic under replay only for rows that cannot change once its fenced calls have sealed them: a body that builds outside input from an immutable range (for example entries a fenced call appended and no transaction rewrites) reads the same bytes at every attempt. Reading mutable rows off the head is allowed but its result is not part of the run's recorded effects. The read costs the head one snapshot and one row lookup; the run does its scan in its own task, off the write lock.
 
 **Status.** `digest`, `target` and `n_place` are the launch identity (launch.md). `release` is `release_digest(exported)`, which is SHA-256 over `u8 17 ‖ "hirsel.release.v1" ‖` the value codec's bytes of this registry's `List[Exported]` in registration order. It is empty until activation has committed. The preview child computes `release` with the same function for the manifest (§12.2). `addr` is the bound address, present from `Listening` on. `Step` and `Phase` are send-only: status and watch stay in-process, and the status route writes its own JSON.
 
@@ -1356,7 +1370,7 @@ Each child sends one last message to `operate` before it ends.
 A failure after the activation commit and before `Ready` leaves the new activation rows on disk, because it happens in `Publishing` or `Listening`. The process never reported `Ready`, so a confirmation fails (§12.2). Restart the selected image. Restoring an earlier activation requires an explicit install and a compatible migration (§6).
 
 **A stop during `Starting`.** `operate` takes `StopRequested` in any phase. During `Starting`, it fixes D = t₀ + `grace_ms` as below, publishes `Draining`, spawns T, and answers H's next step result with `Close`. Nothing has been accepted yet, so there is nothing to refuse.
-- H ends as a failure in that step ends: it drops the publisher if it spawned one and calls `store.close` if it opened the store. `operate` releases the listener if it bound one, and returns `Ok(Unstarted)` (v2.26; before, `Ok(Stopped)`). The head never ran its trigger drive, so it cannot say when its next trigger is due, and `Unstarted` carries nothing.
+- H ends as a failure in that step ends: it drops the publisher if it spawned one and calls `store.close` if it opened the store. `operate` releases the listener if it bound one, and returns `Ok(Unstarted)`. The head never ran its trigger drive, so it cannot say when its next trigger is due, and `Unstarted` carries nothing.
 - A step still running at D (a long recovery) is not waited for: at `Expired`, `operate` cancels H and joins it. H is cancelled at its next cancellation point inside the step, and the `Db`, if it exists, is dropped without `close` (§1.10, §3.7). `operate` returns `Ok(Forced(0))`.
 - `Ready` is never published after a stop is taken. If S has already prepared, its acceptor is released without accepting and S is joined.
 
@@ -1458,7 +1472,7 @@ That **extends D1** ("it runs `place`") to the manifest: there is no second entr
 
 ### 12.3 Place fixture for application tests
 
-`runner.fixture` starts a place in a test with the application's real `place` and `handles`, through `operate`. A test therefore runs the same lifecycle, sessions, head and publisher that production runs. It runs them over the wire path on the granted `Net`, never through the in-process seam (DECISIONS 2026-11-17, "W3e waits on W8a").
+The module `fixture` (package store, fixture.hirsel) starts a place in a test with the application's real `place` and `handles`, through `operate`. A test therefore runs the same lifecycle, sessions, head and publisher that production runs. It runs them over the wire path on the granted `Net`, never through the in-process seam (DECISIONS 2026-11-17, "W3e waits on W8a").
 
 ```hirsel
 pub type FixtureError: send = Start(StartError) | Deadline(u64) | Full(Capacity)
@@ -1467,19 +1481,21 @@ pub type Answer[R] = Returned(R) | Failed(Fault) | Refused(Refusal) | Abandoned
 pub type Replied[R] { answer: Answer[R], version: u64 }
 pub type Seen { version: u64, rows: List[Row] }
 
-pub opaque type Fixture: send
-pub opaque type Caller: send
+pub opaque type Fixture
+pub opaque type Client
 pub opaque type Callee[A, R]: shareable + send
 
 pub fn start[G: send, H: send, S: send](take p: PlaceConfig[G, H, S], within_ms: u64) -> Result[Fixture, FixtureError] waits
-pub fn compute_entry[A, R](f: StaticFn[fn(take A) -> Result[R, Capacity]]) -> Callee[A, R]
-pub fn transact_entry[H, A, R, E](f: StaticFn[fn(mut store.Tx, H, take A) -> Result[R, E]]) -> Callee[A, Result[R, E]]
-pub fn query_entry[H, A](f: StaticFn[fn(store.Tx, H, take A) -> Result[Cover, Capacity]]) -> Callee[A, Cover]
-pub fn query_as_entry[H, A](f: StaticFn[fn(store.Tx, H, Caller, take A) -> Result[Cover, Capacity]]) -> Callee[A, Cover]
-pub fn caller(f: Fixture, within_ms: u64) -> Result[Caller, CallError] waits
-pub fn call[A: codec, R: codec](mut c: Caller, e: Callee[A, R], take a: A, deadline_ms: u32) -> Result[Replied[R], CallError] waits
-pub fn subscribe[A: codec](mut c: Caller, e: Callee[A, Cover], take a: A, within_ms: u64) -> Result[u32, CallError] waits
-pub fn seen_at(mut c: Caller, sub: u32, version: u64, within_ms: u64) -> Result[Seen, CallError] waits
+pub fn compute_entry[A: codec, R: codec](f: StaticFn[fn(take A) -> Result[R, Capacity]]) -> Callee[A, R]
+pub fn transact_entry[H, A: codec, R: codec, E: codec](f: StaticFn[fn(mut store.Tx, H, Caller, take A) -> Result[R, E]]) -> Callee[A, Result[R, E]]
+pub fn granted_entry[G, A: codec, R: codec](f: StaticFn[fn(G, Caller, take A) -> Result[R, Capacity] waits]) -> Callee[A, R]
+pub fn query_entry[H, A: codec, K, V](f: StaticFn[fn(store.Tx, H, take A) -> Result[Cover, Capacity]], key: Key[K], value: Codec[V]) -> Callee[A, ()]
+pub fn query_as_entry[H, A: codec, K, V](f: StaticFn[fn(store.Tx, H, Caller, take A) -> Result[Cover, Capacity]], key: Key[K], value: Codec[V]) -> Callee[A, ()]
+pub fn client(f: Fixture, take token: Option[Bytes], within_ms: u64) -> Result[Client, CallError] waits
+pub fn call[A: codec, R: codec](mut c: Client, e: Callee[A, R], take a: A, deadline_ms: u32) -> Result[Replied[R], CallError] waits
+pub fn subscribe[A: codec](mut c: Client, e: Callee[A, ()], take a: A, within_ms: u64) -> Result[u32, CallError] waits
+pub fn seen_at(mut c: Client, sub: u32, version: u64, within_ms: u64) -> Result[Seen, CallError] waits
+pub fn close(take c: Client) -> () waits
 pub fn status(f: Fixture) -> Status
 pub fn end(take f: Fixture, within_ms: u64) -> Result[Ended, FixtureError] waits
 ```
@@ -1489,23 +1505,26 @@ pub fn end(take f: Fixture, within_ms: u64) -> Result[Ended, FixtureError] waits
 **Start.** `start` requires the backing to be `Memory` or `Temp` and `listen` to be 127.0.0.1 port 0. It refuses anything else with `Start(Missing("backing"))` or `Start(Missing("listen"))`.
 - It makes the root with `status_root()`, spawns `operate` in its own task group, and takes the `watch` receiver from the one-use handoff. It receives phases until `Ready`. The fixture keeps a handle to the root for `status`.
 - A `StartError` is returned as `Start(e)`.
+- The place's task group is spawned with `try_spawn`, so a test whose root allowance is too small gets `Full(cap)`. A `Memory` or `Temp` place reserves its backing's resident limit, which is 1 GiB under `store.defaults()`, so its test needs about 1.1 GiB of allowance (a per-test `limit` in hirsel.toml).
 - If `within_ms` passes first, the result is `Deadline(within_ms)`. It is returned after the fixture has stopped `operate` and released everything it made.
 
 **Typed calls.**
-- `compute_entry`, `transact_entry`, `query_entry` and `query_as_entry` compute the entry's key with the function registration uses: identity and the two fingerprints. So a typed `Callee` cannot name another key.
-- `granted_entry` (v2.24) computes a granted entry's key as the others do. Its call succeeds only against a fixture whose `PlaceConfig.wire` is `Some`, and is `Refused(NotAllowed)` otherwise.
-- `caller` connects one wire client to `status.addr`, with a `Hello` that lists the fixture's entries, and owns one stream.
-- `call` assigns the next position by WIRE's client rules (P1–P3). It encodes `a` and sends one `Call` with `deadline_ms`. It returns when that send's Outcome row arrives, and V1 makes the place answer by `deadline_ms` (`Abandoned` at the latest). A transact `Returned` is decoded as `Result[R, E]`. A broken connection is `Closed`.
+- Fixture entry builders compute the key from the identity and the schemas that registration describes. A transact entry uses the `Result[R, E]` codec. A query entry uses its registered ordered key and current value schemas.
+- A `granted_entry` (v2.24) call succeeds only against a fixture whose `PlaceConfig.wire` is `Some`, and is `Refused(NotAllowed)` otherwise.
+- `client` connects one wire client to `status.addr`, with a `Hello` that carries `token` and lists the place's entries in registration order, and owns one stream. A place whose `wire` binds a credential needs the token to give the session a Caller.
+- `call` assigns the next position by WIRE's client rules (P1–P3). It encodes `a` and sends one `Call` with `deadline_ms`. It returns when that send's Outcome row arrives, and V1 makes the place answer by `deadline_ms` (`Abandoned` at the latest). A transact `Returned` is decoded as `Result[R, E]`. A broken connection is `Closed`. A `Callee` whose key the place does not export is answered `Refused(NoEntry)` without a send.
+- `subscribe` sends one `Subscribe` and returns once a Batch's `complete` names the new subscription. An `Ended` first gives `Closed`.
+- `close` closes the client's connection and joins its reader and writer.
 
 **A durable reply.** `Replied.version` is the version of the Batch that carried the Outcome. By V4, a reply that reports a commit is released only after `durable`, so a `Replied` that `call` returns is already durable at that version. Nothing extra waits.
 
-**The batch at or after a version.** `seen_at(c, sub, v, within_ms)` returns the subscription's full row set as of the first Batch at a version ≥ v. That is L6+L7's count form. It applies Batches in order, as the client cache does. A subscription that is `Ended` gives `Closed`.
+**The batch at or after a version.** `seen_at(c, sub, v, within_ms)` returns the subscription's full row set as of the first Batch at a version ≥ v. That is L6+L7's count form. It applies Batches in order, as the client cache does. If the last Batch the client applied is already at or after v, the result is as of that Batch. A subscription that is `Ended` gives `Closed`.
 
-**End.** `end` sends the stop and waits for `operate`'s `Ended`. It closes every `Caller` it made, and `operate` removes the `Temp` subdirectory. It returns `Ended`. If `within_ms` passes, the result is `Deadline(within_ms)`, returned after the group is cancelled and joined. **Dropping a `Fixture` without `end`** cancels and joins its task group (CONC-8). That drops the listener and the `Db` (a crash cut, §1.10), and `operate`'s cleanup removes the `Temp` subdirectory. Every resource the fixture made is released on either path.
+**End.** `end` sends the stop and waits for `operate`'s `Ended`. The drain closes every session, so a `Client` used afterwards gets `Closed`, and `operate` removes the `Temp` subdirectory. It returns `Ended`. A `Client` still open at `end` holds its session until the drain's grace deadline, so `Ended` is then `Forced`; close clients first for `Stopped`. If `within_ms` passes, the result is `Deadline(within_ms)`, returned after the group is cancelled and joined. **Dropping a `Fixture` without `end`** cancels and joins its task group (CONC-8). That drops the listener and the `Db` (a crash cut, §1.10), and `operate`'s cleanup removes the `Temp` subdirectory. Every resource the fixture made is released on either path.
 
 **Grants.** A test that uses the fixture needs `Net` (listen and connect on 127.0.0.1), `Tasks`, `Clock` and `Random`, plus `Dir` for `Temp`. It receives them as ordinary capability parameters (PROG-4) and places them in `PlaceConfig`.
 
-**Engines.** The fixture runs on Cranelift, LLVM and the evaluator. Evaluator fixtures explicitly grant W8a's model network, which supplies their controlled network and virtual clock. Native fixtures use the granted loopback network.
+**Engines.** Native fixtures run on Cranelift and LLVM over the granted loopback network. Evaluator fixtures will grant W8a's model network, which supplies their controlled network and virtual clock; that path is **unbuilt** until W8a.
 
 **The runner's own harness.** `runner_calls.hirsel`'s `served` and `served_on` drive the head over the wire with `wire_client`, using the production `serve_connection` owner. The evaluator runs those same fixtures on its model network. Subscription-pressure laws additionally hold a joined publisher inbox undrained until their drain step. The in-process client/session seam is deleted.
 
@@ -1611,9 +1630,9 @@ Each law runs in runner_calls (`core-runner-r1`, native only) over one disk-back
 - **Orleans** (af30f59f). Idle activations are collected after `CollectionAge` (15 min), scanned every `CollectionQuantum` (1 min) (src/Orleans.Runtime/Configuration/Options/GrainCollectionOptions.cs:14–24; Catalog/ActivationCollector.cs ScanStale :243–282). Requests that arrive while an activation deactivates are held and forwarded after it completes, not given the old activation (src/Orleans.Runtime/Catalog/ActivationData.cs:1295–1316, :2335–2360). Under memory pressure it collects regardless of keep-alive (Catalog/ActivationCollector.cs:447). **Taken:** hold opens during deactivation, sweep on a period. **Not taken:** memory-pressure eviction; we refuse when full.
 - **Akka cluster sharding** (49e479e8). Idle passivation with a 120 s default timeout, checked every half the timeout (akka-cluster-sharding/src/main/resources/reference.conf:55, :92; akka-cluster-sharding/src/main/scala/akka/cluster/sharding/internal/EntityPassivationStrategy.scala:147–167). Messages for a passivating entity are buffered and the entity restarts when passivation completes if any arrived (akka-cluster-sharding/src/main/scala/akka/cluster/sharding/Shard.scala:457–459, :820–823, :1044–1060); passivation is ignored while messages are buffered (:976–1000). **Taken:** sweep at half the idle time, buffer and restart. **Not taken:** limit-based passivation (evicting least-recently-used entities); see §13.4.
 
-## 14. Cold places under the platform host (new in v2.26; unbuilt)
+## 14. Cold places under the platform host (new in v2.26)
 
-A place run by the platform host (docs/spec/launch.md "Platform host and launcher") is **cold by default**: it runs only while it has work, and the host starts it again when work comes. This section is the wake contract between the two. It reopens §13.5's trigger rule for these places. Everything here is **unbuilt** and its laws are **UNTESTED**. The in-process directory (§13) is unchanged until it is retired (§14.8, conflict 9).
+A place run by the platform host (docs/spec/launch.md "Platform host and launcher") is **cold by default**: it runs only while it has work, and the host starts it again when work comes. This section is the wake contract between the two. It reopens §13.5's trigger rule for these places. The runner's idle stop and child report are **built**, and so is the launcher's side of §14.3-§14.5 (`hirsel launcher`, launch.md "The launcher"); the platform host is not. The in-process directory (§13) is unchanged until it is retired (§14.8, conflict 9).
 
 The rule in one line: a place that a commit has given a future trigger is woken for it, and the host can always tell, from one durable row per place, whether it knows the place's next due time or must start the place to find out.
 
@@ -1709,7 +1728,8 @@ So an idle stop never cuts a run or a lease that started before it was decided, 
 - A session starts with the host's `Hello`. The launcher first ends any earlier session: it stops reading the old connection, and each request of it that it had not acted on is discarded, never acted on later. Only then does it answer.
 - Its answer is the **inventory**, taken in the one loop in which the launcher changes its state: every child it has, by identity (§14.1) and with its state (accepted and not yet started, started, or ended with an end the host has not acknowledged, with the end's report); every cold listener that is readable; and no collection fence (a new session drops it, launch.md "Collect").
 - Every event the launcher sends afterwards follows the inventory in the same stream. Each state change happens in that one loop, so each is either in the inventory or after it, never both and never neither. The launcher keeps an ended child in the inventory until the host acknowledges its end, so an end is not lost with a session.
-- A new session ends every reservation of the old one. The host has already made each attempt whose pending row is durable a root through that row, and it abandons each attempt whose row is not ("When the host starts"); no collection runs before that reconciliation.
+- The inventory also lists each cutover command the launcher forwarded to an OLD child and has a reply for that the host has not acknowledged, keyed by (OLD child, attempt). The launcher keeps OLD's first answer, or `Uncertain` if OLD ended without one, until `CutoverAck`. A re-sent identical cutover command for that key is answered with the kept reply as `CutoverResult`, never forwarded again, and a different command for the same key is refused. So a host that lost a cutover's reply with its session learns the decided answer instead of repeating the install.
+- A new session ends every reservation and every running admission of the old one. The host has already made each attempt whose pending row is durable a root through that row, and it abandons each attempt whose row is not ("When the host starts"); no collection runs before that reconciliation.
 - A child in the inventory that matches no row (an old incarnation, a removed group, or a generation that is neither the authoritative child nor a candidate of a pending deploy) is stopped by its identity, and nothing it reports is applied.
 - A launch request that the host sent in an earlier session and that is not in the inventory will never run. So the host may start a new generation without fearing a late start of an older one: a command is fenced at the launcher before its child can open the store.
 
@@ -1756,7 +1776,7 @@ Two recipes may differ in `n_place` alone and share one image digest, so NEW's d
 
 ### 14.7 Laws
 
-L40 runs in the runner's prepare harness and L44 in the runner's place harness, since each needs one place and no host. Every other law runs in a platform host harness (lane P3 in platform-host-spec-1741/REPORT.md) over places that use triggers, with the launcher's child launches faked only where the law says so. The oracle of each is the rule cited.
+L40 runs in the runner's prepare harness and L44 in the runner's place harness, since each needs one place and no host. Every other law runs in a platform host harness (lane P3 in platform-host-spec-1741/REPORT.md) over places that use triggers, with the launcher's child launches faked only where the law says so. The oracle of each is the rule cited. L46's launcher half, where a child's end is sent after its listener's exit sample and before the watch resumes, and an inventory repeats a readable listener, is built in the launcher's own harness (crates/hirsel-core-driver/src/launcher/laws.rs, `end_samples_listener_before_watch`).
 
 | Law | Wrong implementation it catches | Oracle |
 |---|---|---|
@@ -1768,6 +1788,7 @@ L40 runs in the runner's prepare harness and L44 in the runner's place harness, 
 | L44 `idle_keeps_runs` (v2.27): a granted run that waits on its outside step for 3 × `idle` keeps its place up, and records one attempt; and with H and S both reported idle, a granted attempt (and in a second case an export lease) that H starts just before the sweep that would stop the place makes H answer busy, so the place keeps serving and the run records one attempt | idle counts sessions only, or `operate` stops on its own record of H's and S's last messages, so the place drains, the run is cut, and attempt 2 runs | §14.4 |
 | L45 `wake_probe_bound`: after `max_places` places are left `Dirty` by kills and the host restarts with 10,000 `Clean` rows, it starts exactly the `Dirty` ones as recovery probes, counted apart from the ordinary due wakes it also makes, and lowering `max_places` below them is refused `Busy`. (v2.27) **Host-only restart:** G serves at `Dirty(7)` and only the host is killed; G keeps serving and is adopted, no probe 8 starts, and G's clean report for 7 writes `Clean`. **Retirement:** with `max_places` 1, A fails every start and B's due wake is queued; retiring A answers `Retired`, frees the slot, and B starts | the host probes every row, or accepts a lower bound and breaks the invariant; it probes live children after a host restart; or a failing group can never give up its slot | §14.2, §14.5 |
 | L46 `wake_arrival_during_drain`: a place's idle stop is confirmed, so admission is closed; a client then connects, and in a second case connects just after the launcher's exit sample; each connection is answered by the next process, and the row goes `Dirty(gen)` → `Dirty(gen + 1)` → `Clean` with no `Clean` between; the host applies `End` before the `Arrived` that follows it, and a reconnect between them reports the listener readable in the inventory | the launcher reports the end before it checks the listener, the host writes `Clean`, or the host applies `Arrived` while it still counts the child live and drops it, so the connection waits until the next due time or forever | §14.3 |
+| L47 `trigger_snapshot_fenced` (v2.28): a granted run's first attempt is cut at its first boundary; after reopen, attempt 2 is waiting at its boundary. A `Snap` for attempt 1 is refused `StaleAttempt`, and attempt 2's snapshot returns the row the test wrote in the trigger's arming transaction. The run then completes once | the head answers `Snap` before the fence, from a stale attempt, or with a snapshot older than the last commit | §12.1, `answer_trigger` |
 
 ### 14.8 What this changes elsewhere, and the conflicts
 

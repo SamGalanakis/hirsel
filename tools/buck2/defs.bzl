@@ -245,13 +245,13 @@ def _test_crate_flags(crate_root):
         return []
     return select({"root//tools/buck2:profile_checked": ["-Copt-level=0"], "DEFAULT": []})
 
-def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, package_name, version, edition, build_script = None, bin_exes = {}, data = [], files_env = {}, native_tools = False):
+def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, package_name, version, edition, build_script = None, bin_exes = {}, data = [], files_env = {}, native_tools = False, harness_only = False):
     """A libtest harness (`rustc --test`) and the test that runs it.
 
     `bin_exes` are the package's binaries, as Cargo's CARGO_BIN_EXE_<name>.
     `data` are the files the test reads at run time.
     """
-    harness = name + "-harness"
+    harness = name if harness_only else name + "-harness"
     bin_exe_dir = "{}/{}".format(BIN_EXE_DIR, harness)
     exes = [_env_set("CARGO_BIN_EXE_" + bin, _from_package(manifest_dir, "{}/{}".format(bin_exe_dir, bin))) for bin in sorted(bin_exes)]
     _rust(
@@ -269,6 +269,8 @@ def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, pac
         exec_compatible_with = _compile_constraints(harness),
         visibility = ["PUBLIC"],
     )
+    if harness_only:
+        return
     if package_name == "hirsel-core-rt":
         # Cross harness is opt-in, not a host test/tool or a shipping archive.
         # Same sources/deps as the ordinary harness, with real ARM cfg/std/link.
@@ -526,11 +528,41 @@ def hirsel_core_image(name, **kwargs):
                 exec_compatible_with = [budget_constraint(pool_budget_name(*PRECHECK_REQUEST))],
                 visibility = ["PUBLIC"], **kwargs)
 
+def _store_package_impl(ctx):
+    sources = ctx.actions.symlinked_dir("store-sources", {
+        src.basename: src
+        for src in ctx.attrs.sources
+    })
+    archive = ctx.actions.declare_output("store-1.hpkg")
+    scratch = ctx.actions.declare_output("scratch", dir = True)
+    script = ctx.actions.write("pack.sh", [
+        "set -eu",
+        'mkdir -p "$4/store"; cp "$2"/* "$4/store/"',
+        '"$1" pack "$4/store" --package-store "$4/packages" --output "$3" > /dev/null',
+    ])
+    ctx.actions.run(
+        cmd_args("/bin/sh", script, ctx.attrs.hirsel[DefaultInfo].default_outputs[0],
+                 sources, archive.as_output(), scratch.as_output(),
+                 hidden = ctx.attrs._llvm_libraries[DefaultInfo].default_outputs),
+        env = {"HIRSEL_MEMORY_LIMIT": PRODUCT_MEMORY_LIMIT, "HIRSEL_JOBS": "1"},
+        category = "store_package",
+    )
+    return [DefaultInfo(default_output = archive)]
+
+hirsel_store_package = rule(
+    impl = _store_package_impl,
+    attrs = {
+        "hirsel": attrs.dep(),
+        "sources": attrs.list(attrs.source()),
+        "_llvm_libraries": attrs.dep(default = "toolchains//:llvm-libraries"),
+    },
+)
+
 def _toolchain_bundle_impl(ctx):
     # The self-contained installation the driver discovers beside itself: the
     # compiler as `hirsel` with RPATH $ORIGIN/lib, libLLVM and the libraries it
     # loads, ld.lld and the link kit, the runtime archive for each target, and the core and std
-    # images, recorded in hirsel-core-toolchain.json. The compiler copies
+    # images, recorded in hirsel-core-toolchain.json, and the Store archive. The compiler copies
     # itself in; a request from the bundle loads nothing outside it.
     bundle = ctx.actions.declare_output("hirsel-toolchain", dir = True)
     scratch = ctx.actions.declare_output("scratch", dir = True)
@@ -544,6 +576,7 @@ def _toolchain_bundle_impl(ctx):
         '"$1" core-product --install "$root" > /dev/null',
         '"$1" std-product --install "$root" --runtime "$4" --recording-runtime "$6" --prof-runtime "$9" --prof-recording-runtime "${11}" --target x86_64-unknown-linux-gnu --link-kit "$8" > /dev/null',
         '"$1" std-product --install "$root" --runtime "$5" --recording-runtime "$7" --prof-runtime "${10}" --prof-recording-runtime "${12}" --target aarch64-unknown-linux-gnu > /dev/null',
+        'cp "${13}" "$root/core-packages/store-1.hpkg"',
     ])
     ctx.actions.run(
         cmd_args("/bin/sh", script, ctx.attrs.hirsel[DefaultInfo].default_outputs[0],
@@ -557,6 +590,7 @@ def _toolchain_bundle_impl(ctx):
                  prof_runtimes["aarch64"][DefaultInfo].default_outputs[0],
                  prof_recording_runtimes["x86_64"][DefaultInfo].default_outputs[0],
                  prof_recording_runtimes["aarch64"][DefaultInfo].default_outputs[0],
+                 ctx.attrs.store_package[DefaultInfo].default_outputs[0],
                  hidden = ctx.attrs._llvm_libraries[DefaultInfo].default_outputs),
         env = {"HIRSEL_MEMORY_LIMIT": PRODUCT_MEMORY_LIMIT, "HIRSEL_JOBS": "1"},
         category = "toolchain_bundle",
@@ -574,6 +608,7 @@ hirsel_toolchain_bundle = rule(
         "recording_runtimes": attrs.dep(),
         "prof_runtimes": attrs.dep(),
         "prof_recording_runtimes": attrs.dep(),
+        "store_package": attrs.dep(),
         "_link_kit": attrs.dep(default = "root//tools/buck2/native-toolchain:kit"),
         "_llvm_libraries": attrs.dep(default = "toolchains//:llvm-libraries"),
     },

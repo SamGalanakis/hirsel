@@ -17,3 +17,103 @@ fn ieee_vectors() -> bool {
     }
     crc32.hash(string.as_bytes("")) == 0
 }
+
+// RFC 3720 B.4 gives the digest as little-endian wire bytes.
+fn castagnoli_vectors() -> bool {
+    let zero = b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+    let ones = b"\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff"
+    let up = b"\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f"
+    let down = b"\x1f\x1e\x1d\x1c\x1b\x1a\x19\x18\x17\x16\x15\x14\x13\x12\x11\x10\x0f\x0e\x0d\x0c\x0b\x0a\x09\x08\x07\x06\x05\x04\x03\x02\x01\x00"
+    let pdu = b"\x01\xc0\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x14\x00\x00\x00\x00\x00\x04\x00\x00\x00\x00\x14\x00\x00\x00\x18\x28\x00\x00\x00\x00\x00\x00\x00\x02\x00\x00\x00\x00\x00\x00\x00"
+    crc32c.update(0, b"123456789") == 0xe3069283u32 && crc32c.update(0, zero) == 0x8a9136aau32 && crc32c.update(0, ones) == 0x62a8ab43u32 && crc32c.update(0, up) == 0x46dd794eu32 && crc32c.update(0, down) == 0x113fdb5cu32 && crc32c.update(0, pdu) == 0xd9963a56u32
+}
+
+fn castagnoli_steps(input: Bytes) -> bool {
+    let empty = list.slice(input, 0, 0)
+    let one_chunk = list.slice(input, 1, 16385)
+    let two_chunks = list.slice(input, 1, 16386)
+    let unchanged = bound steps 1 {
+        crc32c.update(0x7d25f6a8u32, empty)
+    }
+    let within = bound steps 2 {
+        crc32c.update(0x7d25f6a8u32, one_chunk)
+    }
+    let exhausted = bound steps 2 {
+        crc32c.update(0x7d25f6a8u32, two_chunks)
+    }
+    let exact = bound steps 3 {
+        crc32c.update(0x7d25f6a8u32, two_chunks)
+    }
+    let Ok(0x7d25f6a8u32) = unchanged else {
+        return false
+    }
+    let Ok(0x3b6bf928u32) = within else {
+        return false
+    }
+    let Error(OutOfTime(steps: 2)) = exhausted else {
+        return false
+    }
+    let Ok(0x90cef21au32) = exact else {
+        return false
+    }
+    true
+}
+
+// expect: run castagnoli_contract() = true
+fn castagnoli_contract() -> bool {
+    if !castagnoli_vectors() {
+        return false
+    }
+    let mut buffer: Bytes = list.with_capacity(32770)
+    let mut state = 0xc3513ba7u32
+    for _ in 0u64 .. 32770 {
+        state = state ^ (state << 13)
+        state = state ^ (state >> 17)
+        state = state ^ (state << 5)
+        list.push(mut buffer, int.truncate(state))
+    }
+    // MSB-first long division with polynomial 0x11EDC6F41 and bit reflection
+    // gives these residues for unaligned ranges and a nonzero starting CRC.
+    let cases: Inline[(u64, u32), 26] =[
+        (0, 0x7d25f6a8),
+        (1, 0x176cdac0),
+        (7, 0xd10b091b),
+        (8, 0xb8b67f83),
+        (9, 0x870a6db3),
+        (255, 0x47b20bea),
+        (256, 0x24bb3017),
+        (257, 0x2efc8276),
+        (511, 0xfd85734c),
+        (512, 0xbd88ac54),
+        (513, 0x717361b8),
+        (767, 0x8d661067),
+        (768, 0xb0c5712d),
+        (769, 0x8c234991),
+        (1535, 0x28009cc8),
+        (1536, 0x88ac3da7),
+        (1537, 0xcd603d61),
+        (16383, 0xff5aac81),
+        (16384, 0x3b6bf928),
+        (16385, 0x90cef21a),
+        (17151, 0xf17f3153),
+        (17152, 0xba9dd356),
+        (17153, 0x05fe7d67),
+        (32767, 0xd74fadd0),
+        (32768, 0x5c99167d),
+        (32769, 0x299d2510),
+    ]
+    for (len, expected) in cases {
+        let input = list.slice(buffer, 1, len + 1)
+        if crc32c.update(0x7d25f6a8u32, input) != expected {
+            return false
+        }
+        let split = len / 2
+        let first = list.slice(input, 0, split)
+        let second = list.slice(input, split, len)
+        let partial = crc32c.update(0x7d25f6a8u32, first)
+        if crc32c.update(partial, second) != expected {
+            return false
+        }
+    }
+    castagnoli_steps(buffer)
+}

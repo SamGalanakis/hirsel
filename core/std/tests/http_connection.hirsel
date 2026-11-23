@@ -1223,7 +1223,15 @@ fn invalid_response(wire: Bytes, over_head: bool) -> bool {
 // interim and final heads, must preserve the decoded bytes and the next head.
 // expect: run http_client_response_fragments() = true
 fn http_client_response_fragments() -> bool {
-    let rows: Inline[(String, u16, String, bool, bool), 7] =[("HTTP/1.1 200 OK\r\nX-Test: yes\r\nTransfer-Encoding: chunked\r\n\r\n2;tag=\"a;b\"\r\nhi\r\n3\r\nbye\r\n0\r\nX-Trailer: end\r\n\r\n", 200, "hibye", false, true), ("HTTP/1.1 200 OK\r\nX-Test: yes\r\nContent-Length: 5\r\n\r\nhello", 200, "hello", false, true), ("HTTP/1.0 200 OK\r\nX-Test: yes\r\n\r\nhello", 200, "hello", false, false), ("HTTP/1.1 200 OK\r\nX-Test: yes\r\nContent-Length: 100\r\n\r\n", 200, "", true, true), ("HTTP/1.1 204 No Content\r\nX-Test: yes\r\n\r\n", 204, "", false, true), ("HTTP/1.1 304 Not Modified\r\nX-Test: yes\r\nContent-Length: 100\r\n\r\n", 304, "", false, true), ("HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nX-Test: yes\r\nContent-Length: 3\r\n\r\nyes", 200, "yes", false, true),]
+    let rows: Inline[(String, u16, String, bool, bool), 7] =[
+        ("HTTP/1.1 200 OK\r\nX-Test: yes\r\nTransfer-Encoding: chunked\r\n\r\n2;tag=\"a;b\"\r\nhi\r\n3\r\nbye\r\n0\r\nX-Trailer: end\r\n\r\n", 200, "hibye", false, true),
+        ("HTTP/1.1 200 OK\r\nX-Test: yes\r\nContent-Length: 5\r\n\r\nhello", 200, "hello", false, true),
+        ("HTTP/1.0 200 OK\r\nX-Test: yes\r\n\r\nhello", 200, "hello", false, false),
+        ("HTTP/1.1 200 OK\r\nX-Test: yes\r\nContent-Length: 100\r\n\r\n", 200, "", true, true),
+        ("HTTP/1.1 204 No Content\r\nX-Test: yes\r\n\r\n", 204, "", false, true),
+        ("HTTP/1.1 304 Not Modified\r\nX-Test: yes\r\nContent-Length: 100\r\n\r\n", 304, "", false, true),
+        ("HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nX-Test: yes\r\nContent-Length: 3\r\n\r\nyes", 200, "yes", false, true),
+    ]
     for (response, status, body, head_only, next) in rows {
         let mut wire: Bytes = list.with_capacity(512)
         list.append(mut wire, string.as_bytes(response))
@@ -1281,6 +1289,117 @@ fn http_client_round_trip(n: Net, c: Clock, tasks: Tasks) -> bool waits {
     passed
 }
 
+type ResponseNetwork: send {
+    port: Served[NetOp],
+    clock: Clock,
+}
+
+fn response_clock(take input: sim.world.World) waits {
+    let mut world = take input
+    sim.world.run(mut world)
+}
+
+fn response_network(take input: ResponseNetwork) waits {
+    let ResponseNetwork(port: take port, clock) = take input
+    let config = sim.net.Config(queue_bytes: 32768, fragment_bytes: 32768, latency_ns: 0)
+    // Maximum draws make every simulated send and receive take its full offer.
+    let mut draws: List[u64] = list.with_capacity(128)
+    list.fill(mut draws, 128, 18446744073709551615u64)
+    let mut streams: List[List[u64]] = list.with_capacity(1)
+    list.push(mut streams, take draws)
+    let script = sim.world.Script(tail_seed: 0, streams: take streams)
+    let mut plan = sim.world.plan_from(script, 0)
+    let _ = sim.net.serve(sim.net.new(config), mut plan, clock, take port)
+}
+
+fn read_response_train(n: Net, c: Clock) -> bool waits {
+    let (bound_listener, address) = result.unwrap(host.listen(n, Addr(ip: V4(2130706433), port: 0), 1))
+    let mut listener = take bound_listener
+    let socket = result.unwrap(host.connect(n, address, Never))
+    let (peer, _) = result.unwrap(host.accept(mut listener, Never))
+    let (server_input, server_output) = net.split(take peer)
+    let mut output = take server_output
+    let request = http_client.Request(method: "GET", target: "/", headers: list.new(), body: Fixed(0))
+    let end = after_ms(host.mono_ns(c), 100)
+    let mut client = result.unwrap(http_client.attach(take socket, "example.test", c, request, end))
+    let until = At(c, end)
+    let head = string.as_bytes("HTTP/1.1 200 OK\r\nContent-Length: 9003\r\n\r\nabc")
+    if !client_send(mut output, head, until) {
+        fail("failed to send the head and its payload prefix")
+    }
+    result.unwrap(http_client.finish_request(mut client, 9003))
+    let mut body: Bytes = list.with_capacity(9004)
+    if result.unwrap(http_client.read(mut client, mut body)) != 3 || body != string.as_bytes("abc") {
+        fail("read-ahead payload differs from the sent prefix")
+    }
+    let mut sent: Bytes = list.with_capacity(9000)
+    list.fill(mut sent, 8997, b'x')
+    list.append(mut sent, string.as_bytes("end"))
+    if !client_send(mut output, sent, until) {
+        fail("failed to send the large payload fragment")
+    }
+    if result.unwrap(http_client.read(mut client, mut body)) != 9000 {
+        fail("read did not accept the offered 9000-byte payload fragment")
+    }
+    if list.slice(body, 3, 9003) != sent {
+        fail("direct payload differs from the sent bytes")
+    }
+    if result.unwrap(http_client.read(mut client, mut body)) != 0 || !http_client.reusable(client) {
+        fail("fixed response did not end on a reusable connection")
+    }
+    result.unwrap(http_client.start(mut client, request, end))
+    let first = string.as_bytes("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhe")
+    if !client_send(mut output, first, until) {
+        fail("failed to send the chunked head and first payload prefix")
+    }
+    result.unwrap(http_client.finish_request(mut client, 8))
+    let mut small: Bytes = list.with_capacity(2)
+    while list.len(small) < 2 {
+        if result.unwrap(http_client.read(mut client, mut small)) == 0 {
+            fail("unexpected EOF before the two-byte buffer filled")
+        }
+    }
+    if small != string.as_bytes("he") {
+        fail("first chunk prefix differs from the sent bytes")
+    }
+    if let Error(NoSpace) = http_client.read(mut client, mut small) {
+        if small != string.as_bytes("he") {
+            fail("NoSpace changed the caller buffer")
+        }
+    } else {
+        fail("a full caller buffer did not return NoSpace")
+    }
+    list.clear(mut body)
+    if !client_send(mut output, string.as_bytes("llo\r"), until) || result.unwrap(http_client.read(mut client, mut body)) != 3 {
+        fail("read did not resume with the rest of the first chunk")
+    }
+    let last = string.as_bytes("\n3;tag=ok\r\nbye\r\n0\r\nX-Trailer: end\r\n\r\n")
+    if !client_send(mut output, last, until) || result.unwrap(http_client.read(mut client, mut body)) != 3 {
+        fail("read did not cross the split chunk delimiter")
+    }
+    let eof = result.unwrap(http_client.read(mut client, mut body)) == 0
+    if !eof || body != string.as_bytes("llobye") || !http_client.reusable(client) {
+        fail("chunked response did not deliver the sent payload and preserve reuse")
+    }
+    http_client.close(take client)
+    let _ = take server_input
+    true
+}
+
+// Queue each wire fragment before the client reads. The 9000-byte payload
+// fragment exceeds the head buffer. The chunk delimiter spans two sends.
+// expect: run http_client_direct_response_body(tasks) = true
+fn http_client_direct_response_body(tasks: Tasks) -> bool waits {
+    let (world, c) = sim.world.new(1, 0, 0)
+    let (n, port) = provide.net(bytes 65536)
+    let driver = task.spawn(tasks, bytes 65536, take world, response_clock)
+    let server = task.spawn(tasks, bytes 4194304, ResponseNetwork(port: take port, clock: c), response_network)
+    let passed = read_response_train(n, c)
+    result.unwrap(task.join(take server))
+    result.unwrap(task.join(take driver))
+    passed
+}
+
 // TLS-2 and TL10. The loopback fixture checks both HTTP heads and the
 // upload bytes. It returns a chunked "world", then conflicting body framing.
 // expect: stdout "GET /reject\nAuthorization: Bearer [secret]\nX-Trace: enabled\nX-Second: [secret]\n"
@@ -1297,9 +1416,9 @@ fn http_client_https_round_trip(n: Net, c: Clock, address: Addr, token: Secret, 
     let mut fields: List[http_client.Header] = list.new()
     let bearer = string.into_bytes("Bearer ")
     let enabled = string.into_bytes("enabled")
-    list.push(mut fields, http_client.Header(name: "Authorization", value: Protected(take bearer, token)))
+    list.push(mut fields, http_client.Header(name: "Authorization", value: Protected(take bearer, secret.share(token))))
     list.push(mut fields, http_client.Header(name: "X-Trace", value: Public(take enabled)))
-    list.push(mut fields, http_client.Header(name: "X-Second", value: Protected(list.new(), token)))
+    list.push(mut fields, http_client.Header(name: "X-Second", value: Protected(list.new(), secret.share(token))))
     let request = http_client.Request(method: "GET", target: "/reject", headers: take fields, body: Fixed(0))
     result.unwrap(http_client.start(mut client, request, end))
     let mut description: Bytes = list.with_capacity(256)

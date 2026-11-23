@@ -566,7 +566,11 @@ pub fn main() -> Result[(), Exit] {
     // Charged: root startup (256 + 32) plus the full 160-byte scope.
     // Retained at the region allocation: startup slot, cause cell, inputs,
     // main result, root Task, Region header and one 4 KiB backing request.
-    let retained = 16 + 56 + 16 + 24 + 672 + 272 + 4096;
+    // The root Task is 672 bytes plus its warm-list links (two pointers) and
+    // its owned Context's grouped-Map keys: a [u64; 2] salt and a 32-byte
+    // PreparedKey.
+    let task = 672 + 16 + 16 + 32;
+    let retained = 16 + 56 + 16 + 24 + task + 272 + 4096;
     // The Stamp takes one 24-byte native slot in the first chunk.
     assert_eq!(
         peaks,

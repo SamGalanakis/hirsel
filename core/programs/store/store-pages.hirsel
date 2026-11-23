@@ -396,19 +396,36 @@ type PageRange: send {
     active: List[std.page.Cursor],
     collection: u32,
     start: Option[Bytes],
+    stop: Option[Bytes],
     inclusive: bool,
     reverse: bool
 }
 
-fn open_page_range(tree: PageTree, start: Option[Bytes], inclusive: bool, reverse: bool) -> Result[PageRange, Error] {
+fn open_page_range(tree: PageTree, start: Option[Bytes], inclusive: bool, reverse: bool, take stop: Option[Bytes]) -> Result[PageRange, Error] {
     let nested = tree_domain(tree) == CollectionMap
     let initial: Option[Bytes] = match start {
         None => None,
         Some(key) => Some(copied(list.slice(key, 0, if nested { order.min(4, list.len(key)) } else { list.len(key) }))?),
     }
-    let listed = std.page.cursor_open(tree.root, initial, inclusive || nested, reverse)
+    let outer_stop: Option[Bytes] = match view stop {
+        None => None,
+        Some(key) => {
+            // Collection keys are four bytes. A longer upper bound includes
+            // its collection; a lower bound always includes its collection.
+            let width = if !nested { list.len(key) } else { order.min(if reverse { 4 } else { 5 }, list.len(key)) }
+            Some(copied(list.slice(key, 0, width))?)
+        },
+    }
+    // In reverse, an exclusive four-byte key precedes every row of its
+    // collection. The outer cursor can skip that collection at the seek.
+    let within_collection = match start {
+        Some(key) => list.len(key) > 4,
+        None => false,
+    }
+    let outer_inclusive = inclusive || (nested && (!reverse || within_collection))
+    let listed = std.page.cursor_open_bounded(tree.root, initial, outer_inclusive, reverse, take outer_stop)
     Ok(PageRange(listed: take listed, nested: nested, active: list.new(), collection: 0,
-                 start: clone(start), inclusive: inclusive, reverse: reverse))
+                 start: clone(start), stop: take stop, inclusive: inclusive, reverse: reverse))
 }
 
 fn next_page_range(mut rows: PageRange) -> Result[Option[(Bytes, Arc[Bytes])], Error] {
@@ -442,7 +459,13 @@ fn next_page_collection(mut rows: PageRange) -> Result[bool, Error] {
         } else { None },
         None => None,
     }
-    list.push(mut rows.active, std.page.cursor_open(root, start, rows.inclusive, rows.reverse))
+    let stop: Option[Bytes] = match rows.stop {
+        Some(boundary) => if list.len(boundary) > 4 && list.slice(boundary, 0, 4) == key {
+            Some(copied(list.slice(boundary, 4, list.len(boundary)))?)
+        } else { None },
+        None => None,
+    }
+    list.push(mut rows.active, std.page.cursor_open_bounded(root, start, rows.inclusive, rows.reverse, take stop))
     Ok(true)
 }
 
@@ -563,13 +586,13 @@ fn test_paged_collection_paths() -> Result[(), Error] {
             return Error(Foreign)
         }
     }
-    let mut forward = open_page_range(tree, None, true, false)?
+    let mut forward = open_page_range(tree, None, true, false, None)?
     for row in 40u64 .. 160 {
         let Some((key, _)) = next_page_range(mut forward)? else { return Error(Missing("range row")) }
         if key != logical_key(7, key_word(row))? { return Error(Foreign) }
     }
     if let Some(_) = next_page_range(mut forward)? { return Error(Foreign) }
-    let mut reverse = open_page_range(tree, Some(logical_key(7, key_word(111))?), false, true)?
+    let mut reverse = open_page_range(tree, Some(logical_key(7, key_word(111))?), false, true, None)?
     let Some((key, _)) = next_page_range(mut reverse)? else { return Error(Missing("reverse row")) }
     if key != logical_key(7, key_word(110))? { return Error(Foreign) }
     let delta = compare_page_collections(earlier, tree)?

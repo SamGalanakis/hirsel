@@ -152,13 +152,29 @@ class InstructionGuard(unittest.TestCase):
                     self.assertIn("requires a verified build record", result.stderr)
                     record_build(changed)
                     result = compare(changed)
-                    self.assertEqual(result.returncode, 0, result.stderr)
-                    self.assertIn("Variable std_sha256 ", result.stdout)
-                    self.assertIn("(+0.000%)", result.stdout)
-                    result = compare(changed, "--aa")
                     self.assertEqual(result.returncode, 2, result.stderr)
-                    self.assertIn("--aa requires identical candidate hashes", result.stderr)
-                    self.assertIn("std_sha256", result.stderr)
+                    self.assertIn("changed std with one compiler requires --whole-std", result.stderr)
+
+                    baseline_row, = baseline["rows"]
+                    changed_row, = changed["rows"]
+                    automatic = baseline_row["flags"]
+                    for mode in (["--image", "library"], ["--source-std"]):
+                        baseline_row["flags"] = changed_row["flags"] = [*automatic, *mode]
+                        record_build(baseline)
+                        record_build(changed)
+                        base.write_text(json.dumps(baseline))
+                        result = compare(changed)
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertIn("Variable std_sha256 ", result.stdout)
+                        self.assertIn("(+0.000%)", result.stdout)
+                        result = compare(changed, "--aa")
+                        self.assertEqual(result.returncode, 2, result.stderr)
+                        self.assertIn("--aa requires identical candidate hashes", result.stderr)
+                        self.assertIn("std_sha256", result.stderr)
+                    baseline_row["flags"] = changed_row["flags"] = automatic
+                    record_build(baseline)
+                    record_build(changed)
+                    base.write_text(json.dumps(baseline))
                     (directory / f"{module}.hirsel").write_text(f"// {module}\n")
 
             (directory / "clbg.hirsel").write_text("// revised benchmark\n")

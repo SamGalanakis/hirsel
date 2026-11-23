@@ -66,7 +66,7 @@ fn lang_1_lf_crlf_and_bare_cr() {
         assert!(l.tokens[1].line_before);
         assert_eq!(l.tokens[1].span.start as usize, 1 + nl.len());
     }
-    for (text, start) in [("a\rb", 1), ("//a\rb", 3), ("/*a\rb*/", 3)] {
+    for (text, start) in [("a\rb", 1), ("//a\rb", 3)] {
         refusal(
             text,
             Span {
@@ -89,8 +89,6 @@ fn lang_1_bidi_controls_are_refused_in_every_token_context() {
             ("", "", false),
             ("//", "", false),
             ("///", "", false),
-            ("/*", "*/", false),
-            ("/**", "*/", false),
             ("\"", "\"", false),
             ("r#\"", "\"#", false),
             ("b\"", "\"", false),
@@ -118,7 +116,7 @@ fn lang_1_bidi_controls_are_refused_in_every_token_context() {
         0x061b, 0x061d, 0x200d, 0x2010, 0x2029, 0x202f, 0x2065, 0x206a,
     ] {
         let c = char::from_u32(code).unwrap();
-        for text in [format!("//{c}"), format!("/*{c}*/"), format!("\"{c}\"")] {
+        for text in [format!("//{c}"), format!("\"{c}\"")] {
             assert!(scan(&text).diagnostics.is_empty(), "U+{code:04X}: {text:?}");
         }
     }
@@ -156,12 +154,12 @@ fn lang_1_identifiers_are_ascii() {
 // Checked mutation C: store scalar counts in token spans instead of byte offsets.
 #[test]
 fn lang_1_positions_are_byte_offsets() {
-    let text = "/*é𝄞*/$";
-    refusal(text, Span { start: 10, end: 11 });
+    let text = "\"é𝄞\"$";
+    refusal(text, Span { start: 8, end: 9 });
     let l = scan(text);
-    assert_eq!(l.tokens[0].span, Span { start: 0, end: 10 });
-    assert_eq!(l.tokens[1].span, Span { start: 10, end: 11 });
-    assert_eq!(l.tokens[2].span, Span { start: 11, end: 11 });
+    assert_eq!(l.tokens[0].span, Span { start: 0, end: 8 });
+    assert_eq!(l.tokens[1].span, Span { start: 8, end: 9 });
+    assert_eq!(l.tokens[2].span, Span { start: 9, end: 9 });
 }
 
 // Checked mutation B: consume CR as part of a line comment instead of its newline.
@@ -178,11 +176,6 @@ fn lang_1_comment_scalars_and_delimiters() {
             "x"
         );
     }
-    // Slash and star are content until they begin a complete delimiter.
-    let l = scan("/* /x *y é */x");
-    assert!(l.diagnostics.is_empty());
-    assert_eq!(l.tokens[0].kind, TokenKind::BlockComment);
-    assert_eq!(l.tokens[0].span, Span { start: 0, end: 14 });
 }
 
 // Checked mutation B: match > before >>= rather than choosing the longest token.
@@ -222,28 +215,13 @@ fn lang_1_no_float_starts_after_a_projection_dot() {
     );
 }
 
-// Checked mutation B: fail to increment depth on an inner /* delimiter.
-#[test]
-fn lang_1_comments_nest() {
-    let text = "/* outer /* inner */ tail */x";
-    let l = scan(text);
-    assert!(l.diagnostics.is_empty());
-    assert_eq!(l.tokens.len(), 3);
-    assert_eq!(l.tokens[0].kind, TokenKind::BlockComment);
-    assert_eq!(l.tokens[0].span, Span { start: 0, end: 28 });
-    assert_eq!(l.tokens[1].kind, TokenKind::Ident);
-}
-
-// Checked mutation B: classify /// and /** as ordinary rather than documentation tokens.
+// Checked mutation B: classify /// as ordinary rather than documentation tokens.
 #[test]
 fn lang_1_documentation_comments_are_otherwise_comments() {
-    let text = "/// line\n/** block */fn f() {}";
+    let text = "/// line\nfn f() {}";
     let l = scan(text);
     assert!(l.diagnostics.is_empty());
-    assert_eq!(
-        (l.tokens[0].kind, l.tokens[1].kind),
-        (TokenKind::DocLine, TokenKind::DocBlock)
-    );
+    assert_eq!(l.tokens[0].kind, TokenKind::DocLine);
     assert_eq!(
         l.significant
             .iter()
@@ -262,23 +240,10 @@ fn lang_1_documentation_comments_are_otherwise_comments() {
     assert!(parsed(text).diagnostics.is_empty());
 }
 
-// Checked mutation B: omit the block-comment newline flag.
+// B2: `/*` opens no comment; it is one invalid token to its line end, and the next line lexes.
 #[test]
-fn lang_1_block_comment_newlines_count_for_lang_4() {
-    assert!(
-        parsed("fn f() { 1 /* no line */ + 2 }")
-            .diagnostics
-            .is_empty()
-    );
-    assert!(parsed("fn f() { (1 /*\n*/ + 2) }").diagnostics.is_empty());
-    assert!(parsed("fn f() { 1 /*\n*/ + 2 }").diagnostics.is_empty());
-}
-
-// Checked mutation C: accept EOF with an unmatched block-comment delimiter.
-#[test]
-fn lang_1_unterminated_comment_is_one_invalid_token() {
-    assert!(scan("// EOF is allowed").diagnostics.is_empty());
-    for text in ["/*", "/**", "/* outer /* inner */"] {
+fn lang_1_block_comments_are_refused() {
+    for text in ["/*", "/**", "/**/", "/* a */", "/* a */ x"] {
         refusal(
             text,
             Span {
@@ -291,5 +256,27 @@ fn lang_1_unterminated_comment_is_one_invalid_token() {
             l.tokens.iter().map(|t| t.kind).collect::<Vec<_>>(),
             [TokenKind::Invalid, TokenKind::Eof]
         );
+    }
+    let l = scan("/* a\nx */");
+    assert_eq!(l.diagnostics[0].rule, "LANG-1");
+    assert_eq!(l.diagnostics[0].primary, Span { start: 0, end: 4 });
+    assert_eq!(l.tokens[1].kind, TokenKind::Ident);
+    assert!(l.tokens[1].line_before);
+}
+
+// B1: a raw literal's line feed or CR is a refusal ending the invalid token before it.
+#[test]
+fn lang_1_raw_literals_close_on_their_line() {
+    for (text, end) in [
+        ("r\"a\nb\"", 3),
+        ("r#\"\n\"#", 3),
+        ("br#\"a\r\nb\"#", 5),
+        ("r\"a\rb\"", 3),
+    ] {
+        let l = scan(text);
+        assert_eq!(l.diagnostics[0].rule, "LANG-1", "{text:?}");
+        assert_eq!(l.diagnostics[0].primary, Span { start: 0, end }, "{text:?}");
+        assert_eq!(l.tokens[0].kind, TokenKind::Invalid);
+        assert_eq!(l.tokens[0].span, Span { start: 0, end });
     }
 }

@@ -104,7 +104,7 @@ unsafe fn check_tls(
         if let Some(secret) = secret
             && !secret
                 .policy
-                .patterns
+                .send
                 .iter()
                 .any(|pattern| pattern.covers(&write.name))
         {
@@ -241,7 +241,7 @@ pub unsafe extern "C" fn hirsel_core_scram_sha256(
                 },
                 secret: net::empty_buffer(),
                 origin: secret.origin,
-                patterns: secret.policy.patterns.clone(),
+                patterns: secret.policy.send.clone(),
                 committed: 0,
                 narrowed: None,
             },

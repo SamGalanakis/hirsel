@@ -221,6 +221,7 @@ pub(super) fn glue_emitter<'a>(
         current: None,
         exits: Vec::new(),
         exit_live: Some(Vec::new()),
+        raised_exit: None,
         step_labels: Default::default(),
         unchecked_steps: false,
         precharge: None,
@@ -228,6 +229,7 @@ pub(super) fn glue_emitter<'a>(
         step_counter: None,
         neutral_step_call: false,
         view_invariants: Vec::new(),
+        view_ends_before_exit: false,
         empty_bounds: empty::EmptyBounds::default(),
         sink,
         items,
@@ -611,13 +613,15 @@ impl FunctionEmitter<'_> {
             | FieldTy::View(_)
             | FieldTy::Locator(_) => None,
             FieldTy::Handle(
-                h @ (hirsel_core_layout::Handle::HostFile | hirsel_core_layout::Handle::Socket),
+                h @ (hirsel_core_layout::Handle::HostFile
+                | hirsel_core_layout::Handle::Socket
+                | hirsel_core_layout::Handle::Secret),
             ) => {
                 let handle = self.load(&Type::I64, p, 1);
-                let name = if *h == hirsel_core_layout::Handle::Socket {
-                    "hirsel_core_socket_drop"
-                } else {
-                    "hirsel_core_hostfile_drop"
+                let name = match h {
+                    hirsel_core_layout::Handle::Socket => "hirsel_core_socket_drop",
+                    hirsel_core_layout::Handle::Secret => "hirsel_core_secret_drop",
+                    _ => "hirsel_core_hostfile_drop",
                 };
                 self.runtime_void(name, &[ptr(CONTEXT), word(handle)]);
                 None

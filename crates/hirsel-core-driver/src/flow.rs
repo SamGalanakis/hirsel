@@ -31,6 +31,7 @@ impl CheckProduct {
                         required: None,
                         message: message.clone(),
                         unresolved: None,
+                        detail: None,
                     });
                 }
             }

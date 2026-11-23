@@ -105,7 +105,8 @@ pub(crate) struct Registry {
     run: Arc<RunGrants>,
 }
 
-/// Copyable designations and their backing storage live through the run.
+/// Run-wide designations and their backing storage. Secret slots are released by
+/// their last holder (TLS-5); the rest live through the run.
 #[derive(Default)]
 pub(crate) struct RunGrants {
     designations: Mutex<Designations>,

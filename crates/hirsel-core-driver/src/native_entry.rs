@@ -23,6 +23,7 @@ mod report;
 mod sites;
 mod start;
 use code::{Code, I8, I32, I64};
+pub(crate) use data::source_site;
 pub(crate) use sites::{check_linked_sites, live_site_words, retain_referenced};
 type Result<T> = std::result::Result<T, String>;
 fn error(e: impl std::fmt::Display) -> String {
@@ -119,16 +120,18 @@ impl<'a> Plan<'a> {
         let Layout::Fixed(layout) = &binding.recipe.layout else {
             return Err(NativeStop::Entry("Result needs fixed layout".into()));
         };
+        crate::native::recipe_build::refuse_unmatched_grants(
+            &identity,
+            &binding.parameters,
+            options,
+        )?;
         let mut ordinals = [0u64; 14];
         let mut grant_mask = options.grant_mask;
         let parameters = binding
             .parameters
             .iter()
             .map(|p| {
-                let kind = if let Some(interface) =
-                    p.ty.strip_prefix("core@1/core/Foreign[")
-                        .and_then(|ty| ty.strip_suffix(']'))
-                {
+                let kind = if let Some(interface) = p.foreign_interface() {
                     if !options.foreign_grants.contains(interface) {
                         return Err(NativeStop::Entry(format!(
                             "not granted: Foreign[{interface}]"
@@ -162,11 +165,6 @@ impl<'a> Plan<'a> {
         if secret_grants.iter().flatten().count() != options.secret_grants.len() {
             return Err(NativeStop::Entry(
                 "Secret grants must name distinct Secret parameters".into(),
-            ));
-        }
-        if options.exec_grants.len() as u64 > ordinals[grant_kind("Exec").unwrap() as usize] {
-            return Err(NativeStop::Entry(
-                "Exec grant has no matching entry parameter".into(),
             ));
         }
         if !options.exec_grants.is_empty() && options.replay.is_some() {

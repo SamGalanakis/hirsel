@@ -104,7 +104,8 @@ def resident(pid):
             for name in ['VmRSS', 'VmHWM']}
 
 
-def measure(argv, directory, env, tag, expected, recording=False, host_directory=None, events="instructions:u"):
+def measure(argv, directory, env, tag, expected, recording=False, host_directory=None,
+            events="instructions:u", before_phase=None):
     """Counters start after population; HWM resets to resident size at READY.
 
     The target reports its own monotonic operation duration. The post-DONE gate
@@ -142,6 +143,8 @@ def measure(argv, directory, env, tag, expected, recording=False, host_directory
             raise RuntimeError('target did not become ready: ' + ready + (work / 'stderr').read_text())
         pid = int((work / 'pid').read_text())
         start_resident = None
+        if before_phase is not None:
+            before_phase()
         if use_perf:
             # Setup may finish at the end of capped's 100 ms CPU quota period.
             # Both periods pass while the target is gated and counters are off.

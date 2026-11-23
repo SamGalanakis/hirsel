@@ -36,6 +36,7 @@ pub enum OptionId {
     InspectCore,
     TestTimeout,
     Rerun,
+    PropertyCorpus,
     Sim,
     SimSeeds,
     SimSeed,
@@ -58,7 +59,6 @@ pub enum OptionId {
     PackageStore,
     Locked,
     Frozen,
-    PackOut,
     Metrics,
     ProfileFront,
     ProfOut,
@@ -86,13 +86,13 @@ pub enum OptionId {
     FmtStdin,
     Signatures,
     ListRules,
-    SdkOut,
     PlaceTimeout,
     NPlace,
     Url,
     CallTimeout,
     Control,
     HostState,
+    CgroupRoot,
     Workdir,
     Listen,
     Scratch,
@@ -130,11 +130,12 @@ commands! {
     "check", "check [package-dir] [options]", "Check a package or an explicit input manifest.";
     "lock", "lock [package-dir] [options]", "Resolve a workspace and write or verify its lock.";
     "fetch", "fetch [package-dir] [options]", "Fetch the pinned libraries a workspace uses.";
-    "pack", "pack [package-dir] --out FILE [options]", "Publish a library and its dependency closure to an archive.";
+    "pack", "pack [package-dir] -o FILE [options]", "Publish a library and its dependency closure to an archive.";
     "build", "build [package-dir | --recipe HASH] [options]", "Assemble a native executable from a release recipe.";
     "publish", "publish PACKAGE [options]", "Check a package, publish its code objects and print the recipe hash.";
     "manifest", "manifest show PATH", "Print a release manifest.";
     "host", "host RECIPE --control SOCKET --state DIR --listen ADDR [options] [-- arguments...]", "Supervise a place and accept deploy requests.";
+    "launcher", "launcher --control SOCKET --state DIR [--cgroup-root DIR]", "Hold the groups' listeners and start their children for the platform host.";
     "deploy", "deploy RECIPE --control SOCKET --code-store DIR [options]", "Submit a recipe and its missing code objects to a host.";
     "run", "run [package-dir] [options] [-- arguments...]", "Build and run a native executable.";
     "prof", "prof <command>", "Capture or inspect a CPU profile.";
@@ -155,7 +156,7 @@ commands! {
     "replay", "replay PACKAGE --tape TAPE [--diagnose] [options]", "Replay a recorded program with no host grants.";
     "tape", "tape show TAPE --include-credentials", "Export the header and frames stored in a credential-bearing tape.";
     "test", "test [package-dir] [options]", "Run each discovered @test in an independent process. When hirsel.toml contains [tests], set limit, dirs and grants there.";
-    "inspect", "inspect [package-dir | --core | --std] (--interface [--json] | --foreign-header MODULE | --dependents DEF [--transitive] | --affected-tests DEF | --unused [--library])", "Inspect a package's declarations and dependencies.";
+    "inspect", "inspect [package-dir | ARCHIVE.hpkg | DEPENDENCY | --core | --std] [--interface [--json] | --foreign-header MODULE | --dependents DEF [--transitive] | --affected-tests DEF | --unused [--library]]", "Inspect a package's declarations and dependencies. The default is --interface.";
     "image", "image [library-root] [options]", "Publish checked core and std source libraries.";
     "core-product", "core-product [options]", "Produce or inspect the published core package.";
     "std-product", "std-product [options]", "Produce or inspect the published core and std packages.";
@@ -164,7 +165,7 @@ commands! {
     "fmt", "fmt [--check] [--signatures] <FILE|DIR|--stdin>", "Format a source file, a source directory, or standard input.";
     "explain", "explain RULE|MODULE|debug-lines|primer | explain --list [--json]", "Explain specification rules and find library declarations.";
     "primer", "primer", "Print the Hirsel primer: the language in one page.";
-    "sdk", "sdk ts <program> --out DIR [options]", "Generate browser and Node ES modules and TypeScript declarations.";
+    "sdk", "sdk ts <program> -o DIR [options]", "Generate browser and Node ES modules and TypeScript declarations.";
     "call", "call SERVER --url ws://HOST:PORT/PATH [options] [-- ENTRY [--FLAG VALUE...]]", "List a running place's entries, or call one, typed from the server's Describe.";
 }
 macro_rules! option {
@@ -202,13 +203,6 @@ static OPTIONS: &[OptionSpec] = &[
             "fetch", "pack"
         ],
         "Require a current workspace lock and use only the package store."
-    ),
-    option!(
-        PackOut,
-        ["--out"],
-        Some("FILE"),
-        ["pack"],
-        "Write the library archive to this file."
     ),
     option!(
         Interface,
@@ -291,15 +285,22 @@ static OPTIONS: &[OptionSpec] = &[
         Control,
         ["--control"],
         Some("SOCKET"),
-        ["host", "deploy"],
+        ["host", "deploy", "launcher"],
         "Host control socket."
     ),
     option!(
         HostState,
         ["--state"],
         Some("DIR"),
-        ["host", "replay"],
+        ["host", "replay", "launcher"],
         "Private host state directory."
+    ),
+    option!(
+        CgroupRoot,
+        ["--cgroup-root"],
+        Some("DIR"),
+        ["launcher"],
+        "Use a delegated cgroup v2 subtree for child lifecycle and contained groups."
     ),
     option!(
         TapeRetention,
@@ -398,13 +399,6 @@ static OPTIONS: &[OptionSpec] = &[
         Some("PATH"),
         ["build"],
         "Write a release manifest from an empty-list preview."
-    ),
-    option!(
-        SdkOut,
-        ["--out"],
-        Some("DIR"),
-        ["sdk"],
-        "Write the generated SDK to this directory."
     ),
     option!(
         PlaceTimeout,
@@ -769,6 +763,13 @@ static OPTIONS: &[OptionSpec] = &[
         "Execute every selected test, reusing no recorded pass."
     ),
     option!(
+        PropertyCorpus,
+        ["--property-corpus"],
+        Some("DIR"),
+        ["test"],
+        "Replay and save minimized failures from opt-in properties in DIR."
+    ),
+    option!(
         Sim,
         ["--sim"],
         None,
@@ -883,8 +884,8 @@ static OPTIONS: &[OptionSpec] = &[
         Output,
         ["-o", "--output"],
         Some("PATH"),
-        ["build", "run", "replay", "test"],
-        "Write the executable, or test executables, here."
+        ["build", "run", "replay", "test", "pack", "sdk"],
+        "Write the command output to this path."
     ),
     option!(
         Entry,

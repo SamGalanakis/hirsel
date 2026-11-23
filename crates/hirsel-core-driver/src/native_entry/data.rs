@@ -4,6 +4,9 @@ use hirsel_core_layout::source_positions;
 use std::collections::BTreeSet;
 use std::mem::offset_of;
 
+const SOURCE_FILES: &str = "__hirsel_source_files";
+const SOURCE_ROW_BYTES: usize = 40;
+
 pub(super) struct Tables {
     pub parameters: DataId,
     pub names: DataId,
@@ -154,7 +157,7 @@ pub(super) fn write(
         object,
         plan.secret_grants
             .iter()
-            .flat_map(|grant| grant.map_or([""; 3], |g| [&g.parameter, &g.source, &g.patterns])),
+            .flat_map(|grant| grant.map_or([""; 3], |g| [&g.parameter, &g.source, &g.policy])),
     )?;
     let env_patterns = bytes(
         object,
@@ -182,7 +185,7 @@ pub(super) fn write(
     let exec_bindings = define(object, None, exec_rows, 8, &exec_pointers)?;
     let (files, file_count) = source_files(sources, live_sites)?;
     let files_id = object
-        .declare_data("__hirsel_source_files", Linkage::Local, false, false)
+        .declare_data(SOURCE_FILES, Linkage::Local, false, false)
         .map_err(error)?;
     define_contents(object, files_id, files, 8, &[])?;
     // The decoder symbol binds the generated entry and Context ABI to the runtime.
@@ -270,11 +273,12 @@ fn source_files(
         rows.push((&file.path, start, positions));
     }
     let count = rows.len();
-    let mut files = vec![0; 40 * count];
+    let mut files = vec![0; SOURCE_ROW_BYTES * count];
     for (row, (path, start, positions)) in rows.into_iter().enumerate() {
-        files[40 * row + 32..40 * row + 40].copy_from_slice(&start.to_le_bytes());
+        let row = SOURCE_ROW_BYTES * row;
+        files[row + 32..row + SOURCE_ROW_BYTES].copy_from_slice(&start.to_le_bytes());
         for (view, content) in [path.as_bytes(), &positions].into_iter().enumerate() {
-            let field = 40 * row + 16 * view;
+            let field = row + 16 * view;
             let offset = files.len() as u64;
             files[field..field + 8].copy_from_slice(&offset.to_le_bytes());
             files[field + 8..field + 16].copy_from_slice(&(content.len() as u64).to_le_bytes());
@@ -282,4 +286,40 @@ fn source_files(
         }
     }
     Ok((files, count))
+}
+
+/// Resolve a corpus report's native word against the same file and coordinates
+/// the linked program uses for failure diagnostics.
+pub(crate) fn source_site(binary: &std::path::Path, site: u64) -> Option<String> {
+    use object::{Object as _, ObjectSection as _, ObjectSymbol as _, read::ReadCache};
+
+    if !(1..source_positions::SITE_END).contains(&site) {
+        return None;
+    }
+    let file = ReadCache::new(std::fs::File::open(binary).ok()?);
+    let elf = object::File::parse(&file).ok()?;
+    let files = elf.symbol_by_name(SOURCE_FILES)?;
+    let section = elf.section_by_index(files.section_index()?).ok()?;
+    let data = section.data_range(files.address(), files.size()).ok()??;
+    let word = |row: &[u8], at| u64::from_le_bytes(row[at..at + 8].try_into().unwrap());
+    // The first path starts immediately after the file rows.
+    let rows_end = word(data.get(..SOURCE_ROW_BYTES)?, 0) as usize;
+    let (rows, _) = data.get(..rows_end)?.as_chunks::<SOURCE_ROW_BYTES>();
+    let file = rows
+        .partition_point(|row| word(row, 32) <= site)
+        .checked_sub(1)?;
+    let row = &rows[file];
+    let view = |at| {
+        let start = word(row, at) as usize;
+        data.get(start..start.checked_add(word(row, at + 8) as usize)?)
+    };
+    let path = std::str::from_utf8(view(0)?).ok()?;
+    let (tag, positions) = view(16)?.split_first()?;
+    let offset = (site - word(row, 32)) as usize;
+    let (line, column) = match *tag {
+        source_positions::TAG => source_positions::position(positions, offset),
+        source_positions::POINTS_TAG => source_positions::point_position(positions, offset)?,
+        _ => return None,
+    };
+    Some(format!("{path}:{line}:{column}"))
 }

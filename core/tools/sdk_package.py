@@ -1,4 +1,4 @@
-"""Build the client tarball and consume it in an isolated TypeScript project."""
+"""Check the packed client and the standalone generated SDK in isolated projects."""
 import json
 import os
 from pathlib import Path
@@ -58,8 +58,9 @@ def check(root, compiler, runtime, node_dist, tool_tarballs):
         executable = work / 'fixture'
         subprocess.run([compiler, 'build', '--source-core', '--inputs', inputs, '--runtime', runtime,
                         '--entry', 'store@1/packed_consumer/main', '--grant', 'Stdout',
+                        '--grant', 'Clock', '--grant', 'Random', '--grant', 'Tasks',
                         '--store', work / 'store', '-o', executable], cwd=work, check=True)
-        subprocess.run([compiler, 'sdk', 'ts', executable, '--out', consumer / 'generated',
+        subprocess.run([compiler, 'sdk', 'ts', executable, '--output', consumer / 'generated',
                         '--runtime', runtime], cwd=work, check=True)
         (consumer / 'payload.bin').write_bytes(subprocess.check_output([executable], cwd=work))
         shutil.copyfile(fixture.with_suffix('.ts'), consumer / 'consumer.ts')
@@ -71,3 +72,25 @@ def check(root, compiler, runtime, node_dist, tool_tarballs):
         # NodeStorage spawns flock(1) to hold a lease on its private state directory.
         subprocess.run([*isolated_node, f'--allow-fs-write={consumer}', '--allow-child-process', 'consumer.ts'],
                        cwd=consumer, env=env, check=True)
+
+        standalone = work / 'standalone'
+        standalone.mkdir()
+        shutil.copyfile(consumer / 'package.json', standalone / 'package.json')
+        shutil.copytree(consumer / 'generated', standalone / 'generated')
+        subprocess.run([*install, *tool_tarballs], cwd=standalone, env=npm_env, check=True)
+        standalone_source = (consumer / 'consumer.ts').read_text()
+        standalone_source = standalone_source.replace("'@hirsel/client'", "'./generated/client.js'")
+        standalone_source = standalone_source.replace("'@hirsel/client/node'", "'./generated/node.js'")
+        (standalone / 'consumer.ts').write_text(standalone_source)
+        compiled = standalone / 'compiled'
+        standalone_node = [node, '--permission', f'--allow-fs-read={standalone}',
+                           f'--allow-fs-write={standalone}']
+        subprocess.run([*standalone_node, standalone / 'node_modules/typescript/bin/tsc',
+                        '--strict', '--module', 'NodeNext', '--target', 'ES2022',
+                        '--outDir', compiled, 'consumer.ts', 'generated/browser.ts'],
+                       cwd=standalone, env=env, check=True)
+        for module in (standalone / 'generated').glob('*.js'):
+            shutil.copyfile(module, compiled / 'generated' / module.name)
+        shutil.copyfile(consumer / 'payload.bin', compiled / 'payload.bin')
+        subprocess.run([*standalone_node, '--allow-child-process', 'consumer.js'],
+                       cwd=compiled, env=env, check=True)

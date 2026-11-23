@@ -12,6 +12,7 @@
 //! ROOT/link/kit/                   the startup objects and link-only libraries
 //! ROOT/runtime/<target>/<hash>/     runtime archives
 //! ROOT/core-packages/               core and std images
+//! ROOT/core-packages/store-1.hpkg   Store package sources
 //! ROOT/hirsel-core-toolchain.json   this selection
 //! ```
 //!
@@ -87,6 +88,33 @@ impl Installed {
     }
     pub fn cache(&self) -> PathBuf {
         self.root.join("core-packages")
+    }
+
+    pub(crate) fn store_package(
+        id: &crate::package_content::Id,
+    ) -> io::Result<crate::package_content::Content> {
+        use crate::package_content::{Id, PackageArchive, check_identity};
+
+        let executable = std::env::current_exe()?;
+        let installed = Self::discover(&executable)?
+            .ok_or_else(|| io::Error::other("store@1 requires an installed toolchain"))?;
+        let path = installed.cache().join("store-1.hpkg");
+        let mut archive = PackageArchive::open(&path)
+            .map_err(|error| io::Error::other(format!("installed store@1: {error}")))?;
+        let content = archive.entries.remove(&archive.head).unwrap().content;
+        check_identity(id, archive.head, &content.id).map_err(io::Error::other)?;
+        if content.bindings
+            != BTreeMap::from([(
+                Id {
+                    name: "std".into(),
+                    major: 1,
+                },
+                None,
+            )])
+        {
+            return Err(io::Error::other("installed store@1 must bind std@1"));
+        }
+        Ok(content)
     }
     pub fn runtime(&self, target: &str) -> Option<PathBuf> {
         self.registration

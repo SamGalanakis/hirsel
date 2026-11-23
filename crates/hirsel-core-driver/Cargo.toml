@@ -11,6 +11,7 @@ name = "hirsel"
 path = "src/main.rs"
 
 [dependencies]
+hirsel-contain = { path = "../hirsel-contain" }
 hirsel-prof = { path = "../hirsel-prof" }
 hirsel-tape-format = { path = "../hirsel-tape-format" }
 hirsel-core-net = { path = "../hirsel-core-net" }
@@ -52,4 +53,5 @@ tempfile = "3"
 hirsel-core-ir = { path = "../hirsel-core-ir", features = ["eval", "wf"] }
 
 [build-dependencies]
+toml = { version = "0.8.23", default-features = false, features = ["parse"] }
 sha2 = "0.10"

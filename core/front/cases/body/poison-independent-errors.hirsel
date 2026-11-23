@@ -1,0 +1,24 @@
+// PROG-8: a name error poisons its construct, not its definition. The call of `nope`,
+// `q` bound from it and `q + 1u64` built on `q` are silent; each later independent error
+// in the same body is reported at the site it has when checked alone.
+fn f(a: u64) -> u64 {
+  let q = nope(a)
+  let r = q + 1u64
+  let m: String = a
+  let k: u64 = "s"
+  a
+}
+type Choice = Yes | No(u64)
+fn g(x: Choice, a: u64) -> u64 {
+  let n = match x { Yes => 1u64, Gone(_) => 0u64 }
+  let s: String = a
+  a
+}
+// expect: refuse LANG-7 at 5:11
+// expect: refuse LANG-11 at 7:19
+// expect: compared LANG-11 at 7:19 | u64 | core@1/core/String
+// expect: refuse LANG-11 at 8:16
+// expect: compared LANG-11 at 8:16 | core@1/core/String | u64
+// expect: refuse LANG-7 at 13:34
+// expect: refuse LANG-11 at 14:19
+// expect: compared LANG-11 at 14:19 | u64 | core@1/core/String

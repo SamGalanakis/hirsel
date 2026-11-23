@@ -63,7 +63,7 @@ fn place(mut r: Reg) -> Result[(), store.runner.RegisterError] {
     store.runner.transact(mut r, code.describe(put), 65536u64, store.runner.DEFAULT_STEPS)?
     store.runner.transact(mut r, code.describe(large), 65536u64, store.runner.DEFAULT_STEPS)?
     store.runner.compute(mut r, code.describe(big), 65536u64, store.runner.DEFAULT_STEPS)?
-    store.runner.query(mut r, code.describe(read), 65536u64, store.runner.DEFAULT_STEPS)?
+    store.runner.query(mut r, code.describe(read), std.codec.key_u64(), std.codec.of_u32(), 65536u64, store.runner.DEFAULT_STEPS)?
     store.runner.compute(mut r, code.describe(shape), 65536u64, store.runner.DEFAULT_STEPS)?
     store.runner.retain_gone(mut r, retired())
 }

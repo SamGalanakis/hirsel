@@ -1,0 +1,49 @@
+fn expect(condition: bool) {
+    if !condition {
+        fail("JSON-RPC framing assertion")
+    }
+}
+
+fn refused(input: String, code: i64) {
+    let Error(take failure) = rpc.request(input) else {
+        fail("accepted invalid request")
+    }
+    expect(failure.code == code)
+}
+
+@test
+fn jsonrpc_framing() -> Result[(), ()] {
+    refused("[", -32700)
+    refused("[]", -32600)
+    refused("[{\"jsonrpc\":\"2.0\",\"method\":\"ping\",\"id\":1}]", -32600)
+    refused("{\"jsonrpc\":\"2.0\",\"method\":\"ping\",\"id\":null}", -32600)
+    refused("{\"jsonrpc\":\"2.0\",\"method\":\"ping\",\"id\":true}", -32600)
+    refused("{\"jsonrpc\":\"2.0\",\"method\":\"ping\",\"id\":1.5}", -32600)
+    refused("{\"jsonrpc\":\"2.0\",\"method\":\"ping\",\"id\":1,\"params\":[]}", -32602)
+    refused("{\"jsonrpc\":\"2.0\",\"method\":\"ping\",\"id\":1,\"\\u0069d\":2}", -32600)
+    let hello = result.unwrap(rpc.request("{\"jsonrpc\":\"2.0\",\"method\":\"ping\",\"id\":\"01\"}"))
+    let expected = "{\"jsonrpc\":\"2.0\",\"id\":\"01\",\"result\":{\"resultType\":\"complete\"}}"
+    let rpc.Request(id: take hello_id, method: _, params: _) = take hello
+    let Some(take id) = take hello_id else {
+        fail("lost string ID")
+    }
+    expect(rpc.encode_result(id, map.new()) == expected)
+    let big = result.unwrap(rpc.request("{\"jsonrpc\":\"2.0\",\"method\":\"ping\",\"id\":9223372036854775808}"))
+    let rpc.Request(id: take big_request_id, method: _, params: _) = take big
+    let Some(take big_id) = take big_request_id else {
+        fail("lost integer ID")
+    }
+    let err = rpc.fault(Some(option.unwrap(rpc.id_value("9223372036854775808"))), -32601, "Method not found")
+    expect(rpc.encode_fault(err) == "{\"jsonrpc\":\"2.0\",\"id\":9223372036854775808,\"error\":{\"code\":-32601,\"message\":\"Method not found\"}}")
+    expect(rpc.same_id(big_id, option.unwrap(rpc.id_value("9223372036854775808"))))
+    expect(!rpc.same_id(id, option.unwrap(rpc.id_value("1"))))
+    let notification = result.unwrap(rpc.request("{\"jsonrpc\":\"2.0\",\"method\":\"notice\"}"))
+    let rpc.Request(id: take notification_id, method: _, params: _) = take notification
+    let None = take notification_id else {
+        return Error(())
+    }
+    let Error(()) = rpc.incoming("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"resultType\":\"complete\"},\"error\":{}}") else {
+        return Error(())
+    }
+    Ok(())
+}

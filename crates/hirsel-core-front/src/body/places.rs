@@ -216,7 +216,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             if v.born < born && v.avail != entry {
                 let name = self.slot_name(s);
-                let cause = self.cause(v.at);
+                let cause = Cause {
+                    site: self.cause(v.at),
+                    role: match v.avail {
+                        Avail::Moved | Avail::Maybe => CausalRole::MovedHere,
+                        Avail::Uninit => CausalRole::DeclaredHere,
+                        Avail::Live => CausalRole::ConflictsHere,
+                    },
+                };
                 self.refuse_from(
                     "OWN-17",
                     site,
@@ -262,7 +269,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Avail::Moved => ("OWN-5", format!("`{name}` was moved")),
             Avail::Uninit => ("OWN-5", format!("`{name}` is not initialised")),
         };
-        let cause = self.cause(v.at);
+        let cause = Cause {
+            site: self.cause(v.at),
+            role: match v.avail {
+                Avail::Moved | Avail::Maybe => CausalRole::MovedHere,
+                Avail::Uninit => CausalRole::DeclaredHere,
+                Avail::Live => CausalRole::ConflictsHere,
+            },
+        };
         self.refuse_from(rule, self.span(n), vec![cause], message);
         // Refused once; later uses are not refused again for it.
         self.set(s, Avail::Live, n);
@@ -307,26 +321,91 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             if overlap(&self.steps, f.place, p)
                 && let Some(rule) = breaks(f.hold, act)
             {
-                let name = self.slot_name(p.slot);
-                let why = match f.hold {
-                    Hold::View(_) => "is viewed",
-                    Hold::CallView(..) => "is viewed by an argument of this call",
-                    Hold::CallMut(..) => "is lent `mut` to this call",
-                    Hold::Assign => "is reserved by an assignment",
-                    Hold::Lent(_) => "is lent `mut` to a pattern binding",
+                let name = self.shown_place(f.place);
+                let (why, role) = match f.hold {
+                    Hold::View(_) => ("is viewed", CausalRole::ViewedHere),
+                    Hold::CallView(..) => (
+                        "is viewed by an argument of this call",
+                        CausalRole::ViewedHere,
+                    ),
+                    Hold::CallMut(..) => ("is lent `mut` to this call", CausalRole::LentMutHere),
+                    Hold::Assign => ("is reserved by an assignment", CausalRole::ReservedHere),
+                    Hold::Lent(_) => (
+                        "is lent `mut` to a pattern binding",
+                        CausalRole::LentMutHere,
+                    ),
                 };
-                let cause = self.cause(f.site);
-                self.refuse_from(
-                    rule,
-                    site,
-                    vec![cause],
-                    format!("a place of `{name}` {why}"),
-                );
+                let cause = Cause {
+                    site: self.cause(f.site),
+                    role,
+                };
+                self.refuse_from(rule, site, vec![cause], format!("`{name}` {why}"));
                 return false;
             }
         }
         true
     }
+    fn shown_place(&mut self, place: Place) -> String {
+        use std::fmt::Write;
+
+        let mut text = self.slot_name(place.slot).to_owned();
+        let mut ty = self.var(place.slot).ty;
+        for at in place.start..place.start + place.len {
+            while let TyKind::View(inner) | TyKind::Anchored(inner, _) = self.t.kind(ty) {
+                ty = *inner;
+            }
+            match self.steps[at as usize] {
+                PStep::Field(i) => {
+                    if let TyKind::Adt(d, _) = self.t.kind(ty)
+                        && let DeclBody::Record(fields) = &self.p.decls[d.index()].body
+                    {
+                        write!(text, ".{}", fields[i as usize].name).unwrap();
+                    } else {
+                        write!(text, ".{i}").unwrap();
+                    }
+                    let field = self.field_ty(ty, i).expect("checked field");
+                    ty = self.linked(field);
+                }
+                PStep::Payload => {
+                    let TyKind::Adt(_, args) = self.t.kind(ty) else {
+                        unreachable!("a payload step follows a holder");
+                    };
+                    ty = args[0];
+                }
+                PStep::Index {
+                    collection, index, ..
+                } => {
+                    let span = self.span(index);
+                    let written = &self.item.source_text()[span.start as usize..span.end as usize];
+                    write!(text, "[{written}]").unwrap();
+                    ty = match self.t.kind(collection) {
+                        TyKind::Array(elem, _) => *elem,
+                        TyKind::Adt(_, args) => args[0],
+                        _ => unreachable!("an index step follows a collection"),
+                    };
+                }
+                PStep::Case(case, i) => {
+                    let TyKind::Adt(d, args) = self.t.kind(ty).clone() else {
+                        unreachable!("a case step follows a variant");
+                    };
+                    let DeclBody::Variant(cases) = &self.p.decls[d.index()].body else {
+                        unreachable!("a case step follows a variant");
+                    };
+                    let case = &cases[case as usize];
+                    let field = &case.fields[i as usize];
+                    if case.labelled {
+                        write!(text, ".{}.{}", case.name, field.name).unwrap();
+                    } else {
+                        write!(text, ".{}.{i}", case.name).unwrap();
+                    }
+                    let field = subst(&mut self.t, field.ty, &args);
+                    ty = self.linked(field);
+                }
+            }
+        }
+        text
+    }
+
     pub(super) fn unfreeze_at(&mut self, i: usize) {
         let x = self.freezes.remove(i);
         self.vars[x.place.slot as usize].as_mut().unwrap().holds -= 1;
@@ -444,11 +523,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     shared: false,
                 };
                 let item = self.item;
-                for token in
-                    &item.tree.tokens[u.projections.start as usize..u.projections.end as usize]
-                {
-                    if token.kind == TokenKind::Ident {
-                        self.field(&mut at, self.p.index.symbols.text(token.symbol), n)?;
+                for token in u.projections.start..u.projections.end {
+                    if item.tree.tokens[token as usize].kind == TokenKind::Ident {
+                        self.field(&mut at, hirsel_core_syntax::TokenId(token), n)?;
                     }
                 }
                 Ok(Some(at))
@@ -457,7 +534,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 let Some(mut at) = self.place(self.kids(n)[0])? else {
                     return Ok(None);
                 };
-                self.field(&mut at, self.token_text(n), n)?;
+                self.field(&mut at, self.item.tree.node(n).token.unwrap(), n)?;
                 Ok(Some(at))
             }
             NodeKind::Index => {
@@ -479,7 +556,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     self.steps.extend_from_within(s..s + l);
                     at.place.start = (self.steps.len() - l) as u32;
                 }
-                self.steps.push(PStep::Index { collection, value });
+                self.steps.push(PStep::Index {
+                    collection,
+                    value,
+                    index: c[1],
+                });
                 at.place.len += 1;
                 at.shared |= viewed
                     || matches!(self.t.kind(collection), TyKind::Adt(d, _) if self.p.decls[d.index()].role == Some(Role::FixedSpan));
@@ -514,7 +595,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
 
     /// Step `at` to its field `name`; through a view, a field that is not plain reads
     /// as a view (OWN-8).
-    pub(super) fn field(&mut self, at: &mut At, name: &str, n: NodeId) -> Result<(), ()> {
+    fn field(
+        &mut self,
+        at: &mut At,
+        token: hirsel_core_syntax::TokenId,
+        n: NodeId,
+    ) -> Result<(), ()> {
+        let name = self.item.tree.token_text(self.item.text, token);
         let (inner, view) = match self.t.kind(at.ty) {
             TyKind::View(x) => (*x, true),
             _ => (at.ty, false),
@@ -533,7 +620,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             } else {
                 args[0]
             };
-            return self.field(at, name, n);
+            return self.field(at, token, n);
         }
         // A region value in region `r`: its region fields are in `r` unless they name
         // another region (MEM-6).
@@ -544,8 +631,32 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let mut stable = false;
         let found = match self.t.kind(inner).clone() {
             TyKind::Adt(d, args) => {
-                self.require_visible_fields(d, n)?;
                 let decl = &self.p.decls[d.index()];
+                if decl.opaque && decl.site.module != self.p.modules[self.at.module as usize].id {
+                    let name = &decl.path.0.name;
+                    let mut r = refusal(
+                        "PROG-2",
+                        self.cause(n),
+                        format!("`{name}` is opaque outside its module"),
+                    );
+                    let member = self.item.token_span(token);
+                    let before = &self.item.tree.tokens[..token.0 as usize];
+                    let mut significant = before.iter().rev().filter(|t| !t.kind.is_trivia());
+                    if let (Some(dot), Some(receiver)) = (significant.next(), significant.next())
+                        && dot.kind == TokenKind::Dot
+                    {
+                        r.detail = Some(Box::new(RefusalDetail::OpaqueField {
+                            receiver_type: decl.path.clone(),
+                            receiver: Span {
+                                start: r.primary.span.start,
+                                end: receiver.span.end - self.item.file_offset,
+                            },
+                            member,
+                        }));
+                    }
+                    self.push_refusal(r);
+                    return Err(());
+                }
                 stable = decl.repr == Repr::Region;
                 match &decl.body {
                     DeclBody::Record(fs) => fs.iter().position(|f| f.name == name).map(|i| {
@@ -573,7 +684,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 );
                 if let TyKind::Adt(d, _) = self.t.kind(inner) {
                     let decl = &self.p.decls[d.index()];
-                    refusal = refusal.with_unresolved(name, NameScope::Field(decl.path.clone()));
+                    refusal = refusal.with_unresolved(
+                        name,
+                        self.item.token_span(token),
+                        NameScope::Field(decl.path.clone()),
+                    );
                 }
                 self.push_refusal(refusal);
             }
@@ -669,7 +784,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     Origin::ViewParam => {
                         // OWN-7: a view parameter of a moving type is never moved.
                         let message = format!("`{name}` is a view parameter");
-                        self.refuse_compared("OWN-7", n, "view", "take", message);
+                        let mut r = refusal("OWN-7", self.cause(n), message)
+                            .with_comparison("view", "take");
+                        r.causal.push(Cause::declared(self.declared_at(s)));
+                        self.push_refusal(r);
                         return;
                     }
                     Origin::MutParam => {
@@ -677,7 +795,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         self.refuse_from(
                             "OWN-11",
                             self.span(n),
-                            vec![cause],
+                            vec![Cause::declared(cause)],
                             format!("`{name}` is a `mut` parameter"),
                         );
                         return;
@@ -705,7 +823,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     self.refuse_from(
                         "OWN-5",
                         self.span(n),
-                        vec![cause],
+                        vec![Cause::declared(cause)],
                         format!("`{name}` is not writable"),
                     );
                     return;
@@ -751,7 +869,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     address =
                         self.address(AddressBase::Address(address), &[Step::Field(i)], place, n);
                 }
-                PStep::Index { collection, value } => {
+                PStep::Index {
+                    collection, value, ..
+                } => {
                     let value = value?;
                     ty = match self.t.kind(collection) {
                         TyKind::Array(elem, _) => *elem,

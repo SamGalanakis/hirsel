@@ -1,8 +1,8 @@
 use super::*;
 use hirsel_core_ir::{FuncId, eval};
 
-#[path = "diagnostic_hints.rs"]
-mod diagnostic_hints;
+#[path = "diagnostic_fixes.rs"]
+mod diagnostic_fixes;
 
 pub(crate) fn request(source: &str, dir: &Path) -> CheckRequest {
     let source_file = dir.join("main.hirsel");
@@ -1134,10 +1134,10 @@ fn prog7_machine_refusal_spans_point_into_current_file_bytes() {
 fn prog7_terminal_sites_count_scalar_columns_and_crlf_lines() {
     // Bugs: a column that counts bytes, and a CR before LF counted as a column.
     // Oracle: positions counted by hand below (docs/spec/diagnostics.md,
-    // "Terminal sites"). On line 3, 44 scalars (50 bytes) precede the refused
-    // `n`, so it is column 45; a byte count would say 51.
+    // "Terminal sites"). On line 3, 49 scalars (55 bytes) precede the refused
+    // `n`, so it is column 50; a byte count would say 56.
     let dir = tempfile::tempdir().unwrap();
-    let source = "// \u{fc}\r\nfn good() -> u64 { 42 }\r\nfn bad() -> u64 { /* \u{e9}\u{2192}\u{1f600} */ let n: u16 = 7; n }\r\n";
+    let source = "// \u{fc}\r\nfn good() -> u64 { 42 }\r\nfn bad() -> u64 { let _ = \"\u{e9}\u{2192}\u{1f600}\"; let n: u16 = 7; n }\r\n";
     let mut req = request(source, dir.path());
     req.capture_sources().unwrap();
     let files = crate::SourceFiles::of(&req);
@@ -1149,7 +1149,7 @@ fn prog7_terminal_sites_count_scalar_columns_and_crlf_lines() {
     let refusal = diagnostics.iter().find(|d| d.rule == "LANG-11").unwrap();
     assert_eq!(
         files.render(&refusal.primary),
-        format!("{}:3:45-46", path.display())
+        format!("{}:3:50-51", path.display())
     );
     // "// \u{fc}" is four scalars: its CR is the line end, so the LF is column 5.
     let lf = source.find('\n').unwrap();
@@ -2973,22 +2973,33 @@ fn unresolved_closure_patterns_do_not_emit_or_use_undeclared_binders() {
 }
 
 #[test]
-fn unresolved_bodies_suppress_cascades_without_hiding_independent_body_errors() {
+fn unresolved_bodies_suppress_cascades_without_hiding_independent_errors() {
     let dir = tempfile::tempdir().unwrap();
-    let source = "type Choice = Yes | No(u64)\nfn pattern(x: Choice) -> u64 { match x { Yes => 1u64, Missing(_) => 0u64 } }\nfn independent() -> u64 { true }\n";
-    for attempt in 0..2 {
+    // The refused body's own independent error (`let k`) is reported cold, from
+    // its record when warm, and follows a change to the signature it reads (PROG-8
+    // poison).
+    let source = |other: &str| {
+        format!(
+            "type Choice = Yes | No(u64)\nfn other() -> {other} {{ {other}_value() }}\nfn pattern(x: Choice) -> u64 {{ let k: u64 = other(); match x {{ Yes => 1u64, Missing(_) => 0u64 }} }}\nfn bool_value() -> bool {{ true }}\nfn u64_value() -> u64 {{ 0u64 }}\n"
+        )
+    };
+    for (attempt, other, expected) in [
+        (0, "bool", &[("LANG-11", 2), ("LANG-7", 2)][..]),
+        (1, "bool", &[("LANG-11", 2), ("LANG-7", 2)][..]),
+        (2, "u64", &[("LANG-7", 2)][..]),
+    ] {
         let product = Driver::default()
-            .check(request(source, dir.path()), &mut Meter::new(false))
+            .check(request(&source(other), dir.path()), &mut Meter::new(false))
             .unwrap();
         assert!(!product.accepted());
-        let rules: Vec<_> = product
+        let mut rules: Vec<_> = product
             .diagnostics
             .iter()
-            .map(|r| r.rule.as_str())
+            .map(|r| (r.rule.as_str(), r.primary.item))
             .collect();
+        rules.sort_unstable();
         assert_eq!(
-            rules,
-            ["LANG-7", "LANG-11"],
+            rules, expected,
             "attempt {attempt}: {:?}",
             product.diagnostics
         );
@@ -3077,8 +3088,8 @@ fn legal() -> u64 {
         let [causal] = diagnostic.causal.as_slice() else {
             panic!("{function} must name one conflicting binding");
         };
-        assert_eq!(causal.module, cause_module);
-        assert_eq!(causal.span, cause);
+        assert_eq!(causal.site.module, cause_module);
+        assert_eq!(causal.site.span, cause);
 
         let definition = path(&format!("main/{function}"));
         let root = hirsel_core_ir::Identity::plain(definition.clone());
@@ -3093,7 +3104,7 @@ fn legal() -> u64 {
         assert_eq!(
             message,
             format!(
-                "app@1/main:{}: LANG-7 `{name}` shadows a visible name\n  caused by {cause_module}:{}",
+                "app@1/main:{}: LANG-7 `{name}` shadows a visible name\n  declared here: {cause_module}:{}",
                 terminal(source, at),
                 terminal(cause_source, cause)
             )

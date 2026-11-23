@@ -2,8 +2,10 @@
 
 mod closure;
 #[cfg(test)]
-mod code_store;
+pub(crate) mod code_store;
 mod exchange;
+#[cfg(test)]
+mod operation_tags;
 mod reservation;
 
 use crate::code_store::CodeStore;
@@ -15,6 +17,7 @@ use exchange::Exchange;
 use hirsel_core_ids::ContentHash;
 use hirsel_core_ir::address::Group;
 use hirsel_core_ir::decode::{DecodeBudget, DecodeError, DecodeLimit, DecodeLimits};
+pub use hirsel_core_ir::normal::EngineTag;
 use hirsel_core_ir::normal::{self, Annex, DecodedBody, Slot};
 use hirsel_core_ir::release_recipe::{Backend, ObjectRef, Recipe};
 use hirsel_core_ir::{FuncId, Identity};
@@ -138,15 +141,6 @@ impl From<io::Error> for AdmissionError {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum EngineTag {
-    Instruction(u8),
-    Runtime(u8),
-    Host(u8),
-    Flow(u8),
-    Terminator(u8),
-}
-
 /// The implementation table belongs to the engine installation, not the sender.
 pub trait BackendSemantics {
     fn supports_target(&self, backend: Backend, target: &str) -> bool;
@@ -178,15 +172,8 @@ impl BackendSemantics for NativeSemantics {
     }
 
     fn supports_tag(&self, backend: Backend, tag: EngineTag) -> bool {
-        // Both engines implement these normal-form operation tags.
         match backend {
-            Backend::Cranelift | Backend::Llvm => match tag {
-                EngineTag::Instruction(tag) => tag <= 43,
-                EngineTag::Runtime(tag) => matches!(tag, 0..=15 | 17..=22 | 27..=46 | 60..=64),
-                EngineTag::Host(tag) => tag <= 31 || tag == 75,
-                EngineTag::Flow(tag) => tag <= 8,
-                EngineTag::Terminator(tag) => tag <= 6,
-            },
+            Backend::Cranelift | Backend::Llvm => tag.is_defined(),
         }
     }
 }
@@ -359,7 +346,7 @@ impl AdmissionStore {
         limits: &AdmissionLimits,
         semantics: &impl BackendSemantics,
     ) -> Result<AdmittedRelease<'_>, AdmissionError> {
-        self.admit_for_runtime(connection, limits, semantics, false, None, None)
+        self.admit_for_runtime(connection, limits, semantics, false, None, None, None)
     }
 
     pub(crate) fn admit_for_runtime(
@@ -370,11 +357,17 @@ impl AdmissionStore {
         recording: bool,
         approved_foreign: Option<&std::collections::BTreeSet<String>>,
         approved_exec: Option<(&std::collections::BTreeSet<String>, &Path)>,
+        attested: Option<ContentHash>,
     ) -> Result<AdmittedRelease<'_>, AdmissionError> {
         let deadline = deadline(limits)?;
         let mut exchange = Exchange::new(connection, deadline);
         let (root, recipe_bytes) = exchange.recipe(limits.recipe_bytes)?;
         check_hash(Recipe::hash(&recipe_bytes), root)?;
+        if attested.is_some_and(|attested| attested != root) {
+            return Err(AdmissionError::Malformed(
+                "the recipe is not the attested root",
+            ));
+        }
 
         let mut budget = budget(limits, Some(deadline));
         let recipe = Recipe::decode(&recipe_bytes, &mut budget)?;

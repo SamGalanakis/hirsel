@@ -67,6 +67,34 @@ fn formatter_canonical_blocks_lists_and_attributes() {
 }
 
 #[test]
+fn formatter_trailing_commas_break_lists() {
+    for (input, expected, mode) in [
+        (
+            "fn f(a:u64,b:u64,){g(a,b,);g(\na,b\n)}",
+            "fn f(\n    a: u64,\n    b: u64,\n) {\n    g(\n        a,\n        b,\n    );\n    g(a, b)\n}\n",
+            ParseMode::Source,
+        ),
+        (
+            "pub fn f[T,](a:fn(u64,u64,),b:Box[(T,),],)->(u64,u64,)",
+            "pub fn f[\n    T,\n](\n    a: fn(\n        u64,\n        u64,\n    ),\n    b: Box[\n        (\n            T,\n        ),\n    ],\n) -> (\n    u64,\n    u64,\n)\n",
+            ParseMode::Signatures,
+        ),
+        (
+            "fn f(){g(// first\n(1,2,), // pair\n// next\n[3,4,], // last\n)}",
+            "fn f() {\n    g(\n        // first\n        (\n            1,\n            2,\n        ), // pair\n        // next\n        [\n            3,\n            4,\n        ], // last\n    )\n}\n",
+            ParseMode::Source,
+        ),
+        (
+            "type Shape = Point(u64,u64,)\nfn f(s:Shape){match s{Point((x,y,),z,)=>g([x;2],z)}}",
+            "type Shape = Point(\n    u64,\n    u64,\n)\n\nfn f(s: Shape) {\n    match s {\n        Point(\n            (\n                x,\n                y,\n            ),\n            z,\n        ) => g([x; 2], z)\n    }\n}\n",
+            ParseMode::Source,
+        ),
+    ] {
+        assert_eq!(formatted(input, mode), expected, "{input}");
+    }
+}
+
+#[test]
 fn formatter_keeps_statement_values_and_exit_boundaries() {
     assert_eq!(
         formatted(
@@ -88,26 +116,23 @@ fn formatter_keeps_statement_values_and_exit_boundaries() {
 
 #[test]
 fn formatter_preserves_comments_and_literal_bytes() {
-    let text = "// header\n/// doc\nfn f(){/* before */let x=r##\"a\n  b\"##; // trailing\n/* alone\n exact */\nx /* inline */ + 1}\n// end";
+    let text = "// header\n/// doc\nfn f(){// before\nlet x=r##\"a \"#  b\"##; // trailing\n// alone\nx + 1}\n// end";
     assert_eq!(
         formatted(text, ParseMode::Source),
-        "// header\n/// doc\nfn f() {\n    /* before */\n    let x = r##\"a\n  b\"##; // trailing\n    /* alone\n exact */\n    x /* inline */ + 1\n}\n// end\n"
+        "// header\n/// doc\nfn f() {\n    // before\n    let x = r##\"a \"#  b\"##; // trailing\n    // alone\n    x + 1\n}\n// end\n"
     );
     assert_eq!(
         formatted("fn f() { a // continues\n + b }", ParseMode::Source),
         "fn f() {\n    a // continues\n        + b\n}\n"
     );
-    formatted("fn f() { /* only */ }", ParseMode::Source);
+    formatted("fn f() { // only\n}", ParseMode::Source);
     formatted("// only comment  ", ParseMode::Source);
     assert_eq!(
-        formatted(
-            "/** docs /* nested */ */\r\nfn f(){1}\r\n",
-            ParseMode::Source
-        ),
-        "/** docs /* nested */ */\nfn f() {\n    1\n}\n"
+        formatted("/// docs\r\nfn f(){1}\r\n", ParseMode::Source),
+        "/// docs\nfn f() {\n    1\n}\n"
     );
     formatted(
-        "fn f() {}\n// attached\nfn g() {}\n/* tail */",
+        "fn f() {}\n// attached\nfn g() {}\n// tail",
         ParseMode::Source,
     );
 }
@@ -249,7 +274,7 @@ fn lang_2_lang_4_lang_5_statement_boundaries_and_recovery() {
     ] {
         equivalents.push((
             format!("fn f() {{ a {op} b }}"),
-            format!("fn f() {{ a // next token continues\n\n /* comment */ {op} b }}"),
+            format!("fn f() {{ a // next token continues\n\n {op} b }}"),
         ));
     }
     for op in [
@@ -298,7 +323,6 @@ fn lang_2_lang_4_lang_5_statement_boundaries_and_recovery() {
             "fn f() {}\nfn g() { a\n + b }",
         ),
         ("fn f() { a + (b\n - c) }", "fn f() { a\n + (b\n - c) }"),
-        ("fn f() { a + b }", "fn f() { a /*\n*/ + b }"),
         ("fn f() { a - b }", "fn f() { a - // required operand\n b }"),
         ("fn f() { a + b }", "fn f() { a + // required operand\n b }"),
         ("fn f() { let y = a + b }", "fn f() { let y\n = a\n + b }"),
@@ -431,7 +455,7 @@ fn lang_1_lang_3_literals_are_lossless_and_decode_the_new_rules() {
     assert_eq!(character_value("'\\u{1f40f}'"), Some('🐏'));
     assert_eq!(character_value("'\\x80'"), None);
     assert_eq!(byte_value("b'\\u{41}'"), None);
-    let text = "/* a\n /* nest */ */ 1..2 b\"a\\xff\" r##\"x\"#\n\"## 'a' 'scan: 0xff_ff 12f32";
+    let text = "// a\n 1..2 b\"a\\xff\" r##\"x\"#\"## 'a' 'scan: 0xff_ff 12f32";
     let l = lex(text);
     assert_eq!(l.diagnostics, vec![]);
     let mut cursor = 0;
@@ -455,7 +479,9 @@ fn lang_1_lang_3_literals_are_lossless_and_decode_the_new_rules() {
         ("0b2", "LANG-3"),
         ("\"\\q\"", "LANG-3"),
         ("b\"é\"", "LANG-3"),
-        ("/* \u{202e} */", "LANG-1"),
+        ("// \u{202e}", "LANG-1"),
+        ("/* a */", "LANG-1"),
+        ("r#\"a\nb\"#", "LANG-1"),
         ("\r", "LANG-1"),
         ("\u{feff}", "LANG-1"),
     ] {

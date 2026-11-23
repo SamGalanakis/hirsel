@@ -207,3 +207,148 @@ fn ingress_value(b: Bytes, peer: Ip, trusted: List[wsock.Prefix]) -> (u16, u64, 
         Error(code) => (code, 0, 0)
     }
 }
+
+type ServedReader: send {
+    n: Net,
+    c: Clock
+}
+
+// Upgrades a served socket from request_bytes() and reads one event: true
+// when it is the binary message "hi".
+fn served_reader(take a: ServedReader) -> bool waits {
+    let ServedReader(n: take n, c: c) = take a
+    let config = wsock.defaults()
+    let pool = result.unwrap(wsock.pending(config))
+    let slot = option.unwrap(result.unwrap(wsock.acquire(pool)))
+    let socket = result.unwrap(host.connect(n, Addr(ip: V4(2130706433), port: 80), Never))
+    let upgraded = result.unwrap(wsock.server(take socket, take slot, V4(2130706433), list.new(), config, c, host.mono_ns(c)))
+    let wsock.Upgraded(reader: take input, writer: take writer, source: _, timers: _, pending: take lease) = take upgraded
+    let mut r = take input
+    let got = match wsock.read(mut r, Never) {
+        Ok(Message(take payload)) => payload == string.as_bytes("hi"),
+        _ => false
+    }
+    let _ = take r
+    let _ = take writer
+    let _ = take lease
+    got
+}
+
+fn answered(mut s: Served[NetOp], take c: Call[NetOp], r: NetReply) -> bool {
+    match provide.reply(mut s, take c, provide.net_reply(r)) {
+        Ok(_) => true,
+        _ => false
+    }
+}
+
+// Answers the connect, the upgrade's receive with request_bytes() and its
+// send, which must be RFC 6455's 101 response.
+fn served_upgrade(mut s: Served[NetOp]) -> bool waits {
+    let Some(take connect) = provide.next(mut s) else {
+        return false
+    }
+    let dialed = match provide.net_op(connect) {
+        Connect(addr) => addr.port == 80,
+        _ => false
+    }
+    if !dialed || !answered(mut s, take connect, Socket(8, Addr(ip: V4(2130706433), port: 80))) {
+        return false
+    }
+    let Some(take request) = provide.next(mut s) else {
+        return false
+    }
+    let mut c = take request
+    let took = provide.fill(mut s, mut c, request_bytes())
+    let n = list.len(request_bytes())
+    if took != n || !answered(mut s, take c, Count(n)) {
+        return false
+    }
+    let Some(take response) = provide.next(mut s) else {
+        return false
+    }
+    let mut p: Bytes = list.with_capacity(256)
+    provide.payload(response, 1, mut p)
+    provide.payload(response, 2, mut p)
+    let k = list.len(p)
+    p == response_bytes() && answered(mut s, take response, Count(k))
+}
+
+// Takes the next call: true when it is Ready(8), answered with r.
+fn served_ready(mut s: Served[NetOp], r: NetReply) -> bool waits {
+    let Some(take call) = provide.next(mut s) else {
+        return false
+    }
+    let op = match provide.net_op(call) {
+        Ready(socket) => socket == 8,
+        _ => false
+    }
+    op && answered(mut s, take call, r)
+}
+
+// Takes the next call: true when it is Recv(8) with an 8192-byte loan, and
+// stages data and answers r.
+fn served_recv(mut s: Served[NetOp], data: Bytes, r: NetReply) -> bool waits {
+    let Some(take call) = provide.next(mut s) else {
+        return false
+    }
+    let mut c = take call
+    let op = match provide.net_op(c) {
+        Recv(socket, room, max) => socket == 8 && room >= 8192 && max == 8192,
+        _ => false
+    }
+    let took = provide.fill(mut s, mut c, data)
+    op && took == list.len(data) && answered(mut s, take c, r)
+}
+
+// Answers Released calls until the client is gone.
+fn served_drain(mut s: Served[NetOp]) -> bool waits {
+    loop {
+        let Some(take call) = provide.next(mut s) else {
+            return true
+        }
+        let released = match provide.net_op(call) {
+            Released(id, part: _) => id == 8,
+            _ => false
+        }
+        if !released || !answered(mut s, take call, Done) {
+            return false
+        }
+    }
+}
+
+// NET-1 readiness lending: the masked binary frame "hi" with a zero mask
+// (RFC 6455 section 5.2: 0x82, 0x82, four mask bytes, payload) arrives split
+// after its third byte across two readiness events. Each receive follows a
+// buffer-free Ready, and the decoder joins the halves into one message.
+// expect: run split_frame_across_readiness(tasks) = true
+fn split_frame_across_readiness(tasks: Tasks) -> bool waits {
+    let (c, hand) = provide.clock(0, 0)
+    let (n, served) = provide.net(bytes 256)
+    let mut s = take served
+    let child = task.spawn(tasks, bytes 65536, ServedReader(n: n, c: c), served_reader)
+    let upgraded = served_upgrade(mut s)
+    let first = served_ready(mut s, Done) && served_recv(mut s, b"\x82\x82\x00", Count(3))
+    let second = served_ready(mut s, Done) && served_recv(mut s, b"\x00\x00\x00hi", Count(5))
+    let drained = served_drain(mut s)
+    let read = result.unwrap(task.join(take child))
+    let _ = take hand
+    upgraded && first && second && drained && read
+}
+
+// Stale readiness: Ready answers Done but the receive then times out before
+// the reader's deadline (Never). The reader must return to a buffer-free
+// Ready, not repeat the receive, and then read the whole frame.
+// expect: run stale_readiness_waits_again(tasks) = true
+fn stale_readiness_waits_again(tasks: Tasks) -> bool waits {
+    let (c, hand) = provide.clock(0, 0)
+    let (n, served) = provide.net(bytes 256)
+    let mut s = take served
+    let child = task.spawn(tasks, bytes 65536, ServedReader(n: n, c: c), served_reader)
+    let upgraded = served_upgrade(mut s)
+    let stale = served_ready(mut s, Done) && served_recv(mut s, b"", Failed(TimedOut))
+    let fresh = served_ready(mut s, Done) && served_recv(mut s, b"\x82\x82\x00\x00\x00\x00hi", Count(8))
+    let drained = served_drain(mut s)
+    let read = result.unwrap(task.join(take child))
+    let _ = take hand
+    upgraded && stale && fresh && drained && read
+}

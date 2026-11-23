@@ -1,0 +1,573 @@
+pub type Tool: shareable + send {
+    name: String,
+    description: String,
+    input_schema: InputSchema,
+    call: fn(mut Call, Clock) -> Step waits
+}
+
+pub opaque type InputSchema: shareable + send {
+    document: String
+}
+
+pub type SchemaError = Encode(std.json.SchemaWriteError) | Shape
+
+pub fn schema[T](format: std.json.Format[T], annotations: List[(String, String)]) -> Result[InputSchema, SchemaError] {
+    let mut document: Bytes = list.new()
+    if let Error(take issue) = std.json.schema(format, annotations, mut document) {
+        return Error(Encode(take issue))
+    }
+    let text = result.unwrap(string.from_utf8(take document))
+    let fields = result.unwrap(rpc.object(text))
+    let Some(take kind) = rpc.field_text(fields, "type") else {
+        return Error(Shape)
+    }
+    if kind != "object" {
+        return Error(Shape)
+    }
+    Ok(InputSchema(document: take text))
+}
+
+pub type Call: send {
+    arguments: String,
+    scratch: Bytes
+}
+
+pub type Step: send = Progress(u64, Option[u64], Option[String]) | Text(String) | ToolError(String)
+
+pub type Resource: codec + shareable + send {
+    uri: String,
+    name: String,
+    mimeType: String
+}
+
+pub type ResourceHandler: shareable + send {
+    info: Resource,
+    read: fn() -> Result[String, String] waits
+}
+
+pub type Catalog: shareable + send = Fixed(List[Tool]) | Dynamic(Dir, String, u64, fn(Dir, String) -> List[Tool] waits)
+
+pub type Server: shareable + send {
+    identity: rpc.Identity,
+    origins: List[String],
+    tools: Catalog,
+    resources: List[ResourceHandler],
+    event_max: u64,
+    producer_bytes: u64,
+    producer_steps: u64
+}
+
+type ResourceText: codec {
+    uri: String,
+    mimeType: String,
+    text: String
+}
+
+fn ok_headers(req: std.http.Request, state: Server) -> bool {
+    let Some(origin) = std.http.field(req, b"origin") else {
+        return true
+    }
+    if let Some(_) = std.http.field_at(req, b"origin", 1) {
+        return false
+    }
+    for candidate in state.origins {
+        if origin == string.as_bytes(candidate) {
+            return true
+        }
+    }
+    false
+}
+
+fn request_media(req: std.http.Request, name: Bytes, expected: String) -> bool {
+    let Some(value) = std.http.field(req, name) else {
+        return false
+    }
+    if let Some(_) = std.http.field_at(req, name, 1) {
+        return false
+    }
+    let Ok(take field) = string.from_utf8(std.http.copy_bytes(value)) else {
+        return false
+    }
+    metadata.media(field, expected)
+}
+
+fn media_accepted(req: std.http.Request, expected: String) -> bool {
+    let mut index = 0u64
+    while let Some(raw) = std.http.field_at(req, b"accept", index) {
+        if let Ok(take field) = string.from_utf8(std.http.copy_bytes(raw)) {
+            let mut at = 0u64
+            while let Some((part, next)) = std.string.next_split(field, at, ",") {
+                if metadata.media(part, expected) {
+                    return true
+                }
+                at = next
+            }
+        }
+        index += 1
+    }
+    false
+}
+
+fn field_equal(req: std.http.Request, field: Bytes, expected: String, encoded: bool) -> bool {
+    let Some(actual) = std.http.field(req, field) else {
+        return false
+    }
+    if let Some(_) = std.http.field_at(req, field, 1) {
+        return false
+    }
+    if encoded {
+        metadata.header_matches(actual, expected)
+    } else {
+        actual == string.as_bytes(expected)
+    }
+}
+
+fn response(status: u16, take text: String) -> Result[std.http.Outcome, std.http.HandlerError] {
+    let mut reply = std.http.response(status, string.into_bytes(take text), false)?
+    std.http.content_type(mut reply, ApplicationJson)?
+    Ok(Reply(take reply))
+}
+
+fn empty(status: u16) -> Result[std.http.Outcome, std.http.HandlerError] {
+    Ok(Reply(std.http.response(status, list.new(), false)?))
+}
+
+fn failure(status: u16, id: rpc.Id, code: i64, message: String) -> Result[std.http.Outcome, std.http.HandlerError] {
+    response(status, rpc.encode_fault(rpc.fault(rpc.id_value(id_json(id)), code, message)))
+}
+
+fn id_json(id: rpc.Id) -> String {
+    let mut encoded = string.new()
+    std.json.write(mut encoded, false, fn(w) {
+        rpc.write_id(w, id)
+    })
+    take encoded
+}
+
+fn read_body(req: std.http.Request, mut responder: std.http.Responder) -> Result[Bytes, std.http.BodyError] waits {
+    if let Some(inline_data) = std.http.inline_body(req) {
+        return Ok(std.http.copy_bytes(inline_data))
+    }
+    let mut body: Bytes = list.new()
+    loop {
+        list.reserve(mut body, 8192)
+        if std.http.read(mut responder, mut body)? == 0 {
+            return Ok(take body)
+        }
+    }
+}
+
+fn metadata_check(req: std.http.Request, id: rpc.Id, method: String, params: rpc.Fields) -> Result[(), rpc.Fault] {
+    let mismatch = scoped fn() -> rpc.Fault {
+        rpc.fault(rpc.id_value(id_json(id)), -32020, "Missing or mismatched MCP request header")
+    }
+    let Some(raw) = map.get(params, "_meta") else {
+        return Error(mismatch())
+    }
+    let Ok(take info) = rpc.object(raw) else {
+        return Error(mismatch())
+    }
+    let Some(take revision) = rpc.field_text(info, metadata.VERSION_FIELD) else {
+        return Error(mismatch())
+    }
+    if !field_equal(req, b"mcp-protocol-version", revision, false) || !field_equal(req, b"mcp-method", method, false) {
+        return Error(mismatch())
+    }
+    if revision != rpc.REVISION {
+        let mut fault = rpc.fault(rpc.id_value(id_json(id)), -32022, "Unsupported protocol version")
+        let mut data: rpc.Fields = map.new()
+        rpc.put(mut data, "requested", rpc.typed_json(revision))
+        rpc.put(mut data, "supported", string.from("[\"2026-07-28\"]"))
+        fault.data = Some(rpc.encode_object(data))
+        return Error(take fault)
+    }
+    if let Some(key) = metadata.named_parameter(method) {
+        let Some(take name) = rpc.field_text(params, key) else {
+            return Error(mismatch())
+        }
+        if !field_equal(req, b"mcp-name", name, true) {
+            return Error(mismatch())
+        }
+    }
+    let Some(caps) = map.get(info, metadata.CLIENT_CAPABILITIES) else {
+        return Error(rpc.fault(rpc.id_value(id_json(id)), -32602, "Missing client capabilities"))
+    }
+    if let Error(_) = rpc.object(caps) {
+        return Error(rpc.fault(rpc.id_value(id_json(id)), -32602, "Invalid client capabilities"))
+    }
+    Ok(())
+}
+
+fn server_info(state: Server) -> String {
+    let mut fields: rpc.Fields = map.new()
+    rpc.put(mut fields, metadata.SERVER_INFO, rpc.typed_json(state.identity))
+    rpc.encode_object(fields)
+}
+
+fn tools_json(tools: List[Tool]) -> String {
+    let mut encoded = string.new()
+    std.json.write(mut encoded, false, fn(w) {
+        std.json.array(w, 0, fn(array_writer, mut rows) {
+            for tool in tools {
+                std.json.element(array_writer, mut rows)
+                std.json.object(array_writer, 1, fn(tool_writer, mut fields) {
+                    std.json.write_member(tool_writer, mut fields, "name")
+                    std.json.write_string_value(tool_writer, tool.name)
+                    std.json.write_member(tool_writer, mut fields, "description")
+                    std.json.write_string_value(tool_writer, tool.description)
+                    std.json.write_member(tool_writer, mut fields, "inputSchema")
+                    result.unwrap(std.json.write_raw(tool_writer, tool.input_schema.document))
+                })
+            }
+        })
+    })
+    take encoded
+}
+
+fn frames(req: std.http.Request, state: Server, directory: Option[Dir], take source: own[send] fn(take std.stream.Seed, Clock, Option[Dir]) waits) -> Result[std.http.Outcome, std.http.HandlerError] {
+    let room = std.stream.Bounds(event_max: state.event_max, producer_bytes: state.producer_bytes, producer_steps: state.producer_steps)
+    let mut spec = std.stream.spec_owned(req, 200, room, directory, take source)?
+    std.stream.header(mut spec, b"Content-Type", b"text/event-stream")?
+    std.stream.header(mut spec, b"X-Accel-Buffering", b"no")?
+    Ok(Stream(take spec))
+}
+
+fn event(message: String) -> Result[Option[Bytes], std.sse.SseError] {
+    let mut buffer = std.sse.buffer(string.byte_len(message) + 8)
+    std.sse.event(mut buffer, None, None, string.as_bytes(message))?
+    Ok(Some(std.sse.into_bytes(take buffer)))
+}
+
+fn tool_result(text: String, failed: bool) -> rpc.Fields {
+    let mut content: Map[String, String] = map.new()
+    let _ = map.insert(mut content, string.from("type"), string.from("text"))
+    let _ = map.insert(mut content, string.from("text"), string.from(text))
+    let mut items: List[Map[String, String]] = list.new()
+    list.push(mut items, take content)
+    let mut body: rpc.Fields = map.new()
+    rpc.put(mut body, "content", rpc.typed_json(items))
+    if failed {
+        rpc.put(mut body, "isError", string.from("true"))
+    }
+    take body
+}
+
+type ToolRun: send {
+    call: Call,
+    handler: fn(mut Call, Clock) -> Step waits,
+    clock: Clock,
+    id: rpc.Id,
+    token: String,
+    info: String,
+    done: bool,
+    last: Option[u64]
+}
+
+fn next_tool(mut job: ToolRun) -> Result[Option[Bytes], std.sse.SseError] waits {
+    if job.done {
+        return Ok(None)
+    }
+    let handler = job.handler
+    loop {
+        match handler(mut job.call, job.clock) {
+            Progress(progress, total, take message) => {
+                if job.token == "" {
+                    continue
+                }
+                if let Some(previous) = job.last {
+                    if progress <= previous {
+                        continue
+                    }
+                }
+                job.last = Some(progress)
+                let mut fields: rpc.Fields = map.new()
+                rpc.put(mut fields, "progressToken", string.from(job.token))
+                rpc.put(mut fields, "progress", rpc.typed_json(progress))
+                if let Some(limit) = total {
+                    rpc.put(mut fields, "total", rpc.typed_json(limit))
+                }
+                if let Some(take label) = take message {
+                    rpc.put(mut fields, "message", rpc.typed_json(label))
+                }
+                return event(rpc.encode_call(None, "notifications/progress", fields))
+            },
+            Text(take text) => return finish_tool(mut job, text, false),
+            ToolError(take text) => return finish_tool(mut job, text, true),
+        }
+    }
+}
+
+fn finish_tool(mut job: ToolRun, text: String, failed: bool) -> Result[Option[Bytes], std.sse.SseError] {
+    job.done = true
+    let mut fields = tool_result(text, failed)
+    rpc.put(mut fields, "_meta", string.from(job.info))
+    event(rpc.encode_result(job.id, fields))
+}
+
+fn tool_source(take seed: std.stream.Seed, clock: Clock, handler: fn(mut Call, Clock) -> Step waits, args: String, id: rpc.Id, token: String, info: String) waits {
+    let call = Call(arguments: string.from(args), scratch: list.new())
+    let run = ToolRun(call: take call, handler, clock, id: option.unwrap(rpc.id_value(id_json(id))), token: string.from(token), info: string.from(info), done: false, last: None)
+    std.stream.produce_owned(take seed, take run, next_tool)
+}
+
+fn with_tools[R](catalog: Catalog, handle: scoped fn(List[Tool]) -> R) -> R waits {
+    match catalog {
+        Fixed(tools) => handle(tools),
+        Dynamic(dir, path, _, loader) => {
+            let tools = loader(dir, path)
+            handle(tools)
+        },
+    }
+}
+
+fn call_tool(req: std.http.Request, state: Server, id: rpc.Id, params: rpc.Fields, tools: List[Tool]) -> Result[std.http.Outcome, std.http.HandlerError] {
+    let Some(take name) = rpc.field_text(params, "name") else {
+        return failure(400, id, -32602, "Invalid tool name")
+    }
+    let arguments = match map.get(params, "arguments") {
+        Some(raw) => string.from(raw),
+        None => string.from("{}"),
+    }
+    if let Error(_) = rpc.object(arguments) {
+        return failure(400, id, -32602, "Invalid tool arguments")
+    }
+    for tool in tools {
+        if tool.name == name {
+            let token = progress_token(params)
+            let handler = tool.call
+            let copied_id = option.unwrap(rpc.id_value(id_json(id)))
+            let info = server_info(state)
+            let source: own[send] fn(take std.stream.Seed, Clock, Option[Dir]) waits = fn(take seed: std.stream.Seed, clock: Clock, directory: Option[Dir]) waits {
+                tool_source(take seed, clock, handler, arguments, copied_id, token, info)
+            }
+            return frames(req, state, None, take source)
+        }
+    }
+    failure(400, id, -32602, "Unknown tool")
+}
+
+fn progress_token(params: rpc.Fields) -> String {
+    if let Some(raw) = map.get(params, "_meta") {
+        if let Ok(take info) = rpc.object(raw) {
+            if let Some(token) = map.get(info, "progressToken") {
+                if let Some(_) = rpc.id_value(token) {
+                    return string.from(token)
+                }
+            }
+        }
+    }
+    string.new()
+}
+
+fn subscription_params(id: rpc.Id) -> rpc.Fields {
+    let mut meta: rpc.Fields = map.new()
+    rpc.put(mut meta, metadata.SUBSCRIPTION_ID, id_json(id))
+    let mut params: rpc.Fields = map.new()
+    rpc.put(mut params, "_meta", rpc.encode_object(meta))
+    take params
+}
+
+type Watch: send {
+    clock: Clock,
+    directory: Option[Dir],
+    path: String,
+    poll_ms: u64,
+    loader: fn(Dir, String) -> List[Tool] waits,
+    id: rpc.Id,
+    enabled: bool,
+    last: Option[String],
+    pending: bool
+}
+
+fn changed(previous: Option[String], now: String) -> bool {
+    match previous {
+        Some(value) => value != now,
+        None => false,
+    }
+}
+
+fn next_change(mut cursor: Watch) -> Result[Option[Bytes], std.sse.SseError] waits {
+    let loader = cursor.loader
+    if cursor.pending {
+        cursor.pending = false
+        if let Some(directory) = cursor.directory {
+            if cursor.enabled {
+                cursor.last = Some(tools_json(loader(directory, cursor.path)))
+            }
+        }
+        let mut params = subscription_params(cursor.id)
+        rpc.put(mut params, "notifications", string.from(if cursor.enabled {
+            "{\"toolsListChanged\":true}"
+        } else {
+            "{}"
+        }))
+        return event(rpc.encode_call(None, "notifications/subscriptions/acknowledged", params))
+    }
+    if let Some(directory) = cursor.directory {
+        if cursor.enabled {
+            loop {
+                host.sleep_until(cursor.clock, std.clock.deadline_after_ms(host.mono_ns(cursor.clock), cursor.poll_ms))
+                let current = tools_json(loader(directory, cursor.path))
+                if changed(cursor.last, current) {
+                    cursor.last = Some(take current)
+                    return event(rpc.encode_call(None, "notifications/tools/list_changed", subscription_params(cursor.id)))
+                }
+            }
+        }
+    }
+    host.sleep_until(cursor.clock, 18446744073709551615)
+    Ok(None)
+}
+
+fn listen_source(take seed: std.stream.Seed, clock: Clock, directory: Option[Dir], path: String, poll_ms: u64, loader: fn(Dir, String) -> List[Tool] waits, id: rpc.Id, enabled: bool) waits {
+    let watch = Watch(clock, directory, path: string.from(path), poll_ms, loader, id: option.unwrap(rpc.id_value(id_json(id))), enabled, last: None, pending: true)
+    std.stream.produce_owned(take seed, take watch, next_change)
+}
+
+fn empty_catalog(directory: Dir, path: String) -> List[Tool] {
+    list.new()
+}
+
+type WatchSpec: send {
+    path: String,
+    poll_ms: u64,
+    load: fn(Dir, String) -> List[Tool] waits,
+    id: rpc.Id,
+    enabled: bool
+}
+
+fn open_subscription(req: std.http.Request, state: Server, dir: Option[Dir], take spec: WatchSpec) -> Result[std.http.Outcome, std.http.HandlerError] {
+    let watch = take spec
+    let source: own[send] fn(take std.stream.Seed, Clock, Option[Dir]) waits = fn(take seed: std.stream.Seed, clock: Clock, grant: Option[Dir]) waits {
+        listen_source(take seed, clock, grant, watch.path, watch.poll_ms, watch.load, watch.id, watch.enabled)
+    }
+    frames(req, state, dir, take source)
+}
+
+fn subscription(req: std.http.Request, state: Server, id: rpc.Id, params: rpc.Fields) -> Result[std.http.Outcome, std.http.HandlerError] {
+    let Some(filter) = map.get(params, "notifications") else {
+        return failure(400, id, -32602, "Missing subscription filter")
+    }
+    let Ok(take requested) = rpc.object(filter) else {
+        return failure(400, id, -32602, "Invalid subscription filter")
+    }
+    let enabled = match map.get(requested, "toolsListChanged") {
+        Some(raw) => {
+            if raw != "true" && raw != "false" {
+                return failure(400, id, -32602, "Invalid toolsListChanged filter")
+            }
+            raw == "true"
+        },
+        None => false,
+    }
+    let request_id = option.unwrap(rpc.id_value(id_json(id)))
+    match state.tools {
+        Fixed(_) => {
+            let spec = WatchSpec(path: string.new(), poll_ms: 0, load: empty_catalog, id: take request_id, enabled: false)
+            open_subscription(req, state, None, take spec)
+        },
+        Dynamic(dir, locator, delay, loader) => {
+            let spec = WatchSpec(path: string.from(locator), poll_ms: order.max(delay, 1), load: loader, id: take request_id, enabled)
+            open_subscription(req, state, Some(dir), take spec)
+        },
+    }
+}
+
+fn dispatch(req: std.http.Request, state: Server, id: rpc.Id, method: String, params: rpc.Fields) -> Result[std.http.Outcome, std.http.HandlerError] waits {
+    let mut body: rpc.Fields = map.new()
+    rpc.put(mut body, "_meta", server_info(state))
+    if method == "server/discover" || method == "tools/list" || method == "resources/list" || method == "resources/read" {
+        rpc.put(mut body, "ttlMs", string.from("0"))
+        rpc.put(mut body, "cacheScope", string.from("\"private\""))
+    }
+    if method == "server/discover" {
+        rpc.put(mut body, "supportedVersions", string.from("[\"2026-07-28\"]"))
+        let capabilities = match state.tools {
+            Fixed(_) => "{\"tools\":{},\"resources\":{}}",
+            Dynamic(_, _, _, _) => "{\"tools\":{\"listChanged\":true},\"resources\":{}}",
+        }
+        rpc.put(mut body, "capabilities", string.from(capabilities))
+    } else if method == "ping" {} else if method == "tools/list" {
+        rpc.put(mut body, "tools", with_tools(state.tools, tools_json))
+    } else if method == "tools/call" {
+        return with_tools(state.tools, fn(tools: List[Tool]) -> Result[std.http.Outcome, std.http.HandlerError] {
+            call_tool(req, state, id, params, tools)
+        })
+    } else if method == "subscriptions/listen" {
+        return subscription(req, state, id, params)
+    } else if method == "resources/list" {
+        let mut rows: List[Resource] = list.new()
+        for item in state.resources {
+            list.push(mut rows, Resource(uri: string.from(item.info.uri), name: string.from(item.info.name), mimeType: string.from(item.info.mimeType)))
+        }
+        rpc.put(mut body, "resources", rpc.typed_json(rows))
+    } else if method == "resources/read" {
+        let Some(take uri) = rpc.field_text(params, "uri") else {
+            return failure(400, id, -32602, "Invalid resource URI")
+        }
+        for item in state.resources {
+            if item.info.uri == uri {
+                let reader = item.read
+                let text = match reader() {
+                    Ok(take data) => take data,
+                    Error(_) => return failure(500, id, -32603, "Resource read failed"),
+                }
+                let mut items: List[ResourceText] = list.new()
+                list.push(mut items, ResourceText(uri: string.from(uri), mimeType: string.from(item.info.mimeType), text: take text))
+                rpc.put(mut body, "contents", rpc.typed_json(items))
+                return response(200, rpc.encode_result(id, body))
+            }
+        }
+        return failure(400, id, -32602, "Unknown resource")
+    } else {
+        return failure(404, id, -32601, "Method not found")
+    }
+    response(200, rpc.encode_result(id, body))
+}
+
+pub fn post(req: std.http.Request, scratch_region: Region, mut responder: std.http.Responder, state: Server) -> Result[std.http.Outcome, std.http.HandlerError] waits {
+    if !ok_headers(req, state) {
+        return empty(403)
+    }
+    if !request_media(req, b"content-type", "application/json") {
+        return empty(415)
+    }
+    if !media_accepted(req, "application/json") || !media_accepted(req, "text/event-stream") {
+        return empty(406)
+    }
+    let data = match read_body(req, mut responder) {
+        Ok(take body) => take body,
+        Error(e) => return empty(e.status),
+    }
+    let Ok(take payload) = string.from_utf8(take data) else {
+        return response(400, rpc.encode_fault(rpc.fault(None, -32700, "Invalid UTF-8")))
+    }
+    let message = match rpc.request(payload) {
+        Ok(take valid) => take valid,
+        Error(take fault) => return response(400, rpc.encode_fault(fault)),
+    }
+    let rpc.Request(id: take maybe_id, method: take method, params: take params) = take message
+    let Some(take id) = take maybe_id else {
+        return empty(202)
+    }
+    if let Error(take fault) = metadata_check(req, id, method, params) {
+        return response(400, rpc.encode_fault(fault))
+    }
+    dispatch(req, state, id, method, params)
+}
+
+fn unsupported(req: std.http.Request, scratch_region: Region, mut responder: std.http.Responder, state: Server) -> Result[std.http.Outcome, std.http.HandlerError] {
+    if !ok_headers(req, state) {
+        return empty(403)
+    }
+    let mut reply = std.http.response(405, list.new(), false)?
+    std.http.header(mut reply, b"Allow", b"POST")?
+    Ok(Reply(take reply))
+}
+
+pub fn mount(mut routes: std.router.Builder[Server], path: String, body_max: u64, stream_bytes: u64) -> Result[(), std.router.AddError] {
+    let route = std.router.Route(handler: post, body_max: Some(body_max), upgrade_bytes: None, stream_bytes: Some(stream_bytes), steps: None)
+    std.router.add(mut routes, "POST", path, take route)?
+    std.router.add(mut routes, "GET", path, std.router.raw(unsupported))?
+    std.router.add(mut routes, "DELETE", path, std.router.raw(unsupported))
+}

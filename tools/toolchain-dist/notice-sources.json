@@ -26,7 +26,7 @@
       ]
     },
     "core-packages/*": {
-      "contents": "the core and std package images (Hirsel sources and their checked and compiled products)"
+      "contents": "the core and std package images and the Store source archive"
     },
     "lib/libLLVM.so.23.1": {
       "native": "engine_llvm",

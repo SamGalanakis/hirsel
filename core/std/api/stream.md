@@ -20,3 +20,10 @@ delimits with a close. HEAD sends just the head. A committed
 `text/event-stream` gets heartbeat comments while the writer and queue
 are idle. The lease begins at the first response byte and covers the whole
 stream. The group cancels and joins its children on exit.
+
+`spec_owned` moves a sendable owning callback into the admitted producer.
+The callback receives the stream's clock and the caller's optional directory
+grant. It can call `produce_owned` with already-owned state. Each item follows
+the same credit, byte and step bounds as `produce`, and a disconnected peer
+cancels the producer. The callback may capture plain functions selected by
+the route configuration.

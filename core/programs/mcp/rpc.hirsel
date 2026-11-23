@@ -1,0 +1,331 @@
+pub const REVISION: String = "2026-07-28"
+
+pub type Id: codec + send = TextId(String) | IntegerId(String)
+
+pub type Fields: send = Map[String, String]
+
+pub type Request: send {
+    id: Option[Id],
+    method: String,
+    params: Fields
+}
+
+pub type Fault: send {
+    id: Option[Id],
+    code: i64,
+    message: String,
+    data: Option[String]
+}
+
+pub type Incoming: send = Reply(Id, String) | Rejected(Fault) | Notification(String, Fields)
+
+pub fn fault(take id: Option[Id], code: i64, message: String) -> Fault {
+    Fault(id: take id, code, message: string.from(message), data: None)
+}
+
+pub fn object(source: String) -> Result[Fields, std.json.Error] {
+    std.json.decode(source, fn(input: String, mut cursor: std.json.Cursor) -> Result[Fields, std.json.Error] {
+        std.json.record_of(input, mut cursor, map.new(), fn(key: String, data: String, mut field: std.json.Cursor, mut fields: Fields) -> Result[(), std.json.Error] {
+            if let Some(_) = map.get(fields, key) {
+                return Error(Syntax(0))
+            }
+            let raw = std.json.read_raw(data, mut field)?
+            let _ = map.insert(mut fields, string.from(key), string.from(raw))
+            Ok(())
+        })
+    })
+}
+
+pub fn text(source: String) -> Option[String] {
+    match std.json.decode(source, std.json.read_string) {
+        Ok(take s) => Some(take s),
+        Error(_) => None,
+    }
+}
+
+pub fn field_text(fields: Fields, key: String) -> Option[String] {
+    match map.get(fields, key) {
+        Some(value) => text(value),
+        None => None,
+    }
+}
+
+pub fn id_value(source: String) -> Option[Id] {
+    if let Some(take s) = text(source) {
+        return Some(TextId(take s))
+    }
+    let digits = string.as_bytes(source)
+    let len = list.len(digits)
+    if len == 0 {
+        return None
+    }
+    let start = if digits[0] == b'-' {
+        1u64
+    } else {
+        0u64
+    }
+    if start == len || len - start > 1 && digits[start] == b'0' {
+        return None
+    }
+    for i in start .. len {
+        if digits[i] < b'0' || digits[i] > b'9' {
+            return None
+        }
+    }
+    Some(IntegerId(string.from(source)))
+}
+
+pub fn same_id(a: Id, b: Id) -> bool {
+    match a {
+        TextId(x) => match b {
+            TextId(y) => x == y,
+            _ => false,
+        },
+        IntegerId(x) => match b {
+            IntegerId(y) => x == y || x == "-0" && y == "0" || x == "0" && y == "-0",
+            _ => false,
+        },
+    }
+}
+
+fn id_field(fields: Fields) -> Result[Option[Id], ()] {
+    match map.get(fields, "id") {
+        None => Ok(None),
+        Some(raw) => match id_value(raw) {
+            Some(take id) => Ok(Some(take id)),
+            None => Error(()),
+        },
+    }
+}
+
+fn versioned(fields: Fields) -> bool {
+    match field_text(fields, "jsonrpc") {
+        Some(v) => v == "2.0",
+        None => false,
+    }
+}
+
+fn params(fields: Fields) -> Result[Fields, std.json.Error] {
+    match map.get(fields, "params") {
+        Some(raw) => object(raw),
+        None => Ok(map.new()),
+    }
+}
+
+pub fn request(source: String) -> Result[Request, Fault] {
+    if let Error(_) = std.json.size(source) {
+        return Error(fault(None, -32700, "Parse error"))
+    }
+    let Ok(take fields) = object(source) else {
+        return Error(fault(None, -32600, "Invalid request"))
+    }
+    let Ok(take id) = id_field(fields) else {
+        return Error(fault(None, -32600, "Invalid request ID"))
+    }
+    let Some(take method) = field_text(fields, "method") else {
+        return Error(fault(take id, -32600, "Invalid method"))
+    }
+    if !versioned(fields) || (match map.get(fields, "result") {
+        Some(_) => true,
+        None => false
+    }) || (match map.get(fields, "error") {
+        Some(_) => true,
+        None => false
+    }) {
+        return Error(fault(take id, -32600, "Invalid request"))
+    }
+    let Ok(take arguments) = params(fields) else {
+        return Error(fault(take id, -32602, "Invalid params"))
+    }
+    Ok(Request(id: take id, method: take method, params: take arguments))
+}
+
+pub fn incoming(source: String) -> Result[Incoming, ()] {
+    let Ok(take fields) = object(source) else {
+        return Error(())
+    }
+    if !versioned(fields) {
+        return Error(())
+    }
+    let take id = id_field(fields)?
+    let value = map.get(fields, "result")
+    let problem = map.get(fields, "error")
+    if let Some(take method) = field_text(fields, "method") {
+        if (match id {
+            Some(_) => true,
+            None => false
+        }) || (match value {
+            Some(_) => true,
+            None => false
+        }) || (match problem {
+            Some(_) => true,
+            None => false
+        }) {
+            return Error(())
+        }
+        let Ok(take arguments) = params(fields) else {
+            return Error(())
+        }
+        return Ok(Notification(take method, take arguments))
+    }
+    if (match map.get(fields, "method") {
+        Some(_) => true,
+        None => false
+    }) {
+        return Error(())
+    }
+    match (value, problem) {
+        (Some(raw), None) => {
+            let Some(take request_id) = take id else {
+                return Error(())
+            }
+            let Ok(take result_fields) = object(raw) else {
+                return Error(())
+            }
+            if field_text(result_fields, "resultType") != Some("complete") {
+                return Error(())
+            }
+            Ok(Reply(take request_id, string.from(raw)))
+        },
+        (None, Some(raw)) => {
+            let Ok(take details) = object(raw) else {
+                return Error(())
+            }
+            let Some(code_raw) = map.get(details, "code") else {
+                return Error(())
+            }
+            let Ok(code) = std.json.decode(code_raw, std.json.read_i64) else {
+                return Error(())
+            }
+            let Some(take message) = field_text(details, "message") else {
+                return Error(())
+            }
+            let data = match map.get(details, "data") {
+                Some(data_raw) => Some(string.from(data_raw)),
+                None => None,
+            }
+            Ok(Rejected(Fault(id: take id, code, message: take message, data: take data)))
+        },
+        _ => Error(()),
+    }
+}
+
+pub fn write_id(writer: std.json.Writer, id: Id) {
+    match id {
+        TextId(s) => std.json.write_string_value(writer, s),
+        IntegerId(s) => std.json.write_number_spelling(writer, s),
+    }
+}
+
+pub fn write_fields(writer: std.json.Writer, mut items: std.json.Items, fields: Fields) {
+    for (key, raw) in fields {
+        std.json.write_member(writer, mut items, key)
+        let _ = std.json.write_raw(writer, raw)
+    }
+}
+
+pub fn encode_result(id: Id, fields: Fields) -> String {
+    let mut out = string.from("")
+    std.json.write(mut out, false, fn(document) {
+        std.json.object(document, 0, fn(w, mut items) {
+            std.json.write_member(w, mut items, "jsonrpc")
+            std.json.write_string_value(w, "2.0")
+            std.json.write_member(w, mut items, "id")
+            write_id(w, id)
+            std.json.write_member(w, mut items, "result")
+            std.json.object(w, 1, fn(result_writer, mut result_items) {
+                std.json.write_member(result_writer, mut result_items, "resultType")
+                std.json.write_string_value(result_writer, "complete")
+                write_fields(result_writer, mut result_items, fields)
+            })
+        })
+    })
+    take out
+}
+
+pub fn encode_fault(error: Fault) -> String {
+    let mut out = string.from("")
+    std.json.write(mut out, false, fn(document) {
+        std.json.object(document, 0, fn(w, mut items) {
+            std.json.write_member(w, mut items, "jsonrpc")
+            std.json.write_string_value(w, "2.0")
+            if let Some(id) = error.id {
+                std.json.write_member(w, mut items, "id")
+                write_id(w, id)
+            }
+            std.json.write_member(w, mut items, "error")
+            std.json.object(w, 1, fn(detail_writer, mut detail) {
+                std.json.write_member(detail_writer, mut detail, "code")
+                std.json.write_i64(detail_writer, error.code)
+                std.json.write_member(detail_writer, mut detail, "message")
+                std.json.write_string_value(detail_writer, error.message)
+                if let Some(data) = error.data {
+                    std.json.write_member(detail_writer, mut detail, "data")
+                    let _ = std.json.write_raw(detail_writer, data)
+                }
+            })
+        })
+    })
+    take out
+}
+
+pub type Identity: codec + shareable + send {
+    name: String,
+    version: String
+}
+
+pub fn typed_json[T: codec](value: T) -> String {
+    let format: std.json.Format[T] = result.unwrap(std.json.interop())
+    result.unwrap(std.json.to_string(format, value))
+}
+
+pub fn contains(fields: Fields, key: String) -> bool {
+    match map.get(fields, key) {
+        Some(_) => true,
+        None => false,
+    }
+}
+
+pub fn put(mut fields: Fields, key: String, take raw: String) {
+    let _ = map.insert(mut fields, string.from(key), take raw)
+}
+
+pub fn encode_object(fields: Fields) -> String {
+    let mut out = string.new()
+    std.json.write(mut out, false, fn(document) {
+        std.json.object(document, 0, fn(w, mut items) {
+            write_fields(w, mut items, fields)
+        })
+    })
+    take out
+}
+
+pub fn encode_call(id: Option[Id], method: String, params_fields: Fields) -> String {
+    let mut out = string.new()
+    std.json.write(mut out, false, fn(document) {
+        std.json.object(document, 0, fn(w, mut items) {
+            std.json.write_member(w, mut items, "jsonrpc")
+            std.json.write_string_value(w, "2.0")
+            if let Some(call_id) = id {
+                std.json.write_member(w, mut items, "id")
+                write_id(w, call_id)
+            }
+            std.json.write_member(w, mut items, "method")
+            std.json.write_string_value(w, method)
+            std.json.write_member(w, mut items, "params")
+            std.json.object(w, 1, fn(params_writer, mut params_items) {
+                write_fields(params_writer, mut params_items, params_fields)
+            })
+        })
+    })
+    take out
+}
+
+pub fn array(source: String) -> Result[List[String], std.json.Error] {
+    std.json.decode(source, fn(input: String, mut cursor: std.json.Cursor) -> Result[List[String], std.json.Error] {
+        std.json.list_of(input, mut cursor, fn(data: String, mut item: std.json.Cursor) -> Result[String, std.json.Error] {
+            let raw = std.json.read_raw(data, mut item)?
+            Ok(string.from(raw))
+        })
+    })
+}

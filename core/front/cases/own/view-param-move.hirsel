@@ -2,3 +2,4 @@
 // expect: refuse OWN-7 at 4:29
 // expect: compared OWN-7 at 4:29 | view | take
 fn f(s: String) -> String { s }
+// expect: cause OWN-7 at 4:29 from 4:6

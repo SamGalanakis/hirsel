@@ -1,0 +1,12 @@
+// PROG-8: a statement that fails to parse poisons the names it may have bound, not its
+// definition. `q` is not refused again after its `let` is lost; the later independent
+// type error is reported at the site it has when checked alone.
+fn f(a: u64) -> u64 {
+  let q = a +* 1u64
+  let m: String = a
+  q
+}
+// expect: refuse LANG-5 at 5:14
+// expect: compared LANG-5 at 5:14 | * | non-keyword identifier
+// expect: refuse LANG-11 at 6:19
+// expect: compared LANG-11 at 6:19 | u64 | core@1/core/String

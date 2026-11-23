@@ -53,9 +53,10 @@ another first. The framed bytes are never compared: `aa` comes before `b`, altho
 of `b` is the smaller byte string. A module's rows are in strictly ascending order of target
 bytewise. Bindings and files are likewise strictly ascending, so no two are equal.
 
-`core@1` is bound in every package and is never written as a binding. `std@1` is a toolchain
-package (section 2) and is written with tag `0`, so a library root says which std major it
-uses, and the toolchain that checks it supplies that std. A toolchain package has no root.
+`core@1` is bound in every package and is never written as a binding. `std@1` and `store@1`
+can be bound as toolchain packages (section 2) and are written with tag `0`. A library
+root records the major it uses, and the toolchain that checks it supplies that package.
+A toolchain binding has no root.
 Its content is the toolchain's and enters every key through the compiler and the toolchain
 identity, as it does today.
 
@@ -224,8 +225,10 @@ one, is refused: the directory walk below is only for a directory with no manife
 major of each name. Each value has exactly one of these forms. `major` is required in all but
 the last.
 
-- `{ major }` alone binds a **toolchain package**: only `std`, and only the major the
-  toolchain has (1). `core` is bound in every package and may not be declared.
+- `{ major }` alone binds a **toolchain package**. The installed toolchain supplies
+  `std@1` and `store@1`. A workspace using toolchain `store@1` cannot also bind
+  `store@1` as a member or published library. `core` is bound in every package and
+  may not be declared.
 - `{ major, path }` binds a member of the same workspace (section 4). The path is relative to
   this manifest's directory and must resolve to a member's directory, whose `[package]` has
   this name and major.
@@ -424,14 +427,14 @@ packages` when it fails.
 
 ## 6. Publishing a library
 
-`hirsel pack [DIR] --out FILE` publishes the member at DIR. It resolves the workspace as any
+`hirsel pack [DIR] --output FILE` publishes the member at DIR. It resolves the workspace as any
 command does, then computes the member's root:
 
 - A binding to another member is encoded as that member's own root, computed the same way,
   recursively. So a member's root is defined whenever its bindings resolve, and it changes
   when any member it reaches changes.
 - A binding to a published library is encoded as its root.
-- A binding to `std` is encoded as a toolchain binding.
+- A binding supplied by the toolchain is encoded as a toolchain binding.
 
 The member's `C` holds its captured `[sources]` files and `[foreign]` archives, every target's,
 and nothing of `[tests]`, `[program]` or `[tool]`. Each archive's captured bytes must match its
@@ -439,7 +442,7 @@ pin here (the `member pin` refusal of section 9). `pack` then writes a package a
 that `C` and the `C` of every package its bindings reach, other than toolchain packages:
 members encoded the same way, and published libraries copied from the store. Before writing,
 `pack` decodes the archive it produced and verifies every root again as a fetch would, and it
-refuses an `--out` that names, by file identity, a manifest, a captured file, the lock or a
+refuses an `--output` that names, by file identity, a manifest, a captured file, the lock or a
 store entry. It puts
 every package into the package store and prints one line per package of the archive, head
 first:
@@ -661,7 +664,7 @@ Roots are always written in full.
 | no sources | `hirsel: <manifest>: sources: a package lists at least one source` |
 | member outside | `hirsel: <root manifest>: workspace.members: "<dir>" resolves outside the workspace` |
 | member claimed | `hirsel: <root manifest>: workspace.members: "<dir>" belongs to the workspace at <other root manifest>` |
-| output alias | `hirsel: --out <path> is an input of this command` (a manifest, a captured file, the lock or a store entry, compared by file identity) |
+| output alias | `hirsel: --output <path> is an input of this command` (a manifest, a captured file, the lock or a store entry, compared by file identity) |
 | no lock in this mode | `hirsel: --locked needs a workspace lock; <what was given> has none` (or `--frozen`) |
 | two dependency forms | `hirsel: <manifest>: dependencies.<name>: give exactly one of path, root, workspace or a toolchain major` |
 | toolchain major | `hirsel: <manifest>: dependencies.std: the toolchain has std@1, not std@<n>` |
@@ -673,7 +676,7 @@ Roots are always written in full.
 | member cycle | `hirsel: the members' path bindings form a cycle: a@1 -> b@1 -> a@1`, starting at the smallest identity on the cycle |
 | inherit missing | `hirsel: <manifest>: dependencies.<name>: the workspace declares no <name>` |
 | no source | `hirsel: <id> sha256:<P> is not in the package store and its binding names no source` |
-| archive outside | `hirsel: <manifest>: dependencies.<name>: archive "<path>" is not inside the workspace root` |
+| archive outside | `hirsel: <manifest>: dependencies.<name>: archive "<path>" is not inside the workspace root. To share an archive across packages, add a parent hirsel.toml with [workspace] and members listing the package directories, then use a relative path within that workspace` |
 | archive incomplete | `hirsel: <id>: <source> lacks sha256:<P>, which <binder> binds as <name>@<major>`, the least such edge |
 | archive extra | `hirsel: <id>: <source> holds sha256:<Q>, which nothing in it binds`, the least such root |
 | fetch mismatch | `hirsel: <id>: <source> holds sha256:<Q>, but the binding pins sha256:<P>` |
@@ -780,8 +783,12 @@ R built from it, equal those of a build from fresh source.
 |---|---|
 | `hirsel lock [DIR]` | resolves the workspace and writes the lock |
 | `hirsel fetch [DIR]` | resolves the workspace and fills the store with every published root of the closure, building nothing |
-| `hirsel pack [DIR] --out FILE` | publishes the member at DIR (section 6) |
+| `hirsel pack [DIR] --output FILE` | publishes the member at DIR (section 6) |
+| `hirsel inspect DIR\|ARCHIVE.hpkg\|DEPENDENCY` | prints the selected package's public interface by default |
 | `hirsel new NAME` | writes `NAME/hirsel.toml`, its sources, its tests and its first lock |
+
+Inspect a dependency by its manifest name from the package that declares it.
+An archive supplies its head package and verified dependency closure.
 
 `--locked`, `--frozen` and `--package-store DIR` apply to `check`, `build`, `publish`, `run`,
 `test`, `inspect`, `replay`, `sdk`, `lock`, `fetch` and `pack`, when the command is given a
@@ -840,8 +847,8 @@ The roots are
 - Y = `sha256:df7ca24aa6689979ef02faa3a35084bf96207edbe52b19d78e6273a98dc2ca99` for `jy`.
 
 Here X is SHA-256 over the 8-byte little-endian 22, `hirsel.library-root.v1`, the 8-byte
-little-endian 72 and the 72 bytes. `hirsel pack jx --out jx.hpkg` prints
-`json@1 <X>` and `hirsel pack jy --out jy.hpkg` prints `json@1 <Y>`. This law catches any
+little-endian 72 and the 72 bytes. `hirsel pack jx --output jx.hpkg` prints
+`json@1 <X>` and `hirsel pack jy --output jy.hpkg` prints `json@1 <Y>`. This law catches any
 encoding drift: a wrong order, a missing frame, a hash over the archive instead of over `C`,
 or a shortened root.
 
@@ -891,7 +898,7 @@ ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad    pin
 ```
 
 Its root is D = `sha256:e073ce479e0454fe08a3b357087e8de69af0e172a90afa5419faf4307f3b8a75`,
-and `hirsel pack demo --out demo.hpkg` prints `demo@1 <D>`. Module `aa` precedes `b` by
+and `hirsel pack demo --output demo.hpkg` prints `demo@1 <D>`. Module `aa` precedes `b` by
 component bytes although its frame `01 02 61 61` is bytewise greater than `01 01 62`, and the
 manifest's row order does not matter. These are wire vectors: the archive bytes are not `ar`
 archives, and only FFI-3 at link time asks that they be. The decoder refuses three variants,
@@ -951,7 +958,7 @@ coalesce. With `b` binding `json` major 2 to the root of a `json@2` fixture, the
   only the named package's own manifest.
 
 **L3. Frozen with missing content.** Take L2's `app` with root X, but give it the source
-`url = "https://hirsel.invalid/jx.hpkg"`. Fill store S1 with `hirsel pack jx --out jx.hpkg
+`url = "https://hirsel.invalid/jx.hpkg"`. Fill store S1 with `hirsel pack jx --output jx.hpkg
 --package-store S1`, and write the fresh lock with `hirsel lock app --package-store S1`. Then
 `hirsel check app --frozen --package-store S2`, with S2 a new empty directory, exits 2, S2 stays
 empty, and its stderr is exactly:
@@ -973,7 +980,7 @@ itself to release its thread.)
 
 **L4. A symlink escaping the package.** Package `p` lists `"a.hirsel" = "a"`, where `a.hirsel`
 is a symbolic link to `../outside.hirsel`, a regular file beside `p`, and `p` has no lock.
-Run from `p`'s parent, `hirsel check p` and `hirsel pack p --out p.hpkg` both exit 2, create no
+Run from `p`'s parent, `hirsel check p` and `hirsel pack p --output p.hpkg` both exit 2, create no
 `hirsel.lock` and no archive, and write exactly this to stderr. The refusal is in resolution step
 2, before the lock is derived:
 
@@ -1001,7 +1008,7 @@ A non-leaf bundle is checked edge by edge. Package `wrap@1` is the review fixtur
 vectors: one file `wrap.hirsel`, module `wrap`, holding `pub fn one() -> u64 { 1u64 }` and a
 line feed, and one binding, `json = { major = 1, root = "<X>", archive = "../vendor/jx.hpkg" }`.
 Its `C` is 107 bytes and its root is W = `sha256:d863de7c3cf6ed4aa5535ee816d90fd603b45462eb6c2b78c846c584bd429689`. `hirsel pack wrap
---out wrap.hpkg` prints `wrap@1 <W>` and then `json@1 <X>`. `app` binds
+--output wrap.hpkg` prints `wrap@1 <W>` and then `json@1 <X>`. `app` binds
 `wrap = { major = 1, root = "<W>", archive = "vendor/wrap.hpkg" }`, and `hirsel check app`
 passes with the store holding W and X. Three archives built by hand from the same entries are
 refused, each leaving the store as it was:

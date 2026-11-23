@@ -16,7 +16,7 @@ use tempfile::TempDir;
 const TARGET: &str = "x86_64-unknown-linux-gnu";
 const LARGE: u64 = 1 << 20;
 
-fn limits() -> AdmissionLimits {
+pub(crate) fn limits() -> AdmissionLimits {
     AdmissionLimits {
         recipe_bytes: LARGE as usize,
         closure_objects: 64,
@@ -102,8 +102,8 @@ fn assert_staging_empty(root: &Path) {
     );
 }
 
-struct Fixture {
-    recipe: Recipe,
+pub(crate) struct Fixture {
+    pub(crate) recipe: Recipe,
     objects: BTreeMap<ObjectKey, Vec<u8>>,
 }
 
@@ -130,7 +130,7 @@ impl Fixture {
         }
     }
 
-    fn leaf() -> Self {
+    pub(crate) fn leaf() -> Self {
         let mut fixture = Self::new("entry");
         let entry = fixture.body("entry", "()", "", "return");
         fixture.recipe.address = fixture.group(&[(entry, vec![])], 0);
@@ -190,6 +190,28 @@ impl Fixture {
         if let Some(need) = read_need(peer) {
             self.send_objects(peer, &need);
         }
+    }
+
+    /// The admission request for this recipe: its root and the request frame.
+    pub(crate) fn request(&self) -> (ContentHash, Vec<u8>) {
+        let bytes = self.recipe.encode();
+        let root = Recipe::hash(&bytes);
+        let mut frame = root.0.to_vec();
+        frame.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+        frame.extend_from_slice(&bytes);
+        (root, frame)
+    }
+
+    /// The object frames answering `need`, ending with the final tag.
+    pub(crate) fn objects(&self, need: &[ObjectKey]) -> Vec<u8> {
+        let mut frames = Vec::new();
+        for key in need {
+            frames.extend(object_header(*key));
+            frames.extend_from_slice(&(self.objects[key].len() as u64).to_le_bytes());
+            frames.extend_from_slice(&self.objects[key]);
+        }
+        frames.push(0);
+        frames
     }
 
     fn send_objects(&self, peer: &mut UnixStream, need: &[ObjectKey]) {

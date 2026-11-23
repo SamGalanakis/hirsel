@@ -27,7 +27,7 @@ impl Options {
         for (id, value) in invocation.options {
             let text = value.as_deref().unwrap_or_default();
             match id {
-                OptionId::SdkOut => out = Some(PathBuf::from(text)),
+                OptionId::Output => out = Some(PathBuf::from(text)),
                 OptionId::PlaceTimeout => {
                     let seconds: f64 = text.parse()?;
                     timeout = Duration::try_from_secs_f64(seconds)
@@ -67,7 +67,7 @@ impl Options {
         }
         Ok(Self {
             program,
-            out: out.ok_or("sdk ts requires --out DIR")?,
+            out: out.ok_or("sdk ts requires --output DIR")?,
             timeout,
             n_place,
             build,
@@ -152,45 +152,6 @@ pub fn frame_schema(
             vec![core.clone()],
             false,
         ),
-        (
-            "store",
-            &[
-                (
-                    "runner",
-                    include_str!("../../../core/programs/store/runner.hirsel"),
-                ),
-                (
-                    "store",
-                    include_str!("../../../core/programs/store/store.hirsel"),
-                ),
-                (
-                    "store",
-                    include_str!("../../../core/programs/store/store-pages.hirsel"),
-                ),
-                (
-                    "store",
-                    include_str!("../../../core/programs/store/store-manifest.hirsel"),
-                ),
-                (
-                    "store",
-                    include_str!("../../../core/programs/store/store-locations.hirsel"),
-                ),
-                (
-                    "store",
-                    include_str!("../../../core/programs/store/store-packs.hirsel"),
-                ),
-                (
-                    "ingress",
-                    include_str!("../../../core/programs/store/ingress.hirsel"),
-                ),
-                (
-                    "triggers",
-                    include_str!("../../../core/programs/store/triggers.hirsel"),
-                ),
-            ][..],
-            vec![core.clone(), std.clone()],
-            false,
-        ),
     ] {
         let directory = work.join(name);
         std::fs::create_dir_all(&directory)?;
@@ -218,6 +179,26 @@ pub fn frame_schema(
             dependencies,
         });
     }
+    let mut sources = Vec::new();
+    let directory = work.join("store");
+    for (file, module, text) in crate::product::bundled::STORE_SOURCES {
+        let file = directory.join(file);
+        std::fs::create_dir_all(file.parent().expect("store source has a directory"))?;
+        std::fs::write(&file, text)?;
+        sources.push(ModuleSource {
+            foreign: false,
+            captured: None,
+            file,
+            modules: module.split('.').map(str::to_owned).collect(),
+            signatures: false,
+        });
+    }
+    packages.push(PackageManifest {
+        namespace: None,
+        package: store.clone(),
+        sources,
+        dependencies: vec![core.clone(), std.clone()],
+    });
     let source = work.join("schema.hirsel");
     std::fs::write(
         &source,
@@ -293,14 +274,16 @@ mod tests {
     }
     #[test]
     fn sdk_command_options() {
-        let options = parse(&["sdk", "ts", "server", "--out", "bindings"]).unwrap();
+        let options = parse(&["sdk", "ts", "server", "-o", "bindings"]).unwrap();
+        assert_eq!(options.out, PathBuf::from("bindings"));
+        assert!(parse(&["sdk", "ts", "server", "--out", "bindings"]).is_err());
         assert_eq!(options.timeout, Duration::from_secs(10));
         assert_eq!(options.n_place, 16 * 1024 * 1024);
         let options = parse(&[
             "sdk",
             "ts",
             "server",
-            "--out",
+            "--output",
             "bindings",
             "--place-timeout",
             "0.5",
@@ -316,7 +299,7 @@ mod tests {
                     "sdk",
                     "ts",
                     "server",
-                    "--out",
+                    "--output",
                     "bindings",
                     "--place-timeout",
                     seconds
@@ -325,7 +308,7 @@ mod tests {
             );
         }
         assert!(parse(&["sdk", "ts", "server"]).is_err());
-        assert!(parse(&["sdk", "js", "server", "--out", "bindings"]).is_err());
+        assert!(parse(&["sdk", "js", "server", "--output", "bindings"]).is_err());
     }
     #[test]
     fn sdk_command_does_not_write_after_a_describe_error() {
@@ -358,13 +341,13 @@ mod tests {
         std::fs::create_dir(&output).unwrap();
         let marker = output.join("keep");
         std::fs::write(&marker, "unchanged").unwrap();
-        let check = |body: &str, n_place, expected: &str| {
+        let check = |body: &str, n_place, timeout, expected: &str| {
             std::fs::write(&server, format!("#!/bin/sh\n{body}\n")).unwrap();
             std::fs::set_permissions(&server, std::fs::Permissions::from_mode(0o700)).unwrap();
             let options = Options {
                 program: server.clone(),
                 out: output.clone(),
-                timeout: Duration::from_millis(100),
+                timeout,
                 n_place,
                 build: vec![],
             };
@@ -372,21 +355,25 @@ mod tests {
             assert_eq!(std::fs::read_to_string(&marker).unwrap(), "unchanged");
             assert_eq!(std::fs::read_dir(&output).unwrap().count(), 1);
         };
+        let response_timeout = Duration::from_secs(3600);
         for n_place in [0, 1] {
             check(
                 "printf '\\000\\000\\000\\000\\010\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000\\000'; exit 2",
                 n_place,
+                response_timeout,
                 "PlaceCapacity(Room { requested: 8, available: 0 })",
             );
         }
         check(
             "printf '\\001\\000\\000\\000\\003\\000\\000\\000abc'; exit 2",
             4096,
+            response_timeout,
             "AlreadyRegistered([97, 98, 99])",
         );
         check(
-            "exec python3 -c 'import time; time.sleep(2)'",
+            "exec python3 -c 'import threading; threading.Event().wait()'",
             4096,
+            Duration::from_millis(100),
             "PlaceTimedOut",
         );
     }

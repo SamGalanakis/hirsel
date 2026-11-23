@@ -168,9 +168,9 @@ hold any SCRAM value computed from a password: the normalized password, `SaltedP
 
 **Secret designations.** A granted secret is a grant. It takes a `GRANT` frame and an object
 ordinal in the order of the run's grants, like every other grant. The header's grant
-snapshot keeps the parameter name, the `to` patterns and MAC use, and the source label
+snapshot keeps the parameter name, the canonical policy text, and the source label
 (`env:OPENAI_API_KEY`), but not the bytes. A sealed secret is designated by the order of its
-seal among the run's seals, together with its `to` patterns and MAC use. The canonical arguments of
+seal among the run's seals, together with its policy. The canonical arguments of
 `SEND_SECRET` and `SECRET_MAC` hold the designation, never the bytes or any function of them, because an
 unkeyed digest of a short secret could be reversed by trying candidate values.
 
@@ -227,8 +227,11 @@ A verdict other than `Sealed` ends the replay at the position where it is found:
 divergent issue has no effect and is not delivered, and no further program code, cleanup or
 finalizer runs. The program observes nothing of it. The replay writes one line,
 `replay: VERDICT at N`, where N is the position of the frame it was checked against, counted
-after the header, and with `--diagnose` the source position of the divergent issue too. It
-then exits 1. A `Sealed` replay exits 0.
+after the header. A divergence appends the scheduler event, recorded frame kind and
+available expected and observed fields. Read capacities and sleep deadlines are shown as
+numbers. Other argument bytes and outcome payloads are redacted. With `--diagnose`, the
+line also includes the source position when one is available. Replay then exits 1. A
+`Sealed` replay exits 0.
 
 ## Credentials
 
@@ -261,9 +264,11 @@ recorded outcome.
 
 ## Format
 
-A recording file is a **tape** in format 8, which `crates/hirsel-tape-format` owns. Format 7
+A recording file is a **tape** in format 9, which `crates/hirsel-tape-format` owns. Format 7
 added the run's Map hash key to the header. Format 8 adds the terminal byte to stream grants
-and adds the SCRAM frames described in [TLS-6](spec/tls.md#tls-6-scram-sha-256).
+and adds the SCRAM frames described in [TLS-6](spec/tls.md#tls-6-scram-sha-256). Format 9
+writes each Secret grant's policy as its canonical set of uses
+([TLS-5](spec/tls.md#tls-5-secrets)).
 The format is not part of the language and a replay reads only tapes its own build admits,
 and its pinned executable reads that layout. The host uses the checked block-zero prefix
 through the launch arguments to find and verify the pin.
@@ -276,8 +281,8 @@ through the launch arguments to find and verify the pin.
 - The `Tls` rule record holds the direction byte 2; the trust byte, followed by 32 bytes of
   roots digest when the trust is `Roots`; the port interval; and a `u16` count of patterns,
   each a length byte followed by its bytes.
-- A `Secret` grant record holds the parameter name, the source label and the patterns, all
-  length-prefixed.
+- A `Secret` grant record holds the parameter name, the source label and the canonical
+  policy text ([TLS-5](spec/tls.md#tls-5-secrets)), all length-prefixed.
 - The `GRANT` frame of a `Stdin`, `Stdout` or `Stderr` grant holds its terminal byte.
 - The `GRANT` frame of an `Exec` grant holds the total profile snapshot length, then its
   first payload chunk. `DATA` frames carry the remaining bytes.

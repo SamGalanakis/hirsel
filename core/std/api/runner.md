@@ -5,6 +5,9 @@ of a place, as a library over v1 (reserved R13). R0 has `Registry[G, H]`, `compu
 `granted`, `describe`, `call`, `start` and `finish`. R1 adds `transact`, the head
 (`place_head`), its internal publisher, and sessions (`connect`, `ask`, `hang_up`).
 
+To use `store.runner`, add `store = { major = 1 }` under `[dependencies]` in
+`hirsel.toml`. The installed Hirsel toolchain supplies the package.
+
 ## No authentication, no authorization
 
 Hirsel and `runner` contain no authentication and no authorization (RUNNER-SPEC
@@ -111,14 +114,16 @@ group (G1). The session hands its client a `Down`: `Batched(KeyedBatch)`, where 
 `KeyedDone{stream, p, outcome}` (the wire `Done` with the store's stream key in place of a
 stream slot, until R3), or `Ended(sub, outcome)`, or `KeyedReset(version, outcomes)`.
 
-R2 adds `query(mut r, f, n, s)` and `query_as(mut r, f, n, s)`, which register a subscription
+R2 adds `query(mut r, f, key, value, n, s)` and `query_as(mut r, f, key, value, n, s)`, which register a subscription
 entry. A `query` body is `fn(Tx, H, take A)` and never sees the Caller; a `query_as` body is
 `fn(Tx, H, Caller, take A)` and gets the subscribing session's Caller at every run. Its body reads at a
 snapshot inside `look`, under `bound bytes n` and `s` steps. Row conversion shares
 those limits when the query runs. A query returns a `Cover` that describes one
 data-tree key range of one table, made with `cover(shape, lo, hi)`, which keeps that
-table's published value. A query key's result fingerprint is the unit schema's, because
-its rows travel under their tables' codecs. The publisher keeps each subscription's
+table's published value. Pass the table's ordered key codec and current value
+codec at registration. The runner fingerprints both schemas and ends a
+subscription if its Cover selects a table with different schemas. The SDK uses
+the registered schemas to generate `subscribeDecoded` stubs. The publisher keeps each subscription's
 Cover and read set at its base, never its rows (F4), so subscribed memory does not grow
 with the rows a Cover spans (L20). A Subscribe runs the query at the
 base, and its whole result goes in one Batch that names the sub in `complete` (G3). A
@@ -329,7 +334,7 @@ identity (the launch digest with the selected constructors, derived by
 `place_head`); otherwise its verdict is `Unknown(RevisionUnknown)`. A chosen
 candidate always runs (RUNNER-SPEC v2.19).
 
-**Operating a place (RUNNER-SPEC v2.15 §12; specified, not built).**
+**Operating a place (RUNNER-SPEC §12.1).**
 `operate(config, stop, status, watch)` owns a place from store open to store close.
 It supervises a head task (store, activation, publisher), a serve supervisor
 with one acceptor child, and the sessions. It publishes
@@ -343,10 +348,13 @@ min(stop + `lag_ms`, D): the acceptor is cancelled, so the listener refuses.
 After that, a new send is `Refused(Overloaded)`, and so is a head FIFO entry
 that was never admitted. Admitted work runs to its reply, and then the head
 closes the store. At D, every owed send is `Abandoned`, the head is cancelled,
-and the store is left at a crash cut for recovery. The result is `Stopped` or
-`Forced(n)`. The place serves `GET /hirsel/status`, a raw route that answers 200
+and the store is left at a crash cut for recovery. The result is
+`Stopped(next_due)` after a clean drain, `Unstarted` after a clean stop during
+startup, or `Forced(n)` at the deadline. With `PlaceConfig.idle = Some(ms)`,
+the runner starts a drain with admission closed after both supervisors
+confirm the place has been idle for the interval. The place serves `GET /hirsel/status`, a raw route that answers 200
 only when `Ready`, with the launch identity and `release_digest`.
-`runner.fixture` starts a place through `operate` on a memory or temporary
+The `fixture` module starts a place through `operate` on a memory or temporary
 store, with typed calls whose replies are durable, `seen_at` for the first
 batch at or after a version, relative bounds on the place's clock, and release
 of every resource on `end` or on drop. It runs natively until the evaluator's model
@@ -374,7 +382,9 @@ snapshot or `triggers.fetch_outcome` in a transaction.
 
 A grant callback receives the attempt’s `TriggerContext`. The run uses `trigger_call` to
 invoke a fenced transaction and `trigger_boundary` to check its attempt and
-any committed cancel request before an outside step. `trigger_hold` commits a
+any committed cancel request before an outside step. `trigger_snapshot` returns a
+read-only store snapshot for the current attempt, so the run can read rows off
+the write lock; a stale or cancelled attempt gets an error instead. `trigger_hold` commits a
 request fingerprint hold. An operator or activation entry uses
 `triggers.request_cancel` or `triggers.release` in a transaction. Passing a
 revision to release changes the stamp and clears the hold together. The next

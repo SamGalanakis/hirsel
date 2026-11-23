@@ -5,8 +5,9 @@ use std::io;
 
 /// Canonical layout of a complete parse. Invalid source has no formatted result.
 /// Prints every non-whitespace token verbatim, including comments and semicolons.
-/// Four-space blocks and statement/field/arm lines are structural; other lists
-/// stay inline. No resolution, second parse or validation of our output is run.
+/// Four-space blocks and statement/field/arm lines are structural. A trailing
+/// comma gives parenthesized and bracketed lists one entry per line.
+/// No resolution, second parse or validation of our output is run.
 pub fn format(parsed: &ParseOutput) -> Option<String> {
     if !parsed.diagnostics.is_empty() || parsed.resource_refusal.is_some() {
         return None;
@@ -145,7 +146,7 @@ fn item_text(item: &Item) -> String {
         let range = node.origin.tokens.start as usize..node.origin.tokens.end as usize;
         match node.kind {
             NodeKind::Block | NodeKind::Fields => {
-                braces(&mut roles, range.start, range.end - 1);
+                indent_between(&mut roles, range.start, range.end - 1);
                 for &child in children {
                     roles[tree.node(child).origin.tokens.start as usize].line_before = true;
                 }
@@ -155,7 +156,7 @@ fn item_text(item: &Item) -> String {
                 let open = (subject.origin.tokens.end as usize..range.end)
                     .find(|&t| tree.tokens[t].kind == TokenKind::LBrace)
                     .unwrap();
-                braces(&mut roles, open, range.end - 1);
+                indent_between(&mut roles, open, range.end - 1);
                 for &child in &children[1..] {
                     roles[tree.node(child).origin.tokens.start as usize].line_before = true;
                 }
@@ -195,6 +196,21 @@ fn item_text(item: &Item) -> String {
             }
             _ => {}
         }
+        let entries = match node.kind {
+            NodeKind::Parameters
+            | NodeKind::Generics
+            | NodeKind::Tuple
+            | NodeKind::TupleType
+            | NodeKind::TuplePattern
+            | NodeKind::Array
+            | NodeKind::Variant
+            | NodeKind::RemovedVariant => children,
+            NodeKind::Call | NodeKind::TypeArguments | NodeKind::ConstructorPattern => {
+                &children[1..]
+            }
+            _ => continue,
+        };
+        trailing_comma_list(tree, &mut roles, range.start, range.end - 1, entries);
     }
     print(
         item.text,
@@ -203,7 +219,34 @@ fn item_text(item: &Item) -> String {
     )
 }
 
-fn braces(roles: &mut [Role], open: usize, close: usize) {
+fn trailing_comma_list(
+    tree: &Tree,
+    roles: &mut [Role],
+    start: usize,
+    close: usize,
+    entries: &[NodeId],
+) {
+    let (Some(&first), Some(&last)) = (entries.first(), entries.last()) else {
+        return;
+    };
+    let last_end = tree.node(last).origin.tokens.end as usize;
+    let trailing = tree.tokens[last_end..close]
+        .iter()
+        .find(|token| !token.kind.is_trivia());
+    if !trailing.is_some_and(|token| token.kind == TokenKind::Comma) {
+        return;
+    }
+    let first_start = tree.node(first).origin.tokens.start as usize;
+    let open = (start..first_start)
+        .rfind(|&t| !tree.tokens[t].kind.is_trivia())
+        .unwrap();
+    indent_between(roles, open, close);
+    for &entry in entries {
+        roles[tree.node(entry).origin.tokens.start as usize].line_before = true;
+    }
+}
+
+fn indent_between(roles: &mut [Role], open: usize, close: usize) {
     if close > open + 1 {
         roles[open].open = true;
         roles[open].line_after = true;
@@ -216,11 +259,10 @@ fn print(text: &str, tokens: &[Token], roles: &[Role]) -> String {
     let mut out = String::new();
     let mut indent = 0;
     let mut line = false;
-    let mut original_newline = true;
     let mut previous: Option<(TokenKind, Role)> = None;
     for (token, &role) in tokens.iter().zip(roles) {
         let raw = &text[token.span.start as usize..token.span.end as usize];
-        original_newline |= token.line_before;
+        let original_newline = previous.is_none() || token.line_before;
         if token.kind == TokenKind::Eof {
             continue;
         }
@@ -228,9 +270,9 @@ fn print(text: &str, tokens: &[Token], roles: &[Role]) -> String {
             indent -= 1;
         }
         let comment = token.kind.is_trivia();
-        let trailing = comment && !original_newline && previous.is_some();
+        let trailing = comment && !original_newline;
         // A trailing comment belongs before the previous token's pending break.
-        // A block opener always puts its contents on an indented line.
+        // An indented group opener always puts its contents on a new line.
         let after_open = previous.is_some_and(|(_, r)| r.open);
         let break_here = role.line_before
             || (line && (!trailing || after_open))
@@ -252,14 +294,12 @@ fn print(text: &str, tokens: &[Token], roles: &[Role]) -> String {
         if role.open {
             indent += 1;
         }
-        let line_comment = matches!(token.kind, TokenKind::LineComment | TokenKind::DocLine);
+        // Every comment runs to its line end (LANG-1), and no token spans a line.
         line = (trailing && line)
             || role.line_after
             || (token.kind == TokenKind::Semicolon && !role.inline_semicolon)
-            || line_comment
-            || (comment && original_newline);
+            || comment;
         previous = Some((token.kind, role));
-        original_newline = raw.contains('\n');
     }
     if !out.is_empty() && !out.ends_with('\n') {
         out.push('\n');

@@ -55,12 +55,12 @@ the mapping and relative PC when neither source is available.
 ## Profile file
 
 A `.hprof` is a self-contained SQLite database with `application_id =
-0x48505246` and `user_version = 2`. Readers open the current version
+0x48505246` and `user_version = 3`. Readers open the current version
 read-only and refuse other versions.
 Source snippets and symbol names are recorded in the database so it can travel
 without the source tree, executable or debug files.
 
-The database has the following tables and columns.
+The database has the following tables, views and columns.
 
 | Table | Columns |
 | --- | --- |
@@ -79,6 +79,11 @@ The database has the following tables and columns.
 | `peak_callsite` | `snapshot_id, callsite_id, live_bytes, live_count` |
 | `mem_alloc_agg` | `callsite_id, allocation_kind, observed_count, observed_bytes, estimated_count, estimated_bytes, freed_count, lifetime_ns` |
 | `budget_scope_summary` | `scope_id, parent_id, scope_kind, task_id, callsite_id, enter_ts, exit_ts, limit_val, peak_val, refused` |
+| `task` | `id, unit_id, runtime_id, parent_id, start_ns, end_ns` |
+| `task_slice` | `id, task_id, tid, worker_id, state, wait_reason, object_id, start_ns, end_ns` |
+| `causal_edge` | `id, src_kind, src_id, dst_task_id, object_id, ts_ns` |
+| `task_wait_episode` (view) | `id, task_id, state, wait_reason, object_id, start_ns, end_ns, slice_end_ns, wake_id, wake_kind, source_task_id, wake_ns, boundary` |
+| `task_wait_critical_path` (view) | `root_id, root_task_id, slice_id, depth, task_id, state, wait_reason, object_id, source_task_id, start_ns, end_ns, boundary` |
 
 `run_meta` has the keys `hprof_version`, `capture_mode`, `target`, `cmdline`,
 `build_id`, `image_digest`, `symbol_tier`, `clock`, `primary_event`,
@@ -87,8 +92,11 @@ The database has the following tables and columns.
 `unresolved_samples`, `host_root_samples` and `kernel_samples`.
 
 Addresses in `*_hex` columns are hexadecimal text. Unsigned numeric values
-above the SQLite signed integer range use exact decimal text. Time is in
-nanoseconds. An unresolved sample has no function for its leaf frame.
+above the SQLite signed integer range use exact decimal text. Timestamps
+and run times are in nanoseconds and use 20 digits for that text, including
+leading zeroes, so comparisons and ordering stay exact. Use
+`u64_elapsed(end_ns, start_ns)` in `prof sql` for exact subtraction.
+An unresolved sample has no function for its leaf frame.
 
 A callsite identifies a frame in its caller chain. A self total counts the
 event periods attributed to the leaf frame. An inclusive total counts each
@@ -293,5 +301,40 @@ nanoseconds over completed lifetimes. Each lifetime runs from task creation
 through its end. With no completed lifetime, the percentiles are null.
 The result includes measured causal edges, the count of wakes whose source
 does not identify an observed task and any truncation from `--limit`.
-External and timer wakes stop causal provenance. The query reports
-individual measured edges and leaves critical paths unspecified.
+The `task_wait_episode` view uses the ID of a waiting or provider slice.
+It pairs the slice with a unique wake for its destination, time interval
+and object when both records carry one. A paired wake ends the blocked
+interval. `slice_end_ns` retains the following state timestamp. Missing
+or ambiguous wakes, timestamp ties, external wakes and capture loss appear
+in `boundary`. An open wait has a null end.
+
+The `task_wait_critical_path` view follows the waking task's running slice
+and preceding slices of that task. Each hop across a wake increases
+`depth`. The view clips dependencies to the blocked interval and gives
+each span to the deepest observed slice. It reports running and ready time
+in separate rows. A non-null `boundary` identifies unknown attribution,
+including time before any observed source slice. Two tasks can wake each
+other in different episodes. Replay profiles report replay timings.
+
+Pass a statement like this to `hirsel prof sql FILE.hprof`. Replace task
+17 and the half-open time window with the task and interval to inspect.
+For bounds above SQLite's signed integer range, use quoted 20-digit
+decimal strings.
+
+```sql
+WITH bounds(lo, hi) AS (VALUES (1000, 2000)),
+spans AS (
+    SELECT root_id, depth, task_id, state, wait_reason, object_id, boundary,
+           max(start_ns, lo) AS start_ns,
+           min(coalesce(end_ns, hi), hi) AS end_ns
+    FROM task_wait_critical_path, bounds
+    WHERE root_task_id = 17 AND start_ns < hi AND (end_ns IS NULL OR end_ns > lo)
+)
+SELECT *, u64_elapsed(end_ns, start_ns) AS duration_ns
+FROM spans WHERE start_ns < end_ns
+ORDER BY start_ns, root_id;
+```
+
+Sum `duration_ns` with `u64_sum` by root and by running, ready or unknown
+attribution to account for the interval. The SQL command's row limit and
+timeout apply to this query.

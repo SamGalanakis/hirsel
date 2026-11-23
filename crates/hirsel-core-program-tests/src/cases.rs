@@ -490,48 +490,131 @@ pub(crate) fn run_case(path: &Path) -> Vec<String> {
                         &mut crate::Meter::new(false),
                     )
                     .unwrap();
-                let sites = |xs: &[hirsel_core_driver::SourceSite]| {
-                    xs.iter()
-                        .map(|s| (s.module.clone(), s.span))
-                        .collect::<Vec<_>>()
-                };
                 let diagnostic_rows = |p: &hirsel_core_driver::CheckProduct| {
-                    p.machine_diagnostics()
-                        .unwrap()
-                        .into_iter()
-                        .map(|d| {
-                            (
-                                d.rule.to_owned(),
-                                d.primary.module,
-                                d.primary.span,
-                                sites(&d.causal),
-                                d.declared.map(str::to_owned),
-                                d.required.map(str::to_owned),
-                                d.message.to_owned(),
-                            )
-                        })
-                        .collect::<Vec<_>>()
+                    serde_json::to_value((
+                        p.machine_diagnostics().unwrap(),
+                        p.machine_incomplete().unwrap(),
+                        p.machine_resources().unwrap(),
+                    ))
+                    .unwrap()
                 };
-                let gap_rows = |p: &hirsel_core_driver::CheckProduct| {
-                    p.machine_incomplete()
-                        .unwrap()
-                        .into_iter()
-                        .map(|g| {
-                            (
-                                g.primary.module,
-                                g.primary.span,
-                                sites(&g.causal),
-                                g.message.to_owned(),
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                };
-                if diagnostic_rows(product) != diagnostic_rows(&warm)
-                    || gap_rows(product) != gap_rows(&warm)
-                {
+                if diagnostic_rows(product) != diagnostic_rows(&warm) {
                     failures.push(
                         "cached diagnostic provenance differs from the source request".into(),
                     );
+                }
+            }
+            ["role", rule, "at", at, role, "from", from] => {
+                let rows = product.machine_diagnostics().unwrap();
+                if !rows.iter().any(|row| {
+                    row.rule == *rule
+                        && matches_site(&row.primary, at)
+                        && row.causal.iter().any(|cause| {
+                            serde_json::to_value(cause.role).unwrap().as_str() == Some(*role)
+                                && matches_site(&cause.site, from)
+                        })
+                }) {
+                    failures.push(format!("missing {role} at {from} for {rule} at {at}"));
+                }
+            }
+            ["available", rule, "at", at, "|", ..] => {
+                let rows = product.machine_diagnostics().unwrap();
+                let row = rows
+                    .iter()
+                    .find(|row| row.rule == *rule && matches_site(&row.primary, at));
+                let signatures = row.filter(|row| row.fixes.is_empty()).map(|row| {
+                    row.available_members
+                        .iter()
+                        .map(|member| member.signature.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" | ")
+                });
+                let want = e.split_once(" | ").unwrap().1;
+                if signatures.as_deref() != Some(want) {
+                    failures.push(format!(
+                        "wrong available members for {rule} at {at}: {signatures:?}"
+                    ));
+                }
+            }
+            [
+                kind @ ("fix" | "first-fix"),
+                rule,
+                "at",
+                at,
+                applicability,
+                "|",
+                replacement @ ..,
+            ] => {
+                let rows = product.machine_diagnostics().unwrap();
+                let row = rows
+                    .iter()
+                    .find(|row| row.rule == *rule && matches_site(&row.primary, at));
+                let fix = row.and_then(|row| match row.fixes.as_slice() {
+                    [fix] => Some(fix),
+                    [first, ..] if *kind == "first-fix" => Some(first),
+                    _ => None,
+                });
+                let Some(fix) = fix else {
+                    failures.push(format!(
+                        "expected {kind} for {rule} at {at}: {:?}",
+                        row.map(|r| &r.fixes)
+                    ));
+                    continue;
+                };
+                let (replacement, signature) = replacement
+                    .iter()
+                    .position(|&word| word == "|")
+                    .map_or((replacement, None), |separator| {
+                        (
+                            &replacement[..separator],
+                            Some(replacement[separator + 1..].join(" ")),
+                        )
+                    });
+                if fix.signature != signature {
+                    failures.push(format!(
+                        "wrong signature for {rule} at {at}: {:?}",
+                        fix.signature
+                    ));
+                }
+                let row = row.unwrap();
+                let line = source.lines().nth(row.primary.line.unwrap() - 1).unwrap();
+                if row.primary.line_text.as_deref() != Some(line) {
+                    failures.push(format!("wrong line text for {rule} at {at}"));
+                }
+                if serde_json::to_value(fix.applicability).unwrap().as_str() != Some(*applicability)
+                {
+                    failures.push(format!(
+                        "expected {applicability} fix for {rule} at {at}: {fix:?}"
+                    ));
+                }
+                let [edit] = fix.edits.as_slice() else {
+                    failures.push(format!("expected one edit in the fix at {at}: {fix:?}"));
+                    continue;
+                };
+                let want = replacement.join(" ");
+                if edit.module != "app@1/main"
+                    || edit.text.split_whitespace().collect::<Vec<_>>().join(" ") != want
+                {
+                    failures.push(format!("wrong edit for {rule} at {at}: {edit:?}"));
+                    continue;
+                }
+                let mut fixed = source.clone();
+                fixed.replace_range(edit.span.start as usize..edit.span.end as usize, &edit.text);
+                let fixed = Checked::source(&fixed, p.entry.clone());
+                if !fixed.product.accepted() {
+                    failures.push(format!(
+                        "edit for {rule} at {at} left diagnostics {:?} and gaps {:?}",
+                        fixed.product.diagnostics, fixed.product.incomplete
+                    ));
+                }
+            }
+            ["missing-pattern", at, pattern] => {
+                if !product.machine_diagnostics().unwrap().iter().any(|row| {
+                    row.rule == "LANG-17"
+                        && matches_site(&row.primary, at)
+                        && row.missing_patterns == [*pattern]
+                }) {
+                    failures.push(format!("missing uncovered pattern {pattern} at {at}"));
                 }
             }
             ["gap-cause", "at", at, "from", from @ ..] => {
@@ -715,10 +798,10 @@ pub(crate) fn run_case(path: &Path) -> Vec<String> {
                 .causal
                 .iter()
                 .map(|c| {
-                    if c.module == main {
-                        line_col(&modules, c)
+                    if c.site.module == main {
+                        line_col(&modules, &c.site)
                     } else {
-                        let m = index.module_path(c.module);
+                        let m = index.module_path(c.site.module);
                         format!("{}/{}", m.package.name, m.modules.join("/"))
                     }
                 })
@@ -1441,7 +1524,7 @@ pub fn worker() -> u64 { 0 }
     let member = index.definition(refusal.primary.module, name).unwrap();
     assert_eq!(refusal.rule, "LANG-7");
     assert_eq!(refusal.primary, index.get(member).site);
-    assert_eq!(refusal.causal[0].module, sibling);
+    assert_eq!(refusal.causal[0].site.module, sibling);
 
     let checked = Checked::check(inputs, files, None);
     let product = &checked.product;
@@ -1465,7 +1548,7 @@ pub fn worker() -> u64 { 0 }
             diagnostic
                 .causal
                 .iter()
-                .map(|site| site.module.as_str())
+                .map(|cause| cause.site.module.as_str())
                 .eq(cause)
         );
     }
@@ -1475,6 +1558,34 @@ pub fn worker() -> u64 { 0 }
         hirsel_core_materialize::join(&units.modules().unwrap(), &identity).unwrap();
     let report = eval::run(&module, function, &[], u64::MAX);
     assert_eq!(report.outcome, eval::Outcome::Returned(vec![3]));
+}
+
+#[test]
+fn diagnostic_delimiter_openers() {
+    let failures = run_case(&root().join("cases/body/diag-unclosed-delimiters.hirsel"));
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn diagnostic_name_candidates() {
+    let failures: Vec<_> = ["transpose", "case", "other-module", "available"]
+        .iter()
+        .flat_map(|case| {
+            let path = root().join(format!("cases/body/diag-name-{case}.hirsel"));
+            run_case(&path)
+                .into_iter()
+                .map(move |failure| format!("{case}: {failure}"))
+        })
+        .collect();
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+fn matches_site(site: &hirsel_core_driver::SourceSite, at: &str) -> bool {
+    site.module == "app@1/main"
+        && site
+            .line
+            .zip(site.column)
+            .is_some_and(|(line, column)| format!("{line}:{column}") == at)
 }
 
 #[test]

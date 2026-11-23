@@ -31,6 +31,7 @@ const UNIT_BYTES: u64 = 1048576
 const COMMIT_BYTES: u64 = 4194304
 
 const COMMIT_CAP: u64 = 4096
+
 const COMMIT_WAIT_NS: u64 = 400000
 
 const SVC_CAP: u64 = 1024
@@ -264,7 +265,19 @@ type Session: send {
 }
 
 fn session(take job: Session) -> u64 waits {
-    let Session(tasks: tasks, nw: nw, clock: clock, r: take rh, w: take wh, sid: sid, commit: commit, svc: svc, tool_port: tool_port, par: par, ready_ack: ready_ack,) = take job
+    let Session(
+        tasks: tasks,
+        nw: nw,
+        clock: clock,
+        r: take rh,
+        w: take wh,
+        sid: sid,
+        commit: commit,
+        svc: svc,
+        tool_port: tool_port,
+        par: par,
+        ready_ack: ready_ack,
+    ) = take job
     let mut r = take rh
     let mut w = take wh
     // One connection answers both the service and the partition: each
@@ -388,10 +401,28 @@ fn read_hello(mut s: ReadHalf, mut buf: Bytes, until: Until) -> bool waits {
 }
 
 fn front(take job: Front) -> u64 waits {
-    let Front(tasks: tasks, nw: nw, clock: clock, me: me, mine: mine, sessions: sessions, partitions: partitions, tool_port: tool_port, par: par, ready_ack: ready_ack, svc: svc, hello: hello, more: more,) = take job
+    let Front(
+        tasks: tasks,
+        nw: nw,
+        clock: clock,
+        me: me,
+        mine: mine,
+        sessions: sessions,
+        partitions: partitions,
+        tool_port: tool_port,
+        par: par,
+        ready_ack: ready_ack,
+        svc: svc,
+        hello: hello,
+        more: more,
+    ) = take job
     // An inbox does not cross: the root sends the partitions' clients here.
     let (c, wiring): (Client[Client[Commit]], Inbox[Client[Commit]]) = result.unwrap(conn.new(partitions, bytes 0))
-    let (sockets, incoming): (Client[Socket], Inbox[Socket]) = result.unwrap(conn.new(if mine == 0 { 1 } else { mine }, bytes 0))
+    let (sockets, incoming): (Client[Socket], Inbox[Socket]) = result.unwrap(conn.new(if mine == 0 {
+        1
+    } else {
+        mine
+    }, bytes 0))
     result.unwrap(conn.send(hello, FrontWiring(commits: take c, sockets: take sockets)))
     let _ = take hello
     let mut commits: List[Client[Commit]] = list.new()
@@ -420,7 +451,19 @@ fn front(take job: Front) -> u64 waits {
         let Some(commit) = list.get(commits, sid % partitions) else {
             fail("no partition")
         }
-        let one = Session(tasks: tasks, nw: nw, clock: clock, r: take r, w: take wh, sid: sid, commit: conn.client(commit), svc: conn.client(svc), tool_port: tool_port, par: par, ready_ack: ready_ack,)
+        let one = Session(
+            tasks: tasks,
+            nw: nw,
+            clock: clock,
+            r: take r,
+            w: take wh,
+            sid: sid,
+            commit: conn.client(commit),
+            svc: conn.client(svc),
+            tool_port: tool_port,
+            par: par,
+            ready_ack: ready_ack,
+        )
         list.push(mut jobs, task.spawn(tasks, bytes per, take one, session))
     }
     result.unwrap(conn.send(more, FILLED))
@@ -455,8 +498,7 @@ type OwnedSession: cross {
 }
 
 fn owned_session(take job: OwnedSession) -> u64 waits {
-    let OwnedSession(tasks: tasks, nw: nw, clock: clock, socket: take socket, sessions: sessions,
-        registration: registration, svc: svc, tool_port: tool_port, par: par, ready_ack: ready_ack) = take job
+    let OwnedSession(tasks: tasks, nw: nw, clock: clock, socket: take socket, sessions: sessions, registration: registration, svc: svc, tool_port: tool_port, par: par, ready_ack: ready_ack) = take job
     let (take rh, take w) = net.split(take socket)
     let mut r = take rh
     let mut hello: Bytes = list.with_capacity(8)
@@ -467,28 +509,28 @@ fn owned_session(take job: OwnedSession) -> u64 waits {
     }
     let (assign, wiring): (Client[Client[Commit]], Inbox[Client[Commit]]) = result.unwrap(conn.new(1, bytes 0))
     result.unwrap(conn.send(registration, Registration(sid: sid, assign: take assign)))
-    if sid >= sessions { return 0 }
-
+    if sid >= sessions {
+        return 0
+    }
     let _ = take registration
     let commit = result.unwrap(conn.receive(wiring))
-    session(Session(tasks: tasks, nw: nw, clock: clock, r: take r, w: take w, sid: sid,
-        commit: take commit, svc: svc, tool_port: tool_port, par: par, ready_ack: ready_ack))
+    session(Session(tasks: tasks, nw: nw, clock: clock, r: take r, w: take w, sid: sid, commit: take commit, svc: svc, tool_port: tool_port, par: par, ready_ack: ready_ack))
 }
 
-fn serve_clients(tasks: Tasks, nw: Net, clock: Clock, port: u64, sessions: u64,
-                 tool_port: u64, par: bool, ready_ack: bool, commits: List[Client[Commit]],
-                 svc: Client[SvcReq]) -> u64 waits {
+fn serve_clients(tasks: Tasks, nw: Net, clock: Clock, port: u64, sessions: u64, tool_port: u64, par: bool, ready_ack: bool, commits: List[Client[Commit]], svc: Client[SvcReq]) -> u64 waits {
     let (take l, _) = result.unwrap(host.listen(nw, local_addr(port), 4096))
     let mut listener = take l
     let mut jobs: List[Task[u64]] = list.new()
     let (registration, clients): (Client[Registration], Inbox[Registration]) = result.unwrap(conn.new(1, bytes 0))
     let mut accepted = 0u64
-    let per = if par { PAR_SESSION_BYTES } else { SESSION_BYTES }
+    let per = if par {
+        PAR_SESSION_BYTES
+    } else {
+        SESSION_BYTES
+    }
     while accepted < sessions {
         let (take socket, _) = result.unwrap(host.accept(mut listener, Never))
-        let one = OwnedSession(tasks: tasks, nw: nw, clock: clock, socket: take socket,
-            sessions: sessions, registration: conn.client(registration), svc: conn.client(svc),
-            tool_port: tool_port, par: par, ready_ack: ready_ack)
+        let one = OwnedSession(tasks: tasks, nw: nw, clock: clock, socket: take socket, sessions: sessions, registration: conn.client(registration), svc: conn.client(svc), tool_port: tool_port, par: par, ready_ack: ready_ack)
         let h = result.unwrap(task.spawn_unit(tasks, bytes per, take one, owned_session))
         let reg = result.unwrap(conn.receive(clients))
         if reg.sid < sessions {
@@ -553,7 +595,21 @@ pub fn main(tasks: Tasks, nw: Net, clock: Clock, err: Stderr, d: Dir, argv: Args
         let mut clients: List[Client[Socket]] = list.new()
         for u in 0 .. k {
             let mine = (sessions + k - 1 - u) / k
-            let job = Front(tasks: tasks, nw: nw, clock: clock, me: u, mine: mine, sessions: sessions, partitions: partitions, tool_port: tool_port, par: par, ready_ack: ready_ack, svc: conn.client(svc), hello: conn.client(fh), more: conn.client(more),)
+            let job = Front(
+                tasks: tasks,
+                nw: nw,
+                clock: clock,
+                me: u,
+                mine: mine,
+                sessions: sessions,
+                partitions: partitions,
+                tool_port: tool_port,
+                par: par,
+                ready_ack: ready_ack,
+                svc: conn.client(svc),
+                hello: conn.client(fh),
+                more: conn.client(more),
+            )
             list.push(mut fronts, result.unwrap(task.spawn_unit(tasks, bytes UNIT_BYTES + mine * per, take job, front)))
             let FrontWiring(commits: wiring, sockets: sockets) = result.unwrap(conn.receive(fh_in))
             list.push(mut clients, take sockets)

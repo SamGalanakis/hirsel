@@ -1,0 +1,1594 @@
+// Module platform (package store): the platform host (docs/spec/launch.md "The platform
+// host", RUNNER-SPEC §14). The catalog is tables of the host's own store. Every decision
+// commits and is durable before the host sends the launcher a request for it (§14.1), so
+// the host's step functions return the requests that the commit allows, in order.
+//
+// The host keeps in memory only what it can rebuild after a restart: the outstanding
+// serving launch of each live group, a cutover in progress, backoff, and the queue of wakes
+// that found no slot (§14.3 "Queued wakes", §14.5).
+pub type Wake: codec + send = Dirty(u64) | Clean(Option[u64])
+
+pub type WakeRow: codec + send {
+    wake: Wake,
+    gen: u64
+}
+
+pub type Author: codec + send = Trusted | Untrusted
+
+pub type Disposition: codec + send = Keep | Delete
+
+pub type GroupRow: codec + send {
+    tenant: String,
+    workdir: String,
+    author: Author,
+    label: launcher.Label,
+    listen: String,
+    bindings: launcher.Bindings,
+    limits: launcher.Limits,
+    assembly: Bytes,
+    activation: u64,
+    retained: List[Bytes],
+    incarnation: u64,
+    retiring: Option[Disposition],
+}
+
+pub type DeployOutcome: codec + send = Pending | Installed | Failed(String) | Undecided
+
+// A deploy attempt's pending record: NEW's assembly and activation, OLD's gen and the
+// candidate's (§14.3 "Cutover commit and abort").
+pub type DeployRow: codec + send {
+    attempt: launcher.Attempt,
+    assembly: Bytes,
+    activation: u64,
+    old: u64,
+    candidate: u64,
+    outcome: DeployOutcome,
+}
+
+// A recording pin (launch.md "Host assembly"): the assembly record a recorded serving
+// process ran, kept as a root until `expires`, in Unix seconds. Keyed by the 16-byte
+// recording ID that the tape's Run routing block names.
+pub type Pin: codec + send {
+    assembly: Bytes,
+    expires: u64
+}
+
+// What a pin lookup finds. An absent pin and an expired one are both `Gone`.
+pub type Resolved: codec + send = Found(Bytes) | Gone
+
+pub type Quota: codec + send {
+    groups: u64,
+    live: u64
+}
+
+type Usage: codec + send {
+    groups: u64,
+    live: u64
+}
+
+pub type Config: codec + send {
+    max_places: u64,
+    idle_ms: u64
+}
+
+type Meta: codec + send {
+    dirty: u64,
+    next_incarnation: u64
+}
+
+type DueKey {
+    at: u64,
+    name: String
+}
+
+// What a retirement left behind (§14.5 step 3).
+pub type Retired: codec + send {
+    workdir: String,
+    disposition: Disposition
+}
+
+pub type Limit: send = Count(u64) | Live(String, u64) | Groups(String, u64)
+
+pub type Refused: send = Full(Limit) | Busy(u64) | Unknown | Exists | Retiring | Missing(String) | Store(store.Error)
+
+// Wall time for the due index, monotonic time for backoff and the Ready reset.
+pub type Now: send {
+    wall_ms: u64,
+    mono_ns: u64
+}
+
+pub type Timers: send {
+    wall_ms: Option[u64],
+    mono_ns: Option[u64]
+}
+
+pub type NewGroup: send {
+    name: String,
+    tenant: String,
+    workdir: String,
+    author: Author,
+    label: launcher.Label,
+    listen: String,
+    bindings: launcher.Bindings,
+    limits: launcher.Limits,
+    assembly: Bytes,
+    activation: u64,
+}
+
+pub type Queued: send {
+    name: String,
+    since: u64
+}
+
+pub type Failing: send {
+    name: String,
+    count: u64,
+    retry_at: Option[u64],
+    last: String
+}
+
+pub type Status: send {
+    dirty: u64,
+    max_places: u64,
+    probes: u64,
+    due_wakes: u64,
+    arrival_wakes: u64,
+    queued: List[Queued],
+    failing: List[Failing],
+}
+
+type Tables {
+    groups: store.Table[String, GroupRow],
+    wake: store.Table[String, WakeRow],
+    dirty: store.Table[String, u64],
+    due: store.Table[DueKey, u8],
+    deploys: store.Table[String, DeployRow],
+    pins: store.Table[Bytes, Pin],
+    quotas: store.Table[String, Quota],
+    usage: store.Table[String, Usage],
+    config: store.Table[u64, Config],
+    meta: store.Table[u64, Meta],
+    retired: store.Table[String, Retired],
+}
+
+type Phase = Requested | Started | Ready(u64)
+
+type Run {
+    gen: u64,
+    phase: Phase
+}
+
+type Cut {
+    attempt: launcher.Attempt,
+    incarnation: u64,
+    old: u64,
+    candidate: u64,
+    activation: u64,
+    old_end: Option[launcher.End],
+    old_ended: bool,
+    opened: bool,
+    candidate_end: Option[launcher.End],
+}
+
+type Vol {
+    run: Option[Run],
+    cut: Option[Cut],
+    count: u64,
+    retry_at: Option[u64],
+    failing: bool,
+    last: String
+}
+
+pub opaque type Host {
+    db: store.Db,
+    t: Tables,
+    vol: Map[String, Vol],
+    queue: List[Queued],
+    probes: u64,
+    due_wakes: u64,
+    arrival_wakes: u64,
+    binds_sent: bool,
+}
+
+const READY_RESET_NS: u64 = 300000000000u64
+
+const BACKOFF_FIRST_NS: u64 = 1000000000u64
+
+const BACKOFF_MAX_NS: u64 = 300000000000u64
+
+const CUTOVER_PAUSE_MS: u64 = 2000u64
+
+fn put_due(k: DueKey, mut out: Bytes) {
+    std.codec.put_key_u64(k.at, mut out)
+    std.codec.put_key_string(k.name, mut out)
+}
+
+fn take_due(raw: Bytes, mut at: u64) -> Result[DueKey, std.codec.DecodeError] {
+    let t = std.codec.take_key_u64(raw, mut at)?
+    let name = std.codec.take_key_string(raw, mut at)?
+    Ok(DueKey(at: t, name: take name))
+}
+
+fn due_schema(mut s: std.codec.Schema) -> Result[(), std.codec.EncodeError] {
+    std.codec.schema_tuple(mut s, 2u64)?
+    std.codec.schema_u64(mut s)
+    std.codec.schema_string(mut s)
+    Ok(())
+}
+
+fn due_key() -> std.codec.Key[DueKey] {
+    std.codec.key_make(put_due, take_due, due_schema)
+}
+
+fn created(take r: Result[store.Ticket, store.Error]) -> Result[(), store.Error] {
+    match take r {
+        Ok(_) => Ok(()),
+        Error(Exists(_)) => Ok(()),
+        Error(take e) => Error(take e)
+    }
+}
+
+fn make_tables(mut db: store.Db) -> Result[Tables, store.Error] waits {
+    let groups: std.codec.Codec[GroupRow] = std.codec.of()
+    let wake_codec: std.codec.Codec[WakeRow] = std.codec.of()
+    let deploys: std.codec.Codec[DeployRow] = std.codec.of()
+    let quotas: std.codec.Codec[Quota] = std.codec.of()
+    let usage: std.codec.Codec[Usage] = std.codec.of()
+    let config_codec: std.codec.Codec[Config] = std.codec.of()
+    let meta: std.codec.Codec[Meta] = std.codec.of()
+    let retired: std.codec.Codec[Retired] = std.codec.of()
+    let pins: std.codec.Codec[Pin] = std.codec.of()
+    created(store.create_table(mut db, store.spec("platform.groups", std.codec.key_string(), groups)))?
+    created(store.create_table(mut db, store.spec("platform.wake", std.codec.key_string(), wake_codec)))?
+    created(store.create_table(mut db, store.spec("platform.dirty", std.codec.key_string(), std.codec.of_u64())))?
+    created(store.create_table(mut db, store.spec("platform.due", due_key(), std.codec.of_u8())))?
+    created(store.create_table(mut db, store.spec("platform.deploys", std.codec.key_string(), deploys)))?
+    created(store.create_table(mut db, store.spec("platform.pins", std.codec.key_bytes(), pins)))?
+    created(store.create_table(mut db, store.spec("platform.quotas", std.codec.key_string(), quotas)))?
+    created(store.create_table(mut db, store.spec("platform.usage", std.codec.key_string(), usage)))?
+    created(store.create_table(mut db, store.spec("platform.config", std.codec.key_u64(), config_codec)))?
+    created(store.create_table(mut db, store.spec("platform.meta", std.codec.key_u64(), meta)))?
+    created(store.create_table(mut db, store.spec("platform.retired", std.codec.key_string(), retired)))?
+    Ok(Tables(
+        groups: store.table(mut db, "platform.groups", std.codec.key_string(), std.codec.of())?,
+        wake: store.table(mut db, "platform.wake", std.codec.key_string(), std.codec.of())?,
+        dirty: store.table(mut db, "platform.dirty", std.codec.key_string(), std.codec.of_u64())?,
+        due: store.table(mut db, "platform.due", due_key(), std.codec.of_u8())?,
+        deploys: store.table(mut db, "platform.deploys", std.codec.key_string(), std.codec.of())?,
+        pins: store.table(mut db, "platform.pins", std.codec.key_bytes(), std.codec.of())?,
+        quotas: store.table(mut db, "platform.quotas", std.codec.key_string(), std.codec.of())?,
+        usage: store.table(mut db, "platform.usage", std.codec.key_string(), std.codec.of())?,
+        config: store.table(mut db, "platform.config", std.codec.key_u64(), std.codec.of())?,
+        meta: store.table(mut db, "platform.meta", std.codec.key_u64(), std.codec.of())?,
+        retired: store.table(mut db, "platform.retired", std.codec.key_string(), std.codec.of())?,
+    ))
+}
+
+fn st[T](take r: Result[T, store.Error]) -> Result[T, Refused] {
+    match take r {
+        Ok(take v) => Ok(take v),
+        Error(take e) => Error(Store(take e))
+    }
+}
+
+// Commits a decision and waits until it is durable; only then may the caller act on it.
+fn decided[R](mut db: store.Db, take attempted: Result[store.Outcome[R, Refused], store.Error]) -> Result[R, Refused] waits {
+    match take attempted {
+        Ok(Committed(store.Done(value: take value, ticket: ticket, ..))) => {
+            st(store.durable(mut db, ticket))?
+            Ok(take value)
+        },
+        Ok(Aborted(store.Undone(value: take why, ..))) => Error(take why),
+        Ok(_) => Error(Missing("commit")),
+        Error(take e) => Error(Store(take e)),
+    }
+}
+
+// Opens the host on its store: creates the catalog on first use, and returns the host
+// with the `Hello` that starts its control session.
+pub fn open(take opened: store.Db, first: Config) -> Result[(Host, List[launcher.Request]), Refused] waits {
+    if first.max_places == 0u64 {
+        return Error(Missing("max_places"))
+    }
+    if first.idle_ms == 0u64 {
+        return Error(Missing("idle_ms"))
+    }
+    let mut db = take opened
+    let t = st(make_tables(mut db))?
+    let made = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), Refused] {
+        if let None = st(store.fetch(tx, store.shape(t.config), 0u64))? {
+            st(store.put(mut tx, t.config, 0u64, first))?
+        }
+        if let None = st(store.fetch(tx, store.shape(t.meta), 0u64))? {
+            st(store.put(mut tx, t.meta, 0u64, Meta(dirty: 0u64, next_incarnation: 1u64)))?
+        }
+        Ok(())
+    })
+    decided(mut db, take made)?
+    let mut out: List[launcher.Request] = list.new()
+    list.push(mut out, Hello)
+    Ok((Host(db: take db, t: take t, vol: map.new(), queue: list.new(), probes: 0u64, due_wakes: 0u64, arrival_wakes: 0u64, binds_sent: false), take out))
+}
+
+// The host's store, for a restart: the process ends and only the store survives.
+pub fn close(take h: Host) -> store.Db {
+    let Host(db: take db, ..) = take h
+    take db
+}
+
+// A new control session in the same process: the launcher discards the old session's
+// unacted requests, so every launch not in the inventory will never run (§14.5).
+pub fn reconnect(h: Host) -> List[launcher.Request] {
+    let mut out: List[launcher.Request] = list.new()
+    list.push(mut out, Hello)
+    out
+}
+
+fn group_of(name: String, incarnation: u64) -> launcher.Group {
+    launcher.Group(name: string.from(name), incarnation: incarnation)
+}
+
+// The one place a Bind is built.
+fn bind_request(name: String, g: GroupRow) -> launcher.Request {
+    Bind(group_of(name, g.incarnation), string.from(g.listen), g.label, clone(g.bindings), g.limits)
+}
+
+fn serving_launch(name: String, g: GroupRow, gen: u64, activation: u64, assembly: Bytes, idle: u64, candidate: Option[u64]) -> launcher.Request {
+    let mode: launcher.Mode = ServingMode(gen, launcher.Serve(activation: activation, idle: idle, candidate: candidate))
+    Start(launcher.Launch(group: group_of(name, g.incarnation), assembly: clone(assembly), workdir: string.from(g.workdir), args: list.new(), mode: mode, recording: None))
+}
+
+fn child_of(name: String, incarnation: u64, gen: u64) -> launcher.Child {
+    launcher.Child(group: group_of(name, incarnation), role: Serving(gen))
+}
+
+fn attempt_bytes(a: launcher.Attempt) -> Bytes {
+    let mut b: Bytes = list.with_capacity(16u64)
+    list.put_word_le(mut b, a.hi)
+    list.put_word_le(mut b, a.lo)
+    b
+}
+
+fn group_row(h: Host, name: String) -> Result[Option[GroupRow], Refused] {
+    st(store.get(store.snapshot(h.db), store.shape(h.t.groups), name))
+}
+
+fn host_config(h: Host) -> Result[Config, Refused] {
+    match st(store.get(store.snapshot(h.db), store.shape(h.t.config), 0u64))? {
+        Some(c) => Ok(c),
+        None => Error(Missing("config"))
+    }
+}
+
+pub fn wake_row(h: Host, name: String) -> Option[WakeRow] {
+    match store.get(store.snapshot(h.db), store.shape(h.t.wake), name) {
+        Ok(Some(w)) => Some(w),
+        _ => None
+    }
+}
+
+fn empty_vol() -> Vol {
+    Vol(run: None, cut: None, count: 0u64, retry_at: None, failing: false, last: string.new())
+}
+
+// The volatile state of one group, by value: read it, change it, put it back.
+fn vol_read(h: Host, name: String) -> Vol {
+    match map.get(h.vol, name) {
+        Some(v) => clone(v),
+        None => empty_vol()
+    }
+}
+
+fn vol_put(mut h: Host, name: String, take v: Vol) {
+    let _ = map.remove(mut h.vol, name)
+    map.insert(mut h.vol, string.from(name), take v)
+}
+
+fn run_gen(h: Host, name: String) -> Option[u64] {
+    match vol_read(h, name).run {
+        Some(r) => Some(r.gen),
+        None => None
+    }
+}
+
+fn cut_of(h: Host, name: String) -> Option[Cut] {
+    vol_read(h, name).cut
+}
+
+fn set_cut(mut h: Host, name: String, take c: Option[Cut]) {
+    let mut v = vol_read(h, name)
+    v.cut = take c
+    vol_put(mut h, name, take v)
+}
+
+fn set_run(mut h: Host, name: String, r: Option[Run]) {
+    let mut v = vol_read(h, name)
+    v.run = r
+    vol_put(mut h, name, take v)
+}
+
+fn queued_at(h: Host, name: String) -> Option[u64] {
+    for i in 0u64 .. list.len(h.queue) {
+        if h.queue[i].name == name {
+            return Some(i)
+        }
+    }
+    None
+}
+
+fn dequeue(mut h: Host, name: String) {
+    let mut kept: List[Queued] = list.new()
+    for q in h.queue {
+        if q.name != name {
+            list.push(mut kept, clone(q))
+        }
+    }
+    h.queue = take kept
+}
+
+// One queue entry per group, with its earliest cause, in (cause time, name) order.
+fn enqueue(mut h: Host, name: String, since: u64) {
+    let mut at = since
+    if let Some(i) = queued_at(h, name) {
+        if h.queue[i].since <= at {
+            return
+        }
+    }
+    dequeue(mut h, name)
+    list.push(mut h.queue, Queued(name: string.from(name), since: at))
+    list.sort_stable(mut h.queue, scoped fn(a: Queued, b: Queued) -> Order {
+        match order.compare(a.since, b.since) {
+            Equal => order.compare(a.name, b.name),
+            other => other
+        }
+    })
+}
+
+fn usage_of(tx: store.Tx, t: Tables, tenant: String) -> Result[Usage, Refused] {
+    match st(store.fetch(tx, store.shape(t.usage), tenant))? {
+        Some(u) => Ok(u),
+        None => Ok(Usage(groups: 0u64, live: 0u64))
+    }
+}
+
+fn quota_of(tx: store.Tx, t: Tables, tenant: String) -> Result[Option[Quota], Refused] {
+    st(store.fetch(tx, store.shape(t.quotas), tenant))
+}
+
+fn meta_of(tx: store.Tx, t: Tables) -> Result[Meta, Refused] {
+    match st(store.fetch(tx, store.shape(t.meta), 0u64))? {
+        Some(m) => Ok(m),
+        None => Error(Missing("meta"))
+    }
+}
+
+fn config_of(tx: store.Tx, t: Tables) -> Result[Config, Refused] {
+    match st(store.fetch(tx, store.shape(t.config), 0u64))? {
+        Some(c) => Ok(c),
+        None => Error(Missing("config"))
+    }
+}
+
+// §14.2: the capacity and tenant checks come before `Dirty`, in the transaction that writes it.
+fn mark_dirty(mut tx: store.Tx, t: Tables, name: String) -> Result[(GroupRow, u64), Refused] {
+    let Some(g) = st(store.fetch(tx, store.shape(t.groups), name))? else {
+        return Error(Unknown)
+    }
+    let Some(w) = st(store.fetch(tx, store.shape(t.wake), name))? else {
+        return Error(Unknown)
+    }
+    let Clean(due) = w.wake else {
+        return Error(Busy(w.gen))
+    }
+    let mut meta = meta_of(tx, t)?
+    let c = config_of(tx, t)?
+    if meta.dirty >= c.max_places {
+        return Error(Full(Count(c.max_places)))
+    }
+    let mut u = usage_of(tx, t, g.tenant)?
+    if let Some(q) = quota_of(tx, t, g.tenant)? {
+        if u.live >= q.live {
+            return Error(Full(Live(string.from(g.tenant), q.live)))
+        }
+    }
+    let next = w.gen + 1u64
+    st(store.put(mut tx, t.wake, name, WakeRow(wake: Dirty(next), gen: next)))?
+    st(store.put(mut tx, t.dirty, name, next))?
+    if let Some(at) = due {
+        let _ = st(store.delete(mut tx, t.due, DueKey(at: at, name: string.from(name))))?
+    }
+    meta.dirty += 1u64
+    st(store.put(mut tx, t.meta, 0u64, meta))?
+    u.live += 1u64
+    st(store.put(mut tx, t.usage, g.tenant, u))?
+    Ok((g, next))
+}
+
+// A new serving launch for a row that is already Dirty (a probe, a relaunch after a
+// readable end, a backoff retry): no check, because `dirty` does not change.
+fn remark(mut tx: store.Tx, t: Tables, name: String) -> Result[(GroupRow, u64), Refused] {
+    let Some(g) = st(store.fetch(tx, store.shape(t.groups), name))? else {
+        return Error(Unknown)
+    }
+    let Some(w) = st(store.fetch(tx, store.shape(t.wake), name))? else {
+        return Error(Unknown)
+    }
+    let Dirty(_) = w.wake else {
+        return Error(Missing("dirty"))
+    }
+    if let Some(_) = g.retiring {
+        return Error(Retiring)
+    }
+    let next = w.gen + 1u64
+    st(store.put(mut tx, t.wake, name, WakeRow(wake: Dirty(next), gen: next)))?
+    st(store.put(mut tx, t.dirty, name, next))?
+    Ok((g, next))
+}
+
+// §14.4 "Only a clean Stopped writes Clean": the row must be Dirty(g) with the report's g.
+fn mark_clean(mut tx: store.Tx, t: Tables, name: String, g: u64, next_due: Option[u64]) -> Result[bool, Refused] {
+    let Some(grp) = st(store.fetch(tx, store.shape(t.groups), name))? else {
+        return Ok(false)
+    }
+    let Some(w) = st(store.fetch(tx, store.shape(t.wake), name))? else {
+        return Ok(false)
+    }
+    let Dirty(a) = w.wake else {
+        return Ok(false)
+    }
+    if a != g {
+        return Ok(false)
+    }
+    st(store.put(mut tx, t.wake, name, WakeRow(wake: Clean(next_due), gen: w.gen)))?
+    let _ = st(store.delete(mut tx, t.dirty, name))?
+    if let Some(at) = next_due {
+        st(store.put(mut tx, t.due, DueKey(at: at, name: string.from(name)), 0u8))?
+    }
+    let mut meta = meta_of(tx, t)?
+    meta.dirty -= 1u64
+    st(store.put(mut tx, t.meta, 0u64, meta))?
+    let mut u = usage_of(tx, t, grp.tenant)?
+    u.live -= 1u64
+    st(store.put(mut tx, t.usage, grp.tenant, u))?
+    Ok(true)
+}
+
+fn launch_dirty(mut h: Host, name: String, probe: bool, mut out: List[launcher.Request]) -> Result[(), Refused] waits {
+    let made = {
+        let t = view h.t
+        store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[(GroupRow, u64), Refused] {
+            remark(mut tx, t, name)
+        })
+    }
+    let (g, gen) = decided(mut h.db, take made)?
+    let c = host_config(h)?
+    list.push(mut out, serving_launch(name, g, gen, g.activation, g.assembly, c.idle_ms, None))
+    let mut v = vol_read(h, name)
+    v.run = Some(Run(gen: gen, phase: Requested))
+    v.retry_at = None
+    v.failing = false
+    vol_put(mut h, name, take v)
+    if probe {
+        h.probes += 1u64
+    }
+    Ok(())
+}
+
+// A cold group's wake (§14.3, the Cold row): the check, `Dirty(gen + 1)`, a launch.
+fn activate(mut h: Host, name: String, mut out: List[launcher.Request]) -> Result[(), Refused] waits {
+    let made = {
+        let t = view h.t
+        store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[(GroupRow, u64), Refused] {
+            mark_dirty(mut tx, t, name)
+        })
+    }
+    let (g, gen) = decided(mut h.db, take made)?
+    let c = host_config(h)?
+    list.push(mut out, serving_launch(name, g, gen, g.activation, g.assembly, c.idle_ms, None))
+    set_run(mut h, name, Some(Run(gen: gen, phase: Requested)))
+    dequeue(mut h, name)
+    Ok(())
+}
+
+type Cause = Arrival | Due(u64) | Operator
+
+// What a wake does by the group's state (§14.3, the table).
+fn wake_cause(mut h: Host, name: String, cause: Cause, now: Now, mut out: List[launcher.Request]) -> Result[(), Refused] waits {
+    let Some(g) = group_row(h, name)? else {
+        return Error(Unknown)
+    }
+    let operator = match cause {
+        Operator => true,
+        _ => false
+    }
+    if let Some(_) = g.retiring {
+        return if operator {
+            Error(Retiring)
+        } else {
+            Ok(())
+        }
+    }
+    let v = vol_read(h, name)
+    if let Some(_) = v.cut {
+        return if operator {
+            Error(Busy(0u64))
+        } else {
+            Ok(())
+        }
+    }
+    if let Some(_) = v.run {
+        return Ok(())
+    }
+    if v.failing {
+        if operator {
+            return launch_dirty(mut h, name, false, mut out)
+        }
+        return Ok(())
+    }
+    let Some(w) = wake_row(h, name) else {
+        return Error(Unknown)
+    }
+    if let Dirty(_) = w.wake {
+        return launch_dirty(mut h, name, true, mut out)
+    }
+    match activate(mut h, name, mut out) {
+        Ok(()) => {
+            match cause {
+                Due(_) => {
+                    h.due_wakes += 1u64
+                },
+                Arrival => {
+                    h.arrival_wakes += 1u64
+                },
+                Operator => (),
+            }
+            Ok(())
+        },
+        Error(Full(take limit)) => {
+            match cause {
+                Operator => Error(Full(take limit)),
+                Due(at) => {
+                    enqueue(mut h, name, at);
+                    Ok(())
+                },
+                Arrival => {
+                    enqueue(mut h, name, now.wall_ms);
+                    Ok(())
+                },
+            }
+        },
+        Error(take e) => Error(take e),
+    }
+}
+
+// Tries every queued wake in order, each independently (§14.3 "Queued wakes").
+fn retry_queue(mut h: Host, now: Now, mut out: List[launcher.Request]) waits {
+    let entries: List[Queued] = clone(h.queue)
+    for q in entries {
+        if let None = queued_at(h, q.name) {
+            continue
+        }
+        dequeue(mut h, q.name)
+        let _ = wake_cause(mut h, q.name, Due(q.since), now, mut out)
+    }
+}
+
+fn backoff_ns(count: u64) -> u64 {
+    if count <= 1u64 {
+        return 0u64
+    }
+    let mut d = BACKOFF_FIRST_NS
+    for _ in 2u64 .. count {
+        d = int.saturating_mul(d, 2u64)
+        if d >= BACKOFF_MAX_NS {
+            return BACKOFF_MAX_NS
+        }
+    }
+    d
+}
+
+fn status_text(s: launcher.Status) -> String {
+    let mut out = string.new()
+    match s {
+        Code(c) => {
+            string.push(mut out, "exit ");
+            string.push_i64(mut out, int.widen(c))
+        },
+        Signal(n) => {
+            string.push(mut out, "signal ");
+            string.push_i64(mut out, int.widen(n))
+        },
+    }
+    out
+}
+
+// An unsuccessful start (§14.5 "Failing and backoff"): retried at once the first time,
+// then after a doubling delay from 1 s up to 5 min. The row stays Dirty and keeps its slot.
+fn unsuccessful(mut h: Host, name: String, why: String, retry: bool, now: Now, mut out: List[launcher.Request]) waits {
+    let mut v = vol_read(h, name)
+    v.run = None
+    v.count += 1u64
+    v.last = string.from(why)
+    v.failing = true
+    v.retry_at = None
+    let count = v.count
+    let delay = backoff_ns(count)
+    if retry && delay > 0u64 {
+        v.retry_at = Some(int.saturating_add(now.mono_ns, delay))
+    }
+    vol_put(mut h, name, take v)
+    if retry && delay == 0u64 {
+        let _ = launch_dirty(mut h, name, false, mut out)
+    }
+}
+
+fn clean_report(e: launcher.End) -> Option[Option[u64]] {
+    match e.status {
+        Code(0i32) => e.report,
+        _ => None
+    }
+}
+
+// The authoritative child ended (§14.3 table, the last two columns; §14.4, §14.5).
+fn apply_end(mut h: Host, name: String, g: GroupRow, gen: u64, e: launcher.End, now: Now, mut out: List[launcher.Request]) waits {
+    let mut v = vol_read(h, name)
+    let ready_ns: Option[u64] = match v.run {
+        Some(r) => match r.phase {
+            Ready(at) => Some(at),
+            _ => None
+        },
+        None => None
+    }
+    v.run = None
+    if let Some(_) = g.retiring {
+        vol_put(mut h, name, take v);
+        return
+    }
+    match clean_report(e) {
+        Some(next_due) => {
+            v.count = 0u64
+            v.failing = false
+            vol_put(mut h, name, take v)
+            if e.readable {
+                let _ = launch_dirty(mut h, name, false, mut out)
+                return
+            }
+            let made = {
+                let t = view h.t
+                store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[bool, Refused] {
+                    mark_clean(mut tx, t, name, gen, next_due)
+                })
+            }
+            if let Ok(true) = decided(mut h.db, take made) {
+                retry_queue(mut h, now, mut out)
+            }
+        },
+        None => {
+            let long = match ready_ns {
+                Some(at) => now.mono_ns >= at && now.mono_ns - at >= READY_RESET_NS,
+                None => false
+            }
+            if long {
+                v.count = 0u64
+            }
+            vol_put(mut h, name, take v)
+            unsuccessful(mut h, name, status_text(e.status), true, now, mut out)
+        },
+    }
+}
+
+fn current(h: Host, c: launcher.Child) -> Option[GroupRow] {
+    match group_row(h, c.group.name) {
+        Ok(Some(g)) => if g.incarnation == c.group.incarnation {
+            Some(g)
+        } else {
+            None
+        },
+        _ => None,
+    }
+}
+
+fn ended(mut h: Host, c: launcher.Child, e: launcher.End, now: Now, mut out: List[launcher.Request]) waits {
+    let Some(g) = current(h, c) else {
+        list.push(mut out, Acknowledge(clone(c)));
+        return
+    }
+    let Serving(gen) = c.role else {
+        list.push(mut out, Acknowledge(clone(c)));
+        return
+    }
+    let name = string.from(c.group.name)
+    let found = cut_of(h, name)
+    match take found {
+        Some(take outstanding) => {
+            let mut cut = take outstanding
+            if gen == cut.candidate {
+                cut.candidate_end = Some(e)
+                if cut.old_ended {
+                    undecided(mut h, name, take cut, mut out)
+                } else {
+                    set_cut(mut h, name, Some(take cut))
+                }
+            } else if gen == cut.old {
+                cut.old_end = Some(e)
+                cut.old_ended = true
+                if cut.opened {
+                    commit_cut(mut h, name, take cut, now, mut out)
+                } else if let Some(_) = cut.candidate_end {
+                    undecided(mut h, name, take cut, mut out)
+                } else {
+                    set_cut(mut h, name, Some(take cut))
+                }
+            }
+        },
+        None => {
+            if run_gen(h, name) == Some(gen) {
+                apply_end(mut h, name, g, gen, e, now, mut out)
+            }
+        },
+    }
+    list.push(mut out, Acknowledge(clone(c)))
+}
+
+// §14.3 "Commit": OLD answered Installed(v), or the candidate opened the store at v and OLD
+// has ended. The row moves to `Dirty(c)` with the deploy outcome in one transaction.
+fn commit_cut(mut h: Host, name: String, take cut: Cut, now: Now, mut out: List[launcher.Request]) waits {
+    let candidate = cut.candidate
+    let made = {
+        let t = view h.t
+        store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[(), Refused] {
+            let Some(found_w) = st(store.fetch(tx, store.shape(t.wake), name))? else {
+                return Error(Unknown)
+            }
+            let mut w = found_w
+            let Some(found_grp) = st(store.fetch(tx, store.shape(t.groups), name))? else {
+                return Error(Unknown)
+            }
+            let mut grp = found_grp
+            let Some(found_d) = st(store.fetch(tx, store.shape(t.deploys), name))? else {
+                return Error(Missing("deploy"))
+            }
+            let mut d = found_d
+            w.wake = Dirty(candidate)
+            st(store.put(mut tx, t.wake, name, w))?
+            st(store.put(mut tx, t.dirty, name, candidate))?
+            list.push(mut grp.retained, clone(grp.assembly))
+            grp.assembly = clone(d.assembly)
+            grp.activation = d.activation
+            st(store.put(mut tx, t.groups, name, grp))?
+            d.outcome = Installed
+            st(store.put(mut tx, t.deploys, name, d))
+        })
+    }
+    if let Error(_) = decided(mut h.db, take made) {
+        return
+    }
+    let phase = if cut.opened {
+        Ready(now.mono_ns)
+    } else {
+        Started
+    }
+    let mut v = vol_read(h, name)
+    v.cut = None
+    v.run = Some(Run(gen: candidate, phase: phase))
+    vol_put(mut h, name, take v)
+    if let Some(e) = cut.candidate_end {
+        let Some(fresh) = current(h, child_of(name, cut.incarnation, candidate)) else {
+            return
+        }
+        apply_end(mut h, name, fresh, candidate, e, now, mut out)
+    }
+}
+
+// §14.3 "Abort": OLD answered Refused, or Drift. The candidate is discarded and the row
+// stays `Dirty(g)`.
+fn abort_cut(mut h: Host, name: String, g: GroupRow, take cut: Cut, why: String, now: Now, mut out: List[launcher.Request]) waits {
+    let made = {
+        let t = view h.t
+        store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[(), Refused] {
+            let Some(found_d) = st(store.fetch(tx, store.shape(t.deploys), name))? else {
+                return Error(Missing("deploy"))
+            }
+            let mut d = found_d
+            d.outcome = Failed(string.from(why))
+            st(store.put(mut tx, t.deploys, name, d))
+        })
+    }
+    if let Error(_) = decided(mut h.db, take made) {
+        return
+    }
+    list.push(mut out, Command(child_of(name, g.incarnation, cut.old), HostAbort(attempt_bytes(cut.attempt))))
+    if let None = cut.candidate_end {
+        list.push(mut out, Stop(child_of(name, g.incarnation, cut.candidate)))
+    }
+    set_cut(mut h, name, None)
+    if let Some(e) = cut.old_end {
+        apply_end(mut h, name, g, cut.old, e, now, mut out)
+    }
+}
+
+// §14.3 "Undecided": neither OLD's answer nor the candidate's open proves the install.
+// Both ends are discarded and the group is probed at a new generation with its recorded
+// activation.
+fn undecided(mut h: Host, name: String, take cut: Cut, mut out: List[launcher.Request]) waits {
+    let made = {
+        let t = view h.t
+        store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[(), Refused] {
+            let Some(found_d) = st(store.fetch(tx, store.shape(t.deploys), name))? else {
+                return Error(Missing("deploy"))
+            }
+            let mut d = found_d
+            d.outcome = Undecided
+            st(store.put(mut tx, t.deploys, name, d))
+        })
+    }
+    if let Error(_) = decided(mut h.db, take made) {
+        return
+    }
+    let mut v = vol_read(h, name)
+    v.cut = None
+    v.run = None
+    vol_put(mut h, name, take v)
+    let _ = launch_dirty(mut h, name, true, mut out)
+}
+
+fn placed(mut h: Host, c: launcher.Child, reply: runner.HostReply, now: Now, mut out: List[launcher.Request]) waits {
+    let Some(g) = current(h, c) else {
+        return
+    }
+    let Serving(gen) = c.role else {
+        return
+    }
+    let name = string.from(c.group.name)
+    let found = cut_of(h, name)
+    match take found {
+        Some(take outstanding) => {
+            let mut cut = take outstanding
+            if gen == cut.candidate {
+                if let PlaceOpened(ready) = reply {
+                    if ready.version == cut.activation {
+                        cut.opened = true
+                        if cut.old_ended {
+                            commit_cut(mut h, name, take cut, now, mut out)
+                        } else {
+                            set_cut(mut h, name, Some(take cut))
+                        }
+                    }
+                }
+            } else if gen == cut.old {
+                match reply {
+                    PlaceInstalled(v, _) => if v == cut.activation {
+                        commit_cut(mut h, name, take cut, now, mut out)
+                    },
+                    PlaceDrift => abort_cut(mut h, name, g, take cut, "drift", now, mut out),
+                    PlaceRefused(why) => abort_cut(mut h, name, g, take cut, why, now, mut out),
+                    _ => (),
+                }
+            }
+        },
+        None => {
+            if run_gen(h, name) == Some(gen) {
+                if let PlaceOpened(_) = reply {
+                    set_run(mut h, name, Some(Run(gen: gen, phase: Ready(now.mono_ns))))
+                }
+            }
+        },
+    }
+}
+
+fn refused(mut h: Host, c: launcher.Child, why: launcher.Refusal, now: Now, mut out: List[launcher.Request]) waits {
+    let Some(_) = current(h, c) else {
+        return
+    }
+    let Serving(gen) = c.role else {
+        return
+    }
+    let name = string.from(c.group.name)
+    if run_gen(h, name) != Some(gen) {
+        return
+    }
+    match why {
+        Retiring => set_run(mut h, name, None),
+        Held => unsuccessful(mut h, name, "held", true, now, mut out),
+        Image(e) => unsuccessful(mut h, name, e, true, now, mut out),
+        Spawn(e) => unsuccessful(mut h, name, e, true, now, mut out),
+        // These do not change with a retry: the group is failing until an operator acts.
+        UnknownGroup => unsuccessful(mut h, name, "unknown group", false, now, mut out),
+        Mismatch => unsuccessful(mut h, name, "mismatch", false, now, mut out),
+        Unbuilt(e) => unsuccessful(mut h, name, e, false, now, mut out),
+    }
+}
+
+fn stop_or_ack(c: launcher.Child, p: launcher.Phase, mut out: List[launcher.Request]) {
+    match p {
+        Started => list.push(mut out, Stop(clone(c))),
+        Exited(_) => list.push(mut out, Acknowledge(clone(c))),
+    }
+}
+
+fn dirty_names(h: Host) -> List[String] {
+    let mut names: List[String] = list.new()
+    let Ok(take scanned) = store.scan(store.snapshot(h.db), store.shape(h.t.dirty), Unbounded, Unbounded) else {
+        return names
+    }
+    let mut rows = take scanned
+    while let Ok(Some((name, _))) = store.next(mut rows) {
+        list.push(mut names, take name)
+    }
+    names
+}
+
+fn binds(h: Host, mut out: List[launcher.Request]) {
+    let Ok(take scanned) = store.scan(store.snapshot(h.db), store.shape(h.t.groups), Unbounded, Unbounded) else {
+        return
+    }
+    let mut rows = take scanned
+    while let Ok(Some((name, g))) = store.next(mut rows) {
+        list.push(mut out, bind_request(name, g))
+    }
+}
+
+// Restart and reconnect (§14.5): adopt the authoritative children and pending-deploy
+// candidates the inventory names, stop the rest, probe each Dirty row left without a child,
+// and wake each readable listener and each passed due time.
+fn reconcile(mut h: Host, children: List[launcher.ChildState], readable: List[launcher.Group], now: Now, mut out: List[launcher.Request]) waits {
+    if !h.binds_sent {
+        binds(h, mut out)
+        h.binds_sent = true
+    }
+    let mut names: List[String] = list.new()
+    for (name, _) in h.vol {
+        list.push(mut names, string.from(name))
+    }
+    for name in names {
+        let mut v = vol_read(h, name)
+        v.run = None
+        v.cut = None
+        vol_put(mut h, name, take v)
+    }
+    let mut ends: List[(launcher.Child, launcher.End)] = list.new()
+    for s in children {
+        let c = s.child
+        let Some(_) = current(h, c) else {
+            stop_or_ack(c, s.phase, mut out);
+            continue
+        }
+        let Serving(gen) = c.role else {
+            stop_or_ack(c, s.phase, mut out);
+            continue
+        }
+        let name = string.from(c.group.name)
+        let Some(w) = wake_row(h, name) else {
+            stop_or_ack(c, s.phase, mut out);
+            continue
+        }
+        let authoritative = match w.wake {
+            Dirty(a) => a == gen,
+            Clean(_) => false
+        }
+        let pending: Option[DeployRow] = match store.get(store.snapshot(h.db), store.shape(h.t.deploys), name) {
+            Ok(Some(d)) => Some(d),
+            _ => None
+        }
+        let candidate = match pending {
+            Some(d) => match d.outcome {
+                Pending => d.candidate == gen,
+                _ => false
+            },
+            None => false,
+        }
+        if authoritative {
+            // A child that ended without a clean report while no host watched leaves its row
+            // Dirty with no child, so the row is probed below (§14.5).
+            if let Exited(e) = s.phase {
+                if let None = clean_report(e) {
+                    list.push(mut out, Acknowledge(clone(c)));
+                    continue
+                }
+            }
+            set_run(mut h, name, Some(Run(gen: gen, phase: Started)))
+        } else if candidate {
+            let Some(d) = pending else {
+                continue
+            }
+            let cut = Cut(attempt: d.attempt, incarnation: c.group.incarnation, old: d.old, candidate: gen, activation: d.activation, old_end: None, old_ended: false, opened: false, candidate_end: None)
+            set_cut(mut h, name, Some(cut))
+        } else {
+            stop_or_ack(c, s.phase, mut out);
+            continue
+        }
+        if let Exited(e) = s.phase {
+            list.push(mut ends, (clone(c), e))
+        }
+    }
+    for (c, e) in ends {
+        ended(mut h, c, e, now, mut out)
+    }
+    for name in dirty_names(h) {
+        let Ok(Some(g)) = group_row(h, name) else {
+            continue
+        }
+        if let Some(_) = g.retiring {
+            list.push(mut out, Retire(group_of(name, g.incarnation)));
+            continue
+        }
+        let v = vol_read(h, name)
+        let idle = match (v.run, v.cut, v.retry_at) {
+            (None, None, None) => true,
+            _ => false
+        }
+        if idle {
+            let _ = launch_dirty(mut h, name, true, mut out)
+        }
+    }
+    for g in readable {
+        let _ = wake_cause(mut h, g.name, Arrival, now, mut out)
+    }
+    due_wakes(mut h, now, mut out)
+}
+
+// Wakes every Clean row whose due time has passed, in due order.
+fn due_wakes(mut h: Host, now: Now, mut out: List[launcher.Request]) waits {
+    let mut due: List[DueKey] = list.new()
+    {
+        let Ok(take scanned) = store.scan(store.snapshot(h.db), store.shape(h.t.due), Unbounded, Unbounded) else {
+            return
+        }
+        let mut rows = take scanned
+        while let Ok(Some((k, _))) = store.next(mut rows) {
+            if k.at > now.wall_ms {
+                break
+            }
+            if let None = queued_at(h, k.name) {
+                list.push(mut due, clone(k))
+            }
+        }
+    }
+    for k in due {
+        let _ = wake_cause(mut h, k.name, Due(k.at), now, mut out)
+    }
+}
+
+fn launched(mut h: Host, c: launcher.Child) {
+    let Serving(gen) = c.role else {
+        return
+    }
+    let name = string.from(c.group.name)
+    let v = vol_read(h, name)
+    let Some(r) = v.run else {
+        return
+    }
+    if r.gen != gen {
+        return
+    }
+    if let Requested = r.phase {
+        set_run(mut h, name, Some(Run(gen: gen, phase: Started)))
+    }
+}
+
+fn bind_failed(mut h: Host, g: launcher.Group, why: String) {
+    let mut v = vol_read(h, g.name)
+    v.failing = true
+    v.last = string.from(why)
+    vol_put(mut h, g.name, take v)
+}
+
+// Applies one launcher event in stream order, and returns the requests it decided.
+pub fn event(mut h: Host, take e: launcher.Event, now: Now) -> List[launcher.Request] waits {
+    let mut out: List[launcher.Request] = list.new()
+    match take e {
+        Inventory(children, readable, _) => reconcile(mut h, children, readable, now, mut out),
+        Launched(c, Started) => launched(mut h, c),
+        Launched(c, Exited(fin)) => ended(mut h, c, fin, now, mut out),
+        Refused(c, why) => refused(mut h, c, why, now, mut out),
+        Ended(c, fin) => ended(mut h, c, fin, now, mut out),
+        Arrived(g) => {
+            if let Ok(Some(r)) = group_row(h, g.name) {
+                if r.incarnation == g.incarnation {
+                    let _ = wake_cause(mut h, g.name, Arrival, now, mut out)
+                }
+            }
+        },
+        Bound(_) => (),
+        BindFailed(g, why) => bind_failed(mut h, g, why),
+        Closed(_) => (),
+        Retired(g) => finish_retire(mut h, g, now, mut out),
+        Placed(c, reply) => placed(mut h, c, reply, now, mut out),
+        CutoverResult(c, _, reply) => placed(mut h, c, reply, now, mut out),
+        Answered(_, _) => (),
+        Need(_, _, _) => (),
+        Admitted(_, _, _, _) => (),
+        Assembled(_, _, _, _, _) => (),
+        AdmissionFailed(_, _) => (),
+        Fenced => (),
+        Collected(_) => (),
+    }
+    take out
+}
+
+// Due times and backoff retries that have come.
+pub fn tick(mut h: Host, now: Now) -> List[launcher.Request] waits {
+    let mut out: List[launcher.Request] = list.new()
+    let mut retry: List[String] = list.new()
+    for (name, v) in h.vol {
+        if let Some(at) = v.retry_at {
+            if at <= now.mono_ns {
+                list.push(mut retry, string.from(name))
+            }
+        }
+    }
+    for name in retry {
+        let _ = launch_dirty(mut h, name, false, mut out)
+    }
+    due_wakes(mut h, now, mut out)
+    take out
+}
+
+// The due-time wait follows the minimum of the due index without the queued rows; the
+// backoff timer follows the earliest retry (§14.3, §14.5).
+pub fn timers(h: Host) -> Timers {
+    let mut wall: Option[u64] = None
+    if let Ok(take scanned) = store.scan(store.snapshot(h.db), store.shape(h.t.due), Unbounded, Unbounded) {
+        let mut rows = take scanned
+        while let Ok(Some((k, _))) = store.next(mut rows) {
+            if let None = queued_at(h, k.name) {
+                wall = Some(k.at);
+                break
+            }
+        }
+    }
+    let mut mono: Option[u64] = None
+    for (_, v) in h.vol {
+        if let Some(at) = v.retry_at {
+            let earlier = match mono {
+                Some(m) => at < m,
+                None => true
+            }
+            if earlier {
+                mono = Some(at)
+            }
+        }
+    }
+    Timers(wall_ms: wall, mono_ns: mono)
+}
+
+// Adds a group: `Clean(None)` at gen 0 under a new incarnation (§14.1 "A new group"),
+// then the launcher binds its listener.
+pub fn add_group(mut h: Host, spec: NewGroup) -> Result[List[launcher.Request], Refused] waits {
+    let made = {
+        let t = view h.t
+        store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[GroupRow, Refused] {
+            if let Some(_) = st(store.fetch(tx, store.shape(t.groups), spec.name))? {
+                return Error(Exists)
+            }
+            let mut u = usage_of(tx, t, spec.tenant)?
+            if let Some(q) = quota_of(tx, t, spec.tenant)? {
+                if u.groups >= q.groups {
+                    return Error(Full(Groups(string.from(spec.tenant), q.groups)))
+                }
+            }
+            let mut meta = meta_of(tx, t)?
+            let g = GroupRow(tenant: string.from(spec.tenant), workdir: string.from(spec.workdir), author: spec.author, label: spec.label, listen: string.from(spec.listen), bindings: clone(spec.bindings), limits: spec.limits, assembly: clone(spec.assembly), activation: spec.activation, retained: list.new(), incarnation: meta.next_incarnation, retiring: None)
+            meta.next_incarnation += 1u64
+            st(store.put(mut tx, t.meta, 0u64, meta))?
+            st(store.put(mut tx, t.groups, spec.name, g))?
+            st(store.put(mut tx, t.wake, spec.name, WakeRow(wake: Clean(None), gen: 0u64)))?
+            u.groups += 1u64
+            st(store.put(mut tx, t.usage, spec.tenant, u))?
+            Ok(g)
+        })
+    }
+    let g = decided(mut h.db, take made)?
+    let mut out: List[launcher.Request] = list.new()
+    list.push(mut out, bind_request(spec.name, g))
+    Ok(take out)
+}
+
+// An operator request to a group: wake it first (§14.3); a full host answers `Full`.
+pub fn wake(mut h: Host, name: String, now: Now) -> Result[List[launcher.Request], Refused] waits {
+    let mut out: List[launcher.Request] = list.new()
+    wake_cause(mut h, name, Operator, now, mut out)?
+    Ok(take out)
+}
+
+// §14.2 "Lowering the bound": below the current `dirty` is refused `Busy(dirty)`. A raise
+// retries the queue.
+pub fn set_max_places(mut h: Host, n: u64, now: Now) -> Result[List[launcher.Request], Refused] waits {
+    if n == 0u64 {
+        return Error(Missing("max_places"))
+    }
+    let made = {
+        let t = view h.t
+        store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[(), Refused] {
+            let meta = meta_of(tx, t)?
+            if n < meta.dirty {
+                return Error(Busy(meta.dirty))
+            }
+            let mut c = config_of(tx, t)?
+            c.max_places = n
+            st(store.put(mut tx, t.config, 0u64, c))
+        })
+    }
+    decided(mut h.db, take made)?
+    let mut out: List[launcher.Request] = list.new()
+    retry_queue(mut h, now, mut out)
+    Ok(take out)
+}
+
+pub fn set_quota(mut h: Host, tenant: String, q: Quota, now: Now) -> Result[List[launcher.Request], Refused] waits {
+    let made = {
+        let t = view h.t
+        store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[(), Refused] {
+            let u = usage_of(tx, t, tenant)?
+            if q.live < u.live {
+                return Error(Busy(u.live))
+            }
+            if q.groups < u.groups {
+                return Error(Busy(u.groups))
+            }
+            st(store.put(mut tx, t.quotas, tenant, q))
+        })
+    }
+    decided(mut h.db, take made)?
+    let mut out: List[launcher.Request] = list.new()
+    retry_queue(mut h, now, mut out)
+    Ok(take out)
+}
+
+// A deploy's cutover (§14.3, §14.6): NEW starts as the candidate at `gen + 1` while the row
+// stays `Dirty(g)` naming OLD, and OLD's head is asked to install `activation` from the
+// prepared import `digest`.
+pub fn deploy(mut h: Host, name: String, attempt: launcher.Attempt, assembly: Bytes, activation: u64, digest: Bytes) -> Result[List[launcher.Request], Refused] waits {
+    let Some(g) = group_row(h, name)? else {
+        return Error(Unknown)
+    }
+    if let Some(_) = g.retiring {
+        return Error(Retiring)
+    }
+    let Some(old) = run_gen(h, name) else {
+        return Error(Busy(0u64))
+    }
+    if let Some(_) = cut_of(h, name) {
+        return Error(Busy(old))
+    }
+    let made = {
+        let t = view h.t
+        store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[u64, Refused] {
+            let Some(w) = st(store.fetch(tx, store.shape(t.wake), name))? else {
+                return Error(Unknown)
+            }
+            let Dirty(a) = w.wake else {
+                return Error(Busy(w.gen))
+            }
+            if a != old {
+                return Error(Busy(a))
+            }
+            let c = w.gen + 1u64
+            st(store.put(mut tx, t.wake, name, WakeRow(wake: Dirty(a), gen: c)))?
+            st(store.put(mut tx, t.deploys, name, DeployRow(attempt: attempt, assembly: clone(assembly), activation: activation, old: old, candidate: c, outcome: Pending)))?
+            Ok(c)
+        })
+    }
+    let c = decided(mut h.db, take made)?
+    let cfg = host_config(h)?
+    let cut = Cut(attempt: attempt, incarnation: g.incarnation, old: old, candidate: c, activation: activation, old_end: None, old_ended: false, opened: false, candidate_end: None)
+    set_cut(mut h, name, Some(cut))
+    let mut out: List[launcher.Request] = list.new()
+    list.push(mut out, serving_launch(name, g, c, activation, assembly, cfg.idle_ms, Some(old)))
+    list.push(mut out, Command(child_of(name, g.incarnation, old), HostCutover(attempt_bytes(attempt), clone(digest), CUTOVER_PAUSE_MS, false)))
+    Ok(take out)
+}
+
+pub fn deploy_outcome(h: Host, name: String) -> Option[DeployOutcome] {
+    match store.get(store.snapshot(h.db), store.shape(h.t.deploys), name) {
+        Ok(Some(take d)) => {
+            let DeployRow(outcome: take o, ..) = take d;
+            Some(take o)
+        },
+        _ => None
+    }
+}
+
+fn drop_rows(mut tx: store.Tx, t: Tables, name: String, g: GroupRow, due: Option[u64], dirty: bool, disposition: Disposition) -> Result[(), Refused] {
+    let _ = st(store.delete(mut tx, t.groups, name))?
+    let _ = st(store.delete(mut tx, t.wake, name))?
+    let _ = st(store.delete(mut tx, t.deploys, name))?
+    if let Some(at) = due {
+        let _ = st(store.delete(mut tx, t.due, DueKey(at: at, name: string.from(name))))?
+    }
+    let mut u = usage_of(tx, t, g.tenant)?
+    u.groups -= 1u64
+    if dirty {
+        let _ = st(store.delete(mut tx, t.dirty, name))?
+        let mut meta = meta_of(tx, t)?
+        meta.dirty -= 1u64
+        st(store.put(mut tx, t.meta, 0u64, meta))?
+        u.live -= 1u64
+    }
+    st(store.put(mut tx, t.usage, g.tenant, u))?
+    st(store.put(mut tx, t.retired, name, Retired(workdir: string.from(g.workdir), disposition: disposition)))
+}
+
+// Removes a group (§14.5 "Removing a group"): a Clean one at once; a Dirty one, failing or
+// not, is retired: a durable mark, then `Retire`, then one transaction at `Retired`.
+pub fn remove(mut h: Host, name: String, disposition: Disposition) -> Result[List[launcher.Request], Refused] waits {
+    let made = {
+        let t = view h.t
+        store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[(GroupRow, bool), Refused] {
+            let Some(found_g) = st(store.fetch(tx, store.shape(t.groups), name))? else {
+                return Error(Unknown)
+            }
+            let mut g = found_g
+            if let Some(_) = g.retiring {
+                return Error(Retiring)
+            }
+            let Some(w) = st(store.fetch(tx, store.shape(t.wake), name))? else {
+                return Error(Unknown)
+            }
+            match w.wake {
+                Clean(due) => {
+                    drop_rows(mut tx, t, name, g, due, false, disposition)?
+                    Ok((g, true))
+                },
+                Dirty(_) => {
+                    g.retiring = Some(disposition)
+                    st(store.put(mut tx, t.groups, name, g))?
+                    Ok((g, false))
+                },
+            }
+        })
+    }
+    let (g, gone) = decided(mut h.db, take made)?
+    dequeue(mut h, name)
+    let mut out: List[launcher.Request] = list.new()
+    if gone {
+        let _ = map.remove(mut h.vol, name)
+        list.push(mut out, Close(group_of(name, g.incarnation)))
+    } else {
+        list.push(mut out, Retire(group_of(name, g.incarnation)))
+    }
+    Ok(take out)
+}
+
+fn finish_retire(mut h: Host, grp: launcher.Group, now: Now, mut out: List[launcher.Request]) waits {
+    let Ok(Some(g)) = group_row(h, grp.name) else {
+        return
+    }
+    if g.incarnation != grp.incarnation {
+        return
+    }
+    let Some(disposition) = g.retiring else {
+        return
+    }
+    let name = string.from(grp.name)
+    let made = {
+        let t = view h.t
+        store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[(), Refused] {
+            drop_rows(mut tx, t, name, g, None, true, disposition)
+        })
+    }
+    if let Error(_) = decided(mut h.db, take made) {
+        return
+    }
+    let _ = map.remove(mut h.vol, name)
+    list.push(mut out, Close(clone(grp)))
+    retry_queue(mut h, now, mut out)
+}
+
+// Makes a recording pin durable. The host calls this before it starts the recorded
+// serving process, so a recording never runs without the pin that names its assembly.
+pub fn keep_pin(mut h: Host, id: Bytes, assembly: Bytes, expires: u64) -> Result[(), Refused] waits {
+    if list.len(id) != 16u64 {
+        return Error(Missing("recording id"))
+    }
+    if list.len(assembly) != 32u64 {
+        return Error(Missing("assembly"))
+    }
+    let made = {
+        let t = view h.t
+        store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[(), Refused] {
+            st(store.put(mut tx, t.pins, id, Pin(assembly: clone(assembly), expires: expires)))
+        })
+    }
+    decided(mut h.db, take made)
+}
+
+// An operator removes a recording pin. Replay of that recording then finds it `Gone`, even
+// while another root keeps its image.
+pub fn forget_pin(mut h: Host, id: Bytes) -> Result[(), Refused] waits {
+    let made = {
+        let t = view h.t
+        store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[(), Refused] {
+            let _ = st(store.delete(mut tx, t.pins, id))?
+            Ok(())
+        })
+    }
+    decided(mut h.db, take made)
+}
+
+// The pin lookup replay makes first (launch.md "Host assembly"): `Found(assembly)` while
+// `now` is before the expiry, in Unix seconds, and `Gone` from the expiry on or when no
+// pin exists. A store error is an error, never `Gone`.
+pub fn resolve_pin(h: Host, id: Bytes, now: u64) -> Result[Resolved, Refused] {
+    match st(store.get(store.snapshot(h.db), store.shape(h.t.pins), id))? {
+        Some(p) if now < p.expires => Ok(Found(clone(p.assembly))),
+        _ => Ok(Gone),
+    }
+}
+
+pub fn retirement(h: Host, name: String) -> Option[Retired] {
+    match store.get(store.snapshot(h.db), store.shape(h.t.retired), name) {
+        Ok(Some(r)) => Some(r),
+        _ => None
+    }
+}
+
+pub fn status(h: Host) -> Status {
+    let mut dirty = 0u64
+    let mut max_places = 0u64
+    if let Ok(Some(m)) = store.get(store.snapshot(h.db), store.shape(h.t.meta), 0u64) {
+        dirty = m.dirty
+    }
+    if let Ok(Some(c)) = store.get(store.snapshot(h.db), store.shape(h.t.config), 0u64) {
+        max_places = c.max_places
+    }
+    let mut failing: List[Failing] = list.new()
+    for (name, v) in h.vol {
+        if v.failing {
+            list.push(mut failing, Failing(name: string.from(name), count: v.count, retry_at: v.retry_at, last: string.from(v.last)))
+        }
+    }
+    let queued: List[Queued] = clone(h.queue)
+    Status(dirty: dirty, max_places: max_places, probes: h.probes, due_wakes: h.due_wakes, arrival_wakes: h.arrival_wakes, queued: take queued, failing: take failing)
+}
+
+// The due-time wait (§14.3 "Due times"): one absolute wall-time alarm on the minimum of the
+// due index without the queued rows, re-armed whenever that minimum changes, and none when
+// the index is empty. There is no polling: nothing wakes the host before the minimum.
+pub type Alarm: send = DueAt(u64)
+
+type Armed {
+    at: u64,
+    waiting: Task[()]
+}
+
+pub opaque type Waiter {
+    armed: Option[Armed]
+}
+
+pub fn waiter() -> Waiter {
+    Waiter(armed: None)
+}
+
+pub fn armed_at(w: Waiter) -> Option[u64] {
+    match w.armed {
+        Some(a) => Some(a.at),
+        None => None
+    }
+}
+
+pub fn rearm(mut w: Waiter, h: Host, tasks: Tasks, c: Clock, to: Sender[Alarm]) waits {
+    let want = timers(h).wall_ms
+    let prior = replace(mut w.armed, None)
+    if let Some(take armed) = take prior {
+        if Some(armed.at) == want {
+            w.armed = Some(take armed);
+            return
+        }
+        let Armed(at: _, waiting: take running) = take armed
+        let _ = task.cancel_join(take running)
+    }
+    let Some(at) = want else {
+        return
+    }
+    let waiting = std.clock.wall_alarm(tasks, c, at, to, DueAt(at))
+    w.armed = Some(Armed(at: at, waiting: take waiting))
+}
+
+pub fn disarm(mut w: Waiter) waits {
+    let prior = replace(mut w.armed, None)
+    if let Some(take armed) = take prior {
+        let Armed(at: _, waiting: take running) = take armed
+        let _ = task.cancel_join(take running)
+    }
+}

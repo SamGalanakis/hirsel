@@ -17,7 +17,9 @@ mod image_index;
 mod image_unit;
 mod inspect;
 pub mod installation;
+pub(crate) mod launcher;
 mod product;
+mod property_corpus;
 pub mod sdk;
 pub mod sdk_command;
 mod tape_cli;
@@ -66,8 +68,8 @@ pub use reachability::{GapStop, Reachable};
 pub use test_run::{Runner, Source, TestCache, TestOutcome};
 mod meter;
 pub use diagnostics::{
-    Diagnostic, DiagnosticHint, IncompleteDiagnostic, ResourceDiagnostic, SourceFiles, SourceSite,
-    line_column,
+    Applicability, AvailableMember, Diagnostic, DiagnosticCause, Edit, Fix, IncompleteDiagnostic,
+    ResourceDiagnostic, SourceFiles, SourceSite, line_column,
 };
 pub use image::{CoreImage, LibraryInput};
 pub use instances::{InstanceStop, Units, collect_instances};
@@ -314,7 +316,6 @@ mod body {
         /// The hash of `ir`'s serialization: its body record's module part,
         /// set when the record is framed.
         ir_hash: ContentHash,
-        pub resolved: bool,
         pub key: DefinitionKey,
         pub anchors: BTreeMap<ItemAt, DefPath>,
         pub incomplete: Vec<Incomplete>,
@@ -344,7 +345,6 @@ mod body {
             definition: DefPath,
             check: CoreCheck,
             ir: Module,
-            resolved: bool,
             key: DefinitionKey,
             anchors: BTreeMap<ItemAt, DefPath>,
             incomplete: Vec<Incomplete>,
@@ -355,7 +355,6 @@ mod body {
                 ir: ir.into(),
                 ir_source: None,
                 ir_hash: ContentHash::default(),
-                resolved,
                 key,
                 anchors,
                 incomplete,
@@ -402,7 +401,6 @@ mod body {
                     .collect(),
                 key: disk.key,
                 incomplete: disk.incomplete,
-                resolved: disk.resolved,
                 ir_hash: head.ir_hash,
                 ir: std::sync::OnceLock::new(),
                 ir_source: Some(source),
@@ -468,6 +466,7 @@ mod body {
 pub struct CheckProduct {
     pub index: Arc<NameIndex>,
     pub files: Vec<Arc<FileProduct>>,
+    unparsed_sources: Vec<(SourceId, Arc<[u8]>)>,
     pub definitions: BTreeMap<DefPath, Arc<DefinitionProduct>>,
     pub diagnostics: Vec<Refusal>,
     pub incomplete: Vec<Incomplete>,
@@ -492,6 +491,7 @@ impl CheckProduct {
         Self {
             index,
             files: vec![],
+            unparsed_sources: vec![],
             definitions: BTreeMap::new(),
             diagnostics: vec![],
             incomplete: vec![],
@@ -512,6 +512,10 @@ impl CheckProduct {
     }
     pub fn accepted(&self) -> bool {
         self.diagnostics.is_empty() && self.incomplete.is_empty() && self.resources.is_empty()
+    }
+    /// Definitions in the request's sources, including those with reused check results.
+    pub(crate) fn checked_definitions(&self) -> usize {
+        self.index.definitions.len() - self.index.definitions.base_len()
     }
     /// The identities of the rechecked bodies, independent of traversal order.
     pub fn rechecked_paths(&self) -> BTreeSet<&DefPath> {
@@ -580,21 +584,17 @@ struct DiskCheckRef<'a> {
     template: &'a Option<hirsel_core_front::GenericTemplate>,
     flow: hirsel_core_front::FlowFacts,
     function: Option<u32>,
-    resolved: bool,
 }
 impl<'a> DiskCheckRef<'a> {
     /// A site is a byte offset from its item's start and the key covers only
-    /// the body's own item, so a resolved body, whose refusals and gaps are
-    /// reported from its record, must cite no other item. An unresolved body
-    /// records none (see `check_inner`).
+    /// the body's own item, so a body, whose refusals and gaps are reported
+    /// from its record, must cite no other item.
     fn of(d: &'a DefinitionProduct) -> io::Result<Self> {
         let c = d.check.counts;
         let mut anchors: Vec<&DefPath> = d.anchors.values().collect();
         anchors.sort_unstable();
         anchors.dedup();
-        if d.resolved
-            && let Some(other) = anchors.iter().find(|p| **p != &d.definition)
-        {
+        if let Some(other) = anchors.iter().find(|p| **p != &d.definition) {
             return Err(io::Error::other(format!(
                 "internal error: the checked body `{}` cites a site in `{other}`",
                 d.definition
@@ -610,7 +610,7 @@ impl<'a> DiskCheckRef<'a> {
         let mut refusals = d.check.refusals.clone();
         for r in &mut refusals {
             canonical(&mut r.primary);
-            r.causal.iter_mut().for_each(canonical);
+            r.causal.iter_mut().for_each(|c| canonical(&mut c.site));
         }
         let mut incomplete = d.incomplete.clone();
         for g in &mut incomplete {
@@ -631,7 +631,6 @@ impl<'a> DiskCheckRef<'a> {
             template: &d.check.template,
             flow,
             function: d.check.function.map(|f| f.0),
-            resolved: d.resolved,
         })
     }
 }
@@ -647,7 +646,6 @@ struct DiskCheck {
     template: Option<hirsel_core_front::GenericTemplate>,
     flow: hirsel_core_front::FlowFacts,
     function: Option<u32>,
-    resolved: bool,
 }
 impl Driver {
     pub fn check(
@@ -1135,11 +1133,7 @@ impl Driver {
                     product
                 } else {
                     let mut emitter = Emitter::new();
-                    // Resolution owns this body's refusal. Lowering it again
-                    // would report cascades; other bodies still check normally.
-                    let check = if !resolution.diagnostics.is_empty()
-                        || resolution.resource_refusal.is_some()
-                    {
+                    let check = if resolution.resource_refusal.is_some() {
                         CoreCheck::default()
                     } else {
                         p.check_lower(f, &mut emitter)
@@ -1160,7 +1154,6 @@ impl Driver {
                         fd.path.clone(),
                         check,
                         emitter.module,
-                        resolution.diagnostics.is_empty(),
                         key,
                         anchors,
                         incomplete,
@@ -1168,15 +1161,13 @@ impl Driver {
                     checked = Some(key_hash);
                     Arc::new(product)
                 };
-                if product.resolved {
-                    for r in &product.check.refusals {
-                        let mut r = r.clone();
-                        keys.bind_site(&product.anchors, &mut r.primary);
-                        for site in &mut r.causal {
-                            keys.bind_site(&product.anchors, site);
-                        }
-                        result.diagnostics.push(r);
+                for r in &product.check.refusals {
+                    let mut r = r.clone();
+                    keys.bind_site(&product.anchors, &mut r.primary);
+                    for cause in &mut r.causal {
+                        keys.bind_site(&product.anchors, &mut cause.site);
                     }
+                    result.diagnostics.push(r);
                 }
                 for g in &product.incomplete {
                     let mut g = g.clone();
@@ -1252,6 +1243,7 @@ impl Driver {
                     result.test_entries.insert(path, decl);
                 }
             }
+            diagnostics::resolve_method_edits(&p, &mut result.diagnostics);
             if produce && declarations_accepted {
                 result.library = Some(Arc::new(p.into_library()));
             } else {
@@ -1275,6 +1267,9 @@ impl Driver {
                 .files
                 .push(file_record(&index, &m, &bytes, source, &rows));
             let file_names = rows.into_iter().map(|(_, d)| d).collect();
+            if m.syntax.source.is_empty() && !bytes.is_empty() {
+                result.unparsed_sources.push((m.source, bytes));
+            }
             result.files.push(Arc::new(FileProduct {
                 module: m.id,
                 file: m.source,
@@ -1443,40 +1438,36 @@ fn derived_sites(result: &mut CheckProduct, modules: &[ModuleInput]) {
         .filter(|r| !generated(&r.primary))
         .map(|r| (r.primary.source, r.primary.item))
         .collect();
-    let apply =
-        |primary: &mut Site, causal: &mut Vec<Site>, ctx: &hirsel_core_syntax::DeriveContext| {
-            primary.item = ctx.item as u32;
-            primary.span = ctx.primary;
-            let at = |span| Site { span, ..*primary };
-            let owner = |span| Site {
-                item: ctx.owner as u32,
-                span,
-                ..*primary
-            };
-            let mut path = vec![owner(ctx.declaration)];
-            path.extend(ctx.arguments.iter().map(|&(item, span)| Site {
-                item: item as u32,
-                span,
-                ..*primary
-            }));
-            path.push(owner(ctx.operation));
-            path.extend(ctx.path.iter().copied().map(at));
-            for &cause in causal.iter() {
-                let cause = if generated(&cause) {
-                    context(&cause).map_or(cause, |c| Site {
-                        item: c.item as u32,
-                        span: c.primary,
-                        ..cause
-                    })
-                } else {
-                    cause
-                };
-                if !path.contains(&cause) {
-                    path.push(cause);
-                }
-            }
-            *causal = path;
+    let project = |site: Site| {
+        if generated(&site) {
+            context(&site).map_or(site, |c| Site {
+                item: c.item as u32,
+                span: c.primary,
+                ..site
+            })
+        } else {
+            site
+        }
+    };
+    let apply = |primary: &mut Site, ctx: &hirsel_core_syntax::DeriveContext| {
+        primary.item = ctx.item as u32;
+        primary.span = ctx.primary;
+        let at = |span| Site { span, ..*primary };
+        let owner = |span| Site {
+            item: ctx.owner as u32,
+            span,
+            ..*primary
         };
+        let mut path = vec![owner(ctx.declaration)];
+        path.extend(ctx.arguments.iter().map(|&(item, span)| Site {
+            item: item as u32,
+            span,
+            ..*primary
+        }));
+        path.push(owner(ctx.operation));
+        path.extend(ctx.path.iter().copied().map(at));
+        path
+    };
     let mut seen = std::collections::HashSet::new();
     result.diagnostics.retain_mut(|r| {
         let is_generated = generated(&r.primary);
@@ -1493,7 +1484,23 @@ fn derived_sites(result: &mut CheckProduct, modules: &[ModuleInput]) {
         if is_generated && own.contains(&(r.primary.source, ctx.owner as u32)) {
             return false;
         }
-        apply(&mut r.primary, &mut r.causal, &ctx);
+        let path = apply(&mut r.primary, &ctx);
+        let mut causal: Vec<_> = path
+            .into_iter()
+            .map(|site| hirsel_core_resolve::Cause {
+                site,
+                role: hirsel_core_resolve::CausalRole::DerivedHere,
+            })
+            .collect();
+        for mut cause in std::mem::take(&mut r.causal) {
+            cause.site = project(cause.site);
+            if !causal.iter().any(|c| c.site == cause.site) {
+                causal.push(cause);
+            }
+        }
+        r.causal = causal;
+        r.detail = None;
+        r.unresolved = None;
         let keep = seen.insert((
             r.rule.clone(),
             r.primary.source,
@@ -1517,7 +1524,13 @@ fn derived_sites(result: &mut CheckProduct, modules: &[ModuleInput]) {
         if own.contains(&(g.primary.source, ctx.owner as u32)) {
             return false;
         }
-        apply(&mut g.primary, &mut g.causal, &ctx);
+        let mut path = apply(&mut g.primary, &ctx);
+        for cause in g.causal.iter().copied().map(project) {
+            if !path.contains(&cause) {
+                path.push(cause);
+            }
+        }
+        g.causal = path;
         let keep = seen.insert((
             g.primary.source,
             g.primary.item,
@@ -1544,8 +1557,8 @@ fn bind_record_sites(product: &mut DefinitionProduct, headers: &reuse::Headers) 
     };
     for r in &mut product.check.refusals {
         bind(&mut r.primary);
-        for site in &mut r.causal {
-            bind(site);
+        for cause in &mut r.causal {
+            bind(&mut cause.site);
         }
     }
     for g in &mut product.incomplete {

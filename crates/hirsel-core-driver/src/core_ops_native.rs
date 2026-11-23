@@ -1182,7 +1182,7 @@ fn returned_argument_views_llvm() {
 
 fn string_growth_operations(backend: Backend) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    for (name, room) in [("string-growth", 16), ("string-growth-refusal", 0)] {
+    for (name, room) in [("string-growth", 16 + 32 + 8), ("string-growth-refusal", 32)] {
         let dir = tempfile::tempdir().unwrap();
         let source =
             std::fs::read_to_string(root.join(format!("core/front/runtime/{name}.hirsel")))
@@ -1600,6 +1600,16 @@ fn run_lines_native(backend: Backend, case: &str) {
     main += "  Ok(())\n}\n";
     ordered_case(backend, &format!("{case}\n{main}"));
 }
+#[test]
+#[ignore = "explicit native integration target"]
+fn crc32c_contract_on_both_native_engines() {
+    let source = include_str!("../../../core/std/tests/crc32.hirsel");
+    let start = source.find("fn castagnoli_vectors()").unwrap();
+    for engine in [Backend::Cranelift, Backend::Llvm] {
+        run_lines_native(engine, &source[start..]);
+    }
+}
+
 /// core.md "Floats": the unary float operations and IEEE comparison predicates.
 fn float_contract(backend: Backend) {
     run_lines_native(
@@ -2411,7 +2421,7 @@ pub fn main(e: Env, secret: Secret) -> Result[(), Exit] {
     options.grant_mask = 1 << grant_kind("Env").unwrap();
     options
         .secret_grants
-        .push(SecretGrant::new("secret", "env:PRIVATE_VALUE", "test.example").unwrap());
+        .push(SecretGrant::new("secret", "env:PRIVATE_VALUE", "tls_send(test.example)").unwrap());
     let launch = |patterns| {
         let mut options = options.clone();
         options.env_patterns = EnvPatterns::parse(patterns);

@@ -6,6 +6,9 @@ tree. The S1 package has memory stores, typed tables and
 indexes, isolated transactions, read sets, frozen cursors and snapshots,
 CallInfo, followers, resident admission and foreign-handle checks.
 
+An installed Hirsel toolchain supplies `store@1`. In `hirsel.toml`, add
+`store = { major = 1 }` under `[dependencies]`.
+
 `memory(clock, random, options)` draws a 16-byte StoreId once. A
 `TableSpec` is built by `spec(name, key, value)` and `with_index(mut s, name, by,
 key)`, which returns `Exists` for a repeated index name. `create_table(mut db, s)`

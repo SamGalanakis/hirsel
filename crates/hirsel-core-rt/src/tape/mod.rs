@@ -244,6 +244,7 @@ struct Replayer {
     lookahead: Option<Frame>,
     /// Frames taken so far: the position the next divergence names.
     taken: u64,
+    comparison: Option<String>,
 }
 
 struct Live {
@@ -550,6 +551,17 @@ impl Live {
                 line.push(')');
             }
         }
+        if let Fault::Diverged(_) = fault {
+            use std::fmt::Write as _;
+            let _ = write!(line, " [event {}: ", self.schedule.events);
+            line.push_str(
+                self.replayer
+                    .as_ref()
+                    .and_then(|r| r.comparison.as_deref())
+                    .unwrap_or("frame unavailable; expected unavailable; observed unavailable"),
+            );
+            line.push(']');
+        }
         line.push('\n');
         // SAFETY: `abort.stderr` is the launcher's stderr fd.
         unsafe {
@@ -712,6 +724,97 @@ impl Recorder {
     }
 }
 
+/// Only structural metadata and allowlisted scalar arguments cross the
+/// replay diagnostic boundary. Frame payloads may contain credentials.
+struct FrameEvidence<'a>(&'a Frame);
+
+impl std::fmt::Display for FrameEvidence<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            Frame::Wait { gap, task }
+            | Frame::Done { gap, task, .. }
+            | Frame::Wake { gap, task }
+            | Frame::Cancel { gap, task } => write!(f, "task={task} gap={gap}"),
+            Frame::Op {
+                task,
+                op,
+                object,
+                args,
+                ..
+            }
+            | Frame::Issue {
+                task,
+                op,
+                object,
+                args,
+            } => {
+                write!(
+                    f,
+                    "{}",
+                    IssueEvidence {
+                        task: *task,
+                        op: *op,
+                        object: *object,
+                        args
+                    }
+                )
+            }
+            Frame::Choose { gap, index } => write!(f, "index={index} gap={gap}"),
+            Frame::Grant { gap, kind, .. } => write!(f, "kind={kind} gap={gap}"),
+            Frame::Repeat { count } => write!(f, "count={count}"),
+            Frame::End { gap, ending } => write!(f, "outcome_kind={} gap={gap}", ending.kind),
+        }
+    }
+}
+
+impl FrameEvidence<'_> {
+    fn kind(&self) -> &'static str {
+        match self.0 {
+            Frame::Wait { .. } => "WAIT",
+            Frame::Issue { .. } => "ISSUE",
+            Frame::Done { .. } => "DONE",
+            Frame::Op { .. } => "OP",
+            Frame::Wake { .. } => "WAKE",
+            Frame::Cancel { .. } => "CANCEL",
+            Frame::Choose { .. } => "CHOOSE",
+            Frame::Grant { .. } => "GRANT",
+            Frame::Repeat { .. } => "REPEAT",
+            Frame::End { .. } => "END",
+        }
+    }
+}
+
+struct IssueEvidence<'a> {
+    task: u64,
+    op: u8,
+    object: u64,
+    args: &'a Args,
+}
+
+impl std::fmt::Display for IssueEvidence<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            task,
+            op,
+            object,
+            args,
+        } = self;
+        write!(f, "task={task} op={op} object={object}")?;
+        let field = match *op {
+            READ | RANDOM | NEXT_ENTRIES => "capacity",
+            SLEEP_UNTIL | SLEEP_UNTIL_WALL => "deadline",
+            _ => return f.write_str(" args=redacted"),
+        };
+        match args {
+            Args::Literal(bytes) => match bytes.as_slice().try_into() {
+                Ok(raw) => write!(f, " {field}={}", u64::from_le_bytes(raw)),
+                Err(_) => write!(f, " {field}=invalid({} bytes)", bytes.len()),
+            },
+            Args::Digest(_) => write!(f, " {field}=redacted"),
+        }
+    }
+}
+
 impl Replayer {
     fn keep_block_storage(&mut self) {
         self.retained_block = RETENTION.retain(self.blocks.buffer_capacity());
@@ -758,6 +861,35 @@ impl Replayer {
             kind,
         })
     }
+    #[cold]
+    fn compared(
+        &mut self,
+        kind: Mismatch,
+        frame: &Frame,
+        observed: std::fmt::Arguments<'_>,
+    ) -> Fault {
+        let expected = FrameEvidence(frame);
+        self.comparison = Some(format!(
+            "frame {}; expected {expected}; observed {observed}",
+            expected.kind()
+        ));
+        self.diverged(kind)
+    }
+
+    #[cold]
+    fn note_next(&mut self, observed: std::fmt::Arguments<'_>) {
+        self.comparison = Some(match self.lookahead.as_ref() {
+            Some(frame) => {
+                let expected = FrameEvidence(frame);
+                format!(
+                    "frame {}; expected {expected}; observed {observed}",
+                    expected.kind()
+                )
+            }
+            None => format!("frame unavailable; expected unavailable; observed {observed}"),
+        });
+    }
+
     /// A divergence at the frame after the last one taken.
     fn diverged_next(&self, kind: Mismatch) -> Fault {
         Fault::Diverged(Divergence {
@@ -797,6 +929,7 @@ fn socket_op(op: u8) -> bool {
             | LISTEN
             | ACCEPT
             | RECV_BOUNDED
+            | RECV_READY
             | SEND_PAIR
             | TLS_CONNECT
             | SEND_SECRET
@@ -1205,6 +1338,7 @@ impl Tape {
                             frames: Default::default(),
                             lookahead: None,
                             taken: 0,
+                            comparison: None,
                         };
                         replay.keep_block_storage();
                         replay
@@ -1354,18 +1488,19 @@ impl Tape {
                         live.schedule.last = live.schedule.events;
                         Ok(args.unwrap_or_default())
                     }
-                    Ok(Frame::End { .. }) => Err(rep.diverged(Mismatch::Missing)),
-                    Ok(Frame::Grant { kind: k, .. }) if k == kind => {
-                        Err(rep.diverged(Mismatch::Schedule))
+                    Ok(frame) => {
+                        let mismatch = match frame {
+                            Frame::End { .. } => Mismatch::Missing,
+                            Frame::Grant { kind: k, .. } if k == kind => Mismatch::Schedule,
+                            Frame::Wake { .. }
+                            | Frame::Cancel { .. }
+                            | Frame::Done { .. }
+                            | Frame::Choose { .. }
+                            | Frame::Wait { .. } => Mismatch::Schedule,
+                            _ => Mismatch::Op,
+                        };
+                        Err(rep.compared(mismatch, &frame, format_args!("GRANT kind={kind}")))
                     }
-                    Ok(
-                        Frame::Wake { .. }
-                        | Frame::Cancel { .. }
-                        | Frame::Done { .. }
-                        | Frame::Choose { .. }
-                        | Frame::Wait { .. },
-                    ) => Err(rep.diverged(Mismatch::Schedule)),
-                    Ok(_) => Err(rep.diverged(Mismatch::Op)),
                     Err(f) => Err(f),
                 };
                 stored.inspect_err(|&f| {
@@ -1473,16 +1608,22 @@ fn finish(
     }
     if let (Some(ending), Ok(()), Some(rep)) = (end, result, live.replayer.as_mut()) {
         result = match rep.next() {
-            Ok(Frame::End { gap, .. }) if !live.schedule.at(gap) => {
-                Err(rep.diverged(Mismatch::Schedule))
-            }
-            Ok(Frame::End { ending: e, .. }) if e != *ending => {
+            Ok(ref frame @ Frame::End { gap, .. }) if !live.schedule.at(gap) => Err(rep.compared(
+                Mismatch::Schedule,
+                frame,
+                format_args!("END gap={}", live.schedule.events - live.schedule.last),
+            )),
+            Ok(ref frame @ Frame::End { ending: ref e, .. }) if e != ending => {
                 let kind = if deadlock.is_some() {
                     Mismatch::Schedule
                 } else {
                     Mismatch::Outcome
                 };
-                Err(rep.diverged(kind))
+                Err(rep.compared(
+                    kind,
+                    frame,
+                    format_args!("END outcome_kind={} (payload redacted)", ending.kind),
+                ))
             }
             Ok(Frame::End { .. }) => rep.next().map_or_else(
                 |f| match f {
@@ -1494,18 +1635,26 @@ fn finish(
                 },
                 |_| Err(Fault::Corrupt),
             ),
-            Ok(
-                Frame::Wake { .. }
-                | Frame::Cancel { .. }
-                | Frame::Done { .. }
-                | Frame::Choose { .. }
-                | Frame::Wait { .. },
-            ) => Err(rep.diverged(Mismatch::Schedule)),
-            Ok(_) => Err(rep.diverged(if deadlock.is_some() {
-                Mismatch::Schedule
-            } else {
-                Mismatch::Extra
-            })),
+            Ok(frame) => {
+                let kind = if deadlock.is_some()
+                    || matches!(
+                        frame,
+                        Frame::Wake { .. }
+                            | Frame::Cancel { .. }
+                            | Frame::Done { .. }
+                            | Frame::Choose { .. }
+                            | Frame::Wait { .. }
+                    ) {
+                    Mismatch::Schedule
+                } else {
+                    Mismatch::Extra
+                };
+                Err(rep.compared(
+                    kind,
+                    &frame,
+                    format_args!("END outcome_kind={}", ending.kind),
+                ))
+            }
             Err(f) => Err(f),
         };
     }
@@ -1568,7 +1717,7 @@ fn ordinal_of(h: u64) -> usize {
 unsafe fn source_handle(request: &Request, inner: Inner) -> u64 {
     let direction = if matches!(
         request.operation,
-        RECV_BOUNDED | SEND_PAIR | SEND_SECRET | SCRAM
+        RECV_BOUNDED | RECV_READY | SEND_PAIR | SEND_SECRET | SCRAM
     ) {
         // SAFETY: owned network operations pin this operand through delivery.
         unsafe { (*request.path.cast::<crate::net::NetworkRequest>()).direction }
@@ -1639,10 +1788,14 @@ unsafe extern "C" fn wait(state: *mut u8, r: *mut Request, token: u64) -> Wait {
             Ok(Frame::Op { task: t, .. } | Frame::Issue { task: t, .. }) if *t == task => {
                 return Wait::default();
             }
-            Ok(_) => rep.diverged_next(Mismatch::Schedule),
+            Ok(_) => {
+                rep.note_next(format_args!("WAIT task={task}"));
+                rep.diverged_next(Mismatch::Schedule)
+            }
             Err(f) => f,
         };
         live.fault = Some(refuse(result));
+        live.abort_replay(result, unsafe { (*r).site });
         return Wait::default();
     }
     let inner = live.objects[ordinal_of(h) - 1].inner.unwrap();
@@ -1991,36 +2144,53 @@ unsafe fn replay(
 ) -> Result<Step, Fault> {
     let task = schedule::task_from_live();
     let rep = live.replayer.as_mut().unwrap();
-    let (t, op, object, stored, out) = match rep.next()? {
-        Frame::Op {
-            task,
-            op,
-            object,
-            args,
-            out,
-        } => (task, op, object, args, Some(out)),
-        Frame::Issue {
-            task,
-            op,
-            object,
-            args,
-        } => (task, op, object, args, None),
-        Frame::End { .. } => return Err(rep.diverged(Mismatch::Missing)),
-        _ => return Err(rep.diverged(Mismatch::Schedule)),
+    let observed = IssueEvidence {
+        task,
+        op: r.operation,
+        object: ordinal as u64,
+        args,
     };
-    if t != task {
-        return Err(rep.diverged(Mismatch::Schedule));
+    let frame = rep.next().map_err(|fault| {
+        if let Fault::Diverged(_) = fault {
+            rep.note_next(format_args!("{observed}"));
+        }
+        fault
+    })?;
+    let mismatch = match &frame {
+        Frame::Op {
+            task: t,
+            op,
+            object,
+            args: stored,
+            ..
+        }
+        | Frame::Issue {
+            task: t,
+            op,
+            object,
+            args: stored,
+        } => {
+            if *t != task {
+                Some(Mismatch::Schedule)
+            } else if *op != r.operation {
+                Some(Mismatch::Op)
+            } else if *object != ordinal as u64 {
+                Some(Mismatch::Object)
+            } else if stored != args {
+                Some(Mismatch::Arg)
+            } else {
+                None
+            }
+        }
+        Frame::End { .. } => Some(Mismatch::Missing),
+        _ => Some(Mismatch::Schedule),
+    };
+    if let Some(kind) = mismatch {
+        return Err(rep.compared(kind, &frame, format_args!("{observed}")));
     }
-    if op != r.operation {
-        return Err(rep.diverged(Mismatch::Op));
-    }
-    if object != ordinal as u64 {
-        return Err(rep.diverged(Mismatch::Object));
-    }
-    if &stored != args {
-        return Err(rep.diverged(Mismatch::Arg));
-    }
-    let Some(out) = out else {
+    let op = r.operation;
+    let object = ordinal as u64;
+    let Frame::Op { out, .. } = frame else {
         if matches!(op, SECRET_MAC | SCRAM_VERIFY | EXEC_SPAWN | EXEC_SIGNAL)
             || (unix_operation(op) && !unix::can_park(op))
             || (op == CLOSE && matches!(r.mode, crate::exec_runtime::PROC_CLOSE | 0x40..=0x42))
@@ -2037,6 +2207,10 @@ unsafe fn replay(
             if !matches!(rep.peek()?, Frame::Done { gap, task: t, .. }
                 if *t == task && live.schedule.last.checked_add(*gap) == Some(live.schedule.events))
             {
+                rep.note_next(format_args!(
+                    "DONE task={task} event={}",
+                    live.schedule.events
+                ));
                 return Err(rep.diverged(Mismatch::Schedule));
             }
             crate::tasks::hirsel_core_ready(token);
@@ -2305,6 +2479,11 @@ unsafe fn replay_out(
         if out.written > r.buffer.len as u64 || (ok && out.written != r.buffer.len as u64) {
             return Err(Fault::Corrupt);
         }
+    } else if op == RECV_READY {
+        // Readiness carries no count: only its status and error.
+        if out.value != 0 || out.written != 0 {
+            return Err(Fault::Corrupt);
+        }
     } else if op == SEND_SECRET {
         if out.value != 0 || (ok && out.written != 0) {
             return Err(Fault::Corrupt);
@@ -2432,7 +2611,16 @@ unsafe fn complete(state: *mut u8, r: *mut Request, token: u64, why: Option<u8>)
                     )
                 }
             }
-            _ => Err(rep.diverged(Mismatch::Schedule)),
+            Ok(frame) => Err(rep.compared(
+                Mismatch::Schedule,
+                &frame,
+                format_args!(
+                    "DONE task={} event={}",
+                    schedule::task(cell),
+                    live.schedule.events
+                ),
+            )),
+            Err(_) => Err(rep.diverged(Mismatch::Schedule)),
         };
         return match result {
             Ok(o) => done(o),

@@ -27,6 +27,8 @@ pub const ACCEPT: u8 = 21;
 pub const TLS_CONNECT: u8 = 22;
 pub const SEND_SECRET: u8 = 23;
 pub const RECV_BOUNDED: u8 = 27;
+/// A wait until a read half has bytes, end of stream or an error to report (NET-1).
+pub const RECV_READY: u8 = 78;
 pub const SEND_PAIR: u8 = 26;
 pub const STOPPED: u8 = 28;
 pub const STDIN_READ: u8 = 32;

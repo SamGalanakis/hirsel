@@ -46,6 +46,26 @@ enum Entry {
     Built(Option<Arc<Closure>>),
 }
 
+/// Which naming of a row's closure this is, by the program's cache.
+#[derive(Clone, Copy, PartialEq)]
+enum Naming {
+    First,
+    Second,
+    Built,
+}
+
+/// What a module holds before a first naming builds a row in place.
+struct Mark {
+    rows: usize,
+    signatures: usize,
+    instances: usize,
+    functions: usize,
+    /// The sizes of the instance, definition-row, program-type-row and signature
+    /// maps.
+    maps: [usize; 4],
+    body_state: [usize; 12],
+}
+
 /// What a fresh emitter holds after building one type's row, numbered from 0. Function
 /// `i` is instance `i`, and every function and signature is interned by its key.
 struct Closure {
@@ -87,20 +107,34 @@ impl Emitter {
             Ok(name) => name,
             Err(row) => return Some(row),
         };
-        let (build, closure) = match p.row_closures.built.lock().unwrap().entry(key.clone()) {
+        let (naming, closure) = match p.row_closures.built.lock().unwrap().entry(key.clone()) {
             std::collections::hash_map::Entry::Vacant(v) => {
                 v.insert(Entry::Seen);
-                (false, None)
+                (Naming::First, None)
             }
             std::collections::hash_map::Entry::Occupied(o) => match o.get() {
-                Entry::Built(closure) => (false, closure.clone()),
-                Entry::Seen => (true, None),
+                Entry::Built(closure) => (Naming::Built, closure.clone()),
+                Entry::Seen => (Naming::Second, None),
             },
         };
+        if naming == Naming::First {
+            // Built in place. When that build found nothing the module held, what it
+            // added is the fresh build numbered past the module's own: the closure,
+            // with no second build at the next naming.
+            let mark = self.mark();
+            let row = self.shaped(p, t, |s| s.shape(ty))?;
+            if let Some(closure) = self.added_closure(&mark, row)
+                && let Some(entry @ Entry::Seen) =
+                    p.row_closures.built.lock().unwrap().get_mut(&key)
+            {
+                *entry = Entry::Built(Some(Arc::new(closure)));
+            }
+            return Some(row);
+        }
         // Built outside the lock: the build names other rows, whose closures it may
         // look up. Two bodies building one closure at once build the same one. A
         // refused build stays refused, as the same types refuse it again.
-        let closure = if build {
+        let closure = if naming == Naming::Second {
             let closure = Closure::build(p, &mut *t, ty).map(Arc::new);
             p.row_closures
                 .built
@@ -140,6 +174,181 @@ impl Emitter {
                     .signatures
                     .contains_key(&(c.signatures[i].clone(), c.conventions[i].clone()))
             })
+    }
+
+    fn mark(&self) -> Mark {
+        Mark {
+            rows: self.module.types.len(),
+            signatures: self.module.signatures.len(),
+            instances: self.module.instances.len(),
+            functions: self.module.functions.len(),
+            maps: self.maps(),
+            body_state: self.body_state(),
+        }
+    }
+
+    fn maps(&self) -> [usize; 4] {
+        [
+            self.funcs.len(),
+            self.rows.len(),
+            self.program_type_rows.len(),
+            self.source_signatures.signatures.len(),
+        ]
+    }
+
+    /// The sizes of the state `Closure::build` refuses a closure for reaching.
+    fn body_state(&self) -> [usize; 12] {
+        [
+            self.generic_rows.len(),
+            self.generic_names.len(),
+            self.generic_codecs.len(),
+            self.generic_calls.len(),
+            self.items.len(),
+            self.statics.len(),
+            self.constant_statics.len(),
+            self.callable_adapters.len(),
+            self.module.items.len(),
+            self.module.statics.len(),
+            self.module.code_variants.len(),
+            self.module.step_free.len(),
+        ]
+    }
+
+    /// What the build in place of `row` added after `m`, numbered from 0: the closure
+    /// a fresh build makes, as the module held none of it. None when an added item
+    /// names one the module held before `m` (the module held part of the closure), or
+    /// when `Closure::build` would refuse the closure.
+    fn added_closure(&self, m: &Mark, row: TypeRef) -> Option<Closure> {
+        let (rows, signatures) = (m.rows as u32, m.signatures as u32);
+        let (instances, functions) = (m.instances as u32, m.functions as u32);
+        let n = self.module.functions.len() - m.functions;
+        if self.refused
+            || (row.0 as usize) < m.rows
+            || self.body_state() != m.body_state
+            || self.module.instances.len() - m.instances != n
+        {
+            return None;
+        }
+        let held = std::cell::Cell::new(false);
+        let below = |x: u32, base: u32| {
+            held.set(held.get() || x < base);
+            x.wrapping_sub(base)
+        };
+        let unbound = |f: &Option<FuncRef>| f.is_some_and(|f| f.0 == u32::MAX);
+        let mut types = Vec::with_capacity(self.module.types.len() - m.rows);
+        for s in &self.module.types[m.rows..] {
+            if s.finalizer.is_some() || unbound(&s.clone) || unbound(&s.codec) {
+                return None;
+            }
+            let mut s = s.clone();
+            s.map_refs(&mut |r| TypeRef(below(r.0, rows)));
+            for f in [&mut s.clone, &mut s.codec].into_iter().flatten() {
+                f.0 = below(f.0, functions);
+            }
+            types.push(s);
+        }
+        let signatures_added: Vec<Signature> = self.module.signatures[m.signatures..]
+            .iter()
+            .map(|s| map_rows(s, |r| TypeId(below(r.0, rows))))
+            .collect();
+        let instances_added: Vec<InstanceKey> = self.module.instances[m.instances..]
+            .iter()
+            .map(|k| InstanceKey {
+                definition: k.definition.clone(),
+                arguments: k
+                    .arguments
+                    .iter()
+                    .map(|a| TypeId(below(a.0, rows)))
+                    .collect(),
+                dictionaries: k.dictionaries.clone(),
+            })
+            .collect();
+        let mut functions_added = Vec::with_capacity(n);
+        let mut source_signatures = Vec::with_capacity(n);
+        for (i, f) in self.module.functions[m.functions..].iter().enumerate() {
+            let id = FuncId(functions + i as u32);
+            if f.body.is_some() || f.instance.0 != instances + i as u32 {
+                return None;
+            }
+            source_signatures.push(SigId(below(self.source_signatures.get(id)?.0, signatures)));
+            functions_added.push(hirsel_core_ir::Function {
+                instance: hirsel_core_ir::InstanceId(i as u32),
+                signature: SigId(below(f.signature.0, signatures)),
+                body: None,
+                versioned: f.versioned,
+            });
+        }
+        // The maps only gain entries, each added function's under its instance: every
+        // added function and signature is interned, as a fresh build leaves them. A
+        // map that gained nothing is not searched.
+        let [funcs, defined, typed, interned] = m.maps;
+        let now = self.maps();
+        if now[0] - funcs != n || now[3] - interned != signatures_added.len() {
+            return None;
+        }
+        let mut conventions = vec![None; signatures_added.len()];
+        if now[3] > interned {
+            for ((_, abi), id) in &self.source_signatures.signatures {
+                if id.0 >= signatures {
+                    conventions[(id.0 - signatures) as usize] = Some(abi.clone());
+                }
+            }
+        }
+        // An added entry naming a row or function held before `m` is the module's.
+        let rows_added: Vec<(usize, FuncId)> = if now[1] > defined {
+            self.rows
+                .iter()
+                .filter(|(_, f)| f.0 >= functions)
+                .map(|(&d, f)| (d, FuncId(f.0 - functions)))
+                .collect()
+        } else {
+            vec![]
+        };
+        let program_type_rows: Vec<(TyId, TypeId)> = if now[2] > typed {
+            self.program_type_rows
+                .iter()
+                .filter(|(_, r)| r.0 >= rows)
+                .map(|(&ty, r)| (ty, TypeId(r.0 - rows)))
+                .collect()
+        } else {
+            vec![]
+        };
+        if rows_added.len() != now[1] - defined || program_type_rows.len() != now[2] - typed {
+            return None;
+        }
+        let conventions: Option<Vec<SignatureAbi>> = conventions.into_iter().collect();
+        let recipes = self
+            .recipes
+            .get(m.rows..)
+            .unwrap_or_default()
+            .iter()
+            .map(|r| {
+                let mut r = r.clone();
+                r.map_refs(|x| TypeRef(below(x.0, rows)));
+                r
+            })
+            .collect();
+        if held.get() {
+            return None;
+        }
+        Some(Closure {
+            row: TypeRef(row.0 - rows),
+            types,
+            open_signatures: (0..signatures_added.len())
+                .filter(|&i| names_no_row(&signatures_added[i]))
+                .collect(),
+            signatures: signatures_added,
+            conventions: conventions?,
+            open_instances: (0..instances_added.len())
+                .filter(|&i| instances_added[i].arguments.is_empty())
+                .collect(),
+            instances: instances_added,
+            functions: functions_added,
+            rows: rows_added,
+            program_type_rows,
+            source_signatures,
+            recipes,
+        })
     }
 
     /// The closure in a module holding some of it: each held row, instance and
@@ -332,10 +541,11 @@ impl Emitter {
         let shape_at = |i: usize| {
             let mut s = c.types[i].clone();
             s.map_refs(&mut |r| TypeRef(r.0 + rows));
-            for hook in [&mut s.finalizer, &mut s.clone, &mut s.codec] {
-                if let Some(f) = hook {
-                    f.0 += functions;
-                }
+            for f in [&mut s.finalizer, &mut s.clone, &mut s.codec]
+                .into_iter()
+                .flatten()
+            {
+                f.0 += functions;
             }
             s
         };

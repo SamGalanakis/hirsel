@@ -30,7 +30,7 @@ STEP_LAWS = (
 LAW_GROUPS = {
     'store': LAWS,
     'triggers': TRIGGER_LAWS,
-    'runner': ('trigger_transact', 'trigger_granted', 'trigger_cancel'),
+    'runner': ('trigger_transact', 'trigger_granted', 'trigger_snapshot', 'trigger_cancel'),
     'steps': STEP_LAWS,
 }
 SCENARIOS = ('journal', 'journal-group', 'journal-rotate', 'journal-place', 'journal-place-split', 'journal-place-idle',

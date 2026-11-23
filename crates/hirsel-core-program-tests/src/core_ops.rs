@@ -575,7 +575,7 @@ fn f() -> u64 {
     if !result.unwrap(secret.verify_hmac_sha256(narrowed, data, tag_data)) { return 3 }
     if result.unwrap(secret.verify_hmac_sha256(narrowed, data, list.slice(tag_data, 0, 31))) { return 4 }
     let other_key = string.into_bytes("Jefe")
-    let no_use = result.unwrap(secret.seal(take other_key, "alpha.test"))
+    let no_use = result.unwrap(secret.seal(take other_key, "tls_send(alpha.test)"))
     match secret.narrow(no_use, "mac") {
         Error(Invalid) => {},
         _ => return 5,

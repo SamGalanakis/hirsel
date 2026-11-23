@@ -708,6 +708,7 @@ pub unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64
                 | LISTEN
                 | ACCEPT
                 | RECV_BOUNDED
+                | RECV_READY
                 | SEND_PAIR
                 | TLS_CONNECT
                 | SEND_SECRET

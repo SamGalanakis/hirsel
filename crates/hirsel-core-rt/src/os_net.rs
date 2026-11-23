@@ -545,6 +545,34 @@ unsafe fn attempt(request: &mut Request, n: &mut NetworkRequest, first: bool) ->
                 // Success requires flushing the final committed record too.
                 return stream.send(fd, &[], &[]);
             }
+            RECV_READY => {
+                if let Some(stream) = n
+                    .tls
+                    .as_mut()
+                    .and_then(|tls| tls.sessions.get_mut(&(key & !3)))
+                {
+                    return stream.ready(sockets.fd(key));
+                }
+                // An ended or reset half answers its next receive at once.
+                if sockets.ended(key) || sockets.reset(key) {
+                    return Some(Outcome::default());
+                }
+                // Bytes, end of stream and a pending error all make the fd
+                // readable; none is consumed, so the receive still reports it.
+                let mut poll = libc::pollfd {
+                    fd: sockets.fd(key),
+                    events: libc::POLLIN | libc::POLLRDHUP,
+                    revents: 0,
+                };
+                match retry(|| libc::poll(&mut poll, 1, 0) as isize) {
+                    Ok(0) => {
+                        sockets.mark_read_drained(key);
+                        return None;
+                    }
+                    Ok(_) => Ok(Outcome::default()),
+                    Err(e) => Err(e),
+                }
+            }
             RECV_BOUNDED | SEND_PAIR => {
                 let b = &mut request.buffer;
                 let receiving = request.operation == RECV_BOUNDED;
@@ -752,8 +780,9 @@ pub(crate) unsafe fn step(request: *mut Request, token: u64, first: bool) -> Ste
             return finish(request, n, signal(6));
         }
         let drained = first
-            && request.operation == RECV_BOUNDED
-            && request.buffer.len < request.buffer.capacity
+            && (request.operation == RECV_READY
+                || (request.operation == RECV_BOUNDED
+                    && request.buffer.len < request.buffer.capacity))
             && (*n.sockets).read_drained(request.handle)
             && n.tls
                 .as_ref()
@@ -850,11 +879,9 @@ unsafe fn tls_step(request: *mut Request, token: u64, first: bool) -> Step {
             });
             let stream = {
                 let _blocking = crate::units::blocking();
-                crate::os_tls::Stream::new(
-                    s.name.take().unwrap(),
-                    roots,
-                    std::mem::take(&mut s.alpn),
-                )
+                streams
+                    .client_config(roots, std::mem::take(&mut s.alpn), s.cacheable)
+                    .and_then(|config| crate::os_tls::Stream::new(s.name.take().unwrap(), config))
             };
             match stream {
                 Ok(stream) => s.stream = Some(stream),
@@ -868,15 +895,17 @@ unsafe fn tls_step(request: *mut Request, token: u64, first: bool) -> Step {
             Ok(Ok(())) => {
                 let protocol = &mut *tls.protocol_out;
                 let out = std::slice::from_raw_parts_mut(protocol.data, protocol.capacity);
-                let (len, binding) = stream.handshake_result(out, &mut *tls.peer_out);
+                let (len, binding, stream) =
+                    match s.stream.take().unwrap().finish(out, &mut *tls.peer_out) {
+                        Ok(result) => result,
+                        Err(outcome) => return tls_finish(tls, key, outcome),
+                    };
                 protocol.len = len;
                 let binding_out = &mut *tls.binding_out;
                 let binding = binding.bytes();
                 ptr::copy_nonoverlapping(binding.as_ptr(), binding_out.data, binding.len());
                 binding_out.len = binding.len();
-                streams
-                    .sessions
-                    .insert(key, Box::new(s.stream.take().unwrap()));
+                streams.sessions.insert(key, stream);
                 sockets.split(key);
                 Step {
                     outcome: Outcome {

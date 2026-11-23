@@ -1,6 +1,7 @@
 //! PROG-4: a checked test uses the ordinary entry ABI, in a fresh process. A run
 //! stop can end that process without ending another test's run.
 use crate::native::EntryDecl;
+use crate::property_corpus;
 use crate::{CheckProduct, NativeOptions, NativeStop, PackageProduct, Reachable, Store};
 use hirsel_core_ids::{ContentHash, DefPath};
 use std::collections::BTreeMap;
@@ -95,6 +96,7 @@ impl Runner {
             "HIRSEL_RECORD",
             "HIRSEL_RECORD_ID",
             SEED_ENV,
+            property_corpus::ENV,
         ] {
             command.env_remove(name);
         }
@@ -110,6 +112,7 @@ pub struct TestOutcome {
     /// Time spent launching, running and collecting the child or replay pair.
     /// A cached result has no child time.
     pub wall_time: Duration,
+    pub(crate) corpus: Option<&'static str>,
 }
 impl TestOutcome {
     /// PROG-3 maps every Error, failure, stop and not-started outcome to nonzero.
@@ -171,6 +174,7 @@ fn grant_parameters(decl: &EntryDecl, options: &mut NativeOptions) {
     options.exec_grants.truncate(exec);
     if taken & (1 << named("Net")) == 0 {
         options.net_rules.clear();
+        options.unix_roots.clear();
     }
     if taken & (1 << named("Env")) == 0 {
         options.env_patterns = None;
@@ -315,6 +319,7 @@ impl TestLaunch<'_> {
 
 struct TestProcess<'a> {
     command: Command,
+    executable: PathBuf,
     pass: Option<(&'a TestCache, ContentHash)>,
     /// Removed once the run is collected.
     _directory: tempfile::TempDir,
@@ -328,6 +333,7 @@ impl TestProcess<'_> {
             output,
             timed_out,
             wall_time,
+            corpus: None,
         };
         if outcome.passed()
             && let Some((cache, key)) = self.pass
@@ -348,6 +354,7 @@ pub(crate) struct TestBatch<'a> {
     pub cache: Option<&'a TestCache>,
     pub rerun: bool,
     pub seed: Option<u64>,
+    pub corpus: Option<&'a property_corpus::Corpus>,
 }
 
 impl TestBatch<'_> {
@@ -369,6 +376,74 @@ impl TestBatch<'_> {
             .finish(test, self.timeout)
     }
 
+    fn run_corpus(
+        &self,
+        corpus: &property_corpus::Corpus,
+        product: &CheckProduct,
+        test: &DefPath,
+        options: &NativeOptions,
+    ) -> TestResult {
+        corpus.check_grants(&product.granted(test, options).directories)?;
+        let run = |seed, input: &str| {
+            let TestLaunch::Run(mut process) =
+                product.test_launch(test, options, self.runner, None, true, seed)?
+            else {
+                unreachable!("corpus runs have no pass cache")
+            };
+            process.command.env(property_corpus::ENV, input);
+            let executable = process.executable.clone();
+            let (outcome, source) = process.run(test, self.timeout)?;
+            Ok::<_, NativeStop>((outcome, source, executable))
+        };
+        let mut replay_time = Duration::ZERO;
+        let stale = match corpus.read(test)? {
+            property_corpus::SavedEntry::Missing => false,
+            property_corpus::SavedEntry::Stale => {
+                corpus.retire(test)?;
+                true
+            }
+            property_corpus::SavedEntry::Current(saved) => {
+                let (mut outcome, source, executable) = run(saved.launch_seed, &saved.input)?;
+                match property_corpus::report(&outcome.output, outcome.timed_out, &executable) {
+                    Some(property_corpus::Report::Stale) => {
+                        corpus.retire(test)?;
+                        replay_time = outcome.wall_time;
+                        true
+                    }
+                    Some(property_corpus::Report::Failure(failure)) => {
+                        outcome.corpus = Some(if saved.confirms(&failure) {
+                            "confirmed"
+                        } else {
+                            corpus.write(test, saved.launch_seed, failure)?;
+                            "changed-failure"
+                        });
+                        return Ok((outcome, source));
+                    }
+                    None => {
+                        if outcome.passed() {
+                            return Err(NativeStop::Entry(
+                                "test did not verify its saved property corpus entry".into(),
+                            ));
+                        }
+                        outcome.corpus = Some("unverified");
+                        return Ok((outcome, source));
+                    }
+                }
+            }
+        };
+        let (mut outcome, source, executable) = run(self.seed, "search")?;
+        outcome.wall_time += replay_time;
+        if let Some(property_corpus::Report::Failure(failure)) =
+            property_corpus::report(&outcome.output, outcome.timed_out, &executable)
+        {
+            corpus.write(test, self.seed, failure)?;
+            outcome.corpus = Some(if stale { "stale-and-saved" } else { "saved" });
+        } else if stale {
+            outcome.corpus = Some("stale");
+        }
+        Ok((outcome, source))
+    }
+
     pub(crate) fn run(
         self,
         product: &CheckProduct,
@@ -379,14 +454,20 @@ impl TestBatch<'_> {
         // Each test's own run configuration; one test's never changes another's.
         let configure = |test: &DefPath| {
             let mut test_options = self.runs.options(test, options);
-            if self.seed.is_some() {
+            let mut grant_env = |name| {
                 let env = test_options
                     .env_patterns
                     .get_or_insert_with(Default::default);
-                if !env.covers(SEED_ENV) {
-                    env.extend(hirsel_core_net::EnvPatterns::parse(SEED_ENV).unwrap());
+                if !env.covers(name) {
+                    env.extend(hirsel_core_net::EnvPatterns::parse(name).unwrap());
                 }
                 test_options.grant_mask |= 1 << crate::grant_kind("Env").unwrap();
+            };
+            if self.seed.is_some() || self.corpus.is_some() {
+                grant_env(SEED_ENV);
+            }
+            if self.corpus.is_some() {
+                grant_env(property_corpus::ENV);
             }
             if let Some(Ok(decl)) = product.test_entries.get(test) {
                 let exec = decl
@@ -432,6 +513,7 @@ impl TestBatch<'_> {
         if self.jobs.get() == 1
             || tests.len() <= 1
             || self.replay
+            || self.corpus.is_some()
             || options.recording
             || options.replay.is_some()
             || options.logical_charge_report.is_some()
@@ -455,6 +537,8 @@ impl TestBatch<'_> {
                             self.expect_verdict,
                         )
                         .map(|outcome| (outcome, Source::Executed))
+                } else if let Some(corpus) = self.corpus {
+                    self.run_corpus(corpus, product, test, &test_options)
                 } else {
                     self.run_one(product, test, &test_options)
                 };
@@ -649,6 +733,7 @@ impl CheckProduct {
                 output,
                 timed_out: false,
                 wall_time: Duration::ZERO,
+                corpus: None,
             }));
         }
         let built = if options.foreign_grants.is_empty() || options.recording {
@@ -673,7 +758,8 @@ impl CheckProduct {
             }
             built
         };
-        let mut command = runner.test_command(&std::fs::canonicalize(&built.executable)?);
+        let executable = std::fs::canonicalize(&built.executable)?;
+        let mut command = runner.test_command(&executable);
         for grant in &options.exec_grants {
             grant.approve(&mut command);
         }
@@ -683,6 +769,7 @@ impl CheckProduct {
         let directory = private_directory(&mut command)?;
         Ok(TestLaunch::Run(TestProcess {
             command,
+            executable,
             pass,
             _directory: directory,
         }))
@@ -768,6 +855,7 @@ impl CheckProduct {
                 output,
                 timed_out,
                 wall_time,
+                corpus: None,
             });
         }
         let record_stderr = String::from_utf8_lossy(&output.stderr);
@@ -800,6 +888,7 @@ impl CheckProduct {
                 output: replay_output,
                 timed_out: true,
                 wall_time,
+                corpus: None,
             });
         }
         let expected = expect_verdict.unwrap_or("Sealed");
@@ -809,6 +898,7 @@ impl CheckProduct {
                 output: replay_output,
                 timed_out: false,
                 wall_time,
+                corpus: None,
             });
         }
         let replay_stderr = String::from_utf8_lossy(&replay_output.stderr);
@@ -821,6 +911,7 @@ impl CheckProduct {
                 output,
                 timed_out: false,
                 wall_time,
+                corpus: None,
             });
         }
         Err(NativeStop::Entry(format!(

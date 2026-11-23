@@ -179,6 +179,8 @@ pub enum Role {
     Map,
     Region,
     Capability,
+    /// `Secret` (TLS-5): a capability that is a resource, one holder of a designation.
+    Secret,
     Task,
     Sender,
     Receiver,
@@ -258,7 +260,8 @@ impl Role {
             "Into" | "Port" | "Sink" => Role::FlowEndpoint,
 
             "Dir" | "Net" | "Clock" | "Random" | "Stdout" | "Stderr" | "Stdin" | "Env"
-            | "Process" | "Tasks" | "Secret" | "Foreign" | "Exec" => Role::Capability,
+            | "Process" | "Tasks" | "Foreign" | "Exec" => Role::Capability,
+            "Secret" => Role::Secret,
             _ => return None,
         })
     }
@@ -295,7 +298,8 @@ impl Role {
             | Role::Latest
             | Role::Client
             | Role::Inbox
-            | Role::Flow => Kind::Resource,
+            | Role::Flow
+            | Role::Secret => Kind::Resource,
         }
     }
 }
@@ -812,7 +816,9 @@ impl Program<'_> {
                         item.tree.token_text(item.text, token)
                     ),
                 );
-                r.causal.push(self.site(at, *e.get()));
+                r.causal.push(hirsel_core_resolve::Cause::declared(
+                    self.site(at, *e.get()),
+                ));
                 self.refusals.push(r);
             }
         }
@@ -946,7 +952,9 @@ impl Program<'_> {
         };
         if let Some(first) = self.decls[d.index()].clone_body {
             let mut r = refusal("MEM-17", site, "a type has one clone body");
-            r.causal.push(self.fns[first as usize].site);
+            r.causal.push(hirsel_core_resolve::Cause::declared(
+                self.fns[first as usize].site,
+            ));
             self.refusals.push(r);
             return;
         }
@@ -2162,7 +2170,7 @@ impl Program<'_> {
         r.causal = members
             .iter()
             .filter(|m| m.0 != least)
-            .map(|m| self.decls[m.0.index()].site)
+            .map(|m| hirsel_core_resolve::Cause::declared(self.decls[m.0.index()].site))
             .collect();
         self.refusals.push(r);
     }
@@ -2188,7 +2196,7 @@ impl Program<'_> {
         r.causal = members
             .iter()
             .filter(|m| m.0 != least.0)
-            .map(|m| self.decls[m.0.index()].site)
+            .map(|m| hirsel_core_resolve::Cause::declared(self.decls[m.0.index()].site))
             .collect();
         self.refusals.push(r);
     }
@@ -2294,6 +2302,7 @@ impl Program<'_> {
             let mut params = 0u64;
             let mut h = match decl.role {
                 Some(Role::Capability) => H_CAPABILITY,
+                Some(Role::Secret) => H_CAPABILITY | H_RESOURCE,
                 Some(
                     Role::Task
                     | Role::Sender
@@ -2501,7 +2510,7 @@ impl Program<'_> {
                         for (site, explanation) in
                             missing_codec_declarations(&self.decls, &self.types, f.ty, &params)
                         {
-                            r.causal.push(site);
+                            r.causal.push(hirsel_core_resolve::Cause::declared(site));
                             r.message += &format!("; {explanation}");
                         }
                     }
@@ -3102,7 +3111,7 @@ fn nominal_bounds(decl: &TypeDecl, meet: impl Fn() -> u16, at: impl Fn(usize) ->
         Some(Role::Arc) => SHAREABLE | SEND | (meet() & (KEY | ORDERED)),
         Some(Role::Box) => meet() & (SHAREABLE | SEND | KEY | ORDERED),
         Some(Role::Sender | Role::Receiver | Role::HostFile | Role::Latest | Role::Inbox) => SEND,
-        Some(Role::Client) => SEND | CROSS,
+        Some(Role::Client | Role::Secret) => SEND | CROSS,
         Some(Role::Socket) if matches!(decl.path.0.name.as_str(), "Socket" | "Listener") => {
             SEND | CROSS
         }

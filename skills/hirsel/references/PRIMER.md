@@ -286,6 +286,22 @@ fn stamp(c: Clock) -> u64 { host.mono_ns(c) }
 fn stamp() -> u64 { host.mono_ns() }                      // refused: CAP-1, no Clock argument
 ```
 
+Capability arguments stay explicit: there is no implicit context. Three habits keep them
+short. Capture an authority at construction when a value keeps using it: std's
+`config.new(source: Env, max_errors: u64)` stores the `Env` in its `Reader`, and every
+getter reads through `r.source`, as `store.Db` keeps its `Clock`. When three or more
+capabilities travel together, pass one small record of them. Give a leaf only the field it
+needs, so its signature still names its whole authority.
+
+```hirsel
+type Caps { out: Stdout, clock: Clock, tasks: Tasks }
+fn report(caps: Caps) -> Result[(), WriteError] waits {
+    let _ = stamp(caps.clock)
+    stdout.write(caps.out, "done\n")
+}
+fn stamp(c: Clock) -> u64 { host.mono_ns(c) }
+```
+
 Any function but `main` is `waits` exactly when it calls something that is `waits`, and
 a needless `waits` is refused too (LANG-8). A waiting call may observe cancellation
 (CONC-7). Tasks share nothing: `task.spawn(tasks, bytes n, take payload, f)` moves a

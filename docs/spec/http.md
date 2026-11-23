@@ -520,6 +520,25 @@ Every byte the server keeps appears here, with its payer, admission and refund. 
 
 **Bounds.** HTTP-1's sum bounds the server, row 14 and 14a bound what the publisher holds for HTTP, and the relay's limit (B-8) bounds every request that outlives its connection. No row's total depends on client behaviour beyond these bounds.
 
+### HTTP-16: Client response body storage
+
+`std.http_client.read(mut connection, mut into)` appends decoded response
+payload to the caller's existing `Bytes` capacity. A full buffer returns
+`NoSpace` before consuming more of the response. The caller can resume with
+spare capacity. A zero-byte result marks the end of the response.
+
+The connection copies any payload that arrived during its head read once.
+After that it receives payload directly into the caller's allocation. Each
+receive is bounded by the available capacity and the current Content-Length
+or chunk remainder. Close-delimited bodies use the remaining decoded-body
+limit and require transport EOF. Chunk framing uses the fixed wire buffer
+and never enters the caller's payload. Any bytes buffered beyond the body
+stay available for the next response.
+
+The caller's storage retains its existing payer and charge (MEM-19 and
+MEM-20). Body reads require no new admission or growth. The connection
+keeps its fixed 8192-byte wire buffer and 8192-byte final-head storage.
+
 ## 2. Stream ownership
 
 A `Stream` (HTTP-10) runs as one task group, spawned by the supervisor. It follows RUNNER-SPEC §3's session group: an owner that waits only on its inbox, and children that report to it.
@@ -1062,7 +1081,7 @@ A claim is scoped by its principal. The application decides the principal and th
 **Worked example: Standard Webhooks.** The app's grant holds one `Secret` per sender, granted for `verify` only (`--grant 'Secret:hook=env:WEBHOOK_KEY verify'`, hmac), and a `Clock`. The binding lists `webhook-id`, `webhook-timestamp` and `webhook-signature`.
 
 ```hirsel unbuilt
-type Hooks: plain + send { hook: Secret, clock: Clock }
+type Hooks: send { hook: Secret, clock: Clock }
 fn claim_hook(g: Hooks, r: ClaimRequest) -> Result[Claimed, ()] waits
 ```
 

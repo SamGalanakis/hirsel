@@ -367,10 +367,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     _ => (2, self.place_ty(types[1], n)?),
                 };
                 let at = self.address(AddressBase::Address(entry), &[Step::Field(field)], ty, n);
-                Some(if name == "slot_meta" {
-                    Some(self.read_bits(at, Ty::Scalar(Scalar::U64), n))
-                } else {
-                    self.read_carried(at, types[usize::from(name == "slot_value")], n)
+                Some(match ty {
+                    PlaceTy::Value(scalar) => Some(self.read_bits(at, scalar, n)),
+                    PlaceTy::Declared(_) => {
+                        self.read_carried(at, types[usize::from(name == "slot_value")], n)
+                    }
                 })
             }
             _ => None,

@@ -16,15 +16,19 @@
 //! row continues the parked operation, so nothing before the wait runs twice.
 //!
 //! The rule is a function of the module alone. A function is represented when
-//! it reaches a wait with a returnable row ([`Wait`]) through direct calls
-//! of represented functions, has none of the refused forms (frame storage,
-//! regions, limits, step scopes, isolation, vectors, `never`, recursion), and
-//! every address it needs after a wait is computed from parameters and
-//! constants alone. A task entry is represented when its spawn names the entry
-//! adapter and a represented callee whose code pointer the spawning body
-//! stores. A channel receive in a represented function is a returnable wait
-//! too when the function's shape allows it with the receive as a site; it
-//! represents no function by itself. Every other wait keeps the stackful drive.
+//! it reaches a wait through direct calls of represented functions, has none
+//! of the refused forms (frame storage, regions, limits, step scopes,
+//! isolation, vectors, `never`, recursion), and every address it needs after a
+//! wait is computed from parameters and constants alone. The variant is built
+//! from the body with each join parameter that every reachable edge feeds one
+//! value replaced by that value, which dominates the join, so an address based
+//! on such a parameter is based on what it forwards. A task entry is
+//! represented when its spawn names the entry adapter and a represented callee
+//! that reaches an owned wait (a returnable row, [`Wait`]), whose code pointer
+//! the spawning body stores; a task that reaches only channel receives keeps
+//! its stack. Below such an entry, a channel receive, or a call of a function
+//! that reaches one, is a site when the caller's shape allows it. Every other
+//! wait keeps the stackful drive.
 use crate::extent::{operands, terminator_uses};
 use crate::*;
 use hirsel_core_ids::ContentHash;
@@ -33,8 +37,12 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 /// Set to any value, the driver leaves every wait stackful.
 pub const DISABLE: &str = "HIRSEL_NO_RETURNABLE";
 
-const CHILD: u64 = 16;
-const ALIGN: u64 = 16;
+/// The record's area is only as aligned as its block and header make it,
+/// eight bytes (`tasks::FrameRecord`), so each level is laid out at that
+/// alignment: its word, then its child area, then its homes, and a home that
+/// needs more alignment refuses the function.
+const CHILD: u64 = 8;
+const ALIGN: u64 = 8;
 
 /// Why a function cannot be represented.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -226,6 +234,185 @@ fn live_after(b: &Body, wanted: &BTreeSet<usize>) -> BTreeMap<usize, Set> {
     while pass(&mut live_in, false) {}
     pass(&mut live_in, true);
     out
+}
+
+/// `body` with each block parameter that can hold only one other value
+/// replaced by that value. A parameter is such when its block is entered only
+/// by edges, from reachable blocks, and every edge carries either that value or
+/// the parameter itself. Each such edge uses the value at the end of its
+/// block, so the value's definition dominates every predecessor and so the
+/// block: it dominates every use of the parameter, and the two are equal
+/// wherever the parameter is read. A resume then reaches what the parameter
+/// named through its one definition, as the prologue or the record holds it.
+fn forwarded(body: &Body) -> Body {
+    let n = body.blocks.len();
+    let mut reachable = vec![false; n];
+    let mut work = vec![0];
+    while let Some(bi) = work.pop() {
+        if std::mem::replace(&mut reachable[bi], true) {
+            continue;
+        }
+        work.extend(successors(body, bi));
+        let range = body.blocks[bi].insts;
+        for inst in range.get(&body.insts).unwrap_or_default() {
+            work.extend(inst.fail(body).map(|f| f.index()));
+        }
+    }
+    let mut entered = vec![false; n];
+    for inst in &body.insts {
+        if let Some(f) = inst.fail(body) {
+            entered[f.index()] = true;
+        }
+    }
+    for t in &body.terminators {
+        if let Terminator::Raise {
+            cleanup: Some(c), ..
+        } = *t
+        {
+            entered[c.index()] = true;
+        }
+    }
+    let mut incoming: Vec<Vec<EdgeId>> = vec![vec![]; n];
+    for (bi, terminator) in body.terminators.iter().enumerate() {
+        let mut out = vec![];
+        match terminator {
+            Terminator::Jump(e) => out.push(*e),
+            Terminator::Branch { yes, no, .. } => out.extend([*yes, *no]),
+            Terminator::Switch {
+                arms, otherwise, ..
+            } => {
+                out.extend(
+                    arms.get(&body.pools.arms)
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|a| a.edge),
+                );
+                out.push(*otherwise);
+            }
+            _ => {}
+        }
+        for e in out {
+            let target = body.edges[e.index()].target.index();
+            if !reachable[bi] {
+                entered[target] = true;
+            }
+            incoming[target].push(e);
+        }
+    }
+    let mut to: HashMap<ValueId, ValueId> = HashMap::new();
+    let resolve = |to: &HashMap<ValueId, ValueId>, mut v: ValueId| {
+        while let Some(&w) = to.get(&v) {
+            v = w;
+        }
+        v
+    };
+    loop {
+        let mut changed = false;
+        for bi in 1..n {
+            if entered[bi] || !reachable[bi] || incoming[bi].is_empty() {
+                continue;
+            }
+            for (i, &p) in params(body, bi).iter().enumerate() {
+                if to.contains_key(&p) {
+                    continue;
+                }
+                let mut only = None;
+                let mut one = true;
+                for &e in &incoming[bi] {
+                    let args = body.edges[e.index()]
+                        .args
+                        .get(&body.pools.values)
+                        .unwrap_or_default();
+                    let a = resolve(&to, args[i]);
+                    if a == p {
+                        continue;
+                    }
+                    match only {
+                        None => only = Some(a),
+                        Some(x) if x == a => {}
+                        Some(_) => one = false,
+                    }
+                }
+                if let (true, Some(v)) = (one, only) {
+                    to.insert(p, v);
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    let mut b = body.clone();
+    if to.is_empty() {
+        return b;
+    }
+    let mut f = |v: ValueId| resolve(&to, v);
+    for inst in &mut b.insts {
+        *inst = map_uses(inst, &mut f);
+    }
+    for call in &mut b.calls {
+        if let Callee::Indirect(v) = &mut call.callee {
+            *v = f(*v);
+        }
+    }
+    for arg in &mut b.pools.args {
+        if let Arg::Value(v) = arg {
+            *v = f(*v);
+        }
+    }
+    for info in &mut b.addresses {
+        if let AddressBase::Value(v) = &mut info.base {
+            *v = f(*v);
+        }
+    }
+    for step in &mut b.pools.steps {
+        if let Step::Index(x) | Step::Element(x) | Step::Byte(x) = step {
+            *x = f(*x);
+        }
+    }
+    for t in &mut b.terminators {
+        match t {
+            Terminator::Branch { condition, .. } => *condition = f(*condition),
+            Terminator::Switch { value, .. } => *value = f(*value),
+            Terminator::Raise {
+                cause:
+                    RaiseCause::Capacity {
+                        requested,
+                        available,
+                    },
+                ..
+            } => {
+                *requested = f(*requested);
+                *available = f(*available);
+            }
+            _ => {}
+        }
+    }
+    // Edge arguments and returned values are uses; they get ranges of their
+    // own, since results and block parameters share the value pool.
+    for e in 0..b.edges.len() {
+        let args: Vec<ValueId> = b.edges[e]
+            .args
+            .get(&b.pools.values)
+            .unwrap_or_default()
+            .iter()
+            .map(|&v| f(v))
+            .collect();
+        b.edges[e].args = PoolRange::push(&mut b.pools.values, args);
+    }
+    for t in 0..b.terminators.len() {
+        if let Terminator::Return(r) = b.terminators[t] {
+            let values: Vec<ValueId> = r
+                .get(&b.pools.values)
+                .unwrap_or_default()
+                .iter()
+                .map(|&v| f(v))
+                .collect();
+            b.terminators[t] = Terminator::Return(PoolRange::push(&mut b.pools.values, values));
+        }
+    }
+    b
 }
 
 /// The values a variant computes in its prologue, so that every resume has
@@ -1707,7 +1894,7 @@ fn sig_id(module: &mut Module, s: Signature) -> SigId {
     SigId(module.signatures.len() as u32 - 1)
 }
 
-fn sites_of(body: &Body, ok: &[bool], receives: bool) -> BTreeMap<usize, Site> {
+fn sites_of(body: &Body, ok: &[bool], owned: &[bool], receives: bool) -> BTreeMap<usize, Site> {
     let mut sites = BTreeMap::new();
     for (k, inst) in body.insts.iter().enumerate() {
         if let Inst::Call { call } = *inst {
@@ -1720,6 +1907,7 @@ fn sites_of(body: &Body, ok: &[bool], receives: bool) -> BTreeMap<usize, Site> {
                 sites.insert(k, Site::Leaf(op));
             } else if let Callee::Direct(g) = c.callee
                 && ok[g.index()]
+                && (receives || owned[g.index()])
             {
                 sites.insert(k, Site::Callee(g));
             }
@@ -1736,10 +1924,11 @@ fn shaped(
     body: &Body,
     dest: Option<TypeId>,
     ok: &[bool],
+    owns: &[bool],
     area: &dyn Fn(FuncId) -> u64,
 ) -> Result<Shape, Refusal> {
-    let all = sites_of(body, ok, true);
-    let owned = sites_of(body, ok, false);
+    let all = sites_of(body, ok, owns, true);
+    let owned = sites_of(body, ok, owns, false);
     if all.len() == owned.len() {
         return shape(module, recipes, body, dest, owned, area);
     }
@@ -1759,29 +1948,41 @@ pub fn apply(module: &mut Module) -> Applied {
         return applied;
     };
     let n = module.functions.len();
-    // Functions that reach a wait through direct calls.
-    let mut reaches = vec![false; n];
-    loop {
-        let mut changed = false;
-        for f in 0..n {
-            if reaches[f] {
-                continue;
+    // Functions that reach an owned wait through direct calls, and those that
+    // reach an owned wait or a channel receive.
+    let reach = |seed: &dyn Fn(Callee) -> bool| {
+        let mut reaches = vec![false; n];
+        loop {
+            let mut changed = false;
+            for f in 0..n {
+                if reaches[f] {
+                    continue;
+                }
+                let Some(body) = &module.functions[f].body else {
+                    continue;
+                };
+                if body.calls.iter().any(|c| {
+                    seed(c.callee) || matches!(c.callee, Callee::Direct(g) if reaches[g.index()])
+                }) {
+                    reaches[f] = true;
+                    changed = true;
+                }
             }
-            let Some(body) = &module.functions[f].body else {
-                continue;
-            };
-            if body.calls.iter().any(|c| {
-                leaf(c.callee).is_some()
-                    || matches!(c.callee, Callee::Direct(g) if reaches[g.index()])
-            }) {
-                reaches[f] = true;
-                changed = true;
+            if !changed {
+                break;
             }
         }
-        if !changed {
-            break;
-        }
-    }
+        reaches
+    };
+    let owns = reach(&|c| leaf(c).is_some());
+    let reaches = reach(&|c| leaf(c).is_some() || receive(c).is_some());
+    let forms: Vec<Option<Body>> = (0..n)
+        .map(|f| {
+            reaches[f]
+                .then(|| module.functions[f].body.as_ref().map(forwarded))
+                .flatten()
+        })
+        .collect();
     let mut ok = vec![false; n];
     let mut why: BTreeMap<usize, Refusal> = BTreeMap::new();
     for f in 0..n {
@@ -1808,8 +2009,8 @@ pub fn apply(module: &mut Module) -> Applied {
                 if !ok[f] || shapes.contains_key(&f) {
                     continue;
                 }
-                let body = module.functions[f].body.as_ref().unwrap();
-                if sites_of(body, &ok, false)
+                let body = forms[f].as_ref().unwrap();
+                if sites_of(body, &ok, &owns, true)
                     .values()
                     .any(|s| matches!(*s, Site::Callee(g) if !shapes.contains_key(&g.index())))
                 {
@@ -1817,7 +2018,7 @@ pub fn apply(module: &mut Module) -> Applied {
                 }
                 let area = |g: FuncId| shapes[&g.index()].area;
                 let dest = module.signatures[module.functions[f].signature.index()].dest;
-                match shaped(module, &recipes, body, dest, &ok, &area) {
+                match shaped(module, &recipes, body, dest, &ok, &owns, &area) {
                     Ok(s) => {
                         shapes.insert(f, s);
                         progress = true;
@@ -1854,7 +2055,8 @@ pub fn apply(module: &mut Module) -> Applied {
     for spawn in spawns(module) {
         let selects = module.step_free.get(&spawn.entry).filter(|s| s.dispatch);
         let form = |entry: FuncId, callee: FuncId| -> Result<Form, Stackful> {
-            if !ok[callee.index()] {
+            // A task whose callee reaches only receives keeps its stack.
+            if !ok[callee.index()] || !owns[callee.index()] {
                 return Err(Stackful::Callee);
             }
             let function = &module.functions[entry.index()];
@@ -1882,12 +2084,13 @@ pub fn apply(module: &mut Module) -> Applied {
                 };
                 call
             };
-            let mut body = old.clone();
+            let mut body = forwarded(old);
             body.calls[indirect.index()].callee = Callee::Direct(callee);
             body.calls[indirect.index()].signature = module.functions[callee.index()].signature;
             let area = |g: FuncId| shapes[&g.index()].area;
             let dest = module.signatures[function.signature.index()].dest;
-            let s = shaped(module, &recipes, &body, dest, &ok, &area).map_err(Stackful::Entry)?;
+            let s = shaped(module, &recipes, &body, dest, &ok, &owns, &area)
+                .map_err(Stackful::Entry)?;
             Ok(Form {
                 entry,
                 callee,
@@ -1903,7 +2106,7 @@ pub fn apply(module: &mut Module) -> Applied {
         match (checked, free) {
             (Ok(checked), Ok(free)) => roots.push((spawn, checked, free)),
             (Err(why), _) | (_, Err(why)) => {
-                if reaches[spawn.callee.index()] {
+                if owns[spawn.callee.index()] {
                     applied.stackful_roots += 1;
                     applied.stackful.push((spawn.entry, spawn.callee, why));
                 }
@@ -1993,7 +2196,7 @@ pub fn apply(module: &mut Module) -> Applied {
     };
     let mut bodies = vec![];
     for (&f, &(id, _)) in &variant {
-        let old = module.functions[f].body.as_ref().unwrap();
+        let old = forms[f].as_ref().unwrap();
         let results = &module.signatures[module.functions[f].signature.index()].results;
         bodies.push((id, build(old, &shapes[&f], false, results, &calls)));
     }
@@ -2118,7 +2321,7 @@ pub fn report(module: &Module, applied: &Applied) -> String {
     }
     for (f, z) in &applied.sizes {
         s.push_str(&format!(
-            "  area f{} {}: {} = word 16 + child {} + slots {} of {} + dest {} + demoted {}; receives {} returnable, {} stackful\n",
+            "  area f{} {}: {} = word 8 + child {} + slots {} of {} + dest {} + demoted {}; receives {} returnable, {} stackful\n",
             f.0,
             name(*f),
             z.area,

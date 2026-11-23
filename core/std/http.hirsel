@@ -2759,6 +2759,32 @@ fn trailer(c: u8, mut d: Decoder) {
     }
 }
 
+/// Returns the number of consecutive payload bytes allowed by the decoder.
+/// None indicates framing or completion. A zero window requires EOF.
+pub fn body_payload(d: Decoder) -> Option[u64] {
+    match d.state {
+        Fixed => Some(d.remaining),
+        ChunkData => Some(d.remaining),
+        UntilEof => Some(d.body_max - d.decoded),
+        _ => None,
+    }
+}
+
+/// Accounts for payload read directly into output, within the current window.
+pub fn advance_body_payload(mut d: Decoder, n: u64) {
+    d.decoded += n
+    if d.state != UntilEof {
+        d.remaining -= n
+        if d.remaining == 0 {
+            d.state = if d.state == Fixed {
+                Finished
+            } else {
+                DataCr
+            }
+        }
+    }
+}
+
 /// Consumes a fresh input fragment, returning one body span at a time. used
 /// counts bytes consumed from THIS call's input, including framing bytes.
 /// Pass its unconsumed suffix to the next call. More needs more network bytes;
@@ -2784,29 +2810,15 @@ pub fn decode(mut d: Decoder, b: Bytes) -> BodyProgress {
             }
             return More
         }
-        if d.state == UntilEof {
-            let n = order.min(d.body_max - d.decoded, list.len(b))
+        if let Some(window) = body_payload(d) {
+            let start = d.used
+            let n = order.min(window, list.len(b) - start)
             if n == 0 {
                 fail(mut d, 413)
                 continue
             }
-            d.used = n
-            d.decoded += n
-            return Data(http1.Span(start: 0, end: n))
-        }
-        if d.state == Fixed || d.state == ChunkData {
-            let start = d.used
-            let n = order.min(d.remaining, list.len(b) - start)
             d.used += n
-            d.remaining -= n
-            d.decoded += n
-            if d.remaining == 0 {
-                if d.state == Fixed {
-                    d.state = Finished
-                } else {
-                    d.state = DataCr
-                }
-            }
+            advance_body_payload(mut d, n)
             return Data(http1.Span(start, end: d.used))
         }
         let c = b[d.used]
@@ -2853,4 +2865,396 @@ pub fn body_eof(mut d: Decoder) -> Result[(), BodyError] {
         fail(mut d, 400)
     }
     Error(d.error)
+}
+
+/// Wire limits for a multipart/form-data body, in bytes.
+pub type MultipartLimits: key {
+    total: u64,
+    headers: u64,
+    part: u64
+}
+
+pub type MultipartError: key = MissingBoundary | BoundaryTooLong | InvalidBoundary | InvalidMultipartType | InvalidPartHeaders | MissingFinalBoundary | MultipartTotalLimit | MultipartHeaderLimit | MultipartPartLimit
+
+/// Metadata for a form part. Header names and values retain wire order.
+pub type MultipartPart {
+    headers: List[(Bytes, Bytes)],
+    name: Bytes,
+    filename: Option[Bytes]
+}
+
+type MultipartPhase: key = FormPreamble | FormHeaders | FormBody | FormClosed
+
+type MultipartTail: key = FormLine | FormPrefix(u64) | FormSuffix | FormDash | FormPadding(bool) | FormCR(bool)
+
+pub opaque type Multipart {
+    delimiter: Bytes,
+    limits: MultipartLimits,
+    total: u64,
+    phase: MultipartPhase,
+    tail: MultipartTail,
+    previous_cr: bool,
+    line_start: u64,
+    buffer: Bytes,
+    part: Option[MultipartPart],
+    fault: Option[MultipartError]
+}
+
+/// Starts a decoder from the request's Content-Type field value.
+pub fn multipart(media_header: Bytes, limits: MultipartLimits) -> Result[Multipart, MultipartError] {
+    if list.len(media_header) == 0 {
+        return Error(MissingBoundary)
+    }
+    let mut at: u64 = 0
+    let media = form_kind(media_header, mut at)
+    if !http1.equal_ascii(media, b"multipart/form-data") {
+        return Error(InvalidMultipartType)
+    }
+    let mut boundary: Option[Bytes] = None
+    while at < list.len(media_header) {
+        let (take key, take value) = form_parameter(media_header, mut at, InvalidBoundary)?
+        if http1.equal_ascii(key, b"boundary") {
+            if let Some(_) = boundary {
+                return Error(InvalidBoundary)
+            }
+            boundary = Some(take value)
+        }
+    }
+    let Some(take b) = boundary else {
+        return Error(MissingBoundary)
+    }
+    let n = list.len(b)
+    if n == 0 {
+        return Error(MissingBoundary)
+    }
+    if n > 70 {
+        return Error(BoundaryTooLong)
+    }
+    if b[n - 1] == b' ' {
+        return Error(InvalidBoundary)
+    }
+    for ch in b {
+        if !form_boundary_char(ch) {
+            return Error(InvalidBoundary)
+        }
+    }
+    let mut delimiter: Bytes = list.with_capacity(n + 2)
+    list.append(mut delimiter, b"--")
+    list.append(mut delimiter, b)
+    Ok(Multipart(delimiter: take delimiter, limits, total: 0, phase: FormPreamble, tail: FormPrefix(0), previous_cr: false, line_start: 0, buffer: list.new(), part: None, fault: None))
+}
+
+fn form_boundary_char(ch: u8) -> bool {
+    ch >= b'A' && ch <= b'Z' || ch >= b'a' && ch <= b'z' || int.is_ascii_digit(ch) || ch == b' ' || ch == b'\'' || ch == b'(' || ch == b')' || ch == b'+' || ch == b'_' || ch == b',' || ch == b'-' || ch == b'.' || ch == b'/' || ch == b':' || ch == b'=' || ch == b'?'
+}
+
+fn form_space(ch: u8) -> bool {
+    ch == b' ' || ch == b'\t'
+}
+
+fn form_ows(value: Bytes, mut at: u64) {
+    while at < list.len(value) && form_space(value[at]) {
+        at += 1
+    }
+}
+
+fn form_trim(value: Bytes, start: u64, end: u64) -> View[Bytes] in value {
+    let mut lo = start
+    let mut hi = end
+    form_ows(list.slice(value, 0, end), mut lo)
+    while hi > lo && form_space(value[hi - 1]) {
+        hi -= 1
+    }
+    list.slice(value, lo, hi)
+}
+
+fn form_kind(value: Bytes, mut at: u64) -> View[Bytes] in value {
+    at = match list.find_byte(value, 0, list.len(value), b';') {
+        Some(i) => i,
+        None => list.len(value),
+    }
+    form_trim(value, 0, at)
+}
+
+fn form_parameter(value: Bytes, mut at: u64, invalid: MultipartError) -> Result[(Bytes, Bytes), MultipartError] {
+    if value[at] != b';' {
+        return Error(invalid)
+    }
+    at += 1
+    form_ows(value, mut at)
+    let start = at
+    let n = list.len(value)
+    while at < n && http1.token(value[at]) {
+        at += 1
+    }
+    if at == start {
+        return Error(invalid)
+    }
+    let mut key: Bytes = list.new()
+    list.append(mut key, list.slice(value, start, at))
+    form_ows(value, mut at)
+    if at == n || value[at] != b'=' {
+        return Error(invalid)
+    }
+    at += 1
+    form_ows(value, mut at)
+    if at == n {
+        return Error(invalid)
+    }
+    let mut out: Bytes = list.new()
+    if value[at] == b'"' {
+        at += 1
+        while at < n && value[at] != b'"' {
+            if value[at] == b'\\' {
+                at += 1
+                if at == n {
+                    return Error(invalid)
+                }
+            }
+            let byte = value[at]
+            if byte < 32 && byte != b'\t' || byte == 127 {
+                return Error(invalid)
+            }
+            list.push(mut out, byte)
+            at += 1
+        }
+        if at == n {
+            return Error(invalid)
+        }
+        at += 1
+    } else {
+        let begin = at
+        while at < n && http1.token(value[at]) {
+            at += 1
+        }
+        if begin == at {
+            return Error(invalid)
+        }
+        list.append(mut out, list.slice(value, begin, at))
+    }
+    form_ows(value, mut at)
+    Ok((take key, take out))
+}
+
+/// Feeds decoded HTTP body bytes. Each callback borrows the part and its body
+/// slice until it returns. The decoder retains at most the current part.
+/// An error is sticky. Earlier callbacks have already observed their parts.
+pub fn multipart_feed(mut form: Multipart, block: Bytes, on_part: scoped fn(MultipartPart, Bytes)) -> Result[(), MultipartError] {
+    if let Some(e) = form.fault {
+        return Error(e)
+    }
+    if list.len(block) > form.limits.total - form.total {
+        form.fault = Some(MultipartTotalLimit)
+        return Error(MultipartTotalLimit)
+    }
+    form.total += list.len(block)
+    for byte in block {
+        if let Error(e) = form_byte(mut form, byte, on_part) {
+            form.fault = Some(e)
+            return Error(e)
+        }
+    }
+    Ok(())
+}
+
+/// Consumes the decoder at HTTP body EOF and requires a closing delimiter.
+/// A closing delimiter at EOF can omit its final CRLF.
+pub fn multipart_finish(take form: Multipart, on_part: scoped fn(MultipartPart, Bytes)) -> Result[(), MultipartError] {
+    if let Some(e) = form.fault {
+        return Error(e)
+    }
+    if form.phase == FormClosed {
+        return Ok(())
+    }
+    if form.tail == FormPadding(true) {
+        return form_emit(form, on_part)
+    }
+    Error(MissingFinalBoundary)
+}
+
+fn form_byte(mut form: Multipart, byte: u8, on_part: scoped fn(MultipartPart, Bytes)) -> Result[(), MultipartError] {
+    match form.phase {
+        FormClosed => Ok(()),
+        FormHeaders => {
+            let n = list.len(form.buffer)
+            if n == form.limits.headers {
+                return Error(MultipartHeaderLimit)
+            }
+            list.push(mut form.buffer, byte)
+            if n == 1 && list.starts_with(form.buffer, b"\r\n") {
+                return Error(InvalidPartHeaders)
+            }
+            if byte == b'\n' && n >= 3 && list.starts_with_at(form.buffer, n - 3, b"\r\n\r\n") {
+                form.part = Some(form_headers(list.slice(form.buffer, 0, n - 1))?)
+                list.clear(mut form.buffer)
+                form.phase = FormBody
+                form.tail = FormLine
+                form.previous_cr = false
+            }
+            Ok(())
+        },
+        _ => {
+            if form.phase == FormBody {
+                list.push(mut form.buffer, byte)
+            }
+            let n = list.len(form.buffer)
+            let newline = form.previous_cr && byte == b'\n'
+            if let FormCR(close) = form.tail {
+                if newline {
+                    form_emit(form, on_part)?
+                    list.clear(mut form.buffer)
+                    form.part = None
+                    form.phase = if close {
+                        FormClosed
+                    } else {
+                        FormHeaders
+                    }
+                    form.tail = FormLine
+                    return Ok(())
+                }
+            }
+            form.tail = if newline {
+                form.line_start = n
+                FormPrefix(0)
+            } else {
+                form_tail(form.delimiter, form.tail, byte)
+            }
+            form.previous_cr = byte == b'\r'
+            if form.phase == FormBody {
+                let confirmed = if form.tail != FormLine {
+                    form.line_start - 2
+                } else if form.previous_cr {
+                    n - 1
+                } else {
+                    n
+                }
+                if confirmed > form.limits.part {
+                    return Error(MultipartPartLimit)
+                }
+            }
+            Ok(())
+        },
+    }
+}
+
+fn form_tail(delimiter: Bytes, previous: MultipartTail, byte: u8) -> MultipartTail {
+    match previous {
+        FormPrefix(i) => {
+            if byte != delimiter[i] {
+                FormLine
+            } else if i + 1 == list.len(delimiter) {
+                FormSuffix
+            } else {
+                FormPrefix(i + 1)
+            }
+        },
+        FormSuffix => if byte == b'-' {
+            FormDash
+        } else {
+            form_padding(false, byte)
+        },
+        FormDash => if byte == b'-' {
+            FormPadding(true)
+        } else {
+            FormLine
+        },
+        FormPadding(close) => form_padding(close, byte),
+        _ => FormLine,
+    }
+}
+
+fn form_padding(close: bool, byte: u8) -> MultipartTail {
+    if form_space(byte) {
+        FormPadding(close)
+    } else if byte == b'\r' {
+        FormCR(close)
+    } else {
+        FormLine
+    }
+}
+
+fn form_emit(form: Multipart, on_part: scoped fn(MultipartPart, Bytes)) -> Result[(), MultipartError] {
+    if let Some(metadata) = form.part {
+        let end = form.line_start - 2
+        if end > form.limits.part {
+            return Error(MultipartPartLimit)
+        }
+        on_part(metadata, list.slice(form.buffer, 0, end))
+    }
+    Ok(())
+}
+
+fn form_headers(raw_head: Bytes) -> Result[MultipartPart, MultipartError] {
+    let mut headers: List[(Bytes, Bytes)] = list.new()
+    let mut disposition: Option[(Bytes, Option[Bytes])] = None
+    let mut at: u64 = 0
+    let n = list.len(raw_head)
+    while at < n {
+        let Some(colon) = list.find_byte3(raw_head, at, n, b':', b'\r', b'\n') else {
+            return Error(InvalidPartHeaders)
+        }
+        if raw_head[colon] != b':' {
+            return Error(InvalidPartHeaders)
+        }
+        let slice = list.slice(raw_head, at, colon)
+        let mut key: Bytes = list.new()
+        list.append(mut key, slice)
+        at = colon + 1
+        let mut value: Bytes = list.new()
+        loop {
+            let Some(end) = list.find_byte2(raw_head, at, n, b'\r', b'\n') else {
+                return Error(InvalidPartHeaders)
+            }
+            if !list.starts_with_at(raw_head, end, b"\r\n") {
+                return Error(InvalidPartHeaders)
+            }
+            list.append(mut value, form_trim(raw_head, at, end))
+            at = end + 2
+            if at == n || !form_space(raw_head[at]) {
+                break
+            }
+            list.push(mut value, b' ')
+        }
+        if !http1.valid_field(key, value) {
+            return Error(InvalidPartHeaders)
+        }
+        if http1.equal_ascii(key, b"content-disposition") {
+            if let Some(_) = disposition {
+                return Error(InvalidPartHeaders)
+            }
+            disposition = Some(form_disposition(value)?)
+        }
+        list.push(mut headers, (take key, take value))
+    }
+    let Some((take name, take filename)) = disposition else {
+        return Error(InvalidPartHeaders)
+    }
+    Ok(MultipartPart(headers: take headers, name: take name, filename: take filename))
+}
+
+fn form_disposition(value: Bytes) -> Result[(Bytes, Option[Bytes]), MultipartError] {
+    let mut at: u64 = 0
+    if !http1.equal_ascii(form_kind(value, mut at), b"form-data") {
+        return Error(InvalidPartHeaders)
+    }
+    let mut name: Option[Bytes] = None
+    let mut filename: Option[Bytes] = None
+    while at < list.len(value) {
+        let (take key, take item) = form_parameter(value, mut at, InvalidPartHeaders)?
+        if http1.equal_ascii(key, b"name") {
+            if let Some(_) = name {
+                return Error(InvalidPartHeaders)
+            }
+            name = Some(take item)
+        } else if http1.equal_ascii(key, b"filename") {
+            if let Some(_) = filename {
+                return Error(InvalidPartHeaders)
+            }
+            filename = Some(take item)
+        }
+    }
+    let Some(take field_name) = name else {
+        return Error(InvalidPartHeaders)
+    }
+    Ok((take field_name, take filename))
 }

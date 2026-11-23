@@ -4,6 +4,7 @@ use super::storage::zeroext;
 use super::*;
 const P: Ty = Ty::Ptr;
 const U: Ty = Ty::Scalar(Scalar::U64);
+const W: Ty = Ty::Scalar(Scalar::U32);
 const K: Ty = Ty::Scalar(Scalar::U8);
 const B: Ty = Ty::Scalar(Scalar::Bool);
 
@@ -128,6 +129,7 @@ impl FunctionEmitter<'_> {
             | HostOp::Listen
             | HostOp::Accept
             | HostOp::RecvBounded
+            | HostOp::RecvReady
             | HostOp::SendPair
             | HostOp::NetNarrow
             | HostOp::ExecNarrow
@@ -182,6 +184,12 @@ impl FunctionEmitter<'_> {
             | HostOp::ExecSignal
             | HostOp::NetSplit
             | HostOp::NetJoin => {
+                let symbol = if rec.is_some() {
+                    op.returnable_symbol()
+                        .expect("only owned waits have a returnable form")
+                } else {
+                    op.adapter_symbol()
+                };
                 let mut operands = vec![ptr(CONTEXT)];
                 operands.extend(rec.clone().map(ptr));
                 for (p, value) in RtOp::Host(op).signature().params.iter().zip(args) {
@@ -200,12 +208,7 @@ impl FunctionEmitter<'_> {
                     });
                 }
                 operands.push(word(at));
-                if rec.is_some() {
-                    let symbol = format!("{}_rec", op.adapter_symbol());
-                    self.native_call(&symbol, &results, &operands)
-                } else {
-                    self.native_call(op.adapter_symbol(), &results, &operands)
-                }
+                self.native_call(symbol, &results, &operands)
             }
             HostOp::ReadAt | HostOp::WriteAt => self.native_call(
                 "hirsel_core_host_at",
@@ -250,7 +253,29 @@ impl FunctionEmitter<'_> {
                     word(at),
                 ],
             ),
-            _ => self.native_call(
+            HostOp::Open
+            | HostOp::Read
+            | HostOp::Write
+            | HostOp::Close
+            | HostOp::TryLock
+            | HostOp::Unlock
+            | HostOp::Mkdir
+            | HostOp::Mkdtemp
+            | HostOp::Remove
+            | HostOp::RemoveTree
+            | HostOp::WallMs
+            | HostOp::MonoNs
+            | HostOp::Stdout
+            | HostOp::Stderr
+            | HostOp::Sync
+            | HostOp::SyncDir
+            | HostOp::Random
+            | HostOp::Stopped
+            | HostOp::OpenDir
+            | HostOp::Entries
+            | HostOp::NextEntries
+            | HostOp::Stat
+            | HostOp::StatFile => self.native_call(
                 op.io_symbol(),
                 &results,
                 &[
@@ -365,6 +390,11 @@ impl FunctionEmitter<'_> {
                 &[U],
                 &[ptr(CONTEXT), u(&args[0])],
             ),
+            RtOp::SecretShare => self.native_call(
+                "hirsel_core_secret_share",
+                &[U],
+                &[ptr(CONTEXT), u(&args[0])],
+            ),
             RtOp::DescribeEmit => self.native_call(
                 "hirsel_core_describe_emit",
                 &[B],
@@ -443,6 +473,11 @@ impl FunctionEmitter<'_> {
                 "hirsel_core_sha256_blocks",
                 &[],
                 &[p(&args[0]), p(&args[1]), u(&args[2])],
+            ),
+            RtOp::Crc32c => self.native_call(
+                "hirsel_core_crc32c",
+                &[W],
+                &[arg(Type::I32, args[0].clone()), p(&args[1]), u(&args[2])],
             ),
             RtOp::Ed25519Verify | RtOp::P256Verify | RtOp::P256VerifyDer => {
                 let name = match op {

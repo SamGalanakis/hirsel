@@ -24,6 +24,7 @@ import shlex
 import os
 import re
 import socket
+import struct
 import sys
 from pathlib import Path
 import shutil
@@ -378,7 +379,7 @@ def host_law(args, root, work, engine, name):
                    '--code-store', str(publish_store), '--store', str(work / 'publish-cache'),
                    '--limit', '268435456', '--n-place', str(n_place), '--dir', 'live',
                    '--grant', 'Net=Listen 127.0.0.0/8 0-65535']
-        for capability in ('Clock', 'Random', 'Tasks', 'Process'):
+        for capability in ('Clock', 'Random', 'Tasks', 'Process', 'Stderr'):
             command += ['--grant', capability]
         return checked(command, engine=engine, case=f'{name}:publish-{n_place}').stdout.strip()
 
@@ -1037,6 +1038,62 @@ def native_run(args, engine, inputs_path, store, prefix, cc=None, runtime=None, 
     return result.returncode, report
 
 
+def runner_idle_stop(args, root, work, engines, row):
+    """P1 laws. Only the child runs here. Host wake rows are covered in P3."""
+    base = manifest(root, work, 'idle-stop')
+    for engine in engines:
+        if engine == 'evaluator':
+            continue
+        store = work / f'idle-stop-store-{engine}'
+        for law in ('idle_keeps_runs', 'stop_unstarted'):
+            definition = f'store@1/runner_calls/test_{law}'
+            code, report = native_run(args, engine, base, store, definition)
+            tests = report.get('tests', [])
+            row(engine=engine, law=law,
+                passed=code == 0 and [test['definition'] for test in tests] == [definition]
+                and all(test.get('passed') for test in tests), result=report)
+        child = work / f'wake-report-{engine}'
+        command = [str(args.compiler.resolve()), 'build', '--inputs', str(base), '--source-core',
+                   '--source-std', '--backend', engine, '--runtime', str(args.runtime.resolve()),
+                   '--store', str(store), '--entry', 'store@1/runner_calls/wake_report_main',
+                   '--limit', str(64 * 1024 * 1024), '--dir', str(dir_for(store)),
+                   '--grant', 'Net=Listen 127.0.0.0/8 0-65535', '-o', str(child)]
+        for capability in ('Clock', 'Tasks', 'Random', 'Process', 'Stderr'):
+            command += ['--grant', capability]
+        if engine == 'llvm':
+            command.append('--release')
+        if args.cc:
+            command += ['--cc', str(args.cc.resolve())]
+        result = run_case('wake-report:build', engine, command, capture_output=True, text=True)
+        if result.returncode:
+            row(engine=engine, law='wake_report', passed=False, result=result.stderr)
+            continue
+        for mode, exit_code, expected in (
+            ('clean', 0, struct.pack('<I', 0)),
+            ('due', 0, struct.pack('<IQ', 1, 123456)),
+            ('forced', 1, b''),
+            ('unstarted', 0, b''),
+            ('error', 1, b''),
+        ):
+            launch = [str(child), '--hirsel-wake', '--hirsel-idle=30', mode]
+            with tempfile.TemporaryFile() as report, tempfile.TemporaryFile() as errors:
+                pid = os.posix_spawn(str(child), launch, os.environ, file_actions=[
+                    (os.POSIX_SPAWN_DUP2, report.fileno(), 5),
+                    (os.POSIX_SPAWN_DUP2, errors.fileno(), 2),
+                ])
+                _, status = os.waitpid(pid, 0)
+                report.seek(0)
+                output = report.read()
+                errors.seek(0)
+                diagnostic = errors.read().decode(errors='replace')
+            actual = os.waitstatus_to_exitcode(status)
+            line = ('place: forced at the drain deadline, 2 sends abandoned\n' if mode == 'forced'
+                    else 'place: missing or invalid test\n' if mode == 'error' else '')
+            row(engine=engine, law=f'wake_report_{mode}',
+                passed=(actual, output, diagnostic) == (exit_code, expected, line),
+                result={'status': actual, 'bytes': output.hex(), 'stderr': diagnostic})
+
+
 def matched_launch(args, root, work, engine, inputs, name, label):
     """Return the selected compiled test's image and its own native outcome."""
     output = work / f'launch-{engine}-{label}'
@@ -1072,7 +1129,7 @@ def main():
     p.add_argument('--session-law', action='append', choices=SESSION_LAWS)
     p.add_argument('--admission-law', action='append', choices=['wire_replacement_generation', 'unread_client', 'hello_and_slots', 'join_cleanup',
                    'full_head_waits', 'gone_slot_v5', 'request_mismatch_wire', 'history_below_latest', 'reply_over_done_max', *SETTLEMENT_LAWS, *RELEASE_LAWS, *REPAIR_LAWS])
-    p.add_argument('--part', choices=['r0', 'r1', 'wire', 'session', 'admission', 'socket', 'calls', 'deadline', 'activation', 'rc1', 'host'])
+    p.add_argument('--part', choices=['r0', 'r1', 'wire', 'session', 'admission', 'socket', 'calls', 'deadline', 'activation', 'rc1', 'host', 'idle-stop'])
     args = p.parse_args()
     if args.part == 'host':
         if not args.host_law or not args.compiler or len(args.backend or []) != 1 or args.backend == ['evaluator']:
@@ -1107,6 +1164,20 @@ def main():
 
     with tempfile.TemporaryDirectory(prefix='hirsel-runner-laws-') as tmp:
         work = Path(tmp)
+        if args.part in (None, 'r1', 'idle-stop'):
+            if args.part == 'idle-stop' and engines == ['evaluator']:
+                p.error('idle-stop requires a native backend')
+            if any(engine != 'evaluator' for engine in engines):
+                if not args.compiler or not args.runtime:
+                    p.error('native backends require --compiler and --runtime')
+                runner_idle_stop(args, root, work, engines, row)
+            if args.part == 'idle-stop':
+                if args.report:
+                    args.report.write_text(json.dumps(rows, indent=2) + '\n')
+                for r in rows:
+                    if not r['passed']:
+                        print('FAIL', json.dumps(r)[:4000])
+                return int(not rows or any(not result['passed'] for result in rows))
         crash_laws = {'deadline': 'one_drain_deadline', 'activation': 'atomic_activation'}
         for part, law in crash_laws.items():
             if args.part not in (None, 'r1', part):

@@ -1,7 +1,7 @@
 // Code addresses and revisions (PROG-9, PROG-10),
 // on the code-revision-review-1040 corpus. Laws:
 // - L1 sensitivity: a pair whose exits differ has different revisions
-//   (s01, s02, s03, s04, s51; d1 an edge out of an instance that carries a
+//   (s01, s03, s04, s51; d1 an edge out of an instance that carries a
 //   dictionary). Oracle: the executables' exits, run here.
 // - L2 invariance: an edit the language defines as non-semantic leaves the
 //   revision equal (c01-c06: local name, parameter name, unreached item,
@@ -45,7 +45,7 @@ const WRAP_7: &str = "pub fn main() -> Result[(), Exit] { if entry() == 7 { Ok((
 const WRAP_8: &str = "pub fn main() -> Result[(), Exit] { if entry() == 8 { Ok(()) } else { Error(Exit(status: 1)) } }\n";
 const WRAP_1002: &str = "pub fn main() -> Result[(), Exit] { if entry(1) == 1002 { Ok(()) } else { Error(Exit(status: 1)) } }\n";
 const LINES: &str = "fn entry(x: u64) -> u64 {\n    let xs = [1u64, 2u64, 3u64];\n    xs[x] + x * 1000u64\n}\n";
-const S45: &str = "fn entry() -> u64 { let r: Result[List[u64], Capacity] = list.with_capacity(1); match r { Ok(_) => 7, Error(_) => 8 } }\n";
+const S45: &str = "fn entry() -> u64 { let mut xs: List[u64] = list.new(); match list.try_reserve(mut xs, 1) { Ok(()) => 7, Error(_) => 8 } }\n";
 
 const GENERATED_CLOSURE: &str =
     "fn entry() -> u64 { let x = 7u64; let f = fn(n: u64) -> u64 { n }; f(x) }\n";
@@ -229,7 +229,6 @@ fn revision_cases() -> Vec<RevisionCase> {
     use Revision::*;
     vec![
         s("s01 newline subtraction", "fn entry() -> i64 { 1i64 - 2 }\n", "fn entry() -> i64 { 1i64\n - 2 }\n", WRAP_I64, Differ),
-        s("s02 newline in block comment", "fn entry() -> i64 { 1i64 /* x */ - 2 }\n", "fn entry() -> i64 { 1i64 /* x\n */ - 2 }\n", WRAP_I64, Differ),
         s("s03 direct call", "fn helper() -> u64 { 7 }\nfn entry() -> u64 { helper() }\n", "fn helper() -> u64 { 8 }\nfn entry() -> u64 { helper() }\n", WRAP_7, Differ),
         s(
             "s04 transitive call",
@@ -266,7 +265,7 @@ fn revision_cases() -> Vec<RevisionCase> {
             Equal,
         ),
         s("c03 unreached addition", "fn entry() -> u64 { 7 }\n", "fn spare() -> u64 { 9 }\nfn entry() -> u64 { 7 }\n", WRAP_7, Equal),
-        s("c04 comment", "fn entry() -> u64 { 7 }\n", "fn entry() -> u64 { /* ordinary */ 7 }\n", WRAP_7, Equal),
+        s("c04 comment", "fn entry() -> u64 { 7 }\n", "fn entry() -> u64 { // ordinary\n7 }\n", WRAP_7, Equal),
         s(
             "c05 item order",
             "fn helper() -> u64 { 7 }\nfn entry() -> u64 { helper() }\n",
@@ -954,7 +953,7 @@ fn revision_parser_and_source_keys_are_distinct_inputs() {
         (key, address, hirsel_core_ir::eval::run(&module, function, &[], 4096).outcome)
     };
     for case in revision_cases().into_iter().filter(|case| {
-        ["s01 ", "s02 ", "c01 ", "c02 ", "c04 "].into_iter().any(|prefix| case.name.starts_with(prefix))
+        ["s01 ", "c01 ", "c02 ", "c04 "].into_iter().any(|prefix| case.name.starts_with(prefix))
     }) {
         let changed = if case.name.starts_with("c02 ") {
             DefPath::from_full("app@1/main/helper").unwrap()

@@ -2,4 +2,3 @@ type Holder[T] { x: T }
 fn bad(x: Holder[scoped fn() -> u64]) {}
 // expect: refuse OWN-19 at 2:18
 // expect: compared OWN-19 at 2:18 | scoped fn() -> u64 | not scoped
-// expect: gap values of this type are not built

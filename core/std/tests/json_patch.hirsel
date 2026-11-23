@@ -1,0 +1,29 @@
+// RFC 6902 sections 4.1 through 4.6. Failed assertions discard earlier edits.
+// expect: run patch_operations_are_atomic() = true
+fn patch_operations_are_atomic() -> bool {
+    region r {
+        let Ok(take input) = json.parse(r, "{\"a\":[1,2,3],\"a/b\":{\"~\":10}}") else {
+            return false
+        }
+        let Ok(take ops) = json.parse(r, "[{\"op\":\"add\",\"path\":\"/a/1\",\"value\":4},{\"op\":\"move\",\"from\":\"/a/0\",\"path\":\"/a/2\"},{\"op\":\"copy\",\"from\":\"/a~1b/~0\",\"path\":\"/a/-\"},{\"op\":\"replace\",\"path\":\"/a/0\",\"value\":5},{\"op\":\"remove\",\"path\":\"/a/3\"},{\"op\":\"test\",\"path\":\"/a/3\",\"value\":1e1}]") else {
+            return false
+        }
+        let Ok(Some(take edited)) = json.patch(r, input, ops) else {
+            return false
+        }
+        let mut wire = string.new()
+        json.push_json(mut wire, edited)
+        if wire != "{\"a\":[5,2,1,10],\"a/b\":{\"~\":10}}" {
+            return false
+        }
+        let Ok(take bad) = json.parse(r, "[{\"op\":\"remove\",\"path\":\"/a/0\"},{\"op\":\"test\",\"path\":\"/a/0\",\"value\":2.0000000000000000000000001}]") else {
+            return false
+        }
+        if let Error(TestFailed(1)) = json.patch(r, input, bad) {
+            let mut original = string.new()
+            json.push_json(mut original, input)
+            return original == "{\"a\":[1,2,3],\"a/b\":{\"~\":10}}"
+        }
+    }
+    false
+}

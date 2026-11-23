@@ -212,8 +212,12 @@ static int phase(void *state,const HirselCoreOsConfig *input,const HirselCoreSou
         fprintf(stderr,"second SIGTERM did not crash the place: wait status %d\n",server.status);
         return 120;
     }
-    int expected=number==1 && WIFEXITED(server.status) && WEXITSTATUS(server.status)==99;
-    if(!WIFEXITED(server.status) || (!expected && WEXITSTATUS(server.status))) {
+    int expected=0;
+    if(WIFEXITED(server.status)) {
+        int code=WEXITSTATUS(server.status);
+        expected=deadline_case && number==1 ? code==1 : (code==0 || (number==1 && code==99));
+    }
+    if(!expected) {
         fprintf(stderr,"server phase %s: wait status %d\n",modes[number],server.status);return 120;
     }
     return 0;

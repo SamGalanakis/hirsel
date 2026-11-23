@@ -16,6 +16,7 @@ pub mod block;
 pub mod causes;
 pub mod channel;
 pub mod counted;
+mod crc32c;
 mod destination;
 pub mod entry;
 mod env;

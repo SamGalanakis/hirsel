@@ -94,9 +94,9 @@ def main():
                 expected = {
                     'completion_unreachable': [('PROG-2', '`store@1/store/Completion` is private or opaque')],
                     'index_rows_escape_refused': [('LANG-13', 'scoped[view] fn results with anchors are reserved')],
-                    'index_rows_write_refused': [('OWN-10', 'a place of `tx` is viewed')],
-                    'view_tx_write_refused': [('OWN-10', 'a place of `tx` is viewed')],
-                    'view_cursor_advance_refused': [('OWN-10', 'a place of `rows` is viewed')],
+                    'index_rows_write_refused': [('OWN-10', '`tx` is viewed')],
+                    'view_tx_write_refused': [('OWN-10', '`tx` is viewed')],
+                    'view_cursor_advance_refused': [('OWN-10', '`rows` is viewed')],
                     'view_snapshot_escape_refused': [('OWN-20', 'a scoped result may read only its declared anchors')],
                     'view_cursor_send_refused': [('CONC-2', '`store@1/store/ViewRows` is not send')],
                     'look_info_refused': [('OWN-5', '`tx` is not writable'),

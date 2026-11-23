@@ -1,0 +1,462 @@
+// §11.17 scrub. A tour rereads the packs listed at one generation from disk,
+// apart from any resident page, and checks every frame envelope. It never
+// repairs and never writes.
+
+// The packs a tour may still read. The Db keeps one share; the tour keeps the
+// other. A cut that finds its share unique drops it: the tour has ended.
+type ScrubLease: shareable + send {
+    packs: List[u64]
+}
+
+type ScrubPack: send {
+    seq: u64,
+    class: u8,
+    frames: u64,
+    payload_bytes: u64
+}
+
+type ScrubInput {
+    input: JournalInput,
+    path: String,
+    context: DiskContext,
+    frames: u64,
+    payload_bytes: u64,
+    room: u64
+}
+
+pub opaque type Scrub {
+    d: Dir,
+    store: StoreId,
+    generation: u64,
+    next_stamp: u64,
+    packs: List[ScrubPack],
+    position: u64,
+    at: u64,
+    open: Option[ScrubInput],
+    checked: u64,
+    // The generation's frame records: the pointer each reachable frame must
+    // match. A persistent share, so taking it copies nothing.
+    known: PageLocations,
+    lease: Arc[ScrubLease]
+}
+
+// generation is the cut whose listed packs the tour reads. checked counts
+// the bytes read so far. next is the lowest pack not yet finished, or None
+// when the tour is done. faults holds what this step found, at most one per
+// pack: a fault ends that pack's tour.
+pub type ScrubReport: send {
+    generation: u64,
+    checked: u64,
+    next: Option[u64],
+    faults: List[Fault]
+}
+
+pub fn begin_scrub(mut db: Db) -> Result[Scrub, Error] {
+    healthy(db)?
+    if !is_disk(db) {
+        return Error(NotFound)
+    }
+    let next_stamp = stamp_after(db.next_node)?
+    let (take packs, take seqs) = disk_allocation(scoped fn() -> Result[(List[ScrubPack], List[u64]), Error] {
+        let mut packs: List[ScrubPack] = list.new()
+        let mut seqs: List[u64] = list.new()
+        let mut cursor = std.omap.range(db.disk[0u64].pages.locations.packs.values, Unbounded, Unbounded)
+        while let Some((seq, pack)) = std.omap.next(mut cursor) {
+            list.push(mut packs, ScrubPack(seq: seq, class: pack.class, frames: int.widen(pack.frames), payload_bytes: pack.payload_bytes))
+            list.push(mut seqs, seq)
+        }
+        Ok((take packs, take seqs))
+    })?
+    let lease = arc.new(ScrubLease(packs: take seqs))
+    capacity(list.try_reserve(mut db.disk[0u64].scrubs, 1))?
+    list.push(mut db.disk[0u64].scrubs, arc.share(lease))
+    Ok(Scrub(d: db.disk[0u64].d, store: db.store, generation: db.checkpointed, next_stamp: next_stamp, packs: take packs, position: 0, at: 0, open: None, checked: 0, known: share_page_locations(db.disk[0u64].pages.locations), lease: take lease))
+}
+
+// Reads at least one frame, then stops once budget bytes are read this step.
+pub fn scrub_step(mut tour: Scrub, budget: u64) -> Result[ScrubReport, Error] waits {
+    let mut faults: List[Fault] = list.new()
+    let mut spent = 0u64
+    while tour.position < list.len(tour.packs) && (spent == 0 || spent < budget) {
+        match scrub_next(mut tour) {
+            Ok(width) => {
+                spent += width
+            },
+            Error(Corrupt(take fault)) => {
+                capacity(list.try_reserve(mut faults, 1))?
+                list.push(mut faults, take fault)
+                scrub_finish_pack(mut tour)?
+            },
+            Error(Unsupported(kind)) => {
+                let path = paged_pack_path(tour.packs[tour.position].seq)?
+                capacity(list.try_reserve(mut faults, 1))?
+                list.push(mut faults, Fault(file: take path, offset: tour.at, why: Kind(kind)))
+                scrub_finish_pack(mut tour)?
+            },
+            Error(take problem) => return Error(take problem),
+        }
+    }
+    tour.checked = int.saturating_add(tour.checked, spent)
+    let pending = if tour.position < list.len(tour.packs) {
+        Some(tour.packs[tour.position].seq)
+    } else {
+        None
+    }
+    Ok(ScrubReport(generation: tour.generation, checked: tour.checked, next: pending, faults: take faults))
+}
+
+fn scrub_finish_pack(mut tour: Scrub) -> Result[(), Error] waits {
+    if let Some(take reading) = replace(mut tour.open, None) {
+        let ScrubInput(input: take input, ..) = take reading
+        let JournalInput(file: take handle, ..) = take input
+        disk_io(host.close(take handle))?
+    }
+    tour.position += 1
+    tour.at = 0
+    Ok(())
+}
+
+// Checks one unit of the current pack: its HEADER, one frame, or its end
+// against the pack's record. Returns the bytes read.
+fn scrub_next(mut tour: Scrub) -> Result[u64, Error] waits {
+    let seq = tour.packs[tour.position].seq
+    let class = tour.packs[tour.position].class
+    let unopened = match tour.open {
+        Some(_) => false,
+        None => true
+    }
+    if unopened {
+        let path = paged_pack_path(seq)?
+        let opened = disk_io(host.open(tour.d, path, Read))?
+        let mut input = journal_input(take opened, false)?
+        let header = disk_read_header(path, journal_prefix(mut input, path, 0, 72)?, 3, Some(seq), Some(tour.store))?
+        tour.open = Some(ScrubInput(input: take input, path: take path, context: header.context, frames: 0, payload_bytes: 0, room: 0))
+        tour.at = 72
+        return Ok(72)
+    }
+    let at = tour.at
+    let next_stamp = tour.next_stamp
+    let frames = tour.packs[tour.position].frames
+    let payload_bytes = tour.packs[tour.position].payload_bytes
+    let checked = match tour.open {
+        Some(mut reading) => scrub_frame(mut reading, tour.known, seq, class, frames, payload_bytes, at, next_stamp),
+        None => fail("store: scrub has no open pack"),
+    }
+    match checked? {
+        Some(end) => {
+            tour.at = end
+            Ok(end - at)
+        },
+        None => {
+            scrub_finish_pack(mut tour)?
+            Ok(0)
+        },
+    }
+}
+
+// None is the pack's end, after its frame count and payload bytes match the
+// record the generation listed.
+fn scrub_frame(mut reading: ScrubInput, known: PageLocations, seq: u64, class: u8, frames: u64, payload_bytes: u64, at: u64, next_stamp: u64) -> Result[Option[u64], Error] waits {
+    if at >= reading.input.size {
+        if reading.frames != frames || reading.payload_bytes != payload_bytes {
+            return Error(disk_fault(reading.path, at, Malformed))
+        }
+        return Ok(None)
+    }
+    let expected = if class == 1 {
+        0x0022u16
+    } else {
+        0x0021u16
+    }
+    let stamp_at = if class == 1 {
+        0u64
+    } else {
+        8u64
+    }
+    let head = journal_prefix(mut reading.input, reading.path, at, 16)?
+    let frame = disk_read_frame_head(reading.path, head, at)?
+    let keep = if frame.kind == expected {
+        order.min(stamp_at + 8, frame.size)
+    } else {
+        0
+    }
+    let mut signed_prefix = disk_allocation(scoped fn() -> Result[Bytes, Error] {
+        Ok(list.with_capacity(keep))
+    })?
+    let plain = scrub_payload(mut reading.input, reading.path, reading.context, at, head, frame, 8 - stamp_at, mut signed_prefix)?
+    disk_page_kind(reading.path, at, frame.kind, expected, frame.flags)?
+    let end = at + 16 + frame.size
+    if frame.kind == expected {
+        if frame.size < stamp_at + 8 {
+            return Error(disk_fault(reading.path, at, Malformed))
+        }
+        disk_check_stamp(reading.path, at, signed_prefix, stamp_at, next_stamp)?
+        // A frame the generation reaches here must be the one its pointer
+        // names. A dead copy has no record at this place.
+        let stamp: u64 = list.word_le(signed_prefix, stamp_at)
+        if let Some(record) = disk_index_get(known.frames, stamp) {
+            let width: u64 = int.widen(record.place.len)
+            if record.place.pack == seq && record.place.offset == at && (width != frame.size || record.place.checksum != plain) {
+                return Error(disk_fault(reading.path, at, Checksum))
+            }
+        }
+        reading.frames += 1
+        reading.payload_bytes += frame.size
+    } else {
+        reading.room += end - at
+        if reading.room > UNKNOWN_ROOM {
+            return Error(disk_fault(reading.path, at, Malformed))
+        }
+    }
+    Ok(Some(end))
+}
+
+// Streams one payload: its bound check against the head, and the plain xxh3
+// that a located pointer carries, over the payload from skip on (a PAGE's
+// whole payload, a BLOB's body after its stamp). keep bytes of the payload
+// go to captured.
+fn scrub_payload(mut input: JournalInput, path: String, context: DiskContext, offset: u64, head: Bytes, frame: DiskFrameHead, skip: u64, mut captured: Bytes) -> Result[u64, Error] waits {
+    if frame.size > input.size - offset - 16 {
+        return Error(disk_fault(path, offset, Truncated))
+    }
+    let keep = list.capacity(captured)
+    let mut check = disk_allocation(scoped fn() -> Result[std.check.Xxh3, Error] {
+        capacity(disk_check_start(context, offset, head))
+    })?
+    let mut plain = std.check.start()
+    let begin = offset + 16
+    let end = begin + frame.size
+    let mut at = begin
+    while at < end {
+        let start = journal_chunk(mut input, path, at)?
+        let part = order.min(end - at, list.len(input.chunk) - start)
+        std.check.add(mut check, input.chunk, start, start + part)
+        let from = at - begin
+        if from + part > skip {
+            let low = if from >= skip {
+                start
+            } else {
+                start + (skip - from)
+            }
+            std.check.add(mut plain, input.chunk, low, start + part)
+        }
+        if list.len(captured) < keep {
+            let capture = order.min(part, keep - list.len(captured))
+            list.append(mut captured, list.slice(input.chunk, start, start + capture))
+        }
+        at += part
+    }
+    if std.check.finish(check) != frame.checksum {
+        return Error(disk_fault(path, offset, Checksum))
+    }
+    Ok(std.check.finish(plain))
+}
+
+fn scrub_leased(scrubs: List[Arc[ScrubLease]], seq: u64) -> bool {
+    for held in scrubs {
+        for pack in held.packs {
+            if pack == seq {
+                return true
+            }
+        }
+    }
+    false
+}
+
+// A share nobody else holds belongs to a tour that ended.
+fn prune_scrubs(mut scrubs: List[Arc[ScrubLease]]) {
+    let mut slot = 0u64
+    while slot < list.len(scrubs) {
+        let ended = match arc.with_unique(mut scrubs[slot], fn(mut _held: ScrubLease) {}) {
+            Some(_) => true,
+            None => false
+        }
+        if ended {
+            let _ = list.swap_remove(mut scrubs, slot)
+        } else {
+            slot += 1
+        }
+    }
+}
+
+fn scrub_fill(mut db: Db, t: Table[u64, u64], rows: u64, add: u64) -> Result[(), Error] waits {
+    let out = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+        for k in 0u64 .. rows {
+            put(mut tx, t, k, k + add)?
+        }
+        Ok(())
+    })?
+    match out {
+        Committed(_) => Ok(()),
+        _ => Error(MigrationFault)
+    }
+}
+
+fn scrub_to_end(mut tour: Scrub, budget: u64, mut faults: List[Fault]) -> Result[u64, Error] waits {
+    loop {
+        let report = scrub_step(mut tour, budget)?
+        for found in report.faults {
+            list.push(mut faults, clone(found))
+        }
+        if let None = report.next {
+            return Ok(report.checked)
+        }
+    }
+}
+
+fn scrub_fault_is(fault: Fault, seq: u64, offset: u64, why: Why) -> Result[bool, Error] {
+    let path = paged_pack_path(seq)?
+    let matched = match fault.why {
+        Checksum => match why {
+            Checksum => true,
+            _ => false
+        },
+        Kind(found) => match why {
+            Kind(wanted) => found == wanted,
+            _ => false
+        },
+        _ => false
+    }
+    Ok(fault.file == path && fault.offset == offset && matched)
+}
+
+// A misdirected write (TigerBeetle's storage fault model, §11.17): pack A's
+// first frame, meant for A at 72, lands at 72 in pack B. A's slot keeps its
+// old sector, zeros for a new file, and B's slot holds A's sealed bytes. The
+// oracle is the injected place: A at 72 reads kind 0, and B at 72 holds a
+// well-formed head whose check binds A's sequence, not B's.
+@test
+fn disk_test_scrub_misdirected(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let path = disk_test_directory(d)
+    let mut options = defaults()
+    options.pack_bytes = 512
+    let mut db = open(tasks, path, c, r, options)?
+    let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
+    let t = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    scrub_fill(mut db, t, 2000, 0)?
+    let _ = checkpoint(mut db)?
+    // Control: the undamaged generation reads clean, and the tour reads every
+    // byte of every listed pack, by the files' own sizes.
+    let mut listed: List[u64] = list.new()
+    let mut data: List[u64] = list.new()
+    let mut cursor = std.omap.range(db.disk[0u64].pages.locations.packs.values, Unbounded, Unbounded)
+    while let Some((seq, pack)) = std.omap.next(mut cursor) {
+        list.push(mut listed, seq)
+        if pack.class == 0 {
+            list.push(mut data, seq)
+        }
+    }
+    let mut total = 0u64
+    for seq in listed {
+        total += list.len(disk_read_paged_file(path, paged_pack_path(seq)?, 67108864)?)
+    }
+    let mut clean: List[Fault] = list.new()
+    let control = begin_scrub(mut db)?
+    let mut tour = take control
+    if scrub_to_end(mut tour, 4096, mut clean)? != total || list.len(clean) != 0 || list.len(data) < 3 {
+        return Error(MigrationFault)
+    }
+    // A is the first data pack whose first frame fits inside B, the second.
+    let a = data[0u64]
+    let b = data[1u64]
+    let a_name = paged_pack_path(a)?
+    let b_name = paged_pack_path(b)?
+    let mut a_raw = disk_read_paged_file(path, a_name, 67108864)?
+    let mut b_raw = disk_read_paged_file(path, b_name, 67108864)?
+    let width = 16 + read_le(a_raw, 76, 4)
+    if 72 + width > list.len(b_raw) {
+        return Error(MigrationFault)
+    }
+    for at in 72u64 .. 72 + width {
+        b_raw[at] = a_raw[at]
+        a_raw[at] = 0u8
+    }
+    disk_write_synced(path, a_name, a_raw)?
+    disk_write_synced(path, b_name, b_raw)?
+    // A lost write over a leftover of the same pack number: C at 72 holds a
+    // frame sealed for C at 72 whose last payload byte differs. The envelope
+    // passes; only the generation's pointer to C at 72 tells the bytes apart.
+    let c_seq = data[2u64]
+    let c_name = paged_pack_path(c_seq)?
+    let mut c_raw = disk_read_paged_file(path, c_name, 67108864)?
+    let c_width = read_le(c_raw, 76, 4)
+    c_raw[87 + c_width] = c_raw[87 + c_width] ^ 1u8
+    let sealed = capacity(disk_check(DiskContext(store: db.store, role: 3, seq: c_seq), 72, list.slice(c_raw, 72, 80), list.slice(c_raw, 88, 88 + c_width)))?
+    list.set_word_le(mut c_raw, 80, sealed)
+    disk_write_synced(path, c_name, c_raw)?
+    let mut faults: List[Fault] = list.new()
+    let damaged = begin_scrub(mut db)?
+    let mut second = take damaged
+    let _ = scrub_to_end(mut second, 4096, mut faults)?
+    if list.len(faults) != 3 || !scrub_fault_is(faults[0u64], a, 72, Kind(0))? || !scrub_fault_is(faults[1u64], b, 72, Checksum)? || !scrub_fault_is(faults[2u64], c_seq, 72, Checksum)? {
+        return Error(MigrationFault)
+    }
+    // Detection only: resident pages still answer.
+    if get(snapshot(db), shape(t), 1999)? != Some(1999u64) {
+        return Error(MigrationFault)
+    }
+    close(take db)
+}
+
+// §11.17's lease: a cut that retires every data pack while a tour holds them
+// keeps the files; the tour reads them clean; after the tour ends, the next
+// cut unlinks exactly the packs no longer listed.
+@test
+fn disk_test_scrub_lease(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let path = disk_test_directory(d)
+    let mut options = defaults()
+    options.pack_bytes = 512
+    let mut db = open(tasks, path, c, r, options)?
+    let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
+    let t = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    scrub_fill(mut db, t, 2000, 0)?
+    let _ = checkpoint(mut db)?
+    let started = begin_scrub(mut db)?
+    let mut tour = take started
+    let first = scrub_step(mut tour, 1)?
+    if first.checked != 72 || list.len(first.faults) != 0 {
+        return Error(MigrationFault)
+    }
+    // Every row changes, so every data page is rewritten and its old pack's
+    // live bytes reach zero.
+    scrub_fill(mut db, t, 2000, 1)?
+    let _ = checkpoint(mut db)?
+    let mut retired = 0u64
+    for seq in tour.lease.packs {
+        if !disk_exists(path, paged_pack_path(seq)?)? {
+            return Error(MigrationFault)
+        }
+    }
+    // The cut carries each retirement the lease holds back.
+    for seq in db.disk[0u64].pages.carried {
+        if scrub_leased(db.disk[0u64].scrubs, seq) {
+            retired += 1
+        }
+    }
+    let mut faults: List[Fault] = list.new()
+    let _ = scrub_to_end(mut tour, 4096, mut faults)?
+    if retired == 0 || list.len(faults) != 0 {
+        return Error(MigrationFault)
+    }
+    let leased: List[u64] = clone(tour.lease.packs)
+    drop(take tour)
+    let _ = checkpoint(mut db)?
+    let mut gone = 0u64
+    for seq in leased {
+        let present = disk_exists(path, paged_pack_path(seq)?)?
+        let listed = match disk_index_get(db.disk[0u64].pages.locations.packs, seq) {
+            Some(_) => true,
+            None => false
+        }
+        if present != listed {
+            return Error(MigrationFault)
+        }
+        if !present {
+            gone += 1
+        }
+    }
+    if gone == 0 {
+        return Error(MigrationFault)
+    }
+    close(take db)
+}

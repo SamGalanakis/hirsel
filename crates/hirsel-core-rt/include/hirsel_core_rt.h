@@ -94,6 +94,9 @@ void hirsel_core_zero_bytes(uint8_t *block, uint8_t *at, uint64_t len);
    context or status; zero blocks read nothing. */
 void hirsel_core_sha256_blocks(uint32_t *state, const uint8_t *data, uint64_t blocks);
 
+/* Extend a finalized CRC-32C. Zero length reads nothing. */
+uint32_t hirsel_core_crc32c(uint32_t crc, const uint8_t *data, uint64_t len);
+
 /* Signature verification. Returns 1 for a valid signature, 0 otherwise.
    Empty ranges are never read. No context or failure status. */
 uint64_t hirsel_core_ed25519_verify(const uint8_t *key, uint64_t key_len,

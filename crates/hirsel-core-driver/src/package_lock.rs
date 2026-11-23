@@ -98,6 +98,22 @@ fn make_rows(resolution: &Resolution) -> Rows {
             },
         );
     }
+    if resolution.toolchain_store {
+        rows.insert(
+            Id {
+                name: "store".into(),
+                major: 1,
+            },
+            Row {
+                root: None,
+                source: "toolchain".into(),
+                edges: vec![Id {
+                    name: "std".into(),
+                    major: 1,
+                }],
+            },
+        );
+    }
     std_row(&mut rows);
     rows
 }
@@ -351,7 +367,10 @@ impl PackOutput {
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or(Path::new("."));
-        let name = out.file_name().ok_or("--out needs a file name")?.to_owned();
+        let name = out
+            .file_name()
+            .ok_or("--output needs a file name")?
+            .to_owned();
         let directory = open_directory(parent)?;
         let parent = FileId::of(&directory.metadata()?);
         let output = Self { directory, name };
@@ -376,7 +395,7 @@ impl PackOutput {
             || existing_store_alias
             || new_store_alias
         {
-            return Err(format!("--out {} is an input of this command", out.display()).into());
+            return Err(format!("--output {} is an input of this command", out.display()).into());
         }
         Ok(output)
     }

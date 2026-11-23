@@ -112,12 +112,21 @@ fn te_in_10() -> bool {
 // expect: run unsupported_codings() = true
 fn unsupported_codings() -> bool {
     for (raw, status) in[
-    // Unknown alone or before final chunked.
-    ("POST / HTTP/1.1\r\nTransfer-Encoding: gzip\r\n\r\n", 501u16), ("POST / HTTP/1.1\r\nTransfer-Encoding: gzip, chunked\r\n\r\n", 501u16), ("POST / HTTP/1.1\r\nTransfer-Encoding: gzip\r\nTransfer-Encoding: chunked\r\n\r\n", 501u16), ("POST / HTTP/1.1\r\nTransfer-Encoding: coding; x=\"chunked, gzip\", chunked\r\n\r\n", 501u16),
-    // A recognized chunked coding must be final and cannot be repeated.
-    ("POST / HTTP/1.1\r\nTransfer-Encoding: ChUnKeD , gzip\r\n\r\n", 400u16), ("POST / HTTP/1.1\r\nTransfer-Encoding: gzip, chunked, gzip\r\n\r\n", 400u16), ("POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n\r\n", 400u16), ("POST / HTTP/1.1\r\nTransfer-Encoding: chunked, chunked\r\n\r\n", 400u16),
-    // A malformed field never yields an unknown-coding result.
-    ("POST / HTTP/1.1\r\nTransfer-Encoding:\r\n\r\n", 400u16), ("POST / HTTP/1.1\r\nTransfer-Encoding: chunked; x=y\r\n\r\n", 400u16), ("POST / HTTP/1.1\r\nTransfer-Encoding: gzip; x=\"unterminated\r\n\r\n", 400u16),] {
+        // Unknown alone or before final chunked.
+        ("POST / HTTP/1.1\r\nTransfer-Encoding: gzip\r\n\r\n", 501u16),
+        ("POST / HTTP/1.1\r\nTransfer-Encoding: gzip, chunked\r\n\r\n", 501u16),
+        ("POST / HTTP/1.1\r\nTransfer-Encoding: gzip\r\nTransfer-Encoding: chunked\r\n\r\n", 501u16),
+        ("POST / HTTP/1.1\r\nTransfer-Encoding: coding; x=\"chunked, gzip\", chunked\r\n\r\n", 501u16),
+        // A recognized chunked coding must be final and cannot be repeated.
+        ("POST / HTTP/1.1\r\nTransfer-Encoding: ChUnKeD , gzip\r\n\r\n", 400u16),
+        ("POST / HTTP/1.1\r\nTransfer-Encoding: gzip, chunked, gzip\r\n\r\n", 400u16),
+        ("POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n\r\n", 400u16),
+        ("POST / HTTP/1.1\r\nTransfer-Encoding: chunked, chunked\r\n\r\n", 400u16),
+        // A malformed field never yields an unknown-coding result.
+        ("POST / HTTP/1.1\r\nTransfer-Encoding:\r\n\r\n", 400u16),
+        ("POST / HTTP/1.1\r\nTransfer-Encoding: chunked; x=y\r\n\r\n", 400u16),
+        ("POST / HTTP/1.1\r\nTransfer-Encoding: gzip; x=\"unterminated\r\n\r\n", 400u16),
+    ] {
         if !frame_case(string.as_bytes(raw), 99, refused(status)) {
             return false
         }
@@ -131,22 +140,23 @@ fn unsupported_codings() -> bool {
 // expect: run upstream_framing_fields() = true
 fn upstream_framing_fields() -> bool {
     for (raw, status) in[
-    // Content-Length followed by Transfer-Encoding.
-    ("PUT /url HTTP/1.1\r\nContent-Length: 1\r\nTransfer-Encoding: identity\r\n\r\n", 400u16),
-    // Transfer-Encoding followed by Content-Length.
-    ("POST /post_identity_body_world?q=search#hey HTTP/1.1\r\nAccept: */*\r\nTransfer-Encoding: identity\r\nContent-Length: 5\r\n\r\nWorld", 400u16),
-    // Duplicate Content-Length, conflicting decimal lengths.
-    ("PUT /url HTTP/1.1\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\n", 400u16),
-    // The same duplicate-field refusal applies to equal lengths (HTTP-4 rule 2).
-    ("PUT /url HTTP/1.1\r\nContent-Length: 1\r\nContent-Length: 1\r\n\r\n", 400u16),
-    // Unknown transfer coding.
-    ("PUT /url HTTP/1.1\r\nTransfer-Encoding: pigeons\r\n\r\n", 501u16),
-    // Non-final chunked in one field.
-    ("POST /post_identity_body_world?q=search#hey HTTP/1.1\r\nAccept: */*\r\nTransfer-Encoding: chunked, deflate\r\n\r\nWorld", 400u16),
-    // Non-final chunked across two fields.
-    ("POST /post_identity_body_world?q=search#hey HTTP/1.1\r\nAccept: */*\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: deflate\r\n\r\nWorld", 400u16),
-    // A token containing chunked twice is not the chunked coding.
-    ("POST /post_identity_body_world?q=search#hey HTTP/1.1\r\nAccept: */*\r\nTransfer-Encoding: chunkedchunked\r\n\r\n5\r\nWorld\r\n0\r\n\r\n", 501u16),] {
+        // Content-Length followed by Transfer-Encoding.
+        ("PUT /url HTTP/1.1\r\nContent-Length: 1\r\nTransfer-Encoding: identity\r\n\r\n", 400u16),
+        // Transfer-Encoding followed by Content-Length.
+        ("POST /post_identity_body_world?q=search#hey HTTP/1.1\r\nAccept: */*\r\nTransfer-Encoding: identity\r\nContent-Length: 5\r\n\r\nWorld", 400u16),
+        // Duplicate Content-Length, conflicting decimal lengths.
+        ("PUT /url HTTP/1.1\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\n", 400u16),
+        // The same duplicate-field refusal applies to equal lengths (HTTP-4 rule 2).
+        ("PUT /url HTTP/1.1\r\nContent-Length: 1\r\nContent-Length: 1\r\n\r\n", 400u16),
+        // Unknown transfer coding.
+        ("PUT /url HTTP/1.1\r\nTransfer-Encoding: pigeons\r\n\r\n", 501u16),
+        // Non-final chunked in one field.
+        ("POST /post_identity_body_world?q=search#hey HTTP/1.1\r\nAccept: */*\r\nTransfer-Encoding: chunked, deflate\r\n\r\nWorld", 400u16),
+        // Non-final chunked across two fields.
+        ("POST /post_identity_body_world?q=search#hey HTTP/1.1\r\nAccept: */*\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: deflate\r\n\r\nWorld", 400u16),
+        // A token containing chunked twice is not the chunked coding.
+        ("POST /post_identity_body_world?q=search#hey HTTP/1.1\r\nAccept: */*\r\nTransfer-Encoding: chunkedchunked\r\n\r\n5\r\nWorld\r\n0\r\n\r\n", 501u16),
+    ] {
         if !frame_case(string.as_bytes(raw), 99, refused(status)) {
             return false
         }
@@ -163,14 +173,16 @@ fn upstream_framing_fields() -> bool {
 // expect: run upstream_framing_head_lines() = true
 fn upstream_framing_head_lines() -> bool {
     let cases: Inline[(String, Option[http.Framing]), 5] =[
-    // httparse test_request_newlines, plus an LF-only Content-Length head.
-    ("GET / HTTP/1.1\nHost: foo.bar\n\n", Some(Empty)), ("PUT /url HTTP/1.1\nContent-Length: 1\n\n", Some(ContentLength(1))),
-    // llhttp Invalid OBS fold after chunked value.
-    ("PUT /url HTTP/1.1\r\nTransfer-Encoding: chunked\r\n  abc\r\n\r\n5\r\nWorld\r\n0\r\n\r\n", None),
-    // httparse test_request_header_with_missing_colon_with_folding.
-    ("GET / HTTP/1.1\r\nAccess-Control-Allow-Credentials   \r\n hello\r\nBread: baguette\r\n\r\n", None),
-    // RFC 9112 section 5.2. A tab starts an obsolete continuation.
-    ("PUT /url HTTP/1.1\r\nContent-Length: 1\r\n\t1\r\n\r\n", None),]
+        // httparse test_request_newlines, plus an LF-only Content-Length head.
+        ("GET / HTTP/1.1\nHost: foo.bar\n\n", Some(Empty)),
+        ("PUT /url HTTP/1.1\nContent-Length: 1\n\n", Some(ContentLength(1))),
+        // llhttp Invalid OBS fold after chunked value.
+        ("PUT /url HTTP/1.1\r\nTransfer-Encoding: chunked\r\n  abc\r\n\r\n5\r\nWorld\r\n0\r\n\r\n", None),
+        // httparse test_request_header_with_missing_colon_with_folding.
+        ("GET / HTTP/1.1\r\nAccess-Control-Allow-Credentials   \r\n hello\r\nBread: baguette\r\n\r\n", None),
+        // RFC 9112 section 5.2. A tab starts an obsolete continuation.
+        ("PUT /url HTTP/1.1\r\nContent-Length: 1\r\n\t1\r\n\r\n", None),
+    ]
     for (raw, expected) in cases {
         let bytes_in = string.as_bytes(raw)
         match expected {
@@ -263,22 +275,26 @@ fn chunk_case(wire: Bytes, limit: u64, status: u16, body: Bytes, used: u64, eof_
 // expect: run upstream_chunk_lines() = true
 fn upstream_chunk_lines() -> bool {
     for (wire, status, body, used) in[
-    // llhttp Chunk extensions.
-    ("5;ilovew3;somuchlove=aretheseparametersfor;another=withvalue\r\nhello\r\n6;blahblah;blah\r\n world\r\n0\r\n\r\n", 0u16, "hello world", 99u64),
-    // llhttp Chunk extensions quoting.
-    ("5;ilovew3=\"I \\\"love\\\"; \\\\extensions\\\\\";somuchlove=\"aretheseparametersfor\";blah;foo=bar\r\nhello\r\n6;blahblah;blah\r\n world\r\n0\r\n\r\n", 0u16, "hello world", 125u64),
-    // llhttp No semicolon before chunk extensions.
-    ("2 erfrferferf\r\naa\r\n0 rrrr\r\n\r\n", 400u16, "", 0u64),
-    // llhttp No extension after semicolon.
-    ("2;\r\naa\r\n0\r\n\r\n", 400u16, "", 0u64),
-    // llhttp Unbalanced chunk extensions quoting.
-    ("5;ilovew3=\"abc\";somuchlove=\"def; ghi\r\nhello\r\n6;blahblah;blah\r\n world\r\n0\r\n\r\n", 400u16, "", 0u64),
-    // httparse test_chunk_size, invalid hex digit.
-    ("567xf8a\r\n", 400u16, "", 0u64),
-    // httparse test_chunk_size, values beyond u64.
-    ("1ffffffffffffffff\r\n", 400u16, "", 0u64), ("Affffffffffffffff\r\n", 400u16, "", 0u64), ("fffffffffffffffff\r\n", 400u16, "", 0u64),
-    // RFC 9112 section 7.1.1 requires token syntax and binds whitespace to a delimiter.
-    ("3735AB1;foo bar*\r\n", 400u16, "", 0u64), ("3735ab1 ; baz \r\n", 400u16, "", 0u64),] {
+        // llhttp Chunk extensions.
+        ("5;ilovew3;somuchlove=aretheseparametersfor;another=withvalue\r\nhello\r\n6;blahblah;blah\r\n world\r\n0\r\n\r\n", 0u16, "hello world", 99u64),
+        // llhttp Chunk extensions quoting.
+        ("5;ilovew3=\"I \\\"love\\\"; \\\\extensions\\\\\";somuchlove=\"aretheseparametersfor\";blah;foo=bar\r\nhello\r\n6;blahblah;blah\r\n world\r\n0\r\n\r\n", 0u16, "hello world", 125u64),
+        // llhttp No semicolon before chunk extensions.
+        ("2 erfrferferf\r\naa\r\n0 rrrr\r\n\r\n", 400u16, "", 0u64),
+        // llhttp No extension after semicolon.
+        ("2;\r\naa\r\n0\r\n\r\n", 400u16, "", 0u64),
+        // llhttp Unbalanced chunk extensions quoting.
+        ("5;ilovew3=\"abc\";somuchlove=\"def; ghi\r\nhello\r\n6;blahblah;blah\r\n world\r\n0\r\n\r\n", 400u16, "", 0u64),
+        // httparse test_chunk_size, invalid hex digit.
+        ("567xf8a\r\n", 400u16, "", 0u64),
+        // httparse test_chunk_size, values beyond u64.
+        ("1ffffffffffffffff\r\n", 400u16, "", 0u64),
+        ("Affffffffffffffff\r\n", 400u16, "", 0u64),
+        ("fffffffffffffffff\r\n", 400u16, "", 0u64),
+        // RFC 9112 section 7.1.1 requires token syntax and binds whitespace to a delimiter.
+        ("3735AB1;foo bar*\r\n", 400u16, "", 0u64),
+        ("3735ab1 ; baz \r\n", 400u16, "", 0u64),
+    ] {
         if !chunk_case(string.as_bytes(wire), 18446744073709551615, status, string.as_bytes(body), used, false) {
             return false
         }

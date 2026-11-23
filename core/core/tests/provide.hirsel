@@ -1119,20 +1119,46 @@ fn seal_invalid_returns_bytes() -> bool {
     result.unwrap(checked)
 }
 
-fn sealed_pencil(to: String) -> Secret {
+fn sealed_pencil(uses: String) -> Secret {
     let b = string.into_bytes(string.from("pencil"))
-    result.unwrap(secret.seal(take b, to))
+    result.unwrap(secret.seal(take b, uses))
+}
+
+// TLS-5 uses: a name is a destination only inside tls_send(...), and a use
+// word only outside it. A pencil sent to the host `mac` is Denied as an HMAC
+// key; a mac key shares no tls_send with it, so narrowing is Invalid; and a
+// bare name is no policy, so sealing to it is Invalid and returns the bytes.
+// expect: run use_mismatch_denied() = true
+fn use_mismatch_denied() -> bool {
+    let to_mac = sealed_pencil(string.from("tls_send(mac)"))
+    let mac_denied = match secret.hmac_sha256(to_mac, string.as_bytes("x")) {
+        Error(Denied) => true,
+        _ => false
+    }
+    let mac_key = sealed_pencil(string.from("mac"))
+    let no_send = match secret.narrow(mac_key, string.from("tls_send(mac)")) {
+        Error(Invalid) => true,
+        _ => false
+    }
+    let bare = match secret.seal(string.into_bytes(string.from("pencil")), "alpha.test") {
+        Error((Invalid, take returned)) => {
+            let _ = take returned
+            true
+        },
+        _ => false
+    }
+    mac_denied && no_send && bare
 }
 
 fn seal_for_unit(take _unused: u64) -> Secret {
-    sealed_pencil(string.from("beta.test"))
+    sealed_pencil(string.from("tls_send(beta.test)"))
 }
 
 // Both secrets keep their original policies. The helper's sealed secret
 // keeps 80 bytes of its 4392-byte reservation charged after the join.
 // expect: run sealed_secret_from_unit(tasks) = true
 fn sealed_secret_from_unit(tasks: Tasks) -> bool waits {
-    let local = sealed_pencil(string.from("alpha.test"))
+    let local = sealed_pencil(string.from("tls_send(alpha.test)"))
     let checked = bound bytes 4392 {
         let worker = result.unwrap(task.spawn_unit(tasks, bytes 4096, 0u64, seal_for_unit))
         let received = result.unwrap(task.join(take worker))
@@ -1141,15 +1167,85 @@ fn sealed_secret_from_unit(tasks: Tasks) -> bool waits {
             Error(c) => c.requested == 4392 && c.available == 4312,
             Ok(_) => false
         }
-        let local_denies = match secret.narrow(local, string.from("beta.test")) {
+        let local_denies = match secret.narrow(local, string.from("tls_send(beta.test)")) {
             Ok(_) => false,
             Error(_) => true
         }
-        let received_permits = match secret.narrow(received, string.from("beta.test")) {
+        let received_permits = match secret.narrow(received, string.from("tls_send(beta.test)")) {
             Ok(_) => true,
             Error(_) => false
         }
         held && local_denies && received_permits
+    }
+    result.unwrap(checked)
+}
+
+// Probe a 4392-byte bound: Ok when nothing else is charged in it, else the
+// bytes still free (conn.new(1, bytes 4320) requests 4392).
+fn free_of_4392() -> u64 {
+    let available: Result[(Client[u64], Inbox[u64]), Capacity] = conn.new(1, bytes 4320)
+    match available {
+        Ok(take pair) => {
+            let _ = take pair
+            4392
+        },
+        Error(c) => c.available
+    }
+}
+
+// An hourly refresh for a day: each pencil sealed to alpha.test charges
+// round_up_8((32 + 10) + 6 + 32) = 80 bytes while held (TLS-5) and refunds them
+// on its last drop, so every hour sees 4312 free and the day ends at 4392.
+// expect: run hourly_seal_stays_flat() = true
+fn hourly_seal_stays_flat() -> bool {
+    let checked = bound bytes 4392 {
+        let mut flat = true
+        for _hour in 0u64 .. 24 {
+            let s = sealed_pencil(string.from("tls_send(alpha.test)"))
+            flat = flat && free_of_4392() == 4312
+            let _ = take s
+        }
+        flat && free_of_4392() == 4392
+    }
+    result.unwrap(checked)
+}
+
+// A narrowed designation keeps the sealed bytes: the seal's 80 and the
+// narrow's round_up_8((32 + 10) + 32) = 80 stay charged after the sealed
+// holder drops, a shared holder adds nothing, and the last drop refunds all.
+// expect: run narrow_outlives_seal() = true
+fn narrow_outlives_seal() -> bool {
+    let checked = bound bytes 4392 {
+        let s = sealed_pencil(string.from("tls_send(alpha.test)"))
+        let n = result.unwrap(secret.narrow(s, string.from("tls_send(alpha.test)")))
+        let _ = take s
+        let shared = secret.share(n)
+        let both = free_of_4392() == 4232
+        let _ = take n
+        let one = free_of_4392() == 4232
+        let usable = match secret.narrow(shared, string.from("tls_send(alpha.test)")) {
+            Ok(take again) => {
+                let _ = take again
+                true
+            },
+            Error(_) => false
+        }
+        let _ = take shared
+        both && one && usable && free_of_4392() == 4392
+    }
+    result.unwrap(checked)
+}
+
+// A secret sealed in a unit and received by the parent refunds its 80 bytes
+// in the parent's bound when the parent drops it.
+// expect: run unit_seal_refunds_in_parent(tasks) = true
+fn unit_seal_refunds_in_parent(tasks: Tasks) -> bool waits {
+    let checked = bound bytes 4392 {
+        let worker = result.unwrap(task.spawn_unit(tasks, bytes 4096, 0u64, seal_for_unit))
+        let received = result.unwrap(task.join(take worker))
+        let held = free_of_4392() == 4312
+        let _ = take received
+        held && free_of_4392() == 4392
     }
     result.unwrap(checked)
 }
@@ -1161,8 +1257,8 @@ fn secret_client(take n: Net) -> bool waits {
     let at = Addr(ip: V4(2130706433), port: 443)
     let socket = result.unwrap(host.connect(n, at, Never))
     let none: List[String] = list.new()
-    let alpha = sealed_pencil(string.from("alpha.test"))
-    let beta = sealed_pencil(string.from("beta.test"))
+    let alpha = sealed_pencil(string.from("tls_send(alpha.test)"))
+    let beta = sealed_pencil(string.from("tls_send(beta.test)"))
     let empty: Bytes = list.new()
     let client_first = string.as_bytes("n,,n=user,r=rOprNGfwEbeRWgbNEkqO")
     let server_first = string.as_bytes("r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096")
@@ -1293,7 +1389,7 @@ fn proof_server(take s: Served[NetOp]) -> bool waits {
 fn served_scram(tasks: Tasks) -> bool waits {
     let (n, s) = provide.net(bytes 64)
     let server = task.spawn(tasks, bytes 65536, take s, proof_server)
-    let verified = forward(n, sealed_pencil("alpha.test"))
+    let verified = forward(n, sealed_pencil("tls_send(alpha.test)"))
     let proven = result.unwrap(task.join(take server))
     verified && proven
 }
@@ -1328,7 +1424,7 @@ fn net_secret(tasks: Tasks) -> bool waits {
                 Error(_) => false
             }
             let given = provide.secret(call)
-            let narrowed = match secret.narrow(given, string.from("beta.test")) {
+            let narrowed = match secret.narrow(given, string.from("tls_send(beta.test)")) {
                 Ok(_) => false,
                 Error(_) => true
             }
@@ -1795,7 +1891,7 @@ fn timeout_then_spent(take timed: Timed) -> bool waits {
     let offer: List[String] = list.new()
     let (r, w, _) = result.unwrap(tls.connect(n, take socket, "alpha.test", System, offer, Never))
     let mut writer = take w
-    let token = sealed_pencil("alpha.test")
+    let token = sealed_pencil("tls_send(alpha.test)")
     let empty: Bytes = list.new()
     let expired = match tls.send_secret(mut writer, string.as_bytes("not queued"), token, empty, At(v, host.mono_ns(v))) {
         Error(TimedOut) => true,
@@ -1914,4 +2010,57 @@ fn settled_handshake(tasks: Tasks, cancel: bool) -> bool waits {
 // expect: run net_tls_withdrawal(tasks) = true
 fn net_tls_withdrawal(tasks: Tasks) -> bool waits {
     settled_handshake(tasks, false) && settled_handshake(tasks, true)
+}
+
+// NET-1 recv_ready on a served stream: the wait is one Ready(socket) call
+// with no room and no payload, and Done reports readiness without consuming
+// bytes, so the following receive still takes the staged "hi" whole.
+fn ready_client(take n: Net) -> bool waits {
+    let (rh, wh) = net.split(result.unwrap(host.connect(n, Addr(ip: V4(2130706433), port: 80), Never)))
+    let mut r = take rh
+    let ready = match host.recv_ready(mut r, Never) {
+        Ok(_) => true,
+        Error(_) => false
+    }
+    let mut b: Bytes = list.with_capacity(4)
+    let got = match host.recv_bounded(mut r, mut b, 4, Never) {
+        Ok(k) => k == 2 && b == string.as_bytes("hi"),
+        Error(_) => false
+    }
+    let _ = take r
+    let _ = take wh
+    ready && got
+}
+
+// expect: run net_ready(tasks) = true
+fn net_ready(tasks: Tasks) -> bool waits {
+    let (n, s) = provide.net(bytes 64)
+    let mut served = take s
+    let child = task.spawn(tasks, bytes 65536, n, ready_client)
+    let connected = net_connect(mut served, 8, 80)
+    let ready = match provide.next(mut served) {
+        Some(take call) => {
+            let op = match provide.net_op(call) {
+                Ready(socket) => socket == 8,
+                _ => false
+            }
+            op && net_answer(mut served, take call, Done)
+        },
+        None => false
+    }
+    let received = match provide.next(mut served) {
+        Some(take call) => {
+            let mut c = take call
+            let op = match provide.net_op(c) {
+                Recv(socket, room, max) => socket == 8 && room == 4 && max == 4,
+                _ => false
+            }
+            let took = provide.fill(mut served, mut c, string.as_bytes("hi"))
+            op && took == 2 && net_answer(mut served, take c, Count(2))
+        },
+        None => false
+    }
+    let halves = net_released(mut served, 8, 1) && net_released(mut served, 8, 2)
+    let client = result.unwrap(task.join(take child))
+    connected && ready && received && halves && client
 }

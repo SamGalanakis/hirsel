@@ -1497,6 +1497,63 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         Some(())
     }
 
+    /// Extend over one chunk per step so a budget can stop large checksums.
+    pub(super) fn crc32c_update(
+        &mut self,
+        crc: ValueId,
+        header: ValueId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let u32_ = Ty::Scalar(Scalar::U32);
+        let u64_ = Ty::Scalar(Scalar::U64);
+        let data = self.read_sequence_word(header, 0, Ty::Ptr, n);
+        let len = self.read_sequence_word(header, 8, u64_, n);
+        let zero = self.konst(u64_, 0, n)?;
+        let limit = self.konst(u64_, 16 * 1024, n)?;
+        let head = self.new_block(&[u64_, u32_]);
+        let chunk = self.new_block(&[]);
+        let update = self.new_block(&[u64_]);
+        let done = self.new_block(&[]);
+        self.jump(head, &[zero, crc], n);
+
+        self.start(head);
+        let params = self.block_params(head);
+        let (offset, crc) = (params[0], params[1]);
+        let more = self.list_compare(CompareOp::Lt, offset, len, n);
+        self.list_branch(more, chunk, done, n);
+
+        self.start(chunk);
+        let fail = self.fail_to(n);
+        self.inst(Inst::Step { fail }, n);
+        let (left, _) = self.list_arith(ArithOp::Sub, ArithMode::Wrapping, len, offset, n);
+        let full = self.list_compare(CompareOp::Ge, left, limit, n);
+        let yes = self.edge(update, &[limit]);
+        let no = self.edge(update, &[left]);
+        self.end(
+            Terminator::Branch {
+                condition: full,
+                yes,
+                no,
+            },
+            Some(n),
+        );
+
+        self.start(update);
+        let count = self.block_params(update)[0];
+        let byte = PlaceTy::Value(Ty::Scalar(Scalar::U8));
+        let from = self.address(AddressBase::Value(data), &[Step::Byte(offset)], byte, n);
+        let from = self.pointer(from, n);
+        let next = self.runtime_row(
+            hirsel_core_ir::RtOp::Crc32c,
+            &[Arg::Value(crc), Arg::Value(from), Arg::Value(count)],
+            n,
+        )?[0];
+        let (after, _) = self.list_arith(ArithOp::Add, ArithMode::Wrapping, offset, count, n);
+        self.jump(head, &[after, next], n);
+        self.start(done);
+        Some(crc)
+    }
+
     pub(super) fn sha1_blocks(
         &mut self,
         state: ValueId,

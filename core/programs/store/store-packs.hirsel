@@ -77,20 +77,22 @@ fn apply_pack_layout(mut known: PageLocations, layout: PackRun) -> Result[(), Er
         for slot in planned.first .. planned.end {
             let frame = layout.frames[slot]
             let place = std.page.PagePtr(pack: planned.seq, offset: offset, len: int.truncate(frame.size), checksum: 0, stamp: frame.stamp)
-            let old = option.unwrap(capacity(disk_index_update(mut known.frames, frame.stamp, fn(mut location: FrameLocation) -> std.page.PagePtr {
+            let old = option.unwrap(capacity(disk_index_update(mut known.frames, frame.stamp, frame_edge_charge, fn(mut location: FrameLocation) -> std.page.PagePtr {
                 replace(mut location.place, place)
             }))?)
             if old.pack != 0 {
-                let _ = capacity(disk_index_update(mut known.packs, old.pack, fn(mut pack: PagePack) {
+                let _ = capacity(disk_index_remove(mut known.members, (old.pack, frame.stamp), member_charge))?
+                let _ = capacity(disk_index_update(mut known.packs, old.pack, pack_edge_charge, fn(mut pack: PagePack) {
                     let width: u64 = int.widen(old.len)
                     pack.live -= width
                 }))?
             }
+            capacity(disk_index_put(mut known.members, (planned.seq, frame.stamp), (), member_charge))?
             offset += 16 + frame.size
         }
         let frame_count: u32 = int.truncate(planned.end - planned.first)
         let record = PagePack(class: layout.class, frames: frame_count, live: planned.payload_bytes, payload_bytes: planned.payload_bytes)
-        capacity(disk_index_put(mut known.packs, planned.seq, record))?
+        capacity(disk_index_put(mut known.packs, planned.seq, record, pack_edge_charge))?
     }
     Ok(())
 }
@@ -113,16 +115,14 @@ fn emit_pack_frame(mut out: Bytes, context: DiskContext, frame: PackFrame, known
             std.check.xxh3(body, 0, list.len(body))
         },
         PageBody(page) => {
-            let raw = disk_allocation(scoped fn() -> Result[Bytes, Error] {
-                page_result(std.page.seal_located(page, scoped fn(stamp: u64) -> std.page.PagePtr {
-                    let Some(location) = disk_index_get(known.frames, stamp) else {
-                        fail("store: missing emitted child")
-                    }
-                    location.place
-                }))
-            })?
-            list.append(mut out, raw)
-            std.check.xxh3(raw, 0, list.len(raw))
+            // The pack buffer already has room for the planned PAGE.
+            page_result(std.page.seal_located(mut out, page, scoped fn(stamp: u64) -> std.page.PagePtr {
+                let Some(location) = disk_index_get(known.frames, stamp) else {
+                    fail("store: missing emitted child")
+                }
+                location.place
+            }))?
+            std.check.xxh3(out, offset + 16, list.len(out))
         },
     }
     let bound_checksum = disk_allocation(scoped fn() -> Result[u64, Error] {
@@ -133,9 +133,9 @@ fn emit_pack_frame(mut out: Bytes, context: DiskContext, frame: PackFrame, known
 }
 
 fn install_emitted_place(mut known: PageLocations, located: std.page.PagePtr) -> Result[(), Error] {
-    let updated = disk_allocation(scoped fn() -> Result[DiskIndex[FrameLocation], Error] {
+    let updated = disk_allocation(scoped fn() -> Result[DiskIndex[u64, FrameLocation], Error] {
         let mut frames = disk_index_share(known.frames)
-        let _ = capacity(disk_index_update(mut frames, located.stamp, fn(mut location: FrameLocation) {
+        let _ = capacity(disk_index_update(mut frames, located.stamp, frame_edge_charge, fn(mut location: FrameLocation) {
             location.place = located
         }))?
         Ok(take frames)
@@ -164,9 +164,22 @@ type PackBuffers {
     temporary: String
 }
 
-fn pack_buffers(pack_bytes: u64) -> Result[PackBuffers, Error] {
+fn cut_output_buffers(cut: PagedCutLayout, manifest_bytes: u64, limit: u64) -> Result[PackBuffers, Error] {
+    let mut width = manifest_bytes
+    for pack in cut.blobs.packs {
+        width = order.max(width, pack.size)
+    }
+    for pack in cut.data_pages.packs {
+        width = order.max(width, pack.size)
+    }
+    for pack in cut.lists.run_packs.packs {
+        width = order.max(width, pack.size)
+    }
+    if width > limit {
+        return Error(Full(Allocation(Capacity(requested: width, available: limit))))
+    }
     disk_allocation(scoped fn() -> Result[PackBuffers, Error] {
-        Ok(PackBuffers(out: list.with_capacity(order.max(pack_bytes, 16777476)), destination: string.with_capacity(22), temporary: string.with_capacity(26)))
+        Ok(PackBuffers(out: list.with_capacity(width), destination: string.with_capacity(22), temporary: string.with_capacity(26)))
     })
 }
 
@@ -190,22 +203,18 @@ fn sparse_pack(known: PagePack) -> bool {
 }
 
 fn moved_frames(known: PageLocations, lists: bool) -> List[u64] {
-    let mut selection: Map[u64, ()] = map.new()
+    let mut moved: List[u64] = list.new()
     let mut inventory = std.omap.range(known.packs.values, Unbounded, Unbounded)
     while let Some((seq, pack)) = std.omap.next(mut inventory) {
         if (pack.class == 2) == lists && sparse_pack(pack) {
-            map.insert(mut selection, seq, ())
-        }
-    }
-    let mut moved: List[u64] = list.new()
-    if map.len(selection) != 0 {
-        let mut locations = std.omap.range(known.frames.values, Unbounded, Unbounded)
-        while let Some((stamp, location)) = std.omap.next(mut locations) {
-            if map.contains(selection, location.place.pack) {
+            let mut members = std.omap.range(known.members.values, Included((seq, 0u64)), Included((seq, 18446744073709551615u64)))
+            while let Some(((_, stamp), _)) = std.omap.next(mut members) {
                 list.push(mut moved, stamp)
             }
         }
     }
+    // The previous stamp-ordered walk seeded the closure in this order.
+    list.sort(mut moved, fn(a: u64, b: u64) -> Order { order.compare(a, b) })
     take moved
 }
 
@@ -420,24 +429,13 @@ fn plan_page_cut(base: PageRetryBase, holders: List[HeldPage], installed: PagedL
     take proposed
 }
 
-type WrittenPageCut {
-    layout: PagedCutLayout,
-    buffers: PackBuffers
-}
-
-fn write_page_cut(d: Dir, id: StoreId, base: PageRetryBase, holders: List[HeldPage], installed: PagedLists, carried: List[u64], first_pack: u64, cap: u64, marks: Map[u64, ()], relocated: Option[View[Log[bool]]], mut next_stamp: u64) -> Result[WrittenPageCut, Error] waits {
-    let mut cut = plan_page_cut(base, holders, installed, carried, first_pack, cap, marks, relocated, mut next_stamp)?
-    let mut buffers = pack_buffers(cap)?
-    {
-        // Keep the pack layout and the record state in disjoint places.
-        let PagedCutLayout(locations: take locations, blobs: take blobs, data_pages: take data_pages, lists: take lists) = take cut
-        let mut known = take locations
-        write_pack_run(d, id, blobs, mut known, mut buffers)?
-        write_pack_run(d, id, data_pages, mut known, mut buffers)?
-        write_pack_run(d, id, lists.run_packs, mut known, mut buffers)?
-        cut = PagedCutLayout(locations: take known, blobs: take blobs, data_pages: take data_pages, lists: take lists)
-    }
-    Ok(WrittenPageCut(layout: take cut, buffers: take buffers))
+fn write_page_cut(d: Dir, id: StoreId, take cut: PagedCutLayout, mut buffers: PackBuffers) -> Result[PagedCutLayout, Error] waits {
+    let PagedCutLayout(locations: take locations, blobs: take blobs, data_pages: take data_pages, lists: take lists) = take cut
+    let mut known = take locations
+    write_pack_run(d, id, blobs, mut known, mut buffers)?
+    write_pack_run(d, id, data_pages, mut known, mut buffers)?
+    write_pack_run(d, id, lists.run_packs, mut known, mut buffers)?
+    Ok(PagedCutLayout(locations: take known, blobs: take blobs, data_pages: take data_pages, lists: take lists))
 }
 
 fn prepare_page_cut[T](base: PageLocations, mut next_stamp: u64,
@@ -546,10 +544,10 @@ fn check_paged_generation(d: Dir) -> Result[(), Error] waits {
     list.push(mut all, take roots)
     let base = page_retry_base(new_page_locations(), map.new(), holders, all)?
     let installed = PagedLists(packs: std.page.empty(0, 0, Unprefixed), retired: std.page.empty(0, 0, Unprefixed))
-    let written = write_page_cut(directory, id, base, holders, installed, list.new(), 1, 512, map.new(), None, mut next_stamp)?
-    let WrittenPageCut(layout: take layout, buffers: take reserved) = take written
-    let mut buffers = take reserved
     let mut manifest = page_manifest_empty()
+    let planned = plan_page_cut(base, holders, installed, list.new(), 1, 512, map.new(), None, mut next_stamp)?
+    let mut buffers = cut_output_buffers(planned, page_manifest_file_size(page_manifest_size(manifest), manifest.fence), page_manifest_file_size(MANIFEST_LIMIT, 1))?
+    let layout = write_page_cut(directory, id, take planned, mut buffers)?
     manifest.generation = 2
     locate_page_cut(mut manifest, layout, all, next_stamp, base.account)
     publish_page_manifest(directory, id, manifest, None, mut buffers.out)?
@@ -610,10 +608,79 @@ fn law_leaf_cell(raw: Bytes, slot: u64) -> u64 {
     at + 2 + read_le(raw, at, 2)
 }
 
+fn law_full_frame_selection(known: PageLocations, lists: bool) -> List[u64] {
+    let mut expected: List[u64] = list.new()
+    let mut frames = std.omap.range(known.frames.values, Unbounded, Unbounded)
+    while let Some((stamp, frame)) = std.omap.next(mut frames) {
+        if let Some(pack) = disk_index_get(known.packs, frame.place.pack) {
+            if (pack.class == 2) == lists && pack.frames > 1 && 2 * pack.live < pack.payload_bytes {
+                list.push(mut expected, stamp)
+            }
+        }
+    }
+    take expected
+}
+
+fn law_pack_stamp(seed: u64, seq: u64, slot: u64) -> u64 {
+    slot * 64 + (seq + seed) % 64 + 1
+}
+
+fn check_pack_membership_selection() -> Result[(), Error] {
+    let seed = splitmix64(1787) % 64
+    let mut installed = new_page_locations()
+    for seq in 1u64 .. 65 {
+        let class: u8 = int.truncate(seq % 3)
+        let (live, frames) = match seq {
+            11 => (2u64, 8u64),
+            29 => (2u64, 8u64),
+            52 => (2u64, 8u64),
+            17 => (4u64, 8u64),
+            37 => (1u64, 1u64),
+            47 => (0u64, 8u64),
+            _ => (8u64, 8u64),
+        }
+        capacity(disk_index_put(mut installed.packs, seq, PagePack(class: class, frames: int.truncate(frames), live: 16 * live, payload_bytes: 16 * frames), pack_edge_charge))?
+        for slot in 0u64 .. live {
+            let stamp = law_pack_stamp(seed, seq, slot)
+            let ptr = std.page.PagePtr(pack: seq, offset: 72 + 32 * slot, len: 16, checksum: stamp, stamp: stamp)
+            add_location(mut installed, ptr, class, 0, list.new())?
+            add_page_source(mut installed, stamp, HolderSource(0, stamp, 0))?
+        }
+    }
+    let data = law_full_frame_selection(installed, false)
+    let lists = law_full_frame_selection(installed, true)
+    if list.len(data) != 2 || list.len(lists) != 4 || moved_frames(installed, false) != data || moved_frames(installed, true) != lists {
+        return Error(Foreign)
+    }
+
+    let mut candidate = share_page_locations(installed)
+    let moved = law_pack_stamp(seed, 52, 0)
+    let first = law_pack_stamp(seed, 55, 0)
+    let second = law_pack_stamp(seed, 55, 1)
+    let mut layout_frames: List[PackFrame] = list.with_capacity(3)
+    for stamp in [moved, first, second] {
+        list.push(mut layout_frames, PackFrame(stamp: stamp, size: 16, body: BlobBody(arc.new(list.new()))))
+    }
+    let layout = layout_packs(take layout_frames, 1, 65, 4096)?
+    apply_pack_layout(mut candidate, layout)?
+    for stamp in [first, second, law_pack_stamp(seed, 11, 0)] {
+        remove_page_source(mut candidate, stamp, HolderSource(0, stamp, 0))?
+    }
+    if moved_frames(candidate, false) != law_full_frame_selection(candidate, false)
+       || moved_frames(candidate, true) != law_full_frame_selection(candidate, true)
+       || moved_frames(installed, false) != data || moved_frames(installed, true) != lists
+       || disk_index_len(candidate.members) != disk_index_len(candidate.frames)
+       || location_storage_charge(candidate) != scan_location_storage_charge(candidate) {
+        return Error(Foreign)
+    }
+    Ok(())
+}
+
 // L41(vii). Three equal-sized blobs fit in one pack. Deleting two selects
 // the pack for relocation, but the mandatory layout keeps the last blob in it.
 @test
 fn disk_test_relocation_late_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    check_pack_membership_selection()?
     let directory = disk_test_directory(d)
     let mut options = defaults()
     options.pack_bytes = 4096
@@ -688,6 +755,15 @@ fn disk_test_relocation_late_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) 
         return Error(Foreign)
     }
     let reopened = open(tasks, directory, c, r, options)?
+    {
+        let known = view reopened.disk[0u64].pages.locations
+        let old_stamp = read_le(original, 88, 8)
+        if std.omap.get(known.members.values, (old_blob_pack, old_stamp)) == None
+           || moved_frames(known, false) != law_full_frame_selection(known, false)
+           || disk_index_len(known.members) != disk_index_len(known.frames) {
+            return Error(Foreign)
+        }
+    }
     let held = snapshot(reopened)
     let sh = shape(t)
     let Some(value) = get(held, sh, 1)? else { return Error(Foreign) }

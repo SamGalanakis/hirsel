@@ -38,7 +38,8 @@ def simulation_support(module):
 type ContractSimulationWorker: send {{
     port: Served[NetOp],
     clock: Clock,
-    window: u64
+    window: u64,
+    seed: u64
 }}
 
 fn contract_simulation_clock(take input: {module}.world.World) waits {{
@@ -47,18 +48,22 @@ fn contract_simulation_clock(take input: {module}.world.World) waits {{
 }}
 
 fn contract_simulation_network(take input: ContractSimulationWorker) waits {{
-    let ContractSimulationWorker(port: take port, clock: time, window: window) = take input
+    let ContractSimulationWorker(port: take port, clock: time, window: window, seed) = take input
     let config = {module}.net.Config(queue_bytes: window, fragment_bytes: window, latency_ns: 0)
-    let mut plan = {module}.world.plan(1)
+    let mut plan = {module}.world.plan(seed)
     let _ = {module}.net.serve({module}.net.new(config), mut plan, time, take port)
 }}
 
 fn start_contract_simulation(tasks: Tasks, window: u64) -> (Net, Clock, Task[()], Task[()]) {{
-    let (world, time) = {module}.world.new(1, 0, 0)
+    start_seeded_simulation(tasks, window, 1)
+}}
+
+fn start_seeded_simulation(tasks: Tasks, window: u64, seed: u64) -> (Net, Clock, Task[()], Task[()]) {{
+    let (world, time) = {module}.world.new(seed, 0, 0)
     let (network, port) = provide.net(bytes 65536)
     let driver = task.spawn(tasks, bytes 65536, take world, contract_simulation_clock)
     let server = task.spawn(tasks, bytes 4194304,
-        ContractSimulationWorker(port: take port, clock: time, window: window), contract_simulation_network)
+        ContractSimulationWorker(port: take port, clock: time, window: window, seed), contract_simulation_network)
     (network, time, take server, take driver)
 }}
 """
@@ -83,6 +88,11 @@ def network_case(case):
 
 def unit_socket_case(case):
     return case.name in ('net:socket_served_by_receiving_unit', 'net:inbox_seal_closes_socket')
+
+
+def simulated_network_case(case, evaluating=False):
+    return (network_case(case) and not unit_socket_case(case)
+            and (evaluating or case.call != 'net_parity(network)'))
 
 
 def loopback_grants():
@@ -769,8 +779,9 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                         def blob(b):
                             return count(len(b)) + b
                         def exported(kind, identity, args, result, args_fp, result_fp):
+                            result_schema = result if kind == 2 else bytes([3, 0, 0, 0, 0]) + result
                             return (count(kind) + blob(identity) + blob(bytes([3, 0, 0, 0, 0]) + args)
-                                    + blob(bytes([3, 0, 0, 0, 0]) + result)
+                                    + blob(result_schema)
                                     + args_fp.to_bytes(8, 'little') + result_fp.to_bytes(8, 'little') + blob(bytes(32)))
                         def record_definition(name, field, ty):
                             return (blob(name.encode()) + count(0) + bytes([0])
@@ -784,9 +795,10 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                         transaction = (count(1) + blob(b'\x01fixture@1/main/commit(take u64)->core@1/core/Result[fixture@1/main/Reply,fixture@1/main/Problem]')
                                        + blob(bytes([3, 0, 0, 0, 0, 6])) + blob(returned)
                                        + (5).to_bytes(8, 'little') + (9).to_bytes(8, 'little') + blob(bytes(32)))
+                        row_schemas = blob(bytes([4, 0, 0, 0, 0, 6])) + blob(bytes([3, 0, 0, 0, 0, 14, 3]))
                         description = (blob(bytes([1, 2])) + blob(b't') + (16777216).to_bytes(8, 'little') + count(3)
                                        + exported(0, b'\x01fixture@1/main/toggle(take u64)->u64', b'\x06', b'\x06', 9007199254740993, 7)
-                                       + exported(2, b'\x01fixture@1/main/rows(take u32)->Bytes', b'\x05', b'\x0e\x03', 2, 3) + transaction)
+                                       + exported(2, b'\x01fixture@1/main/rows(take u32)->Bytes', b'\x05', row_schemas, 2, 3) + transaction)
                         description_file.write_bytes(description)
                         (work / 'package.json').write_text('{"type":"commonjs"}\n')
                         generated = output.with_name(output.stem + '-sdk') if output else work / 'sdk'
@@ -837,8 +849,7 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                 https = '(https)' in case.call
                 if https:
                     port, roots, raw, token, peer = active.enter_context(https_fixture(root))
-                simulated = (network_case(case) and not unit_socket_case(case)
-                             and (evaluating or case.call != 'net_parity(network)'))
+                simulated = simulated_network_case(case, evaluating)
                 if simulated:
                     source_rows, entry = simulated_case(root, case, source, adapted, scratch)
                 else:

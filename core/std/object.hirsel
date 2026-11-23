@@ -1,0 +1,2032 @@
+const PART_BYTES: u64 = 8388608
+
+const MAX_ATTEMPTS: u64 = 5
+
+const MAX_U64: u64 = 18446744073709551615
+
+pub type Style: key = Virtual | Path
+
+pub type Bucket: send {
+    endpoint: String,
+    aws_region: String,
+    bucket: String,
+    prefix: String,
+    style: Style
+}
+
+pub type ETag: key {
+    octets: Inline[u8, 64],
+    len: u64
+}
+
+pub type Meta: send {
+    size: u64,
+    etag: ETag,
+    crc64: Option[u64],
+    put_id: Option[Inline[u8, 16]]
+}
+
+pub type Created: send = Created(Meta) | Exists
+
+pub type Reason: send = Status(u16, Bytes) | Net(NetError) | Http(http_client.Error) | Malformed | Deadline | Cancelled
+
+pub type Error: send = Fatal(Reason) | Retriable(Reason) | Uncertain(Reason) | TooLarge | NotFound | Precondition
+
+pub type Mode: key = Overwrite | NoClobber
+
+pub type Entry: send {
+    key: String,
+    size: u64,
+    etag: ETag
+}
+
+pub type Page: send {
+    truncated: bool,
+    after: String
+}
+
+type Operation: key = Fetch | FetchRange | Put | PutConditional | ListObjects | Erase | Upload | Part | Complete | CompleteConditional | Abort | Head
+
+type Phase: key = BeforeRequest | RequestSent | ResponseHead | ResponseBody
+
+type Decision: key = Accept | Retry | Throttle | Resolve | AlreadyExists | Missing | Changed | Refresh | CorrectSkew | Reject
+
+fn classify(op: Operation, phase: Phase, status: u16, code: Bytes, resolving: bool) -> Decision {
+    let conditional = op == PutConditional || op == CompleteConditional
+    let uncertain = conditional || op == Complete
+    if phase == BeforeRequest {
+        return Retry
+    }
+    if status == 0 {
+        if uncertain && (phase == RequestSent || phase == ResponseBody) {
+            return Resolve
+        }
+        return Retry
+    }
+    if status == 400 && code == string.as_bytes("RequestTimeout") {
+        return Retry
+    }
+    if status == 400 && code == string.as_bytes("RequestTimeTooSkewed") {
+        return CorrectSkew
+    }
+    if status == 403 && code == string.as_bytes("ExpiredToken") {
+        return Refresh
+    }
+    if status == 304 || status == 412 {
+        if conditional {
+            return if resolving {
+                Resolve
+            } else {
+                AlreadyExists
+            }
+        }
+        return Changed
+    }
+    if status == 404 {
+        return if op == Erase || op == Abort {
+            Accept
+        } else {
+            Missing
+        }
+    }
+    if status == 409 && op == FetchRange {
+        return Retry
+    }
+    if status == 429 || status == 503 || code == string.as_bytes("SlowDown") {
+        return if uncertain {
+            Resolve
+        } else {
+            Throttle
+        }
+    }
+    if status == 500 || status == 502 || status == 504 || code == string.as_bytes("InternalError") {
+        return if uncertain {
+            Resolve
+        } else {
+            Retry
+        }
+    }
+    if status >= 200 && status < 300 && list.len(code) == 0 {
+        return Accept
+    }
+    Reject
+}
+
+fn ascii(b: u8) -> char {
+    option.unwrap(char.from_u32(int.widen(b)))
+}
+
+// S3 canonical paths preserve every slash and escape all octets outside the
+// unreserved set, including characters that RFC 3986 allows in path segments.
+fn encode(mut out: String, raw: Bytes, keep_slash: bool) {
+    let hex = string.as_bytes("0123456789ABCDEF")
+    for b in raw {
+        if int.is_ascii_alpha(b) || int.is_ascii_digit(b) || b == b'-' || b == b'_' || b == b'.' || b == b'~' || keep_slash && b == b'/' {
+            string.push_char(mut out, ascii(b))
+        } else {
+            string.push_char(mut out, '%')
+            string.push_char(mut out, ascii(hex[int.widen(b >> 4)]))
+            string.push_char(mut out, ascii(hex[int.widen(b & 15)]))
+        }
+    }
+}
+
+fn make_path(mut out: String, bucket: Bucket, key: String, bucket_only: bool) {
+    string.clear(mut out)
+    string.push_char(mut out, '/')
+    if bucket.style == Path {
+        encode(mut out, string.as_bytes(bucket.bucket), false)
+        string.push_char(mut out, '/')
+    }
+    if !bucket_only {
+        encode(mut out, string.as_bytes(bucket.prefix), true)
+        encode(mut out, string.as_bytes(key), true)
+    }
+}
+
+fn request_path(bucket: Bucket, key: String, bucket_only: bool) -> String {
+    let mut out = string.from("")
+    make_path(mut out, bucket, key, bucket_only)
+    take out
+}
+
+fn new_meta() -> Meta {
+    Meta(size: 0, etag: empty_tag(), crc64: None, put_id: None)
+}
+
+fn copy_bytes(b: Bytes) -> Bytes {
+    let mut out: Bytes = list.with_capacity(list.len(b))
+    list.append(mut out, b)
+    take out
+}
+
+fn header(head: http_client.ResponseHead, name: String) -> Option[View[Bytes]] in head {
+    let key = string.as_bytes(name)
+    for i in 0u64 .. http_client.field_count(head) {
+        let (field, value) = option.unwrap(http_client.field_at(head, i))
+        if http1.equal_ascii(field, key) {
+            return Some(value)
+        }
+    }
+    None
+}
+
+fn size_or(n: Option[u64], fallback: u64) -> u64 {
+    match n {
+        Some(value) => value,
+        None => fallback,
+    }
+}
+
+fn content_length(head: http_client.ResponseHead) -> Option[u64] {
+    let Some(value) = header(head, "content-length") else {
+        return None
+    }
+    match int.parse_decimal_span(value, 0, list.len(value), MAX_U64) {
+        Ok(n) => Some(n),
+        Error(_) => None,
+    }
+}
+
+fn decimal(b: Bytes, lo: u64, hi: u64) -> Result[u64, Error] {
+    match int.parse_decimal_span(b, lo, hi, MAX_U64) {
+        Ok(n) => Ok(n),
+        Error(_) => Error(Fatal(Malformed)),
+    }
+}
+
+type Range: send {
+    lo: u64,
+    hi: u64,
+    size: u64
+}
+
+fn content_range(b: Bytes) -> Result[Range, Error] {
+    if list.len(b) < 11 || list.slice(b, 0, 6) != string.as_bytes("bytes ") {
+        return Error(Fatal(Malformed))
+    }
+    let mut dash = 6u64
+    while dash < list.len(b) && b[dash] != b'-' {
+        dash += 1
+    }
+    if dash == list.len(b) {
+        return Error(Fatal(Malformed))
+    }
+    let mut slash = dash + 1
+    while slash < list.len(b) && b[slash] != b'/' {
+        slash += 1
+    }
+    if slash == list.len(b) {
+        return Error(Fatal(Malformed))
+    }
+    let lo = decimal(b, 6, dash)?
+    let last = decimal(b, dash + 1, slash)?
+    let size = decimal(b, slash + 1, list.len(b))?
+    if lo > last || last >= size {
+        return Error(Fatal(Malformed))
+    }
+    Ok(Range(lo, hi: last + 1, size))
+}
+
+fn empty_tag() -> ETag {
+    ETag(octets:[0; 64], len: 0)
+}
+
+fn etag(data: Bytes) -> Result[ETag, Error] {
+    if list.len(data) > 64 {
+        return Error(Fatal(Malformed))
+    }
+    let mut result = empty_tag()
+    result.len = list.len(data)
+    for i in 0u64 .. result.len {
+        result.octets[i] = data[i]
+    }
+    Ok(result)
+}
+
+fn tag_bytes(tag: ETag) -> Bytes {
+    let mut out: Bytes = list.with_capacity(tag.len)
+    let _ = bytebuf.append_inline(mut out, tag.octets, 0, tag.len)
+    take out
+}
+
+fn read_meta(head: http_client.ResponseHead, size: u64) -> Result[Meta, Error] {
+    let mut out = new_meta()
+    out.size = size
+    if let Some(value) = header(head, "etag") {
+        out.etag = etag(value)?
+    }
+    if let Some(value) = header(head, "x-amz-meta-hirsel-put-id") {
+        out.put_id = decode_id(value)
+    }
+    if let Some(value) = header(head, "x-amz-checksum-crc64nvme") {
+        if let Some(raw) = base64.decode(value) {
+            if list.len(raw) == 8 {
+                let mut n = 0u64
+                for b in raw {
+                    n = (n << 8) | int.widen(b)
+                }
+                out.crc64 = Some(n)
+            }
+        }
+    }
+    Ok(take out)
+}
+
+fn encode_checksum(mut out: Bytes, crc: u32) {
+    let abc = string.as_bytes("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
+    for shift in 0u32 .. 5 {
+        list.push(mut out, abc[int.widen((crc >> (26 - shift * 6)) & 63)])
+    }
+    list.push(mut out, abc[int.widen((crc & 3) << 4)])
+    list.append(mut out, string.as_bytes("=="))
+}
+
+fn fresh_id(random: Random, mut raw: Bytes) -> Inline[u8, 16] {
+    list.clear(mut raw)
+    host.random(random, mut raw)
+    let mut id: Inline[u8, 16] =[0; 16]
+    for i in 0u64 .. 16 {
+        id[i] = raw[i]
+    }
+    id
+}
+
+fn encode_id(mut out: Bytes, id: Inline[u8, 16]) {
+    let hex = string.as_bytes("0123456789abcdef")
+    for i in 0u64 .. 16 {
+        let b = id[i]
+        list.push(mut out, hex[int.widen(b >> 4)])
+        list.push(mut out, hex[int.widen(b & 15)])
+    }
+}
+
+fn decode_id(data: Bytes) -> Option[Inline[u8, 16]] {
+    if list.len(data) != 32 {
+        return None
+    }
+    let mut id: Inline[u8, 16] =[0; 16]
+    for i in 0u64 .. 16 {
+        let Some(a) = hex_value(data[i * 2]) else {
+            return None
+        }
+        let Some(b) = hex_value(data[i * 2 + 1]) else {
+            return None
+        }
+        id[i] = a * 16 + b
+    }
+    Some(id)
+}
+
+fn hex_value(b: u8) -> Option[u8] {
+    let c = int.to_ascii_lower(b)
+    if int.is_ascii_digit(c) {
+        Some(c - b'0')
+    } else if c >= b'a' && c <= b'f' {
+        Some(c - b'a' + 10)
+    } else {
+        None
+    }
+}
+
+type Endpoint: send {
+    name: String,
+    authority: String,
+    port: u16,
+    secure: bool,
+    roots: Option[Bytes]
+}
+
+fn endpoint(bucket: Bucket, take trust: Trust) -> Result[Endpoint, Error] {
+    let parsed = match uri.parse(bucket.endpoint) {
+        Ok(p) => p,
+        Error(_) => return Error(Fatal(Malformed)),
+    }
+    let Some(scheme) = parsed.scheme else {
+        return Error(Fatal(Malformed))
+    }
+    let secure = string.slice(bucket.endpoint, scheme.start, scheme.end) == "https"
+    if !secure && string.slice(bucket.endpoint, scheme.start, scheme.end) != "http" {
+        return Error(Fatal(Malformed))
+    }
+    let Some(Name(host)) = parsed.host else {
+        return Error(Fatal(Malformed))
+    }
+    if parsed.userinfo != None || parsed.query != None || parsed.fragment != None || (parsed.path.end != parsed.path.start && string.slice(bucket.endpoint, parsed.path.start, parsed.path.end) != "/") || bucket.bucket == "" {
+        return Error(Fatal(Malformed))
+    }
+    let mut name = string.from("")
+    if bucket.style == Virtual {
+        string.push(mut name, bucket.bucket)
+        string.push_char(mut name, '.')
+    }
+    string.push(mut name, string.slice(bucket.endpoint, host.start, host.end))
+    let mut authority = string.from(name)
+    let port = if let Some(p) = uri.port_number(bucket.endpoint, parsed) {
+        string.push_char(mut authority, ':')
+        string.push_u64(mut authority, int.widen(p))
+        p
+    } else if secure {
+        443
+    } else {
+        80
+    }
+    if !http.valid_authority(string.as_bytes(authority)) {
+        return Error(Fatal(Malformed))
+    }
+    let roots: Option[Bytes] = match take trust {
+        System => None,
+        Roots(take certs) => Some(take certs),
+    }
+    Ok(Endpoint(name: take name, authority: take authority, port, secure, roots: take roots))
+}
+
+type Job: send {
+    ticket: u64,
+    op: Operation,
+    path: String,
+    query: String,
+    data: Bytes,
+    tag: ETag,
+    id: Option[Inline[u8, 16]],
+    lo: u64,
+    hi: u64,
+    deadline: u64,
+    entries: List[Entry]
+}
+
+type Value: send = Object(Meta) | Existing | Listed(Page) | Initiated(String)
+
+type Reply: send {
+    lane: u64,
+    ticket: u64,
+    path: String,
+    result: Result[Value, Error],
+    data: Bytes,
+    entries: List[Entry]
+}
+
+fn method(op: Operation) -> String {
+    match op {
+        Fetch => "GET",
+        FetchRange => "GET",
+        ListObjects => "GET",
+        Head => "HEAD",
+        Put => "PUT",
+        PutConditional => "PUT",
+        Part => "PUT",
+        Erase => "DELETE",
+        Abort => "DELETE",
+        Upload => "POST",
+        Complete => "POST",
+        CompleteConditional => "POST",
+    }
+}
+
+fn uploads_body(op: Operation) -> bool {
+    op == Put || op == PutConditional || op == Part || op == Complete || op == CompleteConditional
+}
+
+fn payload_read(op: Operation) -> bool {
+    op == Fetch || op == FetchRange
+}
+
+const HOST_FIELD: u64 = 0
+
+const MATCH_FIELD: u64 = 1
+
+const NO_CLOBBER_FIELD: u64 = 2
+
+const RANGE_FIELD: u64 = 3
+
+const CHECKSUM_FIELD: u64 = 4
+
+const PAYLOAD_FIELD: u64 = 5
+
+const DATE_FIELD: u64 = 6
+
+const ID_FIELD: u64 = 7
+
+const TOKEN_FIELD: u64 = 8
+
+const AUTH_FIELD: u64 = 9
+
+const FIELD_COUNT: u64 = 10
+
+type WireBuffers: send {
+    values: List[Bytes],
+    headers: List[http_client.Header],
+    signing: Bytes,
+    target: String,
+    range_text: String
+}
+
+fn wire_buffers() -> WireBuffers {
+    let mut values: List[Bytes] = list.with_capacity(FIELD_COUNT)
+    for i in 0u64 .. FIELD_COUNT {
+        let capacity = if i == TOKEN_FIELD {
+            4096u64
+        } else if i == HOST_FIELD || i == AUTH_FIELD {
+            1024u64
+        } else {
+            64u64
+        }
+        list.push(mut values, list.with_capacity(capacity))
+    }
+    WireBuffers(values: take values, headers: list.with_capacity(FIELD_COUNT), signing: list.with_capacity(16384), target: string.with_capacity(8192), range_text: string.with_capacity(64))
+}
+
+fn field_name(index: u64) -> String {
+    match index {
+        0 => "host",
+        1 => "if-match",
+        2 => "if-none-match",
+        3 => "range",
+        4 => "x-amz-checksum-crc32c",
+        5 => "x-amz-content-sha256",
+        6 => "x-amz-date",
+        7 => "x-amz-meta-hirsel-put-id",
+        8 => "x-amz-security-token",
+        9 => "authorization",
+        _ => fail("unknown signed field"),
+    }
+}
+
+fn value_buffer(mut slots: List[Bytes], index: u64) -> Bytes {
+    let mut out = list.set(mut slots, index, list.new())
+    list.clear(mut out)
+    take out
+}
+
+fn set_header(mut headers: List[http_client.Header], index: u64, take value: Bytes) {
+    list.push(mut headers, http_client.Header(name: field_name(index), value: Public(take value)))
+}
+
+fn copy_header(mut headers: List[http_client.Header], mut slots: List[Bytes], index: u64, from: Bytes) {
+    let mut out = value_buffer(mut slots, index)
+    list.append(mut out, from)
+    set_header(mut headers, index, take out)
+}
+
+fn reclaim_header(mut slots: List[Bytes], take h: http_client.Header) {
+    let http_client.Header(name: take name, value: take value) = take h
+    let Public(take data) = take value else {
+        fail("object signing returned a protected header")
+    }
+    for i in 0u64 .. FIELD_COUNT {
+        if name == field_name(i) {
+            let _ = list.set(mut slots, i, take data)
+            return
+        }
+    }
+    fail("object signing returned an unknown header")
+}
+
+fn reclaim_headers(mut w: WireBuffers, take sent: List[http_client.Header]) {
+    let mut headers = take sent
+    while let Some(take h) = list.pop(mut headers) {
+        reclaim_header(mut w.values, take h)
+    }
+    w.headers = take headers
+}
+
+fn reclaim_request(mut w: WireBuffers, take req: http_client.Request) {
+    let http_client.Request(target: take target, headers: take sent, ..) = take req
+    w.target = take target
+    reclaim_headers(mut w, take sent)
+}
+
+fn signed_request(mut job: Job, op: Operation, server: Endpoint, keys: sigv4.SigningKeys, access_key: String, token: String, clock: Clock, skew: i64, crc: Option[u32], from: u64, to: u64, tag: ETag, mut w: WireBuffers) -> Result[http_client.Request, Error] {
+    let now = host.wall_ms(clock)
+    let timestamp = if skew < 0 {
+        now - order.min(now, int.narrow(int.abs(skew)))
+    } else {
+        int.saturating_add(now, int.narrow(int.abs(skew)))
+    }
+    let mut headers = replace(mut w.headers, list.new())
+    let mut date = value_buffer(mut w.values, DATE_FIELD)
+    if let Error(_) = sigv4.write_date(mut date, timestamp) {
+        let _ = list.set(mut w.values, DATE_FIELD, take date)
+        w.headers = take headers
+        return Error(Fatal(Malformed))
+    }
+    copy_header(mut headers, mut w.values, HOST_FIELD, string.as_bytes(server.authority))
+    if payload_read(op) && tag.len != 0 {
+        let mut field = value_buffer(mut w.values, MATCH_FIELD)
+        let _ = bytebuf.append_inline(mut field, tag.octets, 0, tag.len)
+        set_header(mut headers, MATCH_FIELD, take field)
+    }
+    if op == PutConditional || op == CompleteConditional {
+        copy_header(mut headers, mut w.values, NO_CLOBBER_FIELD, string.as_bytes("*"))
+    }
+    if payload_read(op) && (op == FetchRange || from != 0) {
+        string.clear(mut w.range_text)
+        string.push(mut w.range_text, "bytes=")
+        string.push_u64(mut w.range_text, from)
+        string.push_char(mut w.range_text, '-')
+        if to != MAX_U64 {
+            string.push_u64(mut w.range_text, to - 1)
+        }
+        copy_header(mut headers, mut w.values, RANGE_FIELD, string.as_bytes(w.range_text))
+    }
+    let valid_crc = uploads_body(op) && crc != None
+    if valid_crc {
+        let mut field = value_buffer(mut w.values, CHECKSUM_FIELD)
+        encode_checksum(mut field, option.unwrap(crc))
+        set_header(mut headers, CHECKSUM_FIELD, take field)
+    }
+    copy_header(mut headers, mut w.values, PAYLOAD_FIELD, string.as_bytes("UNSIGNED-PAYLOAD"))
+    set_header(mut headers, DATE_FIELD, take date)
+    if op == Upload || op == Put || op == PutConditional {
+        if let Some(id) = job.id {
+            let mut field = value_buffer(mut w.values, ID_FIELD)
+            encode_id(mut field, id)
+            set_header(mut headers, ID_FIELD, take field)
+        }
+    }
+    if token != "" {
+        copy_header(mut headers, mut w.values, TOKEN_FIELD, string.as_bytes(token))
+    }
+    let uri_path = replace(mut job.path, string.new())
+    let query = if op == Head {
+        string.new()
+    } else {
+        replace(mut job.query, string.new())
+    }
+    let signed = sigv4.Request(method: method(op), uri: take uri_path, query: take query, headers: take headers, payload: if !server.secure && valid_crc {
+        Plaintext
+    } else {
+        Tls
+    })
+    let mut authorization = value_buffer(mut w.values, AUTH_FIELD)
+    let authorized = sigv4.authorize(keys, now, timestamp, access_key, signed, mut w.signing, mut authorization)
+    let sigv4.Request(headers: take signed_fields, uri: take restored_path, query: take restored_query, ..) = take signed
+    job.path = take restored_path
+    if op != Head {
+        job.query = take restored_query
+    }
+    if let Error(_) = authorized {
+        let _ = list.set(mut w.values, AUTH_FIELD, take authorization)
+        reclaim_headers(mut w, take signed_fields)
+        return Error(Fatal(Malformed))
+    }
+    let mut target = replace(mut w.target, string.new())
+    string.clear(mut target)
+    string.push(mut target, job.path)
+    if op != Head && job.query != "" {
+        string.push_char(mut target, '?')
+        string.push(mut target, job.query)
+    }
+    let mut actual_fields = take signed_fields
+    let host = list.remove(mut actual_fields, 0)
+    reclaim_header(mut w.values, take host)
+    set_header(mut actual_fields, AUTH_FIELD, take authorization)
+    Ok(http_client.Request(method: method(op), target: take target, headers: take actual_fields, body: Fixed(if uploads_body(op) {
+        list.len(job.data)
+    } else {
+        0
+    })))
+}
+
+type Failure: send {
+    phase: Phase,
+    reason: Reason,
+    status: u16,
+    code: Bytes,
+    server_time: Option[u64]
+}
+
+type Exchange: send = Received(Value) | Refused(Failure) | Invalid(Error)
+
+fn failure(phase: Phase, e: http_client.Error) -> Exchange {
+    let reason: Reason = match e {
+        Deadline => Deadline,
+        Cancelled => Cancelled,
+        _ => Http(e),
+    }
+    match e {
+        InvalidRequest => Invalid(Fatal(take reason)),
+        State => Invalid(Fatal(take reason)),
+        NoSpace => Invalid(Fatal(take reason)),
+        UnsupportedSwitch => Invalid(Fatal(take reason)),
+        TooLarge => Invalid(TooLarge),
+        _ => Refused(Failure(phase, reason: take reason, status: 0, code: list.new(), server_time: None)),
+    }
+}
+
+fn xml_field(data: String, tag: String) -> Option[View[String]] in data {
+    let mut opening = string.from("<")
+    string.push(mut opening, tag)
+    string.push_char(mut opening, '>')
+    let mut closing = string.from("</")
+    string.push(mut closing, tag)
+    string.push_char(mut closing, '>')
+    let Some(first) = string.find(data, 0, opening) else {
+        return None
+    }
+    let begin_at = first + string.byte_len(opening)
+    let Some(end) = string.find(data, begin_at, closing) else {
+        return None
+    }
+    Some(string.slice(data, begin_at, end))
+}
+
+fn xml_decoded(data: String) -> Result[String, Error] {
+    let mut out = string.from("")
+    let mut at = 0u64
+    loop {
+        let Some(amp) = string.find(data, at, "&") else {
+            string.push(mut out, string.slice(data, at, string.byte_len(data)))
+            return Ok(take out)
+        }
+        string.push(mut out, string.slice(data, at, amp))
+        let Some(end) = string.find(data, amp + 1, ";") else {
+            return Error(Fatal(Malformed))
+        }
+        let name = string.slice(data, amp + 1, end)
+        let c = if name == "amp" {
+            '&'
+        } else if name == "lt" {
+            '<'
+        } else if name == "gt" {
+            '>'
+        } else if name == "quot" {
+            '"'
+        } else if name == "apos" {
+            '\''
+        } else {
+            let octets = string.as_bytes(name)
+            let (begin_at, radix) = if string.starts_with(name, "#x") {
+                (2u64, 16u32)
+            } else if string.starts_with(name, "#") {
+                (1u64, 10u32)
+            } else {
+                return Error(Fatal(Malformed))
+            }
+            if begin_at >= list.len(octets) {
+                return Error(Fatal(Malformed))
+            }
+            let scalar = match int.parse_uint(string.slice(name, begin_at, list.len(octets)), radix) {
+                Ok(n) => n,
+                Error(_) => return Error(Fatal(Malformed)),
+            }
+            if scalar > 0x10ffff {
+                return Error(Fatal(Malformed))
+            }
+            let Some(ch) = char.from_u32(int.narrow(scalar)) else {
+                return Error(Fatal(Malformed))
+            }
+            ch
+        }
+        string.push_char(mut out, c)
+        at = end + 1
+    }
+}
+
+fn fragment(b: Bytes, begin_at: u64, needle: Bytes) -> Option[u64] {
+    if list.len(needle) > list.len(b) {
+        return None
+    }
+    let end = list.len(b) - list.len(needle)
+    for i in begin_at .. end + 1 {
+        if list.slice(b, i, i + list.len(needle)) == needle {
+            return Some(i)
+        }
+    }
+    None
+}
+
+fn xml_text(b: Bytes) -> Result[String, Error] {
+    match string.from_utf8(copy_bytes(b)) {
+        Ok(take s) => Ok(take s),
+        Error(_) => Error(Fatal(Malformed)),
+    }
+}
+
+fn parse_entry(body: String, prefix: String) -> Result[Entry, Error] {
+    let Some(raw_key) = xml_field(body, "Key") else {
+        return Error(Fatal(Malformed))
+    }
+    let key = xml_decoded(raw_key)?
+    if !string.starts_with(key, prefix) {
+        return Error(Fatal(Malformed))
+    }
+    let Some(raw_size) = xml_field(body, "Size") else {
+        return Error(Fatal(Malformed))
+    }
+    let Some(raw_etag) = xml_field(body, "ETag") else {
+        return Error(Fatal(Malformed))
+    }
+    let decoded = xml_decoded(raw_etag)?
+    let size = decimal(string.as_bytes(raw_size), 0, string.byte_len(raw_size))?
+    let relative = string.from(string.slice(key, string.byte_len(prefix), string.byte_len(key)))
+    Ok(Entry(key: take relative, size, etag: etag(string.as_bytes(decoded))?))
+}
+
+fn consume(mut buffer: Bytes, n: u64) {
+    let rest = list.len(buffer) - n
+    list.copy_within(mut buffer, n, 0, rest)
+    list.truncate(mut buffer, rest)
+}
+
+fn receive_failure(e: http_client.Error) -> Exchange {
+    failure(ResponseBody, e)
+}
+
+fn collect(mut c: http_client.Connection, mut into: Bytes, mut overflow: Bytes) -> Result[(), http_client.Error] waits {
+    list.clear(mut overflow)
+    loop {
+        if list.len(into) == list.capacity(into) {
+            return if http_client.read(mut c, mut overflow)? == 0 {
+                Ok(())
+            } else {
+                Error(TooLarge)
+            }
+        }
+        if http_client.read(mut c, mut into)? == 0 {
+            return Ok(())
+        }
+    }
+}
+
+fn listing(mut c: http_client.Connection, prefix: String, mut entries: List[Entry], mut buffer: Bytes) -> Exchange waits {
+    list.clear(mut buffer)
+    let mut truncated: Option[bool] = None
+    let mut closed = false
+    let mut at = 0u64
+    loop {
+        let Some(begin_at) = list.find_byte(buffer, at, list.len(buffer), b'<') else {
+            if list.len(buffer) == list.capacity(buffer) {
+                return Invalid(TooLarge)
+            }
+            list.clear(mut buffer)
+            at = 0
+            match http_client.read(mut c, mut buffer) {
+                Ok(0) => break,
+                Ok(_) => continue,
+                Error(e) => return receive_failure(e),
+            }
+        }
+        let Some(stop) = list.find_byte(buffer, begin_at, list.len(buffer), b'>') else {
+            consume(mut buffer, begin_at)
+            at = 0
+            match http_client.read(mut c, mut buffer) {
+                Ok(0) => return Invalid(Fatal(Malformed)),
+                Ok(_) => continue,
+                Error(e) => return receive_failure(e),
+            }
+        }
+        let (entry, page, final_tag) = {
+            let tag = list.slice(buffer, begin_at, stop + 1)
+            (tag == string.as_bytes("<Contents>"), tag == string.as_bytes("<IsTruncated>"), tag == string.as_bytes("</ListBucketResult>"))
+        }
+        if final_tag {
+            closed = true
+        }
+        if entry || page {
+            let end = if entry {
+                string.as_bytes("</Contents>")
+            } else {
+                string.as_bytes("</IsTruncated>")
+            }
+            let Some(end_at) = fragment(buffer, stop + 1, end) else {
+                consume(mut buffer, begin_at)
+                at = 0
+                if list.len(buffer) == list.capacity(buffer) {
+                    return Invalid(TooLarge)
+                }
+                match http_client.read(mut c, mut buffer) {
+                    Ok(0) => return Invalid(Fatal(Malformed)),
+                    Ok(_) => continue,
+                    Error(e) => return receive_failure(e),
+                }
+            }
+            let body = list.slice(buffer, stop + 1, end_at)
+            if entry {
+                if list.len(entries) == list.capacity(entries) {
+                    return Invalid(TooLarge)
+                }
+                match xml_text(body) {
+                    Ok(text) => {
+                        match parse_entry(text, prefix) {
+                            Ok(take parsed) => list.push(mut entries, take parsed),
+                            Error(take e) => return Invalid(take e),
+                        }
+                    },
+                    Error(take e) => return Invalid(take e),
+                }
+            } else {
+                if body == string.as_bytes("true") {
+                    truncated = Some(true)
+                } else if body == string.as_bytes("false") {
+                    truncated = Some(false)
+                } else {
+                    return Invalid(Fatal(Malformed))
+                }
+            }
+            at = end_at + list.len(end)
+        } else {
+            at = stop + 1
+        }
+    }
+    let Some(more) = truncated else {
+        return Invalid(Fatal(Malformed))
+    }
+    if !closed {
+        return Invalid(Fatal(Malformed))
+    }
+    let after = if list.len(entries) == 0 {
+        string.from("")
+    } else {
+        clone(entries[list.len(entries) - 1].key)
+    }
+    Received(Listed(Page(truncated: more, after: take after)))
+}
+
+fn status_failure(status: u16, body: Bytes) -> Failure {
+    let mut code: Bytes = list.new()
+    let mut server_time: Option[u64] = None
+    if let Ok(text) = xml_text(body) {
+        if let Some(tag) = xml_field(text, "Code") {
+            code = copy_bytes(string.as_bytes(tag))
+        }
+        if let Some(value) = xml_field(text, "ServerTime") {
+            if let Ok((stamp, _)) = time.parse_rfc3339(value) {
+                let seconds = time.unix_secs(stamp)
+                if seconds >= 0 {
+                    let sec: u64 = int.narrow(seconds)
+                    server_time = Some(int.saturating_mul(sec, 1000u64))
+                }
+            }
+        }
+    }
+    Failure(phase: ResponseHead, reason: Status(status, clone(code)), status, code: take code, server_time)
+}
+
+type ReadProgress: send {
+    initial: u64,
+    size: Option[u64],
+    tag: ETag
+}
+
+fn receive_object(mut c: http_client.Connection, mut into: Bytes, mut progress: ReadProgress, status: u16, lo: u64, hi: u64, mut probe: Bytes) -> Exchange waits {
+    let (found, expected) = {
+        let head = http_client.head(c)
+        if status == 206 {
+            let Some(field) = header(head, "content-range") else {
+                return Invalid(Fatal(Malformed))
+            }
+            let range = match content_range(field) {
+                Ok(value) => value,
+                Error(take e) => return Invalid(take e),
+            }
+            if range.lo != lo || range.hi != order.min(hi, range.size) {
+                return Invalid(Fatal(Malformed))
+            }
+            if let Some(prev) = progress.size {
+                if prev != range.size {
+                    return Invalid(Precondition)
+                }
+            }
+            let n = range.hi - range.lo
+            if let Some(field_n) = content_length(head) {
+                if field_n != n {
+                    return Invalid(Fatal(Malformed))
+                }
+            }
+            (read_meta(head, range.size), Some(n))
+        } else if status == 200 && lo == 0 && hi == MAX_U64 {
+            let size = content_length(head)
+            (read_meta(head, size_or(size, 0)), size)
+        } else {
+            return Invalid(Fatal(Malformed))
+        }
+    }
+    let mut received = match take found {
+        Ok(take info) => take info,
+        Error(take e) => return Invalid(take e),
+    }
+    if progress.tag.len != 0 {
+        if progress.tag != received.etag {
+            return Invalid(Precondition)
+        }
+    } else if received.etag.len != 0 {
+        progress.tag = received.etag
+    }
+    if status == 206 || expected != None {
+        progress.size = Some(received.size)
+    }
+    let begin_at = list.len(into)
+    if let Some(n) = expected {
+        if n > list.capacity(into) - begin_at {
+            return Invalid(TooLarge)
+        }
+    }
+    match collect(mut c, mut into, mut probe) {
+        Ok(()) => {},
+        Error(e) => return receive_failure(e),
+    }
+    let n = list.len(into) - begin_at
+    if let Some(want) = expected {
+        if n != want {
+            return Invalid(Fatal(Malformed))
+        }
+    }
+    if status == 200 && expected == None {
+        received.size = n
+    }
+    Received(Object(take received))
+}
+
+fn receive_control(mut c: http_client.Connection, octets: u64, put: Option[Inline[u8, 16]], op: Operation, status: u16, prefix: String, mut entries: List[Entry], mut buffer: Bytes, mut probe: Bytes) -> Exchange waits {
+    if op == ListObjects && status == 200 {
+        return listing(mut c, prefix, mut entries, mut buffer)
+    }
+    list.clear(mut buffer)
+    if let Error(e) = collect(mut c, mut buffer, mut probe) {
+        return receive_failure(e)
+    }
+    if status < 200 || status >= 300 || fragment(buffer, 0, string.as_bytes("<Error")) != None {
+        return Refused(status_failure(status, buffer))
+    }
+    if op == Upload {
+        let Ok(text) = xml_text(buffer) else {
+            return Invalid(Fatal(Malformed))
+        }
+        let Some(id) = xml_field(text, "UploadId") else {
+            return Invalid(Fatal(Malformed))
+        }
+        return match xml_decoded(id) {
+            Ok(take value) => Received(Initiated(take value)),
+            Error(take e) => Invalid(take e),
+        }
+    }
+    let head = http_client.head(c)
+    let mut info = match read_meta(head, if op == Head {
+        size_or(content_length(head), 0)
+    } else {
+        octets
+    }) {
+        Ok(take value) => take value,
+        Error(take e) => return Invalid(take e),
+    }
+    if op == Complete || op == CompleteConditional {
+        let Ok(text) = xml_text(buffer) else {
+            return Invalid(Fatal(Malformed))
+        }
+        let Some(tag) = xml_field(text, "ETag") else {
+            return Invalid(Fatal(Malformed))
+        }
+        let Ok(decoded) = xml_decoded(tag) else {
+            return Invalid(Fatal(Malformed))
+        }
+        info.etag = match etag(string.as_bytes(decoded)) {
+            Ok(value) => value,
+            Error(take e) => return Invalid(take e),
+        }
+    }
+    if (op == Put || op == PutConditional || op == Complete || op == CompleteConditional) {
+        info.put_id = put
+    }
+    Received(Object(take info))
+}
+
+const IDLE_NS: u64 = 4000000000
+
+const FRESH_NS: u64 = 1000000000
+
+const RESOLVE_NS: u64 = 300000000000
+
+const COOL_DOWN_NS: u64 = 100000000
+
+type Held: send {
+    connection: http_client.Connection,
+    address: Addr,
+    idle_at: u64
+}
+
+type PoolMessage: send = Acquire(u64) | Release(Addr, bool) | Measured(u64, Addr, u64) | ResolveNow
+
+type PoolReply: send = Address(Option[Addr]) | Rotate(bool)
+
+type Peer: send {
+    ip: Ip,
+    listed: bool,
+    open: u64,
+    blocked: u64,
+    count: u64,
+    next: u64,
+    rates: Inline[u64, 9]
+}
+
+type Pool: send {
+    network: Net,
+    clock: Clock,
+    tasks: Tasks,
+    server: Endpoint,
+    input: Receiver[PoolMessage],
+    timer_tx: Sender[PoolMessage],
+    replies: List[Sender[PoolReply]],
+    peers: List[Peer]
+}
+
+fn ip_equal(a: Ip, b: Ip) -> bool {
+    match (a, b) {
+        (V4(x), V4(y)) => x == y,
+        (V6(x, y), V6(v, w)) => x == v && y == w,
+        _ => false,
+    }
+}
+
+fn peer_index(peers: List[Peer], ip: Ip) -> Option[u64] {
+    for i in 0u64 .. list.len(peers) {
+        if ip_equal(peers[i].ip, ip) {
+            return Some(i)
+        }
+    }
+    None
+}
+
+fn resolve_peers(n: Net, c: Clock, name: String, deadline: u64, mut peers: List[Peer]) -> Result[(), NetError] waits {
+    let mut ips: List[Ip] = list.with_capacity(16)
+    let count = match host.resolve(n, name, mut ips, At(c, deadline)) {
+        Ok(resolved) => resolved,
+        Error(e) => return Error(e),
+    }
+    if count == 0 {
+        return Error(Reset)
+    }
+    for i in 0u64 .. list.len(peers) {
+        peers[i].listed = false
+    }
+    for ip in ips {
+        if let Some(index) = peer_index(peers, ip) {
+            peers[index].listed = true
+        } else {
+            list.push(mut peers, Peer(ip, listed: true, open: 0, blocked: 0, count: 0, next: 0, rates:[0; 9]))
+        }
+    }
+    list.retain(mut peers, fn(p: Peer) -> bool {
+        p.listed || p.open != 0
+    })
+    Ok(())
+}
+
+fn rate(p: Peer) -> u64 {
+    if p.count == 0 {
+        return 0
+    }
+    let mut ordered = p.rates
+    for i in 1u64 .. p.count {
+        let n = ordered[i]
+        let mut j = i
+        while j > 0 && ordered[j - 1] > n {
+            ordered[j] = ordered[j - 1]
+            j -= 1
+        }
+        ordered[j] = n
+    }
+    ordered[p.count / 2]
+}
+
+fn preferred(peers: List[Peer], i: u64, now: u64) -> bool {
+    if !peers[i].listed || peers[i].blocked > now {
+        return false
+    }
+    let this_rate = rate(peers[i])
+    if this_rate == 0 {
+        return true
+    }
+    let mut faster = 0u64
+    let mut measured = 0u64
+    for p in peers {
+        if p.listed && p.blocked <= now {
+            let other = rate(p)
+            if other != 0 {
+                measured += 1
+                if other > this_rate {
+                    faster += 1
+                }
+            }
+        }
+    }
+    faster < (measured + 1) / 2
+}
+
+fn acquire(mut pool: Pool) -> Option[Addr] {
+    let now = host.mono_ns(pool.clock)
+    let mut chosen: Option[u64] = None
+    for i in 0u64 .. list.len(pool.peers) {
+        if preferred(pool.peers, i, now) {
+            if let Some(old) = chosen {
+                if pool.peers[i].open < pool.peers[old].open {
+                    chosen = Some(i)
+                }
+            } else {
+                chosen = Some(i)
+            }
+        }
+    }
+    if let Some(i) = chosen {
+        pool.peers[i].open += 1
+        return Some(Addr(ip: pool.peers[i].ip, port: pool.server.port))
+    }
+    None
+}
+
+fn pool_loop(take setup: Pool) waits {
+    let mut pool = take setup
+    let mut next = int.saturating_add(host.mono_ns(pool.clock), RESOLVE_NS)
+    let mut timer = clock.alarm(pool.tasks, pool.clock, next, pool.timer_tx, ResolveNow)
+    while let Ok(message) = channel.receive(pool.input) {
+        match message {
+            Acquire(lane) => {
+                let address = acquire(mut pool)
+                let _ = channel.try_send(pool.replies[lane], Address(address))
+            },
+            Release(address, blocked) => {
+                if let Some(i) = peer_index(pool.peers, address.ip) {
+                    pool.peers[i].open -= 1
+                    if blocked {
+                        pool.peers[i].blocked = int.saturating_add(host.mono_ns(pool.clock), COOL_DOWN_NS)
+                    }
+                    if pool.peers[i].open == 0 && !pool.peers[i].listed {
+                        let _ = list.remove(mut pool.peers, i)
+                    }
+                }
+            },
+            Measured(lane, address, throughput) => {
+                let now = host.mono_ns(pool.clock)
+                let mut rotate = true
+                if let Some(i) = peer_index(pool.peers, address.ip) {
+                    if throughput != 0 {
+                        let at = pool.peers[i].next
+                        pool.peers[i].rates[at] = throughput
+                        pool.peers[i].next = (at + 1) % 9
+                        pool.peers[i].count = order.min(9, pool.peers[i].count + 1)
+                    }
+                    rotate = !preferred(pool.peers, i, now)
+                }
+                let _ = channel.try_send(pool.replies[lane], Rotate(rotate))
+            },
+            ResolveNow => {
+                let _ = task.join(take timer)
+                let now = host.mono_ns(pool.clock)
+                let _ = resolve_peers(pool.network, pool.clock, pool.server.name, int.saturating_add(now, FRESH_NS), mut pool.peers)
+                let current = host.mono_ns(pool.clock)
+                let skipped = (current - next) / RESOLVE_NS + 1
+                next = int.saturating_add(next, int.saturating_mul(skipped, RESOLVE_NS))
+                timer = clock.alarm(pool.tasks, pool.clock, next, pool.timer_tx, ResolveNow)
+            },
+        }
+    }
+    let _ = task.cancel_join(take timer)
+}
+
+type LaneMessage: send = Work(Job) | Reap
+
+type LaneEvent: send = Finished(Reply) | LaneFailed
+
+resource type LaneOutput: send {
+    tx: Sender[LaneEvent]
+} drop(output) {
+    let _ = channel.try_send(output.tx, LaneFailed)
+}
+
+type Lane: send {
+    index: u64,
+    network: Net,
+    tasks: Tasks,
+    clock: Clock,
+    random: Random,
+    server: Endpoint,
+    prefix: String,
+    signer: sigv4.Signer,
+    signer_day: u64,
+    access_key: String,
+    token: String,
+    pool: Sender[PoolMessage],
+    lease: Receiver[PoolReply],
+    input: Receiver[LaneMessage],
+    wake: Sender[LaneMessage],
+    output: LaneOutput,
+    held: Option[Held],
+    wire: WireBuffers,
+    control: Bytes,
+    probe: Bytes,
+    jitter: Bytes,
+    skew: i64
+}
+
+fn connect_to(n: Net, server: Endpoint, address: Addr, clock: Clock, end: u64) -> Result[http_client.Connection, http_client.Error] waits {
+    if server.secure {
+        let trust: Trust = match server.roots {
+            Some(cert) => Roots(copy_bytes(cert)),
+            None => System,
+        }
+        http_client.open_tls(n, address, server.authority, server.name, trust, clock, end)
+    } else {
+        http_client.open(n, address, server.authority, clock, end)
+    }
+}
+
+fn open_connection(mut lane: Lane, end: u64) -> Result[Held, Failure] waits {
+    let _ = channel.send(lane.pool, Acquire(lane.index))
+    let address = match channel.receive(lane.lease) {
+        Ok(Address(Some(address))) => address,
+        _ => return Error(Failure(phase: BeforeRequest, reason: Net(Reset), status: 0, code: list.new(), server_time: None)),
+    }
+    let connection = connect_to(lane.network, lane.server, address, lane.clock, end)
+    match connection {
+        Ok(take c) => Ok(Held(connection: take c, address, idle_at: host.mono_ns(lane.clock))),
+        Error(e) => {
+            let _ = channel.send(lane.pool, Release(address, true))
+            let reason: Reason = match e {
+                Deadline => Deadline,
+                Cancelled => Cancelled,
+                _ => Http(e),
+            }
+            Error(Failure(phase: BeforeRequest, reason: take reason, status: 0, code: list.new(), server_time: None))
+        },
+    }
+}
+
+fn release(mut lane: Lane) waits {
+    let old = replace(mut lane.held, None)
+    if let Some(take h) = take old {
+        let Held(connection: take c, address, ..) = take h
+        http_client.close(take c)
+        let _ = channel.send(lane.pool, Release(address, false))
+    }
+}
+
+fn exchange(mut lane: Lane, mut job: Job, op: Operation, mut progress: ReadProgress, crc: Option[u32]) -> Exchange waits {
+    let at = host.mono_ns(lane.clock)
+    let idle_limit = if op == PutConditional || op == Complete || op == CompleteConditional {
+        FRESH_NS
+    } else {
+        IDLE_NS
+    }
+    let expired = match lane.held {
+        Some(old) => at - old.idle_at >= idle_limit,
+        None => false,
+    }
+    if expired {
+        release(mut lane)
+    }
+    let current = replace(mut lane.held, None)
+    let mut h = match take current {
+        Some(take held) => take held,
+        None => {
+            match open_connection(mut lane, job.deadline) {
+                Ok(take held) => take held,
+                Error(take f) => return Refused(take f),
+            }
+        },
+    }
+    let (from, to) = if payload_read(op) {
+        (job.lo + (list.len(job.data) - progress.initial), job.hi)
+    } else {
+        (0u64, MAX_U64)
+    }
+    let sent_size = list.len(job.data)
+    let keys = sigv4.share_keys(lane.signer)
+    let expected_tag = progress.tag
+    let req = signed_request(mut job, op, lane.server, keys, lane.access_key, lane.token, lane.clock, lane.skew, crc, from, to, expected_tag, mut lane.wire)
+    let result = match take req {
+        Error(take e) => Invalid(take e),
+        Ok(take wire) => {
+            let response = transact(mut h.connection, wire, mut job, op, mut progress, from, to, lane.prefix, mut lane.control, mut lane.probe)
+            reclaim_request(mut lane.wire, take wire)
+            take response
+        },
+    }
+    let elapsed = host.mono_ns(lane.clock) - at
+    let throughput: u64 = match result {
+        Received(_) if elapsed != 0 => {
+            let n = if payload_read(op) {
+                list.len(job.data) - sent_size
+            } else if uploads_body(op) {
+                sent_size
+            } else {
+                0
+            }
+            int.saturating_mul(n, 1000000000u64) / elapsed
+        },
+        _ => 0,
+    }
+    let reusable = http_client.reusable(h.connection)
+    let mut rotate = false
+    if reusable || throughput != 0 {
+        let _ = channel.send(lane.pool, Measured(lane.index, h.address, throughput))
+        if let Ok(Rotate(value)) = channel.receive(lane.lease) {
+            rotate = value
+        }
+    }
+    if reusable && !rotate {
+        h.idle_at = host.mono_ns(lane.clock)
+        lane.held = Some(take h)
+        return take result
+    }
+    let Held(connection: take c, address, ..) = take h
+    http_client.close(take c)
+    let _ = channel.send(lane.pool, Release(address, false))
+    take result
+}
+
+fn transact(mut c: http_client.Connection, wire: http_client.Request, mut job: Job, op: Operation, mut progress: ReadProgress, from: u64, to: u64, prefix: String, mut control: Bytes, mut probe: Bytes) -> Exchange waits {
+    if let Error(e) = http_client.start(mut c, wire, job.deadline) {
+        return failure(if http_client.request_started(c) {
+            RequestSent
+        } else {
+            BeforeRequest
+        }, e)
+    }
+    if uploads_body(op) {
+        if let Error(e) = http_client.write(mut c, job.data) {
+            return failure(RequestSent, e)
+        }
+    }
+    if let Error(e) = http_client.finish_request(mut c, MAX_U64) {
+        return failure(RequestSent, e)
+    }
+    let status = http_client.status(http_client.head(c))
+    if payload_read(op) && status >= 200 && status < 300 {
+        return receive_object(mut c, mut job.data, mut progress, status, from, to, mut probe)
+    }
+    let octets = list.len(job.data)
+    let id = job.id
+    receive_control(mut c, octets, id, op, status, prefix, mut job.entries, mut control, mut probe)
+}
+
+fn wait_retry(mut lane: Lane, attempt: u64, throttle: bool, deadline: u64) waits {
+    let base = if throttle {
+        100000000u64
+    } else {
+        10000000u64
+    }
+    let span = base << (attempt - 1)
+    list.clear(mut lane.jitter)
+    host.random(lane.random, mut lane.jitter)
+    let mut sample = 0u64
+    for b in lane.jitter {
+        sample = (sample << 8) | int.widen(b)
+    }
+    let wake = int.saturating_add(host.mono_ns(lane.clock), span + sample % span)
+    host.sleep_until(lane.clock, order.min(wake, deadline))
+}
+
+type Resolution: send = Committed(Value) | Reissue | Doubtful | Undecided
+
+fn resolve_write(mut lane: Lane, mut job: Job, mut read: ReadProgress) -> Resolution waits {
+    if host.mono_ns(lane.clock) >= job.deadline {
+        return Undecided
+    }
+    match exchange(mut lane, mut job, Head, mut read, None) {
+        Received(Object(m)) => {
+            if m.put_id == job.id {
+                Committed(Object(m))
+            } else {
+                Committed(Existing)
+            }
+        },
+        Refused(f) => {
+            match classify(Head, f.phase, f.status, f.code, false) {
+                Missing => Reissue,
+                Retry => Undecided,
+                Throttle => Undecided,
+                _ => Doubtful,
+            }
+        },
+        _ => Doubtful,
+    }
+}
+
+fn retry(mut lane: Lane, mut job: Job) -> Result[Value, Error] waits {
+    let original_entries = list.len(job.entries)
+    let mut progress = ReadProgress(initial: list.len(job.data), size: None, tag: job.tag)
+    let crc = if job.op == Put || job.op == PutConditional || job.op == Part {
+        Some(crc32c.update(0, job.data))
+    } else {
+        None
+    }
+    let mut pending = false
+    let mut ambiguous = false
+    let mut skewed = false
+    let mut last: Reason = Deadline
+    let op = job.op
+    let mut attempt = 0u64
+    while attempt < MAX_ATTEMPTS && host.mono_ns(lane.clock) < job.deadline {
+        let day = host.wall_ms(lane.clock) / 86400000
+        if day != lane.signer_day {
+            if let Error(_) = sigv4.refresh(mut lane.signer, lane.clock) {
+                return Error(Fatal(Malformed))
+            }
+            lane.signer_day = day
+        }
+        attempt += 1
+        let mut throttle = false
+        if !pending {
+            let outcome = exchange(mut lane, mut job, op, mut progress, crc)
+            match take outcome {
+                Received(take value) => return Ok(take value),
+                Invalid(take e) => {
+                    list.truncate(mut job.entries, original_entries)
+                    return Error(take e)
+                },
+                Refused(take response) => {
+                    let Failure(phase, reason: take reason, status, code: take code, server_time) = take response
+                    if let Cancelled = reason {
+                        list.truncate(mut job.entries, original_entries)
+                        return if phase != BeforeRequest && (op == PutConditional || op == Complete || op == CompleteConditional) {
+                            Error(Uncertain(take reason))
+                        } else {
+                            Error(Retriable(take reason))
+                        }
+                    }
+                    let decision = classify(op, phase, status, code, ambiguous)
+                    last = take reason
+                    match decision {
+                        Accept => return Ok(Object(new_meta())),
+                        AlreadyExists => return Ok(Existing),
+                        Changed => return Error(Precondition),
+                        Missing => {
+                            if ambiguous && (op == Complete || op == CompleteConditional) {
+                                pending = true
+                            } else {
+                                return Error(NotFound)
+                            }
+                        },
+                        Reject => return Error(Fatal(take last)),
+                        Refresh => return Error(Fatal(take last)),
+                        Resolve => {
+                            pending = true
+                            ambiguous = true
+                        },
+                        Throttle => {
+                            throttle = true
+                        },
+                        CorrectSkew => {
+                            let Some(corrected) = server_time else {
+                                return Error(Fatal(take last))
+                            }
+                            if skewed || corrected > 253402300799000u64 {
+                                return Error(Fatal(take last))
+                            }
+                            let server_ms: i64 = int.narrow(corrected)
+                            let local_ms: i64 = int.narrow(host.wall_ms(lane.clock))
+                            lane.skew = server_ms - local_ms
+                            skewed = true
+                        },
+                        Retry => {},
+                    }
+                },
+            }
+        }
+        if pending {
+            match resolve_write(mut lane, mut job, mut progress) {
+                Committed(take value) => return Ok(take value),
+                Reissue => {
+                    pending = false
+                },
+                Doubtful => return Error(Uncertain(take last)),
+                Undecided => {},
+            }
+        }
+        list.truncate(mut job.entries, original_entries)
+        if payload_read(op) && list.len(job.data) > progress.initial && progress.tag.len == 0 {
+            return Error(Retriable(take last))
+        }
+        if attempt < MAX_ATTEMPTS && host.mono_ns(lane.clock) < job.deadline {
+            wait_retry(mut lane, attempt, throttle, job.deadline)
+        }
+    }
+    if pending {
+        return Error(Uncertain(take last))
+    }
+    if host.mono_ns(lane.clock) >= job.deadline {
+        return Error(Retriable(Deadline))
+    }
+    Error(Retriable(take last))
+}
+
+type IdleTimer: send {
+    clock: Clock,
+    input: Receiver[u64],
+    output: Sender[LaneMessage]
+}
+
+fn idle_timer(take timer: IdleTimer) waits {
+    while let Ok(at) = channel.receive(timer.input) {
+        host.sleep_until(timer.clock, at)
+        if let Error(_) = channel.send(timer.output, Reap) {
+            return
+        }
+    }
+}
+
+fn on_idle(lane: Lane) -> Option[u64] {
+    match lane.held {
+        Some(h) => Some(int.saturating_add(h.idle_at, IDLE_NS)),
+        None => None,
+    }
+}
+
+fn lane_loop(take setup: Lane) waits {
+    let mut lane = take setup
+    let (arm, inbound): (Sender[u64], Receiver[u64]) = channel.new(1)
+    let timer = task.spawn(lane.tasks, bytes 4096, IdleTimer(clock: lane.clock, input: take inbound, output: channel.sender(lane.wake)), idle_timer)
+    let mut armed = false
+    while let Ok(take next) = channel.receive(lane.input) {
+        match take next {
+            Work(take pending) => {
+                let mut job = take pending
+                let result = retry(mut lane, mut job)
+                if !armed {
+                    if let Some(at) = on_idle(lane) {
+                        let _ = channel.send(arm, at)
+                        armed = true
+                    }
+                }
+                let Job(ticket, path: take path, data: take data, entries: take entries, ..) = take job
+                if let Error(_) = channel.send(lane.output.tx, Finished(Reply(lane: lane.index, ticket, path: take path, result: take result, data: take data, entries: take entries))) {
+                    break
+                }
+            },
+            Reap => {
+                armed = false
+                if let Some(end) = on_idle(lane) {
+                    if host.mono_ns(lane.clock) >= end {
+                        release(mut lane)
+                    } else {
+                        let _ = channel.send(arm, end)
+                        armed = true
+                    }
+                }
+            },
+        }
+    }
+    release(mut lane)
+    let _ = task.cancel_join(take timer)
+}
+
+type Worker {
+    task: Task[()],
+    input: Sender[LaneMessage]
+}
+
+pub opaque type Client {
+    bucket: Bucket,
+    lanes: List[Worker],
+    output: Receiver[LaneEvent],
+    resolver: Task[()],
+    next: u64,
+    random: Random,
+    entropy: Bytes,
+    path: String
+}
+
+type PartReceipt: send {
+    size: u64,
+    tag: ETag
+}
+
+pub opaque type Upload: send {
+    path: String,
+    upload_id: String,
+    put_id: Inline[u8, 16],
+    mode: Mode,
+    parts: List[PartReceipt]
+}
+
+/// Starts the requested lanes with shares of a caller-owned signing root.
+pub fn start(n: Net, tasks: Tasks, take bucket: Bucket, take signer: sigv4.Signer, access_key: String, token: String, take trust: Trust, c: Clock, random: Random, lanes: u64, lane_bytes: u64, deadline: u64) -> Result[Client, Error] waits {
+    let server = endpoint(bucket, take trust)?
+    if lanes == 0 {
+        return Error(Fatal(Malformed))
+    }
+    let mut peers: List[Peer] = list.with_capacity(16)
+    if let Error(e) = resolve_peers(n, c, server.name, deadline, mut peers) {
+        return Error(Retriable(Net(e)))
+    }
+    let mut workers: List[Worker] = list.with_capacity(lanes)
+    let mut replies: List[Sender[PoolReply]] = list.with_capacity(lanes)
+    let (pool_tx, pool_rx): (Sender[PoolMessage], Receiver[PoolMessage]) = channel.new(lanes * 2 + 2)
+    let (tx, output): (Sender[LaneEvent], Receiver[LaneEvent]) = channel.new(lanes * 2)
+    let mut daily_signer = take signer
+    if let Error(_) = sigv4.refresh(mut daily_signer, c) {
+        return Error(Fatal(Malformed))
+    }
+    let day = host.wall_ms(c) / 86400000
+    for index in 0u64 .. lanes {
+        let (input, rx): (Sender[LaneMessage], Receiver[LaneMessage]) = channel.new(2)
+        let (lease_tx, lease): (Sender[PoolReply], Receiver[PoolReply]) = channel.new(1)
+        list.push(mut replies, take lease_tx)
+        let events = match LaneOutput(tx: channel.sender(tx)) {
+            Ok(take output_handle) => take output_handle,
+            Error(_) => return Error(TooLarge),
+        }
+        let setup = Lane(index, network: n, tasks, clock: c, random, server: clone(server), prefix: clone(bucket.prefix), signer: sigv4.share_signer(daily_signer), signer_day: day, access_key: string.from(access_key), token: string.from(token), pool: channel.sender(pool_tx), lease: take lease, input: take rx, wake: channel.sender(input), output: take events, held: None, wire: wire_buffers(), control: list.with_capacity(32768), probe: list.with_capacity(1), jitter: list.with_capacity(8), skew: 0)
+        let worker = task.spawn(tasks, bytes lane_bytes, take setup, lane_loop)
+        list.push(mut workers, Worker(task: take worker, input: take input))
+    }
+    let pool = Pool(network: n, clock: c, tasks, server: take server, input: take pool_rx, timer_tx: take pool_tx, replies: take replies, peers: take peers)
+    let resolver = task.spawn(tasks, bytes lane_bytes, take pool, pool_loop)
+    Ok(Client(bucket: take bucket, lanes: take workers, output: take output, resolver: take resolver, next: 0, random, entropy: list.with_capacity(16), path: string.with_capacity(4096)))
+}
+
+fn new_job(op: Operation, take path: String, take data: Bytes, deadline: u64) -> Job {
+    Job(ticket: 0, op, path: take path, query: string.from(""), data: take data, tag: empty_tag(), id: None, lo: 0, hi: MAX_U64, deadline, entries: list.new())
+}
+
+fn submit(worker: Worker, index: u64, take request: Job) -> Option[Reply] waits {
+    match channel.send(worker.input, Work(take request)) {
+        Ok(()) => None,
+        Error(Closed(Work(take returned))) => {
+            let Job(ticket, path: take path, data: take data, entries: take entries, ..) = take returned
+            Some(Reply(lane: index, ticket, path: take path, result: Error(Retriable(Cancelled)), data: take data, entries: take entries))
+        },
+        Error(_) => fail("object client submitted an invalid lane message"),
+    }
+}
+
+fn receive(output: Receiver[LaneEvent]) -> Reply waits {
+    match channel.receive(output) {
+        Ok(Finished(take reply)) => take reply,
+        _ => fail("object lane failed while owning a request"),
+    }
+}
+
+fn run(mut c: Client, take request: Job) -> Reply waits {
+    let index = c.next
+    c.next = (index + 1) % list.len(c.lanes)
+    let mut reply = match submit(c.lanes[index], index, take request) {
+        Some(take result) => take result,
+        None => receive(c.output),
+    }
+    c.path = replace(mut reply.path, string.from(""))
+    take reply
+}
+
+fn object_job(mut c: Client, op: Operation, key: String, take data: Bytes, deadline: u64) -> Job {
+    make_path(mut c.path, c.bucket, key, false)
+    let path = replace(mut c.path, string.from(""))
+    new_job(op, take path, take data, deadline)
+}
+
+fn as_meta(take result: Result[Value, Error]) -> Result[Meta, Error] {
+    match take result {
+        Ok(Object(take value)) => Ok(take value),
+        Error(take e) => Error(take e),
+        _ => Error(Fatal(Malformed)),
+    }
+}
+
+fn as_created(take result: Result[Value, Error]) -> Result[Created, Error] {
+    match take result {
+        Ok(Object(take value)) => Ok(Created(take value)),
+        Ok(Existing) => Ok(Exists),
+        Error(take e) => Error(take e),
+        _ => Error(Fatal(Malformed)),
+    }
+}
+
+fn as_unit(take result: Result[Value, Error]) -> Result[(), Error] {
+    match take result {
+        Ok(_) => Ok(()),
+        Error(take e) => Error(take e),
+    }
+}
+
+pub fn fetch(mut c: Client, key: String, take into: Bytes, deadline_ns: u64) -> (Result[Meta, Error], Bytes) waits {
+    let request = object_job(mut c, Fetch, key, take into, deadline_ns)
+    let Reply(result: take result, data: take data, ..) = run(mut c, take request)
+    (as_meta(take result), take data)
+}
+
+/// A nonempty byte interval, inclusive at lo and exclusive at hi.
+pub fn fetch_range(mut c: Client, key: String, lo: u64, hi: u64, take into: Bytes, deadline_ns: u64) -> (Result[Meta, Error], Bytes) waits {
+    if lo >= hi {
+        return (Error(Precondition), take into)
+    }
+    let mut request = object_job(mut c, FetchRange, key, take into, deadline_ns)
+    request.lo = lo
+    request.hi = hi
+    let Reply(result: take result, data: take data, ..) = run(mut c, take request)
+    (as_meta(take result), take data)
+}
+
+pub fn store(mut c: Client, key: String, take body: Bytes, deadline_ns: u64) -> (Result[Meta, Error], Bytes) waits {
+    let mut request = object_job(mut c, Put, key, take body, deadline_ns)
+    request.id = Some(fresh_id(c.random, mut c.entropy))
+    let Reply(result: take result, data: take data, ..) = run(mut c, take request)
+    (as_meta(take result), take data)
+}
+
+pub fn store_no_clobber(mut c: Client, key: String, take body: Bytes, deadline_ns: u64) -> (Result[Created, Error], Bytes) waits {
+    let mut request = object_job(mut c, PutConditional, key, take body, deadline_ns)
+    request.id = Some(fresh_id(c.random, mut c.entropy))
+    let Reply(result: take result, data: take data, ..) = run(mut c, take request)
+    (as_created(take result), take data)
+}
+
+pub fn erase(mut c: Client, key: String, deadline_ns: u64) -> Result[(), Error] waits {
+    let request = object_job(mut c, Erase, key, list.new(), deadline_ns)
+    let Reply(result: take result, ..) = run(mut c, take request)
+    as_unit(take result)
+}
+
+pub fn list(mut c: Client, prefix: String, after: String, mut into: List[Entry], deadline_ns: u64) -> Result[Page, Error] waits {
+    let room = order.min(1000u64, list.capacity(into) - list.len(into))
+    if room == 0 {
+        return Error(TooLarge)
+    }
+    let path = request_path(c.bucket, "", true)
+    let mut request = new_job(ListObjects, take path, list.new(), deadline_ns)
+    let mut query = string.from("list-type=2&max-keys=")
+    string.push_u64(mut query, room)
+    string.push(mut query, "&prefix=")
+    encode(mut query, string.as_bytes(c.bucket.prefix), false)
+    encode(mut query, string.as_bytes(prefix), false)
+    if after != "" {
+        string.push(mut query, "&start-after=")
+        encode(mut query, string.as_bytes(c.bucket.prefix), false)
+        encode(mut query, string.as_bytes(after), false)
+    }
+    request.query = take query
+    request.entries = replace(mut into, list.new())
+    let Reply(result: take result, entries: take entries, ..) = run(mut c, take request)
+    into = take entries
+    match take result {
+        Ok(Listed(take page)) => Ok(take page),
+        Error(take e) => Error(take e),
+        _ => Error(Fatal(Malformed)),
+    }
+}
+
+pub fn upload(mut c: Client, key: String, mode: Mode, deadline_ns: u64) -> Result[Upload, Error] waits {
+    let path = request_path(c.bucket, key, false)
+    let mut request = new_job(Upload, clone(path), list.new(), deadline_ns)
+    let id = fresh_id(c.random, mut c.entropy)
+    request.id = Some(id)
+    request.query = string.from("uploads=")
+    let Reply(result: take result, ..) = run(mut c, take request)
+    match take result {
+        Ok(Initiated(take upload_id)) => Ok(Upload(path: take path, upload_id: take upload_id, put_id: id, mode, parts: list.new())),
+        Error(take e) => Error(take e),
+        _ => Error(Fatal(Malformed)),
+    }
+}
+
+fn upload_query(u: Upload, number: u64) -> String {
+    let mut query = string.from("")
+    if number != 0 {
+        string.push(mut query, "partNumber=")
+        string.push_u64(mut query, number)
+        string.push_char(mut query, '&')
+    }
+    string.push(mut query, "uploadId=")
+    encode(mut query, string.as_bytes(u.upload_id), false)
+    take query
+}
+
+fn first_error(mut current: Result[(), Error], take next: Error) {
+    if let Ok(()) = current {
+        current = Error(take next)
+    }
+}
+
+fn dispatch_next(c: Client, lane_index: u64, mut jobs: List[Option[Job]], mut replies: List[Option[Reply]], mut next: u64) -> bool waits {
+    while next < list.len(jobs) {
+        let ticket = next
+        next += 1
+        let Some(take pending) = list.set(mut jobs, ticket, None) else {
+            fail("object batch dispatched a job twice")
+        }
+        let mut request = take pending
+        request.ticket = ticket
+        let returned = submit(c.lanes[lane_index], lane_index, take request)
+        if let Some(take reply) = take returned {
+            let _ = list.set(mut replies, ticket, Some(take reply))
+        } else {
+            return true
+        }
+    }
+    false
+}
+
+fn run_batch(c: Client, take queued: List[Option[Job]]) -> List[Option[Reply]] waits {
+    let mut jobs = take queued
+    let mut replies: List[Option[Reply]] = list.with_capacity(list.len(jobs))
+    for _ in 0u64 .. list.len(jobs) {
+        list.push(mut replies, None)
+    }
+    let mut next = 0u64
+    let mut active = 0u64
+    for lane_index in 0u64 .. order.min(list.len(c.lanes), list.len(jobs)) {
+        if dispatch_next(c, lane_index, mut jobs, mut replies, mut next) {
+            active += 1
+        }
+    }
+    while active > 0 {
+        let reply = receive(c.output)
+        let lane_index = reply.lane
+        let ticket = reply.ticket
+        let _ = list.set(mut replies, ticket, Some(take reply))
+        if !dispatch_next(c, lane_index, mut jobs, mut replies, mut next) {
+            active -= 1
+        }
+    }
+    take replies
+}
+
+pub fn parts(mut c: Client, mut u: Upload, take bodies: List[Bytes], deadline_ns: u64) -> (Result[(), Error], List[Bytes]) waits {
+    let mut returned = take bodies
+    let count = list.len(returned)
+    let existing = list.len(u.parts)
+    if count > 10000 - existing {
+        return (Error(TooLarge), take returned)
+    }
+    let mut queued: List[Option[Job]] = list.with_capacity(count)
+    for i in 0u64 .. count {
+        let data = list.set(mut returned, i, list.new())
+        let mut request = new_job(Part, clone(u.path), take data, deadline_ns)
+        request.query = upload_query(u, existing + i + 1)
+        list.push(mut queued, Some(take request))
+    }
+    let mut status: Result[(), Error] = Ok(())
+    let rv = run_batch(c, take queued)
+    let mut i = 0u64
+    for take slot in rv {
+        let Reply(result: take outcome, data: take data, ..) = option.unwrap(take slot)
+        match as_meta(take outcome) {
+            Ok(meta) => {
+                if meta.etag.len == 0 {
+                    first_error(mut status, Fatal(Malformed))
+                } else {
+                    list.push(mut u.parts, PartReceipt(size: list.len(data), tag: meta.etag))
+                }
+            },
+            Error(take e) => first_error(mut status, take e),
+        }
+        let _ = list.set(mut returned, i, take data)
+        i += 1
+    }
+    if let Error(_) = status {
+        list.truncate(mut u.parts, existing)
+    }
+    (take status, take returned)
+}
+
+fn xml_encode(mut out: String, raw: Bytes) {
+    for b in raw {
+        match b {
+            b'&' => string.push(mut out, "&amp;"),
+            b'<' => string.push(mut out, "&lt;"),
+            b'>' => string.push(mut out, "&gt;"),
+            _ => string.push_char(mut out, ascii(b)),
+        }
+    }
+}
+
+pub fn complete(mut c: Client, take u: Upload, deadline_ns: u64) -> Result[Created, Error] waits {
+    if list.len(u.parts) == 0 {
+        return Error(Precondition)
+    }
+    let mut xml = string.from("<CompleteMultipartUpload>")
+    let mut size = 0u64
+    for i in 0u64 .. list.len(u.parts) {
+        let p = u.parts[i]
+        string.push(mut xml, "<Part><PartNumber>")
+        string.push_u64(mut xml, i + 1)
+        string.push(mut xml, "</PartNumber><ETag>")
+        xml_encode(mut xml, tag_bytes(p.tag))
+        string.push(mut xml, "</ETag></Part>")
+        size += p.size
+    }
+    string.push(mut xml, "</CompleteMultipartUpload>")
+    let operation: Operation = if u.mode == NoClobber {
+        CompleteConditional
+    } else {
+        Complete
+    }
+    let query = upload_query(u, 0)
+    let Upload(path: take path, put_id, ..) = take u
+    let mut request = new_job(operation, take path, string.into_bytes(take xml), deadline_ns)
+    request.query = take query
+    request.id = Some(put_id)
+    let Reply(result: take result, ..) = run(mut c, take request)
+    match as_created(take result) {
+        Ok(Created(take m)) => {
+            let mut meta = take m
+            meta.size = size
+            Ok(Created(take meta))
+        },
+        other => take other,
+    }
+}
+
+pub fn abort(mut c: Client, take u: Upload, deadline_ns: u64) -> Result[(), Error] waits {
+    let query = upload_query(u, 0)
+    let Upload(path: take path, ..) = take u
+    let mut request = new_job(Abort, take path, list.new(), deadline_ns)
+    request.query = take query
+    let Reply(result: take result, ..) = run(mut c, take request)
+    as_unit(take result)
+}
+
+pub fn fetch_parts(mut c: Client, key: String, take buffers_in: List[Bytes], deadline_ns: u64) -> (Result[Meta, Error], List[Bytes]) waits {
+    let mut buffers = take buffers_in
+    let path = request_path(c.bucket, key, false)
+    let Reply(result: take result, ..) = run(mut c, new_job(Head, clone(path), list.new(), deadline_ns))
+    let info = match as_meta(take result) {
+        Ok(take meta) => take meta,
+        Error(take e) => return (Error(take e), take buffers),
+    }
+    let count = info.size / PART_BYTES + if info.size % PART_BYTES == 0 {
+        0
+    } else {
+        1
+    }
+    if count > list.len(buffers) {
+        return (Error(TooLarge), take buffers)
+    }
+    if count > 0 && info.etag.len == 0 {
+        return (Error(Fatal(Malformed)), take buffers)
+    }
+    for i in 0u64 .. count {
+        let n = order.min(PART_BYTES, info.size - i * PART_BYTES)
+        if n > list.capacity(buffers[i]) - list.len(buffers[i]) {
+            return (Error(TooLarge), take buffers)
+        }
+    }
+    let mut queued: List[Option[Job]] = list.with_capacity(count)
+    for i in 0u64 .. count {
+        let data = list.set(mut buffers, i, list.new())
+        let mut request = new_job(FetchRange, clone(path), take data, deadline_ns)
+        request.lo = i * PART_BYTES
+        request.hi = request.lo + order.min(PART_BYTES, info.size - request.lo)
+        request.tag = info.etag
+        list.push(mut queued, Some(take request))
+    }
+    let mut status: Result[(), Error] = Ok(())
+    let rv = run_batch(c, take queued)
+    let mut i = 0u64
+    for take slot in rv {
+        let Reply(result: take part, data: take data, ..) = option.unwrap(take slot)
+        let _ = list.set(mut buffers, i, take data)
+        match as_meta(take part) {
+            Ok(part_meta) => {
+                if part_meta.size != info.size {
+                    first_error(mut status, Precondition)
+                }
+            },
+            Error(take e) => first_error(mut status, take e),
+        }
+        i += 1
+    }
+    match take status {
+        Ok(()) => (Ok(take info), take buffers),
+        Error(take e) => (Error(take e), take buffers),
+    }
+}

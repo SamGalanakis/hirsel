@@ -29,3 +29,6 @@ caller-provided scratch space for canonicalization. It returns `NoSpace`
 if either buffer has insufficient capacity. `sign` accepts an already
 prepared string to sign. Both operations allocate no storage and reject a
 timestamp with no eligible cached key.
+
+`share_signer` gives another lane a signer with the same root, scope and
+keys. `refresh` updates the cache for the current wall time without waiting.

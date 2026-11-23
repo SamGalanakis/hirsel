@@ -140,6 +140,16 @@ pub fn share_keys(s: Signer) -> SigningKeys {
     SigningKeys(today: share_day(s.keys.today), yesterday: take yesterday)
 }
 
+/// Gives another lane a signer with the same root, scope and current keys.
+pub fn share_signer(s: Signer) -> Signer {
+    Signer(root: secret.share(s.root), aws_region: clone(s.aws_region), service: clone(s.service), keys: share_keys(s))
+}
+
+/// Updates the signing keys for the current wall time without waiting.
+pub fn refresh(mut s: Signer, c: Clock) -> Result[(), Error] {
+    rotate(mut s, host.wall_ms(c))
+}
+
 /// Runs one wall-clock timer. At UTC midnight it derives the new day's key.
 /// At 00:15 it releases yesterday's key. The cache owner calls this in a loop
 /// and publishes keys to the signing lanes after each successful return.
@@ -155,9 +165,16 @@ pub fn wait_for_change(mut s: Signer, c: Clock) -> Result[(), Error] waits {
         host.sleep_until_wall(c, deadline)
         now = host.wall_ms(c)
     }
+    rotate(mut s, now)
+}
+
+fn rotate(mut s: Signer, now: u64) -> Result[(), Error] {
+    let current_day = s.keys.today.day
     let day = now / DAY_MS
     if day == current_day {
-        s.keys.yesterday = None
+        if !in_grace(now) {
+            s.keys.yesterday = None
+        }
         return Ok(())
     }
     let today = day_key(s.root, s.aws_region, s.service, day)?

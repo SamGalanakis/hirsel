@@ -252,7 +252,7 @@ fn wire_semantics(tasks: Tasks) -> bool waits {
     let before_delete = plain(w, "GET", "/match", "")
     let deleted = plain(w, "DELETE", "/match", "")
     let absent = plain(w, "HEAD", "/match", "")
-    let upload_id = begin_parts(w, "/abort", "dddddddddddddddddddddddddddddddd", Normal)
+    let upload_id = begin_parts(w, "/abort", "dddddddddddddddddddddddddddddddd")
     let body = first_part(w, "/abort", upload_id, "partial")
     let path = complete_path("/abort", upload_id)
     let aborted = plain(w, "DELETE", path, "")
@@ -273,134 +273,6 @@ fn header_value(response: WireReply, name: String) -> String {
     string.from("")
 }
 
-type Mode: key = Normal | DropPutId | Unbounded | ExternalJitter
-
-type Outcome: key = Created | Exists | Deadline | Exhausted | Fatal
-
-type Attempt: key = Confirmed | AlreadyExists | Retry | Uncertain | Rejected
-
-type Mutation {
-    path: String,
-    key: String,
-    data: String,
-    id: String,
-    complete: bool
-}
-
-type Operation {
-    outcome: Outcome,
-    attempts: u64,
-    wakes: List[u64],
-    finished: u64
-}
-
-fn classify_attempt(exchange: Result[WireReply, http_client.Error], completing: bool) -> Attempt {
-    match exchange {
-        Error(Connect(_)) => Retry,
-        Error(Cancelled) => Rejected,
-        Error(_) => Uncertain,
-        Ok(response) => {
-            let status = response.status
-            let payload = result.unwrap(string.from_utf8(clone(response.data)))
-            if status == 200 {
-                if completing && string.starts_with(payload, "<Error>") {
-                    return Uncertain
-                }
-                return Confirmed
-            }
-            if status == 412 || status == 304 {
-                return AlreadyExists
-            }
-            if status == 500 || status == 502 || status == 503 || status == 504 || status == 429 {
-                return Uncertain
-            }
-            if status == 400 && string.find(payload, 0, "<Code>RequestTimeout</Code>") != None {
-                return Retry
-            }
-            Rejected
-        }
-    }
-}
-
-fn resolve(w: Wire, change: Mutation, end: u64) -> Attempt waits {
-    match call(w, "HEAD", change.key, list.new(), "", end) {
-        Ok(response) if response.status == 404 => Retry,
-        Ok(response) if response.status == 200 => {
-            if header_value(response, "x-amz-meta-hirsel-put-id") == change.id {
-                Confirmed
-            } else {
-                AlreadyExists
-            }
-        },
-        Ok(_) => Uncertain,
-        Error(_) => Uncertain
-    }
-}
-
-fn delay(w: Wire, random: Random, until: u64, mut wakes: List[u64]) waits {
-    let mut sample: Bytes = list.with_capacity(1)
-    host.random(random, mut sample)
-    let jitter: u64 = int.widen(sample[0] % 10)
-    let at = order.min(until, host.mono_ns(w.time) + 10 + jitter)
-    host.sleep_until(w.time, at)
-    list.push(mut wakes, host.mono_ns(w.time))
-}
-
-fn reference(w: Wire, change: Mutation, end: u64, mode: Mode, seed: u64, external: u64) -> Operation waits {
-    let random = provide.random(if mode == ExternalJitter {
-        external
-    } else {
-        seed
-    })
-    let mut attempts = 0u64
-    let mut wakes: List[u64] = list.new()
-    let mut ambiguous = false
-    let outcome = loop {
-        if host.mono_ns(w.time) >= end {
-            break Deadline
-        }
-        if mode != Unbounded && attempts == 5 {
-            break Exhausted
-        }
-        attempts += 1
-        let mut fields: List[Field] = list.new()
-        add(mut fields, "if-none-match", "*")
-        if !change.complete && mode != DropPutId {
-            add(mut fields, "x-amz-meta-hirsel-put-id", change.id)
-        }
-        let method = if change.complete {
-            "POST"
-        } else {
-            "PUT"
-        }
-        let verdict = classify_attempt(call(w, method, change.path, fields, change.data, end), change.complete)
-        if host.mono_ns(w.time) >= end {
-            break Deadline
-        }
-        match verdict {
-            Confirmed => break Created,
-            AlreadyExists if !ambiguous => break Exists,
-            Rejected => break Fatal,
-            _ => ()
-        }
-        if verdict == Uncertain || ambiguous {
-            ambiguous = true
-            match resolve(w, change, end) {
-                Confirmed => break Created,
-                AlreadyExists => break Exists,
-                Rejected => break Fatal,
-                _ => ()
-            }
-        }
-        delay(w, random, end, mut wakes)
-    }
-    Operation(outcome: outcome, attempts: attempts, wakes: take wakes, finished: host.mono_ns(w.time))
-}
-
-fn make_put(path: String, id: String, data: String) -> Mutation {
-    Mutation(path: clone(path), key: clone(path), data: clone(data), id: clone(id), complete: false)
-}
-
 fn xml_field(xml: String, start: String, stop: String) -> String {
     let (_, rest) = option.unwrap(string.split_once(xml, start))
     let (value, _) = option.unwrap(string.split_once(rest, stop))
@@ -413,11 +285,9 @@ fn join_path(first: String, second: String) -> String {
     take joined
 }
 
-fn begin_parts(w: Wire, key: String, id: String, mode: Mode) -> String waits {
+fn begin_parts(w: Wire, key: String, id: String) -> String waits {
     let mut fields: List[Field] = list.new()
-    if mode != DropPutId {
-        add(mut fields, "x-amz-meta-hirsel-put-id", id)
-    }
+    add(mut fields, "x-amz-meta-hirsel-put-id", id)
     let init_path = join_path(key, "?uploads=")
     let started = result.unwrap(call(w, "POST", init_path, fields, "", 1000000))
     if started.status != 200 {
@@ -444,79 +314,6 @@ fn first_part(w: Wire, key: String, upload: String, payload: String) -> String w
     string.push(mut xml, header_value(saved, "etag"))
     string.push(mut xml, "</ETag></Part></CompleteMultipartUpload>")
     take xml
-}
-
-fn has_object(report: sim.s3.Report, key: String, id: String, payload: String) -> bool {
-    if let Some(object) = map.get(report.objects, key) {
-        if let Some(saved) = map.get(object.metadata, "x-amz-meta-hirsel-put-id") {
-            return saved == id && object.data == string.as_bytes(payload)
-        }
-    }
-    false
-}
-
-fn l1(tasks: Tasks, client: fn(Wire, Mutation, u64, Mode, u64, u64) -> Operation waits, mode: Mode) -> bool waits {
-    // PUT commits and loses its reply. Complete gives 200/Error before committing
-    // on the retry, then loses that reply. HEAD resolves both commits.
-    let (w, server, clock_driver) = fixture(tasks, 11, sequence("200060200"), 412)
-    let put_id = "0123456789abcdef0123456789abcdef"
-    let part_id = "abcdef0123456789abcdef0123456789"
-    let one = client(w, make_put("/one", put_id, "one"), 1000000, mode, 11, 0)
-    let multipart_id = begin_parts(w, "/multi", part_id, mode)
-    let body = first_part(w, "/multi", multipart_id, "two")
-    let change = Mutation(path: complete_path("/multi", multipart_id), key: string.from("/multi"), data: take body, id: string.from(part_id), complete: true)
-    let multi = client(w, change, 1000000, mode, 11, 0)
-    let duplicate = client(w, make_put("/one", part_id, "bad"), 1000000, mode, 11, 0)
-    let stored = result.unwrap(task.join(take server))
-    result.unwrap(task.join(take clock_driver))
-    one.outcome == Created && one.attempts == 1 && multi.outcome == Created && multi.attempts == 2 && duplicate.outcome == Exists && stored.writes == 2 && has_object(stored, "one", put_id, "one") && has_object(stored, "multi", part_id, "two")
-}
-
-fn l2(tasks: Tasks, client: fn(Wire, Mutation, u64, Mode, u64, u64) -> Operation waits, mode: Mode, dialect: u16) -> bool waits {
-    // The first HEAD finds our id, the second finds the competing id, and
-    // the third finds no object until a reset-before-body PUT is retried.
-    let (w, server, clock_driver) = fixture(tasks, 22, sequence("200200100"), dialect)
-    let mine = "10000000000000000000000000000000"
-    let other = "20000000000000000000000000000000"
-    let own = client(w, make_put("/own", mine, "ours"), 1000000, mode, 22, 0)
-    let mut fields: List[Field] = list.new()
-    add(mut fields, "x-amz-meta-hirsel-put-id", other)
-    let winner = result.unwrap(call(w, "PUT", "/race", fields, "theirs", 1000000))
-    let race = client(w, make_put("/race", mine, "late"), 1000000, mode, 22, 0)
-    let duplicate = client(w, make_put("/race", mine, "duplicate"), 1000000, mode, 22, 0)
-    let absent = client(w, make_put("/absent", mine, "retry"), 1000000, mode, 22, 0)
-    let stored = result.unwrap(task.join(take server))
-    result.unwrap(task.join(take clock_driver))
-    winner.status == 200 && own.outcome == Created && race.outcome == Exists && duplicate.outcome == Exists && absent.outcome == Created && absent.attempts == 2 && stored.writes == 3 && has_object(stored, "own", mine, "ours") && has_object(stored, "race", other, "theirs") && has_object(stored, "absent", mine, "retry")
-}
-
-fn l3(tasks: Tasks, client: fn(Wire, Mutation, u64, Mode, u64, u64) -> Operation waits, mode: Mode) -> bool waits {
-    let (w, server, clock_driver) = fixture(tasks, 33, sequence("40504050400"), 412)
-    let retry = client(w, make_put("/never", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "data"), 1000, mode, 33, 0)
-    let observed = result.unwrap(task.join(take server))
-    result.unwrap(task.join(take clock_driver))
-    let (slow, stall_server, stall_driver) = fixture(tasks, 34, sequence("3"), 412)
-    let due = client(slow, make_put("/slow", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "committed"), 91, mode, 34, 0)
-    let stalled = result.unwrap(task.join(take stall_server))
-    result.unwrap(task.join(take stall_driver))
-    retry.outcome == Exhausted && retry.attempts == 5 && observed.attempts == 10 && observed.writes == 0 && due.outcome == Deadline && due.attempts == 1 && due.finished == 91 && stalled.withdrawn == 1 && has_object(stalled, "slow", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "committed")
-}
-
-fn jitter_observation(tasks: Tasks, client: fn(Wire, Mutation, u64, Mode, u64, u64) -> Operation waits, mode: Mode, external: u64) -> Operation waits {
-    let (w, server, clock_driver) = fixture(tasks, 44, sequence("405040500"), 412)
-    let outcome = client(w, make_put("/jitter", "cccccccccccccccccccccccccccccccc", "data"), 1000, mode, 44, external)
-    let stored = result.unwrap(task.join(take server))
-    result.unwrap(task.join(take clock_driver))
-    if stored.writes != 1 {
-        fail("jitter case had no eventual commit")
-    }
-    take outcome
-}
-
-fn l5(tasks: Tasks, client: fn(Wire, Mutation, u64, Mode, u64, u64) -> Operation waits, mode: Mode) -> bool waits {
-    let live = jitter_observation(tasks, client, mode, 1)
-    let repeat = jitter_observation(tasks, client, mode, 2)
-    live.outcome == Created && repeat.outcome == Created && live.attempts == 5 && repeat.attempts == 5 && list.len(live.wakes) == 4 && live.wakes == repeat.wakes && live.finished == repeat.finished
 }
 
 type ManifestMode: key = Fenced | EarlyManifest | FirstGeneration | Unfenced
@@ -568,7 +365,7 @@ fn reference_writer(w: Wire, cut: u64, mode: ManifestMode) -> Progress waits {
             return progress
         }
         let path = pack_key(gen)
-        let upload_id = begin_parts(w, path, "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", Normal)
+        let upload_id = begin_parts(w, path, "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")
         step += 1
         if step == cut {
             return progress
@@ -691,25 +488,194 @@ fn l4(tasks: Tasks, writer: fn(Wire, u64, ManifestMode) -> Progress waits, recov
     recovery_case(tasks, writer, recover, 9, "000000001000", mode) && recovery_case(tasks, writer, recover, 9, "000000002000", mode)
 }
 
-// Each defective policy is an input to the same law as the reference policy.
+fn object_fixture(tasks: Tasks, seed: u64, tape: String, dialect: u16) -> (object.Client, Clock, Task[sim.s3.Report], Task[()]) waits {
+    let address = Addr(ip: V4(2130706433), port: 8080)
+    let mut net_model = sim.net.new(sim.net.defaults())
+    let mut ips: List[Ip] = list.with_capacity(1)
+    list.push(mut ips, address.ip)
+    sim.net.resolve_as(mut net_model, string.from("bucket.s3.test"), take ips)
+    let key = signing_key()
+    let verify = result.unwrap(secret.narrow(key, "verify"))
+    let mut faults: List[sim.s3.Fault] = list.with_capacity(8)
+    list.push(mut faults, Clean)
+    list.push(mut faults, ResetBeforeBody)
+    list.push(mut faults, ResetAfterBody)
+    list.push(mut faults, Stall(100000))
+    list.push(mut faults, InternalError)
+    list.push(mut faults, CompleteError)
+    list.push(mut faults, CutResponse(2))
+    list.push(mut faults, RequireResume(2))
+    let mut words: List[u64] = list.with_capacity(2 * string.byte_len(tape))
+    for choice in sequence(tape) {
+        list.push(mut words, choice << 61)
+        list.push(mut words, seed)
+    }
+    let mut scripts: List[List[u64]] = list.with_capacity(1)
+    list.push(mut scripts, take words)
+    let plan = sim.world.plan_from(sim.world.Script(tail_seed: seed, streams: take scripts), 0)
+    let config = sim.s3.Config(address, network: take net_model, after_resolve: None, credential: string.from(access), signing_key: take verify, faults: take faults, exists_status: dialect, fragment_bytes: 64, max_body: 65536)
+    let (world, time) = sim.world.new(seed, 0, 1369353600000)
+    let (network, port) = provide.net(bytes 131072)
+    let driver = task.spawn(tasks, bytes 65536, take world, live_clock)
+    let server_task = task.spawn(tasks, bytes 8388608, Server(config: take config, plan: take plan, time, port: take port), live_server)
+    let secret_bytes = string.into_bytes(string.from("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"))
+    let root = result.unwrap(secret.seal(take secret_bytes, "kdf"))
+    let bucket = object.Bucket(endpoint: string.from("http://s3.test:8080"), aws_region: string.from("us-east-1"), bucket: string.from("bucket"), prefix: string.from(""), style: Virtual)
+    let signer = result.unwrap(sigv4.open(time, take root, "us-east-1", "s3"))
+    let client = result.unwrap(object.start(network, tasks, take bucket, take signer, "AKIAIOSFODNN7EXAMPLE", "", System, time, provide.random(seed), 2, 1048576, 1000000000))
+    (take client, time, take server_task, take driver)
+}
+
+fn has_saved(report: sim.s3.Report, key: String, body: String) -> bool {
+    if let Some(value) = map.get(report.objects, key) {
+        return value.data == string.as_bytes(body)
+    }
+    false
+}
+
+fn created(value: Result[object.Created, object.Error], size: u64) -> bool {
+    if let Ok(Created(info)) = value {
+        return info.size == size && info.put_id != None
+    }
+    false
+}
+
+fn exists(value: Result[object.Created, object.Error]) -> bool {
+    if let Ok(Exists) = value {
+        return true
+    }
+    false
+}
+
+const OBJECT_END: u64 = 10000000000
+
+fn object_l1(tasks: Tasks) -> bool waits {
+    // Lose the conditional PUT reply. The first Complete returns HTTP 200
+    // with an error body. Lose the reply to the successful retry as well.
+    let (client, _, server, driver) = object_fixture(tasks, 11, "2000050200", 412)
+    let mut c = take client
+    let (one, _) = object.store_no_clobber(mut c, "one", string.into_bytes(string.from("one")), OBJECT_END)
+    let mut uploaded = result.unwrap(object.upload(mut c, "multi", NoClobber, OBJECT_END))
+    let mut bodies: List[Bytes] = list.with_capacity(2)
+    list.push(mut bodies, string.into_bytes(string.from("two")))
+    list.push(mut bodies, string.into_bytes(string.from("three")))
+    let (written, returned) = object.parts(mut c, mut uploaded, take bodies, OBJECT_END)
+    result.unwrap(take written)
+    let complete = object.complete(mut c, take uploaded, OBJECT_END)
+    let (duplicate, _) = object.store_no_clobber(mut c, "one", string.into_bytes(string.from("other")), OBJECT_END)
+    let _ = take c
+    let observed = result.unwrap(task.join(take server))
+    result.unwrap(task.join(take driver))
+    created(one, 3) && created(complete, 8) && exists(duplicate) && returned[0] == string.as_bytes("two") && returned[1] == string.as_bytes("three") && observed.writes == 2 && has_saved(observed, "one", "one") && has_saved(observed, "multi", "twothree")
+}
+
+fn object_l2(tasks: Tasks, dialect: u16) -> bool waits {
+    let (client, _, server, driver) = object_fixture(tasks, 22, "200101000", dialect)
+    let mut c = take client
+    let (own, _) = object.store_no_clobber(mut c, "own", string.into_bytes(string.from("ours")), OBJECT_END)
+    let (winner, _) = object.store(mut c, "race", string.into_bytes(string.from("theirs")), OBJECT_END)
+    let (race, _) = object.store_no_clobber(mut c, "race", string.into_bytes(string.from("late")), OBJECT_END)
+    let (absent, _) = object.store_no_clobber(mut c, "absent", string.into_bytes(string.from("retry")), OBJECT_END)
+    let (duplicate, _) = object.store_no_clobber(mut c, "race", string.into_bytes(string.from("duplicate")), OBJECT_END)
+    let _ = take c
+    let observed = result.unwrap(task.join(take server))
+    result.unwrap(task.join(take driver))
+    result.unwrap(take winner).size == 6 && created(own, 4) && exists(race) && created(absent, 5) && exists(duplicate) && observed.writes == 3 && has_saved(observed, "own", "ours") && has_saved(observed, "race", "theirs") && has_saved(observed, "absent", "retry")
+}
+
+fn object_l3(tasks: Tasks) -> bool waits {
+    let (client, _, server, driver) = object_fixture(tasks, 33, "40404040400", 412)
+    let mut c = take client
+    let (bounded, _) = object.store_no_clobber(mut c, "never", string.into_bytes(string.from("data")), OBJECT_END)
+    let _ = take c
+    let observed = result.unwrap(task.join(take server))
+    result.unwrap(task.join(take driver))
+    if let Error(Retriable(Status(500, _))) = bounded {
+        if observed.attempts != 10 || observed.writes != 0 {
+            return false
+        }
+    } else {
+        return false
+    }
+    let (stall_client, now, stall_server, stall_driver) = object_fixture(tasks, 34, "3", 412)
+    let mut slow = take stall_client
+    let (due, _) = object.store_no_clobber(mut slow, "slow", string.into_bytes(string.from("committed")), 91)
+    let finished_at = host.mono_ns(now)
+    let _ = take slow
+    let stalled = result.unwrap(task.join(take stall_server))
+    result.unwrap(task.join(take stall_driver))
+    if let Error(Uncertain(Deadline)) = due {
+        return finished_at == 91 && stalled.attempts == 1 && stalled.withdrawn == 1 && has_saved(stalled, "slow", "committed")
+    }
+    false
+}
+
+fn jitter_clock(tasks: Tasks, seed: u64) -> u64 waits {
+    let (client, time, server, driver) = object_fixture(tasks, seed, "404040400", 412)
+    let mut c = take client
+    let (made, _) = object.store_no_clobber(mut c, "jitter", string.into_bytes(string.from("data")), OBJECT_END)
+    let finished = host.mono_ns(time)
+    let _ = take c
+    let observed = result.unwrap(task.join(take server))
+    result.unwrap(task.join(take driver))
+    if !created(made, 4) || observed.attempts != 9 || observed.writes != 1 {
+        fail("jitter case changed the retry budget or result")
+    }
+    finished
+}
+
+fn object_l5(tasks: Tasks) -> bool waits {
+    let before = jitter_clock(tasks, 44)
+    let same = jitter_clock(tasks, 44)
+    let other = jitter_clock(tasks, 45)
+    before == same && before != other
+}
+
+fn object_ranges(tasks: Tasks) -> bool waits {
+    let (client, _, server, driver) = object_fixture(tasks, 55, "067000", 412)
+    let mut c = take client
+    let (stored, _) = object.store(mut c, "one", string.into_bytes(string.from("payload")), OBJECT_END)
+    let meta = result.unwrap(take stored)
+    let dst: Bytes = list.with_capacity(7)
+    let (fetched, got) = object.fetch(mut c, "one", take dst, OBJECT_END)
+    if result.unwrap(take fetched).etag != meta.etag || got != string.as_bytes("payload") {
+        fail("GET did not append exactly the missing bytes")
+    }
+    let too_small: Bytes = list.with_capacity(2)
+    let (refused, short) = object.fetch(mut c, "one", take too_small, OBJECT_END)
+    if let Error(TooLarge) = refused {
+        if list.len(short) != 0 {
+            fail("GET read an oversized object")
+        }
+    } else {
+        fail("GET did not recognize insufficient capacity")
+    }
+    let mut entries: List[object.Entry] = list.with_capacity(1)
+    let page = result.unwrap(object.list(mut c, "", "", mut entries, OBJECT_END))
+    let _ = take c
+    let seen = result.unwrap(task.join(take server))
+    result.unwrap(task.join(take driver))
+    seen.writes == 1 && seen.attempts == 5 && list.len(entries) == 1 && entries[0].key == "one" && !page.truncated
+}
+
 // expect: run s3_client_laws(tasks) = true
 fn s3_client_laws(tasks: Tasks) -> bool waits {
-    if !wire_semantics(tasks) {
-        fail("DNS, TLS, If-Match, DELETE or multipart abort")
+    if !wire_semantics(tasks) || !object_ranges(tasks) {
+        fail("DNS, TLS, range resume, DELETE or multipart abort")
     }
-    if !l1(tasks, reference, Normal) || l1(tasks, reference, DropPutId) {
+    if !object_l1(tasks) {
         fail("L1 no-clobber and complete")
     }
-    if !l2(tasks, reference, Normal, 412) || !l2(tasks, reference, Normal, 304) || l2(tasks, reference, DropPutId, 412) {
+    if !object_l2(tasks, 412) || !object_l2(tasks, 304) {
         fail("L2 uncertain resolution")
     }
-    if !l3(tasks, reference, Normal) || l3(tasks, reference, Unbounded) {
+    if !object_l3(tasks) {
         fail("L3 attempt budget and deadline")
     }
     if !l4(tasks, reference_writer, reference_recovery, Fenced) || l4(tasks, reference_writer, reference_recovery, EarlyManifest) || l4(tasks, reference_writer, reference_recovery, FirstGeneration) || l4(tasks, reference_writer, reference_recovery, Unfenced) {
         fail("L4 manifest recovery")
     }
-    if !l5(tasks, reference, Normal) || l5(tasks, reference, ExternalJitter) {
+    if !object_l5(tasks) {
         fail("L5 seeded retry schedule")
     }
     true

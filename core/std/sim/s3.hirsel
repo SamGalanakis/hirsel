@@ -1,5 +1,5 @@
 /// One fault per connection, selected before any request octets arrive.
-pub type Fault: send = Clean | ResetBeforeBody | ResetAfterBody | Stall(u64) | InternalError | SlowDown | CompleteError
+pub type Fault: send = Clean | ResetBeforeBody | ResetAfterBody | Stall(u64) | InternalError | SlowDown | CompleteError | CutResponse(u64) | RequireResume(u64)
 
 pub type Config: send {
     address: Addr,
@@ -392,7 +392,8 @@ fn metadata(fields: Map[String, String]) -> Map[String, String] {
 
 fn etag(data: Bytes) -> String {
     let mut out = string.from("\"")
-    string.push(mut out, hex(sha256.hash(data)))
+    let digest = hex(sha256.hash(data))
+    string.push(mut out, string.slice(digest, 0, 32))
     string.push(mut out, "\"")
     take out
 }
@@ -627,6 +628,45 @@ fn multipart(config: Config, mut bucket: Bucket, req: Request, id: String, take 
     take response
 }
 
+fn ranged(object: Object, value: String) -> Response {
+    if !string.starts_with(value, "bytes=") {
+        return error(416, "InvalidRange")
+    }
+    let range = string.slice(value, 6, string.byte_len(value))
+    let Some((raw_lo, raw_hi)) = string.split_once(range, "-") else {
+        return error(416, "InvalidRange")
+    }
+    let Some(lo) = u64_field(raw_lo) else {
+        return error(416, "InvalidRange")
+    }
+    let size = list.len(object.data)
+    if lo >= size {
+        return error(416, "InvalidRange")
+    }
+    let last = if raw_hi == "" {
+        size - 1
+    } else {
+        let Some(parsed) = u64_field(raw_hi) else {
+            return error(416, "InvalidRange")
+        }
+        order.min(parsed, size - 1)
+    }
+    if last < lo {
+        return error(416, "InvalidRange")
+    }
+    let mut content = string.from("bytes ")
+    string.push_u64(mut content, lo)
+    string.push_char(mut content, '-')
+    string.push_u64(mut content, last)
+    string.push_char(mut content, '/')
+    string.push_u64(mut content, size)
+    let data: Bytes = clone(list.slice(object.data, lo, last + 1))
+    let mut response = Response(status: 206, fields: clone(object.metadata), body: take data)
+    map.insert(mut response.fields, string.from("Content-Range"), take content)
+    map.insert(mut response.fields, string.from("ETag"), clone(object.etag))
+    take response
+}
+
 fn dispatch(config: Config, mut bucket: Bucket, req: Request, take body: Bytes, fault: Fault) -> Response {
     match fault {
         InternalError => return error(500, "InternalError"),
@@ -669,6 +709,25 @@ fn dispatch(config: Config, mut bucket: Bucket, req: Request, take body: Bytes, 
     if req.method == "HEAD" || req.method == "GET" {
         let Some(object) = map.get(bucket.objects, req.target.key) else {
             return error(404, "NoSuchKey")
+        }
+        if req.method == "GET" {
+            let requested = map.get(req.fields, "range")
+            if let RequireResume(expected) = fault {
+                let mut range = string.from("bytes=")
+                string.push_u64(mut range, expected)
+                string.push_char(mut range, '-')
+                let expected_tag = map.get(req.fields, "if-match")
+                if let (Some(value), Some(tag)) = (requested, expected_tag) {
+                    if value != range || tag != object.etag {
+                        return error(400, "InvalidResume")
+                    }
+                } else {
+                    return error(400, "InvalidResume")
+                }
+            }
+            if let Some(value) = requested {
+                return ranged(object, value)
+            }
         }
         let mut out = Response(status: 200, fields: clone(object.metadata), body: clone(object.data))
         map.insert(mut out.fields, string.from("ETag"), clone(object.etag))
@@ -717,7 +776,11 @@ fn respond(mut peer: Peer, response: Response, head: bool) {
     string.push(mut line, "\r\n")
     let mut wire = string.into_bytes(take line)
     if !head && response.status != 304 {
-        list.append(mut wire, response.body)
+        if let CutResponse(n) = peer.fault {
+            list.append(mut wire, list.slice(response.body, 0, order.min(n, list.len(response.body))))
+        } else {
+            list.append(mut wire, response.body)
+        }
     }
     peer.outgoing = take wire
     peer.state = Sending
@@ -833,6 +896,11 @@ fn recv(config: Config, mut peer: Peer, clock: Clock, room: u64, mut served: Ser
     if let Stall(until) = peer.fault {
         if host.mono_ns(clock) < until {
             host.sleep_until(clock, until)
+        }
+    }
+    if let CutResponse(_) = peer.fault {
+        if peer.sent == list.len(peer.outgoing) {
+            return answer(mut served, take c, Failed(Reset))
         }
     }
     let limit = order.min(config.fragment_bytes, order.min(room, list.len(peer.outgoing) - peer.sent))

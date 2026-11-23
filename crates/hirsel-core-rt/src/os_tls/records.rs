@@ -420,7 +420,7 @@ impl Tx {
                     // An abandoned send's cancel (`cancel_send`) leaves the
                     // rest of its slot for the next send, which resumes it.
                     TxState::Sent(error) if error == -libc::ECANCELED || error == -libc::EINTR => {
-                        return flight.slot.send(socket.0, zc.tag, flight.sent..flight.end);
+                        return flight.slot.send(zc.tag, flight.sent..flight.end);
                     }
                     TxState::Sent(error) if error < 0 => {
                         return Err(io::Error::from_raw_os_error(-error));
@@ -429,7 +429,7 @@ impl Tx {
                     TxState::Sent(n) => {
                         flight.sent += n as usize;
                         if flight.sent < flight.end {
-                            return flight.slot.send(socket.0, zc.tag, flight.sent..flight.end);
+                            return flight.slot.send(zc.tag, flight.sent..flight.end);
                         }
                         // The ring keeps the bytes until their notification.
                         zc.flight = None;
@@ -441,7 +441,7 @@ impl Tx {
             }
             let mut slot = zc.filling.take().unwrap();
             let end = std::mem::take(&mut zc.end);
-            slot.send(socket.0, zc.tag, 0..end)?;
+            slot.send(zc.tag, 0..end)?;
             zc.flight = Some(Flight { slot, sent: 0, end });
         }
     }

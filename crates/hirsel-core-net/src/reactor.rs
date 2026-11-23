@@ -10,7 +10,7 @@
 //! chosen once per process ([`reactor`]); both turn a kernel turn into the
 //! same `(tag, flags)` events, so dispatch is shared.
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     io,
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
     sync::{Arc, Mutex, MutexGuard, OnceLock, TryLockError},
@@ -69,7 +69,7 @@ fn send_zc() -> SendZc {
     *SEND_ZC.get().unwrap_or(&SendZc::Auto)
 }
 /// The ring and wake descriptor the probe built, for the first poller.
-static PROBED: Mutex<Option<(Uring, OwnedFd)>> = Mutex::new(None);
+static PROBED: Mutex<Option<Uring>> = Mutex::new(None);
 
 /// Whether `auto` may take io_uring on a kernel of this release
 /// (`uname -r`). Through 6.12, a request reached from the exit fallback
@@ -189,7 +189,7 @@ pub fn reactor() -> io::Result<Reactor> {
 
 pub struct Poller {
     backend: Backend,
-    wake: OwnedFd,
+    wake: Arc<OwnedFd>,
     events: Mutex<Vec<libc::epoll_event>>,
     operations: &'static PollOperations,
 }
@@ -234,10 +234,11 @@ impl Poller {
     }
     fn new_uring() -> io::Result<Arc<Self>> {
         let probed = PROBED.lock().unwrap_or_else(|e| e.into_inner()).take();
-        let (ring, wake) = match probed {
+        let ring = match probed {
             Some(probed) => probed,
             None => Uring::open()?,
         };
+        let wake = ring.wake.clone();
         Ok(Arc::new(Self {
             backend: Backend::Uring(Box::new(ring)),
             wake,
@@ -254,7 +255,7 @@ impl Poller {
             unsafe { OwnedFd::from_raw_fd(checked(libc::epoll_create1(libc::EPOLL_CLOEXEC))?) };
         let poller = Arc::new(Self {
             backend: Backend::Epoll(epoll),
-            wake: eventfd()?,
+            wake: Arc::new(eventfd()?),
             events: Mutex::new(Vec::with_capacity(POLL_BATCH as usize)),
             operations: &PollOperations {
                 poll: Self::poll_epoll,
@@ -296,24 +297,24 @@ impl Poller {
     /// A waiter for this direction of `fd` has just parked under `tag`. Its
     /// syscall has already returned EAGAIN, and the readiness it waits for
     /// is reported however soon it arrives.
-    fn park(&self, fd: i32, tag: u64, write: bool) -> io::Result<()> {
+    fn park(&self, tag: u64, write: bool) {
         match &self.backend {
-            Backend::Epoll(_) => Ok(()),
-            Backend::Uring(ring) => ring.park(fd, tag, write),
+            Backend::Epoll(_) => {}
+            Backend::Uring(ring) => ring.park(tag, write),
         }
     }
     /// Watch `fd` for every direction under `tag`: epoll edge-triggered now,
     /// io_uring once a waiter parks.
-    fn add(&self, fd: i32, tag: u64) -> io::Result<()> {
+    fn add(&self, fd: &Arc<OwnedFd>, tag: u64) -> io::Result<()> {
         match &self.backend {
             Backend::Epoll(_) => self.epoll_ctl(
                 libc::EPOLL_CTL_ADD,
-                fd,
+                fd.as_raw_fd(),
                 INTEREST | libc::EPOLLET as u32,
                 tag,
             ),
             Backend::Uring(ring) => {
-                ring.add(tag);
+                ring.add(tag, fd.clone());
                 Ok(())
             }
         }
@@ -332,7 +333,8 @@ impl Poller {
                     // does not.
                     unsafe { libc::shutdown(fd, libc::SHUT_RD) };
                 }
-                ring.remove(tag)
+                ring.remove(tag);
+                Ok(())
             }
         }
     }
@@ -372,7 +374,7 @@ impl Poller {
             unreachable!("the pool waits on an epoll poller directly")
         };
         let _turn = self.events.lock().unwrap_or_else(|e| e.into_inner());
-        let n = ring.wait(out, timeout_ms, self.wake.as_raw_fd());
+        let n = ring.wait(out, timeout_ms);
         if out[..n].iter().any(|event| event.u64 == WAKE) {
             self.drain();
         }
@@ -423,7 +425,7 @@ impl Poller {
         events.clear();
         crate::EPOLL_WAITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         events.resize(POLL_BATCH as usize, libc::epoll_event { events: 0, u64: 0 });
-        let len = ring.wait(&mut events, timeout_ms, self.wake.as_raw_fd());
+        let len = ring.wait(&mut events, timeout_ms);
         events.truncate(len);
         if events.iter().any(|event| event.u64 == WAKE) {
             self.drain();
@@ -447,19 +449,21 @@ impl Poller {
     }
 
     fn wake_eventfd(&self) {
-        let one = 1u64;
-        loop {
-            // SAFETY: nonblocking eventfd, readable eight-byte counter.
-            if unsafe { libc::write(self.wake.as_raw_fd(), (&one as *const u64).cast(), 8) } >= 0 {
-                return;
-            }
-            if io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
-                return;
-            }
-        }
+        signal(self.wake.as_raw_fd());
     }
     fn drain(&self) {
         drain(self.wake.as_raw_fd());
+    }
+}
+fn signal(fd: i32) {
+    let one = 1u64;
+    loop {
+        // SAFETY: nonblocking eventfd, readable eight-byte counter.
+        if unsafe { libc::write(fd, (&raw const one).cast(), 8) } >= 0
+            || io::Error::last_os_error().raw_os_error() != Some(libc::EINTR)
+        {
+            return;
+        }
     }
 }
 fn drain(fd: i32) {
@@ -480,13 +484,12 @@ fn drain(fd: i32) {
 /// kernel, up to a scheduler tick later while that thread computes.
 struct Uring {
     ring: io_uring::IoUring,
+    wake: Arc<OwnedFd>,
     /// Serializes every submission-queue access; completions are read only
     /// under the driver turn.
-    sq: Mutex<()>,
-    /// Watched tags, with whether each direction's (read, write) one-shot
-    /// poll is in the kernel: set when a parked waiter arms it, cleared when
-    /// its completion is reaped. Lock before `sq`.
-    watched: Mutex<HashMap<u64, [bool; 2]>>,
+    sq: Mutex<Submissions>,
+    /// Lock before `sq`.
+    watched: Mutex<HashMap<u64, Watch>>,
     /// The kernel ended the wake eventfd's multishot poll, which waits for
     /// completion-queue room to be re-armed. Touched only under the driver turn.
     wake_ended: Mutex<bool>,
@@ -496,6 +499,35 @@ struct Uring {
     zc: bool,
     /// A sparse registered-buffer table exists for transmit slots.
     sparse: bool,
+    #[cfg(test)]
+    refuse_submit: std::sync::atomic::AtomicBool,
+}
+
+struct Watch {
+    fd: Arc<OwnedFd>,
+    /// Set when a waiter arms the direction and cleared when the driver reaps it.
+    polling: [bool; 2],
+}
+
+struct Submission {
+    entry: io_uring::squeue::Entry,
+    /// The kernel resolves an fd number when it consumes the entry. Keep
+    /// the descriptor open through a short or failed enter, even after close.
+    _fd: Option<Arc<OwnedFd>>,
+}
+
+#[derive(Default)]
+struct Submissions {
+    entries: VecDeque<Submission>,
+    /// Prefix already visible in the shared SQ. The rest waits for space.
+    published: usize,
+}
+
+impl Submissions {
+    fn consumed(&mut self, remaining: usize) {
+        self.entries.drain(..self.published - remaining);
+        self.published = remaining;
+    }
 }
 impl Uring {
     const ENTRIES: u32 = 64;
@@ -511,7 +543,7 @@ impl Uring {
     /// A ring whose kernel runs multishot polls and bounded waits, with its
     /// wake eventfd already watched. Any refusal (an old kernel, a seccomp
     /// filter, `io_uring_disabled`) is an error, and the caller uses epoll.
-    fn open() -> io::Result<(Uring, OwnedFd)> {
+    fn open() -> io::Result<Uring> {
         use io_uring::{cqueue, opcode, register::Probe};
         let unsupported = || io::Error::from(io::ErrorKind::Unsupported);
         let ring = io_uring::IoUring::builder()
@@ -537,25 +569,28 @@ impl Uring {
                 .is_ok();
         let uring = Uring {
             ring,
-            sq: Mutex::new(()),
+            wake: Arc::new(eventfd()?),
+            sq: Mutex::default(),
             watched: Mutex::new(HashMap::new()),
             wake_ended: Mutex::new(false),
             tx: Mutex::default(),
             zc,
             sparse,
+            #[cfg(test)]
+            refuse_submit: std::sync::atomic::AtomicBool::new(false),
         };
-        let wake = eventfd()?;
-        uring.arm_wake(wake.as_raw_fd())?;
+        uring.arm_wake();
+        let wake = uring.wake.as_raw_fd();
         // A multishot poll must report a wake and stay armed.
         let one = 1u64;
         // SAFETY: nonblocking eventfd, readable eight-byte counter.
-        if unsafe { libc::write(wake.as_raw_fd(), (&one as *const u64).cast(), 8) } != 8 {
+        if unsafe { libc::write(wake, (&one as *const u64).cast(), 8) } != 8 {
             return Err(io::Error::last_os_error());
         }
         uring.ring.submitter().submit_and_wait(1)?;
         // SAFETY: no poller exists yet; this is the only completion reader.
         let cqe = unsafe { uring.ring.completion_shared() }.next();
-        drain(wake.as_raw_fd());
+        drain(wake);
         match cqe {
             Some(cqe)
                 if cqe.user_data() == WAKE
@@ -563,41 +598,68 @@ impl Uring {
                     && cqe.result() as u32 & libc::EPOLLIN as u32 != 0
                     && cqueue::more(cqe.flags()) =>
             {
-                Ok((uring, wake))
+                Ok(uring)
             }
             _ => Err(unsupported()),
         }
     }
 
-    fn push(&self, entry: io_uring::squeue::Entry) -> io::Result<()> {
-        let _sq = self.sq.lock().unwrap_or_else(|e| e.into_inner());
-        loop {
-            // SAFETY: `sq` serializes submission-queue access.
-            let pushed = unsafe { self.ring.submission_shared().push(&entry) }.is_ok();
-            match self.ring.submitter().submit() {
-                Ok(_) => {}
-                // Entries left in the queue go in with the next enter.
-                Err(e)
-                    if matches!(
-                        e.raw_os_error(),
-                        Some(libc::EBUSY | libc::EAGAIN | libc::EINTR)
-                    ) => {}
-                Err(e) => return Err(e),
+    fn submit(&self) -> io::Result<usize> {
+        #[cfg(test)]
+        if self
+            .refuse_submit
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return Err(io::Error::from_raw_os_error(libc::EBUSY));
+        }
+        self.ring.submitter().submit()
+    }
+
+    fn flush(&self, pending: &mut Submissions) {
+        // SAFETY: the caller holds `sq`, the only submission-queue writer.
+        let mut sq = unsafe { self.ring.submission_shared() };
+        pending.consumed(sq.len());
+        while !pending.entries.is_empty() {
+            for submission in pending.entries.iter().skip(pending.published) {
+                // SAFETY: the queue owns descriptors and the transmit table
+                // retains any bytes named by the entry until completion.
+                if unsafe { sq.push(&submission.entry) }.is_err() {
+                    break;
+                }
+                pending.published += 1;
             }
-            if pushed {
-                return Ok(());
+            sq.sync();
+            // Once published an entry can be consumed by any enter. Even a
+            // failed enter leaves it owned by the queue. Only the shared head
+            // tells us what was consumed while another thread could enter.
+            let _ = self.submit();
+            sq.sync();
+            let progressed = sq.len() < pending.published;
+            pending.consumed(sq.len());
+            if !progressed || pending.published != 0 {
+                break;
             }
         }
     }
 
+    fn push(&self, entry: io_uring::squeue::Entry, fd: Option<Arc<OwnedFd>>) {
+        let mut pending = self.sq.lock().unwrap_or_else(|e| e.into_inner());
+        pending.entries.push_back(Submission { entry, _fd: fd });
+        self.flush(&mut pending);
+        if !pending.entries.is_empty() {
+            signal(self.wake.as_raw_fd());
+        }
+    }
+
     /// The wake eventfd is always writable; only its counter matters.
-    fn arm_wake(&self, fd: i32) -> io::Result<()> {
+    fn arm_wake(&self) {
         use io_uring::{opcode, types};
         self.push(
-            opcode::PollAdd::new(types::Fd(fd), libc::EPOLLIN as u32)
+            opcode::PollAdd::new(types::Fd(self.wake.as_raw_fd()), libc::EPOLLIN as u32)
                 .multi(true)
                 .build()
                 .user_data(WAKE),
+            Some(self.wake.clone()),
         )
     }
 
@@ -605,55 +667,63 @@ impl Uring {
         if write { tag | WRITE_POLL } else { tag }
     }
 
-    fn add(&self, tag: u64) {
+    fn add(&self, tag: u64, fd: Arc<OwnedFd>) {
         let mut watched = self.watched.lock().unwrap_or_else(|e| e.into_inner());
-        watched.insert(tag, [false; 2]);
+        watched.insert(
+            tag,
+            Watch {
+                fd,
+                polling: [false; 2],
+            },
+        );
     }
 
     /// Arm this direction's one-shot poll of the watched `tag` unless it is
     /// already in the kernel. A poll checks readiness as it is armed, so
     /// bytes that arrived after the waiter's EAGAIN complete it at once.
-    fn park(&self, fd: i32, tag: u64, write: bool) -> io::Result<()> {
+    fn park(&self, tag: u64, write: bool) {
         use io_uring::{opcode, types};
         let mut watched = self.watched.lock().unwrap_or_else(|e| e.into_inner());
-        let polling = &mut watched.entry(tag).or_default()[usize::from(write)];
+        let watch = watched.get_mut(&tag).unwrap();
+        let polling = &mut watch.polling[usize::from(write)];
         if *polling {
-            return Ok(());
+            return;
         }
         let interest = if write { Self::WRITE } else { Self::READ };
         self.push(
-            opcode::PollAdd::new(types::Fd(fd), interest)
+            opcode::PollAdd::new(types::Fd(watch.fd.as_raw_fd()), interest)
                 .build()
                 .user_data(Self::poll_data(tag, write)),
-        )?;
+            Some(watch.fd.clone()),
+        );
         *polling = true;
-        Ok(())
     }
 
     /// Stop watching `tag`, cancelling its polls still in the kernel. Each
     /// holds its own file reference until it is retired.
-    fn remove(&self, tag: u64) -> io::Result<()> {
+    fn remove(&self, tag: u64) {
         let mut watched = self.watched.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(polling) = watched.remove(&tag) else {
-            return Ok(());
+        let Some(watch) = watched.remove(&tag) else {
+            return;
         };
-        for (write, polling) in [false, true].into_iter().zip(polling) {
+        for (write, polling) in [false, true].into_iter().zip(watch.polling) {
             if polling {
                 self.push(
                     io_uring::opcode::PollRemove::new(Self::poll_data(tag, write))
                         .build()
                         .user_data(REMOVED),
-                )?;
+                    None,
+                );
             }
         }
-        Ok(())
     }
 
     /// One kernel turn into `out`, under the driver turn. A timeout of 0 does
     /// not block and -1 blocks until a completion.
-    fn wait(&self, out: &mut [libc::epoll_event], timeout_ms: i32, wake: i32) -> usize {
+    fn wait(&self, out: &mut [libc::epoll_event], timeout_ms: i32) -> usize {
         let n = self.reap(out);
-        self.rearm_wake(wake);
+        self.retry_submissions();
+        self.rearm_wake();
         self.trim();
         if n != 0 {
             return n;
@@ -682,16 +752,24 @@ impl Uring {
         // whatever completions are already posted.
         let _ = entered;
         let n = self.reap(out);
-        self.rearm_wake(wake);
+        self.retry_submissions();
+        self.rearm_wake();
         self.trim();
         n
+    }
+
+    fn retry_submissions(&self) {
+        let mut pending = self.sq.lock().unwrap_or_else(|e| e.into_inner());
+        if !pending.entries.is_empty() {
+            self.flush(&mut pending);
+        }
     }
 
     /// Re-arm an ended wake poll once the completion queue is at most half
     /// full, under the driver turn. A ready eventfd posts as soon as its poll
     /// is armed; re-arming into a full queue ends that poll again at once,
     /// and the pair would cycle without end.
-    fn rearm_wake(&self, wake: i32) {
+    fn rearm_wake(&self) {
         let mut ended = self.wake_ended.lock().unwrap_or_else(|e| e.into_inner());
         if !*ended {
             return;
@@ -701,8 +779,8 @@ impl Uring {
         cq.sync();
         let room = cq.capacity() - cq.len() > cq.len();
         drop(cq);
-        // A refused re-arm stays ended and is retried at the next turn.
-        if room && self.arm_wake(wake).is_ok() {
+        if room {
+            self.arm_wake();
             *ended = false;
         }
     }
@@ -739,10 +817,10 @@ impl Uring {
                     let tag = data & !WRITE_POLL;
                     let mut watched = self.watched.lock().unwrap_or_else(|e| e.into_inner());
                     // A removed tag's cancelled poll reports nothing.
-                    let Some(polling) = watched.get_mut(&tag) else {
+                    let Some(watch) = watched.get_mut(&tag) else {
                         continue;
                     };
-                    polling[usize::from(write)] = false;
+                    watch.polling[usize::from(write)] = false;
                     // A poll that ended without readiness (cancelled because
                     // its arming thread exited, or refused) reports its
                     // direction ready: the waiter retries, sees the socket's
@@ -807,7 +885,7 @@ fn shared_tag(unit: u32, index: usize, generation: u32) -> u64 {
 }
 
 struct Record {
-    fd: OwnedFd,
+    fd: Arc<OwnedFd>,
     pipe: bool,
     owners: u8,
     reset: bool,
@@ -883,7 +961,7 @@ impl Sockets {
 
     fn insert_fd(&mut self, fd: OwnedFd, pipe: bool, direction: u64) -> Option<u64> {
         let key = self.insert_record(Record {
-            fd,
+            fd: Arc::new(fd),
             pipe,
             owners: 1 << direction,
             reset: false,
@@ -1042,7 +1120,7 @@ impl Sockets {
         let slot = &mut self.slots[index];
         let record = slot.record.as_mut().unwrap();
         self.poller.as_ref().unwrap().add(
-            record.fd.as_raw_fd(),
+            &record.fd,
             Self::registration_tag(self.shared, index, slot.generation),
         )?;
         record.registered = true;
@@ -1115,10 +1193,9 @@ impl Sockets {
         let index = ((key >> 2) as u32) as usize;
         let generation = self.slots[index].generation;
         self.poller.as_ref().unwrap().park(
-            self.fd(key),
             Self::registration_tag(self.shared, index, generation),
             write,
-        )?;
+        );
         let r = self.record_mut(key);
         if r.waiters[usize::from(write)].replace(token).is_none() {
             self.waiting += 1;
@@ -1310,6 +1387,37 @@ mod tests {
         false
     }
 
+    #[test]
+    fn refused_submit_keeps_a_closed_socket_until_consumed() {
+        use std::sync::atomic::Ordering::Relaxed;
+        if reactor().unwrap() != Reactor::IoUring {
+            return;
+        }
+        let (socket, _peer) = UnixStream::pair().unwrap();
+        let mut sockets = Sockets::default();
+        let key = sockets.insert(socket.into()).unwrap();
+        sockets.record_mut(key).zero_copy = Some(true);
+        let (poller, tag) = sockets.send_target(key).unwrap().unwrap();
+        let Backend::Uring(ring) = &poller.backend else {
+            unreachable!()
+        };
+        let owner = Arc::downgrade(&sockets.record(key).fd);
+        let mut slot = poller.tx_slot(1).unwrap();
+        slot.bytes()[0] = b'x';
+
+        ring.refuse_submit.store(true, Relaxed);
+        sockets.arm(key, false, 17).unwrap();
+        slot.send(tag, 0..1).unwrap();
+        slot.cancel();
+        drop(slot);
+        assert!(sockets.release(key));
+        assert!(owner.upgrade().is_some(), "closed before SQ consumption");
+
+        ring.refuse_submit.store(false, Relaxed);
+        poller.poll(0).unwrap();
+        assert!(owner.upgrade().is_none(), "retained after SQ consumption");
+    }
+
     /// Workers migrate, so the thread that registered a socket may be gone
     /// when it becomes readable. io_uring ties a poll to its submitting task.
     #[test]
@@ -1491,10 +1599,10 @@ mod tests {
 
     /// A slot whose send waits, cancelled once part of it is in the kernel's
     /// write queue: the kernel still reads that part from the slot.
-    fn cancelled_send(sockets: &mut Sockets, key: u64, poller: &Arc<Poller>, tag: u64) -> TxSlot {
+    fn cancelled_send(sockets: &mut Sockets, poller: &Arc<Poller>, tag: u64) -> TxSlot {
         let mut slot = poller.tx_slot(SLOT).unwrap();
         slot.bytes().fill(b'a');
-        slot.send(sockets.fd(key), tag, 0..SLOT).unwrap();
+        slot.send(tag, 0..SLOT).unwrap();
         // The send takes what the window allows and then waits.
         std::thread::sleep(std::time::Duration::from_millis(20));
         sockets.poll(0, |_| {}).unwrap();
@@ -1539,7 +1647,7 @@ mod tests {
         let Some((mut sockets, key, poller, tag, mut peer)) = stuck_peer() else {
             return;
         };
-        let slot = cancelled_send(&mut sockets, key, &poller, tag);
+        let slot = cancelled_send(&mut sockets, &poller, tag);
         slot.cancel();
         reap_until(&mut sockets, || matches!(slot.state(), TxState::Sent(_)));
         let n = sent(&slot);
@@ -1555,7 +1663,7 @@ mod tests {
         let Some((mut sockets, key, poller, tag, mut peer)) = stuck_peer() else {
             return;
         };
-        let slot = cancelled_send(&mut sockets, key, &poller, tag);
+        let slot = cancelled_send(&mut sockets, &poller, tag);
         let (notified, _) = poller.tx_notifications();
         slot.cancel();
         drop(slot);
@@ -1596,7 +1704,7 @@ mod tests {
         let Some((mut sockets, key, poller, tag, mut peer)) = stuck_peer() else {
             return;
         };
-        let slot = cancelled_send(&mut sockets, key, &poller, tag);
+        let slot = cancelled_send(&mut sockets, &poller, tag);
         slot.cancel();
         reap_until(&mut sockets, || matches!(slot.state(), TxState::Sent(_)));
         let n = sent(&slot);
@@ -1619,7 +1727,7 @@ mod tests {
         };
         let mut slot = poller.tx_slot(1024).unwrap();
         slot.bytes().fill(b'a');
-        slot.send(sockets.fd(key), tag, 0..1024).unwrap();
+        slot.send(tag, 0..1024).unwrap();
         drop(slot);
         let (notified, _) = poller.tx_notifications();
         reap_until(&mut sockets, || poller.tx_notifications().0 > notified);
@@ -1647,7 +1755,7 @@ mod tests {
         let Some((mut sockets, key, poller, tag, mut peer)) = stuck_peer() else {
             return;
         };
-        let slot = cancelled_send(&mut sockets, key, &poller, tag);
+        let slot = cancelled_send(&mut sockets, &poller, tag);
         let (notified, _) = poller.tx_notifications();
         slot.cancel();
         sockets.abandon_send(key);

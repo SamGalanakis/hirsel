@@ -1,0 +1,91 @@
+// Keep this inventory in sync with serve_one. DELETE goes last so a regression
+// in its guard does not remove the fixture before the other routes are checked.
+@test
+fn test_gateway_route_acl(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), u64] waits {
+    if let Error(reason) = preview_run(parent, clock, random, tasks, net, 10u64, true, true) {
+        return Error(100000000u64 + reason)
+    }
+    cold_routes(parent, clock, random, tasks, net)
+}
+
+fn cold_routes(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), u64] waits {
+    let mut name = string.with_capacity(32u64)
+    let root = result.unwrap(host.mkdtemp(parent, mut name))
+    let (asks, _inbox): (Sender[Sender[()]], Receiver[Sender[()]]) = channel.new(4u64)
+    let (tallies, _held): (Sender[Sender[()]], Receiver[Sender[()]]) = channel.new(4u64)
+    let way: harness.gateway.Doorway[Services] = harness.gateway.doorway()
+    let door = harness.gateway.door_of(way)
+    let seed = Services(model: take asks, tallies: take tallies, door: harness.gateway.door_of(way), name: "", tasks: tasks, clock: clock, random: random, net: net, preview: None, chunks: 0u64)
+    let config = harness.gateway.GatewayConfig(root: root, options: store.triggers.law_options(), migrate: code.describe(harness.migrate), factory: session_factory(), max_sessions: 2u64, idle_ms: IDLE_MS, place_bytes: 67108864u64, tasks: tasks, clock: clock, random: random, net: net, watch: None, seed: take seed)
+    let g = result.unwrap(harness.gateway.gateway(take way, take config))
+    let (listener, at) = result.unwrap(host.listen(net, local(0u16), 16u16))
+    let front = harness.gateway_http.Front(submit: store.fixture.transact_entry(code.describe(submit_entry)), decide: store.fixture.transact_entry(code.describe(decide_entry)), keys: result.unwrap(store.fixture.entry_keys(code.describe(place))), socket: wire().socket, agent: "scripted", narrow: All, preview: None, tasks: tasks, clock: clock, random: random, net: net, tail_lines: 64u64, within_ms: WITHIN_MS, poll_ms: 10u64, beat_ms: 50u64, conn_bytes: EFFECT_GRANT, conns_max: 4u64, head_max: 8192u64, body_max: 65536u64)
+    let served = harness.gateway_http.serve(door, take front, take listener)
+    let me = store.ingress.credential(random)
+    let (created, _) = http(net, clock, at.port, "POST", "/sessions", person(me, 0u64), string.into_bytes("acl"))
+    if created != 201u16 {
+        return Error(1u64)
+    }
+    let (listed, ids) = http(net, clock, at.port, "GET", "/sessions", person(me, 0u64), list.new())
+    if listed != 200u16 || ids != b"[0]" {
+        return Error(2u64)
+    }
+    if harness.gateway.marks(door, 0u64).ups != 0u64 {
+        return Error(3u64)
+    }
+    let (waits, take body) = http(net, clock, at.port, "GET", "/sessions/0/waits", person(me, 0u64), list.new())
+    let format: std.json.Format[List[harness.PendingWait]] = result.unwrap(std.json.interop())
+    let Ok(rows) = std.json.decode_typed(format, take body, 65536u64) else { return Error(6u64) }
+    if waits != 200u16 || list.len(rows) != 0u64 { return Error(6u64) }
+    let change = store.fixture.transact_entry(code.describe(revoke_reader))
+    let Ok(Ok(())) = call_routed(door, 0u64, me, 0u64, change, (), tasks, clock, random, net) else {
+        return Error(4u64)
+    }
+    let Some(cold) = down_within(door, 0u64, clock) else {
+        return Error(5u64)
+    }
+    let mut routes: List[(String, String, Bytes)] = list.new()
+    list.push(mut routes, ("GET", "/sessions", list.new()))
+    list.push(mut routes, ("POST", "/sessions", string.into_bytes("another")))
+    list.push(mut routes, ("POST", "/sessions/0/messages", json(harness.Submit(client_key: "held", text: "bump it"))))
+    list.push(mut routes, ("POST", "/sessions/0/decisions", json(harness.Decision(run: 0u64, round: 0u64, ordinal: 0u64, key: list.new(), allow: true))))
+    list.push(mut routes, ("GET", "/sessions/0/history?before=2&lines=1", list.new()))
+    list.push(mut routes, ("GET", "/sessions/0/events", list.new()))
+    list.push(mut routes, ("GET", "/sessions/0/waits", list.new()))
+    list.push(mut routes, ("DELETE", "/sessions/0", list.new()))
+    let mut failures = 0u64
+    for i in 0u64 .. list.len(routes) {
+        let (method, path, payload) = view routes[i]
+        for mode in 0u64 .. 3u64 {
+            // A revocation applies to this session. The collection still lists
+            // other memberships and admits a bearer to create its own session.
+            if mode == 2u64 && i < 2u64 {
+                if i == 0u64 {
+                    let (status, listed_body) = http(net, clock, at.port, method, path, person(me, 1u64), list.new())
+                    if status != 200u16 || listed_body != b"[]" {
+                        failures = failures | (1u64 << 2u64)
+                    }
+                }
+                continue
+            }
+            let mut headers: List[std.http_client.Header] = list.new()
+            if mode == 1u64 {
+                headers = person(b"short", 1u64)
+            } else if mode == 2u64 {
+                headers = person(me, 1u64)
+            }
+            let (status, _) = http(net, clock, at.port, method, path, take headers, clone(payload))
+            if status != 401u16 && status != 403u16 {
+                failures = failures | (1u64 << (i * 3u64 + mode))
+            }
+        }
+    }
+    let after = harness.gateway.marks(door, 0u64)
+    if after.ups != cold.ups || after.downs != cold.downs {
+        failures = failures | (1u64 << 24u64)
+    }
+    harness.gateway_http.halt(take served)
+    let _ = harness.gateway.stop(take g)
+    result.unwrap(std.dir.remove_all(parent, name))
+    if failures == 0u64 { Ok(()) } else { Error(failures) }
+}

@@ -133,7 +133,7 @@ fn tally(g: Grants, take args: Bytes) -> Result[Bytes, harness.Fault] waits {
 
 fn child_of(s: Services) -> harness.gateway.Child {
     let views: std.codec.Codec[harness.View] = std.codec.of()
-    harness.gateway.Child(submit: store.fixture.transact_entry(code.describe(submit_entry)), shown: store.fixture.query_entry(code.describe(shown), std.codec.key_u64(), views), keys: result.unwrap(store.fixture.entry_keys(code.describe(place))), socket: wire().socket, tasks: s.tasks, clock: s.clock, random: s.random, net: s.net, within_ms: WITHIN_MS)
+    harness.gateway.Child(submit: store.fixture.transact_entry(code.describe(submit_entry)), shown: store.fixture.query_as_entry(code.describe(harness.window), std.codec.key_u64(), views), keys: result.unwrap(store.fixture.entry_keys(code.describe(place))), socket: wire().socket, tasks: s.tasks, clock: s.clock, random: s.random, net: s.net, within_ms: WITHIN_MS)
 }
 
 // The subagent: a child session, keyed by this place and this effect's trigger run,
@@ -198,10 +198,6 @@ fn decide_entry(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take
     harness.decide(mut tx, h, gated_agent(), w, caller, take d)
 }
 
-fn shown(tx: store.Tx, h: harness.Handles, take u: ()) -> Result[store.runner.Cover, Capacity] {
-    harness.transcript(h)
-}
-
 fn revoke_reader(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take unused: ()) -> Result[(), harness.Refused] {
     harness.set_reader(mut tx, h, caller, false)
 }
@@ -214,9 +210,8 @@ fn place(mut r: store.runner.Registry[Grants, harness.Handles]) -> Result[(), st
     store.runner.register_attempt(mut r, code.describe(settle), take f, BYTES, store.runner.DEFAULT_STEPS)?
     store.runner.transact(mut r, code.describe(submit_entry), BYTES, store.runner.DEFAULT_STEPS)?
     store.runner.transact(mut r, code.describe(decide_entry), BYTES, store.runner.DEFAULT_STEPS)?
-    let views: std.codec.Codec[harness.View] = std.codec.of()
-    store.runner.query(mut r, code.describe(shown), std.codec.key_u64(), views, BYTES, store.runner.DEFAULT_STEPS)?
     store.runner.transact(mut r, code.describe(revoke_reader), BYTES, store.runner.DEFAULT_STEPS)?
+    harness.pending_waits_entry(mut r, BYTES, store.runner.DEFAULT_STEPS)?
     let windows: std.codec.Codec[harness.View] = std.codec.of()
     store.runner.query_as(mut r, code.describe(harness.window), std.codec.key_u64(), windows, BYTES, store.runner.DEFAULT_STEPS)?
     store.runner.query_as(mut r, code.describe(harness.history_cuts), std.codec.key_u64(), std.codec.of_u64(), BYTES, store.runner.DEFAULT_STEPS)
@@ -1236,14 +1231,15 @@ fn preview_run(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
     }
     if revoke {
         let outsider = store.ingress.credential(random)
-        let mut stranger = browser(net, clock, port, outsider)?
-        if !ended_without_rows(mut stranger) || !empty_history(net, clock, port, outsider) {
+        let (stranger, _) = http(net, clock, port, "GET", "/sessions/0/events", person(outsider, 0u64), list.new())
+        if stranger != 403u16 || !denied_history(net, clock, port, outsider) {
             return Error(40u64)
         }
-        let (status, page) = http(net, clock, port, "GET", "/sessions/0/history?before=2&lines=1", person(me, 0u64), list.new())
-        let mut expected: List[harness.gateway_http.Shown] = list.new()
-        list.push(mut expected, harness.gateway_http.Shown(at: 1u64, line: Line("user", "preview it")))
-        if status != 200u16 || page != json(harness.gateway_http.Page(from: 1u64, rows: take expected)) {
+        let (status, take body) = http(net, clock, port, "GET", "/sessions/0/history?before=2&lines=1", person(me, 0u64), list.new())
+        let page_format: std.json.Format[harness.gateway_http.Page] = result.unwrap(std.json.interop())
+        let Ok(page) = std.json.decode_typed(page_format, take body, 65536u64) else { return Error(41u64) }
+        if status != 200u16 || page.from != 1u64 || list.len(page.rows) != 1u64 ||
+            page.rows[0u64].at != 1u64 || bytes_of(page.rows[0u64].line) != bytes_of((Line("user", "preview it") : harness.View)) {
             return Error(41u64)
         }
 
@@ -1253,11 +1249,11 @@ fn preview_run(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
         }
         let Ok(rest) = channel.receive(inbox) else { return Error(45u64) }
         let _ = channel.send(rest, ())
-        if !ended_without_rows(mut tab) || !empty_history(net, clock, port, me) {
+        if !ended_without_rows(mut tab) || !denied_history(net, clock, port, me) {
             return Error(43u64)
         }
-        let mut returned = browser(net, clock, port, me)?
-        if !ended_without_rows(mut returned) {
+        let (returned, _) = http(net, clock, port, "GET", "/sessions/0/events", person(me, 0u64), list.new())
+        if returned != 403u16 {
             return Error(44u64)
         }
 
@@ -1374,16 +1370,9 @@ fn ended_without_rows(mut c: std.http_client.Connection) -> bool waits {
     }
 }
 
-fn empty_history(net: Net, clock: Clock, port: u16, who: Bytes) -> bool waits {
+fn denied_history(net: Net, clock: Clock, port: u16, who: Bytes) -> bool waits {
     let (status, page) = http(net, clock, port, "GET", "/sessions/0/history?before=2&lines=1", person(who, 0u64), list.new())
-    let empty: List[harness.gateway_http.Shown] = list.new()
-    status == 200u16 && page == json(harness.gateway_http.Page(from: 1u64, rows: take empty))
-}
-
-@test
-fn test_front_reader_acl(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), u64] waits {
-    let _ = preview_run(parent, clock, random, tasks, net, 10u64, true, true)?
-    Ok(())
+    status == 403u16 && list.len(page) == 0u64
 }
 
 // The cold no-tool turn commits place activation, keyed admission, submit,

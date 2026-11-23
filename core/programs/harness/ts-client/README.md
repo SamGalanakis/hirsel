@@ -20,6 +20,8 @@ What the client does:
 - **History.** `loadOlder()` asks for the rows before the oldest one held. Each page
   has its own pinned cutoff, and paging stops at `from` 1. A page that arrives after a
   Reset is dropped.
+- **Approvals.** `pendingWaits()` returns the active run’s open approvals. Pass the
+  returned position and key to `decide()`.
 - **Draft.** A `preview` snapshot replaces the draft. A `preview-delta` appends only at
   the draft's byte end. `preview-clear` drops it. Once the transcript holds the row
   at `key.entry + 1`, that row supersedes the draft. Keys are compared by `run`,

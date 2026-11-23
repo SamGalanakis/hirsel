@@ -478,10 +478,6 @@ fn decide_entry(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take
     harness.decide(mut tx, h, notes_agent(), w, caller, take d)
 }
 
-fn shown(tx: store.Tx, h: harness.Handles, take u: ()) -> Result[store.runner.Cover, Capacity] {
-    harness.transcript(h)
-}
-
 fn place(mut r: store.runner.Registry[Grants, harness.Handles]) -> Result[(), store.runner.RegisterError] {
     store.runner.transact(mut r, code.describe(advance), BYTES, store.runner.DEFAULT_STEPS)?
     store.runner.granted(mut r, code.describe(effect), BYTES, store.runner.DEFAULT_STEPS)?
@@ -490,8 +486,7 @@ fn place(mut r: store.runner.Registry[Grants, harness.Handles]) -> Result[(), st
     store.runner.register_attempt(mut r, code.describe(settle), take f, BYTES, store.runner.DEFAULT_STEPS)?
     store.runner.transact(mut r, code.describe(submit_entry), BYTES, store.runner.DEFAULT_STEPS)?
     store.runner.transact(mut r, code.describe(decide_entry), BYTES, store.runner.DEFAULT_STEPS)?
-    let views: std.codec.Codec[harness.View] = std.codec.of()
-    store.runner.query(mut r, code.describe(shown), std.codec.key_u64(), views, BYTES, store.runner.DEFAULT_STEPS)?
+    harness.pending_waits_entry(mut r, BYTES, store.runner.DEFAULT_STEPS)?
     let windows: std.codec.Codec[harness.View] = std.codec.of()
     store.runner.query_as(mut r, code.describe(harness.window), std.codec.key_u64(), windows, BYTES, store.runner.DEFAULT_STEPS)?
     store.runner.query_as(mut r, code.describe(harness.history_cuts), std.codec.key_u64(), std.codec.of_u64(), BYTES, store.runner.DEFAULT_STEPS)
@@ -774,6 +769,7 @@ fn seed_place(dir: Dir, clock: Clock, random: Random, tasks: Tasks, prompt: Stri
     }
     let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[harness.Disposition, harness.Refused] {
         harness.open_session(mut tx, h, "scripted", All)?
+        harness.set_reader(mut tx, h, you(), true)?
         let Ok(t) = tables(store.tx_schema(tx)) else {
             return Error(Storage)
         }
@@ -807,20 +803,10 @@ fn approve(out: Stdout, dir: Dir, clock: Clock, random: Random, tasks: Tasks) ->
         return Error("schema")
     }
     let snap = store.snapshot(db)
-    let mut rows = match store.scan(snap, store.shape(h.waits), Unbounded, Unbounded) {
-        Ok(take v) => take v,
-        Error(_) => return Error("scan")
-    }
-    let mut found: Option[(harness.WaitKey, Bytes)] = None
-    while let Ok(Some((k, v))) = store.next(mut rows) {
-        if let Open(key, _) = v {
-            found = Some((k, clone(key)))
-        }
-    }
-    let Some((wk, key)) = take found else {
-        return Error("no call is waiting for approval")
-    }
-    let ek = harness.EffectKey(run: wk.run, round: wk.generation, kind: harness.TOOL, ordinal: wk.slot)
+    let Ok(waits) = harness.pending_approvals(snap, h, you()) else { return Error("read approvals") }
+    if list.len(waits) != 1u64 { return Error("expected one open approval") }
+    let wait = waits[0u64]
+    let ek = harness.EffectKey(run: wait.run, round: wait.round, kind: harness.TOOL, ordinal: wait.ordinal)
     let Ok(Some(held)) = store.get(snap, store.shape(h.effects), ek) else {
         return Error("the held call is missing")
     }
@@ -833,7 +819,7 @@ fn approve(out: Stdout, dir: Dir, clock: Clock, random: Random, tasks: Tasks) ->
     let Ok(w) = wired() else {
         return Error("wiring")
     }
-    let d = harness.Decision(run: wk.run, round: wk.generation, ordinal: wk.slot, key: take key, allow: true)
+    let d = harness.Decision(run: wait.run, round: wait.round, ordinal: wait.ordinal, key: clone(wait.key), allow: true)
     let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[harness.Ruling, harness.Refused] {
         harness.decide(mut tx, h, notes_agent(), w, you(), clone(d))
     })
@@ -1172,36 +1158,28 @@ fn count(out: Stdout, label: String, value: u64) -> () waits {
     emit(out, string.from(label), text)
 }
 
-fn live_decision(dir: Dir, b: Browser, tasks: Tasks, random: Random) -> Result[harness.Decision, String] waits {
-    let Ok(db) = store.open(tasks, dir, b.clock, random, options()) else {
-        return Error("could not open the sleeping place")
+fn live_decision(b: Browser) -> Result[harness.Decision, String] waits {
+    let mut reply = browser_request(b, "GET", "/sessions/0/waits", browser_headers(b.credential, 0u64), list.new(), HTTP_MS, 65536u64)?
+    if std.http_client.status(std.http_client.head(reply)) != 200u16 {
+        return Error("browser pending waits request was refused")
     }
-    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
-    let snap = store.snapshot(db)
-    let wait = harness.WaitKey(run: 1u64, slot: 0u64, kind: harness.APPROVAL, generation: 0u64)
-    let member_key = harness.EffectKey(run: wait.run, round: wait.generation, kind: harness.TOOL, ordinal: wait.slot)
-    let Ok(Some(Open(take key, _))) = store.get(snap, store.shape(h.waits), wait) else {
-        return Error("note_add was not waiting for approval")
+    let mut raw: Bytes = list.with_capacity(4096u64)
+    loop {
+        list.reserve(mut raw, 4096u64)
+        match std.http_client.read(mut reply, mut raw) {
+            Ok(0u64) => break,
+            Ok(_) => (),
+            Error(_) => return Error("read pending waits")
+        }
     }
-    let Ok(Some(member)) = store.get(snap, store.shape(h.effects), member_key) else {
-        return Error("missing held tool call")
+    let format: std.json.Format[List[harness.PendingWait]] = result.unwrap(std.json.interop())
+    let Ok(waits) = std.json.decode_typed(format, take raw, 65536u64) else { return Error("decode pending waits") }
+    if list.len(waits) != 1u64 { return Error("expected one pending note_add approval") }
+    let wait = waits[0u64]
+    if wait.run != 1u64 || wait.round != 0u64 || wait.ordinal != 0u64 {
+        return Error("note_add approval had the wrong position")
     }
-    let Some(c) = view member.call else {
-        return Error("missing held tool")
-    }
-    let Inline(raw) = view c.args else {
-        return Error("held tool did not have inline arguments")
-    }
-    let Ok(saved) = text_arg(raw, "text") else {
-        return Error("missing held note text")
-    }
-    if c.name != "note_add" || saved != LIVE_NOTE {
-        return Error("held tool or its arguments differed from the prompt")
-    }
-    let Ok(()) = store.close(take db) else {
-        return Error("could not close the sleeping place")
-    }
-    Ok(harness.Decision(run: wait.run, round: wait.generation, ordinal: wait.slot, key: take key, allow: true))
+    Ok(harness.Decision(run: wait.run, round: wait.round, ordinal: wait.ordinal, key: clone(wait.key), allow: true))
 }
 
 fn live_result(out: Stdout, dir: Dir, b: Browser, tasks: Tasks, random: Random) -> Result[(), String] waits {
@@ -1264,7 +1242,7 @@ fn live_turns(out: Stdout, root: Dir, d: harness.gateway.Door[Services], b: Brow
     let waiting = live_down(d, b.clock, idle.ups)?
     let paused = journal(dir)
     count(out, "journal commits, tool call through approval wait: ", paused - first)
-    let decision = live_decision(dir, b, tasks, random)?
+    let decision = live_decision(b)?
     post(b, "/sessions/0/decisions", browser_headers(b.credential, 2u64), json(decision), 200u16, json((Approved : harness.Ruling)))?
     let saved = browser_reply(mut stream, mut dec, b.clock, 1u64, held.at, "answered", false)?
     if saved.text != "SAVED" {

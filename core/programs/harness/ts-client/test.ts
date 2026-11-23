@@ -6,7 +6,7 @@
 //   node test.ts <built gateway>          run the checks
 //   node test.ts <built gateway> serve    serve the example page and keep running
 import { spawn } from "node:child_process";
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import http from "node:http";
 import { stripTypeScriptTypes } from "node:module";
@@ -152,10 +152,11 @@ try {
   check("a lost answer is resent and answered", dropped === 1 && sent.status === 202 && client.position === 1);
   await until("the approval hold", () => state?.status === "waiting");
 
-  // note_delete {"id":0} is held; its key is the tool, its revision and the arguments.
-  const raw = Buffer.concat([Buffer.from("note_delete"), Buffer.from([0, 0]), Buffer.from([0, 0, 0, 0, 0, 0, 0, 1, 0]), Buffer.from('{"id":0}')]);
+  const waits = await client.pendingWaits();
+  check("note_delete is the pending approval", waits.length === 1 && waits[0].run === 0 && waits[0].round === 1 && waits[0].ordinal === 1);
+  const { run, round, ordinal, key } = waits[0];
   dropAnswer = true;
-  const ruled = await client.decide({ run: 0, round: 1, ordinal: 1, key: createHash("sha256").update(raw).digest("base64"), allow: true });
+  const ruled = await client.decide({ run, round, ordinal, key, allow: true });
   check("the decision is approved once", dropped === 2 && ruled.status === 200 && ruled.body === "Approved" && client.position === 2);
   await until("the first answer", () => state?.status === "answered");
   const forkAt = assistant(state)!.at;
@@ -230,7 +231,7 @@ try {
   await command("revoke", client.position);
   await until("revocation clears the client", () => state?.live === false && state.rows.length === 0 && state.draft === null && state.status === "");
   const refused = await fetch(`${base}/sessions/0/history?before=3&lines=2`, { headers: { Authorization: `Bearer ${me}` } });
-  check("revoked history and client stay empty", refused.ok && (await refused.json()).rows.length === 0 && !(await client.loadOlder()));
+  check("revoked history and client stay empty", refused.status === 403 && !(await client.loadOlder()));
   console.log("PASS");
   close();
 } catch (e) {

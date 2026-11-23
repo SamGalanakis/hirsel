@@ -268,7 +268,7 @@ fn put_wait_key(k: WaitKey, mut out: Bytes) {
     std.codec.put_key_u64(k.generation, mut out)
 }
 
-fn take_wait_key(raw: Bytes, mut at: u64) -> Result[WaitKey, std.codec.DecodeError] {
+pub fn take_wait_key(raw: Bytes, mut at: u64) -> Result[WaitKey, std.codec.DecodeError] {
     let run = std.codec.take_key_u64(raw, mut at)?
     let slot = std.codec.take_key_u64(raw, mut at)?
     let kind = std.codec.take_key_u8(raw, mut at)?
@@ -276,7 +276,7 @@ fn take_wait_key(raw: Bytes, mut at: u64) -> Result[WaitKey, std.codec.DecodeErr
     Ok(WaitKey(run: run, slot: slot, kind: kind, generation: generation))
 }
 
-fn wait_key() -> std.codec.Key[WaitKey] {
+pub fn wait_key() -> std.codec.Key[WaitKey] {
     std.codec.key_make(put_wait_key, take_wait_key, quad_schema)
 }
 
@@ -2080,10 +2080,6 @@ fn reader_key(caller: store.Caller) -> Result[Bytes, Capacity] {
     store.runner.caller_key(caller, mut key)?
     Ok(take key)
 }
-pub fn transcript(h: Handles) -> Result[store.runner.Cover, Capacity] {
-    store.runner.cover(store.shape(h.views), Unbounded, Unbounded)
-}
-
 // The transcript rows a reader asks for. Row 0 is the status and row p + 1 is entry
 // p's line. `Status` is row 0 alone. `Tail(n)` is the last n line rows; its cover moves
 // with each append, so a reader takes one image of it to learn where to start and then
@@ -2091,7 +2087,7 @@ pub fn transcript(h: Handles) -> Result[store.runner.Cover, Capacity] {
 // is rows from `page_from(before, n)` up to `before`: a reader pins `before` at its
 // oldest held row, so later appends never move a page. Rows are sparse, so a page can be
 // short or empty before the first row; a reader stops when `page_from` reaches 1.
-pub type Window: codec + send = Status | Tail(u64) | From(u64) | Page(u64, u64)
+pub type Window: codec + send = Status | Tail(u64) | From(u64) | Page(u64, u64) | Transcript
 
 pub fn page_from(before: u64, lines: u64) -> u64 {
     if before > lines + 1u64 {
@@ -2132,6 +2128,7 @@ fn visible_window(tx: store.Tx, h: Handles, w: Window) -> Result[store.runner.Co
     let t = store.shape(h.views)
     match w {
         Status => store.runner.cover(t, Included(0u64), Included(0u64)),
+        Transcript => store.runner.cover(t, Unbounded, Unbounded),
         Tail(n) => {
             let next = match store.fetch(tx, store.shape(h.session), 0u64) {
                 Ok(Some(s)) => s.next_pos + 1u64,

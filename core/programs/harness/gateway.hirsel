@@ -23,7 +23,7 @@ const PLACE_SESSIONS: u64 = 4u64
 
 // How a new session's store starts: an empty session, or a fork's exported prefix.
 pub type Seeding: send = Fresh(String, harness.Narrow) | Adopt(harness.Prefix)
-pub type Refused: send = Unknown | Full | Asleep | Storage | Seed(harness.Refused) | Place(store.local.Refused) | Stopping
+pub type Refused: send = Unknown | Full | Asleep | Denied | Storage | Seed(harness.Refused) | Place(store.local.Refused) | Stopping
 
 // What the gateway has seen of a session since it started: its place's starts and ends,
 // and the nudges a front sent after it changed the session.
@@ -452,6 +452,20 @@ pub fn route[T: send](d: Door[T], id: u64) -> Result[store.local.Lease, Refused]
     match store.local.route(hd, name_of(id)) { Ok(take lease) => Ok(take lease), Error(take why) => Error(Place(take why)) }
 }
 
+// Enforces the session ACL before a cold wake. A returned lease still needs
+// the live query under the credential bound to its wire connection.
+pub fn access[T: send](d: Door[T], id: u64, caller: store.Caller, wake: bool) -> Result[Option[store.local.Lease], Refused] waits {
+    let hd = reach(d, id)?
+    let check = store.local.ColdCheck(caller: clone(caller), check: code.describe(harness.cold_reader_allowed))
+    match store.local.access(hd, name_of(id), take check, wake) {
+        Ok(take lease) => Ok(take lease),
+        Error(Denied) => Error(Denied),
+        Error(Busy) => Error(Asleep),
+        Error(Unknown) => Error(Unknown),
+        Error(take why) => Error(Place(take why)),
+    }
+}
+
 // Like `route`, but only to a session whose place serves; it never starts one.
 pub fn peek[T: send](d: Door[T], id: u64) -> Result[store.local.Lease, Refused] waits {
     let hd = reach(d, id)?
@@ -505,10 +519,10 @@ pub fn await_down[T: send](d: Door[T], id: u64, after: u64) -> Result[u64, Refus
 // ---- the reference subagent ----
 
 // What a child session's place registers for its parent: a submit entry and a query
-// over `harness.transcript`, and how to reach it.
+// over the ACL-checked transcript, and how to reach it.
 pub type Child: send {
     submit: store.fixture.Callee[harness.Submit, Result[harness.Disposition, harness.Refused]],
-    shown: store.fixture.Callee[(), ()], keys: List[Bytes], socket: std.wsock.Config,
+    shown: store.fixture.Callee[harness.Window, ()], keys: List[Bytes], socket: std.wsock.Config,
     tasks: Tasks, clock: Clock, random: Random, net: Net, within_ms: u64,
 }
 
@@ -553,7 +567,7 @@ fn look[T: send](d: Door[T], id: u64, c: Child, credential: Bytes, take submit: 
         }
         if !placed { store.fixture.close(take client); return Error(Unavailable) }
     }
-    let Ok(sub) = store.fixture.subscribe(mut client, c.shown, (), c.within_ms) else { store.fixture.close(take client); return Error(Unavailable) }
+    let Ok(sub) = store.fixture.subscribe(mut client, c.shown, Transcript, c.within_ms) else { store.fixture.close(take client); return Error(Unavailable) }
     let seen = store.fixture.seen_at(mut client, sub, 0u64, c.within_ms)
     store.fixture.close(take client)
     let Ok(image) = take seen else { return Error(Unavailable) }
@@ -579,6 +593,7 @@ fn look[T: send](d: Door[T], id: u64, c: Child, credential: Bytes, take submit: 
             Error(_) => (),
         }
     }
+    if status == "" { return Error(Unavailable) }
     if status == "answered" || status == "out of rounds" || status == "cancelled" || string.starts_with(status, "stopped") { Ok(Ended(take status, take last)) } else { Ok(Busy(take status, rows)) }
 }
 
@@ -593,7 +608,8 @@ fn look[T: send](d: Door[T], id: u64, c: Child, credential: Bytes, take submit: 
 // a repeated attempt reaches the same child and the same run.
 pub fn ask[T: send](d: Door[T], take key: Bytes, take seeding: Seeding, c: Child, take text: String) -> Result[Bytes, harness.Fault] waits {
     let credential = child_credential(key)
-    let id = match create(d, take key, take seeding) { Ok(n) => n, Error(_) => return Error(Unavailable) }
+    let Ok(take caller) = store.ingress.caller((), credential) else { return Error(Unavailable) }
+    let id = match create_seeded(d, take key, take seeding, Some(take caller)) { Ok(n) => n, Error(_) => return Error(Unavailable) }
     let mut submit: Option[harness.Submit] = Some(harness.Submit(client_key: "parent", text: take text))
     let mut before: Option[(String, u64)] = None
     loop {

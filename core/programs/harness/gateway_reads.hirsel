@@ -1,0 +1,86 @@
+// Authorized reads for the HTTP front.
+
+fn allowed[T: send](d: harness.gateway.Door[T], f: Front, id: u64, credential: Bytes) -> Result[(), u16] waits {
+    if let Some(take client) = reach(d, f, id, credential, 0u64, false)? {
+        store.fixture.close(take client)
+    }
+    Ok(())
+}
+
+fn checked_status(mut client: store.fixture.Client, f: Front) -> Result[String, u16] waits {
+    let head = read_cover(mut client, f, window_entry(), Status)?
+    match visible_status(head) {
+        Some(take status) => Ok(take status),
+        None => Error(403u16),
+    }
+}
+
+fn read_cover[A: codec](mut client: store.fixture.Client, f: Front, entry: store.fixture.Callee[A, ()], take arg: A) -> Result[store.fixture.Seen, u16] waits {
+    let Ok(sub) = store.fixture.subscribe(mut client, entry, take arg, f.within_ms) else { return Error(503u16) }
+    let seen = store.fixture.seen_at(mut client, sub, 0u64, f.within_ms)
+    store.fixture.unsubscribe(mut client, sub)
+    Ok(seen ?=> |_| 503u16)
+}
+
+fn history_page(mut client: store.fixture.Client, f: Front, before: u64, lines: u64) -> Result[Page, u16] waits {
+    let mut from = harness.page_from(before, lines)
+    let cuts = store.fixture.query_as_entry(code.describe(harness.history_cuts), std.codec.key_u64(), std.codec.of_u64())
+    let cut_image = read_cover(mut client, f, cuts, (from, before))?
+    for r in cut_image.rows {
+        if let Some(raw) = view r.value {
+            if let Ok(cut) = std.codec.decode(std.codec.of_u64(), raw) {
+                if cut > from { from = cut }
+            }
+        }
+    }
+    let image = read_cover(mut client, f, window_entry(), Page(before, before - from))?
+    let _ = checked_status(mut client, f)?
+    let codec: std.codec.Codec[harness.View] = std.codec.of()
+    let mut rows: List[Shown] = list.new()
+    for r in image.rows {
+        let Some(raw) = view r.value else {
+            continue
+        }
+        let Some(at) = position(r) else {
+            continue
+        }
+        let Ok(take v) = std.codec.decode(codec, raw) else {
+            continue
+        }
+        list.push(mut rows, Shown(at: at, line: take v))
+    }
+    Ok(Page(from: from, rows: take rows))
+}
+
+fn waits_page(mut client: store.fixture.Client, f: Front) -> Result[List[harness.PendingWait], u16] waits {
+    let codec: std.codec.Codec[harness.Wait] = std.codec.of()
+    let entry = store.fixture.query_as_entry(code.describe(harness.pending_waits), harness.wait_key(), codec)
+    let image = read_cover(mut client, f, entry, ())?
+    let _ = checked_status(mut client, f)?
+    let mut waits: List[harness.PendingWait] = list.new()
+    for row in image.rows {
+        let Some(raw) = view row.value else { continue }
+        let Ok(take wait) = std.codec.decode(codec, raw) else { return Error(503u16) }
+        // The store's table prefix precedes the fixed 25-byte WaitKey.
+        let width = list.len(row.key)
+        if width < 25u64 { return Error(503u16) }
+        let mut at = width - 25u64
+        let Ok(key) = harness.take_wait_key(row.key, mut at) else { return Error(503u16) }
+        if let Some(take open) = harness.open_wait(key, take wait) {
+            list.push(mut waits, take open)
+        }
+    }
+    Ok(take waits)
+}
+
+fn visible_sessions[T: send](d: harness.gateway.Door[T], f: Front, credential: Bytes) -> Result[List[u64], u16] waits {
+    let mut visible: List[u64] = list.new()
+    for id in harness.gateway.listing(d) {
+        match allowed(d, f, id, credential) {
+            Ok(()) => list.push(mut visible, id),
+            Error(code) => if code != 403u16 && code != 404u16 { return Error(code) },
+        }
+    }
+    Ok(take visible)
+}
+

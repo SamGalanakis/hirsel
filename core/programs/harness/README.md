@@ -44,7 +44,7 @@ agent and the wiring:
 `harness.migrate` and `harness.handles` are the place's `migrate` and
 `handles`. `harness.entries(wiring)` is its `TriggerConfig.entries`.
 `harness.open_session` and `harness.submit` run in any write transaction;
-`harness.transcript` is the public Cover read of the session.
+`harness.window` reads the transcript under the session ACL when registered with `query_as`.
 
 ## How a turn runs
 
@@ -323,9 +323,11 @@ options and the idle time.
 one request per connection, and holds each browser's event stream itself, so a
 session's place can unload while its page stays open.
 
-- `GET /sessions` and `DELETE /sessions/:id` call the gateway. `POST /sessions`
-  takes a bearer credential and a creation key. It seeds the new session with
-  that Caller as its first reader and returns the id.
+- Every route requires `Authorization: Bearer <base64 credential>`. A missing or
+  malformed credential returns 401. `GET /sessions` lists the caller's visible
+  sessions. `DELETE /sessions/:id` requires membership in that session.
+  `POST /sessions` takes a creation key, seeds the new session with the caller as
+  its first reader, and returns the id.
 - `POST /sessions/:id/messages` (a JSON `Submit`, answers 202) and
   `POST /sessions/:id/decisions` (a JSON `Decision`, answers the `Ruling`)
   route to the place, waking it, and call its entry. The browser is the
@@ -348,6 +350,12 @@ session's place can unload while its page stays open.
   `from <= at < B`. The page stops at the newest fork cut in the requested
   range. Passing `from` as the next `before` walks the fork's pinned prefix
   and any earlier cuts until `from` is 1. Appends never move a page's upper limit.
+- `GET /sessions/:id/waits` lists the active run caller's open approvals. Use the
+  returned `run`, `round`, `ordinal` and `key` in a `Decision`. `expires` is the
+  wall-clock deadline in milliseconds.
+
+A session ACL denial returns 403 before the front sends any event stream or
+history headers. Denied requests leave a cold place asleep.
 - The front uses `store.ingress.caller` for bearer credentials. Places register
   `harness.window` and `harness.history_cuts` with `store.runner.query_as`.
   Each query reads the Caller's conversation ACL row, including when preview is

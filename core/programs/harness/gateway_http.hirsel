@@ -16,7 +16,9 @@
 // the status and the transcript's last `tail` rows (`?tail=N`, at most and by default
 // the front's `tail_lines`) and every later row as
 // server-sent events, one JSON `Shown` per changed row and a comment as a heartbeat;
-// GET /sessions/{id}/history?before=B&lines=N is one JSON `Page` of earlier rows. After each image's rows comes a "batch" event carrying the store
+// GET /sessions/{id}/history?before=B&lines=N is one JSON `Page` of earlier rows;
+// GET /sessions/{id}/waits lists pending approvals. After each image's rows comes a
+// "batch" event carrying the store
 // version: a reader applies the rows before it together, and the first batch on a
 // stream completes its image. A bearer-authenticated stream on a preview-enabled front
 // also gets the draft: a "preview" snapshot on join, gap, dropped text or a new key,
@@ -103,39 +105,44 @@ fn deadline_ms(c: Clock, ms: u64) -> u64 {
 fn turned(why: harness.gateway.Refused) -> u16 {
     match why {
         Unknown => 404u16,
+        Denied => 403u16,
+        Asleep => 503u16,
         Full => 503u16,
         Stopping => 503u16,
         _ => 500u16
     }
 }
 
-// A wire client to the session's place under `credential`. `wake` routes to it, starting
-// it if it is unloaded; otherwise only a running place is reached. The lease is dropped
-// once the client is connected: the client's session keeps the place up. A place admits
-// one wire session and reaps a finished one only when the next arrives, so a connect just
-// after another front call closed may be turned away, and a place may stop by its idle
-// check between the route and the connect; either is retried, routing again, until
-// `within_ms`.
-fn reach[T: send](d: harness.gateway.Door[T], f: Front, id: u64, take credential: Bytes, first_p: u64, wake: bool) -> Result[store.fixture.Client, u16] waits {
+// Checks a cold ACL before waking a place. If the place is already running,
+// authorize on its live query. A disconnect retries the check as well as the
+// connection, since the place may have unloaded in between.
+fn reach[T: send](d: harness.gateway.Door[T], f: Front, id: u64, credential: Bytes, first_p: u64, wake: bool) -> Result[Option[store.fixture.Client], u16] waits {
+    let Ok(caller) = store.ingress.caller((), credential) else { return Error(401u16) }
     let until = deadline_ms(f.clock, f.within_ms)
     loop {
-        let got_lease = if wake {
-            harness.gateway.route(d, id)
-        } else {
-            harness.gateway.peek(d, id)
+        match harness.gateway.access(d, id, caller, wake) {
+            Ok(None) => return Ok(None),
+            Ok(Some(take lease)) => {
+                if let Some(address) = latest.read(store.local.status(lease)).addr {
+                    let opened = store.fixture.client_at(f.tasks, f.net, f.clock, f.random, f.keys, f.socket, address, Some(clone(credential)), first_p, f.within_ms)
+                    if let Ok(take c) = take opened {
+                        let mut client = take c
+                        let who = store.fixture.bound_caller(client)
+                        if who.issuer != caller.issuer || who.subject != caller.subject {
+                            store.fixture.close(take client)
+                            return Error(403u16)
+                        }
+                        match checked_status(mut client, f) {
+                            Ok(_) => return Ok(Some(take client)),
+                            Error(403u16) => { store.fixture.close(take client); return Error(403u16) },
+                            Error(_) => store.fixture.close(take client),
+                        }
+                    }
+                }
+            },
+            Error(Asleep) => (),
+            Error(why) => return Error(turned(why)),
         }
-        let lease = match take got_lease {
-            Ok(take l) => take l,
-            Error(why) => return Error(turned(why))
-        }
-        if let Some(address) = latest.read(store.local.status(lease)).addr {
-            let opened = store.fixture.client_at(f.tasks, f.net, f.clock, f.random, f.keys, f.socket, address, Some(clone(credential)), first_p, f.within_ms)
-            if let Ok(take c) = take opened {
-                let _ = take lease;
-                return Ok(take c)
-            }
-        }
-        let _ = take lease;
         if host.mono_ns(f.clock) >= until {
             return Error(503u16)
         }
@@ -151,8 +158,7 @@ type Asker {
     p: u64
 }
 
-fn asker(req: Request) -> Result[Asker, u16] {
-    let credential = bearer(req)?
+fn asker(req: Request, take credential: Bytes) -> Result[Asker, u16] {
     let Some(at) = field(req, "hirsel-position") else {
         return Error(400u16)
     }
@@ -172,12 +178,15 @@ fn bearer(req: Request) -> Result[Bytes, u16] {
     let Some(take credential) = std.base64.decode(std.http.copy_bytes(list.slice(auth, 7u64, list.len(auth)))) else {
         return Error(401u16)
     }
+    if let Error(_) = store.ingress.caller((), credential) {
+        return Error(401u16)
+    }
     Ok(take credential)
 }
 
 fn call_place[T: send, A: codec, R: codec](d: harness.gateway.Door[T], f: Front, id: u64, take who: Asker, e: store.fixture.Callee[A, Result[R, harness.Refused]], take a: A) -> Result[R, u16] waits {
     let Asker(credential: take credential, p: p) = take who
-    let mut client = reach(d, f, id, take credential, p, true)?
+    let mut client = option.unwrap(reach(d, f, id, credential, p, true)?)
     let replied = store.fixture.call(mut client, e, take a, int.truncate(f.within_ms))
     store.fixture.close(take client)
     match take replied {
@@ -208,9 +217,9 @@ type Following {
 // A client following the session's transcript. One opened for a nudge stays at least one
 // beat even if the session looks quiet, so a change whose run has not yet written its
 // busy status is not missed.
-fn follow_from[T: send](d: harness.gateway.Door[T], f: Front, id: u64, wake: bool, nudged: bool, credential: Bytes, tail: u64, mut first: Option[u64]) -> Option[Following] waits {
-    let Ok(take opened) = reach(d, f, id, clone(credential), 0u64, wake) else {
-        return None
+fn follow_from[T: send](d: harness.gateway.Door[T], f: Front, id: u64, wake: bool, nudged: bool, credential: Bytes, tail: u64, mut first: Option[u64]) -> Result[Option[Following], u16] waits {
+    let Some(take opened) = reach(d, f, id, credential, 0u64, wake)? else {
+        return Ok(None)
     }
     let mut client = take opened
     let hold_until = if nudged {
@@ -223,11 +232,11 @@ fn follow_from[T: send](d: harness.gateway.Door[T], f: Front, id: u64, wake: boo
     if first == None {
         let Ok(tail_sub) = store.fixture.subscribe(mut client, window_entry(), Tail(tail), f.within_ms) else {
             store.fixture.close(take client);
-            return None
+            return Error(503u16)
         }
         let Ok(image) = store.fixture.seen_at(mut client, tail_sub, 0u64, f.within_ms) else {
             store.fixture.close(take client);
-            return None
+            return Error(503u16)
         }
         let mut low: Option[u64] = None
         for r in image.rows {
@@ -249,15 +258,21 @@ fn follow_from[T: send](d: harness.gateway.Door[T], f: Front, id: u64, wake: boo
     }
     let Ok(status) = store.fixture.subscribe(mut client, window_entry(), Status, f.within_ms) else {
         store.fixture.close(take client);
-        return None
+        return Error(503u16)
     }
-    match store.fixture.subscribe(mut client, window_entry(), From(from), f.within_ms) {
-        Ok(sub) => Some(Following(client: take client, status: status, sub: sub, version: 0u64, fresh: true, hold_until: hold_until, quiet: false)),
-        Error(_) => {
-            store.fixture.close(take client);
-            None
-        },
+    let Ok(sub) = store.fixture.subscribe(mut client, window_entry(), From(from), f.within_ms) else {
+        store.fixture.close(take client);
+        return Error(503u16)
     }
+    let Ok(head) = store.fixture.seen_at(mut client, status, 0u64, f.within_ms) else {
+        store.fixture.close(take client);
+        return Error(503u16)
+    }
+    if visible_status(head) == None {
+        store.fixture.close(take client)
+        return Error(403u16)
+    }
+    Ok(Some(Following(client: take client, status: status, sub: sub, version: 0u64, fresh: true, hold_until: hold_until, quiet: false)))
 }
 
 fn send_out(mut w: WriteHalf, f: Front, take out: Bytes) -> bool waits {
@@ -377,15 +392,7 @@ fn clear_preview(mut w: WriteHalf, f: Front, mut watch: PreviewWatch) -> bool wa
 }
 
 fn preview_status(mut client: store.fixture.Client, f: Front) -> Option[String] waits {
-    let Ok(sub) = store.fixture.subscribe(mut client, window_entry(), Status, f.within_ms) else {
-        return None
-    }
-    let image = store.fixture.seen_at(mut client, sub, 0u64, f.within_ms)
-    store.fixture.unsubscribe(mut client, sub)
-    match take image {
-        Ok(take head) => visible_status(head),
-        Error(_) => None
-    }
+    match checked_status(mut client, f) { Ok(take status) => Some(take status), Error(_) => None }
 }
 
 fn send_preview(mut w: WriteHalf, f: Front, mut client: store.fixture.Client, sent: List[(u64, Bytes)], mut watch: PreviewWatch) -> bool waits {
@@ -460,18 +467,26 @@ fn halted(quit: Receiver[()]) -> bool {
 // stream no wake, and an open stream never holds the place up. Opening the stream wakes
 // the session once, to send its transcript.
 fn follow[T: send](d: harness.gateway.Door[T], f: Front, id: u64, mut w: WriteHalf, quit: Receiver[()], credential: Bytes, tail: u64) -> () waits {
+    let mut last = harness.gateway.marks(d, id)
+    let mut first: Option[u64] = None
+    let opened = follow_from(d, f, id, true, false, credential, tail, mut first)
+    let initial = match take opened {
+        Ok(take following) => option.unwrap(take following),
+        Error(code) => return reply(mut w, f, code, list.new()),
+    }
+    let head = string.into_bytes("HTTP/1.1 200 \r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n")
+    if !send_out(mut w, f, take head) {
+        let Following(client: take client, ..) = take initial
+        store.fixture.close(take client)
+        return
+    }
     let mut watch = PreviewWatch(observer: None, sent: None)
-    follow_loop(d, f, id, mut w, quit, credential, tail, mut watch)
+    follow_loop(d, f, id, mut w, quit, credential, tail, mut last, mut first, take initial, mut watch)
     unwatch(mut watch)
 }
 
-fn follow_loop[T: send](d: harness.gateway.Door[T], f: Front, id: u64, mut w: WriteHalf, quit: Receiver[()], credential: Bytes, tail: u64, mut watch: PreviewWatch) -> () waits {
-    let mut last = harness.gateway.marks(d, id)
-    let mut first: Option[u64] = None
-    let mut following = follow_from(d, f, id, true, false, credential, tail, mut first)
-    if let None = view following {
-        return
-    }
+fn follow_loop[T: send](d: harness.gateway.Door[T], f: Front, id: u64, mut w: WriteHalf, quit: Receiver[()], credential: Bytes, tail: u64, mut last: harness.gateway.Marks, mut first: Option[u64], take initial: Following, mut watch: PreviewWatch) -> () waits {
+    let mut following = Some(take initial)
     let group = harness.gateway.name_of(id)
     let live = match f.preview { Some(_) => true, None => false }
     let within = if live && f.poll_ms < f.beat_ms {
@@ -565,12 +580,14 @@ fn follow_loop[T: send](d: harness.gateway.Door[T], f: Front, id: u64, mut w: Wr
             }
         } else {
             let m = harness.gateway.marks(d, id)
-            if m.nudges != last.nudges {
+            if m.nudges != last.nudges || m.ups != last.ups {
+                let nudged = m.nudges != last.nudges
                 last = m
-                following = follow_from(d, f, id, true, true, credential, tail, mut first)
-            } else if m.ups != last.ups {
-                last = m
-                following = follow_from(d, f, id, false, false, credential, tail, mut first)
+                match follow_from(d, f, id, nudged, nudged, credential, tail, mut first) {
+                    Ok(take next) => { following = take next },
+                    Error(403u16) => return,
+                    Error(_) => (),
+                }
             } else {
                 host.sleep_until(f.clock, deadline_ms(f.clock, f.poll_ms))
                 if host.mono_ns(f.clock) - quiet_since >= f.beat_ms * 1000000u64 {
@@ -710,52 +727,12 @@ fn query_uint(target: Bytes, name: String) -> Option[u64] {
     None
 }
 
-// One page of history, read through the place's query under the browser's Caller, so
-// the place's read check runs for every page. It wakes the session.
-fn history[T: send](d: harness.gateway.Door[T], f: Front, id: u64, take credential: Bytes, before: u64, lines: u64) -> Result[Page, u16] waits {
-    let mut client = reach(d, f, id, take credential, 0u64, true)?
-    let mut from = harness.page_from(before, lines)
-    let cuts = store.fixture.query_as_entry(code.describe(harness.history_cuts), std.codec.key_u64(), std.codec.of_u64())
-    let Ok(bounds) = store.fixture.subscribe(mut client, cuts, (from, before), f.within_ms) else {
-        store.fixture.close(take client);
-        return Error(503u16)
-    }
-    let Ok(cut_image) = store.fixture.seen_at(mut client, bounds, 0u64, f.within_ms) else {
-        store.fixture.close(take client);
-        return Error(503u16)
-    }
-    for r in cut_image.rows {
-        if let Some(raw) = view r.value {
-            if let Ok(cut) = std.codec.decode(std.codec.of_u64(), raw) {
-                if cut > from { from = cut }
-            }
-        }
-    }
-    store.fixture.unsubscribe(mut client, bounds)
-    let Ok(sub) = store.fixture.subscribe(mut client, window_entry(), Page(before, before - from), f.within_ms) else {
-        store.fixture.close(take client);
-        return Error(503u16)
-    }
-    let seen = store.fixture.seen_at(mut client, sub, 0u64, f.within_ms)
+// The fresh status query follows the data queries and applies the same ACL.
+fn history[T: send](d: harness.gateway.Door[T], f: Front, id: u64, credential: Bytes, before: u64, lines: u64) -> Result[Page, u16] waits {
+    let mut client = option.unwrap(reach(d, f, id, credential, 0u64, true)?)
+    let page = history_page(mut client, f, before, lines)
     store.fixture.close(take client)
-    let Ok(image) = take seen else {
-        return Error(503u16)
-    }
-    let codec: std.codec.Codec[harness.View] = std.codec.of()
-    let mut rows: List[Shown] = list.new()
-    for r in image.rows {
-        let Some(raw) = view r.value else {
-            continue
-        }
-        let Some(at) = position(r) else {
-            continue
-        }
-        let Ok(take v) = std.codec.decode(codec, raw) else {
-            continue
-        }
-        list.push(mut rows, Shown(at: at, line: take v))
-    }
-    Ok(Page(from: from, rows: take rows))
+    take page
 }
 
 fn reply(mut w: WriteHalf, f: Front, status: u16, take payload: Bytes) -> () waits {
@@ -790,15 +767,6 @@ fn json_body[V: codec](req: Request, f: Front) -> Option[V] {
     }
 }
 
-fn listed[T: send](d: harness.gateway.Door[T], id: u64) -> bool waits {
-    for n in harness.gateway.listing(d) {
-        if n == id {
-            return true
-        }
-    }
-    false
-}
-
 type Conn[T: send]: send {
     door: harness.gateway.Door[T],
     front: Front,
@@ -827,15 +795,18 @@ fn serve_one[T: send](d: harness.gateway.Door[T], f: Front, mut read: ReadHalf, 
     if list.len(path) == 0u64 || path[0] != "sessions" {
         return reply(mut write, f, 404u16, list.new())
     }
+    let credential = match bearer(req) {
+        Ok(take b) => take b,
+        Error(code) => return reply(mut write, f, code, list.new())
+    }
     if list.len(path) == 1u64 {
         if method == b"GET" {
-            return json_reply(mut write, f, 200u16, harness.gateway.listing(d))
+            return match visible_sessions(d, f, credential) {
+                Ok(take ids) => json_reply(mut write, f, 200u16, ids),
+                Error(code) => reply(mut write, f, code, list.new()),
+            }
         }
         if method == b"POST" {
-            let credential = match bearer(req) {
-                Ok(take b) => take b,
-                Error(code) => return reply(mut write, f, code, list.new())
-            }
             let Ok(take caller) = store.ingress.caller((), credential) else {
                 return reply(mut write, f, 401u16, list.new())
             }
@@ -850,6 +821,9 @@ fn serve_one[T: send](d: harness.gateway.Door[T], f: Front, mut read: ReadHalf, 
         return reply(mut write, f, 404u16, list.new())
     }
     if list.len(path) == 2u64 && method == b"DELETE" {
+        if let Error(code) = allowed(d, f, id, credential) {
+            return reply(mut write, f, code, list.new())
+        }
         return match harness.gateway.delete(d, id) {
             Ok(()) => reply(mut write, f, 204u16, list.new()),
             Error(why) => reply(mut write, f, turned(why), list.new())
@@ -859,7 +833,7 @@ fn serve_one[T: send](d: harness.gateway.Door[T], f: Front, mut read: ReadHalf, 
         return reply(mut write, f, 404u16, list.new())
     }
     if path[2] == "messages" && method == b"POST" {
-        let who = match asker(req) {
+        let who = match asker(req, take credential) {
             Ok(take w) => take w,
             Error(code) => return reply(mut write, f, code, list.new())
         }
@@ -875,7 +849,7 @@ fn serve_one[T: send](d: harness.gateway.Door[T], f: Front, mut read: ReadHalf, 
         }
     }
     if path[2] == "decisions" && method == b"POST" {
-        let who = match asker(req) {
+        let who = match asker(req, take credential) {
             Ok(take w) => take w,
             Error(code) => return reply(mut write, f, code, list.new())
         }
@@ -891,10 +865,6 @@ fn serve_one[T: send](d: harness.gateway.Door[T], f: Front, mut read: ReadHalf, 
         }
     }
     if path[2] == "history" && method == b"GET" {
-        let credential = match bearer(req) {
-            Ok(take b) => take b,
-            Error(code) => return reply(mut write, f, code, list.new())
-        }
         let target = part(req, req.head.target)
         let Some(before) = query_uint(target, "before") else {
             return reply(mut write, f, 400u16, list.new())
@@ -905,29 +875,30 @@ fn serve_one[T: send](d: harness.gateway.Door[T], f: Front, mut read: ReadHalf, 
         if before < 2u64 || lines == 0u64 || lines > PAGE_LINES_MAX {
             return reply(mut write, f, 400u16, list.new())
         }
-        return match history(d, f, id, take credential, before, lines) {
+        return match history(d, f, id, credential, before, lines) {
             Ok(take page) => json_reply(mut write, f, 200u16, page),
             Error(code) => reply(mut write, f, code, list.new()),
         }
     }
+    if path[2] == "waits" && method == b"GET" {
+        let mut client = match reach(d, f, id, credential, 0u64, true) {
+            Ok(take opened) => option.unwrap(take opened),
+            Error(code) => return reply(mut write, f, code, list.new()),
+        }
+        let waits = waits_page(mut client, f)
+        store.fixture.close(take client)
+        return match take waits {
+            Ok(take rows) => json_reply(mut write, f, 200u16, rows),
+            Error(code) => reply(mut write, f, code, list.new()),
+        }
+    }
     if path[2] == "events" && method == b"GET" {
-        if !listed(d, id) {
-            return reply(mut write, f, 404u16, list.new())
-        }
-        let credential = match bearer(req) {
-            Ok(take b) => take b,
-            Error(code) => return reply(mut write, f, code, list.new())
-        }
         let tail = match query_uint(part(req, req.head.target), "tail") {
             Some(n) => n,
             None => f.tail_lines
         }
         if tail == 0u64 || tail > f.tail_lines {
             return reply(mut write, f, 400u16, list.new())
-        }
-        let head = string.into_bytes(string.from("HTTP/1.1 200 \r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"))
-        if !send_out(mut write, f, take head) {
-            return
         }
         return follow(d, f, id, mut write, quit, credential, tail)
     }

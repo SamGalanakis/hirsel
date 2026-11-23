@@ -20,7 +20,7 @@ pub opaque type Factory[T: send]: send { start: own[send] fn(take Launch[T], T) 
 pub type Unloaded: send { name: String, ended: Result[runner.Ended, runner.StartError] }
 // Up: a child reached Ready and the host accepted it. Down: a child ended.
 pub type Change: send = Up(String) | Down(Unloaded)
-pub type Refused: send = Unknown | Exists | Full | Busy | Retiring | Failed(String) | Stopping
+pub type Refused: send = Unknown | Exists | Full | Busy | Retiring | Denied | Failed(String) | Stopping
 
 // `root` holds the host's catalog (`root/host`) and every group's store (`root/<name>`).
 // `place_bytes` is the budget every live child shares; `max_places` and `idle_ms` are
@@ -51,9 +51,15 @@ type Launch[T: send]: send {
 }
 type Started { task: Task[()], charge: u64 }
 
+type AccessReply = Sender[Result[Option[Lease], Refused]]
+pub type ColdCheck: send {
+    caller: store.Caller,
+    check: StaticFn[fn(store.ReadOnly, store.Caller) -> Result[bool, store.Error]],
+}
+
 type In: send = Host(platform.Input) | Up(String, u64) | Down(String, u64, Result[runner.Ended, runner.StartError])
     | Add(String, Sender[Result[(), Refused]]) | Remove(String, Sender[Result[(), Refused]])
-    | Route(String, Sender[Result[Lease, Refused]]) | Peek(String, Sender[Result[Lease, Refused]])
+    | Route(String, AccessReply) | Access(String, ColdCheck, bool, AccessReply) | Peek(String, Sender[Result[Lease, Refused]])
     | Unload(String, Sender[Result[Unloaded, Refused]]) | Groups(Sender[List[String]]) | Halt(Sender[List[Unloaded]])
 
 type PlaceJob[G: send, H: send, S: send, B: send]: send {
@@ -72,7 +78,7 @@ type Kid {
 type Actor[T: send] {
     h: platform.Host, driving: platform.Driver, factory: Factory[T], seed: T, root: Dir, options: store.Options,
     place_bytes: u64, sessions: u64, used: u64, tasks: Tasks, clock: Clock, random: Random, net: Net, me: Sender[In], watch: Option[Sender[Change]],
-    kids: List[Kid], routes: List[(String, Sender[Result[Lease, Refused]])], unloads: List[(String, Sender[Result[Unloaded, Refused]])],
+    kids: List[Kid], routes: List[(String, AccessReply)], unloads: List[(String, Sender[Result[Unloaded, Refused]])],
     removes: List[(String, Sender[Result[(), Refused]])], retiring: List[launcher.Group], halting: bool, unloaded: List[Unloaded],
 }
 
@@ -313,11 +319,11 @@ fn serves(k: Kid) -> bool {
 // A route is answered once the host has accepted a child of its group as Ready, and is
 // refused when its group is gone.
 fn answer_routes[T: send](mut a: Actor[T]) {
-    let mut kept: List[(String, Sender[Result[Lease, Refused]])] = list.new()
+    let mut kept: List[(String, AccessReply)] = list.new()
     while let Some((take name, take reply)) = list.pop(mut a.routes) {
-        let answer: Option[Result[Lease, Refused]] = match platform.serving_ready(a.h, name) {
+        let answer: Option[Result[Option[Lease], Refused]] = match platform.serving_ready(a.h, name) {
             Some(gen) => match kid_of(a, name, gen) {
-                Some(i) => if serves(a.kids[i]) { Some(Ok(lease_of(a.kids[i]))) } else { None },
+                Some(i) => if serves(a.kids[i]) { Some(Ok(Some(lease_of(a.kids[i])))) } else { None },
                 None => None,
             },
             None => match platform.wake_row(a.h, name) { Some(_) => None, None => Some(Error(Unknown)) },
@@ -331,7 +337,7 @@ fn answer_routes[T: send](mut a: Actor[T]) {
 }
 
 fn refuse_routes[T: send](mut a: Actor[T], name: String, why: Refused) {
-    let mut kept: List[(String, Sender[Result[Lease, Refused]])] = list.new()
+    let mut kept: List[(String, AccessReply)] = list.new()
     while let Some((take at, take reply)) = list.pop(mut a.routes) {
         if at == name { let _ = channel.try_send(reply, Error(clone(why))) } else { list.push(mut kept, (take at, take reply)) }
     }
@@ -479,7 +485,7 @@ fn on_remove[T: send](mut a: Actor[T], take name: String, take reply: Sender[Res
 // Wakes the group (§14.3, an operator request) and answers when the host has a Ready child
 // for it. A route during a child's drain waits for the next child, which the drain's end
 // starts because the route makes it readable.
-fn on_route[T: send](mut a: Actor[T], take name: String, take reply: Sender[Result[Lease, Refused]]) waits {
+fn on_route[T: send](mut a: Actor[T], take name: String, take reply: AccessReply) waits {
     let n = now(a)
     match platform.wake(mut a.h, name, n) {
         Ok(take reqs) => {
@@ -497,6 +503,38 @@ fn on_peek[T: send](a: Actor[T], name: String) -> Result[Lease, Refused] {
     match kid_of(a, name, gen) {
         Some(i) => if serves(a.kids[i]) { Ok(lease_of(a.kids[i])) } else { Error(Busy) },
         None => Error(Busy),
+    }
+}
+
+// The local actor owns all child starts. A cold read runs in that actor after
+// the prior child has closed its store and before any next child can open it.
+fn check_cold[T: send](a: Actor[T], name: String, check: ColdCheck) -> Result[(), Refused] waits {
+    if group_has_kid(a, name) {
+        return Error(Busy)
+    }
+    let Ok(dir) = std.dir.narrow(a.root, name) else { return Error(Unknown) }
+    let Ok(take reader) = store.open_read_only(dir, a.options) else {
+        return Error(Failed("read cold store"))
+    }
+    match code.callable(check.check)(reader, check.caller) {
+        Ok(true) => Ok(()),
+        Ok(false) => Error(Denied),
+        Error(_) => Error(Failed("check cold store")),
+    }
+}
+
+fn on_access[T: send](mut a: Actor[T], take name: String, check: ColdCheck, wake: bool, take reply: AccessReply) waits {
+    match on_peek(a, name) {
+        Ok(take lease) => { let _ = channel.try_send(reply, Ok(Some(take lease))); return },
+        Error(Busy) => (),
+        Error(take why) => { let _ = channel.try_send(reply, Error(take why)); return },
+    }
+    if let Error(take why) = check_cold(a, name, check) {
+        let _ = channel.try_send(reply, Error(take why))
+    } else if wake {
+        on_route(mut a, take name, take reply)
+    } else {
+        let _ = channel.try_send(reply, Ok(None))
     }
 }
 
@@ -562,6 +600,7 @@ fn run_local[T: send](take begin: Begin[T]) -> () waits {
             },
             Remove(take name, take reply) => if a.halting { let _ = channel.try_send(reply, Error(Stopping)) } else { on_remove(mut a, take name, take reply) },
             Route(take name, take reply) => if a.halting { let _ = channel.try_send(reply, Error(Stopping)) } else { on_route(mut a, take name, take reply) },
+            Access(take name, take check, wake, take reply) => if a.halting { let _ = channel.try_send(reply, Error(Stopping)) } else { on_access(mut a, take name, check, wake, take reply) },
             Peek(take name, take reply) => { let _ = channel.try_send(reply, if a.halting { Error(Stopping) } else { on_peek(a, name) }) },
             Unload(take name, take reply) => if a.halting { let _ = channel.try_send(reply, Error(Stopping)) } else { on_unload(mut a, take name, take reply) },
             Groups(take reply) => { let _ = channel.try_send(reply, platform.group_names(a.h)) },
@@ -633,8 +672,21 @@ pub fn remove(d: Door, name: String) -> Result[(), Refused] waits {
 
 // Wakes a group if it is unloaded and answers a lease on its Ready child.
 pub fn route(d: Door, name: String) -> Result[Lease, Refused] waits {
-    let (reply, answer): (Sender[Result[Lease, Refused]], Receiver[Result[Lease, Refused]]) = channel.new(1u64)
+    let (reply, answer): (AccessReply, Receiver[Result[Option[Lease], Refused]]) = channel.new(1u64)
     if let Error(_) = channel.send(d.to, Route(string.from(name), take reply)) { return Error(Stopping) }
+    match channel.receive(answer) {
+        Ok(Ok(take lease)) => Ok(option.unwrap(take lease)),
+        Ok(Error(take why)) => Error(take why),
+        Error(_) => Error(Stopping),
+    }
+}
+
+// A running child returns a lease for the caller's live authorization. For a
+// cold child, check its durable state before optionally starting it. None
+// acknowledges an allowed cold read that did not request a wake.
+pub fn access(d: Door, name: String, take check: ColdCheck, wake: bool) -> Result[Option[Lease], Refused] waits {
+    let (reply, answer): (AccessReply, Receiver[Result[Option[Lease], Refused]]) = channel.new(1u64)
+    if let Error(_) = channel.send(d.to, Access(string.from(name), take check, wake, take reply)) { return Error(Stopping) }
     match channel.receive(answer) { Ok(take answered) => take answered, Error(_) => Error(Stopping) }
 }
 

@@ -14,6 +14,7 @@ export type Shown = { at: number; line: View };
 export type DraftKey = { run: number; entry: number; tool?: number; attempt: number };
 export type Draft = { key: DraftKey; offset: number; text: string };
 export type Decision = { run: number; round: number; ordinal: number; key: string; allow: boolean };
+export type PendingWait = Omit<Decision, "allow"> & { expires: number };
 export type State = {
   status: string; rows: Shown[]; draft: Draft | null;
   live: boolean; older: boolean; // whether the first image has arrived; whether earlier rows remain
@@ -57,6 +58,15 @@ export class Client {
   }
   decide(d: Decision) { return this.post("/decisions", JSON.stringify(d)); }
 
+  async pendingWaits(): Promise<PendingWait[]> {
+    const response = await fetch(this.url("/waits"), { headers: this.headers() });
+    if (!response.ok) {
+      await response.body?.cancel();
+      throw new Error(`waits: HTTP ${response.status}`);
+    }
+    return response.json();
+  }
+
   private post(path: string, body: string): Promise<{ status: number; body: unknown }> {
     const run = async () => {
       for (let wait = 50; ; wait = Math.min(wait * 2, 2000)) {
@@ -68,7 +78,7 @@ export class Client {
           });
         } catch { /* no answer: resend the same bytes at the same position */ }
         if (r && r.status !== 503) {
-          this.position += 1;
+          if (r.status !== 401 && r.status !== 403) this.position += 1;
           const text = await r.text();
           return { status: r.status, body: text ? JSON.parse(text) : null };
         }

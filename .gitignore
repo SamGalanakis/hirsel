@@ -1,6 +1,7 @@
 # Logs
 *.log
 *.log.*
+/boat-contain-*/
 
 # Cargo build output
 /target/

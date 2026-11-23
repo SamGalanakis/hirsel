@@ -1,4 +1,0 @@
-{"event":"created","hostedPorts":null,"id":"bx_h4fxadrj","org":null,"team":null,"ttlSeconds":3600}
-{"event":"state","id":"bx_h4fxadrj","state":"starting"}
-{"event":"state","id":"bx_h4fxadrj","state":"ready"}
-{"archiveAfter":"2026-11-23T00:47:39.990Z","commands":{"forward":"boat forward bx_h4fxadrj --remote 3000 --local 3000","ssh":"boat ssh bx_h4fxadrj"},"desktopUrl":null,"event":"ready","id":"bx_h4fxadrj","ip":"2001:41d0:8:817a:100::2a","state":"ready","url":"https://box-node-3bc7079e7ba032d5.on.boat.dev"}

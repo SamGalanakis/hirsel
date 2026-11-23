@@ -1805,7 +1805,7 @@ fn link_objects(
                 };
                 #[cfg(test)]
                 UNIT.set(Some((unit_key, image.path(_unit.address), _prelinked)));
-                Some(file)
+                Some((unit_key, file))
             }
         };
         let files = match open_objects(&separate, &mut counters)? {
@@ -1819,15 +1819,22 @@ fn link_objects(
         let pid = std::process::id();
         let mut inputs = Vec::with_capacity(objects.len() + 4);
         inputs.push(entry.clone());
-        inputs.extend(unit.iter().chain(&files).map(|file| {
+        inputs.extend(unit.iter().map(|(_, file)| file).chain(&files).map(|file| {
             PathBuf::from(format!(
                 "/proc/{pid}/fd/{}",
                 std::os::fd::AsRawFd::as_raw_fd(file)
             ))
         }));
         let mut runtime_sources = sources.clone();
+        // Each input is named by the key its bytes are a function of: the
+        // unit by its key, an object by its identity and read check.
+        let keys: Vec<_> = unit
+            .iter()
+            .map(|(key, _)| (*key, 0))
+            .chain(separate.iter().map(|o| (o.identity, o.check)))
+            .collect();
         let spawns_units =
-            crate::native_entry::retain_referenced(&mut runtime_sources, &inputs[1..])?;
+            crate::native_entry::retain_referenced(&mut runtime_sources, &inputs[1..], &keys)?;
         let write_entry = |live_sites: Option<&BTreeSet<u64>>| -> Result<(), NativeStop> {
             let bytes = entry_plan
                 .emit(

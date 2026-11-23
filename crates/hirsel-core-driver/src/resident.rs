@@ -23,6 +23,7 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+
 use std::sync::atomic::{AtomicBool, Ordering};
 
 const SOCKET: &str = "resident.sock";
@@ -35,6 +36,73 @@ static SERVING: AtomicBool = AtomicBool::new(false);
 thread_local! {
     /// The connection of the request being served, until it is answered.
     static CLIENT: std::cell::RefCell<Option<UnixStream>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The requests this server has begun, which dates each memo entry's use.
+static REQUEST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A resident compiler's memo of one pure derivation, keyed by every input
+/// the derivation reads, so an entry is never stale; outside a server it
+/// remembers nothing. After each request the server drops the entries that
+/// request did not use ([`sweep`]), so a memo holds one request's working set.
+pub(crate) struct Memo<K, V> {
+    entries: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<K, (V, u64)>>>,
+}
+impl<K: std::hash::Hash + Eq, V: Clone> Memo<K, V> {
+    pub(crate) const fn new() -> Self {
+        Self {
+            entries: std::sync::LazyLock::new(Default::default),
+        }
+    }
+    /// The value under `key`, made by `make` unless remembered; a None key
+    /// is a derivation this memo does not key.
+    pub(crate) fn get_or<E>(
+        &self,
+        key: Option<K>,
+        make: impl FnOnce() -> Result<V, E>,
+    ) -> Result<V, E> {
+        let Some(key) = key.filter(|_| serving()) else {
+            return make();
+        };
+        let request = REQUEST.load(Ordering::Relaxed);
+        if let Some((value, used)) = self.entries.lock().unwrap().get_mut(&key) {
+            *used = request;
+            return Ok(value.clone());
+        }
+        let value = make()?;
+        self.entries
+            .lock()
+            .unwrap()
+            .insert(key, (value.clone(), request));
+        Ok(value)
+    }
+    fn sweep(&self, request: u64) {
+        self.entries
+            .lock()
+            .unwrap()
+            .retain(|_, (_, used)| *used == request);
+    }
+}
+
+/// Materialised instances, by identity and definition record.
+pub(crate) static MATERIALISED: Memo<
+    (
+        hirsel_core_ir::Identity,
+        Option<hirsel_core_ids::ContentHash>,
+    ),
+    crate::instances::Materialised,
+> = Memo::new();
+
+/// The site items each link input references, by the input's content key.
+pub(crate) static REFERENCED: Memo<
+    (hirsel_core_ids::ContentHash, u64),
+    crate::native_entry::Referenced,
+> = Memo::new();
+
+/// Drop every memo entry the request numbered `request` did not use.
+fn sweep(request: u64) {
+    MATERIALISED.sweep(request);
+    REFERENCED.sweep(request);
 }
 
 /// Whether this process is a resident compiler serving requests.
@@ -506,6 +574,7 @@ fn serve_requests(
             unsafe { libc::dup2(from.as_raw_fd(), fd as RawFd) };
         }
         drop(fds);
+        let served = REQUEST.fetch_add(1, Ordering::Relaxed) + 1;
         let cwd = PathBuf::from(OsString::from_vec(request.cwd));
         let outcome = if std::env::set_current_dir(&cwd).is_ok() {
             CLIENT.with_borrow_mut(|client| *client = stream.try_clone().ok());
@@ -528,6 +597,7 @@ fn serve_requests(
         if let Outcome::Launch(launch) = outcome {
             launched.push((stream, launch.keep));
         }
+        sweep(served);
         if panicked {
             // The request's state may be torn; the next client starts afresh.
             return Ok(101);

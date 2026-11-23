@@ -674,74 +674,26 @@ impl CheckProduct {
                     hirsel_core_ir::symbol(hash)
                 ))
             })?;
-            let built = match &product {
-                None => {
-                    observe(key, "load");
-                    hirsel_core_materialize::materialize_glue(key, &arguments).map_err(input)?
-                }
-                Some(product) => {
-                    let own = Published {
-                        module: product.ir().map_err(|e| input(e.to_string()))?,
-                        function: product.check.function.unwrap(),
-                        template: product.check.template.as_ref(),
-                    };
-                    observe(key, "load");
-                    hirsel_core_materialize::materialize(&own, key, &arguments).map_err(input)?
-                }
-            };
-            observe(key, "materialize");
-            let (slots, signatures, adapters) = {
-                use hirsel_core_ir::normal::{self, Slot};
-                let module = built.module.as_ref().expect("materialized module");
-                let slots = built
-                    .code
-                    .slots
-                    .iter()
-                    .map(|slot| slot.identity(module))
-                    .collect::<Vec<_>>();
-                let signatures = CodeSignatures {
-                    own: normal::signature(module, built.function),
-                    slots: built
-                        .code
-                        .slots
-                        .iter()
-                        .filter_map(|slot| match slot {
-                            Slot::External(function) => {
-                                Some((slot.identity(module), normal::signature(module, *function)))
-                            }
-                            Slot::Builtin(_) => None,
-                        })
-                        .collect(),
-                };
-                let adapters = module
-                    .functions
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(i, function)| {
-                        function.body.as_ref()?;
-                        let key = &module.instances[function.instance.index()];
-                        key.definition.0.name.contains("$callable[").then(|| {
-                            let code = normal::encode(module, hirsel_core_ir::FuncId(i as u32));
-                            Adapter {
-                                identity: module.identity(function.instance),
-                                body: code.hash(),
-                                slots: code
-                                    .slots
-                                    .iter()
-                                    .map(|slot| slot.identity(module))
-                                    .collect(),
-                            }
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                (slots, signatures, adapters)
-            };
-            let body = built.code.hash();
-            let described = built.code.described;
-            resolver.add(&built.children);
+            // A function of the instance's identity and its definition's
+            // published record: a resident compiler keeps it across requests.
+            let memo_key = (own != Some(ContentHash::default())).then(|| (key.clone(), own));
+            let made = crate::resident::MATERIALISED.get_or(memo_key, || {
+                materialise(key, product.as_deref(), &arguments, observe)
+            })?;
+            let Materialised {
+                module,
+                function,
+                children,
+                body,
+                slots,
+                signatures,
+                adapters,
+                described,
+            } = made;
+            resolver.add(&children);
             if records.is_some() {
                 let mut closures = std::collections::BTreeMap::new();
-                for closure in built.children.iter().flat_map(|c| &c.closures) {
+                for closure in children.iter().flat_map(|c| &c.closures) {
                     closures
                         .entry(closure.hash)
                         .or_insert_with(|| Arc::clone(closure));
@@ -751,8 +703,7 @@ impl CheckProduct {
                     Fields {
                         own,
                         body,
-                        children: built
-                            .children
+                        children: children
                             .iter()
                             .map(|c| c.identity.clone())
                             .collect::<BTreeSet<_>>()
@@ -766,8 +717,7 @@ impl CheckProduct {
                     },
                 );
             }
-            let mut externals: Vec<_> = built
-                .children
+            let mut externals: Vec<_> = children
                 .into_iter()
                 .map(
                     |Child {
@@ -784,8 +734,8 @@ impl CheckProduct {
             instances.rows.insert(key.clone(), row);
             instances.bodies.push(InstanceBody {
                 product,
-                module: built.module,
-                function: built.function,
+                module,
+                function,
                 body,
                 slots,
                 signatures,
@@ -797,4 +747,104 @@ impl CheckProduct {
             Ok(pending.into_iter().collect())
         }
     }
+}
+
+/// An instance as the walk materialises it, before its walk-specific
+/// bookkeeping: a function of its identity, its definition's published
+/// record and its arguments' closures, which its identity names by hash.
+#[derive(Clone)]
+pub(crate) struct Materialised {
+    module: Option<Module>,
+    function: hirsel_core_ir::FuncId,
+    children: Vec<Child>,
+    body: ContentHash,
+    slots: Vec<Identity>,
+    signatures: CodeSignatures,
+    adapters: Vec<Adapter>,
+    described: Vec<Identity>,
+}
+fn materialise(
+    key: &Identity,
+    product: Option<&DefinitionProduct>,
+    arguments: &[&hirsel_core_ir::Closure],
+    observe: &mut impl FnMut(&Identity, &'static str),
+) -> Result<Materialised, InstanceStop> {
+    let input = |message: String| InstanceStop::Input {
+        definition: key.definition.clone(),
+        message,
+    };
+    let built = match product {
+        None => {
+            observe(key, "load");
+            hirsel_core_materialize::materialize_glue(key, arguments).map_err(input)?
+        }
+        Some(product) => {
+            let own = Published {
+                module: product.ir().map_err(|e| input(e.to_string()))?,
+                function: product.check.function.unwrap(),
+                template: product.check.template.as_ref(),
+            };
+            observe(key, "load");
+            hirsel_core_materialize::materialize(&own, key, arguments).map_err(input)?
+        }
+    };
+    observe(key, "materialize");
+    let (slots, signatures, adapters) = {
+        use hirsel_core_ir::normal::{self, Slot};
+        let module = built.module.as_ref().expect("materialized module");
+        let slots = built
+            .code
+            .slots
+            .iter()
+            .map(|slot| slot.identity(module))
+            .collect::<Vec<_>>();
+        let signatures = CodeSignatures {
+            own: normal::signature(module, built.function),
+            slots: built
+                .code
+                .slots
+                .iter()
+                .filter_map(|slot| match slot {
+                    Slot::External(function) => {
+                        Some((slot.identity(module), normal::signature(module, *function)))
+                    }
+                    Slot::Builtin(_) => None,
+                })
+                .collect(),
+        };
+        let adapters = module
+            .functions
+            .iter()
+            .enumerate()
+            .filter_map(|(i, function)| {
+                function.body.as_ref()?;
+                let key = &module.instances[function.instance.index()];
+                key.definition.0.name.contains("$callable[").then(|| {
+                    let code = normal::encode(module, hirsel_core_ir::FuncId(i as u32));
+                    Adapter {
+                        identity: module.identity(function.instance),
+                        body: code.hash(),
+                        slots: code
+                            .slots
+                            .iter()
+                            .map(|slot| slot.identity(module))
+                            .collect(),
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        (slots, signatures, adapters)
+    };
+    let body = built.code.hash();
+    let described = built.code.described;
+    Ok(Materialised {
+        module: built.module,
+        function: built.function,
+        children: built.children,
+        body,
+        slots,
+        signatures,
+        adapters,
+        described,
+    })
 }

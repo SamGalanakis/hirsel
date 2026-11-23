@@ -21,32 +21,14 @@ fn allocatable<'data>(section: &impl object::ObjectSection<'data>) -> bool {
 pub(crate) fn retain_referenced(
     sources: &mut SourceMap,
     inputs: &[PathBuf],
+    keys: &[(hirsel_core_ids::ContentHash, u64)],
 ) -> std::io::Result<bool> {
     let mut names = HashSet::new();
     let mut spawns_units = false;
-    for input in inputs {
-        let cache = object::read::ReadCache::new(File::open(input)?);
-        let object = object::File::parse(&cache).map_err(std::io::Error::other)?;
-        for section in object.sections() {
-            if !allocatable(&section) {
-                continue;
-            }
-            for (_, relocation) in section.relocations() {
-                let object::RelocationTarget::Symbol(index) = relocation.target() else {
-                    continue;
-                };
-                let symbol = object
-                    .symbol_by_index(index)
-                    .map_err(std::io::Error::other)?;
-                let name = symbol.name_bytes().map_err(std::io::Error::other)?;
-                spawns_units |= name == b"hirsel_core_spawn_unit";
-                if let Some(item) = site_item_symbol(name)
-                    && !names.contains(item)
-                {
-                    names.insert(item.to_vec());
-                }
-            }
-        }
+    for (input, key) in inputs.iter().zip(keys) {
+        let scanned = crate::resident::REFERENCED.get_or(Some(*key), || referenced(input))?;
+        spawns_units |= scanned.spawns_units;
+        names.extend(scanned.items.iter().cloned());
     }
     if sources.items.is_empty() {
         return Ok(spawns_units);
@@ -76,6 +58,45 @@ pub(crate) fn retain_referenced(
         item.file = file_numbers[item.file as usize].expect("retained source file");
     }
     Ok(spawns_units)
+}
+
+/// The site items an input object's allocated sections reference, and
+/// whether they call the unit spawn ABI: a function of the object's bytes.
+#[derive(Clone)]
+pub(crate) struct Referenced {
+    items: std::sync::Arc<[Vec<u8>]>,
+    spawns_units: bool,
+}
+
+fn referenced(input: &PathBuf) -> std::io::Result<Referenced> {
+    let mut items = HashSet::new();
+    let mut spawns_units = false;
+    let cache = object::read::ReadCache::new(File::open(input)?);
+    let object = object::File::parse(&cache).map_err(std::io::Error::other)?;
+    for section in object.sections() {
+        if !allocatable(&section) {
+            continue;
+        }
+        for (_, relocation) in section.relocations() {
+            let object::RelocationTarget::Symbol(index) = relocation.target() else {
+                continue;
+            };
+            let symbol = object
+                .symbol_by_index(index)
+                .map_err(std::io::Error::other)?;
+            let name = symbol.name_bytes().map_err(std::io::Error::other)?;
+            spawns_units |= name == b"hirsel_core_spawn_unit";
+            if let Some(item) = site_item_symbol(name)
+                && !items.contains(item)
+            {
+                items.insert(item.to_vec());
+            }
+        }
+    }
+    Ok(Referenced {
+        items: items.into_iter().collect(),
+        spawns_units,
+    })
 }
 
 /// Site relocations in a GC link with `--emit-relocs`. Absolute symbols

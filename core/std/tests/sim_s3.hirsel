@@ -519,14 +519,13 @@ fn object_fixture(tasks: Tasks, seed: u64, tape: String, dialect: u16) -> (objec
     let plan = sim.world.plan_from(sim.world.Script(tail_seed: seed, streams: take scripts), 0)
     let config = sim.s3.Config(address, cut: None, network: take net_model, after_resolve: None, credential: string.from(access), signing_key: take verify, faults: take faults, exists_status: dialect, fragment_bytes: 64, max_body: 65536)
     let (world, time) = sim.world.new(seed, 0, 1369353600000)
-    let (network, port) = provide.net(bytes 131072)
     let driver = task.spawn(tasks, bytes 65536, take world, live_clock)
-    let server_task = task.spawn(tasks, bytes 8388608, Server(config: take config, plan: take plan, time, port: take port), live_server)
+    let (endpoint, server_task) = sim.s3.start_service(tasks, take config, take plan, time, 131072, 8388608)
     let secret_bytes = string.into_bytes(string.from("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"))
     let root = result.unwrap(secret.seal(take secret_bytes, "kdf"))
     let bucket = object.Bucket(endpoint: string.from("http://s3.test:8080"), aws_region: string.from("us-east-1"), bucket: string.from("bucket"), prefix: string.from(""), style: Virtual)
     let credentials_set = cred.from_secret("AKIAIOSFODNN7EXAMPLE", take root, "")
-    let client = result.unwrap(object.start(network, tasks, take bucket, take credentials_set, None, System, time, provide.random(seed), 0, 1048576, 1000000000))
+    let client = result.unwrap(object.start_simulated(endpoint, tasks, take bucket, take credentials_set, time, provide.random(seed), 0, 1048576, 1000000000))
     (take client, time, take server_task, take driver)
 }
 
@@ -535,6 +534,21 @@ fn has_saved(report: sim.s3.Report, key: String, body: String) -> bool {
         return value.data == string.as_bytes(body)
     }
     false
+}
+
+// expect: run typed_sim_endpoint(tasks) = true
+fn typed_sim_endpoint(tasks: Tasks) -> bool waits {
+    let (client, _, server, driver) = object_fixture(tasks, 11, "00000000", 412)
+    let mut c = take client
+    let correct = object.simulated(c) && object.endpoint_host(c) == "s3.test" && !object.endpoint_secure(c)
+    let (reply, _) = object.store_if(mut c, "head", Absent, string.into_bytes(string.from("first")), OBJECT_END)
+    let _ = take c
+    let observed = result.unwrap(task.join(take server))
+    result.unwrap(task.join(take driver))
+    let Ok(Applied(_)) = reply else {
+        return false
+    }
+    correct && observed.writes == 1 && has_saved(observed, "head", "first")
 }
 
 fn created(value: Result[object.Created, object.Error], size: u64) -> bool {

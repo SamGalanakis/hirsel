@@ -2023,6 +2023,7 @@ type Worker {
 
 pub opaque type Client {
     bucket: Bucket,
+    simulated: bool,
     lanes: List[Worker],
     output: Receiver[LaneEvent],
     resolver: Task[()],
@@ -2105,7 +2106,36 @@ pub fn start(n: Net, tasks: Tasks, take bucket: Bucket, take credentials_set: cr
     }
     let pool = Pool(network: n, clock: c, tasks, server: take server, input: take pool_rx, timer_tx: take pool_tx, replies: take replies, peers: take peers)
     let resolver = task.spawn(tasks, bytes lane_bytes, take pool, pool_loop)
-    Ok(Client(bucket: take bucket, lanes: take workers, output: take output, resolver: take resolver, renewal: take renewal, next: 0, random, entropy: list.with_capacity(16), path: string.with_capacity(4096), clock: c))
+    Ok(Client(bucket: take bucket, simulated: false, lanes: take workers, output: take output, resolver: take resolver, renewal: take renewal, next: 0, random, entropy: list.with_capacity(16), path: string.with_capacity(4096), clock: c))
+}
+
+/// Starts a client whose provider port belongs to the S3 simulator.
+pub fn start_simulated(n: sim.s3.Endpoint, tasks: Tasks, take bucket: Bucket, take credentials_set: cred.Credentials, c: Clock, random: Random, requested_lanes: u64, lane_bytes: u64, deadline: u64) -> Result[Client, Error] waits {
+    let mut client = start(sim.s3.endpoint_network(n), tasks, take bucket, take credentials_set, None, System, c, random, requested_lanes, lane_bytes, deadline)?
+    client.simulated = true
+    Ok(take client)
+}
+
+pub fn simulated(c: Client) -> bool {
+    c.simulated
+}
+
+pub fn bucket_config(c: Client) -> Bucket {
+    clone(c.bucket)
+}
+
+pub fn endpoint_host(c: Client) -> String {
+    let parsed = result.unwrap(uri.parse(c.bucket.endpoint))
+    let Name(host) = option.unwrap(parsed.host) else {
+        fail("object client lost its configured hostname")
+    }
+    let mut name = string.from(string.slice(c.bucket.endpoint, host.start, host.end))
+    string.make_ascii_lower(mut name)
+    take name
+}
+
+pub fn endpoint_secure(c: Client) -> bool {
+    string.starts_with(c.bucket.endpoint, "https://")
 }
 
 fn new_job(op: Operation, take path: String, take data: Bytes, deadline: u64) -> Job {

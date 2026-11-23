@@ -40,6 +40,35 @@ pub type Report: send {
     withdrawn: u64
 }
 
+pub opaque type Endpoint {
+    network: Net
+}
+
+type Service: send {
+    config: Config,
+    plan: sim.world.Plan,
+    clock: Clock,
+    port: Served[NetOp]
+}
+
+fn endpoint_service(take service: Service) -> Report waits {
+    let Service(config: take config, plan: take initial, clock, port: take port) = take service
+    let mut plan = take initial
+    serve(config, mut plan, clock, take port)
+}
+
+/// Starts the simulator with exclusive ownership of its provider port.
+pub fn start_service(tasks: Tasks, take config: Config, take plan: sim.world.Plan, clock: Clock, queue_bytes: u64, service_bytes: u64) -> (Endpoint, Task[Report]) {
+    let (network, take port) = provide.net(bytes queue_bytes)
+    let service = Service(config: take config, plan: take plan, clock, port: take port)
+    let running = task.spawn(tasks, bytes service_bytes, take service, endpoint_service)
+    (Endpoint(network), take running)
+}
+
+pub fn endpoint_network(endpoint: Endpoint) -> Net {
+    endpoint.network
+}
+
 type Upload {
     key: String,
     metadata: Map[String, String],

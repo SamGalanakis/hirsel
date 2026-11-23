@@ -22,6 +22,13 @@ A lane closes a connection after four seconds idle and limits reuse to
 one second idle for conditional PUT and multipart complete. Dropping the
 client cancels its tasks and closes their connections.
 
+`start_simulated` takes an endpoint created by `std.sim.s3.start_service`.
+`simulated` reports whether the client was started with that endpoint.
+`bucket_config` returns the configured bucket and prefix along with its
+endpoint settings. `endpoint_host` is the lower-case configured host before
+virtual-host addressing adds the bucket name. `endpoint_secure` reports
+whether the configured scheme is HTTPS.
+
 `Meta` carries the object size, an inline ETag, optional CRC64/NVME and an
 optional 16-byte put-id. An ETag holds up to 64 octets and its length. A
 longer ETag is malformed. Writes return `Created(meta)` or `Exists` where

@@ -78,14 +78,20 @@ fn header_tokens(item: Item<'_>, end: usize) -> Range<u32> {
     tokens
 }
 
-/// The item's full header, including bindings read by its own body.
+/// The item's full header, including bindings read by its own body. A
+/// syntax-refused item gets its own domain so it cannot select a clean
+/// request's declared tables.
 fn header_identity(item: Item<'_>, tokens: Range<u32>) -> ContentHash {
-    const DOMAIN: &str = "hirsel.header-tokens.v2";
+    let domain = if item.range.has_errors {
+        "hirsel.header-tokens.syntax-refused.v1"
+    } else {
+        "hirsel.header-tokens.v2"
+    };
     if let Some(canonical) = item.tree.canonical_slice(tokens.clone(), usize::MAX) {
-        return ContentHash::of_parts(DOMAIN, [canonical]);
+        return ContentHash::of_parts(domain, [canonical]);
     }
     // A deserialized syntax tree has no runtime canonical stream.
-    ContentHash::of_parts_stream(DOMAIN, |parts| {
+    ContentHash::of_parts_stream(domain, |parts| {
         for token in &item.tree.tokens[tokens.start as usize..tokens.end as usize] {
             if token.kind.is_trivia() || matches!(token.kind, TokenKind::Eof) {
                 continue;

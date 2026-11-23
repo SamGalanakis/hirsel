@@ -11,6 +11,8 @@ pub enum OptionId {
     RecordingRuntime,
     ProfRuntime,
     ProfRecordingRuntime,
+    ObservedRuntime,
+    ObservedRecordingRuntime,
     Record,
     Tape,
     Replay,
@@ -438,6 +440,20 @@ static OPTIONS: &[OptionSpec] = &[
         Some("ARCHIVE"),
         ["core-product", "std-product"],
         "Install the combined profiling and recording runtime archive."
+    ),
+    option!(
+        ObservedRuntime,
+        ["--observed-runtime"],
+        Some("ARCHIVE"),
+        ["core-product", "std-product"],
+        "Install the runtime archive for logical charge reports."
+    ),
+    option!(
+        ObservedRecordingRuntime,
+        ["--observed-recording-runtime"],
+        Some("ARCHIVE"),
+        ["core-product", "std-product"],
+        "Install the combined charge observation and recording runtime archive."
     ),
     option!(
         Record,

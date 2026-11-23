@@ -437,6 +437,65 @@ fn profiler_replays_an_explicit_inputs_entry_and_checks_its_identity() {
 }
 
 #[test]
+fn run_logical_charge_report_selects_the_installed_observer() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let prefix = dir.path().join("prefix");
+    let app = dir.path().join("app");
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::write(
+        app.join("main.hirsel"),
+        "pub fn main() -> Result[(), Exit] { Ok(()) }\n",
+    )
+    .unwrap();
+    let product =
+        crate::PackageProduct::bundled(&prefix.join("core-packages"), &mut Meter::new(false))
+            .unwrap();
+    let runtime = |name| std::fs::read(root.join(std::env::var_os(name).unwrap())).unwrap();
+    let ordinary = runtime("HIRSEL_CORE_RT_ARCHIVE");
+    let observed = runtime("HIRSEL_CORE_RT_OBSERVED_ARCHIVE");
+    crate::installation::register(
+        &prefix,
+        "core",
+        &product.image,
+        Some((&ordinary, TARGET)),
+        crate::installation::RuntimeVariants {
+            observed: Some((&observed, TARGET)),
+            ..Default::default()
+        },
+        None,
+    )
+    .unwrap();
+    let compiler = prefix.join("hirsel");
+    std::fs::copy(std::env::current_exe().unwrap(), &compiler).unwrap();
+    let clang = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang");
+    let report = dir.path().join("charges.json");
+    let args = [
+        "run",
+        app.to_str().unwrap(),
+        "--source-core",
+        "--libraries",
+        root.join("core").to_str().unwrap(),
+        "--cc",
+        clang.to_str().unwrap(),
+        "--logical-charge-report",
+        report.to_str().unwrap(),
+    ]
+    .map(str::to_owned);
+    let command = process::request_command_at(&compiler, &args, dir.path());
+    let (code, _, error) = process::tape_request_output(command);
+    assert_eq!(code, Some(0), "{error}");
+    let report: serde_json::Value = serde_json::from_slice(&std::fs::read(report).unwrap()).unwrap();
+    assert_eq!(report["observation_mode"], true);
+    assert_eq!(report["metric_version"], 2);
+    // MEM-19 charges 256 bytes for the root task and 32 for its cause cell.
+    assert_eq!(report["peak_root_reserved_bytes"], 288);
+}
+
+#[test]
 fn profiler_replay_memory_peaks_match_the_runtime_metrics() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")

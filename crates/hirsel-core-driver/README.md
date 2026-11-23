@@ -340,6 +340,9 @@ Builds select the published std product automatically; source mode remains
 available for agreement controls. Both canonical-image rows are accepted.
 
 `build` and `run --logical-charge-report <file.json>` create a diagnostic build.
+The bundled toolchain selects a charge observation runtime for the target and
+recording mode. When passing `--runtime` explicitly, use an archive built with
+`charge-observation`.
 The version-2 JSON keeps `observation_mode:true` and `peak_root_reserved_bytes`.
 It adds these independent measurements at each native phase and at run end:
 

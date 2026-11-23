@@ -27,7 +27,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 const FILE: &str = "hirsel-core-toolchain.json";
-const VERSION: u32 = 3;
+const VERSION: u32 = 4;
 /// The installed compiler's name in its prefix.
 const EXECUTABLE: &str = "hirsel";
 /// The host this compiler runs on: the one target an installation links
@@ -45,6 +45,8 @@ struct Registration {
     recording_runtimes: BTreeMap<String, PathBuf>,
     prof_runtimes: BTreeMap<String, PathBuf>,
     prof_recording_runtimes: BTreeMap<String, PathBuf>,
+    observed_runtimes: BTreeMap<String, PathBuf>,
+    observed_recording_runtimes: BTreeMap<String, PathBuf>,
     /// Each linked target's recipe, relative to the root.
     links: BTreeMap<String, PathBuf>,
 }
@@ -139,6 +141,14 @@ impl Installed {
         };
         runtimes.get(target).map(|path| self.root.join(path))
     }
+    pub fn observed_runtime(&self, target: &str, recording: bool) -> Option<PathBuf> {
+        let runtimes = if recording {
+            &self.registration.observed_recording_runtimes
+        } else {
+            &self.registration.observed_runtimes
+        };
+        runtimes.get(target).map(|path| self.root.join(path))
+    }
     /// The link recipe this installation provides for `target`. A target
     /// without one links only through an explicit `--cc`.
     pub fn link(&self, target: &str) -> Option<PathBuf> {
@@ -223,6 +233,11 @@ pub fn register(
             additional.prof_recording,
             &mut registration.prof_recording_runtimes,
         ),
+        (additional.observed, &mut registration.observed_runtimes),
+        (
+            additional.observed_recording,
+            &mut registration.observed_recording_runtimes,
+        ),
     ] {
         if let Some((bytes, target)) = archive {
             runtimes.insert(target.to_owned(), install_runtime(bytes, target)?);
@@ -261,6 +276,14 @@ pub(crate) fn print_version() -> io::Result<()> {
                 "profiling recording runtime",
                 &installed.registration.prof_recording_runtimes,
             ),
+            (
+                "charge observation runtime",
+                &installed.registration.observed_runtimes,
+            ),
+            (
+                "charge observation recording runtime",
+                &installed.registration.observed_recording_runtimes,
+            ),
         ] {
             for (target, archive) in runtimes {
                 let identity = archive
@@ -291,6 +314,8 @@ pub struct Environment {
     pub recording_runtime: Option<PathBuf>,
     pub prof_runtime: Option<PathBuf>,
     pub prof_recording_runtime: Option<PathBuf>,
+    pub observed_runtime: Option<PathBuf>,
+    pub observed_recording_runtime: Option<PathBuf>,
 }
 pub fn environment(
     executable: &Path,
@@ -338,6 +363,9 @@ pub fn environment(
         prof_runtime: installed.and_then(|installed| installed.prof_runtime(target, false)),
         prof_recording_runtime: installed
             .and_then(|installed| installed.prof_runtime(target, true)),
+        observed_runtime: installed.and_then(|installed| installed.observed_runtime(target, false)),
+        observed_recording_runtime: installed
+            .and_then(|installed| installed.observed_runtime(target, true)),
     })
 }
 /// Keep user-supplied archives in the runtime slot they implement.
@@ -402,6 +430,8 @@ pub struct RuntimeVariants<T> {
     pub recording: Option<T>,
     pub prof: Option<T>,
     pub prof_recording: Option<T>,
+    pub observed: Option<T>,
+    pub observed_recording: Option<T>,
 }
 
 impl<T> Default for RuntimeVariants<T> {
@@ -410,6 +440,8 @@ impl<T> Default for RuntimeVariants<T> {
             recording: None,
             prof: None,
             prof_recording: None,
+            observed: None,
+            observed_recording: None,
         }
     }
 }
@@ -420,6 +452,8 @@ impl<T> RuntimeVariants<T> {
             recording: self.recording.as_ref(),
             prof: self.prof.as_ref(),
             prof_recording: self.prof_recording.as_ref(),
+            observed: self.observed.as_ref(),
+            observed_recording: self.observed_recording.as_ref(),
         }
     }
 }
@@ -443,6 +477,7 @@ pub fn publish(
         input: Option<(&Path, &'a str)>,
         recording: bool,
         prof: bool,
+        observed: bool,
     ) -> io::Result<Option<(Vec<u8>, &'a str)>> {
         input
             .map(|(path, target)| {
@@ -462,15 +497,28 @@ pub fn publish(
                         path.display()
                     )));
                 }
+                if archive_defines_symbol(&bytes, b"hirsel_core_observe_charge") != observed {
+                    let required = if observed {
+                        "with charge observation"
+                    } else {
+                        "without charge observation"
+                    };
+                    return Err(io::Error::other(format!(
+                        "this slot requires a runtime archive {required}: {}",
+                        path.display()
+                    )));
+                }
                 Ok((bytes, target))
             })
             .transpose()
     }
-    let runtime = read_runtime(runtime, false, false)?;
+    let runtime = read_runtime(runtime, false, false, false)?;
     let additional = RuntimeVariants {
-        recording: read_runtime(additional.recording, true, false)?,
-        prof: read_runtime(additional.prof, false, true)?,
-        prof_recording: read_runtime(additional.prof_recording, true, true)?,
+        recording: read_runtime(additional.recording, true, false, false)?,
+        prof: read_runtime(additional.prof, false, true, false)?,
+        prof_recording: read_runtime(additional.prof_recording, true, true, false)?,
+        observed: read_runtime(additional.observed, false, false, true)?,
+        observed_recording: read_runtime(additional.observed_recording, true, false, true)?,
     };
     let linked = runtime
         .as_ref()
@@ -521,6 +569,8 @@ pub fn publish(
             recording: refs.recording.map(archive_ref),
             prof: refs.prof.map(archive_ref),
             prof_recording: refs.prof_recording.map(archive_ref),
+            observed: refs.observed.map(archive_ref),
+            observed_recording: refs.observed_recording.map(archive_ref),
         },
         link.as_ref()
             .map(|(target, recipe)| (*target, recipe.as_path())),

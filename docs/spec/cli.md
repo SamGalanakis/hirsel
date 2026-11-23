@@ -30,6 +30,12 @@ Register the host runtime with `core-product --install` or
 `--runtime ARCHIVE`. The installed compiler links user programs with the
 copied kit and a bundle-relative recipe.
 
+`--logical-charge-report FILE` selects the installed charge observation
+runtime for the build's target and recording mode. Product installations
+register these archives with `--observed-runtime ARCHIVE` and
+`--observed-recording-runtime ARCHIVE`. An explicit `--runtime` must name a
+charge observation archive.
+
 ## Resident compiler
 
 `hirsel serve [package-dir]` keeps one compiler process for a store

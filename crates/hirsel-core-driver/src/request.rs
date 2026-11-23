@@ -349,6 +349,10 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             Opt::ProfRecordingRuntime => {
                 additional_runtimes.prof_recording = Some(PathBuf::from(value))
             }
+            Opt::ObservedRuntime => additional_runtimes.observed = Some(PathBuf::from(value)),
+            Opt::ObservedRecordingRuntime => {
+                additional_runtimes.observed_recording = Some(PathBuf::from(value))
+            }
             Opt::Record => record_path = Some(value),
             Opt::Tape => replay_tape = Some(value),
             Opt::Replay => test_replay = true,
@@ -690,6 +694,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     let observe = profile
         .as_ref()
         .is_some_and(crate::prof_command::Run::observes);
+    let charge_observation = logical_charge_report.is_some();
     let env_recording_runtime = installed
         .as_ref()
         .and_then(|installed| installed.recording_runtime(&target));
@@ -698,12 +703,12 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             core_product = Some(installed.cache());
         }
         if runtime.is_none() {
-            runtime = if observe {
-                installed.prof_runtime(&target, needs_recording)
-            } else if needs_recording {
-                installed.recording_runtime(&target)
-            } else {
-                installed.runtime(&target)
+            runtime = match (observe, charge_observation) {
+                (false, true) => installed.observed_runtime(&target, needs_recording),
+                (true, false) => installed.prof_runtime(&target, needs_recording),
+                (false, false) if needs_recording => installed.recording_runtime(&target),
+                (false, false) => installed.runtime(&target),
+                (true, true) => None,
             };
         }
     }
@@ -747,6 +752,11 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             for (label, archive) in [
                 ("profiling runtime", report.prof_runtime),
                 ("profiling recording runtime", report.prof_recording_runtime),
+                ("charge observation runtime", report.observed_runtime),
+                (
+                    "charge observation recording runtime",
+                    report.observed_recording_runtime,
+                ),
             ] {
                 println!(
                     "{label}: {}",
@@ -764,7 +774,9 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             && (explicit_runtime || explicit_target))
             || additional_runtimes.recording.is_some()
             || additional_runtimes.prof.is_some()
-            || additional_runtimes.prof_recording.is_some())
+            || additional_runtimes.prof_recording.is_some()
+            || additional_runtimes.observed.is_some()
+            || additional_runtimes.observed_recording.is_some())
     {
         return Err(
             "product --runtime/--target and runtime variant options require --install".into(),
@@ -826,7 +838,12 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     };
     let select_runtime = || -> Result<PathBuf, Box<dyn std::error::Error>> {
         let archive = runtime.as_deref().ok_or_else(|| {
-            if observe {
+            if observe && charge_observation {
+                format!("no combined profiling and charge observation runtime archive for {target}; pass --runtime with a combined archive")
+            } else if charge_observation {
+                let mode = if needs_recording { " with recording" } else { "" };
+                format!("no charge observation runtime archive{mode} for {target}; pass --runtime with a charge observation archive{mode}")
+            } else if observe {
                 format!("no profiling runtime archive for {target}; pass --runtime with a profiling archive")
             } else if needs_recording {
                 format!("no recording runtime archive for {target}; pass --runtime with a recording archive")
@@ -842,6 +859,18 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             {
                 return Err(format!(
                     "this profile requires a profiling runtime archive: {}",
+                    archive.display()
+                )
+                .into());
+            }
+            if charge_observation
+                && !crate::installation::archive_defines_symbol(
+                    &bytes,
+                    b"hirsel_core_observe_charge",
+                )
+            {
+                return Err(format!(
+                    "--logical-charge-report requires a charge observation runtime archive: {}",
                     archive.display()
                 )
                 .into());
@@ -924,6 +953,14 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
                             .map(|path| (path, target.as_str())),
                         prof_recording: additional_runtimes
                             .prof_recording
+                            .as_deref()
+                            .map(|path| (path, target.as_str())),
+                        observed: additional_runtimes
+                            .observed
+                            .as_deref()
+                            .map(|path| (path, target.as_str())),
+                        observed_recording: additional_runtimes
+                            .observed_recording
                             .as_deref()
                             .map(|path| (path, target.as_str())),
                     },

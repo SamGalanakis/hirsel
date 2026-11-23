@@ -577,12 +577,14 @@ def _toolchain_bundle_impl(ctx):
     recording_runtimes = ctx.attrs.recording_runtimes[DefaultInfo].sub_targets
     prof_runtimes = ctx.attrs.prof_runtimes[DefaultInfo].sub_targets
     prof_recording_runtimes = ctx.attrs.prof_recording_runtimes[DefaultInfo].sub_targets
+    observed_runtimes = ctx.attrs.observed_runtimes[DefaultInfo].sub_targets
+    observed_recording_runtimes = ctx.attrs.observed_recording_runtimes[DefaultInfo].sub_targets
     script = ctx.actions.write("install.sh", [
         "set -eu",
         'mkdir -p "$2" "$3"; root="$(cd "$2" && pwd)"; export TMPDIR="$(cd "$3" && pwd)"',
         '"$1" core-product --install "$root" > /dev/null',
-        '"$1" std-product --install "$root" --runtime "$4" --recording-runtime "$6" --prof-runtime "$9" --prof-recording-runtime "${11}" --target x86_64-unknown-linux-gnu --link-kit "$8" > /dev/null',
-        '"$1" std-product --install "$root" --runtime "$5" --recording-runtime "$7" --prof-runtime "${10}" --prof-recording-runtime "${12}" --target aarch64-unknown-linux-gnu > /dev/null',
+        '"$1" std-product --install "$root" --runtime "$4" --recording-runtime "$6" --prof-runtime "$9" --prof-recording-runtime "${11}" --observed-runtime "${15}" --observed-recording-runtime "${17}" --target x86_64-unknown-linux-gnu --link-kit "$8" > /dev/null',
+        '"$1" std-product --install "$root" --runtime "$5" --recording-runtime "$7" --prof-runtime "${10}" --prof-recording-runtime "${12}" --observed-runtime "${16}" --observed-recording-runtime "${18}" --target aarch64-unknown-linux-gnu > /dev/null',
         'cp "${13}" "$root/core-packages/store-1.hpkg"',
         'mkdir -p "$TMPDIR/store" "$root/libexec/hirsel"; cp "${14}"/* "$TMPDIR/store/"',
         '"$root/hirsel" build "$TMPDIR/store" --entry store@1/platform_main/main --grant Clock --grant Random --grant Tasks'
@@ -609,6 +611,10 @@ def _toolchain_bundle_impl(ctx):
                  prof_recording_runtimes["aarch64"][DefaultInfo].default_outputs[0],
                  ctx.attrs.store_package[DefaultInfo].default_outputs[0],
                  store_sources,
+                 observed_runtimes["x86_64"][DefaultInfo].default_outputs[0],
+                 observed_runtimes["aarch64"][DefaultInfo].default_outputs[0],
+                 observed_recording_runtimes["x86_64"][DefaultInfo].default_outputs[0],
+                 observed_recording_runtimes["aarch64"][DefaultInfo].default_outputs[0],
                  hidden = ctx.attrs._llvm_libraries[DefaultInfo].default_outputs),
         env = {"HIRSEL_MEMORY_LIMIT": PRODUCT_MEMORY_LIMIT, "HIRSEL_JOBS": "1"},
         category = "toolchain_bundle",
@@ -626,6 +632,8 @@ hirsel_toolchain_bundle = rule(
         "recording_runtimes": attrs.dep(),
         "prof_runtimes": attrs.dep(),
         "prof_recording_runtimes": attrs.dep(),
+        "observed_runtimes": attrs.dep(),
+        "observed_recording_runtimes": attrs.dep(),
         "store_package": attrs.dep(),
         "store_sources": attrs.list(attrs.source()),
         "_link_kit": attrs.dep(default = "root//tools/buck2/native-toolchain:kit"),

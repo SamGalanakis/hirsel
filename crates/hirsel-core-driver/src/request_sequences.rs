@@ -2222,7 +2222,15 @@ fn request_child() {
     crate::request::main(args)
 }
 pub(super) fn tape_request_command(args: &[String], directory: &Path) -> std::process::Command {
-    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    request_command_at(&std::env::current_exe().unwrap(), args, directory)
+}
+
+pub(super) fn request_command_at(
+    executable: &Path,
+    args: &[String],
+    directory: &Path,
+) -> std::process::Command {
+    let mut command = std::process::Command::new(executable);
     command
         .args(["--exact", "native::tests::process::request_child", "--ignored", "--nocapture", "--test-threads=1"])
         .env("REQUEST_CHILD_ARGS", serde_json::to_string(args).unwrap())

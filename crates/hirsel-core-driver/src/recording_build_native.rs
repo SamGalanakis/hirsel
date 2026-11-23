@@ -2714,6 +2714,65 @@ fn run_tape_replays_granted_terminal_bits() {
     assert!(!bits.exists());
 }
 
+/// A loopback IMDSv2 server (TLS-7) that answers `rounds` credential
+/// fetches with `key` as the secret access key and `token` as the session
+/// token, checking the session header on each request.
+fn fake_imds(
+    key: &'static [u8],
+    token: Vec<u8>,
+    rounds: usize,
+) -> (u16, std::thread::JoinHandle<()>) {
+    use std::io::{Read, Write};
+    use std::net::{Ipv4Addr, TcpListener};
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        let body = |request: &str| -> Vec<u8> {
+            let (line, headers) = request.split_once("\r\n").unwrap();
+            match line {
+                "PUT /latest/api/token HTTP/1.1" => {
+                    assert!(headers.contains("X-aws-ec2-metadata-token-ttl-seconds: 21600\r\n"));
+                    b"SESSION-1".to_vec()
+                }
+                "GET /latest/meta-data/iam/security-credentials/ HTTP/1.1" => {
+                    assert!(headers.contains("X-aws-ec2-metadata-token: SESSION-1\r\n"));
+                    b"app-role\n".to_vec()
+                }
+                "GET /latest/meta-data/iam/security-credentials/app-role HTTP/1.1" => {
+                    assert!(headers.contains("X-aws-ec2-metadata-token: SESSION-1\r\n"));
+                    [
+                        &br#"{"Code":"Success","Type":"AWS-HMAC","AccessKeyId":"ASIAEXAMPLE","SecretAccessKey":""#[..],
+                        key,
+                        br#"","Token":""#,
+                        &token,
+                        br#"","Expiration":"2026-01-01T00:00:00Z"}"#,
+                    ]
+                    .concat()
+                }
+                other => panic!("unexpected request {other:?}"),
+            }
+        };
+        for _ in 0..3 * rounds {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut byte = [0];
+            while !request.ends_with(b"\r\n\r\n") {
+                socket.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+            }
+            let reply = body(std::str::from_utf8(&request).unwrap());
+            socket
+                .write_all(
+                    format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", reply.len())
+                        .as_bytes(),
+                )
+                .unwrap();
+            socket.write_all(&reply).unwrap();
+        }
+    });
+    (port, server)
+}
+
 /// TLS-7 CR1: a fetched secret access key is never in program memory. A fake
 /// IMDSv2 server on loopback serves a known key; while the program is parked
 /// after the fetch, the whole readable address space holds exactly one copy
@@ -2722,7 +2781,6 @@ fn run_tape_replays_granted_terminal_bits() {
 #[test]
 fn cr1_fetched_secret_key_is_only_in_the_sealed_store() {
     use std::io::{BufRead, BufReader, Read, Write};
-    use std::net::{Ipv4Addr, TcpListener};
     use std::os::unix::fs::FileExt;
     use std::process::Stdio;
 
@@ -2768,52 +2826,7 @@ pub fn main(c: Cred, i: Stdin, out: Stdout) -> Result[(), Exit] waits {
     let entry = DefPath::from_full("app@1/main/main").unwrap();
 
     let run = |token: &'static [u8]| -> (usize, Vec<u8>) {
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let server = std::thread::spawn(move || {
-            let mut body = |request: &str| -> Vec<u8> {
-                let (line, headers) = request.split_once("\r\n").unwrap();
-                match line {
-                    "PUT /latest/api/token HTTP/1.1" => {
-                        assert!(headers.contains("X-aws-ec2-metadata-token-ttl-seconds: 21600\r\n"));
-                        b"SESSION-1".to_vec()
-                    }
-                    "GET /latest/meta-data/iam/security-credentials/ HTTP/1.1" => {
-                        assert!(headers.contains("X-aws-ec2-metadata-token: SESSION-1\r\n"));
-                        b"app-role\n".to_vec()
-                    }
-                    "GET /latest/meta-data/iam/security-credentials/app-role HTTP/1.1" => {
-                        assert!(headers.contains("X-aws-ec2-metadata-token: SESSION-1\r\n"));
-                        [
-                            &br#"{"Code":"Success","Type":"AWS-HMAC","AccessKeyId":"ASIAEXAMPLE","SecretAccessKey":""#[..],
-                            KEY,
-                            br#"","Token":""#,
-                            token,
-                            br#"","Expiration":"2026-01-01T00:00:00Z"}"#,
-                        ]
-                        .concat()
-                    }
-                    other => panic!("unexpected request {other:?}"),
-                }
-            };
-            for _ in 0..3 {
-                let (mut socket, _) = listener.accept().unwrap();
-                let mut request = Vec::new();
-                let mut byte = [0];
-                while !request.ends_with(b"\r\n\r\n") {
-                    socket.read_exact(&mut byte).unwrap();
-                    request.push(byte[0]);
-                }
-                let reply = body(std::str::from_utf8(&request).unwrap());
-                socket
-                    .write_all(
-                        format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", reply.len())
-                            .as_bytes(),
-                    )
-                    .unwrap();
-                socket.write_all(&reply).unwrap();
-            }
-        });
+        let (port, server) = fake_imds(KEY, token.to_vec(), 1);
         let mut options = native_options(Backend::Cranelift, dir.path());
         options.grant_mask =
             (1 << grant_kind("Stdout").unwrap()) | (1 << grant_kind("Stdin").unwrap());
@@ -2872,6 +2885,63 @@ pub fn main(c: Cred, i: Stdin, out: Stdout) -> Result[(), Exit] waits {
     assert_eq!(crate::call::hex(&mac), MAC_OF_X);
     let (hits, _) = run(KEY);
     assert!(hits >= 2, "the scan missed a key in a program String: {hits}");
+}
+
+/// TLS-7 std credentials: a session token longer than the 4096 bytes
+/// `credentials` reserves arrives whole after exactly one more fetch, with
+/// the lengths `Room` reported. The oracle is the server's own token.
+#[test]
+fn std_credentials_refetch_a_token_longer_than_the_reservation() {
+    let token: Vec<u8> = (0..5000u32).map(|i| b'A' + (i % 26) as u8).collect();
+    let source = r#"
+pub fn main(c: Cred, out: Stdout) -> Result[(), Exit] waits {
+    let creds = match std.cred.credentials(c, Never) {
+        Ok(creds) => creds,
+        _ => return Error(Exit(status: 2)),
+    }
+    result.unwrap(stdout.write(out, creds.access_key_id))
+    result.unwrap(stdout.write(out, " "))
+    result.unwrap(stdout.write(out, creds.session_token))
+    Ok(())
+}
+"#;
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir = tempfile::tempdir().unwrap();
+    let mut request = source_request(source, dir.path());
+    request.inputs.packages[1] =
+        PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+    request.inputs.packages[0].dependencies.push(package("std"));
+    request
+        .inputs
+        .packages
+        .push(CheckRequest::source_std(&root.join("core/std")).unwrap());
+    let product = Driver::default()
+        .check(request, &mut Meter::new(false))
+        .unwrap();
+    assert!(
+        product.accepted(),
+        "{:?} {:?}",
+        product.diagnostics,
+        product.incomplete
+    );
+    // Two rounds: the Room answer and the refetch. A third fetch finds no
+    // server and fails the run.
+    let (port, server) = fake_imds(b"wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", token.clone(), 2);
+    let mut options = native_options(Backend::Cranelift, dir.path());
+    options.grant_mask = 1 << grant_kind("Stdout").unwrap();
+    options.cred_grants =
+        vec![hirsel_core_net::CredGrant::new("c", &format!("imds:127.0.0.1:{port}"), "mac").unwrap()];
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let build = product.build(&entry, &options).unwrap();
+    let output = Command::new(build.executable).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{} {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    server.join().unwrap();
+    assert_eq!(output.stdout, [&b"ASIAEXAMPLE "[..], &token].concat());
 }
 
 #[test]

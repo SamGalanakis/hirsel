@@ -1,0 +1,30 @@
+// AWS-style credentials from a Cred grant or a static Secret grant (TLS-7).
+
+pub type Credentials: send {
+    access_key_id: String,
+    secret: Secret,
+    session_token: String,
+    expires_ns: u64
+}
+
+/// Fetches a fresh set, reserving 128 bytes for the key id and 4096 for the
+/// token; when either is too long, reserves the reported lengths and fetches
+/// once more.
+pub fn credentials(c: Cred, until: Until) -> Result[Credentials, CredError] waits {
+    match fetch_into(c, 128, 4096, until) {
+        Error(Room(key_id: key_id, token: token)) => fetch_into(c, key_id, token, until),
+        other => other,
+    }
+}
+
+/// The record of a static key from a Secret grant: it never expires.
+pub fn from_secret(take access_key_id: String, take secret: Secret, take session_token: String) -> Credentials {
+    Credentials(access_key_id: take access_key_id, secret: take secret, session_token: take session_token, expires_ns: 18446744073709551615u64)
+}
+
+fn fetch_into(c: Cred, key_id_bytes: u64, token_bytes: u64, until: Until) -> Result[Credentials, CredError] waits {
+    let mut key_id = string.with_capacity(key_id_bytes)
+    let mut token = string.with_capacity(token_bytes)
+    let (secret, expires_ns) = cred.fetch(c, mut key_id, mut token, until)?
+    Ok(Credentials(access_key_id: take key_id, secret: take secret, session_token: take token, expires_ns: expires_ns))
+}

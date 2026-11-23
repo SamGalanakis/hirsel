@@ -826,7 +826,7 @@ and comes from the recording.
 ```hirsel unbuilt
 pub type Credentials: send { access_key_id: String, secret: Secret, session_token: String, expires_ns: u64 }
 pub fn credentials(c: Cred, until: Until) -> Result[Credentials, CredError] waits
-pub fn from_secret(access_key_id: String, secret: Secret, session_token: String) -> Credentials
+pub fn from_secret(take access_key_id: String, take secret: Secret, take session_token: String) -> Credentials
 ```
 
 `credentials` reserves 128 bytes for the key id and 4096 for the token, and on `Room` it

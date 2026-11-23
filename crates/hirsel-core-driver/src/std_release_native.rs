@@ -164,6 +164,55 @@ pub fn main(n: Net, tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
 "#,
 );
 
+/// A function value chosen outside any step bound and called inside one: it
+/// prints the fewest steps under which the call finishes. A body entered only
+/// by pointer is still charged under a bound its caller runs in (MEM-30), so
+/// the release builds print what the development build does.
+const STD_CALLBACKS: (&str, &str) = (
+    "callbacks",
+    r#"fn heavy(x: u64) -> bool {
+    let mut i = 0u64
+    while i < 30 {
+        i += 1
+    }
+    x == i
+}
+
+fn light(x: u64) -> bool {
+    x == 30
+}
+
+fn call(f: fn(u64) -> bool, x: u64) -> bool {
+    f(x)
+}
+
+pub fn main(out: Stdout) -> Result[(), Exit] {
+    let mut xs: List[u64] = list.new()
+    list.push(mut xs, 1u64)
+    let f = if list.len(xs) == 1 { heavy } else { light }
+    let mut n = 0u64
+    let mut done = false
+    while !done {
+        let ran = bound steps n {
+            call(f, 30)
+        }
+        match ran {
+            Ok(_) => {
+                done = true
+            }
+            Error(_) => {
+                n += 1
+            }
+        }
+    }
+    let mut line = string.new()
+    let _ = string.push_uint(mut line, n, 10u32, 0, ' ')
+    result.unwrap(stdout.write(out, line));
+    Ok(())
+}
+"#,
+);
+
 /// Channel receives in a represented task, which park with the stack given
 /// back: an owned item kept through a match across later waits, owned items
 /// received in a helper, then the close; and a cancel while parked.
@@ -670,7 +719,7 @@ fn std_differential(modes: &[&str]) -> usize {
     };
     let mut taped = 0;
     let mut prebuilt = false;
-    for (name, source) in UNIT_PROGRAMS.into_iter().chain([STD_FAILS, STD_WAITS, STD_RECEIVES]) {
+    for (name, source) in UNIT_PROGRAMS.into_iter().chain([STD_FAILS, STD_WAITS, STD_RECEIVES, STD_CALLBACKS]) {
         let product = std_checked(dir.path(), name, source, "cache");
         if !std::mem::replace(&mut prebuilt, true) {
             // The std product's prebuild into the library image every

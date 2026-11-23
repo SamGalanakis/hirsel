@@ -5,9 +5,18 @@
 //! scopes. Direct calls carry their context to the callee; a body that runs in
 //! both gets a private free code variant, and the entries that code pointers,
 //! finalizers and the launcher reach select their body by the step window.
+//!
+//! In an executable, a function entered by pointer runs checked only when
+//! something can enter it while a bound is current: an indirect call made in a
+//! checked context whose calling convention it has, a task spawned in a checked
+//! context or a flow stage (whose code runs under the stage's bound), or a
+//! separately lowered body that a checked context calls, or that opens a bound
+//! itself, and that may call a function value of its convention. Finalizers run
+//! from drop glue in any context, so they run checked whenever the image opens
+//! a bound.
 use crate::*;
 use hirsel_core_ids::ContentHash;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 const CHECKED: usize = 0;
 const FREE: usize = 1;
@@ -15,7 +24,7 @@ const FREE: usize = 1;
 /// What a separately lowered body set (the release std, `std_release` in the
 /// driver) publishes about each entry another image calls, computed from that
 /// set's bodies alone.
-#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Summary {
     /// The entry has a step-free body under [`free_identity`], beside its
     /// checked one; its own symbol selects either by the step window.
@@ -25,6 +34,47 @@ pub struct Summary {
     pub opens_bound: bool,
     /// Running it can issue `LaunchWord`, by the same edges.
     pub launches: bool,
+    /// The calling conventions, as [`convention_bit`]s, of the function values
+    /// running it can call, by the same edges: every bit when it reaches a
+    /// function whose body is not in its set.
+    pub calls_values: u64,
+}
+
+/// A function value's calling convention: its signature, with each declared
+/// type named by its closure so that the key does not depend on row numbering.
+/// The front lowers a function value's signature and the signature of every
+/// indirect call of it from the same source callable type, so an indirect call
+/// reaches only functions of its own convention.
+fn convention(
+    module: &Module,
+    signature: SigId,
+    closures: &mut BTreeMap<TypeId, ContentHash>,
+) -> ContentHash {
+    let s = &module.signatures[signature.index()];
+    let mut name = |t: TypeId| *closures.entry(t).or_insert_with(|| module.closure(t).hash);
+    let mut text = String::new();
+    if let Some(d) = s.dest {
+        text += &format!("d{:?};", name(d));
+    }
+    for p in &s.params {
+        match *p {
+            Param::Value(t) => text += &format!("v{t:?};"),
+            Param::Address { place, loan } => {
+                let place = match place {
+                    PlaceTy::Value(t) => format!("{t:?}"),
+                    PlaceTy::Declared(t) => format!("{:?}", name(t)),
+                };
+                text += &format!("a{loan:?}{place};");
+            }
+        }
+    }
+    text += &format!("r{:?}", s.results);
+    ContentHash::of_parts("hirsel.step-convention.v1", [text.as_bytes()])
+}
+
+/// The bit a [`Summary::calls_values`] sets for a convention.
+fn convention_bit(convention: ContentHash) -> u64 {
+    1 << (convention.0[0] & 63)
 }
 
 /// The code identity of the step-free body of the function whose code identity
@@ -100,17 +150,198 @@ pub fn specialize_over(
         .collect();
     let bounded_image = opens_bound(module) || summaries.iter().flatten().any(|s| s.opens_bound);
     let entered = entered(module, &[entry]);
-    let mut pending = Vec::new();
-    for (f, _) in entered.iter().enumerate().filter(|(_, e)| **e) {
-        pending.push((f, FREE));
-        if bounded_image && f != entry.index() {
-            pending.push((f, CHECKED));
+    let pending = if bounded_image {
+        contexts(module, &entered, &summaries)
+    } else {
+        entered
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| **e)
+            .map(|(f, _)| (f, FREE))
+            .collect()
+    };
+    split(module, &entered, pending, &summaries);
+}
+
+/// The contexts each body of a bounded image may run in, from the launcher's
+/// free entry and every entry by pointer (see the module docs).
+fn contexts(
+    module: &Module,
+    entered: &[bool],
+    summaries: &[Option<Summary>],
+) -> Vec<(usize, usize)> {
+    let n = module.functions.len();
+    let scopes: Vec<Option<Vec<bool>>> = module
+        .functions
+        .iter()
+        .map(|f| f.body.as_ref().and_then(bounded_points))
+        .collect();
+    let mut conventions: BTreeMap<SigId, ContentHash> = BTreeMap::new();
+    let mut closures = BTreeMap::new();
+    let mut convention_of = |s: SigId| {
+        *conventions
+            .entry(s)
+            .or_insert_with(|| convention(module, s, &mut closures))
+    };
+    // A task entry adapter named only by spawns calls just the functions
+    // those spawns store for it (`returnable::spawns`).
+    let mut named = vec![0usize; n];
+    for body in module.functions.iter().filter_map(|f| f.body.as_ref()) {
+        for inst in &body.insts {
+            if let Inst::FunctionRef { function, .. } | Inst::DescriptorRef { function, .. } = *inst
+            {
+                named[function.index()] += 1;
+            }
         }
     }
-    if bounded_image && entered[entry.index()] && referenced(module, entry) {
-        pending.push((entry.index(), CHECKED));
+    for f in module.types.iter().filter_map(|shape| shape.finalizer) {
+        named[f.0 as usize] += 1;
     }
-    split(module, &entered, pending, &summaries);
+    let spawns = crate::returnable::spawns(module);
+    let mut spawned: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for spawn in &spawns {
+        spawned
+            .entry(spawn.entry.index())
+            .or_default()
+            .push(spawn.callee.index());
+    }
+    spawned.retain(|&adapter, callees| named[adapter] == callees.len());
+    // A function whose every naming is a spawn's sole store of it into the
+    // input of an adapter above is entered only through that adapter.
+    let mut stored = vec![0usize; n];
+    for spawn in &spawns {
+        if spawn.sole && spawned.contains_key(&spawn.entry.index()) {
+            stored[spawn.callee.index()] += 1;
+        }
+    }
+    // The functions entered by pointer, by convention.
+    let mut by_convention: BTreeMap<ContentHash, Vec<usize>> = BTreeMap::new();
+    for f in (0..n).filter(|&f| entered[f] && stored[f] != named[f] && !spawned.contains_key(&f)) {
+        by_convention
+            .entry(convention_of(module.functions[f].signature))
+            .or_default()
+            .push(f);
+    }
+    let mut pending: Vec<(usize, usize)> = (0..n)
+        .filter(|&f| entered[f])
+        .map(|f| (f, FREE))
+        .chain(
+            module
+                .types
+                .iter()
+                .filter_map(|shape| shape.finalizer)
+                .map(|f| (f.0 as usize, CHECKED)),
+        )
+        .collect();
+    let mut modes = vec![[false; 2]; n];
+    let mut hot: BTreeSet<ContentHash> = BTreeSet::new();
+    let mut bits = 0u64;
+    let mut every = false;
+    while let Some((f, mode)) = pending.pop() {
+        if std::mem::replace(&mut modes[f][mode], true) {
+            continue;
+        }
+        let Some(body) = &module.functions[f].body else {
+            continue;
+        };
+        let refs: BTreeMap<ValueId, FuncId> = body
+            .insts
+            .iter()
+            .filter_map(|inst| match *inst {
+                Inst::FunctionRef { result, function }
+                | Inst::DescriptorRef {
+                    result, function, ..
+                } => Some((result, function)),
+                _ => None,
+            })
+            .collect();
+        let mut new_keys = vec![];
+        let mut new_bits = 0u64;
+        let mut stage = false;
+        for (k, inst) in body.insts.iter().enumerate() {
+            let Inst::Call { call } = *inst else {
+                continue;
+            };
+            let site = &body.calls[call.index()];
+            let context = if mode == FREE && scopes[f].as_ref().is_some_and(|b| !b[k]) {
+                FREE
+            } else {
+                CHECKED
+            };
+            match site.callee {
+                Callee::Direct(g) => {
+                    pending.push((g.index(), context));
+                    if let Some(s) = summaries[g.index()]
+                        && (context == CHECKED || s.opens_bound)
+                    {
+                        new_bits |= s.calls_values;
+                    }
+                }
+                Callee::Indirect(_) => match spawned.get(&f) {
+                    Some(callees) => pending.extend(callees.iter().map(|&g| (g, context))),
+                    None if context == CHECKED => {
+                        let key = convention_of(site.signature);
+                        if hot.insert(key) {
+                            new_keys.push(key);
+                        }
+                    }
+                    None => {}
+                },
+                // The task inherits the current bound.
+                Callee::Runtime(RtOp::Spawn { .. } | RtOp::SpawnUnit { .. })
+                    if context == CHECKED =>
+                {
+                    let args = site.args.get(&body.pools.args).unwrap_or_default();
+                    let entries: Vec<FuncId> = args
+                        .iter()
+                        .filter_map(|a| match a {
+                            Arg::Value(v) => refs.get(v).copied(),
+                            Arg::Address(_) => None,
+                        })
+                        .collect();
+                    if entries.is_empty() {
+                        every = true;
+                    }
+                    pending.extend(entries.into_iter().map(|g| (g.index(), CHECKED)));
+                }
+                Callee::Runtime(RtOp::Flow(hirsel_core_layout::flow::Op::Stage)) => stage = true,
+                _ => {}
+            }
+        }
+        // A stage's adapter and code run under the stage's own bound.
+        if stage {
+            if refs.is_empty() {
+                every = true;
+            }
+            pending.extend(refs.values().map(|g| (g.index(), CHECKED)));
+        }
+        if new_bits & !bits != 0 {
+            bits |= new_bits;
+            for (key, fs) in &by_convention {
+                if convention_bit(*key) & new_bits != 0 {
+                    pending.extend(fs.iter().map(|&g| (g, CHECKED)));
+                }
+            }
+        }
+        for key in new_keys {
+            if let Some(fs) = by_convention.get(&key) {
+                pending.extend(fs.iter().map(|&g| (g, CHECKED)));
+            }
+        }
+        if std::mem::take(&mut every) {
+            pending.extend((0..n).filter(|&g| entered[g]).map(|g| (g, CHECKED)));
+        }
+    }
+    let mut out = vec![];
+    for (f, m) in modes.iter().enumerate() {
+        out.extend(
+            [CHECKED, FREE]
+                .into_iter()
+                .filter(|&c| m[c])
+                .map(|c| (f, c)),
+        );
+    }
+    out
 }
 
 /// Specialize a body set that has no launcher of its own (the release std):
@@ -128,52 +359,65 @@ pub fn specialize_library(module: &mut Module, roots: &[FuncId]) -> Vec<Summary>
         .flat_map(|(f, _)| [(f, FREE), (f, CHECKED)])
         .collect();
     split(module, &entered, pending, &none);
-    let reach = |is: &dyn Fn(&Body) -> bool| {
+    // What a body reaches, as bits ORed over its direct calls, the functions
+    // it names and its free body.
+    let reach = |own: &dyn Fn(&Body) -> u64| {
         let n = module.functions.len();
-        let mut yes: Vec<bool> = module
+        let mut bits: Vec<u64> = module
             .functions
             .iter()
-            // A function this module holds no body for may do either: its
+            // A function this module holds no body for may do anything: its
             // body is not here to show otherwise.
-            .map(|f| f.body.as_ref().is_none_or(is))
+            .map(|f| f.body.as_ref().map_or(u64::MAX, own))
             .collect();
         loop {
             let mut changed = false;
             for f in 0..n {
-                if yes[f] {
-                    continue;
-                }
                 let Some(body) = &module.functions[f].body else {
                     continue;
                 };
-                let reaches = body.insts.iter().any(|inst| match *inst {
-                    Inst::Call { call } => matches!(
-                        body.calls[call.index()].callee,
-                        Callee::Direct(g) if yes[g.index()]
-                    ),
-                    Inst::FunctionRef { function, .. } | Inst::DescriptorRef { function, .. } => {
-                        yes[function.index()]
+                let mut reached = bits[f];
+                for inst in &body.insts {
+                    match *inst {
+                        Inst::Call { call } => {
+                            if let Callee::Direct(g) = body.calls[call.index()].callee {
+                                reached |= bits[g.index()];
+                            }
+                        }
+                        Inst::FunctionRef { function, .. }
+                        | Inst::DescriptorRef { function, .. } => reached |= bits[function.index()],
+                        _ => {}
                     }
-                    _ => false,
-                }) || module
-                    .step_free
-                    .get(&FuncId(f as u32))
-                    .is_some_and(|s| yes[s.body.index()]);
-                if reaches {
-                    yes[f] = true;
+                }
+                if let Some(s) = module.step_free.get(&FuncId(f as u32)) {
+                    reached |= bits[s.body.index()];
+                }
+                if reached != bits[f] {
+                    bits[f] = reached;
                     changed = true;
                 }
             }
             if !changed {
-                return yes;
+                return bits;
             }
         }
     };
-    let opens = reach(&|b| opens_in(b));
+    let opens = reach(&|b| u64::from(opens_in(b)));
     let launches = reach(&|b| {
+        u64::from(
+            b.calls
+                .iter()
+                .any(|c| c.callee == Callee::Runtime(RtOp::LaunchWord)),
+        )
+    });
+    let closures = std::cell::RefCell::new(BTreeMap::new());
+    let values = reach(&|b| {
         b.calls
             .iter()
-            .any(|c| c.callee == Callee::Runtime(RtOp::LaunchWord))
+            .filter(|c| matches!(c.callee, Callee::Indirect(_)))
+            .fold(0, |bits, c| {
+                bits | convention_bit(convention(module, c.signature, &mut closures.borrow_mut()))
+            })
     });
     // A body may reach a bound or a launch only through a function value it
     // calls; that function's own image sees it, as it sees every body it holds.
@@ -181,8 +425,9 @@ pub fn specialize_library(module: &mut Module, roots: &[FuncId]) -> Vec<Summary>
         .iter()
         .map(|&f| Summary {
             free: module.step_free.contains_key(&f),
-            opens_bound: opens[f.index()],
-            launches: launches[f.index()],
+            opens_bound: opens[f.index()] != 0,
+            launches: launches[f.index()] != 0,
+            calls_values: values[f.index()],
         })
         .collect()
 }
@@ -332,23 +577,6 @@ fn split(
         let free = rewrite(body, bounded, &version);
         module.functions[version[f].index()].body = Some(free);
     }
-}
-
-/// The entry is also a function value somewhere, so a bound may be current when
-/// it is entered by pointer.
-fn referenced(module: &Module, entry: FuncId) -> bool {
-    module
-        .functions
-        .iter()
-        .filter_map(|f| f.body.as_ref())
-        .flat_map(|b| &b.insts)
-        .any(|inst| {
-            matches!(*inst, Inst::FunctionRef { function, .. } | Inst::DescriptorRef { function, .. } if function == entry)
-        })
-        || module
-            .types
-            .iter()
-            .any(|shape| shape.finalizer.is_some_and(|f| f.0 == entry.0))
 }
 
 /// For each instruction, whether one of the body's own step scopes is open at it.

@@ -566,6 +566,10 @@ pub(crate) fn prebuild_release<'a>(
     archives: impl IntoIterator<Item = &'a [u8]>,
     meter: &mut Meter,
 ) -> io::Result<()> {
+    // The walk decodes every std body into the image it reads. An image of
+    // the prebuild's own leaves with the check, before the optimiser runs.
+    let image = CoreImage::open(&image.store_root())?
+        .ok_or_else(|| io::Error::other("the std product's image cannot be reopened"))?;
     let scratch = tempfile::tempdir()?;
     let request = crate::CheckRequest {
         manifest: None,
@@ -574,20 +578,20 @@ pub(crate) fn prebuild_release<'a>(
             packages: vec![],
         },
         store: scratch.path().join("request"),
-        library: crate::LibraryInput::Image(Arc::clone(image)),
+        library: crate::LibraryInput::Image(image),
         entry: None,
     };
     let product = crate::Driver::default().check(request, meter)?;
     let identity =
         |bytes: &[u8]| crate::tool_inputs::runtime_identity(ContentHash::of_bytes(bytes));
     // Installation prebuilds the shipping codegen mode for each archive.
-    let runtimes: Vec<_> = archives
-        .into_iter()
-        .map(|bytes| (identity(bytes), false))
-        .collect();
-    product
-        .prebuild_release_std(target, &runtimes)
-        .map_err(|stop| io::Error::other(format!("prebuilding the release std: {stop}")))?;
+    let runtimes: Vec<_> = archives.into_iter().map(identity).collect();
+    let prebuild = |stop| io::Error::other(format!("prebuilding the release std: {stop}"));
+    let side = product
+        .release_std_side(target, &runtimes)
+        .map_err(prebuild)?;
+    drop(product);
+    side.lower().map_err(prebuild)?;
     meter.finish("std product/release prebuild");
     Ok(())
 }

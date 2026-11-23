@@ -280,31 +280,71 @@ impl CheckProduct {
         })
     }
 
-    /// Lower and publish the release std of this product's library image for
-    /// release builds on `target` for each runtime archive, into the
-    /// image's own store, which every build over the image reads first. A
-    /// variant with a side already there keeps it.
-    pub(crate) fn prebuild_release_std(
+    /// The release std of this product's library image for shipping release
+    /// builds on `target` against each runtime archive in `runtimes`, walked
+    /// and prepared from the image. [`ReleaseStdSide::lower`] publishes it
+    /// into the image's own store, which every build over the image reads
+    /// first; a runtime with a side already there keeps it. The side holds
+    /// its own units, so the caller can drop this product, and the bodies its
+    /// image decoded for the walk, before the side's optimiser runs.
+    pub(crate) fn release_std_side(
         &self,
         target: &str,
-        runtimes: &[(ContentHash, bool)],
-    ) -> Result<(), NativeStop> {
+        runtimes: &[ContentHash],
+    ) -> Result<ReleaseStdSide, NativeStop> {
         let image = self
             .image
             .as_ref()
             .ok_or_else(|| NativeStop::Entry("the release std is an image's".into()))?;
-        let store = Store::new(&image.store_root().join(PREBUILT))?;
-        // Each variant walks the side afresh, so no lowering holds another
-        // variant's copy of the std's units through its optimiser.
-        for &(runtime, observe_charge) in runtimes {
-            let generator = Generator {
-                target,
-                observe_charge,
-                runtime,
-            };
-            let side = self.image_side()?;
-            lower(&generator, generator.kin()?, side, &store)?;
-        }
+        // The runtime names a side's kin but its code does not read it: one
+        // lowering serves every runtime archive.
+        let kins = runtimes
+            .iter()
+            .map(|&runtime| {
+                Generator {
+                    target,
+                    observe_charge: false,
+                    runtime,
+                }
+                .kin()
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        Ok(ReleaseStdSide {
+            target: target.to_owned(),
+            runtime: runtimes.first().copied(),
+            kins,
+            store: Store::new(&image.store_root().join(PREBUILT))?,
+            units: if runtimes.is_empty() {
+                None
+            } else {
+                Some(self.image_side()?)
+            },
+        })
+    }
+}
+
+/// A library image's release std side, prepared to lower for one target and
+/// the shipping codegen mode under the kin of each runtime archive.
+pub(crate) struct ReleaseStdSide {
+    target: String,
+    runtime: Option<ContentHash>,
+    kins: Vec<ContentHash>,
+    store: Store,
+    units: Option<SideUnits>,
+}
+
+impl ReleaseStdSide {
+    /// Lower the side once and publish it under every runtime's kin.
+    pub(crate) fn lower(self) -> Result<(), NativeStop> {
+        let (Some(runtime), Some(units)) = (self.runtime, self.units) else {
+            return Ok(());
+        };
+        let generator = Generator {
+            target: &self.target,
+            observe_charge: false,
+            runtime,
+        };
+        lower(&generator, &self.kins, units, &self.store)?;
         Ok(())
     }
 }
@@ -401,7 +441,7 @@ pub(crate) fn std_side(
                 .collect(),
         },
     };
-    let (key, record, lowered) = lower(&generator, kin, lowered, &shared)?;
+    let (key, record, lowered) = lower(&generator, &[kin], lowered, &shared)?;
     if !own(&record) {
         return Err(NativeStop::Entry(
             "the release std lowered for this program holds other bodies than it".into(),
@@ -410,13 +450,15 @@ pub(crate) fn std_side(
     side(&shared, &shared, key, record, lowered)
 }
 
-/// Join, specialize and lower a side's units, publish its parts and record
-/// into `store` under the key its content derives, and name it first in its
-/// toolchain and variant's index there. Also returns how many units it
-/// lowered: none when `store` already holds the side.
+/// Join, specialize and lower a side's units once, publish its parts and
+/// record into `store` under the key its content derives in each of `kins`
+/// (kins whose generators differ only in the runtime they name), and name it
+/// first in each kin's index there. Returns the first kin's key and record,
+/// and how many units it lowered: none when `store` already holds the side
+/// in every kin.
 fn lower(
     options: &Generator<'_>,
-    kin: ContentHash,
+    kins: &[ContentHash],
     side: SideUnits,
     store: &Store,
 ) -> Result<(ContentHash, StdRecord, u64), NativeStop> {
@@ -430,11 +472,25 @@ fn lower(
         .map(|(identity, unit)| Ok((identity.clone(), unit.owner()?)))
         .collect::<io::Result<Vec<_>>>()?;
     let requested = roots.clone();
-    let key = side_key(kin, whole, &requested, &owners)?;
-    if let Some(record) = load_record(store, key, kin)? {
-        write_index(store, kin, key)?;
-        return Ok((key, record, 0));
+    let keys = kins
+        .iter()
+        .map(|&kin| side_key(kin, whole, &requested, &owners))
+        .collect::<io::Result<Vec<_>>>()?;
+    let mut held = Vec::with_capacity(kins.len());
+    for (&kin, &key) in kins.iter().zip(&keys) {
+        match load_record(store, key, kin)? {
+            Some(record) => held.push(record),
+            None => break,
+        }
     }
+    if held.len() == kins.len() {
+        for (&kin, &key) in kins.iter().zip(&keys) {
+            write_index(store, kin, key)?;
+        }
+        let record = held.swap_remove(0);
+        return Ok((keys[0], record, 0));
+    }
+    drop(held);
     let reached: Vec<Identity> = units.keys().cloned().collect();
     let points =
         super::recipe_build::bind_annexes(&mut units, &BTreeMap::new(), &BTreeMap::new(), false)?
@@ -528,38 +584,46 @@ fn lower(
             hirsel_llvm_lazy::Lend::Lend { limit: LEND_LIMIT },
         )
         .map_err(emit)?;
-    // Each part's object is generated when a program first links it: a
-    // program links few of the unit's parts.
-    let mut parts = Vec::with_capacity(program.deferred.len());
-    for (i, part) in program.deferred.into_iter().enumerate() {
-        store.put_keyed(code_name(key, i)?, &part.code)?;
-        parts.push(StdPart {
-            name: part.name,
-            strong: part.strong,
-        });
-    }
-    if parts.is_empty() {
+    if program.deferred.is_empty() {
         return Err(NativeStop::Entry("the release std has no part".into()));
     }
     if body_keys.is_empty() {
         return Err(NativeStop::Entry("the release std holds no body".into()));
     }
-    let lent = lent_name(key)?;
-    store.put_keyed(lent, &program.lent)?;
-    let record = StdRecord {
-        schema: STD_SCHEMA,
-        whole,
-        requested,
-        roots,
-        units: owners,
-        summaries: codes.into_iter().zip(summaries).collect(),
-        points,
-        exports: exports.into_iter().collect(),
-        parts,
-        lent,
-    };
-    store.put_keyed(key, &encode(&record)?)?;
-    write_index(store, kin, key)?;
+    let summaries: Vec<(ContentHash, Summary)> = codes.into_iter().zip(summaries).collect();
+    let exports: BTreeSet<String> = exports.into_iter().collect();
+    let mut first = None;
+    // Each part's object is generated when a program first links it: a
+    // program links few of the unit's parts. Each kin names its own copy of
+    // the one lowering's parts.
+    for (&kin, &key) in kins.iter().zip(&keys) {
+        let mut parts = Vec::with_capacity(program.deferred.len());
+        for (i, part) in program.deferred.iter().enumerate() {
+            store.put_keyed(code_name(key, i)?, &part.code)?;
+            parts.push(StdPart {
+                name: part.name.clone(),
+                strong: part.strong,
+            });
+        }
+        let lent = lent_name(key)?;
+        store.put_keyed(lent, &program.lent)?;
+        let record = StdRecord {
+            schema: STD_SCHEMA,
+            whole,
+            requested: requested.clone(),
+            roots: roots.clone(),
+            units: owners.clone(),
+            summaries: summaries.clone(),
+            points: points.clone(),
+            exports: exports.clone(),
+            parts,
+            lent,
+        };
+        store.put_keyed(key, &encode(&record)?)?;
+        write_index(store, kin, key)?;
+        first.get_or_insert((key, record));
+    }
+    let (key, record) = first.expect("a side is lowered for at least one kin");
     let lowered = record.units.len() as u64;
     Ok((key, record, lowered))
 }

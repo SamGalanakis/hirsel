@@ -1777,7 +1777,7 @@ pub(crate) fn launch(
         #[cfg(not(feature = "record"))]
         let tape_stats = "";
         eprintln!(
-            "untied-stats workers={} units={} resumes={} parks={} yields={} steals={} os_wakes={} gpolls={} gpoll_blocks={} gpoll_events={} timer_fires={} notified_requeue={} create_ns_avg={} ready_to_park_ns_avg={} token_acquires={} unit_epoll_waits={} lifo={} handoffs={} handoff_ns={} handoff_tick_ns={} handoff_age_ns_avg={} net_reactor={}{tape_stats}",
+            "untied-stats workers={} units={} resumes={} parks={} yields={} steals={} os_wakes={} gpolls={} gpoll_blocks={} gpoll_events={} timer_fires={} notified_requeue={} create_ns_avg={} ready_to_park_ns_avg={} token_acquires={} unit_epoll_waits={} lifo={} handoffs={} handoff_ns={} handoff_tick_ns={} handoff_age_ns_avg={} net_uring={}{tape_stats}",
             w,
             g(S_CREATED),
             g(S_RESUMES),
@@ -1799,7 +1799,7 @@ pub(crate) fn launch(
             p.handoff_ticks.saturating_mul(p.handoff_tick_ns),
             p.handoff_tick_ns,
             g(S_HANDOFF_AGE_NS) / g(S_HANDOFFS).max(1),
-            p._shared.reactor().name(),
+            u8::from(p.uring),
         );
     }
     if crate::sequencer::ACQUIRES.load(Ordering::Relaxed) != 0 {

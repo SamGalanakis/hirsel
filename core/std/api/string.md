@@ -13,3 +13,8 @@ Allocation and growth use the underlying list rules. Copying is explicit through
 It allocates nothing and takes O(remaining bytes + pattern bytes) in the worst case.
 
 `string.push_upper`, `string.push_lower`, `string.to_upper` and `string.to_lower` apply full Unicode 18.0.0 case mappings to each scalar.
+
+`string.case_fold` applies Unicode 18.0.0 default full case folding to each scalar.
+`string.eq_ignore_case` compares the resulting UTF-8 bytes. For example, `"Straße"`
+and `"STRASSE"` compare equal, while `"I"` and `"ı"` compare unequal.
+[Unicode text specification](../../../docs/spec/unicode.md).

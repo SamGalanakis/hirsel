@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the std Unicode tables from the four UCD files pinned in UNI-1."""
+"""Generate the std Unicode tables from the UCD files pinned in UNI-1."""
 
 import argparse
 from bisect import bisect_right
@@ -18,6 +18,7 @@ DIGESTS = {
     "DerivedCoreProperties.txt": "09c928886a178fcafd93c29e4bd59073a058e5a100b716d425cb563ab50f68c9",
     "PropList.txt": "f438f532e8737bb8a2702126cdf9c4af5e357c58c7acf9d9eb2fc7c1a1d955d6",
 }
+FOLD_DIGEST = {"CaseFolding.txt": "a004797658a457bec4dc11683e39f69249ea3b595b752dbea6721c4c9f587b0d"}
 CATEGORIES = "Lu Ll Lt Lm Lo Mn Mc Me Nd Nl No Pc Pd Ps Pe Pi Pf Po Sm Sc Sk So Zs Zl Zp Cc Cf Co Cn".split()
 PROPERTIES = ("Other_Alphabetic", "Other_Lowercase", "Other_Uppercase", "White_Space")
 LIMIT = 0x110000
@@ -30,7 +31,7 @@ def scalars():
 
 def read_ucd(directory):
     files = {}
-    for name, expected in DIGESTS.items():
+    for name, expected in (DIGESTS | FOLD_DIGEST).items():
         data = (directory / name).read_bytes()
         actual = sha256(data).hexdigest()
         if actual != expected:
@@ -274,6 +275,52 @@ def verify_case(mappings, cutoff, trie, data, expansion_base, expansions, upper)
             raise ValueError(f"encoded {direction} differs from UCD at U+{code:04X}")
 
 
+def lower_expansion(text, lower):
+    mapped = (
+        value for char in text.decode("utf-8")
+        for value in lower.get(ord(char), (ord(char),))
+    )
+    return "".join(map(chr, mapped)).encode("utf-8")
+
+
+def fold_tables(upper, lower, source, spans, cutoff, check):
+    dotted_i = "".join(map(chr, lower[0x130])).encode("utf-8")
+    if len(dotted_i) != 3:
+        raise ValueError("unexpected UTF-8 length for the lowercase of U+0130")
+    payload = bytearray(dotted_i)
+    for text in spans:
+        folded = lower_expansion(text, lower)
+        if len(folded) != len(text):
+            raise ValueError("folded uppercase expansions must preserve their byte widths")
+        payload.extend(folded)
+    if check:
+        expected = {
+            int(code, 16): tuple(int(value, 16) for value in result.split())
+            for code, status, result, *_ in records(source) if status in ("C", "F")
+        }
+        for code in scalars():
+            if code == 0x131 or code >= cutoff:
+                mapped = (code,)
+            elif code < 0xB5:
+                mapped = lower.get(code, (code,))
+            elif 0x13A0 <= code <= 0x13FD or 0xAB70 <= code <= 0xABBF:
+                mapped = upper.get(code, (code,))
+            else:
+                from_code = 0xDF if code == 0x1E9E else code
+                capital = upper.get(from_code, (from_code,))
+                if len(capital) == 1:
+                    value = capital[0]
+                    mapped = lower.get(value, (value,))
+                else:
+                    text = "".join(map(chr, capital)).encode("utf-8")
+                    _, span = spans[text]
+                    at, width = (span >> 4) + 3, span & 15
+                    mapped = tuple(map(ord, payload[at:at + width].decode("utf-8")))
+            if mapped != expected.get(code, (code,)):
+                raise ValueError(f"encoded full fold differs from CaseFolding.txt at U+{code:04X}")
+    return f"const FOLD_EXPANSIONS: String = {text_literal(payload)}"
+
+
 def case_tables(mappings, cutoff, upper, check):
     if not upper:
         multi = {code: mapped for code, mapped in mappings.items() if len(mapped) != 1}
@@ -313,7 +360,7 @@ def case_tables(mappings, cutoff, upper, check):
         ))
     else:
         declarations.append(inline("LOWER_DELTA", "i32", data))
-    return declarations
+    return declarations, spans
 
 
 def generate(files, check):
@@ -326,10 +373,13 @@ def generate(files, check):
     if cutoff != 0x1EA00:
         raise ValueError("unexpected case trie limit for Unicode 18.0.0")
     char_lines = char_tables(categories, props, derived, check)
+    upper_lines, spans = case_tables(upper, cutoff, True, check)
+    lower_lines, _ = case_tables(lower, cutoff, False, check)
     string_lines = [
         f"const CASE_LIMIT: u32 = {hex(cutoff)}",
-        *case_tables(upper, cutoff, True, check),
-        *case_tables(lower, cutoff, False, check),
+        *upper_lines,
+        *lower_lines,
+        fold_tables(upper, lower, files["CaseFolding.txt"], spans, cutoff, check),
     ]
     for lines in (char_lines, string_lines):
         yield NOTICE + "\n" + "\n\n".join(lines) + "\n"
@@ -358,7 +408,7 @@ def main():
     except (OSError, ValueError) as error:
         parser.exit(1, f"{error}\n")
     if args.check:
-        print("Unicode 18.0.0 categories, properties and case maps agree with UCD across 1,112,064 scalars.")
+        print("Unicode 18.0.0 categories, properties, case maps and full folds agree with UCD across 1,112,064 scalars.")
 
 
 if __name__ == "__main__":

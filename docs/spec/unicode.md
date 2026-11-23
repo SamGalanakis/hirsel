@@ -3,8 +3,8 @@
 This chapter specifies std's Unicode character classification and case conversion: the
 `std.char` members `UNICODE_VERSION`, `Category`, `category`, `is_alphabetic`, `is_letter`,
 `is_numeric`, `is_decimal`, `is_alphanumeric`, `is_whitespace`, `is_uppercase`,
-`is_lowercase`, and the `std.string` members `push_upper`, `push_lower`, `to_upper` and
-`to_lower`. `char` and `string` extend core, so their members are written
+`is_lowercase`, and the `std.string` members `push_upper`, `push_lower`, `to_upper`, `to_lower`,
+`case_fold` and `eq_ignore_case`. `char` and `string` extend core, so their members are written
 bare everywhere (`char.is_letter(c)`, `string.to_lower(s)`), and the type is `char.Category`.
 
 **Rule numbers.** UNI-n are std Unicode rules.
@@ -24,6 +24,7 @@ and in replay ([SEM-8](semantics.md#sem-8-determinism)).
   | `SpecialCasing.txt` | `8538dea57c184f1ef3783885ea79677b10f6efa06423717157e63712f14d1ad2` | full case mappings, the entries with no condition only |
   | `DerivedCoreProperties.txt` | `09c928886a178fcafd93c29e4bd59073a058e5a100b716d425cb563ab50f68c9` | Alphabetic, Lowercase, Uppercase |
   | `PropList.txt` | `f438f532e8737bb8a2702126cdf9c4af5e357c58c7acf9d9eb2fc7c1a1d955d6` | White_Space |
+  | `CaseFolding.txt` | `a004797658a457bec4dc11683e39f69249ea3b595b752dbea6721c4c9f587b0d` | default full case folding, statuses C and F |
 
   The files are © Unicode, Inc. and licensed under the Unicode License v3
   (`https://www.unicode.org/license.txt`, SPDX `Unicode-3.0`). std's source states the notice
@@ -128,7 +129,7 @@ fn is_symbol(c: char) -> bool {
 }
 ```
 
-### UNI-4: Case conversion
+### UNI-4: Case conversion and folding
 
 A scalar's uppercase and lowercase are full case mappings, possibly several scalars, and a
 string's is the concatenation of its scalars' mappings, in order.
@@ -138,6 +139,8 @@ pub fn push_upper(mut out: String, c: char) { string.push_upper(mut out, c) }
 pub fn push_lower(mut out: String, c: char) { string.push_lower(mut out, c) }
 pub fn to_upper(s: String) -> String { string.to_upper(s) }
 pub fn to_lower(s: String) -> String { string.to_lower(s) }
+pub fn case_fold(s: String) -> String { string.case_fold(s) }
+pub fn eq_ignore_case(a: String, b: String) -> bool { string.eq_ignore_case(a, b) }
 ```
 
 - **One scalar.** `upper(c)` is the `<upper>` field of the `SpecialCasing.txt` entry for `c` with
@@ -157,8 +160,11 @@ pub fn to_lower(s: String) -> String { string.to_lower(s) }
   `to_lower("ΣΑΣ")` is `"σασ"`: the final-sigma rule that would end it in `ς` is a context of
   UNI-1's excluded set. Rust's `str::to_lowercase` applies that rule; std does not.
 - **Not round trips.** Neither conversion inverts the other: `to_lower(to_upper("ß"))` is
-  `"ss"`, and `to_upper(to_lower("İ"))` is `"I\u{307}"`, not `"İ"`. Case conversion is not
-  case folding, and std has no folding operation outside regex `(?i)`.
+  `"ss"`, and `to_upper(to_lower("İ"))` is `"I\u{307}"`.
+- **Default full case folding.** `string.case_fold(s)` concatenates the mappings with status C or F
+  in `CaseFolding.txt`. Scalars without such a mapping pass through unchanged. The fold uses no
+  locale or normalization. `string.eq_ignore_case(a, b)` tests byte equality of those folds.
+  Regex `(?i)` uses its own Unicode simple folding ([RE-2](regex.md#re-2-syntax)).
 - **Titlecase** is not provided.
 
 ```hirsel
@@ -196,11 +202,14 @@ The operations are ordinary std code: their charges are the
   in `out` once, as `string.reserve` does, and then admit nothing. A refused reservation raises
   `Capacity` with `out` unchanged. A static `out` is copied into new storage first, as by
   `string.push_char` ([core](core.md)). Each takes a constant number of steps.
-- **`string.to_upper(s)` and `string.to_lower(s)`** admit the result's storage once, with capacity exactly
+- **`string.to_upper(s)`, `string.to_lower(s)` and `string.case_fold(s)`** admit the result's storage once,
+  with capacity exactly
   its byte length (charged rounded up to 8), and nothing else; an empty result admits nothing. A refusal raises
   `Capacity` and admits nothing. The result has at most three bytes for each byte of `s` (U+0390,
   two bytes, uppercases to six), so its length never overflows. Each takes
   O(`string.byte_len(s)` + 1) steps.
+- **`string.eq_ignore_case(a, b)`** admits both folded strings under the same rules as `case_fold`
+  and compares them in O(`string.byte_len(a) + string.byte_len(b) + 1`) steps.
 - **Failures.** The operations fail only with `Capacity`, for the admissions above, and
   `OutOfTime`, at a step under an exhausted bound. They have no `Fail` and no `Bounds`.
 - **Determinism.** The steps follow from std's source and the argument alone, so a bound stops
@@ -252,3 +261,11 @@ fails the last three, and one built from 16.0 data fails all five.
 | `string.to_lower("ΣΑΣ")` | `"σασ"` |
 | `string.to_lower("Ⅷ ǅ")` | `"ⅷ ǆ"` |
 | `string.to_upper("")` | `""`, admitting nothing |
+
+| call | result |
+|---|---|
+| `string.case_fold("Straße ẞ")` | `"strasse ss"` |
+| `string.case_fold("Σςσ")` | `"σσσ"` |
+| `string.case_fold("İIı")` | `"i\u{307}iı"` |
+| `string.eq_ignore_case("Straße", "STRASSE")` | true |
+| `string.eq_ignore_case("I", "ı")` | false |

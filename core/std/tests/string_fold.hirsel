@@ -1,0 +1,6 @@
+// UNI-7. CaseFolding.txt statuses C and F, including the Cherokee uppercase fold.
+// expect: run unicode_full_fold_cases() = true
+fn unicode_full_fold_cases() -> bool {
+    let dotted = "i\u{307}"
+    string.case_fold("Straße ẞ") == "strasse ss" && string.case_fold("Σςσ") == "σσσ" && string.case_fold("İ") == dotted && string.case_fold("Iı") == "iı" && string.case_fold("Ꭰꭰ") == "ᎠᎠ" && string.case_fold("\u{1df95}") == "ss" && string.eq_ignore_case("Straße", "STRASSE") && string.eq_ignore_case("İ", dotted) && !string.eq_ignore_case("İ", "i") && !string.eq_ignore_case("I", "ı")
+}

@@ -1,0 +1,103 @@
+fn s3_host_matches(name: String, aws_region: String) -> bool {
+    if name == "s3.amazonaws.com" {
+        return true
+    }
+    let Some(host_label) = string.strip_suffix(name, ".amazonaws.com") else {
+        return false
+    }
+    let Some(label) = string.strip_prefix(host_label, "s3.") else {
+        return false
+    }
+    if label != aws_region {
+        return false
+    }
+    let region_bytes = string.as_bytes(aws_region)
+    let n = list.len(region_bytes)
+    if n < 6 || region_bytes[2] != b'-' {
+        return false
+    }
+    let mut last_dash = 0u64
+    for at in 0u64 .. n {
+        let b = region_bytes[at]
+        if b == b'-' && at > last_dash + 1 {
+            last_dash = at
+        } else if b < b'a' || b > b'z' {
+            // Region numbers follow the second or later dash.
+            if last_dash <= 2 || !int.is_ascii_digit(b) {
+                return false
+            }
+            for digit in list.slice(region_bytes, at, n) {
+                if !int.is_ascii_digit(digit) {
+                    return false
+                }
+            }
+            return at == last_dash + 1
+        }
+    }
+    false
+}
+
+fn history_qualify(mut client: std.object.Client, deadline: u64) -> Result[(), Error] waits {
+    if std.object.simulated(client) {
+        return Ok(())
+    }
+    if !std.object.endpoint_secure(client) {
+        return Error(Unqualified("insecure"))
+    }
+    let endpoint = std.object.endpoint_host(client)
+    let place = std.object.bucket_config(client)
+    if s3_host_matches(endpoint, place.aws_region) {
+        let Ok(algorithm) = std.object.bucket_encryption(mut client, deadline) else {
+            return Error(Unqualified("aws:encryption"))
+        }
+        if algorithm == "" || algorithm == "AES256" {
+            return Ok(())
+        }
+        let mut reason = string.from("aws:")
+        string.push(mut reason, algorithm)
+        return Error(Unqualified(take reason))
+    }
+    if endpoint == "fly.storage.tigris.dev" || endpoint == "t3.storage.dev" {
+        let Ok(location) = std.object.bucket_location(mut client, deadline) else {
+            return Error(Unqualified("tigris:location"))
+        }
+        if string.find(location, 0, ",") != None {
+            return Error(Unqualified("tigris:dual-region"))
+        }
+        if location == "" {
+            return Error(Unqualified("tigris:location"))
+        }
+        // No Single- or Multi-region reply has qualified for the allow-list.
+        let mut reason = string.from("tigris:")
+        string.push(mut reason, location)
+        return Error(Unqualified(take reason))
+    }
+    Error(Unqualified("unknown"))
+}
+
+fn history_check_namespace(capture: HistoryCapture, client: std.object.Client) -> Result[(), Error] {
+    let live = std.object.bucket_config(client)
+    if capture.config.place.bucket != live.bucket || capture.config.place.prefix != live.prefix {
+        return Error(Foreign)
+    }
+    Ok(())
+}
+
+fn history_probe_head(mut client: std.object.Client, cached_tag: std.object.ETag, mut scratch: Bytes, deadline: u64) -> Result[Option[(HistoryCapture, std.object.ETag)], Error] waits {
+    list.clear(mut scratch)
+    let (take outcome, take body) = std.object.fetch_if_changed(mut client, "head", cached_tag, replace(mut scratch, list.new()), deadline)
+    scratch = take body
+    match take outcome {
+        Ok(None) => Ok(None),
+        Ok(Some(meta)) => {
+            if meta.size != list.len(scratch) || meta.etag.len == 0 {
+                return Error(disk_fault("head", 0, Truncated))
+            }
+            let received = history_decode_head(scratch)?
+            history_check_namespace(received, client)?
+            Ok(Some((take received, meta.etag)))
+        },
+        Error(NotFound) => Error(disk_fault("head", 0, Absent)),
+        Error(take e) => Error(Remote(take e)),
+    }
+}

@@ -21,6 +21,7 @@ std = { major = 1 }
 "store-history-packs.hirsel" = "store"
 "store-reclaim.hirsel" = "store"
 "store-register.hirsel" = "store"
+"store-object-authority.hirsel" = "store"
 "store-levels.hirsel" = "store"
 "store-followers.hirsel" = "store"
 "store-layout.hirsel" = "store"

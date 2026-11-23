@@ -16,6 +16,7 @@
 // directory. The soak runs one seeded cut per seed under retriable faults.
 type BucketSim {
     network: Net,
+    endpoint: std.sim.s3.Endpoint,
     time: Clock,
     server: Task[std.sim.s3.Report],
     driver: Task[()],
@@ -28,24 +29,11 @@ type BucketSimClock: send {
     real: Clock
 }
 
-type BucketSimServer: send {
-    config: std.sim.s3.Config,
-    plan: std.sim.world.Plan,
-    time: Clock,
-    port: core.Served[NetOp]
-}
-
 const BUCKET_LAW_OP_MS: u64 = 30000
 
 const BUCKET_LAW_ROUNDS: u64 = 3
 
 const BUCKET_LAW_CUTS: u64 = 40
-
-fn bucket_law_server(take input: BucketSimServer) -> std.sim.s3.Report waits {
-    let BucketSimServer(config: take config, plan: take initial, time, port: take port) = take input
-    let mut plan = take initial
-    std.sim.s3.serve(config, mut plan, time, take port)
-}
 
 // Advances virtual time until the law stops it and no virtual timer is
 // left. `clock.idle` also answers None while the store waits on its real
@@ -95,11 +83,10 @@ fn bucket_law_sim(tasks: Tasks, real: Clock, seed: u64, cut: Option[std.sim.s3.C
     let verify = result.unwrap(secret.narrow(key, "verify"))
     let config = std.sim.s3.Config(address, cut: cut, network: take net_model, after_resolve: None, credential: string.from("AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request"), signing_key: take verify, faults: take faults, exists_status: 412, fragment_bytes: 4096, max_body: 16777216)
     let (world, time) = std.sim.world.new(seed, 0, 1369353600000)
-    let (network, port) = provide.net(bytes 1048576)
     let (stop, stopping): (Sender[()], Receiver[()]) = channel.new(1u64)
     let driver = task.spawn(tasks, bytes 65536, BucketSimClock(world: take world, stop: take stopping, real), bucket_law_clock)
-    let server = task.spawn(tasks, bytes 33554432, BucketSimServer(config: take config, plan: std.sim.world.plan(seed), time, port: take port), bucket_law_server)
-    BucketSim(network, time, server: take server, driver: take driver, stop: take stop)
+    let (endpoint, take server) = std.sim.s3.start_service(tasks, take config, std.sim.world.plan(seed), time, 1048576, 33554432)
+    BucketSim(network: std.sim.s3.endpoint_network(endpoint), endpoint, time, server: take server, driver: take driver, stop: take stop)
 }
 
 fn bucket_law_place(host_name: String) -> std.object.Bucket {
@@ -110,11 +97,22 @@ fn bucket_law_place(host_name: String) -> std.object.Bucket {
 }
 
 fn bucket_law_client(s: BucketSim, tasks: Tasks, host_name: String, seed: u64) -> Result[std.object.Client, Error] waits {
+    bucket_law_client_with(s, tasks, host_name, seed, false)
+}
+
+fn bucket_law_client_with(s: BucketSim, tasks: Tasks, host_name: String, seed: u64, typed: bool) -> Result[std.object.Client, Error] waits {
     let secret_bytes = string.into_bytes(string.from("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"))
     let root = result.unwrap(secret.seal(take secret_bytes, "kdf"))
     let credentials_set = std.cred.from_secret("AKIAIOSFODNN7EXAMPLE", take root, "")
     let deadline = std.clock.deadline_after_ms(host.mono_ns(s.time), BUCKET_LAW_OP_MS)
-    match std.object.start(s.network, tasks, bucket_law_place(host_name), take credentials_set, None, System, s.time, provide.random(seed), 0, 1048576, deadline) {
+    let place = bucket_law_place(host_name)
+    let random = provide.random(seed)
+    let connected = if typed {
+        std.object.start_simulated(s.endpoint, tasks, take place, take credentials_set, s.time, random, 0, 1048576, deadline)
+    } else {
+        std.object.start(s.network, tasks, take place, take credentials_set, None, System, s.time, random, 0, 1048576, deadline)
+    }
+    match take connected {
         Ok(take client) => Ok(take client),
         Error(take e) => Error(Remote(take e)),
     }
@@ -769,6 +767,69 @@ fn bucket_test_m2_retry_budget(c: Clock, tasks: Tasks) -> Result[(), Error] wait
     }
     if elapsed < 1500000000 || report.attempts > 5 || report.writes != 0 || body != string.as_bytes("proposed head") {
         fail("conditional retries escaped the client's backoff or attempt budget")
+    }
+    Ok(())
+}
+
+fn bucket_m2_law_probe(tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits {
+    let mut old = bucket_law_client_with(sim, tasks, "s3.test", 1, true)?
+    let mut new_client = bucket_law_client_with(sim, tasks, "s3.test", 2, true)?
+    let mut endpoint_only = bucket_law_client(sim, tasks, "s3.test", 3)?
+    let deadline = std.object.deadline_after_ms(old, BUCKET_LAW_OP_MS)
+    if let Error(Unqualified(reason)) = history_qualify(mut endpoint_only, deadline) {
+        if reason != "insecure" {
+            fail("unexpected qualification reason")
+        }
+    } else {
+        fail("a loopback endpoint alone qualified as a simulator")
+    }
+    history_qualify(mut old, deadline)?
+    history_qualify(mut new_client, deadline)?
+    if !s3_host_matches("s3.us-east-1.amazonaws.com", "us-east-1") ||
+        s3_host_matches("s3.dualstack.us-east-1.amazonaws.com", "us-east-1") ||
+        s3_host_matches("s3.us-east-1.amazonaws.com.example.com", "us-east-1") {
+        fail("S3 host qualification used a partial match")
+    }
+    let metadata = history_config_bytes(HistoryConfig(place: std.object.bucket_config(old), level: "bucket"))?
+    let mut first = history_buffers(1024)?
+    let mut successor = history_buffers(1024)?
+    let id = StoreId(hi: 9, lo: 10)
+    let holder = StoreId(hi: 13, lo: 14)
+    let previous = history_publish_genesis(mut old, id, StoreId(hi: 11, lo: 12), metadata, mut first, deadline)?
+    let unchanged = history_probe_head(mut old, previous.tag, mut first.witness, deadline)?
+    if let Some(_) = unchanged {
+        fail("unchanged conditional head probe returned a body")
+    }
+    if list.len(first.witness) != 0 {
+        fail("304 returned head bytes")
+    }
+    let _ = history_fetch(mut new_client, "head", mut successor.witness, deadline)?
+    let HistoryClaimed(take claimed) = history_replace_claim(mut new_client, previous.head, holder, mut successor, deadline)? else {
+        fail("second holder failed to claim")
+    }
+    let mut active = take claimed
+    history_claim_packet(mut successor.packet, active.head)?
+    let HistoryApplied(_) = history_register_advance(mut new_client, mut active, metadata, mut successor, deadline)? else {
+        fail("second holder's claim did not advance")
+    }
+    let Some((take capture, tag)) = history_probe_head(mut old, previous.tag, mut first.witness, deadline)? else {
+        fail("conditional head probe hid a foreign advance")
+    }
+    if capture.head.pair.epoch != 2 || !same(capture.head.pair.holder, holder) ||
+        capture.head.entry.seq != 2 || tag == previous.tag {
+        fail("conditional head probe returned the wrong capture")
+    }
+    Ok(())
+}
+
+@test
+fn bucket_test_m2_head_probe(c: Clock, tasks: Tasks) -> Result[(), Error] waits {
+    let sim = bucket_law_sim(tasks, c, 17, None, list.new())
+    let probed = bucket_m2_law_probe(tasks, sim)
+    let report = bucket_law_finish(take sim)
+    probed?
+    if report.writes != 6 {
+        fail("head probes wrote to the register")
     }
     Ok(())
 }

@@ -870,6 +870,12 @@ fn tool_stream(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
         if mid_run != 200u16 {
             return 19u64
         }
+        // A message during the run is answered at once: the session has one active run,
+        // so the place says Busy rather than holding the request until the turn ends.
+        let (busy, said) = http(net, clock, port, "POST", "/sessions/0/messages", person(me, 2u64), json(harness.Submit(client_key: "k2", text: "again")))
+        if busy != 202u16 || said != json((Busy : harness.Disposition)) {
+            return 20u64
+        }
         let _ = channel.send(let_go, ())
     }
     let r2 = read_until(mut stream, mut decoder, mut rows, "answered")

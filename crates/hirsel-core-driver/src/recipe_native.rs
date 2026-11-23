@@ -2085,7 +2085,8 @@ pub(super) fn release_objects(
         closed_executable,
         (&std.summaries, std.key, std.lent.as_slice()),
     )?;
-    emitted.objects.extend(std.objects);
+    let linked = std.objects(&emitted.objects, options)?;
+    emitted.objects.extend(linked);
     Ok(emitted)
 }
 

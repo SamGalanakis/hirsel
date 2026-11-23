@@ -679,6 +679,16 @@ std::vector<size_t> largest_first(size_t n, Size size) {
     return order;
 }
 
+// A section per definition, and no code generation across definitions:
+// a part's code is a function of the part alone.
+void part_options(TargetMachine &tm) {
+    tm.Options.FunctionSections = true;
+    tm.Options.DataSections = true;
+    tm.Options.UniqueSectionNames = true;
+    tm.Options.EnableIPRA = false;
+    tm.Options.EnableMachineOutliner = false;
+}
+
 // Generate every miss on up to `jobs` threads.
 void generate_all(const TargetMachine &tm, std::vector<Miss> &misses, unsigned jobs) {
     auto order = largest_first(misses.size(), [&](size_t k) { return misses[k].code.size(); });
@@ -754,20 +764,18 @@ void lent_bodies(const Module &m, const StringMap<std::string> &sets, size_t lim
 // part order. A module that cannot be cut (`unsplittable`) is one part named
 // "" keyed by the module's key and generated whole. With `lend`, a library's
 // bodies (`lent_bodies`, under `lend_limit` and `own`) go to `lend` first.
+// With `code`, no part is asked for or generated: each part's name, whether
+// its object defines that name strong, and the bitcode its object is
+// generated from (`hirsel_llvm_generate_parts`) go to `code`, in part order.
 // Returns 0, or 1 with `*error` set to an LLVM message.
 extern "C" int hirsel_llvm_emit_parts(LLVMModuleRef module, LLVMTargetMachineRef machine, unsigned jobs,
     int (*reuse)(void *, const char *, size_t, const char *, size_t, const uint8_t *, size_t),
     void (*deliver)(void *, const uint8_t *, size_t), void *context, size_t lend_limit,
-    const char *own, void (*lend)(void *, const uint8_t *, size_t), char **error) {
+    const char *own, void (*lend)(void *, const uint8_t *, size_t),
+    void (*code)(void *, const char *, size_t, int, const uint8_t *, size_t), char **error) {
     Module &m = *unwrap(module);
     TargetMachine &tm = *reinterpret_cast<TargetMachine *>(machine);
-    // A section per definition, and no code generation across definitions:
-    // a part's code is a function of the part alone.
-    tm.Options.FunctionSections = true;
-    tm.Options.DataSections = true;
-    tm.Options.UniqueSectionNames = true;
-    tm.Options.EnableIPRA = false;
-    tm.Options.EnableMachineOutliner = false;
+    part_options(tm);
     std::string machine_key = machine_text(tm);
     // Local value names label printed IR only.
     for (Function &f : m) {
@@ -797,6 +805,26 @@ extern "C" int hirsel_llvm_emit_parts(LLVMModuleRef module, LLVMTargetMachineRef
                     f.setLinkage(GlobalValue::ExternalLinkage);
                     f.setVisibility(GlobalValue::HiddenVisibility);
                 }
+    }
+    if (code) {
+        SmallVector<char, 0> bytes;
+        if (whole) {
+            bitcode(m, bytes);
+            code(context, "", 0, 1, (const uint8_t *)bytes.data(), bytes.size());
+            return 0;
+        }
+        StringMap<std::string> sets = asm_lines(m);
+        for (Function &f : m) {
+            if (f.isDeclaration()) continue;
+            with_part(m, f, sets, nullptr, nullptr, [&](Module &p) {
+                bytes.clear();
+                bitcode(p, bytes);
+                bool strong = !p.getFunction(f.getName())->isWeakForLinker();
+                code(context, f.getName().data(), f.getName().size(), strong,
+                     (const uint8_t *)bytes.data(), bytes.size());
+            });
+        }
+        return 0;
     }
     auto ask = [&](StringRef name, const hirsel_key::Digest &key) {
         return reuse(context, name.data(), name.size(), machine_key.data(), machine_key.size(),
@@ -850,6 +878,28 @@ extern "C" int hirsel_llvm_emit_parts(LLVMModuleRef module, LLVMTargetMachineRef
     if (hirsel_llvm_emit_object(machine, module, error, &object)) return 1;
     deliver(context, (const uint8_t *)LLVMGetBufferStart(object), LLVMGetBufferSize(object));
     LLVMDisposeMemoryBuffer(object);
+    return 0;
+}
+
+// Generate the `count` parts whose bitcode `codes` holds (`code` of
+// `hirsel_llvm_emit_parts`), each alone, on up to `jobs` threads, as
+// `hirsel_llvm_emit_parts` generates a missed part: `deliver` gets each
+// part's object, in order. Returns 0, or 1 with `*error` set to an LLVM
+// message.
+extern "C" int hirsel_llvm_generate_parts(LLVMTargetMachineRef machine, const uint8_t *const *codes,
+    const size_t *lens, size_t count, unsigned jobs, void (*deliver)(void *, const uint8_t *, size_t),
+    void *context, char **error) {
+    TargetMachine &tm = *reinterpret_cast<TargetMachine *>(machine);
+    part_options(tm);
+    std::vector<Miss> misses(count);
+    for (size_t i = 0; i < count; ++i) misses[i].code.assign(codes[i], codes[i] + lens[i]);
+    generate_all(tm, misses, jobs);
+    for (Miss &miss : misses)
+        if (!miss.error.empty()) {
+            *error = strdup(miss.error.c_str());
+            return 1;
+        }
+    for (Miss &miss : misses) deliver(context, (const uint8_t *)miss.object.data(), miss.object.size());
     return 0;
 }
 

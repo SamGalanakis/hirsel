@@ -45,6 +45,7 @@ type Reuse = unsafe extern "C" fn(
     usize,
 ) -> i32;
 type Deliver = unsafe extern "C" fn(*mut libc::c_void, *const u8, usize);
+type Code = unsafe extern "C" fn(*mut libc::c_void, *const u8, usize, i32, *const u8, usize);
 type CounterRangeReport = unsafe extern "C" fn(*mut libc::c_void, *const u8, usize, libc::c_uint);
 type SourceRemark = unsafe extern "C" fn(
     *mut libc::c_void,
@@ -99,6 +100,18 @@ type Program = unsafe extern "C" fn(
     usize,
     *const libc::c_char,
     Option<Deliver>,
+    Option<Code>,
+    *mut Output,
+);
+type Generate = unsafe extern "C" fn(
+    *const Input,
+    usize,
+    *const libc::c_char,
+    *const libc::c_char,
+    *const libc::c_char,
+    u32,
+    Deliver,
+    *mut libc::c_void,
     *mut Output,
 );
 pub(crate) enum ProgramUnit {
@@ -108,6 +121,7 @@ pub(crate) enum ProgramUnit {
 struct Backend {
     compile: Compile,
     program: Program,
+    generate: Generate,
     free: Free,
     construction: &'static crate::construction::Api,
     _image: File,
@@ -243,10 +257,16 @@ fn load() -> Result<Backend, String> {
     // engine.c built in this same artifact. No foreign component is selected.
     let compile = unsafe { libc::dlsym(handle, c"hirsel_llvm_compile_v2".as_ptr()) };
     let free = unsafe { libc::dlsym(handle, c"hirsel_llvm_output_free_v1".as_ptr()) };
-    let program = unsafe { libc::dlsym(handle, c"hirsel_llvm_program_v10".as_ptr()) };
+    let program = unsafe { libc::dlsym(handle, c"hirsel_llvm_program_v11".as_ptr()) };
+    let generate = unsafe { libc::dlsym(handle, c"hirsel_llvm_generate_v1".as_ptr()) };
     // SAFETY: the table getter is part of the same embedded component ABI.
     let construction = unsafe { libc::dlsym(handle, c"hirsel_llvm_builder_v1".as_ptr()) };
-    if compile.is_null() || free.is_null() || program.is_null() || construction.is_null() {
+    if compile.is_null()
+        || free.is_null()
+        || program.is_null()
+        || generate.is_null()
+        || construction.is_null()
+    {
         return Err(dl_error());
     }
     Ok(Backend {
@@ -255,6 +275,8 @@ fn load() -> Result<Backend, String> {
         compile: unsafe { std::mem::transmute::<*mut libc::c_void, Compile>(compile) },
         // SAFETY: this export is built with the Input/Output C layouts above.
         program: unsafe { std::mem::transmute::<*mut libc::c_void, Program>(program) },
+        // SAFETY: as `program`'s.
+        generate: unsafe { std::mem::transmute::<*mut libc::c_void, Generate>(generate) },
         free: unsafe { std::mem::transmute::<*mut libc::c_void, Free>(free) },
         // SAFETY: the table is static, its types match construction.rs, and the
         // component stays mapped for the process lifetime.
@@ -454,6 +476,26 @@ unsafe extern "C" fn lend_bodies(receiver: *mut libc::c_void, lent: *const u8, l
         receiver.program.lent = std::slice::from_raw_parts(lent, len).to_vec();
     }
 }
+unsafe extern "C" fn defer_part(
+    receiver: *mut libc::c_void,
+    name: *const u8,
+    name_len: usize,
+    strong: i32,
+    code: *const u8,
+    len: usize,
+) {
+    // SAFETY: as in `deliver_part`; the name and bitcode are copied before
+    // the callback returns.
+    unsafe {
+        let receiver = &mut *(receiver as *mut Receiver<'_>);
+        let name = std::slice::from_raw_parts(name, name_len);
+        receiver.program.deferred.push(crate::Deferred {
+            name: String::from_utf8_lossy(name).into_owned(),
+            strong: strong != 0,
+            code: std::slice::from_raw_parts(code, len).to_vec(),
+        });
+    }
+}
 unsafe extern "C" fn deliver_part(receiver: *mut libc::c_void, object: *const u8, len: usize) {
     // SAFETY: as in `reuse_part`; the object is copied before the callback returns.
     unsafe {
@@ -534,10 +576,12 @@ fn emit(
     folds: Option<&mut crate::CounterRangeFolds>,
     lend: crate::Lend<'_>,
 ) -> Result<crate::Program, String> {
-    let (lent, limit, lend_to): (&[u8], usize, Option<Deliver>) = match lend {
-        crate::Lend::None => (&[], 0, None),
-        crate::Lend::Borrow(lent) => (lent, 0, None),
-        crate::Lend::Lend { limit } => (&[], limit, Some(lend_bodies)),
+    // A library defers its parts: a program over it generates the parts it
+    // links ([`generate`]).
+    let (lent, limit, lend_to, defer): (&[u8], usize, Option<Deliver>, Option<Code>) = match lend {
+        crate::Lend::None => (&[], 0, None, None),
+        crate::Lend::Borrow(lent) => (lent, 0, None, None),
+        crate::Lend::Lend { limit } => (&[], limit, Some(lend_bodies), Some(defer_part)),
     };
     let own = CString::new(crate::LENT_NAMESPACE).unwrap();
     let triple = CString::new(target.triple()).unwrap();
@@ -608,12 +652,71 @@ fn emit(
             limit,
             own.as_ptr(),
             lend_to,
+            defer,
             &mut output,
         );
         let bytes = std::slice::from_raw_parts(output.data, output.len).to_vec();
         (backend.free)(output.data);
         if output.failed == 0 {
             Ok(receiver.program)
+        } else {
+            Err(String::from_utf8_lossy(&bytes).into_owned())
+        }
+    }
+}
+
+/// The objects of the parts whose bitcode `codes` holds ([`crate::Deferred`]),
+/// in order, generated for `target` on up to `jobs` threads.
+pub(crate) fn generate(
+    codes: &[&[u8]],
+    target: hirsel_core_layout::Target,
+    jobs: u32,
+) -> Result<Vec<Vec<u8>>, String> {
+    let triple = CString::new(target.triple()).unwrap();
+    let cpu = CString::new(target.cpu()).unwrap();
+    let features = CString::new(target.llvm_features()).unwrap();
+    let backend = backend()?;
+    let inputs: Vec<_> = codes
+        .iter()
+        .map(|code| Input {
+            data: code.as_ptr(),
+            len: code.len(),
+            module: std::ptr::null_mut(),
+        })
+        .collect();
+    let mut objects: Vec<Vec<u8>> = Vec::with_capacity(codes.len());
+    unsafe extern "C" fn deliver(receiver: *mut libc::c_void, object: *const u8, len: usize) {
+        // SAFETY: `receiver` is the vector `generate` passes for this
+        // synchronous call; the object is copied before the callback returns.
+        unsafe {
+            (*(receiver as *mut Vec<Vec<u8>>))
+                .push(std::slice::from_raw_parts(object, len).to_vec());
+        }
+    }
+    let mut output = Output {
+        data: std::ptr::null_mut(),
+        len: 0,
+        failed: 0,
+    };
+    // SAFETY: the bitcode, the terminated target strings and the receiver
+    // stay borrowed through the synchronous C call, which delivers only
+    // during it. The paired component allocator owns its output.
+    unsafe {
+        (backend.generate)(
+            inputs.as_ptr(),
+            inputs.len(),
+            triple.as_ptr(),
+            cpu.as_ptr(),
+            features.as_ptr(),
+            jobs,
+            deliver,
+            &mut objects as *mut Vec<Vec<u8>> as *mut libc::c_void,
+            &mut output,
+        );
+        let bytes = std::slice::from_raw_parts(output.data, output.len).to_vec();
+        (backend.free)(output.data);
+        if output.failed == 0 {
+            Ok(objects)
         } else {
             Err(String::from_utf8_lossy(&bytes).into_owned())
         }

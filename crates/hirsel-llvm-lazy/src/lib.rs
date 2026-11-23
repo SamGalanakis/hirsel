@@ -97,6 +97,10 @@ pub struct Program {
     pub objects: Vec<Vec<u8>>,
     /// The bodies a library program lends ([`Lend::Lend`]), as bitcode.
     pub lent: Vec<u8>,
+    /// A library program's parts ([`Lend::Lend`]), in part order, none
+    /// generated: a program over the library generates the parts it links
+    /// ([`generate_parts`]).
+    pub deferred: Vec<Deferred>,
     /// Source-neutral decisions reported by the passes that made them.
     pub remarks: Vec<hirsel_core_ir::source::CodegenRemark>,
 }
@@ -110,7 +114,8 @@ pub enum Lend<'a> {
     Borrow(&'a [u8]),
     /// The program is a library: [`Program::lent`] gets each body of at most
     /// `limit` instructions, under the name its part's object defines once
-    /// each local definition's name has [`LENT_NAMESPACE`] after it.
+    /// each local definition's name has [`LENT_NAMESPACE`] after it, and
+    /// [`Program::deferred`] its parts, which are not generated.
     Lend {
         limit: usize,
     },
@@ -124,6 +129,27 @@ pub const LENT_NAMESPACE: &str = "$std";
 pub struct Part {
     pub name: String,
     pub reused: bool,
+}
+
+/// A library part not generated: its definition's symbol (empty for a whole
+/// module that cannot be cut), whether its object defines that symbol strong,
+/// and the bitcode [`generate_parts`] generates its object from.
+pub struct Deferred {
+    pub name: String,
+    pub strong: bool,
+    pub code: Vec<u8>,
+}
+
+/// The objects of deferred library parts ([`Deferred::code`]), in order,
+/// generated for `target` on up to `jobs` threads as their program generates
+/// a part it does not defer, each alone. A part's object is the one its
+/// program generates; [`core::split_native_object`] cuts it.
+pub fn generate_parts(
+    codes: &[&[u8]],
+    target: hirsel_core_layout::Target,
+    jobs: u32,
+) -> Result<Vec<Vec<u8>>, String> {
+    loader::generate(codes, target, jobs)
 }
 
 /// What a release program's caller holds from earlier programs.

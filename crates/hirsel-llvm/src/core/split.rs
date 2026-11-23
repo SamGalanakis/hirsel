@@ -1027,6 +1027,24 @@ pub fn strong_definitions(object: &[u8]) -> Result<Vec<Vec<u8>>, String> {
     Ok(names)
 }
 
+/// The symbols `object` names and does not define: what another object of
+/// its link defines for it.
+pub fn undefined_symbols(object: &[u8]) -> Result<Vec<Vec<u8>>, String> {
+    let header = Header::parse(object).map_err(error)?;
+    let table = header.sections(LE, object).map_err(error)?;
+    let symbols = table.symbols(LE, object, elf::SHT_SYMTAB).map_err(error)?;
+    let mut names = Vec::new();
+    for symbol in symbols.iter() {
+        if symbol.st_bind().0 != raw::STB_LOCAL
+            && symbol.is_undefined(LE)
+            && symbol.st_name(LE) != 0
+        {
+            names.push(symbols.symbol_name(LE, symbol).map_err(error)?.to_vec());
+        }
+    }
+    Ok(names)
+}
+
 /// `object` with each symbol `rename` names anew under that name. The names
 /// move to a string table appended to the file; every other byte is kept.
 pub fn rename_symbols(

@@ -548,8 +548,7 @@ fn a_separate_std_is_the_std_products_alone() {
         } else {
             assert!(std.lowered > 0, "a build that lowers the std counts what it lowered");
         }
-        let bytes: Vec<Vec<u8>> =
-            std.objects.iter().map(|object| std::fs::read(&object.path).unwrap()).collect();
+        let bytes = std.codes();
         assert!(!std.lent.is_empty(), "the std lends bodies");
         parts.push((std.key, record, bytes, std.lent));
         if cache == "cache-b" {

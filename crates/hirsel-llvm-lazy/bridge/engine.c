@@ -54,9 +54,12 @@ typedef void (*HirselLlvmKeepTail)(void *, const char *, size_t, const uint8_t *
                                    const uint8_t *, size_t);
 extern void hirsel_llvm_release_tails(LLVMModuleRef module, LLVMTargetMachineRef machine, unsigned jobs,
     HirselLlvmFindTail find, HirselLlvmKeepTail keep, void *context);
+typedef void (*HirselLlvmCode)(void *, const char *, size_t, int, const uint8_t *, size_t);
 extern int hirsel_llvm_emit_parts(LLVMModuleRef module, LLVMTargetMachineRef machine, unsigned jobs,
     HirselLlvmReuse reuse, HirselLlvmDeliver deliver, void *context, size_t lend_limit,
-    const char *own, HirselLlvmDeliver lend, char **error);
+    const char *own, HirselLlvmDeliver lend, HirselLlvmCode code, char **error);
+extern int hirsel_llvm_generate_parts(LLVMTargetMachineRef machine, const uint8_t *const *codes,
+    const size_t *lens, size_t count, unsigned jobs, HirselLlvmDeliver deliver, void *context, char **error);
 static pthread_once_t initialized = PTHREAD_ONCE_INIT;
 static void initialize(void) {
     // Dense control flow leaves many copies of the same rematerializable
@@ -452,6 +455,27 @@ static int public_body(LLVMValueRef f) {
     return LLVMCountBasicBlocks(f) && (linkage == LLVMExternalLinkage || linkage == LLVMWeakODRLinkage);
 }
 
+// The pinned LLVM's machine for `triple`, optimizing when `speed`, or NULL
+// with `out` holding the error.
+static LLVMTargetMachineRef target_machine(const char *triple, const char *cpu, const char *features,
+                                           uint8_t speed, HirselLlvmOutput *out) {
+    unsigned major, minor, patch;
+    LLVMGetVersion(&major, &minor, &patch);
+    if (major != 23 || minor != 1 || patch != 5) {
+        error(out, "LLVM component requires pinned LLVM 23.1.5"); return NULL;
+    }
+    pthread_once(&initialized, initialize);
+    LLVMTargetRef target = NULL;
+    char *message = NULL;
+    if (LLVMGetTargetFromTriple(triple, &target, &message)) {
+        error(out, message); LLVMDisposeMessage(message); return NULL;
+    }
+    LLVMTargetMachineRef machine = LLVMCreateTargetMachine(target, triple, cpu, features,
+        speed ? LLVMCodeGenLevelAggressive : LLVMCodeGenLevelNone, LLVMRelocPIC, LLVMCodeModelDefault);
+    if (!machine) error(out, "LLVM could not create the target machine");
+    return machine;
+}
+
 static void emit_program(const HirselLlvmUnit *units, size_t count,
                           const char *const *exports, size_t export_count,
                           uint8_t speed, const char *triple, const char *cpu,
@@ -460,21 +484,10 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
                           HirselLlvmReuse reuse, HirselLlvmDeliver deliver,
                           HirselLlvmCounterRangeReport report, HirselLlvmSourceRemark source, void *receiver,
                           const uint8_t *lent, size_t lent_len, size_t lend_limit, const char *own,
-                          HirselLlvmDeliver lend, HirselLlvmOutput *out) {
-    unsigned major, minor, patch;
-    LLVMGetVersion(&major, &minor, &patch);
-    if (major != 23 || minor != 1 || patch != 5) {
-        error(out, "LLVM component requires pinned LLVM 23.1.5"); return;
-    }
-    pthread_once(&initialized, initialize);
-    LLVMTargetRef target = NULL;
+                          HirselLlvmDeliver lend, HirselLlvmCode code, HirselLlvmOutput *out) {
+    LLVMTargetMachineRef machine = target_machine(triple, cpu, features, speed, out);
+    if (!machine) return;
     char *message = NULL;
-    if (LLVMGetTargetFromTriple(triple, &target, &message)) {
-        error(out, message); LLVMDisposeMessage(message); return;
-    }
-    LLVMTargetMachineRef machine = LLVMCreateTargetMachine(target, triple, cpu, features,
-        speed ? LLVMCodeGenLevelAggressive : LLVMCodeGenLevelNone, LLVMRelocPIC, LLVMCodeModelDefault);
-    if (!machine) { error(out, "LLVM could not create the target machine"); return; }
     LLVMContextRef context = NULL;
     int own_context = 1, discard_names = 0;
     for (size_t i = 0; i < count; ++i) if (units[i].module) { context = LLVMGetModuleContext(units[i].module); own_context = 0; break; }
@@ -587,7 +600,7 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
     // object to cut per part; a standalone module, which keeps its order, as
     // one object.
     if (export_count) failed = hirsel_llvm_emit_parts(module, machine, jobs, reuse, deliver, receiver,
-                                                      lend_limit, own, lend, &message);
+                                                      lend_limit, own, lend, code, &message);
     else {
         failed = hirsel_llvm_emit_object(machine, module, &message, &buffer);
         if (!failed && buffer) {
@@ -613,9 +626,12 @@ done:
 // is empty or holds the error. `lent` is a library's bodies (`lend` of an
 // earlier program), offered to the optimizer's inliner and then dropped; with
 // `lend`, this program is such a library, and `lend` gets its bodies of up to
-// `lend_limit` instructions, local names suffixed with `own`.
+// `lend_limit` instructions, local names suffixed with `own`. With `code`,
+// no part is generated: `code` gets each part's name, whether its object
+// defines the name strong, and its bitcode, which `hirsel_llvm_generate_v1`
+// generates.
 __attribute__((visibility("default")))
-void hirsel_llvm_program_v10(const HirselLlvmUnit *units, size_t count,
+void hirsel_llvm_program_v11(const HirselLlvmUnit *units, size_t count,
                           const char *const *exports, size_t export_count,
                           uint8_t speed, const char *triple, const char *cpu,
                           const char *features, unsigned jobs,
@@ -623,16 +639,40 @@ void hirsel_llvm_program_v10(const HirselLlvmUnit *units, size_t count,
                           HirselLlvmReuse reuse, HirselLlvmDeliver deliver,
                           HirselLlvmCounterRangeReport report, HirselLlvmSourceRemark source, void *receiver,
                           const uint8_t *lent, size_t lent_len, size_t lend_limit, const char *own,
-                          HirselLlvmDeliver lend, HirselLlvmOutput *out) {
+                          HirselLlvmDeliver lend, HirselLlvmCode code, HirselLlvmOutput *out) {
     emit_program(units, count, exports, export_count, speed, triple, cpu, features, jobs, find, keep,
-                 reuse, deliver, report, source, receiver, lent, lent_len, lend_limit, own, lend, out);
+                 reuse, deliver, report, source, receiver, lent, lent_len, lend_limit, own, lend, code, out);
+}
+
+// Generate the `count` parts whose bitcode `parts` holds (`code` of a
+// release program) for `triple` on up to `jobs` threads, as the program
+// generates a part it does not defer: `deliver` gets each part's object, in
+// order, and `out` is empty or holds the error.
+__attribute__((visibility("default")))
+void hirsel_llvm_generate_v1(const HirselLlvmUnit *parts, size_t count, const char *triple, const char *cpu,
+                             const char *features, unsigned jobs, HirselLlvmDeliver deliver, void *receiver,
+                             HirselLlvmOutput *out) {
+    LLVMTargetMachineRef machine = target_machine(triple, cpu, features, 1, out);
+    if (!machine) return;
+    const uint8_t **codes = malloc(sizeof *codes * (count ? count : 1));
+    size_t *lens = malloc(sizeof *lens * (count ? count : 1));
+    if (!codes || !lens) { error(out, "out of memory"); goto done; }
+    for (size_t i = 0; i < count; ++i) { codes[i] = parts[i].data; lens[i] = parts[i].len; }
+    char *message = NULL;
+    if (hirsel_llvm_generate_parts(machine, codes, lens, count, jobs, deliver, receiver, &message))
+        error(out, message ? message : "LLVM object emission failed");
+    else copy(out, "", 0, 0);
+    free(message);
+done:
+    free(codes); free(lens);
+    LLVMDisposeTargetMachine(machine);
 }
 __attribute__((visibility("default")))
 void hirsel_llvm_compile_v2(const uint8_t *ir, size_t len, uint8_t speed, const char *triple,
                            const char *cpu, const char *features, HirselLlvmOutput *out) {
     HirselLlvmUnit unit = { ir, len, NULL };
     emit_program(&unit, 1, NULL, 0, speed, triple, cpu, features, 0, NULL, NULL, NULL, NULL, NULL, NULL,
-                 NULL, NULL, 0, 0, NULL, NULL, out);
+                 NULL, NULL, 0, 0, NULL, NULL, NULL, out);
 }
 
 extern const void *hirsel_llvm_no_folder_api(void);

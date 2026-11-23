@@ -26,7 +26,10 @@ const RECORD: usize = 16 * 1024;
 const HEADER: usize = 5;
 const MAX_PAYLOAD: usize = RECORD + 2048;
 const MAX_WIRE: usize = HEADER + MAX_PAYLOAD;
-const RX_CAPACITY: usize = 256 * 1024;
+/// The shared slot size: one send batch of whole records, or one receive.
+const BULK: usize = records::TX_SLOT;
+/// Released bulk slots each thread keeps for its next sends and receives.
+const FREE_BULK: usize = 2;
 const CACHED_ROOT_BUNDLES: usize = 16;
 const CACHED_CLIENT_CONFIGS: usize = 16;
 const TICKETS_PER_CONFIG: usize = 64;
@@ -121,7 +124,9 @@ impl Stream {
 
     /// Pending carries the desired direction, false for read or true for write.
     pub(crate) fn handshake(&mut self, fd: i32) -> Result<Result<(), bool>, Outcome> {
-        self.0.advance(&mut SocketIo(fd), true)
+        let result = self.0.advance(&mut SocketIo(fd), true);
+        self.0.rx.release();
+        result
     }
 
     pub(crate) fn finish(
@@ -150,7 +155,15 @@ impl Stream {
     }
 }
 
+thread_local! {
+    static FREE: std::cell::RefCell<Vec<Box<[u8]>>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 /// One runtime-owned byte slot, with a cursor for nonblocking socket I/O.
+///
+/// A bulk slot holds its bytes only while they hold data: it takes them from
+/// the thread's free list when it is written and returns them once empty, so
+/// an idle connection keeps no slot bytes.
 struct Slot {
     bytes: Box<[u8]>,
     start: usize,
@@ -163,6 +176,33 @@ impl Slot {
             bytes: vec![0; capacity].into_boxed_slice(),
             start: 0,
             end: 0,
+        }
+    }
+
+    fn bulk() -> Self {
+        Self::new(0)
+    }
+
+    fn acquire(&mut self) {
+        if self.bytes.is_empty() {
+            self.bytes = FREE
+                .with_borrow_mut(Vec::pop)
+                .unwrap_or_else(|| vec![0; BULK].into_boxed_slice());
+        }
+    }
+
+    /// Gives an empty bulk slot's bytes back to the thread's free list.
+    fn release(&mut self) {
+        if self.start == self.end && self.bytes.len() == BULK {
+            let bytes = std::mem::take(&mut self.bytes);
+            let _ = FREE.try_with(|free| {
+                let mut free = free.borrow_mut();
+                if free.len() < FREE_BULK {
+                    free.push(bytes);
+                }
+            });
+            self.start = 0;
+            self.end = 0;
         }
     }
 
@@ -187,6 +227,7 @@ impl Slot {
     }
 
     fn read(&mut self, socket: &mut SocketIo) -> io::Result<usize> {
+        self.acquire();
         self.compact();
         let space = &mut self.bytes[self.end..];
         if space.is_empty() {
@@ -207,6 +248,13 @@ impl Slot {
             }
         }
         Ok(true)
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.start = self.end;
+        self.release();
     }
 }
 

@@ -17,7 +17,7 @@ impl RustlsStream {
     pub(super) fn new(connection: UnbufferedClientConnection) -> Self {
         Self {
             connection,
-            rx: Slot::new(RX_CAPACITY),
+            rx: Slot::bulk(),
             tx: Slot::new(MAX_WIRE * 2),
             offered: 0,
             plaintext: Slot::new(0),
@@ -147,14 +147,16 @@ impl RustlsStream {
         if self.plaintext.end != 0 || self.read_end.is_some() {
             return true;
         }
-        match self.advance(socket, false) {
+        let ready = match self.advance(socket, false) {
             Ok(Ok(())) => true,
             Ok(Err(_)) => false,
             Err(error) => {
                 self.read_end = Some(error);
                 true
             }
-        }
+        };
+        self.rx.release();
+        ready
     }
 
     fn encode(&mut self, plaintext: Option<&[u8]>) -> Result<(), Outcome> {

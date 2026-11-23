@@ -17,6 +17,7 @@ const TAG: usize = 16;
 const WIRE: usize = HEADER + RECORD + 1 + TAG;
 pub(crate) const TX_RECORDS: usize = 16;
 const CONTROL_HEADROOM: usize = 64;
+pub(super) const TX_SLOT: usize = TX_RECORDS * WIRE + CONTROL_HEADROOM;
 const CONTROL_LIMIT: u8 = 32;
 const HANDSHAKE_HEADER: usize = 4;
 const MAX_HANDSHAKE: usize = 0xffff;
@@ -83,6 +84,7 @@ impl TrafficKey {
     }
 
     fn seal(&mut self, slot: &mut Slot, kind: u8, input: &[u8]) -> Result<(), Outcome> {
+        slot.acquire();
         let payload = input.len() + 1 + TAG;
         let end = slot.end + HEADER + payload;
         let (header, body) = slot.bytes[slot.end..end].split_at_mut(HEADER);
@@ -149,7 +151,7 @@ impl Records {
             rx_key: TrafficKey::new(secrets.rx)?,
             tx_limit,
             rx_limit: limit,
-            tx: Slot::new(TX_RECORDS * WIRE + CONTROL_HEADROOM),
+            tx: Slot::bulk(),
             rx,
             plaintext: 0..0,
             read_end: None,
@@ -182,9 +184,19 @@ impl Records {
         }
         if self.reply_update {
             self.update_tx()?;
-            return self.tx.flush(socket).map_err(transport);
+            if !self.tx.flush(socket).map_err(transport)? {
+                return Ok(false);
+            }
         }
+        self.tx.release();
         Ok(true)
+    }
+
+    /// Returns the receive slot once no record bytes or plaintext remain in it.
+    fn release_rx(&mut self) {
+        if self.plaintext.is_empty() {
+            self.rx.release();
+        }
     }
 
     fn read_record(&mut self, socket: &mut SocketIo, allow_read: bool) -> Result<bool, ReadEnd> {
@@ -352,11 +364,14 @@ impl SecureStream for Records {
             self.plaintext.start = end;
             copied += n;
         }
+        self.release_rx();
         (copied != 0).then(|| count(copied))
     }
 
     fn ready(&mut self, fd: i32) -> Option<Outcome> {
-        self.read_ready(&mut SocketIo(fd), true).then(|| count(0))
+        let ready = self.read_ready(&mut SocketIo(fd), true);
+        self.release_rx();
+        ready.then(|| count(0))
     }
 
     fn send(&mut self, fd: i32, prefix: &[u8], tail: &[u8]) -> Option<Outcome> {

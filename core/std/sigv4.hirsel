@@ -1,0 +1,386 @@
+const DAY_MS: u64 = 86400000
+
+const GRACE_MS: u64 = 900000
+
+type Daily: send {
+    day: u64,
+    date: Inline[u8, 8],
+    key: Secret,
+    scope: Arc[Bytes]
+}
+
+pub opaque type SigningKeys: send {
+    today: Daily,
+    yesterday: Option[Daily]
+}
+
+pub opaque type Signer: send {
+    root: Secret,
+    aws_region: String,
+    service: String,
+    keys: SigningKeys
+}
+
+pub type Error: send = Derive(SecretError) | Mac(MacError) | InvalidScope | InvalidDate | KeyUnavailable | InvalidRequest | MissingChecksum | NoSpace
+
+pub type Payload: send = Tls | Plaintext | Sha256(Inline[u8, 32])
+
+pub type Request: send {
+    method: String,
+    uri: String,
+    query: String,
+    headers: List[http_client.Header],
+    payload: Payload
+}
+
+fn decimal_digit(n: u64, scale: u64) -> u8 {
+    b'0' + int.truncate(n / scale % 10)
+}
+
+fn utc_date(day: u64) -> Result[Inline[u8, 8], Error] {
+    let Some(date) = time.from_days(int.narrow(day)) else {
+        return Error(InvalidDate)
+    }
+    let y: u64 = int.widen(time.year(date))
+    let m: u64 = int.widen(time.month(date))
+    let d: u64 = int.widen(time.day(date))
+    Ok([decimal_digit(y, 1000), decimal_digit(y, 100), decimal_digit(y, 10), decimal_digit(y, 1), decimal_digit(m, 10), decimal_digit(m, 1), decimal_digit(d, 10), decimal_digit(d, 1)])
+}
+
+fn amz_date(date: Inline[u8, 8], ms: u64) -> Inline[u8, 16] {
+    let seconds = ms / 1000
+    let h = seconds / 3600 % 24
+    let m = seconds / 60 % 60
+    let s = seconds % 60
+    let stamp: Inline[u8, 16] =[date[0], date[1], date[2], date[3], date[4], date[5], date[6], date[7], b'T', decimal_digit(h, 10), decimal_digit(h, 1), decimal_digit(m, 10), decimal_digit(m, 1), decimal_digit(s, 10), decimal_digit(s, 1), b'Z']
+    stamp
+}
+
+/// Writes YYYYMMDDTHHMMSSZ into a caller-provided buffer for x-amz-date.
+pub fn write_date(mut out: Bytes, ms: u64) -> Result[(), Error] {
+    let date = amz_date(utc_date(ms / DAY_MS)?, ms)
+    list.clear(mut out)
+    if !bytebuf.append_inline(mut out, date, 0, 16) {
+        return Error(NoSpace)
+    }
+    Ok(())
+}
+
+fn derive(key: Secret, prefix: Bytes, data: Bytes, uses: String) -> Result[Secret, Error] {
+    match secret.derive_hmac_sha256(key, prefix, data, uses) {
+        Ok(k) => Ok(take k),
+        Error(err) => Error(Derive(err)),
+    }
+}
+
+fn valid_scope(part: String) -> bool {
+    if part == "" {
+        return false
+    }
+    for c in string.as_bytes(part) {
+        if !(c >= b'a' && c <= b'z' || int.is_ascii_digit(c) || c == b'-') {
+            return false
+        }
+    }
+    true
+}
+
+fn day_key(root: Secret, aws_region: String, service: String, day: u64) -> Result[Daily, Error] {
+    let date = utc_date(day)?
+    let end = string.as_bytes("/aws4_request")
+    let region_bytes = string.as_bytes(aws_region)
+    let service_bytes = string.as_bytes(service)
+    let mut scope: Bytes = list.with_capacity(10 + list.len(region_bytes) + list.len(service_bytes) + list.len(end))
+    let _ = bytebuf.append_inline(mut scope, date, 0, 8)
+    let empty = string.as_bytes("")
+    let k_date = derive(root, string.as_bytes("AWS4"), scope, "kdf")?
+    let k_region = derive(k_date, empty, region_bytes, "kdf")?
+    let k_service = derive(k_region, empty, service_bytes, "kdf")?
+    let key = derive(k_service, empty, string.as_bytes("aws4_request"), "mac")?
+    list.push(mut scope, b'/')
+    list.append(mut scope, region_bytes)
+    list.push(mut scope, b'/')
+    list.append(mut scope, service_bytes)
+    list.append(mut scope, end)
+    Ok(Daily(day, date, key: take key, scope: arc.new(take scope)))
+}
+
+fn in_grace(ms: u64) -> bool {
+    ms / DAY_MS > 0 && ms % DAY_MS < GRACE_MS
+}
+
+/// Opens a cache for one credential, region and service. During the first 15
+/// UTC minutes of the day it also derives yesterday's key.
+pub fn open(c: Clock, take root: Secret, take aws_region: String, take service: String) -> Result[Signer, Error] {
+    if !valid_scope(aws_region) || !valid_scope(service) {
+        return Error(InvalidScope)
+    }
+    let now = host.wall_ms(c)
+    let day = now / DAY_MS
+    let today = day_key(root, aws_region, service, day)?
+    let yesterday: Option[Daily] = if in_grace(now) {
+        Some(day_key(root, aws_region, service, day - 1)?)
+    } else {
+        None
+    }
+    Ok(Signer(root: take root, aws_region: take aws_region, service: take service, keys: SigningKeys(today: take today, yesterday: take yesterday)))
+}
+
+fn share_day(day: Daily) -> Daily {
+    Daily(day: day.day, date: day.date, key: secret.share(day.key), scope: arc.share(day.scope))
+}
+
+/// Shares the current keys with a signing lane. Replace the lane's snapshot
+/// when wait_for_change returns. The snapshot carries no derivation authority.
+pub fn share_keys(s: Signer) -> SigningKeys {
+    let yesterday = match s.keys.yesterday {
+        Some(day) => Some(share_day(day)),
+        None => None,
+    }
+    SigningKeys(today: share_day(s.keys.today), yesterday: take yesterday)
+}
+
+/// Runs one wall-clock timer. At UTC midnight it derives the new day's key.
+/// At 00:15 it releases yesterday's key. The cache owner calls this in a loop
+/// and publishes keys to the signing lanes after each successful return.
+pub fn wait_for_change(mut s: Signer, c: Clock) -> Result[(), Error] waits {
+    let current_day = s.keys.today.day
+    let deadline = match s.keys.yesterday {
+        Some(_) => current_day * DAY_MS + GRACE_MS,
+        None => (current_day + 1) * DAY_MS,
+    }
+    host.sleep_until_wall(c, deadline)
+    let mut now = host.wall_ms(c)
+    while now < deadline {
+        host.sleep_until_wall(c, deadline)
+        now = host.wall_ms(c)
+    }
+    let day = now / DAY_MS
+    if day == current_day {
+        s.keys.yesterday = None
+        return Ok(())
+    }
+    let today = day_key(s.root, s.aws_region, s.service, day)?
+    let yesterday: Option[Daily] = if !in_grace(now) {
+        None
+    } else if day == current_day + 1 {
+        Some(share_day(s.keys.today))
+    } else {
+        Some(day_key(s.root, s.aws_region, s.service, day - 1)?)
+    }
+    s.keys = SigningKeys(today: take today, yesterday: take yesterday)
+    Ok(())
+}
+
+fn select(keys: SigningKeys, now_ms: u64, timestamp_ms: u64) -> Option[View[Daily]] in keys {
+    let day = timestamp_ms / DAY_MS
+    let today = now_ms / DAY_MS
+    if day != today && !(in_grace(now_ms) && day == today - 1) {
+        return None
+    }
+    if keys.today.day == day {
+        return Some(view keys.today)
+    }
+    match view keys.yesterday {
+        Some(k) if k.day == day => Some(k),
+        _ => None,
+    }
+}
+
+fn mac(key: Secret, data: Bytes) -> Result[Inline[u8, 32], Error] {
+    match secret.hmac_sha256(key, data) {
+        Ok(tag) => Ok(tag),
+        Error(err) => Error(Mac(err)),
+    }
+}
+
+/// Signs a prepared SigV4 string with the key for timestamp_ms.
+/// now_ms is the unadjusted UTC clock reading. Alloc: none.
+pub fn sign(keys: SigningKeys, now_ms: u64, timestamp_ms: u64, string_to_sign: Bytes) -> Result[Inline[u8, 32], Error] {
+    let Some(day) = select(keys, now_ms, timestamp_ms) else {
+        return Error(KeyUnavailable)
+    }
+    mac(day.key, string_to_sign)
+}
+
+fn append(mut out: Bytes, data: Bytes) -> Result[(), Error] {
+    if list.len(data) > list.capacity(out) - list.len(out) {
+        return Error(NoSpace)
+    }
+    list.append(mut out, data)
+    Ok(())
+}
+
+fn text(mut out: Bytes, data: String) -> Result[(), Error] {
+    append(mut out, string.as_bytes(data))
+}
+
+fn hex(mut out: Bytes, digest: Inline[u8, 32]) -> Result[(), Error] {
+    let alphabet = string.as_bytes("0123456789abcdef")
+    let mut digits: Inline[u8, 64] =[0; 64]
+    for i in 0u64 .. 32u64 {
+        digits[i * 2] = alphabet[int.widen(digest[i] >> 4)]
+        digits[i * 2 + 1] = alphabet[int.widen(digest[i] & 15)]
+    }
+    if !bytebuf.append_inline(mut out, digits, 0, 64) {
+        return Error(NoSpace)
+    }
+    Ok(())
+}
+
+fn signed_headers(mut out: Bytes, headers: List[http_client.Header]) -> Result[(), Error] {
+    for i in 0u64 .. list.len(headers) {
+        if i > 0 {
+            text(mut out, ";")?
+        }
+        text(mut out, headers[i].name)?
+    }
+    Ok(())
+}
+
+fn canonical(mut out: Bytes, r: Request, date: Inline[u8, 16]) -> Result[(), Error] {
+    if r.method == "" || !string.starts_with(r.uri, "/") {
+        return Error(InvalidRequest)
+    }
+    for c in string.as_bytes(r.method) {
+        if !http1.token(c) {
+            return Error(InvalidRequest)
+        }
+    }
+    for c in string.as_bytes(r.uri) {
+        if c <= 32 || c == b'?' || c == b'#' || c == 127 {
+            return Error(InvalidRequest)
+        }
+    }
+    for c in string.as_bytes(r.query) {
+        if c <= 32 || c == b'#' || c == 127 {
+            return Error(InvalidRequest)
+        }
+    }
+    text(mut out, r.method)?
+    text(mut out, "\n")?
+    text(mut out, r.uri)?
+    text(mut out, "\n")?
+    text(mut out, r.query)?
+    text(mut out, "\n")?
+    let mut has_host = false
+    let mut has_date = false
+    let mut has_checksum = false
+    for i in 0u64 .. list.len(r.headers) {
+        let h = r.headers[i]
+        let name = string.as_bytes(h.name)
+        let Public(value) = h.value else {
+            return Error(InvalidRequest)
+        }
+        if !http1.valid_field(name, value) || (i != 0 && list.compare_bytes(string.as_bytes(r.headers[i - 1].name), name) != Less) {
+            return Error(InvalidRequest)
+        }
+        for c in name {
+            if int.to_ascii_lower(c) != c {
+                return Error(InvalidRequest)
+            }
+        }
+        if h.name == "host" {
+            has_host = http.valid_authority(value)
+        } else if h.name == "x-amz-date" {
+            if list.len(value) != 16 {
+                return Error(InvalidRequest)
+            }
+            for j in 0u64 .. 16u64 {
+                if value[j] != date[j] {
+                    return Error(InvalidRequest)
+                }
+            }
+            has_date = true
+        } else if h.name == "x-amz-checksum-crc32c" || h.name == "x-amz-checksum-crc64nvme" {
+            has_checksum = has_checksum || list.len(value) != 0
+        }
+        append(mut out, name)?
+        text(mut out, ":")?
+        // Trim leading/trailing whitespace and collapse interior spaces and tabs.
+        let mut start = 0u64
+        let mut count = 0u64
+        let mut wrote = false
+        for j in 0u64 .. list.len(value) {
+            if value[j] == 9 || value[j] == 32 {
+                if count != 0 {
+                    if wrote {
+                        text(mut out, " ")?
+                    }
+                    append(mut out, list.slice(value, start, start + count))?
+                    wrote = true
+                    count = 0
+                }
+            } else {
+                if count == 0 {
+                    start = j
+                }
+                count += 1
+            }
+        }
+        if count != 0 {
+            if wrote {
+                text(mut out, " ")?
+            }
+            append(mut out, list.slice(value, start, start + count))?
+        }
+        text(mut out, "\n")?
+    }
+    if !has_host || !has_date {
+        return Error(InvalidRequest)
+    }
+    if let Plaintext = r.payload {
+        if !has_checksum {
+            return Error(MissingChecksum)
+        }
+    }
+    text(mut out, "\n")?
+    signed_headers(mut out, r.headers)?
+    text(mut out, "\n")?
+    match r.payload {
+        Sha256(digest) => hex(mut out, digest),
+        _ => text(mut out, "UNSIGNED-PAYLOAD"),
+    }
+}
+
+/// Writes the Authorization field value. The caller supplies the canonical
+/// URI and sorted encoded query, plus lowercase headers sorted by name.
+/// Include host, x-amz-date, any x-amz-security-token as Public, and the
+/// checksum header for a Plaintext payload. Combine repeated fields first.
+/// Uses only the capacity already present in scratch and out.
+pub fn authorize(keys: SigningKeys, now_ms: u64, timestamp_ms: u64, access_key: String, r: Request, mut scratch: Bytes, mut out: Bytes) -> Result[(), Error] {
+    let Some(day) = select(keys, now_ms, timestamp_ms) else {
+        return Error(KeyUnavailable)
+    }
+    if access_key == "" {
+        return Error(InvalidRequest)
+    }
+    for c in string.as_bytes(access_key) {
+        if !int.is_ascii_alpha(c) && !int.is_ascii_digit(c) {
+            return Error(InvalidRequest)
+        }
+    }
+    let date = amz_date(day.date, timestamp_ms)
+    list.clear(mut scratch)
+    canonical(mut scratch, r, date)?
+    let digest = sha256.hash(scratch)
+    list.clear(mut scratch)
+    text(mut scratch, "AWS4-HMAC-SHA256\n")?
+    if !bytebuf.append_inline(mut scratch, date, 0, 16) {
+        return Error(NoSpace)
+    }
+    text(mut scratch, "\n")?
+    append(mut scratch, day.scope)?
+    text(mut scratch, "\n")?
+    hex(mut scratch, digest)?
+    let signature = mac(day.key, scratch)?
+    list.clear(mut out)
+    text(mut out, "AWS4-HMAC-SHA256 Credential=")?
+    text(mut out, access_key)?
+    text(mut out, "/")?
+    append(mut out, day.scope)?
+    text(mut out, ", SignedHeaders=")?
+    signed_headers(mut out, r.headers)?
+    text(mut out, ", Signature=")?
+    hex(mut out, signature)
+}

@@ -1,0 +1,112 @@
+// AWS SigV4 suite via botocore 4c688659d4a2ccc0edcdc3357107a534a52e478d,
+// tests/unit/auth/aws4_testsuite/. Compare the published .authz bytes.
+const SIGNED_AT: u64 = 1440938160000
+
+const MIDNIGHT: u64 = 1440979200000
+
+const GRACE_END: u64 = MIDNIGHT + 900000
+
+const TOKEN: String = "6e86291e8372ff2a2260956d9b8aae1d763fbf315fa00fa31553b73ebf194267"
+
+fn field(name: String, value: String) -> http_client.Header {
+    http_client.Header(name: clone(name), value: Public(string.into_bytes(clone(value))))
+}
+
+fn request(token: bool, plaintext: bool, checksum: bool) -> sigv4.Request {
+    let mut headers: List[http_client.Header] = list.with_capacity(4)
+    list.push(mut headers, field("host", "example.amazonaws.com"))
+    if checksum {
+        list.push(mut headers, field("x-amz-checksum-crc32c", "AAAAAA=="))
+    }
+    let mut date: Bytes = list.with_capacity(16)
+    result.unwrap(sigv4.write_date(mut date, SIGNED_AT))
+    list.push(mut headers, http_client.Header(name: "x-amz-date", value: Public(take date)))
+    if token {
+        list.push(mut headers, field("x-amz-security-token", TOKEN))
+    }
+    let payload: sigv4.Payload = if plaintext {
+        Plaintext
+    } else {
+        Sha256([0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14, 0x9a, 0xfb, 0xf4, 0xc8, 0x99, 0x6f, 0xb9, 0x24, 0x27, 0xae, 0x41, 0xe4, 0x64, 0x9b, 0x93, 0x4c, 0xa4, 0x95, 0x99, 0x1b, 0x78, 0x52, 0xb8, 0x55])
+    }
+    sigv4.Request(method: if plaintext {
+        "PUT"
+    } else {
+        "GET"
+    }, uri: "/", query: "", headers: take headers, payload: take payload)
+}
+
+type Rotation: send {
+    c: Clock,
+    signer: sigv4.Signer,
+    to: Sender[sigv4.SigningKeys]
+}
+
+fn rotate(take job: Rotation) waits {
+    let Rotation(c, signer: take s, to: take to) = take job
+    let mut signer = take s
+    for _ in 0u64 .. 2u64 {
+        result.unwrap(sigv4.wait_for_change(mut signer, c))
+        result.unwrap(channel.send(to, sigv4.share_keys(signer)))
+    }
+}
+
+fn correct(keys: sigv4.SigningKeys, now: u64, r: sigv4.Request, expected: String, mut scratch: Bytes, mut out: Bytes) -> bool {
+    result.unwrap(sigv4.authorize(keys, now, SIGNED_AT, "AKIDEXAMPLE", r, mut scratch, mut out))
+    out == string.as_bytes(expected)
+}
+
+// expect: run aws_signatures_and_key_rotation(tasks) = true
+fn aws_signatures_and_key_rotation(tasks: Tasks) -> bool waits {
+    let (c, h) = provide.clock(0, SIGNED_AT)
+    let mut hand = take h
+    let root = result.unwrap(secret.seal(string.into_bytes("wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY"), "kdf"))
+    let signer = result.unwrap(sigv4.open(c, take root, "us-east-1", "service"))
+    let keys = sigv4.share_keys(signer)
+    let mut scratch: Bytes = list.with_capacity(512)
+    let mut out: Bytes = list.with_capacity(256)
+    let vanilla = request(false, false, false)
+    let session = request(true, false, false)
+    let expected_vanilla = "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/service/aws4_request, SignedHeaders=host;x-amz-date, Signature=5fa00fa31553b73ebf1942676e86291e8372ff2a2260956d9b8aae1d763fbf31"
+    let expected_session = "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/service/aws4_request, SignedHeaders=host;x-amz-date;x-amz-security-token, Signature=07ec1639c89043aa0e3e2de82b96708f198cceab042d4a97044c66dd9f74e7f8"
+    let expected_plaintext = "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/service/aws4_request, SignedHeaders=host;x-amz-checksum-crc32c;x-amz-date;x-amz-security-token, Signature=cb4d1aaa9a6dcf212f62952c7a97c8e1525fb64d22e688c8fc71727b37fcd5f2"
+    if !correct(keys, SIGNED_AT, vanilla, expected_vanilla, mut scratch, mut out) || !correct(keys, SIGNED_AT, session, expected_session, mut scratch, mut out) {
+        return false
+    }
+    // Independent Python hashlib.sha256 and hmac.digest over the AWS key
+    // and a plaintext canonical request containing the checksum and token.
+    if !correct(keys, SIGNED_AT, request(true, true, true), expected_plaintext, mut scratch, mut out) {
+        return false
+    }
+    match sigv4.authorize(keys, SIGNED_AT, SIGNED_AT, "AKIDEXAMPLE", request(true, true, false), mut scratch, mut out) {
+        Error(MissingChecksum) => {},
+        _ => return false,
+    }
+    let (to, from): (Sender[sigv4.SigningKeys], Receiver[sigv4.SigningKeys]) = channel.new(1)
+    let timer = task.spawn(tasks, bytes 65536, Rotation(c, signer: take signer, to: take to), rotate)
+    clock.set_wall(mut hand, MIDNIGHT - 1)
+    let _ = clock.idle(mut hand)
+    match channel.try_receive(from) {
+        Error(Empty) => {},
+        _ => return false,
+    }
+    clock.set_wall(mut hand, MIDNIGHT)
+    let next = result.unwrap(channel.receive(from))
+    if !correct(next, MIDNIGHT, session, expected_session, mut scratch, mut out) {
+        return false
+    }
+    let data = string.as_bytes("test next daily key")
+    let _ = result.unwrap(sigv4.sign(next, MIDNIGHT, MIDNIGHT, data))
+    clock.set_wall(mut hand, GRACE_END)
+    let expired = result.unwrap(channel.receive(from))
+    result.unwrap(task.join(take timer))
+    let stale_refused = match sigv4.sign(next, GRACE_END, SIGNED_AT, data) {
+        Error(KeyUnavailable) => true,
+        _ => false,
+    }
+    let old_refused = match sigv4.sign(expired, GRACE_END, SIGNED_AT, data) {
+        Error(KeyUnavailable) => true,
+        _ => false,
+    }
+    stale_refused && old_refused
+}

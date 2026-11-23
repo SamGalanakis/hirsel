@@ -327,24 +327,8 @@ is core's plain record `{ steps: u64 }`.
   stop drops it, cleaning it as every failure does, so the place holds the copy. The copy's
   steps are taken before entry and count against the enclosing bound, not against `n`.
   The store's `rollback_writes_on_overrun(mut tx, n, body)` does this for a transaction:
-  an overrun rolls back the transaction's owned state and the writes `body` staged, and
-  the transaction goes on. Its reads and log appends stay (MEM-29, FAIL-16's list). It
-  copies no staged row: what the transaction staged becomes a shared, frozen layer, and
-  `body` writes an empty overlay above it, so its cost does not grow with the rows staged
-  before it. Its accounting starts at its call, after the arguments are evaluated: the
-  call, freezing the staged writes and setting up the overlay take 40 steps, then `n` is
-  reserved. A caller with at least 40 and fewer than `n + 40` steps left gets
-  `Error(OutOfTime(steps: n))` without running `body` (an admission refusal) and keeps
-  what it had less the 40. A caller with exactly `n + 40` runs `body`, and when `body`
-  exhausts `n`, the caller's bound is exhausted too: no step is refunded, so a following
-  `bound steps 1` is refused. A body that calls it from inside a bound counts one more
-  step for its own entry, so there the threshold is `n + 41`. A return, but not an
-  overrun, then takes steps after `body` to merge the overlay into the transaction, in
-  proportion to the rows `body` staged and the frozen layers it folds. Inside `body`, a
-  read or write of a key its own overlay does not hold looks through each frozen layer
-  below, a step or more per layer. The layers are the enclosing calls' overlays plus one
-  for each consecutive call that overran or was refused before the transaction next
-  merged, so a caller sizing `n` counts them.
+  an overrun rolls back the writes `body` staged, and the transaction goes on. Its costs
+  and bounds are the store's ([STORE-SPEC §1.3](../../core/programs/store/STORE-SPEC.md#13-transactions)).
 - **Waits, bytes and tasks.** Waiting takes no steps: a step bound limits computation, not
   time, and a body that waits forever is ended by a deadline or a cancellation
   ([CONC-7](tasks.md#conc-7-cancellation-points)), not by its bound. Step bounds and limits

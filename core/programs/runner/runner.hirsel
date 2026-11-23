@@ -338,56 +338,52 @@ pub fn operate[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, 
     let mut drain_waiter: Option[Task[()]] = None
     let mut ready: Option[(Listener, Sender[PubIn])] = None
     let mut unused_listener_inputs = Some((take proxies, take supplied_wire, take inbox_serve))
-    let mut stopped = false
-    let mut stop_after_cut = false
-    let mut online = false
-    let mut retiring = false
-    let mut store_id = (0u64, 0u64)
-    let mut retain_from = 0u64
-    let mut expired = false
-    let mut settled = false
+    let mut phase: PlacePhase = OpeningPlace
+    let mut finishing: PlaceFinish = WaitingToFinish
     let mut serve_done: Option[u64] = None
-    let mut head_done = false
     let mut next_due: Option[u64] = None
-    let mut finishing = false
     let mut start_failure: Option[StartError] = None
-    let mut idle_alarm: Option[Task[()]] = None
+    let mut idle_state: IdleState = IdleWaiting
     let mut head_idle = false
     let mut serve_idle = false
-    let mut idle_deadline: Option[u64] = None
-    let mut idle_checking = false
-    let mut hold_serve: Option[Sender[()]] = None
     loop {
-        if online && !stopped && !retiring && head_idle && serve_idle && !idle_checking && none(idle_deadline) {
+        if place_online(phase) && !place_stopping(phase) && !place_retiring(finishing) && head_idle && serve_idle {
             if let Some(ms) = idle {
-                let at = std.clock.deadline_after_ms(host.mono_ns(clock), ms)
-                idle_deadline = Some(at)
-                idle_alarm = Some(std.clock.alarm(tasks, clock, at, to, IdleDeadline(at)))
-            }
-        }
-        if !expired && stopped && !latest.read(cut).started {
-            if let Some(window) = drain_window(latest.read(drain)) {
-                if host.mono_ns(clock) >= window.deadline {
-                    expired = true
-                    let _ = channel.try_send(serve_to, ServeWake)
+                if let IdleWaiting = idle_state {
+                    let at = std.clock.deadline_after_ms(host.mono_ns(clock), ms)
+                    idle_state = IdleArmed(at, std.clock.alarm(tasks, clock, at, to, IdleDeadline(at)))
                 }
             }
         }
-        if expired && !latest.read(cut).started && (match serving { None => true, _ => false }) {
+        if let DrainingPlace(was_online) = phase {
+            if !latest.read(cut).started {
+                if let Some(window) = drain_window(latest.read(drain)) {
+                    if host.mono_ns(clock) >= window.deadline {
+                        phase = ExpiredPlace(was_online)
+                        let _ = channel.try_send(serve_to, ServeWake)
+                    }
+                }
+            }
+        }
+        if place_expired(phase) && !latest.read(cut).started && (match serving { None => true, _ => false }) {
             if let Some(take handle) = replace(mut heading, None) {
                 let mut active_head = take handle
                 task.cancel(mut active_head)
                 let _ = task.join(take active_head)
             }
             return Ok(Forced(match serve_done { Some(count) => count, None => 0u64 }))
-        } else if !expired && head_done && none(serving) && (!retiring || serve_done != None) {
-            if let Some(take problem) = replace(mut start_failure, None) { return Error(take problem) }
-            return Ok(if online { Stopped(next_due) } else { Unstarted })
-        } else if !expired && (settled || retiring) && !finishing {
-            if let Some(_) = serve_done {
-                let _ = channel.try_send(finish_to, ())
-                let _ = channel.try_send(head_to, HeadFinish)
-                finishing = true
+        } else if !place_expired(phase) {
+            if none(heading) && none(serving) && (!place_retiring(finishing) || serve_done != None) {
+                if let Some(take problem) = replace(mut start_failure, None) { return Error(take problem) }
+                return Ok(if place_online(phase) { Stopped(next_due) } else { Unstarted })
+            }
+            if serve_done != None {
+                let can_finish = match finishing { SettledPlace => true, RetiringPlace => true, _ => false }
+                if can_finish {
+                    let _ = channel.try_send(finish_to, ())
+                    let _ = channel.try_send(head_to, HeadFinish)
+                    finishing = if place_retiring(finishing) { FinishingRetired } else { FinishSent }
+                }
             }
         }
         let next = match channel.try_receive(inbox) { Ok(take event) => Some(take event), _ => None }
@@ -408,17 +404,17 @@ pub fn operate[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, 
             },
         }
         let (life_input, hold_head) = match take event {
-            HeadIdleChecked(Some(take held)) if !stopped && !retiring && head_idle && serve_idle && !none(idle_deadline) =>
+            HeadIdleChecked(Some(take held)) if !place_stopping(phase) && !place_retiring(finishing) && head_idle && serve_idle && idle_pending(idle_state) =>
                 (StopRequested, Some(take held)),
             take other => (take other, None),
         }
         let accepted_input = match take life_input {
-            ServePrepared if !stopped => {
+            ServePrepared if !place_stopping(phase) => {
                 let _ = channel.try_send(head_to, HeadContinue)
                 if let Some(control) = hosting {
                     let ready_ns = host.mono_ns(clock)
                     let release: Bytes = clone(current.release)
-                    if let Error(_) = channel.send(control.answer, PlaceOpened(PlaceReady(version: current.activation, store_hi: store_id.0, store_lo: store_id.1, release: take release, retain_from: retain_from, ready_ns: ready_ns))) {
+                    if let Error(_) = channel.send(control.answer, PlaceOpened(PlaceReady(version: current.activation, store_hi: current.store_id.0, store_lo: current.store_id.1, release: take release, retain_from: current.retain_from, ready_ns: ready_ns))) {
                         return Error(Missing("host control"))
                     }
                     continue
@@ -429,18 +425,19 @@ pub fn operate[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, 
         }
         match take accepted_input {
             StopRequested => {
-                if stopped { continue }
+                if place_stopping(phase) { continue }
+                let was_online = place_online(phase)
                 if latest.read(cut).started {
-                    stop_after_cut = true
+                    phase = DeferredStop(was_online)
                     continue
                 }
                 let started = host.mono_ns(clock)
-                stopped = true
+                phase = DrainingPlace(was_online)
                 let idle_stop = !none(hold_head)
                 let bounds = if idle_stop { Stop(lag_ms: 0u64, grace_ms: stop_config.grace_ms) } else { stop_config }
                 drain_waiter = Some(start_drain(bounds, started, clock, tasks, to, drain)?)
                 publish_phase(status, watch, mut current, Draining)?
-                let _ = replace(mut idle_alarm, None)
+                idle_state = IdleWaiting
                 if idle_stop {
                     let _ = channel.try_send(head_to, HeadClose)
                 } else {
@@ -448,10 +445,9 @@ pub fn operate[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, 
                     if let Some(_) = replace(mut ready, None) { let _ = channel.try_send(head_to, HeadClose) }
                 }
                 let _ = take hold_head
-                let _ = replace(mut hold_serve, None)
-                if !online { let _ = channel.try_send(serve_to, ServeWake) }
+                if !was_online { let _ = channel.try_send(serve_to, ServeWake) }
             },
-            Recovered => if stopped { let _ = channel.try_send(head_to, HeadClose) } else {
+            Recovered => if place_stopping(phase) { let _ = channel.try_send(head_to, HeadClose) } else {
                 publish_phase(status, watch, mut current, Starting(Activating))?
                 let _ = channel.try_send(head_to, HeadContinue)
             },
@@ -460,9 +456,7 @@ pub fn operate[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, 
                 current.activation = version
                 current.store_id = identity
                 current.retain_from = retained
-                store_id = identity
-                retain_from = retained
-                if stopped {
+                if place_stopping(phase) {
                     publish_phase(status, None, mut current, Draining)?
                     let _ = channel.try_send(head_to, HeadClose)
                 } else {
@@ -470,7 +464,7 @@ pub fn operate[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, 
                     let _ = channel.try_send(head_to, HeadContinue)
                 }
             },
-            Published(take pub_to) => if stopped { let _ = channel.try_send(head_to, HeadClose) } else {
+            Published(take pub_to) => if place_stopping(phase) { let _ = channel.try_send(head_to, HeadClose) } else {
                 match host.listen(net, listen, 128u16) {
                     Ok((take listener, address)) => {
                         current.addr = Some(address)
@@ -484,9 +478,9 @@ pub fn operate[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, 
                 let _ = channel.try_send(serve_to, ServeWake)
                 let _ = channel.try_send(head_to, HeadClose)
             },
-            StoreAccepted => if !online && !stopped {
+            StoreAccepted => if !place_online(phase) && !place_stopping(phase) {
                 publish_phase(status, watch, mut current, Ready)?
-                online = true
+                phase = match phase { DeferredStop(_) => DeferredStop(true), _ => OnlinePlace }
                 let _ = channel.try_send(serve_to, ServeStart)
             },
             AdmissionClose => {
@@ -494,61 +488,64 @@ pub fn operate[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, 
             },
             DrainExpired => {
                 if !latest.read(cut).started {
-                    expired = true
+                    phase = ExpiredPlace(place_online(phase))
                     let _ = channel.try_send(serve_to, ServeWake)
                 }
             },
-            IdleDeadline(at) => if !stopped && !retiring && idle_deadline == Some(at) && !idle_checking {
-                let _ = replace(mut idle_alarm, None)
-                idle_checking = match channel.try_send(serve_to, CheckServeIdle) { Ok(()) => true, Error(_) => false }
-                if !idle_checking { idle_deadline = None }
+            IdleDeadline(at) => if !place_stopping(phase) && !place_retiring(finishing) {
+                if let IdleArmed(due, _) = idle_state {
+                    if at == due {
+                        idle_state = match channel.try_send(serve_to, CheckServeIdle) {
+                            Ok(()) => CheckingServe(Some(due)),
+                            Error(_) => IdleWaiting,
+                        }
+                    }
+                }
             },
             HeadIdle(value) => {
                 head_idle = value
-                if !value { idle_deadline = None; let _ = replace(mut idle_alarm, None) }
+                if !value { invalidate_idle(mut idle_state) }
             },
             ServeIdle(value) => {
                 serve_idle = value
-                if !value { idle_deadline = None; let _ = replace(mut idle_alarm, None) }
+                if !value { invalidate_idle(mut idle_state) }
             },
             ServeIdleChecked(take held) => {
-                if !stopped && !retiring && !none(held) && head_idle && !none(idle_deadline) {
-                    if let Ok(()) = channel.try_send(head_to, CheckHeadIdle) {
-                        hold_serve = take held
-                        continue
+                if !place_stopping(phase) && !place_retiring(finishing) && head_idle {
+                    if let CheckingServe(Some(due)) = idle_state {
+                        if let Some(take permit) = take held {
+                            if let Ok(()) = channel.try_send(head_to, CheckHeadIdle) {
+                                idle_state = CheckingHead(Some(due), take permit)
+                                continue
+                            }
+                        }
                     }
                 }
-                idle_checking = false
-                idle_deadline = None
+                idle_state = IdleWaiting
             },
-            HeadIdleChecked(_) => {
-                let _ = replace(mut hold_serve, None)
-                idle_checking = false
-                idle_deadline = None
-            },
-            Settled => { settled = true },
-            WritesPaused => if !stopped { publish_phase(status, watch, mut current, Paused)? },
-            WritesResumed => {
-                if stop_after_cut {
-                    stop_after_cut = false
+            HeadIdleChecked(_) => { idle_state = IdleWaiting },
+            Settled => if let WaitingToFinish = finishing { finishing = SettledPlace },
+            WritesPaused => if !place_stopping(phase) { publish_phase(status, watch, mut current, Paused)? },
+            WritesResumed => match phase {
+                DeferredStop(was_online) => {
+                    phase = if was_online { OnlinePlace } else { OpeningPlace }
                     let _ = channel.try_send(to, StopRequested)
-                } else if !stopped {
-                    publish_phase(status, watch, mut current, Ready)?
-                }
+                },
+                DrainingPlace(_) => (),
+                ExpiredPlace(_) => (),
+                _ => publish_phase(status, watch, mut current, Ready)?,
             },
             RetirePlace => {
-                retiring = true
-                let _ = replace(mut idle_alarm, None)
-                let _ = replace(mut hold_serve, None)
+                finishing = match finishing { FinishSent => FinishingRetired, FinishingRetired => FinishingRetired, _ => RetiringPlace }
+                idle_state = IdleWaiting
                 if let Error(_) = channel.send(serve_to, ServeRetire) { serve_done = Some(0u64) }
             },
             HeadEnded(take ending) => {
                 if let Some(take handle) = replace(mut heading, None) { let _ = task.join(take handle) }
-                head_done = true
                 match take ending {
                     Ok(due) => { next_due = due },
                     Error(take problem) => {
-                        if online {
+                        if place_online(phase) {
                             // A failed head cannot settle calls or participate in a drain.
                             if let Some(take handle) = replace(mut serving, None) { let _ = task.cancel_join(take handle) }
                             return Error(take problem)
@@ -580,7 +577,7 @@ pub fn operate[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, 
                             let _ = channel.send(host.answer, take response)
                             if let Ok(()) = channel.receive(host.sent) {}
                         }
-                        if !stopped {
+                        if !place_stopping(phase) {
                             if let None = start_failure { start_failure = Some(take problem) }
                         }
                     },
@@ -590,7 +587,7 @@ pub fn operate[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, 
                 if let Some(take handle) = replace(mut serving, None) { let _ = task.join(take handle) }
                 match take ending {
                     Ok(count) => { serve_done = Some(count) },
-                    Error(take problem) => if online { return Error(take problem) } else {
+                    Error(take problem) => if place_online(phase) { return Error(take problem) } else {
                         start_failure = Some(take problem)
                         let _ = channel.try_send(head_to, HeadClose)
                     },

@@ -76,3 +76,43 @@ pub fn send_frame(mut output: WriteHalf, body: Bytes, maximum: u64, until: Until
     }
     true
 }
+
+type PlacePhase = OpeningPlace | OnlinePlace | DeferredStop(bool) | DrainingPlace(bool) | ExpiredPlace(bool)
+type PlaceFinish = WaitingToFinish | SettledPlace | RetiringPlace | FinishSent | FinishingRetired
+
+fn place_online(phase: PlacePhase) -> bool {
+    match phase {
+        OpeningPlace => false,
+        OnlinePlace => true,
+        DeferredStop(online) => online,
+        DrainingPlace(online) => online,
+        ExpiredPlace(online) => online,
+    }
+}
+
+fn place_stopping(phase: PlacePhase) -> bool {
+    match phase { DrainingPlace(_) => true, ExpiredPlace(_) => true, _ => false }
+}
+
+fn place_expired(phase: PlacePhase) -> bool {
+    match phase { ExpiredPlace(_) => true, _ => false }
+}
+
+fn place_retiring(finishing: PlaceFinish) -> bool {
+    match finishing { RetiringPlace => true, FinishingRetired => true, _ => false }
+}
+
+type IdleState = IdleWaiting | IdleArmed(u64, Task[()]) | CheckingServe(Option[u64]) | CheckingHead(Option[u64], Sender[()])
+
+fn idle_pending(state: IdleState) -> bool {
+    match state { IdleArmed(_, _) => true, CheckingServe(Some(_)) => true, CheckingHead(Some(_), _) => true, _ => false }
+}
+
+fn invalidate_idle(mut state: IdleState) {
+    let prior = replace(mut state, IdleWaiting)
+    state = match take prior {
+        CheckingServe(_) => CheckingServe(None),
+        CheckingHead(_, take permit) => CheckingHead(None, take permit),
+        _ => IdleWaiting,
+    }
+}

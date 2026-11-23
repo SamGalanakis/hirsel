@@ -531,12 +531,9 @@ impl Submissions {
 }
 impl Uring {
     const ENTRIES: u32 = 64;
-    /// The kernel clamps this to its own maximum (65536 on Linux 6.8). Tests
-    /// use a small queue so a few thousand sockets overflow it.
-    #[cfg(not(test))]
-    const COMPLETIONS: u32 = 65536;
-    #[cfg(test)]
-    const COMPLETIONS: u32 = 1024;
+    /// NODROP retains completions past this capacity. The submitter enters
+    /// with GETEVENTS to flush them once reaping has made room.
+    const COMPLETIONS: u32 = 4096;
     const READ: u32 = (libc::EPOLLIN | libc::EPOLLRDHUP) as u32;
     const WRITE: u32 = libc::EPOLLOUT as u32;
 

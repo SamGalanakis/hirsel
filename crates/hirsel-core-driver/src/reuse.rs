@@ -567,6 +567,7 @@ impl Keys {
         let mut keys = Self::with_modules(index, Headers::default(), shape.modules);
         let mut anchors = image_anchors.cloned().unwrap_or_default();
         let mut hooks = vec![];
+        let mut makers = vec![];
         let mut reads = Vec::new();
         let mut body_reads = Vec::new();
         for ((m, rows), digests) in modules.iter().zip(resolutions).zip(shape.headers) {
@@ -625,6 +626,15 @@ impl Keys {
                 if index.get(definition).kind == DefinitionKind::Clone {
                     hooks.push((definition, reads.clone()));
                 }
+                if let Some(owner) = path.0.name.strip_suffix("$codec")
+                    && let Some(ty) = index
+                        .symbols
+                        .find(owner)
+                        .and_then(|owner| index.definition(m.id, owner))
+                    && index.get(ty).kind == DefinitionKind::Type
+                {
+                    makers.push((definition, ty));
+                }
                 anchors.insert((m.source, ordinal as u32), path.clone());
                 headers.names.insert(path, definition);
                 headers.rows[definition.0 as usize] = Some(Header {
@@ -653,6 +663,17 @@ impl Keys {
                 {
                     row.reads.insert(at, hook);
                 }
+            }
+        }
+        // A codec type's row reads its derived maker `D$codec` (SEM-10), which the
+        // checker binds by name beside the type, not through a resolved name. So
+        // the type's closure covers the maker's presence and header: a file whose
+        // syntax refusal skips the derive gives its codec types other closures.
+        for (maker, ty) in makers {
+            if let Some(row) = headers.rows[ty.0 as usize].as_mut()
+                && let Err(at) = row.reads.binary_search(&maker)
+            {
+                row.reads.insert(at, maker);
             }
         }
         // An image that holds core sealed the prelude's hash; a request can

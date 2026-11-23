@@ -733,6 +733,19 @@ pub fn value(p:P)->u64{p.value}"###)), src("hook_a", "core_hook_a.hirsel", false
             core(vec![]),
             std_pkg(),
             pkg("app", &["core", "std"], vec![src("a", "a.hirsel", false, lit(r###"pub type A:codec {x:b.B}"###)), src("b", "b.hirsel", false, lit(r###"pub type B {x:u8}"###))])])]),
+        // A syntax refusal elsewhere in a's file skips its codec derive, so P has no
+        // maker; the fix restores it, and b's reader must see it (stale-codec-1910).
+        seq("codec_maker_parse_refusal", vec![
+        check(vec![
+            core(vec![]),
+            std_pkg(),
+            pkg("app", &["core", "std"], vec![src("a", "a.hirsel", false, lit(r###"pub type P:codec{x:u64}
+fn broken(){let =}"###)), src("b", "b.hirsel", false, lit(r###"fn use(){let _c:std.codec.Codec[a.P]=std.codec.of()}"###))])]),
+        check(vec![
+            core(vec![]),
+            std_pkg(),
+            pkg("app", &["core", "std"], vec![src("a", "a.hirsel", false, lit(r###"pub type P:codec{x:u64}
+fn broken(){}"###)), src("b", "b.hirsel", false, lit(r###"fn use(){let _c:std.codec.Codec[a.P]=std.codec.of()}"###))])])]),
         seq("comptime_absent", vec![
         check(vec![
             core(vec![]),
@@ -1872,6 +1885,7 @@ const GATES: &[(&str, Gate)] = &[
     ("codec_context_added", Gate::Fallback),
     ("codec_default", Gate::Fallback),
     ("codec_field_changed", Gate::Fallback),
+    ("codec_maker_parse_refusal", Gate::Fallback),
     ("codec_owner_body", Gate::Fast),
     ("comptime_absent", Gate::Fallback),
     ("constant_call_absent", Gate::Fallback), // 1039: fast; a module of A is refused (v3.1 condition 4)

@@ -46,7 +46,7 @@ pub type Fault: send {
 
 pub type StoreCapacity: send = Journal(Capacity) | Resident(Capacity) | Allocation(Capacity)
 
-pub type Error: send = Held | NotFound | Corrupt(Fault) | Unsupported(u64) | Io(IoError) | Poisoned(IoError) | Full(StoreCapacity) | Limit(Limit) | Schema(u64) | Stale(u32) | Decode(std.codec.DecodeError) | Exists(String) | Missing(String) | Changed(String) | Undeclared(String) | NoLevel(String) | Behind(Position) | Gone(u32) | Unseen(u32) | Diverged(u32) | Foreign | MigrationFault | ExportDirectory | Fenced(u64) | Lost | Undecided | Declared(String) | NotCurrent(u64) | Unqualified(String) | HistoryMissing(String, Option[u64]) | Reclaimed(u64) | Remote(std.object.Error)
+pub type Error: send = Held | NotFound | Corrupt(Fault) | Unsupported(u64) | Io(IoError) | Poisoned(IoError) | Full(StoreCapacity) | Limit(Limit) | Schema(u64) | Stale(u32) | Decode(std.codec.DecodeError) | Exists(String) | Missing(String) | Changed(String) | Undeclared(String) | NoLevel(String) | Behind(Position) | Gone(u32) | Unseen(u32) | Diverged(u32) | Foreign | MigrationFault | ExportDirectory | Fenced(u64) | Lost | Undecided | Declared(String) | NotCurrent(u64) | Unqualified(String) | HistoryMissing(String, Option[u64]) | Reclaimed(u64) | Remote(std.object.Error) | Tiered(TieredRefusal)
 
 type Roots = PageRoots
 
@@ -3784,7 +3784,8 @@ pub opaque type Schema {
 }
 
 pub opaque type Migration {
-    plan: SchemaPlan
+    plan: SchemaPlan,
+    tiered: bool
 }
 
 pub opaque type StagedMigration {
@@ -3837,17 +3838,18 @@ pub fn tx_schema(tx: Tx) -> Schema {
 
 type MigrationJob: send {
     plan: SchemaPlan,
+    tiered: bool,
     configure: StaticFn[fn(mut Migration) -> Result[(), Error] waits],
     answer: Sender[Result[SchemaPlan, Error]]
 }
 
 fn prepare_migration(take job: MigrationJob) -> () waits {
-    let MigrationJob(plan: take plan, configure: configure, answer: take answer) = take job
-    let mut working = Migration(plan: take plan)
+    let MigrationJob(plan: take plan, tiered: tiered, configure: configure, answer: take answer) = take job
+    let mut working = Migration(plan: take plan, tiered: tiered)
     let result = (code.callable(configure))(mut working)
     let completed: Result[SchemaPlan, Error] = match take result {
         Ok(()) => {
-            let Migration(plan: take committed) = take working
+            let Migration(plan: take committed, ..) = take working
             Ok(take committed)
         },
         Error(take problem) => Error(take problem)
@@ -3858,7 +3860,7 @@ fn prepare_migration(take job: MigrationJob) -> () waits {
 pub fn stage_migration(db: Db, tasks: Tasks, configure: StaticFn[fn(mut Migration) -> Result[(), Error] waits]) -> Result[StagedMigration, Error] waits {
     healthy(db)?
     let (answer, from): (Sender[Result[SchemaPlan, Error]], Receiver[Result[SchemaPlan, Error]]) = channel.new(1)
-    let job = MigrationJob(plan: schema_plan(db), configure: configure, answer: take answer)
+    let job = MigrationJob(plan: schema_plan(db), tiered: store_has_tiered(db), configure: configure, answer: take answer)
     // The callback can wait, so its fault boundary is a task (FAIL-14).
     // An empty task result costs 288 B (MEM-24). Use the parent's remaining
     // grant for this phase and release the unused portion before the cut.
@@ -3944,6 +3946,7 @@ pub fn stage_activation[V](mut staged: StagedMigration, release_at: u64, previou
 }
 
 pub fn install_activation(mut db: Db, take staged: StagedMigration) -> Result[(), Error] waits {
+    require_memory_collections(store_has_tiered(db), Install)?
     let StagedMigration(plan: take plan) = take staged
     let old_fence = db.fence
     if is_disk(db) {
@@ -4252,6 +4255,7 @@ fn catalog_index[J, K, V](store_id: StoreId, catalog: PageTree, mut t: Table[K, 
 }
 
 pub fn drop_table[K, V](mut db: Db, take t: Table[K, V]) -> Result[Ticket, Error] waits {
+    require_memory_collections(store_has_tiered(db), Migrate)?
     healthy(db)?
     let mut plan = schema_plan(db)
     stage_drop_table(mut plan, take t)?
@@ -4259,6 +4263,7 @@ pub fn drop_table[K, V](mut db: Db, take t: Table[K, V]) -> Result[Ticket, Error
 }
 
 pub fn migration_drop_table[K, V](mut phase: Migration, take t: Table[K, V]) -> Result[(), Error] {
+    require_memory_collections(phase.tiered, Migrate)?
     stage_drop_table(mut phase.plan, take t)
 }
 
@@ -4512,6 +4517,7 @@ fn catalog_insert(mut ids: u64, roots: Roots, k: Bytes, v: Bytes) -> Result[Root
 // no number is ever reused (L17); all older numbers retire. A rename is a
 // migrate whose `f` keeps every row.
 pub fn migrate[K, V, K2, V2](mut db: Db, take from: Table[K, V], take to: TableSpec[K2, V2], f: fn(K, V) -> Result[Option[(K2, V2)], Capacity]) -> Result[Ticket, Error] waits {
+    require_memory_collections(store_has_tiered(db), Migrate)?
     healthy(db)?
     let mut plan = schema_plan(db)
     stage_migrate(mut plan, take from, take to, f)?
@@ -4519,6 +4525,7 @@ pub fn migrate[K, V, K2, V2](mut db: Db, take from: Table[K, V], take to: TableS
 }
 
 pub fn migration_migrate[K, V, K2, V2](mut phase: Migration, take from: Table[K, V], take to: TableSpec[K2, V2], f: fn(K, V) -> Result[Option[(K2, V2)], Capacity]) -> Result[(), Error] {
+    require_memory_collections(phase.tiered, Migrate)?
     application_name(to.name)?
     for ix in to.indexes {
         application_name(ix.name)?
@@ -5354,6 +5361,7 @@ pub fn begin_export(mut db: Db, tasks: Tasks, scratch: Dir, take attempt: Bytes,
 }
 
 pub fn begin_export_copy(mut db: Db, scratch: Dir, take attempt: Bytes, activation: u64) -> Result[ExportCopy, DeployError] waits {
+    deploy_result(require_memory_collections(store_has_tiered(db), Export))?
     deploy_result(healthy(db))?
     if !is_disk(db) || list.len(attempt) != 16 {
         return Error(ExportMismatch)
@@ -5965,6 +5973,7 @@ pub opaque type ImportWork: send {
 }
 
 pub fn reserve_import(mut db: Db, take validated: ValidatedImport) -> Result[ImportWork, DeployError] {
+    deploy_result(require_memory_collections(store_has_tiered(db), Install))?
     deploy_result(healthy(db))?
     if !is_disk(db) || validated.meta.base.opened != open_number(db) || validated.meta.base.store_hi != db.store.hi || validated.meta.base.store_lo != db.store.lo || !matches_export(db, validated.meta.base) {
         return Error(ExportMismatch)
@@ -6211,6 +6220,7 @@ fn install_prepared[V](mut db: Db, request: Cutover, current_activation: u64, ol
 
 // The runner has paused admission and settled its workers before this call.
 pub fn perform_cutover[V](mut db: Db, request: Cutover, current_activation: u64, old_describe: Bytes, release_codec: std.codec.Codec[V], release_from: fn(PreparedTarget, Inline[u8, 32]) -> Result[V, DeployError], before_cut: scoped fn() -> bool) -> Result[u64, DeployError] waits {
+    deploy_result(require_memory_collections(store_has_tiered(db), Install))?
     let outcome = install_prepared(mut db, request, current_activation, old_describe, release_codec, release_from, before_cut)
     if is_disk(db) {
         forget_import(mut db)

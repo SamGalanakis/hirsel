@@ -29,9 +29,9 @@
     "lines": 1409
   },
   "core/programs/runner/runner.hirsel": {
-    "lines": 8040,
-    "raise_revision": 4,
-    "reason": "w3a-b-sized-2009"
+    "lines": 8048,
+    "raise_revision": 5,
+    "reason": "m3-s11-refusals-2011"
   },
   "core/programs/runner/runner_calls.hirsel": {
     "lines": 2507
@@ -46,9 +46,9 @@
     "lines": 2982
   },
   "core/programs/store/store.hirsel": {
-    "lines": 8000,
-    "raise_revision": 3,
-    "reason": "m3-s2-format4-2006"
+    "lines": 7982,
+    "raise_revision": 4,
+    "reason": "m3-s11-refusals-2011"
   },
   "core/std/char.hirsel": {
     "lines": 4741

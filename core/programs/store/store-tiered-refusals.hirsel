@@ -1,0 +1,58 @@
+pub type TieredRefusal: send = Memory | Migrate | Export | Install | Authority
+
+fn tiered_collections(root: Arc[std.page.Page]) -> bool {
+    let image = std.page.image_of(root)
+    let slots = std.page.count(image)
+    if std.page.level(image) == 0 {
+        for slot in 0u64 .. slots {
+            // AP7 puts residency immediately after the collection kind.
+            if option.unwrap(std.page.value_at(root, slot))[53] == 1 {
+                return true
+            }
+        }
+    } else {
+        for slot in 0u64 .. slots {
+            if tiered_collections(option.unwrap(std.page.child(root, slot))) {
+                return true
+            }
+        }
+    }
+    false
+}
+
+fn store_has_tiered(db: Db) -> bool {
+    for head in db.heads {
+        if tiered_collections(head.roots.collections.root) {
+            return true
+        }
+    }
+    for retained in db.pins {
+        if tiered_collections(retained.roots.collections.root) {
+            return true
+        }
+    }
+    false
+}
+
+fn require_memory_collections(tiered: bool, reason: TieredRefusal) -> Result[(), Error] {
+    if tiered {
+        return Error(Tiered(reason))
+    }
+    Ok(())
+}
+
+fn require_tiered_storage(db: Db) -> Result[(), Error] {
+    if !is_disk(db) {
+        return Error(Tiered(Memory))
+    }
+    Ok(())
+}
+
+fn require_archive_authority(db: Db) -> Result[(), Error] {
+    if let Some(state) = view db.disk {
+        if let Bucket(_) = state.options.authority {
+            return Ok(())
+        }
+    }
+    Error(Tiered(Authority))
+}

@@ -69,3 +69,165 @@ fn test_l62_slots() -> Result[(), ()] {
     }
     Ok(())
 }
+
+type RefusalFile {
+    name: String,
+    body: Bytes
+}
+
+fn refusal_directory(d: Dir) -> List[RefusalFile] waits {
+    let entries = result.unwrap(std.dir.list(d))
+    let mut files: List[RefusalFile] = list.with_capacity(list.len(entries))
+    for listed in entries {
+        if let File = listed.kind {
+            let body = result.unwrap(std.file.read(d, listed.name))
+            list.push(mut files, RefusalFile(name: clone(listed.name), body: take body))
+        } else {
+            fail("L70(c): unexpected directory entry")
+        }
+    }
+    take files
+}
+
+fn refusal_directory_unchanged(d: Dir, before: List[RefusalFile]) -> bool waits {
+    let after = refusal_directory(d)
+    if list.len(after) != list.len(before) {
+        return false
+    }
+    for i in 0u64 .. list.len(before) {
+        if before[i].name != after[i].name || before[i].body != after[i].body {
+            return false
+        }
+    }
+    true
+}
+
+fn refusal_descriptor(tiered: bool) -> Bytes {
+    // AP7: empty pointer, rows and bytes, followed by kind and residency.
+    let mut record: Bytes = list.with_capacity(56)
+    list.fill(mut record, 52, 0u8)
+    list.push(mut record, 1u8)
+    list.push(mut record, if tiered { 1u8 } else { 0u8 })
+    list.fill(mut record, 2, 0u8)
+    take record
+}
+
+fn refusal_attach_descriptors(mut db: Db, memory_id: u32, tiered_id: u32) -> Result[(), Error] {
+    // Format 4 still rejects Tiered collection pages. Supply the AP7 values in
+    // an ordinary leaf for this admission test. The fixture is never published.
+    let mut rows: List[std.page.Row] = list.new()
+    list.push(mut rows, std.page.Row(key: prefix(memory_id)?, value: refusal_descriptor(false), charge: 126))
+    list.push(mut rows, std.page.Row(key: prefix(tiered_id)?, value: refusal_descriptor(true), charge: 126))
+    let mut stamp = stamp_after(db.next_node)?
+    let root = page_result(std.page.bulk(rows, Unprefixed, 1024, mut stamp))?
+    db.heads[0].roots.collections.root = option.unwrap(take root)
+    Ok(())
+}
+
+fn refusal_drop(mut phase: Migration) -> Result[(), Error] {
+    let source = migration_table(mut phase, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    migration_drop_table(mut phase, take source)
+}
+
+fn refusal_migrate(mut phase: Migration) -> Result[(), Error] {
+    let source = migration_table(mut phase, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let target = spec("renamed", std.codec.key_u64(), std.codec.of_u64())
+    migration_migrate(mut phase, take source, take target, fn(_key: u64, _value: u64) -> Result[Option[(u64, u64)], Capacity] {
+        fail("L70(c): migration body ran")
+    })
+}
+
+fn refusal_release(_target: PreparedTarget, _digest: Inline[u8, 32]) -> Result[Bytes, DeployError] {
+    fail("L70(c): release staged")
+}
+
+fn refusal_noop(mut _phase: Migration) -> Result[(), Error] {
+    Ok(())
+}
+
+fn refusal_import(digest: Inline[u8, 32]) -> ValidatedImport {
+    let base = ExportStamp(attempt: list.new(), store_hi: 0, store_lo: 0, opened: 0, branch: 0, head: 0, next_table: 1, activation: 0, terminal: 0, end: 0)
+    let target = PreparedTarget(describe: list.new(), release: list.new(), digest: list.new(), resident_limit: 0, pack_bytes: 0, checkpoint_bytes: 0, journal_limit: 0)
+    let meta = PreparedMeta(base: take base, target: take target, next_table: 1, changes: 0, ranges: 0)
+    ValidatedImport(meta: take meta, delta: list.new(), ranges: list.new(), digest: digest, charge: 0)
+}
+
+@test
+fn tiered_l70_refusals(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let store_dir = disk_test_directory(d)
+    let scratch = disk_test_directory(d)
+    let mut db = open(tasks, store_dir, c, r, result.unwrap(sized(Directory, 2147483648u64)))?
+    let rows = spec("rows", std.codec.key_u64(), std.codec.of_u64())
+    let other = spec("other", std.codec.key_u64(), std.codec.of_u64())
+    let _ = create_table(mut db, take rows)?
+    let last = create_table(mut db, take other)?
+    durable(mut db, last)?
+    let rows_handle = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let other_handle = table(mut db, "other", std.codec.key_u64(), std.codec.of_u64())?
+    let staged = stage_migration(db, tasks, code.describe(refusal_noop))?
+    let before = refusal_directory(store_dir)
+    let scratch_before = refusal_directory(scratch)
+    let memory_db = memory(c, r, result.unwrap(sized(Memory, 1074790400u64)))
+    if let Error(Tiered(Memory)) = require_tiered_storage(memory_db) {} else {
+        fail("L70(c): expected Tiered(Memory) for memory residency")
+    }
+    if let Error(Tiered(Authority)) = require_archive_authority(memory_db) {} else {
+        fail("L70(c): expected Tiered(Authority) for memory archive")
+    }
+    if let Error(Tiered(Authority)) = require_archive_authority(db) {
+        if !refusal_directory_unchanged(store_dir, before) {
+            fail("L70(c): archive admission changed the store directory")
+        }
+    } else {
+        fail("L70(c): expected Tiered(Authority) for log archive")
+    }
+    close(take memory_db)?
+    refusal_attach_descriptors(mut db, rows_handle.id, other_handle.id)?
+    if let Error(Tiered(Migrate)) = run_migration(mut db, tasks, code.describe(refusal_drop)) {
+        if !refusal_directory_unchanged(store_dir, before) {
+            fail("L70(c): drop changed the store directory")
+        }
+    } else {
+        fail("L70(c): expected Tiered(Migrate) for drop")
+    }
+    if let Error(Tiered(Migrate)) = run_migration(mut db, tasks, code.describe(refusal_migrate)) {
+        if !refusal_directory_unchanged(store_dir, before) {
+            fail("L70(c): migration changed the store directory")
+        }
+    } else {
+        fail("L70(c): expected Tiered(Migrate) for migration")
+    }
+    if let Error(Store(Tiered(Export))) = begin_export_copy(mut db, scratch, list.new(), 0) {
+        if !refusal_directory_unchanged(store_dir, before) || !refusal_directory_unchanged(scratch, scratch_before) {
+            fail("L70(c): export changed the store or scratch directory")
+        }
+    } else {
+        fail("L70(c): expected Tiered(Export)")
+    }
+    let digest: Inline[u8, 32] = [0u8; 32]
+    if let Error(Store(Tiered(Install))) = reserve_import(mut db, refusal_import(digest)) {
+        if !refusal_directory_unchanged(store_dir, before) {
+            fail("L70(c): import reservation changed the store directory")
+        }
+    } else {
+        fail("L70(c): expected Tiered(Install) before import reservation")
+    }
+    let cutover = Cutover(attempt: list.new(), digest: digest, deadline: 0)
+    if let Error(Store(Tiered(Install))) = perform_cutover(mut db, cutover, 0, list.new(), std.codec.of_bytes(), refusal_release, scoped fn() -> bool {
+        fail("L70(c): install reached the cut")
+    }) {
+        if !refusal_directory_unchanged(store_dir, before) {
+            fail("L70(c): install changed the store directory")
+        }
+    } else {
+        fail("L70(c): expected Tiered(Install)")
+    }
+    if let Error(Tiered(Install)) = install_activation(mut db, take staged) {
+        if !refusal_directory_unchanged(store_dir, before) {
+            fail("L70(c): activation changed the store directory")
+        }
+    } else {
+        fail("L70(c): expected Tiered(Install) for activation")
+    }
+    close(take db)
+}

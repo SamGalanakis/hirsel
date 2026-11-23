@@ -1068,6 +1068,13 @@ fn push_store_error(mut line: String, problem: store.Error) {
         HistoryMissing(_, _) => string.push(mut line, "the object store history is missing an object"),
         Reclaimed(_) => string.push(mut line, "the requested object store history was reclaimed"),
         Remote(_) => string.push(mut line, "a bucket operation failed"),
+        Tiered(reason) => string.push(mut line, match reason {
+            Memory => "a memory store cannot use Tiered residency",
+            Migrate => "a store with Tiered collections cannot migrate",
+            Export => "a store with Tiered collections cannot export",
+            Install => "a store with Tiered collections cannot install a release",
+            Authority => "archival requires a bucket authority",
+        }),
     }
 }
 fn push_capacity(mut line: String, cap: Capacity) {
@@ -3004,6 +3011,7 @@ fn head_prepare[G: send, H: send](mut db: store.Db, selection: Selection, persis
     let h = activation_result(store.with_staged_schema(stage, handles))?
     let h2 = activation_result(store.with_staged_schema(stage, handles))?
     if let Error(take problem) = store.install_activation(mut db, take stage) {
+        if let Tiered(Install) = problem { return Error(Store(take problem)) }
         if let InstallAt(_) = selection { return Error(InstallUncertain(take problem)) }
         return Error(Store(take problem))
     }

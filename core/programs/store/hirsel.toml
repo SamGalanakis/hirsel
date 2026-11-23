@@ -38,6 +38,7 @@ std = { major = 1 }
 "store-layout.hirsel" = "store"
 "store-reexec.hirsel" = "store"
 "store-tx.hirsel" = "store"
+"store-tiered-refusals.hirsel" = "store"
 "main.hirsel" = "main"
 
 [program]

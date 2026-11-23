@@ -12,13 +12,9 @@ generated p19 and L12 modules, the calls laws that link an event observer
 through --cc or need the scheduled runtime, retained bytes, crash cuts, the
 socket cases and the host laws.
 
-The crash adapter runs the W2 filesystem cuts and one failed journal sync.
-RC1's L31 checks that the disk store never writes the plaintext Hello credential.
 """
 import argparse
 import base64
-import ctypes
-import ctypes.util
 import fcntl
 from contextlib import contextmanager
 import hashlib
@@ -38,6 +34,7 @@ from urllib.request import urlopen
 
 from case_progress import run_case
 from std_native import ROOT, simulation_support
+from runner_host import cutover_survives_host_loss, unpinned
 from store_tests import crash_inputs, runner_inputs
 from store_crash_tests import checked, run_crashes
 
@@ -346,7 +343,7 @@ CRASHES = ('runner-cross', 'runner-order')
 POISON = 'poison-segment'
 STOP_CASES = ('runner-deadline', 'runner-stop-early', 'runner-stop-twice')
 HOST_LAWS = ('two_recipes_one_digest', 'pinned_recording_uses_retained_image', 'foreign_recording_refused',
-             'missing_store_mount', 'install_child', 'install_child_crash')
+             'missing_store_mount', 'install_child', 'install_child_crash', 'cutover_survives_host_loss')
 
 
 def host_law(args, root, work, engine, name):
@@ -369,11 +366,14 @@ def host_law(args, root, work, engine, name):
     state.mkdir(mode=0o700)
     operator = state / 'operator.sock'
 
-    def publish(n_place):
+    recovery_law = name == 'cutover_survives_host_loss'
+
+    def publish(n_place, root_limit=268435456):
         command = [compiler, 'publish', '--inputs', str(manifest_path), '--source-core', '--source-std',
-                   '--entry', 'store_crash@1/runner_crash/host_main', '--backend', engine,
+                   '--entry', 'store_crash@1/runner_crash/' + ('identity_main' if recovery_law else 'host_main'),
+                   '--backend', engine,
                    '--code-store', str(publish_store), '--store', str(work / 'publish-cache'),
-                   '--limit', '268435456', '--n-place', str(n_place), '--dir', 'live',
+                   '--limit', str(root_limit), '--n-place', str(n_place), '--dir', 'live',
                    '--grant', 'Net=Listen 127.0.0.0/8 0-65535']
         for capability in ('Clock', 'Random', 'Tasks', 'Process', 'Stderr'):
             command += ['--grant', capability]
@@ -381,9 +381,9 @@ def host_law(args, root, work, engine, name):
 
     old_n_place, new_n_place = 1048576, 2097152
     old_recipe = publish(old_n_place)
-    new_recipe = publish(new_n_place) if name not in ('missing_store_mount', 'install_child') else old_recipe
+    new_recipe = publish(old_n_place, 269484032) if recovery_law else publish(new_n_place) if name not in ('missing_store_mount', 'install_child') else old_recipe
     if name not in ('missing_store_mount', 'install_child'):
-        assert old_recipe != new_recipe, 'the two allowances must produce distinct recipes'
+        assert old_recipe != new_recipe, 'OLD and NEW must have distinct recipes'
 
     with socket.socket() as probe:
         probe.bind(('127.0.0.1', 0))
@@ -469,19 +469,9 @@ def host_law(args, root, work, engine, name):
         assert request, f'{case} did not name its request first: {result.stderr}'
         return request.group(1), json.loads(result.stdout.strip().splitlines()[-1])
 
-    def unpinned(tape, copy):
-        # The tape's header block with a fresh tape id, which no catalog has pinned.
-        recorded = tape.read_bytes()
-        length = int.from_bytes(recorded[12:16], 'little')
-        head, payload = recorded[:16], bytearray(recorded[16:16 + length])
-        tape_id = os.urandom(16)
-        payload[3:19] = tape_id
-        xxh3 = ctypes.CDLL(ctypes.util.find_library('xxhash')).XXH3_64bits
-        xxh3.argtypes, xxh3.restype = [ctypes.c_void_p, ctypes.c_size_t], ctypes.c_uint64
-        checked_bytes = tape_id + head + bytes(payload)
-        check = xxh3(checked_bytes, len(checked_bytes))
-        copy.write_bytes(head + bytes(payload) + check.to_bytes(8, 'little'))
-        return copy
+    if recovery_law:
+        return cutover_survives_host_loss(root, work, engine, compiler, state, launch_store, register,
+                                          deploy, running_host, outcome, ready, welcome_n_place)
 
     if name in ('install_child', 'install_child_crash'):
         with running_host():
@@ -689,7 +679,7 @@ def install_child_law(compiler, state, work, old, new):
 
     def probe(assembly, gen, activation, found):
         identity = child(1, gen)
-        start(assembly, identity, pack('<QQII', activation, 60_000, 0, 0))
+        start(assembly, identity, pack('<QQIII', activation, 60_000, 0, 0, 0))
         frame = receive()
         prefix = pack('<I', 9) + identity + pack('<I', 0 if activation == found else 1)
         assert frame.startswith(prefix) and frame[len(prefix):len(prefix) + 8] == pack('<Q', found), frame
@@ -728,7 +718,7 @@ def install_child_law(compiler, state, work, old, new):
                     assert receive() == pack('<I', 3) + genesis + exited
                     # The result is replayable until the host acknowledges the end.
                     send(0)
-                    assert receive() == pack('<II', 0, 1) + genesis + pack('<I', 1) + exited + bytes(8)
+                    assert receive() == pack('<II', 0, 1) + genesis + pack('<I', 1) + exited + bytes(16)
                     placed(genesis, installed)
                     send(6, genesis)
                     if new is None:

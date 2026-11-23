@@ -2,6 +2,7 @@
 //! launcher's one state loop with stand-in children: shell scripts that take the
 //! descriptors of launch.md "Child modes" and behave as the law needs. The real-place
 //! halves (a NEW head opening the store only after OLD closed it) are the platform host's.
+use super::session::serve_fixture as serve;
 use super::session::*;
 use super::{Image, Images, Launcher};
 use std::collections::BTreeSet;
@@ -104,15 +105,6 @@ pub(super) fn group() -> Group {
 
 pub(super) fn attempt(n: u64) -> Attempt {
     Attempt { hi: n, lo: n }
-}
-
-fn serve(activation: u64, candidate: Option<u64>) -> Serve {
-    Serve {
-        activation,
-        idle: 250,
-        candidate,
-        store_id: None,
-    }
 }
 
 fn launch(image: u8, workdir: &Path, mode: Mode) -> Request {
@@ -551,6 +543,8 @@ fn launcher_restart_stateless() {
     let live = ChildState {
         child: serving(1),
         phase: Phase::Started,
+        selection: Some(Selection::new(1, vec![0; 32])),
+        answer: None,
     };
     assert_eq!(
         exchange(&mut launcher, &mut host, Request::Hello),
@@ -575,6 +569,7 @@ fn launcher_restart_stateless() {
         [ChildState {
             child,
             phase: Phase::Exited(End { status: Status::Signal(9), report: None, .. }),
+            ..
         }] if *child == serving(1)
     ));
     write_frame(&mut host, &Request::Acknowledge(serving(1))).unwrap();
@@ -1013,6 +1008,8 @@ sleep 30 & printf '%s' "$!" > orphan; exit 0
         [ChildState {
             child: serving(2),
             phase: Phase::Started,
+            selection: Some(Selection::new(2, vec![0; 32])),
+            answer: None,
         }]
     );
     assert_eq!(directories(), BTreeSet::from(["c-67-1-2-serving".into()]));

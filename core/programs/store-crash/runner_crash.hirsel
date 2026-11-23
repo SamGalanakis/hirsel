@@ -132,6 +132,26 @@ pub fn host_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, n: Net, 
     runner.main(argv, process, errors, tasks, code.describe(place), serve)
 }
 
+// T1's executable uses a smaller configured allowance than its hosted recipe.
+pub fn identity_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, n: Net, process: Process, errors: Stderr) -> Result[(), Exit] waits {
+    let serve = scoped fn(take stopping: Receiver[()]) -> Result[runner.Ended, runner.MainError] waits {
+        let n_place = 524288u64
+        let mut wire = runner.wire_defaults(65536u64, n_place)
+        wire.n_pool = 4194304u64
+        let mut disk = options()
+        disk.lock_wait_ms = 10000u64
+        let config: runner.PlaceConfig[(), Hd, (), ()] = runner.PlaceConfig(
+            backing: Disk(d, disk), selection: (runner.launch_selection(argv) ?=> Usage), place: code.describe(place), n_place: n_place,
+            migrate: code.describe(migrate), handles: code.describe(handles), session: wire, max_sessions: 4u64,
+            proxies: list.new(), n_publisher: 3145728u64,
+            listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r,
+            stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(runner.ingress.binding()), triggers: None, idle: None)
+        let ended = runner.operate(take config, take stopping, result.unwrap(runner.status_root()), None) ?=> Start
+        Ok(ended)
+    }
+    runner.main(argv, process, errors, tasks, code.describe(place), serve)
+}
+
 // A client verdict: empty when every call was answered as expected.
 fn clean(take verdict: String) {
     if verdict != "" {
@@ -667,7 +687,7 @@ fn refused_open(d: Dir, c: Clock, r: Random, tasks: Tasks, selected: runner.Sele
         code.describe(unreachable_handles), take from, take mail, tasks, 1048576u64)
     match take tried {
         Error(NotCurrent(Legacy)) => want(legacy, "activation: fenced store reported legacy"),
-        Error(NotCurrent(Active(found, _))) => want(!legacy && found == v, "activation: wrong active version"),
+        Error(NotCurrent(Active(found, _, _))) => want(!legacy && found == v, "activation: wrong active version"),
         _ => fail("activation: unexpected selection result")
     }
     let reopened = result.unwrap(store.open(tasks, d, c, r, options()))

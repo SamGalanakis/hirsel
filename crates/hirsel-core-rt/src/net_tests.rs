@@ -83,6 +83,7 @@ fn net_laws_child() {
         exec_bindings: std::ptr::null(),
         exec_bindings_len: 0,
         exec_ops: std::ptr::null(),
+        revision: std::ptr::null(),
         cred_grants: std::ptr::null(),
         cred_grants_len: 0,
         target: crate::process::View {
@@ -200,7 +201,6 @@ fn net_narrow_retains_charge_until_run_end_and_refuses_invalid_or_capacity() {
         assert_eq!(context.available(), 40);
     }
 }
-
 #[test]
 fn net_socket_provider_laws() {
     for law in [

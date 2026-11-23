@@ -50,7 +50,7 @@ pub fn stream_key(c: Caller, number: u32) -> Result[Bytes, Capacity] {
     Ok(take stream)
 }
 
-pub type FoundActivation: send = Empty | Legacy | Active(u64, Bytes)
+pub type FoundActivation: send = Empty | Legacy | Active(u64, Bytes, Bytes)
 // `Reopen` opens the store at its current activation, or runs genesis on an empty
 // store; it is what a launch without `--hirsel-activation` selects (RUNNER-SPEC §6).
 pub type Selection: send = Current(u64) | Reopen | Install | InstallAt(u64)
@@ -238,44 +238,45 @@ fn head_bytes(backing: Backing, n_place: u64, n_publisher: u64) -> u64 {
 const OPERATE_OWN_BYTES: u64 = 262144u64
 
 pub fn operate_bytes[G: send, H: send, S: send, B: send](p: PlaceConfig[G, H, S, B]) -> Result[u64, Capacity] {
-    let serving = serving_bytes(p.session, p.max_sessions)?
+    let launch = launch_env()
+    let n_place = if launch.n_place_explicit { launch.n_place } else { p.n_place }
+    let mut session = p.session
+    if launch.n_place_explicit { session.n_place = n_place }
+    let serving = serving_bytes(session, p.max_sessions)?
     let grant = match p.triggers { Some(config) => config.grant_bytes, None => 0u64 }
-    let head = int.saturating_add(head_bytes(p.backing, p.n_place, p.n_publisher), grant)
+    let head = int.saturating_add(head_bytes(p.backing, n_place, p.n_publisher), grant)
     Ok(int.saturating_add(int.saturating_add(head, serving), OPERATE_OWN_BYTES))
 }
 
 pub fn operate[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, B], take stop: Receiver[()], status: Latest[Status], take watching: Option[Sender[Receiver[Phase]]]) -> Result[Ended, StartError] waits {
     let launch = launch_env()
-    if let Some((attempt, image)) = launch.prepare { return operate_prepare(take p, launch.n_place, attempt, image) }
+    let n_place = if launch.n_place_explicit { launch.n_place } else { p.n_place }
+    if let Some((attempt, image)) = launch.prepare { return operate_prepare(take p, n_place, attempt, image) }
     if let Some(version) = launch.install {
-        let result = operate_install(take p, InstallAt(version), launch.n_place)
+        let result = operate_install(take p, InstallAt(version), n_place)
         return finish_install(take result)
     }
     let installing = match p.selection { Install => true, InstallAt(_) => true, _ => false }
     if installing {
-        let configured = p.n_place
         let selection = p.selection
-        let _ = operate_install(take p, selection, configured)?
+        let _ = operate_install(take p, selection, n_place)?
         return Ok(Unstarted)
     }
     if p.idle == Some(0u64) { return Error(Missing("idle")) }
     if p.stop.grace_ms == 0u64 { return Error(Missing("grace_ms")) }
-    let PlaceConfig(backing: take backing, selection: selection, place: place, migrate: migrate, handles: handles, n_place: configured, n_publisher: n_publisher,
+    let PlaceConfig(backing: take backing, selection: selection, place: place, migrate: migrate, handles: handles, n_publisher: n_publisher,
         session: wire_config, max_sessions: limit, proxies: take proxies,
-        listen: listen, net: net, tasks: tasks, clock: clock, random: random, stop: stop_config, wire: take supplied_wire, triggers: take trigger_config, idle: configured_idle) = take p
+        listen: listen, net: net, tasks: tasks, clock: clock, random: random, stop: stop_config, wire: take supplied_wire, triggers: take trigger_config, idle: configured_idle, ..) = take p
     let idle = match launch.idle { Some(ms) => Some(ms), None => configured_idle }
-    // One n_place serves the place (§6 "One n_place"): the launch's under a host, otherwise
-    // PlaceConfig.n_place, which the wire configuration must repeat.
-    let hosted = !none(launch_scratch())
-    if !hosted && wire_config.n_place != configured {
-        return Error(Disagrees(Differ(name: string.from("session.n_place"), given: wire_config.n_place, used: configured)))
+    if !launch.n_place_explicit && wire_config.n_place != n_place {
+        return Error(Disagrees(Differ(name: string.from("session.n_place"), given: wire_config.n_place, used: n_place)))
     }
-    let n_place = if hosted { launch.n_place } else { configured }
     let mut session_config = wire_config
     session_config.n_place = n_place
     if let Some(take problem) = session_problem(session_config, limit, launch.target.size) { return Error(take problem) }
     let watch = status_watch(take watching)?
     let mut current = copy_status(latest.read(status))
+    let mut opening_read: Bytes = list.new()
     current.n_place = n_place
     publish_phase(status, watch, mut current, Starting(Recovering))?
     let (to, inbox): (Sender[LifeEvent], Receiver[LifeEvent]) = channel.new(12u64)
@@ -395,7 +396,7 @@ pub fn operate[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, 
                 if let Some(control) = hosting {
                     let ready_ns = host.mono_ns(clock)
                     let release: Bytes = clone(current.release)
-                    if let Error(_) = channel.send(control.answer, PlaceOpened(PlaceReady(version: current.activation, store_hi: current.store_id.0, store_lo: current.store_id.1, release: take release, retain_from: current.retain_from, ready_ns: ready_ns))) {
+                    if let Error(_) = channel.send(control.answer, PlaceOpened(PlaceReady(version: current.activation, store_hi: current.store_id.0, store_lo: current.store_id.1, release: take release, retain_from: current.retain_from, ready_ns: ready_ns, read: clone(opening_read)))) {
                         return Error(Missing("host control"))
                     }
                     continue
@@ -432,7 +433,8 @@ pub fn operate[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, 
                 publish_phase(status, watch, mut current, Starting(Activating))?
                 let _ = channel.try_send(head_to, HeadContinue)
             },
-            Activated(take release, version, identity, retained) => {
+            Activated(take release, version, identity, retained, take read) => {
+                opening_read = take read
                 current.release = take release
                 current.activation = version
                 current.store_id = identity
@@ -533,8 +535,8 @@ pub fn operate[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, 
                         }
                         if let Some(host) = hosting {
                             let response = match problem {
-                                Open(NotCurrent(Active(version, description))) => {
-                                    PlaceCurrent(version, clone(description))
+                                Open(NotCurrent(Active(version, _, read))) => {
+                                    PlaceCurrent(version, clone(read))
                                 },
                                 Open(NotCurrent(Legacy)) => PlaceRefused("Legacy"),
                                 Open(NotCurrent(Empty)) => PlaceRefused("Empty"),
@@ -889,7 +891,7 @@ pub fn release_digest(exported: List[Exported]) -> Result[Bytes, std.codec.Encod
     Ok(take out)
 }
 
-pub type Describe: codec + send { digest: Bytes, target: String, n_place: u64, exported: List[Exported] }
+pub type Describe: codec + send { digest: Bytes, target: String, n_place: u64, revision: Bytes, exported: List[Exported] }
 
 pub type Preview: codec + send { describe: Describe, release: Bytes, answers: List[Entry] }
 
@@ -946,12 +948,10 @@ fn encode_describe(description: Describe) -> Result[Bytes, std.codec.EncodeError
 fn describe_registered[G: send, H: send](launch: LaunchEnv, take r: Registry[G, H]) -> Result[Bytes, RegisterError] {
     let preview = match launch.preview { Some(old) => Some(preview_answers(r, old)?), None => None }
     let Registry(exported: take exported, ..) = take r
-    let description = Describe(digest: launch_bytes(launch.digest), target: owned_launch_target(launch.target), n_place: launch.n_place, exported: take exported)
+    let description = Describe(digest: launch_bytes(launch.digest), target: owned_launch_target(launch.target), n_place: launch.n_place, revision: launch_bytes(launch.revision), exported: take exported)
     if let Some(take answers) = take preview { return encode_preview(take description, take answers) }
     Ok(encode_describe(description) ?=> |_| Bounds)
 }
-
-pub type ReleaseRecord: codec + send { release: Bytes, digest: Bytes }
 
 fn current_description(db: store.Db) -> Result[Option[Bytes], store.Error] {
     match store.system_table(db, "hirsel.runner.activation", std.codec.key_u8(), std.codec.of_bytes()) {
@@ -1001,17 +1001,6 @@ pub fn launch_selection(a: Args) -> Result[Selection, Exit] {
         selected = Some(choice)
     }
     Ok(match selected { Some(choice) => choice, None => Reopen })
-}
-
-fn prepare_activation[G: send, H: send](r: Registry[G, H], n_place: u64) -> Result[(Bytes, ReleaseRecord), RegisterError] {
-    let release = release_digest(r.exported) ?=> |_| Bounds
-    let launch = launch_env()
-    let image = launch_bytes(launch.digest)
-    let target = owned_launch_target(launch.target)
-    let description = Describe(digest: take image, target: take target, n_place: n_place, exported: clone(r.exported))
-    let payload = encode_describe(description) ?=> |_| Bounds
-    let Describe(digest: take digest, ..) = take description
-    Ok((take payload, ReleaseRecord(release: take release, digest: take digest)))
 }
 
 fn describe_response[G: send, H: send](launch: LaunchEnv, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]]) -> Result[Bytes, RegisterError] {
@@ -1128,7 +1117,7 @@ pub fn start_text(problem: StartError) -> String {
         Open(Migrate(e)) => { string.push(mut line, "migration failed: "); push_store_error(mut line, e) },
         Open(NotCurrent(Empty)) => string.push(mut line, "the store is empty, but --hirsel-activation named a version; start without --hirsel-activation for genesis"),
         Open(NotCurrent(Legacy)) => string.push(mut line, "the store holds data without an activation; start it once with --hirsel-install"),
-        Open(NotCurrent(Active(version, description))) => {
+        Open(NotCurrent(Active(version, description, _))) => {
             string.push(mut line, "the store is at activation ")
             string.push_u64(mut line, version)
             let codec: std.codec.Codec[Describe] = std.codec.of()
@@ -1148,7 +1137,7 @@ pub fn start_text(problem: StartError) -> String {
             }
             string.push(mut line, "; start the build that wrote it, or stop it and start this build once with --hirsel-install to migrate the store to it")
         },
-        Open(IdentityUnknown) => string.push(mut line, "image identity is unavailable"),
+        Open(IdentityUnknown) => string.push(mut line, "release identity is unavailable"),
         Open(StoreMismatch(expected, actual)) => string.push(mut line, store_mismatch(expected, actual)),
         Open(PublisherStopped) => string.push(mut line, "publisher stopped"),
         Open(InstallUncertain(e)) => { string.push(mut line, "install outcome unknown: "); push_store_error(mut line, e) },
@@ -2636,7 +2625,7 @@ fn start_publisher[G: send, H: send](owned: store.Db, place: StaticFn[fn(mut Reg
 }
 
 type DrainWindow: shareable + send { admission: u64, deadline: u64 }
-type LifeEvent: send = StopRequested | Recovered | Activated(Bytes, u64, (u64, u64), u64) | Published(Sender[PubIn]) | ServePrepared | StoreAccepted | Settled | HeadEnded(Result[Option[u64], StartError]) | AdmissionClose | DrainExpired | ServeEnded(Result[u64, StartError])
+type LifeEvent: send = StopRequested | Recovered | Activated(Bytes, u64, (u64, u64), u64, Bytes) | Published(Sender[PubIn]) | ServePrepared | StoreAccepted | Settled | HeadEnded(Result[Option[u64], StartError]) | AdmissionClose | DrainExpired | ServeEnded(Result[u64, StartError])
     | WritesPaused | WritesResumed | RetirePlace
     | IdleDeadline(u64) | HeadIdle(bool) | ServeIdle(bool) | HeadIdleChecked(Option[Sender[()]]) | ServeIdleChecked(Option[Sender[()]])
 
@@ -2667,7 +2656,7 @@ pub type KeepImport: send { built: store.Imported, answer: Sender[Result[Inline[
 
 pub type HostCommand: codec + send = HostExport(Bytes, bool) | HostImport(Bytes, Bytes, Bytes)
     | HostCutover(Bytes, Bytes, u64, bool) | HostAbort(Bytes, Option[Bytes]) | HostStoreAccepted
-pub type PlaceReady: codec + send { version: u64, store_hi: u64, store_lo: u64, release: Bytes, retain_from: u64, ready_ns: u64 }
+pub type PlaceReady: codec + send { version: u64, store_hi: u64, store_lo: u64, release: Bytes, retain_from: u64, ready_ns: u64, read: Bytes }
 pub type HostReply: codec + send = PlaceOpened(PlaceReady) | PlaceCurrent(u64, Bytes) | PlaceRefused(String)
     | PlaceExported(u64, String) | PlaceImported(Bytes) | PlaceInstalled(u64, bool) | PlaceDrift | PlaceAborted | PlaceUncertain | PlaceWriteAck(u64)
     | PlaceStoreMismatch(u64, u64, u64, u64) | PlaceInstallRefused(InstallRefusal)
@@ -2935,8 +2924,14 @@ fn managed_head[G: send, H: send, S: send](take job: ManagedHead[G, H, S]) -> Re
     let (version, retain_from) = if persistent {
         match activation_window(db) { Ok(found) => found, Error(take problem) => { let _ = close_store(take db); return Error(Open(Store(take problem))) } }
     } else { (0u64, 0u64) }
-    if !head_advance(to, inbox, Activated(clone(release), version, store.identity_words(db), retain_from)) { return head_closed(take db) }
-    let trigger_drive = match open_trigger_drive(db, clock, tasks, channel.sender(head_to), release, take triggering) {
+    let read: Bytes = if persistent {
+        match capture_release(db, version, launch_env().witness) {
+            Ok(take raw) => take raw,
+            Error(take problem) => { let _ = close_store(take db); return Error(Open(Store(take problem))) },
+        }
+    } else { list.new() }
+    if !head_advance(to, inbox, Activated(clone(release), version, store.identity_words(db), retain_from, take read)) { return head_closed(take db) }
+    let trigger_drive = match open_trigger_drive(db, clock, tasks, channel.sender(head_to), reg.exported, n_place, take triggering) {
         Ok(take drive) => take drive,
         Error(take problem) => { let _ = close_store(take db); return Error(Open(Store(take problem))) },
     }
@@ -2971,6 +2966,7 @@ fn head_prepare[G: send, H: send](mut db: store.Db, selection: Selection, persis
         let release = release_digest(local_registry.exported) ?=> |_| Place(Bounds)
         return Ok((take local_registry, take h, take h2, take release, take identity))
     }
+    if persistent && launch_env().revision.size == 0u64 { return Error(IdentityUnknown) }
     let current = activation_result(current_description(db))?
     let selected: Option[u64] = match selection {
         Install => None,
@@ -2996,17 +2992,18 @@ fn head_prepare[G: send, H: send](mut db: store.Db, selection: Selection, persis
             Some(_) => {
                 if store.fence_level(db) == 0 && persistent { return Error(NotCurrent(Legacy)) }
                 let version = activation_result(activation_version(db))?
-                if version != expected { return Error(NotCurrent(Active(version, option.unwrap(take current)))) }
+                if version != expected { return Error(not_current_activation(db, version, option.unwrap(take current))) }
                 Some(version)
             },
         },
     }
-    if persistent && selected == None && launch_image().size == 0u64 { return Error(IdentityUnknown) }
     let mut reg = match placed(place, n_place) { Ok(take reg) => take reg, Error(take problem) => return Error(Place(take problem)) }
     let (description, record) = prepare_activation(reg, n_place) ?=> Place
     if let Some(version) = selected {
         let old = option.unwrap(take current)
-        if old != description { return Error(NotCurrent(Active(version, take old))) }
+        let prior = activation_result(release_record(db, version))?
+        let matches = match prior { Some(row) => row.binding == record.binding, None => false }
+        if !matches { return Error(not_current_activation(db, version, take old)) }
         let identity = activation_identity(code.identity(place), code.identity(migrate), code.identity(handles))?
         let h = open_handles(db, handles)?
         let h2 = open_handles(db, handles)?
@@ -3149,11 +3146,11 @@ pub fn prepare_deploy[G: send, H: send](p: PrepareConfig[G, H]) -> Result[(), Pr
         Ok(take hash) => take hash,
         Error(c) => return Error(Open(Store(Full(Allocation(c))))),
     }
-    if list.len(digest) != 32 || digest != p.image_digest { return Error(Identity) }
-    prepare_export(p, source, digest)
+    if list.len(digest) != 32 || digest != p.image_digest || launch_env().revision.size == 0u64 { return Error(Identity) }
+    prepare_export(p, source)
 }
 
-fn prepare_export[G: send, H: send](p: PrepareConfig[G, H], source: store.Preparation, digest: Bytes) -> Result[(), PrepareError] waits {
+fn prepare_export[G: send, H: send](p: PrepareConfig[G, H], source: store.Preparation) -> Result[(), PrepareError] waits {
     let registered = match placed(p.place, p.n_place) {
         Ok(take reg) => take reg,
         Error(take error) => return Error(Open(Place(take error))),
@@ -3169,11 +3166,11 @@ fn prepare_export[G: send, H: send](p: PrepareConfig[G, H], source: store.Prepar
     let _ = prepare_open_result(store.with_staged_schema(staged, p.handles))?
     if let Error(take problem) = store.validate_preparation(source, staged) { return Error(Open(Store(take problem))) }
     let (take description, take record) = prepare_activation(registered, p.n_place) ?=> |problem| Open(Place(problem))
-    let ReleaseRecord(release: take release, digest: take image) = take record
+    let ReleaseRecord(release: take release, digest: take image, binding: take binding, ..) = take record
     let target = store.PreparedTarget(describe: take description, release: take release, digest: take image,
         resident_limit: p.options.resident_limit, pack_bytes: p.options.pack_bytes,
         checkpoint_bytes: p.options.checkpoint_bytes, journal_limit: p.options.journal_limit)
-    let scan = prepare_trigger_scan(source, staged, registered, p.triggers, digest)?
+    let scan = prepare_trigger_scan(source, staged, registered, p.triggers, binding)?
     write_trigger_scan(p.scratch, scan)?
     prepare_result(store.write_prepared(source, staged, p.scratch, take target))
 }
@@ -3259,34 +3256,40 @@ fn write_trigger_scan(d: Dir, raw: Bytes) -> Result[(), PrepareError] waits {
     Ok(())
 }
 
-fn target_release(target: store.PreparedTarget) -> Result[ReleaseRecord, store.DeployError] {
+fn target_release(target: store.PreparedTarget, prepared: Inline[u8, 32]) -> Result[ReleaseRecord, store.DeployError] {
     let codec: std.codec.Codec[Describe] = std.codec.of()
     let decoded = std.codec.decode(codec, target.describe)
     let description = match take decoded {
         Ok(take description) => take description,
         Error(_) => return Error(ImportMalformed),
     }
-    if description.digest != target.digest { return Error(ImportMalformed) }
+    let binding = identity_digest(description) ?=> |_| ImportMalformed
     let release = release_digest(description.exported) ?=> |_| ImportMalformed
     if release != target.release { return Error(ImportMalformed) }
-    let digest: Bytes = clone(target.digest)
-    Ok(ReleaseRecord(release: take release, digest: take digest))
+    let mut witness: Bytes = list.with_capacity(32u64)
+    for byte in prepared { list.push(mut witness, byte) }
+    Ok(ReleaseRecord(release: take release, digest: clone(description.digest), binding: take binding, n_place: description.n_place, prepared: take witness))
 }
 
 fn cutover_store[G: send, H: send](mut db: store.Db, request: store.Cutover, reg: Registry[G, H], n_place: u64, before_cut: scoped fn() -> bool) -> Result[u64, store.DeployError] waits {
-    let description = match prepare_activation(reg, n_place) {
-        Ok((take description, _)) => take description,
+    let binding = match prepare_activation(reg, n_place) {
+        Ok((_, ReleaseRecord(binding: take binding, ..))) => take binding,
         Error(Full(c)) => { store.release_export(mut db, request.attempt); return Error(Store(Full(Allocation(c)))) },
         Error(_) => { store.release_export(mut db, request.attempt); return Error(Drift) },
     }
     let selected = current_description(db)
-    match take selected {
-        Ok(Some(known)) => if known != description { store.release_export(mut db, request.attempt); return Error(Drift) },
+    let description = match take selected {
+        Ok(Some(take known)) => take known,
         Ok(None) => { store.release_export(mut db, request.attempt); return Error(Drift) },
         Error(take problem) => { store.release_export(mut db, request.attempt); return Error(Store(take problem)) },
     }
     let version = match activation_version(db) {
         Ok(version) => version,
+        Error(take problem) => { store.release_export(mut db, request.attempt); return Error(Store(take problem)) },
+    }
+    match release_record(db, version) {
+        Ok(Some(row)) if row.binding == binding => (),
+        Ok(_) => { store.release_export(mut db, request.attempt); return Error(Drift) },
         Error(take problem) => { store.release_export(mut db, request.attempt); return Error(Store(take problem)) },
     }
     let codec: std.codec.Codec[ReleaseRecord] = std.codec.of()
@@ -4079,7 +4082,7 @@ type TriggerDrive[G: send] {
 
 fn make_trigger_drive[G: send, S: send](db: store.Db, clock: Clock, tasks: Tasks, take to: Sender[HeadInput], revision: Bytes, take config: TriggerConfig[G, S]) -> Result[Box[TriggerDrive[G]], store.Error] {
     let tables = store.with_schema(db, code.describe(triggers.tables))?
-    let stamp = trigger_stamp(revision)?
+    let stamp = copy_bytes(revision)?
     let TriggerConfig(entries: take entries, author: take author, grants: take seed, grant: grant, grant_bytes: allowance) = take config
     let (grants, inbox): (Sender[GrantRequest[G]], Receiver[GrantRequest[G]]) = channel.new(1u64)
     let supply = GrantWorker(grants: take seed, grant: grant, inbox: take inbox)
@@ -4089,20 +4092,15 @@ fn make_trigger_drive[G: send, S: send](db: store.Db, clock: Clock, tasks: Tasks
     Ok(box.new(take drive))
 }
 
-fn trigger_stamp(revision: Bytes) -> Result[Bytes, store.Error] {
-    let image = launch_digest() ?=> |cap| Full(Allocation(cap))
-    if list.len(image) == 0u64 { copy_bytes(revision) } else { Ok(take image) }
-}
-
-fn open_trigger_drive[G: send, S: send](db: store.Db, clock: Clock, tasks: Tasks, take to: Sender[HeadInput], revision: Bytes, take config: Option[TriggerConfig[G, S]]) -> Result[Option[Box[TriggerDrive[G]]], store.Error] {
+fn open_trigger_drive[G: send, S: send](db: store.Db, clock: Clock, tasks: Tasks, take to: Sender[HeadInput], exported: List[Exported], n_place: u64, take config: Option[TriggerConfig[G, S]]) -> Result[Option[Box[TriggerDrive[G]]], store.Error] {
     if let Some(take configured) = take config {
         if !triggers.is_empty(configured.entries) {
-            return Ok(Some(make_trigger_drive(db, clock, tasks, take to, revision, take configured)?))
+            return Ok(Some(make_trigger_drive(db, clock, tasks, take to, trigger_stamp(exported, n_place)?, take configured)?))
         }
     }
     let snapshot = store.snapshot(db)
     let Some(take tables) = triggers.tables_for_settlement(store.snapshot_schema(snapshot), snapshot)? else { return Ok(None) }
-    let drive: TriggerDrive[G] = TriggerDrive(tables: take tables, revision: trigger_stamp(revision)?, clock: clock, tasks: tasks, to: take to,
+    let drive: TriggerDrive[G] = TriggerDrive(tables: take tables, revision: trigger_stamp(exported, n_place)?, clock: clock, tasks: tasks, to: take to,
         entries: triggers.empty_entries(), author: store.Caller(issuer: 0u8, subject: list.new()), grants: None, active: map.new(), timer: None)
     Ok(Some(box.new(take drive)))
 }

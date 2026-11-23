@@ -6080,7 +6080,7 @@ pub fn cutover_settled(mut db: Db) -> Result[bool, Error] {
     Ok(covered(db, Journal(db.frame_seq)))
 }
 
-fn install_prepared[V](mut db: Db, request: Cutover, current_activation: u64, old_describe: Bytes, release_codec: std.codec.Codec[V], release_from: fn(PreparedTarget) -> Result[V, DeployError], before_cut: scoped fn() -> bool) -> Result[u64, DeployError] waits {
+fn install_prepared[V](mut db: Db, request: Cutover, current_activation: u64, old_describe: Bytes, release_codec: std.codec.Codec[V], release_from: fn(PreparedTarget, Inline[u8, 32]) -> Result[V, DeployError], before_cut: scoped fn() -> bool) -> Result[u64, DeployError] waits {
     let staged = accept_cutover(mut db, request)?
     let base = view staged.meta.base
     if db.heads[0].head != base.head || db.next_table != base.next_table || current_activation != base.activation {
@@ -6101,7 +6101,7 @@ fn install_prepared[V](mut db: Db, request: Cutover, current_activation: u64, ol
     let mut installation = StagedMigration(plan: take planned)
     let release_at = base.head + 1u64
     let prior = deploy_result(copied(old_describe))?
-    let release = release_from(target)?
+    let release = release_from(target, request.digest)?
     deploy_result(stage_activation(mut installation, release_at, Some(take prior), target.describe, release_codec, release))?
     installation.plan.live = install_account(db, installation.plan.roots)?
     deploy_result(over_ceiling(installation.plan.live, disk_limit))?
@@ -6122,7 +6122,7 @@ fn install_prepared[V](mut db: Db, request: Cutover, current_activation: u64, ol
 }
 
 // The runner has paused admission and settled its workers before this call.
-pub fn perform_cutover[V](mut db: Db, request: Cutover, current_activation: u64, old_describe: Bytes, release_codec: std.codec.Codec[V], release_from: fn(PreparedTarget) -> Result[V, DeployError], before_cut: scoped fn() -> bool) -> Result[u64, DeployError] waits {
+pub fn perform_cutover[V](mut db: Db, request: Cutover, current_activation: u64, old_describe: Bytes, release_codec: std.codec.Codec[V], release_from: fn(PreparedTarget, Inline[u8, 32]) -> Result[V, DeployError], before_cut: scoped fn() -> bool) -> Result[u64, DeployError] waits {
     let outcome = install_prepared(mut db, request, current_activation, old_describe, release_codec, release_from, before_cut)
     if is_disk(db) {
         forget_import(mut db)

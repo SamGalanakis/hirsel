@@ -75,6 +75,7 @@ impl Run {
             exec_bindings: std::ptr::null(),
             exec_bindings_len: 0,
             exec_ops: std::ptr::null(),
+            revision: std::ptr::null(),
             cred_grants: std::ptr::null(),
             cred_grants_len: 0,
             target: view(b"test-target"),
@@ -100,7 +101,6 @@ impl Run {
             }
         }
     }
-
     fn grant(&mut self, rule: &str) -> u64 {
         let storage = RulesStorage::new([GrantRule::parse(rule).unwrap()]);
         let handle = storage.handle();

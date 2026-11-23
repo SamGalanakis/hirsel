@@ -59,6 +59,8 @@ pub struct Metadata {
     executable: Image,
     target: String,
     n_place: u64,
+    n_place_explicit: bool,
+    revision: Option<[u8; 32]>,
     describe: bool,
     wake: bool,
     idle_ms: u64,
@@ -66,6 +68,7 @@ pub struct Metadata {
     preview: Option<Vec<u8>>,
     preparing: Option<([u8; 16], [u8; 32])>,
     install_child: Option<u64>,
+    witness: Option<u64>,
 }
 
 impl Metadata {
@@ -92,6 +95,8 @@ impl Metadata {
             executable,
             target: target.into(),
             n_place,
+            n_place_explicit: false,
+            revision: None,
             describe,
             wake: false,
             idle_ms: 0,
@@ -99,6 +104,7 @@ impl Metadata {
             preview: None,
             preparing: None,
             install_child: None,
+            witness: None,
         }
     }
 
@@ -137,6 +143,24 @@ impl Metadata {
     pub fn n_place(&self) -> u64 {
         self.n_place
     }
+    pub fn n_place_explicit(&self) -> bool {
+        self.n_place_explicit
+    }
+
+    pub fn with_launch_identity(
+        mut self,
+        revision: Option<[u8; 32]>,
+        n_place_explicit: bool,
+    ) -> Self {
+        self.revision = revision;
+        self.n_place_explicit = n_place_explicit;
+        self
+    }
+
+    pub fn revision(&self) -> Option<[u8; 32]> {
+        self.revision
+    }
+
     pub fn is_describe(&self) -> bool {
         self.describe
     }
@@ -180,6 +204,15 @@ impl Metadata {
         self
     }
 
+    pub fn with_witness(mut self, witness: Option<u64>) -> Self {
+        self.witness = witness;
+        self
+    }
+
+    pub fn witness(&self) -> Option<u64> {
+        self.witness
+    }
+
     pub fn word(&self, field: u64, index: u64) -> u64 {
         let byte = |bytes: &[u8]| {
             usize::try_from(index)
@@ -221,6 +254,13 @@ impl Metadata {
                 (Some(activation), 1) => activation,
                 _ => 0,
             },
+            16 => u64::from(self.n_place_explicit),
+            17 => self
+                .revision
+                .as_ref()
+                .map_or(0, |revision| revision.len() as u64),
+            18 => self.revision.as_ref().map_or(0, |revision| byte(revision)),
+            19 => self.witness.unwrap_or(0),
             _ => 0,
         }
     }

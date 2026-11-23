@@ -29,7 +29,7 @@ fn add_group_turn(mut h: Host, spec: NewGroup, also: scoped[view] fn(mut store.T
                 }
             }
             let mut meta = meta_of(tx, t)?
-            let g = GroupRow(tenant: string.from(spec.tenant), workdir: string.from(spec.workdir), author: spec.author, label: spec.label, listen: string.from(spec.listen), bindings: clone(spec.bindings), limits: spec.limits, assembly: clone(spec.assembly), activation: spec.activation, retained: list.new(), store_id: None, incarnation: meta.next_incarnation, retiring: None, args: clone(spec.args), record: clone(spec.record))
+            let g = GroupRow(tenant: string.from(spec.tenant), workdir: string.from(spec.workdir), author: spec.author, label: spec.label, listen: string.from(spec.listen), bindings: clone(spec.bindings), limits: spec.limits, assembly: clone(spec.assembly), activation: spec.activation, retained: list.new(), recovery: None, store_id: None, incarnation: meta.next_incarnation, retiring: None, args: clone(spec.args), record: clone(spec.record))
             meta.next_incarnation += 1u64
             st(store.put(mut tx, t.meta, 0u64, meta))?
             st(store.put(mut tx, t.groups, spec.name, g))?

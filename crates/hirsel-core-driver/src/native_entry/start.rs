@@ -135,6 +135,11 @@ pub(super) fn emit(
             .map_err(error)?;
         f.address(operations)
     };
+    let revision = f
+        .object
+        .declare_data("hirsel_code_revision", Linkage::Import, false, false)
+        .map_err(error)?;
+    let revision = f.address(revision);
     for (offset, value) in [
         (abi::OS_CONFIG_ROOT_LIMIT, limit),
         (abi::OS_CONFIG_ARGS, args),
@@ -175,6 +180,7 @@ pub(super) fn emit(
             f.constant(plan.exec.len() as u64),
         ),
         (abi::OS_CONFIG_EXEC_OPS, exec_ops),
+        (abi::OS_CONFIG_REVISION, revision),
     ] {
         f.store(value, config, offset);
     }
@@ -186,11 +192,6 @@ pub(super) fn emit(
         let path = f.string(replay.path.as_bytes())?;
         let identity = f.string(plan.identity.as_bytes())?;
         let mode = f.constant(if replay.diagnose { 2 } else { 1 });
-        let revision = f
-            .object
-            .declare_data("hirsel_code_revision", Linkage::Import, false, false)
-            .map_err(error)?;
-        let revision = f.address(revision);
         f.value_call(
             "hirsel_core_os_replay",
             I8,
@@ -200,11 +201,6 @@ pub(super) fn emit(
         )?
     } else if plan.recording {
         let identity = f.string(plan.identity.as_bytes())?;
-        let revision = f
-            .object
-            .declare_data("hirsel_code_revision", Linkage::Import, false, false)
-            .map_err(error)?;
-        let revision = f.address(revision);
         let runner = if spawns_units {
             "hirsel_core_os_run_recording_with_units"
         } else {

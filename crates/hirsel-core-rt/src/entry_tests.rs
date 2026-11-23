@@ -180,6 +180,7 @@ fn describe_launch_skips_directory_grants_and_owns_only_transport_fds() {
         exec_bindings: std::ptr::null(),
         exec_bindings_len: 0,
         exec_ops: std::ptr::null(),
+        revision: std::ptr::null(),
         cred_grants: std::ptr::null(),
         cred_grants_len: 0,
         target: View {
@@ -283,6 +284,7 @@ fn c_entry_constructor_fills_main_order_with_u64_handles_and_copies_argv() {
         exec_bindings: std::ptr::null(),
         exec_bindings_len: 0,
         exec_ops: std::ptr::null(),
+        revision: std::ptr::null(),
         cred_grants: std::ptr::null(),
         cred_grants_len: 0,
         target: crate::process::View {
@@ -428,6 +430,7 @@ fn c_constructor_refuses_missing_grants_bad_descriptors_and_invalid_argv_before_
         exec_bindings: std::ptr::null(),
         exec_bindings_len: 0,
         exec_ops: std::ptr::null(),
+        revision: std::ptr::null(),
         cred_grants: std::ptr::null(),
         cred_grants_len: 0,
         target: crate::process::View {
@@ -533,6 +536,7 @@ fn c_u64_capability_operands_feed_host_requests_and_ok_is_initialized() {
         exec_bindings: std::ptr::null(),
         exec_bindings_len: 0,
         exec_ops: std::ptr::null(),
+        revision: std::ptr::null(),
         cred_grants: std::ptr::null(),
         cred_grants_len: 0,
         target: crate::process::View {
@@ -739,6 +743,7 @@ fn broken_pipe_child() {
             exec_bindings: std::ptr::null(),
             exec_bindings_len: 0,
             exec_ops: std::ptr::null(),
+            revision: std::ptr::null(),
             cred_grants: std::ptr::null(),
             cred_grants_len: 0,
             target: crate::process::View {

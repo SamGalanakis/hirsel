@@ -417,18 +417,20 @@ fn trigger_scan_image(d: Dir, c: Clock, r: Random, tasks: Tasks, options: store.
     let old_digest = trigger_scan_law_bytes(32u64, 1u8)
     let new_digest = trigger_scan_law_bytes(32u64, if same_image { 1u8 } else { 2u8 })
     let new_place = if same_image { code.describe(trigger_scan_law_old) } else { code.describe(trigger_scan_law_new) }
-    let new_n_place = if same_image { n_place * 2u64 } else { n_place }
+    let new_n_place = n_place
     let mut old_reg = result.unwrap(placed(code.describe(trigger_scan_law_old), n_place))
     // Model an older body at the same path and schema, as recorded by OLD.
     if !same_image { old_reg.exported[0u64].revision = trigger_scan_law_bytes(32u64, 3u8) }
     let Registry(exported: take exported, ..) = take old_reg
     let release = result.unwrap(release_digest(exported))
-    let old_desc = result.unwrap(encode_describe(Describe(digest: clone(old_digest),
-        target: "", n_place: n_place, exported: take exported)))
+    let old_description = Describe(digest: clone(old_digest), target: "", n_place: n_place,
+        revision: launch_bytes(launch_env().revision), exported: take exported)
+    let old_binding = result.unwrap(identity_digest(old_description))
+    let old_desc = result.unwrap(encode_describe(old_description))
     let mut staged = result.unwrap(store.stage_migration(db, tasks, code.describe(trigger_law_migrate)))
     let release_codec: std.codec.Codec[ReleaseRecord] = std.codec.of()
     result.unwrap(store.stage_activation(mut staged, 1u64, None, old_desc, release_codec,
-        ReleaseRecord(release: take release, digest: clone(old_digest))))
+        ReleaseRecord(release: take release, digest: clone(old_digest), binding: clone(old_binding), n_place: n_place, prepared: list.new())))
     result.unwrap(store.install_activation(mut db, take staged))
     let tables = result.unwrap(store.with_schema(db, code.describe(triggers.tables)))
 
@@ -463,12 +465,12 @@ fn trigger_scan_image(d: Dir, c: Clock, r: Random, tasks: Tasks, options: store.
     let cancelling_row = option.unwrap(result.unwrap(triggers.next_pending(base, tables, scoped fn(id: triggers.Id) -> bool { id != park_cancel })))
     let parked_row = result.unwrap(triggers.next_pending(base, tables, scoped fn(id: triggers.Id) -> bool { Some(id) != staying }))
     let started = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), triggers.Error] {
-        let _ = triggers.start(mut tx, tables, first, old_digest)?
-        let _ = triggers.start(mut tx, tables, second, old_digest)?
-        let Body(park) = triggers.start(mut tx, tables, cancelling_row, old_digest)? else { return Error(StaleAttempt) }
+        let _ = triggers.start(mut tx, tables, first, old_binding)?
+        let _ = triggers.start(mut tx, tables, second, old_binding)?
+        let Body(park) = triggers.start(mut tx, tables, cancelling_row, old_binding)? else { return Error(StaleAttempt) }
         triggers.hold(mut tx, tables, park, 0u64, list.new(), list.new())?
         if let Some(row_to_park) = parked_row {
-            let Body(hold) = triggers.start(mut tx, tables, row_to_park, old_digest)? else { return Error(StaleAttempt) }
+            let Body(hold) = triggers.start(mut tx, tables, row_to_park, old_binding)? else { return Error(StaleAttempt) }
             triggers.hold(mut tx, tables, hold, 0u64, list.new(), list.new())?
         }
         triggers.request_cancel(mut tx, tables, cancel)?
@@ -483,7 +485,7 @@ fn trigger_scan_image(d: Dir, c: Clock, r: Random, tasks: Tasks, options: store.
     let setup = PrepareConfig(scratch: exported_store.dir, options: clone(options), attempt: clone(attempt), image_digest: clone(new_digest),
         clock: c, tasks: tasks, n_place: new_n_place, place: new_place,
         migrate: code.describe(trigger_scan_law_keep_schema), handles: code.describe(trigger_law_handles), triggers: clone(new_entries))
-    result.unwrap(prepare_export(setup, source, new_digest))
+    result.unwrap(prepare_export(setup, source))
     let raw = result.unwrap(std.file.read(exported_store.dir, "TRIGGERS"))
     let codec: std.codec.Codec[List[TriggerScanRow]] = std.codec.of_list()
     let rows = result.unwrap(std.codec.decode(codec, raw))
@@ -518,7 +520,8 @@ fn trigger_scan_image(d: Dir, c: Clock, r: Random, tasks: Tasks, options: store.
     let mut head = take running
     head.r = result.unwrap(placed(new_place, new_n_place))
     let mut drive = option.unwrap(replace(mut head.trigger_drive, None))
-    drive.revision = clone(new_digest)
+    let new_binding = result.unwrap(trigger_stamp(head.r.exported, new_n_place))
+    drive.revision = clone(new_binding)
     head.trigger_drive = Some(take drive)
     for i in 0u64 .. 8u64 {
         if !result.unwrap(advance_triggers(mut head)) { fail("L40: due trigger did not advance") }
@@ -541,7 +544,7 @@ fn trigger_scan_image(d: Dir, c: Clock, r: Random, tasks: Tasks, options: store.
     } else {
         for id in [kept, lost] {
             match result.unwrap(triggers.hold_mark(snapshot, tables, id)) {
-                Some(Revision(before, after)) => if before != old_digest || after != new_digest { fail("L40: wrong image digests in hold") },
+                Some(Revision(before, after)) => if before != old_binding || after != new_binding { fail("L40: wrong release identities in hold") },
                 _ => fail("L40: changed image did not park the run"),
             }
         }
@@ -593,7 +596,7 @@ fn trigger_scan_last_entry(d: Dir, c: Clock, r: Random, tasks: Tasks, options: s
     let setup = PrepareConfig(scratch: exported_store.dir, options: clone(options), attempt: clone(attempt), image_digest: clone(digest),
         clock: c, tasks: tasks, n_place: n_place, place: code.describe(trigger_scan_law_empty),
         migrate: code.describe(trigger_scan_law_keep_schema), handles: code.describe(trigger_law_handles), triggers: triggers.empty_entries())
-    result.unwrap(prepare_export(setup, source, digest))
+    result.unwrap(prepare_export(setup, source))
     let raw = result.unwrap(std.file.read(exported_store.dir, "TRIGGERS"))
     let codec: std.codec.Codec[List[TriggerScanRow]] = std.codec.of_list()
     let rows = result.unwrap(std.codec.decode(codec, raw))
@@ -619,7 +622,7 @@ fn trigger_scan_last_entry(d: Dir, c: Clock, r: Random, tasks: Tasks, options: s
     let server = task.spawn(tasks, bytes allowance, take job, head_ended)
     if let Ok(Recovered) = channel.receive(events) {} else { fail("L40: serving head did not recover") }
     result.unwrap(channel.send(head_to, HeadContinue))
-    if let Ok(Activated(_, _, _, _)) = channel.receive(events) {} else { fail("L40: serving head did not activate") }
+    if let Ok(Activated(_, _, _, _, _)) = channel.receive(events) {} else { fail("L40: serving head did not activate") }
     result.unwrap(channel.send(head_to, HeadContinue))
     if let Ok(Published(_)) = channel.receive(events) {} else { fail("L40: serving head did not publish") }
     host.sleep_until_wall(c, due)

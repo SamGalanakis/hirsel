@@ -93,7 +93,7 @@ type Operated[G: send, H: send, S: send, B: send]: send {
 // A live child: the host's identity for it, its stop, its status and its task.
 type Kid {
     child: launcher.Child, stop: Option[Sender[()]], status: Latest[runner.Status], task: Option[Task[()]], charge: u64,
-    expect: Option[(u64, u64)], ready: bool,
+    expect: Option[(u64, u64)], ready: bool, selected: launcher.Selection,
 }
 
 type Catalog: send { sessions: store.Table[u64, Bytes], keys: store.Table[Bytes, u64], meta: store.Table[u64, u64] }
@@ -249,7 +249,7 @@ fn selection_of(activation: u64) -> runner.Selection { Current(activation) }
 // Carries out a Start of a serving child: the group's store at root/<workdir>, the
 // activation the host names, and the host's idle bound.
 fn start[T: send](mut a: Actor[T], take l: launcher.Launch, mut events: List[launcher.Event]) waits {
-    let launcher.Launch(group: take group, workdir: take workdir, mode: take mode, ..) = take l
+    let launcher.Launch(group: take group, workdir: take workdir, mode: take mode, assembly: take assembly, ..) = take l
     let role = launcher.role_of(mode)
     if let Install(_) = role {
         list.push(mut events, Refused(launcher.Child(group: clone(group), role: role), Mismatch))
@@ -286,7 +286,7 @@ fn start[T: send](mut a: Actor[T], take l: launcher.Launch, mut events: List[lau
             let Started(task: take running, charge: charged) = take begun
             a.used += charged
             list.push(mut a.kids, Kid(child: clone(child), stop: Some(take stop_to), status: take root, task: Some(take running), charge: charged,
-                expect: serve.store_id, ready: false))
+                expect: serve.store_id, ready: false, selected: launcher.Selection(activation: serve.activation, assembly: take assembly)))
             list.push(mut events, Launched(take child, Started))
         },
         Error(take why) => list.push(mut events, Refused(take child, Spawn(take why))),
@@ -323,7 +323,7 @@ fn carry_out[T: send](mut a: Actor[T], take r: launcher.Request, mut events: Lis
     match take r {
         Hello => {
             let mut children: List[launcher.ChildState] = list.new()
-            for k in a.kids { list.push(mut children, launcher.ChildState(child: clone(k.child), phase: Started)) }
+            for k in a.kids { list.push(mut children, launcher.ChildState(child: clone(k.child), phase: Started, selection: Some(clone(k.selected)), answer: None)) }
             list.push(mut events, Inventory(take children, list.new(), list.new()))
         },
         Bind(take g, _, _, _, _) => list.push(mut events, Bound(take g)),
@@ -425,7 +425,7 @@ fn on_up[T: send](mut a: Actor[T], name: String, gen: u64) waits {
         list.push(mut events, Placed(take child, PlaceStoreMismatch(want.0, want.1, s.store_id.0, s.store_id.1)))
     } else {
         a.kids[i].ready = true
-        let ready = runner.PlaceReady(version: s.activation, store_hi: s.store_id.0, store_lo: s.store_id.1, release: clone(s.release), retain_from: s.retain_from, ready_ns: host.mono_ns(a.clock))
+        let ready = runner.PlaceReady(version: s.activation, store_hi: s.store_id.0, store_lo: s.store_id.1, release: clone(s.release), retain_from: s.retain_from, ready_ns: host.mono_ns(a.clock), read: list.new())
         list.push(mut events, Placed(take child, PlaceOpened(take ready)))
         if let Some(id) = id_of(name) { count_up(mut a, id) }
         if let Some(w) = a.watch { let _ = channel.try_send(w, Up(string.from(name))) }
@@ -475,8 +475,8 @@ fn on_down[T: send](mut a: Actor[T], name: String, gen: u64, take ended: Result[
     let mut events: List[launcher.Event] = list.new()
     let mut failed: Option[String] = None
     if !k.ready {
-        if let Error(Open(NotCurrent(Active(version, description)))) = ended {
-            list.push(mut events, Placed(clone(k.child), PlaceCurrent(version, clone(description))))
+        if let Error(Open(NotCurrent(Active(version, _, read)))) = ended {
+            list.push(mut events, Placed(clone(k.child), PlaceCurrent(version, clone(read))))
         }
         if let Error(e) = ended { failed = Some(start_text(e)) }
     }

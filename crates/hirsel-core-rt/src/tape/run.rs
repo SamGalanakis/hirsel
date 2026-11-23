@@ -1,5 +1,8 @@
 //! Run tapes are owned by process startup. Main receives only substitutes;
 //! Replay constructs its grants from the entry signature, with no host provider.
+mod launch;
+use launch::{read_launch, write_launch};
+
 use super::*;
 use crate::{
     Context,
@@ -92,46 +95,6 @@ unsafe extern "C" fn emit_describe(state: *mut u8, bytes: *const u8, len: usize)
     }
 }
 
-fn write_launch(out: &mut Vec<u8>, launch: &Metadata, managed: bool) {
-    for bytes in [launch.digest(), launch.target().as_bytes()] {
-        put_varint(out, bytes.len() as u64);
-        out.extend_from_slice(bytes);
-    }
-    out.extend_from_slice(&launch.n_place().to_le_bytes());
-    out.push(
-        u8::from(launch.is_describe())
-            | (u8::from(managed) << 1)
-            | (u8::from(launch.is_wake()) << 2),
-    );
-    if launch.is_wake() {
-        out.extend_from_slice(&launch.idle_ms().to_le_bytes());
-    }
-}
-
-fn read_launch(arg: &[u8]) -> Result<(Metadata, bool), Corrupt> {
-    let mut c = Cursor::new(arg);
-    for _ in 0..c.varint()? {
-        c.bytes()?;
-    }
-    let digest = match c.bytes()? {
-        [] => None,
-        bytes => Some(bytes.try_into().map_err(|_| Corrupt)?),
-    };
-    let target = std::str::from_utf8(c.bytes()?).map_err(|_| Corrupt)?;
-    let n_place = u64::from_le_bytes(c.fixed()?);
-    let flags = c.u8()?;
-    if !matches!(flags, 0 | 1 | 2 | 4 | 6) {
-        return Err(Corrupt);
-    }
-    let mut launch = Metadata::embedded(digest, target, n_place, flags == 1);
-    if flags & 4 != 0 {
-        launch = launch.with_wake(u64::from_le_bytes(c.fixed()?));
-    }
-    if !c.done() {
-        return Err(Corrupt);
-    }
-    Ok((launch, flags & 2 != 0))
-}
 unsafe extern "C" fn diagnostic(state: *mut u8, bytes: *const u8, len: usize) {
     // SAFETY: the process pins Run and the caller pins this diagnostic view.
     unsafe {
@@ -401,7 +364,9 @@ unsafe extern "C" fn invoke(
             arg: None,
             across: run.mode == 2,
         };
+        let mut launch_revision = run.revision;
         let opened = if let Some(replay) = run.replay.take() {
+            launch_revision = replay.stored.revision;
             Tape::open_with_startup(run.revision, TapeInput::Replay(replay), &expect)
         } else {
             let (dir, name) = match tape_directory(&mut run.sink, &run.path) {
@@ -448,7 +413,7 @@ unsafe extern "C" fn invoke(
         let (launch, managed) = if run.mode == 0 {
             ((*(*config).launch).clone(), !run.host.is_null())
         } else {
-            match read_launch(&startup.arg) {
+            match read_launch(&startup.arg, launch_revision) {
                 Ok((launch, managed)) => {
                     if (*(*config).launch).digest() != launch.digest() {
                         let label = b"replay: build differs\n";

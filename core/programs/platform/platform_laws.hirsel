@@ -671,7 +671,7 @@ fn answer_current(mut r: Rig, name: String, store_at: u64) waits {
 fn answer_opened(mut r: Rig, name: String, version: u64) waits {
     let ch = last(r, name)
     let mut events: List[launcher.Event] = list.new()
-    list.push(mut events, Placed(take ch, PlaceOpened(runner.PlaceReady(version: version, store_hi: 1u64, store_lo: 2u64, release: release_at(version), retain_from: 0u64, ready_ns: 0u64))))
+    list.push(mut events, Placed(take ch, PlaceOpened(runner.PlaceReady(version: version, store_hi: 1u64, store_lo: 2u64, release: release_at(version), retain_from: 0u64, ready_ns: 0u64, read: list.new()))))
     feed(mut r, take events)
 }
 
@@ -824,7 +824,7 @@ fn release_at(version: u64) -> Bytes {
 }
 
 fn describe_of(digest: Bytes) -> runner.Describe {
-    runner.Describe(digest: clone(digest), target: "t", n_place: 1u64, exported: list.new())
+    runner.Describe(digest: clone(digest), target: "t", n_place: 1u64, revision: clone(digest), exported: list.new())
 }
 
 // OLD's describe child's answer.
@@ -971,16 +971,6 @@ fn names_root(roots: List[Bytes], assembly: Bytes) -> bool {
 fn collection_keeps(mut r: Rig, new: bool, old: bool) -> bool waits {
     let roots = collected_roots(mut r)
     names_root(roots, image_two()) == new && names_root(roots, image()) == old
-}
-
-// A group serving at gen 1 and a deploy prepared but not yet sent: its Start and cutover.
-fn cut_case(c: Clock, rnd: Random) -> (Rig, launcher.Child, List[launcher.Request]) waits {
-    let mut r = rig(c, rnd, 4u64)
-    add(mut r, "g", "t")
-    op_wake(mut r, "g")
-    let old = last(r, "g")
-    let go = prepared(mut r, old)
-    (take r, old, take go)
 }
 
 // The deploy committed once: OLD got one cutover, the row is Dirty(2) with NEW's assembly
@@ -1245,7 +1235,7 @@ fn cutover_survives_host_loss(c: Clock, rnd: Random) -> Result[(), ()] waits {
     let mut u2 = restart(take u, 4u64)
     expect(is_dirty(u2, "g", 1u64) && launcher.held(u2.f) == 1u64, "L44 Uncertain: decided before the candidate opened")
     let mut opened: List[launcher.Event] = list.new()
-    list.push(mut opened, Placed(clone(new6), PlaceOpened(runner.PlaceReady(version: 2u64, store_hi: 0u64, store_lo: 0u64, release: release_two(), retain_from: 0u64, ready_ns: 0u64))))
+    list.push(mut opened, Placed(clone(new6), PlaceOpened(runner.PlaceReady(version: 2u64, store_hi: 1u64, store_lo: 2u64, release: release_two(), retain_from: 0u64, ready_ns: 0u64, read: cutover_read(2u64)))))
     feed(mut u2, take opened)
     expect(is_dirty(u2, "g", 2u64) && committed_once(u2), "L44 Uncertain: the candidate's open at v did not commit")
     expect(collection_keeps(mut u2, true, true), "L44 Uncertain: a collection did not keep NEW's root and the retained OLD")
@@ -1301,13 +1291,13 @@ fn cutover_survives_host_loss(c: Clock, rnd: Random) -> Result[(), ()] waits {
     old_says(mut pr2, old8, PlaceAborted)
     expect(failed_with(pr2, "interrupted before the cutover") && rooted_at(pr2, image(), 1u64) && is_dirty(pr2, "g", 1u64), "L44 while preparing: OLD's abort answer did not fail the deploy with OLD's root kept")
     expect(collection_keeps(mut pr2, false, true), "L44 while preparing: the failed deploy's NEW was still a root")
-    // A preview that does not describe NEW's image stops the deploy before OLD exports.
     let mut pv = rig(c, rnd, 4u64)
     add(mut pv, "g", "t")
     op_wake(mut pv, "g")
     let old9 = last(pv, "g")
     to_export(mut pv, old9, preview_answer(image(), release_two()))
     expect(asked_of(pv, 1u64) == 0u64 && failed_with(pv, "preview does not describe the selected assembly") && gens(pv, "g") == one(1u64), "L44 preview mismatch: OLD was asked to export, or the deploy did not fail")
+    release_recovery_traces(c, rnd)
     Ok(())
 }
 
@@ -1381,9 +1371,9 @@ fn place_answers(mut r: Rig, store_at: u64) waits {
         fail("no serving start to answer")
     }
     let reply: runner.HostReply = if selected == store_at {
-        PlaceOpened(runner.PlaceReady(version: store_at, store_hi: 0u64, store_lo: 0u64, release: release_at(store_at), retain_from: 0u64, ready_ns: 0u64))
+        PlaceOpened(runner.PlaceReady(version: store_at, store_hi: 1u64, store_lo: 2u64, release: release_at(store_at), retain_from: 0u64, ready_ns: 0u64, read: cutover_read(store_at)))
     } else {
-        PlaceCurrent(store_at, list.new())
+        PlaceCurrent(store_at, cutover_read(store_at))
     }
     let mut events: List[launcher.Event] = list.new()
     list.push(mut events, Placed(take ch, take reply))
@@ -1406,7 +1396,7 @@ fn seed_clean(mut r: Rig, n: u64, due: u64) waits {
                 for i in lo .. upto {
                     let mut name = string.from("bulk-")
                     string.push_uint(mut name, i, 10u32, 6u64, '0')
-                    let g = GroupRow(tenant: "bulk", workdir: string.from(name), author: Trusted, label: Uncontained, listen: "127.0.0.1:0", bindings: uncontained(), limits: unlimited(), assembly: image(), activation: 1u64, retained: list.new(), store_id: None, incarnation: 1000000u64 + i, retiring: None, args: list.new(), record: None)
+                    let g = GroupRow(tenant: "bulk", workdir: string.from(name), author: Trusted, label: Uncontained, listen: "127.0.0.1:0", bindings: uncontained(), limits: unlimited(), assembly: image(), activation: 1u64, retained: list.new(), recovery: None, store_id: None, incarnation: 1000000u64 + i, retiring: None, args: list.new(), record: None)
                     st(store.put(mut tx, t.groups, name, g))?
                     let at: Option[u64] = if i < due {
                         Some(T0 + 10u64)

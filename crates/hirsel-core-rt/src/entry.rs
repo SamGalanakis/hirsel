@@ -1,6 +1,9 @@
 //! FORM decision 44: capabilities and Args are plain u64 provider handles.
 //! Config.grants is in main parameter order; the run closes its grants after
 //! main's cleanup. Grant closure cannot allocate, admit or fail.
+#[path = "entry_launch.rs"]
+mod launch_options;
+
 use crate::{
     Context,
     os::{DirectoryOperations, OsProvider, hirsel_core_os_directory_ops},
@@ -216,6 +219,8 @@ pub struct OsConfig {
     /// One `[parameter, source, policy]` record per Cred parameter (TLS-7).
     pub cred_grants: *const [View; 3],
     pub cred_grants_len: usize,
+    /// The entry revision, or null for an embedder without one.
+    pub revision: *const [u8; 32],
 }
 impl OsConfig {
     pub(crate) fn with_default_operations(&self) -> Self {
@@ -441,7 +446,6 @@ impl OsProcess {
     pub(crate) fn host_launch(&self) -> Option<&HostLaunch> {
         self.host.as_ref()
     }
-
     #[cfg_attr(hirsel_runtime_size, optimize(size))]
     /// Matching socket activation metadata is consumed during process startup,
     /// before other threads can access the environment.
@@ -458,96 +462,23 @@ impl OsProcess {
                 std::str::from_utf8(value)
                     .map_err(|_| io::Error::from_raw_os_error(libc::EILSEQ))?;
             }
-            let mut n_place = hirsel_core_ids::launch::DEFAULT_N_PLACE;
-            let mut describe_mode = false;
-            let mut preview_mode = false;
-            let mut wake = false;
-            let mut install_child = None;
-            let mut idle_ms = None;
-            let mut store_id = None;
-            let mut prefix = 0;
-            let mut exec_approvals = Vec::new();
-            for argument in argv.clone() {
-                if let Some(approval) = argument.strip_prefix(b"--hirsel-exec=")
-                    && input.exec_bindings_len != 0
-                {
-                    exec_approvals.push(approval);
-                } else if argument == b"--hirsel-describe" || argument == b"--hirsel-preview" {
-                    if describe_mode {
-                        return Err(io::Error::from_raw_os_error(libc::EINVAL).into());
-                    }
-                    describe_mode = true;
-                    preview_mode = argument == b"--hirsel-preview";
-                } else if let Some(value) = argument.strip_prefix(b"--hirsel-install-child=") {
-                    install_child = Some(
-                        std::str::from_utf8(value)
-                            .ok()
-                            .and_then(|value| value.parse::<u64>().ok())
-                            .ok_or_else(|| io::Error::from_raw_os_error(libc::EINVAL))?,
-                    );
-                    prefix += 1;
-                    break;
-                } else if argument == b"--hirsel-wake" {
-                    if wake {
-                        return Err(io::Error::from_raw_os_error(libc::EINVAL).into());
-                    }
-                    wake = true;
-                } else if let Some(value) = argument.strip_prefix(b"--hirsel-idle=") {
-                    if idle_ms.is_some() {
-                        return Err(io::Error::from_raw_os_error(libc::EINVAL).into());
-                    }
-                    let idle = std::str::from_utf8(value)
-                        .ok()
-                        .and_then(|value| value.parse::<u64>().ok())
-                        .filter(|idle| *idle != 0)
-                        .ok_or_else(|| io::Error::from_raw_os_error(libc::EINVAL))?;
-                    idle_ms = Some(idle);
-                } else if let Some(value) = argument.strip_prefix(b"--hirsel-store-id=") {
-                    let parsed = std::str::from_utf8(value).ok().and_then(|value| {
-                        if value.len() != 32 || !value.as_bytes().iter().all(u8::is_ascii_hexdigit)
-                        {
-                            return None;
-                        }
-                        let (hi, lo) = value.split_at(16);
-                        Some((
-                            u64::from_str_radix(hi, 16).ok()?,
-                            u64::from_str_radix(lo, 16).ok()?,
-                        ))
-                    });
-                    if store_id.is_some() || parsed.is_none() {
-                        return Err(io::Error::from_raw_os_error(libc::EINVAL).into());
-                    }
-                    store_id = parsed;
-                } else if let Some(value) = argument.strip_prefix(b"--hirsel-n-place=") {
-                    n_place = std::str::from_utf8(value)
-                        .ok()
-                        .and_then(|v| v.parse().ok())
-                        .ok_or_else(|| io::Error::from_raw_os_error(libc::EINVAL))?;
-                } else {
-                    break;
-                }
-                prefix += 1;
-            }
-            let args: Vec<_> = argv.skip(prefix).map(<[u8]>::to_vec).collect();
-            let prepare_path = if args.first().is_some_and(|arg| arg == b"--hirsel-prepare") {
-                if describe_mode || args.len() != 4 || input.directories_len == 0 {
-                    return Err(io::Error::from_raw_os_error(libc::EINVAL).into());
-                }
-                let dir = Path::new(OsStr::from_bytes(&args[1]));
-                if !dir.is_absolute() {
-                    return Err(io::Error::from_raw_os_error(libc::EINVAL).into());
-                }
-                Some(dir)
-            } else {
-                None
-            };
+            let options = launch_options::parse(argv.clone(), input.exec_bindings_len != 0)?;
+            let args: Vec<_> = argv.skip(options.prefix).map(<[u8]>::to_vec).collect();
+            let prepare_path = options.prepare_path(&args, input.directories_len)?;
+            let launch_options::LaunchOptions {
+                n_place,
+                n_place_explicit,
+                describe_mode,
+                preview_mode,
+                wake,
+                install_child,
+                idle_ms,
+                store_id,
+                witness,
+                exec_approvals,
+                ..
+            } = options;
             let installing = install_child.is_some();
-            if (wake && (describe_mode || prepare_path.is_some() || installing))
-                || (installing && (describe_mode || prepare_path.is_some()))
-                || (!wake && (idle_ms.is_some() || store_id.is_some()))
-            {
-                return Err(io::Error::from_raw_os_error(libc::EINVAL).into());
-            }
             let digest = receive_launch_image()?;
             // Fd 3 is the inherited listener and fd 4 is the control socket.
             // Take the launcher's dedicated report descriptor before opening grants.
@@ -571,11 +502,13 @@ impl OsProcess {
             let mut launch = match digest {
                 Some(digest) => Metadata::embedded(Some(digest), target, n_place, describe_mode),
                 None => launch_metadata(target, n_place, describe_mode),
-            };
+            }
+            .with_launch_identity(input.revision.as_ref().copied(), n_place_explicit);
             if wake {
                 launch = launch
                     .with_wake(idle_ms.unwrap_or_default())
-                    .with_store_id(store_id);
+                    .with_store_id(store_id)
+                    .with_witness(witness);
             }
             if prepare_path.is_some() {
                 launch = launch.with_prepare(prepare_hex(&args[2])?, prepare_hex(&args[3])?);

@@ -255,6 +255,7 @@ pub struct Describe {
     pub digest: Vec<u8>,
     pub target: String,
     pub n_place: u64,
+    pub revision: Vec<u8>,
     pub exported: Vec<Exported>,
 }
 impl Describe {
@@ -269,6 +270,7 @@ impl Describe {
         let digest = r.bytes()?;
         let target = r.name()?;
         let n_place = r.word()?;
+        let revision = r.bytes()?;
         let n = r.count()?;
         let mut exported = Vec::new();
         for _ in 0..n {
@@ -290,6 +292,7 @@ impl Describe {
             digest,
             target,
             n_place,
+            revision,
             exported,
         })
     }
@@ -547,6 +550,7 @@ mod tests {
             digest: vec![1],
             target: "t".into(),
             n_place: 16,
+            revision: vec![],
             exported: vec![entry("a", "toggle"), entry("b", "toggle")],
         };
         let dir = tempfile::tempdir().unwrap();
@@ -584,6 +588,7 @@ mod tests {
             digest: vec![1, 2],
             target: "x86_64-unknown-linux-gnu".into(),
             n_place: u64::MAX,
+            revision: vec![],
             exported: vec![entry("m", "toggle"), query],
         };
         let files = generate(&d).unwrap();
@@ -602,9 +607,9 @@ mod tests {
     }
     #[test]
     fn sdk_describe_and_nominal_schemas() {
-        // Describe {digest: [], target: "t", n_place: 17, exported: []}.
+        // Describe {digest: [], target: "t", n_place: 17, revision: [], exported: []}.
         let bytes = [
-            0, 0, 0, 0, 1, 0, 0, 0, b't', 17, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 1, 0, 0, 0, b't', 17, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         ];
         let describe = Describe::read(&bytes).unwrap();
         assert_eq!(describe.target, "t");
@@ -662,6 +667,7 @@ mod tests {
         blob(&mut bytes, &[]);
         blob(&mut bytes, b"t");
         bytes.extend_from_slice(&17u64.to_le_bytes());
+        blob(&mut bytes, &[42; 32]);
         bytes.extend_from_slice(&1u32.to_le_bytes());
         bytes.extend_from_slice(&1u32.to_le_bytes());
         blob(&mut bytes, &e.identity);
@@ -671,6 +677,7 @@ mod tests {
         bytes.extend_from_slice(&e.result_fp.to_le_bytes());
         blob(&mut bytes, &e.revision);
         let description = Describe::read(&bytes).unwrap();
+        assert_eq!(description.revision, [42; 32]);
         assert_eq!(description.exported[0].args_fp, u64::MAX);
         assert_eq!(description.exported[0].result_fp, 7);
         assert_eq!(description.exported[0].revision, e.revision);

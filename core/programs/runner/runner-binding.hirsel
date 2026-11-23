@@ -123,6 +123,8 @@ type LaunchBytes { field: u64, size: u64 }
 
 type LaunchEnv {
     n_place: u64,
+    n_place_explicit: bool,
+    revision: LaunchBytes,
     digest: LaunchBytes,
     target: LaunchBytes,
     describe: bool,
@@ -132,6 +134,7 @@ type LaunchEnv {
     idle: Option[u64],
     store_id: Option[(u64, u64)],
     install: Option[u64],
+    witness: u64,
 }
 
 fn launch_env() -> LaunchEnv {
@@ -141,9 +144,10 @@ fn launch_env() -> LaunchEnv {
     let idle: Option[u64] = if idle_ms == 0u64 { None } else { Some(idle_ms) }
     let store_id = if launch_word(14u64, 0u64) != 0u64 { Some((launch_word(14u64, 1u64), launch_word(14u64, 2u64))) } else { None }
     let install_at = if launch_word(15u64, 0u64) != 0u64 { Some(launch_word(15u64, 1u64)) } else { None }
-    LaunchEnv(n_place: launch_word(0u64, 0u64), digest: launch_image(), target: launch_target_bytes(),
+    LaunchEnv(n_place: launch_word(0u64, 0u64), n_place_explicit: launch_word(16u64, 0u64) != 0u64,
+        revision: LaunchBytes(field: 18u64, size: launch_word(17u64, 0u64)), digest: launch_image(), target: launch_target_bytes(),
         describe: launch_word(5u64, 0u64) != 0u64, preview: preview, prepare: prepare_mode, wake: launch_word(12u64, 0u64) != 0u64,
-        idle: idle, store_id: store_id, install: install_at)
+        idle: idle, store_id: store_id, install: install_at, witness: launch_word(19u64, 0u64))
 }
 
 fn launch_image() -> LaunchBytes { LaunchBytes(field: 2u64, size: launch_word(1u64, 0u64)) }

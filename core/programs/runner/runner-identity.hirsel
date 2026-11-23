@@ -1,0 +1,89 @@
+pub type ReleaseIdentity: codec + send { revision: Bytes, n_place: u64, exported: List[Exported] }
+
+pub fn identity_digest(description: Describe) -> Result[Bytes, RegisterError] {
+    if list.len(description.revision) != 32u64 { return Error(Bounds) }
+    let identity = ReleaseIdentity(revision: clone(description.revision), n_place: description.n_place, exported: clone(description.exported))
+    let codec: std.codec.Codec[ReleaseIdentity] = std.codec.of()
+    let mut payload: Bytes = list.new()
+    std.codec.encode(codec, identity, mut payload) ?=> |_| Bounds
+    let mut hash = std.sha256.start()
+    let domain = string.as_bytes("hirsel.identity.v1")
+    std.sha256.add_byte(mut hash, 18u8)
+    std.sha256.add(mut hash, domain, 0u64, list.len(domain))
+    std.sha256.add(mut hash, payload, 0u64, list.len(payload))
+    let digest = std.sha256.finish(hash)
+    let mut out: Bytes = list.with_capacity(32u64)
+    for byte in digest { list.push(mut out, byte) }
+    Ok(take out)
+}
+
+pub fn decode_description(raw: Bytes) -> Option[Describe] {
+    let codec: std.codec.Codec[Describe] = std.codec.of()
+    match std.codec.decode(codec, raw) {
+        Ok(take description) => Some(take description),
+        Error(_) => None,
+    }
+}
+
+pub type ReleaseRecord: codec + send { release: Bytes, digest: Bytes, binding: Bytes, n_place: u64, prepared: Bytes }
+
+pub type PlaceRead: codec + send {
+    store_hi: u64,
+    store_lo: u64,
+    binding: Bytes,
+    n_place: u64,
+    prepared: Bytes,
+}
+
+fn release_record(db: store.Db, version: u64) -> Result[Option[ReleaseRecord], store.Error] {
+    let codec: std.codec.Codec[ReleaseRecord] = std.codec.of()
+    let table = store.system_table(db, "hirsel.runner.releases", std.codec.key_u64(), codec)?
+    store.get(store.snapshot(db), store.shape(table), version)
+}
+
+// Call under the open store's lock. A failed capture leaves the refusal useful
+// as a start outcome, but supplies no evidence for a recovery decision.
+fn capture_release(db: store.Db, version: u64, witness: u64) -> Result[Bytes, store.Error] {
+    let Some(current) = release_record(db, version)? else { return Error(Missing("activation release")) }
+    let prepared: Bytes = if witness == 0u64 {
+        list.new()
+    } else if witness == version {
+        clone(current.prepared)
+    } else {
+        match release_record(db, witness)? { Some(record) => clone(record.prepared), None => list.new() }
+    }
+    let (hi, lo) = store.identity_words(db)
+    let read = PlaceRead(store_hi: hi, store_lo: lo, binding: clone(current.binding), n_place: current.n_place, prepared: take prepared)
+    let mut raw: Bytes = list.new()
+    let codec: std.codec.Codec[PlaceRead] = std.codec.of()
+    std.codec.encode(codec, read, mut raw) ?=> |_| Limit(Value)
+    Ok(take raw)
+}
+
+fn not_current_activation(db: store.Db, version: u64, take description: Bytes) -> OpenError {
+    let read = match capture_release(db, version, launch_env().witness) {
+        Ok(take raw) => take raw,
+        Error(_) => list.new(),
+    }
+    NotCurrent(Active(version, take description, take read))
+}
+
+fn prepare_activation[G: send, H: send](r: Registry[G, H], n_place: u64) -> Result[(Bytes, ReleaseRecord), RegisterError] {
+    let release = release_digest(r.exported) ?=> |_| Bounds
+    let launch = launch_env()
+    let image = launch_bytes(launch.digest)
+    let target = owned_launch_target(launch.target)
+    let description = Describe(digest: take image, target: take target, n_place: n_place, revision: launch_bytes(launch.revision), exported: clone(r.exported))
+    let binding: Bytes = if launch.revision.size == 0u64 { list.new() } else { identity_digest(description)? }
+    let payload = encode_describe(description) ?=> |_| Bounds
+    let Describe(digest: take digest, ..) = take description
+    Ok((take payload, ReleaseRecord(release: take release, digest: take digest, binding: take binding, n_place: n_place, prepared: list.new())))
+}
+
+fn trigger_stamp(exported: List[Exported], n_place: u64) -> Result[Bytes, store.Error] {
+    let entry = launch_env().revision
+    if entry.size == 0u64 { return Ok(list.new()) }
+    let revision = launch_bytes(entry)
+    let identity = Describe(digest: list.new(), target: string.new(), n_place: n_place, revision: take revision, exported: clone(exported))
+    Ok(identity_digest(identity) ?=> |_| Limit(Value))
+}

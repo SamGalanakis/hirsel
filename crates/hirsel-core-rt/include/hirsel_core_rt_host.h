@@ -207,6 +207,9 @@ typedef struct {
     const void *exec_bindings;
     size_t exec_bindings_len;
     const void *exec_ops;
+    const HirselCoreView (*cred_grants)[3];
+    size_t cred_grants_len;
+    const uint8_t (*revision)[32];
 } HirselCoreOsConfig;
 typedef struct HirselCoreOsProcess HirselCoreOsProcess;
 typedef struct { HirselCoreOsProcess *process; HirselCoreIoError error; } HirselCoreOpenProcess;

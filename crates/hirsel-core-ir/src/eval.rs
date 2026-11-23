@@ -11,6 +11,7 @@
 //! producer's code. Provider rows run against a modelled provider ([`World`]).
 
 mod conn;
+mod launch;
 mod map;
 mod simd;
 
@@ -1589,20 +1590,7 @@ fn run_world(
         mach.mem[split(p).0].bytes.copy_from_slice(&bytes);
         mach.mem[split(p).0].fixed = true;
     }
-    let target = mach
-        .world
-        .launch
-        .as_ref()
-        .unwrap()
-        .target()
-        .as_bytes()
-        .to_vec();
-    if !target.is_empty() {
-        let target_data = mach.block(target.len() as u64, None, 0, None);
-        mach.mem[split(target_data).0].bytes.clone_from(&target);
-        mach.mem[split(target_data).0].fixed = true;
-        mach.world.launch_target = (target_data, target.len() as u64);
-    }
+    launch::install(&mut mach, f, input.revisions);
     for a in input.argv {
         let carrier = mach.host_view(a.as_bytes());
         mach.world.args.push(carrier);

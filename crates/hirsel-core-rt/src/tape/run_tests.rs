@@ -6,6 +6,8 @@ pub(in crate::tape) fn check_launch_replay() {
         digest: Vec<u8>,
         target: Vec<u8>,
         n_place: u64,
+        explicit: u64,
+        revision: Vec<u8>,
         describe: u64,
         emitted: bool,
     }
@@ -23,6 +25,8 @@ pub(in crate::tape) fn check_launch_replay() {
                 digest: (0..word(1, 0)).map(|i| word(2, i) as u8).collect(),
                 target: std::slice::from_raw_parts(target.data, target.len).to_vec(),
                 n_place: word(0, 0),
+                explicit: word(16, 0),
+                revision: (0..word(17, 0)).map(|i| word(18, i) as u8).collect(),
                 describe: word(5, 0),
                 emitted: process::hirsel_core_describe_emit(
                     context,
@@ -105,6 +109,7 @@ pub(in crate::tape) fn check_launch_replay() {
             exec_ops: std::ptr::null(),
             cred_grants: std::ptr::null(),
             cred_grants_len: 0,
+            revision: &[7; 32],
             target: View {
                 data: target.as_ptr(),
                 len: target.len(),
@@ -133,6 +138,8 @@ pub(in crate::tape) fn check_launch_replay() {
     assert_eq!(recorded.digest.len(), 32);
     assert_eq!(recorded.target, b"record-target");
     assert_eq!(recorded.n_place, 73);
+    assert_eq!(recorded.explicit, 1);
+    assert_eq!(recorded.revision, [7; 32]);
     assert_eq!(recorded.describe, 1);
     assert!(recorded.emitted);
     assert!(

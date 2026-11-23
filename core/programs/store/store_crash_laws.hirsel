@@ -181,7 +181,7 @@ fn install_next(mut phase: Migration) -> Result[(), Error] {
     migration_migrate(mut phase, take second, take replacement, crash_thousand)
 }
 
-fn install_target_value(target: PreparedTarget) -> Result[Bytes, DeployError] {
+fn install_target_value(target: PreparedTarget, _witness: Inline[u8, 32]) -> Result[Bytes, DeployError] {
     deploy_result(copied(target.release))
 }
 

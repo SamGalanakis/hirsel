@@ -1695,7 +1695,7 @@ pub fn law_restart_reopens(parent: Dir, clock: Clock, random: Random, tasks: Tas
     other.place = code.describe(fixture_place)
     let (refusing, _held, _phases, _) = start_managed(tasks, take other, false)
     let refused = match task.join(take refusing) {
-        Ok(Error(Open(NotCurrent(Active(version, _))))) => version == installed,
+        Ok(Error(Open(NotCurrent(Active(version, _, _))))) => version == installed,
         _ => false,
     }
     let check = result.unwrap(store.open(tasks, dir, clock, random, disk_options()))

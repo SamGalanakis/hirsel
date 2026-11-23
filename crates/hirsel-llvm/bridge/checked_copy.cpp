@@ -1041,6 +1041,7 @@ static void inlineLoopHelpers(Module &M) {
       CallBase *Call;
       int Entry;
       size_t UnwindGroup;
+      const DISubprogram *Origin;
     };
     SmallVector<Candidate, 16> Pending;
     DenseMap<BasicBlock *, SmallVector<size_t, 4>> UnwindGroups;
@@ -1072,19 +1073,38 @@ static void inlineLoopHelpers(Module &M) {
             Group = *Same + 1;
           }
         }
-        Pending.push_back({C, -1, Group});
+        Pending.push_back({C, -1, Group, nullptr});
       }
     }
     DenseSet<size_t> ExpandedUnwinds;
-    unsigned Budget = 2048;
+    constexpr unsigned Limit = 2048;
+    unsigned Budget = Limit;
+    DenseMap<const DISubprogram *, unsigned> SourceBudgets;
     while (!Pending.empty()) {
-      auto [Call, Entry, Group] = Pending.pop_back_val();
+      auto [Call, Entry, Group, Origin] = Pending.pop_back_val();
       Function *Target = Call->getCalledFunction();
       if (!Target || Target->isDeclaration() || Target == &F || Deep(Target, Entry) ||
           Target->hasFnAttribute(Attribute::NoInline) ||
           Call->hasFnAttr(Attribute::NoInline)) continue;
       unsigned Cost = expansionCost(*Target);
-      if (Cost > Budget) continue;
+      if (Cost > Limit) continue;
+      unsigned Price = Cost;
+      auto UnswitchSize = Target->getFnAttribute("hirsel.pre-unswitch-size");
+      if (UnswitchSize.isValid()) {
+        unsigned Before;
+        if (!UnswitchSize.getValueAsString().getAsInteger(10, Before))
+          Price = std::min(Cost, Before);
+      }
+      if (!Origin && Cost > Budget) {
+        // If unswitching made a helper too expensive, price it against the
+        // body that owned the call before ordinary inlining merged it.
+        auto Loc = Call->getDebugLoc();
+        if (Price == Cost || !Loc || !Loc->getInlinedAt()) continue;
+        Origin = Loc->getScope()->getSubprogram();
+      }
+      unsigned &Remaining = Origin ? SourceBudgets.try_emplace(Origin, Limit).first->second : Budget;
+      unsigned Charge = Origin ? Price : Cost;
+      if (Charge > Remaining) continue;
       bool Recursive = Mutual(Target, &F);
       if (Recursive && RecursiveGrowth[Target] + Cost > 450) continue;
       // A looping helper amortizes its call. Repeating the same expansion
@@ -1096,12 +1116,12 @@ static void inlineLoopHelpers(Module &M) {
       }
       InlineFunctionInfo Info;
       if (InlineFunction(*Call, Info, true).isSuccess()) {
-        Budget -= Cost;
+        Remaining -= Charge;
         if (Recursive) RecursiveGrowth[Target] += Cost;
         if (Group) ExpandedUnwinds.insert(Group);
         History.push_back({Target, Entry});
         for (CallBase *Site : Info.InlinedCallSites)
-          Pending.push_back({Site, int(History.size()) - 1, 0});
+          Pending.push_back({Site, int(History.size()) - 1, 0, Origin});
       }
     }
   }

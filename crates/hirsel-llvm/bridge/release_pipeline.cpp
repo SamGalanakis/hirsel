@@ -502,6 +502,26 @@ public:
     }
 };
 
+// Keep the price before nontrivial unswitching duplicates an infallible
+// helper's loop. The late inliner still checks the full size of each copy.
+class PriceUnswitchPass : public OptionalPassInfoMixin<PriceUnswitchPass> {
+    SimpleLoopUnswitchPass unswitch{/*NonTrivial=*/true};
+
+public:
+    PreservedAnalyses run(Loop &loop, LoopAnalysisManager &analyses,
+                          LoopStandardAnalysisResults &results, LPMUpdater &updater) {
+        Function &f = *loop.getHeader()->getParent();
+        if (!f.getName().ends_with(".infallible") || f.hasFnAttribute("hirsel.pre-unswitch-size"))
+            return unswitch.run(loop, analyses, results, updater);
+        unsigned before = f.getInstructionCount();
+        auto preserved = unswitch.run(loop, analyses, results, updater);
+        if (!preserved.areAllPreserved() && f.getInstructionCount() > before) {
+            f.addFnAttr("hirsel.pre-unswitch-size", std::to_string(before));
+        }
+        return preserved;
+    }
+};
+
 // These LLVM 23.1 O3 pass settings have no equivalent in the pipeline parser.
 using CounterRangeReport = void (*)(void *, const char *, size_t, unsigned);
 
@@ -538,13 +558,17 @@ void registerReleasePasses(PassBuilder &builder, CounterRangeReport report, hirs
         });
     builder.registerPipelineParsingCallback(
         [](StringRef name, LoopPassManager &passes, ArrayRef<PassBuilder::PipelineElement>) {
+            if (name == "priced-unswitch") {
+                passes.addPass(PriceUnswitchPass());
+                return true;
+            }
             if (name == "full-unroll") {
                 passes.addPass(LoopFullUnrollPass(3));
                 return true;
             }
             if (name == "extra-unswitch") {
                 ExtraLoopPassManager<ShouldRunExtraSimpleLoopUnswitch> extra;
-                extra.addPass(SimpleLoopUnswitchPass(/*NonTrivial=*/true));
+                extra.addPass(PriceUnswitchPass());
                 passes.addPass(std::move(extra));
                 return true;
             }
@@ -636,7 +660,7 @@ extern "C" LLVMErrorRef hirsel_llvm_optimize_release(
             "aggressive-instcombine,libcalls-shrinkwrap,tailcallelim,implied-check-hoist,"
             "simplifycfg<switch-range-to-icmp>,reassociate,constraint-elimination,invariant-arm-sink,"
             "loop-mssa(loop-instsimplify,loop-simplifycfg,licm<no-allowspeculation>,"
-                      "loop-rotate,licm<allowspeculation>,simple-loop-unswitch<nontrivial;trivial>),"
+                      "loop-rotate,licm<allowspeculation>,priced-unswitch),"
             "simplifycfg<switch-range-to-icmp>,instcombine<no-verify-fixpoint>,counted-exit-split,"
             "loop(loop-idiom,indvars,simple-loop-unswitch<trivial>,extra-unswitch,loop-deletion,full-unroll),counter-range,"
             "sroa<modify-cfg>,early-vector-combine,mldst-motion,gvn,sccp,bdce,instcombine<no-verify-fixpoint>,"

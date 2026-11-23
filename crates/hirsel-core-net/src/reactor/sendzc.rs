@@ -10,10 +10,13 @@
 //! bytes rather than free memory the kernel may still read.
 //!
 //! Each slot is registered as a fixed buffer while it holds bytes, at its own
-//! index of a sparse table, so a send pins no pages per call. An idle slot
-//! keeps its bytes only in the ring's small pool ([`POOL`]); beyond it, the
-//! slot is unregistered and its bytes freed. A connection that is not sending
-//! holds no slot. A refused registration (a memory-lock limit) leaves the slot
+//! index of a sparse table, so a send pins no pages per call. A slot that
+//! ends idle keeps its bytes for the next send while sends continue, as many
+//! as the busiest moment needed (a stalled peer holds a socket buffer's worth
+//! awaiting notifications), so steady sending allocates nothing. Once a full
+//! [`TRIM`] passes with no slot taken, the driver turn unregisters and frees
+//! every idle slot: a ring that stopped sending holds no slot bytes, and a
+//! connection that is not sending never holds a slot. A refused registration (a memory-lock limit) leaves the slot
 //! unregistered, and its sends name its bytes directly.
 use super::{Backend, Poller, Uring};
 use std::{
@@ -32,8 +35,9 @@ pub(super) const REGISTERED: u32 = 64;
 /// kernel copied the data after all (`IORING_NOTIF_USAGE_ZC_COPIED`).
 const REPORT_USAGE: u16 = 1 << 3;
 const ZC_COPIED: u32 = 1 << 31;
-/// Idle slots the ring keeps registered for the next sends.
-pub const POOL: usize = 4;
+/// How long idle slots outlive the last slot taken; a blocking driver turn
+/// waits at most this long while any are kept.
+pub(super) const TRIM: std::time::Duration = std::time::Duration::from_secs(1);
 
 pub(super) fn is_tx(user_data: u64) -> bool {
     user_data & TX_MASK == TX
@@ -65,6 +69,10 @@ pub(super) struct Table {
     free: Vec<u32>,
     /// Idle entries that keep their (registered) bytes.
     idle: Vec<u32>,
+    /// Slots taken so far, and the count and time at the last trim check.
+    taken: u64,
+    trim_seen: u64,
+    trim_since: Option<std::time::Instant>,
     /// Notifications whose data the kernel copied after all.
     pub(super) copied: u64,
     pub(super) notified: u64,
@@ -141,6 +149,7 @@ impl Poller {
                 index
             }
         };
+        table.taken += 1;
         let entry = &mut table.entries[index as usize];
         entry.held = true;
         entry.result = None;
@@ -301,20 +310,50 @@ impl Uring {
         };
     }
 
-    /// An entry neither held nor busy: pool its bytes or free them.
+    /// An entry neither held nor busy keeps its bytes for the next send.
     fn recycle(&self, table: &mut Table, index: u32) {
-        let entry = &mut table.entries[index as usize];
-        entry.result = None;
-        if table.idle.len() < POOL {
-            table.idle.push(index);
+        table.entries[index as usize].result = None;
+        table.idle.push(index);
+    }
+
+    /// Whether idle slots wait for a trim, so a blocking turn must wake for it.
+    pub(super) fn tx_kept(&self) -> bool {
+        !self.tx().idle.is_empty()
+    }
+
+    /// Under the driver turn: free every idle slot once a full [`TRIM`] has
+    /// passed with none taken.
+    pub(super) fn trim(&self) {
+        let mut table = self.tx();
+        if table.idle.is_empty() {
+            table.trim_since = None;
             return;
         }
-        if entry.registered {
-            self.unregister(index);
-            entry.registered = false;
+        let now = std::time::Instant::now();
+        let taken = table.taken;
+        match table.trim_since {
+            Some(since) if table.trim_seen == taken => {
+                if now.duration_since(since) < TRIM {
+                    return;
+                }
+            }
+            _ => {
+                table.trim_seen = taken;
+                table.trim_since = Some(now);
+                return;
+            }
         }
-        entry.bytes = Box::default();
-        table.free.push(index);
+        table.trim_since = None;
+        let table = &mut *table;
+        for index in table.idle.drain(..) {
+            let entry = &mut table.entries[index as usize];
+            if entry.registered {
+                self.unregister(index);
+                entry.registered = false;
+            }
+            entry.bytes = Box::default();
+            table.free.push(index);
+        }
     }
 
     /// Apply one transmit completion. Returns the tag to ready, if any.

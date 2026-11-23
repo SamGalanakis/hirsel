@@ -16,7 +16,7 @@ use std::{
     sync::{Arc, Mutex, MutexGuard, OnceLock, TryLockError},
 };
 mod sendzc;
-pub use sendzc::{POOL as TX_POOL, TxSlot, TxState};
+pub use sendzc::{TxSlot, TxState};
 
 const POLL_BATCH: i32 = 128;
 /// The wake eventfd's tag.
@@ -654,9 +654,18 @@ impl Uring {
     fn wait(&self, out: &mut [libc::epoll_event], timeout_ms: i32, wake: i32) -> usize {
         let n = self.reap(out);
         self.rearm_wake(wake);
+        self.trim();
         if n != 0 {
             return n;
         }
+        // Kept transmit slots are freed by a later turn, so do not sleep
+        // past their trim.
+        let trim_ms = sendzc::TRIM.as_millis() as i32;
+        let timeout_ms = if self.tx_kept() && !(0..=trim_ms).contains(&timeout_ms) {
+            trim_ms
+        } else {
+            timeout_ms
+        };
         let submitter = self.ring.submitter();
         let entered = if timeout_ms == 0 {
             submitter.submit()
@@ -674,6 +683,7 @@ impl Uring {
         let _ = entered;
         let n = self.reap(out);
         self.rearm_wake(wake);
+        self.trim();
         n
     }
 
@@ -1499,9 +1509,9 @@ mod tests {
         }
     }
 
-    /// Fill every slot the ring hands out now, as the next sends would.
+    /// Fill the slots the next sends would take.
     fn refill(poller: &Arc<Poller>) -> Vec<TxSlot> {
-        (0..=TX_POOL)
+        (0..4)
             .map(|_| {
                 let mut slot = poller.tx_slot(SLOT).unwrap();
                 slot.bytes().fill(b'b');
@@ -1594,6 +1604,38 @@ mod tests {
         let reused: Vec<Vec<u8>> = (0..8).map(|_| vec![b'b'; SLOT]).collect();
         read_all_a(&mut peer, n);
         drop(reused);
+    }
+
+    /// Slots stay kept while sends go on, and a ring that stopped sending
+    /// frees them: a blocking turn wakes for the trim, which comes a full
+    /// interval after the last slot taken, so idle memory returns to 0.
+    #[test]
+    fn a_ring_that_stopped_sending_frees_its_slots() {
+        let Some((mut sockets, key, poller, tag, mut peer)) = stuck_peer() else {
+            return;
+        };
+        let Backend::Uring(ring) = &poller.backend else {
+            unreachable!()
+        };
+        let mut slot = poller.tx_slot(1024).unwrap();
+        slot.bytes().fill(b'a');
+        slot.send(sockets.fd(key), tag, 0..1024).unwrap();
+        drop(slot);
+        let (notified, _) = poller.tx_notifications();
+        reap_until(&mut sockets, || poller.tx_notifications().0 > notified);
+        read_all_a(&mut peer, 1024);
+        assert!(ring.tx_kept());
+        let start = std::time::Instant::now();
+        let long = (3 * sendzc::TRIM).as_millis() as i32;
+        while ring.tx_kept() && start.elapsed() < 3 * sendzc::TRIM {
+            sockets.poll(long, |_| {}).unwrap();
+        }
+        let took = start.elapsed();
+        assert!(
+            (sendzc::TRIM / 2..2 * sendzc::TRIM).contains(&took) && !ring.tx_kept(),
+            "idle slots freed after {took:?}, kept: {}",
+            ring.tx_kept()
+        );
     }
 
     /// An abandoned send on a peer that stopped reading: its queued bytes

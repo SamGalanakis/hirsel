@@ -348,6 +348,55 @@ pub fn open_session(mut tx: store.Tx, h: Handles, take model: String, take narro
     kept(store.put(mut tx, h.views, 0u64, Status("idle")))
 }
 
+// ---- forks ----
+
+// An exported prefix: entries[0..len) and the session settings they ran
+// under. A fork is a new session seeded from one; it shares these entries and
+// nothing else.
+pub type Prefix: codec + send { model: String, tools_narrow: Narrow, head_pos: u64, entries: List[Entry] }
+
+// Exports entries[0..upto) through a snapshot. A cut inside a tool round (an
+// Assistant whose calls do not all have results before `upto`) conflicts: the
+// fork's first request would carry calls with no results.
+pub fn export(snap: store.Snapshot, h: Handles, upto: u64) -> Result[Prefix, Refused] {
+    let Some(s) = kept(store.get(snap, store.shape(h.session), 0u64))? else { return Error(Malformed("no session")) }
+    if upto > s.next_pos || s.head_pos > upto { return Error(Malformed("cut outside the log")) }
+    let mut log: List[Entry] = list.with_capacity(upto)
+    let mut open: List[String] = list.new()
+    for p in 0u64..upto {
+        let Some(take e) = kept(store.get(snap, store.shape(h.entries), p))? else { return Error(Malformed("entry")) }
+        match e {
+            Assistant(answer) => {
+                open = list.new()
+                for c in answer.calls { list.push(mut open, clone(c.id)) }
+            },
+            ToolResult(id, _) => {
+                let mut rest: List[String] = list.new()
+                for o in open { if o != id { list.push(mut rest, clone(o)) } }
+                open = take rest
+            },
+            _ => (),
+        }
+        list.push(mut log, take e)
+    }
+    if list.len(open) > 0u64 { return Error(Conflict) }
+    Ok(Prefix(model: clone(s.model), tools_narrow: clone(s.tools_narrow), head_pos: s.head_pos, entries: take log))
+}
+
+// Seeds an empty session from a prefix: its entries and their visible lines,
+// with no runs, inbox, effects or waits. Reactions do not run again; what
+// they wrote in the parent stays there. The section and tool hashes start
+// empty, so the fork's first prepare appends a baseline.
+pub fn adopt(mut tx: store.Tx, h: Handles, take p: Prefix) -> Result[(), Refused] {
+    if let Some(_) = kept(store.fetch(tx, store.shape(h.session), 0u64))? { return Error(Conflict) }
+    let Prefix(model: take model, tools_narrow: take narrow, head_pos: head, entries: take log) = take p
+    let mut s = Session(model: take model, tools_narrow: take narrow, head_pos: head, next_pos: 0u64, active_run: None,
+        next_run: 0u64, active_sections_hashes: list.new(), active_tools_hash: list.new())
+    for e in log { let _ = put_entry(mut tx, h, mut s, e)? }
+    kept(store.put(mut tx, h.session, 0u64, s))?
+    kept(store.put(mut tx, h.views, 0u64, Status("idle")))
+}
+
 fn digest(raw: Bytes) -> Bytes {
     let d = std.sha256.hash(raw)
     let mut out: Bytes = list.with_capacity(32u64)

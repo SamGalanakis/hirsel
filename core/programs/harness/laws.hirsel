@@ -320,6 +320,138 @@ fn test_round_bytes_bounded(parent: Dir, clock: Clock, random: Random, tasks: Ta
     if law_round_bytes_bounded(parent, clock, random, tasks) { Ok(()) } else { Error(()) }
 }
 
+// ---- forks ----
+
+fn answer_of(text: String, take calls: List[harness.Call]) -> harness.Entry {
+    Assistant(harness.Answer(text: clone(text), calls: take calls, stop: "end", usage: usage()))
+}
+
+// The parent's log, by hand: a finished tool round, a plain answer and a
+// second user turn whose answer asks for two calls, only one answered.
+fn parent_log() -> List[harness.Entry] {
+    let mut one: List[harness.Call] = list.new()
+    list.push(mut one, harness.Call(id: "c1", name: "bump", args: Inline(string.into_bytes("{}"))))
+    let mut two: List[harness.Call] = list.new()
+    list.push(mut two, harness.Call(id: "c2", name: "bump", args: Inline(string.into_bytes("{}"))))
+    list.push(mut two, harness.Call(id: "c3", name: "bump", args: Inline(string.into_bytes("{}"))))
+    let mut log: List[harness.Entry] = list.new()
+    list.push(mut log, User("one"))
+    list.push(mut log, answer_of("", take one))
+    list.push(mut log, ToolResult("c1", Returned(Inline(string.into_bytes("1")))))
+    list.push(mut log, answer_of("first", list.new()))
+    list.push(mut log, User("two"))
+    list.push(mut log, answer_of("", take two))
+    list.push(mut log, ToolResult("c2", Returned(Inline(string.into_bytes("2")))))
+    take log
+}
+
+fn logged(dir: Dir, clock: Clock, random: Random, tasks: Tasks, log: List[harness.Entry]) -> store.Db waits {
+    let mut db = result.unwrap(store.open(tasks, dir, clock, random, store.triggers.law_options()))
+    result.unwrap(store.run_migration(mut db, tasks, code.describe(harness.migrate)))
+    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
+        for p in 0u64..list.len(log) { store.put(mut tx, h.entries, p, clone(log[p]))? }
+        store.put(mut tx, h.session, 0u64, harness.Session(model: "scripted", tools_narrow: All, head_pos: 0u64, next_pos: list.len(log),
+            active_run: None, next_run: 3u64, active_sections_hashes: list.new(), active_tools_hash: list.new()))
+    })
+    match take ran { Ok(Committed(_)) => (), _ => fail("logged: fill did not commit") }
+    take db
+}
+
+// Codec bytes stand in for equality, which entries and views do not have.
+fn bytes_of[A: codec](a: A) -> Bytes {
+    let codec: std.codec.Codec[A] = std.codec.of()
+    let mut raw: Bytes = list.new()
+    result.unwrap(std.codec.encode(codec, a, mut raw))
+    take raw
+}
+
+fn exported(db: store.Db, upto: u64) -> Result[harness.Prefix, harness.Refused] {
+    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    harness.export(store.snapshot(db), h, upto)
+}
+
+// The visible line each entry must show, by hand: user and assistant text,
+// and a tool result's call id.
+fn line_of(e: harness.Entry) -> Option[harness.View] {
+    match e {
+        User(t) => Some(Line("user", clone(t))),
+        Assistant(a) => Some(Line("assistant", clone(a.text))),
+        ToolResult(id, _) => Some(Line("tool", clone(id))),
+        _ => None,
+    }
+}
+
+// Law F1 (Fable: a fork is a new session seeded from an exported prefix): a
+// fork cut after the first finished round holds exactly the parent's first
+// four entries and their lines, and no run; its first request after a new
+// submit is those four messages and the new one, under a baseline. A cut
+// inside the second round (one of two calls answered) conflicts. Oracle: the
+// parent log and lines written by hand.
+pub fn law_fork_shares_prefix(parent: Dir, clock: Clock, random: Random, tasks: Tasks) -> u64 waits {
+    let mut from_name = string.with_capacity(32u64)
+    let from = result.unwrap(host.mkdtemp(parent, mut from_name))
+    let mut to_name = string.with_capacity(32u64)
+    let to = result.unwrap(host.mkdtemp(parent, mut to_name))
+    let log = parent_log()
+    let src = logged(from, clock, random, tasks, log)
+    let mut bad = 0u64
+    let inside = exported(src, 6u64)
+    if let Error(Conflict) = inside { () } else { bad = 1u64 }
+    let prefix = match exported(src, 4u64) { Ok(take p) => take p, Error(_) => { bad = 2u64; harness.Prefix(model: "", tools_narrow: All, head_pos: 0u64, entries: list.new()) } }
+    result.unwrap(store.close(take src))
+    let mut db = result.unwrap(store.open(tasks, to, clock, random, store.triggers.law_options()))
+    result.unwrap(store.run_migration(mut db, tasks, code.describe(harness.migrate)))
+    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    let adopted = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), harness.Refused] { harness.adopt(mut tx, h, clone(prefix)) })
+    match take adopted { Ok(Committed(_)) => (), _ => { if bad == 0u64 { bad = 3u64 } } }
+    let snap = store.snapshot(db)
+    if bad == 0u64 {
+        let Some(s) = result.unwrap(store.get(snap, store.shape(h.session), 0u64)) else { fail("fork: no session") }
+        let quiet = s.next_pos == 4u64 && s.next_run == 0u64 && match s.active_run { None => true, Some(_) => false }
+            && match result.unwrap(store.get(snap, store.shape(h.runs), 0u64)) { None => true, Some(_) => false }
+        if !quiet { bad = 4u64 }
+    }
+    for p in 0u64..7u64 {
+        if bad != 0u64 { break }
+        let e = result.unwrap(store.get(snap, store.shape(h.entries), p))
+        let v = result.unwrap(store.get(snap, store.shape(h.views), p + 1u64))
+        let want_e: Option[harness.Entry] = if p < 4u64 { Some(clone(log[p])) } else { None }
+        let want_v: Option[harness.View] = if p < 4u64 { line_of(log[p]) } else { None }
+        if bytes_of(e) != bytes_of(want_e) || bytes_of(v) != bytes_of(want_v) { bad = 10u64 + p }
+    }
+    if bad == 0u64 {
+        let w = result.unwrap(wired())
+        let sent = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[harness.Disposition, harness.Refused] {
+            harness.submit(mut tx, h, crash_agent(), w, alice(), harness.Submit(client_key: "f1", text: "three"))
+        })
+        match take sent { Ok(Committed(_)) => (), _ => { bad = 5u64 } }
+    }
+    if bad == 0u64 {
+        kick(mut db, crash_agent())
+        let later = store.snapshot(db)
+        let key = harness.EffectKey(run: 0u64, round: 0u64, kind: harness.MODEL, ordinal: 0u64)
+        let Some(e) = result.unwrap(store.get(later, store.shape(h.effects), key)) else { fail("fork: no model effect") }
+        let asked = result.unwrap(harness.request(later, h, key, e.cutoff))
+        let mut want: List[harness.Entry] = list.new()
+        for p in 0u64..4u64 { list.push(mut want, clone(log[p])) }
+        list.push(mut want, User("three"))
+        if bytes_of(asked.messages) != bytes_of(want) { bad = 6u64 }
+        if !offers_bump(result.unwrap(store.get(later, store.shape(h.entries), 5u64))) { bad = 7u64 }
+    }
+    result.unwrap(store.close(take db))
+    result.unwrap(std.dir.remove_all(parent, from_name))
+    result.unwrap(std.dir.remove_all(parent, to_name))
+    bad
+}
+
+@test
+fn test_fork_shares_prefix(parent: Dir, clock: Clock, random: Random, tasks: Tasks) -> Result[(), u64] waits {
+    // The law answers the first check that failed, or 0.
+    let bad = law_fork_shares_prefix(parent, clock, random, tasks)
+    if bad == 0u64 { Ok(()) } else { Error(bad) }
+}
+
 // ---- gates, approvals and inside tools ----
 
 fn pass_gate(tx: store.Tx, ask: harness.Ask) -> harness.Verdict { Pass }

@@ -983,7 +983,7 @@ pub type Done[R] { value: R, ticket: Ticket, info: CallInfo, reads: List[Read] }
 pub type Read = Point(Bytes) | Span(Bytes, Bytes)   // data-tree keys (§2.4), the bytes of Change.tree_key; span [lo, hi) (I1)
 pub type Bound[K] = Unbounded | Included(K) | Excluded(K)   // std.omap's names (D9); K need not be ordered
 
-pub fn run[R, A](mut db: Db, steps: Option[u64], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Result[Outcome[R, A], Error] waits   // None: no step scope (AC1)
+pub fn run[R, A](mut db: Db, steps: Option[u64], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Result[Outcome[R, A], Error] waits   // None: no step scope (AC1); v2.56 §13.3: plain fn + shareable env
 pub fn run_on[R, A](mut db: Db, b: Branch, steps: Option[u64], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Result[Outcome[R, A], Error] waits
 
 pub fn fetch[K, V](tx: Tx, t: Shape[K, V], k: K) -> Result[Option[V], Error]       // a fresh value; Shape, F5
@@ -995,19 +995,19 @@ pub fn info(mut tx: Tx) -> CallInfo      // mut: only a transaction body has Cal
 pub type CallRecord: codec { key: Bytes, args: Bytes, stream: Bytes, revision: Option[Bytes], code: Bytes }   // F7; p and CallInfo come from the frame; revision: code.revision of the entry that ran; v2.30 AN1: code = u64 n ‖ u64 s (BE) ‖ replay identity (0 or 32 B)
 pub type Plan { n_e: u64, s_e: u64, reply_max: u64 }   // v2.30 AN1: the body's byte and step allowances, and the longest reply
 pub type Stop = Raised(u32) | OutOfSteps(u64) | OutOfBytes(Capacity)   // v2.30 AN1: Policy deleted
-pub type Served = Committed(Receipt) | Kept(Receipt) | Failed(Pending, Stop) | NoRoom(Pending, Capacity)   // v2.29 AM1, AM3; ATTACK-4 B7: the refusal's Capacity
+pub type Served = Committed(Receipt) | Kept(Receipt) | Failed(Pending, Stop) | NoRoom(Pending, Capacity)   // v2.56 §13.3: NoRoom may carry Cache; v2.29 AM1, AM3; ATTACK-4 B7: the refusal's Capacity
 pub type Receipt { ticket: Ticket, reply: Bytes }   // v2.29 AM3: the first delivery, no read-back; v2.30 AN1
 pub type ServeError = Before(Error) | After(Error)   // v2.29 AM4: Before leaves the position as it was; After is poison
 pub opaque type Pending   // v2.29 AM1: not copy, codec or send; the Completion, the record, the run's CallInfo and base, and on NoRoom the outcome it would have stored
 pub fn serve(mut db: Db, take c: Completion, plan: Plan, take rec: Option[CallRecord],
-        body: scoped[view] fn(mut Tx) -> Result[Bytes, Bytes]) -> Result[Served, ServeError] waits   // v2.30 AN1: one isolated execution, the body's; with `conclude`, the only writer of a reply and a record
+        body: scoped[view] fn(mut Tx) -> Result[Bytes, Bytes]) -> Result[Served, ServeError] waits   // v2.56 §13.3: plain fn + shareable env; v2.30 AN1: one isolated execution, the body's; with `conclude`, the only writer of a reply and a record
 pub fn conclude(mut db: Db, take p: Pending, take r: Bytes, reserve: Reserve) -> Result[Served, ServeError] waits   // v2.29 AM1, AM6: r with p's record, CallInfo and base, one streams-only commit, no code run; Reserve = Resident | Claim
 pub fn untried(take c: Completion, take rec: Option[CallRecord], info: CallInfo) -> Pending   // v2.29 AM1: for a position that runs nothing (a gone key)
 pub fn recorded(db: Db, b: Branch, version: u64) -> Result[Option[Recorded], Error] waits   // write barrier, then live segments; None once a taken cut covers the version (W2); v2.29 AM6 (ATTACK-4 M3): with its settle context
 pub type Recorded { record: CallRecord, settle: u8, branch: Branch, base: u64, at: u64, seed: u64 }   // settle 0: the frame's own context; 1 a body fault, 2 an admission refusal: the attempted run's
 
 pub opaque type Rows[K, V]: send         // Arc shares of a path + bounds + Key[K] + Codec[V]
-pub fn next[K, V](mut r: Rows[K, V]) -> Result[Option[(K, V)], Error]
+pub fn next[K, V](mut r: Rows[K, V]) -> Result[Option[(K, V)], Error]   // v2.56 §13.4: takes a Reader and waits
 pub scoped type IndexRows[K, V]          // index cursor, primary Shape, View[Log[Read]] of its Tx (J1)
 pub fn next_indexed[K, V](mut r: IndexRows[K, V]) -> Result[Option[(K, V)], Error]   // records Point(table id ‖ Key[K]) per row returned
 ```
@@ -2309,7 +2309,7 @@ Integers are little-endian unless marked BE, as in §2. "str" and "bytes" have �
 
 ### 11.1 Format word, kinds and limits
 
-**AP1. The format word is 3.** HEADER's `format` (§2.3) is 3 in every file. A file with any other format is `Unsupported(format)`. A format-2 store directory is refused at its MANIFEST's HEADER, before payload dispatch, O1, cleanup, rotation or worker startup, and nothing in the directory changes. There is no dual reader and no migration path: M1 is the one format cutover.
+**AP1. The format word is 3** (4 from v2.56, §13.1, which refuses format 3 as this clause refuses format 2). HEADER's `format` (§2.3) is 3 in every file. A file with any other format is `Unsupported(format)`. A format-2 store directory is refused at its MANIFEST's HEADER, before payload dispatch, O1, cleanup, rotation or worker startup, and nothing in the directory changes. There is no dual reader and no migration path: M1 is the one format cutover.
 
 **Kinds of format 3:**
 
@@ -3178,7 +3178,7 @@ pub type StoreCapacity = Journal(Capacity) | Resident(Capacity) | Allocation(Cap
 // changed result types (v2.40, rulings (a) and (b)); core Capacity { requested, available } is unchanged
 pub type Error = … | Full(StoreCapacity) | …                     // every other case as §1.1 and the Limit gains above
 pub type Outcome[R, A] = Committed(Done[R]) | Aborted(Undone[A]) | Failed(Causes) | Refused(StoreCapacity) | Stopped(core.OutOfTime)
-pub type Served = Committed(Receipt) | Kept(Receipt) | Failed(Pending, Stop) | NoRoom(Pending, StoreCapacity)   // NoRoom: Resident or Allocation, never Journal
+pub type Served = Committed(Receipt) | Kept(Receipt) | Failed(Pending, Stop) | NoRoom(Pending, StoreCapacity)   // NoRoom: Resident, Allocation or (v2.56 §13.3) Cache, never Journal
 pub type ServeError = Before(Error, Option[Pending]) | After(Error)   // Some(p) only from conclude refused before publication
 pub type Looked[R] = Seen(Seen[R]) | Failed(Causes) | Refused(StoreCapacity) | Stopped(core.OutOfTime)
 pub type DeployError = … | FullNew(StoreCapacity)                  // §3.5a; its other cases unchanged
@@ -3786,7 +3786,7 @@ This needs the provider contract (§12.2): with a non-linearizable head, two hol
 
 ### 12.8 Composition
 
-- **Replay.** A holder's tape records each authority request and its outcome as any provider operation. Re-execution reads call records from entries exactly as from journal frames, and never calls the authority.
+- **Replay.** A holder's tape records each authority request and its outcome as any provider operation. Re-execution reads call records from entries exactly as from journal frames, and never calls the authority's register. On a Tiered base it may GET immutable packs, and an unavailable frame is `Unknown` (v2.56 §13.3).
   - No law or rule depends on the order of authority replies relative to other events. Nothing is added to, or depends on, CONC-10, SEM-8, CAP-8 or CAP-9's order.
   - Re-executing a recorded call on a follower whose base is above the call's entry, so the entry is no longer readable, is `Unknown`, not `Different` (Fable 6b).
 - **M3 Tiered paging (Fable F13), recorded so that M3 does not rediscover it.** v2.56 §13.5 answers each point: holders lease, followers re-base, an expired read is `Reclaimed`, and NVMe is Bucket-only and re-verified.
@@ -3884,7 +3884,7 @@ M3 lets one collection be larger than RAM. A **Tiered** collection keeps its sea
 
 A Tiered frame is never written into a class 0, 1 or 2 pack, and a Memory frame never into a class 3 or 4 pack. So Memory packs keep AP16's incoming lists and location table unchanged, and a Tiered pack has no per-frame state in RAM. The pack row grows from 21 to 29 bytes: `class u8, frames u32, live u64, bytes u64, index u64`. `index` is the offset of the pack's first PACK_INDEX frame, and is 0 for classes 0–2.
 
-**PACK_INDEX, kind 0x0023, MUST bit set (Fable F11, astra #14).** It is a required kind: an old reader refuses it as `Unsupported(0x0023)`. Every class 3 and class 4 pack ends with one or more PACK_INDEX frames, each ≤ 1 MiB. Together they list every PAGE or BLOB frame of the pack in offset order, one row per frame:
+**PACK_INDEX, kind 0x0023, MUST 1 in the kinds table's sense (Fable F11, astra #14).** It is a required kind: an old reader refuses it as `Unsupported(0x0023)`. Every class 3 and class 4 pack ends with one or more PACK_INDEX frames, each ≤ 1 MiB. Together they list every PAGE or BLOB frame of the pack in offset order, one row per frame:
 
 | Field | Size | Rule |
 |---|---|---|
@@ -3899,7 +3899,7 @@ A Tiered frame is never written into a class 0, 1 or 2 pack, and a Memory frame 
 - The key is a PAGE's low key, or a BLOB's owning row key, with the collection prefix (AP5).
 - Keys are front-coded within one PACK_INDEX frame only, so each frame decodes alone.
 - Each frame's payload starts with `rows u32` and `prev u64`, the offset of the previous PACK_INDEX frame of the pack (0 for the first).
-- **Counted inside `pack_bytes`.** A pack closes before a frame whose payload plus the PACK_INDEX bytes its row adds would take the pack past `pack_bytes`, unless the pack holds no frame yet. The writer adds each row's worst-case encoded size (31 + full key length) to the running total as it admits the frame.
+- **Counted inside `pack_bytes`.** A pack closes before a frame whose payload plus the PACK_INDEX bytes its row adds would take the pack past `pack_bytes`, unless the pack holds no frame yet. The writer adds each row's worst-case encoded size (29 + full key length) to the running total as it admits the frame. For every PACK_INDEX frame the rows will need, it also adds that frame's head (§2.1) and its 12-byte `rows`/`prev` prefix.
 - A Tiered pack's row `frames` counts PAGE and BLOB frames, not PACK_INDEX frames. `bytes` counts the whole object.
 
 **MANIFEST 0x0031 in format 4.** AP14's `account u64` becomes two fields in its place: `account_memory u64` and `account_tiered u64`. They are the exact logical accounts of the Memory and the Tiered collections at this generation, and the sum is AP15's logical account (astra #20). These fields follow them, in this order:
@@ -3914,7 +3914,7 @@ A Tiered frame is never written into a class 0, 1 or 2 pack, and a Memory frame 
 | archive_drop | u64 | chain entries below this position may be erased (§13.9) |
 | archive_dropped | u64 | how far erasure below `archive_drop` has got |
 
-- The fixed part grows by 128 bytes, and AP4's MANIFEST size expression grows by the same 128.
+- The fixed part grows by 120 bytes: 112 for the fields above, plus 8 for the split account. AP4's MANIFEST size expression grows by the same 120.
 - `lineage` and `deferred_frees` are participating roots for AP15, AP16 and the locator.
 - Their pages live in class-2 packs and are read and validated with the other list trees (AP21 step 0).
 
@@ -3925,7 +3925,7 @@ A Tiered frame is never written into a class 0, 1 or 2 pack, and a Memory frame 
 
 **LOCATE coverage (Fable F15, astra #23).** §12.2's locator coverage L ∪ C extends to class 3 and class 4 packs and to the class-2 packs of `lineage` and `deferred_frees`. The locator is unchanged: these packs are depth-0 rows like any other, resolved through §12.2's chunk tree at depth ≥ 1. M3 never reads a locator root as flat pack rows.
 
-**ARCHIVE, kind 0x00E0, 32 bytes, at most one per CHECKPOINT entry (§13.9).** Its fields are `position u64, epoch u64, len u64, digest u64`. It names the archive segment `a-<position>-<epoch>-<digest>` of that checkpoint. It is present only while archival is on, and it follows LOCATE.
+**ARCHIVE, kind 0x00E0, MUST 1, 32 bytes, at most one per CHECKPOINT entry (§13.9).** Its fields are `position u64, epoch u64, len u64, digest u64`. It names the archive segment `a-<position>-<epoch>-<digest>` of that checkpoint. It is present only while archival is on, and it follows LOCATE.
 
 **Kinds.** Format 4 adds PACK_INDEX 0x0023 (MUST) and ARCHIVE 0x00E0. Every other kind is as §2.7 and the §11 kinds table.
 
@@ -3968,7 +3968,7 @@ Which slots of a snapshot are Hot is fixed when the snapshot is captured. No lat
 **Single flight.** Concurrent misses on one key share one GET. Each waiter re-verifies its own edge on completion.
 
 **Room (Fable F20, astra #17).** The pager inserts a frame only when `cached + pinned + overlap + size ≤ cache_bytes`, evicting unpinned entries first.
-- `overlap` counts evicted frames whose `Arc` count shows another holder, such as an attempt's share or an old `CacheDir`. The pager re-checks them on each request.
+- `overlap` counts evicted frames another holder may still share, such as an attempt's share or an old `CacheDir`. On eviction the pager keeps its own share in an overlap list and on each request calls `arc.try_unwrap` on each entry: success means it was the last holder and frees the frame; `Err` hands the share back and it stays counted. Std exposes no holder count, so this is the test.
 - A target that still does not fit is delivered to the waiting call alone: it lives in that call's pins and is never inserted.
 - The pager's own state (pin map, waiter lists, ghost list, `CacheDir` path copies) is charged to the pager task, whose root limit is `pager_task_bytes` (§13.11).
 
@@ -3976,7 +3976,7 @@ Which slots of a snapshot are Hot is fixed when the snapshot is captured. No lat
 - `writer_pin_bytes` (default 67,108,864, at least 2 × VALUE_LIMIT + 1,048,576, else `Missing("writer_pin_bytes")`) for the Db task's calls;
 - the rest is shared by unpinned frames and reader pins.
 
-`reader(db, pin_bytes)` reserves `pin_bytes` from the rest when the Reader is created, and dropping the Reader returns them. Partitions are fixed. Nothing waits for another partition to drain, and pins never move between partitions.
+`reader(db, pin_bytes)` reserves `pin_bytes` from the rest when the Reader is created, and dropping the Reader returns them. `pin_bytes` below VALUE_LIMIT + 1,048,576, which is one largest blob plus a path of pages, is `Missing("pin_bytes")`. Partitions are fixed. Nothing waits for another partition to drain, and pins never move between partitions.
 
 ### 13.3 Execution: the touched-page counter and abort-and-rerun
 
@@ -3996,7 +3996,7 @@ A later touch of the same page in the same attempt finds it in the touched set a
 **The Db task never waits on a miss.**
 - **Attempts 1 and 2: parked.** The call is parked with its pins, and the Db task runs other calls. When the frame arrives, the parked call reruns before any call not yet started, at the **current** head. If the head moved, pins the new attempt does not touch are released when that attempt ends.
 - **Attempt 3 on: held.** The call holds the head. The Db task starts no other call until this call commits, refuses or fails, and every rerun reads the root captured when the call entered held mode. A cut's install that publishes Cold edges for that version does not change the captured root, because `Arc` keeps it.
-- At most one call is held at a time. A parked call that would need pins beyond the writer partition alongside the held call's pins releases all of its pins (all-or-release).
+- At most one call is held at a time. A cut's Drain (AP16 step 0) waits for a held call to end, so no install lands under a held call, and its commit applies to the root it captured, which is still the head. A parked call that would need pins beyond the writer partition alongside the held call's pins releases all of its pins (all-or-release).
 
 **Termination.** In held mode every attempt either ends, or misses a Cold page not yet pinned, which the next attempt has pinned. The pinned bytes never exceed the touched bytes, which never exceed `writer_pin_bytes`, which holds the call's pins alone. So a held call ends after at most one attempt more than the number of distinct Cold pages it touches. Prefetch along the scan direction usually makes that close to the tree height plus leaves ÷ `prefetch`. Each attempt runs under the call's own step bound (MEM-30). The steps of attempts that did not decide the call are added to `Accounts.rerun_steps`.
 
@@ -4017,10 +4017,11 @@ pub fn look[E: shareable, R](r: Reader, s: Snapshot, steps: Option[u64], env: E,
 
 - A plain `fn` captures nothing (LANG-13).
 - Its input is `env`, which is `shareable` and so holds no resource (MEM-15). So it holds no `Sender`, `Log`, `Latest` or channel end.
-- These replace the `scoped[view] fn` forms of §1.3 and §1.5. A runner entry body (`serve`) already has this shape.
+- `serve` (§1.3) changes the same way: `body: fn(mut Tx, E) -> Result[Bytes, Bytes]` with `env: E` (`E: shareable`). The runner passes the entry function and its decoded arguments as `env`.
+- These replace the `scoped[view] fn` forms of §1.3 and §1.5. D-M3-1 is wider than Q1's literal wording, which named Tiered mutation bodies: it covers every store and read bodies too, because a per-store signature would be two APIs (open item M3-O1).
 - So an aborted attempt leaves no effect behind it except steps and what it leaves in the pager's cache.
 
-**Enclosing step bounds (Fable F27).** Each attempt runs in its own `bound steps` scope with the call's full step budget. `run` called inside an enclosing `bound steps` scope on a Tiered store is `Tiered(Bounded)`, because an enclosing bound would be charged for reruns it cannot see. The Db task itself has no enclosing bound.
+**Enclosing step bounds (Fable F27).** Each attempt runs in its own `bound steps` scope with the call's full step budget. Every attempt the call runs is charged to any enclosing bound on the task that runs it. Q1 allows this because steps are not an observable, and so it is not refused.
 
 **Re-execution (astra #24, Q1).** `reexecute` (§12.8) of a recorded call against a Tiered base reads frames through the pager from immutable packs. It never reads `head`, never claims, and never calls the authority's register. It reruns on a miss like a call.
 - A frame that is absent, or a pack whose name the base's locator no longer reaches, makes the result `Unknown`.
@@ -4070,7 +4071,7 @@ pub fn changes(r: Reader, a: Snapshot, b: Snapshot) -> Result[List[Change], Erro
 
 **The fence has one owner (Fable F9).** A pager GET never decides `Fenced`. A 404 or 403 on a frame that a live lease names goes to the journal task. The journal task takes §12.5's witness and answers `Fenced(e)` (first evidence wins, §12.3) or `Corrupt(.. Absent)`. The pager only forwards.
 
-**Followers (astra #7, Fable F8).** A follower Snapshot carries its **capture** c_f = (position, epoch, digest) of the CHECKPOINT whose MANIFEST its Cold slots come from. The follower's lease is live while c_f is in the retained set the follower last observed: the latest head's checkpoint, or a row of its MARK. After any head read (`catch_up`, `fresh`, the idle poll) that shows c_f gone, the follower marks every Snapshot with that capture expired, and the rule above applies. A 404 on a frame of a live capture takes §12.5's witness against c_f's own tuple:
+**Followers (astra #7, Fable F8).** A follower Snapshot carries its **capture** c_f = (position, epoch, digest) of the CHECKPOINT whose MANIFEST its Cold slots come from. The follower's lease is live while c_f is in the retained set the follower last observed: the latest head's checkpoint, or a row of its MARK. After any head read (`catch_up`, `fresh`, the idle poll) that shows c_f gone, the follower marks every Snapshot with that capture expired, and the rule above applies. Names follow §12.2: the tip entry is named with HEAD's `entry_epoch`, and a checkpoint with its `c_epoch` (astra #21). A 404 on a frame of a live capture takes §12.5's witness against c_f's own tuple:
 - c_f below the head's floor gives `Reclaimed(floor)`;
 - c_f retained gives `Corrupt(.. Absent)`.
 
@@ -4201,14 +4202,13 @@ pub fn drop_archive(mut db: Db, below: u64) -> Result[(), Error] waits // erase 
 ### 13.10 What M3 refuses (Q4)
 
 ```hirsel
-pub type TieredRefusal = Memory | Migrate | Export | Install | Authority | Bounded
+pub type TieredRefusal = Memory | Migrate | Export | Install | Authority
 // Error gains:  | Tiered(TieredRefusal)
 ```
 
 - `migrate` (§1.8), `export` (§3.5a) and `install` (§12.7) on a store whose catalog holds a Tiered collection return `Tiered(Migrate)`, `Tiered(Export)` or `Tiered(Install)`. This is checked first, before any staging, upload, journal write or head write, and every byte is left unchanged. Building them is M3b.
 - `Tiered(Memory)` is the answer for Tiered residency on a memory store.
 - `Tiered(Authority)` is the answer for `archive` on log@1 or memory.
-- `Tiered(Bounded)` is the answer for `run` inside an enclosing step bound on a Tiered store (§13.3).
 - Because install is refused, astra #21's Fenced or Undecided install has no M3 case.
 
 ### 13.11 Memory and steps

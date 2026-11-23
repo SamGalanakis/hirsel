@@ -900,6 +900,56 @@ fn tls13_record_boundaries_and_updates(run: &mut Run) {
     run.release_halves(key);
 }
 
+fn tls13_receive_slot_scrub(run: &mut Run) {
+    const PAYLOAD: [u8; 128] = [0x5a; 128];
+    const TAIL: u8 = 0xa5;
+    for read in [PAYLOAD.len(), 1] {
+        let mut config = certificate_config(&[]);
+        config.send_tls13_tickets = 0;
+        let (send, wait) = mpsc::channel();
+        let (port, peer) = serve(listener(), config, move |mut server| {
+            server_handshake(&mut server).unwrap();
+            assert_eq!(
+                server.conn.protocol_version(),
+                Some(rustls::ProtocolVersion::TLSv1_3)
+            );
+            wait.recv().unwrap();
+            server.write_all(&PAYLOAD).unwrap();
+            assert_eq!(server.read(&mut [0]).unwrap(), 0);
+        });
+        let key = run.connect(port);
+        assert_eq!(
+            run.upgrade(key, b"alpha.test", Some(CA), &[]).outcome.error,
+            IoError::OK
+        );
+        let address = crate::os_tls::seed_test_slot(TAIL);
+        send.send(()).unwrap();
+        let mut bytes = [0; PAYLOAD.len()];
+        let (out, n) = read_tls_law(run, key, &mut bytes[..read]);
+        assert_eq!(
+            (out.error, n, &bytes[..n]),
+            (IoError::OK, read, &PAYLOAD[..read])
+        );
+        let assert_scrubbed = |slot: Option<&[u8]>| {
+            let (tail, rest) = slot
+                .expect("receive slot must be in the pool")
+                .split_last()
+                .unwrap();
+            assert_eq!(*tail, TAIL);
+            assert!(rest.iter().all(|&byte| byte == 0));
+        };
+        if read == PAYLOAD.len() {
+            crate::os_tls::inspect_test_slot(address, assert_scrubbed);
+            run.release_halves(key);
+        } else {
+            crate::os_tls::inspect_test_slot(address, |slot| assert!(slot.is_none()));
+            run.release_halves(key);
+            crate::os_tls::inspect_test_slot(address, assert_scrubbed);
+        }
+        peer.join().unwrap();
+    }
+}
+
 struct SlotSend<'a> {
     key: u64,
     bytes: &'a [u8],
@@ -1134,6 +1184,7 @@ fn os_tls_loopback_laws() {
     tls12_round_trip(&mut run);
     tls13_record_boundaries_and_updates(&mut run);
     tls13_record_rejection(&mut run);
+    tls13_receive_slot_scrub(&mut run);
     committed_final_slot(&mut run);
     cert_case(&mut run, b"beta.test", Some(CA), Some(tls_failure(0, 1)));
     assert_eq!(fds(), baseline);

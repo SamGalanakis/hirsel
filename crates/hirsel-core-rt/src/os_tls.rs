@@ -159,6 +159,26 @@ thread_local! {
     static FREE: std::cell::RefCell<Vec<Box<[u8]>>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
+#[cfg(test)]
+pub(crate) fn seed_test_slot(tail: u8) -> usize {
+    let mut bytes = vec![0; BULK].into_boxed_slice();
+    bytes[BULK - 1] = tail;
+    let address = bytes.as_ptr().addr();
+    FREE.with_borrow_mut(|free| {
+        free.clear();
+        free.push(bytes);
+    });
+    address
+}
+
+#[cfg(test)]
+pub(crate) fn inspect_test_slot(address: usize, inspect: impl FnOnce(Option<&[u8]>)) {
+    FREE.with_borrow(|free| {
+        let slot = free.iter().find(|slot| slot.as_ptr().addr() == address);
+        inspect(slot.map(Box::as_ref));
+    });
+}
+
 /// One runtime-owned byte slot, with a cursor for nonblocking socket I/O.
 ///
 /// A bulk slot holds its bytes only while they hold data: it takes them from
@@ -168,6 +188,9 @@ struct Slot {
     bytes: Box<[u8]>,
     start: usize,
     end: usize,
+    /// The furthest a socket read wrote. Compaction and in-place decryption
+    /// can leave plaintext above the current cursor.
+    rx_written: usize,
 }
 
 impl Slot {
@@ -176,6 +199,7 @@ impl Slot {
             bytes: vec![0; capacity].into_boxed_slice(),
             start: 0,
             end: 0,
+            rx_written: 0,
         }
     }
 
@@ -191,9 +215,13 @@ impl Slot {
         }
     }
 
-    /// Gives an empty bulk slot's bytes back to the thread's free list.
+    /// Scrubs bytes written on receive before returning an empty bulk slot.
     fn release(&mut self) {
         if self.start == self.end && self.bytes.len() == BULK {
+            if self.rx_written != 0 {
+                zeroize::zeroize_bytes(&mut self.bytes[..self.rx_written]);
+                self.rx_written = 0;
+            }
             let bytes = std::mem::take(&mut self.bytes);
             let _ = FREE.try_with(|free| {
                 let mut free = free.borrow_mut();
@@ -235,6 +263,7 @@ impl Slot {
         }
         let n = socket.read(space)?;
         self.end += n;
+        self.rx_written = self.rx_written.max(self.end);
         Ok(n)
     }
 

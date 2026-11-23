@@ -19,9 +19,10 @@ use rustls::{
     unbuffered::{ConnectionState, EncodeError, InsufficientSizeError},
 };
 use std::{
+    fs::{File, OpenOptions},
     io::{Read, Write},
     net::{SocketAddr, SocketAddrV4, TcpStream, ToSocketAddrs},
-    os::fd::OwnedFd,
+    os::{fd::OwnedFd, unix::fs::OpenOptionsExt},
     ptr,
     sync::{Arc, Mutex},
     time::Duration,
@@ -484,6 +485,24 @@ fn tls_net(failure_outcome: Outcome) -> Outcome {
     failure(NET, 0, failure_outcome.error.code, NET_TLS)
 }
 
+fn open_credential_file(path: &str) -> std::io::Result<File> {
+    // Opening a FIFO for reading would wait for a writer without O_NONBLOCK.
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY)
+        .open(path)?;
+    let kind = file.metadata()?.file_type();
+    if !kind.is_file() {
+        let code = if kind.is_dir() {
+            libc::EISDIR
+        } else {
+            libc::EINVAL
+        };
+        return Err(std::io::Error::from_raw_os_error(code));
+    }
+    Ok(file)
+}
+
 /// The web identity token file, read whole at each fetch into a fixed buffer.
 fn identity_token(path: &str) -> Result<Zeroizing<Vec<u8>>, Outcome> {
     let token_error = |error: std::io::Error| match error.kind() {
@@ -491,7 +510,7 @@ fn identity_token(path: &str) -> Result<Zeroizing<Vec<u8>>, Outcome> {
         std::io::ErrorKind::PermissionDenied => failure(TOKEN, 0, 0, IO_DENIED),
         _ => failure(TOKEN, 0, error.raw_os_error().unwrap_or(0) as u32, IO_OTHER),
     };
-    let mut file = std::fs::File::open(path).map_err(token_error)?;
+    let mut file = open_credential_file(path).map_err(token_error)?;
     let mut token = Zeroizing::new(vec![0u8; REPLY_MAX + 1]);
     let mut len = 0;
     loop {
@@ -530,10 +549,15 @@ fn assume_role(source: &StsSource, deadline: Option<u64>) -> Answer {
     let roots = match &source.roots {
         None => crate::os_tls::system_roots(),
         Some(path) => {
-            let pem = std::fs::read(path).unwrap_or_default();
-            let (_, store) = hirsel_core_net::tls::trust(1, &pem)
-                .ok_or(tls_net(crate::net::tls_failure(3, 0)))?;
-            Arc::new(store.unwrap())
+            let roots_error = || tls_net(crate::net::tls_failure(3, 0));
+            let mut pem = Vec::new();
+            open_credential_file(path)
+                .and_then(|mut file| file.read_to_end(&mut pem))
+                .map_err(|_| roots_error())?;
+            let store = hirsel_core_net::tls::trust(1, &pem)
+                .and_then(|(_, store)| store)
+                .ok_or_else(roots_error)?;
+            Arc::new(store)
         }
     };
     let name = ServerName::try_from(source.host.clone())

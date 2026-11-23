@@ -828,10 +828,15 @@ epoch. So `2026-11-23T12:00:00Z` gives `1795435200000000000`, which a program co
 - `Net(e)`: a connection, TLS or transport failure. A `roots:` file that cannot be read or
   holds no certificate gives `Net(Tls(Roots))`. A deadline gives `Net(TimedOut)` and a cancel gives `Net(Aborted)`. Each
   ends the helper's exchange; a reply that comes later is zeroed and discarded.
-- `Token(e)`: the `sts` token file could not be read, or is empty (`Token(NotFound)`).
+- `Token(e)`: the `sts` token file could not be read (`NotFound` for a missing file,
+  `Denied` for a permissions failure), or is empty (`Token(NotFound)`).
 - `Status(code)`: a reply whose HTTP status is not 200.
-- `Malformed`: a reply over 64 KiB, a missing member or element, a value with an escape, an
-  expiry in another form, or an IMDS `Code` other than `Success`.
+- `Malformed`: a reply or web identity token over 64 KiB, a missing member or element,
+  a value with an escape, an expiry in another form, or an IMDS `Code` other than `Success`.
+
+The provider only reads regular files for `file:` and `roots:`. A named pipe gives
+`Token(Other(EINVAL))` or `Net(Tls(Roots))` respectively. File refusals include no file
+contents in the error or logs.
 
 Each call makes a fresh exchange. The provider caches nothing, and when to refresh is the
 program's choice (std credentials, below).
@@ -924,10 +929,11 @@ endpoint by name.
 | **CR2** replay without the endpoint | replay contacting the source, or the key reaching a frame | Record CR1's run. The tape holds the key id and token bytes, and holds none of the key's raw bytes, hex or base64. Replayed with the server gone, the run prints the same tag and ends `Sealed`. |
 | **CR3** the IMDS exchange | a missing IMDSv2 token, a wrong expiry, or a failure that still makes a designation | The server answers only a `PUT` with the TTL header and only `GET`s that carry its token. `Expiration` `2026-11-23T12:00:00Z` gives `1795435200000000000` (`date -ud`). A 404 on the role gives `Status(404)`. A reply without `SecretAccessKey`, with an escaped value, or with `Code` `Expired` gives `Malformed`. A `token` with 3 bytes of room against a 7-byte token gives `Room(20, 7)` with both strings unchanged. A server that never answers, under a 50 ms deadline, gives `Net(TimedOut)`. A grant with source `static` is refused at its spelling. |
 | **CR4** STS web identity | the token sent from a stale read, or the wrong reply element taken as the key | A loopback TLS server as `localhost` with its CA's roots, granted `sts:<arn> at:localhost:<port> roots:<ca> file:<token>`. The server receives `WebIdentityToken` equal to the file's bytes, which it rewrites before each reply, and sees each of three versions once. The reply puts `SessionToken` before `SecretAccessKey`. Its `AssumeRoleWithWebIdentityResponse` gives the fixture's key id and expiry, and the key's MAC matches CR1's oracle. A 403 `AccessDenied` gives `Status(403)`. |
+| **CR5** STS file refusals | a wrong refusal, a blocked fetch, or file contents in output | Against CR4's loopback server, missing and empty tokens give `Token(NotFound)`, a permissions failure gives `Token(Denied)`, an oversized token gives `Malformed`, and a token pipe gives `Token(Other(EINVAL))`. Missing, unreadable, invalid PEM, and pipe roots give `Net(Tls(Roots))`. Output contains only the typed refusal labels and no diagnostics. Only the valid control reaches STS. |
 
 TL1 to TL11, TL14 to TL16 and SC1 to SC8 run against the OS provider over
 loopback. TL5, TL7, TL13, TL15, SC1 and SC5 also have scripted-provider cases, so that the
-evaluator is covered. SC9 runs on both engines. CR1 to CR4 run natively against loopback servers. The recording laws of
+evaluator is covered. SC9 runs on both engines. CR1 to CR5 run natively against loopback servers. The recording laws of
 TLS sessions and secrets, RL3 to RL5, are with the tools ([recording](../recording.md#laws)).
 
 ## Build slices
@@ -944,7 +950,7 @@ and L (more than three).
 | **T5** HTTPS client | S | T1, T4, http-client-1439 | std `tls` api page; `https` connect = `host.connect`, then `tls.connect` offering `http/1.1`, then the plain client's reader and writer over the halves; `Secret` header values written through `send_secret`; `[secret]` in request and error renders | TL10 (the client's case), and one HTTPS round trip in the existing http client harness |
 | **T6** STARTTLS | S | T1, T3 | `net.join` and `Unjoined` (NET-7) on both engines and in the evaluator's virtual sockets; TLS-1's unread-bytes peek in the OS provider, and a pre-handshake bytes step in peer scripts | TL14–TL16 |
 | **T7** SCRAM | M | T4, T6 | TLS-1's binding value (`binding_out`, the recording's `TLS_CONNECT` delivery); `Scram`, `ScramError`, `scram_sha256`, `scram_final_len`, `scram_verify`; SASLprep with raw fallback; the per-iteration charge; `SCRAM` and `SCRAM_VERIFY` in the OS, scripted and virtual paths and in a recording | SC1–SC9 |
-| **T8** credential grants | M | T4, T7 | the `Cred` type and grant kind, the `imds` and `sts` sources, `cred.fetch` in the OS provider on a host helper, its frames and grant record in a recording, std `cred` | CR1–CR4 |
+| **T8** credential grants | M | T4, T7 | the `Cred` type and grant kind, the `imds` and `sts` sources, `cred.fetch` in the OS provider on a host helper, its frames and grant record in a recording, std `cred` | CR1–CR5 |
 
 T2 and T3 can run in parallel after T1. T4 waits for T2 because its designation in a
 recording is part of its contract. T5, T6 and T7 run in any order once their dependencies land.

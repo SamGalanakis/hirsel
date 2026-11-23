@@ -3177,6 +3177,7 @@ pub fn main(c: Cred, out: Stdout) -> Result[(), Exit] waits {
 }
 
 const STS_ROLE: &str = "arn:aws:iam::123456789012:role/app";
+const STS_CA: &[u8] = include_bytes!("../../hirsel-core-rt/testdata/tls/sts-ca.pem");
 
 /// A loopback STS (TLS-7) serving TLS as `localhost` under the STS test CA.
 /// It answers one `AssumeRoleWithWebIdentity` per entry of `versions`,
@@ -3312,7 +3313,6 @@ fn fake_sts(
 /// gives `Status(403)`.
 #[test]
 fn cr4_sts_web_identity() {
-    const CA: &[u8] = include_bytes!("../../hirsel-core-rt/testdata/tls/sts-ca.pem");
     const KEY: &[u8] = b"wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
     const TOKEN: &[u8] = b"IQoJb3JpZ2luX2VjEXAMPLETOKEN";
     const MAC_OF_X: &str = "6601539f5439dea50305982bb16cb241bfde747c9db741797a9b913aa4c318d8";
@@ -3362,7 +3362,7 @@ pub fn main(c: Cred, out: Stdout) -> Result[(), Exit] waits {
 "#;
     let dir = tempfile::tempdir().unwrap();
     let roots = dir.path().join("roots.pem");
-    std::fs::write(&roots, CA).unwrap();
+    std::fs::write(&roots, STS_CA).unwrap();
     let token_file = dir.path().join("token");
     let (port, server) = fake_sts(KEY, TOKEN, token_file.clone(), VERSIONS.to_vec(), 2);
 
@@ -3408,6 +3408,148 @@ pub fn main(c: Cred, out: Stdout) -> Result[(), Exit] waits {
     }
     let round = [&b"ASIASTSEXAMPLE "[..], TOKEN, b" ", &mac, b"\n"].concat();
     assert_eq!(output.stdout, [&round[..], &round, b"denied"].concat());
+}
+
+/// TLS-7 CR5: invalid STS input files refuse without contacting STS or
+/// exposing file contents. Only the final, valid fetch reaches the server.
+#[test]
+fn cr5_sts_file_refusals() {
+    use std::{
+        ffi::CString,
+        fs,
+        os::unix::{ffi::OsStrExt, fs::PermissionsExt},
+    };
+
+    const IDENTITY: &[u8] = b"cr5-web-identity-private";
+    const BAD_PEM: &[u8] =
+        b"-----BEGIN CERTIFICATE-----\ncr5-invalid-roots-private\n-----END CERTIFICATE-----\n";
+    const KEY: &[u8] = b"cr5-sts-access-key-private";
+    const TOKEN: &[u8] = b"cr5-sts-session-token";
+    let source = r#"
+fn refusal(c: Cred, out: Stdout, until: Until) waits {
+    let mut key_id = string.with_capacity(64)
+    let mut token = string.with_capacity(64)
+    let text = match cred.fetch(c, mut key_id, mut token, until) {
+        Error(Token(NotFound)) => "Token(NotFound)\n",
+        Error(Token(Denied)) => "Token(Denied)\n",
+        Error(Token(Other(code))) => if code == 22u32 { "Token(Other(EINVAL))\n" } else { "wrong code\n" },
+        Error(Malformed) => "Malformed\n",
+        Error(Net(Tls(Roots))) => "Net(Tls(Roots))\n",
+        _ => "unexpected result\n",
+    }
+    result.unwrap(stdout.write(out, text))
+}
+
+pub fn main(
+    missing_token: Cred, denied_token: Cred, empty: Cred, oversized: Cred, fifo_token: Cred,
+    missing_roots: Cred, denied_roots: Cred, invalid_roots: Cred, fifo_roots: Cred,
+    valid: Cred, clock: Clock, out: Stdout
+) -> Result[(), Exit] waits {
+    refusal(missing_token, out, Never)
+    refusal(denied_token, out, Never)
+    refusal(empty, out, Never)
+    refusal(oversized, out, Never)
+    refusal(fifo_token, out, At(clock, host.mono_ns(clock) + 1000000000u64))
+    refusal(missing_roots, out, Never)
+    refusal(denied_roots, out, Never)
+    refusal(invalid_roots, out, Never)
+    refusal(fifo_roots, out, At(clock, host.mono_ns(clock) + 1000000000u64))
+    let mut key_id = string.with_capacity(64)
+    let mut token = string.with_capacity(64)
+    match cred.fetch(valid, mut key_id, mut token, Never) {
+        Ok(_) => Ok(()),
+        Error(_) => Error(Exit(status: 2)),
+    }
+}
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let path = |name: &str| dir.path().join(name);
+    fs::write(path("ca.pem"), STS_CA).unwrap();
+    fs::write(path("denied-token"), IDENTITY).unwrap();
+    fs::write(path("denied-roots"), STS_CA).unwrap();
+    for name in ["denied-token", "denied-roots"] {
+        fs::set_permissions(path(name), fs::Permissions::from_mode(0o000)).unwrap();
+    }
+    fs::write(path("empty-token"), []).unwrap();
+    let mut oversized = vec![b'x'; 64 * 1024 + 1];
+    oversized[..IDENTITY.len()].copy_from_slice(IDENTITY);
+    fs::write(path("oversized-token"), oversized).unwrap();
+    fs::write(path("invalid-roots"), BAD_PEM).unwrap();
+    let fifo = CString::new(path("fifo").as_os_str().as_bytes()).unwrap();
+    // SAFETY: fifo points to a live, NUL-terminated path within the fixture directory.
+    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+
+    let (port, server) = fake_sts(KEY, TOKEN, path("valid-token"), vec![IDENTITY], 1);
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core/core");
+    let mut request = source_request(source, dir.path());
+    request.inputs.packages[1] = PackageManifest::directory(&root, package("core"), true).unwrap();
+    let product = Driver::default()
+        .check(request, &mut Meter::new(false))
+        .unwrap();
+    assert!(
+        product.accepted(),
+        "{:?} {:?}",
+        product.diagnostics,
+        product.incomplete
+    );
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let mut options = native_options(Backend::Cranelift, dir.path());
+    options.grant_mask = (1 << grant_kind("Stdout").unwrap()) | (1 << grant_kind("Clock").unwrap());
+    options.cred_grants = [
+        ("missing_token", "ca.pem", "missing-token"),
+        ("denied_token", "ca.pem", "denied-token"),
+        ("empty", "ca.pem", "empty-token"),
+        ("oversized", "ca.pem", "oversized-token"),
+        ("fifo_token", "ca.pem", "fifo"),
+        ("missing_roots", "missing-roots", "valid-token"),
+        ("denied_roots", "denied-roots", "valid-token"),
+        ("invalid_roots", "invalid-roots", "valid-token"),
+        ("fifo_roots", "fifo", "valid-token"),
+        ("valid", "ca.pem", "valid-token"),
+    ]
+    .map(|(param, roots, token)| {
+        hirsel_core_net::CredGrant::new(
+            param,
+            &format!(
+                "sts:{STS_ROLE} at:localhost:{port} roots:{} file:{}",
+                path(roots).display(),
+                path(token).display()
+            ),
+            "mac",
+        )
+        .unwrap()
+    })
+    .into();
+    let build = product.build(&entry, &options).unwrap();
+    let output = Command::new(build.executable).output().unwrap();
+    for stream in [&output.stdout, &output.stderr] {
+        for marker in [IDENTITY, KEY, TOKEN, b"cr5-invalid-roots-private"] {
+            assert!(
+                !stream.windows(marker.len()).any(|bytes| bytes == marker),
+                "credential fixture bytes in process output"
+            );
+        }
+    }
+    assert!(output.status.success(), "{}", output.status);
+    assert!(
+        output.stderr.is_empty(),
+        "unexpected credential diagnostics"
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        concat!(
+            "Token(NotFound)\n",
+            "Token(Denied)\n",
+            "Token(NotFound)\n",
+            "Malformed\n",
+            "Token(Other(EINVAL))\n",
+            "Net(Tls(Roots))\n",
+            "Net(Tls(Roots))\n",
+            "Net(Tls(Roots))\n",
+            "Net(Tls(Roots))\n",
+        )
+    );
+    assert_eq!(server.join().unwrap(), [IDENTITY]);
 }
 
 /// TLS-7 std credentials: a session token longer than the 4096 bytes

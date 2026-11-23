@@ -62,7 +62,7 @@ fn sv9_wycheproof_short_signature() -> bool {
 }
 
 // SV10. One step and zero bytes suffice for NIST record 4's 128-byte message.
-// expect: run sv10_fixed_charge() = true
+// expect: reference run sv10_fixed_charge() = true
 fn sv10_fixed_charge() -> bool {
     let (key, msg, sig) = nist_record_4()
     let work = bound bytes 0 {
@@ -77,7 +77,7 @@ fn sv10_fixed_charge() -> bool {
 }
 
 // SV10. The same bound suffices for DER tcId 5.
-// expect: run sv10_der_charge() = true
+// expect: reference run sv10_der_charge() = true
 fn sv10_der_charge() -> bool {
     let (key, msg, sig) = wycheproof_der_tc5()
     let work = bound bytes 0 {

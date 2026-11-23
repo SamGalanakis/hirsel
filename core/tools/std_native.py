@@ -275,8 +275,7 @@ def discover(root, filters):
         run_env = tuple(tuple(pair) for pair in re.findall(r'^// test-env: ([A-Z0-9_]+)=(\S+)$', source, re.M))
         fixture = env_fixture(file, source)
         stdout = stderr = b""
-        first_write = None
-        host_op = 0
+        first_write, host_op = None, 0
         engine_fact = None
         schedule = None
         root_limit = 64 << 20
@@ -312,27 +311,28 @@ def discover(root, filters):
                 host_op = 2 if words[1:] == ["file"] else 0
             if text == "// host: remove_tree_prefix a":
                 first_write, host_op = 0, 9
-            match = re.fullmatch(r'\s*// expect: run (.*?) = (.*?)\s*', text)
+            match = re.fullmatch(r'\s*// expect: (reference )?run (.*?) = (.*?)\s*', text)
             if not match:
-                if text.strip().startswith('// expect: run '):
+                if text.strip().startswith(('// expect: run ', '// expect: reference run ')):
                     raise ValueError(f'{file}:{line}: unreadable run oracle')
                 continue
-            call, expected = match.groups()
+            reference, call, expected = match.groups()
+            reference_reason = evaluator_only or ('Reference count under MEM-30' if reference else None)
             if '(env)' in call and not fixture:
                 raise ValueError(f'{file}:{line}: Env law needs a fixture')
-            if expected.startswith('fault ') and not evaluator_only:
-                raise ValueError(f'{file}:{line}: fault oracle requires // test-backend: evaluator')
+            if expected.startswith('fault ') and not reference_reason:
+                raise ValueError(f'{file}:{line}: fault oracle requires a reference-only run')
             if expected.startswith('fault '):
                 if not isinstance(json.loads(expected.removeprefix('fault ')), str):
                     raise ValueError(f'{file}:{line}: fault oracle must be an exact JSON string')
-            if evaluator_only and (not call.endswith('()') or first_write is not None or schedule):
+            if reference_reason and (native_only or not call.endswith('()') or first_write is not None or schedule):
                 raise ValueError(f'{file}:{line}: evaluator-only laws take no host arguments')
             name = call.split('(')[0]
             header = re.search(r'\bfn\s+' + re.escape(name) + r'\s*\([^)]*\)([^\{]*)\{', source)
             if header is None:
                 raise ValueError(f'{file}:{line}: no function for {call}')
             package = 'runner' if file.parent == root / 'core/programs/runner/tests' else file.relative_to(root).parts[1]
-            case = Contract(file, line, call, expected, bool(re.search(r'\bwaits\b', header[1])), stdout, stderr, first_write, test_of, host_op, package, evaluator_only, engine_fact, schedule, root_limit, evaluator_instructions, run_env, fixture,
+            case = Contract(file, line, call, expected, bool(re.search(r'\bwaits\b', header[1])), stdout, stderr, first_write, test_of, host_op, package, reference_reason, engine_fact, schedule, root_limit, evaluator_instructions, run_env, fixture,
                             native_only=native_only)
             schedule = None
             root_limit = 64 << 20

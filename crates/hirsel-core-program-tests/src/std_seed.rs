@@ -358,7 +358,11 @@ fn check_corpus(corpus: hirsel_core_resolve::Corpus) -> String {
         let none = HashMap::new();
         let functions = emitted.get(&module).unwrap_or(&none);
         for line in s.text.lines() {
-            let Some(e) = line.trim().strip_prefix("// expect: run ") else {
+            let line = line.trim();
+            let Some(e) = line
+                .strip_prefix("// expect: run ")
+                .or_else(|| line.strip_prefix("// expect: reference run "))
+            else {
                 continue;
             };
             let Some((call, want)) = e.split_once(" = ") else {

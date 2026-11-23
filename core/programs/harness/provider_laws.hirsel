@@ -293,6 +293,12 @@ fn exchange(tasks: Tasks, d: provider.Dialect, take reply: Option[Bytes]) -> (Re
 }
 
 fn exchange_with_bounds(tasks: Tasks, d: provider.Dialect, take reply: Option[Bytes], caps: provider.Bounds) -> (Result[harness.Answer, harness.Fault], String) waits {
+    let mut sink: Option[harness.preview.Source] = None
+    exchange_preview(tasks, d, take reply, caps, mut sink)
+}
+
+fn exchange_preview(tasks: Tasks, d: provider.Dialect, take reply: Option[Bytes], caps: provider.Bounds,
+    mut sink: Option[harness.preview.Source]) -> (Result[harness.Answer, harness.Fault], String) waits {
     let (initial, clock) = std.sim.world.new(0u64, 0u64, 0u64)
     let mut world = take initial
     let plan = std.sim.world.detach(mut world)
@@ -312,7 +318,7 @@ fn exchange_with_bounds(tasks: Tasks, d: provider.Dialect, take reply: Option[By
             let (heard, hears): (Sender[Bytes], Receiver[Bytes]) = channel.new(1u64)
             let expect = match provider.body(p.model, simple_request()) { Ok(b) => string.byte_len(b), Error(_) => 0u64 }
             let server = task.spawn(tasks, bytes 1048576u64, Script(listener: take listener, clock: clock, reply: take bytes_out, expect: expect, heard: take heard), scripted)
-            let answered = provider.ask(n, clock, take p, simple_request())
+            let answered = provider.ask_with_preview(n, clock, take p, simple_request(), mut sink)
             if let Ok(take b) = channel.receive(hears) {
                 if let Ok(take s) = string.from_utf8(take b) { said = take s }
             }
@@ -378,4 +384,28 @@ fn test_openrouter_body_and_event_bounds(tasks: Tasks) -> Result[(), u64] waits 
     caps.body_bytes = 800u64
     let (too_large, _) = exchange_with_bounds(tasks, OpenAi, Some(reply_with("200 OK", "text/event-stream", openrouter_note())), caps)
     match too_large { Error(Unavailable) => Ok(()), _ => Error(5u64) }
+}
+
+// The provider sends reasoning and tool arguments alongside assistant text.
+// Only the literal assistant text is eligible for the gateway preview.
+@test
+fn test_preview_only_provider_text(tasks: Tasks, clock: Clock) -> Result[(), u64] waits {
+    let hub = harness.preview.start(tasks, 1048576u64, 4096u64)
+    let door = harness.preview.door(hub)
+    let caller = store.Caller(issuer: 2u8, subject: bytes_of("owner"))
+    let target = harness.preview.target(door, "s0", clock)
+    let watch = option.unwrap(harness.preview.observe(door, "s0", caller))
+    let dispatch = store.triggers.Id(store_hi: 1u64, store_lo: 2u64, branch: 0u32, version: 3u64, index: 0u64)
+    let key = harness.preview.Key(dispatch: dispatch, run: 0u64, entry: 2u64, tool: None, attempt: 1u64)
+    let mut sink = harness.preview.source(target, caller, key)
+    let mut response = string.from("data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"hidden reasoning\"}}]}\n\n")
+    string.push(mut response, openai_tools())
+    let (answer, _) = exchange_preview(tasks, OpenAi, Some(reply_with("200 OK", "text/event-stream", response)), provider.bounds(), mut sink)
+    let Ok(got) = answer else { return Error(1u64) }
+    if !openai_ok(got) { return Error(2u64) }
+    let Some(preview_text) = harness.preview.read(watch) else { return Error(3u64) }
+    if preview_text.text != "Checking now." { return Error(4u64) }
+    harness.preview.unobserve(take watch)
+    harness.preview.stop(take hub)
+    Ok(())
 }

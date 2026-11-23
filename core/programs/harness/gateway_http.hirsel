@@ -229,18 +229,21 @@ fn follow_loop[T: send](d: harness.gateway.Door[T], f: Front, id: u64, mut w: Wr
             let mut client = take c
             let seen_marks = harness.gateway.marks(d, id)
             let at = if fresh { 0u64 } else { version + 1u64 }
-            if live && !watching(watch) {
+            if live && !quiet && !watching(watch) {
                 if let Some(p) = view f.preview { watch.observer = preview.observe(p, group, store.fixture.bound_caller(client)) }
             }
             match store.fixture.seen_at(mut client, sub, at, within) {
                 Ok(take image) => {
                     let next = image.version
                     let Some(status) = send_rows(mut w, f, image, mut sent) else { store.fixture.close(take client); return }
-                    if busy(status) || host.mono_ns(f.clock) < hold_until {
-                        following = Some(Following(client: take client, sub: sub, version: next, fresh: false, hold_until: hold_until, quiet: !busy(status)))
-                    } else {
-                        if !clear_preview(mut w, f, mut watch) { store.fixture.close(take client); return }
+                    let active = busy(status)
+                    if !active {
                         unwatch(mut watch)
+                        if !clear_preview(mut w, f, mut watch) { store.fixture.close(take client); return }
+                    }
+                    if active || host.mono_ns(f.clock) < hold_until {
+                        following = Some(Following(client: take client, sub: sub, version: next, fresh: false, hold_until: hold_until, quiet: !active))
+                    } else {
                         store.fixture.close(take client)
                         last = seen_marks
                         quiet_since = host.mono_ns(f.clock)
@@ -248,14 +251,12 @@ fn follow_loop[T: send](d: harness.gateway.Door[T], f: Front, id: u64, mut w: Wr
                 },
                 // No change in a beat: a quiet session past its hold is let go of.
                 Error(Deadline(_)) => {
-                    if !send_preview(mut w, f, sent, mut watch) { store.fixture.close(take client); return }
+                    if !quiet && !send_preview(mut w, f, sent, mut watch) { store.fixture.close(take client); return }
                     if host.mono_ns(f.clock) - quiet_since >= f.beat_ms * 1000000u64 {
                         if !beat(mut w, f) { store.fixture.close(take client); return }
                         quiet_since = host.mono_ns(f.clock)
                     }
                     if quiet && host.mono_ns(f.clock) >= hold_until {
-                        if !clear_preview(mut w, f, mut watch) { store.fixture.close(take client); return }
-                        unwatch(mut watch)
                         store.fixture.close(take client)
                         last = seen_marks
                         quiet_since = host.mono_ns(f.clock)

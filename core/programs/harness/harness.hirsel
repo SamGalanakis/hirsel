@@ -1398,10 +1398,9 @@ pub fn effect_with_preview[G: send, F](ctx: store.runner.TriggerContext, port: G
             Error(take fault) => ModelFailed(fault_text(take fault)),
         }
     } else {
-        let mut sink = effect_preview(target, snap, h, ctx, key)
-        if let Some(mut p) = sink { preview.delta(mut p, "running tool") }
+        let progress = effect_preview(target, snap, h, ctx, key)
         let Some(c) = view e.call else { return Ok(Lost) }
-        if mcp_tools.reserved(c.name) { Tool(remote_effect(snap, h, e, c, a, port)) }
+        let outcome: Receipt = if mcp_tools.reserved(c.name) { Tool(remote_effect(snap, h, e, c, a, port)) }
         else {
             let Some(Outside(f, _)) = tool_named(a, c.name) else { return Ok(Lost) }
             let Inline(raw) = view c.args else { return Ok(Lost) }
@@ -1412,6 +1411,8 @@ pub fn effect_with_preview[G: send, F](ctx: store.runner.TriggerContext, port: G
                 Error(take fault) => Failed(fault_text(take fault)),
             })
         }
+        let _ = take progress
+        take outcome
     }
     let done: Option[Filed] = call_attempt(ctx, settle_entry, Settle(key: key, receipt: Some(take receipt)))
     match done { Some(_) => Ok(Sent), None => Ok(Lost) }

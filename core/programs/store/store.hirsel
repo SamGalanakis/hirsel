@@ -1456,7 +1456,7 @@ fn stage_call[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_repl
     let ci = call_info(db.store, db.heads[i].id, db.heads[i].head + 1, wall, db.heads[i].at)
     let caught = isolate(fn() -> Result[Finished[R, A], OutOfTime] {
         let perform = scoped fn() -> Finished[R, A] {
-            let staged = draft_body(db, i, ci, keep_reply, reads, issued, body)
+            let staged = draft_body(db, db.heads[i].roots, ci, keep_reply, reads, issued, body)
             let prepared = if let Some(_) = steps {
                 match prepare_metered_pages(take staged) {
                     Ok(take ready) => take ready,
@@ -1511,8 +1511,8 @@ fn raised_capacity(causes: Causes) -> Option[Capacity] {
     None
 }
 
-fn draft_body[R, A](db: Db, i: u64, ci: CallInfo, keep_reply: Option[fn(A) -> bool], reads: Log[Read], issued: Log[u64], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Finished[R, A] {
-    let mut tx = Tx(store: db.store, roots: share_roots(db.heads[i].roots), ids: db.next_node, private_from: int.saturating_add(db.next_node, 1), resident: db.resident, retain_old: retaining(db), frame_tail: match db.journal {
+fn draft_body[R, A](db: Db, base: Roots, ci: CallInfo, keep_reply: Option[fn(A) -> bool], reads: Log[Read], issued: Log[u64], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Finished[R, A] {
+    let mut tx = Tx(store: db.store, roots: share_roots(base), ids: db.next_node, private_from: int.saturating_add(db.next_node, 1), resident: db.resident, retain_old: retaining(db), frame_tail: match db.journal {
         Some(_) => OPEN_FRAME_TAIL,
         None => NO_FRAME_TAIL,
     }, reads: view reads, issued: view issued, refusal: None, frame_bytes: 42, wrote: false, ops: empty_ops(), info: ci, stream_ops: empty_ops(), extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, streams: 0)
@@ -1534,13 +1534,13 @@ fn draft_body[R, A](db: Db, i: u64, ci: CallInfo, keep_reply: Option[fn(A) -> bo
                 return RolledBack(Aborted(Undone(value: take a, ticket: None)))
             }
             // F2 keeps the streams and CALL writes with the old data roots.
-            let live = match stream_live(db, i, tx.stream_ops) {
+            let live = match stream_live(db, base.streams, tx.stream_ops) {
                 Ok(n) => n,
                 Error(c) => return RolledBack(Refused(Allocation(c)))
             }
             tx.resident = live
-            tx.roots.collections = share_page_tree(db.heads[i].roots.collections)
-            tx.roots.catalog = share_page_tree(db.heads[i].roots.catalog)
+            tx.roots.collections = share_page_tree(base.collections)
+            tx.roots.catalog = share_page_tree(base.catalog)
             tx.ops = empty_ops()
             tx.rows = 0
             tx.frame_tail = NO_FRAME_TAIL
@@ -1641,7 +1641,7 @@ fn draft_call(db: Db, complete: Completion, ci: CallInfo, plan: Plan, rec: Optio
             let draft = bound bytes plan.n_e {
                 let reads: Log[Read] = log.new()
                 let issued: Log[u64] = log.new()
-                let staged = draft_body(db, 0, ci, keep, reads, issued, scoped fn(mut tx: Tx) -> Result[Bytes, ServeReply] {
+                let staged = draft_body(db, db.heads[0].roots, ci, keep, reads, issued, scoped fn(mut tx: Tx) -> Result[Bytes, ServeReply] {
                     stage_reply(mut tx, complete, rec, plan.reply_max, body)
                 })
                 let finished = match prepare_metered_pages(take staged) {
@@ -1687,8 +1687,8 @@ fn draft_call(db: Db, complete: Completion, ci: CallInfo, plan: Plan, rec: Optio
     DraftedCall(stage: take staged, next_id: next_id)
 }
 
-// F2: the account after only the reply writes `ops`, against branch `i`.
-fn stream_live(db: Db, i: u64, ops: DataOps) -> Result[u64, Capacity] {
+// F2: the account after only the reply writes `ops`, against the base `streams` tree.
+fn stream_live(db: Db, streams: PageTree, ops: DataOps) -> Result[u64, Capacity] {
     let retained = retaining(db)
     let mut live = db.resident
     for slot in 0u64 .. ops.rows.count {
@@ -1696,7 +1696,7 @@ fn stream_live(db: Db, i: u64, ops: DataOps) -> Result[u64, Capacity] {
         let k = operation.key
         if let Some(raw) = operation.value {
             if !retained {
-                if let Some(old) = get_page_row(db.heads[i].roots.streams, k) {
+                if let Some(old) = get_page_row(streams, k) {
                     live = int.saturating_sub(live, entry(k, old))
                 }
             }
@@ -16075,92 +16075,10 @@ fn journal_following(d: Dir, id: StoreId, seq: u64, flush: bool) -> Result[Optio
     }
 }
 
-type CallSearch {
-    found: bool,
-    answer: Option[Recorded]
-}
-
 pub fn recorded(db: Db, b: Branch, wanted: u64) -> Result[Option[Recorded], Error] waits {
-    healthy(db)?
-    let i = branch_index(db, b)?
-    if list.len(db.disk) == 0 {
-        return Ok(None)
-    }
-    // A version the last cut covers has its frame below record_cut, so the
-    // scan from there does not find it.
-    if wanted > db.heads[i].head {
-        return Ok(None)
-    }
-    // Z1: skip the barrier exactly when every frame this Db has sent is acked,
-    // so it is written (X1 step 0's condition); never compare a version with
-    // `journaled`, which counts frames.
-    if !covered(db, Journal(db.frame_seq)) {
-        if let Some(sender) = db.journal {
-            let _ = channel.send(sender, Barrier)
-        }
-        if let Some(receiver) = db.written {
-            match result.unwrap(channel.receive(receiver)) {
-                Written => {},
-                WriteFailed(e) => {
-                    if let Some(sender) = db.written_send {
-                        let _ = channel.try_send(sender, WriteFailed(e))
-                    }
-                    return Error(Poisoned(e))
-                }
-            }
-        }
-    }
-    let d = db.disk[0].d
-    let mut seq = db.disk[0].record_cut
-    loop {
-        let path = capacity(disk_path("j-", seq, ""))?
-        let file = match host.open(d, path, Read) {
-            Ok(take handle) => take handle,
-            Error(NotFound) => return Ok(None),
-            Error(e) => return Error(Io(e))
-        }
-        let mut source = journal_input(take file, false)?
-        let following = journal_following(d, db.store, seq, false)?
-        let boundary = match following {
-            Some(h) => Some(h.prev_end),
-            None => disk_end(d, db.store, seq)?
-        }
-        let last = match following {
-            Some(_) => false,
-            None => true
-        }
-        let mut search = CallSearch(found: false, answer: None)
-        let id = db.store
-        let _ = journal_scan(mut source, path, id, seq, boundary, last, mut search, scoped fn(mut found: CallSearch, take event: JournalEvent) -> Result[(), Error] {
-            let Commit(take commit) = take event else {
-                return Ok(())
-            }
-            if !found.found && commit.branch == b.id && commit.version == wanted {
-                let JournalCommit(version: frame, at: wall, call: take call, ..) = take commit
-                found.found = true
-                found.answer = match take call {
-                    None => None,
-                    Some(CallSection(record: take rec, settlement: settled)) => {
-                        let context = match settled {
-                            Some(current) => current,
-                            None => Settlement(way: 0, base: frame - 1, at: wall, seed: call_info(id, b.id, frame, wall, wall).seed)
-                        }
-                        Some(Recorded(record: take rec, settle: context.way, branch: b, base: context.base, at: context.at, seed: context.seed))
-                    },
-                }
-            }
-            Ok(())
-        })?
-        let JournalInput(file: take consumed_file, ..) = take source
-        disk_io(host.close(take consumed_file))?
-        let CallSearch(found: found, answer: take answer) = take search
-        if found {
-            return Ok(take answer)
-        }
-        if last {
-            return Ok(None)
-        }
-        seq += 1
+    match recorded_commit(db, b, wanted)? {
+        Some(commit) => Ok(recorded_call(db.store, b, commit)),
+        None => Ok(None),
     }
 }
 

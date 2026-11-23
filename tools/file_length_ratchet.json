@@ -52,7 +52,7 @@
     "lines": 2982
   },
   "core/programs/store/store.hirsel": {
-    "lines": 19184,
+    "lines": 19102,
     "reason": "store-sync-1906"
   },
   "core/std/char.hirsel": {

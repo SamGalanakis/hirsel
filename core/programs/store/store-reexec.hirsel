@@ -1,0 +1,432 @@
+// RUNNER-SPEC §7 (R5): a recorded call re-executed on its base, under its
+// recorded CallInfo, compared with what it committed.
+
+pub type Difference = Reply | Writes
+
+pub type UnknownReason = NoEntry | ArgsUnresolved | StateGone | RevisionUnknown | NotRecorded | Effects | AdmissionRefused
+
+pub type Verdict = Same | Different(Difference) | Unknown(UnknownReason)
+
+// The settle context of a frame's call section (ATTACK-4 M3): an inline reply
+// ran on the frame's own base, `at` and seed; a settled one carries its own.
+fn recorded_call(id: StoreId, b: Branch, commit: JournalCommit) -> Option[Recorded] {
+    let Some(section) = view commit.call else {
+        return None
+    }
+    let context = match section.settlement {
+        Some(current) => current,
+        None => Settlement(way: 0, base: commit.version - 1, at: commit.at, seed: call_info(id, b.id, commit.version, commit.at, commit.at).seed)
+    }
+    Some(Recorded(record: clone(section.record), settle: context.way, branch: b, base: context.base, at: context.at, seed: context.seed))
+}
+
+// The committed frame of `wanted` on `b`, read from the live journal. A
+// version the last cut covers, and every version of a memory store, is None.
+fn recorded_commit(db: Db, b: Branch, wanted: u64) -> Result[Option[JournalCommit], Error] waits {
+    healthy(db)?
+    let i = branch_index(db, b)?
+    if list.len(db.disk) == 0 {
+        return Ok(None)
+    }
+    // A version the last cut covers has its frame below record_cut, so the
+    // scan from there does not find it.
+    if wanted > db.heads[i].head {
+        return Ok(None)
+    }
+    // Z1: skip the barrier exactly when every frame this Db has sent is acked,
+    // so it is written (X1 step 0's condition); never compare a version with
+    // `journaled`, which counts frames.
+    if !covered(db, Journal(db.frame_seq)) {
+        if let Some(sender) = db.journal {
+            let _ = channel.send(sender, Barrier)
+        }
+        if let Some(receiver) = db.written {
+            match result.unwrap(channel.receive(receiver)) {
+                Written => {},
+                WriteFailed(e) => {
+                    if let Some(sender) = db.written_send {
+                        let _ = channel.try_send(sender, WriteFailed(e))
+                    }
+                    return Error(Poisoned(e))
+                }
+            }
+        }
+    }
+    let d = db.disk[0].d
+    let mut seq = db.disk[0].record_cut
+    loop {
+        let path = capacity(disk_path("j-", seq, ""))?
+        let file = match host.open(d, path, Read) {
+            Ok(take handle) => take handle,
+            Error(NotFound) => return Ok(None),
+            Error(e) => return Error(Io(e))
+        }
+        let mut source = journal_input(take file, false)?
+        let following = journal_following(d, db.store, seq, false)?
+        let boundary = match following {
+            Some(h) => Some(h.prev_end),
+            None => disk_end(d, db.store, seq)?
+        }
+        let last = match following {
+            Some(_) => false,
+            None => true
+        }
+        let mut search: Option[JournalCommit] = None
+        let _ = journal_scan(mut source, path, db.store, seq, boundary, last, mut search, scoped fn(mut found: Option[JournalCommit], take event: JournalEvent) -> Result[(), Error] {
+            let Commit(take commit) = take event else {
+                return Ok(())
+            }
+            if let None = found {
+                if commit.branch == b.id && commit.version == wanted {
+                    found = Some(take commit)
+                }
+            }
+            Ok(())
+        })?
+        let JournalInput(file: take consumed_file, ..) = take source
+        disk_io(host.close(take consumed_file))?
+        if let Some(take commit) = take search {
+            return Ok(Some(take commit))
+        }
+        if last {
+            return Ok(None)
+        }
+        seq += 1
+    }
+}
+
+type BaseReplay {
+    replay: JournalReplay,
+    branch: u32,
+    next: u64,
+    stopped: bool
+}
+
+// The roots of version `base` on `b`: the MANIFEST's state with the live
+// journal replayed up to, not including, the commit after `base`. This is the
+// open path, so the pages are the ones every load path builds (MEM-30). None
+// when the MANIFEST is already past `base`.
+fn base_roots(db: Db, b: Branch, base: u64) -> Result[Option[Roots], Error] waits {
+    let d = db.disk[0].d
+    let (_, id, take manifest) = read_only_manifest(d)?
+    if let Some(_) = manifest.claim {
+        return Error(Unsupported(1))
+    }
+    let validated = validate_page_manifest(d, id, take manifest)?
+    let ValidatedPageManifest(manifest: take selected, graph: take resolved, ..) = take validated
+    let mut graph = take resolved
+    let empty_collection = disk_allocation(fn() -> Result[Arc[std.page.Page], Error] {
+        Ok(std.page.empty(0, 0, Collection))
+    })?
+    let pages = attach_page_graph(mut graph, empty_collection)?
+    let state = disk_allocation(scoped fn() -> Result[State, Error] {
+        let holders = attach_manifest_holders(selected, pages, empty_collection)
+        capacity(manifest_state(selected, holders))
+    })?
+    let replay = journal_replay(take state, selected.next_stamp - 1)?
+    for tip in replay.state.tips {
+        if tip.id == b.id && tip.head > base {
+            return Ok(None)
+        }
+    }
+    let mut held = BaseReplay(replay: take replay, branch: b.id, next: base + 1, stopped: false)
+    let mut seq = selected.first_live
+    loop {
+        let path = capacity(disk_path("j-", seq, ""))?
+        let file = match host.open(d, path, Read) {
+            Ok(take handle) => take handle,
+            Error(e) => return Error(Io(e))
+        }
+        let mut source = journal_input(take file, false)?
+        let following = journal_following(d, id, seq, false)?
+        let boundary = match following {
+            Some(h) => Some(h.prev_end),
+            None => disk_end(d, id, seq)?
+        }
+        let last = match following {
+            Some(_) => false,
+            None => true
+        }
+        let scanned = journal_scan(mut source, path, id, seq, boundary, last, mut held, scoped fn(mut at: BaseReplay, take event: JournalEvent) -> Result[(), Error] {
+            if at.stopped {
+                return Ok(())
+            }
+            match take event {
+                Commit(take commit) => {
+                    if commit.branch == at.branch && commit.version == at.next {
+                        at.stopped = true
+                        return Ok(())
+                    }
+                    journal_apply_commit(path, mut at.replay, commit)
+                },
+                Fork(take encoded) => journal_apply_fork(path, mut at.replay, take encoded),
+            }
+        })
+        let JournalInput(file: take consumed_file, ..) = take source
+        disk_io(host.close(take consumed_file))?
+        let _ = scanned?
+        if held.stopped || last {
+            break
+        }
+        seq += 1
+    }
+    for tip in held.replay.state.tips {
+        if tip.id == b.id && tip.head == base {
+            return Ok(Some(share_roots(tip.roots)))
+        }
+    }
+    Ok(None)
+}
+
+type Rerun = RanTo(Bytes, DataRows) | Halted(Stop) | RoomRefused
+
+// Section 7 step 3: the body on `base` under the recorded CallInfo, bounded as
+// `serve` bounds it. Nothing is committed; an application error keeps no
+// data writes (F2).
+fn rerun(db: Db, base: Roots, ci: CallInfo, plan: Plan, call: Recorded, body: scoped[view] fn(Recorded, mut Tx) -> Result[Bytes, Bytes]) -> Rerun {
+    let reads: Log[Read] = log.new()
+    let issued: Log[u64] = log.new()
+    let caught = isolate(fn() -> Result[Result[Finished[Bytes, Bytes], Capacity], OutOfTime] {
+        bound steps plan.s_e {
+            let drafted = bound bytes plan.n_e {
+                let keep: Option[fn(Bytes) -> bool] = None
+                let staged = draft_body(db, base, ci, keep, reads, issued, scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] {
+                    body(call, mut tx)
+                })
+                match prepare_metered_pages(take staged) {
+                    Ok(take ready) => take ready,
+                    Error(Full(problem)) => RolledBack(Refused(problem)),
+                    Error(_) => fail("store: invalid re-run pages"),
+                }
+            }
+            take drafted
+        }
+    })
+    let _ = log.finish(take reads)
+    let _ = log.finish(take issued)
+    let finished = match take caught {
+        Error(problem) => return Halted(OutOfBytes(problem)),
+        Ok(Error(take causes)) => return match raised_capacity(causes) {
+            Some(problem) => Halted(OutOfBytes(problem)),
+            None => Halted(Raised(cause_number(causes))),
+        },
+        Ok(Ok(Error(limit))) => return Halted(OutOfSteps(limit.steps)),
+        Ok(Ok(Ok(Error(problem)))) => return Halted(OutOfBytes(problem)),
+        Ok(Ok(Ok(Ok(take done)))) => take done,
+    }
+    let (take output, take writes) = match take finished {
+        RolledBack(Aborted(Undone(value: take answer, ..))) => (take answer, new_data_rows()),
+        RolledBack(Refused(Allocation(problem))) => return Halted(OutOfBytes(problem)),
+        RolledBack(Refused(_)) => return RoomRefused,
+        RolledBack(Failed(causes)) => return Halted(Raised(cause_number(causes))),
+        RolledBack(Stopped(limit)) => return Halted(OutOfSteps(limit.steps)),
+        RolledBack(Committed(_)) => fail("store: re-run committed"),
+        Prepared(take ready) => {
+            let Prepared(outcome: take outcome, ops: take ops, ..) = take ready
+            match take outcome {
+                Ok(take answer) => (take answer, take ops),
+                Error(take answer) => (take answer, new_data_rows()),
+            }
+        },
+    }
+    if list.len(output) > plan.reply_max {
+        return Halted(OutOfBytes(Capacity(requested: list.len(output), available: plan.reply_max)))
+    }
+    RanTo(take output, take writes)
+}
+
+// The reply the frame wrote on the record's stream: position 8, digest 32,
+// state 2, then the reply (AH3).
+fn recorded_reply(commit: JournalCommit, stream: Bytes) -> Option[View[Bytes]] in commit {
+    for op in commit.streams {
+        if op.key == stream {
+            if let Some(raw) = view op.value {
+                if list.len(raw) >= 41 && raw[40u64] == 2u8 {
+                    return Some(view raw)
+                }
+            }
+        }
+    }
+    None
+}
+
+// The frame records data rows in key order; the re-run's rows are sorted the same way.
+fn same_writes(rows: DataRows, committed: List[JournalOp]) -> Result[bool, Error] {
+    if rows.count != list.len(committed) {
+        return Ok(false)
+    }
+    let order = capacity(data_order(rows))?
+    for position in 0u64 .. rows.count {
+        let op = ordered_row(rows, order, position)
+        let other = view committed[position]
+        if op.key != other.key {
+            return Ok(false)
+        }
+        let equal = match (view op.value, view other.value) {
+            (Some(staged), Some(raw)) => staged_bytes(staged) == raw,
+            (None, None) => true,
+            _ => false,
+        }
+        if !equal {
+            return Ok(false)
+        }
+    }
+    Ok(true)
+}
+
+// RUNNER-SPEC §7: re-executes the call recorded at version `v` of `b` with
+// `body` on a private copy of its base, under the recorded run's CallInfo,
+// and compares the reply and the data writes with the committed ones. A
+// faulted re-run replies `failed(stop)`, the reply its conclude would write.
+pub fn reexecute(db: Db, b: Branch, v: u64, plan: Plan, failed: scoped fn(Stop) -> Bytes, body: scoped[view] fn(Recorded, mut Tx) -> Result[Bytes, Bytes]) -> Result[Verdict, Error] waits {
+    let Some(commit) = recorded_commit(db, b, v)? else {
+        return Ok(Unknown(StateGone))
+    }
+    let Some(call) = recorded_call(db.store, b, commit) else {
+        return Ok(Unknown(NotRecorded))
+    }
+    if call.settle == 2 {
+        return Ok(Unknown(AdmissionRefused))
+    }
+    let Some(stored) = recorded_reply(commit, call.record.stream) else {
+        return Ok(Unknown(NotRecorded))
+    }
+    let Some(base) = base_roots(db, b, call.base)? else {
+        return Ok(Unknown(StateGone))
+    }
+    let ci = CallInfo(id: CallId(store: db.store, branch: b.id, version: call.base + 1), at: call.at, seed: call.seed)
+    let (take output, take writes) = match rerun(db, base, ci, plan, call, body) {
+        RanTo(take output, take writes) => (take output, take writes),
+        Halted(stop) => (failed(stop), new_data_rows()),
+        RoomRefused => return Ok(Unknown(AdmissionRefused)),
+    }
+    if list.len(stored) != 41 + list.len(output) || !list.starts_with_at(stored, 41, output) {
+        return Ok(Different(Reply))
+    }
+    if !same_writes(writes, commit.data)? {
+        return Ok(Different(Writes))
+    }
+    Ok(Same)
+}
+
+// R5's entry: it replies with row 9 as its base holds it and with its
+// CallInfo, and writes the CallInfo. `forced` replaces info(mut tx);
+// `extra` adds one more write.
+fn info_entry(mut tx: Tx, t: Table[u64, u64], forced: Option[CallInfo], extra: bool) -> Result[Bytes, Bytes] {
+    let ci = match forced {
+        Some(given) => given,
+        None => info(mut tx),
+    }
+    let before = match result.unwrap(fetch(tx, shape(t), 9)) {
+        Some(n) => n,
+        None => 0u64,
+    }
+    result.unwrap(put(mut tx, t, 1, ci.at))
+    result.unwrap(put(mut tx, t, 2, ci.seed))
+    result.unwrap(put(mut tx, t, 3, ci.id.version))
+    if extra {
+        result.unwrap(put(mut tx, t, 4, 1))
+    }
+    let mut output: Bytes = list.new()
+    for word in [before, ci.at, ci.seed, ci.id.version] {
+        result.unwrap(le(mut output, word, 8))
+    }
+    Ok(take output)
+}
+
+fn set_row(mut db: Db, t: Table[u64, u64], k: u64, v: u64) -> bool waits {
+    match result.unwrap(run(mut db, None, scoped fn(mut tx: Tx) -> Result[(), Error] {
+        put(mut tx, t, k, v)
+    })) {
+        Committed(_) => true,
+        _ => false,
+    }
+}
+
+fn verdict_is(got: Verdict, want: Verdict) -> bool {
+    verdict_code(got) == verdict_code(want)
+}
+
+fn verdict_code(v: Verdict) -> u8 {
+    match v {
+        Same => 0u8,
+        Different(Reply) => 1u8,
+        Different(Writes) => 2u8,
+        Unknown(StateGone) => 3u8,
+        _ => 9u8,
+    }
+}
+
+// R5: an entry whose reply and writes are its info(mut tx) fields, re-executed
+// after later commits changed its input row, compares Same live and after a
+// journal-replay reopen; under the fork's CallInfo it compares Different(Reply),
+// and with one more write Different(Writes). Once a cut covers it, StateGone.
+// Oracle: the recorded run's own reply and frame.
+pub fn disk_law_reexecute_info(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    let dir = disk_test_directory(d)
+    let mut db = result.unwrap(open(tasks, dir, c, r, defaults()))
+    result.unwrap(create_table(mut db, spec("info", std.codec.key_u64(), std.codec.of_u64())))
+    let t = result.unwrap(table(mut db, "info", std.codec.key_u64(), std.codec.of_u64()))
+    if !set_row(mut db, t, 9, 7) {
+        return false
+    }
+    let stream = key_word(55)
+    let rec = call_for(stream, 32)
+    let request = request_digest(rec.key, rec.args)
+    let admission = result.unwrap(admit(mut db, stream, 0, request))
+    let Admitted(take complete) = take admission else {
+        return false
+    }
+    result.unwrap(durable(mut db, ticket(complete)))
+    let plan = Plan(n_e: 65536, s_e: 65536, reply_max: 4096)
+    let served = serve(mut db, take complete, plan, Some(take rec), scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] {
+        info_entry(mut tx, t, None, false)
+    })
+    let Ok(Committed(receipt)) = take served else {
+        return false
+    }
+    result.unwrap(durable(mut db, receipt.ticket))
+    let v = version(snapshot(db))
+    if !set_row(mut db, t, 9, 8) || !set_row(mut db, t, 1, 0) {
+        return false
+    }
+    let head = snapshot(db)
+    let (probe, _) = result.unwrap(fork(mut db, "probe", head))
+    let forked = call_info(db.store, probe.id, version(snapshot(db)) + 1, 0, 0)
+    let failed = scoped fn(_stop: Stop) -> Bytes {
+        key_word(0)
+    }
+    let line = main_branch(db)
+    let honest = result.unwrap(reexecute(db, line, v, plan, failed, scoped fn(call: Recorded, mut tx: Tx) -> Result[Bytes, Bytes] {
+        info_entry(mut tx, t, None, false)
+    }))
+    let moved = result.unwrap(reexecute(db, line, v, plan, failed, scoped fn(call: Recorded, mut tx: Tx) -> Result[Bytes, Bytes] {
+        info_entry(mut tx, t, Some(forked), false)
+    }))
+    let wider = result.unwrap(reexecute(db, line, v, plan, failed, scoped fn(call: Recorded, mut tx: Tx) -> Result[Bytes, Bytes] {
+        info_entry(mut tx, t, None, true)
+    }))
+    if !verdict_is(honest, Same) || !verdict_is(moved, Different(Reply)) || !verdict_is(wider, Different(Writes)) {
+        return false
+    }
+    result.unwrap(close(take db))
+    let mut reopened = result.unwrap(open(tasks, dir, c, r, defaults()))
+    let again = result.unwrap(reexecute(reopened, main_branch(reopened), v, plan, failed, scoped fn(call: Recorded, mut tx: Tx) -> Result[Bytes, Bytes] {
+        info_entry(mut tx, t, None, false)
+    }))
+    let _ = result.unwrap(checkpoint(mut reopened))
+    let gone = result.unwrap(reexecute(reopened, main_branch(reopened), v, plan, failed, scoped fn(call: Recorded, mut tx: Tx) -> Result[Bytes, Bytes] {
+        info_entry(mut tx, t, None, false)
+    }))
+    result.unwrap(close(take reopened))
+    verdict_is(again, Same) && verdict_is(gone, Unknown(StateGone))
+}
+
+@test
+fn disk_test_reexecute_info(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if disk_law_reexecute_info(d, c, r, tasks) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}

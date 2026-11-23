@@ -40,7 +40,7 @@ fn snapshot(context: &Context) -> Vec<String> {
         d.reap_inboxes
             .get()
             .map(|p| unsafe { p.as_ref().debug_state() }),
-        d.remote.lock().unwrap().debug_state()
+        d.remote_for_test().debug_state()
     ));
     rows
 }

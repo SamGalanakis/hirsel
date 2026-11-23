@@ -1,6 +1,7 @@
 //! Owner inboxes list the payer roots that have dirty slots, and each root
-//! keeps its own dirty-slot list. Links are prepaid in Slot; the domain mutex
-//! serializes publication, forwarding and retirement.
+//! keeps its own dirty-slot list. Links are prepaid in Slot. Only the domain's
+//! own Unit touches Remote (one worker runs a Unit at a time); another Unit's
+//! refunds arrive as `Post`s on the domain's mailbox, which that Unit folds in.
 //!
 //! Routing invariant: every queued slot that is not unassigned is on the list
 //! of its current union-find root, and a root's list is nonempty exactly when
@@ -16,7 +17,7 @@ use std::{
 };
 
 /// A record's dirty-slot list and its link in an inbox's root list. Only
-/// Domain.remote reads or writes it, and only on a union-find root's record
+/// the owner's Remote reads or writes it, and only on a union-find root's record
 /// is it nonempty.
 #[derive(Clone, Copy)]
 pub(super) struct Queue {
@@ -56,7 +57,7 @@ pub(super) struct Inbox {
     reaping: Cell<bool>,
     next_reap: Cell<Option<NonNull<Inbox>>>,
     pending: AtomicBool,
-    // Only Domain.remote reads or writes the root list.
+    // Only the owner's Remote reads or writes the root list.
     head: UnsafeCell<Option<NonNull<Slot>>>,
 }
 #[cfg(test)]
@@ -100,9 +101,6 @@ impl Inbox {
     pub(super) fn pending(&self) -> bool {
         self.pending.load(Ordering::Acquire)
     }
-    pub(super) fn pending_word(&self) -> &AtomicBool {
-        &self.pending
-    }
     fn notify(&self) {
         self.pending.store(true, Ordering::Release);
     }
@@ -114,17 +112,15 @@ impl Inbox {
 type Inboxes = HashMap<u64, Box<Inbox>, foldhash::fast::RandomState>;
 
 pub(super) struct Remote {
-    pub(super) retired: bool,
     inboxes: Inboxes,
-    // A foreign OS thread cannot inspect task-exclusive union records. The
-    // next owner event routes this list under the scheduler's table lease.
+    // Folded mailbox posts wait here, unrouted, until the next owner event
+    // routes them under the scheduler's table lease.
     unassigned: Option<NonNull<Slot>>,
     queued: usize,
 }
 impl Remote {
     pub(super) fn new() -> Self {
         Self {
-            retired: false,
             inboxes: Inboxes::default(),
             unassigned: None,
             queued: 0,
@@ -143,8 +139,8 @@ impl Remote {
         });
         NonNull::from(&mut **inbox)
     }
-    // Called only with both the local table lease and domain mutex. Foreign
-    // publishers never inspect the task-local reference counts or reap list.
+    // Called only by the owner, with the local table lease. Mailbox posters
+    // never inspect the task-local reference counts or reap list.
     pub(super) fn reap(&mut self, domain: &Domain) {
         let mut head = domain.reap_inboxes.take();
         while let Some(inbox) = head {
@@ -163,11 +159,10 @@ impl Remote {
         self.inboxes.len()
     }
     #[cfg(test)]
-    pub(super) fn debug_state(&self) -> (bool, usize, Option<usize>, Vec<InboxSnapshot>) {
+    pub(super) fn debug_state(&self) -> (usize, Option<usize>, Vec<InboxSnapshot>) {
         let mut inboxes: Vec<_> = self.inboxes.values().map(|v| v.debug_state()).collect();
         inboxes.sort();
         (
-            self.retired,
             self.queued,
             unsafe { self.unassigned.map(|p| p.as_ref().id) },
             inboxes,
@@ -176,11 +171,7 @@ impl Remote {
     pub(super) fn pending(&self) -> bool {
         self.queued != 0
     }
-    #[cfg(test)]
-    pub(super) fn queued_slots(&self) -> usize {
-        self.queued
-    }
-    /// The record's queue. SAFETY: the caller owns the domain mutex, and the
+    /// The record's queue. SAFETY: the caller runs on the owner Unit, and the
     /// record is live.
     #[allow(clippy::mut_from_ref)]
     unsafe fn queue_of<'a>(record: NonNull<Slot>) -> &'a mut Queue {
@@ -188,11 +179,11 @@ impl Remote {
     }
     /// The live inbox of a union-find root.
     fn live_inbox(root: NonNull<Slot>) -> NonNull<Inbox> {
-        // SAFETY: the domain mutex owns routing; a queued root is pinned.
+        // SAFETY: the owner Unit owns routing; a queued root is pinned.
         unsafe { (*root.as_ref().links.get()).live.inbox }
     }
     fn link(root: NonNull<Slot>, inbox: NonNull<Inbox>) {
-        // SAFETY: domain mutex; the root is unlinked and its list nonempty.
+        // SAFETY: owner Unit; the root is unlinked and its list nonempty.
         unsafe {
             let q = Self::queue_of(root);
             debug_assert!(q.inbox.is_none() && q.head.is_some());
@@ -207,7 +198,7 @@ impl Remote {
         }
     }
     fn unlink(root: NonNull<Slot>) -> NonNull<Inbox> {
-        // SAFETY: domain mutex; the root is linked on q.inbox.
+        // SAFETY: owner Unit; the root is linked on q.inbox.
         unsafe {
             let q = Self::queue_of(root);
             let inbox = q.inbox.take().unwrap();
@@ -224,7 +215,7 @@ impl Remote {
     /// Queue a clean slot on its root's list, linking the root on its live
     /// inbox if the list was empty.
     fn push(root: NonNull<Slot>, slot: NonNull<Slot>) {
-        // SAFETY: domain mutex; each dirty slot has one list link.
+        // SAFETY: owner Unit; each dirty slot has one list link.
         unsafe {
             let q = Self::queue_of(root);
             *slot.as_ref().next_pending.get() = q.head;
@@ -264,7 +255,7 @@ impl Remote {
             if let Some(root) = root {
                 Self::push(root.0, pointer);
             } else {
-                // SAFETY: domain mutex owns this slot's unpublished list link.
+                // SAFETY: owner Unit owns this slot's unpublished list link.
                 unsafe { *slot.next_pending.get() = self.unassigned };
                 self.unassigned = Some(pointer);
             }
@@ -286,7 +277,7 @@ impl Remote {
         let mut head = self.unassigned.take();
         while let Some(slot) = head {
             // SAFETY: queued charges/zero pins retain the slot; the caller has
-            // both the table lease and domain mutex for links and canonicalization.
+            // the table lease on the owner Unit for links and canonicalization.
             unsafe {
                 head = *slot.as_ref().next_pending.get();
                 Self::push(Payer(slot).root().0, slot);
@@ -304,7 +295,7 @@ impl Remote {
     /// Lower an inbox's notification once it lists no root and no unassigned
     /// entry can still route to it, so its owner sees no stale post.
     fn vacate(&self, inbox: NonNull<Inbox>) {
-        // SAFETY: the map retains the inbox until the next reap; domain mutex.
+        // SAFETY: the map retains the inbox until the next reap; owner Unit.
         unsafe {
             if (*inbox.as_ref().head.get()).is_none() && self.unassigned.is_none() {
                 inbox.as_ref().clear();
@@ -314,7 +305,7 @@ impl Remote {
     /// Put a root's nonempty list on its live inbox.
     fn follow(&self, root: NonNull<Slot>) {
         let target = Self::live_inbox(root);
-        // SAFETY: domain mutex owns the root's queue.
+        // SAFETY: owner Unit owns the root's queue.
         let linked = unsafe { Self::queue_of(root).inbox };
         if linked.is_some_and(|inbox| inbox != target) {
             let old = Self::unlink(root);
@@ -327,7 +318,7 @@ impl Remote {
     /// inbox (a union can replace the winner's live record).
     pub(super) fn unite(&mut self, winner: NonNull<Slot>, loser: NonNull<Slot>) {
         self.follow(winner);
-        // SAFETY: domain mutex owns both queues; the loser is no longer a root.
+        // SAFETY: owner Unit owns both queues; the loser is no longer a root.
         unsafe {
             let l = Self::queue_of(loser);
             let Some(head) = l.head.take() else {
@@ -355,12 +346,12 @@ impl Remote {
         let inbox = match owner {
             Some(owner) => &**self.inboxes.get(&owner)?,
             None => &**self.inboxes.values().find(|inbox| {
-                // SAFETY: caller owns the domain mutex; only it mutates queue links.
+                // SAFETY: the caller runs on the owner Unit; only it mutates queue links.
                 unsafe { (*inbox.head.get()).is_some() }
             })?,
         };
-        // SAFETY: the domain mutex owns links; clearing the last root also
-        // clears its owner's notification, before any foreign publisher can run.
+        // SAFETY: the owner Unit owns links; clearing the last root also
+        // clears its owner's notification.
         unsafe {
             let Some(root) = *inbox.head.get() else {
                 inbox.clear();
@@ -389,7 +380,7 @@ impl Remote {
             .map(|inbox| {
                 let inbox: &Inbox = inbox;
                 let mut roots = vec![];
-                // SAFETY: test reads under the domain mutex.
+                // SAFETY: the test reads on the owner Unit.
                 unsafe {
                     let mut root = *inbox.head.get();
                     while let Some(r) = root {
@@ -437,5 +428,125 @@ impl Remote {
         self.inboxes
             .get(&owner)
             .is_some_and(|inbox| inbox.pending())
+    }
+}
+
+/// One refund posted from another Unit: `bytes` (or a zero pin when 0) for `payer`.
+pub(super) struct Post {
+    payer: Payer,
+    bytes: u64,
+    next: *mut Post,
+}
+/// The mailbox head after retirement. Never a node address (Post is 8-aligned).
+pub(super) fn closed() -> *mut Post {
+    std::ptr::without_provenance_mut(1)
+}
+impl Domain {
+    /// SAFETY: the caller runs on the owner Unit, or retires the domain.
+    #[allow(clippy::mut_from_ref)]
+    #[inline(always)]
+    pub(super) unsafe fn remote(&self) -> &mut Remote {
+        unsafe { &mut *self.remote.get() }
+    }
+    #[cfg(test)]
+    pub(super) fn remote_for_test(&self) -> &mut Remote {
+        // SAFETY: tests read routing on the owner's thread.
+        unsafe { self.remote() }
+    }
+    /// Feed a mailbox batch, newest first, into the owner's unassigned list in
+    /// posting order. The owner Unit only.
+    pub(super) fn fold(remote: &mut Remote, mut batch: *mut Post) {
+        let mut fifo: *mut Post = std::ptr::null_mut();
+        while !batch.is_null() {
+            // SAFETY: the swap gave this Unit sole custody of the batch.
+            unsafe {
+                let next = (*batch).next;
+                (*batch).next = fifo;
+                fifo = batch;
+                batch = next;
+            }
+        }
+        while !fifo.is_null() {
+            // SAFETY: as above; each node was boxed by its poster.
+            let post = unsafe { Box::from_raw(fifo) };
+            fifo = post.next;
+            remote.enqueue(post.payer, post.bytes, None);
+        }
+    }
+    /// Whether a bound owner has refunds to fold: its inbox's, or any mail.
+    #[inline(always)]
+    pub(super) fn bound_pending(&self, inbox: &Inbox) -> bool {
+        inbox.pending() || !self.mail.load(Ordering::Acquire).is_null()
+    }
+    /// Close the mailbox at retirement and take its last batch. Later posts
+    /// find CLOSED and wait for `retire`, which the caller holds. Returns once
+    /// no poster whose push made the batch can still touch this Domain.
+    pub(super) fn close_mail(&self) -> *mut Post {
+        let batch = self.mail.swap(closed(), Ordering::AcqRel);
+        let mut spins = 0u32;
+        while self.posters.load(Ordering::Acquire) != 0 {
+            spins += 1;
+            if spins < 64 {
+                std::hint::spin_loop();
+            } else {
+                std::thread::yield_now();
+            }
+        }
+        batch
+    }
+}
+
+impl Payer {
+    /// Post a refund from another Unit. The unapplied bytes (or zero pin) keep
+    /// the slot and Domain alive until the owner folds the post; `posters`
+    /// keeps the Domain alive from the push to this call's last touch.
+    #[cold]
+    pub(super) fn remote_refund(self, bytes: u64) {
+        let d = self.domain();
+        d.posters.fetch_add(1, Ordering::SeqCst);
+        let post = Box::into_raw(Box::new(Post {
+            payer: self,
+            bytes,
+            next: std::ptr::null_mut(),
+        }));
+        let mut head = d.mail.load(Ordering::Acquire);
+        loop {
+            if head == closed() {
+                // SAFETY: never published.
+                drop(unsafe { Box::from_raw(post) });
+                d.posters.fetch_sub(1, Ordering::Release);
+                return self.retired_refund(bytes);
+            }
+            // SAFETY: the node is unpublished until the exchange succeeds.
+            unsafe { (*post).next = head };
+            match d
+                .mail
+                .compare_exchange_weak(head, post, Ordering::SeqCst, Ordering::Acquire)
+            {
+                Ok(_) => break,
+                Err(now) => head = now,
+            }
+        }
+        // After the push: the owner lowers `pending` before rechecking `mail`.
+        d.pending.store(true, Ordering::SeqCst);
+        d.posters.fetch_sub(1, Ordering::Release);
+    }
+    /// A refund after the last handle dropped: no owner remains to fold it.
+    #[cold]
+    fn retired_refund(self, bytes: u64) {
+        let d = self.domain();
+        let guard = d.retire.lock().unwrap();
+        let f = self.forest();
+        f.refund(self, bytes);
+        f.retired_bytes -= bytes;
+        let empty = f.retired_bytes == 0 && f.zeros == 0;
+        let domain = self.slot().domain;
+        drop(guard);
+        if empty {
+            // SAFETY: all handles, zero leases and outstanding bytes are gone.
+            unsafe {
+                drop(Box::from_raw(domain.as_ptr()));
+            }
+        }
     }
 }

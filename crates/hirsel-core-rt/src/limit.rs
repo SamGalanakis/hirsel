@@ -7,13 +7,13 @@
 use crate::Capacity;
 #[path = "limit_refunds.rs"]
 mod refunds;
-use refunds::{Inbox, Queue, Remote};
+use refunds::{Inbox, Post, Queue, Remote, closed};
 use std::{
     cell::{Cell, UnsafeCell},
     ptr::NonNull,
     sync::{
         Mutex,
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering},
     },
 };
 
@@ -418,7 +418,14 @@ struct Domain {
     forest: UnsafeCell<Forest>,
     handles: Cell<usize>,
     owner: Option<usize>,
-    remote: Mutex<Remote>,
+    /// Routing state, touched only on the owner Unit (one worker at a time).
+    remote: UnsafeCell<Remote>,
+    /// Other Units' refunds: a Treiber stack of `Post`s, or CLOSED once retired.
+    mail: AtomicPtr<Post>,
+    /// Posters between their first and last touch of this Domain.
+    posters: AtomicUsize,
+    /// Serializes retirement with the posts that find the mailbox CLOSED.
+    retire: Mutex<()>,
     reap_inboxes: Cell<Option<NonNull<Inbox>>>,
     /// Admitted bytes whose backing storage stays until run teardown.
     run_owned: AtomicU64,
@@ -656,7 +663,8 @@ impl Payer {
                 live = unsafe { (*root.links()).live };
             }
             if live.owner != crate::tasks::current_id() {
-                let publish = || d.remote.lock().unwrap().enqueue(self, bytes, Some(root));
+                // SAFETY: a bound or owning caller runs on the owner Unit.
+                let publish = || unsafe { d.remote() }.enqueue(self, bytes, Some(root));
                 if bytes == 0 {
                     publish();
                 } else {
@@ -679,27 +687,6 @@ impl Payer {
             }
         } else {
             self.remote_refund(bytes);
-        }
-    }
-    #[cold]
-    fn remote_refund(self, bytes: u64) {
-        let d = self.domain();
-        let mut remote = d.remote.lock().unwrap();
-        if remote.retired {
-            let f = self.forest();
-            f.refund(self, bytes);
-            f.retired_bytes -= bytes;
-            let empty = f.retired_bytes == 0 && f.zeros == 0;
-            let domain = self.slot().domain;
-            drop(remote);
-            if empty {
-                // SAFETY: all handles, zero leases and outstanding bytes are gone.
-                unsafe {
-                    drop(Box::from_raw(domain.as_ptr()));
-                }
-            }
-        } else {
-            remote.enqueue(self, bytes, None);
         }
     }
 
@@ -797,7 +784,10 @@ impl Funding {
             }),
             handles: Cell::new(1),
             owner: Some(thread()),
-            remote: Mutex::new(remote),
+            remote: UnsafeCell::new(remote),
+            mail: AtomicPtr::new(std::ptr::null_mut()),
+            posters: AtomicUsize::new(0),
+            retire: Mutex::new(()),
             pending: AtomicBool::new(false),
             reap_inboxes: Cell::new(None),
             run_owned: AtomicU64::new(0),
@@ -857,32 +847,24 @@ impl Funding {
             unsafe { binding.inbox.as_ref().release(binding.domain.as_ref()) };
         }
     }
-    /// The word `drain` tests on this thread, for a commit served by another
-    /// worker on this owner's behalf.
+    /// Whether `drain` would fold anything for this thread's owner: its bound
+    /// inbox or the mailbox, or else the domain's word.
     #[inline(always)]
-    pub(crate) fn pending_word(&self) -> *const AtomicBool {
+    pub(crate) fn pending(&self) -> bool {
         let domain = self.payer.get().slot().domain;
         // SAFETY: the current Funding and dispatch binding pin their state.
         unsafe {
             match BOUND.get().filter(|binding| binding.domain == domain) {
-                Some(binding) => binding.inbox.as_ref().pending_word(),
-                None => &domain.as_ref().pending,
+                Some(binding) => domain.as_ref().bound_pending(binding.inbox.as_ref()),
+                None => domain.as_ref().pending.load(Ordering::Acquire),
             }
         }
     }
 
-    /// Apply only the running owner's ordered refunds. No admission or allocation.
+    /// Apply only the running owner's ordered refunds. No admission.
     #[inline(always)]
     pub fn drain(&self) {
-        let domain = self.payer.get().slot().domain;
-        // SAFETY: the current Funding and dispatch binding pin their state.
-        let pending = unsafe {
-            match BOUND.get().filter(|binding| binding.domain == domain) {
-                Some(binding) => binding.inbox.as_ref().pending(),
-                None => domain.as_ref().pending.load(Ordering::Acquire),
-            }
-        };
-        if pending {
+        if self.pending() {
             self.drain_notified();
         }
     }
@@ -896,9 +878,18 @@ impl Funding {
     #[cold]
     fn drain_pending(&self) {
         let domain = self.payer.get().domain();
-        let mut remote = domain.remote.lock().unwrap();
-        self.drain_locked(&mut remote, false);
-        domain.pending.store(remote.pending(), Ordering::Release);
+        // SAFETY: drains run on the owner Unit.
+        let remote = unsafe { domain.remote() };
+        let batch = domain.mail.swap(std::ptr::null_mut(), Ordering::Acquire);
+        debug_assert!(batch != closed(), "a drain after retirement");
+        Domain::fold(remote, batch);
+        self.drain_locked(remote, false);
+        // Lower, then recheck the mailbox: a post pushed after the swap either
+        // shows here or raises `pending` after this store (both SeqCst).
+        domain.pending.store(remote.pending(), Ordering::SeqCst);
+        if !domain.mail.load(Ordering::SeqCst).is_null() {
+            domain.pending.store(true, Ordering::Relaxed);
+        }
         remote.reap(domain);
     }
     fn drain_locked(&self, remote: &mut Remote, retired: bool) {
@@ -995,7 +986,8 @@ impl Funding {
         let old = payer.forest().record(payer).live;
         if old.owner != owner {
             let domain = payer.domain();
-            let mut remote = domain.remote.lock().unwrap();
+            // SAFETY: Funding methods run on the owner Unit.
+            let remote = unsafe { domain.remote() };
             remote.reap(domain);
             let inbox = remote.inbox(owner);
             // SAFETY: the replacing live record takes over this inbox pin.
@@ -1061,7 +1053,8 @@ impl Funding {
         let (parent, owner) = self.handover_destination();
         let unused = unsafe { (*child.local()).available };
         crate::tasks::commit_refund(owner, unused, || {
-            let mut remote = d.remote.lock().unwrap();
+            // SAFETY: Funding methods run on the owner Unit.
+            let remote = unsafe { d.remote() };
             let f = child.forest();
             let lexical_parent = f.record(child).live.parent.unwrap();
             debug_assert!(f.record(child).parent.is_none());
@@ -1080,8 +1073,8 @@ impl Funding {
         let original_parent = f.record(child).live.parent.unwrap();
         let unused = unsafe { (*child.local()).available };
         let (winner, loser) = f.merge(child, original_parent, unused);
-        let mut remote = payer.domain().remote.lock().unwrap();
-        remote.unite(winner.0, loser.0);
+        // SAFETY: Funding methods run on the owner Unit.
+        unsafe { payer.domain().remote() }.unite(winner.0, loser.0);
         winner
     }
 
@@ -1225,12 +1218,8 @@ impl Funding {
         f.record_mut(child).parent = Some(parent);
         f.record_mut(child).refs = 0;
         f.record_mut(parent).refs += 1;
-        child
-            .domain()
-            .remote
-            .lock()
-            .unwrap()
-            .unite(parent.0, child.0);
+        // SAFETY: Funding methods run on the owner Unit.
+        unsafe { child.domain().remote() }.unite(parent.0, child.0);
         self.payer.set(parent);
         true
     }
@@ -1353,15 +1342,18 @@ impl Drop for Funding {
         if BOUND.get().is_some_and(|binding| binding.domain == domain) {
             Self::unbind();
         }
-        let mut remote = d.remote.lock().unwrap();
-        remote.retired = true;
+        let guard = d.retire.lock().unwrap();
+        let batch = d.close_mail();
+        // SAFETY: the last handle's drop is the owner's final act on Remote.
+        let remote = unsafe { d.remote() };
+        Domain::fold(remote, batch);
         let f = self.payer.get().forest();
         f.retired_bytes = f.outstanding();
-        self.drain_locked(&mut remote, true);
+        self.drain_locked(remote, true);
         self.payer.get().forest().release(self.payer.get());
         let empty =
             self.payer.get().forest().retired_bytes == 0 && self.payer.get().forest().zeros == 0;
-        drop(remote);
+        drop(guard);
         if empty {
             // SAFETY: the last handle and all charged values have been settled.
             unsafe {

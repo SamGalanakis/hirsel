@@ -3030,9 +3030,7 @@ pub(crate) unsafe fn arc_unobserved(context: *const Context) -> bool {
     // task alone writes its tape and pair state while it runs.
     unsafe {
         let task = &*((*context).events as *const Task);
-        !task.arc_runtime
-            && !task.arc_hooks
-            && !(*(*context).current.pending_word()).load(Ordering::Acquire)
+        !task.arc_runtime && !task.arc_hooks && !(*context).current.pending()
     }
 }
 pub(crate) unsafe fn event_in(context: *const Context, kind: u8, object: u64, value: u64) {

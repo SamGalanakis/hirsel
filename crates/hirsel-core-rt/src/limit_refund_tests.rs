@@ -166,10 +166,9 @@ fn dirty_inbox_aggregates_bytes_and_zero_pins_among_many_clean_records() {
         .unwrap();
     assert_eq!(context.available(), 48);
     let domain = context.current.payer.get().domain();
-    assert_eq!(domain.remote.lock().unwrap().queued_slots(), 1);
     context.current.drain();
     assert_eq!(context.available(), 64);
-    assert!(!domain.remote.lock().unwrap().pending());
+    assert!(!domain.remote_for_test().pending());
     assert_eq!(context.current.payer.get().forest().zeros, 0);
     drop(clean);
 }
@@ -219,9 +218,7 @@ fn owner_inboxes_and_handover_preserve_the_next_owner_event() {
         root.payer
             .get()
             .domain()
-            .remote
-            .lock()
-            .unwrap()
+            .remote_for_test()
             .pending_for(owner)
     };
     drop(Block::new(&context, Some(8), 8, 8).unwrap());
@@ -248,16 +245,14 @@ fn foreign_thread_routing_and_owner_reassignment_leave_no_stale_post() {
         root.payer
             .get()
             .domain()
-            .remote
-            .lock()
-            .unwrap()
+            .remote_for_test()
             .pending_for(owner)
     };
     let foreign = Foreign(vec![Block::new(&context, Some(8), 8, 8).unwrap()]);
     std::thread::spawn(move || foreign.release())
         .join()
         .unwrap();
-    assert!(pending(0));
+    assert!(root.pending());
     root.drain(); // Routes the OS-thread publication, but cannot deliver owner 1.
     assert!(!pending(0));
     assert!(pending(1));
@@ -282,16 +277,7 @@ fn finished_owner_inboxes_are_reclaimed_under_task_churn() {
         drop(child);
         root.drain_notified();
         assert_eq!(root.available(), 64);
-        assert_eq!(
-            root.payer
-                .get()
-                .domain()
-                .remote
-                .lock()
-                .unwrap()
-                .inbox_count(),
-            1
-        );
+        assert_eq!(root.payer.get().domain().remote_for_test().inbox_count(), 1);
     }
 }
 
@@ -644,7 +630,7 @@ fn a_refund_after_handover_and_before_end_goes_to_the_next_owner_event() {
 #[test]
 fn reassignment_and_handover_move_exactly_the_moved_roots_queued_slots() {
     let root = Funding::root(96);
-    let routed = || root.payer.get().domain().remote.lock().unwrap().routed();
+    let routed = || root.payer.get().domain().remote_for_test().routed();
     let a = root.reserve(32).unwrap();
     a.task_owner(1);
     let b = root.reserve(32).unwrap();
@@ -690,4 +676,91 @@ fn reassignment_and_handover_move_exactly_the_moved_roots_queued_slots() {
     assert_eq!((root.available(), ca.available()), (64, 32));
     ca.current.end();
     assert_eq!(root.available(), 96);
+}
+
+/// Cross-Unit stress law (CONC-15 refunds, MEM-19): foreign threads drop
+/// owner-charged blocks (content refunds) and settle connection charges
+/// (`refund_at_unit`) at once, over the root and nested limit records, while
+/// the owner admits, refunds and drains. Afterwards the root's balance is its
+/// capacity less the kept charges, summed from the plan, and no zero pin
+/// remains. Red on a lost or doubled post (a mailbox take that loads and
+/// stores instead of swapping loses the posts pushed in between).
+#[test]
+fn concurrent_foreign_posts_leave_exactly_the_kept_charges_outstanding() {
+    const POSTERS: usize = 8;
+    const PER: usize = 600;
+    const CAPACITY: u64 = 64 << 20;
+    struct Posts {
+        drops: Vec<Block>,
+        settles: Vec<Block>,
+    }
+    // SAFETY: sole custody of owner-charged blocks moves to the poster; it
+    // only drops them or settles them at their unit, both of which post.
+    unsafe impl Send for Posts {}
+    impl Posts {
+        fn post(self, start: &std::sync::Barrier) {
+            start.wait();
+            let mut settles = self.settles.into_iter();
+            for block in self.drops {
+                drop(block);
+                if let Some(settle) = settles.next() {
+                    settle.refund_at_unit();
+                }
+            }
+            settles.for_each(Block::refund_at_unit);
+        }
+    }
+    let mut context = Context::new(CAPACITY);
+    let mut kept = Vec::new();
+    let mut kept_bytes = 0u64;
+    let mut posts: Vec<Posts> = (0..POSTERS)
+        .map(|_| Posts {
+            drops: Vec::new(),
+            settles: Vec::new(),
+        })
+        .collect();
+    for i in 0..POSTERS * PER {
+        let charge = match i % 11 {
+            0 => 0,
+            n => 8 * (1 + (i as u64 * 7 + n as u64 * 13) % 97),
+        };
+        let nested = i % 3 == 0;
+        if nested {
+            context.limit_enter(charge + 64).unwrap();
+        }
+        let block = Block::new(&context, Some(charge), charge.max(1) as usize, 8).unwrap();
+        if nested {
+            context.limit_exit();
+        }
+        let poster = &mut posts[i % POSTERS];
+        match i % 5 {
+            0 => {
+                kept_bytes += charge;
+                kept.push(block);
+            }
+            1 | 3 => poster.settles.push(block),
+            _ => poster.drops.push(block),
+        }
+    }
+    let start = std::sync::Arc::new(std::sync::Barrier::new(POSTERS + 1));
+    let workers: Vec<_> = posts
+        .into_iter()
+        .map(|posts| {
+            let start = start.clone();
+            std::thread::spawn(move || posts.post(&start))
+        })
+        .collect();
+    start.wait();
+    while !workers.iter().all(|w| w.is_finished()) {
+        drop(Block::new(&context, Some(16), 16, 8).unwrap());
+        context.current.drain();
+    }
+    for worker in workers {
+        worker.join().unwrap();
+    }
+    context.current.drain();
+    assert_eq!(context.available(), CAPACITY - kept_bytes);
+    drop(kept);
+    assert_eq!(context.available(), CAPACITY);
+    assert_eq!(context.current.payer.get().forest().zeros, 0);
 }

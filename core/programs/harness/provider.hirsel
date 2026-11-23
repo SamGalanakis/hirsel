@@ -454,3 +454,115 @@ pub fn read(d: Dialect, b: Bounds, body: Bytes) -> Result[harness.Answer, String
     std.sse.finish(mut dec)
     answer(take st)
 }
+
+// ---- transport ----
+
+pub type Security = Plain | Https(String, Trust)
+
+// Where a provider listens. `prefix` goes before the dialect's path, for
+// gateways that serve the API under a base path.
+pub type Endpoint { address: Addr, authority: String, prefix: String, security: Security }
+
+// One provider route. The key is a Secret and reaches the wire only as a
+// protected header value.
+pub type Provider { model: Model, endpoint: Endpoint, key: Secret, bounds: Bounds, deadline_ms: u64 }
+
+fn path(p: Provider) -> String {
+    let mut out = string.from(p.endpoint.prefix)
+    match p.model.dialect {
+        Anthropic => string.push(mut out, "/v1/messages"),
+        OpenAi => string.push(mut out, "/v1/chat/completions"),
+    }
+    take out
+}
+
+fn public(name: String, value: String) -> std.http_client.Header {
+    std.http_client.Header(name: string.from(name), value: Public(string.into_bytes(string.from(value))))
+}
+
+fn headers(p: Provider) -> List[std.http_client.Header] {
+    let mut out: List[std.http_client.Header] = list.new()
+    list.push(mut out, public("Content-Type", "application/json"))
+    list.push(mut out, public("Accept", "text/event-stream"))
+    match p.model.dialect {
+        Anthropic => {
+            list.push(mut out, public("anthropic-version", "2023-06-01"))
+            list.push(mut out, std.http_client.Header(name: "x-api-key", value: Protected(list.new(), secret.share(p.key))))
+        },
+        OpenAi => list.push(mut out, std.http_client.Header(name: "Authorization", value: Protected(b"Bearer ", secret.share(p.key)))),
+    }
+    take out
+}
+
+fn event_stream(head: std.http_client.ResponseHead) -> bool {
+    for i in 0u64 .. std.http_client.field_count(head) {
+        let Some((name, value)) = std.http_client.field_at(head, i) else { continue }
+        if std.http1.equal_ascii(name, b"content-type") {
+            return match string.from_utf8(std.http.copy_bytes(value)) {
+                Ok(take t) => string.starts_with(t, "text/event-stream"),
+                Error(_) => false,
+            }
+        }
+    }
+    false
+}
+
+// Once request bytes may have left, every failure is Unavailable: the
+// provider may have run and charged the call, so the worker records doubt.
+// Before that, a failure is a plain refusal and nothing was spent.
+fn sent_or(c: std.http_client.Connection, why: String) -> harness.Fault {
+    if std.http_client.request_started(c) { Unavailable } else { Refused(string.from(why)) }
+}
+
+// Calls the provider and reads its streamed answer. A non-200 reply is a
+// definite rejection (Refused); a stream that ends without its terminator is
+// doubt (Unavailable).
+pub fn ask(n: Net, clock: Clock, p: Provider, take req: harness.Request) -> Result[harness.Answer, harness.Fault] waits {
+    let text = match body(p.model, req) {
+        Ok(take t) => take t,
+        Error(take why) => return Error(BadArgs(take why)),
+    }
+    let deadline = host.mono_ns(clock) + p.deadline_ms * 1000000u64
+    let opened = match p.endpoint.security {
+        Plain => std.http_client.open(n, p.endpoint.address, p.endpoint.authority, clock, deadline),
+        Https(name, trust) => std.http_client.open_tls(n, p.endpoint.address, p.endpoint.authority, name, trust, clock, deadline),
+    }
+    let mut c = match take opened {
+        Ok(take ready) => take ready,
+        Error(_) => return Error(Refused("could not connect to the provider")),
+    }
+    let request = std.http_client.Request(method: "POST", target: path(p), headers: headers(p), body: Fixed(string.byte_len(text)))
+    if let Error(_) = std.http_client.start(mut c, request, deadline) { return Error(sent_or(c, "could not start the request")) }
+    if let Error(_) = std.http_client.write(mut c, string.as_bytes(text)) { return Error(sent_or(c, "could not send the request")) }
+    if let Error(_) = std.http_client.finish_request(mut c, p.bounds.event_bytes) { return Error(Unavailable) }
+    let (status, events) = {
+        let head = std.http_client.head(c)
+        (std.http_client.status(head), event_stream(head))
+    }
+    if status != 200 {
+        let mut why = string.from("the provider answered HTTP ")
+        string.push_uint(mut why, int.widen(status), 10u32, 0u64, '0')
+        return Error(Refused(take why))
+    }
+    if !events { return Error(Unavailable) }
+    let mut dec = decoder(p.bounds)
+    let mut st = stream(p.model.dialect, p.bounds)
+    let mut chunk: Bytes = list.with_capacity(8192u64)
+    loop {
+        let got = match std.http_client.read(mut c, mut chunk) {
+            Ok(k) => k,
+            Error(_) => return Error(Unavailable),
+        }
+        if got == 0u64 { return Error(Unavailable) }
+        match feed(mut dec, mut st, chunk) {
+            Ok(true) => break,
+            Ok(false) => list.clear(mut chunk),
+            Error(_) => return Error(Unavailable),
+        }
+    }
+    std.sse.finish(mut dec)
+    match answer(take st) {
+        Ok(take a) => Ok(take a),
+        Error(_) => Error(Unavailable),
+    }
+}

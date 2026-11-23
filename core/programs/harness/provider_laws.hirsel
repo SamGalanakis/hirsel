@@ -193,3 +193,152 @@ fn test_request_bodies_follow_wire_format() -> Result[(), u64] {
     if ok_o != 0u64 { return Error(ok_o) }
     Ok(())
 }
+
+// ---- transport over a simulated TLS network ----
+//
+// A Secret leaves only over a verified TLS stream (TLS-5), so the transport
+// law runs on std.sim.net, which answers the handshake for the provider's
+// name. The provider is a scripted peer task.
+
+const PEER: String = "api.provider.test"
+
+type Link: send { port: Served[NetOp], clock: Clock, plan: std.sim.world.Plan }
+
+fn drive_clock(take input: std.sim.world.World) waits {
+    let mut world = take input
+    std.sim.world.run(mut world)
+}
+
+fn serve_link(take input: Link) waits {
+    let Link(port: take port, clock: clock, plan: take initial) = take input
+    let mut plan = take initial
+    let mut link = std.sim.net.new(std.sim.net.defaults())
+    std.sim.net.handshake_as(mut link, string.from(PEER), Ok(Handshake(protocol: Some(0), peer: (0, 0, 0, 0))))
+    let _ = std.sim.net.serve(link, mut plan, clock, take port)
+}
+
+// What the scripted provider does after it has read the request body: send
+// these bytes (possibly none) and close. std.sim.net confirms a SendSecret
+// without delivering its bytes, so the request head (which carries the key)
+// never reaches the peer; the peer reads the body, whose length the law
+// computes from provider.body.
+type Script: send { listener: Listener, clock: Clock, reply: Bytes, expect: u64, heard: Sender[Bytes] }
+
+fn later(clock: Clock) -> Until { At(clock, host.mono_ns(clock) + 5000000000u64) }
+
+fn scripted(take s: Script) -> () waits {
+    let Script(listener: take l, clock: clock, reply: take reply, expect: expect, heard: heard) = take s
+    let mut listener = take l
+    let Ok((socket, _)) = host.accept(mut listener, later(clock)) else { return () }
+    let (take input, take output) = net.split(take socket)
+    let mut r = take input
+    let mut w = take output
+    let mut got: Bytes = list.with_capacity(65536u64)
+    while list.len(got) < expect {
+        let Ok(k) = host.recv_bounded(mut r, mut got, 65536u64, later(clock)) else { break }
+        if k == 0u64 { break }
+    }
+    let _ = channel.send(heard, take got)
+    let end = list.len(reply)
+    let mut at = 0u64
+    while at < end {
+        let Ok(k) = host.send_pair(mut w, list.slice(reply, at, end), b"", later(clock)) else { break }
+        if k == 0u64 { break }
+        at += k
+    }
+}
+
+fn reply_with(status: String, media: String, body: String) -> Bytes {
+    let mut out = string.from("HTTP/1.1 ")
+    string.push(mut out, status)
+    string.push(mut out, "\r\nContent-Type: ")
+    string.push(mut out, media)
+    string.push(mut out, "\r\nConnection: close\r\n\r\n")
+    string.push(mut out, body)
+    string.into_bytes(take out)
+}
+
+fn route(d: provider.Dialect, at: Addr) -> provider.Provider {
+    let mut uses = string.from("tls_send(")
+    string.push(mut uses, PEER)
+    string.push(mut uses, ")")
+    provider.Provider(
+        model: provider.Model(dialect: d, name: "m", max_tokens: 64u64),
+        endpoint: provider.Endpoint(address: at, authority: PEER, prefix: "", security: Https(PEER, System)),
+        key: result.unwrap(secret.seal(bytes_of("sk-test-0001"), uses)), bounds: provider.bounds(), deadline_ms: 5000u64)
+}
+
+fn simple_request() -> harness.Request {
+    let mut messages: List[harness.Entry] = list.new()
+    list.push(mut messages, User("weather in San Francisco?"))
+    harness.Request(route: "m", system: list.new(), tools: list.new(), messages: take messages, key: bytes_of("k"))
+}
+
+// One exchange in a fresh simulated world. With `reply` = None nobody
+// listens; otherwise the peer reads the request and sends the reply. Answers
+// the result and the request bytes the peer heard.
+fn exchange(tasks: Tasks, d: provider.Dialect, take reply: Option[Bytes]) -> (Result[harness.Answer, harness.Fault], String) waits {
+    let (initial, clock) = std.sim.world.new(0u64, 0u64, 0u64)
+    let mut world = take initial
+    let plan = std.sim.world.detach(mut world)
+    let timer = task.spawn(tasks, bytes 65536u64, take world, drive_clock)
+    let (n, port) = provide.net(bytes 4096u64)
+    let link = task.spawn(tasks, bytes 4194304u64, Link(port: take port, clock: clock, plan: take plan), serve_link)
+    let (listener, at) = result.unwrap(host.listen(n, Addr(ip: V4(2130706433u32), port: 0u16), 1u16))
+    let mut said = string.new()
+    let got = match take reply {
+        None => {
+            let _ = take listener
+            provider.ask(n, clock, route(d, at), simple_request())
+        },
+        Some(take bytes_out) => {
+            let (heard, hears): (Sender[Bytes], Receiver[Bytes]) = channel.new(1u64)
+            let expect = match provider.body(route(d, at).model, simple_request()) { Ok(b) => string.byte_len(b), Error(_) => 0u64 }
+            let server = task.spawn(tasks, bytes 1048576u64, Script(listener: take listener, clock: clock, reply: take bytes_out, expect: expect, heard: take heard), scripted)
+            let answered = provider.ask(n, clock, route(d, at), simple_request())
+            if let Ok(take b) = channel.receive(hears) {
+                if let Ok(take s) = string.from_utf8(take b) { said = take s }
+            }
+            let _ = task.join(take server)
+            take answered
+        },
+    }
+    drop(take n)
+    let _ = task.join(take link)
+    let _ = task.join(take timer)
+    (take got, take said)
+}
+
+fn has(s: String, part: String) -> bool { match string.find(s, 0u64, part) { Some(_) => true, None => false } }
+
+// Law T1: doubt only after the request may have reached the provider.
+// - A connection nobody accepts is a plain refusal: nothing was sent and
+//   nothing was spent.
+// - A reply cut before the terminator, or a close with no reply after the
+//   whole request was sent, is doubt (Unavailable): the provider may have run
+//   and charged the call.
+// - A non-200 reply is a definite rejection (Refused), not doubt.
+// - The documented stream reads to the documented answer, after the peer
+//   received exactly the body provider.body writes.
+// Answers the failing case, or 0.
+@test
+fn test_doubt_only_after_send(tasks: Tasks) -> Result[(), u64] waits {
+    let (nobody, _) = exchange(tasks, Anthropic, None)
+    match nobody { Error(Refused(_)) => (), _ => return Error(2u64) }
+    let sse = "text/event-stream"
+    let (whole, heard) = exchange(tasks, Anthropic, Some(reply_with("200 OK", sse, anthropic_docs())))
+    match whole { Ok(a) => if !anthropic_ok(a) { return Error(3u64) }, Error(_) => return Error(4u64) }
+    if !has(heard, "\"stream\":true") { return Error(5u64) }
+    let (cut, _) = exchange(tasks, Anthropic, Some(reply_with("200 OK", sse, anthropic_cut())))
+    match cut { Error(Unavailable) => (), _ => return Error(8u64) }
+    let (silent, _) = exchange(tasks, Anthropic, Some(list.new()))
+    match silent { Error(Unavailable) => (), _ => return Error(9u64) }
+    let (rejected, _) = exchange(tasks, Anthropic, Some(reply_with("400 Bad Request", "application/json", "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"bad\"}}")))
+    match rejected { Error(Refused(_)) => (), _ => return Error(10u64) }
+    let (oai, oai_heard) = exchange(tasks, OpenAi, Some(reply_with("200 OK", sse, openai_tools())))
+    match oai { Ok(a) => if !openai_ok(a) { return Error(11u64) }, Error(_) => return Error(12u64) }
+    if !has(oai_heard, "\"include_usage\":true") { return Error(13u64) }
+    let (oai_cut, _) = exchange(tasks, OpenAi, Some(reply_with("200 OK", sse, openai_cut())))
+    match oai_cut { Error(Unavailable) => (), _ => return Error(15u64) }
+    Ok(())
+}

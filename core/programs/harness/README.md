@@ -182,6 +182,16 @@ each response chunk to `provider.feed` and asks `provider.answer` at the end.
 - **Checked fragments.** Tool input schemas and call arguments are raw JSON
   embedded in the body, so `body` checks each one before writing.
 
+- **Transport.** `provider.ask(net, clock, provider, request)` is the
+  agent's model function body. It connects with `open` or `open_tls`; a
+  failure there is `Refused`, since nothing was sent. Once
+  `http_client.request_started`, every failure (a cut stream, a close with no
+  reply, a malformed or over-bound stream) is `Unavailable`, which the worker
+  records as doubt with spend unresolved. A non-200 reply is a definite
+  rejection, `Refused`. The key is a `Secret` sent only as a protected header
+  (`x-api-key`, or `Authorization: Bearer`), and secrets travel only over a
+  verified TLS stream, so plain HTTP endpoints cannot carry one.
+
 ## Laws
 
 | law | claim | oracle |
@@ -198,5 +208,6 @@ each response chunk to `provider.feed` and asks `provider.answer` at the end.
 | S1 `test_documented_streams_read` | The Anthropic docs' tool-use stream and an OpenAI tool-call stream read to their documented answer (text, calls, joined arguments, stop reason, usage), fed whole or in pieces of 1, 2, 7 or 61 bytes. | The Anthropic streaming docs' example, copied verbatim, and a stream built from OpenAI's documented chunk schema; the expected answers are read off the fixtures by hand. |
 | S2 `test_answer_needs_terminator` | A stream cut before `message_stop` or `[DONE]`, cut inside a tool argument, or ending in an error event gives no answer. | Each provider's documented success terminator. |
 | W1 `test_request_bodies_follow_wire_format` | Bodies follow each provider's documented message shape: Anthropic groups one turn's tool results into one user message with `is_error`, and OpenAI sends arguments as a string and asks for usage. | The message shapes in each provider's API reference. |
+| T1 `test_doubt_only_after_send` | Over a simulated TLS network: no listener is Refused; a stream cut before its terminator or a close with no reply after the request is Unavailable (doubt); a 400 reply is Refused; the documented streams read to their documented answers. | Whether request bytes may have reached the provider in each script, and the documented answers. |
 
 Open: a `std.sim.fs` crash cut at the same boundary as C1.

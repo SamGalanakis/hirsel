@@ -9,8 +9,8 @@ to the program. A program must reach this branch without using a capability.
 
 ## Immutable launch identity
 
-The runtime supplies one private launch metadata value with `digest`, `target`
-and `n_place`. `digest` is the 32-byte SHA-256 digest of the executable image's
+The runtime supplies one private launch metadata value with `digest`, `target`,
+`n_place` and `assembly`. `digest` is the 32-byte SHA-256 digest of the executable image's
 bytes, as specified by FIPS 180-4. `target` is that image's target triple.
 `n_place` is the byte allowance used for this launch's place registration. The
 launcher fixes these values before program code runs. The runner reads this
@@ -22,7 +22,18 @@ alongside digest and target. `runner.main` has no `n_place` argument and reads
 its allowance only from metadata. One executable can launch with different
 allowances, so the full identity includes `n_place` independently of the digest.
 Both native and evaluator launchers supply it, and describe reports it. Bindings
-record the allowance of the described launch. A const-parameter mechanism was
+record the allowance of the described launch.
+
+`assembly` (STORE-SPEC v2.51; not yet built) is the 32-byte name of the assembly record
+the launch runs ("Assembly records" below), or empty when the launcher names none. One
+executable can be the image of several records (two recipes that differ outside the image,
+or one recipe under two toolchains that give the same bytes), and records differ in what the
+host approved for them, so the record is part of the identity apart from the digest. The
+platform launcher passes the record it launches to every child of it; `hirsel run` and
+`hirsel build --manifest` pass the record they just assembled; an evaluator or embedded
+launch passes it explicitly or leaves it empty. A launch of a bare executable names none. The
+name is the launching principal's statement, as `n_place` is: it selects nothing and grants
+nothing, and is compared only as part of `Describe`. A const-parameter mechanism was
 considered and left out: it is a separate language feature and is unnecessary
 for launch configuration. There is no compiler rule naming `runner@1/runner` to
 require or extract a constant argument.
@@ -77,7 +88,7 @@ store or listener. It encodes this record with the ordinary value codec:
 type Kind: codec + send = Compute | Transact | Query | Granted
 type Described: codec + send { kind: Kind, identity: Bytes, args: Bytes, result: Bytes }
 type Exported: codec + send { described: Described, args_fp: u64, result_fp: u64, revision: Bytes }
-type Describe: codec + send { digest: Bytes, target: String, n_place: u64, exported: List[Exported] }
+type Describe: codec + send { digest: Bytes, target: String, n_place: u64, assembly: Bytes, exported: List[Exported] }
 type ReleaseManifest: codec + send { describe: Describe, release: Bytes, grants: List[String], root_limit: u64, recipe: Bytes }
 ```
 
@@ -109,8 +120,9 @@ and reports `PlaceTimedOut`; no generated output is written. The deadline
 covers entry through `main`, registration, encoding and child exit. Capacity,
 duplicate registration and timeout errors leave the output destination alone.
 
-The native launcher consumes the private prefix `--hirsel-describe`<!-- doc-ref: external --> and
-`--hirsel-n-place=<bytes>`<!-- doc-ref: external --> before constructing user `Args`. The allowance defaults
+The native launcher consumes the private prefix `--hirsel-describe`<!-- doc-ref: external -->,
+`--hirsel-n-place=<bytes>`<!-- doc-ref: external --> and `--hirsel-assembly=<hex>`<!-- doc-ref: planned -->
+(64 lowercase hex digits; absent means empty) before constructing user `Args`. The allowance defaults
 to 16 MiB. A place launched by the platform host or launcher runs at the
 allowance that option selects. A standalone place runs at its own
 `PlaceConfig.n_place` and ignores the option: its wire configuration must repeat
@@ -172,6 +184,7 @@ ordinary value codec. Its type, `ReleaseManifest`, is declared with `Describe` a
   the exported entries in registration order. `n_place` is the allowance the
   child ran with. A hosted launch that selects another `--hirsel-n-place`<!-- doc-ref: external -->
   is a different release identity, and Welcome and the status route report it.
+  `assembly` is the record the build assembled.
 - `release` is the preview child's `release`, which it computes with
   `runner.release_digest`: SHA-256 over `u8 17 ‖ "hirsel.release.v1" ‖` the
   value codec's bytes of the registry's exported list. The driver never hashes
@@ -190,8 +203,9 @@ ordinary value codec. Its type, `ReleaseManifest`, is declared with `Describe` a
 - `root_limit` is the executable's root limit.
 - `recipe` is the 32-byte root R of the release recipe the executable was assembled
   from (below). `release` says what the public interface runs, R says what code was
-  assembled, and the digest says which bytes run. R does not enter `release`, and the
-  store's `releases` rows do not hold it.
+  assembled, and the digest says which bytes run. R does not enter `release` or the
+  store's `releases` rows; the store's `Describe` names it only through `assembly`, whose
+  record names R.
 
 Grants and the root limit are part of the executable's build key, so a manifest
 describes exactly one executable. Limits the place sets in its own code (`q`,
@@ -334,7 +348,8 @@ assembly run under the same kind of limits on time, memory and output.
 
 **Assembly records.** An **assembly record** is an immutable host record naming one realised
 combination: R, the toolchain fingerprint, and the image digest that assembly produced. Its name
-is the hash of those three. The **toolchain fingerprint** is a hash of the effective environment
+is the hash of those three, and every launch of the record carries it in its `Describe`
+("Immutable launch identity"), so an activation names exactly one record. The **toolchain fingerprint** is a hash of the effective environment
 of the assembly: the resolved target features, the compiler and backend, the runtime ABI and
 runtime archive, the linker, every link input and the effective settings. A host's toolchain is
 an immutable installation, so every file it loads is covered. Image bytes are kept once per
@@ -367,9 +382,9 @@ root reaches. The roots are the union of: the assembly record of each retained a
 (current, previous, and each live `releases` interval), each pending record, each recording pin, and
 each live reservation. An assembly record keeps its image, its recipe and the recipe's closure.
 The host keeps a per-store index from activation version to the assembly record that serves it,
-so the store's `releases` rows keep their format. A decided selection, a commit, a genesis
-adoption, a host-run install and an operator `Select` write it; a probe's intent never does
-(RUNNER-SPEC §14.3 "What serves"), and a recording pin names the assembly record of
+so the store's `releases` rows keep their format. A decided selection, a commit, an Installed
+outcome (at the attempt's `v`), a genesis adoption and a host-run install write it; a probe's
+intent never does (RUNNER-SPEC §14.3 "What serves"), and a recording pin names the assembly record of
 the run it records and is synced before `Pinned` is answered. A retained image carries its runtime. The host reads its recipe envelope to recover
 launch settings and keep referenced objects. A retained digest whose image is missing gives `Unknown(ImageGone)`.
 
@@ -415,16 +430,14 @@ installed after recovery`), and so is no row on log@1, or on objects@1 no row un
 pair than the one OLD recorded with its import. On objects@1 no row under OLD's pair proves
 nothing yet: OLD's delayed write can still land, so the next probe opens OLD's assembly at
 OLD's activation, and that open, or its read, decides. The outcome never chooses what serves.
-In the same transaction the host selects the store's current activation with the assembly
-whose `Describe` digest is the read's image, so a group never returns to `v` from a later
-activation. Identical records count once. If OLD's and NEW's are two records with that digest,
-the one this store's activation index already names for that activation serves; when none is
-named, or neither matches, nothing is selected and the group is failing with that cause until
-an operator acts (`Select` names one of two matching records). A probe whose open does not
-prove the install serves only if this rule selects its assembly; otherwise the host stops it
-before accepting its `PlaceOpened`. Roots follow RUNNER-SPEC §14.3
-"Roots": the selected assembly is current, the other is retained unless the deploy failed and
-OLD was selected, and with nothing selected OLD stays current and NEW retained. Any other
+An Installed outcome also records NEW's assembly for `v` in the
+activation index, whatever activation the read reports. In the same transaction the host
+selects the store's current activation with the assembly whose `Describe` digest is the read's
+image, so a group never returns to `v` from a later activation. `Describe` names its assembly
+record, so at most one of OLD's and NEW's matches; when neither does, nothing is selected and
+the group is failing with that cause until an operator deploys or installs. A probe whose open
+does not prove the install serves only if this rule selects its assembly; otherwise the host
+stops it before accepting its `PlaceOpened`. Roots follow RUNNER-SPEC §14.3 "Roots". Any other
 answer (`Held`, a missing image, a failed read, an I/O failure) decides nothing: both roots stay, and the probe is retried under the
 ordinary backoff. Neither a timer nor a retry count decides a root.
 The platform host records the attempt as `Preparing` before its describe, preview and
@@ -694,7 +707,6 @@ answered `Error(Protocol)` and closes only that exchange.
 | 6 LookupGroup(name) | Returns GroupInfo(G) for the registered incarnation, or `Error(UnknownGroup)`, also while the group is still registering. |
 | 7 Register(D, registration, input, foreign, exec) | `registration` is (name, tenant, workdir, trusted, label, listen, bindings, limits, args, record), with `record` an `Option` of (dir, retentionSeconds). Registers a new group and deploys its first release, below. `input`, `foreign` and `exec` are Begin's. |
 | 8 Decide(D, grants, approve) | A person's decision on D, which must be in AwaitDecision on exactly this grant diff ("Deploy preview"); anything else is `Error(Denied)`. An approval repeats D's admission under a fresh A, this connection owning it; a refusal fails D `Denied`. |
-| 9 Select(G, assembly) | (v2.50, not yet built.) Names which of two assembly records with one `Describe` digest serves a group failing with that two-record cause (RUNNER-SPEC §14.3 "What serves"). The record must be one of the two and its `Describe` digest the recorded image; anything else is `Error(Conflict)`. In one transaction the host writes the record into the store's activation index at the recorded activation, makes it the group's current assembly at that activation with the other root kept by "Roots", and clears the pending choice from the `groups` row and the failing state, then starts the group. Answered GroupInfo(G); a repeat naming the record the index already holds is answered the same. |
 
 | Host → operator | Payload and rule |
 |---|---|
@@ -794,11 +806,6 @@ activation, assembly and report.
   sends Decide approving it and goes on; otherwise it prints the state, with the diff, and
   exits 2. `hirsel deploy --state S --request-id D --refuse-grants` refuses the diff D
   awaits a decision on. `hirsel deploy --state S --status D` sends only Status.
-- `hirsel select --state S --group NAME --assembly HEX`<!-- doc-ref: planned --> resolves G with LookupGroup and
-  sends Select (v2.50, not yet built). It carries no D, so it prints no `request` line and no
-  JSON outcome, and the exit statuses below are register's and deploy's: it exits 0 on
-  GroupInfo and 1 on an Error, which it prints. Running it again after a lost connection is
-  safe, since a repeat is answered the same.
 
 Register and deploy stream the admission input on AwaitInput, answer each Need with the missing objects,
 and on Display check that the text is the one their own approvals produce, print it, and
@@ -939,7 +946,7 @@ child endpoints, pidfds and cgroup population changes.
      request for a decision ("Deploy preview"). Nonempty
      approval text waits for the operator to confirm exactly that text. An untrusted
      author's deploy is source only, without Foreign or `Exec` grants, and is refused
-     before `Admit`. The host checks NEW's preview against the target and allowance.
+     before `Admit`. The host checks NEW's preview against the target, allowance and NEW's assembly record.
   4. `Assemble(attempt)` builds and syncs the image and its assembly record, and
      `Assembled(attempt, assembly, digest, fetch, assembly_ns)` answers it with the
      assembly name, the image digest and the fetch and assembly times in nanoseconds. The

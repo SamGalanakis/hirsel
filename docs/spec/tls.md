@@ -775,8 +775,8 @@ sources are:
   `sts.amazonaws.com` port 443 with the host's roots (TLS-3's `System`) unless `at:` and
   `roots:` name others. `<token-path>` comes last and may hold spaces.
 
-Any other source, `static` included, refuses the grant: the launcher reports it and the run
-does not start (exit 103). The launcher reads nothing from a source before the run starts.
+Any other source, `static` included, is a misspelt grant: like a misspelt `Secret` or `Net`
+grant, the command reports the grant syntax and exits 2 before it reads the program. The launcher reads nothing from a source before the run starts.
 The token file is read by the provider at each fetch, since the identity provider rotates
 it, and its bytes never enter program memory either.
 
@@ -792,8 +792,12 @@ on a host helper and the task parks. The provider:
   path followed by that role name, whose body is a JSON object.
 - For `sts`, sends one `POST /` with an `application/x-www-form-urlencoded` body that holds
   `Action=AssumeRoleWithWebIdentity`, `Version=2011-06-15`, `RoleArn`,
-  `RoleSessionName=hirsel` and `WebIdentityToken`, over TLS verified as the endpoint's name.
-  The reply is XML.
+  `RoleSessionName=hirsel` and `WebIdentityToken`, over TLS 1.3 verified as the endpoint's
+  name. rustls runs the handshake; the provider opens the records after it in place in its
+  own buffer, since rustls' record layer keeps plaintext in memory it never zeroes. A server
+  that offers only TLS 1.2 gives `Net(Tls(Protocol(_)))`.
+  Each value is sent with every byte outside RFC 3986's unreserved set as `%XX`. The reply
+  is XML, and its fields are read inside its `Credentials` element.
 
 The provider receives each reply into run-owned host memory of at most 64 KiB, and zeroes
 each buffer that held key bytes before it frees it. It reads these fields from the last
@@ -818,7 +822,8 @@ epoch. So `2026-11-23T12:00:00Z` gives `1795435200000000000`, which a program co
 - `Room(key_id, token)`: the spare capacity of `key_id` or `token` is less than the byte
   length of that value. It holds both lengths, and the call writes neither string and makes
   no designation. Like every core operation it never grows a buffer.
-- `Net(e)`: a connection, TLS or transport failure. A deadline gives `Net(TimedOut)` and a cancel gives `Net(Aborted)`. Each
+- `Net(e)`: a connection, TLS or transport failure. A `roots:` file that cannot be read or
+  holds no certificate gives `Net(Tls(Roots))`. A deadline gives `Net(TimedOut)` and a cancel gives `Net(Aborted)`. Each
   ends the helper's exchange; a reply that comes later is zeroed and discarded.
 - `Token(e)`: the `sts` token file could not be read, or is empty (`Token(NotFound)`).
 - `Status(code)`: a reply whose HTTP status is not 200.
@@ -882,7 +887,8 @@ Each law names the bug it catches and the oracle its expected value comes from. 
 harness is named, the cases go into it. Certificate fixtures are a test CA and two leaf
 certificates, `alpha.test` and `beta.test`, generated with `openssl` and checked in
 together with their SHA-256 leaf digests, which `openssl x509 -outform der | sha256sum`
-computes.
+computes. CR4 uses a second test CA and a `localhost` leaf, since its source dials the
+endpoint by name.
 
 | law | bug | oracle and setup |
 |---|---|---|
@@ -911,10 +917,10 @@ computes.
 | **SC7** channel binding | the identity digest used where the signature's hash is required, or binding over a missing value | `client_first` `p=tls-server-end-point,,n=,r=abc` over the `alpha.test` leaf, signed with SHA-256, sends `c=` the base64 of `p=tls-server-end-point,,` followed by the leaf's `openssl x509 -outform der \| sha256sum` digest. Over a leaf signed with SHA-384 (an added fixture), it sends the base64 of the header followed by the leaf's `sha384sum` digest, and `scram_final_len` counts its 48 bytes. An Ed25519 leaf, and `p=tls-unique,,`, give `Binding` before issue. The oracle is RFC 5929 §4.1. |
 | **SC8** no key material in a recording | key material or the proof reaching a frame | Record SC1's run with the password from an `env:` grant. The tape holds none of these: `pencil`, `SaltedPassword` `c4a49510323ab4f952cac1fa99441939e78ea74d6be81ddf7096e87513dc615d`, `ClientKey` `a60fc923d67e8644a92d16b96eda5ef4656b0c725c484374be25535576996e8b`, `StoredKey` `586e5df283e6dceb5c3e791d8b8528ec191e664045ce971792e2e6b5bb13e2a6`, `ServerKey` `c1f3cbc1c13a9d35a14c0990eed97629ea225863e566a4314ab99f3f00e5d9d5`, the proof's 32 raw bytes, and their base64. Each is searched raw and as hex. The values follow by hand from RFC 7677's inputs through RFC 5802 §3. Replayed with the variable unset, the run gives the same verdict and ends `Sealed`. |
 | **SC9** virtual SCRAM | the virtual path sending different bytes or exposing a granted secret | Against a `provide.net` server whose handshake reply is `Secured`, seal the owned bytes of `"pencil"` with `"tls_send(alpha.test)"`, unwrap the result, and use SC1's transcript. The server's `Send` calls carry exactly SC1's client-final bytes. When the server commits 10 bytes and then the rest, the second `Send` offers bytes 10 to 106. Under `hirsel test --replay`, the replay ends `Sealed` and its server sees the same calls. |
-| **CR1** no key byte in program memory | the key copied into a program buffer, or a host buffer that held it left unzeroed | A loopback IMDS server hands out the 40-byte key `wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY` granted `Cred:aws=imds:127.0.0.1:<port> mac`. The program fetches, prints `secret.hmac_sha256` of `x` under the key, and parks on a receive from the test. The tag equals Python's `hmac.new(key, b"x", "sha256")`. While it is parked, the test reads every readable mapping of the run's process through `/proc/<pid>/mem` and finds the key exactly once: the sealed store. The control serves the same key as `Token` too, which puts it in a program `String`, and the same scan finds it at least twice. |
+| **CR1** no key byte in program memory | the key copied into a program buffer, or a host buffer that held it left unzeroed | A loopback IMDS server hands out the 40-byte key `wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY` granted `Cred:aws=imds:127.0.0.1:<port> mac`. The program fetches, prints `secret.hmac_sha256` of `x` under the key, and parks on a receive from the test. The tag equals Python's `hmac.new(key, b"x", "sha256")`. While it is parked, the test reads every readable mapping of the run's process through `/proc/<pid>/mem` and finds the key exactly once: the sealed store. The control serves the same key as `Token` too, which puts it in a program `String`, and the same scan finds it at least twice. Both runs repeat against CR4's STS server over TLS, which catches plaintext left in a TLS library's buffers. |
 | **CR2** replay without the endpoint | replay contacting the source, or the key reaching a frame | Record CR1's run. The tape holds the key id and token bytes, and holds none of the key's raw bytes, hex or base64. Replayed with the server gone, the run prints the same tag and ends `Sealed`. |
-| **CR3** the IMDS exchange | a missing IMDSv2 token, a wrong expiry, or a failure that still makes a designation | The server answers only a `PUT` with the TTL header and only `GET`s that carry its token. `Expiration` `2026-11-23T12:00:00Z` gives `1795435200000000000` (`date -ud`). A 404 on the role gives `Status(404)`. A reply without `SecretAccessKey`, with an escaped value, or with `Code` `Expired` gives `Malformed`. A `token` with 3 bytes of room against a 7-byte token gives `Room(20, 7)` with both strings unchanged. A server that never answers, under a 50 ms deadline, gives `Net(TimedOut)`. A grant with source `static` does not start (exit 103). |
-| **CR4** STS web identity | the token sent from a stale read, or the wrong reply element taken as the key | A loopback TLS server as `alpha.test` with the test CA's roots, granted `sts:<arn> at:alpha.test:<port> roots:<ca> file:<token>`. The server receives `WebIdentityToken` equal to the file's bytes, which the test rewrites between two fetches, and sees each version once. Its `AssumeRoleWithWebIdentityResponse` gives the fixture's key id and expiry, and the key's MAC matches CR1's oracle. A 403 `AccessDenied` gives `Status(403)`. |
+| **CR3** the IMDS exchange | a missing IMDSv2 token, a wrong expiry, or a failure that still makes a designation | The server answers only a `PUT` with the TTL header and only `GET`s that carry its token. `Expiration` `2026-11-23T12:00:00Z` gives `1795435200000000000` (`date -ud`). A 404 on the role gives `Status(404)`. A reply without `SecretAccessKey`, with an escaped value, or with `Code` `Expired` gives `Malformed`. A `token` with 3 bytes of room against a 7-byte token gives `Room(20, 7)` with both strings unchanged. A server that never answers, under a 50 ms deadline, gives `Net(TimedOut)`. A grant with source `static` is refused at its spelling. |
+| **CR4** STS web identity | the token sent from a stale read, or the wrong reply element taken as the key | A loopback TLS server as `localhost` with its CA's roots, granted `sts:<arn> at:localhost:<port> roots:<ca> file:<token>`. The server receives `WebIdentityToken` equal to the file's bytes, which it rewrites before each reply, and sees each of three versions once. The reply puts `SessionToken` before `SecretAccessKey`. Its `AssumeRoleWithWebIdentityResponse` gives the fixture's key id and expiry, and the key's MAC matches CR1's oracle. A 403 `AccessDenied` gives `Status(403)`. |
 
 TL1 to TL11, TL14 to TL16 and SC1 to SC8 run against the OS provider over
 loopback. TL5, TL7, TL13, TL15, SC1 and SC5 also have scripted-provider cases, so that the

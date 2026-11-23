@@ -9,6 +9,7 @@ use crate::{
     provider::*,
 };
 use hirsel_core_net::{Name, TlsTrust, scram::Binding};
+pub(crate) use records::{Opened, OwnedRecords};
 #[cfg(test)]
 pub(crate) use records::{TX_RECORDS, TX_TEST_LIMIT};
 use rustls::{
@@ -308,7 +309,7 @@ fn count(value: usize) -> Outcome {
     }
 }
 
-fn protocol_error(error: rustls::Error) -> Outcome {
+pub(crate) fn protocol_error(error: rustls::Error) -> Outcome {
     match error {
         rustls::Error::AlertReceived(alert) => tls_failure(4, u8::from(alert)),
         rustls::Error::InvalidCertificate(error) => tls_failure(

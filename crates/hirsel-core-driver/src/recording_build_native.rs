@@ -2724,43 +2724,43 @@ fn run_tape_replays_granted_terminal_bits() {
 
 /// A loopback IMDSv2 server (TLS-7) that answers `rounds` credential
 /// fetches with `key` as the secret access key and `token` as the session
-/// token, checking the session header on each request.
+/// token.
 fn fake_imds(
     key: &'static [u8],
     token: Vec<u8>,
     rounds: usize,
 ) -> (u16, std::thread::JoinHandle<()>) {
+    let json = [
+        &br#"{"Code":"Success","Type":"AWS-HMAC","AccessKeyId":"ASIAEXAMPLE","SecretAccessKey":""#[..],
+        key,
+        br#"","Token":""#,
+        &token,
+        br#"","Expiration":"2026-01-01T00:00:00Z"}"#,
+    ]
+    .concat();
+    imds_script(vec![ImdsRound::Credentials(json); rounds])
+}
+
+/// One credential fetch as a scripted IMDSv2 server answers it.
+#[derive(Clone)]
+enum ImdsRound {
+    /// The role's credentials document.
+    Credentials(Vec<u8>),
+    /// This status in place of the role's credentials.
+    Status(u16),
+    /// The session token request is read and never answered.
+    Silent,
+}
+
+/// A loopback IMDSv2 server (TLS-7) that answers one fetch per round. It
+/// asserts the TTL header on each `PUT` and its session token on each `GET`.
+fn imds_script(rounds: Vec<ImdsRound>) -> (u16, std::thread::JoinHandle<()>) {
     use std::io::{Read, Write};
     use std::net::{Ipv4Addr, TcpListener};
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
     let server = std::thread::spawn(move || {
-        let body = |request: &str| -> Vec<u8> {
-            let (line, headers) = request.split_once("\r\n").unwrap();
-            match line {
-                "PUT /latest/api/token HTTP/1.1" => {
-                    assert!(headers.contains("X-aws-ec2-metadata-token-ttl-seconds: 21600\r\n"));
-                    b"SESSION-1".to_vec()
-                }
-                "GET /latest/meta-data/iam/security-credentials/ HTTP/1.1" => {
-                    assert!(headers.contains("X-aws-ec2-metadata-token: SESSION-1\r\n"));
-                    b"app-role\n".to_vec()
-                }
-                "GET /latest/meta-data/iam/security-credentials/app-role HTTP/1.1" => {
-                    assert!(headers.contains("X-aws-ec2-metadata-token: SESSION-1\r\n"));
-                    [
-                        &br#"{"Code":"Success","Type":"AWS-HMAC","AccessKeyId":"ASIAEXAMPLE","SecretAccessKey":""#[..],
-                        key,
-                        br#"","Token":""#,
-                        &token,
-                        br#"","Expiration":"2026-01-01T00:00:00Z"}"#,
-                    ]
-                    .concat()
-                }
-                other => panic!("unexpected request {other:?}"),
-            }
-        };
-        for _ in 0..3 * rounds {
+        let accept = || {
             let (mut socket, _) = listener.accept().unwrap();
             let mut request = Vec::new();
             let mut byte = [0];
@@ -2768,21 +2768,177 @@ fn fake_imds(
                 socket.read_exact(&mut byte).unwrap();
                 request.push(byte[0]);
             }
-            let reply = body(std::str::from_utf8(&request).unwrap());
+            (socket, String::from_utf8(request).unwrap())
+        };
+        let answer = |mut socket: std::net::TcpStream, status: u16, body: &[u8]| {
             socket
                 .write_all(
-                    format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", reply.len())
+                    format!("HTTP/1.1 {status} X\r\nContent-Length: {}\r\n\r\n", body.len())
                         .as_bytes(),
                 )
                 .unwrap();
-            socket.write_all(&reply).unwrap();
+            socket.write_all(body).unwrap();
+        };
+        for round in rounds {
+            let (mut socket, request) = accept();
+            assert!(request.starts_with("PUT /latest/api/token HTTP/1.1\r\n"), "{request}");
+            assert!(request.contains("\r\nX-aws-ec2-metadata-token-ttl-seconds: 21600\r\n"));
+            if let ImdsRound::Silent = round {
+                // Held open until the fetch gives up and closes it.
+                let _ = socket.read(&mut [0]);
+                continue;
+            }
+            answer(socket, 200, b"SESSION-1");
+            let (socket, request) = accept();
+            assert!(request.starts_with("GET /latest/meta-data/iam/security-credentials/ HTTP/1.1\r\n"), "{request}");
+            assert!(request.contains("\r\nX-aws-ec2-metadata-token: SESSION-1\r\n"));
+            answer(socket, 200, b"app-role\n");
+            let (socket, request) = accept();
+            assert!(request.starts_with("GET /latest/meta-data/iam/security-credentials/app-role HTTP/1.1\r\n"), "{request}");
+            assert!(request.contains("\r\nX-aws-ec2-metadata-token: SESSION-1\r\n"));
+            match round {
+                ImdsRound::Credentials(json) => answer(socket, 200, &json),
+                ImdsRound::Status(status) => answer(socket, status, b""),
+                ImdsRound::Silent => unreachable!(),
+            }
         }
     });
     (port, server)
 }
 
+/// TLS-7 CR3: the IMDS exchange. Each line the program prints is the outcome
+/// of one fetch against a scripted IMDSv2 server, in order: an expiry of
+/// `2026-11-23T12:00:00Z` read as 1795435200000000000 (`date -ud`), a 404 on
+/// the role's credentials, three malformed documents (no `SecretAccessKey`,
+/// an escaped value, `Code` `Expired`), `Room(20, 7)` for a 7-byte token
+/// with 3 bytes of room, both strings left empty, and `Net(TimedOut)` from a
+/// server that never answers under a 50 ms deadline. A `static` source is
+/// refused at its spelling.
+#[test]
+fn cr3_imds_exchange() {
+    let source = r#"
+fn say(out: Stdout, text: String) -> Result[(), Exit] waits {
+    result.unwrap(stdout.write(out, text))
+    Ok(())
+}
+
+fn malformed(c: Cred, out: Stdout) -> Result[(), Exit] waits {
+    let mut key_id = string.with_capacity(64)
+    let mut token = string.with_capacity(64)
+    match cred.fetch(c, mut key_id, mut token, Never) {
+        Error(Malformed) => say(out, "malformed\n"),
+        _ => Error(Exit(status: 9)),
+    }
+}
+
+pub fn main(c: Cred, clock: Clock, out: Stdout) -> Result[(), Exit] waits {
+    let mut key_id = string.with_capacity(64)
+    let mut token = string.with_capacity(64)
+    let (_key, expires) = result.unwrap(cred.fetch(c, mut key_id, mut token, Never))
+    if expires != 1795435200000000000u64 {
+        return Error(Exit(status: 4))
+    }
+    say(out, "expiry\n")?
+    let mut key_id_404 = string.with_capacity(64)
+    let mut token_404 = string.with_capacity(64)
+    match cred.fetch(c, mut key_id_404, mut token_404, Never) {
+        Error(Status(code)) => if code == 404u16 {
+            say(out, "404\n")?
+        } else {
+            return Error(Exit(status: 5))
+        },
+        _ => return Error(Exit(status: 6)),
+    }
+    malformed(c, out)?
+    malformed(c, out)?
+    malformed(c, out)?
+    let mut key_id_room = string.with_capacity(64)
+    let mut token_room = string.with_capacity(3)
+    match cred.fetch(c, mut key_id_room, mut token_room, Never) {
+        Error(Room(key_id: k, token: t)) => if k == 20u64 && t == 7u64 {
+            say(out, "room[")?
+            say(out, key_id_room)?
+            say(out, "|")?
+            say(out, token_room)?
+            say(out, "]\n")?
+        } else {
+            return Error(Exit(status: 7))
+        },
+        _ => return Error(Exit(status: 8)),
+    }
+    let mut key_id_late = string.with_capacity(64)
+    let mut token_late = string.with_capacity(64)
+    match cred.fetch(c, mut key_id_late, mut token_late, At(clock, host.mono_ns(clock) + 50000000u64)) {
+        Error(Net(TimedOut)) => say(out, "timeout\n"),
+        _ => Error(Exit(status: 10)),
+    }
+}
+"#;
+    let document = |fields: &str| -> Vec<u8> {
+        format!(r#"{{"Code":"Success","Type":"AWS-HMAC",{fields}"Expiration":"2026-11-23T12:00:00Z"}}"#)
+            .into_bytes()
+    };
+    let good = document(
+        r#""AccessKeyId":"ASIAIOSFODNN7EXAMPLE","SecretAccessKey":"wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY","Token":"TOKEN07","#,
+    );
+    let (port, server) = imds_script(vec![
+        ImdsRound::Credentials(good.clone()),
+        ImdsRound::Status(404),
+        ImdsRound::Credentials(document(r#""AccessKeyId":"ASIAIOSFODNN7EXAMPLE","Token":"TOKEN07","#)),
+        ImdsRound::Credentials(document(
+            r#""AccessKeyId":"ASIA\u0049OSFODNN7EXAMPLE","SecretAccessKey":"wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY","Token":"TOKEN07","#,
+        )),
+        ImdsRound::Credentials(
+            String::from_utf8(good.clone())
+                .unwrap()
+                .replace(r#""Code":"Success""#, r#""Code":"Expired""#)
+                .into_bytes(),
+        ),
+        ImdsRound::Credentials(good),
+        ImdsRound::Silent,
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core/core");
+    let mut request = source_request(source, dir.path());
+    request.inputs.packages[1] = PackageManifest::directory(&root, package("core"), true).unwrap();
+    let product = Driver::default()
+        .check(request, &mut Meter::new(false))
+        .unwrap();
+    assert!(
+        product.accepted(),
+        "{:?} {:?}",
+        product.diagnostics,
+        product.incomplete
+    );
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let mut options = native_options(Backend::Cranelift, dir.path());
+    options.grant_mask = (1 << grant_kind("Stdout").unwrap()) | (1 << grant_kind("Clock").unwrap());
+    options.cred_grants = vec![
+        hirsel_core_net::CredGrant::new("c", &format!("imds:127.0.0.1:{port}"), "mac").unwrap(),
+    ];
+    let build = product.build(&entry, &options).unwrap();
+    let output = Command::new(build.executable).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{} {:?} {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    server.join().unwrap();
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "expiry\n404\nmalformed\nmalformed\nmalformed\nroom[|]\ntimeout\n"
+    );
+    assert_eq!(
+        hirsel_core_net::CredGrant::parse("Cred:aws=static mac"),
+        Err(hirsel_core_net::CredGrant::SYNTAX)
+    );
+}
+
 /// TLS-7 CR1: a fetched secret access key is never in program memory. A fake
-/// IMDSv2 server on loopback serves a known key; while the program is parked
+/// IMDSv2 server on loopback, then a fake STS over TLS, serves a known key;
+/// while the program is parked
 /// after the fetch, the whole readable address space holds exactly one copy
 /// of it, the sealed store. The control serves the key as the session token
 /// too, which the program receives as a String, and the scan must see it.
@@ -2833,14 +2989,31 @@ pub fn main(c: Cred, i: Stdin, out: Stdout) -> Result[(), Exit] waits {
     );
     let entry = DefPath::from_full("app@1/main/main").unwrap();
 
-    let run = |token: &'static [u8]| -> (usize, Vec<u8>) {
-        let (port, server) = fake_imds(KEY, token.to_vec(), 1);
+    let roots = dir.path().join("roots.pem");
+    std::fs::write(
+        &roots,
+        include_bytes!("../../hirsel-core-rt/testdata/tls/sts-ca.pem"),
+    )
+    .unwrap();
+    let token_file = dir.path().join("token");
+    let run = |sts: bool, token: &'static [u8]| -> (usize, Vec<u8>) {
+        let (cred, server) = if sts {
+            let (port, server) = fake_sts(KEY, token, token_file.clone(), vec![b"jwt"], 1);
+            let server = std::thread::spawn(move || assert_eq!(server.join().unwrap(), [b"jwt"]));
+            let source = format!(
+                "sts:{STS_ROLE} at:localhost:{port} roots:{} file:{}",
+                roots.display(),
+                token_file.display()
+            );
+            (source, server)
+        } else {
+            let (port, server) = fake_imds(KEY, token.to_vec(), 1);
+            (format!("imds:127.0.0.1:{port}"), server)
+        };
         let mut options = native_options(Backend::Cranelift, dir.path());
         options.grant_mask =
             (1 << grant_kind("Stdout").unwrap()) | (1 << grant_kind("Stdin").unwrap());
-        options.cred_grants = vec![
-            hirsel_core_net::CredGrant::new("c", &format!("imds:127.0.0.1:{port}"), "mac").unwrap(),
-        ];
+        options.cred_grants = vec![hirsel_core_net::CredGrant::new("c", &cred, "mac").unwrap()];
         let build = product.build(&entry, &options).unwrap();
         let mut child = Command::new(build.executable)
             .stdin(Stdio::piped())
@@ -2852,7 +3025,8 @@ pub fn main(c: Cred, i: Stdin, out: Stdout) -> Result[(), Exit] waits {
         let mut line = Vec::new();
         stdout.read_until(b'\n', &mut line).unwrap();
         server.join().unwrap();
-        assert_eq!(line, [b"ASIAEXAMPLE ", token, b"\n"].concat());
+        let key_id: &[u8] = if sts { b"ASIASTSEXAMPLE " } else { b"ASIAEXAMPLE " };
+        assert_eq!(line, [key_id, token, b"\n"].concat());
 
         // The program is parked on stdin: scan its readable mappings.
         let maps = std::fs::read_to_string(format!("/proc/{}/maps", child.id())).unwrap();
@@ -2888,11 +3062,13 @@ pub fn main(c: Cred, i: Stdin, out: Stdout) -> Result[(), Exit] waits {
         (hits, mac)
     };
 
-    let (hits, mac) = run(b"IQoJb3JpZ2luX2VjEXAMPLETOKEN");
-    assert_eq!(hits, 1, "the fetched key outside its sealed store");
-    assert_eq!(crate::call::hex(&mac), MAC_OF_X);
-    let (hits, _) = run(KEY);
-    assert!(hits >= 2, "the scan missed a key in a program String: {hits}");
+    for sts in [false, true] {
+        let (hits, mac) = run(sts, b"IQoJb3JpZ2luX2VjEXAMPLETOKEN");
+        assert_eq!(hits, 1, "the fetched key outside its sealed store (sts: {sts})");
+        assert_eq!(crate::call::hex(&mac), MAC_OF_X);
+        let (hits, _) = run(sts, KEY);
+        assert!(hits >= 2, "the scan missed a key in a program String: {hits} (sts: {sts})");
+    }
 }
 
 /// TLS-7 CR2: a recorded fetch keeps the key id and session token, never
@@ -2993,6 +3169,240 @@ pub fn main(c: Cred, out: Stdout) -> Result[(), Exit] waits {
     );
     // Replay emits nothing; it checked every write against the recorded one.
     assert!(output.stdout.is_empty());
+}
+
+const STS_ROLE: &str = "arn:aws:iam::123456789012:role/app";
+
+/// A loopback STS (TLS-7) serving TLS as `localhost` under the STS test CA.
+/// It answers one `AssumeRoleWithWebIdentity` per entry of `versions`,
+/// checking the form body; the first `ok` replies give `key` and `token` and
+/// the rest are 403 `AccessDenied`. Before each reply it writes the next
+/// version to `token_file`. It returns the web identity tokens it received.
+fn fake_sts(
+    key: &'static [u8],
+    token: &'static [u8],
+    token_file: std::path::PathBuf,
+    versions: Vec<&'static [u8]>,
+    ok: usize,
+) -> (u16, std::thread::JoinHandle<Vec<Vec<u8>>>) {
+    use rustls::{
+        ServerConfig, ServerConnection, StreamOwned,
+        pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
+    };
+    use std::{
+        io::{Read, Write},
+        net::{Ipv4Addr, TcpListener},
+        sync::Arc,
+    };
+    const LEAF: &[u8] = include_bytes!("../../hirsel-core-rt/testdata/tls/sts.pem");
+    const LEAF_KEY: &[u8] = include_bytes!("../../hirsel-core-rt/testdata/tls/sts.key.pem");
+    std::fs::write(&token_file, versions[0]).unwrap();
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let config = Arc::new(
+        ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![CertificateDer::from_pem_slice(LEAF).unwrap()],
+                PrivateKeyDer::from_pem_slice(LEAF_KEY).unwrap(),
+            )
+            .unwrap(),
+    );
+    let server = std::thread::spawn(move || -> Vec<Vec<u8>> {
+        let decode = |value: &[u8]| -> Vec<u8> {
+            let mut out = Vec::new();
+            let mut i = 0;
+            while i < value.len() {
+                if value[i] == b'%' {
+                    let hex = std::str::from_utf8(&value[i + 1..i + 3]).unwrap();
+                    out.push(u8::from_str_radix(hex, 16).unwrap());
+                    i += 3;
+                } else {
+                    assert_ne!(value[i], b'+', "a space is sent as %20");
+                    out.push(value[i]);
+                    i += 1;
+                }
+            }
+            out
+        };
+        let mut seen = Vec::new();
+        for round in 0..versions.len() {
+            let (socket, _) = listener.accept().unwrap();
+            let connection = ServerConnection::new(config.clone()).unwrap();
+            let mut stream = StreamOwned::new(connection, socket);
+            let mut head = Vec::new();
+            let mut byte = [0];
+            while !head.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).unwrap();
+                head.push(byte[0]);
+            }
+            let head = String::from_utf8(head).unwrap();
+            assert!(head.starts_with("POST / HTTP/1.1\r\n"), "{head}");
+            assert!(head.contains(&format!("\r\nHost: localhost:{port}\r\n")), "{head}");
+            assert!(head.contains("\r\nContent-Type: application/x-www-form-urlencoded\r\n"));
+            let length: usize = head
+                .split("\r\n")
+                .find_map(|line| line.strip_prefix("Content-Length: "))
+                .unwrap()
+                .parse()
+                .unwrap();
+            let mut body = vec![0; length];
+            stream.read_exact(&mut body).unwrap();
+            let mut fields = std::collections::BTreeMap::new();
+            for pair in body.split(|&b| b == b'&') {
+                let at = pair.iter().position(|&b| b == b'=').unwrap();
+                fields.insert(decode(&pair[..at]), decode(&pair[at + 1..]));
+            }
+            let field = |name: &str| fields[name.as_bytes()].clone();
+            assert_eq!(field("Action"), b"AssumeRoleWithWebIdentity");
+            assert_eq!(field("Version"), b"2011-06-15");
+            assert_eq!(field("RoleArn"), STS_ROLE.as_bytes());
+            assert!(!field("RoleSessionName").is_empty());
+            seen.push(field("WebIdentityToken"));
+            if round + 1 < versions.len() {
+                std::fs::write(&token_file, versions[round + 1]).unwrap();
+            }
+            let (status, reply) = if round < ok {
+                (
+                    "200 OK",
+                    [
+                        &b"<AssumeRoleWithWebIdentityResponse xmlns=\"https://sts.amazonaws.com/doc/2011-06-15/\"><AssumeRoleWithWebIdentityResult><AssumedRoleUser><Arn>arn:aws:sts::123456789012:assumed-role/app/hirsel</Arn><AssumedRoleId>AROAEXAMPLE:hirsel</AssumedRoleId></AssumedRoleUser><Credentials><SessionToken>"[..],
+                        token,
+                        b"</SessionToken><SecretAccessKey>",
+                        key,
+                        b"</SecretAccessKey><Expiration>2026-01-01T00:00:00Z</Expiration><AccessKeyId>ASIASTSEXAMPLE</AccessKeyId></Credentials><Audience>sts.amazonaws.com</Audience></AssumeRoleWithWebIdentityResult></AssumeRoleWithWebIdentityResponse>",
+                    ]
+                    .concat(),
+                )
+            } else {
+                (
+                    "403 Forbidden",
+                    b"<ErrorResponse><Error><Type>Sender</Type><Code>AccessDenied</Code><Message>Not authorized</Message></Error></ErrorResponse>".to_vec(),
+                )
+            };
+            stream
+                .write_all(
+                    format!("HTTP/1.1 {status}\r\nContent-Type: text/xml\r\nContent-Length: {}\r\n\r\n", reply.len())
+                        .as_bytes(),
+                )
+                .unwrap();
+            stream.write_all(&reply).unwrap();
+            stream.conn.send_close_notify();
+            stream.flush().unwrap();
+        }
+        seen
+    });
+    (port, server)
+}
+
+/// TLS-7 CR4: STS `AssumeRoleWithWebIdentity` over TLS. A fake STS on
+/// loopback, trusted through a `roots:` file, receives `WebIdentityToken`
+/// equal to the token file's bytes, which it rewrites before each reply, so
+/// a stale read shows as a repeated version. The reply's `Credentials` give
+/// the key id, expiry and key (its MAC matches Python's
+/// `hmac.new(KEY, b"x", "sha256")`); the session token precedes the key, so
+/// a reply element taken as the key changes the MAC. A 403 `AccessDenied`
+/// gives `Status(403)`.
+#[test]
+fn cr4_sts_web_identity() {
+    const CA: &[u8] = include_bytes!("../../hirsel-core-rt/testdata/tls/sts-ca.pem");
+    const KEY: &[u8] = b"wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
+    const TOKEN: &[u8] = b"IQoJb3JpZ2luX2VjEXAMPLETOKEN";
+    const MAC_OF_X: &str = "6601539f5439dea50305982bb16cb241bfde747c9db741797a9b913aa4c318d8";
+    // Each holds bytes that form encoding must escape.
+    const VERSIONS: [&[u8]; 3] = [
+        b"eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ2MSJ9.c2ln+/=",
+        b"eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ2MiJ9.c2ln&x=y",
+        b"eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ2MyJ9.c2ln%20",
+    ];
+    let source = r#"
+fn round(c: Cred, out: Stdout) -> Result[(), Exit] waits {
+    let mut key_id = string.with_capacity(64)
+    let mut token = string.with_capacity(64)
+    let (key, expires) = result.unwrap(cred.fetch(c, mut key_id, mut token, Never))
+    if expires != 1767225600000000000u64 {
+        return Error(Exit(status: 4))
+    }
+    result.unwrap(stdout.write(out, key_id))
+    result.unwrap(stdout.write(out, " "))
+    result.unwrap(stdout.write(out, token))
+    result.unwrap(stdout.write(out, " "))
+    let tag = result.unwrap(secret.hmac_sha256(key, string.as_bytes("x")))
+    let mut tag_data: Bytes = list.with_capacity(32)
+    if !bytebuf.append_inline(mut tag_data, tag, 0, 32) {
+        return Error(Exit(status: 5))
+    }
+    result.unwrap(stdout.write_bytes(out, tag_data))
+    result.unwrap(stdout.write(out, "\n"))
+    Ok(())
+}
+
+pub fn main(c: Cred, out: Stdout) -> Result[(), Exit] waits {
+    round(c, out)?
+    round(c, out)?
+    let mut key_id = string.with_capacity(64)
+    let mut token = string.with_capacity(64)
+    match cred.fetch(c, mut key_id, mut token, Never) {
+        Error(Status(code)) => if code == 403u16 {
+            result.unwrap(stdout.write(out, "denied"))
+            Ok(())
+        } else {
+            Error(Exit(status: 6))
+        },
+        _ => Error(Exit(status: 7)),
+    }
+}
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let roots = dir.path().join("roots.pem");
+    std::fs::write(&roots, CA).unwrap();
+    let token_file = dir.path().join("token");
+    let (port, server) = fake_sts(KEY, TOKEN, token_file.clone(), VERSIONS.to_vec(), 2);
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core/core");
+    let mut request = source_request(source, dir.path());
+    request.inputs.packages[1] = PackageManifest::directory(&root, package("core"), true).unwrap();
+    let product = Driver::default()
+        .check(request, &mut Meter::new(false))
+        .unwrap();
+    assert!(
+        product.accepted(),
+        "{:?} {:?}",
+        product.diagnostics,
+        product.incomplete
+    );
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let mut options = native_options(Backend::Cranelift, dir.path());
+    options.grant_mask = 1 << grant_kind("Stdout").unwrap();
+    options.cred_grants = vec![
+        hirsel_core_net::CredGrant::new(
+            "c",
+            &format!(
+                "sts:{STS_ROLE} at:localhost:{port} roots:{} file:{}",
+                roots.display(),
+                token_file.display()
+            ),
+            "mac",
+        )
+        .unwrap(),
+    ];
+    let build = product.build(&entry, &options).unwrap();
+    let output = Command::new(build.executable).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{} {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(server.join().unwrap(), VERSIONS);
+    let mut mac = [0u8; 32];
+    for (i, byte) in mac.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&MAC_OF_X[2 * i..2 * i + 2], 16).unwrap();
+    }
+    let round = [&b"ASIASTSEXAMPLE "[..], TOKEN, b" ", &mac, b"\n"].concat();
+    assert_eq!(output.stdout, [&round[..], &round, b"denied"].concat());
 }
 
 /// TLS-7 std credentials: a session token longer than the 4096 bytes

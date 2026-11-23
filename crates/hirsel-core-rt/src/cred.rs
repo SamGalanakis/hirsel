@@ -11,10 +11,16 @@ use crate::{
     secret::{Origin, Secret},
     tasks::Outside,
 };
-use hirsel_core_net::{CredGrant, CredSource, SecretPolicy};
+use hirsel_core_net::{CredGrant, CredSource, SecretPolicy, StsSource};
+use rustls::{
+    ClientConfig,
+    client::UnbufferedClientConnection,
+    pki_types::ServerName,
+    unbuffered::{ConnectionState, EncodeError, InsufficientSizeError},
+};
 use std::{
     io::{Read, Write},
-    net::{SocketAddr, SocketAddrV4, TcpStream},
+    net::{SocketAddr, SocketAddrV4, TcpStream, ToSocketAddrs},
     os::fd::OwnedFd,
     ptr,
     sync::{Arc, Mutex},
@@ -54,6 +60,7 @@ impl Granted {
 /// The outcome error tags (`CredError` case plus one; `core_ops` lowers them).
 const ROOM: u8 = 1;
 const NET: u8 = 2;
+const TOKEN: u8 = 3;
 const STATUS: u8 = 4;
 const MALFORMED: u8 = 5;
 /// The designation's admission was refused; the source raises it (MEM-21).
@@ -65,6 +72,11 @@ const NET_RESET: u64 = 5;
 const NET_TIMED_OUT: u64 = 6;
 const NET_ABORTED: u64 = 7;
 const NET_OTHER: u64 = 8;
+const NET_TLS: u64 = 9;
+/// IoError tags carried in `written` under TOKEN; any other is `Other(code)`.
+const IO_NOT_FOUND: u64 = 1;
+const IO_DENIED: u64 = 2;
+const IO_OTHER: u64 = 5;
 
 /// The most bytes the provider receives in one reply.
 const REPLY_MAX: usize = 64 * 1024;
@@ -146,7 +158,7 @@ unsafe fn step(request: *mut Request, token: u64, first: bool) -> Step {
         let mut submit = Submit {
             token,
             deadline,
-            source: cred.source,
+            source: cred.source.clone(),
         };
         // SAFETY: submission is synchronous and hands the helper owned data.
         let outcome = unsafe {
@@ -190,7 +202,7 @@ unsafe extern "C" fn submit_on_stack(state: *mut u8, request: *mut Request) -> O
             &mut *(*request).path.cast_mut().cast::<CredRequest>(),
         )
     };
-    let (token, deadline, source) = (submit.token, submit.deadline, submit.source);
+    let (token, deadline, source) = (submit.token, submit.deadline, submit.source.clone());
     let completion = Arc::new(Mutex::new(Completion {
         active: Some(Outside::begin()),
         answer: None,
@@ -202,6 +214,7 @@ unsafe extern "C" fn submit_on_stack(state: *mut u8, request: *mut Request) -> O
         .spawn(move || {
             let answer = match source {
                 CredSource::Imds(at) => imds(at, deadline),
+                CredSource::Sts(sts) => assume_role(&sts, deadline),
             };
             let mut result = result.lock().unwrap();
             if let Some(active) = result.active.take() {
@@ -259,72 +272,141 @@ fn io_failure(error: &std::io::Error) -> Outcome {
     }
 }
 
-/// One HTTP/1.1 exchange on its own connection. The reply lands in a
-/// fixed buffer of `REPLY_MAX` bytes that never grows and is zeroed on drop.
-/// Returns the buffer and the body's range.
+/// Connects to the first of `addresses` that accepts before the deadline.
+fn connect(addresses: &[SocketAddr], deadline: Option<u64>) -> Result<TcpStream, Outcome> {
+    let mut last = net(NET_UNREACHABLE);
+    for address in addresses {
+        let connected = match remaining(deadline)? {
+            Some(left) => TcpStream::connect_timeout(address, left),
+            None => TcpStream::connect(address),
+        };
+        match connected {
+            Ok(stream) => return Ok(stream),
+            Err(error) => last = io_failure(&error),
+        }
+    }
+    Err(last)
+}
+
+/// One HTTP/1.1 exchange on its own plain connection.
 fn exchange(
     at: SocketAddrV4,
     request: &[u8],
     deadline: Option<u64>,
 ) -> Result<(Zeroizing<Vec<u8>>, std::ops::Range<usize>), Outcome> {
-    let address = SocketAddr::V4(at);
-    let mut stream = match remaining(deadline)? {
-        Some(left) => TcpStream::connect_timeout(&address, left),
-        None => TcpStream::connect(address),
-    }
-    .map_err(|e| io_failure(&e))?;
-    let left = remaining(deadline)?;
+    let mut stream = connect(&[SocketAddr::V4(at)], deadline)?;
     stream
-        .set_write_timeout(left)
-        .and_then(|()| stream.write_all(request))
+        .set_write_timeout(remaining(deadline)?)
         .map_err(|e| io_failure(&e))?;
-    let mut reply = Zeroizing::new(vec![0u8; REPLY_MAX + 1]);
-    let mut len = 0;
-    loop {
+    stream.write_all(request).map_err(|e| io_failure(&e))?;
+    let mut reply = Reply::new();
+    while !reply.whole() {
         stream
             .set_read_timeout(remaining(deadline)?)
             .map_err(|e| io_failure(&e))?;
-        match stream.read(&mut reply[len..]) {
+        match stream.read(reply.room()?) {
             Ok(0) => break,
-            Ok(n) => len += n,
+            Ok(n) => reply.len += n,
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
             Err(e) => return Err(io_failure(&e)),
         }
-        if len > REPLY_MAX {
-            return Err(failure(MALFORMED, 0, 0, 0));
+    }
+    reply.body()
+}
+
+/// A reply received into a fixed buffer of `REPLY_MAX` bytes that never
+/// grows and is zeroed on drop.
+struct Reply {
+    bytes: Zeroizing<Vec<u8>>,
+    len: usize,
+}
+
+impl Reply {
+    fn new() -> Self {
+        Self {
+            bytes: Zeroizing::new(vec![0u8; REPLY_MAX + 1]),
+            len: 0,
         }
     }
-    let head_end = find(&reply[..len], b"\r\n\r\n").ok_or(failure(MALFORMED, 0, 0, 0))?;
-    let head = &reply[..head_end];
-    let status = head
-        .strip_prefix(b"HTTP/1.1 ")
-        .or_else(|| head.strip_prefix(b"HTTP/1.0 "))
-        .and_then(|rest| rest.get(..3))
-        .and_then(|code| std::str::from_utf8(code).ok()?.parse::<u16>().ok())
-        .ok_or(failure(MALFORMED, 0, 0, 0))?;
-    if status != 200 {
-        return Err(failure(STATUS, u64::from(status), 0, 0));
+
+    /// The unfilled part; a reply over `REPLY_MAX` is `Malformed`.
+    fn room(&mut self) -> Result<&mut [u8], Outcome> {
+        if self.len > REPLY_MAX {
+            return Err(failure(MALFORMED, 0, 0, 0));
+        }
+        Ok(&mut self.bytes[self.len..])
     }
-    let mut body = head_end + 4..len;
-    for line in head.split(|&b| b == b'\n').skip(1) {
-        let line = line.strip_suffix(b"\r").unwrap_or(line);
-        let Some(colon) = line.iter().position(|&b| b == b':') else {
-            continue;
+
+    fn append(&mut self, bytes: &[u8]) -> Result<(), Outcome> {
+        let room = self.room()?;
+        let n = bytes.len().min(room.len());
+        room[..n].copy_from_slice(&bytes[..n]);
+        self.len += n;
+        if n < bytes.len() {
+            return Err(failure(MALFORMED, 0, 0, 0));
+        }
+        Ok(())
+    }
+
+    /// Whether the head and the body its `Content-Length` declares are in.
+    fn whole(&self) -> bool {
+        let received = &self.bytes[..self.len];
+        let Some(head_end) = find(received, b"\r\n\r\n") else {
+            return false;
         };
-        let (name, value) = (&line[..colon], line[colon + 1..].trim_ascii());
-        if name.eq_ignore_ascii_case(b"transfer-encoding") {
-            return Err(failure(MALFORMED, 0, 0, 0));
-        }
-        if name.eq_ignore_ascii_case(b"content-length") {
-            let n = std::str::from_utf8(value)
-                .ok()
-                .and_then(|v| v.parse::<usize>().ok())
-                .filter(|&n| n <= body.len())
-                .ok_or(failure(MALFORMED, 0, 0, 0))?;
-            body.end = body.start + n;
-        }
+        let declared = received[..head_end]
+            .split(|&b| b == b'\n')
+            .skip(1)
+            .find_map(|line| {
+                let colon = line.iter().position(|&b| b == b':')?;
+                line[..colon]
+                    .eq_ignore_ascii_case(b"content-length")
+                    .then(|| {
+                        std::str::from_utf8(line[colon + 1..].trim_ascii())
+                            .ok()?
+                            .parse::<usize>()
+                            .ok()
+                    })?
+            });
+        declared.is_some_and(|n| self.len >= head_end + 4 + n)
     }
-    Ok((reply, body))
+
+    /// The buffer and its body's range, once the status is 200.
+    fn body(self) -> Result<(Zeroizing<Vec<u8>>, std::ops::Range<usize>), Outcome> {
+        let reply = self.bytes;
+        let len = self.len;
+        let head_end = find(&reply[..len], b"\r\n\r\n").ok_or(failure(MALFORMED, 0, 0, 0))?;
+        let head = &reply[..head_end];
+        let status = head
+            .strip_prefix(b"HTTP/1.1 ")
+            .or_else(|| head.strip_prefix(b"HTTP/1.0 "))
+            .and_then(|rest| rest.get(..3))
+            .and_then(|code| std::str::from_utf8(code).ok()?.parse::<u16>().ok())
+            .ok_or(failure(MALFORMED, 0, 0, 0))?;
+        if status != 200 {
+            return Err(failure(STATUS, u64::from(status), 0, 0));
+        }
+        let mut body = head_end + 4..len;
+        for line in head.split(|&b| b == b'\n').skip(1) {
+            let line = line.strip_suffix(b"\r").unwrap_or(line);
+            let Some(colon) = line.iter().position(|&b| b == b':') else {
+                continue;
+            };
+            let (name, value) = (&line[..colon], line[colon + 1..].trim_ascii());
+            if name.eq_ignore_ascii_case(b"transfer-encoding") {
+                return Err(failure(MALFORMED, 0, 0, 0));
+            }
+            if name.eq_ignore_ascii_case(b"content-length") {
+                let n = std::str::from_utf8(value)
+                    .ok()
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .filter(|&n| n <= body.len())
+                    .ok_or(failure(MALFORMED, 0, 0, 0))?;
+                body.end = body.start + n;
+            }
+        }
+        Ok((reply, body))
+    }
 }
 
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -395,6 +477,244 @@ fn imds(at: SocketAddrV4, deadline: Option<u64>) -> Answer {
         secret: Some(Arc::new(exact(secret))),
     };
     Ok(fetched)
+}
+
+/// A TLS failure as `Net(Tls(f))`.
+fn tls_net(failure_outcome: Outcome) -> Outcome {
+    failure(NET, 0, failure_outcome.error.code, NET_TLS)
+}
+
+/// The web identity token file, read whole at each fetch into a fixed buffer.
+fn identity_token(path: &str) -> Result<Zeroizing<Vec<u8>>, Outcome> {
+    let token_error = |error: std::io::Error| match error.kind() {
+        std::io::ErrorKind::NotFound => failure(TOKEN, 0, 0, IO_NOT_FOUND),
+        std::io::ErrorKind::PermissionDenied => failure(TOKEN, 0, 0, IO_DENIED),
+        _ => failure(TOKEN, 0, error.raw_os_error().unwrap_or(0) as u32, IO_OTHER),
+    };
+    let mut file = std::fs::File::open(path).map_err(token_error)?;
+    let mut token = Zeroizing::new(vec![0u8; REPLY_MAX + 1]);
+    let mut len = 0;
+    loop {
+        match file.read(&mut token[len..]) {
+            Ok(0) => break,
+            Ok(n) => len += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(token_error(e)),
+        }
+        if len > REPLY_MAX {
+            return Err(failure(MALFORMED, 0, 0, 0));
+        }
+    }
+    if len == 0 {
+        return Err(failure(TOKEN, 0, 0, IO_NOT_FOUND));
+    }
+    token.truncate(len);
+    Ok(token)
+}
+
+/// Appends `value` form-urlencoded: unreserved bytes as they are, others `%XX`.
+fn form(out: &mut Vec<u8>, value: &[u8]) {
+    for &b in value {
+        if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) {
+            out.push(b);
+        } else {
+            out.extend_from_slice(format!("%{b:02X}").as_bytes());
+        }
+    }
+}
+
+/// STS `AssumeRoleWithWebIdentity`: one `POST /` over TLS verified as the
+/// endpoint's name, with the token file's bytes as `WebIdentityToken`.
+fn assume_role(source: &StsSource, deadline: Option<u64>) -> Answer {
+    let identity = identity_token(&source.token_path)?;
+    let roots = match &source.roots {
+        None => crate::os_tls::system_roots(),
+        Some(path) => {
+            let pem = std::fs::read(path).unwrap_or_default();
+            let (_, store) = hirsel_core_net::tls::trust(1, &pem)
+                .ok_or(tls_net(crate::net::tls_failure(3, 0)))?;
+            Arc::new(store.unwrap())
+        }
+    };
+    let name = ServerName::try_from(source.host.clone())
+        .map_err(|_| tls_net(crate::net::tls_failure(1, 0)))?;
+    // TLS 1.3 only: its records are opened in this exchange's own buffers.
+    let mut config =
+        ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .map_err(|e| tls_net(crate::os_tls::protocol_error(e)))?
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+    config.resumption = rustls::client::Resumption::disabled();
+    config.enable_secret_extraction = true;
+    let connection = UnbufferedClientConnection::new(Arc::new(config), name)
+        .map_err(|e| tls_net(crate::os_tls::protocol_error(e)))?;
+    let addresses = (source.host.as_str(), source.port)
+        .to_socket_addrs()
+        .map_err(|_| net(NET_UNREACHABLE))?
+        .collect::<Vec<_>>();
+    let tcp = connect(&addresses, deadline)?;
+
+    const FIXED: &[u8] =
+        b"Action=AssumeRoleWithWebIdentity&Version=2011-06-15&RoleSessionName=hirsel&RoleArn=";
+    const TOKEN_FIELD: &[u8] = b"&WebIdentityToken=";
+    let mut body = Zeroizing::new(Vec::with_capacity(
+        FIXED.len() + TOKEN_FIELD.len() + 3 * (source.role_arn.len() + identity.len()),
+    ));
+    body.extend_from_slice(FIXED);
+    form(&mut body, source.role_arn.as_bytes());
+    body.extend_from_slice(TOKEN_FIELD);
+    form(&mut body, &identity);
+    drop(identity);
+    let host = if source.port == StsSource::PORT {
+        source.host.clone()
+    } else {
+        format!("{}:{}", source.host, source.port)
+    };
+    let length = body.len().to_string();
+    let post = request(&[
+        b"POST / HTTP/1.1\r\nHost: ",
+        host.as_bytes(),
+        b"\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: ",
+        length.as_bytes(),
+        b"\r\nConnection: close\r\n\r\n",
+        &body,
+    ]);
+    drop(body);
+    let (reply, range) = tls_exchange(connection, tcp, &post, deadline)?;
+    let credentials = element(&reply[range], b"Credentials")?;
+    let secret = text(element(credentials, b"SecretAccessKey")?)?;
+    if secret.is_empty() {
+        return Err(failure(MALFORMED, 0, 0, 0));
+    }
+    Ok(Fetched {
+        key_id: exact(text(element(credentials, b"AccessKeyId")?)?),
+        token: exact(text(element(credentials, b"SessionToken")?)?),
+        expires_ns: expiry(text(element(credentials, b"Expiration")?)?)?,
+        secret: Some(Arc::new(exact(secret))),
+    })
+}
+
+/// The largest TLS record on the wire: header, payload and expansion.
+const TLS_WIRE: usize = 5 + 16 * 1024 + 2048;
+
+/// One HTTP/1.1 exchange over TLS 1.3. rustls runs the handshake, which
+/// carries no key bytes; the records after it are opened in place in
+/// `incoming`, which never grows and is zeroed on drop, and copied from there
+/// into the reply. (rustls' own record layer decrypts into heap it frees
+/// without zeroing.)
+fn tls_exchange(
+    mut connection: UnbufferedClientConnection,
+    mut tcp: TcpStream,
+    request: &[u8],
+    deadline: Option<u64>,
+) -> Result<(Zeroizing<Vec<u8>>, std::ops::Range<usize>), Outcome> {
+    let protocol = |error: rustls::Error| tls_net(crate::os_tls::protocol_error(error));
+    let tls = |case| tls_net(crate::net::tls_failure(case, 0));
+    let mut incoming = Zeroizing::new(vec![0u8; 2 * TLS_WIRE]);
+    let mut used = 0;
+    let mut outgoing = Vec::new();
+    let send = |tcp: &mut TcpStream, outgoing: &mut Vec<u8>| -> Result<(), Outcome> {
+        tcp.set_write_timeout(remaining(deadline)?)
+            .map_err(|e| io_failure(&e))?;
+        tcp.write_all(outgoing).map_err(|e| io_failure(&e))?;
+        outgoing.clear();
+        Ok(())
+    };
+    // Reads more of the stream; false at its end.
+    let receive = |tcp: &mut TcpStream, incoming: &mut [u8], used: &mut usize| loop {
+        if *used == incoming.len() {
+            return Err(tls(4));
+        }
+        tcp.set_read_timeout(remaining(deadline)?)
+            .map_err(|e| io_failure(&e))?;
+        match tcp.read(&mut incoming[*used..]) {
+            Ok(0) => return Ok(false),
+            Ok(n) => {
+                *used += n;
+                return Ok(true);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(io_failure(&e)),
+        }
+    };
+    loop {
+        let status = connection.process_tls_records(&mut incoming[..used]);
+        let discard = status.discard;
+        let mut more = false;
+        let mut ready = false;
+        match status.state.map_err(protocol)? {
+            ConnectionState::EncodeTlsData(mut data) => {
+                let start = outgoing.len();
+                let mut room = TLS_WIRE;
+                loop {
+                    outgoing.resize(start + room, 0);
+                    match data.encode(&mut outgoing[start..]) {
+                        Ok(n) => break outgoing.truncate(start + n),
+                        Err(EncodeError::InsufficientSize(InsufficientSizeError {
+                            required_size,
+                        })) => room = required_size,
+                        Err(_) => return Err(tls(4)),
+                    }
+                }
+            }
+            ConnectionState::TransmitTlsData(data) => {
+                send(&mut tcp, &mut outgoing)?;
+                data.done();
+            }
+            ConnectionState::WriteTraffic(_) => ready = true,
+            ConnectionState::BlockedHandshake => more = true,
+            ConnectionState::PeerClosed | ConnectionState::Closed => return Err(tls(5)),
+            _ => return Err(tls(4)),
+        }
+        incoming.copy_within(discard..used, 0);
+        used -= discard;
+        if ready {
+            break;
+        }
+        if more && !receive(&mut tcp, &mut incoming, &mut used)? {
+            return Err(tls(5));
+        }
+    }
+    let mut records = crate::os_tls::OwnedRecords::new(connection).map_err(tls_net)?;
+    records.seal(&mut outgoing, request).map_err(tls_net)?;
+    send(&mut tcp, &mut outgoing)?;
+    let mut reply = Reply::new();
+    while !reply.whole() {
+        match records.open(&mut incoming[..used]).map_err(tls_net)? {
+            Some((len, opened)) => {
+                match opened {
+                    crate::os_tls::Opened::Data(range) => reply.append(&incoming[range])?,
+                    crate::os_tls::Opened::Control => {}
+                    crate::os_tls::Opened::Closed => break,
+                }
+                incoming.copy_within(len..used, 0);
+                used -= len;
+            }
+            // The stream ended with no close_notify, short of the reply.
+            None if !receive(&mut tcp, &mut incoming, &mut used)? => return Err(tls(6)),
+            None => {}
+        }
+    }
+    reply.body()
+}
+
+/// The content of the first `<name>` element.
+fn element<'a>(xml: &'a [u8], name: &[u8]) -> Result<&'a [u8], Outcome> {
+    let malformed = failure(MALFORMED, 0, 0, 0);
+    let open = [b"<", name, b">"].concat();
+    let close = [b"</", name, b">"].concat();
+    let start = find(xml, &open).ok_or(malformed)? + open.len();
+    let end = start + find(&xml[start..], &close).ok_or(malformed)?;
+    Ok(&xml[start..end])
+}
+
+/// Element text with no markup and no entity reference (an escape).
+fn text(value: &[u8]) -> Result<&[u8], Outcome> {
+    if value.iter().any(|&b| b == b'<' || b == b'&') {
+        return Err(failure(MALFORMED, 0, 0, 0));
+    }
+    Ok(value)
 }
 
 /// A copy in storage of exactly its length, so it never reallocates.
@@ -523,7 +843,7 @@ pub unsafe extern "C" fn hirsel_core_cred_fetch(
                 max_receive: 0,
             },
             source: grant.map_or(CredSource::Imds(SocketAddrV4::new(0.into(), 0)), |g| {
-                g.source
+                g.source.clone()
             }),
             spares: [spare(key_id) as u64, spare(token) as u64],
             job: None,

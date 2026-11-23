@@ -143,7 +143,7 @@ mod tls_rule;
 pub use tls_rule::{Name, Pattern, TlsRule, TlsTrust};
 mod cred_grant;
 pub mod key_wrap;
-pub use cred_grant::{CredGrant, CredSource, STS_UNBUILT};
+pub use cred_grant::{CredGrant, CredSource, StsSource};
 mod secret_grant;
 pub use secret_grant::{
     SecretGrant, SecretPolicy, SecretSource, SecretUse, derive_hmac_sha256, hmac_sha256,

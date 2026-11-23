@@ -133,16 +133,22 @@ impl TrafficKey {
 
     fn seal(&mut self, slot: &mut Slot, kind: u8, input: &[u8]) -> Result<(), Outcome> {
         slot.acquire();
-        let payload = input.len() + 1 + TAG;
-        let end = slot.end + HEADER + payload;
-        let (header, body) = slot.bytes[slot.end..end].split_at_mut(HEADER);
-        let [hi, lo] = (payload as u16).to_be_bytes();
+        let end = slot.end + HEADER + input.len() + 1 + TAG;
+        self.seal_into(&mut slot.bytes[slot.end..end], kind, input)?;
+        slot.end = end;
+        Ok(())
+    }
+
+    /// Seals `input` as one record filling `record`, which holds exactly its
+    /// header, payload, content type and tag.
+    fn seal_into(&mut self, record: &mut [u8], kind: u8, input: &[u8]) -> Result<(), Outcome> {
+        let (header, body) = record.split_at_mut(HEADER);
+        let [hi, lo] = (body.len() as u16).to_be_bytes();
         header.copy_from_slice(&[APPLICATION, 3, 3, hi, lo]);
         let nonce = self.nonce();
         #[cfg(target_arch = "x86_64")]
         if let Some(key) = &self.out_of_place {
             key.seal(*nonce.as_ref(), header, input, kind, body);
-            slot.end = end;
             return Ok(());
         }
         let (plain, tag) = body.split_at_mut(input.len() + 1);
@@ -153,8 +159,144 @@ impl TrafficKey {
             .seal_in_place_separate_tag(nonce, Aad::from(header), plain)
             .map_err(|_| tls_failure(4, 0))?;
         tag.copy_from_slice(sealed.as_ref());
-        slot.end = end;
         Ok(())
+    }
+
+    /// Opens a whole record in place, header first. Returns its content type
+    /// and the length of its payload, which starts after the header.
+    fn open(&mut self, record: &mut [u8], limit: u64) -> Result<(u8, usize), AlertDescription> {
+        if self.seq >= limit {
+            return Err(AlertDescription::UnexpectedMessage);
+        }
+        let (header, body) = record.split_at_mut(HEADER);
+        let nonce = self.nonce();
+        let plaintext = self
+            .key
+            .open_in_place(nonce, Aad::from(&*header), body)
+            .map_err(|_| AlertDescription::BadRecordMac)?;
+        if plaintext.len() > RECORD + 1 {
+            return Err(AlertDescription::RecordOverflow);
+        }
+        let content = plaintext
+            .iter()
+            .rposition(|&byte| byte != 0)
+            .ok_or(AlertDescription::UnexpectedMessage)?;
+        Ok((plaintext[content], content))
+    }
+}
+
+/// The length of the whole record at the front of `input`, once it is all
+/// there.
+fn whole_record(input: &[u8]) -> Result<Option<usize>, AlertDescription> {
+    if input.len() < HEADER {
+        return Ok(None);
+    }
+    let len = payload_len(input);
+    if len > MAX_CIPHERTEXT {
+        return Err(AlertDescription::RecordOverflow);
+    }
+    if input[0] != APPLICATION {
+        return Err(AlertDescription::UnexpectedMessage);
+    }
+    Ok((input.len() >= HEADER + len).then_some(HEADER + len))
+}
+
+/// What an opened record held.
+pub(crate) enum Opened {
+    /// Application data, at this range of the record's buffer.
+    Data(Range<usize>),
+    /// A ticket, a key update or an empty record.
+    Control,
+    /// The peer's close_notify.
+    Closed,
+}
+
+/// TLS 1.3 records sealed and opened in buffers the caller owns, so opened
+/// plaintext stays where it was received and the caller zeroes it (TLS-7's
+/// credential exchange). The handshake is rustls'; it holds no key bytes.
+pub(crate) struct OwnedRecords {
+    handshake: PostHandshake,
+    tx_key: TrafficKey,
+    rx_key: TrafficKey,
+    limit: u64,
+}
+
+impl OwnedRecords {
+    pub(crate) fn new(connection: UnbufferedClientConnection) -> Result<Self, Outcome> {
+        let (secrets, kernel) = connection
+            .dangerous_into_kernel_connection()
+            .map_err(protocol_error)?;
+        let limit = kernel
+            .negotiated_cipher_suite()
+            .tls13()
+            .ok_or(tls_failure(4, 0))?
+            .common
+            .confidentiality_limit;
+        Ok(Self {
+            handshake: PostHandshake {
+                kernel,
+                fragment: Vec::new(),
+            },
+            tx_key: TrafficKey::new(secrets.tx)?,
+            rx_key: TrafficKey::new(secrets.rx)?,
+            limit,
+        })
+    }
+
+    /// Appends `input` to `out` sealed as application records.
+    pub(crate) fn seal(&mut self, out: &mut Vec<u8>, input: &[u8]) -> Result<(), Outcome> {
+        for chunk in input.chunks(RECORD) {
+            if self.tx_key.seq >= self.limit {
+                return Err(tls_failure(4, 0));
+            }
+            let start = out.len();
+            out.resize(start + HEADER + chunk.len() + 1 + TAG, 0);
+            self.tx_key
+                .seal_into(&mut out[start..], APPLICATION, chunk)?;
+        }
+        Ok(())
+    }
+
+    /// Opens the record at the front of `wire` in place. None while it is
+    /// incomplete; else the record's length and what it held. A local
+    /// failure is `Protocol(0)` and a peer's alert `Protocol(code)`.
+    pub(crate) fn open(&mut self, wire: &mut [u8]) -> Result<Option<(usize, Opened)>, Outcome> {
+        let local = |_: AlertDescription| tls_failure(4, 0);
+        let Some(len) = whole_record(wire).map_err(local)? else {
+            return Ok(None);
+        };
+        let (kind, content) = self
+            .rx_key
+            .open(&mut wire[..len], self.limit)
+            .map_err(local)?;
+        let payload = &wire[HEADER..HEADER + content];
+        if kind != HANDSHAKE && !self.handshake.fragment.is_empty() {
+            return Err(tls_failure(4, 0));
+        }
+        let opened = match kind {
+            APPLICATION if payload.is_empty() => Opened::Control,
+            APPLICATION => Opened::Data(HEADER..HEADER + content),
+            HANDSHAKE if !payload.is_empty() => {
+                // A requested update is owed only before our next record,
+                // and the exchange sends none after its request.
+                if self.handshake.consume(payload).map_err(local)?.is_some() {
+                    self.rx_key = self
+                        .handshake
+                        .kernel
+                        .update_rx_secret()
+                        .map_err(protocol_error)
+                        .and_then(TrafficKey::new)?;
+                }
+                Opened::Control
+            }
+            ALERT => match payload {
+                [1, 0] => Opened::Closed,
+                [1 | 2, code] => return Err(tls_failure(4, *code)),
+                _ => return Err(tls_failure(4, 0)),
+            },
+            _ => return Err(tls_failure(4, 0)),
+        };
+        Ok(Some((len, opened)))
     }
 }
 
@@ -250,17 +392,8 @@ impl Records {
     fn read_record(&mut self, socket: &mut SocketIo, allow_read: bool) -> Result<bool, ReadEnd> {
         let (start, end) = loop {
             let input = &self.rx.bytes[self.rx.start..self.rx.end];
-            if input.len() >= HEADER {
-                let len = payload_len(input);
-                if len > MAX_CIPHERTEXT {
-                    return Err(ReadEnd::Local(AlertDescription::RecordOverflow));
-                }
-                if input[0] != APPLICATION {
-                    return Err(ReadEnd::Local(AlertDescription::UnexpectedMessage));
-                }
-                if input.len() >= HEADER + len {
-                    break (self.rx.start, self.rx.start + HEADER + len);
-                }
+            if let Some(len) = whole_record(input).map_err(ReadEnd::Local)? {
+                break (self.rx.start, self.rx.start + len);
             }
             if !allow_read {
                 return Ok(false);
@@ -273,25 +406,11 @@ impl Records {
             }
         };
 
-        if self.rx_key.seq >= self.rx_limit {
-            return Err(ReadEnd::Local(AlertDescription::UnexpectedMessage));
-        }
-        let (header, body) = self.rx.bytes[start..end].split_at_mut(HEADER);
-        let nonce = self.rx_key.nonce();
-        let plaintext = self
+        let (kind, content) = self
             .rx_key
-            .key
-            .open_in_place(nonce, Aad::from(header), body)
-            .map_err(|_| ReadEnd::Local(AlertDescription::BadRecordMac))?;
-        if plaintext.len() > RECORD + 1 {
-            return Err(ReadEnd::Local(AlertDescription::RecordOverflow));
-        }
-        let content = plaintext
-            .iter()
-            .rposition(|&byte| byte != 0)
-            .ok_or(ReadEnd::Local(AlertDescription::UnexpectedMessage))?;
-        let (payload, kind) = plaintext.split_at(content);
-        let kind = kind[0];
+            .open(&mut self.rx.bytes[start..end], self.rx_limit)
+            .map_err(ReadEnd::Local)?;
+        let payload = &self.rx.bytes[start + HEADER..start + HEADER + content];
         if kind != HANDSHAKE && !self.handshake.fragment.is_empty() {
             return Err(ReadEnd::Local(AlertDescription::UnexpectedMessage));
         }

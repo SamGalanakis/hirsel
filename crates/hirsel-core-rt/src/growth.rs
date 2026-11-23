@@ -64,7 +64,7 @@ pub(crate) unsafe fn replace(
     // Memcheck tracks requested extents and lacks per-slot resize metadata.
     #[cfg(not(feature = "memcheck"))]
     if kind == block::PLAIN
-        && bytes <= 64
+        && bytes <= crate::abi_layout::GROW_SLAB_MAX_PAYLOAD_BYTES as usize
         && frame_payer.is_none()
         && let Some(original) =
             unsafe { task_heap::try_reassign_slab(old, payer, bytes, align, kind) }

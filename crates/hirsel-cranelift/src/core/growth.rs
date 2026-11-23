@@ -1,6 +1,6 @@
-//! One shared runtime call for byte buffers and above the native payload threshold, the entry LLVM
-//! uses for every growth it does not complete inline. Small buffers retain the
-//! inline classic allocation/copy/install/free sequence.
+//! One shared runtime call when growth can reuse a backing, the entry LLVM
+//! uses for every growth it does not complete inline. Other buffers retain
+//! the inline allocation/copy/install/free sequence.
 use super::function::Function;
 use super::*;
 use cranelift_codegen::ir::{StackSlotData, StackSlotKind, Value, condcodes::IntCC};
@@ -37,16 +37,22 @@ impl Function<'_, '_, '_> {
         if dispatch {
             let cap = self.load_word(at, 16);
             let native = self.b.create_block();
-            if stride == 1 {
-                self.b.ins().jump(native, &[]);
-            } else {
-                let large = self.b.ins().icmp_imm_s(
-                    IntCC::UnsignedGreaterThanOrEqual,
-                    cap,
-                    memory_layout::GROW_CALL_MIN_PAYLOAD_BYTES.div_ceil(stride) as i64,
+            let large = self.b.ins().icmp_imm_s(
+                IntCC::UnsignedGreaterThanOrEqual,
+                cap,
+                memory_layout::GROW_CALL_MIN_PAYLOAD_BYTES.div_ceil(stride) as i64,
+            );
+            let reuse = if stride == 1 && kind == memory_layout::NATIVE_PLAIN {
+                let slab = self.b.ins().icmp_imm_s(
+                    IntCC::UnsignedLessThanOrEqual,
+                    size,
+                    memory_layout::GROW_SLAB_MAX_PAYLOAD_BYTES as i64,
                 );
-                self.b.ins().brif(large, native, &[], classic, &[]);
-            }
+                self.b.ins().bor(large, slab)
+            } else {
+                large
+            };
+            self.b.ins().brif(reuse, native, &[], classic, &[]);
             self.b.switch_to_block(native);
             let alignment = self.b.ins().iconst(types::I64, align as i64);
             let stride_word = self.b.ins().iconst(types::I64, stride as i64);

@@ -195,3 +195,6 @@ pub const fn cause_kind(word: u64) -> u8 {
 /// Capacity times native element stride, excluding the prefix. Both emitters
 /// use this one allocator policy; logical admission remains the full new charge.
 pub const GROW_CALL_MIN_PAYLOAD_BYTES: u64 = 2048;
+
+/// Above this new payload size, growth cannot reuse a small slab slot.
+pub const GROW_SLAB_MAX_PAYLOAD_BYTES: u64 = 64;

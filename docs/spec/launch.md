@@ -396,16 +396,27 @@ is **Undecided**: a durable state that keeps both OLD's and NEW's roots, under w
 command, ordinary wake, second deploy or retirement may change the group's roots. The host
 decides it only by what the store reports under its `LOCK`, through a recovery probe. The probe is a
 serving launch with no predecessor at a fresh generation. Its pair is saved in the
-pending record as probe intent, never as the group's current pair. The first probe opens NEW's
-assembly at the attempt's activation `v`. An open of NEW at `v` that reports `releases[v].prepared`
+pending record as probe intent, never as the group's current pair. Every probe also names the
+attempt's activation `v` as its witness version. The first probe opens NEW's
+assembly at `v`. An open of NEW at `v` that reports `releases[v].prepared`
 equal to the attempt's prepared digest proves the install (RUNNER-SPEC §14.3; an open at `v`
 with another `prepared` proves this attempt did not install): the host
 makes NEW the current assembly and activation, keeps OLD's as retained, and records the
-deploy `Installed`, in one durable transaction, and the probe goes on serving. A refusal
-`PlaceCurrent` naming OLD's recorded activation proves nothing yet: it selects OLD's pair, and
-once that probe has ended the next probe opens OLD's assembly at OLD's activation. Only that
-open proves `v` was never installed, and then the deploy is recorded failed (`not installed
-after recovery`) with OLD's roots kept. Any other answer (`Held`, a missing image, an unknown
+deploy `Installed`, in one durable transaction, and the probe goes on serving. On objects@1 a
+probe refused `NotCurrent` reports a follower read of one capture of the store: its activation,
+image, holder pair and `releases[v]` (RUNNER-SPEC §14.3 "The probe's read"). Row `v` decides
+the attempt even when another install has since moved the store past `v`: the attempt's digest
+is `Installed`; another `prepared`, or no row under another pair than the one OLD recorded with
+its import, is failed (`not installed after recovery`). No row under OLD's pair proves nothing
+yet: OLD's delayed write can still land, so the next probe opens OLD's assembly at OLD's
+activation, and that open, or its read, decides. The outcome never chooses what serves. In the
+same transaction the host selects the store's current activation with whichever of OLD's and
+NEW's assemblies has the read's `Describe` digest, so a group never returns to `v` from a later
+activation; if neither matches, the group is failing with that cause until an operator acts.
+The selected assembly is the current root, and the other is retained unless the deploy failed
+and OLD serves. On log@1 a refusal `PlaceCurrent` naming OLD's recorded activation selects
+OLD's pair as before, and only that probe's open at OLD's activation proves `v` was never
+installed. Any other answer (`Held`, a missing image, a failed read, on log@1 an unknown
 activation, an I/O failure) decides nothing: both roots stay, and the probe is retried under the
 ordinary backoff. Neither a timer nor a retry count decides a root.
 The platform host records the attempt as `Preparing` before its describe, preview and

@@ -697,7 +697,6 @@ pub(super) enum Operation<'a> {
     Insert(&'a Type, &'a Value, &'a Type, &'a Value, u32),
     Phi(&'a Type, &'a [(Value, Label)]),
     Call(&'a FnSig, &'a Value, &'a [Value], &'a CallAttrs),
-    /// `atomicrmw <op> ptr, <ty> <value> <ordering>, align 8`; yields the old value.
     Branch(Label),
     Conditional(&'a Value, Label, Label, bool),
     Switch(&'a Type, &'a Value, Label, &'a [(i128, Label)]),

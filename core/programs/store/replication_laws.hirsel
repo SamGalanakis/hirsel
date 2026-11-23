@@ -1,0 +1,217 @@
+// One writer at a time drives the M2 bucket register. The followers use the
+// ordinary capture and catch-up APIs. Each GROUP writes an immutable payload
+// and marks its predecessor as superseded. The latter makes reversing any
+// adjacent pair observable even when a cold restart replays the whole suffix.
+type ReplicationWriter {
+    source: ObjectPackRead,
+    register: HistoryRegister,
+    replay: JournalReplay,
+    authority: Bytes,
+    buffers: HistoryBuffers
+}
+
+fn replication_writer(tasks: Tasks, r: Random, sim: BucketSim, seed: u64, expected: Option[StoreId]) -> Result[ReplicationWriter, Error] waits {
+    let client = bucket_law_client_lanes(sim, tasks, "spare.test", seed, true, 1)?
+    let authority = history_config_bytes(HistoryConfig(place: std.object.bucket_config(client), level: "bucket"))?
+    let mut source = ObjectPackRead(client: take client, locator: HistoryLocator(rows: map.new(), chunks: list.new(), last_pack: 0), deadline: 0)
+    let mut buffers = history_buffers(1024)?
+    let mut options = defaults()
+    options.create = match expected {
+        Some(_) => false,
+        None => true,
+    }
+    options.expect = expected
+    let (take register, take replay) = history_open_register(mut source, sim.time, r, options, "bucket", mut buffers, BUCKET_LAW_OP_MS)?
+    Ok(ReplicationWriter(source: take source, register: take register, replay: take replay, authority: take authority, buffers: take buffers))
+}
+
+fn replication_key(n: u64) -> Bytes {
+    let mut key: Bytes = list.with_capacity(1)
+    let octet: u8 = int.truncate(n)
+    list.push(mut key, octet)
+    take key
+}
+
+fn replication_stream_row(mut raw: Bytes, key: u64, value: u64) {
+    list.push(mut raw, 1u8)
+    list.put_word_le(mut raw, 1u32)
+    let octet: u8 = int.truncate(key)
+    list.push(mut raw, octet)
+    list.put_word_le(mut raw, 8u32)
+    list.put_word_le(mut raw, value)
+}
+
+fn replication_packet(mut raw: Bytes, head: HistoryHead, entry_version: u64, value: u64) -> Result[(), Error] {
+    let ctx = DiskContext(store: head.store, role: 2, seq: history_next_id(head.entry.seq)?)
+    history_packet_header(mut raw, ctx, head.pair.epoch, head.entry)?
+    list.fill(mut raw, 16, 0u8)
+    list.put_word_le(mut raw, 0u32)
+    list.put_word_le(mut raw, entry_version)
+    list.put_word_le(mut raw, 0u64)
+    list.push(mut raw, 1u8)
+    list.push(mut raw, 1u8)
+    list.put_word_le(mut raw, if entry_version == 1 {
+        2u32
+    } else {
+        3u32
+    })
+    replication_stream_row(mut raw, entry_version, value)
+    if entry_version > 1 {
+        replication_stream_row(mut raw, 128 + entry_version - 1, 0)
+    }
+    replication_stream_row(mut raw, 128 + entry_version, 1)
+    capacity(history_seal(mut raw, ctx, 112, 0x0011))
+}
+
+fn replication_advance(mut writer: ReplicationWriter, entry_version: u64, value: u64) -> Result[(), Error] waits {
+    replication_packet(mut writer.buffers.packet, writer.register.head, entry_version, value)?
+    let due = std.object.deadline_after_ms(writer.source.client, BUCKET_LAW_OP_MS)
+    let verdict = history_register_advance(mut writer.source.client, mut writer.register, writer.authority, mut writer.buffers, due)?
+    let HistoryApplied(_) = verdict else {
+        return Error(Undecided)
+    }
+    let head = writer.register.head
+    history_apply_entry(history_key("e-", head.entry), head.store, head.entry, writer.buffers.packet, mut writer.replay, 1048576)
+}
+
+fn replication_open_follower(mut ids: Followers, tasks: Tasks, sim: BucketSim, host_name: String, seed: u64, store: StoreId, op_ms: u64) -> Result[Follower, Error] waits {
+    let client = bucket_law_client_lanes(sim, tasks, host_name, seed, true, 1)?
+    let mut options = defaults()
+    options.expect = Some(store)
+    follower(mut ids, tasks, object_authority(take client, "bucket", op_ms), sim.time, options)
+}
+
+fn replication_mix(previous: Inline[u8, 32], entry_version: u64, value: u64) -> Inline[u8, 32] {
+    let mut input: Bytes = list.with_capacity(48)
+    for i in 0u64 .. 32 {
+        list.push(mut input, previous[i])
+    }
+    list.put_word_le(mut input, entry_version)
+    list.put_word_le(mut input, value)
+    std.sha256.hash(input)
+}
+
+fn replication_failure(node: String, seed: u64, entry_version: u64, cause: String) -> Never {
+    let mut message = string.from(node)
+    string.push(mut message, " seed ")
+    string.push_u64(mut message, seed)
+    string.push(mut message, " Position(main, ")
+    string.push_u64(mut message, entry_version)
+    string.push(mut message, "): ")
+    string.push(mut message, cause)
+    fail(take message)
+}
+
+// The reference hashes come from the proposed GROUP payloads after the
+// register confirms them. Each node's hashes come from its applied rows.
+// Recompute every prefix so a cold capture cannot inherit an old digest.
+fn replication_check(node: String, seed: u64, tip: Tip, held: u64, expected: List[Inline[u8, 32]]) {
+    if tip.head != held || tip.id != 0 || held >= list.len(expected) {
+        replication_failure(node, seed, held, "unexpected applied position")
+    }
+    let tree = view tip.roots.streams
+    let (rows, _) = std.page.totals(tree.root)
+    if rows != 2 * held {
+        replication_failure(node, seed, held, "missing or extraneous applied rows")
+    }
+    let mut hash: Inline[u8, 32] =[0u8; 32]
+    for n in 1u64 .. held + 1 {
+        let Some(payload) = get_page_row(tree, replication_key(n)) else {
+            replication_failure(node, seed, n, "missing entry")
+        }
+        let Some(marker) = get_page_row(tree, replication_key(128 + n)) else {
+            replication_failure(node, seed, n, "missing order marker")
+        }
+        if list.len(marker) != 8 || read_le(marker, 0, 8) != (if n == held {
+            1u64
+        } else {
+            0u64
+        }) {
+            replication_failure(node, seed, n, "entry applied out of order")
+        }
+        if list.len(payload) != 8 {
+            replication_failure(node, seed, n, "wrong payload width")
+        }
+        hash = replication_mix(hash, n, read_le(payload, 0, 8))
+        if hash != expected[n] {
+            replication_failure(node, seed, n, "running hash differs from committed inputs")
+        }
+    }
+}
+
+fn replication_follow(mut f: Follower, node: String, seed: u64, entry_version: u64, expected: List[Inline[u8, 32]]) waits {
+    let due = clock.deadline_after_ms(host.mono_ns(f.clock), BUCKET_LAW_OP_MS)
+    let Ok(applied_position) = catch_up(mut f, due) else {
+        replication_failure(node, seed, entry_version, "catch-up refused")
+    }
+    if applied_position.version != entry_version {
+        replication_failure(node, seed, entry_version, "catch-up returned the wrong position")
+    }
+    replication_check(node, seed, f.capture.state.tips[0], entry_version, expected)
+}
+
+fn replication_run(tasks: Tasks, sim: BucketSim, seed: u64) -> Result[(), Error] waits {
+    let mut plan = std.sim.world.plan(seed)
+    let r = provide.random(seed)
+    let mut writer = replication_writer(tasks, r, sim, seed, None)?
+    let store = writer.register.head.store
+    let mut ids = followers()
+    let mut first = replication_open_follower(mut ids, tasks, sim, "spare.test", seed, store, BUCKET_LAW_OP_MS)?
+    let mut second = replication_open_follower(mut ids, tasks, sim, "spare.test", seed, store, BUCKET_LAW_OP_MS)?
+    let mut expected: List[Inline[u8, 32]] = list.with_capacity(7)
+    list.push(mut expected,[0u8; 32])
+    replication_check("writer", seed, writer.replay.state.tips[0], 0, expected)
+    replication_check("first follower", seed, first.capture.state.tips[0], 0, expected)
+    replication_check("second follower", seed, second.capture.state.tips[0], 0, expected)
+    let restart = 2 + std.sim.world.pick(mut plan, 3)
+    for n in 1u64 .. 7 {
+        if n == restart {
+            let replacement = replication_writer(tasks, r, sim, n, Some(store))?
+            replication_check("reclaimed writer", seed, replacement.replay.state.tips[0], n - 1, expected)
+            let old_epoch = writer.register.head.pair.epoch
+            replication_packet(mut writer.buffers.packet, writer.register.head, n, 0)?
+            let due = std.object.deadline_after_ms(writer.source.client, BUCKET_LAW_OP_MS)
+            if let Error(Fenced(epoch)) = history_register_advance(mut writer.source.client, mut writer.register, writer.authority, mut writer.buffers, due) {
+                if epoch != old_epoch {
+                    replication_failure("writer", seed, n, "wrong epoch after stale CAS")
+                }
+            } else {
+                replication_failure("writer", seed, n, "stale CAS did not fence the old writer")
+            }
+            writer = take replacement
+            replication_follow(mut first, "first follower after claim", seed, n - 1, expected)
+            replication_follow(mut second, "second follower after claim", seed, n - 1, expected)
+            // Primary connections are partitioned. The spare endpoint still
+            // serves the same register and objects to the remaining nodes.
+            let blocked = replication_open_follower(mut ids, tasks, sim, "s3.test", seed, store, 100)
+            if let Error(Remote(Retriable(_))) = blocked {} else {
+                replication_failure("restarting follower", seed, n - 1, "partition did not refuse its capture")
+            }
+        }
+        let value = 1 + std.sim.world.pick(mut plan, 0xffffffff)
+        if let Error(_) = replication_advance(mut writer, n, value) {
+            replication_failure("writer", seed, n, "commit did not advance and apply")
+        }
+        let previous = expected[n - 1]
+        list.push(mut expected, replication_mix(previous, n, value))
+        replication_check("writer", seed, writer.replay.state.tips[0], n, expected)
+        replication_follow(mut first, "first follower", seed, n, expected)
+        if n == restart {
+            second = replication_open_follower(mut ids, tasks, sim, "spare.test", n, store, BUCKET_LAW_OP_MS)?
+            replication_check("cold follower", seed, second.capture.state.tips[0], n, expected)
+        } else {
+            replication_check("lagging follower", seed, second.capture.state.tips[0], n - 1, expected)
+            replication_follow(mut second, "second follower", seed, n, expected)
+        }
+    }
+    Ok(())
+}
+
+@test
+fn bucket_test_m2_replication(c: Clock, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
+    let seed = bucket_law_seed(seed_grant, 711)
+    let sim = bucket_law_sim(tasks, c, seed, Some(bucket_law_wire_cut(0, false)), list.new())
+    let checked = replication_run(tasks, sim, seed)
+    let _ = bucket_law_finish(take sim)
+    checked
+}

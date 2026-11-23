@@ -27,7 +27,7 @@ fn log_level_uses_host_barrier(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
 
 // L57. A receipt keeps its branch version across later journal rotations.
 @test
-fn position_survives_three_cuts(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+fn position_survives_three_cuts(d: Dir, c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
     let directory = disk_test_directory(d)
     let mut db = open(tasks, directory, c, r, defaults())?
     let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
@@ -39,10 +39,26 @@ fn position_survives_three_cuts(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
         fail("the position law did not commit")
     }
     let receipt = done.ticket
-    for _ in 0u64 .. 3 {
+    let seed = std.sim.world.test_seed(seed_grant)
+    let mut plan = std.sim.world.plan(match seed {
+        Some(active) => active,
+        None => 0,
+    })
+    let mut frontier = 2u64
+    for i in 0u64 .. 3 {
         let cut = checkpoint(mut db)?
         if let Error(Missing(_)) = position(mut db, cut) {} else {
             fail("a cut received a commit Position")
+        }
+        if seed != None && std.sim.world.pick(mut plan, 2) == 1 {
+            let after_cut = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+                put(mut tx, rows, i + 8, 80 + i)
+            })?
+            let Committed(continued) = after_cut else {
+                fail("the position law did not commit after the cut")
+            }
+            durable(mut db, continued.ticket)?
+            frontier += 1
         }
     }
     let saved = position(mut db, receipt)?
@@ -57,11 +73,11 @@ fn position_survives_three_cuts(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
     let due = clock.deadline_after_ms(host.mono_ns(c), 1000)
     let found = at_least(mut first, saved, due)?
     let refreshed = fresh(mut first, due)?
-    if refreshed.open != found.open || version(refreshed) != 2 {
+    if refreshed.open != found.open || version(refreshed) != frontier {
         fail("fresh replaced the follower's open identity or lost a row")
     }
     let also = snapshot_follower(second, main)?
-    if found.open == also.open || version(found) != 2 || version(also) != 2 {
+    if found.open == also.open || version(found) != frontier || version(also) != frontier {
         fail("log followers did not keep distinct capture identities")
     }
     let source = follower_table(second, "rows", std.codec.key_u64(), std.codec.of_u64())?

@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import tomllib
 
 import runner_tests
 import std_native
@@ -16,6 +17,8 @@ import std_native
 ROOT = std_native.ROOT
 SEED = 'HIRSEL_TEST_SIM_SEED'
 DEFAULT_SEEDS = 32
+PACKAGE_LAWS = ('store',)
+SEEDED_TEST = re.compile(r'^@test\s+fn (\w+)\(([^)]*)\)', re.M)
 # These laws drive 10,000 frames per seed. Keep the complete floods in each
 # nightly batch while giving their disjoint ranges fewer seeds.
 FLOOD_SEEDS = {
@@ -40,8 +43,23 @@ DIRECT = {
 }
 
 
+def seeded_package_laws(package):
+    """A package test opts in with its simulation-specific Env parameter."""
+    directory = ROOT / 'core/programs' / package
+    manifest = tomllib.loads((directory / 'hirsel.toml').read_text())
+    version = manifest['package']['major']
+    laws = {}
+    for file, module in manifest['tests']['sources'].items():
+        for name, parameters in SEEDED_TEST.findall((directory / file).read_text()):
+            if re.search(r'(^|,)\s*seed_grant\s*:\s*Env\s*(,|$)', parameters):
+                definition = f'{package}@{version}/{module.replace(".", "/")}/{name}'
+                laws[definition] = definition
+    if not laws:
+        raise ValueError(f'{package} has no seeded package tests')
+    return laws
+
+
 def selected_laws():
-    """Use the ordinary contract inventory and the runner's simulated wire laws."""
     laws = {'postgres': {f'postgres@1/sim_tests/{name}': name for name in POSTGRES}}
     for case in std_native.discover(ROOT, []):
         if case.name in DIRECT or std_native.simulated_network_case(case):
@@ -65,6 +83,7 @@ def selected_laws():
         if 'Net' in types:
             runner[f'runner@1/runner_calls/law_{name}'] = types
     laws['runner'] = runner
+    laws.update((package, seeded_package_laws(package)) for package in PACKAGE_LAWS)
     return laws
 
 
@@ -172,13 +191,40 @@ def output_name(definition):
     return hashlib.sha256(b''.join(len(part).to_bytes(8, 'little') + part for part in parts)).hexdigest()
 
 
+def run_preparation(command, scratch, report, expected):
+    with report.open('w') as log:
+        result = subprocess.run(command, stdout=log, cwd=scratch)
+    if result.returncode not in (0, 1):
+        raise ValueError(f'preparation exited {result.returncode}; see {report}')
+    rows = {row['definition']: row for row in json.loads(report.read_text())['tests']}
+    if rows.keys() != set(expected):
+        raise ValueError(f'preparation did not discover exactly the campaign entries; see {report}')
+    return rows
+
+
 def prepare(compiler, work, kind, group, jobs, seeds):
     scratch = work / kind
     scratch.mkdir()
     output = scratch / 'bin'
     command = [str(compiler), 'test', '--release', '--backend', 'llvm', '-j', str(jobs), '--seed', '0',
                '--store', str(scratch / 'objects'), '-o', str(output), '--json']
-    if kind == 'postgres':
+    reports = {}
+    rows = {}
+    if kind in PACKAGE_LAWS:
+        # Package mode writes a workspace lock. Stage the manifests and their
+        # relative dependencies away from the checkout.
+        programs = work / 'programs'
+        if not programs.exists():
+            shutil.copytree(ROOT / 'core/programs', programs,
+                            ignore=shutil.ignore_patterns('hirsel.lock', 'node_modules'))
+        entries = group
+        print(f'Preparing {len(entries)} {kind} laws', flush=True)
+        for index, definition in enumerate(entries.values()):
+            report = scratch / f'prepare-{index}.json'
+            reports[definition] = report
+            rows.update(run_preparation(command + [str(programs / kind), '--filter', definition],
+                                        scratch, report, [definition]))
+    elif kind == 'postgres':
         package = scratch / 'postgres'
         shutil.copytree(ROOT / 'core/programs/postgres', package, ignore=shutil.ignore_patterns('hirsel.lock'))
         entries = {law: law for law in group}
@@ -193,17 +239,14 @@ def prepare(compiler, work, kind, group, jobs, seeds):
         command.extend(['--inputs', str(manifest), '--source-core', '--source-std',
                         '--filter', '/campaign_', '--limit', str(limit),
                         '--grant', 'Tasks', '--grant', f'Env={SEED}'])
-    print(f'Preparing {len(entries)} {kind} laws', flush=True)
-    report = scratch / 'prepare.json'
-    with report.open('w') as log:
-        result = subprocess.run(command, stdout=log, cwd=scratch)
-    if result.returncode not in (0, 1):
-        raise ValueError(f'{kind} preparation exited {result.returncode}; see {report}')
-    rows = {row['definition']: row for row in json.loads(report.read_text())['tests']}
-    if rows.keys() != set(entries.values()):
-        raise ValueError(f'{kind} did not discover exactly the campaign entries; see {report}')
+    if kind not in PACKAGE_LAWS:
+        print(f'Preparing {len(entries)} {kind} laws', flush=True)
+        report = scratch / 'prepare.json'
+        reports = dict.fromkeys(entries.values(), report)
+        rows = run_preparation(command, scratch, report, entries.values())
     laws = []
     for law, definition in entries.items():
+        report = reports[definition]
         binary = output / output_name(definition)
         if rows[definition].get('source') != 'executed' or not binary.is_file():
             raise ValueError(f'{law} produced no executable; see {report}')
@@ -222,9 +265,13 @@ def main():
     parser.add_argument('--jobs', type=int, default=4, choices=range(1, 5))
     parser.add_argument('--seeds', type=int, help='override the default seed count for every law')
     parser.add_argument('--law', help='prepare or list just one exact law')
+    parser.add_argument('--package', action='append', choices=PACKAGE_LAWS,
+                        help='prepare or list only this package (repeatable)')
     parser.add_argument('--list', action='store_true')
     args = parser.parse_args()
     inventory = selected_laws()
+    if args.package:
+        inventory = {kind: laws for kind, laws in inventory.items() if kind in args.package}
     if args.law and not any(args.law in laws for laws in inventory.values()):
         parser.error('unknown simulation law')
     if args.list:

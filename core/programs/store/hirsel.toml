@@ -50,6 +50,7 @@ dirs = ["."]
 "bucket_laws.hirsel" = "store"
 "object_cut_laws.hirsel" = "store"
 "authority_laws.hirsel" = "store"
+"replication_laws.hirsel" = "store"
 "store_put_laws.hirsel" = "store"
 "store_schema_laws.hirsel" = "store"
 "store_changes_laws.hirsel" = "store"

@@ -101,6 +101,10 @@ fn bucket_law_client(s: BucketSim, tasks: Tasks, host_name: String, seed: u64) -
 }
 
 fn bucket_law_client_with(s: BucketSim, tasks: Tasks, host_name: String, seed: u64, typed: bool) -> Result[std.object.Client, Error] waits {
+    bucket_law_client_lanes(s, tasks, host_name, seed, typed, 0)
+}
+
+fn bucket_law_client_lanes(s: BucketSim, tasks: Tasks, host_name: String, seed: u64, typed: bool, lanes: u64) -> Result[std.object.Client, Error] waits {
     let secret_bytes = string.into_bytes(string.from("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"))
     let root = result.unwrap(secret.seal(take secret_bytes, "kdf"))
     let credentials_set = std.cred.from_secret("AKIAIOSFODNN7EXAMPLE", take root, "")
@@ -108,9 +112,9 @@ fn bucket_law_client_with(s: BucketSim, tasks: Tasks, host_name: String, seed: u
     let place = bucket_law_place(host_name)
     let random = provide.random(seed)
     let connected = if typed {
-        std.object.start_simulated(s.endpoint, tasks, take place, take credentials_set, s.time, random, 0, 1048576, deadline)
+        std.object.start_simulated(s.endpoint, tasks, take place, take credentials_set, s.time, random, lanes, 1048576, deadline)
     } else {
-        std.object.start(s.network, tasks, take place, take credentials_set, None, System, s.time, random, 0, 1048576, deadline)
+        std.object.start(s.network, tasks, take place, take credentials_set, None, System, s.time, random, lanes, 1048576, deadline)
     }
     match take connected {
         Ok(take client) => Ok(take client),
@@ -329,10 +333,10 @@ fn bucket_law_wire_cut(after: u64, apply: bool) -> std.sim.s3.Cut {
     std.sim.s3.Cut(after, apply, spare: bucket_law_spare())
 }
 
-fn bucket_law_seed(e: Env) -> u64 {
+fn bucket_law_seed(e: Env, fallback: u64) -> u64 {
     match std.sim.world.test_seed(e) {
         Some(active) => active,
-        None => 0,
+        None => fallback,
     }
 }
 
@@ -367,7 +371,7 @@ fn bucket_test_l4_cuts(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), 
 // retriable faults on every connection the seed's plan picks.
 @test
 fn bucket_test_soak(d: Dir, c: Clock, r: Random, tasks: Tasks, e: Env) -> Result[(), Error] waits {
-    let seed = bucket_law_seed(e)
+    let seed = bucket_law_seed(e, 0)
     let after = seed % BUCKET_LAW_CUTS
     let apply = (seed / BUCKET_LAW_CUTS) % 2 == 0
     let same_directory = (seed / (2 * BUCKET_LAW_CUTS)) % 2 == 0
@@ -540,8 +544,8 @@ fn bucket_m2_law_register(tasks: Tasks, sim: BucketSim) -> Result[(HistoryRef, H
 // L53 register portion. An obsolete If-Match may leave immutable debris.
 // Head names only the new holder's chain.
 @test
-fn bucket_test_m2_register_fence(c: Clock, tasks: Tasks) -> Result[(), Error] waits {
-    let sim = bucket_law_sim(tasks, c, 5, None, list.new())
+fn bucket_test_m2_register_fence(c: Clock, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
+    let sim = bucket_law_sim(tasks, c, bucket_law_seed(seed_grant, 5), None, list.new())
     let observed = bucket_m2_law_register(tasks, sim)
     let report = bucket_law_finish(take sim)
     let (committed, orphan) = observed?
@@ -570,8 +574,8 @@ fn bucket_m2_law_recover(tasks: Tasks, sim: BucketSim) -> Result[(), Error] wait
 }
 
 @test
-fn bucket_test_m2_link_recovery(c: Clock, tasks: Tasks) -> Result[(), Error] waits {
-    let sim = bucket_law_sim(tasks, c, 5, None, list.new())
+fn bucket_test_m2_link_recovery(c: Clock, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
+    let sim = bucket_law_sim(tasks, c, bucket_law_seed(seed_grant, 5), None, list.new())
     let recovered = bucket_m2_law_recover(tasks, sim)
     let _ = bucket_law_finish(take sim)
     recovered?
@@ -744,10 +748,10 @@ fn bucket_m2_read_packs(d: Dir, tasks: Tasks, sim: BucketSim) -> Result[(), Erro
 }
 
 @test
-fn bucket_test_m2_paged_recovery(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+fn bucket_test_m2_paged_recovery(d: Dir, c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
     let directory = disk_test_directory(d)
     bucket_m2_seed_checkpoint(directory, c, r, tasks)?
-    let sim = bucket_law_sim(tasks, c, 5, None, list.new())
+    let sim = bucket_law_sim(tasks, c, bucket_law_seed(seed_grant, 5), None, list.new())
     let recovered = bucket_m2_read_packs(directory, tasks, sim)
     let _ = bucket_law_finish(take sim)
     recovered
@@ -756,10 +760,10 @@ fn bucket_test_m2_paged_recovery(d: Dir, c: Clock, r: Random, tasks: Tasks) -> R
 // Q5 shares one attempt budget and the client's backoff even when every
 // conditional response is SlowDown.
 @test
-fn bucket_test_m2_retry_budget(c: Clock, tasks: Tasks) -> Result[(), Error] waits {
+fn bucket_test_m2_retry_budget(c: Clock, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
     let mut faults: List[std.sim.s3.Fault] = list.with_capacity(1)
     list.push(mut faults, SlowDown)
-    let sim = bucket_law_sim(tasks, c, 39, None, take faults)
+    let sim = bucket_law_sim(tasks, c, bucket_law_seed(seed_grant, 39), None, take faults)
     let mut client = bucket_law_client(sim, tasks, "s3.test", 3)?
     let mut body = string.into_bytes(string.from("proposed head"))
     let mut witness: Bytes = list.with_capacity(HISTORY_HEAD_LIMIT)
@@ -827,8 +831,8 @@ fn bucket_m2_law_probe(tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits 
 }
 
 @test
-fn bucket_test_m2_head_probe(c: Clock, tasks: Tasks) -> Result[(), Error] waits {
-    let sim = bucket_law_sim(tasks, c, 17, None, list.new())
+fn bucket_test_m2_head_probe(c: Clock, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
+    let sim = bucket_law_sim(tasks, c, bucket_law_seed(seed_grant, 17), None, list.new())
     let probed = bucket_m2_law_probe(tasks, sim)
     let report = bucket_law_finish(take sim)
     probed?
@@ -880,10 +884,10 @@ fn bucket_m2_law_admit(d: Dir, tasks: Tasks, r: Random, sim: BucketSim) -> Resul
 }
 
 @test
-fn bucket_test_m2_admitted_claim(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+fn bucket_test_m2_admitted_claim(d: Dir, c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
     let directory = disk_test_directory(d)
     bucket_m2_seed_checkpoint(directory, c, r, tasks)?
-    let sim = bucket_law_sim(tasks, c, 42, None, list.new())
+    let sim = bucket_law_sim(tasks, c, bucket_law_seed(seed_grant, 42), None, list.new())
     let admitted = bucket_m2_law_admit(directory, tasks, r, sim)
     let report = bucket_law_finish(take sim)
     admitted?
@@ -946,8 +950,8 @@ fn bucket_m2_law_follow(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), E
 }
 
 @test
-fn bucket_test_m2_follower(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
-    let sim = bucket_law_sim(tasks, c, 773, None, list.new())
+fn bucket_test_m2_follower(c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
+    let sim = bucket_law_sim(tasks, c, bucket_law_seed(seed_grant, 773), None, list.new())
     let followed = bucket_m2_law_follow(tasks, r, sim)
     let _ = bucket_law_finish(take sim)
     followed

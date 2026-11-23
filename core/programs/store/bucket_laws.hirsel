@@ -14,7 +14,6 @@
 // Reopen: at every cut, the writer's own directory reopens with every row
 // its journal acknowledged, and its next checkpoint carries them to a fresh
 // directory. The soak runs one seeded cut per seed under retriable faults.
-
 type BucketSim {
     network: Net,
     time: Clock,
@@ -442,4 +441,46 @@ fn bucket_test_read_only_mirror(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
     let _ = take client
     let _ = bucket_law_finish(take sim)
     Ok(())
+}
+
+// STORE L60. Little-endian fields and XXH3 frame checks were derived
+// independently of the store encoder.
+@test
+fn bucket_test_m2_head_vectors() -> Result[(), Error] {
+    let config = HistoryConfig(place: std.object.Bucket(endpoint: "https://s3.amazonaws.com", aws_region: "us-east-1", bucket: "bucket", prefix: "", style: Path), level: "bucket")
+    let payload = history_config_bytes(config)?
+    let test_id = StoreId(hi: 9, lo: 10)
+    let base = HistoryRef(seq: 1, epoch: 1, len: 189, digest: 0x2701)
+    let first = HistoryHead(store: test_id, pair: HistoryPair(epoch: 1, holder: StoreId(hi: 11, lo: 12)), activation: 0, entry: base, checkpoint: base, floor: 1, binding:[0; 32])
+    let mut raw: Bytes = list.with_capacity(HISTORY_HEAD_LIMIT)
+    history_encode_head(mut raw, first, payload)?
+    history_check_vector(raw, "AQABADgAAACxNmTA109JIUhJUlNUT1JFAwAAAAcBAAAJAAAAAAAAAAoAAAAAAAAAAQAAAAAAAAABAAAAAAAAAAAAAAAAAAAAoAABAIgAAABrpm/F53MsogEAAAAAAAAACwAAAAAAAAAMAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAABAAAAAAAAAL0AAAAAAAAAAScAAAAAAAABAAAAAAAAAAEAAAAAAAAAvQAAAAAAAAABJwAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADQAAEAOgAAAGIV85gSXfLaARgAaHR0cHM6Ly9zMy5hbWF6b25hd3MuY29tCQB1cy1lYXN0LTEGAGJ1Y2tldAAAAQYAYnVja2V0Ag==")
+    let second = history_claim_head(first, StoreId(hi: 13, lo: 14))?
+    history_encode_head(mut raw, second, payload)?
+    history_check_vector(raw, "AQABADgAAACuFoOKpNKMrkhJUlNUT1JFAwAAAAcBAAAJAAAAAAAAAAoAAAAAAAAAAgAAAAAAAAABAAAAAAAAAAAAAAAAAAAAoAABAIgAAABeIDePuXa+GQIAAAAAAAAADQAAAAAAAAAOAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAABAAAAAAAAAL0AAAAAAAAAAScAAAAAAAABAAAAAAAAAAEAAAAAAAAAvQAAAAAAAAABJwAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADQAAEAOgAAAGIV85gSXfLaARgAaHR0cHM6Ly9zMy5hbWF6b25hd3MuY29tCQB1cy1lYXN0LTEGAGJ1Y2tldAAAAQYAYnVja2V0Ag==")
+    let mut group = second
+    group.entry = HistoryRef(seq: 3, epoch: 2, len: 130, digest: 0x2702)
+    history_encode_head(mut raw, group, payload)?
+    history_check_vector(raw, "AQABADgAAABobDseeg8a9EhJUlNUT1JFAwAAAAcBAAAJAAAAAAAAAAoAAAAAAAAAAgAAAAAAAAADAAAAAAAAAAAAAAAAAAAAoAABAIgAAAALx/4qAwqAEQIAAAAAAAAADQAAAAAAAAAOAAAAAAAAAAAAAAAAAAAAAwAAAAAAAAACAAAAAAAAAIIAAAAAAAAAAicAAAAAAAABAAAAAAAAAAEAAAAAAAAAvQAAAAAAAAABJwAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADQAAEAOgAAAKIpeJ6fFk/AARgAaHR0cHM6Ly9zMy5hbWF6b25hd3MuY29tCQB1cy1lYXN0LTEGAGJ1Y2tldAAAAQYAYnVja2V0Ag==")
+    let third = history_claim_head(group, StoreId(hi: 15, lo: 16))?
+    history_encode_head(mut raw, third, payload)?
+    history_check_vector(raw, "AQABADgAAAABNVY6cXpaWkhJUlNUT1JFAwAAAAcBAAAJAAAAAAAAAAoAAAAAAAAAAwAAAAAAAAADAAAAAAAAAAAAAAAAAAAAoAABAIgAAAA0iG7/ROpScQMAAAAAAAAADwAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAAwAAAAAAAAACAAAAAAAAAIIAAAAAAAAAAicAAAAAAAABAAAAAAAAAAEAAAAAAAAAvQAAAAAAAAABJwAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADQAAEAOgAAAKIpeJ6fFk/AARgAaHR0cHM6Ly9zMy5hbWF6b25hd3MuY29tCQB1cy1lYXN0LTEGAGJ1Y2tldAAAAQYAYnVja2V0Ag==")
+    let fourth = history_claim_head(third, StoreId(hi: 17, lo: 18))?
+    history_encode_head(mut raw, fourth, payload)?
+    history_check_vector(raw, "AQABADgAAABqnvrgjUDuQkhJUlNUT1JFAwAAAAcBAAAJAAAAAAAAAAoAAAAAAAAABAAAAAAAAAADAAAAAAAAAAAAAAAAAAAAoAABAIgAAACx56qhmzpHHwQAAAAAAAAAEQAAAAAAAAASAAAAAAAAAAAAAAAAAAAAAwAAAAAAAAACAAAAAAAAAIIAAAAAAAAAAicAAAAAAAABAAAAAAAAAAEAAAAAAAAAvQAAAAAAAAABJwAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADQAAEAOgAAAKIpeJ6fFk/AARgAaHR0cHM6Ly9zMy5hbWF6b25hd3MuY29tCQB1cy1lYXN0LTEGAGJ1Y2tldAAAAQYAYnVja2V0Ag==")
+    let recovered = history_decode_head(raw)?
+    if !history_pair_matches(recovered.head.pair, fourth.pair) || history_key("e-", recovered.head.entry) != "e-00000000000000000003-00000000000000000002-0000000000002702" {
+        fail("a claim changed the inherited entry's name")
+    }
+    let retired = option.unwrap(std.base64.decode(string.as_bytes("AQABADgAAACxNmTA109JIUhJUlNUT1JFAwAAAAcBAAAJAAAAAAAAAAoAAAAAAAAAAQAAAAAAAAABAAAAAAAAAAAAAAAAAAAAoAABAIgAAABrpm/F53MsogEAAAAAAAAACwAAAAAAAAAMAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAABAAAAAAAAAL0AAAAAAAAAAScAAAAAAAABAAAAAAAAAAEAAAAAAAAAvQAAAAAAAAABJwAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABQAAEAOgAAAN+E4qwUArMfARgAaHR0cHM6Ly9zMy5hbWF6b25hd3MuY29tCQB1cy1lYXN0LTEGAGJ1Y2tldAAAAQYAYnVja2V0Ag==")))
+    match history_decode_head(retired) {
+        Error(Unsupported(0x0050)) => Ok(()),
+        _ => fail("the retired AUTHORITY kind was accepted"),
+    }
+}
+
+fn history_check_vector(raw: Bytes, expected: String) {
+    if raw != option.unwrap(std.base64.decode(string.as_bytes(expected))) {
+        fail("the HEAD wire bytes differ from the L60 vector")
+    }
 }

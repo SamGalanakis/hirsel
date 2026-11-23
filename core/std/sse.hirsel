@@ -154,14 +154,9 @@ pub opaque type Decoder: send {
     stopped: bool
 }
 
-/// Allocates fixed storage for a line, event data, name and two ID buffers.
+/// Grows its buffers as input arrives, up to `max_bytes` of content per buffer.
 pub fn decoder(max_bytes: u64) -> Decoder {
-    let line_buffer: Bytes = list.with_capacity(max_bytes)
-    let data: Bytes = list.with_capacity(max_bytes)
-    let name: Bytes = list.with_capacity(max_bytes)
-    let pending: Bytes = list.with_capacity(max_bytes)
-    let last: Bytes = list.with_capacity(max_bytes)
-    Decoder(max_bytes, line: take line_buffer, data: take data, name: take name, pending_id: take pending, last_id: take last, id_changed: false, retry: None, first_line: true, skip_lf: false, stopped: false)
+    Decoder(max_bytes, line: list.new(), data: list.new(), name: list.new(), pending_id: list.new(), last_id: list.new(), id_changed: false, retry: None, first_line: true, skip_lf: false, stopped: false)
 }
 
 pub fn last_event_id(d: Decoder) -> View[Bytes] in d {

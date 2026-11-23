@@ -14,7 +14,8 @@ encoded buffer to a stream producer's output without copying.
 
 ## Decoding
 
-`decoder(max_bytes)` creates a bounded EventSource parser.
+`decoder(max_bytes)` creates a bounded EventSource parser whose buffers grow
+as input arrives.
 `feed(mut decoder, fragment, emit)` accepts arbitrary byte fragments,
 including splits inside a UTF-8 scalar, a BOM or a CRLF. It calls `emit`
 with borrowed UTF-8 bytes for the event name, folded data and last event

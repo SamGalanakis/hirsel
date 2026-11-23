@@ -99,6 +99,17 @@ fn test_documented_streams_read() -> Result[(), u64] {
     Ok(())
 }
 
+@test
+fn test_stream_fits_notes_worker() -> Result[(), ()] {
+    let decoded = bound bytes 131072u64 {
+        match read_in(OpenAi, openai_tools(), 61u64) {
+            Ok(a) => openai_ok(a),
+            Error(_) => false,
+        }
+    }
+    match decoded { Ok(true) => Ok(()), _ => Error(()) }
+}
+
 // Law S2: no answer without the success terminator. A stream that stops
 // before `message_stop` or `[DONE]`, or carries an error event, has no
 // answer: the request went out, so the worker must record doubt rather than

@@ -140,7 +140,7 @@ fn journal_fixture_call(mut db: Db, i: u64, large: bool, take revision: Option[B
     db.file_end += size
     db.frame_seq += 1
     let commit_ticket = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq))
-    db.pending = Some(take raw)
+    write_disk(mut db.disk, take raw, scoped fn(mut state: DiskState, take frame_bytes: Bytes) { state.pending = Some(take frame_bytes) })
     handoff(mut db)?
     Ok(commit_ticket)
 }
@@ -639,13 +639,15 @@ fn journal_test_ack_channel(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result
 
 fn journal_failure_notice(db: Db) -> Option[IoError] {
     let mut found: Option[IoError] = None
-    if let Some(receiver) = db.written {
+    if let Some(disk) = db.disk {
+        let receiver = view disk.written
         if let Ok(WriteFailed(e)) = channel.try_receive(receiver) {
             found = Some(e)
         }
     }
     if let Some(e) = found {
-        if let Some(sender) = db.written_send {
+        if let Some(disk) = db.disk {
+        let sender = view disk.written_send
             let _ = channel.try_send(sender, WriteFailed(e))
         }
     }
@@ -683,7 +685,7 @@ pub fn journal_law_rotation(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool w
     let pending_end = db.file_end
     let previous_seq = db.file_seq
     let cut = result.unwrap(checkpoint(mut db))
-    if db.journaled != wanted {
+    if disk_state(db).journaled != wanted {
         return false
     }
     let header = option.unwrap(result.unwrap(journal_header(d, db.store, previous_seq + 1, false)))
@@ -691,10 +693,12 @@ pub fn journal_law_rotation(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool w
         return false
     }
     result.unwrap(durable(mut db, cut))
-    if let Some(sender) = db.journal {
+    if let Some(disk) = db.disk {
+        let sender = view disk.journal
         result.unwrap(channel.send(sender, Barrier))
     }
-    if let Some(receiver) = db.written {
+    if let Some(disk) = db.disk {
+        let receiver = view disk.written
         match result.unwrap(channel.receive(receiver)) {
             Written => {},
             _ => return false

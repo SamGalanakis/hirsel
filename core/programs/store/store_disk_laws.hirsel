@@ -546,7 +546,7 @@ fn cut_lease(lease: Option[Arc[ExportLease]]) -> Option[Arc[ExportLease]] {
 
 fn db_lease(db: Db) -> Option[Arc[ExportLease]] {
     if is_disk(db) {
-        cut_lease(db.disk[0].lease)
+        cut_lease(disk_state(db).lease)
     } else {
         None
     }

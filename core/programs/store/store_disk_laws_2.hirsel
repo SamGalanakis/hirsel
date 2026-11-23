@@ -27,9 +27,9 @@ fn journaled_branch_drop(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[()
         return Error(Foreign)
     }
     let sh = shape(rows)
-    let first = db.disk[0].pages.next_pack
+    let first = disk_state(db).pages.next_pack
     let _ = drop_table(mut db, take rows)?
-    let after = db.disk[0].pages.next_pack
+    let after = disk_state(db).pages.next_pack
     let mut stamps: Map[u64, ()] = map.new()
     for seq in first .. after {
         let raw = disk_read_file(d, capacity(disk_path("p-", seq, ""))?, 8500)?
@@ -377,7 +377,7 @@ pub fn disk_law_db_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
     if version(snapshot(db)) != before || db.checkpointed != 2 {
         return false
     }
-    if let Some(_) = db.poison {
+    if let Some(_) = journal_poison(db) {
         return false
     }
     let unchanged = result.unwrap(disk_load(d, 2097152))
@@ -543,7 +543,7 @@ fn check_publish_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[()
         list.push(mut original, disk_read_paged_file(directory, file.name, 4096)?)
     }
     let planned = 72u64 + 16 + 8 + 6 + 1024
-    let pack = paged_pack_path(db.disk[0u64].pages.next_pack)?
+    let pack = paged_pack_path(disk_state(db).pages.next_pack)?
     let mut timing: Option[CutTiming] = None
     match disk_cut_with_limit(mut db, NoHolderChange, seal_page_manifest_file, None, options.pack_bytes, planned - 1, mut timing) {
         Error(Full(Allocation(problem))) if problem.requested == planned && problem.available == planned - 1 => (),
@@ -660,8 +660,8 @@ fn law_resident_scan(db: Db) -> bool {
     for held in db.pins {
         list.push(mut roots, share_roots(held.roots))
     }
-    let images = resident_images(roots, Some(view db.disk[0u64].pages.lists))
-    accounts(db).resident == int.saturating_add(images, scan_location_storage_charge(db.disk[0u64].pages.locations))
+    let images = resident_images(roots, Some(disk_state(db).pages.lists))
+    accounts(db).resident == int.saturating_add(images, scan_location_storage_charge(disk_state(db).pages.locations))
 }
 
 fn law_empty_collection_pages() -> Result[List[Arc[std.page.Page]], Error] {
@@ -761,10 +761,10 @@ pub fn disk_law_resident_charge(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bo
     let mut t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_string()))
     let _ = result.unwrap(checkpoint(mut db))
     let before = accounts(db).resident
-    let installed = share_page_locations(db.disk[0].pages.locations)
+    let installed = share_page_locations(disk_state(db).pages.locations)
     let _ = result.unwrap(checkpoint(mut db))
-    let frame_ids = db.disk[0].pages.locations.frames.ids
-    let pack_ids = db.disk[0].pages.locations.packs.ids
+    let frame_ids = disk_state(db).pages.locations.frames.ids
+    let pack_ids = disk_state(db).pages.locations.packs.ids
     if before != accounts(db).resident || installed.frames.ids != frame_ids || installed.packs.ids != pack_ids || !law_resident_scan(db) {
         return false
     }

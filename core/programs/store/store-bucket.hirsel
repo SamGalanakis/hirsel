@@ -18,21 +18,17 @@ type BucketWriter {
 }
 
 fn bucket_failed(db: Db) -> Result[(), Error] {
-    for conn in db.disk {
-        if let Some(w) = conn.bucket {
-            if let Some(e) = w.failed {
-                return Error(clone(e))
-            }
+    if let Some(state) = view db.disk {
+        if let Some(w) = state.bucket {
+            if let Some(e) = w.failed { return Error(clone(e)) }
         }
     }
     Ok(())
 }
 
 fn bucket_claim_of(db: Db) -> Option[BucketClaim] {
-    if list.len(db.disk) == 0 {
-        return None
-    }
-    match db.disk[0u64].bucket {
+    let Some(state) = view db.disk else { return None }
+    match state.bucket {
         Some(w) => Some(clone(w.claim)),
         None => None,
     }
@@ -455,8 +451,8 @@ fn bucket_send_pack(mut w: BucketWriter, d: Dir, seq: u64, mode: std.object.Mode
 // Uploads the cut's new packs, then publishes its generation. Only a created
 // MANIFEST lets the cut advance; any failure stops the writer.
 fn bucket_publish(mut db: Db, first_pack: u64, end_pack: u64, generation: u64, manifest: Bytes) -> Result[(), Error] waits {
-    let d = db.disk[0u64].d
-    let Some(take writer) = replace(mut db.disk[0u64].bucket, None) else {
+    let d = disk_state(db).d
+    let Some(take writer) = edit_disk(mut db.disk, scoped fn(mut state: DiskState) -> Option[BucketWriter] { replace(mut state.bucket, None) }) else {
         return Ok(())
     }
     let mut w = take writer
@@ -477,6 +473,6 @@ fn bucket_publish(mut db: Db, first_pack: u64, end_pack: u64, generation: u64, m
     if let Error(e) = outcome {
         w.failed = Some(clone(e))
     }
-    db.disk[0u64].bucket = Some(take w)
+    write_disk(mut db.disk, take w, scoped fn(mut state: DiskState, take open_writer: BucketWriter) { state.bucket = Some(take open_writer) })
     take outcome
 }

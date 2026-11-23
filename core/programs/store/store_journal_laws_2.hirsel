@@ -30,7 +30,7 @@ fn journal_test_fork_preparation(c: Clock, d: Dir, r: Random, tasks: Tasks) -> R
     let mut db = open(tasks, root, c, r, journal_crash_options())?
     let (sender, take receiver): (Sender[JournalMsg], Receiver[JournalMsg]) = channel.new(1)
     let _ = take receiver
-    let original = replace(mut db.journal, Some(sender))
+    let original = edit_disk(mut db.disk, scoped fn(mut state: DiskState) -> Sender[JournalMsg] { replace(mut state.journal, sender) })
     let saved_disk = snapshot(db)
     match fork(mut db, "beta", saved_disk) {
         Error(Poisoned(Closed)) => (),
@@ -98,7 +98,7 @@ fn journal_test_fork_meta_limit(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
     }
     deploy_result(disk_io(host.remove(child, "EXPORT")))?
     let mut db = deploy_result(open(tasks, child, c, r, options))?
-    if db.record_bytes != 16777216 || db.uncovered != 38 {
+    if db.record_bytes != 16777216 || disk_state(db).uncovered != 38 {
         fail("open lost the equality FORK")
     }
     let beta = option.unwrap(branch(db, "beta"))
@@ -190,7 +190,7 @@ fn journal_test_fork_threshold(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
         let mut db = open(tasks, child, c, r, options)?
         create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
         let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
-        if !typed_put(mut db, rows, 1, 11) || db.uncovered != 73 {
+        if !typed_put(mut db, rows, 1, 11) || disk_state(db).uncovered != 73 {
             return Error(Foreign)
         }
         let previous = db.file_seq
@@ -209,7 +209,7 @@ fn journal_test_fork_threshold(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
         } else {
             previous + 1
         }
-        if !covered(db, receipt.mark) || journal_mark(receipt) != 2 || db.file_seq != expected_segment || db.since_cut != 0 {
+        if !covered(db, receipt.mark) || journal_mark(receipt) != 2 || db.file_seq != expected_segment || disk_state(db).since_cut != 0 {
             return Error(Foreign)
         }
         let expected_journal = if refuse {
@@ -217,7 +217,7 @@ fn journal_test_fork_threshold(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
         } else {
             0u64
         }
-        if db.uncovered != expected_journal || db.checkpointed != (if refuse {
+        if disk_state(db).uncovered != expected_journal || db.checkpointed != (if refuse {
             generation
         } else {
             generation + 1
@@ -255,16 +255,16 @@ fn journal_test_fork_pack_lists(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
         list.push(mut values, std.page.Row(key: key_word(key), value: take raw, charge: 1108))
     }
     bulk_store_collection(mut db.heads[0].roots.collections, rows.id, 1, values, mut db.next_node)?
-    let first = db.disk[0].pages.next_pack
+    let first = disk_state(db).pages.next_pack
     let _ = checkpoint(mut db)?
-    let after = db.disk[0].pages.next_pack
+    let after = disk_state(db).pages.next_pack
     let manifest = disk_read_file(child, "MANIFEST", 387)?
-    if read_le(manifest, 76, 4) != 299 || std.page.level(std.page.image_of(db.disk[0].pages.lists.packs)) < 2 {
+    if read_le(manifest, 76, 4) != 299 || std.page.level(std.page.image_of(disk_state(db).pages.lists.packs)) < 2 {
         return Error(Foreign)
     }
     let held = snapshot(db)
     let (beta, receipt) = fork(mut db, "beta", held)?
-    if beta.id != 1 || !covered(db, receipt.mark) || db.disk[0].pages.next_pack != after {
+    if beta.id != 1 || !covered(db, receipt.mark) || disk_state(db).pages.next_pack != after {
         return Error(Foreign)
     }
     let id = db.store
@@ -456,10 +456,12 @@ fn journal_poison_write(mut db: Db, t: Table[u64, u64], out: Stdout, scenario: S
 // A Barrier-only group: the journal wakes, finds no frame, answers Written.
 fn journal_frameless_wakes(db: Db, wakes: u64) -> Result[(), Error] waits {
     for _ in 0u64 .. wakes {
-        if let Some(sender) = db.journal {
+        if let Some(disk) = db.disk {
+        let sender = view disk.journal
             result.unwrap(channel.send(sender, Barrier))
         }
-        if let Some(receiver) = db.written {
+        if let Some(disk) = db.disk {
+        let receiver = view disk.written
             match result.unwrap(channel.receive(receiver)) {
                 Written => {},
                 WriteFailed(e) => return Error(Poisoned(e))

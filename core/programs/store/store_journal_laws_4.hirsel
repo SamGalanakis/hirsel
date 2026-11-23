@@ -21,7 +21,7 @@ fn journal_cap_restart(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), 
     let Committed(_) = start else {
         return Error(Foreign)
     }
-    if db.uncovered != 4096 || db.since_cut != 4096 || db.file_seq != initial_segment {
+    if disk_state(db).uncovered != 4096 || disk_state(db).since_cut != 4096 || db.file_seq != initial_segment {
         return Error(Foreign)
     }
     let keep_reply: Option[fn(Error) -> bool] = None
@@ -35,7 +35,7 @@ fn journal_cap_restart(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), 
     result.unwrap(bound bytes 1048576 {
         maybe_checkpoint(mut db)
     })?
-    if db.checkpointed != initial_generation || db.file_seq != initial_segment || db.uncovered != 16781392 || db.since_cut != 0 || db.inflight != 0 {
+    if db.checkpointed != initial_generation || db.file_seq != initial_segment || disk_state(db).uncovered != 16781392 || disk_state(db).since_cut != 0 || disk_state(db).inflight != 0 {
         return Error(Foreign)
     }
     let previous_head = version(snapshot(db))
@@ -72,7 +72,7 @@ fn journal_cap_restart(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), 
     if db.next_branch != id_before || db.frame_seq != frame_before || db.record_bytes != bytes_before {
         return Error(Foreign)
     }
-    if db.uncovered != 16781392 || version(snapshot(db)) != previous_head {
+    if disk_state(db).uncovered != 16781392 || version(snapshot(db)) != previous_head {
         return Error(Foreign)
     }
     close(take db)?
@@ -165,7 +165,7 @@ fn journal_test_cap_calls(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(
     }))
     let before = version(snapshot(db))
     let frames = db.frame_seq
-    if accounts(db).journal != 16781392 || db.since_cut != 0 {
+    if accounts(db).journal != 16781392 || disk_state(db).since_cut != 0 {
         return Error(())
     }
     // Two section heads (47 including the frame header), one data put

@@ -16,5 +16,5 @@ pub fn fixture_broken_handoff(mut db: Db) {
     let (to, abandoned): (Sender[JournalMsg], Receiver[JournalMsg]) = channel.new(1)
     let mut disconnected = Some(take abandoned)
     disconnected = None
-    db.journal = Some(take to)
+    write_disk(mut db.disk, take to, scoped fn(mut state: DiskState, take disconnected_to: Sender[JournalMsg]) { state.journal = take disconnected_to })
 }

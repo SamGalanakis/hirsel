@@ -373,7 +373,7 @@ pub fn journal_law_db(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
         },
         _ => return false
     }
-    if db.journaled != 1 || db.inflight != 0 {
+    if disk_state(db).journaled != 1 || disk_state(db).inflight != 0 {
         return false
     }
     if !typed_put(mut db, t, 8, 80) {
@@ -602,7 +602,7 @@ pub fn journal_law_recorded_fork(d: Dir, c: Clock, r: Random, tasks: Tasks) -> b
     }
     let last = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq))
     result.unwrap(durable(mut db, last))
-    if db.journaled != 100 || db.heads[0].head != 101 {
+    if disk_state(db).journaled != 100 || db.heads[0].head != 101 {
         return false
     }
     let (f, _) = result.unwrap(fork(mut db, "f", early))

@@ -230,7 +230,11 @@ type W3cRig {
 // The real wire owner, head and publisher delivery path, stepped without sockets.
 // One pre-admitted unreplied gone call gives the same version oracle as the socket fixture.
 fn w3c_rig(tasks: Tasks, clock: Clock, random: Random) -> W3cRig waits {
-    let mut db = store.memory(clock, random, store.defaults())
+    w3c_rig_on(store.memory(clock, random, store.defaults()), tasks, clock, random)
+}
+
+fn w3c_rig_on(take backing: store.Db, tasks: Tasks, clock: Clock, random: Random) -> W3cRig waits {
+    let mut db = take backing
     let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), std.codec.of_u32())))
     let data = result.unwrap(store.table(mut db, "data", std.codec.key_u64(), std.codec.of_u32()))
     let caller = option.unwrap(anonymous_caller(random))
@@ -507,8 +511,11 @@ fn test_wire_replacement_generation(tasks: Tasks, clock: Clock, random: Random) 
 
 // L33. The store has published new roots, then the frame handoff fails.
 // The head leaves without any Release for the outstanding caller.
-pub fn law_after_publication(tasks: Tasks, clock: Clock, random: Random) -> bool waits {
-    let mut rig = w3c_rig(tasks, clock, random)
+pub fn law_after_publication(d: Dir, tasks: Tasks, clock: Clock, random: Random) -> bool waits {
+    let mut label = string.with_capacity(32)
+    let dir = result.unwrap(host.mkdtemp(d, mut label))
+    let disk = result.unwrap(store.open(tasks, dir, clock, random, store.defaults()))
+    let mut rig = w3c_rig_on(take disk, tasks, clock, random)
     let caller = store.Caller(issuer: 1u8, subject: list.new())
     let stream = result.unwrap(stream_key(caller, 51u32))
     let codec: std.codec.Codec[Result[u64, u32]] = std.codec.of()
@@ -534,8 +541,8 @@ pub fn law_after_publication(tasks: Tasks, clock: Clock, random: Random) -> bool
 }
 
 @test
-fn test_after_publication(tasks: Tasks, clock: Clock, random: Random) -> Result[(), ()] waits {
-    if law_after_publication(tasks, clock, random) { Ok(()) } else { Error(()) }
+fn test_after_publication(d: Dir, tasks: Tasks, clock: Clock, random: Random) -> Result[(), ()] waits {
+    if law_after_publication(d, tasks, clock, random) { Ok(()) } else { Error(()) }
 }
 
 // L28 (v2.19, outcome_dropped): a unit the writer drops loses its content and keeps its

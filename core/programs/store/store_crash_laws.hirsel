@@ -290,7 +290,7 @@ fn crash_install_refusals(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(
         _ => fail("cutover ignored NEW's journal floor"),
     }
     let after = deploy_result(disk_read_paged_file(d, "MANIFEST", MANIFEST_LIMIT))?
-    if version(snapshot(db)) != base || before != after || db.disk[0u64].options.journal_limit != 268435456 {
+    if version(snapshot(db)) != base || before != after || disk_state(db).options.journal_limit != 268435456 {
         fail("a refused install changed OLD")
     }
     let (scratch_writes, _) = crash_install_prepared(mut db, d, c, tasks, attempt)?

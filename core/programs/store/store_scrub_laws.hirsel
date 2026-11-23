@@ -58,7 +58,7 @@ fn disk_test_scrub_misdirected(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
     // byte of every listed pack, by the files' own sizes.
     let mut listed: List[u64] = list.new()
     let mut data: List[u64] = list.new()
-    let mut cursor = std.omap.range(db.disk[0u64].pages.locations.packs.values, Unbounded, Unbounded)
+    let mut cursor = std.omap.range(disk_state(db).pages.locations.packs.values, Unbounded, Unbounded)
     while let Some((seq, pack)) = std.omap.next(mut cursor) {
         list.push(mut listed, seq)
         if pack.class == 0 {
@@ -147,8 +147,8 @@ fn disk_test_scrub_lease(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[()
         }
     }
     // The cut carries each retirement the lease holds back.
-    for seq in db.disk[0u64].pages.carried {
-        if scrub_leased(db.disk[0u64].scrubs, seq) {
+    for seq in disk_state(db).pages.carried {
+        if scrub_leased(disk_state(db).scrubs, seq) {
             retired += 1
         }
     }
@@ -163,7 +163,7 @@ fn disk_test_scrub_lease(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[()
     let mut gone = 0u64
     for seq in leased {
         let present = disk_exists(path, paged_pack_path(seq)?)?
-        let listed = match disk_index_get(db.disk[0u64].pages.locations.packs, seq) {
+        let listed = match disk_index_get(disk_state(db).pages.locations.packs, seq) {
             Some(_) => true,
             None => false
         }

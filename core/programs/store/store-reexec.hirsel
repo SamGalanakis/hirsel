@@ -25,9 +25,7 @@ fn recorded_call(id: StoreId, b: Branch, commit: JournalCommit) -> Option[Record
 fn recorded_commit(db: Db, b: Branch, wanted: u64) -> Result[Option[JournalCommit], Error] waits {
     healthy(db)?
     let i = branch_index(db, b)?
-    if list.len(db.disk) == 0 {
-        return Ok(None)
-    }
+    let Some(state) = view db.disk else { return Ok(None) }
     // A version the last cut covers has its frame below record_cut, so the
     // scan from there does not find it.
     if wanted > db.heads[i].head {
@@ -37,23 +35,17 @@ fn recorded_commit(db: Db, b: Branch, wanted: u64) -> Result[Option[JournalCommi
     // so it is written (X1 step 0's condition); never compare a version with
     // `journaled`, which counts frames.
     if !covered(db, Journal(db.frame_seq)) {
-        if let Some(sender) = db.journal {
-            let _ = channel.send(sender, Barrier)
-        }
-        if let Some(receiver) = db.written {
-            match result.unwrap(channel.receive(receiver)) {
-                Written => {},
-                WriteFailed(e) => {
-                    if let Some(sender) = db.written_send {
-                        let _ = channel.try_send(sender, WriteFailed(e))
-                    }
-                    return Error(Poisoned(e))
-                }
+        let _ = channel.send(state.journal, Barrier)
+        match result.unwrap(channel.receive(state.written)) {
+            Written => (),
+            WriteFailed(e) => {
+                let _ = channel.try_send(state.written_send, WriteFailed(e))
+                return Error(Poisoned(e))
             }
         }
     }
-    let d = db.disk[0].d
-    let mut seq = db.disk[0].record_cut
+    let d = disk_state(db).d
+    let mut seq = disk_state(db).record_cut
     loop {
         let path = capacity(disk_path("j-", seq, ""))?
         let file = match host.open(d, path, Read) {
@@ -107,7 +99,7 @@ type BaseReplay {
 // open path, so the pages are the ones every load path builds (MEM-30). None
 // when the MANIFEST is already past `base`.
 fn base_roots(db: Db, b: Branch, base: u64) -> Result[Option[Roots], Error] waits {
-    let d = db.disk[0].d
+    let d = disk_state(db).d
     let (_, id, take manifest) = read_only_manifest(d)?
     if let Some(_) = manifest.claim {
         return Error(Unsupported(1))

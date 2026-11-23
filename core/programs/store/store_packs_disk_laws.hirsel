@@ -218,7 +218,7 @@ fn disk_test_relocation_late_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) 
     let codec = std.codec.of_bytes()
     let _ = create_table(mut db, spec("values", std.codec.key_u64(), codec))?
     let t = table(mut db, "values", std.codec.key_u64(), codec)?
-    let old_blob_pack = db.disk[0u64].pages.next_pack
+    let old_blob_pack = disk_state(db).pages.next_pack
     let initial = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
         for k in 1u64 .. 4 {
             let mut value: Bytes = list.with_capacity(1024)

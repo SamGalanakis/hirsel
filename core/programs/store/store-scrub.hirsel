@@ -58,7 +58,7 @@ pub fn begin_scrub(mut db: Db) -> Result[Scrub, Error] {
     let (take packs, take seqs) = disk_allocation(scoped fn() -> Result[(List[ScrubPack], List[u64]), Error] {
         let mut packs: List[ScrubPack] = list.new()
         let mut seqs: List[u64] = list.new()
-        let mut cursor = std.omap.range(db.disk[0u64].pages.locations.packs.values, Unbounded, Unbounded)
+        let mut cursor = std.omap.range(disk_state(db).pages.locations.packs.values, Unbounded, Unbounded)
         while let Some((seq, pack)) = std.omap.next(mut cursor) {
             list.push(mut packs, ScrubPack(seq: seq, class: pack.class, frames: int.widen(pack.frames), payload_bytes: pack.payload_bytes))
             list.push(mut seqs, seq)
@@ -66,9 +66,12 @@ pub fn begin_scrub(mut db: Db) -> Result[Scrub, Error] {
         Ok((take packs, take seqs))
     })?
     let lease = arc.new(ScrubLease(packs: take seqs))
-    capacity(list.try_reserve(mut db.disk[0u64].scrubs, 1))?
-    list.push(mut db.disk[0u64].scrubs, arc.share(lease))
-    Ok(Scrub(d: db.disk[0u64].d, store: db.store, generation: db.checkpointed, next_stamp: next_stamp, packs: take packs, position: 0, at: 0, open: None, checked: 0, known: share_page_locations(db.disk[0u64].pages.locations), lease: take lease))
+    edit_disk(mut db.disk, scoped fn(mut state: DiskState) -> Result[(), Error] {
+        capacity(list.try_reserve(mut state.scrubs, 1))?
+        list.push(mut state.scrubs, arc.share(lease))
+        Ok(())
+    })?
+    Ok(Scrub(d: disk_state(db).d, store: db.store, generation: db.checkpointed, next_stamp: next_stamp, packs: take packs, position: 0, at: 0, open: None, checked: 0, known: share_page_locations(disk_state(db).pages.locations), lease: take lease))
 }
 
 // Reads at least one frame, then stops once budget bytes are read this step.

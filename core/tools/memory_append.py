@@ -25,7 +25,7 @@ for engine in ['llvm','cranelift']:
   entry=names[op];symbols=set()
   for obj in entry['objects']:symbols.update(l.split()[-1] for l in subprocess.check_output(['nm','-u',obj],text=True).splitlines() if 'hirsel_core_site_' in l)
   src=d/(op+'.c');src.write_text(caller.replace('BODY',entry['symbol']).replace('EXPECTED',str(want))+'\n'+''.join('const uint64_t '+v+'=0;\n' for v in symbols));binary=d/op
-  if not binary.exists():run([root/'tools/capped',cc,'-O3','-no-pie','-Wl,--wrap=hirsel_core_grow_cold','-I',root/'crates/hirsel-core-rt/include',src,*entry['objects'],rt,'-lgcc_s','-lpthread','-ldl','-lm','-lrt','-lutil','-o',binary],d/(op+'-link.log'))
+  if not binary.exists():run([root/'tools/capped',cc,'-O3','-no-pie','-Wl,--wrap=hirsel_core_grow_cold,--wrap=hirsel_core_grow_small_bytes','-I',root/'crates/hirsel-core-rt/include',src,*entry['objects'],rt,'-lgcc_s','-lpthread','-ldl','-lm','-lrt','-lutil','-o',binary],d/(op+'-link.log'))
   if prepare:continue
   while os.getloadavg()[0]>32:time.sleep(15)
   with open('/tmp/hirsel-langarena-measure.lock','a') as la,open('/tmp/core-llvm-905-measure.lock','a') as co:

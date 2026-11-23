@@ -1385,12 +1385,50 @@ pub unsafe extern "C" fn hirsel_core_grow_cold(
     kind: u8,
 ) -> Growth {
     // SAFETY: the emitter provides a live context and the exclusive carrier.
-    match unsafe {
+    growth_result(unsafe {
         crate::growth::grow_cold(
             &*context, carrier, bytes, align, stride, charge, capacity, moved, refund, overflow,
             kind,
         )
-    } {
+    })
+}
+
+/// The small, plain byte case of `hirsel_core_grow_cold`.
+/// # Safety
+/// As for `hirsel_core_grow_cold`. The new native size equals `capacity` and
+/// fits the short slab threshold, alignment is eight, the backing is below
+/// the dedicated growth threshold, and charge arithmetic has not overflowed.
+#[inline(never)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_grow_small_bytes(
+    context: *const Context,
+    carrier: *mut u8,
+    capacity: u64,
+    charge: u64,
+    moved: usize,
+    refund: u64,
+) -> Growth {
+    // SAFETY: the emitter provides a live context and the exclusive carrier.
+    growth_result(unsafe {
+        crate::growth::replace(
+            &*context,
+            carrier,
+            capacity as usize,
+            8,
+            charge,
+            capacity,
+            moved,
+            refund,
+            false,
+            crate::block::PLAIN,
+            false,
+        )
+    })
+}
+
+#[inline]
+fn growth_result(result: Result<NonNull<u8>, Capacity>) -> Growth {
+    match result {
         Ok(pointer) => Growth {
             pointer: pointer.as_ptr(),
             available: 0,

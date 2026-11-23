@@ -50,6 +50,7 @@ impl FunctionEmitter<'_> {
                 &cap,
                 &int(GROW_CALL_MIN_PAYLOAD_BYTES.div_ceil(stride)),
             );
+            let mut short_bytes = None;
             let small = if stride == 1 && kind == NATIVE_PLAIN {
                 let beyond_slab = self.cmp(
                     Predicate::Ugt,
@@ -57,6 +58,12 @@ impl FunctionEmitter<'_> {
                     size,
                     &int(GROW_SLAB_MAX_PAYLOAD_BYTES),
                 );
+                if align == 8 {
+                    let slab = self.bin(Binary::Xor, &Type::I1, &beyond_slab, &true.into());
+                    let fits = self.bin(Binary::And, &Type::I1, &slab, &small);
+                    let exact = self.cmp(Predicate::Eq, &i64, size, capacity);
+                    short_bytes = Some(self.bin(Binary::And, &Type::I1, &fits, &exact));
+                }
                 self.bin(Binary::And, &Type::I1, &small, &beyond_slab)
             } else {
                 small
@@ -125,8 +132,34 @@ impl FunctionEmitter<'_> {
             let shadow = self.temp(Type::words(3));
             self.runtime_void("llvm.lifetime.start.p0", &[ptr(shadow.clone())]);
             self.store_native(&shadow, 0, Type::Ptr, old);
-            self.store_native(&shadow, 16, Type::I64, &cap);
             let grown = Type::structure([Type::Ptr, Type::I64]);
+            let specialized = short_bytes.map(|short| {
+                let generic = Label::new("grow_generic", n);
+                let short_bytes = Label::new("grow_short_bytes", n);
+                let joined = Label::new("grow_native_result", n);
+                let no_overflow = self.bin(Binary::Xor, &Type::I1, &over, &true.into());
+                let eligible = self.bin(Binary::And, &Type::I1, &short, &no_overflow);
+                self.likely(&eligible, short_bytes, generic);
+                self.block(short_bytes);
+                let pair = self.call_declared(
+                    "hirsel_core_grow_small_bytes",
+                    grown.clone(),
+                    &[
+                        ptr(CONTEXT),
+                        ptr(shadow.clone()),
+                        word(capacity.clone()),
+                        word(charge.clone()),
+                        word(moved.clone()),
+                        word(refund.clone()),
+                    ],
+                    FnAttrs::default(),
+                    &CallAttrs::default(),
+                );
+                self.br(joined);
+                self.block(generic);
+                (generic, short_bytes, joined, pair)
+            });
+            self.store_native(&shadow, 16, Type::I64, &cap);
             let pair = self.call_declared(
                 "hirsel_core_grow_cold",
                 grown.clone(),
@@ -149,6 +182,16 @@ impl FunctionEmitter<'_> {
                     ..CallAttrs::default()
                 },
             );
+            let pair = if let Some((generic, short_bytes, joined, fast)) = specialized {
+                self.br(joined);
+                self.block(joined);
+                self.emit(Operation::Phi(
+                    &grown,
+                    &[(pair, generic), (fast, short_bytes)],
+                ))
+            } else {
+                pair
+            };
             let block = self.extract(&grown, &pair, 0);
             let room = self.extract(&grown, &pair, 1);
             let present = self.cmp(Predicate::Ne, &Type::Ptr, &block, &Value::Null);

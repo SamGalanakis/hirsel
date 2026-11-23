@@ -71,6 +71,11 @@ typedef struct { void *pointer; uint64_t available; } HirselCoreGrowth;
 HirselCoreGrowth hirsel_core_grow_cold(const HirselCoreContext *, void *carrier,
     size_t bytes, size_t align, uint64_t stride, uint64_t charge, uint64_t capacity,
     size_t moved, uint64_t refund, bool overflow, uint8_t kind);
+/* Consuming growth with alignment 8, plain byte storage, no overflow and
+ * native size equal to the short capacity. The old backing is below the
+ * dedicated growth threshold. The carrier contract is the same as above. */
+HirselCoreGrowth hirsel_core_grow_small_bytes(const HirselCoreContext *,
+    void *carrier, uint64_t capacity, uint64_t charge, size_t moved, uint64_t refund);
 /* rt.dest_id: no hidden context or failure status; never admits or allocates. */
 uint64_t hirsel_core_dest_id(void);
 /* Map hashing (FORM "Maps"). The caller provides five u64 words of scratch. */

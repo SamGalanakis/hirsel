@@ -1,4 +1,4 @@
-//! The grouped Map index and placement functions (PROG-11).
+//! The grouped Map index and placement functions (docs/internal/map-index.md).
 
 use crate::map_hash::PreparedKey;
 use crate::{Body, Carried, FieldTy, Repr, Scalar, Shape, Ty};

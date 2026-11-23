@@ -1,4 +1,4 @@
-; PROG-11 placement operations under run key 00 01 ... 0f.
+; Map placement operations (docs/internal/map-index.md) under run key 00 01 ... 0f.
 core v1
 type t0 = scoped "PlacementState" { words: array 5 u64 }
 static d0 = align 1 hex 6162636465666768696a6b6c6d6e6f7071

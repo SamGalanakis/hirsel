@@ -63,7 +63,7 @@ fn churn_capacity_and_order() {
     );
 }
 
-/// The independent PROG-11 fixture exercises the cap, the one promotion, and
+/// The independent fixture for docs/internal/map-index.md exercises the cap, one promotion, and
 /// the strong-mode probe lengths on the actual emitted Map operations.
 #[test]
 fn grouped_map_probe_cap_and_promotion() {

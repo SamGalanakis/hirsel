@@ -2,7 +2,7 @@
 ; f0 plain carrier, f1 counted carrier, f2 Map value, f3 Map value in a counted node.
 ; Each case returns no values and retains zero charge. MEM-24 charges 48 bytes
 ; (8 + 24 + 16) for Map storage and 32 more for a counted holder.
-; PROG-11 places f4's static carrier (pointer, length, capacity 0) at 0,
+; The index in docs/internal/map-index.md places f4's static carrier (pointer, length, capacity 0) at 0,
 ; its live meta at 24, and the key at 32. The block is 40 + 32 + 80 = 152
 ; physical bytes. Cleanup only needs the entry.
 core v1

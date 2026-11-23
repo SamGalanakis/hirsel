@@ -1946,12 +1946,12 @@ fn hash_read_facts_observe_intervening_writes() {
 }
 
 #[test]
-fn map_placement_operations_match_prog_11() {
+fn map_placement_operations_match_fixed_key_vectors() {
     mod vectors {
-        include!("../../../hirsel-core-ir/samples/map-placement-vectors.rs");
+        include!("../../../hirsel-cranelift/tests/support/map-placement-vectors.rs");
     }
     let module = text::parse(include_str!(
-        "../../../hirsel-core-ir/samples/map-placement.core"
+        "../../../hirsel-cranelift/tests/support/map-placement.core"
     ))
     .unwrap();
     wf::module(&module).unwrap();

@@ -6,14 +6,11 @@ include!("support/native.rs");
 mod providers;
 
 #[test]
-fn map_placement_operations_match_prog_11() {
+fn map_placement_operations_match_fixed_key_vectors() {
     mod vectors {
-        include!("../../hirsel-core-ir/samples/map-placement-vectors.rs");
+        include!("support/map-placement-vectors.rs");
     }
-    let module = text::parse(include_str!(
-        "../../hirsel-core-ir/samples/map-placement.core"
-    ))
-    .unwrap();
+    let module = text::parse(include_str!("support/map-placement.core")).unwrap();
     let arguments: Vec<_> = vectors::CASES.iter().map(|&(_, arg, _)| [arg]).collect();
     let reports: Vec<_> = vectors::CASES
         .iter()

@@ -1,7 +1,7 @@
 ; Two live slots separated by an already removed entry. Cleanup visits key
 ; before value in insertion order. For x=1 the last key and value both fail;
 ; the two prepaid cells retain 64 charge until delivery drops the chain.
-; PROG-11 lays out each slot as three words: meta, key, value. Cleanup only
+; The index in docs/internal/map-index.md uses three words per slot: meta, key, value. Cleanup only
 ; needs the slots. The block is 3 × 24 + 32 + 80 = 184 physical bytes, while
 ; MEM-24 charges 3 × (8 + 8 + 16) = 96 bytes.
 core v1

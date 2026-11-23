@@ -55,7 +55,7 @@ fn u(s: Scalar) -> FieldTy {
     FieldTy::Scalar(s)
 }
 
-/// PROG-11 assigns bit j to byte j, including tags next to a matching lane.
+/// See docs/internal/map-index.md for the lane mask rule, including adjacent tags.
 /// Using an inexact zero-byte mask can include a neighboring nonmatch.
 #[test]
 fn map_group_masks_match_byte_loop() {

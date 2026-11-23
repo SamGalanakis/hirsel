@@ -37,7 +37,7 @@
     "reason": "release-publish-1912"
   },
   "core/programs/store/runner_calls.hirsel": {
-    "lines": 2805
+    "lines": 2507
   },
   "core/programs/store/store-manifest.hirsel": {
     "lines": 2982
@@ -256,7 +256,7 @@
     "lines": 8524
   },
   "crates/hirsel-core-ir/src/extent.rs": {
-    "lines": 1342
+    "lines": 1233
   },
   "crates/hirsel-core-ir/src/ir.rs": {
     "lines": 2873
@@ -268,7 +268,7 @@
     "lines": 2181
   },
   "crates/hirsel-core-ir/src/returnable.rs": {
-    "lines": 2817
+    "lines": 2736
   },
   "crates/hirsel-core-ir/src/tests.rs": {
     "lines": 1576

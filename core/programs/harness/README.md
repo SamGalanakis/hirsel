@@ -273,8 +273,9 @@ each response chunk to `provider.feed` and asks `provider.answer` at the end.
 
 ## The gateway
 
-`harness.gateway` keeps a catalog of sessions and runs each session's place as a
-group of an in-process platform host (`store.local`, RUNNER-SPEC §14.9). A place
+`harness.gateway` runs each session as a keyed session of an in-process platform
+host (`store.local`, RUNNER-SPEC §14.9), which keeps the catalog in its own store
+and commits a session's rows with its group, so the two never disagree. A place
 unloads only by its own idle stop (§14.4), which never cuts active work: an idle
 session holds no memory. An app gives it the factory that builds a session's
 place (`store.local.seeded_factory`, whose `make` sees the gateway's seed, the
@@ -282,7 +283,7 @@ services every session's grants are made from), its migration, its store
 options and the idle time.
 
 - `create(door, key, Fresh(model, narrow) | Adopt(prefix))` seeds a new
-  session's store, adds its group, then commits its catalog row; a repeated key
+  session's store, then adds its group and its catalog row; a repeated key
   returns the same id, and an id is never reused. `Adopt` takes a fork's
   exported prefix.
 - `route(door, id)` wakes the session, starting its place if it is unloaded,
@@ -290,7 +291,8 @@ options and the idle time.
   the place; a client's session does. Wire calls go to the place itself. A
   binding is needed for a caller that reconnects, and its request positions
   continue across connections.
-- `delete` unlists the session, then drains its place and deletes its store.
+- `delete` unlists the session and removes its group, and answers once its
+  place has drained and its store is deleted.
   `listing` and `stop` do what they say.
 - **Wake.** The host keeps the wake row (§14.1). Only a clean stop writes
   Clean; a trigger due later wakes the session then. Any other end leaves
@@ -300,8 +302,8 @@ options and the idle time.
   of its round can still move by itself, and "waiting" when every open call
   waits on an approval or a resume, so a client holding the session can let
   go and the place can stop.
-- `unload(door, id)` closes a session's place now, as an operator would. A
-  closer task waits for the stop, so the gateway keeps serving meanwhile. A
+- `unload(door, id)` closes a session's place now, as an operator would. The
+  host answers when the stop ends and keeps serving meanwhile. A
   cut run (`Forced`, `Unstarted`) is woken again at once. A place that cannot
   start stays Dirty until the next route or gateway start; there is no backoff.
 - **Subagent.** `ask(door, key, seeding, child, text)` is an Outside tool body.

@@ -504,8 +504,8 @@ fn heartbeat(mut w: WriteHalf, f: Front, mut at: u64) -> bool waits {
 }
 
 // Returns true when the browser can wait for this place to start again.
-fn place_stream(d: harness.gateway.Door, f: Front, id: u64, mut w: WriteHalf, quit: Receiver[()], mut place: Following, mut sent: Map[u64, Bytes], mut watch: PreviewWatch, mut beat_at: u64, mut marks: harness.gateway.Marks) -> bool waits {
-    let group = harness.gateway.name_of(id)
+fn place_stream(d: harness.gateway.Door, f: Front, id: u64, mut w: WriteHalf, quit: Receiver[()], mut place: Following, mut sent: Map[u64, Bytes], mut watch: PreviewWatch, mut beat_at: u64, mut marks: store.local.Marks) -> bool waits {
+    let group = store.local.name_of(id)
     let mut active = false
     let mut draft_changed = false
     while !halted(quit) {

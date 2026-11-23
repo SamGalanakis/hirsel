@@ -47,6 +47,7 @@ dirs = ["."]
 
 [tests.sources]
 "runner-idle-law.hirsel" = "runner_calls"
+"local-laws.hirsel" = "runner_calls"
 "location_laws.hirsel" = "store"
 "assembly_laws.hirsel" = "store"
 "import_read_laws.hirsel" = "store"

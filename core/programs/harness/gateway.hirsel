@@ -1,20 +1,12 @@
-// Module gateway (package harness): the Directory/Gateway. It keeps a catalog of
-// sessions, each a key and an id, and runs each session's place as a group of an
-// in-process platform host (RUNNER-SPEC §14.9). The host owns the wake: a route wakes a
-// session on demand, a place unloads only by its own idle stop (§14.4), which never cuts
-// active work, and an unloaded session holds no memory. Only a clean stop writes Clean;
-// a trigger due later wakes the session then, and every other end leaves it Dirty and
-// starts it again (§14.4, §14.5).
-//
-// Two durable stores hold a session: the catalog and the host's group. A create seeds the
-// session's store, adds the group and then commits the catalog row; a delete removes the
-// row and then the group. A restarted gateway removes every group with no row and adds a
-// group for every row without one.
+// Module gateway (package harness): the Directory/Gateway. Each session is a keyed
+// session of an in-process platform host (`store.local`, RUNNER-SPEC §14.9), which keeps
+// the catalog, routes and wakes. The host owns the wake: a route wakes a session on
+// demand, a place unloads only by its own idle stop (§14.4), which never cuts active work,
+// and an unloaded session holds no memory. Only a clean stop writes Clean; a trigger due
+// later wakes the session then, and every other end leaves it Dirty and starts it again
+// (§14.4, §14.5). This module seeds a session's store with a harness session and checks a
+// cold session's ACL before a wake.
 
-// What the gateway's own task spends beyond its host (`store.local.host_bytes`): the catalog
-// store and a session store opened to seed it.
-const GATEWAY_BYTES: u64 = 67108864u64
-const NEXT_ID: u64 = 0u64
 // The wire sessions a session's place admits at once. A front's following stream holds
 // one for as long as the session is busy, so a history page, a status read, a message or
 // a decision meanwhile needs its own, and a subagent's look at a child needs one more; a
@@ -23,11 +15,7 @@ const PLACE_SESSIONS: u64 = 4u64
 
 // How a new session's store starts: an empty session, or a fork's exported prefix.
 pub type Seeding: send = Fresh(String, harness.Narrow) | Adopt(harness.Prefix)
-pub type Refused: send = Unknown | Full | Asleep | Denied | Storage | Seed(harness.Refused) | Place(store.local.Refused) | Stopping
-
-// What the gateway has seen of a session since it started: its place's starts and ends,
-// and the nudges a front sent after it changed the session.
-pub type Marks: codec + send { ups: u64, downs: u64, nudges: u64 }
+pub type Refused: send = Unknown | Full | Asleep | Denied | Place(store.local.Refused) | Stopping
 
 // `place_bytes` is the budget every live session's place shares, and `idle_ms` the idle
 // time each place stops after (the host's Config, §14.2, §14.4).
@@ -37,522 +25,123 @@ pub type GatewayConfig[T: send]: send {
     tasks: Tasks, clock: Clock, random: Random, net: Net, watch: Option[Sender[store.local.Change]], seed: T,
 }
 
-type GwIn: send =
-    Create(Bytes, Seeding, Option[store.Caller], Sender[Result[u64, Refused]])
-    | Delete(u64, Sender[Result[(), Refused]])
-    | Listing(Sender[List[u64]])
-    | Reach(u64, Sender[Result[store.local.Door, Refused]])
-    | Changed(store.local.Change)
-    | Downs(u64, Sender[u64])
-    | AwaitDown(u64, u64, Sender[Result[u64, Refused]])
-    | Nudge(u64)
-    | Marked(u64, Sender[Marks])
-    | WatchMarks(u64, Sender[()], Sender[u64])
-    | UnwatchMarks(u64, u64)
-    | Halt(Sender[List[store.local.Unloaded]])
+pub opaque type Gateway { host: store.local.Local }
+pub opaque type Door: send { host: store.local.Door }
+// A gateway's inbox, made before the gateway so that its seed can hold a door to it
+// (a session's subagent tool starts its child through that door).
+pub opaque type Doorway: send { way: store.local.Doorway }
 
-pub opaque type Gateway { to: Sender[GwIn], actor: Task[()] }
-pub opaque type Door: send { to: Sender[GwIn] }
-
-// ---- the catalog ----
-
-type Catalog: send { sessions: store.Table[u64, Bytes], keys: store.Table[Bytes, u64], meta: store.Table[u64, u64] }
-
-fn created(take r: Result[(), store.Error]) -> Result[(), store.Error] {
+fn refused(take r: store.local.Refused) -> Refused {
     match take r {
-        Error(Exists(_)) => Ok(()),
-        other => take other,
+        Unknown => Unknown,
+        Full => Full,
+        Busy => Asleep,
+        Denied => Denied,
+        Stopping => Stopping,
+        other => Place(take other),
     }
 }
 
-fn catalog_migrate(mut phase: store.Migration) -> Result[(), store.Error] {
-    let c_key: std.codec.Codec[Bytes] = std.codec.of()
-    let c_id: std.codec.Codec[u64] = std.codec.of()
-    created(store.migration_create_table(mut phase, store.spec("gateway.sessions", std.codec.key_u64(), c_key)))?
-    created(store.migration_create_table(mut phase, store.spec("gateway.keys", std.codec.key_bytes(), c_id)))?
-    created(store.migration_create_table(mut phase, store.spec("gateway.meta", std.codec.key_u64(), c_id)))
+fn mapped[A](take r: Result[A, store.local.Refused]) -> Result[A, Refused] {
+    match take r { Ok(take v) => Ok(take v), Error(take why) => Error(refused(take why)) }
 }
 
-fn catalog_handles(schema: store.Schema) -> Result[Catalog, store.Error] {
-    let c_key: std.codec.Codec[Bytes] = std.codec.of()
-    let c_id: std.codec.Codec[u64] = std.codec.of()
-    Ok(Catalog(sessions: store.schema_table(schema, "gateway.sessions", std.codec.key_u64(), c_key)?,
-        keys: store.schema_table(schema, "gateway.keys", std.codec.key_bytes(), c_id)?,
-        meta: store.schema_table(schema, "gateway.meta", std.codec.key_u64(), c_id)?))
-}
-
-// ---- names ----
-
-pub fn name_of(id: u64) -> String {
-    let mut s = string.from("s")
-    string.push_u64(mut s, id)
-    s
-}
-
-fn id_of(name: String) -> Option[u64] {
-    let Some(digits) = string.strip_prefix(name, "s") else { return None }
-    match (int.parse(string.from(digits)) : Result[u64, ParseError]) { Ok(n) => Some(n), Error(_) => None }
-}
-
-// ---- the actor ----
-
-type Begin[T: send]: send { config: GatewayConfig[T], inbox: Receiver[GwIn], me: Sender[GwIn], ready: Sender[Result[(), Refused]] }
-type Forward: send { from: Receiver[store.local.Change], to: Sender[GwIn] }
-type Removing: send { hd: store.local.Door, name: String, reply: Option[Sender[Result[(), Refused]]] }
-
-type Actor {
-    db: store.Db, catalog: Catalog, root: Dir, options: store.Options,
-    migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits], max_sessions: u64, count: u64,
-    host: store.local.Local, tasks: Tasks, clock: Clock, random: Random,
-    watch: Option[Sender[store.local.Change]], removers: List[Task[()]],
-    // Each session's marks since the gateway started, and who waits for its next end.
-    marks: Map[u64, Marks], watching: Map[u64, Map[u64, Sender[()]]], next_watch: u64,
-    waiters: List[(u64, u64, Sender[Result[u64, Refused]])],
-}
-
-fn forward_changes(take f: Forward) -> () waits {
-    while let Ok(take c) = channel.receive(f.from) {
-        if let Error(_) = channel.send(f.to, Changed(take c)) { return }
-    }
-}
-
-fn has_row(a: Actor, id: u64) -> bool {
-    let snap = store.snapshot(a.db)
-    match store.get(snap, store.shape(a.catalog.sessions), id) { Ok(Some(_)) => true, _ => false }
-}
-
-fn seed_store(a: Actor, dir: Dir, seeding: Seeding, reader: Option[store.Caller]) -> Result[(), Refused] waits {
-    let mut db = match store.open(a.tasks, dir, a.clock, a.random, clone(a.options)) { Ok(take v) => take v, Error(_) => return Error(Storage) }
-    if let Error(_) = store.run_migration(mut db, a.tasks, a.migrate) { let _ = store.close(take db); return Error(Storage) }
-    let Ok(h) = store.with_schema(db, code.describe(harness.handles)) else { let _ = store.close(take db); return Error(Storage) }
-    let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), harness.Refused] {
-        match seeding {
-            Fresh(model, narrow) => harness.open_session(mut tx, h, clone(model), clone(narrow)),
-            Adopt(prefix) => harness.adopt(mut tx, h, clone(prefix)),
-        }?
-        if let Some(caller) = reader { harness.set_reader(mut tx, h, caller, true)? }
-        Ok(())
-    })
-    let seeded: Result[(), Refused] = match take ran {
-        Ok(Committed(done)) => match store.durable(mut db, done.ticket) { Ok(()) => Ok(()), Error(_) => Error(Storage) },
-        Ok(Aborted(store.Undone(value: take why, ..))) => Error(Seed(take why)),
-        _ => Error(Storage),
-    }
-    let _ = store.close(take db)
-    seeded
-}
-
-// A create is idempotent by its key. The store is seeded and the group added before the
-// row commits, and the id is taken by that commit, so a create that dies first leaves a
-// directory and a group no row names: the next create of that id clears the directory
-// and finds the group, and a restart removes it. An id is never reused once committed.
-fn on_create(mut a: Actor, take key: Bytes, take seeding: Seeding, reader: Option[store.Caller]) -> Result[u64, Refused] waits {
-    let snap = store.snapshot(a.db)
-    match store.get(snap, store.shape(a.catalog.keys), key) {
-        Ok(Some(id)) => return Ok(id),
-        Ok(None) => (),
-        Error(_) => return Error(Storage),
-    }
-    if a.count >= a.max_sessions { return Error(Full) }
-    let id = match store.get(snap, store.shape(a.catalog.meta), NEXT_ID) { Ok(Some(n)) => n, Ok(None) => 0u64, Error(_) => return Error(Storage) }
-    let name = name_of(id)
-    let _ = std.dir.remove_all(a.root, name)
-    if let Error(_) = std.dir.create_dir(a.root, name) { return Error(Storage) }
-    let Ok(dir) = std.dir.narrow(a.root, name) else { return Error(Storage) }
-    seed_store(a, dir, seeding, reader)?
-    match store.local.add(store.local.door(a.host), name) {
-        Ok(()) => (),
-        // A group left by a create of this id that died before its row: it never ran,
-        // since only a row's session is routed.
-        Error(Exists) => (),
-        Error(take why) => return Error(Place(take why)),
-    }
-    let Ok(catalog) = store.with_schema(a.db, code.describe(catalog_handles)) else { return Error(Storage) }
-    let ran = store.run(mut a.db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
-        store.put(mut tx, catalog.sessions, id, clone(key))?
-        store.put(mut tx, catalog.keys, clone(key), id)?
-        store.put(mut tx, catalog.meta, NEXT_ID, id + 1u64)
-    })
-    let Ok(Committed(done)) = take ran else { return Error(Storage) }
-    if let Error(_) = store.durable(mut a.db, done.ticket) { return Error(Storage) }
-    a.count += 1u64
-    Ok(id)
-}
-
-// Removing a group waits for its place to drain, and a place's own effects may need the
-// gateway meanwhile (a subagent tool), so a remover task waits, not the actor.
-fn remove_once(take job: Removing) -> () waits {
-    let Removing(hd: take hd, name: take name, reply: take reply) = take job
-    let answer: Result[(), Refused] = match store.local.remove(hd, name) {
-        Ok(()) => Ok(()),
-        Error(Unknown) => Ok(()),
-        Error(Stopping) => Error(Stopping),
-        Error(take why) => Error(Place(take why)),
-    }
-    if let Some(r) = take reply { let _ = channel.send(r, take answer) }
-}
-
-fn start_remove(mut a: Actor, take name: String, take reply: Option[Sender[Result[(), Refused]]]) -> () {
-    let job = Removing(hd: store.local.door(a.host), name: take name, reply: take reply)
-    let run: fn(take Removing) -> () waits = remove_once
-    list.push(mut a.removers, task.spawn(a.tasks, bytes 65536u64, take job, run))
-}
-
-// Deletes the row first: a gateway that dies before the group is removed removes it at
-// its next start, and a deleted session is never routed again.
-fn on_delete(mut a: Actor, id: u64, take reply: Sender[Result[(), Refused]]) -> () waits {
-    let snap = store.snapshot(a.db)
-    let key: Bytes = match store.get(snap, store.shape(a.catalog.sessions), id) {
-        Ok(Some(k)) => clone(k),
-        Ok(None) => { let _ = channel.send(reply, Error(Unknown)); return },
-        Error(_) => { let _ = channel.send(reply, Error(Storage)); return },
-    }
-    let Ok(catalog) = store.with_schema(a.db, code.describe(catalog_handles)) else { let _ = channel.send(reply, Error(Storage)); return }
-    let ran = store.run(mut a.db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
-        let _ = store.delete(mut tx, catalog.keys, clone(key))?
-        let _ = store.delete(mut tx, catalog.sessions, id)?
-        Ok(())
-    })
-    let Ok(Committed(done)) = take ran else { let _ = channel.send(reply, Error(Storage)); return }
-    if let Error(_) = store.durable(mut a.db, done.ticket) { let _ = channel.send(reply, Error(Storage)); return }
-    a.count -= 1u64
-    let mut waiting: List[(u64, u64, Sender[Result[u64, Refused]])] = list.new()
-    while let Some((at, after, take r)) = list.pop(mut a.waiters) {
-        if at == id { let _ = channel.send(r, Error(Unknown)) } else { list.push(mut waiting, (at, after, take r)) }
-    }
-    a.waiters = take waiting
-    start_remove(mut a, name_of(id), Some(take reply))
-}
-
-fn on_listing(a: Actor) -> List[u64] {
-    let mut ids: List[u64] = list.new()
-    let snap = store.snapshot(a.db)
-    let Ok(take rows) = store.scan(snap, store.shape(a.catalog.sessions), Unbounded, Unbounded) else { return ids }
-    let mut cursor = take rows
-    while let Ok(Some((id, _))) = store.next(mut cursor) { list.push(mut ids, id) }
-    ids
-}
-
-// The host's door for a session in the catalog; the caller routes, peeks or unloads
-// through it, outside the actor.
-fn on_reach(a: Actor, id: u64) -> Result[store.local.Door, Refused] {
-    if has_row(a, id) { Ok(store.local.door(a.host)) } else { Error(Unknown) }
-}
-
-fn marks_of(a: Actor, id: u64) -> Marks {
-    match map.get(a.marks, id) {
-        Some(m) => Marks(ups: m.ups, downs: m.downs, nudges: m.nudges),
-        None => Marks(ups: 0u64, downs: 0u64, nudges: 0u64),
-    }
-}
-
-fn downs_of(a: Actor, id: u64) -> u64 { marks_of(a, id).downs }
-
-fn put_marks(mut a: Actor, id: u64, take m: Marks) {
-    map.insert(mut a.marks, id, take m)
-    if let Some(watchers) = map.get(a.watching, id) {
-        for (_, to) in watchers { let _ = channel.try_send(to, ()) }
-    }
-}
-
-fn on_watch(mut a: Actor, id: u64, take notify: Sender[()], reply: Sender[u64]) {
-    a.next_watch += 1u64
-    let mut watchers = match map.remove(mut a.watching, id) {
-        Some(take old) => take old,
-        None => map.new(),
-    }
-    if let Ok(()) = channel.try_send(reply, a.next_watch) {
-        map.insert(mut watchers, a.next_watch, take notify)
-    }
-    if map.len(watchers) > 0u64 { map.insert(mut a.watching, id, take watchers) }
-}
-
-fn on_unwatch(mut a: Actor, id: u64, token: u64) {
-    if let Some(take old) = map.remove(mut a.watching, id) {
-        let mut watchers = take old
-        let _ = map.remove(mut watchers, token)
-        if map.len(watchers) > 0u64 { map.insert(mut a.watching, id, take watchers) }
-    }
-}
-
-fn count_up(mut a: Actor, id: u64) -> () {
-    let m = marks_of(a, id)
-    put_marks(mut a, id, Marks(ups: m.ups + 1u64, downs: m.downs, nudges: m.nudges))
-}
-
-fn on_nudge(mut a: Actor, id: u64) -> () {
-    let m = marks_of(a, id)
-    put_marks(mut a, id, Marks(ups: m.ups, downs: m.downs, nudges: m.nudges + 1u64))
-}
-
-fn count_down(mut a: Actor, id: u64) -> () waits {
-    let m = marks_of(a, id)
-    let n = m.downs + 1u64
-    put_marks(mut a, id, Marks(ups: m.ups, downs: n, nudges: m.nudges))
-    let mut waiting: List[(u64, u64, Sender[Result[u64, Refused]])] = list.new()
-    while let Some((at, after, take reply)) = list.pop(mut a.waiters) {
-        if at == id && n > after { let _ = channel.send(reply, Ok(n)) } else { list.push(mut waiting, (at, after, take reply)) }
-    }
-    a.waiters = take waiting
-}
-
-fn on_await(mut a: Actor, id: u64, after: u64, take reply: Sender[Result[u64, Refused]]) -> () {
-    let n = downs_of(a, id)
-    if n > after { let _ = channel.try_send(reply, Ok(n)); return }
-    if has_row(a, id) { list.push(mut a.waiters, (id, after, take reply)) } else { let _ = channel.try_send(reply, Error(Unknown)) }
-}
-
-fn on_changed(mut a: Actor, take c: store.local.Change) -> () waits {
-    match c {
-        Up(name) => if let Some(id) = id_of(name) { count_up(mut a, id) },
-        Down(u) => if let Some(id) = id_of(u.name) { count_down(mut a, id) },
-    }
-    if let Some(w) = a.watch { let _ = channel.try_send(w, take c) }
-}
-
-// Brings the host's groups to the catalog: a group no row names is removed (a create or
-// a delete died between its two commits) and a row with no group gets one.
-fn recover(mut a: Actor) -> Result[(), Refused] waits {
-    let ids = on_listing(a)
-    let names = store.local.groups(store.local.door(a.host))
-    for name in names {
-        let named = match id_of(name) { Some(id) => list.contains(ids, id), None => false }
-        if !named {
-            match store.local.remove(store.local.door(a.host), name) {
-                Ok(()) => (),
-                Error(Unknown) => (),
-                Error(take why) => return Error(Place(take why)),
-            }
+// Seeds a session's store with its harness session and, for a visible one, its reader.
+fn seeder(take seeding: Seeding, take reader: Option[store.Caller]) -> store.local.Seed {
+    fn(mut db: store.Db) -> Result[(), String] waits {
+        let Ok(h) = store.with_schema(db, code.describe(harness.handles)) else { return Error(string.from("harness schema")) }
+        let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), harness.Refused] {
+            match seeding {
+                Fresh(model, narrow) => harness.open_session(mut tx, h, clone(model), clone(narrow)),
+                Adopt(prefix) => harness.adopt(mut tx, h, clone(prefix)),
+            }?
+            if let Some(caller) = reader { harness.set_reader(mut tx, h, caller, true)? }
+            Ok(())
+        })
+        match take ran {
+            Ok(Committed(done)) => match store.durable(mut db, done.ticket) { Ok(()) => Ok(()), Error(_) => Error(string.from("seed durable")) },
+            Ok(Aborted(_)) => Error(string.from("seed refused")),
+            _ => Error(string.from("seed store")),
         }
     }
-    for id in ids {
-        let name = name_of(id)
-        if !list.contains(names, name) {
-            if let Error(take why) = store.local.add(store.local.door(a.host), name) { return Error(Place(take why)) }
-        }
-        a.count += 1u64
-    }
-    Ok(())
-}
-
-fn open_catalog(tasks: Tasks, root: Dir, clock: Clock, random: Random, options: store.Options) -> Result[(store.Db, Catalog), Refused] waits {
-    let _ = std.dir.create_dir(root, "catalog")
-    let Ok(dir) = std.dir.narrow(root, "catalog") else { return Error(Storage) }
-    let mut db = match store.open(tasks, dir, clock, random, clone(options)) { Ok(take v) => take v, Error(_) => return Error(Storage) }
-    if let Error(_) = store.run_migration(mut db, tasks, code.describe(catalog_migrate)) { let _ = store.close(take db); return Error(Storage) }
-    let Ok(catalog) = store.with_schema(db, code.describe(catalog_handles)) else { let _ = store.close(take db); return Error(Storage) }
-    Ok((take db, take catalog))
-}
-
-fn run_gateway[T: send](take begin: Begin[T]) -> () waits {
-    let Begin(config: take config, inbox: take inbox, me: take me, ready: take ready) = take begin
-    let GatewayConfig(root: root, options: take options, migrate: migrate, factory: take making, max_sessions: max_sessions, idle_ms: idle_ms, place_bytes: place_bytes,
-        tasks: tasks, clock: clock, random: random, net: net, watch: take watch, seed: take seed) = take config
-    let (db, catalog) = match open_catalog(tasks, root, clock, random, options) {
-        Ok(take opened) => take opened,
-        Error(take why) => { let _ = channel.send(ready, Error(take why)); return },
-    }
-    let (host_watch, changes): (Sender[store.local.Change], Receiver[store.local.Change]) = channel.new(256u64)
-    let lconfig = store.local.Config(root: root, options: clone(options), factory: take making, seed: take seed, max_places: max_sessions, idle_ms: idle_ms,
-        place_bytes: place_bytes, sessions: PLACE_SESSIONS, tasks: tasks, clock: clock, random: random, net: net, watch: Some(take host_watch))
-    let local_host = match store.local.local(take lconfig) {
-        Ok(take made) => take made,
-        Error(take why) => { let _ = store.close(take db); let _ = channel.send(ready, Error(Place(take why))); return },
-    }
-    let forward: fn(take Forward) -> () waits = forward_changes
-    let forwarding = task.spawn(tasks, bytes 65536u64, Forward(from: take changes, to: channel.sender(me)), forward)
-    let mut a = Actor(db: take db, catalog: take catalog, root: root, options: take options, migrate: migrate, max_sessions: max_sessions, count: 0u64,
-        host: take local_host, tasks: tasks, clock: clock, random: random, watch: take watch, removers: list.new(), marks: map.new(), watching: map.new(), next_watch: 0u64, waiters: list.new())
-    let _ = take me
-    let recovered = recover(mut a)
-    let failed = match recovered { Ok(()) => false, Error(_) => true }
-    let _ = channel.send(ready, take recovered)
-    let mut halted: Option[Sender[List[store.local.Unloaded]]] = None
-    if !failed {
-        while let Ok(take m) = channel.receive(inbox) {
-            match take m {
-                Create(take key, take seeding, reader, reply) => { let _ = channel.send(reply, on_create(mut a, take key, take seeding, reader)) },
-                Delete(id, take reply) => on_delete(mut a, id, take reply),
-                Listing(reply) => { let _ = channel.send(reply, on_listing(a)) },
-                Reach(id, reply) => { let _ = channel.send(reply, on_reach(a, id)) },
-                Changed(take c) => on_changed(mut a, take c),
-                Downs(id, reply) => { let _ = channel.send(reply, downs_of(a, id)) },
-                AwaitDown(id, after, take reply) => on_await(mut a, id, after, take reply),
-                Nudge(id) => on_nudge(mut a, id),
-                Marked(id, reply) => { let _ = channel.send(reply, marks_of(a, id)) },
-                WatchMarks(id, take notify, reply) => on_watch(mut a, id, take notify, reply),
-                UnwatchMarks(id, token) => on_unwatch(mut a, id, token),
-                Halt(take reply) => { halted = Some(take reply)
-                    break },
-            }
-        }
-    }
-    let Actor(db: take catalog_db, host: take held, removers: take removers, waiters: take waiters, ..) = take a
-    let unloaded = store.local.stop(take held)
-    let mut removing = take removers
-    while let Some(take remover) = list.pop(mut removing) { let _ = task.join(take remover) }
-    let mut left = take waiters
-    while let Some((_, _, take r)) = list.pop(mut left) { let _ = channel.send(r, Error(Stopping)) }
-    let _ = store.close(take catalog_db)
-    let _ = take inbox
-    let _ = task.join(take forwarding)
-    if let Some(reply) = take halted { let _ = channel.send(reply, take unloaded) }
 }
 
 // ---- the API ----
 
-// A gateway's inbox, made before the gateway so that its seed can hold a door to it
-// (a session's subagent tool starts its child through that door).
-pub type Doorway: send { to: Sender[GwIn], inbox: Receiver[GwIn] }
+pub fn doorway() -> Doorway { Doorway(way: store.local.doorway()) }
 
-pub fn doorway() -> Doorway {
-    let (to, inbox): (Sender[GwIn], Receiver[GwIn]) = channel.new(256u64)
-    Doorway(to: take to, inbox: take inbox)
-}
+pub fn door_of(w: Doorway) -> Door { Door(host: store.local.door_of(w.way)) }
 
-pub fn door_of(w: Doorway) -> Door { Door(to: channel.sender(w.to)) }
-
-pub fn copy_door(d: Door) -> Door { Door(to: channel.sender(d.to)) }
+pub fn copy_door(d: Door) -> Door { Door(host: store.local.copy_door(d.host)) }
 
 pub fn gateway[T: send](take way: Doorway, take config: GatewayConfig[T]) -> Result[Gateway, Refused] waits {
-    if config.max_sessions == 0u64 || config.place_bytes == 0u64 || config.idle_ms == 0u64 { return Error(Full) }
-    let tasks = config.tasks
-    let need = int.saturating_add(store.local.host_bytes(config.options, config.place_bytes), GATEWAY_BYTES)
-    let Doorway(to: take to, inbox: take inbox) = take way
-    let (ready, started): (Sender[Result[(), Refused]], Receiver[Result[(), Refused]]) = channel.new(1u64)
-    let begin = Begin(config: take config, inbox: take inbox, me: channel.sender(to), ready: take ready)
-    let run: fn(take Begin[T]) -> () waits = run_gateway
-    let actor = match task.try_spawn(tasks, bytes need, take begin, run) {
-        Ok(take spawned) => take spawned,
-        Error(_) => return Error(Full),
-    }
-    match channel.receive(started) {
-        Ok(Ok(())) => Ok(Gateway(to: take to, actor: take actor)),
-        Ok(Error(take why)) => { let _ = task.join(take actor); Error(take why) },
-        Error(_) => { let _ = task.join(take actor); Error(Stopping) },
-    }
+    let GatewayConfig(root: root, options: take options, migrate: migrate, factory: take making, max_sessions: max_sessions, idle_ms: idle_ms, place_bytes: place_bytes,
+        tasks: tasks, clock: clock, random: random, net: net, watch: take watch, seed: take seed) = take config
+    let lconfig = store.local.Config(root: root, options: take options, migrate: migrate, factory: take making, seed: take seed, max_places: max_sessions, idle_ms: idle_ms,
+        place_bytes: place_bytes, sessions: PLACE_SESSIONS, tasks: tasks, clock: clock, random: random, net: net, watch: take watch)
+    let Doorway(way: take w) = take way
+    match store.local.local(take w, take lconfig) { Ok(take host) => Ok(Gateway(host: take host)), Error(take why) => Error(refused(take why)) }
 }
 
-pub fn door(g: Gateway) -> Door { Door(to: channel.sender(g.to)) }
+pub fn door(g: Gateway) -> Door { Door(host: store.local.door(g.host)) }
 
 pub fn create(d: Door, take key: Bytes, take seeding: Seeding) -> Result[u64, Refused] waits {
-    create_seeded(d, take key, take seeding, None)
+    create_with(d, take key, take seeding, None)
 }
 
-// Seeds a private session and its initial reader before publishing the catalog row.
+// Seeds a private session and its initial reader before listing it.
 pub fn create_visible(d: Door, key: Bytes, take seeding: Seeding, take caller: store.Caller) -> Result[u64, Refused] waits {
     let mut scoped_key: Bytes = list.new()
-    if let Error(_) = store.runner.caller_key(caller, mut scoped_key) { return Error(Seed(Malformed("reader identity"))) }
+    if let Error(_) = store.runner.caller_key(caller, mut scoped_key) { return Error(Place(Failed(string.from("reader identity")))) }
     list.append(mut scoped_key, key)
-    create_seeded(d, take scoped_key, take seeding, Some(take caller))
+    create_with(d, take scoped_key, take seeding, Some(take caller))
 }
 
-fn create_seeded(d: Door, take key: Bytes, take seeding: Seeding, take reader: Option[store.Caller]) -> Result[u64, Refused] waits {
-    let (reply, answer): (Sender[Result[u64, Refused]], Receiver[Result[u64, Refused]]) = channel.new(1u64)
-    if let Error(_) = channel.send(d.to, Create(take key, take seeding, take reader, take reply)) { return Error(Stopping) }
-    match channel.receive(answer) { Ok(take answered) => take answered, Error(_) => Error(Stopping) }
+fn create_with(d: Door, take key: Bytes, take seeding: Seeding, take reader: Option[store.Caller]) -> Result[u64, Refused] waits {
+    mapped(store.local.create(d.host, take key, seeder(take seeding, take reader)))
 }
 
 // Unlists a session, then drains its place and deletes its store.
-pub fn delete(d: Door, id: u64) -> Result[(), Refused] waits {
-    let (reply, answer): (Sender[Result[(), Refused]], Receiver[Result[(), Refused]]) = channel.new(1u64)
-    if let Error(_) = channel.send(d.to, Delete(id, take reply)) { return Error(Stopping) }
-    match channel.receive(answer) { Ok(take answered) => take answered, Error(_) => Error(Stopping) }
-}
+pub fn delete(d: Door, id: u64) -> Result[(), Refused] waits { mapped(store.local.delete(d.host, id)) }
 
-pub fn listing(d: Door) -> List[u64] waits {
-    let (reply, answer): (Sender[List[u64]], Receiver[List[u64]]) = channel.new(1u64)
-    if let Error(_) = channel.send(d.to, Listing(take reply)) { return list.new() }
-    match channel.receive(answer) { Ok(take answered) => take answered, Error(_) => list.new() }
-}
-
-fn reach(d: Door, id: u64) -> Result[store.local.Door, Refused] waits {
-    let (reply, answer): (Sender[Result[store.local.Door, Refused]], Receiver[Result[store.local.Door, Refused]]) = channel.new(1u64)
-    if let Error(_) = channel.send(d.to, Reach(id, take reply)) { return Error(Stopping) }
-    match channel.receive(answer) { Ok(take answered) => take answered, Error(_) => Error(Stopping) }
-}
+pub fn listing(d: Door) -> List[u64] waits { store.local.listing(d.host) }
 
 // Routes to a session, waking its place if it is unloaded. The lease's status holds the
 // place's address. A lease does not hold the place: a client's session does (§14.9).
-pub fn route(d: Door, id: u64) -> Result[store.local.Lease, Refused] waits {
-    let hd = reach(d, id)?
-    match store.local.route(hd, name_of(id)) { Ok(take lease) => Ok(take lease), Error(take why) => Error(Place(take why)) }
-}
+pub fn route(d: Door, id: u64) -> Result[store.local.Lease, Refused] waits { mapped(store.local.route(d.host, id)) }
 
 // Enforces the session ACL before a cold wake. A returned lease still needs
 // the live query under the credential bound to its wire connection.
 pub fn access(d: Door, id: u64, caller: store.Caller, wake: bool) -> Result[Option[store.local.Lease], Refused] waits {
-    let hd = reach(d, id)?
     let check = store.local.ColdCheck(caller: clone(caller), check: code.describe(harness.cold_reader_allowed))
-    match store.local.access(hd, name_of(id), take check, wake) {
-        Ok(take lease) => Ok(take lease),
-        Error(Denied) => Error(Denied),
-        Error(Busy) => Error(Asleep),
-        Error(Unknown) => Error(Unknown),
-        Error(take why) => Error(Place(take why)),
-    }
+    mapped(store.local.access(d.host, id, take check, wake))
 }
 
 // Like `route`, but only to a session whose place serves; it never starts one.
-pub fn peek(d: Door, id: u64) -> Result[store.local.Lease, Refused] waits {
-    let hd = reach(d, id)?
-    match store.local.peek(hd, name_of(id)) {
-        Ok(take lease) => Ok(take lease),
-        Error(Busy) => Error(Asleep),
-        Error(take why) => Error(Place(take why)),
-    }
-}
-
-// Tells the gateway that a front changed a session, so streams that follow it look again.
-pub fn nudge(d: Door, id: u64) -> () waits { let _ = channel.send(d.to, Nudge(id)) }
-
-pub fn marks(d: Door, id: u64) -> Marks waits {
-    let (reply, answer): (Sender[Marks], Receiver[Marks]) = channel.new(1u64)
-    if let Error(_) = channel.send(d.to, Marked(id, take reply)) { return Marks(ups: 0u64, downs: 0u64, nudges: 0u64) }
-    match channel.receive(answer) { Ok(m) => m, Error(_) => Marks(ups: 0u64, downs: 0u64, nudges: 0u64) }
-}
-
-// The caller registers before sampling marks. A queued notification is enough
-// because marks contain the cumulative counts.
-pub fn watch_marks(d: Door, id: u64, notify: Sender[()]) -> Option[u64] waits {
-    let (reply, answer): (Sender[u64], Receiver[u64]) = channel.new(1u64)
-    if let Error(_) = channel.send(d.to, WatchMarks(id, channel.sender(notify), take reply)) { return None }
-    match channel.receive(answer) { Ok(token) => Some(token), Error(_) => None }
-}
-
-pub fn unwatch_marks(d: Door, id: u64, token: u64) -> () waits {
-    let _ = channel.send(d.to, UnwatchMarks(id, token))
-}
-
-// Stops every live session through its graceful stop and answers how each ended.
-pub fn stop(take g: Gateway) -> List[store.local.Unloaded] waits {
-    let Gateway(to: take to, actor: take actor) = take g
-    let (reply, answer): (Sender[List[store.local.Unloaded]], Receiver[List[store.local.Unloaded]]) = channel.new(1u64)
-    let _ = channel.send(to, Halt(take reply))
-    let ended = match channel.receive(answer) { Ok(take done) => take done, Error(_) => list.new() }
-    let _ = task.join(take actor)
-    take ended
-}
+pub fn peek(d: Door, id: u64) -> Result[store.local.Lease, Refused] waits { mapped(store.local.peek(d.host, id)) }
 
 // Stops a session's place now, as an operator would (§14.4 "Unload"); a cut run is
 // started again by the host.
-pub fn unload(d: Door, id: u64) -> Result[store.local.Unloaded, Refused] waits {
-    let hd = reach(d, id)?
-    match store.local.unload(hd, name_of(id)) { Ok(take u) => Ok(take u), Error(take why) => Error(Place(take why)) }
-}
+pub fn unload(d: Door, id: u64) -> Result[store.local.Unloaded, Refused] waits { mapped(store.local.unload(d.host, id)) }
 
-// How many times the session's place has ended since the gateway started.
-pub fn downs(d: Door, id: u64) -> u64 waits {
-    let (reply, answer): (Sender[u64], Receiver[u64]) = channel.new(1u64)
-    if let Error(_) = channel.send(d.to, Downs(id, take reply)) { return 0u64 }
-    match channel.receive(answer) { Ok(n) => n, Error(_) => 0u64 }
-}
+// Tells the gateway that a front changed a session, so streams that follow it look again.
+pub fn nudge(d: Door, id: u64) -> () waits { store.local.nudge(d.host, id) }
+
+pub fn marks(d: Door, id: u64) -> store.local.Marks waits { store.local.marks(d.host, id) }
+
+// The caller registers before sampling marks. A queued notification is enough
+// because marks contain the cumulative counts.
+pub fn watch_marks(d: Door, id: u64, notify: Sender[()]) -> Option[u64] waits { store.local.watch_marks(d.host, id, notify) }
+
+pub fn unwatch_marks(d: Door, id: u64, token: u64) -> () waits { store.local.unwatch_marks(d.host, id, token) }
 
 // Waits until the session's place has ended more than `after` times, and answers how many.
-pub fn await_down(d: Door, id: u64, after: u64) -> Result[u64, Refused] waits {
-    let (reply, answer): (Sender[Result[u64, Refused]], Receiver[Result[u64, Refused]]) = channel.new(1u64)
-    if let Error(_) = channel.send(d.to, AwaitDown(id, after, take reply)) { return Error(Stopping) }
-    match channel.receive(answer) { Ok(take answered) => take answered, Error(_) => Error(Stopping) }
+pub fn await_down(d: Door, id: u64, after: u64) -> Result[u64, Refused] waits { mapped(store.local.await_down(d.host, id, after)) }
+
+// Stops every live session through its graceful stop and answers how each ended.
+pub fn stop(take g: Gateway) -> List[store.local.Unloaded] waits {
+    let Gateway(host: take host) = take g
+    store.local.stop(take host)
 }
 
 // ---- the reference subagent ----
@@ -648,11 +237,11 @@ fn look(d: Door, id: u64, c: Child, credential: Bytes, take submit: Option[harne
 pub fn ask(d: Door, take key: Bytes, take seeding: Seeding, c: Child, take text: String) -> Result[Bytes, harness.Fault] waits {
     let credential = child_credential(key)
     let Ok(take caller) = store.ingress.caller((), credential) else { return Error(Unavailable) }
-    let id = match create_seeded(d, take key, take seeding, Some(take caller)) { Ok(n) => n, Error(_) => return Error(Unavailable) }
+    let id = match create_with(d, take key, take seeding, Some(take caller)) { Ok(n) => n, Error(_) => return Error(Unavailable) }
     let mut submit: Option[harness.Submit] = Some(harness.Submit(client_key: "parent", text: take text))
     let mut before: Option[(String, u64)] = None
     loop {
-        let ended = downs(d, id)
+        let ended = marks(d, id).downs
         let (status, rows) = match look(d, id, c, credential, take submit)? {
             Ended(status, answer) => {
                 if status == "answered" { return Ok(string.into_bytes(take answer)) }

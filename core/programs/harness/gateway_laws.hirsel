@@ -743,7 +743,7 @@ fn same_rows(got: List[(u64, Bytes)], want: List[(u64, Bytes)]) -> bool {
 }
 
 // Waits up to five seconds for the session's place to be down, as the gateway saw it.
-fn down_within(door: harness.gateway.Door, id: u64, clock: Clock) -> Option[harness.gateway.Marks] waits {
+fn down_within(door: harness.gateway.Door, id: u64, clock: Clock) -> Option[store.local.Marks] waits {
     for i in 0u64 .. 100u64 {
         let m = harness.gateway.marks(door, id)
         if m.downs >= 1u64 && m.ups == m.downs {

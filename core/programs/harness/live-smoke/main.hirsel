@@ -202,7 +202,7 @@ fn browser_reply(mut c: std.http_client.Connection, mut dec: std.sse.Decoder, cl
     }
 }
 
-fn live_down(d: harness.gateway.Door, clock: Clock, after: u64) -> Result[harness.gateway.Marks, String] waits {
+fn live_down(d: harness.gateway.Door, clock: Clock, after: u64) -> Result[store.local.Marks, String] waits {
     for i in 0u64 .. 100u64 {
         let marks = harness.gateway.marks(d, 0u64)
         if marks.ups > after && marks.ups == marks.downs {

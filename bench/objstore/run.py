@@ -18,7 +18,8 @@ RUST = {
     "epoll": False, "ring": True, "uring": False, "uring-ring": True,
     "aws-lc": True, "ktls": True, "ktls-send": True,
 }
-LANG = {"hirsel-plain": False, "hirsel-tls": True}
+# Each Hirsel cell names its Net reactor; `auto` takes io_uring where the host allows it.
+LANG = {"hirsel-plain": False, "hirsel-tls": True, "hirsel-plain-epoll": False, "hirsel-tls-epoll": True}
 MODES = RUST | LANG
 
 
@@ -166,7 +167,9 @@ def run(args, work, results):
                 tls = MODES[mode]
                 instrument = None
                 if mode in LANG:
-                    client = command(args.hirsel, method, ports[tls], args.requests, measure)
+                    reactor = "epoll" if mode.endswith("-epoll") else "auto"
+                    client = command("env", f"HIRSEL_NET_REACTOR={reactor}", args.hirsel, method,
+                                     ports[tls], args.requests, measure)
                     if tls:
                         client.append(pem)
                 else:

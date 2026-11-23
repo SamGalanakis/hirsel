@@ -2232,7 +2232,11 @@ pub(super) fn tape_request_command(args: &[String], directory: &Path) -> std::pr
 
 /// Exercise the real CLI request in the existing process child harness.
 pub(super) fn tape_request(args: &[String], directory: &Path) -> (Option<i32>, String, String) {
-    let output = tape_request_command(args, directory).output().unwrap();
+    tape_request_output(tape_request_command(args, directory))
+}
+/// Run a prepared request child and split its output after the child mark.
+pub(super) fn tape_request_output(mut command: std::process::Command) -> (Option<i32>, String, String) {
+    let output = command.output().unwrap();
     let after = |bytes: &[u8]| {
         let text=String::from_utf8_lossy(bytes);
         let at=text.find(CHILD_MARK).expect("request child started")+CHILD_MARK.len();

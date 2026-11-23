@@ -1144,7 +1144,12 @@ fn tape_http_replays_both_native_engines() {
         ),
     );
 
-    for engine in ["cranelift", "llvm"] {
+    // Each engine records under one Net reactor and replays under the other,
+    // so the reactor choice is shown not to be a replay input in either
+    // direction. `auto` picks io_uring wherever the host allows it.
+    for (engine, recorded_on, replayed_on) in
+        [("cranelift", "auto", "epoll"), ("llvm", "epoll", "auto")]
+    {
         std::fs::write(&main, fixture).unwrap();
         let tape = dir.path().join(format!("{engine}.tape"));
         let common = [
@@ -1184,6 +1189,7 @@ fn tape_http_replays_both_native_engines() {
             ],
         );
         let mut child = process::tape_request_command(&record, dir.path())
+            .env(hirsel_core_net::REACTOR_ENV, recorded_on)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -1253,7 +1259,9 @@ fn tape_http_replays_both_native_engines() {
         let sealed = std::fs::read(&tape).unwrap();
 
         let replay = invoke("replay", &["--tape", tape.to_str().unwrap()]);
-        let (code, stdout, sent) = process::tape_request(&replay, dir.path());
+        let mut replaying = process::tape_request_command(&replay, dir.path());
+        replaying.env(hirsel_core_net::REACTOR_ENV, replayed_on);
+        let (code, stdout, sent) = process::tape_request_output(replaying);
         assert_eq!(code, Some(0), "{engine} replay: {sent}");
         assert!(stdout.is_empty(), "{engine}: {stdout}");
         assert_eq!(sent.as_bytes(), wire, "{engine} replay compared to wire");

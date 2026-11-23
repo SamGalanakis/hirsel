@@ -1166,6 +1166,7 @@ pub fn rollback_writes_on_error[R, E](mut tx: Tx, body: scoped[view] fn(mut Tx) 
     let roots = share_roots(tx.roots)
     let ops: DataOps = clone(tx.ops)
     let resident = tx.resident
+    let frame_tail = tx.frame_tail
     let frame_bytes = tx.frame_bytes
     let wrote = tx.wrote
     let result = body(mut tx)
@@ -1173,6 +1174,8 @@ pub fn rollback_writes_on_error[R, E](mut tx: Tx, body: scoped[view] fn(mut Tx) 
         tx.roots = take roots
         tx.ops = take ops
         tx.resident = resident
+        // The frame-tail slot names a data op, so it goes with them.
+        tx.frame_tail = frame_tail
         tx.frame_bytes = frame_bytes
         tx.wrote = wrote
     }
@@ -1219,7 +1222,6 @@ pub fn rollback_writes_on_overrun[R, E](mut tx: Tx, steps: u64, body: scoped[vie
     let Drafted(roots: take roots, ids: ids, resident: resident, frame_tail: frame_tail, refusal: refusal, frame_bytes: frame_bytes,
         wrote: wrote, ops: take ops, stream_ops: take stream_ops, extra_bytes: extra_bytes, call: take call, result: take result) = (take ran)?
     tx.ids = ids
-    tx.frame_tail = frame_tail
     tx.refusal = refusal
     tx.stream_ops = take stream_ops
     tx.extra_bytes = extra_bytes
@@ -1227,6 +1229,7 @@ pub fn rollback_writes_on_overrun[R, E](mut tx: Tx, steps: u64, body: scoped[vie
     if let Ok(_) = result {
         tx.roots = take roots
         tx.ops = take ops
+        tx.frame_tail = frame_tail
         tx.resident = resident
         tx.frame_bytes = frame_bytes
         tx.wrote = wrote
@@ -5276,6 +5279,84 @@ pub fn law_rollback_on_overrun(c: Clock) -> bool waits {
 @test
 fn test_rollback_on_overrun(c: Clock) -> Result[(), ()] waits {
     if law_rollback_on_overrun(c) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+fn tail_body(mut w: Tx, t: Table[u64, u64]) -> Result[(), Error] {
+    let _ = delete(mut w, t, 1)?
+    let _ = delete(mut w, t, 2)?
+    put(mut w, t, 3, 30)?
+    Error(Missing("typed"))
+}
+
+// A journaled transaction over rows 1 and 2 runs a body that deletes both and
+// puts row 3 (so the put's frame-tail slot is 2), then returns a typed error.
+// The caller handles it, puts row 4 and commits. `bounded` picks
+// rollback_writes_on_overrun, else rollback_writes_on_error. Answers rows 1..4
+// after commit, or 9s if the transaction did not commit.
+fn typed_error_tail_case(d: Dir, c: Clock, r: Random, tasks: Tasks, bounded: bool) -> (u64, u64, u64, u64) waits {
+    let dir = disk_test_directory(d)
+    let mut db = result.unwrap(open(tasks, dir, c, r, defaults()))
+    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
+    let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    let seeded = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+        put(mut tx, t, 1, 10)?
+        put(mut tx, t, 2, 20)
+    }))
+    match take seeded {
+        Committed(_) => (),
+        _ => return (9, 9, 9, 9),
+    }
+    let out = run(mut db, None, scoped fn(mut tx: Tx) -> Result[(), Error] {
+        let typed = if bounded {
+            match rollback_writes_on_overrun(mut tx, 1000000, scoped fn(mut w: Tx) -> Result[(), Error] {
+                tail_body(mut w, t)
+            }) {
+                Ok(take inner) => take inner,
+                Error(_) => return Error(Missing("overrun")),
+            }
+        } else {
+            rollback_writes_on_error(mut tx, scoped fn(mut w: Tx) -> Result[(), Error] {
+                tail_body(mut w, t)
+            })
+        }
+        match typed {
+            Error(Missing(_)) => (),
+            _ => return Error(Missing("not typed")),
+        }
+        put(mut tx, t, 4, 40)
+    })
+    let committed = match take out {
+        Ok(Committed(_)) => true,
+        _ => false,
+    }
+    let rows = if committed {
+        let s = snapshot(db)
+        let sh = shape(t)
+        (typed_value(s, sh, 1), typed_value(s, sh, 2), typed_value(s, sh, 3), typed_value(s, sh, 4))
+    } else {
+        (9, 9, 9, 9)
+    }
+    result.unwrap(close(take db))
+    rows
+}
+
+// A typed error discards the body's data ops and with them its frame-tail
+// slot, so the caller's later write commits. Oracle, by hand: rows 1 and 2
+// stay, 3 is discarded, 4 commits.
+pub fn disk_law_typed_error_drops_frame_tail(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    let bounded = typed_error_tail_case(d, c, r, tasks, true)
+    let unbounded = typed_error_tail_case(d, c, r, tasks, false)
+    bounded.0 == 10 && bounded.1 == 20 && bounded.2 == 0 && bounded.3 == 40
+        && unbounded.0 == 10 && unbounded.1 == 20 && unbounded.2 == 0 && unbounded.3 == 40
+}
+
+@test
+fn disk_test_typed_error_drops_frame_tail(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if disk_law_typed_error_drops_frame_tail(d, c, r, tasks) {
         Ok(())
     } else {
         Error(())

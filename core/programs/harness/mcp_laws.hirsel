@@ -120,16 +120,16 @@ fn mcp_status(at: Addr, credential: Bytes, clock: Clock, random: Random, tasks: 
 // Hold a real local tools/call response until the live query has inspected
 // status, then send exactly 100 KiB of text and recover the stored result.
 @test
-fn test_mcp_working_and_blob(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), u64] waits {
+fn test_mcp_working_and_blob(parent: Dir, clock: Clock, random: Random, tasks: Tasks, network: Net) -> Result[(), u64] waits {
     let mut name = string.with_capacity(32u64)
     let dir = result.unwrap(host.mkdtemp(parent, mut name))
     let credential = store.ingress.credential(random)
     seed_mcp_blob(dir, clock, random, tasks, result.unwrap(store.ingress.caller((), credential)))
-    let (take input, at) = result.unwrap(host.listen(net, Addr(ip: V4(0x7f000001u32), port: 0u16), 1u16))
+    let (take input, at) = result.unwrap(host.listen(network, Addr(ip: V4(0x7f000001u32), port: 0u16), 1u16))
     let mut listener = take input
     let (take blobs, server) = blob_fixture(tasks, clock, random, MCP_BLOB_SIZE)
     let mut fixture = take blobs
-    fixture.peer = Some((at, net))
+    fixture.peer = Some((at, network))
     let (world, _) = std.sim.world.new(2u64, 0u64, 0u64)
     let (done, finishing): (Sender[()], Receiver[()]) = channel.new(1u64)
     let keeper = task.spawn(tasks, bytes 65536u64, KeepServer(world: take world, real: clock, stop: take finishing), keep_blob_server)
@@ -138,9 +138,9 @@ fn test_mcp_working_and_blob(parent: Dir, clock: Clock, random: Random, tasks: T
     let (tool, _tools): (Sender[ToolAsk], Receiver[ToolAsk]) = channel.new(1u64)
     let services = Services(model: take model, tool: take tool, blobs: Some(copy_blob_fixture(fixture)))
     let w = result.unwrap(mcp_blob_wiring())
-    let mut config = settings_of(code.describe(mcp_blob_place), harness.entries(w), dir, clock, random, tasks, net, take services, Some(IDLE_MS))
-    config.wire = Some(store.ingress.binding())
-    let socket = clone(config.session.socket)
+    let mut config = settings_of(code.describe(mcp_blob_place), harness.entries(w), dir, clock, random, tasks, network, take services, Some(IDLE_MS))
+    config.wire = Some(store.runner.wire_bind((), code.describe(store.ingress.caller), 4096u64, 65536u64))
+    let socket = store.runner.wire_defaults(65536u64, PLACE_BYTES).socket
     let (running, _stop, status) = launch(tasks, take config)
     let until = std.clock.deadline_after_ms(host.mono_ns(clock), 5000u64)
     let (take conn, _) = result.unwrap(host.accept(mut listener, At(clock, until)))
@@ -149,8 +149,8 @@ fn test_mcp_working_and_blob(parent: Dir, clock: Clock, random: Random, tasks: T
     let mut writer = take output
     if !read_mcp_request(mut r, clock, until) { return Error(1u64) }
     let Some(address) = latest.read(status).addr else { return Error(2u64) }
-    let working = mcp_status(address, credential, clock, random, tasks, net, socket)
-    let mut body = string.into_bytes("{\"jsonrpc\":\"2.0\",\"id\":\"call\",\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"")
+    let working = mcp_status(address, credential, clock, random, tasks, network, socket)
+    let mut body = string.into_bytes("{\"jsonrpc\":\"2.0\",\"id\":\"call\",\"result\":{\"resultType\":\"complete\",\"content\":[{\"type\":\"text\",\"text\":\"")
     list.append(mut body, blob_bytes(MCP_BLOB_SIZE))
     list.append(mut body, b"\"}]}}")
     let mut head = string.from("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: ")

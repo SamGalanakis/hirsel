@@ -9,6 +9,14 @@ pub fn as_bytes(data: FrozenBytes) -> View[Bytes] in data
 /// using hint. The capacity, charges and refusal are those of list.try_reserve.
 pub fn try_reserve_hint(mut data: Bytes, n: u64, hint: u64) -> Result[(), Capacity]
 
+/// Like list.with_capacity. Small buffers may carry backing for one later
+/// buffer. This operation pays only for its own capacity.
+pub fn with_tail(n: u64) -> Bytes
+
+/// Like list.with_capacity. May use the unused backing prepared by with_tail.
+/// The returned buffer owns its capacity independently of head.
+pub fn from_tail(mut head: Bytes, n: u64) -> Bytes
+
 /// Appends src[start .. end] from Inline[u8, N] when the range and spare
 /// capacity both fit. Returns false with the destination unchanged otherwise.
 pub fn append_inline[A: plain](mut out: Bytes, src: A, start: u64, end: u64) -> bool

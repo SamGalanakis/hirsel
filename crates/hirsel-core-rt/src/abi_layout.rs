@@ -85,6 +85,8 @@ pub const RESOURCE_PREFIX_BYTES: usize = 8;
 pub const NATIVE_PLAIN: u8 = 0;
 pub const NATIVE_GRAPH: u8 = 1;
 pub const NATIVE_RESOURCE: u8 = 2;
+pub const NATIVE_SPLIT_BYTES: u8 = 3;
+pub const SPLIT_BYTES_PREFIX: usize = 24;
 pub const FIXED_DESCRIPTOR_RECIPE: usize = 0;
 pub const FIXED_DESCRIPTOR_CHARGE: usize = 8;
 pub const FIXED_DESCRIPTOR_PAYLOAD_OFFSET: usize = 16;
@@ -120,6 +122,7 @@ pub const fn own_prefix(kind: u8) -> usize {
         NATIVE_PLAIN => 0,
         NATIVE_GRAPH => GRAPH_PREFIX_BYTES,
         NATIVE_RESOURCE => RESOURCE_PREFIX_BYTES,
+        NATIVE_SPLIT_BYTES => SPLIT_BYTES_PREFIX,
         _ => panic!("native block kind"),
     }
 }
@@ -132,7 +135,7 @@ pub const fn own_prefix(kind: u8) -> usize {
 // address at payload+a, the next frame link at payload+b and, for a point
 // inside an inline array, the cursor at payload+index: words that glue never
 // reads again (hirsel_core_layout::frames). Dynamic buffers retain their GRAPH frame;
-// resources their separate prefix. Kind 3 is unused.
+// resources and split byte blocks their separate prefixes.
 
 // Arc count mutations are inline under the scheduler's event turn. After the
 // operation, with released before last-release glue, take the context-first

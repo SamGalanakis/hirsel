@@ -308,6 +308,8 @@ tags!(AllocPlace {
     2 => Region(part0),
     3 => Frame(part0),
     4 => LentFrame(part0),
+    5 => ByteHead,
+    6 => ByteTail(part0),
 });
 
 tags!(Counted {

@@ -186,6 +186,24 @@ impl Function<'_, '_, '_> {
                         &[ctx, frame, size, charge, overflow],
                     )?;
                     [values[0], values[1], values[2]]
+                } else if matches!(place, AllocPlace::ByteHead | AllocPlace::ByteTail(_)) {
+                    let overflow = overflow.map_or_else(
+                        || self.b.ins().iconst(types::I8, 0),
+                        |v| self.values[v.index()],
+                    );
+                    let mut args = vec![ctx];
+                    let mut signature = vec![p];
+                    let name = if let AllocPlace::ByteTail(head) = place {
+                        args.push(self.get(head));
+                        signature.push(p);
+                        "hirsel_core_alloc_byte_tail"
+                    } else {
+                        "hirsel_core_alloc_byte_head"
+                    };
+                    args.extend([size, charge, overflow]);
+                    signature.extend([u, u, boolean]);
+                    let r = self.c_call(name, &signature, &[p, u, u], &args)?;
+                    [r[0], r[1], r[2]]
                 } else if resource.is_none() && !matches!(place, AllocPlace::Region(_)) {
                     let overflow = overflow.map(|v| self.get(v));
                     let values = self.own_alloc(native_kind, size, alignment, charge, overflow)?;

@@ -395,6 +395,100 @@ fn log_inline_entries_survive_stops() -> bool {
     log_inline_outcomes() == 12 && denied == (1234u64, 64u64, 63u64) && refunded && growth == (admitted, admitted)
 }
 
+fn fail_after_tail_write() {
+    let mut key = bytebuf.with_tail(12)
+    list.fill(mut key, 12, 7u8)
+    let mut frame = bytebuf.from_tail(mut key, 126)
+    list.fill(mut frame, 126, 19u8)
+    fail("after writing the frame")
+}
+
+fn tail_write_under(limit: u64) -> Result[(bool, bool), Capacity] {
+    bound bytes limit {
+        let written = isolate(fail_after_tail_write)
+        let failed_after_write = {
+            if let Ok(Error(take causes)) = take written {
+                let mut failed = false
+                for cause in causes {
+                    if let Fail(_) = cause.kind {
+                        failed = true
+                    }
+                }
+                failed
+            } else {
+                false
+            }
+        }
+        let mut spare: Bytes = list.new()
+        let refunded = match list.try_reserve(mut spare, 144) {
+            Ok(()) => true,
+            Error(_) => false,
+        }
+        (failed_after_write, refunded)
+    }
+}
+
+fn tail_from_other_limit() -> Bytes {
+    let mut key = bytebuf.with_tail(12)
+    list.fill(mut key, 12, 7u8)
+    let mut frame = result.unwrap(bound bytes 128 {
+        bytebuf.from_tail(mut key, 126)
+    })
+    list.fill(mut frame, 126, 19u8)
+    take frame
+}
+
+fn tail_refusal() -> Result[Result[Result[Bytes, Capacity], Causes], Capacity] {
+    isolate(fn() {
+        let mut key = bytebuf.with_tail(12)
+        bound bytes 127 {
+            bytebuf.from_tail(mut key, 126)
+        }
+    })
+}
+
+fn tail_with_other_backing() -> bool {
+    let mut local: Bytes = list.new()
+    list.push(mut local, 11u8)
+    let mut ordinary = bytebuf.from_tail(mut local, 1)
+    list.push(mut ordinary, 29u8)
+    let mut grown = bytebuf.with_tail(12)
+    list.fill(mut grown, 13, 5u8)
+    let mut replacement = bytebuf.from_tail(mut grown, 126)
+    list.fill(mut replacement, 126, 13u8)
+    let mut key = bytebuf.with_tail(12)
+    let mut oversized = bytebuf.from_tail(mut key, 161)
+    list.fill(mut oversized, 161, 31u8)
+    local[0] == 11 && ordinary[0] == 29 && grown[12] == 5 && replacement[125] == 13 && oversized[160] == 31
+}
+
+// The key and frame charge 16 and 128. After an isolated failure, only the
+// replacement 32-byte cause cell is still charged to this 176-byte scope.
+// expect: run byte_tail_charges_and_owners_are_independent() = true
+fn byte_tail_charges_and_owners_are_independent() -> bool {
+    let (failed, refunded) = result.unwrap(tail_write_under(176))
+    let refusal = match caught(tail_refusal()) {
+        Some(c) => c.requested == 128 && c.available == 127,
+        None => false,
+    }
+    let live_frame = tail_from_other_limit()
+    let mut key = bytebuf.with_tail(12)
+    list.fill(mut key, 12, 7u8)
+    let mut copied: Bytes = clone(key)
+    let mut clone_frame = bytebuf.from_tail(mut copied, 126)
+    list.fill(mut clone_frame, 126, 41u8)
+    {
+        let mut first = bytebuf.from_tail(mut key, 126)
+        list.fill(mut first, 126, 23u8)
+        let mut other = bytebuf.from_tail(mut key, 126)
+        list.fill(mut other, 126, 37u8)
+        if first[125] != 23 || other[125] != 37 || clone_frame[125] != 41 {
+            return false
+        }
+    }
+    failed && refunded && refusal && live_frame[125] == 19 && key[11] == 7 && copied[11] == 7 && clone_frame[125] == 41 && tail_with_other_backing()
+}
+
 // An initial capacity of 22 charges 24 bytes. Reserving 22 more after one
 // push doubles it to 44, charging 48 before refunding the original 24.
 fn hinted_buffer_under(limit: u64) -> Result[bool, Capacity] {

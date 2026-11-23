@@ -6,6 +6,7 @@ use std::ptr::NonNull;
 pub const PLAIN: u8 = crate::abi_layout::NATIVE_PLAIN;
 pub const GRAPH: u8 = crate::abi_layout::NATIVE_GRAPH;
 pub const RESOURCE: u8 = crate::abi_layout::NATIVE_RESOURCE;
+pub(crate) const SPLIT_BYTES: u8 = crate::abi_layout::NATIVE_SPLIT_BYTES;
 /// Immutable generated metadata for one concrete fixed owning shape, followed
 /// inline by its suspension [`Point`]s (abi_layout::fixed_point).
 #[repr(C)]
@@ -136,7 +137,14 @@ pub(crate) fn allocate_admitted(
 #[inline]
 pub(crate) unsafe fn funding(payload: NonNull<u8>) -> Payer {
     // SAFETY: the live block pins its page and original payer.
-    unsafe { task_heap::payer(payload) }
+    unsafe {
+        let page = task_heap::page_of(payload);
+        if task_heap::Page::kind(page) == SPLIT_BYTES {
+            crate::split_bytes::payer(page, payload)
+        } else {
+            task_heap::Page::funding(page, payload)
+        }
+    }
 }
 
 /// # Safety
@@ -169,6 +177,10 @@ pub(crate) unsafe fn free_on_page(
     // SAFETY: the payer remains pinned until settlement. The live slot
     // keeps the page after settlement and through physical return.
     unsafe {
+        if task_heap::Page::kind(page) == SPLIT_BYTES {
+            crate::split_bytes::free(page, payload, charge, context);
+            return;
+        }
         if charge != 0 {
             let payer = task_heap::Page::funding(page, payload);
             if let Some(context) = context {

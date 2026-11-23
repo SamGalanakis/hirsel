@@ -744,7 +744,8 @@ fn map_uses(inst: &Inst, f: &mut impl FnMut(ValueId) -> ValueId) -> Inst {
             if let AllocPlace::Like(x)
             | AllocPlace::Region(x)
             | AllocPlace::Frame(x)
-            | AllocPlace::LentFrame(x) = place
+            | AllocPlace::LentFrame(x)
+            | AllocPlace::ByteTail(x) = place
             {
                 *x = f(*x);
             }

@@ -89,6 +89,7 @@ pub use units_lang::bench::pingpong as units_lang_pingpong;
 mod xxh3;
 
 mod frame_list;
+mod split_bytes;
 
 use limit::Funding;
 use std::sync::atomic::AtomicBool;

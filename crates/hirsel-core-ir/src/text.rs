@@ -730,6 +730,8 @@ impl Printer {
                             AllocPlace::Region(r) => format!(" in v{}", r.0),
                             AllocPlace::Frame(r) => format!(" frame v{}", r.0),
                             AllocPlace::LentFrame(r) => format!(" lent_frame v{}", r.0),
+                            AllocPlace::ByteHead => " byte_head".into(),
+                            AllocPlace::ByteTail(r) => format!(" byte_tail v{}", r.0),
                         };
                         format!(
                             "{}, {}{} = alloc {kind} {} align {align} charge {}{place}{}",
@@ -1655,6 +1657,10 @@ impl BodyParser {
                 AllocPlace::LentFrame(l.value()?)
             } else if l.eat("frame") {
                 AllocPlace::Frame(l.value()?)
+            } else if l.eat("byte_head") {
+                AllocPlace::ByteHead
+            } else if l.eat("byte_tail") {
+                AllocPlace::ByteTail(l.value()?)
             } else {
                 AllocPlace::Current
             };

@@ -36,14 +36,23 @@ impl FrameLists {
 
     /// Remove the allocation record if this carrier owns frame storage.
     pub(crate) fn remove(&self, data: NonNull<u8>) -> Option<Payer> {
+        let (link, entry) = self.find(data)?;
+        link.set(entry.next.get());
+        Some(entry.payer)
+    }
+
+    pub(crate) fn contains(&self, data: NonNull<u8>) -> bool {
+        self.find(data).is_some()
+    }
+
+    fn find(&self, data: NonNull<u8>) -> Option<(&Cell<Option<NonNull<Entry>>>, &Entry)> {
         let mut link = &self.first;
         while let Some(entry) = link.get() {
             // SAFETY: the task owns the chain. A registered allocation's frame
             // stays live until this path consumes the allocation.
             let current = unsafe { entry.as_ref() };
             if current.data == data {
-                link.set(current.next.get());
-                return Some(current.payer);
+                return Some((link, current));
             }
             link = &current.next;
         }

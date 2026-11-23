@@ -87,7 +87,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     ) -> ValueId {
         let yes = self.new_block(&[]);
         let no = self.new_block(&[]);
-        let done = self.new_block(&[Ty::Scalar(Scalar::U64)]);
+        let done = self.new_block(&[self.b.values[yes_value.index()]]);
         self.list_branch(on, yes, no, n);
         self.start(yes);
         self.jump(done, &[yes_value], n);
@@ -502,6 +502,35 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         result: TyId,
         n: NodeId,
     ) -> Option<ValueId> {
+        self.list_with_capacity_at(item, count, result, AllocPlace::Current, n)
+    }
+
+    pub(super) fn bytes_from_tail(
+        &mut self,
+        head: ValueId,
+        count: ValueId,
+        result: TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let item = scalar(Scalar::U8);
+        let carrier = self.list_carrier(item, n)?;
+        let cap = self.carrier_word(head, carrier, SeqWord::Cap, n);
+        let data = self.carrier_word(head, carrier, SeqWord::Data, n);
+        let zero = self.konst(Ty::Scalar(Scalar::U64), 0, n)?;
+        let null = self.konst(Ty::Ptr, 0, n)?;
+        let owns = self.list_compare(CompareOp::Ne, cap, zero, n);
+        let key = self.list_choose(owns, data, null, n);
+        self.list_with_capacity_at(item, count, result, AllocPlace::ByteTail(key), n)
+    }
+
+    pub(super) fn list_with_capacity_at(
+        &mut self,
+        item: TyId,
+        count: ValueId,
+        result: TyId,
+        place: AllocPlace,
+        n: NodeId,
+    ) -> Option<ValueId> {
         let list_id = match self.rep(result) {
             Ok(Rep::Place(id)) => id,
             Err(what) => {
@@ -543,7 +572,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
 
         self.start(allocate);
         let plan = self.list_plan(item, count, None, n)?;
-        let (block, available) = self.list_allocate(&plan, AllocPlace::Current, n);
+        let (block, available) = self.list_allocate(&plan, place, n);
         let admitted = self.list_compare(CompareOp::Ne, block, null, n);
         self.raise_unless(admitted, plan.charge, available, n);
         self.list_allocated(to, list_id, block, count, n);

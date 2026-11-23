@@ -1185,7 +1185,8 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
             if let AllocPlace::Like(v)
             | AllocPlace::Region(v)
             | AllocPlace::Frame(v)
-            | AllocPlace::LentFrame(v) = place
+            | AllocPlace::LentFrame(v)
+            | AllocPlace::ByteTail(v) = place
             {
                 c.is(v, Ty::Ptr)?;
             }
@@ -1207,6 +1208,17 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
                         )
                     ),
                     || "frame bytes back only sequence storage and log nodes".into(),
+                )?;
+            }
+            if matches!(place, AllocPlace::ByteHead | AllocPlace::ByteTail(_)) {
+                need(
+                    align == 8
+                        && matches!(
+                            kind,
+                            AllocKind::Own { edge: hirsel_core_layout::FieldTy::Seq(item) }
+                                if **item == hirsel_core_layout::FieldTy::Scalar(Scalar::U8)
+                        ),
+                    || "split byte backing requires a word-aligned byte sequence".into(),
                 )?;
             }
             // Region storage is stable and stable storage is in a region (crate docs,

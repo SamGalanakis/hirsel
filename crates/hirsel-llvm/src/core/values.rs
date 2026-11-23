@@ -157,7 +157,8 @@ pub(super) fn slots(body: &Body, flow: &flow::Flow<'_>) -> Vec<bool> {
                     if let AllocPlace::Region(v)
                     | AllocPlace::Like(v)
                     | AllocPlace::Frame(v)
-                    | AllocPlace::LentFrame(v) = place
+                    | AllocPlace::LentFrame(v)
+                    | AllocPlace::ByteTail(v) = place
                     {
                         read(v);
                     }

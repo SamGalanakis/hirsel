@@ -844,7 +844,9 @@ impl FunctionEmitter<'_> {
                     AllocPlace::Current
                     | AllocPlace::Like(_)
                     | AllocPlace::Frame(_)
-                    | AllocPlace::LentFrame(_) => Payer::Current,
+                    | AllocPlace::LentFrame(_)
+                    | AllocPlace::ByteHead
+                    | AllocPlace::ByteTail(_) => Payer::Current,
                     AllocPlace::Region(r) => Payer::Region(self.numeric(r)),
                 };
                 let (charge, size) = (self.numeric(charge), self.numeric(size));
@@ -868,6 +870,20 @@ impl FunctionEmitter<'_> {
                         ],
                     );
                     admitted
+                } else if matches!(place, AllocPlace::ByteHead | AllocPlace::ByteTail(_)) {
+                    let overflow = overflow.map_or(FALSE, |v| {
+                        let flag = self.numeric(v);
+                        self.cmp(Predicate::Ne, &Type::I8, &flag, &int(0))
+                    });
+                    let mut args = vec![ptr(CONTEXT)];
+                    let name = if let AllocPlace::ByteTail(head) = place {
+                        args.push(ptr(self.numeric(head)));
+                        "hirsel_core_alloc_byte_tail"
+                    } else {
+                        "hirsel_core_alloc_byte_head"
+                    };
+                    args.extend([word(size), word(charge), zeroext(Type::I1, overflow)]);
+                    self.allocation(name, &args)
                 } else {
                     self.allocate_raw(kind, &payer, &charge, &size, align, overflow)
                 };

@@ -24,9 +24,11 @@ pub(crate) fn before_foreign_return(pause: impl FnOnce() + 'static) {
 pub(crate) const SLAB: usize = 64 * 1024;
 const MIN_PAGE_BYTES: usize = 4096;
 const PAYER_BYTES: usize = size_of::<Payer>();
+const NATIVE_KINDS: usize = crate::abi_layout::NATIVE_SPLIT_BYTES as usize + 1;
 const _: () = assert!(
     own_prefix(crate::block::GRAPH) + PAYER_BYTES <= i8::MAX as usize
         && own_prefix(crate::block::RESOURCE) + PAYER_BYTES <= i8::MAX as usize
+        && own_prefix(crate::block::SPLIT_BYTES) + PAYER_BYTES <= i8::MAX as usize
 );
 const GROWTH_RESERVE_FACTOR: usize = 8;
 const MIN_GROWTH_RESERVATION: usize = 256 * 1024;
@@ -630,7 +632,7 @@ fn partial_key(class: Class) -> PartialKey {
     (class.kind, class.bin, class.align)
 }
 
-type Heads = [[Option<PagePointer>; SLAB_BINS]; 3];
+type Heads = [[Option<PagePointer>; SLAB_BINS]; NATIVE_KINDS];
 
 struct EmptyHeads(UnsafeCell<Heads>);
 
@@ -639,7 +641,7 @@ struct EmptyHeads(UnsafeCell<Heads>);
 unsafe impl Sync for EmptyHeads {}
 
 fn empty_heads() -> NonNull<Heads> {
-    static EMPTY_HEADS: EmptyHeads = EmptyHeads(UnsafeCell::new([[None; SLAB_BINS]; 3]));
+    static EMPTY_HEADS: EmptyHeads = EmptyHeads(UnsafeCell::new([[None; SLAB_BINS]; NATIVE_KINDS]));
     NonNull::new(EMPTY_HEADS.0.get()).unwrap()
 }
 
@@ -683,7 +685,7 @@ struct DedicatedCache {
 impl State {
     const fn empty() -> Self {
         Self {
-            heads: [[None; SLAB_BINS]; 3],
+            heads: [[None; SLAB_BINS]; NATIVE_KINDS],
             partial: HashMap::with_hasher(foldhash::fast::FixedState::with_seed(0)),
             listed: Vec::new(),
         }
@@ -1316,16 +1318,6 @@ pub(crate) unsafe fn page_of(payload: NonNull<u8>) -> PagePointer {
     }
     // SAFETY: slab slots share their mapping with its aligned descriptor.
     unsafe { NonNull::new_unchecked(payload.as_ptr().with_addr(address & !(SLAB - 1)).cast()) }
-}
-
-/// # Safety
-/// A live block pins its original payer until its logical refund.
-pub(crate) unsafe fn payer(payload: NonNull<u8>) -> Payer {
-    // SAFETY: the slot is logically live and pins the page and payer.
-    unsafe {
-        let page = page_of(payload);
-        Page::funding(page, payload)
-    }
 }
 
 /// # Safety

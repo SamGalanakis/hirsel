@@ -31,6 +31,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 ),
                 "freeze" => Some(self.freeze_bytes(vals[0]?, result, n)),
                 "as_bytes" => Some(self.view_frozen_bytes(vals[0]?, result, n)),
+                "with_tail" => Some(self.list_with_capacity_at(
+                    scalar(Scalar::U8),
+                    vals[0]?,
+                    result,
+                    AllocPlace::ByteHead,
+                    n,
+                )),
+                "from_tail" => Some(self.bytes_from_tail(vals[0]?, vals[1]?, result, n)),
                 "try_reserve_hint" => Some(self.list_try_reserve(
                     scalar(Scalar::U8),
                     vals[0]?,

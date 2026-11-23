@@ -280,6 +280,8 @@ operations! {
     ("list", "reserve", Lane::Value, "A", "core-check-calls-910", false),
     ("list", "try_reserve", Lane::Value, "A", "capacity-unwind-1492", false),
     ("bytebuf", "try_reserve_hint", Lane::Value, "A", "r8-load-reserve-string-1848", false),
+    ("bytebuf", "with_tail", Lane::Value, "A", "r8-commit-inline-1850", false),
+    ("bytebuf", "from_tail", Lane::Value, "A", "r8-commit-inline-1850", false),
     ("list", "get", Lane::Value, "A", "core-check-calls-910", false),
     ("list", "slice", Lane::Value, "A", "core-check-calls-910", false),
     ("list", "push", Lane::Value, "A", "core-check-calls-910", false),

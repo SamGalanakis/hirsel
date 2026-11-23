@@ -658,6 +658,60 @@ pub struct Allocation {
     pub capacity: Capacity,
 }
 
+impl From<Result<NonNull<u8>, Capacity>> for Allocation {
+    fn from(result: Result<NonNull<u8>, Capacity>) -> Self {
+        match result {
+            Ok(pointer) => Self {
+                pointer: pointer.as_ptr(),
+                capacity: Capacity {
+                    requested: 0,
+                    available: 0,
+                },
+            },
+            Err(capacity) => Self {
+                pointer: ptr::null_mut(),
+                capacity,
+            },
+        }
+    }
+}
+
+/// Admit a small byte buffer, with physical backing for one second buffer.
+/// # Safety
+/// Context is live and task-exclusive. The nonempty buffer has the given charge.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_alloc_byte_head(
+    context: *const Context,
+    bytes: usize,
+    charge: u64,
+    overflow: bool,
+) -> Allocation {
+    crate::split_bytes::key(unsafe { &*context }, bytes, (!overflow).then_some(charge)).into()
+}
+
+/// Admit a byte buffer, using unused backing beside a lent head when it fits.
+/// # Safety
+/// Context is live and task-exclusive. A nonnull head belongs to a live
+/// exclusively lent Bytes carrier with nonzero capacity.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_alloc_byte_tail(
+    context: *const Context,
+    head: *mut u8,
+    bytes: usize,
+    charge: u64,
+    overflow: bool,
+) -> Allocation {
+    unsafe {
+        crate::split_bytes::tail(
+            &*context,
+            NonNull::new(head),
+            bytes,
+            (!overflow).then_some(charge),
+        )
+    }
+    .into()
+}
+
 /// The consuming grow row's two outputs; both targets return them in registers.
 #[repr(C)]
 pub struct Growth {

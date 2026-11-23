@@ -874,6 +874,11 @@ pub enum AllocPlace {
     /// Frame storage with a live allocation record understood by lent callees.
     /// The aligned slot includes FRAME_LIST_LINK_BYTES after its payload.
     LentFrame(ValueId),
+    /// The current limit. A short byte buffer may reserve disjoint tail backing.
+    ByteHead,
+    /// The current limit. A nonnull pointer is data exclusively lent from a
+    /// nonempty owning Bytes carrier, which may have an unused tail.
+    ByteTail(ValueId),
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]

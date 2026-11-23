@@ -163,7 +163,8 @@ pub fn operands(b: &Body, i: &Inst) -> (Vec<usize>, Vec<usize>) {
             if let AllocPlace::Like(x)
             | AllocPlace::Region(x)
             | AllocPlace::Frame(x)
-            | AllocPlace::LentFrame(x) = place
+            | AllocPlace::LentFrame(x)
+            | AllocPlace::ByteTail(x) = place
             {
                 uses.push(v(x));
             }

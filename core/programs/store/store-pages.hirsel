@@ -15,25 +15,32 @@ fn attach_page_tree(pages: Map[u64, Arc[std.page.Page]], ptr: std.page.PagePtr, 
     let root = if ptr.stamp == 0 {
         std.page.empty(0, 0, domain)
     } else {
-        let Some(found) = map.get(pages, ptr.stamp) else { fail("store: missing validated root") }
+        let Some(found) = map.get(pages, ptr.stamp) else {
+            fail("store: missing validated root")
+        }
         arc.share(found)
     }
     PageTree(root: take root, inline: inline, empty_collection: take empty_collection)
 }
 
 fn attach_page_roots(pages: Map[u64, Arc[std.page.Page]], roots: LocatedRoots, inline: u64, empty_collection: Arc[std.page.Page]) -> PageRoots {
-    PageRoots(collections: attach_page_tree(pages, roots.collections, CollectionMap, inline, Some(arc.share(empty_collection))),
-              streams: attach_page_tree(pages, roots.streams, Unprefixed, inline, None),
-              catalog: attach_page_tree(pages, roots.catalog, Unprefixed, inline, None))
+    PageRoots(collections: attach_page_tree(pages, roots.collections, CollectionMap, inline, Some(arc.share(empty_collection))), streams: attach_page_tree(pages, roots.streams, Unprefixed, inline, None), catalog: attach_page_tree(pages, roots.catalog, Unprefixed, inline, None))
 }
 
 fn new_page_tree(domain: std.page.Domain, inline: u64) -> PageTree {
-    let empty_collection = if domain == CollectionMap { Some(std.page.empty(0, 0, Collection)) } else { None }
+    let empty_collection = if domain == CollectionMap {
+        Some(std.page.empty(0, 0, Collection))
+    } else {
+        None
+    }
     PageTree(root: std.page.empty(0, 0, domain), inline: inline, empty_collection: take empty_collection)
 }
 
 fn share_page_tree(tree: PageTree) -> PageTree {
-    let empty_collection = match tree.empty_collection { Some(empty) => Some(arc.share(empty)), None => None }
+    let empty_collection = match tree.empty_collection {
+        Some(empty) => Some(arc.share(empty)),
+        None => None
+    }
     PageTree(root: arc.share(tree.root), inline: tree.inline, empty_collection: take empty_collection)
 }
 
@@ -69,7 +76,11 @@ fn page_result[T](take value: Result[T, std.page.Error]) -> Result[T, Error] {
 
 fn collection_record(root: Arc[std.page.Page], kind: u8) -> Result[Bytes, Error] {
     let (rows, charge) = std.page.totals(root)
-    let id = if rows == 0 { 0u64 } else { std.page.stamp(std.page.image_of(root)) }
+    let id = if rows == 0 {
+        0u64
+    } else {
+        std.page.stamp(std.page.image_of(root))
+    }
     let mut record = std.page.encode_ptr(std.page.unlocated(id))
     capacity(le(mut record, rows, 8))?
     capacity(le(mut record, charge, 8))?
@@ -82,7 +93,9 @@ fn put_collection(mut tree: PageTree, key: Bytes, built: Option[Arc[std.page.Pag
     let root = match built {
         Some(ready) => arc.share(ready),
         None => {
-            let Some(shared) = view tree.empty_collection else { fail("store: missing empty collection page") }
+            let Some(shared) = view tree.empty_collection else {
+                fail("store: missing empty collection page")
+            }
             arc.share(shared)
         },
     }
@@ -101,7 +114,9 @@ fn bulk_collection(mut tree: PageTree, id: u32, kind: u8, rows: List[std.page.Ro
 
 fn count_page_rows(tree: PageTree, id: u32, low: Bytes, high: Bytes) -> Result[u64, Error] {
     let collection_key = prefix(id)?
-    let Some((root, descriptor)) = std.page.collection_entry(tree.root, collection_key) else { return Ok(0u64) }
+    let Some((root, descriptor)) = std.page.collection_entry(tree.root, collection_key) else {
+        return Ok(0u64)
+    }
     let total: u64 = list.word_le(descriptor, 36)
     let from = collection_rank(root, collection_key, low, total)
     let until = collection_rank(root, collection_key, high, total)
@@ -110,9 +125,15 @@ fn count_page_rows(tree: PageTree, id: u32, low: Bytes, high: Bytes) -> Result[u
 
 fn collection_rank(root: Arc[std.page.Page], id_key: Bytes, boundary: Bytes, total: u64) -> u64 {
     let n = list.len(boundary)
-    if n < 4 || list.slice(boundary, 0, 4) < id_key { return 0 }
-    if list.slice(boundary, 0, 4) > id_key { return total }
-    if n == 4 { return 0 }
+    if n < 4 || list.slice(boundary, 0, 4) < id_key {
+        return 0
+    }
+    if list.slice(boundary, 0, 4) > id_key {
+        return total
+    }
+    if n == 4 {
+        return 0
+    }
     std.page.rank(root, list.slice(boundary, 4, n), false)
 }
 
@@ -131,7 +152,9 @@ fn one_page_account(roots: PageRoots) -> u64 {
 fn page_image_charge(node: Arc[std.page.Page], mut seen: Map[u64, ()]) -> u64 {
     let image = std.page.image_of(node)
     let stamp = std.page.stamp(image)
-    if stamp == 0 || map.contains(seen, stamp) { return 0 }
+    if stamp == 0 || map.contains(seen, stamp) {
+        return 0
+    }
     map.insert(mut seen, stamp, ())
     let mut total = list.capacity(std.page.payload(image))
     for slot in 0u64 .. std.page.count(image) {
@@ -173,19 +196,31 @@ fn account_frontier(mut ready: Heap[(Bytes, u64)], walks: List[std.page.Walk], s
 
 fn compare_row_versions(first: std.page.Walk, second: std.page.Walk) -> Order {
     let stamp = std.page.walk_blob_stamp(first)
-    if stamp != 0 && stamp == std.page.walk_blob_stamp(second) { return Equal }
-    let Some(a) = std.page.walk_value(first) else { fail("store: missing row version") }
-    let Some(b) = std.page.walk_value(second) else { fail("store: missing row version") }
+    if stamp != 0 && stamp == std.page.walk_blob_stamp(second) {
+        return Equal
+    }
+    let Some(a) = std.page.walk_value(first) else {
+        fail("store: missing row version")
+    }
+    let Some(b) = std.page.walk_value(second) else {
+        fail("store: missing row version")
+    }
     list.compare_bytes(a, b)
 }
 
 fn count_row_versions(walks: List[std.page.Walk], mut group: List[u64], key_width: u64) -> u64 {
-    list.sort(mut group, scoped fn(a: u64, b: u64) -> Order { compare_row_versions(walks[a], walks[b]) })
+    list.sort(mut group, scoped fn(a: u64, b: u64) -> Order {
+        compare_row_versions(walks[a], walks[b])
+    })
     let mut charge = 0u64
     for slot in 0u64 .. list.len(group) {
         let current = group[slot]
-        if slot != 0 && compare_row_versions(walks[current], walks[group[slot - 1]]) == Equal { continue }
-        let Some(raw) = std.page.walk_value(walks[current]) else { fail("store: missing row version") }
+        if slot != 0 && compare_row_versions(walks[current], walks[group[slot - 1]]) == Equal {
+            continue
+        }
+        let Some(raw) = std.page.walk_value(walks[current]) else {
+            fail("store: missing row version")
+        }
         charge = int.saturating_add(charge, 62 + round8(key_width) + round8(list.len(raw)))
     }
     charge
@@ -197,7 +232,9 @@ fn row_version_union(roots: List[Arc[std.page.Page]], prefix_width: u64) -> u64 
     let mut seen: Map[u64, ()] = map.new()
     for root in roots {
         let stamp = std.page.stamp(std.page.image_of(root))
-        if stamp == 0 || map.contains(seen, stamp) { continue }
+        if stamp == 0 || map.contains(seen, stamp) {
+            continue
+        }
         map.insert(mut seen, stamp, ())
         let slot = list.len(walks)
         list.push(mut walks, std.page.walk_begin(root))
@@ -209,8 +246,13 @@ fn row_version_union(roots: List[Arc[std.page.Page]], prefix_width: u64) -> u64 
         list.clear(mut group)
         list.push(mut group, first)
         loop {
-            let same_key = match heap.peek(ready) { Some((following, _)) => following == key, None => false }
-            if !same_key { break }
+            let same_key = match heap.peek(ready) {
+                Some((following, _)) => following == key,
+                None => false
+            }
+            if !same_key {
+                break
+            }
             let (_, slot) = option.unwrap(heap.pop(mut ready))
             list.push(mut group, slot)
         }
@@ -219,9 +261,14 @@ fn row_version_union(roots: List[Arc[std.page.Page]], prefix_width: u64) -> u64 
         for slot in group {
             if let Some(span) = std.page.walk_subtree(walks[slot]) {
                 if let Some(common) = shared {
-                    if common.stamp != span.stamp { shared = None }
+                    if common.stamp != span.stamp {
+                        shared = None
+                    }
                 }
-                let lvl = match highest { Some(prior) => order.max(prior, span.level), None => span.level }
+                let lvl = match highest {
+                    Some(prior) => order.max(prior, span.level),
+                    None => span.level
+                }
                 highest = Some(lvl)
             } else {
                 shared = None
@@ -229,7 +276,10 @@ fn row_version_union(roots: List[Arc[std.page.Page]], prefix_width: u64) -> u64 
         }
         if let Some(_) = shared {
             let high = option.unwrap(std.page.walk_subtree_high(walks[first]))
-            let overlaps = match heap.peek(ready) { Some((following, _)) => following <= high, None => false }
+            let overlaps = match heap.peek(ready) {
+                Some((following, _)) => following <= high,
+                None => false
+            }
             if !overlaps {
                 charge = int.saturating_add(charge, std.page.walk_subtree_charge(walks[first]))
                 for slot in group {
@@ -242,7 +292,9 @@ fn row_version_union(roots: List[Arc[std.page.Page]], prefix_width: u64) -> u64 
         if let Some(top_level) = highest {
             for slot in group {
                 if let Some(span) = std.page.walk_subtree(walks[slot]) {
-                    if span.level == top_level { std.page.walk_expand(mut walks[slot]) }
+                    if span.level == top_level {
+                        std.page.walk_expand(mut walks[slot])
+                    }
                 }
                 account_frontier(mut ready, walks, slot)
             }
@@ -258,7 +310,9 @@ fn row_version_union(roots: List[Arc[std.page.Page]], prefix_width: u64) -> u64 
 }
 
 fn page_row_account(roots: List[PageRoots]) -> u64 {
-    if list.len(roots) == 1 { return one_page_account(roots[0u64]) }
+    if list.len(roots) == 1 {
+        return one_page_account(roots[0u64])
+    }
     let mut streams: List[Arc[std.page.Page]] = list.with_capacity(list.len(roots))
     let mut catalog: List[Arc[std.page.Page]] = list.with_capacity(list.len(roots))
     let mut collections: Map[u32, List[Arc[std.page.Page]]] = map.new()
@@ -269,7 +323,9 @@ fn page_row_account(roots: List[PageRoots]) -> u64 {
         while let Some(take item) = std.page.cursor_next(mut listed) {
             let std.page.CursorRow(key: take key, collection: take collection_root, ..) = take item
             let id: u32 = list.word_be(key, 0)
-            let Some(take child) = take collection_root else { fail("store: missing collection root") }
+            let Some(take child) = take collection_root else {
+                fail("store: missing collection root")
+            }
             map.update_or_insert(mut collections, id, list.new(), fn(mut group: List[Arc[std.page.Page]]) {
                 list.push(mut group, arc.share(child))
             })
@@ -308,40 +364,46 @@ fn put_page_row(mut tree: PageTree, key: Bytes, value: Bytes, private_from: u64,
     }
     let inline = tree.inline
     let suffix = list.slice(key, 4, list.len(key))
-    page_result(std.page.edit_collection(mut tree.root, collection_key, private_from, mut ids,
-        scoped fn(mut root: Arc[std.page.Page], mut stamps: u64) -> Result[(), std.page.Error] {
-            std.page.insert(mut root, suffix, value, None, inline, private_from, mut stamps)
-        }))
+    page_result(std.page.edit_collection(mut tree.root, collection_key, private_from, mut ids, scoped fn(mut root: Arc[std.page.Page], mut stamps: u64) -> Result[(), std.page.Error] {
+        std.page.insert(mut root, suffix, value, None, inline, private_from, mut stamps)
+    }))
 }
 
 fn put_shared_page_row(mut tree: PageTree, key: Bytes, value: Arc[Bytes], private_from: u64, mut ids: u64) -> Result[(), Error] {
     if tree_domain(tree) != CollectionMap {
         return page_result(std.page.insert_shared(mut tree.root, key, value, tree.inline, private_from, mut ids))
     }
-    if list.len(key) < 4 { return Error(Limit(Key)) }
+    if list.len(key) < 4 {
+        return Error(Limit(Key))
+    }
     let collection_key = list.slice(key, 0, 4)
     let inline = tree.inline
     let suffix = list.slice(key, 4, list.len(key))
-    page_result(std.page.edit_collection(mut tree.root, collection_key, private_from, mut ids,
-        scoped fn(mut root: Arc[std.page.Page], mut stamps: u64) -> Result[(), std.page.Error] {
-            std.page.insert_shared(mut root, suffix, value, inline, private_from, mut stamps)
-        }))
+    page_result(std.page.edit_collection(mut tree.root, collection_key, private_from, mut ids, scoped fn(mut root: Arc[std.page.Page], mut stamps: u64) -> Result[(), std.page.Error] {
+        std.page.insert_shared(mut root, suffix, value, inline, private_from, mut stamps)
+    }))
 }
 
 fn remove_page_row(mut tree: PageTree, key: Bytes, private_from: u64, mut ids: u64) -> Result[bool, Error] {
     if tree_domain(tree) != CollectionMap {
         return page_result(std.page.remove(mut tree.root, key, private_from, mut ids))
     }
-    let present = match get_page_row(tree, key) { Some(_) => true, None => false }
-    if !present { return Ok(false) }
+    let present = match get_page_row(tree, key) {
+        Some(_) => true,
+        None => false
+    }
+    if !present {
+        return Ok(false)
+    }
     let collection_key = list.slice(key, 0, 4)
     let suffix = list.slice(key, 4, list.len(key))
-    let Some(empty_root) = view tree.empty_collection else { fail("store: missing empty collection page") }
-    page_result(std.page.edit_collection(mut tree.root, collection_key, private_from, mut ids,
-        scoped fn(mut root: Arc[std.page.Page], mut stamps: u64) -> Result[(), std.page.Error] {
-            let _ = std.page.remove_with_empty(mut root, suffix, empty_root, private_from, mut stamps)?
-            Ok(())
-        }))?
+    let Some(empty_root) = view tree.empty_collection else {
+        fail("store: missing empty collection page")
+    }
+    page_result(std.page.edit_collection(mut tree.root, collection_key, private_from, mut ids, scoped fn(mut root: Arc[std.page.Page], mut stamps: u64) -> Result[(), std.page.Error] {
+        let _ = std.page.remove_with_empty(mut root, suffix, empty_root, private_from, mut stamps)?
+        Ok(())
+    }))?
     Ok(true)
 }
 
@@ -364,14 +426,26 @@ fn open_page_range(tree: PageTree, start: Option[Bytes], inclusive: bool, revers
     let nested = tree_domain(tree) == CollectionMap
     let initial: Option[Bytes] = match start {
         None => None,
-        Some(key) => Some(copied(list.slice(key, 0, if nested { order.min(4, list.len(key)) } else { list.len(key) }))?),
+        Some(key) => Some(copied(list.slice(key, 0, if nested {
+            order.min(4, list.len(key))
+        } else {
+            list.len(key)
+        }))?),
     }
     let outer_stop: Option[Bytes] = match view stop {
         None => None,
         Some(key) => {
             // Collection keys are four bytes. A longer upper bound includes
             // its collection; a lower bound always includes its collection.
-            let width = if !nested { list.len(key) } else { order.min(if reverse { 4 } else { 5 }, list.len(key)) }
+            let width = if !nested {
+                list.len(key)
+            } else {
+                order.min(if reverse {
+                    4
+                } else {
+                    5
+                }, list.len(key))
+            }
             Some(copied(list.slice(key, 0, width))?)
         },
     }
@@ -383,8 +457,7 @@ fn open_page_range(tree: PageTree, start: Option[Bytes], inclusive: bool, revers
     }
     let outer_inclusive = inclusive || (nested && (!reverse || within_collection))
     let listed = std.page.cursor_open_bounded(tree.root, initial, outer_inclusive, reverse, take outer_stop)
-    Ok(PageRange(listed: take listed, nested: nested, active: list.new(), collection: 0,
-                 start: clone(start), stop: take stop, inclusive: inclusive, reverse: reverse))
+    Ok(PageRange(listed: take listed, nested: nested, active: list.new(), collection: 0, start: clone(start), stop: take stop, inclusive: inclusive, reverse: reverse))
 }
 
 fn next_page_range(mut rows: PageRange) -> Result[Option[(Bytes, Arc[Bytes])], Error] {
@@ -403,40 +476,61 @@ fn next_page_range(mut rows: PageRange) -> Result[Option[(Bytes, Arc[Bytes])], E
             }
             let _ = list.pop(mut rows.active)
         }
-        if !next_page_collection(mut rows)? { return Ok(None) }
+        if !next_page_collection(mut rows)? {
+            return Ok(None)
+        }
     }
 }
 
 fn next_page_collection(mut rows: PageRange) -> Result[bool, Error] {
-    let Some(take found) = std.page.cursor_next(mut rows.listed) else { return Ok(false) }
+    let Some(take found) = std.page.cursor_next(mut rows.listed) else {
+        return Ok(false)
+    }
     let std.page.CursorRow(key: take key, collection: take subtree, ..) = take found
-    let Some(take root) = take subtree else { return Error(malformed(0)) }
+    let Some(take root) = take subtree else {
+        return Error(malformed(0))
+    }
     rows.collection = list.word_be(key, 0)
     let start: Option[Bytes] = match rows.start {
         Some(boundary) => if list.len(boundary) >= 4 && list.slice(boundary, 0, 4) == key {
             Some(copied(list.slice(boundary, 4, list.len(boundary)))?)
-        } else { None },
+        } else {
+            None
+        },
         None => None,
     }
     let stop: Option[Bytes] = match rows.stop {
         Some(boundary) => if list.len(boundary) > 4 && list.slice(boundary, 0, 4) == key {
             Some(copied(list.slice(boundary, 4, list.len(boundary)))?)
-        } else { None },
+        } else {
+            None
+        },
         None => None,
     }
     list.push(mut rows.active, std.page.cursor_open_bounded(root, start, rows.inclusive, rows.reverse, take stop))
     Ok(true)
 }
 
-fn page_change_rows(mut out: List[Change], id: u32, mut left: std.page.Walk, mut right: std.page.Walk) -> Result[(), Error] {
+// Locate the next leaf pair in range, skipping matching subtrees before descent.
+fn diff_position(mut left: std.page.Walk, mut right: std.page.Walk, high: Option[Bytes]) -> Option[(Bytes, Order)] {
     loop {
         let old_key = std.page.walk_key(left)
         let new_key = std.page.walk_key(right)
         let comparison = match (view old_key, view new_key) {
-            (None, None) => return Ok(()),
+            (None, None) => return None,
             (None, Some(_)) => Greater,
             (Some(_), None) => Less,
             (Some(a), Some(b)) => list.compare_bytes(a, b),
+        }
+        let key = if comparison == Greater {
+            option.unwrap(take new_key)
+        } else {
+            option.unwrap(take old_key)
+        }
+        if let Some(end) = high {
+            if key >= end {
+                return None
+            }
         }
         let old_span = std.page.walk_subtree(left)
         let new_span = std.page.walk_subtree(right)
@@ -465,48 +559,146 @@ fn page_change_rows(mut out: List[Change], id: u32, mut left: std.page.Walk, mut
                 continue
             }
         }
-        if comparison == Less {
-            list.push(mut out, Change(tree_key: logical_key(id, option.unwrap(take old_key))?, value: None))
-        } else if comparison == Greater || compare_row_versions(left, right) != Equal {
-            let replacement = std.page.walk_owned_value(right)
-            list.push(mut out, Change(tree_key: logical_key(id, option.unwrap(take new_key))?, value: take replacement))
-        }
-        if comparison != Greater { std.page.walk_next(mut left) }
-        if comparison != Less { std.page.walk_next(mut right) }
+        return Some((take key, comparison))
     }
 }
 
-fn compare_page_collections(before: PageTree, after: PageTree) -> Result[List[Change], Error] {
-    let mut out: List[Change] = list.new()
-    if tree_stamp(before) == tree_stamp(after) { return Ok(take out) }
-    let mut left = std.page.cursor_open(before.root, None, true, false)
-    let mut right = std.page.cursor_open(after.root, None, true, false)
-    let mut old_collection = std.page.cursor_next(mut left)
-    let mut new_collection = std.page.cursor_next(mut right)
-    loop {
-        let comparison = match (view old_collection, view new_collection) {
-            (None, None) => return Ok(take out),
-            (None, Some(_)) => Greater,
-            (Some(_), None) => Less,
-            (Some(a), Some(b)) => list.compare_bytes(a.key, b.key),
-        }
-        let mut id = 0u32
-        let mut from = std.page.walk_empty()
-        let mut until = std.page.walk_empty()
-        if comparison != Greater {
-            let Some(item) = view old_collection else { fail("store: missing old collection") }
-            let Some(root) = item.collection else { fail("store: missing collection root") }
-            id = list.word_be(item.key, 0)
-            from = std.page.walk_begin(root)
-        }
-        if comparison != Less {
-            let Some(item) = view new_collection else { fail("store: missing new collection") }
-            let Some(root) = item.collection else { fail("store: missing collection root") }
-            id = list.word_be(item.key, 0)
-            until = std.page.walk_begin(root)
-        }
-        page_change_rows(mut out, id, mut from, mut until)?
-        if comparison != Greater { old_collection = std.page.cursor_next(mut left) }
-        if comparison != Less { new_collection = std.page.cursor_next(mut right) }
+fn diff_advance(mut left: std.page.Walk, mut right: std.page.Walk, comparison: Order) {
+    if comparison != Greater {
+        std.page.walk_next(mut left)
     }
+    if comparison != Less {
+        std.page.walk_next(mut right)
+    }
+}
+
+type ChangeOutput {
+    rows: List[Change],
+    remaining: u64,
+    limits: Option[Limits],
+    next: Option[Bytes]
+}
+
+fn page_change_rows(mut out: ChangeOutput, id: u32, mut left: std.page.Walk, mut right: std.page.Walk, high: Option[Bytes]) -> Result[bool, Error] {
+    while let Some((take key, comparison)) = diff_position(mut left, mut right, high) {
+        if comparison != Equal || compare_row_versions(left, right) != Equal {
+            let logical = logical_key(id, key)?
+            if let Some(limits) = out.limits {
+                let value_width = if comparison == Less {
+                    0u64
+                } else {
+                    let raw = option.unwrap(std.page.walk_value(right))
+                    list.len(raw)
+                }
+                let width = int.saturating_add(list.len(logical), value_width)
+                let included = list.len(out.rows)
+                if included == limits.rows || (included != 0 && width > out.remaining) {
+                    out.next = Some(take logical)
+                    return Ok(false)
+                }
+                out.remaining = int.saturating_sub(out.remaining, width)
+            }
+            let replacement: Option[Arc[Bytes]] = if comparison == Less {
+                None
+            } else {
+                std.page.walk_owned_value(right)
+            }
+            list.push(mut out.rows, Change(tree_key: take logical, value: take replacement))
+        }
+        diff_advance(mut left, mut right, comparison)
+    }
+    Ok(true)
+}
+
+fn start_diff(root: Option[View[Arc[std.page.Page]]], low: Option[Bytes]) -> std.page.Walk {
+    let Some(page) = root else {
+        return std.page.walk_empty()
+    }
+    match low {
+        None => std.page.walk_begin(page),
+        Some(key) => std.page.walk_from(page, key),
+    }
+}
+
+fn diff_bound(boundary: Option[Bytes], collection: Bytes) -> Option[Bytes] {
+    if let Some(key) = boundary {
+        if list.len(key) > 4 && list.slice(key, 0, 4) == collection {
+            return Some(clone(list.slice(key, 4, list.len(key))))
+        }
+    }
+    None
+}
+
+fn walk_page_changes(mut out: ChangeOutput, before: Option[View[PageTree]], after: PageTree, low: Option[Bytes], high: Option[Bytes]) -> Result[(), Error] {
+    let low_id: Option[Bytes] = match low {
+        None => None,
+        Some(key) => Some(clone(list.slice(key, 0, order.min(4, list.len(key))))),
+    }
+    let mut left = match before {
+        None => std.page.walk_empty(),
+        Some(tree) => start_diff(Some(view tree.root), low_id)
+    }
+    let mut right = start_diff(Some(view after.root), low_id)
+    while let Some((take key, comparison)) = diff_position(mut left, mut right, high) {
+        if comparison != Equal || compare_row_versions(left, right) != Equal {
+            let start = diff_bound(low, key)
+            let stop = diff_bound(high, key)
+            let mut from = if comparison == Greater {
+                std.page.walk_empty()
+            } else {
+                let root = std.page.walk_collection(left)
+                start_diff(Some(view root), start)
+            }
+            let mut until = if comparison == Less {
+                std.page.walk_empty()
+            } else {
+                let root = std.page.walk_collection(right)
+                start_diff(Some(view root), start)
+            }
+            let id: u32 = list.word_be(key, 0)
+            if !page_change_rows(mut out, id, mut from, mut until, stop)? {
+                break
+            }
+        }
+        diff_advance(mut left, mut right, comparison)
+    }
+    Ok(())
+}
+
+fn compare_page_collections(before: PageTree, after: PageTree) -> Result[List[Change], Error] {
+    let mut out = ChangeOutput(rows: list.new(), remaining: 0, limits: None, next: None)
+    walk_page_changes(mut out, Some(view before), after, None, None)?
+    let ChangeOutput(rows: take rows, ..) = take out
+    Ok(take rows)
+}
+
+pub type Trimmed {
+    lo: Bytes,
+    hi: Bytes
+}
+
+pub type ChangePage {
+    changes: List[Change],
+    trimmed: List[Trimmed],
+    next: Option[Bytes]
+}
+
+pub fn changes_page(a: Option[Snapshot], b: Snapshot, lo: Bytes, hi: Bytes, l: Limits) -> Result[ChangePage, Error] {
+    page_limits(l)?
+    if let Some(base) = a {
+        if !same(base.store, b.store) || base.open != b.open {
+            return Error(Foreign)
+        }
+    }
+    let mut out = ChangeOutput(rows: list.new(), remaining: l.byte_limit, limits: Some(l), next: None)
+    if lo < hi {
+        let low: Option[Bytes] = Some(clone(lo))
+        let high: Option[Bytes] = Some(clone(hi))
+        match a {
+            None => walk_page_changes(mut out, None, b.roots.collections, low, high)?,
+            Some(base) => walk_page_changes(mut out, Some(view base.roots.collections), b.roots.collections, low, high)?,
+        }
+    }
+    let ChangeOutput(rows: take rows, next: take resume, ..) = take out
+    Ok(ChangePage(changes: take rows, trimmed: list.new(), next: take resume))
 }

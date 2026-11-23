@@ -2989,6 +2989,30 @@ pub fn walk_begin(root: Arc[Page]) -> Walk {
     Walk(path: take path)
 }
 
+/// Seek to the inclusive lower bound, retaining whole subtrees after the seek path.
+pub fn walk_from(root: Arc[Page], low: Bytes) -> Walk {
+    let mut walk = walk_begin(root)
+    while let Some(key) = walk_key(walk) {
+        if key >= low {
+            break
+        }
+        if let Some(high) = walk_subtree_high(walk) {
+            if high >= low {
+                walk_expand(mut walk)
+                continue
+            }
+        }
+        walk_next(mut walk)
+    }
+    take walk
+}
+
+/// The child named by a collection-map row.
+pub fn walk_collection(walk: Walk) -> Arc[Page] {
+    let top = option.unwrap(list.last(walk.path))
+    arc.share(top.page.kids[top.slot])
+}
+
 pub fn walk_empty() -> Walk {
     Walk(path: list.new())
 }

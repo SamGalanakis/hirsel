@@ -77,8 +77,9 @@
     "lines": 1374
   },
   "core/std/page.hirsel": {
-    "lines": 3115,
-    "reason": "reexec-1902"
+    "lines": 3139,
+    "raise_revision": 1,
+    "reason": "w3a-b-codec-changes-2008"
   },
   "core/std/prop.hirsel": {
     "lines": 1743

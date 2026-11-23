@@ -1,0 +1,122 @@
+// L73. Table 1's u64 key is 12 bytes (4-byte id + 8-byte value).
+// A stored Bytes value has a 2-byte schema number and a 4-byte length.
+fn bounded_law_key(k: u64) -> Bytes {
+    let mut raw: Bytes = list.new()
+    list.put_word_be(mut raw, 1u32)
+    list.put_word_be(mut raw, k)
+    take raw
+}
+
+fn bounded_law_value(k: u64) -> Bytes {
+    let width = if k == 0 {
+        282u64
+    } else {
+        82u64
+    }
+    let mut raw: Bytes = list.with_capacity(width)
+    list.fill(mut raw, width, int.truncate(k))
+    take raw
+}
+
+fn bounded_law_pages(s: Snapshot, first: u64, until: u64, rows: u64, byte_limit: u64, ideal_rows: u64, pages: u64) -> bool {
+    let hi = bounded_law_key(until)
+    let mut lo = bounded_law_key(first)
+    let mut key = first
+    for _ in 0u64 .. pages {
+        let expected_rows = order.min(ideal_rows, until - key)
+        let page = result.unwrap(changes_page(None, s, lo, hi, Limits(rows: rows, byte_limit: byte_limit)))
+        if list.len(page.changes) != expected_rows || list.len(page.trimmed) != 0 {
+            return false
+        }
+        for row in page.changes {
+            if row.tree_key != bounded_law_key(key) {
+                return false
+            }
+            let Some(raw) = view row.value else {
+                return false
+            }
+            if list.compare_bytes(raw, view_law_stored(bounded_law_value(key))) != Equal {
+                return false
+            }
+            key += 1
+        }
+        match page.next {
+            Some(resume) => {
+                if key == until || resume != bounded_law_key(key) {
+                    return false
+                }
+                lo = clone(resume)
+            },
+            None => if key != until {
+                return false
+            },
+        }
+    }
+    key == until
+}
+
+@test
+fn projector_bounded(c: Clock) -> Result[(), ()] waits {
+    let mut db = test_db(c, 1073741824)
+    result.unwrap(create_table(mut db, spec("source", std.codec.key_u64(), std.codec.of_bytes())))
+    let t = result.unwrap(table(mut db, "source", std.codec.key_u64(), std.codec.of_bytes()))
+    let committed = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+        for k in 0u64 .. 12 {
+            put(mut tx, t, k, bounded_law_value(k))?
+        }
+        Ok(())
+    }))
+    if let Committed(_) = committed {} else {
+        return Error(())
+    }
+    let base = snapshot(db)
+    if !bounded_law_pages(base, 1, 11, 10, 100, 1, 10) {
+        return Error(())
+    }
+    if !bounded_law_pages(base, 0, 4, 10, 100, 1, 4) {
+        return Error(())
+    }
+    if !bounded_law_pages(base, 1, 11, 4, 1000, 4, 3) {
+        return Error(())
+    }
+    let changed = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+        put(mut tx, t, 2, bounded_law_value(2))?
+        let _ = delete(mut tx, t, 4)?
+        put(mut tx, t, 6, bounded_law_value(4))?
+        Ok(())
+    }))
+    if let Committed(_) = changed {} else {
+        return Error(())
+    }
+    let newer = snapshot(db)
+    let high = bounded_law_key(7)
+    let limits = Limits(rows: 2, byte_limit: 100)
+    let first = result.unwrap(changes_page(Some(clone(base)), newer, bounded_law_key(2), high, limits))
+    if list.len(first.changes) != 1 || first.changes[0u64].tree_key != bounded_law_key(4) {
+        return Error(())
+    }
+    if let Some(_) = first.changes[0u64].value {
+        return Error(())
+    }
+    let Some(resume) = view first.next else {
+        return Error(())
+    }
+    if resume != bounded_law_key(6) {
+        return Error(())
+    }
+    let last = result.unwrap(changes_page(Some(base), newer, resume, high, limits))
+    if list.len(last.changes) != 1 || last.changes[0u64].tree_key != bounded_law_key(6) {
+        return Error(())
+    }
+    if let Some(_) = last.next {
+        return Error(())
+    }
+    let Some(raw) = view last.changes[0u64].value else {
+        return Error(())
+    }
+    if list.compare_bytes(raw, view_law_stored(bounded_law_value(4))) == Equal {
+        Ok(())
+    } else {
+        Error(())
+    }
+}

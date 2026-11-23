@@ -155,10 +155,10 @@ and exits. Start the executable again to serve.
 A bare install exits 0 whatever host the store belongs to: it skips the current-image guard
 and writes a `Describe` that names no assembly record. That is right for a standalone place
 and wrong for a store a platform host serves, whose group then matches none of its records.
-A hand install meant for a hosted group must launch as one of the group's retained records:
-pass that record's `--hirsel-assembly=<hex>`<!-- doc-ref: planned --> and its allowance
+A hand install meant for a hosted group must launch as one of the records the host can adopt,
+the failed deploy's OLD or NEW that the group still keeps: pass that record's `--hirsel-assembly=<hex>`<!-- doc-ref: planned --> and its allowance
 `--hirsel-n-place=<bytes>`<!-- doc-ref: external -->, and run its exact image. The group's
-`Status.failing[].last` names the retained records when the host finds no match. The group's
+`Status.failing[].last` names those candidates when the host finds no match. The group's
 next retry reads the store and serves that record at the installed activation
 (RUNNER-SPEC §14.3 "Leaving no record"); a group left failing by a decided deploy recovers
 only this way, because a hot deploy needs a live OLD. Both options are run arguments,
@@ -453,7 +453,7 @@ record, so at most one of OLD's and NEW's matches, and a probe that opens always
 record it opened; when neither matches, nothing is selected, the group's row keeps a durable
 no-record mark (the attempt, the read's activation and the assembly its `Describe` names), and
 the group is failing with the cause `No retained assembly matches the store at activation a`,
-followed by that assembly name (or "names no assembly") and the retained records' names. The
+followed by that assembly name (or "names no assembly") and the names of the candidates below. The
 mark, not the start that last failed, carries the cause, so retries refused at the stale
 activation and a host restart keep it. Each retry of a marked group, once refused, reads the
 store as the probe does, without the witness row; when the read's image is the `Describe`

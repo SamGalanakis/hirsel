@@ -2496,6 +2496,7 @@ fn provider_samples_match_the_hand_oracle_and_every_closed_row_emits() {
             HostOp::ScramVerify => &["u64", "ptr"],
             HostOp::SecretSeal => &["ptr", "ptr"],
             HostOp::SecretNarrow => &["u64", "ptr"],
+            HostOp::SecretDeriveHmac => &["u64", "ptr", "ptr", "ptr"],
             HostOp::NetSplit
             | HostOp::Stopped
             | HostOp::EnvLen

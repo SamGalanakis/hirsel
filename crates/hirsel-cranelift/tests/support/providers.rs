@@ -302,6 +302,7 @@ fn every_host_row_preserves_c_fields_and_status() {
                     | HostOp::SecretSeal
                     | HostOp::SecretNarrow
                     | HostOp::SecretHmac
+                    | HostOp::SecretDeriveHmac
                     | HostOp::SecretVerifyHmac
                     | HostOp::NetSplit
                     | HostOp::StdinRead
@@ -403,6 +404,7 @@ fn every_host_row_preserves_c_fields_and_status() {
                     | HostOp::SecretSeal
                     | HostOp::SecretNarrow
                     | HostOp::SecretHmac
+                    | HostOp::SecretDeriveHmac
                     | HostOp::SecretVerifyHmac
                     | HostOp::NetSplit
                     | HostOp::StdinRead

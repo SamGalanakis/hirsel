@@ -35,6 +35,7 @@ pub const STDIN_READ: u8 = 32;
 pub const READ_AT: u8 = 37;
 pub const WRITE_AT: u8 = 38;
 pub const SECRET_MAC: u8 = 39;
+pub const SECRET_KDF: u8 = 79;
 pub const RESOLVE: u8 = 40;
 pub const OPEN_DIR: u8 = 43;
 pub const ENTRIES: u8 = 44;

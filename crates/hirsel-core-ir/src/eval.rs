@@ -4473,18 +4473,7 @@ impl Machine<'_> {
                 use zeroize::Zeroize;
                 self.mem[block].bytes[offset..offset + bytes.len()].zeroize();
             }
-            let seal = Arc::new(());
-            self.world
-                .seals
-                .push((Arc::downgrade(&seal), payer.clone(), charge));
-            let key = self.designate(
-                EvalSecret {
-                    policy,
-                    bytes: Arc::new(bytes),
-                    seal,
-                },
-                (payer.clone(), 0),
-            );
+            let key = self.store_sealed(policy, bytes, payer.clone(), charge);
             return vec![key, 0, 0, 0];
         } else {
             let parent = self.secret(a[0]).unwrap();
@@ -4499,6 +4488,50 @@ impl Machine<'_> {
             },
             (payer, charge),
         );
+        vec![key, 0, 0, 0]
+    }
+
+    fn store_sealed(
+        &mut self,
+        policy: SecretPolicy,
+        bytes: Zeroizing<Vec<u8>>,
+        payer: Limit,
+        charge: u64,
+    ) -> u64 {
+        let seal = Arc::new(());
+        self.world
+            .seals
+            .push((Arc::downgrade(&seal), payer.clone(), charge));
+        self.designate(
+            EvalSecret {
+                policy,
+                bytes: Arc::new(bytes),
+                seal,
+            },
+            (payer, 0),
+        )
+    }
+
+    fn secret_derive(&mut self, t: &Task, a: &[u64]) -> Vec<u64> {
+        let parent = self.secret(a[0]).unwrap();
+        let policy = std::str::from_utf8(self.carrier_bytes(a[3]))
+            .ok()
+            .and_then(|uses| parent.policy.derived(uses));
+        let Some(policy) = policy else {
+            return vec![0, 1, 0, 0];
+        };
+        let charge = SecretGrant::logical_size(&policy.send, 32).unwrap();
+        let payer = t.limits.last().unwrap();
+        if let Err(available) = self.admit_charge(payer, charge, false) {
+            return vec![charge, 2, 0, available];
+        }
+        let parent = self.secret(a[0]).unwrap();
+        let bytes = hirsel_core_net::derive_hmac_sha256(
+            &parent.bytes,
+            self.carrier_bytes(a[1]),
+            self.carrier_bytes(a[2]),
+        );
+        let key = self.store_sealed(policy, bytes, payer.clone(), charge);
         vec![key, 0, 0, 0]
     }
 
@@ -4732,6 +4765,7 @@ impl Machine<'_> {
             HostOp::ScramFinalLen => return Ok(self.scram_final_len(a)),
             HostOp::ScramVerify => return Ok(self.scram_verify(a)),
             HostOp::SecretNarrow => return Ok(self.secret_policy(t, op, a)),
+            HostOp::SecretDeriveHmac => return Ok(self.secret_derive(t, a)),
             HostOp::SecretHmac | HostOp::SecretVerifyHmac => return Ok(self.secret_mac(op, a)),
             HostOp::EnvGet | HostOp::EnvLen | HostOp::EnvName | HostOp::EnvNarrow => {
                 return Ok(self.env(t, op, a));
@@ -4785,6 +4819,7 @@ impl Machine<'_> {
             | HostOp::ScramVerify
             | HostOp::SecretSeal
             | HostOp::SecretNarrow
+            | HostOp::SecretDeriveHmac
             | HostOp::SecretHmac
             | HostOp::SecretVerifyHmac
             | HostOp::EnvGet

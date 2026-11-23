@@ -285,6 +285,7 @@ most once:
 | `tls_send(<patterns>)` | `tls.send_secret` and `secret.scram_sha256` on a stream whose verified name one of the comma-separated TLS-3 patterns covers |
 | `mac` | `secret.hmac_sha256` and `secret.verify_hmac_sha256` (the MAC sink, below) |
 | `verify` | `secret.verify_hmac_sha256` only |
+| `kdf` | `secret.derive_hmac_sha256` |
 | `sign(<alg>)` | signing with `<alg>`, one of `ed25519`, `p256` and `rs256` |
 | `wrap` | use as a key-encryption key |
 | `mtls_client_id` | use as a TLS client identity |
@@ -293,7 +294,7 @@ most once:
 only inside `tls_send(...)` and a use word only outside it, so `tls_send(mac)` sends to
 the host `mac` and permits no MAC. A policy with no use, a word given twice, an unknown
 word or a malformed pattern list is `Invalid`. The canonical text, which recordings and
-diagnostics print, writes `tls_send` first, then `mac` or `verify`, the `sign` uses in the
+diagnostics print, writes `tls_send` first, then `mac` or `verify`, `kdf`, the `sign` uses in the
 order above, `wrap` and `mtls_client_id`, with each pattern as TLS-3 prints it. No
 operation yet reads `sign`, `wrap` or `mtls_client_id`: a policy may hold them and
 `narrow` intersects them, so the policy's shape is final.
@@ -342,7 +343,7 @@ every other use remains when both policies hold it. If no use remains, or `uses`
 refusal returns `Capacity(c)`.
 
 **Holders and release.** Each `Secret` value is one **holder** of a **designation**: the
-bytes it designates together with its policy. `seal`, `narrow` and `provide.secret`
+bytes it designates together with its policy. `seal`, `derive_hmac_sha256`, `narrow` and `provide.secret`
 ([core](core.md#provide)) each make a new designation with one holder.
 `secret.share(s)` returns one more holder of the designation of `s`, as `share` adds a
 holder of an `Rc` ([MEM-16](memory.md#mem-16-counting)): it admits nothing, never fails
@@ -351,12 +352,12 @@ designation is dropped, the designation is **released**: the charge that `narrow
 `provide.secret` admitted for it is refunded. The bytes of a sealed secret stay while
 any designation of them is held, since `narrow` and `provide.secret` designate the same
 bytes. When the last of them is released, the runtime zeroes the bytes and refunds the
-charge that `seal` admitted. So a program that seals a fresh token every hour and drops
+charge that `seal` or `derive_hmac_sha256` admitted. So a program that seals a fresh token every hour and drops
 the old one holds the storage of one token, not of every token it has sealed.
 
 A release is not a provider operation: it passes no replay point, takes no step, cannot
 fail and adds no frame to a recording. A designation is recorded by its origin (the
-grant, or the order of its seal), never by where the runtime keeps it, so a release
+grant, seal ordinal or derivation delivery position), never by where the runtime keeps it, so a release
 changes no recorded value ([recording](../recording.md#credentials)). Each charge is paid
 by the limit that admitted it ([MEM-19](budgets.md#mem-19-limits)). A refund from
 another unit reaches that limit as any cross-unit refund does
@@ -368,7 +369,7 @@ stay with the helper's owner, as the charges of its open connections do
 **No cleartext accessor.** No operation returns a secret's bytes, their length, any
 unkeyed digest of them, or the result of comparing them. The MAC sink's keyed tag and
 verdict, and the SCRAM sink's verdict, are the only values computed from them that reach the
-program. The SCRAM proof goes only onto an authorized stream (TLS-6). Because `Secret` is not `codec`, no
+program. A derivation returns an opaque designation. The SCRAM proof goes only onto an authorized stream (TLS-6). Because `Secret` is not `codec`, no
 store or JSON codec encodes one. `secret.render` returns the fixed marker
 `[secret]` for every secret. Every std function that renders, logs or describes a value
 holding a secret writes this marker in the secret's place. This includes the HTTP
@@ -425,6 +426,24 @@ key never does. `hmac_sha256` needs the `mac` use, and `verify_hmac_sha256` need
 or `verify`. Without the use, the result is `Denied` before issue, with no effect. A tag over chosen data is a
 signing oracle wherever it is sent, which is why the use must be granted. A signature
 sink with another algorithm follows the same rule.
+
+**The HMAC derivation sink.**
+
+```hirsel core
+pub fn derive_hmac_sha256(s: Secret, key_prefix: Bytes, data: Bytes, uses: String) -> Result[Secret, SecretError]
+```
+
+The runtime computes HMAC-SHA256 over `data` with `key_prefix` followed by the bytes
+of `s` as the key. It keeps the resulting 32 bytes as a new sealed secret. The
+parent must permit `kdf`. The child policy must be nonempty and a subset of
+`mac kdf`, including the `verify` use that `mac` permits. A refused or malformed
+policy gives `Invalid` before issue. The runtime admits 64 bytes for the child
+under the caller's current limit and returns `Capacity(c)` if admission refuses.
+
+The call never waits. A successful result passes the replay point. A recording
+holds the parent designation, the child policy, `key_prefix` and `data`, and a
+success delivery. Replay makes the child designation without key material.
+The runtime zeroes derived bytes when their last designation is released.
 
 ### TLS-6: SCRAM-SHA-256
 

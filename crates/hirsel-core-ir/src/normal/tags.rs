@@ -472,6 +472,7 @@ tags!(HostOp {
     115 => NetNarrowUnix,
     116 => SleepUntilWall,
     117 => RecvReady,
+    118 => SecretDeriveHmac,
 });
 
 tags!(RaiseCause {

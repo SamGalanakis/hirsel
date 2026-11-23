@@ -1101,6 +1101,7 @@ pub enum HostOp {
     WriteAt = 38,
     SecretHmac = hirsel_core_ids::host_op::SECRET_MAC as isize,
     SecretVerifyHmac = 42,
+    SecretDeriveHmac = hirsel_core_ids::host_op::SECRET_KDF as isize,
     Resolve = hirsel_core_ids::host_op::RESOLVE as isize,
     NetNarrowResolve = 41,
     StdinRead = hirsel_core_ids::host_op::STDIN_READ as isize,
@@ -1190,6 +1191,7 @@ impl HostOp {
         HostOp::SecretNarrow,
         HostOp::SecretHmac,
         HostOp::SecretVerifyHmac,
+        HostOp::SecretDeriveHmac,
         HostOp::RecvBounded,
         HostOp::RecvReady,
         HostOp::SendPair,
@@ -1309,6 +1311,7 @@ impl HostOp {
             HostOp::SecretSeal => "secret_seal",
             HostOp::SecretNarrow => "secret_narrow",
             HostOp::SecretHmac => "secret_hmac_sha256",
+            HostOp::SecretDeriveHmac => "secret_derive_hmac_sha256",
             HostOp::SecretVerifyHmac => "secret_verify_hmac_sha256",
             HostOp::NetSplit => "net_split",
             HostOp::NetJoin => "net_join",
@@ -1374,6 +1377,7 @@ impl HostOp {
             Self::SecretSeal => "hirsel_core_secret_seal",
             Self::SecretNarrow => "hirsel_core_secret_narrow",
             Self::SecretHmac => "hirsel_core_secret_hmac_sha256",
+            Self::SecretDeriveHmac => "hirsel_core_secret_derive_hmac_sha256",
             Self::SecretVerifyHmac => "hirsel_core_secret_verify_hmac_sha256",
             Self::NetSplit => "hirsel_core_net_split",
             Self::NetJoin => "hirsel_core_net_join",
@@ -1436,6 +1440,7 @@ impl HostOp {
                 | HostOp::SecretSeal
                 | HostOp::SecretNarrow
                 | HostOp::SecretHmac
+                | HostOp::SecretDeriveHmac
                 | HostOp::SecretVerifyHmac
                 | HostOp::NetSplit
                 | HostOp::NetJoin
@@ -1799,6 +1804,7 @@ impl RtOp {
                     // owned bytes. Tags 1 (invalid) and 2 (capacity) leave it intact.
                     HostOp::SecretSeal => (vec![V(p), V(p)], outcome),
                     HostOp::SecretNarrow => (vec![V(u64_), V(p)], outcome),
+                    HostOp::SecretDeriveHmac => (vec![V(u64_), V(p), V(p), V(p)], outcome),
                     HostOp::SecretHmac | HostOp::SecretVerifyHmac => {
                         (vec![V(u64_), V(p), V(p)], outcome)
                     }

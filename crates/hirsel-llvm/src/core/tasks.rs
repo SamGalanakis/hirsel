@@ -154,6 +154,7 @@ impl FunctionEmitter<'_> {
             | HostOp::SecretSeal
             | HostOp::SecretNarrow
             | HostOp::SecretHmac
+            | HostOp::SecretDeriveHmac
             | HostOp::SecretVerifyHmac
             | HostOp::StdinRead
             | HostOp::StreamTerminal

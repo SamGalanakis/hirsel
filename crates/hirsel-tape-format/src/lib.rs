@@ -960,6 +960,9 @@ impl Out {
             return Err(Corrupt);
         }
         let value = c.varint()?;
+        if op == op::SECRET_KDF && (status != OK || value == 0) {
+            return Err(Corrupt);
+        }
         if op == op::SCRAM_VERIFY && (status != OK || value > 1) {
             return Err(Corrupt);
         }

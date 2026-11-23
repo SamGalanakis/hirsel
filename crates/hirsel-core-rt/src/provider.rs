@@ -88,7 +88,12 @@ pub const STEP_PENDING: u8 = 1;
 pub(crate) fn cancellation_point(operation: u8) -> bool {
     !matches!(
         operation,
-        WALL_MS | MONO_NS | SECRET_MAC | SCRAM_VERIFY | crate::foreign::handles::RELEASE_WAIT_OP
+        WALL_MS
+            | MONO_NS
+            | SECRET_MAC
+            | SECRET_KDF
+            | SCRAM_VERIFY
+            | crate::foreign::handles::RELEASE_WAIT_OP
     )
 }
 pub const ABORT_CANCEL: u8 = 1;

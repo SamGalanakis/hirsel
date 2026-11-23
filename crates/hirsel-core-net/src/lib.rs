@@ -139,7 +139,8 @@ mod tls_rule;
 pub use tls_rule::{Name, Pattern, TlsRule, TlsTrust};
 mod secret_grant;
 pub use secret_grant::{
-    SecretGrant, SecretPolicy, SecretSource, SecretUse, hmac_sha256, verify_hmac_sha256,
+    SecretGrant, SecretPolicy, SecretSource, SecretUse, derive_hmac_sha256, hmac_sha256,
+    verify_hmac_sha256,
 };
 
 #[cfg(test)]

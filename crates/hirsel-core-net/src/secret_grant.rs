@@ -15,12 +15,14 @@ impl SecretUse {
     pub const SIGN_RS256: Self = Self(16);
     pub const WRAP: Self = Self(32);
     pub const MTLS_CLIENT_ID: Self = Self(64);
+    pub const KDF: Self = Self(128);
 
     /// Each use word in its canonical order. A set prints `mac` alone for
     /// `MAC`, which implies `verify`.
-    const WORDS: [(&str, Self); 7] = [
+    const WORDS: [(&str, Self); 8] = [
         ("mac", Self::MAC),
         ("verify", Self::VERIFY),
+        ("kdf", Self::KDF),
         ("sign(ed25519)", Self::SIGN_ED25519),
         ("sign(p256)", Self::SIGN_P256),
         ("sign(rs256)", Self::SIGN_RS256),
@@ -45,7 +47,7 @@ impl SecretUse {
 }
 
 /// A Secret's typed set of uses (TLS-5): `tls_send(<patterns>)`, `mac`,
-/// `verify`, `sign(<alg>)`, `wrap` and `mtls_client_id`, written in that
+/// `verify`, `kdf`, `sign(<alg>)`, `wrap` and `mtls_client_id`, written in that
 /// order, separated by single spaces. A DNS name appears only inside
 /// `tls_send(...)`, so no name can be read as a use.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -92,6 +94,17 @@ impl SecretPolicy {
             send: Arc::from([Pattern::Exact(name.clone())]),
             uses: SecretUse::default(),
         }
+    }
+
+    /// The requested policy of a derived key. A parent with `kdf` may
+    /// derive keys for MAC, verification or further derivation.
+    pub fn derived(&self, requested: &str) -> Option<Self> {
+        if !self.uses.permits(SecretUse::KDF) {
+            return None;
+        }
+        let child = Self::parse(requested)?;
+        let allowed = SecretUse(SecretUse::MAC.0 | SecretUse::KDF.0);
+        (child.send.is_empty() && allowed.permits(child.uses)).then_some(child)
     }
 
     pub fn intersect(&self, requested: &Self) -> Option<Self> {
@@ -168,7 +181,7 @@ impl<'a> SecretSource<'a> {
 }
 
 impl SecretGrant {
-    pub const SYNTAX: &str = "expected --grant 'Secret:<parameter>=env:VAR|file:PATH <uses>', <uses> being tls_send(<patterns>), mac, verify, sign(<alg>), wrap or mtls_client_id separated by spaces, with 'to <patterns>' for tls_send(<patterns>)";
+    pub const SYNTAX: &str = "expected --grant 'Secret:<parameter>=env:VAR|file:PATH <uses>', <uses> being tls_send(<patterns>), mac, verify, kdf, sign(<alg>), wrap or mtls_client_id separated by spaces, with 'to <patterns>' for tls_send(<patterns>)";
 
     pub fn logical_size(patterns: &[Pattern], len: u64) -> Option<u64> {
         Pattern::list_bytes(patterns)
@@ -203,6 +216,27 @@ impl SecretGrant {
 pub fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
     let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, key);
     ring::hmac::sign(&key, data).as_ref().try_into().unwrap()
+}
+
+pub fn derive_hmac_sha256(key: &[u8], prefix: &[u8], data: &[u8]) -> zeroize::Zeroizing<Vec<u8>> {
+    // RFC 2104 hashes a key longer than one block before using it in HMAC.
+    // Hash the two slices separately so the full prefixed key needs no allocation.
+    const BLOCK: usize = 64;
+    let key = if prefix.len() <= BLOCK && key.len() <= BLOCK - prefix.len() {
+        let mut combined = zeroize::Zeroizing::new([0; BLOCK]);
+        combined[..prefix.len()].copy_from_slice(prefix);
+        combined[prefix.len()..prefix.len() + key.len()].copy_from_slice(key);
+        ring::hmac::Key::new(
+            ring::hmac::HMAC_SHA256,
+            &combined[..prefix.len() + key.len()],
+        )
+    } else {
+        let mut digest = ring::digest::Context::new(&ring::digest::SHA256);
+        digest.update(prefix);
+        digest.update(key);
+        ring::hmac::Key::new(ring::hmac::HMAC_SHA256, digest.finish().as_ref())
+    };
+    zeroize::Zeroizing::new(ring::hmac::sign(&key, data).as_ref().to_vec())
 }
 
 pub fn verify_hmac_sha256(key: &[u8], data: &[u8], tag: &[u8]) -> bool {

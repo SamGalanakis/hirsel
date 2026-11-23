@@ -157,6 +157,7 @@ environment.
 | `SEND_PAIR` on a TLS half | as for a socket: both offered plaintext buffers and the deadline | the committed count |
 | `SEND_SECRET` | half ordinal; canonical args = `before`, the secret's designation, `after`, `until` | the outcome, and the committed count on failure |
 | `SECRET_MAC` | run-owned sink at object 0; canonical args = mode, secret designation, `data` (and `tag` for verify) | the 32-byte tag or the verdict |
+| `SECRET_KDF` | run-owned sink at object 0; canonical args = parent designation, child policy, `key_prefix`, `data` | the delivery position, with no key bytes |
 | `SCRAM` | half ordinal; canonical args = secret designation, `client_first`, `server_first`, `before`, `after`, `until` | the outcome, and the committed count on failure. The new `Scram`'s ordinal on success. |
 | `SCRAM_VERIFY` | `Scram` ordinal; canonical args = `server_final` | the verdict |
 
@@ -170,8 +171,9 @@ hold any SCRAM value computed from a password: the normalized password, `SaltedP
 ordinal in the order of the run's grants, like every other grant. The header's grant
 snapshot keeps the parameter name, the canonical policy text, and the source label
 (`env:OPENAI_API_KEY`), but not the bytes. A sealed secret is designated by the order of its
-seal among the run's seals, together with its policy. The canonical arguments of
-`SEND_SECRET` and `SECRET_MAC` hold the designation, never the bytes or any function of them, because an
+seal among the run's seals, together with its policy. A derived secret is designated
+by the position of its `SECRET_KDF` delivery and its policy. The canonical arguments of
+`SEND_SECRET`, `SECRET_MAC` and `SECRET_KDF` hold the designation, never the bytes or any function of them, because an
 unkeyed digest of a short secret could be reversed by trying candidate values.
 
 ## Recording failures and truncated recordings

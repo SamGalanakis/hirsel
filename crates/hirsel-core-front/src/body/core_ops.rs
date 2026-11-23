@@ -392,6 +392,7 @@ operations! {
     ("secret", "seal", Lane::Runtime(Kernel::SecretSeal), "A", "tls-t4-1447", false),
     ("secret", "narrow", Lane::Runtime(Kernel::Net(HostOp::SecretNarrow)), "B", "tls-t4-1447", false),
     ("secret", "hmac_sha256", Lane::Runtime(Kernel::Net(HostOp::SecretHmac)), "B", "hmac-1504", false),
+    ("secret", "derive_hmac_sha256", Lane::Runtime(Kernel::Net(HostOp::SecretDeriveHmac)), "B", "secret-kdf-signer-1816", false),
     ("secret", "verify_hmac_sha256", Lane::Runtime(Kernel::Net(HostOp::SecretVerifyHmac)), "B", "hmac-1504", false),
     ("secret", "scram_sha256", Lane::Runtime(Kernel::Net(HostOp::ScramSha256)), "B", "small-host-impl-1576", false),
     ("secret", "scram_final_len", Lane::Runtime(Kernel::Net(HostOp::ScramFinalLen)), "B", "small-host-impl-1576", false),
@@ -3701,6 +3702,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         ) {
             return self.runtime_exec(op, f, vals, result, n);
         }
+        if op == HostOp::SecretDeriveHmac {
+            return self.runtime_secret_derive(vals, result, n);
+        }
         if matches!(op, HostOp::SecretHmac | HostOp::SecretVerifyHmac) {
             return self.runtime_secret_mac(op, vals, result, n);
         }
@@ -4138,32 +4142,82 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 let Some(error) = cx.runtime_field(to, &[Step::Field(0)], error_ty, n) else {
                     return;
                 };
-                let Some(invalid) = cx.runtime_compare(byte, tag, 1, n) else {
-                    return;
-                };
-                let yes = cx.new_block(&[]);
-                let no = cx.new_block(&[]);
-                let join = cx.new_block(&[]);
-                cx.runtime_branch(invalid, yes, no, n);
-                cx.start(yes);
-                cx.runtime_case_payload(error, 0, UNIT, None, n);
-                cx.jump(join, &[], n);
-                cx.start(no);
-                cx.inst(
-                    Inst::SetCase {
-                        address: error,
-                        case: 1,
-                    },
-                    n,
-                );
-                let capacity = cx.capacity_ty(n);
+                cx.runtime_secret_error(error, tag, value, available, n);
+            },
+        )
+    }
+
+    fn runtime_secret_error(
+        &mut self,
+        error: AddressId,
+        tag: ValueId,
+        value: ValueId,
+        available: ValueId,
+        n: NodeId,
+    ) {
+        let Some(invalid) = self.runtime_compare(Ty::Scalar(Scalar::U8), tag, 1, n) else {
+            return;
+        };
+        let yes = self.new_block(&[]);
+        let no = self.new_block(&[]);
+        let join = self.new_block(&[]);
+        self.runtime_branch(invalid, yes, no, n);
+        self.start(yes);
+        self.runtime_case_payload(error, 0, UNIT, None, n);
+        self.jump(join, &[], n);
+        self.start(no);
+        self.inst(
+            Inst::SetCase {
+                address: error,
+                case: 1,
+            },
+            n,
+        );
+        let capacity = self.capacity_ty(n);
+        if let Some(at) =
+            self.runtime_field(error, &[Step::CaseField { case: 1, field: 0 }], capacity, n)
+        {
+            self.runtime_capacity(at, value, available, n);
+        }
+        self.jump(join, &[], n);
+        self.start(join);
+    }
+
+    fn runtime_secret_derive(
+        &mut self,
+        vals: &[Option<ValueId>],
+        result: TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let secret = self.runtime_key(vals[0]?, n);
+        let [value, tag, _, available] = self.runtime_row(
+            RtOp::Host(HostOp::SecretDeriveHmac),
+            &[
+                Arg::Value(secret),
+                Arg::Value(vals[1]?),
+                Arg::Value(vals[2]?),
+                Arg::Value(vals[3]?),
+            ],
+            n,
+        )?;
+        let ok = self.runtime_compare(Ty::Scalar(Scalar::U8), tag, 0, n)?;
+        self.runtime_result(
+            result,
+            ok,
+            n,
+            |cx, to, ty| {
                 if let Some(at) =
-                    cx.runtime_field(error, &[Step::CaseField { case: 1, field: 0 }], capacity, n)
+                    cx.runtime_field(to, &[Step::CaseField { case: 0, field: 0 }], ty, n)
                 {
-                    cx.runtime_capacity(at, value, available, n);
+                    cx.runtime_store(at, &[], Ty::Scalar(Scalar::U64), value, n);
                 }
-                cx.jump(join, &[], n);
-                cx.start(join);
+            },
+            |cx, to, ty| {
+                if let Some(at) =
+                    cx.runtime_field(to, &[Step::CaseField { case: 1, field: 0 }], ty, n)
+                {
+                    cx.runtime_secret_error(at, tag, value, available, n);
+                }
             },
         )
     }

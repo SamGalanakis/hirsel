@@ -339,6 +339,8 @@ HirselCoreHostOutcome hirsel_core_scram_sha256(HirselCoreContext *, uint64_t, ui
 HirselCoreHostOutcome hirsel_core_scram_final_len(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, const HirselCoreBuffer *, uint64_t);
 HirselCoreHostOutcome hirsel_core_scram_verify(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, uint64_t);
 #define HIRSEL_CORE_SECRET_MAC 39
+#define HIRSEL_CORE_SECRET_KDF 79
+HirselCoreHostOutcome hirsel_core_secret_derive_hmac_sha256(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, const HirselCoreBuffer *, const HirselCoreBuffer *, uint64_t);
 HirselCoreHostOutcome hirsel_core_secret_hmac_sha256(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, uint8_t *, uint64_t);
 HirselCoreHostOutcome hirsel_core_secret_verify_hmac_sha256(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, const HirselCoreBuffer *, uint64_t);
 HirselCoreHostOutcome hirsel_core_net_narrow_tls(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, uint16_t, uint16_t, uint8_t, const HirselCoreBuffer *, uint64_t);

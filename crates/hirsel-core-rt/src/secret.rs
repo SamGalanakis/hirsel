@@ -19,6 +19,19 @@ use zeroize::{Zeroize, Zeroizing};
 pub(crate) enum Origin {
     Granted(u64),
     Sealed(u64),
+    #[cfg(feature = "record")]
+    Derived(u64),
+}
+
+#[cfg(feature = "record")]
+impl Origin {
+    pub(crate) fn wire(self) -> (u8, u64) {
+        match self {
+            Self::Granted(ordinal) => (0, ordinal),
+            Self::Sealed(ordinal) => (1, ordinal),
+            Self::Derived(ordinal) => (2, ordinal),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -340,6 +353,41 @@ fn admit(payer: Payer, policies: &[Pattern], len: u64) -> Result<Charge, Outcome
     }
 }
 
+unsafe fn store_sealed(
+    context: *mut Context,
+    policy: SecretPolicy,
+    bytes: Option<Arc<Zeroizing<Vec<u8>>>>,
+    charge: Charge,
+    origin: Option<Origin>,
+) -> Outcome {
+    let mut secrets = unsafe {
+        (*(*context).host_files)
+            .registry
+            .run_grants()
+            .secrets
+            .lock()
+            .unwrap()
+    };
+    let origin = origin.unwrap_or_else(|| {
+        let ordinal = secrets.seals;
+        secrets.seals += 1;
+        Origin::Sealed(ordinal)
+    });
+    let value = secrets.push(
+        Secret {
+            origin,
+            policy,
+            bytes,
+            seal: Some(ChargeCell::new(charge)),
+        },
+        None,
+    );
+    Outcome {
+        value,
+        ..Outcome::default()
+    }
+}
+
 /// On success, copies the bytes into a run-owned secret and wipes owned
 /// source storage. On refusal, leaves the source and its charge untouched.
 /// The caller owns the carrier and is responsible for moving or dropping it.
@@ -366,27 +414,7 @@ pub unsafe extern "C" fn hirsel_core_secret_seal(
         if (*source).capacity != 0 && (*source).len != 0 {
             std::slice::from_raw_parts_mut((*source).data, (*source).len).zeroize();
         }
-        let mut secrets = (*(*context).host_files)
-            .registry
-            .run_grants()
-            .secrets
-            .lock()
-            .unwrap();
-        let origin = Origin::Sealed(secrets.seals);
-        secrets.seals += 1;
-        let value = secrets.push(
-            Secret {
-                origin,
-                policy,
-                bytes: Some(owned),
-                seal: Some(ChargeCell::new(charge)),
-            },
-            None,
-        );
-        Outcome {
-            value,
-            ..Outcome::default()
-        }
+        store_sealed(context, policy, Some(owned), charge, None)
     }
 }
 
@@ -446,6 +474,112 @@ pub(crate) struct MacTape {
     pub(crate) handle: u64,
 }
 
+pub(crate) struct KdfRequest<'a> {
+    pub(crate) secret: &'a Secret,
+    pub(crate) prefix: &'a [u8],
+    pub(crate) data: &'a [u8],
+    #[cfg(feature = "record")]
+    pub(crate) child: &'a SecretPolicy,
+    output: *mut Option<Arc<Zeroizing<Vec<u8>>>>,
+}
+
+pub(crate) const KDF_PROVIDER: Provider = Provider {
+    issue: kdf_issue,
+    ..MAC_PROVIDER
+};
+
+unsafe extern "C" fn kdf_issue(_: *mut u8, request: *mut Request, _: u64) -> Step {
+    // SAFETY: the adapter pins the input and exclusive output slot.
+    unsafe {
+        let args = &*(*request).path.cast::<KdfRequest<'_>>();
+        let key = args.secret.bytes.as_deref().unwrap();
+        args.output
+            .write(Some(Arc::new(hirsel_core_net::derive_hmac_sha256(
+                key,
+                args.prefix,
+                args.data,
+            ))));
+    }
+    Step {
+        kind: STEP_DONE,
+        outcome: Outcome::default(),
+        deadline_ns: 0,
+    }
+}
+
+unsafe fn drive_secret_sink(
+    context: *mut Context,
+    live: Provider,
+    request: &mut Request,
+) -> Outcome {
+    #[cfg(feature = "record")]
+    if let Some(tape) = unsafe { (*(*context).host_files).secret_mac_tape } {
+        request.handle = tape.handle;
+        return unsafe { crate::provider::drive(context, &tape.provider, request, None) };
+    }
+    unsafe { crate::provider::drive(context, &live, request, None) }
+}
+
+/// # Safety
+/// The Secret is live and all three input carriers stay pinned through delivery.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_secret_derive_hmac_sha256(
+    context: *mut Context,
+    s: u64,
+    prefix: *const Buffer,
+    data: *const Buffer,
+    uses: *const Buffer,
+    site: u64,
+) -> Outcome {
+    unsafe {
+        crate::process::deny_describe_capability(context);
+        let secret = resolve(context, s);
+        let uses = crate::tls::bytes(&*uses);
+        let Some(child) = std::str::from_utf8(uses)
+            .ok()
+            .and_then(|uses| secret.policy.derived(uses))
+        else {
+            return INVALID;
+        };
+        let charge = match admit((*context).payer(), &child.send, 32) {
+            Ok(charge) => charge,
+            Err(error) => return error,
+        };
+        let mut bytes = None;
+        let args = KdfRequest {
+            secret: &secret,
+            prefix: crate::tls::bytes(&*prefix),
+            data: crate::tls::bytes(&*data),
+            #[cfg(feature = "record")]
+            child: &child,
+            output: &raw mut bytes,
+        };
+        let mut request = Request {
+            operation: crate::provider::SECRET_KDF,
+            mode: 0,
+            handle: 0,
+            path: (&raw const args).cast(),
+            path_len: std::mem::size_of_val(&args),
+            buffer: crate::net::empty_buffer(),
+            site,
+        };
+        let outcome = drive_secret_sink(context, KDF_PROVIDER, &mut request);
+        if outcome.error.tag != 0 {
+            return outcome;
+        }
+        if outcome.status != 0 {
+            return INVALID;
+        }
+        #[cfg(feature = "record")]
+        let origin = (outcome.value != 0).then_some(Origin::Derived(outcome.value));
+        #[cfg(not(feature = "record"))]
+        let origin = None;
+        // A replay leaves bytes absent. The sinks that can read this key
+        // are themselves replay deliveries.
+        store_sealed(context, child, bytes, charge, origin)
+    }
+}
+
 pub(crate) struct MacRequest<'a> {
     pub(crate) secret: &'a Secret,
     pub(crate) data: &'a [u8],
@@ -485,11 +619,11 @@ unsafe extern "C" fn mac_issue(_: *mut u8, request: *mut Request, _: u64) -> Ste
 }
 
 unsafe extern "C" fn mac_resume(_: *mut u8, _: *mut Request, _: u64) -> Step {
-    unreachable!("Secret MAC never waits")
+    unreachable!("Secret key sinks never wait")
 }
 
 unsafe extern "C" fn mac_abort(_: *mut u8, _: *mut Request, _: u64, _: u8) -> Outcome {
-    unreachable!("Secret MAC never waits")
+    unreachable!("Secret key sinks never wait")
 }
 
 unsafe fn mac(
@@ -517,16 +651,10 @@ unsafe fn mac(
             data: crate::tls::bytes(&*data),
             tag: tag.map(|tag| crate::tls::bytes(&*tag)),
         };
-        #[cfg(feature = "record")]
-        let tape = (*(*context).host_files).secret_mac_tape;
-        #[cfg(feature = "record")]
-        let (p, h) = tape.map_or((MAC_PROVIDER, 0), |tape| (tape.provider, tape.handle));
-        #[cfg(not(feature = "record"))]
-        let (p, h) = (MAC_PROVIDER, 0);
         let mut request = Request {
             operation: crate::provider::SECRET_MAC,
             mode: u8::from(tag.is_some()),
-            handle: h,
+            handle: 0,
             path: (&raw const args).cast(),
             path_len: std::mem::size_of_val(&args),
             buffer: Buffer {
@@ -536,7 +664,7 @@ unsafe fn mac(
             },
             site,
         };
-        crate::provider::drive(context, &p, &mut request, None)
+        drive_secret_sink(context, MAC_PROVIDER, &mut request)
     }
 }
 

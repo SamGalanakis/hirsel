@@ -1032,10 +1032,7 @@ unsafe fn socket_args(request: &Request) -> Args {
         }
         if request.operation == SCRAM {
             let scram = &*request.path.cast::<crate::scram::ScramRequest<'_>>();
-            let (kind, ordinal) = match scram.send.origin {
-                crate::secret::Origin::Granted(ordinal) => (0, ordinal),
-                crate::secret::Origin::Sealed(ordinal) => (1, ordinal),
-            };
+            let (kind, ordinal) = scram.send.origin.wire();
             args.push(kind);
             put_varint(&mut args, ordinal);
             let patterns = hirsel_core_net::Pattern::list_text(&scram.send.patterns);
@@ -1054,10 +1051,7 @@ unsafe fn socket_args(request: &Request) -> Args {
         if matches!(request.operation, SEND_PAIR | SEND_SECRET) {
             if request.operation == SEND_SECRET {
                 let send = &*request.path.cast::<crate::secret::SendRequest>();
-                let (kind, ordinal) = match send.origin {
-                    crate::secret::Origin::Granted(ordinal) => (0, ordinal),
-                    crate::secret::Origin::Sealed(ordinal) => (1, ordinal),
-                };
+                let (kind, ordinal) = send.origin.wire();
                 args.push(kind);
                 put_varint(&mut args, ordinal);
                 let patterns = hirsel_core_net::Pattern::list_text(&send.patterns);
@@ -1114,12 +1108,27 @@ unsafe fn canonical(r: &Request) -> Args {
         if r.operation == SCRAM_VERIFY {
             return Args::of(buffer_bytes(&r.buffer));
         }
+        if r.operation == SECRET_KDF {
+            let kdf = &*r.path.cast::<crate::secret::KdfRequest<'_>>();
+            let (kind, ordinal) = kdf.secret.origin.wire();
+            let policy = kdf.secret.policy.text();
+            let child = kdf.child.text();
+            let mut head = vec![kind];
+            put_varint(&mut head, ordinal);
+            put_varint(&mut head, policy.len() as u64);
+            put_varint(&mut head, child.len() as u64);
+            put_varint(&mut head, kdf.prefix.len() as u64);
+            return Args::of_parts(&[
+                &head,
+                policy.as_bytes(),
+                child.as_bytes(),
+                kdf.prefix,
+                kdf.data,
+            ]);
+        }
         if r.operation == SECRET_MAC {
             let mac = &*r.path.cast::<crate::secret::MacRequest<'_>>();
-            let (kind, ordinal) = match mac.secret.origin {
-                crate::secret::Origin::Granted(ordinal) => (0, ordinal),
-                crate::secret::Origin::Sealed(ordinal) => (1, ordinal),
-            };
+            let (kind, ordinal) = mac.secret.origin.wire();
             let policy = mac.secret.policy.text();
             let mut head = vec![r.mode, kind];
             put_varint(&mut head, ordinal);
@@ -1739,7 +1748,7 @@ unsafe fn denied(request: &Request) -> bool {
 /// that WAIT open until the scheduler records WAKE, or cancellation closes W.
 unsafe extern "C" fn wait(state: *mut u8, r: *mut Request, token: u64) -> Wait {
     // This operation has only immediate frames, in both modes.
-    if unsafe { matches!((*r).operation, SECRET_MAC | SCRAM_VERIFY) } {
+    if unsafe { matches!((*r).operation, SECRET_MAC | SECRET_KDF | SCRAM_VERIFY) } {
         return Wait::default();
     }
     let cell = cell_of(state);
@@ -1890,6 +1899,10 @@ unsafe fn issue_in(cell: &Cell, r: &mut Request, token: u64) -> Step {
             provider: crate::secret::MAC_PROVIDER,
             handle: 0,
         },
+        SECRET_KDF => Inner {
+            provider: crate::secret::KDF_PROVIDER,
+            handle: 0,
+        },
         SCRAM_VERIFY => Inner {
             provider: crate::scram::VERIFY_PROVIDER,
             handle: 0,
@@ -1933,9 +1946,15 @@ unsafe fn issue_in(cell: &Cell, r: &mut Request, token: u64) -> Step {
         );
         return step;
     }
+    let mut outcome = step.outcome;
+    if r.operation == SECRET_KDF {
+        // The new designation follows this delivery's tape position, even if
+        // another unit installs its handle in the Secret table first.
+        outcome.value = live.schedule.events + 1;
+    }
     // SAFETY: the source completed this pinned request.
     let (out, answer, delivery) =
-        unsafe { record_out(live, generation, r, before, inner, step.outcome) };
+        unsafe { record_out(live, generation, r, before, inner, outcome) };
     let Frame::Issue {
         task,
         op,
@@ -2191,8 +2210,10 @@ unsafe fn replay(
     let op = r.operation;
     let object = ordinal as u64;
     let Frame::Op { out, .. } = frame else {
-        if matches!(op, SECRET_MAC | SCRAM_VERIFY | EXEC_SPAWN | EXEC_SIGNAL)
-            || (unix_operation(op) && !unix::can_park(op))
+        if matches!(
+            op,
+            SECRET_MAC | SECRET_KDF | SCRAM_VERIFY | EXEC_SPAWN | EXEC_SIGNAL
+        ) || (unix_operation(op) && !unix::can_park(op))
             || (op == CLOSE && matches!(r.mode, crate::exec_runtime::PROC_CLOSE | 0x40..=0x42))
         {
             return Err(Fault::Corrupt);
@@ -2431,6 +2452,10 @@ unsafe fn replay_out(
                 .ok_or(Fault::Corrupt)?;
             // SAFETY: RESOLVE pins the list with at least count spare slots.
             unsafe { crate::resolve::append(&mut r.buffer, &addresses) };
+        }
+    } else if op == SECRET_KDF {
+        if !ok || out.value != live.schedule.events {
+            return Err(Fault::Corrupt);
         }
     } else if op == SECRET_MAC {
         if !ok

@@ -1466,10 +1466,13 @@ fn cli_tls_replay(with_secret: bool) {
             &from_file,
             "--grant",
             "Secret:verifier=env:HIRSEL_TL10_TOKEN verify",
+            "--grant",
+            "Secret:root=env:HIRSEL_TL10_KDF kdf",
         ]);
     }
     let record = invoke("run", &grants)
         .env("HIRSEL_TL10_TOKEN", &token)
+        .env("HIRSEL_TL10_KDF", "0123456789".repeat(8))
         .env("SSL_CERT_FILE", &roots)
         .env_remove("SSL_CERT_DIR")
         .output()
@@ -1511,7 +1514,24 @@ fn cli_tls_replay(with_secret: bool) {
     assert!(!sealed.windows(LEAF.len()).any(|bytes| bytes == LEAF));
 
     let assert_secrets_absent = |outputs: &[&[u8]]| {
-        for bytes in [raw.as_slice(), token.as_bytes(), file_bytes.as_slice()] {
+        let kdf_root = "0123456789".repeat(8);
+        // Python hmac.digest, independently of the runtime implementation.
+        let kdf_first = [
+            68, 139, 36, 231, 245, 6, 65, 79, 136, 52, 109, 246, 128, 87, 34, 195, 187, 76, 231,
+            43, 96, 22, 84, 42, 147, 175, 43, 184, 167, 226, 63, 185,
+        ];
+        let kdf_second = [
+            116, 109, 191, 234, 25, 229, 240, 52, 192, 164, 164, 171, 152, 97, 51, 233, 6, 228, 41,
+            232, 130, 136, 33, 55, 176, 11, 144, 2, 46, 217, 8, 205,
+        ];
+        for bytes in [
+            raw.as_slice(),
+            token.as_bytes(),
+            file_bytes.as_slice(),
+            kdf_root.as_bytes(),
+            kdf_first.as_slice(),
+            kdf_second.as_slice(),
+        ] {
             for form in [
                 bytes,
                 crate::call::hex(bytes).as_bytes(),
@@ -1548,6 +1568,7 @@ fn cli_tls_replay(with_secret: bool) {
         .env("SSL_CERT_FILE", &roots)
         .env_remove("SSL_CERT_DIR")
         .env_remove("HIRSEL_TL10_TOKEN")
+        .env_remove("HIRSEL_TL10_KDF")
         .output()
         .unwrap();
     let replay_log = after(&replay.stderr);
@@ -1574,6 +1595,11 @@ fn cli_tls_replay(with_secret: bool) {
         assert!(export.contains("grant `token` [secret] for tls_send(alpha.test) mac"));
         assert!(export.contains("grant `local` [secret] for tls_send(alpha.test)"));
         assert_secrets_absent(&[&replay.stdout, &replay.stderr, export.as_bytes()]);
+        let kdf_op = format!(" op={} ", hirsel_tape_format::op::SECRET_KDF);
+        assert_eq!(
+            export.lines().filter(|line| line.contains(&kdf_op)).count(),
+            2
+        );
         let mac_op = format!(" op={} ", hirsel_tape_format::op::SECRET_MAC);
         let mac: Vec<_> = export
             .lines()
@@ -1581,7 +1607,7 @@ fn cli_tls_replay(with_secret: bool) {
             .collect();
         assert_eq!(
             mac.len(),
-            6,
+            7,
             "MAC operations issued without the necessary use"
         );
         assert_eq!(

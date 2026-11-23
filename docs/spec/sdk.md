@@ -84,7 +84,7 @@ TypeScript app or bundle them with your browser app. Include the generated
 `codec.js`, `entries.js` and `frame.js` beside the compiled runtime. The SDK
 needs no runtime npm dependencies.
 
-```ts
+```text
 import {Client} from './generated/client.js';
 import {BrowserStorage} from './generated/browser.js';
 import {Frame} from './generated/frame.js';

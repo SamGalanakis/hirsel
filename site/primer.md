@@ -62,7 +62,7 @@ fn f(x: u64) -> u64 { let x = x + 1; x }                  // refused: LANG-7, sh
 ```
 ```hirsel
 fn width() -> u64 { 8 }
-fn f() -> u64 { let width: u64 = 1; width }               // refused: LANG-7, width is a function
+fn f() -> u64 { let width: u64 = 1; 0 }                   // refused: LANG-7, width is a function
 ```
 
 - Generics take bounds from a fixed set: `plain`, `shareable`, `send`, `cross`, `key`, `ordered`,

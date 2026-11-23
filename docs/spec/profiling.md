@@ -321,7 +321,7 @@ Pass a statement like this to `hirsel prof sql FILE.hprof`. Replace task
 For bounds above SQLite's signed integer range, use quoted 20-digit
 decimal strings.
 
-```sql
+```text
 WITH bounds(lo, hi) AS (VALUES (1000, 2000)),
 spans AS (
     SELECT root_id, depth, task_id, state, wait_reason, object_id, boundary,

@@ -243,6 +243,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             (c[0], &c[1..])
         };
         let fail = |cx: &mut Self| cx.pat_push(n, ERROR, Head::Any, PoolRange::EMPTY);
+        let p: &'c Program<'a> = self.p;
+        let target = p.target(self.at, path).copied();
+        // A bare pattern without a binder or constructor target is a refused binding.
+        // Poison it before checking the scrutinee type (PROG-8).
+        if target == Some(Target::Missing) || (target.is_none() && path == n) {
+            return fail(self);
+        }
         let TyKind::Adt(d, _) = self.t.kind(self.pattern_type(ty)) else {
             if ty != ERROR {
                 self.refuse(
@@ -254,14 +261,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return fail(self);
         };
         let d = *d;
-        let p: &'c Program<'a> = self.p;
         let decl = &p.decls[d.index()];
-        let target = p.target(self.at, path).copied();
-        // The resolver refused this name (LANG-7): the pattern is poisoned and
-        // matches anything, so its visibility is not checked again (PROG-8).
-        if matches!(target, Some(Target::Missing)) {
-            return fail(self);
-        }
         let from = p.modules[self.at.module as usize].id;
         let visible = match target {
             Some(Target::Definition(def)) => p.by_definition[def.0 as usize] == Some(Def::Type(d)),

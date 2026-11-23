@@ -449,6 +449,12 @@ fn status(mut tx: store.Tx, h: Handles, take text: String) -> Result[(), Refused
     kept(store.put(mut tx, h.views, 0u64, Status(take text)))
 }
 
+// Writes the status only when it changes, so a watcher sees no empty update.
+fn show_status(mut tx: store.Tx, h: Handles, take text: String) -> Result[(), Refused] {
+    if let Some(Status(current)) = kept(store.fetch(tx, store.shape(h.views), 0u64))? { if current == text { return Ok(()) } }
+    status(mut tx, h, take text)
+}
+
 pub type Submit: codec + send { client_key: String, text: String }
 
 // Admits a submission. A repeated key with identical bytes returns its
@@ -882,13 +888,22 @@ fn derive[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut s: 
 
 fn step_round[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut s: Session, id: u64, take r: Run, round: u64, n: u64) -> Result[(), Refused] {
     let mut open = false
+    // Whether an open member has a worker or a sealed call; a round whose
+    // open members are all Held or Parked shows "waiting".
+    let mut working = false
     let mut ran_inside = false
     for i in 0u64..n {
         let key = EffectKey(run: id, round: round, kind: TOOL, ordinal: i)
         let Some(take found) = kept(store.fetch(tx, store.shape(h.effects), key))? else { return Error(Malformed("member")) }
         let mut e = take found
-        let pending = match e.phase { Pending => true, Settled(_) => false, Doubted => false, _ => { open = true; false } }
-        // A Held member waits for its decision; it counts as open above.
+        let pending = match e.phase {
+            Pending => true,
+            Settled(_) => false,
+            Doubted => false,
+            Held => { open = true; false },
+            Parked => { open = true; false },
+            _ => { open = true; working = true; false },
+        }
         if !pending { continue }
         let call: Call = match e.call { Some(c) => clone(c), None => return Error(Malformed("member call")) }
         if mcp_tools.reserved(call.name) {
@@ -920,6 +935,7 @@ fn step_round[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut
             },
             Outside(_, repeat) => {
                 open = true
+                working = true
                 e.repeat = clone(repeat)
                 e.deadline = now(mut tx) + a.limits.tool_ms
                 seal(mut tx, h, w, key, take e)?
@@ -927,7 +943,7 @@ fn step_round[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut
             Mcp(_) => return Error(Malformed("member tool")),
         }
     }
-    if open { return Ok(()) }
+    if open { return show_status(mut tx, h, if working { "calling tools" } else { "waiting" }) }
     present(mut tx, h, a, w, mut s, id, take r, round, n)
 }
 

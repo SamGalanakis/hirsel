@@ -415,3 +415,53 @@ fn test_l84_bucket_window(c: Clock, tasks: Tasks) -> Result[(), Error] waits {
     }
     got
 }
+
+fn l70_cache_target(stamp: u64) -> TieredTarget {
+    TieredBlob(std.page.BlobRef(stamp: stamp, len: 1025, checksum: 101, pack: 7, offset: 72 + 2048 * stamp, body: 0))
+}
+
+fn l70_cache_frame(stamp: u64) -> Arc[TieredFrame] {
+    let mut bytes_value: Bytes = list.with_capacity(1025)
+    list.fill(mut bytes_value, 1025, 19u8)
+    arc.new(TieredFrame(identity: tiered_frame_id(l70_cache_target(stamp)), payload: TieredValue(arc.new(take bytes_value))))
+}
+
+@test
+fn test_l70_cache_overlap() -> Result[(), Error] {
+    // One legal Reader and exactly two 1,049-byte BLOB frames.
+    let mut private_cache = new_tiered_cache(17762354)
+    tiered_cache_reserve_reader(mut private_cache, 17760256)?
+    tiered_cache_admit(mut private_cache, l70_cache_frame(1))
+    tiered_cache_admit(mut private_cache, l70_cache_frame(2))
+    if private_cache.cached_bytes != 2098 || private_cache.reader_reserved != 17760256 {
+        fail("L70: frame and Reader charges")
+    }
+    {
+        let Some(held_frame) = tiered_cache_lookup(mut private_cache, "p-7", l70_cache_target(1))? else {
+            fail("L70: cached frame disappeared")
+        }
+        tiered_cache_admit(mut private_cache, l70_cache_frame(3))
+        if private_cache.overlap_bytes != 1049 || private_cache.cached_bytes != 1049 {
+            fail("L70: an evicted pin stopped counting against shared bytes")
+        }
+        if let Some(_) = tiered_cache_lookup(mut private_cache, "p-7", l70_cache_target(2))? {
+            fail("L70: inserting the third frame exceeded the shared partition")
+        }
+        if held_frame.identity.stamp != 1 {
+            fail("L70: eviction changed the pinned frame")
+        }
+    }
+    tiered_cache_refresh_overlap(mut private_cache)
+    if private_cache.overlap_bytes != 0 || private_cache.cached_bytes != 1049 {
+        fail("L70: overlap stayed charged after its final pin dropped")
+    }
+    tiered_cache_admit(mut private_cache, l70_cache_frame(2))
+    if tiered_fifo_len(private_cache.main) != 1 || private_cache.cached_bytes != 2098 {
+        fail("L70: a remembered key did not return to the main queue")
+    }
+    tiered_cache_release_reader(mut private_cache, 17760256)
+    if private_cache.reader_reserved != 0 {
+        fail("L70: dropping the Reader did not refund its reservation")
+    }
+    Ok(())
+}

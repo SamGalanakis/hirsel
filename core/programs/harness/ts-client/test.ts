@@ -10,7 +10,7 @@ import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import http from "node:http";
 import { stripTypeScriptTypes } from "node:module";
-import { Client, type State } from "./client.ts";
+import { Client, type ReleaseDecision, type State } from "./client.ts";
 
 const here = new URL(".", import.meta.url);
 const gateway = spawn(process.argv[2], [], { stdio: ["pipe", "pipe", "inherit"] });
@@ -224,6 +224,22 @@ try {
     flat(inherited) === flat(pinned) && flat(forkRows) === flat(await transcript(forkSession)) &&
     users(forkRows) === 2 && [...forkRows.values()].includes(JSON.stringify({ Line: ["user", "fork only"] })));
   forkReader.stop();
+
+  async function settleRelease(decision: ReleaseDecision, expected: string) {
+    const previous = assistant(state)!.at;
+    check("sent a release request", (await client.send("File an example release.", `release-${previous}`)).status === 202);
+    await until("a parked release", () => state?.status === "waiting");
+    const proposals = await client.releases();
+    check("lists the filed proposal", proposals.length === 1 && proposals[0].proposal.summary === "Update the example source");
+    const settled = await client.settle(proposals[0].id, decision);
+    check("settles the proposal", settled.status === 200 && settled.body === "Recorded");
+    await until("the release result", () => state?.status === "answered" && (assistant(state)?.at ?? 0) > previous);
+    const line = assistant(state)!.line;
+    check(`tool result: ${expected}`, "Line" in line && line.Line[1] === expected);
+    check("settled proposal is absent from the list", (await client.releases()).length === 0);
+  }
+  await settleRelease("Publish", "approved, not deployed");
+  await settleRelease({ Reject: "try another source change" }, "try another source change");
 
   // Remove the run owner's read access while their draft is visible.
   drafts.length = 0;

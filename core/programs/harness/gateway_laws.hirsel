@@ -790,7 +790,7 @@ fn tool_stream(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
     } else {
         None
     }
-    let front = harness.gateway_http.Front(bind: code.describe(store.ingress.caller), bind_bytes: 4096u64, bind_steps: 65536u64, authority: string.into_bytes("localhost"), submit: store.client.transact_entry(code.describe(submit_entry)), decide: store.client.transact_entry(code.describe(decide_entry)), keys: result.unwrap(store.client.entry_keys(code.describe(place))), socket: wire().socket, agent: "scripted", narrow: All, preview: take front_port, tasks: tasks, clock: clock, random: random, net: net, tail_lines: 64u64, within_ms: WITHIN_MS, beat_ms: 200u64, conn_bytes: EFFECT_GRANT, conns_max: 4u64, head_max: 8192u64, body_max: 65536u64)
+    let front = harness.gateway_http.Front(bind: code.describe(store.ingress.caller), bind_bytes: 4096u64, bind_steps: 65536u64, authority: string.into_bytes("localhost"), submit: store.client.transact_entry(code.describe(submit_entry)), decide: store.client.transact_entry(code.describe(decide_entry)), settle: None, keys: result.unwrap(store.client.entry_keys(code.describe(place))), socket: wire().socket, agent: "scripted", narrow: All, preview: take front_port, tasks: tasks, clock: clock, random: random, net: net, tail_lines: 64u64, within_ms: WITHIN_MS, beat_ms: 200u64, conn_bytes: EFFECT_GRANT, conns_max: 4u64, head_max: 8192u64, body_max: 65536u64)
     let served = harness.gateway_http.serve(door, take front, take listener)
     let port = at.port
     let me = store.ingress.credential(random)
@@ -1186,7 +1186,7 @@ fn preview_run(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
     } else {
         None
     }
-    let front = harness.gateway_http.Front(bind: code.describe(store.ingress.caller), bind_bytes: 4096u64, bind_steps: 65536u64, authority: string.into_bytes("localhost"), submit: store.client.transact_entry(code.describe(submit_entry)), decide: store.client.transact_entry(code.describe(decide_entry)), keys: result.unwrap(store.client.entry_keys(code.describe(place))), socket: wire().socket, agent: "scripted", narrow: All, preview: take front_port, tasks: tasks, clock: clock, random: random, net: net, tail_lines: 64u64, within_ms: WITHIN_MS, beat_ms: 50u64, conn_bytes: EFFECT_GRANT, conns_max: 4u64, head_max: 8192u64, body_max: 65536u64)
+    let front = harness.gateway_http.Front(bind: code.describe(store.ingress.caller), bind_bytes: 4096u64, bind_steps: 65536u64, authority: string.into_bytes("localhost"), submit: store.client.transact_entry(code.describe(submit_entry)), decide: store.client.transact_entry(code.describe(decide_entry)), settle: None, keys: result.unwrap(store.client.entry_keys(code.describe(place))), socket: wire().socket, agent: "scripted", narrow: All, preview: take front_port, tasks: tasks, clock: clock, random: random, net: net, tail_lines: 64u64, within_ms: WITHIN_MS, beat_ms: 50u64, conn_bytes: EFFECT_GRANT, conns_max: 4u64, head_max: 8192u64, body_max: 65536u64)
     let served = harness.gateway_http.serve(door, take front, take listener)
     let port = at.port
     let me = store.ingress.credential(random)

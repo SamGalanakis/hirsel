@@ -70,7 +70,7 @@ pub fn window(tx: store.Tx, h: Handles, caller: store.Caller, take w: Window) ->
     store.runner.cover(t, Included(0u64), Excluded(0u64))
 }
 
-fn reader_allowed(tx: store.Tx, h: Handles, caller: store.Caller) -> Result[bool, Capacity] {
+pub fn reader_allowed(tx: store.Tx, h: Handles, caller: store.Caller) -> Result[bool, Capacity] {
     let key = reader_key(caller)?
     Ok(match store.fetch(tx, store.shape(h.readers), take key) {
         Ok(Some(true)) => true,

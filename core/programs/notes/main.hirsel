@@ -62,6 +62,7 @@ fn created(take r: Result[(), store.Error]) -> Result[(), store.Error] {
 
 pub fn migrate(mut phase: store.Migration) -> Result[(), store.Error] {
     harness.migrate(mut phase)?
+    harness.release.migrate(mut phase)?
     let c_note: std.codec.Codec[String] = std.codec.of()
     let c_count: std.codec.Codec[u64] = std.codec.of()
     created(store.migration_create_table(mut phase, store.spec(notes_name(), std.codec.key_u64(), c_note)))?
@@ -325,7 +326,15 @@ fn scripted_model(g: Grants, take r: harness.Request) -> Result[harness.Answer, 
     }
     let mut calls: List[harness.Call] = list.new()
     let mut words = string.new()
-    if results == 0u64 {
+    if let Some((written, result)) = scripted_release(r) {
+        if let Some(text) = result {
+            words = string.from(text)
+        } else if written {
+            list.push(mut calls, call("release", "propose_release", "{\"summary\":\"Update the example source\"}"))
+        } else {
+            list.push(mut calls, call("write", "write_source", "{\"path\":\"main.hirsel\",\"text\":\"pub fn main() {}\"}"))
+        }
+    } else if results == 0u64 {
         list.push(mut calls, call("c1", "note_add", "{\"text\":\"The team meeting moved to Thursday.\"}"))
         list.push(mut calls, call("c2", "clock", "{}"))
     } else if results == 2u64 {
@@ -348,6 +357,37 @@ fn scripted_model(g: Grants, take r: harness.Request) -> Result[harness.Answer, 
         Ok(take a) => Ok(take a),
         Error(_) => Error(Unavailable)
     }
+}
+
+fn scripted_release(r: harness.Request) -> Option[(bool, Option[String])] {
+    let mut releasing = false
+    let mut written = false
+    let mut result: Option[String] = None
+    for e in r.messages {
+        match e {
+            User(text) => {
+                releasing = text == "File an example release.";
+                written = false;
+                result = None
+            },
+            ToolResult(id, outcome) => {
+                if id == "write" {
+                    if let Returned(_) = outcome { written = true }
+                }
+                if id == "release" {
+                    match outcome {
+                        Returned(Inline(raw)) => {
+                            if let Ok(take text) = string.from_utf8(clone(raw)) { result = Some(take text) }
+                        },
+                        Failed(why) => { result = Some(string.from(why)) },
+                        _ => (),
+                    }
+                }
+            },
+            _ => (),
+        }
+    }
+    if releasing { Some((written, take result)) } else { None }
 }
 
 // The scripted answer, its text drafted in eight pieces over about a second.
@@ -432,6 +472,7 @@ fn notes_agent() -> harness.Agent[Grants] {
     list.push(mut a.tools, harness.inside("note_delete", "deletes a note by id", "{\"id\":\"number\"}", code.describe(note_delete)))
     list.push(mut a.tools, harness.outside("clock", "reads the wall clock", "{}", Repeatable(3u64), code.describe(clock_tool)))
     list.push(mut a.tools, harness.outside("summarize", "asks a helper agent for a one-line summary", "{\"text\":\"string\"}", Once, code.describe(summarize)))
+    harness.release.add_tools(mut a)
     list.push(mut a.gates, harness.Gate(name: "confirm_delete", check: code.describe(confirm_delete)))
     list.push(mut a.gates, harness.Gate(name: "confirm_live_add", check: code.describe(confirm_live_add)))
     list.push(mut a.reactions, harness.After(name: "tally", run: code.describe(tally)))
@@ -478,10 +519,17 @@ pub fn decide_entry(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, 
     harness.decide(mut tx, h, notes_agent(), w, caller, take d)
 }
 
+pub fn settle_release_entry(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take ask: harness.release.DevSettlement) -> Result[harness.Filed, harness.Refused] {
+    harness.release.dev_settle(mut tx, h, caller, notes_agent(), wired()?, take ask)
+}
+
 pub fn place(mut r: store.runner.Registry[Grants, harness.Handles]) -> Result[(), store.runner.RegisterError] {
     harness.register_standard(mut r, code.describe(advance), code.describe(effect), code.describe(settle), BYTES, BYTES)?
     store.runner.transact(mut r, code.describe(submit_entry), BYTES, store.runner.DEFAULT_STEPS)?
     store.runner.transact(mut r, code.describe(decide_entry), BYTES, store.runner.DEFAULT_STEPS)?
+    store.runner.transact(mut r, code.describe(settle_release_entry), BYTES, store.runner.DEFAULT_STEPS)?
+    let proposals: std.codec.Codec[harness.release.Proposal] = std.codec.of()
+    store.runner.query_as(mut r, code.describe(harness.release.dev_proposals), std.codec.key_bytes(), proposals, BYTES, store.runner.DEFAULT_STEPS)?
     harness.pending_waits_entry(mut r, BYTES, store.runner.DEFAULT_STEPS)?
     let windows: std.codec.Codec[harness.View] = std.codec.of()
     store.runner.query_as(mut r, code.describe(harness.window), std.codec.key_u64(), windows, BYTES, store.runner.DEFAULT_STEPS)?

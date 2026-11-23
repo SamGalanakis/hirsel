@@ -15,6 +15,17 @@ export type DraftKey = { run: number; entry: number; tool?: number; attempt: num
 export type Draft = { key: DraftKey; offset: number; text: string };
 export type Decision = { run: number; round: number; ordinal: number; key: string; allow: boolean };
 export type PendingWait = Omit<Decision, "allow"> & { expires: number };
+export type ReleaseDecision = "Publish" | { Reject: string };
+export type FiledRelease = {
+  id: string;
+  proposal: {
+    call: { run: number; round: number; kind: number; ordinal: number };
+    tree: string;
+    summary: string;
+    build: { package: string; grants: string[]; dirs: string[] };
+    state: "Filed";
+  };
+};
 export type State = {
   status: string; rows: Shown[]; draft: Draft | null;
   live: boolean; older: boolean; // whether the first image has arrived; whether earlier rows remain
@@ -57,6 +68,18 @@ export class Client {
     return this.post("/messages", JSON.stringify({ client_key: clientKey, text }));
   }
   decide(d: Decision) { return this.post("/decisions", JSON.stringify(d)); }
+  settle(id: string, decision: ReleaseDecision) {
+    return this.post("/releases", JSON.stringify({ id, decision }));
+  }
+
+  async releases(): Promise<FiledRelease[]> {
+    const response = await fetch(this.url("/releases"), { headers: this.headers() });
+    if (!response.ok) {
+      await response.body?.cancel();
+      throw new Error(`releases: HTTP ${response.status}`);
+    }
+    return response.json();
+  }
 
   async pendingWaits(): Promise<PendingWait[]> {
     const response = await fetch(this.url("/waits"), { headers: this.headers() });

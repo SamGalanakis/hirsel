@@ -18,7 +18,8 @@
 // server-sent events, one JSON `Shown` per changed row and a comment as a heartbeat;
 // GET /sessions/{id}/history?before=B&lines=N is one JSON `Page` of earlier rows;
 // GET /sessions/{id}/waits lists pending approvals; POST /sessions/{id}/forks takes a
-// JSON `ForkAsk` and answers the new session's id. After each image's rows comes a
+// JSON `ForkAsk` and answers the new session's id. GET /sessions/{id}/releases lists
+// filed proposals and POST settles one on a development front. After each image's rows comes a
 // "batch" event carrying the store
 // version: a reader applies the rows before it together, and the first batch on a
 // stream completes its image. A bearer-authenticated stream on a preview-enabled front
@@ -69,6 +70,7 @@ pub type Front: send {
     authority: Bytes,
     submit: store.client.Callee[harness.Submit, Result[harness.Disposition, harness.Refused]],
     decide: store.client.Callee[harness.Decision, Result[harness.Ruling, harness.Refused]],
+    settle: Option[store.client.Callee[release.DevSettlement, Result[harness.Filed, harness.Refused]]],
     keys: List[Bytes],
     socket: std.wsock.Config,
     agent: String,
@@ -93,7 +95,7 @@ pub opaque type Served {
 }
 
 fn copy_front(f: Front) -> Front {
-    Front(bind: f.bind, bind_bytes: f.bind_bytes, bind_steps: f.bind_steps, authority: clone(f.authority), submit: clone(f.submit), decide: clone(f.decide), keys: clone(f.keys), socket: clone(f.socket), agent: string.from(f.agent), narrow: clone(f.narrow), preview: copy_preview(f.preview), tasks: f.tasks, clock: f.clock, random: f.random, net: f.net, tail_lines: f.tail_lines, within_ms: f.within_ms, beat_ms: f.beat_ms, conn_bytes: f.conn_bytes, conns_max: f.conns_max, head_max: f.head_max, body_max: f.body_max)
+    Front(bind: f.bind, bind_bytes: f.bind_bytes, bind_steps: f.bind_steps, authority: clone(f.authority), submit: clone(f.submit), decide: clone(f.decide), settle: clone(f.settle), keys: clone(f.keys), socket: clone(f.socket), agent: string.from(f.agent), narrow: clone(f.narrow), preview: copy_preview(f.preview), tasks: f.tasks, clock: f.clock, random: f.random, net: f.net, tail_lines: f.tail_lines, within_ms: f.within_ms, beat_ms: f.beat_ms, conn_bytes: f.conn_bytes, conns_max: f.conns_max, head_max: f.head_max, body_max: f.body_max)
 }
 
 fn window_entry() -> store.client.Callee[harness.Window, ()] {
@@ -195,6 +197,7 @@ fn call_place[A: codec, R: codec](d: harness.gateway.Door, f: Front, id: u64, id
     store.client.close(take client)
     match take replied {
         Ok(store.client.Replied(answer: Returned(Ok(take r)), ..)) => Ok(take r),
+        Ok(store.client.Replied(answer: Returned(Error(NotAllowed)), ..)) => Error(403u16),
         Ok(store.client.Replied(answer: Returned(Error(_)), ..)) => Error(422u16),
         Ok(store.client.Replied(answer: Refused(NotAllowed), ..)) => Error(403u16),
         Ok(store.client.Replied(answer: Refused(RequestMismatch), ..)) => Error(409u16),
@@ -835,6 +838,9 @@ fn serve_one(d: harness.gateway.Door, f: Front, mut read: ReadHalf, mut write: W
             Error(Place(Failed(_))) => reply(mut write, f, 422u16, list.new()),
             Error(why) => reply(mut write, f, turned(why), list.new()),
         }
+    }
+    if path[2] == "releases" {
+        return release_route(d, f, id, identity, method, req, mut write)
     }
     if path[2] == "history" && method == b"GET" {
         let target = part(req, req.head.target)

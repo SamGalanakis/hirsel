@@ -84,3 +84,54 @@ fn visible_sessions(d: harness.gateway.Door, f: Front, identity: Identity) -> Re
     Ok(take visible)
 }
 
+fn releases_page(mut client: store.client.Client, f: Front) -> Result[List[release.FiledProposal], u16] waits {
+    let codec: std.codec.Codec[release.Proposal] = std.codec.of()
+    let entry = store.client.query_as_entry(code.describe(release.dev_proposals), std.codec.key_bytes(), codec)
+    let image = read_cover(mut client, f, entry, ())?
+    let _ = checked_status(mut client, f)?
+    let mut filed: List[release.FiledProposal] = list.new()
+    for row in image.rows {
+        let Some(raw) = view row.value else { continue }
+        let p = std.codec.decode(codec, raw) ?=> |_| 503u16
+        if let Filed = p.state {
+            let mut at = 4u64 // WIRE keys start with the table prefix
+            let id = std.codec.take_key_bytes(row.key, mut at) ?=> |_| 503u16
+            list.push(mut filed, release.FiledProposal(id: take id, proposal: take p))
+        }
+    }
+    Ok(take filed)
+}
+
+fn release_route(d: harness.gateway.Door, f: Front, id: u64, identity: Identity, method: Bytes, req: Request, mut write: WriteHalf) -> () waits {
+    let Some(entry) = view f.settle else { return reply(mut write, f, 404u16, list.new()) }
+    if method == b"GET" {
+        let mut client = match reach(d, f, id, identity, 0u64, true) {
+            Ok(take opened) => option.unwrap(take opened),
+            Error(code) => return reply(mut write, f, code, list.new()),
+        }
+        let proposals = releases_page(mut client, f)
+        store.client.close(take client)
+        return match take proposals {
+            Ok(take filed) => json_reply(mut write, f, 200u16, filed),
+            Error(code) => reply(mut write, f, code, list.new()),
+        }
+    }
+    if method == b"POST" {
+        let p = match request_position(req) {
+            Ok(n) => n,
+            Error(code) => return reply(mut write, f, code, list.new()),
+        }
+        let Some(take ask) = (json_body(req, f) : Option[release.DevSettlement]) else {
+            return reply(mut write, f, 400u16, list.new())
+        }
+        return match call_place(d, f, id, identity, p, entry, take ask) {
+            Ok(ruling) => {
+                harness.gateway.nudge(d, id);
+                json_reply(mut write, f, 200u16, ruling)
+            },
+            Error(code) => reply(mut write, f, code, list.new()),
+        }
+    }
+    reply(mut write, f, 405u16, list.new())
+}
+

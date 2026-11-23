@@ -280,6 +280,33 @@ pub fn names_files(tree: Bytes, files: List[File]) -> bool {
 
 pub type Settlement: codec + send { id: Bytes, state: State }
 
+pub type DevDecision: codec + send = Publish | Reject(String)
+pub type DevSettlement: codec + send { id: Bytes, decision: DevDecision }
+pub type FiledProposal: codec + send { id: Bytes, proposal: Proposal }
+
+// The development gateway delegates release decisions to the session's readers.
+pub fn dev_proposals(tx: store.Tx, h: harness.Handles, caller: store.Caller, take unused: ()) -> Result[store.runner.Cover, Capacity] {
+    let t = tables(store.tx_schema(tx)) ?=> |_| read_failed()
+    let shape = store.shape(t.proposals)
+    if harness.reader_allowed(tx, h, caller)? {
+        return store.runner.cover(shape, Unbounded, Unbounded)
+    }
+    store.runner.cover(shape, Included(list.new()), Excluded(list.new()))
+}
+
+pub fn dev_settle[G: send](mut tx: store.Tx, h: harness.Handles, caller: store.Caller, a: harness.Agent[G], w: harness.Wiring, take ask: DevSettlement) -> Result[harness.Filed, harness.Refused] {
+    if !(harness.reader_allowed(tx, h, caller) ?=> |_| Storage) {
+        return Error(NotAllowed)
+    }
+    let t = tables(store.tx_schema(tx)) ?=> |_| Storage
+    let DevSettlement(id: take id, decision: take decision) = take ask
+    let state = match take decision {
+        Publish => Published("approved, not deployed"),
+        Reject(take why) => Rejected(take why),
+    }
+    settle(mut tx, h, t, a, w, id, take state)
+}
+
 // WIRE query bodies. An app's query_as entries authorize the Caller before forwarding.
 // Each Cover is published against the same transaction snapshot as the scan that chose it.
 pub fn pending_cover(tx: store.Tx, t: Tables) -> Result[store.runner.Cover, Capacity] {

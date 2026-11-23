@@ -34,10 +34,8 @@ impl Reactor {
     }
 }
 
-/// `auto` uses io_uring when this kernel allows it; `epoll`, and an unset
-/// variable, use epoll. Unset means epoll only until the ring's exit and
-/// completion-overflow handling is fixed (a 6.8 kernel oops in the task-work
-/// fallback path left a process unkillable); `auto` becomes the default again.
+/// `auto`, and an unset variable, use io_uring when this kernel allows it and
+/// epoll otherwise; `epoll` forces epoll.
 pub const REACTOR_ENV: &str = "HIRSEL_NET_REACTOR";
 static CHOSEN: OnceLock<Result<Reactor, String>> = OnceLock::new();
 /// The ring and wake descriptor the probe built, for the first poller.
@@ -47,7 +45,6 @@ static PROBED: Mutex<Option<(Uring, OwnedFd)>> = Mutex::new(None);
 pub fn reactor() -> io::Result<Reactor> {
     CHOSEN
         .get_or_init(|| match std::env::var_os(REACTOR_ENV) {
-            None => Ok(Reactor::Epoll),
             Some(v) if v == "epoll" => Ok(Reactor::Epoll),
             Some(v) if v != "auto" => Err(format!(
                 "{REACTOR_ENV}={} is not a reactor; use auto or epoll",
@@ -1141,6 +1138,122 @@ mod tests {
             assert!(sockets.release(key));
             std::net::TcpListener::bind(address)
                 .unwrap_or_else(|e| panic!("{address} under {:?}: {e}", reactor()));
+        }
+    }
+
+    /// Set by the choice law for the fresh process it runs this test in.
+    const EXPECT_ENV: &str = "HIRSEL_NET_REACTOR_LAW_EXPECT";
+    const REFUSE_ENV: &str = "HIRSEL_NET_REACTOR_LAW_REFUSE";
+
+    /// Whether a ring with the features the reactor needs (NODROP, EXT_ARG)
+    /// can be set up here, asked of the kernel directly.
+    fn kernel_offers_io_uring() -> bool {
+        const FEAT_NODROP: u32 = 1 << 1;
+        const FEAT_EXT_ARG: u32 = 1 << 8;
+        // struct io_uring_params: 120 bytes, `features` at byte 20.
+        let mut params = [0u32; 30];
+        // SAFETY: io_uring_setup writes only into the 120-byte params.
+        let fd = unsafe { libc::syscall(libc::SYS_io_uring_setup, 1u32, params.as_mut_ptr()) };
+        if fd < 0 {
+            return false;
+        }
+        // SAFETY: the ring descriptor was just created and is owned here.
+        drop(unsafe { OwnedFd::from_raw_fd(fd as i32) });
+        let wanted = FEAT_NODROP | FEAT_EXT_ARG;
+        params[5] & wanted == wanted
+    }
+
+    /// Make this thread's `io_uring_setup` fail with EPERM, as a container's
+    /// seccomp profile does.
+    fn refuse_io_uring_setup() {
+        let statement = |code: u32, jt, jf, k| libc::sock_filter {
+            code: code as u16,
+            jt,
+            jf,
+            k,
+        };
+        let ret = libc::BPF_RET | libc::BPF_K;
+        let filter = [
+            // seccomp_data.nr
+            statement(libc::BPF_LD | libc::BPF_W | libc::BPF_ABS, 0, 0, 0),
+            statement(
+                libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K,
+                0,
+                1,
+                libc::SYS_io_uring_setup as u32,
+            ),
+            statement(ret, 0, 0, libc::SECCOMP_RET_ERRNO | libc::EPERM as u32),
+            statement(ret, 0, 0, libc::SECCOMP_RET_ALLOW),
+        ];
+        let program = libc::sock_fprog {
+            len: filter.len() as u16,
+            filter: filter.as_ptr().cast_mut(),
+        };
+        // SAFETY: the filter outlives the call, which copies it.
+        unsafe {
+            assert_eq!(libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0), 0);
+            assert_eq!(
+                libc::prctl(libc::PR_SET_SECCOMP, libc::SECCOMP_MODE_FILTER, &program),
+                0,
+                "{}",
+                io::Error::last_os_error()
+            );
+        }
+    }
+
+    /// The fresh-process half of the choice law below.
+    #[test]
+    #[ignore = "run by the reactor choice law in a fresh process"]
+    fn the_reactor_this_process_chose() {
+        let Some(expected) = std::env::var_os(EXPECT_ENV) else {
+            return;
+        };
+        if std::env::var_os(REFUSE_ENV).is_some() {
+            refuse_io_uring_setup();
+        }
+        assert_eq!(reactor().unwrap().name(), expected);
+        let mut sockets = Sockets::default();
+        let (socket, mut peer) = UnixStream::pair().unwrap();
+        socket.set_nonblocking(true).unwrap();
+        let key = sockets.insert(socket.into()).unwrap();
+        sockets.arm(key, false, 3).unwrap();
+        sockets.poll(0, |_| {}).unwrap();
+        peer.write_all(b"x").unwrap();
+        sockets.arm(key, false, 4).unwrap();
+        assert!(readied(&mut sockets, 4));
+    }
+
+    /// D5: with the variable unset, a process takes io_uring wherever the
+    /// kernel offers it, and epoll, still carrying readiness, where
+    /// `io_uring_setup` is refused.
+    #[test]
+    fn an_unset_reactor_takes_io_uring_where_offered_and_epoll_where_refused() {
+        let offered = if kernel_offers_io_uring() {
+            "io_uring"
+        } else {
+            "epoll"
+        };
+        for (refused, expected) in [(false, offered), (true, "epoll")] {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child
+                .args([
+                    "--exact",
+                    "reactor::tests::the_reactor_this_process_chose",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env_remove(REACTOR_ENV)
+                .env(EXPECT_ENV, expected);
+            if refused {
+                child.env(REFUSE_ENV, "1");
+            }
+            let out = child.output().unwrap();
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(
+                out.status.success() && stdout.contains("1 passed"),
+                "refused={refused} expected {expected}:\n{stdout}{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
         }
     }
 }

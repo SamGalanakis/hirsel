@@ -508,7 +508,7 @@ fn law_typed_retry(tasks: Tasks, random: Random) -> bool waits {
     let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
     let w = result.unwrap(harness.wiring(code.describe(retry_advance), code.describe(retry_entry)))
     let mut a = harness.agent("retry", "m", code.describe(retry_model))
-    a.model_repeat = Repeatable(6u64)
+    a.charge = BoundedDuplicate(5u64)
     let caller = store.Caller(issuer: 1u8, subject: b"test")
     let prepared = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), harness.Refused] {
         harness.open_session(mut tx, h, "m", All)?

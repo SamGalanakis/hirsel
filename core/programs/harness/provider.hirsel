@@ -219,7 +219,6 @@ fn anthropic_body(w: std.json.Writer, mut items: std.json.Items, m: Model, req: 
                 },
                 User(text) => user_message(mw, mut msgs, text, cache, last == Some(i)),
                 Inform(text) => user_message(mw, mut msgs, text, cache, last == Some(i)),
-                Reset(text) => user_message(mw, mut msgs, text, cache, last == Some(i)),
                 _ => (),
             }
             i += 1u64
@@ -274,7 +273,6 @@ fn openai_body(w: std.json.Writer, mut items: std.json.Items, m: Model, req: har
             match e {
                 User(text) => role_message(mw, mut msgs, "user", text),
                 Inform(text) => role_message(mw, mut msgs, "user", text),
-                Reset(summary) => role_message(mw, mut msgs, "user", summary),
                 Assistant(a) => {
                     std.json.element(mw, mut msgs)
                     std.json.object(mw, msgs.depth, fn(ow, mut o) {

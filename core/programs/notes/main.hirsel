@@ -752,7 +752,6 @@ fn show_entry(out: Stdout, e: harness.Entry) -> () waits {
             emit(out, take s, "")
         },
         Inform(t) => emit(out, "  inform: ", t),
-        Reset(t) => emit(out, "  reset: ", t),
         Note(t, _) => emit(out, "  note: ", t),
     }
 }

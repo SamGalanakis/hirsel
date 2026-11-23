@@ -111,11 +111,21 @@ agent and the wiring:
   run at its next `prepare` (`Joined(run)`); `NextTurn` input waits for the
   boundary. `finish` arms a `Kick` when the ingress is non-empty.
 - `advance` reads the session row and the active run. To prepare a model
-  call it seals an effect row with only a cutoff, `(head_pos, tail_pos,
-  route, policy)`, and writes the effect trigger and a deadline trigger. No
+  call it seals an effect row with only a cutoff, `(frame, tail_pos,
+  route, policy, omit)`, and writes the effect trigger and a deadline trigger. No
   request body is stored or passed as a trigger argument.
+- History is append-only. `prepare` asks `Agent.pressure` once (bounded,
+  read-only). A valid `OpenFrame(base)` writes `harness.frames[base]` and
+  moves `Session.frame`; the next request starts with the frame's seed and
+  folds a fresh baseline, and a repeated open of the same base is a no-op.
+  `Agent.prompt_view` seals up to 8 omit ranges into the cutoff for one
+  request. `Command::Compact(seed)` opens a frame at the turn boundary.
+- `Limits.no_progress` (default `Bounded(3)`) stops a run after that many
+  consecutive tool rounds with no `Returned` outcome. `Agent.charge` bounds
+  model resends: `RequireGuarantee` seals the model effect `Once`,
+  `BoundedDuplicate(n)` seals it `Repeatable(n + 1)`.
 - `effect` is the granted worker. It calls `begin`, which records the
-  dispatch durably. It then reads `entries[head_pos..=tail_pos]` through
+  dispatch durably. It then reads the frame seed and `entries[frame..=tail_pos]` through
   `runner.trigger_snapshot`, makes the one outside call, and calls `settle`.
 - `settle` is first-writer-wins. A model answer commits as an `Assistant`
   entry (model.answer) before any tool is derived from it. Derivation runs in

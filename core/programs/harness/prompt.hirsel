@@ -143,18 +143,27 @@ fn plan[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], mut s: Session) -> R
 
 // The request for a model effect, built from immutable entries read through
 // the attempt's snapshot, so the advance transaction never carries the body.
-// System entries fold into `system` and `tools`; Notes are not sent.
+// System entries fold into `system` and `tools`; Notes are not sent. A frame's
+// seed is the first message, and the sealed omit ranges leave messages out.
 pub fn request(snap: store.Snapshot, h: Handles, key: EffectKey, e: Effect) -> Result[Request, store.Error] {
     let cutoff = view e.cutoff
     let mut messages: List[Entry] = list.new()
     let mut system: List[Change] = list.new()
     let mut tools: List[ToolDef] = list.new()
-    let mut p = cutoff.head_pos
+    if cutoff.frame > 0u64 {
+        let Some(f) = store.get(snap, store.shape(h.frames), cutoff.frame)? else {
+            return Error(Missing("frame"))
+        }
+        list.push(mut messages, Inform(clone(f.seed)))
+    }
+    let mut p = cutoff.frame
     while p <= cutoff.tail_pos {
         match store.get(snap, store.shape(h.entries), p)? {
             Some(System(take patch)) => fold(mut system, mut tools, take patch),
             Some(Note(_, _)) => (),
-            Some(take entry) => list.push(mut messages, take entry),
+            Some(take entry) => if !omitted(cutoff.omit, p) {
+                list.push(mut messages, take entry)
+            },
             None => return Error(Missing("entry")),
         }
         p += 1u64

@@ -89,7 +89,7 @@ fn boundary[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut s
     }
     for (seq, row) in rows {
         if let Command(c) = view row.item {
-            apply(mut s, c)
+            apply(mut tx, h, mut s, c)?
             let _ = kept(store.delete(mut tx, h.ingress, seq))?
             disposed(mut tx, h, row.key, Applied)?
         }
@@ -102,7 +102,7 @@ fn boundary[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut s
             s.next_run = id + 1u64
             s.active_run = Some(id)
             disposed(mut tx, h, row.key, Placed(id))?
-            let run = Run(caller: clone(row.key.caller), phase: Preparing, round: 0u64, rounds_left: a.limits.rounds, spend: Spend(known: 0u64, reserved: 0u64, unresolved: 0u64))
+            let run = Run(caller: clone(row.key.caller), phase: Preparing, round: 0u64, rounds_left: a.limits.rounds, stalled: 0u64, spend: Spend(known: 0u64, reserved: 0u64, unresolved: 0u64))
             kept(store.put(mut tx, h.runs, id, clone(run)))?
             kept(store.put(mut tx, h.session, 0u64, clone(s)))?
             return prepare(mut tx, h, a, w, mut s, id, clone(run))
@@ -111,12 +111,17 @@ fn boundary[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut s
     kept(store.put(mut tx, h.session, 0u64, s))
 }
 
-fn apply(mut s: Session, c: Command) {
+fn apply(mut tx: store.Tx, h: Handles, mut s: Session, c: Command) -> Result[(), Refused] {
     match c {
         Narrow(n) => {
             s.tools_narrow = clone(n)
         },
+        Compact(seed) => {
+            let base = s.next_pos
+            let _ = open_frame(mut tx, h, mut s, FrameOpen(base: base, reason: "compact", seed: clone(seed)))?
+        },
     }
+    Ok(())
 }
 
 // Early input from the run's caller joins the run at its prepare, in enqueue

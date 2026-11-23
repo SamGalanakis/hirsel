@@ -510,12 +510,14 @@ fn prepare[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut s:
         return finish(mut tx, h, w, mut s, id, take run, OutOfRounds)
     }
     steer(mut tx, h, a, mut s, id, run.caller)?
+    pressed(mut tx, h, a, mut s, id, run.round)?
     plan(mut tx, h, a, mut s)?
     kept(store.put(mut tx, h.session, 0u64, clone(s)))?
+    let omit = viewed(tx, h, a, s, id, run.round)?
     let key = EffectKey(run: id, round: run.round, kind: MODEL, ordinal: 0u64)
     let deadline = now(mut tx) + a.limits.model_ms
-    let cutoff = Cutoff(head_pos: s.head_pos, tail_pos: s.next_pos - 1u64, route: clone(a.route), policy: 0u64, tools_pos: clone(s.active_tools_pos))
-    let e = Effect(cutoff: take cutoff, call: None, repeat: clone(a.model_repeat), deadline: deadline, phase: Pending, trigger: None, dispatches: 0u64, stream: true, reserve: a.limits.model_reserve)
+    let cutoff = Cutoff(frame: s.frame, tail_pos: s.next_pos - 1u64, route: clone(a.route), policy: 0u64, tools_pos: clone(s.active_tools_pos), omit: take omit)
+    let e = Effect(cutoff: take cutoff, call: None, repeat: repeat_of(a.charge), deadline: deadline, phase: Pending, trigger: None, dispatches: 0u64, stream: true, reserve: a.limits.model_reserve)
     seal(mut tx, h, w, key, take e)?
     run.spend.reserved += a.limits.model_reserve
     run.phase = AwaitingModel(run.round)
@@ -716,6 +718,7 @@ fn fault_text(take f: Fault) -> String {
 // next request in the same transaction.
 fn present[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut s: Session, id: u64, take r: Run, round: u64, n: u64) -> Result[(), Refused] {
     let mut run = take r
+    let mut progressed = false
     for i in 0u64 .. n {
         let key = EffectKey(run: id, round: round, kind: TOOL, ordinal: i)
         let Some(take e) = kept(store.fetch(tx, store.shape(h.effects), key))? else {
@@ -729,12 +732,21 @@ fn present[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut s:
             Settled(Tool(take o)) => take o,
             _ => InDoubt
         }
+        if let Returned(_) = outcome {
+            progressed = true
+        }
         let _ = append(mut tx, h, a, mut s, ToolResult(clone(c.id), take outcome))?
     }
     kept(store.put(mut tx, h.session, 0u64, s))?
     run.round = round + 1u64
     run.rounds_left -= 1u64
     run.phase = Preparing
+    run.stalled = if progressed { 0u64 } else { run.stalled + 1u64 }
+    if let Bounded(most) = a.limits.no_progress {
+        if run.stalled >= most {
+            return finish(mut tx, h, w, mut s, id, take run, Stopped("no progress"))
+        }
+    }
     prepare(mut tx, h, a, w, mut s, id, take run)
 }
 

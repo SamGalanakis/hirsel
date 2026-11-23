@@ -59,7 +59,7 @@ pub fn law_ingress_orders_at_boundaries(parent: Dir, clock: Clock, random: Rando
     if bad == 0u64 && !(match (steer, narrow, later) { (Queued(1u64), Queued(2u64), Queued(3u64)) => true, _ => false }) { bad = 2u64 }
     // 3. Run 0's next round: the Early input joins it; the command has not applied.
     let set = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
-        store.put(mut tx, h.runs, 0u64, harness.Run(caller: alice(), phase: Preparing, round: 1u64, rounds_left: 8u64,
+        store.put(mut tx, h.runs, 0u64, harness.Run(caller: alice(), phase: Preparing, round: 1u64, rounds_left: 8u64, stalled: 0u64,
             spend: harness.Spend(known: 0u64, reserved: 0u64, unresolved: 0u64)))
     })
     match take set { Ok(Committed(_)) => (), _ => fail("ingress: setup did not commit") }

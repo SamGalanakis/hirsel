@@ -359,7 +359,7 @@ fn logged(dir: Dir, clock: Clock, random: Random, tasks: Tasks, log: List[harnes
     let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
     let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
         for p in 0u64..list.len(log) { store.put(mut tx, h.entries, p, clone(log[p]))? }
-        store.put(mut tx, h.session, 0u64, harness.Session(model: "scripted", tools_narrow: All, head_pos: 0u64, next_pos: list.len(log),
+        store.put(mut tx, h.session, 0u64, harness.Session(model: "scripted", tools_narrow: All, frame: 0u64, next_pos: list.len(log),
             active_run: None, next_run: 3u64, next_seq: 0u64, active_sections_hashes: list.new(), active_tools_hash: list.new(), active_tools_pos: None))
     })
     match take ran { Ok(Committed(_)) => (), _ => fail("logged: fill did not commit") }
@@ -406,7 +406,7 @@ pub fn law_fork_shares_prefix(parent: Dir, clock: Clock, random: Random, tasks: 
     let mut bad = 0u64
     let inside = exported(src, 6u64)
     if let Error(Conflict) = inside { () } else { bad = 1u64 }
-    let prefix = match exported(src, 4u64) { Ok(take p) => take p, Error(_) => { bad = 2u64; harness.Prefix(model: "", tools_narrow: All, head_pos: 0u64, entries: list.new(), cuts: list.new()) } }
+    let prefix = match exported(src, 4u64) { Ok(take p) => take p, Error(_) => { bad = 2u64; harness.Prefix(model: "", tools_narrow: All, frame: 0u64, frames: list.new(), entries: list.new(), cuts: list.new()) } }
     result.unwrap(store.close(take src))
     let mut db = result.unwrap(store.open(tasks, to, clock, random, runner.triggers.law_options()))
     result.unwrap(store.run_migration(mut db, tasks, code.describe(harness.migrate)))
@@ -720,7 +720,7 @@ fn fresh(dir: Dir, clock: Clock, random: Random, tasks: Tasks) -> store.Db waits
     let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
     let filled = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
         store.put(mut tx, h.entries, 0u64, User("go"))?
-        store.put(mut tx, h.session, 0u64, harness.Session(model: "scripted", tools_narrow: All, head_pos: 0u64, next_pos: 1u64,
+        store.put(mut tx, h.session, 0u64, harness.Session(model: "scripted", tools_narrow: All, frame: 0u64, next_pos: 1u64,
             active_run: Some(0u64), next_run: 1u64, next_seq: 0u64, active_sections_hashes: list.new(), active_tools_hash: list.new(), active_tools_pos: None))
     })
     match take filled { Ok(Committed(_)) => (), _ => fail("fresh: fill did not commit") }
@@ -742,7 +742,7 @@ fn prepared(mut db: store.Db, a: harness.Agent[Grants], round: u64, take shows: 
             s.tools_narrow = Only(list.new())
             store.put(mut tx, h.session, 0u64, s)?
         }
-        store.put(mut tx, h.runs, 0u64, harness.Run(caller: alice(), phase: Preparing, round: round, rounds_left: 8u64,
+        store.put(mut tx, h.runs, 0u64, harness.Run(caller: alice(), phase: Preparing, round: round, rounds_left: 8u64, stalled: 0u64,
             spend: harness.Spend(known: 0u64, reserved: 0u64, unresolved: 0u64)))
     })
     match take set { Ok(Committed(_)) => (), _ => fail("prepared: setup did not commit") }

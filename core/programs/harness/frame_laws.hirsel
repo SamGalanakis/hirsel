@@ -1,0 +1,130 @@
+// Offline laws for agent frames and the prompt view, on the laws.hirsel fixtures.
+
+fn always_open(tx: store.Tx, p: harness.Pressure) -> harness.Pressed {
+    OpenFrame(harness.FrameOpen(base: 2u64, reason: "pressure", seed: "S"))
+}
+
+fn omit_three(tx: store.Tx, p: harness.Pressure) -> List[harness.Omit] {
+    let mut out: List[harness.Omit] = list.new()
+    list.push(mut out, harness.Omit(from: 3u64, upto: 3u64))
+    take out
+}
+
+fn framing() -> harness.Agent[Grants] {
+    let mut a = crash_agent()
+    a.pressure = Some(code.describe(always_open))
+    a
+}
+
+fn framing_with_view() -> harness.Agent[Grants] {
+    let mut a = framing()
+    a.prompt_view = Some(code.describe(omit_three))
+    a
+}
+
+// Run 0 at `round`, ready to prepare.
+fn at_round(mut db: store.Db, round: u64) -> () waits {
+    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    let set = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
+        store.put(mut tx, h.runs, 0u64, harness.Run(caller: alice(), phase: Preparing, round: round, rounds_left: 8u64, stalled: 0u64,
+            spend: harness.Spend(known: 0u64, reserved: 0u64, unresolved: 0u64)))
+    })
+    match take set { Ok(Committed(_)) => (), _ => fail("frames: setup did not commit") }
+}
+
+fn frame_rows(db: store.Db) -> List[(u64, harness.Frame)] {
+    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    let mut out: List[(u64, harness.Frame)] = list.new()
+    let mut rows = result.unwrap(store.scan(store.snapshot(db), store.shape(h.frames), Unbounded, Unbounded))
+    while let Some((base, f)) = result.unwrap(store.next(mut rows)) {
+        list.push(mut out, (base, clone(f)))
+    }
+    take out
+}
+
+fn entry_at(db: store.Db, p: u64) -> Option[harness.Entry] {
+    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    result.unwrap(store.get(store.snapshot(db), store.shape(h.entries), p))
+}
+
+// The four hand-placed entries: 0 "first", 1 the baseline, 2 "a", 3 "u2".
+fn log_unchanged(db: store.Db) -> bool {
+    is_user_text(entry_at(db, 0u64), "first") && offers_bump(entry_at(db, 1u64))
+        && match entry_at(db, 2u64) { Some(Assistant(a)) => a.text == "a" && list.len(a.calls) == 0u64, _ => false }
+        && is_user_text(entry_at(db, 3u64), "u2")
+}
+
+fn is_user_text(e: Option[harness.Entry], text: String) -> bool { match e { Some(User(t)) => t == text, _ => false } }
+
+fn seeded_with(r: harness.Request, seed: String) -> bool {
+    list.len(r.messages) > 0u64 && match r.messages[0] { Inform(t) => t == seed, _ => false }
+}
+
+// Law F1 (ADR 0001: append-only history, durable frames): a pressure hook
+// that always answers OpenFrame(base 2) opens exactly one frame however often
+// it is asked. A prepare that crashes before its commit leaves no frame; after
+// reopening, the first prepare opens it and every later one is a no-op. The
+// framed request starts with the seed, leaves out entries 0-1 yet keeps the
+// system text and tools (a baseline follows the open), and a view that omits
+// position 3 removes it from one request. h.entries is never rewritten.
+// Oracle: positions and messages derived by hand from the four entries.
+pub fn law_frames_open_once(parent: Dir, clock: Clock, random: Random, tasks: Tasks) -> u64 waits {
+    let mut name = string.with_capacity(32u64)
+    let dir = result.unwrap(host.mkdtemp(parent, mut name))
+    let mut db = result.unwrap(store.open(tasks, dir, clock, random, runner.triggers.law_options()))
+    result.unwrap(store.run_migration(mut db, tasks, code.describe(harness.migrate)))
+    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    let w = result.unwrap(wired())
+    // Run 0 prepares round 0 under the plain agent: entries 0 and 1.
+    let opened = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[harness.Disposition, harness.Refused] {
+        harness.open_session(mut tx, h, "scripted", All)?
+        harness.submit(mut tx, h, crash_agent(), w, alice(), NextTurn, harness.Submit(client_key: "k", text: "first"))
+    })
+    match take opened { Ok(Committed(_)) => (), _ => fail("frames: submit did not commit") }
+    let grown = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
+        store.put(mut tx, h.entries, 2u64, Assistant(harness.Answer(text: "a", calls: list.new(), stop: "end", usage: usage())))?
+        store.put(mut tx, h.entries, 3u64, User("u2"))?
+        let Some(take found) = store.fetch(tx, store.shape(h.session), 0u64)? else { return Error(Missing("session")) }
+        let mut s = take found
+        s.next_pos = 4u64
+        store.put(mut tx, h.session, 0u64, s)
+    })
+    match take grown { Ok(Committed(_)) => (), _ => fail("frames: log did not commit") }
+    let mut bad = 0u64
+    // 1. The crash: round 1's prepare opens the frame, and its transaction never commits.
+    at_round(mut db, 1u64)
+    let crashed = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), harness.Refused] {
+        harness.advance(mut tx, h, framing(), w, Kick)?
+        Error(Storage)
+    })
+    match take crashed { Ok(Aborted(_)) => (), _ => fail("frames: the crash committed") }
+    if bad == 0u64 && list.len(frame_rows(db)) != 0u64 { bad = 1u64 }
+    result.unwrap(store.close(take db))
+    db = result.unwrap(store.open(tasks, dir, clock, random, runner.triggers.law_options()))
+    // 2. Resume: round 1 opens the frame; rounds 2 and 3 ask again and change nothing.
+    kick(mut db, framing())
+    at_round(mut db, 2u64)
+    kick(mut db, framing())
+    let rows = frame_rows(db)
+    if bad == 0u64 && !(list.len(rows) == 1u64 && rows[0].0 == 2u64 && rows[0].1.parent == 0u64 && rows[0].1.seed == "S") { bad = 2u64 }
+    let r2 = asked_at(db, 0u64, 2u64)
+    if bad == 0u64 && !(seeded_with(r2, "S") && !says_user(r2, "first") && says_user(r2, "u2")) { bad = 3u64 }
+    if bad == 0u64 && !(list.len(r2.tools) == 1u64 && r2.tools[0].name == "bump") { bad = 4u64 }
+    if bad == 0u64 && !log_unchanged(db) { bad = 5u64 }
+    // 3. The view leaves position 3 out of round 3's request only.
+    at_round(mut db, 3u64)
+    kick(mut db, framing_with_view())
+    if bad == 0u64 && list.len(frame_rows(db)) != 1u64 { bad = 6u64 }
+    let r3 = asked_at(db, 0u64, 3u64)
+    if bad == 0u64 && !(seeded_with(r3, "S") && !says_user(r3, "u2")) { bad = 7u64 }
+    if bad == 0u64 && !(says_user(asked_at(db, 0u64, 2u64), "u2") && log_unchanged(db)) { bad = 8u64 }
+    result.unwrap(store.close(take db))
+    result.unwrap(std.dir.remove_all(parent, name))
+    bad
+}
+
+@test
+fn test_frames_open_once(parent: Dir, clock: Clock, random: Random, tasks: Tasks) -> Result[(), u64] waits {
+    let bad = law_frames_open_once(parent, clock, random, tasks)
+    if bad == 0u64 { Ok(()) } else { Error(bad) }
+}

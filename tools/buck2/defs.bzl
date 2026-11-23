@@ -569,8 +569,8 @@ def _toolchain_bundle_impl(ctx):
     # images, recorded in hirsel-core-toolchain.json, and the Store archive. The compiler copies
     # itself in; a request from the bundle loads nothing outside it. The bundled compiler then
     # builds the platform host as libexec/hirsel/platform_main (docs/spec/launch.md "Starting
-    # the host"): its grants name the state directory as /proc/self/cwd, the directory the
-    # launcher starts it in.
+    # the host") and its offline pin reader as libexec/hirsel/pin_reader: their grants name the state directory as /proc/self/cwd, the directory the
+    # launcher starts the host in, and the driver the reader.
     bundle = ctx.actions.declare_output("hirsel-toolchain", dir = True)
     scratch = ctx.actions.declare_output("scratch", dir = True)
     runtimes = ctx.attrs.runtimes[DefaultInfo].sub_targets
@@ -588,6 +588,8 @@ def _toolchain_bundle_impl(ctx):
         '"$root/hirsel" build "$TMPDIR/store" --entry store@1/platform_main/main --grant Clock --grant Random --grant Tasks'
         + ' --grant "Net=UnixRoot ctl /proc/self/cwd;UnixConnect ctl launcher.sock;UnixListen ctl operator.sock"'
         + ' --dir /proc/self/cwd/catalog --limit {} -o "$root/libexec/hirsel/platform_main" > /dev/null'.format(PLATFORM_HOST_LIMIT),
+        '"$root/hirsel" build "$TMPDIR/store" --entry store@1/platform_main/read_pin --grant Clock --grant Stdout'
+        + ' --dir /proc/self/cwd/catalog --limit {} -o "$root/libexec/hirsel/pin_reader" > /dev/null'.format(PLATFORM_HOST_LIMIT),
     ])
     store_sources = ctx.actions.symlinked_dir("store-sources", {
         src.basename: src

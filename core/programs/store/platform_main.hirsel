@@ -220,6 +220,57 @@ fn number(argv: Args, i: u64) -> Result[u64, Exit] {
     }
 }
 
+// The installed offline pin reader, `libexec/hirsel/pin_reader ID` with its Dir at
+// STATE/catalog (launch.md "Replaying a recording"). The driver runs it only while it holds
+// STATE/launcher.lock and STATE/catalog/LOCK. It prints `found <assembly hex>` or `gone`
+// and exits 0; a usage error exits 64 and a catalog that cannot be read 74, never `gone`.
+pub fn read_pin(d: Dir, c: Clock, out: Stdout, argv: Args) -> Result[(), Exit] waits {
+    let Some(text) = args.get(argv, 0u64) else {
+        return Error(Exit(status: 64u8))
+    }
+    let Some(id) = unhex(text) else {
+        return Error(Exit(status: 64u8))
+    }
+    if list.len(id) != 16u64 {
+        return Error(Exit(status: 64u8))
+    }
+    let line = match platform.resolve_offline(d, id, host.wall_ms(c) / 1000u64) {
+        Ok(Found(assembly)) => joined_hex("found ", assembly),
+        Ok(Gone) => "gone\n",
+        Error(_) => return Error(Exit(status: 74u8)),
+    }
+    match stdout.write(out, line) {
+        Ok(_) => Ok(()),
+        Error(_) => Error(Exit(status: 74u8)),
+    }
+}
+
+fn unhex(s: String) -> Option[Bytes] {
+    let n = string.byte_len(s)
+    if n % 2u64 != 0u64 {
+        return None
+    }
+    let mut out: Bytes = list.with_capacity(n / 2u64)
+    let mut i = 0u64
+    while i < n {
+        let Ok(v) = int.parse_uint(string.slice(s, i, i + 2u64), 16u32) else {
+            return None
+        }
+        list.push(mut out, int.narrow(v))
+        i += 2u64
+    }
+    Some(out)
+}
+
+fn joined_hex(prefix: String, b: Bytes) -> String {
+    let mut out = string.from(prefix)
+    for x in b {
+        string.push_uint(mut out, int.widen(x), 16u32, 2u64, '0')
+    }
+    string.push(mut out, "\n")
+    out
+}
+
 pub fn main(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, argv: Args) -> Result[(), Exit] waits {
     let Some(root) = args.get(argv, 0u64) else {
         return Error(Exit(status: 64u8))

@@ -377,7 +377,12 @@ assigns each serving process a recording ID and syncs its pin before launching
 the process. A pin names the assembly record and carries its expiry. The
 default retention period is 30 days, set by `--tape-retention DAYS`.
 `hirsel replay --state HOST_STATE --tape TAPE` resolves the recording ID through
-the pin, refuses a recipe with a foreign leaf before reading any record of the tape
+the pin. It asks a running host with `ResolvePin` on `HOST_STATE/operator.sock`. When no host
+listens there, it takes `HOST_STATE/launcher.lock` and then the catalog's `LOCK`, both without
+waiting, and reads the pin with `libexec/hirsel/pin_reader` (`platform_main/read_pin`), which
+replays the catalog journal read-only and prints `found <assembly hex>` or `gone`. A held lock or a
+host that does not answer exits 75 "temporarily unavailable"; a reader error is an error, never
+`Gone`. Replay then refuses a recipe with a foreign leaf before reading any record of the tape
 (FFI-8), and runs the verified image from the host image store. Replay takes the
 arguments and launch metadata from the recording.
 

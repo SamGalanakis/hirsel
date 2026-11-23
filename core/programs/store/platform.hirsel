@@ -3479,10 +3479,25 @@ pub fn forget_pin(mut h: Host, id: Bytes) -> Result[(), Refused] waits {
 // `now` is before the expiry, in Unix seconds, and `Gone` from the expiry on or when no
 // pin exists. A store error is an error, never `Gone`.
 pub fn resolve_pin(h: Host, id: Bytes, now: u64) -> Result[operator.Resolved, Refused] {
-    match st(store.get(store.snapshot(h.db), store.shape(h.t.pins), id))? {
-        Some(p) if now < p.expires => Ok(Found(clone(p.assembly))),
-        _ => Ok(Gone),
+    Ok(pin_answer(st(store.get(store.snapshot(h.db), store.shape(h.t.pins), id))?, now))
+}
+
+// The one pin rule both owners apply: the live host and the offline reader.
+fn pin_answer(p: Option[Pin], now: u64) -> operator.Resolved {
+    match p {
+        Some(found) if now < found.expires => Found(clone(found.assembly)),
+        _ => Gone,
     }
+}
+
+// The offline reader (launch.md "Replaying a recording"): while no host runs, and with the
+// caller holding the launcher's lifetime lock and the catalog's LOCK, it recovers the
+// catalog in `d` read-only (STORE §11.19: no genesis, repair, cleanup or write) and gives
+// the live host's lookup at `now`, in Unix seconds. A store error is an error, never Gone.
+pub fn resolve_offline(d: Dir, id: Bytes, now: u64) -> Result[operator.Resolved, store.Error] waits {
+    let reader = store.open_read_only(d, store.defaults())?
+    let pins: store.Shape[Bytes, Pin] = store.read_only_table(reader, "platform.pins", std.codec.key_bytes(), std.codec.of())?
+    Ok(pin_answer(store.read_only_get(reader, pins, id)?, now))
 }
 
 pub fn retirement(h: Host, name: String) -> Option[Retired] {

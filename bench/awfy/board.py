@@ -537,7 +537,9 @@ def prepare_compile(out, artifacts, env):
 
 
 def publish_std(out, artifacts, env):
-    run([artifacts["compiler"], "std-product", "--store", out / "packages"], env=env)
+    # The toolchain bundle prebuilds the release std, so the board's std does.
+    run([artifacts["compiler"], "std-product", "--store", out / "packages",
+         "--target", artifacts["target"]], env=env)
 
 
 def prepare_hirsel_compile(out, artifacts, env, *, packages=None):
@@ -630,9 +632,8 @@ def compile_rows(board, out, prepared, fixture, tools):
                                                    path=target / "build.json")
                 record = receipt.build_record(report)
                 sample["compiled_parts"] = report["native"]["compiled"]
-                # The cold build lowers the std roots the program reaches
-                # into the shared cache; the edit reaches the same roots, so
-                # an edit build that lowers std again missed that side.
+                # prepare_hirsel_compile prebuilt the release std into the
+                # std product, so a build that lowers std itself missed it.
                 sample["std_lowered"] = report["native"]["reach"]["std_lowered"]
                 rebuilt = sample["compiled_parts"] > 0
             else:
@@ -646,7 +647,7 @@ def compile_rows(board, out, prepared, fixture, tools):
             sample["verified"] = measure.matches_output(verify, marker)
             if not sample["verified"]:
                 sample["status"] = "wrong-result"
-            elif mode == "edit" and sample.get("std_lowered"):
+            elif sample.get("std_lowered"):
                 sample["status"] = "std-lowered"
             elif sample["status"] == "ok" and not sample["seconds"]:
                 sample["status"] = "missing-duration"

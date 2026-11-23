@@ -2,8 +2,8 @@
 // the separately lowered std every optimised LLVM build takes:
 //
 // Independence: a std side is a function of its units' content, toolchain and
-// variant. The std product's own prebuild, and a program's build over another
-// image of the same std lowering the std cold into its own parts store, hold
+// variant. Two builds of a program over separate images of the same std, the
+// second taking the side the first lowered into the shared parts store, hold
 // equal key, record, part and lent bytes. A recipe assembled after its source
 // and image are gone takes the side its build stored and links the same
 // executable. A program checked over library sources whose one std function it
@@ -12,8 +12,9 @@
 // the definitions a program reaches, red on "the std's record".
 //
 // Semantic differential: a program assembled over the separately lowered std,
-// calling it out of line (Parts) or importing and inlining its small bodies
-// (Imported), does and reports what the same program's Cranelift development
+// calling it out of line (Parts), importing and inlining its small bodies
+// (Imported), or over the whole std the std product prebuilt into its library
+// image with its objects (Prebuilt), does and reports what the same program's Cranelift development
 // build, which holds every std body it reaches as its own object, does: its
 // exit, output and failure report, its logical charge report, its failure
 // under a root step limit, and how its recorded tape replays. Mutants: the
@@ -445,8 +446,9 @@ HirselCoreHostOutcome __wrap_hirsel_core_host_io(
 fn std_of(
     options: &NativeOptions,
     publication: &crate::native::recipe_build::Publication,
+    library: Option<&Path>,
 ) -> Option<crate::native::std_release::StdSide> {
-    publication.std_side(options).unwrap()
+    publication.std_side(options, library).unwrap()
 }
 
 /// What a run of a program shows: exit, stdout, stderr, charge report, tape.
@@ -461,6 +463,9 @@ enum StdBuild {
     Parts,
     /// Over the std's parts, with its lent bodies imported for inlining.
     Imported,
+    /// Over the side the std product prebuilt into the library image, with
+    /// its lent bodies, when the build's generator is the one it prebuilt for.
+    Prebuilt,
 }
 
 /// Assemble `product`'s entry as `build` takes the std, and run it with a
@@ -481,9 +486,24 @@ fn std_run(product: &CheckProduct, options: &NativeOptions, build: StdBuild, dir
         .unwrap();
     let std = match build {
         StdBuild::Dev => None,
-        StdBuild::Parts => std_of(options, &publication)
+        StdBuild::Parts => std_of(options, &publication, None)
             .map(|std| crate::native::std_release::StdSide { lent: Vec::new(), ..std }),
-        StdBuild::Imported => std_of(options, &publication),
+        StdBuild::Imported => std_of(options, &publication, None),
+        StdBuild::Prebuilt => {
+            let library = product.image.as_ref().map(|image| image.store_root());
+            let std = std_of(options, &publication, library.as_deref());
+            // The prebuilt side holds every plain std root, not only those
+            // the program reaches.
+            let unreached = hirsel_core_ir::Identity::plain(
+                DefPath::from_full("std@1/base64/encode_string").unwrap(),
+            );
+            assert_eq!(
+                std.as_ref().is_some_and(|std| std.roots.contains(&unreached)),
+                options.logical_charge_report.is_none(),
+                "the prebuilt side serves exactly the shipping generator"
+            );
+            std
+        }
     };
     let built = Publication::open(&code, publication.root, &crate::request::local_admission_limits())
         .unwrap()
@@ -564,7 +584,7 @@ fn a_separate_std_is_lowered_once_for_the_roots_a_program_reaches() {
         let publication = product
             .publish_release(&entry, &reached, &options, &code, 16 * 1024 * 1024)
             .unwrap();
-        let std = std_of(&options, &publication).expect("an optimised build's std");
+        let std = std_of(&options, &publication, None).expect("an optimised build's std");
         assert!(std.roots.contains(&split), "the entry's call uses the side");
         assert!(
             !std.roots.contains(&find),
@@ -649,8 +669,15 @@ fn std_differential(modes: &[&str]) -> usize {
             .join(std::env::var_os(name).unwrap_or_else(|| panic!("{name}")))
     };
     let mut taped = 0;
+    let mut prebuilt = false;
     for (name, source) in UNIT_PROGRAMS.into_iter().chain([STD_FAILS, STD_WAITS, STD_RECEIVES]) {
         let product = std_checked(dir.path(), name, source, "cache");
+        if !std::mem::replace(&mut prebuilt, true) {
+            // The std product's prebuild into the library image every
+            // program here is checked over.
+            let target = native_options(Backend::Llvm, dir.path()).target;
+            product.prebuilt_std(&target).unwrap().lower().unwrap();
+        }
         let project = dir.path().join(name);
         let mut base = native_options(Backend::Llvm, &dir.path().join("shared"));
         base.optimize = true;
@@ -704,9 +731,9 @@ fn std_differential(modes: &[&str]) -> usize {
                     String::from_utf8_lossy(&parts.2)
                 );
             }
-            let builds = [StdBuild::Dev, StdBuild::Parts, StdBuild::Imported];
+            let builds = [StdBuild::Dev, StdBuild::Parts, StdBuild::Imported, StdBuild::Prebuilt];
             let mut tapes = vec![(StdBuild::Dev, parts.4.clone())];
-            for build in [StdBuild::Parts, StdBuild::Imported] {
+            for build in [StdBuild::Parts, StdBuild::Imported, StdBuild::Prebuilt] {
                 let shown = std_run(&product, &options, build, &project);
                 assert_eq!(
                     (parts.0, &parts.1, &parts.2),

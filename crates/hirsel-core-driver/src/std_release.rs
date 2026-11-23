@@ -1,19 +1,23 @@
-//! The release std: the plain library instances a program reaches, and every
-//! instance they reach, lowered as one unit apart from the program. Its roots
-//! are selected from the program's reached plain library instances. Two
-//! programs that select the same roots and reach the same library bodies
-//! from them take the same side from the shared parts cache. Every root is
-//! an export; a program calls it by its symbol and holds none of its bodies.
-//! Every optimised LLVM build
-//! takes one: a program lowers every other library instance it reaches
-//! itself, so its optimiser sees the closure and dictionary arguments it
-//! passes them, and the held roots with what they reach: those
-//! [`ALWAYS_IMPORT`] names, those that take code a caller can bind
-//! ([`callable_variants::takes_code`]), those that make an owned network wait,
-//! whose returnable variants a program builds, and the plain roots called
-//! by program helpers and specialised library instances, so their call
-//! chains can optimise together. Scalar floating-point routines can lend
-//! their separately optimised bodies to call sites that pass only values.
+//! The release std: plain library instances, and every instance they reach,
+//! lowered as one unit apart from the program. Every root is an export; a
+//! program calls it by its symbol and holds none of its bodies. Every
+//! optimised LLVM build takes one, of two kinds:
+//! - prebuilt: `std-product` lowers every plain function its image checked
+//!   whole, less the held roots and what they reach, and generates every
+//!   part's machine code into the image's own store ([`PREBUILT`]), once per
+//!   toolchain and target. A build over that image whose units agree with the
+//!   side's takes it, and lowers and generates none of it.
+//! - reached: any other build lowers the plain roots its own closure reaches
+//!   into the shared parts cache, keeping in the program the plain roots its
+//!   helpers and specialised library instances call, so their call chains
+//!   optimise together; scalar floating-point routines are lent instead.
+//!
+//! A program lowers every other library instance it reaches itself, so its
+//! optimiser sees the closure and dictionary arguments it passes them, and
+//! the held roots with what they reach: those [`ALWAYS_IMPORT`] names, those
+//! that take code a caller can bind ([`callable_variants::takes_code`]), and
+//! those that make an owned network wait, whose returnable variants a
+//! program builds.
 //!
 //! The unit and a program meet at five contracts:
 //! - callable: each root is defined under its instance symbol, and one
@@ -29,9 +33,12 @@
 //!
 //! The unit also lends its bodies of at most [`LEND_LIMIT`] instructions,
 //! after its own optimiser, to each program's inliner
-//! ([`hirsel_llvm_lazy::Lend`]). A body copied into a program keeps the
-//! unit's site references and step charges; each call it keeps reaches the
-//! unit's part under the same five contracts.
+//! ([`hirsel_llvm_lazy::Lend`]) as `available_externally` definitions: a
+//! call site LLVM's inline cost takes inlines the body, and every other call
+//! reaches the unit's part, whose machine code is generated apart from the
+//! program. A body copied into a program keeps the unit's site references
+//! and step charges; each call it keeps reaches the unit's part under the
+//! same five contracts.
 use super::recipe_build::Unit;
 use super::*;
 use crate::native::{NativeOptions, NativeStop, ObjectProduct};
@@ -40,7 +47,7 @@ use hirsel_core_ir::{Callee, FuncId, Identity, Param};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 
-const STD_SCHEMA: u32 = 7;
+const STD_SCHEMA: u32 = 8;
 
 /// The largest body, in LLVM instructions after the std's optimiser, the std
 /// lends a program's inliner. LLVM's inline cost decides each call site; this
@@ -224,19 +231,23 @@ fn program_side(
 const STD_NAMESPACE: &str = hirsel_llvm_lazy::LENT_NAMESPACE;
 
 /// The release std a program's publication assembles against under
-/// `options`' generator, linking the runtime whose identity is `runtime`: the
-/// selected plain library roots with every unit they reach, lowered once
-/// into the shared parts cache. A program that selects no roots takes the
-/// empty side.
+/// `options`' generator: the side `library` (a library image's store)
+/// prebuilt for this generator when each unit it holds that the program also
+/// holds is the program's own (equal owner); else the selected plain library
+/// roots with every unit they reach, lowered once into the shared parts
+/// cache. A program that selects no roots takes the empty side.
 pub(crate) fn std_side(
     units: &BTreeMap<Identity, Unit>,
     entry: &Identity,
+    library: Option<&Path>,
     options: &NativeOptions,
-    runtime: ContentHash,
 ) -> Result<StdSide, NativeStop> {
-    let (roots, reached) = program_side(units, entry);
-    let generator = Generator::of(options, runtime);
+    let generator = Generator::of(options);
     let kin = generator.kin()?;
+    if let Some(side) = prebuilt_side(units, library, kin)? {
+        return Ok(side);
+    }
+    let (roots, reached) = program_side(units, entry);
     if roots.is_empty() {
         return Ok(StdSide {
             key: side_key(kin, &[], &[])?,
@@ -259,18 +270,185 @@ pub(crate) fn std_side(
             .collect(),
     };
     let shared = Store::new(&options.parts)?;
-    let (key, record, lowered) = lower(&generator, kin, side_units, &shared)?;
+    let (key, record, lowered) = lower(&generator, kin, side_units, &shared, false)?;
     side(&shared, key, record, lowered)
 }
 
+/// The side `library`'s store holds prebuilt for `kin`, when each unit it
+/// holds that `units` also holds has the same owner.
+fn prebuilt_side(
+    units: &BTreeMap<Identity, Unit>,
+    library: Option<&Path>,
+    kin: ContentHash,
+) -> Result<Option<StdSide>, NativeStop> {
+    let Some(path) = library
+        .map(|root| root.join(PREBUILT))
+        .filter(|path| path.is_dir())
+    else {
+        return Ok(None);
+    };
+    let store = Store::new(&path)?;
+    let Some(key) = store
+        .get(prebuilt_name(kin)?)?
+        .and_then(|bytes| decode::<ContentHash>(&bytes))
+    else {
+        return Ok(None);
+    };
+    let Some(record) = load_record(&store, key, kin)? else {
+        return Ok(None);
+    };
+    for (identity, owner) in &record.units {
+        if let Some(unit) = units.get(identity)
+            && unit.owner()? != *owner
+        {
+            return Ok(None);
+        }
+    }
+    side(&store, key, record, 0).map(Some)
+}
+
+/// Where `std-product` publishes its image's prebuilt release std, inside
+/// the image's store.
+pub(crate) const PREBUILT: &str = "release-std";
+
+/// The name the key of the side prebuilt for `kin` is stored under.
+fn prebuilt_name(kin: ContentHash) -> io::Result<ContentHash> {
+    crate::native::key("hirsel.core-std-prebuilt.v1", &kin)
+}
+
+impl CheckProduct {
+    /// The library image's plain roots: a plain identity of each non-generic
+    /// function the image checked whole, in identity order.
+    fn std_plain_roots(&self) -> Result<Vec<Identity>, NativeStop> {
+        let image = self
+            .image
+            .as_ref()
+            .ok_or_else(|| NativeStop::Entry("the release std is an image's".into()))?;
+        let directory = image.directory().map_err(NativeStop::Input)?;
+        let mut roots = Vec::new();
+        for definition in directory.definitions.keys() {
+            let product = self.demand_body(definition).map_err(NativeStop::Input)?;
+            if product.check.function.is_none() || product.check.template.is_some() {
+                continue;
+            }
+            roots.push(Identity::plain(definition.clone()));
+        }
+        roots.sort();
+        Ok(roots)
+    }
+
+    /// The units of the prebuilt release std of this product's library
+    /// image: every plain root the image checked whole and what it reaches,
+    /// less each held root and what it reaches, prepared as a recipe names
+    /// them. Reads the library image only.
+    fn image_side(&self) -> Result<SideUnits, NativeStop> {
+        let plain = self.std_plain_roots()?;
+        let mut materialized = crate::instances::InstanceSet::default();
+        // A root whose walk stops is left out alone; a program reaching it
+        // lowers it itself and stops there.
+        let mut walks = Vec::new();
+        for root in plain {
+            if let Ok(walked) =
+                self.instances_into([root.clone()], SIDE_INSTANCE_LIMIT, &mut materialized)
+            {
+                walks.push((root, walked));
+            }
+        }
+        // What a held root reaches stays the program's to lower.
+        let mut held = BTreeSet::new();
+        for (root, walked) in &walks {
+            let instance = materialized.get(root);
+            if held_root(&root.definition, instance.ir()?, instance.function) {
+                held.extend(walked.iter().cloned());
+                held.insert(root.clone());
+            }
+        }
+        let mut reached = BTreeSet::new();
+        let mut roots = Vec::new();
+        for (root, walked) in walks {
+            if !held.contains(&root) {
+                reached.extend(walked);
+                roots.push(root);
+            }
+        }
+        let items = reached
+            .iter()
+            .map(|i| {
+                materialized
+                    .get(i)
+                    .ir()
+                    .map(hirsel_core_ir::source::anchored_items)
+            })
+            .collect::<io::Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        let sources = self.native_sources(&items)?;
+        let sources = sources.positions();
+        let mut units = BTreeMap::new();
+        for identity in reached {
+            let instance = materialized.get(&identity);
+            let unit =
+                super::recipe_build::prepare_unit(instance.ir()?, instance.function, &sources);
+            units.insert(identity, unit);
+        }
+        Ok(SideUnits { roots, units })
+    }
+
+    /// The prebuilt release std of this product's library image for release
+    /// builds on `target`, walked and prepared from the image.
+    /// [`PrebuiltStd::lower`] publishes it, with every part's machine code,
+    /// into the image's own store. The side holds its own units, so the
+    /// caller can drop this product, and the bodies its image decoded for the
+    /// walk, before the side's optimiser runs.
+    pub(crate) fn prebuilt_std(&self, target: &str) -> Result<PrebuiltStd, NativeStop> {
+        let image = self
+            .image
+            .as_ref()
+            .ok_or_else(|| NativeStop::Entry("the release std is an image's".into()))?;
+        Ok(PrebuiltStd {
+            target: target.to_owned(),
+            store: Store::new(&image.store_root().join(PREBUILT))?,
+            units: self.image_side()?,
+        })
+    }
+}
+
+/// A library image's release std, prepared to lower and generate for one
+/// target.
+pub(crate) struct PrebuiltStd {
+    target: String,
+    store: Store,
+    units: SideUnits,
+}
+
+impl PrebuiltStd {
+    /// Lower the side, generate every part's object, and publish them.
+    pub(crate) fn lower(self) -> Result<(), NativeStop> {
+        // The shipping release builds, which observe no logical charges.
+        let generator = Generator {
+            target: &self.target,
+            observe_charge: false,
+        };
+        let kin = generator.kin()?;
+        let (key, _, _) = lower(&generator, kin, self.units, &self.store, true)?;
+        self.store.put_keyed(prebuilt_name(kin)?, &encode(&key)?)?;
+        Ok(())
+    }
+}
+
 /// Join, specialize and lower a side's units, and publish its parts and
-/// record into `store` under the key its content derives. Also returns how
-/// many units it lowered: none when `store` already holds the side.
+/// record into `store` under the key its content derives in `kin`. Each
+/// part is stored as bitcode, whose object a program generates when it first
+/// links the part; with `objects`, as the object itself, generated here.
+/// Also returns how many units it lowered: none when `store` already holds
+/// the side.
 fn lower(
     options: &Generator<'_>,
     kin: ContentHash,
     side: SideUnits,
     store: &Store,
+    objects: bool,
 ) -> Result<(ContentHash, StdRecord, u64), NativeStop> {
     let SideUnits { roots, mut units } = side;
     let owners = units
@@ -379,15 +557,43 @@ fn lower(
             hirsel_llvm_lazy::Lend::Lend { limit: LEND_LIMIT },
         )
         .map_err(emit)?;
-    // Each part's object is generated when a program first links it: a
-    // program links few of the unit's parts.
-    let mut parts = Vec::with_capacity(program.deferred.len());
-    for (i, part) in program.deferred.into_iter().enumerate() {
-        store.put_keyed(code_name(key, i)?, &part.code)?;
-        parts.push(StdPart {
-            name: part.name,
+    let parts: Vec<StdPart> = program
+        .deferred
+        .iter()
+        .map(|part| StdPart {
+            name: part.name.clone(),
             strong: part.strong,
-        });
+        })
+        .collect();
+    if objects {
+        let finished = StdParts {
+            key,
+            instance: Some(first.clone()),
+            store: Some(store.clone()),
+            exports: exports.iter().cloned().collect(),
+            parts: parts.clone(),
+        };
+        let private_names = finished.private_names();
+        let target = hirsel_core_layout::Target::from_triple(options.target)
+            .expect("supported native target");
+        // Generated in batches, so the objects in hand stay few.
+        for (batch, codes) in program.deferred.chunks(256).enumerate() {
+            let codes: Vec<&[u8]> = codes.iter().map(|part| part.code.as_slice()).collect();
+            let generated =
+                hirsel_llvm_lazy::generate_parts(&codes, target, hirsel_guard::jobs() as u32)
+                    .map_err(emit)?;
+            for (j, object) in generated.iter().enumerate() {
+                let i = batch * 256 + j;
+                let object = finished.finish(i, object, &private_names).map_err(emit)?;
+                crate::native_object::publish(store, part_name(key, i)?, &object)?;
+            }
+        }
+    } else {
+        // Each part's object is generated when a program first links it: a
+        // program links few of the unit's parts.
+        for (i, part) in program.deferred.iter().enumerate() {
+            store.put_keyed(code_name(key, i)?, &part.code)?;
+        }
     }
     if parts.is_empty() {
         return Err(NativeStop::Entry("the release std has no part".into()));
@@ -419,7 +625,6 @@ fn lower(
 struct Generator<'a> {
     target: &'a str,
     observe_charge: bool,
-    runtime: ContentHash,
 }
 
 /// The instance limit every release std is walked and lowered under: the
@@ -427,16 +632,16 @@ struct Generator<'a> {
 const SIDE_INSTANCE_LIMIT: usize = crate::native::DEFAULT_INSTANCE_LIMIT;
 
 impl<'a> Generator<'a> {
-    fn of(options: &'a NativeOptions, runtime: ContentHash) -> Self {
+    fn of(options: &'a NativeOptions) -> Self {
         Self {
             target: &options.target,
             observe_charge: options.logical_charge_report.is_some(),
-            runtime,
         }
     }
 
     /// The toolchain and variant a side's code is a function of besides its
-    /// units: every side of one kin is lowered by the same generator.
+    /// units: every side of one kin is lowered by the same generator. The
+    /// runtime a program links is not one: the side's code reads none of it.
     fn kin(&self) -> io::Result<ContentHash> {
         let compiler = crate::reuse::compiler_identity()?;
         let llvm = crate::tool_inputs::llvm_library()?;
@@ -446,7 +651,6 @@ impl<'a> Generator<'a> {
                 STD_SCHEMA,
                 compiler,
                 llvm,
-                self.runtime,
                 self.target,
                 self.observe_charge,
                 !hirsel_llvm_lazy::core::facts_enabled(),
@@ -514,6 +718,70 @@ pub(crate) struct StdParts {
 }
 
 impl StdParts {
+    /// The names of the unit's strong definitions it does not export.
+    fn private_names(&self) -> BTreeSet<&[u8]> {
+        self.parts
+            .iter()
+            .filter(|part| part.strong && !self.exports.contains(&part.name))
+            .map(|part| part.name.as_bytes())
+            .collect()
+    }
+
+    /// Part `i`'s object as a program links it, from the object generated
+    /// from its bitcode: cut, with its debug rows, and its names under the
+    /// link contract. The part defines strong only its own symbol, when its
+    /// record says so, and its debug symbol.
+    fn finish(
+        &self,
+        i: usize,
+        object: &[u8],
+        private_names: &BTreeSet<&[u8]>,
+    ) -> Result<hirsel_core_ir::source::NativeObject, String> {
+        let parts = self;
+        let part = &parts.parts[i];
+        let key = part_name(self.key, i).map_err(|e| e.to_string())?;
+        let mut cut =
+            hirsel_llvm_lazy::core::split_native_object(object, &[(&part.name, key)], true)?;
+        let mut object = cut.pop().ok_or("a release std part cuts to no object")?;
+        let strong = hirsel_llvm_lazy::core::strong_definitions(&object.bytes)?;
+        let own: BTreeSet<Vec<u8>> = strong
+            .into_iter()
+            .filter(|name| {
+                !std::str::from_utf8(name).is_ok_and(|name| parts.exports.contains(name))
+            })
+            .collect();
+        if !part.name.is_empty() {
+            let debug = hirsel_core_ir::source::debug_symbol(key, 0).into_bytes();
+            let mut expected = BTreeSet::from([debug]);
+            if part.strong && !parts.exports.contains(&part.name) {
+                expected.insert(part.name.clone().into_bytes());
+            }
+            if own != expected {
+                return Err(format!(
+                    "release std part {} defines other strong symbols than its record names",
+                    part.name
+                ));
+            }
+        }
+        let is_renamed = |name: &[u8]| private_names.contains(name) || own.contains(name);
+        let rename = |name: &[u8]| {
+            is_renamed(name).then(|| {
+                let mut renamed = name.to_vec();
+                renamed.extend_from_slice(STD_NAMESPACE.as_bytes());
+                renamed
+            })
+        };
+        object.bytes = hirsel_llvm_lazy::core::rename_symbols(&object.bytes, &rename)?;
+        if let Some(debug) = &mut object.debug {
+            for section in &mut debug.sections {
+                if is_renamed(section.symbol.as_bytes()) {
+                    section.symbol.push_str(STD_NAMESPACE);
+                }
+            }
+        }
+        Ok(object)
+    }
+
     /// The name a part's symbol has in a program's link: a strong
     /// definition the unit does not export is in the std's namespace.
     fn linked(&self, part: &StdPart) -> Vec<u8> {
@@ -621,16 +889,9 @@ impl StdSide {
                     hirsel_guard::jobs() as u32,
                 )
                 .map_err(emit)?;
-                let private_names = private_names.get_or_insert_with(|| {
-                    parts
-                        .parts
-                        .iter()
-                        .filter(|part| part.strong && !parts.exports.contains(&part.name))
-                        .map(|part| part.name.as_bytes())
-                        .collect()
-                });
+                let private_names = private_names.get_or_insert_with(|| parts.private_names());
                 for (&i, object) in missed.iter().zip(&generated) {
-                    let object = self.finish(i, object, private_names).map_err(emit)?;
+                    let object = parts.finish(i, object, private_names).map_err(emit)?;
                     named.extend(
                         hirsel_llvm_lazy::core::undefined_symbols(&object.bytes).map_err(emit)?,
                     );
@@ -655,61 +916,6 @@ impl StdSide {
                 compiled: false,
             })
             .collect())
-    }
-
-    /// Part `i`'s object as a program links it, from the object generated
-    /// from its bitcode: cut, with its debug rows, and its names under the
-    /// link contract. The part defines strong only its own symbol, when its
-    /// record says so, and its debug symbol.
-    fn finish(
-        &self,
-        i: usize,
-        object: &[u8],
-        private_names: &BTreeSet<&[u8]>,
-    ) -> Result<hirsel_core_ir::source::NativeObject, String> {
-        let parts = &self.parts;
-        let part = &parts.parts[i];
-        let key = part_name(self.key, i).map_err(|e| e.to_string())?;
-        let mut cut =
-            hirsel_llvm_lazy::core::split_native_object(object, &[(&part.name, key)], true)?;
-        let mut object = cut.pop().ok_or("a release std part cuts to no object")?;
-        let strong = hirsel_llvm_lazy::core::strong_definitions(&object.bytes)?;
-        let own: BTreeSet<Vec<u8>> = strong
-            .into_iter()
-            .filter(|name| {
-                !std::str::from_utf8(name).is_ok_and(|name| parts.exports.contains(name))
-            })
-            .collect();
-        if !part.name.is_empty() {
-            let debug = hirsel_core_ir::source::debug_symbol(key, 0).into_bytes();
-            let mut expected = BTreeSet::from([debug]);
-            if part.strong && !parts.exports.contains(&part.name) {
-                expected.insert(part.name.clone().into_bytes());
-            }
-            if own != expected {
-                return Err(format!(
-                    "release std part {} defines other strong symbols than its record names",
-                    part.name
-                ));
-            }
-        }
-        let is_renamed = |name: &[u8]| private_names.contains(name) || own.contains(name);
-        let rename = |name: &[u8]| {
-            is_renamed(name).then(|| {
-                let mut renamed = name.to_vec();
-                renamed.extend_from_slice(STD_NAMESPACE.as_bytes());
-                renamed
-            })
-        };
-        object.bytes = hirsel_llvm_lazy::core::rename_symbols(&object.bytes, &rename)?;
-        if let Some(debug) = &mut object.debug {
-            for section in &mut debug.sections {
-                if is_renamed(section.symbol.as_bytes()) {
-                    section.symbol.push_str(STD_NAMESPACE);
-                }
-            }
-        }
-        Ok(object)
     }
 
     /// Each part's bitcode, in part order.

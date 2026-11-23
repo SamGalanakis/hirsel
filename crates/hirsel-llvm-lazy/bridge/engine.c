@@ -548,7 +548,9 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
     LLVMTargetDataRef layout = LLVMCreateTargetDataLayout(machine);
     LLVMSetModuleDataLayout(module, layout); LLVMDisposeTargetData(layout);
     LLVMErrorRef e = LLVMErrorSuccess;
-    if (speed && hirsel_llvm_large_release(module)) {
+    // A library (`lend`) is optimised whole however large: every program
+    // runs its code and inlines its lent bodies, and it is lowered once.
+    if (speed && !lend && hirsel_llvm_large_release(module)) {
         e = hirsel_llvm_optimize_large_release(module, machine);
     } else if (speed) {
         unsigned hint = LLVMGetEnumAttributeKindForName("inlinehint", 10);

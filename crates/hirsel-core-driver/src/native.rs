@@ -578,7 +578,8 @@ impl CheckProduct {
             .release_units(&root, &reached, &code, None, None)?
             .units;
         let runtime = inputs.toolchain.runtime;
-        let std = std_release::std_side(&units, &root, options, runtime)?;
+        let library = self.image.as_ref().map(|image| image.store_root());
+        let std = std_release::std_side(&units, &root, library.as_deref(), options)?;
         units.retain(|identity, _| identity == &root || !std.roots.contains(identity));
         recipe_build::bind_annexes(&mut units, &BTreeMap::new(), &std.points, true, None)?;
         let store = Store::new(&options.store)?;

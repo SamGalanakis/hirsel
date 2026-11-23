@@ -593,7 +593,48 @@ pub fn publish(
             prebuild(&installed, target, &archive, recipe, meter)?;
         }
     }
+    // The host's release builds take the std prebuilt here. A cross
+    // target's lower the std roots they reach, as its whole-std lowering does
+    // not fit the bundle step's memory limit (AArch64 exceeds 2G).
+    if std
+        && let Some((_, target)) = runtime
+        && target == HOST
+    {
+        prebuild_release(&product.image, target, meter)?;
+    }
     Ok(product)
+}
+
+/// Lower the release std of a std product's image for release builds on
+/// `target`, with every part's machine code, into the image's store, where
+/// every release build over the image finds it.
+pub(crate) fn prebuild_release(
+    image: &CoreImage,
+    target: &str,
+    meter: &mut Meter,
+) -> io::Result<()> {
+    // The walk decodes every std body into the image it reads. An image of
+    // the prebuild's own leaves with the check, before the optimiser runs.
+    let image = CoreImage::open(&image.store_root())?
+        .ok_or_else(|| io::Error::other("the std product's image cannot be reopened"))?;
+    let scratch = tempfile::tempdir()?;
+    let request = crate::CheckRequest {
+        manifest: None,
+        inputs: crate::CorpusManifest {
+            core: image.directory()?.inputs.core.clone(),
+            packages: vec![],
+        },
+        store: scratch.path().join("request"),
+        library: crate::LibraryInput::Image(image),
+        entry: None,
+    };
+    let product = crate::Driver::default().check(request, meter)?;
+    let prebuild = |stop| io::Error::other(format!("prebuilding the release std: {stop}"));
+    let side = product.prebuilt_std(target).map_err(prebuild)?;
+    drop(product);
+    side.lower().map_err(prebuild)?;
+    meter.finish("std product/release prebuild");
+    Ok(())
 }
 
 /// Prebuild the installed std image's plain instances for a development

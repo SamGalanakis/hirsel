@@ -135,10 +135,16 @@ core runtime. `run` builds and
 executes it, forwarding arguments after `--` and returning its process status.
 
 Every LLVM release build, `build`, `run` and `test` alike, is assembled from its
-published recipe over the release std: the plain core and std instances the
-program reaches, with what they reach, lowered apart from the program and keyed
-by those instances' content, in the user's cache, where every build reaching
-the same roots finds them. The std side exports its plain
+published recipe over the release std. When the build's library image holds
+the std its std product prebuilt for the build's target and generator, the
+release std is that: every plain std root the image checked whole, with what
+it reaches, less the roots `ALWAYS_IMPORT` holds back, lowered to machine code
+once when the toolchain bundle installs its host target (`std-product
+--install`) or on `std-product --store|--image --target TRIPLE`. A build over
+it compiles none of the std. Otherwise the release std is the plain core and
+std instances the program reaches, with what they reach, lowered apart from the
+program and keyed by those instances' content, in the user's cache, where every
+build reaching the same roots finds them. The std side exports its plain
 roots, each with its step summary, and lends bodies of at most `LEND_LIMIT`
 instructions `available_externally` for inlining. The release unit holds the
 program's own bodies and every other library instance it reaches, so its
@@ -465,7 +471,9 @@ the host runtime requires `--link-kit`, which supplies the editor, startup
 objects and link-time libraries. Another target's runtime is registered without
 a recipe and its links take `--cc` and `--sysroot`. A missing piece of the prefix is a named refusal at the
 request that needs it; nothing falls back. --store and --image cannot combine
-with --install; product --runtime/--target require --install. The distribution
+with --install; product --runtime and core-product --target require --install.
+`std-product --target TRIPLE` with --store or --image prebuilds that image's
+release std for TRIPLE into the image's store. The distribution
 assembler uses this same producer. It does not switch the currently installed
 old CLI.
 A copied new compiler beside the registration uses these products/runtime from

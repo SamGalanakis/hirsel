@@ -28,7 +28,11 @@ The native unwind records mark where a stack walk ends at a fiber boundary.
 Register the host runtime with `core-product --install` or
 `std-product --install` by passing `--link-kit DIRECTORY` alongside
 `--runtime ARCHIVE`. The installed compiler links user programs with the
-copied kit and a bundle-relative recipe.
+copied kit and a bundle-relative recipe. Installing the std product for the
+host target also compiles the release std to machine code once, so release
+builds over the installed std compile only the program. `std-product --store
+CACHE --target TRIPLE` (or `--image IMAGE --target TRIPLE`) does the same for
+that product's image and target.
 
 `--logical-charge-report FILE` selects the installed charge observation
 runtime for the build's target and recording mode. Product installations

@@ -1775,9 +1775,9 @@ impl Publication {
     /// [`Self::assemble`] of a program checked as `product`. An optimised
     /// LLVM build takes every library instance a separately lowered release
     /// std holds from it ([`std_side`]): the program holds none of their
-    /// bodies and calls each by its exported symbol. Other builds' prebuilt
-    /// objects are read first from `library` (a library image's store), else
-    /// from `product`'s image.
+    /// bodies and calls each by its exported symbol. That std, and any other
+    /// build's prebuilt objects, are read first from `library` (a library
+    /// image's store), else from `product`'s image.
     pub(crate) fn assemble_with(
         self,
         options: &NativeOptions,
@@ -1790,26 +1790,23 @@ impl Publication {
                 .and_then(|product| product.image.as_ref())
                 .map(|image| image.store_root().to_owned())
         });
-        let std = self.std_side(options)?;
+        let std = self.std_side(options, library.as_deref())?;
         self.assemble_over(options, counters, std, library.as_deref())
     }
 
     /// The separately lowered release std an optimised LLVM build of this
-    /// publication under `options` takes ([`std_side`]); None for any other.
-    pub(crate) fn std_side(&self, options: &NativeOptions) -> Result<Option<StdSide>, NativeStop> {
+    /// publication under `options` takes ([`std_side`]), prebuilt in
+    /// `library` (a library image's store) or not; None for any other.
+    pub(crate) fn std_side(
+        &self,
+        options: &NativeOptions,
+        library: Option<&Path>,
+    ) -> Result<Option<StdSide>, NativeStop> {
         let (options, _) = self.launch(options)?;
         if !matches!(options.backend, Backend::Llvm) || !options.optimize {
             return Ok(None);
         }
-        let runtime = match &options.observed {
-            Some(observed) => observed.0.runtime,
-            None => {
-                crate::tool_inputs::toolchain(&options.link, &options.target, &options.runtime)?
-                    .0
-                    .runtime
-            }
-        };
-        std_side(&self.units, &self.recipe.entry, &options, runtime).map(Some)
+        std_side(&self.units, &self.recipe.entry, library, &options).map(Some)
     }
 
     /// The options the recipe's launch fixes over `options`, and its entry's
@@ -1828,8 +1825,8 @@ impl Publication {
     /// Assemble the program; an optimised LLVM build over `std`, the
     /// separately lowered release std ([`Self::std_side`]), which every such
     /// build takes and no other does: the program holds none of its exports'
-    /// bodies and calls each by its exported symbol. An object `library` (a
-    /// library image's store) holds prebuilt under its key is read from it.
+    /// bodies and calls each by its exported symbol. The side comes from
+    /// `library` (a library image's store) when its std product prebuilt it.
     pub(crate) fn assemble_over(
         mut self,
         options: &NativeOptions,

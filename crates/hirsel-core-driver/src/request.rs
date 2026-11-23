@@ -770,17 +770,15 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
         return Err("--install cannot be combined with --store or --image".into());
     }
     if install_root.is_none()
-        && (((command == "core-product" || command == "std-product")
-            && (explicit_runtime || explicit_target))
+        && ((command == "core-product" && (explicit_runtime || explicit_target))
+            || (command == "std-product" && explicit_runtime)
             || additional_runtimes.recording.is_some()
             || additional_runtimes.prof.is_some()
             || additional_runtimes.prof_recording.is_some()
             || additional_runtimes.observed.is_some()
             || additional_runtimes.observed_recording.is_some())
     {
-        return Err(
-            "product --runtime/--target and runtime variant options require --install".into(),
-        );
+        return Err("product --runtime, core-product --target and runtime variant options require --install".into());
     }
     if profile_front && !hirsel_core_ids::published::FRONT_OBSERVER_AVAILABLE {
         return Err("--profile-front needs the front-observer release compiler".into());
@@ -974,6 +972,11 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             };
             (package.image, package.rebuilt)
         };
+        // An explicit target asks for the image's prebuilt release std, which
+        // an install prebuilds for its own target.
+        if command == "std-product" && explicit_target && install_root.is_none() {
+            crate::installation::prebuild_release(&image, &target, &mut meter)?;
+        }
         let name = if let Some(name) = product_name {
             let found = image.resolve_name(&name)?.is_some();
             meter.finish("package name resolution");

@@ -868,4 +868,41 @@ const LOWER_DELTA: Inline[i32, 86] =[
 ]
 
 const FOLD_EXPANSIONS: String = "\u{69}\u{307}\u{73}\u{73}\u{2bc}\u{6e}\u{6a}\u{30c}\u{3b9}\u{308}\u{301}\u{3c5}\u{308}\u{301}\u{565}\u{582}\u{68}\u{331}\u{74}\u{308}\u{77}\u{30a}\u{79}\u{30a}\u{61}\u{2be}\u{3c5}\u{313}\u{3c5}\u{313}\u{300}\u{3c5}\u{313}\u{301}\u{3c5}\u{313}\u{342}\u{1f00}\u{3b9}\u{1f01}\u{3b9}\u{1f02}\u{3b9}\u{1f03}\u{3b9}\u{1f04}\u{3b9}\u{1f05}\u{3b9}\u{1f06}\u{3b9}\u{1f07}\u{3b9}\u{1f20}\u{3b9}\u{1f21}\u{3b9}\u{1f22}\u{3b9}\u{1f23}\u{3b9}\u{1f24}\u{3b9}\u{1f25}\u{3b9}\u{1f26}\u{3b9}\u{1f27}\u{3b9}\u{1f60}\u{3b9}\u{1f61}\u{3b9}\u{1f62}\u{3b9}\u{1f63}\u{3b9}\u{1f64}\u{3b9}\u{1f65}\u{3b9}\u{1f66}\u{3b9}\u{1f67}\u{3b9}\u{1f70}\u{3b9}\u{3b1}\u{3b9}\u{3ac}\u{3b9}\u{3b1}\u{342}\u{3b1}\u{342}\u{3b9}\u{1f74}\u{3b9}\u{3b7}\u{3b9}\u{3ae}\u{3b9}\u{3b7}\u{342}\u{3b7}\u{342}\u{3b9}\u{3b9}\u{308}\u{300}\u{3b9}\u{342}\u{3b9}\u{308}\u{342}\u{3c5}\u{308}\u{300}\u{3c1}\u{313}\u{3c5}\u{342}\u{3c5}\u{308}\u{342}\u{1f7c}\u{3b9}\u{3c9}\u{3b9}\u{3ce}\u{3b9}\u{3c9}\u{342}\u{3c9}\u{342}\u{3b9}\u{66}\u{66}\u{66}\u{69}\u{66}\u{6c}\u{66}\u{66}\u{69}\u{66}\u{66}\u{6c}\u{73}\u{74}\u{574}\u{576}\u{574}\u{565}\u{574}\u{56b}\u{57e}\u{576}\u{574}\u{56d}"
+
 // END
+/// Joins parts with sep between successive strings. Fails: Capacity.
+pub fn join(parts: List[String], sep: String) -> String {
+    let mut out = string.new()
+    for i in 0 .. list.len(parts) {
+        if i != 0 {
+            string.push(mut out, sep)
+        }
+        string.push(mut out, parts[i])
+    }
+    take out
+}
+
+/// Replaces every leftmost non-overlapping occurrence of pat. An empty
+/// pattern inserts replacement at every scalar boundary, including the ends.
+pub fn replace(s: String, pat: String, replacement: String) -> String {
+    let mut out = string.new()
+    let n = string.byte_len(s)
+    let m = string.byte_len(pat)
+    let mut at: u64 = 0
+    if m == 0 {
+        string.push(mut out, replacement)
+        while let Some((_, next)) = string.next_scalar(s, at) {
+            string.push(mut out, string.slice(s, at, next))
+            string.push(mut out, replacement)
+            at = next
+        }
+    } else {
+        while let Some(found) = find(s, at, pat) {
+            string.push(mut out, string.slice(s, at, found))
+            string.push(mut out, replacement)
+            at = found + m
+        }
+        string.push(mut out, string.slice(s, at, n))
+    }
+    take out
+}

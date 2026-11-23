@@ -1,0 +1,15 @@
+fn hex_vector(raw: Bytes, encoded: String, upper: Bytes) -> bool {
+    let Some(lower_bytes) = hex.decode(string.as_bytes(encoded)) else {
+        return false
+    }
+    let Some(upper_bytes) = hex.decode(upper) else {
+        return false
+    }
+    lower_bytes == raw && upper_bytes == raw && hex.encode(raw) == encoded
+}
+
+// RFC 4648 section 10, with mixed case and malformed inputs.
+// expect: run micro_hex() = true
+fn micro_hex() -> bool {
+    hex_vector(b"", "", b"") && hex_vector(b"f", "66", b"66") && hex_vector(b"fo", "666f", b"666F") && hex_vector(b"foo", "666f6f", b"666F6F") && hex_vector(b"foob", "666f6f62", b"666F6F62") && hex_vector(b"fooba", "666f6f6261", b"666F6f6261") && hex_vector(b"foobar", "666f6f626172", b"666F6F626172") && hex.decode(b"abc") == None && hex.decode(b"g0") == None && hex.decode(b"0 ") == None
+}

@@ -87,7 +87,9 @@
     "lines": 1743
   },
   "core/std/regex.hirsel": {
-    "lines": 28360
+    "lines": 14386,
+    "raise_revision": 1,
+    "reason": "std-micro-prims-2019"
   },
   "core/std/sim/s3.hirsel": {
     "lines": 1213,
@@ -118,7 +120,9 @@
     "lines": 1439
   },
   "core/std/tests/string.hirsel": {
-    "lines": 1512
+    "lines": 1522,
+    "raise_revision": 1,
+    "reason": "std-micro-prims-2019"
   },
   "core/std/zstd.hirsel": {
     "lines": 1415

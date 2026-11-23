@@ -191,3 +191,19 @@ fn caught[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
         _ => None,
     }
 }
+
+fn url_vector(raw: Bytes, padded: String, unpadded: String) -> bool {
+    let Some(with_pad) = base64.decode_url(string.as_bytes(padded), true) else {
+        return false
+    }
+    let Some(without_pad) = base64.decode_url(string.as_bytes(unpadded), false) else {
+        return false
+    }
+    with_pad == raw && without_pad == raw && base64.encode_url(raw, true) == padded && base64.encode_url(raw, false) == unpadded
+}
+
+// Section 10 inputs, plus 0xfb 0xff (sextets 62, 63, 60).
+// expect: run micro_base64url() = true
+fn micro_base64url() -> bool {
+    url_vector(b"", "", "") && url_vector(b"f", "Zg==", "Zg") && url_vector(b"fo", "Zm8=", "Zm8") && url_vector(b"foo", "Zm9v", "Zm9v") && url_vector(b"foob", "Zm9vYg==", "Zm9vYg") && url_vector(b"fooba", "Zm9vYmE=", "Zm9vYmE") && url_vector(b"foobar", "Zm9vYmFy", "Zm9vYmFy") && url_vector(b"\xfb\xff", "-_8=", "-_8") && base64.decode_url(b"+/8=", true) == None && base64.decode_url(b"-_8", true) == None && base64.decode_url(b"-_8=", false) == None && base64.decode_url(b"-_9", false) == None && base64.decode_url(b"-", false) == None
+}

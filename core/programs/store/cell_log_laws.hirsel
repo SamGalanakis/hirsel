@@ -1,0 +1,206 @@
+fn descriptor_fixture(kind: u8, tail: u64, stamp: u64, rows: u64, charge: u64) -> Bytes {
+    let mut wire: Bytes = list.with_capacity(56 + tail)
+    list.fill(mut wire, 56 + tail, 0u8)
+    list.set_word_le(mut wire, 28, stamp)
+    list.set_word_le(mut wire, 36, rows)
+    list.set_word_le(mut wire, 44, charge)
+    wire[52] = kind
+    take wire
+}
+
+// A one-row map leaf, built independently of the page encoder. The four-byte
+// id is the page prefix and the row's stored key suffix is empty.
+fn descriptor_page(wire: Bytes) -> Bytes {
+    let mut page: Bytes = list.with_capacity(35 + list.len(wire))
+    list.fill(mut page, 33, 0u8)
+    list.set_word_le(mut page, 2, 1u16)
+    list.set_word_le(mut page, 4, 4u16)
+    list.set_word_le(mut page, 8, 1u64)
+    let heap: u32 = int.truncate(33 + list.len(wire))
+    let width: u16 = int.truncate(list.len(wire))
+    list.set_word_le(mut page, 16, heap)
+    page[27] = 7
+    list.set_word_le(mut page, 31, width)
+    list.append(mut page, wire)
+    list.put_word_le(mut page, 28u16)
+    take page
+}
+
+fn valid_descriptor(wire: Bytes) -> bool {
+    match std.page.decode(descriptor_page(wire), CollectionMap) {
+        Ok(_) => true,
+        _ => false,
+    }
+}
+
+fn malformed_descriptor(wire: Bytes) -> bool {
+    match std.page.decode(descriptor_page(wire), CollectionMap) {
+        Error(MalformedPage) => true,
+        _ => false,
+    }
+}
+
+fn cell_descriptor_cases() -> bool {
+    let empty = std.page.empty(0, 0, Collection)
+    let empty_wire = descriptor_fixture(3, 2, 0, 0, 0)
+    if !valid_descriptor(empty_wire) || result.unwrap(cell_record(empty, None)) != empty_wire {
+        return false
+    }
+    let spilled = descriptor_fixture(3, 2, 9, 1, 334)
+    if !valid_descriptor(spilled) || !malformed_descriptor(descriptor_fixture(3, 2, 9, 2, 334)) {
+        return false
+    }
+    let sizes: Inline[(u64, u64), 3] = [(2, 78), (255, 326), (256, 326)]
+    for (width, charge) in sizes {
+        let mut wire = descriptor_fixture(3, 2 + width, 0, 1, charge)
+        let ilen: u16 = int.truncate(width)
+        list.set_word_le(mut wire, 56, ilen)
+        let value = result.unwrap(copied(list.slice(wire, 58, 58 + width)))
+        if !valid_descriptor(wire) || result.unwrap(cell_record(empty, Some(take value))) != wire {
+            return false
+        }
+        wire[53] = 1
+        if !malformed_descriptor(wire) {
+            return false
+        }
+        wire[53] = 0
+        wire[44] += 1
+        if !malformed_descriptor(wire) {
+            return false
+        }
+    }
+    let mut one = descriptor_fixture(3, 3, 0, 1, 78)
+    list.set_word_le(mut one, 56, 1u16)
+    let mut oversized = descriptor_fixture(3, 259, 0, 1, 334)
+    list.set_word_le(mut oversized, 56, 257u16)
+    malformed_descriptor(one) && malformed_descriptor(oversized) && malformed_descriptor(descriptor_fixture(3, 0, 0, 0, 0))
+}
+
+fn log_descriptor_cases() -> bool {
+    let empty = std.page.empty(0, 0, Collection)
+    let mut wire = descriptor_fixture(4, 16, 0, 0, 0)
+    list.set_word_le(mut wire, 56, 257u64)
+    list.set_word_le(mut wire, 64, 257u64)
+    if !valid_descriptor(wire) || result.unwrap(log_record(empty, 257, 257, 0)) != wire {
+        return false
+    }
+    wire[53] = 1
+    if !valid_descriptor(wire) || result.unwrap(log_record(empty, 257, 257, 1)) != wire {
+        return false
+    }
+    list.set_word_le(mut wire, 64, 258u64)
+    if !malformed_descriptor(wire) {
+        return false
+    }
+    let mut dense = descriptor_fixture(4, 16, 9, 3, 258)
+    list.set_word_le(mut dense, 56, 10u64)
+    list.set_word_le(mut dense, 64, 7u64)
+    if !valid_descriptor(dense) {
+        return false
+    }
+    list.set_word_le(mut dense, 36, 4u64)
+    malformed_descriptor(dense) && malformed_descriptor(descriptor_fixture(4, 15, 0, 0, 0))
+}
+
+fn collection_catalog_fixture(kind: u8, key: Bytes) -> Bytes {
+    let mut wire: Bytes = list.with_capacity(54 + list.len(key))
+    list.fill(mut wire, 21, 0u8)
+    wire[0] = kind
+    wire[1] = 7
+    wire[9] = 1
+    let key_width: u32 = int.truncate(list.len(key))
+    list.set_word_le(mut wire, 17, key_width)
+    list.append(mut wire, key)
+    list.put_word_le(mut wire, 1u16)
+    list.put_word_le(mut wire, 0u16)
+    let mut schema: Bytes = list.new()
+    list.put_word_le(mut schema, 3u32)
+    list.put_word_le(mut schema, 0x0600u16)
+    list.put_word_le(mut wire, std.codec.fingerprint_of(schema))
+    list.put_word_le(mut wire, 6u32)
+    list.append(mut wire, schema)
+    list.put_word_le(mut wire, 1u16)
+    list.fill(mut wire, 8, 0u8)
+    take wire
+}
+
+fn collection_catalog_cases() -> bool {
+    let mut key_u64: Bytes = list.new()
+    list.put_word_le(mut key_u64, 4u32)
+    list.put_word_le(mut key_u64, 0x0600u16)
+    let cell = collection_catalog_fixture(3, list.new())
+    let log = collection_catalog_fixture(4, key_u64)
+    let cell_meta = result.unwrap(decode_catalog(cell))
+    let log_meta = result.unwrap(decode_catalog(log))
+    if cell_meta.kind != 3 || cell_meta.id != 7 || log_meta.kind != 4 || log_meta.id != 7 || log_meta.key != key_u64 ||
+        result.unwrap(encode_catalog(cell_meta)) != cell || result.unwrap(encode_catalog(log_meta)) != log {
+        return false
+    }
+    match (decode_catalog(collection_catalog_fixture(3, key_u64)), decode_catalog(collection_catalog_fixture(4, list.new()))) {
+        (Error(Corrupt(_)), Error(Corrupt(_))) => true,
+        _ => false,
+    }
+}
+
+fn cell_log_frame_case() -> bool {
+    let trim_array: Inline[u8, 42] = [
+        3, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 1, 2, 0, 0, 0, 0, 0, 0, 4, 6,
+        3, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0,
+    ]
+    let mut trims: Bytes = list.with_capacity(42)
+    for byte in trim_array {
+        list.push(mut trims, byte)
+    }
+    let seven = result.unwrap(prefix(7))
+    let eight = result.unwrap(prefix(8))
+    let mut encoded: Bytes = list.new()
+    encode_log_trim(mut encoded, seven, 258, 1030)
+    encode_log_trim(mut encoded, eight, 513, 0)
+    if encoded != trims {
+        return false
+    }
+
+    let mut payload: Bytes = list.new()
+    list.fill(mut payload, 20, 0u8)
+    let sections: Inline[u8, 6] = [2, 0, 2, 0, 0, 0]
+    for byte in sections {
+        list.push(mut payload, byte)
+    }
+    list.append(mut payload, trims)
+    let reply_header: Inline[u8, 15] = [1, 1, 0, 0, 0, 3, 1, 0, 0, 0, b's', 41, 0, 0, 0]
+    for byte in reply_header {
+        list.push(mut payload, byte)
+    }
+    list.fill(mut payload, 40, 0u8)
+    list.push(mut payload, 2u8)
+    list.fill(mut payload, 12, 0u8)
+    list.put_word_le(mut payload, 16u32)
+    list.fill(mut payload, 17, 0u8)
+    let frame_ops = result.unwrap(journal_decode_commit("frame", payload))
+    let Some(call) = view frame_ops.call else { return false }
+    if list.len(frame_ops.data) != 2 || list.len(frame_ops.streams) != 1 || call.record.stream != string.as_bytes("s") ||
+        frame_ops.data[0].key != seven || frame_ops.data[1].key != eight {
+        return false
+    }
+    if let Some(_) = frame_ops.streams[0].trim {
+        return false
+    }
+    let Some(one) = frame_ops.data[0].trim else { return false }
+    let Some(two) = frame_ops.data[1].trim else { return false }
+    if one.floor != 258 || one.dropped != 1030 || two.floor != 513 || two.dropped != 0 {
+        return false
+    }
+    list.truncate(mut payload, 46)
+    match journal_decode_commit("frame", payload) {
+        Error(Corrupt(Fault(why: Malformed, ..))) => true,
+        _ => false,
+    }
+}
+
+@test
+fn cell_log_format_l79_l77_l78() -> Result[(), ()] {
+    if !cell_descriptor_cases() || !log_descriptor_cases() || !collection_catalog_cases() || !cell_log_frame_case() {
+        return Error(())
+    }
+    Ok(())
+}

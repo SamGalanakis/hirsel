@@ -6,9 +6,9 @@ pub fn journal_law_apply() -> bool {
     for head in 1u64 .. 4 {
         let key = result.unwrap(logical_key(1, key_word(7)))
         let mut data: List[JournalOp] = list.new()
-        list.push(mut data, JournalOp(key: result.unwrap(copied(key)), value: Some(key_word(head * 10))))
+        list.push(mut data, JournalOp(key: result.unwrap(copied(key)), value: Some(key_word(head * 10)), trim: None))
         let mut streams: List[JournalOp] = list.new()
-        list.push(mut streams, JournalOp(key: result.unwrap(copied(string.as_bytes("stream"))), value: Some(key_word(head))))
+        list.push(mut streams, JournalOp(key: result.unwrap(copied(string.as_bytes("stream"))), value: Some(key_word(head)), trim: None))
         let commit = JournalCommit(branch: 0, version: head, at: 100 + head, data: take data, streams: take streams, call: None)
         result.unwrap(journal_apply("j-7", mut replay, Commit(take commit)))
         if replay.state.tips[0].head != head || replay.state.tips[0].at != 100 + head {
@@ -46,7 +46,7 @@ pub fn journal_law_apply() -> bool {
     }
     let key = result.unwrap(logical_key(1, key_word(7)))
     let mut deletes: List[JournalOp] = list.new()
-    list.push(mut deletes, JournalOp(key: result.unwrap(copied(key)), value: None))
+    list.push(mut deletes, JournalOp(key: result.unwrap(copied(key)), value: None, trim: None))
     let removed = JournalCommit(branch: 0, version: 4, at: 104, data: take deletes, streams: list.new(), call: None)
     result.unwrap(journal_apply("j-7", mut replay, Commit(take removed)))
     if page_row_count(replay.state.tips[0].roots.collections) != 0 || page_row_count(saved) != 1 || replay.state.tips[0].head != 4 || replay.state.tips[0].at != 104 {

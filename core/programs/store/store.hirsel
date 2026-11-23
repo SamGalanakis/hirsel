@@ -2686,6 +2686,13 @@ fn encode_data_op(mut payload: Bytes, key: Bytes, value: Option[StagedValue]) ->
     }
 }
 
+fn encode_log_trim(mut payload: Bytes, key: Bytes, floor: u64, dropped: u64) {
+    list.push(mut payload, 3u8)
+    list.append(mut payload, key)
+    list.put_word_be(mut payload, floor)
+    list.put_word_be(mut payload, dropped)
+}
+
 fn encode_stream_op(mut payload: Bytes, operation: DataOp, call: Option[View[CallRecord]], settlement: Option[Settlement]) -> Result[(), Capacity] {
     if let (Some(raw), Some(record)) = (view operation.value, view call) {
         if operation.key == record.stream {
@@ -3546,10 +3553,19 @@ fn decode_catalog(raw: Bytes) -> Result[Catalog, Error] {
     let id: u32 = int.truncate(take_le(raw, mut at, 4)?)
     let owner: u32 = int.truncate(take_le(raw, mut at, 4)?)
     let epoch = take_le(raw, mut at, 8)?
-    if (kind != 1 && kind != 2) || id == 0 || epoch == 0 || (kind == 2 && owner == 0) {
+    if kind < 1 || kind > 4 || id == 0 || epoch == 0 || (kind == 2 && owner == 0) {
         return Error(malformed(0))
     }
     let key = take_blob(raw, mut at)?
+    if kind == 3 && list.len(key) != 0 {
+        return Error(malformed(17))
+    }
+    if kind == 4 {
+        let expected = std.codec.key_schema(std.codec.key_u64()) ?=> |_| malformed(17)
+        if key != expected {
+            return Error(malformed(17))
+        }
+    }
     let schema_count = take_le(raw, mut at, 2)?
     let mut schemas: List[ValueSchema] = list.new()
     for _ in 0u64 .. schema_count {
@@ -7042,9 +7058,15 @@ fn call_code_size(size: u64) -> bool {
     size == 16 || size == 48
 }
 
+type JournalTrim: shareable + send {
+    floor: u64,
+    dropped: u64
+}
+
 type JournalOp: shareable + send {
     key: Bytes,
-    value: Option[Bytes]
+    value: Option[Bytes],
+    trim: Option[JournalTrim]
 }
 
 type JournalCommit {
@@ -7081,7 +7103,18 @@ fn journal_ops(file: String, raw: Bytes, stream: bool, mut at: u64, mut call: Op
     for i in 0u64 .. operation_count {
         let op_at = at
         let kind = disk_number(file, raw, mut at, 1)?
-        if kind != 1 && kind != 2 && !(stream && kind == 3) {
+        if kind == 3 && !stream {
+            if list.len(raw) - at < 20 {
+                return Error(disk_fault(file, op_at, Malformed))
+            }
+            let key = copied(list.slice(raw, at, at + 4))?
+            let floor = word_be(raw, at + 4)
+            let dropped = word_be(raw, at + 12)
+            at += 20
+            list.push(mut ops, JournalOp(key: take key, value: None, trim: Some(JournalTrim(floor: floor, dropped: dropped))))
+            continue
+        }
+        if kind < 1 || kind > 3 {
             return Error(disk_fault(file, op_at, Malformed))
         }
         let key = disk_blob(file, raw, mut at, 4096)?
@@ -7100,7 +7133,7 @@ fn journal_ops(file: String, raw: Bytes, stream: bool, mut at: u64, mut call: Op
             }
             Some(take stored)
         }
-        list.push(mut ops, JournalOp(key: take key, value: take value))
+        list.push(mut ops, JournalOp(key: take key, value: take value, trim: None))
     }
     Ok(take ops)
 }
@@ -7402,6 +7435,9 @@ fn journal_apply_ops(file: String, mut ids: u64, mut tree: PageTree, ops: List[J
     }
     let mut next_stamp = stamp_after(ids)?
     for op in ops {
+        if let Some(_) = op.trim {
+            return Error(disk_fault(file, 0, Malformed))
+        }
         if tree_domain(tree) == CollectionMap {
             let valid = list.len(op.key) >= 4 && match std.page.collection_child(tree.root, list.slice(op.key, 0, 4)) {
                 Some(_) => true,

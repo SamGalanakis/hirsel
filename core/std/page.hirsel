@@ -430,21 +430,53 @@ fn key_limit(domain: Domain) -> u64 {
     }
 }
 
-fn map_value(raw: Bytes, at: u64) -> Result[(), Error] {
-    let ptr = ptr_at(raw, at)
-    if ptr.stamp == 0 {
-        let rows: u64 = list.word_le(raw, at + 36)
-        let charge: u64 = list.word_le(raw, at + 44)
-        if ptr != unlocated(0) || rows != 0 || charge != 0 {
-            return Error(MalformedPage)
-        }
-    }
-    let kind = raw[at + 52]
-    let residency = raw[at + 53]
-    if (kind != 1 && kind != 2) || residency > 1 || raw[at + 55] != 0 {
+fn map_value(raw: Bytes, at: u64, width: u64) -> Result[(), Error] {
+    if width < 56 {
         return Error(MalformedPage)
     }
-    if residency != 0 || raw[at + 54] != 0 {
+    let ptr = ptr_at(raw, at)
+    let rows: u64 = list.word_le(raw, at + 36)
+    let charge: u64 = list.word_le(raw, at + 44)
+    let kind = raw[at + 52]
+    let residency = raw[at + 53]
+    if residency > 1 || raw[at + 55] != 0 || (ptr.stamp == 0 && ptr != unlocated(0)) {
+        return Error(MalformedPage)
+    }
+    match kind {
+        3 => {
+            if residency != 0 || width < 58 {
+                return Error(MalformedPage)
+            }
+            let ilen = u16_at(raw, at + 56)
+            if ilen > 256 || ilen == 1 || width != 58 + ilen {
+                return Error(MalformedPage)
+            }
+            if ilen != 0 {
+                if ptr.stamp != 0 || rows != 1 || charge != row_charge(4, ilen) {
+                    return Error(MalformedPage)
+                }
+            } else if (ptr.stamp == 0 && (rows != 0 || charge != 0)) || (ptr.stamp != 0 && rows != 1) {
+                return Error(MalformedPage)
+            }
+        },
+        4 => {
+            if width != 72 {
+                return Error(MalformedPage)
+            }
+            let next: u64 = list.word_le(raw, at + 56)
+            let first: u64 = list.word_le(raw, at + 64)
+            if first > next || rows != next - first || (rows == 0 && ptr.stamp != 0) {
+                return Error(MalformedPage)
+            }
+        },
+        _ => if (kind != 1 && kind != 2) || width != 56 {
+            return Error(MalformedPage)
+        },
+    }
+    if kind != 3 && ptr.stamp == 0 && (rows != 0 || charge != 0) {
+        return Error(MalformedPage)
+    }
+    if (residency != 0 && kind != 4) || raw[at + 54] != 0 {
         return Error(UnsupportedPage)
     }
     Ok(())
@@ -510,10 +542,7 @@ pub fn decode(take raw: Bytes, domain: Domain) -> Result[Image, Error] {
                     return Error(MalformedPage)
                 }
                 if domain == CollectionMap {
-                    if width != 56 {
-                        return Error(MalformedPage)
-                    }
-                    map_value(raw, at)?
+                    map_value(raw, at, width)?
                 }
                 at += width
             } else {
@@ -752,10 +781,10 @@ fn valid_entry(domain: Domain, lvl: u8, i: u64, row: Entry) -> Result[(), Error]
                 return Error(MalformedPage)
             }
             if domain == CollectionMap {
-                if n != 4 || width != 56 {
+                if n != 4 {
                     return Error(MalformedPage)
                 }
-                map_value(value, 0)?
+                map_value(value, 0, width)?
             }
         },
     }

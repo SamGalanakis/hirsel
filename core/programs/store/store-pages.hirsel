@@ -74,18 +74,38 @@ fn page_result[T](take value: Result[T, std.page.Error]) -> Result[T, Error] {
     }
 }
 
-fn collection_record(root: Arc[std.page.Page], kind: u8) -> Result[Bytes, Error] {
-    let (rows, charge) = std.page.totals(root)
-    let id = if rows == 0 {
-        0u64
-    } else {
-        std.page.stamp(std.page.image_of(root))
-    }
-    let mut record = std.page.encode_ptr(std.page.unlocated(id))
+fn collection_header(stamp: u64, rows: u64, charge: u64, kind: u8, residency: u8) -> Result[Bytes, Error] {
+    let mut record = std.page.encode_ptr(std.page.unlocated(stamp))
     capacity(le(mut record, rows, 8))?
     capacity(le(mut record, charge, 8))?
-    capacity(le(mut record, int.widen(kind), 1))?
-    list.fill(mut record, 3, 0u8)
+    list.push(mut record, kind)
+    list.push(mut record, residency)
+    list.fill(mut record, 2, 0u8)
+    Ok(take record)
+}
+
+fn rooted_collection_record(root: Arc[std.page.Page], kind: u8, residency: u8) -> Result[Bytes, Error] {
+    let (rows, charge) = std.page.totals(root)
+    let stamp = if rows == 0 { 0u64 } else { std.page.stamp(std.page.image_of(root)) }
+    collection_header(stamp, rows, charge, kind, residency)
+}
+
+fn cell_record(root: Arc[std.page.Page], inline: Option[Bytes]) -> Result[Bytes, Error] {
+    if let Some(value) = inline {
+        let mut record = collection_header(0, 1, 70 + round8(list.len(value)), 3, 0)?
+        capacity(le(mut record, list.len(value), 2))?
+        list.append(mut record, value)
+        return Ok(take record)
+    }
+    let mut record = rooted_collection_record(root, 3, 0)?
+    list.fill(mut record, 2, 0u8)
+    Ok(take record)
+}
+
+fn log_record(root: Arc[std.page.Page], first_seq: u64, next_seq: u64, residency: u8) -> Result[Bytes, Error] {
+    let mut record = rooted_collection_record(root, 4, residency)?
+    list.put_word_le(mut record, next_seq)
+    list.put_word_le(mut record, first_seq)
     Ok(take record)
 }
 
@@ -99,7 +119,7 @@ fn put_collection(mut tree: PageTree, key: Bytes, built: Option[Arc[std.page.Pag
             arc.share(shared)
         },
     }
-    let record = collection_record(root, kind)?
+    let record = rooted_collection_record(root, kind, 0)?
     page_result(std.page.insert(mut tree.root, key, record, Some(take root), tree.inline, private_from, mut ids))
 }
 

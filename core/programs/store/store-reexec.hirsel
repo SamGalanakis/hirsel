@@ -255,6 +255,9 @@ fn same_writes(rows: DataRows, committed: List[JournalOp]) -> Result[bool, Error
         if op.key != other.key {
             return Ok(false)
         }
+        if let Some(_) = other.trim {
+            return Ok(false)
+        }
         let equal = match (view op.value, view other.value) {
             (Some(staged), Some(raw)) => staged_bytes(staged) == raw,
             (None, None) => true,

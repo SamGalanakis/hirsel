@@ -212,8 +212,9 @@ The operations are ordinary std code: their charges are the
   and compares them in O(`string.byte_len(a) + string.byte_len(b) + 1`) steps.
 - **Failures.** The operations fail only with `Capacity`, for the admissions above, and
   `OutOfTime`, at a step under an exhausted bound. They have no `Fail` and no `Bounds`.
-- **Determinism.** The steps follow from std's source and the argument alone, so a bound stops
-  these operations at the same step on every engine, build and optimisation level, and in replay.
+- **Determinism.** The steps follow from the build, std's source and the argument alone, so a
+  bound stops these operations at the same step on every run of one build, and in its replay
+  ([MEM-30](budgets.md#mem-30-step-bounds)).
 
 ### UNI-7: Worked examples
 

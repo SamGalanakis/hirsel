@@ -271,8 +271,8 @@ admit what the logical charges would refuse.
 
 ### MEM-30: Step bounds
 
-A **step** is taken at each call, each loop back edge and each other entry of user code,
-and nowhere else; a **step
+In the reference count (Determinism, below), a **step** is taken at each call, each loop
+back edge and each other entry of user code, and nowhere else; a **step
 bound** of `n` allows `n` steps, and the step after them stops the code with the failure
 `OutOfTime` (FAIL-2), which the scope whose bound ran out catches; no `isolate` catches it
 while that bound is current. `bound steps n
@@ -371,7 +371,8 @@ is core's plain record `{ steps: u64 }`.
   or optimisation level may take fewer or more steps than the reference count, for example
   by inlining a call or merging loop heads, so no program or test may rely on an exact count
   across engines or optimisation levels. Every build takes at least one step for each
-  iteration of a loop and each level of recursion, and the extra steps of
+  iteration of a loop in user code and each call into user code that recursion reaches, and
+  the extra steps of
   `secret.scram_sha256`, `crc32c.update` and `crc64nvme.update` as the reference count
   does, so code that computes without end exhausts every bound and work an untrusted input
   chooses is bounded by it. A step taken while no bound is current uses nothing and

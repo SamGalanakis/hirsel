@@ -18,6 +18,7 @@ type Row: codec + send { key: Bytes, wake: Wake }
 pub type Seeding: send = Fresh(String, harness.Narrow) | Adopt(harness.Prefix)
 pub type Refused: send = Unknown | Full | Busy | Storage | Seed(harness.Refused) | Place(store.places.Refused) | Stopping
 
+// `place_bytes` is the budget every loaded session's place shares, as in the directory.
 pub type GatewayConfig[T: send]: send {
     root: Dir, options: store.Options, migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits],
     factory: fn() -> Result[store.places.Factory[T], Capacity], max_sessions: u64, place_bytes: u64,
@@ -31,6 +32,9 @@ type GwIn[T: send]: send =
     | Route(u64, Sender[Result[store.places.Opener[T], Refused]])
     | Changed(store.places.Change)
     | Due(u64)
+    | Unload(u64, Sender[Result[store.places.Unloaded, Refused]])
+    | Downs(u64, Sender[u64])
+    | AwaitDown(u64, u64, Sender[Result[u64, Refused]])
     | Halt(Sender[List[store.places.Unloaded]])
 
 pub opaque type Gateway[T: send] { to: Sender[GwIn[T]], actor: Task[()] }
@@ -88,6 +92,8 @@ type Actor[T: send] {
     factory: fn() -> Result[store.places.Factory[T], Capacity], max_sessions: u64, count: u64,
     directory: store.places.Directory[T], tasks: Tasks, clock: Clock, random: Random, me: Sender[GwIn[T]],
     watch: Option[Sender[store.places.Change]], alarms: List[(u64, Task[()])], wakers: List[(u64, Task[()])],
+    // How many times each session's place has ended since the gateway started, and who waits for the next end.
+    closers: List[Task[()]], downs: List[(u64, u64)], waiters: List[(u64, u64, Sender[Result[u64, Refused]])],
 }
 
 fn forward_changes[T: send](take f: Forward[T]) -> () waits {
@@ -244,6 +250,11 @@ fn on_delete[T: send](mut a: Actor[T], id: u64) -> Result[(), Refused] waits {
     let Ok(Committed(done)) = take ran else { return Error(Storage) }
     if let Error(_) = store.durable(mut a.db, done.ticket) { return Error(Storage) }
     a.count -= 1u64
+    let mut waiting: List[(u64, u64, Sender[Result[u64, Refused]])] = list.new()
+    while let Some((at, after, take reply)) = list.pop(mut a.waiters) {
+        if at == id { let _ = channel.send(reply, Error(Unknown)) } else { list.push(mut waiting, (at, after, take reply)) }
+    }
+    a.waiters = take waiting
     let _ = std.dir.remove_all(a.root, name)
     Ok(())
 }
@@ -270,11 +281,42 @@ fn ended_wake(ended: Result[store.runner.Ended, store.runner.StartError]) -> Wak
     match ended { Ok(Stopped(next)) => Clean(next), _ => Dirty }
 }
 
-// Records how a place ended, then wakes it again or arms its due time.
+fn downs_of[T: send](a: Actor[T], id: u64) -> u64 {
+    for d in a.downs { if d.0 == id { return d.1 } }
+    0u64
+}
+
+fn count_down[T: send](mut a: Actor[T], id: u64) -> u64 waits {
+    let n = downs_of(a, id) + 1u64
+    let mut kept: List[(u64, u64)] = list.new()
+    for d in a.downs { if d.0 != id { list.push(mut kept, (d.0, d.1)) } }
+    list.push(mut kept, (id, n))
+    a.downs = take kept
+    let mut waiting: List[(u64, u64, Sender[Result[u64, Refused]])] = list.new()
+    while let Some((at, after, take reply)) = list.pop(mut a.waiters) {
+        if at == id && n > after { let _ = channel.send(reply, Ok(n)) } else { list.push(mut waiting, (at, after, take reply)) }
+    }
+    a.waiters = take waiting
+    n
+}
+
+fn on_await[T: send](mut a: Actor[T], id: u64, after: u64, take reply: Sender[Result[u64, Refused]]) -> () {
+    let n = downs_of(a, id)
+    if n > after { let _ = channel.try_send(reply, Ok(n)); return }
+    match row_of(a, id) {
+        Some(_) => list.push(mut a.waiters, (id, after, take reply)),
+        None => { let _ = channel.try_send(reply, Error(Unknown)) },
+    }
+}
+
+// Records how a place ended, then wakes it again or arms its due time. A run that was
+// cut (Forced, Unstarted) is woken at once; a place that could not start is left Dirty
+// for the next route or gateway start, with no backoff.
 fn on_down[T: send](mut a: Actor[T], u: store.places.Unloaded) -> () waits {
     let Some(id) = id_of(u.name) else { return }
+    let _ = count_down(mut a, id)
     let wake_to = ended_wake(u.ended)
-    let again = match wake_to { Dirty => true, Clean(_) => false }
+    let again = match u.ended { Ok(Forced(_)) => true, Ok(Unstarted) => true, _ => false }
     let due: Option[u64] = match wake_to { Clean(Some(t)) => Some(t), _ => None }
     if let Error(_) = mark(mut a, id, take wake_to) { return }
     if again { wake_now(mut a, id) } else if let Some(t) = due { arm(mut a, id, t) }
@@ -292,6 +334,28 @@ fn on_changed[T: send](mut a: Actor[T], take c: store.places.Change) -> () waits
         Down(u) => on_down(mut a, u),
     }
     if let Some(w) = a.watch { let _ = channel.try_send(w, take c) }
+}
+
+type Closing[T: send]: send { opener: store.places.Opener[T], name: String, reply: Sender[Result[store.places.Unloaded, Refused]] }
+
+// Closing waits for the place's stop, and a place's own effects may need the gateway
+// meanwhile (a subagent tool), so a closer task waits, not the actor.
+fn close_once[T: send](take job: Closing[T]) -> () waits {
+    let Closing(opener: take opener, name: take name, reply: take reply) = take job
+    let answer: Result[store.places.Unloaded, Refused] = match store.places.close(opener, name) {
+        Ok(take u) => Ok(take u),
+        Error(Leased) => Error(Busy),
+        Error(Stopping) => Error(Stopping),
+        Error(_) => Error(Unknown),
+    }
+    let _ = channel.send(reply, take answer)
+}
+
+fn on_unload[T: send](mut a: Actor[T], id: u64, take reply: Sender[Result[store.places.Unloaded, Refused]]) -> () waits {
+    let Some(_) = row_of(a, id) else { let _ = channel.send(reply, Error(Unknown)); return }
+    let job = Closing(opener: store.places.opener(a.directory), name: name_of(id), reply: take reply)
+    let run: fn(take Closing[T]) -> () waits = close_once
+    list.push(mut a.closers, task.spawn(a.tasks, bytes 65536u64, take job, run))
 }
 
 fn on_due[T: send](mut a: Actor[T], id: u64) -> () waits {
@@ -348,7 +412,7 @@ fn run_gateway[T: send](take begin: Begin[T]) -> () waits {
     let forwarding = task.spawn(tasks, bytes 65536u64, Forward(from: take changes, to: channel.sender(me)), forward)
     let mut a = Actor(db: take db, catalog: take catalog, root: root, options: take options, migrate: migrate, factory: factory,
         max_sessions: max_sessions, count: 0u64, directory: take directory, tasks: tasks, clock: clock, random: random,
-        me: take me, watch: take watch, alarms: list.new(), wakers: list.new())
+        me: take me, watch: take watch, alarms: list.new(), wakers: list.new(), closers: list.new(), downs: list.new(), waiters: list.new())
     let recovered = recover(mut a)
     let failed = match recovered { Ok(()) => false, Error(_) => true }
     let _ = channel.send(ready, take recovered)
@@ -362,6 +426,9 @@ fn run_gateway[T: send](take begin: Begin[T]) -> () waits {
                 Route(id, reply) => { let _ = channel.send(reply, on_route(mut a, id)) },
                 Changed(take c) => on_changed(mut a, take c),
                 Due(id) => on_due(mut a, id),
+                Unload(id, take reply) => on_unload(mut a, id, take reply),
+                Downs(id, reply) => { let _ = channel.send(reply, downs_of(a, id)) },
+                AwaitDown(id, after, take reply) => on_await(mut a, id, after, take reply),
                 Halt(take reply) => { halted = Some(take reply)
                     break },
             }
@@ -369,8 +436,10 @@ fn run_gateway[T: send](take begin: Begin[T]) -> () waits {
     }
     while let Some((_, take alarm)) = list.pop(mut a.alarms) { let _ = task.cancel_join(take alarm) }
     while let Some((_, take waker)) = list.pop(mut a.wakers) { let _ = task.join(take waker) }
-    let Actor(db: take catalog_db, directory: take held, ..) = take a
+    let Actor(db: take catalog_db, directory: take held, closers: take closers, ..) = take a
     let unloaded = store.places.stop(take held)
+    let mut closing = take closers
+    while let Some(take closer) = list.pop(mut closing) { let _ = task.join(take closer) }
     let mut db_left = take catalog_db
     for u in unloaded { record_end(mut db_left, u) }
     let _ = store.close(take db_left)
@@ -381,11 +450,24 @@ fn run_gateway[T: send](take begin: Begin[T]) -> () waits {
 
 // ---- the API ----
 
-pub fn gateway[T: send](take config: GatewayConfig[T]) -> Result[Gateway[T], Refused] waits {
+// A gateway's inbox, made before the gateway so that its seed can hold a door to it
+// (a session's subagent tool starts its child through that door).
+pub type Doorway[T: send]: send { to: Sender[GwIn[T]], inbox: Receiver[GwIn[T]] }
+
+pub fn doorway[T: send]() -> Doorway[T] {
+    let (to, inbox): (Sender[GwIn[T]], Receiver[GwIn[T]]) = channel.new(256u64)
+    Doorway(to: take to, inbox: take inbox)
+}
+
+pub fn door_of[T: send](w: Doorway[T]) -> Door[T] { Door(to: channel.sender(w.to)) }
+
+pub fn copy_door[T: send](d: Door[T]) -> Door[T] { Door(to: channel.sender(d.to)) }
+
+pub fn gateway[T: send](take way: Doorway[T], take config: GatewayConfig[T]) -> Result[Gateway[T], Refused] waits {
     if config.max_sessions == 0u64 || config.place_bytes == 0u64 { return Error(Full) }
     let tasks = config.tasks
     let need = int.saturating_add(config.place_bytes, GATEWAY_BYTES)
-    let (to, inbox): (Sender[GwIn[T]], Receiver[GwIn[T]]) = channel.new(256u64)
+    let Doorway(to: take to, inbox: take inbox) = take way
     let (ready, started): (Sender[Result[(), Refused]], Receiver[Result[(), Refused]]) = channel.new(1u64)
     let begin = Begin(config: take config, inbox: take inbox, me: channel.sender(to), ready: take ready)
     let run: fn(take Begin[T]) -> () waits = run_gateway
@@ -438,4 +520,133 @@ pub fn stop[T: send](take g: Gateway[T]) -> List[store.places.Unloaded] waits {
     let ended = match channel.receive(answer) { Ok(take done) => take done, Error(_) => list.new() }
     let _ = task.join(take actor)
     take ended
+}
+
+// Closes a session's place now, as an operator would; a cut run is woken again at once.
+pub fn unload[T: send](d: Door[T], id: u64) -> Result[store.places.Unloaded, Refused] waits {
+    let (reply, answer): (Sender[Result[store.places.Unloaded, Refused]], Receiver[Result[store.places.Unloaded, Refused]]) = channel.new(1u64)
+    if let Error(_) = channel.send(d.to, Unload(id, take reply)) { return Error(Stopping) }
+    match channel.receive(answer) { Ok(take answered) => take answered, Error(_) => Error(Stopping) }
+}
+
+// How many times the session's place has ended since the gateway started.
+pub fn downs[T: send](d: Door[T], id: u64) -> u64 waits {
+    let (reply, answer): (Sender[u64], Receiver[u64]) = channel.new(1u64)
+    if let Error(_) = channel.send(d.to, Downs(id, take reply)) { return 0u64 }
+    match channel.receive(answer) { Ok(n) => n, Error(_) => 0u64 }
+}
+
+// Waits until the session's place has ended more than `after` times, and answers how many.
+pub fn await_down[T: send](d: Door[T], id: u64, after: u64) -> Result[u64, Refused] waits {
+    let (reply, answer): (Sender[Result[u64, Refused]], Receiver[Result[u64, Refused]]) = channel.new(1u64)
+    if let Error(_) = channel.send(d.to, AwaitDown(id, after, take reply)) { return Error(Stopping) }
+    match channel.receive(answer) { Ok(take answered) => take answered, Error(_) => Error(Stopping) }
+}
+
+// ---- the reference subagent ----
+
+// What a child session's place registers for its parent: a submit entry and a query
+// over `harness.transcript`, and how to reach it.
+pub type Child: send {
+    submit: store.fixture.Callee[harness.Submit, Result[harness.Disposition, harness.Refused]],
+    shown: store.fixture.Callee[(), ()], keys: List[Bytes], socket: std.wsock.Config,
+    tasks: Tasks, clock: Clock, random: Random, net: Net, within_ms: u64,
+}
+
+// The credential the subagent presents to its child: 16 bytes derived from the child's
+// key, so every connection to one child is one Caller under a binding that maps a
+// 16-byte credential to a Caller (`store.ingress.caller`).
+pub fn child_credential(key: Bytes) -> Bytes {
+    let tag = string.as_bytes("hirsel.harness.subagent.v1")
+    let mut hash = std.sha256.start()
+    std.sha256.add(mut hash, tag, 0u64, list.len(tag))
+    std.sha256.add(mut hash, key, 0u64, list.len(key))
+    let digest = std.sha256.finish(hash)
+    let mut out: Bytes = list.with_capacity(16u64)
+    for i in 0u64 .. 16u64 { list.push(mut out, digest[i]) }
+    out
+}
+
+// The key of the child a parent's effect starts: the parent's place name and the
+// effect's trigger run, which every attempt of that effect shares.
+pub fn child_key(parent: String, ctx: store.runner.TriggerContext) -> Bytes {
+    let mut key = string.into_bytes(string.from(parent))
+    list.push(mut key, 0u8)
+    let codec: std.codec.Codec[store.triggers.Id] = std.codec.of()
+    let _ = std.codec.encode(codec, store.triggers.run_id(store.runner.trigger_attempt(ctx)), mut key)
+    key
+}
+
+type Seen: send = Busy(String, u64) | Ended(String, String)
+
+// One look at the child: its status and its last assistant line, read from one image
+// of its transcript query.
+fn look[T: send](d: Door[T], id: u64, c: Child, credential: Bytes, take submit: Option[harness.Submit]) -> Result[Seen, harness.Fault] waits {
+    let Ok(lease) = route(d, id) else { return Error(Unavailable) }
+    let Some(address) = latest.read(store.places.status(lease)).addr else { return Error(Unavailable) }
+    let Ok(take opened) = store.fixture.client_at(c.tasks, c.net, c.clock, c.random, c.keys, c.socket, address, Some(clone(credential)), 0u64, c.within_ms) else { return Error(Unavailable) }
+    let _ = take lease
+    let mut client = take opened
+    if let Some(take m) = take submit {
+        let placed = match store.fixture.call(mut client, c.submit, take m, 5000u32) {
+            Ok(store.fixture.Replied(answer: Returned(Ok(_)), ..)) => true,
+            _ => false,
+        }
+        if !placed { store.fixture.close(take client); return Error(Unavailable) }
+    }
+    let Ok(sub) = store.fixture.subscribe(mut client, c.shown, (), c.within_ms) else { store.fixture.close(take client); return Error(Unavailable) }
+    let seen = store.fixture.seen_at(mut client, sub, 0u64, c.within_ms)
+    store.fixture.close(take client)
+    let Ok(image) = take seen else { return Error(Unavailable) }
+    let codec: std.codec.Codec[harness.View] = std.codec.of()
+    let mut status = string.new()
+    let mut last = string.new()
+    let mut last_at = 0u64
+    let rows = list.len(image.rows)
+    for r in image.rows {
+        let Some(raw) = view r.value else { continue }
+        let Ok(at) = std.codec.decode_key(std.codec.key_u64(), r.key) else { continue }
+        match std.codec.decode(codec, raw) {
+            Ok(Status(text)) => { status = clone(text) },
+            Ok(Line(kind, text)) => if kind == "assistant" && at >= last_at {
+                last_at = at
+                last = clone(text)
+            },
+            Error(_) => (),
+        }
+    }
+    if status == "answered" || status == "out of rounds" || status == "cancelled" || string.starts_with(status, "stopped") { Ok(Ended(take status, take last)) } else { Ok(Busy(take status, rows)) }
+}
+
+// A subagent: an Outside tool body that starts the child session named by `key`, gives
+// it `text` and waits for its run to end, then returns its last answer. It holds no
+// lease and no connection while it waits; it looks at the child only after the child's
+// place has stopped. A look wakes the child, which then stops again by itself, so when a
+// look finds the child as the last one did (it waits on a person or a tool), the next
+// look waits for a stop after that one: someone else must wake the child first. A child
+// waiting on a person therefore costs one wake per outside wake, not a wake loop.
+// Starting is idempotent by key and the submit by the child's Caller and client key, so
+// a repeated attempt reaches the same child and the same run.
+pub fn ask[T: send](d: Door[T], take key: Bytes, take seeding: Seeding, c: Child, take text: String) -> Result[Bytes, harness.Fault] waits {
+    let credential = child_credential(key)
+    let id = match create(d, take key, take seeding) { Ok(n) => n, Error(_) => return Error(Unavailable) }
+    let mut submit: Option[harness.Submit] = Some(harness.Submit(client_key: "parent", text: take text))
+    let mut before: Option[(String, u64)] = None
+    loop {
+        let ended = downs(d, id)
+        let (status, rows) = match look(d, id, c, credential, take submit)? {
+            Ended(status, answer) => {
+                if status == "answered" { return Ok(string.into_bytes(take answer)) }
+                return Error(Refused(take status))
+            },
+            Busy(status, rows) => (take status, rows),
+        }
+        submit = None
+        let unchanged = match before { Some((s0, r0)) => s0 == status && r0 == rows, None => false }
+        if let Error(_) = await_down(d, id, ended) { return Error(Unavailable) }
+        if unchanged {
+            if let Error(_) = await_down(d, id, ended + 1u64) { return Error(Unavailable) }
+        }
+        before = Some((take status, rows))
+    }
 }

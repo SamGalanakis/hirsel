@@ -265,6 +265,22 @@ options.
   of its round can still move by itself, and "waiting" when every open call
   waits on an approval or a resume, so a client holding the session can let
   go and the place can stop.
+- `unload(door, id)` closes a session's place now, as an operator would. A
+  closer task waits for the stop, so the gateway keeps serving meanwhile. A
+  cut run (`Forced`, `Unstarted`) is woken again at once. A place that cannot
+  start stays Dirty until the next route or gateway start; there is no backoff.
+- **Subagent.** `ask(door, key, seeding, child, text)` is an Outside tool body.
+  It starts the child session named by `key` (`child_key(place name, trigger
+  context)`, so every attempt of one effect reaches one child), submits `text`
+  under a credential derived from the key, and returns the child's last
+  assistant line once its status is "answered". It holds no lease or
+  connection while it waits: `await_down` wakes it when the child's place
+  stops. A look wakes the child, so after a look that finds the child as the
+  last one did, `ask` waits for a stop that someone else's wake caused. The
+  gateway's seed holds the door (`doorway()` makes the inbox before the
+  gateway). The effect entry and `grant_bytes` must hold the wire client's two
+  1 MiB tasks. An effect that runs out of bytes raises, its run stays
+  unsettled, and the place idles out.
 
 ## Laws
 
@@ -283,6 +299,7 @@ options.
 | J1 `test_round_bytes_bounded` | Preparing a model call writes the same bytes after 10 entries as after 1,000, within 64 bytes. Settling a 65,537-byte Outside result keeps the journal smaller than the result. Recovery after an acknowledged PUT and before settle produces InDoubt without redispatch. A settled reference reads back byte-for-byte and a body with the wrong digest is refused. | The snapshot diff, recovered journal byte account, scripted dispatch counts and the simulated S3 object at the fixture's independently computed SHA-256 key. |
 | F1 `test_fork_shares_prefix` | A fork cut after a finished tool round holds exactly the parent's entries before the cut and their visible lines, with no run. Its first request after a new submit is those messages plus the new one, under a fresh baseline. A cut inside a tool round (one of two calls answered) conflicts. | The parent log and the lines each entry shows, written by hand. |
 | W1 `test_wake_resumes_transcript` (gateway_laws) | A session whose place stopped by itself while a call waits for approval is woken by the route that carries the approval. The log read while it was unloaded is the first three entries of the finished log, and the run finishes as the script says. | The five-entry log derived by hand from the script. |
+| S1 `test_subagent_once_child_crash`, `test_subagent_once_parent_crash` (gateway_laws) | A subagent's Once tool runs at most once across a cut of either place. The cut call settles InDoubt, there are exactly two sessions, and both logs are as the script says. **Open red:** the cut does not yet end Forced. | The test's own count of `tally` runs and the logs derived by hand. |
 | S1 `test_documented_streams_read` | The Anthropic docs' tool-use stream and an OpenAI tool-call stream read to their documented answer (text, calls, joined arguments, stop reason, usage), fed whole or in pieces of 1, 2, 7 or 61 bytes. | The Anthropic streaming docs' example, copied verbatim, and a stream built from OpenAI's documented chunk schema; the expected answers are read off the fixtures by hand. |
 | S2 `test_answer_needs_terminator` | A stream cut before `message_stop` or `[DONE]`, cut inside a tool argument, or ending in an error event gives no answer. | Each provider's documented success terminator. |
 | W1 `test_request_bodies_follow_wire_format` | Bodies follow each provider's documented message shape: Anthropic groups one turn's tool results into one user message with `is_error`, and OpenAI sends arguments as a string and asks for usage. | The message shapes in each provider's API reference. |

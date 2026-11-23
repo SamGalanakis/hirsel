@@ -31,7 +31,9 @@ The harness gateway creates and deletes one session place per conversation. The 
 | 1 | Names at run time | **NEW: `add`, `remove`, `max_names`** | §13.1. `add` lists one more name (a listed name is `Duplicate`, `max_names` listed names are `Full`). `remove` unlists a name with no instance (a loaded one is `Loaded`, so it is closed first). A removed name leaves its slot unlisted, so the slot numbers live place tasks report under never shift. The directory reserves its own bytes for `max_names` names up front. | the gateway's create and delete |
 | 2 | Who unloads | **NEW: `idle_ms: None`** | §13.2 Idle. With `None` the directory never unloads by its sweep; a place unloads only by its own §14.4 idle stop, which waits for no sessions, no busy work, no active trigger and no trigger due within its idle time. | an active run is not a lease |
 | 3 | Shared services | **NEW: the seed `T`, `seeded_factory`** | §13.1. The directory owns one `seed: T`; a `seeded_factory`'s `make` sees it at each start. `Factory`, `Listed`, `Directory` and `Opener` take `T`. | the gateway's session services |
-| 4 | The platform host | **UNCHANGED: §14.8 row 9** | The gateway runs its sessions in a directory because the platform host cannot yet run in-process places. When P6 retires the directory, the gateway moves to the platform host with it. | orchestrator, 2026-11-23 |
+| 4 | A place's own name | **NEW: `Supplied.name`** | §13.1. `make` gets the listed name it is starting, so a place can name itself to shared services (a subagent tool keys its child by its parent's name). | the gateway's subagent tool |
+| 5 | The test client | **NEW: `fixture.client_at`, `fixture.entry_keys`** | §12.3. A client of a place the fixture did not start, by address, starting at a given request position (a bound Caller's positions continue across connections), and the entry keys a `place` registers. | the gateway's laws and subagent tool |
+| 6 | The platform host | **UNCHANGED: §14.8 row 9** | The gateway runs its sessions in a directory because the platform host cannot yet run in-process places. When P6 retires the directory, the gateway moves to the platform host with it. | orchestrator, 2026-11-23 |
 
 Reversible: both are additive. A directory built with every name and `Some(idle_ms)` behaves as in v2.29.
 
@@ -1533,6 +1535,8 @@ pub fn granted_entry[G, A: codec, R: codec](f: StaticFn[fn(G, Caller, take A) ->
 pub fn query_entry[H, A: codec, K, V](f: StaticFn[fn(store.Tx, H, take A) -> Result[Cover, Capacity]], key: Key[K], value: Codec[V]) -> Callee[A, ()]
 pub fn query_as_entry[H, A: codec, K, V](f: StaticFn[fn(store.Tx, H, Caller, take A) -> Result[Cover, Capacity]], key: Key[K], value: Codec[V]) -> Callee[A, ()]
 pub fn client(f: Fixture, take token: Option[Bytes], within_ms: u64) -> Result[Client, CallError] waits
+pub fn client_at(tasks: Tasks, net: Net, clock: Clock, random: Random, keys: List[Bytes], socket: std.wsock.Config, address: Addr, take token: Option[Bytes], first_p: u64, within_ms: u64) -> Result[Client, CallError] waits   // v2.30
+pub fn entry_keys[G: send, H: send](place: StaticFn[fn(mut runner.Registry[G, H]) -> Result[(), runner.RegisterError]]) -> Result[List[Bytes], runner.StartError]   // v2.30
 pub fn call[A: codec, R: codec](mut c: Client, e: Callee[A, R], take a: A, deadline_ms: u32) -> Result[Replied[R], CallError] waits
 pub fn subscribe[A: codec](mut c: Client, e: Callee[A, ()], take a: A, within_ms: u64) -> Result[u32, CallError] waits
 pub fn seen_at(mut c: Client, sub: u32, version: u64, within_ms: u64) -> Result[Seen, CallError] waits
@@ -1585,7 +1589,7 @@ A directory runs several places in one process and finds them by name. It is the
 ### 13.1 API
 
 ```hirsel
-pub type Supplied: send { tasks: Tasks, clock: Clock, random: Random, net: Net }
+pub type Supplied: send { name: String, tasks: Tasks, clock: Clock, random: Random, net: Net }   // v2.30: name
 pub opaque type Factory[T: send]: send                                   // v2.30: T is the seed
 pub type Listed[T: send]: send { name: String, factory: Factory[T], backing: runner.Backing, selection: runner.Selection }
 pub type DirectoryConfig: send {

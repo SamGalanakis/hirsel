@@ -5,7 +5,8 @@
 
 // What a factory's `make` gets to build its PlaceConfig from. The directory replaces the
 // config's backing and selection with the listed ones (§13.3).
-pub type Supplied: send { tasks: Tasks, clock: Clock, random: Random, net: Net }
+// `name` is the listed name being started (v2.30), so a place can name itself to the services it is given.
+pub type Supplied: send { name: String, tasks: Tasks, clock: Clock, random: Random, net: Net }
 
 // A start sees a view of the directory's seed (v2.30).
 pub opaque type Factory[T: send]: send { start: own[send] fn(take Launch[T], T) -> Result[Started, Refused] }
@@ -294,7 +295,7 @@ fn launch[T: send](mut a: Actor[T], index: u64, take waiters: Waiters) {
     if a.live >= a.max_places { answer_all(take waiters, Full(Count(a.max_places))); return }
     let (stop_to, stop_from): (Sender[()], Receiver[()]) = channel.new(1u64)
     let root = match runner.status_root() { Ok(take made_root) => take made_root, Error(cap) => { answer_all(take waiters, Full(Reserve(room(cap)))); return } }
-    let supplied = Supplied(tasks: a.tasks, clock: a.clock, random: a.random, net: a.net)
+    let supplied = Supplied(name: string.from(a.slots[index].name), tasks: a.tasks, clock: a.clock, random: a.random, net: a.net)
     let launched = Launch(supplied: take supplied, backing: copy_backing(a.slots[index].backing), selection: a.slots[index].selection,
         available: a.place_bytes - a.used, stop: take stop_from, status: latest.handle(root), to: channel.sender(a.to), slot: index)
     let started = (a.slots[index].factory.start)(take launched, a.seed)

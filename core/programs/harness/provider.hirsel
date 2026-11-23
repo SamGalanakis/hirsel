@@ -447,10 +447,10 @@ pub fn answer(take st: Stream) -> Result[harness.Answer, String] {
 }
 
 // A whole response body at once: what the transport does chunk by chunk.
-pub fn read(d: Dialect, b: Bounds, body: Bytes) -> Result[harness.Answer, String] {
+pub fn read(d: Dialect, b: Bounds, raw: Bytes) -> Result[harness.Answer, String] {
     let mut dec = decoder(b)
     let mut st = stream(d, b)
-    let _ = feed(mut dec, mut st, body)?
+    let _ = feed(mut dec, mut st, raw)?
     std.sse.finish(mut dec)
     answer(take st)
 }

@@ -15,9 +15,6 @@
   "core/programs/harness/laws.hirsel": {
     "lines": 1989
   },
-  "core/programs/notes/main.hirsel": {
-    "lines": 1435
-  },
   "core/programs/postgres/postgres.hirsel": {
     "lines": 1409
   },
@@ -156,7 +153,7 @@
     "lines": 1634
   },
   "crates/hirsel-core-driver/src/native.rs": {
-    "lines": 2980,
+    "lines": 2927,
     "reason": "h-release-1895"
   },
   "crates/hirsel-core-driver/src/product.rs": {
@@ -175,7 +172,7 @@
     "lines": 4287
   },
   "crates/hirsel-core-driver/src/request.rs": {
-    "lines": 1947,
+    "lines": 1943,
     "reason": "h-release-1895"
   },
   "crates/hirsel-core-driver/src/request_sequences.rs": {

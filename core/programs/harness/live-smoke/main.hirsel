@@ -1,3 +1,374 @@
-pub fn main(out: Stdout, data: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, api_key: Secret) -> Result[(), Exit] waits {
-    notes.main.live_smoke(out, data, clock, random, tasks, net, api_key)
+// The manual OpenRouter smoke: the notes agent behind the gateway and its HTTP
+// front, driven like a browser against a live model.
+fn live_place(take supplied: store.local.Supplied, s: notes.main.Services) -> Result[store.runner.PlaceConfig[notes.main.Grants, harness.Handles, notes.main.Services, ()], Capacity] {
+    let mut config = notes.main.settings(Memory, supplied.clock, supplied.random, supplied.tasks, supplied.net, notes.main.Services(helper: channel.sender(s.helper), clock: s.clock, live: match s.live {
+        Some(l) => Some(notes.main.copy_live(l, supplied.name)),
+        None => None,
+    }, stream: None))
+    config.wire = Some(store.runner.wire_bind((), code.describe(store.ingress.caller), 4096u64, 65536u64))
+    Ok(take config)
+}
+
+fn live_factory() -> store.local.Factory[notes.main.Services] {
+    store.local.seeded_factory(live_place)
+}
+
+fn json[A: codec](a: A) -> Bytes {
+    let f: std.json.Format[A] = result.unwrap(std.json.interop())
+    string.into_bytes(result.unwrap(std.json.to_string(f, a)))
+}
+
+fn browser_headers(credential: Bytes, at: u64) -> List[std.http_client.Header] {
+    let mut auth = string.from("Bearer ")
+    string.push(mut auth, std.base64.encode_string(credential))
+    let mut pos = string.new()
+    string.push_u64(mut pos, at)
+    let mut headers: List[std.http_client.Header] = list.new()
+    list.push(mut headers, std.http_client.Header(name: "Authorization", value: Public(string.into_bytes(take auth))))
+    list.push(mut headers, std.http_client.Header(name: "Hirsel-Position", value: Public(string.into_bytes(take pos))))
+    headers
+}
+
+type Browser {
+    net: Net,
+    clock: Clock,
+    address: Addr,
+    credential: Bytes
+}
+
+fn browser_request(b: Browser, method: String, path: String, take headers: List[std.http_client.Header], take body: Bytes, within: u64, limit: u64) -> Result[std.http_client.Connection, String] waits {
+    let req = std.http_client.Request(method: string.from(method), target: string.from(path), headers: take headers, body: Fixed(list.len(body)))
+    let deadline = std.clock.deadline_after_ms(host.mono_ns(b.clock), within)
+    let Ok(take connection) = std.http_client.dial(b.net, b.address, "127.0.0.1", b.clock, take req, deadline) else {
+        return Error("browser could not open its HTTP request")
+    }
+    let mut c = take connection
+    if list.len(body) > 0u64 {
+        if let Error(_) = std.http_client.write(mut c, body) {
+            return Error("browser could not write its HTTP body")
+        }
+    }
+    if let Error(_) = std.http_client.finish_request(mut c, limit) {
+        return Error("browser could not read the HTTP head")
+    }
+    Ok(take c)
+}
+
+fn post(b: Browser, path: String, take headers: List[std.http_client.Header], take body: Bytes, expected: u16, expected_body: Bytes) -> Result[(), String] waits {
+    let mut c = browser_request(b, "POST", path, take headers, take body, notes.main.HTTP_MS, 65536u64)?
+    let status = std.http_client.status(std.http_client.head(c))
+    let mut got: Bytes = list.with_capacity(4096u64)
+    loop {
+        list.reserve(mut got, 4096u64)
+        match std.http_client.read(mut c, mut got) {
+            Ok(0u64) => break,
+            Ok(_) => (),
+            Error(_) => return Error("browser could not read the HTTP body"),
+        }
+    }
+    if status != expected || got != expected_body {
+        let mut reason = string.from(path)
+        string.push(mut reason, " returned HTTP ")
+        string.push_u64(mut reason, int.widen(status))
+        string.push(mut reason, " with body ")
+        if let Ok(words) = string.from_utf8(take got) {
+            string.push(mut reason, words)
+        }
+        return Error(take reason)
+    }
+    Ok(())
+}
+
+fn message(b: Browser, at: u64, id: u64, key: String, prompt: String) -> Result[(), String] waits {
+    post(b, "/sessions/0/messages", browser_headers(b.credential, at), json(harness.Submit(client_key: string.from(key), text: string.from(prompt))), 202u16, json((Placed(id) : harness.Disposition)))
+}
+
+type SeenReply {
+    at: u64,
+    text: String,
+    first_preview_ns: u64,
+    preview_deltas: u64
+}
+
+fn browser_reply(mut c: std.http_client.Connection, mut dec: std.sse.Decoder, clock: Clock, run: u64, after: u64, until: String, expect_preview: bool) -> Result[SeenReply, String] waits {
+    let rows: std.json.Format[harness.gateway_http.Shown] = result.unwrap(std.json.interop())
+    let drafts: std.json.Format[harness.preview.Draft] = result.unwrap(std.json.interop())
+    let deltas: std.json.Format[harness.gateway_http.PreviewDelta] = result.unwrap(std.json.interop())
+    let mut chunk: Bytes = list.with_capacity(8192u64)
+    let mut reply = SeenReply(at: after, text: "", first_preview_ns: 0u64, preview_deltas: 0u64)
+    let mut status = string.new()
+    let mut batch_ready = false
+    let mut first_text = string.new()
+    let mut draft_at = 0u64
+    let mut draft_seq = 0u64
+    let mut draft_offset = 0u64
+    let mut draft = string.new()
+    let mut cleared = false
+    loop {
+        match std.http_client.read(mut c, mut chunk) {
+            Ok(0u64) => return Error("browser SSE stream closed before the reply"),
+            Ok(_) => (),
+            Error(_) => return Error("browser could not read the reply from its SSE stream"),
+        }
+        let fed = std.sse.feed(mut dec, chunk, fn(name: Bytes, data: Bytes, event_id: Bytes) -> std.sse.FeedControl[String] {
+            if name == b"message" {
+                batch_ready = false
+                let Ok(harness.gateway_http.Shown(at: at, line: take line)) = std.json.decode_typed(rows, std.http.copy_bytes(data), 65536u64) else {
+                    return Fail("invalid transcript event")
+                }
+                match take line {
+                    Status(take state) => {
+                        status = take state
+                    },
+                    Line(role, take text) => if role == "assistant" && at > reply.at {
+                        reply.at = at
+                        reply.text = take text
+                    },
+                }
+            } else if name == b"batch" {
+                let Ok(version) = string.from_utf8(std.http.copy_bytes(data)) else {
+                    return Fail("invalid batch version")
+                }
+                if let Error(_) = std.int.parse_uint(version, 10) {
+                    return Fail("invalid batch version")
+                }
+                batch_ready = true
+            } else if expect_preview && name == b"preview" {
+                let Ok(harness.preview.Draft(key: key, seq: seq, offset: offset, text: take text, ..)) = std.json.decode_typed(drafts, std.http.copy_bytes(data), 65536u64) else {
+                    return Fail("invalid preview event")
+                }
+                if key.run == run && key.tool == None && string.byte_len(text) > 0u64 {
+                    if key.entry + 1u64 <= reply.at {
+                        return Fail("browser saw a draft after its committed row")
+                    }
+                    if reply.first_preview_ns == 0u64 {
+                        reply.first_preview_ns = host.mono_ns(clock)
+                        if offset != 0u64 {
+                            return Fail("first preview started past the answer's first byte")
+                        }
+                        first_text = string.from(text)
+                    }
+                    draft_at = key.entry + 1u64
+                    draft_seq = seq
+                    draft_offset = offset
+                    draft = take text
+                    cleared = false
+                }
+            } else if expect_preview && name == b"preview-delta" && draft_at > 0u64 && !cleared {
+                let Ok(more) = std.json.decode_typed(deltas, std.http.copy_bytes(data), 65536u64) else {
+                    return Fail("invalid preview delta event")
+                }
+                if draft_at <= reply.at || more.seq <= draft_seq || more.at != draft_offset + string.byte_len(draft) {
+                    return Fail("preview delta did not continue the active draft")
+                }
+                string.push(mut draft, more.text)
+                draft_seq = more.seq
+                reply.preview_deltas += 1u64
+            } else if name == b"preview-clear" && draft_at > 0u64 {
+                cleared = true
+            }
+            Continue
+        })
+        match take fed {
+            Error(Callback(take why, _)) => return Error(take why),
+            Error(Decode(_, _)) => return Error("malformed SSE frame"),
+            Ok(_) => (),
+        }
+        list.clear(mut chunk)
+        if batch_ready && status == until && reply.at > after {
+            if !expect_preview {
+                return Ok(take reply)
+            }
+            if draft_at == 0u64 {
+                return Error("browser received no text preview for the wake answer")
+            }
+            if draft_at != reply.at {
+                return Error("preview and committed answer refer to different entries")
+            }
+            if !string.starts_with(reply.text, first_text) {
+                return Error("first draft did not match the committed text prefix")
+            }
+            if first_text == reply.text {
+                return Error("first preview already held the whole answer")
+            }
+            let end = draft_offset + string.byte_len(draft)
+            if end > string.byte_len(reply.text) || string.slice(reply.text, draft_offset, end) != draft {
+                return Error("latest draft did not match its place in the committed text")
+            }
+            if cleared {
+                return Ok(take reply)
+            }
+        }
+    }
+}
+
+fn live_down(d: harness.gateway.Door, clock: Clock, after: u64) -> Result[harness.gateway.Marks, String] waits {
+    for i in 0u64 .. 100u64 {
+        let marks = harness.gateway.marks(d, 0u64)
+        if marks.ups > after && marks.ups == marks.downs {
+            std.clock.sleep_ns(clock, 2u64 * notes.main.IDLE_MS * 1000000u64)
+            let quiet = harness.gateway.marks(d, 0u64)
+            if quiet.ups != marks.ups || quiet.downs != marks.downs {
+                return Error("SSE stream woke a quiet place")
+            }
+            return Ok(marks)
+        }
+        std.clock.sleep_ns(clock, 50000000u64)
+    }
+    Error("place did not unload under the SSE stream")
+}
+
+fn journal(dir: Dir) -> u64 waits {
+    store.read_only_version(result.unwrap(store.open_read_only(dir, notes.main.options())))
+}
+
+fn live_decision(b: Browser) -> Result[harness.Decision, String] waits {
+    let mut reply = browser_request(b, "GET", "/sessions/0/waits", browser_headers(b.credential, 0u64), list.new(), notes.main.HTTP_MS, 65536u64)?
+    if std.http_client.status(std.http_client.head(reply)) != 200u16 {
+        return Error("browser pending waits request was refused")
+    }
+    let mut raw: Bytes = list.with_capacity(4096u64)
+    loop {
+        list.reserve(mut raw, 4096u64)
+        match std.http_client.read(mut reply, mut raw) {
+            Ok(0u64) => break,
+            Ok(_) => (),
+            Error(_) => return Error("read pending waits")
+        }
+    }
+    let format: std.json.Format[List[harness.PendingWait]] = result.unwrap(std.json.interop())
+    let Ok(waits) = std.json.decode_typed(format, take raw, 65536u64) else { return Error("decode pending waits") }
+    if list.len(waits) != 1u64 { return Error("expected one pending note_add approval") }
+    let wait = waits[0u64]
+    if wait.run != 1u64 || wait.round != 0u64 || wait.ordinal != 0u64 {
+        return Error("note_add approval had the wrong position")
+    }
+    Ok(harness.Decision(run: wait.run, round: wait.round, ordinal: wait.ordinal, key: clone(wait.key), allow: true))
+}
+
+fn live_result(out: Stdout, dir: Dir, b: Browser, tasks: Tasks, random: Random) -> Result[(), String] waits {
+    let Ok(db) = store.open(tasks, dir, b.clock, random, notes.main.options()) else {
+        return Error("could not open the final journal")
+    }
+    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    let t = result.unwrap(store.with_schema(db, code.describe(notes.main.tables)))
+    let snap = store.snapshot(db)
+    let mut tokens = 0u64
+    for i in 0u64 .. 3u64 {
+        let Ok(Some(run)) = store.get(snap, store.shape(h.runs), i) else {
+            return Error("missing run in the journal")
+        }
+        let Finished(Answered) = view run.phase else {
+            return Error("run did not finish with an answer")
+        }
+        if run.spend.known == 0u64 || run.spend.reserved != 0u64 || run.spend.unresolved != 0u64 {
+            return Error("run did not settle its token usage")
+        }
+        tokens += run.spend.known
+    }
+    notes.main.count(out, "settled tokens: ", tokens)
+    let Ok(Some(note)) = store.get(snap, store.shape(t.notes), 0u64) else {
+        return Error("note_add did not save a note")
+    }
+    if note != notes.main.LIVE_NOTE {
+        return Error("note_add saved different text")
+    }
+    let Ok(Some(1u64)) = store.get(snap, store.shape(t.stats), notes.main.RESULTS) else {
+        return Error("expected exactly one tool result")
+    }
+    let Ok(()) = store.close(take db) else {
+        return Error("could not close the final journal")
+    }
+    Ok(())
+}
+
+fn live_turns(out: Stdout, root: Dir, d: harness.gateway.Door, b: Browser, tasks: Tasks, random: Random) -> Result[(), String] waits {
+    post(b, "/sessions", browser_headers(b.credential, 0u64), string.into_bytes("notes smoke"), 201u16, b"0")?
+    let Ok(dir) = std.dir.narrow(root, "s0") else {
+        return Error("missing HTTP-created session directory")
+    }
+    let seeded = journal(dir)
+    let mut stream = browser_request(b, "GET", "/sessions/0/events", browser_headers(b.credential, 0u64), list.new(), 180000u64, 1073741824u64)?
+    if std.http_client.status(std.http_client.head(stream)) != 200u16 {
+        return Error("browser SSE request was refused")
+    }
+    let mut dec = std.sse.decoder(65536u64)
+    message(b, 0u64, 0u64, "warmup", notes.main.LIVE_WARMUP)?
+    let warmup = browser_reply(mut stream, mut dec, b.clock, 0u64, 0u64, "answered", false)?
+    if warmup.text != "READY" {
+        return Error("warmup answer differed from READY")
+    }
+    let idle = live_down(d, b.clock, 0u64)?
+    let first = journal(dir)
+    notes.main.count(out, "journal commits, warmup: ", first - seeded)
+    message(b, 1u64, 1u64, "add-note", notes.main.LIVE_PROMPT)?
+    let held = browser_reply(mut stream, mut dec, b.clock, 1u64, warmup.at, "waiting", false)?
+    let waiting = live_down(d, b.clock, idle.ups)?
+    let paused = journal(dir)
+    notes.main.count(out, "journal commits, tool call through approval wait: ", paused - first)
+    let decision = live_decision(b)?
+    post(b, "/sessions/0/decisions", browser_headers(b.credential, 2u64), json(decision), 200u16, json((Approved : harness.Ruling)))?
+    let saved = browser_reply(mut stream, mut dec, b.clock, 1u64, held.at, "answered", false)?
+    if saved.text != "SAVED" {
+        return Error("tool acknowledgement differed from SAVED")
+    }
+    let asleep = live_down(d, b.clock, waiting.ups)?
+    let second = journal(dir)
+    notes.main.count(out, "journal commits, approval through acknowledgement: ", second - paused)
+    notes.main.count(out, "place downs before wake message: ", asleep.downs)
+    let started = host.mono_ns(b.clock)
+    message(b, 3u64, 2u64, "wake", notes.main.LIVE_WAKE)?
+    let resumed = browser_reply(mut stream, mut dec, b.clock, 2u64, saved.at, "answered", true)?
+    if !string.starts_with(resumed.text, "1.") || string.byte_len(resumed.text) < 80u64 {
+        return Error("wake answer did not contain the requested numbered explanation")
+    }
+    notes.main.count(out, "first preview latency ns: ", resumed.first_preview_ns - started)
+    notes.main.count(out, "wake answer preview deltas: ", resumed.preview_deltas)
+    let woken = live_down(d, b.clock, asleep.ups)?
+    notes.main.count(out, "place ups after wake message: ", woken.ups)
+    notes.main.count(out, "journal commits, wake answer: ", journal(dir) - second)
+    live_result(out, dir, b, tasks, random)
+}
+
+pub fn main(out: Stdout, data: Dir, clock: Clock, random: Random, tasks: Tasks, network: Net, api_key: Secret) -> Result[(), Exit] waits {
+    let Ok(ips) = std.net.lookup(network, notes.main.OPENROUTER, At(clock, host.mono_ns(clock) + 5000000000u64)) else {
+        return notes.main.quit(out, "cannot resolve openrouter.ai")
+    }
+    let mut resolved: Option[Addr] = None
+    for ip in ips {
+        if let V4(_) = ip {
+            resolved = Some(Addr(ip: ip, port: 443u16));
+            break
+        }
+    }
+    let Some(upstream) = resolved else {
+        return notes.main.quit(out, "openrouter.ai has no IPv4 address")
+    }
+    let hub = harness.preview.start(tasks, 1048576u64, 4096u64)
+    let (helper, _unused): (Sender[notes.main.HelperAsk], Receiver[notes.main.HelperAsk]) = channel.new(1u64)
+    let live = notes.main.Live(net: network, address: upstream, key: secret.share(api_key), out: out, preview: harness.preview.door(hub), group: "")
+    let way: harness.gateway.Doorway = harness.gateway.doorway()
+    let d = harness.gateway.door_of(way)
+    let config = harness.gateway.GatewayConfig(root: data, options: notes.main.options(), migrate: code.describe(notes.main.migrate), factory: live_factory(), max_sessions: 1u64, idle_ms: notes.main.IDLE_MS, place_bytes: 67108864u64, tasks: tasks, clock: clock, random: random, net: network, watch: None, seed: notes.main.Services(helper: take helper, clock: clock, live: Some(take live), stream: None))
+    let Ok(take g) = harness.gateway.gateway(take way, take config) else {
+        return notes.main.quit(out, "could not start the gateway")
+    }
+    let Ok((take listener, address)) = host.listen(network, notes.main.loopback(), 16u16) else {
+        return notes.main.quit(out, "could not listen for HTTP")
+    }
+    let mut tools: List[String] = list.new()
+    list.push(mut tools, "note_add")
+    let front = harness.gateway_http.Front(bind: code.describe(store.ingress.caller), bind_bytes: 4096u64, bind_steps: 65536u64, authority: string.into_bytes("localhost"), submit: store.client.transact_entry(code.describe(notes.main.submit_entry)), decide: store.client.transact_entry(code.describe(notes.main.decide_entry)), keys: result.unwrap(store.client.entry_keys(code.describe(notes.main.place))), socket: notes.main.wire().socket, agent: notes.main.LIVE_MODEL, narrow: Only(take tools), preview: Some(harness.preview.door(hub)), tasks: tasks, clock: clock, random: random, net: network, tail_lines: 64u64, within_ms: notes.main.HTTP_MS, beat_ms: 50u64, conn_bytes: 8388608u64, conns_max: 4u64, head_max: 8192u64, body_max: 65536u64)
+    let served = harness.gateway_http.serve(d, take front, take listener)
+    let ran = live_turns(out, data, d, Browser(net: network, clock: clock, address: address, credential: store.ingress.credential(random)), tasks, random)
+    harness.gateway_http.halt(take served)
+    let _ = harness.gateway.stop(take g)
+    harness.preview.stop(take hub)
+    match take ran {
+        Ok(()) => {
+            notes.main.emit(out, "HTTP smoke passed", "");
+            Ok(())
+        },
+        Error(take why) => notes.main.quit(out, why),
+    }
 }

@@ -1,3 +1,132 @@
+// The scripted gateway that the TypeScript client is tested against.
+fn scripted_revoke_entry(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take unused: ()) -> Result[(), harness.Refused] {
+    harness.set_reader(mut tx, h, caller, false)
+}
+
+fn scripted_entries(mut r: store.runner.Registry[notes.main.Grants, harness.Handles]) -> Result[(), store.runner.RegisterError] {
+    notes.main.place(mut r)?
+    store.runner.transact(mut r, code.describe(scripted_revoke_entry), notes.main.BYTES, store.runner.DEFAULT_STEPS)
+}
+
+fn scripted_place(take supplied: store.local.Supplied, s: notes.main.Services) -> Result[store.runner.PlaceConfig[notes.main.Grants, harness.Handles, notes.main.Services, ()], Capacity] {
+    let mut config = notes.main.settings(Memory, supplied.clock, supplied.random, supplied.tasks, supplied.net, notes.main.Services(helper: channel.sender(s.helper), clock: s.clock, live: None, stream: notes.main.copy_stream(s.stream, supplied.name)))
+    config.wire = Some(store.runner.wire_bind((), code.describe(store.ingress.caller), 4096u64, 65536u64))
+    config.place = code.describe(scripted_entries)
+    Ok(take config)
+}
+
+fn scripted_factory() -> store.local.Factory[notes.main.Services] {
+    store.local.seeded_factory(scripted_place)
+}
+
+type ScriptedWatch: send { door: harness.gateway.Door, out: Stdout, clock: Clock }
+
+fn scripted_downs(take watch: ScriptedWatch) -> () waits {
+    let mut downs = 0u64
+    loop {
+        std.clock.sleep_ns(watch.clock, 20000000u64)
+        let m = harness.gateway.marks(watch.door, 0u64)
+        if m.downs != downs {
+            downs = m.downs
+            notes.main.count(watch.out, "down ", downs)
+        }
+    }
+}
+
+type ScriptedControl: codec { action: String, credential: String, at: u64 }
+
+fn scripted_fork(data: Dir, d: harness.gateway.Door, caller: store.Caller, cut: u64, clock: Clock, random: Random, tasks: Tasks) -> Result[u64, String] waits {
+    let _ = harness.gateway.unload(d, 0u64)
+    let Ok(dir) = std.dir.narrow(data, "s0") else { return Error("no fork source") }
+    let Ok(take db) = store.open(tasks, dir, clock, random, notes.main.options()) else { return Error("could not open the fork source") }
+    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    let exported = harness.export(store.snapshot(db), h, cut)
+    result.unwrap(store.close(take db))
+    let Ok(take prefix) = take exported else { return Error("invalid fork cut") }
+    match harness.gateway.create_visible(d, b"fork", Adopt(take prefix), clone(caller)) {
+        Ok(id) => Ok(id),
+        Error(_) => Error("could not create fork"),
+    }
+}
+
+fn scripted_revoke(d: harness.gateway.Door, credential: Bytes, p: u64, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[u64, String] waits {
+    let Ok(take lease) = harness.gateway.route(d, 0u64) else { return Error("could not route revocation") }
+    let Some(address) = latest.read(store.local.status(lease)).addr else { return Error("no place address") }
+    let keys = result.unwrap(store.fixture.entry_keys(code.describe(scripted_entries)))
+    let Ok(take opened) = store.fixture.client_at(tasks, net, clock, random, keys, notes.main.wire().socket, address, Some(clone(credential)), p, notes.main.HTTP_MS) else {
+        return Error("could not connect for revocation")
+    }
+    let mut client = take opened
+    let entry = store.fixture.transact_entry(code.describe(scripted_revoke_entry))
+    let reply = store.fixture.call(mut client, entry, (), int.truncate(notes.main.HTTP_MS))
+    store.fixture.close(take client)
+    if let Ok(store.fixture.Replied(answer: Returned(Ok(())), ..)) = reply {
+        harness.gateway.nudge(d, 0u64)
+        return Ok(0u64)
+    }
+    Error("revocation was refused")
+}
+
+fn scripted_controls(input: Stdin, out: Stdout, data: Dir, d: harness.gateway.Door, clock: Clock, random: Random, tasks: Tasks, net: Net) -> () waits {
+    let format: std.json.Format[ScriptedControl] = result.unwrap(std.json.interop())
+    let mut lines = std.io.lines(Stdin(input), 1024u64)
+    let mut line = string.new()
+    while let Ok(true) = std.io.read_line(mut lines, mut line) {
+        let Ok(control) = std.json.decode_typed(format, clone(string.as_bytes(line)), 1024u64) else {
+            notes.main.emit(out, "control-error ", "invalid command")
+            continue
+        }
+        let Some(credential) = std.base64.decode(clone(string.as_bytes(control.credential))) else {
+            notes.main.emit(out, "control-error ", "invalid credential")
+            continue
+        }
+        let result = if control.action == "fork" {
+            match store.ingress.caller((), credential) {
+                Ok(caller) => scripted_fork(data, d, caller, control.at, clock, random, tasks),
+                Error(_) => Error("invalid credential"),
+            }
+        } else if control.action == "revoke" {
+            scripted_revoke(d, credential, control.at, clock, random, tasks, net)
+        } else {
+            Error("unknown command")
+        }
+        match result {
+            Ok(id) => notes.main.count(out, "control ", id),
+            Error(why) => notes.main.emit(out, "control-error ", why),
+        }
+    }
+}
+
+// Serves the scripted notes agent over HTTP until the fixture input closes. It prints `port N` once
+// it listens, then `down N` each time session 0's place stops.
 pub fn main(out: Stdout, input: Stdin, data: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), Exit] waits {
-    notes.main.serve_scripted(out, input, data, clock, random, tasks, net)
+    let mut helper_name = string.with_capacity(32u64)
+    let Ok(helper_dir) = host.mkdtemp(data, mut helper_name) else {
+        return notes.main.quit(out, "cannot make the helper directory")
+    }
+    let (ask, asks): (Sender[notes.main.HelperAsk], Receiver[notes.main.HelperAsk]) = channel.new(1u64)
+    let helping = task.spawn(tasks, bytes 67108864u64, notes.main.HelperSeed(inbox: take asks, dir: helper_dir, clock: clock, random: random, tasks: tasks, net: net), notes.main.helper_service)
+    let hub = harness.preview.start(tasks, 1048576u64, 4096u64)
+    let way: harness.gateway.Doorway = harness.gateway.doorway()
+    let d = harness.gateway.door_of(way)
+    let seed = notes.main.Services(helper: channel.sender(ask), clock: clock, live: None, stream: Some(notes.main.Stream(door: harness.preview.door(hub), group: "")))
+    let config = harness.gateway.GatewayConfig(root: data, options: notes.main.options(), migrate: code.describe(notes.main.migrate), factory: scripted_factory(), max_sessions: 2u64, idle_ms: notes.main.IDLE_MS, place_bytes: 67108864u64, tasks: tasks, clock: clock, random: random, net: net, watch: None, seed: take seed)
+    let Ok(take g) = harness.gateway.gateway(take way, take config) else {
+        return notes.main.quit(out, "could not start the gateway")
+    }
+    let Ok((take listener, address)) = host.listen(net, notes.main.loopback(), 16u16) else {
+        return notes.main.quit(out, "could not listen for HTTP")
+    }
+    let front = harness.gateway_http.Front(bind: code.describe(store.ingress.caller), bind_bytes: 4096u64, bind_steps: 65536u64, authority: string.into_bytes("localhost"), submit: store.client.transact_entry(code.describe(notes.main.submit_entry)), decide: store.client.transact_entry(code.describe(notes.main.decide_entry)), keys: result.unwrap(store.client.entry_keys(code.describe(scripted_entries))), socket: notes.main.wire().socket, agent: "scripted", narrow: All, preview: Some(harness.preview.door(hub)), tasks: tasks, clock: clock, random: random, net: net, tail_lines: 4u64, within_ms: notes.main.HTTP_MS, beat_ms: 200u64, conn_bytes: 8388608u64, conns_max: 8u64, head_max: 8192u64, body_max: 65536u64)
+    let served = harness.gateway_http.serve(d, take front, take listener)
+    notes.main.count(out, "port ", int.widen(address.port))
+    let watching = task.spawn(tasks, bytes 65536u64, ScriptedWatch(door: harness.gateway.copy_door(d), out: out, clock: clock), scripted_downs)
+    scripted_controls(input, out, data, d, clock, random, tasks, net)
+    let _ = task.cancel_join(take watching)
+    harness.gateway_http.halt(take served)
+    let _ = harness.gateway.stop(take g)
+    harness.preview.stop(take hub)
+    let _ = take ask
+    let _ = task.join(take helping)
+    Ok(())
 }

@@ -5,6 +5,9 @@ charge = "charge-v1"
 
 [dependencies]
 notes = { major = 1, path = "../../../notes" }
+std = { major = 1 }
+store = { major = 1, path = "../../../store" }
+harness = { major = 1, path = "../.." }
 
 [sources]
 "main.hirsel" = "main"

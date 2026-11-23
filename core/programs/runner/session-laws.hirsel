@@ -244,36 +244,7 @@ pub fn law_subscription_room_refunded() -> bool {
 
 @test
 fn test_wire_session(tasks: Tasks, clock: Clock) -> Result[(), ()] waits {
-    if law_serving_budget() && law_subscription_room_refunded() && law_session_records(tasks) && law_pool_holds_writer_bytes(tasks, clock) && law_writer_one_frame() && law_children_joined_on_close(tasks) { Ok(()) } else { Error(()) }
-}
-
-// MEM-24: one WireUnit holds Bytes (24), Option[WireCheck] (32) and write_ack (1).
-// The channel adds its 64-byte header.
-const WIRE_UNIT_CHANNEL_BYTES: u64 = 24u64 + 32u64 + 1u64 + 64u64
-
-pub fn law_writer_one_frame() -> bool {
-    // The two caller-owned candidate frames and the handoff channel spend the grant.
-    let checked = bound bytes (2u64 * 262160u64 + WIRE_UNIT_CHANNEL_BYTES) {
-        let (tx, rx): (Sender[WireUnit], Receiver[WireUnit]) = channel.new(1u64)
-        let first: Bytes = list.with_capacity(262158u64)
-        let second: Bytes = list.with_capacity(262158u64)
-        let mut busy = false
-        let handed = if wire_ready(busy) {
-            match wire_offer(tx, mut busy, WireUnit(frame: take first, check: None, write_ack: false)) { Ok(()) => true, _ => false }
-        } else { false }
-        let pending = result.unwrap(channel.try_receive(rx))
-        let rejected = if wire_ready(busy) {
-            let _ = wire_offer(tx, mut busy, WireUnit(frame: take second, check: None, write_ack: false))
-            false
-        } else {
-            let mut probe: Bytes = list.new()
-            let charged = match list.try_reserve(mut probe, 1u64) { Error(_) => true, _ => false }
-            charged && list.capacity(second) == 262158u64
-        }
-        let empty = match channel.try_receive(rx) { Error(Empty) => true, _ => false }
-        handed && busy && rejected && empty && list.capacity(pending.frame) == 262158u64
-    }
-    match checked { Ok(ok) => ok, Error(_) => false }
+    if law_serving_budget() && law_subscription_room_refunded() && law_session_records(tasks) && law_pool_holds_writer_bytes(tasks, clock) && law_children_joined_on_close(tasks) { Ok(()) } else { Error(()) }
 }
 
 fn wire_park(take rx: Receiver[()]) -> () waits { let _ = channel.receive(rx) }
@@ -283,7 +254,7 @@ pub fn law_children_joined_on_close(tasks: Tasks) -> bool waits {
     let (b, br): (Sender[()], Receiver[()]) = channel.new(1u64)
     let reader = task.spawn(tasks, bytes 4096u64, take ar, wire_park)
     let writer = task.spawn(tasks, bytes 4096u64, take br, wire_park)
-    wire_join(take reader, take writer)
+    wire_join(take reader, Some(take writer))
     let read_closed = match channel.try_send(a, ()) { Error(Closed(_)) => true, _ => false }
     let write_closed = match channel.try_send(b, ()) { Error(Closed(_)) => true, _ => false }
     read_closed && write_closed
@@ -296,12 +267,11 @@ fn wire_owner_park(take rx: Receiver[()]) -> Result[(), std.wsock.Error] waits {
 
 pub fn law_session_records(tasks: Tasks) -> bool waits {
     // Five WireEvents of 169 (8 plus FromRunner's Notice of 161, the largest payload once the
-    // cold controls, Reader and Writer are boxed) plus the channel header, the writer handoff
-    // channel, four unit channels of 64, two task records of 288, and the owner record of 328
-    // (288 plus 40 for Result[(), std.wsock.Error]).
-    let checked = bound bytes (5u64 * 169u64 + 64u64 + WIRE_UNIT_CHANNEL_BYTES + 4u64 * 64u64 + 2u64 * 288u64 + 328u64) {
+    // cold controls, Reader and Writer are boxed) plus the channel header, four unit channels
+    // of 64, two task records of 288 (the reader, and the writer while a write blocks), and the
+    // owner record of 328 (288 plus 40 for Result[(), std.wsock.Error]).
+    let checked = bound bytes (5u64 * 169u64 + 64u64 + 4u64 * 64u64 + 2u64 * 288u64 + 328u64) {
         let (events, hear): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(5u64)
-        let (writes, read_writes): (Sender[WireUnit], Receiver[WireUnit]) = channel.new(1u64)
         let (credit, read_credit): (Sender[()], Receiver[()]) = channel.new(5u64)
         let (a, ar): (Sender[()], Receiver[()]) = channel.new(1u64)
         let (b, br): (Sender[()], Receiver[()]) = channel.new(1u64)
@@ -312,14 +282,13 @@ pub fn law_session_records(tasks: Tasks) -> bool waits {
         let mut probe: Bytes = list.new()
         let exact = match list.try_reserve(mut probe, 1u64) { Error(_) => true, _ => false }
         task.cancel(mut owner)
-        wire_join(take reader, take writer)
+        wire_join(take reader, Some(take writer))
         let _ = task.join(take owner)
         let owner_closed = match channel.try_send(end, ()) { Error(Closed(_)) => true, _ => false }
-        let _ = channel.try_send(events, wire_event(Sent))
-        let _ = channel.try_send(writes, WireUnit(frame: list.new(), check: None, write_ack: false))
+        let _ = channel.try_send(events, wire_event(Dropped))
         let _ = channel.try_send(credit, ())
-        let live = match (channel.try_receive(hear), channel.try_receive(read_writes), channel.try_receive(read_credit)) {
-            (Ok(WireEvent(e: Sent)), Ok(_), Ok(())) => true,
+        let live = match (channel.try_receive(hear), channel.try_receive(read_credit)) {
+            (Ok(WireEvent(e: Dropped)), Ok(())) => true,
             _ => false,
         }
         let closed = match (channel.try_send(a, ()), channel.try_send(b, ())) {
@@ -329,4 +298,128 @@ pub fn law_session_records(tasks: Tasks) -> bool waits {
         exact && live && closed && owner_closed
     }
     match checked { Ok(ok) => ok, Error(_) => false }
+}
+
+// v2.44 (§3 Session): the owner writes without waiting and starts a writer child only when a
+// send would block. The rig is a loopback session whose client reads nothing until told.
+type WritePeer: send { net: Net, address: Addr, clock: Clock, random: Random, socket: std.wsock.Config, go: Receiver[u64], heard: Sender[u64] }
+
+fn write_peer(take peer: WritePeer) -> () waits {
+    let WritePeer(net: net, address: address, clock: clock, random: random, socket: config, go: take go, heard: take heard) = take peer
+    let end: Until = At(clock, int.saturating_add(host.mono_ns(clock), 5000000000u64))
+    let socket = result.unwrap(host.connect(net, address, end))
+    let mut name: Bytes = list.new()
+    list.append(mut name, string.as_bytes("127.0.0.1"))
+    let std.wsock.Connected(reader: take input, writer: take writer, outgoing: _, timers: _) =
+        result.unwrap(std.wsock.client(take socket, take name, config, clock, random))
+    let mut reader = take input
+    let wanted = match channel.receive(go) { Ok(n) => n, Error(_) => return }
+    let until: Until = At(clock, int.saturating_add(host.mono_ns(clock), 30000000000u64))
+    let mut read = 0u64
+    while read < wanted {
+        match std.wsock.read(mut reader, until) { Ok(Message(_)) => { read += 1u64 }, Ok(_) => {}, Error(_) => break }
+    }
+    let _ = channel.send(heard, read)
+    let _ = take writer
+}
+
+type WriteRig { writer: Box[std.wsock.Writer], reader: std.wsock.Reader, peer: Task[()], go: Sender[u64], heard: Receiver[u64] }
+
+fn write_rig(tasks: Tasks, clock: Clock, random: Random, net: Net, config: std.wsock.Config) -> WriteRig waits {
+    let pending = result.unwrap(std.wsock.pending(config))
+    let slot = option.unwrap(result.unwrap(std.wsock.acquire(pending)))
+    let (take listening, address) = result.unwrap(host.listen(net, Addr(ip: V4(0x7f000001u32), port: 0u16), 1u16))
+    let mut listener = take listening
+    let (go, go_from): (Sender[u64], Receiver[u64]) = channel.new(1u64)
+    let (heard_to, heard): (Sender[u64], Receiver[u64]) = channel.new(1u64)
+    let peer = WritePeer(net: net, address: address, clock: clock, random: random, socket: config, go: take go_from, heard: take heard_to)
+    let running = task.spawn(tasks, bytes 2097152u64, take peer, write_peer)
+    let deadline: Until = At(clock, int.saturating_add(host.mono_ns(clock), 5000000000u64))
+    let (take socket, addr) = result.unwrap(host.accept(mut listener, deadline))
+    let std.wsock.Upgraded(reader: take reader, writer: take writer, source: _, timers: _, pending: _) =
+        result.unwrap(std.wsock.server(take socket, take slot, addr.ip, list.new(), config, clock, host.mono_ns(clock)))
+    WriteRig(writer: box.new(take writer), reader: take reader, peer: take running, go: take go, heard: take heard)
+}
+
+fn write_stage(mut w: Box[std.wsock.Writer], config: std.wsock.Config, size: u64) {
+    let mut out = result.unwrap(std.wsock.outbound(Server, config, None))
+    let payload: Bytes = list.with_capacity(size)
+    let mut body = take payload
+    for _ in 0u64 .. size { list.push(mut body, 7u8) }
+    result.unwrap(std.wsock.stage(mut w, result.unwrap(std.wsock.encode(mut out, true, 2u8, body))))
+}
+
+fn write_staged(tasks: Tasks, take w: Box[std.wsock.Writer], to: Sender[WireEvent], clock: Clock, config: std.wsock.Config) -> Result[Task[()], WireInput] waits {
+    let out = result.unwrap(std.wsock.outbound(Server, config, None))
+    wire_start(tasks, WireWrite(writer: take w, to: channel.sender(to), out: out, clock: clock, config: config,
+        end: int.saturating_add(host.mono_ns(clock), std.wsock.MESSAGE_NS), can_close: true, close: false, report: None))
+}
+
+// Bug caught: a writer that blocks the owner, or a spawned writer that never hands the Writer
+// back. A small frame is written inline with no child; frames of 200,000 B fill the unread
+// socket until one would block, which starts the child; once the client reads, the child
+// drains that frame, returns the Writer with Sent and exits, and the next frame is inline again.
+pub fn law_write_spawned_on_block(tasks: Tasks, clock: Clock, random: Random, net: Net) -> bool waits {
+    let config = std.wsock.defaults()
+    let WriteRig(writer: take initial, reader: take reader, peer: take peer, go: take go, heard: take heard) = write_rig(tasks, clock, random, net, config)
+    let (to, events): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(2u64)
+    let mut w = take initial
+    write_stage(mut w, config, 16u64)
+    let mut sent = 1u64
+    let mut writing: Option[Task[()]] = None
+    match write_staged(tasks, take w, to, clock, config) { Error(Sent(take back)) => { w = take back }, _ => return false }
+    while sent < 512u64 {
+        write_stage(mut w, config, 200000u64)
+        sent += 1u64
+        match write_staged(tasks, take w, to, clock, config) {
+            Error(Sent(take back)) => { w = take back },
+            Ok(take h) => { writing = Some(take h); break },
+            _ => return false,
+        }
+    }
+    let Some(take child) = take writing else { return false }
+    result.unwrap(channel.send(go, sent + 1u64))
+    let returned = match channel.receive(events) { Ok(WireEvent(e: Sent(take back))) => take back, _ => return false }
+    let exited = match task.join(take child) { Ok(()) => true, _ => false }
+    let mut again = take returned
+    write_stage(mut again, config, 16u64)
+    let inline = match write_staged(tasks, take again, to, clock, config) { Error(Sent(_)) => true, _ => false }
+    let all_read = match channel.receive(heard) { Ok(n) => n == sent + 1u64, _ => false }
+    let _ = task.join(take peer)
+    let _ = take reader
+    exited && inline && all_read
+}
+
+// Bug caught: a refused writer spawn that hangs the session or loses its end. Each frame is
+// staged outside a bound one byte short of writer_bytes(), and only the write runs inside it,
+// so the inline writes fit and the spawn at the first blocked send is refused: the session
+// ends with 1001 (§3 Session, v2.44).
+pub fn law_write_capacity_ends(tasks: Tasks, clock: Clock, random: Random, net: Net) -> bool waits {
+    let config = std.wsock.defaults()
+    let WriteRig(writer: take initial, reader: take reader, peer: take running, go: take go, heard: _) = write_rig(tasks, clock, random, net, config)
+    let (to, _events): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(2u64)
+    let mut held: Option[Box[std.wsock.Writer]] = Some(take initial)
+    let mut ended = false
+    for _ in 0u64 .. 512u64 {
+        let Some(take staged) = replace(mut held, None) else { break }
+        let mut w = take staged
+        write_stage(mut w, config, 200000u64)
+        let started = bound bytes (writer_bytes() - 1u64) { write_staged(tasks, take w, to, clock, config) }
+        match take started {
+            Ok(Error(Sent(take back))) => { held = Some(take back) },
+            Ok(Error(Ended(1001u16))) => { ended = true },
+            _ => {},
+        }
+    }
+    let _ = take go
+    let mut peer = take running
+    task.cancel(mut peer)
+    let _ = task.join(take peer)
+    let _ = take reader
+    ended
+}
+
+@test
+fn test_wire_write(tasks: Tasks, clock: Clock, random: Random, net: Net) -> Result[(), ()] waits {
+    if law_write_spawned_on_block(tasks, clock, random, net) && law_write_capacity_ends(tasks, clock, random, net) { Ok(()) } else { Error(()) }
 }

@@ -1,21 +1,21 @@
 // §3 "Repair", the owner's take: an owner that takes Update 1 also takes the Updates queued
 // behind it, in order, up to its inbox's capacity (1+q = 5) in one delivery job. The first
 // other event ends the run and is held, not lost, and every take counts once toward the
-// drain wake. Hand-derived: with the run at 3 of 5, taking Updates 2 and 3 and then `Sent`
+// drain wake. Hand-derived: with the run at 3 of 5, taking Updates 2 and 3 and then `Dropped`
 // is three takes, so the run wraps once (one wake) and ends at 1; Update 4 stays queued. A
 // full backlog takes four more Updates and leaves the fifth queued.
 pub fn law_owner_takes_queued() -> bool {
     let (to, inbox): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(5u64)
     let _ = channel.try_send(to, queued_update(2u64))
     let _ = channel.try_send(to, queued_update(3u64))
-    let _ = channel.try_send(to, wire_event(Sent))
+    let _ = channel.try_send(to, wire_event(Dropped))
     let _ = channel.try_send(to, queued_update(4u64))
     let mut updates: List[Update] = list.new()
     list.push(mut updates, Update(version: 1u64, content: None, outcomes: list.new()))
     let mut held: Option[WireEvent] = None
     let mut run = 3u64
     let wakes = wire_take_queued(inbox, mut run, 5u64, mut updates, mut held)
-    let held_sent = match take held { Some(WireEvent(e: Sent)) => true, _ => false }
+    let held_sent = match take held { Some(WireEvent(e: Dropped)) => true, _ => false }
     let left = match channel.try_receive(inbox) { Ok(WireEvent(e: FromRunner(Notice(e: Updated(take u))))) => u.version == 4u64, _ => false }
     let mixed = wakes == 1u64 && run == 1u64 && held_sent && left && queued_versions(updates, 3u64)
 

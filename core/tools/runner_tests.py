@@ -1066,7 +1066,7 @@ def children_joined(report):
 
 
 READER_CANCELLATION = 'pool_releases_cancelled_reader'
-SESSION_LAWS = ('pool_holds_writer_bytes', READER_CANCELLATION, 'writer_one_frame',
+SESSION_LAWS = ('pool_holds_writer_bytes', READER_CANCELLATION, 'write_spawned_on_block', 'write_capacity_ends',
                 'children_joined_on_close', 'session_records', 'serving_budget', 'subscription_room_refunded')
 
 

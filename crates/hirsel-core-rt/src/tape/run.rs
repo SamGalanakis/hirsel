@@ -415,7 +415,9 @@ unsafe extern "C" fn invoke(
         } else {
             match read_launch(&startup.arg, launch_revision) {
                 Ok((launch, managed)) => {
-                    if (*(*config).launch).digest() != launch.digest() {
+                    let current = (*(*config).launch).digest();
+                    let recorded = launch.digest();
+                    if !current.is_empty() && !recorded.is_empty() && current != recorded {
                         let label = b"replay: build differs\n";
                         crate::os::diagnostic(run.stderr, label.as_ptr(), label.len());
                     }
@@ -781,6 +783,11 @@ unsafe fn run_taped(
             _ => return process::NOT_STARTED,
         };
         let stderr = sink.stderr_fd();
+        let launch_metadata = if mode == 0 {
+            Metadata::source
+        } else {
+            Metadata::native
+        };
         let mut run = Run {
             entry,
             requirements: input.parameters,
@@ -798,7 +805,7 @@ unsafe fn run_taped(
             grants: vec![],
             creds: vec![],
             sink,
-            launch: Box::new(Metadata::source(
+            launch: Box::new(launch_metadata(
                 "",
                 hirsel_core_ids::launch::DEFAULT_N_PLACE,
                 false,

@@ -668,6 +668,47 @@ fn first_draft(mut c: std.http_client.Connection, mut dec: std.sse.Decoder) -> O
     }
 }
 
+// Folds the draft stream from `first` until the row at `at` shows the run answered. Each
+// delta must begin at the end of the draft held so far, and every draft must be the
+// answer's text at its offset. The answer is the first check that failed, or 0.
+fn fold_drafts(mut c: std.http_client.Connection, mut dec: std.sse.Decoder, take first: harness.preview.Draft, mut rows: List[(u64, Bytes)], at: u64) -> u64 waits {
+    let snapshot: std.json.Format[harness.preview.Draft] = result.unwrap(std.json.interop())
+    let delta: std.json.Format[harness.gateway_http.PreviewDelta] = result.unwrap(std.json.interop())
+    let row_format: std.json.Format[harness.gateway_http.Shown] = result.unwrap(std.json.interop())
+    let answer = preview_answer().text
+    let mut offset = first.offset
+    let mut text: String = clone(first.text)
+    let mut bad = 0u64
+    let mut answered = false
+    let mut present = false
+    let mut chunk: Bytes = list.with_capacity(8192u64)
+    while !(answered && present) {
+        match std.http_client.read(mut c, mut chunk) { Ok(0u64) => return 1u64, Ok(_) => (), Error(_) => return 1u64 }
+        let fed = std.sse.feed(mut dec, chunk, fn(name: Bytes, data: Bytes, event_id: Bytes) -> std.sse.FeedControl[()] {
+            if name == b"preview" {
+                let Ok(take p) = std.json.decode_typed(snapshot, std.http.copy_bytes(data), 65536u64) else { return Fail(()) }
+                let harness.preview.Draft(offset: o, text: take t, ..) = take p
+                offset = o
+                text = take t
+            } else if name == b"preview-delta" {
+                let Ok(take d) = std.json.decode_typed(delta, std.http.copy_bytes(data), 65536u64) else { return Fail(()) }
+                if d.at != offset + string.byte_len(text) { bad = 2u64; return Fail(()) }
+                string.push(mut text, d.text)
+            } else if name == b"message" {
+                let Ok(row) = std.json.decode_typed(row_format, std.http.copy_bytes(data), 65536u64) else { return Fail(()) }
+                if let Status(s) = row.line { answered = s == "answered" }
+                if row.at == at { present = true }
+                list.push(mut rows, (row.at, bytes_of(row.line)))
+            }
+            if offset + string.byte_len(text) > string.byte_len(answer) || text != string.slice(answer, offset, offset + string.byte_len(text)) { bad = 3u64; return Fail(()) }
+            Continue
+        })
+        if let Error(_) = fed { return if bad == 0u64 { 4u64 } else { bad } }
+        list.clear(mut chunk)
+    }
+    0u64
+}
+
 fn answer_rows() -> List[(u64, Bytes)] {
     let mut expected: List[(u64, Bytes)] = list.new()
     list.push(mut expected, row_of(0u64, Status("answered")))
@@ -723,7 +764,7 @@ fn preview_run(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
     let mut shown_key: Option[harness.preview.Key] = None
     if enabled {
         let Some(p) = first_draft(mut tab, mut decoder) else { return Error(15u64) }
-        if p.key.run != 0u64 || p.key.entry != 2u64 || p.key.tool != None || p.seq != 1u64 ||
+        if p.key.run != 0u64 || p.key.entry != 2u64 || p.key.tool != None || p.seq != 1u64 || p.offset != 0u64 ||
             p.text != string.slice(preview_answer().text, 0u64, 10000u64 / chunks) { return Error(16u64) }
         shown_key = Some(p.key)
     }
@@ -770,6 +811,8 @@ fn preview_run(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
             if next_draft.key.run != 1u64 || next_draft.key.entry != 4u64 { return Error(28u64) }
             let Ok(next_rest) = channel.receive(inbox) else { return Error(29u64) }
             let _ = channel.send(next_rest, ())
+            let folded = fold_drafts(mut returned, mut again_decoder, clone(next_draft), mut again, 5u64)
+            if folded != 0u64 { return Error(3000u64 + folded) }
             harness.preview.unobserve(take witness)
             let _ = take late
         }

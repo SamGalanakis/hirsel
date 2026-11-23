@@ -14,12 +14,23 @@
 // DELETE /sessions/{id}; POST /sessions/{id}/messages takes a JSON `harness.Submit`;
 // POST /sessions/{id}/decisions a JSON `harness.Decision`; GET /sessions/{id}/events is
 // the transcript as server-sent events, one JSON `Shown` per changed row and a comment
-// as a heartbeat. A bearer-authenticated stream on a preview-enabled front
-// also gets named "preview" snapshots and "preview-clear" events. Each
-// snapshot replaces the draft. Its transcript row at key.entry + 1 supersedes it.
+// as a heartbeat. After each image's rows comes a "batch" event carrying the store
+// version: a reader applies the rows before it together, and the first batch on a
+// stream completes its image. A bearer-authenticated stream on a preview-enabled front
+// also gets the draft: a "preview" snapshot on join, gap, dropped text or a new key,
+// then "preview-delta" events that append text at the draft's end, and "preview-clear".
+// Its transcript row at key.entry + 1 supersedes the draft.
 
 // One transcript row as a stream sends it: its position and its view.
 pub type Shown: codec + send { at: u64, line: harness.View }
+
+// Draft text that continues the last snapshot or delta: `at` is the draft offset where
+// `text` begins, which must be the end of what the reader holds.
+pub type PreviewDelta: codec + send { seq: u64, at: u64, text: String }
+
+// Deltas wait until this much text or this old before they are sent.
+const PREVIEW_FLUSH_BYTES: u64 = 2048u64
+const PREVIEW_FLUSH_MS: u64 = 100u64
 
 // What the front needs from a session's place: its submit and decide entries and a query
 // over `harness.transcript`, and how to reach it. A new session starts as `agent` with
@@ -167,7 +178,9 @@ fn send_rows(mut w: WriteHalf, f: Front, image: store.fixture.Seen, mut sent: Li
     Some(status)
 }
 
-type PreviewWatch { observer: Option[preview.Observer], sent: Option[(preview.Key, u64)] }
+// `sent` names the draft the browser holds and the offset of its end; `pending_ns` is
+// when the oldest text not yet sent was published.
+type PreviewWatch { observer: Option[preview.Observer], sent: Option[(preview.Key, u64)], pending_ns: Option[u64] }
 
 fn watching(watch: PreviewWatch) -> bool { match watch.observer { Some(_) => true, None => false } }
 
@@ -176,6 +189,7 @@ fn unwatch(mut watch: PreviewWatch) -> () waits {
 }
 
 fn clear_preview(mut w: WriteHalf, f: Front, mut watch: PreviewWatch) -> bool waits {
+    watch.pending_ns = None
     if let Some(_) = replace(mut watch.sent, None) {
         return send_out(mut w, f, string.into_bytes("event: preview-clear\ndata: null\n\n"))
     }
@@ -191,11 +205,31 @@ fn send_preview(mut w: WriteHalf, f: Front, sent: List[(u64, Bytes)], mut watch:
     for row in sent {
         if row.0 == draft.key.entry + 1u64 { return clear_preview(mut w, f, mut watch) }
     }
-    let stamp = (draft.key, draft.seq)
-    if let Some((key, seq)) = watch.sent { if key == draft.key && seq == draft.seq { return true } }
+    let end = draft.offset + string.byte_len(draft.text)
+    if let Some((key, held)) = watch.sent {
+        if key == draft.key && draft.offset <= held && held <= end {
+            if held == end { return true }
+            let since = match watch.pending_ns { Some(ns) => ns, None => draft.produced_ns }
+            watch.pending_ns = Some(since)
+            if end - held < PREVIEW_FLUSH_BYTES && host.mono_ns(f.clock) - since < PREVIEW_FLUSH_MS * 1000000u64 { return true }
+            let more = PreviewDelta(seq: draft.seq, at: held, text: string.from(string.slice(draft.text, held - draft.offset, end - draft.offset)))
+            let Some(take event) = event_of(more, Some("preview-delta")) else { return false }
+            watch.sent = Some((draft.key, end))
+            watch.pending_ns = None
+            return send_out(mut w, f, take event)
+        }
+    }
     let Some(take event) = event_of(draft, Some("preview")) else { return false }
-    watch.sent = Some(stamp)
+    watch.sent = Some((draft.key, end))
+    watch.pending_ns = None
     send_out(mut w, f, take event)
+}
+
+fn send_batch(mut w: WriteHalf, f: Front, version: u64) -> bool waits {
+    let mut out = string.from("event: batch\ndata: ")
+    string.push_u64(mut out, version)
+    string.push(mut out, "\n\n")
+    send_out(mut w, f, string.into_bytes(take out))
 }
 
 fn halted(quit: Receiver[()]) -> bool {
@@ -209,7 +243,7 @@ fn halted(quit: Receiver[()]) -> bool {
 // stream no wake, and an open stream never holds the place up. Opening the stream wakes
 // the session once, to send its transcript.
 fn follow[T: send](d: harness.gateway.Door[T], f: Front, id: u64, mut w: WriteHalf, quit: Receiver[()], credential: Option[Bytes]) -> () waits {
-    let mut watch = PreviewWatch(observer: None, sent: None)
+    let mut watch = PreviewWatch(observer: None, sent: None, pending_ns: None)
     follow_loop(d, f, id, mut w, quit, credential, mut watch)
     unwatch(mut watch)
 }
@@ -236,6 +270,7 @@ fn follow_loop[T: send](d: harness.gateway.Door[T], f: Front, id: u64, mut w: Wr
                 Ok(take image) => {
                     let next = image.version
                     let Some(status) = send_rows(mut w, f, image, mut sent) else { store.fixture.close(take client); return }
+                    if !send_batch(mut w, f, next) { store.fixture.close(take client); return }
                     let active = busy(status)
                     if !active {
                         unwatch(mut watch)

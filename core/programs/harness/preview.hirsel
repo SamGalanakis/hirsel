@@ -8,14 +8,17 @@ pub type Key: codec + key + send {
     attempt: u64,
 }
 
+// `offset` is the position of `text` in the attempt's whole draft, so a reader
+// can append a later suffix instead of taking the whole draft again.
 pub type Draft: codec + send {
     key: Key,
     seq: u64,
     produced_ns: u64,
+    offset: u64,
     text: String,
 }
 
-type Input: send = Start(String, store.Caller, Key, u64, Receiver[()]) | Delta(Key, u64, u64, String) | Attach(String, store.Caller, Receiver[()], Sender[u64]) | Detach(u64) | Revoke(String, store.Caller, Sender[()]) | Read(u64, Sender[Option[Draft]]) | Stop
+type Input: send = Start(String, store.Caller, Key, u64, Receiver[()]) | Delta(Key, u64, u64, u64, String) | Attach(String, store.Caller, Receiver[()], Sender[u64]) | Detach(u64) | Revoke(String, store.Caller, Sender[()]) | Read(u64, Sender[Option[Draft]]) | Stop
 
 pub opaque type Door: send {
     to: Sender[Input],
@@ -38,6 +41,7 @@ pub opaque type Source: send {
     lease: Sender[()],
     key: Key,
     seq: u64,
+    offset: u64,
     clock: Clock
 }
 
@@ -54,6 +58,7 @@ type Active {
     live: Receiver[()],
     seq: u64,
     produced_ns: u64,
+    base: u64,
     text: String,
     changed: u64,
 }
@@ -152,14 +157,14 @@ fn starts(mut active: List[Active], take group: String, take caller: store.Calle
         remove_at(mut active, i)
     }
     let state_seq = first_seq(key)
-    list.push(mut active, Active(group: take group, caller: take caller, key: key, live: take live, seq: state_seq, produced_ns: produced, text: string.new(), changed: if state_seq == 0u64 {
+    list.push(mut active, Active(group: take group, caller: take caller, key: key, live: take live, seq: state_seq, produced_ns: produced, base: 0u64, text: string.new(), changed: if state_seq == 0u64 {
         0u64
     } else {
         changed
     }))
 }
 
-fn on_delta(mut active: List[Active], watching: List[Watching], limit: u64, changed: u64, key: Key, seq: u64, produced: u64, take text: String) {
+fn on_delta(mut active: List[Active], watching: List[Watching], limit: u64, changed: u64, key: Key, seq: u64, produced: u64, at: u64, take text: String) {
     for i in 0u64 .. list.len(active) {
         if active[i].key != key || !open(active[i].live) {
             continue
@@ -170,6 +175,9 @@ fn on_delta(mut active: List[Active], watching: List[Watching], limit: u64, chan
         let added = string.byte_len(text)
         if seq != active[i].seq + 1u64 || string.byte_len(active[i].text) + added > limit {
             active[i].text = string.new()
+        }
+        if string.byte_len(active[i].text) == 0u64 {
+            active[i].base = at
         }
         active[i].seq = seq
         active[i].produced_ns = produced
@@ -199,15 +207,15 @@ fn draft_for(active: List[Active], watching: List[Watching], id: u64, limit: u64
         let a = view active[i]
         // The tool's fixed running status comes from its active lease. It
         // requires no retained text when nobody is watching.
-        let text = if a.key.tool != None && string.byte_len(a.text) == 0u64 {
+        let (offset, text) = if a.key.tool != None && string.byte_len(a.text) == 0u64 {
             if limit < string.byte_len("running tool") {
                 return None
             }
-            "running tool"
+            (0u64, string.from("running tool"))
         } else {
-            string.from(a.text)
+            (a.base, string.from(a.text))
         }
-        return Some(Draft(key: a.key, seq: a.seq, produced_ns: a.produced_ns, text: take text))
+        return Some(Draft(key: a.key, seq: a.seq, produced_ns: a.produced_ns, offset: offset, text: take text))
     }
     None
 }
@@ -225,9 +233,9 @@ fn receive_all(take job: (Receiver[Input], u64)) -> () waits {
                 changed += 1u64
                 starts(mut active, take group, take caller, key, produced, changed, take live)
             },
-            Delta(key, seq, produced, take text) => {
+            Delta(key, seq, produced, at, take text) => {
                 changed += 1u64
-                on_delta(mut active, watching, limit, changed, key, seq, produced, take text)
+                on_delta(mut active, watching, limit, changed, key, seq, produced, at, take text)
             },
             Attach(take group, take caller, take live, reply) => {
                 prune(mut active, mut watching, None)
@@ -295,7 +303,7 @@ pub fn source(t: Target, caller: store.Caller, key: Key) -> Option[Source] {
     if let Error(_) = channel.try_send(d.to, Start(string.from(t.group), clone(caller), key, host.mono_ns(t.clock), take live)) {
         return None
     }
-    Some(Source(door: copy_door(d), lease: take lease, key: key, seq: first_seq(key), clock: t.clock))
+    Some(Source(door: copy_door(d), lease: take lease, key: key, seq: first_seq(key), offset: 0u64, clock: t.clock))
 }
 
 // Keep only a UTF-8 tail of a very large delta. On a lost delta the next
@@ -318,9 +326,11 @@ pub fn delta(mut p: Source, text: String) {
         p.seq += 1u64
     }
     p.seq += 1u64
+    let at = p.offset + from
+    p.offset += n
     let _ = bound bytes p.door.text_bytes + 4096u64 {
         let shown = string.from(string.slice(text, from, n))
-        let _ = channel.try_send(p.door.to, Delta(p.key, p.seq, host.mono_ns(p.clock), take shown))
+        let _ = channel.try_send(p.door.to, Delta(p.key, p.seq, host.mono_ns(p.clock), at, take shown))
     }
 }
 

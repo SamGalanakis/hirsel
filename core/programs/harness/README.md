@@ -215,9 +215,14 @@ with its bearer credential. The place binds it to a Caller. Only the run's
 Caller receives its draft. When an application revokes read access, it can
 call `harness.preview.revoke` to clear that Caller's existing watchers.
 
-Each named `preview` event replaces the draft with a bounded snapshot. The
-key contains the store identity, run, transcript entry, dispatch and attempt.
-A `preview-clear` event removes the draft. A committed row at
+A named `preview` event replaces the draft with a bounded snapshot: its
+`offset` is where `text` sits in the attempt's draft. The key contains the
+store identity, run, transcript entry, dispatch and attempt. The front sends a
+snapshot only when a stream joins, after a lost delta, when the hub dropped
+text the browser had not received, or for a new key. Otherwise it sends
+`preview-delta` events (`seq`, `at`, `text`) that append at the draft's end,
+coalesced up to 2 KiB or 100 ms. A delta whose `at` is not the held end means
+the reader lost its place: reconnect. A `preview-clear` event removes the draft. A committed row at
 `key.entry + 1` supersedes the draft. Reconnecting starts from the current
 snapshot, if any. Connect without a bearer credential for transcript rows
 alone.
@@ -325,7 +330,9 @@ session's place can unload while its page stays open.
   so a retried request at one position runs once. An entry's refusal is 422,
   a stranger 403, a position bound to other bytes 409.
 - `GET /sessions/:id/events` is a server-sent event stream of the session's
-  transcript rows (`Shown { at, line }`). The front follows the place only
+  transcript rows (`Shown { at, line }`). A `batch` event with the store
+  version follows each image's rows; apply the rows before it together, and
+  treat the first batch on a stream as the complete image. The front follows the place only
   while it is busy, then lets go; it learns of a later change from the
   gateway's start counts (`marks`), and reads the new rows with `peek`, which
   never starts a place. Opening the stream wakes the session once. A comment

@@ -352,16 +352,16 @@ pub fn open_bucket(tasks: Tasks, d: Dir, c: Clock, r: Random, options: Options, 
 /// Recovers an existing Bucket store's local journal and packs. The local
 /// MANIFEST must match the newest published generation byte for byte.
 pub fn open_bucket_read_only(d: Dir, options: Options, mut client: std.object.Client, op_ms: u64) -> Result[ReadOnly, Error] waits {
-    let Bucket(place) = options.authority else {
+    let Bucket(place) = view options.authority else {
         return Error(Unsupported(0))
     }
     open_checks(options)?
     let (take raw, id, take manifest) = read_only_manifest(d)?
-    let Some(claim) = manifest.claim else {
-        return Error(Unsupported(0))
-    }
-    if !same_place(claim, place) {
-        return Error(Foreign)
+    match manifest.claim {
+        Some(claim) => if !same_place(claim, place) {
+            return Error(Foreign)
+        },
+        None => return Error(Unsupported(0)),
     }
     let generation = manifest.generation
     let reader = read_only_recover(d, id, take manifest, options.resident_limit)?

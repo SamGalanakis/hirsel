@@ -58,6 +58,9 @@ limit = 536870912
 [tests.runs."store@1/store/bucket_test_fence"]
 limit = 536870912
 
+[tests.runs."store@1/store/bucket_test_read_only_mirror"]
+limit = 134217728
+
 [tests.runs."store@1/store/bucket_test_soak"]
 limit = 536870912
 

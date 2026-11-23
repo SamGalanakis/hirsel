@@ -13782,17 +13782,18 @@ fn disk_test_read_only_snapshot(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
     }
     let mut db = open(tasks, child, c, r, defaults())?
     let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
-    let writable = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
-    if !typed_put(mut db, writable, 7, 70) {
+    let opened_rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    if !typed_put(mut db, opened_rows, 7, 70) {
         fail("could not commit first row")
     }
-    durable(mut db, Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq)))?
+    let last = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq))
+    durable(mut db, last)?
     let saved = open_read_only(child, defaults())?
     let rows = read_only_table(saved, "rows", std.codec.key_u64(), std.codec.of_u64())?
     if read_only_version(saved) != 2 || read_only_get(saved, rows, 7)? != Some(70u64) {
         fail("read-only open missed a durable journal row")
     }
-    if !typed_put(mut db, writable, 7, 71) {
+    if !typed_put(mut db, opened_rows, 7, 71) {
         fail("could not commit replacement row")
     }
     checkpoint(mut db)?

@@ -1,0 +1,297 @@
+type JournalMsg: send = Frame(Bytes, u64) | Rotate(HostFile, HostFile) | Barrier | IdleCheck
+
+type WriteNotice: send = Written | WriteFailed(IoError)
+
+type JournalIdleTimer: send {
+    clock: Clock,
+    requests: Receiver[()],
+    journal: Sender[JournalMsg]
+}
+
+fn journal_idle_timer(take timer: JournalIdleTimer) waits {
+    while let Ok(()) = channel.receive(timer.requests) {
+        std.clock.sleep_ns(timer.clock, 100000000)
+        if let Error(_) = channel.send(timer.journal, IdleCheck) {
+            return
+        }
+    }
+}
+
+type JournalWorker: send {
+    store: StoreId,
+    seq: u64,
+    segment: HostFile,
+    end_file: HostFile,
+    group_commits: u32,
+    group_bytes: u32,
+    receive: Receiver[JournalMsg],
+    send: Sender[Ack],
+    ready: Sender[Result[(), Capacity]],
+    written: Sender[WriteNotice],
+    synced: Sender[()],
+    idle: Option[Sender[()]]
+}
+
+type JournalBuffers {
+    group: Bytes,
+    end_bytes: Bytes,
+    binding: Bytes
+}
+
+fn journal_set(mut raw: Bytes, at: u64, value: u64, width: u64) {
+    for i in 0u64 .. width {
+        raw[at + i] = int.truncate(value >> (i * 8))
+    }
+}
+
+fn journal_fixed_check(binding: Bytes, raw: Bytes, at: u64, length: u64) -> u64 {
+    let mut state = std.check.start()
+    std.check.add(mut state, binding, 0, 33)
+    std.check.add(mut state, raw, at, at + 8)
+    std.check.add(mut state, raw, at + 16, at + 16 + length)
+    std.check.finish(state)
+}
+
+fn journal_buffers(reserve: u64) -> Result[JournalBuffers, Capacity] {
+    let group: Bytes = list.with_capacity(reserve)
+    let mut end_bytes: Bytes = list.with_capacity(96)
+    list.fill(mut end_bytes, 96, 0u8)
+    let mut binding: Bytes = list.with_capacity(33)
+    list.fill(mut binding, 33, 0u8)
+    Ok(JournalBuffers(group: take group, end_bytes: take end_bytes, binding: take binding))
+}
+
+// END's bytes and checksum binding reuse storage admitted at spawn. The END
+// file is a fixed 96 bytes, rewritten in place through the handle opened when
+// its segment was created; a torn rewrite fails its checksum like a torn
+// truncate-and-write would, and only loses detection (§3.4 step 5).
+fn journal_write_end(id: StoreId, seq: u64, end: u64, mut end_file: HostFile, mut raw: Bytes, mut binding: Bytes) -> Result[(), Error] waits {
+    journal_set(mut binding, 0, id.hi, 8)
+    journal_set(mut binding, 8, id.lo, 8)
+    journal_set(mut binding, 16, 4, 1)
+    journal_set(mut binding, 17, seq, 8)
+    journal_set(mut binding, 25, 0, 8)
+    journal_set(mut raw, 0, 1, 2)
+    journal_set(mut raw, 2, 1, 2)
+    journal_set(mut raw, 4, 56, 4)
+    let magic = string.as_bytes("HIRSTORE")
+    for i in 0u64 .. 8 {
+        raw[16 + i] = magic[i]
+    }
+    journal_set(mut raw, 24, DISK_FORMAT, 4)
+    journal_set(mut raw, 28, 4, 1)
+    journal_set(mut raw, 32, id.hi, 8)
+    journal_set(mut raw, 40, id.lo, 8)
+    journal_set(mut raw, 56, seq, 8)
+    let header_check = journal_fixed_check(binding, raw, 0, 56)
+    journal_set(mut raw, 8, header_check, 8)
+    journal_set(mut raw, 72, 0x0012, 2)
+    journal_set(mut raw, 74, 1, 2)
+    journal_set(mut raw, 76, 8, 4)
+    journal_set(mut raw, 88, end, 8)
+    journal_set(mut binding, 25, 72, 8)
+    let end_check = journal_fixed_check(binding, raw, 72, 8)
+    journal_set(mut raw, 80, end_check, 8)
+    match host.write_at(mut end_file, 0, raw) {
+        Ok(()) => {},
+        Error(e) => return Error(Io(e.error))
+    }
+    disk_io(host.sync(mut end_file))
+}
+
+fn journal_loop(take input: JournalWorker, take scratch: JournalBuffers) -> Result[(), Error] waits {
+    let JournalWorker(store: id, seq: initial_seq, segment: take segment, end_file: take end_file, group_commits: max_frames, group_bytes: max_bytes, receive: take receive, send: take send, ready: _, written: take notices, synced: take synced, idle: take idle_timer) = take input
+    let mut segment_file = take segment
+    let mut end_handle = take end_file
+    let mut seq = initial_seq
+    let mut end = 72u64
+    // The d the END file holds: 72 from segment creation.
+    let mut end_named = 72u64
+    let mut written = 0u64
+    let mut groups = 0u64
+    let JournalBuffers(group: take reserved, end_bytes: take initial_end, binding: take initial_binding) = take scratch
+    let mut buffer = take reserved
+    let mut end_bytes = take initial_end
+    let mut binding = take initial_binding
+    let group_limit: u64 = int.widen(max_bytes)
+    let mut deferred: Option[JournalMsg] = None
+    let mut idle_at: Option[u64] = None
+    loop {
+        let mut next_message = replace(mut deferred, None)
+        if let None = next_message {
+            if groups != 0 {
+                // A cap or Barrier can end a group without probing the queue.
+                match channel.try_receive(receive) {
+                    Ok(take msg) => {
+                        next_message = Some(take msg)
+                    },
+                    Error(Empty) => {
+                        if end != end_named {
+                            journal_write_end(id, seq, end, mut end_handle, mut end_bytes, mut binding)?
+                            end_named = end
+                        }
+                        groups = 0
+                    },
+                    Error(Closed) => {}
+                }
+            }
+            if let None = next_message {
+                // Arm a check on the first park with a batch buffer. Writes
+                // during the quiet interval keep the buffer for the next park.
+                if idle_at == None && list.capacity(buffer) != 0 {
+                    if let Some(timer) = idle_timer {
+                        if let Ok(()) = channel.try_send(timer, ()) {
+                            idle_at = Some(written)
+                        }
+                    }
+                }
+                next_message = match channel.receive(receive) {
+                    Ok(take msg) => Some(take msg),
+                    Error(_) => None
+                }
+            }
+        }
+        list.clear(mut buffer)
+        let mut first: Option[Bytes] = None
+        let mut frames = 0u64
+        let mut group_bytes = 0u64
+        let mut last_frame = 0u64
+        let mut idle = false
+        let mut closing = false
+        let mut rotating: Option[(HostFile, HostFile)] = None
+        let mut answering = false
+        loop {
+            let selected = replace(mut next_message, None)
+            match take selected {
+                None => {
+                    closing = true;
+                    break
+                },
+                Some(Frame(take raw, number)) => {
+                    let length = list.len(raw)
+                    if frames != 0 && group_bytes + length > group_limit {
+                        deferred = Some(Frame(take raw, number))
+                        break
+                    }
+                    if frames == 0 {
+                        first = Some(take raw)
+                    } else {
+                        if let Some(take leader) = replace(mut first, None) {
+                            if list.capacity(buffer) == 0 {
+                                buffer = list.with_capacity(group_limit)
+                            }
+                            list.append(mut buffer, leader)
+                        }
+                        list.append(mut buffer, raw)
+                    }
+                    group_bytes += length
+                    last_frame = number
+                    frames += 1
+                    if frames >= int.widen(max_frames) || group_bytes >= group_limit {
+                        break
+                    }
+                },
+                Some(Rotate(take file, take rotated_end)) => {
+                    rotating = Some((take file, take rotated_end));
+                    break
+                },
+                Some(Barrier) => {
+                    answering = true;
+                    break
+                },
+                Some(IdleCheck) => {
+                    if frames == 0 && idle_at == Some(written) {
+                        buffer = list.new()
+                    }
+                    idle_at = None
+                }
+            }
+            match channel.try_receive(receive) {
+                Ok(take msg) => {
+                    next_message = Some(take msg)
+                },
+                Error(Empty) => {
+                    idle = true;
+                    break
+                },
+                Error(Closed) => {
+                    closing = true;
+                    break
+                }
+            }
+        }
+        if frames != 0 {
+            // A lone frame keeps its handoff allocation. A batch uses the
+            // worker's reserved buffer while the source frames are still charged.
+            let write = match take first {
+                Some(take raw) => host.write(mut segment_file, raw),
+                None => host.write(mut segment_file, buffer)
+            }
+            match write {
+                Ok(()) => {},
+                Error(e) => return Error(Io(e.error))
+            }
+        }
+        if answering {
+            let _ = channel.try_send(notices, Written)
+        }
+        if frames != 0 {
+            disk_io(host.sync(mut segment_file))?
+            end += group_bytes
+            written += group_bytes
+            if let Error(_) = channel.send(send, Journaled(last_frame, written)) {
+                return Ok(())
+            }
+            // After the ack, so a writer woken by this notice finds it.
+            let _ = channel.try_send(synced, ())
+            groups += 1
+        }
+        let rotate_now = match rotating {
+            Some(_) => true,
+            None => false
+        }
+        // An END that would repeat the d already named writes nothing.
+        if (idle || closing || rotate_now || groups == 64) && end != end_named {
+            journal_write_end(id, seq, end, mut end_handle, mut end_bytes, mut binding)?
+            end_named = end
+            groups = 0
+        }
+        if let Some((take new_file, take new_end)) = take rotating {
+            disk_io(host.close(take segment_file))?
+            disk_io(host.close(replace(mut end_handle, take new_end)))?
+            segment_file = take new_file
+            seq += 1
+            end = 72
+            end_named = 72
+        }
+        if closing {
+            disk_io(host.close(take segment_file))?
+            disk_io(host.close(take end_handle))?
+            return Ok(())
+        }
+    }
+}
+
+fn journal_worker(take input: JournalWorker) -> Result[(), Error] waits {
+    let allocation = journal_buffers(0)
+    let reserved = match take allocation {
+        Ok(take buffer) => take buffer,
+        Error(c) => {
+            let _ = channel.send(input.ready, Error(c));
+            return Ok(())
+        }
+    }
+    if let Error(_) = channel.send(input.ready, Ok(())) {
+        return Ok(())
+    }
+    let send = channel.sender(input.send)
+    let written = channel.sender(input.written)
+    let synced = channel.sender(input.synced)
+    let result = journal_loop(take input, take reserved)
+    if let Error(Io(e)) = result {
+        let _ = channel.try_send(written, WriteFailed(e))
+        let _ = channel.send(send, Broken(e))
+        let _ = channel.try_send(synced, ())
+    }
+    take result
+}

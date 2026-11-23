@@ -98,6 +98,7 @@ pub opaque type Db {
     journal: Option[Sender[JournalMsg]],
     pending: Option[Bytes],
     journal_task: Option[Task[Result[(), Error]]],
+    journal_idle_task: Option[Task[()]],
     // Stream name to the unreplied Admitted(p) this open committed (§1.8).
     admits: Map[Bytes, OpenAdmit]
 }
@@ -600,7 +601,7 @@ fn memory_at(c: Clock, id: StoreId, o: Options) -> Db {
 }
 
 fn empty_db(c: Clock, id: StoreId, o: Options) -> Db {
-    Db(store: id, fence: 0, disk: list.new(), clock: c, heads: list.new(), branch_names: map.new(), pins: list.new(), record_bytes: branch_record_bytes("main"), next_pin: 0, next_branch: 1, next_node: 0, next_table: 1, file_seq: 1, file_end: 72, frame_seq: 0, resident: 0, page_resident: 0, changes: 0, settled: 0, ceiling: o.resident_limit, acks: None, journaled: 0, inflight: 0, uncovered: 0, since_cut: 0, acked_bytes: 0, written: None, written_send: None, synced: None, checkpointed: 0, poison: None, journal: None, pending: None, journal_task: None, admits: map.new())
+    Db(store: id, fence: 0, disk: list.new(), clock: c, heads: list.new(), branch_names: map.new(), pins: list.new(), record_bytes: branch_record_bytes("main"), next_pin: 0, next_branch: 1, next_node: 0, next_table: 1, file_seq: 1, file_end: 72, frame_seq: 0, resident: 0, page_resident: 0, changes: 0, settled: 0, ceiling: o.resident_limit, acks: None, journaled: 0, inflight: 0, uncovered: 0, since_cut: 0, acked_bytes: 0, written: None, written_send: None, synced: None, checkpointed: 0, poison: None, journal: None, pending: None, journal_task: None, journal_idle_task: None, admits: map.new())
 }
 
 pub type Accounts {
@@ -2105,6 +2106,7 @@ pub fn close(take db: Db) -> Result[(), Error] waits {
             }
         }
     }
+    let _ = replace(mut owned.journal_idle_task, None)
     let _ = replace(mut owned.journal, None)
     let writer = replace(mut owned.journal_task, None)
     if let Some(_) = owned.poison {
@@ -12221,7 +12223,9 @@ type JournalChannels {
     written_send: Sender[WriteNotice],
     written_receive: Receiver[WriteNotice],
     synced_send: Sender[()],
-    synced_receive: Receiver[()]
+    synced_receive: Receiver[()],
+    idle_send: Sender[()],
+    idle_receive: Receiver[()]
 }
 
 fn journal_channels(group_count: u64) -> JournalChannels {
@@ -12232,7 +12236,8 @@ fn journal_channels(group_count: u64) -> JournalChannels {
     let (ready, waiting): (Sender[Result[(), Capacity]], Receiver[Result[(), Capacity]]) = channel.new(1)
     let (written_send, written_receive): (Sender[WriteNotice], Receiver[WriteNotice]) = channel.new(2)
     let (synced_send, synced_receive): (Sender[()], Receiver[()]) = channel.new(1)
-    JournalChannels(frames: take frames, queued: take queued, acks: take acks, received: take received, ready: take ready, waiting: take waiting, written_send: take written_send, written_receive: take written_receive, synced_send: take synced_send, synced_receive: take synced_receive)
+    let (idle_send, idle_receive): (Sender[()], Receiver[()]) = channel.new(1)
+    JournalChannels(frames: take frames, queued: take queued, acks: take acks, received: take received, ready: take ready, waiting: take waiting, written_send: take written_send, written_receive: take written_receive, synced_send: take synced_send, synced_receive: take synced_receive, idle_send: take idle_send, idle_receive: take idle_receive)
 }
 
 // S3 makes the disk opener public with its journal and final durability path.
@@ -12337,10 +12342,15 @@ fn open_started(tasks: Tasks, d: Dir, c: Clock, options: Options, take session: 
     let channels = disk_allocation(scoped fn() -> Result[JournalChannels, Error] {
         Ok(journal_channels(int.widen(options.group_commits)))
     })?
-    let JournalChannels(frames: take frames, queued: take queued, acks: take journal_acks, received: take journal_received, ready: take ready, waiting: take waiting, written_send: take written_send, written_receive: take written_receive, synced_send: take synced_send, synced_receive: take synced_receive) = take channels
+    let JournalChannels(frames: take frames, queued: take queued, acks: take journal_acks, received: take journal_received, ready: take ready, waiting: take waiting, written_send: take written_send, written_receive: take written_receive, synced_send: take synced_send, synced_receive: take synced_receive, idle_send: take idle_send, idle_receive: take idle_receive) = take channels
     let written_worker = channel.sender(written_send)
     let reserve: u64 = int.widen(options.group_bytes)
-    let input = JournalWorker(store: id, seq: seq, segment: take segment, end_file: take end_file, group_commits: options.group_commits, group_bytes: options.group_bytes, receive: take queued, send: take journal_acks, ready: take ready, written: take written_worker, synced: take synced_send)
+    let timer_input = JournalIdleTimer(clock: c, requests: take idle_receive, journal: channel.sender(frames))
+    let timer = match task.try_spawn(tasks, bytes 4096, take timer_input, journal_idle_timer) {
+        Ok(take running) => take running,
+        Error((problem, _)) => return Error(Full(Allocation(problem))),
+    }
+    let input = JournalWorker(store: id, seq: seq, segment: take segment, end_file: take end_file, group_commits: options.group_commits, group_bytes: options.group_bytes, receive: take queued, send: take journal_acks, ready: take ready, written: take written_worker, synced: take synced_send, idle: Some(take idle_send))
     let writer = match task.try_spawn(tasks, bytes reserve + 65536, take input, journal_worker) {
         Ok(take running) => take running,
         Error((problem, _)) => return Error(Full(Allocation(problem))),
@@ -12352,6 +12362,7 @@ fn open_started(tasks: Tasks, d: Dir, c: Clock, options: Options, take session: 
     db.journal = Some(take frames)
     db.acks = Some(take journal_received)
     db.journal_task = Some(take writer)
+    db.journal_idle_task = Some(take timer)
     Ok(take db)
 }
 
@@ -15524,269 +15535,6 @@ fn journal_test_bootstrap(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(
     }
 }
 
-type JournalMsg: send = Frame(Bytes, u64) | Rotate(HostFile, HostFile) | Barrier
-
-type WriteNotice: send = Written | WriteFailed(IoError)
-
-type JournalWorker: send {
-    store: StoreId,
-    seq: u64,
-    segment: HostFile,
-    end_file: HostFile,
-    group_commits: u32,
-    group_bytes: u32,
-    receive: Receiver[JournalMsg],
-    send: Sender[Ack],
-    ready: Sender[Result[(), Capacity]],
-    written: Sender[WriteNotice],
-    synced: Sender[()]
-}
-
-type JournalBuffers {
-    group: Bytes,
-    end_bytes: Bytes,
-    binding: Bytes
-}
-
-fn journal_set(mut raw: Bytes, at: u64, value: u64, width: u64) {
-    for i in 0u64 .. width {
-        raw[at + i] = int.truncate(value >> (i * 8))
-    }
-}
-
-fn journal_fixed_check(binding: Bytes, raw: Bytes, at: u64, length: u64) -> u64 {
-    let mut state = std.check.start()
-    std.check.add(mut state, binding, 0, 33)
-    std.check.add(mut state, raw, at, at + 8)
-    std.check.add(mut state, raw, at + 16, at + 16 + length)
-    std.check.finish(state)
-}
-
-fn journal_buffers(reserve: u64) -> Result[JournalBuffers, Capacity] {
-    let group: Bytes = list.with_capacity(reserve)
-    let mut end_bytes: Bytes = list.with_capacity(96)
-    list.fill(mut end_bytes, 96, 0u8)
-    let mut binding: Bytes = list.with_capacity(33)
-    list.fill(mut binding, 33, 0u8)
-    Ok(JournalBuffers(group: take group, end_bytes: take end_bytes, binding: take binding))
-}
-
-// END's bytes and checksum binding reuse storage admitted at spawn. The END
-// file is a fixed 96 bytes, rewritten in place through the handle opened when
-// its segment was created; a torn rewrite fails its checksum like a torn
-// truncate-and-write would, and only loses detection (§3.4 step 5).
-fn journal_write_end(id: StoreId, seq: u64, end: u64, mut end_file: HostFile, mut raw: Bytes, mut binding: Bytes) -> Result[(), Error] waits {
-    journal_set(mut binding, 0, id.hi, 8)
-    journal_set(mut binding, 8, id.lo, 8)
-    journal_set(mut binding, 16, 4, 1)
-    journal_set(mut binding, 17, seq, 8)
-    journal_set(mut binding, 25, 0, 8)
-    journal_set(mut raw, 0, 1, 2)
-    journal_set(mut raw, 2, 1, 2)
-    journal_set(mut raw, 4, 56, 4)
-    let magic = string.as_bytes("HIRSTORE")
-    for i in 0u64 .. 8 {
-        raw[16 + i] = magic[i]
-    }
-    journal_set(mut raw, 24, DISK_FORMAT, 4)
-    journal_set(mut raw, 28, 4, 1)
-    journal_set(mut raw, 32, id.hi, 8)
-    journal_set(mut raw, 40, id.lo, 8)
-    journal_set(mut raw, 56, seq, 8)
-    let header_check = journal_fixed_check(binding, raw, 0, 56)
-    journal_set(mut raw, 8, header_check, 8)
-    journal_set(mut raw, 72, 0x0012, 2)
-    journal_set(mut raw, 74, 1, 2)
-    journal_set(mut raw, 76, 8, 4)
-    journal_set(mut raw, 88, end, 8)
-    journal_set(mut binding, 25, 72, 8)
-    let end_check = journal_fixed_check(binding, raw, 72, 8)
-    journal_set(mut raw, 80, end_check, 8)
-    match host.write_at(mut end_file, 0, raw) {
-        Ok(()) => {},
-        Error(e) => return Error(Io(e.error))
-    }
-    disk_io(host.sync(mut end_file))
-}
-
-fn journal_loop(take input: JournalWorker, take scratch: JournalBuffers) -> Result[(), Error] waits {
-    let JournalWorker(store: id, seq: initial_seq, segment: take segment, end_file: take end_file, group_commits: max_frames, group_bytes: max_bytes, receive: take receive, send: take send, ready: _, written: take notices, synced: take synced) = take input
-    let mut segment_file = take segment
-    let mut end_handle = take end_file
-    let mut seq = initial_seq
-    let mut end = 72u64
-    // The d the END file holds: 72 from segment creation.
-    let mut end_named = 72u64
-    let mut written = 0u64
-    let mut groups = 0u64
-    let JournalBuffers(group: take reserved, end_bytes: take initial_end, binding: take initial_binding) = take scratch
-    let mut buffer = take reserved
-    let mut end_bytes = take initial_end
-    let mut binding = take initial_binding
-    let group_limit: u64 = int.widen(max_bytes)
-    let mut deferred: Option[JournalMsg] = None
-    loop {
-        let mut next_message = replace(mut deferred, None)
-        if let None = next_message {
-            if groups != 0 {
-                // A cap or Barrier can end a group without probing the queue.
-                match channel.try_receive(receive) {
-                    Ok(take msg) => {
-                        next_message = Some(take msg)
-                    },
-                    Error(Empty) => {
-                        if end != end_named {
-                            journal_write_end(id, seq, end, mut end_handle, mut end_bytes, mut binding)?
-                            end_named = end
-                        }
-                        groups = 0
-                    },
-                    Error(Closed) => {}
-                }
-            }
-            if let None = next_message {
-                next_message = match channel.receive(receive) {
-                    Ok(take msg) => Some(take msg),
-                    Error(_) => None
-                }
-            }
-        }
-        list.clear(mut buffer)
-        let mut first: Option[Bytes] = None
-        let mut frames = 0u64
-        let mut group_bytes = 0u64
-        let mut last_frame = 0u64
-        let mut idle = false
-        let mut closing = false
-        let mut rotating: Option[(HostFile, HostFile)] = None
-        let mut answering = false
-        loop {
-            let selected = replace(mut next_message, None)
-            match take selected {
-                None => {
-                    closing = true;
-                    break
-                },
-                Some(Frame(take raw, number)) => {
-                    let length = list.len(raw)
-                    if frames != 0 && group_bytes + length > group_limit {
-                        deferred = Some(Frame(take raw, number))
-                        break
-                    }
-                    if frames == 0 {
-                        first = Some(take raw)
-                    } else {
-                        if let Some(take leader) = replace(mut first, None) {
-                            list.append(mut buffer, leader)
-                        }
-                        list.append(mut buffer, raw)
-                    }
-                    group_bytes += length
-                    last_frame = number
-                    frames += 1
-                    if frames >= int.widen(max_frames) || group_bytes >= group_limit {
-                        break
-                    }
-                    match channel.try_receive(receive) {
-                        Ok(take msg) => {
-                            next_message = Some(take msg)
-                        },
-                        Error(Empty) => {
-                            idle = true;
-                            break
-                        },
-                        Error(Closed) => {
-                            closing = true;
-                            break
-                        }
-                    }
-                },
-                Some(Rotate(take file, take rotated_end)) => {
-                    rotating = Some((take file, take rotated_end));
-                    break
-                },
-                Some(Barrier) => {
-                    answering = true;
-                    break
-                }
-            }
-        }
-        if frames != 0 {
-            // A lone frame keeps its handoff allocation. A batch uses the
-            // worker's reserved buffer while the source frames are still charged.
-            let write = match take first {
-                Some(take raw) => host.write(mut segment_file, raw),
-                None => host.write(mut segment_file, buffer)
-            }
-            match write {
-                Ok(()) => {},
-                Error(e) => return Error(Io(e.error))
-            }
-        }
-        if answering {
-            let _ = channel.try_send(notices, Written)
-        }
-        if frames != 0 {
-            disk_io(host.sync(mut segment_file))?
-            end += group_bytes
-            written += group_bytes
-            if let Error(_) = channel.send(send, Journaled(last_frame, written)) {
-                return Ok(())
-            }
-            // After the ack, so a writer woken by this notice finds it.
-            let _ = channel.try_send(synced, ())
-            groups += 1
-        }
-        let rotate_now = match rotating {
-            Some(_) => true,
-            None => false
-        }
-        // An END that would repeat the d already named writes nothing.
-        if (idle || closing || rotate_now || groups == 64) && end != end_named {
-            journal_write_end(id, seq, end, mut end_handle, mut end_bytes, mut binding)?
-            end_named = end
-            groups = 0
-        }
-        if let Some((take new_file, take new_end)) = take rotating {
-            disk_io(host.close(take segment_file))?
-            disk_io(host.close(replace(mut end_handle, take new_end)))?
-            segment_file = take new_file
-            seq += 1
-            end = 72
-            end_named = 72
-        }
-        if closing {
-            disk_io(host.close(take segment_file))?
-            disk_io(host.close(take end_handle))?
-            return Ok(())
-        }
-    }
-}
-
-fn journal_worker(take input: JournalWorker) -> Result[(), Error] waits {
-    let allocation = journal_buffers(int.widen(input.group_bytes))
-    let reserved = match take allocation {
-        Ok(take buffer) => take buffer,
-        Error(c) => {
-            let _ = channel.send(input.ready, Error(c));
-            return Ok(())
-        }
-    }
-    if let Error(_) = channel.send(input.ready, Ok(())) {
-        return Ok(())
-    }
-    let send = channel.sender(input.send)
-    let written = channel.sender(input.written)
-    let synced = channel.sender(input.synced)
-    let result = journal_loop(take input, take reserved)
-    if let Error(Io(e)) = result {
-        let _ = channel.try_send(written, WriteFailed(e))
-        let _ = channel.send(send, Broken(e))
-        let _ = channel.try_send(synced, ())
-    }
-    take result
-}
-
 fn journal_worker_case(d: Dir, tasks: Tasks, mode: u64) -> bool waits {
     let id = StoreId(hi: 1, lo: 2)
     let (take segment, take end_file) = result.unwrap(disk_new_segment(d, id, 7, 0))
@@ -15801,7 +15549,8 @@ fn journal_worker_case(d: Dir, tasks: Tasks, mode: u64) -> bool waits {
         let (take rotated, take rotated_end) = result.unwrap(disk_new_segment(d, id, 8, 114))
         result.unwrap(channel.send(send, Rotate(take rotated, take rotated_end)))
     }
-    for head in 2u64 .. 4 {
+    let startup_frames = if mode == 4 { 2u64 } else { 3u64 }
+    for head in 2u64 .. startup_frames + 1 {
         let seq = if mode == 3 {
             8u64
         } else {
@@ -15817,6 +15566,8 @@ fn journal_worker_case(d: Dir, tasks: Tasks, mode: u64) -> bool waits {
     }
     let max_frames = if mode == 1 {
         1u32
+    } else if mode == 4 {
+        2u32
     } else {
         8u32
     }
@@ -15825,7 +15576,9 @@ fn journal_worker_case(d: Dir, tasks: Tasks, mode: u64) -> bool waits {
     } else {
         100u32
     }
-    let input = JournalWorker(store: id, seq: 7, segment: take segment, end_file: take end_file, group_commits: max_frames, group_bytes: max_bytes, receive: take receive, send: take acks, ready: take ready, written: take written_send, synced: take synced_send)
+    let (idle_send, idle_receive): (Sender[()], Receiver[()]) = channel.new(1)
+    let idle = if mode == 4 { Some(take idle_send) } else { None }
+    let input = JournalWorker(store: id, seq: 7, segment: take segment, end_file: take end_file, group_commits: max_frames, group_bytes: max_bytes, receive: take receive, send: take acks, ready: take ready, written: take written_send, synced: take synced_send, idle: take idle)
     let reserve: u64 = int.widen(max_bytes)
     let worker = if mode == 0 || mode == 2 {
         task.spawn(tasks, bytes reserve + 65536, take input, journal_worker_zero)
@@ -15833,11 +15586,38 @@ fn journal_worker_case(d: Dir, tasks: Tasks, mode: u64) -> bool waits {
         task.spawn(tasks, bytes reserve + 65536, take input, journal_worker)
     }
     result.unwrap(result.unwrap(channel.receive(waiting)))
+    let mut previously_acked = 0u64
+    if mode == 4 {
+        result.unwrap(channel.receive(idle_receive))
+        match result.unwrap(channel.receive(received)) {
+            Journaled(2, 84) => {},
+            _ => return false
+        }
+        for head in 3u64 .. 5 {
+            let raw = journal_empty_commit(DiskContext(store: id, role: 2, seq: 7), 72 + (head - 1) * 42, head)
+            result.unwrap(channel.send(send, Frame(take raw, head)))
+        }
+        match result.unwrap(channel.receive(received)) {
+            Journaled(4, 168) => {},
+            _ => return false
+        }
+        // This check covers the second group and must leave the timer armed.
+        result.unwrap(channel.send(send, IdleCheck))
+        result.unwrap(channel.receive(idle_receive))
+        // The next check sees no intervening writes. The queued batch must
+        // still sync and recover after the worker releases its buffer.
+        result.unwrap(channel.send(send, IdleCheck))
+        for head in 5u64 .. 7 {
+            let raw = journal_empty_commit(DiskContext(store: id, role: 2, seq: 7), 72 + (head - 1) * 42, head)
+            result.unwrap(channel.send(send, Frame(take raw, head)))
+        }
+        previously_acked = 4
+    }
     let _ = take send
     result.unwrap(result.unwrap(task.join(take worker)))
     let mut group_count = 0u64
-    let mut final_number = 0u64
-    let mut final_bytes = 0u64
+    let mut final_number = previously_acked
+    let mut final_bytes = previously_acked * 42
     while let Ok(ack) = channel.try_receive(received) {
         match ack {
             Journaled(n, bytes_out) => {
@@ -15859,17 +15639,20 @@ fn journal_worker_case(d: Dir, tasks: Tasks, mode: u64) -> bool waits {
     }
     let expected_groups = if mode == 1 || mode == 2 {
         3u64
+    } else if mode == 4 {
+        1u64
     } else {
         2u64
     }
-    if group_count != expected_groups || final_number != 3 || final_bytes != 126 {
+    let expected_frames = if mode == 4 { 6u64 } else { 3u64 }
+    if group_count != expected_groups || final_number != expected_frames || final_bytes != expected_frames * 42 {
         return false
     }
     let end = result.unwrap(disk_end(d, id, 7))
     if end != Some(if mode == 3 {
         114u64
     } else {
-        198u64
+        72 + expected_frames * 42
     }) {
         return false
     }
@@ -15877,14 +15660,14 @@ fn journal_worker_case(d: Dir, tasks: Tasks, mode: u64) -> bool waits {
     if mode == 3 {
         all.seq == 8 && all.end == 156 && all.replay.state.tips[0].head == 3
     } else {
-        all.seq == 7 && all.end == 198 && all.replay.state.tips[0].head == 3
+        all.seq == 7 && all.end == 72 + expected_frames * 42 && all.replay.state.tips[0].head == expected_frames
     }
 }
 
 // L3/L10/L21: close drains every queued frame. Byte and frame bounds give
 // different groupings but the same commit prefix; Rotate preserves that order.
 pub fn journal_law_worker(d: Dir, tasks: Tasks) -> bool waits {
-    for mode in 0u64 .. 4 {
+    for mode in 0u64 .. 5 {
         if !journal_worker_case(disk_test_directory(d), tasks, mode) {
             return false
         }

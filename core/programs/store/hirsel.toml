@@ -8,6 +8,7 @@ std = { major = 1 }
 
 [sources]
 "store.hirsel" = "store"
+"store-journal-worker.hirsel" = "store"
 "store-pages.hirsel" = "store"
 "store-manifest.hirsel" = "store"
 "store-locations.hirsel" = "store"

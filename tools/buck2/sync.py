@@ -809,6 +809,7 @@ def first_party(meta: dict) -> str:
                             prof_runtimes="//:hirsel-core-rt-prof-archives",
                             prof_recording_runtimes="//:hirsel-core-rt-prof-record-archives",
                             store_package="//:store-package",
+                            store_sources=Raw('glob(["core/programs/store/*.hirsel"]) + ["core/programs/store/hirsel.toml"]'),
                             visibility=["PUBLIC"]))
     out.append("\n" + call("hirsel_script_test", name="gate-distribution-notices", script="tools/tests/distribution_notices.py",
                             args=["--present", *adapted_citations_present()],

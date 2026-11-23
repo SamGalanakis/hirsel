@@ -5,10 +5,15 @@
 // argv: the control socket's root label, its path beneath that root, max_places, idle_ms.
 // The host opens its catalog, connects, sends `Hello`, and then runs one loop: a reader
 // task posts each launcher event into the driver's queue, beside the driver's due-time and
-// backoff alarms, and every request a step decides goes out in order. A lost session ends
-// the host with status 75; the launcher starts it again, and the new session's inventory
-// reconciles (RUNNER-SPEC §14.5).
+// backoff alarms, an accept task posts each operator connection on operator.sock (beside
+// the control socket, the listener the launcher passed), and a reader per connection posts
+// its frames. Every request a step decides goes out in order, and then every operator
+// answer it decided (launch.md "The operator socket"). A lost session ends the host with
+// status 75; the launcher starts it again, and the new session's inventory reconciles
+// (RUNNER-SPEC §14.5). The host never changes its working directory: its grants name the
+// state directory as /proc/self/cwd.
 const MAX_FRAME: u64 = 16777216u64
+const OPERATOR_PATH: String = "operator.sock"
 
 type Reader: send {
     input: ReadHalf,
@@ -26,7 +31,8 @@ fn read_exact(mut input: ReadHalf, mut out: Bytes, size: u64) -> bool waits {
     true
 }
 
-fn read_event(mut input: ReadHalf) -> Option[launcher.Event] waits {
+// One length-prefixed frame of at most MAX_FRAME bytes, or None at the stream's end.
+fn read_frame(mut input: ReadHalf) -> Option[Bytes] waits {
     let mut header: Bytes = list.with_capacity(4u64)
     if !read_exact(mut input, mut header, 4u64) {
         return None
@@ -41,6 +47,13 @@ fn read_event(mut input: ReadHalf) -> Option[launcher.Event] waits {
     }
     let mut body: Bytes = list.with_capacity(size)
     if !read_exact(mut input, mut body, size) {
+        return None
+    }
+    Some(body)
+}
+
+fn read_event(mut input: ReadHalf) -> Option[launcher.Event] waits {
+    let Some(body) = read_frame(mut input) else {
         return None
     }
     let codec: std.codec.Codec[launcher.Event] = std.codec.of()
@@ -63,12 +76,90 @@ fn read_events(take seed: Reader) -> () waits {
     let _ = channel.send(to, Lost)
 }
 
+type Accepter: send {
+    listener: UnixListener,
+    to: Sender[platform.Input]
+}
+
+// Posts each accepted operator connection; the listener admits only the operator's UID.
+fn accept_operators(take seed: Accepter) -> () waits {
+    let Accepter(listener: take listener, to: take to) = take seed
+    let mut l = take listener
+    while let Ok(take s) = host.accept_unix(mut l, Never) {
+        if let Error(_) = channel.send(to, Joined(take s)) {
+            return
+        }
+    }
+}
+
+type Operator: send {
+    conn: u64,
+    input: ReadHalf,
+    to: Sender[platform.Input]
+}
+
+// Posts each frame of connection `conn` in order, then its end.
+fn read_operator(take seed: Operator) -> () waits {
+    let Operator(conn: conn, input: take input, to: take to) = take seed
+    let mut r = take input
+    while let Some(take body) = read_frame(mut r) {
+        if let Error(_) = channel.send(to, Asked(conn, take body)) {
+            return
+        }
+    }
+    let _ = channel.send(to, HungUp(conn))
+}
+
+type Writer: send {
+    conn: u64,
+    output: WriteHalf,
+    frames: Receiver[Bytes],
+    to: Sender[platform.Input]
+}
+
+// Writes connection `conn`'s answers in order until the loop drops its sender or a write
+// fails, then posts `Flushed(conn)`; the write half closes as the task ends.
+fn write_operator(take seed: Writer) -> () waits {
+    let Writer(conn: conn, output: take output, frames: take frames, to: take to) = take seed
+    let mut w = take output
+    while let Ok(take body) = channel.receive(frames) {
+        if !send_frame(mut w, body) {
+            break
+        }
+    }
+    let _ = channel.send(to, Flushed(conn))
+}
+
+// Answers a connection's writer may hold before the connection counts as stalled.
+const QUEUED_ANSWERS: u64 = 64u64
+
+// A connection reader's allowance: one largest frame and its header, with room to spare.
+const READER_BYTES: u64 = 17825792u64
+
+// One live operator connection: its reader while it reads, the sender to its writer while
+// answers may follow, and its writer.
+type Conn {
+    reading: Option[Task[()]],
+    frames: Option[Sender[Bytes]],
+    writing: Task[()]
+}
+
+fn stop_reading(mut c: Conn) waits {
+    if let Some(take r) = replace(mut c.reading, None) {
+        let _ = task.cancel_join(take r)
+    }
+}
+
 fn send_request(mut output: WriteHalf, r: launcher.Request) -> bool waits {
     let codec: std.codec.Codec[launcher.Request] = std.codec.of()
     let mut body: Bytes = list.new()
     if let Error(_) = std.codec.encode(codec, r, mut body) {
         return false
     }
+    send_frame(mut output, body)
+}
+
+fn send_frame(mut output: WriteHalf, body: Bytes) -> bool waits {
     if list.len(body) > MAX_FRAME {
         return false
     }
@@ -84,6 +175,39 @@ fn send_request(mut output: WriteHalf, r: launcher.Request) -> bool waits {
         }
     }
     true
+}
+
+// Queues each answer the host decided on its connection's writer, never waiting on it. A
+// connection's last answer ends its sending side, and a connection whose writer is full or
+// gone is dropped and detached: one stalled operator never stalls the host.
+fn answer(mut h: platform.Host, mut conns: Map[u64, Conn]) -> List[launcher.Request] waits {
+    let mut out: List[launcher.Request] = list.new()
+    for sent in platform.outgoing(mut h) {
+        let Some(take c) = map.remove(mut conns, sent.conn) else {
+            continue
+        }
+        let mut live = take c
+        let mut queued = false
+        if let Some(take body) = operator.encode_answer(clone(sent.answer)) {
+            if let Some(f) = live.frames {
+                queued = match channel.try_send(f, take body) {
+                    Ok(()) => true,
+                    Error(_) => false,
+                }
+            }
+        }
+        if !queued || sent.close {
+            live.frames = None
+            stop_reading(mut live)
+        }
+        if !queued {
+            for take r in platform.detach(mut h, sent.conn) {
+                list.push(mut out, take r)
+            }
+        }
+        map.insert(mut conns, sent.conn, take live)
+    }
+    out
 }
 
 fn number(argv: Args, i: u64) -> Result[u64, Exit] {
@@ -116,10 +240,18 @@ pub fn main(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, argv: Args) -> Re
         Ok(take s) => take s,
         Error(_) => return Error(Exit(status: 75u8))
     }
+    let listener = match host.listen_unix(n, root, OPERATOR_PATH, 16u16) {
+        Ok(take l) => take l,
+        Error(_) => return Error(Exit(status: 74u8))
+    }
     let (take input, take output) = net.split(take socket)
     let mut w = take output
     let (to, from): (Sender[platform.Input], Receiver[platform.Input]) = channel.new(64u64)
     let reading = task.spawn(tasks, bytes 33554432u64, Reader(input: take input, to: channel.sender(to)), read_events)
+    let accepting = task.spawn(tasks, bytes 1048576u64, Accepter(listener: take listener, to: channel.sender(to)), accept_operators)
+    let operators = channel.sender(to)
+    let mut conns: Map[u64, Conn] = map.new()
+    let mut next_conn = 1u64
     let mut h = take h0
     let mut driving = platform.driver(tasks, c, take to)
     let mut sent = true
@@ -130,16 +262,57 @@ pub fn main(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, argv: Args) -> Re
     while sent {
         let next = match channel.receive(from) {
             Ok(Lost) => break,
+            Ok(Joined(take s)) => {
+                let conn = next_conn
+                next_conn += 1u64
+                let (take rd, take wr) = net.split(take s)
+                let (frames, queue): (Sender[Bytes], Receiver[Bytes]) = channel.new(QUEUED_ANSWERS)
+                // A host without room for one more connection closes it; it never traps.
+                let Ok(take reader) = task.try_spawn(tasks, bytes READER_BYTES, Operator(conn: conn, input: take rd, to: channel.sender(operators)), read_operator) else {
+                    continue
+                }
+                let Ok(take writer) = task.try_spawn(tasks, bytes 1048576u64, Writer(conn: conn, output: take wr, frames: take queue, to: channel.sender(operators)), write_operator) else {
+                    let _ = task.cancel_join(take reader)
+                    continue
+                }
+                map.insert(mut conns, conn, Conn(reading: Some(take reader), frames: Some(take frames), writing: take writer))
+                continue
+            },
             Ok(take i) => take i,
             Error(_) => break,
+        }
+        match next {
+            // The client closed: its writer drains what is queued and then ends.
+            HungUp(conn) => {
+                let _ = map.update(mut conns, conn, scoped fn(mut open: Conn) {
+                    open.frames = None
+                })
+            },
+            Flushed(conn) => if let Some(take gone) = map.remove(mut conns, conn) {
+                let mut ending = take gone
+                stop_reading(mut ending)
+                let Conn(reading: _, frames: _, writing: take done) = take ending
+                let _ = task.join(take done)
+            },
+            _ => (),
         }
         let now = platform.Now(wall_ms: host.wall_ms(c), mono_ns: host.mono_ns(c))
         let reqs = platform.step(mut h, mut driving, take next, now)
         for req in reqs {
             sent = sent && send_request(mut w, req)
         }
+        for req in answer(mut h, mut conns) {
+            sent = sent && send_request(mut w, req)
+        }
     }
     platform.stop(take driving)
+    let _ = task.cancel_join(take accepting)
+    for take (_, take live) in take conns {
+        let mut ending = take live
+        stop_reading(mut ending)
+        let Conn(reading: _, frames: _, writing: take writing) = take ending
+        let _ = task.cancel_join(take writing)
+    }
     let _ = task.cancel_join(take reading)
     let _ = platform.close(take h)
     Error(Exit(status: 75u8))

@@ -41,6 +41,7 @@ pub static hirsel_core_os_socket_activation: SocketActivation = SocketActivation
     rules: RulesStorage::from_views,
     unix_probe: hirsel_core_net::unix::probe,
     unix_roots: crate::os_unix::configure_roots,
+    operator: crate::os_unix::receive_operator,
 };
 
 pub(crate) const LISTEN_FD: i32 = 3;

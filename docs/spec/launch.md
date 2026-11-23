@@ -573,6 +573,48 @@ reconciles it.
 refused with the quota it exceeds. The host never evicts a live group to admit another
 (RUNNER-SPEC §13.4, "No eviction").
 
+### Starting the host
+
+`hirsel launcher --state S --control S/launcher.sock --operator-listen S/operator.sock
+--platform-host PREFIX/libexec/hirsel/platform_main [--max-places N] [--idle-ms M]` starts
+the platform host as its first and only bootstrap child. N and M are positive decimals,
+1 and 30000 by default. The launcher binds both sockets mode 0600, creates `S/catalog`, and
+starts the installed executable with working directory S and the program-visible argv
+`platform_main ctl launcher.sock N M`. The host's grants are compiled into that executable:
+its `Dir` is `/proc/self/cwd/catalog`, and its Net root `ctl` is `/proc/self/cwd` with
+`UnixConnect ctl launcher.sock` and `UnixListen ctl operator.sock`, beside Clock, Random and
+Tasks. Nothing in the host changes its working directory. A missing executable is an
+incomplete installation, and the launcher ends with status 74.
+
+**The operator listener.** The launcher passes the operator listener as descriptor 3 and
+names it in `HIRSEL_OPERATOR_LISTEN=PPID:3:UID`: the launcher's PID, the descriptor and the
+operator's UID (the launcher's effective UID). The host's runtime takes it at startup only
+when PPID is its parent and the descriptor is a listening `AF_UNIX` stream socket, marks it
+close-on-exec and removes the variable. The host's first `listen_unix` adopts it, and only
+when the grant's root and path name the very socket it is bound at (same inode); any other
+first listen is Denied. Accept on the adopted listener reads the peer's `SO_PEERCRED` and
+closes a connection from any other UID before the program sees it. No other listener is
+affected, and a tenant never receives descriptor 3 or the variable.
+
+**The control peer.** While the launcher runs a bootstrap host, a connection to launcher.sock
+is accepted as the session only when its `SO_PEERCRED` PID is the live host's; any other is
+closed before it can replace the session or end its fence.
+
+**Restart.** The launcher watches the host's pidfd in its one epoll set. When the host ends
+with 75, by a signal or with any status other than 64 and 74, the launcher reaps it and
+starts it again with the same argv: at once the first time, then after 1, 2, 4 ... s up to
+5 min. A run of 5 min or more resets the delay to immediate. Groups, listeners, retained
+cutover replies and cgroups stay live across the restart, and the new host's `Hello`
+reconciles them. A host that ends 64 (usage) or 74 (catalog or installation) is not started
+again: the launcher ends with that status.
+
+**Operator loop.** Beside the launcher reader and both alarms, an accept task posts each
+operator connection into the host's one queue, a reader task per connection posts its
+frames, and a writer task per connection sends its answers from a bounded queue. A
+connection whose queue is full or whose write failed is dropped and detached, so no
+operator stalls the loop. A `Begin` before the session's inventory is reconciled is answered
+`Error(Busy)`.
+
 ### The operator socket
 
 The operator talks to the platform host over `STATE/operator.sock`, a filesystem Unix

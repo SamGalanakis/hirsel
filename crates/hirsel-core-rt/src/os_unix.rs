@@ -68,6 +68,170 @@ pub(crate) unsafe fn configure_roots(
     Ok(())
 }
 
+/// The environment naming the launcher's operator listener: `PPID:3:UID`.
+pub(crate) const OPERATOR_ENV: &str = "HIRSEL_OPERATOR_LISTEN";
+const OPERATOR_FD: i32 = 3;
+
+/// Take custody of the operator listener the launcher passed at descriptor 3, with the
+/// one peer UID its connections may have (docs/spec/launch.md "Starting the host").
+/// Metadata left by a launcher that is not this process's parent is not this process's.
+/// # Safety
+/// Call during startup, before any other thread can access the environment, and before
+/// any open can reuse descriptor 3.
+pub(crate) unsafe fn receive_operator() -> io::Result<Option<(OwnedFd, u32)>> {
+    let Some(value) = std::env::var_os(OPERATOR_ENV) else {
+        return Ok(None);
+    };
+    let invalid = || io::Error::from_raw_os_error(libc::EINVAL);
+    let fields: Vec<u32> = value
+        .to_str()
+        .ok_or_else(invalid)?
+        .split(':')
+        .map(|f| f.parse().map_err(|_| invalid()))
+        .collect::<io::Result<_>>()?;
+    let [parent, fd, uid] = fields[..] else {
+        return Err(invalid());
+    };
+    // SAFETY: the environment is read before any other thread starts.
+    unsafe { std::env::remove_var(OPERATOR_ENV) };
+    // SAFETY: getppid has no failure.
+    if parent != unsafe { libc::getppid() } as u32 {
+        return Ok(None);
+    }
+    if fd != OPERATOR_FD as u32 || std::env::var_os("LISTEN_PID").is_some() {
+        return Err(invalid());
+    }
+    let option = |name| {
+        let mut value = 0i32;
+        let mut len = size_of::<i32>() as libc::socklen_t;
+        // SAFETY: value and len are live and sized for an int option.
+        let rc = unsafe {
+            libc::getsockopt(
+                OPERATOR_FD,
+                libc::SOL_SOCKET,
+                name,
+                (&raw mut value).cast(),
+                &mut len,
+            )
+        };
+        if rc < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(value)
+        }
+    };
+    if option(libc::SO_DOMAIN)? != libc::AF_UNIX
+        || option(libc::SO_TYPE)? != libc::SOCK_STREAM
+        || option(libc::SO_ACCEPTCONN)? != 1
+    {
+        return Err(invalid());
+    }
+    // SAFETY: descriptor 3 is the parent's listener, checked above; ownership moves here
+    // and the descriptor stops passing through any later exec.
+    unsafe {
+        retry(|| libc::fcntl(OPERATOR_FD, libc::F_SETFD, libc::FD_CLOEXEC) as isize)
+            .map_err(io::Error::from_raw_os_error)?;
+        Ok(Some((OwnedFd::from_raw_fd(OPERATOR_FD), uid)))
+    }
+}
+
+/// Whether `listener` is bound at the socket `root`/`path` names: the same inode.
+fn bound_at(listener: &OwnedFd, root: BorrowedFd<'_>, path: &str) -> bool {
+    use std::os::unix::{ffi::OsStrExt, fs::MetadataExt};
+    // SAFETY: integer-only address storage, sized by len.
+    let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    let mut len = size_of::<libc::sockaddr_un>() as libc::socklen_t;
+    if unsafe { libc::getsockname(listener.as_raw_fd(), (&raw mut addr).cast(), &mut len) } < 0 {
+        return false;
+    }
+    let bytes: Vec<u8> = addr.sun_path
+        [..(len as usize).saturating_sub(offset_of!(libc::sockaddr_un, sun_path))]
+        .iter()
+        .map(|&c| c as u8)
+        .take_while(|&b| b != 0)
+        .collect();
+    if bytes.first() != Some(&b'/') {
+        return false;
+    }
+    let Ok(bound) = std::fs::symlink_metadata(std::ffi::OsStr::from_bytes(&bytes)) else {
+        return false;
+    };
+    let Ok(target) = pinned_socket(root, path) else {
+        return false;
+    };
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: a live O_PATH descriptor and its result slot.
+    if unsafe { libc::fstat(target.as_raw_fd(), stat.as_mut_ptr()) } < 0 {
+        return false;
+    }
+    let stat = unsafe { stat.assume_init() };
+    (bound.dev(), bound.ino()) == (stat.st_dev, stat.st_ino)
+}
+
+/// Adopt the launcher's operator listener for a UNIX_LISTEN that names its socket.
+fn adopt_operator(
+    os: &OsProvider,
+    n: &UnixRequest,
+    sockets: &mut Sockets,
+    listener: OwnedFd,
+    uid: u32,
+) -> Outcome {
+    let Some(root) = os.unix_roots.get(n.root) else {
+        return DENIED;
+    };
+    if !bound_at(&listener, root.as_fd(), n.path) {
+        return DENIED;
+    }
+    let flags = unsafe { libc::fcntl(listener.as_raw_fd(), libc::F_GETFL) };
+    if flags < 0
+        || unsafe {
+            libc::fcntl(
+                listener.as_raw_fd(),
+                libc::F_SETFL,
+                flags | libc::O_NONBLOCK,
+            )
+        } < 0
+    {
+        return error(host(io::Error::last_os_error()));
+    }
+    match unsafe { adopt_socket(sockets, listener) } {
+        Ok(key) => {
+            *os.operator.lock().unwrap() = Some((key, uid));
+            success(key)
+        }
+        Err(code) => error(host(code)),
+    }
+}
+
+/// The one peer UID listener `key` admits, when it is the adopted operator listener.
+pub(crate) fn admitted(os: &OsProvider, key: u64) -> Option<u32> {
+    match *os.operator.lock().unwrap() {
+        Some((listener, uid)) if listener == key => Some(uid),
+        _ => None,
+    }
+}
+
+/// The UID of the process at the other end of a connected stream.
+fn peer_uid(fd: BorrowedFd<'_>) -> Option<u32> {
+    let mut cred = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut len = size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: cred and len are live, sized for SO_PEERCRED.
+    let rc = unsafe {
+        libc::getsockopt(
+            fd.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&raw mut cred).cast(),
+            &mut len,
+        )
+    };
+    (rc == 0).then_some(cred.uid)
+}
+
 fn host(code: io::Error) -> i32 {
     code.raw_os_error().unwrap_or(libc::EIO)
 }
@@ -230,17 +394,24 @@ fn connect(fd: i32, target: &OwnedFd) -> Result<isize> {
     retry(|| unsafe { libc::connect(fd, (&addr as *const libc::sockaddr_un).cast(), len) as isize })
 }
 
-fn accept(sockets: &mut Sockets, fd: i32) -> Result<Outcome> {
-    // SAFETY: no peer address is requested. Success returns a fresh descriptor.
-    let accepted = retry(|| unsafe {
-        libc::accept4(
-            fd,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
-        ) as isize
-    })?;
-    let accepted = unsafe { OwnedFd::from_raw_fd(accepted as i32) };
+/// Accept one connection; on a listener that admits only `uid`, a connection from any
+/// other UID is closed and the next one tried.
+pub(crate) fn accept(sockets: &mut Sockets, fd: i32, uid: Option<u32>) -> Result<Outcome> {
+    let accepted = loop {
+        // SAFETY: no peer address is requested. Success returns a fresh descriptor.
+        let accepted = retry(|| unsafe {
+            libc::accept4(
+                fd,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+            ) as isize
+        })?;
+        let accepted = unsafe { OwnedFd::from_raw_fd(accepted as i32) };
+        if uid.is_none_or(|uid| peer_uid(accepted.as_fd()) == Some(uid)) {
+            break accepted;
+        }
+    };
     unsafe { adopt_socket(sockets, accepted) }
         .map(success)
         .map_err(host)
@@ -346,6 +517,11 @@ pub(crate) unsafe fn step(os: &OsProvider, request: &mut Request, token: u64, fi
     let sockets = unsafe { &mut *n.sockets };
     let op = request.operation;
     if first {
+        if op == UNIX_LISTEN
+            && let Some((listener, uid)) = os.inherited_unix.lock().unwrap().take()
+        {
+            return done(adopt_operator(os, n, sockets, listener, uid));
+        }
         if matches!(op, UNIX_LISTEN | DATAGRAM_BIND) {
             return done(bound(os, n, sockets, op == UNIX_LISTEN, |fd, backlog| {
                 retry(|| unsafe { libc::listen(fd, backlog) as isize }).map(|_| ())
@@ -401,7 +577,7 @@ pub(crate) unsafe fn step(os: &OsProvider, request: &mut Request, token: u64, fi
                 Outcome::default()
             }
         }),
-        UNIX_ACCEPT => accept(sockets, fd),
+        UNIX_ACCEPT => accept(sockets, fd, admitted(os, request.handle)),
         DATAGRAM_SEND | DATAGRAM_SEND_TO => send(fd, &request.buffer, n.target.as_ref()),
         DATAGRAM_RECV => recv(fd, &mut request.buffer),
         _ => unreachable!(),

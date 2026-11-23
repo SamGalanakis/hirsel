@@ -500,6 +500,10 @@ def hirsel_script_test(name, script, data, args = [], bin_exes = {}, front_obser
 
 PRODUCT_MEMORY_LIMIT = "2G"
 
+# The platform host's root limit: its catalog store, the launcher session and each operator
+# connection's reader and writer.
+PLATFORM_HOST_LIMIT = 1073741824
+
 def _core_image_impl(ctx):
     sources = ctx.actions.symlinked_dir("sources", {f.short_path: f for f in ctx.attrs.srcs})
     image = ctx.actions.declare_output("core-image", dir = True)
@@ -563,7 +567,10 @@ def _toolchain_bundle_impl(ctx):
     # compiler as `hirsel` with RPATH $ORIGIN/lib, libLLVM and the libraries it
     # loads, ld.lld and the link kit, the runtime archive for each target, and the core and std
     # images, recorded in hirsel-core-toolchain.json, and the Store archive. The compiler copies
-    # itself in; a request from the bundle loads nothing outside it.
+    # itself in; a request from the bundle loads nothing outside it. The bundled compiler then
+    # builds the platform host as libexec/hirsel/platform_main (docs/spec/launch.md "Starting
+    # the host"): its grants name the state directory as /proc/self/cwd, the directory the
+    # launcher starts it in.
     bundle = ctx.actions.declare_output("hirsel-toolchain", dir = True)
     scratch = ctx.actions.declare_output("scratch", dir = True)
     runtimes = ctx.attrs.runtimes[DefaultInfo].sub_targets
@@ -577,7 +584,15 @@ def _toolchain_bundle_impl(ctx):
         '"$1" std-product --install "$root" --runtime "$4" --recording-runtime "$6" --prof-runtime "$9" --prof-recording-runtime "${11}" --target x86_64-unknown-linux-gnu --link-kit "$8" > /dev/null',
         '"$1" std-product --install "$root" --runtime "$5" --recording-runtime "$7" --prof-runtime "${10}" --prof-recording-runtime "${12}" --target aarch64-unknown-linux-gnu > /dev/null',
         'cp "${13}" "$root/core-packages/store-1.hpkg"',
+        'mkdir -p "$TMPDIR/store" "$root/libexec/hirsel"; cp "${14}"/* "$TMPDIR/store/"',
+        '"$root/hirsel" build "$TMPDIR/store" --entry store@1/platform_main/main --grant Clock --grant Random --grant Tasks'
+        + ' --grant "Net=UnixRoot ctl /proc/self/cwd;UnixConnect ctl launcher.sock;UnixListen ctl operator.sock"'
+        + ' --dir /proc/self/cwd/catalog --limit {} -o "$root/libexec/hirsel/platform_main" > /dev/null'.format(PLATFORM_HOST_LIMIT),
     ])
+    store_sources = ctx.actions.symlinked_dir("store-sources", {
+        src.basename: src
+        for src in ctx.attrs.store_sources
+    })
     ctx.actions.run(
         cmd_args("/bin/sh", script, ctx.attrs.hirsel[DefaultInfo].default_outputs[0],
                  bundle.as_output(), scratch.as_output(),
@@ -591,6 +606,7 @@ def _toolchain_bundle_impl(ctx):
                  prof_recording_runtimes["x86_64"][DefaultInfo].default_outputs[0],
                  prof_recording_runtimes["aarch64"][DefaultInfo].default_outputs[0],
                  ctx.attrs.store_package[DefaultInfo].default_outputs[0],
+                 store_sources,
                  hidden = ctx.attrs._llvm_libraries[DefaultInfo].default_outputs),
         env = {"HIRSEL_MEMORY_LIMIT": PRODUCT_MEMORY_LIMIT, "HIRSEL_JOBS": "1"},
         category = "toolchain_bundle",
@@ -609,6 +625,7 @@ hirsel_toolchain_bundle = rule(
         "prof_runtimes": attrs.dep(),
         "prof_recording_runtimes": attrs.dep(),
         "store_package": attrs.dep(),
+        "store_sources": attrs.list(attrs.source()),
         "_link_kit": attrs.dep(default = "root//tools/buck2/native-toolchain:kit"),
         "_llvm_libraries": attrs.dep(default = "toolchains//:llvm-libraries"),
     },

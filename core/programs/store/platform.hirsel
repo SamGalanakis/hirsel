@@ -2222,6 +2222,9 @@ pub fn asked(mut h: Host, conn: u64, body: Bytes, now: Now) -> List[launcher.Req
         return out
     }
     match ask {
+        // A deploy waits for the session's inventory to be reconciled, so it can neither
+        // race the adoption of a pending deploy nor bind a group twice.
+        BeginAsk(_, _, _, _, _, _) if !h.binds_sent => refuse(mut h, conn, BusyClass, "the host is reconciling with the launcher"),
         BeginAsk(d, g, input, added, foreign, exec) => begin(mut h, conn, ask, d, g, input, added, foreign, exec, now, mut out),
         DataAsk(d, a, chunk) => match upload_of(h, conn, d, a) {
             Some(_) if list.len(chunk) > 0u64 => list.push(mut out, AdmitData(a, clone(chunk))),
@@ -3219,7 +3222,10 @@ pub fn status(h: Host) -> Status {
 // one absolute wall-time alarm on the minimum of the due index without the queued rows and
 // one monotonic alarm on the earliest backoff retry, and none where there is none. There is
 // no polling: nothing wakes the host before either minimum.
-pub type Input: send = Got(launcher.Event) | DueAt(u64) | RetryAt(u64) | Lost
+// One input to the host's loop: a launcher event, a timer, the launcher session's end, an
+// operator connection accepted on operator.sock, one operator frame on connection `conn`,
+// that connection's end as read, or as written (its writer ended, flushed or failed).
+pub type Input: send = Got(launcher.Event) | DueAt(u64) | RetryAt(u64) | Lost | Joined(Socket) | Asked(u64, Bytes) | HungUp(u64) | Flushed(u64)
 
 type Armed {
     at: u64,
@@ -3257,7 +3263,11 @@ pub fn step(mut h: Host, mut d: Driver, take input: Input, now: Now) -> List[lau
         Got(take e) => event(mut h, take e, now),
         DueAt(_) => tick(mut h, now),
         RetryAt(_) => tick(mut h, now),
+        Asked(conn, body) => asked(mut h, conn, body, now),
+        HungUp(conn) => detach(mut h, conn),
+        Flushed(conn) => detach(mut h, conn),
         Lost => list.new(),
+        Joined(_) => list.new(),
     }
     settle(mut d, h)
     take out

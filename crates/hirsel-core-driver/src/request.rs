@@ -453,6 +453,10 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             | Opt::Control
             | Opt::HostState
             | Opt::CgroupRoot
+            | Opt::OperatorListen
+            | Opt::PlatformHost
+            | Opt::MaxPlaces
+            | Opt::IdleMs
             | Opt::Workdir
             | Opt::Listen
             | Opt::Scratch

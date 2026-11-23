@@ -190,7 +190,14 @@ unsafe fn exec(
                 failed(report, *libc::__errno_location());
             }
         }
-        let first = if serving { 6 } else { 3 };
+        // The report pipe goes above every launch slot: 6 for a serving child, 4 for the
+        // platform host (whose operator listener is 3), 3 otherwise.
+        let mut first = if serving { 6 } else { 3 };
+        for &(_, target) in fds {
+            if target >= first && target < IMAGE_FD {
+                first = target + 1;
+            }
+        }
         let report_slot = if image { IMAGE_FD + 1 } else { first };
         if report != report_slot && libc::dup3(report, report_slot, libc::O_CLOEXEC) < 0 {
             failed(report, *libc::__errno_location());

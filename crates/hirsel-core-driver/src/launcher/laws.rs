@@ -1187,3 +1187,64 @@ fn cutover_reply_retained() {
     assert!(seen.contains(&uncertain), "{seen:?}");
     assert_eq!(rig.ask(send(&silent_old, 4, 0xbb)), [uncertain]);
 }
+
+/// A launcher that starts the platform host (launch.md "Starting the host") runs `script`
+/// as that host, with the operator listener at `operator`.
+fn hosted(rig: &mut Rig, script: &str) -> PathBuf {
+    let program = rig.work().join("host");
+    fs::write(&program, format!("#!/bin/sh\n{script}\n")).unwrap();
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+    let operator = super::bind_control(&rig.work().join("operator.sock")).unwrap();
+    rig.launcher.bootstrap = Some(super::bootstrap::Bootstrap::new(
+        program,
+        vec![],
+        rig.work().join("state"),
+        operator,
+    ));
+    rig.work()
+}
+
+/// Only the host's own process holds the control session: another process of the same
+/// user that connects to launcher.sock is closed, so it can neither take over the session
+/// nor end the host's (launch.md "The operator socket").
+#[test]
+fn control_peer_is_the_host() {
+    let mut rig = rig(&[]);
+    let socket = rig.work().join("launcher.sock");
+    rig.launcher
+        .listen(super::bind_control(&socket).unwrap())
+        .unwrap();
+    hosted(&mut rig, "exec sleep 30");
+    rig.idle(Duration::from_millis(50));
+    assert!(rig.launcher.bootstrap.as_ref().unwrap().pid().is_some());
+    let _foreign = UnixStream::connect(&socket).unwrap();
+    rig.idle(Duration::from_millis(50));
+    assert!(
+        rig.launcher.session.is_none(),
+        "a process that is not the host was admitted to the control session"
+    );
+}
+
+/// The host is started again after exit 75 at once, then after 1 s, 2 s ...; never after
+/// 74 (the catalog is unreadable) or 64 (usage), whose status the launcher ends with.
+#[test]
+fn host_restart_wired() {
+    let mut rig = rig(&[]);
+    let work = hosted(&mut rig, "echo x >> ../starts\nexit 75");
+    rig.idle(Duration::from_millis(2500));
+    let starts = fs::read_to_string(work.join("starts"))
+        .unwrap()
+        .lines()
+        .count();
+    assert_eq!(starts, 3, "starts at 0 s, 0 s and 1 s within 2.5 s");
+
+    let mut rig = self::rig(&[]);
+    let work = hosted(&mut rig, "echo x >> ../starts\nexit 74");
+    rig.idle(Duration::from_millis(500));
+    let starts = fs::read_to_string(work.join("starts"))
+        .unwrap()
+        .lines()
+        .count();
+    assert_eq!(starts, 1, "a host that ended 74 was started again");
+    assert_eq!(rig.launcher.bootstrap.as_ref().unwrap().stopped(), Some(74));
+}

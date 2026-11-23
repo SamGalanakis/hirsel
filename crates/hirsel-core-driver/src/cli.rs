@@ -93,6 +93,10 @@ pub enum OptionId {
     Control,
     HostState,
     CgroupRoot,
+    OperatorListen,
+    PlatformHost,
+    MaxPlaces,
+    IdleMs,
     Workdir,
     Listen,
     Scratch,
@@ -138,7 +142,7 @@ commands! {
     "publish", "publish PACKAGE [options]", "Check a package, publish its code objects and print the recipe hash.";
     "manifest", "manifest show PATH", "Print a release manifest.";
     "host", "host RECIPE --control SOCKET --state DIR --listen ADDR [options] [-- arguments...]", "Supervise a place and accept deploy requests.";
-    "launcher", "launcher --control SOCKET --state DIR [--cgroup-root DIR]", "Hold the groups' listeners and start their children for the platform host.";
+    "launcher", "launcher --control SOCKET --state DIR [--operator-listen SOCKET --platform-host FILE --max-places N --idle-ms MS] [--cgroup-root DIR]", "Hold the groups' listeners and start their children for the platform host.";
     "deploy", "deploy RECIPE --control SOCKET --code-store DIR [options]", "Submit a recipe and its missing code objects to a host.";
     "run", "run [package-dir] [options] [-- arguments...]", "Build and run a native executable.";
     "serve", "serve [package-dir] [--store DIRECTORY] [--max-memory BYTES] [--stop]", "Serve the package's build and run requests from a resident compiler.";
@@ -305,6 +309,34 @@ static OPTIONS: &[OptionSpec] = &[
         Some("DIR"),
         ["launcher"],
         "Use a delegated cgroup v2 subtree for child lifecycle and contained groups."
+    ),
+    option!(
+        OperatorListen,
+        ["--operator-listen"],
+        Some("SOCKET"),
+        ["launcher"],
+        "Operator socket the platform host accepts deploys on."
+    ),
+    option!(
+        PlatformHost,
+        ["--platform-host"],
+        Some("FILE"),
+        ["launcher"],
+        "Installed platform host executable to start as the first child."
+    ),
+    option!(
+        MaxPlaces,
+        ["--max-places"],
+        Some("N"),
+        ["launcher"],
+        "Groups the platform host keeps live at once."
+    ),
+    option!(
+        IdleMs,
+        ["--idle-ms"],
+        Some("MS"),
+        ["launcher"],
+        "Idle time after which a serving group is stopped."
     ),
     option!(
         TapeRetention,

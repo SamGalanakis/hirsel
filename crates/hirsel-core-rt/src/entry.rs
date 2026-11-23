@@ -162,6 +162,7 @@ pub struct SocketActivation {
     pub(crate) unix_probe: fn() -> io::Result<()>,
     pub(crate) unix_roots:
         unsafe fn(&mut OsProvider, &[hirsel_core_net::RuleView]) -> Result<(), StartupError>,
+    pub(crate) operator: unsafe fn() -> io::Result<Option<(OwnedFd, u32)>>,
 }
 
 /// Reads the credential source for a Secret grant during startup.
@@ -562,12 +563,12 @@ impl OsProcess {
             let launch = Box::new(launch);
             // Receive before the first dup/open can reuse a missing activation fd.
             let net_ops = input.socket_activation.as_ref();
-            let inherited = if let Some(activation) = net_ops
+            let (inherited, operator) = if let Some(activation) = net_ops
                 && input.grant_mask & (1 << NET) != 0
             {
-                (activation.receive)()?
+                ((activation.receive)()?, (activation.operator)()?)
             } else {
-                None
+                (None, None)
             };
             let host_control = receive_host_control()?;
             if host_control.is_some() && (describe_mode || prepare_path.is_some()) {
@@ -616,6 +617,7 @@ impl OsProcess {
             let mut os = Box::new(OsProvider::from_streams(stdout, stderr));
             if !describe_mode && prepare_path.is_none() {
                 *os.inherited_listener.get_mut().unwrap() = inherited;
+                *os.inherited_unix.get_mut().unwrap() = operator;
             }
             let describe_out = if describe_mode {
                 Some(duplicate(input.stdout_fd)?)

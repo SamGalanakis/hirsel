@@ -8,6 +8,7 @@
 //! that a decision reads again: what it knows of its children is in memory and reaches a
 //! new host through the inventory that answers `Hello`.
 mod admit;
+mod bootstrap;
 mod cgroup;
 #[cfg(test)]
 mod laws;
@@ -85,12 +86,18 @@ pub(crate) fn run(
 ) -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
     use crate::cli::OptionId as Opt;
     let (mut control, mut state, mut cgroup_root) = (None, None, None);
+    let (mut operator, mut platform_host, mut max_places, mut idle_ms) = (None, None, None, None);
     for (option, value) in invocation.options {
-        let value = PathBuf::from(value.unwrap_or_default());
+        let text = value.unwrap_or_default();
+        let value = PathBuf::from(&text);
         match option {
             Opt::Control => control = Some(value),
             Opt::HostState => state = Some(value),
             Opt::CgroupRoot => cgroup_root = Some(value),
+            Opt::OperatorListen => operator = Some(value),
+            Opt::PlatformHost => platform_host = Some(value),
+            Opt::MaxPlaces => max_places = Some(positive(&text, "--max-places")?),
+            Opt::IdleMs => idle_ms = Some(positive(&text, "--idle-ms")?),
             _ => return Err("unexpected launcher option".into()),
         }
     }
@@ -109,8 +116,56 @@ pub(crate) fn run(
     })?;
     launcher.admit_with(admission.expect("opened with the stores"))?;
     launcher.listen(bind_control(&control)?)?;
+    match (operator, platform_host) {
+        (None, None) => (),
+        (Some(operator), Some(program)) => {
+            // The host's argv names the control socket by its name in STATE, which is the
+            // host's working directory (launch.md "Starting the host").
+            let name = control
+                .file_name()
+                .filter(|_| {
+                    control.parent().and_then(|p| p.canonicalize().ok()) == Some(state.clone())
+                })
+                .ok_or("--control must name a socket directly in --state")?;
+            let args = vec![
+                OsString::from("ctl"),
+                name.to_owned(),
+                OsString::from(max_places.unwrap_or(1).to_string()),
+                OsString::from(idle_ms.unwrap_or(30000).to_string()),
+            ];
+            let program = std::path::absolute(program)?;
+            if !program.is_file() {
+                eprintln!(
+                    "hirsel launcher: the installation has no platform host at {}",
+                    program.display()
+                );
+                std::process::exit(74);
+            }
+            // The host's one Dir is STATE/catalog; it creates the catalog store inside it.
+            std::fs::create_dir_all(state.join("catalog"))?;
+            launcher.bootstrap = Some(bootstrap::Bootstrap::new(
+                program,
+                args,
+                state.clone(),
+                bind_control(&std::path::absolute(operator)?)?,
+            ));
+        }
+        _ => return Err("--operator-listen and --platform-host go together".into()),
+    }
     loop {
         launcher.wait_turn(None)?;
+        if let Some(code) = launcher.bootstrap.as_ref().and_then(|b| b.stopped()) {
+            eprintln!("hirsel launcher: the platform host ended with status {code}");
+            drop(launcher);
+            std::process::exit(code);
+        }
+    }
+}
+
+fn positive(text: &str, name: &str) -> Result<u64, Box<dyn std::error::Error>> {
+    match text.parse::<u64>() {
+        Ok(n) if n > 0 => Ok(n),
+        _ => Err(format!("{name} takes a positive decimal").into()),
     }
 }
 
@@ -420,6 +475,9 @@ pub(crate) struct Launcher<I> {
     control_watch: Option<Watch>,
     control: Option<UnixListener>,
     session: Option<Conn>,
+    /// The platform host, when this launcher starts it; then only its process may hold the
+    /// control session.
+    bootstrap: Option<bootstrap::Bootstrap>,
     _lock: File,
 }
 
@@ -607,6 +665,7 @@ impl<I: Images> Launcher<I> {
             control_watch: None,
             control: None,
             session: None,
+            bootstrap: None,
             _lock: lock,
         })
     }
@@ -1559,8 +1618,15 @@ impl<I: Images> Launcher<I> {
             }
         }
         let mut events = [libc::epoll_event { events: 0, u64: 0 }; 64];
+        let timeout = match (timeout, self.bootstrap.as_ref().and_then(|b| b.timeout())) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
         let count = self.epoll.wait(timeout, &mut events)?;
         let events = &events[..count];
+        if let Some(bootstrap) = &mut self.bootstrap {
+            bootstrap.turn(&self.epoll, events)?;
+        }
         for i in 0..self.children.len() {
             if self.children[i]
                 .process
@@ -1609,6 +1675,14 @@ impl<I: Images> Launcher<I> {
         let mut accepted = None;
         if let Some(control) = &self.control {
             while let Ok((stream, _)) = control.accept() {
+                // With a bootstrap host, a connection from any other process is closed
+                // before it can replace the session (launch.md "The operator socket").
+                if let Some(bootstrap) = &self.bootstrap
+                    && (bootstrap.pid().is_none()
+                        || bootstrap::peer_pid(&stream) != bootstrap.pid())
+                {
+                    continue;
+                }
                 accepted = Conn::new(&self.epoll, stream).ok().or(accepted);
             }
         }

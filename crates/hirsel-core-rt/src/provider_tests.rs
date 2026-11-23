@@ -1610,6 +1610,80 @@ fn exec_supervisor_law(image: &std::path::Path) {
     drop(sentinel);
 }
 
+/// The launcher's operator listener (docs/spec/launch.md "Starting the host"): the first
+/// UNIX_LISTEN adopts it only when the grant names the very socket it is bound at, and its
+/// accept closes a connection from any UID but the operator's and takes the next one.
+#[test]
+fn operator_listener_is_private() {
+    use crate::{net, os_unix, unix_net::*};
+    use hirsel_core_net::GrantRule;
+    use std::io::Read;
+    use std::os::unix::net::{UnixListener, UnixStream};
+
+    fn carrier(data: &[u8]) -> Buffer {
+        Buffer {
+            data: data.as_ptr().cast_mut(),
+            len: data.len(),
+            capacity: 0,
+        }
+    }
+    // SAFETY: geteuid has no failure.
+    let uid = unsafe { libc::geteuid() };
+    let root = carrier(b"test");
+    for (named, admitted) in [("decoy", false), ("operator.sock", true)] {
+        let mut files = Box::new(crate::host_file::Files::default());
+        let mut f = Fixture::new();
+        // SAFETY: both allocations are pinned until the fixture is dropped.
+        unsafe { (*f.context).host_files = &raw mut *files };
+        let dir = f.root.path().to_owned();
+        let bound = dir.join("operator.sock");
+        let _decoy = UnixListener::bind(dir.join("decoy")).unwrap();
+        let listener = UnixListener::bind(&bound).unwrap();
+        *f.os.inherited_unix.get_mut().unwrap() = Some((listener.into(), uid));
+        f.os.unix_roots
+            .insert("test".into(), File::open(&dir).unwrap().into());
+        let provider = f.os.provider();
+        let rules = net::RulesStorage::new(
+            [GrantRule::parse(&format!("UnixListen test {named}")).unwrap()].into_iter(),
+        );
+        let n = files.registry.grant(provider, rules.handle());
+        let out = unsafe {
+            hirsel_core_host_listen_unix(f.context, n, &root, &carrier(named.as_bytes()), 4, 1)
+        };
+        if !admitted {
+            assert_eq!(
+                out.error,
+                IoError { tag: 1, code: 0 },
+                "the inherited listener was adopted for a socket it is not bound at"
+            );
+            continue;
+        }
+        assert_eq!(out.error, IoError::OK);
+        let fd = files.sockets.fd(out.value);
+        let only = os_unix::admitted(&f.os, out.value);
+        let _client = UnixStream::connect(&bound).unwrap();
+        let accepted = os_unix::accept(&mut files.sockets, fd, only).unwrap();
+        assert!(
+            files.sockets.release(accepted.value),
+            "the operator's own UID is admitted"
+        );
+
+        // The same listener admitting another UID: the connection is closed, never returned.
+        let mut stranger = UnixStream::connect(&bound).unwrap();
+        assert_eq!(
+            os_unix::accept(&mut files.sockets, fd, only.map(|u| u + 1)).map(|o| o.value),
+            Err(libc::EAGAIN),
+            "a connection from another UID was accepted"
+        );
+        assert_eq!(
+            stranger.read(&mut [0]).unwrap(),
+            0,
+            "the stranger is closed"
+        );
+        unsafe { net::hirsel_core_socket_drop(f.context, out.value) };
+    }
+}
+
 #[test]
 fn unix_endpoints_retain_authority_and_datagrams_commit_exactly_one_packet() {
     use crate::{net, os_unix, unix_net::*};

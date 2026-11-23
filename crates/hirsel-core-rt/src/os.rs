@@ -53,6 +53,11 @@ pub struct OsProvider {
     temporary: u64,
     in_flight_syncs: Vec<*mut crate::os_sync::SyncCell>,
     pub(crate) inherited_listener: Mutex<Option<OwnedFd>>,
+    /// The launcher's operator listener and the one peer UID it admits, until the first
+    /// UNIX_LISTEN adopts it (docs/spec/launch.md "Starting the host").
+    pub(crate) inherited_unix: Mutex<Option<(OwnedFd, u32)>>,
+    /// The adopted operator listener's socket key and its admitted peer UID.
+    pub(crate) operator: Mutex<Option<(u64, u32)>>,
     stdout: Option<OwnedFd>,
     stderr: Option<OwnedFd>,
 }
@@ -94,6 +99,8 @@ impl OsProvider {
             temporary: 0,
             in_flight_syncs: Vec::new(),
             inherited_listener: Mutex::new(None),
+            inherited_unix: Mutex::new(None),
+            operator: Mutex::new(None),
             stdout,
             stderr,
         }

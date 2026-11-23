@@ -42,6 +42,7 @@ fn unknown() -> u64 { missing() }                       // refused: LANG-7, miss
 | `provide`, `clock`, `process` | [provide](../../core/core/provide.hirsel) | CAP-2, CAP-5, CONC-7, FAIL-13, FAIL-15, MEM-24, TLS-5; [Provide](#provide) |
 | `foreign` | the raw handle type `Ptr` | FFI-4 to FFI-7 |
 | `exec` | [exec](../../core/core/exec.hirsel) | EXEC-2 to EXEC-8 |
+| `cred` (unbuilt) | `cred.hirsel` | TLS-7 |
 | `args`, `env`, `host`, `stdin`, `stdout`, `stderr` | [args](../../core/core/args.hirsel), [env](../../core/core/env.hirsel), [host](../../core/core/host.hirsel), [stdin](../../core/core/stdin.hirsel), [stdout](../../core/core/stdout.hirsel), [stderr](../../core/core/stderr.hirsel) | PROG-3, CAP-5, CAP-7 |
 
 A library module may extend a core module by name (LANG-7).
@@ -109,6 +110,7 @@ the format's u32 field. Fixed-width scalar and key writers return unit.
 | `Secret` ([TLS-5](tls.md#tls-5-secrets)) | resource, mechanical | `send` | 8 | resource |
 | `Foreign[I]` ([FFI-4](foreign.md#ffi-4-the-foreign-capability)) | plain | `shareable`, `send` | 8 | capability |
 | `Exec` ([EXEC-2](exec.md#exec-2-launch-profiles-and-narrowing)) | plain | `shareable`, `send` | 8 | capability |
+| `Cred` ([TLS-7](tls.md#tls-7-credential-grants), unbuilt) | plain | `shareable`, `send` | 8 | capability |
 | `foreign.Ptr[K]` ([FFI-6](foreign.md#ffi-6-handles)) | plain | `send` | 8 | a handle-table ordinal of kind `K`; holds a raw handle (OWN-2) |
 | `Args` | plain | `shareable`, `send` | 8 | nothing |
 | `Site` | plain | `shareable`, `send`, `key` | 8 | nothing |

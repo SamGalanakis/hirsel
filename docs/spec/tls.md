@@ -589,6 +589,150 @@ PBKDF2 iterations per guess. A proof with its transcript would be the same. That
 the proof is never stored and the tape is credential-bearing: it is readable only by its
 owner, created at a fresh path, and exported only with `--include-credentials`.
 
+### TLS-7: Credential grants
+
+```hirsel unbuilt
+pub type CredError = Room(key_id: u64, token: u64) | Net(NetError) | Token(IoError) | Status(u16) | Malformed | Capacity(Capacity)
+pub fn fetch(c: Cred, mut key_id: String, mut token: String, until: Until) -> Result[(Secret, u64), CredError] waits
+```
+
+These are in module `cred`. A `Cred` is a plain capability that designates one
+**credential source**: a host endpoint that issues short-lived AWS-style credentials.
+`cred.fetch` obtains a fresh set from it. The secret access key arrives as a `Secret`
+that the host sealed itself, so no byte of it is ever in program memory. The access key
+id, the session token and the expiry are public, and the program receives them as
+ordinary values. A session token authorizes nothing without a signature made with the
+secret key, and SigV4 hashes it into the canonical request, so it needs no sealing.
+
+**Why a grant.** Authority to obtain credentials enters by grant (CAP-4), not by a `Net`
+rule. A `Net` that reaches the metadata endpoint or STS would also let the program fetch the
+same response itself and read the key in plaintext, so keeping the key out of program
+memory would be a library convention, not a property of the run. With a `Cred` grant, only
+the host provider reaches the endpoint, and the run needs no `Net` rule for it. A static key
+is already a `Secret` grant (TLS-5) with a public key id, so it is not a credential source:
+a second way to grant the same bytes would make two rules for one thing.
+
+**Grants.** `main` takes a `Cred` parameter, which the run configuration grants:
+
+```sh
+hirsel run app --grant 'Cred:aws=imds mac'
+hirsel run app --grant 'Cred:aws=imds:127.0.0.1:8123 mac'
+hirsel run app --grant 'Cred:aws=sts:arn:aws:iam::123456789012:role/app file:/var/run/secrets/token mac'
+```
+
+`Cred:<parameter>` names the `main` parameter. The text after `=` is the source, then the
+policy of every secret key fetched from it, in TLS-5's command-line spelling. The policy is
+the longest space-separated suffix that parses as one, as for a `Secret` grant. The
+sources are:
+
+- `imds`: the instance metadata service, IMDSv2, at `169.254.169.254` port 80.
+  `imds:<ipv4>:<port>` names another address, so a test can run its own server.
+- `sts:<role-arn> [at:<name>:<port>] [roots:<pem-path>] file:<token-path>`: STS
+  `AssumeRoleWithWebIdentity` with the web identity token in `<token-path>`. The endpoint is
+  `sts.amazonaws.com` port 443 with the host's roots (TLS-3's `System`) unless `at:` and
+  `roots:` name others. `<token-path>` comes last and may hold spaces.
+
+Any other source, `static` included, refuses the grant: the launcher reports it and the run
+does not start (exit 103). The launcher reads nothing from a source before the run starts.
+The token file is read by the provider at each fetch, since the identity provider rotates
+it, and its bytes never enter program memory either.
+
+**The fetch.** `cred.fetch` waits, and is a cancellation point at its issue
+([CONC-7](tasks.md#conc-7-cancellation-points)). At issue, the provider starts the exchange
+on a host helper and the task parks. The provider:
+
+- For `imds`, sends three HTTP/1.1 requests, each on its own connection with
+  `Connection: close`. The first is `PUT /latest/api/token` with
+  `X-aws-ec2-metadata-token-ttl-seconds: 21600`, whose body is the session token for the next
+  two. The second is `GET /latest/meta-data/iam/security-credentials/` with
+  `X-aws-ec2-metadata-token`, whose first line is the role name. The third is the same
+  path followed by that role name, whose body is a JSON object.
+- For `sts`, sends one `POST /` with an `application/x-www-form-urlencoded` body that holds
+  `Action=AssumeRoleWithWebIdentity`, `Version=2011-06-15`, `RoleArn`,
+  `RoleSessionName=hirsel` and `WebIdentityToken`, over TLS verified as the endpoint's name.
+  The reply is XML.
+
+The provider receives each reply into run-owned host memory of at most 64 KiB, and zeroes
+each buffer that held key bytes before it frees it. It reads these fields from the last
+reply:
+
+| meaning | IMDS JSON member | STS XML element |
+|---|---|---|
+| access key id | `AccessKeyId` | `AccessKeyId` |
+| secret access key | `SecretAccessKey` | `SecretAccessKey` |
+| session token | `Token` | `SessionToken` |
+| expiry | `Expiration` | `Expiration` |
+
+An IMDS reply must also have `"Code": "Success"`. Each value is a string with no escape
+sequence, and the expiry has the form `YYYY-MM-DDTHH:MM:SSZ`. These are the forms both
+services send.
+
+On success, the access key id is appended to `key_id` and the session token to `token`,
+and the result is the secret key together with the expiry, in nanoseconds since the Unix
+epoch. So `2026-11-23T12:00:00Z` gives `1795435200000000000`, which a program compares with
+`host.wall_ms(c) * 1000000`. The failures are:
+
+- `Room(key_id, token)`: the spare capacity of `key_id` or `token` is less than the byte
+  length of that value. It holds both lengths, and the call writes neither string and makes
+  no designation. Like every core operation it never grows a buffer.
+- `Net(e)`: a connection, TLS or transport failure. A deadline gives `Net(TimedOut)` and a cancel gives `Net(Aborted)`. Each
+  ends the helper's exchange; a reply that comes later is zeroed and discarded.
+- `Token(e)`: the `sts` token file could not be read, or is empty (`Token(NotFound)`).
+- `Status(code)`: a reply whose HTTP status is not 200.
+- `Malformed`: a reply over 64 KiB, a missing member or element, a value with an escape, an
+  expiry in another form, or an IMDS `Code` other than `Success`.
+- `Capacity(c)`: the designation's admission (below) was refused.
+
+Each call makes a fresh exchange. The provider caches nothing, and when to refresh is the
+program's choice (std credentials, below).
+
+**The secret key.** A successful fetch makes a new designation with one holder, with the
+grant's policy. It admits `round_up_8(pattern_bytes + 32)` from the current limit, as
+`narrow` does (TLS-5). The key bytes are run-owned host memory and are never charged, as a
+granted secret's are, so the key's length never reaches the program, even through a
+refusal. Holders and release follow TLS-5. When the last designation of the key is
+released, the runtime zeroes the bytes. A fetched secret is treated as a granted one wherever
+this chapter tells the two apart: it never satisfies a TLS half of `provide.net`
+(`send_secret` and `scram_sha256` give `Denied`).
+
+**No virtual form.** There is no `provide.cred`, and the model world grants no `Cred`. A
+test of a program that fetches credentials runs natively against a server of its own,
+named by the grant's `imds:` address or `sts` endpoint and roots.
+
+**Replay.** `cred.fetch` is a provider operation
+([CAP-5](capabilities.md#cap-5-provider-operations)) and passes the replay point at issue
+and at delivery ([CAP-8](capabilities.md#cap-8-the-replay-point)):
+
+- The issue holds the `Cred`'s grant ordinal, the spare capacities of `key_id` and `token`,
+  and `until`.
+- The delivery holds the outcome. On success it also holds the expiry and the bytes of the
+  access key id and the session token, which are received plaintext. It never holds the
+  secret key.
+
+A recording's grant record for a `Cred` holds the parameter name, the source text and the
+canonical policy, as a `Secret` grant record does. A replay contacts no endpoint and
+reads no token file. It delivers the recorded outcome, and a recorded success makes a
+designation with no bytes behind it, as a replayed grant has
+([recording](../recording.md#credentials)). No operation reads a secret's bytes, so the
+program computes the same values. A MAC tag computed with the key is a delivery of its own
+and comes from the recording.
+
+**Std credentials.** Std's `cred` module wraps the fetch in a record:
+
+```hirsel unbuilt
+pub type Credentials: send { access_key_id: String, secret: Secret, session_token: String, expires_ns: u64 }
+pub fn credentials(c: Cred, until: Until) -> Result[Credentials, CredError] waits
+pub fn from_secret(access_key_id: String, secret: Secret, session_token: String) -> Credentials
+```
+
+`credentials` reserves 128 bytes for the key id and 4096 for the token, and on `Room` it
+reserves the reported lengths and fetches once more. `from_secret` builds the record of a
+static key from a `Secret` grant, with `expires_ns` equal to `u64` max, so a client takes
+one record type whatever the key's source. The refresh policy belongs with the SigV4
+`Signer`. It fetches when the expiry is less than 300 s away, retries after 100 ms
+doubling, and validates new credentials with a signed `HEAD` of the bucket before it
+replaces the old set, which stays in use until it expires.
+
 ## Laws
 
 Each law names the bug it catches and the oracle its expected value comes from. Where a
@@ -623,10 +767,14 @@ computes.
 | **SC7** channel binding | the identity digest used where the signature's hash is required, or binding over a missing value | `client_first` `p=tls-server-end-point,,n=,r=abc` over the `alpha.test` leaf, signed with SHA-256, sends `c=` the base64 of `p=tls-server-end-point,,` followed by the leaf's `openssl x509 -outform der \| sha256sum` digest. Over a leaf signed with SHA-384 (an added fixture), it sends the base64 of the header followed by the leaf's `sha384sum` digest, and `scram_final_len` counts its 48 bytes. An Ed25519 leaf, and `p=tls-unique,,`, give `Binding` before issue. The oracle is RFC 5929 §4.1. |
 | **SC8** no key material in a recording | key material or the proof reaching a frame | Record SC1's run with the password from an `env:` grant. The tape holds none of these: `pencil`, `SaltedPassword` `c4a49510323ab4f952cac1fa99441939e78ea74d6be81ddf7096e87513dc615d`, `ClientKey` `a60fc923d67e8644a92d16b96eda5ef4656b0c725c484374be25535576996e8b`, `StoredKey` `586e5df283e6dceb5c3e791d8b8528ec191e664045ce971792e2e6b5bb13e2a6`, `ServerKey` `c1f3cbc1c13a9d35a14c0990eed97629ea225863e566a4314ab99f3f00e5d9d5`, the proof's 32 raw bytes, and their base64. Each is searched raw and as hex. The values follow by hand from RFC 7677's inputs through RFC 5802 §3. Replayed with the variable unset, the run gives the same verdict and ends `Sealed`. |
 | **SC9** virtual SCRAM | the virtual path sending different bytes or exposing a granted secret | Against a `provide.net` server whose handshake reply is `Secured`, seal the owned bytes of `"pencil"` with `"tls_send(alpha.test)"`, unwrap the result, and use SC1's transcript. The server's `Send` calls carry exactly SC1's client-final bytes. When the server commits 10 bytes and then the rest, the second `Send` offers bytes 10 to 106. Under `hirsel test --replay`, the replay ends `Sealed` and its server sees the same calls. |
+| **CR1** no key byte in program memory | the key copied into a program buffer, or a host buffer that held it left unzeroed | A loopback IMDS server hands out the 40-byte key `wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY` granted `Cred:aws=imds:127.0.0.1:<port> mac`. The program fetches, prints `secret.hmac_sha256` of `x` under the key, and parks on a receive from the test. The tag equals Python's `hmac.new(key, b"x", "sha256")`. While it is parked, the test reads every readable mapping of the run's process through `/proc/<pid>/mem` and finds the key exactly once: the sealed store. The control serves the same key as `Token` too, which puts it in a program `String`, and the same scan finds it at least twice. |
+| **CR2** replay without the endpoint | replay contacting the source, or the key reaching a frame | Record CR1's run. The tape holds the key id and token bytes, and holds none of the key's raw bytes, hex or base64. Replayed with the server gone, the run prints the same tag and ends `Sealed`. |
+| **CR3** the IMDS exchange | a missing IMDSv2 token, a wrong expiry, or a failure that still makes a designation | The server answers only a `PUT` with the TTL header and only `GET`s that carry its token. `Expiration` `2026-11-23T12:00:00Z` gives `1795435200000000000` (`date -ud`). A 404 on the role gives `Status(404)`. A reply without `SecretAccessKey`, with an escaped value, or with `Code` `Expired` gives `Malformed`. A `token` with 3 bytes of room against a 7-byte token gives `Room(20, 7)` with both strings unchanged. A server that never answers, under a 50 ms deadline, gives `Net(TimedOut)`. A grant with source `static` does not start (exit 103). |
+| **CR4** STS web identity | the token sent from a stale read, or the wrong reply element taken as the key | A loopback TLS server as `alpha.test` with the test CA's roots, granted `sts:<arn> at:alpha.test:<port> roots:<ca> file:<token>`. The server receives `WebIdentityToken` equal to the file's bytes, which the test rewrites between two fetches, and sees each version once. Its `AssumeRoleWithWebIdentityResponse` gives the fixture's key id and expiry, and the key's MAC matches CR1's oracle. A 403 `AccessDenied` gives `Status(403)`. |
 
 TL1 to TL11, TL14 to TL16 and SC1 to SC8 run against the OS provider over
 loopback. TL5, TL7, TL13, TL15, SC1 and SC5 also have scripted-provider cases, so that the
-evaluator is covered. SC9 runs on both engines. The recording laws of
+evaluator is covered. SC9 runs on both engines. CR1 to CR4 run natively against loopback servers. The recording laws of
 TLS sessions and secrets, RL3 to RL5, are with the tools ([recording](../recording.md#laws)).
 
 ## Build slices
@@ -643,6 +791,7 @@ and L (more than three).
 | **T5** HTTPS client | S | T1, T4, http-client-1439 | std `tls` api page; `https` connect = `host.connect`, then `tls.connect` offering `http/1.1`, then the plain client's reader and writer over the halves; `Secret` header values written through `send_secret`; `[secret]` in request and error renders | TL10 (the client's case), and one HTTPS round trip in the existing http client harness |
 | **T6** STARTTLS | S | T1, T3 | `net.join` and `Unjoined` (NET-7) on both engines and in the evaluator's virtual sockets; TLS-1's unread-bytes peek in the OS provider, and a pre-handshake bytes step in peer scripts | TL14–TL16 |
 | **T7** SCRAM | M | T4, T6 | TLS-1's binding value (`binding_out`, the recording's `TLS_CONNECT` delivery); `Scram`, `ScramError`, `scram_sha256`, `scram_final_len`, `scram_verify`; SASLprep with raw fallback; the per-iteration charge; `SCRAM` and `SCRAM_VERIFY` in the OS, scripted and virtual paths and in a recording | SC1–SC9 |
+| **T8** credential grants | M | T4, T7 | the `Cred` type and grant kind, the `imds` and `sts` sources, `cred.fetch` in the OS provider on a host helper, its frames and grant record in a recording, std `cred` | CR1–CR4 |
 
 T2 and T3 can run in parallel after T1. T4 waits for T2 because its designation in a
 recording is part of its contract. T5, T6 and T7 run in any order once their dependencies land.

@@ -487,6 +487,17 @@ fn handshake(n: Network, namelen: u64, mut s: Served[NetOp], take c: Call[NetOp]
     let _ = answer(mut s, take c, r)
 }
 
+/// Answers a name operation using the configured DNS and handshake scripts.
+pub fn answer_name(n: Network, mut served: Served[NetOp], take call: Call[NetOp]) {
+    match provide.net_op(call) {
+        Resolve(name: len, room: room) => resolve(n, len, room, mut served, take call),
+        Handshake(name: len, ..) => handshake(n, len, mut served, take call),
+        _ => {
+            let _ = reject(mut served, take call, Denied)
+        }
+    }
+}
+
 fn send_secret(n: Network, mut state: State, id: u64, now: u64, mut s: Served[NetOp], take c: Call[NetOp]) -> Option[Call[NetOp]] {
     let Some(local) = endpoint(state, id) else {
         return reject(mut s, take c, Reset)

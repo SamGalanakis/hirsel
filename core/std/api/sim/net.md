@@ -14,3 +14,6 @@ and closing a write half lets its peer drain the pipe before EOF.
 `resolve_as` and `handshake_as` configure name-specific replies. The server
 counts successful opaque secret sends without reading their bytes. Virtual
 TLS supplies no trust authority for entry-granted secrets.
+
+`answer_name` answers one served Resolve or Handshake using the same
+scripts as `serve`. It replies Denied to other operations.

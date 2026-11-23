@@ -1,0 +1,978 @@
+/// One fault per connection, selected before any request octets arrive.
+pub type Fault: send = Clean | ResetBeforeBody | ResetAfterBody | Stall(u64) | InternalError | SlowDown | CompleteError
+
+pub type Config: send {
+    address: Addr,
+    network: sim.net.Network,
+    after_resolve: Option[sim.net.Network],
+    credential: String,
+    signing_key: Secret,
+    faults: List[Fault],
+    exists_status: u16,
+    fragment_bytes: u64,
+    max_body: u64
+}
+
+pub type Object: send {
+    data: Bytes,
+    etag: String,
+    metadata: Map[String, String]
+}
+
+pub type Report: send {
+    objects: Map[String, Object],
+    writes: u64,
+    attempts: u64,
+    withdrawn: u64
+}
+
+type Upload {
+    key: String,
+    metadata: Map[String, String],
+    parts: Map[u64, Object]
+}
+
+type Bucket {
+    objects: Map[String, Object],
+    uploads: Map[String, Upload],
+    next_upload: u64,
+    writes: u64
+}
+
+type Target {
+    key: String,
+    query: Map[String, String]
+}
+
+type Request {
+    method: String,
+    target: Target,
+    fields: Map[String, String]
+}
+
+type Response {
+    status: u16,
+    fields: Map[String, String],
+    body: Bytes
+}
+
+fn reply(status: u16, body: String) -> Response {
+    Response(status: status, fields: map.new(), body: string.into_bytes(clone(body)))
+}
+
+fn error(status: u16, code: String) -> Response {
+    let mut xml = string.from("<Error><Code>")
+    string.push(mut xml, code)
+    string.push(mut xml, "</Code></Error>")
+    reply(status, xml)
+}
+
+fn piece(data: Bytes, lo: u64, hi: u64) -> String {
+    result.unwrap(string.from_utf8(clone(list.slice(data, lo, hi))))
+}
+
+fn nibble(c: u8) -> Option[u8] {
+    if c >= b'0' && c <= b'9' {
+        return Some(c - b'0')
+    }
+    let lower = int.to_ascii_lower(c)
+    if lower >= b'a' && lower <= b'f' {
+        return Some(lower - b'a' + 10)
+    }
+    None
+}
+
+fn decode(text: String) -> Option[String] {
+    let raw = string.as_bytes(text)
+    let mut octets: Bytes = list.with_capacity(list.len(raw))
+    let mut i = 0u64
+    while i < list.len(raw) {
+        if raw[i] == b'%' {
+            if i + 2 >= list.len(raw) {
+                return None
+            }
+            let Some(hi) = nibble(raw[i + 1]) else {
+                return None
+            }
+            let Some(lo) = nibble(raw[i + 2]) else {
+                return None
+            }
+            list.push(mut octets, (hi << 4) | lo)
+            i += 3
+        } else {
+            list.push(mut octets, raw[i])
+            i += 1
+        }
+    }
+    match string.from_utf8(take octets) {
+        Ok(take value) => Some(take value),
+        Error(_) => None
+    }
+}
+
+fn or_else(value: Option[u64], fallback: u64) -> u64 {
+    match value {
+        Some(n) => n,
+        None => fallback
+    }
+}
+
+fn parse_target(raw: String) -> Option[Target] {
+    let octets = string.as_bytes(raw)
+    let end = list.len(octets)
+    if end == 0 || octets[0] != b'/' {
+        return None
+    }
+    let cut = or_else(list.find_byte(octets, 0, end, b'?'), end)
+    let Some(take key) = decode(piece(octets, 1, cut)) else {
+        return None
+    }
+    let mut query: Map[String, String] = map.new()
+    let mut at = cut + 1
+    while at < end {
+        let stop = or_else(list.find_byte(octets, at, end, b'&'), end)
+        let eq = or_else(list.find_byte(octets, at, stop, b'='), stop)
+        let name = piece(octets, at, eq)
+        let value = piece(octets, order.min(eq + 1, stop), stop)
+        if name == "" || map.get(query, name) != None {
+            return None
+        }
+        map.insert(mut query, take name, take value)
+        at = stop + 1
+    }
+    Some(Target(key: take key, query: take query))
+}
+
+fn parse_headers(raw: Bytes, head: http1.Head) -> Option[Map[String, String]] {
+    let mut out: Map[String, String] = map.new()
+    for i in 0u64 .. head.count {
+        let h = head.fields[i]
+        let mut name = piece(raw, h.name.start, h.name.end)
+        string.make_ascii_lower(mut name)
+        let span = list.slice(raw, h.value.start, h.value.end)
+        let Ok(take value) = string.from_utf8(clone(span)) else {
+            return None
+        }
+        if map.get(out, name) != None {
+            return None
+        }
+        map.insert(mut out, take name, take value)
+    }
+    Some(take out)
+}
+
+fn u64_field(s: String) -> Option[u64] {
+    let parsed: Result[u64, ParseError] = int.parse(s)
+    match parsed {
+        Ok(n) => Some(n),
+        Error(_) => None
+    }
+}
+
+fn body_length(fields: Map[String, String]) -> Option[u64] {
+    if map.get(fields, "transfer-encoding") != None {
+        return None
+    }
+    match map.get(fields, "content-length") {
+        Some(n) => u64_field(n),
+        None => Some(0)
+    }
+}
+
+fn hex(digest: Inline[u8, 32]) -> String {
+    let digits = string.as_bytes("0123456789abcdef")
+    let mut out: Bytes = list.with_capacity(64)
+    for i in 0u64 .. 32 {
+        list.push(mut out, digits[int.widen(digest[i] >> 4)])
+        list.push(mut out, digits[int.widen(digest[i] & 15)])
+    }
+    result.unwrap(string.from_utf8(take out))
+}
+
+fn canonical_value(mut out: String, value: String) {
+    let octets = string.as_bytes(value)
+    let mut gap = false
+    let mut start = 0u64
+    for i in 0u64 .. list.len(octets) {
+        if octets[i] == b' ' || octets[i] == b'\t' {
+            if i > start {
+                if gap {
+                    string.push(mut out, " ")
+                }
+                string.push(mut out, string.slice(value, start, i))
+                gap = true
+            }
+            start = i + 1
+        }
+    }
+    if start < list.len(octets) {
+        if gap {
+            string.push(mut out, " ")
+        }
+        string.push(mut out, string.slice(value, start, list.len(octets)))
+    }
+}
+
+fn sorted_keys[V](m: Map[String, V]) -> List[String] {
+    let mut keys: List[String] = list.with_capacity(map.len(m))
+    for (key, _) in m {
+        list.push(mut keys, clone(key))
+    }
+    list.sort(mut keys, fn(a: String, b: String) -> Order {
+        order.compare(a, b)
+    })
+    take keys
+}
+
+fn append_query(mut out: String, query: Map[String, String]) {
+    let keys = sorted_keys(query)
+    for i in 0u64 .. list.len(keys) {
+        if i != 0 {
+            string.push(mut out, "&")
+        }
+        let key = keys[i]
+        string.push(mut out, key)
+        string.push(mut out, "=")
+        if let Some(value) = map.get(query, key) {
+            string.push(mut out, value)
+        }
+    }
+}
+
+fn canonical_headers(mut out: String, fields: Map[String, String], signed: String) -> bool {
+    let octets = string.as_bytes(signed)
+    let mut last = string.from("")
+    let mut has_host = false
+    let mut has_date = false
+    let mut at = 0u64
+    while at < list.len(octets) {
+        let stop = or_else(list.find_byte(octets, at, list.len(octets), b';'), list.len(octets))
+        let name = piece(octets, at, stop)
+        if order.compare(last, name) != Less || (stop + 1 == list.len(octets) && octets[stop] == b';') {
+            return false
+        }
+        let Some(value) = map.get(fields, name) else {
+            return false
+        }
+        string.push(mut out, name)
+        string.push(mut out, ":")
+        canonical_value(mut out, value)
+        string.push(mut out, "\n")
+        has_host = has_host || name == "host"
+        has_date = has_date || name == "x-amz-date"
+        last = take name
+        at = stop + 1
+    }
+    for (name, _) in fields {
+        if string.starts_with(name, "x-amz-") && name != "x-amz-content-sha256" {
+            let mut wanted = string.from(";")
+            string.push(mut wanted, name)
+            string.push(mut wanted, ";")
+            let mut names = string.from(";")
+            string.push(mut names, signed)
+            string.push(mut names, ";")
+            if string.find(names, 0, wanted) == None {
+                return false
+            }
+        }
+    }
+    has_host && has_date
+}
+
+fn authenticated(config: Config, req: Request, raw_target: String, body: Bytes) -> bool {
+    let fields = view req.fields
+    let Some(auth) = map.get(fields, "authorization") else {
+        return false
+    }
+    let Some(date) = map.get(fields, "x-amz-date") else {
+        return false
+    }
+    let Some(payload_digest) = map.get(fields, "x-amz-content-sha256") else {
+        return false
+    }
+    let Some((credential, rest)) = string.split_once(auth, ", SignedHeaders=") else {
+        return false
+    }
+    let Some((signed, signature)) = string.split_once(rest, ", Signature=") else {
+        return false
+    }
+    let mut prefix = string.from("AWS4-HMAC-SHA256 Credential=")
+    string.push(mut prefix, config.credential)
+    if credential != prefix || string.byte_len(signature) != 64 {
+        return false
+    }
+    let Some((_, scope)) = string.split_once(config.credential, "/") else {
+        return false
+    }
+    if string.byte_len(date) != 16 || string.byte_len(scope) < 8 || string.slice(date, 0, 8) != string.slice(scope, 0, 8) {
+        return false
+    }
+    if payload_digest != "UNSIGNED-PAYLOAD" && payload_digest != hex(sha256.hash(body)) {
+        return false
+    }
+    let mut canonical: String = clone(req.method)
+    string.push(mut canonical, "\n")
+    match string.split_once(raw_target, "?") {
+        Some((path, _)) => string.push(mut canonical, path),
+        None => string.push(mut canonical, raw_target)
+    }
+    string.push(mut canonical, "\n")
+    append_query(mut canonical, req.target.query)
+    string.push(mut canonical, "\n")
+    if !canonical_headers(mut canonical, fields, signed) {
+        return false
+    }
+    string.push(mut canonical, "\n")
+    string.push(mut canonical, signed)
+    string.push(mut canonical, "\n")
+    string.push(mut canonical, payload_digest)
+    let mut message = string.from("AWS4-HMAC-SHA256\n")
+    string.push(mut message, date)
+    string.push(mut message, "\n")
+    string.push(mut message, scope)
+    string.push(mut message, "\n")
+    string.push(mut message, hex(sha256.hash(string.as_bytes(canonical))))
+    let raw = string.as_bytes(signature)
+    let mut tag: Bytes = list.with_capacity(32)
+    for i in 0u64 .. 32 {
+        let Some(hi) = nibble(raw[2 * i]) else {
+            return false
+        }
+        let Some(lo) = nibble(raw[2 * i + 1]) else {
+            return false
+        }
+        list.push(mut tag, (hi << 4) | lo)
+    }
+    if let Ok(true) = secret.verify_hmac_sha256(config.signing_key, string.as_bytes(message), tag) {
+        return true
+    }
+    false
+}
+
+fn xml_text(mut xml: String, text: String) {
+    let octets = string.as_bytes(text)
+    let mut start = 0u64
+    for i in 0u64 .. list.len(octets) {
+        let escaped = match octets[i] {
+            b'&' => "&amp;",
+            b'<' => "&lt;",
+            b'>' => "&gt;",
+            b'"' => "&quot;",
+            b'\'' => "&apos;",
+            _ => ""
+        }
+        if escaped != "" {
+            string.push(mut xml, string.slice(text, start, i))
+            string.push(mut xml, escaped)
+            start = i + 1
+        }
+    }
+    string.push(mut xml, string.slice(text, start, list.len(octets)))
+}
+
+fn element(mut xml: String, tag: String, value: String) {
+    string.push(mut xml, "<")
+    string.push(mut xml, tag)
+    string.push(mut xml, ">")
+    xml_text(mut xml, value)
+    string.push(mut xml, "</")
+    string.push(mut xml, tag)
+    string.push(mut xml, ">")
+}
+
+fn metadata(fields: Map[String, String]) -> Map[String, String] {
+    let mut out: Map[String, String] = map.new()
+    for (name, value) in fields {
+        if string.starts_with(name, "x-amz-meta-") {
+            map.insert(mut out, clone(name), clone(value))
+        }
+    }
+    take out
+}
+
+fn etag(data: Bytes) -> String {
+    let mut out = string.from("\"")
+    string.push(mut out, hex(sha256.hash(data)))
+    string.push(mut out, "\"")
+    take out
+}
+
+fn conditional(config: Config, req: Request, objects: Map[String, Object]) -> Option[u16] {
+    let old = map.get(objects, req.target.key)
+    if let Some(tag) = map.get(req.fields, "if-match") {
+        if let Some(present) = old {
+            if tag != "*" && tag != present.etag {
+                return Some(409)
+            }
+        } else {
+            return Some(409)
+        }
+    }
+    if let Some(tag) = map.get(req.fields, "if-none-match") {
+        if let Some(present) = old {
+            if tag == "*" || tag == present.etag {
+                return Some(config.exists_status)
+            }
+        }
+    }
+    None
+}
+
+fn text_number(n: u64) -> String {
+    let mut out = string.from("")
+    string.push_u64(mut out, n)
+    take out
+}
+
+fn list_objects(objects: Map[String, Object], query: Map[String, String]) -> Response {
+    let mut prefix = string.from("")
+    if let Some(raw) = map.get(query, "prefix") {
+        let Some(take value) = decode(raw) else {
+            return error(400, "InvalidArgument")
+        }
+        prefix = take value
+    }
+    let mut after = string.from("")
+    let start = if map.get(query, "continuation-token") != None {
+        map.get(query, "continuation-token")
+    } else {
+        map.get(query, "start-after")
+    }
+    if let Some(raw) = start {
+        let Some(take value) = decode(raw) else {
+            return error(400, "InvalidArgument")
+        }
+        after = take value
+    }
+    let limit = if let Some(raw) = map.get(query, "max-keys") {
+        let Some(n) = u64_field(raw) else {
+            return error(400, "InvalidArgument")
+        }
+        order.min(n, 1000u64)
+    } else {
+        1000
+    }
+    let mut xml = string.from("<ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">")
+    element(mut xml, "Prefix", prefix)
+    element(mut xml, "MaxKeys", text_number(limit))
+    let mut count = 0u64
+    let mut truncated = false
+    let mut last = string.from("")
+    for key in sorted_keys(objects) {
+        if string.starts_with(key, prefix) && order.compare(key, after) == Greater {
+            if count == limit {
+                truncated = limit != 0
+                break
+            }
+            let object = option.unwrap(map.get(objects, key))
+            string.push(mut xml, "<Contents>")
+            element(mut xml, "Key", key)
+            element(mut xml, "ETag", object.etag)
+            element(mut xml, "Size", text_number(list.len(object.data)))
+            string.push(mut xml, "</Contents>")
+            last = clone(key)
+            count += 1
+        }
+    }
+    element(mut xml, "KeyCount", text_number(count))
+    element(mut xml, "IsTruncated", if truncated {
+        "true"
+    } else {
+        "false"
+    })
+    if truncated {
+        element(mut xml, "NextContinuationToken", last)
+    }
+    string.push(mut xml, "</ListBucketResult>")
+    reply(200, xml)
+}
+
+fn put(mut bucket: Bucket, key: String, take data: Bytes, take meta: Map[String, String]) -> String {
+    let tag = etag(data)
+    map.insert(mut bucket.objects, clone(key), Object(data: take data, etag: clone(tag), metadata: take meta))
+    bucket.writes += 1
+    take tag
+}
+
+fn begin(mut bucket: Bucket, req: Request) -> Response {
+    let id = text_number(bucket.next_upload)
+    bucket.next_upload += 1
+    map.insert(mut bucket.uploads, clone(id), Upload(key: clone(req.target.key), metadata: metadata(req.fields), parts: map.new()))
+    let mut xml = string.from("<InitiateMultipartUploadResult>")
+    element(mut xml, "Key", req.target.key)
+    element(mut xml, "UploadId", id)
+    string.push(mut xml, "</InitiateMultipartUploadResult>")
+    reply(200, xml)
+}
+
+fn put_part(mut upload: Upload, n: u64, take body: Bytes) -> Response {
+    let tag = etag(body)
+    map.insert(mut upload.parts, n, Object(data: take body, etag: clone(tag), metadata: map.new()))
+    let mut response = reply(200, "")
+    map.insert(mut response.fields, string.from("ETag"), take tag)
+    take response
+}
+
+fn consume(s: String, mut at: u64, wanted: String) -> bool {
+    while at < string.byte_len(s) && list.contains(string.as_bytes(" \t\r\n"), string.as_bytes(s)[at]) {
+        at += 1
+    }
+    if string.find(s, at, wanted) != Some(at) {
+        return false
+    }
+    at += string.byte_len(wanted)
+    true
+}
+
+fn tag_value(s: String, mut at: u64, open: String, close: String) -> Option[View[String]] in s {
+    if !consume(s, mut at, open) {
+        return None
+    }
+    let end = string.find(s, at, close)?
+    let value = string.slice(s, at, end)
+    at = end + string.byte_len(close)
+    Some(value)
+}
+
+fn gather(upload: Upload, raw: Bytes, max_body: u64) -> Result[Bytes, String] {
+    let Ok(take s) = string.from_utf8(clone(raw)) else {
+        return Error(string.from("MalformedXML"))
+    }
+    let mut at = 0u64
+    if !consume(s, mut at, "<CompleteMultipartUpload>") {
+        return Error(string.from("MalformedXML"))
+    }
+    let mut previous = 0u64
+    let mut data: Bytes = list.new()
+    while consume(s, mut at, "<Part>") {
+        let Some(number) = tag_value(s, mut at, "<PartNumber>", "</PartNumber>") else {
+            return Error(string.from("MalformedXML"))
+        }
+        let Some(n) = u64_field(number) else {
+            return Error(string.from("InvalidPart"))
+        }
+        let Some(expected) = tag_value(s, mut at, "<ETag>", "</ETag>") else {
+            return Error(string.from("MalformedXML"))
+        }
+        if !consume(s, mut at, "</Part>") {
+            return Error(string.from("MalformedXML"))
+        }
+        if n <= previous {
+            return Error(string.from("InvalidPartOrder"))
+        }
+        let Some(saved) = map.get(upload.parts, n) else {
+            return Error(string.from("InvalidPart"))
+        }
+        if expected != saved.etag {
+            return Error(string.from("InvalidPart"))
+        }
+        if list.len(saved.data) > max_body - list.len(data) {
+            return Error(string.from("EntityTooLarge"))
+        }
+        list.append(mut data, saved.data)
+        previous = n
+    }
+    if previous == 0 || !consume(s, mut at, "</CompleteMultipartUpload>") || at != string.byte_len(s) {
+        return Error(string.from("MalformedXML"))
+    }
+    Ok(take data)
+}
+
+fn multipart(config: Config, mut bucket: Bucket, req: Request, id: String, take body: Bytes, fault: Fault) -> Response {
+    let Some(take upload) = map.remove(mut bucket.uploads, id) else {
+        return error(404, "NoSuchUpload")
+    }
+    let mut current = take upload
+    let response = if current.key != req.target.key {
+        error(404, "NoSuchUpload")
+    } else if req.method == "DELETE" {
+        return reply(204, "")
+    } else if req.method == "PUT" {
+        let n = match map.get(req.target.query, "partNumber") {
+            Some(number) => or_else(u64_field(number), 0),
+            None => 0
+        }
+        if n == 0 || n > 10000 {
+            error(400, "InvalidArgument")
+        } else {
+            put_part(mut current, n, take body)
+        }
+    } else if req.method == "POST" {
+        if let CompleteError = fault {
+            error(200, "InternalError")
+        } else if let Some(status) = conditional(config, req, bucket.objects) {
+            error(status, if status == 409 {
+                "ConditionalRequestConflict"
+            } else {
+                "PreconditionFailed"
+            })
+        } else {
+            match gather(current, body, config.max_body) {
+                Error(code) => error(400, code),
+                Ok(take data) => {
+                    let Upload(metadata: take meta, ..) = take current
+                    let tag = put(mut bucket, req.target.key, take data, take meta)
+                    let mut xml = string.from("<CompleteMultipartUploadResult>")
+                    element(mut xml, "Key", req.target.key)
+                    element(mut xml, "ETag", tag)
+                    string.push(mut xml, "</CompleteMultipartUploadResult>")
+                    return reply(200, xml)
+                }
+            }
+        }
+    } else {
+        error(405, "MethodNotAllowed")
+    }
+    map.insert(mut bucket.uploads, clone(id), take current)
+    take response
+}
+
+fn dispatch(config: Config, mut bucket: Bucket, req: Request, take body: Bytes, fault: Fault) -> Response {
+    match fault {
+        InternalError => return error(500, "InternalError"),
+        SlowDown => return error(503, "SlowDown"),
+        _ => ()
+    }
+    if let Some(id) = map.get(req.target.query, "uploadId") {
+        return multipart(config, mut bucket, req, id, take body, fault)
+    }
+    if req.method == "POST" && map.get(req.target.query, "uploads") != None {
+        return begin(mut bucket, req)
+    }
+    if req.method == "GET" && req.target.key == "" {
+        if let Some(v) = map.get(req.target.query, "list-type") {
+            if v == "2" {
+                return list_objects(bucket.objects, req.target.query)
+            }
+        }
+    }
+    if req.target.key == "" {
+        return error(400, "InvalidArgument")
+    }
+    if let Some(status) = conditional(config, req, bucket.objects) {
+        return error(status, if status == 409 {
+            "ConditionalRequestConflict"
+        } else {
+            "PreconditionFailed"
+        })
+    }
+    if req.method == "PUT" {
+        let tag = put(mut bucket, req.target.key, take body, metadata(req.fields))
+        let mut out = reply(200, "")
+        map.insert(mut out.fields, string.from("ETag"), take tag)
+        return take out
+    }
+    if req.method == "DELETE" {
+        let _ = map.remove(mut bucket.objects, req.target.key)
+        return reply(204, "")
+    }
+    if req.method == "HEAD" || req.method == "GET" {
+        let Some(object) = map.get(bucket.objects, req.target.key) else {
+            return error(404, "NoSuchKey")
+        }
+        let mut out = Response(status: 200, fields: clone(object.metadata), body: clone(object.data))
+        map.insert(mut out.fields, string.from("ETag"), clone(object.etag))
+        return take out
+    }
+    error(405, "MethodNotAllowed")
+}
+
+type ReadState = Reading | Body(u64) | Sending | ResetPeer
+
+type Peer {
+    fault: Fault,
+    plan: sim.world.Plan,
+    state: ReadState,
+    head: http1.Head,
+    cursor: http1.Cursor,
+    incoming: Bytes,
+    outgoing: Bytes,
+    sent: u64,
+    read_closed: bool,
+    write_closed: bool
+}
+
+fn new_peer(fault: Fault, take plan: sim.world.Plan) -> Peer {
+    Peer(fault: fault, plan: take plan, state: Reading, head: http1.head(), cursor: http1.cursor(), incoming: list.new(), outgoing: list.new(), sent: 0, read_closed: false, write_closed: false)
+}
+
+fn respond(mut peer: Peer, response: Response, head: bool) {
+    let mut line = string.from("HTTP/1.1 ")
+    string.push_u64(mut line, int.widen(response.status))
+    string.push(mut line, " \r\nConnection: close\r\nContent-Length: ")
+    string.push_u64(mut line, if response.status == 304 || (head && response.status != 200) {
+        0
+    } else {
+        list.len(response.body)
+    })
+    string.push(mut line, "\r\n")
+    for name in sorted_keys(response.fields) {
+        string.push(mut line, name)
+        string.push(mut line, ": ")
+        if let Some(value) = map.get(response.fields, name) {
+            string.push(mut line, value)
+        }
+        string.push(mut line, "\r\n")
+    }
+    string.push(mut line, "\r\n")
+    let mut wire = string.into_bytes(take line)
+    if !head && response.status != 304 {
+        list.append(mut wire, response.body)
+    }
+    peer.outgoing = take wire
+    peer.state = Sending
+    list.clear(mut peer.incoming)
+}
+
+fn received(config: Config, mut bucket: Bucket, mut peer: Peer) {
+    if let Reading = peer.state {
+        match http1.resume(peer.incoming, mut peer.head, mut peer.cursor) {
+            Partial => return,
+            Complete => (),
+            _ => {
+                respond(mut peer, error(400, "MalformedRequest"), false)
+                return
+            }
+        }
+        if let ResetBeforeBody = peer.fault {
+            peer.state = ResetPeer
+            return
+        }
+        let Some(take fields) = parse_headers(peer.incoming, peer.head) else {
+            respond(mut peer, error(400, "MalformedRequest"), false)
+            return
+        }
+        let Some(size) = body_length(fields) else {
+            respond(mut peer, error(400, "InvalidRequest"), false)
+            return
+        }
+        if size > config.max_body {
+            respond(mut peer, error(413, "EntityTooLarge"), false)
+            return
+        }
+        peer.state = Body(size)
+    }
+    let Body(size) = peer.state else {
+        return
+    }
+    if list.len(peer.incoming) - peer.head.end < size {
+        return
+    }
+    let method = piece(peer.incoming, peer.head.method.start, peer.head.method.end)
+    let head = method == "HEAD"
+    if list.len(peer.incoming) - peer.head.end != size {
+        respond(mut peer, error(400, "InvalidRequest"), head)
+        return
+    }
+    let raw_target = piece(peer.incoming, peer.head.target.start, peer.head.target.end)
+    let Some(take uri) = parse_target(raw_target) else {
+        respond(mut peer, error(400, "InvalidURI"), head)
+        return
+    }
+    let fields = option.unwrap(parse_headers(peer.incoming, peer.head))
+    let body: Bytes = clone(list.slice(peer.incoming, peer.head.end, list.len(peer.incoming)))
+    let req = Request(method: take method, target: take uri, fields: take fields)
+    if !authenticated(config, req, raw_target, body) {
+        respond(mut peer, error(403, "SignatureDoesNotMatch"), head)
+        return
+    }
+    let response = dispatch(config, mut bucket, req, take body, peer.fault)
+    if let ResetAfterBody = peer.fault {
+        peer.state = ResetPeer
+    } else {
+        respond(mut peer, response, head)
+    }
+}
+
+fn answer(mut served: Served[NetOp], take call: Call[NetOp], response: NetReply) -> bool {
+    if let Ok(()) = provide.reply(mut served, take call, provide.net_reply(response)) {
+        return true
+    }
+    false
+}
+
+fn matches_closed(state: ReadState) -> bool {
+    match state {
+        Sending => true,
+        ResetPeer => true,
+        _ => false
+    }
+}
+
+fn send(config: Config, mut bucket: Bucket, mut peer: Peer, prefix: u64, tail: u64, mut served: Served[NetOp], take call: Call[NetOp]) {
+    if matches_closed(peer.state) {
+        let _ = answer(mut served, take call, Failed(Reset))
+        return
+    }
+    if prefix + tail == 0 {
+        let _ = answer(mut served, take call, Count(0))
+        return
+    }
+    let mut data: Bytes = list.with_capacity(prefix + tail)
+    provide.payload(call, 1, mut data)
+    provide.payload(call, 2, mut data)
+    if list.len(data) != prefix + tail {
+        let _ = answer(mut served, take call, Failed(Aborted))
+        return
+    }
+    let limit = order.min(config.fragment_bytes, list.len(data))
+    let count = 1 + sim.world.pick(mut peer.plan, limit)
+    if answer(mut served, take call, Count(count)) {
+        list.append(mut peer.incoming, list.slice(data, 0, count))
+        received(config, mut bucket, mut peer)
+    }
+}
+
+fn recv(config: Config, mut peer: Peer, clock: Clock, room: u64, mut served: Served[NetOp], take call: Call[NetOp]) -> bool waits {
+    let mut c = take call
+    match peer.state {
+        ResetPeer => return answer(mut served, take c, Failed(Reset)),
+        Sending => (),
+        _ => return answer(mut served, take c, Failed(Reset))
+    }
+    if let Stall(until) = peer.fault {
+        if host.mono_ns(clock) < until {
+            host.sleep_until(clock, until)
+        }
+    }
+    let limit = order.min(config.fragment_bytes, order.min(room, list.len(peer.outgoing) - peer.sent))
+    let count: u64 = if limit == 0 {
+        0
+    } else {
+        1 + sim.world.pick(mut peer.plan, limit)
+    }
+    let staged = provide.fill(mut served, mut c, list.slice(peer.outgoing, peer.sent, peer.sent + count))
+    if answer(mut served, take c, Count(staged)) {
+        peer.sent += staged
+        true
+    } else {
+        false
+    }
+}
+
+fn operate(config: Config, mut bucket: Bucket, mut peer: Peer, clock: Clock, op: NetOp, mut served: Served[NetOp], take call: Call[NetOp]) -> bool waits {
+    match op {
+        Send(prefix: prefix, tail: tail, ..) => {
+            send(config, mut bucket, mut peer, prefix, tail, mut served, take call)
+            true
+        },
+        Recv(room: room, max: max, ..) => recv(config, mut peer, clock, order.min(room, max), mut served, take call),
+        Ready(..) => {
+            if let Stall(until) = peer.fault {
+                if host.mono_ns(clock) < until {
+                    host.sleep_until(clock, until)
+                }
+            }
+            answer(mut served, take call, Done)
+        },
+        Released(part: part, ..) => {
+            match part {
+                Whole => {
+                    peer.read_closed = true
+                    peer.write_closed = true
+                },
+                Read => {
+                    peer.read_closed = true
+                },
+                Write => {
+                    peer.write_closed = true
+                }
+            }
+            true
+        },
+        _ => answer(mut served, take call, Failed(Denied))
+    }
+}
+
+fn same_addr(a: Addr, b: Addr) -> bool {
+    if a.port != b.port {
+        return false
+    }
+    match (a.ip, b.ip) {
+        (V4(x), V4(y)) => x == y,
+        (V6(hi, lo), V6(other_hi, other_lo)) => hi == other_hi && lo == other_lo,
+        _ => false
+    }
+}
+
+fn name_operation(op: NetOp) -> bool {
+    match op {
+        Resolve(..) => true,
+        Handshake(..) => true,
+        _ => false
+    }
+}
+
+fn socket(op: NetOp) -> Option[u64] {
+    match op {
+        Send(socket: id, ..) => Some(id),
+        Recv(socket: id, ..) => Some(id),
+        Ready(socket: id) => Some(id),
+        Released(id: id, ..) => Some(id),
+        _ => None
+    }
+}
+
+/// Runs a single bucket over a served Net. A clock controller drives stalls.
+pub fn serve(n: Config, mut plan: sim.world.Plan, clock: Clock, take served: Served[NetOp]) -> Report waits {
+    if n.fragment_bytes == 0 || (n.exists_status != 412 && n.exists_status != 304) {
+        fail("sim.s3 needs a positive fragment size and a 412 or 304 dialect")
+    }
+    let mut port = take served
+    let mut bucket = Bucket(objects: map.new(), uploads: map.new(), next_upload: 1, writes: 0)
+    let mut peers: Map[u64, Peer] = map.new()
+    let mut next = 1u64
+    let mut dns_changed = false
+    let mut withdrawn = 0u64
+    while let Some(take call) = provide.next(mut port) {
+        let op = provide.net_op(call)
+        match op {
+            Connect(addr: addr) => {
+                if !same_addr(addr, n.address) {
+                    let _ = answer(mut port, take call, Failed(Refused))
+                } else if answer(mut port, take call, Socket(next, addr)) {
+                    let fault = if list.len(n.faults) == 0 {
+                        Clean
+                    } else {
+                        n.faults[sim.world.pick(mut plan, list.len(n.faults))]
+                    }
+                    let stream = sim.world.plan(sim.world.pick(mut plan, 0xffffffffffffffff))
+                    map.insert(mut peers, next, new_peer(fault, take stream))
+                    next += 1
+                }
+            },
+            _ if name_operation(op) => {
+                if dns_changed {
+                    match n.after_resolve {
+                        Some(network) => sim.net.answer_name(network, mut port, take call),
+                        None => sim.net.answer_name(n.network, mut port, take call)
+                    }
+                } else {
+                    sim.net.answer_name(n.network, mut port, take call)
+                }
+                if let Resolve(..) = op {
+                    dns_changed = true
+                }
+            },
+            _ => {
+                if let Some(id) = socket(op) {
+                    if let Some(take found) = map.remove(mut peers, id) {
+                        let mut entry = take found
+                        if !operate(n, mut bucket, mut entry, clock, op, mut port, take call) {
+                            withdrawn += 1
+                        }
+                        if !entry.read_closed || !entry.write_closed {
+                            map.insert(mut peers, id, take entry)
+                        }
+                    } else {
+                        let _ = answer(mut port, take call, Failed(Reset))
+                    }
+                } else {
+                    let _ = answer(mut port, take call, Failed(Denied))
+                }
+            }
+        }
+    }
+    let Bucket(objects: take objects, writes, ..) = take bucket
+    Report(objects: take objects, writes: writes, attempts: next - 1, withdrawn: withdrawn)
+}

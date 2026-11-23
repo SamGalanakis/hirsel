@@ -3,7 +3,8 @@
 ### CAP-1: Authority is explicit
 
 Files, directories, network, processes, clocks, randomness, standard streams, environment
-variables, tasks, credentials ([`Secret`](tls.md#tls-5-secrets)), native code
+variables, tasks, credentials ([`Secret`](tls.md#tls-5-secrets)), credential sources
+([`Cred`](tls.md#tls-7-credential-grants), unbuilt), native code
 ([`Foreign[I]`](foreign.md#ffi-4-the-foreign-capability)) and child processes
 ([`Exec`](exec.md#exec-2-launch-profiles-and-narrowing), unbuilt) are reached only
 through operations that take a capability argument.
@@ -74,7 +75,9 @@ fn opener(d: Dir) -> own fn(String) -> Result[HostFile, IoError] waits {
 The only capabilities a run starts with are the arguments of `main`
 ([PROG-3](programs.md#prog-3-entry)). The run's configuration grants each parameter. A
 `Secret` parameter is granted from an environment variable or a file that the launcher
-reads before the run starts ([TLS-5](tls.md#tls-5-secrets)); a run
+reads before the run starts ([TLS-5](tls.md#tls-5-secrets)), and a `Cred` parameter from a
+credential source that only the provider contacts ([TLS-7](tls.md#tls-7-credential-grants),
+unbuilt); a run
 whose configuration does not grant one of them, or whose provider cannot give one on this
 host (a `Dir`'s minimum host, [core](core.md#contracts-the-signatures-do-not-state)), does not start: it runs no
 program code and has no host effect, and reports as

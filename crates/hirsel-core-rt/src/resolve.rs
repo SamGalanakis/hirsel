@@ -104,7 +104,7 @@ pub unsafe extern "C" fn hirsel_core_host_resolve(
                 direction: 0,
                 os: &crate::os_resolve::OPERATIONS,
                 tls: ptr::null_mut(),
-                pending_write: false,
+                tls_send_pending: false,
                 max_receive: 0,
             },
             raw_name: *name,

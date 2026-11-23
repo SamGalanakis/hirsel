@@ -9,6 +9,7 @@ use rustls::{
 use std::{
     io::{Read, Write},
     net::{Ipv4Addr, TcpListener, TcpStream},
+    os::fd::AsRawFd,
     sync::{Arc, mpsc},
     thread,
 };
@@ -897,6 +898,142 @@ fn tls13_record_boundaries_and_updates(run: &mut Run) {
     run.release_halves(key);
 }
 
+struct SlotSend<'a> {
+    key: u64,
+    bytes: &'a [u8],
+    resume_peer: mpsc::Sender<()>,
+    cancel: bool,
+    sent: Outcome,
+}
+
+unsafe extern "C" fn send_slot(context: *mut Context, _: *mut u8, input: *mut u8) -> u8 {
+    unsafe {
+        let case = input.cast::<*mut SlotSend<'_>>().read();
+        (*case).sent = hirsel_core_host_send_pair(
+            context,
+            (*case).key | 2,
+            &self::input((*case).bytes),
+            &self::input(b""),
+            0,
+            0,
+            0,
+            3,
+        );
+    }
+    0
+}
+
+unsafe extern "C" fn drain_slot(context: *mut Context, _: *mut u8, input: *mut u8) -> u8 {
+    unsafe {
+        let mut case = input.cast::<*mut SlotSend<'_>>().read();
+        let child = hirsel_core_spawn(
+            context,
+            0,
+            8192,
+            (&raw mut case).cast(),
+            send_slot,
+            crate::tasks_tests::layout::<*mut SlotSend<'_>, ()>(0),
+            5,
+        );
+        assert!(!child.task.is_null());
+        checkpoint();
+        assert!(task_waits_for_provider(child.task));
+        if (*case).cancel {
+            hirsel_core_cancel(context, child.task);
+        } else {
+            (*case).resume_peer.send(()).unwrap();
+        }
+        let joined = hirsel_core_join(context, child.task, ptr::null_mut(), 5);
+        assert_eq!((joined.kind, joined.status), (0, 0));
+        if (*case).cancel {
+            (*case).resume_peer.send(()).unwrap();
+            // Cancellation returns the committed count, so the next send
+            // resumes the queued ciphertext without replaying the plaintext.
+            let flushed = hirsel_core_host_send_pair(
+                context,
+                (*case).key | 2,
+                &self::input(b""),
+                &self::input(b""),
+                0,
+                0,
+                0,
+                6,
+            );
+            assert_eq!(flushed.error, IoError::OK);
+        }
+    }
+    0
+}
+
+fn committed_final_slot(run: &mut Run) {
+    const SIZE: usize = 4 * 16 * 1024;
+    let set_buffer = |fd, option| unsafe {
+        let size = 4096i32;
+        assert_eq!(
+            libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                option,
+                (&raw const size).cast(),
+                size_of::<i32>() as u32
+            ),
+            0
+        );
+    };
+    for cancel in [false, true] {
+        let listener = listener();
+        set_buffer(listener.as_raw_fd(), libc::SO_RCVBUF);
+        let (resume_peer, paused) = mpsc::channel();
+        let (port, peer) = serve(listener, certificate_config(&[]), move |mut server| {
+            server_handshake(&mut server).unwrap();
+            paused.recv().unwrap();
+            let mut bytes = vec![0; SIZE];
+            server.read_exact(&mut bytes).unwrap();
+            assert!(bytes.iter().enumerate().all(|(i, &b)| b == (i % 251) as u8));
+            server.write_all(b"!").unwrap();
+            server.conn.send_close_notify();
+            server.flush().unwrap();
+        });
+        let key = run.connect(port);
+        set_buffer(run.files.sockets.fd(key), libc::SO_SNDBUF);
+        assert_eq!(
+            run.upgrade(key, b"alpha.test", Some(CA), &[]).outcome.error,
+            IoError::OK
+        );
+        let bytes: Vec<_> = (0..SIZE).map(|i| (i % 251) as u8).collect();
+        let mut case = SlotSend {
+            key,
+            bytes: &bytes,
+            resume_peer,
+            cancel,
+            sent: Outcome::default(),
+        };
+        let mut input = &raw mut case;
+        unsafe {
+            crate::causes::task_start(&mut run.context).unwrap();
+            let status = run_root(
+                &raw mut *run.context,
+                drain_slot,
+                (&raw mut input).cast(),
+                ptr::null_mut(),
+                size_of::<*mut SlotSend<'_>>(),
+                0,
+                SchedulerProvider::default(),
+            );
+            assert_eq!(status, 0);
+        }
+        assert_eq!(
+            (case.sent.error, case.sent.value),
+            (IoError::OK, SIZE as u64)
+        );
+        let mut reply = [0];
+        let (out, n) = read_tls_law(run, key, &mut reply);
+        assert_eq!((out.error, n, reply), (IoError::OK, 1, [b'!']));
+        run.release_halves(key);
+        peer.join().unwrap();
+    }
+}
+
 fn tls13_record_rejection(run: &mut Run) {
     for oversized in [false, true] {
         let (port, peer) = serve(listener(), certificate_config(&[]), move |mut server| {
@@ -977,6 +1114,7 @@ fn os_tls_loopback_laws() {
     tls12_round_trip(&mut run);
     tls13_record_boundaries_and_updates(&mut run);
     tls13_record_rejection(&mut run);
+    committed_final_slot(&mut run);
     cert_case(&mut run, b"beta.test", Some(CA), Some(tls_failure(0, 1)));
     assert_eq!(fds(), baseline);
     cert_case(&mut run, b"alpha.test", Some(CA), None);

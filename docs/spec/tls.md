@@ -133,8 +133,10 @@ The halves from `tls.connect` are ordinary halves. The rules of
   passes or cancellation arrives after some bytes were committed, the send returns
   `Ok(n)`. If it committed zero bytes, it returns `TimedOut` or `Aborted`. The session
   holds at most the connection's slot cap of committed ciphertext beyond what the
-  socket has accepted. The next send or drop flushes it first. Each byte reaches
-  the peer exactly once when the caller continues from the returned count.
+  socket has accepted. A send that commits its entire input waits for its final
+  ciphertext to reach the socket, subject to the deadline and cancellation rules
+  above. The next send or drop flushes any outstanding ciphertext first. Each byte
+  reaches the peer exactly once when the caller continues from the returned count.
 - **Both directions.** One TLS session serves both halves. The provider serialises the
   two halves' use of it, but only inside a callback and never across a wait. So a
   receive in one task and a send in another proceed together, as they do on a plain

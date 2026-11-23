@@ -32,6 +32,7 @@ pub(crate) struct HandshakeState {
     pub cacheable: bool,
     pub stream: Option<crate::os_tls::Stream>,
     pub consumed: bool,
+    pub pending_write: bool,
 }
 
 pub(crate) unsafe fn bytes(buffer: &Buffer) -> &[u8] {
@@ -209,7 +210,7 @@ unsafe fn connect(
                 direction: 0,
                 os: &crate::os_net::TLS_OPERATIONS,
                 tls: &raw mut (*files).tls,
-                pending_write: false,
+                tls_send_pending: false,
                 max_receive: 0,
             },
             name: View {
@@ -341,6 +342,7 @@ unsafe fn prepare(
                 cacheable,
                 stream: None,
                 consumed: false,
+                pending_write: false,
             },
         ))
     }

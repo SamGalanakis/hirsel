@@ -584,7 +584,18 @@ unsafe fn attempt(request: &mut Request, n: &mut NetworkRequest, first: bool) ->
                 {
                     let fd = sockets.fd(key);
                     if let Some(tail) = tail {
-                        return stream.send(fd, crate::tls::bytes(b), crate::tls::bytes(tail));
+                        if !n.tls_send_pending {
+                            let length = (b.len + tail.len) as u64;
+                            let answer =
+                                stream.send(fd, crate::tls::bytes(b), crate::tls::bytes(tail))?;
+                            if length == 0 || answer.error != IoError::OK || answer.value < length {
+                                return Some(answer);
+                            }
+                            // After a full write the caller may wait for a reply. Keep
+                            // the write waiter until the final slot reaches the socket.
+                            n.tls_send_pending = true;
+                        }
+                        return stream.send(fd, &[], &[]);
                     }
                     let spare = if b.capacity <= b.len {
                         &mut [][..]
@@ -684,6 +695,13 @@ unsafe fn finish(request: &Request, n: &mut NetworkRequest, mut outcome: Outcome
                 (*n.sockets).release(key);
             }
         }
+    }
+    if n.tls_send_pending {
+        // A deadline or cancellation cannot take back already committed bytes.
+        outcome = Outcome {
+            value: request.buffer.len as u64 + unsafe { (*n.send_tail).len as u64 },
+            ..Outcome::default()
+        };
     }
     if matches!(request.operation, SEND_SECRET | SCRAM) && outcome.error != IoError::OK {
         // SAFETY: this operation pins its distinct progress field through delivery.
@@ -888,7 +906,7 @@ unsafe fn tls_step(request: *mut Request, token: u64, first: bool) -> Step {
                 Err(outcome) => return tls_finish(tls, key, outcome),
             }
         } else {
-            sockets.disarm(key, n.pending_write);
+            sockets.disarm(key, s.pending_write);
         }
         let stream = s.stream.as_mut().unwrap();
         match stream.handshake(sockets.fd(key)) {
@@ -921,7 +939,7 @@ unsafe fn tls_step(request: *mut Request, token: u64, first: bool) -> Step {
                     return tls_finish(tls, key, signal(6));
                 }
                 let deadline = due.host();
-                n.pending_write = write;
+                s.pending_write = write;
                 if let Err(e) = sockets.arm(key, write, token) {
                     return tls_finish(tls, key, error(e.raw_os_error().unwrap_or(libc::EIO)));
                 }

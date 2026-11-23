@@ -178,7 +178,8 @@ pub(crate) struct NetworkRequest {
     pub direction: u8,
     pub os: &'static crate::os_net::Operations,
     pub tls: *mut crate::os_tls::Streams,
-    pub pending_write: bool,
+    /// TLS SEND_PAIR already committed its entire input and is draining ciphertext.
+    pub tls_send_pending: bool,
     /// RECV_BOUNDED's bound, which a served Net's call reports.
     pub max_receive: u64,
 }
@@ -419,7 +420,7 @@ unsafe fn address_op(
             direction: 0,
             os: &crate::os_net::OPERATIONS,
             tls: &raw mut (*files).tls,
-            pending_write: false,
+            tls_send_pending: false,
             max_receive: 0,
         };
         let mut request = Request {
@@ -521,7 +522,7 @@ impl OwnedNet {
                 direction: (key & 3) as u8,
                 os: &crate::os_net::OPERATIONS,
                 tls: &raw mut (*files).tls,
-                pending_write: false,
+                tls_send_pending: false,
                 max_receive,
             });
             let mut buffer = if operand.is_null() {
@@ -1042,7 +1043,7 @@ pub unsafe extern "C" fn hirsel_core_host_send_secret(
                 direction: 2,
                 os: &crate::os_net::OPERATIONS,
                 tls: &raw mut (*files).tls,
-                pending_write: false,
+                tls_send_pending: false,
                 max_receive: 0,
             },
             secret: Buffer {

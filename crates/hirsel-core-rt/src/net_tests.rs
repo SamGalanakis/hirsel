@@ -969,7 +969,7 @@ unsafe fn socket_law(law: &str, context: *mut Context, n: u64, clock: u64) {
                         direction: 0,
                         os: &crate::os_net::OPERATIONS,
                         tls: ptr::null_mut(),
-                        pending_write: false,
+                        tls_send_pending: false,
                         max_receive: 0,
                     };
                     let mut r = Request {

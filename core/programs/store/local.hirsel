@@ -10,7 +10,7 @@
 // returned, so after the child's store is closed: a group never has two heads.
 
 // What a factory's `make` gets to build its PlaceConfig from. The launcher replaces the
-// config's backing, selection and idle bound with the host's (§14.9).
+// config's backing, selection, idle bound and wire session count with the host's (§14.9).
 // `name` is the group being started, so a place can name itself to the services it is given.
 pub type Supplied: send { name: String, tasks: Tasks, clock: Clock, random: Random, net: Net }
 
@@ -24,10 +24,11 @@ pub type Refused: send = Unknown | Exists | Full | Busy | Retiring | Failed(Stri
 
 // `root` holds the host's catalog (`root/host`) and every group's store (`root/<name>`).
 // `place_bytes` is the budget every live child shares; `max_places` and `idle_ms` are
-// the host's Config (§14.2, §14.4).
+// the host's Config (§14.2, §14.4). `sessions` is the wire sessions every place admits at
+// once (`PlaceConfig.max_sessions`).
 pub type Config[T: send]: send {
     root: Dir, options: store.Options, factory: Factory[T], seed: T,
-    max_places: u64, idle_ms: u64, place_bytes: u64,
+    max_places: u64, idle_ms: u64, place_bytes: u64, sessions: u64,
     tasks: Tasks, clock: Clock, random: Random, net: Net, watch: Option[Sender[Change]],
 }
 
@@ -45,7 +46,7 @@ const PLACE_TASK_BYTES: u64 = 65536u64
 const LOCAL_BYTES: u64 = 1048576u64
 
 type Launch[T: send]: send {
-    supplied: Supplied, backing: runner.Backing, selection: runner.Selection, idle: u64, available: u64,
+    supplied: Supplied, backing: runner.Backing, selection: runner.Selection, idle: u64, sessions: u64, available: u64,
     stop: Receiver[()], status: Latest[runner.Status], to: Sender[In], name: String, gen: u64,
 }
 type Started { task: Task[()], charge: u64 }
@@ -70,7 +71,7 @@ type Kid {
 
 type Actor[T: send] {
     h: platform.Host, driving: platform.Driver, factory: Factory[T], seed: T, root: Dir, options: store.Options,
-    place_bytes: u64, used: u64, tasks: Tasks, clock: Clock, random: Random, net: Net, me: Sender[In], watch: Option[Sender[Change]],
+    place_bytes: u64, sessions: u64, used: u64, tasks: Tasks, clock: Clock, random: Random, net: Net, me: Sender[In], watch: Option[Sender[Change]],
     kids: List[Kid], routes: List[(String, Sender[Result[Lease, Refused]])], unloads: List[(String, Sender[Result[Unloaded, Refused]])],
     removes: List[(String, Sender[Result[(), Refused]])], retiring: List[launcher.Group], halting: bool, unloaded: List[Unloaded],
 }
@@ -99,11 +100,12 @@ pub fn seeded_factory[T: send, G: send, H: send, S: send, B: send](make: fn(take
 }
 
 fn start_made[T: send, G: send, H: send, S: send, B: send](take request: Launch[T], take made: Result[runner.PlaceConfig[G, H, S, B], Capacity]) -> Result[Started, String] {
-    let Launch(supplied: supplied, backing: take backing, selection: selection, idle: idle, available: available, stop: take halt, status: take root, to: take to, name: take name, gen: gen) = take request
+    let Launch(supplied: supplied, backing: take backing, selection: selection, idle: idle, sessions: sessions, available: available, stop: take halt, status: take root, to: take to, name: take name, gen: gen) = take request
     let mut config = match take made { Ok(take m) => take m, Error(_) => return Error(string.from("Full")) }
     config.backing = take backing
     config.selection = selection
     config.idle = Some(idle)
+    config.max_sessions = sessions
     let need = match runner.operate_bytes(config) { Ok(total) => total, Error(_) => return Error(string.from("Full")) }
     let charge = int.saturating_add(need, PLACE_TASK_BYTES)
     if charge > available { return Error(string.from("Full")) }
@@ -207,7 +209,7 @@ fn start[T: send](mut a: Actor[T], take l: launcher.Launch, mut events: List[lau
         Error(_) => { list.push(mut events, Refused(take child, Spawn(string.from("Full")))); return },
     }
     let supplied = Supplied(name: string.from(group.name), tasks: a.tasks, clock: a.clock, random: a.random, net: a.net)
-    let launched: Launch[T] = Launch(supplied: take supplied, backing: Disk(dir, clone(a.options)), selection: selection_of(serve.activation), idle: serve.idle,
+    let launched: Launch[T] = Launch(supplied: take supplied, backing: Disk(dir, clone(a.options)), selection: selection_of(serve.activation), idle: serve.idle, sessions: a.sessions,
         available: a.place_bytes - a.used, stop: take stop_from, status: latest.handle(root), to: channel.sender(a.me), name: string.from(group.name), gen: gen)
     match (a.factory.start)(take launched, a.seed) {
         Ok(take begun) => {
@@ -516,7 +518,7 @@ fn open_host(tasks: Tasks, root: Dir, clock: Clock, random: Random, options: sto
 fn run_local[T: send](take begin: Begin[T]) -> () waits {
     let Begin(config: take config, inbox: take inbox, me: take me, ready: take ready) = take begin
     let Config(root: root, options: take options, factory: take making, seed: take seed, max_places: max_places, idle_ms: idle_ms, place_bytes: place_bytes,
-        tasks: tasks, clock: clock, random: random, net: net, watch: take watch) = take config
+        sessions: sessions, tasks: tasks, clock: clock, random: random, net: net, watch: take watch) = take config
     // A reopened host keeps its recorded Config; this one applies to a new catalog only.
     let (opened_host, hello) = match open_host(tasks, root, clock, random, options, platform.Config(max_places: max_places, idle_ms: idle_ms)) {
         Ok(take opened) => take opened,
@@ -527,7 +529,7 @@ fn run_local[T: send](take begin: Begin[T]) -> () waits {
     let forwarding = task.spawn(tasks, bytes 65536u64, Forward(from: take host_from, to: channel.sender(me)), fwd)
     let timers = platform.driver(tasks, clock, take host_to)
     let mut a = Actor(h: take opened_host, driving: take timers, factory: take making, seed: take seed, root: root, options: take options,
-        place_bytes: place_bytes, used: 0u64, tasks: tasks, clock: clock, random: random, net: net, me: take me, watch: take watch,
+        place_bytes: place_bytes, sessions: sessions, used: 0u64, tasks: tasks, clock: clock, random: random, net: net, me: take me, watch: take watch,
         kids: list.new(), routes: list.new(), unloads: list.new(), removes: list.new(), retiring: list.new(), halting: false, unloaded: list.new())
     // Hello is answered with an empty inventory, so the host starts every Dirty group and
     // every passed due time (§14.5).
@@ -579,7 +581,7 @@ pub fn host_bytes(options: store.Options, place_bytes: u64) -> u64 {
 }
 
 pub fn local[T: send](take config: Config[T]) -> Result[Local, Refused] waits {
-    if config.max_places == 0u64 || config.idle_ms == 0u64 || config.place_bytes == 0u64 { return Error(Full) }
+    if config.max_places == 0u64 || config.idle_ms == 0u64 || config.place_bytes == 0u64 || config.sessions == 0u64 { return Error(Full) }
     let tasks = config.tasks
     let need = host_bytes(config.options, config.place_bytes)
     let (to, inbox): (Sender[In], Receiver[In]) = channel.new(256u64)

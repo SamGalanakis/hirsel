@@ -2687,7 +2687,7 @@ fn start_local(parent: Dir, make: fn(take local.Supplied) -> Result[runner.Place
     let (watch, changes): (Sender[local.Change], Receiver[local.Change]) = channel.new(16u64)
     let making: local.Factory[()] = local.factory(make)
     let config = local.Config(root: dir, options: disk_options(), factory: take making, seed: (), max_places: 1u64, idle_ms: idle_ms,
-        place_bytes: DIRECTORY_BUDGET, tasks: tasks, clock: clock, random: random, net: net, watch: Some(take watch))
+        place_bytes: DIRECTORY_BUDGET, sessions: 1u64, tasks: tasks, clock: clock, random: random, net: net, watch: Some(take watch))
     let made = match local.local(take config) { Ok(take made) => take made, Error(_) => fail("local: refused a valid configuration") }
     let door = local.door(made)
     if let Error(_) = local.add(door, "a") { fail("local: add refused") }

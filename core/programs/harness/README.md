@@ -355,7 +355,8 @@ session's place can unload while its page stays open.
   `Page(before, n)`. The harness has no reader ACL yet; an application that
   needs one registers the window with `query_as` and refuses there.
 - While a session is busy, its following stream holds one of the place's wire
-  sessions. A place behind a front therefore needs `max_sessions` of at least 2.
+  sessions. The gateway's host sets every session's place to four (RUNNER-SPEC
+  §14.9), so a page, a status read, a message or a decision never waits for the run.
   A front call whose connect is refused retries until `within_ms`, which covers a
   finished session the place has not yet reaped.
 - `ts-client/` is a TypeScript browser client for this front, with an example page

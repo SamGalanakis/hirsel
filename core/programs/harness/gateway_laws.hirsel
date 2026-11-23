@@ -237,7 +237,7 @@ fn wire() -> store.runner.WireConfig {
     w
 }
 
-// The host replaces the backing, selection and idle time with its own (§14.9). The binding maps
+// The host replaces the backing, selection, idle time and wire session count with its own (§14.9). The binding maps
 // one credential to one Caller across connections, as a browser's login would.
 fn session_place(take supplied: store.local.Supplied, s: Services) -> Result[store.runner.PlaceConfig[Grants, harness.Handles, Services, ()], Capacity] {
     let w = result.unwrap(wired())
@@ -867,6 +867,12 @@ fn tool_stream(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
         }
         let Ok(let_go) = channel.receive(held) else {
             return 18u64
+        }
+        // A read during the run: the open stream holds one of the place's wire sessions,
+        // so the page needs another, and it must not wait for the held tool.
+        let (mid_run, _) = http(net, clock, port, "GET", "/sessions/0/history?before=4&lines=2", person(me, 0u64), list.new())
+        if mid_run != 200u16 {
+            return 19u64
         }
         let _ = channel.send(let_go, ())
     }

@@ -15,6 +15,11 @@
 // store and a session store opened to seed it.
 const GATEWAY_BYTES: u64 = 67108864u64
 const NEXT_ID: u64 = 0u64
+// The wire sessions a session's place admits at once. A front's following stream holds
+// one for as long as the session is busy, so a history page, a status read, a message or
+// a decision meanwhile needs its own, and a subagent's look at a child needs one more; a
+// read never waits for a running turn to end.
+const PLACE_SESSIONS: u64 = 4u64
 
 // How a new session's store starts: an empty session, or a fork's exported prefix.
 pub type Seeding: send = Fresh(String, harness.Narrow) | Adopt(harness.Prefix)
@@ -322,7 +327,7 @@ fn run_gateway[T: send](take begin: Begin[T]) -> () waits {
     }
     let (host_watch, changes): (Sender[store.local.Change], Receiver[store.local.Change]) = channel.new(256u64)
     let lconfig = store.local.Config(root: root, options: clone(options), factory: take making, seed: take seed, max_places: max_sessions, idle_ms: idle_ms,
-        place_bytes: place_bytes, tasks: tasks, clock: clock, random: random, net: net, watch: Some(take host_watch))
+        place_bytes: place_bytes, sessions: PLACE_SESSIONS, tasks: tasks, clock: clock, random: random, net: net, watch: Some(take host_watch))
     let local_host = match store.local.local(take lconfig) {
         Ok(take made) => take made,
         Error(take why) => { let _ = store.close(take db); let _ = channel.send(ready, Error(Place(take why))); return },

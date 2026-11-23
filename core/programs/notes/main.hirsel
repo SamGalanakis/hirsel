@@ -1339,9 +1339,6 @@ pub fn live_smoke(out: Stdout, data: Dir, clock: Clock, random: Random, tasks: T
 fn scripted_place(take supplied: store.local.Supplied, s: Services) -> Result[store.runner.PlaceConfig[Grants, harness.Handles, Services, ()], Capacity] {
     let mut config = settings(Memory, supplied.clock, supplied.random, supplied.tasks, supplied.net, Services(helper: channel.sender(s.helper), clock: s.clock, live: None, stream: copy_stream(s.stream, supplied.name)))
     config.wire = Some(store.runner.wire_bind((), code.describe(store.ingress.caller), 4096u64, 65536u64))
-    // A following stream holds one wire session while the session is busy, so a page or
-    // a POST meanwhile needs another.
-    config.max_sessions = 4u64
     Ok(take config)
 }
 

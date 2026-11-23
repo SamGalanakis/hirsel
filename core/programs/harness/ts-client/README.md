@@ -25,9 +25,9 @@ What the client does:
   at `key.entry + 1`, that row supersedes the draft. Keys are compared by `run`,
   `entry`, `tool` and `attempt`, because `dispatch` holds u64s past 2^53.
 
-A place served through a front needs `max_sessions` of at least 2. While a session is
-busy, its stream's follow holds one wire session. With only one, a page or a POST
-waits until the run ends, and gets a 503 after `within_ms`.
+While a session is busy, its stream's follow holds one wire session. The gateway's
+host gives every session's place four, so a page or a POST meanwhile never waits for
+the run.
 
 The harness has no reader ACL. Every history page and stream is a fresh query under
 the browser's Caller, so an application can refuse readers by registering the window

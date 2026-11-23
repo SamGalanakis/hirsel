@@ -52,7 +52,14 @@ nothing, cannot fail, and passes no replay point. Dropping a write half performs
 `SHUT_WR`, ignoring the result. On a TLS stream it first queues `close_notify` and makes
 one nonblocking attempt to send it ([TLS-2](tls.md#tls-2-plaintext-on-a-tls-stream)). Dropping a read half releases its ownership.
 The last owner closes the descriptor once. Dropping an unsplit socket or a
-listener closes it once. No finalizer waits or enables positive linger.
+listener closes it once. No finalizer waits or enables positive linger. A send that
+ends in `Aborted` or `TimedOut` marks its socket abandoned until the next send on it
+starts: closing an abandoned socket resets the connection (`SO_LINGER` with a zero
+timeout), so bytes still queued for a peer that stopped reading are dropped at the close
+instead of being retried after it, and the peer sees a reset, not end of stream. A later
+send clears the mark, so a connection that recovers closes normally. The abort itself
+still delivers at once; the host first takes back any send the kernel still holds for
+the socket, so the close is not held open by it.
 
 ```hirsel core
 pub type Unjoined = Unjoined(ReadHalf, WriteHalf)

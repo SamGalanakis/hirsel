@@ -15,6 +15,8 @@ use std::{
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
     sync::{Arc, Mutex, MutexGuard, OnceLock, TryLockError},
 };
+mod sendzc;
+pub use sendzc::{POOL as TX_POOL, TxSlot, TxState};
 
 const POLL_BATCH: i32 = 128;
 /// The wake eventfd's tag.
@@ -47,6 +49,25 @@ impl Reactor {
 /// `io_uring` forces io_uring.
 pub const REACTOR_ENV: &str = "HIRSEL_NET_REACTOR";
 static CHOSEN: OnceLock<Result<Reactor, String>> = OnceLock::new();
+
+/// When an io_uring ring sends from runtime slots zero-copy (`IORING_OP_SEND_ZC`):
+/// `auto`, and an unset variable, for every TCP peer but a loopback one;
+/// `always` for loopback too; `never` for none. On loopback the kernel copies
+/// every zero-copy send at delivery (`ZC_COPIED`), so it only adds the
+/// notification and page pinning: TLS PUT measured 17% slower there.
+pub const SEND_ZC_ENV: &str = "HIRSEL_NET_SEND_ZC";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SendZc {
+    Auto,
+    Always,
+    Never,
+}
+static SEND_ZC: OnceLock<SendZc> = OnceLock::new();
+
+fn send_zc() -> SendZc {
+    *SEND_ZC.get().unwrap_or(&SendZc::Auto)
+}
 /// The ring and wake descriptor the probe built, for the first poller.
 static PROBED: Mutex<Option<(Uring, OwnedFd)>> = Mutex::new(None);
 
@@ -78,10 +99,64 @@ fn kernel_release() -> String {
     }
 }
 
+/// Whether sends to `fd`'s peer go zero-copy under [`SEND_ZC_ENV`]: TCP
+/// only, and under `auto` not to a loopback address.
+fn zero_copy_peer(fd: i32) -> bool {
+    let mode = send_zc();
+    if mode == SendZc::Never {
+        return false;
+    }
+    // SAFETY: a live socket; the storage holds any address family.
+    let peer = unsafe {
+        let mut storage: libc::sockaddr_storage = std::mem::zeroed();
+        let mut len = size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+        if libc::getpeername(fd, (&raw mut storage).cast(), &mut len) != 0 {
+            return false;
+        }
+        match i32::from(storage.ss_family) {
+            libc::AF_INET => {
+                let v4 = &*(&raw const storage).cast::<libc::sockaddr_in>();
+                std::net::SocketAddr::from((
+                    std::net::Ipv4Addr::from(u32::from_be(v4.sin_addr.s_addr)),
+                    0,
+                ))
+            }
+            libc::AF_INET6 => {
+                let v6 = &*(&raw const storage).cast::<libc::sockaddr_in6>();
+                std::net::SocketAddr::from((std::net::Ipv6Addr::from(v6.sin6_addr.s6_addr), 0))
+            }
+            _ => return false,
+        }
+    };
+    mode == SendZc::Always || !is_loopback(&peer)
+}
+
+fn is_loopback(peer: &std::net::SocketAddr) -> bool {
+    match peer.ip() {
+        std::net::IpAddr::V4(ip) => ip.is_loopback(),
+        std::net::IpAddr::V6(ip) => {
+            ip.is_loopback() || ip.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback())
+        }
+    }
+}
+
 /// The process's reactor, chosen at its first use and fixed after.
 pub fn reactor() -> io::Result<Reactor> {
     CHOSEN
         .get_or_init(|| {
+            let send_zc = match std::env::var_os(SEND_ZC_ENV) {
+                None => SendZc::Auto,
+                Some(v) if v == "auto" => SendZc::Auto,
+                Some(v) if v == "always" => SendZc::Always,
+                Some(v) if v == "never" => SendZc::Never,
+                Some(v) => {
+                    return Err(format!(
+                        "{SEND_ZC_ENV}={} is not a choice; use auto, always or never",
+                        v.to_string_lossy()
+                    ));
+                }
+            };
+            let _ = SEND_ZC.set(send_zc);
             let forced = match std::env::var_os(REACTOR_ENV) {
                 Some(v) if v == "epoll" => return Ok(Reactor::Epoll),
                 Some(v) if v == "io_uring" => true,
@@ -415,6 +490,12 @@ struct Uring {
     /// The kernel ended the wake eventfd's multishot poll, which waits for
     /// completion-queue room to be re-armed. Touched only under the driver turn.
     wake_ended: Mutex<bool>,
+    /// Transmit slots and their zero-copy sends. Lock before `sq`.
+    tx: Mutex<sendzc::Table>,
+    /// The kernel runs SEND_ZC.
+    zc: bool,
+    /// A sparse registered-buffer table exists for transmit slots.
+    sparse: bool,
 }
 impl Uring {
     const ENTRIES: u32 = 64;
@@ -447,11 +528,21 @@ impl Uring {
         {
             return Err(unsupported());
         }
+        let zc = probe.is_supported(opcode::SendZc::CODE)
+            && probe.is_supported(opcode::AsyncCancel::CODE);
+        let sparse = zc
+            && ring
+                .submitter()
+                .register_buffers_sparse(sendzc::REGISTERED)
+                .is_ok();
         let uring = Uring {
             ring,
             sq: Mutex::new(()),
             watched: Mutex::new(HashMap::new()),
             wake_ended: Mutex::new(false),
+            tx: Mutex::default(),
+            zc,
+            sparse,
         };
         let wake = eventfd()?;
         uring.arm_wake(wake.as_raw_fd())?;
@@ -626,6 +717,13 @@ impl Uring {
                     }
                     (WAKE, libc::EPOLLIN as u32)
                 }
+                data if sendzc::is_tx(data) => {
+                    // A send's answer or notification readies its socket's writer.
+                    match self.tx_complete(data, cqe.result(), cqe.flags()) {
+                        Some(owner) => (owner, libc::EPOLLOUT as u32),
+                        None => continue,
+                    }
+                }
                 _ => {
                     let write = data & WRITE_POLL != 0;
                     let tag = data & !WRITE_POLL;
@@ -693,6 +791,8 @@ fn share(poller: Arc<Poller>, unit: fn() -> Option<u32>) -> io::Result<Arc<Polle
     Ok(poller)
 }
 fn shared_tag(unit: u32, index: usize, generation: u32) -> u64 {
+    // Unit 0xffff is the ring's own: wake, poll removals and transmit slots.
+    assert!(unit < 0xffff, "unit {unit} is reserved");
     (u64::from(unit) << SHARED_UNIT_SHIFT) | (u64::from(generation & 0xffff) << 32) | index as u64
 }
 
@@ -708,6 +808,10 @@ struct Record {
     read_terminal: bool,
     /// A listener this process created, and so the only holder of its socket.
     own_listener: bool,
+    /// Its last send was abandoned, so it closes with a reset.
+    abandoned: bool,
+    /// Whether sends to its peer go zero-copy, once a send has asked.
+    zero_copy: Option<bool>,
 }
 struct Slot {
     generation: u32,
@@ -779,6 +883,8 @@ impl Sockets {
             read_drained: false,
             read_terminal: false,
             own_listener: false,
+            abandoned: false,
+            zero_copy: None,
         })?;
         Some(key | direction)
     }
@@ -931,6 +1037,64 @@ impl Sockets {
         )?;
         record.registered = true;
         Ok(())
+    }
+
+    /// The ring and tag that zero-copy sends on `key` use: Some only for a
+    /// socket of an io_uring poller that sends zero-copy. Registers the
+    /// socket, so a send's answer readies its writer.
+    pub fn send_target(&mut self, key: u64) -> io::Result<Option<(Arc<Poller>, u64)>> {
+        self.register(key)?;
+        let poller = self.poller.clone().unwrap();
+        let Backend::Uring(ring) = &poller.backend else {
+            return Ok(None);
+        };
+        if !ring.zc {
+            return Ok(None);
+        }
+        let r = self.record_mut(key);
+        let fd = r.fd.as_raw_fd();
+        if !*r.zero_copy.get_or_insert_with(|| zero_copy_peer(fd)) {
+            return Ok(None);
+        }
+        let index = ((key >> 2) as u32) as usize;
+        let tag = Self::registration_tag(self.shared, index, self.slots[index].generation);
+        Ok(Some((poller, tag)))
+    }
+
+    /// A send on `key` was abandoned (cancelled or past its deadline): until
+    /// the next send starts, closing the socket resets it (`SO_LINGER{1,0}`),
+    /// so bytes still queued for a peer that stopped reading are dropped at
+    /// once instead of being retried after the close. The caller cancels its
+    /// own zero-copy send, if any: one left in the kernel holds the socket
+    /// open past its close.
+    pub fn abandon_send(&mut self, key: u64) {
+        self.record_mut(key).abandoned = true;
+        Self::linger(self.fd(key), true);
+    }
+
+    /// A send on `key` starts: a close after it delivers what it queued.
+    pub fn resume_send(&mut self, key: u64) {
+        let r = self.record_mut(key);
+        if std::mem::take(&mut r.abandoned) {
+            Self::linger(r.fd.as_raw_fd(), false);
+        }
+    }
+
+    fn linger(fd: i32, reset: bool) {
+        let linger = libc::linger {
+            l_onoff: i32::from(reset),
+            l_linger: 0,
+        };
+        // SAFETY: a live socket; an initialized option value.
+        unsafe {
+            libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_LINGER,
+                (&raw const linger).cast(),
+                size_of::<libc::linger>() as u32,
+            )
+        };
     }
 
     /// Register a socket once and publish this direction's current waiter.
@@ -1264,6 +1428,260 @@ mod tests {
             "{left} of {SOCKETS} unreported under {:?}",
             reactor()
         );
+    }
+
+    const SLOT: usize = 256 << 10;
+
+    /// A loopback TCP connection whose peer has stopped reading, with small
+    /// buffers, so a large send waits in the kernel. None unless this
+    /// process's poller sends zero-copy.
+    fn stuck_peer() -> Option<(Sockets, u64, Arc<Poller>, u64, std::net::TcpStream)> {
+        let (mut sockets, key, peer) = small_pair();
+        // These laws are about the slots, so their loopback peer sends
+        // zero-copy as under `always`.
+        sockets.record_mut(key).zero_copy = Some(true);
+        let (poller, tag) = sockets.send_target(key).unwrap()?;
+        Some((sockets, key, poller, tag, peer))
+    }
+
+    /// A registered loopback client whose writes back up after a few
+    /// 16 KiB buffers, and its peer.
+    fn small_pair() -> (Sockets, u64, std::net::TcpStream) {
+        use std::net::{TcpListener, TcpStream};
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (peer, _) = listener.accept().unwrap();
+        for (socket, option) in [(&client, libc::SO_SNDBUF), (&peer, libc::SO_RCVBUF)] {
+            let size = 16384i32;
+            // SAFETY: a live socket; an initialized option value.
+            unsafe {
+                libc::setsockopt(
+                    socket.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    option,
+                    (&raw const size).cast(),
+                    4,
+                )
+            };
+        }
+        client.set_nonblocking(true).unwrap();
+        let mut sockets = Sockets::default();
+        let key = sockets.insert(OwnedFd::from(client)).unwrap();
+        (sockets, key, peer)
+    }
+
+    /// Reap completions until `done` holds, for at most five seconds.
+    fn reap_until(sockets: &mut Sockets, mut done: impl FnMut() -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !done() {
+            assert!(std::time::Instant::now() < deadline, "no completion");
+            sockets.poll(10, |_| {}).unwrap();
+        }
+    }
+
+    /// A slot whose send waits, cancelled once part of it is in the kernel's
+    /// write queue: the kernel still reads that part from the slot.
+    fn cancelled_send(sockets: &mut Sockets, key: u64, poller: &Arc<Poller>, tag: u64) -> TxSlot {
+        let mut slot = poller.tx_slot(SLOT).unwrap();
+        slot.bytes().fill(b'a');
+        slot.send(sockets.fd(key), tag, 0..SLOT).unwrap();
+        // The send takes what the window allows and then waits.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        sockets.poll(0, |_| {}).unwrap();
+        assert_eq!(slot.state(), TxState::Sending);
+        slot
+    }
+
+    fn sent(slot: &TxSlot) -> usize {
+        match slot.state() {
+            TxState::Sent(n) if n > 0 => n as usize,
+            state => panic!("{state:?}"),
+        }
+    }
+
+    /// Fill every slot the ring hands out now, as the next sends would.
+    fn refill(poller: &Arc<Poller>) -> Vec<TxSlot> {
+        (0..=TX_POOL)
+            .map(|_| {
+                let mut slot = poller.tx_slot(SLOT).unwrap();
+                slot.bytes().fill(b'b');
+                slot
+            })
+            .collect()
+    }
+
+    fn read_all_a(peer: &mut std::net::TcpStream, n: usize) {
+        use std::io::Read;
+        let mut got = vec![0; n];
+        peer.read_exact(&mut got).unwrap();
+        let wrong = got.iter().filter(|&&b| b != b'a').count();
+        assert_eq!(
+            wrong, 0,
+            "{wrong} of {n} bytes the peer read are not the sent bytes"
+        );
+    }
+
+    /// A send's answer does not end the kernel's reads of its slot: until
+    /// the notification, the queued part is still read from it. A claim
+    /// dropped after the answer must not hand the slot to the next send.
+    #[test]
+    fn an_answered_slot_is_not_reused_before_its_notification() {
+        let Some((mut sockets, key, poller, tag, mut peer)) = stuck_peer() else {
+            return;
+        };
+        let slot = cancelled_send(&mut sockets, key, &poller, tag);
+        slot.cancel();
+        reap_until(&mut sockets, || matches!(slot.state(), TxState::Sent(_)));
+        let n = sent(&slot);
+        drop(slot);
+        let _next = refill(&poller);
+        read_all_a(&mut peer, n);
+    }
+
+    /// A claim dropped before its cancelled send answers: the answer comes
+    /// with more to follow, and the slot waits for that notification too.
+    #[test]
+    fn a_cancelled_send_keeps_its_slot_until_the_notification() {
+        let Some((mut sockets, key, poller, tag, mut peer)) = stuck_peer() else {
+            return;
+        };
+        let slot = cancelled_send(&mut sockets, key, &poller, tag);
+        let (notified, _) = poller.tx_notifications();
+        slot.cancel();
+        drop(slot);
+        // The answer, and not yet the notification, which waits for the peer.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
+        while std::time::Instant::now() < deadline {
+            sockets.poll(10, |_| {}).unwrap();
+        }
+        assert_eq!(poller.tx_notifications().0, notified);
+        let _next = refill(&poller);
+        // Everything the cancelled send took: the window's worth, copied when
+        // it arrived, then the write queue's, read from the slot only now.
+        use std::io::Read;
+        peer.set_read_timeout(Some(std::time::Duration::from_millis(200)))
+            .unwrap();
+        let mut got = Vec::new();
+        let mut buf = vec![0; 1 << 16];
+        while let Ok(n @ 1..) = peer.read(&mut buf) {
+            got.extend_from_slice(&buf[..n]);
+        }
+        assert!(got.len() > 2 * 16384, "{}", got.len());
+        let wrong = got.iter().filter(|&&b| b != b'a').count();
+        assert_eq!(
+            wrong,
+            0,
+            "{wrong} of {} bytes the peer read are not the sent bytes",
+            got.len()
+        );
+    }
+
+    /// A ring closed while the kernel still reads a slot: those bytes must
+    /// never return to the allocator.
+    #[test]
+    fn a_ring_dropped_with_notifications_owed_keeps_their_bytes() {
+        // Slots come from the heap, where a freed one is handed out again.
+        // SAFETY: a process-wide malloc tuning, harmless to other tests.
+        unsafe { libc::mallopt(libc::M_MMAP_THRESHOLD, 64 << 20) };
+        let Some((mut sockets, key, poller, tag, mut peer)) = stuck_peer() else {
+            return;
+        };
+        let slot = cancelled_send(&mut sockets, key, &poller, tag);
+        slot.cancel();
+        reap_until(&mut sockets, || matches!(slot.state(), TxState::Sent(_)));
+        let n = sent(&slot);
+        drop((slot, sockets, poller));
+        let reused: Vec<Vec<u8>> = (0..8).map(|_| vec![b'b'; SLOT]).collect();
+        read_all_a(&mut peer, n);
+        drop(reused);
+    }
+
+    /// An abandoned send on a peer that stopped reading: its queued bytes
+    /// are dropped at the close, the peer sees a reset rather than every
+    /// committed byte, and the slot's notification follows promptly.
+    #[test]
+    fn an_abandoned_send_leaves_no_queued_bytes_after_close() {
+        use std::io::Read;
+        let Some((mut sockets, key, poller, tag, mut peer)) = stuck_peer() else {
+            return;
+        };
+        let slot = cancelled_send(&mut sockets, key, &poller, tag);
+        let (notified, _) = poller.tx_notifications();
+        slot.cancel();
+        sockets.abandon_send(key);
+        drop(slot);
+        assert!(sockets.release(key));
+        reap_until(&mut sockets, || poller.tx_notifications().0 > notified);
+        let mut total = 0;
+        let mut buf = vec![0; 1 << 16];
+        let end = loop {
+            match peer.read(&mut buf) {
+                Ok(0) => break None,
+                Ok(n) => total += n,
+                Err(e) => break Some(e.kind()),
+            }
+        };
+        assert_eq!(
+            end,
+            Some(io::ErrorKind::ConnectionReset),
+            "after {total} bytes"
+        );
+    }
+
+    /// `auto` treats every loopback form as loopback, including an IPv4
+    /// loopback peer of an IPv6 socket, and nothing else.
+    #[test]
+    fn auto_send_zc_skips_loopback_peers_only() {
+        use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+        assert!(is_loopback(&SocketAddr::from((
+            Ipv4Addr::new(127, 3, 2, 1),
+            9
+        ))));
+        assert!(is_loopback(&SocketAddr::from((Ipv6Addr::LOCALHOST, 9))));
+        assert!(is_loopback(&SocketAddr::from((
+            Ipv4Addr::new(127, 0, 0, 1).to_ipv6_mapped(),
+            9
+        ))));
+        assert!(!is_loopback(&SocketAddr::from((
+            Ipv4Addr::new(10, 0, 0, 1),
+            9
+        ))));
+        assert!(!is_loopback(&SocketAddr::from((
+            Ipv4Addr::new(10, 0, 0, 1).to_ipv6_mapped(),
+            9
+        ))));
+    }
+
+    /// A send that starts after an abandoned one takes back its reset: the
+    /// close then delivers every queued byte and a FIN, under both reactors.
+    #[test]
+    fn a_send_after_an_abandoned_one_closes_without_a_reset() {
+        use std::io::Read;
+        let (mut sockets, key, mut peer) = small_pair();
+        sockets.abandon_send(key);
+        sockets.resume_send(key);
+        let bytes = vec![b'c'; 1 << 16];
+        let mut queued = 0;
+        while queued < bytes.len() {
+            // SAFETY: a live socket and an in-bounds buffer.
+            let n = unsafe {
+                libc::send(
+                    sockets.fd(key),
+                    bytes[queued..].as_ptr().cast(),
+                    bytes.len() - queued,
+                    libc::MSG_NOSIGNAL,
+                )
+            };
+            if n <= 0 {
+                break;
+            }
+            queued += n as usize;
+        }
+        assert!(sockets.release(key));
+        let mut received = Vec::new();
+        peer.read_to_end(&mut received)
+            .unwrap_or_else(|e| panic!("{e} after {} of {queued} bytes", received.len()));
+        assert_eq!(received.len(), queued);
     }
 
     /// Releasing a listener frees its address on return, as closing it

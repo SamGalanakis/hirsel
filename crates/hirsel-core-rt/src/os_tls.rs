@@ -4,7 +4,7 @@ mod records;
 mod rustls_stream;
 
 use crate::{
-    net::{SecureStream, tls_failure},
+    net::{SecureStream, ZeroCopy, tls_failure},
     os_net,
     provider::*,
 };

@@ -143,7 +143,10 @@ The halves from `tls.connect` are ordinary halves. The rules of
   socket. Records that the session must send in reply, such as a key update response,
   are sent by the next callback that can write.
 - **Drop.** Dropping a TLS write half queues `close_notify` and makes one nonblocking
-  attempt to send it with any committed ciphertext, then performs `SHUT_WR`. Like the
+  attempt to send it with any committed ciphertext, then performs `SHUT_WR`. After a
+  send that ended in `Aborted` or `TimedOut`, with no later send, the close resets the
+  connection ([NET-7](net.md#net-7-owned-connections)), so committed ciphertext the
+  peer has not taken may be dropped. Like the
   plain drop, it ignores the result, cannot wait, and passes no replay point. Dropping
   the read half releases its ownership. The last owner closes the descriptor once and
   frees the session. Hirsel makes no promise that the crypto library wipes key-schedule

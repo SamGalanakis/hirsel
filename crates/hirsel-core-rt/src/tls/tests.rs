@@ -1168,6 +1168,9 @@ fn os_tls_loopback_laws() {
         let out = crate::test_process::command()
             .args(["--exact", "tls::tests::os_tls_loopback_laws", "--nocapture"])
             .env("HIRSEL_TLS_LAWS_CHILD", "1")
+            // Loopback skips zero-copy under `auto`; these laws hold the
+            // io_uring zero-copy send path to the same records.
+            .env(hirsel_core_net::SEND_ZC_ENV, "always")
             .output()
             .unwrap();
         assert!(

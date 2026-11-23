@@ -383,6 +383,9 @@ unsafe fn attempt(request: &mut Request, n: &mut NetworkRequest, first: bool) ->
         if !first && request.operation != LISTEN {
             sockets.disarm(key, write);
         }
+        if first && matches!(request.operation, SEND_PAIR | SEND_SECRET | SCRAM) {
+            sockets.resume_send(key);
+        }
         let result = match request.operation {
             LISTEN => {
                 let key = match socket(n, true) {
@@ -525,6 +528,7 @@ unsafe fn attempt(request: &mut Request, n: &mut NetworkRequest, first: bool) ->
                 let send = request.path.cast_mut().cast::<crate::secret::SendRequest>();
                 let committed = &mut (*send).committed;
                 let fd = sockets.fd(key);
+                let zc = sockets.send_target(key).ok().flatten();
                 let mut skip = *committed;
                 // SEND_SECRET's message is whole in `secret`; its buffer and
                 // tail are the wire and marks it was built from.
@@ -542,7 +546,7 @@ unsafe fn attempt(request: &mut Request, n: &mut NetworkRequest, first: bool) ->
                     }
                     let part = &part[skip..];
                     let len = part.len();
-                    let answer = stream.send(fd, part, &[])?;
+                    let answer = stream.send(fd, zc.clone(), part, &[])?;
                     if answer.error != IoError::OK {
                         return Some(answer);
                     }
@@ -553,7 +557,7 @@ unsafe fn attempt(request: &mut Request, n: &mut NetworkRequest, first: bool) ->
                     skip = 0;
                 }
                 // Success requires flushing the final committed record too.
-                return stream.send(fd, &[], &[]);
+                return stream.send(fd, zc, &[], &[]);
             }
             RECV_READY => {
                 if let Some(stream) = n
@@ -594,10 +598,15 @@ unsafe fn attempt(request: &mut Request, n: &mut NetworkRequest, first: bool) ->
                 {
                     let fd = sockets.fd(key);
                     if let Some(tail) = tail {
+                        let zc = sockets.send_target(key).ok().flatten();
                         if !n.tls_send_pending {
                             let length = (b.len + tail.len) as u64;
-                            let answer =
-                                stream.send(fd, crate::tls::bytes(b), crate::tls::bytes(tail))?;
+                            let answer = stream.send(
+                                fd,
+                                zc.clone(),
+                                crate::tls::bytes(b),
+                                crate::tls::bytes(tail),
+                            )?;
                             if length == 0 || answer.error != IoError::OK || answer.value < length {
                                 return Some(answer);
                             }
@@ -605,7 +614,7 @@ unsafe fn attempt(request: &mut Request, n: &mut NetworkRequest, first: bool) ->
                             // the write waiter until the final slot reaches the socket.
                             n.tls_send_pending = true;
                         }
-                        return stream.send(fd, &[], &[]);
+                        return stream.send(fd, zc, &[], &[]);
                     }
                     let spare = if b.capacity <= b.len {
                         &mut [][..]
@@ -863,6 +872,18 @@ pub(crate) unsafe fn abort(request: *mut Request, token: u64, reason: u8) -> Out
             key,
             matches!(r.operation, CONNECT | SEND_PAIR | SEND_SECRET | SCRAM),
         );
+        if matches!(r.operation, SEND_PAIR | SEND_SECRET | SCRAM) {
+            // A peer that stopped reading must not hold the abandoned bytes,
+            // or the socket, past its close.
+            if let Some(stream) = n
+                .tls
+                .as_mut()
+                .and_then(|tls| tls.sessions.get_mut(&(key & !3)))
+            {
+                stream.cancel_send();
+            }
+            (*n.sockets).abandon_send(key);
+        }
         finish(r, n, signal(if reason == ABORT_CANCEL { 7 } else { 6 })).outcome
     }
 }

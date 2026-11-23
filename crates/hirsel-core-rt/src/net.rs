@@ -155,12 +155,22 @@ impl AddressOutcome {
 }
 /// Only a ready TLS session enters the socket registry. Keep ordinary Net
 /// callbacks independent of a concrete TLS backend.
+/// Where a stream's zero-copy sends go: the socket's io_uring poller and
+/// the registration tag its send completions ready.
+pub(crate) type ZeroCopy = Option<(std::sync::Arc<hirsel_core_net::Poller>, u64)>;
+
 pub(crate) trait SecureStream: Send {
     fn receive(&mut self, fd: i32, plaintext: &mut [u8]) -> Option<Outcome>;
     /// RECV_READY: Some once the next receive has plaintext, end of stream
     /// or an error to report, None while it would wait.
     fn ready(&mut self, fd: i32) -> Option<Outcome>;
-    fn send(&mut self, fd: i32, prefix: &[u8], tail: &[u8]) -> Option<Outcome>;
+    /// `zc` is the ring and writer tag for zero-copy sends on `fd`, when its
+    /// poller sends zero-copy; a stream that can uses it while it has nothing
+    /// queued, and keeps its choice until then.
+    fn send(&mut self, fd: i32, zc: ZeroCopy, prefix: &[u8], tail: &[u8]) -> Option<Outcome>;
+    /// The send waiting on this stream was abandoned: hand back any send
+    /// the kernel still holds, keeping its bytes for the next send.
+    fn cancel_send(&mut self) {}
     fn shutdown(&mut self, fd: i32);
 }
 

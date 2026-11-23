@@ -204,7 +204,7 @@ impl SecureStream for RustlsStream {
         self.read_ready(&mut SocketIo(fd)).then(|| count(0))
     }
 
-    fn send(&mut self, fd: i32, prefix: &[u8], tail: &[u8]) -> Option<Outcome> {
+    fn send(&mut self, fd: i32, _: ZeroCopy, prefix: &[u8], tail: &[u8]) -> Option<Outcome> {
         let mut socket = SocketIo(fd);
         let mut committed = 0;
         let result = (|| {

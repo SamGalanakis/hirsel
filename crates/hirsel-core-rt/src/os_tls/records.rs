@@ -1,4 +1,5 @@
 use super::*;
+use hirsel_core_net::{TxSlot, TxState};
 use ring::aead::{self, Aad, LessSafeKey, UnboundKey};
 use rustls::{
     AlertDescription, ConnectionTrafficSecrets, ExtractedSecrets,
@@ -300,13 +301,160 @@ impl OwnedRecords {
     }
 }
 
+/// Sealed records on their way to the socket. Records seal straight into
+/// the bytes they are sent from: a bulk slot written with `send(2)`, or,
+/// when the socket's io_uring ring sends zero-copy, a ring transmit slot. A
+/// stream picks the zero-copy path while it has nothing queued, and keeps it
+/// until it is drained again, so the two never interleave on the wire.
+struct Tx {
+    plain: Slot,
+    zc: Option<ZcTx>,
+}
+
+/// Zero-copy transmit: one slot in the kernel (`flight`) while the next
+/// batch seals into another (`filling`), so sealing overlaps the send.
+struct ZcTx {
+    poller: Arc<hirsel_core_net::Poller>,
+    tag: u64,
+    filling: Option<TxSlot>,
+    end: usize,
+    flight: Option<Flight>,
+}
+
+struct Flight {
+    slot: TxSlot,
+    sent: usize,
+    end: usize,
+}
+
+impl Tx {
+    fn idle(&self) -> bool {
+        self.plain.start == self.plain.end
+            && self
+                .zc
+                .as_ref()
+                .is_none_or(|zc| zc.flight.is_none() && zc.end == 0)
+    }
+
+    /// Choose the send path for the next bytes. Only an idle stream changes
+    /// path, so queued bytes always leave before later ones.
+    fn choose(&mut self, zc: ZeroCopy) {
+        if !self.idle() {
+            return;
+        }
+        self.zc = zc.map(|(poller, tag)| ZcTx {
+            poller,
+            tag,
+            filling: None,
+            end: 0,
+            flight: None,
+        });
+    }
+
+    fn seal(&mut self, key: &mut TrafficKey, kind: u8, input: &[u8]) -> Result<(), Outcome> {
+        let wire = HEADER + input.len() + 1 + TAG;
+        let Some(zc) = &mut self.zc else {
+            return key.seal(&mut self.plain, kind, input);
+        };
+        if zc.filling.is_none() {
+            zc.filling = Some(
+                zc.poller
+                    .tx_slot(TX_SLOT)
+                    .ok_or_else(|| transport(io::Error::from_raw_os_error(libc::ENOBUFS)))?,
+            );
+        }
+        let bytes = zc.filling.as_mut().unwrap().bytes();
+        key.seal_into(&mut bytes[zc.end..zc.end + wire], kind, input)?;
+        zc.end += wire;
+        Ok(())
+    }
+
+    /// Move queued bytes on. Zero-copy: account the flight's answer, resend
+    /// what it left, and submit the filled slot once the flight is done.
+    fn pump(&mut self, socket: &mut SocketIo) -> io::Result<()> {
+        let Some(zc) = &mut self.zc else {
+            self.plain.flush(socket)?;
+            return Ok(());
+        };
+        loop {
+            if let Some(flight) = &mut zc.flight {
+                match flight.slot.state() {
+                    TxState::Sending | TxState::Filling => return Ok(()),
+                    // An abandoned send's cancel (`cancel_send`) leaves the
+                    // rest of its slot for the next send, which resumes it.
+                    TxState::Sent(error) if error == -libc::ECANCELED || error == -libc::EINTR => {
+                        return flight.slot.send(socket.0, zc.tag, flight.sent..flight.end);
+                    }
+                    TxState::Sent(error) if error < 0 => {
+                        return Err(io::Error::from_raw_os_error(-error));
+                    }
+                    TxState::Sent(0) => return Err(io::Error::from(io::ErrorKind::WriteZero)),
+                    TxState::Sent(n) => {
+                        flight.sent += n as usize;
+                        if flight.sent < flight.end {
+                            return flight.slot.send(socket.0, zc.tag, flight.sent..flight.end);
+                        }
+                        // The ring keeps the bytes until their notification.
+                        zc.flight = None;
+                    }
+                }
+            }
+            if zc.end == 0 {
+                return Ok(());
+            }
+            let mut slot = zc.filling.take().unwrap();
+            let end = std::mem::take(&mut zc.end);
+            slot.send(socket.0, zc.tag, 0..end)?;
+            zc.flight = Some(Flight { slot, sent: 0, end });
+        }
+    }
+
+    /// Whether every queued byte has reached the socket.
+    fn flush(&mut self, socket: &mut SocketIo) -> io::Result<bool> {
+        self.pump(socket)?;
+        Ok(self.idle())
+    }
+
+    /// Whether the next batch of records has room: the plain slot drained,
+    /// or no zero-copy slot still waiting behind the flight.
+    fn room(&mut self, socket: &mut SocketIo) -> io::Result<bool> {
+        self.pump(socket)?;
+        Ok(match &self.zc {
+            None => self.plain.start == self.plain.end,
+            Some(zc) => zc.end == 0,
+        })
+    }
+
+    fn release(&mut self) {
+        self.plain.release();
+    }
+
+    /// Ask the kernel to hand back the send in flight, keeping its unsent
+    /// bytes for the next send, so the abandoned socket can close at once.
+    fn cancel(&self) {
+        if let Some(flight) = self.zc.as_ref().and_then(|zc| zc.flight.as_ref()) {
+            flight.slot.cancel();
+        }
+    }
+}
+
+impl Drop for ZcTx {
+    fn drop(&mut self) {
+        // A closed stream drops its unsent bytes, as a plain slot does; a
+        // send parked in the kernel would otherwise hold the socket open.
+        if let Some(flight) = &self.flight {
+            flight.slot.cancel();
+        }
+    }
+}
+
 pub(super) struct Records {
     handshake: PostHandshake,
     tx_key: TrafficKey,
     rx_key: TrafficKey,
     tx_limit: u64,
     rx_limit: u64,
-    tx: Slot,
+    tx: Tx,
     rx: Slot,
     /// Decrypted payload of the last record, before the unread ciphertext.
     plaintext: Range<usize>,
@@ -341,7 +489,10 @@ impl Records {
             rx_key: TrafficKey::new(secrets.rx)?,
             tx_limit,
             rx_limit: limit,
-            tx: Slot::bulk(),
+            tx: Tx {
+                plain: Slot::bulk(),
+                zc: None,
+            },
             rx,
             plaintext: 0..0,
             read_end: None,
@@ -353,8 +504,8 @@ impl Records {
     }
 
     fn update_tx(&mut self) -> Result<(), Outcome> {
-        self.tx_key
-            .seal(&mut self.tx, HANDSHAKE, &[KEY_UPDATE, 0, 0, 1, 0])?;
+        self.tx
+            .seal(&mut self.tx_key, HANDSHAKE, &[KEY_UPDATE, 0, 0, 1, 0])?;
         self.tx_key = TrafficKey::sending(
             self.handshake
                 .kernel
@@ -481,8 +632,8 @@ impl Records {
         if self.write_end.is_none()
             && self.tx_key.seq < self.tx_limit
             && self
-                .tx_key
-                .seal(&mut self.tx, ALERT, &[level, alert])
+                .tx
+                .seal(&mut self.tx_key, ALERT, &[level, alert])
                 .is_ok()
         {
             let _ = self.tx.flush(socket);
@@ -541,11 +692,18 @@ impl SecureStream for Records {
         ready.then(|| count(0))
     }
 
-    fn send(&mut self, fd: i32, prefix: &[u8], tail: &[u8]) -> Option<Outcome> {
+    fn send(&mut self, fd: i32, zc: ZeroCopy, prefix: &[u8], tail: &[u8]) -> Option<Outcome> {
         let mut socket = SocketIo(fd);
         let mut committed = 0;
+        self.tx.choose(zc);
         let result = (|| {
-            if !self.flush(&mut socket)? {
+            if let Some(error) = self.write_end {
+                return Err(error);
+            }
+            if self.reply_update && !self.flush(&mut socket)? {
+                return Ok(false);
+            }
+            if !self.tx.room(&mut socket).map_err(transport)? {
                 return Ok(false);
             }
             let mut queued = 0;
@@ -554,17 +712,17 @@ impl SecureStream for Records {
                 .flat_map(|part| part.chunks(RECORD))
             {
                 if self.tx_key.seq >= self.tx_limit - 1 {
-                    if !self.flush(&mut socket)? {
+                    if !self.tx.room(&mut socket).map_err(transport)? {
                         return Ok(false);
                     }
                     self.update_tx()?;
                     queued = 0;
                 }
-                self.tx_key.seal(&mut self.tx, APPLICATION, record)?;
+                self.tx.seal(&mut self.tx_key, APPLICATION, record)?;
                 committed += record.len();
                 queued += 1;
                 if queued == TX_RECORDS {
-                    if !self.flush(&mut socket)? {
+                    if !self.tx.room(&mut socket).map_err(transport)? {
                         return Ok(false);
                     }
                     queued = 0;
@@ -579,6 +737,10 @@ impl SecureStream for Records {
             }
         }
         (committed != 0 || matches!(result, Ok(true))).then(|| count(committed))
+    }
+
+    fn cancel_send(&mut self) {
+        self.tx.cancel();
     }
 
     fn shutdown(&mut self, fd: i32) {

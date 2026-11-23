@@ -3271,3 +3271,516 @@ fn write_decimal(w: TypedWriter, mut length: u64, negative: bool, coefficient: u
     }
     write_signed(w, mut length, e)
 }
+
+/// A malformed operation, unresolved pointer, failed assertion, or result build failure.
+pub type PatchError = InvalidPatch | InvalidOperation(u64) | InvalidPointer(u64) | MissingTarget(u64) | MoveIntoChild(u64) | TestFailed(u64) | PatchResult(Error)
+
+type PatchNode = PNull | PFalse | PTrue | PNum(String) | PStr(String) | PArr(List[PatchNode]) | PObj(List[PatchMember])
+
+type PatchMember {
+    key: String,
+    node: PatchNode
+}
+
+/// Applies an RFC 6902 array of operations to input, which remains borrowed.
+/// Only a successful patch can publish a new document into r. None means the
+/// final operation removed the root. Operation errors carry the zero-based index.
+pub fn patch(r: Region, input: Json, operations: Json) -> Result[Option[Json in r], PatchError] {
+    let Arr(ops) = operations else {
+        return Error(InvalidPatch)
+    }
+    let mut tree = Some(patch_node(input))
+    let mut ordinal: u64 = 0
+    for op in ops {
+        let next = patch_step(take tree, op, ordinal)?
+        tree = take next
+        ordinal += 1
+    }
+    let Some(take node) = tree else {
+        return Ok(None)
+    }
+    let mut encoded = string.new()
+    write(mut encoded, false, scoped fn(w: json.Writer) {
+        patch_write(w, node, 0)
+    })
+    match parse(r, encoded) {
+        Ok(take result) => Ok(Some(take result)),
+        Error(take e) => Error(PatchResult(take e)),
+    }
+}
+
+fn patch_node(j: Json) -> PatchNode {
+    match j {
+        Null => PNull,
+        False => PFalse,
+        True => PTrue,
+        Num(s) => PNum(string.from(text.as_string(s))),
+        Str(s) => PStr(string.from(text.as_string(s))),
+        Arr(xs) => {
+            let mut nodes: List[PatchNode] = list.with_capacity(seq.len(xs))
+            for x in xs {
+                list.push(mut nodes, patch_node(x))
+            }
+            PArr(take nodes)
+        },
+        Obj(xs) => {
+            let mut fields: List[PatchMember] = list.with_capacity(seq.len(xs))
+            for m in xs {
+                list.push(mut fields, PatchMember(key: string.from(text.as_string(m.key)), node: patch_node(m.value)))
+            }
+            PObj(take fields)
+        },
+    }
+}
+
+fn patch_copy(j: PatchNode) -> PatchNode {
+    match j {
+        PNull => PNull,
+        PFalse => PFalse,
+        PTrue => PTrue,
+        PNum(s) => PNum(string.from(s)),
+        PStr(s) => PStr(string.from(s)),
+        PArr(xs) => {
+            let mut nodes: List[PatchNode] = list.with_capacity(list.len(xs))
+            for x in xs {
+                list.push(mut nodes, patch_copy(x))
+            }
+            PArr(take nodes)
+        },
+        PObj(xs) => {
+            let mut fields: List[PatchMember] = list.with_capacity(list.len(xs))
+            for m in xs {
+                list.push(mut fields, PatchMember(key: string.from(m.key), node: patch_copy(m.node)))
+            }
+            PObj(take fields)
+        },
+    }
+}
+
+fn patch_write(w: json.Writer, j: PatchNode, depth: u64) {
+    match j {
+        PNull => write_null(w),
+        PFalse => write_bool(w, false),
+        PTrue => write_bool(w, true),
+        PNum(s) => write_number_spelling(w, s),
+        PStr(s) => write_string_value(w, s),
+        PArr(xs) => array(w, depth, scoped fn(child: json.Writer, mut items: Items) {
+            for x in xs {
+                element(child, mut items)
+                patch_write(child, x, items.depth)
+            }
+        }),
+        PObj(xs) => object(w, depth, scoped fn(child: json.Writer, mut items: Items) {
+            for m in xs {
+                write_member(child, mut items, m.key)
+                patch_write(child, m.node, items.depth)
+            }
+        }),
+    }
+}
+
+fn patch_tokens(s: String, op: u64) -> Result[List[String], PatchError] {
+    let mut tokens: List[String] = list.new()
+    let n = string.byte_len(s)
+    if n == 0 {
+        return Ok(take tokens)
+    }
+    if at(s, 0) != b'/' {
+        return Error(InvalidPointer(op))
+    }
+    let mut start: u64 = 1
+    loop {
+        let end = match string.find(s, start, "/") {
+            Some(i) => i,
+            None => n,
+        }
+        let Some(take token) = pointer_unescape(string.slice(s, start, end)) else {
+            return Error(InvalidPointer(op))
+        }
+        list.push(mut tokens, take token)
+        if end == n {
+            return Ok(take tokens)
+        }
+        start = end + 1
+    }
+}
+
+fn patch_required[in a](ms: IndexedSpan[Member] in a, key: String, op: u64) -> Result[View[Json], PatchError] in ms {
+    match pointer_member(ms, key) {
+        Some(value) => Ok(value),
+        None => Error(InvalidOperation(op)),
+    }
+}
+
+fn patch_path[in a](ms: IndexedSpan[Member] in a, key: String, op: u64) -> Result[List[String], PatchError] {
+    let Str(s) = patch_required(ms, key, op)? else {
+        return Error(InvalidOperation(op))
+    }
+    patch_tokens(text.as_string(s), op)
+}
+
+fn patch_step(take current: Option[PatchNode], spec: Json, op: u64) -> Result[Option[PatchNode], PatchError] {
+    let Obj(ms) = spec else {
+        return Error(InvalidOperation(op))
+    }
+    let Str(name) = patch_required(ms, "op", op)? else {
+        return Error(InvalidOperation(op))
+    }
+    let path = patch_path(ms, "path", op)?
+    let action = text.as_string(name)
+    if list.len(path) == 0 {
+        if action == "add" {
+            let value = patch_required(ms, "value", op)?
+            return Ok(Some(patch_node(value)))
+        }
+        if action == "remove" {
+            if let Some(_) = current {
+                return Ok(None)
+            }
+            return Error(MissingTarget(op))
+        }
+    }
+    let Some(take tree) = current else {
+        return Error(MissingTarget(op))
+    }
+    let next = patch_apply(take tree, action, ms, path, op)?
+    Ok(Some(take next))
+}
+
+fn patch_apply[in a](take tree: PatchNode, action: String, ms: IndexedSpan[Member] in a, path: List[String], op: u64) -> Result[PatchNode, PatchError] {
+    if action == "add" || action == "replace" {
+        let value = patch_required(ms, "value", op)?
+        return patch_put(take tree, path, patch_node(value), action == "add", op)
+    }
+    if action == "remove" {
+        return patch_edit(take tree, path, 0, None, false, op)
+    }
+    if action == "test" {
+        let expected = patch_required(ms, "value", op)?
+        if !patch_test(tree, path, expected, op)? {
+            return Error(TestFailed(op))
+        }
+        return Ok(take tree)
+    }
+    if action != "copy" && action != "move" {
+        return Error(InvalidOperation(op))
+    }
+    let from = patch_path(ms, "from", op)?
+    if action == "copy" {
+        let value = patch_select_copy(tree, from, op)?
+        return patch_put(take tree, path, take value, true, op)
+    }
+    if patch_prefix(from, path) {
+        if list.len(from) < list.len(path) {
+            return Error(MoveIntoChild(op))
+        }
+        patch_require_target(tree, from, op)?
+        return Ok(take tree)
+    }
+    let value = patch_select_copy(tree, from, op)?
+    let reduced = patch_edit(take tree, from, 0, None, false, op)?
+    patch_put(take reduced, path, take value, true, op)
+}
+
+fn patch_prefix(from: List[String], path: List[String]) -> bool {
+    if list.len(from) > list.len(path) {
+        return false
+    }
+    for i in 0 .. list.len(from) {
+        if from[i] != path[i] {
+            return false
+        }
+    }
+    true
+}
+
+fn patch_test(tree: PatchNode, path: List[String], expected: Json, op: u64) -> Result[bool, PatchError] {
+    let value = patch_lookup(tree, path, 0, op)?
+    Ok(patch_equal(value, expected))
+}
+
+fn patch_require_target(tree: PatchNode, path: List[String], op: u64) -> Result[(), PatchError] {
+    let _ = patch_lookup(tree, path, 0, op)?
+    Ok(())
+}
+
+fn patch_select_copy(tree: PatchNode, path: List[String], op: u64) -> Result[PatchNode, PatchError] {
+    let value = patch_lookup(tree, path, 0, op)?
+    Ok(patch_copy(value))
+}
+
+fn patch_lookup(j: PatchNode, path: List[String], depth: u64, op: u64) -> Result[View[PatchNode], PatchError] in j {
+    if depth == list.len(path) {
+        return Ok(view j)
+    }
+    let token = path[depth]
+    match j {
+        PObj(xs) => {
+            let Some(i) = patch_member(xs, token, op)? else {
+                return Error(MissingTarget(op))
+            }
+            patch_lookup(xs[i].node, path, depth + 1, op)
+        },
+        PArr(xs) => {
+            let i = patch_index(token, list.len(xs), false, op)?
+            patch_lookup(xs[i], path, depth + 1, op)
+        },
+        _ => Error(MissingTarget(op)),
+    }
+}
+
+fn patch_member(xs: List[PatchMember], key: String, op: u64) -> Result[Option[u64], PatchError] {
+    let mut found: Option[u64] = None
+    for i in 0 .. list.len(xs) {
+        if xs[i].key == key {
+            if let Some(_) = found {
+                return Error(MissingTarget(op))
+            }
+            found = Some(i)
+        }
+    }
+    Ok(found)
+}
+
+fn patch_index(token: String, n: u64, adding: bool, op: u64) -> Result[u64, PatchError] {
+    if adding && token == "-" {
+        return Ok(n)
+    }
+    if !int.is_ascii_digit(at(token, 0)) || !canonical_decimal(token) {
+        return Error(InvalidPointer(op))
+    }
+    let parsed: Result[u64, ParseError] = int.parse(token)
+    let Ok(i) = parsed else {
+        return Error(MissingTarget(op))
+    }
+    if i > n || (i == n && !adding) {
+        return Error(MissingTarget(op))
+    }
+    Ok(i)
+}
+
+fn patch_put(take tree: PatchNode, path: List[String], take value: PatchNode, add: bool, op: u64) -> Result[PatchNode, PatchError] {
+    patch_depth(value, list.len(path))?
+    patch_edit(take tree, path, 0, Some(take value), add, op)
+}
+
+fn patch_depth(j: PatchNode, depth: u64) -> Result[(), PatchError] {
+    match j {
+        PArr(xs) => {
+            if depth >= MAX_DEPTH {
+                return Error(PatchResult(Depth))
+            }
+            for x in xs {
+                patch_depth(x, depth + 1)?
+            }
+        },
+        PObj(xs) => {
+            if depth >= MAX_DEPTH {
+                return Error(PatchResult(Depth))
+            }
+            for m in xs {
+                patch_depth(m.node, depth + 1)?
+            }
+        },
+        _ => (),
+    }
+    Ok(())
+}
+
+fn patch_edit(take j: PatchNode, path: List[String], depth: u64, take value: Option[PatchNode], add: bool, op: u64) -> Result[PatchNode, PatchError] {
+    if depth == list.len(path) {
+        return match take value {
+            Some(take node) => Ok(take node),
+            None => Error(MissingTarget(op)),
+        }
+    }
+    let token = path[depth]
+    let leaf = depth + 1 == list.len(path)
+    match take j {
+        PObj(take fields) => {
+            let mut xs = take fields
+            match patch_member(xs, token, op)? {
+                Some(i) => {
+                    if leaf {
+                        match take value {
+                            Some(take node) => {
+                                let _ = list.set(mut xs, i, PatchMember(key: string.from(token), node: take node))
+                            },
+                            None => {
+                                let _ = list.remove(mut xs, i)
+                            },
+                        }
+                    } else {
+                        let PatchMember(key: take key, node: take child) = list.remove(mut xs, i)
+                        let next = patch_edit(take child, path, depth + 1, take value, add, op)?
+                        list.insert(mut xs, i, PatchMember(key: take key, node: take next))
+                    }
+                },
+                None => {
+                    if !leaf || !add {
+                        return Error(MissingTarget(op))
+                    }
+                    if let Some(take node) = take value {
+                        list.push(mut xs, PatchMember(key: string.from(token), node: take node))
+                    }
+                },
+            }
+            Ok(PObj(take xs))
+        },
+        PArr(take elements) => {
+            let mut xs = take elements
+            let i = patch_index(token, list.len(xs), leaf && add, op)?
+            if leaf {
+                match take value {
+                    Some(take node) => {
+                        if add {
+                            list.insert(mut xs, i, take node)
+                        } else {
+                            let _ = list.set(mut xs, i, take node)
+                        }
+                    },
+                    None => {
+                        let _ = list.remove(mut xs, i)
+                    },
+                }
+            } else {
+                let child = list.remove(mut xs, i)
+                let next = patch_edit(take child, path, depth + 1, take value, add, op)?
+                list.insert(mut xs, i, take next)
+            }
+            Ok(PArr(take xs))
+        },
+        _ => Error(MissingTarget(op)),
+    }
+}
+
+fn patch_equal(a: PatchNode, b: Json) -> bool {
+    match (view a, view b) {
+        (PNull, Null) => true,
+        (PFalse, False) => true,
+        (PTrue, True) => true,
+        (PStr(x), Str(y)) => x == text.as_string(y),
+        (PNum(x), Num(y)) => patch_number_equal(x, text.as_string(y)),
+        (PArr(xs), Arr(ys)) => {
+            if list.len(xs) != seq.len(ys) {
+                return false
+            }
+            let mut i: u64 = 0
+            for y in ys {
+                if !patch_equal(xs[i], y) {
+                    return false
+                }
+                i += 1
+            }
+            true
+        },
+        (PObj(xs), Obj(ys)) => {
+            if list.len(xs) != seq.len(ys) {
+                return false
+            }
+            let lookup = index(ys)
+            if has_duplicates(lookup) {
+                return false
+            }
+            let mut seen: Map[String, ()] = map.new()
+            for x in xs {
+                if let Some(_) = map.get(seen, x.key) {
+                    return false
+                }
+                map.insert(mut seen, string.from(x.key), ())
+                let Some(y) = get(lookup, x.key) else {
+                    return false
+                }
+                if !patch_equal(x.node, y) {
+                    return false
+                }
+            }
+            true
+        },
+        _ => false,
+    }
+}
+
+type PatchDecimal {
+    negative: bool,
+    digits: Bytes,
+    scale: i64,
+    exponent_at: u64,
+    exponent_sign: i64
+}
+
+fn patch_decimal(s: String) -> PatchDecimal {
+    let mut digits: Bytes = list.new()
+    let negative = at(s, 0) == b'-'
+    let mut i: u64 = if negative {
+        1
+    } else {
+        0
+    }
+    let mut fractional = false
+    let mut scale: i64 = 0
+    while i < string.byte_len(s) && at(s, i) != b'e' && at(s, i) != b'E' {
+        let byte = at(s, i)
+        if byte == b'.' {
+            fractional = true
+        } else {
+            if fractional {
+                scale -= 1
+            }
+            if byte != b'0' || list.len(digits) != 0 {
+                list.push(mut digits, byte)
+            }
+        }
+        i += 1
+    }
+    while list.len(digits) != 0 && digits[list.len(digits) - 1] == b'0' {
+        let _ = list.pop(mut digits)
+        scale += 1
+    }
+    let mut sign: i64 = 1
+    if i < string.byte_len(s) {
+        i += 1
+        if at(s, i) == b'-' {
+            sign = -1
+            i += 1
+        } else if at(s, i) == b'+' {
+            i += 1
+        }
+    }
+    PatchDecimal(negative, digits: take digits, scale, exponent_at: i, exponent_sign: sign)
+}
+
+fn patch_number_equal(a: String, b: String) -> bool {
+    let x = patch_decimal(a)
+    let y = patch_decimal(b)
+    if list.compare_bytes(x.digits, y.digits) != Equal {
+        return false
+    }
+    if list.len(x.digits) == 0 {
+        return true
+    }
+    if x.negative != y.negative {
+        return false
+    }
+    // Compare exponent plus scale exactly, even when an exponent exceeds an integer.
+    let mut carry = x.scale - y.scale
+    let mut i = string.byte_len(a)
+    let mut j = string.byte_len(b)
+    while i > x.exponent_at || j > y.exponent_at {
+        if i > x.exponent_at {
+            i -= 1
+            let digit: i64 = int.widen(at(a, i) - b'0')
+            carry += x.exponent_sign * digit
+        }
+        if j > y.exponent_at {
+            j -= 1
+            let digit: i64 = int.widen(at(b, j) - b'0')
+            carry -= y.exponent_sign * digit
+        }
+        if carry % 10 != 0 {
+            return false
+        }
+        carry /= 10
+    }
+    carry == 0
+}

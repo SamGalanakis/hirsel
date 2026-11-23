@@ -123,3 +123,24 @@ Each completed append stays in the output if a later append refuses
 Capacity. A quoted string appends its opening quote, each unescaped run
 or escape, and its closing quote as separate requests. An object member
 writes its key this way before appending the colon.
+
+## JSON Patch
+
+`std.json.patch(r, input, operations)` applies an RFC 6902 array in order.
+Its `add`, `remove`, `replace`, `move`, `copy` and `test` operations take
+RFC 6901 pointers. The empty pointer addresses the root. Array additions
+insert before the given index or append at the array length or `-`.
+A move resolves its destination after removing the source.
+
+The function borrows both inputs. It edits a private tree and publishes the
+result into `r` after all operations have succeeded. `Ok(None)` represents
+a removed root, and a later root add can restore a document in the same
+patch. An error publishes nothing. Operation errors carry a zero-based index.
+An operation can have extra fields. Duplicate required fields and paths to
+ambiguous object members fail.
+
+The `test` operation compares numbers by exact decimal value, strings by
+decoded code points, arrays in order, and objects by their uniquely named
+members in any order. Results keep number spellings, object member order and
+the JSON document's nesting limit. Working allocations include the editable
+tree, copies requested by the patch, and a serialization of the final result.

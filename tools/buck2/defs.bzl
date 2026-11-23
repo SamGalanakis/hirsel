@@ -552,6 +552,9 @@ def _store_package_impl(ctx):
     script = ctx.actions.write("pack.sh", [
         "set -eu",
         'mkdir -p "$3" "$4/store" "$4/runner"; cp -L "$2"/store/* "$4/store/"; cp -L "$2"/runner/* "$4/runner/"',
+        # The copies keep the inputs' read-only mode under remote execution: replace the
+        # manifest rather than write through it.
+        'rm -f "$4/runner/hirsel.toml"',
         TOOLCHAIN_BINDINGS + ' "$2/runner/hirsel.toml" > "$4/runner/hirsel.toml"',
         '"$1" pack "$4/store" --package-store "$4/packages" --output "$3/store-1.hpkg" > /dev/null',
         '"$1" pack "$4/runner" --package-store "$4/packages" --output "$3/runner-1.hpkg" > /dev/null',
@@ -598,7 +601,7 @@ def _toolchain_bundle_impl(ctx):
         '"$1" std-product --install "$root" --runtime "$4" --recording-runtime "$6" --prof-runtime "$9" --prof-recording-runtime "${11}" --observed-runtime "${15}" --observed-recording-runtime "${17}" --target x86_64-unknown-linux-gnu --link-kit "$8" > /dev/null',
         '"$1" std-product --install "$root" --runtime "$5" --recording-runtime "$7" --prof-runtime "${10}" --prof-recording-runtime "${12}" --observed-runtime "${16}" --observed-recording-runtime "${18}" --target aarch64-unknown-linux-gnu > /dev/null',
         'cp "${13}"/store-1.hpkg "${13}"/runner-1.hpkg "$root/core-packages/"',
-        'mkdir -p "$TMPDIR/platform" "$root/libexec/hirsel"; cp -L "${14}"/platform/* "$TMPDIR/platform/"',
+        'mkdir -p "$TMPDIR/platform" "$root/libexec/hirsel"; cp -L "${14}"/platform/* "$TMPDIR/platform/"; rm -f "$TMPDIR/platform/hirsel.toml"',
         TOOLCHAIN_BINDINGS + ' "${14}/platform/hirsel.toml" > "$TMPDIR/platform/hirsel.toml"',
         '"$root/hirsel" build "$TMPDIR/platform" --entry platform@1/platform_main/main --grant Clock --grant Random --grant Tasks'
         + ' --grant "Net=UnixRoot ctl /proc/self/cwd;UnixConnect ctl launcher.sock;UnixListen ctl operator.sock"'

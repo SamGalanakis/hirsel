@@ -330,7 +330,11 @@ is core's plain record `{ steps: u64 }`.
   `bound steps 1` is refused. A body that calls it from inside a bound counts one more
   step for its own entry, so there the threshold is `n + 41`. A return, but not an
   overrun, then takes steps after `body` to merge the overlay into the transaction, in
-  proportion to the rows `body` staged and the frozen layers it folds.
+  proportion to the rows `body` staged and the frozen layers it folds. Inside `body`, a
+  read or write of a key its own overlay does not hold looks through each frozen layer
+  below, a step or more per layer. The layers are the enclosing calls' overlays plus one
+  for each consecutive call that overran or was refused before the transaction next
+  merged, so a caller sizing `n` counts them.
 - **Waits, bytes and tasks.** Waiting takes no steps: a step bound limits computation, not
   time, and a body that waits forever is ended by a deadline or a cancellation
   ([CONC-7](tasks.md#conc-7-cancellation-points)), not by its bound. Step bounds and limits

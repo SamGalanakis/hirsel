@@ -5529,8 +5529,24 @@ fn test_rollback_on_overrun(c: Clock) -> Result[(), ()] waits {
 // nested callbacks replace row 1, delete row 2 and add rows 100 and 101; a
 // typed error drops its write of row 3; an overrun drops its write of row 4;
 // rollback_writes_on_error keeps its write of row 5. Every other row keeps
-// its value. The inner callback's bound is below what its enclosing bound has
+// its value. A body reads through the frozen layers below its overlay: after
+// the inner callback returns, and after the overrun, a fetch and a range see
+// row 1 as "one", row 2 gone, rows 3, 4 and 64 as staged, row 101 present,
+// and 65 rows in all (64 staged, less row 2, plus rows 100 and 101). The inner callback's bound is below what its enclosing bound has
 // left, since a nested bound cannot grant steps its parent no longer holds.
+fn layered_reads(tx: Tx, sh: Shape[u64, String], big: String) -> Result[bool, Error] {
+    let mut rows = range(tx, sh, Included(1), Included(200))?
+    let mut seen = 0u64
+    while let Some(_) = next_range(mut rows)? {
+        seen += 1
+    }
+    let one = fetch(tx, sh, 1)? == Some(string.from("one"))
+    let gone = fetch(tx, sh, 2)? == None
+    let kept = fetch(tx, sh, 3)? == Some(clone(big)) && fetch(tx, sh, 4)? == Some(clone(big)) && fetch(tx, sh, 64)? == Some(clone(big))
+    let added = fetch(tx, sh, 101)? == Some(string.from("hundred one"))
+    Ok(seen == 65 && one && gone && kept && added)
+}
+
 pub fn law_callback_shares_staged(c: Clock) -> bool waits {
     let mut db = test_db(c, 1073741824)
     result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_string())))
@@ -5538,6 +5554,7 @@ pub fn law_callback_shares_staged(c: Clock) -> bool waits {
     let mut raw: Bytes = list.with_capacity(1000)
     list.fill(mut raw, 1000, 97u8)
     let big = result.unwrap(string.from_utf8(take raw))
+    let sh = shape(t)
     let out = run(mut db, None, scoped fn(mut tx: Tx) -> Result[bool, Error] {
         for k in 1u64 .. 65 {
             put(mut tx, t, k, big)?
@@ -5558,8 +5575,13 @@ pub fn law_callback_shares_staged(c: Clock) -> bool waits {
                 put(mut v, t, 101, "hundred one")
             })
             match inner {
-                Ok(Ok(())) => Ok(()),
-                _ => Error(Missing("inner")),
+                Ok(Ok(())) => {},
+                _ => return Error(Missing("inner")),
+            }
+            if layered_reads(w, sh, big)? {
+                Ok(())
+            } else {
+                Error(Missing("reads"))
             }
         })
         let typed = rollback_writes_on_overrun(mut tx, 100000, scoped fn(mut w: Tx) -> Result[(), Error] {
@@ -5571,6 +5593,9 @@ pub fn law_callback_shares_staged(c: Clock) -> bool waits {
             loop {}
         })
         let kept = rollback_writes_on_error(mut tx, scoped fn(mut w: Tx) -> Result[(), Error] {
+            if !layered_reads(w, sh, big)? {
+                return Error(Missing("reads after overrun"))
+            }
             put(mut w, t, 5, "five")
         })
         let shapes = match (nested, typed, over, kept) {
@@ -5584,7 +5609,6 @@ pub fn law_callback_shares_staged(c: Clock) -> bool waits {
         _ => false,
     }
     let s = snapshot(db)
-    let sh = shape(t)
     let mut good = shaped
     for k in 1u64 .. 65 {
         let want = if k == 1 {

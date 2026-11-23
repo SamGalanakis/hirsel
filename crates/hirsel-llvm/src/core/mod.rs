@@ -808,10 +808,10 @@ fn emit_module(
                 | "std@1/regex/compile_new" => Inline::Never,
                 // Keep lazy DFA misses off the cached transition path.
                 "std@1/regex/dfa_transition" => Inline::Never,
-                // Revisit bounded mutable loops after borrow-scope emission.
-                // LLVM inlining carries their parameter scopes into the caller.
+                // Small mutable loops, and two a hot loop enters per step, carry their scopes in.
                 _ if source.batch_steps
-                    && body.insts.len() <= 4096
+                    && (body.insts.len() <= 256
+                        || matches!(definition.as_str(), "std@1/regex/dfa_search" | "core@1/heap/pop"))
                     && sig.params.iter().any(|p| {
                         matches!(p, Param::Address { place, loan: Loan::Mut }
                             if matches!(place, PlaceTy::Value(Ty::Scalar(_)))

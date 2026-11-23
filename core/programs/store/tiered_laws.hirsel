@@ -107,7 +107,11 @@ fn refusal_descriptor(tiered: bool) -> Bytes {
     let mut record: Bytes = list.with_capacity(56)
     list.fill(mut record, 52, 0u8)
     list.push(mut record, 1u8)
-    list.push(mut record, if tiered { 1u8 } else { 0u8 })
+    list.push(mut record, if tiered {
+        1u8
+    } else {
+        0u8
+    })
     list.fill(mut record, 2, 0u8)
     take record
 }
@@ -204,7 +208,7 @@ fn tiered_l70_refusals(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), 
     } else {
         fail("L70(c): expected Tiered(Export)")
     }
-    let digest: Inline[u8, 32] = [0u8; 32]
+    let digest: Inline[u8, 32] =[0u8; 32]
     if let Error(Store(Tiered(Install))) = reserve_import(mut db, refusal_import(digest)) {
         if !refusal_directory_unchanged(store_dir, before) {
             fail("L70(c): import reservation changed the store directory")
@@ -261,4 +265,106 @@ fn test_l70_dirty_admission() -> Result[(), ()] {
         return Error(())
     }
     Ok(())
+}
+
+fn l65_wrong_edge(target: TieredTarget, cached: Arc[TieredFrame]) -> bool {
+    match verify_tiered_edge("p-7", target, cached.identity) {
+        Error(Corrupt(Fault(offset: 72, why: Checksum, ..))) => true,
+        _ => false,
+    }
+}
+
+fn l65_page_wire(child_pack: u64, bound_digest: u64) -> Bytes {
+    let mut raw: Bytes = list.with_capacity(96)
+    list.put_word_le(mut raw, 0x0021u16)
+    list.put_word_le(mut raw, 1u16)
+    list.put_word_le(mut raw, 80u32)
+    list.put_word_le(mut raw, bound_digest)
+    list.put_word_le(mut raw, 1u16)
+    list.put_word_le(mut raw, 1u16)
+    list.put_word_le(mut raw, 0u32)
+    list.put_word_le(mut raw, 40u64)
+    list.put_word_le(mut raw, 78u32)
+    list.put_word_le(mut raw, 0u32)
+    list.put_word_le(mut raw, 0u16)
+    list.put_word_le(mut raw, child_pack)
+    list.put_word_le(mut raw, 72u64)
+    list.put_word_le(mut raw, 33u32)
+    list.put_word_le(mut raw, 333u64)
+    list.put_word_le(mut raw, 41u64)
+    list.put_word_le(mut raw, 1u64)
+    list.put_word_le(mut raw, 78u64)
+    list.put_word_le(mut raw, 24u16)
+    take raw
+}
+
+fn l65_check_page(owner: StoreId) -> Result[(), ()] {
+    let mut ptr = std.page.PagePtr(pack: 8, offset: 72, len: 80, checksum: 0xc3a9635c753cb40c, stamp: 40)
+    let raw = l65_page_wire(7, 0x37bed3f9c4f620ba)
+    let cached = result.unwrap(read_tiered_frame("p-8", owner, TieredPage(ptr), raw, 72, 42))
+    let TieredImage(ready) = cached.payload else {
+        return Error(())
+    }
+    let Some(ColdPage(referring)) = std.page.child_slot(ready, 0) else {
+        return Error(())
+    }
+    // Parent stamp 40 may name child stamp 41. Only locations order the edge.
+    if referring != std.page.PagePtr(pack: 7, offset: 72, len: 33, checksum: 333, stamp: 41) {
+        return Error(())
+    }
+    ptr.checksum = 0xebf10455d6dc2bc3
+    let self_edge = l65_page_wire(8, 0x36034793180eb3d0)
+    let Error(Corrupt(Fault(offset: 72, why: Order, ..))) = read_tiered_frame("p-8", owner, TieredPage(ptr), self_edge, 72, 42) else {
+        return Error(())
+    }
+    Ok(())
+}
+
+@test
+fn test_l65_tiered_edges() -> Result[(), ()] {
+    let owner = StoreId(hi: 3, lo: 4)
+    let reference = std.page.BlobRef(stamp: 2, len: 1025, checksum: 0x8234157262b2bd3d, pack: 7, offset: 72, body: 0)
+    // A range starting at 64, followed by the AP8 blob vector at offset 72.
+    // Both checksums are frozen from libxxhash over the §2.1 and AP8 bytes.
+    let mut raw: Bytes = list.with_capacity(1057)
+    list.put_word_le(mut raw, 0u64)
+    list.put_word_le(mut raw, 0x0022u16)
+    list.put_word_le(mut raw, 1u16)
+    list.put_word_le(mut raw, 1033u32)
+    list.put_word_le(mut raw, 0x1c7a045bb5175e24u64)
+    list.put_word_le(mut raw, 2u64)
+    list.fill(mut raw, 1025, 106u8)
+    let valid = TieredBlob(reference)
+    let cached = result.unwrap(read_tiered_frame("p-7", owner, valid, raw, 64, 3))
+    let TieredValue(value) = cached.payload else {
+        return Error(())
+    }
+    if list.len(value) != 1025 || value[0u64] != 106 || value[1024u64] != 106 {
+        return Error(())
+    }
+    let mut wrong = reference
+    wrong.stamp = 1
+    if !l65_wrong_edge(TieredBlob(wrong), cached) {
+        return Error(())
+    }
+    wrong = reference
+    wrong.checksum = 1
+    if !l65_wrong_edge(TieredBlob(wrong), cached) {
+        return Error(())
+    }
+    wrong = reference
+    wrong.len = 1024
+    if !l65_wrong_edge(TieredBlob(wrong), cached) {
+        return Error(())
+    }
+    let wrong_kind = std.page.PagePtr(pack: 7, offset: 72, len: 1033, checksum: reference.checksum, stamp: 2)
+    if !l65_wrong_edge(TieredPage(wrong_kind), cached) {
+        return Error(())
+    }
+    let _ = result.unwrap(verify_tiered_edge("p-7", valid, cached.identity))
+    raw[16u64] = 0
+    let Error(Corrupt(Fault(offset: 72, why: Checksum, ..))) = read_tiered_frame("p-7", owner, valid, raw, 64, 3) else {
+        return Error(())
+    }
+    l65_check_page(owner)
 }

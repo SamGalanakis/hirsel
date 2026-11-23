@@ -26,6 +26,7 @@ std = { major = 1 }
 "store-object-open.hirsel" = "store"
 "store-levels.hirsel" = "store"
 "store-followers.hirsel" = "store"
+"store-object-follower.hirsel" = "store"
 "store-layout.hirsel" = "store"
 "store-reexec.hirsel" = "store"
 "store-tx.hirsel" = "store"

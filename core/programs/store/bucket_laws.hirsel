@@ -897,3 +897,61 @@ fn bucket_test_m2_admitted_claim(d: Dir, c: Clock, r: Random, tasks: Tasks) -> R
     }
     Ok(())
 }
+
+fn bucket_m2_law_follow(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error] waits {
+    let initial_client = bucket_law_client_with(sim, tasks, "s3.test", 1, true)?
+    let reader = bucket_law_client_with(sim, tasks, "s3.test", 2, true)?
+    let mut writer = ObjectPackRead(client: take initial_client, locator: HistoryLocator(rows: map.new(), chunks: list.new(), last_pack: 0), deadline: 0)
+    let mut workspace = history_buffers(1024)?
+    let authority = history_config_bytes(HistoryConfig(place: std.object.bucket_config(writer.client), level: "bucket"))?
+    let (take opened, _) = history_open_register(mut writer, sim.time, r, defaults(), "bucket", mut workspace, BUCKET_LAW_OP_MS)?
+    let mut held = take opened
+    let mut source = followers()
+    let mut settings = defaults()
+    settings.expect = Some(held.head.store)
+    // Writer selection never constrains a read-only follower.
+    settings.activation = Some(17)
+    settings.binding = Some(list.new())
+    let mut followed = follower(mut source, tasks, object_authority(take reader, "reader", BUCKET_LAW_OP_MS), sim.time, settings)?
+    let deadline = std.object.deadline_after_ms(writer.client, BUCKET_LAW_OP_MS)
+    let genesis = fresh(mut followed, deadline)?
+    let genesis_head = follower_head(followed)?
+    if version(genesis) != 0 || genesis_head.claim.epoch != 1 || genesis_head.activation != 0 || list.len(genesis_head.binding) != 32 {
+        fail("fresh did not preserve the initial capture")
+    }
+    bucket_m2_law_commit_packet(mut workspace.packet, held.head, 1)?
+    let HistoryApplied(_) = history_register_advance(mut writer.client, mut held, authority, mut workspace, deadline)? else {
+        fail("the first group did not advance")
+    }
+    let advanced = at_least(mut followed, Position(store: held.head.store, branch: 0, version: 1), deadline)?
+    if version(advanced) != 1 || version(genesis) != 0 {
+        fail("catch-up did not publish its applied version privately")
+    }
+    bucket_m2_law_commit_packet(mut workspace.packet, held.head, 2)?
+    let HistoryApplied(_) = history_register_advance(mut writer.client, mut held, authority, mut workspace, deadline)? else {
+        fail("the second group did not advance")
+    }
+    let last = history_key("e-", held.head.entry)
+    match std.object.erase(mut writer.client, last, deadline) {
+        Error(take problem) => return Error(Remote(take problem)),
+        Ok(()) => (),
+    }
+    if let Error(Corrupt(Fault(file: gone, why: Absent, ..))) = fresh(mut followed, deadline) {
+        if gone != last { fail("witness named another object") }
+    } else {
+        fail("a missing live entry was accepted or classified as reclaimed")
+    }
+    let current = applied(followed, Branch(store: held.head.store, id: 0))?
+    if current.version != 1 {
+        fail("failed catch-up changed the published state")
+    }
+    Ok(())
+}
+
+@test
+fn bucket_test_m2_follower(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let sim = bucket_law_sim(tasks, c, 773, None, list.new())
+    let followed = bucket_m2_law_follow(tasks, r, sim)
+    let _ = bucket_law_finish(take sim)
+    followed
+}

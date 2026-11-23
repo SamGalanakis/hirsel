@@ -124,7 +124,7 @@ fn retaining(db: Db) -> bool {
 
 // A branch as a cut, open and replay carry it: a Head without the readers'
 // handle (section 3.5 step 3).
-type Tip: send {
+type Tip: shareable + send {
     id: u32,
     name: String,
     parent: u32,
@@ -135,7 +135,7 @@ type Tip: send {
 }
 
 // Every branch's head and every pin: what one cut makes durable.
-type State: send {
+type State: shareable + send {
     tips: List[Tip],
     pins: List[Pin],
     next_branch: u32,

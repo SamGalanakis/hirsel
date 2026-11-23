@@ -1,0 +1,189 @@
+type ObjectAuthorityConfig {
+    client: std.object.Client,
+    level_name: String,
+    op_ms: u64
+}
+
+pub fn object_authority(take c: std.object.Client, level_name: String, op_ms: u64) -> Authority {
+    ObjectAuthority(ObjectAuthorityConfig(client: take c, level_name: string.from(level_name), op_ms))
+}
+
+type ObjectFollowerIo {
+    requests: Option[std.object.Requests],
+    workers: Option[std.object.Workers],
+    op_ms: u64
+}
+
+type ObjectFollowHead: shareable + send {
+    current: HistoryHead,
+    tag: std.object.ETag,
+    next_node: u64
+}
+
+pub type Claim {
+    epoch: u64,
+    holder: Bytes
+}
+
+pub type HeadView {
+    store: StoreId,
+    activation: u64,
+    binding: Bytes,
+    claim: Claim
+}
+
+pub fn follower_head(f: Follower) -> Result[HeadView, Error] {
+    let Some(record) = f.capture.remote else {
+        return Error(Missing("head"))
+    }
+    let current = record.current
+    disk_allocation(scoped fn() -> Result[HeadView, Error] {
+        let mut owner: Bytes = list.with_capacity(16)
+        list.put_word_le(mut owner, current.pair.holder.hi)
+        list.put_word_le(mut owner, current.pair.holder.lo)
+        let mut opaque_binding: Bytes = list.with_capacity(32)
+        let _ = bytebuf.append_inline(mut opaque_binding, current.binding, 0, 32)
+        Ok(HeadView(store: current.store, activation: current.activation, binding: take opaque_binding, claim: Claim(epoch: current.pair.epoch, holder: take owner)))
+    })
+}
+
+type ObjectFollowAnswer: send {
+    requests: std.object.Requests,
+    outcome: Result[Option[Arc[FollowCapture]], Error]
+}
+
+type ObjectFollowJob: send {
+    requests: std.object.Requests,
+    previous: Option[Arc[FollowCapture]],
+    expect: Option[StoreId],
+    ceiling: u64,
+    deadline: u64,
+    response: Sender[ObjectFollowAnswer]
+}
+
+fn copy_follow_state(previous: State) -> Result[State, Error] {
+    disk_allocation(scoped fn() -> Result[State, Error] {
+        let mut tips: List[Tip] = list.with_capacity(list.len(previous.tips))
+        let mut pins: List[Pin] = list.with_capacity(list.len(previous.pins))
+        for old_tip in previous.tips {
+            list.push(mut tips, Tip(id: old_tip.id, name: string.from(old_tip.name), parent: old_tip.parent, forked_at: old_tip.forked_at, roots: share_roots(old_tip.roots), head: old_tip.head, at: old_tip.at))
+        }
+        for old_pin in previous.pins {
+            list.push(mut pins, capacity(share_pin(old_pin))?)
+        }
+        Ok(State(tips: take tips, pins: take pins, next_branch: previous.next_branch, next_table: previous.next_table))
+    })
+}
+
+fn object_follow_head(mut source: ObjectPackRead, previous: Option[Arc[FollowCapture]], mut scratch: Bytes) -> Result[Option[(HistoryCapture, std.object.ETag)], Error] waits {
+    if let Some(capture) = previous {
+        return history_probe_head(mut source.client, option.unwrap(capture.remote).tag, mut scratch, source.deadline)
+    }
+    let outcome = history_fetch(mut source.client, "head", mut scratch, source.deadline)
+    history_qualify(mut source.client, source.deadline)?
+    let tag = match take outcome {
+        Ok(meta) => meta.etag,
+        Error(Remote(NotFound)) => return Error(NotFound),
+        Error(take problem) => return Error(take problem),
+    }
+    let latest = history_decode_head(scratch)?
+    history_check_namespace(latest, source.client)?
+    Ok(Some((take latest, tag)))
+}
+
+fn object_follow_replay(mut source: ObjectPackRead, latest: HistoryHead, previous: Option[Arc[FollowCapture]], ceiling: u64) -> Result[JournalReplay, Error] waits {
+    if let Some(old_capture) = previous {
+        let old = option.unwrap(old_capture.remote)
+        if latest.checkpoint.seq <= old.current.entry.seq {
+            let state = copy_follow_state(old_capture.state)?
+            let initial = journal_replay(take state, old.next_node)?
+            over_ceiling(journal_account(initial)?, ceiling)?
+            return history_rebase_suffix(mut source, latest, old.current.entry, take initial, ceiling)
+        }
+    }
+    history_paged_capture(mut source, latest, ceiling)
+}
+
+fn object_follow_capture(mut source: ObjectPackRead, previous: Option[Arc[FollowCapture]], expected: Option[StoreId], ceiling: u64) -> Result[Option[Arc[FollowCapture]], Error] waits {
+    let mut scratch = disk_allocation(fn() -> Result[Bytes, Error] { Ok(list.with_capacity(HISTORY_HEAD_LIMIT)) })?
+    let fetched = object_follow_head(mut source, previous, mut scratch)?
+    let Some((take head_capture, tag)) = take fetched else { return Ok(None) }
+    let latest = head_capture.head
+    check_expected_store(expected, latest.store)?
+    let old_charge = if let Some(old_capture) = previous {
+        let old = option.unwrap(old_capture.remote)
+        if latest.floor < old.current.floor || latest.entry.seq < old.current.entry.seq {
+            return Error(disk_fault("head", 72, Order))
+        }
+        if history_ref_matches(latest.entry, old.current.entry) {
+            let refreshed = FollowCapture(store: latest.store, state: arc.share(old_capture.state), resident: old_capture.resident, remote: Some(ObjectFollowHead(current: latest, tag, next_node: old.next_node)))
+            return Ok(Some(arc.new(take refreshed)))
+        }
+        old_capture.resident
+    } else {
+        0u64
+    }
+    let recovered = object_follow_replay(mut source, latest, previous, ceiling - old_charge)
+    let replay = match take recovered {
+        Ok(take ready) => take ready,
+        Error(Full(Resident(cap))) => return Error(Full(Resident(Capacity(requested: int.saturating_add(old_charge, cap.requested), available: ceiling)))),
+        Error(HistoryMissing(take file, missing_seq)) => {
+            let witness = history_witness(mut source.client, latest, None, file, missing_seq, mut scratch, source.deadline)?
+            if let HistoryEvicted(newer) = witness {
+                return Error(Reclaimed(newer.head.floor))
+            }
+            if let Some(old_capture) = previous {
+                return Error(Behind(Position(store: old_capture.store, branch: 0, version: old_capture.state.tips[0].head)))
+            }
+            return Error(Remote(Retriable(Deadline)))
+        },
+        Error(take problem) => return Error(take problem),
+    }
+    let resident = journal_account(replay)?
+    let JournalReplay(state: take built, next_node, ..) = take replay
+    let remote = ObjectFollowHead(current: latest, tag, next_node)
+    Ok(Some(arc.new(FollowCapture(store: latest.store, state: arc.new(take built), resident, remote: Some(remote)))))
+}
+
+fn object_follow_job(take job: ObjectFollowJob) waits {
+    let ObjectFollowJob(requests: take requests, previous: take previous, expect, ceiling, deadline, response: take response) = take job
+    let client = std.object.attach(take requests)
+    let mut source = ObjectPackRead(client: take client, locator: HistoryLocator(rows: map.new(), chunks: list.new(), last_pack: 0), deadline)
+    let outcome = object_follow_capture(mut source, previous, expect, ceiling)
+    let ObjectPackRead(client: take remote, ..) = take source
+    let (take returned, _) = std.object.split(take remote)
+    let _ = channel.send(response, ObjectFollowAnswer(requests: take returned, outcome: take outcome))
+}
+
+fn object_follow_private(tasks: Tasks, mut io: ObjectFollowerIo, take previous: Option[Arc[FollowCapture]], expected: Option[StoreId], ceiling: u64, deadline: u64) -> Result[Option[Arc[FollowCapture]], Error] waits {
+    let (response, answer): (Sender[ObjectFollowAnswer], Receiver[ObjectFollowAnswer]) = channel.new(1)
+    let Some(take requests) = replace(mut io.requests, None) else { return Error(Io(Closed)) }
+    let job = ObjectFollowJob(requests: take requests, previous: take previous, expect: expected, ceiling, deadline, response: take response)
+    let first = task.try_spawn(tasks, bytes 18446744073709551327u64, take job, object_follow_job)
+    let worker = match take first {
+        Ok(take running) => take running,
+        Error((problem, take returned)) => {
+            if problem.available < 288 {
+                let ObjectFollowJob(requests: take kept, ..) = take returned
+                io.requests = Some(take kept)
+                return Error(Full(Allocation(problem)))
+            }
+            task.spawn(tasks, bytes (problem.available - 288), take returned, object_follow_job)
+        },
+    }
+    match task.join(take worker) {
+        Ok(()) => (),
+        Error(Failed(causes)) => return Error(match raised_capacity(causes) {
+            Some(problem) => Full(Allocation(problem)),
+            None => Io(Closed),
+        }),
+        Error(Cancelled(_)) => return Error(Io(Closed)),
+    }
+    match channel.receive(answer) {
+        Ok(ObjectFollowAnswer(requests: take returned, outcome: take observed)) => {
+            io.requests = Some(take returned)
+            take observed
+        },
+        Error(_) => Error(Io(Closed)),
+    }
+}

@@ -1,4 +1,4 @@
-pub opaque type Authority = LogAuthority(Dir)
+pub opaque type Authority = LogAuthority(Dir) | ObjectAuthority(ObjectAuthorityConfig)
 
 pub fn log_authority(d: Dir) -> Authority {
     LogAuthority(d)
@@ -12,19 +12,22 @@ pub fn followers() -> Followers {
     Followers(issued: 0)
 }
 
-type LogCapture: send {
+type FollowCapture: shareable + send {
     store: StoreId,
-    state: State,
-    resident: u64
+    state: Arc[State],
+    resident: u64,
+    remote: Option[ObjectFollowHead]
 }
+
+type FollowBackend = FollowLog(Dir) | FollowObject(ObjectFollowerIo)
 
 pub opaque type Follower {
     open: u64,
-    directory: Dir,
+    backend: FollowBackend,
     tasks: Tasks,
     clock: Clock,
     ceiling: u64,
-    capture: LogCapture,
+    capture: Arc[FollowCapture],
     stopped: Option[StoreCapacity]
 }
 
@@ -32,10 +35,10 @@ type LogFollowJob: send {
     directory: Dir,
     expect: Option[StoreId],
     ceiling: u64,
-    result: Sender[Result[LogCapture, Error]]
+    result: Sender[Result[Arc[FollowCapture], Error]]
 }
 
-fn log_follow_capture(d: Dir, expected: Option[StoreId], ceiling: u64) -> Result[LogCapture, Error] waits {
+fn log_follow_capture(d: Dir, expected: Option[StoreId], ceiling: u64) -> Result[Arc[FollowCapture], Error] waits {
     disk_io(host.sync_dir(d))?
     let (take raw, id, take manifest) = read_only_manifest(d)?
     check_expected_store(expected, id)?
@@ -47,7 +50,7 @@ fn log_follow_capture(d: Dir, expected: Option[StoreId], ceiling: u64) -> Result
     over_ceiling(resident, ceiling)?
     check_read_only_manifest(d, raw)?
     let JournalReplay(state: take state, ..) = take replay
-    Ok(LogCapture(store: id, state: take state, resident))
+    Ok(arc.new(FollowCapture(store: id, state: arc.new(take state), resident, remote: None)))
 }
 
 fn log_follow_job(take job: LogFollowJob) waits {
@@ -55,8 +58,8 @@ fn log_follow_job(take job: LogFollowJob) waits {
     let _ = channel.send(job.result, take selected)
 }
 
-fn log_follow_private(tasks: Tasks, d: Dir, expected: Option[StoreId], ceiling: u64) -> Result[LogCapture, Error] waits {
-    let (to, from): (Sender[Result[LogCapture, Error]], Receiver[Result[LogCapture, Error]]) = channel.new(1)
+fn log_follow_private(tasks: Tasks, d: Dir, expected: Option[StoreId], ceiling: u64) -> Result[Arc[FollowCapture], Error] waits {
+    let (to, from): (Sender[Result[Arc[FollowCapture], Error]], Receiver[Result[Arc[FollowCapture], Error]]) = channel.new(1)
     let job = LogFollowJob(directory: d, expect: expected, ceiling, result: take to)
     let first = task.try_spawn(tasks, bytes 18446744073709551327u64, take job, log_follow_job)
     let worker = match take first {
@@ -82,12 +85,22 @@ fn log_follow_private(tasks: Tasks, d: Dir, expected: Option[StoreId], ceiling: 
     }
 }
 
-pub fn follower(mut source: Followers, tasks: Tasks, authority: Authority, c: Clock, o: Options) -> Result[Follower, Error] waits {
+pub fn follower(mut source: Followers, tasks: Tasks, take authority: Authority, c: Clock, o: Options) -> Result[Follower, Error] waits {
     let minted = history_next_id(source.issued)?
-    let LogAuthority(d) = authority
-    let captured = log_follow_private(tasks, d, o.expect, o.resident_limit)?
+    let (take backend, take captured) = match take authority {
+        LogAuthority(d) => (FollowLog(d), log_follow_private(tasks, d, o.expect, o.resident_limit)?),
+        ObjectAuthority(ObjectAuthorityConfig(client: take client, op_ms, ..)) => {
+            let deadline = std.object.deadline_after_ms(client, op_ms)
+            let (take requests, take workers) = std.object.split(take client)
+            let mut io = ObjectFollowerIo(requests: Some(take requests), workers: take workers, op_ms)
+            let Some(take initial) = object_follow_private(tasks, mut io, None, o.expect, o.resident_limit, deadline)? else {
+                return Error(NotFound)
+            }
+            (FollowObject(take io), take initial)
+        },
+    }
     source.issued = minted
-    Ok(Follower(open: HISTORY_OPEN_LIMIT | minted, directory: d, tasks, clock: c, ceiling: o.resident_limit, capture: take captured, stopped: None))
+    Ok(Follower(open: HISTORY_OPEN_LIMIT | minted, backend: take backend, tasks, clock: c, ceiling: o.resident_limit, capture: take captured, stopped: None))
 }
 
 pub fn follower_table[K, V](f: Follower, name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[Table[K, V], Error] {
@@ -146,14 +159,29 @@ pub fn catch_up(mut f: Follower, deadline_ns: u64) -> Result[Position, Error] wa
     if host.mono_ns(f.clock) >= deadline_ns {
         return Error(Behind(previous))
     }
-    let update = log_follow_private(f.tasks, f.directory, Some(f.capture.store), f.ceiling - f.capture.resident)
-    let newer = match take update {
-        Ok(take minted) => take minted,
-        Error(Full(Resident(c))) => {
-            let actual = Capacity(requested: int.saturating_add(f.capture.resident, c.requested), available: f.ceiling)
-            f.stopped = Some(Resident(actual))
-            return Error(Full(Resident(actual)))
+    let update: Result[Option[Arc[FollowCapture]], Error] = match f.backend {
+        FollowLog(d) => {
+            let outcome = log_follow_private(f.tasks, d, Some(f.capture.store), f.ceiling - f.capture.resident)
+            match take outcome {
+                Ok(take fresh_capture) => Ok(Some(take fresh_capture)),
+                Error(Full(Resident(c))) => Error(Full(Resident(Capacity(requested: int.saturating_add(f.capture.resident, c.requested), available: f.ceiling)))),
+                Error(take problem) => Error(take problem),
+            }
         },
+        FollowObject(mut io) => {
+            let due = order.min(clock.deadline_after_ms(host.mono_ns(f.clock), io.op_ms), deadline_ns)
+            let previous_capture = arc.share(f.capture)
+            object_follow_private(f.tasks, mut io, Some(take previous_capture), Some(f.capture.store), f.ceiling, due)
+        },
+    }
+    let newer = match take update {
+        Ok(Some(take minted)) => take minted,
+        Ok(None) => return Ok(previous),
+        Error(Full(Resident(c))) => {
+            f.stopped = Some(Resident(c))
+            return Error(Full(Resident(c)))
+        },
+        Error(Remote(Retriable(Deadline))) if host.mono_ns(f.clock) >= deadline_ns => return Error(Behind(previous)),
         Error(take problem) => return Error(take problem),
     }
     if host.mono_ns(f.clock) >= deadline_ns {
@@ -173,16 +201,37 @@ pub fn fresh(mut f: Follower, deadline_ns: u64) -> Result[Snapshot, Error] waits
 
 pub fn at_least(mut f: Follower, p: Position, deadline_ns: u64) -> Result[Snapshot, Error] waits {
     let b = Branch(store: p.store, id: p.branch)
-    match applied(f, b) {
-        Ok(current) if current.version >= p.version => return snapshot_follower(f, b),
-        Error(Unseen(_)) => (),
-        Error(take problem) => return Error(take problem),
-        _ => (),
+    loop {
+        match applied(f, b) {
+            Ok(current) if current.version >= p.version => return snapshot_follower(f, b),
+            Error(Unseen(_)) => (),
+            Error(take problem) => return Error(take problem),
+            _ => (),
+        }
+        if host.mono_ns(f.clock) >= deadline_ns {
+            let current = applied(f, b)?
+            return Error(Behind(current))
+        }
+        if let FollowLog(_) = f.backend {
+            // A log follower requires writer exclusion for its life.
+            host.sleep_until(f.clock, deadline_ns)
+            continue
+        }
+        match catch_up(mut f, deadline_ns) {
+            Ok(_) => (),
+            Error(Behind(_)) => (),
+            Error(Reclaimed(_)) => (),
+            Error(take problem) => return Error(take problem),
+        }
+        match applied(f, b) {
+            Ok(current) if current.version >= p.version => return snapshot_follower(f, b),
+            Error(Unseen(_)) => (),
+            Error(take problem) => return Error(take problem),
+            _ => (),
+        }
+        let poll = clock.deadline_after_ms(host.mono_ns(f.clock), 10)
+        host.sleep_until(f.clock, order.min(poll, deadline_ns))
     }
-    // A log follower requires writer exclusion for its life.
-    host.sleep_until(f.clock, deadline_ns)
-    let current = applied(f, b)?
-    Error(Behind(current))
 }
 
 pub fn follower_index[J, K, V](f: Follower, t: Table[K, V], name: String, by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J]) -> Result[Index[J, K, V], Error] {

@@ -12,6 +12,8 @@ const IDLE_MS: u64 = 200u64
 const OPENROUTER: String = "openrouter.ai"
 const LIVE_MODEL: String = "deepseek/deepseek-v4.1-flash-1017"
 const LIVE_NOTE: String = "The team meeting moved to Thursday."
+const LIVE_WARMUP: String = "Reply with READY and nothing else."
+const LIVE_WAKE: String = "Write exactly eight short numbered lines about the benefits of a well-kept meeting notebook. Start with 1. and include no introduction."
 const LIVE_PROMPT: String = "Save a new note with the exact text 'The team meeting moved to Thursday.' Use note_add once. After the tool returns, reply with SAVED."
 
 // A small session's store: each place reserves its resident cache, its pack
@@ -128,6 +130,13 @@ fn confirm_delete(tx: store.Tx, ask: harness.Ask) -> harness.Verdict {
     if ask.call.name == "note_delete" { Hold("deleting a note needs your approval") } else { Pass }
 }
 
+fn confirm_live_add(tx: store.Tx, ask: harness.Ask) -> harness.Verdict {
+    if ask.call.name != "note_add" { return Pass }
+    let Ok(h) = harness.handles(store.tx_schema(tx)) else { return Deny("harness schema unavailable") }
+    let Ok(Some(s)) = store.fetch(tx, store.shape(h.session), 0u64) else { return Deny("harness session unavailable") }
+    if s.model == LIVE_MODEL { Hold("the live smoke requires approval to save a note") } else { Pass }
+}
+
 // Counts tool results in the transaction that appends each one.
 fn tally(mut tx: store.Tx, at: u64, e: harness.Entry) -> Result[(), harness.Fault] {
     let ToolResult(_, _) = view e else { return Ok(()) }
@@ -155,13 +164,18 @@ fn notes_section(tx: store.Tx) -> Result[Option[String], store.Error] {
 
 // ---- grants: what Outside tools and the model are given ----
 
-type Live: send { net: Net, address: Addr, key: Secret, out: Stdout }
+type Live: send { net: Net, address: Addr, key: Secret, out: Stdout, preview: harness.preview.Door, group: String }
 type Services: send { helper: Sender[HelperAsk], clock: Clock, live: Option[Live] }
 type Grants: send { context: store.runner.TriggerContext, helper: Sender[HelperAsk], clock: Clock, live: Option[Live] }
 
+fn copy_live(l: Live, group: String) -> Live {
+    Live(net: l.net, address: l.address, key: secret.share(l.key), out: l.out,
+        preview: harness.preview.copy_door(l.preview), group: string.from(group))
+}
+
 fn make_grants(s: Services, take ctx: store.runner.TriggerContext) -> Result[Grants, Capacity] {
     let live = match s.live {
-        Some(l) => Some(Live(net: l.net, address: l.address, key: secret.share(l.key), out: l.out)),
+        Some(l) => Some(copy_live(l, l.group)),
         None => None,
     }
     Ok(Grants(context: take ctx, helper: channel.sender(s.helper), clock: s.clock, live: take live))
@@ -228,21 +242,35 @@ fn scripted_model(g: Grants, take r: harness.Request) -> Result[harness.Answer, 
 }
 
 fn model(g: Grants, take request: harness.Request) -> Result[harness.Answer, harness.Fault] waits {
+    let mut draft: Option[harness.preview.Source] = None
+    live_model(g, take request, mut draft)
+}
+
+fn live_model(g: Grants, take request: harness.Request, mut draft: Option[harness.preview.Source]) -> Result[harness.Answer, harness.Fault] waits {
     let Some(live) = view g.live else { return scripted_model(g, take request) }
     let mut req = take request
     let mut replies = 0u64
-    for e in req.messages { if let Assistant(_) = e { replies += 1u64 } }
-    if replies >= 2u64 { return Error(Refused("live smoke uses at most two model requests")) }
-    if replies == 1u64 { list.clear(mut req.tools) }
+    let mut prompt = string.new()
+    for e in req.messages {
+        match e {
+            User(text) => { prompt = string.from(text); replies = 0u64 },
+            Assistant(_) => { replies += 1u64 },
+            _ => (),
+        }
+    }
+    let limit = if prompt == LIVE_PROMPT { 2u64 } else if prompt == LIVE_WARMUP || prompt == LIVE_WAKE { 1u64 } else { 0u64 }
+    if replies >= limit { return Error(Refused("live smoke request limit")) }
+    if prompt != LIVE_PROMPT || replies > 0u64 { list.clear(mut req.tools) }
     let m = harness.provider.Model(dialect: OpenAi, name: LIVE_MODEL, max_tokens: 512u64)
     let endpoint = harness.provider.Endpoint(address: live.address, authority: OPENROUTER, prefix: "/api", security: Https(OPENROUTER, System))
     let p = harness.provider.Provider(model: take m, endpoint: take endpoint, key: secret.share(live.key), bounds: harness.provider.bounds(), deadline_ms: 45000u64)
     emit(live.out, "OpenRouter request attempted", "")
-    let result = harness.provider.ask(live.net, g.clock, take p, take req)
+    let result = harness.provider.ask_with_preview(live.net, g.clock, take p, take req, mut draft)
     match result {
         Error(Refused(why)) => emit(live.out, "OpenRouter refused: ", why),
         Error(BadArgs(why)) => emit(live.out, "OpenRouter request invalid: ", why),
         Error(Unavailable) => emit(live.out, "OpenRouter stream did not yield an answer", ""),
+        Ok(a) => count(live.out, "OpenRouter reported tokens: ", a.usage.input + a.usage.output),
         _ => (),
     }
     take result
@@ -255,6 +283,7 @@ fn notes_agent() -> harness.Agent[Grants] {
     list.push(mut a.tools, harness.outside("clock", "reads the wall clock", "{}", Repeatable(3u64), code.describe(clock_tool)))
     list.push(mut a.tools, harness.outside("summarize", "asks a helper agent for a one-line summary", "{\"text\":\"string\"}", Once, code.describe(summarize)))
     list.push(mut a.gates, harness.Gate(name: "confirm_delete", check: code.describe(confirm_delete)))
+    list.push(mut a.gates, harness.Gate(name: "confirm_live_add", check: code.describe(confirm_live_add)))
     list.push(mut a.reactions, harness.After(name: "tally", run: code.describe(tally)))
     list.push(mut a.sections, harness.Section(key: "notes", render: code.describe(notes_section)))
     a
@@ -270,7 +299,10 @@ fn advance(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take wake
 }
 
 fn effect(g: Grants, caller: store.Caller, take key: harness.EffectKey) -> Result[harness.Worked, Capacity] waits {
-    harness.effect(g.context, g, take key, notes_agent(), code.describe(settle))
+    let Some(l) = view g.live else { return harness.effect(g.context, g, take key, notes_agent(), code.describe(settle)) }
+    let mut a = notes_agent()
+    a.preview_model = Some(code.describe(live_model))
+    harness.effect_with_preview(g.context, g, take key, a, code.describe(settle), Some(harness.preview.target(l.preview, l.group, g.clock)))
 }
 
 fn settle(mut tx: store.Tx, a: store.triggers.Attempt, take m: harness.Settle) -> Result[harness.Filed, store.Error] {
@@ -278,12 +310,28 @@ fn settle(mut tx: store.Tx, a: store.triggers.Attempt, take m: harness.Settle) -
     harness.settle(mut tx, notes_agent(), w, a, take m)
 }
 
+fn submit_entry(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take m: harness.Submit) -> Result[harness.Disposition, harness.Refused] {
+    let w = wired()?
+    harness.submit(mut tx, h, notes_agent(), w, caller, take m)
+}
+
+fn decide_entry(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take d: harness.Decision) -> Result[harness.Ruling, harness.Refused] {
+    let w = wired()?
+    harness.decide(mut tx, h, notes_agent(), w, caller, take d)
+}
+
+fn shown(tx: store.Tx, h: harness.Handles, take u: ()) -> Result[store.runner.Cover, Capacity] { harness.transcript(h) }
+
 fn place(mut r: store.runner.Registry[Grants, harness.Handles]) -> Result[(), store.runner.RegisterError] {
     store.runner.transact(mut r, code.describe(advance), BYTES, store.runner.DEFAULT_STEPS)?
     store.runner.granted(mut r, code.describe(effect), BYTES, store.runner.DEFAULT_STEPS)?
     harness.register(mut r, BYTES, store.runner.DEFAULT_STEPS)?
     let f: own[send] fn(mut store.Tx, store.triggers.Attempt, take harness.Settle) -> Result[harness.Filed, store.Error] = settle
-    store.runner.register_attempt(mut r, code.describe(settle), take f, BYTES, store.runner.DEFAULT_STEPS)
+    store.runner.register_attempt(mut r, code.describe(settle), take f, BYTES, store.runner.DEFAULT_STEPS)?
+    store.runner.transact(mut r, code.describe(submit_entry), BYTES, store.runner.DEFAULT_STEPS)?
+    store.runner.transact(mut r, code.describe(decide_entry), BYTES, store.runner.DEFAULT_STEPS)?
+    let views: std.codec.Codec[harness.View] = std.codec.of()
+    store.runner.query(mut r, code.describe(shown), std.codec.key_u64(), views, BYTES, store.runner.DEFAULT_STEPS)
 }
 
 // ---- the helper agent: a second place, one session of its own ----
@@ -423,11 +471,12 @@ fn until_idle[G: send, S: send](take config: store.runner.PlaceConfig[G, harness
     }
 }
 
-fn settings(dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, take s: Services) -> store.runner.PlaceConfig[Grants, harness.Handles, Services, ()] {
+fn settings(take backing: store.runner.Backing, clock: Clock, random: Random, tasks: Tasks, net: Net, take s: Services) -> store.runner.PlaceConfig[Grants, harness.Handles, Services, ()] {
     let w = result.unwrap(wired())
+    let grant_bytes = if let Some(_) = view s.live { LIVE_GRANT_BYTES } else { 65536u64 }
     let config = store.runner.TriggerConfig(entries: harness.entries(w), author: store.Caller(issuer: 0u8, subject: list.new()),
-        grants: take s, grant: make_grants, grant_bytes: 65536u64)
-    store.runner.PlaceConfig(backing: Disk(dir, options()), selection: Reopen, place: code.describe(place), n_place: PLACE_BYTES,
+        grants: take s, grant: make_grants, grant_bytes: grant_bytes)
+    store.runner.PlaceConfig(backing: take backing, selection: Reopen, place: code.describe(place), n_place: PLACE_BYTES,
         migrate: code.describe(migrate), handles: code.describe(harness.handles), session: wire(), max_sessions: 1u64,
         proxies: list.new(), n_publisher: PLACE_BYTES, listen: loopback(),
         net: net, tasks: tasks, clock: clock, random: random, stop: store.runner.Stop(lag_ms: 0u64, grace_ms: 200u64),
@@ -493,19 +542,13 @@ fn quit(out: Stdout, why: String) -> Result[(), Exit] waits {
 
 // ---- the program ----
 
-fn seed_place(dir: Dir, clock: Clock, random: Random, tasks: Tasks, live: bool, prompt: String) -> Result[(), String] waits {
+fn seed_place(dir: Dir, clock: Clock, random: Random, tasks: Tasks, prompt: String) -> Result[(), String] waits {
     let mut db = match store.open(tasks, dir, clock, random, options()) { Ok(take v) => take v, Error(_) => return Error("open") }
     let Ok(()) = store.run_migration(mut db, tasks, code.describe(migrate)) else { return Error("migrate") }
     let Ok(h) = store.with_schema(db, code.describe(harness.handles)) else { return Error("schema") }
     let Ok(w) = wired() else { return Error("wiring") }
     let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[harness.Disposition, harness.Refused] {
-        if live {
-            let mut tools: List[String] = list.new()
-            list.push(mut tools, "note_add")
-            harness.open_session(mut tx, h, LIVE_MODEL, Only(take tools))?
-        } else {
-            harness.open_session(mut tx, h, "scripted", All)?
-        }
+        harness.open_session(mut tx, h, "scripted", All)?
         let Ok(t) = tables(store.tx_schema(tx)) else { return Error(Storage) }
         let Ok(()) = store.put(mut tx, t.notes, 0u64, "Team meeting on Tuesday.") else { return Error(Storage) }
         let Ok(()) = store.put(mut tx, t.stats, NEXT_ID, 1u64) else { return Error(Storage) }
@@ -548,25 +591,15 @@ fn approve(out: Stdout, dir: Dir, clock: Clock, random: Random, tasks: Tasks) ->
     Ok(())
 }
 
-fn report(out: Stdout, dir: Dir, clock: Clock, random: Random, tasks: Tasks, live: bool) -> Result[(), String] waits {
+fn report(out: Stdout, dir: Dir, clock: Clock, random: Random, tasks: Tasks) -> Result[(), String] waits {
     let Ok(db) = store.open(tasks, dir, clock, random, options()) else { return Error("open") }
     let Ok(h) = store.with_schema(db, code.describe(harness.handles)) else { return Error("schema") }
     let Ok(t) = store.with_schema(db, code.describe(tables)) else { return Error("tables") }
     let snap = store.snapshot(db)
     let Ok(Some(session)) = store.get(snap, store.shape(h.session), 0u64) else { return Error("no session") }
     emit(out, "transcript:", "")
-    let mut replies = 0u64
-    let mut calls = 0u64
-    let mut acknowledged = false
     for pos in 0u64..session.next_pos {
-        if let Ok(Some(e)) = store.get(snap, store.shape(h.entries), pos) {
-            show_entry(out, e)
-            if let Assistant(a) = view e {
-                replies += 1u64
-                calls += list.len(a.calls)
-                acknowledged = a.text == "SAVED"
-            }
-        }
+        if let Ok(Some(e)) = store.get(snap, store.shape(h.entries), pos) { show_entry(out, e) }
     }
     emit(out, "notes:", "")
     let mut rows = match store.scan(snap, store.shape(t.notes), Unbounded, Unbounded) { Ok(take v) => take v, Error(_) => return Error("scan") }
@@ -587,57 +620,314 @@ fn report(out: Stdout, dir: Dir, clock: Clock, random: Random, tasks: Tasks, liv
     string.push_u64(mut s, run.spend.reserved)
     string.push(mut s, " reserved")
     emit(out, take s, "")
-    if live {
-        let Finished(Answered) = view run.phase else { return Error("live run did not finish with an answer") }
-        if replies != 2u64 || calls != 1u64 || counted != 1u64 || !acknowledged || run.spend.known == 0u64 {
-            return Error("expected two streamed replies, one tool call and a final SAVED")
-        }
-        let Ok(Some(note)) = store.get(snap, store.shape(t.notes), 1u64) else { return Error("note_add did not save a note") }
-        if note != LIVE_NOTE { return Error("note_add saved different text") }
-    }
     let _ = store.close(take db)
     Ok(())
 }
 
-fn run_notes(out: Stdout, data: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, take live: Option[Live]) -> Result[(), Exit] waits {
-    let manual = match view live { Some(_) => true, None => false }
-    let prompt = if manual { LIVE_PROMPT } else { "The team meeting moved to Thursday. Please note it and tidy up." }
+pub fn main(out: Stdout, data: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), Exit] waits {
+    let prompt = "The team meeting moved to Thursday. Please note it and tidy up."
     let mut parent_name = string.with_capacity(32u64)
     let Ok(parent) = host.mkdtemp(data, mut parent_name) else { return quit(out, "cannot make the place directory") }
     let mut helper_name = string.with_capacity(32u64)
     let Ok(helper) = host.mkdtemp(data, mut helper_name) else { return quit(out, "cannot make the helper directory") }
-    if let Error(take why) = seed_place(parent, clock, random, tasks, manual, prompt) { return quit(out, why) }
+    if let Error(take why) = seed_place(parent, clock, random, tasks, prompt) { return quit(out, why) }
     emit(out, "you: ", prompt)
     let (ask, asks): (Sender[HelperAsk], Receiver[HelperAsk]) = channel.new(1u64)
     let helping = task.spawn(tasks, bytes 67108864u64, HelperSeed(inbox: take asks, dir: helper, clock: clock, random: random, tasks: tasks, net: net), helper_service)
-    let first = until_idle(settings(parent, clock, random, tasks, net, Services(helper: channel.sender(ask), clock: clock, live: take live)))
+    let first = until_idle(settings(Disk(parent, options()), clock, random, tasks, net, Services(helper: channel.sender(ask), clock: clock, live: None)))
     if let Error(take why) = first { return quit(out, why) }
-    if !manual {
-        if let Error(take why) = approve(out, parent, clock, random, tasks) { return quit(out, why) }
-        let second = until_idle(settings(parent, clock, random, tasks, net, Services(helper: channel.sender(ask), clock: clock, live: None)))
-        if let Error(take why) = second { return quit(out, why) }
-    }
-    let shown = report(out, parent, clock, random, tasks, manual)
+    if let Error(take why) = approve(out, parent, clock, random, tasks) { return quit(out, why) }
+    let second = until_idle(settings(Disk(parent, options()), clock, random, tasks, net, Services(helper: channel.sender(ask), clock: clock, live: None)))
+    if let Error(take why) = second { return quit(out, why) }
+    let summarized = report(out, parent, clock, random, tasks)
     let _ = take ask
     let _ = task.join(take helping)
     let _ = std.dir.remove_all(data, parent_name)
     let _ = std.dir.remove_all(data, helper_name)
-    match take shown { Ok(()) => Ok(()), Error(take why) => quit(out, why) }
+    match take summarized { Ok(()) => Ok(()), Error(take why) => quit(out, why) }
 }
 
-pub fn main(out: Stdout, data: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), Exit] waits {
-    run_notes(out, data, clock, random, tasks, net, None)
+// ---- the manual OpenRouter smoke ----
+
+const LIVE_GRANT_BYTES: u64 = 4194304u64
+const HTTP_MS: u64 = 5000u64
+
+fn live_place(take supplied: store.places.Supplied, s: Services) -> Result[store.runner.PlaceConfig[Grants, harness.Handles, Services, ()], Capacity] {
+    let mut config = settings(Memory, supplied.clock, supplied.random, supplied.tasks, supplied.net,
+        Services(helper: channel.sender(s.helper), clock: s.clock, live: match s.live {
+            Some(l) => Some(copy_live(l, supplied.name)), None => None,
+        }))
+    config.wire = Some(store.runner.wire_bind((), code.describe(store.ingress.caller), 4096u64, 65536u64))
+    Ok(take config)
+}
+
+fn live_factory() -> Result[store.places.Factory[Services], Capacity] { store.places.seeded_factory(live_place) }
+
+fn json[A: codec](a: A) -> Bytes {
+    let f: std.json.Format[A] = result.unwrap(std.json.interop())
+    string.into_bytes(result.unwrap(std.json.to_string(f, a)))
+}
+
+fn browser_headers(credential: Bytes, at: u64) -> List[std.http_client.Header] {
+    let mut auth = string.from("Bearer ")
+    string.push(mut auth, std.base64.encode_string(credential))
+    let mut pos = string.new()
+    string.push_u64(mut pos, at)
+    let mut headers: List[std.http_client.Header] = list.new()
+    list.push(mut headers, std.http_client.Header(name: "Authorization", value: Public(string.into_bytes(take auth))))
+    list.push(mut headers, std.http_client.Header(name: "Hirsel-Position", value: Public(string.into_bytes(take pos))))
+    headers
+}
+
+type Browser { net: Net, clock: Clock, address: Addr, credential: Bytes }
+
+fn browser_request(b: Browser, method: String, path: String, take headers: List[std.http_client.Header],
+    take body: Bytes, within: u64, limit: u64) -> Result[std.http_client.Connection, String] waits {
+    let req = std.http_client.Request(method: string.from(method), target: string.from(path), headers: take headers,
+        body: Fixed(list.len(body)))
+    let deadline = std.clock.deadline_after_ms(host.mono_ns(b.clock), within)
+    let Ok(take connection) = std.http_client.dial(b.net, b.address, "127.0.0.1", b.clock, take req, deadline)
+        else { return Error("browser could not open its HTTP request") }
+    let mut c = take connection
+    if list.len(body) > 0u64 {
+        if let Error(_) = std.http_client.write(mut c, body) { return Error("browser could not write its HTTP body") }
+    }
+    if let Error(_) = std.http_client.finish_request(mut c, limit) { return Error("browser could not read the HTTP head") }
+    Ok(take c)
+}
+
+fn post(b: Browser, path: String, take headers: List[std.http_client.Header], take body: Bytes,
+    expected: u16, expected_body: Bytes) -> Result[(), String] waits {
+    let mut c = browser_request(b, "POST", path, take headers, take body, HTTP_MS, 65536u64)?
+    let status = std.http_client.status(std.http_client.head(c))
+    let mut got: Bytes = list.with_capacity(4096u64)
+    loop {
+        list.reserve(mut got, 4096u64)
+        match std.http_client.read(mut c, mut got) {
+            Ok(0u64) => break,
+            Ok(_) => (),
+            Error(_) => return Error("browser could not read the HTTP body"),
+        }
+    }
+    if status != expected || got != expected_body {
+        let mut reason = string.from(path)
+        string.push(mut reason, " returned HTTP ")
+        string.push_u64(mut reason, int.widen(status))
+        string.push(mut reason, " with body ")
+        if let Ok(words) = string.from_utf8(take got) { string.push(mut reason, words) }
+        return Error(take reason)
+    }
+    Ok(())
+}
+
+fn message(b: Browser, at: u64, id: u64, key: String, prompt: String) -> Result[(), String] waits {
+    post(b, "/sessions/0/messages", browser_headers(b.credential, at), json(harness.Submit(client_key: string.from(key),
+        text: string.from(prompt))), 202u16, json((Placed(id) : harness.Disposition)))
+}
+
+type SeenReply { at: u64, text: String, first_preview_ns: u64 }
+
+fn browser_reply(mut c: std.http_client.Connection, mut dec: std.sse.Decoder, clock: Clock,
+    run: u64, after: u64, until: String, expect_preview: bool) -> Result[SeenReply, String] waits {
+    let rows: std.json.Format[harness.gateway_http.Shown] = result.unwrap(std.json.interop())
+    let drafts: std.json.Format[harness.preview.Draft] = result.unwrap(std.json.interop())
+    let mut chunk: Bytes = list.with_capacity(8192u64)
+    let mut reply = SeenReply(at: after, text: "", first_preview_ns: 0u64)
+    let mut status = string.new()
+    let mut draft = string.new()
+    let mut draft_at = 0u64
+    let mut cleared = false
+    loop {
+        match std.http_client.read(mut c, mut chunk) {
+            Ok(0u64) => return Error("browser SSE stream closed before the reply"),
+            Ok(_) => (),
+            Error(_) => return Error("browser could not read the reply from its SSE stream"),
+        }
+        let fed = std.sse.feed(mut dec, chunk, fn(name: Bytes, data: Bytes, event_id: Bytes) -> std.sse.FeedControl[String] {
+            if name == b"message" {
+                let Ok(harness.gateway_http.Shown(at: at, line: take line)) = std.json.decode_typed(rows, std.http.copy_bytes(data), 65536u64)
+                    else { return Fail("invalid transcript event") }
+                match take line {
+                    Status(take state) => { status = take state },
+                    Line(role, take text) => if role == "assistant" && at > reply.at {
+                        reply.at = at
+                        reply.text = take text
+                    },
+                }
+            } else if expect_preview && name == b"preview" {
+                let Ok(harness.preview.Draft(key: key, text: take text, ..)) = std.json.decode_typed(drafts, std.http.copy_bytes(data), 65536u64)
+                    else { return Fail("invalid preview event") }
+                if key.run == run && key.tool == None && string.byte_len(text) > 0u64 {
+                    if key.entry + 1u64 <= reply.at { return Fail("browser saw a draft after its committed row") }
+                    if reply.first_preview_ns == 0u64 {
+                        reply.first_preview_ns = host.mono_ns(clock)
+                        draft_at = key.entry + 1u64
+                        draft = take text
+                    }
+                    cleared = false
+                }
+            } else if name == b"preview-clear" && draft_at > 0u64 { cleared = true }
+            Continue
+        })
+        match take fed {
+            Error(Callback(take why, _)) => return Error(take why),
+            Error(Decode(_, _)) => return Error("malformed SSE frame"),
+            Ok(_) => (),
+        }
+        list.clear(mut chunk)
+        if status == until && reply.at > after {
+            if !expect_preview { return Ok(take reply) }
+            if draft_at == 0u64 { return Error("browser received no text preview for the wake answer") }
+            if draft_at != reply.at { return Error("preview and committed answer refer to different entries") }
+            if !string.starts_with(reply.text, draft) { return Error("first draft did not match the committed text prefix") }
+            if draft == reply.text { return Error("first preview already held the whole answer") }
+            if cleared { return Ok(take reply) }
+        }
+    }
+}
+
+fn live_down(d: harness.gateway.Door[Services], clock: Clock, after: u64) -> Result[harness.gateway.Marks, String] waits {
+    for i in 0u64..100u64 {
+        let marks = harness.gateway.marks(d, 0u64)
+        if marks.ups > after && marks.ups == marks.downs {
+            std.clock.sleep_ns(clock, 2u64 * IDLE_MS * 1000000u64)
+            let quiet = harness.gateway.marks(d, 0u64)
+            if quiet.ups != marks.ups || quiet.downs != marks.downs { return Error("SSE stream woke a quiet place") }
+            return Ok(marks)
+        }
+        std.clock.sleep_ns(clock, 50000000u64)
+    }
+    Error("place did not unload under the SSE stream")
+}
+
+fn journal(dir: Dir) -> u64 waits {
+    store.read_only_version(result.unwrap(store.open_read_only(dir, options())))
+}
+
+fn count(out: Stdout, label: String, value: u64) -> () waits {
+    let mut text = string.new()
+    string.push_u64(mut text, value)
+    emit(out, string.from(label), text)
+}
+
+fn live_decision(dir: Dir, b: Browser, tasks: Tasks, random: Random) -> Result[harness.Decision, String] waits {
+    let Ok(db) = store.open(tasks, dir, b.clock, random, options()) else { return Error("could not open the sleeping place") }
+    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    let snap = store.snapshot(db)
+    let wait = harness.WaitKey(run: 1u64, slot: 0u64, kind: harness.APPROVAL, generation: 0u64)
+    let member_key = harness.EffectKey(run: wait.run, round: wait.generation, kind: harness.TOOL, ordinal: wait.slot)
+    let Ok(Some(Open(take key, _))) = store.get(snap, store.shape(h.waits), wait)
+        else { return Error("note_add was not waiting for approval") }
+    let Ok(Some(member)) = store.get(snap, store.shape(h.effects), member_key) else { return Error("missing held tool call") }
+    let Some(c) = view member.call else { return Error("missing held tool") }
+    let Inline(raw) = view c.args else { return Error("held tool did not have inline arguments") }
+    let Ok(saved) = text_arg(raw, "text") else { return Error("missing held note text") }
+    if c.name != "note_add" || saved != LIVE_NOTE { return Error("held tool or its arguments differed from the prompt") }
+    let Ok(()) = store.close(take db) else { return Error("could not close the sleeping place") }
+    Ok(harness.Decision(run: wait.run, round: wait.generation, ordinal: wait.slot, key: take key, allow: true))
+}
+
+fn live_result(out: Stdout, dir: Dir, b: Browser, tasks: Tasks, random: Random) -> Result[(), String] waits {
+    let Ok(db) = store.open(tasks, dir, b.clock, random, options()) else { return Error("could not open the final journal") }
+    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    let t = result.unwrap(store.with_schema(db, code.describe(tables)))
+    let snap = store.snapshot(db)
+    let mut tokens = 0u64
+    for i in 0u64..3u64 {
+        let Ok(Some(run)) = store.get(snap, store.shape(h.runs), i) else { return Error("missing run in the journal") }
+        let Finished(Answered) = view run.phase else { return Error("run did not finish with an answer") }
+        if run.spend.known == 0u64 || run.spend.reserved != 0u64 || run.spend.unresolved != 0u64 {
+            return Error("run did not settle its token usage")
+        }
+        tokens += run.spend.known
+    }
+    count(out, "settled tokens: ", tokens)
+    let Ok(Some(note)) = store.get(snap, store.shape(t.notes), 0u64) else { return Error("note_add did not save a note") }
+    if note != LIVE_NOTE { return Error("note_add saved different text") }
+    let Ok(Some(1u64)) = store.get(snap, store.shape(t.stats), RESULTS) else { return Error("expected exactly one tool result") }
+    let Ok(()) = store.close(take db) else { return Error("could not close the final journal") }
+    Ok(())
+}
+
+fn live_turns(out: Stdout, root: Dir, d: harness.gateway.Door[Services], b: Browser, tasks: Tasks, random: Random) -> Result[(), String] waits {
+    post(b, "/sessions", list.new(), string.into_bytes("notes smoke"), 201u16, b"0")?
+    let Ok(dir) = std.dir.narrow(root, "s0") else { return Error("missing HTTP-created session directory") }
+    let seeded = journal(dir)
+    let mut stream = browser_request(b, "GET", "/sessions/0/events", browser_headers(b.credential, 0u64),
+        list.new(), 180000u64, 1073741824u64)?
+    if std.http_client.status(std.http_client.head(stream)) != 200u16 { return Error("browser SSE request was refused") }
+    let mut dec = std.sse.decoder(65536u64)
+
+    message(b, 0u64, 0u64, "warmup", LIVE_WARMUP)?
+    let warmup = browser_reply(mut stream, mut dec, b.clock, 0u64, 0u64, "answered", false)?
+    if warmup.text != "READY" { return Error("warmup answer differed from READY") }
+    let idle = live_down(d, b.clock, 0u64)?
+    let first = journal(dir)
+    count(out, "journal commits, warmup: ", first - seeded)
+
+    message(b, 1u64, 1u64, "add-note", LIVE_PROMPT)?
+    let held = browser_reply(mut stream, mut dec, b.clock, 1u64, warmup.at, "waiting", false)?
+    let waiting = live_down(d, b.clock, idle.ups)?
+    let paused = journal(dir)
+    count(out, "journal commits, tool call through approval wait: ", paused - first)
+    let decision = live_decision(dir, b, tasks, random)?
+    post(b, "/sessions/0/decisions", browser_headers(b.credential, 2u64), json(decision),
+        200u16, json((Approved : harness.Ruling)))?
+    let saved = browser_reply(mut stream, mut dec, b.clock, 1u64, held.at, "answered", false)?
+    if saved.text != "SAVED" { return Error("tool acknowledgement differed from SAVED") }
+    let asleep = live_down(d, b.clock, waiting.ups)?
+    let second = journal(dir)
+    count(out, "journal commits, approval through acknowledgement: ", second - paused)
+    count(out, "place downs before wake message: ", asleep.downs)
+
+    let started = host.mono_ns(b.clock)
+    message(b, 3u64, 2u64, "wake", LIVE_WAKE)?
+    let resumed = browser_reply(mut stream, mut dec, b.clock, 2u64, saved.at, "answered", true)?
+    if !string.starts_with(resumed.text, "1.") || string.byte_len(resumed.text) < 80u64 {
+        return Error("wake answer did not contain the requested numbered explanation")
+    }
+    count(out, "first preview latency ns: ", resumed.first_preview_ns - started)
+    let woken = live_down(d, b.clock, asleep.ups)?
+    count(out, "place ups after wake message: ", woken.ups)
+    count(out, "journal commits, wake answer: ", journal(dir) - second)
+    live_result(out, dir, b, tasks, random)
 }
 
 pub fn live_smoke(out: Stdout, data: Dir, clock: Clock, random: Random, tasks: Tasks, network: Net, api_key: Secret) -> Result[(), Exit] waits {
-    let Ok(ips) = std.net.lookup(network, OPENROUTER, At(clock, host.mono_ns(clock) + 5000000000u64)) else {
-        return quit(out, "cannot resolve openrouter.ai")
+    let Ok(ips) = std.net.lookup(network, OPENROUTER, At(clock, host.mono_ns(clock) + 5000000000u64))
+        else { return quit(out, "cannot resolve openrouter.ai") }
+    let mut resolved: Option[Addr] = None
+    for ip in ips { if let V4(_) = ip { resolved = Some(Addr(ip: ip, port: 443u16)); break } }
+    let Some(upstream) = resolved else { return quit(out, "openrouter.ai has no IPv4 address") }
+    let hub = harness.preview.start(tasks, 1048576u64, 4096u64)
+    let (helper, _unused): (Sender[HelperAsk], Receiver[HelperAsk]) = channel.new(1u64)
+    let live = Live(net: network, address: upstream, key: secret.share(api_key), out: out,
+        preview: harness.preview.door(hub), group: "")
+    let way: harness.gateway.Doorway[Services] = harness.gateway.doorway()
+    let d = harness.gateway.door_of(way)
+    let config = harness.gateway.GatewayConfig(root: data, options: options(), migrate: code.describe(migrate),
+        factory: live_factory, max_sessions: 1u64, place_bytes: 67108864u64, tasks: tasks, clock: clock, random: random,
+        net: network, watch: None, seed: Services(helper: take helper, clock: clock, live: Some(take live)))
+    let Ok(take g) = harness.gateway.gateway(take way, take config) else { return quit(out, "could not start the gateway") }
+    let Ok((take listener, address)) = host.listen(network, loopback(), 16u16) else { return quit(out, "could not listen for HTTP") }
+    let views: std.codec.Codec[harness.View] = std.codec.of()
+    let mut tools: List[String] = list.new()
+    list.push(mut tools, "note_add")
+    let front = harness.gateway_http.Front(submit: store.fixture.transact_entry(code.describe(submit_entry)),
+        decide: store.fixture.transact_entry(code.describe(decide_entry)),
+        shown: store.fixture.query_entry(code.describe(shown), std.codec.key_u64(), views),
+        keys: result.unwrap(store.fixture.entry_keys(code.describe(place))), socket: wire().socket, agent: LIVE_MODEL,
+        narrow: Only(take tools), preview: Some(harness.preview.door(hub)), tasks: tasks, clock: clock, random: random,
+        net: network, within_ms: HTTP_MS, poll_ms: 10u64, beat_ms: 50u64, conn_bytes: 8388608u64,
+        conns_max: 4u64, head_max: 8192u64, body_max: 65536u64)
+    let served = harness.gateway_http.serve(d, take front, take listener)
+    let ran = live_turns(out, data, d, Browser(net: network, clock: clock, address: address,
+        credential: store.ingress.credential(random)), tasks, random)
+    harness.gateway_http.halt(take served)
+    let _ = harness.gateway.stop(take g)
+    harness.preview.stop(take hub)
+    match take ran {
+        Ok(()) => { emit(out, "HTTP smoke passed", ""); Ok(()) },
+        Error(take why) => quit(out, why),
     }
-    for ip in ips {
-        if let V4(_) = ip {
-            let live = Live(net: network, address: Addr(ip: ip, port: 443u16), key: secret.share(api_key), out: out)
-            return run_notes(out, data, clock, random, tasks, network, Some(take live))
-        }
-    }
-    quit(out, "openrouter.ai has no IPv4 address")
 }

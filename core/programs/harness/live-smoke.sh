@@ -19,7 +19,7 @@ trap 'rm -rf -- "$work"' EXIT
 mkdir "$work/data"
 "${HIRSEL:-hirsel}" build "$here/live-smoke" --limit 268435456 --dir "$work/data" \
     --grant Stdout --grant Clock --grant Random --grant Tasks \
-    --grant 'Net=Listen 127.0.0.0/8 0-65535;Resolve openrouter.ai;Connect 0.0.0.0/0 443-443;Tls openrouter.ai 443-443 System' \
-    --grant 'Secret:api_key=env:OPENROUTER_API_KEY to openrouter.ai' -o "$work/notes-live"
+    --grant 'Net=Listen 127.0.0.0/8 0-65535;Connect 127.0.0.0/8 0-65535;Resolve openrouter.ai;Connect 0.0.0.0/0 443-443;Tls openrouter.ai 443-443 System' \
+    --grant 'Secret:api_key=env:OPENROUTER_API_KEY to openrouter.ai' -o "$work/gateway-smoke"
 
-OPENROUTER_API_KEY="$OPENROUTER_API_KEY" "$work/notes-live"
+OPENROUTER_API_KEY="$OPENROUTER_API_KEY" "$work/gateway-smoke"

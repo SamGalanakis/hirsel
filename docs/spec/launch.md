@@ -431,7 +431,7 @@ host accepts the import it checks that the prepared target's `Describe` and rele
 the ones the preview reported for that record. OLD's first drift is retried once and keeps the
 record: the deploy row returns to `Preparing` at a fresh attempt, OLD exports again under its
 original write pause, the prepare child and import run again with the preview's `Describe` and
-release, and the candidate starts at a new generation; that cutover keeps the original pause
+release, and once the discarded candidate has ended the new one starts at a new generation; that cutover keeps the original pause
 deadline. A drift of the retried attempt fails the deploy (`drift`). The row records that the
 retry is spent, so a host restarted after it re-sends the retry's cutover unchanged. The write pause keeps hot deploy's own checks (attempt and prepared
 digest, store identity, version and activation, capacity, and the deadline), and no fetch,

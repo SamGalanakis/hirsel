@@ -4,16 +4,22 @@ fn anchor_word(sites: &[u64], anchor: Option<hirsel_core_ir::Anchor>) -> u64 {
 }
 trait NativeInput {
     fn module(&self) -> &Module;
-    fn site_bindings(&self) -> String { String::new() }
+    fn site_bindings(&self) -> String {
+        String::new()
+    }
     /// By item, its first site word (`SourceMap::item_sites`).
-    fn sites(&self) -> Vec<u64> { hirsel_core_ir::source::module_sites(self.module()) }
+    fn sites(&self) -> Vec<u64> {
+        hirsel_core_ir::source::module_sites(self.module())
+    }
     fn object(&self, target: Target, optimization: Optimization, observing: bool) -> Vec<u8>;
     fn verify(&self, target: Target, observing: bool) {
         verify_ir(&emit_ir_for_target(self.module(), target, observing, &self.sites()).unwrap());
     }
 }
 impl NativeInput for Module {
-    fn module(&self) -> &Module { self }
+    fn module(&self) -> &Module {
+        self
+    }
     fn object(&self, target: Target, optimization: Optimization, observing: bool) -> Vec<u8> {
         emit_object_for_target(self, target, optimization, observing, &self.sites()).unwrap()
     }
@@ -76,20 +82,11 @@ fn execute(input: &impl NativeInput, cases: &[Case]) -> Vec<NativeReport> {
     execute_with_bindings(input, cases, "")
 }
 
-fn map_entropy_binding(key: &[u8; 16]) -> String {
-    let bytes = key.map(|b| b.to_string()).join(", ");
-    format!(
-        "#include <sys/random.h>\n\
-         extern ssize_t __real_getrandom(void *, size_t, unsigned int);\n\
-         ssize_t __wrap_getrandom(void *buf, size_t len, unsigned int flags) {{\n\
-             static const uint8_t key[16] = {{{bytes}}};\n\
-             if (len != sizeof(key) || flags != 0) return __real_getrandom(buf, len, flags);\n\
-             memcpy(buf, key, len); return len;\n\
-         }}\n"
-    )
-}
-
-fn execute_with_bindings(input: &impl NativeInput, cases: &[Case], bindings: &str) -> Vec<NativeReport> {
+fn execute_with_bindings(
+    input: &impl NativeInput,
+    cases: &[Case],
+    bindings: &str,
+) -> Vec<NativeReport> {
     execute_with_configuration(input, cases, bindings, "")
 }
 fn execute_with_configuration(
@@ -166,9 +163,7 @@ fn execute_target_object_checked(
     let dir = scratch.path();
     let observing = std::env::var_os("HIRSEL_TEST_CHARGE_OBSERVATION").is_some();
     input.verify(target, observing);
-    let bytes = object.unwrap_or_else(|| {
-        input.object(target, optimization, observing)
-    });
+    let bytes = object.unwrap_or_else(|| input.object(target, optimization, observing));
     std::fs::write(dir.join("core.o"), bytes).unwrap();
     let mut c = String::from(
         "#include <stdint.h>\n#include <stdio.h>\n#include <string.h>\n#include <assert.h>\n#include \"hirsel_core_rt.h\"\nextern uint64_t hirsel_core_test_available(const HirselCoreContext *);\nextern HirselCoreContext *hirsel_core_test_context_new(uint64_t);\nextern void hirsel_core_test_inject(HirselCoreContext *,size_t,bool);\nextern size_t hirsel_core_test_attempts(const HirselCoreContext *);\nstatic uint64_t trace[4096]; static size_t traces;\nvoid hirsel_core_test_drop_trace(uint64_t n){assert(traces<4096);trace[traces++]=n;}\nstatic float f32(uint32_t b){float x;memcpy(&x,&b,4);return x;}\nstatic double f64(uint64_t b){double x;memcpy(&x,&b,8);return x;}\nstatic const char *causes[]={\"Overflow\",\"Bounds\",\"Division\",\"Unwrap\",\"Fail\",\"Cancelled\",\"Capacity\"};\n",
@@ -183,7 +178,9 @@ fn execute_target_object_checked(
         let s = &module.signatures[f.signature.index()];
         let vector = |t: &Ty| matches!(t, Ty::Vector(_));
         if s.results.iter().any(vector)
-            || s.params.iter().any(|p| matches!(p, Param::Value(t) if vector(t)))
+            || s.params
+                .iter()
+                .any(|p| matches!(p, Param::Value(t) if vector(t)))
         {
             continue;
         }
@@ -221,8 +218,11 @@ fn execute_target_object_checked(
         )
         .unwrap();
     }
-    if !bindings.contains("hirsel_core_site_") { c.push_str(&input.site_bindings()); }
+    if !bindings.contains("hirsel_core_site_") {
+        c.push_str(&input.site_bindings());
+    }
     c.push_str(bindings);
+    c.push_str("\n#ifndef SETUP_CASE\n#define SETUP_CASE(ctx) ((void)0)\n#endif\n");
     c.push_str(r#"
 extern void hirsel_core_test_reset_limit(HirselCoreContext *, uint64_t);
 static HirselCoreEvent arc_events[4096]; static size_t arc_count;
@@ -335,7 +335,7 @@ static void diagnostic(void *state, const uint8_t *s, size_t n) { (void)state; f
         } else {
             ""
         };
-        writeln!(c,"static uint8_t case{k}(HirselCoreContext *ctx,const HirselCoreProcessConfig *cfg,HirselCoreMainResult *result) {{ (void)cfg; (void)result; hirsel_core_test_reset_limit(ctx,UINT64_C({limit})); {files} traces=0; arc_count=0; {begin} {inject} {destination} uint64_t initial=hirsel_core_test_available(ctx); {ret} r{k} = {}({args});",symbol(module,f)).unwrap();
+        writeln!(c,"static uint8_t case{k}(HirselCoreContext *ctx,const HirselCoreProcessConfig *cfg,HirselCoreMainResult *result) {{ (void)cfg; (void)result; hirsel_core_test_reset_limit(ctx,UINT64_C({limit})); SETUP_CASE(ctx); {files} traces=0; arc_count=0; {begin} {inject} {destination} uint64_t initial=hirsel_core_test_available(ctx); {ret} r{k} = {}({args});",symbol(module,f)).unwrap();
         writeln!(invocations, "assert(hirsel_core_run(&cfg,case{k})==0);").unwrap();
         let status = if sig.results.is_empty() {
             format!("r{k}")
@@ -400,7 +400,6 @@ static void diagnostic(void *state, const uint8_t *s, size_t n) { (void)state; f
         "hirsel_core_free_value",
         "hirsel_core_block_payer",
         "hirsel_core_release",
-        "getrandom",
     ] {
         if bindings.contains(&format!("__wrap_{symbol}")) {
             compiler.arg(format!("-Wl,--wrap={symbol}"));
@@ -561,10 +560,7 @@ fn call_results_match_callees(ir: &str) {
 fn agree_cases(input: &impl NativeInput, cases: &[Case], memory: bool) {
     let module = input.module();
     call_results_match_callees(&emit_ir(module).unwrap());
-    // Native startup draws its CAP-8 run key from the OS. Give it the same
-    // key as run_injected so the raw CoreIR hash results are comparable.
-    let got = execute_with_bindings(input, cases, &map_entropy_binding(&[0; 16]));
-    check_native_reports(module, &input.sites(), cases, got, memory);
+    check_native_reports(module, &input.sites(), cases, execute(input, cases), memory);
 }
 
 fn check_native_reports(

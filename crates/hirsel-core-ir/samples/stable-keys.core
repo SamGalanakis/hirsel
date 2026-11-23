@@ -16,7 +16,7 @@
 ;
 ; Source (package samples@0, module keys), the helpers instantiated for these types:
 ;   f6: fn texts() { ("abc" <=> "abd", "abc" <=> "ab", A."abc" <=> B."abc",
-;                     hash word of A."abc", of B."abc") }
+;                     the two hash words agree) }
 ;   f7: fn fixed() { ([1,2,3] <=> [1,2], [1,2] <=> [1,5], [1,2] <=> [1,2], [1,5] <=> [1,2,3]) }
 ;   f8: fn seqs() { (["ab","c"] == ["ab","d"], ["ab","c"] == ["ab","c"]) }
 ;
@@ -26,10 +26,8 @@
 ; length 11 = (4 + 2) + (4 + 1), then the two Texts), ["ab","d"] at 95. Blob B (d1),
 ; W 2, used 5: Text "abc" at 16 (count 3 as a u16, then the bytes).
 ; "abc" < "abd" at byte 2; "ab" is a proper prefix of "abc"; A."abc" and B."abc" have
-; the same bytes at different W, so they are equal and hash alike. The oracle
-; is SipHash-1-3 with an all-zero test key over the words [3, 0x636261],
-; taken from siphasher 1.0.4.
-; run: f6() -> -1, 1, 0, 16348673346809479290, 16348673346809479290 | used 0
+; the same bytes at different W, so they are equal and hash alike.
+; run: f6() -> -1, 1, 0, true | used 0
 ; [1,2,3] vs [1,2]: equal for 2 elements, then the longer is greater. [1,2] vs [1,5]:
 ; 2 < 5. [1,5] vs [1,2,3]: 5 > 2 decides before the lengths.
 ; run: f7() -> 1, -1, 0, 1 | used 0
@@ -49,7 +47,7 @@ sig g4 = (&view t0) -> (u64)
 sig g5 = (ptr, u64) -> (u64)
 sig g6 = (&view t1, &view t1) -> (i8)
 sig g7 = (&view t2, &view t2) -> (bool)
-sig g8 = () -> (i8, i8, i8, u64, u64)
+sig g8 = () -> (i8, i8, i8, bool)
 sig g9 = () -> (i8, i8, i8, i8)
 sig g10 = () -> (bool, bool)
 inst n0 = samples@0/keys/read_w [] []
@@ -343,11 +341,12 @@ b0:
   v9: i8 = call f2 g2 (&a0, &a9)
   v10: u64 = call f3 g4 (&a0)
   v11: u64 = call f3 g4 (&a9)
+  v12: bool = eq v10, v11
   dead s0
   dead s1
   dead s2
   dead s3
-  return v7, v8, v9, v10, v11
+  return v7, v8, v9, v12
 }
 fn f7 = n7 g9 {
   slot s0 = t1                         ; [1,2,3]

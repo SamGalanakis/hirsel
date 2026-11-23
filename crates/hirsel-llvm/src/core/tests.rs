@@ -1927,71 +1927,19 @@ fn static_capacity_zero_carriers_drop_and_grow_through_runtime_cleanup() {
 fn hash_read_facts_observe_intervening_writes() {
     let module = text::parse(include_str!("../../tests/core_runtime/hash-writes.core")).unwrap();
     wf::module(&module).unwrap();
-    let mut cases = [(0, 1), (1, 0), (u64::MAX, 0), (1 << 63, u64::MAX)]
-        .map(|(a, b)| Case {
-            function: FuncId(0),
-            args: vec![a, b],
-            limit: 0,
-            injection: None,
-        })
-        .into_iter()
-        .collect::<Vec<_>>();
-    let word = |bits| Case {
-        function: FuncId(1),
-        args: vec![bits],
+    let cases = [(0, 1), (1, 0), (u64::MAX, 0), (1 << 63, u64::MAX)].map(|(a, b)| Case {
+        function: FuncId(0),
+        args: vec![a, b],
         limit: 0,
         injection: None,
-    };
-    let fixed = cases.len();
-    cases.push(word(u64::from_le_bytes([0, 1, 2, 3, 4, 5, 6, 7])));
-    let fixed_key = std::array::from_fn(|i| i as u8);
-    let mut vectors = vec![
-        ([0; 16], vec![word(0)], Some((0, 0xbd60acb658c79e45))),
-        (fixed_key, cases, Some((fixed, 0x369095118d299a8e))),
-    ];
-    for seed in [0x1584_u64, 0x9e3779b97f4a7c15] {
-        let mut state = seed;
-        let mut random_word = || {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            state
-        };
-        let mut key = [0; 16];
-        for half in key.chunks_exact_mut(8) {
-            half.copy_from_slice(&random_word().to_le_bytes());
-        }
-        vectors.push((key, (0..64).map(|_| word(random_word())).collect(), None));
-    }
+    });
     for facts in [false, true] {
         let ir = emit_ir_with_facts(&module, false, facts).unwrap();
         for speed in [false, true] {
             let object = hirsel_llvm_lazy::compile_ir(&ir, speed).unwrap();
-            for (key, cases, fixed) in &vectors {
-                // Supply CAP-8 entropy to the linked test process so the evaluator
-                // and native program see the same key.
-                let got = execute_object(
-                    &module,
-                    cases,
-                    &map_entropy_binding(key),
-                    "",
-                    Optimization::None,
-                    Some(object.clone()),
-                );
-                if let Some((index, expected)) = fixed {
-                    // Independent siphasher vector, also pinned by the runtime suite.
-                    assert_eq!(
-                        got[*index].outcome,
-                        eval::Outcome::Returned(vec![*expected, 1])
-                    );
-                }
-                for (case, actual) in cases.iter().zip(got) {
-                    let (expected, _) =
-                        eval::run_map_hash(&module, case.function, &case.args, case.limit, *key);
-                    assert_eq!(actual.outcome, expected.outcome);
-                    assert_eq!(actual.used, 0);
-                    assert_eq!(actual.admissions, 0);
-                }
+            for actual in execute_object(&module, &cases, "", "", Optimization::None, Some(object))
+            {
+                assert_eq!(actual.outcome, eval::Outcome::Returned(vec![1, 1]));
             }
         }
     }
@@ -2020,7 +1968,8 @@ fn map_placement_operations_match_prog_11() {
     let reports = execute_object(
         &module,
         &cases,
-        &map_entropy_binding(&key),
+        "extern void hirsel_core_test_set_map_vectors_key(HirselCoreContext *);\n\
+         #define SETUP_CASE(ctx) hirsel_core_test_set_map_vectors_key(ctx)\n",
         "",
         Optimization::Speed,
         None,

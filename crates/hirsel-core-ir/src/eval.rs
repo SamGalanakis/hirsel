@@ -11,7 +11,12 @@
 //! producer's code. Provider rows run against a modelled provider ([`World`]).
 
 mod conn;
+mod map;
 mod simd;
+
+pub use map::run_map_hash;
+#[cfg(feature = "map-observation")]
+pub use map::run_map_observed;
 
 use crate::*;
 use hirsel_core_ids::ContentHash;
@@ -1233,49 +1238,6 @@ fn collect_arrays(ty: &FieldTy, out: &mut Vec<(FieldTy, u64)>) {
 pub fn run(m: &Module, f: FuncId, args: &[u64], limit: u64) -> Report {
     run_injected(m, f, args, limit, None)
 }
-/// Test a single program with a chosen run key, and report its source step count.
-pub fn run_map_hash(
-    m: &Module,
-    f: FuncId,
-    args: &[u64],
-    limit: u64,
-    key: [u8; 16],
-) -> (Report, u64) {
-    let (report, checked) = run_world(
-        m,
-        f,
-        args,
-        limit,
-        WorldInput {
-            map_hash_key: key,
-            ..WorldInput::default()
-        },
-    );
-    (report, checked.steps)
-}
-
-/// Observe the probe and rebuild paths of the emitted CoreIR in a fixed-key run.
-#[cfg(feature = "map-observation")]
-pub fn run_map_observed(
-    m: &Module,
-    f: FuncId,
-    args: &[u64],
-    limit: u64,
-    key: [u8; 16],
-) -> (Report, Checked) {
-    run_world(
-        m,
-        f,
-        args,
-        limit,
-        WorldInput {
-            map_hash_key: key,
-            observe_maps: true,
-            events: true,
-            ..WorldInput::default()
-        },
-    )
-}
 /// Where a run's NaNs take their one observable pattern (FORM #97: only a `reinterpret`
 /// from a float observes the pattern, and it gives the canonical one).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1555,7 +1517,7 @@ pub fn run_host_stdio(
 }
 
 struct WorldInput<'a> {
-    map_hash_key: [u8; 16],
+    map_hash_key: Option<[u8; 16]>,
     #[cfg(feature = "map-observation")]
     observe_maps: bool,
     network: Option<Network>,
@@ -1584,7 +1546,7 @@ impl Default for WorldInput<'_> {
     fn default() -> Self {
         Self {
             network: None,
-            map_hash_key: [0; 16],
+            map_hash_key: None,
             #[cfg(feature = "map-observation")]
             observe_maps: false,
             network_out: None,
@@ -2038,7 +2000,8 @@ fn cause(r: RaiseCause) -> &'static str {
 
 impl<'m> Machine<'m> {
     fn new(m: &'m Module, recipes: Vec<RecipeRow>, limit: u64, input: &WorldInput<'_>) -> Self {
-        let (s0, s1, map_strong_key) = hirsel_core_layout::map_index::derive(&input.map_hash_key);
+        let map_hash_key = input.map_hash_key.unwrap_or_else(map::fresh_key);
+        let (s0, s1, map_strong_key) = hirsel_core_layout::map_index::derive(&map_hash_key);
         Self {
             next_step_bound: 1,
             m,
@@ -2060,7 +2023,7 @@ impl<'m> Machine<'m> {
             steps: 0,
             injection: input.injection,
             world: World {
-                map_hash_key: input.map_hash_key,
+                map_hash_key,
                 map_fast_salt: [s0, s1],
                 map_strong_key,
                 #[cfg(feature = "map-observation")]

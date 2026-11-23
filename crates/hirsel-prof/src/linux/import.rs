@@ -10,7 +10,7 @@ use super::perf::{Kind, Mapping, Record, Sample};
 use super::procfs::{self, Identity, KernelSymbols};
 use super::unwind::{Registers, Stack, Step};
 use crate::MemMode;
-use crate::memory::{MemoryImport, Rss};
+use crate::memory::MemoryImport;
 use crate::observation::{Observation, RecordKind};
 use crate::profile::{Result, Timestamp, Unsigned};
 
@@ -115,12 +115,12 @@ impl<'a> Import<'a> {
         Ok(())
     }
 
-    /// A live capture passes its RSS reads and keeps the perf mappings.
+    /// A live capture keeps the perf mappings.
     pub(crate) fn store_memory(
         &mut self,
         observations: &Observation,
         mode: MemMode,
-        live: Option<&[Rss]>,
+        live: bool,
     ) -> Result<()> {
         let mut memory = MemoryImport::default();
         let unknown = self.unknown_callsite()?;
@@ -128,7 +128,7 @@ impl<'a> Import<'a> {
         let mut maps = Vec::new();
         while let Some(record) = records.next() {
             match &record.kind {
-                RecordKind::Mapping(line) if live.is_none() => {
+                RecordKind::Mapping(line) if !live => {
                     maps.extend_from_slice(line);
                     maps.push(b'\n');
                     if !records.peek().is_some_and(|next| {
@@ -156,7 +156,7 @@ impl<'a> Import<'a> {
             self.db,
             mode.as_str(),
             observations.lost,
-            observations.complete,
+            observations.complete.then_some(observations.memory_emitted),
             unknown,
             live,
         )
@@ -626,9 +626,9 @@ mod tests {
     fn runtime_observation_refuses_unassigned_kind() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("runtime.observations");
-        let mut wire = b"HIRSOBS1".to_vec();
-        // Both frames have no words or bytes. Kind 22 is unassigned; 65,534 is END.
-        for kind in [22u16, 65_534] {
+        let mut wire = b"HIRSOBS2".to_vec();
+        // Both frames have no words or bytes. Kind 24 is unassigned; 65,534 is END.
+        for kind in [24u16, 65_534] {
             let mut header = [0; 20];
             header[12..14].copy_from_slice(&kind.to_le_bytes());
             wire.extend_from_slice(&header);
@@ -640,7 +640,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             error.to_string(),
-            "unassigned runtime observation kind 22 in HIRSOBS1"
+            "unassigned runtime observation kind 24 in HIRSOBS2"
         );
     }
 

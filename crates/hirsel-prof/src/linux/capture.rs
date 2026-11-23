@@ -10,7 +10,6 @@ use super::import::Import;
 use super::launch::SuspendedLaunchedProcess;
 use super::perf::{self, Event, PerfGroup, PerfSettings};
 use super::procfs::Identity;
-use crate::memory::Rss;
 use crate::observation::{Observation, RecordKind};
 use crate::profile::{ProfileWriter, Result, RunMeta};
 
@@ -123,15 +122,11 @@ pub fn run(
         provenance.identity,
     );
     import.source_remarks()?;
-    let mut rss = mem.map(|_| ResidentSet::new(pid));
     let status = loop {
         if let Some(group) = &mut group {
             for record in group.collect(false)? {
                 import.record(record)?;
             }
-        }
-        if let Some(rss) = &mut rss {
-            rss.poll()?;
         }
         if let Some(status) = child.try_wait()? {
             break status;
@@ -153,8 +148,8 @@ pub fn run(
         if group.is_none() {
             seed_mappings(&mut import, &observations)?;
         }
-        if let (Some(mode), Some(rss)) = (mem, &rss) {
-            import.store_memory(&observations, mode, Some(&rss.instants()))?;
+        if let Some(mode) = mem {
+            import.store_memory(&observations, mode, true)?;
         }
         observations.store(profile.connection())?;
     }
@@ -226,7 +221,7 @@ pub fn replay(
     if let Some(options) = launch.observation {
         let observations = Observation::read(options.path)?;
         if let Some(mode) = options.mem {
-            import.store_memory(&observations, mode, None)?;
+            import.store_memory(&observations, mode, false)?;
         } else {
             seed_mappings(&mut import, &observations)?;
         }
@@ -258,70 +253,6 @@ pub fn replay(
 
 pub(crate) const LIVE_EXACT: &str =
     "a live memory profile is sampled; record a tape and use 'hirsel prof replay --mem=exact'";
-
-/// Resident set reads at a fixed interval, independent of the memory samples.
-struct ResidentSet {
-    statm: std::path::PathBuf,
-    page: u64,
-    next: u64,
-    peak: Option<Rss>,
-    last: Option<Rss>,
-}
-
-const RSS_INTERVAL_NS: u64 = 10_000_000;
-
-impl ResidentSet {
-    fn new(pid: u32) -> Self {
-        // SAFETY: sysconf has no memory operands.
-        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as u64;
-        Self {
-            statm: format!("/proc/{pid}/statm").into(),
-            page,
-            next: 0,
-            peak: None,
-            last: None,
-        }
-    }
-
-    fn poll(&mut self) -> Result<()> {
-        let ts = perf::monotonic_ns()?;
-        if ts < self.next {
-            return Ok(());
-        }
-        self.next = ts + RSS_INTERVAL_NS;
-        // The process can exit or become a zombie between reads.
-        let Ok(statm) = std::fs::read_to_string(&self.statm) else {
-            return Ok(());
-        };
-        let Some(pages) = statm
-            .split_ascii_whitespace()
-            .nth(1)
-            .and_then(|pages| pages.parse::<u64>().ok())
-            .filter(|&pages| pages != 0)
-        else {
-            return Ok(());
-        };
-        let read = Rss {
-            label: "peak",
-            ts,
-            bytes: pages * self.page,
-        };
-        if self.peak.is_none_or(|peak| read.bytes > peak.bytes) {
-            self.peak = Some(read);
-        }
-        self.last = Some(read);
-        Ok(())
-    }
-
-    /// The highest read and the last read before exit.
-    fn instants(&self) -> Vec<Rss> {
-        let last = self.last.map(|last| Rss {
-            label: "last",
-            ..last
-        });
-        self.peak.into_iter().chain(last).collect()
-    }
-}
 
 fn seed_mappings(import: &mut Import<'_>, observations: &Observation) -> Result<()> {
     let mut maps = observations

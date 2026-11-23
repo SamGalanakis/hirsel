@@ -1,5 +1,5 @@
 PRAGMA application_id = 0x48505246;
-PRAGMA user_version = 3;
+PRAGMA user_version = 4;
 
 CREATE TABLE run_meta (
     key TEXT PRIMARY KEY,
@@ -121,7 +121,8 @@ CREATE TABLE peak_snapshot (
     metric TEXT NOT NULL CHECK (metric IN ('charged_bytes', 'retained_bytes', 'slack_bytes')),
     scope_id INTEGER,
     ts_ns ANY NOT NULL,
-    total_bytes ANY NOT NULL
+    total_bytes ANY NOT NULL,
+    resident_bytes ANY
 ) STRICT;
 
 CREATE TABLE peak_callsite (
@@ -129,6 +130,7 @@ CREATE TABLE peak_callsite (
     callsite_id INTEGER NOT NULL REFERENCES callsite,
     live_bytes ANY NOT NULL,
     live_count ANY NOT NULL,
+    resident_bytes ANY,
     PRIMARY KEY (snapshot_id, callsite_id)
 ) STRICT, WITHOUT ROWID;
 

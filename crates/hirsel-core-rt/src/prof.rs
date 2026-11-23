@@ -2,13 +2,16 @@
 use std::cell::{RefCell, UnsafeCell};
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
+use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-const MAGIC: &[u8; 8] = b"HIRSOBS1";
+const MAGIC: &[u8; 8] = b"HIRSOBS2";
 const DEFAULT_CHUNK_BYTES: usize = 64 * 1024;
+const LIVE_MEMORY_CHUNK_BYTES: usize = 512 * 1024;
+const RSS_INTERVAL_NS: u64 = 10_000_000;
 const MAX_CHUNK_BYTES: usize = 64 * 1024 * 1024;
 const MAX_RECORD_BYTES: usize = DEFAULT_CHUNK_BYTES;
 const HEADER_BYTES: usize = 20;
@@ -36,6 +39,8 @@ pub(crate) enum Kind {
     ScopeStack = 19,
     MemoryMeta = 20,
     SlackMember = 21,
+    ResidentSnapshot = 22,
+    ResidentMember = 23,
 }
 
 thread_local! {
@@ -44,7 +49,7 @@ thread_local! {
 static RUN: Mutex<Option<Arc<Shared>>> = Mutex::new(None);
 
 struct Chunk {
-    data: UnsafeCell<Box<[u8]>>,
+    data: UnsafeCell<Box<[MaybeUninit<u8>]>>,
     /// Zero gives the producer custody. Publishing a length passes custody to
     /// the drain thread until it has copied the prefix and reset the length.
     len: AtomicUsize,
@@ -58,7 +63,7 @@ impl Chunk {
     fn new(bytes: usize) -> Result<Self, std::collections::TryReserveError> {
         let mut data = Vec::new();
         data.try_reserve_exact(bytes)?;
-        data.resize(bytes, 0);
+        data.resize_with(bytes, MaybeUninit::uninit);
         Ok(Self {
             data: UnsafeCell::new(data.into_boxed_slice()),
             len: AtomicUsize::new(0),
@@ -70,7 +75,9 @@ impl Chunk {
         if len != 0 {
             // SAFETY: the acquire takes the published prefix before releasing
             // this chunk back to the producer.
-            output.write_all(unsafe { &(&*self.data.get())[..len] })?;
+            output.write_all(unsafe {
+                std::slice::from_raw_parts((&*self.data.get()).as_ptr().cast::<u8>(), len)
+            })?;
             self.len.store(0, Ordering::Release);
         }
         Ok(len != 0)
@@ -81,6 +88,7 @@ struct Thread {
     chunks: [Chunk; 2],
     dead: AtomicBool,
     lost: AtomicU64,
+    memory_emitted: AtomicU64,
     tid: u32,
 }
 
@@ -90,6 +98,7 @@ impl Thread {
             chunks: [Chunk::new(bytes)?, Chunk::new(bytes)?],
             dead: AtomicBool::new(false),
             lost: 0.into(),
+            memory_emitted: 0.into(),
             tid,
         })
     }
@@ -102,6 +111,7 @@ struct Writer {
     capacity: usize,
     tasks: bool,
     lost: u64,
+    memory_emitted: u64,
 }
 
 impl Writer {
@@ -113,6 +123,7 @@ impl Writer {
             capacity,
             tasks,
             lost: 0,
+            memory_emitted: 0,
         }
     }
 
@@ -126,6 +137,7 @@ impl Writer {
     }
 
     fn append(&mut self, kind: Kind, words: &[u64], bytes: &[u8]) {
+        self.memory_emitted += u64::from(kind as u16 >= Kind::Alloc as u16);
         if let (Ok(words_len), Ok(bytes_len)) =
             (u16::try_from(words.len()), u32::try_from(bytes.len()))
         {
@@ -140,7 +152,7 @@ impl Writer {
                     // chunk until seal gives custody to the drain thread.
                     let data = unsafe { &mut *chunk.data.get() };
                     let dst = &mut data[self.used..self.used + needed];
-                    dst[..HEADER_BYTES].copy_from_slice(&header(
+                    dst[..HEADER_BYTES].write_copy_of_slice(&header(
                         now_ns(),
                         self.thread.tid,
                         kind as u16,
@@ -148,9 +160,9 @@ impl Writer {
                         bytes_len,
                     ));
                     for (dst, word) in dst[HEADER_BYTES..].chunks_exact_mut(8).zip(words) {
-                        dst.copy_from_slice(&word.to_le_bytes());
+                        dst.write_copy_of_slice(&word.to_le_bytes());
                     }
-                    dst[HEADER_BYTES + words.len() * 8..].copy_from_slice(bytes);
+                    dst[HEADER_BYTES + words.len() * 8..].write_copy_of_slice(bytes);
                     self.used += needed;
                     return;
                 }
@@ -164,6 +176,9 @@ impl Drop for Writer {
     fn drop(&mut self) {
         self.seal();
         self.thread.lost.store(self.lost, Ordering::Relaxed);
+        self.thread
+            .memory_emitted
+            .store(self.memory_emitted, Ordering::Relaxed);
         self.thread.dead.store(true, Ordering::Release);
     }
 }
@@ -199,6 +214,7 @@ pub(crate) fn append(kind: Kind, words: &[u64], bytes: &[u8]) {
 struct Shared {
     tasks: bool,
     chunk_bytes: usize,
+    live_memory: bool,
     /// Workers publish their buffers at startup. Hooks access only TLS.
     new_threads: Mutex<Vec<Arc<Thread>>>,
     done: AtomicBool,
@@ -271,7 +287,13 @@ impl Run {
             std::env::remove_var("HIRSEL_PROFILE_CHUNK_BYTES");
             std::env::remove_var("HIRSEL_PROFILE_TASKS");
         }
-        let size = size.map_or(Some(DEFAULT_CHUNK_BYTES), |value| {
+        let live_memory = !replay && memory.is_some();
+        let default_size = if live_memory {
+            LIVE_MEMORY_CHUNK_BYTES
+        } else {
+            DEFAULT_CHUNK_BYTES
+        };
+        let size = size.map_or(Some(default_size), |value| {
             value
                 .to_str()?
                 .parse::<usize>()
@@ -284,7 +306,7 @@ impl Run {
             );
             return None;
         };
-        match Self::open(path, size, tasks) {
+        match Self::open(path, size, tasks, live_memory) {
             Ok(run) => {
                 match memory {
                     Some(settings) if replay => crate::mem_prof::start(settings),
@@ -304,6 +326,7 @@ impl Run {
         path: impl AsRef<std::path::Path>,
         chunk_bytes: usize,
         tasks: bool,
+        live_memory: bool,
     ) -> io::Result<Self> {
         let mut output = BufWriter::new(File::options().write(true).truncate(true).open(path)?);
         output.write_all(MAGIC)?;
@@ -323,6 +346,7 @@ impl Run {
         let shared = Arc::new(Shared {
             tasks,
             chunk_bytes,
+            live_memory,
             new_threads: Mutex::default(),
             done: AtomicBool::new(false),
         });
@@ -359,6 +383,9 @@ impl Drop for Run {
 
 fn drain(shared: &Shared, mut output: impl Write) -> io::Result<()> {
     let mut threads: Vec<(Arc<Thread>, usize)> = Vec::new();
+    let mut next_rss = 0;
+    let mut peak = None::<Arc<crate::mem_prof::Residency>>;
+    let mut last = None;
     loop {
         let done = shared.done.load(Ordering::Acquire);
         threads.extend(
@@ -380,19 +407,67 @@ fn drain(shared: &Shared, mut output: impl Write) -> io::Result<()> {
                 *next ^= 1;
             }
             if dead {
-                output.write_all(&header(now_ns(), worker.tid, LOSS, 1, 0))?;
+                output.write_all(&header(now_ns(), worker.tid, LOSS, 2, 0))?;
                 output.write_all(&worker.lost.load(Ordering::Relaxed).to_le_bytes())?;
+                output.write_all(&worker.memory_emitted.load(Ordering::Relaxed).to_le_bytes())?;
                 threads.swap_remove(index);
             } else {
                 index += 1;
             }
         }
         if done {
+            for (label, snapshot) in [peak, last].into_iter().enumerate() {
+                if let Some(snapshot) = snapshot {
+                    write_residency(&mut output, label as u64, &snapshot)?;
+                }
+            }
             output.write_all(&header(now_ns(), 0, END, 0, 0))?;
             return output.flush();
         }
+        if shared.live_memory {
+            let now = now_ns();
+            if now >= next_rss
+                && let Some(read) = crate::mem_prof::residency()
+            {
+                next_rss = now + RSS_INTERVAL_NS;
+                let read = Arc::new(read);
+                if peak.as_ref().is_none_or(|peak| read.rss > peak.rss) {
+                    peak = Some(read.clone());
+                }
+                last = Some(read);
+            }
+        }
         thread::park_timeout(Duration::from_millis(1));
     }
+}
+
+fn write_residency(
+    output: &mut impl Write,
+    label: u64,
+    read: &crate::mem_prof::Residency,
+) -> io::Result<()> {
+    output.write_all(&header(
+        read.timestamp,
+        0,
+        Kind::ResidentSnapshot as u16,
+        2,
+        0,
+    ))?;
+    output.write_all(&label.to_le_bytes())?;
+    output.write_all(&read.rss.to_le_bytes())?;
+    for &(id, bytes) in &read.samples {
+        output.write_all(&header(
+            read.timestamp,
+            0,
+            Kind::ResidentMember as u16,
+            3,
+            0,
+        ))?;
+        output.write_all(&label.to_le_bytes())?;
+        output.write_all(&id.to_le_bytes())?;
+        output.write_all(&bytes.to_le_bytes())?;
+    }
+    Ok(())
 }
 
 static NEXT_RUN: AtomicU64 = AtomicU64::new(1);

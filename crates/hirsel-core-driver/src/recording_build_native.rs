@@ -502,7 +502,7 @@ fn observed_tape_run(program: &Path, args: &[&str]) -> (Option<i32>, String, Str
         .env("HIRSEL_PROFILE", raw.path()).output().unwrap();
     if output.status.success() {
         let data = std::fs::read(raw.path()).unwrap();
-        assert!(data.starts_with(b"HIRSOBS1") && data.len() > 8, "{program:?}: runtime observations");
+        assert!(data.starts_with(b"HIRSOBS2") && data.len() > 8, "{program:?}: runtime observations");
     }
     (output.status.code(), String::from_utf8(output.stdout).unwrap(), String::from_utf8(output.stderr).unwrap())
 }

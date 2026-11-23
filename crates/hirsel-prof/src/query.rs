@@ -250,13 +250,21 @@ fn peak_mem(db: &Connection, quality: &Value, limit: usize) -> Result<Value> {
         .as_str()
         .ok_or("profile has no memory capture")?;
     let limit_sql = bounded_limit(limit)?;
+    let live = !quality["mem_absent_metrics"].is_null();
+    let snapshot_bytes = if live {
+        "total_bytes AS allocated_bytes,resident_bytes"
+    } else {
+        "total_bytes"
+    };
     let peaks = select_result(
         db,
-        "SELECT id,metric,ts_ns,total_bytes FROM peak_snapshot WHERE scope_id IS NULL ORDER BY metric,ts_ns",
+        &format!(
+            "SELECT id,metric,ts_ns,{snapshot_bytes} FROM peak_snapshot
+                  WHERE scope_id IS NULL ORDER BY metric,ts_ns"
+        ),
         [],
         3,
     )?;
-    let live = !quality["mem_absent_metrics"].is_null();
     let scopes = select_result(
         db,
         "SELECT id,scope_id,metric,ts_ns,total_bytes FROM peak_snapshot WHERE scope_id IS NOT NULL
@@ -264,13 +272,24 @@ fn peak_mem(db: &Connection, quality: &Value, limit: usize) -> Result<Value> {
         [limit_sql],
         limit,
     )?;
-    let callsites = select_result(db,
-        "SELECT p.metric,p.id AS snapshot_id,c.callsite_id,c.live_bytes,c.live_count,f.def_path,fr.file,fr.line
+    let callsite_bytes = if live {
+        "c.live_bytes AS allocated_bytes,c.resident_bytes"
+    } else {
+        "c.live_bytes"
+    };
+    let order_bytes = if live {
+        "c.resident_bytes"
+    } else {
+        "c.live_bytes"
+    };
+    let callsites = select_result(
+        db,
+        &format!("SELECT p.metric,p.id AS snapshot_id,c.callsite_id,{callsite_bytes},c.live_count,f.def_path,fr.file,fr.line
          FROM peak_snapshot p JOIN peak_callsite c ON c.snapshot_id=p.id
          JOIN callsite s ON s.id=c.callsite_id JOIN frame fr ON fr.id=s.frame_id
          LEFT JOIN function f ON f.id=fr.function_id
          WHERE p.scope_id IS NULL
-         ORDER BY length(CAST(c.live_bytes AS TEXT)) DESC,c.live_bytes DESC,p.id,c.callsite_id LIMIT ?1",
+         ORDER BY length(CAST({order_bytes} AS TEXT)) DESC,{order_bytes} DESC,p.id,c.callsite_id LIMIT ?1"),
          [limit_sql], limit)?;
     let allocations = select_result(db,
         "SELECT a.callsite_id,a.allocation_kind,a.observed_count,a.observed_bytes,

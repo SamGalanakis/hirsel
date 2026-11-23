@@ -112,7 +112,8 @@ has no embedded DWARF.
 For `prof replay`, use `--mem=exact` for exact peak counters and backing
 lifetimes, or `--mem=sampled` for weighted allocation estimates. A bare
 `--mem` selects sampled mode. `prof run --mem` samples every live worker and
-reports weighted retained bytes and allocation rates by callsite. Live
+reports weighted allocated and resident backing bytes at the peak and
+last RSS reads, plus allocation rates by callsite. Live
 memory is sampled only: `prof run --mem=exact` refuses and names replay.
 `prof attach --mem` refuses, because attaching cannot sample allocations
 made before it. `prof peak-mem` reads the memory results and budget scopes

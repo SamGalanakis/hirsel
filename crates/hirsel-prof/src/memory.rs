@@ -10,6 +10,8 @@ const BUDGET: u16 = 18;
 const SCOPE_STACK: u16 = 19;
 const META: u16 = 20;
 const SLACK: u16 = 21;
+const RESIDENT_SNAPSHOT: u16 = 22;
+const RESIDENT_MEMBER: u16 = 23;
 
 const BACKING: &[&str] = &[
     "block",
@@ -34,13 +36,10 @@ struct Allocation {
 /// Metrics a live capture cannot observe without one payer order.
 const LIVE_ABSENT: &str = "charged_bytes,slack_bytes,budget_near_misses";
 
-/// A resident set size the profiler read from a live process.
-#[derive(Clone, Copy)]
-pub(crate) struct Rss {
-    /// `peak` for the highest read, `last` for the last read before exit.
-    pub(crate) label: &'static str,
-    pub(crate) ts: u64,
-    pub(crate) bytes: u64,
+#[derive(Default)]
+struct Residency {
+    rss: Option<(u64, u64)>,
+    samples: HashMap<u64, u64>,
 }
 
 #[derive(Clone, Copy)]
@@ -94,6 +93,15 @@ pub(crate) enum MemoryEvent {
     },
     Slack {
         epoch: u64,
+        id: u64,
+        bytes: u64,
+    },
+    ResidentSnapshot {
+        index: usize,
+        rss: u64,
+    },
+    ResidentMember {
+        index: usize,
         id: u64,
         bytes: u64,
     },
@@ -159,6 +167,15 @@ impl MemoryEvent {
                 state_loss,
             },
             (SLACK, &[epoch, id, bytes]) => Self::Slack { epoch, id, bytes },
+            (RESIDENT_SNAPSHOT, &[index @ 0..=1, rss]) => Self::ResidentSnapshot {
+                index: index as usize,
+                rss,
+            },
+            (RESIDENT_MEMBER, &[index @ 0..=1, id, bytes]) => Self::ResidentMember {
+                index: index as usize,
+                id,
+                bytes,
+            },
             _ => return Err(format!("invalid memory profile record {kind}").into()),
         };
         Ok(event)
@@ -171,6 +188,7 @@ pub(crate) struct MemoryImport {
     /// Epoch, allocation id, and the live size after the change. None frees it.
     changes: Vec<(u64, u64, Option<u64>)>,
     snapshots: Vec<Snapshot>,
+    residency: [Residency; 2],
     budgets: Vec<Budget>,
     scope_stacks: HashMap<u64, i64>,
     slack: BTreeMap<(u64, u64), u64>,
@@ -200,7 +218,6 @@ impl MemoryImport {
     }
 
     pub(crate) fn record(&mut self, ts: u64, event: &MemoryEvent, site: Option<i64>) -> Result<()> {
-        self.records += 1;
         match *event {
             MemoryEvent::Allocate {
                 id,
@@ -257,7 +274,16 @@ impl MemoryImport {
             MemoryEvent::Slack { epoch, id, bytes } => {
                 self.slack.insert((epoch, id), bytes);
             }
+            MemoryEvent::ResidentSnapshot { index, rss } => {
+                self.residency[index].rss = Some((ts, rss));
+                return Ok(());
+            }
+            MemoryEvent::ResidentMember { index, id, bytes } => {
+                self.residency[index].samples.insert(id, bytes);
+                return Ok(());
+            }
         }
+        self.records += 1;
         Ok(())
     }
 
@@ -266,13 +292,13 @@ impl MemoryImport {
         db: &Connection,
         mode: &str,
         drops: u64,
-        trace_complete: bool,
+        emitted: Option<u64>,
         unknown: i64,
-        live: Option<&[Rss]>,
+        live: bool,
     ) -> Result<()> {
         self.allocations(db)?;
-        let complete = if let Some(instants) = live {
-            self.live_snapshots(db, instants, unknown)?;
+        let complete = if live {
+            self.live_snapshots(db, unknown)?;
             db.execute(
                 "INSERT INTO run_meta VALUES ('mem_absent_metrics', ?1)",
                 [LIVE_ABSENT],
@@ -284,7 +310,7 @@ impl MemoryImport {
         };
         let (version, state_loss) = self.meta.unwrap_or_default();
         let exact = mode == "exact"
-            && trace_complete
+            && emitted.is_some()
             && version != 0
             && state_loss == 0
             && drops == 0
@@ -294,7 +320,15 @@ impl MemoryImport {
         stmt.execute(("mem_mode", mode))?;
         stmt.execute(("metric_version", Unsigned(version)))?;
         stmt.execute(("mem_records", Unsigned(self.records)))?;
-        stmt.execute(("mem_records_lost", Unsigned(drops)))?;
+        if let Some(emitted) = emitted {
+            let lost = emitted
+                .checked_sub(self.records)
+                .ok_or("invalid emitted memory record count")?;
+            stmt.execute(("mem_records_emitted", Unsigned(emitted)))?;
+            stmt.execute(("mem_records_lost", Unsigned(lost)))?;
+        } else {
+            stmt.execute(("mem_records_lost", Unsigned(drops)))?;
+        }
         stmt.execute(("mem_state_lost", Unsigned(state_loss)))?;
         stmt.execute(("mem_unmatched", Unsigned(self.unmatched)))?;
         stmt.execute(("mem_stacks", Unsigned(self.stacks)))?;
@@ -348,30 +382,37 @@ impl MemoryImport {
         Ok(())
     }
 
-    /// Weighted live bytes per callsite at each instant the profiler read the
-    /// process RSS. The instants are independent of the samples. Each worker
-    /// stamps its changes with the monotonic clock in place of a replay epoch.
-    fn live_snapshots(&mut self, db: &Connection, instants: &[Rss], unknown: i64) -> Result<()> {
+    /// The runtime reads both process RSS and sampled backing residency.
+    /// Each worker stamps changes with the monotonic clock instead of a replay epoch.
+    fn live_snapshots(&mut self, db: &Connection, unknown: i64) -> Result<()> {
+        #[derive(Default)]
+        struct Member {
+            allocated: f64,
+            resident: f64,
+            count: f64,
+            missing: bool,
+        }
+
         self.changes.sort_unstable_by_key(|change| change.0);
         let mut changes = self.changes.iter().peekable();
         let mut live = HashMap::new();
         let mut snapshot_row = db.prepare(
-            "INSERT INTO peak_snapshot(metric,scope_id,ts_ns,total_bytes) VALUES (?1,NULL,?2,?3)",
+            "INSERT INTO peak_snapshot(metric,scope_id,ts_ns,total_bytes,resident_bytes)
+             VALUES ('retained_bytes',NULL,?1,?2,?3)",
         )?;
-        let mut member_row = db.prepare("INSERT INTO peak_callsite VALUES (?1,?2,?3,?4)")?;
-        let mut instants = instants.to_vec();
-        instants.sort_unstable_by_key(|rss| rss.ts);
-        for rss in instants {
+        let mut member_row = db.prepare("INSERT INTO peak_callsite VALUES (?1,?2,?3,?4,?5)")?;
+        for (label, read) in ["peak", "last"].into_iter().zip(&self.residency) {
+            let Some((ts, rss)) = read.rss else { continue };
             db.execute(
                 "INSERT INTO run_meta VALUES (?1,?2),(?3,?4)",
                 (
-                    format!("rss_{}_ns", rss.label),
-                    Timestamp(rss.ts),
-                    format!("rss_{}_bytes", rss.label),
-                    Unsigned(rss.bytes),
+                    format!("rss_{label}_ns"),
+                    Timestamp(ts),
+                    format!("rss_{label}_bytes"),
+                    Unsigned(rss),
                 ),
             )?;
-            while changes.peek().is_some_and(|change| change.0 <= rss.ts) {
+            while changes.peek().is_some_and(|change| change.0 <= ts) {
                 let &(_, id, bytes) = changes.next().unwrap();
                 if let Some(bytes) = bytes {
                     live.insert(id, bytes);
@@ -379,29 +420,39 @@ impl MemoryImport {
                     live.remove(&id);
                 }
             }
-            let mut members = BTreeMap::<i64, (f64, f64)>::new();
+            let mut members = BTreeMap::<i64, Member>::new();
             for (id, &bytes) in &live {
                 let (site, probability) = self
                     .allocations
                     .get(id)
                     .map_or((unknown, 1.0), |a| (a.site, a.probability));
                 let member = members.entry(site).or_default();
-                member.0 += bytes as f64 / probability;
-                member.1 += 1.0 / probability;
+                member.allocated += bytes as f64 / probability;
+                member.count += 1.0 / probability;
+                if let Some(&resident) = read.samples.get(id) {
+                    member.resident += resident as f64 / probability;
+                } else {
+                    member.missing = true;
+                }
             }
-            let total = members.values().map(|member| member.0).sum::<f64>();
+            let allocated = members.values().map(|member| member.allocated).sum::<f64>();
+            let resident = members
+                .values()
+                .map(|member| (!member.missing).then_some(member.resident))
+                .sum::<Option<f64>>();
             snapshot_row.execute((
-                "retained_bytes",
-                Timestamp(rss.ts),
-                Unsigned(total.round() as u64),
+                Timestamp(ts),
+                Unsigned(allocated.round() as u64),
+                resident.map(|bytes| Unsigned(bytes.round() as u64)),
             ))?;
             let id = db.last_insert_rowid();
-            for (site, (bytes, count)) in members {
+            for (site, member) in members {
                 member_row.execute((
                     id,
                     site,
-                    Unsigned(bytes.round() as u64),
-                    Unsigned(count.round() as u64),
+                    Unsigned(member.allocated.round() as u64),
+                    Unsigned(member.count.round() as u64),
+                    (!member.missing).then_some(Unsigned(member.resident.round() as u64)),
                 ))?;
             }
         }
@@ -437,7 +488,7 @@ impl MemoryImport {
         let mut snapshot_row = db.prepare(
             "INSERT INTO peak_snapshot(metric,scope_id,ts_ns,total_bytes) VALUES (?1,?2,?3,?4)",
         )?;
-        let mut member_row = db.prepare("INSERT INTO peak_callsite VALUES (?1,?2,?3,?4)")?;
+        let mut member_row = db.prepare("INSERT INTO peak_callsite VALUES (?1,?2,?3,?4,NULL)")?;
         for peak in &self.snapshots {
             while changes.peek().is_some_and(|change| change.0 <= peak.epoch) {
                 let &(_, id, bytes) = changes.next().unwrap();
@@ -529,7 +580,7 @@ mod tests {
         record(7, PEAK, &[1, 0, 3, 124, 2], None);
         record(7, PEAK, &[2, 0, 2, 92, 1], None);
         record(7, META, &[2, 0], None);
-        memory.finish(&db, "exact", 0, true, 1, None).unwrap();
+        memory.finish(&db, "exact", 0, Some(10), 1, false).unwrap();
 
         let peaks = db
             .prepare(

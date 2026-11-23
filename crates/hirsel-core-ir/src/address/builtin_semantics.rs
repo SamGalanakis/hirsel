@@ -286,6 +286,8 @@ const BUILTIN_SEMANTICS: &[(&str, &str, u32)] = &[
     ("sha1", "blocks", 1),
     ("sha256", "block", 1),
     ("sha256", "blocks", 1),
+    ("shared", "new", 1),
+    ("shared", "share", 1),
     ("simd", "any", 1),
     ("simd", "bitmask", 1),
     ("simd", "cast", 1),

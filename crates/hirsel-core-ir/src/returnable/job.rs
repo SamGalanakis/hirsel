@@ -180,7 +180,7 @@ pub(super) fn transfer_job(
             use hirsel_core_layout::FieldTy as F;
             match field {
                 F::Borrow | F::View(_) | F::Locator(_) | F::RegionRef(_) => return None,
-                F::Inline(x) | F::Box(x) | F::Rc(x) | F::Arc(x) | F::Link(x) => {
+                F::Inline(x) | F::Box(x) | F::Rc(x) | F::Arc(x) | F::Shared(x) | F::Link(x) => {
                     rows.push(x.0 as usize)
                 }
                 F::Seq(e)

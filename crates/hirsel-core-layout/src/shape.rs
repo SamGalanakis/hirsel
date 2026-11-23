@@ -332,6 +332,10 @@ pub enum FieldTy {
     /// Read-only Bytes storage. The third word is capacity, with the usual
     /// sequence niches. The second word is a doubled length or an odd payer token.
     FrozenBytes,
+    /// `Shared[T]` (CONC-15): a pointer to a node read by many units. The
+    /// runtime shares and releases it with an atomic count; its payload sits at
+    /// the node's word 1, as an `Arc`'s does.
+    Shared(TypeRef),
 }
 
 impl FieldTy {
@@ -342,6 +346,7 @@ impl FieldTy {
             | FieldTy::Box(_)
             | FieldTy::Rc(_)
             | FieldTy::Arc(_)
+            | FieldTy::Shared(_)
             | FieldTy::RegionRef(_)
             | FieldTy::Link(_) => true,
             FieldTy::Seq(ty)
@@ -368,6 +373,7 @@ impl FieldTy {
             | FieldTy::Box(id)
             | FieldTy::Rc(id)
             | FieldTy::Arc(id)
+            | FieldTy::Shared(id)
             | FieldTy::RegionRef(id)
             | FieldTy::Link(id) => *id = f(*id),
             FieldTy::Seq(ty)

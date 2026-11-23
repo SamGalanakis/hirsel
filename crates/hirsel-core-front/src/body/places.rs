@@ -609,7 +609,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         // A Box, Rc or Arc reads as its payload; a counted payload is shared, so its
         // fields read as views (OWN-8, MEM-14, MEM-15).
         if let TyKind::Adt(d, args) = self.t.kind(inner).clone()
-            && let Some(role @ (Role::Box | Role::Rc | Role::Arc)) = self.p.decls[d.index()].role
+            && let Some(role @ (Role::Box | Role::Rc | Role::Arc | Role::Shared)) =
+                self.p.decls[d.index()].role
         {
             let shared = view || role != Role::Box;
             self.steps.push(PStep::Payload);
@@ -1668,7 +1669,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             TyKind::Adt(d, args)
                 if matches!(
                     self.p.decls[d.index()].role,
-                    Some(Role::Box | Role::Rc | Role::Arc)
+                    Some(Role::Box | Role::Rc | Role::Arc | Role::Shared)
                 ) =>
             {
                 Some(args[0])
@@ -1755,7 +1756,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             };
             if !matches!(
                 self.p.decls[d.index()].role,
-                Some(Role::Box | Role::Rc | Role::Arc)
+                Some(Role::Box | Role::Rc | Role::Arc | Role::Shared)
             ) {
                 break;
             }
@@ -1792,7 +1793,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             };
             if !matches!(
                 self.p.decls[d.index()].role,
-                Some(Role::Box | Role::Rc | Role::Arc)
+                Some(Role::Box | Role::Rc | Role::Arc | Role::Shared)
             ) {
                 return None;
             }

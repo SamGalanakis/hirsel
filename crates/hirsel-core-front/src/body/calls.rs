@@ -1765,7 +1765,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 return None;
             }
             match self.role_of(part) {
-                Some((Role::Box | Role::Rc | Role::Arc, args)) => part = self.bare(args[0]),
+                Some((Role::Box | Role::Rc | Role::Arc | Role::Shared, args)) => {
+                    part = self.bare(args[0])
+                }
                 _ => return Some("no part of this value is the expected type"),
             }
         }

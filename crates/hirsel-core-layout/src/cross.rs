@@ -1,7 +1,8 @@
 //! What a `cross` value owns as it moves between units (CONC-15, CONC-17): each
-//! sequence buffer, client, socket and listener, by byte offset in the value.
-//! The runtime copies sequence contents and moves client handles. Sockets and
-//! listeners move with their host state, detached from the poller until taken.
+//! sequence buffer, client, socket, listener and `Shared` holder, by byte offset
+//! in the value. The runtime copies sequence contents and moves client handles
+//! and `Shared` holders. Sockets and listeners move with their host state,
+//! detached from the poller until taken.
 use crate::{Body, FieldTy, Handle, Layout, RecipeRow, Row, TypeRef, field_size};
 
 /// A sequence carrier (pointer, length, capacity).
@@ -10,6 +11,8 @@ pub const SEQ: u64 = 0;
 pub const CLIENT: u64 = 1;
 /// A whole socket or listener handle word.
 pub const SOCKET: u64 = 2;
+/// One holder of a `Shared` node: the pointer moves, the payload stays put.
+pub const SHARED: u64 = 3;
 
 /// Each owner of a value of row `ty`, as `[offset, kind, element bytes, element
 /// logical size]`, in field order.
@@ -40,6 +43,7 @@ fn held(shapes: &[Row], recipes: &[RecipeRow], ty: &FieldTy, at: u64, out: &mut 
         }
         FieldTy::Handle(Handle::Client) => out.push([at, CLIENT, 0, 0]),
         FieldTy::Handle(Handle::Socket) => out.push([at, SOCKET, 0, 0]),
+        FieldTy::Shared(_) => out.push([at, SHARED, 0, 0]),
         FieldTy::Array(e, n) => {
             let (stride, _, _) = field_size(shapes, recipes, e);
             for i in 0..*n {

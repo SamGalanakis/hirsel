@@ -1,0 +1,4 @@
+// Module `shared` (CONC-15): a frozen value read by many Units without a copy.
+pub fn new[T: shareable + cross](take x: T) -> Shared[T]
+
+pub fn share[T: shareable + cross](h: Shared[T]) -> Shared[T]

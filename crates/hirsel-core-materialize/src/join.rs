@@ -114,7 +114,9 @@ impl Remap {
                     | RtOp::TrySend { item }
                     | RtOp::Receive { item }
                     | RtOp::TryReceive { item }
-                    | RtOp::LatestNew { item } => {
+                    | RtOp::LatestNew { item }
+                    | RtOp::SharedNew { item }
+                    | RtOp::SharedRelease { item } => {
                         *item = self.types[item.index()];
                     }
                     _ => {}

@@ -170,6 +170,8 @@ pub enum Role {
     Box,
     Rc,
     Arc,
+    /// `Shared[T]` (CONC-15): a counted node many units read.
+    Shared,
     Latest,
     Client,
     Inbox,
@@ -223,6 +225,7 @@ impl Role {
             "Box" => Role::Box,
             "Rc" => Role::Rc,
             "Arc" => Role::Arc,
+            "Shared" => Role::Shared,
             "Latest" => Role::Latest,
             "Client" => Role::Client,
             "Inbox" => Role::Inbox,
@@ -276,7 +279,7 @@ impl Role {
             | Role::Builder
             | Role::Causes
             | Role::Log => Kind::Own,
-            Role::Rc | Role::Arc => Kind::Counted,
+            Role::Rc | Role::Arc | Role::Shared => Kind::Counted,
             Role::View | Role::Region | Role::Dest | Role::Writer => Kind::Scoped,
             Role::Text | Role::FixedSpan | Role::SeqSpan | Role::IndexedSpan | Role::SeqIndex => {
                 Kind::Region
@@ -2751,6 +2754,7 @@ fn mentions_for_bound(
                 | Role::Box
                 | Role::Rc
                 | Role::Arc
+                | Role::Shared
                 | Role::List
                 | Role::Map
                 | Role::Task
@@ -3127,6 +3131,8 @@ fn nominal_bounds(decl: &TypeDecl, meet: impl Fn() -> u16, at: impl Fn(usize) ->
         Some(Role::StaticFn) => PLAIN | SHAREABLE | SEND | CROSS | KEY,
         Some(Role::Rc) => SHAREABLE | (meet() & (KEY | ORDERED)),
         Some(Role::Arc) => SHAREABLE | SEND | (meet() & (KEY | ORDERED)),
+        // CONC-15: a holder crosses as its pointer; the payload stays put.
+        Some(Role::Shared) => SHAREABLE | SEND | CROSS | (meet() & (KEY | ORDERED)),
         Some(Role::Box) => meet() & (SHAREABLE | SEND | KEY | ORDERED),
         Some(Role::Sender | Role::Receiver | Role::HostFile | Role::Latest | Role::Inbox) => SEND,
         Some(Role::Client | Role::Secret) => SEND | CROSS,

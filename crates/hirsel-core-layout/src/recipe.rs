@@ -628,6 +628,7 @@ impl Sendable {
             | FieldTy::Fn
             | FieldTy::OwnFn
             | FieldTy::Arc(_)
+            | FieldTy::Shared(_)
             | FieldTy::Handle(_)
             | FieldTy::FrozenBytes => true,
         }
@@ -664,6 +665,7 @@ fn owned_rows(shapes: &[Row], send: &mut Sendable, ty: &FieldTy, rows: &mut Vec<
         }
         FieldTy::FrozenBytes
         | FieldTy::Arc(_)
+        | FieldTy::Shared(_)
         | FieldTy::RegionRef(_)
         | FieldTy::OwnFn
         | FieldTy::Handle(_) => false,
@@ -998,7 +1000,9 @@ pub fn field_niche<'r>(
         })
     };
     match ty {
-        FieldTy::Box(_) | FieldTy::Rc(_) | FieldTy::Arc(_) => n(0, POINTER, 0, 1),
+        FieldTy::Box(_) | FieldTy::Rc(_) | FieldTy::Arc(_) | FieldTy::Shared(_) => {
+            n(0, POINTER, 0, 1)
+        }
         FieldTy::RegionRef(t) if !matches!(shapes[t.index()].repr, Repr::Compact(_)) => {
             n(0, POINTER, 0, 1)
         }
@@ -1399,6 +1403,7 @@ fn measure<'r>(
         FieldTy::Box(_)
         | FieldTy::Rc(_)
         | FieldTy::Arc(_)
+        | FieldTy::Shared(_)
         | FieldTy::Handle(
             Handle::Task
             | Handle::Causes
@@ -1591,6 +1596,7 @@ fn drops(shapes: &[Row], ty: &FieldTy, drop: &dyn Fn(TypeRef) -> bool) -> bool {
         FieldTy::Box(_)
         | FieldTy::Rc(_)
         | FieldTy::Arc(_)
+        | FieldTy::Shared(_)
         | FieldTy::Map(..)
         | FieldTy::OwnFn
         | FieldTy::Handle(

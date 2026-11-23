@@ -727,42 +727,17 @@ pub(crate) enum Body {
     SealAnswer(*const ConnCore),
     /// The owner asks a helper's root to cancel (units_lang).
     Cancel,
+    /// A `Shared` node's last release away from home, which cleans it (CONC-15).
+    SharedRelease(usize),
 }
 
 impl Body {
-    #[cfg(test)]
-    fn content(&self) -> String {
-        let amounts = |cs: &[Credit]| {
-            cs.iter()
-                .map(|c| c.amount.to_string())
-                .collect::<Vec<_>>()
-                .join(",")
-        };
-        match self {
-            Body::Credits(cs) => amounts(cs),
-            Body::LastRelease(retained, _) => retained.to_string(),
-            // SAFETY: the end arrival owns the ended helper's context.
-            Body::HelperEnd(e) => {
-                let h = unsafe { e.0.as_ref() };
-                let info = h.helper.as_ref().unwrap();
-                format!(
-                    "root {} ret {}",
-                    h.current_used(),
-                    info.ret.as_ref().map_or(0, |v| v.bytes())
-                )
-            }
-            Body::Settlement(_, Settle::Accepted(cs)) => amounts(cs),
-            Body::Settlement(_, Settle::Closed(v) | Settle::Withdrawn(v)) => {
-                format!("{} bytes", v.bytes())
-            }
-            Body::Item(_, v) => format!("{} bytes tag {}", v.bytes(), v.tag),
-            Body::Close(_) | Body::SealAnswer(_) | Body::Cancel => String::new(),
-        }
-    }
-
     /// Forwarded from an ended helper to its owner: credits and notices only.
     fn forwarded(&self) -> bool {
-        matches!(self, Body::Credits(_) | Body::LastRelease(..))
+        matches!(
+            self,
+            Body::Credits(_) | Body::LastRelease(..) | Body::SharedRelease(_)
+        )
     }
 }
 
@@ -1032,6 +1007,7 @@ pub(crate) enum Took {
     Close,
     SealAnswer,
     Cancel,
+    SharedRelease,
 }
 
 /// One take made inside an owner's own release: what was taken, its
@@ -1875,6 +1851,7 @@ impl UnitCtx {
                 }
                 (Took::Credits, 0)
             }
+            Body::SharedRelease(node) => (Took::SharedRelease, node),
             Body::LastRelease(retained, conn) => {
                 conn.retire(retained);
                 (Took::LastRelease, Arc::as_ptr(&conn).addr())

@@ -34,6 +34,8 @@ pub opaque type Rc[T: shareable]
 
 pub opaque type Arc[T: shareable + send]
 
+pub opaque type Shared[T: shareable + cross]
+
 pub opaque resource type Latest[T: shareable + send]
 
 pub opaque resource type Client[T: cross]

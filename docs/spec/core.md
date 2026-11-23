@@ -36,6 +36,7 @@ fn unknown() -> u64 { missing() }                       // refused: LANG-7, miss
 | `task`, `channel` | [task](../../core/core/task.hirsel), [channel](../../core/core/channel.hirsel) | CONC-1 to CONC-11, CONC-15 |
 | `conn` | [conn](../../core/core/conn.hirsel) | CONC-17 |
 | `latest` | [latest](../../core/core/latest.hirsel) | CONC-13 |
+| `shared` | [shared](../../core/core/shared.hirsel) | CONC-15 |
 | `log` | [log](../../core/core/log.hirsel) | MEM-29 |
 | `code` | [code](../../core/core/code.hirsel) | PROG-9 |
 | `flow` | [flow](../../core/core/flow.hirsel) | CONC-14 |
@@ -89,6 +90,7 @@ the format's u32 field. Fixed-width scalar and key writers return unit.
 | `Box[T]` | own | `shareable`, `send`, `key`, `ordered` when T | 8 | T's |
 | `Rc[T]` | counted | `shareable`; `key`, `ordered` when T | 8 | T's |
 | `Arc[T]` | counted | `shareable`, `send`; `key`, `ordered` when T | 8 | T's |
+| `Shared[T]` ([CONC-15](tasks.md#conc-15-units)) | counted | `shareable`, `send`, `cross`; `key`, `ordered` when T | 8 | T's |
 | `View[T]` | scoped, copyable | `key`, `ordered` when T | | scoped value, and T's |
 | `Region`, `Dest[T]`, `Writer[T, in r]` | scoped; `Dest` and `Writer` move | none | | scoped value |
 | `Text` | region | `key`, `ordered` | 16 | region reference |

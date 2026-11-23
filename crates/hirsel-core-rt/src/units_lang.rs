@@ -21,7 +21,7 @@
 //! capacity. Clients move as handles. Sockets move with their registrations detached.
 use crate::{
     Capacity, Context, block,
-    causes::{self, Cause, Causes, Cell, StringMessage},
+    causes::{self, Cause, Causes, Cell},
     limit::Payer,
     net::{CrossedSocket, CrossingSockets, SocketCrossing},
     tasks::{self, Body, Readies, TaskLayout, Waiters},
@@ -30,7 +30,7 @@ use crate::{
 };
 use hirsel_core_layout::{
     charge,
-    cross::{CLIENT, SEQ, SOCKET},
+    cross::{CLIENT, SEQ, SHARED, SOCKET},
 };
 use std::{
     collections::HashMap,
@@ -96,7 +96,7 @@ pub struct Cross {
 }
 
 impl Cross {
-    fn owners(&self) -> &[[u64; 4]] {
+    pub(crate) fn owners(&self) -> &[[u64; 4]] {
         if self.count == 0 {
             return &[];
         }
@@ -397,6 +397,11 @@ unsafe fn drop_packed_owners(
             if !h.is_null() {
                 unit.drop_client(unsafe { Box::from_raw(h) }.client);
             }
+        } else if o[1] == SHARED {
+            // SAFETY: the item moved this holder here and no one received it.
+            unsafe {
+                crate::shared::release(unit, context, word(flat.add(o[0] as usize)) as *mut u8)
+            };
         }
     }
 }
@@ -428,8 +433,11 @@ pub(crate) struct LangUnit {
     inboxes: Map<usize, *mut InboxH>,
     sends: Map<u32, *mut SendWait>,
     helpers: Map<usize, *mut HelperH>,
-    /// Header and unused room of cleaned connections, until the last release.
+    /// Header and unused room of cleaned connections, until the last release;
+    /// likewise the bytes of an ended helper's live `Shared` nodes.
     retained: Map<usize, Held>,
+    /// Each live `Shared` node made here, with the bytes it holds (CONC-15).
+    pub(crate) homed: Map<usize, u64>,
     /// Run-owned grants paid from helper reservations, held until this unit ends.
     run_grants: Vec<Held>,
     /// Tasks waiting on something another unit settles: the scheduler does
@@ -465,7 +473,7 @@ impl LangUnit {
         unsafe { pump(self) };
     }
 
-    fn refund_retained(&mut self, id: usize) {
+    pub(crate) fn refund_retained(&mut self, id: usize) {
         self.retained.remove(&id);
     }
 
@@ -501,6 +509,7 @@ impl LangUnit {
             sends: map(),
             helpers: map(),
             retained: map(),
+            homed: map(),
             run_grants: Vec::new(),
             waits: 0,
             root: ptr::null_mut(),
@@ -596,6 +605,7 @@ unsafe fn on_take(u: &mut LangUnit, took: Took, id: usize, wake_inboxes: bool) {
             }
             Took::LastRelease => u.refund_retained(id),
             Took::Credits => {}
+            Took::SharedRelease => crate::shared::clean(u, tasks::current_context(), id as *mut u8),
             Took::Cancel => {
                 if !u.root.is_null() {
                     tasks::hirsel_core_cancel(ptr::null_mut(), u.root);
@@ -718,7 +728,11 @@ pub unsafe extern "C" fn hirsel_core_conn_new(
             files: (*context).host_files,
             inbox,
             waiters: Waiters::default(),
-            owners: owners.iter().copied().filter(|o| o[1] == CLIENT).collect(),
+            owners: owners
+                .iter()
+                .copied()
+                .filter(|o| o[1] == CLIENT || o[1] == SHARED)
+                .collect(),
             charge: Some(held),
         }));
         u.inboxes.insert(key, ih);
@@ -1216,75 +1230,6 @@ struct Ended {
     secrets: crate::secret::HandedOver,
 }
 
-struct CrossedCause {
-    cause: Cause,
-    owned_message: Vec<u8>,
-    message_charge: u64,
-}
-
-// SAFETY: owned bytes are copied into the Vec, and the remaining cause pointer
-// is either null, run-lived immutable storage or a scalar payload.
-unsafe impl Send for CrossedCause {}
-
-impl CrossedCause {
-    fn pack(cause: &Cause) -> Self {
-        let StringMessage {
-            data,
-            len,
-            capacity,
-        } = cause.message;
-        let (data, owned_message, message_charge) = if cause.kind() == causes::FAIL && capacity != 0
-        {
-            let content = if len == 0 {
-                Vec::new()
-            } else {
-                // SAFETY: the live cause owns this initialized String prefix.
-                unsafe { std::slice::from_raw_parts(data, len as usize) }.to_vec()
-            };
-            (ptr::null_mut(), content, charge::seq(capacity, 1).unwrap())
-        } else {
-            // Static message bytes live through the run. Other causes carry
-            // scalar payloads in these words.
-            (data, Vec::new(), 0)
-        };
-        Self {
-            cause: Cause {
-                message: StringMessage {
-                    data,
-                    len,
-                    capacity,
-                },
-                site: cause.site,
-            },
-            owned_message,
-            message_charge,
-        }
-    }
-
-    fn unpack(self, context: &Context, held: &mut Held) -> Cause {
-        let mut cause = self.cause;
-        if self.message_charge != 0 {
-            let data = block::allocate_admitted(
-                context,
-                held.partition(self.message_charge),
-                cause.message.capacity as usize,
-                8,
-                block::PLAIN,
-            );
-            // SAFETY: the copied prefix fits in the new buffer at the original capacity.
-            unsafe {
-                ptr::copy_nonoverlapping(
-                    self.owned_message.as_ptr(),
-                    data.as_ptr(),
-                    self.owned_message.len(),
-                );
-            }
-            cause.message.data = data.as_ptr();
-        }
-        cause
-    }
-}
-
 /// A tagged task handle names a helper.
 pub(crate) fn is_helper(task: *mut tasks::Task) -> bool {
     task as usize & 1 != 0
@@ -1510,7 +1455,13 @@ fn helper_main(
         // Each connection still retained has its last client in another unit;
         // the owner holds its charge from the end take on. Its own copy here
         // goes back to this helper's limit, which ends with it.
-        let survivors = lu.retained.drain().map(|(k, h)| (k, h.bytes)).collect();
+        // So does each `Shared` node made here that another unit still holds.
+        let survivors = lu
+            .retained
+            .drain()
+            .map(|(k, h)| (k, h.bytes))
+            .chain(lu.homed.drain())
+            .collect();
         // Likewise each Secret designation still held elsewhere.
         let (secrets, refunds) = files
             .registry
@@ -1756,6 +1707,9 @@ pub(crate) unsafe fn abandon(context: *mut Context, task: *mut tasks::Task) -> u
 }
 
 #[doc(hidden)]
+#[path = "units_lang_cause.rs"]
+mod cause;
+use cause::CrossedCause;
 #[path = "units_lang_bench.rs"]
 pub mod bench;
 

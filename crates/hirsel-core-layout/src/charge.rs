@@ -25,6 +25,11 @@ pub const CONNECTION_MAX_ROOM: u64 = (1 << 40) - 1;
 /// A `Latest` root's bookkeeping: its `Arc` holder, handle count, identity and
 /// the holder's drop (CONC-13), exactly the record the engine keeps.
 pub const LATEST_ROOT: u64 = 32;
+/// A `Shared` node's bookkeeping beside its payload (CONC-15): the atomic
+/// count, the home Unit's port, the payload's owners table and its length,
+/// and the node's own charge, so whichever Unit drops the last holder can
+/// send the node home to be released.
+pub const SHARED_NODE: u64 = 40;
 /// A `provide.clock`, `provide.random` or `provide.process` cell (MEM-24),
 /// held by the constructing payer until the run ends, as a narrowed grant.
 pub const PROVIDE_CELL: u64 = 32;
@@ -86,6 +91,14 @@ pub const fn map(capacity: u64, key: u64, value: u64) -> Option<u64> {
 /// An `Rc` or `Arc` node: payload plus its count, rounded up to 8.
 pub const fn counted(payload: u64) -> Option<u64> {
     match payload.checked_add(8) {
+        Some(n) => round8(n),
+        None => None,
+    }
+}
+
+/// A `Shared` node: payload plus `SHARED_NODE`, rounded up to 8.
+pub const fn shared(payload: u64) -> Option<u64> {
+    match payload.checked_add(SHARED_NODE) {
         Some(n) => round8(n),
         None => None,
     }

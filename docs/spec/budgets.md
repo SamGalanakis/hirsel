@@ -133,6 +133,7 @@ is the most any build charges for the allocation (MEM-28):
 | channel | capacity × item size + 64 |
 | connection ([CONC-17](tasks.md#conc-17-connections)) | 64 + capacity × item size + its room, up to `2^22 − 1` slots and `2^40 − 1` bytes of room |
 | `Latest` root | 32 |
+| `Shared` node ([CONC-15](tasks.md#conc-15-units)) | the payload's size + 40, rounded up to 8; the buffers the payload holds keep their own charges |
 | `log.new` node | 24 |
 | a log's entries | as `List[E]` storage |
 | a flow port | `cap × (16 + size(T)) + 64`, refunded to its limit record on flow cleanup ([CONC-14](tasks.md#conc-14-flows)) |

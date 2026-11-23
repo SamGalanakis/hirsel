@@ -895,6 +895,10 @@ impl Glue<'_, '_, '_> {
                 let p = self.load(at, 0);
                 self.release(p, *payload, matches!(t, FieldTy::Arc(_)))?;
             }
+            FieldTy::Shared(_) => {
+                let p = self.load(at, 0);
+                self.call("hirsel_core_shared_release", &[P, P], &[], &[self.ctx, p])?;
+            }
             FieldTy::Array(e, n) => {
                 let len = self.icon(*n);
                 self.array(at, e, len)?;
@@ -1001,29 +1005,6 @@ impl Glue<'_, '_, '_> {
             other => return Err(unsupported(format!("drop field {other:?}"))),
         }
         Ok(())
-    }
-    fn release(&mut self, p: Value, t: TypeRef, atomic: bool) -> Result<()> {
-        let charge = charge::counted(self.tables.layouts[t.index()].logical_size.unwrap()).unwrap();
-        fast::release(
-            &mut self.b,
-            &mut self.calls,
-            self.object,
-            [self.ctx, p],
-            (
-                charge,
-                (!hirsel_core_layout::terminal(
-                    &self.tables.input.types,
-                    self.tables.layouts,
-                    &if atomic {
-                        FieldTy::Arc(t)
-                    } else {
-                        FieldTy::Rc(t)
-                    },
-                ))
-                .then(|| self.glues.fixed[t.index()].unwrap()[1]),
-            ),
-            atomic,
-        )
     }
     fn free_buffer(&mut self, p: Value, cap: Value, logical: u64) -> Result<()> {
         let bytes = self.b.ins().imul_imm_s(cap, logical as i64);

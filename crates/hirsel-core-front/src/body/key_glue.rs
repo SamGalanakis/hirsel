@@ -777,7 +777,7 @@ impl Derive<'_> {
         c.inst(Inst::Call { call });
         result
     }
-    fn runtime(&mut self, c: &mut Code, op: RtOp, args: &[ValueId]) -> Option<ValueId> {
+    pub(super) fn runtime(&mut self, c: &mut Code, op: RtOp, args: &[ValueId]) -> Option<ValueId> {
         let sig = op.signature();
         let result = sig.results.first().map(|&ty| c.value(ty));
         let signature = signature_id(self.module, sig);
@@ -1190,7 +1190,7 @@ impl Derive<'_> {
                 let n = c.constant(*len);
                 self.order_sequence(c, item, [a, b], [n, n], different)?;
             }
-            FieldTy::Box(t) | FieldTy::Rc(t) | FieldTy::Arc(t) => {
+            FieldTy::Box(t) | FieldTy::Rc(t) | FieldTy::Arc(t) | FieldTy::Shared(t) => {
                 let mut x = c.read(a, Ty::Ptr);
                 let mut y = c.read(b, Ty::Ptr);
                 if !matches!(field, FieldTy::Box(_)) {
@@ -1434,7 +1434,7 @@ impl Derive<'_> {
                 let len = c.constant(*len);
                 self.fold_sequence(c, item, p, len, state)?
             }
-            FieldTy::Box(t) | FieldTy::Rc(t) | FieldTy::Arc(t) => {
+            FieldTy::Box(t) | FieldTy::Rc(t) | FieldTy::Arc(t) | FieldTy::Shared(t) => {
                 let mut data = c.read(p, Ty::Ptr);
                 if !matches!(field, FieldTy::Box(_)) {
                     data = c.offset(data, 8);
@@ -1933,7 +1933,7 @@ impl Derive<'_> {
                 let len = c.constant(*len);
                 self.equal_sequence(c, item, a, b, len, no)?;
             }
-            FieldTy::Box(t) | FieldTy::Rc(t) | FieldTy::Arc(t) => {
+            FieldTy::Box(t) | FieldTy::Rc(t) | FieldTy::Arc(t) | FieldTy::Shared(t) => {
                 let mut x = c.read(a, Ty::Ptr);
                 let mut y = c.read(b, Ty::Ptr);
                 if !matches!(field, FieldTy::Box(_)) {

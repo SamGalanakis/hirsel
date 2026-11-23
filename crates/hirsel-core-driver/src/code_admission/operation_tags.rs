@@ -78,6 +78,9 @@ fn runtime_probes() -> Module {
         RtOp::Crc32cCombine,
         RtOp::Crc64NvmeCombine,
         RtOp::Transfer { x: ITEM, r: ITEM },
+        RtOp::SharedNew { item: ITEM },
+        RtOp::SharedShare,
+        RtOp::SharedRelease { item: ITEM },
     ]
     .into_iter()
     .chain(HostOp::ALL.iter().copied().map(RtOp::Host))

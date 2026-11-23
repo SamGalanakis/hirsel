@@ -678,6 +678,7 @@ impl Substitution<'_> {
             FieldTy::Box(id) => FieldTy::Box(row(id, self)),
             FieldTy::Rc(id) => FieldTy::Rc(row(id, self)),
             FieldTy::Arc(id) => FieldTy::Arc(row(id, self)),
+            FieldTy::Shared(id) => FieldTy::Shared(row(id, self)),
             FieldTy::RegionRef(id) => FieldTy::RegionRef(row(id, self)),
             FieldTy::Link(id) => FieldTy::Link(row(id, self)),
             FieldTy::Seq(x) => FieldTy::Seq(Box::new(self.field(x, false))),
@@ -857,6 +858,12 @@ impl Substitution<'_> {
                 item: self.ty(item),
             },
             RtOp::LatestNew { item } => RtOp::LatestNew {
+                item: self.ty(item),
+            },
+            RtOp::SharedNew { item } => RtOp::SharedNew {
+                item: self.ty(item),
+            },
+            RtOp::SharedRelease { item } => RtOp::SharedRelease {
                 item: self.ty(item),
             },
             RtOp::LaunchTarget { view } => RtOp::LaunchTarget {

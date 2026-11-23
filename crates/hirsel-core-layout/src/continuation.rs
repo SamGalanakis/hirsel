@@ -194,7 +194,7 @@ fn plan_field(shapes: &[Row], recipes: &[RecipeRow], ty: &FieldTy, at: u64) -> N
                 yields: Some(false),
             }
         }
-        FieldTy::Handle(_) => whole(8),
+        FieldTy::Handle(_) | FieldTy::Shared(_) => whole(8),
         // An owned closure hands its environment, when it has one, to the drain
         // under the descriptor the environment names; only that pointer is read.
         FieldTy::OwnFn => Node::Leaf {

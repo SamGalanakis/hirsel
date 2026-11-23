@@ -37,7 +37,7 @@ fn field_at<'a>(input: &c::Module, t: &'a FieldTy) -> At<'a> {
     match t {
         FieldTy::Inline(t) => held(input, TypeId(t.0)),
         FieldTy::Box(t) => At::Pointer(TypeId(t.0)),
-        FieldTy::Rc(t) | FieldTy::Arc(t) => At::Counted(TypeId(t.0)),
+        FieldTy::Rc(t) | FieldTy::Arc(t) | FieldTy::Shared(t) => At::Counted(TypeId(t.0)),
         FieldTy::Array(e, n) => At::Array(e, *n),
         _ => At::Other,
     }

@@ -207,7 +207,9 @@
     "lines": 2523
   },
   "crates/hirsel-core-front/src/body/calls.rs": {
-    "lines": 2587
+    "lines": 2589,
+    "raise_revision": 1,
+    "reason": "conc-shared-payloads-1993"
   },
   "crates/hirsel-core-front/src/body/closures.rs": {
     "lines": 2983
@@ -216,7 +218,9 @@
     "lines": 1308
   },
   "crates/hirsel-core-front/src/body/core_ops.rs": {
-    "lines": 4788
+    "lines": 4690,
+    "raise_revision": 1,
+    "reason": "conc-shared-payloads-1993"
   },
   "crates/hirsel-core-front/src/body/key_glue.rs": {
     "lines": 2851
@@ -234,10 +238,14 @@
     "lines": 2578
   },
   "crates/hirsel-core-front/src/body/places.rs": {
-    "lines": 1860
+    "lines": 1861,
+    "raise_revision": 1,
+    "reason": "conc-shared-payloads-1993"
   },
   "crates/hirsel-core-front/src/body/templates.rs": {
-    "lines": 1388
+    "lines": 1395,
+    "raise_revision": 1,
+    "reason": "conc-shared-payloads-1993"
   },
   "crates/hirsel-core-front/src/body/values.rs": {
     "lines": 1217
@@ -246,10 +254,14 @@
     "lines": 2531
   },
   "crates/hirsel-core-front/src/decls.rs": {
-    "lines": 3815
+    "lines": 3821,
+    "raise_revision": 1,
+    "reason": "conc-shared-payloads-1993"
   },
   "crates/hirsel-core-front/src/layout.rs": {
-    "lines": 1033
+    "lines": 1035,
+    "raise_revision": 1,
+    "reason": "conc-shared-payloads-1993"
   },
   "crates/hirsel-core-front/src/tests.rs": {
     "lines": 1512
@@ -261,15 +273,17 @@
     "lines": 1198
   },
   "crates/hirsel-core-ir/src/eval.rs": {
-    "lines": 8524
+    "lines": 8497,
+    "raise_revision": 1,
+    "reason": "conc-shared-payloads-1993"
   },
   "crates/hirsel-core-ir/src/extent.rs": {
     "lines": 1233
   },
   "crates/hirsel-core-ir/src/ir.rs": {
-    "lines": 2877,
-    "raise_revision": 1,
-    "reason": "checkbox-red-1946 marks returnable park exits for native result lowering"
+    "lines": 2473,
+    "raise_revision": 2,
+    "reason": "conc-shared-payloads-1993"
   },
   "crates/hirsel-core-ir/src/lib.rs": {
     "lines": 1145
@@ -284,13 +298,17 @@
     "lines": 1576
   },
   "crates/hirsel-core-ir/src/text.rs": {
-    "lines": 2431
+    "lines": 2439,
+    "raise_revision": 1,
+    "reason": "conc-shared-payloads-1993"
   },
   "crates/hirsel-core-ir/src/wf.rs": {
     "lines": 1905
   },
   "crates/hirsel-core-layout/src/recipe.rs": {
-    "lines": 1964
+    "lines": 1970,
+    "raise_revision": 1,
+    "reason": "conc-shared-payloads-1993"
   },
   "crates/hirsel-core-layout/src/tests.rs": {
     "lines": 1469
@@ -299,7 +317,9 @@
     "lines": 2003
   },
   "crates/hirsel-core-program-tests/src/cases.rs": {
-    "lines": 2726
+    "lines": 2717,
+    "raise_revision": 1,
+    "reason": "conc-shared-payloads-1993"
   },
   "crates/hirsel-core-program-tests/tests/llvm_source.rs": {
     "lines": 4760
@@ -386,7 +406,7 @@
     "lines": 1778
   },
   "crates/hirsel-core-rt/src/units_ledger.rs": {
-    "lines": 2001
+    "lines": 1978
   },
   "crates/hirsel-core-syntax/src/derive.rs": {
     "lines": 1704

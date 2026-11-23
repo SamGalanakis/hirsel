@@ -1,0 +1,85 @@
+// Shared payloads across units (CONC-15). Charges come from the spec: a node
+// admits round8(size(T) + 40) from its maker, beside the buffers its payload
+// already owns; a Shared crosses as a holder with content 0; a unit admits
+// 256 + size(R) + 32 + n from its spawner. Here T is List[u8] (24 bytes, so
+// the node is 64) holding one 1 MiB buffer (1048576). Each law repeats under a
+// bound with no slack, so a copy, a second charge or a refund that never comes
+// fails it.
+// test-env: HIRSEL_UNTIED=4
+fn reader(take s: Shared[List[u8]]) -> u64 {
+    list.len(s)
+}
+
+fn mebibyte() -> List[u8] {
+    let mut xs: List[u8] = list.with_capacity(1048576)
+    list.fill(mut xs, 1048576, 7u8)
+    xs
+}
+
+// Nothing is left of a bound that is exactly full: conn.new(1, bytes 0) asks 72.
+fn full() -> bool {
+    let probe: Result[(Client[u64], Inbox[u64]), Capacity] = conn.new(1, bytes 0)
+    match probe {
+        Error(c) => c.requested == 72 && c.available == 0,
+        Ok(_) => false,
+    }
+}
+
+// A's 1 MiB payload goes to B and C. The bound is the buffer 1048576, the node
+// 64 and two units of 256 + 8 + 32 + 0 = 296: 1049232. With both units running
+// it is exactly full, so neither crossing copied or charged the payload again.
+// B and C read it and end; A reads it and drops it last, here or (when `first`)
+// before the joins, so B's or C's release is the last and goes home to A. Each
+// round needs the whole bound back.
+fn round(tasks: Tasks, first: bool) -> bool waits {
+    let s = shared.new(mebibyte())
+    let b = result.unwrap(task.spawn_unit(tasks, bytes 0, shared.share(s), reader))
+    let c = result.unwrap(task.spawn_unit(tasks, bytes 0, shared.share(s), reader))
+    let at_peak = full()
+    let mine = list.len(s)
+    if first {
+        let _ = take s
+    }
+    let theirs = result.unwrap(task.join(take b)) + result.unwrap(task.join(take c))
+    at_peak && mine == 1048576 && theirs == 2097152
+}
+
+// expect: run shared_payload_charged_once(tasks) = true
+fn shared_payload_charged_once(tasks: Tasks) -> bool waits {
+    let checked = bound bytes 1049232 {
+        let mut ok = true
+        for i in 0u64 .. 6 {
+            ok = ok && round(tasks, i % 2 == 1)
+        }
+        ok
+    }
+    result.unwrap(checked)
+}
+
+fn maker(take unit: ()) -> Shared[List[u8]] {
+    shared.new(mebibyte())
+}
+
+// A helper's node outlives it. Its charge is 256 + 8 + 32 + n with n = 1048640,
+// the buffer and the node, all of a bound of 1048936. After the join the owner
+// still holds the node's 1048640 for the ended helper, so a connection asking
+// 64 + 8 + 225 = 297 sees 296; the owner's last release returns the node's
+// bytes, and the next round needs the whole bound again.
+// expect: run helper_shared_outlives_helper(tasks) = true
+fn helper_shared_outlives_helper(tasks: Tasks) -> bool waits {
+    let checked = bound bytes 1048936 {
+        let mut ok = true
+        for _ in 0u64 .. 3 {
+            let h = result.unwrap(task.spawn_unit(tasks, bytes 1048640, (), maker))
+            let s = result.unwrap(task.join(take h))
+            let held: Result[(Client[u64], Inbox[u64]), Capacity] = conn.new(1, bytes 225)
+            let kept = match held {
+                Error(c) => c.requested == 297 && c.available == 296,
+                Ok(_) => false,
+            }
+            ok = ok && kept && list.len(s) == 1048576
+        }
+        ok
+    }
+    result.unwrap(checked)
+}

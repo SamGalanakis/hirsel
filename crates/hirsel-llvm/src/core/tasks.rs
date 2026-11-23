@@ -718,6 +718,20 @@ impl FunctionEmitter<'_> {
             RtOp::LatestHandle => {
                 self.native_call("hirsel_core_latest_handle", &[P], &[p(&args[0])])
             }
+            RtOp::SharedNew { item } => {
+                let cross = self.cross(item, 0);
+                self.native_call(
+                    "hirsel_core_shared_new",
+                    &[P, U],
+                    &[ptr(CONTEXT), p(&args[0]), p(&cross), u(&args[1])],
+                )
+            }
+            RtOp::SharedShare => self.native_call("hirsel_core_shared_share", &[P], &[p(&args[0])]),
+            RtOp::SharedRelease { .. } => self.native_call(
+                "hirsel_core_shared_release",
+                &[],
+                &[ptr(CONTEXT), p(&args[0])],
+            ),
             RtOp::LatestRead => self.native_call("hirsel_core_latest_read", &[P], &[p(&args[0])]),
             RtOp::LatestPublish => self.native_call(
                 "hirsel_core_latest_publish",

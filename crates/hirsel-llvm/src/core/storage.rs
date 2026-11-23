@@ -93,7 +93,7 @@ impl FunctionEmitter<'_> {
         match t {
             FieldTy::Inline(t) => self.kind_of(TypeId(t.0)),
             FieldTy::Box(t) => At::Pointer(TypeId(t.0)),
-            FieldTy::Rc(t) | FieldTy::Arc(t) => At::Counted(TypeId(t.0)),
+            FieldTy::Rc(t) | FieldTy::Arc(t) | FieldTy::Shared(t) => At::Counted(TypeId(t.0)),
             FieldTy::Array(e, n) => At::Array(e.clone(), *n),
             FieldTy::Seq(e) => At::Seq(e.clone()),
             _ => At::Other,
@@ -213,10 +213,8 @@ impl FunctionEmitter<'_> {
         let steps = info.steps.get(&self.body.pools.steps).unwrap();
         let (last, before) = steps.split_last()?;
         let scalar = |t: &FieldTy| {
-            matches!(
-                t,
-                FieldTy::Scalar(_) | FieldTy::Box(_) | FieldTy::Rc(_) | FieldTy::Arc(_)
-            )
+            matches!(t, FieldTy::Scalar(_) | FieldTy::Box(_) | FieldTy::Rc(_))
+                || matches!(t, FieldTy::Arc(_) | FieldTy::Shared(_))
         };
         let data = match *last {
             Step::Seq(_) => return Some(alias::SEQ_WORD_ACCESS),

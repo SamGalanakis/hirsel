@@ -127,7 +127,11 @@ fn scalar_leaves<'a>(
     while let Some((at, field)) = pending.pop() {
         let ty = match field {
             FieldTy::Scalar(s) => Ty::Scalar(*s),
-            FieldTy::Box(_) | FieldTy::Rc(_) | FieldTy::Arc(_) | FieldTy::Fn => Ty::Ptr,
+            FieldTy::Box(_)
+            | FieldTy::Rc(_)
+            | FieldTy::Arc(_)
+            | FieldTy::Shared(_)
+            | FieldTy::Fn => Ty::Ptr,
             FieldTy::Handle(Handle::Sender | Handle::Receiver) => return None,
             FieldTy::Handle(_) => Ty::Scalar(Scalar::U64),
             FieldTy::Inline(id) => {

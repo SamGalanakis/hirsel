@@ -182,6 +182,7 @@ fn field_ty(f: &FieldTy) -> String {
         FieldTy::FrozenBytes => "frozen_bytes".into(),
         FieldTy::Rc(t) => format!("rc t{}", t.0),
         FieldTy::Arc(t) => format!("arc t{}", t.0),
+        FieldTy::Shared(t) => format!("shared t{}", t.0),
         FieldTy::RegionRef(t) => format!("region_ref t{}", t.0),
         FieldTy::Array(e, n) => format!("array {n} {}", field_ty(e)),
         FieldTy::Fn => "fn".into(),
@@ -295,6 +296,9 @@ fn rt(op: RtOp) -> String {
         RtOp::SpawnUnit { x, r } => format!("rt.spawn_unit[t{}, t{}]", x.0, r.0),
         RtOp::LatestPublish => "rt.latest_publish".into(),
         RtOp::LatestRead => "rt.latest_read".into(),
+        RtOp::SharedNew { item } => format!("rt.shared_new[t{}]", item.0),
+        RtOp::SharedShare => "rt.shared_share".into(),
+        RtOp::SharedRelease { item } => format!("rt.shared_release[t{}]", item.0),
         RtOp::DestId => "rt.dest_id".into(),
         RtOp::CompareBytes => "rt.compare_bytes".into(),
         RtOp::MapHashBytes => "rt.map_hash_bytes".into(),
@@ -1094,13 +1098,14 @@ impl<'a> Line<'a> {
         use hirsel_core_layout::Handle;
         let boxed = |l: &mut Self| l.field_ty().map(Box::new);
         Ok(match self.peek().ok_or("expected a field type")? {
-            "box" | "rc" | "arc" | "region_ref" | "link" => {
+            "box" | "rc" | "arc" | "shared" | "region_ref" | "link" => {
                 let w = self.next()?;
                 let t = self.tref()?;
                 match w {
                     "box" => FieldTy::Box(t),
                     "rc" => FieldTy::Rc(t),
                     "arc" => FieldTy::Arc(t),
+                    "shared" => FieldTy::Shared(t),
                     "region_ref" => FieldTy::RegionRef(t),
                     _ => FieldTy::Link(t),
                 }
@@ -1931,6 +1936,9 @@ impl BodyParser {
                 }
                 "latest_publish" => RtOp::LatestPublish,
                 "latest_read" => RtOp::LatestRead,
+                "shared_new" => RtOp::SharedNew { item: tys(1)?[0] },
+                "shared_share" => RtOp::SharedShare,
+                "shared_release" => RtOp::SharedRelease { item: tys(1)?[0] },
                 "dest_id" => RtOp::DestId,
                 "compare_bytes" => RtOp::CompareBytes,
                 "map_hash_bytes" => RtOp::MapHashBytes,

@@ -96,6 +96,7 @@ tags!(FieldTy {
     18 => Link(part0),
     19 => Locator(part0),
     20 => FrozenBytes,
+    21 => Shared(part0),
 });
 
 tags!(hirsel_core_layout::Body {
@@ -385,6 +386,9 @@ tags!(RtOp {
     69 => Crc32cCombine,
     70 => Crc64NvmeCombine,
     71 => Transfer { x, r },
+    72 => SharedNew { item },
+    73 => SharedShare,
+    74 => SharedRelease { item },
 });
 
 tags!(Wait {

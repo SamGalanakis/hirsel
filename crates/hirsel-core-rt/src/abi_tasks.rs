@@ -64,6 +64,9 @@ pub use crate::latest::{
     hirsel_core_latest_drop, hirsel_core_latest_handle, hirsel_core_latest_new,
     hirsel_core_latest_publish, hirsel_core_latest_read,
 };
+pub use crate::shared::{
+    hirsel_core_shared_new, hirsel_core_shared_release, hirsel_core_shared_share,
+};
 pub use crate::tasks::{
     hirsel_core_cancel, hirsel_core_check_cancel, hirsel_core_join, hirsel_core_spawn,
     hirsel_core_task_drop,

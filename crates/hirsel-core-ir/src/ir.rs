@@ -965,6 +965,20 @@ pub enum RtOp {
     LatestPublish,
     /// The root's node, which the caller shares before any other event.
     LatestRead,
+    /// `shared.new` (CONC-15): `(x, charge) -> (node, available)`; the runtime
+    /// admits `charge` and moves `x` into a new node. A null node is `Capacity`,
+    /// with `x` still in its place.
+    SharedNew {
+        item: TypeId,
+    },
+    /// `shared.share`: one more holder of the node, counted atomically and not
+    /// an event (CONC-15).
+    SharedShare,
+    /// One holder of a `Shared[item]` node fewer; the last one cleans the payload
+    /// and refunds the node through its own record (CONC-15).
+    SharedRelease {
+        item: TypeId,
+    },
     DestId,
     /// Bytewise order of two byte ranges (SEM-7): `String`, `Text` and `Bytes`.
     CompareBytes,
@@ -1237,7 +1251,9 @@ impl RtOp {
             RtOp::SpawnUnit { x, .. } => {
                 (vec![V(u64_), take(x), V(p), V(u64_)], vec![p, u64_, u64_])
             }
-            RtOp::LatestHandle | RtOp::LatestRead => (vec![V(p)], vec![p]),
+            RtOp::LatestHandle | RtOp::LatestRead | RtOp::SharedShare => (vec![V(p)], vec![p]),
+            RtOp::SharedNew { item } => (vec![take(item), V(u64_)], vec![p, u64_]),
+            RtOp::SharedRelease { .. } => (vec![V(p)], vec![]),
             RtOp::LatestPublish => (vec![V(p), V(p)], vec![]),
             RtOp::DestId => (vec![], vec![u64_]),
             RtOp::CompareBytes => (
@@ -1603,7 +1619,9 @@ impl RtOp {
             | RtOp::Receive { item }
             | RtOp::ReceiveRec { item }
             | RtOp::TryReceive { item }
-            | RtOp::LatestNew { item } => vec![item],
+            | RtOp::LatestNew { item }
+            | RtOp::SharedNew { item }
+            | RtOp::SharedRelease { item } => vec![item],
             RtOp::LaunchTarget { view } => vec![view],
             RtOp::Cancel
             | RtOp::CheckCancel
@@ -1612,6 +1630,7 @@ impl RtOp {
             | RtOp::LatestHandle
             | RtOp::LatestPublish
             | RtOp::LatestRead
+            | RtOp::SharedShare
             | RtOp::DestId
             | RtOp::CompareBytes
             | RtOp::MapHashBytes

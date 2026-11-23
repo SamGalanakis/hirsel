@@ -365,11 +365,12 @@ impl<T: TyRead> Shapes<'_, T> {
                     }
                     // A box or counted reference held as a value: its one pointer field,
                     // cleaned by the recipe (freed, or released, MEM-15/16).
-                    Some(role @ (Role::Box | Role::Rc | Role::Arc)) => {
+                    Some(role @ (Role::Box | Role::Rc | Role::Arc | Role::Shared)) => {
                         let to = self.shape(args[0])?;
                         let field = match role {
                             Role::Box => FieldTy::Box(to),
                             Role::Rc => FieldTy::Rc(to),
+                            Role::Shared => FieldTy::Shared(to),
                             _ => FieldTy::Arc(to),
                         };
                         let held = Some(field.clone());
@@ -662,6 +663,7 @@ impl<T: TyRead> Shapes<'_, T> {
                 Some(Role::Box) => FieldTy::Box(self.shape(args[0])?),
                 Some(Role::Rc) => FieldTy::Rc(self.shape(args[0])?),
                 Some(Role::Arc) => FieldTy::Arc(self.shape(args[0])?),
+                Some(Role::Shared) => FieldTy::Shared(self.shape(args[0])?),
                 Some(Role::List) => FieldTy::Seq(Box::new(self.field(args[0])?)),
                 Some(Role::String) => FieldTy::Seq(Box::new(FieldTy::Scalar(Scalar::U8))),
                 Some(Role::FrozenBytes) => FieldTy::FrozenBytes,

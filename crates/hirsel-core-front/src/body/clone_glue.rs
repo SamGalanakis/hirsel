@@ -65,6 +65,7 @@ impl Derive<'_> {
                 | FieldTy::Box(t)
                 | FieldTy::Rc(t)
                 | FieldTy::Arc(t)
+                | FieldTy::Shared(t)
                 | FieldTy::RegionRef(t)
                 | FieldTy::Link(t) => row(types, t.0, seen, allow_hooks),
                 FieldTy::Seq(x)
@@ -158,6 +159,7 @@ impl Derive<'_> {
             | FieldTy::Box(_)
             | FieldTy::Rc(_)
             | FieldTy::Arc(_)
+            | FieldTy::Shared(_)
             | FieldTy::Map(..)
             | FieldTy::OwnFn => true,
             FieldTy::Array(item, _) => self.owns(item, seen),
@@ -293,6 +295,10 @@ impl Derive<'_> {
                     node,
                     kind: counted(field),
                 });
+            }
+            FieldTy::Shared(_) => {
+                let node = c.read(from, Ty::Ptr);
+                self.runtime(c, hirsel_core_ir::RtOp::SharedShare, &[node]);
             }
             FieldTy::Seq(_) | FieldTy::FrozenBytes => {
                 let u = Ty::Scalar(Scalar::U64);
@@ -486,6 +492,14 @@ impl Derive<'_> {
                 let charge = c.constant(self.box_charge(t));
                 c.inst(Inst::Free { block, charge });
             }
+            FieldTy::Shared(t) => {
+                let node = c.read(at, Ty::Ptr);
+                self.runtime(
+                    c,
+                    hirsel_core_ir::RtOp::SharedRelease { item: TypeId(t.0) },
+                    &[node],
+                );
+            }
             FieldTy::Rc(t) | FieldTy::Arc(t) => {
                 let node = c.read(at, Ty::Ptr);
                 c.inst(Inst::Release {
@@ -673,7 +687,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             };
             let skip = match self.p.decls[d.index()].role {
                 Some(Role::Box) => 0,
-                Some(Role::Rc | Role::Arc) => 8,
+                Some(Role::Rc | Role::Arc | Role::Shared) => 8,
                 _ => break,
             };
             let block = self.get_word(AddressBase::Value(at), 0, Ty::Ptr, n)?;

@@ -921,6 +921,31 @@ impl Function<'_, '_, '_> {
                 outputs[1] = values[1];
                 2
             }
+            RtOp::SharedNew { item } => {
+                let cross = self.cross(item, 0)?;
+                let values = self.c_call(
+                    "hirsel_core_shared_new",
+                    &[P, P, P, U],
+                    &[P, U],
+                    &[self.context, args[0], cross, args[1]],
+                )?;
+                outputs[0] = values[0];
+                outputs[1] = values[1];
+                2
+            }
+            RtOp::SharedShare => {
+                outputs[0] = self.c_call("hirsel_core_shared_share", &[P], &[P], &[args[0]])?[0];
+                1
+            }
+            RtOp::SharedRelease { .. } => {
+                self.c_call(
+                    "hirsel_core_shared_release",
+                    &[P, P],
+                    &[],
+                    &[self.context, args[0]],
+                )?;
+                0
+            }
             RtOp::LatestHandle | RtOp::LatestRead => {
                 let name = if op == RtOp::LatestHandle {
                     "hirsel_core_latest_handle"

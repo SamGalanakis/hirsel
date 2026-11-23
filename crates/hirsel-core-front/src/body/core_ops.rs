@@ -51,6 +51,8 @@ pub(crate) enum Kernel {
     LatestHandle,
     LatestPublish,
     LatestRead,
+    SharedNew,
+    SharedShare,
     ChannelSender,
     Send,
     TrySend,
@@ -109,6 +111,8 @@ operations! {
     ("latest", "handle", Lane::Runtime(Kernel::LatestHandle), "A", "core-ops-914", false),
     ("latest", "publish", Lane::Runtime(Kernel::LatestPublish), "A", "core-ops-914", false),
     ("latest", "read", Lane::Runtime(Kernel::LatestRead), "A", "core-ops-914", false),
+    ("shared", "new", Lane::Runtime(Kernel::SharedNew), "A", "conc-shared-1993", false),
+    ("shared", "share", Lane::Runtime(Kernel::SharedShare), "A", "conc-shared-1993", false),
     ("log", "new", Lane::Runtime(Kernel::LogNew), "B", "core-ops-914", false),
     ("log", "append", Lane::Runtime(Kernel::LogAppend), "B", "core-ops-914", false),
     ("log", "finish", Lane::Runtime(Kernel::LogFinish), "B", "core-ops-914", false),
@@ -958,6 +962,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             Kernel::ChannelNew => self.runtime_channel(types[0], vals[0]?, result, n),
             Kernel::LatestNew => self.runtime_latest_new(types[0], vals[0], result, n),
+            Kernel::SharedNew => self.runtime_shared_new(types[0], vals[0], result, n),
+            Kernel::SharedShare => {
+                let node = self.runtime_handle(vals[0]?, n);
+                let [node, ..] = self.runtime_row(RtOp::SharedShare, &[Arg::Value(node)], n)?;
+                self.runtime_carrier(result, node, n)
+            }
             Kernel::LatestHandle => {
                 let handle = self.runtime_handle(vals[0]?, n);
                 let [handle, ..] =
@@ -1306,6 +1316,34 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.runtime_admitted(result, ok, [requested, available], n, |cx, to| {
             cx.consume(arc, n);
             cx.runtime_store(to, &[Step::Field(0)], Ty::Ptr, latest, n);
+        })
+    }
+
+    /// `shared.new`: the runtime admits the node, `charge::shared(size(T))`,
+    /// from the current limit and moves the taken value into it; a refusal
+    /// raises with the value still the caller's (CONC-15).
+    fn runtime_shared_new(
+        &mut self,
+        item: TyId,
+        value: Option<ValueId>,
+        result: TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let size = self.layout_size(item, true, n)?;
+        let u = Ty::Scalar(Scalar::U64);
+        let one = self.konst(u, 1, n)?;
+        let base = self.konst(u, hirsel_core_layout::charge::SHARED_NODE + 7, n)?;
+        let (requested, _) = self.runtime_charge_parts(one, size, base, true, n)?;
+        let (id, input) = self.runtime_place(item, value, n)?;
+        let [node, available, ..] = self.runtime_row(
+            RtOp::SharedNew { item: id },
+            &[Arg::Address(input), Arg::Value(requested)],
+            n,
+        )?;
+        let ok = self.runtime_nonzero(Ty::Ptr, node, n)?;
+        self.runtime_admitted(result, ok, [requested, available], n, |cx, to| {
+            cx.consume(value, n);
+            cx.runtime_store(to, &[Step::Field(0)], Ty::Ptr, node, n);
         })
     }
 
@@ -1741,6 +1779,8 @@ pub(crate) fn assert_no_ambient_input(p: &Program<'_>) {
             | Kernel::LatestHandle
             | Kernel::LatestPublish
             | Kernel::LatestRead
+            | Kernel::SharedNew
+            | Kernel::SharedShare
             | Kernel::ChannelSender
             | Kernel::Send
             | Kernel::TrySend

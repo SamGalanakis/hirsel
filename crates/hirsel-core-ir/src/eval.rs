@@ -5671,7 +5671,7 @@ impl Machine<'_> {
         match f {
             FieldTy::Inline(x) => self.at_of(*x),
             FieldTy::Box(x) => At::Ptr(*x),
-            FieldTy::Rc(x) | FieldTy::Arc(x) => At::Counted(*x),
+            FieldTy::Rc(x) | FieldTy::Arc(x) | FieldTy::Shared(x) => At::Counted(*x),
             FieldTy::Array(e, n) => At::Array(
                 self.arrays
                     .iter()
@@ -5971,6 +5971,11 @@ impl Machine<'_> {
                 self.release(node, *x);
                 false
             }
+            FieldTy::Shared(x) => {
+                let node = self.load(at, 8);
+                self.release_shared(node, *x);
+                false
+            }
             FieldTy::Handle(Handle::Causes) => {
                 let head = self.load(at, 8);
                 let cells = self.causes.remove(&head).expect("Causes dropped twice");
@@ -6213,6 +6218,32 @@ impl Machine<'_> {
             );
             let charge = charge::counted(self.recipes[ty.index()].logical_size.expect("fixed"));
             self.free_as(node, charge, None, "a counted node");
+        }
+    }
+    /// CONC-15: drop one holder of a `Shared` node; the last one cleans the
+    /// payload and refunds the node to the limit that admitted it.
+    fn release_shared(&mut self, node: u64, ty: TypeRef) {
+        let count = self.load(node, 8) - 1;
+        self.store(node, 8, count);
+        if count == 0 {
+            let mut scratch = Task {
+                step_bounds: Vec::new(),
+                slice_steps: 0,
+                limits: Vec::new(),
+                chain: Vec::new(),
+                cells: Vec::new(),
+                obligations: Vec::new(),
+                reserved: Vec::new(),
+                at: Vec::new(),
+                k: 0,
+                shield: 0,
+            };
+            assert!(
+                !self.drop_value(&mut scratch, node + 8, ty),
+                "a shared payload failed"
+            );
+            let charge = charge::shared(self.logical(ty));
+            self.free_as(node, charge, None, "a shared node");
         }
     }
     /// Take channel `i`'s front item into `dest`, or return false when its queue is
@@ -6912,6 +6943,29 @@ impl Machine<'_> {
                 self.event(LATEST_PUBLISH, id, 0);
                 self.release_latest_holder(t, old, item);
                 vec![]
+            }
+            RtOp::SharedNew { item } => match self.admit(cur, a[1]) {
+                Err(room) => vec![0, room],
+                Ok(()) => {
+                    // The count and the payload; the native node's bookkeeping
+                    // words before them are the runtime's (CONC-15).
+                    let item = TypeRef(item.0);
+                    let size = self.held(item);
+                    let node = self.block(8 + size, Some(cur.clone()), a[1], None);
+                    self.store(node, 8, 1);
+                    let bytes = self.get(a[0], size as usize).to_vec();
+                    self.put(node + 8, &bytes);
+                    vec![node, 0]
+                }
+            },
+            RtOp::SharedRelease { item } => {
+                self.release_shared(a[0], TypeRef(item.0));
+                vec![]
+            }
+            RtOp::SharedShare => {
+                let count = self.load(a[0], 8) + 1;
+                self.store(a[0], 8, count);
+                vec![a[0]]
             }
             RtOp::LatestRead => {
                 let l = &self.latests[(a[0] - LATEST_BASE) as usize];

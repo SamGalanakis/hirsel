@@ -116,6 +116,7 @@ fn concrete_rows_reaching_rigid(module: &Module) -> Vec<(String, String)> {
             | FieldTy::Box(r)
             | FieldTy::Rc(r)
             | FieldTy::Arc(r)
+            | FieldTy::Shared(r)
             | FieldTy::RegionRef(r)
             | FieldTy::Link(r) => out.push(r.0),
             FieldTy::Seq(e)

@@ -3,25 +3,8 @@ use super::storage::zeroext;
 use super::*;
 use hirsel_core_layout::{FieldTy, Repr, TypeRef, field_size};
 
-fn cleanup_dependencies(field: &FieldTy, counted: bool, pending: &mut Vec<(usize, bool)>) {
-    match field {
-        FieldTy::Inline(t) => pending.push((t.index(), counted)),
-        FieldTy::Box(t) => {
-            pending.push((t.index(), counted));
-            pending.push((t.index(), true));
-        }
-        FieldTy::Rc(t) | FieldTy::Arc(t) => pending.push((t.index(), true)),
-        // Seq and Map storage is released by the drain from its buffer recipe
-        // (LANG-19), so its elements are counted cleanup wherever it is held.
-        FieldTy::Map(key, value) => {
-            cleanup_dependencies(key, true, pending);
-            cleanup_dependencies(value, true, pending);
-        }
-        FieldTy::Seq(element) => cleanup_dependencies(element, true, pending),
-        FieldTy::Array(element, _) => cleanup_dependencies(element, counted, pending),
-        _ => {}
-    }
-}
+mod deps;
+use deps::cleanup_dependencies;
 
 /// Whether ordinary glue cleans `field` in place with nothing below it to
 /// drain: scalars, terminal storage and inline values with no drop.
@@ -605,6 +588,11 @@ impl FunctionEmitter<'_> {
                 self.release_node(&node, *t, matches!(field, FieldTy::Arc(_)))?;
                 None
             }
+            FieldTy::Shared(_) => {
+                let node = self.load(&Type::Ptr, p, 1);
+                self.runtime_void("hirsel_core_shared_release", &[ptr(CONTEXT), ptr(node)]);
+                None
+            }
             FieldTy::Scalar(_)
             | FieldTy::RegionRef(_)
             | FieldTy::Fn
@@ -867,7 +855,8 @@ pub(super) fn mechanical_count(
         | FieldTy::Arc(_)
         | FieldTy::Seq(_)
         | FieldTy::Map(_, _)
-        | FieldTy::FrozenBytes => 1,
+        | FieldTy::FrozenBytes
+        | FieldTy::Shared(_) => 1,
         FieldTy::Inline(t) => {
             let Some(drop) = &recipes[t.index()].drop else {
                 return Ok(0);
@@ -1074,7 +1063,7 @@ impl FunctionEmitter<'_> {
                 self.br(Label::plain("resume"));
             }
             FieldTy::Seq(_) | FieldTy::Map(_, _) => self.enqueue_collection(field, p),
-            FieldTy::FrozenBytes => self.clean_whole(field, p)?,
+            FieldTy::FrozenBytes | FieldTy::Shared(_) => self.clean_whole(field, p)?,
             FieldTy::Box(t) | FieldTy::Rc(t) | FieldTy::Arc(t) => {
                 let node = self.load(&Type::Ptr, p, 1);
                 let logical = held_logical(self.module, self.recipes, t.index());

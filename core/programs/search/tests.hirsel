@@ -1,3 +1,8 @@
+const LAST_ID: u64 = 18446744073709551615u64
+
+// Ranked by the independent Python oracle, with whole-corpus statistics.
+const INITIAL: Inline[(u64, f64), 5] =[(1u64, 1.007225464450901), (3u64, 0.8406763719039017), (LAST_ID, 0.8406763719039017), (2u64, 0.6881642867354947), (4u64, 0.4203381859519508)]
+
 fn install(mut migration: store.Migration) -> Result[(), store.Error] {
     let layout: search.Spec[bool] = search.spec("test")
     search.install(mut migration, layout)
@@ -7,6 +12,20 @@ fn expect_hit(hits: List[search.Hit], rank: u64, id: u64, score: f64) {
     let hit = hits[rank]
     if hit.id != id || !float.le(float.abs(hit.score - score), 0.000000001) {
         fail("BM25 hit differs from the Python reference")
+    }
+}
+
+fn load_fixture(mut db: store.Db, index: search.Index[bool]) -> () waits {
+    let loaded = result.unwrap(store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
+        search.upsert(mut tx, index, 1, "red red blue", false)?
+        search.upsert(mut tx, index, 2, "red red red red", true)?
+        search.upsert(mut tx, index, 3, "red blue green", false)?
+        search.upsert(mut tx, index, 4, "blue green green", true)?
+        search.upsert(mut tx, index, 5, "the", true)?
+        search.upsert(mut tx, index, LAST_ID, "red blue green", false)
+    }))
+    if let Committed(_) = loaded {} else {
+        fail("initial indexing")
     }
 }
 
@@ -29,18 +48,7 @@ fn snapshot_bm25(clock: Clock, random: Random, tasks: Tasks) -> Result[(), ()] w
     result.unwrap(store.run_migration(mut db, tasks, code.describe(install)))
     let layout: search.Spec[bool] = search.spec("test")
     let index = result.unwrap(search.open(store.snapshot_schema(store.snapshot(db)), layout, take analyzer))
-    let last = 18446744073709551615u64
-    let loaded = result.unwrap(store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
-        search.upsert(mut tx, index, 1, "red red blue", false)?
-        search.upsert(mut tx, index, 2, "red red red red", true)?
-        search.upsert(mut tx, index, 3, "red blue green", false)?
-        search.upsert(mut tx, index, 4, "blue green green", true)?
-        search.upsert(mut tx, index, 5, "the", true)?
-        search.upsert(mut tx, index, last, "red blue green", false)
-    }))
-    if let Committed(_) = loaded {} else {
-        fail("initial indexing")
-    }
+    load_fixture(mut db, index)
     let before = store.snapshot(db)
     let params = search.defaults()
     let query = "red blue red"
@@ -54,11 +62,10 @@ fn snapshot_bm25(clock: Clock, random: Random, tasks: Tasks) -> Result[(), ()] w
     if list.len(initial) != 5 {
         fail("initial scores, deduplication or tie break")
     }
-    expect_hit(initial, 0, 1, 1.007225464450901)
-    expect_hit(initial, 1, 3, 0.8406763719039017)
-    expect_hit(initial, 2, last, 0.8406763719039017)
-    expect_hit(initial, 3, 2, 0.6881642867354947)
-    expect_hit(initial, 4, 4, 0.4203381859519508)
+    for rank in 0u64 .. 5 {
+        let (id, score) = INITIAL[rank]
+        expect_hit(initial, rank, id, score)
+    }
     let filtered = result.unwrap(search.query(before, index, query, 2, params, permitted))
     if list.len(filtered) != 2 {
         fail("filter precedes top k")
@@ -94,7 +101,7 @@ fn snapshot_bm25(clock: Clock, random: Random, tasks: Tasks) -> Result[(), ()] w
         fail("updated scores and rejected transaction")
     }
     expect_hit(after, 0, 2, 1.3552587760931822)
-    expect_hit(after, 1, last, 1.330714006884092)
+    expect_hit(after, 1, LAST_ID, 1.330714006884092)
     expect_hit(after, 2, 3, 0.7103824848366291)
     expect_hit(after, 3, 4, 0.507082234241936)
     let mut subset: std.set.Set[u64] = std.set.new()
@@ -116,4 +123,61 @@ fn snapshot_bm25(clock: Clock, random: Random, tasks: Tasks) -> Result[(), ()] w
     expect_hit(prior, 1, 4, 0.4203381859519508)
     result.unwrap(store.close(take db))
     Ok(())
+}
+
+fn mask_contains(mask: u64, id: u64) -> bool {
+    let bit = if id == LAST_ID {
+        5u64
+    } else {
+        id - 1
+    }
+    ((mask >> bit) & 1) != 0
+}
+
+@test
+fn filtered_top_k(clock: Clock, random: Random, tasks: Tasks) -> Result[(), ()] waits {
+    let mut db = store.memory(clock, random, store.defaults())
+    result.unwrap(store.run_migration(mut db, tasks, code.describe(install)))
+    let layout: search.Spec[bool] = search.spec("test")
+    let mut stop_words: List[String] = list.new()
+    list.push(mut stop_words, string.from("the"))
+    let index = result.unwrap(search.open(store.snapshot_schema(store.snapshot(db)), layout, search.tokenizer(stop_words)))
+    load_fixture(mut db, index)
+    let snapshot = store.snapshot(db)
+    let mut config = std.prop.config()
+    config.cases = 512
+    let inputs = std.prop.pair(std.prop.u64_in(0, 63), std.prop.u64_in(0, 7))
+    let outcome = std.prop.all(config, inputs, fn(input: (u64, u64)) -> Result[(), String] {
+        let (mask, k) = input
+        let hits = result.unwrap(search.query(snapshot, index, "red blue red", k, search.defaults(), scoped fn(id: u64, _metadata: bool) -> bool {
+            mask_contains(mask, id)
+        }))
+        let mut rank: u64 = 0
+        for (id, score) in INITIAL {
+            if rank == k {
+                break
+            }
+            if mask_contains(mask, id) {
+                if rank >= list.len(hits) {
+                    return Error(string.from("eligible hit missing"))
+                }
+                expect_hit(hits, rank, id, score)
+                rank += 1
+            }
+        }
+        if list.len(hits) != rank {
+            return Error(string.from("unexpected hit"))
+        }
+        Ok(())
+    })
+    result.unwrap(store.close(take db))
+    match take outcome {
+        Held(512, 0) => Ok(()),
+        Falsified(found) => {
+            let mut report = string.new()
+            std.prop.report(found, mut report)
+            fail(take report)
+        },
+        _ => fail("expected all 512 mask and limit combinations")
+    }
 }

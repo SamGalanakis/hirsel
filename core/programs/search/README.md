@@ -69,3 +69,6 @@ failures propagate rather than truncating the result.
 `snapshot_bm25` checks fixed Python reference scores to an absolute tolerance
 of `1e-9`. It covers exact filtering, ties, duplicate query terms, deletes,
 updates, aborted writes and retained snapshots.
+`filtered_top_k` uses `std.prop.all` to check every eligibility mask for the
+six-document fixture and every limit from zero to seven against the Python
+ranking.

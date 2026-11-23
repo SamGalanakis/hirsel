@@ -605,7 +605,12 @@ fn look[T: send](d: Door[T], id: u64, c: Child, credential: Bytes, take submit: 
     let rows = list.len(image.rows)
     for r in image.rows {
         let Some(raw) = view r.value else { continue }
-        let Ok(at) = std.codec.decode_key(std.codec.key_u64(), r.key) else { continue }
+        // A query row's key carries the table's prefix before the u64 key, so the
+        // position is the key's last eight bytes, big-endian.
+        let width = list.len(r.key)
+        if width < 8u64 { continue }
+        let mut at = 0u64
+        for i in width - 8u64 .. width { at = at * 256u64 + int.widen(r.key[i]) }
         match std.codec.decode(codec, raw) {
             Ok(Status(text)) => { status = clone(text) },
             Ok(Line(kind, text)) => if kind == "assistant" && at >= last_at {

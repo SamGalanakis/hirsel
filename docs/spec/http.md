@@ -62,7 +62,7 @@ There is one line per mechanism, saying what Hirsel does with it and why.
   - These are HTTP-10's three outcomes.
 - **ADAPTED.** io_uring (http.goose:126-160), through the pure-Rust `io-uring` crate instead of liburing, so it needs no C headers or library. Provided buffer rings are not taken, and neither are HTTP/2 and HTTP/3 in rung 1 (http.goose:41).
   - NET's transport has two reactors behind one boundary: io_uring when the running kernel allows it, epoll where it does not (an older kernel, a container that refuses `io_uring_setup`).
-  - The runtime chooses once, at its first socket poller, and `HIRSEL_NET_REACTOR=epoll` forces epoll. Any other value except `auto` is refused.
+  - The runtime chooses once, at its first socket poller. `HIRSEL_NET_REACTOR=auto` takes io_uring when the kernel allows it and `HIRSEL_NET_REACTOR=epoll` forces epoll. Any other value is refused. Until the ring's exit and completion-overflow handling is fixed, an unset variable means epoll; it will mean `auto` again.
   - The choice changes no program-visible result and is not a replay input, so a run recorded under one reactor replays under the other.
 
 ### Others

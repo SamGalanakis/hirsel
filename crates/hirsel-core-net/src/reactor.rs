@@ -34,8 +34,10 @@ impl Reactor {
     }
 }
 
-/// `auto` (the default) uses io_uring when this kernel allows it; `epoll`
-/// forces epoll.
+/// `auto` uses io_uring when this kernel allows it; `epoll`, and an unset
+/// variable, use epoll. Unset means epoll only until the ring's exit and
+/// completion-overflow handling is fixed (a 6.8 kernel oops in the task-work
+/// fallback path left a process unkillable); `auto` becomes the default again.
 pub const REACTOR_ENV: &str = "HIRSEL_NET_REACTOR";
 static CHOSEN: OnceLock<Result<Reactor, String>> = OnceLock::new();
 /// The ring and wake descriptor the probe built, for the first poller.
@@ -45,6 +47,7 @@ static PROBED: Mutex<Option<(Uring, OwnedFd)>> = Mutex::new(None);
 pub fn reactor() -> io::Result<Reactor> {
     CHOSEN
         .get_or_init(|| match std::env::var_os(REACTOR_ENV) {
+            None => Ok(Reactor::Epoll),
             Some(v) if v == "epoll" => Ok(Reactor::Epoll),
             Some(v) if v != "auto" => Err(format!(
                 "{REACTOR_ENV}={} is not a reactor; use auto or epoll",

@@ -42,22 +42,22 @@
       },
       "entries": {
         "bfs-idiomatic": {
-          "marginal_per_token": 4878.376161837069
+          "marginal_per_token": 5212.522577
         },
         "bfs-matched": {
-          "marginal_per_token": 4888.518316019683
+          "marginal_per_token": 5223.359422
         },
         "generics-idiomatic": {
-          "marginal_per_token": 5111.825552138664
+          "marginal_per_token": 5356.760375
         },
         "generics-matched": {
-          "marginal_per_token": 5111.825552138664
+          "marginal_per_token": 5356.760375
         },
         "lru-idiomatic": {
-          "marginal_per_token": 4673.0348886086595
+          "marginal_per_token": 4891.584158
         },
         "lru-matched": {
-          "marginal_per_token": 4673.0348886086595
+          "marginal_per_token": 4891.584158
         },
         "files-idiomatic": {
           "marginal_per_token": 5756.009334889148
@@ -66,10 +66,10 @@
           "marginal_per_token": 5756.009334889148
         },
         "json-idiomatic": {
-          "marginal_per_token": 4851.51376146789
+          "marginal_per_token": 5111.404382
         },
         "json-matched": {
-          "marginal_per_token": 4851.51376146789
+          "marginal_per_token": 5111.404382
         },
         "pipeline-idiomatic": {
           "marginal_per_token": 5207.85498489426
@@ -78,10 +78,10 @@
           "marginal_per_token": 5207.85498489426
         },
         "request-scratch-idiomatic": {
-          "marginal_per_token": 4846.458383019318
+          "marginal_per_token": 5138.523525
         },
         "request-scratch-matched": {
-          "marginal_per_token": 4846.458383019318
+          "marginal_per_token": 5138.523525
         },
         "rope-idiomatic": {
           "marginal_per_token": 4725.6597645148195

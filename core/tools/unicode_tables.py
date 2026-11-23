@@ -4,6 +4,7 @@
 import argparse
 from bisect import bisect_right
 from hashlib import sha256
+from itertools import groupby
 from pathlib import Path
 
 
@@ -93,50 +94,55 @@ def verify_properties(categories, props, derived):
             raise ValueError(f"{name}: PropList and DerivedCoreProperties disagree at U+{min(mismatch):04X}")
 
 
-def category_runs(categories):
-    result = []
-    previous = None
-    for code in scalars():
-        tag = categories[code]
-        if tag != previous:
-            result.append((code << 5) | tag)
-            previous = tag
-    return result
+def packed_words(data, width):
+    per_word = 64 // width
+    return [
+        sum(value << (width * i) for i, value in enumerate(data[at:at + per_word]))
+        for at in range(0, len(data), per_word)
+    ]
 
 
-def ranges(points):
-    result = []
-    for code in sorted(points):
-        if result and result[-1][1] + 1 == code:
-            result[-1] = (result[-1][0], code)
-        else:
-            result.append((code, code))
-    return result
+def unpack(words, at, width):
+    per_word = 64 // width
+    return (words[at // per_word] >> (width * (at % per_word))) & ((1 << width) - 1)
 
 
-def case_tables(mappings, expansions):
-    runs = []
-    multi = []
-    for code, mapped in sorted(mappings.items()):
-        if mapped == (code,):
-            continue
-        if len(mapped) > 1:
-            text = "".join(chr(value) for value in mapped).encode("utf-8")
-            multi.append((code, (len(expansions) << 4) | len(text)))
-            expansions.extend(text)
-            continue
-        delta = mapped[0] - code
-        if runs:
-            start, length, stride, previous = runs[-1]
-            gap = code - (start + (length - 1) * stride)
-            if delta == previous and (gap == stride or length == 1 and gap == 2):
-                runs[-1] = (start, length + 1, gap, delta)
-                continue
-        runs.append((code, 1, 1, delta))
-    # 21 bits for a scalar start, 10 for the run length, one for the stride.
-    if any(length >= 1024 for _, length, _, _ in runs):
-        raise ValueError("case run too long for table encoding")
-    return [((start << 11) | (length << 1) | (stride - 1), delta) for start, length, stride, delta in runs], multi
+def pack_blocks(data):
+    """Append unique blocks with the longest available suffix-prefix overlap."""
+    blocks = tuple(sorted(set(data)))
+    size = len(blocks[0])
+    offsets = {}
+    remaining = set(blocks)
+    prefixes = [
+        {prefix: tuple(group) for prefix, group in groupby(blocks, key=lambda b: b[:width])}
+        for width in range(size)
+    ]
+    payload = bytearray()
+    while remaining:
+        for width in range(min(size - 1, len(payload)), -1, -1):
+            suffix = bytes(payload[-width:]) if width else b""
+            block = next((b for b in prefixes[width].get(suffix, ()) if b in remaining), None)
+            if block is not None:
+                break
+        offsets[block] = len(payload) - width
+        payload.extend(block[width:])
+        remaining.remove(block)
+    return [offsets[block] for block in data], payload
+
+
+def unique_blocks(data, size):
+    ids = {}
+    payload = bytearray()
+    indices = bytearray()
+    for at in range(0, len(data), size):
+        block = bytes(data[at:at + size])
+        if block not in ids:
+            if len(ids) == 256:
+                raise ValueError("case trie block IDs exceed u8")
+            ids[block] = len(ids)
+            payload.extend(block)
+        indices.append(ids[block])
+    return indices, payload
 
 
 def inline(name, element, values):
@@ -144,51 +150,170 @@ def inline(name, element, values):
     return f"const {name}: Inline[{element}, {len(values)}] =[\n{rows}]"
 
 
-def indexed_tables(name, element, tables):
-    values = []
-    lines = []
-    for key, rows in tables:
-        lines.append(f"const {key}_LO: u64 = {len(values)}")
-        values.extend(rows)
-        lines.append(f"const {key}_HI: u64 = {len(values)}")
-    lines.append(inline(name, element, values))
-    return lines
+def words(name, values):
+    data = ", ".join(f"{value:#018x}" for value in values)
+    return f"const {name}: Inline[u64, {len(values)}] =[{data}]"
 
 
-def verify_categories(categories, runs, props, property_ranges):
-    starts = [word >> 5 for word in runs]
-    decoded = {
-        name: {code for lo, hi in entries for code in range(lo, hi + 1)}
-        for name, entries in property_ranges
-    }
-    if decoded != props:
-        raise ValueError("encoded property ranges differ from PropList")
+def text_literal(data):
+    return '"' + "".join(f"\\u{{{ord(value):x}}}" for value in data.decode("utf-8")) + '"'
+
+
+def prop_runs(data, start, end):
+    return [
+        (code, data[code]) for code in range(start, end)
+        if code == start or data[code] != data[code - 1]
+    ]
+
+
+def emit_prop_runs(name, runs):
+    lines = [f"fn {name}(code: u32) -> u8 {{"]
+    for (_, tag), (end, _) in zip(runs, runs[1:]):
+        lines.extend((f"    if code < {hex(end)} {{", f"        return {tag}", "    }"))
+    lines.extend((f"    {runs[-1][1]}", "}"))
+    return "\n".join(lines)
+
+
+def char_tables(categories, props, derived, check):
+    data = bytearray(categories)
+    for bit, name in enumerate(("Alphabetic", "Uppercase", "Lowercase"), 5):
+        for code in derived[name]:
+            data[code] |= 1 << bit
+    cutoff = 0x20000
+    if any(max(points) >= cutoff for points in props.values()):
+        raise ValueError("high property runs require no Other_* or White_Space")
+    blocks = [bytes(data[at:at + 32]) for at in range(0, cutoff, 32)]
+    offsets, payload = pack_blocks(blocks)
+    if len(payload) > 65535:
+        raise ValueError("character property offsets exceed u16")
+    first = packed_words(offsets, 16)
+    second = packed_words(payload, 8)
+    ascii_runs = prop_runs(data, 0, 128)
+    high_runs = prop_runs(data, cutoff, LIMIT)
+    if check:
+        verify_char(categories, props, derived, first, second, ascii_runs, high_runs)
+    return [
+        words("PROP_S1", first),
+        words("PROP_S2", second),
+        emit_prop_runs("prop_ascii", ascii_runs),
+        emit_prop_runs("prop_high", high_runs),
+    ]
+
+
+def verify_char(categories, props, derived, first, second, ascii_runs, high_runs):
+    ascii_starts, ascii_values = zip(*ascii_runs)
+    high_starts, high_values = zip(*high_runs)
     for code in scalars():
-        if runs[bisect_right(starts, code) - 1] & 31 != categories[code]:
-            raise ValueError(f"encoded category differs from UnicodeData at U+{code:04X}")
+        ascii = code < 128
+        if ascii:
+            record = ascii_values[bisect_right(ascii_starts, code) - 1]
+        elif code >= 0x20000:
+            record = high_values[bisect_right(high_starts, code) - 1]
+        else:
+            offset = unpack(first, code >> 5, 16)
+            record = unpack(second, offset + (code & 31), 8)
+        tag = record & 31
+        whitespace = (9 <= code <= 13 or code == 0x20 or code == 0x85 or code == 0xA0
+                      or code == 0x1680 or 0x2000 <= code <= 0x200A
+                      or code in (0x2028, 0x2029, 0x202F, 0x205F, 0x3000))
+        if ascii:
+            upper = 65 <= code <= 90
+            lower = 97 <= code <= 122
+            alpha = letter = upper or lower
+            number = decimal = 48 <= code <= 57
+        else:
+            alpha, upper, lower = (bool(record & bit) for bit in (32, 64, 128))
+            letter = tag <= 4
+            number = 8 <= tag <= 10
+            decimal = tag == 8
+        category = CATEGORIES[categories[code]]
+        expected_alpha = code in derived["Alphabetic"]
+        expected_number = category in ("Nd", "Nl", "No")
+        actual = (tag, alpha, upper, lower, letter, number, decimal, alpha or number, whitespace)
+        expected = (
+            categories[code], expected_alpha, code in derived["Uppercase"],
+            code in derived["Lowercase"], category.startswith("L"), expected_number,
+            category == "Nd", expected_alpha or expected_number, code in props["White_Space"],
+        )
+        if actual != expected:
+            raise ValueError(f"encoded character properties differ from UCD at U+{code:04X}")
 
 
-def verify_case(mappings, runs, multi, expansions):
-    starts = [word >> 11 for word, _ in runs]
-    expansions_by_code = {}
-    for code, packed in multi:
-        start, length = packed >> 4, packed & 15
-        expansions_by_code[code] = tuple(map(ord, expansions[start:start + length].decode("utf-8")))
+def case_trie(actions):
+    level2, level3 = unique_blocks(actions, 16)
+    level1, level2 = unique_blocks(level2, 32)
+    return tuple(packed_words(level, 8) for level in (level1, level2, level3))
+
+
+def verify_case(mappings, cutoff, trie, data, expansion_base, expansions, upper):
+    first, second, third = trie
     for code in scalars():
-        result = expansions_by_code.get(code)
-        if result is None:
-            target = code
-            index = bisect_right(starts, code) - 1
-            if index >= 0:
-                word, delta = runs[index]
-                offset = code - starts[index]
-                length = (word >> 1) & 1023
-                stride = 1 + (word & 1)
-                if offset % stride == 0 and offset // stride < length:
-                    target += delta
-            result = (target,)
-        if result != mappings.get(code, (code,)):
-            raise ValueError(f"encoded case map differs from UCD at U+{code:04X}")
+        if code < (0xB5 if upper else 0xC0):
+            if upper and 97 <= code <= 122:
+                actual = (code - 32,)
+            elif not upper and 65 <= code <= 90:
+                actual = (code + 32,)
+            else:
+                actual = (code,)
+        elif not upper and code == 0x130:
+            actual = (0x69, 0x307)
+        elif code >= cutoff:
+            actual = (code,)
+        else:
+            page = unpack(first, code >> 9, 8)
+            block = unpack(second, (page << 5) + ((code >> 4) & 31), 8)
+            action = unpack(third, (block << 4) + (code & 15), 8)
+            entry = data[action]
+            if action < expansion_base:
+                actual = (code + entry,)
+            else:
+                at, length = entry >> 4, entry & 15
+                actual = tuple(map(ord, expansions[at:at + length].decode("utf-8")))
+        if actual != mappings.get(code, (code,)):
+            direction = "uppercase" if upper else "lowercase"
+            raise ValueError(f"encoded {direction} differs from UCD at U+{code:04X}")
+
+
+def case_tables(mappings, cutoff, upper, check):
+    if not upper:
+        multi = {code: mapped for code, mapped in mappings.items() if len(mapped) != 1}
+        if multi != {0x130: (0x69, 0x307)}:
+            raise ValueError("lowercase must have only the U+0130 expansion")
+    start = 0xB5 if upper else 0xC0
+    deltas = {0: 0}
+    spans = {}
+    expansions = bytearray()
+    actions = bytearray(cutoff)
+    for code, mapped in sorted(mappings.items()):
+        if code >= cutoff or code < start or mapped == (code,):
+            continue
+        if len(mapped) == 1:
+            delta = mapped[0] - code
+            actions[code] = deltas.setdefault(delta, len(deltas))
+    for code, mapped in sorted(mappings.items()):
+        if upper and len(mapped) > 1:
+            text = "".join(map(chr, mapped)).encode("utf-8")
+            if len(text) > 15:
+                raise ValueError("uppercase expansion length exceeds 4 bits")
+            if text not in spans:
+                spans[text] = (len(spans), (len(expansions) << 4) | len(text))
+                expansions.extend(text)
+            actions[code] = len(deltas) + spans[text][0]
+    data = [*deltas, *(span for _, span in spans.values())]
+    trie = case_trie(actions)
+    if check:
+        verify_case(mappings, cutoff, trie, data, len(deltas), expansions, upper)
+    prefix = "UPPER" if upper else "LOWER"
+    declarations = [words(f"{prefix}_L{level}", values) for level, values in enumerate(trie, 1)]
+    if upper:
+        declarations.extend((
+            f"const UPPER_EXPANSION_BASE: u8 = {len(deltas)}",
+            inline("UPPER_DATA", "i32", data),
+            f"const UPPER_EXPANSIONS: String = {text_literal(expansions)}",
+        ))
+    else:
+        declarations.append(inline("LOWER_DELTA", "i32", data))
+    return declarations
 
 
 def generate(files, check):
@@ -196,37 +321,18 @@ def generate(files, check):
     props = properties(files["PropList.txt"], PROPERTIES)
     derived = properties(files["DerivedCoreProperties.txt"], ("Alphabetic", "Lowercase", "Uppercase"))
     verify_properties(categories, props, derived)
-    runs = category_runs(categories)
-    property_ranges = [(name, ranges(points)) for name, points in props.items()]
-    expansions = bytearray()
-    upper_runs, upper_multi = case_tables(upper, expansions)
-    lower_runs, lower_multi = case_tables(lower, expansions)
-    if check:
-        verify_categories(categories, runs, props, property_ranges)
-        verify_case(upper, upper_runs, upper_multi, expansions)
-        verify_case(lower, lower_runs, lower_multi, expansions)
-    char_lines = [
-        NOTICE,
-        f"const CATEGORY_COUNT: u64 = {len(runs)}",
-        inline("CATEGORY_RUNS", "u32", runs),
-        *indexed_tables("PROPERTY_RANGES", "(u32, u32)", [
-            (name.upper(), entries) for name, entries in property_ranges
-        ]),
-    ]
-    expansion_text = "".join(f"\\u{{{ord(value):x}}}" for value in expansions.decode("utf-8"))
+    last = max(code for mapping in (upper, lower) for code, mapped in mapping.items() if mapped != (code,))
+    cutoff = ((last + 512) // 512) * 512
+    if cutoff != 0x1EA00:
+        raise ValueError("unexpected case trie limit for Unicode 18.0.0")
+    char_lines = char_tables(categories, props, derived, check)
     string_lines = [
-        NOTICE,
-        *indexed_tables("CASE_RUNS", "(u32, i32)", [
-            ("UPPER_RUN", upper_runs), ("LOWER_RUN", lower_runs)
-        ]),
-        *indexed_tables("CASE_MULTI", "(u32, u32)", [
-            ("UPPER_MULTI", upper_multi), ("LOWER_MULTI", lower_multi)
-        ]),
-        f'const CASE_EXPANSIONS: String = "{expansion_text}"',
+        f"const CASE_LIMIT: u32 = {hex(cutoff)}",
+        *case_tables(upper, cutoff, True, check),
+        *case_tables(lower, cutoff, False, check),
     ]
     for lines in (char_lines, string_lines):
-        notice, *declarations = lines
-        yield notice + "\n" + "\n\n".join(declarations) + "\n"
+        yield NOTICE + "\n" + "\n\n".join(lines) + "\n"
 
 
 def main():

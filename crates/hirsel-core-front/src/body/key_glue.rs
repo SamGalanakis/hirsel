@@ -2337,11 +2337,10 @@ mod tests {
             .unwrap();
             let f = ensure(&mut m, TypeId(0), KeyOp::Hash).unwrap();
             wf::module(&m).unwrap();
-            assert_eq!(
-                eval::run(&m, f, &[bits], u64::MAX).outcome,
-                eval::Outcome::Returned(vec![want]),
-                "{name}"
-            );
+            let outcome = eval::run_map_hash(&m, f, &[bits], u64::MAX, [0; 16])
+                .0
+                .outcome;
+            assert_eq!(outcome, eval::Outcome::Returned(vec![want]), "{name}");
             assert!(
                 m.functions[f.index()]
                     .body
@@ -2622,7 +2621,7 @@ mod tests {
             );
             let m = text::parse(&fixture).unwrap();
             wf::module(&m).unwrap();
-            let run = eval::run(&m, FuncId(f as u32), &[], 0);
+            let run = eval::run_map_hash(&m, FuncId(f as u32), &[], 0, [0; 16]).0;
             assert_eq!(run.outcome, eval::Outcome::Returned(vec![want]), "{types}");
             assert_eq!(run.used, 0);
         }
@@ -2827,7 +2826,7 @@ mod located_order_tests {
                 };
                 let m = text::parse(&source).unwrap();
                 wf::module(&m).unwrap();
-                let run = eval::run(&m, FuncId(row as u32), &[], 0);
+                let run = eval::run_map_hash(&m, FuncId(row as u32), &[], 0, [0; 16]).0;
                 assert_eq!(run.used, 0);
                 match run.outcome {
                     eval::Outcome::Returned(v) => v[0],

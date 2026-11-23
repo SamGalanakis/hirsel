@@ -30,9 +30,9 @@ output directory must be new and outside the checkout.
   of paired samples with `--repeats`. Full defaults to one pair per regime
   point. The measurement wait defaults to 30 minutes for quick and four
   hours for full. `--deadline-seconds` overrides that bound after builds.
-- Before taking the locks, the runner samples `/proc/stat` for one second
-  and requires every server CPU to be under 5% busy. The controller takes
-  the regime lock before the board lock and releases both after the timed
+- Before taking the locks, the runner samples task runtime from `/proc/schedstat`
+  for one second and requires every server and load CPU to be under 5% busy.
+  The controller takes the regime lock before the board lock and releases both after the timed
   pair. Holds avoid 02:45–04:00 local time and are separated by at least
   15 seconds. The runner records host load and `pgrep -x cc1plus` at both
   boundaries. Neither reading is an admission or discard rule.

@@ -25,31 +25,26 @@ SWITCH = re.compile(
 )
 
 
-def cpu_ticks(cpus):
+def cpu_runtime_ns(cpus):
     wanted = set(cpus)
     rows = {}
-    for line in Path("/proc/stat").read_text().splitlines():
+    for line in Path("/proc/schedstat").read_text().splitlines():
         name, *values = line.split()
-        if not name.startswith("cpu") or not name[3:].isdigit() or int(name[3:]) not in wanted:
-            continue
-        user, nice, system, idle, iowait, irq, softirq, steal, *_ = map(int, values)
-        busy = user + nice + system + irq + softirq + steal
-        rows[int(name[3:])] = (busy, busy + idle + iowait)
+        if name.startswith("cpu") and name[3:].isdigit() and int(name[3:]) in wanted:
+            # The seventh CPU field is cumulative task runtime in nanoseconds.
+            rows[int(name[3:])] = int(values[6])
     if rows.keys() != wanted:
-        raise RuntimeError("server CPUs missing from /proc/stat")
+        raise RuntimeError("measurement CPUs missing from /proc/schedstat")
     return rows
 
 
 def idle_sample(cpus):
-    start = cpu_ticks(cpus)
+    start = cpu_runtime_ns(cpus)
+    started = time.monotonic_ns()
     time.sleep(1)
-    end = cpu_ticks(cpus)
-    busy = {}
-    for cpu in cpus:
-        busy_ticks = end[cpu][0] - start[cpu][0]
-        total_ticks = end[cpu][1] - start[cpu][1]
-        busy[cpu] = busy_ticks / total_ticks if total_ticks else 1
-    return busy
+    end = cpu_runtime_ns(cpus)
+    elapsed = time.monotonic_ns() - started
+    return {cpu: (end[cpu] - start[cpu]) / elapsed for cpu in cpus}
 
 
 def board_window_open():
@@ -109,7 +104,7 @@ def record_tasks(path, cpus):
                     os.close(fd)
 
 
-def classify_tasks(path, cpu_sets, windows, start, end, busy_ticks):
+def classify_tasks(path, cpu_sets, windows, start, end, busy_ns):
     """Charge each sched-switch interval to the arm and CPU set it overlaps."""
     cpus = set(cpu_sets["server"]) | set(cpu_sets["load"])
     seen = [Counter() for _ in windows]
@@ -147,7 +142,7 @@ def classify_tasks(path, cpu_sets, windows, start, end, busy_ticks):
 
     for cpu, (timestamp, pid, command) in running.items():
         account(cpu, pid, command, timestamp, end)
-    unobserved = sorted(cpu for cpu in cpus if cpu not in running and busy_ticks.get(cpu, 0))
+    unobserved = sorted(cpu for cpu in cpus if cpu not in running and busy_ns.get(cpu, 0))
     arms = {}
     for arm, intervals in zip(windows, seen, strict=True):
         owned = set(arm["pids"])
@@ -212,19 +207,19 @@ def hold(receipt, *, cpu_sets, output, lock_paths, gap, compiler_processes):
                        load_start=os.getloadavg()[0], cc1plus_start=compiler_processes())
         try:
             with record_tasks(trace, observed):
-                before = cpu_ticks(observed)
+                before = cpu_runtime_ns(observed)
                 receipt["timed_start_ns"] = time.monotonic_ns()
                 try:
                     yield True
                 finally:
                     receipt["timed_end_ns"] = time.monotonic_ns()
-                    after = cpu_ticks(observed)
-                    receipt["busy_ticks"] = {cpu: after[cpu][0] - before[cpu][0] for cpu in observed}
+                    after = cpu_runtime_ns(observed)
+                    receipt["busy_ns"] = {cpu: after[cpu] - before[cpu] for cpu in observed}
         finally:
             receipt.update(hold_s=time.monotonic() - started, load_end=os.getloadavg()[0],
                            finished=datetime.now().astimezone().isoformat(),
                            cc1plus_end=compiler_processes())
     receipt.update(classify_tasks(trace, cpu_sets, receipt["arm_windows"],
-                                  receipt["timed_start_ns"], receipt["timed_end_ns"], receipt["busy_ticks"]))
+                                  receipt["timed_start_ns"], receipt["timed_end_ns"], receipt["busy_ns"]))
     receipt["clean"] = (receipt["hold_s"] < MEASUREMENT_SECONDS and bool(receipt["arm_cpu"])
                         and all(arm["admitted"] for arm in receipt["arm_cpu"].values()))

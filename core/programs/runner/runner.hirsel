@@ -99,32 +99,13 @@ fn launch_word(field: u64, index: u64) -> u64 { 0u64 }
 fn launch_socket() -> Option[Socket] { None }
 fn launch_scratch() -> Option[Dir] { None }
 
-fn launch_digest() -> Result[Bytes, Capacity] {
-    let len = launch_word(1u64, 0u64)
-    let mut digest: Bytes = list.with_capacity(len)
-    for i in 0u64..len {
-        list.push(mut digest, int.narrow(launch_word(2u64, i)))
-    }
-    Ok(take digest)
-}
-
 fn launch_text(a: Args) -> View[String] in a { "" }
 
-fn launch_target(a: Args) -> String {
-    string.from(launch_text(a))
-}
-
-fn launch_owned_target() -> Result[String, Capacity] {
-    let count = launch_word(3u64, 0u64)
-    let mut text_bytes: Bytes = list.with_capacity(count)
-    for index in 0u64 .. count {
-        list.push(mut text_bytes, int.narrow(launch_word(4u64, index)))
-    }
-    Ok(result.unwrap(string.from_utf8(take text_bytes)))
-}
+fn launch_target(a: Args) -> String { string.from(launch_text(a)) }
 
 pub fn status_root() -> Result[Latest[Status], Capacity] {
-    let initial = Status(phase: Starting(Recovering), digest: launch_digest()?, target: launch_owned_target()?, n_place: launch_word(0u64, 0u64), release: list.new(), activation: 0u64, store_id: (0u64, 0u64), retain_from: 0u64, addr: None)
+    let launch = launch_env()
+    let initial = Status(phase: Starting(Recovering), digest: launch_bytes(launch.digest), target: owned_launch_target(launch.target), n_place: launch.n_place, release: list.new(), activation: 0u64, store_id: (0u64, 0u64), retain_from: 0u64, addr: None)
     let shared = arc.new(take initial)
     Ok(latest.new(take shared))
 }
@@ -264,9 +245,10 @@ pub fn operate_bytes[G: send, H: send, S: send, B: send](p: PlaceConfig[G, H, S,
 }
 
 pub fn operate[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, B], take stop: Receiver[()], status: Latest[Status], take watching: Option[Sender[Receiver[Phase]]]) -> Result[Ended, StartError] waits {
-    if launch_word(9u64, 0u64) != 0u64 { return operate_prepare(take p) }
-    if launch_word(15u64, 0u64) != 0u64 {
-        let result = operate_install(take p, InstallAt(launch_word(15u64, 1u64)), launch_word(0u64, 0u64))
+    let launch = launch_env()
+    if let Some((attempt, image)) = launch.prepare { return operate_prepare(take p, launch.n_place, attempt, image) }
+    if let Some(version) = launch.install {
+        let result = operate_install(take p, InstallAt(version), launch.n_place)
         return finish_install(take result)
     }
     let installing = match p.selection { Install => true, InstallAt(_) => true, _ => false }
@@ -276,23 +258,22 @@ pub fn operate[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, 
         let _ = operate_install(take p, selection, configured)?
         return Ok(Unstarted)
     }
-    let launch_idle = launch_word(13u64, 0u64)
     if p.idle == Some(0u64) { return Error(Missing("idle")) }
     if p.stop.grace_ms == 0u64 { return Error(Missing("grace_ms")) }
     let PlaceConfig(backing: take backing, selection: selection, place: place, migrate: migrate, handles: handles, n_place: configured, n_publisher: n_publisher,
         session: wire_config, max_sessions: limit, proxies: take proxies,
         listen: listen, net: net, tasks: tasks, clock: clock, random: random, stop: stop_config, wire: take supplied_wire, triggers: take trigger_config, idle: configured_idle) = take p
-    let idle = if launch_idle != 0u64 { Some(launch_idle) } else { configured_idle }
+    let idle = match launch.idle { Some(ms) => Some(ms), None => configured_idle }
     // One n_place serves the place (§6 "One n_place"): the launch's under a host, otherwise
     // PlaceConfig.n_place, which the wire configuration must repeat.
     let hosted = !none(launch_scratch())
     if !hosted && wire_config.n_place != configured {
         return Error(Disagrees(Differ(name: string.from("session.n_place"), given: wire_config.n_place, used: configured)))
     }
-    let n_place = if hosted { launch_word(0u64, 0u64) } else { configured }
+    let n_place = if hosted { launch.n_place } else { configured }
     let mut session_config = wire_config
     session_config.n_place = n_place
-    if let Some(take problem) = session_problem(session_config, limit) { return Error(take problem) }
+    if let Some(take problem) = session_problem(session_config, limit, launch.target.size) { return Error(take problem) }
     let watch = status_watch(take watching)?
     let mut current = copy_status(latest.read(status))
     current.n_place = n_place
@@ -326,7 +307,7 @@ pub fn operate[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, 
     let cut = latest.handle(activity.root)
     let head_job = ManagedHead(backing: take backing, selection: selection, tasks: tasks, clock: clock, random: random, place: place, migrate: migrate, handles: handles,
         n_place: n_place, n_publisher: n_publisher, inbox: take inbox_head, finish_from: take finish_from, to: channel.sender(to), drain: latest.handle(drain),
-        head_to: channel.sender(head_to), cut: take activity, triggering: take trigger_config, idle: idle)
+        head_to: channel.sender(head_to), cut: take activity, triggering: take trigger_config, idle: idle, expected_store: launch.store_id)
     let head_run: fn(take ManagedHead[G, H, S]) -> () waits = head_ended
     // The head is the place's largest task; a root limit too small for it is a resource
     // failure that names the bytes, not a fault at this line.
@@ -649,21 +630,15 @@ fn finish_install(take result: Result[u64, StartError]) -> Result[Ended, StartEr
     match take result { Ok(_) => Ok(Unstarted), Error(take problem) => Error(take problem) }
 }
 
-fn prepare_bytes(field: u64, size: u64) -> Result[Bytes, StartError] {
-    let mut value: Bytes = list.with_capacity(size)
-    for i in 0u64 .. size { list.push(mut value, int.narrow(launch_word(field, i))) }
-    Ok(take value)
-}
-
-fn operate_prepare[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, B]) -> Result[Ended, StartError] waits {
+fn operate_prepare[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, B], n_place: u64, attempt: LaunchBytes, image: LaunchBytes) -> Result[Ended, StartError] waits {
     let PlaceConfig(backing: take backing, place: place, migrate: migrate, handles: handles, clock: clock, tasks: tasks, triggers: take config, ..) = take p
     let (scratch, options) = match backing { Disk(scratch, options) => (scratch, options), _ => return Error(Missing("scratch")) }
     let entries = match take config {
         Some(TriggerConfig(entries: take listed, ..)) => take listed,
         None => triggers.empty_entries(),
     }
-    let setup = PrepareConfig(scratch: scratch, options: clone(options), attempt: prepare_bytes(10u64, 16u64)?, image_digest: prepare_bytes(11u64, 32u64)?,
-        clock: clock, tasks: tasks, n_place: launch_word(0u64, 0u64), place: place, migrate: migrate, handles: handles, triggers: take entries)
+    let setup = PrepareConfig(scratch: scratch, options: clone(options), attempt: launch_bytes(attempt), image_digest: launch_bytes(image),
+        clock: clock, tasks: tasks, n_place: n_place, place: place, migrate: migrate, handles: handles, triggers: take entries)
     match prepare_deploy(setup) {
         Ok(()) => Ok(Unstarted),
         Error(Open(take problem)) => Error(Open(take problem)),
@@ -922,12 +897,8 @@ pub type ReleaseManifest: codec + send {
     recipe: Bytes
 }
 
-fn preview_old_entries() -> Result[List[Exported], RegisterError] {
-    let count = launch_word(7u64, 0u64)
-    let mut payload: Bytes = list.with_capacity(count)
-    for i in 0u64 .. count {
-        list.push(mut payload, int.narrow(launch_word(8u64, i)))
-    }
+fn preview_old_entries(old: LaunchBytes) -> Result[List[Exported], RegisterError] {
+    let payload = launch_bytes(old)
     let codec: std.codec.Codec[List[Exported]] = std.codec.of_list()
     match std.codec.decode(codec, payload) {
         Ok(take entries) => Ok(take entries),
@@ -935,8 +906,8 @@ fn preview_old_entries() -> Result[List[Exported], RegisterError] {
     }
 }
 
-fn preview_answers[G: send, H: send](r: Registry[G, H]) -> Result[List[Entry], RegisterError] {
-    let old = preview_old_entries()?
+fn preview_answers[G: send, H: send](r: Registry[G, H], previous: LaunchBytes) -> Result[List[Entry], RegisterError] {
+    let old = preview_old_entries(previous)?
     let mut answers: List[Entry] = list.with_capacity(list.len(old))
     for i in 0u64 .. list.len(old) {
         let row = view old[i]
@@ -968,15 +939,10 @@ fn encode_describe(description: Describe) -> Result[Bytes, std.codec.EncodeError
     Ok(take out)
 }
 
-fn describe_registered[G: send, H: send](a: Args, take r: Registry[G, H]) -> Result[Bytes, RegisterError] {
-    let preview = if launch_word(6u64, 0u64) != 0u64 { Some(preview_answers(r)?) } else { None }
+fn describe_registered[G: send, H: send](launch: LaunchEnv, take r: Registry[G, H]) -> Result[Bytes, RegisterError] {
+    let preview = match launch.preview { Some(old) => Some(preview_answers(r, old)?), None => None }
     let Registry(exported: take exported, ..) = take r
-    let digest = match launch_digest() {
-        Ok(take digest) => take digest,
-        Error(c) => return Error(Full(c)),
-    }
-    let target = launch_target(a)
-    let description = Describe(digest: take digest, target: take target, n_place: launch_word(0u64, 0u64), exported: take exported)
+    let description = Describe(digest: launch_bytes(launch.digest), target: owned_launch_target(launch.target), n_place: launch.n_place, exported: take exported)
     if let Some(take answers) = take preview { return encode_preview(take description, take answers) }
     Ok(encode_describe(description) ?=> |_| Bounds)
 }
@@ -1035,22 +1001,23 @@ pub fn launch_selection(a: Args) -> Result[Selection, Exit] {
 
 fn prepare_activation[G: send, H: send](r: Registry[G, H], n_place: u64) -> Result[(Bytes, ReleaseRecord), RegisterError] {
     let release = release_digest(r.exported) ?=> |_| Bounds
-    let image = launch_digest() ?=> Full
-    let target = launch_owned_target() ?=> Full
+    let launch = launch_env()
+    let image = launch_bytes(launch.digest)
+    let target = owned_launch_target(launch.target)
     let description = Describe(digest: take image, target: take target, n_place: n_place, exported: clone(r.exported))
     let payload = encode_describe(description) ?=> |_| Bounds
     let Describe(digest: take digest, ..) = take description
     Ok((take payload, ReleaseRecord(release: take release, digest: take digest)))
 }
 
-fn describe_response[G: send, H: send](a: Args, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]]) -> Result[Bytes, RegisterError] {
+fn describe_response[G: send, H: send](launch: LaunchEnv, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]]) -> Result[Bytes, RegisterError] {
     let run = code.callable(place)
     // The isolate's cause cell belongs to the parent, outside n_place.
     let ran = isolate(scoped fn() -> Result[Result[Bytes, RegisterError], Capacity] {
-        bound bytes launch_word(0u64, 0u64) {
+        bound bytes launch.n_place {
             let mut r: Registry[G, H] = registry()
             match run(mut r) {
-                Ok(()) => describe_registered(a, take r),
+                Ok(()) => describe_registered(launch, take r),
                 Error(take e) => Error(take e),
             }
         }
@@ -1190,7 +1157,8 @@ pub fn start_text(problem: StartError) -> String {
     take line
 }
 
-pub fn main[G: send, H: send](a: Args, process: Process, errors: Stderr, tasks: Tasks, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], start_server: scoped fn(take Receiver[()]) -> Result[Ended, MainError] waits) -> Result[(), Exit] waits {
+pub fn main[G: send, H: send](_a: Args, process: Process, errors: Stderr, tasks: Tasks, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], start_server: scoped fn(take Receiver[()]) -> Result[Ended, MainError] waits) -> Result[(), Exit] waits {
+    let launch = launch_env()
     let serving = scoped fn() -> Result[(), Exit] waits {
         let full = Exit(status: 1u8)
         let (to, from): (Sender[()], Receiver[()]) = channel.new(1u64)
@@ -1201,7 +1169,7 @@ pub fn main[G: send, H: send](a: Args, process: Process, errors: Stderr, tasks: 
         let _ = task.join(take waiting)
         match take ended {
             Ok(Stopped(due)) => {
-                if launch_word(12u64, 0u64) != 0u64 {
+                if launch.wake {
                     let codec: std.codec.Codec[Option[u64]] = std.codec.of()
                     let mut report: Bytes = list.with_capacity(12u64)
                     if let Error(_) = std.codec.encode(codec, due, mut report) { return Error(full) }
@@ -1226,16 +1194,20 @@ pub fn main[G: send, H: send](a: Args, process: Process, errors: Stderr, tasks: 
             Error(Usage(exit)) => Error(exit),
         }
     }
-    launch_server(a, place, serving)
+    launch_with(launch, place, serving)
 }
 
 // The first branch precedes the caller's ordinary serve callback, including its
 // store open, listener and every capability use. No n_place runtime argument.
-pub fn launch_server[G: send, H: send](a: Args, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], start_server: scoped fn() -> Result[(), Exit] waits) -> Result[(), Exit] waits {
-    if launch_word(5u64, 0u64) == 0u64 {
+pub fn launch_server[G: send, H: send](_a: Args, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], start_server: scoped fn() -> Result[(), Exit] waits) -> Result[(), Exit] waits {
+    launch_with(launch_env(), place, start_server)
+}
+
+fn launch_with[G: send, H: send](launch: LaunchEnv, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], start_server: scoped fn() -> Result[(), Exit] waits) -> Result[(), Exit] waits {
+    if !launch.describe {
         return start_server()
     }
-    match describe_response(a, place) {
+    match describe_response(launch, place) {
         Ok(take payload) => if launch_emit(payload) { Ok(()) } else { Error(Exit(status: 1u8)) },
         Error(take e) => {
             let error: DescribeError = match take e {
@@ -2905,7 +2877,7 @@ type ManagedHead[G: send, H: send, S: send]: send {
     n_place: u64, n_publisher: u64, inbox: Receiver[HeadInput], finish_from: Receiver[()],
     to: Sender[LifeEvent], drain: Latest[Option[DrainWindow]],
     head_to: Sender[HeadInput], cut: CutActivity,
-    triggering: Option[TriggerConfig[G, S]], idle: Option[u64],
+    triggering: Option[TriggerConfig[G, S]], idle: Option[u64], expected_store: Option[(u64, u64)],
 }
 
 fn head_advance(to: Sender[LifeEvent], inbox: Receiver[HeadInput], take progress: LifeEvent) -> bool waits {
@@ -2939,12 +2911,11 @@ fn open_backing(take backing: Backing, tasks: Tasks, clock: Clock, random: Rando
 fn managed_head[G: send, H: send, S: send](take job: ManagedHead[G, H, S]) -> Result[Option[u64], StartError] waits {
     let ManagedHead(backing: take backing, selection: selection, tasks: tasks, clock: clock, random: random, place: place, migrate: migrate, handles: handles,
         n_place: n_place, n_publisher: n_publisher, inbox: take inbox, finish_from: take finish_from, to: take to, drain: take drain,
-        head_to: take head_to, cut: take cut, triggering: take triggering, idle: idle) = take job
+        head_to: take head_to, cut: take cut, triggering: take triggering, idle: idle, expected_store: expected_store) = take job
     let persistent = match backing { Disk(_, _) => true, _ => false }
     let (take opened, take temporary) = open_backing(take backing, tasks, clock, random)?
     let mut db = take opened
-    if launch_word(14u64, 0u64) != 0u64 {
-        let expected = (launch_word(14u64, 1u64), launch_word(14u64, 2u64))
+    if let Some(expected) = expected_store {
         let actual = store.identity_words(db)
         if expected != actual {
             let _ = close_store(take db)
@@ -3027,7 +2998,7 @@ fn head_prepare[G: send, H: send](mut db: store.Db, selection: Selection, persis
             },
         },
     }
-    if persistent && selected == None && launch_word(1u64, 0u64) == 0u64 { return Error(IdentityUnknown) }
+    if persistent && selected == None && launch_image().size == 0u64 { return Error(IdentityUnknown) }
     let mut reg = match placed(place, n_place) { Ok(take reg) => take reg, Error(take problem) => return Error(Place(take problem)) }
     let (description, record) = prepare_activation(reg, n_place) ?=> Place
     if let Some(version) = selected {
@@ -5336,22 +5307,22 @@ fn wire_variable_peak(c: WireConfig) -> u64 {
     input + transport + retained + wire_service_job_bytes(c) + 32768u64
 }
 
-fn wire_configuration(c: WireConfig) -> bool { none(wire_problem(c)) }
+fn wire_configuration(c: WireConfig) -> bool { none(wire_problem(c, launch_target_bytes().size)) }
 
 fn exceeds(name: String, value: u64, limit: u64) -> Option[StartError] {
     Some(Exceeds(Bound(name: clone(name), value: value, limit: limit)))
 }
 
-fn session_problem(c: WireConfig, max_sessions: u64) -> Option[StartError] {
+fn session_problem(c: WireConfig, max_sessions: u64, target_size: u64) -> Option[StartError] {
     if max_sessions == 0u64 { return Some(Missing("max_sessions")) }
     if max_sessions > WIRE_OWNER_LIMIT { return exceeds("max_sessions", max_sessions, WIRE_OWNER_LIMIT) }
-    wire_problem(c)
+    wire_problem(c, target_size)
 }
 
 // The first WireConfig setting a session cannot run with. A session's variable peak
 // counts n_place twice (retained state and the service job), so the largest n_place
 // that fits is half of what the ceiling leaves after every other term.
-fn wire_problem(c: WireConfig) -> Option[StartError] {
+fn wire_problem(c: WireConfig, target_size: u64) -> Option[StartError] {
     if c.q > 4u64 { return exceeds("q", c.q, 4u64) }
     if c.socket.max_frame > 262144u64 { return exceeds("socket.max_frame", c.socket.max_frame, 262144u64) }
     if c.socket.pending_max > 1024u64 { return exceeds("socket.pending_max", c.socket.pending_max, 1024u64) }
@@ -5371,7 +5342,7 @@ fn wire_problem(c: WireConfig) -> Option[StartError] {
     }
     // Welcome carries one issuer byte, at most SUBJECT_MAX subject bytes and a 32-byte digest.
     // The launch target belongs to this run, so its size is known at serve.
-    let welcome = 69u64 + SUBJECT_MAX + launch_word(3u64, 0u64)
+    let welcome = 69u64 + SUBJECT_MAX + target_size
     let mandatory = if welcome > 125u64 { welcome } else { 125u64 }
     let floor = std.order.max(mandatory, wire_outcome_reserve(c) + 28u64)
     if c.socket.max_frame < floor { return Some(Missing("socket.max_frame (below the Welcome and outcome frames)")) }

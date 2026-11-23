@@ -35,7 +35,7 @@ fn private_runner_launch_hook_is_lowered_and_evaluated() {
     let directory = tempfile::tempdir().unwrap();
     let runner = include_str!("../../../core/programs/runner/runner.hirsel");
     let source = format!(
-        "{runner}\npub fn probe(a: Args) -> u64 {{\n let d = result.unwrap(launch_digest())\n let t = launch_target(a)\n launch_word(0u64, 0u64) + list.len(d) + string.byte_len(t)\n}}\n"
+        "{runner}\npub fn probe(a: Args) -> u64 {{\n let d = result.unwrap(launch_digest())\n let t = launch_target(a)\n launch_env().n_place + list.len(d) + string.byte_len(t)\n}}\n"
     );
     let path = directory.path().join("runner.hirsel");
     std::fs::write(&path, source).unwrap();
@@ -92,7 +92,7 @@ fn runner_launch_fixture(directory: &Path, runner_override: Option<&Path>) -> Ar
         let source = runner
             .sources
             .iter_mut()
-            .find(|source| source.modules == ["runner"])
+            .find(|source| source.file.ends_with("runner.hirsel"))
             .unwrap();
         source.file = path.to_owned();
         source.captured = None;
@@ -175,9 +175,9 @@ fn store_opened_in_describe_mutant_is_caught_by_the_launch_law() {
     let directory = tempfile::tempdir().unwrap();
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let source = std::fs::read_to_string(root.join("core/programs/runner/runner.hirsel")).unwrap();
-    let marker = "    if launch_word(5u64, 0u64) == 0u64 {";
+    let marker = "    if !launch.describe {";
     assert!(source.contains(marker));
-    let mutant = source.replacen(marker, "    if launch_word(5u64, 0u64) != 0u64 { return start_server() }\n    if launch_word(5u64, 0u64) == 0u64 {", 1);
+    let mutant = source.replacen(marker, "    if true {", 1);
     let path = directory.path().join("runner-mutant.hirsel");
     std::fs::write(&path, mutant).unwrap();
     let product = runner_launch_fixture(directory.path(), Some(&path));

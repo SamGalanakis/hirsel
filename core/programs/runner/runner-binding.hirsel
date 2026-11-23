@@ -116,3 +116,48 @@ fn invalidate_idle(mut state: IdleState) {
         _ => IdleWaiting,
     }
 }
+
+// The runtime exposes immutable launch words. Variable-length payloads are
+// allocated only by the operation that uses them, under that operation's bound.
+type LaunchBytes { field: u64, size: u64 }
+
+type LaunchEnv {
+    n_place: u64,
+    digest: LaunchBytes,
+    target: LaunchBytes,
+    describe: bool,
+    preview: Option[LaunchBytes],
+    prepare: Option[(LaunchBytes, LaunchBytes)],
+    wake: bool,
+    idle: Option[u64],
+    store_id: Option[(u64, u64)],
+    install: Option[u64],
+}
+
+fn launch_env() -> LaunchEnv {
+    let preview = if launch_word(6u64, 0u64) != 0u64 { Some(LaunchBytes(field: 8u64, size: launch_word(7u64, 0u64))) } else { None }
+    let prepare_mode = if launch_word(9u64, 0u64) != 0u64 { Some((LaunchBytes(field: 10u64, size: 16u64), LaunchBytes(field: 11u64, size: 32u64))) } else { None }
+    let idle_ms = launch_word(13u64, 0u64)
+    let idle: Option[u64] = if idle_ms == 0u64 { None } else { Some(idle_ms) }
+    let store_id = if launch_word(14u64, 0u64) != 0u64 { Some((launch_word(14u64, 1u64), launch_word(14u64, 2u64))) } else { None }
+    let install_at = if launch_word(15u64, 0u64) != 0u64 { Some(launch_word(15u64, 1u64)) } else { None }
+    LaunchEnv(n_place: launch_word(0u64, 0u64), digest: launch_image(), target: launch_target_bytes(),
+        describe: launch_word(5u64, 0u64) != 0u64, preview: preview, prepare: prepare_mode, wake: launch_word(12u64, 0u64) != 0u64,
+        idle: idle, store_id: store_id, install: install_at)
+}
+
+fn launch_image() -> LaunchBytes { LaunchBytes(field: 2u64, size: launch_word(1u64, 0u64)) }
+
+fn launch_target_bytes() -> LaunchBytes { LaunchBytes(field: 4u64, size: launch_word(3u64, 0u64)) }
+
+fn launch_bytes(payload: LaunchBytes) -> Bytes {
+    let mut raw: Bytes = list.with_capacity(payload.size)
+    for i in 0u64 .. payload.size { list.push(mut raw, int.narrow(launch_word(payload.field, i))) }
+    take raw
+}
+
+fn launch_digest() -> Result[Bytes, Capacity] { Ok(launch_bytes(launch_image())) }
+
+fn owned_launch_target(target: LaunchBytes) -> String {
+    result.unwrap(string.from_utf8(launch_bytes(target)))
+}

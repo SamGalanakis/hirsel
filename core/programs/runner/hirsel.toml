@@ -10,6 +10,7 @@ store = { major = 1, path = "../store" }
 [sources]
 "runner.hirsel" = "runner"
 "runner-binding.hirsel" = "runner"
+"runner-reexec.hirsel" = "runner"
 "triggers.hirsel" = "triggers"
 "steps.hirsel" = "steps"
 "ingress.hirsel" = "ingress"
@@ -26,6 +27,7 @@ dirs = ["."]
 "steps_laws.hirsel" = "steps"
 "signup.hirsel" = "signup"
 "runner_laws.hirsel" = "runner_laws"
+"runner_reexec_laws.hirsel" = "runner"
 "runner_calls.hirsel" = "runner_calls"
 "runner-idle-law.hirsel" = "runner_calls"
 "session-laws.hirsel" = "runner"

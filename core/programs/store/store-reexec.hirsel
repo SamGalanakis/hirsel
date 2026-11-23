@@ -266,39 +266,68 @@ fn same_writes(rows: DataRows, committed: List[JournalOp]) -> Result[bool, Error
     Ok(true)
 }
 
-// RUNNER-SPEC §7: re-executes the call recorded at version `v` of `b` with
-// `body` on a private copy of its base, under the recorded run's CallInfo,
-// and compares the reply and the data writes with the committed ones.
-// For a fault settled by conclude, compare the re-run's `failed(stop)`.
-pub fn reexecute(db: Db, b: Branch, v: u64, plan: Plan, failed: scoped fn(Stop) -> Bytes, body: scoped[view] fn(Recorded, mut Tx) -> Result[Bytes, Bytes]) -> Result[Verdict, Error] waits {
+type ReplaySource { commit: JournalCommit, call: Recorded, base: Roots }
+
+fn replay_source(db: Db, b: Branch, v: u64) -> Result[Result[ReplaySource, UnknownReason], Error] waits {
     let Some(commit) = recorded_commit(db, b, v)? else {
-        return Ok(Unknown(StateGone))
+        return Ok(Error(StateGone))
     }
     let Some(call) = recorded_call(db.store, b, commit) else {
-        return Ok(Unknown(NotRecorded))
+        return Ok(Error(NotRecorded))
     }
     if call.settle == 2 {
-        return Ok(Unknown(AdmissionRefused))
+        return Ok(Error(AdmissionRefused))
     }
-    let Some(stored) = recorded_reply(commit, call.record.stream) else {
-        return Ok(Unknown(NotRecorded))
+    if let None = recorded_reply(commit, call.record.stream) {
+        return Ok(Error(NotRecorded))
     }
     let Some(base) = base_roots(db, b, call.base)? else {
-        return Ok(Unknown(StateGone))
+        return Ok(Error(StateGone))
     }
-    let ci = CallInfo(id: CallId(store: db.store, branch: b.id, version: call.base + 1), at: call.at, seed: call.seed)
-    let reran = rerun(db, base, ci, plan, call, body)
+    Ok(Ok(ReplaySource(commit: take commit, call: take call, base: take base)))
+}
+
+// RUNNER-SPEC §7: run on a private copy of the attempted base, under the
+// original CallInfo, and compare the committed reply and writes.
+fn replay_run(db: Db, source: ReplaySource, plan: Plan, failed: scoped fn(Stop) -> Bytes, body: scoped[view] fn(Recorded, mut Tx) -> Result[Bytes, Bytes]) -> Result[Verdict, Error] {
+    let call = view source.call
+    let ci = CallInfo(id: CallId(store: db.store, branch: call.branch.id, version: call.base + 1), at: call.at, seed: call.seed)
+    let reran = rerun(db, source.base, ci, plan, call, body)
     let (take output, take writes) = match (call.settle, take reran) {
         (0, RanTo(take output, take writes)) => (take output, take writes),
         (1, Halted(stop)) => (failed(stop), new_data_rows()),
         (_, RoomRefused) => return Ok(Unknown(AdmissionRefused)),
         _ => return Ok(Different(Reply)),
     }
+    let stored = option.unwrap(recorded_reply(source.commit, call.record.stream))
     if list.len(stored) != 41 + list.len(output) || !list.starts_with_at(stored, 41, output) {
         return Ok(Different(Reply))
     }
-    if !same_writes(writes, commit.data)? {
+    if !same_writes(writes, source.commit.data)? {
         return Ok(Different(Writes))
     }
     Ok(Same)
+}
+
+pub fn reexecute(db: Db, b: Branch, v: u64, plan: Plan, failed: scoped fn(Stop) -> Bytes, body: scoped[view] fn(Recorded, mut Tx) -> Result[Bytes, Bytes]) -> Result[Verdict, Error] waits {
+    match take replay_source(db, b, v)? {
+        Ok(take source) => replay_run(db, source, plan, failed, body),
+        Error(reason) => Ok(Unknown(reason)),
+    }
+}
+
+// Select the plan and open fresh handles on the same historical schema the
+// re-execution will read. Preparation runs outside the recorded entry's bounds.
+pub fn reexecute_with[E](db: Db, b: Branch, v: u64, store_error: scoped fn(take Error) -> E, failed: scoped fn(Stop) -> Bytes,
+    prepare: scoped fn(Recorded, Schema, scoped fn(Plan, scoped[view] fn(Recorded, mut Tx) -> Result[Bytes, Bytes]) -> Result[Verdict, Error]) -> Result[Verdict, E]) -> Result[Verdict, E] waits {
+    let loaded = replay_source(db, b, v) ?=> |e| store_error(take e)
+    let source = match take loaded {
+        Ok(take source) => take source,
+        Error(reason) => return Ok(Unknown(reason)),
+    }
+    let schema = Schema(store: db.store, catalog: share_page_tree(source.base.catalog))
+    let rerun_selected = scoped fn(plan: Plan, body: scoped[view] fn(Recorded, mut Tx) -> Result[Bytes, Bytes]) -> Result[Verdict, Error] {
+        replay_run(db, source, plan, failed, body)
+    }
+    prepare(source.call, schema, rerun_selected)
 }

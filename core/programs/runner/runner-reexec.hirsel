@@ -1,0 +1,61 @@
+pub type ReplayMode = RecordedCode | Candidate
+
+// CALL's code (RUNNER-SPEC §7): u64 n ‖ u64 s, big-endian, then the replay identity.
+fn code_bytes(n: u64, s: u64, replay_identity: Bytes) -> Result[Bytes, Capacity] {
+    let mut raw: Bytes = list.with_capacity(16 + list.len(replay_identity))
+    be_word(mut raw, n, 8)?
+    be_word(mut raw, s, 8)?
+    list.append(mut raw, replay_identity)
+    Ok(take raw)
+}
+
+fn recorded_stream_caller(key: Bytes) -> Option[Caller] {
+    if list.len(key) < 6u64 { return None }
+    let n: u64 = int.widen(key[1u64])
+    if n > SUBJECT_MAX || list.len(key) != n + 6u64 { return None }
+    let subject: Bytes = clone(list.slice(key, 2u64, n + 2u64))
+    Some(store.Caller(issuer: key[0u64], subject: take subject))
+}
+
+// Re-execute a recorded transact against its original base without publishing writes.
+pub fn reexecute[G: send, H: send](db: store.Db, branch: store.Branch, version: u64, mode: ReplayMode,
+    place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64,
+    migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits],
+    handles: StaticFn[fn(store.Schema) -> Result[H, store.Error]]) -> Result[store.Verdict, OpenError] waits {
+    store.reexecute_with(db, branch, version, scoped fn(take e: store.Error) -> OpenError { Store(take e) }, replay_fault,
+        scoped fn(recorded_entry: store.Recorded, schema: store.Schema,
+            run: scoped fn(store.Plan, scoped[view] fn(store.Recorded, mut store.Tx) -> Result[Bytes, Bytes]) -> Result[store.Verdict, store.Error]) -> Result[store.Verdict, OpenError] {
+            let recorded_code = view recorded_entry.record.code
+            if let RecordedCode = mode {
+                let identity = activation_identity(code.identity(place), code.identity(migrate), code.identity(handles))?
+                if list.len(identity) == 0u64 || list.len(recorded_code) != 16u64 + list.len(identity) ||
+                    !list.starts_with_at(recorded_code, 16u64, identity) {
+                    return Ok(Unknown(RevisionUnknown))
+                }
+            }
+            let registered = placed(place, n_place) ?=> Place
+            let Some(Transact(n, s, _, check, go)) = map.get(registered.slots, recorded_entry.record.key) else {
+                return Ok(Unknown(NoEntry))
+            }
+            if let RecordedCode = mode {
+                let identity = list.slice(recorded_code, 16u64, list.len(recorded_code))
+                let expected = code_bytes(n, s, identity) ?=> |problem| Store(Full(Allocation(problem)))
+                if expected != recorded_code { return Ok(Unknown(RevisionUnknown)) }
+            }
+            // The current CALL format has only stream records. HTTP Part B adds claim keys.
+            let Some(caller) = recorded_stream_caller(recorded_entry.record.stream) else {
+                return Ok(Unknown(ArgsUnresolved))
+            }
+            if let Some(Malformed(_)) = check(recorded_entry.record.args) { return Ok(Unknown(ArgsUnresolved)) }
+            let h = (code.callable(handles))(schema) ?=> Store
+            let plan = store.Plan(n_e: n, s_e: s, reply_max: MAX_RETURNED_BYTES + 8u64)
+            Ok(run(plan, scoped fn(record: store.Recorded, mut tx: store.Tx) -> Result[Bytes, Bytes] {
+                let outcome = go(mut tx, h, caller, record.record.args)
+                encode_entry_reply(mut tx, take outcome)
+            }) ?=> Store)
+        })
+}
+
+fn replay_fault(stop: store.Stop) -> Bytes {
+    result.unwrap(encode_runner_reply(failed_stop(stop)))
+}

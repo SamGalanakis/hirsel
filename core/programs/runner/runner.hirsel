@@ -3778,15 +3778,6 @@ fn be_word(mut raw: Bytes, value: u64, width: u64) -> Result[(), Capacity] {
     Ok(())
 }
 
-// CALL's code (RUNNER-SPEC §7): u64 n ‖ u64 s, big-endian, then the replay identity.
-fn code_bytes(n: u64, s: u64, replay_identity: Bytes) -> Result[Bytes, Capacity] {
-    let mut raw: Bytes = list.with_capacity(16 + list.len(replay_identity))
-    be_word(mut raw, n, 8)?
-    be_word(mut raw, s, 8)?
-    list.append(mut raw, replay_identity)
-    Ok(take raw)
-}
-
 fn record_request(q: Request, revision: Option[Bytes], n: u64, s: u64, replay_identity: Bytes) -> Result[store.CallRecord, store.Error] {
     let rev = match revision { Some(bytes_in) => Some(copy_bytes(bytes_in)?), None => None }
     let code = match code_bytes(n, s, replay_identity) {

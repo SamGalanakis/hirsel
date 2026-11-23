@@ -652,139 +652,137 @@ impl Wire for HostReply {
     }
 }
 
-impl Wire for Request {
-    fn put(&self, w: &mut Writer) {
-        match self {
-            Self::Hello => w.u32(0),
-            Self::Bind(g, address, label, bindings, limits) => {
-                w.u32(1);
-                g.put(w);
-                w.bytes(address.as_bytes());
-                w.u32(match label {
-                    Label::Contained => 0,
-                    Label::Uncontained => 1,
-                });
-                w.bytes(bindings.store.as_bytes());
-                w.strings(&bindings.dirs);
-                w.strings(&bindings.net);
-                w.option(&limits.memory, |w, &memory| w.u64(memory));
-                w.option(&limits.cpu, |w, &(quota, period)| {
-                    w.u64(quota);
-                    w.u64(period);
-                });
-                w.option(&limits.pids, |w, &pids| w.u64(pids));
-            }
-            Self::Close(g) => (w.u32(2), g.put(w)).1,
-            Self::Start(launch) => (w.u32(3), launch.put(w)).1,
-            Self::Stop(c) => (w.u32(4), c.put(w)).1,
-            Self::Kill(c) => (w.u32(5), c.put(w)).1,
-            Self::Acknowledge(c) => (w.u32(6), c.put(w)).1,
-            Self::Command(c, command) => {
-                w.u32(7);
-                c.put(w);
-                command.put(w);
-            }
-            Self::Retire(g) => (w.u32(8), g.put(w)).1,
-            Self::Release(a) => (w.u32(9), a.put(w)).1,
-            Self::CollectBegin => w.u32(10),
-            Self::Collect(roots) => {
-                w.u32(11);
-                w.len(roots.len());
-                for root in roots {
-                    w.bytes(root);
+// Each row supplies the tag to both directions of the codec.
+macro_rules! session_wire {
+    ($ty:ty, $error:literal, $w:ident, $r:ident;
+        $($tag:literal => $variant:ident $(($($field:ident),+))? $($put:block)? => $get:expr),+ $(,)?
+    ) => {
+        impl Wire for $ty {
+            fn put(&self, $w: &mut Writer) {
+                #[repr(u32)]
+                enum Tag {
+                    $($variant = $tag),+
+                }
+
+                match self {
+                    $(Self::$variant $(($($field),+))? => {
+                        $w.u32(Tag::$variant as u32);
+                        $($put)?
+                    }),+
                 }
             }
-            Self::Admit(g, a, input, approvals) => {
-                w.u32(12);
-                g.put(w);
-                a.put(w);
-                let (tag, bytes) = match input {
-                    Input::Attested(r) => (0, r),
-                    Input::Publication(r) => (1, r),
-                    Input::Source(tree) => (2, tree),
-                };
-                w.u32(tag);
-                w.bytes(bytes);
-                w.bool(approvals.recording);
-                w.strings(&approvals.foreign);
-                w.strings(&approvals.exec);
-                w.bytes(approvals.workdir.as_bytes());
-                w.option(&approvals.old, |w, old| w.bytes(old));
-            }
-            Self::AdmitData(a, bytes) => {
-                w.u32(13);
-                a.put(w);
-                w.bytes(bytes);
-            }
-            Self::AdmitEnd(a) => (w.u32(14), a.put(w)).1,
-            Self::Assemble(a) => (w.u32(15), a.put(w)).1,
-            Self::CutoverAck(c, a) => {
-                w.u32(16);
-                c.put(w);
-                a.put(w);
+
+            fn get($r: &mut Reader<'_>) -> io::Result<Self> {
+                Ok(match $r.u32()? {
+                    $($tag => $get,)+
+                    _ => return Err(malformed($error)),
+                })
             }
         }
-    }
-    fn get(r: &mut Reader<'_>) -> io::Result<Self> {
-        Ok(match r.u32()? {
-            0 => Self::Hello,
-            1 => Self::Bind(
-                Group::get(r)?,
-                r.string()?,
-                match r.u32()? {
-                    0 => Label::Contained,
-                    1 => Label::Uncontained,
-                    _ => return Err(malformed("label tag")),
-                },
-                Bindings {
-                    store: r.string()?,
-                    dirs: r.strings()?,
-                    net: r.strings()?,
-                },
-                Limits {
-                    memory: r.option(Reader::u64)?,
-                    cpu: r.option(|r| Ok((r.u64()?, r.u64()?)))?,
-                    pids: r.option(Reader::u64)?,
-                },
-            ),
-            2 => Self::Close(Group::get(r)?),
-            3 => Self::Start(Launch::get(r)?),
-            4 => Self::Stop(Child::get(r)?),
-            5 => Self::Kill(Child::get(r)?),
-            6 => Self::Acknowledge(Child::get(r)?),
-            7 => Self::Command(Child::get(r)?, HostCommand::get(r)?),
-            8 => Self::Retire(Group::get(r)?),
-            9 => Self::Release(Attempt::get(r)?),
-            10 => Self::CollectBegin,
-            11 => {
-                let n = r.count(4)?;
-                Self::Collect((0..n).map(|_| r.bytes()).collect::<io::Result<_>>()?)
-            }
-            12 => Self::Admit(
-                Group::get(r)?,
-                Attempt::get(r)?,
-                match r.u32()? {
-                    0 => Input::Attested(r.bytes()?),
-                    1 => Input::Publication(r.bytes()?),
-                    2 => Input::Source(r.bytes()?),
-                    _ => return Err(malformed("admission input tag")),
-                },
-                Approvals {
-                    recording: r.bool()?,
-                    foreign: r.strings()?,
-                    exec: r.strings()?,
-                    workdir: r.string()?,
-                    old: r.option(Reader::bytes)?,
-                },
-            ),
-            13 => Self::AdmitData(Attempt::get(r)?, r.bytes()?),
-            14 => Self::AdmitEnd(Attempt::get(r)?),
-            15 => Self::Assemble(Attempt::get(r)?),
-            16 => Self::CutoverAck(Child::get(r)?, Attempt::get(r)?),
-            _ => return Err(malformed("request tag")),
-        })
-    }
+    };
 }
+
+session_wire!(Request, "request tag", w, r;
+    0 => Hello => Self::Hello,
+    1 => Bind(g, address, label, bindings, limits) {
+        g.put(w);
+        w.bytes(address.as_bytes());
+        w.u32(match label {
+            Label::Contained => 0,
+            Label::Uncontained => 1,
+        });
+        w.bytes(bindings.store.as_bytes());
+        w.strings(&bindings.dirs);
+        w.strings(&bindings.net);
+        w.option(&limits.memory, |w, &memory| w.u64(memory));
+        w.option(&limits.cpu, |w, &(quota, period)| {
+            w.u64(quota);
+            w.u64(period);
+        });
+        w.option(&limits.pids, |w, &pids| w.u64(pids));
+    } => Self::Bind(
+        Group::get(r)?,
+        r.string()?,
+        match r.u32()? {
+            0 => Label::Contained,
+            1 => Label::Uncontained,
+            _ => return Err(malformed("label tag")),
+        },
+        Bindings {
+            store: r.string()?,
+            dirs: r.strings()?,
+            net: r.strings()?,
+        },
+        Limits {
+            memory: r.option(Reader::u64)?,
+            cpu: r.option(|r| Ok((r.u64()?, r.u64()?)))?,
+            pids: r.option(Reader::u64)?,
+        },
+    ),
+    2 => Close(g) { g.put(w); } => Self::Close(Group::get(r)?),
+    3 => Start(launch) { launch.put(w); } => Self::Start(Launch::get(r)?),
+    4 => Stop(c) { c.put(w); } => Self::Stop(Child::get(r)?),
+    5 => Kill(c) { c.put(w); } => Self::Kill(Child::get(r)?),
+    6 => Acknowledge(c) { c.put(w); } => Self::Acknowledge(Child::get(r)?),
+    7 => Command(c, command) {
+        c.put(w);
+        command.put(w);
+    } => Self::Command(Child::get(r)?, HostCommand::get(r)?),
+    8 => Retire(g) { g.put(w); } => Self::Retire(Group::get(r)?),
+    9 => Release(a) { a.put(w); } => Self::Release(Attempt::get(r)?),
+    10 => CollectBegin => Self::CollectBegin,
+    11 => Collect(roots) {
+        w.len(roots.len());
+        for root in roots {
+            w.bytes(root);
+        }
+    } => {
+        let n = r.count(4)?;
+        Self::Collect((0..n).map(|_| r.bytes()).collect::<io::Result<_>>()?)
+    },
+    12 => Admit(g, a, input, approvals) {
+        g.put(w);
+        a.put(w);
+        let (tag, bytes) = match input {
+            Input::Attested(r) => (0, r),
+            Input::Publication(r) => (1, r),
+            Input::Source(tree) => (2, tree),
+        };
+        w.u32(tag);
+        w.bytes(bytes);
+        w.bool(approvals.recording);
+        w.strings(&approvals.foreign);
+        w.strings(&approvals.exec);
+        w.bytes(approvals.workdir.as_bytes());
+        w.option(&approvals.old, |w, old| w.bytes(old));
+    } => Self::Admit(
+        Group::get(r)?,
+        Attempt::get(r)?,
+        match r.u32()? {
+            0 => Input::Attested(r.bytes()?),
+            1 => Input::Publication(r.bytes()?),
+            2 => Input::Source(r.bytes()?),
+            _ => return Err(malformed("admission input tag")),
+        },
+        Approvals {
+            recording: r.bool()?,
+            foreign: r.strings()?,
+            exec: r.strings()?,
+            workdir: r.string()?,
+            old: r.option(Reader::bytes)?,
+        },
+    ),
+    13 => AdmitData(a, bytes) {
+        a.put(w);
+        w.bytes(bytes);
+    } => Self::AdmitData(Attempt::get(r)?, r.bytes()?),
+    14 => AdmitEnd(a) { a.put(w); } => Self::AdmitEnd(Attempt::get(r)?),
+    15 => Assemble(a) { a.put(w); } => Self::Assemble(Attempt::get(r)?),
+    16 => CutoverAck(c, a) {
+        c.put(w);
+        a.put(w);
+    } => Self::CutoverAck(Child::get(r)?, Attempt::get(r)?),
+);
 
 impl Wire for End {
     fn put(&self, w: &mut Writer) {
@@ -853,193 +851,154 @@ impl Wire for Refusal {
     }
 }
 
-impl Wire for Event {
-    fn put(&self, w: &mut Writer) {
-        match self {
-            Self::Inventory(children, readable, cutovers) => {
-                w.u32(0);
-                w.len(children.len());
-                for state in children {
-                    state.child.put(w);
-                    state.phase.put(w);
-                }
-                w.len(readable.len());
-                for g in readable {
-                    g.put(w);
-                }
-                w.len(cutovers.len());
-                for (c, a) in cutovers {
-                    c.put(w);
-                    a.put(w);
-                }
-            }
-            Self::Launched(c, phase) => {
-                w.u32(1);
-                c.put(w);
-                phase.put(w);
-            }
-            Self::Refused(c, why) => {
-                w.u32(2);
-                c.put(w);
-                why.put(w);
-            }
-            Self::Ended(c, end) => {
-                w.u32(3);
-                c.put(w);
-                end.put(w);
-            }
-            Self::Arrived(g) => (w.u32(4), g.put(w)).1,
-            Self::Bound(g) => (w.u32(5), g.put(w)).1,
-            Self::BindFailed(g, why) => {
-                w.u32(6);
-                g.put(w);
-                w.bytes(why.as_bytes());
-            }
-            Self::Closed(g) => (w.u32(7), g.put(w)).1,
-            Self::Retired(g) => (w.u32(8), g.put(w)).1,
-            Self::Placed(c, reply) => {
-                w.u32(9);
-                c.put(w);
-                reply.put(w);
-            }
-            Self::Fenced => w.u32(10),
-            Self::Collected(n) => (w.u32(11), w.u64(*n)).1,
-            Self::Answered(c, answer) => {
-                w.u32(12);
-                c.put(w);
-                w.bytes(answer);
-            }
-            Self::Need(a, keys, last) => {
-                w.u32(13);
-                a.put(w);
-                w.len(keys.len());
-                for key in keys {
-                    w.u32(match key.kind {
-                        ObjectKind::Group => 0,
-                        ObjectKind::Body => 1,
-                        ObjectKind::Annex => 2,
-                        ObjectKind::ForeignArchive => 3,
-                        ObjectKind::Recipe => unreachable!("a recipe is never needed"),
-                    });
-                    w.bytes(&key.hash.0);
-                }
-                w.bool(*last);
-            }
-            Self::Admitted(a, root, summary, display) => {
-                w.u32(14);
-                a.put(w);
-                w.bytes(root);
-                w.u64(summary.root_limit);
-                w.u64(summary.old_root_limit);
-                w.bool(summary.grants_added);
-                w.bytes(display.as_bytes());
-            }
-            Self::Assembled(a, key, digest, fetch, assembly) => {
-                w.u32(15);
-                a.put(w);
-                w.bytes(key);
-                w.bytes(digest);
-                w.u64(*fetch);
-                w.u64(*assembly);
-            }
-            Self::AdmissionFailed(a, failure) => {
-                w.u32(16);
-                a.put(w);
-                let (tag, why) = match failure {
-                    Failure::Denied(why) => (0, why),
-                    Failure::Invalid(why) => (1, why),
-                    Failure::Unassembled(why) => (2, why),
-                };
-                w.u32(tag);
-                w.bytes(why.as_bytes());
-            }
-            Self::CutoverResult(c, a, reply) => {
-                w.u32(17);
-                c.put(w);
-                a.put(w);
-                reply.put(w);
-            }
+session_wire!(Event, "event tag", w, r;
+    0 => Inventory(children, readable, cutovers) {
+        w.len(children.len());
+        for state in children {
+            state.child.put(w);
+            state.phase.put(w);
         }
-    }
-    fn get(r: &mut Reader<'_>) -> io::Result<Self> {
-        Ok(match r.u32()? {
-            0 => {
-                let n = r.count(4)?;
-                let children = (0..n)
-                    .map(|_| {
-                        Ok(ChildState {
-                            child: Child::get(r)?,
-                            phase: Phase::get(r)?,
-                        })
-                    })
-                    .collect::<io::Result<_>>()?;
-                let n = r.count(4)?;
-                let readable = (0..n).map(|_| Group::get(r)).collect::<io::Result<_>>()?;
-                let n = r.count(4)?;
-                let cutovers = (0..n)
-                    .map(|_| Ok((Child::get(r)?, Attempt::get(r)?)))
-                    .collect::<io::Result<_>>()?;
-                Self::Inventory(children, readable, cutovers)
-            }
-            1 => Self::Launched(Child::get(r)?, Phase::get(r)?),
-            2 => Self::Refused(Child::get(r)?, Refusal::get(r)?),
-            3 => Self::Ended(Child::get(r)?, End::get(r)?),
-            4 => Self::Arrived(Group::get(r)?),
-            5 => Self::Bound(Group::get(r)?),
-            6 => Self::BindFailed(Group::get(r)?, r.string()?),
-            7 => Self::Closed(Group::get(r)?),
-            8 => Self::Retired(Group::get(r)?),
-            9 => Self::Placed(Child::get(r)?, HostReply::get(r)?),
-            10 => Self::Fenced,
-            11 => Self::Collected(r.u64()?),
-            12 => Self::Answered(Child::get(r)?, r.bytes()?),
-            13 => {
-                let a = Attempt::get(r)?;
-                let n = r.count(8)?;
-                let keys = (0..n)
-                    .map(|_| {
-                        let kind = match r.u32()? {
-                            0 => ObjectKind::Group,
-                            1 => ObjectKind::Body,
-                            2 => ObjectKind::Annex,
-                            3 => ObjectKind::ForeignArchive,
-                            _ => return Err(malformed("needed object tag")),
-                        };
-                        let hash = <[u8; 32]>::try_from(r.bytes()?)
-                            .map_err(|_| malformed("needed object hash"))?;
-                        Ok(ObjectKey {
-                            kind,
-                            hash: ContentHash(hash),
-                        })
-                    })
-                    .collect::<io::Result<_>>()?;
-                Self::Need(a, keys, r.bool()?)
-            }
-            14 => Self::Admitted(
-                Attempt::get(r)?,
-                r.bytes()?,
-                Summary {
-                    root_limit: r.u64()?,
-                    old_root_limit: r.u64()?,
-                    grants_added: r.bool()?,
-                },
-                r.string()?,
-            ),
-            15 => Self::Assembled(Attempt::get(r)?, r.bytes()?, r.bytes()?, r.u64()?, r.u64()?),
-            16 => Self::AdmissionFailed(
-                Attempt::get(r)?,
-                match r.u32()? {
-                    0 => Failure::Denied(r.string()?),
-                    1 => Failure::Invalid(r.string()?),
-                    2 => Failure::Unassembled(r.string()?),
-                    _ => return Err(malformed("admission failure tag")),
-                },
-            ),
-            17 => Self::CutoverResult(Child::get(r)?, Attempt::get(r)?, HostReply::get(r)?),
-            _ => return Err(malformed("event tag")),
-        })
-    }
-}
+        w.len(readable.len());
+        for g in readable {
+            g.put(w);
+        }
+        w.len(cutovers.len());
+        for (c, a) in cutovers {
+            c.put(w);
+            a.put(w);
+        }
+    } => {
+        let n = r.count(4)?;
+        let children = (0..n)
+            .map(|_| {
+                Ok(ChildState {
+                    child: Child::get(r)?,
+                    phase: Phase::get(r)?,
+                })
+            })
+            .collect::<io::Result<_>>()?;
+        let n = r.count(4)?;
+        let readable = (0..n).map(|_| Group::get(r)).collect::<io::Result<_>>()?;
+        let n = r.count(4)?;
+        let cutovers = (0..n)
+            .map(|_| Ok((Child::get(r)?, Attempt::get(r)?)))
+            .collect::<io::Result<_>>()?;
+        Self::Inventory(children, readable, cutovers)
+    },
+    1 => Launched(c, phase) {
+        c.put(w);
+        phase.put(w);
+    } => Self::Launched(Child::get(r)?, Phase::get(r)?),
+    2 => Refused(c, why) {
+        c.put(w);
+        why.put(w);
+    } => Self::Refused(Child::get(r)?, Refusal::get(r)?),
+    3 => Ended(c, end) {
+        c.put(w);
+        end.put(w);
+    } => Self::Ended(Child::get(r)?, End::get(r)?),
+    4 => Arrived(g) { g.put(w); } => Self::Arrived(Group::get(r)?),
+    5 => Bound(g) { g.put(w); } => Self::Bound(Group::get(r)?),
+    6 => BindFailed(g, why) {
+        g.put(w);
+        w.bytes(why.as_bytes());
+    } => Self::BindFailed(Group::get(r)?, r.string()?),
+    7 => Closed(g) { g.put(w); } => Self::Closed(Group::get(r)?),
+    8 => Retired(g) { g.put(w); } => Self::Retired(Group::get(r)?),
+    9 => Placed(c, reply) {
+        c.put(w);
+        reply.put(w);
+    } => Self::Placed(Child::get(r)?, HostReply::get(r)?),
+    10 => Fenced => Self::Fenced,
+    11 => Collected(n) { w.u64(*n); } => Self::Collected(r.u64()?),
+    12 => Answered(c, answer) {
+        c.put(w);
+        w.bytes(answer);
+    } => Self::Answered(Child::get(r)?, r.bytes()?),
+    13 => Need(a, keys, last) {
+        a.put(w);
+        w.len(keys.len());
+        for key in keys {
+            w.u32(match key.kind {
+                ObjectKind::Group => 0,
+                ObjectKind::Body => 1,
+                ObjectKind::Annex => 2,
+                ObjectKind::ForeignArchive => 3,
+                ObjectKind::Recipe => unreachable!("a recipe is never needed"),
+            });
+            w.bytes(&key.hash.0);
+        }
+        w.bool(*last);
+    } => {
+        let a = Attempt::get(r)?;
+        let n = r.count(8)?;
+        let keys = (0..n)
+            .map(|_| {
+                let kind = match r.u32()? {
+                    0 => ObjectKind::Group,
+                    1 => ObjectKind::Body,
+                    2 => ObjectKind::Annex,
+                    3 => ObjectKind::ForeignArchive,
+                    _ => return Err(malformed("needed object tag")),
+                };
+                let hash = <[u8; 32]>::try_from(r.bytes()?)
+                    .map_err(|_| malformed("needed object hash"))?;
+                Ok(ObjectKey {
+                    kind,
+                    hash: ContentHash(hash),
+                })
+            })
+            .collect::<io::Result<_>>()?;
+        Self::Need(a, keys, r.bool()?)
+    },
+    14 => Admitted(a, root, summary, display) {
+        a.put(w);
+        w.bytes(root);
+        w.u64(summary.root_limit);
+        w.u64(summary.old_root_limit);
+        w.bool(summary.grants_added);
+        w.bytes(display.as_bytes());
+    } => Self::Admitted(
+        Attempt::get(r)?,
+        r.bytes()?,
+        Summary {
+            root_limit: r.u64()?,
+            old_root_limit: r.u64()?,
+            grants_added: r.bool()?,
+        },
+        r.string()?,
+    ),
+    15 => Assembled(a, key, digest, fetch, assembly) {
+        a.put(w);
+        w.bytes(key);
+        w.bytes(digest);
+        w.u64(*fetch);
+        w.u64(*assembly);
+    } => Self::Assembled(Attempt::get(r)?, r.bytes()?, r.bytes()?, r.u64()?, r.u64()?),
+    16 => AdmissionFailed(a, failure) {
+        a.put(w);
+        let (tag, why) = match failure {
+            Failure::Denied(why) => (0, why),
+            Failure::Invalid(why) => (1, why),
+            Failure::Unassembled(why) => (2, why),
+        };
+        w.u32(tag);
+        w.bytes(why.as_bytes());
+    } => Self::AdmissionFailed(
+        Attempt::get(r)?,
+        match r.u32()? {
+            0 => Failure::Denied(r.string()?),
+            1 => Failure::Invalid(r.string()?),
+            2 => Failure::Unassembled(r.string()?),
+            _ => return Err(malformed("admission failure tag")),
+        },
+    ),
+    17 => CutoverResult(c, a, reply) {
+        c.put(w);
+        a.put(w);
+        reply.put(w);
+    } => Self::CutoverResult(Child::get(r)?, Attempt::get(r)?, HostReply::get(r)?),
+);
 
 /// The largest session frame either side accepts.
 pub(crate) const MAX_FRAME: usize = 16 << 20;

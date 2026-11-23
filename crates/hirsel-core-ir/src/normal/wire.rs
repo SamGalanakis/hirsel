@@ -481,6 +481,14 @@ pub(super) trait Tagged {
 macro_rules! tags {
     (@ignore $field:ident) => { _ };
     ($ty:ty { $($tag:literal => $name:ident $( ( $($part:ident $(@ $part_kind:ident)?),+ ) )? $( { $($field:ident $(@ $field_kind:ident)?),+ } )?),* $(,)? }) => {
+        const _: () = {
+            let mut used = [false; 256];
+            $(
+                assert!(!used[$tag], concat!("duplicate ", stringify!($ty), " tag ", stringify!($tag)));
+                used[$tag] = true;
+            )*
+        };
+
         impl Tagged for $ty {
             fn tag(&self) -> u8 {
                 match self {

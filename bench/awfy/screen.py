@@ -51,8 +51,8 @@ def prepare(args):
 
 
 def stage(directory, upstream, target):
+    import awfy_measure
     import build
-    import measure
     from elf_census import strip_image
 
     metadata = directory / "screen.json"
@@ -64,8 +64,8 @@ def stage(directory, upstream, target):
     shutil.copyfile(config, target / config.name)
     rows = []
     for suite, name in ROWS:
-        cases = (measure.arena_rows(config.parent, config) if suite == "arena"
-                 else measure.runtime_cases(suite, directory / "awfy", upstream))
+        cases = (awfy_measure.arena_rows(config.parent, config) if suite == "arena"
+                 else awfy_measure.runtime_cases(suite, directory / "awfy", upstream))
         binary_and_args, marker = dict(cases)[name]["hirsel"]
         binary, *arguments = binary_and_args
         report = json.loads(binary.with_name(f"{binary.name}-build.json").read_text())

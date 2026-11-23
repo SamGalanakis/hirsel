@@ -270,7 +270,7 @@ class QuietCyclePairs(unittest.TestCase):
 
             with (patch.object(bench_cpus, "Path", side_effect=linux_file),
                   patch.object(bench_cpus.subprocess, "run", side_effect=run),
-                  patch.object(receipt.measure.core_measure, "sample", side_effect=sample)):
+                  patch.object(receipt.awfy_measure.core_measure, "sample", side_effect=sample)):
                 siblings = bench_cpus.sibling_cpus([7])
                 kept, attempts = receipt.cycle_samples(row, row, args, siblings, {})
                 args.sibling_busy_threshold = None
@@ -335,7 +335,7 @@ class QuietCyclePairs(unittest.TestCase):
                         (target / "stdout").write_text(f"start: 123\nSort::Merge: {status} in 0.1s\nSummary: 0.1s\n")
                         return {"status": "ok", "pmu_times_ns": {"instructions:u": [[1, 1]]}}
 
-                    with patch.object(receipt.measure.core_measure, "sample", side_effect=run):
+                    with patch.object(receipt.awfy_measure.core_measure, "sample", side_effect=run):
                         observed = receipt.observe(row.copy(), directory, {}, ())
                     self.assertEqual(observed["verified"], status == "OK")
                     self.assertEqual(observed["status"], "ok" if status == "OK" else "wrong-result")

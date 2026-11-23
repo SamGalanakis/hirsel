@@ -16,10 +16,10 @@ import subprocess
 import sys
 import tempfile
 
+import awfy_measure
 import build
 from build import sha256
 import elf_census
-import measure
 import profile_diff
 from bench_cpus import positive_int, sibling_cpus, smt_activity
 from measurement_artifacts import SHIPPING, check
@@ -166,8 +166,8 @@ def observe(row, target, env, siblings, *, cycles=False, label=None, quiet_windo
     if "stdin" in row:
         options["stdin"] = row["stdin"]
     with activity as busy:
-        sample = measure.core_measure.sample(row["argv"], target, env=env, cwd=row["cwd"], cycles=cycles,
-                                            pmu_times=True, **options)
+        sample = awfy_measure.core_measure.sample(row["argv"], target, env=env, cwd=row["cwd"], cycles=cycles,
+                                                  pmu_times=True, **options)
     if not quiet_window:
         sample["smt_busy_percent"] = busy
     output = (target / "stdout").read_bytes()
@@ -196,8 +196,8 @@ def make_receipt(expected):
 def runtime_rows(args):
     for suite, directory in (("awfy", args.awfy_build), ("pool", args.pool_build), ("arena", args.arena_build)):
         if directory is not None:
-            cases = list(measure.runtime_cases(suite, directory, args.upstream))
-            if sorted(name for name, _ in cases) != sorted(measure.EXPECTED[measure.SUITES[suite]]):
+            cases = list(awfy_measure.runtime_cases(suite, directory, args.upstream))
+            if sorted(name for name, _ in cases) != sorted(awfy_measure.EXPECTED[awfy_measure.SUITES[suite]]):
                 raise ValueError(f"{suite}: fixture does not have the expected rows")
             for name, commands in cases:
                 yield f"{suite}/{name}", (suite, name, directory, *commands["hirsel"])
@@ -317,7 +317,7 @@ def validate_row(key, row):
         if field not in row or row[field] is None or not row[field]:
             raise ValueError(f"missing {field}")
     suite, mode = row["suite"], row["mode"]
-    if (suite not in measure.SUITES or not key.startswith(suite + "/")
+    if (suite not in awfy_measure.SUITES or not key.startswith(suite + "/")
             or (mode not in ("cold", "edit") if suite == "compile"
                 else mode != "release")
             or any(not re.fullmatch("[a-f0-9]{64}", row[field])
@@ -603,9 +603,9 @@ def peer_cycle_pairs(key, hirsel, args, siblings, env, report=None):
     cwd = Path(hirsel["cwd"])
     if suite == "arena":
         config, = map(Path, hirsel["fixture_files"])
-        cases = dict(measure.arena_rows(cwd, config))
+        cases = dict(awfy_measure.arena_rows(cwd, config))
     else:
-        cases = dict(measure.runtime_cases(suite, cwd, args.upstream))
+        cases = dict(awfy_measure.runtime_cases(suite, cwd, args.upstream))
     commands = cases[name]
     command, marker = commands["hirsel"]
     argv = [f"./{command[0].name}", *map(str, command[1:])]

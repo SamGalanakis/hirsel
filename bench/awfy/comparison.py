@@ -3,7 +3,7 @@ import math
 import re
 import shlex
 
-import measure
+import awfy_measure
 import receipt
 
 VERSION = 1
@@ -63,19 +63,19 @@ def compile_oracle(sample, side, recipe, mode):
         return False
     results = sample.get("verification", {})
     if recipe == "awfy-release":
-        if results.keys() != set(measure.EXPECTED["AWFY original"]):
+        if results.keys() != set(awfy_measure.EXPECTED["AWFY original"]):
             return False
         for name, result in results.items():
             marker = re.escape(name) + r": iterations=1 runtime: \d+us" if side == "rust" else "verified"
             if mode == "edit":
                 marker += " board-edit"
-            if not measure.matches_output(result, marker):
+            if not awfy_measure.matches_output(result, marker):
                 return False
         return True
     checksum = SPECTRALNORM_CHECKSUM + (mode == "edit")
     result = results.get(SPECTRALNORM)
     return bool(result and result.get("expected_checksum") == checksum
-                and measure.matches_output(result, spectralnorm_marker(side, checksum)))
+                and awfy_measure.matches_output(result, spectralnorm_marker(side, checksum)))
 
 
 def checkbox_oracle(sample, mode):
@@ -130,7 +130,7 @@ def compare_row(goal, name, samples, commit, mode, fields, *, oracle, peers=("ru
 
 def runtime_memory(runtime, commit, suite):
     cases = [(goal, name) for goal in RUNTIME_SUITES if suite in (goal, RUNTIME_MEMORY[-1])
-             for name in measure.EXPECTED[goal]]
+             for name in awfy_measure.EXPECTED[goal]]
     peers = ("rust", "goose")
     logs = {peer: [] for peer in peers}
     issues = {}
@@ -168,9 +168,9 @@ def rows(evidence, units_rows):
         if family == "image-size":
             details = evidence.get("size", {})
             oracle = (details.get("anchor_present") is True
-                      and details.get("verified_workloads") == sorted(measure.EXPECTED["AWFY original"])
+                      and details.get("verified_workloads") == sorted(awfy_measure.EXPECTED["AWFY original"])
                       and details.get("strip_version", "").startswith("GNU strip")
-                      and details.get("strip_flags") == list(measure.STRIP_FLAGS))
+                      and details.get("strip_flags") == list(awfy_measure.STRIP_FLAGS))
             output.append(compare_row("Size", SIZE_ROW, observed.get("size", {}), commit, "stripped",
                                       ("bytes",), oracle=lambda *_: oracle))
         if family == "checkbox":

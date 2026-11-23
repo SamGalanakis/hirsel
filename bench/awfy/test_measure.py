@@ -14,15 +14,15 @@ import unittest
 from unittest.mock import patch
 from pathlib import Path
 
-from board import EXPECTED, Board, measure, measurement_slot, rebaseline, receipt
+import awfy_measure
+from board import EXPECTED, Board, measurement_slot, rebaseline, receipt
 import bench_cpus
 import build
+import cold_phases
 
 
 class PassCostAccounting(unittest.TestCase):
     def test_rejects_double_counted_nested_passes(self):
-        from cold_phases import pass_costs
-
         with tempfile.TemporaryDirectory() as temp:
             trace = Path(temp) / "passes.jsonl.gz"
             rows = [
@@ -38,14 +38,14 @@ class PassCostAccounting(unittest.TestCase):
                         stream.write(json.dumps(row) + "\n")
 
             write_trace()
-            passes, phases = pass_costs(trace)
+            passes, phases = cold_phases.pass_costs(trace)
             self.assertEqual(sum(row["instructions"] for row in passes.values()), 90)
             self.assertEqual(phases["release"]["unattributed_instructions"], 10)
             self.assertEqual(phases["object-emission"]["unattributed_instructions"], 40)
             rows[1]["instructions"] = 90
             write_trace()
             with self.assertRaisesRegex(ValueError, "exceed their pipeline counters"):
-                pass_costs(trace)
+                cold_phases.pass_costs(trace)
 
 
 class WorkloadMatching(unittest.TestCase):
@@ -89,8 +89,8 @@ class WorkloadMatching(unittest.TestCase):
             js = root / "benchmarks/JavaScript"
             js.mkdir(parents=True)
             (js / "json.js").write_text('const RAP_BENCHMARK_MINIFIED = "{}";\n')
-            originals = dict(measure.rows(root, False, root))
-            pools = dict(measure.matched_pool_rows(root, root))
+            originals = dict(awfy_measure.rows(root, False, root))
+            pools = dict(awfy_measure.matched_pool_rows(root, root))
         for name, inner, checksum, workload in (("Json", "100", 156, "{}"), ("Storage", "25", 5461, "7,7")):
             pool = name + "Pool"
             self.assertEqual(originals[name]["rust"][0][1:], [name, "1", inner, workload])
@@ -188,15 +188,15 @@ class BoardCompletion(unittest.TestCase):
         board = Board(out, "abcd1234")
         board.report["size_measurement"] = {
             "strip_version": "GNU strip 2.42", "strip_flags": ["--strip-all"],
-            "verified_workloads": sorted(measure.EXPECTED["AWFY original"]),
+            "verified_workloads": sorted(awfy_measure.EXPECTED["AWFY original"]),
             "pins": board.report["pins"],
         }
-        suites = {goal: suite for suite, goal in measure.SUITES.items()}
+        suites = {goal: suite for suite, goal in awfy_measure.SUITES.items()}
         for goal, names in EXPECTED.items():
             for name in names:
                 if name == "LangArena edit" and omit_edit:
                     continue
-                sides = ("hirsel", "rust") if goal in ("Compile", "Checkbox") else measure.SIDES
+                sides = ("hirsel", "rust") if goal in ("Compile", "Checkbox") else awfy_measure.SIDES
                 fields, values = self.sample(goal, name)
                 samples = {side: {"status": "ok", **values} for side in sides}
                 if name == "LangArena edit":
@@ -257,9 +257,9 @@ class ComparisonReceipts(unittest.TestCase):
         evidence = {"version": VERSION, "commit": self.commit, "families": ["runtime-memory"],
                     "failures": {}, "samples": {}, "runtime": {}}
         for suite in RUNTIME_SUITES:
-            for name in measure.EXPECTED[suite]:
+            for name in awfy_measure.EXPECTED[suite]:
                 evidence["runtime"][f"{suite}/{name}"] = {
-                    side: self.arm("runtime", 128) for side in measure.SIDES}
+                    side: self.arm("runtime", 128) for side in awfy_measure.SIDES}
         cases = evidence["runtime"]
         cases["AWFY original/Bounce"]["hirsel"]["max_rss_kib"] = 256
         cases["AWFY original/List"]["hirsel"]["max_rss_kib"] = 64
@@ -307,7 +307,7 @@ class ComparisonReceipts(unittest.TestCase):
         from comparison import SPECTRALNORM, compare_row, compile_oracle, COMPILE_FIELDS
 
         mode = "arena-release/edit"
-        samples = {side: self.arm(mode, 128) | {"rebuilt": True} for side in measure.SIDES}
+        samples = {side: self.arm(mode, 128) | {"rebuilt": True} for side in awfy_measure.SIDES}
         for side, sample in samples.items():
             marker = ("CLBG::Spectralnorm checksum=1051192944 expected=1051192944 status=OK"
                       if side == "hirsel" else "CLBG::Spectralnorm: OK in 0.01s")
@@ -342,8 +342,6 @@ class ComparisonReceipts(unittest.TestCase):
 
 class SiblingActivity(unittest.TestCase):
     def test_cold_phases_reuses_the_lane_cpu_set(self):
-        import cold_phases
-
         original = os.sched_getaffinity(0)
         cpus = sorted(original)[:2]
         self.addCleanup(os.sched_setaffinity, 0, original)

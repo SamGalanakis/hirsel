@@ -38,7 +38,7 @@ taskset -c "$build_cpus" python3 core/tools/measurement_artifacts.py > "$out/too
 taskset -c "$build_cpus" python3 bench/awfy/build.py "$out/build" --upstream "$awfy" \
   --artifacts "$out/toolchain.json" --goose "$goose/build/goose" \
   --rust "$resid/bench/v2/t1-awfy/rust"
-python3 bench/awfy/measure.py "$out/build" "$out/awfy" --upstream "$awfy" \
+python3 bench/awfy/awfy_measure.py "$out/build" "$out/awfy" --upstream "$awfy" \
   --build-cpus "$build_cpus" --measure-cpus "$measure_cpus"
 python3 bench/awfy/profiles.py "$out/build" "$out/awfy/samples.json" \
   "$out/profiles" --upstream "$awfy" --build-cpus "$build_cpus" --measure-cpus "$measure_cpus"
@@ -66,7 +66,7 @@ allocation. Each Hello uses a separate binary.
 ## Original AWFY size board
 
 Build into a fresh output directory with the three release toolchains above.
-Run `measure.py "$out/build" "$out/size-board" --upstream "$awfy" --size-board`
+Run `awfy_measure.py "$out/build" "$out/size-board" --upstream "$awfy" --size-board`
 on the lane's assigned CPUs. It verifies the same 14 names, inputs and expected
 results on all three harnesses, then uses GNU `strip --strip-all -R .comment` on each complete
 executable. Report one Hirsel/Rust ratio and one Hirsel/Goose ratio for the
@@ -97,7 +97,7 @@ matched ports in `pool-ports/rust`, compiled separately from the original
 Resid harness. Do not use original `Json` or `Storage` as pool denominators.
 
 ```sh
-python3 bench/awfy/measure.py "$out/build" "$out/pools-before" \
+python3 bench/awfy/awfy_measure.py "$out/build" "$out/pools-before" \
   --build-cpus "$build_cpus" --measure-cpus "$measure_cpus" --upstream "$awfy" --pool
 ```
 
@@ -118,7 +118,7 @@ Hirsel group entry points with the same configuration:
 ```sh
 taskset -c 16-17 python3 bench/awfy/arena.py "$out/arena" \
   --config core/langarena/rust/run.js --artifacts "$out/toolchain.json" --rust "$out/arena/rust"
-python3 bench/awfy/measure.py "$out/arena" "$out/arena-startup" --arena \
+python3 bench/awfy/awfy_measure.py "$out/arena" "$out/arena-startup" --arena \
   --build-cpus "$build_cpus" --measure-cpus "$measure_cpus"
 ```
 

@@ -114,7 +114,7 @@ def print_pass_costs(trace, top, baseline=None):
 
 
 def counted_build(directory, evidence, command, env):
-    sample = board.measure.core_measure.sample(command, evidence, env=env, cwd=directory, pmu_times=True)
+    sample = board.awfy_measure.core_measure.sample(command, evidence, env=env, cwd=directory, pmu_times=True)
     (evidence / "stdout").replace(evidence / "build.json")
     if sample["status"] != "ok" or not receipt.counter_ready(sample, "instructions:u"):
         raise ValueError(f"{evidence}: cold build needs a fully active instructions:u counter")

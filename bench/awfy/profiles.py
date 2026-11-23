@@ -7,7 +7,7 @@ from pathlib import Path
 import re
 import subprocess
 
-from measure import ROOT, measurement_slot, rows
+from awfy_measure import ROOT, measurement_slot, rows
 from bench_cpus import add_cpu_sets, sibling_cpus, smt_activity, validate_cpu_sets
 
 

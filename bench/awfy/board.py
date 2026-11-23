@@ -21,10 +21,10 @@ import tempfile
 import time
 
 import arena
+import awfy_measure
 import build
 import comparison
 import comparison_units
-import measure
 import receipt
 from receipt import measurement_slot, write as write_json
 from comparison import SPECTRALNORM, SPECTRALNORM_CHECKSUM, spectralnorm_marker
@@ -45,7 +45,7 @@ STARTUP = {
     "pool": ("List", "AWFY pool/index (List)"),
     "arena": ("CLBG::Nbody", "LangArena (CLBG::Nbody)"),
 }
-EXPECTED = {**measure.EXPECTED, "Startup": tuple(label for _, label in STARTUP.values())}
+EXPECTED = {**awfy_measure.EXPECTED, "Startup": tuple(label for _, label in STARTUP.values())}
 INSTRUCTION_LIMIT = Decimal(2)
 SIZE_LIMIT = 2048
 SIZE_ROW = "AWFY original-14 harness"
@@ -140,7 +140,7 @@ def rows_by_label(report):
 
 
 def inactive_counters(report):
-    suites = {title: suite for suite, title in measure.SUITES.items()}
+    suites = {title: suite for suite, title in awfy_measure.SUITES.items()}
     blocked = {}
     for row in report["rows"]:
         goal, name = row["goal"], row["row"]
@@ -164,7 +164,7 @@ def size_changes(reference, candidate):
             raise ValueError(f"size identity differs: {field}")
     left, right = (rows_by_label(report)["Size", SIZE_ROW] for report in (reference, candidate))
     changes = []
-    for side in measure.SIDES:
+    for side in awfy_measure.SIDES:
         previous, current = (row["samples"][side] for row in (left, right))
         for sample in (previous, current):
             if (sample["status"] != "ok" or type(sample["bytes"]) is not int or sample["bytes"] <= 0
@@ -200,7 +200,7 @@ def checkbox_changes(reference, candidate, metric):
 
 
 def instruction_keys():
-    return [f"{suite}/{name}" for suite, goal in measure.SUITES.items() for name in EXPECTED[goal]]
+    return [f"{suite}/{name}" for suite, goal in awfy_measure.SUITES.items() for name in EXPECTED[goal]]
 
 
 class Board:
@@ -352,7 +352,7 @@ class Board:
             (row["goal"], row["row"]) == (goal, name) for row in self.report["rows"]
         ):
             raise ValueError(f"unexpected or repeated row {label}")
-        sides = ("hirsel", "rust") if goal in ("Compile", "Checkbox") else measure.SIDES
+        sides = ("hirsel", "rust") if goal in ("Compile", "Checkbox") else awfy_measure.SIDES
         complete = True
         for side in sides:
             sample = samples.get(side, {})
@@ -399,7 +399,7 @@ def sample_runtime(row, commands, directory, samples_dir, env, siblings, index, 
             output = row["stdout"].encode().splitlines(keepends=True)
         else:
             with smt_activity(siblings, f"{label}/{side}") as busy:
-                sample = measure.core_measure.sample(command, target, env=env, cwd=directory, pmu_times=True)
+                sample = awfy_measure.core_measure.sample(command, target, env=env, cwd=directory, pmu_times=True)
             sample["smt_busy_percent"] = busy
             output = (target / "stdout").read_bytes().splitlines(keepends=True)
             sample["verified"] = sample["status"] in ("ok", "missing-counter") and any(
@@ -427,9 +427,9 @@ def matmul_notes(name):
 
 
 def runtime_rows(board, suite, directory, upstream, tools, *, config=None, startup=False, extended=False):
-    goal = measure.SUITES[suite]
-    rows = (measure.arena_rows(directory, config) if config is not None
-            else measure.runtime_cases(suite, directory, upstream))
+    goal = awfy_measure.SUITES[suite]
+    rows = (awfy_measure.arena_rows(directory, config) if config is not None
+            else awfy_measure.runtime_cases(suite, directory, upstream))
     if extended:
         rows = list(rows)
         if sorted(name for name, _ in rows) != sorted(EXPECTED[goal]):
@@ -462,12 +462,12 @@ def runtime_rows(board, suite, directory, upstream, tools, *, config=None, start
 
 
 def awfy_rows(board, out, upstream, tools):
-    originals = [(name, commands) for name, commands in measure.rows(out, False, upstream) if name != "Hello"]
+    originals = [(name, commands) for name, commands in awfy_measure.rows(out, False, upstream) if name != "Hello"]
     if sorted(dict(originals)) != sorted(EXPECTED["AWFY original"]) or len(originals) != 14:
         raise ValueError("the original board requires 14 distinct AWFY rows")
     verified = runtime_rows(board, "awfy", out, upstream, tools)
     if len(verified) == len(originals):
-        result = measure.verified_sizes(out, verified)
+        result = awfy_measure.verified_sizes(out, verified)
         board.report["size_measurement"] = {
             "verified_workloads": sorted(verified), "strip_version": result["strip_version"],
             "strip_flags": result["strip_flags"],
@@ -478,7 +478,7 @@ def awfy_rows(board, out, upstream, tools):
     else:
         board.report["failures"]["Size"] = "not all original harness results verified"
         board.save()
-    pools = list(measure.matched_pool_rows(out, upstream))
+    pools = list(awfy_measure.matched_pool_rows(out, upstream))
     if sorted(dict(pools)) != sorted(EXPECTED["AWFY pool/index"]) or len(pools) != 8:
         raise ValueError("the pool board requires eight distinct AWFY rows")
     runtime_rows(board, "pool", out, upstream, tools)
@@ -620,8 +620,8 @@ def compile_rows(board, out, prepared, fixture, tools):
         for side, command, cwd, executable in commands:
             target = out / f"{mode}-{side}"
             with smt_activity(siblings, f"{label}/{side}") as busy:
-                sample = measure.core_measure.sample(command, target, env=sample_env, cycles=True,
-                                                     cwd=cwd, pmu_times=True)
+                sample = awfy_measure.core_measure.sample(command, target, env=sample_env, cycles=True,
+                                                          cwd=cwd, pmu_times=True)
             sample["smt_busy_percent"] = busy
             samples[side] = sample
             if sample["status"] not in ("ok", "missing-counter"):
@@ -645,7 +645,7 @@ def compile_rows(board, out, prepared, fixture, tools):
             verify = verify_output([executable, config.name, name], out, env)
             (target / "verification").write_text(verify["stdout"] + verify["stderr"])
             marker = spectralnorm_marker(side, expected)
-            sample["verified"] = measure.matches_output(verify, marker)
+            sample["verified"] = awfy_measure.matches_output(verify, marker)
             if not sample["verified"]:
                 sample["status"] = "wrong-result"
             elif sample.get("std_lowered"):
@@ -749,7 +749,7 @@ def prepare_comparison_compile(out, recipe, args, artifacts, goose, packages, en
     plan = {
         side: (commands[side], rust if side == "rust" else out, images[side],
                cargo_scope(env) if side == "rust" else goose_env if side == "goose" else env, edit[side])
-        for side in measure.SIDES
+        for side in awfy_measure.SIDES
     }
     return plan, package
 
@@ -804,7 +804,7 @@ def goose_build_evidence(target, check, image):
 def compile_verification(out, recipe, side, image, mode, args, env):
     if recipe == "awfy-release":
         return {name: verify_output([image, *commands[side][0][1:]], out, env)
-                for name, commands in measure.runtime_cases("awfy", out, args.awfy)}
+                for name, commands in awfy_measure.runtime_cases("awfy", out, args.awfy)}
     checksum = SPECTRALNORM_CHECKSUM + (mode == "edit")
     config = out / f"fixture-{mode}.json"
     if not config.exists():
@@ -837,7 +837,7 @@ def measure_comparison_compile(evidence, out, recipe, prepared, args, modes):
     for mode in modes:
         mode_id = f"{recipe}/{mode}"
         samples = evidence["samples"][mode_id] = {}
-        order = measure.SIDES if mode == "cold" else measure.SIDES[::-1]
+        order = awfy_measure.SIDES if mode == "cold" else awfy_measure.SIDES[::-1]
         for side in order:
             require_comparison_window()
             command, cwd, image, env, edit = plan[side]
@@ -866,8 +866,8 @@ def measure_comparison_compile(evidence, out, recipe, prepared, args, modes):
                 dev_hirsel = side == "hirsel" and recipe == "arena-dev"
                 before = native_objects(out / "packages") if dev_hirsel else set()
                 with smt_activity(siblings, f"{mode_id}/{side}") as busy:
-                    sample = measure.core_measure.sample(command, target, env=env, cycles=True,
-                                                         cwd=cwd, pmu_times=True)
+                    sample = awfy_measure.core_measure.sample(command, target, env=env, cycles=True,
+                                                              cwd=cwd, pmu_times=True)
                 sample.update(meta, smt_busy_percent=busy)
                 if dev_hirsel:
                     sample["cranelift_library_objects_written"] = len(native_objects(out / "packages") - before)
@@ -1189,8 +1189,8 @@ def record_comparison_runtime(evidence, rows):
 
 
 def record_comparison_size(evidence, awfy, upstream, verified):
-    result = (measure.size_board(awfy, upstream) if verified is None
-              else measure.verified_sizes(awfy, sorted(verified)))
+    result = (awfy_measure.size_board(awfy, upstream) if verified is None
+              else awfy_measure.verified_sizes(awfy, sorted(verified)))
     evidence["size"] = {key: result[key] for key in ("strip_version", "strip_flags", "verified_workloads")}
     evidence["size"]["verified_workloads"].sort()
     evidence["size"]["anchor_present"] = anchor_present(evidence["commit"], "97ad0db8")

@@ -318,3 +318,83 @@ fn test_fork_cache_diff(parent: Dir, clock: Clock, random: Random, tasks: Tasks)
         Error(())
     }
 }
+
+fn fork_projection_steps(mut db: store.Db) -> u64 waits {
+    put_file(mut db, "s2", "beta")
+    let bounds = store.Plan(n_e: 1048576u64, s_e: 1048576u64, reply_max: 4096u64)
+    let version = record_call(mut db, bounds)
+    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    let b = store.main_branch(db)
+    let current_agent = fork_agent(0u8)
+    let candidate_agent = fork_agent(2u8)
+    let mut sections: List[String] = list.new()
+    list.push(mut sections, "s1")
+    let mut low = 0u64
+    let mut high = 4194304u64
+    while low < high {
+        let mid = low + (high - low) / 2
+        let diff = bound steps mid {
+            harness.fork_cache_diff(db, b, version, bounds, h, current_agent, candidate_agent)
+        }
+        match take diff {
+            Error(_) => {
+                low = mid + 1
+            },
+            Ok(Error(Overran)) => {
+                low = mid + 1
+            },
+            Ok(take got) => {
+                if !fork_diff_is(got, Some("s1"), sections) {
+                    fail("fork depth: incorrect cache diff")
+                }
+                high = mid
+            },
+        }
+    }
+    if low == 4194304u64 {
+        fail("fork depth: projection never completed")
+    }
+    low
+}
+
+// Each gateway fork adopts its selected prefix into a fresh session store.
+// Keep the same single entry at every cut. Even after 32 generations, the
+// same recorded call must project the same diff under the same step grant.
+@test
+fn test_fork_cache_diff_depth(parent: Dir, clock: Clock, random: Random, tasks: Tasks) -> Result[(), (u64, u64)] waits {
+    let mut root_name = string.with_capacity(32u64)
+    let root_dir = result.unwrap(host.mkdtemp(parent, mut root_name))
+    let root = answered_with(root_dir, clock, random, tasks, true, harness.Call(id: "c1", name: "bump", args: inline_text("{}")))
+    let mut prefix = result.unwrap(exported(root, 1u64))
+    result.unwrap(store.close(take root))
+    result.unwrap(std.dir.remove_all(parent, root_name))
+    let mut shallow = 0u64
+    let mut deep = 0u64
+    for depth in 1u64 .. 33u64 {
+        let mut name = string.with_capacity(32u64)
+        let dir = result.unwrap(host.mkdtemp(parent, mut name))
+        let mut db = result.unwrap(store.open(tasks, dir, clock, random, runner.triggers.law_options()))
+        result.unwrap(store.run_migration(mut db, tasks, code.describe(release_migrate)))
+        let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+        let adopted = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), harness.Refused] {
+            harness.adopt(mut tx, h, clone(prefix))
+        })
+        let Ok(Committed(_)) = adopted else {
+            fail("fork depth: adoption failed")
+        }
+        prefix = result.unwrap(exported(db, 1u64))
+        if depth == 1u64 {
+            shallow = fork_projection_steps(mut db)
+        }
+        if depth == 32u64 {
+            deep = fork_projection_steps(mut db)
+        }
+        result.unwrap(store.close(take db))
+        result.unwrap(std.dir.remove_all(parent, name))
+    }
+    if shallow == deep {
+        Ok(())
+    } else {
+        Error((shallow, deep))
+    }
+}

@@ -3270,6 +3270,7 @@ So no `Branch` value, `branch(db, name)` answer or CallId ever names an id whose
 **AP18. Cost of a live-head fork.**
 - The new branch's three roots are shares of an existing head's, so the set of row versions held by the participating roots is unchanged, and its account charge is 0 (AP15). It does no walk, no settle and no cut.
 - **Direct cost (v2.40 C-12).** A live-head fork costs one FORK frame (16 + 18 + n bytes), the drain of the queued prefix (step 7: every group already queued, each with its sync), one group sync for its own frame, one branch record and three Arc shares, independent of the tree's size. With the journal drained and below `checkpoint_bytes`, which is L44's fixture, that is **one group sync**, independent of the tree.
+- The writer binary-searches the live heads by id. At least 143 bytes per head count against the 16 MiB holder-record budget, so the search makes at most 17 comparisons. It follows no parent links. Between cuts, with capacity already reserved and the same roots and journal state, a fork, a single write and a point read at the child make at most three such searches.
 - **End-to-end cost when it crosses the threshold.** The call also includes the threshold cut's whole pause T (AP16, with t_remove), and the cut's outcome is as **Threshold cuts** above says. The two costs are stated separately, and L44 measures only the direct one.
 
 **AP19. FORK payload (kind 0x0013, MUST), in a journal segment:**

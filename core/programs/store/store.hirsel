@@ -301,16 +301,20 @@ fn record_memory_cut(mut db: Db, live: u64, pages: u64) -> Ticket {
     Ticket(store: db.store, open: 0, mark: Cut(db.checkpointed))
 }
 
+fn branch_slot(db: Db, id: u32) -> Result[u64, u64] {
+    if id == 0 {
+        return Ok(0)
+    }
+    list.binary_search_by(db.heads, scoped fn(h: Head) -> Order {
+        order.compare(h.id, id)
+    })
+}
+
 fn branch_index(db: Db, b: Branch) -> Result[u64, Error] {
     if !same(b.store, db.store) {
         return Error(Foreign)
     }
-    for i in 0u64 .. list.len(db.heads) {
-        if db.heads[i].id == b.id {
-            return Ok(i)
-        }
-    }
-    Error(Missing("branch"))
+    Ok(branch_slot(db, b.id) ?=> |_| Missing("branch"))
 }
 
 fn head_snapshot(db: Db, i: u64) -> Snapshot {
@@ -767,19 +771,15 @@ pub fn fork(mut db: Db, name: String, from: Snapshot) -> Result[(Branch, Ticket)
     // still live, gives the at its CallInfo continues from (section 1.7).
     let mut at = db.heads[0].at
     let mut live: Option[u64] = None
-    for slot in 0u64 .. list.len(db.heads) {
+    if let Ok(slot) = branch_slot(db, from.branch) {
         let h = db.heads[slot]
-        if h.id != from.branch {
-            continue
-        }
         at = h.at
         if h.head == from.head && tree_stamp(h.roots.collections) == tree_stamp(from.roots.collections) && tree_stamp(h.roots.streams) == tree_stamp(from.roots.streams) && tree_stamp(h.roots.catalog) == tree_stamp(from.roots.catalog) {
             live = Some(slot)
         }
-        break
     }
-    if let Some(parent) = live {
-        return fork_live(mut db, name, parent)
+    if let Some(slot) = live {
+        return fork_live(mut db, name, slot)
     }
     db.next_branch += 1
     let (take head, take indexed_name) = disk_allocation(scoped fn() -> Result[(Head, String), Error] {

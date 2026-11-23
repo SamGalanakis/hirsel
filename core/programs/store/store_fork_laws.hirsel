@@ -502,6 +502,83 @@ pub fn law_fork_shared_head(c: Clock) -> bool waits {
     }
 }
 
+fn fork_tip_round(mut db: Db, from: Snapshot, rows: Table[u64, u64]) -> Result[bool, Error] waits {
+    let (child, _) = fork(mut db, "measured", from)?
+    let before = accounts(db).logical
+    let written = run_on(mut db, child, None, scoped fn(mut tx: Tx) -> Result[(), Error] {
+        put(mut tx, rows, 1, 2)
+    })?
+    let Committed(_) = written else {
+        return Ok(false)
+    }
+    let tip = snapshot_of(db, child)?
+    Ok(get(tip, shape(rows), 1)? == Some(2u64) && get(from, shape(rows), 1)? == Some(1u64) && accounts(db).logical == before + 94)
+}
+
+fn fork_tip_fits(c: Clock, depth: u64, steps: u64) -> bool waits {
+    let mut db = test_db(c, 1073741824)
+    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
+    let rows = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    if !typed_put(mut db, rows, 1, 1) {
+        fail("fork depth: fixture write")
+    }
+    // Give both runs the same live branch set and tree. Only the fork source
+    // changes. The new branch uses the same id, slot and name in each run.
+    let mut source = main_branch(db)
+    let mut tip = source
+    for id in 1u64 .. 33 {
+        let from = result.unwrap(snapshot_of(db, tip))
+        let name = result.unwrap(disk_path("depth-", id, ""))
+        let (child, _) = result.unwrap(fork(mut db, name, from))
+        tip = child
+        if id == depth {
+            source = child
+        }
+    }
+    let from = result.unwrap(snapshot_of(db, source))
+    let owned = take db
+    let measured = bound steps steps {
+        let mut active = take owned
+        fork_tip_round(mut active, from, rows)
+    }
+    match take measured {
+        Error(_) => false,
+        Ok(Ok(true)) => true,
+        _ => fail("fork depth: fork, write or read failed"),
+    }
+}
+
+fn fork_tip_steps(c: Clock, depth: u64) -> u64 waits {
+    let mut low = 0u64
+    let mut high = 65536u64
+    if !fork_tip_fits(c, depth, high) {
+        fail("fork depth: no successful probe")
+    }
+    while low < high {
+        let mid = low + (high - low) / 2
+        if fork_tip_fits(c, depth, mid) {
+            high = mid
+        } else {
+            low = mid + 1
+        }
+    }
+    low
+}
+
+// STORE-SPEC §11.13 AP18: a live-head fork does no ancestry walk. With
+// identical roots and no cut, the fork, put and get may differ by at most
+// 32 metered steps for the variation in the binary search for the source.
+@test
+fn test_fork_depth(c: Clock) -> Result[(), (u64, u64)] waits {
+    let shallow = fork_tip_steps(c, 1)
+    let deep = fork_tip_steps(c, 32)
+    if deep <= shallow + 32 && shallow <= deep + 32 {
+        Ok(())
+    } else {
+        Error((shallow, deep))
+    }
+}
+
 // L27(c). Adding the reader's older version would cost 448 bytes,
 // one more than the available 447. The refused cut consumes its branch id.
 pub fn law_fork_old_snapshot(c: Clock) -> bool waits {

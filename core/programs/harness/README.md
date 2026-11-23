@@ -364,6 +364,11 @@ options and the idle time.
   session's store, then adds its group and its catalog row; a repeated key
   returns the same id, and an id is never reused. `Adopt` takes a fork's
   exported prefix.
+- A fork copies the selected prefix, including its frames and cut markers,
+  into a fresh store. Its work depends on that prefix. `fork_cache_diff` reads
+  the new store's manifest and journal to reconstruct the recorded call's base.
+  For equal prefixes and local replay histories, neither operation's cost
+  grows with the number of prior session forks.
 - `route(door, id)` wakes the session, starting its place if it is unloaded,
   and returns a lease whose status holds its address. The lease does not hold
   the place; a client's session does. Wire calls go to the place itself. A

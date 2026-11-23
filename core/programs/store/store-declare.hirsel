@@ -1,0 +1,316 @@
+pub type Mode = Migrate | Open | Follower
+
+type DeclarationBase {
+    store: StoreId,
+    opened: u64,
+    version: u64,
+    stamp: u64,
+    changes: u64,
+    live: u64
+}
+
+pub opaque type Declare {
+    mode: Mode,
+    base: DeclarationBase,
+    plan: SchemaPlan,
+    tables: Map[u32, bool],
+    indexes: Map[u32, ()],
+    failed: bool,
+    versioned: bool
+}
+
+pub opaque type TableDecl[K, V] {
+    base: DeclarationBase,
+    handle: Table[K, V]
+}
+
+fn declaration_base(db: Db) -> DeclarationBase {
+    DeclarationBase(store: db.store, opened: open_number(db), version: db.heads[0].head, stamp: db.next_node, changes: db.changes, live: db.resident)
+}
+
+fn follower_base(f: Follower) -> DeclarationBase {
+    DeclarationBase(store: f.capture.store, opened: f.open, version: f.capture.state.tips[0].head, stamp: f.capture.watermark, changes: 0, live: f.capture.resident)
+}
+
+fn same_declaration_base(a: DeclarationBase, b: DeclarationBase) -> bool {
+    same(a.store, b.store) && a.opened == b.opened && a.version == b.version && a.stamp == b.stamp && a.changes == b.changes && a.live == b.live
+}
+
+fn new_declaration(mode: Mode, base: DeclarationBase, take plan: SchemaPlan, versioned: bool) -> Declare {
+    Declare(mode: mode, base: base, plan: take plan, tables: map.new(), indexes: map.new(), failed: false, versioned: versioned)
+}
+
+pub fn declare(db: Db, mode: Mode) -> Result[Declare, Error] {
+    healthy(db)?
+    match mode {
+        Follower => Error(Foreign),
+        Migrate => {
+            require_memory_collections(store_has_tiered(db), Migrate)?
+            Ok(new_declaration(mode, declaration_base(db), schema_plan(db), is_disk(db)))
+        },
+        Open => Ok(new_declaration(mode, declaration_base(db), schema_plan(db), is_disk(db))),
+    }
+}
+
+pub fn declare_follower(f: Follower) -> Declare {
+    let capture = view f.capture
+    let plan = SchemaPlan(store: capture.store, roots: share_roots(capture.state.tips[0].roots), next_node: capture.watermark, next_table: capture.state.next_table, live: capture.resident, ceiling: f.ceiling, retained: false, changed: false, bindings: list.new())
+    new_declaration(Follower, follower_base(f), take plan, true)
+}
+
+pub fn declare_migration(db: Db, tasks: Tasks, configure: StaticFn[fn(mut Migration) -> Result[(), Error] waits]) -> Result[Declare, Error] waits {
+    require_memory_collections(store_has_tiered(db), Migrate)?
+    let staged = stage_migration(db, tasks, configure)?
+    let StagedMigration(plan: take plan) = take staged
+    Ok(new_declaration(Migrate, declaration_base(db), take plan, is_disk(db)))
+}
+
+fn declaration_name(name: String) -> Result[(), Error] {
+    if std.string.starts_with(name, "hirsel.") {
+        return Error(Missing(named(name)?))
+    }
+    Ok(())
+}
+
+pub fn declare_table[K, V](mut d: Declare, name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[TableDecl[K, V], Error] {
+    if d.failed {
+        return Error(MigrationFault)
+    }
+    d.failed = true
+    declaration_name(name)?
+    let lookup_key = table_key(name)?
+    let exists = match get_page_row(d.plan.roots.catalog, lookup_key) {
+        Some(record) => {
+            let id: u32 = int.truncate(read_le(record, 1, 4))
+            if map.contains(d.tables, id) {
+                return Error(Exists(named(name)?))
+            }
+            true
+        },
+        None => false,
+    }
+    let handle = match d.mode {
+        Migrate => {
+            if !exists {
+                stage_create_table(mut d.plan, spec(named(name)?, key, value))?
+            }
+            stage_table(mut d.plan, name, key, value)?
+        },
+        _ => match catalog_handle(d.plan.store, d.plan.roots.catalog, named(name)?, key, value) {
+            Error(Schema(n)) if n != 0 => return Error(Missing("schema")),
+            Error(take problem) => return Error(take problem),
+            Ok(take bound_table) => take bound_table,
+        },
+    }
+    map.insert(mut d.tables, handle.id, false)
+    d.failed = false
+    Ok(TableDecl(base: d.base, handle: take handle))
+}
+
+fn active_table[K, V](d: Declare, t: TableDecl[K, V]) -> Result[(), Error] {
+    if d.failed {
+        return Error(MigrationFault)
+    }
+    if !same_declaration_base(d.base, t.base) || option.copied(map.get(d.tables, t.handle.id)) != Some(false) {
+        return Error(Foreign)
+    }
+    let record = catalog_entry_in(d.plan.roots.catalog, t.handle.catalog_key)?
+    if record.id != t.handle.id || record.key != t.handle.readers.schemas.key {
+        return Error(Foreign)
+    }
+    for schema in record.schemas {
+        if schema.number == t.handle.readers.current && schema.schema == t.handle.readers.schemas.value {
+            return Ok(())
+        }
+    }
+    Error(Foreign)
+}
+
+fn declaration_index_name(key: Bytes) -> Result[String, Error] {
+    let raw = copied(list.slice(key, 5, list.len(key)))?
+    let name = string.from_utf8(take raw) ?=> |_| malformed(0)
+    Ok(take name)
+}
+
+fn remove_declared_index(mut plan: SchemaPlan, key: Bytes, record: Catalog) -> Result[(), Error] {
+    let mut roots = share_roots(plan.roots)
+    let charge = remove_store_collection(mut roots.collections, record.id, mut plan.next_node)?
+    let mut live = plan.live
+    if !plan.retained {
+        let Some(raw) = get_page_row(roots.catalog, key) else { return Error(Stale(record.id)) }
+        live = int.saturating_sub(live, charge + entry(key, raw))
+    }
+    remove_store_row(mut roots.catalog, key, mut plan.next_node)?
+    let next_table = plan.next_table
+    keep_schema(mut plan, take roots, live, next_table)
+}
+
+pub fn declare_index[J, K, V](mut d: Declare, t: TableDecl[K, V], name: String, by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J]) -> Result[Index[J, K, V], Error] {
+    active_table(d, t)?
+    d.failed = true
+    declaration_name(name)?
+    let lookup_key = catalog_index_key(t.handle.id, name)?
+    let description = std.codec.key_schema(key) ?=> |_| Schema(0)
+    let revision = if d.versioned {
+        let Some(hash) = code.revision(by) else { return Error(Missing("revision")) }
+        copied(hash)?
+    } else {
+        list.new()
+    }
+    let existing = match get_page_row(d.plan.roots.catalog, lookup_key) {
+        Some(raw) => Some(decode_catalog(raw)?),
+        None => None,
+    }
+    let rebuild = match take existing {
+        None => {
+            if let Migrate = d.mode { true } else { return Error(Missing(named(name)?)) }
+        },
+        Some(take record) => {
+            if map.contains(d.indexes, record.id) {
+                return Error(Exists(named(name)?))
+            }
+            if record.by != code.identity(by) || record.key != description || record.revision != revision {
+                if let Migrate = d.mode {
+                    remove_declared_index(mut d.plan, lookup_key, record)?
+                    true
+                } else if record.key != description {
+                    return Error(Schema(0))
+                } else {
+                    return Error(Changed(named(name)?))
+                }
+            } else {
+                false
+            }
+        },
+    }
+    if rebuild {
+        stage_versioned_index(mut d.plan, t.handle, name, by, key, take revision)?
+    }
+    let (take address, take record) = read_catalog_index(d.plan.store, d.plan.roots.catalog, t.handle, name, by, key)?
+    let handle = catalog_index_handle(d.plan.roots.catalog, t.handle, record, take address, key)?
+    match d.mode {
+        Follower => (),
+        _ => list.push(mut d.plan.bindings, bind_index(t.handle, record, by, key)),
+    }
+    map.insert(mut d.indexes, record.id, ())
+    d.failed = false
+    Ok(take handle)
+}
+
+pub fn finish[K, V](mut d: Declare, take t: TableDecl[K, V]) -> Result[Table[K, V], Error] {
+    active_table(d, t)?
+    d.failed = true
+    let table_id = t.handle.id
+    let high = index_prefix(table_id + 1)?
+    let mut cursor = byte_cursor(d.plan.roots.catalog, Included(index_prefix(table_id)?), high)?
+    while let Some((take key, take raw)) = next_bytes(mut cursor)? {
+        let record = decode_catalog(raw)?
+        if !map.contains(d.indexes, record.id) {
+            if let Migrate = d.mode {
+                remove_declared_index(mut d.plan, key, record)?
+            } else {
+                return Error(Undeclared(declaration_index_name(key)?))
+            }
+        }
+    }
+    map.insert(mut d.tables, table_id, true)
+    d.failed = false
+    let TableDecl(handle: take handle, ..) = take t
+    Ok(take handle)
+}
+
+fn complete_declaration(d: Declare) -> Result[(), Error] {
+    if d.failed {
+        return Error(MigrationFault)
+    }
+    let mut upper: Bytes = list.new()
+    list.push(mut upper, 2u8)
+    let mut cursor = byte_cursor(d.plan.roots.catalog, Included(table_key("")?), upper)?
+    while let Some((take key, take raw)) = next_bytes(mut cursor)? {
+        let name_bytes = copied(list.slice(key, 1, list.len(key)))?
+        let name = string.from_utf8(take name_bytes) ?=> |_| malformed(0)
+        if !std.string.starts_with(name, "hirsel.") {
+            let id: u32 = int.truncate(read_le(raw, 1, 4))
+            if option.copied(map.get(d.tables, id)) != Some(true) {
+                return Error(Undeclared(take name))
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn seal(mut db: Db, take d: Declare) -> Result[Ticket, Error] waits {
+    healthy(db)?
+    if let Follower = d.mode { return Error(Foreign) }
+    if !same_declaration_base(d.base, declaration_base(db)) {
+        return Error(Foreign)
+    }
+    complete_declaration(d)?
+    let Declare(plan: take candidate, ..) = take d
+    let mut proposal = take candidate
+    let bindings = replace(mut proposal.bindings, list.new())
+    let mut registry = empty_index_registry()
+    for take binding in take bindings {
+        register_index(mut registry, take binding)
+    }
+    if proposal.changed {
+        let committed = publish_schema_plan(mut db, take proposal)?
+        db.indexes = take registry
+        return Ok(committed)
+    }
+    db.indexes = take registry
+    Ok(Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, db.heads[0].head)))
+}
+
+pub fn seal_follower(f: Follower, take d: Declare) -> Result[(), Error] {
+    let Follower = d.mode else { return Error(Foreign) }
+    if !same_declaration_base(d.base, follower_base(f)) {
+        return Error(Foreign)
+    }
+    complete_declaration(d)
+}
+
+pub fn migrate_table[K, V, K2, V2](mut m: Migration, from: String, take from_key: std.codec.Key[K], take from_value: std.codec.Codec[V],
+    to: String, take to_key: std.codec.Key[K2], take to_value: std.codec.Codec[V2], convert: fn(K, V) -> Result[Option[(K2, V2)], Capacity]) -> Result[(), Error] {
+    require_memory_collections(m.tiered, Migrate)?
+    declaration_name(from)?
+    declaration_name(to)?
+    let prior = catalog_handle(m.plan.store, m.plan.roots.catalog, named(from)?, from_key, from_value)?
+    stage_migrate(mut m.plan, take prior, spec(named(to)?, to_key, to_value), convert)
+}
+
+pub fn drop_named_table(mut m: Migration, name: String) -> Result[(), Error] {
+    require_memory_collections(m.tiered, Migrate)?
+    declaration_name(name)?
+    let key = table_key(name)?
+    let table_id = match get_page_row(m.plan.roots.catalog, key) {
+        Some(raw) => decode_catalog(raw)?.id,
+        None => return Error(Missing(named(name)?)),
+    }
+    stage_drop_table_key(mut m.plan, key, table_id)
+}
+
+pub fn rename_table(mut m: Migration, from: String, to: String) -> Result[(), Error] {
+    require_memory_collections(m.tiered, Migrate)?
+    declaration_name(from)?
+    declaration_name(to)?
+    let old_key = table_key(from)?
+    let new_key = table_key(to)?
+    let mut live = m.plan.live
+    let value = {
+        let Some(raw) = get_page_row(m.plan.roots.catalog, old_key) else {
+            return Error(Missing(named(from)?))
+        }
+        if old_key == new_key { return Ok(()) }
+        if let Some(_) = get_page_row(m.plan.roots.catalog, new_key) {
+            return Error(Exists(named(to)?))
+        }
+        if !m.plan.retained { live -= entry(old_key, raw) }
+        copied(raw)?
+    }
+    let base = share_roots(m.plan.roots)
+    let mut roots = catalog_insert(mut m.plan.next_node, base, new_key, value)?
+    remove_store_row(mut roots.catalog, old_key, mut m.plan.next_node)?
+    let next_table = m.plan.next_table
+    keep_schema(mut m.plan, take roots, live + entry(new_key, value), next_table)
+}

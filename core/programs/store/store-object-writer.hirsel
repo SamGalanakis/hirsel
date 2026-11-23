@@ -145,7 +145,7 @@ pub fn claim_of(db: Db) -> Result[Claim, Error] {
     Error(Missing("head"))
 }
 
-fn object_cut_state(mut db: Db, take delta: HolderDelta, seal: scoped fn(mut Bytes, DiskContext, u32) -> Result[(), Error] waits, target: Option[TargetLimits], pack_bytes: u64, limit: u64) -> Result[Ticket, Error] waits {
+fn object_cut_state(mut db: Db, take delta: HolderDelta, write_seal: scoped fn(mut Bytes, DiskContext, u32) -> Result[(), Error] waits, target: Option[TargetLimits], pack_bytes: u64, limit: u64) -> Result[Ticket, Error] waits {
     if let Some(_) = target { return Error(Unsupported(1)) }
     let last = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
     durable(mut db, last)?
@@ -168,7 +168,7 @@ fn object_cut_state(mut db: Db, take delta: HolderDelta, seal: scoped fn(mut Byt
         },
     }
     let mut lane = object_journal_begin(take owned)
-    let outcome = object_cut_work(mut db, mut lane, take delta, seal, pack_bytes, limit)
+    let outcome = object_cut_work(mut db, mut lane, take delta, write_seal, pack_bytes, limit)
     let return_io = object_journal_pause(take lane)
     if let Error(_) = channel.send(resume, take return_io) {
         return Error(Io(Closed))
@@ -192,7 +192,7 @@ fn object_cut_state(mut db: Db, take delta: HolderDelta, seal: scoped fn(mut Byt
     take outcome
 }
 
-fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: HolderDelta, seal: scoped fn(mut Bytes, DiskContext, u32) -> Result[(), Error] waits, pack_bytes: u64, limit: u64) -> Result[Ticket, Error] waits {
+fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: HolderDelta, write_seal: scoped fn(mut Bytes, DiskContext, u32) -> Result[(), Error] waits, pack_bytes: u64, limit: u64) -> Result[Ticket, Error] waits {
     let old = lane.register.head
     let seq = history_next_id(old.entry.seq)?
     let generation = history_next_id(db.checkpointed)?
@@ -216,7 +216,7 @@ fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: Holde
         }
         let mut buffers = cut_output_buffers(planned, manifest_bytes, limit)?
         let (take layout, take refs) = history_write_page_cut(mut lane.client, old, take planned, object_state(db).locator, mut buffers, mut workspace, now)?
-        fill_cut_manifest(mut buffers.out, db, delta, generation, seq, seq, layout, stamp, base.account, seal)?
+        fill_cut_manifest(mut buffers.out, db, delta, generation, seq, seq, layout, stamp, base.account, write_seal)?
         let (take pages, _) = disk_allocation(scoped fn() -> Result[(PageDisk, DiskRemovals), Error] {
             cut_retirement(layout, participants.holders, None, list.new(), seq, seq)
         })?

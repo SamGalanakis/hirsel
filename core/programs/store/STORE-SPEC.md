@@ -1,4 +1,6 @@
-# STORE-SPEC v2.61: the M4 store library (lane store-spec-1001)
+# STORE-SPEC v2.62: the M4 store library (lane store-spec-1001)
+
+v2.62 (W3a B2, m3-s1-read-api-2005): §1.2 stages a declaration from a Db view and seals it through a fresh mutable lend after an exact base check.
 
 v2.61 (lane w3b-spec-fix-2003, astra w3b-check-astra-1998's 14 findings on §14): text only, **not yet built**. It fixes all fourteen. COMMIT ops are decoded by (section, op), so a serve holding Log trims and its Replied put is valid (#1). `changes` gains bounds items, so an empty Log's moved bounds wake its reader, and a page clips trimmed spans to its range (#2, #3). The tail window is [n − min(t, n − f), n), and a rerun diffs the old registration against the new (#4). A trim is a cut and join that leaves no unary non-root branch, reading at most 2h − 1 pages and touching at most 4h (#5). Rollback layers inherit enclosing bounds and masks, and a fold keeps a revert's mask (#6, #9). The dropped list holds the full PagePtr and blobs (#7). The transaction size is exact and journal-only (#8). An inline Cell counts as one version per distinct stored value in a multi-root settle (#10). Cells and Logs publish through `published_cell` and `published_log` (#11). **D-Q2-8 is restored to Sam's ruling:** a Tiered Log's archive is its anchored packed leaves, their blob closure and the committed ops between them, inside §13.9's `archive` tree (#12). L83's oracle advances in seq order (#13), and costs count logical page visits per attempt (#14). The runner side is RUNNER-SPEC v2.47 with one `Changes.bounds` amendment (report of w3b-spec-fix-2003). Reversible.
 
@@ -1044,7 +1046,7 @@ pub opaque type Index[J, K, V, P]: shareable + send // StoreId, index id, catalo
 pub type IndexKind = Many | Unique
 
 pub type Mode = Migrate | Open | Follower
-pub opaque type Declare                          // not send: the mode, the Db (Migrate, Open) or Follower, the staged catalog, the index registry being built, the names declared
+pub opaque type Declare                          // not send: the mode, the captured base, the staged catalog, the index registry being built, the names declared
 pub opaque type TableDecl[K, V]                  // not send: a table being declared; unusable for reads and writes until `finish`
 pub fn declare_table[K, V](mut d: Declare, name: String, take key: codec.Key[K], take value: codec.Codec[V]) -> Result[TableDecl[K, V], Error]
 pub fn index[J, K, V](mut d: Declare, mut t: TableDecl[K, V], name: String, kind: IndexKind,
@@ -1055,9 +1057,10 @@ pub fn covering[J, K, V, P](mut d: Declare, mut t: TableDecl[K, V], name: String
 pub fn covering_row[J, K, V](mut d: Declare, mut t: TableDecl[K, V], name: String, kind: IndexKind,
         by: StaticFn[fn(K, V) -> Result[List[J], Capacity]], take key: codec.Key[J]) -> Result[Index[J, K, V, V], Error]   // the identity projection
 pub fn finish[K, V](mut d: Declare, take t: TableDecl[K, V]) -> Result[Table[K, V], Error]
-pub fn declare(mut db: Db, mode: Mode) -> Result[Declare, Error]         // Migrate or Open; Follower is `declare_follower`
+pub fn declare(db: Db, mode: Mode) -> Result[Declare, Error]             // Migrate or Open; Follower is `declare_follower`
 pub fn declare_follower(f: Follower) -> Declare
-pub fn seal(take d: Declare) -> Result[Ticket, Error] waits              // Migrate: the one schema commit; Open, Follower: checks undeclared names, commits nothing
+pub fn seal(mut db: Db, take d: Declare) -> Result[Ticket, Error] waits  // Migrate: the one schema commit; Open: checks undeclared names, commits nothing
+pub fn seal_follower(f: Follower, take d: Declare) -> Result[(), Error]  // checks undeclared names at the captured base
 
 pub opaque type Migration                        // not send: made for `on_migrate` only, in Migrate mode (AL4)
 pub fn migrate_table[K, V, K2, V2](mut m: Migration, from: String, take key: codec.Key[K], take value: codec.Codec[V],
@@ -1066,6 +1069,8 @@ pub fn migrate_table[K, V, K2, V2](mut m: Migration, from: String, take key: cod
 pub fn drop_table(mut m: Migration, name: String) -> Result[(), Error]
 pub fn rename_table(mut m: Migration, from: String, to: String) -> Result[(), Error]
 ```
+
+A `mut` lend lasts for one call (OWN-7, OWN-8), so `declare` captures a private base through a view. `seal` takes a fresh mutable lend and checks the exact base before publishing.
 
 **The registry (DX Q1, Fable 5).** Each `Db` and each `Follower` owns one index registry: a map from table id to the erased extractors and projections of that table's indexes, in declaration order. Each entry is an owning `own[send] fn(K, V) -> Result[(List[Bytes], Bytes), Capacity]` that returns the sorted, deduplicated encoded keys and the encoded payload. `seal` installs it. A write `Tx` made by `run`, `run_on` or `serve` borrows the registry of its `Db` for its lifetime. `put` and `delete` look up the table id there, once per call. A table id the registry lacks (a `Table` from another `Declare` of this open) is `Stale(id)`. So there is no epoch: the catalog and the registry change together, at `seal`, and a handle names only an id. A `Follower`'s registry has no extractors, and its Tx cannot be a write Tx.
 

@@ -3990,48 +3990,7 @@ pub fn migration_create_index[J, K, V](mut phase: Migration, t: Table[K, V], nam
 }
 
 fn stage_create_index[J, K, V](mut plan: SchemaPlan, t: Table[K, V], name: String, by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J]) -> Result[(), Error] {
-    if !same(plan.store, t.store) {
-        return Error(Foreign)
-    }
-    let k = catalog_index_key(t.id, name)?
-    if let Some(_) = get_page_row(plan.roots.catalog, k) {
-        return Error(Exists(named(name)?))
-    }
-    let mut meta = catalog_entry_in(plan.roots.catalog, t.catalog_key)?
-    if meta.id != t.id {
-        return Error(Stale(t.id))
-    }
-    let id = plan.next_table
-    let c = Catalog(kind: 2, id: id, owner: t.id, epoch: 1, key: (std.codec.key_schema(key) ?=> |_| Schema(0)), schemas: list.new(), next: 0, by: copied(code.identity(by))?, revision: list.new())
-    let raw = encode_catalog(c)?
-    let mut roots = share_roots(plan.roots)
-    let mut live = int.saturating_add(126, catalog_recharge(plan.live, plan.roots, k, raw, plan.retained))
-    let mut backfill: List[std.page.Row] = list.new()
-    let source = match std.page.collection_child(plan.roots.collections.root, prefix(t.id)?) {
-        Some(root) => arc.share(root),
-        None => return Error(Stale(t.id)),
-    }
-    let mut rows = std.page.cursor_open(source, None, true, false)
-    while let Some(item) = std.page.cursor_next(mut rows) {
-        let value = row_value(t.readers, t.id, item.value)?
-        let j = capacity((code.callable(by))(value))?
-        let mut encoded_index = encode_key(key, j)?
-        list.append(mut encoded_index, item.key)
-        if list.len(encoded_index) > 4092 {
-            return Error(Limit(Key))
-        }
-        let charge = 62 + round8(4 + list.len(encoded_index))
-        live = int.saturating_add(live, charge)
-        list.push(mut backfill, std.page.Row(key: take encoded_index, value: list.new(), charge: charge))
-    }
-    sort_bulk_rows(mut backfill)?
-    bulk_store_collection(mut roots.collections, id, 2, backfill, mut plan.next_node)?
-    roots = catalog_insert(mut plan.next_node, roots, k, raw)?
-    meta.epoch += 1
-    let changed = encode_catalog(meta)?
-    live = catalog_recharge(live, plan.roots, t.catalog_key, changed, plan.retained)
-    roots = catalog_insert(mut plan.next_node, roots, t.catalog_key, changed)?
-    keep_schema(mut plan, take roots, live, id + 1)
+    stage_versioned_index(mut plan, t, name, by, key, list.new())
 }
 
 pub fn index[J, K, V](mut db: Db, t: Table[K, V], name: String, by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J]) -> Result[Index[J, K, V], Error] {
@@ -4102,9 +4061,13 @@ fn stage_drop_table[K, V](mut plan: SchemaPlan, take t: Table[K, V]) -> Result[(
     if meta.id != t.id {
         return Error(Stale(t.id))
     }
-    let indexes = index_catalog_in(plan.roots.catalog, t.id)?
+    stage_drop_table_key(mut plan, t.catalog_key, t.id)
+}
+
+fn stage_drop_table_key(mut plan: SchemaPlan, catalog_key: Bytes, table_id: u32) -> Result[(), Error] {
+    let indexes = index_catalog_in(plan.roots.catalog, table_id)?
     let mut ids: List[u32] = list.new()
-    list.push(mut ids, t.id)
+    list.push(mut ids, table_id)
     for ix in indexes {
         list.push(mut ids, ix.id)
     }
@@ -4116,8 +4079,8 @@ fn stage_drop_table[K, V](mut plan: SchemaPlan, take t: Table[K, V]) -> Result[(
             live = int.saturating_sub(live, charge)
         }
     }
-    let low = index_prefix(t.id)?
-    let high = index_prefix(t.id + 1)?
+    let low = index_prefix(table_id)?
+    let high = index_prefix(table_id + 1)?
     let mut cursor = byte_cursor(roots.catalog, Included(take low), high)?
     while let Some((k, v)) = next_bytes(mut cursor)? {
         if !plan.retained {
@@ -4125,12 +4088,12 @@ fn stage_drop_table[K, V](mut plan: SchemaPlan, take t: Table[K, V]) -> Result[(
         }
         remove_store_row(mut roots.catalog, k, mut plan.next_node)?
     }
-    if let Some(raw) = get_page_row(plan.roots.catalog, t.catalog_key) {
+    if let Some(raw) = get_page_row(plan.roots.catalog, catalog_key) {
         if !plan.retained {
-            live = int.saturating_sub(live, entry(t.catalog_key, raw))
+            live = int.saturating_sub(live, entry(catalog_key, raw))
         }
     }
-    remove_store_row(mut roots.catalog, t.catalog_key, mut plan.next_node)?
+    remove_store_row(mut roots.catalog, catalog_key, mut plan.next_node)?
     let next_id = plan.next_table
     keep_schema(mut plan, take roots, live, next_id)
 }
@@ -6756,7 +6719,7 @@ fn cut_manifest_size(db: Db, delta: HolderDelta) -> u64 {
     page_manifest_file_size(MANIFEST_FIXED_BYTES + records, db.fence)
 }
 
-fn fill_cut_manifest(mut raw: Bytes, db: Db, delta: HolderDelta, generation: u64, seq: u64, prev_first: u64, layout: PagedCutLayout, next_stamp: u64, account: u64, seal: scoped fn(mut Bytes, DiskContext, u32) -> Result[(), Error] waits) -> Result[(), Error] waits {
+fn fill_cut_manifest(mut raw: Bytes, db: Db, delta: HolderDelta, generation: u64, seq: u64, prev_first: u64, layout: PagedCutLayout, next_stamp: u64, account: u64, write_seal: scoped fn(mut Bytes, DiskContext, u32) -> Result[(), Error] waits) -> Result[(), Error] waits {
     let tables = match delta {
         ReplaceMain(main, _) => main.tables,
         _ => db.next_table
@@ -6791,7 +6754,7 @@ fn fill_cut_manifest(mut raw: Bytes, db: Db, delta: HolderDelta, generation: u64
     visit_cut_pins(db, delta, mut raw, scoped fn(mut buffer: Bytes, held: Pin) -> Result[(), Error] {
         append_page_manifest_pin(mut buffer, held.name, held.branch, held.version, published_page_roots(layout.locations, held.roots), held.watermark)
     })?
-    seal(mut raw, context, db.fence)?
+    write_seal(mut raw, context, db.fence)?
     if let Some(held_claim) = claim {
         append_bucket_frames(mut raw, context, held_claim)?
     }
@@ -6859,25 +6822,25 @@ type CutTiming {
     drain_groups: u64
 }
 
-fn disk_cut_state(mut db: Db, take delta: HolderDelta, seal: scoped fn(mut Bytes, DiskContext, u32) -> Result[(), Error] waits) -> Result[Ticket, Error] waits {
+fn disk_cut_state(mut db: Db, take delta: HolderDelta, write_seal: scoped fn(mut Bytes, DiskContext, u32) -> Result[(), Error] waits) -> Result[Ticket, Error] waits {
     let mut timing: Option[CutTiming] = None
-    disk_cut_timed(mut db, take delta, seal, mut timing)
+    disk_cut_timed(mut db, take delta, write_seal, mut timing)
 }
 
-fn disk_cut_timed(mut db: Db, take delta: HolderDelta, seal: scoped fn(mut Bytes, DiskContext, u32) -> Result[(), Error] waits, mut timing: Option[CutTiming]) -> Result[Ticket, Error] waits {
+fn disk_cut_timed(mut db: Db, take delta: HolderDelta, write_seal: scoped fn(mut Bytes, DiskContext, u32) -> Result[(), Error] waits, mut timing: Option[CutTiming]) -> Result[Ticket, Error] waits {
     let target = db_target(db)
     let pack_bytes = match target {
         Some(wanted) => wanted.pack,
         None => disk_state(db).options.pack_bytes,
     }
     let limit = order.max(pack_bytes, page_manifest_file_size(MANIFEST_LIMIT, 1))
-    disk_cut_with_limit(mut db, take delta, seal, target, pack_bytes, limit, mut timing)
+    disk_cut_with_limit(mut db, take delta, write_seal, target, pack_bytes, limit, mut timing)
 }
 
-fn disk_cut_with_limit(mut db: Db, take delta: HolderDelta, seal: scoped fn(mut Bytes, DiskContext, u32) -> Result[(), Error] waits, target: Option[TargetLimits], pack_bytes: u64, limit: u64, mut timing: Option[CutTiming]) -> Result[Ticket, Error] waits {
+fn disk_cut_with_limit(mut db: Db, take delta: HolderDelta, write_seal: scoped fn(mut Bytes, DiskContext, u32) -> Result[(), Error] waits, target: Option[TargetLimits], pack_bytes: u64, limit: u64, mut timing: Option[CutTiming]) -> Result[Ticket, Error] waits {
     healthy(db)?
     if object_writer_open(db) {
-        return object_cut_state(mut db, take delta, seal, target, pack_bytes, limit)
+        return object_cut_state(mut db, take delta, write_seal, target, pack_bytes, limit)
     }
     edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
         state.since_cut = 0
@@ -6936,7 +6899,7 @@ fn disk_cut_with_limit(mut db: Db, take delta: HolderDelta, seal: scoped fn(mut 
         let (take pages, take removals) = disk_allocation(scoped fn() -> Result[(PageDisk, DiskRemovals), Error] {
             cut_retirement(layout, holders, disk_state(db).lease, disk_state(db).scrubs, prev_first, seq)
         })?
-        fill_cut_manifest(mut manifest, db, delta, generation, seq, prev_first, layout, stamp, base.account, seal)?
+        fill_cut_manifest(mut manifest, db, delta, generation, seq, prev_first, layout, stamp, base.account, write_seal)?
         Ok(PreparedDiskCut(pages: take pages, removals: take removals, manifest: take manifest))
     })
     db.next_node = next_stamp - 1

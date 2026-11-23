@@ -1,0 +1,73 @@
+fn declaration_law_rename(mut m: Migration) -> Result[(), Error] {
+    rename_table(mut m, "items", "renamed")
+}
+
+@test
+fn test_declaration_seal(c: Clock, tasks: Tasks) -> Result[(), Error] waits {
+    let mut db = test_db(c, 1073741824)
+    let key = std.codec.key_u64()
+    let value = std.codec.of_u64()
+    let mut staged = declare(db, Migrate)?
+    let items = declare_table(mut staged, "items", key, value)?
+    let ix = declare_index(mut staged, items, "bucket", code.describe(bucket), key)?
+    let rows = finish(mut staged, take items)?
+    let omitted = declare_table(mut staged, "omitted", key, value)?
+    let _ = finish(mut staged, take omitted)?
+    if version(snapshot(db)) != 0 {
+        return Error(Foreign)
+    }
+    let _ = seal(mut db, take staged)?
+    if version(snapshot(db)) != 1 || !typed_put(mut db, rows, 7, 6) {
+        return Error(Foreign)
+    }
+    let mut found = find(snapshot(db), ix, Included(2), Included(2))?
+    if next(mut found)? != Some((7, 6)) || next(mut found)? != None {
+        return Error(Foreign)
+    }
+    let before = version(snapshot(db))
+    let mut refused = declare(db, Migrate)?
+    let extra = declare_table(mut refused, "extra", key, value)?
+    let _ = finish(mut refused, take extra)?
+    match seal(mut db, take refused) {
+        Error(Undeclared(name)) if name == "items" => (),
+        _ => return Error(Foreign),
+    }
+    if version(snapshot(db)) != before {
+        return Error(Foreign)
+    }
+    let mut opened = declare(db, Open)?
+    let opened_table = declare_table(mut opened, "extra", key, value)
+    match take opened_table {
+        Error(Missing(name)) if name == "extra" => (),
+        _ => return Error(Foreign),
+    }
+    let mut stale = declare(db, Open)?
+    let declared_items = declare_table(mut stale, "items", key, value)?
+    let _ = declare_index(mut stale, declared_items, "bucket", code.describe(bucket), key)?
+    let _ = finish(mut stale, take declared_items)?
+    let declared_omitted = declare_table(mut stale, "omitted", key, value)?
+    let _ = finish(mut stale, take declared_omitted)?
+    if !typed_put(mut db, rows, 8, 10) {
+        return Error(Foreign)
+    }
+    match seal(mut db, take stale) {
+        Error(Foreign) => (),
+        _ => return Error(Foreign),
+    }
+    let mut renamed = declare_migration(db, tasks, code.describe(declaration_law_rename))?
+    let table_decl = declare_table(mut renamed, "renamed", key, value)?
+    let _ = declare_index(mut renamed, table_decl, "bucket", code.describe(bucket), key)?
+    let new_handle = finish(mut renamed, take table_decl)?
+    let untouched = declare_table(mut renamed, "omitted", key, value)?
+    let _ = finish(mut renamed, take untouched)?
+    let pre_rename = snapshot(db)
+    let _ = seal(mut db, take renamed)?
+    let after = snapshot(db)
+    if version(after) != version(pre_rename) + 1 || get(after, new_handle, 7)? != Some(6) || get(pre_rename, rows, 7)? != Some(6) {
+        return Error(Foreign)
+    }
+    match get(after, rows, 7) {
+        Error(Stale(_)) => Ok(()),
+        _ => Error(Foreign),
+    }
+}

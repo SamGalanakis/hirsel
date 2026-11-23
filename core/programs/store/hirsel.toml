@@ -43,6 +43,7 @@ std = { major = 1 }
 "store-tx.hirsel" = "store"
 "store-tiered-refusals.hirsel" = "store"
 "store-index-registry.hirsel" = "store"
+"store-declare.hirsel" = "store"
 "main.hirsel" = "main"
 
 [program]
@@ -65,6 +66,7 @@ dirs = ["."]
 "store_put_laws.hirsel" = "store"
 "store_schema_laws.hirsel" = "store"
 "store_changes_laws.hirsel" = "store"
+"store_declare_laws.hirsel" = "store"
 "store_changes_page_law.hirsel" = "store"
 "store_fork_laws.hirsel" = "store"
 "store_read_laws.hirsel" = "store"

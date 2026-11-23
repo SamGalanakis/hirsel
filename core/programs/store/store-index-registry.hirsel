@@ -61,3 +61,48 @@ fn registered_index(tx: Tx, table_id: u32, schema: u16, record: Catalog) -> Resu
     }
     Error(Stale(table_id))
 }
+
+fn stage_versioned_index[J, K, V](mut plan: SchemaPlan, t: Table[K, V], name: String, by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J], take revision: Bytes) -> Result[(), Error] {
+    if !same(plan.store, t.store) {
+        return Error(Foreign)
+    }
+    let k = catalog_index_key(t.id, name)?
+    if let Some(_) = get_page_row(plan.roots.catalog, k) {
+        return Error(Exists(named(name)?))
+    }
+    let mut meta = catalog_entry_in(plan.roots.catalog, t.catalog_key)?
+    if meta.id != t.id {
+        return Error(Stale(t.id))
+    }
+    let id = plan.next_table
+    let c = Catalog(kind: 2, id: id, owner: t.id, epoch: 1, key: (std.codec.key_schema(key) ?=> |_| Schema(0)), schemas: list.new(), next: 0, by: copied(code.identity(by))?, revision: take revision)
+    let raw = encode_catalog(c)?
+    let mut roots = share_roots(plan.roots)
+    let mut live = int.saturating_add(126, catalog_recharge(plan.live, plan.roots, k, raw, plan.retained))
+    let mut backfill: List[std.page.Row] = list.new()
+    let source = match std.page.collection_child(plan.roots.collections.root, prefix(t.id)?) {
+        Some(root) => arc.share(root),
+        None => return Error(Stale(t.id)),
+    }
+    let mut rows = std.page.cursor_open(source, None, true, false)
+    while let Some(item) = std.page.cursor_next(mut rows) {
+        let value = row_value(t.readers, t.id, item.value)?
+        let j = capacity((code.callable(by))(value))?
+        let mut encoded_index = encode_key(key, j)?
+        list.append(mut encoded_index, item.key)
+        if list.len(encoded_index) > 4092 {
+            return Error(Limit(Key))
+        }
+        let charge = 62 + round8(4 + list.len(encoded_index))
+        live = int.saturating_add(live, charge)
+        list.push(mut backfill, std.page.Row(key: take encoded_index, value: list.new(), charge: charge))
+    }
+    sort_bulk_rows(mut backfill)?
+    bulk_store_collection(mut roots.collections, id, 2, backfill, mut plan.next_node)?
+    roots = catalog_insert(mut plan.next_node, roots, k, raw)?
+    meta.epoch += 1
+    let changed = encode_catalog(meta)?
+    live = catalog_recharge(live, plan.roots, t.catalog_key, changed, plan.retained)
+    roots = catalog_insert(mut plan.next_node, roots, t.catalog_key, changed)?
+    keep_schema(mut plan, take roots, live, id + 1)
+}

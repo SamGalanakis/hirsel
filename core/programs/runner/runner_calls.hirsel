@@ -265,7 +265,7 @@ fn is(a: runner.Outcome, b: runner.Outcome) -> bool {
     x == y
 }
 
-fn empty(inbox: Receiver[runner.Req]) -> bool {
+fn empty(inbox: Receiver[runner.HeadInput]) -> bool {
     match channel.try_receive(inbox) {
         Ok(_) => false,
         Error(_) => true,
@@ -312,7 +312,7 @@ const NEVER: u64 = 18446744073709551615u64
 // Each fixture gives its connections the same credential, so two
 // connections naming one stream still address the same durable position.
 type Conn = Socket(wire_client.Conn, Task[Result[(), std.wsock.Error]]) | Held(runner.FixtureOwner)
-type Drive: send { head: Sender[runner.Req], post: Sender[runner.PubIn], clock: Clock, tasks: Tasks, net: Net, random: Random, token: Bytes, accepted: Option[Receiver[()]] }
+type Drive: send { head: Sender[runner.HeadInput], post: Sender[runner.PubIn], clock: Clock, tasks: Tasks, net: Net, random: Random, token: Bytes, accepted: Option[Receiver[()]] }
 
 fn client_keys() -> List[Bytes] {
     let mut requested_keys: List[Bytes] = list.new()
@@ -416,13 +416,13 @@ fn served_on(take fresh: store.Db, c: Clock, tasks: Tasks, n: Net, r: Random, mu
     // The disk fixture drives one connection. Leave room in its existing root
     // budget for the journal worker and the activation cut's buffer.
     let driving_bytes = if store.is_disk(db) { 25165824u64 } else { 33554432u64 }
-    let (head, inbox): (Sender[runner.Req], Receiver[runner.Req]) = channel.new(64u64)
+    let (head, inbox): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(64u64)
     let mail = result.unwrap(runner.mailbox(4u64))
     let credential = ingress.credential(r)
     list.append(mut token, credential)
     let mut forwarding: Option[Task[()]] = None
     let (to_head, grouped_ack) = if grouped != 0u64 {
-        let (to, from): (Sender[runner.Req], Receiver[runner.Req]) = channel.new(64u64)
+        let (to, from): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(64u64)
         let (ack, hear): (Sender[()], Receiver[()]) = channel.new(grouped)
         let seed = Group(head: take head, from: take from, initial: grouped, accepted: take ack)
         forwarding = Some(task.spawn(tasks, bytes 65536u64, take seed, group))
@@ -486,9 +486,9 @@ fn cause_text(take prefix: String, cs: Causes) -> String {
 // Hold the initial concurrency group until every socket owner has admitted it.
 // V4 groups two independent streams; H1 groups both equal sends and the mismatch.
 // Subsequent requests pass through normally.
-type Group: send { head: Sender[runner.Req], from: Receiver[runner.Req], initial: u64, accepted: Sender[()] }
+type Group: send { head: Sender[runner.HeadInput], from: Receiver[runner.HeadInput], initial: u64, accepted: Sender[()] }
 fn group(take g: Group) -> () waits {
-    let mut initial: List[runner.Req] = list.new()
+    let mut initial: List[runner.HeadInput] = list.new()
     for _ in 0u64 .. g.initial {
         list.push(mut initial, result.unwrap(channel.receive(g.from)))
         let _ = channel.send(g.accepted, ())
@@ -1433,7 +1433,7 @@ fn drained(take fresh: store.Db, tasks: Tasks) -> bool waits {
     let fresh_request = drain_send(to, "new", 0u64, 42u64)
     let _ = take to
     let mail = result.unwrap(runner.mailbox(4u64))
-    result.unwrap(runner.place_head_requests(take db, code.describe(place), N_PLACE, code.describe(migrate), code.describe(handles), ManagedRequests(take from), take mail, tasks, 1048576u64))
+    result.unwrap(runner.place_head(take db, code.describe(place), N_PLACE, code.describe(migrate), code.describe(handles), take from, take mail, tasks, 1048576u64))
     let admitted = drain_answer(first, "held", 0u64)
     let joined = drain_answer(join, "held", 0u64)
     match (admitted, joined, drain_answer(fifo, "held", 1u64), drain_answer(fresh_request, "new", 0u64)) {
@@ -2179,7 +2179,7 @@ pub fn law_calls_deadline_held(c: Clock, r: Random, tasks: Tasks, n: Net) -> boo
 // - L15, a joined send takes a slot: with q = 0 a second send of a held position is
 //   Overloaded at once, and the first is Abandoned at its deadline (join_outside_account).
 pub fn law_calls_held_head(c: Clock, tasks: Tasks, n: Net, r: Random) -> bool waits {
-    let (head, inbox): (Sender[runner.Req], Receiver[runner.Req]) = channel.new(64u64)
+    let (head, inbox): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(64u64)
     let mail = result.unwrap(runner.mailbox(1u64))
     let post = runner.post(mail)
     let credential = ingress.credential(r)
@@ -2373,7 +2373,7 @@ fn migration_tables_absent(catalog: store.Schema) -> Result[bool, store.Error] {
 pub fn law_atomic_migration(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
     let options = disk_options()
     let db = result.unwrap(store.open(tasks, d, c, r, options))
-    let (_, inbox): (Sender[runner.Req], Receiver[runner.Req]) = channel.new(1)
+    let (_, inbox): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(1)
     let mail = result.unwrap(runner.mailbox(1))
     let opened = runner.place_head(take db, code.describe(place), N_PLACE,
         code.describe(migration_second_refuses), code.describe(handles), take inbox, take mail, tasks, 1048576)
@@ -2432,7 +2432,7 @@ fn note_place(mut r: NoteRegistry) -> Result[(), runner.RegisterError] {
     runner.transact(mut r, code.describe(note_revoke), 65536u64, 8192u64)
 }
 
-type NoteDriver: send { head: Sender[runner.Req] }
+type NoteDriver: send { head: Sender[runner.HeadInput] }
 
 fn note_send(d: NoteDriver, owner: u8, stream: u32, p: u64, f: StaticFn[fn(mut store.Tx, NoteHandles, runner.Caller, take u64) -> Result[u64, u32]], arg: u64) -> runner.Outcome waits {
     let mut subject: Bytes = list.new()
@@ -2441,7 +2441,7 @@ fn note_send(d: NoteDriver, owner: u8, stream: u32, p: u64, f: StaticFn[fn(mut s
     let name = result.unwrap(runner.stream_key(caller, stream))
     let key = key_of(code.identity(f), std.codec.of_u64(), reply())
     let (to, from): (Sender[runner.WireEvent], Receiver[runner.WireEvent]) = channel.new(1u64)
-    result.unwrap(channel.send(d.head, runner.head_request(take caller, take name, p, take key, u64_arg(arg), take to)))
+    result.unwrap(channel.send(d.head, RunRequest(runner.head_request(take caller, take name, p, take key, u64_arg(arg), take to))))
     let delivery = option.unwrap(runner.head_outcome(result.unwrap(channel.receive(from))))
     let runner.KeyedDone(outcome: take outcome, ..) = take delivery
     take outcome
@@ -2468,7 +2468,7 @@ pub fn law_duplicate_own_reply(c: Clock, r: Random, tasks: Tasks) -> bool waits 
         store.put(mut tx, hd.members, 2u64, 1u64)
     }))
     if let Committed(_) = seeded {} else { return false }
-    let (head, inbox): (Sender[runner.Req], Receiver[runner.Req]) = channel.new(4u64)
+    let (head, inbox): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(4u64)
     let mail = result.unwrap(runner.mailbox(4u64))
     let driving = task.spawn(tasks, bytes 1048576u64, NoteDriver(head: take head), drive_notes)
     let ended = runner.place_head(take db, code.describe(note_place), N_PLACE, code.describe(already_migrated), code.describe(note_handles), take inbox, take mail, tasks, 1048576u64)

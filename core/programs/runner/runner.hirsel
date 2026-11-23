@@ -2502,15 +2502,11 @@ fn publish[G: send, H: send](take p: Publish[G, H]) -> () waits {
 }
 
 // The head selects the release under the store's LOCK before opening handles.
-pub fn place_head[G: send, H: send](take db: store.Db, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits], handles: StaticFn[fn(store.Schema) -> Result[H, store.Error]], take inbox: Receiver[Req], take mail: Mailbox, tasks: Tasks, n_publisher: u64) -> Result[(), OpenError] waits {
-    place_head_selected(take db, Current(0u64), place, n_place, migrate, handles, DirectRequests(take inbox), take mail, tasks, n_publisher)
-}
-
-pub fn place_head_requests[G: send, H: send](take db: store.Db, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits], handles: StaticFn[fn(store.Schema) -> Result[H, store.Error]], take inbox: HeadRequests, take mail: Mailbox, tasks: Tasks, n_publisher: u64) -> Result[(), OpenError] waits {
+pub fn place_head[G: send, H: send](take db: store.Db, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits], handles: StaticFn[fn(store.Schema) -> Result[H, store.Error]], take inbox: Receiver[HeadInput], take mail: Mailbox, tasks: Tasks, n_publisher: u64) -> Result[(), OpenError] waits {
     place_head_selected(take db, Current(0u64), place, n_place, migrate, handles, take inbox, take mail, tasks, n_publisher)
 }
 
-pub fn place_head_selected[G: send, H: send](take db: store.Db, selection: Selection, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits], handles: StaticFn[fn(store.Schema) -> Result[H, store.Error]], take inbox: HeadRequests, take mail: Mailbox, tasks: Tasks, n_publisher: u64) -> Result[(), OpenError] waits {
+pub fn place_head_selected[G: send, H: send](take db: store.Db, selection: Selection, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits], handles: StaticFn[fn(store.Schema) -> Result[H, store.Error]], take inbox: Receiver[HeadInput], take mail: Mailbox, tasks: Tasks, n_publisher: u64) -> Result[(), OpenError] waits {
     let mut owned = take db
     let persistent = store.is_disk(owned)
     let prepared = head_prepare(mut owned, selection, persistent, place, migrate, handles, n_place, tasks)
@@ -2523,7 +2519,7 @@ pub fn place_head_selected[G: send, H: send](take db: store.Db, selection: Selec
 }
 
 fn run_head[G: send, H: send](take db: store.Db, take r: Registry[G, H], take replay_identity: Bytes, take h: H, take h2: H,
-    place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, take inbox: HeadRequests,
+    place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, take inbox: Receiver[HeadInput],
     take mail: Mailbox, tasks: Tasks, n_publisher: u64, take drain: Option[HeadDrain], take trigger_drive: Option[Box[TriggerDrive[G]]]) -> Result[Option[u64], OpenError] waits {
     let mut owned = take db
     let publishing = start_publisher(owned, place, n_place, take h2, take mail, tasks, n_publisher)
@@ -2532,14 +2528,12 @@ fn run_head[G: send, H: send](take db: store.Db, take r: Registry[G, H], take re
         Error(take problem) => { let _ = close_store(take owned); return Error(take problem) },
     }
     if let Some(control) = drain {
-        if let ManagedRequests(from) = inbox {
-            if !head_advance(control.events, from, Published(channel.sender(out))) {
-                let mut stopping = take publisher_task
-                task.cancel(mut stopping)
-                let _ = task.join(take stopping)
-                close_store(take owned)?
-                return Ok(None)
-            }
+        if !head_advance(control.events, inbox, Published(channel.sender(out))) {
+            let mut stopping = take publisher_task
+            task.cancel(mut stopping)
+            let _ = task.join(take stopping)
+            close_store(take owned)?
+            return Ok(None)
         }
     }
     let mut hd = Head(db: take owned, r: take r, replay_identity: take replay_identity, h: take h, out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: take trigger_drive)
@@ -2567,7 +2561,7 @@ fn relay_syncs(take relay: SyncRelay) -> () waits {
     }
 }
 
-type Forward: send { from: HeadRequests, to: Sender[HeadInput] }
+type Forward: send { from: Receiver[HeadInput], to: Sender[HeadInput] }
 
 // A head the caller feeds through its own channel gets one inbox that also carries the
 // relay's wakes. The caller closing its channel arrives as InboxEnded.
@@ -2585,10 +2579,10 @@ fn forward_requests(take forward: Forward) -> () waits {
 
 // A journaled store's syncs wake the head through its inbox (Head.wakes). A store
 // without a journal is durable at commit, so its groups release at close.
-fn head_wakes[G: send, H: send](mut hd: Head[G, H], take inbox: HeadRequests, drain: Option[HeadDrain], tasks: Tasks) -> (HeadRequests, List[Task[()]]) {
+fn head_wakes[G: send, H: send](mut hd: Head[G, H], take inbox: Receiver[HeadInput], drain: Option[HeadDrain], tasks: Tasks) -> (Receiver[HeadInput], List[Task[()]]) {
     let mut helpers: List[Task[()]] = list.new()
     let Some(take notices) = store.sync_notices(mut hd.db) else { return (take inbox, take helpers) }
-    let (to, woken): (Sender[HeadInput], HeadRequests) = match drain {
+    let (to, woken): (Sender[HeadInput], Receiver[HeadInput]) = match drain {
         Some(control) => (channel.sender(control.head_to), take inbox),
         None => {
             let (to, from): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(64u64)
@@ -2600,7 +2594,7 @@ fn head_wakes[G: send, H: send](mut hd: Head[G, H], take inbox: HeadRequests, dr
                     return (take original, take helpers)
                 },
             }
-            (take to, ManagedRequests(take from))
+            (take to, take from)
         },
     }
     let relay = SyncRelay(notices: take notices, to: take to)
@@ -2902,7 +2896,6 @@ type WritePause {
     work: Option[CutoverWork],
 }
 
-pub type HeadRequests: send = DirectRequests(Receiver[Req]) | ManagedRequests(Receiver[HeadInput])
 type HeadDrain {
     finish: Receiver[()], events: Sender[LifeEvent], window: Latest[Option[DrainWindow]],
     clock: Clock, tasks: Tasks, head_to: Sender[HeadInput], n_place: u64, cut: CutActivity, idle: Option[u64],
@@ -2981,7 +2974,7 @@ fn managed_head[G: send, H: send, S: send](take job: ManagedHead[G, H, S]) -> Re
         Error(cap) => { let _ = close_store(take db); return Error(Full(cap)) },
     }
     let closing = HeadDrain(finish: take finish_from, events: take to, window: take drain, clock: clock, tasks: tasks, head_to: take head_to, n_place: n_place, cut: take cut, idle: idle)
-    let ended = run_head(take db, take reg, take replay_identity, take local, take publisher_handles, place, n_place, ManagedRequests(take inbox), take mail, tasks, n_publisher, Some(take closing), take trigger_drive)
+    let ended = run_head(take db, take reg, take replay_identity, take local, take publisher_handles, place, n_place, take inbox, take mail, tasks, n_publisher, Some(take closing), take trigger_drive)
     let _ = take temporary
     match take ended {
         Ok(due) => Ok(due),
@@ -3352,14 +3345,11 @@ fn closing_at(drain: Latest[Option[DrainWindow]], clock: Clock) -> bool {
 
 fn drain_window(window: Option[DrainWindow]) -> Option[DrainWindow] { window }
 
-fn head_next(inbox: HeadRequests, waiting: bool) -> Option[HeadInput] waits {
-    match inbox {
-        DirectRequests(from) => if waiting {
-            match channel.receive(from) { Ok(take req) => Some(RunRequest(take req)), _ => None }
-        } else { match channel.try_receive(from) { Ok(take req) => Some(RunRequest(take req)), _ => None } },
-        ManagedRequests(from) => if waiting {
-            match channel.receive(from) { Ok(take req) => Some(take req), _ => None }
-        } else { match channel.try_receive(from) { Ok(take req) => Some(take req), _ => None } },
+fn head_next(inbox: Receiver[HeadInput], waiting: bool) -> Option[HeadInput] waits {
+    if waiting {
+        match channel.receive(inbox) { Ok(take req) => Some(take req), _ => None }
+    } else {
+        match channel.try_receive(inbox) { Ok(take req) => Some(take req), _ => None }
     }
 }
 
@@ -3373,7 +3363,7 @@ fn head_next(inbox: HeadRequests, waiting: bool) -> Option[HeadInput] waits {
 // behind.
 const SETTLE_PROBES: u64 = 64
 
-fn settle_probe(inbox: HeadRequests) -> Option[HeadInput] waits {
+fn settle_probe(inbox: Receiver[HeadInput]) -> Option[HeadInput] waits {
     let mut polls = 0u64
     while polls < SETTLE_PROBES {
         if let Some(take more) = head_next(inbox, false) { return Some(take more) }
@@ -3511,7 +3501,7 @@ fn head_is_idle[G: send, H: send](head: Head[G, H], idle: u64) -> Result[bool, s
     Ok(true)
 }
 
-fn serve_head[G: send, H: send](mut head: Head[G, H], take inbox: HeadRequests, take drain: Option[HeadDrain], mut tables: Option[triggers.Tables]) -> Result[bool, store.Error] waits {
+fn serve_head[G: send, H: send](mut head: Head[G, H], take inbox: Receiver[HeadInput], take drain: Option[HeadDrain], mut tables: Option[triggers.Tables]) -> Result[bool, store.Error] waits {
     let mut closed = false
     let mut settled = false
     let mut input: Option[HeadInput] = None
@@ -5982,7 +5972,6 @@ fn wire_post(mut work: WireWork) -> bool waits {
     while list.len(work.posts) != 0u64 {
         let req = list.remove(mut work.posts, 0u64)
         let sent = match head {
-            LegacyHead(to) => match channel.send(to, take req) { Ok(()) => true, Error(_) => false },
             LifecycleHead(to) => match channel.send(to, RunRequest(take req)) { Ok(()) => true, Error(_) => false },
         }
         if !sent { work.posts = list.new(); return false }
@@ -6759,23 +6748,17 @@ fn deadline_notice(take stream: Bytes, p: u64, generation: u64) -> WireEvent {
     wire_event(FromRunner(Notice(e: Expired(Tick(stream: take stream, p, generation)))))
 }
 
-type WireHead: send = LegacyHead(Sender[Req]) | LifecycleHead(Sender[HeadInput])
+type WireHead: send = LifecycleHead(Sender[HeadInput])
 type HeadOffer = Posted | InboxFull(Req) | InboxClosed
 
 fn copy_wire_head(head: WireHead) -> WireHead {
     match head {
-        LegacyHead(to) => LegacyHead(channel.sender(to)),
         LifecycleHead(to) => LifecycleHead(channel.sender(to)),
     }
 }
 
 fn try_head(head: WireHead, take req: Req) -> HeadOffer {
     match head {
-        LegacyHead(to) => match channel.try_send(to, take req) {
-            Ok(()) => Posted,
-            Error(Full(take back)) => InboxFull(take back),
-            Error(Closed(_)) => InboxClosed,
-        },
         LifecycleHead(to) => match channel.try_send(to, RunRequest(take req)) {
             Ok(()) => Posted,
             Error(Full(RunRequest(take back))) => InboxFull(take back),
@@ -6867,8 +6850,8 @@ pub opaque type WireSession[G: send, H: send, B: send]: send {
 // holds a content unit. The owner already counts the new instance as live.
 type WireResub: send { sub: u32, generation: u64, input: SubscriptionInput }
 
-pub fn wire_service[G: send, H: send, B: send](take reg: Registry[G, H], random: Random, take session_wire: Option[Wire[G, B]], head: Sender[Req], clock: Clock, tasks: Tasks, config: WireConfig, a: Args) -> Service[WireSession[G, H, B]] {
-    wire_service_with_head(take reg, random, take session_wire, LegacyHead(channel.sender(head)), clock, tasks, config, launch_target(a))
+pub fn wire_service[G: send, H: send, B: send](take reg: Registry[G, H], random: Random, take session_wire: Option[Wire[G, B]], head: Sender[HeadInput], clock: Clock, tasks: Tasks, config: WireConfig, a: Args) -> Service[WireSession[G, H, B]] {
+    wire_service_with_head(take reg, random, take session_wire, LifecycleHead(channel.sender(head)), clock, tasks, config, launch_target(a))
 }
 
 fn wire_service_with_head[G: send, H: send, B: send](take reg: Registry[G, H], random: Random, take session_wire: Option[Wire[G, B]], take head: WireHead, clock: Clock, tasks: Tasks, config: WireConfig, take target: String) -> Service[WireSession[G, H, B]] {
@@ -7967,14 +7950,14 @@ fn wire_finish[G: send, H: send, B: send](mut s: WireSession[G, H, B]) -> Option
 }
 
 // Production sessions build place inside the owner, after source admission.
-pub fn wire_place_service[G: send, H: send, B: send](place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], random: Random, take session_wire: Option[Wire[G, B]], head: Sender[Req], clock: Clock, tasks: Tasks, config: WireConfig, a: Args) -> Service[WireSession[G, H, B]] {
+pub fn wire_place_service[G: send, H: send, B: send](place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], random: Random, take session_wire: Option[Wire[G, B]], head: Sender[HeadInput], clock: Clock, tasks: Tasks, config: WireConfig, a: Args) -> Service[WireSession[G, H, B]] {
     wire_place_target(place, random, take session_wire, head, clock, tasks, config, launch_target(a))
 }
 
 // Embedded hosts and socket fixtures supply their launch target directly.
-pub fn wire_place_target[G: send, H: send, B: send](place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], random: Random, take session_wire: Option[Wire[G, B]], head: Sender[Req], clock: Clock, tasks: Tasks, config: WireConfig, take target: String) -> Service[WireSession[G, H, B]] {
+pub fn wire_place_target[G: send, H: send, B: send](place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], random: Random, take session_wire: Option[Wire[G, B]], head: Sender[HeadInput], clock: Clock, tasks: Tasks, config: WireConfig, take target: String) -> Service[WireSession[G, H, B]] {
     let initial: Registry[G, H] = registry()
-    let mut service = wire_service_with_head(take initial, random, take session_wire, LegacyHead(channel.sender(head)), clock, tasks, config, take target)
+    let mut service = wire_service_with_head(take initial, random, take session_wire, LifecycleHead(channel.sender(head)), clock, tasks, config, take target)
     service.context.place = Some(place)
     take service
 }

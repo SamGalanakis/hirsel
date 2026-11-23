@@ -68,7 +68,7 @@ fn place(mut r: Reg) -> Result[(), runner.RegisterError] {
     runner.retain_gone(mut r, retired())
 }
 
-type Server: send { net: Net, clock: Clock, tasks: Tasks, random: Random, args: Args, head: Sender[runner.Req], post: Sender[runner.PubIn] }
+type Server: send { net: Net, clock: Clock, tasks: Tasks, random: Random, args: Args, head: Sender[runner.HeadInput], post: Sender[runner.PubIn] }
 
 fn bind_test(random: Random, credential: Bytes) -> Result[runner.Caller, ()] {
     if list.len(credential) == 0u64 {
@@ -143,7 +143,7 @@ fn serve_place(n: Net, c: Clock, random: Random, tasks: Tasks, a: Args) -> Resul
     let caller = result.unwrap(runner.ingress.caller((), token))
     let stream = result.unwrap(runner.stream_key(caller, 77u32))
     let _ = result.unwrap(store.admit(mut db, stream, 0u64, store.request_digest(retired(), list.new())))
-    let (head, inbox): (Sender[runner.Req], Receiver[runner.Req]) = channel.new(64u64)
+    let (head, inbox): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(64u64)
     let mail = result.unwrap(runner.mailbox(64u64))
     let seed = Server(net: n, clock: c, tasks: tasks, random: random, args: a, head: take head, post: runner.post(mail))
     let h = task.spawn(tasks, bytes 1073741824u64, take seed, server)

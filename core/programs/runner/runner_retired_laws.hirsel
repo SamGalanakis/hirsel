@@ -365,7 +365,7 @@ fn retired_owner(take seed: RetiredOwner) -> Result[(), ()] waits {
 
 fn retired_session(c: Clock, r: Random, tasks: Tasks, end: u64) -> bool waits {
     let Mailbox(to: take to, from: take from, rounds: take rounds) = result.unwrap(mailbox(2u64))
-    let (head, heads): (Sender[Req], Receiver[Req]) = channel.new(1u64)
+    let (head, heads): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(1u64)
     let (down_to, down): (Sender[Down], Receiver[Down]) = channel.new(16u64)
     let (inbox, events): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(16u64)
     let reg = result.unwrap(placed(code.describe(subs_place), 1048576u64))

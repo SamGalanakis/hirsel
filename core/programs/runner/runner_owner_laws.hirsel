@@ -40,8 +40,8 @@ pub fn law_owner_take_wakes() -> bool {
 // No wire configuration, for unit drivers whose registry fixes `G` and binds nothing.
 fn no_wire[G: send]() -> Option[Wire[G, ()]] { None }
 
-fn wire_service_seed[G: send, H: send, B: send](take reg: Registry[G, H], random: Random, take session_wire: Option[Wire[G, B]], head: Sender[Req], clock: Clock, tasks: Tasks, config: WireConfig, take target: String) -> Service[WireSession[G, H, B]] {
-    wire_service_with_head(take reg, random, take session_wire, LegacyHead(channel.sender(head)), clock, tasks, config, take target)
+fn wire_service_seed[G: send, H: send, B: send](take reg: Registry[G, H], random: Random, take session_wire: Option[Wire[G, B]], head: Sender[HeadInput], clock: Clock, tasks: Tasks, config: WireConfig, take target: String) -> Service[WireSession[G, H, B]] {
+    wire_service_with_head(take reg, random, take session_wire, LifecycleHead(channel.sender(head)), clock, tasks, config, take target)
 }
 
 pub fn fixture_unsubscribe(owner: FixtureOwner, sub: u32) -> () waits {

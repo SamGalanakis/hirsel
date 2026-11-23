@@ -222,7 +222,7 @@ fn options() -> store.Options {
 // and searches the files after the last acknowledged call and checkpoint.
 type SecretClient: send {
     tasks: Tasks, net: Net, clock: Clock, random: Random,
-    head: Sender[runner.Req], post: Sender[runner.PubIn], token: Bytes
+    head: Sender[runner.HeadInput], post: Sender[runner.PubIn], token: Bytes
 }
 
 fn secret_client(take d: SecretClient) -> String waits {
@@ -261,7 +261,7 @@ pub fn no_secret_at_rest(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, 
     let mut db = result.unwrap(store.open(tasks, d, c, r, options()))
     let cv: std.codec.Codec[u64] = std.codec.of()
     result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
-    let (head, inbox): (Sender[runner.Req], Receiver[runner.Req]) = channel.new(64u64)
+    let (head, inbox): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(64u64)
     let mail = result.unwrap(runner.mailbox(4u64))
     let seed = SecretClient(tasks: tasks, net: n, clock: c, random: r, head: take head, post: runner.post(mail), token: take token)
     let driving = task.spawn(tasks, bytes 33554432u64, take seed, secret_client)
@@ -424,7 +424,7 @@ fn keyed(take done: List[runner.Done]) -> List[runner.KeyedDone] {
     out
 }
 
-type Accept: send { listener: Listener, tasks: Tasks, clock: Clock, random: Random, head: Sender[runner.Req], post: Sender[runner.PubIn], sessions: u64 }
+type Accept: send { listener: Listener, tasks: Tasks, clock: Clock, random: Random, head: Sender[runner.HeadInput], post: Sender[runner.PubIn], sessions: u64 }
 
 fn accept(take seed: Accept) -> () waits {
     let Accept(listener: take listener, tasks: tasks, clock: c, random: random, head: take head, post: take post, sessions: sessions) = take seed
@@ -452,11 +452,11 @@ fn served(take db: store.Db, selection: runner.Selection, c: Clock, r: Random, t
     let mut port = string.from("PORT ")
     string.push_u64(mut port, int.widen(address.port))
     result.unwrap(stdout.write(out, port))
-    let (head, inbox): (Sender[runner.Req], Receiver[runner.Req]) = channel.new(64u64)
+    let (head, inbox): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(64u64)
     let mail = result.unwrap(runner.mailbox(4u64))
     let seed = Accept(listener: take listener, tasks: tasks, clock: c, random: r, head: take head, post: runner.post(mail), sessions: sessions)
     let mut driving = task.spawn(tasks, bytes 33554432u64, take seed, accept)
-    let opened = runner.place_head_selected(take db, selection, code.describe(place), N_PLACE, code.describe(migrate), code.describe(handles), DirectRequests(take inbox), take mail, tasks, 1048576u64)
+    let opened = runner.place_head_selected(take db, selection, code.describe(place), N_PLACE, code.describe(migrate), code.describe(handles), take inbox, take mail, tasks, 1048576u64)
     if let Error(_) = opened { task.cancel(mut driving) }
     let _ = task.join(take driving)
     take opened
@@ -647,10 +647,10 @@ fn unreachable_handles(_catalog: store.Schema) -> Result[Hd, store.Error] {
 
 fn refused_open(d: Dir, c: Clock, r: Random, tasks: Tasks, selected: runner.Selection, allowance: u64, v: u64, legacy: bool) -> () waits {
     let db = result.unwrap(store.open(tasks, d, c, r, options()))
-    let (_sender, from): (Sender[runner.Req], Receiver[runner.Req]) = channel.new(1u64)
+    let (_sender, from): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(1u64)
     let mail = result.unwrap(runner.mailbox(1u64))
     let tried = runner.place_head_selected(take db, selected, code.describe(place), allowance, code.describe(migrate),
-        code.describe(unreachable_handles), DirectRequests(take from), take mail, tasks, 1048576u64)
+        code.describe(unreachable_handles), take from, take mail, tasks, 1048576u64)
     match take tried {
         Error(NotCurrent(Legacy)) => want(legacy, "activation: fenced store reported legacy"),
         Error(NotCurrent(Active(found, _))) => want(!legacy && found == v, "activation: wrong active version"),
@@ -670,9 +670,9 @@ fn unavailable_identity(d: Dir, c: Clock, r: Random, tasks: Tasks, grow: bool, p
     let db = result.unwrap(store.open(tasks, d, c, r, options()))
     if phase == "write" {
         let chosen: runner.Selection = if grow { Install } else { Current(0u64) }
-        let (_sender, inbox): (Sender[runner.Req], Receiver[runner.Req]) = channel.new(1u64)
+        let (_sender, inbox): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(1u64)
         let attempted = runner.place_head_selected(take db, chosen, code.describe(place), N_PLACE, code.describe(migrate),
-            code.describe(unreachable_handles), DirectRequests(take inbox), result.unwrap(runner.mailbox(1u64)), tasks, 1048576u64)
+            code.describe(unreachable_handles), take inbox, result.unwrap(runner.mailbox(1u64)), tasks, 1048576u64)
         match take attempted {
             Error(IdentityUnknown) => result.unwrap(stdout.write(out, "DONE")),
             _ => fail("disk install accepted an unavailable identity"),

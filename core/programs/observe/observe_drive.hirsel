@@ -2,7 +2,7 @@
 // runner's wire client; it adds no observer hooks to the runner or store.
 pub type Mix: codec + send = Correct | ReuseWhileLive | RecoverNewBytes | NoDirectory | AdvanceOnRefusal
 type Reg = runner.Registry[(), observe_fixture.Handles]
-type Drive: send { head: Sender[runner.Req], post: Sender[runner.PubIn], clock: Clock, tasks: Tasks, net: Net, random: Random, token: Bytes, out: Stdout, err: Stderr, seed: u64, mix: Mix }
+type Drive: send { head: Sender[runner.HeadInput], post: Sender[runner.PubIn], clock: Clock, tasks: Tasks, net: Net, random: Random, token: Bytes, out: Stdout, err: Stderr, seed: u64, mix: Mix }
 type Conn { id: u64, clock: Clock, out: Stdout, wire: wire_client.Conn, task: Task[Result[(), std.wsock.Error]] }
 const NEVER: u64 = 18446744073709551615u64
 const LATER: u64 = 10000000000u64
@@ -43,7 +43,7 @@ fn emit(out: Stdout, trace: Log[observe.Obs], take e: observe.Obs) -> () waits {
     log.append(trace, take e)
 }
 
-fn drive_input(take head: Sender[runner.Req], take post: Sender[runner.PubIn], clock: Clock, random: Random, tasks: Tasks, net: Net, out: Stdout, err: Stderr, seed: u64, mix: Mix) -> Drive {
+fn drive_input(take head: Sender[runner.HeadInput], take post: Sender[runner.PubIn], clock: Clock, random: Random, tasks: Tasks, net: Net, out: Stdout, err: Stderr, seed: u64, mix: Mix) -> Drive {
     let d = Drive(head: take head, post: take post, clock: clock, tasks: tasks, net: net, random: random,
         token: ingress.credential(random),
         out: out, err: err, seed: seed, mix: mix)
@@ -208,7 +208,7 @@ pub fn run(out: Stdout, err: Stderr, clock: Clock, random: Random, tasks: Tasks,
     let mut db = store.memory(clock, random, store.defaults())
     let ca: std.codec.Codec[observe_fixture.Request] = std.codec.of()
     let _ = result.unwrap(store.create_table(mut db, store.spec("ran", std.codec.key_bytes(), ca)))
-    let (head, inbox): (Sender[runner.Req], Receiver[runner.Req]) = channel.new(64u64)
+    let (head, inbox): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(64u64)
     let mail = result.unwrap(runner.mailbox(4u64))
     let input = drive_input(take head, runner.post(mail), clock, random, tasks, net, out, err, seed, mix)
     let body = task.spawn(tasks, bytes 33554432u64, take input, drive)
@@ -227,7 +227,7 @@ type JoinDrive: send { drive: Drive, scenario: JoinCase }
 // on the evaluator's virtual Clock. Wire ordering is checked separately.
 pub fn deadline_join(out: Stdout, err: Stderr, clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
     let db = store.memory(clock, random, store.defaults())
-    let (head, inbox): (Sender[runner.Req], Receiver[runner.Req]) = channel.new(64u64)
+    let (head, inbox): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(64u64)
     let mail = result.unwrap(runner.mailbox(64u64))
     let d = drive_input(take head, runner.post(mail), clock, random, tasks, net, out, err, 0u64, Correct)
     let trace: Log[observe.Obs] = log.new()
@@ -310,7 +310,7 @@ pub fn run_join(out: Stdout, err: Stderr, clock: Clock, random: Random, tasks: T
     let mut db = store.memory(clock, random, store.defaults())
     let ca: std.codec.Codec[observe_fixture.Request] = std.codec.of()
     let _ = result.unwrap(store.create_table(mut db, store.spec("ran", std.codec.key_bytes(), ca)))
-    let (head, inbox): (Sender[runner.Req], Receiver[runner.Req]) = channel.new(64u64)
+    let (head, inbox): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(64u64)
     let mail = result.unwrap(runner.mailbox(4u64))
     let d = drive_input(take head, runner.post(mail), clock, random, tasks, net, out, err, 0u64, Correct)
     let input = JoinDrive(drive: take d, scenario: scenario)

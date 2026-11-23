@@ -57,7 +57,7 @@ fn string_arg(n: u64, trailing: bool) -> Bytes {
     b
 }
 
-type D: send { head: Sender[runner.Req], post: Sender[runner.PubIn], clock: Clock, tasks: Tasks, flood: u64, net: Net, random: Random }
+type D: send { head: Sender[runner.HeadInput], post: Sender[runner.PubIn], clock: Clock, tasks: Tasks, flood: u64, net: Net, random: Random }
 
 fn answer(cn: wire_client.Conn) -> runner.Outcome waits {
     match wire_client.next(cn) {
@@ -104,7 +104,7 @@ pub fn main(clock: Clock, random: Random, tasks: Tasks, argv: Args, net: Net) ->
     let mut db = store.memory(clock, random, store.defaults())
     let cv: std.codec.Codec[u64] = std.codec.of()
     let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
-    let (head, inbox): (Sender[runner.Req], Receiver[runner.Req]) = channel.new(64u64)
+    let (head, inbox): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(64u64)
     let mail = result.unwrap(runner.mailbox(4u64))
     let d = D(head: take head, post: runner.post(mail), clock: clock, tasks: tasks, flood: flood, net: net, random: random)
     let driving = task.spawn(tasks, bytes 33554432u64, take d, drive)

@@ -36,7 +36,7 @@ pub fn law_unread_client(tasks: Tasks, clock: Clock, random: Random) -> bool {
     let transact_key = w3c_key(code.identity(code.describe(w3c_tx)), std.codec.of_u32(), carried)
     let codec: std.codec.Codec[Bytes] = std.codec.of()
     let key = w3c_key(code.identity(code.describe(w3c_bytes)), std.codec.of_u32(), codec)
-    let (head, requests): (Sender[Req], Receiver[Req]) = channel.new(5u64)
+    let (head, requests): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(5u64)
     let service = wire_service_seed(take reg, random, no_wire(), head, clock, tasks, wire_defaults(1048576u64, 1048576u64), string.new())
     let Service(context: take initial, step: _, ready: _, allocate: _, finish: _, check: _) = take service
     let mut s = take initial
@@ -71,7 +71,7 @@ pub fn law_unread_client(tasks: Tasks, clock: Clock, random: Random) -> bool {
         std.codec.put_u32(8164u32, mut arg)
         let at = host.mono_ns(clock)
         result.unwrap(wire_call_ready(mut s, mut work, WirePending(stream: stream, p: 0u64, slot: 1u32, deadline: 10000u32, arg: take arg, at: at, grows: true)))
-        let Req(e: take input) = result.unwrap(channel.try_receive(requests))
+        let RunRequest(Req(e: take input)) = result.unwrap(channel.try_receive(requests)) else { return false }
         let Requested(Request(stream: take named, p: p, ..)) = take input else {
             return false
         }
@@ -130,7 +130,7 @@ pub fn law_hello_and_slots(tasks: Tasks, clock: Clock, random: Random) -> bool {
     let mut reg: Registry[(), ()] = registry()
     result.unwrap(compute(mut reg, code.describe(w3c_bytes), 65536u64, DEFAULT_STEPS))
     result.unwrap(transact(mut reg, code.describe(w3c_tx), 65536u64, DEFAULT_STEPS))
-    let (head, requests): (Sender[Req], Receiver[Req]) = channel.new(1u64)
+    let (head, requests): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(1u64)
     let service = wire_service_seed(take reg, random, no_wire(), head, clock, tasks, wire_defaults(1048576u64, 1048576u64), string.new())
     let Service(context: take initial, step: _, ready: _, allocate: _, finish: _, check: _) = take service
     let mut s = take initial
@@ -224,7 +224,7 @@ fn w3c_retired() -> Bytes {
 
 type W3cRig {
     head: Head[(), W3cHandles], owner: WireSession[(), W3cHandles, ()], work: WireWork,
-    requests: Receiver[Req], releases: Receiver[PubIn], inbox: Receiver[WireEvent]
+    requests: Receiver[HeadInput], releases: Receiver[PubIn], inbox: Receiver[WireEvent]
 }
 
 // The real wire owner, head and publisher delivery path, stepped without sockets.
@@ -236,7 +236,7 @@ fn w3c_rig(tasks: Tasks, clock: Clock, random: Random) -> W3cRig waits {
     let caller = option.unwrap(anonymous_caller(random))
     let stream = wire_stream(caller, 77u32)
     let _ = result.unwrap(store.admit(mut db, stream, 0u64, store.request_digest(w3c_retired(), list.new())))
-    let (to_head, requests): (Sender[Req], Receiver[Req]) = channel.new(5u64)
+    let (to_head, requests): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(5u64)
     let (to_pub, releases): (Sender[PubIn], Receiver[PubIn]) = channel.new(5u64)
     let (to_owner, inbox): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(5u64)
     let service = wire_service_seed(w3c_registry(), random, no_wire(), to_head, clock, tasks, wire_defaults(1048576u64, 1048576u64), string.new())
@@ -268,7 +268,7 @@ fn w3c_send(mut rig: W3cRig, stream: u32, p: u64, slot: u32, take arg: Bytes) ->
     let at = host.mono_ns(rig.owner.clock)
     result.unwrap(wire_call_ready(mut rig.owner, mut rig.work, WirePending(stream: stream, p: p, slot: slot, deadline: 10000u32, arg: take arg, at: at, grows: true)))
     if let Some(take out) = transport_receive(mut rig.owner, mut rig.work) { return take out }
-    let q = result.unwrap(channel.try_receive(rig.requests))
+    let RunRequest(take q) = result.unwrap(channel.try_receive(rig.requests)) else { fail("W3c: expected request") }
     result.unwrap(head_arrival(mut rig.head, take q, false, false))
     if list.len(rig.head.group) != 0u64 { result.unwrap(gate(mut rig.head)) }
     let release = result.unwrap(channel.try_receive(rig.releases))
@@ -341,7 +341,7 @@ pub fn law_full_head_waits(tasks: Tasks, clock: Clock, random: Random) -> bool w
     for _ in 0u64 .. 5u64 { let _ = result.unwrap(channel.try_receive(rig.requests)) }
     if !wire_post(mut rig.work) { return false }
     for stream in 0u32 .. 5u32 {
-        let Req(e: take got) = result.unwrap(channel.try_receive(rig.requests))
+        let RunRequest(Req(e: take got)) = result.unwrap(channel.try_receive(rig.requests)) else { return false }
         let named = match rig.owner.caller { Some(c) => wire_stream(c, stream), None => return false }
         match take got {
             Requested(take q) => if q.stream != named { return false },
@@ -437,7 +437,7 @@ pub fn law_wire_replacement_generation(tasks: Tasks, c: Clock, r: Random) -> boo
         h: result.unwrap(subs_handles(mut db)), base: take base, from: take from, rounds: take rounds, ready: take ready_to)
     let publishing = task.spawn(tasks, bytes 8388608u64, take pub_job, publish)
     if let Ok(None) = channel.receive(ready_from) {} else { return false }
-    let (head, requests): (Sender[Req], Receiver[Req]) = channel.new(1u64)
+    let (head, requests): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(1u64)
     let reg = result.unwrap(placed(code.describe(subs_place), 1048576u64))
     let config = wire_defaults(1048576u64, 1048576u64)
     let service = wire_service_seed(take reg, r, no_wire(), head, c, tasks, config, string.new())
@@ -542,7 +542,7 @@ fn test_after_publication(tasks: Tasks, clock: Clock, random: Random) -> Result[
 // Outcome rows, which ride in the owner's next Reset; a Dropped never counts toward the
 // protocol-error close, so a second one sends a second Reset rather than closing 1008.
 pub fn law_dropped_keeps_outcomes(tasks: Tasks, c: Clock, r: Random) -> bool {
-    let (head, requests): (Sender[Req], Receiver[Req]) = channel.new(1u64)
+    let (head, requests): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(1u64)
     let reg = result.unwrap(placed(code.describe(subs_place), 1048576u64))
     let service = wire_service_seed(take reg, r, no_wire(), head, c, tasks, wire_defaults(1048576u64, 1048576u64), string.new())
     let Service(context: take initial, step: _, ready: _, allocate: _, finish: _, check: _) = take service
@@ -602,7 +602,7 @@ fn repair_board(mark: u8) -> List[Row] {
 // (item 6 counts only coalesced rows against `budget`). Red when the owner keeps every
 // superseded repair queued: the sixth whole board puts it over `budget`, and it resets.
 pub fn law_repair_coalesced(tasks: Tasks, c: Clock, r: Random) -> bool {
-    let (head, requests): (Sender[Req], Receiver[Req]) = channel.new(1u64)
+    let (head, requests): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(1u64)
     let reg = result.unwrap(placed(code.describe(subs_place), 1048576u64))
     let service = wire_service_seed(take reg, r, no_wire(), head, c, tasks, wire_defaults(1048576u64, 1048576u64), string.new())
     let Service(context: take initial, step: _, ready: _, allocate: _, finish: _, check: _) = take service
@@ -664,7 +664,7 @@ fn held_quiet(from: Receiver[PubIn]) -> bool {
 // was computed from, a later hit no longer fences it, and the writer releases it stale.
 // Red on v2.19.1, which sent each removal at once.
 pub fn law_removal_waits_for_writer(tasks: Tasks, c: Clock, r: Random) -> bool {
-    let (head, requests): (Sender[Req], Receiver[Req]) = channel.new(1u64)
+    let (head, requests): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(1u64)
     let reg = result.unwrap(placed(code.describe(subs_place), 1048576u64))
     let service = wire_service_seed(take reg, r, no_wire(), head, c, tasks, wire_defaults(1048576u64, 1048576u64), string.new())
     let Service(context: take initial, step: _, ready: _, allocate: _, finish: _, check: _) = take service
@@ -750,7 +750,7 @@ pub fn law_repair_one_unsent(tasks: Tasks, c: Clock, r: Random) -> bool waits {
     let mut b = Board(r: take board_reg, h: take h, base: store.snapshot(db), newest: None, subs: subscriptions())
     let _ = at_base_generation(mut b, 7u64, 1u32, 1u64, SubscriptionInput(room: None, key: query_key(code.describe(q1)), arg: no_arg(), caller: law_caller(1u64)))
 
-    let (head, requests): (Sender[Req], Receiver[Req]) = channel.new(1u64)
+    let (head, requests): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(1u64)
     let reg = result.unwrap(placed(code.describe(subs_place), 1048576u64))
     let service = wire_service_seed(take reg, r, no_wire(), head, c, tasks, wire_defaults(1048576u64, 1048576u64), string.new())
     let Service(context: take initial, step: _, ready: _, allocate: _, finish: _, check: _) = take service
@@ -821,7 +821,7 @@ fn burst_drain(take d: BurstDrain) -> Result[(), ()] waits {
 // generation its Join named. Red when the owner `try_send`s its Join (v2.12 item 3), and when
 // it sends the first Subscribe as its own `WireSubscribed` after the Admit.
 pub fn law_join_waits(tasks: Tasks, c: Clock, r: Random) -> bool waits {
-    let (head, requests): (Sender[Req], Receiver[Req]) = channel.new(1u64)
+    let (head, requests): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(1u64)
     let reg = result.unwrap(placed(code.describe(subs_place), 1048576u64))
     let service = wire_service_seed(take reg, r, no_wire(), head, c, tasks, wire_defaults(1048576u64, 1048576u64), string.new())
     let Service(context: take initial, step: _, ready: _, allocate: _, finish: _, check: _) = take service

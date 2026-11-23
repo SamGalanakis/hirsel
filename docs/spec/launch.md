@@ -408,7 +408,9 @@ ordinary backoff. Neither a timer nor a retry count decides a root.
 The platform host records the attempt as `Preparing` before its describe, preview and
 prepare children and OLD's export. A `Preparing` row proves no cutover was sent, so after a host
 loss it is aborted: OLD, if it still runs, is sent `HostAbort`, and the failure is recorded on
-OLD's answer or end, never before (RUNNER-SPEC §14.3 "Preparing"). An open that proves NEW's
+OLD's answer or end, never before (RUNNER-SPEC §14.3 "Preparing"). A drift retry records
+the original attempt as well as the retry. Its abort releases either pause owner, including
+when the host restarted before OLD took the retry export. An open that proves NEW's
 install must also report the release that the preview reported for NEW and the store ID
 recorded for the group. The first accepted `PlaceOpened` binds the group incarnation to
 its store ID in the catalog before the host lets the runner serve. A first open at genesis

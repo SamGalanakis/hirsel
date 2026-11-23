@@ -120,7 +120,7 @@ pub(crate) enum HostCommand {
     Export(Vec<u8>, bool),
     Import(Vec<u8>, Vec<u8>, Vec<u8>),
     Cutover(Vec<u8>, Vec<u8>, u64, bool),
-    Abort(Vec<u8>),
+    Abort(Vec<u8>, Option<Vec<u8>>),
     StoreAccepted,
 }
 
@@ -594,7 +594,11 @@ impl Wire for HostCommand {
                 w.u64(*pause);
                 w.bool(*retry);
             }
-            Self::Abort(a) => (w.u32(3), w.bytes(a)).1,
+            Self::Abort(a, previous) => {
+                w.u32(3);
+                w.bytes(a);
+                w.option(previous, |w, previous| w.bytes(previous));
+            }
             Self::StoreAccepted => w.u32(4),
         }
     }
@@ -603,7 +607,7 @@ impl Wire for HostCommand {
             0 => Self::Export(r.bytes()?, r.bool()?),
             1 => Self::Import(r.bytes()?, r.bytes()?, r.bytes()?),
             2 => Self::Cutover(r.bytes()?, r.bytes()?, r.u64()?, r.bool()?),
-            3 => Self::Abort(r.bytes()?),
+            3 => Self::Abort(r.bytes()?, r.option(Reader::bytes)?),
             4 => Self::StoreAccepted,
             _ => return Err(malformed("host command tag")),
         })
@@ -1197,6 +1201,14 @@ mod tests {
                     HostCommand::Cutover(vec![0xaa], vec![0xbb], 2000, false),
                 ),
                 "07000000010000006703000000000000000100000007000000000000000200000001000000aa01000000bbd00700000000000000".into(),
+            ),
+            (
+                Request::Command(serving(), HostCommand::Abort(vec![0xaa], Some(vec![0xbb]))),
+                "07000000010000006703000000000000000100000007000000000000000300000001000000aa0100000001000000bb".into(),
+            ),
+            (
+                Request::Command(serving(), HostCommand::StoreAccepted),
+                "070000000100000067030000000000000001000000070000000000000004000000".into(),
             ),
             (
                 Request::Retire(group()),

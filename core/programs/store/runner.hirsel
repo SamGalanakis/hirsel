@@ -2564,7 +2564,7 @@ fn idle_vote(to: Sender[LifeEvent], head: bool, idle: bool) -> () waits {
 }
 
 pub type HeadInput: send = RunRequest(Req) | HeadContinue | HeadClose | HeadFinish | TriggerWake(u64) | TriggerMessage(Box[TriggerInput]) | TriggerDone(triggers.Attempt, Option[Outcome])
-    | StartCutover(Box[CutoverWork]) | AbortCutover(Bytes) | PauseDeadline(u64)
+    | StartCutover(Box[CutoverWork]) | AbortCutover(Bytes, Option[Bytes], Sender[()]) | PauseDeadline(u64)
     | ExportCommand(Box[ExportCommand]) | ReserveImport(Box[ReserveImport]) | KeepImport(Box[KeepImport]) | CheckHeadIdle
 
 pub type CutoverWork: send { request: store.Cutover, result_to: Sender[Result[(u64, bool), store.DeployError]] }
@@ -2576,7 +2576,7 @@ pub type ReserveImport: send { checked: store.ValidatedImport, answer: Sender[Re
 pub type KeepImport: send { built: store.Imported, answer: Sender[Result[Inline[u8, 32], store.DeployError]] }
 
 pub type HostCommand: codec + send = HostExport(Bytes, bool) | HostImport(Bytes, Bytes, Bytes)
-    | HostCutover(Bytes, Bytes, u64, bool) | HostAbort(Bytes) | HostStoreAccepted
+    | HostCutover(Bytes, Bytes, u64, bool) | HostAbort(Bytes, Option[Bytes]) | HostStoreAccepted
 pub type PlaceReady: codec + send { version: u64, store_hi: u64, store_lo: u64, release: Bytes, retain_from: u64, ready_ns: u64 }
 pub type HostReply: codec + send = PlaceOpened(PlaceReady) | PlaceCurrent(u64, Bytes) | PlaceRefused(String)
     | PlaceExported(u64, String) | PlaceImported(Bytes) | PlaceInstalled(u64, bool) | PlaceDrift | PlaceAborted | PlaceUncertain | PlaceWriteAck(u64)
@@ -2778,9 +2778,16 @@ fn host_reader(take reader: HostReader) -> () waits {
                 let _ = channel.send(life, StoreAccepted)
                 continue
             },
-            HostAbort(take attempt) => {
-                let _ = replace(mut exported, None)
-                let _ = channel.send(head, AbortCutover(take attempt))
+            HostAbort(attempt, retry_of) => {
+                let releasing = match exported {
+                    Some(held) => abort_matches(held.stamp.attempt, attempt, retry_of),
+                    None => false,
+                }
+                if releasing { let _ = replace(mut exported, None) }
+                let aborted = host_head(head, scoped fn(take done: Sender[()]) -> Result[HeadInput, Capacity] {
+                    Ok(AbortCutover(clone(attempt), clone(retry_of), take done))
+                })
+                if let None = aborted { return }
                 PlaceAborted
             },
         }
@@ -3297,6 +3304,14 @@ fn pause_has_work(pause: Option[WritePause]) -> bool {
     match pause { Some(active) => !none(active.work), None => false }
 }
 
+fn abort_matches(held: Bytes, attempt: Bytes, retry_of: Option[Bytes]) -> bool {
+    if held == attempt { return true }
+    match retry_of {
+        Some(previous) => held == previous,
+        None => false,
+    }
+}
+
 fn end_write_pause(mut db: store.Db, mut pause: Option[WritePause], control: HeadDrain, take why: store.DeployError) -> () waits {
     if let Some(take active) = replace(mut pause, None) {
         let WritePause(attempt: take id, deadline_task: take timer, work: take work, ..) = take active
@@ -3435,16 +3450,23 @@ fn serve_head[G: send, H: send](mut head: Head[G, H], take inbox: HeadRequests, 
                 } else { let _ = channel.try_send(host_result, Error(AttemptBusy)) }
                 continue
             },
-            Some(AbortCutover(attempt)) => {
+            Some(AbortCutover(attempt, retry_of, done)) => {
                 store.release_export(mut head.db, attempt)
+                if let Some(previous) = retry_of {
+                    store.release_export(mut head.db, previous)
+                }
                 if let Some(control) = drain {
-                    let current = match pause { Some(active) => active.attempt == attempt, None => false }
+                    let current = match pause {
+                        Some(active) => abort_matches(active.attempt, attempt, retry_of),
+                        None => false,
+                    }
                     if current {
                         end_write_pause(mut head.db, mut pause, control, AttemptBusy)
                         refresh_waiting(mut head, true)
                         resuming = true
                     }
                 }
+                let _ = channel.try_send(done, ())
                 continue
             },
             Some(ExportCommand(take command)) => {

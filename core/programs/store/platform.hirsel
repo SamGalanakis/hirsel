@@ -51,7 +51,7 @@ pub type DeployOutcome: codec + send = Preparing | Pending | Installed | Failed(
 // `activation` (the export's head + 1), the prepared digest `digest` the cutover names, the
 // release and Describe the preview reported, and the candidate's gen. A new session re-sends
 // exactly that command (§14.5). OLD's first verified drift returns the row to `Preparing`
-// at a fresh attempt with `retried` set, keeping the assembly, image, Describe and release
+// at a fresh attempt with `retry_of` set, keeping the assembly, image, Describe and release
 // (launch.md "Hot deploy"); a drift of a retried attempt fails the deploy.
 pub type DeployRow: codec + send {
     // The operator request D this deploy runs for.
@@ -67,9 +67,9 @@ pub type DeployRow: codec + send {
     outcome: DeployOutcome,
     // NEW's exact Describe bytes from the preview, which a retry's import names again.
     describe: Bytes,
-    // This deploy's one retry after drift is spent: its cutover is a retry under OLD's
-    // original write pause.
-    retried: bool,
+    // A drift retry keeps the ID that OLD initially paused under until OLD takes the
+    // retry export. Recovery must be able to abort either ID.
+    retry_of: Option[launcher.Attempt],
     // The launcher's fetch and assembly times for NEW.
     fetch_ns: Option[u64],
     assemble_ns: Option[u64],
@@ -238,6 +238,7 @@ type Stage = Describing | Previewing(u64) | Exporting | PrepareRunning(u64) | Im
 
 type Prep {
     attempt: launcher.Attempt,
+    retry_of: Option[launcher.Attempt],
     incarnation: u64,
     old: u64,
     assembly: Bytes,
@@ -1155,7 +1156,7 @@ fn abort_cut(mut h: Host, name: String, g: GroupRow, take cut: Cut, why: String,
 // The failure is durable: OLD drops the attempt, and the candidate is stopped.
 fn discard_cut(mut h: Host, name: String, g: GroupRow, take cut: Cut, now: Now, mut out: List[launcher.Request]) waits {
     list.push(mut out, cutover_ack(name, cut))
-    list.push(mut out, Command(child_of(name, g.incarnation, cut.old), HostAbort(attempt_bytes(cut.attempt))))
+    list.push(mut out, Command(child_of(name, g.incarnation, cut.old), abort_command(cut.attempt, None)))
     if let None = cut.candidate_end {
         list.push(mut out, Stop(child_of(name, g.incarnation, cut.candidate)))
     }
@@ -1172,7 +1173,7 @@ fn discard_cut(mut h: Host, name: String, g: GroupRow, take cut: Cut, now: Now, 
 // candidate generation. The discarded candidate is stopped as in an abort. A drift of a
 // retried attempt aborts, and so does a drift OLD answered before it ended, since no export
 // can follow. OLD's answer re-delivered to a new session is the same answer
-// and spends nothing: only the row's `retried` decides.
+// and spends nothing: only the row's `retry_of` decides.
 fn drift(mut h: Host, name: String, g: GroupRow, take cut: Cut, now: Now, mut out: List[launcher.Request]) waits {
     let made = {
         let t = view h.t
@@ -1189,14 +1190,14 @@ fn drift(mut h: Host, name: String, g: GroupRow, take cut: Cut, now: Now, mut ou
             if !ours {
                 return Error(Missing("deploy"))
             }
-            if d.retried || k.old_ended {
+            if !is_none(d.retry_of) || k.old_ended {
                 d.outcome = Failed("drift")
                 put_deploy(mut tx, t, name, d, abort_class("drift"))?
                 return Ok(None)
             }
+            d.retry_of = Some(d.attempt)
             d.attempt = fresh_attempt(mut tx, t)?
             d.outcome = Preparing
-            d.retried = true
             put_deploy(mut tx, t, name, clone(d), StoreClass)?
             Ok(Some(d))
         })
@@ -1218,7 +1219,7 @@ fn drift(mut h: Host, name: String, g: GroupRow, take cut: Cut, now: Now, mut ou
         list.push(mut out, Stop(child_of(name, g.incarnation, c)))
     }
     list.push(mut out, Command(child_of(name, g.incarnation, cut.old), HostExport(attempt_bytes(retry.attempt), true)))
-    let p = Prep(attempt: retry.attempt, incarnation: g.incarnation, old: cut.old, assembly: clone(retry.assembly), image: clone(retry.image), target: string.new(), n_place: 0u64, stage: Exporting, describe: clone(retry.describe), release: clone(retry.release), helper: None, aborting: false, discarded: discarded)
+    let p = Prep(attempt: retry.attempt, retry_of: retry.retry_of, incarnation: g.incarnation, old: cut.old, assembly: clone(retry.assembly), image: clone(retry.image), target: string.new(), n_place: 0u64, stage: Exporting, describe: clone(retry.describe), release: clone(retry.release), helper: None, aborting: false, discarded: discarded)
     let mut v = vol_read(h, name)
     v.cut = None
     v.prep = Some(p)
@@ -1624,9 +1625,9 @@ fn resume_cuts(mut h: Host, held: List[launcher.CutoverKey], mut out: List[launc
         let Ok(Some(g)) = group_row(h, name) else {
             continue
         }
-        let p = Prep(attempt: d.attempt, incarnation: g.incarnation, old: d.old, assembly: clone(d.assembly), image: clone(d.image), target: string.new(), n_place: 0u64, stage: Aborting("interrupted before the cutover"), describe: list.new(), release: list.new(), helper: None, aborting: run_gen(h, name) == Some(d.old), discarded: None)
+        let p = Prep(attempt: d.attempt, retry_of: d.retry_of, incarnation: g.incarnation, old: d.old, assembly: clone(d.assembly), image: clone(d.image), target: string.new(), n_place: 0u64, stage: Aborting("interrupted before the cutover"), describe: list.new(), release: list.new(), helper: None, aborting: run_gen(h, name) == Some(d.old), discarded: None)
         if p.aborting {
-            list.push(mut out, Command(child_of(name, g.incarnation, d.old), HostAbort(attempt_bytes(d.attempt))))
+            list.push(mut out, Command(child_of(name, g.incarnation, d.old), abort_command(d.attempt, d.retry_of)))
         }
         prep_finish(mut h, name, take p)
     }
@@ -1636,7 +1637,7 @@ fn resume_cuts(mut h: Host, held: List[launcher.CutoverKey], mut out: List[launc
             continue
         }
         if let Some(_) = cut_of(h, name) {
-            list.push(mut out, cutover_command(name, g.incarnation, d.old, d.attempt, d.digest, d.retried))
+            list.push(mut out, cutover_command(name, g.incarnation, d.old, d.attempt, d.digest, !is_none(d.retry_of)))
         } else if run_gen(h, name) == Some(d.old) {
             let Ok(cfg) = host_config(h) else {
                 continue
@@ -1644,7 +1645,7 @@ fn resume_cuts(mut h: Host, held: List[launcher.CutoverKey], mut out: List[launc
             let cut = Cut(attempt: d.attempt, incarnation: g.incarnation, old: d.old, candidate: d.candidate, activation: d.activation, old_end: None, old_ended: false, opened: false, candidate_end: None, held: false, release: clone(d.release))
             set_cut(mut h, name, Some(cut))
             list.push(mut out, serving_launch(name, g, d.candidate, d.activation, d.assembly, cfg.idle_ms, Some(d.old)))
-            list.push(mut out, cutover_command(name, g.incarnation, d.old, d.attempt, d.digest, d.retried))
+            list.push(mut out, cutover_command(name, g.incarnation, d.old, d.attempt, d.digest, !is_none(d.retry_of)))
         } else {
             let made = {
                 let t = view h.t
@@ -1951,7 +1952,7 @@ fn prepare(mut h: Host, name: String, request: Bytes, attempt: launcher.Attempt,
                     _ => return Error(Busy(a)),
                 }
             }
-            let row = DeployRow(request: clone(request), attempt: attempt, assembly: clone(assembly), image: clone(image_digest), digest: list.new(), release: list.new(), activation: 0u64, old: old, candidate: 0u64, outcome: Preparing, describe: list.new(), retried: false, fetch_ns: Some(fetch_ns), assemble_ns: Some(assemble_ns))
+            let row = DeployRow(request: clone(request), attempt: attempt, assembly: clone(assembly), image: clone(image_digest), digest: list.new(), release: list.new(), activation: 0u64, old: old, candidate: 0u64, outcome: Preparing, describe: list.new(), retry_of: None, fetch_ns: Some(fetch_ns), assemble_ns: Some(assemble_ns))
             put_deploy(mut tx, t, name, row, StoreClass)
         })
     }
@@ -1961,7 +1962,7 @@ fn prepare(mut h: Host, name: String, request: Bytes, attempt: launcher.Attempt,
     let mut out: List[launcher.Request] = list.new()
     list.push(mut out, Release(attempt))
     list.push(mut out, helper_launch(name, g, g.assembly, take mode))
-    let p = Prep(attempt: attempt, incarnation: g.incarnation, old: old, assembly: clone(assembly), image: clone(image_digest), target: string.from(target), n_place: n_place, stage: Describing, describe: list.new(), release: list.new(), helper: Some(take describer), aborting: false, discarded: None)
+    let p = Prep(attempt: attempt, retry_of: None, incarnation: g.incarnation, old: old, assembly: clone(assembly), image: clone(image_digest), target: string.from(target), n_place: n_place, stage: Describing, describe: list.new(), release: list.new(), helper: Some(take describer), aborting: false, discarded: None)
     set_prep(mut h, name, Some(take p))
     Ok(take out)
 }
@@ -3231,6 +3232,14 @@ fn joined(head: String, tail: String) -> String {
     out
 }
 
+fn abort_command(attempt: launcher.Attempt, retry_of: Option[launcher.Attempt]) -> runner.HostCommand {
+    let previous = match retry_of {
+        Some(a) => Some(attempt_bytes(a)),
+        None => None,
+    }
+    HostAbort(attempt_bytes(attempt), take previous)
+}
+
 // A Preparing deploy fails. Once OLD was sent its export, OLD is sent HostAbort for the
 // attempt, and a live helper is stopped; the row stays Preparing until OLD answered
 // PlaceAborted or ended and the helper ended, so a host lost before then aborts again.
@@ -3249,7 +3258,7 @@ fn prep_fail(mut h: Host, name: String, take p: Prep, why: String, old_live: boo
     }
     q.aborting = exported && old_live
     if q.aborting && !keep_why {
-        list.push(mut out, Command(child_of(name, q.incarnation, q.old), HostAbort(attempt_bytes(q.attempt))))
+        list.push(mut out, Command(child_of(name, q.incarnation, q.old), abort_command(q.attempt, q.retry_of)))
     }
     if !keep_why {
         if let Some(c) = q.helper {
@@ -3462,7 +3471,7 @@ fn prep_pending(mut h: Host, name: String, take p: Prep, head: u64, digest: Byte
             d.candidate = c
             d.outcome = Pending
             pin_start(mut tx, t, g, c, d.assembly, now_s)?
-            let retried = d.retried
+            let retried = !is_none(d.retry_of)
             put_deploy(mut tx, t, name, d, StoreClass)?
             Ok((g, c, retried))
         })

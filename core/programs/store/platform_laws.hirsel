@@ -760,7 +760,7 @@ fn command_kind(q: launcher.Request) -> u64 {
     match q {
         Command(_, HostExport(_, _)) => 1u64,
         Command(_, HostCutover(_, _, _, _)) => 2u64,
-        Command(_, HostAbort(_)) => 3u64,
+        Command(_, HostAbort(_, _)) => 3u64,
         Assemble(_) => 4u64,
         Release(_) => 5u64,
         _ => 0u64,
@@ -1002,6 +1002,30 @@ fn deploy_drift_retry(c: Clock, rnd: Random) -> Result[(), ()] waits {
     answer(mut r, old, PlaceDrift)
     expect(failed_with(r, "drift") && is_dirty(r, "g", 1u64), "L52: the second drift did not fail the deploy at Dirty(g)")
     expect(asked_of(r, 3u64) == 1u64 && launcher.held(r.f) == 0u64, "L52: the second drift did not abort OLD once and release the held answer")
+
+    // Lose the host after the fresh Preparing commit, before delivering its retry export.
+    // OLD still knows the attempt from the first cutover. The reconnect abort must work
+    // whether OLD kept that ID or already changed it while accepting the retry export.
+    let (lost0, paused, pending) = cut_case(c, rnd)
+    let mut lost = take lost0
+    pump(mut lost, take pending)
+    let original = deploy_attempt(lost)
+    let replies = launcher.cutover_reply(mut lost.f, paused, PlaceDrift)
+    for result in replies {
+        let _ = apply(mut lost, Got(clone(result)))
+    }
+    let new_attempt = deploy_attempt(lost)
+    expect(still_preparing(lost) && (new_attempt.hi != original.hi || new_attempt.lo != original.lo), "L52 restart: no durable retry to recover")
+    let mut recovered = restart(take lost, 4u64)
+    let mut abort_named_both = false
+    for request in recovered.asked {
+        if let Command(child, HostAbort(a, Some(prior))) = request {
+            abort_named_both = launcher.same_child(child, paused) && a == attempt_bytes(new_attempt) && prior == attempt_bytes(original)
+        }
+    }
+    expect(abort_named_both && asked_of(recovered, 1u64) == 0u64 && still_preparing(recovered), "L52 restart: recovery did not abort both possible pause owners and wait for OLD")
+    old_says(mut recovered, paused, PlaceAborted)
+    expect(failed_with(recovered, "interrupted before the cutover") && is_dirty(recovered, "g", 1u64), "L52 restart: abort did not preserve OLD")
     Ok(())
 }
 

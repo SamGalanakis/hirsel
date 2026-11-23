@@ -276,8 +276,8 @@ fn same_writes(rows: DataRows, committed: List[JournalOp]) -> Result[bool, Error
 
 // RUNNER-SPEC §7: re-executes the call recorded at version `v` of `b` with
 // `body` on a private copy of its base, under the recorded run's CallInfo,
-// and compares the reply and the data writes with the committed ones. A
-// faulted re-run replies `failed(stop)`, the reply its conclude would write.
+// and compares the reply and the data writes with the committed ones.
+// For a fault settled by conclude, compare the re-run's `failed(stop)`.
 pub fn reexecute(db: Db, b: Branch, v: u64, plan: Plan, failed: scoped fn(Stop) -> Bytes, body: scoped[view] fn(Recorded, mut Tx) -> Result[Bytes, Bytes]) -> Result[Verdict, Error] waits {
     let Some(commit) = recorded_commit(db, b, v)? else {
         return Ok(Unknown(StateGone))
@@ -295,10 +295,12 @@ pub fn reexecute(db: Db, b: Branch, v: u64, plan: Plan, failed: scoped fn(Stop) 
         return Ok(Unknown(StateGone))
     }
     let ci = CallInfo(id: CallId(store: db.store, branch: b.id, version: call.base + 1), at: call.at, seed: call.seed)
-    let (take output, take writes) = match rerun(db, base, ci, plan, call, body) {
-        RanTo(take output, take writes) => (take output, take writes),
-        Halted(stop) => (failed(stop), new_data_rows()),
-        RoomRefused => return Ok(Unknown(AdmissionRefused)),
+    let reran = rerun(db, base, ci, plan, call, body)
+    let (take output, take writes) = match (call.settle, take reran) {
+        (0, RanTo(take output, take writes)) => (take output, take writes),
+        (1, Halted(stop)) => (failed(stop), new_data_rows()),
+        (_, RoomRefused) => return Ok(Unknown(AdmissionRefused)),
+        _ => return Ok(Different(Reply)),
     }
     if list.len(stored) != 41 + list.len(output) || !list.starts_with_at(stored, 41, output) {
         return Ok(Different(Reply))
@@ -357,6 +359,110 @@ fn verdict_code(v: Verdict) -> u8 {
     }
 }
 
+fn reexecute_admit(mut db: Db, stream: u64) -> (Completion, CallRecord) waits {
+    let key = key_word(stream)
+    let record = call_for(key, 32)
+    let admitted = result.unwrap(admit(mut db, key, 0, request_digest(record.key, record.args)))
+    let Admitted(take complete) = take admitted else {
+        fail("re-execution law: expected an admitted call")
+    }
+    result.unwrap(durable(mut db, ticket(complete)))
+    (take complete, take record)
+}
+
+fn reexecute_error_entry(mut tx: Tx, t: Table[u64, u64]) -> Result[Bytes, Bytes] {
+    result.unwrap(put(mut tx, t, 9, 99))
+    Error(key_word(17))
+}
+
+// §7 Kept: the error reply survives with its CALL, and the staged row does not.
+fn reexecute_kept(mut db: Db, t: Table[u64, u64], plan: Plan) -> bool waits {
+    let (take complete, take record) = reexecute_admit(mut db, 56)
+    let served = serve(mut db, take complete, plan, Some(take record), scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] {
+        reexecute_error_entry(mut tx, t)
+    })
+    let Ok(Kept(receipt)) = take served else {
+        return false
+    }
+    result.unwrap(durable(mut db, receipt.ticket))
+    if result.unwrap(get(snapshot(db), shape(t), 9)) != Some(8u64) {
+        return false
+    }
+    let v = version(snapshot(db))
+    let line = main_branch(db)
+    let failed = scoped fn(_stop: Stop) -> Bytes {
+        key_word(0)
+    }
+    let kept = result.unwrap(reexecute(db, line, v, plan, failed, scoped fn(_call: Recorded, mut tx: Tx) -> Result[Bytes, Bytes] {
+        reexecute_error_entry(mut tx, t)
+    }))
+    let same_without_writes = result.unwrap(reexecute(db, line, v, plan, failed, scoped fn(_call: Recorded, mut tx: Tx) -> Result[Bytes, Bytes] {
+        Ok(key_word(17))
+    }))
+    let changed = result.unwrap(reexecute(db, line, v, plan, failed, scoped fn(_call: Recorded, mut tx: Tx) -> Result[Bytes, Bytes] {
+        Error(key_word(18))
+    }))
+    verdict_is(kept, Same) && verdict_is(same_without_writes, Same) && verdict_is(changed, Different(Reply))
+}
+
+fn reexecute_fault_bytes(stop: Stop) -> Bytes {
+    match stop {
+        Raised(kind) => key_word(int.widen(kind)),
+        _ => key_word(0),
+    }
+}
+
+fn reexecute_fault_entry(mut tx: Tx, t: Table[u64, u64]) -> Result[Bytes, Bytes] {
+    if result.unwrap(fetch(tx, shape(t), 9)) == Some(8u64) {
+        result.unwrap(put(mut tx, t, 10, 1))
+        fail("re-execution law: raised from the attempted base")
+    }
+    Ok(key_word(5))
+}
+
+// §7 Failed: two commits intervene between the attempt's base and conclude.
+// The re-run must use that base and CallInfo, and must raise the same fault.
+fn reexecute_failed(mut db: Db, t: Table[u64, u64], plan: Plan) -> bool waits {
+    let (take complete, take record) = reexecute_admit(mut db, 57)
+    let served = serve(mut db, take complete, plan, Some(take record), scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] {
+        reexecute_fault_entry(mut tx, t)
+    })
+    // RUNNER-SPEC §1.1 assigns 5 to Fail.
+    let Ok(Failed(take pending_run, Raised(5))) = take served else {
+        return false
+    }
+    let attempted = pending_run.attempted
+    if result.unwrap(get(snapshot(db), shape(t), 10)) != None {
+        return false
+    }
+    if !set_row(mut db, t, 9, 10) || !set_row(mut db, t, 9, 11) {
+        return false
+    }
+    let concluded = conclude(mut db, take pending_run, key_word(5), Resident)
+    let Ok(Committed(receipt)) = take concluded else {
+        return false
+    }
+    result.unwrap(durable(mut db, receipt.ticket))
+    let v = version(snapshot(db))
+    let line = main_branch(db)
+    let fault = result.unwrap(reexecute(db, line, v, plan, reexecute_fault_bytes, scoped fn(_call: Recorded, mut tx: Tx) -> Result[Bytes, Bytes] {
+        let ci = info(mut tx)
+        let same_id = same(ci.id.store, attempted.id.store) && ci.id.branch == attempted.id.branch && ci.id.version == attempted.id.version
+        if !same_id || ci.at != attempted.at || ci.seed != attempted.seed {
+            return Error(key_word(1))
+        }
+        reexecute_fault_entry(mut tx, t)
+    }))
+    let different_fault = result.unwrap(reexecute(db, line, v, plan, reexecute_fault_bytes, scoped fn(_call: Recorded, mut tx: Tx) -> Result[Bytes, Bytes] {
+        let absent: Option[Bytes] = None
+        Ok(option.unwrap(take absent))
+    }))
+    let returned = result.unwrap(reexecute(db, line, v, plan, reexecute_fault_bytes, scoped fn(_call: Recorded, mut tx: Tx) -> Result[Bytes, Bytes] {
+        Ok(key_word(5))
+    }))
+    verdict_is(fault, Same) && verdict_is(different_fault, Different(Reply)) && verdict_is(returned, Different(Reply))
+}
+
 // R5: an entry whose reply and writes are its info(mut tx) fields, re-executed
 // after later commits changed its input row, compares Same live and after a
 // journal-replay reopen; under the fork's CallInfo it compares Different(Reply),
@@ -370,14 +476,7 @@ pub fn disk_law_reexecute_info(d: Dir, c: Clock, r: Random, tasks: Tasks) -> boo
     if !set_row(mut db, t, 9, 7) {
         return false
     }
-    let stream = key_word(55)
-    let rec = call_for(stream, 32)
-    let request = request_digest(rec.key, rec.args)
-    let admission = result.unwrap(admit(mut db, stream, 0, request))
-    let Admitted(take complete) = take admission else {
-        return false
-    }
-    result.unwrap(durable(mut db, ticket(complete)))
+    let (take complete, take rec) = reexecute_admit(mut db, 55)
     let plan = Plan(n_e: 65536, s_e: 65536, reply_max: 4096)
     let served = serve(mut db, take complete, plan, Some(take rec), scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] {
         info_entry(mut tx, t, None, false)
@@ -418,8 +517,10 @@ pub fn disk_law_reexecute_info(d: Dir, c: Clock, r: Random, tasks: Tasks) -> boo
     let gone = result.unwrap(reexecute(reopened, main_branch(reopened), v, plan, failed, scoped fn(call: Recorded, mut tx: Tx) -> Result[Bytes, Bytes] {
         info_entry(mut tx, t, None, false)
     }))
+    let replayed = verdict_is(again, Same) && verdict_is(gone, Unknown(StateGone))
+    let cases = replayed && reexecute_kept(mut reopened, t, plan) && reexecute_failed(mut reopened, t, plan)
     result.unwrap(close(take reopened))
-    verdict_is(again, Same) && verdict_is(gone, Unknown(StateGone))
+    cases
 }
 
 @test

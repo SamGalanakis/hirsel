@@ -138,9 +138,6 @@ impl ResolutionScratch {
         ordinal: u32,
         item: Item<'_>,
     ) -> Resolution {
-        if item.range.has_errors {
-            return Resolution::default();
-        }
         let size = item.range.resolution_size;
         let queries = size.names as usize
             + size.binders as usize
@@ -199,6 +196,7 @@ impl ResolutionScratch {
                         | NodeKind::ResourceType
                         | NodeKind::ScopedType
                 ),
+            lost: false,
             scope_id: 0,
             next_scope: 1,
             depth: 0,
@@ -259,6 +257,10 @@ struct Resolver<'a, 's> {
     loop_base: usize,
     numeric_parameter: bool,
     numeric_declaration: bool,
+    /// A statement of an enclosing block before this point failed to parse
+    /// (PROG-8): it may have bound names, so a bare value name found nowhere
+    /// is poisoned rather than refused.
+    lost: bool,
     scope_id: u32,
     next_scope: u32,
     depth: u32,
@@ -734,8 +736,13 @@ impl<'a> Resolver<'a, '_> {
                 .unwrap_or_else(|| self.variant_or_missing(n, name));
         }
         if !type_context {
-            self.head_lookup(n, name)
-                .unwrap_or_else(|| self.variant_or_missing(n, name))
+            if let Some(t) = self.head_lookup(n, name) {
+                return t;
+            }
+            if self.lost && !self.has_variant(name) {
+                return Target::Missing;
+            }
+            self.variant_or_missing(n, name)
         } else {
             self.missing(n)
         }
@@ -978,6 +985,7 @@ impl<'a> Resolver<'a, '_> {
                         };
                         t
                     }
+                    None if self.lost => Target::Missing,
                     None => {
                         let message = if self.index.packages[self.package.0 as usize].name == name {
                             let bare = rest
@@ -1199,13 +1207,20 @@ impl<'a> Resolver<'a, '_> {
                 | NodeKind::CallableType
                 | NodeKind::ScopedCallableType
                 | NodeKind::OwnCallableType => self.function(n),
-                NodeKind::TypeDecl
-                | NodeKind::ResourceType
-                | NodeKind::ScopedType
-                | NodeKind::Block => self.scope(|r| {
+                NodeKind::TypeDecl | NodeKind::ResourceType | NodeKind::ScopedType => {
+                    self.scope(|r| {
+                        for &child in c {
+                            r.visit(child)
+                        }
+                    })
+                }
+                NodeKind::Block => self.scope(|r| {
+                    let lost = r.lost;
                     for &child in c {
-                        r.visit(child)
+                        r.visit(child);
+                        r.lost |= r.item.tree.node(child).kind == NodeKind::Error;
                     }
+                    r.lost = lost;
                 }),
                 NodeKind::Generic | NodeKind::RegionGeneric => {
                     self.bind(

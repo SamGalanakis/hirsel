@@ -105,17 +105,9 @@ fn header_file_end(item: Item<'_>) -> usize {
 
 /// The item's header tokens, the shape's part for this item: the declared
 /// tables a shape selects hold every header token's meaning, the parameter
-/// names included (`hirsel_core_front::layer`). An item that fails to parse
-/// anywhere, its body included, resolves nothing (`ResolutionScratch::resolve`),
-/// so its header lowers to the refused type: the same tokens are another
-/// signature.
+/// names included (`hirsel_core_front::layer`).
 fn header_identity(item: Item<'_>) -> ContentHash {
-    let domain = if item.range.has_errors {
-        "hirsel.header-tokens.unparsed.v1"
-    } else {
-        "hirsel.header-tokens.v2"
-    };
-    token_identity(item, header_file_end(item), domain)
+    token_identity(item, header_file_end(item), "hirsel.header-tokens.v2")
 }
 
 /// A signature's identity as its readers depend on it, the header row's

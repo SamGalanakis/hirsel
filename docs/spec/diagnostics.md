@@ -77,7 +77,7 @@ refusal is never suppressed or reworded by another one, except that checks depen
 construct that failed to parse, resolve or type are not made.
 
 **Poison.** Suppression is by construct, not by definition. A construct that failed to
-resolve or type is **poisoned**: a name that was not found, a call or construction of it,
+parse, resolve or type is **poisoned**: a name that was not found, a call or construction of it,
 and a type with a refused part all have the refused type. An expression with a poisoned
 operand is poisoned, and so is a place bound from a poisoned value. A poisoned operand
 suppresses only the checks that read it:
@@ -98,6 +98,10 @@ suppresses only the checks that read it:
 - A refused definition reports no gaps (constructs the implementation does not build):
   it is never built.
 
+A statement that fails to parse is poisoned too. It may have bound names or been its
+block's value, so the block's value has the refused type, and, after the statement in its
+block and the blocks inside, a bare value name found nowhere is poisoned rather than refused
+([LANG-7](language.md#lang-7-names)), as is an assignment to it.
+
 Every other check of the same body, before or after the poisoned construct, is made, and
-its refusals are reported. A definition with a syntax refusal is not resolved or checked
-further.
+its refusals are reported.

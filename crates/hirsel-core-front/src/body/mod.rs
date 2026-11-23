@@ -960,9 +960,6 @@ impl Program<'_> {
     pub fn check_lower(&self, f: usize, e: &mut Emitter) -> CoreCheck {
         crate::cost_scope!("body", self.fns[f].path.to_string());
         let fd = &self.fns[f];
-        if self.item(fd.at).range.has_errors {
-            return CoreCheck::default();
-        }
         let Some(body) = fd.body else {
             return CoreCheck::default();
         };
@@ -1344,7 +1341,8 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         let fd = &p.fns[f];
         let item = p.item(fd.at);
         let info = &p.items[fd.at.module as usize][fd.at.item as usize];
-        let refused = !info.resolution.diagnostics.is_empty();
+        // A syntax refusal of this item poisons the statements it lost (PROG-8).
+        let refused = !info.resolution.diagnostics.is_empty() || item.range.has_errors;
         let binder_at = info
             .resolution
             .binders

@@ -41,6 +41,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     pub(super) fn statements(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
         let stmts = self.kids(n);
         let mut diverged = false;
+        // A statement that failed to parse may have been the block's value (PROG-8).
+        let lost = stmts.iter().any(|&s| self.kind(s) == NodeKind::Error);
         for (i, &s) in stmts.iter().enumerate() {
             crate::cost_scope!("construct", format!("{:?}", self.kind(s)));
             crate::cost_scope!(
@@ -84,7 +86,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.unfreeze(freezes, |h| (h != Hold::View(Extent::Temp)).then_some(h));
             self.end_owners(owners, None, true, s);
         }
-        let t = if diverged { NEVER } else { UNIT };
+        let t = if diverged {
+            NEVER
+        } else if lost {
+            ERROR
+        } else {
+            UNIT
+        };
         match want {
             Some(w) if t != NEVER => {
                 self.coerce(t, w, n);
@@ -286,6 +294,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     NodeKind::Group | NodeKind::Projection | NodeKind::Index
                 ) {
                     target = self.kids(target)[0];
+                }
+                // A place naming what the resolver could not find is poisoned (PROG-8).
+                if self.kind(target) == NodeKind::Path
+                    && matches!(self.p.target(self.at, target), Some(Target::Missing))
+                {
+                    self.halt();
+                    return false;
                 }
                 if self.kind(target) == NodeKind::Ascription {
                     let refusals = self.out.refusals.len();

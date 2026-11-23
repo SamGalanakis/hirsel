@@ -815,8 +815,10 @@ fn syntax_refusals_do_not_cascade_and_recovery_keeps_the_next_definition() {
     let file = &p.syntax;
     assert!(file.items[0].has_errors);
     assert!(!file.items[1].has_errors);
+    // The lost `let` poisons `x` (PROG-8): it resolves to nothing, refused nowhere.
     let bad = resolve(&index, module, files[0].2, 0, file.item(0));
-    assert!(bad.names.is_empty() && bad.diagnostics.is_empty());
+    assert!(bad.diagnostics.is_empty(), "{:?}", bad.diagnostics);
+    assert!(bad.names.iter().all(|u| u.target == Target::Missing));
     let good = resolve(&index, module, files[0].2, 1, file.item(1));
     assert!(good.diagnostics.is_empty());
     assert_eq!(good.names.len(), 3);

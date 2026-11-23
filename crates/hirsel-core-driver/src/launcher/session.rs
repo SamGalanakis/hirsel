@@ -188,13 +188,16 @@ pub(crate) struct Approvals {
     pub(crate) old: Option<Vec<u8>>,
 }
 
-/// What the host compares before `Assemble`: the new and old root limits, and whether the
-/// new recipe adds a grant the old one lacks.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// What the host compares before `Assemble`: the new and old root limits, whether the new
+/// recipe adds a grant the old one lacks, and the new recipe's target and place allowance,
+/// which the host checks NEW's preview against.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Summary {
     pub(crate) root_limit: u64,
     pub(crate) old_root_limit: u64,
     pub(crate) grants_added: bool,
+    pub(crate) target: String,
+    pub(crate) n_place: u64,
 }
 
 /// Why an admission ended: a policy refusal printed as is, an invalid input or release,
@@ -957,6 +960,8 @@ session_wire!(Event, "event tag", w, r;
         w.u64(summary.root_limit);
         w.u64(summary.old_root_limit);
         w.bool(summary.grants_added);
+        w.bytes(summary.target.as_bytes());
+        w.u64(summary.n_place);
         w.bytes(display.as_bytes());
     } => Self::Admitted(
         Attempt::get(r)?,
@@ -965,6 +970,8 @@ session_wire!(Event, "event tag", w, r;
             root_limit: r.u64()?,
             old_root_limit: r.u64()?,
             grants_added: r.bool()?,
+            target: r.string()?,
+            n_place: r.u64()?,
         },
         r.string()?,
     ),
@@ -1306,10 +1313,12 @@ mod tests {
                         root_limit: 1024,
                         old_root_limit: 2048,
                         grants_added: true,
+                        target: "t".into(),
+                        n_place: 3,
                     },
                     "l".into(),
                 ),
-                "0e0000000807060504030201181716151413121120000000cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc0004000000000000000800000000000001010000006c",
+                "0e0000000807060504030201181716151413121120000000cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc000400000000000000080000000000000101000000740300000000000000010000006c",
             ),
             (
                 Event::Assembled(attempt(), (0..32).collect(), vec![0xdd; 32], 5, 6),

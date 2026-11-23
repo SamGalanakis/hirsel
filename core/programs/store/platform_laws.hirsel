@@ -1,4 +1,4 @@
-// Laws of the platform host (RUNNER-SPEC §14.7: L39, L41, L42, L43, L45) over the faked
+// Laws of the platform host (RUNNER-SPEC §14.7: L39, L41, L42, L43, L45, L48) over the faked
 // launcher. Each law drives the host through the session's requests and events. Its oracle
 // is the outcome the cited rule states: which serving launches the launcher is asked for,
 // at which generation, and what each wake row then holds. A started serving launch stands
@@ -536,11 +536,34 @@ fn old_says(mut r: Rig, old: launcher.Child, take said: runner.HostReply) waits 
     feed(mut r, take events)
 }
 
-// A deploy of NEW (image_two, target "t", one place) through OLD's describe and the
-// preview's answer `preview`, which the host checks before it asks OLD to export.
-fn to_export(mut r: Rig, old: launcher.Child, take preview: Bytes) waits {
-    let go = must(deploy(mut r.h, "g", an_attempt(), image_two(), image_two(), "t", 1u64), "deploy")
+// The verifier's summary of NEW (target "t", one place) beside OLD's recipe.
+fn summary_of(root_limit: u64, old_root_limit: u64, grants_added: bool) -> launcher.Summary {
+    launcher.Summary(root_limit: root_limit, old_root_limit: old_root_limit, grants_added: grants_added, target: "t", n_place: 1u64)
+}
+
+// The host opens group g's admission of NEW, attested, and the verifier admits it with
+// `summary` and the approval text `display`.
+fn admit_new(mut r: Rig, take summary: launcher.Summary, display: String, grant_added: bool) waits {
+    let go = must(deploy(mut r.h, "g", an_attempt(), Attested(image_two()), list.new(), list.new(), grant_added), "deploy")
     pump(mut r, take go)
+    let mut events: List[launcher.Event] = list.new()
+    list.push(mut events, Admitted(an_attempt(), image_two(), take summary, string.from(display)))
+    feed(mut r, take events)
+}
+
+// The launcher assembled NEW (assembly and image both image_two) and holds its reservation.
+fn assembled_new(mut r: Rig) waits {
+    let mut events: List[launcher.Event] = list.new()
+    list.push(mut events, Assembled(an_attempt(), image_two(), image_two(), 5u64, 6u64))
+    feed(mut r, take events)
+}
+
+// A deploy of NEW (image_two, target "t", one place) admitted and assembled, through OLD's
+// describe and the preview's answer `preview`, which the host checks before it asks OLD to
+// export.
+fn to_export(mut r: Rig, old: launcher.Child, take preview: Bytes) waits {
+    admit_new(mut r, summary_of(1u64, 1u64, false), "", false)
+    assembled_new(mut r)
     helper_answers(mut r, helper_child(old, DescribeMode(an_attempt())), describe_answer())
     helper_answers(mut r, helper_child(old, PreviewMode(an_attempt(), list.new())), take preview)
 }
@@ -555,17 +578,20 @@ fn prepared(mut r: Rig, old: launcher.Child) -> List[launcher.Request] waits {
     apply(mut r, Got(Placed(clone(old), PlaceImported(image_two()))))
 }
 
-// What OLD was asked: 1 an export, 2 a cutover, 3 an abort, 0 anything else.
+// What the launcher was asked: OLD 1 an export, 2 a cutover, 3 an abort; 4 an Assemble,
+// 5 a Release; 0 anything else.
 fn command_kind(q: launcher.Request) -> u64 {
     match q {
         Command(_, HostExport(_, _)) => 1u64,
         Command(_, HostCutover(_, _, _, _)) => 2u64,
         Command(_, HostAbort(_)) => 3u64,
+        Assemble(_) => 4u64,
+        Release(_) => 5u64,
         _ => 0u64,
     }
 }
 
-// How many of the rig's requests were OLD commands of `kind`.
+// How many of the rig's requests were of `kind`.
 fn asked_of(r: Rig, kind: u64) -> u64 {
     let mut n = 0u64
     for q in r.asked {
@@ -1045,4 +1071,84 @@ fn pin_expiry(c: Clock, rnd: Random) -> Result[(), ()] waits {
     must(forget_pin(mut kept.h, id), "forget_pin")
     expect(pin_gone(kept.h, id, 0u64), "pin: a removed pin resolved")
     Ok(())
+}
+
+fn rejected_with(r: Rig, why: String) -> bool {
+    match deploy_admission(r.h, "g") {
+        Some(Rejected(w)) => w == why,
+        _ => false
+    }
+}
+
+fn helpers_started(r: Rig) -> u64 {
+    let mut n = 0u64
+    for c in r.starts {
+        if let Describe(_) = c.role {
+            n += 1u64
+        }
+    }
+    n
+}
+
+// A group g serving at gen 1 whose cgroup memory is `memory`, by `author`.
+fn admission_case(c: Clock, rnd: Random, memory: Option[u64], author: Author) -> Rig waits {
+    let mut r = rig(c, rnd, 4u64)
+    let spec = NewGroup(name: "g", tenant: "t", workdir: "g", author: author, label: Uncontained, listen: "127.0.0.1:0", bindings: uncontained(), limits: launcher.Limits(memory: memory, cpu: None, pids: None), assembly: image(), activation: 1u64)
+    let reqs = must(add_group(mut r.h, spec), "add_group")
+    pump(mut r, take reqs)
+    op_wake(mut r, "g")
+    r
+}
+
+// L48 `deploy_admission_policy` (launch.md "Publish and assemble"): the host relays a
+// deploy's admission and decides its approvals from the verified summary before the image
+// is assembled. OLD and NEW serve side by side through the cutover, so their root limits
+// together must fit the group's memory; a grant OLD's recipe lacks needs the operator's
+// approval; nonempty approval text needs the operator's confirmation of exactly that text;
+// an untrusted author publishes source only. A refused admission is released and leaves no
+// Preparing row, no helper child and no Assemble.
+@test
+fn deploy_admission_policy(c: Clock, rnd: Random) -> Result[(), ()] waits {
+    // Overlap memory: 60 + 50 > 100 is refused; 50 + 50 fits.
+    let mut r = admission_case(c, rnd, Some(100u64), Trusted)
+    admit_new(mut r, summary_of(60u64, 50u64, false), "", false)
+    expect(rejected_with(r, "Refused(Memory)"), "memory: OLD and NEW together exceed the group's memory")
+    expect(asked_of(r, 4u64) == 0u64 && asked_of(r, 5u64) == 1u64, "memory: the refused admission is released, not assembled")
+    expect(is_none(deploy_outcome(r.h, "g")) && helpers_started(r) == 0u64, "memory: a refused admission prepares nothing")
+    admit_new(mut r, summary_of(50u64, 50u64, false), "", false)
+    expect(asked_of(r, 4u64) == 1u64, "memory: an admission that fits is assembled")
+    // A grant OLD lacks: refused without the operator's approval, assembled with it.
+    let mut r2 = admission_case(c, rnd, None, Trusted)
+    admit_new(mut r2, summary_of(1u64, 1u64, true), "", false)
+    expect(rejected_with(r2, "Refused(GrantAdded)") && asked_of(r2, 4u64) == 0u64, "grant: an unapproved added grant is refused")
+    admit_new(mut r2, summary_of(1u64, 1u64, true), "", true)
+    expect(asked_of(r2, 4u64) == 1u64, "grant: an approved added grant is assembled")
+    // Approval text: no Assemble until the operator confirms exactly that text; then the
+    // assembled deploy is Preparing, its reservation released and OLD's describe started.
+    let mut r3 = admission_case(c, rnd, None, Trusted)
+    admit_new(mut r3, summary_of(1u64, 1u64, false), "foreign: lib", false)
+    expect(asked_of(r3, 4u64) == 0u64, "confirm: assembled before the confirmation")
+    let wrong = deploy_confirm(mut r3.h, "g", "foreign: other")
+    expect(asked_of(r3, 4u64) == 0u64 && !is_ok(wrong), "confirm: a different text confirms nothing")
+    let go = must(deploy_confirm(mut r3.h, "g", "foreign: lib"), "confirm")
+    pump(mut r3, take go)
+    expect(asked_of(r3, 4u64) == 1u64, "confirm: the exact text assembles")
+    assembled_new(mut r3)
+    expect(still_preparing(r3) && asked_of(r3, 5u64) == 1u64 && helpers_started(r3) == 1u64, "confirm: the assembled deploy prepares after its row is durable")
+    // An untrusted author attests nothing.
+    let mut r4 = admission_case(c, rnd, None, Untrusted)
+    let attested = deploy(mut r4.h, "g", an_attempt(), Attested(image_two()), list.new(), list.new(), false)
+    expect(!is_ok(attested) && is_none(deploy_admission(r4.h, "g")), "untrusted: an attested recipe is refused")
+    unplug(mut r)
+    unplug(mut r2)
+    unplug(mut r3)
+    unplug(mut r4)
+    Ok(())
+}
+
+fn is_ok[T](r: Result[T, Refused]) -> bool {
+    match r {
+        Ok(_) => true,
+        Error(_) => false
+    }
 }

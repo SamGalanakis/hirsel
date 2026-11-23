@@ -82,12 +82,15 @@ pub type Approvals: codec + send {
 // One object the launcher needs, by kind and 32-byte hash.
 pub type Wanted: codec + send = GroupKey(Bytes) | BodyKey(Bytes) | AnnexKey(Bytes) | ArchiveKey(Bytes)
 
-// What the host compares before `Assemble`: the new and old root limits, and whether the
-// new recipe adds a grant the old one lacks.
+// What the host compares before `Assemble`: the new and old root limits, whether the new
+// recipe adds a grant the old one lacks, and the new recipe's target and place allowance,
+// which the host checks NEW's preview against.
 pub type Summary: codec + send {
     root_limit: u64,
     old_root_limit: u64,
-    grants_added: bool
+    grants_added: bool,
+    target: String,
+    n_place: u64
 }
 
 // Why an admission ended: a policy refusal printed as is, an invalid input or release,
@@ -231,7 +234,9 @@ fn holds_store(r: Role) -> bool {
 }
 
 // The fake launcher. Children never run: a test ends them with `end`, and makes a listener
-// readable with `connect` (a client waits in the backlog) or not with `accept`.
+// readable with `connect` (a client waits in the backlog) or not with `accept`. It runs no
+// verifier: a test answers an admission's requests with `Need`, `Admitted`, `Assembled`
+// or `AdmissionFailed` itself.
 type Kept {
     state: ChildState
 }
@@ -536,10 +541,10 @@ pub fn handle(mut f: Fake, take r: Request) -> List[Event] {
             f.fenced = false
             push_event(mut out, Collected(0u64))
         },
-        Admit(_, take a, _, _) => push_event(mut out, AdmissionFailed(take a, Invalid("the fake has no admission"))),
+        Admit(_, _, _, _) => (),
         AdmitData(_, _) => (),
         AdmitEnd(_) => (),
-        Assemble(take a) => push_event(mut out, AdmissionFailed(take a, Invalid("the fake has no admission"))),
+        Assemble(_) => (),
         CutoverAck(take c, a) => {
             if let Some(i) = find_key(f, c, a) {
                 let last = list.len(f.cutovers) - 1u64

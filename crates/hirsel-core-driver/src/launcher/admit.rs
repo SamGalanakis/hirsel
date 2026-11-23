@@ -410,6 +410,8 @@ fn work(
 fn summary(ad: &Admission, recipe: &Recipe, old: Option<&[u8]>) -> Result<Summary, Failure> {
     let mut summary = Summary {
         root_limit: recipe.launch.root_limit,
+        target: recipe.launch.target.clone(),
+        n_place: recipe.launch.n_place,
         ..Summary::default()
     };
     if let Some(old) = old {

@@ -102,7 +102,7 @@ pub type Retired: codec + send {
 
 pub type Limit: send = Count(u64) | Live(String, u64) | Groups(String, u64)
 
-pub type Refused: send = Full(Limit) | Busy(u64) | Unknown | Exists | Retiring | Missing(String) | Store(store.Error)
+pub type Refused: send = Full(Limit) | Busy(u64) | Unknown | Exists | Retiring | Missing(String) | Denied(String) | Store(store.Error)
 
 // Wall time for the due index, monotonic time for backoff and the Ready reset.
 pub type Now: send {
@@ -212,6 +212,22 @@ type Prep {
     aborting: bool,
 }
 
+// Where a deploy's admission stands (launch.md "The launcher", "Publish and assemble"):
+// the verifier's Need parts so far and whether the last came, the approval text the
+// operator must confirm, the image being assembled, the launcher's failure with its
+// payload, or the host's own policy refusal.
+pub type AdmitStage: codec + send = Uploading(List[launcher.Wanted], bool) | Confirming(String) | Assembling | Unadmitted(launcher.Failure) | Rejected(String)
+
+type Admitting {
+    attempt: launcher.Attempt,
+    incarnation: u64,
+    // The operator approved a grant OLD's recipe lacks.
+    grant_added: bool,
+    stage: AdmitStage,
+    // The verified recipe's summary, from `Admitted`.
+    summary: Option[launcher.Summary],
+}
+
 type Vol {
     run: Option[Run],
     cut: Option[Cut],
@@ -222,7 +238,8 @@ type Vol {
     // The probe was answered with the other pair's activation: its end starts the next
     // probe at once, outside backoff.
     reprobe: bool,
-    prep: Option[Prep]
+    prep: Option[Prep],
+    admit: Option[Admitting]
 }
 
 pub opaque type Host {
@@ -424,7 +441,7 @@ pub fn wake_row(h: Host, name: String) -> Option[WakeRow] {
 }
 
 fn empty_vol() -> Vol {
-    Vol(run: None, cut: None, count: 0u64, retry_at: None, failing: false, last: string.new(), reprobe: false, prep: None)
+    Vol(run: None, cut: None, count: 0u64, retry_at: None, failing: false, last: string.new(), reprobe: false, prep: None, admit: None)
 }
 
 // The volatile state of one group, by value: read it, change it, put it back.
@@ -1244,6 +1261,8 @@ fn reconcile(mut h: Host, children: List[launcher.ChildState], readable: List[la
         v.run = None
         v.cut = None
         v.prep = None
+        let was = replace(mut v.admit, None)
+        v.admit = interrupted(take was)
         vol_put(mut h, name, take v)
     }
     let mut ends: List[(launcher.Child, launcher.End)] = list.new()
@@ -1481,10 +1500,10 @@ pub fn event(mut h: Host, take e: launcher.Event, now: Now) -> List[launcher.Req
         Placed(c, reply) => placed(mut h, c, reply, now, mut out),
         CutoverResult(c, _, reply) => placed(mut h, c, reply, now, mut out),
         Answered(c, said) => answered(mut h, c, said, mut out),
-        Need(_, _, _) => (),
-        Admitted(_, _, _, _) => (),
-        Assembled(_, _, _, _, _) => (),
-        AdmissionFailed(_, _) => (),
+        Need(a, keys, done) => needed(mut h, a, keys, done),
+        Admitted(a, _, summary, display) => admitted(mut h, a, summary, display, mut out),
+        Assembled(a, key, digest, _, _) => assembled(mut h, a, key, digest, mut out),
+        AdmissionFailed(a, why) => unadmitted(mut h, a, why),
         Fenced => (),
         Collected(_) => (),
     }
@@ -1620,13 +1639,14 @@ pub fn set_quota(mut h: Host, tenant: String, q: Quota, now: Now) -> Result[List
     Ok(take out)
 }
 
-// A deploy whose NEW assembly is published (launch.md "Hot deploy"). The Preparing row is
+// A deploy whose NEW assembly is published and synced (launch.md "Hot deploy"): its
+// admission was answered `Assembled`. The Preparing row is
 // durable before the attempt's reservation is released and before any helper runs; it
 // keeps the row `Dirty(g)` naming OLD. The host then runs OLD's describe child, NEW's preview
 // child over OLD's exported list, OLD's export, NEW's prepare child on it and OLD's import,
 // checking each answer before the next step. `image` is NEW's image digest and `target`
 // and `n_place` the verified recipe's, which the preview must report.
-pub fn deploy(mut h: Host, name: String, attempt: launcher.Attempt, assembly: Bytes, image_digest: Bytes, target: String, n_place: u64) -> Result[List[launcher.Request], Refused] waits {
+fn prepare(mut h: Host, name: String, attempt: launcher.Attempt, assembly: Bytes, image_digest: Bytes, target: String, n_place: u64) -> Result[List[launcher.Request], Refused] waits {
     let Some(g) = group_row(h, name)? else {
         return Error(Unknown)
     }
@@ -1673,6 +1693,286 @@ pub fn deploy(mut h: Host, name: String, attempt: launcher.Attempt, assembly: By
     let p = Prep(attempt: attempt, incarnation: g.incarnation, old: old, assembly: clone(assembly), image: clone(image_digest), target: string.from(target), n_place: n_place, stage: Describing, describe: list.new(), release: list.new(), helper: Some(take describer), aborting: false)
     set_prep(mut h, name, Some(take p))
     Ok(take out)
+}
+
+// Begins a deploy of the group's serving OLD (launch.md "Publish and assemble"): the host
+// opens the launcher's admission of `input` with the group's working directory and OLD's
+// assembly, and the operator's approved Foreign and Exec bindings. An untrusted author
+// publishes source only and approves no Foreign or Exec grant. `grant_added` approves a
+// grant OLD's recipe lacks. One deploy runs per group at a time.
+pub fn deploy(mut h: Host, name: String, attempt: launcher.Attempt, take input: launcher.Input, foreign: List[String], exec: List[String], grant_added: bool) -> Result[List[launcher.Request], Refused] {
+    let Some(g) = group_row(h, name)? else {
+        return Error(Unknown)
+    }
+    if let Some(_) = g.retiring {
+        return Error(Retiring)
+    }
+    let Some(old) = run_gen(h, name) else {
+        return Error(Busy(0u64))
+    }
+    let v = vol_read(h, name)
+    if !is_none(v.cut) || !is_none(v.prep) || !is_none(running_admission(v)) {
+        return Error(Busy(old))
+    }
+    match deploy_outcome(h, name) {
+        Some(Preparing) => return Error(Busy(old)),
+        Some(Pending) => return Error(Busy(old)),
+        Some(Undecided(_)) => return Error(Busy(old)),
+        _ => (),
+    }
+    if let Untrusted = g.author {
+        let source = match input {
+            Source(_) => true,
+            _ => false,
+        }
+        if !source || list.len(foreign) > 0u64 || list.len(exec) > 0u64 {
+            return Error(Denied("an untrusted author publishes source only, without Foreign or Exec grants"))
+        }
+    }
+    let approvals = launcher.Approvals(recording: false, foreign: clone(foreign), exec: clone(exec), workdir: string.from(g.workdir), old: Some(clone(g.assembly)))
+    let mut out: List[launcher.Request] = list.new()
+    list.push(mut out, Admit(group_of(name, g.incarnation), attempt, take input, take approvals))
+    let mut w = vol_read(h, name)
+    w.admit = Some(Admitting(attempt: attempt, incarnation: g.incarnation, grant_added: grant_added, stage: Uploading(list.new(), false), summary: None))
+    vol_put(mut h, name, take w)
+    Ok(take out)
+}
+
+// The next bounded chunk of an attested admission's exchange bytes, relayed unchanged.
+pub fn deploy_data(mut h: Host, name: String, take chunk: Bytes) -> Result[List[launcher.Request], Refused] {
+    let Some(a) = uploading(vol_read(h, name)) else {
+        return Error(Unknown)
+    }
+    let mut out: List[launcher.Request] = list.new()
+    list.push(mut out, AdmitData(a, take chunk))
+    Ok(take out)
+}
+
+// The attested admission's input is complete.
+pub fn deploy_end(mut h: Host, name: String) -> Result[List[launcher.Request], Refused] {
+    let Some(a) = uploading(vol_read(h, name)) else {
+        return Error(Unknown)
+    }
+    let mut out: List[launcher.Request] = list.new()
+    list.push(mut out, AdmitEnd(a))
+    Ok(take out)
+}
+
+// The operator confirmed exactly `display`, the approval text `Admitted` gave: assemble.
+pub fn deploy_confirm(mut h: Host, name: String, display: String) -> Result[List[launcher.Request], Refused] {
+    let mut v = vol_read(h, name)
+    let Some(take adm) = replace(mut v.admit, None) else {
+        return Error(Unknown)
+    }
+    let mut d = take adm
+    let shown = match d.stage {
+        Confirming(text) => Some(string.from(text)),
+        _ => None,
+    }
+    let Some(text) = shown else {
+        v.admit = Some(take d)
+        vol_put(mut h, name, take v)
+        return Error(Unknown)
+    }
+    if text != display {
+        v.admit = Some(take d)
+        vol_put(mut h, name, take v)
+        return Error(Denied("the confirmation is not the approval text shown"))
+    }
+    let a = d.attempt
+    d.stage = Assembling
+    v.admit = Some(take d)
+    vol_put(mut h, name, take v)
+    let mut out: List[launcher.Request] = list.new()
+    list.push(mut out, Assemble(a))
+    Ok(take out)
+}
+
+// Where the group's latest admission stands, if it has had one since the host started.
+pub fn deploy_admission(h: Host, name: String) -> Option[AdmitStage] {
+    match vol_read(h, name).admit {
+        Some(d) => Some(clone(d.stage)),
+        None => None,
+    }
+}
+
+// The attempt of an admission the launcher still runs.
+fn running_admission(v: Vol) -> Option[launcher.Attempt] {
+    match v.admit {
+        Some(d) => match d.stage {
+            Uploading(_, _) => Some(d.attempt),
+            Confirming(_) => Some(d.attempt),
+            Assembling => Some(d.attempt),
+            _ => None,
+        },
+        None => None,
+    }
+}
+
+fn uploading(v: Vol) -> Option[launcher.Attempt] {
+    match v.admit {
+        Some(d) => match d.stage {
+            Uploading(_, _) => Some(d.attempt),
+            _ => None,
+        },
+        None => None,
+    }
+}
+
+// A new launcher session cancelled every running admission.
+fn interrupted(take adm: Option[Admitting]) -> Option[Admitting] {
+    let Some(take held) = take adm else {
+        return None
+    }
+    let mut d = take held
+    let running = match d.stage {
+        Uploading(_, _) => true,
+        Confirming(_) => true,
+        Assembling => true,
+        _ => false,
+    }
+    if running {
+        d.stage = Rejected("the launcher session ended during admission")
+    }
+    Some(take d)
+}
+
+fn same_attempt(a: launcher.Attempt, b: launcher.Attempt) -> bool {
+    a.hi == b.hi && a.lo == b.lo
+}
+
+// The group whose running admission is attempt `a`.
+fn admitting_group(h: Host, a: launcher.Attempt) -> Option[String] {
+    for (name, v) in h.vol {
+        if let Some(x) = running_admission(v) {
+            if same_attempt(x, a) {
+                return Some(string.from(name))
+            }
+        }
+    }
+    None
+}
+
+fn set_stage(mut h: Host, name: String, take stage: AdmitStage) {
+    let mut v = vol_read(h, name)
+    let Some(take adm) = replace(mut v.admit, None) else {
+        return
+    }
+    let mut d = take adm
+    d.stage = take stage
+    v.admit = Some(take d)
+    vol_put(mut h, name, take v)
+}
+
+fn needed(mut h: Host, a: launcher.Attempt, keys: List[launcher.Wanted], done: bool) {
+    let Some(name) = admitting_group(h, a) else {
+        return
+    }
+    let Some(d) = vol_read(h, name).admit else {
+        return
+    }
+    let mut parts: List[launcher.Wanted] = match d.stage {
+        Uploading(sofar, _) => clone(sofar),
+        _ => return,
+    }
+    for k in keys {
+        list.push(mut parts, clone(k))
+    }
+    set_stage(mut h, name, Uploading(take parts, done))
+}
+
+// The verifier admitted the release: the host checks its overlap memory and grants against
+// OLD's recipe, then assembles at once or after the operator confirms the approval text.
+fn admitted(mut h: Host, a: launcher.Attempt, summary: launcher.Summary, display: String, mut out: List[launcher.Request]) {
+    let Some(name) = admitting_group(h, a) else {
+        return
+    }
+    let Ok(Some(g)) = group_row(h, name) else {
+        return
+    }
+    let mut v = vol_read(h, name)
+    let Some(take adm) = replace(mut v.admit, None) else {
+        return
+    }
+    let mut d = take adm
+    let mut why = string.new()
+    // OLD and NEW run side by side through the cutover, so the group's memory bounds both.
+    if let Some(m) = g.limits.memory {
+        if summary.root_limit > m || summary.old_root_limit > m - summary.root_limit {
+            why = "Refused(Memory)"
+        }
+    }
+    if why == "" && summary.grants_added && !d.grant_added {
+        why = "Refused(GrantAdded)"
+    }
+    if why != "" {
+        d.stage = Rejected(take why)
+        list.push(mut out, Release(a))
+    } else if display == "" {
+        d.stage = Assembling
+        list.push(mut out, Assemble(a))
+    } else {
+        d.stage = Confirming(string.from(display))
+    }
+    d.summary = Some(clone(summary))
+    v.admit = Some(take d)
+    vol_put(mut h, name, take v)
+}
+
+// NEW is assembled and its reservation held: the deploy goes on to Preparing.
+fn assembled(mut h: Host, a: launcher.Attempt, key: Bytes, digest: Bytes, mut out: List[launcher.Request]) waits {
+    let Some(name) = admitting_group(h, a) else {
+        return
+    }
+    let Some(d) = vol_read(h, name).admit else {
+        return
+    }
+    let assembling = match d.stage {
+        Assembling => true,
+        _ => false,
+    }
+    let Some(summary) = d.summary else {
+        return
+    }
+    if !assembling {
+        return
+    }
+    let mut v = vol_read(h, name)
+    v.admit = None
+    vol_put(mut h, name, take v)
+    match prepare(mut h, name, a, key, digest, summary.target, summary.n_place) {
+        Ok(more) => {
+            for q in more {
+                list.push(mut out, clone(q))
+            }
+        },
+        Error(e) => {
+            let mut w = vol_read(h, name)
+            w.admit = Some(Admitting(attempt: a, incarnation: d.incarnation, grant_added: d.grant_added, stage: Rejected(refused_text(e)), summary: Some(clone(summary))))
+            vol_put(mut h, name, take w)
+            list.push(mut out, Release(a))
+        },
+    }
+}
+
+fn unadmitted(mut h: Host, a: launcher.Attempt, why: launcher.Failure) {
+    let Some(name) = admitting_group(h, a) else {
+        return
+    }
+    set_stage(mut h, name, Unadmitted(clone(why)))
+}
+
+fn refused_text(e: Refused) -> String {
+    match e {
+        Full(_) => "full",
+        Busy(_) => "busy",
+        Unknown => "unknown group",
+        Exists => "exists",
+        Retiring => "retiring",
+        Missing(w) => joined("missing ", w),
+        Denied(w) => string.from(w),
+        Store(_) => "store error",
+    }
 }
 
 // A describe, preview or prepare child of a deploy: no store, listener or endpoint.
@@ -2120,6 +2420,12 @@ pub fn remove(mut h: Host, name: String, disposition: Disposition) -> Result[Lis
     let (g, gone) = decided(mut h.db, take made)?
     dequeue(mut h, name)
     let mut out: List[launcher.Request] = list.new()
+    let mut v = vol_read(h, name)
+    if let Some(a) = running_admission(v) {
+        list.push(mut out, Release(a))
+        v.admit = None
+        vol_put(mut h, name, take v)
+    }
     if gone {
         let _ = map.remove(mut h.vol, name)
         list.push(mut out, Close(group_of(name, g.incarnation)))

@@ -606,13 +606,21 @@ cold listeners, child endpoints, pidfds and cgroup population changes.
      while a verifier has a frame of input it has not taken, so a slow upload bounds the
      launcher's buffer; children's ends are still reported while it waits, and later
      requests wait only until the verifier takes that frame.
-  3. `Admitted(attempt, root, summary, display)` reports the verified root, its root and
-     memory limits beside the approved OLD recipe's, whether it adds a grant, and the
-     approval text (foreign archives and `Exec` profiles). The host decides the approvals
-     from it.
+  3. `Admitted(attempt, root, summary, display)` reports the verified root, its root
+     limit beside the approved OLD recipe's, whether it adds a grant OLD's recipe lacks,
+     the recipe's target and place allowance, and the approval text (foreign archives and
+     `Exec` profiles). The host decides the approvals from it. OLD and NEW serve side by
+     side through the cutover, so the two root limits together must fit the group's
+     memory limit, or the host answers `Refused(Memory)`; an added grant the operator did
+     not approve is `Refused(GrantAdded)`. Either refusal releases the attempt. Nonempty
+     approval text waits for the operator to confirm exactly that text. An untrusted
+     author's deploy is source only, without Foreign or `Exec` grants, and is refused
+     before `Admit`. The host checks NEW's preview against the target and allowance.
   4. `Assemble(attempt)` builds and syncs the image and its assembly record, and
-     `Assembled(attempt, assembly, digest, fetch, bytes)` answers it. The launcher then
-     holds a reservation of the assembly for the attempt until the host releases it.
+     `Assembled(attempt, assembly, digest, fetch, assembly_ns)` answers it with the
+     assembly name, the image digest and the fetch and assembly times in nanoseconds. The
+     launcher then holds a reservation of the assembly for the attempt until the host
+     releases it, which it does once the deploy's Preparing row is durable.
   `AdmissionFailed(attempt, failure)` (`Denied`, `Invalid` or `Unassembled`) ends an
   attempt at any step. `Release(attempt)` or a new session cancels a running attempt.
 - **Launch.** It starts a group's children: install (genesis and standalone install),

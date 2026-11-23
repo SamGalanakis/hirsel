@@ -394,6 +394,7 @@ pub opaque type Connection: send {
     clock: Clock,
     deadline: u64,
     phase: Phase,
+    head_committed: bool,
     upload: RequestBody,
     head_request: bool,
     close_after: bool
@@ -423,7 +424,20 @@ fn send(mut output: WriteHalf, prefix: Bytes, body: Bytes, clock: Clock, deadlin
 fn send_head(mut c: Connection, req: Request, encoded: EncodedHead) -> Result[(), Error] waits {
     let empty = string.as_bytes("")
     if encoded.count == 0 {
-        return send(mut c.output, c.encoding, empty, c.clock, c.deadline)
+        let end = list.len(c.encoding)
+        let mut at = 0u64
+        while at < end {
+            check_deadline(mut c)?
+            match host.send_pair(mut c.output, list.slice(c.encoding, at, end), empty, At(c.clock, c.deadline)) {
+                Ok(0) => return Error(Write(Reset)),
+                Ok(n) => {
+                    c.head_committed = true
+                    at += n
+                },
+                Error(e) => return write_result(Error(e)),
+            }
+        }
+        return Ok(())
     }
     let mut index = 0u64
     for f in req.headers {
@@ -441,6 +455,8 @@ fn send_head(mut c: Connection, req: Request, encoded: EncodedHead) -> Result[()
                 list.len(c.encoding)
             }
             let after = list.slice(c.encoding, at, end)
+            // send_secret does not return a committed count on failure.
+            c.head_committed = true
             write_result(tls.send_secret(mut c.output, before, credential, after, At(c.clock, c.deadline)))?
         }
     }
@@ -456,7 +472,7 @@ fn check_deadline(mut c: Connection) -> Result[(), Error] {
     }
 }
 
-fn connect(n: Net, address: Addr, clock: Clock, deadline_ns: u64) -> Result[Socket, Error] waits {
+fn connect_socket(n: Net, address: Addr, clock: Clock, deadline_ns: u64) -> Result[Socket, Error] waits {
     if host.mono_ns(clock) >= deadline_ns {
         return Error(Deadline)
     }
@@ -468,13 +484,28 @@ fn connect(n: Net, address: Addr, clock: Clock, deadline_ns: u64) -> Result[Sock
 
 /// Dials a numeric address and writes the first request head under this deadline.
 pub fn dial(n: Net, address: Addr, authority: String, clock: Clock, req: Request, deadline_ns: u64) -> Result[Connection, Error] waits {
-    let socket = connect(n, address, clock, deadline_ns)?
-    attach(take socket, authority, clock, req, deadline_ns)
+    let mut c = open(n, address, authority, clock, deadline_ns)?
+    start(mut c, req, deadline_ns)?
+    Ok(take c)
 }
 
 /// Performs a verified TLS handshake offering HTTP/1.1 and writes the first request head.
 pub fn https(n: Net, address: Addr, authority: String, name: String, trust: Trust, clock: Clock, req: Request, deadline_ns: u64) -> Result[Connection, Error] waits {
-    let socket = connect(n, address, clock, deadline_ns)?
+    let mut c = open_tls(n, address, authority, name, trust, clock, deadline_ns)?
+    start(mut c, req, deadline_ns)?
+    Ok(take c)
+}
+
+/// Opens a numeric address without writing an HTTP request.
+pub fn open(n: Net, address: Addr, authority: String, clock: Clock, deadline_ns: u64) -> Result[Connection, Error] waits {
+    let socket = connect_socket(n, address, clock, deadline_ns)?
+    let (take input, take output) = net.split(take socket)
+    idle_connection(take input, take output, authority, clock, deadline_ns)
+}
+
+/// Opens and verifies a TLS stream without writing an HTTP request.
+pub fn open_tls(n: Net, address: Addr, authority: String, name: String, trust: Trust, clock: Clock, deadline_ns: u64) -> Result[Connection, Error] waits {
+    let socket = connect_socket(n, address, clock, deadline_ns)?
     let mut alpn: List[String] = list.new()
     let protocol = string.from("http/1.1")
     list.push(mut alpn, take protocol)
@@ -482,25 +513,25 @@ pub fn https(n: Net, address: Addr, authority: String, name: String, trust: Trus
         Ok(take stream) => take stream,
         Error(e) => return Error(connect_error(e)),
     }
-    attach_halves(take input, take output, authority, clock, req, deadline_ns)
+    idle_connection(take input, take output, authority, clock, deadline_ns)
 }
 
 /// Takes ownership of a connected stream and writes the first request head.
 pub fn attach(take socket: Socket, authority: String, clock: Clock, req: Request, deadline_ns: u64) -> Result[Connection, Error] waits {
     let (take input, take output) = net.split(take socket)
-    attach_halves(take input, take output, authority, clock, req, deadline_ns)
+    let mut c = idle_connection(take input, take output, authority, clock, deadline_ns)?
+    start(mut c, req, deadline_ns)?
+    Ok(take c)
 }
 
-fn attach_halves(take input: ReadHalf, take output: WriteHalf, authority: String, clock: Clock, req: Request, deadline_ns: u64) -> Result[Connection, Error] waits {
+fn idle_connection(take input: ReadHalf, take output: WriteHalf, authority: String, clock: Clock, deadline_ns: u64) -> Result[Connection, Error] {
     if string.byte_len(authority) > 8192 {
         return Error(TooLarge)
     }
     let stored = string.from(authority)
     let wire = reader()?
     let encoding = storage(8192)?
-    let mut c = Connection(input: take input, output: take output, wire: take wire, encoding: take encoding, authority: take stored, clock, deadline: deadline_ns, phase: Idle, upload: Fixed(0), head_request: false, close_after: false)
-    start(mut c, req, deadline_ns)?
-    Ok(take c)
+    Ok(Connection(input: take input, output: take output, wire: take wire, encoding: take encoding, authority: take stored, clock, deadline: deadline_ns, phase: Idle, head_committed: false, upload: Fixed(0), head_request: false, close_after: false))
 }
 
 /// Begins another request after the previous body has reached EOF.
@@ -508,6 +539,7 @@ pub fn start(mut c: Connection, req: Request, deadline_ns: u64) -> Result[(), Er
     if c.phase != Idle {
         return Error(State)
     }
+    c.head_committed = false
     c.deadline = deadline_ns
     check_deadline(mut c)?
     let encoded = encode_head(mut c.encoding, c.authority, req)?
@@ -519,6 +551,12 @@ pub fn start(mut c: Connection, req: Request, deadline_ns: u64) -> Result[(), Er
     c.head_request = req.method == "HEAD"
     c.phase = Upload
     Ok(())
+}
+
+/// Whether the last start committed request bytes, or may have when a
+/// protected header send failed.
+pub fn request_started(c: Connection) -> bool {
+    c.head_committed
 }
 
 /// Sends a body fragment. A local size error leaves the upload unchanged.

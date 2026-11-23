@@ -21,6 +21,9 @@ head. `attach` takes an already connected socket and writes the same head.
 also verifies the TLS peer for `name` under the supplied `trust` policy and
 offers HTTP/1.1 through ALPN. The address, Host authority and TLS verification
 name are explicit. Both transports return the same `Connection`.
+`open(net, address, authority, clock, deadline_ns)` and
+`open_tls(net, address, authority, name, trust, clock, deadline_ns)`
+return an idle connection before sending a request.
 `start(mut connection, request, deadline_ns)` writes another request on a
 reusable connection. `write(mut connection, bytes)` sends a body fragment.
 `finish_request(mut connection, body_max)` completes the upload and reads
@@ -62,6 +65,9 @@ state, insufficient output space, connect, write, read,
 malformed head, protocol switching, body framing, size limits, deadline and
 cancellation. A refused allocation raises `Capacity`. A wire or deadline
 failure makes the connection unusable. Writes can have committed a prefix on failure.
+`request_started(connection)` reports whether the last `start` committed
+any request bytes. It also reports true if a protected header send failed
+and the client cannot distinguish zero from a partly committed send.
 
 The transport-free `Reader` accepts bounded fragments with `feed` and an
 EOF signal with `end_input`. `parse_head` reports when a final head is

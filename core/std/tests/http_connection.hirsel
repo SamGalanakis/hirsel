@@ -1271,7 +1271,14 @@ fn http_client_round_trip(n: Net, c: Clock, tasks: Tasks) -> bool waits {
     let (server, address) = listen_for_law(n, c, tasks, test_config())
     let fixed = http_client.Request(method: "POST", target: "/echo?source=client", headers: list.new(), body: Fixed(5))
     let end = after_ms(host.mono_ns(c), 100)
-    let mut client = result.unwrap(http_client.dial(n, address, "example.test", c, fixed, end))
+    let mut client = result.unwrap(http_client.open(n, address, "example.test", c, end))
+    if http_client.request_started(client) || !http_client.reusable(client) {
+        fail("opening a connection started a request")
+    }
+    result.unwrap(http_client.start(mut client, fixed, end))
+    if !http_client.request_started(client) {
+        fail("a successful start committed no request bytes")
+    }
     result.unwrap(http_client.write(mut client, string.as_bytes("hel")))
     result.unwrap(http_client.write(mut client, string.as_bytes("lo")))
     if !post_echo(mut client, "hello") {

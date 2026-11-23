@@ -1846,6 +1846,7 @@ impl Publication {
         let root = &self.units[entry];
         let (abi, cleanup) = bound_entry_abi(&decl, &entry.definition, &root.module, FuncId(0))
             .map_err(NativeStop::Entry)?;
+        let root_body = root.code.body.hash;
         // Native bodies and lent std code can operate on the same live Map.
         let emitter = emitter(&options, tools.runtime, &target)?;
         use std::os::unix::ffi::OsStrExt;
@@ -1883,7 +1884,7 @@ impl Publication {
         let mut remarks = Vec::new();
         let (mut objects, closed_image, launch_digest_unused) = if let Some(std) = std {
             let emitted = release_objects(
-                &self.units,
+                self.units,
                 entry,
                 std,
                 &options,
@@ -1992,10 +1993,7 @@ impl Publication {
         };
         let cleanup = if let Some(module) = cleanup {
             let identity = cleanup_identity(&module);
-            let cleanup_key = key(
-                "hirsel.recipe-entry-cleanup.v1",
-                &(emitter, root.code.body.hash),
-            )?;
+            let cleanup_key = key("hirsel.recipe-entry-cleanup.v1", &(emitter, root_body))?;
             objects.push(object(
                 &store,
                 None,
@@ -2054,7 +2052,7 @@ impl Publication {
 /// the exports of `std`, over `std`: the program's image parts and the std's
 /// objects. `closed_executable`: the hirsel launcher alone enters the image.
 pub(super) fn release_objects(
-    units: &BTreeMap<Identity, Unit>,
+    units: BTreeMap<Identity, Unit>,
     entry: &Identity,
     std: StdSide,
     options: &NativeOptions,
@@ -2082,6 +2080,8 @@ pub(super) fn release_objects(
         },
     )?;
     let joined = release::join_modules(entry, &reached, &modules, |_| FuncId(0))?;
+    drop(modules);
+    drop(units);
     let mut emitted = release::emit_release_image(
         entry,
         &reached,

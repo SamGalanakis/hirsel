@@ -31,6 +31,8 @@ typedef void (*HirselLlvmSourceRemark)(void *, unsigned, const char *, size_t, c
                                        const char *, size_t, unsigned);
 extern void hirsel_llvm_share_cold_step_sync(void *module, void *machine,
     HirselLlvmSourceRemark source, void *receiver);
+extern LLVMBool hirsel_llvm_large_release(LLVMModuleRef module);
+extern LLVMErrorRef hirsel_llvm_optimize_large_release(LLVMModuleRef module, LLVMTargetMachineRef machine);
 extern LLVMErrorRef hirsel_llvm_optimize_release(LLVMModuleRef module, LLVMTargetMachineRef machine,
     LLVMBool prune, LLVMBool prepay_steps, HirselLlvmCounterRangeReport report, HirselLlvmSourceRemark source, void *receiver,
     const uint8_t *lent, size_t lent_len);
@@ -545,7 +547,10 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
     LLVMSetTarget(module, triple);
     LLVMTargetDataRef layout = LLVMCreateTargetDataLayout(machine);
     LLVMSetModuleDataLayout(module, layout); LLVMDisposeTargetData(layout);
-    if (speed) {
+    LLVMErrorRef e = LLVMErrorSuccess;
+    if (speed && hirsel_llvm_large_release(module)) {
+        e = hirsel_llvm_optimize_large_release(module, machine);
+    } else if (speed) {
         unsigned hint = LLVMGetEnumAttributeKindForName("inlinehint", 10);
         for (LLVMValueRef f = LLVMGetFirstFunction(module); f; f = LLVMGetNextFunction(f))
             if (LLVMCountBasicBlocks(f))
@@ -556,9 +561,9 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
         // carrier values and fold checks implied by the caller's room test.
         hirsel_llvm_inline_snapshot_calls(module);
         LLVMValueRef refill = LLVMGetNamedFunction(module, "hirsel_core_step_out");
-        LLVMErrorRef e = hirsel_llvm_optimize_release(module, machine, export_count != 0,
-                                                      refill && LLVMGetFirstUse(refill), report, source, receiver,
-                                                      lent, lent_len);
+        e = hirsel_llvm_optimize_release(module, machine, export_count != 0,
+                                        refill && LLVMGetFirstUse(refill), report, source, receiver,
+                                        lent, lent_len);
         if (!e) e = hirsel_llvm_specialize_release(module, machine, lent, lent_len);
         if (!e) {
             hirsel_llvm_inline_recursive_leaves(module);
@@ -581,13 +586,13 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
             hirsel_cold_failure_edges(module, context);
             hirsel_llvm_share_cold_step_sync(module, machine, source, receiver);
             e = hirsel_llvm_growth_arms_back(module, machine);
-            hirsel_llvm_align_release_functions(module);
-        }
-        if (e) {
-            char *text = LLVMGetErrorMessage(e); error(out, text);
-            LLVMDisposeErrorMessage(text); goto done;
         }
     }
+    if (e) {
+        char *text = LLVMGetErrorMessage(e); error(out, text);
+        LLVMDisposeErrorMessage(text); goto done;
+    }
+    if (speed) hirsel_llvm_align_release_functions(module);
     if (!speed) hirsel_llvm_promote_development_slots(module);
 #ifdef HIRSEL_PROFILE_FRAME_POINTERS
     hirsel_llvm_configure_codegen(module, 1);

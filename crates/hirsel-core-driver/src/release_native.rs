@@ -295,6 +295,11 @@ pub(super) fn emit_release_image(
                     .iter()
                     .any(|call| call.callee == Callee::Runtime(RtOp::LaunchWord))
             });
+    let mut private_variants = joined
+        .code_variants
+        .keys()
+        .filter(|f| joined.functions[f.index()].body.is_some())
+        .count();
     let modules = [joined];
     let refs = [&modules[0]];
     // The checked body keys identify the source-neutral published modules.
@@ -334,6 +339,7 @@ pub(super) fn emit_release_image(
         ),
         &consumed.iter().map(Vec::as_slice).collect::<Vec<_>>(),
     )?;
+    drop(consumed);
     // Every part, whichever program reached it, is in the shared parts cache.
     let shared = Store::new(&options.parts)?;
     let emit = |message: String| NativeStop::Emit {
@@ -389,16 +395,6 @@ pub(super) fn emit_release_image(
         remarks = Vec::new();
     }
     if held.is_empty() {
-        let units = modules
-            .iter()
-            .zip(&facts)
-            .map(|(module, facts)| hirsel_llvm_lazy::Unit::Core {
-                module,
-                facts,
-                observe_charge: options.logical_charge_report.is_some(),
-                debug_lines: true,
-            })
-            .collect::<Vec<_>>();
         let mut parts = Vec::new();
         let mut failure = None;
         let mut reuse = SharedParts {
@@ -410,10 +406,23 @@ pub(super) fn emit_release_image(
         };
         let exports = [instance.symbol()];
         let program = match lowered {
-            Some(release) => release.emit(&exports, jobs, &mut reuse, lend),
-            None => hirsel_llvm_lazy::emit_program_parts(
-                &units, &exports, target, jobs, &mut reuse, lend,
-            ),
+            Some(release) => {
+                drop(facts);
+                drop(modules);
+                release.emit(&exports, jobs, &mut reuse, lend)
+            }
+            None => {
+                let unit = hirsel_llvm_lazy::Unit::Core {
+                    module: &modules[0],
+                    facts: &facts[0],
+                    observe_charge: options.logical_charge_report.is_some(),
+                    debug_lines: true,
+                };
+                let lowered = hirsel_llvm_lazy::lower_program(&[unit], target).map_err(emit)?;
+                drop(facts);
+                drop(modules);
+                lowered.emit(&exports, jobs, &mut reuse, lend)
+            }
         }
         .map_err(emit)?;
         remarks = program.remarks;
@@ -470,15 +479,6 @@ pub(super) fn emit_release_image(
         record.debug_sites.clone_from(&debug_sites);
         store.put_keyed(unit, &encode(&record)?)?;
     }
-    let mut private_variants = modules
-        .iter()
-        .map(|m| {
-            m.code_variants
-                .keys()
-                .filter(|f| m.functions[f.index()].body.is_some())
-                .count()
-        })
-        .sum();
     let objects = held
         .into_iter()
         .map(|(bare, object, file, compiled)| ObjectProduct {

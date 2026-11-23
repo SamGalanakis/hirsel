@@ -616,6 +616,24 @@ extern "C" void hirsel_llvm_align_release_functions(LLVMModuleRef module) {
     }
 }
 
+extern "C" LLVMBool hirsel_llvm_large_release(LLVMModuleRef module) {
+    // Above this scale, speculative inlining and path-sensitive analyses can
+    // multiply a module that already occupies hundreds of MiB.
+    constexpr size_t MaxFullPipelineInstructions = 1'000'000;
+    size_t count = 0;
+    for (const Function &function : *unwrap(module))
+        if ((count += function.getInstructionCount()) > MaxFullPipelineInstructions) return 1;
+    return 0;
+}
+
+extern "C" LLVMErrorRef hirsel_llvm_optimize_large_release(LLVMModuleRef module, LLVMTargetMachineRef machine) {
+    // Preserve call boundaries. Even always-inline helpers can expand this
+    // much IR past the memory budget. Std calls use the side's objects.
+    return runPasses(module, machine, "release",
+        "globaldce,function<eager-inv>(sroa<modify-cfg>,early-cse,"
+        "instcombine<no-verify-fixpoint>,simplifycfg),globaldce");
+}
+
 extern "C" LLVMErrorRef hirsel_llvm_optimize_release(
     LLVMModuleRef raw_module, LLVMTargetMachineRef raw_machine, LLVMBool prune,
     LLVMBool prepay_steps, CounterRangeReport report, hirsel_llvm::SourceRemark source, void *receiver, const uint8_t *lent,

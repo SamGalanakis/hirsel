@@ -564,7 +564,7 @@ impl CheckProduct {
         recipe_build::bind_annexes(&mut units, &BTreeMap::new(), &std.points, true)?;
         let store = Store::new(&options.store)?;
         Ok(
-            recipe_build::release_objects(&units, &root, std, options, runtime, &store, false)?
+            recipe_build::release_objects(units, &root, std, options, runtime, &store, false)?
                 .objects,
         )
     }

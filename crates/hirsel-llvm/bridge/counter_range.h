@@ -494,12 +494,26 @@ private:
             // Fills, copies and lifetime markers were recorded before their
             // group could open.
             events.remove_if([&](auto &entry) { return objects[entry.second.object].open; });
+            // Every per-block state is indexed by these objects. Open
+            // objects have no events, so they need no columns. A copy's
+            // source survives with its destination because they share a group.
+            std::vector<unsigned> closedIndex(objects.size());
+            unsigned closedCount = 0;
+            for (unsigned k = 0; k < objects.size(); k++) {
+                if (objects[k].open) continue;
+                closedIndex[k] = closedCount;
+                objects[closedCount++] = objects[k];
+            }
+            objects.resize(closedCount);
+            for (auto &[i, event] : events) {
+                event.object = closedIndex[event.object];
+                if (event.kind == Kind::Copy) event.source = closedIndex[event.source];
+            }
             summaries.resize(objects.size());
             contributions.resize(objects.size());
             summaryChanges.resize(objects.size());
             summaryThresholds.resize(objects.size());
             for (unsigned k = 0; k < objects.size(); k++) {
-                if (objects[k].open) continue;
                 for (Cell &cell : groups[objects[k].group].cells) {
                     unsigned width = cell.integer ? cell.bytes * 8 : 1;
                     summaries[k].push_back(ConstantRange::getEmpty(width));
@@ -536,12 +550,6 @@ private:
                     llvm::sort(list, [](const APInt &a, const APInt &b) { return a.ult(b); });
                     list.erase(std::unique(list.begin(), list.end()), list.end());
                 }
-            for (BasicBlock *block : ReversePostOrderTraversal<Function *>(&f)) {
-                position[block] = order.size();
-                order.push_back(block);
-            }
-            solveInitialised();
-            solveLive();
         }
 
         // A value flushed where no read of the object is reachable is never
@@ -568,12 +576,6 @@ private:
                     }
                 }
             }
-        }
-
-        bool anyClosed() const {
-            for (const Object &o : objects)
-                if (!o.open) return true;
-            return false;
         }
 
         bool closedLoad(Instruction *i) const {
@@ -657,7 +659,10 @@ private:
             for (unsigned k = 0; k < objects.size(); k++)
                 for (unsigned c = 0; c < contributions[k].size(); c++)
                     contributions[k][c] = ConstantRange::getEmpty(contributions[k][c].getBitWidth());
-            std::vector<std::vector<Dirty>> after(order.size());
+            // An absent object has no materialised element at this exit.
+            // Save only dirty objects, in object order, for forward edges.
+            using Exit = std::vector<std::pair<unsigned, Dirty>>;
+            std::vector<Exit> after(order.size());
             DenseMap<LoadInst *, ConstantRange> fresh;
             for (unsigned b = 0; b < order.size(); b++) {
                 BasicBlock *block = order[b];
@@ -669,7 +674,6 @@ private:
                         if (at != position.end()) preds.push_back({pred, at->second});
                     }
                     for (unsigned k = 0; k < objects.size(); k++) {
-                        if (objects[k].open) continue;
                         SmallVector<std::pair<BasicBlock *, Dirty>, 4> in;
                         for (auto [pred, p] : preds) {
                             // A retreating edge's state was flushed at its
@@ -678,7 +682,12 @@ private:
                                 in.push_back({pred, Dirty()});
                                 continue;
                             }
-                            Dirty dirty = after[p][k];
+                            const Exit &exit = after[p];
+                            auto found = llvm::lower_bound(exit, k, [](const auto &entry, unsigned object) {
+                                return entry.first < object;
+                            });
+                            Dirty dirty;
+                            if (found != exit.end() && found->first == k) dirty = found->second;
                             if (dirty.base && !keeps(dirty.base, block)) flush(k, dirty, b);
                             in.push_back({pred, std::move(dirty)});
                         }
@@ -826,7 +835,8 @@ private:
                             Dirty copy = state[k];
                             flush(k, copy, to);
                         }
-                after[b] = std::move(state);
+                for (unsigned k = 0; k < state.size(); k++)
+                    if (state[k].base) after[b].emplace_back(k, std::move(state[k]));
             }
             bool grew = false;
             for (unsigned k = 0; k < objects.size(); k++)
@@ -1179,7 +1189,13 @@ private:
             queued.assign(items.size(), true);
             for (unsigned k = 0; k < items.size(); k++) work.push(k);
             settle();
-            if (!anyClosed()) return;
+            if (objects.empty()) return;
+            for (BasicBlock *block : ReversePostOrderTraversal<Function *>(&f)) {
+                position[block] = order.size();
+                order.push_back(block);
+            }
+            solveInitialised();
+            solveLive();
             for (unsigned round = 0; sweep(); round++) {
                 // Widening bounds the rounds; this only guards compile time.
                 if (round == 256) {

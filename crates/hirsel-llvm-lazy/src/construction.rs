@@ -200,6 +200,7 @@ pub(crate) fn output(out: Output) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     const CHILD: &str = "HIRSEL_LLVM_OUT_OF_MEMORY_CHILD";
+    const RELEASE_JOBS: &str = "HIRSEL_LLVM_RELEASE_MEMORY_CHILD";
 
     // LLVM copies a 1 GiB metadata string past a 256 MiB limit. The source is
     // a read-only anonymous mapping, which the data limit does not count, so
@@ -254,5 +255,102 @@ mod tests {
             ),
             "{stderr}"
         );
+    }
+
+    #[test]
+    fn release_parts_under_data_limit_child() {
+        use std::fmt::Write as _;
+
+        let Ok(jobs) = std::env::var(RELEASE_JOBS) else {
+            return;
+        };
+        let jobs = jobs.parse().unwrap();
+        let target = hirsel_core_layout::Target::X86_64Linux;
+        let payload = "A".repeat(8 << 20);
+        let mut ir = format!(
+            "@data = private constant [{} x i8] c\"{payload}\"\n",
+            payload.len()
+        );
+        drop(payload);
+        let exports: Vec<_> = (0..64).map(|i| format!("entry{i}")).collect();
+        for (i, name) in exports.iter().enumerate() {
+            if i < 2 {
+                writeln!(ir, "define ptr @{name}() {{ ret ptr @data }}").unwrap();
+            } else {
+                writeln!(ir, "define i32 @{name}() {{ ret i32 {i} }}").unwrap();
+            }
+        }
+        let program = crate::emit_program_parts(
+            &[crate::Unit::Text(&ir)],
+            &exports,
+            target,
+            1,
+            &mut crate::Unheld,
+            crate::Lend::Lend {
+                limit: 0,
+                namespace: crate::LENT_NAMESPACE,
+            },
+        )
+        .unwrap();
+        drop(ir);
+        assert_eq!(program.deferred.len(), exports.len());
+        let codes: Vec<_> = program.deferred.iter().map(|p| p.code.as_slice()).collect();
+
+        // Reproduce a release image that already holds most of its 4 GiB data
+        // limit. The untouched mapping costs no resident memory. Both large
+        // parts need to parse their 8 MiB constant, which cannot fit beside a
+        // single 128 MiB worker stack in this remaining headroom.
+        let status = std::fs::read_to_string("/proc/self/status").unwrap();
+        let used_kib: usize = status
+            .lines()
+            .find_map(|line| line.strip_prefix("VmData:"))
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let reserve = (4usize << 30) - (used_kib << 10) - (130 << 20);
+        // SAFETY: a fresh, untouched anonymous mapping, unmapped below.
+        let held = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                reserve,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        assert_ne!(held, libc::MAP_FAILED);
+        let objects = crate::generate_parts(&codes, target, jobs).unwrap();
+        // SAFETY: this is the full range of the mapping above.
+        assert_eq!(unsafe { libc::munmap(held, reserve) }, 0);
+        assert_eq!(objects.len(), exports.len());
+        assert_eq!(objects.iter().filter(|o| o.len() > (8 << 20)).count(), 2);
+    }
+
+    #[test]
+    fn release_parts_finish_under_a_four_gib_data_limit_at_high_job_counts() {
+        for jobs in ["32", "64"] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "construction::tests::release_parts_under_data_limit_child",
+                    "--exact",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(RELEASE_JOBS, jobs)
+                .env("HIRSEL_MEMORY_LIMIT", "4G")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{jobs} jobs: {}\n{}\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+        }
     }
 }

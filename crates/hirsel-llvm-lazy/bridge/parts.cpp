@@ -54,12 +54,14 @@
 #include <llvm/Transforms/Utils/Cloning.h>
 #include <llvm/Transforms/Utils/ValueMapper.h>
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <atomic>
 #include <numeric>
 #include <optional>
 #include <pthread.h>
 #include <string>
+#include <sys/resource.h>
 #include <vector>
 
 using namespace llvm;
@@ -672,12 +674,41 @@ private:
     }
 };
 
-// Runs each thread's `start()` on the indices of `order`, taken in order, on up
-// to `jobs` threads, the calling thread one of them. Each thread has a target
-// machine of its own (a machine holds per-module state), or none when LLVM
-// cannot create one, and the stack the guard gives the compiler's own thread.
+constexpr size_t worker_stack = size_t(16) << 20;
+// Bank release codegen used about 42 MiB of data per LLVM worker beyond its
+// stack. Allow 64 MiB for the target machine, passes and allocator growth.
+constexpr size_t worker_budget = worker_stack + (size_t(64) << 20);
+
+size_t worker_width(size_t parts, unsigned jobs) {
+    size_t width = std::min<size_t>(std::max(jobs, 1u), parts);
+    if (width <= 1) return width;
+
+    struct rlimit limit;
+    if (getrlimit(RLIMIT_DATA, &limit) != 0) return 1;
+    if (limit.rlim_cur == RLIM_INFINITY) return width;
+    FILE *status = std::fopen("/proc/self/status", "r");
+    if (!status) return 1;
+    auto close = make_scope_exit([&] { std::fclose(status); });
+    char line[256];
+    while (std::fgets(line, sizeof(line), status)) {
+        unsigned long long kib;
+        if (std::sscanf(line, "VmData: %llu", &kib) != 1) continue;
+        auto used = kib << 10;
+        if (used >= limit.rlim_cur) return 1;
+        // Count the caller too: it needs LLVM heap space beside the new stacks.
+        auto fit = (limit.rlim_cur - used) / worker_budget;
+        return std::max<size_t>(1, std::min<unsigned long long>(width, fit));
+    }
+    return 1;
+}
+
+// Runs each thread's `start()` on the indices of `order`, taken in order. Each
+// thread, including the caller, has its own target machine, or none when LLVM
+// cannot create one. Width limits concurrency without changing the parts.
 template <typename Start>
 void on_threads(const TargetMachine &tm, const std::vector<size_t> &order, unsigned jobs, Start start) {
+    size_t width = worker_width(order.size(), jobs);
+    if (width == 0) return;
     struct Shared {
         const TargetMachine &tm;
         const std::vector<size_t> &order;
@@ -693,16 +724,19 @@ void on_threads(const TargetMachine &tm, const std::vector<size_t> &order, unsig
         for (size_t k; (k = s.next.fetch_add(1)) < s.order.size();) work(machine.get(), s.order[k]);
         return nullptr;
     };
-    size_t width = std::min<size_t>(std::max(jobs, 1u), order.size());
     std::vector<pthread_t> threads;
     pthread_attr_t attr;
-    pthread_attr_init(&attr);
-    pthread_attr_setstacksize(&attr, size_t(128) << 20);
-    for (size_t i = 1; i < width; ++i) {
-        pthread_t t;
-        if (pthread_create(&t, &attr, run, &shared) == 0) threads.push_back(t);
+    if (width > 1 && pthread_attr_init(&attr) == 0) {
+        if (pthread_attr_setstacksize(&attr, worker_stack) == 0) {
+            threads.reserve(width - 1);
+            for (size_t i = 1; i < width; ++i) {
+                pthread_t t;
+                if (pthread_create(&t, &attr, run, &shared) != 0) break;
+                threads.push_back(t);
+            }
+        }
+        pthread_attr_destroy(&attr);
     }
-    pthread_attr_destroy(&attr);
     run(&shared);
     for (pthread_t t : threads) pthread_join(t, nullptr);
 }

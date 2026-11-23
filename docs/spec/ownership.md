@@ -1060,6 +1060,10 @@ fn start(b: Bytes) -> Cursor in b { Cursor(input: view b, pos: 0) }
 scoped type Cursor { input: View[Bytes], pos: u64 }
 type Holder { c: Cursor }                                 // refused: OWN-19
 ```
+```hirsel
+scoped type Layer { under: Option[View[Layer]], n: u64 }  // refused: OWN-19, Layer is scoped
+fn bump(mut l: Layer) { l.n = 1 }
+```
 
 ### OWN-23: Generic bodies
 

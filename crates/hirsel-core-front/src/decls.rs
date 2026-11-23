@@ -1882,7 +1882,7 @@ impl Program<'_> {
         let n = self.decls.len();
         let base = self.decls.base_len();
         let mut state = vec![Visit::Todo; n - base];
-        let mut stack: Vec<(DeclId, usize)> = vec![];
+        let mut stack: Vec<(DeclId, usize, u32)> = vec![];
         let order = base..n;
         for d in order {
             if state[d - base] == Visit::Todo {
@@ -2044,7 +2044,12 @@ impl Program<'_> {
 
     /// Kind and inline parameters, reading only fields held inline (OWN-2). Re-entering
     /// an open declaration is an inline containment cycle.
-    fn inline_visit(&mut self, d: DeclId, state: &mut [Visit], stack: &mut Vec<(DeclId, usize)>) {
+    fn inline_visit(
+        &mut self,
+        d: DeclId,
+        state: &mut [Visit],
+        stack: &mut Vec<(DeclId, usize, u32)>,
+    ) {
         state[d.index() - self.decls.base_len()] = Visit::Open;
         let decl = &self.decls[d.index()];
         let mut kind_fixed = match decl.role {
@@ -2063,7 +2068,7 @@ impl Program<'_> {
             decl.all_fields().map(|f| f.ty).collect()
         };
         for (k, ty) in fields.into_iter().enumerate() {
-            stack.push((d, k));
+            stack.push((d, k, 0));
             let (fk, fp) = self.inline_ty(ty, state, stack);
             stack.pop();
             inline |= fp;
@@ -2088,7 +2093,7 @@ impl Program<'_> {
         &mut self,
         ty: TyId,
         state: &mut [Visit],
-        stack: &mut Vec<(DeclId, usize)>,
+        stack: &mut Vec<(DeclId, usize, u32)>,
     ) -> (Kind, u64) {
         match self.types.kind(ty).clone() {
             TyKind::Param(i) => (Kind::Plain, 1 << i),
@@ -2103,7 +2108,15 @@ impl Program<'_> {
                 (k, p)
             }
             TyKind::Anchored(x, _) | TyKind::Array(x, _) => self.inline_ty(x, state, stack),
-            TyKind::View(_) => (Kind::Scoped, 0),
+            // A view is held as its viewed type's own bytes (FORM #56), so its payload is
+            // inline: a type viewing itself contains itself. The frame counts the views
+            // open on its path.
+            TyKind::View(x) => {
+                stack.last_mut().unwrap().2 += 1;
+                let (_, p) = self.inline_ty(x, state, stack);
+                stack.last_mut().unwrap().2 -= 1;
+                (Kind::Scoped, p)
+            }
             TyKind::Fn(..) => (kind(&self.decls, &self.types, ty, &[]), 0),
             TyKind::Adt(e, args) => {
                 if let Some(r) = self.decls[e.index()].role {
@@ -2141,22 +2154,27 @@ impl Program<'_> {
         }
     }
 
-    fn cycle(&mut self, entered: DeclId, stack: &[(DeclId, usize)]) {
-        let start = stack.iter().position(|&(d, _)| d == entered).unwrap();
+    fn cycle(&mut self, entered: DeclId, stack: &[(DeclId, usize, u32)]) {
+        let start = stack.iter().position(|&(d, _, _)| d == entered).unwrap();
         let members = &stack[start..];
         if members
             .iter()
-            .any(|&(d, _)| self.decls[d.index()].summary.cycle)
+            .any(|&(d, _, _)| self.decls[d.index()].summary.cycle)
         {
             return;
         }
-        let &(least, field) = members
+        for &(d, _, _) in members {
+            self.decls[d.index()].summary.cycle = true;
+        }
+        // A cycle through a view views a scoped type, already refused by OWN-19 at
+        // that view's argument: one mistake, one refusal.
+        if members.iter().any(|&(_, _, views)| views > 0) {
+            return;
+        }
+        let &(least, field, _) = members
             .iter()
             .min_by(|a, b| self.identity(a.0).cmp(&self.identity(b.0)))
             .unwrap();
-        for &(d, _) in members {
-            self.decls[d.index()].summary.cycle = true;
-        }
         let decl = &self.decls[least.index()];
         let f = decl.all_fields().nth(field).unwrap();
         let mut r = refusal(

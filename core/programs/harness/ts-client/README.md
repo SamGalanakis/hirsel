@@ -7,8 +7,9 @@ types are stripped (`node:module`'s `stripTypeScriptTypes`, as `test.ts` does).
 
 What the client does:
 
-- **Caller.** Every request sends `Authorization: Bearer <base64 credential>`. Each
-  POST sends `Hirsel-Position`. Positions are sequential per Caller, so the client
+- **Caller.** Every request sends `Authorization: Bearer <base64 credential>`.
+  Messages, approvals and release settlements send `Hirsel-Position`.
+  Positions are sequential per Caller, so the client
   sends one POST at a time. It resends a POST that got no answer, or a 503, with the
   same bytes at the same position, and advances only once answered. Keep `position`
   beside the credential to continue after a reload.
@@ -22,6 +23,12 @@ What the client does:
   Reset is dropped.
 - **Approvals.** `pendingWaits()` returns the active run’s open approvals. Pass the
   returned position and key to `decide()`.
+- **Forks.** `fork(cut, key)` returns the new session ID. Give the fork its own
+  `Client` with the same credential and a fresh request position.
+- **Releases.** `releases()` lists filed proposals on a development gateway.
+  Pass a proposal ID to `settle(id, "Publish")` or
+  `settle(id, { Reject: "reason" })`. A Publish decision gives the parked tool
+  the result `approved, not deployed`.
 - **Draft.** A `preview` snapshot replaces the draft. A `preview-delta` appends only at
   the draft's byte end. `preview-clear` drops it. Once the transcript holds the row
   at `key.entry + 1`, that row supersedes the draft. Keys are compared by `run`,
@@ -47,6 +54,7 @@ that also serves `example.html`, and drives the client through:
 - a stream cut mid-answer;
 - a Reset after paging;
 - paging back to the first row, including a transient 503 and a fork cut;
+- publishing one release proposal and rejecting another;
 - clearing the client when read access is revoked during a draft.
 
 The oracle is a fresh reader: a raw stream's first image plus raw history pages,

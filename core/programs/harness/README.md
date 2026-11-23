@@ -5,9 +5,63 @@ set and an append-only list of entries. A turn is rows and short `store.Tx`
 transitions, and no code runs between effects, so a place that stops or dies
 at any point reopens and carries on from its rows.
 
-Subagents and forks are not part of the harness. A subagent is an ordinary
-Outside tool that calls another session's place and waits for it. A fork is
-a new session place seeded from an exported prefix of entries.
+The gateway can fork a session at a transcript cut. A subagent is an Outside
+tool that calls another session's place and waits for its answer.
+
+## Quickstart
+
+From the repository root with Node.js 24 or later, build the toolchain and
+point `HIRSEL` to the executable inside the printed output directory.
+
+```sh
+python3 tools/buck2/prepare.py
+toolchain=$(.buck2/bin/buck2 build -j4 //:hirsel-toolchain --show-output | awk '$1 == "root//:hirsel-toolchain" { print $2 }')
+export HIRSEL="$PWD/$toolchain/hirsel"
+```
+
+Run the offline check first. The script builds a debug gateway with
+`--limit 536870912` and starts it on loopback. The TypeScript client sends
+a chat, forks it, replays a recorded call for the cache diff, and settles
+a release proposal.
+
+```sh
+core/programs/harness/serve.sh --scripted
+```
+
+Expect `Chat READY`, `Fork 1 FORKED`, a cache diff whose first changed section
+is `release-preview`, and `Release approved, not deployed`. The diff compares
+the current notes agent with the example candidate on the same recorded fork
+call's base. The development gateway has no launcher. Selecting Publish
+settles the proposal and returns `approved, not deployed` to the tool.
+
+Set `OPENROUTER_API_KEY` in `~/.config/hirsel/openrouter-dev.env`. The script
+sources that file and passes the key to the gateway's Secret grant. Then run
+the live chat and fork against OpenRouter.
+
+```sh
+core/programs/harness/serve.sh --live
+```
+
+The chat asks the model to save one note. The fork asks it to reply with
+`FORKED`. The client prints both answers, the same cache diff, and the
+provider's request and prompt-token counts. Append a quoted prompt to
+change the chat. Set `OPENROUTER_MODEL` before the command to
+choose a model listed by OpenRouter.
+
+If the model ID is refused, check it at `https://openrouter.ai/models`.
+For provider HTTP errors, the client prints the status and the provider's
+message when available. If the gateway is unreachable, start it with
+`serve.sh --gateway` and use its loopback port.
+
+For a gateway you can call from your own Node.js client, run
+`core/programs/harness/serve.sh --gateway` and use
+`http://127.0.0.1:<port>` from its `port` line. Closing stdin stops it.
+Create a session with a bearer credential and use the same credential to
+send a message, fork or decide a release. The agent can call
+`write_source` to prepare a file and `propose_release` to file it. Read the
+filed ID with `client.releases()`, then call `client.settle(id, "Publish")`
+or `client.settle(id, { Reject: "your reason" })`. At the gateway's stdin,
+`diff SESSION_ID` compares the example candidate after a chat on the fork.
 
 ## What a harness author writes
 
@@ -355,6 +409,12 @@ session's place can unload while its page stays open.
 - `GET /sessions/:id/waits` lists the active run caller's open approvals. Use the
   returned `run`, `round`, `ordinal` and `key` in a `Decision`. `expires` is the
   wall-clock deadline in milliseconds.
+- `POST /sessions/:id/forks` takes `{key, cut}` and returns the new session ID.
+  It shares entries before the cut. Repeating the key returns the same ID.
+- A development front enables `GET /sessions/:id/releases` to list filed
+  proposals and `POST /sessions/:id/releases` to settle one. The POST takes
+  `{id, decision}` with `"Publish"` or `{Reject: reason}`, and uses the same
+  `Hirsel-Position` rules as a message. Both routes require the session's reader.
 
 A session ACL denial returns 403 before the front sends any event stream or
 history headers. Denied requests leave a cold place asleep.

@@ -10,6 +10,10 @@ store = { major = 1, path = "../store" }
 
 [sources]
 "harness.hirsel" = "harness"
+"turn.hirsel" = "harness"
+"prompt.hirsel" = "harness"
+"views.hirsel" = "harness"
+"blob.hirsel" = "harness"
 "waits.hirsel" = "harness"
 "tool_hash.hirsel" = "harness"
 "harness-project.hirsel" = "harness"

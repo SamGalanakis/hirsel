@@ -1,0 +1,979 @@
+// Module harness: the turn. Submissions, decisions, advance, rounds and the fenced
+// begin/settle protocol, as rows and short transactions.
+// Appends one entry at the session tail and its visible line in the same
+// transaction. The caller writes the session row.
+fn append[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], mut s: Session, take e: Entry) -> Result[u64, Refused] {
+    let at = put_entry(mut tx, h, mut s, e)?
+    for r in a.reactions {
+        if !reacted(mut tx, r, at, e, a.limits) {
+            let _ = put_entry(mut tx, h, mut s, Note("reaction failed", string.into_bytes(clone(r.name))))?
+        }
+    }
+    Ok(at)
+}
+
+fn put_entry(mut tx: store.Tx, h: Handles, mut s: Session, e: Entry) -> Result[u64, Refused] {
+    let at = s.next_pos
+    if let Some(take v) = line(e) {
+        kept(store.put(mut tx, h.views, at + 1u64, v))?
+    }
+    kept(store.put(mut tx, h.entries, at, clone(e)))?
+    s.next_pos = at + 1u64
+    Ok(at)
+}
+
+// One reaction, under the Inside byte and step bounds, with its writes rolled
+// back if it fails or overruns.
+fn reacted(mut tx: store.Tx, r: After, at: u64, e: Entry, l: Limits) -> bool {
+    let go = code.callable(r.run)
+    let ran = store.rollback_writes_on_overrun(mut tx, l.inside_steps, scoped fn(mut t: store.Tx) -> Result[(), Fault] {
+        let bounded = bound bytes l.inside_bytes {
+            go(mut t, at, clone(e))
+        }
+        match take bounded {
+            Ok(take done) => take done,
+            Error(_) => Error(TooLarge)
+        }
+    })
+    match ran {
+        Ok(Ok(())) => true,
+        _ => false
+    }
+}
+
+pub type Submit: codec + send {
+    client_key: String,
+    text: String
+}
+
+// Admits a submission. A repeated key with identical bytes returns its
+// recorded disposition; different bytes conflict. A submission that arrives
+// while a run is active is answered Busy and leaves no row, so the same key
+// may be sent again once the run ends.
+pub fn submit[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, caller: store.Caller, take m: Submit) -> Result[Disposition, Refused] {
+    if string.byte_len(m.text) > INLINE_LIMIT {
+        return Error(TooLarge)
+    }
+    let Submit(client_key: take client_key, text: take text) = take m
+    let key = InboxKey(caller: clone(caller), client_key: take client_key)
+    let d = digest(string.as_bytes(text))
+    if let Some(seen) = kept(store.fetch(tx, store.shape(h.inbox), key))? {
+        if seen.digest != d {
+            return Error(Conflict)
+        }
+        return Ok(clone(seen.disposition))
+    }
+    let mut s = session_of(tx, h)?
+    if let Some(_) = s.active_run {
+        return Ok(Busy)
+    }
+    let _ = append(mut tx, h, a, mut s, User(take text))?
+    let id = s.next_run
+    s.next_run = id + 1u64
+    s.active_run = Some(id)
+    let run = Run(caller: clone(caller), phase: Preparing, round: 0u64, rounds_left: a.limits.rounds, spend: Spend(known: 0u64, reserved: 0u64, unresolved: 0u64))
+    kept(store.put(mut tx, h.runs, id, run))?
+    kept(store.put(mut tx, h.session, 0u64, s))?
+    kept(store.put(mut tx, h.inbox, key, Received(digest: take d, disposition: Placed(id))))?
+    advance(mut tx, h, a, w, Kick)?
+    Ok(Placed(id))
+}
+
+fn finish(mut tx: store.Tx, h: Handles, mut s: Session, id: u64, take r: Run, take why: Finish) -> Result[(), Refused] {
+    let mut run = take r
+    let shown = match why {
+        Answered => "answered",
+        OutOfRounds => "out of rounds",
+        Stopped(_) => "stopped",
+        Cancelled => "cancelled"
+    }
+    run.phase = Finished(take why)
+    kept(store.put(mut tx, h.runs, id, run))?
+    s.active_run = None
+    kept(store.put(mut tx, h.session, 0u64, s))?
+    status(mut tx, h, take shown)
+}
+
+// Only the run's caller may cancel. A repeated cancel returns the terminal
+// receipt, even after a later run has taken the session.
+pub fn cancel(mut tx: store.Tx, h: Handles, caller: store.Caller, id: u64) -> Result[Finish, Refused] {
+    let Some(take found) = kept(store.fetch(tx, store.shape(h.runs), id))? else {
+        return Error(Malformed("no such run"))
+    }
+    let mut run = take found
+    if run.caller.issuer != caller.issuer || run.caller.subject != caller.subject {
+        return Error(NotAllowed)
+    }
+    if let Finished(why) = run.phase {
+        return Ok(clone(why))
+    }
+    let mut s = session_of(tx, h)?
+    if s.active_run != Some(id) {
+        return Error(Malformed("inactive run"))
+    }
+    match run.phase {
+        AwaitingModel(round) => {
+            cancel_effect(mut tx, h, EffectKey(run: id, round: round, kind: MODEL, ordinal: 0u64), mut run.spend)?
+        },
+        AwaitingRound(round, n) => for i in 0u64 .. n {
+            cancel_effect(mut tx, h, EffectKey(run: id, round: round, kind: TOOL, ordinal: i), mut run.spend)?
+        },
+        _ => (),
+    }
+    finish(mut tx, h, mut s, id, take run, Cancelled)?
+    Ok(Cancelled)
+}
+
+fn cancel_effect(mut tx: store.Tx, h: Handles, key: EffectKey, mut spend: Spend) -> Result[(), Refused] {
+    let Some(take found) = kept(store.fetch(tx, store.shape(h.effects), key))? else {
+        return Error(Malformed("effect"))
+    }
+    let mut e = take found
+    let dispatched = match e.phase {
+        Settled(_) => return Ok(()),
+        Doubted => return Ok(()),
+        Held => {
+            let wait = WaitKey(run: key.run, slot: key.ordinal, kind: APPROVAL, generation: key.round)
+            kept(store.put(mut tx, h.waits, wait, Revoked))?
+            false
+        },
+        Dispatched(_) => true,
+        _ => false,
+    }
+    cancel_trigger(mut tx, h, e.trigger)?
+    e.phase = if key.kind == MODEL {
+        spend.reserved -= e.reserve
+        if dispatched {
+            spend.unresolved += e.reserve;
+            Doubted
+        } else {
+            Settled(ModelFailed("run cancelled"))
+        }
+    } else {
+        Settled(Tool(if dispatched {
+            InDoubt
+        } else {
+            Failed("run cancelled")
+        }))
+    }
+    kept(store.put(mut tx, h.effects, key, e))
+}
+
+fn cancel_trigger(mut tx: store.Tx, h: Handles, trigger: Option[store.triggers.Id]) -> Result[(), Refused] {
+    if let Some(id) = trigger {
+        match store.triggers.request_cancel(mut tx, h.triggers, id) {
+            Ok(()) => (),
+            Error(StaleAttempt) => (),
+            Error(_) => return Error(Storage),
+        }
+    }
+    Ok(())
+}
+
+fn tool_of[G: send](a: Agent[G], name: String) -> Option[Tool[G]] {
+    for t in a.tools {
+        if t.name == name {
+            return Some(clone(t))
+        }
+    }
+    None
+}
+
+// Read only the tool definitions the model saw. The pointer stays fixed even
+// when later System entries change sections without changing tools.
+fn matching_remote(pinned: Option[Entry], name: String, row: mcp_tools.Remote) -> bool {
+    let Some(System(patch)) = view pinned else {
+        return false
+    }
+    let Some(defs) = view patch.tools else {
+        return false
+    }
+    for def in defs {
+        if def.name == name {
+            return def.catalog == Some(clone(mcp_tools.fingerprint(row)))
+        }
+    }
+    false
+}
+
+fn current_remote(tx: store.Tx, h: Handles, cutoff: Cutoff, name: String) -> Result[Option[mcp_tools.Remote], Refused] {
+    let Some(pos) = cutoff.tools_pos else {
+        return Ok(None)
+    }
+    let Some(take row) = kept(store.fetch(tx, store.shape(h.mcp_catalog), name))? else {
+        return Ok(None)
+    }
+    let pinned = kept(store.fetch(tx, store.shape(h.entries), pos))?
+    if matching_remote(pinned, name, row) {
+        Ok(Some(take row))
+    } else {
+        Ok(None)
+    }
+}
+
+fn resolve_tool[G: send](tx: store.Tx, h: Handles, a: Agent[G], cutoff: Cutoff, name: String) -> Result[Option[Tool[G]], Refused] {
+    if !mcp_tools.reserved(name) {
+        return Ok(tool_of(a, name))
+    }
+    if let None = a.mcp_peer {
+        return Ok(None)
+    }
+    let Some(row) = current_remote(tx, h, cutoff, name)? else {
+        return Ok(None)
+    }
+    Ok(Some(Tool(name: clone(name), about: string.from(mcp_tools.about(row)), input: string.from(mcp_tools.input(row)), rev: 0u64, repair: None, run: Mcp(clone(mcp_tools.fingerprint(row))))))
+}
+
+// Runs the tool's repair on the call's arguments, bounded like a gate.
+fn repaired[G: send](t: Tool[G], l: Limits, mut call: Call) -> Result[(), String] {
+    let Some(f) = t.repair else {
+        return Ok(())
+    }
+    let raw: Bytes = match call.args {
+        Inline(b) => clone(b),
+        Blob(_) => return Error("blob arguments are not supported yet")
+    }
+    let go = code.callable(f)
+    let ran = bound bytes l.gate_bytes {
+        bound steps l.gate_steps {
+            go(raw)
+        }
+    }
+    match take ran {
+        Ok(Ok(Ok(take fixed))) => {
+            if list.len(fixed) > INLINE_LIMIT {
+                return Error("repaired arguments too large")
+            }
+            call.args = Inline(take fixed)
+            Ok(())
+        },
+        Ok(Ok(Error(take fault))) => Error(fault_text(take fault)),
+        _ => Error("argument repair exceeded its bounds"),
+    }
+}
+
+fn rank(v: Verdict) -> u8 {
+    match v {
+        Pass => 0u8,
+        Hold(_) => 1u8,
+        Deny(_) => 2u8
+    }
+}
+
+// The fold of every gate's verdict by maximum. A gate that overruns its
+// bounds denies: a gate fails closed.
+pub fn verdict[G: send](tx: store.Tx, a: Agent[G], ask: Ask) -> Verdict {
+    let mut out: Verdict = Pass
+    for g in a.gates {
+        let go = code.callable(g.check)
+        let ran = bound bytes a.limits.gate_bytes {
+            bound steps a.limits.gate_steps {
+                go(tx, ask)
+            }
+        }
+        let v: Verdict = match take ran {
+            Ok(Ok(take v)) => take v,
+            _ => Deny(clone(g.name)),
+        }
+        if rank(v) > rank(out) {
+            out = take v
+        }
+    }
+    take out
+}
+
+pub const APPROVAL: u8 = 0u8
+
+// What an approval is bound to: the tool, its revision and the exact
+// arguments the gates saw (after repair). Any change to one of them needs a
+// new approval.
+pub fn approval_key(name: String, rev: u64, args: Payload) -> Bytes {
+    let mut raw: Bytes = list.new()
+    std.codec.put_key_string(name, mut raw)
+    std.codec.put_key_u64(rev, mut raw)
+    hash_approval(take raw, args)
+}
+
+fn remote_approval(name: String, fingerprint: Bytes, args: Payload) -> Bytes {
+    let mut raw: Bytes = list.new()
+    std.codec.put_key_string(name, mut raw)
+    std.codec.put_key_bytes(fingerprint, mut raw)
+    hash_approval(take raw, args)
+}
+
+fn hash_approval(take prefix: Bytes, args: Payload) -> Bytes {
+    let mut raw = take prefix
+    match args {
+        Inline(b) => {
+            list.push(mut raw, 0u8);
+            list.append(mut raw, b)
+        },
+        Blob(r) => {
+            list.push(mut raw, 1u8);
+            list.append(mut raw, r.digest)
+        },
+    }
+    digest(raw)
+}
+
+pub type Decision: codec + send {
+    run: u64,
+    round: u64,
+    ordinal: u64,
+    key: Bytes,
+    allow: bool
+}
+
+// What a decision did. A decision at or after the hold's expiry is Lapsed
+// even when the expiry timer has not run yet.
+pub type Ruling: codec + send = Approved | Declined | Lapsed
+
+fn ruled(allow: bool) -> Ruling {
+    if allow {
+        Approved
+    } else {
+        Declined
+    }
+}
+
+// Decides a held call. Only the run's caller may decide, and only with the
+// key the call is held under; a key for any other tool, revision or
+// arguments conflicts and changes nothing. The first decision wins: a repeat
+// of it returns its ruling, and a different one conflicts.
+pub fn decide[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, caller: store.Caller, take d: Decision) -> Result[Ruling, Refused] {
+    let Some(run) = kept(store.fetch(tx, store.shape(h.runs), d.run))? else {
+        return Error(Malformed("no such run"))
+    }
+    if run.caller.issuer != caller.issuer || run.caller.subject != caller.subject {
+        return Error(NotAllowed)
+    }
+    let wait = WaitKey(run: d.run, slot: d.ordinal, kind: APPROVAL, generation: d.round)
+    let Some(take found) = kept(store.fetch(tx, store.shape(h.waits), wait))? else {
+        return Error(Malformed("no such hold"))
+    }
+    let member_key = EffectKey(run: d.run, round: d.round, kind: TOOL, ordinal: d.ordinal)
+    let Some(take m) = kept(store.fetch(tx, store.shape(h.effects), member_key))? else {
+        return Error(Malformed("no such call"))
+    }
+    let mut member = take m
+    if let Some(c) = view member.call {
+        if mcp_tools.reserved(c.name) {
+            if let None = a.mcp_peer {
+                return Error(Conflict)
+            }
+            if let None = current_remote(tx, h, member.cutoff, c.name)? {
+                return Error(Conflict)
+            }
+        }
+    }
+    let (held, expires) = match take found {
+        Open(take k, x) => (take k, x),
+        Decided(take k, allow) => return if k == d.key && allow == d.allow {
+            Ok(ruled(allow))
+        } else {
+            Error(Conflict)
+        },
+        Expired => return Ok(Lapsed),
+        Revoked => return Error(Conflict),
+    }
+    if held != d.key {
+        return Error(Conflict)
+    }
+    match member.phase {
+        Held => (),
+        _ => return Error(Conflict)
+    }
+    if now(mut tx) >= expires {
+        lapse(mut tx, h, wait, member_key)?
+        advance(mut tx, h, a, w, Kick)?
+        return Ok(Lapsed)
+    }
+    member.phase = if d.allow {
+        Pending
+    } else {
+        Settled(Tool(Denied("not approved")))
+    }
+    kept(store.put(mut tx, h.effects, member_key, member))?
+    kept(store.put(mut tx, h.waits, wait, Decided(clone(d.key), d.allow)))?
+    advance(mut tx, h, a, w, Kick)?
+    Ok(ruled(d.allow))
+}
+
+fn lapse(mut tx: store.Tx, h: Handles, wait: WaitKey, member_key: EffectKey) -> Result[(), Refused] {
+    let Some(take m) = kept(store.fetch(tx, store.shape(h.effects), member_key))? else {
+        return Error(Malformed("no such call"))
+    }
+    let mut member = take m
+    member.phase = Settled(Tool(Denied("approval expired")))
+    kept(store.put(mut tx, h.effects, member_key, member))?
+    kept(store.put(mut tx, h.waits, wait, Expired))
+}
+
+// The expiry timer of a hold. A hold that is still open at its expiry lapses;
+// a decided one, or a timer that runs early, changes nothing.
+fn expire(mut tx: store.Tx, h: Handles, wait: WaitKey) -> Result[(), Refused] {
+    let Some(found) = kept(store.fetch(tx, store.shape(h.waits), wait))? else {
+        return Ok(())
+    }
+    let Open(_, expires) = view found else {
+        return Ok(())
+    }
+    if now(mut tx) < expires {
+        return Ok(())
+    }
+    lapse(mut tx, h, wait, EffectKey(run: wait.run, round: wait.generation, kind: TOOL, ordinal: wait.slot))
+}
+
+// Settles a parked Inside call. The app's own entry calls it from whatever
+// wakes the park, after authorizing its caller. Only the first resume of a
+// parked call in the active run counts.
+pub fn resume[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, key: EffectKey, take outcome: Outcome) -> Result[Filed, Refused] {
+    let Some(take found) = kept(store.fetch(tx, store.shape(h.effects), key))? else {
+        return Ok(Ignored)
+    }
+    let mut e = take found
+    match e.phase {
+        Parked => (),
+        _ => return Ok(Ignored)
+    }
+    let s = session_of(tx, h)?
+    if s.active_run != Some(key.run) {
+        return Ok(Ignored)
+    }
+    if now(mut tx) >= e.deadline {
+        advance(mut tx, h, a, w, Deadline(key))?
+        return Ok(Ignored)
+    }
+    let shown = match take outcome {
+        Returned(Inline(take b)) => if list.len(b) > INLINE_LIMIT {
+            Failed("result too large")
+        } else {
+            Returned(Inline(take b))
+        },
+        take other => take other,
+    }
+    e.phase = Settled(Tool(take shown))
+    kept(store.put(mut tx, h.effects, key, e))?
+    advance(mut tx, h, a, w, Kick)?
+    Ok(Recorded)
+}
+
+fn tool_named[G: send](a: Agent[G], name: String) -> Option[ToolRun[G]] {
+    for t in a.tools {
+        if t.name == name {
+            return Some(clone(t.run))
+        }
+    }
+    None
+}
+
+fn narrowed(s: Session, name: String) -> bool {
+    match s.tools_narrow {
+        All => true,
+        Only(names) => {
+            for n in names {
+                if n == name {
+                    return true
+                }
+            }
+            false
+        },
+    }
+}
+
+fn seal(mut tx: store.Tx, h: Handles, w: Wiring, key: EffectKey, take e: Effect) -> Result[(), Refused] {
+    let mut sealed = take e
+    let id = armed(store.triggers.write(mut tx, h.triggers, w.entries, w.effect, key, AfterCommit))?
+    let _ = armed(store.triggers.write(mut tx, h.triggers, w.entries, w.advance, Deadline(key), At(sealed.deadline)))?
+    sealed.trigger = Some(id)
+    sealed.phase = Sealed
+    kept(store.put(mut tx, h.effects, key, sealed))
+}
+
+fn now(mut tx: store.Tx) -> u64 {
+    store.info(mut tx).at
+}
+
+// The one decision function. It reads the session row, the active run and at
+// most `limits.calls` effect rows of the current round, so its cost does not
+// depend on the length of the conversation. It runs at most one Inside tool
+// and schedules itself AfterCommit when more remain.
+pub fn advance[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, take wake: Wake) -> Result[(), Refused] {
+    let mut s = session_of(tx, h)?
+    let Some(id) = s.active_run else {
+        return Ok(())
+    }
+    match wake {
+        Deadline(key) => if key.run == id {
+            inspect(mut tx, h, key)?
+        },
+        Expire(wait) => if wait.run == id {
+            expire(mut tx, h, wait)?
+        },
+        Kick => (),
+    }
+    s = session_of(tx, h)?
+    if s.active_run != Some(id) {
+        return Ok(())
+    }
+    let Some(take found) = kept(store.fetch(tx, store.shape(h.runs), id))? else {
+        return Error(Malformed("active run"))
+    }
+    let run = take found
+    match run.phase {
+        Preparing => prepare(mut tx, h, a, w, mut s, id, take run),
+        AwaitingModel(_) => Ok(()),
+        AnswerReady(round) => derive(mut tx, h, a, w, mut s, id, take run, round),
+        AwaitingRound(round, n) => step_round(mut tx, h, a, w, mut s, id, take run, round, n),
+        Finished(_) => Ok(()),
+    }
+}
+
+fn prepare[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut s: Session, id: u64, take r: Run) -> Result[(), Refused] {
+    let mut run = take r
+    if run.rounds_left == 0u64 {
+        return finish(mut tx, h, mut s, id, take run, OutOfRounds)
+    }
+    plan(mut tx, h, a, mut s)?
+    kept(store.put(mut tx, h.session, 0u64, clone(s)))?
+    let key = EffectKey(run: id, round: run.round, kind: MODEL, ordinal: 0u64)
+    let deadline = now(mut tx) + a.limits.model_ms
+    let cutoff = Cutoff(head_pos: s.head_pos, tail_pos: s.next_pos - 1u64, route: clone(a.route), policy: 0u64, tools_pos: clone(s.active_tools_pos))
+    let e = Effect(cutoff: take cutoff, call: None, repeat: clone(a.model_repeat), deadline: deadline, phase: Pending, trigger: None, dispatches: 0u64, reserve: a.limits.model_reserve)
+    seal(mut tx, h, w, key, take e)?
+    run.spend.reserved += a.limits.model_reserve
+    run.phase = AwaitingModel(run.round)
+    kept(store.put(mut tx, h.runs, id, run))?
+    status(mut tx, h, "thinking")
+}
+
+// After model.answer committed: one member row per returned call, in model
+// order. Calls beyond the limit, unknown tools and narrowed-away tools are
+// settled at once with a typed outcome and never dispatched.
+fn derive[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut s: Session, id: u64, take r: Run, round: u64) -> Result[(), Refused] {
+    let mut run = take r
+    let model_key = EffectKey(run: id, round: round, kind: MODEL, ordinal: 0u64)
+    let Some(e) = kept(store.fetch(tx, store.shape(h.effects), model_key))? else {
+        return Error(Malformed("model effect"))
+    }
+    let Settled(Model(answer)) = view e.phase else {
+        return Error(Malformed("model answer"))
+    }
+    if list.len(answer.calls) == 0u64 {
+        return finish(mut tx, h, mut s, id, take run, Answered)
+    }
+    let mut ordinal = 0u64
+    for given in answer.calls {
+        let key = EffectKey(run: id, round: round, kind: TOOL, ordinal: ordinal)
+        let mut call: Call = clone(given)
+        let phase: EffectPhase = if ordinal >= a.limits.calls {
+            Settled(Tool(Failed("too many calls in one answer")))
+        } else if !narrowed(s, call.name) {
+            Settled(Tool(Gone))
+        } else {
+            match resolve_tool(tx, h, a, e.cutoff, call.name)? {
+                None => Settled(Tool(Gone)),
+                Some(t) => match repaired(t, a.limits, mut call) {
+                    Error(take why) => Settled(Tool(Failed(take why))),
+                    Ok(()) => match verdict(tx, a, Ask(caller: clone(run.caller), call: clone(call))) {
+                        Pass => Pending,
+                        Deny(take why) => Settled(Tool(Denied(take why))),
+                        Hold(_) => {
+                            let wait = WaitKey(run: id, slot: ordinal, kind: APPROVAL, generation: round)
+                            let expires = now(mut tx) + a.limits.hold_ms
+                            let approval = match t.run {
+                                Mcp(fp) => remote_approval(t.name, fp, call.args),
+                                _ => approval_key(t.name, t.rev, call.args),
+                            }
+                            kept(store.put(mut tx, h.waits, wait, Open(take approval, expires)))?
+                            let _ = armed(store.triggers.write(mut tx, h.triggers, w.entries, w.advance, Expire(wait), At(expires)))?
+                            Held
+                        },
+                    },
+                },
+            }
+        }
+        let member = Effect(cutoff: clone(e.cutoff), call: Some(take call), repeat: Once, deadline: 0u64, phase: take phase, trigger: None, dispatches: 0u64, reserve: 0u64)
+        kept(store.put(mut tx, h.effects, key, member))?
+        ordinal += 1u64
+    }
+    run.phase = AwaitingRound(round, ordinal)
+    kept(store.put(mut tx, h.runs, id, run))?
+    status(mut tx, h, "calling tools")?
+    let _ = armed(store.triggers.write(mut tx, h.triggers, w.entries, w.advance, Kick, AfterCommit))?
+    Ok(())
+}
+
+fn step_round[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut s: Session, id: u64, take r: Run, round: u64, n: u64) -> Result[(), Refused] {
+    let mut open = false
+    // Whether an open member has a worker or a sealed call; a round whose
+    // open members are all Held or Parked shows "waiting".
+    let mut working = false
+    let mut ran_inside = false
+    for i in 0u64 .. n {
+        let key = EffectKey(run: id, round: round, kind: TOOL, ordinal: i)
+        let Some(take found) = kept(store.fetch(tx, store.shape(h.effects), key))? else {
+            return Error(Malformed("member"))
+        }
+        let mut e = take found
+        let pending = match e.phase {
+            Pending => true,
+            Settled(_) => false,
+            Doubted => false,
+            Held => {
+                open = true;
+                false
+            },
+            Parked => {
+                open = true;
+                false
+            },
+            _ => {
+                open = true;
+                working = true;
+                false
+            },
+        }
+        if !pending {
+            continue
+        }
+        let call: Call = match e.call {
+            Some(c) => clone(c),
+            None => return Error(Malformed("member call"))
+        }
+        if mcp_tools.reserved(call.name) {
+            let live = current_remote(tx, h, e.cutoff, call.name)?
+            if let (Some(_), Some(_)) = (a.mcp_peer, live) {
+                open = true
+                working = true
+                e.repeat = Once
+                e.deadline = now(mut tx) + a.limits.tool_ms
+                seal(mut tx, h, w, key, take e)?
+            } else {
+                e.phase = Settled(Tool(Gone))
+                kept(store.put(mut tx, h.effects, key, e))?
+            }
+            continue
+        }
+        let Some(run) = tool_named(a, call.name) else {
+            return Error(Malformed("member tool"))
+        }
+        match run {
+            Inside(f) => {
+                if ran_inside {
+                    let _ = armed(store.triggers.write(mut tx, h.triggers, w.entries, w.advance, Kick, AfterCommit))?
+                    return Ok(())
+                }
+                ran_inside = true
+                e.phase = match run_inside(mut tx, f, key, call.args, a.limits) {
+                    Gave(take outcome) => Settled(Tool(take outcome)),
+                    Parks => {
+                        open = true
+                        e.deadline = now(mut tx) + a.limits.tool_ms
+                        let _ = armed(store.triggers.write(mut tx, h.triggers, w.entries, w.advance, Deadline(key), At(e.deadline)))?
+                        Parked
+                    },
+                }
+                kept(store.put(mut tx, h.effects, key, e))?
+            },
+            Outside(_, repeat) => {
+                open = true
+                working = true
+                e.repeat = clone(repeat)
+                e.deadline = now(mut tx) + a.limits.tool_ms
+                seal(mut tx, h, w, key, take e)?
+            },
+            Mcp(_) => return Error(Malformed("member tool")),
+        }
+    }
+    if open {
+        return show_status(mut tx, h, if working {
+            "calling tools"
+        } else {
+            "waiting"
+        })
+    }
+    present(mut tx, h, a, w, mut s, id, take r, round, n)
+}
+
+// Runs an Inside tool in the advance transaction under its byte and step
+// bounds. A tool that fails or overruns either bound leaves none of its writes.
+type Ran = Gave(Outcome) | Parks
+
+fn run_inside(mut tx: store.Tx, f: StaticFn[fn(mut store.Tx, Invoke) -> Result[Reply, Fault]], key: EffectKey, args: Payload, l: Limits) -> Ran {
+    let Inline(raw) = view args else {
+        return Gave(Failed("blob arguments are not supported yet"))
+    }
+    let go = code.callable(f)
+    let given = Invoke(key: key, args: clone(raw))
+    let ran = store.rollback_writes_on_overrun(mut tx, l.inside_steps, scoped fn(mut t: store.Tx) -> Result[Reply, Fault] {
+        let bounded = bound bytes l.inside_bytes {
+            go(mut t, given)
+        }
+        match take bounded {
+            Ok(take r) => take r,
+            Error(_) => Error(Refused("inside tool exceeded its bytes")),
+        }
+    })
+    match take ran {
+        Ok(Ok(Now(take out))) => Gave(if list.len(out) > INLINE_LIMIT {
+            Failed("result too large")
+        } else {
+            Returned(Inline(take out))
+        }),
+        Ok(Ok(Later)) => Parks,
+        Ok(Error(take fault)) => Gave(Failed(fault_text(take fault))),
+        Error(_) => Gave(Failed("inside tool exceeded its steps")),
+    }
+}
+
+fn fault_text(take f: Fault) -> String {
+    match take f {
+        BadArgs(take why) => take why,
+        Refused(take why) => take why,
+        Unavailable => "unavailable",
+        TooLarge => "too large",
+    }
+}
+
+// All members settled: append their results in model order, then prepare the
+// next request in the same transaction.
+fn present[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut s: Session, id: u64, take r: Run, round: u64, n: u64) -> Result[(), Refused] {
+    let mut run = take r
+    for i in 0u64 .. n {
+        let key = EffectKey(run: id, round: round, kind: TOOL, ordinal: i)
+        let Some(take e) = kept(store.fetch(tx, store.shape(h.effects), key))? else {
+            return Error(Malformed("member"))
+        }
+        let Effect(call: take call, phase: take phase, ..) = take e
+        let Some(take c) = take call else {
+            return Error(Malformed("member call"))
+        }
+        let outcome = match take phase {
+            Settled(Tool(take o)) => take o,
+            _ => InDoubt
+        }
+        let _ = append(mut tx, h, a, mut s, ToolResult(clone(c.id), take outcome))?
+    }
+    kept(store.put(mut tx, h.session, 0u64, s))?
+    run.round = round + 1u64
+    run.rounds_left -= 1u64
+    run.phase = Preparing
+    prepare(mut tx, h, a, w, mut s, id, take run)
+}
+
+// A deadline fired for one effect. A settled effect is left alone. Otherwise
+// the effect's run is asked to cancel and the effect is recorded as in doubt
+// if it was dispatched: a deadline is not a clean timeout.
+fn inspect(mut tx: store.Tx, h: Handles, key: EffectKey) -> Result[(), Refused] {
+    let Some(take found) = kept(store.fetch(tx, store.shape(h.effects), key))? else {
+        return Ok(())
+    }
+    let mut e = take found
+    if now(mut tx) < e.deadline {
+        return Ok(())
+    }
+    let dispatched = match e.phase {
+        Dispatched(_) => true,
+        Sealed => false,
+        Parked => false,
+        _ => return Ok(()),
+    }
+    cancel_trigger(mut tx, h, e.trigger)?
+    e.phase = if key.kind == MODEL {
+        if dispatched {
+            Doubted
+        } else {
+            Settled(ModelFailed("model deadline"))
+        }
+    } else {
+        Settled(Tool(if dispatched {
+            InDoubt
+        } else {
+            Failed("tool deadline")
+        }))
+    }
+    let reserve = e.reserve
+    kept(store.put(mut tx, h.effects, key, e))?
+    if key.kind == MODEL {
+        model_closed(mut tx, h, key, reserve, dispatched)?
+    }
+    Ok(())
+}
+
+// A model effect closed without an answer ends its run.
+fn model_closed(mut tx: store.Tx, h: Handles, key: EffectKey, reserve: u64, doubted: bool) -> Result[(), Refused] {
+    let Some(take found) = kept(store.fetch(tx, store.shape(h.runs), key.run))? else {
+        return Ok(())
+    }
+    let mut run = take found
+    run.spend.reserved -= reserve
+    if doubted {
+        run.spend.unresolved += reserve
+    }
+    let mut s = session_of(tx, h)?
+    let why = if doubted {
+        "model call in doubt"
+    } else {
+        "model failed"
+    }
+    finish(mut tx, h, mut s, key.run, take run, Stopped(why))
+}
+
+// ---- the effect protocol: begin and settle are fenced attempt entries ----
+pub type Permit: codec + send = Go(u64) | Doubt | Shut
+
+fn active(tx: store.Tx, h: Handles, run: u64) -> Result[bool, store.Error] {
+    let Some(s) = store.fetch(tx, store.shape(h.session), 0u64)? else {
+        return Ok(false)
+    }
+    Ok(match s.active_run {
+        Some(r) => r == run,
+        None => false
+    })
+}
+
+// begin(E) records the dispatch before the worker may send. A Once effect
+// whose earlier attempt began and never settled is in doubt at once; it never
+// waits for its deadline and never sends again.
+fn begin(mut tx: store.Tx, attempt: store.triggers.Attempt, take key: EffectKey) -> Result[Permit, store.Error] {
+    let h = handles(store.tx_schema(tx))?
+    let Some(take found) = store.fetch(tx, store.shape(h.effects), key)? else {
+        return Ok(Shut)
+    }
+    let mut e = take found
+    let Some(t) = e.trigger else {
+        return Ok(Shut)
+    }
+    if t != store.triggers.run_id(attempt) {
+        return Ok(Shut)
+    }
+    if !active(tx, h, key.run)? {
+        return Ok(Shut)
+    }
+    let n = store.triggers.number(attempt)
+    match e.phase {
+        Sealed => (),
+        Dispatched(prev) => {
+            if prev >= n {
+                return Ok(Shut)
+            }
+            let again = match e.repeat {
+                Once => false,
+                Repeatable(max) => e.dispatches < max && store.info(mut tx).at < e.deadline,
+            }
+            if !again {
+                return Ok(Doubt)
+            }
+            if key.kind == MODEL {
+                resend_reserve(mut tx, h, key.run, e.reserve)?
+            }
+        },
+        _ => return Ok(Shut),
+    }
+    e.phase = Dispatched(n)
+    e.dispatches += 1u64
+    store.put(mut tx, h.effects, key, e)?
+    Ok(Go(n))
+}
+
+// A resend: the earlier dispatch may have been charged and will never be
+// settled, so its reservation becomes unresolved; the reserved bound stays
+// held for the new dispatch.
+fn resend_reserve(mut tx: store.Tx, h: Handles, id: u64, reserve: u64) -> Result[(), store.Error] {
+    let Some(take found) = store.fetch(tx, store.shape(h.runs), id)? else {
+        return Ok(())
+    }
+    let mut run = take found
+    run.spend.unresolved += reserve
+    store.put(mut tx, h.runs, id, run)
+}
+
+pub fn register[G: send, H: send](mut r: store.runner.Registry[G, H], n: u64, steps: u64) -> Result[(), store.runner.RegisterError] {
+    let f: own[send] fn(mut store.Tx, store.triggers.Attempt, take EffectKey) -> Result[Permit, store.Error] = begin
+    store.runner.register_attempt(mut r, code.describe(begin), take f, n, steps)
+}
+
+pub type Settle: codec + send {
+    key: EffectKey,
+    receipt: Option[Receipt]
+}
+
+pub type Filed: codec + send = Recorded | Ignored
+
+// settle(E, receipt): first writer wins. A model answer commits as its entry
+// and schedules derivation; a tool receipt settles its member and advances.
+// None records the effect as in doubt. The app's settle entry is a fenced
+// attempt entry whose body calls this; a refusal rolls the transaction back.
+pub fn settle[G: send](mut tx: store.Tx, a: Agent[G], w: Wiring, attempt: store.triggers.Attempt, take m: Settle) -> Result[Filed, store.Error] {
+    let h = handles(store.tx_schema(tx))?
+    match settle_in(mut tx, h, a, w, attempt, take m) {
+        Ok(d) => Ok(d),
+        Error(Storage) => Error(Missing("harness: storage refused the settle")),
+        Error(_) => Error(Missing("harness: settle refused")),
+    }
+}
+
+fn settle_in[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, attempt: store.triggers.Attempt, take m: Settle) -> Result[Filed, Refused] {
+    let Settle(key: key, receipt: take receipt) = take m
+    if !kept(active(tx, h, key.run))? {
+        return Ok(Ignored)
+    }
+    let Some(take found) = kept(store.fetch(tx, store.shape(h.effects), key))? else {
+        return Ok(Ignored)
+    }
+    let mut e = take found
+    let Some(t) = e.trigger else {
+        return Ok(Ignored)
+    }
+    if t != store.triggers.run_id(attempt) {
+        return Ok(Ignored)
+    }
+    match e.phase {
+        Dispatched(_) => (),
+        _ => return Ok(Ignored)
+    }
+    match take receipt {
+        None => {
+            if key.kind == MODEL {
+                e.phase = Doubted
+                let reserve = e.reserve
+                kept(store.put(mut tx, h.effects, key, e))?
+                model_closed(mut tx, h, key, reserve, true)?
+            } else {
+                e.phase = Settled(Tool(InDoubt))
+                kept(store.put(mut tx, h.effects, key, e))?
+                advance(mut tx, h, a, w, Kick)?
+            }
+        },
+        Some(Model(take answer)) => {
+            let Some(take found_run) = kept(store.fetch(tx, store.shape(h.runs), key.run))? else {
+                return Ok(Ignored)
+            }
+            let mut run = take found_run
+            run.spend.reserved -= e.reserve
+            run.spend.known += answer.usage.input + answer.usage.output
+            run.phase = AnswerReady(key.round)
+            let mut s = session_of(tx, h)?
+            let said: Answer = clone(answer)
+            let _ = append(mut tx, h, a, mut s, Assistant(take said))?
+            kept(store.put(mut tx, h.session, 0u64, s))?
+            kept(store.put(mut tx, h.runs, key.run, run))?
+            e.phase = Settled(Model(take answer))
+            kept(store.put(mut tx, h.effects, key, e))?
+            let _ = armed(store.triggers.write(mut tx, h.triggers, w.entries, w.advance, Kick, AfterCommit))?
+        },
+        Some(ModelFailed(take why)) => {
+            let reserve = e.reserve
+            e.phase = Settled(ModelFailed(take why))
+            kept(store.put(mut tx, h.effects, key, e))?
+            model_closed(mut tx, h, key, reserve, false)?
+        },
+        Some(Tool(take outcome)) => {
+            e.phase = Settled(Tool(take outcome))
+            kept(store.put(mut tx, h.effects, key, e))?
+            advance(mut tx, h, a, w, Kick)?
+        },
+    }
+    Ok(Recorded)
+}

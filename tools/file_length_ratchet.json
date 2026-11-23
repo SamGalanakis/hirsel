@@ -8,21 +8,15 @@
   "core/core/tests/provide.hirsel": {
     "lines": 2344
   },
-  "core/programs/harness/gateway_http.hirsel": {
-    "lines": 1010
-  },
   "core/programs/harness/gateway_laws.hirsel": {
-    "lines": 1500,
+    "lines": 1493,
     "reason": "gateway-push-1905"
   },
-  "core/programs/harness/harness.hirsel": {
-    "lines": 2149
-  },
   "core/programs/harness/laws.hirsel": {
-    "lines": 2023
+    "lines": 2005
   },
   "core/programs/notes/main.hirsel": {
-    "lines": 1465
+    "lines": 1443
   },
   "core/programs/postgres/postgres.hirsel": {
     "lines": 1409
@@ -46,7 +40,7 @@
     "reason": "store-sync-1906"
   },
   "core/programs/store/runner_calls.hirsel": {
-    "lines": 2951
+    "lines": 2805
   },
   "core/programs/store/store-manifest.hirsel": {
     "lines": 2982
@@ -175,7 +169,7 @@
     "lines": 1001
   },
   "crates/hirsel-core-driver/src/recipe_native.rs": {
-    "lines": 2256
+    "lines": 2184
   },
   "crates/hirsel-core-driver/src/recording_build_native.rs": {
     "lines": 4287

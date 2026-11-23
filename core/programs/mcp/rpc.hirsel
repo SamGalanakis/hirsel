@@ -268,3 +268,64 @@ pub fn encode_fault(error: Fault) -> String {
     })
     take out
 }
+
+pub type Identity: codec + shareable + send {
+    name: String,
+    version: String
+}
+
+pub fn typed_json[T: codec](value: T) -> String {
+    let format: std.json.Format[T] = result.unwrap(std.json.interop())
+    result.unwrap(std.json.to_string(format, value))
+}
+
+pub fn contains(fields: Fields, key: String) -> bool {
+    match map.get(fields, key) {
+        Some(_) => true,
+        None => false,
+    }
+}
+
+pub fn put(mut fields: Fields, key: String, take raw: String) {
+    let _ = map.insert(mut fields, string.from(key), take raw)
+}
+
+pub fn encode_object(fields: Fields) -> String {
+    let mut out = string.new()
+    std.json.write(mut out, false, fn(document) {
+        std.json.object(document, 0, fn(w, mut items) {
+            write_fields(w, mut items, fields)
+        })
+    })
+    take out
+}
+
+pub fn encode_call(id: Option[Id], method: String, params_fields: Fields) -> String {
+    let mut out = string.new()
+    std.json.write(mut out, false, fn(document) {
+        std.json.object(document, 0, fn(w, mut items) {
+            std.json.write_member(w, mut items, "jsonrpc")
+            std.json.write_string_value(w, "2.0")
+            if let Some(call_id) = id {
+                std.json.write_member(w, mut items, "id")
+                write_id(w, call_id)
+            }
+            std.json.write_member(w, mut items, "method")
+            std.json.write_string_value(w, method)
+            std.json.write_member(w, mut items, "params")
+            std.json.object(w, 1, fn(params_writer, mut params_items) {
+                write_fields(params_writer, mut params_items, params_fields)
+            })
+        })
+    })
+    take out
+}
+
+pub fn array(source: String) -> Result[List[String], std.json.Error] {
+    std.json.decode(source, fn(input: String, mut cursor: std.json.Cursor) -> Result[List[String], std.json.Error] {
+        std.json.list_of(input, mut cursor, fn(data: String, mut item: std.json.Cursor) -> Result[String, std.json.Error] {
+            let raw = std.json.read_raw(data, mut item)?
+            Ok(string.from(raw))
+        })
+    })
+}

@@ -10,8 +10,10 @@ pub opaque type Spec: send {
     block: Bytes,
     state_at: u64,
     room: Bounds,
-    driver: fn(take Seed) waits
+    source: Source
 }
+
+type Source: send = Encoded(fn(take Seed) waits) | Owned(own[send] fn(take Seed, Clock, Option[Dir]) waits, Option[Dir])
 
 pub fn spec[P: codec + send](req: http.Request, response_status: u16, room: Bounds, state: P, driver: fn(take Seed) waits) -> Result[Spec, http.HandlerError] {
     if response_status < 200 || response_status > 599 || response_status == 204 || response_status == 304 || room.event_max == 0 {
@@ -36,8 +38,28 @@ pub fn spec[P: codec + send](req: http.Request, response_status: u16, room: Boun
         }
     }
     match take made {
-        Ok(Ok(take block)) => Ok(Spec(status: response_status, fields: list.new(), block: take block, state_at: out_cap, room, driver)),
+        Ok(Ok(take block)) => Ok(Spec(status: response_status, fields: list.new(), block: take block, state_at: out_cap, room, source: Encoded(driver))),
         Ok(Error(_)) => Error(InvalidStream),
+        Error(e) => Error(Allocation(e)),
+    }
+}
+
+/// Hands an owning producer to the admitted stream task without serialization.
+pub fn spec_owned(req: http.Request, response_status: u16, room: Bounds, directory: Option[Dir], take driver: own[send] fn(take Seed, Clock, Option[Dir]) waits) -> Result[Spec, http.HandlerError] {
+    if response_status < 200 || response_status > 599 || response_status == 204 || response_status == 304 || room.event_max == 0 {
+        return Error(InvalidStream)
+    }
+    let (out_cap, _) = http.handover_limits(req)
+    if room.producer_bytes < int.saturating_mul(3u64, room.event_max) || out_cap > 18446744073709551608 {
+        return Error(InvalidStream)
+    }
+    let made: Result[Bytes, Capacity] = bound bytes ((out_cap + 7) / 8 * 8) {
+        let mut block: Bytes = list.with_capacity(out_cap)
+        list.fill(mut block, out_cap, 0u8)
+        take block
+    }
+    match take made {
+        Ok(take block) => Ok(Spec(status: response_status, fields: list.new(), block: take block, state_at: out_cap, room, source: Owned(take driver, directory))),
         Error(e) => Error(Allocation(e)),
     }
 }
@@ -61,7 +83,7 @@ pub type Offer: send {
     head_len: u64,
     state_at: u64,
     room: Bounds,
-    driver: fn(take Seed) waits,
+    source: Source,
     chunked: bool,
     heartbeat: bool,
     suppress: bool,
@@ -70,12 +92,12 @@ pub type Offer: send {
 }
 
 pub fn prepare(take s: Spec, head: Bytes, chunked: bool, heartbeat: bool, suppress: bool, at: u64, pre_head: u64) -> Offer {
-    let Spec(status: _, fields: _, block: take owned, state_at, room, driver) = take s
+    let Spec(status: _, fields: _, block: take owned, state_at, room, source: take source) = take s
     let mut block = take owned
     for i in 0u64 .. list.len(head) {
         block[i] = head[i]
     }
-    Offer(block: take block, head_len: list.len(head), state_at, room, driver, chunked, heartbeat, suppress, at, pre_head)
+    Offer(block: take block, head_len: list.len(head), state_at, room, source: take source, chunked, heartbeat, suppress, at, pre_head)
 }
 
 type Delivery: send = Item(Bytes) | Staged(Bytes) | Committed | Sent(SentUnit) | WriteFailed | ReadEnd | Tick | SourceEnded | Stop
@@ -102,7 +124,7 @@ pub opaque type Seed: send {
 
 fn discard(take buffer: Bytes) {}
 
-fn next_event[P: codec + send, E](take previous: P, room: Bounds, next: fn(mut P) -> Result[Option[Bytes], E] waits) -> Result[(P, Result[Result[Option[Bytes], E], Capacity]), OutOfTime] waits {
+fn next_event[P: send, E](take previous: P, room: Bounds, next: fn(mut P) -> Result[Option[Bytes], E] waits) -> Result[(P, Result[Result[Option[Bytes], E], Capacity]), OutOfTime] waits {
     bound steps room.producer_steps {
         let mut state = take previous
         let event = bound bytes room.event_max {
@@ -116,24 +138,50 @@ pub fn produce[P: codec + send, E](take seed: Seed, next: fn(mut P) -> Result[Op
     let Seed(block: take block, at, inbox: take inbox, credits: take credits, room) = take seed
     let decoded = codec.decode_at((codec.of() : codec.Codec[P]), block, at)
     discard(take block)
-    if let Ok(take initial) = take decoded {
-        let mut state = take initial
-        while let Ok(()) = channel.receive(credits) {
-            match next_event(take state, room, next) {
-                Ok((take current, Ok(Ok(Some(take event))))) => {
-                    state = take current
-                    if list.len(event) == 0 || list.capacity(event) > room.event_max {
-                        break
-                    }
-                    if let Error(_) = channel.send(inbox, Item(take event)) {
-                        return
-                    }
-                },
-                _ => break,
-            }
+    match take decoded {
+        Ok(take initial) => produce_items(take initial, take inbox, take credits, room, next),
+        Error(_) => {
+            let _ = channel.send(inbox, SourceEnded)
+        },
+    }
+}
+
+/// Produces from already-owned state. The same credit and per-item bounds apply.
+pub fn produce_owned[P: send, E](take seed: Seed, take state: P, next: fn(mut P) -> Result[Option[Bytes], E] waits) waits {
+    let Seed(block: take block, at: _, inbox: take inbox, credits: take credits, room) = take seed
+    discard(take block)
+    produce_items(take state, take inbox, take credits, room, next)
+}
+
+fn produce_items[P: send, E](take initial: P, take inbox: Sender[Delivery], take credits: Receiver[()], room: Bounds, next: fn(mut P) -> Result[Option[Bytes], E] waits) waits {
+    let mut state = take initial
+    while let Ok(()) = channel.receive(credits) {
+        match next_event(take state, room, next) {
+            Ok((take current, Ok(Ok(Some(take event))))) => {
+                state = take current
+                if list.len(event) == 0 || list.capacity(event) > room.event_max {
+                    break
+                }
+                if let Error(_) = channel.send(inbox, Item(take event)) {
+                    return
+                }
+            },
+            _ => break,
         }
     }
     let _ = channel.send(inbox, SourceEnded)
+}
+
+type OwnedJob: send {
+    seed: Seed,
+    clock: Clock,
+    directory: Option[Dir],
+    driver: own[send] fn(take Seed, Clock, Option[Dir]) waits
+}
+
+fn run_owned(take job: OwnedJob) waits {
+    let OwnedJob(seed: take seed, clock: clock, directory, driver: take driver) = take job
+    driver(take seed, clock, directory)
 }
 
 pub type Transfer: send {
@@ -355,7 +403,8 @@ pub fn drive(take job: Work) waits {
     if buffered > allowance {
         return
     }
-    let Offer(block: take block, head_len, state_at, room, driver, chunked, heartbeat, suppress, at, pre_head) = take offer
+    let Offer(block: take block, head_len, state_at, room, source: take offered_source, chunked, heartbeat, suppress, at, pre_head) = take offer
+    let mut source = Some(take offered_source)
     let (tx, rx): (Sender[Delivery], Receiver[Delivery]) = channel.new(6)
     if let Some(owner) = control {
         if !http.register_stream(owner, StopHandle(inbox: channel.sender(tx))) {
@@ -422,7 +471,13 @@ pub fn drive(take job: Work) waits {
                         } else {
                             let receiver = option.unwrap(replace(mut credit, None))
                             let seed = Seed(block: take packet, at: state_at, inbox: channel.sender(tx), credits: take receiver, room)
-                            producer = Some(task.spawn(tasks, bytes room.producer_bytes, take seed, driver))
+                            producer = match option.unwrap(replace(mut source, None)) {
+                                Encoded(driver) => Some(task.spawn(tasks, bytes room.producer_bytes, take seed, driver)),
+                                Owned(take driver, directory) => {
+                                    let owned = OwnedJob(seed: take seed, clock: c, directory, driver: take driver)
+                                    Some(task.spawn(tasks, bytes room.producer_bytes, take owned, run_owned))
+                                },
+                            }
                         }
                         let _ = channel.try_send(units, Head)
                     }

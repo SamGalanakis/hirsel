@@ -5,6 +5,10 @@ charge = "charge-v1"
 
 [sources]
 "rpc.hirsel" = "rpc"
+"metadata.hirsel" = "metadata"
+"client.hirsel" = "client"
+"server.hirsel" = "server"
+"tests/interop.hirsel" = "interop"
 
 [dependencies]
 std = { major = 1 }

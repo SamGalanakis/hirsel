@@ -1,0 +1,156 @@
+const MEMORY: u64 = 1048576
+
+type EchoInput: codec {
+    text: Option[String]
+}
+
+type ProgressInput: codec {
+    cancel: Option[bool]
+}
+
+type EmptyInput: codec {}
+
+fn input_schema[T: codec](format: std.json.Format[T]) -> server.InputSchema {
+    result.unwrap(server.schema(format, list.new()))
+}
+
+fn echo(mut call: server.Call, clock: Clock) -> server.Step {
+    let values = result.unwrap(rpc.object(call.arguments))
+    match rpc.field_text(values, "text") {
+        Some(take value) => Text(take value),
+        None => ToolError(string.from("missing text")),
+    }
+}
+
+fn progress(mut call: server.Call, clock: Clock) -> server.Step waits {
+    if list.len(call.scratch) == 0 {
+        list.push(mut call.scratch, 1u8)
+        return Progress(1, Some(2), Some(string.from("started")))
+    }
+    if call.arguments == "{\"cancel\":true}" {
+        host.sleep_until(clock, std.clock.deadline_after_ms(host.mono_ns(clock), 10000))
+    }
+    Text(string.from("complete"))
+}
+
+fn loader(directory: Dir, marker: String) -> List[server.Tool] waits {
+    let mut tools: List[server.Tool] = list.new()
+    list.push(mut tools, server.Tool(name: string.from("echo"), description: string.from("Echo text"), input_schema: input_schema((result.unwrap(std.json.interop()) : std.json.Format[EchoInput])), call: echo))
+    list.push(mut tools, server.Tool(name: string.from("progress"), description: string.from("Report progress"), input_schema: input_schema((result.unwrap(std.json.interop()) : std.json.Format[ProgressInput])), call: progress))
+    if let Ok(_) = std.file.read_string(directory, marker) {
+        list.push(mut tools, server.Tool(name: string.from("added"), description: string.from("Added by the test"), input_schema: input_schema((result.unwrap(std.json.interop()) : std.json.Format[EmptyInput])), call: echo))
+    }
+    take tools
+}
+
+fn note() -> Result[String, String] {
+    Ok(string.from("fixture note"))
+}
+
+fn config() -> std.http.Config {
+    std.http.Config(ingress: list.new(), sockets_max: 8, http_max: 8, upgrades_max: 0, conns_max: 8, ip_sockets_max: 8, refuse_max: 1, refuse_ms: 100, inbox_cap: 16, head_max: 8192, fields_max: 64, pipeline_max: 8192, body_inline: 8192, body_max: MEMORY, out_cap: 4096, handler_bytes: MEMORY, first_head_ms: 5000, idle_ms: 5000, head_ms: 5000, body_ms: 5000, handler_ms: 5000, write_ms: 5000, drain_ms: 500, linger_ms: 10, drain_max: 8192, streams_max: 1, state_max: 0, reads_max: 1, heartbeat_ms: 150, lease_ms: 20000)
+}
+
+fn serve(n: Net, c: Clock, tasks: Tasks, dir: Dir, out: Stdout) waits {
+    let (listener, addr) = result.unwrap(host.listen(n, Addr(ip: V4(2130706433), port: 0), 16))
+    let mut listeners: List[Listener] = list.new()
+    list.push(mut listeners, take listener)
+    let mut origins: List[String] = list.new()
+    list.push(mut origins, string.from("http://mcp.local"))
+    let mut resources: List[server.ResourceHandler] = list.new()
+    list.push(mut resources, server.ResourceHandler(info: server.Resource(uri: string.from("fixture://notes/readme"), name: string.from("Readme"), mimeType: string.from("text/plain")), read: note))
+    let state = server.Server(identity: rpc.Identity(name: string.from("hirsel-mcp"), version: string.from("1")), origins: take origins, tools: Dynamic(dir, string.from("catalog.changed"), 100u64, loader), resources: take resources, event_max: 65536, producer_bytes: MEMORY, producer_steps: 10000000)
+    let mut routes: std.router.Builder[server.Server] = std.router.builder()
+    result.unwrap(server.mount(mut routes, "/mcp", MEMORY, 2 * MEMORY))
+    let mut ready = string.new()
+    string.push_u64(mut ready, int.widen(addr.port))
+    string.push(mut ready, "\n")
+    result.unwrap(stdout.write(out, ready))
+    result.unwrap(std.http.serve(take listeners, c, tasks, config(), result.unwrap(std.router.build(take routes)), take state))
+}
+
+fn invoke(n: Net, c: Clock, peer: client.Endpoint, method: String, input: String, notice: scoped fn(client.Notice) -> bool) -> Result[String, client.Error] waits {
+    let identity = rpc.Identity(name: string.from("hirsel-test"), version: string.from("1"))
+    let id = option.unwrap(rpc.id_value("1"))
+    client.call(n, c, peer, None, identity, id, method, result.unwrap(rpc.object(input)), MEMORY, 65536, std.clock.deadline_after_ms(host.mono_ns(c), 5000), notice)
+}
+
+fn ignore_notice(notice: client.Notice) -> bool {
+    true
+}
+
+fn expect_content(result_body: String, key: String, expected: String) {
+    let data = result.unwrap(rpc.object(result_body))
+    let Some(raw) = map.get(data, key) else {
+        fail("missing result member")
+    }
+    let Some(_) = std.string.find(raw, 0, expected) else {
+        fail("unexpected result member")
+    }
+}
+
+fn check_sdk(n: Net, c: Clock, authority: String, port: u16) waits {
+    let peer = client.Endpoint(address: Addr(ip: V4(2130706433), port), authority: string.from(authority), target: string.from("/mcp"), origin: string.from("http://mcp.local"), security: Plain)
+    let discover = result.unwrap(invoke(n, c, peer, "server/discover", "{}", ignore_notice))
+    expect_content(discover, "supportedVersions", "2026-07-28")
+    let tools = result.unwrap(invoke(n, c, peer, "tools/list", "{}", ignore_notice))
+    expect_content(tools, "tools", "echo")
+    let definitions = result.unwrap(metadata.tools(tools))
+    let echo_tool = option.unwrap(list.get(definitions, 0))
+    if metadata.tool_name(echo_tool) != "echo" {
+        fail("wrong listed tool")
+    }
+    let identity = rpc.Identity(name: string.from("hirsel-test"), version: string.from("1"))
+    let request_id = option.unwrap(rpc.id_value("2"))
+    let echo_result = result.unwrap(client.call_tool(n, c, peer, None, identity, request_id, echo_tool, string.from("{\"text\":\" café \"}"), None, MEMORY, 65536, std.clock.deadline_after_ms(host.mono_ns(c), 5000), ignore_notice))
+    expect_content(echo_result, "content", " café ")
+    let failed_tool = result.unwrap(invoke(n, c, peer, "tools/call", "{\"name\":\"failure\"}", ignore_notice))
+    expect_content(failed_tool, "isError", "true")
+    let resources = result.unwrap(invoke(n, c, peer, "resources/list", "{}", ignore_notice))
+    expect_content(resources, "resources", "fixture://notes/readme")
+    let note_result = result.unwrap(invoke(n, c, peer, "resources/read", "{\"uri\":\"fixture://notes/readme\"}", ignore_notice))
+    expect_content(note_result, "contents", "fixture note")
+    match invoke(n, c, peer, "tools/call", "{\"name\":\"slow\",\"_meta\":{\"progressToken\":\"cancel-1\"}}", fn(notice: client.Notice) -> bool {
+        if notice.method != "notifications/progress" {
+            fail("unexpected SSE notification")
+        }
+        let Some(take token) = rpc.field_text(notice.params, "progressToken") else {
+            fail("missing progress token")
+        }
+        if token != "cancel-1" {
+            fail("wrong progress token")
+        }
+        false
+    }) {
+        Error(Cancelled) => {},
+        Error(Remote(take fault)) => fail(string.from(fault.message)),
+        Error(Transport(_)) => fail("transport failed before cancellation"),
+        Error(Disconnected) => fail("stream closed before progress"),
+        Error(InvalidMessage) => fail("invalid SSE message"),
+        _ => fail("SSE stream did not cancel"),
+    }
+    let _ = result.unwrap(invoke(n, c, peer, "server/discover", "{}", ignore_notice))
+}
+
+pub fn main(n: Net, c: Clock, tasks: Tasks, directory: Dir, out: Stdout, argv: Args) -> Result[(), ()] waits {
+    let Some(action) = args.get(argv, 0) else {
+        return Error(())
+    }
+    if action == "serve" {
+        serve(n, c, tasks, directory, out)
+    } else if action == "client" {
+        let Some(arg) = args.get(argv, 1) else {
+            return Error(())
+        }
+        let port = result.unwrap(std.int.parse_uint(arg, 10))
+        if port == 0 || port > 65535 {
+            return Error(())
+        }
+        let mut authority = string.from("127.0.0.1:")
+        string.push(mut authority, arg)
+        check_sdk(n, c, authority, int.truncate(port))
+    } else {
+        return Error(())
+    }
+    Ok(())
+}

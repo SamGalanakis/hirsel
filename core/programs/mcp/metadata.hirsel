@@ -1,0 +1,259 @@
+pub const VERSION_FIELD: String = "io.modelcontextprotocol/protocolVersion"
+
+pub const CLIENT_INFO: String = "io.modelcontextprotocol/clientInfo"
+
+pub const CLIENT_CAPABILITIES: String = "io.modelcontextprotocol/clientCapabilities"
+
+pub const SERVER_INFO: String = "io.modelcontextprotocol/serverInfo"
+
+pub const SUBSCRIPTION_ID: String = "io.modelcontextprotocol/subscriptionId"
+
+pub fn named_parameter(method: String) -> Option[View[String]] in method {
+    if method == "tools/call" || method == "prompts/get" {
+        Some("name")
+    } else if method == "resources/read" {
+        Some("uri")
+    } else {
+        None
+    }
+}
+
+fn sentinel(value: String) -> bool {
+    std.string.starts_with(value, "=?base64?") && std.string.ends_with(value, "?=")
+}
+
+fn ascii_header(value: String) -> bool {
+    if std.string.trim_ascii(value) != value || sentinel(value) {
+        return false
+    }
+    for c in string.as_bytes(value) {
+        if c != 9 && (c < 32 || c > 126) {
+            return false
+        }
+    }
+    true
+}
+
+pub fn header_value(value: String) -> String {
+    if ascii_header(value) {
+        return string.from(value)
+    }
+    let mut escaped = string.from("=?base64?")
+    string.push(mut escaped, std.base64.encode_string(string.as_bytes(value)))
+    string.push(mut escaped, "?=")
+    take escaped
+}
+
+pub fn header_matches(raw: Bytes, expected: String) -> bool {
+    let wire = match string.from_utf8(std.http.copy_bytes(raw)) {
+        Ok(take v) => take v,
+        Error(_) => return false,
+    }
+    if !sentinel(wire) {
+        return ascii_header(wire) && wire == expected
+    }
+    let end = string.byte_len(wire) - 2
+    if end < 9 {
+        return false
+    }
+    match std.base64.decode(string.as_bytes(string.slice(wire, 9, end))) {
+        Some(take decoded) => decoded == string.as_bytes(expected),
+        None => false,
+    }
+}
+
+pub fn media(value: String, expected: String) -> bool {
+    let mime = match std.string.split_once(value, ";") {
+        Some((kind, _)) => kind,
+        None => string.slice(value, 0, string.byte_len(value)),
+    }
+    std.http1.equal_ascii(string.as_bytes(std.string.trim_ascii(mime)), string.as_bytes(expected))
+}
+
+pub opaque type ToolDefinition {
+    name: String,
+    description: Option[String],
+    schema: String,
+    mirrored: List[Mirror]
+}
+
+type ValueKind: key = TextValue | IntegerValue | BooleanValue
+
+type Mirror {
+    header: String,
+    path: List[String],
+    kind: ValueKind
+}
+
+pub fn tool_name(tool: ToolDefinition) -> View[String] in tool {
+    view tool.name
+}
+
+pub fn tool_schema(tool: ToolDefinition) -> View[String] in tool {
+    view tool.schema
+}
+
+fn annotation(fields: rpc.Fields, raw: String, path: List[String], mut mirrors: List[Mirror]) -> Result[(), ()] {
+    let Some(take suffix) = rpc.text(raw) else {
+        return Error(())
+    }
+    if suffix == "" || list.len(path) == 0 {
+        return Error(())
+    }
+    for c in string.as_bytes(suffix) {
+        if !std.http1.token(c) {
+            return Error(())
+        }
+    }
+    let Some(take type_name) = rpc.field_text(fields, "type") else {
+        return Error(())
+    }
+    let kind = if type_name == "string" {
+        TextValue
+    } else if type_name == "integer" {
+        IntegerValue
+    } else if type_name == "boolean" {
+        BooleanValue
+    } else {
+        return Error(())
+    }
+    let mut header = string.from("Mcp-Param-")
+    string.push(mut header, suffix)
+    for entry in mirrors {
+        if std.http1.equal_ascii(string.as_bytes(entry.header), string.as_bytes(header)) {
+            return Error(())
+        }
+    }
+    let mut copied: List[String] = list.with_capacity(list.len(path))
+    for key in path {
+        list.push(mut copied, string.from(key))
+    }
+    list.push(mut mirrors, Mirror(header: take header, path: take copied, kind))
+    Ok(())
+}
+
+fn scan(source: String, property_chain: bool, mut path: List[String], mut mirrors: List[Mirror]) -> Result[(), ()] {
+    if let Ok(take fields) = rpc.object(source) {
+        if let Some(raw) = map.get(fields, "x-mcp-header") {
+            if !property_chain {
+                return Error(())
+            }
+            annotation(fields, raw, path, mut mirrors)?
+        }
+        for (key, child) in fields {
+            if key == "properties" && property_chain {
+                if let Ok(take properties) = rpc.object(child) {
+                    for (name, node) in properties {
+                        list.push(mut path, string.from(name))
+                        scan(node, true, mut path, mut mirrors)?
+                        let _ = list.pop(mut path)
+                    }
+                } else {
+                    scan(child, false, mut path, mut mirrors)?
+                }
+            } else if key != "x-mcp-header" {
+                scan(child, false, mut path, mut mirrors)?
+            }
+        }
+    } else if let Ok(take items) = rpc.array(source) {
+        for node in items {
+            scan(node, false, mut path, mut mirrors)?
+        }
+    }
+    Ok(())
+}
+
+fn definition(source: String) -> Result[ToolDefinition, ()] {
+    let Ok(take fields) = rpc.object(source) else {
+        return Error(())
+    }
+    let Some(take name) = rpc.field_text(fields, "name") else {
+        return Error(())
+    }
+    let Some(schema) = map.get(fields, "inputSchema") else {
+        return Error(())
+    }
+    let Ok(take schema_fields) = rpc.object(schema) else {
+        return Error(())
+    }
+    let Some(take kind) = rpc.field_text(schema_fields, "type") else {
+        return Error(())
+    }
+    if kind != "object" {
+        return Error(())
+    }
+    let mut mirrored: List[Mirror] = list.new()
+    let mut path: List[String] = list.new()
+    scan(schema, true, mut path, mut mirrored)?
+    Ok(ToolDefinition(name: take name, description: rpc.field_text(fields, "description"), schema: string.from(schema), mirrored: take mirrored))
+}
+
+pub fn tools(result_body: String) -> Result[List[ToolDefinition], ()] {
+    let Ok(take fields) = rpc.object(result_body) else {
+        return Error(())
+    }
+    let Some(raw) = map.get(fields, "tools") else {
+        return Error(())
+    }
+    let Ok(take rows) = rpc.array(raw) else {
+        return Error(())
+    }
+    let mut parsed: List[ToolDefinition] = list.new()
+    for row in rows {
+        if let Ok(take tool) = definition(row) {
+            list.push(mut parsed, take tool)
+        }
+    }
+    Ok(take parsed)
+}
+
+fn argument(arguments: String, path: List[String], index: u64) -> Option[String] {
+    if index == list.len(path) {
+        return if arguments == "null" {
+            None
+        } else {
+            Some(string.from(arguments))
+        }
+    }
+    let Ok(take fields) = rpc.object(arguments) else {
+        return None
+    }
+    let Some(child) = map.get(fields, path[index]) else {
+        return None
+    }
+    argument(child, path, index + 1)
+}
+
+fn mirror_text(raw: String, kind: ValueKind) -> Result[String, ()] {
+    match kind {
+        TextValue => match rpc.text(raw) {
+            Some(take value) => Ok(take value),
+            None => Error(()),
+        },
+        BooleanValue => if raw == "true" || raw == "false" {
+            Ok(string.from(raw))
+        } else {
+            Error(())
+        },
+        IntegerValue => {
+            let Ok(value) = std.json.decode(raw, std.json.read_i64) else {
+                return Error(())
+            }
+            if value < -9007199254740991 || value > 9007199254740991 {
+                return Error(())
+            }
+            Ok(rpc.typed_json(value))
+        },
+    }
+}
+
+pub fn tool_headers(tool: ToolDefinition, arguments: String) -> Result[List[(String, String)], ()] {
+    let mut headers: List[(String, String)] = list.new()
+    for entry in tool.mirrored {
+        if let Some(take raw) = argument(arguments, entry.path, 0) {
+            let value = mirror_text(raw, entry.kind)?
+            list.push(mut headers, (string.from(entry.header), header_value(value)))
+        }
+    }
+    Ok(take headers)
+}

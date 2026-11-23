@@ -1,0 +1,225 @@
+pub type Security = Plain | Https(String, Trust)
+
+pub type Endpoint {
+    address: Addr,
+    authority: String,
+    target: String,
+    origin: String,
+    security: Security
+}
+
+pub type Error: send = Transport(std.http_client.Error) | Http(u16) | Event(std.sse.SseError) | InvalidMessage | InvalidRequest | Disconnected | Cancelled | Remote(rpc.Fault)
+
+pub type Notice: send {
+    method: String,
+    params: rpc.Fields
+}
+
+fn header(name: String, value: String) -> std.http_client.Header {
+    std.http_client.Header(name: string.from(name), value: Public(string.into_bytes(string.from(value))))
+}
+
+fn open(n: Net, clock: Clock, target: Endpoint, request: std.http_client.Request, deadline: u64) -> Result[std.http_client.Connection, Error] waits {
+    let connection = match target.security {
+        Plain => std.http_client.dial(n, target.address, target.authority, clock, request, deadline),
+        Https(hostname, trust) => std.http_client.https(n, target.address, target.authority, hostname, trust, clock, request, deadline),
+    }
+    match take connection {
+        Ok(take ready) => Ok(take ready),
+        Error(e) => Error(Transport(e)),
+    }
+}
+
+fn response_media(head: std.http_client.ResponseHead, expected: String) -> bool {
+    for i in 0u64 .. std.http_client.field_count(head) {
+        let Some((name, value)) = std.http_client.field_at(head, i) else {
+            continue
+        }
+        if std.http1.equal_ascii(name, b"content-type") {
+            return match string.from_utf8(std.http.copy_bytes(value)) {
+                Ok(take text) => metadata.media(text, expected),
+                Error(_) => false,
+            }
+        }
+    }
+    false
+}
+
+fn read_fragment(mut connection: std.http_client.Connection, mut input: Bytes) -> Result[u64, Error] waits {
+    match std.http_client.read(mut connection, mut input) {
+        Ok(n) => Ok(n),
+        Error(e) => Error(Transport(e)),
+    }
+}
+
+fn response_message(raw: Bytes) -> Result[rpc.Incoming, Error] {
+    let Ok(take text) = string.from_utf8(std.http.copy_bytes(raw)) else {
+        return Error(InvalidMessage)
+    }
+    match rpc.incoming(text) {
+        Ok(take message) => Ok(take message),
+        Error(()) => Error(InvalidMessage),
+    }
+}
+
+fn finish(take message: rpc.Incoming, id: rpc.Id, status: u16) -> Result[String, Error] {
+    match take message {
+        Reply(reply_id, take data) => {
+            if status != 200 || !rpc.same_id(reply_id, id) {
+                return Error(InvalidMessage)
+            }
+            Ok(take data)
+        },
+        Rejected(take failure) => {
+            if let Some(failure_id) = failure.id {
+                if !rpc.same_id(failure_id, id) {
+                    return Error(InvalidMessage)
+                }
+            } else if status == 200 {
+                return Error(InvalidMessage)
+            }
+            Error(Remote(take failure))
+        },
+        Notification(_, _) => Error(InvalidMessage),
+    }
+}
+
+fn read_events(mut connection: std.http_client.Connection, id: rpc.Id, event_max: u64, on_notice: scoped fn(Notice) -> bool) -> Result[String, Error] waits {
+    let mut decoder = std.sse.decoder(event_max)
+    let mut chunk: Bytes = list.with_capacity(8192)
+    let mut terminal: Option[String] = None
+    loop {
+        let n = read_fragment(mut connection, mut chunk)?
+        if n == 0 {
+            std.sse.finish(mut decoder)
+            return Error(Disconnected)
+        }
+        let fed = std.sse.feed(mut decoder, chunk, fn(name: Bytes, data: Bytes, event_id: Bytes) -> std.sse.FeedControl[Error] {
+            if name != b"message" {
+                return Continue
+            }
+            match response_message(data) {
+                Ok(Notification(take method, take params_fields)) => {
+                    let notice = Notice(method: take method, params: take params_fields)
+                    if on_notice(notice) {
+                        Continue
+                    } else {
+                        Fail(Cancelled)
+                    }
+                },
+                Ok(take message) => match finish(take message, id, 200) {
+                    Ok(take answer) => {
+                        terminal = Some(take answer)
+                        Stop
+                    },
+                    Error(take issue) => Fail(take issue),
+                },
+                Error(take issue) => Fail(take issue),
+            }
+        })
+        match take fed {
+            Ok(Stopped(_)) => return Ok(option.unwrap(take terminal)),
+            Ok(Consumed(_)) => list.clear(mut chunk),
+            Error(Decode(e, _)) => return Error(Event(e)),
+            Error(Callback(take e, _)) => return Error(take e),
+        }
+    }
+}
+
+fn exchange(n: Net, clock: Clock, peer: Endpoint, take bearer: Option[Secret], identity: rpc.Identity, id: rpc.Id, method: String, take params_fields: rpc.Fields, mirrored: List[(String, String)], body_max: u64, event_max: u64, deadline: u64, on_notice: scoped fn(Notice) -> bool) -> Result[String, Error] waits {
+    let mut params = take params_fields
+    let mut info: rpc.Fields = map.new()
+    rpc.put(mut info, metadata.VERSION_FIELD, rpc.typed_json(rpc.REVISION))
+    rpc.put(mut info, metadata.CLIENT_INFO, rpc.typed_json(identity))
+    rpc.put(mut info, metadata.CLIENT_CAPABILITIES, string.from("{}"))
+    if let Some(raw) = map.get(params, "_meta") {
+        let Ok(take extra) = rpc.object(raw) else {
+            return Error(InvalidRequest)
+        }
+        for (key, value) in extra {
+            if !rpc.contains(info, key) {
+                rpc.put(mut info, key, string.from(value))
+            }
+        }
+    }
+    rpc.put(mut params, "_meta", rpc.encode_object(info))
+    let mut headers: List[std.http_client.Header] = list.new()
+    list.push(mut headers, header("Content-Type", "application/json"))
+    list.push(mut headers, header("Accept", "application/json, text/event-stream"))
+    list.push(mut headers, header("MCP-Protocol-Version", rpc.REVISION))
+    list.push(mut headers, header("Mcp-Method", method))
+    list.push(mut headers, header("Origin", peer.origin))
+    if let Some(key) = metadata.named_parameter(method) {
+        let Some(take name) = rpc.field_text(params, key) else {
+            return Error(InvalidRequest)
+        }
+        list.push(mut headers, header("Mcp-Name", metadata.header_value(name)))
+    }
+    for (name, value) in mirrored {
+        list.push(mut headers, header(name, value))
+    }
+    if let Some(take token) = take bearer {
+        list.push(mut headers, std.http_client.Header(name: string.from("Authorization"), value: Protected(b"Bearer ", take token)))
+    }
+    for (_, raw) in params {
+        if let Error(_) = std.json.size(raw) {
+            return Error(InvalidRequest)
+        }
+    }
+    let mut encoded_id = string.new()
+    std.json.write(mut encoded_id, false, fn(w) {
+        rpc.write_id(w, id)
+    })
+    let Some(take copied) = rpc.id_value(encoded_id) else {
+        return Error(InvalidRequest)
+    }
+    let body = rpc.encode_call(Some(take copied), method, params)
+    let request = std.http_client.Request(method: string.from("POST"), target: string.from(peer.target), headers: take headers, body: Fixed(string.byte_len(body)))
+    let mut connection = open(n, clock, peer, request, deadline)?
+    if let Error(e) = std.http_client.write(mut connection, string.as_bytes(body)) {
+        return Error(Transport(e))
+    }
+    if let Error(e) = std.http_client.finish_request(mut connection, body_max) {
+        return Error(Transport(e))
+    }
+    let (status, events, json) = {
+        let head = std.http_client.head(connection)
+        (std.http_client.status(head), response_media(head, "text/event-stream"), response_media(head, "application/json"))
+    }
+    if status == 200 && events {
+        return read_events(mut connection, id, event_max, on_notice)
+    }
+    if !json {
+        return Error(Http(status))
+    }
+    let mut body_bytes: Bytes = list.new()
+    loop {
+        list.reserve(mut body_bytes, 8192)
+        if read_fragment(mut connection, mut body_bytes)? == 0 {
+            break
+        }
+    }
+    finish(response_message(body_bytes)?, id, status)
+}
+
+/// Sends a stateless request. Returning false from on_notice closes its stream.
+pub fn call(n: Net, clock: Clock, peer: Endpoint, take bearer: Option[Secret], identity: rpc.Identity, id: rpc.Id, method: String, take params_fields: rpc.Fields, body_max: u64, event_max: u64, deadline: u64, on_notice: scoped fn(Notice) -> bool) -> Result[String, Error] waits {
+    exchange(n, clock, peer, take bearer, identity, id, method, take params_fields, list.new(), body_max, event_max, deadline, on_notice)
+}
+
+/// Calls a listed tool, projecting its annotated arguments into HTTP headers.
+pub fn call_tool(n: Net, clock: Clock, peer: Endpoint, take bearer: Option[Secret], identity: rpc.Identity, id: rpc.Id, tool: metadata.ToolDefinition, take arguments: String, take extra_meta: Option[String], body_max: u64, event_max: u64, deadline: u64, on_notice: scoped fn(Notice) -> bool) -> Result[String, Error] waits {
+    if let Error(_) = rpc.object(arguments) {
+        return Error(InvalidRequest)
+    }
+    let Ok(take mirrored) = metadata.tool_headers(tool, arguments) else {
+        return Error(InvalidRequest)
+    }
+    let mut params: rpc.Fields = map.new()
+    rpc.put(mut params, "name", rpc.typed_json(metadata.tool_name(tool)))
+    rpc.put(mut params, "arguments", take arguments)
+    if let Some(take extra) = take extra_meta {
+        rpc.put(mut params, "_meta", take extra)
+    }
+    exchange(n, clock, peer, take bearer, identity, id, "tools/call", take params, mirrored, body_max, event_max, deadline, on_notice)
+}

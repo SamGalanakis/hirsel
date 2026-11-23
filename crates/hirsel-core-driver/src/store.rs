@@ -387,6 +387,10 @@ impl Store {
         Ok(temporary.file)
     }
     /// Whether `path` names a file of this store.
+    /// The store's directory.
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
     pub(crate) fn holds(&self, path: &Path) -> bool {
         path.parent() == Some(&*self.root)
     }

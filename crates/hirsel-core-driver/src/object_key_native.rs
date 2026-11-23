@@ -27,7 +27,7 @@ fn objects_of(
                 (None, Some((store, address))) => {
                     crate::native_object::load_debug(store, *address).unwrap().unwrap()
                 }
-                (debug, _) => debug.clone().unwrap(),
+                (debug, _) => (**debug.as_ref().unwrap()).clone(),
             };
             let debug = encode(&debug).unwrap();
             (format!("{:?}", o.instance), (o.compiled, std::fs::read(&o.path).unwrap(), debug))

@@ -80,6 +80,18 @@ pub(crate) fn load(
     store: &Store,
     key: ContentHash,
 ) -> io::Result<Option<(Bare, NativeObject, File)>> {
+    let Some((object, debug)) = record(store, key)? else {
+        return Ok(None);
+    };
+    let Some((bytes, file)) = store.get_bare(object)? else {
+        return Ok(None);
+    };
+    Ok(Some((object, NativeObject { bytes, debug }, file)))
+}
+
+/// The parts of the record under `key` that are a function of the key: the
+/// bare object it names and its decoded debug rows, when every part checks.
+fn record(store: &Store, key: ContentHash) -> io::Result<Option<(Bare, Option<NativeDebug>)>> {
     let Some(bytes) = store.get(key)? else {
         return Ok(None);
     };
@@ -92,9 +104,6 @@ pub(crate) fn load(
     {
         return Ok(None);
     }
-    let Some((bytes, file)) = store.get_bare(root.object)? else {
-        return Ok(None);
-    };
     let debug = match root.debug {
         Some(name) => match load_debug(store, name)? {
             Some(debug) => Some(debug),
@@ -102,7 +111,38 @@ pub(crate) fn load(
         },
         None => None,
     };
-    Ok(Some((root.object, NativeObject { bytes, debug }, file)))
+    Ok(Some((root.object, debug)))
+}
+
+/// A stored record's key-determined parts ([`record`]), shared by a
+/// resident compiler's requests.
+pub(crate) type Shared = (Bare, Option<std::sync::Arc<NativeDebug>>);
+
+/// [`load`] without the object's bytes, its debug rows shared: a resident
+/// compiler remembers each record it read. The object itself is read and
+/// checked again through the descriptor returned, which the link hands the
+/// linker.
+pub(crate) fn load_shared(
+    store: &Store,
+    key: ContentHash,
+) -> io::Result<Option<(Bare, Option<std::sync::Arc<NativeDebug>>, File)>> {
+    let shared = crate::resident::OBJECT_RECORDS.get_or(
+        Some((store.root().to_owned(), key)),
+        || match record(store, key) {
+            Ok(Some((object, debug))) => Ok((object, debug.map(std::sync::Arc::new))),
+            Ok(None) => Err(None),
+            Err(error) => Err(Some(error)),
+        },
+    );
+    let (object, debug) = match shared {
+        Ok(shared) => shared,
+        Err(None) => return Ok(None),
+        Err(Some(error)) => return Err(error),
+    };
+    let Some((_, file)) = store.get_bare(object)? else {
+        return Ok(None);
+    };
+    Ok(Some((object, debug, file)))
 }
 
 /// A Cranelift development instance's record, under its instance key

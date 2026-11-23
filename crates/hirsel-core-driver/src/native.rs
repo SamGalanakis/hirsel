@@ -225,7 +225,7 @@ pub struct ObjectProduct {
     /// through, which the link hands the linker. None: a stored object named
     /// by a record, which the link opens and checks through that descriptor.
     pub(crate) held: Option<std::fs::File>,
-    pub debug: Option<hirsel_core_ir::source::NativeDebug>,
+    pub debug: Option<std::sync::Arc<hirsel_core_ir::source::NativeDebug>>,
     /// Stored debug rows: their store and address. A link with debug lines
     /// reads them when `debug` is not in hand.
     pub(crate) debug_record: Option<(Store, ContentHash)>,
@@ -256,6 +256,25 @@ impl ObjectProduct {
         debug: Option<ContentHash>,
         compiled: bool,
     ) -> Self {
+        let mut product = Self::shared(
+            instance,
+            store,
+            (object, held),
+            native.debug.map(std::sync::Arc::new),
+            compiled,
+        );
+        product.debug_record = debug.map(|d| (store.clone(), d));
+        product
+    }
+    /// An object this request checked through `held`, its debug rows
+    /// `debug` in hand.
+    pub(crate) fn shared(
+        instance: Identity,
+        store: &Store,
+        (object, held): (Bare, std::fs::File),
+        debug: Option<std::sync::Arc<hirsel_core_ir::source::NativeDebug>>,
+        compiled: bool,
+    ) -> Self {
         Self {
             private_variants: 0,
             instance,
@@ -263,8 +282,8 @@ impl ObjectProduct {
             path: crate::native_object::path(store, object.address),
             check: object.check,
             held: Some(held),
-            debug: native.debug,
-            debug_record: debug.map(|d| (store.clone(), d)),
+            debug,
+            debug_record: None,
             compiled,
         }
     }
@@ -1726,7 +1745,7 @@ fn link_objects(
             let mut refused = Vec::new();
             for object in objects {
                 match (&object.debug, &object.debug_record) {
-                    (Some(debug), _) => rows.push(Cow::Borrowed(debug)),
+                    (Some(debug), _) => rows.push(Cow::Borrowed(&**debug)),
                     (None, Some((store, address))) => {
                         match crate::native_object::load_debug(store, *address)? {
                             Some(debug) => rows.push(Cow::Owned(debug)),

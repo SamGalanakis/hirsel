@@ -488,7 +488,7 @@ pub(super) fn emit_release_image(
             identity: bare.address,
             check: bare.check,
             held: Some(file),
-            debug: object.debug,
+            debug: object.debug.map(std::sync::Arc::new),
             debug_record: None,
             compiled,
         })

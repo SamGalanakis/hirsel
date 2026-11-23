@@ -646,7 +646,7 @@ impl StdSide {
                 identity: bare.address,
                 check: bare.check,
                 held: Some(file),
-                debug,
+                debug: debug.map(std::sync::Arc::new),
                 debug_record: None,
                 compiled: false,
             })

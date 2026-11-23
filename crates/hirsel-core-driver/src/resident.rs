@@ -103,6 +103,10 @@ pub(crate) static REFERENCED: Memo<
     crate::native_entry::Referenced,
 > = Memo::new();
 
+/// Each stored object record's key-determined parts, by store and key.
+pub(crate) static OBJECT_RECORDS: Memo<(PathBuf, ContentHash), crate::native_object::Shared> =
+    Memo::new();
+
 #[derive(Clone)]
 struct SourceHash {
     bytes: Arc<[u8]>,
@@ -204,6 +208,7 @@ pub(crate) static RESOLVED: Memo<
 fn sweep(request: u64) {
     MATERIALISED.sweep(request);
     REFERENCED.sweep(request);
+    OBJECT_RECORDS.sweep(request);
     SOURCE_HASHES.sweep(request);
     PARSED.sweep(request);
     RESOLVED.sweep(request);

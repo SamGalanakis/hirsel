@@ -1605,14 +1605,14 @@ fn object<'m>(
     instance: &Identity,
     module: impl FnOnce() -> Result<Cow<'m, Module>, NativeStop>,
 ) -> Result<ObjectProduct, NativeStop> {
-    let mut found = crate::native_object::load(store, key)?.map(|hit| (store, hit));
+    let mut found = crate::native_object::load_shared(store, key)?.map(|hit| (store, hit));
     if found.is_none()
         && let Some(library) = library
     {
-        found = crate::native_object::load(library, key)?.map(|hit| (library, hit));
+        found = crate::native_object::load_shared(library, key)?.map(|hit| (library, hit));
     }
-    let (store, held, object, compiled) = match found {
-        Some((store, (bare, object, file))) => (store, (bare, file), object, false),
+    let (store, held, debug, compiled) = match found {
+        Some((store, (bare, debug, file))) => (store, (bare, file), debug, false),
         None => {
             let module = module()?;
             let object = emit_unit(&module, || module.link_symbols(), options, key, instance)
@@ -1623,17 +1623,16 @@ fn object<'m>(
             (
                 store,
                 crate::native_object::publish(store, key, &object)?,
-                object,
+                object.debug.map(Arc::new),
                 true,
             )
         }
     };
-    Ok(ObjectProduct::held(
+    Ok(ObjectProduct::shared(
         instance.clone(),
         store,
         held,
-        object,
-        None,
+        debug,
         compiled,
     ))
 }

@@ -179,3 +179,88 @@ pub fn law_project_cache_diff(parent: Dir, clock: Clock, random: Random, tasks: 
 fn test_project_cache_diff(parent: Dir, clock: Clock, random: Random, tasks: Tasks) -> Result[(), ()] waits {
     if law_project_cache_diff(parent, clock, random, tasks) { Ok(()) } else { Error(()) }
 }
+
+fn sec_alpha_two(tx: store.Tx) -> Result[Option[String], store.Error] { Ok(Some("alpha two")) }
+
+// s2 as the row `release.files["s2"]` holds it, so the text depends on the rows it renders over.
+fn sec_row(tx: store.Tx) -> Result[Option[String], store.Error] {
+    let t = release.tables(store.tx_schema(tx))?
+    store.fetch(tx, store.shape(t.files), "s2")
+}
+
+// The live agent (s1 "alpha", s2 "beta") and two candidates that read s2 from its row: one
+// leaves s1 alone, one changes s1's text to "alpha two".
+fn fork_agent(kind: u8) -> harness.Agent[Grants] {
+    let mut a = harness.agent("crash", "scripted", code.describe(scripted_model))
+    list.push(mut a.tools, harness.outside("bump", "adds one", "{}", Once, code.describe(bump)))
+    if kind == 2u8 {
+        list.push(mut a.sections, harness.Section(key: "s1", render: code.describe(sec_alpha_two)))
+    } else {
+        list.push(mut a.sections, harness.Section(key: "s1", render: code.describe(sec_alpha)))
+    }
+    if kind == 0u8 {
+        list.push(mut a.sections, harness.Section(key: "s2", render: code.describe(sec_beta)))
+    } else {
+        list.push(mut a.sections, harness.Section(key: "s2", render: code.describe(sec_row)))
+    }
+    a
+}
+
+fn word(n: u64, fill: u8) -> Bytes {
+    let mut b: Bytes = list.new()
+    list.fill(mut b, n, fill)
+    b
+}
+
+// Records one served call at the returned version; its body writes one source row.
+fn record_call(mut db: store.Db, bounds: store.Plan) -> u64 waits {
+    let t = result.unwrap(store.with_schema(db, code.describe(release.tables)))
+    let rec = store.CallRecord(key: word(32u64, 1u8), args: word(16u64, 2u8), stream: word(8u64, 5u8), revision: Some(word(32u64, 3u8)), code: word(48u64, 9u8))
+    let admission = result.unwrap(store.admit(mut db, clone(rec.stream), 0u64, store.request_digest(rec.key, rec.args)))
+    let Admitted(take complete) = take admission else { fail("record_call: not admitted") }
+    result.unwrap(store.durable(mut db, store.ticket(complete)))
+    let served = store.serve(mut db, take complete, bounds, Some(take rec), scoped fn(mut tx: store.Tx) -> Result[Bytes, Bytes] {
+        result.unwrap(store.put(mut tx, t.files, "other", "x"))
+        Ok(list.new())
+    })
+    let Ok(Committed(receipt)) = take served else { fail("record_call: not committed") }
+    result.unwrap(store.durable(mut db, receipt.ticket))
+    store.version(store.snapshot(db))
+}
+
+fn fork_diff_is(got: Result[harness.CacheDiff, harness.ForkDiffError], first: Option[String], sections: List[String]) -> bool {
+    match got {
+        Ok(d) => d.first_section == first && d.sections == sections && !d.tools && !d.prefix,
+        Error(_) => false,
+    }
+}
+
+// Law R3 (fable-design 4.4, step 5): the fork cache diff projects both agents on the
+// recorded call's base, not on the head. s2's row reads "beta" when the call runs and
+// "beta two" after it. Oracle, by hand from the base rows: the candidate that only reads
+// s2 from its row renders what the live agent renders, so it breaks nothing; the candidate
+// that changes s1's text breaks the cache at s1 and changes s1 alone. Projected at the head,
+// both would also show s2.
+pub fn law_fork_cache_diff(parent: Dir, clock: Clock, random: Random, tasks: Tasks) -> bool waits {
+    let mut name = string.with_capacity(32u64)
+    let dir = result.unwrap(host.mkdtemp(parent, mut name))
+    let mut db = answered_with(dir, clock, random, tasks, true, harness.Call(id: "c1", name: "bump", args: inline_text("{}")))
+    put_file(mut db, "s2", "beta")
+    let bounds = store.Plan(n_e: 1048576u64, s_e: 1048576u64, reply_max: 4096u64)
+    let v = record_call(mut db, bounds)
+    put_file(mut db, "s2", "beta two")
+    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    let b = store.main_branch(db)
+    let unchanged = harness.fork_cache_diff(db, b, v, bounds, h, fork_agent(0u8), fork_agent(1u8))
+    let edited = harness.fork_cache_diff(db, b, v, bounds, h, fork_agent(0u8), fork_agent(2u8))
+    result.unwrap(store.close(take db))
+    result.unwrap(std.dir.remove_all(parent, name))
+    let mut s1: List[String] = list.new()
+    list.push(mut s1, "s1")
+    fork_diff_is(unchanged, None, list.new()) && fork_diff_is(edited, Some("s1"), take s1)
+}
+
+@test
+fn test_fork_cache_diff(parent: Dir, clock: Clock, random: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if law_fork_cache_diff(parent, clock, random, tasks) { Ok(()) } else { Error(()) }
+}

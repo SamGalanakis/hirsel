@@ -82,3 +82,46 @@ pub fn cache_diff(live: Projection, next: Projection) -> CacheDiff {
     }
     CacheDiff(first_section: take first, sections: take changed, tools: live.tools != next.tools, prefix: live.prefix != next.prefix)
 }
+
+// Why a fork's cache diff has no answer: the recorded call's base is gone or was never
+// recorded (the store's reason), a projection overran the plan's bounds, or one refused.
+pub type ForkDiffError: send = Unrecorded(store.UnknownReason) | Overran | Store(store.Error) | Projection(Refused)
+
+// What a release changes in the next request of the session as it stood when the call
+// recorded at version `v` of `b` ran: `project` under `live` and under `next`, each run by
+// the store's recorded-call re-execution on a private copy of that call's base (RUNNER-SPEC
+// §7), then `cache_diff`. Nothing either side writes is kept. A base the store cannot
+// rebuild, a projection over `bounds`, or a refused projection has no diff.
+pub fn fork_cache_diff[G: send, N: send](db: store.Db, b: store.Branch, v: u64, bounds: store.Plan, h: Handles, live: Agent[G], next: Agent[N]) -> Result[CacheDiff, ForkDiffError] waits {
+    let before = projected_at(db, b, v, bounds, h, live)?
+    let after = projected_at(db, b, v, bounds, h, next)?
+    Ok(cache_diff(before, after))
+}
+
+fn projected_at[G: send](db: store.Db, b: store.Branch, v: u64, bounds: store.Plan, h: Handles, a: Agent[G]) -> Result[Projection, ForkDiffError] waits {
+    let seen: Log[Result[Projection, Refused]] = log.new()
+    let halted: Log[bool] = log.new()
+    let ran = store.reexecute(db, b, v, bounds, scoped fn(_stop: store.Stop) -> Bytes {
+        log.append(halted, true)
+        list.new()
+    }, scoped fn(_call: store.Recorded, mut tx: store.Tx) -> Result[Bytes, Bytes] {
+        log.append(seen, project(tx, h, a))
+        Ok(list.new())
+    })
+    let outcome = match take ran {
+        Ok(take done) => take done,
+        Error(take e) => return Error(Store(take e)),
+    }
+    if let Unknown(reason) = outcome {
+        return Error(Unrecorded(reason))
+    }
+    if list.len(log.finish(take halted)) > 0u64 {
+        return Error(Overran)
+    }
+    let mut got = log.finish(take seen)
+    match list.pop(mut got) {
+        Some(Ok(take p)) => Ok(take p),
+        Some(Error(take r)) => Error(Projection(take r)),
+        None => Error(Overran),
+    }
+}

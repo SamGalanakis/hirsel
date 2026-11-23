@@ -1,0 +1,441 @@
+// Module gateway_http (package harness): the gateway's HTTP front. It serves /sessions
+// and holds each browser's event stream itself, so a session's place runs only while
+// the session works: a stream follows the place through a wire client while the session
+// is busy and lets go of it when the session is quiet, and the place then stops by
+// itself under the open stream.
+//
+// The front accepts its own connections, and each connection's task holds a gateway
+// door. std.http cannot serve this: its handlers and stream producers hold only
+// shareable state and a Clock and Dir (HTTP-10, HTTP-11), and a door is a channel. Each
+// connection carries one request and closes (`Connection: close`); a request body has a
+// Content-Length or none.
+//
+// Routes: GET /sessions lists ids; POST /sessions creates a session keyed by the body;
+// DELETE /sessions/{id}; POST /sessions/{id}/messages takes a JSON `harness.Submit`;
+// POST /sessions/{id}/decisions a JSON `harness.Decision`; GET /sessions/{id}/events is
+// the transcript as server-sent events, one JSON `Shown` per changed row and a comment
+// as a heartbeat.
+
+// One transcript row as a stream sends it: its position and its view.
+pub type Shown: codec + send { at: u64, line: harness.View }
+
+// What the front needs from a session's place: its submit and decide entries and a query
+// over `harness.transcript`, and how to reach it. A new session starts as `agent` with
+// `narrow`. Each connection's task spends `conn_bytes`, which must hold a wire client.
+pub type Front: send {
+    submit: store.fixture.Callee[harness.Submit, Result[harness.Disposition, harness.Refused]],
+    decide: store.fixture.Callee[harness.Decision, Result[harness.Ruling, harness.Refused]],
+    shown: store.fixture.Callee[(), ()], keys: List[Bytes], socket: std.wsock.Config,
+    agent: String, narrow: harness.Narrow,
+    tasks: Tasks, clock: Clock, random: Random, net: Net,
+    within_ms: u64, poll_ms: u64, beat_ms: u64, conn_bytes: u64, conns_max: u64, head_max: u64, body_max: u64,
+}
+
+pub opaque type Served { halt: Sender[()], accepting: Task[()] }
+
+fn copy_front(f: Front) -> Front {
+    Front(submit: clone(f.submit), decide: clone(f.decide), shown: clone(f.shown), keys: clone(f.keys), socket: clone(f.socket),
+        agent: string.from(f.agent), narrow: clone(f.narrow), tasks: f.tasks, clock: f.clock, random: f.random, net: f.net,
+        within_ms: f.within_ms, poll_ms: f.poll_ms, beat_ms: f.beat_ms, conn_bytes: f.conn_bytes, conns_max: f.conns_max,
+        head_max: f.head_max, body_max: f.body_max)
+}
+
+fn deadline_ms(c: Clock, ms: u64) -> u64 { std.clock.deadline_after_ms(host.mono_ns(c), ms) }
+
+// ---- reaching a session ----
+
+fn turned(why: harness.gateway.Refused) -> u16 {
+    match why { Unknown => 404u16, Busy => 409u16, Full => 503u16, Stopping => 503u16, _ => 500u16 }
+}
+
+// A wire client to the session's place under `credential`. `wake` routes to it, starting
+// it if it is unloaded; otherwise only a running place is reached. The lease is dropped
+// once the client is connected: the client's session keeps the place up.
+fn reach[T: send](d: harness.gateway.Door[T], f: Front, id: u64, take credential: Bytes, first_p: u64, wake: bool) -> Result[store.fixture.Client, u16] waits {
+    let got_lease = if wake { harness.gateway.route(d, id) } else { harness.gateway.peek(d, id) }
+    let lease = match take got_lease { Ok(take l) => take l, Error(why) => return Error(turned(why)) }
+    let Some(address) = latest.read(store.places.status(lease)).addr else { return Error(503u16) }
+    let opened = store.fixture.client_at(f.tasks, f.net, f.clock, f.random, f.keys, f.socket, address, Some(take credential), first_p, f.within_ms)
+    let _ = take lease
+    match take opened { Ok(take c) => Ok(take c), Error(_) => Error(503u16) }
+}
+
+// The browser is the Caller. It names itself with `Authorization: Bearer <base64 credential>`
+// and gives its next request position in `Hirsel-Position`, which it keeps by WIRE's client
+// rules (P1, P2), so a repeated request at one position with the same bytes runs once.
+type Asker { credential: Bytes, p: u64 }
+
+fn asker(req: Request) -> Result[Asker, u16] {
+    let Some(auth) = field(req, "authorization") else { return Error(401u16) }
+    if list.len(auth) <= 7u64 || !std.http1.equal_ascii(std.http.copy_bytes(list.slice(auth, 0u64, 7u64)), string.as_bytes("Bearer ")) { return Error(401u16) }
+    let Some(take credential) = std.base64.decode(std.http.copy_bytes(list.slice(auth, 7u64, list.len(auth)))) else { return Error(401u16) }
+    let Some(at) = field(req, "hirsel-position") else { return Error(400u16) }
+    let Ok(p) = std.int.parse_uint(text_of(take at), 10) else { return Error(400u16) }
+    Ok(Asker(credential: take credential, p: p))
+}
+
+fn call_place[T: send, A: codec, R: codec](d: harness.gateway.Door[T], f: Front, id: u64, take who: Asker, e: store.fixture.Callee[A, Result[R, harness.Refused]], take a: A) -> Result[R, u16] waits {
+    let Asker(credential: take credential, p: p) = take who
+    let mut client = reach(d, f, id, take credential, p, true)?
+    let replied = store.fixture.call(mut client, e, take a, int.truncate(f.within_ms))
+    store.fixture.close(take client)
+    match take replied {
+        Ok(store.fixture.Replied(answer: Returned(Ok(take r)), ..)) => Ok(take r),
+        Ok(store.fixture.Replied(answer: Returned(Error(_)), ..)) => Error(422u16),
+        Ok(store.fixture.Replied(answer: Refused(NotAllowed), ..)) => Error(403u16),
+        Ok(store.fixture.Replied(answer: Refused(RequestMismatch), ..)) => Error(409u16),
+        Ok(store.fixture.Replied(answer: Refused(HistoryUnavailable), ..)) => Error(409u16),
+        _ => Error(503u16),
+    }
+}
+
+// ---- the stream ----
+
+fn busy(status: String) -> bool { status == "thinking" || status == "calling tools" }
+
+type Following { client: store.fixture.Client, sub: u32, version: u64, fresh: bool, hold_until: u64, quiet: bool }
+
+// A client following the session's transcript. One opened for a nudge stays at least one
+// beat even if the session looks quiet, so a change whose run has not yet written its
+// busy status is not missed.
+fn follow_from[T: send](d: harness.gateway.Door[T], f: Front, id: u64, wake: bool, nudged: bool) -> Option[Following] waits {
+    let Ok(take opened) = reach(d, f, id, store.ingress.credential(f.random), 0u64, wake) else { return None }
+    let mut client = take opened
+    let hold_until = if nudged { deadline_ms(f.clock, f.beat_ms) } else { 0u64 }
+    match store.fixture.subscribe(mut client, f.shown, (), f.within_ms) {
+        Ok(sub) => Some(Following(client: take client, sub: sub, version: 0u64, fresh: true, hold_until: hold_until, quiet: false)),
+        Error(_) => { store.fixture.close(take client); None },
+    }
+}
+
+fn send_out(mut w: WriteHalf, f: Front, take out: Bytes) -> bool waits {
+    match std.http.write_wire(mut w, out, list.new(), f.clock, deadline_ms(f.clock, f.within_ms)) { Ok(()) => true, Error(_) => false }
+}
+
+fn beat(mut w: WriteHalf, f: Front) -> bool waits {
+    let mut buffer = std.sse.buffer(16u64)
+    if let Error(_) = std.sse.comment(mut buffer, "beat") { return false }
+    send_out(mut w, f, std.sse.into_bytes(take buffer))
+}
+
+fn event_of(take s: Shown) -> Option[Bytes] {
+    let Ok(format) = (std.json.interop() : Result[std.json.Format[Shown], std.json.TypedError]) else { return None }
+    let Ok(take text) = std.json.to_string(format, s) else { return None }
+    let mut buffer = std.sse.buffer(string.byte_len(text) + 8u64)
+    if let Error(_) = std.sse.event(mut buffer, None, None, string.as_bytes(text)) { return None }
+    Some(std.sse.into_bytes(take buffer))
+}
+
+// Sends every row of `image` that differs from what this stream sent, and answers the
+// session's status, or None when the browser is gone.
+fn send_rows(mut w: WriteHalf, f: Front, image: store.fixture.Seen, mut sent: List[(u64, Bytes)]) -> Option[String] waits {
+    let codec: std.codec.Codec[harness.View] = std.codec.of()
+    let mut status = string.new()
+    for r in image.rows {
+        let Some(raw) = view r.value else { continue }
+        // A query row's key carries the table's prefix before the u64 key.
+        let width = list.len(r.key)
+        if width < 8u64 { continue }
+        let mut at = 0u64
+        for i in width - 8u64 .. width { at = at * 256u64 + int.widen(r.key[i]) }
+        let Ok(take v) = std.codec.decode(codec, raw) else { continue }
+        if let Status(text) = v { status = clone(text) }
+        let mut same = false
+        let mut kept: List[(u64, Bytes)] = list.new()
+        while let Some((p, take old)) = list.pop(mut sent) {
+            if p == at { same = old == raw } else { list.push(mut kept, (p, take old)) }
+        }
+        list.push(mut kept, (at, clone(raw)))
+        sent = take kept
+        if !same {
+            let Some(take event) = event_of(Shown(at: at, line: take v)) else { return None }
+            if !send_out(mut w, f, take event) { return None }
+        }
+    }
+    Some(status)
+}
+
+fn halted(quit: Receiver[()]) -> bool {
+    match channel.try_receive(quit) { Ok(()) => true, Error(Empty) => false, Error(_) => true }
+}
+
+// A stream. It follows the session's place through a wire client while the session is
+// busy, and lets go of it when the session is quiet. Then it reads only the gateway's
+// marks: a nudge (a front changed the session) routes to it again, and a start by anyone
+// else is followed while the place runs, without starting it. So a quiet session costs a
+// stream no wake, and an open stream never holds the place up. Opening the stream wakes
+// the session once, to send its transcript.
+fn follow[T: send](d: harness.gateway.Door[T], f: Front, id: u64, mut w: WriteHalf, quit: Receiver[()]) -> () waits {
+    let mut last = harness.gateway.marks(d, id)
+    let mut following = follow_from(d, f, id, true, false)
+    let mut sent: List[(u64, Bytes)] = list.new()
+    let mut quiet_since = host.mono_ns(f.clock)
+    while !halted(quit) {
+        if let Some(take fo) = replace(mut following, None) {
+            let Following(client: take c, sub: sub, version: version, fresh: fresh, hold_until: hold_until, quiet: quiet) = take fo
+            let mut client = take c
+            let seen_marks = harness.gateway.marks(d, id)
+            let at = if fresh { 0u64 } else { version + 1u64 }
+            match store.fixture.seen_at(mut client, sub, at, f.beat_ms) {
+                Ok(take image) => {
+                    let next = image.version
+                    let Some(status) = send_rows(mut w, f, image, mut sent) else { store.fixture.close(take client); return }
+                    if busy(status) || host.mono_ns(f.clock) < hold_until {
+                        following = Some(Following(client: take client, sub: sub, version: next, fresh: false, hold_until: hold_until, quiet: !busy(status)))
+                    } else {
+                        store.fixture.close(take client)
+                        last = seen_marks
+                        quiet_since = host.mono_ns(f.clock)
+                    }
+                },
+                // No change in a beat: a quiet session past its hold is let go of.
+                Error(Deadline(_)) => {
+                    if !beat(mut w, f) { store.fixture.close(take client); return }
+                    if quiet && host.mono_ns(f.clock) >= hold_until {
+                        store.fixture.close(take client)
+                        last = seen_marks
+                        quiet_since = host.mono_ns(f.clock)
+                    } else {
+                        following = Some(Following(client: take client, sub: sub, version: version, fresh: fresh, hold_until: hold_until, quiet: quiet))
+                    }
+                },
+                Error(_) => {
+                    store.fixture.close(take client)
+                    last = seen_marks
+                },
+            }
+        } else {
+            let m = harness.gateway.marks(d, id)
+            if m.nudges != last.nudges {
+                last = m
+                following = follow_from(d, f, id, true, true)
+            } else if m.ups != last.ups {
+                last = m
+                following = follow_from(d, f, id, false, false)
+            } else {
+                host.sleep_until(f.clock, deadline_ms(f.clock, f.poll_ms))
+                if host.mono_ns(f.clock) - quiet_since >= f.beat_ms * 1000000u64 {
+                    if !beat(mut w, f) { return }
+                    quiet_since = host.mono_ns(f.clock)
+                }
+            }
+        }
+    }
+    if let Some(take fo) = replace(mut following, None) {
+        let Following(client: take c, ..) = take fo
+        store.fixture.close(take c)
+    }
+}
+
+// ---- one request ----
+
+type Request { input: Bytes, head: std.http1.Head, body_at: u64, body_len: u64 }
+
+fn read_request(mut r: ReadHalf, f: Front) -> Result[Request, u16] waits {
+    let until = At(f.clock, deadline_ms(f.clock, f.within_ms))
+    let mut input: Bytes = list.with_capacity(f.head_max + f.body_max)
+    let mut head = std.http1.head()
+    let mut cursor = std.http1.cursor()
+    loop {
+        match std.http1.resume(input, mut head, mut cursor) {
+            Complete => break,
+            Partial => (),
+            Bad => return Error(400u16),
+            TooLarge => return Error(431u16),
+        }
+        if list.len(input) >= f.head_max { return Error(431u16) }
+        let room = f.head_max - list.len(input)
+        match host.recv_bounded(mut r, mut input, room, until) { Ok(0u64) => return Error(400u16), Ok(_) => (), Error(_) => return Error(408u16) }
+    }
+    let body_at = head.end
+    let body_len = match std.http.framing(input, view head, f.body_max) {
+        Ok(Empty) => 0u64,
+        Ok(ContentLength(n)) => n,
+        Ok(_) => return Error(411u16),
+        Error(_) => return Error(413u16),
+    }
+    while list.len(input) < body_at + body_len {
+        let want = body_at + body_len - list.len(input)
+        match host.recv_bounded(mut r, mut input, want, until) { Ok(0u64) => return Error(400u16), Ok(_) => (), Error(_) => return Error(408u16) }
+    }
+    Ok(Request(input: take input, head: take head, body_at: body_at, body_len: body_len))
+}
+
+fn part(req: Request, s: std.http1.Span) -> Bytes { std.http.copy_bytes(list.slice(req.input, s.start, s.end)) }
+
+fn field(req: Request, name: String) -> Option[Bytes] {
+    for i in 0u64 .. req.head.count {
+        let h = req.head.fields[i]
+        if std.http1.equal_ascii(part(req, h.name), string.as_bytes(name)) { return Some(part(req, h.value)) }
+    }
+    None
+}
+
+fn body(req: Request) -> Bytes { std.http.copy_bytes(list.slice(req.input, req.body_at, req.body_at + req.body_len)) }
+
+fn text_of(take b: Bytes) -> String { match string.from_utf8(take b) { Ok(take t) => take t, Error(_) => string.new() } }
+
+// The path's segments after the leading slash, without the query.
+fn segments(target: Bytes) -> List[String] {
+    let mut out: List[String] = list.new()
+    let mut current: Bytes = list.new()
+    let mut started = false
+    for b in target {
+        if b == 63u8 { break }
+        if b == 47u8 {
+            if started { list.push(mut out, text_of(replace(mut current, list.new()))) }
+            started = true
+        } else { list.push(mut current, b) }
+    }
+    if started { list.push(mut out, text_of(take current)) }
+    out
+}
+
+fn reply(mut w: WriteHalf, f: Front, status: u16, take payload: Bytes) -> () waits {
+    let mut head = string.from("HTTP/1.1 ")
+    string.push_uint(mut head, int.widen(status), 10u32, 3u64, '0')
+    string.push(mut head, " \r\nContent-Length: ")
+    string.push_u64(mut head, list.len(payload))
+    if list.len(payload) > 0u64 { string.push(mut head, "\r\nContent-Type: application/json") }
+    string.push(mut head, "\r\nConnection: close\r\n\r\n")
+    let _ = std.http.write_wire(mut w, string.into_bytes(take head), payload, f.clock, deadline_ms(f.clock, f.within_ms))
+}
+
+fn json_reply[V: codec](mut w: WriteHalf, f: Front, status: u16, v: V) -> () waits {
+    let Ok(format) = (std.json.interop() : Result[std.json.Format[V], std.json.TypedError]) else { return reply(mut w, f, 500u16, list.new()) }
+    match std.json.to_string(format, v) {
+        Ok(take text) => reply(mut w, f, status, string.into_bytes(take text)),
+        Error(_) => reply(mut w, f, 500u16, list.new()),
+    }
+}
+
+fn json_body[V: codec](req: Request, f: Front) -> Option[V] {
+    let Ok(format) = (std.json.interop() : Result[std.json.Format[V], std.json.TypedError]) else { return None }
+    match std.json.decode_typed(format, body(req), f.body_max) { Ok(take v) => Some(take v), Error(_) => None }
+}
+
+fn listed[T: send](d: harness.gateway.Door[T], id: u64) -> bool waits {
+    for n in harness.gateway.listing(d) { if n == id { return true } }
+    false
+}
+
+type Conn[T: send]: send { door: harness.gateway.Door[T], front: Front, socket: Socket, slot: u64, done: Sender[u64], quit: Receiver[()] }
+
+fn connection[T: send](take job: Conn[T]) -> () waits {
+    let Conn(door: take d, front: take f, socket: take socket, slot: slot, done: take done, quit: take quit) = take job
+    let (r, w) = net.split(take socket)
+    let mut read = take r
+    let mut write = take w
+    serve_one(d, f, mut read, mut write, quit)
+    let _ = channel.send(done, slot)
+}
+
+fn serve_one[T: send](d: harness.gateway.Door[T], f: Front, mut read: ReadHalf, mut write: WriteHalf, quit: Receiver[()]) -> () waits {
+    let req = match read_request(mut read, f) { Ok(take q) => take q, Error(code) => return reply(mut write, f, code, list.new()) }
+    let method = part(req, req.head.method)
+    let path = segments(part(req, req.head.target))
+    if list.len(path) == 0u64 || path[0] != "sessions" { return reply(mut write, f, 404u16, list.new()) }
+    if list.len(path) == 1u64 {
+        if method == b"GET" { return json_reply(mut write, f, 200u16, harness.gateway.listing(d)) }
+        if method == b"POST" {
+            return match harness.gateway.create(d, body(req), Fresh(string.from(f.agent), clone(f.narrow))) {
+                Ok(n) => json_reply(mut write, f, 201u16, n),
+                Error(why) => reply(mut write, f, turned(why), list.new()),
+            }
+        }
+        return reply(mut write, f, 405u16, list.new())
+    }
+    let Ok(id) = std.int.parse_uint(path[1], 10) else { return reply(mut write, f, 404u16, list.new()) }
+    if list.len(path) == 2u64 && method == b"DELETE" {
+        return match harness.gateway.delete(d, id) { Ok(()) => reply(mut write, f, 204u16, list.new()), Error(why) => reply(mut write, f, turned(why), list.new()) }
+    }
+    if list.len(path) != 3u64 { return reply(mut write, f, 404u16, list.new()) }
+    if path[2] == "messages" && method == b"POST" {
+        let who = match asker(req) { Ok(take w) => take w, Error(code) => return reply(mut write, f, code, list.new()) }
+        let Some(take m) = (json_body(req, f) : Option[harness.Submit]) else { return reply(mut write, f, 400u16, list.new()) }
+        return match call_place(d, f, id, take who, f.submit, take m) {
+            Ok(take placed) => { harness.gateway.nudge(d, id); json_reply(mut write, f, 202u16, placed) },
+            Error(code) => reply(mut write, f, code, list.new()),
+        }
+    }
+    if path[2] == "decisions" && method == b"POST" {
+        let who = match asker(req) { Ok(take w) => take w, Error(code) => return reply(mut write, f, code, list.new()) }
+        let Some(take decision) = (json_body(req, f) : Option[harness.Decision]) else { return reply(mut write, f, 400u16, list.new()) }
+        return match call_place(d, f, id, take who, f.decide, take decision) {
+            Ok(take ruling) => { harness.gateway.nudge(d, id); json_reply(mut write, f, 200u16, ruling) },
+            Error(code) => reply(mut write, f, code, list.new()),
+        }
+    }
+    if path[2] == "events" && method == b"GET" {
+        if !listed(d, id) { return reply(mut write, f, 404u16, list.new()) }
+        let head = string.into_bytes(string.from("HTTP/1.1 200 \r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"))
+        if !send_out(mut write, f, take head) { return }
+        return follow(d, f, id, mut write, quit)
+    }
+    reply(mut write, f, 404u16, list.new())
+}
+
+// ---- serving ----
+
+type Accepting[T: send]: send { door: harness.gateway.Door[T], front: Front, listener: Listener, stop: Receiver[()] }
+
+// Accepts connections until told to stop, and joins each connection's task when it ends.
+// At the stop it tells every open stream to end, which each does within a beat.
+fn accept_loop[T: send](take job: Accepting[T]) -> () waits {
+    let Accepting(door: take d, front: take f, listener: take listener, stop: take stop) = take job
+    let mut l = take listener
+    let (done, ended): (Sender[u64], Receiver[u64]) = channel.new(f.conns_max + 1u64)
+    let mut conns: List[(u64, Sender[()], Task[()])] = list.new()
+    let mut next = 0u64
+    let run: fn(take Conn[T]) -> () waits = connection
+    loop {
+        while let Ok(slot) = channel.try_receive(ended) {
+            let mut kept: List[(u64, Sender[()], Task[()])] = list.new()
+            while let Some((s, take h, take t)) = list.pop(mut conns) {
+                if s == slot { let _ = task.join(take t) } else { list.push(mut kept, (s, take h, take t)) }
+            }
+            conns = take kept
+        }
+        if halted(stop) { break }
+        match host.accept(mut l, At(f.clock, deadline_ms(f.clock, f.poll_ms))) {
+            Ok((take socket, _)) => {
+                if list.len(conns) >= f.conns_max {
+                    let (_, w) = net.split(take socket)
+                    let mut write = take w
+                    reply(mut write, f, 503u16, list.new())
+                } else {
+                    let (h, quit): (Sender[()], Receiver[()]) = channel.new(1u64)
+                    let conn = Conn(door: harness.gateway.copy_door(d), front: copy_front(f), socket: take socket, slot: next, done: channel.sender(done), quit: take quit)
+                    let t = task.spawn(f.tasks, bytes f.conn_bytes, take conn, run)
+                    list.push(mut conns, (next, take h, take t))
+                    next += 1u64
+                }
+            },
+            Error(_) => (),
+        }
+    }
+    let _ = take l
+    while let Some((_, take h, take t)) = list.pop(mut conns) {
+        let _ = channel.try_send(h, ())
+        let _ = task.join(take t)
+    }
+}
+
+// Serves the gateway behind `d` on `listener` until `halt`.
+pub fn serve[T: send](d: harness.gateway.Door[T], take front: Front, take listener: Listener) -> Served {
+    let (h, stop): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let tasks = front.tasks
+    // The accept task's own buffers, and every connection's task inside it.
+    let room = 1048576u64 + front.conns_max * front.conn_bytes
+    let job = Accepting(door: harness.gateway.copy_door(d), front: take front, listener: take listener, stop: take stop)
+    let run: fn(take Accepting[T]) -> () waits = accept_loop
+    let accepting = task.spawn(tasks, bytes room, take job, run)
+    Served(halt: take h, accepting: take accepting)
+}
+
+// Stops accepting, ends every open stream and waits for every connection's task.
+pub fn halt(take s: Served) -> () waits {
+    let Served(halt: take h, accepting: take accepting) = take s
+    let _ = channel.send(h, ())
+    let _ = task.join(take accepting)
+}

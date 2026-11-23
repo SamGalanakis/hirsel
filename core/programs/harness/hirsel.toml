@@ -13,6 +13,7 @@ store = { major = 1, path = "../store" }
 "mcp.hirsel" = "mcp_tools"
 "provider.hirsel" = "provider"
 "gateway.hirsel" = "gateway"
+"gateway_http.hirsel" = "gateway_http"
 
 [tests]
 limit = 268435456

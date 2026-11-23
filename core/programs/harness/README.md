@@ -282,6 +282,31 @@ options.
   1 MiB tasks. An effect that runs out of bytes raises, its run stays
   unsettled, and the place idles out.
 
+## The HTTP front
+
+`harness.gateway_http.serve(door, front, listener)` serves a gateway over HTTP/1.1,
+one request per connection, and holds each browser's event stream itself, so a
+session's place can unload while its page stays open.
+
+- `GET /sessions`, `POST /sessions` (body: the key; answers the id) and
+  `DELETE /sessions/:id` call the gateway.
+- `POST /sessions/:id/messages` (a JSON `Submit`, answers 202) and
+  `POST /sessions/:id/decisions` (a JSON `Decision`, answers the `Ruling`)
+  route to the place, waking it, and call its entry. The browser is the
+  Caller: it sends `Authorization: Bearer <base64 credential>` and
+  `Hirsel-Position: <p>`, its next request position by WIRE's client rules,
+  so a retried request at one position runs once. An entry's refusal is 422,
+  a stranger 403, a position bound to other bytes 409.
+- `GET /sessions/:id/events` is a server-sent event stream of the session's
+  transcript rows (`Shown { at, line }`). The front follows the place only
+  while it is busy, then lets go; it learns of a later change from the
+  gateway's start counts (`marks`), and reads the new rows with `peek`, which
+  never starts a place. Opening the stream wakes the session once. A comment
+  every `beat_ms` keeps the connection open.
+- `std.http` cannot hold a gateway door in a handler or stream producer
+  (HTTP-10, HTTP-11), so the front runs its own accept loop. WebSocket is not
+  served.
+
 ## Laws
 
 | law | claim | oracle |
@@ -298,6 +323,7 @@ options.
 | K1 `test_parked_call_resumes_once` | An Inside tool that returns Later runs once and stays parked through further wakes. The first resume settles it with the given result and the round goes on; a second resume is ignored. | The tool's own run count and the bytes passed to resume. |
 | J1 `test_round_bytes_bounded` | Preparing a model call writes the same bytes after 10 entries as after 1,000, within 64 bytes. Settling a 65,537-byte Outside result keeps the journal smaller than the result. Recovery after an acknowledged PUT and before settle produces InDoubt without redispatch. A settled reference reads back byte-for-byte and a body with the wrong digest is refused. | The snapshot diff, recovered journal byte account, scripted dispatch counts and the simulated S3 object at the fixture's independently computed SHA-256 key. |
 | F1 `test_fork_shares_prefix` | A fork cut after a finished tool round holds exactly the parent's entries before the cut and their visible lines, with no run. Its first request after a new submit is those messages plus the new one, under a fresh baseline. A cut inside a tool round (one of two calls answered) conflicts. | The parent log and the lines each entry shows, written by hand. |
+| B1 `test_front_holds_stream` (gateway_laws) | Through the front: a message wakes the session and the open stream shows its rows up to "waiting"; the place then stops under the open stream and is not started again in a quiet second; the browser's approval wakes it and the same stream shows the run's end; halting the front ends the stream. | The rows derived by hand from the script, and the gateway's start and stop counts. |
 | W1 `test_wake_resumes_transcript` (gateway_laws) | A session whose place stopped by itself while a call waits for approval is woken by the route that carries the approval. The log read while it was unloaded is the first three entries of the finished log, and the run finishes as the script says. | The five-entry log derived by hand from the script. |
 | S1 `test_subagent_once_child_crash`, `test_subagent_once_parent_crash` (gateway_laws) | A subagent's Once tool runs at most once across a cut of either place. The cut call settles InDoubt, there are exactly two sessions, and both logs are as the script says. The cut is a stop with a client left open on the place, so it ends Forced at the grace deadline while the held call is in flight. | The test's own count of `tally` runs and the logs derived by hand. |
 | S1 `test_documented_streams_read` | The Anthropic docs' tool-use stream and an OpenAI tool-call stream read to their documented answer (text, calls, joined arguments, stop reason, usage), fed whole or in pieces of 1, 2, 7 or 61 bytes. | The Anthropic streaming docs' example, copied verbatim, and a stream built from OpenAI's documented chunk schema; the expected answers are read off the fixtures by hand. |

@@ -16,7 +16,11 @@ type Row: codec + send { key: Bytes, wake: Wake }
 
 // How a new session's store starts: an empty session, or a fork's exported prefix.
 pub type Seeding: send = Fresh(String, harness.Narrow) | Adopt(harness.Prefix)
-pub type Refused: send = Unknown | Full | Busy | Storage | Seed(harness.Refused) | Place(store.places.Refused) | Stopping
+pub type Refused: send = Unknown | Full | Busy | Asleep | Storage | Seed(harness.Refused) | Place(store.places.Refused) | Stopping
+
+// What the gateway has seen of a session since it started: its place's starts and ends,
+// and the nudges a front sent after it changed the session.
+pub type Marks: codec + send { ups: u64, downs: u64, nudges: u64 }
 
 // `place_bytes` is the budget every loaded session's place shares, as in the directory.
 pub type GatewayConfig[T: send]: send {
@@ -35,6 +39,9 @@ type GwIn[T: send]: send =
     | Unload(u64, Sender[Result[store.places.Unloaded, Refused]])
     | Downs(u64, Sender[u64])
     | AwaitDown(u64, u64, Sender[Result[u64, Refused]])
+    | Nudge(u64)
+    | Marked(u64, Sender[Marks])
+    | Peek(u64, Sender[Result[store.places.Opener[T], Refused]])
     | Halt(Sender[List[store.places.Unloaded]])
 
 pub opaque type Gateway[T: send] { to: Sender[GwIn[T]], actor: Task[()] }
@@ -92,8 +99,8 @@ type Actor[T: send] {
     factory: fn() -> Result[store.places.Factory[T], Capacity], max_sessions: u64, count: u64,
     directory: store.places.Directory[T], tasks: Tasks, clock: Clock, random: Random, me: Sender[GwIn[T]],
     watch: Option[Sender[store.places.Change]], alarms: List[(u64, Task[()])], wakers: List[(u64, Task[()])],
-    // How many times each session's place has ended since the gateway started, and who waits for the next end.
-    closers: List[Task[()]], downs: List[(u64, u64)], waiters: List[(u64, u64, Sender[Result[u64, Refused]])],
+    // Each session's marks since the gateway started, and who waits for its next end.
+    closers: List[Task[()]], marks: List[(u64, Marks)], waiters: List[(u64, u64, Sender[Result[u64, Refused]])],
 }
 
 fn forward_changes[T: send](take f: Forward[T]) -> () waits {
@@ -281,17 +288,42 @@ fn ended_wake(ended: Result[store.runner.Ended, store.runner.StartError]) -> Wak
     match ended { Ok(Stopped(next)) => Clean(next), _ => Dirty }
 }
 
-fn downs_of[T: send](a: Actor[T], id: u64) -> u64 {
-    for d in a.downs { if d.0 == id { return d.1 } }
-    0u64
+fn marks_of[T: send](a: Actor[T], id: u64) -> Marks {
+    for m in a.marks { if m.0 == id { return Marks(ups: m.1.ups, downs: m.1.downs, nudges: m.1.nudges) } }
+    Marks(ups: 0u64, downs: 0u64, nudges: 0u64)
+}
+
+fn downs_of[T: send](a: Actor[T], id: u64) -> u64 { marks_of(a, id).downs }
+
+fn put_marks[T: send](mut a: Actor[T], id: u64, take m: Marks) -> () {
+    let mut kept: List[(u64, Marks)] = list.new()
+    while let Some((at, take old)) = list.pop(mut a.marks) { if at != id { list.push(mut kept, (at, take old)) } }
+    list.push(mut kept, (id, take m))
+    a.marks = take kept
+}
+
+fn count_up[T: send](mut a: Actor[T], id: u64) -> () {
+    let m = marks_of(a, id)
+    put_marks(mut a, id, Marks(ups: m.ups + 1u64, downs: m.downs, nudges: m.nudges))
+}
+
+fn on_nudge[T: send](mut a: Actor[T], id: u64) -> () {
+    let m = marks_of(a, id)
+    put_marks(mut a, id, Marks(ups: m.ups, downs: m.downs, nudges: m.nudges + 1u64))
+}
+
+// A session's opener only while its place runs, as far as the gateway has seen: a
+// peek never starts a place.
+fn on_peek[T: send](a: Actor[T], id: u64) -> Result[store.places.Opener[T], Refused] {
+    let Some(_) = row_of(a, id) else { return Error(Unknown) }
+    let m = marks_of(a, id)
+    if m.ups > m.downs { Ok(store.places.opener(a.directory)) } else { Error(Asleep) }
 }
 
 fn count_down[T: send](mut a: Actor[T], id: u64) -> u64 waits {
-    let n = downs_of(a, id) + 1u64
-    let mut kept: List[(u64, u64)] = list.new()
-    for d in a.downs { if d.0 != id { list.push(mut kept, (d.0, d.1)) } }
-    list.push(mut kept, (id, n))
-    a.downs = take kept
+    let m = marks_of(a, id)
+    let n = m.downs + 1u64
+    put_marks(mut a, id, Marks(ups: m.ups, downs: n, nudges: m.nudges))
     let mut waiting: List[(u64, u64, Sender[Result[u64, Refused]])] = list.new()
     while let Some((at, after, take reply)) = list.pop(mut a.waiters) {
         if at == id && n > after { let _ = channel.send(reply, Ok(n)) } else { list.push(mut waiting, (at, after, take reply)) }
@@ -327,6 +359,7 @@ fn on_changed[T: send](mut a: Actor[T], take c: store.places.Change) -> () waits
         // The directory sends a name's Down before it starts it again, so a start's Up
         // marks Dirty after its predecessor's Down marked Clean.
         Up(name) => if let Some(id) = id_of(name) {
+            count_up(mut a, id)
             if let Some(row) = row_of(a, id) {
                 if let Clean(_) = row.wake { let _ = put_row(mut a, id, Row(key: clone(row.key), wake: Dirty)) }
             }
@@ -412,7 +445,7 @@ fn run_gateway[T: send](take begin: Begin[T]) -> () waits {
     let forwarding = task.spawn(tasks, bytes 65536u64, Forward(from: take changes, to: channel.sender(me)), forward)
     let mut a = Actor(db: take db, catalog: take catalog, root: root, options: take options, migrate: migrate, factory: factory,
         max_sessions: max_sessions, count: 0u64, directory: take directory, tasks: tasks, clock: clock, random: random,
-        me: take me, watch: take watch, alarms: list.new(), wakers: list.new(), closers: list.new(), downs: list.new(), waiters: list.new())
+        me: take me, watch: take watch, alarms: list.new(), wakers: list.new(), closers: list.new(), marks: list.new(), waiters: list.new())
     let recovered = recover(mut a)
     let failed = match recovered { Ok(()) => false, Error(_) => true }
     let _ = channel.send(ready, take recovered)
@@ -429,6 +462,9 @@ fn run_gateway[T: send](take begin: Begin[T]) -> () waits {
                 Unload(id, take reply) => on_unload(mut a, id, take reply),
                 Downs(id, reply) => { let _ = channel.send(reply, downs_of(a, id)) },
                 AwaitDown(id, after, take reply) => on_await(mut a, id, after, take reply),
+                Nudge(id) => on_nudge(mut a, id),
+                Marked(id, reply) => { let _ = channel.send(reply, marks_of(a, id)) },
+                Peek(id, reply) => { let _ = channel.send(reply, on_peek(a, id)) },
                 Halt(take reply) => { halted = Some(take reply)
                     break },
             }
@@ -510,6 +546,23 @@ pub fn route[T: send](d: Door[T], id: u64) -> Result[store.places.Lease, Refused
     if let Error(_) = channel.send(d.to, Route(id, take reply)) { return Error(Stopping) }
     let opener = match channel.receive(answer) { Ok(Ok(take o)) => take o, Ok(Error(take why)) => return Error(take why), Error(_) => return Error(Stopping) }
     match store.places.open(opener, name_of(id)) { Ok(take lease) => Ok(take lease), Error(take why) => Error(Place(take why)) }
+}
+
+// Like `route`, but only to a session whose place runs; it never starts one.
+pub fn peek[T: send](d: Door[T], id: u64) -> Result[store.places.Lease, Refused] waits {
+    let (reply, answer): (Sender[Result[store.places.Opener[T], Refused]], Receiver[Result[store.places.Opener[T], Refused]]) = channel.new(1u64)
+    if let Error(_) = channel.send(d.to, Peek(id, take reply)) { return Error(Stopping) }
+    let opener = match channel.receive(answer) { Ok(Ok(take o)) => take o, Ok(Error(take why)) => return Error(take why), Error(_) => return Error(Stopping) }
+    match store.places.open(opener, name_of(id)) { Ok(take lease) => Ok(take lease), Error(take why) => Error(Place(take why)) }
+}
+
+// Tells the gateway that a front changed a session, so streams that follow it look again.
+pub fn nudge[T: send](d: Door[T], id: u64) -> () waits { let _ = channel.send(d.to, Nudge(id)) }
+
+pub fn marks[T: send](d: Door[T], id: u64) -> Marks waits {
+    let (reply, answer): (Sender[Marks], Receiver[Marks]) = channel.new(1u64)
+    if let Error(_) = channel.send(d.to, Marked(id, take reply)) { return Marks(ups: 0u64, downs: 0u64, nudges: 0u64) }
+    match channel.receive(answer) { Ok(m) => m, Error(_) => Marks(ups: 0u64, downs: 0u64, nudges: 0u64) }
 }
 
 // Stops every loaded session through its graceful stop and records how each ended.

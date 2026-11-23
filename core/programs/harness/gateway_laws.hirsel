@@ -409,3 +409,174 @@ fn test_subagent_once_parent_crash(parent: Dir, clock: Clock, random: Random, ta
     let bad = law_subagent_once(parent, clock, random, tasks, net, false)
     if bad == 0u64 { Ok(()) } else { Error(bad) }
 }
+
+
+// ---- law H1: the front holds a session's stream, not its place ----
+
+fn local(port: u16) -> Addr { Addr(ip: V4(0x7f000001u32), port: port) }
+
+// One request to the front, answered with its status and body; 0 when it failed.
+fn http(net: Net, clock: Clock, port: u16, method: String, target: String, take headers: List[std.http_client.Header], take payload: Bytes) -> (u16, Bytes) waits {
+    let req = std.http_client.Request(method: string.from(method), target: string.from(target), headers: take headers, body: Fixed(list.len(payload)))
+    let Ok(take opened) = std.http_client.dial(net, local(port), "127.0.0.1", clock, req, std.clock.deadline_after_ms(host.mono_ns(clock), WITHIN_MS)) else { return (0u16, list.new()) }
+    let mut c = take opened
+    if list.len(payload) > 0u64 { if let Error(_) = std.http_client.write(mut c, payload) { return (0u16, list.new()) } }
+    if let Error(_) = std.http_client.finish_request(mut c, 65536u64) { return (0u16, list.new()) }
+    let status = std.http_client.status(std.http_client.head(c))
+    let mut got: Bytes = list.new()
+    loop {
+        list.reserve(mut got, 4096u64)
+        match std.http_client.read(mut c, mut got) { Ok(0u64) => break, Ok(_) => (), Error(_) => break }
+    }
+    (status, got)
+}
+
+// A browser's headers: its credential and the position of this request.
+fn person(credential: Bytes, p: u64) -> List[std.http_client.Header] {
+    let mut auth = string.from("Bearer ")
+    string.push(mut auth, std.base64.encode_string(credential))
+    let mut at = string.new()
+    string.push_u64(mut at, p)
+    let mut out: List[std.http_client.Header] = list.new()
+    list.push(mut out, std.http_client.Header(name: "Authorization", value: Public(string.into_bytes(take auth))))
+    list.push(mut out, std.http_client.Header(name: "Hirsel-Position", value: Public(string.into_bytes(take at))))
+    out
+}
+
+fn json[V: codec](v: V) -> Bytes {
+    let format: std.json.Format[V] = result.unwrap(std.json.interop())
+    string.into_bytes(result.unwrap(std.json.to_string(format, v)))
+}
+
+// Reads the stream until a row shows status `until`, folding each event into `rows` by
+// position; false when the stream ended first.
+fn read_until(mut c: std.http_client.Connection, mut decoder: std.sse.Decoder, mut rows: List[(u64, Bytes)], until: String) -> bool waits {
+    let format: std.json.Format[harness.gateway_http.Shown] = result.unwrap(std.json.interop())
+    let mut chunk: Bytes = list.with_capacity(8192u64)
+    loop {
+        match std.http_client.read(mut c, mut chunk) { Ok(0u64) => return false, Ok(_) => (), Error(_) => return false }
+        let mut reached = false
+        let fed = std.sse.feed(mut decoder, chunk, fn(name: Bytes, data: Bytes, event_id: Bytes) -> std.sse.FeedControl[()] {
+            let Ok(row) = std.json.decode_typed(format, std.http.copy_bytes(data), 65536u64) else { return Fail(()) }
+            if let Status(text) = row.line { if text == until { reached = true } }
+            let mut kept: List[(u64, Bytes)] = list.new()
+            while let Some((p, take old)) = list.pop(mut rows) { if p != row.at { list.push(mut kept, (p, take old)) } }
+            list.push(mut kept, (row.at, bytes_of(row.line)))
+            rows = take kept
+            Continue
+        })
+        if let Error(_) = fed { return false }
+        list.clear(mut chunk)
+        if reached { return true }
+    }
+}
+
+// The rows, hand-derived from the script: the status at position 0, then each entry's
+// line one past its position (the system patch at 1 has none).
+fn row_of(at: u64, v: harness.View) -> (u64, Bytes) { (at, bytes_of(v)) }
+
+fn rows_want(take status: String, finished_run: bool) -> List[(u64, Bytes)] {
+    let mut want: List[(u64, Bytes)] = list.new()
+    list.push(mut want, row_of(0u64, Status(take status)))
+    list.push(mut want, row_of(1u64, Line("user", "bump it")))
+    list.push(mut want, row_of(3u64, Line("assistant", "")))
+    if finished_run {
+        list.push(mut want, row_of(4u64, Line("tool", "c1")))
+        list.push(mut want, row_of(5u64, Line("assistant", "done")))
+    }
+    want
+}
+
+fn same_rows(got: List[(u64, Bytes)], want: List[(u64, Bytes)]) -> bool {
+    if list.len(got) != list.len(want) { return false }
+    for w in want {
+        let mut found = false
+        for g in got { if g.0 == w.0 && g.1 == w.1 { found = true } }
+        if !found { return false }
+    }
+    true
+}
+
+// Waits up to five seconds for the session's place to be down, as the gateway saw it.
+fn down_within(door: harness.gateway.Door[Services], id: u64, clock: Clock) -> Option[harness.gateway.Marks] waits {
+    for i in 0u64 .. 100u64 {
+        let m = harness.gateway.marks(door, id)
+        if m.downs >= 1u64 && m.ups == m.downs { return Some(m) }
+        std.clock.sleep_ns(clock, 50000000u64)
+    }
+    None
+}
+
+// Law H1 (the front holds the stream, not the place): a browser's event stream on a
+// session shows the run up to its approval wait, the place then stops by itself under
+// the open stream and stays stopped while nobody acts, and the approval posted through
+// the front wakes it and the same stream shows the run's end. Oracle: the hand-derived
+// rows, and no start or stop in a quiet second (more than three idle times). The answer
+// is the first check that failed, or 0.
+pub fn law_front_holds_stream(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> u64 waits {
+    let mut name = string.with_capacity(32u64)
+    let root = result.unwrap(host.mkdtemp(parent, mut name))
+    let (asks, inbox): (Sender[Sender[()]], Receiver[Sender[()]]) = channel.new(4u64)
+    let modelling = task.spawn(tasks, bytes 1048576u64, take inbox, model_service)
+    let (tallies, _held): (Sender[Sender[()]], Receiver[Sender[()]]) = channel.new(4u64)
+    let way: harness.gateway.Doorway[Services] = harness.gateway.doorway()
+    let door = harness.gateway.door_of(way)
+    let seed = Services(model: take asks, tallies: take tallies, door: harness.gateway.door_of(way), name: "", tasks: tasks, clock: clock, random: random, net: net)
+    let config = harness.gateway.GatewayConfig(root: root, options: store.triggers.law_options(), migrate: code.describe(harness.migrate),
+        factory: session_factory, max_sessions: 1u64, place_bytes: 67108864u64, tasks: tasks, clock: clock, random: random, net: net,
+        watch: None, seed: take seed)
+    let g = match harness.gateway.gateway(take way, take config) { Ok(take made) => take made, Error(_) => return 1u64 }
+    let (listener, at) = result.unwrap(host.listen(net, local(0u16), 16u16))
+    let views: std.codec.Codec[harness.View] = std.codec.of()
+    let front = harness.gateway_http.Front(submit: store.fixture.transact_entry(code.describe(submit_entry)),
+        decide: store.fixture.transact_entry(code.describe(decide_entry)),
+        shown: store.fixture.query_entry(code.describe(shown), std.codec.key_u64(), views),
+        keys: result.unwrap(store.fixture.entry_keys(code.describe(place))), socket: wire().socket, agent: "scripted", narrow: All,
+        tasks: tasks, clock: clock, random: random, net: net, within_ms: WITHIN_MS, poll_ms: 20u64, beat_ms: 200u64,
+        conn_bytes: EFFECT_GRANT, conns_max: 4u64, head_max: 8192u64, body_max: 65536u64)
+    let served = harness.gateway_http.serve(door, take front, take listener)
+    let port = at.port
+    let (created, made) = http(net, clock, port, "POST", "/sessions", list.new(), string.into_bytes("first"))
+    if created != 201u16 { return 1u64 }
+    if made != b"0" { return 2u64 }
+    let events = std.http_client.Request(method: "GET", target: "/sessions/0/events", headers: list.new(), body: Fixed(0u64))
+    let Ok(take opened) = std.http_client.dial(net, local(port), "127.0.0.1", clock, events, std.clock.deadline_after_ms(host.mono_ns(clock), 30000u64)) else { return 3u64 }
+    let mut stream = take opened
+    if let Error(_) = std.http_client.finish_request(mut stream, 1073741824u64) { return 4u64 }
+    if std.http_client.status(std.http_client.head(stream)) != 200u16 { return 5u64 }
+    let mut decoder = std.sse.decoder(65536u64)
+    let mut rows: List[(u64, Bytes)] = list.new()
+    let me = store.ingress.credential(random)
+    let (posted, _) = http(net, clock, port, "POST", "/sessions/0/messages", person(me, 0u64), json(harness.Submit(client_key: "k1", text: "bump it")))
+    if posted != 202u16 { return 6u64 }
+    let r1 = read_until(mut stream, mut decoder, mut rows, "waiting")
+    if !r1 { return 7u64 }
+    if !same_rows(rows, rows_want("waiting", false)) { return 8u64 }
+    let Some(asleep) = down_within(door, 0u64, clock) else { return 9u64 }
+    std.clock.sleep_ns(clock, 1000000000u64)
+    let later = harness.gateway.marks(door, 0u64)
+    if later.ups != asleep.ups || later.downs != asleep.downs { return 10u64 }
+    let key = harness.approval_key("bump", 1u64, Inline(string.into_bytes("{}")))
+    let (ruled, ruling) = http(net, clock, port, "POST", "/sessions/0/decisions", person(me, 1u64), json(harness.Decision(run: 0u64, round: 0u64, ordinal: 0u64, key: take key, allow: true)))
+    if ruled != 200u16 { return 11u64 }
+    if ruling != json((Approved : harness.Ruling)) { return 12u64 }
+    let r2 = read_until(mut stream, mut decoder, mut rows, "answered")
+    if !r2 { return 13u64 }
+    if !same_rows(rows, rows_want("answered", true)) { return 14u64 }
+    harness.gateway_http.halt(take served)
+    let mut tail: Bytes = list.with_capacity(4096u64)
+    let ended = loop {
+        match std.http_client.read(mut stream, mut tail) { Ok(0u64) => break true, Ok(_) => list.clear(mut tail), Error(_) => break true }
+    }
+    if !ended { return 15u64 }
+    let _ = harness.gateway.stop(take g)
+    let _ = task.join(take modelling)
+    result.unwrap(std.dir.remove_all(parent, name))
+    0u64
+}
+
+@test
+fn test_front_holds_stream(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), u64] waits {
+    let bad = law_front_holds_stream(parent, clock, random, tasks, net)
+    if bad == 0u64 { Ok(()) } else { Error(bad) }
+}

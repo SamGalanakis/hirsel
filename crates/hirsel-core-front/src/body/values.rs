@@ -760,6 +760,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             .filter(|w| w.payload == 0)
             .and_then(|w| match self.t.kind(w.ty) {
                 TyKind::Adt(d, _) => Some(*d),
+                // Resolve the region type so construction can refuse it under MEM-2.
+                TyKind::Anchored(inner, _) => match self.t.kind(*inner) {
+                    TyKind::Adt(d, _) if p.decls[d.index()].repr == Repr::Region => Some(*d),
+                    _ => None,
+                },
                 _ => None,
             });
         let Some(d) = expected else {

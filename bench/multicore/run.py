@@ -396,7 +396,8 @@ def stderr_metrics(directory):
 def unit_pool(directory):
     for line in (directory / "stderr").read_text().splitlines():
         if line.startswith("untied-stats "):
-            return {name: int(value) for name, value in (part.split("=") for part in line.split()[1:])}
+            return {name: value if name == "net_reactor" else int(value)
+                    for name, value in (part.split("=", 1) for part in line.split()[1:])}
     return {}
 
 

@@ -358,7 +358,8 @@ class Runner:
         ordinary_err = []
         for line in server_err:
             if line.startswith("untied-stats "):
-                ustats = {key: int(value) for key, value in (kv.split("=", 1) for kv in line.split()[1:])}
+                ustats = {key: value if key == "net_reactor" else int(value)
+                          for key, value in (kv.split("=", 1) for kv in line.split()[1:])}
             elif line.startswith("pool-memory "):
                 memory = {key: int(value) for key, value in (kv.split("=", 1) for kv in line.split()[1:])}
             else:

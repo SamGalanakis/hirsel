@@ -327,7 +327,7 @@ fn log_inline_outcomes() -> u64 {
         log.append(issued, 2)
         loop {}
     }
-    if let Ok(()) = stopped {
+    if let Ok(_) = stopped {
         return 0
     }
     let entries = log.finish(take issued)

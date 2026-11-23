@@ -442,16 +442,20 @@ pub(super) fn closed() -> *mut Post {
     std::ptr::without_provenance_mut(1)
 }
 impl Domain {
-    /// SAFETY: the caller runs on the owner Unit, or retires the domain.
-    #[allow(clippy::mut_from_ref)]
+    /// The owner's routing. Single-consumer invariant: only the owner Unit
+    /// dereferences this pointer (Law 1 keeps one worker inside it at a time),
+    /// or `Funding::drop` under `retire` after `close_mail` has seen `posters`
+    /// reach zero. Foreign posters touch only `mail`, `pending` and `posters`.
+    /// Each site takes one `&mut` for a scope that ends before any other
+    /// site's can begin, so no two references to the cell are live at once.
     #[inline(always)]
-    pub(super) unsafe fn remote(&self) -> &mut Remote {
-        unsafe { &mut *self.remote.get() }
+    pub(super) fn remote(&self) -> *mut Remote {
+        self.remote.get()
     }
     #[cfg(test)]
-    pub(super) fn remote_for_test(&self) -> &mut Remote {
-        // SAFETY: tests read routing on the owner's thread.
-        unsafe { self.remote() }
+    pub(super) fn remote_for_test(&self) -> &Remote {
+        // SAFETY: tests read routing on the owner's thread, between operations.
+        unsafe { &*self.remote() }
     }
     /// Feed a mailbox batch, newest first, into the owner's unassigned list in
     /// posting order. The owner Unit only.

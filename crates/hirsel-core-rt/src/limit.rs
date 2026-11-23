@@ -664,7 +664,7 @@ impl Payer {
             }
             if live.owner != crate::tasks::current_id() {
                 // SAFETY: a bound or owning caller runs on the owner Unit.
-                let publish = || unsafe { d.remote() }.enqueue(self, bytes, Some(root));
+                let publish = || unsafe { &mut *d.remote() }.enqueue(self, bytes, Some(root));
                 if bytes == 0 {
                     publish();
                 } else {
@@ -879,7 +879,7 @@ impl Funding {
     fn drain_pending(&self) {
         let domain = self.payer.get().domain();
         // SAFETY: drains run on the owner Unit.
-        let remote = unsafe { domain.remote() };
+        let remote = unsafe { &mut *domain.remote() };
         let batch = domain.mail.swap(std::ptr::null_mut(), Ordering::Acquire);
         debug_assert!(batch != closed(), "a drain after retirement");
         Domain::fold(remote, batch);
@@ -987,7 +987,7 @@ impl Funding {
         if old.owner != owner {
             let domain = payer.domain();
             // SAFETY: Funding methods run on the owner Unit.
-            let remote = unsafe { domain.remote() };
+            let remote = unsafe { &mut *domain.remote() };
             remote.reap(domain);
             let inbox = remote.inbox(owner);
             // SAFETY: the replacing live record takes over this inbox pin.
@@ -1054,7 +1054,7 @@ impl Funding {
         let unused = unsafe { (*child.local()).available };
         crate::tasks::commit_refund(owner, unused, || {
             // SAFETY: Funding methods run on the owner Unit.
-            let remote = unsafe { d.remote() };
+            let remote = unsafe { &mut *d.remote() };
             let f = child.forest();
             let lexical_parent = f.record(child).live.parent.unwrap();
             debug_assert!(f.record(child).parent.is_none());
@@ -1074,7 +1074,7 @@ impl Funding {
         let unused = unsafe { (*child.local()).available };
         let (winner, loser) = f.merge(child, original_parent, unused);
         // SAFETY: Funding methods run on the owner Unit.
-        unsafe { payer.domain().remote() }.unite(winner.0, loser.0);
+        unsafe { &mut *payer.domain().remote() }.unite(winner.0, loser.0);
         winner
     }
 
@@ -1219,7 +1219,7 @@ impl Funding {
         f.record_mut(child).refs = 0;
         f.record_mut(parent).refs += 1;
         // SAFETY: Funding methods run on the owner Unit.
-        unsafe { child.domain().remote() }.unite(parent.0, child.0);
+        unsafe { &mut *child.domain().remote() }.unite(parent.0, child.0);
         self.payer.set(parent);
         true
     }
@@ -1345,7 +1345,7 @@ impl Drop for Funding {
         let guard = d.retire.lock().unwrap();
         let batch = d.close_mail();
         // SAFETY: the last handle's drop is the owner's final act on Remote.
-        let remote = unsafe { d.remote() };
+        let remote = unsafe { &mut *d.remote() };
         Domain::fold(remote, batch);
         let f = self.payer.get().forest();
         f.retired_bytes = f.outstanding();

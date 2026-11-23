@@ -417,26 +417,59 @@ fn staged_bytes(value: StagedValue) -> View[Bytes] in value {
     }
 }
 
+// Keep up to two operations in the draft. Larger drafts spill subsequent
+// operations in insertion order.
+type DataRows: shareable + send {
+    count: u64,
+    first: Inline[DataOp, 2],
+    rest: List[DataOp]
+}
+
+fn new_data_rows() -> DataRows {
+    let first: Inline[DataOp, 2] = [
+        DataOp(key: list.new(), value: None),
+        DataOp(key: list.new(), value: None),
+    ]
+    DataRows(count: 0, first: take first, rest: list.new())
+}
+
+fn data_row(rows: DataRows, slot: u64) -> View[DataOp] in rows {
+    if slot < 2 {
+        view rows.first[slot]
+    } else {
+        view rows.rest[slot - 2]
+    }
+}
+
+fn push_data_row(mut rows: DataRows, take row: DataOp) {
+    if rows.count < 2 {
+        rows.first[rows.count] = take row
+    } else {
+        list.push(mut rows.rest, take row)
+    }
+    rows.count += 1
+}
+
 // A commit's rows by key. Up to SCANNED_OPS rows are found by scanning; the
 // slot map is built only when a commit stages more.
 type DataOps {
-    rows: List[DataOp],
+    rows: DataRows,
     slots: Map[Bytes, u64]
 }
 
 const SCANNED_OPS: u64 = 8
 
 fn empty_ops() -> DataOps {
-    DataOps(rows: list.new(), slots: map.new())
+    DataOps(rows: new_data_rows(), slots: map.new())
 }
 
 fn op_slot(ops: DataOps, key: Bytes) -> Option[u64] {
-    let n = list.len(ops.rows)
+    let n = ops.rows.count
     if n > SCANNED_OPS {
         return option.copied(map.get(ops.slots, key))
     }
     for slot in 0u64 .. n {
-        if ops.rows[slot].key == key {
+        if data_row(ops.rows, slot).key == key {
             return Some(slot)
         }
     }
@@ -1193,8 +1226,8 @@ fn maybe_checkpoint(mut db: Db) -> Result[(), Error] waits {
 type Ran[R, A] {
     value: Result[R, A],
     roots: Option[Roots],
-    edits: List[DataOp],
-    replies: List[DataOp],
+    edits: DataRows,
+    replies: DataRows,
     first_stamp: u64,
     prepared_roots: bool,
     live: u64,
@@ -1215,8 +1248,8 @@ type Prepared[R, A] {
     roots: Roots,
     live: u64,
     frame: Option[Bytes],
-    ops: List[DataOp],
-    stream_ops: List[DataOp],
+    ops: DataRows,
+    stream_ops: DataRows,
     first_stamp: u64,
     prepared_roots: bool,
     call: Option[CallSection]
@@ -1299,7 +1332,7 @@ fn draft_body[R, A](db: Db, i: u64, ci: CallInfo, keep_reply: Option[fn(A) -> bo
                 Some(decide) => decide(a),
                 None => true
             }
-            if !keep || list.len(tx.stream_ops.rows) == 0 {
+            if !keep || tx.stream_ops.rows.count == 0 {
                 return RolledBack(Aborted(Undone(value: take a, ticket: None)))
             }
             // F2 keeps the streams and CALL writes with the old data roots.
@@ -1356,9 +1389,10 @@ fn finish_stage[R, A](ci: CallInfo, take finished: Finished[R, A], take seen: Li
         Prepared(take tx) => take tx,
     }
     let Prepared(outcome: take outcome, roots: take roots, live: live, frame: take frame, ops: take operations, stream_ops: take stream_edits, first_stamp: first_stamp, prepared_roots: prepared_roots, call: _) = take prepared
-    let mut admits_rows = list.len(stream_edits) != 0
+    let mut admits_rows = stream_edits.count != 0
     if !admits_rows {
-        for edit in operations {
+        for slot in 0u64 .. operations.count {
+            let edit = data_row(operations, slot)
             if let Some(_) = edit.value {
                 admits_rows = true;
                 break
@@ -1454,7 +1488,8 @@ fn draft_call(db: Db, complete: Completion, ci: CallInfo, plan: Plan, rec: Optio
 fn stream_live(db: Db, i: u64, ops: DataOps) -> Result[u64, Capacity] {
     let retained = retaining(db)
     let mut live = db.resident
-    for operation in ops.rows {
+    for slot in 0u64 .. ops.rows.count {
+        let operation = data_row(ops.rows, slot)
         let k = operation.key
         if let Some(raw) = operation.value {
             if !retained {
@@ -1495,7 +1530,7 @@ fn wait_for_frame_room(mut db: Db, frame: Option[Bytes]) -> Result[(), Error] wa
 type AdmittedDraft[R, A] = Ready(Ran[R, A], Publication) | OverLimit(Ran[R, A], StoreCapacity)
 
 fn prepare_edited_roots[R, A](mut db: Db, i: u64, mut ran: Ran[R, A]) -> Result[(), Error] {
-    if ran.prepared_roots || (list.len(ran.edits) == 0 && list.len(ran.replies) == 0) {
+    if ran.prepared_roots || (ran.edits.count == 0 && ran.replies.count == 0) {
         return Ok(())
     }
     let (take candidate, after) = disk_allocation(scoped fn() -> Result[(Roots, u64), Error] {
@@ -1528,8 +1563,8 @@ fn prepare_direct_edit[R, A](mut db: Db, i: u64, mut ran: Ran[R, A]) -> Result[b
     if let Some(_) = db.heads[i].following {
         return Ok(false)
     }
-    let data_count = list.len(ran.edits)
-    let reply_count = list.len(ran.replies)
+    let data_count = ran.edits.count
+    let reply_count = ran.replies.count
     if data_count + reply_count == 0 || (reply_count != 0 && data_count + reply_count != 1) {
         return Ok(false)
     }
@@ -1544,7 +1579,7 @@ fn prepare_direct_edit[R, A](mut db: Db, i: u64, mut ran: Ran[R, A]) -> Result[b
     let applied = if data_count != 0 {
         direct_data_edits(mut db, i, ran)?
     } else {
-        let op = view ran.replies[0u64]
+        let op = data_row(ran.replies, 0u64)
         match view op.value {
             None => false,
             Some(raw) => {
@@ -1569,18 +1604,18 @@ fn prepare_direct_edit[R, A](mut db: Db, i: u64, mut ran: Ran[R, A]) -> Result[b
 fn direct_data_edits[R, A](mut db: Db, i: u64, ran: Ran[R, A]) -> Result[bool, Capacity] {
     let inline = db.heads[i].roots.collections.inline
     // put_inline_unique takes no stamp above this bound; each path is far shorter than 512.
-    let rows = list.len(ran.edits)
+    let rows = ran.edits.count
     if ran.first_stamp == 0 || rows > 1024 || ran.first_stamp > 18446744073709551103u64 - 512 * rows {
         return Ok(false)
     }
     for e in 0u64 .. rows {
-        let op = view ran.edits[e]
+        let op = data_row(ran.edits, e)
         let Some(raw) = view op.value else {
             return Ok(false)
         }
         let collection = list.slice(op.key, 0, 4)
         for prior in 0u64 .. e {
-            if list.compare_bytes(list.slice(ran.edits[prior].key, 0, 4), collection) == Equal {
+            if list.compare_bytes(list.slice(data_row(ran.edits, prior).key, 0, 4), collection) == Equal {
                 return Ok(false)
             }
         }
@@ -1589,7 +1624,8 @@ fn direct_data_edits[R, A](mut db: Db, i: u64, ran: Ran[R, A]) -> Result[bool, C
         }
     }
     let mut stamps = ran.first_stamp
-    for op in ran.edits {
+    for slot in 0u64 .. ran.edits.count {
+        let op = data_row(ran.edits, slot)
         let Some(raw) = view op.value else {
             fail("store: a checked direct edit lost its value")
         }
@@ -2105,7 +2141,7 @@ fn apply_put(mut tx: Tx, take p: Bytes, take val: Bytes) -> Result[(), Error] {
             0u64
         } else {
             match op_slot(tx.ops, p) {
-                Some(slot) => match tx.ops.rows[slot].value {
+                Some(slot) => match data_row(tx.ops.rows, slot).value {
                     Some(value) => entry(p, staged_bytes(value)),
                     None => 0,
                 },
@@ -2160,7 +2196,7 @@ fn apply_delete(mut tx: Tx, take p: Bytes, refund: u64) -> Result[(), Error] {
 // no data ops has no data head.
 fn tx_frame(tx: Tx) -> u64 {
     let total = int.saturating_add(tx.frame_bytes, tx.extra_bytes)
-    if list.len(tx.ops.rows) == 0 && list.len(tx.stream_ops.rows) != 0 {
+    if tx.ops.rows.count == 0 && tx.stream_ops.rows.count != 0 {
         total - 5
     } else {
         total
@@ -2273,13 +2309,13 @@ fn stream_write(mut tx: Tx, take key: Bytes, take value: Bytes, call_size: u64) 
     if list.len(value) > 1048576 {
         return Error(Limit(Value))
     }
-    let head = if list.len(tx.stream_ops.rows) == 0 {
+    let head = if tx.stream_ops.rows.count == 0 {
         5u64
     } else {
         0u64
     }
     let extra = int.saturating_add(tx.extra_bytes - old_data_op_size(tx.stream_ops, key), head + 9 + list.len(key) + list.len(value) + call_size)
-    let data_head = if list.len(tx.ops.rows) == 0 {
+    let data_head = if tx.ops.rows.count == 0 {
         5u64
     } else {
         0u64
@@ -2851,24 +2887,28 @@ fn test_foreign(c: Clock) -> Result[(), ()] waits {
 
 fn save_data_op(mut ops: DataOps, take key: Bytes, take value: Option[StagedValue]) {
     if let Some(slot) = op_slot(ops, key) {
-        ops.rows[slot].value = take value
+        if slot < 2 {
+            ops.rows.first[slot].value = take value
+        } else {
+            ops.rows.rest[slot - 2].value = take value
+        }
     } else {
-        let position = list.len(ops.rows)
+        let position = ops.rows.count
         if position == SCANNED_OPS {
             for earlier in 0u64 .. position {
-                map.insert(mut ops.slots, clone(ops.rows[earlier].key), earlier)
+                map.insert(mut ops.slots, clone(data_row(ops.rows, earlier).key), earlier)
             }
         }
         if position >= SCANNED_OPS {
             map.insert(mut ops.slots, clone(key), position)
         }
-        list.push(mut ops.rows, DataOp(key: take key, value: take value))
+        push_data_row(mut ops.rows, DataOp(key: take key, value: take value))
     }
 }
 
 fn transaction_row(tx: Tx, key: Bytes) -> Option[View[Bytes]] in tx {
     if let Some(slot) = op_slot(tx.ops, key) {
-        return match tx.ops.rows[slot].value {
+        return match data_row(tx.ops.rows, slot).value {
             Some(raw) => Some(staged_bytes(raw)),
             None => None,
         }
@@ -2878,7 +2918,7 @@ fn transaction_row(tx: Tx, key: Bytes) -> Option[View[Bytes]] in tx {
 
 fn transaction_stream(tx: Tx, key: Bytes) -> Option[View[Bytes]] in tx {
     if let Some(slot) = op_slot(tx.stream_ops, key) {
-        return match tx.stream_ops.rows[slot].value {
+        return match data_row(tx.stream_ops.rows, slot).value {
             Some(raw) => Some(staged_bytes(raw)),
             None => None,
         }
@@ -2886,8 +2926,9 @@ fn transaction_stream(tx: Tx, key: Bytes) -> Option[View[Bytes]] in tx {
     get_page_row(tx.roots.streams, key)
 }
 
-fn materialize_rows(mut tree: PageTree, operations: List[DataOp], first: u64, mut draw: u64) -> Result[(), Error] {
-    for op in operations {
+fn materialize_rows(mut tree: PageTree, operations: DataRows, first: u64, mut draw: u64) -> Result[(), Error] {
+    for slot in 0u64 .. operations.count {
+        let op = data_row(operations, slot)
         match op.value {
             Some(PageValue(raw)) => put_page_row(mut tree, op.key, raw, first, mut draw)?,
             Some(BlobBody(raw)) => put_shared_page_row(mut tree, op.key, raw, first, mut draw)?,
@@ -2911,7 +2952,7 @@ fn transaction_collection_pages(tx: Tx) -> Result[PageTree, Error] {
 
 fn old_data_op_size(ops: DataOps, key: Bytes) -> u64 {
     if let Some(slot) = op_slot(ops, key) {
-        data_op_size(ops.rows[slot])
+        data_op_size(data_row(ops.rows, slot))
     } else {
         0
     }
@@ -2949,21 +2990,21 @@ fn blob(mut out: Bytes, b: Bytes) -> Result[(), Capacity] {
     Ok(list.append(mut out, b))
 }
 
-fn encode_commit(ci: CallInfo, ops: List[DataOp], seq: u64, offset: u64) -> Result[Bytes, Capacity] {
-    let streams: List[DataOp] = list.new()
+fn encode_commit(ci: CallInfo, ops: DataRows, seq: u64, offset: u64) -> Result[Bytes, Capacity] {
+    let streams: DataRows = new_data_rows()
     encode_sections(ci, ops, streams, None, seq, offset)
 }
 
-fn data_order(ops: List[DataOp]) -> Result[List[u64], Capacity] {
+fn data_order(ops: DataRows) -> Result[List[u64], Capacity] {
     let mut slots: List[u64] = list.new()
-    let n = list.len(ops)
+    let n = ops.count
     if n > 1 {
         list.try_reserve(mut slots, n)?
         for position in 0u64 .. n {
             list.push(mut slots, position)
         }
         list.sort(mut slots, scoped fn(a: u64, b: u64) -> Order {
-            list.compare_bytes(ops[a].key, ops[b].key)
+            list.compare_bytes(data_row(ops, a).key, data_row(ops, b).key)
         })
     }
     Ok(take slots)
@@ -2972,9 +3013,10 @@ fn data_order(ops: List[DataOp]) -> Result[List[u64], Capacity] {
 @test
 fn journal_test_order_workspace() -> Result[(), ()] {
     let n = 10000u64
-    let mut ops: List[DataOp] = list.with_capacity(n)
+    let mut ops = new_data_rows()
+    list.reserve(mut ops.rest, n - 2)
     for position in 0u64 .. n {
-        list.push(mut ops, DataOp(key: key_word(n - position), value: None))
+        push_data_row(mut ops, DataOp(key: key_word(n - position), value: None))
     }
     // Independently observe the allocator's grant for the index list. The
     // encoder's ordering pass can fit into that grant without owning any key.
@@ -3000,15 +3042,15 @@ fn journal_test_order_workspace() -> Result[(), ()] {
     Ok(())
 }
 
-fn encode_data_ops(mut payload: Bytes, ops: List[DataOp], slots: List[u64]) -> Result[(), Capacity] {
+fn encode_data_ops(mut payload: Bytes, ops: DataRows, slots: List[u64]) -> Result[(), Capacity] {
     le(mut payload, 0, 1)?
-    let n = list.len(ops)
+    let n = ops.count
     le(mut payload, n, 4)?
     if n == 1 {
-        encode_data_op(mut payload, ops[0u64].key, ops[0u64].value)?
+        encode_data_op(mut payload, data_row(ops, 0u64).key, data_row(ops, 0u64).value)?
     } else {
         for slot in slots {
-            encode_data_op(mut payload, ops[slot].key, ops[slot].value)?
+            encode_data_op(mut payload, data_row(ops, slot).key, data_row(ops, slot).value)?
         }
     }
     Ok(())
@@ -3040,16 +3082,16 @@ fn encode_stream_op(mut payload: Bytes, operation: DataOp, call: Option[View[Cal
     encode_data_op(mut payload, operation.key, operation.value)
 }
 
-fn encode_stream_ops(mut payload: Bytes, ops: List[DataOp], call: Option[View[CallRecord]], settlement: Option[Settlement]) -> Result[(), Capacity] {
+fn encode_stream_ops(mut payload: Bytes, ops: DataRows, call: Option[View[CallRecord]], settlement: Option[Settlement]) -> Result[(), Capacity] {
     le(mut payload, 1, 1)?
-    let op_count = list.len(ops)
+    let op_count = ops.count
     le(mut payload, op_count, 4)?
     if op_count == 1 {
-        encode_stream_op(mut payload, ops[0u64], call, settlement)?
+        encode_stream_op(mut payload, data_row(ops, 0u64), call, settlement)?
     } else {
         let ordered = data_order(ops)?
         for slot in ordered {
-            encode_stream_op(mut payload, ops[slot], call, settlement)?
+            encode_stream_op(mut payload, data_row(ops, slot), call, settlement)?
         }
     }
     Ok(())
@@ -3075,23 +3117,23 @@ fn encode_call(mut payload: Bytes, record: CallRecord, settlement: Option[Settle
     }
 }
 
-fn encode_staged(ci: CallInfo, ops: List[DataOp], streams: List[DataOp], call: Option[CallSection], rec: Option[CallRecord], settlement: Option[Settlement], seq: u64, offset: u64) -> Result[Bytes, Capacity] {
+fn encode_staged(ci: CallInfo, ops: DataRows, streams: DataRows, call: Option[CallSection], rec: Option[CallRecord], settlement: Option[Settlement], seq: u64, offset: u64) -> Result[Bytes, Capacity] {
     if let Some(record) = rec {
         return encode_frame(ci, ops, streams, Some(view record), settlement, seq, offset)
     }
     encode_sections(ci, ops, streams, call, seq, offset)
 }
 
-fn encode_sections(ci: CallInfo, ops: List[DataOp], streams: List[DataOp], call: Option[CallSection], seq: u64, offset: u64) -> Result[Bytes, Capacity] {
+fn encode_sections(ci: CallInfo, ops: DataRows, streams: DataRows, call: Option[CallSection], seq: u64, offset: u64) -> Result[Bytes, Capacity] {
     match call {
         Some(section) => encode_frame(ci, ops, streams, Some(view section.record), section.settlement, seq, offset),
         None => encode_frame(ci, ops, streams, None, None, seq, offset),
     }
 }
 
-fn encode_frame(ci: CallInfo, ops: List[DataOp], streams: List[DataOp], call: Option[View[CallRecord]], settlement: Option[Settlement], seq: u64, offset: u64) -> Result[Bytes, Capacity] {
-    let data = list.len(ops) != 0 || list.len(streams) == 0
-    let stream = list.len(streams) != 0
+fn encode_frame(ci: CallInfo, ops: DataRows, streams: DataRows, call: Option[View[CallRecord]], settlement: Option[Settlement], seq: u64, offset: u64) -> Result[Bytes, Capacity] {
+    let data = ops.count != 0 || streams.count == 0
+    let stream = streams.count != 0
     let sections = (if data {
         1u64
     } else {
@@ -3102,10 +3144,12 @@ fn encode_frame(ci: CallInfo, ops: List[DataOp], streams: List[DataOp], call: Op
         0u64
     })
     let mut size = 21 + 5 * sections
-    for operation in ops {
+    for slot in 0u64 .. ops.count {
+        let operation = data_row(ops, slot)
         size += data_op_size(operation)
     }
-    for operation in streams {
+    for slot in 0u64 .. streams.count {
+        let operation = data_row(streams, slot)
         size += data_op_size(operation)
         if let (Some(_), Some(record)) = (view operation.value, view call) {
             if operation.key == record.stream {
@@ -3150,7 +3194,7 @@ pub fn law_frames(c: Clock) -> bool {
         put_bytes(mut tx, 1, key_word(1), key_word(11))?
         put_bytes(mut tx, 1, key_word(2), key_word(33))?
         let _ = delete_bytes(mut tx, 1, key_word(1))?
-        if tx.frame_bytes != 88 || list.len(tx.ops.rows) != 2 {
+        if tx.frame_bytes != 88 || tx.ops.rows.count != 2 {
             return Error(Foreign)
         }
         capacity(encode_commit(info(mut tx), tx.ops.rows, 1, 72))
@@ -5749,7 +5793,7 @@ fn reject_999(v: u64) -> Result[u64, Capacity] {
 
 fn write_state(tx: Tx) -> (u64, u64, u64, u64, u64, bool) {
     let node = tree_stamp(tx.roots.collections)
-    (node, tx.ids, tx.resident, tx.frame_bytes, list.len(tx.ops.rows), tx.wrote)
+    (node, tx.ids, tx.resident, tx.frame_bytes, tx.ops.rows.count, tx.wrote)
 }
 
 fn check_index_put_refusal(mut db: Db, t: Table[u64, u64], value: u64, frame_limit: bool) -> bool waits {
@@ -6946,7 +6990,7 @@ fn frame_boundary_points() -> bool {
     let times: Inline[u64, 5] =[999, 999, 999, 1001, 0]
     let segments: Inline[u64, 5] =[9, 9, 9, 10, 256]
     let offsets: Inline[u64, 5] =[72, 73, 1048576, 73, 1048576]
-    let mut ops: List[DataOp] = list.new()
+    let mut ops: DataRows = new_data_rows()
     let key = result.unwrap(logical_key(1, key_word(7)))
     let mut value: Bytes = list.new()
     list.push(mut value, 0u8)
@@ -6954,7 +6998,7 @@ fn frame_boundary_points() -> bool {
     for i in 0u64 .. 32 {
         list.push(mut value, int.truncate(i))
     }
-    list.push(mut ops, DataOp(key: take key, value: Some(PageValue(take value))))
+    push_data_row(mut ops, DataOp(key: take key, value: Some(PageValue(take value))))
     for i in 0u64 .. 5 {
         let ci = CallInfo(id: CallId(store: stores[i], branch: branches[i], version: versions[i]), at: times[i], seed: 0)
         let raw = result.unwrap(encode_commit(ci, ops, segments[i], offsets[i]))
@@ -8329,7 +8373,7 @@ pub fn law_index_writes(c: Clock) -> bool waits {
     }
     let same_j = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[u64, Error] {
         put(mut tx, t, 1, 21)?;
-        Ok(list.len(tx.ops.rows))
+        Ok(tx.ops.rows.count)
     }))
     match take same_j {
         Committed(done) => if done.value != 1 {
@@ -8339,7 +8383,7 @@ pub fn law_index_writes(c: Clock) -> bool waits {
     }
     let changed_j = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[u64, Error] {
         put(mut tx, t, 1, 22)?;
-        Ok(list.len(tx.ops.rows))
+        Ok(tx.ops.rows.count)
     }))
     match take changed_j {
         Committed(done) => done.value == 7,
@@ -14585,8 +14629,8 @@ pub fn journal_law_bootstrap(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool 
     result.unwrap(le(mut stored, 0, 2))
     result.unwrap(le(mut stored, 70, 8))
     let key = result.unwrap(logical_key(1, key_word(7)))
-    let mut written: List[DataOp] = list.new()
-    list.push(mut written, DataOp(key: take key, value: Some(PageValue(take stored))))
+    let mut written: DataRows = new_data_rows()
+    push_data_row(mut written, DataOp(key: take key, value: Some(PageValue(take stored))))
     let ci = CallInfo(id: CallId(store: id, branch: 0, version: 2), at: wall, seed: 0)
     let raw = result.unwrap(encode_commit(ci, written, seq, 72))
     if list.len(raw) != 73 {
@@ -16756,16 +16800,16 @@ pub fn journal_law_call_vector() -> bool {
     result.unwrap(le(mut value, 0, 2))
     list.fill(mut value, 32, 4u8)
     let key = result.unwrap(logical_key(1, key_word(7)))
-    let mut data: List[DataOp] = list.new()
-    list.push(mut data, DataOp(key: take key, value: Some(PageValue(take value))))
+    let mut data: DataRows = new_data_rows()
+    push_data_row(mut data, DataOp(key: take key, value: Some(PageValue(take value))))
     let mut stream_value: Bytes = list.new()
     result.unwrap(le(mut stream_value, 1, 8))
     list.fill(mut stream_value, 32, 5u8)
     result.unwrap(le(mut stream_value, 2, 1))
     list.fill(mut stream_value, 8, 3u8)
     let stream = result.unwrap(copied(string.as_bytes("stream00")))
-    let mut streams: List[DataOp] = list.new()
-    list.push(mut streams, DataOp(key: result.unwrap(copied(stream)), value: Some(PageValue(take stream_value))))
+    let mut streams: DataRows = new_data_rows()
+    push_data_row(mut streams, DataOp(key: result.unwrap(copied(stream)), value: Some(PageValue(take stream_value))))
     let mut entry_key: Bytes = list.new()
     list.fill(mut entry_key, 32, 1u8)
     let mut args: Bytes = list.new()
@@ -16865,8 +16909,8 @@ fn journal_fixture_call(mut db: Db, i: u64, large: bool, take revision: Option[B
     } else {
         8u64
     }, 3u8)
-    let mut streams: List[DataOp] = list.new()
-    list.push(mut streams, DataOp(key: result.unwrap(copied(stream)), value: Some(PageValue(take value))))
+    let mut streams: DataRows = new_data_rows()
+    push_data_row(mut streams, DataOp(key: result.unwrap(copied(stream)), value: Some(PageValue(take value))))
     let mut entry_key: Bytes = list.new()
     list.fill(mut entry_key, 32, 1u8)
     let mut args: Bytes = list.new()
@@ -16875,7 +16919,7 @@ fn journal_fixture_call(mut db: Db, i: u64, large: bool, take revision: Option[B
     call_checked(checked)?
     let call = Some(CallSection(record: take checked, settlement: None))
     let ci = call_info(db.store, db.heads[i].id, db.heads[i].head + 1, db.heads[i].at + 1, db.heads[i].at)
-    let data: List[DataOp] = list.new()
+    let data: DataRows = new_data_rows()
     let raw = result.unwrap(encode_sections(ci, data, streams, call, db.file_seq, db.file_end))
     let size = list.len(raw)
     let commit = {

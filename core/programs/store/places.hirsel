@@ -67,21 +67,21 @@ type Actor {
 
 type Ticker: send { to: Sender[DirIn], clock: Clock, every_ms: u64 }
 
-type PlaceJob[G: send, H: send, S: send]: send {
-    config: runner.PlaceConfig[G, H, S], stop: Receiver[()], status: Latest[runner.Status], to: Sender[DirIn], slot: u64, need: u64,
+type PlaceJob[G: send, H: send, S: send, B: send]: send {
+    config: runner.PlaceConfig[G, H, S, B], stop: Receiver[()], status: Latest[runner.Status], to: Sender[DirIn], slot: u64, need: u64,
 }
-type Operated[G: send, H: send, S: send]: send {
-    config: runner.PlaceConfig[G, H, S], stop: Receiver[()], status: Latest[runner.Status], watch: Sender[Receiver[runner.Phase]],
+type Operated[G: send, H: send, S: send, B: send]: send {
+    config: runner.PlaceConfig[G, H, S, B], stop: Receiver[()], status: Latest[runner.Status], watch: Sender[Receiver[runner.Phase]],
 }
 
 fn room(cap: Capacity) -> runner.Room { runner.Room(requested: cap.requested, available: cap.available) }
 
-pub fn place_factory[G: send, H: send, S: send](make: fn(take Supplied) -> Result[runner.PlaceConfig[G, H, S], Capacity]) -> Result[Factory, Capacity] {
+pub fn place_factory[G: send, H: send, S: send, B: send](make: fn(take Supplied) -> Result[runner.PlaceConfig[G, H, S, B], Capacity]) -> Result[Factory, Capacity] {
     let made = fn(take request: Launch) -> Result[Started, Refused] { start_place(take request, make) }
     Ok(Factory(start: take made))
 }
 
-fn start_place[G: send, H: send, S: send](take request: Launch, make: fn(take Supplied) -> Result[runner.PlaceConfig[G, H, S], Capacity]) -> Result[Started, Refused] {
+fn start_place[G: send, H: send, S: send, B: send](take request: Launch, make: fn(take Supplied) -> Result[runner.PlaceConfig[G, H, S, B], Capacity]) -> Result[Started, Refused] {
     let Launch(supplied: take supplied, backing: take backing, selection: selection, available: available, stop: take halt, status: take root, to: take to, slot: slot) = take request
     let tasks = supplied.tasks
     let mut config = match make(take supplied) { Ok(take made) => take made, Error(cap) => return Error(Start(Full(cap))) }
@@ -91,7 +91,7 @@ fn start_place[G: send, H: send, S: send](take request: Launch, make: fn(take Su
     let charge = int.saturating_add(need, PLACE_TASK_BYTES)
     if charge > available { return Error(Full(Reserve(runner.Room(requested: charge, available: available)))) }
     let job = PlaceJob(config: take config, stop: take halt, status: take root, to: take to, slot: slot, need: need)
-    let run: fn(take PlaceJob[G, H, S]) -> () waits = run_place
+    let run: fn(take PlaceJob[G, H, S, B]) -> () waits = run_place
     let handle = task.spawn(tasks, bytes charge, take job, run)
     Ok(Started(task: take handle, charge: charge))
 }
@@ -99,19 +99,19 @@ fn start_place[G: send, H: send, S: send](take request: Launch, make: fn(take Su
 // The place task: operate runs in a child so this task can read its phases. Its last
 // message to the directory is Down, sent after operate has returned and so after the Db
 // is closed or dropped.
-fn run_place[G: send, H: send, S: send](take job: PlaceJob[G, H, S]) -> () waits {
+fn run_place[G: send, H: send, S: send, B: send](take job: PlaceJob[G, H, S, B]) -> () waits {
     let to = channel.sender(job.to)
     let slot = job.slot
     let ended = operated(take job)
     let _ = channel.send(to, Down(slot, take ended))
 }
 
-fn operated[G: send, H: send, S: send](take job: PlaceJob[G, H, S]) -> Result[runner.Ended, runner.StartError] waits {
+fn operated[G: send, H: send, S: send, B: send](take job: PlaceJob[G, H, S, B]) -> Result[runner.Ended, runner.StartError] waits {
     let PlaceJob(config: take config, stop: take halt, status: take root, to: take to, slot: slot, need: need) = take job
     let tasks = config.tasks
     let (handoff, phases_from): (Sender[Receiver[runner.Phase]], Receiver[Receiver[runner.Phase]]) = channel.new(1u64)
     let request = Operated(config: take config, stop: take halt, status: take root, watch: take handoff)
-    let run: fn(take Operated[G, H, S]) -> Result[runner.Ended, runner.StartError] waits = run_operate
+    let run: fn(take Operated[G, H, S, B]) -> Result[runner.Ended, runner.StartError] waits = run_operate
     let running = task.spawn(tasks, bytes need, take request, run)
     if let Ok(take phases) = channel.receive(phases_from) {
         while let Ok(phase) = channel.receive(phases) {
@@ -124,7 +124,7 @@ fn operated[G: send, H: send, S: send](take job: PlaceJob[G, H, S]) -> Result[ru
     }
 }
 
-fn run_operate[G: send, H: send, S: send](take request: Operated[G, H, S]) -> Result[runner.Ended, runner.StartError] waits {
+fn run_operate[G: send, H: send, S: send, B: send](take request: Operated[G, H, S, B]) -> Result[runner.Ended, runner.StartError] waits {
     let Operated(config: take config, stop: take halt, status: take root, watch: take phases) = take request
     runner.operate(take config, take halt, root, Some(take phases))
 }

@@ -85,7 +85,7 @@ fn server(take seed: Server) -> () waits {
     if let Some(mode) = args.get(a, 0u64) {
         if mode == "welcome_with_small_budget" { config.budget = 65536u64 }
     }
-    let make: scoped[view] fn() -> store.runner.Service[store.runner.WireSession[Random, H]] = fn() -> store.runner.Service[store.runner.WireSession[Random, H]] {
+    let make: scoped[view] fn() -> store.runner.Service[store.runner.WireSession[Random, H, Random]] = fn() -> store.runner.Service[store.runner.WireSession[Random, H, Random]] {
         store.runner.wire_place_service(code.describe(place), random, Some(store.runner.wire(random, Some(code.describe(bind_test)), 4096u64, 65536u64)), head, c, tasks, config, a)
     }
     let _ = store.runner.serve(take listener, tasks, c, post, config, 128u64, list.new(), make)

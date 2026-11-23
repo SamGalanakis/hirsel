@@ -20,7 +20,10 @@ grant and no `Arc[G]`. Your application does both:
   function from a copy of your grant and the client's credential bytes (the
   Hello `credential`, or the HTTP `Authorization` value) to `Ok(Caller)` or
   `Error(())`. An `Error` refuses the Hello with Close 1008, or the HTTP request
-  with 401. The runner never reads the credential itself.
+  with 401. The runner never reads the credential itself. A place whose trigger
+  grant is not plain binds with `runner.wire_bind(seed, bind, ..)` instead: the
+  binding gets a copy of its own plain `seed`, and wire calls to granted entries
+  are refused.
 - **Authorization** is your entry bodies. Transact, query and granted bodies
   receive the Caller and decide access in their own code, for example by reading
   a membership row in the same transaction.
@@ -75,7 +78,7 @@ moves its attempt's `G` into `start`. A wire call reaches a granted entry only w
 place gives `PlaceConfig.wire` a `runner.wire(grant, ..)`, which requires `G: plain + send`
 (Dir, Net, Clock, Random, Secret and records of them); each wire call then runs with its
 own copy of the grant, so no call consumes it. Without it a wire call to a granted entry
-is `Refused(NotAllowed)`. A movable `G` stays trigger-only. A spawn the place cannot grant returns `Budget`. `finish` joins
+is `Refused(NotAllowed)`, as it is with a `runner.wire_bind` wire, which binds but carries no grant. A movable `G` stays trigger-only. A spawn the place cannot grant returns `Budget`. `finish` joins
 that task, and a task that fails or is cancelled gives `Failed(Raised)`. A key that
 names no entry of the kind being asked for gives `NoEntry`.
 

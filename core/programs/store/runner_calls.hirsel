@@ -719,7 +719,7 @@ pub fn law_calls_duplicate(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool wa
 // returns 3 on the first call and 5 on the second.
 fn anonymous_reply(d: Drive) -> Option[u64] waits {
     let requested = client_keys()
-    let unbound: Option[runner.Wire[()]] = None
+    let unbound: Option[runner.Wire[(), ()]] = None
     let (take wire, take session) = paired(wire_client.pair(d.tasks, d.net, d.clock, d.random, take unbound, d.head, d.post,
         code.describe(place), requested, Some(clone(d.token)), 0u64, 2097152u64))
     wire_client.send_frame(wire, Call(7u32, 0u64, wire_client.slot(requested, k_write()), 10000u32, u64_arg(5u64)))
@@ -797,6 +797,62 @@ pub fn law_granted_copied(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool wai
 @test
 fn test_granted_copied(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
     if law_granted_copied(c, r, tasks, n) { Ok(()) } else { Error(()) }
+}
+
+// bind_only (RUNNER-SPEC §3 "Binding", L36): a registry whose grant owns a list, so is not
+// plain, binds its sessions through `runner.wire_bind`. The test chose subject byte 2 for
+// credential [2], so Welcome names Caller(2, [2]). `mine` covers keys from the subject byte
+// up; W wrote keys 1 and 2, so the bound session's image is {2} at 5. A wire call to the
+// registry's `Granted` entry is Refused(NotAllowed): the configuration has no grant.
+type HeldGrant: send { clock: Clock, values: List[u64] }
+
+fn held_body(grant: HeldGrant, caller: runner.Caller, take value: u64) -> Result[u64, Capacity] waits {
+    host.sleep_until(grant.clock, host.mono_ns(grant.clock))
+    Ok(list.len(grant.values) + value)
+}
+
+fn held_place(mut r: runner.Registry[HeldGrant, Hd]) -> Result[(), runner.RegisterError] {
+    runner.granted(mut r, code.describe(held_body), 65536u64, runner.DEFAULT_STEPS)?
+    runner.query_as(mut r, code.describe(mine), std.codec.key_u64(), std.codec.of_u64(), 65536u64, runner.DEFAULT_STEPS)
+}
+
+fn chosen_caller(_seed: (), credential: Bytes) -> Result[runner.Caller, ()] {
+    if list.len(credential) != 1u64 { return Error(()) }
+    Ok(subject_caller(credential[0]))
+}
+
+fn drive_bind_only(take d: Drive) -> () waits {
+    let w = conn(d, 1u64)
+    put_at(w, d.clock, 0u64, 1u64)
+    put_at(w, d.clock, 1u64, 2u64)
+    let mut requested: List[Bytes] = list.new()
+    list.push(mut requested, k_mine())
+    list.push(mut requested, key_of(code.identity(code.describe(held_body)), std.codec.of_u64(), std.codec.of_u64()))
+    let binding: runner.Wire[HeldGrant, ()] = runner.wire_bind((), code.describe(chosen_caller), 4096u64, 65536u64)
+    let mut credential: Bytes = list.new()
+    list.push(mut credential, 2u8)
+    let (take wire, take session) = paired(wire_client.pair(d.tasks, d.net, d.clock, d.random, Some(take binding), d.head, d.post,
+        code.describe(held_place), requested, Some(take credential), 1u64, 2097152u64))
+    want(wire.caller.issuer == 2u8 && wire.caller.subject == subject_caller(2u8).subject, "bind_only: Welcome names the bound Caller")
+    let mut arg: Bytes = list.new()
+    result.unwrap(std.codec.encode(std.codec.of_u32(), 0u32, mut arg))
+    wire_client.send_frame(wire, Subscribe(1u32, 0u32, take arg, None))
+    let cn: Conn = Socket(take wire, take session)
+    let mut image = Image(rows: map.new(), at: 0u64, completes: 0u64)
+    image_at(cn, mut image, 5u64, 1u64, key_list(Some(2u64), None), string.from("bind_only: mine runs as the bound Caller"))
+    match cn { Socket(sock, _) => wire_client.send_frame(sock, Call(0u32, 0u64, 1u32, 10000u32, u64_arg(1u64))), _ => fail("bind_only: not a socket") }
+    want(is(frame(cn).outcome, Refused(NotAllowed)), "bind_only: a Granted call is refused")
+    hang(take cn)
+    hang(take w)
+}
+
+pub fn law_bind_only(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
+    served(c, r, tasks, n, drive_bind_only)
+}
+
+@test
+fn test_bind_only(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    if law_bind_only(c, r, tasks, n) { Ok(()) } else { Error(()) }
 }
 
 // refusals with L2 and L3, one session with q = 0:
@@ -1416,18 +1472,18 @@ fn test_drain_reopened(parent: Dir, c: Clock, r: Random, tasks: Tasks) -> Result
     Ok(())
 }
 
-type ManagedRun[G: send, S: send]: send {
-    settings: runner.PlaceConfig[G, Hd, S], stop: Receiver[()], status: Latest[runner.Status], watch: Sender[Receiver[runner.Phase]],
+type ManagedRun[G: send, S: send, B: send]: send {
+    settings: runner.PlaceConfig[G, Hd, S, B], stop: Receiver[()], status: Latest[runner.Status], watch: Sender[Receiver[runner.Phase]],
 }
 
-fn run_managed[G: send, S: send](take job: ManagedRun[G, S]) -> Result[runner.Ended, runner.StartError] waits {
+fn run_managed[G: send, S: send, B: send](take job: ManagedRun[G, S, B]) -> Result[runner.Ended, runner.StartError] waits {
     let ManagedRun(settings: take settings, stop: take stop, status: take status, watch: take watch) = take job
     runner.operate(take settings, take stop, status, Some(take watch))
 }
 
 fn managed_address(status: runner.Status) -> Addr { option.unwrap(status.addr) }
 
-fn managed_settings(dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, listen: Addr, stop: runner.Stop) -> runner.PlaceConfig[(), Hd, ()] {
+fn managed_settings(dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, listen: Addr, stop: runner.Stop) -> runner.PlaceConfig[(), Hd, (), ()] {
     let mut wire = runner.wire_defaults(65536u64, N_PLACE)
     wire.n_pool = 4194304u64
     runner.PlaceConfig(backing: Disk(dir, disk_options()), selection: Current(0u64), place: code.describe(place), n_place: N_PLACE,
@@ -1436,13 +1492,13 @@ fn managed_settings(dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: N
         net: net, tasks: tasks, clock: clock, random: random, stop: stop, wire: Some(ingress.binding()), triggers: None, idle: None)
 }
 
-fn start_managed[G: send, S: send](tasks: Tasks, take settings: runner.PlaceConfig[G, Hd, S], stop_pending: bool) -> (Task[Result[runner.Ended, runner.StartError]], Sender[()], Receiver[runner.Phase], Latest[runner.Status]) waits {
+fn start_managed[G: send, S: send, B: send](tasks: Tasks, take settings: runner.PlaceConfig[G, Hd, S, B], stop_pending: bool) -> (Task[Result[runner.Ended, runner.StartError]], Sender[()], Receiver[runner.Phase], Latest[runner.Status]) waits {
     let (stop_to, stop_from): (Sender[()], Receiver[()]) = channel.new(1u64)
     if stop_pending { result.unwrap(channel.send(stop_to, ())) }
     let (handoff, phase_rx): (Sender[Receiver[runner.Phase]], Receiver[Receiver[runner.Phase]]) = channel.new(1u64)
     let status = result.unwrap(runner.status_root())
     let request = ManagedRun(settings: take settings, stop: take stop_from, status: latest.handle(status), watch: take handoff)
-    let run: fn(take ManagedRun[G, S]) -> Result[runner.Ended, runner.StartError] waits = run_managed
+    let run: fn(take ManagedRun[G, S, B]) -> Result[runner.Ended, runner.StartError] waits = run_managed
     let running = task.spawn(tasks, bytes 50331648u64, take request, run)
     (take running, take stop_to, result.unwrap(channel.receive(phase_rx)), take status)
 }
@@ -1477,7 +1533,7 @@ fn fixture_place(mut r: Calls) -> Result[(), runner.RegisterError] {
     runner.granted(mut r, code.describe(ping), 65536u64, runner.DEFAULT_STEPS)
 }
 
-fn fixture_settings(clock: Clock, random: Random, tasks: Tasks, net: Net, take wire: Option[runner.Wire[()]]) -> runner.PlaceConfig[(), Hd, ()] {
+fn fixture_settings(clock: Clock, random: Random, tasks: Tasks, net: Net, take wire: Option[runner.Wire[(), ()]]) -> runner.PlaceConfig[(), Hd, (), ()] {
     let mut session = runner.wire_defaults(65536u64, N_PLACE)
     session.n_pool = 4194304u64
     session.n_granted = 131072u64
@@ -1845,7 +1901,7 @@ fn idle_trigger_case(parent: Dir, wall_clock: Clock, random: Random, tasks: Task
         grants: IdleSeed(clock: virtual_time, starts: take starts), grant: idle_grant, grant_bytes: 65536u64)
     let mut wire = runner.wire_defaults(65536u64, N_PLACE)
     wire.n_pool = 4194304u64
-    let settings: runner.PlaceConfig[IdleGrant, Hd, IdleSeed] = runner.PlaceConfig(
+    let settings: runner.PlaceConfig[IdleGrant, Hd, IdleSeed, ()] = runner.PlaceConfig(
         backing: Disk(dir, disk_options()), selection: Current(0u64), place: code.describe(idle_place), n_place: N_PLACE,
         migrate: code.describe(ping_migrate), handles: code.describe(handles), session: wire, max_sessions: 1u64,
         proxies: list.new(), n_publisher: 1048576u64, listen: listen, net: network, tasks: tasks, clock: virtual_time,
@@ -2482,7 +2538,7 @@ fn directory_wire() -> runner.WireConfig {
     wire
 }
 
-fn directory_config(supplied: places.Supplied, place_fn: StaticFn[fn(mut Calls) -> Result[(), runner.RegisterError]], migrate_fn: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits], stop: runner.Stop) -> runner.PlaceConfig[(), Hd, ()] {
+fn directory_config(supplied: places.Supplied, place_fn: StaticFn[fn(mut Calls) -> Result[(), runner.RegisterError]], migrate_fn: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits], stop: runner.Stop) -> runner.PlaceConfig[(), Hd, (), ()] {
     runner.PlaceConfig(backing: Memory, selection: Install, place: place_fn, n_place: N_PLACE,
         migrate: migrate_fn, handles: code.describe(handles), session: directory_wire(), max_sessions: 1u64,
         proxies: list.new(), n_publisher: 1048576u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16),
@@ -2490,18 +2546,18 @@ fn directory_config(supplied: places.Supplied, place_fn: StaticFn[fn(mut Calls) 
 }
 
 // A place that stops at once.
-fn quick_place(take supplied: places.Supplied) -> Result[runner.PlaceConfig[(), Hd, ()], Capacity] {
+fn quick_place(take supplied: places.Supplied) -> Result[runner.PlaceConfig[(), Hd, (), ()], Capacity] {
     Ok(directory_config(supplied, code.describe(place), code.describe(migrate), runner.Stop(lag_ms: 0u64, grace_ms: 2000u64)))
 }
 
 // A place whose drain keeps admission open for 400 ms, so an open can arrive during it.
-fn lagged_place(take supplied: places.Supplied) -> Result[runner.PlaceConfig[(), Hd, ()], Capacity] {
+fn lagged_place(take supplied: places.Supplied) -> Result[runner.PlaceConfig[(), Hd, (), ()], Capacity] {
     Ok(directory_config(supplied, code.describe(place), code.describe(migrate), runner.Stop(lag_ms: 400u64, grace_ms: 2000u64)))
 }
 
 type DirectoryRun { directory: places.Directory, opener: places.Opener, dir_name: String, changes: Receiver[places.Change] }
 
-fn start_directory(parent: Dir, make: fn(take places.Supplied) -> Result[runner.PlaceConfig[(), Hd, ()], Capacity], idle_ms: u64, clock: Clock, random: Random, tasks: Tasks, net: Net) -> DirectoryRun waits {
+fn start_directory(parent: Dir, make: fn(take places.Supplied) -> Result[runner.PlaceConfig[(), Hd, (), ()], Capacity], idle_ms: u64, clock: Clock, random: Random, tasks: Tasks, net: Net) -> DirectoryRun waits {
     let mut dir_name = string.with_capacity(32u64)
     let dir = result.unwrap(host.mkdtemp(parent, mut dir_name))
     let (watch, changes): (Sender[places.Change], Receiver[places.Change]) = channel.new(16u64)
@@ -2667,7 +2723,7 @@ fn kept_place(mut r: Calls) -> Result[(), runner.RegisterError] {
     runner.granted(mut r, code.describe(ping), 65536u64, runner.DEFAULT_STEPS)
 }
 
-fn keeping_place(take supplied: places.Supplied) -> Result[runner.PlaceConfig[(), Hd, ()], Capacity] {
+fn keeping_place(take supplied: places.Supplied) -> Result[runner.PlaceConfig[(), Hd, (), ()], Capacity] {
     let mut config = directory_config(supplied, code.describe(kept_place), code.describe(ping_migrate), runner.Stop(lag_ms: 0u64, grace_ms: 2000u64))
     let (entries, _) = ping_entries()
     config.triggers = Some(runner.TriggerConfig(entries: take entries, author: store.Caller(issuer: 0u8, subject: list.new()),

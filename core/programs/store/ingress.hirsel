@@ -12,7 +12,7 @@ pub fn caller(_seed: (), supplied: Bytes) -> Result[store.Caller, ()] {
     Ok(store.Caller(issuer: 2u8, subject: take subject))
 }
 
-pub fn binding() -> runner.Wire[()] {
+pub fn binding() -> runner.Wire[(), ()] {
     runner.wire((), Some(code.describe(caller)), 4096u64, 65536u64)
 }
 

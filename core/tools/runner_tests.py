@@ -49,7 +49,7 @@ CHUNK = 500
 # evaluator (the registry's map grows to 2 MiB while its old table is live).
 N_PLACE = 16 * 1024 * 1024
 
-CALLS = ('atomic_migration', 'serve_bounded_and_settled', 'duplicate_own_reply', 'release_digest', 'ready_after_activation', 'drain_answers_once', 'drain_reopened', 'lag_window', 'calls_two_streams', 'calls_group_version', 'calls_joiners', 'calls_duplicate', 'anonymous_fresh', 'granted_copied', 'calls_refusals',
+CALLS = ('atomic_migration', 'serve_bounded_and_settled', 'duplicate_own_reply', 'release_digest', 'ready_after_activation', 'drain_answers_once', 'drain_reopened', 'lag_window', 'calls_two_streams', 'calls_group_version', 'calls_joiners', 'calls_duplicate', 'anonymous_fresh', 'granted_copied', 'bind_only', 'calls_refusals',
          'calls_runs_once', 'calls_session_charge', 'calls_store_refusal', 'calls_one_outcome_per_send', 'calls_deadline_held', 'calls_deadline_hung', 'calls_held_head', 'calls_retired_head', 'calls_session_mismatch', 'calls_recorded', 'subs_wired', 'query_as_caller', 'publisher_never_blocks', 'repair_delivered',
          'dir_one_head', 'dir_open_during_close', 'dir_idle_unload', 'dir_reopen_keeps')
 # The place directory's laws (RUNNER-SPEC §13.6) bind sockets and use disk stores.
@@ -785,18 +785,23 @@ def evaluate(evaluator, inputs_path, definition, launch_image=None):
     return value, report
 
 
+# L36: a movable wire grant (`runner.wire`) and a movable bind seed (`runner.wire_bind`) are
+# each refused at the constructor's plain bound.
+NONPLAIN_WIRES = (('wire_granted_nonplain', 'OwnedGrant'), ('wire_bind_nonplain', 'OwnedSeed'))
+
+
 def granted_bound(args, root, work, row):
-    name = 'wire_granted_nonplain'
-    rejected = manifest(root, work, name, extra=[(root / f'core/programs/store/{name}.hirsel', name)])
-    command = [str(args.compiler.resolve()), 'check', '--inputs', str(rejected),
-               '--source-core', '--source-std', '--store', str(work / name), '--json']
-    checked = run_case(name, 'checker', command, capture_output=True, text=True)
-    report = json.loads(checked.stdout)
-    actual = [(d.get('rule'), d.get('message')) for d in report.get('diagnostics', [])]
-    expected = [('LANG-12', '`store@1/wire_granted_nonplain/OwnedGrant` is not plain')]
-    passed = (checked.returncode == 1 and report.get('accepted') is False and actual == expected
-              and not report.get('incomplete') and not report.get('resources'))
-    row(engine='checker', law=name, passed=passed, result=report)
+    for name, movable in NONPLAIN_WIRES:
+        rejected = manifest(root, work, name, extra=[(root / f'core/programs/store/{name}.hirsel', name)])
+        command = [str(args.compiler.resolve()), 'check', '--inputs', str(rejected),
+                   '--source-core', '--source-std', '--store', str(work / name), '--json']
+        checked = run_case(name, 'checker', command, capture_output=True, text=True)
+        report = json.loads(checked.stdout)
+        actual = [(d.get('rule'), d.get('message')) for d in report.get('diagnostics', [])]
+        expected = [('LANG-12', f'`store@1/{name}/{movable}` is not plain')]
+        passed = (checked.returncode == 1 and report.get('accepted') is False and actual == expected
+                  and not report.get('incomplete') and not report.get('resources'))
+        row(engine='checker', law=name, passed=passed, result=report)
 
 
 def activation_body_edit(root, work):

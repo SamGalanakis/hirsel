@@ -77,11 +77,12 @@ class Tape:
     def grant(s, kind, vector=None, gap=0):
         data = lb(vector) if kind == ARGS else bytes([0]) if 4 <= kind <= 6 else b''
         s.put(bytes([7]) + vi(gap) + bytes([kind]) + data)
-    def op(s, op, obj, a, value=0, error=None, written=None, payload=b''):
+    def op(s, op, obj, a, value=0, error=None, written=None, payload=b'', spare=None):
         head = 3
         f = b''
         if s.task != 0: head |= 0x10; f += vi(0); s.task = 0
-        f = bytes([head]) + f + bytes([op]) + vi(obj) + args(a)
+        room = b'' if spare is None else bytes([18]) + vi(spare) + vi(0)
+        f = bytes([head]) + f + bytes([op]) + vi(obj) + room + args(a)
         if op in (WALL_MS, MONO_NS):
             prev = s.prev.get((op, obj), 0); s.prev[(op, obj)] = value; value = zz(value - prev)
         f += bytes([1 if error else 0]) + vi(value)
@@ -111,8 +112,8 @@ t.op(STDOUT, 2, b'0123456789abcdefXYZ', written=19)   # 19 bytes: digest
 t.op(OPEN, 3, bytes([0]) + b'missing', error=(1, 0))  # NotFound
 t.op(OPEN, 3, bytes([0]) + b'data', 5)                # ordinal 5
 big = bytes((i * 7 + 1) & 0xff for i in range(70_000))
-t.op(READ, 5, struct.pack('<Q', 70_000), 70_000, payload=big)
-t.op(READ, 5, struct.pack('<Q', 10), 0, payload=b'')
+t.op(READ, 5, b'', 70_000, payload=big, spare=70_000)
+t.op(READ, 5, b'', 0, spare=10)
 t.op(CLOSE, 5, b'')
 t.op(SLEEP_UNTIL, 1, struct.pack('<Q', 9_000))
 t.op(RENAME, 3, b'a\0b')
@@ -167,7 +168,7 @@ net.op(LISTEN, 1, addr(0) + struct.pack('<H', 8), 3, payload=addr(49217))
 deadline = vi(2) + struct.pack('<Q', 5000)
 net.put(bytes([1, ACCEPT]) + vi(3) + args(deadline))
 net.put(bytes([2, 0, 0]) + vi(4) + lb(addr(49218)))
-net.op(RECV_BOUNDED, 4, struct.pack('<Q', 70000) + deadline, 70000, payload=big)
+net.op(RECV_BOUNDED, 4, deadline, 70000, payload=big, spare=70_000)
 net.op(SEND_PAIR, 4, deadline + lb(b'abc') + lb(b'def'), value=4)
-net.op(RECV_BOUNDED, 4, struct.pack('<Q', 1) + deadline, error=(5, 0))
+net.op(RECV_BOUNDED, 4, deadline, error=(5, 0), spare=1)
 (HERE / 'net-tape.bin').write_bytes(net.end(0, struct.pack('<I', 0)))

@@ -15,6 +15,9 @@ pub(super) const REVISION: [u8; 32] = {
     }
     b
 };
+#[path = "rl2_tests.rs"]
+mod rl2;
+
 const HAND: &[u8] = include_bytes!("testdata/hand-tape.bin");
 const MODEL: &[u8] = include_bytes!("testdata/model-f4-tape.bin");
 const XXH3: &[u8] = include_bytes!("testdata/xxh3.bin");
@@ -365,8 +368,8 @@ fn spare(sub: (Provider, u64), op: u8, prefix: &[u8], capacity: usize) -> Ob {
 #[derive(Clone, Copy, PartialEq)]
 enum Variant {
     Same,
-    /// The first stdout write sends other bytes: an issue the tape never saw.
     OtherWrite,
+    KeepFile,
 }
 
 /// The run vectors.py encodes. Stops at the first refused on_tape (there is
@@ -412,7 +415,9 @@ fn scripted_run(
     obs.push(opened);
     obs.push(spare(file, READ, &[], read));
     obs.push(spare(file, READ, &[], 10));
-    obs.push(plain(file, CLOSE, 0, &[]));
+    if variant != Variant::KeepFile {
+        obs.push(plain(file, CLOSE, 0, &[]));
+    }
     obs.push(input(clock, SLEEP_UNTIL, &9_000u64.to_le_bytes()));
     obs.push(plain(dir, RENAME, 0, b"a\0b"));
     let made = spare(dir, MKDTEMP, b"t.", 64);
@@ -857,7 +862,7 @@ fn replay_reads_and_allocates_by_block() {
         task: 0,
         op: READ,
         object: 2,
-        args: Args::of(&(input.len() as u64).to_le_bytes()),
+        args: Args::of(&[]).buffered([input.len() as u64, 0]),
         out: Out {
             value: input.len() as u64,
             payload: input.clone(),
@@ -1202,10 +1207,10 @@ fn launcher_reports_the_first_tampered_argument() {
             diagnose: false,
         });
         scripted_run(&tape, host.provider(), 100, Variant::Same);
-        panic!("the launcher should stop at the tampered read");
+        panic!("the launcher should stop at the tampered send");
     }
 
-    // Four grants, four clock reads, two writes and two opens precede READ.
+    // Four grants and four clock reads precede the first STDOUT.
     let (store, _) = record(100);
     let tape = store.file();
     let at = boundaries(&tape);
@@ -1217,15 +1222,15 @@ fn launcher_reports_the_first_tampered_argument() {
         )
         .unwrap();
     let Frame::Op {
-        op: READ,
+        op: STDOUT,
         args: Args::Literal(bytes),
         ..
-    } = &mut frames[12]
+    } = &mut frames[8]
     else {
-        panic!("expected the first READ at frame 13");
+        panic!("expected the first STDOUT at frame 9");
     };
-    assert_eq!(bytes[0], 100);
-    bytes[0] = 101;
+    assert_eq!(bytes, b"hello");
+    bytes[4] = b'X';
     let mut encoder = Encoder::default();
     let payload: Vec<u8> = frames.iter().flat_map(|f| encoder.frame(f).0).collect();
     let changed = [
@@ -1248,12 +1253,10 @@ fn launcher_reports_the_first_tampered_argument() {
         .unwrap();
     let diagnostic = String::from_utf8(output.stderr).unwrap();
     assert_eq!(output.status.code(), Some(1), "{diagnostic}");
-    // The four grants reserve ordinals 1 through 4. The successful open
-    // supplies file 5. Eight synchronous operations precede the READ issue.
     assert_eq!(
         diagnostic,
         format!(
-            "replay: Diverged(Arg) at 13 [event 17: frame OP; expected task=0 op={READ} object=5 capacity=101; observed task=0 op={READ} object=5 capacity=100]\n"
+            "replay: Diverged(Arg) at 9 [event 9: frame OP; expected task=0 op={STDOUT} object=2 args=redacted; observed task=0 op={STDOUT} object=2 args=redacted]\n"
         )
     );
 }
@@ -2044,7 +2047,7 @@ fn a_repeat_the_format_forbids_is_corrupt() {
 
 /// The hand-built rows put stdin and Proc release between distinct issues.
 #[test]
-fn exec_close_rows_diverge_and_impossible_spawn_issues_no_handles() {
+fn exec_close_rows_match_by_part_and_impossible_spawn_issues_no_handles() {
     use crate::{
         Context,
         exec_runtime::{hirsel_core_exec_spawn, hirsel_core_exec_wait},
@@ -2059,7 +2062,11 @@ fn exec_close_rows_diverge_and_impossible_spawn_issues_no_handles() {
             task: 0,
             op,
             object,
-            args: Args::of(args),
+            args: if op == RECV_BOUNDED {
+                Args::of(args).buffered([4, 0])
+            } else {
+                Args::of(args)
+            },
             out: Out {
                 value,
                 payload: payload.to_vec(),
@@ -2082,8 +2089,6 @@ fn exec_close_rows_diverge_and_impossible_spawn_issues_no_handles() {
     snapshot.extend_from_slice(b"\x00\x00\x00\x00\x00\x00\x00\x00");
     snapshot.extend_from_slice(b"\x01\x00\x00\x00\x04\x00\x00\x00work");
     let launch = b"\x04\x00\x00\x00tool\x04\x00\x00\x00work\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01\x01\x00";
-    let mut recv_args = [0; 9];
-    recv_args[0] = 4; // little-endian spare room, followed by Never
     let normal = vec![
         Frame::Grant {
             gap: 0,
@@ -2093,12 +2098,12 @@ fn exec_close_rows_diverge_and_impossible_spawn_issues_no_handles() {
         row(EXEC_SPAWN, 1, launch, 2, &[3, 4, 0]),
         row(SEND_PAIR, 3, &[0, 1, b'x', 0], 1, &[]),
         row(CLOSE, 3, &[2], 0, &[]),
-        row(RECV_BOUNDED, 4, &recv_args, 1, b"x"),
+        row(RECV_BOUNDED, 4, &[0], 1, b"x"),
         row(EXEC_WAIT, 2, &[0], 23, &[]),
         row(CLOSE, 2, &[0], 0, &[]),
         row(CLOSE, 4, &[1], 0, &[]),
         Frame::End {
-            gap: 2, // last CLOSE issue and its synchronous delivery
+            gap: 2, // last ordered operation and its synchronous delivery
             ending: ending(),
         },
     ];
@@ -2109,17 +2114,11 @@ fn exec_close_rows_diverge_and_impossible_spawn_issues_no_handles() {
             0 => Ok(()),
             1 => {
                 frames.swap(3, 4);
-                Err(Fault::Diverged(Divergence {
-                    at: 4,
-                    kind: Mismatch::Op,
-                }))
+                Ok(())
             }
             2 => {
                 frames.swap(6, 7);
-                Err(Fault::Diverged(Divergence {
-                    at: 7,
-                    kind: Mismatch::Object,
-                }))
+                Ok(())
             }
             3 => {
                 frames[1] = row(EXEC_SPAWN, 1, launch, 2, &[3, 3, 0]);
@@ -2220,17 +2219,12 @@ fn exec_close_rows_diverge_and_impossible_spawn_issues_no_handles() {
                 let read =
                     hirsel_core_host_recv_bounded(&mut context, output, &mut b, 4, 0, 0, 0, 803);
                 let proc = spawned.outcome.value;
-                if case == 1 {
-                    assert_eq!(read.status, STATUS_REFUSED);
-                    assert_eq!((b.len, bytes), (0, [0xcc; 4]));
-                } else {
-                    assert_eq!(read.value, 1);
-                    assert_eq!((b.len, bytes), (1, [b'x', 0xcc, 0xcc, 0xcc]));
-                    assert_eq!(
-                        hirsel_core_exec_wait(&mut context, proc, 0, 0, 0, 804).value,
-                        23
-                    );
-                }
+                assert_eq!(read.value, 1);
+                assert_eq!((b.len, bytes), (1, [b'x', 0xcc, 0xcc, 0xcc]));
+                assert_eq!(
+                    hirsel_core_exec_wait(&mut context, proc, 0, 0, 0, 804).value,
+                    23
+                );
                 hirsel_core_socket_drop(&mut context, proc);
                 hirsel_core_socket_drop(&mut context, output);
             }
@@ -2408,7 +2402,7 @@ fn unix_tape_rejects_impossible_packet_before_appending() {
                 task: 0,
                 op: DATAGRAM_RECV,
                 object: 2,
-                args: Args::of(&[0, 2, 0, 0, 0, 0, 0, 0, 0]),
+                args: Args::of(&[0]).buffered([2, 0]),
                 out: packet,
             },
             Frame::Op {
@@ -2419,7 +2413,7 @@ fn unix_tape_rejects_impossible_packet_before_appending() {
                 out: Out::default(),
             },
             Frame::End {
-                gap: 2, // last CLOSE issue and its synchronous delivery
+                gap: 2, // last ordered operation and its synchronous delivery
                 ending: ending(),
             },
         ];
@@ -2457,18 +2451,18 @@ fn unix_tape_rejects_impossible_packet_before_appending() {
             bind.path = (&raw mut unix).cast();
             let result = hirsel_core_host(&mut context, &provider, &mut bind);
             assert_eq!(ordinal_of(result.value), 2);
-            let mut storage = [b'!', 0xcc, 0xcc];
+            let mut storage = [b'!', 0xcc, 0xcc, 0xcc];
             let buffer = Buffer {
                 data: storage.as_mut_ptr(),
                 len: 1,
-                capacity: 3,
+                capacity: storage.len(),
             };
             let mut recv = request(DATAGRAM_RECV, 0, result.value, &[], buffer);
             recv.path = (&raw mut unix).cast();
             let got = hirsel_core_host(&mut context, &provider, &mut recv);
             if is_valid {
                 assert_eq!((got.value, got.written, got.kind), (3, 2, 1));
-                assert_eq!((recv.buffer.len, storage), (3, *b"!ab"));
+                assert_eq!((recv.buffer.len, storage), (3, [b'!', b'a', b'b', 0xcc]));
                 let mut close = request(
                     CLOSE,
                     crate::net::SOCKET_CLOSE,
@@ -2483,7 +2477,7 @@ fn unix_tape_rejects_impossible_packet_before_appending() {
                 assert_eq!(tape.end(&ending()), Ok(()));
             } else {
                 assert_eq!(got.status, STATUS_REFUSED);
-                assert_eq!((recv.buffer.len, storage), (1, [b'!', 0xcc, 0xcc]));
+                assert_eq!((recv.buffer.len, storage), (1, [b'!', 0xcc, 0xcc, 0xcc]));
                 assert_eq!(tape.end(&ending()), Err(Fault::Corrupt));
             }
         }

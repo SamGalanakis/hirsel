@@ -6,7 +6,9 @@
 //! block's xxh3-64 check, which covers the tape id, the block's flags, magic,
 //! sequence number and length, so a block from another tape or another place
 //! fails. Discovery is sequential from offset 0 and never resynchronises.
+mod arguments;
 mod payload;
+pub use arguments::Args;
 pub use payload::{carries_payload, tls_connect_payload};
 
 use hirsel_core_net::{
@@ -854,51 +856,6 @@ fn check_digest(bytes: &[u8], id: &[u8; 16], seq: u64) -> Result<(), Stop> {
         return Err(Stop::Damaged(seq));
     }
     Ok(())
-}
-
-/// `args` of an ISSUE or OP frame: up to 16 literal bytes, else a digest.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum Args {
-    Literal(Vec<u8>),
-    Digest(u64),
-}
-impl Args {
-    pub fn of(bytes: &[u8]) -> Self {
-        Self::of_parts(&[bytes])
-    }
-    pub fn of_parts(parts: &[&[u8]]) -> Self {
-        let len = parts
-            .iter()
-            .fold(0usize, |len, part| len.saturating_add(part.len()));
-        if len <= ARGS_LITERAL {
-            let mut bytes = Vec::with_capacity(len);
-            for part in parts {
-                bytes.extend_from_slice(part);
-            }
-            Args::Literal(bytes)
-        } else {
-            Args::Digest(xxh3(parts))
-        }
-    }
-    fn encode(&self, out: &mut Vec<u8>) {
-        match self {
-            Args::Literal(b) => put_bytes(out, b),
-            Args::Digest(d) => {
-                out.push(ARGS_LITERAL as u8 + 1);
-                out.extend_from_slice(&d.to_le_bytes());
-            }
-        }
-    }
-    fn decode(c: &mut Cursor) -> Result<Self, Corrupt> {
-        let n = c.varint()?;
-        if n as usize <= ARGS_LITERAL {
-            Ok(Args::Literal(c.take(n as usize)?.to_vec()))
-        } else if n as usize == ARGS_LITERAL + 1 {
-            Ok(Args::Digest(u64::from_le_bytes(c.fixed()?)))
-        } else {
-            Err(Corrupt)
-        }
-    }
 }
 
 /// Whether the operation encodes an extra byte count in its outcome.

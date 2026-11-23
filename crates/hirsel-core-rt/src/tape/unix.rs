@@ -48,9 +48,6 @@ pub(super) unsafe fn canonical(r: &Request, op: UnixOperation) -> Args {
             }
         }
         match op.fields.last() {
-            Some(UnixField::Room) => args.extend_from_slice(
-                &(r.buffer.capacity.saturating_sub(r.buffer.len) as u64).to_le_bytes(),
-            ),
             Some(UnixField::Bytes) => {
                 let bytes = super::buffer_bytes(&r.buffer);
                 put_varint(&mut args, bytes.len() as u64);
@@ -67,6 +64,7 @@ pub(super) fn delivery(
     reply: UnixReply,
     out: &Out,
     objects: u64,
+    recorded_spare: Option<u64>,
 ) -> Result<(), Fault> {
     use super::{ABORTED, ERROR, OK, TIMED_OUT};
     let op = r.operation;
@@ -75,7 +73,7 @@ pub(super) fn delivery(
             return Err(Fault::Corrupt);
         }
         if reply == UnixReply::Packet {
-            let space = r.buffer.capacity.saturating_sub(r.buffer.len) as u64;
+            let space = recorded_spare.ok_or(Fault::Corrupt)?;
             let count = space.min(out.value);
             let Some((&flag, payload)) = out.payload.split_first() else {
                 return Err(Fault::Corrupt);

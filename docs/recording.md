@@ -140,7 +140,7 @@ A replay starts no process and opens no socket. It matches each `CLOSE` by its o
 part, not by its position among the frames: a handle's drop may come earlier or later than
 it did in the recording, because when a value is dropped is not an observation the
 program's meaning fixes. Ordinals are allocated in delivery order and never reused, so the
-match is exact. A `CLOSE` the recording does not hold for that ordinal and part, or a
+match is exact. A `CLOSE` contributes no scheduler event. A `CLOSE` the recording does not hold for that ordinal and part, or a
 recorded `CLOSE` whose handle the replay never drops before the run ends, ends the replay
 `Diverged`, the second at the run's end (RL2). It then changes local ownership only: nothing is killed,
 closed or unlinked on the host. A delivery that its issue could not have produced, such as a
@@ -326,10 +326,14 @@ through the launch arguments to find and verify the pin.
 - A `Cred` grant record, after the `Secret` grant records, holds the parameter name, the
   source text and the canonical policy text
   ([TLS-7](spec/tls.md#tls-7-credential-grants)), all length-prefixed. A fetch's issue holds
-  the spare capacities of `key_id` and `token` as two little-endian `u64`s, then its
-  deadline. A successful delivery holds its own tape position as `value` (the designation
+  the spare capacities of `key_id` and `token` and its deadline. A successful delivery holds its own tape position as `value` (the designation
   the key gets) and, as the payload, the key id and the session token, each
   length-prefixed, then the expiry as a little-endian `u64`. The key is never in a frame.
+- Buffered issue arguments start with tag 18 and two varint spare capacities. The
+  second is zero for single-buffer operations. The remaining operands follow in the
+  usual literal or digest encoding.
+- A `CLOSE` is an immediate OP with task zero. Its frame keeps its position for
+  diagnostics. Replay matches it by ordinal and part.
 - The `GRANT` frame of a `Stdin`, `Stdout` or `Stderr` grant holds its terminal byte.
 - The `GRANT` frame of an `Exec` grant holds the total profile snapshot length, then its
   first payload chunk. `DATA` frames carry the remaining bytes.

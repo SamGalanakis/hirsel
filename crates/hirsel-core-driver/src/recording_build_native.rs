@@ -541,11 +541,8 @@ fn tape_run_replays(backend: Backend, other: Backend) {
 
     let switched = tape_run_build(other, dir.path(), "e", ("", ""), Some(replay_plan.clone()));
     let (code, again, err) = tape_run(&switched, &["three"], None);
-    assert_eq!(
-        (code, again),
-        (Some(0), String::new()),
-        "the other engine: {err}"
-    );
+    assert_eq!((code, again), (Some(0), String::new()), "the other engine: {err}");
+    assert!(err.lines().any(|line| line == "replay: build differs"), "{err}");
 
     let changed = tape_run_build(
         backend,

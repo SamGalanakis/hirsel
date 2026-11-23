@@ -14,6 +14,10 @@
 use crate::*;
 use std::collections::{HashMap, HashSet};
 
+mod needed;
+pub(crate) use needed::slot_conflicts;
+use needed::{anchored_views, needed_ranges};
+
 /// What an instruction defines and uses, as names: value `v` is `v`, address `a` is
 /// `values + a`. An `address` instruction defines its address and uses its base and
 /// step operands.
@@ -544,99 +548,7 @@ pub fn share_slots(b: &mut Body, signatures: &[Signature]) {
         return;
     }
     let n = candidates.len();
-    let slots = slots_with(b, &from);
-    let nb = b.blocks.len();
-    let words = n.div_ceil(64);
-    let lens: Vec<u32> = b.blocks.iter().map(|blk| blk.insts.len).collect();
-    // Each candidate's accesses by block: (block, first, last) index.
-    let mut acc = vec![0u64; nb * words];
-    let mut spans: Vec<Vec<(u32, u32, u32)>> = vec![vec![]; n];
-    for (c, &s) in candidates.iter().enumerate() {
-        let mut points: Vec<Point> = slots.lives[s]
-            .iter()
-            .chain(&slots.deads[s])
-            .chain(&slots.uses[s])
-            .copied()
-            .collect();
-        points.sort_unstable();
-        for (bi, j) in points {
-            acc[bi as usize * words + c / 64] |= 1 << (c % 64);
-            match spans[c].last_mut() {
-                Some(last) if last.0 == bi => last.2 = j,
-                _ => spans[c].push((bi, j, j)),
-            }
-        }
-    }
-    let mut succ: Vec<Vec<usize>> = vec![vec![]; nb];
-    for (bi, out) in succ.iter_mut().enumerate() {
-        let code = b.blocks[bi].insts.get(&b.insts).unwrap_or_default();
-        out.extend(code.iter().filter_map(|i| i.fail(b)).map(|f| f.index()));
-        out.extend(targets(b, bi));
-        out.sort_unstable();
-        out.dedup();
-    }
-    // Accessed on some path before a block's entry, and after its exit.
-    let mut before = vec![0u64; nb * words];
-    let mut after = vec![0u64; nb * words];
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for bi in 0..nb {
-            for &t in &succ[bi] {
-                for w in 0..words {
-                    let into = before[bi * words + w] | acc[bi * words + w];
-                    if into & !before[t * words + w] != 0 {
-                        before[t * words + w] |= into;
-                        changed = true;
-                    }
-                }
-            }
-        }
-        for bi in (0..nb).rev() {
-            for &t in &succ[bi] {
-                for w in 0..words {
-                    let into = after[t * words + w] | acc[t * words + w];
-                    if into & !after[bi * words + w] != 0 {
-                        after[bi * words + w] |= into;
-                        changed = true;
-                    }
-                }
-            }
-        }
-    }
-    // Each candidate's needed ranges: (block, from, to), inclusive, the block's
-    // length being its terminator; in block order, at most one a block.
-    let mut ranges: Vec<Vec<(u32, u32, u32)>> = vec![vec![]; n];
-    for bi in 0..nb {
-        for w in 0..words {
-            let (pre, post, here) = (
-                before[bi * words + w],
-                after[bi * words + w],
-                acc[bi * words + w],
-            );
-            let mut live = (pre & post) | here;
-            while live != 0 {
-                let c = w * 64 + live.trailing_zeros() as usize;
-                live &= live - 1;
-                let bit = 1u64 << (c % 64);
-                let span = (here & bit != 0).then(|| {
-                    let i = spans[c].partition_point(|&(sb, _, _)| (sb as usize) < bi);
-                    (spans[c][i].1, spans[c][i].2)
-                });
-                let lo = if pre & bit != 0 {
-                    0
-                } else {
-                    span.map_or(0, |x| x.0)
-                };
-                let hi = if post & bit != 0 {
-                    lens[bi]
-                } else {
-                    span.map_or(lens[bi], |x| x.1)
-                };
-                ranges[c].push((bi as u32, lo, hi));
-            }
-        }
-    }
+    let ranges = needed_ranges(b, &from, &candidates);
     let mut map: Vec<u32> = (0..k as u32).collect();
     let mut shared = vec![false; k];
     // Each home's needed ranges, disjoint and sorted by (block, from); indexed by
@@ -690,7 +602,7 @@ pub fn share_slots(b: &mut Body, signatures: &[Signature]) {
     }
     let mut insts = Vec::with_capacity(b.insts.len());
     let mut anchors = Vec::with_capacity(b.insts.len());
-    for bi in 0..nb {
+    for bi in 0..b.blocks.len() {
         let r = b.blocks[bi].insts;
         let at = insts.len() as u32;
         for j in r.start as usize..(r.start + r.len) as usize {
@@ -881,29 +793,8 @@ pub fn scoped_slots(b: &Body, signatures: &[Signature]) -> ScopedSlots {
     // to a call whose results include a pointer, or that has a destination,
     // ends only at its `StorageDead`s. A `mut` loan to such a call already
     // escapes (Ruling 7), and a `take` place is consumed.
-    let mut early = out.clone();
-    for site in &b.calls {
-        let Some(g) = signatures.get(site.signature.index()) else {
-            continue;
-        };
-        if g.dest.is_none() && !g.results.contains(&Ty::Ptr) {
-            continue;
-        }
-        let args = site.args.get(&b.pools.args).unwrap_or_default();
-        for (arg, param) in args[usize::from(g.dest.is_some())..].iter().zip(&g.params) {
-            if let (
-                Arg::Address(x),
-                Param::Address {
-                    loan: Loan::View, ..
-                },
-            ) = (*arg, param)
-            {
-                for &s in &from[b.values.len() + x.index()] {
-                    early[s as usize] = false;
-                }
-            }
-        }
-    }
+    let anchored = anchored_views(b, signatures, &from);
+    let early: Vec<bool> = out.iter().zip(&anchored).map(|(&o, &a)| o && !a).collect();
     let mut ends = storage_ends(b, &early, &used, words);
     // Live on every path into each block (`must`, a meet) and on some path
     // (`may`, a join).

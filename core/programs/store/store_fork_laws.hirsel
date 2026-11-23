@@ -567,12 +567,12 @@ fn fork_tip_steps(c: Clock, depth: u64) -> u64 waits {
 
 // STORE-SPEC §11.13 AP18: a live-head fork does no ancestry walk. With
 // identical roots and no cut, the fork, put and get may differ by at most
-// 32 metered steps for the variation in the binary search for the source.
+// 16 metered steps for the variation in the binary search for the source.
 @test
 fn test_fork_depth(c: Clock) -> Result[(), (u64, u64)] waits {
     let shallow = fork_tip_steps(c, 1)
     let deep = fork_tip_steps(c, 32)
-    if deep <= shallow + 32 && shallow <= deep + 32 {
+    if deep <= shallow + 16 && shallow <= deep + 16 {
         Ok(())
     } else {
         Error((shallow, deep))

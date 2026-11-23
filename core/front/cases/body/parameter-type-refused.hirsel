@@ -1,0 +1,8 @@
+// LANG-12: a parameter whose written type is refused has no value to bind, so its
+// body is checked but not built; passing it on once panicked call lowering.
+// expect: refuse LANG-12 at 8:9
+// expect: compared LANG-12 at 8:9 | 1 type argument | 0 type arguments
+type Door { n: u64 }
+fn get(d: Door) -> u64 { d.n }
+
+fn f(d: Door[u64]) -> u64 { get(d) }

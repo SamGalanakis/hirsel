@@ -2418,17 +2418,11 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         let fd = self.fd.clone();
         let mut written_parameters = vec![];
         for (parameter_index, pd) in fd.params.iter().enumerate() {
-            let v = match self.ir_ty(pd.ty) {
-                _ if pd.mode == Mode::Mut && k < entry_params.len() => {
-                    k += 1;
-                    Some(entry_params[k - 1])
-                }
-                Some(_) if k < entry_params.len() => {
-                    k += 1;
-                    Some(entry_params[k - 1])
-                }
-                _ => None,
-            };
+            let carried = self.ir_ty(pd.ty).is_some() || pd.mode == Mode::Mut;
+            let v = (carried && k < entry_params.len()).then(|| {
+                k += 1;
+                entry_params[k - 1]
+            });
             let mut callable_ty = pd.ty;
             while let TyKind::Anchored(inner, _) | TyKind::View(inner) = self.t.kind(callable_ty) {
                 callable_ty = *inner;
@@ -2506,6 +2500,11 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         // that anchor set (OWN-19), which may name a later parameter.
         for (index, slot, ty, mode) in written_parameters {
             self.written_parameter_anchors(index, slot, ty, mode);
+        }
+        // A refused signature type leaves nothing to bind: check the body, build none.
+        if mentions_error(&self.t, self.fd.callable) {
+            self.inherited_refusal = true;
+            self.halt();
         }
         // A clone body builds its result in a local destination (`clone_return`).
         if self.fd.clone_of.is_some() && self.live() {

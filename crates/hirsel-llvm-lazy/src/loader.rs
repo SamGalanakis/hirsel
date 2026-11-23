@@ -114,6 +114,7 @@ type Generate = unsafe extern "C" fn(
     *mut libc::c_void,
     *mut Output,
 );
+type StdObjectCodec = unsafe extern "C" fn(*const u8, usize, usize, *mut Output);
 type JoinLent = unsafe extern "C" fn(*const Input, usize, *mut Output);
 pub(crate) enum ProgramUnit {
     Native(crate::construction::NativeModule),
@@ -124,6 +125,7 @@ struct Backend {
     program: Program,
     generate: Generate,
     join_lent: JoinLent,
+    std_object_codec: StdObjectCodec,
     free: Free,
     construction: &'static crate::construction::Api,
     _image: File,
@@ -262,6 +264,8 @@ fn load() -> Result<Backend, String> {
     let program = unsafe { libc::dlsym(handle, c"hirsel_llvm_program_v11".as_ptr()) };
     let generate = unsafe { libc::dlsym(handle, c"hirsel_llvm_generate_v1".as_ptr()) };
     let join_lent = unsafe { libc::dlsym(handle, c"hirsel_llvm_join_lent_v1".as_ptr()) };
+    let std_object_codec =
+        unsafe { libc::dlsym(handle, c"hirsel_llvm_std_object_codec_v1".as_ptr()) };
     // SAFETY: the table getter is part of the same embedded component ABI.
     let construction = unsafe { libc::dlsym(handle, c"hirsel_llvm_builder_v1".as_ptr()) };
     if compile.is_null()
@@ -269,6 +273,7 @@ fn load() -> Result<Backend, String> {
         || program.is_null()
         || generate.is_null()
         || join_lent.is_null()
+        || std_object_codec.is_null()
         || construction.is_null()
     {
         return Err(dl_error());
@@ -282,6 +287,9 @@ fn load() -> Result<Backend, String> {
         // SAFETY: as `program`'s.
         generate: unsafe { std::mem::transmute::<*mut libc::c_void, Generate>(generate) },
         join_lent: unsafe { std::mem::transmute::<*mut libc::c_void, JoinLent>(join_lent) },
+        std_object_codec: unsafe {
+            std::mem::transmute::<*mut libc::c_void, StdObjectCodec>(std_object_codec)
+        },
         free: unsafe { std::mem::transmute::<*mut libc::c_void, Free>(free) },
         // SAFETY: the table is static, its types match construction.rs, and the
         // component stays mapped for the process lifetime.
@@ -692,6 +700,27 @@ pub(crate) fn join_lent(modules: &[Vec<u8>]) -> Result<Vec<u8>, String> {
     // same engine allocates and frees the returned buffer.
     unsafe {
         (backend.join_lent)(inputs.as_ptr(), inputs.len(), &mut output);
+        let bytes = std::slice::from_raw_parts(output.data, output.len).to_vec();
+        (backend.free)(output.data);
+        if output.failed == 0 {
+            Ok(bytes)
+        } else {
+            Err(String::from_utf8_lossy(&bytes).into_owned())
+        }
+    }
+}
+
+pub(crate) fn std_object_codec(bytes: &[u8], decoded_size: usize) -> Result<Vec<u8>, String> {
+    let backend = backend()?;
+    let mut output = Output {
+        data: std::ptr::null_mut(),
+        len: 0,
+        failed: 0,
+    };
+    // SAFETY: bytes and output are borrowed for the synchronous call. The
+    // allocating component also frees the output.
+    unsafe {
+        (backend.std_object_codec)(bytes.as_ptr(), bytes.len(), decoded_size, &mut output);
         let bytes = std::slice::from_raw_parts(output.data, output.len).to_vec();
         (backend.free)(output.data);
         if output.failed == 0 {

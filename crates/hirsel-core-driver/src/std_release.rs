@@ -48,7 +48,7 @@ use hirsel_core_ir::{Callee, FuncId, Identity, Param};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 
-const STD_SCHEMA: u32 = 9;
+const STD_SCHEMA: u32 = 10;
 
 /// The largest body, in LLVM instructions after the std's optimiser, the std
 /// lends a program's inliner. LLVM's inline cost decides each call site; this
@@ -592,7 +592,11 @@ fn lower(
         points.sort_unstable();
         points.dedup();
     }
-    store.put_keyed(lent_key, &lent)?;
+    if prebuilt {
+        write_compressed(store, lent_key, &lent)?;
+    } else {
+        store.put_keyed(lent_key, &lent)?;
+    }
     store.put_keyed(key, &encode(&record)?)?;
     let lowered = record.units.len() as u64;
     Ok((key, record, lowered))
@@ -745,7 +749,7 @@ fn lower_module(
                     &private_names[index],
                 )
                 .map_err(emit)?;
-                crate::native_object::publish(store, part_key, &object)?;
+                write_compressed(store, part_key, &encode(&object)?)?;
             }
         }
     } else {
@@ -826,9 +830,12 @@ fn side(
         .first()
         .cloned()
         .ok_or_else(|| NativeStop::Entry("the release std has no root".into()))?;
-    let lent = store
-        .get(record.lent)?
-        .ok_or_else(|| NativeStop::Entry("the release std's lent bodies are missing".into()))?;
+    let lent = if record.prebuilt {
+        read_compressed(store, record.lent)?
+    } else {
+        store.get(record.lent)?
+    }
+    .ok_or_else(|| NativeStop::Entry("the release std's lent bodies are missing".into()))?;
     Ok(StdSide {
         key,
         lent,
@@ -838,6 +845,7 @@ fn side(
         points: record.points,
         parts: StdParts {
             key,
+            prebuilt: record.prebuilt,
             instance: Some(instance),
             store: Some(store.clone()),
             exports: record.exports,
@@ -851,6 +859,7 @@ fn side(
 pub(crate) struct StdParts {
     /// The std's key, which each part's names derive from.
     key: ContentHash,
+    prebuilt: bool,
     /// The root each part's object is recorded under.
     instance: Option<Identity>,
     /// The shared cache holding each part's bitcode, and its object once
@@ -912,7 +921,7 @@ fn finish(
             renamed
         })
     };
-    object.bytes = hirsel_llvm_lazy::core::rename_symbols(&object.bytes, &rename)?;
+    object.bytes = hirsel_llvm_lazy::core::rewrite_std_symbols(&object.bytes, &rename)?;
     if let Some(debug) = &mut object.debug {
         for section in &mut debug.sections {
             if is_renamed(section.symbol.as_bytes()) {
@@ -996,7 +1005,13 @@ impl StdSide {
             let mut named = Vec::new();
             let mut missed = Vec::new();
             for i in next {
-                match crate::native_object::load(store, part_name(self.key, i)?)? {
+                let key = part_name(self.key, i)?;
+                let object = if parts.prebuilt {
+                    read_prebuilt_object(store, key)?
+                } else {
+                    crate::native_object::load(store, key)?
+                };
+                match object {
                     Some((bare, object, file)) => {
                         named.extend(
                             hirsel_llvm_lazy::core::undefined_symbols(&object.bytes)
@@ -1080,6 +1095,59 @@ impl StdSide {
             })
             .collect()
     }
+}
+
+/// The installed store keeps the original byte length and one zlib frame.
+fn write_compressed(store: &Store, key: ContentHash, bytes: &[u8]) -> io::Result<()> {
+    let compressed = hirsel_llvm_lazy::compress_std_record(bytes).map_err(io::Error::other)?;
+    let mut payload = Vec::with_capacity(8 + compressed.len());
+    payload.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+    payload.extend_from_slice(&compressed);
+    store.put_keyed(key, &payload)
+}
+
+fn read_compressed(store: &Store, key: ContentHash) -> io::Result<Option<Vec<u8>>> {
+    let Some(payload) = store.get(key)? else {
+        return Ok(None);
+    };
+    let (header, bytes) = payload
+        .split_first_chunk::<8>()
+        .ok_or_else(|| io::Error::other("a compressed release std record has no length"))?;
+    let size = usize::try_from(u64::from_le_bytes(*header))
+        .ok()
+        .and_then(std::num::NonZeroUsize::new)
+        .ok_or_else(|| io::Error::other("invalid release std record length"))?;
+    let decoded = hirsel_llvm_lazy::decompress_std_record(bytes, size).map_err(io::Error::other)?;
+    if decoded.len() != size.get() {
+        return Err(io::Error::other("invalid release std record length"));
+    }
+    Ok(Some(decoded))
+}
+
+/// A linker input only for a prebuilt part the program actually reaches.
+fn read_prebuilt_object(
+    store: &Store,
+    key: ContentHash,
+) -> io::Result<
+    Option<(
+        crate::store::Bare,
+        hirsel_core_ir::source::NativeObject,
+        std::fs::File,
+    )>,
+> {
+    use std::io::Write;
+    let Some(payload) = read_compressed(store, key)? else {
+        return Ok(None);
+    };
+    let native: hirsel_core_ir::source::NativeObject =
+        decode(&payload).ok_or_else(|| io::Error::other("invalid prebuilt release std object"))?;
+    let mut file = tempfile::tempfile()?;
+    file.write_all(&native.bytes)?;
+    let bare = crate::store::Bare {
+        address: key,
+        check: crate::store::checksum(&native.bytes),
+    };
+    Ok(Some((bare, native, file)))
 }
 
 /// The record stored under `key` when it decodes, is of `kin` and its own

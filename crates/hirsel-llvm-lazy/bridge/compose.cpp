@@ -5,6 +5,7 @@
 #include <llvm/IR/Module.h>
 #include <llvm/Linker/Linker.h>
 #include <llvm/Support/CBindingWrapping.h>
+#include <llvm/Support/Compression.h>
 #include <llvm/Support/MemoryBuffer.h>
 #include <llvm/Support/raw_ostream.h>
 #include <llvm/Transforms/IPO/MergeFunctions.h>
@@ -70,4 +71,20 @@ extern "C" void hirsel_llvm_merge_glue(LLVMModuleRef module) {
             (f.getName().starts_with("core_drop_") || f.getName().starts_with("core_compare_")))
             glue.push_back(&f);
     if (glue.size() > 1) llvm::MergeFunctionsPass::runOnFunctions(glue);
+}
+
+// Compress the prepared std object and its detached rows as one store record.
+extern "C" int hirsel_llvm_std_object_codec(const uint8_t *data, size_t size, size_t decoded_size,
+    void (*deliver)(void *, const uint8_t *, size_t), void *receiver, char **error) {
+    namespace zlib = llvm::compression::zlib;
+    llvm::SmallVector<uint8_t, 0> bytes;
+    llvm::ArrayRef<uint8_t> input(data, size);
+    if (!decoded_size) {
+        zlib::compress(input, bytes);
+    } else if (auto failure = zlib::decompress(input, bytes, decoded_size)) {
+        *error = strdup(llvm::toString(std::move(failure)).c_str());
+        return 1;
+    }
+    deliver(receiver, bytes.data(), bytes.size());
+    return 0;
 }

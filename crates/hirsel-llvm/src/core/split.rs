@@ -1045,49 +1045,38 @@ pub fn undefined_symbols(object: &[u8]) -> Result<Vec<Vec<u8>>, String> {
     Ok(names)
 }
 
-/// `object` with each symbol `rename` names anew under that name. The names
-/// move to a string table appended to the file; every other byte is kept.
-pub fn rename_symbols(
+/// Rename a release std object's symbols and omit locals the link never
+/// reads. ARM mapping symbols still distinguish instructions from data.
+pub fn rewrite_std_symbols(
     object: &[u8],
     rename: &dyn Fn(&[u8]) -> Option<Vec<u8>>,
 ) -> Result<Vec<u8>, String> {
-    let header = Header::parse(object).map_err(error)?;
-    if header.e_type(LE).0 != raw::ET_REL {
-        return Err("only a relocatable object's symbols are renamed".into());
-    }
-    let table = header.sections(LE, object).map_err(error)?;
-    let symbols = table.symbols(LE, object, elf::SHT_SYMTAB).map_err(error)?;
-    let symtab = table.section(symbols.section()).map_err(error)?;
-    let strtab_index = symbols.string_section().0;
-    let strtab = table.section(symbols.string_section()).map_err(error)?;
-    let mut strings = strtab.data(LE, object).map_err(error)?.to_vec();
-    let mut out = object.to_vec();
-    let base = symtab.sh_offset(LE) as usize;
-    let entsize = symtab.sh_entsize(LE) as usize;
-    let mut renamed = false;
-    for (i, symbol) in symbols.iter().enumerate() {
-        if symbol.st_name(LE) == 0 {
-            continue;
+    use object::build::Id as _;
+    use object::build::elf::{Builder, SectionData};
+    let mut elf = Builder::read(object).map_err(error)?;
+    let used: std::collections::HashSet<_> = elf
+        .sections
+        .iter()
+        .filter_map(|section| match &section.data {
+            SectionData::Relocation(relocations) => Some(relocations),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|relocation| relocation.symbol.map(|symbol| symbol.index()))
+        .collect();
+    let arm = elf.header.e_machine == elf::EM_AARCH64;
+    for symbol in &mut elf.symbols {
+        let name = symbol.name.as_slice();
+        if symbol.st_bind() == elf::STB_LOCAL
+            && !used.contains(&symbol.id().index())
+            && !(arm && name.starts_with(b"$"))
+        {
+            symbol.delete = true;
+        } else if let Some(name) = rename(name) {
+            symbol.name = name.into();
         }
-        let name = symbols.symbol_name(LE, symbol).map_err(error)?;
-        let Some(new) = rename(name) else { continue };
-        let offset = u32::try_from(strings.len()).map_err(error)?;
-        strings.extend_from_slice(&new);
-        strings.push(0);
-        out[base + i * entsize..][..4].copy_from_slice(&offset.to_le_bytes());
-        renamed = true;
     }
-    if !renamed {
-        return Ok(out);
-    }
-    // The new table goes at the end; its section header is pointed at it.
-    let at = out.len() as u64;
-    out.extend_from_slice(&strings);
-    let shoff = header.e_shoff(LE) as usize;
-    let shentsize = header.e_shentsize(LE) as usize;
-    let sh = shoff + strtab_index * shentsize;
-    // Elf64_Shdr: sh_offset at 24, sh_size at 32.
-    out[sh + 24..][..8].copy_from_slice(&at.to_le_bytes());
-    out[sh + 32..][..8].copy_from_slice(&(strings.len() as u64).to_le_bytes());
+    let mut out = Vec::new();
+    elf.write(&mut out).map_err(error)?;
     Ok(out)
 }

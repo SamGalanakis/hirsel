@@ -127,6 +127,19 @@ pub fn join_lent(modules: &[Vec<u8>]) -> Result<Vec<u8>, String> {
     loader::join_lent(modules)
 }
 
+/// Compress a release std store record using the LLVM engine's zlib.
+pub fn compress_std_record(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    loader::std_object_codec(bytes, 0)
+}
+
+/// Decompress a release std store record to its recorded byte size.
+pub fn decompress_std_record(
+    bytes: &[u8],
+    size: std::num::NonZeroUsize,
+) -> Result<Vec<u8>, String> {
+    loader::std_object_codec(bytes, size.get())
+}
+
 /// What a library's link contract appends to each of its strong definitions
 /// that it does not export.
 pub const LENT_NAMESPACE: &str = "$std";

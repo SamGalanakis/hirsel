@@ -90,14 +90,14 @@ static void error(HirselLlvmOutput *out, const char *message) {
 }
 extern int hirsel_llvm_join_lent(const HirselLlvmUnit *, size_t, HirselLlvmDeliver, void *, char **);
 
-static void deliver_lent(void *out, const uint8_t *data, size_t len) {
+static void deliver_bytes(void *out, const uint8_t *data, size_t len) {
     copy(out, data, len, 0);
 }
 
 __attribute__((visibility("default")))
 void hirsel_llvm_join_lent_v1(const HirselLlvmUnit *units, size_t count, HirselLlvmOutput *out) {
     char *message = NULL;
-    if (hirsel_llvm_join_lent(units, count, deliver_lent, out, &message)) {
+    if (hirsel_llvm_join_lent(units, count, deliver_bytes, out, &message)) {
         error(out, message);
         free(message);
     }
@@ -700,3 +700,15 @@ void hirsel_llvm_compile_v2(const uint8_t *ir, size_t len, uint8_t speed, const 
 extern const void *hirsel_llvm_no_folder_api(void);
 __attribute__((visibility("default")))
 const void *hirsel_llvm_builder_v1(void) { return hirsel_llvm_no_folder_api(); }
+
+extern int hirsel_llvm_std_object_codec(const uint8_t *, size_t, size_t, HirselLlvmDeliver, void *, char **);
+
+__attribute__((visibility("default")))
+void hirsel_llvm_std_object_codec_v1(const uint8_t *data, size_t size, size_t decoded_size,
+                                    HirselLlvmOutput *out) {
+    char *message = NULL;
+    if (hirsel_llvm_std_object_codec(data, size, decoded_size, deliver_bytes, out, &message)) {
+        error(out, message);
+        free(message);
+    }
+}

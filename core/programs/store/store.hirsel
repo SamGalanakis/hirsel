@@ -3642,20 +3642,41 @@ pub fn fetch[K, V](tx: Tx, t: Shape[K, V], k: K) -> Result[Option[V], Error] {
 
 type DataEdit = StoreRow(Bytes, Bytes) | RemoveRow(Bytes, u64)
 
-fn append_index_remove(tx: Tx, mut edits: List[DataEdit], take key: Bytes, mut frame: u64) -> Result[(), Error] {
+type IndexEdits {
+    first: Option[DataEdit],
+    rest: List[DataEdit]
+}
+
+fn push_index_edit(mut edits: IndexEdits, take edit: DataEdit) {
+    if let None = edits.first {
+        edits.first = Some(take edit)
+    } else {
+        list.push(mut edits.rest, take edit)
+    }
+}
+
+fn append_index_remove(tx: Tx, mut edits: IndexEdits, take key: Bytes, mut frame: u64) -> Result[(), Error] {
     if let Some(refund) = delete_refund(tx, key) {
         frame = edit_frame(tx, key, 5 + list.len(key), frame)?
-        list.push(mut edits, RemoveRow(take key, refund))
+        push_index_edit(mut edits, RemoveRow(take key, refund))
     }
     Ok(())
 }
 
-fn apply_edits(mut tx: Tx, take edits: List[DataEdit]) -> Result[(), Error] {
-    for take edit in take edits {
-        match take edit {
-            StoreRow(take key, take raw) => apply_put(mut tx, take key, take raw)?,
-            RemoveRow(take key, refund) => apply_delete(mut tx, take key, refund)?,
-        }
+fn apply_edit(mut tx: Tx, take edit: DataEdit) -> Result[(), Error] {
+    match take edit {
+        StoreRow(take key, take raw) => apply_put(mut tx, take key, take raw),
+        RemoveRow(take key, refund) => apply_delete(mut tx, take key, refund),
+    }
+}
+
+fn apply_edits(mut tx: Tx, take edits: IndexEdits) -> Result[(), Error] {
+    let IndexEdits(first: take first, rest: take rest) = take edits
+    if let Some(take edit) = take first {
+        apply_edit(mut tx, take edit)?
+    }
+    for take edit in take rest {
+        apply_edit(mut tx, take edit)?
     }
     Ok(())
 }
@@ -3678,7 +3699,7 @@ fn put_impl[K, V](mut tx: Tx, t: Table[K, V], take p: Bytes, v: V) -> Result[(),
             Some(old) => Some(row_value(t.readers, t.id, old)?),
             None => None
         }
-        let mut edits: List[DataEdit] = list.new()
+        let mut edits = IndexEdits(first: None, rest: list.new())
         for ix in t.indexes {
             let key = list.slice(p, 4, list.len(p))
             let index_row = capacity((ix.extract)(v, Some(ix.id), key))?
@@ -3691,7 +3712,7 @@ fn put_impl[K, V](mut tx: Tx, t: Table[K, V], take p: Bytes, v: V) -> Result[(),
             }
             let empty: Bytes = list.new()
             frame = put_frame(tx, index_row, empty, frame)?
-            list.push(mut edits, StoreRow(take index_row, take empty))
+            push_index_edit(mut edits, StoreRow(take index_row, take empty))
         }
         apply_put(mut tx, take p, take raw)?
         apply_edits(mut tx, take edits)?
@@ -3715,7 +3736,7 @@ fn delete_impl[K, V](mut tx: Tx, t: Table[K, V], key: Bytes) -> Result[bool, Err
         })
     }
     let mut frame = tx.frame_bytes
-    let mut edits: List[DataEdit] = list.new()
+    let mut edits = IndexEdits(first: None, rest: list.new())
     for ix in t.indexes {
         let row = capacity((ix.extract)(old, Some(ix.id), key))?
         append_index_remove(tx, mut edits, take row, mut frame)?

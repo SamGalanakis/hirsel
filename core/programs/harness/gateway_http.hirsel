@@ -72,7 +72,6 @@ pub type Front: send {
     net: Net,
     tail_lines: u64,
     within_ms: u64,
-    poll_ms: u64,
     beat_ms: u64,
     conn_bytes: u64,
     conns_max: u64,
@@ -81,12 +80,12 @@ pub type Front: send {
 }
 
 pub opaque type Served {
-    halt: Sender[()],
-    accepting: Task[()]
+    to: Sender[FrontEvent],
+    serving: Task[()]
 }
 
 fn copy_front(f: Front) -> Front {
-    Front(bind: f.bind, bind_bytes: f.bind_bytes, bind_steps: f.bind_steps, authority: clone(f.authority), submit: clone(f.submit), decide: clone(f.decide), keys: clone(f.keys), socket: clone(f.socket), agent: string.from(f.agent), narrow: clone(f.narrow), preview: copy_preview(f.preview), tasks: f.tasks, clock: f.clock, random: f.random, net: f.net, tail_lines: f.tail_lines, within_ms: f.within_ms, poll_ms: f.poll_ms, beat_ms: f.beat_ms, conn_bytes: f.conn_bytes, conns_max: f.conns_max, head_max: f.head_max, body_max: f.body_max)
+    Front(bind: f.bind, bind_bytes: f.bind_bytes, bind_steps: f.bind_steps, authority: clone(f.authority), submit: clone(f.submit), decide: clone(f.decide), keys: clone(f.keys), socket: clone(f.socket), agent: string.from(f.agent), narrow: clone(f.narrow), preview: copy_preview(f.preview), tasks: f.tasks, clock: f.clock, random: f.random, net: f.net, tail_lines: f.tail_lines, within_ms: f.within_ms, beat_ms: f.beat_ms, conn_bytes: f.conn_bytes, conns_max: f.conns_max, head_max: f.head_max, body_max: f.body_max)
 }
 
 fn window_entry() -> store.client.Callee[harness.Window, ()] {
@@ -726,7 +725,7 @@ type Conn[T: send]: send {
     front: Front,
     socket: Socket,
     slot: u64,
-    done: Sender[u64],
+    done: Sender[FrontEvent],
     quit: Receiver[()]
 }
 
@@ -736,7 +735,7 @@ fn connection[T: send](take job: Conn[T]) -> () waits {
     let mut read = take r
     let mut write = take w
     serve_one(d, f, mut read, mut write, quit)
-    let _ = channel.send(done, slot)
+    let _ = channel.send(done, Finished(slot))
 }
 
 fn serve_one[T: send](d: harness.gateway.Door[T], f: Front, mut read: ReadHalf, mut write: WriteHalf, quit: Receiver[()]) -> () waits {
@@ -857,76 +856,79 @@ fn serve_one[T: send](d: harness.gateway.Door[T], f: Front, mut read: ReadHalf, 
 }
 
 // ---- serving ----
-type Accepting[T: send]: send {
+type FrontEvent: send = Accepted(Socket) | ListenerEnded | Finished(u64) | Halt
+
+type Acceptor: send { listener: Listener, permit: Receiver[()], to: Sender[FrontEvent] }
+
+fn accept_sockets(take job: Acceptor) waits {
+    let Acceptor(listener: take listener, permit: take permit, to: take to) = take job
+    let mut l = take listener
+    while let Ok(()) = channel.receive(permit) {
+        match host.accept(mut l, Never) {
+            Ok((take socket, _)) => if let Error(_) = channel.send(to, Accepted(take socket)) { return },
+            Error(_) => { let _ = channel.send(to, ListenerEnded); return },
+        }
+    }
+}
+
+type FrontJob[T: send]: send {
     door: harness.gateway.Door[T],
     front: Front,
     listener: Listener,
-    stop: Receiver[()]
+    to: Sender[FrontEvent],
+    inbox: Receiver[FrontEvent]
 }
 
-// Accepts connections until told to stop, and joins each connection's task when it ends.
-// At the stop it tells every open stream to end, which each does within a beat.
-fn accept_loop[T: send](take job: Accepting[T]) -> () waits {
-    let Accepting(door: take d, front: take f, listener: take listener, stop: take stop) = take job
-    let mut l = take listener
-    let (done, ended): (Sender[u64], Receiver[u64]) = channel.new(f.conns_max + 1u64)
-    let mut conns: List[(u64, Sender[()], Task[()])] = list.new()
+fn serve_front[T: send](take job: FrontJob[T]) -> () waits {
+    let FrontJob(door: take d, front: take f, listener: take listener, to: take to, inbox: take inbox) = take job
+    let (permit, permits): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let acceptor = Acceptor(listener: take listener, permit: take permits, to: channel.sender(to))
+    let accepting = task.spawn(f.tasks, bytes 8192u64, take acceptor, accept_sockets)
+    let _ = channel.try_send(permit, ())
+    let mut conns: Map[u64, (Sender[()], Task[()])] = map.new()
     let mut next = 0u64
     let run: fn(take Conn[T]) -> () waits = connection
-    loop {
-        while let Ok(slot) = channel.try_receive(ended) {
-            let mut kept: List[(u64, Sender[()], Task[()])] = list.new()
-            while let Some((s, take h, take t)) = list.pop(mut conns) {
-                if s == slot {
-                    let _ = task.join(take t)
-                } else {
-                    list.push(mut kept, (s, take h, take t))
-                }
-            }
-            conns = take kept
-        }
-        if halted(stop) {
-            break
-        }
-        match host.accept(mut l, At(f.clock, deadline_ms(f.clock, f.poll_ms))) {
-            Ok((take socket, _)) => {
-                if list.len(conns) >= f.conns_max {
+    while let Ok(take event) = channel.receive(inbox) {
+        match take event {
+            Accepted(take socket) => {
+                if map.len(conns) >= f.conns_max {
                     let (_, w) = net.split(take socket)
                     let mut write = take w
                     reply(mut write, f, 503u16, list.new())
                 } else {
                     let (h, quit): (Sender[()], Receiver[()]) = channel.new(1u64)
-                    let conn = Conn(door: harness.gateway.copy_door(d), front: copy_front(f), socket: take socket, slot: next, done: channel.sender(done), quit: take quit)
+                    let conn = Conn(door: harness.gateway.copy_door(d), front: copy_front(f), socket: take socket, slot: next, done: channel.sender(to), quit: take quit)
                     let t = task.spawn(f.tasks, bytes f.conn_bytes, take conn, run)
-                    list.push(mut conns, (next, take h, take t))
+                    map.insert(mut conns, next, (take h, take t))
                     next += 1u64
                 }
+                let _ = channel.try_send(permit, ())
             },
-            Error(_) => (),
+            Finished(slot) => if let Some((_, take t)) = map.remove(mut conns, slot) { let _ = task.join(take t) },
+            Halt => break,
+            ListenerEnded => break,
         }
     }
-    let _ = take l
-    while let Some((_, take h, take t)) = list.pop(mut conns) {
-        let _ = channel.try_send(h, ())
-        let _ = task.join(take t)
-    }
+    let _ = task.cancel_join(take accepting)
+    for (_, (h, _)) in conns { let _ = channel.try_send(h, ()) }
+    for take (_, (_, take t)) in take conns { let _ = task.join(take t) }
 }
 
 // Serves the gateway behind `d` on `listener` until `halt`.
 pub fn serve[T: send](d: harness.gateway.Door[T], take front: Front, take listener: Listener) -> Served {
-    let (h, stop): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let (to, inbox): (Sender[FrontEvent], Receiver[FrontEvent]) = channel.new(front.conns_max + 2u64)
     let tasks = front.tasks
-    // The accept task's own buffers, and every connection's task inside it.
+    // The supervisor and acceptor's buffers, and the connections' tasks.
     let room = 1048576u64 + front.conns_max * front.conn_bytes
-    let job = Accepting(door: harness.gateway.copy_door(d), front: take front, listener: take listener, stop: take stop)
-    let run: fn(take Accepting[T]) -> () waits = accept_loop
-    let accepting = task.spawn(tasks, bytes room, take job, run)
-    Served(halt: take h, accepting: take accepting)
+    let job = FrontJob(door: harness.gateway.copy_door(d), front: take front, listener: take listener, to: channel.sender(to), inbox: take inbox)
+    let run: fn(take FrontJob[T]) -> () waits = serve_front
+    let serving = task.spawn(tasks, bytes room, take job, run)
+    Served(to: take to, serving: take serving)
 }
 
 // Stops accepting, ends every open stream and waits for every connection's task.
 pub fn halt(take s: Served) -> () waits {
-    let Served(halt: take h, accepting: take accepting) = take s
-    let _ = channel.send(h, ())
-    let _ = task.join(take accepting)
+    let Served(to: take to, serving: take serving) = take s
+    let _ = channel.send(to, Halt)
+    let _ = task.join(take serving)
 }

@@ -8,6 +8,19 @@ fn test_gateway_route_acl(parent: Dir, clock: Clock, random: Random, tasks: Task
     cold_routes(parent, clock, random, tasks, net)
 }
 
+// Both tabs must have the same held draft before the idle window starts.
+fn idle_preview_tab(net: Net, clock: Clock, port: u16, me: Bytes, reads: Receiver[()]) -> Result[std.http_client.Connection, u64] waits {
+    let mut other = browser(net, clock, port, me)?
+    let mut decoder = std.sse.decoder(65536u64)
+    let Some(_) = first_draft(mut other, mut decoder) else { return Error(49u64) }
+    let Ok(()) = channel.try_receive(reads) else { return Error(49u64) }
+    std.clock.sleep_ns(clock, 1000000000u64)
+    match channel.try_receive(reads) {
+        Error(Empty) => Ok(take other),
+        _ => Error(48u64),
+    }
+}
+
 fn cold_routes(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), u64] waits {
     let mut name = string.with_capacity(32u64)
     let root = result.unwrap(host.mkdtemp(parent, mut name))
@@ -19,7 +32,7 @@ fn cold_routes(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
     let config = harness.gateway.GatewayConfig(root: root, options: store.triggers.law_options(), migrate: code.describe(harness.migrate), factory: session_factory(), max_sessions: 2u64, idle_ms: IDLE_MS, place_bytes: 67108864u64, tasks: tasks, clock: clock, random: random, net: net, watch: None, seed: take seed)
     let g = result.unwrap(harness.gateway.gateway(take way, take config))
     let (listener, at) = result.unwrap(host.listen(net, local(0u16), 16u16))
-    let front = harness.gateway_http.Front(bind: code.describe(store.ingress.caller), bind_bytes: 4096u64, bind_steps: 65536u64, authority: string.into_bytes("localhost"), submit: store.client.transact_entry(code.describe(submit_entry)), decide: store.client.transact_entry(code.describe(decide_entry)), keys: result.unwrap(store.client.entry_keys(code.describe(place))), socket: wire().socket, agent: "scripted", narrow: All, preview: None, tasks: tasks, clock: clock, random: random, net: net, tail_lines: 64u64, within_ms: WITHIN_MS, poll_ms: 10u64, beat_ms: 50u64, conn_bytes: EFFECT_GRANT, conns_max: 4u64, head_max: 8192u64, body_max: 65536u64)
+    let front = harness.gateway_http.Front(bind: code.describe(store.ingress.caller), bind_bytes: 4096u64, bind_steps: 65536u64, authority: string.into_bytes("localhost"), submit: store.client.transact_entry(code.describe(submit_entry)), decide: store.client.transact_entry(code.describe(decide_entry)), keys: result.unwrap(store.client.entry_keys(code.describe(place))), socket: wire().socket, agent: "scripted", narrow: All, preview: None, tasks: tasks, clock: clock, random: random, net: net, tail_lines: 64u64, within_ms: WITHIN_MS, beat_ms: 50u64, conn_bytes: EFFECT_GRANT, conns_max: 4u64, head_max: 8192u64, body_max: 65536u64)
     let served = harness.gateway_http.serve(door, take front, take listener)
     let me = store.ingress.credential(random)
     let (created, _) = http(net, clock, at.port, "POST", "/sessions", person(me, 0u64), string.into_bytes("acl"))

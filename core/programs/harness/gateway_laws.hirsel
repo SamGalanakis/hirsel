@@ -798,7 +798,7 @@ fn tool_stream(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
     } else {
         None
     }
-    let front = harness.gateway_http.Front(bind: code.describe(store.ingress.caller), bind_bytes: 4096u64, bind_steps: 65536u64, authority: string.into_bytes("localhost"), submit: store.client.transact_entry(code.describe(submit_entry)), decide: store.client.transact_entry(code.describe(decide_entry)), keys: result.unwrap(store.client.entry_keys(code.describe(place))), socket: wire().socket, agent: "scripted", narrow: All, preview: take front_port, tasks: tasks, clock: clock, random: random, net: net, tail_lines: 64u64, within_ms: WITHIN_MS, poll_ms: 20u64, beat_ms: 200u64, conn_bytes: EFFECT_GRANT, conns_max: 4u64, head_max: 8192u64, body_max: 65536u64)
+    let front = harness.gateway_http.Front(bind: code.describe(store.ingress.caller), bind_bytes: 4096u64, bind_steps: 65536u64, authority: string.into_bytes("localhost"), submit: store.client.transact_entry(code.describe(submit_entry)), decide: store.client.transact_entry(code.describe(decide_entry)), keys: result.unwrap(store.client.entry_keys(code.describe(place))), socket: wire().socket, agent: "scripted", narrow: All, preview: take front_port, tasks: tasks, clock: clock, random: random, net: net, tail_lines: 64u64, within_ms: WITHIN_MS, beat_ms: 200u64, conn_bytes: EFFECT_GRANT, conns_max: 4u64, head_max: 8192u64, body_max: 65536u64)
     let served = harness.gateway_http.serve(door, take front, take listener)
     let port = at.port
     let me = store.ingress.credential(random)
@@ -1196,7 +1196,7 @@ fn preview_run(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
     } else {
         None
     }
-    let front = harness.gateway_http.Front(bind: code.describe(store.ingress.caller), bind_bytes: 4096u64, bind_steps: 65536u64, authority: string.into_bytes("localhost"), submit: store.client.transact_entry(code.describe(submit_entry)), decide: store.client.transact_entry(code.describe(decide_entry)), keys: result.unwrap(store.client.entry_keys(code.describe(place))), socket: wire().socket, agent: "scripted", narrow: All, preview: take front_port, tasks: tasks, clock: clock, random: random, net: net, tail_lines: 64u64, within_ms: WITHIN_MS, poll_ms: 10u64, beat_ms: 50u64, conn_bytes: EFFECT_GRANT, conns_max: 4u64, head_max: 8192u64, body_max: 65536u64)
+    let front = harness.gateway_http.Front(bind: code.describe(store.ingress.caller), bind_bytes: 4096u64, bind_steps: 65536u64, authority: string.into_bytes("localhost"), submit: store.client.transact_entry(code.describe(submit_entry)), decide: store.client.transact_entry(code.describe(decide_entry)), keys: result.unwrap(store.client.entry_keys(code.describe(place))), socket: wire().socket, agent: "scripted", narrow: All, preview: take front_port, tasks: tasks, clock: clock, random: random, net: net, tail_lines: 64u64, within_ms: WITHIN_MS, beat_ms: 50u64, conn_bytes: EFFECT_GRANT, conns_max: 4u64, head_max: 8192u64, body_max: 65536u64)
     let served = harness.gateway_http.serve(door, take front, take listener)
     let port = at.port
     let me = store.ingress.credential(random)
@@ -1244,15 +1244,7 @@ fn preview_run(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
             return Error(41u64)
         }
 
-        // Keep the run and its draft unchanged across the idle window. The
-        // worker stays blocked until EOF, so only the live ACL change can end
-        // the stream. Comments may still arrive during this interval.
-        let Ok(()) = channel.try_receive(reads) else { return Error(49u64) }
-        std.clock.sleep_ns(clock, 1000000000u64)
-        match channel.try_receive(reads) {
-            Error(Empty) => (),
-            _ => return Error(48u64),
-        }
+        let mut other = idle_preview_tab(net, clock, port, me, reads)?
         let change = store.fixture.transact_entry(code.describe(revoke_reader))
         let Ok(Ok(())) = call_routed(door, 0u64, me, 1u64, change, (), tasks, clock, random, net) else {
             return Error(42u64)
@@ -1261,6 +1253,7 @@ fn preview_run(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
         if !ended_without_rows(mut tab) || host.mono_ns(clock) - revoked_at > 50000000u64 {
             return Error(43u64)
         }
+        if !ended_without_rows(mut other) { return Error(43u64) }
         let Ok(rest) = channel.receive(inbox) else { return Error(45u64) }
         let _ = channel.send(rest, ())
         if !denied_history(net, clock, port, me) { return Error(47u64) }

@@ -51,7 +51,7 @@ pub(super) fn check_fallback_seal() {
             },
         ),
     ] {
-        let mut sending = TrafficKey::sending((255, secret)).unwrap();
+        let mut sending = TrafficKey::new((255, secret)).unwrap();
         assert!(sending.out_of_place.is_none());
         let opening = LessSafeKey::new(UnboundKey::new(algorithm, &key).unwrap());
         let mut slot = Slot::new(HEADER + usize::from(header[4]));
@@ -78,27 +78,17 @@ pub(super) fn check_fallback_seal() {
 
 struct TrafficKey {
     key: LessSafeKey,
-    /// AES-GCM that seals straight from the caller's bytes into the slot.
+    /// AES-GCM that seals straight from the caller's bytes into the send
+    /// slot and opens straight from the receive slot into the caller's bytes.
     #[cfg(target_arch = "x86_64")]
-    out_of_place: Option<super::gcm::SealKey>,
+    out_of_place: Option<super::gcm::GcmKey>,
     iv: Iv,
     seq: u64,
 }
 
 impl TrafficKey {
-    fn new(secrets: (u64, ConnectionTrafficSecrets)) -> Result<Self, Outcome> {
-        Self::with(secrets, false)
-    }
-
-    /// A send key, which seals AES-GCM out of place where the CPU allows.
-    fn sending(secrets: (u64, ConnectionTrafficSecrets)) -> Result<Self, Outcome> {
-        Self::with(secrets, true)
-    }
-
-    fn with(
-        (seq, secret): (u64, ConnectionTrafficSecrets),
-        sending: bool,
-    ) -> Result<Self, Outcome> {
+    /// A key that seals and opens AES-GCM out of place where the CPU allows.
+    fn new((seq, secret): (u64, ConnectionTrafficSecrets)) -> Result<Self, Outcome> {
         let (algorithm, key, iv) = match secret {
             ConnectionTrafficSecrets::Aes128Gcm { key, iv } => (&aead::AES_128_GCM, key, iv),
             ConnectionTrafficSecrets::Aes256Gcm { key, iv } => (&aead::AES_256_GCM, key, iv),
@@ -108,11 +98,9 @@ impl TrafficKey {
             _ => return Err(tls_failure(4, 0)),
         };
         #[cfg(target_arch = "x86_64")]
-        let out_of_place = (sending && algorithm != &aead::CHACHA20_POLY1305)
-            .then(|| super::gcm::SealKey::new(key.as_ref()))
+        let out_of_place = (algorithm != &aead::CHACHA20_POLY1305)
+            .then(|| super::gcm::GcmKey::new(key.as_ref()))
             .flatten();
-        #[cfg(not(target_arch = "x86_64"))]
-        let _ = sending;
         let key = LessSafeKey::new(
             UnboundKey::new(algorithm, key.as_ref()).map_err(|_| tls_failure(4, 0))?,
         );
@@ -183,6 +171,55 @@ impl TrafficKey {
             .rposition(|&byte| byte != 0)
             .ok_or(AlertDescription::UnexpectedMessage)?;
         Ok((plaintext[content], content))
+    }
+
+    /// Whether `open_into` can open a record of `body` ciphertext bytes, tag
+    /// included, into `out`.
+    fn opens_into(&self, body: usize, out: &[u8]) -> bool {
+        #[cfg(target_arch = "x86_64")]
+        return self.out_of_place.is_some() && body >= TAG && out.len() >= body - TAG;
+        #[cfg(not(target_arch = "x86_64"))]
+        return false;
+    }
+
+    /// Opens a whole record, header first, into `out`, which takes its whole
+    /// decrypted body (payload, content type and padding) and must hold it,
+    /// as `opens_into` checks. Returns the content type and the payload
+    /// length. A record that fails to open leaves `out` zeroed.
+    #[cfg(target_arch = "x86_64")]
+    fn open_into(
+        &mut self,
+        record: &[u8],
+        out: &mut [u8],
+        limit: u64,
+    ) -> Result<(u8, usize), AlertDescription> {
+        if self.seq >= limit {
+            return Err(AlertDescription::UnexpectedMessage);
+        }
+        let (header, body) = record.split_at(HEADER);
+        let plaintext = &mut out[..body.len() - TAG];
+        let nonce = self.nonce();
+        let key = self.out_of_place.as_ref().unwrap();
+        key.open(*nonce.as_ref(), header, body, plaintext)
+            .map_err(|()| AlertDescription::BadRecordMac)?;
+        if plaintext.len() > RECORD + 1 {
+            return Err(AlertDescription::RecordOverflow);
+        }
+        let content = plaintext
+            .iter()
+            .rposition(|&byte| byte != 0)
+            .ok_or(AlertDescription::UnexpectedMessage)?;
+        Ok((plaintext[content], content))
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    fn open_into(
+        &mut self,
+        _: &[u8],
+        _: &mut [u8],
+        _: u64,
+    ) -> Result<(u8, usize), AlertDescription> {
+        unreachable!("opens_into refuses")
     }
 }
 
@@ -485,7 +522,7 @@ impl Records {
                 kernel,
                 fragment: Vec::new(),
             },
-            tx_key: TrafficKey::sending(secrets.tx)?,
+            tx_key: TrafficKey::new(secrets.tx)?,
             rx_key: TrafficKey::new(secrets.rx)?,
             tx_limit,
             rx_limit: limit,
@@ -506,7 +543,7 @@ impl Records {
     fn update_tx(&mut self) -> Result<(), Outcome> {
         self.tx
             .seal(&mut self.tx_key, HANDSHAKE, &[KEY_UPDATE, 0, 0, 1, 0])?;
-        self.tx_key = TrafficKey::sending(
+        self.tx_key = TrafficKey::new(
             self.handshake
                 .kernel
                 .update_tx_secret()
@@ -540,28 +577,72 @@ impl Records {
         }
     }
 
-    fn read_record(&mut self, socket: &mut SocketIo, allow_read: bool) -> Result<bool, ReadEnd> {
+    /// Opens the next record. None while it would wait; else how many
+    /// payload bytes it delivered straight into `direct`. Application data
+    /// opens there when its whole decrypted body fits, and otherwise in the
+    /// receive slot, as `plaintext`. Past the delivered bytes, `direct` holds
+    /// nothing a record carried: anything else opened there is zeroed.
+    fn read_record(
+        &mut self,
+        socket: &mut SocketIo,
+        allow_read: bool,
+        direct: &mut [u8],
+    ) -> Result<Option<usize>, ReadEnd> {
         let (start, end) = loop {
             let input = &self.rx.bytes[self.rx.start..self.rx.end];
             if let Some(len) = whole_record(input).map_err(ReadEnd::Local)? {
                 break (self.rx.start, self.rx.start + len);
             }
             if !allow_read {
-                return Ok(false);
+                return Ok(None);
             }
             match self.rx.read(socket) {
                 Ok(0) => return Err(ReadEnd::Transport(tls_failure(6, 0))),
                 Ok(_) => {}
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(false),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(None),
                 Err(error) => return Err(ReadEnd::Transport(transport(error))),
             }
         };
 
-        let (kind, content) = self
-            .rx_key
-            .open(&mut self.rx.bytes[start..end], self.rx_limit)
-            .map_err(ReadEnd::Local)?;
-        let payload = &self.rx.bytes[start + HEADER..start + HEADER + content];
+        let into = self.rx_key.opens_into(end - start - HEADER, direct);
+        let delivered = self.dispatch(start..end, into.then_some(&mut *direct));
+        if into {
+            // The content type, padding and any control payload.
+            let opened = end - start - HEADER - TAG;
+            direct[*delivered.as_ref().unwrap_or(&0)..opened].fill(0);
+        }
+        let delivered = delivered?;
+        self.rx.consume(end - start);
+        Ok(Some(delivered))
+    }
+
+    /// Opens the whole record at `record` in the receive slot, or into
+    /// `direct`, and acts on it. Returns the payload bytes left in `direct`.
+    fn dispatch(
+        &mut self,
+        record: Range<usize>,
+        direct: Option<&mut [u8]>,
+    ) -> Result<usize, ReadEnd> {
+        let start = record.start;
+        let into = direct.is_some();
+        let (kind, content, payload): (u8, usize, &[u8]) = match direct {
+            Some(out) => {
+                let (kind, content) = self
+                    .rx_key
+                    .open_into(&self.rx.bytes[record], out, self.rx_limit)
+                    .map_err(ReadEnd::Local)?;
+                (kind, content, &out[..content])
+            }
+            None => {
+                let (kind, content) = self
+                    .rx_key
+                    .open(&mut self.rx.bytes[record], self.rx_limit)
+                    .map_err(ReadEnd::Local)?;
+                let payload = &self.rx.bytes[start + HEADER..start + HEADER + content];
+                (kind, content, payload)
+            }
+        };
+        let mut delivered = 0;
         if kind != HANDSHAKE && !self.handshake.fragment.is_empty() {
             return Err(ReadEnd::Local(AlertDescription::UnexpectedMessage));
         }
@@ -575,7 +656,11 @@ impl Records {
                     }
                 } else {
                     self.consecutive_empty = 0;
-                    self.plaintext = start + HEADER..start + HEADER + content;
+                    if into {
+                        delivered = content;
+                    } else {
+                        self.plaintext = start + HEADER..start + HEADER + content;
+                    }
                 }
             }
             HANDSHAKE if !payload.is_empty() => {
@@ -601,8 +686,7 @@ impl Records {
             },
             _ => return Err(ReadEnd::Local(AlertDescription::UnexpectedMessage)),
         }
-        self.rx.consume(end - start);
-        Ok(true)
+        Ok(delivered)
     }
 
     fn stop_read(&mut self, socket: &mut SocketIo, end: ReadEnd) {
@@ -640,21 +724,32 @@ impl Records {
         }
     }
 
-    fn read_ready(&mut self, socket: &mut SocketIo, allow_read: bool) -> bool {
+    /// Opens records until plaintext waits in the slot, the read ends or
+    /// payload lands in `direct`. None while it would wait; else how many
+    /// bytes landed in `direct`.
+    fn read_ready(
+        &mut self,
+        socket: &mut SocketIo,
+        allow_read: bool,
+        direct: &mut [u8],
+    ) -> Option<usize> {
         while self.plaintext.is_empty() && self.read_end.is_none() {
-            match self.read_record(socket, allow_read) {
-                Ok(true) => {
+            match self.read_record(socket, allow_read, direct) {
+                Ok(Some(delivered)) => {
                     if self.reply_update
                         && let Err(error) = self.flush(socket)
                     {
                         self.write_end = Some(error);
                     }
+                    if delivered != 0 {
+                        return Some(delivered);
+                    }
                 }
-                Ok(false) => return false,
+                Ok(None) => return None,
                 Err(end) => self.stop_read(socket, end),
             }
         }
-        true
+        Some(0)
     }
 }
 
@@ -671,7 +766,16 @@ impl SecureStream for Records {
         }
         let mut socket = SocketIo(fd);
         let mut copied = 0;
-        while copied < destination.len() && self.read_ready(&mut socket, copied == 0) {
+        while copied < destination.len() {
+            let Some(delivered) =
+                self.read_ready(&mut socket, copied == 0, &mut destination[copied..])
+            else {
+                break;
+            };
+            copied += delivered;
+            if delivered != 0 {
+                continue;
+            }
             if let Some(end) = self.read_end {
                 return Some(if copied == 0 { end } else { count(copied) });
             }
@@ -687,9 +791,9 @@ impl SecureStream for Records {
     }
 
     fn ready(&mut self, fd: i32) -> Option<Outcome> {
-        let ready = self.read_ready(&mut SocketIo(fd), true);
+        let ready = self.read_ready(&mut SocketIo(fd), true, &mut []);
         self.release_rx();
-        ready.then(|| count(0))
+        ready.map(|_| count(0))
     }
 
     fn send(&mut self, fd: i32, zc: ZeroCopy, prefix: &[u8], tail: &[u8]) -> Option<Outcome> {

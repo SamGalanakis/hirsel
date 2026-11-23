@@ -1,11 +1,12 @@
-//! Out-of-place AES-GCM sealing over ring 0.17.14's VAES/VPCLMULQDQ assembly.
+//! Out-of-place AES-GCM over ring 0.17.14's VAES/VPCLMULQDQ assembly.
 //!
-//! ring seals only in place, which costs a plaintext copy into the send slot.
-//! This drives the same audited assembly ring selects on these CPUs
-//! (`aes_gcm_enc_update_vaes_avx2` and its key and GHASH routines) with a
-//! separate source and destination. The framing follows ring's `aes_gcm::seal`:
-//! counter block 1 masks the tag, bulk blocks start at counter 2, and the
-//! partial last block is encrypted and hashed from the destination.
+//! ring seals and opens only in place, which costs a plaintext copy into the
+//! send slot and another out of the receive slot. This drives the same audited
+//! assembly ring selects on these CPUs (`aes_gcm_{enc,dec}_update_vaes_avx2`
+//! and its key and GHASH routines) with a separate source and destination.
+//! The framing follows ring's `aes_gcm::{seal, open}`: counter block 1 masks
+//! the tag, bulk blocks start at counter 2, and the partial last block is
+//! hashed as ciphertext zero-padded to a block.
 #![cfg(target_arch = "x86_64")]
 
 const BLOCK: usize = 16;
@@ -39,14 +40,24 @@ unsafe extern "C" {
         table: &HTable,
         xi: &mut [u8; 16],
     );
+    #[link_name = "ring_core_0_17_14__aes_gcm_dec_update_vaes_avx2"]
+    fn gcm_dec(
+        input: *const u8,
+        output: *mut u8,
+        len: usize,
+        key: &AesKey,
+        ivec: &[u8; 16],
+        table: &HTable,
+        xi: &mut [u8; 16],
+    );
 }
 
-pub(super) struct SealKey {
+pub(super) struct GcmKey {
     aes: AesKey,
     table: HTable,
 }
 
-impl SealKey {
+impl GcmKey {
     /// The CPU features ring requires before it selects this assembly.
     fn supported() -> bool {
         std::arch::is_x86_feature_detected!("aes")
@@ -100,6 +111,43 @@ impl SealKey {
         }
     }
 
+    /// The counter block that masks the tag, the first bulk counter block and
+    /// GHASH over `aad`.
+    fn start(&self, nonce: [u8; 12], aad: &[u8]) -> ([u8; BLOCK], [u8; BLOCK], [u8; BLOCK]) {
+        let mut counter = [0; BLOCK];
+        counter[..12].copy_from_slice(&nonce);
+        counter[15] = 1;
+        let tag_mask = counter;
+        counter[15] = 2;
+        let mut xi = [0; BLOCK];
+        self.ghash(&mut xi, aad);
+        (tag_mask, counter, xi)
+    }
+
+    fn advance(counter: &mut [u8; BLOCK], bytes: usize) {
+        let next = u32::from_be_bytes(counter[12..].try_into().unwrap())
+            .wrapping_add((bytes / BLOCK) as u32);
+        counter[12..].copy_from_slice(&next.to_be_bytes());
+    }
+
+    /// Hashes the bit lengths and masks the result into the tag.
+    fn finish(
+        &self,
+        mut xi: [u8; BLOCK],
+        tag_mask: &[u8; BLOCK],
+        aad: usize,
+        len: usize,
+    ) -> [u8; BLOCK] {
+        let mut lengths = [0; BLOCK];
+        lengths[..8].copy_from_slice(&(aad as u64 * 8).to_be_bytes());
+        lengths[8..].copy_from_slice(&(len as u64 * 8).to_be_bytes());
+        // SAFETY: one block.
+        unsafe { gcm_ghash(&mut xi, &self.table, lengths.as_ptr(), BLOCK) };
+        // SAFETY: one in-place block.
+        unsafe { aes_ctr32(xi.as_mut_ptr(), xi.as_mut_ptr(), 1, &self.aes, tag_mask) };
+        xi
+    }
+
     /// Seals `input ‖ [extra]` under `nonce` and `aad` into `out`, which holds
     /// `input.len() + 1` ciphertext bytes followed by the 16-byte tag. The
     /// plaintext is read from `input` and written nowhere but `out`.
@@ -113,13 +161,7 @@ impl SealKey {
     ) {
         let len = input.len() + 1;
         assert_eq!(out.len(), len + BLOCK);
-        let mut counter = [0; BLOCK];
-        counter[..12].copy_from_slice(&nonce);
-        counter[15] = 1;
-        let tag_mask = counter;
-        counter[15] = 2;
-        let mut xi = [0; BLOCK];
-        self.ghash(&mut xi, aad);
+        let (tag_mask, mut counter, mut xi) = self.start(nonce, aad);
 
         let whole = input.len() / BLOCK * BLOCK;
         if whole != 0 {
@@ -135,9 +177,7 @@ impl SealKey {
                     &mut xi,
                 )
             };
-            let next = u32::from_be_bytes(counter[12..].try_into().unwrap())
-                .wrapping_add((whole / BLOCK) as u32);
-            counter[12..].copy_from_slice(&next.to_be_bytes());
+            Self::advance(&mut counter, whole);
         }
 
         // The partial block (1 to 16 bytes, ending in `extra`) is built in
@@ -159,21 +199,68 @@ impl SealKey {
         block[rest..].fill(0);
         // SAFETY: one block.
         unsafe { gcm_ghash(&mut xi, &self.table, block.as_ptr(), BLOCK) };
+        out[len..].copy_from_slice(&self.finish(xi, &tag_mask, aad.len(), len));
+    }
 
-        let mut lengths = [0; BLOCK];
-        lengths[..8].copy_from_slice(&(aad.len() as u64 * 8).to_be_bytes());
-        lengths[8..].copy_from_slice(&(len as u64 * 8).to_be_bytes());
-        // SAFETY: one block.
-        unsafe { gcm_ghash(&mut xi, &self.table, lengths.as_ptr(), BLOCK) };
-        // SAFETY: one in-place block.
-        unsafe { aes_ctr32(xi.as_mut_ptr(), xi.as_mut_ptr(), 1, &self.aes, &tag_mask) };
-        out[len..].copy_from_slice(&xi);
+    /// Opens `sealed` (ciphertext, then the 16-byte tag) under `nonce` and
+    /// `aad` into `out`, which holds exactly the ciphertext's length. On a tag
+    /// mismatch `out` is zeroed: unauthenticated plaintext never outlives the
+    /// call.
+    pub(super) fn open(
+        &self,
+        nonce: [u8; 12],
+        aad: &[u8],
+        sealed: &[u8],
+        out: &mut [u8],
+    ) -> Result<(), ()> {
+        let len = sealed.len().checked_sub(BLOCK).ok_or(())?;
+        assert_eq!(out.len(), len);
+        let (tag_mask, mut counter, mut xi) = self.start(nonce, aad);
+
+        let whole = len / BLOCK * BLOCK;
+        if whole != 0 {
+            // SAFETY: `sealed` and `out` are distinct and hold `whole` bytes.
+            unsafe {
+                gcm_dec(
+                    sealed.as_ptr(),
+                    out.as_mut_ptr(),
+                    whole,
+                    &self.aes,
+                    &counter,
+                    &self.table,
+                    &mut xi,
+                )
+            };
+            Self::advance(&mut counter, whole);
+        }
+
+        let rest = len - whole;
+        if rest != 0 {
+            let mut block = [0; BLOCK];
+            block[..rest].copy_from_slice(&sealed[whole..len]);
+            // SAFETY: one block.
+            unsafe { gcm_ghash(&mut xi, &self.table, block.as_ptr(), BLOCK) };
+            // SAFETY: one in-place block.
+            unsafe { aes_ctr32(block.as_ptr(), block.as_mut_ptr(), 1, &self.aes, &counter) };
+            out[whole..].copy_from_slice(&block[..rest]);
+        }
+
+        let tag = self.finish(xi, &tag_mask, aad.len(), len);
+        let differ = tag
+            .iter()
+            .zip(&sealed[len..])
+            .fold(0, |differ, (a, b)| differ | (a ^ b));
+        if std::hint::black_box(differ) != 0 {
+            out.fill(0);
+            return Err(());
+        }
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::SealKey;
+    use super::GcmKey;
     use ring::aead::{AES_128_GCM, AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
 
     fn hex(text: &str) -> Vec<u8> {
@@ -183,20 +270,33 @@ mod tests {
             .collect()
     }
 
+    /// Opens `sealed` with `key`; a flipped tag bit must fail and leave `out`
+    /// zeroed.
+    fn open(key: &GcmKey, nonce: [u8; 12], aad: &[u8], sealed: &[u8]) -> Vec<u8> {
+        let mut out = vec![0xa5; sealed.len() - 16];
+        key.open(nonce, aad, sealed, &mut out).unwrap();
+        let mut forged = sealed.to_vec();
+        *forged.last_mut().unwrap() ^= 1;
+        let mut zeroed = vec![0xa5; out.len()];
+        assert!(key.open(nonce, aad, &forged, &mut zeroed).is_err());
+        assert!(zeroed.iter().all(|&byte| byte == 0));
+        out
+    }
+
     /// McGrew-Viega cases 4 and 16, Wycheproof multi-block AAD, and ring's
-    /// in-place seal over every partial-block shape.
+    /// in-place seal over every partial-block shape, each sealed and opened.
     #[test]
-    fn out_of_place_seal_matches_gcm() {
+    fn out_of_place_gcm_matches_ring() {
         if std::env::var("HIRSEL_TLS_GCM_TEST_FALLBACK").as_deref() == Ok("1") {
             assert!(
-                !SealKey::supported(),
+                !GcmKey::supported(),
                 "fallback job requires a CPU without the VAES path"
             );
             super::super::records::check_fallback_seal();
             return;
         }
         assert!(
-            SealKey::supported(),
+            GcmKey::supported(),
             "fast GCM conformance requires VAES and VPCLMULQDQ. Set HIRSEL_TLS_GCM_TEST_FALLBACK=1 for the fallback job"
         );
         let plain = hex(concat!(
@@ -223,11 +323,12 @@ mod tests {
                 ),
             ),
         ] {
-            let seal = SealKey::new(&hex(key)).unwrap();
+            let seal = GcmKey::new(&hex(key)).unwrap();
             let (input, extra) = plain.split_at(plain.len() - 1);
             let mut out = vec![0; plain.len() + 16];
             seal.seal(nonce, &aad, input, extra[0], &mut out);
             assert_eq!(out, hex(sealed));
+            assert_eq!(open(&seal, nonce, &aad, &out), plain);
         }
 
         for line in include_str!("testdata/aes-gcm-multiblock-aad.tsv")
@@ -237,7 +338,7 @@ mod tests {
             let [id, key, iv, aad, msg, ct, tag] = line.split('\t').collect::<Vec<_>>()[..] else {
                 panic!("malformed Wycheproof vector: {line}");
             };
-            let seal = SealKey::new(&hex(key)).unwrap();
+            let seal = GcmKey::new(&hex(key)).unwrap();
             let msg = hex(msg);
             let (extra, input) = msg.split_last().unwrap();
             let mut out = vec![0; msg.len() + super::BLOCK];
@@ -251,12 +352,17 @@ mod tests {
             let (ciphertext, actual_tag) = out.split_at(msg.len());
             assert_eq!(ciphertext, hex(ct), "Wycheproof case {id} ciphertext");
             assert_eq!(actual_tag, hex(tag), "Wycheproof case {id} tag");
+            assert_eq!(
+                open(&seal, hex(iv).try_into().unwrap(), &hex(aad), &out),
+                msg,
+                "Wycheproof case {id} open"
+            );
         }
 
         let header = [23, 3, 3, 0x40, 0x11];
         for (algorithm, key) in [(&AES_128_GCM, [0x42; 32]), (&AES_256_GCM, [0x5a; 32])] {
             let key = &key[..algorithm.key_len()];
-            let seal = SealKey::new(key).unwrap();
+            let seal = GcmKey::new(key).unwrap();
             let ring = LessSafeKey::new(UnboundKey::new(algorithm, key).unwrap());
             for len in (0..=272).chain(16_368..=16_400) {
                 let input: Vec<u8> = (0..len).map(|i| (i * 7 + len) as u8).collect();
@@ -274,6 +380,14 @@ mod tests {
                     .unwrap();
                 expected.extend_from_slice(tag.as_ref());
                 assert_eq!(out, expected, "{} bytes", len);
+                let mut plain = input;
+                plain.push(23);
+                assert_eq!(
+                    open(&seal, nonce, &header, &out),
+                    plain,
+                    "{} bytes open",
+                    len
+                );
             }
         }
     }

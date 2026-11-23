@@ -612,7 +612,7 @@ pub fn refill(mut r: Reader, deadline: Until) -> Result[(), Error] waits {
         None => deadline
     }
     loop {
-        let _ = replace(mut r.input, list.new())
+        r.input = list.new()
         r.cursor = 0
         let ready = match host.recv_ready(mut r.half, read_until) {
             Ok(()) => true,
@@ -620,22 +620,22 @@ pub fn refill(mut r: Reader, deadline: Until) -> Result[(), Error] waits {
             Error(e) => return Error(Network(e))
         }
         if ready {
-            let mut loan: Bytes = list.new()
-            if let Error(c) = list.try_reserve(mut loan, SCRATCH) {
+            // The loan is the reader's own input, released by assignment, so
+            // nothing here is promoted to frame storage and the reader's task
+            // gives its stack back while it waits (ir returnable.rs).
+            if let Error(c) = list.try_reserve(mut r.input, SCRATCH) {
                 return Error(Allocation(c))
             }
-            match host.recv_bounded(mut r.half, mut loan, SCRATCH, read_until) {
+            match host.recv_bounded(mut r.half, mut r.input, SCRATCH, read_until) {
                 Ok(0) => return Error(Eof),
-                Ok(_) => {
-                    r.input = take loan
-                    return Ok(())
-                },
+                Ok(_) => return Ok(()),
                 Error(TimedOut) => if !expired(read_until) {
                     continue
                 },
                 Error(e) => return Error(Network(e))
             }
         }
+        r.input = list.new()
         return if message_expired(r, host.mono_ns(r.clock)) {
             Error(Protocol(1001u16))
         } else {

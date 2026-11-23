@@ -367,7 +367,9 @@ root reaches. The roots are the union of: the assembly record of each retained a
 (current, previous, and each live `releases` interval), each pending record, each recording pin, and
 each live reservation. An assembly record keeps its image, its recipe and the recipe's closure.
 The host keeps a per-store index from activation version to the assembly record that serves it,
-so the store's `releases` rows keep their format, and a recording pin names the assembly record of
+so the store's `releases` rows keep their format. A decided selection, a commit, a genesis
+adoption, a host-run install and an operator `Select` write it; a probe's intent never does
+(RUNNER-SPEC §14.3 "What serves"), and a recording pin names the assembly record of
 the run it records and is synced before `Pinned` is answered. A retained image carries its runtime. The host reads its recipe envelope to recover
 launch settings and keep referenced objects. A retained digest whose image is missing gives `Unknown(ImageGone)`.
 
@@ -402,22 +404,28 @@ assembly at `v`. An open of NEW at `v` that reports `releases[v].prepared`
 equal to the attempt's prepared digest proves the install (RUNNER-SPEC §14.3; an open at `v`
 with another `prepared` proves this attempt did not install): the host
 makes NEW the current assembly and activation, keeps OLD's as retained, and records the
-deploy `Installed`, in one durable transaction, and the probe goes on serving. On objects@1 a
-probe refused `NotCurrent` reports a follower read of one capture of the store: its activation,
-image, holder pair and `releases[v]` (RUNNER-SPEC §14.3 "The probe's read"). Row `v` decides
-the attempt even when another install has since moved the store past `v`: the attempt's digest
-is `Installed`; another `prepared`, or no row under another pair than the one OLD recorded with
-its import, is failed (`not installed after recovery`). No row under OLD's pair proves nothing
-yet: OLD's delayed write can still land, so the next probe opens OLD's assembly at OLD's
-activation, and that open, or its read, decides. The outcome never chooses what serves. In the
-same transaction the host selects the store's current activation with whichever of OLD's and
-NEW's assemblies has the read's `Describe` digest, so a group never returns to `v` from a later
-activation; if neither matches, the group is failing with that cause until an operator acts.
-The selected assembly is the current root, and the other is retained unless the deploy failed
-and OLD serves. On log@1 a refusal `PlaceCurrent` naming OLD's recorded activation selects
-OLD's pair as before, and only that probe's open at OLD's activation proves `v` was never
-installed. Any other answer (`Held`, a missing image, a failed read, on log@1 an unknown
-activation, an I/O failure) decides nothing: both roots stay, and the probe is retried under the
+deploy `Installed`, in one durable transaction, and the probe goes on serving. A probe
+refused `NotCurrent` reports one capture of the store, read before it exits and without
+application handles: its store ID, activation, image, on objects@1 its holder pair, and
+`releases[v]` (RUNNER-SPEC §14.3 "The probe's read"). On objects@1 the capture is a follower
+read; on log@1 the probe keeps the store's `LOCK` after the refused comparison and reads its
+own recovered state. Row `v` decides the attempt even when another install has since moved the
+store past `v`: the attempt's digest is `Installed`; another `prepared` is failed (`not
+installed after recovery`), and so is no row on log@1, or on objects@1 no row under another
+pair than the one OLD recorded with its import. On objects@1 no row under OLD's pair proves
+nothing yet: OLD's delayed write can still land, so the next probe opens OLD's assembly at
+OLD's activation, and that open, or its read, decides. The outcome never chooses what serves.
+In the same transaction the host selects the store's current activation with the assembly
+whose `Describe` digest is the read's image, so a group never returns to `v` from a later
+activation. Identical records count once. If OLD's and NEW's are two records with that digest,
+the one this store's activation index already names for that activation serves; when none is
+named, or neither matches, nothing is selected and the group is failing with that cause until
+an operator acts (`Select` names one of two matching records). A probe whose open does not
+prove the install serves only if this rule selects its assembly; otherwise the host stops it
+before accepting its `PlaceOpened`. Roots follow RUNNER-SPEC §14.3
+"Roots": the selected assembly is current, the other is retained unless the deploy failed and
+OLD was selected, and with nothing selected OLD stays current and NEW retained. Any other
+answer (`Held`, a missing image, a failed read, an I/O failure) decides nothing: both roots stay, and the probe is retried under the
 ordinary backoff. Neither a timer nor a retry count decides a root.
 The platform host records the attempt as `Preparing` before its describe, preview and
 prepare children and OLD's export. A `Preparing` row proves no cutover was sent, so after a host
@@ -686,6 +694,7 @@ answered `Error(Protocol)` and closes only that exchange.
 | 6 LookupGroup(name) | Returns GroupInfo(G) for the registered incarnation, or `Error(UnknownGroup)`, also while the group is still registering. |
 | 7 Register(D, registration, input, foreign, exec) | `registration` is (name, tenant, workdir, trusted, label, listen, bindings, limits, args, record), with `record` an `Option` of (dir, retentionSeconds). Registers a new group and deploys its first release, below. `input`, `foreign` and `exec` are Begin's. |
 | 8 Decide(D, grants, approve) | A person's decision on D, which must be in AwaitDecision on exactly this grant diff ("Deploy preview"); anything else is `Error(Denied)`. An approval repeats D's admission under a fresh A, this connection owning it; a refusal fails D `Denied`. |
+| 9 Select(G, assembly) | (v2.50, not yet built.) Names which of two assembly records with one `Describe` digest serves a group failing with that two-record cause (RUNNER-SPEC §14.3 "What serves"). The record must be one of the two and its `Describe` digest the recorded image; anything else is `Error(Conflict)`. In one transaction the host writes the record into the store's activation index at the recorded activation, makes it the group's current assembly at that activation with the other root kept by "Roots", and clears the pending choice from the `groups` row and the failing state, then starts the group. Answered GroupInfo(G); a repeat naming the record the index already holds is answered the same. |
 
 | Host → operator | Payload and rule |
 |---|---|
@@ -785,8 +794,13 @@ activation, assembly and report.
   sends Decide approving it and goes on; otherwise it prints the state, with the diff, and
   exits 2. `hirsel deploy --state S --request-id D --refuse-grants` refuses the diff D
   awaits a decision on. `hirsel deploy --state S --status D` sends only Status.
+- `hirsel select --state S --group NAME --assembly HEX`<!-- doc-ref: planned --> resolves G with LookupGroup and
+  sends Select (v2.50, not yet built). It carries no D, so it prints no `request` line and no
+  JSON outcome, and the exit statuses below are register's and deploy's: it exits 0 on
+  GroupInfo and 1 on an Error, which it prints. Running it again after a lost connection is
+  safe, since a repeat is answered the same.
 
-Both stream the admission input on AwaitInput, answer each Need with the missing objects,
+Register and deploy stream the admission input on AwaitInput, answer each Need with the missing objects,
 and on Display check that the text is the one their own approvals produce, print it, and
 send Confirm with its SHA-256. `Error(Busy)` is retried with the same D for up to 60 s.
 Their exit status is 0 for `Installed` (1 when the pause report is `StartFailed`), 2 for a

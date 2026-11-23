@@ -9,30 +9,92 @@ CallInfo, followers, resident admission, online scrub, offline read-only opens, 
 An installed Hirsel toolchain supplies `store@1`. In `hirsel.toml`, add
 `store = { major = 1 }` under `[dependencies]`.
 
-`memory(clock, random, options)` draws a 16-byte StoreId once. A
-`TableSpec` is built by `spec(name, key, value)` and `with_index(mut s, name, by,
-key)`, which returns `Exists` for a repeated index name. `create_table(mut db, s)`
-registers the table's key and value schema dictionaries and every index in one
-schema commit; `table` opens a handle and resolves
-older schemas once into shared Readers. Every row starts with its u16 schema
+`memory(clock, random, options)` draws a 16-byte StoreId once.
+
+**One handle per table (DX Q1, STORE-SPEC v2.57 §1.2).** `Table[K, V]` is plain
+`shareable + send` data: the StoreId, the table id, its catalog key, `Key[K]` and the
+shared value Readers. The same handle reads and writes. There is no `Shape` and no
+`store.shape`: a read-only use is a view `Tx` (`tx: Tx`), and OWN-5 refuses a write
+through it. An `Index[J, K, V, P]` is shareable as well. Index extractors are not part
+of any handle. They live in the open's **index registry**, which is keyed by table id
+and owned by the `Db`, or by the `Follower`, which holds no extractors. A write `Tx`
+reaches the registry, so `put` and `delete` maintain every index the catalog lists.
+A handle never holds a stale subset of the indexes. Every row starts with its u16 schema
 number. Schema numbers are append-only. Fingerprint equality is followed by byte
-equality. A key schema change is `Schema`; an unknown row schema number is
-`Stale`. Initial table/index id is 1, schema number is 0 and schema epoch is 1.
+equality. A key schema change is `Schema`; an unknown row schema number is `Stale`.
+Table and index ids are never reused. A handle checks its catalog key against the
+roots it reads, and an id that is not live there is `Stale(id)`.
+
+**Declaring the schema.** A program declares its tables once, in
+`schema(mut d: store.Declare) -> Result[H, store.Error]`. The runner (or a test)
+runs it in one of three modes:
+
+- **`Migrate`** (genesis, `--hirsel-install`, a deploy's prepare). It creates
+  missing tables and indexes, appends a changed but compatible value schema, and
+  rebuilds an index whose kind, key schema, payload schema or extractor/projection
+  revision changed. It drops an index of a declared table that the declaration no
+  longer names. A table the declaration no longer names makes the whole call
+  `Undeclared(name)`, unless the optional `on_migrate(mut m: store.Migration)`, which
+  runs first, dropped or renamed it. Every change is in one schema commit, so an
+  error leaves the old catalog and rows exactly as they were.
+- **`Open`** (an ordinary open, an offline read-only open). It only checks: a
+  missing table or index is `Missing(name)`, a different key or payload schema is
+  `Schema`, a different extractor or projection revision is `Changed(name)`, and a
+  catalog index the declaration does not name is `Undeclared(name)`.
+- **`Follower`** (M2 §12.5). It binds the same declaration over a follower's applied
+  catalog, with `Open`'s checks. The handles are read-only and carry no extractors.
+
+There is no describe mode. A describe launch runs `Migrate` on an empty memory store
+and reads the catalog it built. `declare_table(mut d, name, key, value)` returns a
+`TableDecl`. `index`, `covering` and `covering_row` add indexes to it, and
+`finish(mut d, take t)` seals it and returns the `Table`. A `TableDecl` that has not
+been sealed cannot be read or written, so a table without its indexes cannot exist.
+Keys are written with `std.codec.key_of[K]()` ([codec.md](codec.md)), which covers
+`Desc[T]` for descending components.
 
 `run` and `run_on` execute the callback under `isolate`. A successful body publishes
 one set of roots after resident admission. A memory store encodes no COMMIT;
 a store with a journal encodes it before admission. An abort, fault or
 refusal publishes nothing. An abort with no reply writes returns `Undone {
 value, ticket: None }`; an abort that wrote a reply keeps it (F2, below).
-`fetch` and `range`
-read through a shareable `Shape`; `put` and `delete` use a `Table`. `fetch` returns
-a fresh decoded value. `put` and `delete` maintain every registered index atomically, including when an extractor
-returns Capacity. A handle missing an index returns `Stale`. Dropping and
-recreating a name does not make the previous handle valid. Every read checks the
-handle's catalog key against the roots it reads. An old handle reads an older
-snapshot normally and returns `Stale(id)` against a recreated table; the new
-handle is stale against the older snapshot. Schema epochs constrain writes,
-while ids identify table and index incarnations and are never reused.
+`fetch`, `range`, `range_prefix`, `count`, `lookup`, `lookup_prefix` and `entries`
+read through a `Table` or `Index` in any `Tx`; `put` and `delete` need `mut Tx`.
+`fetch` returns a fresh decoded value. `put` and `delete` maintain every index in
+the registry atomically, including when an extractor returns Capacity, and a
+`Conflict` (below) changes nothing. Dropping and recreating a name does not make the
+previous handle valid. An old handle reads an older snapshot normally and returns
+`Stale(id)` against a recreated table; the new handle is stale against the older
+snapshot.
+
+**Indexes (DX Q3).** An extractor is `StaticFn[fn(K, V) -> Result[List[J], Capacity]]`.
+An empty list puts the row in no entry (a partial index), one key gives a standard
+index, and several give a multi-index. The store sorts the encoded keys and removes
+duplicates, all inside the write's bounds. The kind is `Many` (entry
+`ix ‖ J ‖ K => payload`) or `Unique` (entry `ix ‖ J => u32 len(K) ‖ K ‖ payload`). The payload is
+`()` for `index`, a projection `fn(K, V) -> Result[P, Capacity]` with its own codec for
+`covering`, and the row itself for `covering_row`, the identity shorthand. The catalog
+stores each index's kind, key schema, payload schema list (append-only numbers, like a
+table's) and the `code.identity` and `code.revision` of the extractor and the
+projection. So an edited extractor body is seen (`Changed` in `Open`, a rebuild in
+`Migrate`). An unchanged encoded key with an unchanged payload causes no index write.
+A changed payload at an unchanged key rewrites the entry, so a covering slot sees a
+value-only edit.
+
+**Unique conflicts.** Before `put` stages anything, it computes the row's complete
+edit: old and new entries of every index, the primary row, and their frame and resident
+charges. For each `Unique` index, in declaration order, and each new J in encoded order,
+it probes the staged view of `ix ‖ J`. An entry owned by another primary key is
+`Conflict(index name)`, never `Exists`. The row's own key is not a conflict, so a row
+keeps its unique keys across updates. Nothing is staged, and the `Tx` becomes
+**abort-only**: every later `put` or `delete` returns the same `Conflict`, reads still
+work, and the run commits no data. A body that returns `Error(e)` keeps only its reply
+(F2), so `?=>` maps a conflict to a domain error such as `Taken`. A body that returns
+`Ok` from an abort-only `Tx` is a fault: `run` answers `Failed`, and the runner answers
+`Failed(Conflict(name))`, so no reply reports success for discarded writes. To swap
+two rows' unique keys, delete one and put both. The probe records a `Point` on
+`ix ‖ J`, so a query that tested a name for availability re-runs when it is taken.
+A `Migrate` backfill checks uniqueness per J as it merges its sorted runs, and a
+duplicate is `Conflict(name)` with the old catalog and rows unchanged.
 
 `look(snapshot, body)` runs a view-Tx query under `isolate`, returning
 `Seen { value, version, reads }`, `Failed` or `Refused`. It publishes nothing and
@@ -43,28 +105,36 @@ shared pages by stamp. Each change holds an Arc to its stored value. Deletions h
 are Foreign; branches of one open are allowed. Catalog and stream roots do not
 contribute changes. Page visits are O(k log n), where k counts keys written
 between snapshots, including same-value rewrites. The output uses O(w) storage
-for w keys whose values differ, with w <= k.
+for w keys whose values differ, with w <= k. `changes_page(a, b, lo, hi, limits)`
+returns the same changes restricted to `[lo, hi)`, one bounded page at a time, with
+the resume key of the next page.
 
 Reads are `Point(Bytes)` or `Span(Bytes, Bytes)` over logical keys,
 including the table or index id prefix, with half-open span bounds.
 `range` and `range_reverse` return `RangeRows` scoped to the Tx. Each
 `next_range` records the gap it inspected, including the row it finds, before
 decoding the row. A probe that returns None records the rest of the requested
-interval. Constructing a cursor records nothing.
-`lookup` returns `IndexRows` scoped to its Tx. It records an index Span when
-created and a primary-key Point for each row returned by `next_indexed`.
-The checker refuses an escaping IndexRows or a write through its Tx while it
-lives; bodies collect results before writing. An unchanged encoded index key
-causes no index write. Snapshot `scan`, `scan_reverse` and `find` return
-sendable `Rows` advanced by `next`. `count(snapshot, shape, lower, upper)`
-returns the number of table rows in that interval in O(log N) tree work. `Shape` and
-`Index` share Readers and let snapshots be queried on reader tasks. `follow`
-returns a Latest root; publication follows the admitted head swap. A refused
-snapshot-record allocation leaves the follower behind until a later publication.
-Closing the writer leaves readers' last snapshots usable.
+interval. Constructing a cursor records nothing. `range_prefix(tx, t, q, key_of[Q]())`
+and `lookup_prefix(tx, ix, q, key_of[Q]())` read every key whose leading components
+equal `q`. Q's key schema must be a component prefix of the key's, or the call is
+`Schema(0)`. The span is `[enc(q), successor(enc(q)))`, where `successor` drops trailing
+`0xff` bytes and increments the last byte; a prefix of all `0xff` is bounded by the end
+of the id's range. `count(tx, t, lo, hi)` records one Span and costs O(log N).
+`lookup` returns `IndexRows` scoped to its Tx and joins each entry to its primary row.
+Each `next_indexed` records the index gap it scanned in full (J, K) order, ties
+included, and a primary-key Point for the row it returns. Exhaustion records the
+terminal gap. So a write past the last row a top-k query took does not invalidate it.
+`entries(tx, ix, lo, hi)` returns the index's own `(J, K, P)` without the join and
+records only index gaps. The checker refuses an escaping IndexRows or a write through
+its Tx while it lives; bodies collect results before writing. Snapshot reads use M3's
+per-task `Reader` (STORE-SPEC M3, M3 Q2): `get(mut r, s, t, k)`, `scan`, `find`,
+`count`, `scan_page` and `find_page` all take `mut r: Reader` and `waits`, and return
+owned values. `follow` returns a Latest root; publication follows the admitted head
+swap. A refused snapshot-record allocation leaves the follower behind until a later
+publication. Closing the writer leaves readers' last snapshots usable.
 
 **Keyset pages (STORE-SPEC v2.25 AI1).**
-`scan_page(s, shape, lo, hi, limits)` and `find_page(s, index, lo, hi, limits)`
+`scan_page(mut r, s, t, lo, hi, limits)` and `find_page(mut r, s, index, lo, hi, limits)`
 read one bounded page from the same byte cursor as `scan` and `find`.
 `Limits{rows, byte_limit}` refuses zero with `Missing("rows")` or `Missing("bytes")`.
 A row counts its data-tree key plus its stored value, and a page holds at least
@@ -154,10 +224,12 @@ The store does no authorization (STORE v2.30 AN1): a Tx may read and write
 every key of its store. A program decides access itself, from the Caller it is
 given. A live query is registered as caller-independent (`runner.query`, body
 `fn(Tx, H, take A)`) or caller-dependent (`runner.query_as`, body
-`fn(Tx, H, Caller, take A)`; RUNNER-SPEC v2.25 rule 2). A `query_as` body is
-given the subscribing session's bound Caller at its first run, every rerun and
-every repair, and its Cover is that subscription's alone: no result is shared
-between subscriptions, so one Caller's result never reaches another.
+`fn(Tx, H, Caller, take A)`; RUNNER-SPEC v2.45 rule 2). The publisher evaluates one
+**shared view** per `(entry, argument bytes, None)` for `query` and per
+`(entry, argument bytes, Some(the Caller's full codec bytes))` for `query_as`. So
+subscriptions share a result only when the body ran on the same inputs. A
+`query_as` result reaches only sessions bound to that exact Caller, and one Caller's
+result never reaches another (RUNNER-SPEC v2.45 §4 "Shared views").
 
 Branches and pins (§1.9, §1.12) are named heads of one open. `fork(mut db, name,
 from)` makes a branch at a Snapshot of this open. A live-head fork shares the
@@ -176,15 +248,17 @@ written by each cut and restored by open and replay. A refusal for resident
 space first settles the account (§1.11 I4); a schema commit refuses on the
 conservative live figure. CALL frames name their branch.
 
-`migrate(mut db, from, to, f)` (§1.2, L31) rewrites every row of `from` through
-`f` into the spec `to` in one schema commit. It drops `from`'s indexes, takes the
-table id and then the spec's index ids from the id counter in spec order, and
-builds the indexes from the new rows. The rows take one new schema number, the
-source entry's `next`; numbers are never reused. A Capacity from `f` or an
-extractor, or a build past the ceiling, is `Full`; an oversized key is
-`Limit(Key)`; two rows with one new key, or a target name naming another live
-table, is `Exists`. Each refusal changes nothing. A handle or pin older than
-the migrate is `Stale`.
+`migrate_table(mut m, from, to, f)` (§1.2, L31) is a `Migration` operation, so it
+runs only in `on_migrate`, before `Migrate` mode's declaration. It rewrites every row of
+`from` through `f: fn(K, V) -> Result[Option[(K2, V2)], Capacity]` into the table `to`
+names, and the declaration that follows builds that table's indexes from the new rows.
+The rows take one new schema number, the source entry's `next`; numbers are never
+reused. A Capacity from `f` or an extractor, or a build past the ceiling, is `Full`;
+an oversized key is `Limit(Key)`; two rows with one new key, or a target name naming
+another live table, is `Exists`; a unique duplicate is `Conflict`. Each refusal changes
+nothing. A handle or pin older than the migrate is `Stale`. `drop_table(mut m, name)`
+and `rename_table(mut m, from, to)` are the other `Migration` operations; they are how
+a table leaves the declaration.
 
 `//:core-store-s1` selects the package's evaluator and native laws, including
 Cranelift, LLVM development and LLVM release, with look write/info checker
@@ -239,16 +313,13 @@ STORE-SPEC §11 specifies the paged store, scoped views and journaled forks.
   `migrate` sorts the output, refuses duplicate keys with `Exists`, and builds
   bottom-up. It publishes only if the exact account of its new roots fits
   (AP13).
-- **View reads (AP12).** `fetch_bytes(tx, t, k)` and `get_bytes(s, t, k)` return
-  `Result[Option[View[Bytes]], Error]` anchored to the Tx or Snapshot. The bytes
-  include the stored schema number and codec payload. The owned `fetch` and `get`
-  decode from the view and transcode older schemas as needed.
-  `scan_bytes(s, t, lo, hi)` returns `Result[ViewRows, Error] in s`. `ViewRows`
-  is scoped to its Snapshot and cannot be sent to a task. `next_view(mut c)`
-  returns an owned logical key or `None` at exhaustion. `value_view(c)` borrows
-  the current value as `View[Bytes] in c`. It traps if there is no current row.
-  The checker prevents advancing the cursor while the value view lives.
-  On `Poisoned` the cursor does not move. `ByteRows` is an owning, sendable cursor.
+- **View reads (AP12, M3 Q2).** `fetch_bytes(tx, t, k)` returns
+  `Result[Option[View[Bytes]], Error] in tx`, a zero-copy view anchored to the Tx and
+  usable inside `run` and `look`. The bytes are the stored schema number and the codec
+  payload. The owned `fetch` decodes from the view and transcodes older schemas as needed.
+  There are no bare-Snapshot view reads: `get_bytes`, `scan_bytes`, `ViewRows` and
+  `ByteRows` are deleted. A Snapshot read outside a `look` goes through a `Reader` and
+  returns owned values.
 - **Accounts.** Admission counts each distinct row version (tree, logical key,
   stored value) once across every branch head, pin and in-flight fork, at
   `entry(k, v)`, plus 126 bytes per distinct collection. The figure does not
@@ -329,3 +400,80 @@ STORE-SPEC §11 specifies the paged store, scoped views and journaled forks.
   `Before(Error, Option[Pending]) | After(Error)`. Core `Capacity` and the
   body's `Stop.OutOfBytes(Capacity)` are unchanged, and every other case is
   unchanged (§11.16).
+
+## Sizing a store (DX Q6a)
+
+`store.defaults()` and its fixed 1 GiB `resident_limit` are deleted. `sized(kind, share)`
+derives every byte figure from `share`, the bytes this store may use, and returns
+`Result[Options, Shortage]`. `kind` is `Memory | Directory | Bucket`. The fractions are
+STORE-SPEC v2.57 §1.1 "Derived sizes". The runner computes `share` from the
+executable's root limit (`hirsel build --limit`), minus `operate_bytes` and main's keep,
+so a place has no store numbers to choose. `Overrides` holds an `Option` per figure,
+and each `Some` replaces the derived value. The result must still fit `share`. A
+`Shortage { need, have, parts }` names every part of the requirement with its bytes,
+so the diagnostic shows which figure to raise. There are no named profiles.
+
+## Projectors: durable derived state from `changes`
+
+A **projector** keeps derived state, such as a search index, embeddings or a
+cross-place projection, current with a source table. It tails source commits through
+`changes_page`. It writes its derived rows and its cursor in **one** transaction of
+the derived store, so after a crash the derived state is either fully at the cursor or
+not written at all (STORE-SPEC v2.57 §1.14).
+
+```hirsel
+pub type Projection: codec { generation: u32, applied: u64, target: u64, resume: Option[Bytes], retiring: Option[u32] }
+pub type Source = Local | Follower(Follower)
+pub opaque type Projector[K, V]          // not send: the source handle, the Projection's table, the base Snapshot, the pass's target Snapshot
+pub type Stepped = Applied(u64) | Passed(u64) | Rebuilt(u32) | Idle   // rows applied; a pass completed at a version; a new generation; nothing to do
+pub type ProjectError[E] = Store(Error) | Apply(E)
+pub fn projector[K, V](mut d: Declare, name: String, source: Table[K, V], from: Source) -> Result[Projector[K, V], Error]
+pub fn step[K, V, E](mut p: Projector[K, V], mut db: Db, limits: Limits,
+        apply: scoped[view] fn(mut Tx, u32, K, Option[V]) -> Result[(), E]) -> Result[Stepped, ProjectError[E]] waits
+pub fn rebuild[K, V](mut p: Projector[K, V], mut db: Db) -> Result[Ticket, Error] waits
+pub fn retire_page[K, V](mut p: Projector[K, V], mut db: Db, limits: Limits,
+        drop: scoped[view] fn(mut Tx, u32, Limits) -> Result[bool, Error]) -> Result[bool, Error] waits
+```
+
+- **The cursor.** `projector` declares the reserved table
+  `hirsel.projections: Table[String, Projection]` in the derived store and binds the
+  row `name`. The derived store is `db`. `Local` means the source table is in `db`
+  itself. `Follower(f)` means the source is another store, read through its M2
+  follower.
+- **A step.** The step takes the base snapshot B and the pass's target T (the newest
+  source snapshot when the pass began), and reads one page of
+  `changes_page(B, T, source span, after resume, limits)`. In one `run` on `db` it calls
+  `apply(tx, generation, k, value)` for each change, a deletion being `None`, and then
+  writes the Projection with `resume` set to the page's next key. At the last page it
+  writes `applied = T.version` and `resume = None`. A pass begun after a restart
+  resumes at the stored `resume` only when its T is the stored `target`; with a newer
+  T it starts again at the first key, because the keys below `resume` were applied
+  at the old target's values. If the body returns `Error(e)`,
+  nothing commits and `step` returns `Apply(e)` with the cursor unchanged.
+- **The apply contract: idempotent per key.** `apply` must leave the derived state
+  determined by (generation, k, value) alone. Applying a change that the state already
+  reflects changes nothing. A derived aggregate keeps each key's contribution in a
+  derived row keyed by k, and replaces it. That is why a base older than the cursor is
+  safe: re-applying a change is a no-op.
+- **The base.** For `Local`, the base is the pin `hirsel.projector.<name>`. It moves to T
+  only after the transaction that sets `applied = T.version` is durable. A crash
+  between the two leaves the older pin, and the next pass re-applies from it. For
+  `Follower`, the base is the newest retained checkpoint at or below `applied`
+  (`follower_floor`, STORE-SPEC §12.5). A missing base (`Reclaimed`, a dropped pin)
+  starts a rebuild, and the step reports `Rebuilt(g)`.
+- **A lost target.** A pass's target lives in memory. After a restart, the pass resumes
+  only if its new target is the stored `target`; otherwise it begins again at its first
+  key with the new target and the same base, and every re-applied key is a no-op.
+- **Rebuild.** `rebuild` commits `{generation + 1, applied: 0, resume: None, retiring:
+  Some(old)}`. From then on the base is the empty snapshot, so a pass is the whole source
+  at T, read in pages. A full rebuild never builds a list larger than one page. Derived
+  tables key their rows by generation. Readers read the **live generation** from the
+  cursor row: `generation` once `applied` > 0, and `retiring` while the rebuild's first
+  pass is open, so no reader sees a half-built generation. `retire_page` deletes one
+  bounded page of the retiring generation through `drop`, only once `applied` > 0, and
+  clears `retiring` when it returns `false`.
+- **Outside effects.** An `apply` that calls out (an embedding API, an LLM, another
+  place) runs at least once per change and may run again after a crash or a lost
+  target. Make such effects idempotent, for example by keying them by
+  (generation, k, value digest).
+- Laws: L72 `projector_converges`, L73 `projector_bounded` (STORE-SPEC v2.57 §1.14).

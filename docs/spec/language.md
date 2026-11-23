@@ -121,9 +121,9 @@ fn left() -> i64 { ORIGIN.x }
 ```
 ```hirsel unbuilt
 // in a package that depends on package store, whose root module is store/store.hirsel
-fn count(db: store.Db, shape: store.Shape[u64, u64]) -> u64 {
+fn count(db: store.Db, t: store.Table[u64, u64]) -> u64 {
   let n = result.unwrap(store.look(store.snapshot(db), None, fn(tx: store.Tx) -> u64 {
-    option.unwrap(result.unwrap(store.fetch(tx, shape, 1u64)))
+    option.unwrap(result.unwrap(store.fetch(tx, t, 1u64)))
   }));
   n
 }

@@ -977,15 +977,17 @@ The relay hands every Outcome by `try_send` into the send's fresh 1-slot reply c
 
 | Frame | SSE event | `data` (one line of JSON) |
 |---|---|---|
-| `Batch(version, complete, rows, outcomes)` | `event: batch` | `{"version": "<u64>", "complete": [<u32>…], "rows": [<Row>…], "outcomes": []}` |
+| `Batch(version, complete, groups, outcomes)` | `event: batch` | `{"version": "<u64>", "complete": [<u32>…], "groups": [<Group>…], "outcomes": []}` |
 | `Ended(sub, outcome)` | `event: ended` | `{"sub": <u32>, "outcome": <Outcome>}`; then the stream ends |
 | `Reset(version, outcomes)` | `event: reset` | `{"version": "<u64>", "outcomes": []}`; then the stream ends |
 
-**A row is a tagged envelope**, never `V | null`. WIRE's `Row { sub, key, value: Option[Bytes] }` is written as:
-- present: `{"sub": <u32>, "table": "<name>", "key": <K>, "present": true, "value": <V>}`;
-- removed: `{"sub": <u32>, "table": "<name>", "key": <K>, "present": false}`, with no `value` member.
+**A group** (RUNNER-SPEC v2.45, `Group{sub, value, rows}`) is `{"sub": <u32>, "value": <R>, "rows": [<Row>…]}`, with no `value` member when the group's value bytes are empty (unchanged). A completing group always has `value`; for an R whose encoding is always empty it is written as `null`.
 
-So a present row whose value is itself `null` (a V of `()`, `Option[T]`, or a nullable `via` type) is distinct from a removal. Keys and values are written in B-4's forms, from the Cover's table schemas in describe.
+**A row is a tagged envelope**, never `V | null`. WIRE's `Row { slot, key, value: Option[Bytes] }` is written as:
+- present: `{"slot": "<name>", "table": "<name>", "key": <K>, "present": true, "value": <V>}`;
+- removed: `{"slot": "<name>", "table": "<name>", "key": <K>, "present": false}`, with no `value` member.
+
+So a present row whose value is itself `null` (a V of `()`, `Option[T]`, or a nullable `via` type) is distinct from a removal. Keys, values and R are written in B-4's forms, from the query's slot schemas and value schema in Describe v2.
 
 - `outcomes` is always empty: an SSE stream carries no sends, so it can owe no Outcome. The member is kept so that one decoder reads WebSocket and SSE envelopes.
 - The completing initial Batch, an empty one included, is the event whose `complete` lists the subscription. A later event whose `complete` lists it is a repair (RUNNER-SPEC v2.20): the client replaces the subscription's image from empty, as for the first.

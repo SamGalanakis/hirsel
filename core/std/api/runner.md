@@ -54,9 +54,9 @@ exactly; the host passes it and an application does not need it.
 
 **Why a place did not start.** `runner.start_text(problem)` is one line naming a
 `StartError` and what to change; `runner.main` prints it on stderr. `Exceeds(bound)`
-names a setting, its value and the most this place accepts, `Disagrees(differ)` a
-setting that repeats another with a different value, and `Missing(name)` a setting
-that is zero or too small.
+names a setting, its value and the most this place accepts, and `Missing(name)` a
+setting that is zero or too small. (v2.45 deletes `Disagrees`: its only case was a
+session `n_place` that differed from the place's, and the session no longer carries one.)
 
 **`PlaceConfig.wire`.** `None` serves anonymous sessions: each Hello gets a fresh
 anonymous Caller and a granted entry is `Refused(NotAllowed)`. `Some(runner.wire(grant,
@@ -70,8 +70,8 @@ bind, ..))` binds the same way and carries no grant, so granted entries stay
 `n_place` and every wire session plans against it, so `n_place` counts once in the
 serving budget, not per session. A standalone place has one `n_place`, `PlaceConfig.n_place`: it
 bounds `place` in the head and every session, and `Status` and Welcome report it.
-The wire configuration must repeat it, and one that does not is refused
-`Disagrees(name, given, used)` with both values. A standalone start ignores
+The wire configuration does not carry it: each session takes the head's value
+(RUNNER-SPEC v2.45; `WireConfig.n_place` and its `Disagrees` refusal are deleted). A standalone start ignores
 `--hirsel-n-place`. Under the platform host the recipe's `n_place` (`hirsel publish
 --n-place`) replaces both. Generate the SDK with the same value (`hirsel sdk ts
 --n-place`); a client whose bindings carry another value reports both on its
@@ -81,7 +81,10 @@ The wire configuration must repeat it, and one that does not is refused
 head (`n_place`, `n_publisher` and the store's journal reserve), every session's
 reserve up to `max_sessions`, and operate's own 256 KiB. The executable's root
 limit (`hirsel build --limit`) must exceed it plus what `main` keeps; a smaller one is
-refused `Full(capacity)` with the requested and available bytes.
+refused `Full(capacity)` with the requested and available bytes. The store takes the
+rest: `operate` opens it with `store.sized(kind, root limit − operate_bytes − 1 MiB)`
+(store.md "Sizing a store"), and `PlaceConfig.sizes` overrides single figures. So
+`--limit` is the one number a place chooses.
 
 The wire types are `Kind`, `Refusal`, `Fault`, `Outcome` and `Described`, all
 `codec + send`. `Room` and `Bad` carry Capacity and DecodeError, because those types
@@ -139,12 +142,14 @@ is `Failed(Gone)`, whose entry no longer exists: its reply has no record.
 `store.recorded(db, branch, v)` reads a record back from a disk store; a memory store
 keeps none.
 
-Call `place_head(db, place, n_place, handles, query_handles, inbox, mail, tasks, n_publisher)`
+Call `place_head(db, place, n_place, on_migrate, schema, inbox, mail, tasks, n_publisher)`
 on the task that opened the `store.Db`. The head runs `place` under `bytes n_place`
-and calls `handles` once. It passes the result through `query_handles` to derive
-the publisher's handles from the selected descriptors. For a table field,
-`store.query_table` derives a read-only handle for the same incarnation. The
-publisher runs `place` itself under its task allowance, `bytes n_publisher`.
+and calls `schema` once (RUNNER-SPEC v2.45 rule 12): in `Migrate` mode at genesis,
+install and prepare, after the optional `on_migrate`, and in `Open` mode otherwise.
+`schema(mut d: store.Declare) -> Result[H, store.Error]` declares every table and
+index and returns H, which is `shareable + send`, so the head and the publisher share
+it. `handles`, `query_handles`, `store.Schema` and `store.query_table` are deleted.
+The publisher runs `place` itself under its task allowance, `bytes n_publisher`.
 Open waits for it and returns `Place` if registration fails. The session
 computes each request's digest at ingress
 (`store.request_digest` over the key and the exact argument bytes). The head admits
@@ -156,30 +161,41 @@ no commit (a duplicate's stored reply, a refusal, `Refused(HistoryUnavailable)` 
 without a snapshot and the publisher sends them at its base (V3). The publisher
 gives each session its diff or Reset and all pending answers in one update per durable
 group (G1). The session hands its client a `Down`: `Batched(KeyedBatch)`, where a
-`KeyedBatch` is `{version, complete, rows, outcomes}` with wire `Row`s and each outcome a
+`KeyedBatch` is `{version, complete, groups, outcomes}` with wire `Group`s and each outcome a
 `KeyedDone{stream, p, outcome}` (the wire `Done` with the store's stream key in place of a
 stream slot, until R3), or `Ended(sub, outcome)`, or `KeyedReset(version, outcomes)`.
 
-R2 adds `query(mut r, f, key, value, n, s)` and `query_as(mut r, f, key, value, n, s)`, which register a subscription
-entry. A `query` body is `fn(Tx, H, take A)` and never sees the Caller; a `query_as` body is
-`fn(Tx, H, Caller, take A)` and gets the subscribing session's Caller at every run. Its body reads at a
-snapshot inside `look`, under `bound bytes n` and `s` steps. Row conversion shares
-those limits when the query runs. A query returns a `Cover` that describes one
-data-tree key range of one table, made with `cover(shape, lo, hi)`, which keeps that
-table's published value. Pass the table's ordered key codec and current value
-codec at registration. The runner fingerprints both schemas and ends a
-subscription if its Cover selects a table with different schemas. The SDK uses
-the registered schemas to generate `subscribeDecoded` stubs. The publisher keeps each subscription's
-Cover and read set at its base, never its rows (F4), so subscribed memory does not grow
-with the rows a Cover spans (L20). A Subscribe runs the query at the
-base, and its whole result goes in one Batch that names the sub in `complete` (G3). A
-Subscribe on a live (session, sub) replaces it. Each round, from the base to the newest
-released snapshot, re-runs only the subscriptions whose reads a change hit. It sends the
-difference between the old and the new Cover's rows, a removal being a row with no value,
-and for an unchanged Cover only the changed keys inside it (G2). Every row's value is the
-table's published value (F10). A query that faults or runs out ends its subscription
-with `Ended(sub, Failed(..))`. A session Reset drops all of that session's
-subscriptions.
+`query(mut r, f, slots, n, s)` and `query_as(mut r, f, slots, n, s)` register a live
+query (RUNNER-SPEC v2.45). A `query` body is `fn(Tx, H, take A)` and never sees the
+Caller; a `query_as` body is `fn(Tx, H, Caller, take A)` and gets the subscribing
+session's Caller at every run. Both return `Answer[R] { value: R, covers: CoverSet }`:
+a computed value of any codec type R, and the rows the client should hold, as up to
+16 spans over named **slots**. Register the slots with `slot(mut s, "name", table)`;
+a slot's id is its registration index, and the query's key fingerprints R's schema
+and the slot list, so the generated SDK has `sub.value()` typed as R and
+`sub.rows("name")` typed by the slot's table. The body adds spans with
+`cover(mut c, "name", t, lo, hi)`, which is `Missing(name)` for an unregistered slot.
+A body runs at a snapshot inside `look`, under `bound bytes n` and `s` steps; row
+conversion shares those limits. A `count` query returns `Answer { value: n, covers:
+covers() }`; a list query returns `Answer { value: (), covers }`, whose value costs
+0 bytes.
+
+Subscriptions with the same key and argument bytes share one **view**, and for
+`query_as` only when the Callers' bytes are equal too. A view runs once per round,
+encodes its group once and splices it into every subscriber's frame; each subscriber
+is still charged the full read set and cover, so sharing never changes admission. A
+Subscribe joins a live view's current image without a run. The publisher keeps each
+view's CoverSet, read set and last value bytes, never its rows (F4), so subscribed
+memory does not grow with the rows a cover spans (L20). A Subscribe's whole result
+goes in one Batch that names the sub in `complete` (G3). Each round re-runs only the
+views whose reads a change hit. If the re-run's encoded value equals the last one,
+the group's `value` is empty (unchanged); a read-set hit still fences the
+subscribers' sessions. The group's rows are each slot's difference between the old
+and the new cover, a removal being a row with no value, and for a cover-only hit the
+changed keys inside it (G2). Every round publishes all its fences, then advances the
+round register once, then offers (one barrier). A query that faults or runs out ends
+the view with `Ended(sub, Failed(..))` to every subscriber. A session Reset drops all
+of that session's subscriptions.
 
 The publisher has one inbox, a `Mailbox` made by `mailbox(n)` with room for n
 messages; `place_head` takes the mailbox and `post(mail)` gives the `Sender[PubIn]`
@@ -240,16 +256,21 @@ position, the larger of 1 and its unanswered sends, at most 1 + q in all: a join
 send takes a slot, and a re-send of an Abandoned position whose slot is still held
 reuses it. `hang_up()` closes the session.
 
-`Frame` is the WIRE-SPEC v2 wire envelope. Its declared variants fix tags
+`Frame` is the wire envelope of subprotocol `hirsel.3` (RUNNER-SPEC v2.45 §3). Its declared variants fix tags
 0 through 8: Hello, Call, Subscribe, Unsubscribe, Welcome, Placed, Batch, Ended,
-Reset. `Want`, `Entry`, `Done` and `Row` are its codec payload types. Welcome carries
+Reset. `Want`, `Entry`, `Done`, `Group` and `Row` are its codec payload types. Welcome carries
 the Caller, q, budget, executable digest, target and n_place. Batch carries the
-version, completing subscription ids, rows and outcomes, in that order. A Row key
+version, completing subscription ids, groups and outcomes, in that order. A Group is
+`{sub, value, rows}`: `value` is the query's R bytes, empty when unchanged, and each
+Row is `{slot, key, value}`. A Row key
 is the logical key, with big-endian table and integer key components;
 its optional value contains the current value codec's bytes without a stored
 schema prefix. Wire serving runs over `runner.serve` / `runner.operate` (below).
 Outcome tags are Returned 0, Failed 1, Refused 2, Abandoned 3 and InDoubt 4.
 Refusal appends RequestMismatch 6 and HistoryUnavailable 7 after NotAllowed 5.
+Fault tags are Raised 0, OutOfBytes 1, OutOfTime 2, Gone 3 and Conflict 4.
+A client that offers only the retired tokens `hirsel.1` or `hirsel.2` is closed 1009
+with reason `hirsel.3` right after the upgrade, before any Welcome.
 
 The head's stream state is the store's own (STORE-SPEC §1.8, S5 and v2.24's request
 identity): `store.admit` and `store.reply`, with no runner table. The gate waits on
@@ -275,6 +296,8 @@ The hand-derived `frame_vectors` law and its `tag_order`, `complete_omitted` and
 `//:core-runner-wire`. The byte
 fixtures in `core/programs/runner/frame-vectors.json` are frozen against
 RUNNER-SPEC v2.11.4's R2 contract and Outcome/Refusal tags, including F9-F12.
+RUNNER-SPEC v2.45's `hirsel.3` Batch groups and Fault tag 4 change them; the
+fixtures are regenerated by their tool, never edited by hand.
 
 WIRE W3b uses reader-funded decoded frames. With payload cap m and q queued
 calls, `reader_bytes` reserves `2(1+q)(4m+128) + round8(3m/2) + 8192 + 4096`.
@@ -317,7 +340,7 @@ DONE_MAX is 8192, leaving 8172 reply bytes. Transact checks before commit and
 records an oversized reply as Failed(OutOfBytes); compute checks without recording.
 At q=4 the owner retains at most 41140 bytes of outcome rows, including five V1
 refusals. The sixth unsent refusal closes 1008. Reset preserves every held Done.
-Older stored replies above the bound close 1009 without changing stored bytes.
+Older stored replies above the bound close 1009, after Welcome, without changing stored bytes.
 `max_subs` defaults to 128, with publication rows also bounded by the byte budget.
 
 A read credit is acquired before decoding and returned after dispatch consumes
@@ -368,8 +391,8 @@ takes the unit and before its first byte, and drops the unit, resetting the
 session, when a commit since that version hit one of the session's read sets.
 Outcomes are not checked: a call's saved reply is delivered as it was committed,
 and a duplicate send returns its saved reply unchanged. The catalog changes only
-in a separate `migrate` phase, published in one commit. `handles` gets a
-`store.Schema` that only opens existing tables and indexes. `store.serve` owns each
+when `schema` runs in `Migrate` mode, published in one commit; in `Open` mode it only
+checks the catalog against the declaration. `store.serve` owns each
 admitted position's `Completion`. It runs the body as one isolated execution over
 one snapshot and commits the record with the reply, so neither commits alone. It
 returns a receipt for the first delivery. Replay reads the Caller back from the

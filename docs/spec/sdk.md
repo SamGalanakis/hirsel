@@ -32,22 +32,29 @@ percent-decoded final component of an entry's definition identity. Duplicate
 names cause `DuplicateStubName(a, b)` before any output is written.
 
 The transport implements `call(want, argsBytes, resultDecoder)`, returning
-`Promise<Outcome<R>>`, and `subscribe(want, argsBytes, onRows, onEnd?)`, returning a
-handle with `unsubscribe()`. The generated stub forwards the optional `onEnd`
-callback. The runtime removes the matching subscription before delivering the
-decoded `Ended` reason once. An empty completed Batch delivers `[]` to `onRows`.
-Reset and reconnect resubscribe without calling `onEnd`.
+`Promise<Outcome<R>>`, and `subscribe(want, argsBytes, onChange, onEnd?)`, returning a
+handle `sub` with `value()`, `rows(slot)` and `unsubscribe()` (RUNNER-SPEC v2.45).
+`sub.value()` is the query's computed value R and `sub.rows(slot)` the rows of
+one named slot, both as of the last applied Batch. Each Batch group for the
+subscription is applied whole, value and every slot's rows together, and then
+`onChange(sub)` is called once. An empty group `value` keeps the previous value;
+a completing group always carries the full value and every slot's full rows, so
+an empty completed result gives `rows(slot)` = `[]` for every slot. The
+generated stub forwards the optional `onEnd` callback. The runtime removes the
+matching subscription before delivering the decoded `Ended` reason once. Reset
+and reconnect resubscribe without calling `onEnd`.
 
-Use `api.subscribeDecoded.<name>(args, onRows, onEnd?)` for typed rows. Each
-row has `sub`, the numeric `table` id, the decoded `key`, and `value` as an
-`Option` of the decoded row type. The wrapper reads the four-byte table id
-and decodes the remaining key bytes with the table's ordered key codec.
-`codec.js` exports the key and row value codecs as `Key<i>` and `RowValue<i>`
-for the query at index `i` in `want`. Use `api.subscribe.<name>` for wire rows.
+Use `api.subscribeDecoded.<name>(args, onChange, onEnd?)` for typed values and
+rows: `value()` is the decoded R, and each row of `rows(slot)` has the decoded
+`key` and `value` as an `Option` of the slot table's decoded row type, with
+`slot` the slot's name. `codec.js` exports `Value<i>` and, per slot `s`,
+`Key<i>_<s>` and `RowValue<i>_<s>` for the query at index `i` in `want`. Use
+`api.subscribe.<name>` for wire groups.
 
-For a query, `Described.result` is the ordered key schema and the value schema
-in that order, each encoded as `std.codec` Bytes. `result_fp` fingerprints
-that pair so changing either schema changes the Want.
+For a query, `Described.result` is R's value schema followed by the slot list,
+each slot's name, ordered key schema and value schema, each schema encoded as
+`std.codec` Bytes. `result_fp` fingerprints the whole, so changing R, a slot's
+name, its table's schemas, or the slot order changes the Want.
 
 Compute and Granted calls return `Promise<Outcome<R>>`. Transact calls return
 `Promise<Outcome<Result<R, E>>>`: the Returned payload contains the complete
@@ -59,13 +66,19 @@ The launch identity contains digest bytes, target and `n_place`. Fingerprints
 come from the described program; the generator does not implement fingerprinting.
 
 `frame.js` exports the Frame, Outcome, Fault and Refusal codecs, the fixed Raised
-and BadKind number tables, and `subprotocol = "hirsel.2"`. Frame is a protocol
-type shared by every executable. The generator computes
-`std.codec.schema(of[runner.Frame]())` from the compiler's bundled runner and
-std sources. Describe contains only per-program data. A Frame change requires
-a subprotocol change; the client checks the negotiated subprotocol.
+and BadKind number tables, and `subprotocol = "hirsel.3"`. Frame is a protocol
+type shared by every executable. The schema `std.codec.schema(of[runner.Frame]())`
+is computed by a tool from the compiler's bundled runner and std sources and
+checked in as a generated file; CI regenerates it and fails when the checked-in
+file differs <!-- doc-ref: planned -->. The generator reads that file, and
+Describe contains only per-program data. A Frame change requires a subprotocol
+change; the client checks the negotiated subprotocol. A server that does not
+speak any offered token answers 101 and then Close 1009 with reason `hirsel.3`
+before any Welcome; the client reports that the page or client must be
+reloaded, and never retries. A 1009 after Welcome is the stored-reply close and
+is reported as a reply error.
 Outcome has Returned, Failed, Refused, Abandoned and InDoubt at tags 0 through
-4. Refusal appends RequestMismatch at tag 6 and HistoryUnavailable at tag 7.
+4. Fault appends Conflict at tag 4 (RUNNER-SPEC v2.45). Refusal appends RequestMismatch at tag 6 and HistoryUnavailable at tag 7.
 Superseded is absent. The generated codecs follow the bundled declarations.
 
 `--place-timeout` is a positive number of seconds, default 10. `--n-place` fixes
@@ -150,7 +163,7 @@ as the TypeScript client's is. It sends Hello without an application credential.
 It sends one Call on stream 0 at position 0, then reads Batch and Reset frames until
 the Done for that position arrives. There is no debug entry point or second call
 path: a place applies its credential binding to the CLI's empty credential as it
-would to any other client. The upgrade offers `hirsel.2` and checks
+would to any other client. The upgrade offers `hirsel.3` and checks
 `Sec-WebSocket-Accept` and the selected subprotocol. `--timeout` bounds the
 connection and is the Call's `deadline_ms`; default 10 seconds. A session that
 ends after the Call was sent reports that the outcome is unknown, and the call

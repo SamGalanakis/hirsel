@@ -79,7 +79,7 @@ of one program are different executables, so their digests differ
 `Welcome.executable` carries this digest, including an empty digest for
 unavailable identity. Generated bindings record digest, target and `n_place`.
 `Welcome` carries `(caller, q, budget, executable, target, n_place)` under
-tag 4 of `hirsel.2`. Target and allowance are independent of the executable digest.
+tag 4 of `hirsel.3`. Target and allowance are independent of the executable digest.
 When either identity is unavailable the diagnostic is "identity unknown", with
 no mismatch report. A differing available digest, target or `n_place` produces
 a developer diagnostic only. Compatibility is decided by entry identity and
@@ -602,6 +602,12 @@ a live session's `Placed` answers for the same list; `manifest_exact` (L35)
 checks the grants, the root limit and `release`; `confirm_identity` (L32);
 `place_run_bounded` also covers the preview child, which observes no store or
 listener.
+
+## Dry run and dev loop
+
+*(Planned, RUNNER-SPEC v2.45 and STORE-SPEC v2.57; neither verb is built.)*
+
+`hirsel dry-run --exe NEW --store DIR`<!-- doc-ref: planned --> opens a copy-on-write image of the place's store at DIR, runs NEW's `on_migrate` and then `schema` in mode `Migrate` against it, and prints what an activation would do: each table and index the declaration adds, drops or renames, each backfill with its row count, each unique index whose backfill would fail with the first conflicting key pair, and the sizes `store.sized` derives for the place's root limit with any `Shortage`. It commits nothing to DIR and exits nonzero when the activation would fail. `hirsel dev SERVER`<!-- doc-ref: planned --> runs SERVER against a `Temp` store, rebuilds on a source change, and on each rebuild performs the same migration on the live temporary store and resubscribes every open session, so a query's new slot list or R reaches the client as a `complete` group. Neither verb has a mode the serving path lacks: both run the ordinary place open (RUNNER-SPEC §6).
 
 ## Platform host and launcher
 

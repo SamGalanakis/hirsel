@@ -58,7 +58,7 @@ fn pool_call_owner(take owner: PoolCallOwner) -> () waits {
     let (to, inbox): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(1u64)
     let (credit, credits): (Sender[()], Receiver[()]) = channel.new(1u64)
     result.unwrap(channel.try_send(credit, ()))
-    let reading = WireRead(reader: take input, to: take to, credits: take credits, clock: clock, config: config, pool: take pool)
+    let reading = WireRead(reader: box.new(take input), to: take to, credits: take credits, clock: clock, config: config, pool: take pool)
     let mut reader = task.spawn(tasks, bytes reader_bytes(), take reading, wire_read)
 
     // Park the reader's handoff at the head of the owner's deferred queue.
@@ -295,10 +295,11 @@ fn wire_owner_park(take rx: Receiver[()]) -> Result[(), std.wsock.Error] waits {
 }
 
 pub fn law_session_records(tasks: Tasks) -> bool waits {
-    // Five WireEvents of 450 plus the channel header, the writer handoff channel,
-    // four unit channels of 64, two task records of 288, and the owner record of 328
+    // Five WireEvents of 169 (8 plus FromRunner's Notice of 161, the largest payload once the
+    // cold controls, Reader and Writer are boxed) plus the channel header, the writer handoff
+    // channel, four unit channels of 64, two task records of 288, and the owner record of 328
     // (288 plus 40 for Result[(), std.wsock.Error]).
-    let checked = bound bytes (5u64 * 450u64 + 64u64 + WIRE_UNIT_CHANNEL_BYTES + 4u64 * 64u64 + 2u64 * 288u64 + 328u64) {
+    let checked = bound bytes (5u64 * 169u64 + 64u64 + WIRE_UNIT_CHANNEL_BYTES + 4u64 * 64u64 + 2u64 * 288u64 + 328u64) {
         let (events, hear): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(5u64)
         let (writes, read_writes): (Sender[WireUnit], Receiver[WireUnit]) = channel.new(1u64)
         let (credit, read_credit): (Sender[()], Receiver[()]) = channel.new(5u64)

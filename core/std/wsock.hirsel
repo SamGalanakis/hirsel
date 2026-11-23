@@ -366,7 +366,7 @@ pub opaque type Writer: send {
 pub opaque type WriteBuffer: send {
     pending: Bytes,
     cursor: u64,
-    pong: Option[websocket.Control]
+    pong: Option[Box[websocket.Control]]
 }
 
 pub opaque type Outbound: send {
@@ -526,7 +526,7 @@ pub fn prepare(mut w: WriteBuffer, mut out: Outbound) -> Result[bool, Error] {
 /// Records a Pong even while a data frame is part-written. As RFC 6455 5.5.2
 /// permits, repeated pending Pings coalesce to the most recently received one.
 pub fn owe_pong(mut w: WriteBuffer, control: websocket.Control) {
-    w.pong = Some(control)
+    w.pong = Some(box.new(control))
 }
 
 pub const MESSAGE_NS: u64 = 30000000000

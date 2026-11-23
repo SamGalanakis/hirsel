@@ -1,4 +1,6 @@
-# STORE-SPEC v2.58: the M4 store library (lane store-spec-1001)
+# STORE-SPEC v2.59: the M4 store library (lane store-spec-1001)
+
+v2.59 (lane m3-spec-fix-1994, astra m3-check-astra-1990's 15 findings on §13): text only, **not yet built**. This first part fixes the durability and reclaim findings 1–4 and 12. The probe descends every participating root by key and is never pruned by stamp, and its verdict belongs to the cut that publishes it (#1). Archive membership is a durable index of position ranges in the MANIFEST, written by the cut that a toggle makes, and every cut seals the window it covers, including a disabling one (#3). `drop_archive` never erases above the captured floor (#2). Reclaim's rule 1 is a bounded sweep with a durable cursor, so `retain` = 1 and skipped passes leave no orphan behind (#12). Pinning or forking a historical Snapshot on a Tiered store holds its closure and copies frames out of packs that have left the inventory (#4). The ARCHIVE frame is withdrawn, and the MANIFEST's archive scalars are replaced inside the format-4 change, with no new format word.
 
 v2.58 (lane w3b-cell-log-spec-1991, Sam's 2026-11-23 Store DX ruling Q2 = A): text only, **not yet built**. §14 specifies `Cell[V]` and `Log[V]` as collection kinds 3 and 4 of format 4, with no new format word. A Cell lives inline in its collection-map entry up to 256 bytes and spills to a one-row tree above that, and a write of its current value is elided. A Log keeps `next_seq` and `first_seq` in its descriptor, appends with no lookup, splits its rightmost page (n − 1, 1) and (n − 2, 2), and trims in O(height) with one 13-byte COMMIT op. `changes` reports a trim as one `Trimmed` span, and `window_changes` gives the runner's tail cover its rows. `Prop` is dropped, `Edge` is a helper and `Queue` waits. Laws L77–L83. See CHANGES-v2.58. Reversible: the spec only.
 
@@ -140,6 +142,16 @@ v2.29 (RUNNER-SPEC v2.18, lane caller-scope-1128, astra's third attack, ATTACK-3
 
 v2.28 (RUNNER-SPEC v2.17, lane caller-scope-1128, astra's second attack, ATTACK-2): text and format; no store has been deployed, so the cutover is a fresh store. `serve` runs an admitted position: it runs the policy and the body as two isolated executions over one snapshot and writes the reply, and the record when there is one, in the body's transaction; a fault keeps the run's digest in a `Pending` that `conclude` writes with the fixed reply (AL1). A duplicate returns the stored reply with its scope digest (AL2). The scope digest begins with the StoreId (AL3). `migrate` is its own phase over a `Migration`, and `Schema` only opens (AL4). The CALL section carries the authority bytes (AL5). The sizes follow the 32-byte scope digest, and `serve` keeps no read log (AL6).
 
+## CHANGES-v2.59 (m3-spec-fix-1994: astra m3-check-astra-1990 findings; not yet built)
+
+| Item | Change | Where |
+|---|---|---|
+| #1 probe | The probe descends every participating root by collection and key, compares the root PagePtr and every edge, and no stamp comparison prunes it. A match is an exact (pack, offset) with equal payload length and checksum. The verdict belongs to the publishing cut, and a cut installing a historical root restarts unfinished probes. Loads check the location order rule only, never a stamp order | §13.6, §13.7, L69 |
+| #2 drop | The drop boundary is min(`archive_drop`, captured floor). `drop_archive` above the head erases nothing reclaim keeps. The out-of-band deletion rule is removed | §13.9, L71 |
+| #3 archive index | `archive_on`, the `archive` list-tree index of disjoint ranges and `archive_drop` replace the four archive scalars. Toggles are cuts. Every cut seals its window, a disabling cut included. The ARCHIVE frame 0x00E0 is withdrawn | §13.1, §13.7, §13.9, L68, L71 |
+| #4 historical promotion | A pin or cut-path fork of a non-head Snapshot on a Tiered store holds its lease or capture, references in place when no Tiered pack left since its generation, and otherwise copies the frames of unlisted packs into fresh class 3/4 packs. An expired lease is `Reclaimed(floor)` | §1.9, AP17, §13.5, L69 |
+| #12 sweep | Rule 1 is a one-page-per-pass sweep of `e-` from a durable MANIFEST cursor that wraps at the floor | §12.6, §13.1, §13.9, L71 |
+
 ## CHANGES-v2.58 (w3b-cell-log-spec-1991: Store DX Q2, Cell and Log; not yet built)
 
 | Item | Change | Where |
@@ -181,7 +193,7 @@ v2.28 (RUNNER-SPEC v2.17, lane caller-scope-1128, astra's second attack, ATTACK-
 | Q3 | `StoreCapacity.Cache` maps to `Served.NoRoom`. The writer/reader pin partition is fixed, and a `CacheDir` is held for one attempt | §13.2, §13.3 |
 | Q4 | `migrate`, `export` and `install` on a Tiered store return `Tiered(..)` before any write | §13.10 |
 | AP2 | Canonical form is the form of every image a cut writes or uploads. Tiered reads resolve only sealed, located pages | AP2, §13.2 |
-| Archival | `archive` and `drop_archive`, the `a-` segments, the ARCHIVE frame 0x00E0, and how reclaim rule 1 skips kept entries | §13.9 |
+| Archival | `archive` and `drop_archive`, the `a-` segments and the MANIFEST archive index (v2.59; the ARCHIVE frame is withdrawn), and the reclaim sweep that replaces rule 1's listing | §13.9 |
 
 ## CHANGES-v2.55 (store-runner-soften-1974: Spec Q1, Q4, Q5; with RUNNER v2.42; not yet built)
 
@@ -1373,6 +1385,7 @@ pub fn pinned(db: Db, name: String) -> Option[Snapshot]
 - `pin`, `unpin`, `fork`, `delete_branch` and `adopt` each make a checkpoint cut, and their ticket is that cut's generation.
 - Reason: a pinned or forked version older than the last checkpoint may have nodes that no pack holds. Writing them at the cut is the only way the pin survives a crash, and the incremental checkpoint writes only those nodes.
 - `fork` and `pin` take only a Snapshot of this open (`Foreign` otherwise). A Snapshot of an earlier open may hold node ids that this open has handed out again, because ids past the manifest's `next_node` are reissued after a reopen.
+- **On a Tiered store (v2.59).** A pin or cut-path fork of a Snapshot that is not the live head and reaches Cold data first acquires that Snapshot's lease and holds it until the cut publishes. An expired lease is `Reclaimed(floor)`, with nothing written. The cut takes ownership of the Snapshot's complete Cold closure, copying frames whose packs have left the inventory, before it publishes (§13.5, "Promoting a historical Snapshot").
 
 **What each does:**
 
@@ -3213,7 +3226,7 @@ Three failures stay distinct: a validation error (`Corrupt`, `Dangling` or `Unsu
 3. `name` is over 255 UTF-8 bytes: `Limit(Name)`. A live branch already has `name`: `Exists(name)`. The empty name is allowed, on both paths, as built (`checked_name`), and the FORK and MANIFEST grammars carry 0–255 bytes.
 4. `next_branch` is 2³² − 1, so `id + 1` cannot be represented: `Limit(Ids)`.
 5. The MANIFEST size expression (AP4) over the live branches and pins plus this branch's record would pass `MANIFEST_LIMIT`: `Limit(Manifest)`.
-6. **Live-head test.** `from`'s branch is live, `from`'s version equals that branch head's version, and `from`'s three root stamps equal the head's three root stamps at the call. Then the fork is a **live-head fork** (AP18). Otherwise, including a Snapshot of a deleted branch, an older Snapshot, or one whose roots differ, it takes §1.9's cut path, because journal replay rebuilds only head versions.
+6. **Live-head test.** `from`'s branch is live, `from`'s version equals that branch head's version, and `from`'s three root stamps equal the head's three root stamps at the call. Then the fork is a **live-head fork** (AP18). Otherwise, including a Snapshot of a deleted branch, an older Snapshot, or one whose roots differ, it takes §1.9's cut path, because journal replay rebuilds only head versions. On a Tiered store, the cut path first protects and transfers the Snapshot's Cold closure (§13.5, "Promoting a historical Snapshot", v2.59). An expired lease is `Reclaimed(floor)` here, after step 5 and before an id is taken.
 
 **The journal cap comes first (AP15).** On a disk store's live-head path, right after step 6: if the FORK frame's f = 16 + 18 + n bytes fails AP15's comparison against U and `journal_limit`, `fork` returns `Full(Journal(Capacity{requested: r, available: journal_limit}))` by AP15's comparison (r saturates at u64::MAX) before the preparation and before the id is taken (C-10), so no allocator refusal can mask it, and nothing is allocated, sent or installed.
 
@@ -3885,8 +3898,8 @@ pub fn claim_of(db: Db) -> Result[Claim, Error]                                 
 - the live set of that CHECKPOINT's retained checkpoints.
 
 A pass may overlap the next cut. Names the next cut creates are at or above G and N, and rule 4 never touches them. A pass erases:
-1. entries at positions < floor, of epoch ≤ e;
-2. entries at **max(floor, c₀ + 1) ≤ position ≤ P** whose (position, epoch, digest) is not on the chain, of epoch ≤ e. In that range the chain names are known exactly, from recovery's walk (c₀ + 1..p at open) and from this holder's own advances (p + 1..P). These are a fenced holder's orphans, a dead pipeline's entry and a losing claim's entries. **Positions in [floor, c₀] are never erased by rule 2**, because this open has no chain names there. An orphan there waits until the floor passes it and rule 1 removes it, which takes at most `retain` more checkpoints;
+1. entries at positions < floor, of epoch ≤ e, found by the bounded sweep of §13.9 (v2.59), which resumes from a durable cursor and keeps the entries an archive index row holds;
+2. entries at **max(floor, c₀ + 1) ≤ position ≤ P** whose (position, epoch, digest) is not on the chain, of epoch ≤ e. In that range the chain names are known exactly, from recovery's walk (c₀ + 1..p at open) and from this holder's own advances (p + 1..P). These are a fenced holder's orphans, a dead pipeline's entry and a losing claim's entries. **Positions in [floor, c₀] are never erased by rule 2**, because this open has no chain names there. An orphan there waits until the floor passes it and rule 1's sweep reaches it, within one sweep cycle after that (§13.9);
 3. MANIFESTs, chunks and packs of epoch < e that are not live;
 4. MANIFESTs, chunks and packs of epoch e that are not live and whose generation < G, chunk position < the CHECKPOINT's position, or seq < N. Names of epoch e at or above those may belong to a cut in flight or a refused cut, and wait for a later pass;
 5. pending multipart uploads whose key's epoch is < e. Uploads of its own epoch are never aborted, because they may be a live cut's (Fable nit, Astra).
@@ -4065,13 +4078,13 @@ A Tiered frame is never written into a class 0, 1 or 2 pack, and a Memory frame 
 | lineage | PagePtr 36 | root of the lineage tree (§13.6): boundaries and deadlist cells; a class-2 list tree |
 | deferred_frees | PagePtr 36 | root of the deferred-free queue (§13.6); a class-2 list tree |
 | deferred_next | u64 | the next queue sequence number |
-| archive_since | u64 | 0 = archival never on; else the position where it was last turned on (§13.9) |
-| archive_until | u64 | u64 max while on; else the position where it was turned off |
-| archive_drop | u64 | chain entries below this position may be erased (§13.9) |
-| archive_dropped | u64 | how far erasure below `archive_drop` has got |
+| archive_on | u64 | 0 = archival off; else the cut position from which it is on (§13.9) |
+| archive | PagePtr 36 | root of the archive index (§13.9): disjoint position ranges and their segments; a class-2 list tree, all zero when empty |
+| archive_drop | u64 | the requested drop watermark (§13.9); 0 = none |
+| sweep | 3 × u64 | the reclaim sweep cursor (§13.9): (position, epoch, digest) of the last `e-` key fully examined; all zero = before the first |
 
-- The fixed part grows by 120 bytes: 112 for the fields above, plus 8 for the split account. AP4's MANIFEST size expression grows by the same 120.
-- `lineage` and `deferred_frees` are participating roots for AP15, AP16 and the locator.
+- The fixed part grows by 164 bytes: 156 for the fields above, plus 8 for the split account. AP4's MANIFEST size expression grows by the same 164 (v2.59; v2.56's four archive scalars are replaced).
+- `lineage`, `deferred_frees` and `archive` are list roots. AP16 keeps their packs, the locator covers them, and AP15 does not count them. `lineage` and `deferred_frees` are also participating roots of the probe (§13.6).
 - Their pages live in class-2 packs and are read and validated with the other list trees (AP21 step 0).
 
 **FORK and pin watermarks (Fable F7).** FORK's payload (0x0013) gains `watermark u64` after `name`. A pin's journal frame and its MANIFEST pin record gain `watermark u64` after their existing fields, which makes the pin record 130 + n bytes. A watermark is exact:
@@ -4079,11 +4092,9 @@ A Tiered frame is never written into a class 0, 1 or 2 pack, and a Memory frame 
 - a pin records the counter at the capture of the Snapshot it pins;
 - neither is ever estimated or reconstructed.
 
-**LOCATE coverage (Fable F15, astra #23).** §12.2's locator coverage L ∪ C extends to class 3 and class 4 packs and to the class-2 packs of `lineage` and `deferred_frees`. The locator is unchanged: these packs are depth-0 rows like any other, resolved through §12.2's chunk tree at depth ≥ 1. M3 never reads a locator root as flat pack rows.
+**LOCATE coverage (Fable F15, astra #23).** §12.2's locator coverage L ∪ C extends to class 3 and class 4 packs and to the class-2 packs of `lineage`, `deferred_frees` and `archive`. The locator is unchanged: these packs are depth-0 rows like any other, resolved through §12.2's chunk tree at depth ≥ 1. M3 never reads a locator root as flat pack rows.
 
-**ARCHIVE, kind 0x00E0, MUST 1, 32 bytes, at most one per CHECKPOINT entry (§13.9).** Its fields are `position u64, epoch u64, len u64, digest u64`. It names the archive segment `a-<position>-<epoch>-<digest>` of that checkpoint. It is present only while archival is on, and it follows LOCATE.
-
-**Kinds.** Format 4 adds PACK_INDEX 0x0023 (MUST) and ARCHIVE 0x00E0. Every other kind is as §2.7 and the §11 kinds table.
+**Kinds.** Format 4 adds PACK_INDEX 0x0023 (MUST). Every other kind is as §2.7 and the §11 kinds table. v2.56's ARCHIVE frame 0x00E0 is withdrawn (v2.59): the archive index in the MANIFEST names every segment, so no CHECKPOINT entry carries one.
 
 **Cells and Logs (v2.58, §14.1).** Format 4 also adds `CollectionRoot` kinds 3 (Cell) and 4 (Log) with their longer map-leaf descriptors, the catalog kinds 3 and 4, and COMMIT data op tag 3 (trim). They change no frame kind and need no further format word.
 
@@ -4230,6 +4241,14 @@ pub fn changes_page(r: Reader, a: Option[Snapshot], b: Snapshot, lo: Bytes, hi: 
 
 **Expiry is not a cache event (Fable F3, astra #8).** Once a Snapshot's lease has expired, every resolution of a Cold slot through it is `Reclaimed(floor)`, whether or not the frame is cached, pinned or on NVMe. Hot slots stay readable, because the Snapshot's `Arc` owns them. A read through a live lease that finds a pack absent is decided by this holder from its own lease: the name is live, so the answer is `Corrupt(Fault{.., why: Absent})`, never `Reclaimed` (Fable F8.3).
 
+**Promoting a historical Snapshot (v2.59, astra 1990 #4).** A `pin`, and a cut-path `fork` (AP17 step 6), install a Snapshot's roots as a new participating root. When the Snapshot is not the live head and its roots reach a Cold slot, the cut that publishes the pin or fork does these steps first:
+1. **Protection.** The capture's lease (holder) or capture c_f (follower) must be live, and the operation holds it until the cut publishes. An expired lease returns `Reclaimed(floor)` before anything is admitted or written. Leases are holder state, so this is decided by the holder alone, and no cache event decides it.
+2. **Closure.** If no Tiered pack has left the inventory since the Snapshot's generation g, every Cold frame it reaches is in a listed pack, and the new root references them in place. Otherwise the cut walks the Snapshot's Cold closure through its own locator, which the lease keeps readable. It copies each frame whose pack is no longer listed into fresh class 3 or 4 packs and rewrites the paths above it, as relocation does (§13.6). Frames in listed packs are referenced in place.
+3. **Probes.** The cut restarts every unfinished probe (§13.6), because the new root may name a frame that an earlier pass found unnamed.
+4. **Release.** The operation releases the lease only after the cut that owns the closure publishes. A refused or failed cut publishes no root and releases nothing early.
+
+The walk and the copies are charged to the checkpoint task (§13.11), never to the caller's partition. The walk is O(the Snapshot's Cold pages) when packs have left since g, and O(1) when none has. A Snapshot whose roots are all Hot is sealed by the cut like any dirty page. A live-head fork (AP17, AP18) shares the head's roots, which already participate, so it is unchanged.
+
 **The fence has one owner (Fable F9).** A pager GET never decides `Fenced`. A 404 or 403 on a frame that a live lease names goes to the journal task. The journal task takes §12.5's witness and answers `Fenced(e)` (first evidence wins, §12.3) or `Corrupt(.. Absent)`. The pager only forwards.
 
 **Followers (astra #7, Fable F8).** A follower Snapshot carries its **capture** c_f = (position, epoch, digest) of the CHECKPOINT whose MANIFEST its Cold slots come from. The follower's lease is live while c_f is in the retained set the follower last observed: the latest head's checkpoint, or a row of its MARK. After any head read (`catch_up`, `fresh`, the idle poll) that shows c_f gone, the follower marks every Snapshot with that capture expired, and the rule above applies. Names follow §12.2: the tip entry is named with HEAD's `entry_epoch`, and a checkpoint with its `c_epoch` (astra #21). A 404 on a frame of a live capture takes §12.5's witness against c_f's own tuple:
@@ -4267,7 +4286,7 @@ A fork is therefore an implicit pin on its parent (Fable F6, astra #10). Boundar
 
 **Relocation moves cells.** When compaction moves a live frame of stamp s and length n from pack p to pack q, then for each branch b whose head does not match the frame but whose boundary k does (k is the newest such boundary), the cell (b, k, side, birth(s), p) moves n bytes to (.., q). A cell that would go negative is clamped to 0, and p is queued for the repair probe.
 
-**The probe (astra #12, Fable F30).** To decide a frame of pack p with index row (collection, key, stamp, offset), the probe descends, by key, every **participating root**:
+**The probe (astra #12, Fable F30; v2.59, astra 1990 #1).** To decide a frame of pack p with index row (collection, key, stamp, offset), the probe descends, by collection and key, every **participating root**:
 - every branch head;
 - every pin;
 - the base root (AP14);
@@ -4275,7 +4294,11 @@ A fork is therefore an implicit pin on its parent (Fable F6, astra #10). Boundar
 - `lineage`;
 - every subtree queued in `deferred_frees`.
 
-A descent skips a subtree whose root stamp is below the frame's stamp. The stamp order is an invariant, checked at every load: a child's stamp is below its parent's (`Corrupt(Order)`). A **positive match** is a Slot or BlobSlot whose PagePtr or BlobRef names (p, offset) exactly, with `len` and the checksum equal. A BLOB matches only through its owning leaf's BlobRef. A frame with no positive match in any root is dead. The probe reads PACK_INDEX and interior pages through the checkpoint task's own partition, never the writer's. It runs on at most `probe_budget` frames per cut (Options, default 65,536). The cut that finishes a pack's probe sets that pack's `live` to the exact sum of its matched frames.
+In each root it finds the collection's `CollectionRoot` in the collection map, compares that root PagePtr itself, and then follows the path to the row's key, comparing every edge it follows. **No stamp comparison prunes a descent.** AP10's in-place edits may leave a parent stamped below its child (AP20: stamps cannot order a tree), so a page stamped 41 under a parent stamped 40 is reached and compared like any other. Loads check AP20's location order rule, never a stamp order.
+
+A **positive match** is a `CollectionRoot` root PagePtr, a `Slot` PagePtr or a `BlobSlot` BlobRef that names (p, offset) exactly, with the payload length and the checksum equal (§13.2's PAGE and BLOB rules). A BLOB matches only through a BlobRef in a leaf. The probe reads PACK_INDEX and interior pages through the checkpoint task's own partition, never the writer's. It runs on at most `probe_budget` frames per cut (Options, default 65,536).
+
+**The verdict belongs to the publishing cut.** A probe may span several cuts. A frame matched at any of them stays matched. A frame is dead only when no root of the cut that publishes the pack's retirement names it. An earlier cut's "no match" still holds at the publishing cut for one reason: no commit can re-reference a frame that no participating root names. Commits derive from heads, and `adopt` takes a branch's roots, and both are participating roots. The only other way to re-reference a frame is to install a historical root (§13.5, "Promoting a historical Snapshot"). A cut that installs one restarts every unfinished probe and discards their unpublished verdicts. The cut that finishes a pack's probe sets that pack's `live` to the exact sum of its matched frames. A pack leaves the inventory only at that cut.
 
 **Compaction at the cut (AP16 Choose and Plan for Tiered packs).**
 - The cut selects Tiered packs by `live` / `bytes` ascending below `compact_ratio` (Options, default 0.5), then any pack not probed in `repair_cuts` cuts (Options, default 64). The second rule repairs drift in `live` (astra #13).
@@ -4300,7 +4323,7 @@ A descent skips a subtree whose root stamp is below the frame's stamp. The stamp
 ### 13.7 Lazy open (AP21-T)
 
 **What open validates (Fable F14, astra #6).** On a store with a Tiered collection, AP21 runs steps 0–11 with these changes:
-- **Step 0, metadata, in full.** It validates every list tree, including `lineage` and `deferred_frees`, every class-2 pack, the pack inventory, and (objects@1) the locator's exact coverage L ∪ C (§12.2, §13.1), exactly as AP21 does. A damaged list, retirement entry, boundary, cell or queue entry is `Corrupt` at open.
+- **Step 0, metadata, in full.** It validates every list tree, including `lineage`, `deferred_frees` and the `archive` index (its rows are disjoint and ascending, and each segment name is well formed; v2.59), every class-2 pack, the pack inventory, and (objects@1) the locator's exact coverage L ∪ C (§12.2, §13.1), exactly as AP21 does. A damaged list, retirement entry, boundary, cell or queue entry is `Corrupt` at open.
 - **Tiered pages are not decoded.** It decodes no class 3 or class 4 frame, and builds no incoming list or location record for one.
 - **Steps 4 (Validate) and 6 (Rebuild)** run in full for Memory collections only.
 - **Step 5 (Cleanup)** deletes only names that are absent from the inventory just validated, and runs only after step 3's O1, which on objects@1 means after the claim. Open never deletes a pack that a validated list names.
@@ -4308,8 +4331,7 @@ A descent skips a subtree whose root stamp is below the frame's stamp. The stamp
 
 **Every later load of a Tiered frame checks:**
 - AP20's five checks;
-- the location order rule;
-- the stamp order rule (§13.6);
+- the location order rule (AP20). No stamp order is checked: a parent may carry a lower stamp than its child (AP10), and a store's own page is never refused for it (v2.59);
 - stamp < `next_stamp`;
 - AP3's bounded decode.
 
@@ -4334,31 +4356,43 @@ A failure is `Corrupt` for that read. It is never a value, and nothing is delete
 
 ### 13.9 Archival retention (opt-in, default off)
 
-**What it keeps.** On objects@1 and sim@1 a store may keep its committed history past reclaim: every entry on the chain (GROUP, CLAIM and CHECKPOINT objects, the immutable CALL records of §12.2) and the archive segments that name them. It keeps no MANIFEST, chunk or pack. A Log's history is archived as the COMMIT ops of the kept GROUP entries, and no pack is kept for it (§14.10, D-Q2-8).
+**What it keeps.** On objects@1 and sim@1, a store may keep committed history past reclaim. It keeps every **chain** entry whose position lies in an archived range: GROUP, CLAIM and CHECKPOINT objects, and the immutable CALL records of §12.2. It also keeps the archive segments that name those entries. It keeps no MANIFEST, chunk or pack. A Log's history is archived as the COMMIT ops of the kept GROUP entries, and no pack is kept for it (§14.10, D-Q2-8).
 
 ```hirsel
-pub fn archive(mut db: Db, on: bool) -> Result[u64, Error] waits      // the position where it takes effect; Tiered(Authority) on log@1 or memory
-pub fn drop_archive(mut db: Db, below: u64) -> Result[(), Error] waits // erase kept entries below `below`; below ≤ archive_until
+pub fn archive(mut db: Db, on: bool) -> Result[(u64, Ticket), Error] waits      // the cut position where it takes effect; Tiered(Authority) on log@1 or memory
+pub fn drop_archive(mut db: Db, below: u64) -> Result[Ticket, Error] waits      // request erasure of archived entries below `below`
 ```
 
-- **Durable, not an option.** `archive` is a commit that sets `archive_since` (on) or `archive_until` (off) in the next MANIFEST. A restart with other Options cannot purge the archive. A store that never turns it on has `archive_since` = 0, and §12.6 applies to it unchanged.
-- **Segments.** While archival is on, each cut at position c writes, before its CHECKPOINT entry, the create-only object `a-<c>-<e>-<digest>`.
-  - It is HEADER followed by frames of rows (position u64, epoch u64, digest u64, len u64), ≤ 32,768 rows per 1 MiB frame.
-  - It names every chain entry in [c′, c), where c′ is the previous CHECKPOINT on the chain, so c′'s own entry is included. The holder knows these names exactly from recovery's walk and its own advances.
-  - The CHECKPOINT entry's ARCHIVE frame names it. Kept CHECKPOINT entries form a chain of segments down from the head, so reading the archive never needs LIST.
-- **What reclaim skips.** For a pass with captured floor f:
-  - **Rule 1** keeps an entry at position q < f when archive_drop ≤ q, archive_since ≤ q < archive_until, and a segment reachable from the head names its (position, epoch, digest). Every other entry below f goes as before, including off-chain and genesis debris.
-  - Rule 1's LIST starts after the bare prefix `e-<pf>`, so position pf itself is listed, where pf is the floor in the MARK of the oldest retained CHECKPOINT. It reads the segments from that checkpoint down to pf, at most `retain` hops. Listing stays bounded by `retain` checkpoint intervals, however large the archive is.
-  - **Rule 2** is unchanged: off-chain entries above the floor are erased.
-  - **Rules 3–5** are unchanged for MANIFESTs, chunks, packs and uploads. A segment is treated like a MANIFEST: it is live while an ARCHIVE frame of a kept or live entry names it, and otherwise erased by rule 3 or 4.
+**The archive index (v2.59, astra 1990 #3).** Archive membership is durable MANIFEST state:
+- `archive_on` is 0 when archival is off. Otherwise it is the cut position from which archival is on.
+- The `archive` root is a class-2 list tree of disjoint half-open position ranges. Each row is keyed `start u64 BE` and its inline value is 40 bytes: `end u64`, then the segment's `position u64, epoch u64, digest u64, len u64`. The segment is the create-only object `a-<position>-<epoch>-<digest>`.
+- Rows are disjoint and ascend by `start`. An overlap, `start ≥ end`, or a segment whose `position` is not the row's `end` is `Corrupt(Malformed)` at AP21 step 0.
+- Archive traversal and reclaim read this index from the current MANIFEST. They never follow a chain of CHECKPOINT entries, so a run of checkpoints taken with archival off cannot cut the route to an older segment.
+
+**Toggles are cuts.** `archive` and `drop_archive` each make a checkpoint cut, as `pin` does (§1.9). The returned position c is that cut's CHECKPOINT position, and the ticket is its generation. So a toggle and its effective position become durable together in one MANIFEST, and a restart after `archive` returns sees the new state. A failed or refused cut changes nothing. Archival is durable MANIFEST state, not an Option, so a restart with other Options cannot purge the archive. A store that never turns it on has `archive_on` = 0 and an empty index, and only the sweep below applies to it.
+
+**Every cut seals what it covers.** A cut at position c, whose previous cut was at c′, does this before it writes its CHECKPOINT entry:
+1. If `archive_on` was non-zero at c′, or this cut turns archival off, the window [c′, c) was archived. The window includes c′'s own entry.
+2. The cut writes one segment `a-<c>-<e>-<digest>`. It is a HEADER, then frames of rows (position u64, epoch u64, digest u64, len u64), at most 32,768 rows per 1 MiB frame. It names every chain entry in the window, which the holder knows exactly from recovery's walk and its own advances.
+3. The cut adds the index row [c′, c) → that segment.
+4. The cut then sets `archive_on` to c (turning on) or to 0 (turning off), or leaves it unchanged.
+
+So a disabling cut still seals the part it covered. An off-then-on sequence appends a new range and leaves the earlier rows unchanged. Turning archival on at a cut with no prior cut since genesis starts the first window at that cut.
+
+**Reclaim: the sweep (v2.59, astra 1990 #12).** v2.56's rule 1 listed only [pf, f), so it missed whole intervals when `retain` = 1 and when cuts passed without a reclaim pass. Rule 1 of §12.6 is replaced on every objects@1 and sim@1 store, archival or not, by this bounded sweep, whose cursor is durable:
+- **One page per pass.** A pass with captured floor f and epoch e lists `e-` once, starting after the MANIFEST's `sweep` key, for at most one LIST page (1,000 keys). It examines the keys in order, and stops at the first key whose position is ≥ f.
+- **What it erases.** It erases an examined key of epoch ≤ e unless the key is **kept**. A key is kept when an index row [s, end) holds its position q, q ≥ the drop boundary D (below), and the row's segment names exactly that (position, epoch, digest). So off-chain entries inside an archived range go too, including a fenced holder's `e-150`.
+- **Progress.** The next cut records, as `sweep`, the last key of the longest examined prefix whose erases all succeeded. A failed DELETE leaves the cursor before that key. A crash repeats deletes, which is harmless because a name never holds two contents (§12.2). A position with more than 1,000 keys resumes at its exact next key.
+- **Wrapping.** When a pass reaches a key at or above f, or the end of the listing, the next cut sets `sweep` to zero, and the next pass starts again from the first `e-` key. So a fenced holder's late PUT behind the cursor is removed within one more cycle, and no orphan below the floor stays forever. A cycle takes ⌈(keys below f) / 1,000⌉ passes.
+- Rules 2–5 of §12.6 are unchanged. A segment is erased only as below, never by rules 3–4 while an index row names it. A segment that no published index names (a crash before its cut published) is an orphan of epoch e or lower, erased by rule 3 or 4 like a MANIFEST.
 - **Recovery and followers are unaffected.** §12.3's fetch-hint LIST starts after `e-<c>` with c ≥ floor, so kept entries below the floor are never listed or read by recovery.
-- **Turning it off.** `archive(db, false)` stops new segments at the next cut. Entries already kept stay kept, because `archive_until` bounds rule 1's skip, until `drop_archive`.
-- **Deleting the archive.** `drop_archive(db, below)` raises `archive_drop` to `below` at the next cut, monotonically.
-  - Each later pass erases kept entries and segments in [archive_dropped, archive_drop), at most one LIST page (1,000 keys) per pass.
-  - The next cut records the progress in `archive_dropped`. A crash repeats deletes, which is harmless because a name never holds two contents.
-  - A segment row below `archive_drop` names an entry that may be gone, and a reader of the archive treats it as erased.
-  - An operator may also delete `e-` and `a-` names below `archive_drop` out of band. Names at or above it must not be touched.
-- **Stragglers.** A fenced holder's late PUT of an entry below an already-passed range re-creates an orphan that no later rule-1 listing reaches. It stays until a `drop_archive` range covers it, and it is never read. The same holds for orphans below pf when more than `retain` − 1 cuts pass without a reclaim pass. Re-enabling archival after turning it off never erases what an earlier interval kept, because rule 1 never lists below pf.
+
+**Dropping the archive (v2.59, astra 1990 #2).** `drop_archive(db, below)` raises `archive_drop` to `below` at its cut. It is monotone: a lower `below` changes nothing. `below` may be any value, including one above the head. The watermark only releases archive ownership. It never authorizes erasing anything that reclaim would otherwise keep:
+- **The drop boundary** of a pass is D = min(`archive_drop`, the pass's captured floor f). The sweep erases only below f, so the current CHECKPOINT, every retained checkpoint, the chain above the floor and every leased name stay live whatever `below` is.
+- **Index trimming.** The cut after a pass trims the index up to D. A row with `end` ≤ D is removed, and its segment is erased after that cut is Advanced. A row with `start` < D < `end` keeps its segment, which its surviving suffix needs, and its `start` becomes D. Rows at or above D are unchanged.
+- **Operators.** Operators erase archive data only through `drop_archive`. Out-of-band deletion of `e-` or `a-` names is not supported.
+
+**Stragglers.** A segment row below D names entries that may be gone, and a reader of the archive treats them as erased.
 
 ### 13.10 What M3 refuses (Q4)
 
@@ -4400,10 +4434,10 @@ Harness: `tiered_laws.hirsel` over `std.sim.s3` and the §3.9 file-system model.
 | **L65 hits verify their edge** | Two edges name one (pack, offset) with different checksums or stamps. The wrong edge is `Corrupt` whether the frame was cached first by the right edge, pinned, on NVMe or delivered to a waiter | skipping the check on a cache hit |
 | **L66 lifetime and re-base** | An expired holder or follower Snapshot gets `Reclaimed(floor)` through Cold slots, cached or not. A live one with an erased pack gets `Corrupt(Absent)`. Across a re-base, old Snapshots answer from their own pages or `Reclaimed`, and `changes` across domains is `Foreign` | re-reading an expired Snapshot at the new root |
 | **L67 NVMe is never trusted** | Each flipped byte or truncated NVMe entry is refetched and the right value returned. With the bucket copy also bad, the read is `Corrupt` | serving an NVMe entry without the five checks |
-| **L68 lazy open deletes nothing live** | Damaged lists, cells, queue entries or locator rows are `Corrupt` at open with every name kept. Cleanup removes exactly the walker's orphans | cleanup before step 0's validation |
-| **L69 compaction keeps every referenced frame** | Under random forks, pins, drops and compaction, with a crash at each row of §13.6's table on both sides, every frame the walker reaches from any participating root is readable after reopen, and every retired pack is unreachable | retiring a pack on `live == 0` without the probe |
+| **L68 lazy open deletes nothing live** | Damaged lists, cells, queue entries, locator rows or archive index rows (overlapping, `start ≥ end`, or a segment position other than `end`) are `Corrupt` at open with every name kept. Cleanup removes exactly the walker's orphans | cleanup before step 0's validation |
+| **L69 compaction keeps every referenced frame** | Under random forks, pins, drops and compaction, with a crash at each row of §13.6's table on both sides, every frame the walker reaches from any participating root is readable after reopen, and every retired pack is unreachable. Cases (v2.59): a parent written at stamp 40 whose child page was edited in place to stamp 41 is still found by the probe and loads; a frame named only by a fork made while a probe ran keeps its pack; a pin of a historical Snapshot whose pack left the inventory after its generation promotes by copy, and one whose lease expired is `Reclaimed(floor)` with nothing admitted | retiring a pack on `live == 0` without the probe; pruning a probe descent by stamp; a verdict taken from a cut other than the publishing one; pinning a historical Snapshot by reference after its pack retired |
 | **L70 partitions and refusals** | Readers that saturate their pool never delay a writer commit. Dirty bytes never pass `dirty_bytes`. `migrate`, `export` and `install` on a Tiered store are `Tiered(..)` with every byte unchanged | one shared pin pool |
-| **L71 archival** | With archival on, every chain entry below the floor survives reclaim and every off-chain entry is erased. With it never on, the store's names after reclaim equal L58's. `drop_archive(b)` erases exactly the kept names below b, and rule 1's LIST never starts below pf | rule 1 erasing kept entries |
+| **L71 archival** | With archival on, every chain entry in an index range survives reclaim and every other entry below the floor is erased within one sweep cycle. With it never on, the store's names after reclaim equal L58's. Cases (v2.59): (a) `archive(true)` then `archive(false)` before the next cut: the window up to the disabling cut is sealed and kept; (b) on, off, on with no reclaim pass between: two disjoint rows, both kept; (c) a restart right after `archive` returns: the reopened MANIFEST has the new `archive_on`; (d) `retain` = 1 with debris at several intervals and a fenced holder's `e-150` PUT behind the cursor: all erased within one cycle; (e) `drop_archive` with `below` above the head, with a follower open and a recovery from C400: the current CHECKPOINT, every retained checkpoint and the chain above the floor stay, the follower and recovery succeed, and the index is trimmed to D = min(`archive_drop`, f) | rule 1 erasing kept entries; reading archive membership from a CHECKPOINT chain; an unsealed window at a disabling cut; a sweep with no durable cursor; a drop boundary not capped by the floor |
 
 ## 14. Cell and Log collections (Store DX Q2, v2.58, not yet built)
 
@@ -4672,7 +4706,7 @@ Its size is at most 2t plus the overlap's differences. Its cost is O(map height 
   A plan miss is a body miss and reruns the attempt (§13.3). The touched-page counter counts these pages only, so a trim's `Refused(Cache)` depends on the height and not on the rows dropped.
 - **Dropped subtrees.** At the trim's apply, each dropped child edge goes into the commit's **dropped list**: a Cold edge as its PagePtr (20 bytes, as the replaced list), and a Hot child as its share. The list is charged with the dirty bytes (§13.8). The next cut enqueues each Cold edge in `deferred_frees` (§13.6) and walks each Hot child, enqueuing its Cold descendants and dropping its pages. That walk visits dirty pages only, which `dirty_bytes` already bounds, and runs on the checkpoint task. Draining then applies §13.6's deadlist rule, so a subtree still shared with a pin or fork goes to cells and not to `live`. The probe and reclaim are unchanged.
 - **Reclaim and followers.** No change. A follower replays the trim op and reaches the same Cold edges through its own installs (§13.5).
-- **Archival (D-Q2-8).** With archival on (§13.9), a Log's history is the tag-1 appends and tag-3 trims in the kept GROUP entries. Every row the Log held from `archive_since` onward entered by one of those ops, so an archive reader rebuilds any range of it by replaying the kept entries in position order. No pack is kept for a Log. §13.9's pack hook is not used, and its membership rework (m3-spec-fix-1994) needs no Log case.
+- **Archival (D-Q2-8).** With archival on (§13.9), a Log's history is the tag-1 appends and tag-3 trims in the kept GROUP entries. Every row the Log held inside an archived range (§13.9's index) entered by one of those ops, so an archive reader rebuilds any range of it by replaying the kept entries in position order. No pack is kept for a Log. §13.9's pack hook is not used, and its membership rework (m3-spec-fix-1994) needs no Log case.
 - **Export** copies the MANIFEST, packs and journal (§12.7, §3.5a). Descriptors, with their sequence bounds and inline Cell bytes, travel in it unchanged.
 - **Prepared install** never builds a Cell or Log from rows. `Migrate` creates them empty and `migrate_table` names tables only (§14.2). So the graft carries each existing Cell and Log descriptor byte-equal, and a prepared-rows (0x0084) row whose id names a Cell or Log is `Corrupt(Malformed)`. A Log's bounds therefore never need to cross the inventory.
 

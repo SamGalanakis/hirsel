@@ -35,28 +35,67 @@ impl Reactor {
 }
 
 /// `auto`, and an unset variable, use io_uring when this kernel allows it and
-/// epoll otherwise; `epoll` forces epoll.
+/// its release is at least 6.13, and epoll otherwise; `epoll` forces epoll and
+/// `io_uring` forces io_uring.
 pub const REACTOR_ENV: &str = "HIRSEL_NET_REACTOR";
 static CHOSEN: OnceLock<Result<Reactor, String>> = OnceLock::new();
 /// The ring and wake descriptor the probe built, for the first poller.
 static PROBED: Mutex<Option<(Uring, OwnedFd)>> = Mutex::new(None);
 
+/// Whether `auto` may take io_uring on a kernel of this release
+/// (`uname -r`). Through 6.12, a request reached from the exit fallback
+/// (`io_fallback_req_func`) puts its task through `io_put_task_remote`, which
+/// oopsed on 6.8 when a process was killed with multishot polls armed. 6.13
+/// removed requests' task pointers and that function; 6.12.y still has them.
+fn release_allows_uring(release: &str) -> bool {
+    let mut parts = release
+        .split(|c: char| !c.is_ascii_digit())
+        .map(str::parse::<u32>);
+    match (parts.next(), parts.next()) {
+        (Some(Ok(major)), Some(Ok(minor))) => (major, minor) >= (6, 13),
+        _ => false,
+    }
+}
+
+fn kernel_release() -> String {
+    // SAFETY: uname fills the zeroed struct; release is NUL-terminated.
+    unsafe {
+        let mut name: libc::utsname = std::mem::zeroed();
+        if libc::uname(&mut name) != 0 {
+            return String::new();
+        }
+        std::ffi::CStr::from_ptr(name.release.as_ptr())
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
 /// The process's reactor, chosen at its first use and fixed after.
 pub fn reactor() -> io::Result<Reactor> {
     CHOSEN
-        .get_or_init(|| match std::env::var_os(REACTOR_ENV) {
-            Some(v) if v == "epoll" => Ok(Reactor::Epoll),
-            Some(v) if v != "auto" => Err(format!(
-                "{REACTOR_ENV}={} is not a reactor; use auto or epoll",
-                v.to_string_lossy()
-            )),
-            _ => Ok(match Uring::open() {
+        .get_or_init(|| {
+            let forced = match std::env::var_os(REACTOR_ENV) {
+                Some(v) if v == "epoll" => return Ok(Reactor::Epoll),
+                Some(v) if v == "io_uring" => true,
+                Some(v) if v != "auto" => {
+                    return Err(format!(
+                        "{REACTOR_ENV}={} is not a reactor; use auto, epoll or io_uring",
+                        v.to_string_lossy()
+                    ));
+                }
+                _ => false,
+            };
+            if !forced && !release_allows_uring(&kernel_release()) {
+                return Ok(Reactor::Epoll);
+            }
+            match Uring::open() {
                 Ok(probed) => {
                     *PROBED.lock().unwrap_or_else(|e| e.into_inner()) = Some(probed);
-                    Reactor::IoUring
+                    Ok(Reactor::IoUring)
                 }
-                Err(_) => Reactor::Epoll,
-            }),
+                Err(e) if forced => Err(format!("{REACTOR_ENV}=io_uring: {e}")),
+                Err(_) => Ok(Reactor::Epoll),
+            }
         })
         .clone()
         .map_err(|message| {
@@ -1224,11 +1263,11 @@ mod tests {
     }
 
     /// D5: with the variable unset, a process takes io_uring wherever the
-    /// kernel offers it, and epoll, still carrying readiness, where
-    /// `io_uring_setup` is refused.
+    /// kernel offers it and is not below the release gate, and epoll, still
+    /// carrying readiness, where `io_uring_setup` is refused.
     #[test]
     fn an_unset_reactor_takes_io_uring_where_offered_and_epoll_where_refused() {
-        let offered = if kernel_offers_io_uring() {
+        let offered = if kernel_offers_io_uring() && release_allows_uring(&kernel_release()) {
             "io_uring"
         } else {
             "epoll"
@@ -1254,6 +1293,33 @@ mod tests {
                 "refused={refused} expected {expected}:\n{stdout}{}",
                 String::from_utf8_lossy(&out.stderr)
             );
+        }
+    }
+
+    /// The gate admits 6.13 and later by numeric (major, minor), whatever
+    /// the distribution suffix; everything through 6.12.y, and an unreadable
+    /// release, stays on epoll.
+    #[test]
+    fn the_release_gate_admits_6_13_and_later_only() {
+        for (release, allowed) in [
+            ("6.12.118", false),
+            ("6.12.999-generic", false),
+            ("6.13", true),
+            ("6.13.0", true),
+            ("6.13.0-rc1", true),
+            ("6.13-rc1", true),
+            ("6.8.0-149-generic", false),
+            ("6.1.0-27-amd64", false),
+            ("6.2", false),
+            ("5.15.0-130-generic", false),
+            ("5.130.0", false),
+            ("7.0.0-43-generic", true),
+            ("10.1", true),
+            ("6", false),
+            ("", false),
+            ("generic", false),
+        ] {
+            assert_eq!(release_allows_uring(release), allowed, "{release}");
         }
     }
 }

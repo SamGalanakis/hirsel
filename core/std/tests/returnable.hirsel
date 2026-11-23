@@ -4,7 +4,6 @@
 // task's stack back at the direct waits and keeps the closure's wait stackful;
 // the other engines keep every wait stackful. The bytes and their order are
 // fixed by the protocol below, so every engine must give the same log.
-
 type ServeJob: send {
     socket: Socket,
     clock: Clock,
@@ -104,7 +103,7 @@ fn waits_through_wrappers_and_closures(n: Net, clock: Clock, tasks: Tasks) -> bo
     let mut r = take read
     let mut w = take write
     let mut ack: Bytes = list.with_capacity(1)
-    let sends = ["a", "aa", "xb", "bb", "c", "cc", "yd", "dd"]
+    let sends =["a", "aa", "xb", "bb", "c", "cc", "yd", "dd"]
     for i in 0u64 .. 4 {
         send_all(mut w, string.as_bytes(sends[2 * i]))
         send_all(mut w, string.as_bytes(sends[2 * i + 1]))
@@ -157,7 +156,11 @@ fn deep(n: u64, a: u64, b: u64, c: u64) -> u64 {
 fn nap(take clock: Clock) -> u64 waits {
     let d = deep(40, 1, 2, 3)
     host.sleep_until(clock, host.mono_ns(clock) + 20000000)
-    if d == 0 { 0 } else { 1 }
+    if d == 0 {
+        0
+    } else {
+        1
+    }
 }
 
 fn one(b: u64) -> Bytes {

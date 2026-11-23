@@ -90,7 +90,8 @@ fn check_paged_generation(d: Dir) -> Result[(), Error] waits {
     let base = page_retry_base(new_page_locations(), map.new(), holders, all)?
     let installed = PagedLists(packs: std.page.empty(0, 0, Unprefixed), retired: std.page.empty(0, 0, Unprefixed))
     let mut manifest = page_manifest_empty()
-    let planned = plan_page_cut(base, holders, installed, Some(view list.new()), 1, 512, map.new(), None, mut next_stamp)?
+    let carried: List[u64] = list.new()
+    let planned = plan_page_cut(base, holders, installed, Some(view carried), 1, 512, map.new(), None, mut next_stamp)?
     let mut buffers = cut_output_buffers(planned, page_manifest_file_size(page_manifest_size(manifest), manifest.fence), page_manifest_file_size(MANIFEST_LIMIT, 1))?
     let layout = write_page_cut(directory, id, take planned, mut buffers)?
     manifest.generation = 2

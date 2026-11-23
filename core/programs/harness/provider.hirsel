@@ -534,7 +534,7 @@ pub fn ask(n: Net, clock: Clock, p: Provider, take req: harness.Request) -> Resu
     let request = std.http_client.Request(method: "POST", target: path(p), headers: headers(p), body: Fixed(string.byte_len(text)))
     if let Error(_) = std.http_client.start(mut c, request, deadline) { return Error(sent_or(c, "could not start the request")) }
     if let Error(_) = std.http_client.write(mut c, string.as_bytes(text)) { return Error(sent_or(c, "could not send the request")) }
-    if let Error(_) = std.http_client.finish_request(mut c, p.bounds.event_bytes) { return Error(Unavailable) }
+    if let Error(_) = std.http_client.finish_request(mut c, p.bounds.body_bytes) { return Error(Unavailable) }
     let (status, events) = {
         let head = std.http_client.head(c)
         (std.http_client.status(head), event_stream(head))

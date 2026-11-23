@@ -289,6 +289,10 @@ fn simple_request() -> harness.Request {
 // listens; otherwise the peer reads the request and sends the reply. Answers
 // the result and the request bytes the peer heard.
 fn exchange(tasks: Tasks, d: provider.Dialect, take reply: Option[Bytes]) -> (Result[harness.Answer, harness.Fault], String) waits {
+    exchange_with_bounds(tasks, d, take reply, provider.bounds())
+}
+
+fn exchange_with_bounds(tasks: Tasks, d: provider.Dialect, take reply: Option[Bytes], caps: provider.Bounds) -> (Result[harness.Answer, harness.Fault], String) waits {
     let (initial, clock) = std.sim.world.new(0u64, 0u64, 0u64)
     let mut world = take initial
     let plan = std.sim.world.detach(mut world)
@@ -296,17 +300,19 @@ fn exchange(tasks: Tasks, d: provider.Dialect, take reply: Option[Bytes]) -> (Re
     let (n, port) = provide.net(bytes 4096u64)
     let link = task.spawn(tasks, bytes 4194304u64, Link(port: take port, clock: clock, plan: take plan), serve_link)
     let (listener, at) = result.unwrap(host.listen(n, Addr(ip: V4(2130706433u32), port: 0u16), 1u16))
+    let mut p = route(d, at)
+    p.bounds = caps
     let mut said = string.new()
     let got = match take reply {
         None => {
             let _ = take listener
-            provider.ask(n, clock, route(d, at), simple_request())
+            provider.ask(n, clock, take p, simple_request())
         },
         Some(take bytes_out) => {
             let (heard, hears): (Sender[Bytes], Receiver[Bytes]) = channel.new(1u64)
-            let expect = match provider.body(route(d, at).model, simple_request()) { Ok(b) => string.byte_len(b), Error(_) => 0u64 }
+            let expect = match provider.body(p.model, simple_request()) { Ok(b) => string.byte_len(b), Error(_) => 0u64 }
             let server = task.spawn(tasks, bytes 1048576u64, Script(listener: take listener, clock: clock, reply: take bytes_out, expect: expect, heard: take heard), scripted)
-            let answered = provider.ask(n, clock, route(d, at), simple_request())
+            let answered = provider.ask(n, clock, take p, simple_request())
             if let Ok(take b) = channel.receive(hears) {
                 if let Ok(take s) = string.from_utf8(take b) { said = take s }
             }
@@ -352,4 +358,24 @@ fn test_doubt_only_after_send(tasks: Tasks) -> Result[(), u64] waits {
     let (oai_cut, _) = exchange(tasks, OpenAi, Some(reply_with("200 OK", sse, openai_cut())))
     match oai_cut { Error(Unavailable) => (), _ => return Error(15u64) }
     Ok(())
+}
+
+// Captured OpenRouter SSE body for the notes tool call, including usage.
+fn openrouter_note() -> String { "data: {\"id\":\"gen-1795430590-zFvFoYoTcUHbGqw2GwuX\",\"object\":\"chat.completion.chunk\",\"created\":1795430590,\"model\":\"deepseek/deepseek-v4.1-flash-1017\",\"provider\":\"Particle AI\",\"choices\":[{\"index\":0,\"delta\":{\"content\":null,\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call_5a03597ee4034608bed14b02\",\"type\":\"function\",\"function\":{\"name\":\"note_add\",\"arguments\":\"\"}}]},\"finish_reason\":null,\"native_finish_reason\":null}]}\n\ndata: {\"id\":\"gen-1795430590-zFvFoYoTcUHbGqw2GwuX\",\"object\":\"chat.completion.chunk\",\"created\":1795430590,\"model\":\"deepseek/deepseek-v4.1-flash-1017\",\"provider\":\"Particle AI\",\"choices\":[{\"index\":0,\"delta\":{\"content\":null,\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"text\\\": \\\"The team meeting moved to Thursday.\\\"}\"}}]},\"finish_reason\":null,\"native_finish_reason\":null}]}\n\ndata: {\"id\":\"gen-1795430590-zFvFoYoTcUHbGqw2GwuX\",\"object\":\"chat.completion.chunk\",\"created\":1795430590,\"model\":\"deepseek/deepseek-v4.1-flash-1017\",\"provider\":\"Particle AI\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\",\"role\":\"assistant\"},\"finish_reason\":\"tool_calls\",\"native_finish_reason\":\"tool_calls\"}]}\n\ndata: {\"id\":\"gen-1795430590-zFvFoYoTcUHbGqw2GwuX\",\"object\":\"chat.completion.chunk\",\"created\":1795430590,\"model\":\"deepseek/deepseek-v4.1-flash-1017\",\"provider\":\"Particle AI\",\"service_tier\":\"default\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\",\"role\":\"assistant\"},\"finish_reason\":\"tool_calls\",\"native_finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":327,\"completion_tokens\":44,\"total_tokens\":371,\"cost\":0.00004382,\"is_byok\":false,\"prompt_tokens_details\":{\"cached_tokens\":0,\"cache_write_tokens\":0,\"audio_tokens\":0,\"video_tokens\":0},\"cost_details\":{\"upstream_inference_cost\":0.00004382,\"upstream_inference_prompt_cost\":0.00001962,\"upstream_inference_completions_cost\":0.0000242},\"completion_tokens_details\":{\"reasoning_tokens\":1,\"image_tokens\":0,\"audio_tokens\":0}}}\n\ndata: [DONE]\n\n" }
+
+// Each event fits in 800 bytes. The full 1,907-byte response fits in 2,048.
+@test
+fn test_openrouter_body_and_event_bounds(tasks: Tasks) -> Result[(), u64] waits {
+    let mut caps = provider.bounds()
+    caps.event_bytes = 800u64
+    caps.body_bytes = 2048u64
+    let (got, _) = exchange_with_bounds(tasks, OpenAi, Some(reply_with("200 OK", "text/event-stream", openrouter_note())), caps)
+    let Ok(a) = got else { return Error(1u64) }
+    if a.text != "" || a.stop != "tool_calls" || a.usage.input != 327u64 || a.usage.output != 44u64 { return Error(2u64) }
+    if list.len(a.calls) != 1u64 { return Error(3u64) }
+    let c = a.calls[0]
+    if c.id != "call_5a03597ee4034608bed14b02" || c.name != "note_add" || !args_are(c, "/text", "The team meeting moved to Thursday.") { return Error(4u64) }
+    caps.body_bytes = 800u64
+    let (too_large, _) = exchange_with_bounds(tasks, OpenAi, Some(reply_with("200 OK", "text/event-stream", openrouter_note())), caps)
+    match too_large { Error(Unavailable) => Ok(()), _ => Error(5u64) }
 }

@@ -1,4 +1,6 @@
-# STORE-SPEC v2.57: the M4 store library (lane store-spec-1001)
+# STORE-SPEC v2.58: the M4 store library (lane store-spec-1001)
+
+v2.58 (lane w3b-cell-log-spec-1991, Sam's 2026-11-23 Store DX ruling Q2 = A): text only, **not yet built**. §14 specifies `Cell[V]` and `Log[V]` as collection kinds 3 and 4 of format 4, with no new format word. A Cell lives inline in its collection-map entry up to 256 bytes and spills to a one-row tree above that, and a write of its current value is elided. A Log keeps `next_seq` and `first_seq` in its descriptor, appends with no lookup, splits its rightmost page (n − 1, 1) and (n − 2, 2), and trims in O(height) with one 13-byte COMMIT op. `changes` reports a trim as one `Trimmed` span, and `window_changes` gives the runner's tail cover its rows. `Prop` is dropped, `Edge` is a helper and `Queue` waits. Laws L77–L83. See CHANGES-v2.58. Reversible: the spec only.
 
 v2.57 (lane w3a-dx-wire-spec-1982, Sam's 2026-11-23 Store DX rulings Q1 and Q3–Q6 with computed views and projectors): text only, **not yet built**. One `Table[K, V]` handle reads and writes, and index extractors live in a per-`Db` registry, so `Shape`, `shape` and the epoch are deleted (§1.2). A program declares its schema once through `Declare` in mode `Migrate`, `Open` or `Follower`; the catalog stores each index's kind, payload schemas and the `code.revision` of its extractor and projection, so an edited extractor body is `Changed` or rebuilt. Indexes are `Many` or `Unique`, an extractor returns `List[J]` (partial, standard and multi alike), and covering indexes carry a payload. A unique `put` preflights the whole edit, and a `Conflict` leaves the Tx abort-only. Reads gain `range_prefix`, `lookup_prefix`, `count` and `entries`; `lookup` records gaps in full (J, K) order. `get_bytes`, `scan_bytes`, `ViewRows` and `ByteRows` are deleted. `defaults()` becomes `sized(kind, share)`. Projectors (§1.14) tail `changes_page` and write derived rows and their cursor in one transaction. See CHANGES-v2.57. Reversible: the spec only.
 
@@ -137,6 +139,22 @@ v2.29 (RUNNER-SPEC v2.18, lane caller-scope-1128, astra's third attack, ATTACK-3
 - **Two RUNNER-SPEC slices consume this version.** AM3 and AM8 are small and are built first, as slice RA. RS then takes AM1, AM2 and AM4–AM7, and RR builds on AM8 (RUNNER-SPEC §9). Neither RS nor RR waits on the other.
 
 v2.28 (RUNNER-SPEC v2.17, lane caller-scope-1128, astra's second attack, ATTACK-2): text and format; no store has been deployed, so the cutover is a fresh store. `serve` runs an admitted position: it runs the policy and the body as two isolated executions over one snapshot and writes the reply, and the record when there is one, in the body's transaction; a fault keeps the run's digest in a `Pending` that `conclude` writes with the fixed reply (AL1). A duplicate returns the stored reply with its scope digest (AL2). The scope digest begins with the StoreId (AL3). `migrate` is its own phase over a `Migration`, and `Schema` only opens (AL4). The CALL section carries the authority bytes (AL5). The sizes follow the 32-byte scope digest, and `serve` keeps no read log (AL6).
+
+## CHANGES-v2.58 (w3b-cell-log-spec-1991: Store DX Q2, Cell and Log; not yet built)
+
+| Item | Change | Where |
+|---|---|---|
+| Format | `CollectionRoot` kinds 3 Cell and 4 Log; a Cell's descriptor carries up to 256 inline bytes and a Log's carries `next_seq` and `first_seq`; catalog kinds 3 and 4; COMMIT data op tag 3, a 13-byte trim. All are format 4 additions (D-Q2-1) | §14.1, AP1a, AP3, AP4, AP7, AP8, §13.1 |
+| Cell | `declare_cell`, `cell_fetch`, `cell_set`, `cell_clear`, `cell_get`; inline by value length alone; equal writes and A → B → A are elided, rollback layers included; always Memory | §14.2, §14.3 |
+| Log | `declare_log`, `append` (no lookup), `trim_before`, `log_fetch`, `last` (O(height)), `bounds`, `log_range` and the Reader forms; the dense invariant; rolled-back appends free their seqs | §14.2, §14.4 |
+| Pages | Log appends split the rightmost page (n − 1, 1) and (n − 2, 2); a trim edits at most 2 × height pages and loads no dropped page | §14.5, AP3 |
+| Replay | the trim sorts before the Log's appends in a COMMIT; live, replay and followers apply it the same way | §14.6 |
+| Account | every descriptor stays 126; a Cell's value is one row; a trim-only commit is never refused | §14.7 |
+| `changes` | returns `Changes{rows, trimmed}`; `ChangePage` gains `trimmed`; a Cell compares values | §14.8, §1.5, §13.4, AP6 |
+| Covers | `tail_window` and `window_changes` for the runner's tail cover; RUNNER-SPEC's restatement is open item W3B-O1 | §14.9 |
+| Tiered | narrowed commit plans; a trim's dropped subtrees go to `deferred_frees` at the next cut; archival keeps a Log's ops, not its packs | §14.10, §13.6, §13.9 |
+| DX | `Prop` dropped, `Edge` a helper, `Queue` deferred | §14.11 |
+| Laws | L77 `cell_elision`, L78 `cell_inline_boundary`, L79 `log_dense`, L80 `trim_bounded`, L81 `trimmed_changes`, L82 `tail_window`, L83 `append_fill` | §14.13 |
 
 ## CHANGES-v2.57 (w3a-dx-wire-spec-1982: Store DX Q1, Q3–Q6; with RUNNER v2.45; not yet built)
 
@@ -1169,7 +1187,7 @@ pub type Change { tree_key: Bytes, value: Option[Bytes] }   // the key domain of
 pub fn published_value[K, V](t: Table[K, V], c: Change) -> Result[Option[Bytes], Error]   // the row's value in t's current codec, prefix removed (AG3)
 pub fn span_changes(s: Snapshot, lo: Bytes, hi: Bytes) -> Result[List[Change], Error]     // the data-tree rows of s in [lo, hi), key order, each with Some(stored bytes) (AG3)
 pub fn changes(a: Snapshot, b: Snapshot) -> Result[List[Change], Error]   // F6
-pub type ChangePage { changes: List[Change], next: Option[Bytes] }
+pub type ChangePage { changes: List[Change], trimmed: List[Trimmed], next: Option[Bytes] }   // v2.58: trimmed Log spans (§14.8)
 pub fn changes_page(a: Option[Snapshot], b: Snapshot, lo: Bytes, hi: Bytes, l: Limits) -> Result[ChangePage, Error]   // v2.57: changes in [lo, hi), one page; None = the empty snapshot
 ```
 
@@ -1197,7 +1215,7 @@ pub fn changes_page(a: Option[Snapshot], b: Snapshot, lo: Bytes, hi: Bytes, l: L
   - A program can still pass Snapshots on its own channels.
 - `get`, `scan` and `find` are `Foreign` when the Table or Index names another store than the Snapshot, and `Stale(id)` when its id is not in the Snapshot's catalog (I3).
 - **`look(s, steps, body)`** (F5, RUNNER G2–G3; `steps` per AC1: `Some(n)` puts `bound steps n` around the query call inside the isolate, and a stop is `Stopped(OutOfTime { steps: n })`) runs `body` inside `isolate` over a Tx whose base and working roots are `s`'s, with scope everything, an empty op list and no CallInfo. The body receives a view `Tx`, so `put`, `delete`, `reply`, `record` and `info` (which take `mut Tx`) cannot be called: OWN-5 (RUN `look_put`, `info_look_mut`). `fetch`, `range` and `lookup` record `Read`s exactly as in `run`. Nothing is committed and no ticket exists. It needs no Db, so it runs on any task that holds a Snapshot. A fault is `Failed(causes)`; isolate's capacity is `Refused`. `Foreign` when a Table or Index names another store.
-- **`changes(a, b)`** (F6, RUNNER G2) gives every data-tree key (table id u32 BE ‖ Key bytes, or index id ‖ J ‖ K) whose value differs between `a` and `b`, ascending, with `b`'s value, or None when deleted. It descends both trees together and skips a pair of subtrees with the same node id: within one open a node id names one immutable node. Cost: O(k log n) node visits for k keys written between the two snapshots, same-value rewrites included, because a rewritten key's path has new node ids; w ≤ k changes are returned (H4). It is `Foreign` when `a` and `b` belong to different stores or different opens, because node ids are reissued after a reopen (§1.9). Different branches of one open are allowed. The streams and catalog trees are not compared.
+- **`changes(a, b)`** (F6, RUNNER G2) gives every data-tree key (table id u32 BE ‖ Key bytes, or index id ‖ J ‖ K) whose value differs between `a` and `b`, ascending, with `b`'s value, or None when deleted. It descends both trees together and skips a pair of subtrees with the same node id: within one open a node id names one immutable node. Cost: O(k log n) node visits for k keys written between the two snapshots, same-value rewrites included, because a rewritten key's path has new node ids; w ≤ k changes are returned (H4). It is `Foreign` when `a` and `b` belong to different stores or different opens, because node ids are reissued after a reopen (§1.9). Different branches of one open are allowed. The streams and catalog trees are not compared. v2.58: a Log trim is one `Trimmed` span, and a Cell's change is one key (§14.8).
 - **`changes_page(a, b, lo, hi, l)`** (v2.57) gives the part of `changes(a, b)` whose keys lie in [lo, hi), in key order, taking changes while it holds fewer than `l.rows` and the next fits in what is left of `l.bytes` (a change's bytes: key length plus value length), at least one when one remains, as a keyset page does. `next` is the key of the first change it did not return, or None when none remains in range. `a` = None is the empty snapshot, so every live row of `b` in range is a change. It descends both trees only within [lo, hi), so a page costs O(p log n) node visits for the p keys it passes. Zero limits are `Missing`, and the Foreign rules are `changes`'s. The projector (§1.14) resumes with `lo` = `next`.
 
 **Keyset pages (v2.25, AI1).** A page is a bounded read of a table or an index on a Snapshot, plus an opaque continuation that resumes it exactly.
@@ -2538,7 +2556,7 @@ So the payload is 212 + d bytes: 84 of `ExportStamp` (20 + 64), 108 + d of targe
 
 **AP1a. COMMIT payload of format 3: the CALL rides the Replied op that owns it (v2.39).** §2.4's COMMIT is kept with these changes, and the cutover slice rewrites §2.4 to match:
 - **Sections.** The section count is 1–2. Tag 0 is data and tag 1 is streams, each `ops u32` then ops. The tags are strictly ascending (v2.40, C-8): a COMMIT holds at most one section of each tag, data first. **Tag 2 (`call`) is retired**: a format-3 COMMIT holding it is `Corrupt(Malformed)`.
-- **Ops.** Tag 1 is a put (key, value), tag 2 a delete (key). These are the only data-section tags. In the streams section, tag 1 puts an Admitted or a Replied value. **Tag 3 is a Replied put with its call**: key (u32 length ‖ the stream name), value (u32 length ‖ the streams value, whose state byte must be 2, Replied), then the call: entry key (u32 length ‖ bytes), args (u32 length ‖ codec bytes), revision (u32 length ‖ bytes; length 0 or 32), code (u32 length ‖ 16 or 48 bytes, v2.30 AN1), and settle (u8: 0, or 1 or 2 followed by base u64-BE ‖ at u64-BE ‖ seed u64-BE, v2.29 AM6). The call has no stream field: its stream is the op's key.
+- **Ops.** Tag 1 is a put (key, value), tag 2 a delete (key). These are the only data-section tags of format 3. Format 4 adds tag 3, a Log trim (§14.1, §14.6). In the streams section, tag 1 puts an Admitted or a Replied value. **Tag 3 is a Replied put with its call**: key (u32 length ‖ the stream name), value (u32 length ‖ the streams value, whose state byte must be 2, Replied), then the call: entry key (u32 length ‖ bytes), args (u32 length ‖ codec bytes), revision (u32 length ‖ bytes; length 0 or 32), code (u32 length ‖ 16 or 48 bytes, v2.30 AN1), and settle (u8: 0, or 1 or 2 followed by base u64-BE ‖ at u64-BE ‖ seed u64-BE, v2.29 AM6). The call has no stream field: its stream is the op's key.
 - **Decoder rules**, each failure `Corrupt(Malformed)`: a tag-3 op outside the streams section; a tag-3 op whose value's state is not 2; more than one tag-3 op in a COMMIT; a revision length other than 0 or 32; a code length other than 16 or 48; a settle other than 0, 1 or 2; a call that ends early; two sections with one tag, or a streams section before a data section (C-8); any other op of the streams section (a tag-1 put or a tag-2 delete) whose key equals the tag-3 op's key (C-8). So every decoded CALL belongs to exactly one Replied op in its own frame, that op is the only op of its stream in the frame, and an Admitted put, a delete or a missing op can never carry one. The row that replay leaves for the stream is therefore the reply that `recorded` returns. Other streams keys need not be unique or ordered on read, as built; the writer emits each streams key once, in order.
 - **Writer.** `serve` and `conclude` attach the record to the Replied put that consumes its `Completion` (§1.3; with no reply call the record is discarded, as built). The encoder writes that put as tag 3 and never encodes `rec.stream`, which names the same stream by construction. That construction is the built check, kept (C-8): before anything is published, `serve` and `conclude` require `rec.stream` to equal the Completion's stream (the built `check_completion_record`), for a Pending made by `untried` as for one made by `serve`, and a mismatch is `Before(Foreign, None)` (AP15) with nothing written. A record is kept and discarded exactly as §1.3 says.
 - **Replay.** Replay applies a tag-3 op as the put it holds and skips its call, which changes no state. The call's CallInfo is the frame's when settle is 0, and the recorded run's otherwise, as built.
@@ -2550,7 +2568,7 @@ So the payload is 212 + d bytes: 84 of `ExportStamp` (20 + 64), 108 + d of targe
 **AP4. Limits: write admission and decode ceilings are separate (H8).**
 - **Decode ceilings are fixed by format 3** and never follow an API constant: a BlobRef `len` and a COMMIT op's value length are at most `FORMAT_VALUE_MAX` = 16,711,680 bytes; a BLOB payload at most 16,711,688; a prepared-rows payload at most 16,715,784; a COMMIT payload at most 16,777,280. A stored value within them is readable by every format-3 reader, whatever the writing open's API limit was.
 - **Write admission** is the API constant `VALUE_LIMIT`, checked by `put`, `migrate` and import as `Limit(Value)` is today. M1 sets it to 16,711,680 = `FORMAT_VALUE_MAX`. Lowering it later refuses larger new writes and leaves larger stored values readable, because readers check only the decode ceiling. Raising it past `FORMAT_VALUE_MAX` is a format change, and past the transaction limit it needs a chunked COMMIT path, which M1 does not have.
-- Each tree keeps its own domain: a catalog value keeps its built cap of 1 MiB (`encode_catalog`), so kind 0x0082 keeps its limit, and 0x0081 keeps its 1,048,832-byte limit over its format-3 payload of 212 + |describe| bytes (AP1b); a streams value keeps its built bound; a collection-map value is always the 56-byte `CollectionRoot` (AP7).
+- Each tree keeps its own domain: a catalog value keeps its built cap of 1 MiB (`encode_catalog`), so kind 0x0082 keeps its limit, and 0x0081 keeps its 1,048,832-byte limit over its format-3 payload of 212 + |describe| bytes (AP1b); a streams value keeps its built bound; a collection-map value is the descriptor of §14.1: the 56-byte `CollectionRoot`, extended for a Cell or Log, at most 314 bytes (AP7).
 - The key limit stays 4096 bytes on the logical key (AP5), which is today's check on the id-prefixed key. The page target is 4096 bytes (AP3). The inline threshold is 1024 bytes (AP8). The transaction limit stays 16,777,280 COMMIT payload bytes (U1). A put of a full key and a full value fits one COMMIT with room for its fixed fields.
 - **Counters.** Branch and table ids are u32. A `fork` or `create_table`/`create_index`/`migrate` that would need an id that is not below 2³² − 1 is `Limit(Ids)`, refused before anything is allocated or published (H10). Stamps are u64; a stamp reservation that would pass 2⁶⁴ − 1 is `Limit(Ids)` too.
 - **MANIFEST size: one expression (H14, N8, R5).** The MANIFEST payload (AP14) is 152 fixed bytes (72 of fields, the two list-root PagePtrs of 36 each, and the branch and pin counts of 4 each) plus its records:
@@ -2566,7 +2584,7 @@ So the payload is 212 + d bytes: 84 of `ExportStamp` (20 + 64), 108 + d of targe
 - In memory a page is `Arc[Page]` with `Page { image: Bytes, kids: List[Arc[Page]], blobs: List[Arc[Bytes]] }`.
 - **Edges.** A page's owning edges, in slot order, are:
   - in a branch, `kids[i]` is the child of the entry in slot i;
-  - in a leaf of the collection map, `kids[i]` is the root page of the collection in slot i. A collection with no rows has the store's one **empty page** `EMPTY` as its kid: a shared `Arc[Page]` with a zero-entry image and stamp 0, which is never written, never counted and never loaded. On disk its root is the all-zero PagePtr (AP20). A map leaf has no blobs: a `CollectionRoot` is always inline (AP7);
+  - in a leaf of the collection map, `kids[i]` is the root page of the collection in slot i. A collection with no rows has the store's one **empty page** `EMPTY` as its kid: a shared `Arc[Page]` with a zero-entry image and stamp 0, which is never written, never counted and never loaded. On disk its root is the all-zero PagePtr (AP20). A map leaf has no blobs: a `CollectionRoot` is always inline (AP7). An empty Cell, an inline Cell and an empty Log also have `EMPTY` as their kid (§14.1);
   - in any other leaf, `kids` is empty, and `blobs[j]` is the body of the BlobRef whose `body` field is j.
 - Every traversal follows these edges and never a location: reads, the uniqueness walk of AP10, re-stamping, the cut, relocation, reference counts and the account. So a map entry written before any cut, whose PagePtr holds no location, is reached by its kid.
 - **The cut seals; a commit need not (H3; v2.55, Spec Q4).** A page may be unsealed while a body edits it (AP9), and a published in-memory image may stay unsealed after its commit: it may hold free space and dead entries and a shorter prefix than the longest, within a private page's bounds (AP3). The cut seals: every image it encodes is in canonical form, with no free space, no dead entries, the longest common prefix, and bodies numbered in slot order (§3.5, AP3's decode rules). So live commits, journal replay and a MANIFEST load may leave different partitions, images and stamps, and what they guarantee to have in common is logical (AP3, "Live and replay"). Every reader finds entries through the slot array and a body through its `body` field, never by position. A published image is never changed: sealing or editing a shared page copies it. A body's steps follow the layout it reads, so they may differ with how its base was loaded; steps are a per-build fuel bound (MEM-30), not an observable that must match across loads. Canonical form is the form of every image a cut writes to disk or uploads in a pack, and M3 needs no more: a Tiered read (§13.2) resolves only such sealed, located pages, and an unsealed in-memory page is always Hot (v2.56).
@@ -2624,7 +2642,7 @@ Entry 0's separator is always empty (slen 0): it stands for "below every key" an
 - A leaf exceeds T only when it holds one entry. The largest leaf is 24 + 2 + 4096 + 1 + 2 + 1024 + 2 = **5,151** bytes: a stored key of up to 4096 bytes (the streams and catalog trees have no id to strip), with an inline value at the threshold.
 - A branch exceeds T only when it holds at most three entries. The largest branch is 24 + 3 × 54 + 2 × 4096 + 3 × 2 = **8,384** bytes, and that is the PAGE payload limit.
 - **A page is legal** when its canonical size is at most T, or it is a leaf with one entry, or it is a branch with at most three entries. Any edit that leaves a page illegal (an insert, an overwrite that grows a value, a separator pushed up from a child) splits it at once, in the same write.
-- **The split rule (N6).** Cut the page's entries, in slot order, into the fewest consecutive pieces that are each legal **and, for a branch, each hold at least two entries**. Among the cuts with that fewest number, take the one whose largest piece (by canonical size) is smallest, and among those the leftmost. Such a cut exists, because a branch piece of two or three entries is always legal. At most three pieces are needed after one edit of a legal page: the edit inserts at most two adjacent entries, and the entries before and after them form legal runs. Example: children A0, A1, B, C with a 4,001-byte separator before A1 and one-byte separators before B and C. The 1 + 3 cut would leave a unary branch and is not a candidate; the split is 2 + 2, [A0, A1] keeping the long separator and [B, C] with B's separator moved up. The parent gains one entry per extra piece, and may split in turn. A root that splits gains a new root above it.
+- **The split rule (N6).** Cut the page's entries, in slot order, into the fewest consecutive pieces that are each legal **and, for a branch, each hold at least two entries**. Among the cuts with that fewest number, take the one whose largest piece (by canonical size) is smallest, and among those the leftmost. Such a cut exists, because a branch piece of two or three entries is always legal. A Log (kind 4) splits its rightmost page by §14.5's append rule instead. At most three pieces are needed after one edit of a legal page: the edit inserts at most two adjacent entries, and the entries before and after them form legal runs. Example: children A0, A1, B, C with a 4,001-byte separator before A1 and one-byte separators before B and C. The 1 + 3 cut would leave a unary branch and is not a candidate; the split is 2 + 2, [A0, A1] keeping the long separator and [B, C] with B's separator moved up. The parent gains one entry per extra piece, and may split in turn. A root that splits gains a new root above it.
 - **The merge rule (H6).**
   - A delete or a shrinking overwrite that leaves a non-root page's canonical size below T/4 merges it with its right sibling under the same parent, or its left sibling when it is the last child, if the merged page is legal. Otherwise nothing is done, except for a unary branch below.
   - **No non-root branch is ever left with one entry.** A non-root branch left with one entry merges with its sibling (chosen as above) when the sibling has at most two entries, which is always legal (at most three entries). Otherwise it borrows the sibling's nearest entry, which leaves it two entries and the sibling at least two, both legal. **Borrowing rotates through the parent separator s between the pair** (the logical separator of the right page in the parent):
@@ -2645,7 +2663,7 @@ Entry 0's separator is always empty (slen 0): it stands for "below every key" an
 - Each slot points into [24 + P, heap). Its entry, with every length field it holds, ends at or before heap. **On disk the entries tile the heap in slot order:** slot 0 is 24 + P, each later slot equals the end of the previous slot's entry, and the last entry ends at heap. So no slot can alias another entry's bytes (M3).
 - **Key widths.** In a collection's leaf, 4 + P + klen ≤ 4096 (the logical key limit, AP4); in a streams or catalog leaf, P + klen ≤ 4096; a branch separator obeys the same bound for its tree. In a collection-map leaf, P + klen = 4: the key is exactly one u32 id.
 - vtag is 0 or 1; vlen ≤ 1024; a BlobRef's `body` is below the page's BlobRef count, and the `body` fields are 0, 1, … in slot order.
-- A branch stores an empty suffix in slot 0, and every other slot has a non-empty separator after restoring its prefix. A branch's level is ≥ 1, and every child's level is the branch's level − 1. A collection map leaf's entries all have vtag 0 and vlen 56, and each value is a valid `CollectionRoot` (AP7).
+- A branch stores an empty suffix in slot 0, and every other slot has a non-empty separator after restoring its prefix. A branch's level is ≥ 1, and every child's level is the branch's level − 1. A collection map leaf's entries all have vtag 0 and the vlen §14.1 gives for their `kind` (56 for a table or index), and each value is a valid descriptor (AP7, §14.1).
 - dead = 0 and heap = len − 2·count on disk.
 - **Not checked** (§2.8's line): key order across slots, separator bounds and prefix maximality. They are our writer's output under a 64-bit check bound to its place. A wrong order gives a wrong but well-formed tree, and decoding stays total.
 - **Precedence.** For each edge open resolves, the checks run in this order and the first failure is the answer: the location order rule (AP20, using only the parent's location and the PagePtr's `pack` and `offset`, so a self-pointer is `Corrupt(Order)` before any checksum that depends on itself is tried); listing and class (`Dangling`, `Malformed`); the five load checks (`Corrupt(Checksum)`); then this decode (`Corrupt(Malformed)`) and the child-level rule.
@@ -2702,7 +2720,7 @@ A failure is `Corrupt(Checksum)`. A pack not listed, or an offset at which no fr
 - **An in-place edit of a published page across commits (AP10) draws a new stamp for the page and for every ancestor on its path, up to the root, including the collection-map leaf and map path above a collection's root.** Otherwise the cut, which writes only stamps that have no record (AP16), would skip the edited page, and the edit would be lost once its journal segment retires.
 - Relocation, sealing to canonical form, a location refresh in a branch entry or descriptor, and a prefix recomputation keep the stamp.
 - **Stamp equality is meaningful only within one open of one store (M6).** Two pages with one stamp in one open have equal logical content. `changes(a, b)` first checks that a and b are Snapshots of the same store and open (`Foreign` otherwise, as built), and only then skips a child whose stamp is equal on both sides without loading it. No cache, table or fast path compares stamps across opens.
-- `changes(a, b)` walks the two collection maps in id order. An entry present on both sides with equal root stamps gives nothing. A collection present only in a gives one deletion per row of its tree, and one present only in b gives one insertion per row, each with its logical key. So a `drop_table` costs O(1 + indexes) to commit, and `changes` across it costs the dropped rows, as L23 requires.
+- `changes(a, b)` walks the two collection maps in id order. A table or index entry present on both sides with equal root stamps gives nothing. Cells compare values, and Log trims are reported as spans (§14.8). A collection present only in a gives one deletion per row of its tree, and one present only in b gives one insertion per row, each with its logical key. So a `drop_table` costs O(1 + indexes) to commit, and `changes` across it costs the dropped rows, as L23 requires.
 - A BLOB's stamp is drawn from the same counter when its value is first written, and is kept across relocation.
 - **List pages are stamped on the writer, before the watermark is captured (S1).** A cut (AP16) runs on the writer, which owns the counter. It draws, by checked u64 arithmetic, a fresh stamp for every list page the cut builds or edits, then captures `next_stamp` as the counter after those draws. A list page that class-2 relocation moves unchanged keeps its stamp, as every relocated frame does (T3). So every list page, like every data page the cut writes, has a stamp below the captured `next_stamp`, and every commit after the capture draws a stamp at or above it. A draw past 2⁶⁴ − 1 refuses the cut with `Limit(Ids)`, losing nothing (U4). A cut that is refused or whose I/O fails leaves its drawn stamps consumed: the counter never rolls back. After a crash, open resumes the counter at the selected MANIFEST's `next_stamp`, which is above every list page that MANIFEST reaches.
 - **The watermark covers listed packs only (M6).** Every frame in a pack that the selected MANIFEST lists, live or dead, and every list page reached from its two list roots, has a stamp below that MANIFEST's `next_stamp`. A pack the MANIFEST neither lists nor reaches from its list roots is a leftover of an unpublished cut (H2): it may hold higher stamps, open never reads it, and the next cut that reaches its seq replaces it before any MANIFEST lists it. So stamps issued after `next_stamp` by an open that made no cut, and reissued by a later open, never meet a listed frame with the same stamp. Open checks the watermark on every frame of every listed pack (AP21).
@@ -2711,17 +2729,17 @@ A failure is `Corrupt(Checksum)`. A pack not listed, or an offset at which no fr
 ### 11.5 Per-collection roots
 
 **AP7. `Roots` becomes three page trees: `{collections, streams, catalog}`.**
-- `collections` is the collection map: a page tree keyed by `collection id u32 BE`. Its value is a `CollectionRoot`, always inline (vtag 0, vlen 56) whatever the store's inline threshold (H8), and its root page is the leaf's kid for that slot (AP2).
+- `collections` is the collection map: a page tree keyed by `collection id u32 BE`. Its value is a `CollectionRoot`, always inline (vtag 0, vlen 56; a Cell's and a Log's descriptors are longer, §14.1) whatever the store's inline threshold (H8), and its root page is the leaf's kid for that slot (AP2).
 - Every table and every index is one collection, so `share_roots` stays three Arc shares. Dropping or swapping a collection changes one map entry.
 
 **`CollectionRoot`, 56 bytes:**
 
 | Off | Size | Field | Rule |
 |---|---|---|---|
-| 0 | 36 | root PagePtr | the collection's tree; all zero when it has no rows (and then `rows` and `bytes` are 0, else `Corrupt(Malformed)`) |
+| 0 | 36 | root PagePtr | the collection's tree; all zero when it has no rows (and then `rows` and `bytes` are 0, else `Corrupt(Malformed)`), or when a Cell is inline (§14.1) |
 | 36 | 8 | rows u64 | exact row count |
 | 44 | 8 | bytes u64 | row charge of the collection's rows: the sum of `entry(k, v)` (AP15) |
-| 52 | 1 | kind u8 | 1 table, 2 index (as the catalog's kind); other values `Corrupt(Malformed)` |
+| 52 | 1 | kind u8 | 1 table, 2 index, 3 Cell, 4 Log (as the catalog's kind; 3 and 4 in format 4, §14.1); other values `Corrupt(Malformed)` |
 | 53 | 1 | residency u8 | 0 = Memory. 1 = Tiered (format 4, §13.1; in format 3 it was `Unsupported(0x0021)`). Other values are `Corrupt(Malformed)`. |
 | 54 | 1 | tree u8 | 0 = B+ pages. 1–255 are reserved (a future per-collection Bε-tree) and are `Unsupported(0x0021)`. |
 | 55 | 1 | zero u8 | non-zero is `Corrupt(Malformed)` |
@@ -2735,7 +2753,7 @@ A failure is `Corrupt(Checksum)`. A pack not listed, or an offset at which no fr
 
 ### 11.6 Values
 
-**AP8. Inline values and BlobRef.** A stored value (schema number u16 ‖ codec bytes, D1) of v bytes in a table or index row, or in a streams or catalog row, is inline when v ≤ the store's inline threshold, and otherwise a BlobRef. A `CollectionRoot` is always inline (AP7).
+**AP8. Inline values and BlobRef.** A stored value (schema number u16 ‖ codec bytes, D1) of v bytes in a table or index row, or in a streams or catalog row, is inline when v ≤ the store's inline threshold, and otherwise a BlobRef. A `CollectionRoot` is always inline (AP7). A Cell's value is inline in its descriptor by §14.1's 256-byte rule, never by this threshold; a spilled Cell's one row follows this rule.
 
 **BlobRef, 42 bytes, a leaf entry's value when vtag = 1:**
 
@@ -4067,6 +4085,8 @@ A Tiered frame is never written into a class 0, 1 or 2 pack, and a Memory frame 
 
 **Kinds.** Format 4 adds PACK_INDEX 0x0023 (MUST) and ARCHIVE 0x00E0. Every other kind is as §2.7 and the §11 kinds table.
 
+**Cells and Logs (v2.58, §14.1).** Format 4 also adds `CollectionRoot` kinds 3 (Cell) and 4 (Log) with their longer map-leaf descriptors, the catalog kinds 3 and 4, and COMMIT data op tag 3 (trim). They change no frame kind and need no further format word.
+
 **Catalog index rows (v2.57, DX Q1 and Q3).** Format 4's catalog row for an index carries, after the fields §1.2 already lists: `kind u8` (0 = Many, 1 = Unique), the payload schema list (u16 count, then each schema as `std.codec` Bytes, append-only), and for `by` and for `project` (absent for `()` and the row) their `code.identity` and `code.revision`, each length-prefixed. A Format 4 catalog without them does not exist: Format 4 is new in M3, so no store carries an index row of the earlier shape.
 
 ### 13.2 Pages, edges and the cache
@@ -4185,7 +4205,7 @@ pub fn scan[K, V](r: Reader, s: Snapshot, t: Table[K, V], lo: Bound[K], hi: Boun
 pub fn find[J, K, V, P](r: Reader, s: Snapshot, ix: Index[J, K, V, P], lo: Bound[J], hi: Bound[J]) -> Result[Rows[K, V], Error]   // v2.57: Index carries its payload type
 pub fn next[K, V](r: Reader, mut c: Rows[K, V]) -> Result[Option[(K, V)], Error] waits
 pub fn span_changes(r: Reader, s: Snapshot, lo: Bytes, hi: Bytes) -> Result[List[Change], Error] waits
-pub fn changes(r: Reader, a: Snapshot, b: Snapshot) -> Result[List[Change], Error] waits
+pub fn changes(r: Reader, a: Snapshot, b: Snapshot) -> Result[Changes, Error] waits   // v2.58: rows and trimmed Log spans (§14.8)
 pub fn changes_page(r: Reader, a: Option[Snapshot], b: Snapshot, lo: Bytes, hi: Bytes, l: Limits) -> Result[ChangePage, Error] waits   // v2.57 (§1.5)
 ```
 
@@ -4263,7 +4283,7 @@ A descent skips a subtree whose root stamp is below the frame's stamp. The stamp
 - A fully probed pack with no remaining matched frame leaves the lists at this cut, in AP16's removal plan.
 
 **Deferred frees (Fable F26, F34, astra #11).**
-- Dropping a Tiered collection, a Tiered table's rows by `drop_table`, or a branch whose Tiered roots are not otherwise shared, enqueues each released root PagePtr in `deferred_frees`, keyed by `deferred_next`. It reads no page.
+- Dropping a Tiered collection, a Tiered table's rows by `drop_table`, or a branch whose Tiered roots are not otherwise shared, enqueues each released root PagePtr in `deferred_frees`, keyed by `deferred_next`. It reads no page. The subtrees a Log trim drops are enqueued the same way at the next cut (§14.10).
 - Each cut drains up to `free_budget` pages (Options, default 4,096). Draining a queued PagePtr reads its page, enqueues its children, and removes the entry. It then applies the deadlist rule above to that frame as a replaced edge of the dropping branch, so frames still shared with a pin or fork go to cells, not to `live`.
 - The queue is a participating root, so no pack it still has to read is retired.
 - The queue, `deferred_next`, every `live` change and every cell change ship in the same MANIFEST generation as the cut that made them. There is no separate cursor.
@@ -4314,7 +4334,7 @@ A failure is `Corrupt` for that read. It is never a value, and nothing is delete
 
 ### 13.9 Archival retention (opt-in, default off)
 
-**What it keeps.** On objects@1 and sim@1 a store may keep its committed history past reclaim: every entry on the chain (GROUP, CLAIM and CHECKPOINT objects, the immutable CALL records of §12.2) and the archive segments that name them. It keeps no MANIFEST, chunk or pack. `Log[Event]` leaves are W3's (DX Q2) and are not yet specified. Once W3's `Log` lands, its packed leaves are archived by this same hook: rule 3–4 skip for the packs a kept CHECKPOINT's ARCHIVE segment names. That hook is the only addition W3 will need.
+**What it keeps.** On objects@1 and sim@1 a store may keep its committed history past reclaim: every entry on the chain (GROUP, CLAIM and CHECKPOINT objects, the immutable CALL records of §12.2) and the archive segments that name them. It keeps no MANIFEST, chunk or pack. A Log's history is archived as the COMMIT ops of the kept GROUP entries, and no pack is kept for it (§14.10, D-Q2-8).
 
 ```hirsel
 pub fn archive(mut db: Db, on: bool) -> Result[u64, Error] waits      // the position where it takes effect; Tiered(Authority) on log@1 or memory
@@ -4384,3 +4404,311 @@ Harness: `tiered_laws.hirsel` over `std.sim.s3` and the §3.9 file-system model.
 | **L69 compaction keeps every referenced frame** | Under random forks, pins, drops and compaction, with a crash at each row of §13.6's table on both sides, every frame the walker reaches from any participating root is readable after reopen, and every retired pack is unreachable | retiring a pack on `live == 0` without the probe |
 | **L70 partitions and refusals** | Readers that saturate their pool never delay a writer commit. Dirty bytes never pass `dirty_bytes`. `migrate`, `export` and `install` on a Tiered store are `Tiered(..)` with every byte unchanged | one shared pin pool |
 | **L71 archival** | With archival on, every chain entry below the floor survives reclaim and every off-chain entry is erased. With it never on, the store's names after reclaim equal L58's. `drop_archive(b)` erases exactly the kept names below b, and rule 1's LIST never starts below pf | rule 1 erasing kept entries |
+
+## 14. Cell and Log collections (Store DX Q2, v2.58, not yet built)
+
+`Cell[V]` holds one value. `Log[V]` is a dense, append-only sequence trimmed from the front. Both are first-class collection kinds of `store@1`, over the same pages (§11.2), collection map (AP7), COMMIT (AP1a), Tiered paging (§13) and followers (§12.5) as tables. They are not tables with a convention. Everything here is text only and **not yet built**. It follows Sam's 2026-11-23 ruling DX Q2 = A, which it does not reopen.
+
+### 14.0 Scope and the choices that shape it
+
+**Ruled (DX Q2 = A).** These are Sam's calls; the spec only makes them exact.
+- A Cell is a hybrid: inline in its collection-map leaf entry up to 256 bytes, and spilled to a one-row tree above that. Setting a Cell to its current value is elided automatically.
+- A Log keeps `next_seq` and `first_seq` in its descriptor. An append looks nothing up. Its rightmost page splits (n − 1, 1) for a leaf and (n − 2, 2) for a branch. `trim_before` is O(log N), journals one 13-byte op and appears in diffs as one span. `last` is O(height). The runner gains a native tail cover.
+- `Prop` is dropped. `Edge` is a library helper over a table and an index (§14.11). `Queue` is revisited after triggers move to partial `fn(K, V)` indexes.
+
+**This spec's decisions, each reversible while the store is unbuilt:**
+
+| # | Decision | Why | Reversibility |
+|---|---|---|---|
+| D-Q2-1 | No new format word. Cells and Logs are format 4 additions, listed with M3's in §13.1 | format 4 is new in M3 and unbuilt, so no store holds a format-4 byte yet. A second bump would be a stepping stone | text only |
+| D-Q2-2 | `CollectionRoot.kind` 3 = Cell and 4 = Log select the layout and the split rule; `tree` stays 0 | the kind already decides the descriptor and the catalog; a second selector byte could disagree with it | text only |
+| D-Q2-3 | A Cell is inline exactly when its stored value is at most 256 bytes (`CELL_INLINE`), never by the store's `inline` threshold | inline-or-spilled must be a function of the value alone, so live, replayed and follower trees store one value the same way | text only |
+| D-Q2-4 | Every descriptor is charged 126 bytes (AP15), whatever its kind. A Cell's value is charged as its row, inline or spilled | the account counts logical content; the extra 16 descriptor bytes of a Log are fixed metadata like the rest of the descriptor | text only |
+| D-Q2-5 | A trim is reported as one `Trimmed` span. `changes` returns rows and spans side by side (§14.8) | per-key deletions would make a 100,000-row trim cost 100,000 changes per publisher round, which undoes the O(log N) trim | text only; consumers of `changes` change with it |
+| D-Q2-6 | A rolled-back or aborted append frees its sequence number | the dense invariant (rows = next − first) is what lets `append` skip the lookup and `trim_before` count from branch entries | text only |
+| D-Q2-7 | A Cell is always Memory; a Log may be Tiered | a Cell is at most one page and one blob, so paging it saves nothing | text only |
+| D-Q2-8 | The archive keeps a Log's history as the COMMIT ops of its kept GROUP entries (§14.10), and §13.9's pack hook stays unused | every Log row enters through an append op and leaves through a trim op, so the kept chain already holds it. Keeping packs would need archive membership for packs, which §13.9 does not have | text only; a pack-level archive can be added later beside it |
+
+**Names.** Programs write `store.Cell[V]` and `store.Log[V]`. Inside this spec, `Log[Read]` in §1.3 and §1.5 is core's append-only log (`core.Log`), which a Tx uses for its read log. `Log[V]` in this section is the store collection.
+
+### 14.1 Format (format 4)
+
+**Kinds.** AP7's `CollectionRoot.kind` gains 3 = **Cell** and 4 = **Log**. The catalog entry of a Cell or Log has the same catalog kind and the same fields as a table's: name, key schema and value schema list (D1, §1.2). A Cell's key schema is empty, and a Log's is the `u64` key codec (`key_u64`, u64 big-endian). Neither has indexes. A Cell's residency is 0, else `Corrupt(Malformed)`. A Log's is 0 or 1 (§13.1).
+
+**The collection-map value.** The map-leaf value of a collection is its descriptor, always inline (vtag 0), whatever the store's `inline` threshold:
+
+| Kind | Value | vlen |
+|---|---|---|
+| 1 table, 2 index | `CollectionRoot` (56) | 56 |
+| 3 Cell | `CollectionRoot` (56) ‖ `ilen u16` LE ‖ `ilen` bytes | 58 + ilen, at most 314 |
+| 4 Log | `CollectionRoot` (56) ‖ `next_seq u64` LE ‖ `first_seq u64` LE | 72 |
+
+AP3's map-leaf decode rule ("vtag 0 and vlen 56") becomes "vtag 0, and vlen as this table gives for the entry's `kind` byte". AP4's "a collection-map value is always the 56-byte `CollectionRoot`" becomes "is the descriptor of this table, at most 314 bytes".
+
+**A Cell's descriptor has three states.** A Cell's logical key is its 4-byte id alone: its row is the one row with an empty Key.
+
+| State | root PagePtr | rows | bytes | ilen | The map leaf's kid |
+|---|---|---|---|---|---|
+| empty | all zero | 0 | 0 | 0 | `EMPTY` |
+| inline | all zero | 1 | entry(4, ilen) | 2–256 | `EMPTY` |
+| spilled | a one-leaf tree | 1 | entry(4, \|v\|) | 0 | the tree's root page |
+
+- The inline bytes are the stored value: the u16-LE schema number then the codec bytes (D1). So ilen ≥ 2.
+- A spilled tree holds exactly one row, whose stored suffix is empty (AP5). Its leaf entry follows AP8: inline in the leaf when |v| is at most the store's `inline` threshold, else a BlobRef.
+- **The rule (D-Q2-3).** Every writer stores a Cell value v inline when 2 ≤ |v| ≤ `CELL_INLINE` = 256, and spilled otherwise. This includes `cell_set`, replay, followers and a cut's re-encode. So the state is a function of the value. No reader consults the rule: the descriptor says which state it is in.
+- **Decode** (each failure `Corrupt(Malformed)`):
+  - ilen ≤ 256, and ilen ≠ 1;
+  - ilen > 0 requires an all-zero root, rows = 1 and bytes = entry(4, ilen);
+  - ilen = 0 with an all-zero root requires rows = bytes = 0;
+  - a non-zero root requires ilen = 0 and rows = 1.
+  
+  AP7's rule that an all-zero root has rows = bytes = 0 holds for every kind except an inline Cell. That the spilled tree holds one row with an empty suffix is the writer's output, and is not checked (§2.8's line, as AP3's key order is not).
+
+**A Log's descriptor** (D-Q2-2):
+- `next_seq` is the sequence number the next append takes, and `first_seq` the lowest that may be present.
+- The **dense invariant**: first_seq ≤ next_seq, rows = next_seq − first_seq, and the Log holds exactly the rows with sequence numbers in [first_seq, next_seq).
+- **Decode** checks first_seq ≤ next_seq and rows = next_seq − first_seq, each failure `Corrupt(Malformed)`. AP7's zero-root rule then follows from rows = 0. That the rows present are exactly that range is the writer's output, and is not checked.
+- A Log row's logical key is `id u32 BE ‖ seq u64 BE` (12 bytes), so key order is sequence order.
+
+**COMMIT data op tag 3, trim** (AP1a's data section gains it; it is a format 4 addition, D-Q2-1):
+
+| Off | Size | Field |
+|---|---|---|
+| 0 | 1 | tag u8 = 3 |
+| 1 | 4 | id u32 BE, a Log's collection id |
+| 5 | 8 | bound u64 BE |
+
+- 13 bytes, with no length prefixes. Its sort key in the op order is the 4-byte id. It sorts before every row key of that Log, which is 12 bytes long and starts with the id, and it equals no other op's key: a Cell's row key is also 4 bytes, but names another id.
+- The no-duplicate rule (U10) allows at most one trim per Log per COMMIT.
+- A tag-3 op in the streams section is `Corrupt(Malformed)`. So is one whose id does not name a kind-4 descriptor in the head that replay applies it to.
+- `journal_scan` decodes it for recovery, `replay_export` and `recorded` with the same op decoder (H9).
+
+**Limits.** A Cell value obeys `VALUE_LIMIT`, as a row does. A Log's logical key is 12 bytes. An append when the Tx's `next_seq` is u64::MAX is `Limit(Ids)`, with nothing staged.
+
+### 14.2 Declaring
+
+```hirsel
+pub opaque type Cell[V]: shareable + send   // StoreId, id, catalog key, Arc[Readers[V]]; reads and writes
+pub opaque type Log[V]: shareable + send    // StoreId, id, catalog key, Arc[Readers[V]]; reads and writes
+pub fn declare_cell[V](mut d: Declare, name: String, take value: codec.Codec[V]) -> Result[Cell[V], Error]
+pub fn declare_log[V](mut d: Declare, name: String, take value: codec.Codec[V]) -> Result[Log[V], Error]
+```
+
+- `declare_cell` and `declare_log` follow `declare_table`'s rules in every mode (§1.2): names, the reserved `hirsel.` namespace, value schemas (D1), `Missing`, `Schema(i)`, `Undeclared`. They return the handle at once, because there is nothing more to declare.
+- Declaring a name whose catalog entry has another kind is `Changed(name)` in `Open` and `Follower`. In `Migrate` it is `Exists(name)`: a kind is never converted. A program that wants another kind drops the name and declares it again.
+- `Migrate` creates a Cell empty, and a Log empty with next_seq = first_seq = 0.
+- `drop_table` and `rename_table` (§1.2 `Migration`) take any collection name. `migrate_table` names tables only: a Cell or Log name is `Missing(name)`. A Cell's or Log's value type changes by D1 schema resolution, as a table's does.
+- Handles carry no extractor. A read or write checks the handle's catalog key as a table's does, and is `Stale(id)` or `Foreign` by the same rules (I3, §1.12).
+- `set_residency` (§13.8) on a Cell is `Missing("residency")` (D-Q2-7).
+
+### 14.3 Cell
+
+```hirsel
+pub fn cell_fetch[V](tx: Tx, c: Cell[V]) -> Result[Option[V], Error]                       // records Point(id)
+pub fn cell_set[V](mut tx: Tx, c: Cell[V], v: V) -> Result[(), Error]                      // elided when equal; records nothing
+pub fn cell_clear[V](mut tx: Tx, c: Cell[V]) -> Result[(), Error]                          // elided when already empty; records nothing
+pub fn cell_get[V](r: Reader, s: Snapshot, c: Cell[V]) -> Result[Option[V], Error] waits   // §13.4's Reader form
+```
+
+- **Staging.** `cell_set` encodes v (current schema number ‖ codec bytes, D1) and checks `Limit(Value)`. It then compares the encoded bytes with the Tx's current stored value of the Cell: the staged op for key `id` if there is one (a delete reads as empty), else the head's value. **Equal bytes stage nothing**, so the call writes no op, no page and no frame byte. Unequal bytes stage a put of key `id`. If the new bytes equal the head's value, the staged op for `id` is removed instead. So A → B → A in one Tx leaves no op. `cell_clear` does the same with "empty" in place of a value, staging a delete.
+- **Rollback layers (§1.3).** Removing an op is a staged edit like any other. Inside `rollback_writes_on_overrun`, the call's overlay records a **revert** for key `id`. A revert reads as the head's value, and folding it into the layer below removes that layer's op for `id`. An overrun drops the overlay with its revert, so the op below is visible again. Reads look through layers as before, O(depth).
+- **Reads.** The compare records no `Read`: `cell_set` and `cell_clear` return nothing, so a body learns nothing from them, exactly as from a blind `put`. `cell_fetch` and `cell_get` record `Point(id)`, the Cell's logical key, in the read log of `run` and `look`.
+- **A body that stages nothing** commits as §1.3 says for any Tx with no op. Its version advance carries no Change (§14.8), so no read set or cover is hit.
+- **Apply.** A put of key `id` whose value is at most 256 bytes rewrites the Cell's map entry inline and drops a spilled tree, if any, from the descriptor. A larger value builds or rewrites the one-leaf tree. A delete makes the entry empty. Each is one map-leaf edit plus at most one collection page. AP10's in-place rule and AP6's re-stamping of the map path apply unchanged.
+- **Cost.** O(map height + |v|) steps to stage, and O(map height) page edits plus at most one leaf and one blob at apply. Neither depends on any other collection's size.
+
+### 14.4 Log
+
+```hirsel
+pub type LogBounds: shareable + send { first: u64, next: u64 }
+pub fn append[V](mut tx: Tx, l: Log[V], v: V) -> Result[u64, Error]                               // the seq it takes; no lookup; records nothing
+pub fn trim_before[V](mut tx: Tx, l: Log[V], seq: u64) -> Result[(), Error]                      // records nothing
+pub fn log_fetch[V](tx: Tx, l: Log[V], seq: u64) -> Result[Option[V], Error]                     // records Point(id ‖ seq)
+pub fn last[V](tx: Tx, l: Log[V]) -> Result[Option[(u64, V)], Error]                             // O(height)
+pub fn bounds[V](tx: Tx, l: Log[V]) -> Result[LogBounds, Error]                                  // O(map height)
+pub fn log_range[V](tx: Tx, l: Log[V], lo: Bound[u64], hi: Bound[u64]) -> Result[Rows[u64, V], Error]
+pub fn log_get[V](r: Reader, s: Snapshot, l: Log[V], seq: u64) -> Result[Option[V], Error] waits
+pub fn log_last[V](r: Reader, s: Snapshot, l: Log[V]) -> Result[Option[(u64, V)], Error] waits
+pub fn log_bounds[V](r: Reader, s: Snapshot, l: Log[V]) -> Result[LogBounds, Error] waits
+pub fn log_scan[V](r: Reader, s: Snapshot, l: Log[V], lo: Bound[u64], hi: Bound[u64]) -> Result[Rows[u64, V], Error]   // read with §13.4's `next`
+```
+
+**The Tx's Log state.** On a Tx's first write to a Log, the Tx reads that Log's descriptor from its head (O(map height)) and keeps (first, next) for it. Then:
+- `append` takes seq = next, checks `Limit(Ids)`, `Limit(Value)` and the transaction limit, stages a put of `id ‖ seq` and sets next = seq + 1. It reads no row and no page below the map. The old row's charge is 0, by the dense invariant, because seq ≥ the head's `next_seq`.
+- `trim_before(seq)` clamps the bound: s′ = min(max(seq, first), next). If s′ = first, it stages nothing. Otherwise it stages the trim (id, s′), replacing a trim the Tx staged earlier, removes every staged append below s′, and sets first = s′.
+- Bounds are positions, not ids (D-Q2-6). A rollback layer that drops appends also restores `next`, and an aborted, failed or refused Tx stages nothing. So the sequence numbers a dropped append took are taken again by the next append. §1.3's "issued ids stay" does not apply to them.
+- Staged appends and the staged trim are layer edits like any other (§1.3). An overlay keeps its own (first, next) for each Log it touched, and folding takes the overlay's.
+
+**Reads, and what they record.**
+
+| Read | Answer | Recorded |
+|---|---|---|
+| `log_fetch(seq)` | None if seq < first or seq ≥ next; else the staged append, else the head's row | `Point(id ‖ seq)` |
+| `last` | None if first = next; else the last staged append, else the head's rightmost row | `Span(id ‖ (next − 1), id + 1)`; when empty, `Span(id, id + 1)` |
+| `bounds` | (first, next) | `Span(id, id + 1)`, the whole Log |
+| `log_range(lo, hi)` | rows in [lo, hi) ∩ [first, next), staged rows merged | `Span` of the requested range, as `range` |
+
+`id + 1` is the 4-byte big-endian successor of the id: every key of the Log lies below it. `last`'s Span is hit by the next append and by a trim that removes the last row, and by nothing else. The Snapshot forms answer the same from the Snapshot's roots and record nothing, as Snapshot reads do (§1.5).
+
+**Costs.**
+- `append`: O(|v|) steps after the first write's O(map height).
+- `trim_before`: O(1) steps to stage, plus removing the staged appends it drops.
+- `log_fetch`: O(height).
+- `last`: O(height). It descends the rightmost path through each branch's last entry, and never scans.
+- `bounds`: O(map height).
+- `log_range`: O(height + rows).
+
+None of these bounds depends on the Log's length, on what is cached or on how the Log was loaded.
+
+### 14.5 Pages: the append split and the trim
+
+**The append split.** A Log is kind 4. An append's apply inserts its row at the rightmost slot of the rightmost leaf, because seq ≥ every key present. When that makes a page illegal (AP3), kind 4 splits it like this instead of by N6:
+- a **leaf** of n entries splits into (n − 1, 1): the old entries stay, and the new entry starts a new rightmost leaf;
+- a **branch** of n entries, illegal after its new rightmost entry, splits into (n − 2, 2).
+
+The parent gains one entry, which may split it in turn by the same rule, and a root that splits gains a new root above it.
+
+*Both pieces are legal.* A leaf's left piece holds the n − 1 entries of the legal page before the insert. Its canonical size is no larger than that page's, because a common prefix of fewer keys is at least as long. A branch with at most three entries is always legal, so an illegal branch has n ≥ 4. Its left piece then holds n − 2 ≥ 2 entries of the previously legal page, and its right piece holds two. The pushed-up separator is AP3's shortest separator. So an append-only Log fills every leaf and branch but the rightmost to the page target, where N6 would leave them half full.
+
+Every other Log edit uses AP3's rules unchanged: N6 for an illegal page not at the rightmost slot, and H6 merges and borrows. Tables, indexes and Cells keep N6. Bulk build (AP13) never builds a Log (§14.2, §14.10).
+
+**`trim_before`'s apply.** It takes a Log with rows [f, n) to [s′, max(n, s′)):
+- **s′ ≥ n.** The root becomes `EMPTY` (AP2), with rows = bytes = 0.
+- **Otherwise,** it descends from the root to the leaf that holds key `id ‖ s′`. At each branch on that path, with child i on the path:
+  1. it removes entries 0 … i − 1 and subtracts their `rows` and `bytes` from the descriptor and the path's branch entries;
+  2. it makes child i entry 0, with its separator emptied.
+  
+  At the leaf, it removes the entries below s′ and subtracts each one's entry charge. Then, bottom-up along the path, each page is fixed by H6. Its left neighbours are gone, so it merges with or borrows from its right sibling, and a unary root is replaced by its child, repeatedly.
+- **Cost.** Every page it edits or reads is on the boundary path or is a right sibling of a page on it: at most 2 × height pages. The dropped rows' count and charge come from branch entries, so it loads no dropped page. The dropped subtrees are released by dropping their shares. On a Memory Log the runtime frees them when the last share drops (a pinned Snapshot keeps its own), and that work is the Db task's, outside every call's step bound. A Tiered Log releases them by §14.10.
+
+### 14.6 Commit, replay and followers
+
+**The frame.** A commit writes a Log's staged trim as op tag 3 and each staged append as a tag-1 put of key `id ‖ seq`, in key order: the trim first, then the appends. A Cell's staged write is a tag-1 put or a tag-2 delete of key `id`. A trim of any number of rows costs 13 COMMIT bytes. Within one Tx, the appends left after a trim all have seq ≥ its bound (§14.4).
+
+**Apply, live and replay alike, in op order.**
+- **Tag 3 (id, b):** apply §14.5's trim with s′ = b, then set first_seq = b and next_seq = max(next_seq, b).
+- **Tag 1 on a Log key `id ‖ seq`:** insert at the rightmost slot with §14.5's split, then set next_seq = seq + 1 and rows += 1.
+- **A Cell's tag 1 or tag 2:** §14.3's apply, inline or spilled by the value's length.
+
+The trim sorts first and the appends follow at next_seq. So the dense invariant holds after every op, including when the bound lies inside the same commit's appends (§14.4 dropped those before the frame was written). Replay reads no descriptor field the frame does not determine. A replayed store therefore holds the same Cells, the same Logs and the same (first_seq, next_seq) as the live one, with the logical equivalence AP3 states ("Live and replay").
+
+**Exact-mode charges at apply** (AP15) are entry(12, |v|) added per append with nothing subtracted, the dropped `bytes` subtracted per trim, and §14.7's rule for a Cell.
+
+**Followers.** A follower applies GROUP entries' COMMIT frames as §3.4 step 6 does (§12.5), so a follower's Logs and Cells are the holder's. `declare_cell` and `declare_log` in mode `Follower` check its applied catalog, and `follower_reader` serves the Snapshot forms. A trim reaches a follower as its 13-byte op, never as per-row deletes.
+
+**Stamps.** An inline Cell write re-stamps the map leaf and its map path (AP6), and a spilled one also stamps its leaf. An append or trim re-stamps the pages it edits and their map path. An elided Cell write stamps nothing.
+
+### 14.7 Accounting (MEM-19, AP15)
+
+- **Descriptors.** Every collection id is charged 126, whatever its kind (D-Q2-4), so AP15's formula, AP13's workspace, §11.1's install figures and L49 are unchanged.
+- **A Cell's row.** A Cell holding stored value v holds one row version (tree = its id, key = its 4-byte id, v), charged entry(4, |v|) = 70 + r8(|v|), inline or spilled alike. `CollectionRoot.bytes` is that figure, or 0 when empty, so the one-root count (N10) needs no Cell case. Exact mode adds the new row and subtracts the old. An elided write changes nothing.
+- **A Log's rows.** Each row is charged entry(12, |v|) = 78 + r8(|v|).
+  - In exact mode, an append adds it and subtracts nothing, by the dense invariant. A trim subtracts the dropped rows' charge, which the apply sums from branch entries and the leaf in O(height).
+  - In conservative mode, an append adds its charge and a trim subtracts nothing.
+  - A trim-only commit adds nothing, so it is never refused by admission, as a delete-only commit is not.
+- **Tiered.** A Tiered Log's charges go to `account_tiered` (§13.8). Its dirty rightmost path counts toward `dirty_bytes`, once per page per cut.
+- **Payers (MEM-19).** Staging buffers and the Tx's Log state are the call's. Page edits and splits at apply are the writer's, preallocated by AP10's plan-then-apply. A trim's released pages are freed on the Db task (Memory) or by the checkpoint task's drain (Tiered, §13.6).
+
+### 14.8 `changes` over Cells and Logs
+
+**Types (D-Q2-5).** `changes` and `changes_page` return trimmed spans beside the per-key rows:
+
+```hirsel
+pub type Trimmed { lo: Bytes, hi: Bytes }            // every key in [lo, hi) was present at a and is absent at b
+pub type Changes { rows: List[Change], trimmed: List[Trimmed] }
+pub fn changes(r: Reader, a: Snapshot, b: Snapshot) -> Result[Changes, Error] waits
+pub type ChangePage { changes: List[Change], trimmed: List[Trimmed], next: Option[Bytes] }
+```
+
+They replace §13.4's `changes` result and §1.5's `ChangePage`. A `Trimmed` never overlaps a `Change`'s key. Both lists are in key order (a span by its `lo`). `changes_page` counts a span as one change of |lo| + |hi| bytes, placed at `lo`, and its `next` is the smallest key it did not return, row or span.
+
+**The walk.** AP6's walk of the two collection maps in id order is unchanged for kinds 1 and 2. For a Cell or Log entry present on both sides:
+- **Cell.** If both are spilled with equal root stamps, nothing. Otherwise it compares the two stored values: inline bytes, the spilled row's bytes, or empty. Unequal values give one `Change{tree_key: id, value}`, with b's value or None. An inline Cell's root stamp is 0 on both sides, so the equal-stamp skip alone would miss its writes. That is why the compare is by value.
+- **Log**, with a's (f_a, n_a) and b's (f_b, n_b):
+  - Equal root stamps give nothing, because equal rows give equal bounds when the Log is not empty, and two empty Logs differ in no row.
+  - Otherwise, when f_a < min(f_b, n_a), one `Trimmed{lo: id ‖ f_a, hi: id ‖ min(f_b, n_a)}`.
+  - Then the ordinary two-tree descent, over keys at or above the span's `hi` when there is a span and over the whole Log otherwise, so the trimmed rows are never visited. Neither side holds a key below `hi` outside the span: a's keys there are the span, and b holds none below f_b ≥ `hi`. On one branch the descent yields b's appends as insertions, or, when b is the older snapshot, a's appends as deletions and b's rows below f_a as insertions. Across branches it also yields the overlap's differing rows.
+- A Cell present on one side only gives its one row as an insertion or deletion, if it holds a value.
+- A Log present only in a gives one `Trimmed{id ‖ f_a, id ‖ n_a}` when it held rows. A Log present only in b gives one insertion per row, as a table does.
+
+**Cost.** Per Log, the span takes O(1). The descent costs O(height + k log n) for the k keys written at or above the trimmed boundary, and the rewritten left spine adds at most one path. Per Cell, it costs O(|v|), plus one leaf when spilled. A trim's cost in `changes` does not depend on how many rows it dropped.
+
+**Consumers.**
+- `span_changes` and `published_value` are unchanged: a `Trimmed` has no value.
+- A projector's source is a `Table` (§1.14), whose id range holds no `Trimmed`, so a projector ignores the list. A Log consumer keeps a sequence cursor and reads the Log directly. It needs no projector.
+- RUNNER G2 treats a `Trimmed` as a change to every key in its span (§14.9).
+
+### 14.9 Covers and the tail cover
+
+**What the store gives the runner.** A Cell's data-tree key is `id`, and a Log row's is `id ‖ seq`. Slot rows, Points and Spans use these keys exactly as table rows do (AP5, I1). So the wire's slot `Row{slot, key, value}` (RUNNER v2.45 §1.1) carries Cell and Log rows with no new row form.
+
+**The tail window.** For a Snapshot s whose Log has bounds (f, n), the tail window of length t ≥ 1 is the sequence range W(s, t) = [max(f, n − t), n) (t = 0 is `Missing("n")`).
+
+```hirsel
+pub fn tail_window[V](r: Reader, s: Snapshot, l: Log[V], t: u64) -> Result[LogBounds, Error] waits                  // O(map height)
+pub fn window_changes[V](r: Reader, a: Snapshot, b: Snapshot, l: Log[V], t: u64) -> Result[List[Change], Error] waits
+```
+
+`window_changes` gives, in key order:
+- one deletion (`value` None) for each seq in W(a, t) \ W(b, t). These keys come from the two descriptors by arithmetic, and no page is read for them;
+- one insertion, with b's stored value, for each seq in W(b, t) \ W(a, t);
+- each seq in both windows whose stored value differs between a and b. On one branch there is none, because a Log row never changes. Across branches it is found by the two-tree descent restricted to the overlap.
+
+Its size is at most 2t plus the overlap's differences. Its cost is O(map height + (rows returned + 1) × height), whatever the Log's length and whatever was trimmed. The Foreign rules are `changes`'s.
+
+**The cover semantics the runner must implement (store side specified here; RUNNER-SPEC restates them, open item W3B-O1):**
+- A Cell slot covers `Span(id, id ‖ 0x00)`, its one key. A Log slot covers a fixed sequence range as a Span of row keys, or a **tail cover** of length t.
+- A tail cover is indexed on the whole Log, `Span(id, id + 1)`, because the window moves with every append and trim. Its initial rows are `span_changes(s, id ‖ lo, id ‖ hi)` for (lo, hi) = `tail_window(s, t)`.
+- A round from a to b in which a `Change` or a `Trimmed` falls in a tail cover's Log sends `window_changes(a, b, l, t)` as that slot's rows. That is the cover-only path, and it reruns nothing. A read-set hit reruns the query as G2 says, and its slot diff for a tail cover is the same `window_changes`.
+- A `Trimmed` hits a read set or cover when its span overlaps a Point or Span. On a cover-only hit of a fixed-range cover, its rows are deletions of each key in span ∩ cover, enumerated from a.
+- The subscription retains (l, t) and no rows (L20). The tail cover's `cover_tail(c, name, l, t)` API, its CoverSet entry and its `slot` registration over a `Log` are RUNNER-SPEC's to name, with no change to hirsel.3's rows.
+
+### 14.10 Tiered Logs, compaction, reclaim, archival, export and install
+
+- **Tiered.** A Tiered Log follows §13 unchanged, with two narrowings of §13.3's commit plan:
+  - an append's plan resolves the rightmost path only, because the append split reads no sibling;
+  - a trim's plan resolves the boundary path and each path page's right sibling, never a dropped page.
+  
+  A plan miss is a body miss and reruns the attempt (§13.3). The touched-page counter counts these pages only, so a trim's `Refused(Cache)` depends on the height and not on the rows dropped.
+- **Dropped subtrees.** At the trim's apply, each dropped child edge goes into the commit's **dropped list**: a Cold edge as its PagePtr (20 bytes, as the replaced list), and a Hot child as its share. The list is charged with the dirty bytes (§13.8). The next cut enqueues each Cold edge in `deferred_frees` (§13.6) and walks each Hot child, enqueuing its Cold descendants and dropping its pages. That walk visits dirty pages only, which `dirty_bytes` already bounds, and runs on the checkpoint task. Draining then applies §13.6's deadlist rule, so a subtree still shared with a pin or fork goes to cells and not to `live`. The probe and reclaim are unchanged.
+- **Reclaim and followers.** No change. A follower replays the trim op and reaches the same Cold edges through its own installs (§13.5).
+- **Archival (D-Q2-8).** With archival on (§13.9), a Log's history is the tag-1 appends and tag-3 trims in the kept GROUP entries. Every row the Log held from `archive_since` onward entered by one of those ops, so an archive reader rebuilds any range of it by replaying the kept entries in position order. No pack is kept for a Log. §13.9's pack hook is not used, and its membership rework (m3-spec-fix-1994) needs no Log case.
+- **Export** copies the MANIFEST, packs and journal (§12.7, §3.5a). Descriptors, with their sequence bounds and inline Cell bytes, travel in it unchanged.
+- **Prepared install** never builds a Cell or Log from rows. `Migrate` creates them empty and `migrate_table` names tables only (§14.2). So the graft carries each existing Cell and Log descriptor byte-equal, and a prepared-rows (0x0084) row whose id names a Cell or Log is `Corrupt(Malformed)`. A Log's bounds therefore never need to cross the inventory.
+
+### 14.11 Edge, Prop and Queue
+
+- **`Edge[A, B]`** is a library helper in package `store`, not a collection kind: a `Table[(A, B), ()]` plus a `Many` index whose extractor `fn((A, B), ()) -> Result[List[B], Capacity]` returns `[b]`. Out-edges of a are `range_prefix(t, a, ..)`, and in-edges of b are `lookup(ix, b)`. It adds no format and no law.
+- **`Prop`** is dropped: a `Table[K, V]` or a `Cell[V]` holds what it held.
+- **`Queue`** is not specified. It is revisited after triggers move to partial `fn(K, V)` indexes.
+
+### 14.12 Memory and steps
+
+| Operation | Steps (MEM-30), a per-build bound | Bytes, and payer (MEM-19) |
+|---|---|---|
+| `cell_set`, `cell_clear` | O(map height + \|v\|) | the encoded value and one op; the call |
+| `cell_fetch`, `cell_get` | O(map height), + one leaf if spilled | the decoded value; the call or the Reader |
+| `append` | O(\|v\|); the Tx's first write to a Log adds O(map height) | the encoded value, one op, 16 bytes of Log state per Log; the call |
+| `trim_before` | O(1) + the staged appends it drops | 13 frame bytes; the call |
+| `last`, `log_fetch`, `log_get` | O(height) | one decoded row; the call or the Reader |
+| `bounds`, `log_bounds`, `tail_window` | O(map height) | none |
+| apply of a trim | ≤ 2 × height page edits | the writer, preallocated (AP10) |
+| apply of an append | O(height) page edits, amortized O(1) splits | the writer, preallocated (AP10) |
+| `changes` per Log | O(1) for the span + O(height + k log n) | the result; the caller |
+| `window_changes` | O(map height + (rows + 1) × height) | the result; the caller |
+
+No bound depends on the number of rows a trim drops, on cache state, or on how a tree was loaded. Freeing dropped pages is the Db task's (Memory) or the checkpoint task's (Tiered).
+
+### 14.13 Laws L77–L83
+
+Harness: `cell_log_laws.hirsel`<!-- doc-ref: planned --> over a `memory` store, a log@1 store under §3.9's file-system model, and a Tiered Log over `std.sim.s3`. The oracle is an ordered-map model holding each Cell's value and each Log's (first, next, rows), fed the same calls. The laws' frame walker decodes descriptors and COMMIT ops by §14.1 and never calls the store's reader. All are **PLANNED**.
+
+| Law | What must hold | Seeded bug it catches |
+|---|---|---|
+| **L77 `cell_elision`** | For random Cell writes, among them equal-value sets, A → B → A within one Tx, and sets inside `rollback_writes_on_overrun` that overrun: the frame's ops for the Cell equal the model's net change; a Tx whose net change is none writes no Cell op and stamps no page; and `changes` gives a Cell Change exactly when the model's value differs | elision by comparing with the head only (`head_only_compare`: A → B → A writes B then A); a revert lost on overrun (`revert_survives_overrun`) |
+| **L78 `cell_inline_boundary`** | Values whose stored length is 2, 255, 256, 257 and 1,025, set in every order: the descriptor's state is inline exactly for ≤ 256 on live, replayed and follower stores and after a cut, whatever the store's `inline` threshold; reads, `changes` and the account equal the model's across each transition | inline decided by the store's threshold (`store_threshold_inline`); a spilled tree left behind on return to inline (`stale_spill`) |
+| **L79 `log_dense`** | Random appends, trims (bounds below first, inside, at next, past next, and inside the same Tx's appends), aborts, overruns and crash cuts: after every recovery each Log's descriptor and rows equal the model's, with rows = next − first, and every append returns the model's seq | a rolled-back append keeping its seq (`seq_not_restored`: a gap and a descriptor that fails decode); a trim op applied after the appends (`trim_after_appends`) |
+| **L80 `trim_bounded`** | A trim of k rows from a Log of n rows (n up to 10⁶, k ∈ {1, n/2, n − 1, n}) writes one 13-byte op, edits and reads at most 2 × height pages counted by the harness's page hook, loads no dropped Tiered page from a cold cache, and leaves the exact account and the descriptor equal to the model's | a trim as per-row deletes (`per_row_trim`: k ops and O(k) pages); a trim that loads dropped pages to count them (`count_by_walk`) |
+| **L81 `trimmed_changes`** | `changes(a, b)` and every `changes_page` sequence over it, with a and b on one branch and on two forks, equal the model's diff in which the keys a trim removed form one `Trimmed` per Log and every other key is a row | per-key deletions for a trim (`trim_as_rows`); a span ending at f_b where n_a < f_b (`span_past_next`: a span covering keys a never held) |
+| **L82 `tail_window`** | For random appends and trims between a and b and t ∈ {1, 10, larger than the Log}, `window_changes(a, b, l, t)` equals the model's diff of the two windows, and `tail_window` equals [max(f, n − t), n) | a window computed from b's bounds alone (`one_sided_window`: removals missing after a trim); appends outside the window sent (`unwindowed_inserts`) |
+| **L83 `append_fill`** | After m appends of equal-size rows to an empty Log, every leaf but the rightmost holds the most entries the page target allows, and the page count is the hand-derived ⌈m / per_leaf⌉ leaves plus their branches | N6 used for appends (`n6_append`: leaves half full, about twice the pages) |

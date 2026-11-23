@@ -1,0 +1,225 @@
+fn history_check_open(client: std.object.Client, selected: HistoryCapture, requested_level: String, options: Options) -> Result[(), Error] {
+    let current = selected.head
+    check_expected_store(options.expect, current.store)?
+    history_check_namespace(selected, client)?
+    if requested_level != selected.config.level {
+        return Error(Declared(string.from(requested_level)))
+    }
+    if let Some(version_number) = options.activation {
+        if version_number != current.activation {
+            return Error(NotCurrent(current.activation))
+        }
+    }
+    if current.activation != 0 {
+        if let Some(binding) = options.binding {
+            if !history_binding_equals(binding, current.binding) {
+                return Error(NotCurrent(current.activation))
+            }
+        }
+    }
+    let _ = history_next_id(current.pair.epoch)?
+    let _ = history_next_id(current.entry.seq)?
+    Ok(())
+}
+
+fn history_binding_equals(octets: Bytes, binding: Inline[u8, 32]) -> bool {
+    if list.len(octets) != 32 {
+        return false
+    }
+    for i in 0u64 .. 32 {
+        if octets[i] != binding[i] {
+            return false
+        }
+    }
+    true
+}
+
+fn history_genesis_debris(key: String) -> bool {
+    let octets = string.as_bytes(key)
+    if list.len(octets) != 60 || octets[1] != b'-' || octets[22] != b'-' || octets[43] != b'-' {
+        return false
+    }
+    let class = octets[0]
+    if class != b'e' && class != b'm' && class != b'p' && class != b'l' {
+        return false
+    }
+    if list.slice(octets, 23, 43) != string.as_bytes("00000000000000000001") {
+        return false
+    }
+    if class != b'p' && list.slice(octets, 2, 22) != string.as_bytes("00000000000000000001") {
+        return false
+    }
+    for digit in list.slice(octets, 2, 22) {
+        if !int.is_ascii_digit(digit) {
+            return false
+        }
+    }
+    if list.slice(octets, 2, 22) == string.as_bytes("00000000000000000000") {
+        return false
+    }
+    for digit in list.slice(octets, 44, 60) {
+        if !int.is_ascii_digit(digit) && (digit < b'a' || digit > b'f') {
+            return false
+        }
+    }
+    true
+}
+
+fn history_check_empty(mut client: std.object.Client, deadline: u64) -> Result[(), Error] waits {
+    let mut after = string.new()
+    let mut entries = disk_allocation(scoped fn() -> Result[List[std.object.Entry], Error] {
+        Ok(list.with_capacity(1000))
+    })?
+    loop {
+        list.clear(mut entries)
+        let page = match std.object.list(mut client, "", after, mut entries, deadline) {
+            Ok(value) => value,
+            Error(take e) => return Error(Remote(take e)),
+        }
+        for member in entries {
+            if !history_genesis_debris(std.object.key_text(member.key)) {
+                return Error(Exists("authority"))
+            }
+        }
+        if !page.truncated {
+            return Ok(())
+        }
+        let following = std.object.key_text(page.after)
+        if order.compare(following, after) != Greater {
+            return Error(disk_fault("authority", 0, Malformed))
+        }
+        after = take following
+    }
+}
+
+fn history_open_genesis(mut client: std.object.Client, r: Random, holder: StoreId, options: Options, requested_level: String, mut workspace: HistoryBuffers, deadline: u64) -> Result[(HistoryRegister, JournalReplay), Error] waits {
+    if !options.create || (options.activation != None && options.activation != Some(0u64)) {
+        return Error(NotFound)
+    }
+    if let Some(_) = options.expect {
+        return Error(NotFound)
+    }
+    history_check_empty(mut client, deadline)?
+    let first = disk_allocation(scoped fn() -> Result[State, Error] {
+        capacity(main_state(empty_roots(), 0, 0))
+    })?
+    let initial = journal_replay(take first, 0)?
+    over_ceiling(journal_account(initial)?, options.resident_limit)?
+    let place = std.object.bucket_config(client)
+    let authority = history_config_bytes(HistoryConfig(place: take place, level: string.from(requested_level)))?
+    let created = history_publish_genesis(mut client, capacity(disk_identity(r))?, holder, authority, mut workspace, deadline)
+    let mut register = match take created {
+        Ok(take granted) => take granted,
+        Error(Exists(existing)) if existing == "head" => return Error(Lost),
+        Error(take problem) => return Error(take problem),
+    }
+    history_advance_claim(mut client, mut register, authority, mut workspace, deadline)?
+    Ok((take register, take initial))
+}
+
+fn history_advance_claim(mut client: std.object.Client, mut register: HistoryRegister, authority: Bytes, mut workspace: HistoryBuffers, deadline: u64) -> Result[(), Error] waits {
+    history_claim_packet(mut workspace.packet, register.head)?
+    let advanced = history_register_advance(mut client, mut register, authority, mut workspace, deadline)
+    match take advanced {
+        Ok(HistoryApplied(_)) => Ok(()),
+        Error(Fenced(_)) => Error(Lost),
+        Error(take problem) => Error(take problem),
+        _ => Error(Undecided),
+    }
+}
+
+fn history_claim_retry(c: Clock, r: Random, mut entropy: Bytes, pause: u64, deadline: u64) waits {
+    list.clear(mut entropy)
+    host.random(r, mut entropy)
+    let jitter = read_le(entropy, 0, 8) % pause
+    host.sleep_until(c, order.min(clock.deadline_after_ms(host.mono_ns(c), pause + jitter), deadline))
+}
+
+// Recover and admit the state while the incumbent still holds the claim.
+// The returned register has already advanced its CLAIM entry.
+fn history_open_existing(mut reader: ObjectPackRead, c: Clock, r: Random, holder: StoreId, take first: HistoryCapture, options: Options, requested_level: String, mut workspace: HistoryBuffers) -> Result[(HistoryRegister, JournalReplay), Error] waits {
+    let pair = first.head.pair
+    let mut selected = take first
+    let mut admitted: Option[(HistoryHead, JournalReplay)] = None
+    let mut entropy = disk_allocation(fn() -> Result[Bytes, Error] { Ok(list.with_capacity(8)) })?
+    let mut pause = 10u64
+    loop {
+        if std.object.deadline_after_ms(reader.client, 0) >= reader.deadline {
+            return Error(Lost)
+        }
+        history_check_open(reader.client, selected, requested_level, options)?
+        let trial = match replace(mut admitted, None) {
+            Some((base, take replay)) if selected.head.checkpoint.seq <= base.entry.seq => {
+                if selected.head.floor < base.floor {
+                    return Error(disk_fault("head", 72, Malformed))
+                }
+                history_rebase_suffix(mut reader, selected.head, base.entry, take replay, options.resident_limit)
+            },
+            _ => history_paged_capture(mut reader, selected.head, options.resident_limit),
+        }
+        let replay = match take trial {
+            Ok(take ready) => take ready,
+            Error(HistoryMissing(take file, missing_seq)) => {
+                let verdict = history_witness(mut reader.client, selected.head, Some(pair), file, missing_seq, mut workspace.witness, reader.deadline)?
+                match take verdict {
+                    HistoryEvicted(take newer) if options.claim_ms != 0 => {
+                        selected = take newer
+                        continue
+                    },
+                    _ => return Error(Lost),
+                }
+            },
+            Error(take problem) => return Error(take problem),
+        }
+        let head = selected.head
+        let authority = copied(list.slice(workspace.witness, 240, list.len(workspace.witness)))?
+        if std.object.deadline_after_ms(reader.client, 0) >= reader.deadline {
+            return Error(Lost)
+        }
+        let attempt = history_replace_claim(mut reader.client, head, holder, mut workspace, reader.deadline)?
+        match take attempt {
+            HistoryClaimed(take result) => {
+                let mut register = take result
+                history_advance_claim(mut reader.client, mut register, authority, mut workspace, reader.deadline)?
+                return Ok((take register, take replay))
+            },
+            HistoryClaimMoved(backoff) => {
+                if options.claim_ms == 0 {
+                    return Error(Lost)
+                }
+                selected = history_decode_head(workspace.witness)?
+                admitted = Some((head, take replay))
+                if backoff {
+                    history_claim_retry(c, r, mut entropy, pause, reader.deadline)
+                    pause = order.min(pause * 2, 1000)
+                }
+            },
+            HistoryClaimLost => return Error(Lost),
+            HistoryClaimUncertain => return Error(Undecided),
+        }
+    }
+}
+
+fn history_rebase_suffix(mut reader: ObjectPackRead, head: HistoryHead, from: HistoryRef, take initial: JournalReplay, ceiling: u64) -> Result[JournalReplay, Error] waits {
+    let suffix = history_suffix(mut reader.client, head, from, reader.deadline)?
+    let mut replay = take initial
+    history_apply_suffix(mut reader.client, head, from.seq, suffix, mut replay, ceiling, reader.deadline)?
+    Ok(take replay)
+}
+
+
+fn history_open_register(mut reader: ObjectPackRead, c: Clock, r: Random, options: Options, requested_level: String, mut workspace: HistoryBuffers, op_ms: u64) -> Result[(HistoryRegister, JournalReplay), Error] waits {
+    let claim_ms = if options.claim_ms == 0 { op_ms } else { options.claim_ms }
+    reader.deadline = std.object.deadline_after_ms(reader.client, claim_ms)
+    let observed = history_fetch(mut reader.client, "head", mut workspace.witness, reader.deadline)
+    history_qualify(mut reader.client, reader.deadline)?
+    let holder = capacity(disk_identity(r))?
+    match take observed {
+        Ok(_) => {
+            let selected = history_decode_head(workspace.witness)?
+            history_open_existing(mut reader, c, r, holder, take selected, options, requested_level, mut workspace)
+        },
+        Error(Remote(NotFound)) => history_open_genesis(mut reader.client, r, holder, options, requested_level, mut workspace, reader.deadline),
+        Error(take failure) => Error(take failure),
+    }
+}

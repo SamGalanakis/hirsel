@@ -191,11 +191,11 @@ fn history_publish_genesis(mut client: std.object.Client, id: StoreId, holder: S
         HistoryApplied(tag) => Ok(HistoryRegister(head, tag, terminal: None)),
         HistoryConflict(_) => Error(Exists("head")),
         HistoryRefused(take problem) => Error(Remote(take problem)),
-        HistoryUndecided => Error(Remote(Uncertain(Deadline))),
+        HistoryUndecided => Error(Undecided),
     }
 }
 
-type HistoryClaimResult = HistoryClaimed(HistoryRegister) | HistoryClaimMoved | HistoryClaimLost | HistoryClaimUncertain
+type HistoryClaimResult = HistoryClaimed(HistoryRegister) | HistoryClaimMoved(bool) | HistoryClaimLost | HistoryClaimUncertain
 
 // Keep only the bytes changed by the claim so the final GET can overwrite
 // the admitted buffer. All other bytes must match the prepared replacement.
@@ -228,7 +228,7 @@ fn history_claim_same(candidate: Bytes, saved: Inline[u8, 48], observed: Bytes) 
     true
 }
 
-fn history_claim_changed(head: HistoryHead, observed: Bytes) -> Result[HistoryClaimResult, Error] {
+fn history_claim_changed(head: HistoryHead, observed: Bytes, backoff: bool) -> Result[HistoryClaimResult, Error] {
     let (_, field) = history_head_frame(observed)?
     if !history_pair_matches(head.pair, history_frame_pair(observed, field)) {
         return Ok(HistoryClaimLost)
@@ -237,7 +237,7 @@ fn history_claim_changed(head: HistoryHead, observed: Bytes) -> Result[HistoryCl
     if latest.head.entry.seq <= head.entry.seq {
         return Error(disk_fault("head", 72, Malformed))
     }
-    Ok(HistoryClaimMoved)
+    Ok(HistoryClaimMoved(backoff))
 }
 
 // The caller has already recovered and admitted the head in witness.
@@ -247,11 +247,11 @@ fn history_replace_claim(mut client: std.object.Client, admitted: HistoryHead, h
     history_encode_head(mut buffers.body, candidate, list.slice(buffers.witness, 240, list.len(buffers.witness)))?
     let observed = history_fetch(mut client, "head", mut buffers.witness, deadline)?
     if !history_claim_same(buffers.body, saved, buffers.witness) {
-        return history_claim_changed(admitted, buffers.witness)
+        return history_claim_changed(admitted, buffers.witness, false)
     }
     match history_write_head(mut client, Match(observed.etag), mut buffers.body, mut buffers.witness, deadline) {
         HistoryApplied(tag) => Ok(HistoryClaimed(HistoryRegister(head: candidate, tag, terminal: None))),
-        HistoryConflict(_) => history_claim_changed(admitted, buffers.witness),
+        HistoryConflict(_) => history_claim_changed(admitted, buffers.witness, true),
         HistoryRefused(take problem) => Error(Remote(take problem)),
         HistoryUndecided => Ok(HistoryClaimUncertain),
     }

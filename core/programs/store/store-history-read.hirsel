@@ -67,17 +67,23 @@ fn history_length(link: HistoryLink, seq: u64) -> HistoryRef {
     HistoryRef(seq, epoch: link.epoch, len: link.len, digest: link.digest)
 }
 
-fn history_range(mut client: std.object.Client, path: String, size: u64, lo: u64, hi: u64, mut buffer: Bytes, deadline: u64) -> Result[(), Error] waits {
+fn history_missing_object(path: String, reference: HistoryRef) -> Error {
+    let missing_seq = if string.starts_with(path, "e-") { Some(reference.seq) } else { None }
+    HistoryMissing(string.from(path), missing_seq)
+}
+
+fn history_range(mut client: std.object.Client, path: String, reference: HistoryRef, lo: u64, hi: u64, mut buffer: Bytes, deadline: u64) -> Result[(), Error] waits {
     list.clear(mut buffer)
     let (take result, take raw) = std.object.fetch_range(mut client, path, lo, hi, replace(mut buffer, list.new()), deadline)
     buffer = take raw
     match take result {
         Ok(meta) => {
-            if meta.size != size || list.len(buffer) != hi - lo {
+            if meta.size != reference.len || list.len(buffer) != hi - lo {
                 return Error(disk_fault(path, lo, Truncated))
             }
             Ok(())
         },
+        Error(NotFound) => Error(history_missing_object(path, reference)),
         Error(take problem) => Error(Remote(take problem)),
     }
 }
@@ -101,7 +107,7 @@ fn history_suffix(mut client: std.object.Client, head: HistoryHead, from: Histor
         let name = history_key("e-", current)
         let leaf = HistoryLink(epoch: current.epoch, len: current.len, digest: current.digest)
         let _ = list.set(mut refs, current.seq - from.seq - 1, leaf)
-        history_range(mut client, name, current.len, 0, 112, mut prefix_buffer, deadline)?
+        history_range(mut client, name, current, 0, 112, mut prefix_buffer, deadline)?
         let (_, predecessor) = history_entry_context(name, head.store, current, prefix_buffer)?
         current = history_length(predecessor, current.seq - 1)
     }
@@ -115,7 +121,11 @@ fn history_read_object(mut client: std.object.Client, path: String, reference: H
     let mut raw = disk_allocation(scoped fn() -> Result[Bytes, Error] {
         Ok(list.with_capacity(reference.len))
     })?
-    let _ = history_fetch(mut client, path, mut raw, deadline)?
+    match history_fetch(mut client, path, mut raw, deadline) {
+        Ok(_) => (),
+        Error(Remote(NotFound)) => return Error(history_missing_object(path, reference)),
+        Error(take problem) => return Error(take problem),
+    }
     Ok(take raw)
 }
 

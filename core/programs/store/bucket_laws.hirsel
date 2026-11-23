@@ -687,7 +687,7 @@ fn bucket_m2_pack_entry(mut raw: Bytes, id: StoreId, manifest: HistoryRef, refs:
     Ok(history_new_ref(1, 1, raw))
 }
 
-fn bucket_m2_read_packs(d: Dir, tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits {
+fn bucket_m2_upload_checkpoint(d: Dir, tasks: Tasks, sim: BucketSim) -> Result[(ObjectPackRead, HistoryHead), Error] waits {
     let (id, take selected) = read_page_manifest_file(d)?
     let validated = validate_page_manifest(d, id, take selected)?
     let ValidatedPageManifest(manifest: take initial, inventory: take inventory, ..) = take validated
@@ -695,7 +695,7 @@ fn bucket_m2_read_packs(d: Dir, tasks: Tasks, sim: BucketSim) -> Result[(), Erro
     manifest.first_live = 1
     manifest.prev_first = 1
     manifest.retirement_root = std.page.unlocated(0)
-    let mut client = bucket_law_client(sim, tasks, "s3.test", 3)?
+    let mut client = bucket_law_client_with(sim, tasks, "s3.test", 3, true)?
     let due = std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS)
     let mut refs: List[HistoryRef] = list.with_capacity(map.len(inventory))
     let mut kinds = 0u8
@@ -725,7 +725,14 @@ fn bucket_m2_read_packs(d: Dir, tasks: Tasks, sim: BucketSim) -> Result[(), Erro
     let entry_ref = bucket_m2_pack_entry(mut raw_entry, id, base, refs)?
     history_create(mut client, history_key("e-", entry_ref), mut raw_entry, mut compare, due)?
     let head = HistoryHead(store: id, pair: HistoryPair(epoch: 1, holder: StoreId(hi: 17, lo: 18)), activation: 0, entry: entry_ref, checkpoint: entry_ref, floor: 1, binding:[0; 32])
-    let mut source = ObjectPackRead(client: take client, locator: HistoryLocator(rows: map.new(), chunks: list.new(), last_pack: 0), deadline: due)
+    let source = ObjectPackRead(client: take client, locator: HistoryLocator(rows: map.new(), chunks: list.new(), last_pack: 0), deadline: due)
+    Ok((take source, head))
+}
+
+fn bucket_m2_read_packs(d: Dir, tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits {
+    let (take loaded, head) = bucket_m2_upload_checkpoint(d, tasks, sim)?
+    let mut source = take loaded
+    let id = head.store
     let replay = history_paged_capture(mut source, head, 1048576)?
     let root = view replay.state.tips[0]
     let snap = Snapshot(store: id, open: 0, branch: 0, head: root.head, roots: share_roots(root.roots))
@@ -830,6 +837,63 @@ fn bucket_test_m2_head_probe(c: Clock, tasks: Tasks) -> Result[(), Error] waits 
     probed?
     if report.writes != 6 {
         fail("head probes wrote to the register")
+    }
+    Ok(())
+}
+
+fn bucket_m2_law_admit(d: Dir, tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error] waits {
+    let (take loaded, head) = bucket_m2_upload_checkpoint(d, tasks, sim)?
+    let mut source = take loaded
+    let mut workspace = history_buffers(1024)?
+    let cfg = HistoryConfig(place: std.object.bucket_config(source.client), level: "bucket")
+    let authority = history_config_bytes(cfg)?
+    history_encode_head(mut workspace.body, head, authority)?
+    let HistoryApplied(tag) = history_write_head(mut source.client, Absent, mut workspace.body, mut workspace.witness, source.deadline) else {
+        fail("could not publish the checkpoint fixture")
+    }
+    let mut incumbent = HistoryRegister(head, tag, terminal: None)
+    let mut requested = defaults()
+    requested.create = false
+    requested.expect = Some(head.store)
+    requested.resident_limit = 0
+    let small = history_open_register(mut source, sim.time, r, requested, "bucket", mut workspace, BUCKET_LAW_OP_MS)
+    if let Error(Full(Resident(_))) = small {} else {
+        fail("the claim did not admit the restored state before fencing")
+    }
+    requested.resident_limit = 1048576
+    requested.activation = Some(3)
+    let stale = history_open_register(mut source, sim.time, r, requested, "bucket", mut workspace, BUCKET_LAW_OP_MS)
+    if let Error(NotCurrent(0)) = stale {} else {
+        fail("the claim ignored the requested activation")
+    }
+    bucket_m2_law_commit_packet(mut workspace.packet, incumbent.head, 3)?
+    let HistoryApplied(_) = history_register_advance(mut source.client, mut incumbent, authority, mut workspace, source.deadline)? else {
+        fail("the refused open fenced the incumbent")
+    }
+    requested.activation = Some(0)
+    let (take claimed, take loaded_state) = history_open_register(mut source, sim.time, r, requested, "bucket", mut workspace, BUCKET_LAW_OP_MS)?
+    if claimed.head.pair.epoch != 2 || claimed.head.entry.seq != 3 || loaded_state.state.tips[0].head != 3 {
+        fail("open did not serve the admitted suffix after advancing CLAIM")
+    }
+    bucket_m2_law_commit_packet(mut workspace.packet, incumbent.head, 4)?
+    if let Error(Fenced(1)) = history_register_advance(mut source.client, mut incumbent, authority, mut workspace, source.deadline) {} else {
+        fail("a fenced holder advanced after the admitted claim")
+    }
+    Ok(())
+}
+
+@test
+fn bucket_test_m2_admitted_claim(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let directory = disk_test_directory(d)
+    bucket_m2_seed_checkpoint(directory, c, r, tasks)?
+    let sim = bucket_law_sim(tasks, c, 42, None, list.new())
+    let admitted = bucket_m2_law_admit(directory, tasks, r, sim)
+    let report = bucket_law_finish(take sim)
+    admitted?
+    let visible = option.unwrap(map.get(report.objects, "head"))
+    let selected = history_decode_head(visible.data)?
+    if selected.head.entry.seq != 3 || selected.head.pair.epoch != 2 {
+        fail("a refused claim or fenced advance changed the visible head")
     }
     Ok(())
 }

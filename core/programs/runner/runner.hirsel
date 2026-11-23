@@ -5406,7 +5406,7 @@ type WireInput: send = Input(Frame, u64) | FromRunner(Notice) | HelloBound(Optio
 type WirePacket: send = Fragment | Decoded(Frame, u64) | Pinged(std.websocket.Control) | Ponged | PeerClosed(std.websocket.Control)
 type WireParsed: send { reader: std.wsock.Reader, packet: Result[Option[WirePacket], std.wsock.Error] }
 type WireAllocation[C: send]: send = Decode(std.wsock.Reader, u64, Sender[WireParsed]) | Encode(Frame, Sender[Result[Bytes, std.wsock.Error]]) | AllocateService(Box[Service[C]], ServiceAllocation, Sender[Option[AllocatedState[C]]])
-type WirePool[C: send]: send { inbox: Receiver[WireAllocation[C]], config: std.wsock.Config, clock: Clock, tasks: Tasks, service_bytes: u64 }
+type WirePool[C: send]: send { inbox: Receiver[WireAllocation[C]], config: std.wsock.Config, clock: Clock, service_bytes: u64 }
 pub type ServiceAllocation: send = AcceptHello(Option[Caller]) | PlanCall | ValidateSubscribe(u32, u32, Bytes, Option[Bytes]) | DeliverUpdate(DeliveryJob)
 pub opaque type DeliveryJob: send { updates: List[Update], output: List[WireOutput], drain: Option[Latest[Option[DrainWindow]]] }
 type AllocatedState[C: send]: send { service: Box[Service[C]], status: Result[Box[ServicePlan], u16] }
@@ -5446,8 +5446,9 @@ fn wire_parse(mut reader: std.wsock.Reader, at: u64, clock: Clock) -> Result[Opt
 }
 
 fn wire_pool[C: send](take pool: WirePool[C]) -> () waits {
-    let WirePool(inbox: take inbox, config: config, clock: clock, tasks: tasks, service_bytes: service_bytes) = take pool
+    let WirePool(inbox: take inbox, config: config, clock: clock, service_bytes: service_bytes) = take pool
     let encoder = match std.wsock.outbound(Server, config, None) { Ok(out) => out, Error(_) => return }
+    let (slot, job): (Sender[ServiceAllocationJob[C]], Receiver[ServiceAllocationJob[C]]) = channel.new(1u64)
     while let Ok(take work) = channel.receive(inbox) {
         match take work {
             Decode(take input, at, take to) => {
@@ -5460,14 +5461,12 @@ fn wire_pool[C: send](take pool: WirePool[C]) -> () waits {
                 let _ = channel.try_send(to, take encoded_frame)
             },
             AllocateService(take owned, take plan, take to) => {
-                let run: fn(take ServiceAllocationJob[C]) -> AllocatedState[C] waits = wire_allocate_job
-                let job = ServiceAllocationJob(service: take owned, plan: take plan)
-                let returned = match task.spawn(tasks, bytes service_bytes, take job, run) {
-                    take running => match task.join(take running) {
-                        Ok(take completed) => Some(take completed),
-                        Error(_) => None,
-                    },
-                }
+                // A bounded, isolated step: its body takes the job from the slot, so a failure drops the session (None).
+                let _ = channel.try_send(slot, ServiceAllocationJob(service: take owned, plan: take plan))
+                let ran = bound bytes service_bytes { isolate(scoped fn() -> Option[AllocatedState[C]] {
+                    match channel.try_receive(job) { Ok(take next) => Some(wire_allocate_job(take next)), _ => None }
+                }) }
+                let returned = match take ran { Ok(Ok(Ok(take completed))) => take completed, _ => None }
                 let _ = channel.try_send(to, take returned)
             },
         }
@@ -5484,7 +5483,7 @@ fn start_wire_pool[C: send](tasks: Tasks, c: WireConfig, clock: Clock, n: u64, s
     let (to, inbox): (Sender[WireAllocation[C]], Receiver[WireAllocation[C]]) = channel.new(slots)
     // Registry construction may reserve n_place. Hello key growth is bounded
     // by the wire payload, rounded identities and the list of Bytes handles.
-    let pool = WirePool(inbox: take inbox, config: c.socket, clock: clock, tasks: tasks, service_bytes: wire_service_job_bytes(c))
+    let pool = WirePool(inbox: take inbox, config: c.socket, clock: clock, service_bytes: wire_service_job_bytes(c))
     let run: fn(take WirePool[C]) -> () waits = wire_pool
     let handle = task.spawn(tasks, bytes n, take pool, run)
     Ok((take to, take handle))

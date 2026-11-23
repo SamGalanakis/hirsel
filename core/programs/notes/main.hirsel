@@ -5,15 +5,22 @@
 // reaction (`tally`) and a system section (`notes`).
 //
 // The default run uses a scripted model. See README.md.
-
 const BYTES: u64 = 131072u64
+
 const PLACE_BYTES: u64 = 1048576u64
+
 const IDLE_MS: u64 = 200u64
+
 const OPENROUTER: String = "openrouter.ai"
+
 const LIVE_MODEL: String = "deepseek/deepseek-v4.1-flash-1017"
+
 const LIVE_NOTE: String = "The team meeting moved to Thursday."
+
 const LIVE_WARMUP: String = "Reply with READY and nothing else."
+
 const LIVE_WAKE: String = "Write exactly eight short numbered lines about the benefits of a well-kept meeting notebook. Start with 1. and include no introduction."
+
 const LIVE_PROMPT: String = "Save a new note with the exact text 'The team meeting moved to Thursday.' Use note_add once. After the tool returns, reply with SAVED."
 
 // A small session's store: each place reserves its resident cache, its pack
@@ -28,14 +35,23 @@ fn options() -> store.Options {
 }
 
 // ---- the app's own tables ----
+fn notes_name() -> String {
+    "notes.notes"
+}
 
-fn notes_name() -> String { "notes.notes" }
-fn stats_name() -> String { "notes.stats" }
+fn stats_name() -> String {
+    "notes.stats"
+}
+
 // stats keys: the next note id, and the tool results the reaction counted.
 const NEXT_ID: u64 = 0u64
+
 const RESULTS: u64 = 1u64
 
-type Tables { notes: store.Table[u64, String], stats: store.Table[u64, u64] }
+type Tables {
+    notes: store.Table[u64, String],
+    stats: store.Table[u64, u64]
+}
 
 fn created(take r: Result[(), store.Error]) -> Result[(), store.Error] {
     match take r {
@@ -55,18 +71,21 @@ fn migrate(mut phase: store.Migration) -> Result[(), store.Error] {
 fn tables(schema: store.Schema) -> Result[Tables, store.Error] {
     let c_note: std.codec.Codec[String] = std.codec.of()
     let c_count: std.codec.Codec[u64] = std.codec.of()
-    Ok(Tables(notes: store.schema_table(schema, notes_name(), std.codec.key_u64(), c_note)?,
-        stats: store.schema_table(schema, stats_name(), std.codec.key_u64(), c_count)?))
+    Ok(Tables(notes: store.schema_table(schema, notes_name(), std.codec.key_u64(), c_note)?, stats: store.schema_table(schema, stats_name(), std.codec.key_u64(), c_count)?))
 }
 
 fn stat(tx: store.Tx, t: Tables, k: u64) -> Result[u64, store.Error] {
-    match store.fetch(tx, store.shape(t.stats), k)? { Some(n) => Ok(n), None => Ok(0u64) }
+    match store.fetch(tx, store.shape(t.stats), k)? {
+        Some(n) => Ok(n),
+        None => Ok(0u64)
+    }
 }
 
 // ---- tool arguments ----
-
 fn text_arg(raw: Bytes, field: String) -> Result[String, harness.Fault] {
-    let Ok(take s) = string.from_utf8(clone(raw)) else { return Error(BadArgs("arguments are not UTF-8")) }
+    let Ok(take s) = string.from_utf8(clone(raw)) else {
+        return Error(BadArgs("arguments are not UTF-8"))
+    }
     let mut pointer = string.from("/")
     string.push(mut pointer, field)
     region r {
@@ -81,11 +100,16 @@ fn text_arg(raw: Bytes, field: String) -> Result[String, harness.Fault] {
 }
 
 fn id_arg(raw: Bytes) -> Result[u64, harness.Fault] {
-    let Ok(take s) = string.from_utf8(clone(raw)) else { return Error(BadArgs("arguments are not UTF-8")) }
+    let Ok(take s) = string.from_utf8(clone(raw)) else {
+        return Error(BadArgs("arguments are not UTF-8"))
+    }
     region r {
         match std.json.parse(r, s) {
             Ok(x) => match std.json.pointer(x, "/id") {
-                Some(v) => match std.json.as_u64(v) { Some(n) => Ok(n), None => Error(BadArgs("id is not a number")) },
+                Some(v) => match std.json.as_u64(v) {
+                    Some(n) => Ok(n),
+                    None => Error(BadArgs("id is not a number"))
+                },
                 None => Error(BadArgs("id is missing")),
             },
             Error(_) => Error(BadArgs("arguments are not JSON")),
@@ -100,49 +124,81 @@ fn numbered(take head: String, n: u64) -> Bytes {
 }
 
 // ---- Inside tools: they run in advance's transaction ----
-
 fn note_add(mut tx: store.Tx, inv: harness.Invoke) -> Result[harness.Reply, harness.Fault] {
     let line = text_arg(inv.args, "text")?
-    let Ok(t) = tables(store.tx_schema(tx)) else { return Error(Unavailable) }
-    let Ok(id) = stat(tx, t, NEXT_ID) else { return Error(Unavailable) }
-    let Ok(()) = store.put(mut tx, t.notes, id, line) else { return Error(Unavailable) }
-    let Ok(()) = store.put(mut tx, t.stats, NEXT_ID, id + 1u64) else { return Error(Unavailable) }
+    let Ok(t) = tables(store.tx_schema(tx)) else {
+        return Error(Unavailable)
+    }
+    let Ok(id) = stat(tx, t, NEXT_ID) else {
+        return Error(Unavailable)
+    }
+    let Ok(()) = store.put(mut tx, t.notes, id, line) else {
+        return Error(Unavailable)
+    }
+    let Ok(()) = store.put(mut tx, t.stats, NEXT_ID, id + 1u64) else {
+        return Error(Unavailable)
+    }
     Ok(Now(numbered("added note ", id)))
 }
 
 fn note_delete(mut tx: store.Tx, inv: harness.Invoke) -> Result[harness.Reply, harness.Fault] {
     let id = id_arg(inv.args)?
-    let Ok(t) = tables(store.tx_schema(tx)) else { return Error(Unavailable) }
+    let Ok(t) = tables(store.tx_schema(tx)) else {
+        return Error(Unavailable)
+    }
     match store.fetch(tx, store.shape(t.notes), id) {
         Ok(Some(_)) => (),
         Ok(None) => return Error(BadArgs("no such note")),
         Error(_) => return Error(Unavailable),
     }
-    let Ok(_) = store.delete(mut tx, t.notes, id) else { return Error(Unavailable) }
+    let Ok(_) = store.delete(mut tx, t.notes, id) else {
+        return Error(Unavailable)
+    }
     Ok(Now(numbered("deleted note ", id)))
 }
 
 // ---- the gate, the reaction and the section ----
-
 // Deleting is the one call that needs a person: it is held until the run's
 // caller approves these exact arguments.
 fn confirm_delete(tx: store.Tx, ask: harness.Ask) -> harness.Verdict {
-    if ask.call.name == "note_delete" { Hold("deleting a note needs your approval") } else { Pass }
+    if ask.call.name == "note_delete" {
+        Hold("deleting a note needs your approval")
+    } else {
+        Pass
+    }
 }
 
 fn confirm_live_add(tx: store.Tx, ask: harness.Ask) -> harness.Verdict {
-    if ask.call.name != "note_add" { return Pass }
-    let Ok(h) = harness.handles(store.tx_schema(tx)) else { return Deny("harness schema unavailable") }
-    let Ok(Some(s)) = store.fetch(tx, store.shape(h.session), 0u64) else { return Deny("harness session unavailable") }
-    if s.model == LIVE_MODEL { Hold("the live smoke requires approval to save a note") } else { Pass }
+    if ask.call.name != "note_add" {
+        return Pass
+    }
+    let Ok(h) = harness.handles(store.tx_schema(tx)) else {
+        return Deny("harness schema unavailable")
+    }
+    let Ok(Some(s)) = store.fetch(tx, store.shape(h.session), 0u64) else {
+        return Deny("harness session unavailable")
+    }
+    if s.model == LIVE_MODEL {
+        Hold("the live smoke requires approval to save a note")
+    } else {
+        Pass
+    }
 }
 
 // Counts tool results in the transaction that appends each one.
 fn tally(mut tx: store.Tx, at: u64, e: harness.Entry) -> Result[(), harness.Fault] {
-    let ToolResult(_, _) = view e else { return Ok(()) }
-    let Ok(t) = tables(store.tx_schema(tx)) else { return Error(Unavailable) }
-    let Ok(n) = stat(tx, t, RESULTS) else { return Error(Unavailable) }
-    let Ok(()) = store.put(mut tx, t.stats, RESULTS, n + 1u64) else { return Error(Unavailable) }
+    let ToolResult(_, _) = view e else {
+        return Ok(())
+    }
+    let Ok(t) = tables(store.tx_schema(tx)) else {
+        return Error(Unavailable)
+    }
+    let Ok(n) = stat(tx, t, RESULTS) else {
+        return Error(Unavailable)
+    }
+    let Ok(()) = store.put(mut tx, t.stats, RESULTS, n + 1u64) else {
+        return Error(Unavailable)
+    }
     Ok(())
 }
 
@@ -151,7 +207,7 @@ fn notes_section(tx: store.Tx) -> Result[Option[String], store.Error] {
     let t = tables(store.tx_schema(tx))?
     let mut out = string.from("Notes:")
     let next = stat(tx, t, NEXT_ID)?
-    for id in 0u64..next {
+    for id in 0u64 .. next {
         if let Some(line) = store.fetch(tx, store.shape(t.notes), id)? {
             string.push(mut out, "\n")
             string.push_u64(mut out, id)
@@ -163,14 +219,30 @@ fn notes_section(tx: store.Tx) -> Result[Option[String], store.Error] {
 }
 
 // ---- grants: what Outside tools and the model are given ----
+type Live: send {
+    net: Net,
+    address: Addr,
+    key: Secret,
+    out: Stdout,
+    preview: harness.preview.Door,
+    group: String
+}
 
-type Live: send { net: Net, address: Addr, key: Secret, out: Stdout, preview: harness.preview.Door, group: String }
-type Services: send { helper: Sender[HelperAsk], clock: Clock, live: Option[Live] }
-type Grants: send { context: store.runner.TriggerContext, helper: Sender[HelperAsk], clock: Clock, live: Option[Live] }
+type Services: send {
+    helper: Sender[HelperAsk],
+    clock: Clock,
+    live: Option[Live]
+}
+
+type Grants: send {
+    context: store.runner.TriggerContext,
+    helper: Sender[HelperAsk],
+    clock: Clock,
+    live: Option[Live]
+}
 
 fn copy_live(l: Live, group: String) -> Live {
-    Live(net: l.net, address: l.address, key: secret.share(l.key), out: l.out,
-        preview: harness.preview.copy_door(l.preview), group: string.from(group))
+    Live(net: l.net, address: l.address, key: secret.share(l.key), out: l.out, preview: harness.preview.copy_door(l.preview), group: string.from(group))
 }
 
 fn make_grants(s: Services, take ctx: store.runner.TriggerContext) -> Result[Grants, Capacity] {
@@ -182,7 +254,6 @@ fn make_grants(s: Services, take ctx: store.runner.TriggerContext) -> Result[Gra
 }
 
 // ---- Outside tools: they run in a worker, off the write lock ----
-
 fn clock_tool(g: Grants, take args: Bytes) -> Result[Bytes, harness.Fault] {
     Ok(numbered("wall clock ms ", host.wall_ms(g.clock)))
 }
@@ -191,7 +262,9 @@ fn clock_tool(g: Grants, take args: Bytes) -> Result[Bytes, harness.Fault] {
 fn summarize(g: Grants, take args: Bytes) -> Result[Bytes, harness.Fault] waits {
     let line = text_arg(args, "text")?
     let (reply, replied): (Sender[Result[String, String]], Receiver[Result[String, String]]) = channel.new(1u64)
-    if let Error(_) = channel.send(g.helper, Summarize(take line, take reply)) { return Error(Unavailable) }
+    if let Error(_) = channel.send(g.helper, Summarize(take line, take reply)) {
+        return Error(Unavailable)
+    }
     // The helper's place may have run its model before it failed, so a
     // failure after the ask is in doubt, not a refusal.
     match channel.receive(replied) {
@@ -201,8 +274,9 @@ fn summarize(g: Grants, take args: Bytes) -> Result[Bytes, harness.Fault] waits 
 }
 
 // ---- the parent agent ----
-
-fn usage() -> harness.Usage { harness.Usage(input: 10u64, output: 5u64) }
+fn usage() -> harness.Usage {
+    harness.Usage(input: 10u64, output: 5u64)
+}
 
 fn call(take id: String, take name: String, take args: String) -> harness.Call {
     harness.Call(id: take id, name: take name, args: Inline(string.into_bytes(take args)))
@@ -211,7 +285,11 @@ fn call(take id: String, take name: String, take args: String) -> harness.Call {
 fn returned(r: harness.Request, id: String) -> String {
     for e in r.messages {
         if let ToolResult(at, Returned(Inline(b))) = e {
-            if at == id { if let Ok(take s) = string.from_utf8(clone(b)) { return take s } }
+            if at == id {
+                if let Ok(take s) = string.from_utf8(clone(b)) {
+                    return take s
+                }
+            }
         }
     }
     string.new()
@@ -220,7 +298,11 @@ fn returned(r: harness.Request, id: String) -> String {
 // Three rounds, chosen by how many tool results the request carries.
 fn scripted_model(g: Grants, take r: harness.Request) -> Result[harness.Answer, harness.Fault] waits {
     let mut results = 0u64
-    for e in r.messages { if let ToolResult(_, _) = e { results += 1u64 } }
+    for e in r.messages {
+        if let ToolResult(_, _) = e {
+            results += 1u64
+        }
+    }
     let mut calls: List[harness.Call] = list.new()
     let mut words = string.new()
     if results == 0u64 {
@@ -233,12 +315,19 @@ fn scripted_model(g: Grants, take r: harness.Request) -> Result[harness.Answer, 
         string.push(mut words, "Saved the move and removed the stale note. ")
         string.push(mut words, returned(r, "c3"))
     }
-    let stop = if list.len(calls) == 0u64 { "end" } else { "tool_use" }
+    let stop = if list.len(calls) == 0u64 {
+        "end"
+    } else {
+        "tool_use"
+    }
     // The agent's model must be a waiting function and a waiting function
     // must wait (LANG-8), so the scripted answer is handed over a channel.
     let (reply, replied): (Sender[harness.Answer], Receiver[harness.Answer]) = channel.new(1u64)
     let _ = channel.send(reply, harness.Answer(text: take words, calls: take calls, stop: stop, usage: usage()))
-    match channel.receive(replied) { Ok(take a) => Ok(take a), Error(_) => Error(Unavailable) }
+    match channel.receive(replied) {
+        Ok(take a) => Ok(take a),
+        Error(_) => Error(Unavailable)
+    }
 }
 
 fn model(g: Grants, take request: harness.Request) -> Result[harness.Answer, harness.Fault] waits {
@@ -247,20 +336,37 @@ fn model(g: Grants, take request: harness.Request) -> Result[harness.Answer, har
 }
 
 fn live_model(g: Grants, take request: harness.Request, mut draft: Option[harness.preview.Source]) -> Result[harness.Answer, harness.Fault] waits {
-    let Some(live) = view g.live else { return scripted_model(g, take request) }
+    let Some(live) = view g.live else {
+        return scripted_model(g, take request)
+    }
     let mut req = take request
     let mut replies = 0u64
     let mut prompt = string.new()
     for e in req.messages {
         match e {
-            User(text) => { prompt = string.from(text); replies = 0u64 },
-            Assistant(_) => { replies += 1u64 },
+            User(text) => {
+                prompt = string.from(text);
+                replies = 0u64
+            },
+            Assistant(_) => {
+                replies += 1u64
+            },
             _ => (),
         }
     }
-    let limit = if prompt == LIVE_PROMPT { 2u64 } else if prompt == LIVE_WARMUP || prompt == LIVE_WAKE { 1u64 } else { 0u64 }
-    if replies >= limit { return Error(Refused("live smoke request limit")) }
-    if prompt != LIVE_PROMPT || replies > 0u64 { list.clear(mut req.tools) }
+    let limit = if prompt == LIVE_PROMPT {
+        2u64
+    } else if prompt == LIVE_WARMUP || prompt == LIVE_WAKE {
+        1u64
+    } else {
+        0u64
+    }
+    if replies >= limit {
+        return Error(Refused("live smoke request limit"))
+    }
+    if prompt != LIVE_PROMPT || replies > 0u64 {
+        list.clear(mut req.tools)
+    }
     let m = harness.provider.Model(dialect: OpenAi, name: LIVE_MODEL, max_tokens: 512u64)
     let endpoint = harness.provider.Endpoint(address: live.address, authority: OPENROUTER, prefix: "/api", security: Https(OPENROUTER, System))
     let p = harness.provider.Provider(model: take m, endpoint: take endpoint, key: secret.share(live.key), bounds: harness.provider.bounds(), deadline_ms: 45000u64)
@@ -291,7 +397,9 @@ fn notes_agent() -> harness.Agent[Grants] {
 
 // The four entries the place registers. Each rebuilds the agent from code,
 // so a trigger never carries the agent itself.
-fn wired() -> Result[harness.Wiring, harness.Refused] { harness.wiring(code.describe(advance), code.describe(effect)) }
+fn wired() -> Result[harness.Wiring, harness.Refused] {
+    harness.wiring(code.describe(advance), code.describe(effect))
+}
 
 fn advance(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take wake: harness.Wake) -> Result[(), harness.Refused] {
     let w = wired()?
@@ -299,14 +407,18 @@ fn advance(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take wake
 }
 
 fn effect(g: Grants, caller: store.Caller, take key: harness.EffectKey) -> Result[harness.Worked, Capacity] waits {
-    let Some(l) = view g.live else { return harness.effect(g.context, g, take key, notes_agent(), code.describe(settle)) }
+    let Some(l) = view g.live else {
+        return harness.effect(g.context, g, take key, notes_agent(), code.describe(settle))
+    }
     let mut a = notes_agent()
     a.preview_model = Some(code.describe(live_model))
     harness.effect_with_preview(g.context, g, take key, a, code.describe(settle), Some(harness.preview.target(l.preview, l.group, g.clock)))
 }
 
 fn settle(mut tx: store.Tx, a: store.triggers.Attempt, take m: harness.Settle) -> Result[harness.Filed, store.Error] {
-    let Ok(w) = wired() else { return Error(Missing("harness: wiring")) }
+    let Ok(w) = wired() else {
+        return Error(Missing("harness: wiring"))
+    }
     harness.settle(mut tx, notes_agent(), w, a, take m)
 }
 
@@ -320,7 +432,13 @@ fn decide_entry(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take
     harness.decide(mut tx, h, notes_agent(), w, caller, take d)
 }
 
-fn shown(tx: store.Tx, h: harness.Handles, take u: ()) -> Result[store.runner.Cover, Capacity] { harness.transcript(h) }
+fn shown(tx: store.Tx, h: harness.Handles, take u: ()) -> Result[store.runner.Cover, Capacity] {
+    harness.transcript(h)
+}
+
+fn window(tx: store.Tx, h: harness.Handles, take w: harness.Window) -> Result[store.runner.Cover, Capacity] {
+    harness.window(tx, h, w)
+}
 
 fn place(mut r: store.runner.Registry[Grants, harness.Handles]) -> Result[(), store.runner.RegisterError] {
     store.runner.transact(mut r, code.describe(advance), BYTES, store.runner.DEFAULT_STEPS)?
@@ -331,12 +449,15 @@ fn place(mut r: store.runner.Registry[Grants, harness.Handles]) -> Result[(), st
     store.runner.transact(mut r, code.describe(submit_entry), BYTES, store.runner.DEFAULT_STEPS)?
     store.runner.transact(mut r, code.describe(decide_entry), BYTES, store.runner.DEFAULT_STEPS)?
     let views: std.codec.Codec[harness.View] = std.codec.of()
-    store.runner.query(mut r, code.describe(shown), std.codec.key_u64(), views, BYTES, store.runner.DEFAULT_STEPS)
+    store.runner.query(mut r, code.describe(shown), std.codec.key_u64(), views, BYTES, store.runner.DEFAULT_STEPS)?
+    let windows: std.codec.Codec[harness.View] = std.codec.of()
+    store.runner.query(mut r, code.describe(window), std.codec.key_u64(), windows, BYTES, store.runner.DEFAULT_STEPS)
 }
 
 // ---- the helper agent: a second place, one session of its own ----
-
-type HelperGrants: send { context: store.runner.TriggerContext }
+type HelperGrants: send {
+    context: store.runner.TriggerContext
+}
 
 fn helper_grants(s: (), take ctx: store.runner.TriggerContext) -> Result[HelperGrants, Capacity] {
     Ok(HelperGrants(context: take ctx))
@@ -345,22 +466,37 @@ fn helper_grants(s: (), take ctx: store.runner.TriggerContext) -> Result[HelperG
 // Answers with the first sentence of the newest user message.
 fn helper_model(g: HelperGrants, take r: harness.Request) -> Result[harness.Answer, harness.Fault] waits {
     let mut last = string.new()
-    for e in r.messages { if let User(t) = e { last = clone(t) } }
+    for e in r.messages {
+        if let User(t) = e {
+            last = clone(t)
+        }
+    }
     let mut first: Bytes = list.new()
     for b in string.into_bytes(take last) {
         list.push(mut first, b)
-        if b == 46u8 { break }
+        if b == 46u8 {
+            break
+        }
     }
     let mut words = string.from("Summary: ")
-    if let Ok(take s) = string.from_utf8(take first) { string.push(mut words, s) }
+    if let Ok(take s) = string.from_utf8(take first) {
+        string.push(mut words, s)
+    }
     let (reply, replied): (Sender[harness.Answer], Receiver[harness.Answer]) = channel.new(1u64)
     let _ = channel.send(reply, harness.Answer(text: take words, calls: list.new(), stop: "end", usage: harness.Usage(input: 4u64, output: 2u64)))
-    match channel.receive(replied) { Ok(take a) => Ok(take a), Error(_) => Error(Unavailable) }
+    match channel.receive(replied) {
+        Ok(take a) => Ok(take a),
+        Error(_) => Error(Unavailable)
+    }
 }
 
-fn helper_agent() -> harness.Agent[HelperGrants] { harness.agent("helper", "scripted", code.describe(helper_model)) }
+fn helper_agent() -> harness.Agent[HelperGrants] {
+    harness.agent("helper", "scripted", code.describe(helper_model))
+}
 
-fn helper_wired() -> Result[harness.Wiring, harness.Refused] { harness.wiring(code.describe(helper_advance), code.describe(helper_effect)) }
+fn helper_wired() -> Result[harness.Wiring, harness.Refused] {
+    harness.wiring(code.describe(helper_advance), code.describe(helper_effect))
+}
 
 fn helper_advance(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take wake: harness.Wake) -> Result[(), harness.Refused] {
     let w = helper_wired()?
@@ -372,7 +508,9 @@ fn helper_effect(g: HelperGrants, caller: store.Caller, take key: harness.Effect
 }
 
 fn helper_settle(mut tx: store.Tx, a: store.triggers.Attempt, take m: harness.Settle) -> Result[harness.Filed, store.Error] {
-    let Ok(w) = helper_wired() else { return Error(Missing("harness: wiring")) }
+    let Ok(w) = helper_wired() else {
+        return Error(Missing("harness: wiring"))
+    }
     harness.settle(mut tx, helper_agent(), w, a, take m)
 }
 
@@ -387,37 +525,61 @@ fn helper_place(mut r: store.runner.Registry[HelperGrants, harness.Handles]) -> 
 // The helper's service: it owns the helper place's directory and, per ask,
 // submits the text, runs the place until it is idle and reads the answer.
 type HelperAsk: send = Summarize(String, Sender[Result[String, String]])
-type HelperSeed: send { inbox: Receiver[HelperAsk], dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net }
+
+type HelperSeed: send {
+    inbox: Receiver[HelperAsk],
+    dir: Dir,
+    clock: Clock,
+    random: Random,
+    tasks: Tasks,
+    net: Net
+}
 
 fn helper_settings(dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> store.runner.PlaceConfig[HelperGrants, harness.Handles, (), ()] {
     let w = result.unwrap(helper_wired())
-    let config = store.runner.TriggerConfig(entries: harness.entries(w), author: store.Caller(issuer: 0u8, subject: list.new()),
-        grants: (), grant: helper_grants, grant_bytes: 65536u64)
-    store.runner.PlaceConfig(backing: Disk(dir, options()), selection: Reopen, place: code.describe(helper_place), n_place: PLACE_BYTES,
-        migrate: code.describe(harness.migrate), handles: code.describe(harness.handles), session: wire(), max_sessions: 1u64,
-        proxies: list.new(), n_publisher: PLACE_BYTES, listen: loopback(),
-        net: net, tasks: tasks, clock: clock, random: random, stop: store.runner.Stop(lag_ms: 0u64, grace_ms: 200u64),
-        wire: None, triggers: Some(take config), idle: Some(IDLE_MS))
+    let config = store.runner.TriggerConfig(entries: harness.entries(w), author: store.Caller(issuer: 0u8, subject: list.new()), grants: (), grant: helper_grants, grant_bytes: 65536u64)
+    store.runner.PlaceConfig(backing: Disk(dir, options()), selection: Reopen, place: code.describe(helper_place), n_place: PLACE_BYTES, migrate: code.describe(harness.migrate), handles: code.describe(harness.handles), session: wire(), max_sessions: 1u64, proxies: list.new(), n_publisher: PLACE_BYTES, listen: loopback(), net: net, tasks: tasks, clock: clock, random: random, stop: store.runner.Stop(lag_ms: 0u64, grace_ms: 200u64), wire: None, triggers: Some(take config), idle: Some(IDLE_MS))
 }
 
 fn helper_ask(seed: HelperSeed, n: u64, take line: String) -> Result[String, String] waits {
-    let mut db = match store.open(seed.tasks, seed.dir, seed.clock, seed.random, options()) { Ok(take v) => take v, Error(_) => return Error("helper: open") }
-    let Ok(()) = store.run_migration(mut db, seed.tasks, code.describe(harness.migrate)) else { return Error("helper: migrate") }
-    let Ok(h) = store.with_schema(db, code.describe(harness.handles)) else { return Error("helper: schema") }
-    let Ok(w) = helper_wired() else { return Error("helper: wiring") }
+    let mut db = match store.open(seed.tasks, seed.dir, seed.clock, seed.random, options()) {
+        Ok(take v) => take v,
+        Error(_) => return Error("helper: open")
+    }
+    let Ok(()) = store.run_migration(mut db, seed.tasks, code.describe(harness.migrate)) else {
+        return Error("helper: migrate")
+    }
+    let Ok(h) = store.with_schema(db, code.describe(harness.handles)) else {
+        return Error("helper: schema")
+    }
+    let Ok(w) = helper_wired() else {
+        return Error("helper: wiring")
+    }
     let mut client_key = string.from("ask-")
     string.push_u64(mut client_key, n)
     let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[harness.Disposition, harness.Refused] {
-        if n == 0u64 { harness.open_session(mut tx, h, "scripted", All)? }
+        if n == 0u64 {
+            harness.open_session(mut tx, h, "scripted", All)?
+        }
         harness.submit(mut tx, h, helper_agent(), w, you(), harness.Submit(client_key: clone(client_key), text: clone(line)))
     })
-    let Ok(Committed(done)) = take ran else { return Error("helper: submit did not commit") }
-    let Ok(()) = store.durable(mut db, done.ticket) else { return Error("helper: durable") }
-    let Ok(()) = store.close(take db) else { return Error("helper: close") }
+    let Ok(Committed(done)) = take ran else {
+        return Error("helper: submit did not commit")
+    }
+    let Ok(()) = store.durable(mut db, done.ticket) else {
+        return Error("helper: durable")
+    }
+    let Ok(()) = store.close(take db) else {
+        return Error("helper: close")
+    }
     until_idle(helper_settings(seed.dir, seed.clock, seed.random, seed.tasks, seed.net))?
-    let Ok(db2) = store.open(seed.tasks, seed.dir, seed.clock, seed.random, options()) else { return Error("helper: reopen") }
+    let Ok(db2) = store.open(seed.tasks, seed.dir, seed.clock, seed.random, options()) else {
+        return Error("helper: reopen")
+    }
     let snap = store.snapshot(db2)
-    let Ok(Some(session)) = store.get(snap, store.shape(h.session), 0u64) else { return Error("helper: no session") }
+    let Ok(Some(session)) = store.get(snap, store.shape(h.session), 0u64) else {
+        return Error("helper: no session")
+    }
     let last = session.next_pos - 1u64
     let answer: Result[String, String] = match store.get(snap, store.shape(h.entries), last) {
         Ok(Some(Assistant(a))) => Ok(clone(a.text)),
@@ -437,10 +599,13 @@ fn helper_service(take seed: HelperSeed) -> () waits {
 }
 
 // ---- running a place ----
+fn you() -> store.Caller {
+    store.Caller(issuer: 1u8, subject: string.into_bytes("you"))
+}
 
-fn you() -> store.Caller { store.Caller(issuer: 1u8, subject: string.into_bytes("you")) }
-
-fn loopback() -> Addr { Addr(ip: V4(0x7f000001u32), port: 0u16) }
+fn loopback() -> Addr {
+    Addr(ip: V4(0x7f000001u32), port: 0u16)
+}
 
 fn wire() -> store.runner.WireConfig {
     let mut w = store.runner.wire_defaults(65536u64, PLACE_BYTES)
@@ -452,7 +617,9 @@ fn wire() -> store.runner.WireConfig {
 // timer, so `operate` returns.
 fn until_idle[G: send, S: send](take config: store.runner.PlaceConfig[G, harness.Handles, S, ()]) -> Result[(), String] waits {
     let (stop, stopped): (Sender[()], Receiver[()]) = channel.new(1u64)
-    let Ok(status) = store.runner.status_root() else { return Error("place: status") }
+    let Ok(status) = store.runner.status_root() else {
+        return Error("place: status")
+    }
     let ended = store.runner.operate(take config, take stopped, latest.handle(status), None)
     let _ = take stop
     match ended {
@@ -473,19 +640,19 @@ fn until_idle[G: send, S: send](take config: store.runner.PlaceConfig[G, harness
 
 fn settings(take backing: store.runner.Backing, clock: Clock, random: Random, tasks: Tasks, net: Net, take s: Services) -> store.runner.PlaceConfig[Grants, harness.Handles, Services, ()] {
     let w = result.unwrap(wired())
-    let grant_bytes = if let Some(_) = view s.live { LIVE_GRANT_BYTES } else { 65536u64 }
-    let config = store.runner.TriggerConfig(entries: harness.entries(w), author: store.Caller(issuer: 0u8, subject: list.new()),
-        grants: take s, grant: make_grants, grant_bytes: grant_bytes)
-    store.runner.PlaceConfig(backing: take backing, selection: Reopen, place: code.describe(place), n_place: PLACE_BYTES,
-        migrate: code.describe(migrate), handles: code.describe(harness.handles), session: wire(), max_sessions: 1u64,
-        proxies: list.new(), n_publisher: PLACE_BYTES, listen: loopback(),
-        net: net, tasks: tasks, clock: clock, random: random, stop: store.runner.Stop(lag_ms: 0u64, grace_ms: 200u64),
-        wire: None, triggers: Some(take config), idle: Some(IDLE_MS))
+    let grant_bytes = if let Some(_) = view s.live {
+        LIVE_GRANT_BYTES
+    } else {
+        65536u64
+    }
+    let config = store.runner.TriggerConfig(entries: harness.entries(w), author: store.Caller(issuer: 0u8, subject: list.new()), grants: take s, grant: make_grants, grant_bytes: grant_bytes)
+    store.runner.PlaceConfig(backing: take backing, selection: Reopen, place: code.describe(place), n_place: PLACE_BYTES, migrate: code.describe(migrate), handles: code.describe(harness.handles), session: wire(), max_sessions: 1u64, proxies: list.new(), n_publisher: PLACE_BYTES, listen: loopback(), net: net, tasks: tasks, clock: clock, random: random, stop: store.runner.Stop(lag_ms: 0u64, grace_ms: 200u64), wire: None, triggers: Some(take config), idle: Some(IDLE_MS))
 }
 
 // ---- printing ----
-
-fn say(out: Stdout, s: String) -> () waits { let _ = stdout.write(out, s) }
+fn say(out: Stdout, s: String) -> () waits {
+    let _ = stdout.write(out, s)
+}
 
 fn emit(out: Stdout, take head: String, rest: String) -> () waits {
     let mut s = take head
@@ -496,7 +663,10 @@ fn emit(out: Stdout, take head: String, rest: String) -> () waits {
 
 fn args_text(p: harness.Payload) -> String {
     match p {
-        Inline(b) => match string.from_utf8(clone(b)) { Ok(take s) => take s, Error(_) => string.from("(bytes)") },
+        Inline(b) => match string.from_utf8(clone(b)) {
+            Ok(take s) => take s,
+            Error(_) => string.from("(bytes)")
+        },
         Blob(_) => string.from("(blob)"),
     }
 }
@@ -505,7 +675,9 @@ fn show_entry(out: Stdout, e: harness.Entry) -> () waits {
     match e {
         User(t) => emit(out, "  user: ", t),
         Assistant(a) => {
-            if string.byte_len(a.text) > 0u64 { emit(out, "  assistant: ", a.text) }
+            if string.byte_len(a.text) > 0u64 {
+                emit(out, "  assistant: ", a.text)
+            }
             for c in a.calls {
                 let mut s = string.from("  assistant calls ")
                 string.push(mut s, c.name)
@@ -524,9 +696,11 @@ fn show_entry(out: Stdout, e: harness.Entry) -> () waits {
             let mut s = string.from("  system: ")
             string.push_u64(mut s, list.len(p.changes))
             string.push(mut s, " section change(s)")
-            if let Some(d) = p.tools { string.push(mut s, ", ")
+            if let Some(d) = p.tools {
+                string.push(mut s, ", ")
                 string.push_u64(mut s, list.len(d))
-                string.push(mut s, " tools") }
+                string.push(mut s, " tools")
+            }
             emit(out, take s, "")
         },
         Inform(t) => emit(out, "  inform: ", t),
@@ -541,79 +715,139 @@ fn quit(out: Stdout, why: String) -> Result[(), Exit] waits {
 }
 
 // ---- the program ----
-
 fn seed_place(dir: Dir, clock: Clock, random: Random, tasks: Tasks, prompt: String) -> Result[(), String] waits {
-    let mut db = match store.open(tasks, dir, clock, random, options()) { Ok(take v) => take v, Error(_) => return Error("open") }
-    let Ok(()) = store.run_migration(mut db, tasks, code.describe(migrate)) else { return Error("migrate") }
-    let Ok(h) = store.with_schema(db, code.describe(harness.handles)) else { return Error("schema") }
-    let Ok(w) = wired() else { return Error("wiring") }
+    let mut db = match store.open(tasks, dir, clock, random, options()) {
+        Ok(take v) => take v,
+        Error(_) => return Error("open")
+    }
+    let Ok(()) = store.run_migration(mut db, tasks, code.describe(migrate)) else {
+        return Error("migrate")
+    }
+    let Ok(h) = store.with_schema(db, code.describe(harness.handles)) else {
+        return Error("schema")
+    }
+    let Ok(w) = wired() else {
+        return Error("wiring")
+    }
     let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[harness.Disposition, harness.Refused] {
         harness.open_session(mut tx, h, "scripted", All)?
-        let Ok(t) = tables(store.tx_schema(tx)) else { return Error(Storage) }
-        let Ok(()) = store.put(mut tx, t.notes, 0u64, "Team meeting on Tuesday.") else { return Error(Storage) }
-        let Ok(()) = store.put(mut tx, t.stats, NEXT_ID, 1u64) else { return Error(Storage) }
+        let Ok(t) = tables(store.tx_schema(tx)) else {
+            return Error(Storage)
+        }
+        let Ok(()) = store.put(mut tx, t.notes, 0u64, "Team meeting on Tuesday.") else {
+            return Error(Storage)
+        }
+        let Ok(()) = store.put(mut tx, t.stats, NEXT_ID, 1u64) else {
+            return Error(Storage)
+        }
         harness.submit(mut tx, h, notes_agent(), w, you(), harness.Submit(client_key: "k1", text: string.from(prompt)))
     })
-    let Ok(Committed(done)) = take ran else { return Error("submit did not commit") }
-    let Ok(()) = store.durable(mut db, done.ticket) else { return Error("durable") }
-    let Ok(()) = store.close(take db) else { return Error("close") }
+    let Ok(Committed(done)) = take ran else {
+        return Error("submit did not commit")
+    }
+    let Ok(()) = store.durable(mut db, done.ticket) else {
+        return Error("durable")
+    }
+    let Ok(()) = store.close(take db) else {
+        return Error("close")
+    }
     Ok(())
 }
 
 // Finds the open approval, shows the held call and approves it under its key.
 fn approve(out: Stdout, dir: Dir, clock: Clock, random: Random, tasks: Tasks) -> Result[(), String] waits {
-    let mut db = match store.open(tasks, dir, clock, random, options()) { Ok(take v) => take v, Error(_) => return Error("open") }
-    let Ok(h) = store.with_schema(db, code.describe(harness.handles)) else { return Error("schema") }
+    let mut db = match store.open(tasks, dir, clock, random, options()) {
+        Ok(take v) => take v,
+        Error(_) => return Error("open")
+    }
+    let Ok(h) = store.with_schema(db, code.describe(harness.handles)) else {
+        return Error("schema")
+    }
     let snap = store.snapshot(db)
-    let mut rows = match store.scan(snap, store.shape(h.waits), Unbounded, Unbounded) { Ok(take v) => take v, Error(_) => return Error("scan") }
+    let mut rows = match store.scan(snap, store.shape(h.waits), Unbounded, Unbounded) {
+        Ok(take v) => take v,
+        Error(_) => return Error("scan")
+    }
     let mut found: Option[(harness.WaitKey, Bytes)] = None
     while let Ok(Some((k, v))) = store.next(mut rows) {
-        if let Open(key, _) = v { found = Some((k, clone(key))) }
+        if let Open(key, _) = v {
+            found = Some((k, clone(key)))
+        }
     }
-    let Some((wk, key)) = take found else { return Error("no call is waiting for approval") }
+    let Some((wk, key)) = take found else {
+        return Error("no call is waiting for approval")
+    }
     let ek = harness.EffectKey(run: wk.run, round: wk.generation, kind: harness.TOOL, ordinal: wk.slot)
-    let Ok(Some(held)) = store.get(snap, store.shape(h.effects), ek) else { return Error("the held call is missing") }
+    let Ok(Some(held)) = store.get(snap, store.shape(h.effects), ek) else {
+        return Error("the held call is missing")
+    }
     if let Some(c) = held.call {
         let mut s = string.from("held for approval: ")
         string.push(mut s, c.name)
         string.push(mut s, " ")
         emit(out, take s, args_text(c.args))
     }
-    let Ok(w) = wired() else { return Error("wiring") }
+    let Ok(w) = wired() else {
+        return Error("wiring")
+    }
     let d = harness.Decision(run: wk.run, round: wk.generation, ordinal: wk.slot, key: take key, allow: true)
     let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[harness.Ruling, harness.Refused] {
         harness.decide(mut tx, h, notes_agent(), w, you(), clone(d))
     })
-    let Ok(Committed(done)) = take ran else { return Error("the decision did not commit") }
-    let Ok(()) = store.durable(mut db, done.ticket) else { return Error("durable") }
+    let Ok(Committed(done)) = take ran else {
+        return Error("the decision did not commit")
+    }
+    let Ok(()) = store.durable(mut db, done.ticket) else {
+        return Error("durable")
+    }
     emit(out, "you approved it", "")
-    let Ok(()) = store.close(take db) else { return Error("close") }
+    let Ok(()) = store.close(take db) else {
+        return Error("close")
+    }
     Ok(())
 }
 
 fn report(out: Stdout, dir: Dir, clock: Clock, random: Random, tasks: Tasks) -> Result[(), String] waits {
-    let Ok(db) = store.open(tasks, dir, clock, random, options()) else { return Error("open") }
-    let Ok(h) = store.with_schema(db, code.describe(harness.handles)) else { return Error("schema") }
-    let Ok(t) = store.with_schema(db, code.describe(tables)) else { return Error("tables") }
+    let Ok(db) = store.open(tasks, dir, clock, random, options()) else {
+        return Error("open")
+    }
+    let Ok(h) = store.with_schema(db, code.describe(harness.handles)) else {
+        return Error("schema")
+    }
+    let Ok(t) = store.with_schema(db, code.describe(tables)) else {
+        return Error("tables")
+    }
     let snap = store.snapshot(db)
-    let Ok(Some(session)) = store.get(snap, store.shape(h.session), 0u64) else { return Error("no session") }
+    let Ok(Some(session)) = store.get(snap, store.shape(h.session), 0u64) else {
+        return Error("no session")
+    }
     emit(out, "transcript:", "")
-    for pos in 0u64..session.next_pos {
-        if let Ok(Some(e)) = store.get(snap, store.shape(h.entries), pos) { show_entry(out, e) }
+    for pos in 0u64 .. session.next_pos {
+        if let Ok(Some(e)) = store.get(snap, store.shape(h.entries), pos) {
+            show_entry(out, e)
+        }
     }
     emit(out, "notes:", "")
-    let mut rows = match store.scan(snap, store.shape(t.notes), Unbounded, Unbounded) { Ok(take v) => take v, Error(_) => return Error("scan") }
+    let mut rows = match store.scan(snap, store.shape(t.notes), Unbounded, Unbounded) {
+        Ok(take v) => take v,
+        Error(_) => return Error("scan")
+    }
     while let Ok(Some((id, text))) = store.next(mut rows) {
         let mut s = string.from("  ")
         string.push_u64(mut s, id)
         string.push(mut s, ". ")
         emit(out, take s, text)
     }
-    let counted = match store.get(snap, store.shape(t.stats), RESULTS) { Ok(Some(n)) => n, _ => 0u64 }
+    let counted = match store.get(snap, store.shape(t.stats), RESULTS) {
+        Ok(Some(n)) => n,
+        _ => 0u64
+    }
     let mut tallied = string.from("tool results counted by the reaction: ")
     string.push_u64(mut tallied, counted)
     emit(out, take tallied, "")
-    let Ok(Some(run)) = store.get(snap, store.shape(h.runs), 0u64) else { return Error("no run") }
+    let Ok(Some(run)) = store.get(snap, store.shape(h.runs), 0u64) else {
+        return Error("no run")
+    }
     let mut s = string.from("spend: ")
     string.push_u64(mut s, run.spend.known)
     string.push(mut s, " tokens, ")
@@ -627,41 +861,58 @@ fn report(out: Stdout, dir: Dir, clock: Clock, random: Random, tasks: Tasks) -> 
 pub fn main(out: Stdout, data: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), Exit] waits {
     let prompt = "The team meeting moved to Thursday. Please note it and tidy up."
     let mut parent_name = string.with_capacity(32u64)
-    let Ok(parent) = host.mkdtemp(data, mut parent_name) else { return quit(out, "cannot make the place directory") }
+    let Ok(parent) = host.mkdtemp(data, mut parent_name) else {
+        return quit(out, "cannot make the place directory")
+    }
     let mut helper_name = string.with_capacity(32u64)
-    let Ok(helper) = host.mkdtemp(data, mut helper_name) else { return quit(out, "cannot make the helper directory") }
-    if let Error(take why) = seed_place(parent, clock, random, tasks, prompt) { return quit(out, why) }
+    let Ok(helper) = host.mkdtemp(data, mut helper_name) else {
+        return quit(out, "cannot make the helper directory")
+    }
+    if let Error(take why) = seed_place(parent, clock, random, tasks, prompt) {
+        return quit(out, why)
+    }
     emit(out, "you: ", prompt)
     let (ask, asks): (Sender[HelperAsk], Receiver[HelperAsk]) = channel.new(1u64)
     let helping = task.spawn(tasks, bytes 67108864u64, HelperSeed(inbox: take asks, dir: helper, clock: clock, random: random, tasks: tasks, net: net), helper_service)
     let first = until_idle(settings(Disk(parent, options()), clock, random, tasks, net, Services(helper: channel.sender(ask), clock: clock, live: None)))
-    if let Error(take why) = first { return quit(out, why) }
-    if let Error(take why) = approve(out, parent, clock, random, tasks) { return quit(out, why) }
+    if let Error(take why) = first {
+        return quit(out, why)
+    }
+    if let Error(take why) = approve(out, parent, clock, random, tasks) {
+        return quit(out, why)
+    }
     let second = until_idle(settings(Disk(parent, options()), clock, random, tasks, net, Services(helper: channel.sender(ask), clock: clock, live: None)))
-    if let Error(take why) = second { return quit(out, why) }
+    if let Error(take why) = second {
+        return quit(out, why)
+    }
     let summarized = report(out, parent, clock, random, tasks)
     let _ = take ask
     let _ = task.join(take helping)
     let _ = std.dir.remove_all(data, parent_name)
     let _ = std.dir.remove_all(data, helper_name)
-    match take summarized { Ok(()) => Ok(()), Error(take why) => quit(out, why) }
+    match take summarized {
+        Ok(()) => Ok(()),
+        Error(take why) => quit(out, why)
+    }
 }
 
 // ---- the manual OpenRouter smoke ----
-
 const LIVE_GRANT_BYTES: u64 = 4194304u64
+
 const HTTP_MS: u64 = 5000u64
 
 fn live_place(take supplied: store.places.Supplied, s: Services) -> Result[store.runner.PlaceConfig[Grants, harness.Handles, Services, ()], Capacity] {
-    let mut config = settings(Memory, supplied.clock, supplied.random, supplied.tasks, supplied.net,
-        Services(helper: channel.sender(s.helper), clock: s.clock, live: match s.live {
-            Some(l) => Some(copy_live(l, supplied.name)), None => None,
-        }))
+    let mut config = settings(Memory, supplied.clock, supplied.random, supplied.tasks, supplied.net, Services(helper: channel.sender(s.helper), clock: s.clock, live: match s.live {
+        Some(l) => Some(copy_live(l, supplied.name)),
+        None => None,
+    }))
     config.wire = Some(store.runner.wire_bind((), code.describe(store.ingress.caller), 4096u64, 65536u64))
     Ok(take config)
 }
 
-fn live_factory() -> Result[store.places.Factory[Services], Capacity] { store.places.seeded_factory(live_place) }
+fn live_factory() -> Result[store.places.Factory[Services], Capacity] {
+    store.places.seeded_factory(live_place)
+}
 
 fn json[A: codec](a: A) -> Bytes {
     let f: std.json.Format[A] = result.unwrap(std.json.interop())
@@ -679,25 +930,32 @@ fn browser_headers(credential: Bytes, at: u64) -> List[std.http_client.Header] {
     headers
 }
 
-type Browser { net: Net, clock: Clock, address: Addr, credential: Bytes }
+type Browser {
+    net: Net,
+    clock: Clock,
+    address: Addr,
+    credential: Bytes
+}
 
-fn browser_request(b: Browser, method: String, path: String, take headers: List[std.http_client.Header],
-    take body: Bytes, within: u64, limit: u64) -> Result[std.http_client.Connection, String] waits {
-    let req = std.http_client.Request(method: string.from(method), target: string.from(path), headers: take headers,
-        body: Fixed(list.len(body)))
+fn browser_request(b: Browser, method: String, path: String, take headers: List[std.http_client.Header], take body: Bytes, within: u64, limit: u64) -> Result[std.http_client.Connection, String] waits {
+    let req = std.http_client.Request(method: string.from(method), target: string.from(path), headers: take headers, body: Fixed(list.len(body)))
     let deadline = std.clock.deadline_after_ms(host.mono_ns(b.clock), within)
-    let Ok(take connection) = std.http_client.dial(b.net, b.address, "127.0.0.1", b.clock, take req, deadline)
-        else { return Error("browser could not open its HTTP request") }
+    let Ok(take connection) = std.http_client.dial(b.net, b.address, "127.0.0.1", b.clock, take req, deadline) else {
+        return Error("browser could not open its HTTP request")
+    }
     let mut c = take connection
     if list.len(body) > 0u64 {
-        if let Error(_) = std.http_client.write(mut c, body) { return Error("browser could not write its HTTP body") }
+        if let Error(_) = std.http_client.write(mut c, body) {
+            return Error("browser could not write its HTTP body")
+        }
     }
-    if let Error(_) = std.http_client.finish_request(mut c, limit) { return Error("browser could not read the HTTP head") }
+    if let Error(_) = std.http_client.finish_request(mut c, limit) {
+        return Error("browser could not read the HTTP head")
+    }
     Ok(take c)
 }
 
-fn post(b: Browser, path: String, take headers: List[std.http_client.Header], take body: Bytes,
-    expected: u16, expected_body: Bytes) -> Result[(), String] waits {
+fn post(b: Browser, path: String, take headers: List[std.http_client.Header], take body: Bytes, expected: u16, expected_body: Bytes) -> Result[(), String] waits {
     let mut c = browser_request(b, "POST", path, take headers, take body, HTTP_MS, 65536u64)?
     let status = std.http_client.status(std.http_client.head(c))
     let mut got: Bytes = list.with_capacity(4096u64)
@@ -714,21 +972,26 @@ fn post(b: Browser, path: String, take headers: List[std.http_client.Header], ta
         string.push(mut reason, " returned HTTP ")
         string.push_u64(mut reason, int.widen(status))
         string.push(mut reason, " with body ")
-        if let Ok(words) = string.from_utf8(take got) { string.push(mut reason, words) }
+        if let Ok(words) = string.from_utf8(take got) {
+            string.push(mut reason, words)
+        }
         return Error(take reason)
     }
     Ok(())
 }
 
 fn message(b: Browser, at: u64, id: u64, key: String, prompt: String) -> Result[(), String] waits {
-    post(b, "/sessions/0/messages", browser_headers(b.credential, at), json(harness.Submit(client_key: string.from(key),
-        text: string.from(prompt))), 202u16, json((Placed(id) : harness.Disposition)))
+    post(b, "/sessions/0/messages", browser_headers(b.credential, at), json(harness.Submit(client_key: string.from(key), text: string.from(prompt))), 202u16, json((Placed(id) : harness.Disposition)))
 }
 
-type SeenReply { at: u64, text: String, first_preview_ns: u64, preview_deltas: u64 }
+type SeenReply {
+    at: u64,
+    text: String,
+    first_preview_ns: u64,
+    preview_deltas: u64
+}
 
-fn browser_reply(mut c: std.http_client.Connection, mut dec: std.sse.Decoder, clock: Clock,
-    run: u64, after: u64, until: String, expect_preview: bool) -> Result[SeenReply, String] waits {
+fn browser_reply(mut c: std.http_client.Connection, mut dec: std.sse.Decoder, clock: Clock, run: u64, after: u64, until: String, expect_preview: bool) -> Result[SeenReply, String] waits {
     let rows: std.json.Format[harness.gateway_http.Shown] = result.unwrap(std.json.interop())
     let drafts: std.json.Format[harness.preview.Draft] = result.unwrap(std.json.interop())
     let deltas: std.json.Format[harness.gateway_http.PreviewDelta] = result.unwrap(std.json.interop())
@@ -751,28 +1014,39 @@ fn browser_reply(mut c: std.http_client.Connection, mut dec: std.sse.Decoder, cl
         let fed = std.sse.feed(mut dec, chunk, fn(name: Bytes, data: Bytes, event_id: Bytes) -> std.sse.FeedControl[String] {
             if name == b"message" {
                 batch_ready = false
-                let Ok(harness.gateway_http.Shown(at: at, line: take line)) = std.json.decode_typed(rows, std.http.copy_bytes(data), 65536u64)
-                    else { return Fail("invalid transcript event") }
+                let Ok(harness.gateway_http.Shown(at: at, line: take line)) = std.json.decode_typed(rows, std.http.copy_bytes(data), 65536u64) else {
+                    return Fail("invalid transcript event")
+                }
                 match take line {
-                    Status(take state) => { status = take state },
+                    Status(take state) => {
+                        status = take state
+                    },
                     Line(role, take text) => if role == "assistant" && at > reply.at {
                         reply.at = at
                         reply.text = take text
                     },
                 }
             } else if name == b"batch" {
-                let Ok(version) = string.from_utf8(std.http.copy_bytes(data)) else { return Fail("invalid batch version") }
-                if let Error(_) = std.int.parse_uint(version, 10) { return Fail("invalid batch version") }
+                let Ok(version) = string.from_utf8(std.http.copy_bytes(data)) else {
+                    return Fail("invalid batch version")
+                }
+                if let Error(_) = std.int.parse_uint(version, 10) {
+                    return Fail("invalid batch version")
+                }
                 batch_ready = true
             } else if expect_preview && name == b"preview" {
-                let Ok(harness.preview.Draft(key: key, seq: seq, offset: offset, text: take text, ..)) =
-                    std.json.decode_typed(drafts, std.http.copy_bytes(data), 65536u64)
-                    else { return Fail("invalid preview event") }
+                let Ok(harness.preview.Draft(key: key, seq: seq, offset: offset, text: take text, ..)) = std.json.decode_typed(drafts, std.http.copy_bytes(data), 65536u64) else {
+                    return Fail("invalid preview event")
+                }
                 if key.run == run && key.tool == None && string.byte_len(text) > 0u64 {
-                    if key.entry + 1u64 <= reply.at { return Fail("browser saw a draft after its committed row") }
+                    if key.entry + 1u64 <= reply.at {
+                        return Fail("browser saw a draft after its committed row")
+                    }
                     if reply.first_preview_ns == 0u64 {
                         reply.first_preview_ns = host.mono_ns(clock)
-                        if offset != 0u64 { return Fail("first preview started past the answer's first byte") }
+                        if offset != 0u64 {
+                            return Fail("first preview started past the answer's first byte")
+                        }
                         first_text = string.from(text)
                     }
                     draft_at = key.entry + 1u64
@@ -782,15 +1056,18 @@ fn browser_reply(mut c: std.http_client.Connection, mut dec: std.sse.Decoder, cl
                     cleared = false
                 }
             } else if expect_preview && name == b"preview-delta" && draft_at > 0u64 && !cleared {
-                let Ok(more) = std.json.decode_typed(deltas, std.http.copy_bytes(data), 65536u64)
-                    else { return Fail("invalid preview delta event") }
+                let Ok(more) = std.json.decode_typed(deltas, std.http.copy_bytes(data), 65536u64) else {
+                    return Fail("invalid preview delta event")
+                }
                 if draft_at <= reply.at || more.seq <= draft_seq || more.at != draft_offset + string.byte_len(draft) {
                     return Fail("preview delta did not continue the active draft")
                 }
                 string.push(mut draft, more.text)
                 draft_seq = more.seq
                 reply.preview_deltas += 1u64
-            } else if name == b"preview-clear" && draft_at > 0u64 { cleared = true }
+            } else if name == b"preview-clear" && draft_at > 0u64 {
+                cleared = true
+            }
             Continue
         })
         match take fed {
@@ -800,27 +1077,41 @@ fn browser_reply(mut c: std.http_client.Connection, mut dec: std.sse.Decoder, cl
         }
         list.clear(mut chunk)
         if batch_ready && status == until && reply.at > after {
-            if !expect_preview { return Ok(take reply) }
-            if draft_at == 0u64 { return Error("browser received no text preview for the wake answer") }
-            if draft_at != reply.at { return Error("preview and committed answer refer to different entries") }
-            if !string.starts_with(reply.text, first_text) { return Error("first draft did not match the committed text prefix") }
-            if first_text == reply.text { return Error("first preview already held the whole answer") }
+            if !expect_preview {
+                return Ok(take reply)
+            }
+            if draft_at == 0u64 {
+                return Error("browser received no text preview for the wake answer")
+            }
+            if draft_at != reply.at {
+                return Error("preview and committed answer refer to different entries")
+            }
+            if !string.starts_with(reply.text, first_text) {
+                return Error("first draft did not match the committed text prefix")
+            }
+            if first_text == reply.text {
+                return Error("first preview already held the whole answer")
+            }
             let end = draft_offset + string.byte_len(draft)
             if end > string.byte_len(reply.text) || string.slice(reply.text, draft_offset, end) != draft {
                 return Error("latest draft did not match its place in the committed text")
             }
-            if cleared { return Ok(take reply) }
+            if cleared {
+                return Ok(take reply)
+            }
         }
     }
 }
 
 fn live_down(d: harness.gateway.Door[Services], clock: Clock, after: u64) -> Result[harness.gateway.Marks, String] waits {
-    for i in 0u64..100u64 {
+    for i in 0u64 .. 100u64 {
         let marks = harness.gateway.marks(d, 0u64)
         if marks.ups > after && marks.ups == marks.downs {
             std.clock.sleep_ns(clock, 2u64 * IDLE_MS * 1000000u64)
             let quiet = harness.gateway.marks(d, 0u64)
-            if quiet.ups != marks.ups || quiet.downs != marks.downs { return Error("SSE stream woke a quiet place") }
+            if quiet.ups != marks.ups || quiet.downs != marks.downs {
+                return Error("SSE stream woke a quiet place")
+            }
             return Ok(marks)
         }
         std.clock.sleep_ns(clock, 50000000u64)
@@ -839,75 +1130,107 @@ fn count(out: Stdout, label: String, value: u64) -> () waits {
 }
 
 fn live_decision(dir: Dir, b: Browser, tasks: Tasks, random: Random) -> Result[harness.Decision, String] waits {
-    let Ok(db) = store.open(tasks, dir, b.clock, random, options()) else { return Error("could not open the sleeping place") }
+    let Ok(db) = store.open(tasks, dir, b.clock, random, options()) else {
+        return Error("could not open the sleeping place")
+    }
     let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
     let snap = store.snapshot(db)
     let wait = harness.WaitKey(run: 1u64, slot: 0u64, kind: harness.APPROVAL, generation: 0u64)
     let member_key = harness.EffectKey(run: wait.run, round: wait.generation, kind: harness.TOOL, ordinal: wait.slot)
-    let Ok(Some(Open(take key, _))) = store.get(snap, store.shape(h.waits), wait)
-        else { return Error("note_add was not waiting for approval") }
-    let Ok(Some(member)) = store.get(snap, store.shape(h.effects), member_key) else { return Error("missing held tool call") }
-    let Some(c) = view member.call else { return Error("missing held tool") }
-    let Inline(raw) = view c.args else { return Error("held tool did not have inline arguments") }
-    let Ok(saved) = text_arg(raw, "text") else { return Error("missing held note text") }
-    if c.name != "note_add" || saved != LIVE_NOTE { return Error("held tool or its arguments differed from the prompt") }
-    let Ok(()) = store.close(take db) else { return Error("could not close the sleeping place") }
+    let Ok(Some(Open(take key, _))) = store.get(snap, store.shape(h.waits), wait) else {
+        return Error("note_add was not waiting for approval")
+    }
+    let Ok(Some(member)) = store.get(snap, store.shape(h.effects), member_key) else {
+        return Error("missing held tool call")
+    }
+    let Some(c) = view member.call else {
+        return Error("missing held tool")
+    }
+    let Inline(raw) = view c.args else {
+        return Error("held tool did not have inline arguments")
+    }
+    let Ok(saved) = text_arg(raw, "text") else {
+        return Error("missing held note text")
+    }
+    if c.name != "note_add" || saved != LIVE_NOTE {
+        return Error("held tool or its arguments differed from the prompt")
+    }
+    let Ok(()) = store.close(take db) else {
+        return Error("could not close the sleeping place")
+    }
     Ok(harness.Decision(run: wait.run, round: wait.generation, ordinal: wait.slot, key: take key, allow: true))
 }
 
 fn live_result(out: Stdout, dir: Dir, b: Browser, tasks: Tasks, random: Random) -> Result[(), String] waits {
-    let Ok(db) = store.open(tasks, dir, b.clock, random, options()) else { return Error("could not open the final journal") }
+    let Ok(db) = store.open(tasks, dir, b.clock, random, options()) else {
+        return Error("could not open the final journal")
+    }
     let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
     let t = result.unwrap(store.with_schema(db, code.describe(tables)))
     let snap = store.snapshot(db)
     let mut tokens = 0u64
-    for i in 0u64..3u64 {
-        let Ok(Some(run)) = store.get(snap, store.shape(h.runs), i) else { return Error("missing run in the journal") }
-        let Finished(Answered) = view run.phase else { return Error("run did not finish with an answer") }
+    for i in 0u64 .. 3u64 {
+        let Ok(Some(run)) = store.get(snap, store.shape(h.runs), i) else {
+            return Error("missing run in the journal")
+        }
+        let Finished(Answered) = view run.phase else {
+            return Error("run did not finish with an answer")
+        }
         if run.spend.known == 0u64 || run.spend.reserved != 0u64 || run.spend.unresolved != 0u64 {
             return Error("run did not settle its token usage")
         }
         tokens += run.spend.known
     }
     count(out, "settled tokens: ", tokens)
-    let Ok(Some(note)) = store.get(snap, store.shape(t.notes), 0u64) else { return Error("note_add did not save a note") }
-    if note != LIVE_NOTE { return Error("note_add saved different text") }
-    let Ok(Some(1u64)) = store.get(snap, store.shape(t.stats), RESULTS) else { return Error("expected exactly one tool result") }
-    let Ok(()) = store.close(take db) else { return Error("could not close the final journal") }
+    let Ok(Some(note)) = store.get(snap, store.shape(t.notes), 0u64) else {
+        return Error("note_add did not save a note")
+    }
+    if note != LIVE_NOTE {
+        return Error("note_add saved different text")
+    }
+    let Ok(Some(1u64)) = store.get(snap, store.shape(t.stats), RESULTS) else {
+        return Error("expected exactly one tool result")
+    }
+    let Ok(()) = store.close(take db) else {
+        return Error("could not close the final journal")
+    }
     Ok(())
 }
 
 fn live_turns(out: Stdout, root: Dir, d: harness.gateway.Door[Services], b: Browser, tasks: Tasks, random: Random) -> Result[(), String] waits {
     post(b, "/sessions", list.new(), string.into_bytes("notes smoke"), 201u16, b"0")?
-    let Ok(dir) = std.dir.narrow(root, "s0") else { return Error("missing HTTP-created session directory") }
+    let Ok(dir) = std.dir.narrow(root, "s0") else {
+        return Error("missing HTTP-created session directory")
+    }
     let seeded = journal(dir)
-    let mut stream = browser_request(b, "GET", "/sessions/0/events", browser_headers(b.credential, 0u64),
-        list.new(), 180000u64, 1073741824u64)?
-    if std.http_client.status(std.http_client.head(stream)) != 200u16 { return Error("browser SSE request was refused") }
+    let mut stream = browser_request(b, "GET", "/sessions/0/events", browser_headers(b.credential, 0u64), list.new(), 180000u64, 1073741824u64)?
+    if std.http_client.status(std.http_client.head(stream)) != 200u16 {
+        return Error("browser SSE request was refused")
+    }
     let mut dec = std.sse.decoder(65536u64)
-
     message(b, 0u64, 0u64, "warmup", LIVE_WARMUP)?
     let warmup = browser_reply(mut stream, mut dec, b.clock, 0u64, 0u64, "answered", false)?
-    if warmup.text != "READY" { return Error("warmup answer differed from READY") }
+    if warmup.text != "READY" {
+        return Error("warmup answer differed from READY")
+    }
     let idle = live_down(d, b.clock, 0u64)?
     let first = journal(dir)
     count(out, "journal commits, warmup: ", first - seeded)
-
     message(b, 1u64, 1u64, "add-note", LIVE_PROMPT)?
     let held = browser_reply(mut stream, mut dec, b.clock, 1u64, warmup.at, "waiting", false)?
     let waiting = live_down(d, b.clock, idle.ups)?
     let paused = journal(dir)
     count(out, "journal commits, tool call through approval wait: ", paused - first)
     let decision = live_decision(dir, b, tasks, random)?
-    post(b, "/sessions/0/decisions", browser_headers(b.credential, 2u64), json(decision),
-        200u16, json((Approved : harness.Ruling)))?
+    post(b, "/sessions/0/decisions", browser_headers(b.credential, 2u64), json(decision), 200u16, json((Approved : harness.Ruling)))?
     let saved = browser_reply(mut stream, mut dec, b.clock, 1u64, held.at, "answered", false)?
-    if saved.text != "SAVED" { return Error("tool acknowledgement differed from SAVED") }
+    if saved.text != "SAVED" {
+        return Error("tool acknowledgement differed from SAVED")
+    }
     let asleep = live_down(d, b.clock, waiting.ups)?
     let second = journal(dir)
     count(out, "journal commits, approval through acknowledgement: ", second - paused)
     count(out, "place downs before wake message: ", asleep.downs)
-
     let started = host.mono_ns(b.clock)
     message(b, 3u64, 2u64, "wake", LIVE_WAKE)?
     let resumed = browser_reply(mut stream, mut dec, b.clock, 2u64, saved.at, "answered", true)?
@@ -923,40 +1246,45 @@ fn live_turns(out: Stdout, root: Dir, d: harness.gateway.Door[Services], b: Brow
 }
 
 pub fn live_smoke(out: Stdout, data: Dir, clock: Clock, random: Random, tasks: Tasks, network: Net, api_key: Secret) -> Result[(), Exit] waits {
-    let Ok(ips) = std.net.lookup(network, OPENROUTER, At(clock, host.mono_ns(clock) + 5000000000u64))
-        else { return quit(out, "cannot resolve openrouter.ai") }
+    let Ok(ips) = std.net.lookup(network, OPENROUTER, At(clock, host.mono_ns(clock) + 5000000000u64)) else {
+        return quit(out, "cannot resolve openrouter.ai")
+    }
     let mut resolved: Option[Addr] = None
-    for ip in ips { if let V4(_) = ip { resolved = Some(Addr(ip: ip, port: 443u16)); break } }
-    let Some(upstream) = resolved else { return quit(out, "openrouter.ai has no IPv4 address") }
+    for ip in ips {
+        if let V4(_) = ip {
+            resolved = Some(Addr(ip: ip, port: 443u16));
+            break
+        }
+    }
+    let Some(upstream) = resolved else {
+        return quit(out, "openrouter.ai has no IPv4 address")
+    }
     let hub = harness.preview.start(tasks, 1048576u64, 4096u64)
     let (helper, _unused): (Sender[HelperAsk], Receiver[HelperAsk]) = channel.new(1u64)
-    let live = Live(net: network, address: upstream, key: secret.share(api_key), out: out,
-        preview: harness.preview.door(hub), group: "")
+    let live = Live(net: network, address: upstream, key: secret.share(api_key), out: out, preview: harness.preview.door(hub), group: "")
     let way: harness.gateway.Doorway[Services] = harness.gateway.doorway()
     let d = harness.gateway.door_of(way)
-    let config = harness.gateway.GatewayConfig(root: data, options: options(), migrate: code.describe(migrate),
-        factory: live_factory, max_sessions: 1u64, place_bytes: 67108864u64, tasks: tasks, clock: clock, random: random,
-        net: network, watch: None, seed: Services(helper: take helper, clock: clock, live: Some(take live)))
-    let Ok(take g) = harness.gateway.gateway(take way, take config) else { return quit(out, "could not start the gateway") }
-    let Ok((take listener, address)) = host.listen(network, loopback(), 16u16) else { return quit(out, "could not listen for HTTP") }
+    let config = harness.gateway.GatewayConfig(root: data, options: options(), migrate: code.describe(migrate), factory: live_factory, max_sessions: 1u64, place_bytes: 67108864u64, tasks: tasks, clock: clock, random: random, net: network, watch: None, seed: Services(helper: take helper, clock: clock, live: Some(take live)))
+    let Ok(take g) = harness.gateway.gateway(take way, take config) else {
+        return quit(out, "could not start the gateway")
+    }
+    let Ok((take listener, address)) = host.listen(network, loopback(), 16u16) else {
+        return quit(out, "could not listen for HTTP")
+    }
     let views: std.codec.Codec[harness.View] = std.codec.of()
     let mut tools: List[String] = list.new()
     list.push(mut tools, "note_add")
-    let front = harness.gateway_http.Front(submit: store.fixture.transact_entry(code.describe(submit_entry)),
-        decide: store.fixture.transact_entry(code.describe(decide_entry)),
-        shown: store.fixture.query_entry(code.describe(shown), std.codec.key_u64(), views),
-        keys: result.unwrap(store.fixture.entry_keys(code.describe(place))), socket: wire().socket, agent: LIVE_MODEL,
-        narrow: Only(take tools), preview: Some(harness.preview.door(hub)), tasks: tasks, clock: clock, random: random,
-        net: network, within_ms: HTTP_MS, poll_ms: 10u64, beat_ms: 50u64, conn_bytes: 8388608u64,
-        conns_max: 4u64, head_max: 8192u64, body_max: 65536u64)
+    let front = harness.gateway_http.Front(submit: store.fixture.transact_entry(code.describe(submit_entry)), decide: store.fixture.transact_entry(code.describe(decide_entry)), shown: store.fixture.query_entry(code.describe(window), std.codec.key_u64(), views), keys: result.unwrap(store.fixture.entry_keys(code.describe(place))), socket: wire().socket, agent: LIVE_MODEL, narrow: Only(take tools), preview: Some(harness.preview.door(hub)), tasks: tasks, clock: clock, random: random, net: network, tail_lines: 64u64, within_ms: HTTP_MS, poll_ms: 10u64, beat_ms: 50u64, conn_bytes: 8388608u64, conns_max: 4u64, head_max: 8192u64, body_max: 65536u64)
     let served = harness.gateway_http.serve(d, take front, take listener)
-    let ran = live_turns(out, data, d, Browser(net: network, clock: clock, address: address,
-        credential: store.ingress.credential(random)), tasks, random)
+    let ran = live_turns(out, data, d, Browser(net: network, clock: clock, address: address, credential: store.ingress.credential(random)), tasks, random)
     harness.gateway_http.halt(take served)
     let _ = harness.gateway.stop(take g)
     harness.preview.stop(take hub)
     match take ran {
-        Ok(()) => { emit(out, "HTTP smoke passed", ""); Ok(()) },
+        Ok(()) => {
+            emit(out, "HTTP smoke passed", "");
+            Ok(())
+        },
         Error(take why) => quit(out, why),
     }
 }

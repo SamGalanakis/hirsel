@@ -1,10 +1,20 @@
 // Module fixture (package store): a place started in a test through runner.operate and
 // driven over the wire path (RUNNER-SPEC §12.3).
 pub type FixtureError: send = Start(runner.StartError) | Deadline(u64) | Full(Capacity)
+
 pub type CallError: send = Deadline(u64) | Closed | Protocol(String) | Decode(std.codec.DecodeError) | Full(Capacity)
+
 pub type Answer[R] = Returned(R) | Failed(runner.Fault) | Refused(runner.Refusal) | Abandoned
-pub type Replied[R] { answer: Answer[R], version: u64 }
-pub type Seen { version: u64, rows: List[runner.Row] }
+
+pub type Replied[R] {
+    answer: Answer[R],
+    version: u64
+}
+
+pub type Seen {
+    version: u64,
+    rows: List[runner.Row]
+}
 
 // What the fixture's own tasks spend beyond operate's allowance: the phase forwarder,
 // its channels and the alarms.
@@ -13,31 +23,66 @@ const OWN_BYTES: u64 = 65536u64
 type PlaceEvent: send = Phase(runner.Phase) | Finished(Result[runner.Ended, runner.StartError]) | Expired
 
 type PlaceJob[G: send, H: send, S: send, B: send]: send {
-    config: runner.PlaceConfig[G, H, S, B], stop: Receiver[()], status: Latest[runner.Status], to: Sender[PlaceEvent], need: u64,
+    config: runner.PlaceConfig[G, H, S, B],
+    stop: Receiver[()],
+    status: Latest[runner.Status],
+    to: Sender[PlaceEvent],
+    need: u64,
 }
 
 type Operated[G: send, H: send, S: send, B: send]: send {
-    config: runner.PlaceConfig[G, H, S, B], stop: Receiver[()], status: Latest[runner.Status], watch: Sender[Receiver[runner.Phase]],
+    config: runner.PlaceConfig[G, H, S, B],
+    stop: Receiver[()],
+    status: Latest[runner.Status],
+    watch: Sender[Receiver[runner.Phase]],
 }
 
 pub opaque type Fixture {
-    stop: Sender[()], events: Receiver[PlaceEvent], me: Sender[PlaceEvent], place: Task[()], status: Latest[runner.Status],
-    keys: List[Bytes], net: Net, tasks: Tasks, clock: Clock, random: Random, socket: std.wsock.Config,
+    stop: Sender[()],
+    events: Receiver[PlaceEvent],
+    me: Sender[PlaceEvent],
+    place: Task[()],
+    status: Latest[runner.Status],
+    keys: List[Bytes],
+    net: Net,
+    tasks: Tasks,
+    clock: Clock,
+    random: Random,
+    socket: std.wsock.Config,
 }
 
-type Sub: send { id: u32, ready: bool, ended: bool, rows: List[runner.Row] }
+type Sub: send {
+    id: u32,
+    ready: bool,
+    ended: bool,
+    rows: List[runner.Row]
+}
 
 pub opaque type Client {
     conn: wire_client.Conn,
-    keys: List[Bytes], next_p: u64, next_sub: u32, subs: List[Sub], version: u64, lost: bool, generation: u64,
-    tasks: Tasks, clock: Clock,
+    keys: List[Bytes],
+    next_p: u64,
+    next_sub: u32,
+    subs: List[Sub],
+    version: u64,
+    lost: bool,
+    generation: u64,
+    tasks: Tasks,
+    clock: Clock,
 }
 
 // A typed entry: the key registration computes, so a Callee cannot name another key.
-pub opaque type Callee[A, R]: shareable + send { key: Bytes, args: std.codec.Codec[A], reply: std.codec.Codec[R] }
+pub opaque type Callee[A, R]: shareable + send {
+    key: Bytes,
+    args: std.codec.Codec[A],
+    reply: std.codec.Codec[R]
+}
 
 fn callee[F, A, R](f: StaticFn[F], args: std.codec.Codec[A], reply: std.codec.Codec[R]) -> Callee[A, R] {
-    let key = match runner.attempt_key(f, args, reply) { Ok(take k) => take k, Error(_) => fail("fixture: entry schema has no fingerprint") }
+    let key = match runner.attempt_key(f, args, reply) {
+        Ok(take k) => take k,
+        Error(_) => fail("fixture: entry schema has no fingerprint")
+    }
     Callee(key: take key, args: args, reply: reply)
 }
 
@@ -76,11 +121,18 @@ pub fn query_as_entry[H, A: codec, K, V](f: StaticFn[fn(store.Tx, H, runner.Call
 fn place_keys[G: send, H: send](place: StaticFn[fn(mut runner.Registry[G, H]) -> Result[(), runner.RegisterError]]) -> Result[List[Bytes], runner.StartError] {
     let mut r: runner.Registry[G, H] = runner.registry()
     let run = code.callable(place)
-    if let Error(e) = run(mut r) { return Error(Open(Place(e))) }
+    if let Error(e) = run(mut r) {
+        return Error(Open(Place(e)))
+    }
     let mut described: Bytes = list.new()
-    if let Error(_) = runner.describe(r, mut described) { return Error(Missing("place")) }
+    if let Error(_) = runner.describe(r, mut described) {
+        return Error(Missing("place"))
+    }
     let codec: std.codec.Codec[List[runner.Described]] = std.codec.of_list()
-    let entries = match std.codec.decode(codec, described) { Ok(take d) => take d, Error(_) => return Error(Missing("place")) }
+    let entries = match std.codec.decode(codec, described) {
+        Ok(take d) => take d,
+        Error(_) => return Error(Missing("place"))
+    }
     let mut keys: List[Bytes] = list.with_capacity(list.len(entries))
     for d in entries {
         let mut key: Bytes = list.with_capacity(list.len(d.identity) + 16u64)
@@ -93,7 +145,10 @@ fn place_keys[G: send, H: send](place: StaticFn[fn(mut runner.Registry[G, H]) ->
 }
 
 fn loopback_any(a: Addr) -> bool {
-    match a.ip { V4(ip) => ip == 0x7f000001u32 && a.port == 0u16, _ => false }
+    match a.ip {
+        V4(ip) => ip == 0x7f000001u32 && a.port == 0u16,
+        _ => false
+    }
 }
 
 fn run_place[G: send, H: send, S: send, B: send](take job: PlaceJob[G, H, S, B]) -> () waits {
@@ -105,10 +160,15 @@ fn run_place[G: send, H: send, S: send, B: send](take job: PlaceJob[G, H, S, B])
     let running = task.spawn(tasks, bytes need, take request, run)
     if let Ok(take phases) = channel.receive(phases_from) {
         while let Ok(phase) = channel.receive(phases) {
-            if let Error(_) = channel.send(to, Phase(phase)) { break }
+            if let Error(_) = channel.send(to, Phase(phase)) {
+                break
+            }
         }
     }
-    let ended = match task.join(take running) { Ok(take e) => take e, Error(_) => Error(Missing("operate")) }
+    let ended = match task.join(take running) {
+        Ok(take e) => take e,
+        Error(_) => Error(Missing("operate"))
+    }
     let _ = channel.send(to, Finished(take ended))
 }
 
@@ -118,11 +178,26 @@ fn run_operate[G: send, H: send, S: send, B: send](take request: Operated[G, H, 
 }
 
 pub fn start[G: send, H: send, S: send, B: send](take p: runner.PlaceConfig[G, H, S, B], within_ms: u64) -> Result[Fixture, FixtureError] waits {
-    match p.backing { Memory => (), Temp(_) => (), Disk(_, _) => return Error(Start(Missing("backing"))) }
-    if !loopback_any(p.listen) { return Error(Start(Missing("listen"))) }
-    let keys = match place_keys(p.place) { Ok(take k) => take k, Error(e) => return Error(Start(e)) }
-    let need = match runner.operate_bytes(p) { Ok(total) => total, Error(cap) => return Error(Full(cap)) }
-    let root = match runner.status_root() { Ok(take made) => take made, Error(cap) => return Error(Full(cap)) }
+    match p.backing {
+        Memory => (),
+        Temp(_) => (),
+        Disk(_, _) => return Error(Start(Missing("backing")))
+    }
+    if !loopback_any(p.listen) {
+        return Error(Start(Missing("listen")))
+    }
+    let keys = match place_keys(p.place) {
+        Ok(take k) => take k,
+        Error(e) => return Error(Start(e))
+    }
+    let need = match runner.operate_bytes(p) {
+        Ok(total) => total,
+        Error(cap) => return Error(Full(cap))
+    }
+    let root = match runner.status_root() {
+        Ok(take made) => take made,
+        Error(cap) => return Error(Full(cap))
+    }
     let (net, tasks, clock, random, socket) = (p.net, p.tasks, p.clock, p.random, p.session.socket)
     let deadline = std.clock.deadline_after_ms(host.mono_ns(clock), within_ms)
     let (stop_to, stop_from): (Sender[()], Receiver[()]) = channel.new(1u64)
@@ -138,20 +213,38 @@ pub fn start[G: send, H: send, S: send, B: send](take p: runner.PlaceConfig[G, H
         match channel.receive(events) {
             Ok(Phase(Ready)) => break,
             Ok(Phase(_)) => (),
-            Ok(Finished(Error(e))) => { let _ = task.cancel_join(take alarm); let _ = task.cancel_join(take place); return Error(Start(e)) },
-            Ok(Finished(Ok(_))) => { let _ = task.cancel_join(take alarm); let _ = task.cancel_join(take place); return Error(Start(Missing("operate"))) },
-            Ok(Expired) => { let _ = task.cancel_join(take place); return Error(Deadline(within_ms)) },
-            Error(_) => { let _ = task.cancel_join(take alarm); let _ = task.cancel_join(take place); return Error(Start(Missing("operate"))) },
+            Ok(Finished(Error(e))) => {
+                let _ = task.cancel_join(take alarm);
+                let _ = task.cancel_join(take place);
+                return Error(Start(e))
+            },
+            Ok(Finished(Ok(_))) => {
+                let _ = task.cancel_join(take alarm);
+                let _ = task.cancel_join(take place);
+                return Error(Start(Missing("operate")))
+            },
+            Ok(Expired) => {
+                let _ = task.cancel_join(take place);
+                return Error(Deadline(within_ms))
+            },
+            Error(_) => {
+                let _ = task.cancel_join(take alarm);
+                let _ = task.cancel_join(take place);
+                return Error(Start(Missing("operate")))
+            },
         }
     }
     let _ = task.cancel_join(take alarm)
-    Ok(Fixture(stop: take stop_to, events: take events, me: take me, place: take place, status: take root,
-        keys: take keys, net: net, tasks: tasks, clock: clock, random: random, socket: socket))
+    Ok(Fixture(stop: take stop_to, events: take events, me: take me, place: take place, status: take root, keys: take keys, net: net, tasks: tasks, clock: clock, random: random, socket: socket))
 }
 
-pub fn status(f: Fixture) -> runner.Status { copy_status(latest.read(f.status)) }
+pub fn status(f: Fixture) -> runner.Status {
+    copy_status(latest.read(f.status))
+}
 
-fn copy_status(value: runner.Status) -> runner.Status { clone(value) }
+fn copy_status(value: runner.Status) -> runner.Status {
+    clone(value)
+}
 
 pub fn end(take f: Fixture, within_ms: u64) -> Result[runner.Ended, FixtureError] waits {
     let Fixture(stop: take stop, events: take events, me: take me, place: take place, clock: clock, tasks: tasks, ..) = take f
@@ -163,11 +256,21 @@ pub fn end(take f: Fixture, within_ms: u64) -> Result[runner.Ended, FixtureError
             Ok(Finished(take ended)) => {
                 let _ = task.cancel_join(take alarm)
                 let _ = task.join(take place)
-                return match take ended { Ok(e) => Ok(e), Error(take e) => Error(Start(take e)) }
+                return match take ended {
+                    Ok(e) => Ok(e),
+                    Error(take e) => Error(Start(take e))
+                }
             },
             Ok(Phase(_)) => (),
-            Ok(Expired) => { let _ = task.cancel_join(take place); return Error(Deadline(within_ms)) },
-            Error(_) => { let _ = task.cancel_join(take alarm); let _ = task.cancel_join(take place); return Error(Start(Missing("operate"))) },
+            Ok(Expired) => {
+                let _ = task.cancel_join(take place);
+                return Error(Deadline(within_ms))
+            },
+            Error(_) => {
+                let _ = task.cancel_join(take alarm);
+                let _ = task.cancel_join(take place);
+                return Error(Start(Missing("operate")))
+            },
         }
     }
 }
@@ -176,7 +279,10 @@ pub fn end(take f: Fixture, within_ms: u64) -> Result[runner.Ended, FixtureError
 const IDLE_MS: u64 = 0xffffffffffffffffu64
 
 pub fn client(f: Fixture, take token: Option[Bytes], within_ms: u64) -> Result[Client, CallError] waits {
-    let address = match latest.read(f.status).addr { Some(a) => a, None => return Error(Closed) }
+    let address = match latest.read(f.status).addr {
+        Some(a) => a,
+        None => return Error(Closed)
+    }
     client_at(f.tasks, f.net, f.clock, f.random, f.keys, f.socket, address, take token, 0u64, within_ms)
 }
 
@@ -192,23 +298,36 @@ pub fn client_at(tasks: Tasks, net: Net, clock: Clock, random: Random, keys: Lis
     let deadline = std.clock.deadline_after_ms(host.mono_ns(clock), within_ms)
     let conn = match wire_client.connect_for(tasks, net, address, clock, random, keys, take token, socket, within_ms, IDLE_MS) {
         Ok(take c) => take c,
-        Error(_) => return if host.mono_ns(clock) >= deadline { Error(Deadline(within_ms)) } else { Error(Closed) },
+        Error(_) => return if host.mono_ns(clock) >= deadline {
+            Error(Deadline(within_ms))
+        } else {
+            Error(Closed)
+        },
     }
     let held: List[Bytes] = clone(keys)
-    Ok(Client(conn: take conn, keys: take held, next_p: first_p, next_sub: 0u32,
-        subs: list.new(), version: 0u64, lost: false, generation: 0u64, tasks: tasks, clock: clock))
+    Ok(Client(conn: take conn, keys: take held, next_p: first_p, next_sub: 0u32, subs: list.new(), version: 0u64, lost: false, generation: 0u64, tasks: tasks, clock: clock))
 }
 
 // Identity returned by the place in Welcome after binding the credential.
-pub fn bound_caller(c: Client) -> store.Caller { clone(c.conn.caller) }
+pub fn bound_caller(c: Client) -> store.Caller {
+    clone(c.conn.caller)
+}
 
 fn find_sub(subs: List[Sub], id: u32) -> Option[u64] {
-    for i in 0u64 .. list.len(subs) { if subs[i].id == id { return Some(i) } }
+    for i in 0u64 .. list.len(subs) {
+        if subs[i].id == id {
+            return Some(i)
+        }
+    }
     None
 }
 
 fn named(ids: List[u32], id: u32) -> bool {
-    for x in ids { if x == id { return true } }
+    for x in ids {
+        if x == id {
+            return true
+        }
+    }
     false
 }
 
@@ -224,8 +343,14 @@ fn apply(mut c: Client, version: u64, complete: List[u32], rows: List[runner.Row
     for row in rows {
         if let Some(at) = find_sub(c.subs, row.sub) {
             let mut kept: List[runner.Row] = list.new()
-            for old in c.subs[at].rows { if old.key != row.key { list.push(mut kept, clone(old)) } }
-            if let Some(_) = row.value { list.push(mut kept, clone(row)) }
+            for old in c.subs[at].rows {
+                if old.key != row.key {
+                    list.push(mut kept, clone(old))
+                }
+            }
+            if let Some(_) = row.value {
+                list.push(mut kept, clone(row))
+            }
             c.subs[at].rows = take kept
         }
     }
@@ -233,54 +358,85 @@ fn apply(mut c: Client, version: u64, complete: List[u32], rows: List[runner.Row
 }
 
 fn end_sub(mut c: Client, id: u32) {
-    if let Some(at) = find_sub(c.subs, id) { c.subs[at].ended = true }
+    if let Some(at) = find_sub(c.subs, id) {
+        c.subs[at].ended = true
+    }
 }
 
 type Step = Answered(runner.Outcome, u64) | Applied | Gone | Bad(String) | TimedOut
 
 // Takes the next event and applies it. `want` is the call position whose Outcome is awaited.
 fn step(mut c: Client, want: Option[u64]) -> Step waits {
-    if c.lost { return Gone }
+    if c.lost {
+        return Gone
+    }
     match wire_client.wait(c.conn) {
         Got(Batch(version, take complete, take rows, take done)) => {
             apply(mut c, version, complete, rows)
             if let Some(p) = want {
                 for take d in take done {
                     let runner.Done(stream: stream, p: at, outcome: take outcome) = take d
-                    if stream == 0u32 && at == p { return Answered(take outcome, version) }
+                    if stream == 0u32 && at == p {
+                        return Answered(take outcome, version)
+                    }
                 }
             }
             Applied
         },
-        Got(Ended(sub, _)) => { end_sub(mut c, sub); Applied },
+        Got(Ended(sub, _)) => {
+            end_sub(mut c, sub);
+            Applied
+        },
         Got(Reset(_, _)) => Bad("Reset"),
         Got(_) => Applied,
-        Woke(g) => if g == c.generation { TimedOut } else { Applied },
-        Gone => { c.lost = true; Gone },
+        Woke(g) => if g == c.generation {
+            TimedOut
+        } else {
+            Applied
+        },
+        Gone => {
+            c.lost = true;
+            Gone
+        },
     }
 }
 
 fn slot_of(c: Client, key: Bytes) -> Option[u32] {
     let s = wire_client.slot(c.keys, key)
-    if s == 4294967295u32 { None } else { Some(s) }
+    if s == 4294967295u32 {
+        None
+    } else {
+        Some(s)
+    }
 }
 
 fn encoded[A](codec: std.codec.Codec[A], a: A) -> Result[Bytes, CallError] {
     let mut out: Bytes = list.new()
-    match std.codec.encode(codec, a, mut out) { Ok(()) => Ok(take out), Error(_) => Error(Protocol("argument does not encode")) }
+    match std.codec.encode(codec, a, mut out) {
+        Ok(()) => Ok(take out),
+        Error(_) => Error(Protocol("argument does not encode"))
+    }
 }
 
 pub fn call[A: codec, R: codec](mut c: Client, e: Callee[A, R], take a: A, deadline_ms: u32) -> Result[Replied[R], CallError] waits {
-    let slot = match slot_of(c, e.key) { Some(s) => s, None => return Ok(Replied(answer: Refused(NoEntry), version: c.version)) }
+    let slot = match slot_of(c, e.key) {
+        Some(s) => s,
+        None => return Ok(Replied(answer: Refused(NoEntry), version: c.version))
+    }
     let arg = encoded(e.args, a)?
     let p = c.next_p
     c.next_p += 1u64
-    if let Error(_) = channel.send(c.conn.to, Send(Call(0u32, p, slot, deadline_ms, take arg))) { return Error(Closed) }
+    if let Error(_) = channel.send(c.conn.to, Send(Call(0u32, p, slot, deadline_ms, take arg))) {
+        return Error(Closed)
+    }
     loop {
         match step(mut c, Some(p)) {
             Answered(take outcome, version) => {
                 let answer = match take outcome {
-                    Returned(take b) => match std.codec.decode(e.reply, b) { Ok(take r) => Returned(take r), Error(d) => return Error(Decode(d)) },
+                    Returned(take b) => match std.codec.decode(e.reply, b) {
+                        Ok(take r) => Returned(take r),
+                        Error(d) => return Error(Decode(d))
+                    },
                     Failed(f) => Failed(f),
                     Refused(r) => Refused(r),
                     Abandoned => Abandoned,
@@ -300,23 +456,45 @@ pub fn call[A: codec, R: codec](mut c: Client, e: Callee[A, R], take a: A, deadl
 type Goal = Opened(u64) | Reached(u64, u64)
 
 fn met(c: Client, goal: Goal) -> Option[Result[(), CallError]] {
-    let (at, version) = match goal { Opened(at) => (at, 0u64), Reached(at, version) => (at, version) }
-    if c.subs[at].ended { Some(Error(Closed)) } else if c.subs[at].ready && c.version >= version { Some(Ok(())) } else { None }
+    let (at, version) = match goal {
+        Opened(at) => (at, 0u64),
+        Reached(at, version) => (at, version)
+    }
+    if c.subs[at].ended {
+        Some(Error(Closed))
+    } else if c.subs[at].ready && c.version >= version {
+        Some(Ok(()))
+    } else {
+        None
+    }
 }
 
 // Waits until `goal` holds of the client, or `within_ms` passes on the clock.
 fn wait_until(mut c: Client, within_ms: u64, goal: Goal) -> Result[(), CallError] waits {
-    if let Some(r) = met(c, goal) { return r }
+    if let Some(r) = met(c, goal) {
+        return r
+    }
     c.generation += 1u64
     let at = std.clock.deadline_after_ms(host.mono_ns(c.clock), within_ms)
     let alarm = wire_client.alarm(c.conn, c.tasks, c.clock, at, c.generation)
     let mut outcome: Result[(), CallError] = Error(Deadline(within_ms))
     loop {
         match step(mut c, None) {
-            Applied => { if let Some(r) = met(c, goal) { outcome = r; break } },
+            Applied => {
+                if let Some(r) = met(c, goal) {
+                    outcome = r;
+                    break
+                }
+            },
             TimedOut => break,
-            Gone => { outcome = Error(Closed); break },
-            Bad(take why) => { outcome = Error(Protocol(take why)); break },
+            Gone => {
+                outcome = Error(Closed);
+                break
+            },
+            Bad(take why) => {
+                outcome = Error(Protocol(take why));
+                break
+            },
             Answered(_, _) => (),
         }
     }
@@ -325,15 +503,33 @@ fn wait_until(mut c: Client, within_ms: u64, goal: Goal) -> Result[(), CallError
 }
 
 pub fn subscribe[A: codec](mut c: Client, e: Callee[A, ()], take a: A, within_ms: u64) -> Result[u32, CallError] waits {
-    let slot = match slot_of(c, e.key) { Some(s) => s, None => return Error(Protocol("entry not in the place")) }
+    let slot = match slot_of(c, e.key) {
+        Some(s) => s,
+        None => return Error(Protocol("entry not in the place"))
+    }
     let arg = encoded(e.args, a)?
     let id = c.next_sub
     c.next_sub += 1u32
     list.push(mut c.subs, Sub(id: id, ready: false, ended: false, rows: list.new()))
-    if let Error(_) = channel.send(c.conn.to, Send(Subscribe(id, slot, take arg, None))) { return Error(Closed) }
+    if let Error(_) = channel.send(c.conn.to, Send(Subscribe(id, slot, take arg, None))) {
+        return Error(Closed)
+    }
     let at = list.len(c.subs) - 1u64
     wait_until(mut c, within_ms, Opened(at))?
     Ok(id)
+}
+
+// Ends a subscription. Rows a later Batch still carries for it are ignored.
+pub fn unsubscribe(mut c: Client, sub: u32) -> () waits {
+    let Some(at) = find_sub(c.subs, sub) else {
+        return
+    }
+    let last = list.len(c.subs) - 1u64
+    if at != last {
+        list.swap(mut c.subs, at, last)
+    }
+    let _ = list.pop(mut c.subs)
+    let _ = channel.send(c.conn.to, Send(Unsubscribe(sub)))
 }
 
 // Closes the client's connection and joins its reader and writer.
@@ -343,7 +539,10 @@ pub fn close(take c: Client) -> () waits {
 }
 
 pub fn seen_at(mut c: Client, sub: u32, version: u64, within_ms: u64) -> Result[Seen, CallError] waits {
-    let at = match find_sub(c.subs, sub) { Some(i) => i, None => return Error(Closed) }
+    let at = match find_sub(c.subs, sub) {
+        Some(i) => i,
+        None => return Error(Closed)
+    }
     wait_until(mut c, within_ms, Reached(at, version))?
     let rows: List[runner.Row] = clone(c.subs[at].rows)
     Ok(Seen(version: c.version, rows: take rows))

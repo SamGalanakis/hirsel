@@ -337,7 +337,23 @@ session's place can unload while its page stays open.
   while it is busy, then lets go; it learns of a later change from the
   gateway's start counts (`marks`), and reads the new rows with `peek`, which
   never starts a place. Opening the stream wakes the session once. A comment
-  every `beat_ms` keeps the connection open.
+  every `beat_ms` keeps the connection open. The stream starts at the last
+  `?tail=N` lines (default and maximum `Front.tail_lines`) and keeps that lower
+  bound while it lasts, so later rows only append.
+- `GET /sessions/:id/history?before=B&lines=N` (bearer credential, `N` at most
+  256) answers one JSON `Page { from, rows }`: the rows at positions
+  `from <= at < B`, where `from` is `B - N`, at least 1. A reader pages back by
+  passing the previous page's `from` as `before` until `from` is 1. The upper
+  cutoff is the page's own, so rows appended meanwhile never shift a page.
+  Each page is a fresh query under the browser's Caller, so the place's read
+  check runs for every page.
+- A front names the place's view query in `Front.shown`, a
+  `Callee[harness.Window, ()]` registered with `store.runner.query` over
+  `harness.window`: `Status` (row 0), `Tail(n)`, `From(first)` and
+  `Page(before, n)`. The harness has no reader ACL yet; an application that
+  needs one registers the window with `query_as` and refuses there.
+- A place admits one wire session, so a front call that finds it still held
+  retries the connect until `within_ms`.
 - `std.http` cannot hold a gateway door in a handler or stream producer
   (HTTP-10, HTTP-11), so the front runs its own accept loop. WebSocket is not
   served.

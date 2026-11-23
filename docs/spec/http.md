@@ -981,7 +981,7 @@ The relay hands every Outcome by `try_send` into the send's fresh 1-slot reply c
 | `Ended(sub, outcome)` | `event: ended` | `{"sub": <u32>, "outcome": <Outcome>}`; then the stream ends |
 | `Reset(version, outcomes)` | `event: reset` | `{"version": "<u64>", "outcomes": []}`; then the stream ends |
 
-**A group** (RUNNER-SPEC v2.45, `Group{sub, value, rows}`) is `{"sub": <u32>, "value": <R>, "rows": [<Row>…]}`, with no `value` member when the group's value bytes are empty (unchanged). A completing group always has `value`; for an R whose encoding is always empty it is written as `null`.
+**A group** (RUNNER-SPEC v2.45, `Group{sub, value, rows}`) is `{"sub": <u32>, "value": <R>, "rows": [<Row>…]}`, with no `value` member when the group's value bytes are empty (unchanged). A completing group always has `value`: its bytes, even zero bytes, are decoded against R and written in R's B-4 form, so a unit R is `null` and an empty record is `{}` (RUNNER-SPEC v2.46, astra 1995 #12). The `value` member is omitted only on a non-completing group whose value was elided.
 
 **A row is a tagged envelope**, never `V | null`. WIRE's `Row { slot, key, value: Option[Bytes] }` is written as:
 - present: `{"slot": "<name>", "table": "<name>", "key": <K>, "present": true, "value": <V>}`;
@@ -1024,18 +1024,18 @@ The generator runs `place` (D1) and reads the entries and the bindings from desc
 
 ### B-11: One-shot reads
 
-A query entry returns an opaque `Cover`, not a codec value (RUNNER-SPEC rule 2, §4), so a one-shot read is a transient subscription.
+A query entry returns an `Answer[R]`: a codec value R and an opaque `CoverSet` (RUNNER-SPEC v2.45 rule 2, §4), so a one-shot read is a transient subscription.
 
 - **The slot.** The generated handler first asks the supervisor for a read slot (`ReadSlot`, answered on the connection's 1-slot reply channel). At most `reads_max` are held; over it the answer is 503 `Refused(Overloaded)`.
 - **The read.** The handler joins the publisher as its own session, with a retirement mark as §2's groups have (paid in its scope), subscribes through PubIn as B-9 does, and waits for the completing initial Batch on its own inbox, under `Request.deadline`.
-- **The response** is 200 with one JSON object, the `batch` envelope of B-9's table, rows in B-9's tagged form: version, complete, rows and empty outcomes. It is written from the frame by the transcoder, as B-9 writes an event.
+- **The response** is 200 with one JSON object, exactly B-9's completing `batch` envelope: version, complete, `groups` (one group naming the read's sub, with its full value in B-9's completing form and every slot's rows in B-9's tagged form) and empty outcomes (RUNNER-SPEC v2.46). A one-shot read of a query whose answer is only a value, say 7, returns it as that group's `value`. It is written from the frame by the transcoder, as B-9 writes an event.
 - **Payer.** The read's session record and its inbox are in the handler's scope (`handler_bytes`, HTTP-15 row 8); the delivered frame's rows are on the publisher's ledger (row 14a), as for a session.
 - **The end.** The handler drops its inbox `Receiver` and its retirement mark's `Sender`, `try_send`s one `Drained`, and then sends `ReadDone` to release the slot. Nothing here waits on the publisher. A read that fails or is cancelled drops its mark mechanically too, and if the connection task ends holding a slot, the supervisor releases the slot at that task's end. After it joins that task, the supervisor `try_send`s one `Drained` (RUNNER-SPEC v2.14, CHANGES-v2.14 item 3). The publisher retires the session at its next sweep (§2 Publisher retirement), without any later traffic.
 - **Consistency.** The rows are exactly the Cover's state at `version`, the publisher's base when the Subscribe ran (RUNNER-SPEC §4, G3).
 - **Release (RUNNER-SPEC §3 "The release check", v2.19.2).** The handler joins with its Caller, like any session, and its writer applies RUNNER-SPEC's check. **The unit** is the 200 head with its whole body, a content unit at the version of its rows. A B-7 error response made from a publisher-made `Ended` is a content unit at that `Ended`'s version. A fixed status with no data passes unchecked. A unit that is dropped writes nothing of itself, and the answer is 503 `{"refused": "reset"}` with `Retry-After: 1`, so the client re-requests. A head that passed is written with its body, whatever commits meanwhile. An SSE group's writer checks each event the same way, an `ended` event included. A dropped event ends the stream with `event: reset`, as the owner's `Reset` on `Dropped` does (RUNNER-SPEC §3).
 - **Bounds.** The rows allowance is the WebSocket one (RUNNER-SPEC §3 frame bounds), so equal reads give equal answers over both transports. An oversized result is the 503 of B-9.
 - **Failure.** An `Ended` is answered with its B-7 status, checked as above, and a passed `Request.deadline` with HTTP-5's 503; both then end as above.
-- **describe** exports a query binding's result schema as this envelope over the Cover's tables. It does not pretend `Cover` has an ordinary B-4 form.
+- **describe** exports a query binding's result schema as this envelope over R's schema and the slots' tables. It does not pretend `CoverSet` has an ordinary B-4 form.
 - A `Read` binding of a compute entry returns R, through B-5.
 
 ### B-12: Stable operation IDs

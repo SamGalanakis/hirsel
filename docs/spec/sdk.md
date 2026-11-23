@@ -35,11 +35,27 @@ The transport implements `call(want, argsBytes, resultDecoder)`, returning
 `Promise<Outcome<R>>`, and `subscribe(want, argsBytes, onChange, onEnd?)`, returning a
 handle `sub` with `value()`, `rows(slot)` and `unsubscribe()` (RUNNER-SPEC v2.45).
 `sub.value()` is the query's computed value R and `sub.rows(slot)` the rows of
-one named slot, both as of the last applied Batch. Each Batch group for the
-subscription is applied whole, value and every slot's rows together, and then
-`onChange(sub)` is called once. An empty group `value` keeps the previous value;
-a completing group always carries the full value and every slot's full rows, so
-an empty completed result gives `rows(slot)` = `[]` for every slot. The
+one named slot, both as of the last applied Batch.
+
+The accessor contract (RUNNER-SPEC v2.46, astra 1995 #9):
+- A subscription is **pending** until its current instance completes. While
+  pending, `value()` and `rows(slot)` report Pending; after `Ended` or
+  `unsubscribe()` they report Ended. Neither ever returns another instance's or
+  another Caller's data.
+- On a Reset or a disconnect the public image is invalidated at once, not when
+  the new `complete` arrives. When Welcome binds a different Caller, every image
+  of the previous Caller is released.
+- Frames of an earlier connection and groups of retired sub ids are ignored.
+- A Batch is applied in two phases: every current group in it is decoded and
+  staged first, a completing group's image replacing the old one from empty;
+  then all staged images are committed together; only then is `onChange`
+  called, once per changed subscription. So a callback that reads a second
+  subscription changed by the same Batch sees its new image.
+- A `complete` decodes the full value even when its encoding is empty (an
+  `R = ()` or empty-record value). Only a non-completing group with an empty
+  `value` keeps its current instance's previous value.
+- A completing group carries every slot's full rows, so an empty completed
+  result gives `rows(slot)` = `[]` for every slot. The
 generated stub forwards the optional `onEnd` callback. The runtime removes the
 matching subscription before delivering the decoded `Ended` reason once. Reset
 and reconnect resubscribe without calling `onEnd`.
@@ -143,7 +159,8 @@ the stream retires. HistoryUnavailable retires only a matching pending request,
 while RequestMismatch also fences the generation. Incompatible closes remain
 terminal until an explicit reconnect or bindings reload. Reconnection waits for
 all Placed frames, recovers pending calls, and restores subscriptions using new
-ids. Cache replacement waits for Batch.complete.
+ids. The old images are invalidated at the disconnect, and each subscription is
+pending until its new `complete` (above).
 
 The application may supply credential bytes in Client options. The client
 sends them in Hello and stores the returned Caller with the stream. It replays

@@ -35,34 +35,8 @@ fn history_binding_equals(octets: Bytes, binding: Inline[u8, 32]) -> bool {
 }
 
 fn history_genesis_debris(key: String) -> bool {
-    let octets = string.as_bytes(key)
-    if list.len(octets) != 60 || octets[1] != b'-' || octets[22] != b'-' || octets[43] != b'-' {
-        return false
-    }
-    let class = octets[0]
-    if class != b'e' && class != b'm' && class != b'p' && class != b'l' {
-        return false
-    }
-    if list.slice(octets, 23, 43) != string.as_bytes("00000000000000000001") {
-        return false
-    }
-    if class != b'p' && list.slice(octets, 2, 22) != string.as_bytes("00000000000000000001") {
-        return false
-    }
-    for digit in list.slice(octets, 2, 22) {
-        if !int.is_ascii_digit(digit) {
-            return false
-        }
-    }
-    if list.slice(octets, 2, 22) == string.as_bytes("00000000000000000000") {
-        return false
-    }
-    for digit in list.slice(octets, 44, 60) {
-        if !int.is_ascii_digit(digit) && (digit < b'a' || digit > b'f') {
-            return false
-        }
-    }
-    true
+    let Some(name) = history_parse_name(key) else { return false }
+    name.epoch == 1 && (name.kind == b'p' || name.seq == 1)
 }
 
 fn history_check_empty(mut client: std.object.Client, deadline: u64) -> Result[(), Error] waits {

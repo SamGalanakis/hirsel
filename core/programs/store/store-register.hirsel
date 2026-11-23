@@ -100,17 +100,20 @@ fn history_create(mut client: std.object.Client, key: String, mut raw: Bytes, mu
 }
 
 fn history_register_advance(mut client: std.object.Client, mut register: HistoryRegister, authority: Bytes, mut buffers: HistoryBuffers, deadline: u64) -> Result[HistoryWrite, Error] waits {
+    let mut candidate = register.head
+    let seq = history_next_id(candidate.entry.seq)?
+    candidate.entry = history_new_ref(seq, candidate.pair.epoch, buffers.packet)
+    history_register_publish(mut client, mut register, candidate, authority, mut buffers, deadline)
+}
+
+fn history_register_publish(mut client: std.object.Client, mut register: HistoryRegister, candidate: HistoryHead, authority: Bytes, mut buffers: HistoryBuffers, deadline: u64) -> Result[HistoryWrite, Error] waits {
     if let Some(stopped) = register.terminal {
         return match stopped {
             HistoryFault(problem) => Error(clone(problem)),
             HistoryUnknown => Ok(HistoryUndecided),
         }
     }
-    let mut candidate = register.head
-    let seq = history_next_id(candidate.entry.seq)?
-    let item = history_new_ref(seq, candidate.pair.epoch, buffers.packet)
-    history_fill_key(mut buffers.key, "e-", item)
-    candidate.entry = item
+    history_fill_key(mut buffers.key, "e-", candidate.entry)
     history_encode_head(mut buffers.body, candidate, authority)?
     if let Error(take problem) = history_create(mut client, buffers.key, mut buffers.packet, mut buffers.compare, deadline) {
         register.terminal = Some(HistoryFault(clone(problem)))
@@ -164,20 +167,9 @@ fn history_manifest_packet(mut raw: Bytes, id: StoreId) -> Result[HistoryRef, Er
 fn history_genesis_packet(mut raw: Bytes, id: StoreId, manifest: HistoryRef) -> Result[HistoryRef, Error] {
     let ctx = DiskContext(store: id, role: 2, seq: 1)
     let none = HistoryRef(seq: 0, epoch: 0, len: 0, digest: 0)
-    history_packet_header(mut raw, ctx, 1, none)?
-    list.fill(mut raw, 16, 0u8)
-    list.put_word_le(mut raw, manifest.seq)
-    list.put_word_le(mut raw, manifest.epoch)
-    list.put_word_le(mut raw, manifest.digest)
-    list.put_word_le(mut raw, manifest.len)
-    list.put_word_le(mut raw, 1u64)
-    list.push(mut raw, 0u8)
-    list.put_word_le(mut raw, 0u32)
-    capacity(history_seal(mut raw, ctx, 112, 0x0090))?
-    let at = list.len(raw)
-    list.fill(mut raw, 16, 0u8)
-    capacity(history_seal(mut raw, ctx, at, 0x00C0))?
-    Ok(history_new_ref(1, 1, raw))
+    let retained = HistoryRetention(floor: 1, earlier: list.new())
+    let locator = HistoryLocateRoot(depth: 0, rows: list.new())
+    history_checkpoint_packet(mut raw, ctx, 1, none, manifest, retained, locator)
 }
 
 fn history_publish_genesis(mut client: std.object.Client, id: StoreId, holder: StoreId, authority: Bytes, mut buffers: HistoryBuffers, deadline: u64) -> Result[HistoryRegister, Error] waits {

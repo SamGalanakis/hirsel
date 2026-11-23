@@ -1,0 +1,119 @@
+const HISTORY_LOCATE_ROWS: u64 = 32768
+
+type HistoryLocateRoot {
+    depth: u8,
+    rows: List[HistoryRef]
+}
+
+type HistoryActivation {
+    number: u64,
+    binding: Inline[u8, 32]
+}
+
+fn history_mark_ref(mut raw: Bytes, item: HistoryRef) {
+    list.put_word_le(mut raw, item.seq)
+    list.put_word_le(mut raw, item.epoch)
+    list.put_word_le(mut raw, item.digest)
+    list.put_word_le(mut raw, item.len)
+}
+
+fn history_checkpoint_packet(mut raw: Bytes, ctx: DiskContext, epoch: u64, predecessor: HistoryRef, manifest: HistoryRef, retained: HistoryRetention, locator: HistoryLocateRoot) -> Result[HistoryRef, Error] {
+    history_packet_header(mut raw, ctx, epoch, predecessor)?
+    list.fill(mut raw, 16, 0u8)
+    history_mark_ref(mut raw, manifest)
+    list.put_word_le(mut raw, retained.floor)
+    list.push(mut raw, locator.depth)
+    let earlier_count: u32 = int.narrow(list.len(retained.earlier))
+    list.put_word_le(mut raw, earlier_count)
+    for older in retained.earlier {
+        history_mark_ref(mut raw, older)
+    }
+    capacity(history_seal(mut raw, ctx, 112, 0x0090))?
+    let at = list.len(raw)
+    history_encode_locator(mut raw, locator.rows)
+    capacity(history_seal(mut raw, ctx, at, 0x00C0))?
+    Ok(history_new_ref(ctx.seq, epoch, raw))
+}
+
+fn history_encode_locator(mut raw: Bytes, rows: List[HistoryRef]) {
+    list.fill(mut raw, 16, 0u8)
+    for item in rows {
+        history_ref_encode(mut raw, item)
+    }
+}
+
+fn history_make_locator(mut client: std.object.Client, id: StoreId, seq: u64, epoch: u64, take packs: List[HistoryRef], mut workspace: HistoryBuffers, deadline: u64) -> Result[HistoryLocateRoot, Error] waits {
+    let mut rows = take packs
+    let mut depth = 0u8
+    if list.len(rows) > HISTORY_LOCATE_ROWS {
+        list.clear(mut workspace.packet)
+        capacity(list.try_reserve(mut workspace.packet, 88 + 32 * HISTORY_LOCATE_ROWS + BINDING_BYTES))?
+        list.clear(mut workspace.compare)
+        capacity(list.try_reserve(mut workspace.compare, 88 + 32 * HISTORY_LOCATE_ROWS))?
+    }
+    while list.len(rows) > HISTORY_LOCATE_ROWS {
+        let row_count = list.len(rows)
+        let length = (row_count - 1) / HISTORY_LOCATE_ROWS + 1
+        let mut parents = disk_allocation(scoped fn() -> Result[List[HistoryRef], Error] {
+            Ok(list.with_capacity(length))
+        })?
+        let ctx = DiskContext(store: id, role: 8, seq)
+        for ordinal in 0u64 .. length {
+            let first = ordinal * HISTORY_LOCATE_ROWS
+            let end = first + order.min(row_count - first, HISTORY_LOCATE_ROWS)
+            let slice_rows = list.slice(rows, first, end)
+            list.clear(mut workspace.packet)
+            capacity(history_append_header(mut workspace.packet, ctx, epoch))?
+            history_encode_locator(mut workspace.packet, slice_rows)
+            capacity(history_seal(mut workspace.packet, ctx, 72, 0x00C0))?
+            let chunk = history_new_ref(seq, epoch, workspace.packet)
+            history_fill_key(mut workspace.key, "l-", chunk)
+            history_create(mut client, workspace.key, mut workspace.packet, mut workspace.compare, deadline)?
+            list.push(mut parents, chunk)
+        }
+        rows = take parents
+        depth += 1
+    }
+    Ok(HistoryLocateRoot(depth, rows: take rows))
+}
+
+fn history_publish_checkpoint(mut client: std.object.Client, mut register: HistoryRegister, authority: Bytes, manifest: HistoryRef, retained: HistoryRetention, locator: HistoryLocateRoot, activation_update: Option[HistoryActivation], mut workspace: HistoryBuffers, deadline: u64) -> Result[HistoryWrite, Error] waits {
+    let mut candidate = register.head
+    let seq = history_next_id(candidate.entry.seq)?
+    let ctx = DiskContext(store: candidate.store, role: 2, seq)
+    let width = 189 + 32 * (list.len(retained.earlier) + list.len(locator.rows))
+    list.clear(mut workspace.packet)
+    capacity(list.try_reserve(mut workspace.packet, width + BINDING_BYTES))?
+    list.clear(mut workspace.compare)
+    capacity(list.try_reserve(mut workspace.compare, width))?
+    let base = history_checkpoint_packet(mut workspace.packet, ctx, candidate.pair.epoch, candidate.entry, manifest, retained, locator)?
+    candidate.entry = base
+    candidate.checkpoint = base
+    candidate.floor = retained.floor
+    if let Some(changed) = activation_update {
+        candidate.activation = changed.number
+        candidate.binding = changed.binding
+    }
+    history_register_publish(mut client, mut register, candidate, authority, mut workspace, deadline)
+}
+
+fn history_create_manifest(mut client: std.object.Client, id: StoreId, epoch: u64, manifest: PageManifest, mut workspace: HistoryBuffers, deadline: u64) -> Result[HistoryRef, Error] waits {
+    let (take prepared, take header) = disk_allocation(scoped fn() -> Result[(Bytes, Bytes), Error] {
+        let raw = disk_page_manifest_bytes(id, manifest)?
+        let mut leader: Bytes = list.with_capacity(72 + BINDING_BYTES)
+        let ctx = DiskContext(store: id, role: 1, seq: manifest.generation)
+        capacity(history_append_header(mut leader, ctx, epoch))?
+        Ok((take raw, take leader))
+    })?
+    let mut raw = take prepared
+    for i in 0u64 .. 72 {
+        raw[i] = header[i]
+    }
+    let item = history_new_ref(manifest.generation, epoch, raw)
+    history_fill_key(mut workspace.key, "m-", item)
+    if item.len > list.capacity(workspace.compare) {
+        workspace.compare = disk_allocation(scoped fn() -> Result[Bytes, Error] { Ok(list.with_capacity(item.len)) })?
+    }
+    history_create(mut client, workspace.key, mut raw, mut workspace.compare, deadline)?
+    Ok(item)
+}

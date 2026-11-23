@@ -1,0 +1,78 @@
+fn object_cut_law(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error] waits {
+    let client = bucket_law_client_with(sim, tasks, "s3.test", 1, true)?
+    let mut source = ObjectPackRead(client: take client, locator: HistoryLocator(rows: map.new(), chunks: list.new(), last_pack: 0), deadline: 0)
+    let mut workspace = history_buffers(1057000)?
+    let (take opened, _) = history_open_register(mut source, sim.time, r, defaults(), "bucket", mut workspace, BUCKET_LAW_OP_MS)?
+    let mut held = take opened
+    let id = held.head.store
+    let metadata = history_config_bytes(HistoryConfig(place: std.object.bucket_config(source.client), level: "bucket"))?
+    bucket_m2_law_commit_packet(mut workspace.packet, held.head, 1)?
+    let HistoryApplied(_) = history_register_advance(mut source.client, mut held, metadata, mut workspace, source.deadline)? else {
+        fail("checkpoint law's group was refused")
+    }
+    let old_checkpoint = history_key("e-", held.head.checkpoint)
+    let (take previous, _) = history_checkpoint(mut source.client, held.head, source.deadline)?
+    let retained = history_retain(previous, held.head.checkpoint, 4, 1)?
+    let mut page_manifest = page_manifest_empty()
+    page_manifest.generation = 2
+    page_manifest.first_live = 4
+    page_manifest.prev_first = 4
+    page_manifest.branches[0].version = 1
+    let manifest = history_create_manifest(mut source.client, id, held.head.pair.epoch, page_manifest, mut workspace, source.deadline)?
+    let location = history_make_locator(mut source.client, id, 4, 1, list.new(), mut workspace, source.deadline)?
+    let activation = HistoryActivation(number: 1, binding:[42; 32])
+    let HistoryApplied(_) = history_publish_checkpoint(mut source.client, mut held, metadata, manifest, retained, location, Some(activation), mut workspace, source.deadline)? else {
+        fail("checkpoint did not advance the register")
+    }
+    let mut new_reader = bucket_law_client_with(sim, tasks, "s3.test", 2, true)?
+    let _ = history_fetch(mut new_reader, "head", mut workspace.witness, source.deadline)?
+    let capture = history_decode_head(workspace.witness)?
+    if capture.head.entry.seq != 4 || capture.head.checkpoint.seq != 4 || capture.head.floor != 4 || capture.head.activation != 1 || capture.head.binding[31] != 42 {
+        fail("checkpoint did not atomically publish the floor, activation and binding")
+    }
+    // Older checkpoints and groups are not needed by the new capture.
+    match std.object.erase(mut source.client, old_checkpoint, source.deadline) {
+        Ok(()) => (),
+        Error(take problem) => return Error(Remote(take problem)),
+    }
+    let recovered = history_paged_capture(mut source, capture.head, 1048576)?
+    if recovered.state.tips[0].head != 1 { fail("cold recovery lost the checkpoint's main tip") }
+    object_locator_boundary(mut source, held.head, manifest, mut workspace)
+}
+
+// A root at the row limit fits directly. One more row needs two child
+// objects whose combined leaf rows are exactly the sorted input.
+fn object_locator_boundary(mut source: ObjectPackRead, head: HistoryHead, manifest: HistoryRef, mut workspace: HistoryBuffers) -> Result[(), Error] waits {
+    let mut input: List[HistoryRef] = list.with_capacity(32769)
+    for ordinal in 1u64 .. 32770 {
+        list.push(mut input, HistoryRef(seq: ordinal, epoch: 1, len: 96, digest: ordinal * 2))
+    }
+    let flat = history_make_locator(mut source.client, head.store, 5, 1, clone(list.slice(input, 0, 32768)), mut workspace, source.deadline)?
+    if flat.depth != 0 || list.len(flat.rows) != 32768 {
+        fail("a full LOCATE root grew an extra level")
+    }
+    let split = history_make_locator(mut source.client, head.store, 5, 1, take input, mut workspace, source.deadline)?
+    if split.depth != 1 || list.len(split.rows) != 2 {
+        fail("one row above the limit did not make two child chunks")
+    }
+    let ctx = DiskContext(store: head.store, role: 2, seq: 5)
+    let retained = HistoryRetention(floor: 5, earlier: list.new())
+    let mark_entry = history_checkpoint_packet(mut workspace.packet, ctx, 1, head.entry, manifest, retained, split)?
+    let mark = history_read_mark("test checkpoint", head.store, mark_entry, workspace.packet)?
+    let mut observed = head
+    observed.checkpoint = mark_entry
+    let loaded = history_locator(mut source.client, observed, mark, workspace.packet, source.deadline)?
+    if map.len(loaded.rows) != 32769 || option.unwrap(map.get(loaded.rows, 32768)).digest != 65536 ||
+        option.unwrap(map.get(loaded.rows, 32769)).digest != 65538 {
+        fail("the split locator changed the leaf rows at the boundary")
+    }
+    Ok(())
+}
+
+@test
+fn bucket_test_m2_checkpoint_advance(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let sim = bucket_law_sim(tasks, c, 992, None, list.new())
+    let outcome = object_cut_law(tasks, r, sim)
+    let _ = bucket_law_finish(take sim)
+    outcome
+}

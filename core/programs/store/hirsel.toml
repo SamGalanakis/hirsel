@@ -52,7 +52,7 @@ dirs = ["."]
 [tests.runs."store@1/store/frame_size_boundary"]
 limit = 134217728
 
-[tests.runs."store@1/store/bucket_test_l4_cut"]
+[tests.runs."store@1/store/bucket_test_l4_cuts"]
 limit = 536870912
 
 [tests.runs."store@1/store/bucket_test_fence"]

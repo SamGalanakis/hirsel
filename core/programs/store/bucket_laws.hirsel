@@ -14,7 +14,6 @@
 // Reopen: at every cut, the writer's own directory reopens with every row
 // its journal acknowledged, and its next checkpoint carries them to a fresh
 // directory. The soak runs one seeded cut per seed under retriable faults.
-// Each cut runs in its own process (`hirsel test --sim --seeds N`).
 
 type BucketSim {
     network: Net,
@@ -340,26 +339,31 @@ fn bucket_law_seed(e: Env) -> u64 {
     }
 }
 
-// One wire cut per process. `hirsel test --sim --seeds 160` sweeps cuts 0
-// to 39 in each of the four modes: the request applied or dropped, and
-// recovery into a fresh directory or a reopen of the writer's own. Each
-// checkpoint takes at least four requests (begin, part, complete and the
-// MANIFEST), so a writer done before request 12 was not cut, and one cut at
-// 40 or later runs every round: the sweep covers every cut that matters.
+// Every wire cut in one process, in each of the four modes: the request
+// applied or dropped, and recovery into a fresh directory or a reopen of the
+// writer's own. Each checkpoint takes at least four requests (begin, part,
+// complete and the MANIFEST), so a writer done before request 12 was not
+// cut. The sweep ends at the first cut every mode outlives, which covers
+// every cut that matters.
 @test
-fn bucket_test_l4_cut(d: Dir, c: Clock, r: Random, tasks: Tasks, e: Env) -> Result[(), Error] waits {
-    let seed = bucket_law_seed(e)
-    let after = (seed / 4) % BUCKET_LAW_CUTS
-    let apply = seed % 2 == 0
-    let same_directory = (seed / 2) % 2 == 0
-    let uncut = bucket_law_cut(d, c, r, tasks, after, bucket_law_wire_cut(after, apply), list.new(), same_directory)?
-    if uncut && after < 4 * BUCKET_LAW_ROUNDS {
-        fail("bucket L4: the cut never reached the writer")
+fn bucket_test_l4_cuts(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    for after in 0u64 .. BUCKET_LAW_CUTS {
+        let mut uncut = true
+        for mode in 0u64 .. 4 {
+            let apply = mode % 2 == 0
+            let same_directory = mode >= 2
+            if !bucket_law_cut(d, c, r, tasks, after, bucket_law_wire_cut(after, apply), list.new(), same_directory)? {
+                uncut = false
+            }
+        }
+        if uncut {
+            if after < 4 * BUCKET_LAW_ROUNDS {
+                fail("bucket L4: the cut never reached the writer")
+            }
+            return Ok(())
+        }
     }
-    if !uncut && after + 1 == BUCKET_LAW_CUTS {
-        fail("bucket L4: the writer never finished uncut")
-    }
-    Ok(())
+    fail("bucket L4: the writer never finished uncut")
 }
 
 // The soak: one cut per seed at a seeded request, both recoveries, with

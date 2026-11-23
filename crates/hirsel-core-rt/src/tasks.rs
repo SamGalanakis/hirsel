@@ -2433,8 +2433,11 @@ pub(crate) struct Readies {
     net: Mutex<Option<Arc<hirsel_core_net::Poller>>>,
     /// Host work this waiter depends on whose ready is still to come (a
     /// queued or running sync). It drops only after that ready is pushed, so
-    /// a waiter that reads zero and then no pending ready is quiescent.
-    outside: AtomicUsize,
+    /// a waiter that reads zero and then no pending ready is quiescent. The
+    /// drop to zero notifies the waiter, which may have taken the ready and
+    /// parked while the count was still one. Through the pool's seam, so the
+    /// pool checker schedules that drop against the waiter's park.
+    outside: crate::units::sync::AtomicUsize,
     /// mc-units-untied: the unit this waiter belongs to, or units::NONE.
     unit: u32,
 }
@@ -2450,7 +2453,7 @@ impl Readies {
             worker: std::thread::current(),
             peers: Mutex::default(),
             net: Mutex::new(None),
-            outside: AtomicUsize::new(0),
+            outside: crate::units::sync::AtomicUsize::new(0),
             unit,
         })
     }
@@ -2638,7 +2641,12 @@ impl Outside {
 }
 impl Drop for Outside {
     fn drop(&mut self) {
-        self.0.outside.fetch_sub(1, Ordering::SeqCst);
+        // The waiter may have taken this work's ready and parked while the
+        // count was still one: with no other wake to come it would wait for
+        // ever instead of deciding quiescence (FAIL-15).
+        if self.0.outside.fetch_sub(1, Ordering::SeqCst) == 1 {
+            self.0.notify();
+        }
     }
 }
 

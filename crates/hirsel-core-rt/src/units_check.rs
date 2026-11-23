@@ -1415,6 +1415,54 @@ pub(super) static CASES: &[Case] = &[
         },
         pct: None,
     },
+    // 3b. Quiescence after a sync (sim-idle-hang-1854). Unit 0 submits a
+    // sync, takes its ready and its result, then decides quiescence as the
+    // task scheduler's idle does: while outside work is counted it parks,
+    // and once none is it may stop with Deadlock or wake its idle waits.
+    // The helper pushes the ready before it drops the count, so the unit
+    // can take the ready and park while the count is still one. The drop
+    // to zero must wake it, or the run waits for ever with nothing to come.
+    Case {
+        name: "outside_end_wakes_waiter",
+        workers: 1,
+        units: 1,
+        body: |_| {
+            let readies = crate::tasks::Readies::for_unit(0);
+            let outside = crate::tasks::Outside::for_readies(readies.clone());
+            let cell = crate::os_sync::SyncCell::for_check(SYNC_TOKEN, outside);
+            name_object(std::sync::Arc::as_ptr(&readies), "unit 0 waiter");
+            name_object(cell, "sync cell");
+            SYNC_CELL.store(cell, Ordering::SeqCst);
+            FLAG[2].store(true, Ordering::SeqCst);
+            while !readies.take_for_test(SYNC_TOKEN) {
+                unit_park(None);
+            }
+            // SAFETY: the issuer's handle, taken once after its ready.
+            if unsafe { crate::os_sync::SyncCell::take_for_check(cell) } != Some(0) {
+                return 0;
+            }
+            while readies.has_outside() {
+                unit_park(None);
+            }
+            served(0, "unit 0 saw its outside work end");
+            0
+        },
+        producers: &[("helper", || {
+            producer_wait_flag(2);
+            sleep_producer(now() + param(0));
+            // SAFETY: the helper's handle on the cell unit 0 submitted.
+            unsafe {
+                crate::os_sync::SyncCell::complete_for_check(SYNC_CELL.load(Ordering::SeqCst), 0)
+            };
+        })],
+        goals: 0b1,
+        params: |r| {
+            // The helper's sync time; the window is between its push and
+            // its count drop, whatever the sync took.
+            PARAM[0].store(r(0, 400), Ordering::Relaxed);
+        },
+        pct: None,
+    },
     // 4. Injector starved by a private-slot pair (mc-units-sched). One
     // worker. Units 0 and 1 wake each other and park, for ever, so the
     // worker always has a unit in its private slot or (after LIFO_RUNS runs)
@@ -2189,6 +2237,10 @@ mod tests {
     #[test]
     fn requeue_without_notification() {
         check("requeue_without_notification");
+    }
+    #[test]
+    fn outside_end_wakes_waiter() {
+        check("outside_end_wakes_waiter");
     }
     #[test]
     fn injector_starved() {

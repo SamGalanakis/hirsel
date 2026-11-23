@@ -620,6 +620,12 @@ fn activation_pairs(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, out: Stdo
         stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(ingress.binding()), triggers: None, idle: None)
     let seed = DeadlinePlace(config: take settings, stop: take stopping, status: result.unwrap(runner.status_root()), watch: take watch)
     let running = task.spawn(tasks, bytes 50331648u64, take seed, deadline_place)
+    // A standalone install completes durably without publishing a serving phase.
+    if let Install = chosen {
+        if let Ok(Ok(Unstarted)) = task.join(take running) {} else { fail("activation: install did not finish") }
+        result.unwrap(stdout.write(out, "DONE"))
+        return
+    }
     let phases = result.unwrap(channel.receive(watcher))
     loop {
         match channel.receive(phases) { Ok(Ready) => break, Ok(Starting(_)) => (), _ => fail("activation: no Ready") }

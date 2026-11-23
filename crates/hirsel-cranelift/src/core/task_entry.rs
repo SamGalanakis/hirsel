@@ -157,7 +157,7 @@ impl Glues {
 }
 pub(super) fn input_offset(
     input: &c::Module,
-    layouts: &[hirsel_core_layout::Recipe],
+    layouts: &[hirsel_core_layout::RecipeRow],
     x: TypeId,
 ) -> Result<u64> {
     let (_, align) = place::storage(input, layouts, PlaceTy::Declared(x))?;

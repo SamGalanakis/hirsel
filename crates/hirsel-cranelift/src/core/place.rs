@@ -3,7 +3,7 @@
 use super::function::{Address, Function};
 use super::*;
 use cranelift_codegen::ir::{MemFlagsData, Value};
-use hirsel_core_layout::{FieldTy, Fixed, Layout, Recipe, Repr};
+use hirsel_core_layout::{FieldTy, Fixed, Layout, Recipe, RecipeRow, Repr};
 
 #[derive(Clone, Copy)]
 enum At<'a> {
@@ -14,7 +14,7 @@ enum At<'a> {
     Array(&'a FieldTy, u64),
 }
 
-fn fixed(layouts: &[Recipe], id: TypeId) -> Result<&Fixed> {
+fn fixed(layouts: &[RecipeRow], id: TypeId) -> Result<&Fixed> {
     match &layouts[id.index()].layout {
         Layout::Fixed(f) => Ok(f),
         Layout::Compact(_) => Err(unsupported(
@@ -42,7 +42,7 @@ fn field_at<'a>(input: &c::Module, t: &'a FieldTy) -> At<'a> {
         _ => At::Other,
     }
 }
-pub(super) fn storage(input: &c::Module, layouts: &[Recipe], p: PlaceTy) -> Result<(u64, u64)> {
+pub(super) fn storage(input: &c::Module, layouts: &[RecipeRow], p: PlaceTy) -> Result<(u64, u64)> {
     Ok(match p {
         PlaceTy::Value(Ty::Vector(v)) => (v.size(), 16),
         PlaceTy::Value(t) => {

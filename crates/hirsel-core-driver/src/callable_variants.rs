@@ -7,7 +7,7 @@ use crate::{ContentHash, DefPath, InstanceStop, NativeStop};
 use hirsel_core_ir::{
     Callee, FuncId, Function, Identity, Inst, Loan, Module, Param, PlaceTy, SigId,
 };
-use hirsel_core_layout::{Recipe, TypeRef};
+use hirsel_core_layout::{RecipeRow, TypeRef};
 use serde::Serialize;
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -243,7 +243,7 @@ struct Work<'a, 'm> {
     limit: usize,
     /// Each unit's layout recipes, with the type count they were computed for:
     /// an import appends rows.
-    recipes: RefCell<BTreeMap<usize, (usize, Rc<Vec<Recipe>>)>>,
+    recipes: RefCell<BTreeMap<usize, (usize, Rc<Vec<RecipeRow>>)>>,
     /// What each body can use of known code, by its code identity.
     demands: RefCell<BTreeMap<ContentHash, Rc<Vec<Demand>>>>,
     /// The bodies whose demands are being computed, to end a recursive forward.
@@ -334,7 +334,7 @@ impl Work<'_, '_> {
             code,
         })
     }
-    fn recipes(&self, unit: usize) -> Rc<Vec<Recipe>> {
+    fn recipes(&self, unit: usize) -> Rc<Vec<RecipeRow>> {
         let types = &self.modules[unit].types;
         if let Some((n, r)) = self.recipes.borrow().get(&unit)
             && *n == types.len()
@@ -420,7 +420,7 @@ impl Work<'_, '_> {
     /// Whether `t`'s callable parameter `p` carries record-held code: `t` calls
     /// through it passing a viewed record with a code word it knows or is bound,
     /// or passes it on to a callee whose parameter carries.
-    fn carries(&self, t: Target, recipes: &[Recipe], o: &mut origins::Origins, p: u32) -> bool {
+    fn carries(&self, t: Target, recipes: &[RecipeRow], o: &mut origins::Origins, p: u32) -> bool {
         let m = &self.modules[t.unit];
         let body = m.functions[t.function.index()].body.as_ref().unwrap();
         let this = origins::Origin::Parameter(p, 0);

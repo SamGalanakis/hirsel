@@ -7,7 +7,7 @@
 //! unknown offset, moved, grown, its pointer stored, passed on an edge or
 //! returned) is never bound.
 use hirsel_core_ir::*;
-use hirsel_core_layout::{FieldTy, Layout, Recipe, Row, TypeRef};
+use hirsel_core_layout::{FieldTy, Layout, RecipeRow, Row, TypeRef};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -50,8 +50,8 @@ enum Def {
 
 /// Byte offsets of the code words of a value of declared type `t`: each
 /// plain `fn`, `own fn` and borrowed field, through inline records.
-pub(super) fn code_words(shapes: &[Row], recipes: &[Recipe], t: TypeRef) -> Vec<u64> {
-    fn walk(shapes: &[Row], recipes: &[Recipe], t: TypeRef, base: u64, out: &mut Vec<u64>) {
+pub(super) fn code_words(shapes: &[Row], recipes: &[RecipeRow], t: TypeRef) -> Vec<u64> {
+    fn walk(shapes: &[Row], recipes: &[RecipeRow], t: TypeRef, base: u64, out: &mut Vec<u64>) {
         let (Some(fields), Some(Layout::Fixed(layout))) = (
             shapes.get(t.index()).and_then(|s| s.fields(None)),
             recipes.get(t.index()).map(|r| &r.layout),
@@ -126,7 +126,7 @@ pub(super) fn frozen_parameters(
 pub(super) struct Origins<'a> {
     body: &'a Body,
     shapes: &'a [Row],
-    recipes: &'a [Recipe],
+    recipes: &'a [RecipeRow],
     defs: Vec<Def>,
     /// Immutable callable entry values: plain code, or a carrier's pointer.
     callables: BTreeMap<ValueId, u32>,
@@ -144,7 +144,7 @@ pub(super) struct Origins<'a> {
 impl<'a> Origins<'a> {
     pub(super) fn new(
         module: &'a Module,
-        recipes: &'a [Recipe],
+        recipes: &'a [RecipeRow],
         signature: &Signature,
         body: &'a Body,
     ) -> Self {

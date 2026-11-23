@@ -25,7 +25,7 @@ use super::scalar_abi::SignatureAbi;
 use crate::Program;
 use crate::types::*;
 use hirsel_core_ir::{FuncId, InstanceKey, Param, PlaceTy, SigId, Signature, TypeId};
-use hirsel_core_layout::{FuncRef, Row, Shape, TypeRef};
+use hirsel_core_layout::{FuncRef, Recipe, Row, Shape, TypeRef};
 use std::sync::Arc;
 
 /// The program's closed row closures, by row name: the name the module interns the
@@ -80,7 +80,7 @@ struct Closure {
     program_type_rows: Vec<(TyId, TypeId)>,
     source_signatures: Vec<SigId>,
     /// The recipes of the first rows of `types`, as the build ended with them.
-    recipes: Vec<hirsel_core_layout::Recipe>,
+    recipes: Vec<hirsel_core_layout::RecipeRow>,
     /// The argument-free instances and row-free signatures, which a module may hold
     /// without holding a row of the closure.
     open_instances: Vec<usize>,
@@ -327,9 +327,12 @@ impl Emitter {
             .unwrap_or_default()
             .iter()
             .map(|r| {
-                let mut r = r.clone();
+                if !r.names_row() {
+                    return Arc::clone(r);
+                }
+                let mut r = Recipe::clone(r);
                 r.map_refs(|x| TypeRef(below(x.0, rows)));
-                r
+                Arc::new(r)
             })
             .collect();
         if held.get() {
@@ -480,9 +483,14 @@ impl Emitter {
         if !c.recipes.is_empty() {
             debug_assert_eq!(self.recipes.len(), rows as usize);
             for &i in fresh_rows.iter().take_while(|&&i| i < c.recipes.len()) {
-                let mut r = c.recipes[i].clone();
+                let r = &c.recipes[i];
+                if !r.names_row() {
+                    self.recipes.push(Arc::clone(r));
+                    continue;
+                }
+                let mut r = Recipe::clone(r);
                 r.map_refs(|x| at[x.index()]);
-                self.recipes.push(r);
+                self.recipes.push(Arc::new(r));
             }
         }
         for (key, id) in fresh_signatures.into_iter().zip(signatures..) {
@@ -578,9 +586,12 @@ impl Emitter {
         if !c.recipes.is_empty() {
             debug_assert_eq!(self.recipes.len(), rows as usize);
             self.recipes.extend(c.recipes.iter().map(|r| {
-                let mut r = r.clone();
+                if !r.names_row() {
+                    return Arc::clone(r);
+                }
+                let mut r = Recipe::clone(r);
                 r.map_refs(|x| TypeRef(x.0 + rows));
-                r
+                Arc::new(r)
             }));
         }
         for i in 0..c.types.len() {

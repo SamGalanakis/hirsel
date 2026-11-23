@@ -25,7 +25,7 @@ fn cleanup_dependencies(field: &FieldTy, counted: bool, pending: &mut Vec<(usize
 
 /// Whether ordinary glue cleans `field` in place with nothing below it to
 /// drain: scalars, terminal storage and inline values with no drop.
-fn flat_field(module: &Module, recipes: &[hirsel_core_layout::Recipe], field: &FieldTy) -> bool {
+fn flat_field(module: &Module, recipes: &[hirsel_core_layout::RecipeRow], field: &FieldTy) -> bool {
     match field {
         FieldTy::Box(_) | FieldTy::Rc(_) | FieldTy::Arc(_) | FieldTy::Seq(_) | FieldTy::Map(..) => {
             hirsel_core_layout::terminal(&module.types, recipes, field)
@@ -46,7 +46,7 @@ fn flat_field(module: &Module, recipes: &[hirsel_core_layout::Recipe], field: &F
 /// A box of a fixed (non-terminal, non-resource) type.
 fn fixed_box(
     module: &Module,
-    recipes: &[hirsel_core_layout::Recipe],
+    recipes: &[hirsel_core_layout::RecipeRow],
     field: &FieldTy,
 ) -> Option<usize> {
     match field {
@@ -64,7 +64,7 @@ fn fixed_box(
 /// inline value or array of direct values, or a box of a direct type.
 pub(super) fn direct_field(
     module: &Module,
-    recipes: &[hirsel_core_layout::Recipe],
+    recipes: &[hirsel_core_layout::RecipeRow],
     field: &FieldTy,
     set: &BTreeSet<usize>,
 ) -> bool {
@@ -87,12 +87,12 @@ pub(super) fn direct_field(
 /// boxes deeper than DIRECT_DEPTH still go to the drain (LANG-19).
 fn direct_types(
     module: &Module,
-    recipes: &[hirsel_core_layout::Recipe],
+    recipes: &[hirsel_core_layout::RecipeRow],
     normal: &BTreeSet<usize>,
 ) -> BTreeSet<usize> {
     fn reach(
         module: &Module,
-        recipes: &[hirsel_core_layout::Recipe],
+        recipes: &[hirsel_core_layout::RecipeRow],
         field: &FieldTy,
         pending: &mut Vec<usize>,
     ) {
@@ -104,7 +104,7 @@ fn direct_types(
     }
     fn boxes(
         module: &Module,
-        recipes: &[hirsel_core_layout::Recipe],
+        recipes: &[hirsel_core_layout::RecipeRow],
         field: &FieldTy,
         pending: &mut Vec<usize>,
     ) {
@@ -177,7 +177,7 @@ const DEPTH: Local = Local::Named("depth");
 #[allow(clippy::too_many_arguments)]
 pub(super) fn glue_emitter<'a>(
     module: &'a Module,
-    recipes: &'a [hirsel_core_layout::Recipe],
+    recipes: &'a [hirsel_core_layout::RecipeRow],
     failures: &'a failure::Failures,
     facts: bool,
     body: &'a Body,
@@ -267,7 +267,7 @@ pub(super) const STEP_PARAMS: [Local; 4] = [
 pub(super) fn drop_glue(
     module: &Module,
     target: Target,
-    recipes: &[hirsel_core_layout::Recipe],
+    recipes: &[hirsel_core_layout::RecipeRow],
     failures: &failure::Failures,
     facts: bool,
     test_hooks: bool,
@@ -803,7 +803,7 @@ impl FunctionEmitter<'_> {
 pub(super) fn release_lasts(
     module: &Module,
     target: Target,
-    recipes: &[hirsel_core_layout::Recipe],
+    recipes: &[hirsel_core_layout::RecipeRow],
     failures: &failure::Failures,
     facts: bool,
     lasts: &[(u32, bool)],
@@ -858,7 +858,7 @@ pub(super) fn release_lasts(
 
 pub(super) fn mechanical_count(
     module: &Module,
-    recipes: &[hirsel_core_layout::Recipe],
+    recipes: &[hirsel_core_layout::RecipeRow],
     field: &FieldTy,
 ) -> Result<u64> {
     Ok(match field {
@@ -1290,7 +1290,7 @@ impl FunctionEmitter<'_> {
 fn counted_glue(
     module: &Module,
     target: Target,
-    recipes: &[hirsel_core_layout::Recipe],
+    recipes: &[hirsel_core_layout::RecipeRow],
     failures: &failure::Failures,
     facts: bool,
     demanded: &BTreeSet<usize>,
@@ -1408,7 +1408,7 @@ fn counted_glue(
 
 /// The logical bytes a box or counted block of type `t` holds: a resource's
 /// block holds its pointer.
-fn held_logical(module: &Module, recipes: &[hirsel_core_layout::Recipe], t: usize) -> u64 {
+fn held_logical(module: &Module, recipes: &[hirsel_core_layout::RecipeRow], t: usize) -> u64 {
     if module.types[t].repr == Repr::Resource {
         8
     } else {
@@ -1444,7 +1444,7 @@ impl FunctionEmitter<'_> {
 fn resource_glue(
     module: &Module,
     target: Target,
-    recipes: &[hirsel_core_layout::Recipe],
+    recipes: &[hirsel_core_layout::RecipeRow],
     failures: &failure::Failures,
     facts: bool,
     test_hooks: bool,
@@ -1542,7 +1542,7 @@ fn resource_glue(
 fn value_glue(
     module: &Module,
     target: Target,
-    recipes: &[hirsel_core_layout::Recipe],
+    recipes: &[hirsel_core_layout::RecipeRow],
     failures: &failure::Failures,
     facts: bool,
     values: &BTreeSet<usize>,

@@ -119,7 +119,7 @@ fn descriptor_symbol(function: &str) -> String {
 /// emitter has no role facts, keeps the pointer ABI.
 fn carriers(
     module: &Module,
-    recipes: &[hirsel_core_layout::Recipe],
+    recipes: &[hirsel_core_layout::RecipeRow],
     facts: Option<&hirsel_core_ir::roles::Facts>,
     f: FuncId,
     sig: &Signature,
@@ -1578,7 +1578,7 @@ struct FunctionEmitter<'a> {
     call_layouts: Option<&'a hirsel_core_ir::native_layout::CallLayouts>,
     module: &'a Module,
     body: &'a Body,
-    recipes: &'a [hirsel_core_layout::Recipe],
+    recipes: &'a [hirsel_core_layout::RecipeRow],
     abi: abi::Return,
     has_status: bool,
     append_fast: bool,

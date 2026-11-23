@@ -188,7 +188,7 @@ fn tail_like(module: &Module, f: &Function, body: &Body, k: usize) -> bool {
 /// holds nothing that borrows the frames the transfer gives back.
 fn transfer_job(
     module: &Module,
-    recipes: &[hirsel_core_layout::Recipe],
+    recipes: &[hirsel_core_layout::RecipeRow],
     g: FuncId,
 ) -> Option<(TypeId, u64)> {
     let sig = &module.signatures[module.functions[g.index()].signature.index()];
@@ -975,7 +975,7 @@ fn homed_slots(
 
 fn place_layout(
     module: &Module,
-    recipes: &[hirsel_core_layout::Recipe],
+    recipes: &[hirsel_core_layout::RecipeRow],
     t: PlaceTy,
 ) -> Option<(u64, u64)> {
     match t {
@@ -1005,7 +1005,7 @@ fn round(x: u64, a: u64) -> u64 {
 /// areas `area`.
 fn shape(
     module: &Module,
-    recipes: &[hirsel_core_layout::Recipe],
+    recipes: &[hirsel_core_layout::RecipeRow],
     body: &Body,
     dest: Option<TypeId>,
     sites: BTreeMap<usize, Site>,
@@ -2207,7 +2207,7 @@ fn sites_of(body: &Body, calling: Calling<'_>, receives: bool) -> BTreeMap<usize
 /// without them.
 fn shaped(
     module: &Module,
-    recipes: &[hirsel_core_layout::Recipe],
+    recipes: &[hirsel_core_layout::RecipeRow],
     body: &Body,
     dest: Option<TypeId>,
     calling: Calling<'_>,

@@ -1,6 +1,6 @@
 //! Fixed-layout paths from a resource's payload to its owned foreign ordinals.
 use crate::{
-    Body, Carried, Encoding, FieldTy, Layout, Recipe, Repr, Row, Scalar, Shape, Tag, Ty, TypeRef,
+    Body, Carried, Encoding, FieldTy, Layout, RecipeRow, Repr, Row, Scalar, Shape, Tag, Ty, TypeRef,
 };
 
 /// A raw handle has an eight-byte carrier and a nominal kind encoded in its
@@ -21,7 +21,7 @@ pub fn foreign_kind(shape: &Shape) -> Option<&str> {
 /// A record per handle slot: offset, condition count, then its enclosing
 /// variant tests from outside in. Each test gives a tag and the required case.
 /// A nested owning resource releases its own fields.
-pub fn foreign_cleanup(shapes: &[Row], recipes: &[Recipe], resource: TypeRef) -> Vec<u64> {
+pub fn foreign_cleanup(shapes: &[Row], recipes: &[RecipeRow], resource: TypeRef) -> Vec<u64> {
     let mut words = Vec::new();
     if shapes.iter().any(|shape| foreign_kind(shape).is_some()) {
         paths(shapes, recipes, resource, 0, &mut Vec::new(), &mut words);
@@ -31,7 +31,7 @@ pub fn foreign_cleanup(shapes: &[Row], recipes: &[Recipe], resource: TypeRef) ->
 
 fn paths(
     shapes: &[Row],
-    recipes: &[Recipe],
+    recipes: &[RecipeRow],
     row: TypeRef,
     base: u64,
     conditions: &mut Vec<[u64; 7]>,

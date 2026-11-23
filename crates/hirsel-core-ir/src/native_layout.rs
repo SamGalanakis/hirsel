@@ -1,6 +1,6 @@
 use crate::{Inst, LayoutQuery, Loan, Module, Param, PlaceTy, Signature, TypeId};
 use hirsel_core_layout::{
-    Body, FieldTy, Handle, Layout, Recipe, Repr, Row, Scalar, Tag, Ty, TypeRef, field_size,
+    Body, FieldTy, Handle, Layout, RecipeRow, Repr, Row, Scalar, Tag, Ty, TypeRef, field_size,
 };
 use std::borrow::Cow;
 
@@ -12,7 +12,7 @@ impl LayoutQuery {
         }
     }
 
-    pub fn native(&self, shapes: &[Row], recipes: &[Recipe]) -> u64 {
+    pub fn native(&self, shapes: &[Row], recipes: &[RecipeRow]) -> u64 {
         match self {
             Self::FieldSize(field) => field_size(shapes, recipes, field).0,
             Self::HeldSize(ty) if shapes[ty.index()].repr == hirsel_core_layout::Repr::Region => {
@@ -42,7 +42,7 @@ impl LayoutQuery {
 /// Resolve physical operands only after the checked module has been published
 /// and its revision computed. The existing constant-based optimizations then
 /// work with the same values as the evaluator.
-pub fn resolve<'a>(module: &'a Module, recipes: &[Recipe]) -> Cow<'a, Module> {
+pub fn resolve<'a>(module: &'a Module, recipes: &[RecipeRow]) -> Cow<'a, Module> {
     if !module
         .functions
         .iter()
@@ -114,7 +114,7 @@ pub struct CallLayouts {
 /// one of them is not a scalar.
 fn scalar_leaves<'a>(
     shapes: &'a [Row],
-    recipes: &[Recipe],
+    recipes: &[RecipeRow],
     size: u64,
     fields: impl DoubleEndedIterator<Item = (u64, &'a FieldTy)>,
 ) -> Option<ScalarRecord> {
@@ -179,7 +179,7 @@ fn scalar_leaves<'a>(
 }
 
 impl CallLayouts {
-    pub fn new(shapes: &[Row], recipes: &[Recipe]) -> Self {
+    pub fn new(shapes: &[Row], recipes: &[RecipeRow]) -> Self {
         let mut records = vec![None; shapes.len()];
         let mut ok_results = vec![None; shapes.len()];
         for (i, shape) in shapes.iter().enumerate() {

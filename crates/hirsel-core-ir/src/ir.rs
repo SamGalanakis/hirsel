@@ -11,7 +11,7 @@
 use crate::decode::{DecodeBudget, DecodeError, DecodeLimit, DecodeResult};
 use hirsel_core_ids::{ContentHash, DefPath};
 pub use hirsel_core_layout::{Carried, Row, Scalar, Shape, Ty, Vector};
-use hirsel_core_layout::{Cleanup, FieldTy, FuncRef, Recipe, TypeRef, cleanup_class};
+use hirsel_core_layout::{Cleanup, FieldTy, FuncRef, RecipeRow, TypeRef, cleanup_class};
 use std::collections::HashMap;
 use std::marker::PhantomData;
 
@@ -828,7 +828,7 @@ impl AllocKind {
     }
     /// The cleanup class of the block (crate docs, "Cleanup classes"); `None` for
     /// region storage, which no edge cleans.
-    pub fn cleanup(&self, shapes: &[Row], recipes: &[Recipe]) -> Option<Cleanup> {
+    pub fn cleanup(&self, shapes: &[Row], recipes: &[RecipeRow]) -> Option<Cleanup> {
         match self {
             AllocKind::Own { edge } => cleanup_class(shapes, recipes, edge),
             AllocKind::Environment { .. } => Some(Cleanup::Fixed),
@@ -838,7 +838,7 @@ impl AllocKind {
     }
     /// Whether the block is terminal: the 8-byte payer prefix, freed with nothing
     /// to drop (crate docs, "Cleanup classes").
-    pub fn terminal(&self, shapes: &[Row], recipes: &[Recipe]) -> bool {
+    pub fn terminal(&self, shapes: &[Row], recipes: &[RecipeRow]) -> bool {
         self.cleanup(shapes, recipes) == Some(Cleanup::Terminal)
     }
 }

@@ -121,7 +121,7 @@ impl<'a> Forwarding<'a> {
     pub fn ending(
         &mut self,
         module: &Module,
-        recipes: &[hirsel_core_layout::Recipe],
+        recipes: &[hirsel_core_layout::RecipeRow],
         signature: &Signature,
         constants: &[Option<u64>],
         block: usize,

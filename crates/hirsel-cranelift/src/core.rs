@@ -96,7 +96,7 @@ pub(super) struct Compilation {
 
 pub(super) struct Tables<'a> {
     input: &'a c::Module,
-    layouts: &'a [hirsel_core_layout::Recipe],
+    layouts: &'a [hirsel_core_layout::RecipeRow],
     signatures: &'a [abi::Signature],
     call_layouts: &'a c::native_layout::CallLayouts,
     functions: &'a [cranelift_module::FuncId],
@@ -179,7 +179,7 @@ pub fn emit_object(
 /// corresponds to `input.types`; the backend reads it without recomputing layouts.
 pub fn emit_object_with_layouts(
     input: &c::Module,
-    layouts: &[hirsel_core_layout::Recipe],
+    layouts: &[hirsel_core_layout::RecipeRow],
     options: &Options<'_>,
     object_key: hirsel_core_ids::ContentHash,
 ) -> Result<Object> {
@@ -199,7 +199,7 @@ pub fn emit_object_with_layouts(
 #[doc(hidden)]
 pub fn emit_object_for_test(
     input: &c::Module,
-    layouts: &[hirsel_core_layout::Recipe],
+    layouts: &[hirsel_core_layout::RecipeRow],
     options: &Options<'_>,
     object_key: hirsel_core_ids::ContentHash,
 ) -> Result<Object> {
@@ -210,7 +210,7 @@ pub fn emit_object_for_test(
 #[doc(hidden)]
 pub fn emit_object_for_test_observed(
     input: &c::Module,
-    layouts: &[hirsel_core_layout::Recipe],
+    layouts: &[hirsel_core_layout::RecipeRow],
     options: &Options<'_>,
     object_key: hirsel_core_ids::ContentHash,
     observe_charge: bool,
@@ -231,7 +231,7 @@ pub fn emit_object_for_test_observed(
 #[doc(hidden)]
 pub fn emit_object_profiled(
     input: &c::Module,
-    layouts: &[hirsel_core_layout::Recipe],
+    layouts: &[hirsel_core_layout::RecipeRow],
     options: &Options<'_>,
     object_key: hirsel_core_ids::ContentHash,
     observer: &impl profile::Observer,
@@ -253,7 +253,7 @@ pub fn emit_object_profiled(
 pub fn emit_object_with_charge_observation(
     input: &c::Module,
     symbols: &[String],
-    layouts: &[hirsel_core_layout::Recipe],
+    layouts: &[hirsel_core_layout::RecipeRow],
     options: &Options<'_>,
     object_key: hirsel_core_ids::ContentHash,
     observe_charge: bool,
@@ -364,7 +364,7 @@ fn descriptors(
 fn emit(
     input: &c::Module,
     symbols: &[String],
-    layouts: &[hirsel_core_layout::Recipe],
+    layouts: &[hirsel_core_layout::RecipeRow],
     options: &Options<'_>,
     object_key: hirsel_core_ids::ContentHash,
     trace_drops: bool,

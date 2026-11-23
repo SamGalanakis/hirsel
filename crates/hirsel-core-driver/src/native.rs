@@ -1408,7 +1408,7 @@ fn bound_entry_abi(
             .ok_or("entry result has no emitted destination")?;
         let recipes =
             hirsel_core_layout::compute(&module.types).map_err(|_| "invalid entry layout")?;
-        let recipe = recipes[dest.index()].clone();
+        let recipe = hirsel_core_layout::Recipe::clone(&recipes[dest.index()]);
         let exit_offset = if decl.exit {
             let hirsel_core_layout::Body::Variant(cases) = &module.types[dest.index()].body else {
                 return Err("entry Result needs a variant");
@@ -2384,9 +2384,9 @@ fn f5 = n5 g5 extern
             );
         }
         let plan_abi = EntryAbi {
-            recipe: hirsel_core_layout::compute(&module.types)
-                .unwrap()
-                .remove(0),
+            recipe: hirsel_core_layout::Recipe::clone(
+                &hirsel_core_layout::compute(&module.types).unwrap()[0],
+            ),
             exit_offset: None,
             error_text: None,
             parameters: vec![EntryParameter {

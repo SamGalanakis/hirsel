@@ -274,7 +274,7 @@ pub fn derive(
 
 struct Derive<'a> {
     module: &'a mut Module,
-    recipes: Vec<hirsel_core_layout::Recipe>,
+    recipes: Vec<hirsel_core_layout::RecipeRow>,
     of: &'a DefPath,
     rows: &'a Rows,
 }

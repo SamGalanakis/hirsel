@@ -555,7 +555,7 @@ pub(super) fn inline_ordered(module: &Module, body: &mut Body) -> bool {
 
 pub(super) struct Derive<'a> {
     pub(super) module: &'a mut Module,
-    pub(super) recipes: Vec<Recipe>,
+    pub(super) recipes: Vec<RecipeRow>,
     active: Vec<(TypeId, KeyOp)>,
     /// The one operation whose body is derived; None derives every one reached.
     only: Option<(TypeId, KeyOp)>,

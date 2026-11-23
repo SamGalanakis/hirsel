@@ -203,7 +203,7 @@ fn own_layout_is_resolved_after_the_body_hash() {
         (24, vec![0, 8, 16], vec![5, 0, 0, 0, 0, 0, 0, 0, 8, 7, 6, 5, 4, 3, 2, 1, 10, 9, 0, 0, 0, 0, 0, 0]),
         (16, vec![10, 0, 8], vec![8, 7, 6, 5, 4, 3, 2, 1, 10, 9, 5, 0, 0, 0, 0, 0]),
     ] {
-        let Layout::Fixed(layout) = &mut layouts[ty.index()].layout else { unreachable!() };
+        let Layout::Fixed(layout) = &mut std::sync::Arc::make_mut(&mut layouts[ty.index()]).layout else { unreachable!() };
         layout.size = size_bytes;
         layout.offsets = vec![offsets];
         assert_eq!(data.native(&module.types, &layouts), (8, expected.into()));

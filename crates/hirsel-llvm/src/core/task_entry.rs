@@ -5,7 +5,7 @@ use super::*;
 
 pub(super) fn input_offset(
     module: &Module,
-    recipes: &[hirsel_core_layout::Recipe],
+    recipes: &[hirsel_core_layout::RecipeRow],
     x: TypeId,
 ) -> u64 {
     hirsel_core_layout::field_size(
@@ -26,7 +26,7 @@ pub(super) fn transfer_entry_name(x: TypeId, r: TypeId) -> String {
 pub(super) fn emit(
     module: &Module,
     target: Target,
-    recipes: &[hirsel_core_layout::Recipe],
+    recipes: &[hirsel_core_layout::RecipeRow],
     call_layouts: &hirsel_core_ir::native_layout::CallLayouts,
     failures: &failure::Failures,
     facts: bool,

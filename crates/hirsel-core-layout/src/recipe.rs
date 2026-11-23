@@ -32,7 +32,28 @@ pub struct Recipe {
     pub drop: Option<DropRecipe>,
 }
 
+/// A row of a recipe table. Tables share recipes as they share rows ([`Row`]): a
+/// recipe that names no row is the same in every table that holds its row, and a
+/// write copies a shared recipe first (`Arc::make_mut`).
+pub type RecipeRow = std::sync::Arc<Recipe>;
+
 impl Recipe {
+    /// Whether the recipe names a row, so [`Self::map_refs`] may change it.
+    pub fn names_row(&self) -> bool {
+        let compact = match &self.layout {
+            Layout::Compact(set) => set
+                .at
+                .iter()
+                .flat_map(|c| c.fields.iter().flatten())
+                .any(|field| matches!(field.size, Size::Inline(_))),
+            Layout::Fixed(_) => false,
+        };
+        compact
+            || self
+                .drop
+                .as_ref()
+                .is_some_and(|drop| drop.fields.iter().flatten().any(|f| f.ty.names_row()))
+    }
     /// Translate a recipe's shape references into the table where it will be used.
     pub fn map_refs(&mut self, mut map: impl FnMut(TypeRef) -> TypeRef) {
         if let Layout::Compact(set) = &mut self.layout {
@@ -355,7 +376,7 @@ fn align_up(n: u64, a: u64) -> u64 {
 }
 
 /// Recipes for every shape of a module, indexed like `shapes`.
-pub fn compute(shapes: &[Row]) -> Result<Vec<Recipe>, LayoutError> {
+pub fn compute(shapes: &[Row]) -> Result<Vec<RecipeRow>, LayoutError> {
     let mut recipes = vec![];
     extend(shapes, &mut recipes)?;
     Ok(recipes)
@@ -364,7 +385,7 @@ pub fn compute(shapes: &[Row]) -> Result<Vec<Recipe>, LayoutError> {
 /// Compute only the appended shapes. `recipes` describes an unchanged prefix of
 /// `shapes`; neither that prefix nor its references may change between extensions.
 /// A refused suffix leaves the existing recipes intact.
-pub fn extend(shapes: &[Row], recipes: &mut Vec<Recipe>) -> Result<(), LayoutError> {
+pub fn extend(shapes: &[Row], recipes: &mut Vec<RecipeRow>) -> Result<(), LayoutError> {
     RecipeScratch::default().extend(shapes, recipes)
 }
 
@@ -374,7 +395,7 @@ pub struct RecipeScratch {
     state: Vec<State>,
     order: Vec<TypeRef>,
     stack: Vec<TypeRef>,
-    suffix: Vec<Option<Recipe>>,
+    suffix: Vec<Option<RecipeRow>>,
     effects: std::cell::RefCell<Effects>,
     #[cfg(test)]
     pub(crate) initialized_rows: usize,
@@ -382,8 +403,12 @@ pub struct RecipeScratch {
 impl RecipeScratch {
     /// Compute the new suffix, retaining the prior recipes on refusal. Visit state
     /// is indexed relative to that suffix; references into the prefix are done.
-    pub fn extend(&mut self, shapes: &[Row], recipes: &mut Vec<Recipe>) -> Result<(), LayoutError> {
-        self.extend_with(shapes, recipes, |_, make| make())
+    pub fn extend(
+        &mut self,
+        shapes: &[Row],
+        recipes: &mut Vec<RecipeRow>,
+    ) -> Result<(), LayoutError> {
+        self.extend_with(shapes, recipes, |_, make| make().map(RecipeRow::new))
     }
 
     /// Extend using the caller's owner for layout recipes, with the same dependency
@@ -391,11 +416,11 @@ impl RecipeScratch {
     pub fn extend_with(
         &mut self,
         shapes: &[Row],
-        recipes: &mut Vec<Recipe>,
+        recipes: &mut Vec<RecipeRow>,
         mut resolve: impl FnMut(
             TypeRef,
             &dyn Fn() -> Result<Recipe, LayoutError>,
-        ) -> Result<Recipe, LayoutError>,
+        ) -> Result<RecipeRow, LayoutError>,
     ) -> Result<(), LayoutError> {
         let prefix = recipes.len();
         let appended = shapes.len() - prefix;
@@ -458,8 +483,8 @@ impl RecipeScratch {
 }
 
 struct Computed<'a> {
-    prefix: &'a [Recipe],
-    suffix: &'a mut [Option<Recipe>],
+    prefix: &'a [RecipeRow],
+    suffix: &'a mut [Option<RecipeRow>],
     effects: &'a std::cell::RefCell<Effects>,
 }
 
@@ -647,9 +672,9 @@ fn owned_rows(shapes: &[Row], send: &mut Sendable, ty: &FieldTy, rows: &mut Vec<
 impl Computed<'_> {
     fn get(&self, t: TypeRef) -> Option<&Recipe> {
         if t.index() < self.prefix.len() {
-            Some(&self.prefix[t.index()])
+            Some(&*self.prefix[t.index()])
         } else {
-            self.suffix[t.index() - self.prefix.len()].as_ref()
+            self.suffix[t.index() - self.prefix.len()].as_deref()
         }
     }
 }
@@ -1436,7 +1461,7 @@ pub struct MapEntry {
     pub value: u64,
 }
 
-pub fn map_entry(shapes: &[Row], recipes: &[Recipe], k: &FieldTy, v: &FieldTy) -> MapEntry {
+pub fn map_entry(shapes: &[Row], recipes: &[RecipeRow], k: &FieldTy, v: &FieldTy) -> MapEntry {
     let word = (8, 8, 8);
     let measured = [
         word,
@@ -1457,14 +1482,14 @@ pub fn map_entry(shapes: &[Row], recipes: &[Recipe], k: &FieldTy, v: &FieldTy) -
 
 /// Native size, native alignment and logical size of an own-held field of type `ty`
 /// whose shape is already accepted: what drop glue needs for an array's stride.
-pub fn field_size(shapes: &[Row], recipes: &[Recipe], ty: &FieldTy) -> (u64, u64, u64) {
+pub fn field_size(shapes: &[Row], recipes: &[RecipeRow], ty: &FieldTy) -> (u64, u64, u64) {
     held_size(shapes, recipes, Repr::Own, ty)
 }
 
 /// [`field_size`] of a field held by a value whose representation is `holder`.
 pub fn held_size(
     shapes: &[Row],
-    recipes: &[Recipe],
+    recipes: &[RecipeRow],
     holder: Repr,
     ty: &FieldTy,
 ) -> (u64, u64, u64) {
@@ -1525,7 +1550,7 @@ pub enum Cleanup {
 
 /// Whether cleaning the block `edge` owns is a free with nothing to drop
 /// ([`cleanup_class`] is [`Cleanup::Terminal`]).
-pub fn terminal(shapes: &[Row], recipes: &[Recipe], edge: &FieldTy) -> bool {
+pub fn terminal(shapes: &[Row], recipes: &[RecipeRow], edge: &FieldTy) -> bool {
     cleanup_class(shapes, recipes, edge) == Some(Cleanup::Terminal)
 }
 
@@ -1534,7 +1559,7 @@ pub fn terminal(shapes: &[Row], recipes: &[Recipe], edge: &FieldTy) -> bool {
 /// counted payload whose type has no drop recipe, `Seq` storage of elements that need no
 /// drop (`String` and `Bytes` buffers, a `List` of plain elements), or `Map` storage whose
 /// keys and values need none. Derived, never stored.
-pub fn cleanup_class(shapes: &[Row], recipes: &[Recipe], edge: &FieldTy) -> Option<Cleanup> {
+pub fn cleanup_class(shapes: &[Row], recipes: &[RecipeRow], edge: &FieldTy) -> Option<Cleanup> {
     let drop = |t: TypeRef| recipes[t.index()].drop.is_some();
     Some(match edge {
         FieldTy::Box(t) | FieldTy::Rc(t) | FieldTy::Arc(t) => {
@@ -1868,7 +1893,7 @@ fn packed_plain(shapes: &[Row], t: TypeRef) -> Result<Option<u64>, ()> {
 /// the value's start. This is the definition both native engines and the evaluator
 /// implement; it is also how tests derive expected extents of hand-built blobs.
 pub fn compact_extent(
-    recipes: &[Recipe],
+    recipes: &[RecipeRow],
     ty: TypeRef,
     w: Width,
     base: u64,
@@ -1895,7 +1920,7 @@ pub fn compact_extent(
 
 /// Absolute start of every field of `row` for a value at `base`.
 pub fn compact_starts(
-    recipes: &[Recipe],
+    recipes: &[RecipeRow],
     c: &Compact,
     row: &[CField],
     base: u64,
@@ -1912,7 +1937,7 @@ pub fn compact_starts(
 }
 
 fn field_ends(
-    recipes: &[Recipe],
+    recipes: &[RecipeRow],
     c: &Compact,
     row: &[CField],
     base: u64,

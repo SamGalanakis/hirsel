@@ -178,7 +178,12 @@ fn cell(
     root
 }
 
-pub(super) fn promote(module: &Module, recipes: &[Recipe], body: &mut Body, dest: Option<SlotId>) {
+pub(super) fn promote(
+    module: &Module,
+    recipes: &[RecipeRow],
+    body: &mut Body,
+    dest: Option<SlotId>,
+) {
     let prune_reads = scalar_copies(module, recipes, body);
     let mut aliases = (0..body.values.len())
         .map(|i| ValueId(i as u32))

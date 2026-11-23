@@ -33,7 +33,7 @@ pub(super) struct Function<'a, 'b, 'c> {
     pub body: &'c Body,
     pub input: &'c c::Module,
     pub instance: &'c InstanceKey,
-    pub layouts: &'c [hirsel_core_layout::Recipe],
+    pub layouts: &'c [hirsel_core_layout::RecipeRow],
     pub values: Vec<Value>,
     /// The upper 16 bytes of each 32-byte vector value.
     pub high: Vec<Value>,

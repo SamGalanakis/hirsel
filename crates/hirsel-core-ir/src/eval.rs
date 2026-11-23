@@ -17,8 +17,8 @@ use crate::*;
 use hirsel_core_ids::ContentHash;
 use hirsel_core_ids::host_op::{DIR_READ_ONLY, needs_writable_dir};
 use hirsel_core_layout::{
-    Body as Shaped, Cleanup, FieldTy, Handle, Layout, Recipe, Repr, TypeRef, charge, cleanup_class,
-    compute, field_size, map_entry,
+    Body as Shaped, Cleanup, FieldTy, Handle, Layout, RecipeRow, Repr, TypeRef, charge,
+    cleanup_class, compute, field_size, map_entry,
 };
 use hirsel_core_net::{Name, SecretGrant, SecretPolicy, SecretUse};
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -1000,7 +1000,7 @@ enum At {
 
 struct Machine<'m> {
     m: &'m Module,
-    recipes: Vec<Recipe>,
+    recipes: Vec<RecipeRow>,
     mem: Blocks,
     root: Option<Limit>,
     next_step_bound: u64,
@@ -2037,7 +2037,7 @@ fn cause(r: RaiseCause) -> &'static str {
 }
 
 impl<'m> Machine<'m> {
-    fn new(m: &'m Module, recipes: Vec<Recipe>, limit: u64, input: &WorldInput<'_>) -> Self {
+    fn new(m: &'m Module, recipes: Vec<RecipeRow>, limit: u64, input: &WorldInput<'_>) -> Self {
         let (s0, s1, map_strong_key) = hirsel_core_layout::map_index::derive(&input.map_hash_key);
         Self {
             next_step_bound: 1,

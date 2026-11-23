@@ -4,7 +4,7 @@
 //! module's layout rows, giving the [`Show`] the run renders.
 use hirsel_core_front::{DeclBody, Role, TyId, TyKind, Types};
 use hirsel_core_layout::show::{Case, Node, Part, Show};
-use hirsel_core_layout::{Body, FieldTy, Layout, Recipe, Row, Scalar, TypeRef, field_size};
+use hirsel_core_layout::{Body, FieldTy, Layout, RecipeRow, Row, Scalar, TypeRef, field_size};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -138,7 +138,7 @@ impl Describe<'_> {
 pub(crate) fn place(
     shown: &ErrorShown,
     shapes: &[Row],
-    recipes: &[Recipe],
+    recipes: &[RecipeRow],
     dest: usize,
 ) -> Result<Show, &'static str> {
     let (Body::Variant(cases), Layout::Fixed(result)) = (&shapes[dest].body, &recipes[dest].layout)
@@ -172,7 +172,7 @@ pub(crate) fn place(
 struct Place<'a> {
     shown: &'a ErrorShown,
     shapes: &'a [Row],
-    recipes: &'a [Recipe],
+    recipes: &'a [RecipeRow],
     nodes: Vec<Node>,
     placed: HashMap<(u32, TypeRef), u32>,
 }

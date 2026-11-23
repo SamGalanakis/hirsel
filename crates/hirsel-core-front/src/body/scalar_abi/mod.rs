@@ -171,7 +171,7 @@ impl CallPlan {
 
 pub(super) fn rewrite(
     module: &Module,
-    recipes: &[Recipe],
+    recipes: &[RecipeRow],
     body: &mut Body,
     old_signature: SigId,
     own: &Plan,

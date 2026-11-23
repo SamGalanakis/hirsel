@@ -2,7 +2,7 @@
 //! at a time to the runtime's intrusive worklist, so pointer depth uses no stack.
 use super::*;
 use cranelift_codegen::ir::{MemFlagsData, Value, condcodes::IntCC};
-use hirsel_core_layout::{FieldTy, Layout, Recipe, Repr, TypeRef, charge, field_size};
+use hirsel_core_layout::{FieldTy, Layout, Recipe, RecipeRow, Repr, TypeRef, charge, field_size};
 use std::collections::BTreeSet;
 mod resume;
 use resume::plan_type;
@@ -31,7 +31,7 @@ impl Glues {
     pub fn declare(
         object: &mut ObjectModule,
         input: &c::Module,
-        layouts: &[Recipe],
+        layouts: &[RecipeRow],
     ) -> Result<Self> {
         let mut roots = BTreeSet::new();
         fn counted(ty: &FieldTy, roots: &mut BTreeSet<usize>) {
@@ -96,7 +96,7 @@ impl Glues {
         // by its recipe, whose fields are drained descendants too.
         fn normal(
             t: usize,
-            layouts: &[Recipe],
+            layouts: &[RecipeRow],
             resources: &BTreeSet<usize>,
             needed: &mut BTreeSet<usize>,
             roots: &mut BTreeSet<usize>,
@@ -130,7 +130,7 @@ impl Glues {
             }
             fn field(
                 f: &FieldTy,
-                layouts: &[Recipe],
+                layouts: &[RecipeRow],
                 resources: &BTreeSet<usize>,
                 needed: &mut BTreeSet<usize>,
                 roots: &mut BTreeSet<usize>,
@@ -179,7 +179,7 @@ impl Glues {
         // whose fields are descendants (`resourced`).
         fn descendants(
             t: usize,
-            layouts: &[Recipe],
+            layouts: &[RecipeRow],
             resources: &BTreeSet<usize>,
             roots: &mut BTreeSet<usize>,
             visited: &mut BTreeSet<usize>,
@@ -193,7 +193,7 @@ impl Glues {
             }
             fn field(
                 f: &FieldTy,
-                layouts: &[Recipe],
+                layouts: &[RecipeRow],
                 resources: &BTreeSet<usize>,
                 roots: &mut BTreeSet<usize>,
                 visited: &mut BTreeSet<usize>,

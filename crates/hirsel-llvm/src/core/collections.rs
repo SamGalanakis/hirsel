@@ -11,7 +11,7 @@ struct Entries<'a> {
     state: Option<u64>,
 }
 impl<'a> Entries<'a> {
-    fn new(module: &Module, recipes: &[hirsel_core_layout::Recipe], field: &'a FieldTy) -> Self {
+    fn new(module: &Module, recipes: &[hirsel_core_layout::RecipeRow], field: &'a FieldTy) -> Self {
         match field {
             FieldTy::Seq(e) => {
                 let (stride, _, logical) = field_size(&module.types, recipes, e);
@@ -215,7 +215,7 @@ impl FunctionEmitter<'_> {
 pub(super) fn glue(
     module: &Module,
     target: Target,
-    recipes: &[hirsel_core_layout::Recipe],
+    recipes: &[hirsel_core_layout::RecipeRow],
     failures: &failure::Failures,
     facts: bool,
     collections: &[FieldTy],

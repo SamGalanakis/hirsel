@@ -34,7 +34,7 @@ use hirsel_core_ir::{
     TypeId, UnaryOp, ValueId, Vector,
 };
 use hirsel_core_layout::{
-    Carried, FieldTy, Handle, Layout, Recipe, Repr as LRepr, Scalar, TypeRef,
+    Carried, FieldTy, Handle, Layout, Recipe, RecipeRow, Repr as LRepr, Scalar, TypeRef,
 };
 use hirsel_core_resolve::{CausalRole, Cause, RefusalDetail};
 use hirsel_core_resolve::{NameScope, Refusal, Target};
@@ -189,7 +189,7 @@ pub struct Emitter {
     /// Successful row lookups for types in the program's immutable type arena.
     program_type_rows: HashMap<TyId, TypeId>,
     /// The recipes of `module.types`, recomputed when rows were added.
-    recipes: Vec<Recipe>,
+    recipes: Vec<RecipeRow>,
     recipe_scratch: hirsel_core_layout::RecipeScratch,
     generic_names: std::collections::BTreeMap<TypeId, NameRecipe>,
     generic_codecs: std::collections::BTreeMap<TypeId, templates::CodecRecipe>,
@@ -660,7 +660,7 @@ impl Emitter {
                 }
             }
         }
-        self.recipes.get(id.index())
+        self.recipes.get(id.index()).map(|r| &**r)
     }
     /// How a value of `ty` is carried: a scalar, or a place of a fixed layout. A value
     /// whose cleanup may run a finalizer (a resource, or one held inside) is not built.

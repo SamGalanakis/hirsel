@@ -8,8 +8,8 @@ use crate::Program;
 use crate::decls::{DeclBody, Repr, Role};
 use crate::types::*;
 use hirsel_core_layout::{
-    Body, Carried, Case, Field, FieldTy, FuncRef, Handle, LayoutError, Recipe, Repr as LRepr, Row,
-    Scalar, Shape, Ty, TypeRef, compute,
+    Body, Carried, Case, Field, FieldTy, FuncRef, Handle, LayoutError, Recipe, RecipeRow,
+    Repr as LRepr, Row, Scalar, Shape, Ty, TypeRef, compute,
 };
 use rustc_hash::FxHashMap as HashMap;
 
@@ -24,7 +24,10 @@ pub(crate) type ShapeNames = HashMap<String, TypeRef>;
 pub(crate) struct RecipeLayouts(HashMap<String, RecipeLayout>);
 
 struct RecipeLayout {
-    recipe: Recipe,
+    /// The recipe with each row it names numbered by its slot in `rows`, and the
+    /// finalizer of the module that built it. One that names no row is shared by
+    /// every module whose row has its finalizer.
+    recipe: RecipeRow,
     rows: Vec<String>,
 }
 
@@ -35,24 +38,37 @@ impl RecipeLayouts {
         names: &ShapeNames,
         row: TypeRef,
         make: &dyn Fn() -> Result<Recipe, LayoutError>,
-    ) -> Result<Recipe, LayoutError> {
+    ) -> Result<RecipeRow, LayoutError> {
         let shape = &shapes[row.index()];
         if let Some(layout) = self.0.get(&shape.name) {
-            let mut recipe = layout.recipe.clone();
+            let finalized = |r: &Recipe| {
+                r.drop
+                    .as_ref()
+                    .is_none_or(|d| d.finalizer == shape.finalizer)
+            };
+            if layout.rows.is_empty() && finalized(&layout.recipe) {
+                return Ok(RecipeRow::clone(&layout.recipe));
+            }
+            let mut recipe = Recipe::clone(&layout.recipe);
             recipe.map_refs(|r| names[&layout.rows[r.index()]]);
             if let Some(drop) = &mut recipe.drop {
                 drop.finalizer = shape.finalizer;
             }
-            return Ok(recipe);
+            return Ok(RecipeRow::new(recipe));
         }
-        let result = make()?;
-        let mut recipe = result.clone();
+        let result = RecipeRow::new(make()?);
         let mut rows = vec![];
-        recipe.map_refs(|r| {
-            let slot = TypeRef(rows.len() as u32);
-            rows.push(shapes[r.index()].name.clone());
-            slot
-        });
+        let recipe = if result.names_row() {
+            let mut recipe = Recipe::clone(&result);
+            recipe.map_refs(|r| {
+                let slot = TypeRef(rows.len() as u32);
+                rows.push(shapes[r.index()].name.clone());
+                slot
+            });
+            RecipeRow::new(recipe)
+        } else {
+            RecipeRow::clone(&result)
+        };
         self.0
             .insert(shape.name.clone(), RecipeLayout { recipe, rows });
         Ok(result)
@@ -896,7 +912,7 @@ pub(crate) fn recipes(p: &mut Program) {
     match compute(s.shapes) {
         Ok(recipes) => {
             for (d, r) in roots {
-                p.decls[d].summary.recipe = Some(recipes[r.index()].clone());
+                p.decls[d].summary.recipe = Some(Recipe::clone(&recipes[r.index()]));
             }
         }
         Err(LayoutError::NativeRange { ty, field, bytes }) => {

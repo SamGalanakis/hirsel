@@ -2,7 +2,7 @@ use super::*;
 
 /// Rewrite scalar-sized copies before promoting places. Byte-run copies remain
 /// byte-run copies; their byte count need not be one element's size.
-pub(super) fn scalar_copies(module: &Module, recipes: &[Recipe], body: &mut Body) -> bool {
+pub(super) fn scalar_copies(module: &Module, recipes: &[RecipeRow], body: &mut Body) -> bool {
     let mut removed_drop = false;
     let constants: HashMap<_, _> = body
         .insts
@@ -315,7 +315,7 @@ pub(super) fn scalar_views(module: &Module, body: &mut Body, aliases: &mut Vec<V
 /// A niche variant still goes through Case, including its dataful case.
 fn direct_word_tag(
     module: &Module,
-    recipes: &[Recipe],
+    recipes: &[RecipeRow],
     place: PlaceTy,
 ) -> Option<(Ty, hirsel_core_layout::Tag)> {
     let PlaceTy::Declared(row) = place else {

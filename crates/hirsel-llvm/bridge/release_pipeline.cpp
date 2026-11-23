@@ -609,7 +609,9 @@ extern "C" void hirsel_llvm_align_release_functions(LLVMModuleRef module) {
     for (Function &f : *unwrap(module)) {
         if (f.isDeclaration()) continue;
         if (f.hasFnAttribute(Attribute::Cold)) {
-            if (!f.hasSection()) f.setSection((Twine(".text.unlikely.") + f.getName()).str());
+            // Let the emitter give each definition its own cold section.
+            // An explicit section would make a lending library unsplittable.
+            if (!f.hasSection()) f.setSectionPrefix("unlikely");
             continue;
         }
         if (f.hasOptSize() || f.getAlign().valueOrOne() >= Align(64)) continue;

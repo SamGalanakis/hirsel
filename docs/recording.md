@@ -84,12 +84,24 @@ and every task the run starts belongs to it.
 **Canonical arguments.** An issue's arguments of 16 bytes or fewer are stored literally,
 and longer ones as their xxh3-64 digest.
 
+**Spare capacity.** An issue that reads into a buffer (a listing read, a positioned read,
+`RESOLVE`, `DGRAM_RECV`, `stdin.read`, a credential fetch) records its buffer's spare
+capacity, but a replay does not compare the replaying buffer's spare capacity with the
+recorded one. It requires only that the recorded delivery fits: the bytes, records or
+addresses delivered are at most the replaying buffer's spare capacity, and a replay whose
+buffer is too small for the recorded delivery ends `Diverged` at that issue (RL2). So a
+buffer that grew or shrank between builds, by a capacity rounding or another growth
+policy, replays as long as each delivery still fits. A delivery that contradicts the
+recorded room, such as a datagram whose length and truncation flag disagree with the
+recorded spare capacity, is still `Corrupt`, because the room it is checked against is the
+recorded one.
+
 **Directory and positioned file operations.** Narrowing and opening a listing
 deliver new object ordinals. Each listing read checks the handle ordinal and
-spare capacity, then supplies whole records in the recorded order. Stat
+that the records fit its spare capacity, then supplies whole records in the recorded order. Stat
 operations supply kind, size and signed modification nanoseconds. Positioned
-I/O checks the file ordinal, offset, and spare capacity or input bytes, then
-supplies the read bytes or the committed write count.
+I/O checks the file ordinal, offset, and input bytes, and for a read that the bytes fit
+its spare capacity, then supplies the read bytes or the committed write count.
 
 **Sockets.** The run checks each LISTEN and CONNECT against its source Net rules, and a
 recording records a denied outcome as the delivery the run received. It records the bound
@@ -124,8 +136,13 @@ them may contain such values.
 | `DGRAM_RECV` | datagram ordinal; spare capacity; `until` | the appended bytes, the packet's length and the truncation flag, or the error |
 | `CLOSE` of a `Proc`, pipe half or Unix socket | the ordinal and part, as for every dropped host handle | the outcome |
 
-A replay starts no process and opens no socket. It checks each `CLOSE` at its position, so a moved
-drop diverges there (RL2). It then changes local ownership only: nothing is killed,
+A replay starts no process and opens no socket. It matches each `CLOSE` by its ordinal and
+part, not by its position among the frames: a handle's drop may come earlier or later than
+it did in the recording, because when a value is dropped is not an observation the
+program's meaning fixes. Ordinals are allocated in delivery order and never reused, so the
+match is exact. A `CLOSE` the recording does not hold for that ordinal and part, or a
+recorded `CLOSE` whose handle the replay never drops before the run ends, ends the replay
+`Diverged`, the second at the run's end (RL2). It then changes local ownership only: nothing is killed,
 closed or unlinked on the host. A delivery that its issue could not have produced, such as a
 packet whose length and flag contradict its room, is `Corrupt`
 ([EXEC-8](spec/exec.md#exec-8-exec-at-the-replay-point-and-served-exec)).
@@ -207,8 +224,21 @@ metadata is the recorded value, never the digest of the replaying executable.
 identity, entry code revision ([PROG-9](spec/programs.md#prog-9-code-descriptors)),
 argument snapshot, root limit or charge policy differs from the replaying build's, and one
 whose header is damaged. The code revision covers the reachable checked code, not the engine
-or the CPU's vector level, so a recording replays on either engine and on any CPU the build
-supports. It exits 2 with `replay: refused: REASON`.
+or the CPU's vector level, so admission accepts a recording on either engine and on any CPU
+the build supports. It exits 2 with `replay: refused: REASON`.
+
+**Another build (2026-11-23, Spec Q1).** Steps and slice ends are a build's own
+([SEM-8](spec/semantics.md#sem-8-determinism), [CAP-9](spec/capabilities.md#cap-9-recording-is-outside-the-program)):
+the same program may take a different number of steps on another engine or optimisation
+level, so its slices may end at other points and a step bound may stop it elsewhere. A
+recording build is the same build as the build without recording, and replay on that build
+is exact. A replay on another build of the same revision is admitted and is exact for a run
+that took no slice end and was stopped by no step bound. For any other run it may end
+`Diverged` where the two builds' steps first differ: a scheduler choice made at a slice end,
+or an `OutOfTime` at another point, is then not the one recorded. When the replaying
+executable's digest differs from the recorded launch metadata's, the replay writes
+`replay: build differs` first, so such a divergence is attributed to the build and not read
+as a bug in the program.
 
 **Across revisions.** `hirsel replay app --tape PATH --diagnose` admits a recording of
 another code revision and still refuses the other differences. It writes
@@ -270,20 +300,22 @@ recorded outcome.
 
 ## Format
 
-A recording file is a **tape** in format 11, which `crates/hirsel-tape-format` owns. Format 7
-added the run's Map hash key to the header. Format 8 adds the terminal byte to stream grants
+A recording file is a **tape** in format 12, which `crates/hirsel-tape-format` owns. Format 7
+added the run's Map hash key to the header, and format 12 removes it (below). Format 8 adds the terminal byte to stream grants
 and adds the SCRAM frames described in [TLS-6](spec/tls.md#tls-6-scram-sha-256). Format 9
 writes each Secret grant's policy as its canonical set of uses
 ([TLS-5](spec/tls.md#tls-5-secrets)). Format 10 gives `SEND_SECRET` the list of
 designations, the `wire` and the `marks` of one message. Format 11 adds the `Cred` grant
 record and the credential fetch frames ([TLS-7](spec/tls.md#tls-7-credential-grants)).
-The format is not part of the language and a replay reads only tapes its own build admits,
+Format 12 removes the Map hash key from the header; a replay refuses a tape of an earlier
+format. The format is not part of the language and a replay reads only tapes its own build admits,
 and its pinned executable reads that layout. The host uses the checked block-zero prefix
 through the launch arguments to find and verify the pin.
 
-- The header ends with the run's 16-byte Map hash key. Replay restores it before starting
-  any task. The Map placement salts and strong placement key are derived from it, not recorded
-  ([PROG-11](spec/programs.md#prog-11-map-index)). Call tape fixtures reserve this field as sixteen zero bytes.
+- The header holds no Map hash key. Every run, a replay included, draws its own key from
+  host entropy at entry, and no observable depends on it
+  ([SEM-5](spec/semantics.md#sem-5-maps), [CAP-8](spec/capabilities.md#cap-8-the-replay-point)),
+  so a replay supplies nothing for it and compares nothing with it.
 - The header has no mode byte. Its grant snapshot stores the run's root Net rules in order
   and with duplicates; each address rule occupies 23 bytes.
 - The `Tls` rule record holds the direction byte 2; the trust byte, followed by 32 bytes of
@@ -325,7 +357,7 @@ recording. It runs against a controlled provider that the run's configuration ch
 | law | bug | oracle and setup |
 |---|---|---|
 | **RL1** recording changes nothing | recording machinery that adds a charge, a step, a poll or a second read, or leaks into a build without recording | For a corpus of small programs with scripted providers and ordered senders, run the build without recording, the recording build with recording off and the same build with recording on, on both engines. Their outputs, outcomes, cause sites and chains, `Capacity` refusals, step counts and provider call logs are equal. The executable built without recording defines no symbol of the recording runtime. |
-| **RL2** a divergence ends the replay at its position | a replay that continues past a mismatch, or reports it to the program | Record a run, then replay it with the program edited to (a) drop a handle at another point, (b) omit its last send and (c) send other bytes, each still returning the recorded result. Each replay ends `Diverged` at the hand-counted frame position, exits 1, and its scripted provider records zero calls. |
+| **RL2** a divergence ends the replay at its position | a replay that continues past a mismatch, or reports it to the program | Record a run, then replay it with the program edited to (a) keep to the end a handle the recording dropped (its recorded `CLOSE` never comes: `Diverged` at the run's end), (b) omit its last send and (c) send other bytes, each still returning the recorded result, and (d) read into a buffer too small for a recorded delivery. Each replay ends `Diverged` at the hand-counted frame position, exits 1, and its scripted provider records zero calls. Replays with the program edited to (e) drop a handle at another point and (f) read into a larger buffer, each still delivering the recorded bytes, end `Sealed` (2026-11-23, Spec Q5). |
 | **RL3** replay is offline | replay reaching the host or needing keys | Record an HTTPS GET against the loopback server. Replay it with a refuse-all inner provider, the server stopped, and the roots file removed. The response bytes, the protocol and the peer digest are equal to the recorded run's, and the inner provider records zero calls. |
 | **RL4** replay without the secret | replay reading the secret's source | Replay TL10's recording ([TLS](spec/tls.md#laws)) with the environment variable unset. The run starts. Its outputs equal the recorded run's, byte for byte. The inner provider records zero calls. |
 | **RL5** a secret never reaches a recording | a secret's bytes in a frame or a digest | Record TL10's run and search the recording for the value, its base64 and its raw bytes: there are no hits. |

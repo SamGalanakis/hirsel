@@ -822,7 +822,11 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
                 .unwrap_or(Path::new("."))
                 .join(".hirsel-core")
         });
-    let code_store = CodeStore::new(code_store.unwrap_or_else(|| store.join("code-store")));
+    let code_store = match code_store {
+        Some(path) => CodeStore::new(path),
+        None if command == "build" => CodeStore::for_build(store.join("code-store")),
+        None => CodeStore::new(store.join("code-store")),
+    };
     let select_link = |cc: Option<PathBuf>| -> Result<Link, Box<dyn std::error::Error>> {
         match (cc, &installed) {
             (Some(cc), _) => Ok(Link::Driver(crate::link_driver(&cc)?)),

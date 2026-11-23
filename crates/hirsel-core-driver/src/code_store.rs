@@ -9,6 +9,8 @@ use std::{
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
 };
+mod watch;
+pub(crate) use watch::{Presence, Watch};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum ObjectKind {
@@ -66,11 +68,29 @@ impl ObjectKind {
 #[derive(Clone)]
 pub struct CodeStore {
     root: PathBuf,
+    local_build: bool,
 }
 
 impl CodeStore {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            local_build: false,
+        }
+    }
+
+    /// Default code cache of a CLI build. Collection leases and publication
+    /// freshness apply to a supplied code store, whose objects are shared
+    /// with admission.
+    pub(crate) fn for_build(root: PathBuf) -> Self {
+        Self {
+            root,
+            local_build: true,
+        }
+    }
+
+    pub(crate) fn local_build(&self) -> bool {
+        self.local_build
     }
 
     pub(crate) fn root(&self) -> &Path {
@@ -166,6 +186,15 @@ impl CodeStore {
             hash: kind.hash(bytes),
             len: bytes.len() as u64,
         };
+        self.put_addressed(kind, object, bytes)
+    }
+
+    fn put_addressed(
+        &self,
+        kind: ObjectKind,
+        object: ObjectRef,
+        bytes: &[u8],
+    ) -> io::Result<ObjectRef> {
         let path = self.path(kind, object.hash);
         if path.try_exists()? {
             // Published again: refresh it, so collection keeps it as long as a new object.

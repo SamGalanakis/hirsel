@@ -122,6 +122,18 @@ pub(crate) static RECIPE_REACH: Memo<
     Arc<std::sync::Mutex<Option<crate::reachability::RecipeGraph>>>,
 > = Memo::new();
 
+/// Code object names checked in the last publication into a local build store.
+pub(crate) static RECIPE_FILES: Memo<
+    PathBuf,
+    Arc<std::sync::Mutex<Option<crate::code_store::Watch>>>,
+> = Memo::new();
+
+/// Address plans for entries of a local build.
+pub(crate) static RECIPE_GROUPS: Memo<
+    ContentHash,
+    Arc<std::sync::Mutex<Option<crate::native::recipe_groups::Groups>>>,
+> = Memo::new();
+
 /// The site items each link input references, by the input's content key.
 pub(crate) static REFERENCED: Memo<
     (hirsel_core_ids::ContentHash, u64),
@@ -261,6 +273,8 @@ pub(crate) static RESOLVED: Memo<
 fn sweep(request: u64) {
     MATERIALISED.sweep(request);
     RECIPE_REACH.sweep(request);
+    RECIPE_FILES.sweep(request);
+    RECIPE_GROUPS.sweep(request);
     REFERENCED.sweep(request);
     OBJECT_RECORDS.sweep(request);
     DEBUG_POSITIONS.sweep(request);

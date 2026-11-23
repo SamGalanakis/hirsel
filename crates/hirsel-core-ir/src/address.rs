@@ -8,7 +8,8 @@ use crate::normal::{
 };
 use crate::release_recipe::{ForeignFunction, text};
 use hirsel_core_ids::ContentHash;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 /// The hash and ordered executable slots of a checked instance.
 pub struct CodeRow {
@@ -193,71 +194,197 @@ pub fn code_groups_with_external(
     external: impl Fn(&Identity) -> Option<ContentHash>,
     group: impl FnMut(ContentHash, Vec<u8>),
 ) -> Option<BTreeMap<Identity, ContentHash>> {
-    addresses(
-        roots,
-        row,
-        |identity| builtin_semantics::number(&identity.definition),
-        external,
-        group,
-    )
+    let graph = CodeGraph::discover(roots, row, external)?;
+    let mut group = group;
+    let hashes = group_addresses(&graph.nodes, |_, hash, bytes| group(hash, bytes));
+    let mut addresses = graph.external_addresses;
+    addresses.extend(graph.members.into_iter().zip(hashes));
+    Some(addresses)
 }
 
-fn addresses(
-    roots: impl IntoIterator<Item = Identity>,
-    mut row: impl FnMut(&Identity) -> Option<CodeRow>,
-    builtin: impl Fn(&Identity) -> Option<u32>,
-    external: impl Fn(&Identity) -> Option<ContentHash>,
-    group: impl FnMut(ContentHash, Vec<u8>),
-) -> Option<BTreeMap<Identity, ContentHash>> {
-    let mut checked = BTreeMap::new();
-    let mut builtins = BTreeMap::new();
-    let mut externals = BTreeMap::new();
-    let mut pending: Vec<_> = roots.into_iter().collect();
-    while let Some(identity) = pending.pop() {
-        if checked.contains_key(&identity)
-            || builtins.contains_key(&identity)
-            || externals.contains_key(&identity)
-        {
-            continue;
+struct CodeGraph {
+    members: Vec<Identity>,
+    nodes: Vec<Node>,
+    external_addresses: BTreeMap<Identity, ContentHash>,
+}
+
+impl CodeGraph {
+    fn discover(
+        roots: impl IntoIterator<Item = Identity>,
+        mut row: impl FnMut(&Identity) -> Option<CodeRow>,
+        external: impl Fn(&Identity) -> Option<ContentHash>,
+    ) -> Option<Self> {
+        let mut checked = BTreeMap::new();
+        let mut builtins = BTreeMap::new();
+        let mut externals = BTreeMap::new();
+        let mut pending: Vec<_> = roots.into_iter().collect();
+        while let Some(identity) = pending.pop() {
+            if checked.contains_key(&identity)
+                || builtins.contains_key(&identity)
+                || externals.contains_key(&identity)
+            {
+                continue;
+            }
+            if let Some(code) = row(&identity) {
+                pending.extend(code.slots.iter().cloned());
+                checked.insert(identity, code);
+            } else if let Some(number) = builtin_semantics::number(&identity.definition) {
+                builtins.insert(identity, number);
+            } else {
+                let address = external(&identity)?;
+                externals.insert(identity, address);
+            }
         }
-        if let Some(code) = row(&identity) {
-            pending.extend(code.slots.iter().cloned());
-            checked.insert(identity, code);
-        } else if let Some(number) = builtin(&identity) {
-            builtins.insert(identity, number);
-        } else {
-            let address = external(&identity)?;
-            externals.insert(identity, address);
+
+        // These positions are in ascending Identity order and belong to this walk.
+        let indices: BTreeMap<_, _> = checked.keys().enumerate().map(|(i, id)| (id, i)).collect();
+        let nodes: Vec<_> = checked
+            .values()
+            .map(|code| Node {
+                body: code.body,
+                slots: code
+                    .slots
+                    .iter()
+                    .map(|slot| match indices.get(slot) {
+                        Some(&i) => Slot::Instance(i),
+                        None => match builtins.get(slot) {
+                            Some(&number) => Slot::Builtin(number),
+                            None => Slot::External(externals[slot]),
+                        },
+                    })
+                    .collect(),
+            })
+            .collect();
+        externals.extend(builtins.into_iter().map(|(identity, number)| {
+            let address = hash_builtin(&identity, number);
+            (identity, address)
+        }));
+        Some(Self {
+            members: checked.into_keys().collect(),
+            nodes,
+            external_addresses: externals,
+        })
+    }
+
+    fn addresses(&self, hashes: &[ContentHash]) -> BTreeMap<Identity, ContentHash> {
+        self.members
+            .iter()
+            .cloned()
+            .zip(hashes.iter().copied())
+            .chain(
+                self.external_addresses
+                    .iter()
+                    .map(|(identity, hash)| (identity.clone(), *hash)),
+            )
+            .collect()
+    }
+}
+
+/// The groups of one fixed slot graph, retained in callee-first order. A
+/// body-only edit re-encodes its component and the callers whose bindings
+/// change. The caller must build a new plan when the slot graph changes.
+pub struct GroupPlan {
+    graph: CodeGraph,
+    frames: Vec<GroupFrame>,
+    component: Vec<usize>,
+    hashes: Vec<ContentHash>,
+    addresses: Arc<BTreeMap<Identity, ContentHash>>,
+    numbers: Vec<Option<u32>>,
+}
+
+struct GroupFrame {
+    members: Vec<usize>,
+    callers: Vec<usize>,
+    hash: ContentHash,
+    bytes: Vec<u8>,
+}
+
+impl GroupPlan {
+    pub fn new(
+        roots: impl IntoIterator<Item = Identity>,
+        row: impl FnMut(&Identity) -> Option<CodeRow>,
+        external: impl Fn(&Identity) -> Option<ContentHash>,
+    ) -> Option<Self> {
+        let graph = CodeGraph::discover(roots, row, external)?;
+        let mut frames = Vec::new();
+        let mut component = vec![0; graph.nodes.len()];
+        let hashes = group_addresses(&graph.nodes, |members, hash, bytes| {
+            for &node in members {
+                component[node] = frames.len();
+            }
+            frames.push(GroupFrame {
+                members: members.to_vec(),
+                callers: Vec::new(),
+                hash,
+                bytes,
+            });
+        });
+        for (i, node) in graph.nodes.iter().enumerate() {
+            let caller = component[i];
+            for slot in &node.slots {
+                if let Slot::Instance(callee) = *slot
+                    && component[callee] != caller
+                {
+                    frames[component[callee]].callers.push(caller);
+                }
+            }
+        }
+        for frame in &mut frames {
+            frame.callers.sort_unstable();
+            frame.callers.dedup();
+        }
+        let addresses = Arc::new(graph.addresses(&hashes));
+        Some(Self {
+            numbers: vec![None; graph.nodes.len()],
+            graph,
+            frames,
+            component,
+            hashes,
+            addresses,
+        })
+    }
+
+    /// Update hashes for changed bodies. Identities outside this plan's root
+    /// closure do not contribute to its addresses.
+    pub fn update<'a>(&mut self, bodies: impl IntoIterator<Item = (&'a Identity, ContentHash)>) {
+        let mut pending = BTreeSet::new();
+        for (identity, body) in bodies {
+            if let Ok(node) = self.graph.members.binary_search(identity)
+                && self.graph.nodes[node].body != body
+            {
+                self.graph.nodes[node].body = body;
+                pending.insert(self.component[node]);
+            }
+        }
+        while let Some(i) = pending.pop_first() {
+            let frame = &mut self.frames[i];
+            let (hash, bytes) = hash_group(
+                &self.graph.nodes,
+                &mut frame.members,
+                &mut self.numbers,
+                &mut self.hashes,
+            );
+            if hash != frame.hash {
+                frame.hash = hash;
+                frame.bytes = bytes;
+                let addresses = Arc::make_mut(&mut self.addresses);
+                for &node in &frame.members {
+                    *addresses.get_mut(&self.graph.members[node]).unwrap() = self.hashes[node];
+                }
+                pending.extend(frame.callers.iter().copied());
+            }
         }
     }
 
-    // These positions are in ascending Identity order and belong to this walk.
-    let indices: BTreeMap<_, _> = checked.keys().enumerate().map(|(i, id)| (id, i)).collect();
-    let nodes: Vec<_> = checked
-        .values()
-        .map(|code| Node {
-            body: code.body,
-            slots: code
-                .slots
-                .iter()
-                .map(|slot| match indices.get(slot) {
-                    Some(&i) => Slot::Instance(i),
-                    None => match builtins.get(slot) {
-                        Some(&number) => Slot::Builtin(number),
-                        None => Slot::External(externals[slot]),
-                    },
-                })
-                .collect(),
-        })
-        .collect();
-    let hashes = group_addresses(&nodes, group);
-    let mut result: BTreeMap<_, _> = checked.into_keys().zip(hashes).collect();
-    result.extend(builtins.into_iter().map(|(identity, number)| {
-        let address = hash_builtin(&identity, number);
-        (identity, address)
-    }));
-    result.extend(externals);
-    Some(result)
+    pub fn addresses(&self) -> Arc<BTreeMap<Identity, ContentHash>> {
+        Arc::clone(&self.addresses)
+    }
+
+    pub fn frames(&self) -> impl Iterator<Item = (ContentHash, &[u8])> {
+        self.frames
+            .iter()
+            .map(|frame| (frame.hash, frame.bytes.as_slice()))
+    }
 }
 
 struct Node {
@@ -286,7 +413,7 @@ struct Frame {
 
 fn group_addresses(
     nodes: &[Node],
-    mut group: impl FnMut(ContentHash, Vec<u8>),
+    mut group: impl FnMut(&[usize], ContentHash, Vec<u8>),
 ) -> Vec<ContentHash> {
     let mut visits: Vec<_> = (0..nodes.len()).map(|_| Visit::default()).collect();
     let mut frames: Vec<Frame> = Vec::new();
@@ -342,7 +469,7 @@ fn group_addresses(
                 }
                 let (hash, bytes) =
                     hash_group(nodes, &mut members, &mut group_numbers, &mut addresses);
-                group(hash, bytes);
+                group(&members, hash, bytes);
                 members.clear();
             }
             if let Some(parent) = frames.last() {
@@ -388,6 +515,57 @@ fn hash_group(
 mod tests {
     use super::*;
     use hirsel_core_ids::DefPath;
+
+    #[test]
+    fn body_edits_rehash_only_their_groups_and_callers() {
+        let [root, a, b, leaf] = ["root", "a", "b", "leaf"].map(|name| {
+            Identity::plain(DefPath::from_full(&format!("app@1/main/{name}")).unwrap())
+        });
+        let mut bodies = BTreeMap::from([
+            (root.clone(), ContentHash([1; 32])),
+            (a.clone(), ContentHash([2; 32])),
+            (b.clone(), ContentHash([3; 32])),
+            (leaf.clone(), ContentHash([4; 32])),
+        ]);
+        let slots = BTreeMap::from([
+            (root.clone(), vec![a.clone(), leaf.clone()]),
+            (a.clone(), vec![b.clone()]),
+            (b.clone(), vec![a.clone()]),
+            (leaf.clone(), vec![]),
+        ]);
+        let row = |bodies: &BTreeMap<Identity, ContentHash>, identity: &Identity| {
+            Some(CodeRow {
+                body: *bodies.get(identity)?,
+                slots: slots.get(identity)?.clone(),
+            })
+        };
+        let mut plan = GroupPlan::new([root.clone()], |id| row(&bodies, id), |_| None).unwrap();
+        let before = plan.addresses();
+        let hash = ContentHash([5; 32]);
+        bodies.insert(b.clone(), hash);
+        plan.update([(&b, hash)]);
+        let mut expected_frames = BTreeMap::new();
+        let expected = code_groups(
+            [root.clone()],
+            |id| row(&bodies, id),
+            |hash, bytes| {
+                expected_frames.insert(hash, bytes);
+            },
+        )
+        .unwrap();
+        let after = plan.addresses();
+        assert_eq!(*after, expected);
+        assert_eq!(
+            plan.frames()
+                .map(|(hash, bytes)| (hash, bytes.to_vec()))
+                .collect::<BTreeMap<_, _>>(),
+            expected_frames,
+        );
+        assert_eq!(after[&leaf], before[&leaf]);
+        for changed in [root, a, b] {
+            assert_ne!(after[&changed], before[&changed]);
+        }
+    }
 
     #[test]
     fn recursive_generic_group_uses_full_identity_order_and_every_edge() {

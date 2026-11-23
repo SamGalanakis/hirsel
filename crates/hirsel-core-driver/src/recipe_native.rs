@@ -5,7 +5,7 @@ use super::*;
 use crate::code_admission::{
     AdmissionError, AdmissionLimits, NativeSemantics, VerifiedRelease, admit_local,
 };
-use crate::code_store::{CodeStore, ObjectKind};
+use crate::code_store::{CodeStore, ObjectKind, Presence};
 use crate::foreign_archive::LinkArchives;
 use hirsel_core_ir::{
     FuncId, ItemId,
@@ -193,7 +193,7 @@ pub struct Publication {
     /// The units an earlier publication's memo gave, apart from `units`.
     memos: Hits,
     index: Option<Memos>,
-    addresses: BTreeMap<Identity, ContentHash>,
+    addresses: Arc<BTreeMap<Identity, ContentHash>>,
     link_archives: LinkArchives,
 }
 
@@ -303,6 +303,16 @@ impl CheckProduct {
         let map = self.native_sources(&items)?;
         let sources = map.positions();
         let files = index.map(|_| file_digests(&map)).transpose()?;
+        let local = index.filter(|_| store.local_build() && crate::resident::serving());
+        let watch = match local.and_then(|_| std::path::absolute(store.root()).ok()) {
+            Some(path) => Some(
+                crate::resident::RECIPE_FILES
+                    .get_or(Some(path), || Ok::<_, io::Error>(Arc::default()))?,
+            ),
+            None => None,
+        };
+        let mut watch = watch.as_ref().map(|watch| watch.lock().unwrap());
+        let mut presence = Presence::new(store, watch.as_deref_mut(), local.is_some());
         let mut units = BTreeMap::new();
         let mut memos = BTreeMap::new();
         for (identity, anchored) in instances.iter().zip(&anchored) {
@@ -311,14 +321,8 @@ impl CheckProduct {
                 (Some(index), Some(files)) if identity != entry => {
                     let key = memo_key(identity, instance, anchored, &map, files)?;
                     if let Some(memo) = index.read.units.get(&key)
-                        && index
-                            .code
-                            .path(ObjectKind::Body, memo.body.0)
-                            .try_exists()?
-                        && index
-                            .code
-                            .path(ObjectKind::Annex, memo.annex.0)
-                            .try_exists()?
+                        && presence.contains(ObjectKind::Body, memo.code().body)?
+                        && presence.contains(ObjectKind::Annex, memo.code().annex)?
                     {
                         memos.insert(identity.clone(), (key, Arc::clone(memo)));
                         continue;
@@ -340,8 +344,8 @@ impl CheckProduct {
                 .filter_map(|identity| builtin_semantics_number(&identity.definition))
                 .collect();
             let code = BodyRef {
-                body: store.put(ObjectKind::Body, &body.bytes)?,
-                annex: store.put(ObjectKind::Annex, &annex.encode())?,
+                body: presence.put(ObjectKind::Body, &body.bytes)?,
+                annex: presence.put(ObjectKind::Annex, &annex.encode())?,
             };
             units.insert(
                 identity.clone(),
@@ -354,24 +358,54 @@ impl CheckProduct {
                 },
             );
         }
-        let mut groups = Vec::new();
-        let mut pending = Vec::new();
-        let addresses = reached
-            .materialized
-            .groups(
-                instances,
-                None,
-                [entry.clone()],
-                &reached.materialized.foreign_addresses,
-                |_, bytes| pending.push(bytes),
-            )
-            .ok_or_else(|| NativeStop::Entry("incomplete or inconsistent recipe closure".into()))?;
-        for bytes in pending {
-            groups.push(store.put(ObjectKind::Group, &bytes)?);
-        }
+        let invalid = || NativeStop::Entry("incomplete or inconsistent recipe closure".into());
+        let (mut groups, addresses) = if let Some(index) = local {
+            let remembered = crate::resident::RECIPE_GROUPS
+                .get_or(Some(index.key), || Ok::<_, io::Error>(Arc::default()))?;
+            let mut remembered = remembered.lock().unwrap();
+            if !remembered
+                .as_mut()
+                .is_some_and(|groups| groups.update(instances, &reached.materialized))
+            {
+                *remembered = Some(
+                    super::recipe_groups::Groups::new(entry, instances, &reached.materialized)
+                        .ok_or_else(invalid)?,
+                );
+            }
+            let plan = &remembered.as_ref().unwrap().plan;
+            let groups = plan
+                .frames()
+                .map(|(hash, bytes)| {
+                    let object = ObjectRef {
+                        hash,
+                        len: bytes.len() as u64,
+                    };
+                    presence.put_addressed(ObjectKind::Group, object, bytes)
+                })
+                .collect::<io::Result<Vec<_>>>()?;
+            (groups, plan.addresses())
+        } else {
+            let mut pending = Vec::new();
+            let addresses = reached
+                .materialized
+                .groups(
+                    instances,
+                    None,
+                    [entry.clone()],
+                    &reached.materialized.foreign_addresses,
+                    |_, bytes| pending.push(bytes),
+                )
+                .ok_or_else(invalid)?;
+            let groups = pending
+                .iter()
+                .map(|bytes| store.put(ObjectKind::Group, bytes))
+                .collect::<io::Result<Vec<_>>>()?;
+            (groups, Arc::new(addresses))
+        };
         groups.sort_unstable_by_key(|group| group.hash);
         units.retain(|identity, _| addresses.contains_key(identity));
         memos.retain(|identity, _| addresses.contains_key(identity));
+        presence.complete()?;
         Ok(Released {
             units,
             memos,
@@ -388,7 +422,7 @@ pub(super) struct Released {
     pub(super) units: BTreeMap<Identity, Unit>,
     memos: Hits,
     groups: Vec<ObjectRef>,
-    addresses: BTreeMap<Identity, ContentHash>,
+    addresses: Arc<BTreeMap<Identity, ContentHash>>,
 }
 
 /// Each source file's digest: its path, its text and its annex points, all
@@ -1311,7 +1345,7 @@ impl Publication {
             units,
             memos: BTreeMap::new(),
             index: None,
-            addresses,
+            addresses: Arc::new(addresses),
             link_archives,
         }
     }
@@ -2083,8 +2117,7 @@ impl Publication {
             |_| Ok(0),
             self.recipe.address,
             || {
-                Ok(self
-                    .addresses
+                Ok(Arc::unwrap_or_clone(self.addresses)
                     .into_iter()
                     .map(|(id, address)| (id, hirsel_core_ir::code_revision(address)))
                     .collect())
@@ -2214,8 +2247,7 @@ impl Publication {
         let group = store.put(ObjectKind::Group, &group.encode()).unwrap();
         self.recipe.groups[0] = group;
         self.recipe.address = Group::member_address(group.hash, 0);
-        self.addresses
-            .insert(self.recipe.entry.clone(), self.recipe.address);
+        Arc::make_mut(&mut self.addresses).insert(self.recipe.entry.clone(), self.recipe.address);
         self.root = store
             .put(ObjectKind::Recipe, &self.recipe.encode())
             .unwrap()

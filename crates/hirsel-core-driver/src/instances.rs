@@ -140,7 +140,7 @@ pub(crate) enum Location {
 }
 /// The ABI of the reached definition and its external references. Intrinsic
 /// uses have no native link ABI to compare.
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) struct CodeSignatures {
     pub own: ContentHash,
     pub slots: Vec<(Identity, ContentHash)>,
@@ -154,6 +154,8 @@ pub(crate) struct Adapter {
     body: ContentHash,
     slots: Vec<Identity>,
 }
+
+type GroupRows<'a> = BTreeMap<&'a Identity, (ContentHash, &'a Vec<Identity>, &'a CodeSignatures)>;
 
 /// The fields of an instance record that are read from its module.
 pub(crate) struct Fields {
@@ -347,6 +349,46 @@ impl InstanceSet {
         foreign: &BTreeMap<Identity, ContentHash>,
         group: impl FnMut(ContentHash, Vec<u8>),
     ) -> Option<BTreeMap<Identity, ContentHash>> {
+        let rows = self.group_rows(instances, prior, foreign)?;
+        code_groups_with_external(
+            roots,
+            |identity| {
+                let (body, slots, _) = rows.get(identity)?;
+                Some(CodeRow {
+                    body: *body,
+                    slots: (*slots).clone(),
+                })
+            },
+            |identity| foreign.get(identity).copied(),
+            group,
+        )
+    }
+
+    pub(crate) fn group_plan(
+        &self,
+        entry: &Identity,
+        instances: &[Identity],
+    ) -> Option<hirsel_core_ir::address::GroupPlan> {
+        let rows = self.group_rows(instances, None, &self.foreign_addresses)?;
+        hirsel_core_ir::address::GroupPlan::new(
+            [entry.clone()],
+            |identity| {
+                let (body, slots, _) = rows.get(identity)?;
+                Some(CodeRow {
+                    body: *body,
+                    slots: (*slots).clone(),
+                })
+            },
+            |identity| self.foreign_addresses.get(identity).copied(),
+        )
+    }
+
+    fn group_rows<'a>(
+        &'a self,
+        instances: &'a [Identity],
+        prior: Option<&'a crate::reach::Reach>,
+        foreign: &BTreeMap<Identity, ContentHash>,
+    ) -> Option<GroupRows<'a>> {
         let mut rows = BTreeMap::new();
         let mut generated = BTreeMap::new();
         for identity in instances {
@@ -386,18 +428,7 @@ impl InstanceSet {
                 }
             }
         }
-        code_groups_with_external(
-            roots,
-            |identity| {
-                let (body, slots, _) = rows.get(identity)?;
-                Some(CodeRow {
-                    body: *body,
-                    slots: (*slots).clone(),
-                })
-            },
-            |identity| foreign.get(identity).copied(),
-            group,
-        )
+        Some(rows)
     }
 
     /// Each instance that one of `instances` describes, with its code

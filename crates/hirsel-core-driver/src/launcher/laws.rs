@@ -1012,7 +1012,8 @@ sleep 30 & printf '%s' "$!" > orphan; exit 0
 /// Admission over the session (launch.md "The launcher", Requests 12-16): the launcher
 /// relays the request and objects to the verifier, answers the verifier's Need as
 /// `Need` events, and reports the verified root; an attested root the recipe does not
-/// hash to refuses before any Need.
+/// hash to refuses before any Need; a child's end and a collection are answered while an
+/// upload is half sent.
 #[test]
 fn session_admission() {
     use crate::code_admission::ObjectKind;
@@ -1074,7 +1075,26 @@ fn session_admission() {
         asked, wanted,
         "an empty store needs every object of the closure"
     );
-    rig.ask(Request::AdmitData(attempt(2), fixture.objects(&need)));
+    // A slow upload: half the objects, then a child's end and a collection go through
+    // while the attempt waits for the rest.
+    let objects = fixture.objects(&need);
+    let (head, tail) = objects.split_at(objects.len() / 2);
+    rig.ask(Request::AdmitData(attempt(2), head.to_vec()));
+    let child = serving(1);
+    rig.ask(launch(0, &rig.work(), Mode::Serving(1, serve(1, None))));
+    rig.ask(Request::Kill(child.clone()));
+    let seen = rig.until(|seen| ended(seen, &child));
+    assert!(
+        !seen
+            .iter()
+            .any(|e| matches!(e, Event::Admitted(..) | Event::AdmissionFailed(..)))
+    );
+    assert_eq!(rig.ask(Request::CollectBegin), [Event::Fenced]);
+    assert!(matches!(
+        rig.ask(Request::Collect(vec![])).as_slice(),
+        [Event::Collected(_)]
+    ));
+    rig.ask(Request::AdmitData(attempt(2), tail.to_vec()));
     rig.ask(Request::AdmitEnd(attempt(2)));
     let seen = rig.until(|seen| !seen.is_empty());
     match seen.as_slice() {
@@ -1089,4 +1109,81 @@ fn session_admission() {
         }
         other => panic!("after AdmitEnd: {other:?}"),
     }
+}
+
+/// Cutover retention (RUNNER-SPEC §14.5): OLD's first answer to a cutover is kept by
+/// (OLD, attempt) until `CutoverAck`, listed in the inventory, and returned to an identical
+/// re-send without forwarding it again; a different command for the key is refused; an OLD
+/// that ends unanswered leaves `Uncertain`, which a re-send after its end returns.
+#[test]
+fn cutover_reply_retained() {
+    let cutover = |a: u64, digest: u8| {
+        let mut id = a.to_le_bytes().to_vec();
+        id.extend_from_slice(&a.to_le_bytes());
+        HostCommand::Cutover(id, vec![digest], 2000, false)
+    };
+    let mut frame = Vec::new();
+    super::session::write_frame(&mut frame, &cutover(3, 0xbb)).unwrap();
+    let mut reply = Vec::new();
+    super::session::write_frame(&mut reply, &HostReply::Installed(4, true)).unwrap();
+    let octal: String = reply.iter().map(|b| format!("\\{b:03o}")).collect();
+    let n = frame.len();
+    // OLD 0 answers its first command and records every byte forwarded to it; OLD 1
+    // reads its command and ends without answering.
+    let answers = format!("head -c {n} <&4 > got-0\nprintf '{octal}' >&4\nexec cat <&4 >> got-0");
+    let silent = format!("head -c {n} <&4 > got-1");
+    let mut rig = rig(&[&answers, &silent]);
+    let work = rig.work();
+    rig.bind();
+    let old = serving(1);
+    assert_eq!(
+        rig.ask(launch(0, &work, Mode::Serving(1, serve(1, None)))),
+        [Event::Launched(old.clone(), Phase::Started)]
+    );
+    let send = |c: &Child, a: u64, d: u8| Request::Command(c.clone(), cutover(a, d));
+    let decided = Event::CutoverResult(old.clone(), attempt(3), HostReply::Installed(4, true));
+    rig.ask(send(&old, 3, 0xbb));
+    let seen = rig.until(|seen| !seen.is_empty());
+    assert_eq!(seen, [decided.clone()]);
+
+    let held = |rig: &mut Rig| match rig.ask(Request::Hello).as_slice() {
+        [Event::Inventory(_, _, cutovers)] => cutovers.clone(),
+        other => panic!("Hello answered {other:?}"),
+    };
+    assert_eq!(
+        held(&mut rig),
+        [(old.clone(), attempt(3))],
+        "a new session still holds it"
+    );
+    assert_eq!(
+        rig.ask(send(&old, 3, 0xbb)),
+        [decided],
+        "a re-send returns the kept reply"
+    );
+    assert!(matches!(
+        rig.ask(send(&old, 3, 0xcc)).as_slice(),
+        [Event::Placed(c, HostReply::Refused(_))] if *c == old
+    ));
+    rig.idle(Duration::from_millis(200));
+    assert_eq!(
+        fs::read(work.join("got-0")).unwrap(),
+        frame,
+        "OLD saw the cutover exactly once"
+    );
+    assert!(
+        rig.ask(Request::CutoverAck(old.clone(), attempt(3)))
+            .is_empty()
+    );
+    assert!(held(&mut rig).is_empty(), "the acknowledgement drops it");
+
+    rig.ask(Request::Kill(old.clone()));
+    rig.until(|seen| ended(seen, &old));
+    rig.ask(Request::Acknowledge(old.clone()));
+    let silent_old = serving(2);
+    rig.ask(launch(1, &work, Mode::Serving(2, serve(2, None))));
+    rig.ask(send(&silent_old, 4, 0xbb));
+    let seen = rig.until(|seen| ended(seen, &silent_old));
+    let uncertain = Event::CutoverResult(silent_old.clone(), attempt(4), HostReply::Uncertain);
+    assert!(seen.contains(&uncertain), "{seen:?}");
+    assert_eq!(rig.ask(send(&silent_old, 4, 0xbb)), [uncertain]);
 }

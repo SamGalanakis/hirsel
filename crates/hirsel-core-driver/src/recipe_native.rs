@@ -331,20 +331,20 @@ impl CheckProduct {
                 }
                 _ => None,
             };
-            let original = instance.ir()?;
-            let (body, mut annex, module) =
-                normal::prepare_assembly(original, instance.function, &sources);
+            // The materialised module is `retain`'s canonical decoding of
+            // `instance.code`, so its annex is read off without encoding again.
+            let (mut annex, module) =
+                normal::prepare_retained_assembly(&instance.code, instance.ir()?, &sources);
             if identity == entry {
                 annex.1.clone_from(&names);
             }
-            let builtins = body
+            let builtins = instance
                 .slots
                 .iter()
-                .map(|slot| slot.identity(original))
                 .filter_map(|identity| builtin_semantics_number(&identity.definition))
                 .collect();
             let code = BodyRef {
-                body: presence.put(ObjectKind::Body, &body.bytes)?,
+                body: presence.put(ObjectKind::Body, &instance.code)?,
                 annex: presence.put(ObjectKind::Annex, &annex.encode())?,
             };
             units.insert(

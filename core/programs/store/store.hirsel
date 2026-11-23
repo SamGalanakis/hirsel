@@ -426,7 +426,7 @@ type DataRows: shareable + send {
 }
 
 fn new_data_rows() -> DataRows {
-    let first: Inline[DataOp, 2] = [
+    let first: Inline[DataOp, 2] =[
         DataOp(key: list.new(), value: None),
         DataOp(key: list.new(), value: None),
     ]
@@ -452,19 +452,30 @@ fn push_data_row(mut rows: DataRows, take row: DataOp) {
 
 // A commit's rows by key. Up to SCANNED_OPS rows are found by scanning; the
 // slot map is built only when a commit stages more.
-type DataOps {
+type DataOps: shareable + send {
     rows: DataRows,
     slots: Map[Bytes, u64]
 }
 
 const SCANNED_OPS: u64 = 8
+
 // A journaled draft starts open. The first inserted typed key supplies its row slot.
 // The two sentinels are outside the range of slots in a bounded COMMIT frame.
 const NO_FRAME_TAIL: u64 = 18446744073709551615
+
 const OPEN_FRAME_TAIL: u64 = NO_FRAME_TAIL - 1
 
 fn empty_ops() -> DataOps {
     DataOps(rows: new_data_rows(), slots: map.new())
+}
+
+// What enclosing transactions staged before a callback began, frozen so the
+// callback shares it instead of copying it (MEM-30's copy idiom without the
+// copy). Lookups check a transaction's own ops, then its layers newest first.
+type Staged: shareable + send {
+    ops: DataOps,
+    stream_ops: DataOps,
+    call: Option[CallSection]
 }
 
 fn op_slot(ops: DataOps, key: Bytes) -> Option[u64] {
@@ -499,7 +510,16 @@ pub opaque scoped type Tx {
     // its 5-byte head, when it has ops, plus the CALL section's bytes.
     stream_ops: DataOps,
     extra_bytes: u64,
-    call: Option[CallSection]
+    call: Option[CallSection],
+    // Layers beneath `ops`, oldest first. The last `own` are this Tx's own
+    // staged writes, frozen when it entered a callback; the rest are shared
+    // with the transactions it runs inside. `rows` and `streams` count the
+    // distinct keys staged across `ops` and every layer: a key's slot is the
+    // one it took when first staged, and a new key takes the next.
+    below: List[Arc[Staged]],
+    own: u64,
+    rows: u64,
+    streams: u64
 }
 
 pub opaque type Snapshot: shareable + send {
@@ -1163,23 +1183,13 @@ pub fn info(mut tx: Tx) -> CallInfo {
 // A step records the body's typed error in the outer transaction. Keep the
 // issued-id log and read set, and roll back the body's table writes.
 pub fn rollback_writes_on_error[R, E](mut tx: Tx, body: scoped[view] fn(mut Tx) -> Result[R, E]) -> Result[R, E] {
-    let roots = share_roots(tx.roots)
-    let ops: DataOps = clone(tx.ops)
-    let resident = tx.resident
-    let frame_tail = tx.frame_tail
-    let frame_bytes = tx.frame_bytes
-    let wrote = tx.wrote
-    let result = body(mut tx)
-    if let Error(_) = result {
-        tx.roots = take roots
-        tx.ops = take ops
-        tx.resident = resident
-        // The frame-tail slot names a data op, so it goes with them.
-        tx.frame_tail = frame_tail
-        tx.frame_bytes = frame_bytes
-        tx.wrote = wrote
+    freeze(mut tx)
+    let d = {
+        let mut draft = Tx(store: tx.store, roots: share_roots(tx.roots), ids: tx.ids, private_from: tx.private_from, resident: tx.resident, retain_old: tx.retain_old, frame_tail: tx.frame_tail, reads: tx.reads, issued: tx.issued, refusal: tx.refusal, frame_bytes: tx.frame_bytes, wrote: tx.wrote, ops: empty_ops(), info: tx.info, stream_ops: empty_ops(), extra_bytes: tx.extra_bytes, call: None, below: clone(tx.below), own: 0, rows: tx.rows, streams: tx.streams)
+        let result = body(mut draft)
+        drafted_tx(take draft, take result)
     }
-    take result
+    install(mut tx, take d)
 }
 
 type Drafted[R, E] {
@@ -1194,50 +1204,138 @@ type Drafted[R, E] {
     stream_ops: DataOps,
     extra_bytes: u64,
     call: Option[CallSection],
+    rows: u64,
+    streams: u64,
     result: Result[R, E]
 }
 
-// rollback_writes_on_error under a step bound of `steps` (MEM-30). The body
-// writes a working copy of `tx`, moved into the bound. A return installs the
-// copy, without its table writes when it is a typed Error, as above. An
-// overrun drops the copy, which rolls back the transaction's owned state and
-// staged writes. What does not install into `tx` survives (MEM-29, FAIL-16):
-// the read set, so a key the body fetched is in the commit's reads; the
-// issued-id log, so a dropped write can still raise the id watermark; and
-// any append to a log the caller owns.
-pub fn rollback_writes_on_overrun[R, E](mut tx: Tx, steps: u64, body: scoped[view] fn(mut Tx) -> Result[R, E]) -> Result[Result[R, E], OutOfTime] {
-    // The copy's views anchor it to `tx`: its slot ends, and the bound returns
-    // the copy's owned parts, before `tx` is written.
-    let ran = {
-        let work = Tx(store: tx.store, roots: share_roots(tx.roots), ids: tx.ids, private_from: tx.private_from, resident: tx.resident,
-            retain_old: tx.retain_old, frame_tail: tx.frame_tail, reads: tx.reads, issued: tx.issued, refusal: tx.refusal,
-            frame_bytes: tx.frame_bytes, wrote: tx.wrote, ops: clone(tx.ops), info: tx.info, stream_ops: clone(tx.stream_ops),
-            extra_bytes: tx.extra_bytes, call: clone(tx.call))
-        bound steps steps {
-            let mut draft = take work
-            let result = body(mut draft)
-            let Tx(roots: take roots, ids: ids, resident: resident, frame_tail: frame_tail, refusal: refusal, frame_bytes: frame_bytes,
-                wrote: wrote, ops: take ops, stream_ops: take stream_ops, extra_bytes: extra_bytes, call: take call, ..) = take draft
-            Drafted(roots: take roots, ids: ids, resident: resident, frame_tail: frame_tail, refusal: refusal, frame_bytes: frame_bytes,
-                wrote: wrote, ops: take ops, stream_ops: take stream_ops, extra_bytes: extra_bytes, call: take call, result: take result)
+// A callback's Tx, less its shares of the layers beneath, so the parent's own
+// layers are unique again when `install` folds them back.
+fn drafted_tx[R, E](take draft: Tx, take result: Result[R, E]) -> Drafted[R, E] {
+    let Tx(roots: take roots, ids: ids, resident: resident, frame_tail: frame_tail, refusal: refusal, frame_bytes: frame_bytes, wrote: wrote, ops: take ops, stream_ops: take stream_ops, extra_bytes: extra_bytes, call: take call, rows: rows, streams: streams, ..) = take draft
+    Drafted(roots: take roots, ids: ids, resident: resident, frame_tail: frame_tail, refusal: refusal, frame_bytes: frame_bytes, wrote: wrote, ops: take ops, stream_ops: take stream_ops, extra_bytes: extra_bytes, call: take call, rows: rows, streams: streams, result: take result)
+}
+
+// Moves what `tx` has staged into a layer its callback shares, leaving `tx`
+// an empty overlay over the same rows. The callback starts with nothing owned
+// to copy, and when it overruns, `tx` needs no restoring: the layer stays
+// beneath `tx` until the next install or the commit folds it back (fold_own).
+fn freeze(mut tx: Tx) {
+    let layer = Staged(ops: replace(mut tx.ops, empty_ops()), stream_ops: replace(mut tx.stream_ops, empty_ops()), call: replace(mut tx.call, None))
+    list.push(mut tx.below, arc.new(take layer))
+    tx.own += 1
+}
+
+// Folds `tx`'s own layers back into its ops, oldest first, then the writes
+// staged over them. Replacements keep their slots and new keys append in
+// first-write order, so every slot, and the frame-tail slot, stays put.
+fn fold_own(mut tx: Tx) {
+    let mut frozen: List[Staged] = list.new()
+    while tx.own != 0 {
+        let Some(top) = list.pop(mut tx.below) else {
+            break
+        }
+        let layer = match arc.try_unwrap(take top) {
+            Ok(take mine) => take mine,
+            Error(take shared) => Staged(ops: clone(shared.ops), stream_ops: clone(shared.stream_ops), call: clone(shared.call)),
+        }
+        list.push(mut frozen, take layer)
+        tx.own -= 1
+    }
+    let Some(oldest) = list.pop(mut frozen) else {
+        return
+    }
+    let Staged(ops: take ops, stream_ops: take stream_ops, call: take call) = take oldest
+    let mut data = take ops
+    let mut streams = take stream_ops
+    let mut held = take call
+    while let Some(take newer) = list.pop(mut frozen) {
+        let Staged(ops: take o, stream_ops: take so, call: take c) = take newer
+        fold_ops(mut data, tx.below, false, take o)
+        fold_ops(mut streams, tx.below, true, take so)
+        if let Some(take section) = c {
+            held = Some(take section)
         }
     }
-    let Drafted(roots: take roots, ids: ids, resident: resident, frame_tail: frame_tail, refusal: refusal, frame_bytes: frame_bytes,
-        wrote: wrote, ops: take ops, stream_ops: take stream_ops, extra_bytes: extra_bytes, call: take call, result: take result) = (take ran)?
+    fold_ops(mut data, tx.below, false, replace(mut tx.ops, empty_ops()))
+    fold_ops(mut streams, tx.below, true, replace(mut tx.stream_ops, empty_ops()))
+    if let Some(take section) = replace(mut tx.call, None) {
+        held = Some(take section)
+    }
+    tx.ops = take data
+    tx.stream_ops = take streams
+    tx.call = take held
+}
+
+// Stages `newer`'s rows over `ops` in their first-write order.
+fn fold_ops(mut ops: DataOps, below: List[Arc[Staged]], streams: bool, take newer: DataOps) {
+    let DataOps(rows: take rows, slots: _) = take newer
+    let DataRows(count: staged, first: take first, rest: take rest) = take rows
+    let mut head = take first
+    // Moved, not copied: the frame-tail key keeps the spare room it was made with.
+    for slot in 0u64 .. order.min(staged, 2) {
+        let DataOp(key: take key, value: take value) = replace(mut head[slot], DataOp(key: list.new(), value: None))
+        let mut ignored = 0u64
+        let _ = save_data_op(mut ops, below, streams, mut ignored, take key, take value)
+    }
+    for take op in take rest {
+        let DataOp(key: take key, value: take value) = take op
+        let mut ignored = 0u64
+        let _ = save_data_op(mut ops, below, streams, mut ignored, take key, take value)
+    }
+}
+
+// Installs a callback's return. Streams, the CALL record, ids and a refusal
+// stay on a typed Error too; table writes and their frame-tail slot install
+// only on Ok.
+fn install[R, E](mut tx: Tx, take d: Drafted[R, E]) -> Result[R, E] {
+    let Drafted(roots: take roots, ids: ids, resident: resident, frame_tail: frame_tail, refusal: refusal, frame_bytes: frame_bytes, wrote: wrote, ops: take ops, stream_ops: take stream_ops, extra_bytes: extra_bytes, call: take call, rows: rows, streams: streams, result: take result) = take d
+    fold_own(mut tx)
     tx.ids = ids
     tx.refusal = refusal
-    tx.stream_ops = take stream_ops
+    fold_ops(mut tx.stream_ops, tx.below, true, take stream_ops)
+    tx.streams = streams
     tx.extra_bytes = extra_bytes
-    tx.call = take call
+    if let Some(take section) = call {
+        tx.call = Some(take section)
+    }
     if let Ok(_) = result {
         tx.roots = take roots
-        tx.ops = take ops
+        fold_ops(mut tx.ops, tx.below, false, take ops)
+        tx.rows = rows
         tx.frame_tail = frame_tail
         tx.resident = resident
         tx.frame_bytes = frame_bytes
         tx.wrote = wrote
     }
-    Ok(take result)
+    take result
+}
+
+// rollback_writes_on_error under a step bound of `steps` (MEM-30). The body
+// writes a working Tx, moved into the bound, over a frozen layer of what `tx`
+// staged. A return installs the work, without its table writes when it is a
+// typed Error, as above. An overrun drops the work, which rolls back the
+// transaction's owned state and staged writes, and returns with no further
+// step. What does not install into `tx` survives (MEM-29, FAIL-16): the read
+// set, so a key the body fetched is in the commit's reads; the issued-id log,
+// so a dropped write can still raise the id watermark; and any append to a
+// log the caller owns.
+pub fn rollback_writes_on_overrun[R, E](mut tx: Tx, steps: u64, body: scoped[view] fn(mut Tx) -> Result[R, E]) -> Result[Result[R, E], OutOfTime] {
+    freeze(mut tx)
+    // The work's views anchor it to `tx`: its slot ends, and the bound returns
+    // the work's owned parts, before `tx` is written.
+    let ran = {
+        let work = Tx(store: tx.store, roots: share_roots(tx.roots), ids: tx.ids, private_from: tx.private_from, resident: tx.resident, retain_old: tx.retain_old, frame_tail: tx.frame_tail, reads: tx.reads, issued: tx.issued, refusal: tx.refusal, frame_bytes: tx.frame_bytes, wrote: tx.wrote, ops: empty_ops(), info: tx.info, stream_ops: empty_ops(), extra_bytes: tx.extra_bytes, call: None, below: clone(tx.below), own: 0, rows: tx.rows, streams: tx.streams)
+        bound steps steps {
+            let mut draft = take work
+            let result = body(mut draft)
+            // Inline, not drafted_tx: a call here would take a step after the body.
+            let Tx(roots: take roots, ids: ids, resident: resident, frame_tail: frame_tail, refusal: refusal, frame_bytes: frame_bytes, wrote: wrote, ops: take ops, stream_ops: take stream_ops, extra_bytes: extra_bytes, call: take call, rows: rows, streams: streams, ..) = take draft
+            Drafted(roots: take roots, ids: ids, resident: resident, frame_tail: frame_tail, refusal: refusal, frame_bytes: frame_bytes, wrote: wrote, ops: take ops, stream_ops: take stream_ops, extra_bytes: extra_bytes, call: take call, rows: rows, streams: streams, result: take result)
+        }
+    }
+    let d = (take ran)?
+    Ok(install(mut tx, take d))
 }
 
 pub fn run[R, A](mut db: Db, steps: Option[u64], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Result[Outcome[R, A], Error] waits {
@@ -1414,8 +1512,11 @@ fn draft_body[R, A](db: Db, i: u64, ci: CallInfo, keep_reply: Option[fn(A) -> bo
     let mut tx = Tx(store: db.store, roots: share_roots(db.heads[i].roots), ids: db.next_node, private_from: int.saturating_add(db.next_node, 1), resident: db.resident, retain_old: retaining(db), frame_tail: match db.journal {
         Some(_) => OPEN_FRAME_TAIL,
         None => NO_FRAME_TAIL,
-    }, reads: view reads, issued: view issued, refusal: None, frame_bytes: 42, wrote: false, ops: empty_ops(), info: ci, stream_ops: empty_ops(), extra_bytes: 0, call: None)
+    }, reads: view reads, issued: view issued, refusal: None, frame_bytes: 42, wrote: false, ops: empty_ops(), info: ci, stream_ops: empty_ops(), extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, streams: 0)
     let outcome = body(mut tx)
+    if tx.own != 0 {
+        fold_own(mut tx)
+    }
     if let Some(c) = tx.refusal {
         return RolledBack(Refused(Allocation(c)))
     }
@@ -1438,11 +1539,12 @@ fn draft_body[R, A](db: Db, i: u64, ci: CallInfo, keep_reply: Option[fn(A) -> bo
             tx.roots.collections = share_page_tree(db.heads[i].roots.collections)
             tx.roots.catalog = share_page_tree(db.heads[i].roots.catalog)
             tx.ops = empty_ops()
+            tx.rows = 0
             tx.frame_tail = NO_FRAME_TAIL
             Error(take a)
         }
     }
-    let Tx(store: _, roots: take roots, ids: _, private_from: first_stamp, resident: live, retain_old: _, frame_tail: frame_tail, reads: _, issued: _, refusal: _, frame_bytes: _, wrote: _, ops: take ops, info: _, stream_ops: take stream_ops, extra_bytes: _, call: take call) = take tx
+    let Tx(store: _, roots: take roots, ids: _, private_from: first_stamp, resident: live, retain_old: _, frame_tail: frame_tail, reads: _, issued: _, refusal: _, frame_bytes: _, wrote: _, ops: take ops, info: _, stream_ops: take stream_ops, extra_bytes: _, call: take call, ..) = take tx
     let DataOps(rows: take rows, slots: _) = take ops
     let DataOps(rows: take stream_rows, slots: _) = take stream_ops
     Prepared(Prepared(outcome: take value, roots: take roots, live: live, frame: None, ops: take rows, frame_tail: frame_tail, stream_ops: take stream_rows, first_stamp: first_stamp, prepared_roots: false, call: take call))
@@ -2225,7 +2327,7 @@ fn put_frame(tx: Tx, key: Bytes, value: Bytes, frame: u64) -> Result[u64, Error]
 }
 
 fn edit_frame(tx: Tx, key: Bytes, width: u64, frame: u64) -> Result[u64, Error] {
-    let after = int.saturating_add(frame - old_data_op_size(tx.ops, key), width)
+    let after = int.saturating_add(frame - old_data_op_size(tx.ops, tx.below, false, key), width)
     if int.saturating_add(after, tx.extra_bytes) - 16 > 16777280 {
         return Error(Limit(Transaction))
     }
@@ -2246,9 +2348,24 @@ fn apply_put(mut tx: Tx, take p: Bytes, take val: Bytes, tail: bool) -> Result[(
                 Some(value) => entry(p, staged_bytes(value)),
                 None => 0,
             },
-            None => match std.page.lookup(child, list.slice(p, 4, list.len(p))) {
-                Some(value) => entry(p, value),
-                None => 0,
+            None => {
+                // The newest layer that staged the key wins.
+                let mut beneath: Option[u64] = None
+                for layer in tx.below {
+                    if let Some(slot) = op_slot(layer.ops, p) {
+                        beneath = Some(match data_row(layer.ops.rows, slot).value {
+                            Some(value) => entry(p, staged_bytes(value)),
+                            None => 0,
+                        })
+                    }
+                }
+                match beneath {
+                    Some(found) => found,
+                    None => match std.page.lookup(child, list.slice(p, 4, list.len(p))) {
+                        Some(value) => entry(p, value),
+                        None => 0,
+                    },
+                }
             },
         }
         let old = if tx.retain_old {
@@ -2261,7 +2378,7 @@ fn apply_put(mut tx: Tx, take p: Bytes, take val: Bytes, tail: bool) -> Result[(
     }
     let _ = reserve_ids(mut tx, height)?
     let value = stage_value(take val, tx.roots.collections.inline)
-    let position = save_data_op(mut tx.ops, take p, Some(take value))
+    let position = save_data_op(mut tx.ops, tx.below, false, mut tx.rows, take p, Some(take value))
     if tail {
         tx.frame_tail = position
     }
@@ -2299,7 +2416,7 @@ fn delete_refund(tx: Tx, key: Bytes) -> Option[u64] {
 fn apply_delete(mut tx: Tx, take p: Bytes, refund: u64) -> Result[(), Error] {
     let height = collection_write_height(tx.roots.collections, p)
     let _ = reserve_ids(mut tx, height)?
-    let _ = save_data_op(mut tx.ops, take p, None)
+    let _ = save_data_op(mut tx.ops, tx.below, false, mut tx.rows, take p, None)
     tx.resident = int.saturating_sub(tx.resident, refund)
     Ok(())
 }
@@ -2308,7 +2425,7 @@ fn apply_delete(mut tx: Tx, take p: Bytes, refund: u64) -> Result[(), Error] {
 // no data ops has no data head.
 fn tx_frame(tx: Tx) -> u64 {
     let total = int.saturating_add(tx.frame_bytes, tx.extra_bytes)
-    if tx.ops.rows.count == 0 && tx.stream_ops.rows.count != 0 {
+    if tx.rows == 0 && tx.streams != 0 {
         total - 5
     } else {
         total
@@ -2421,13 +2538,13 @@ fn stream_write(mut tx: Tx, take key: Bytes, take value: Bytes, call_size: u64) 
     if list.len(value) > 1048576 {
         return Error(Limit(Value))
     }
-    let head = if tx.stream_ops.rows.count == 0 {
+    let head = if tx.streams == 0 {
         5u64
     } else {
         0u64
     }
-    let extra = int.saturating_add(tx.extra_bytes - old_data_op_size(tx.stream_ops, key), head + 9 + list.len(key) + list.len(value) + call_size)
-    let data_head = if tx.ops.rows.count == 0 {
+    let extra = int.saturating_add(tx.extra_bytes - old_data_op_size(tx.stream_ops, tx.below, true, key), head + 9 + list.len(key) + list.len(value) + call_size)
+    let data_head = if tx.rows == 0 {
         5u64
     } else {
         0u64
@@ -2449,7 +2566,7 @@ fn stream_write(mut tx: Tx, take key: Bytes, take value: Bytes, call_size: u64) 
     let height = tree_height(tx.roots.streams)
     let _ = reserve_ids(mut tx, height)?
     let raw = stage_value(take value, tx.roots.streams.inline)
-    let _ = save_data_op(mut tx.stream_ops, take key, Some(take raw))
+    let _ = save_data_op(mut tx.stream_ops, tx.below, true, mut tx.streams, take key, Some(take raw))
     tx.resident = int.saturating_add(int.saturating_sub(tx.resident, old_charge), charge)
     tx.extra_bytes = extra
     tx.wrote = true
@@ -2486,6 +2603,11 @@ fn reply(mut tx: Tx, stream: Bytes, p: u64, take r: Bytes) -> Result[(), Error] 
 fn reply_recorded(mut tx: Tx, p: u64, take r: Bytes, take c: CallRecord) -> Result[(), Error] {
     if let Some(_) = tx.call {
         return Error(Exists("call"))
+    }
+    for layer in tx.below {
+        if let Some(_) = layer.call {
+            return Error(Exists("call"))
+        }
     }
     let (take key, take value) = reply_row(tx, c.stream, p, r)?
     call_checked(c)?
@@ -2999,7 +3121,10 @@ fn test_foreign(c: Clock) -> Result[(), ()] waits {
     }
 }
 
-fn save_data_op(mut ops: DataOps, take key: Bytes, take value: Option[StagedValue]) -> u64 {
+// Stages one row in `ops` and returns its slot: `fresh`, the next one, for a
+// key new to the transaction, else OPEN_FRAME_TAIL. A key a layer beneath
+// staged keeps its slot there, so `ops` holds the replacement uncounted.
+fn save_data_op(mut ops: DataOps, below: List[Arc[Staged]], streams: bool, mut fresh: u64, take key: Bytes, take value: Option[StagedValue]) -> u64 {
     if let Some(slot) = op_slot(ops, key) {
         if slot < 2 {
             ops.rows.first[slot].value = take value
@@ -3007,6 +3132,21 @@ fn save_data_op(mut ops: DataOps, take key: Bytes, take value: Option[StagedValu
             ops.rows.rest[slot - 2].value = take value
         }
         return OPEN_FRAME_TAIL
+    }
+    let mut beneath = false
+    for layer in below {
+        let found = if streams {
+            op_slot(layer.stream_ops, key)
+        } else {
+            op_slot(layer.ops, key)
+        }
+        if let Some(_) = found {
+            beneath = true
+        }
+    }
+    let at = fresh
+    if !beneath {
+        fresh += 1
     }
     let position = ops.rows.count
     if position == SCANNED_OPS {
@@ -3018,7 +3158,11 @@ fn save_data_op(mut ops: DataOps, take key: Bytes, take value: Option[StagedValu
         map.insert(mut ops.slots, clone(key), position)
     }
     push_data_row(mut ops.rows, DataOp(key: take key, value: take value))
-    position
+    if beneath {
+        OPEN_FRAME_TAIL
+    } else {
+        at
+    }
 }
 
 fn transaction_row(tx: Tx, key: Bytes) -> Option[View[Bytes]] in tx {
@@ -3026,6 +3170,15 @@ fn transaction_row(tx: Tx, key: Bytes) -> Option[View[Bytes]] in tx {
         return match data_row(tx.ops.rows, slot).value {
             Some(raw) => Some(staged_bytes(raw)),
             None => None,
+        }
+    }
+    if let Some(at) = newest_layer(tx.below, false, key) {
+        let layer = view tx.below[at]
+        if let Some(slot) = op_slot(layer.ops, key) {
+            return match data_row(layer.ops.rows, slot).value {
+                Some(raw) => Some(staged_bytes(raw)),
+                None => None,
+            }
         }
     }
     get_page_row(tx.roots.collections, key)
@@ -3038,7 +3191,34 @@ fn transaction_stream(tx: Tx, key: Bytes) -> Option[View[Bytes]] in tx {
             None => None,
         }
     }
+    if let Some(at) = newest_layer(tx.below, true, key) {
+        let layer = view tx.below[at]
+        if let Some(slot) = op_slot(layer.stream_ops, key) {
+            return match data_row(layer.stream_ops.rows, slot).value {
+                Some(raw) => Some(staged_bytes(raw)),
+                None => None,
+            }
+        }
+    }
     get_page_row(tx.roots.streams, key)
+}
+
+// The newest layer that staged `key`, a deletion included.
+fn newest_layer(below: List[Arc[Staged]], streams: bool, key: Bytes) -> Option[u64] {
+    let mut newest: Option[u64] = None
+    let mut at = 0u64
+    for layer in below {
+        let found = if streams {
+            op_slot(layer.stream_ops, key)
+        } else {
+            op_slot(layer.ops, key)
+        }
+        if let Some(_) = found {
+            newest = Some(at)
+        }
+        at += 1
+    }
+    newest
 }
 
 fn materialize_rows(mut tree: PageTree, operations: DataRows, first: u64, mut draw: u64) -> Result[(), Error] {
@@ -3061,16 +3241,30 @@ fn transaction_collection_pages(tx: Tx) -> Result[PageTree, Error] {
         return Error(Limit(Ids))
     }
     let mut draw = first
+    for layer in tx.below {
+        materialize_rows(mut tree, layer.ops.rows, first, mut draw)?
+    }
     materialize_rows(mut tree, tx.ops.rows, first, mut draw)?
     Ok(take tree)
 }
 
-fn old_data_op_size(ops: DataOps, key: Bytes) -> u64 {
+// The frame bytes of the op staged for `key`, in `ops` or the newest layer.
+fn old_data_op_size(ops: DataOps, below: List[Arc[Staged]], streams: bool, key: Bytes) -> u64 {
     if let Some(slot) = op_slot(ops, key) {
-        data_op_size(data_row(ops.rows, slot))
-    } else {
-        0
+        return data_op_size(data_row(ops.rows, slot))
     }
+    let mut size = 0u64
+    for layer in below {
+        let staged = if streams {
+            view layer.stream_ops
+        } else {
+            view layer.ops
+        }
+        if let Some(slot) = op_slot(staged, key) {
+            size = data_op_size(data_row(staged.rows, slot))
+        }
+    }
+    size
 }
 
 fn data_op_size(operation: DataOp) -> u64 {
@@ -3550,7 +3744,10 @@ fn test_node_ids(c: Clock) -> Result[(), ()] {
     }
 }
 
-pub type RowSchemas: codec + shareable + send { key: Bytes, value: Bytes }
+pub type RowSchemas: codec + shareable + send {
+    key: Bytes,
+    value: Bytes
+}
 
 pub opaque type Readers[V]: shareable + send {
     codec: std.codec.Codec[V],
@@ -3813,7 +4010,11 @@ fn put_impl[K, V](mut tx: Tx, t: Table[K, V], take p: Bytes, v: V, tail: bool) -
     // The schema tag and the codec's least length, so a fixed-width value encodes without growing.
     let mut raw: Bytes = list.new()
     let least = 2 + std.codec.least(t.readers.codec)
-    let hint = if least <= 32 { least * 2 } else { least }
+    let hint = if least <= 32 {
+        least * 2
+    } else {
+        least
+    }
     capacity(bytebuf.try_reserve_hint(mut raw, least, hint))?
     capacity(le(mut raw, int.widen(t.readers.current), 2))?
     std.codec.encode(t.readers.codec, v, mut raw) ?=> |_| Limit(Value)
@@ -5267,7 +5468,9 @@ fn overrun_case(c: Clock, outer: u64) -> (u64, u64, u64, u64, bool) waits {
                 put(mut i, t, 2, 20)?
                 loop {}
             })
-            let probe = bound steps 1 { () }
+            let probe = bound steps 1 {
+                ()
+            }
             let admitted = match probe {
                 Ok(_) => true,
                 Error(_) => false,
@@ -5293,25 +5496,116 @@ fn overrun_case(c: Clock, outer: u64) -> (u64, u64, u64, u64, bool) waits {
 // MEM-30 with a rollback-able Tx. An overrun leaves none of the body's writes,
 // and the transaction goes on to write and commit. Oracle for the charge, by
 // hand from rollback_writes_on_overrun's source: the outer body's call (1),
-// the call of rollback_writes_on_overrun (1), share_roots (1 + 3 share_page_tree
-// + 4 arc.share: the collection map's root and empty child, the streams and
-// catalog roots) and three clones (3) come to 13 before the inner bound of N
-// is reserved, and the overrun returns at `?` with no step. So an outer bound
-// of N + 13 runs the body and is then exhausted: a one-step reservation after
-// it is refused, which an overrun that refunded a step would admit. N + 14
-// leaves that step, and N + 12 refuses the body's entry and keeps N - 1.
+// the call of rollback_writes_on_overrun (1), freeze (its call, three
+// replace, two empty_ops at 6 each: its call, new_data_rows with three
+// list.new, map.new; then list.push and arc.new: 18), share_roots (1 + 3
+// share_page_tree + 4 arc.share: the collection map's root and empty child,
+// the streams and catalog roots), two empty_ops (12) and the clone of the
+// layer list (1) come to 41 before the inner bound of N is reserved, and the
+// overrun returns at `?` with no step. So an outer bound of N + 41 runs the
+// body and is then exhausted: a one-step reservation after it is refused,
+// which an overrun that refunded a step would admit. N + 42 leaves that step,
+// and N + 40 refuses the body's entry and keeps N - 1.
 pub fn law_rollback_on_overrun(c: Clock) -> bool waits {
-    let exact = overrun_case(c, 1013)
-    let spare = overrun_case(c, 1014)
-    let short = overrun_case(c, 1012)
-    exact.0 == 1 && exact.1 == 10 && exact.2 == 0 && exact.3 == 30 && !exact.4
-        && spare.0 == 1 && spare.4
-        && short.0 == 0 && short.1 == 10 && short.2 == 0 && short.3 == 30 && short.4
+    let exact = overrun_case(c, 1041)
+    let spare = overrun_case(c, 1042)
+    let short = overrun_case(c, 1040)
+    exact.0 == 1 && exact.1 == 10 && exact.2 == 0 && exact.3 == 30 && !exact.4 && spare.0 == 1 && spare.4 && short.0 == 0 && short.1 == 10 && short.2 == 0 && short.3 == 30 && short.4
 }
 
 @test
 fn test_rollback_on_overrun(c: Clock) -> Result[(), ()] waits {
     if law_rollback_on_overrun(c) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+// ADVICE 5: a callback copies none of the rows staged before it. Oracle: 64
+// staged rows of 1,000-byte values are 64,000 bytes, so a callback that
+// copied them could not start under a 32 KiB byte bound; one that shares
+// them needs only its own empty overlay. Then the merge rules, by hand:
+// nested callbacks replace row 1, delete row 2 and add rows 100 and 101; a
+// typed error drops its write of row 3; an overrun drops its write of row 4;
+// rollback_writes_on_error keeps its write of row 5. Every other row keeps
+// its value. The inner callback's bound is below what its enclosing bound has
+// left, since a nested bound cannot grant steps its parent no longer holds.
+pub fn law_callback_shares_staged(c: Clock) -> bool waits {
+    let mut db = test_db(c, 1073741824)
+    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_string())))
+    let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_string()))
+    let mut raw: Bytes = list.with_capacity(1000)
+    list.fill(mut raw, 1000, 97u8)
+    let big = result.unwrap(string.from_utf8(take raw))
+    let out = run(mut db, None, scoped fn(mut tx: Tx) -> Result[bool, Error] {
+        for k in 1u64 .. 65 {
+            put(mut tx, t, k, big)?
+        }
+        let shared = bound bytes 32768 {
+            rollback_writes_on_overrun(mut tx, 100000, scoped fn(mut w: Tx) -> Result[(), Error] {
+                put(mut w, t, 1, "one")
+            })
+        }
+        let fits = match shared {
+            Ok(Ok(Ok(()))) => true,
+            _ => false,
+        }
+        let nested = rollback_writes_on_overrun(mut tx, 100000, scoped fn(mut w: Tx) -> Result[(), Error] {
+            put(mut w, t, 100, "hundred")?
+            let inner = rollback_writes_on_overrun(mut w, 50000, scoped fn(mut v: Tx) -> Result[(), Error] {
+                let _ = delete(mut v, t, 2)?
+                put(mut v, t, 101, "hundred one")
+            })
+            match inner {
+                Ok(Ok(())) => Ok(()),
+                _ => Error(Missing("inner")),
+            }
+        })
+        let typed = rollback_writes_on_overrun(mut tx, 100000, scoped fn(mut w: Tx) -> Result[(), Error] {
+            put(mut w, t, 3, "three")?
+            Error(Missing("typed"))
+        })
+        let over = rollback_writes_on_overrun(mut tx, 1000, scoped fn(mut w: Tx) -> Result[(), Error] {
+            put(mut w, t, 4, "four")?
+            loop {}
+        })
+        let kept = rollback_writes_on_error(mut tx, scoped fn(mut w: Tx) -> Result[(), Error] {
+            put(mut w, t, 5, "five")
+        })
+        let shapes = match (nested, typed, over, kept) {
+            (Ok(Ok(())), Ok(Error(_)), Error(_), Ok(())) => true,
+            _ => false,
+        }
+        Ok(fits && shapes)
+    })
+    let shaped = match take out {
+        Ok(Committed(done)) => done.value,
+        _ => false,
+    }
+    let s = snapshot(db)
+    let sh = shape(t)
+    let mut good = shaped
+    for k in 1u64 .. 65 {
+        let want = if k == 1 {
+            Some(string.from("one"))
+        } else if k == 2 {
+            None
+        } else if k == 5 {
+            Some(string.from("five"))
+        } else {
+            Some(string.from(big))
+        }
+        if result.unwrap(get(s, sh, k)) != want {
+            good = false
+        }
+    }
+    good && result.unwrap(get(s, sh, 100)) == Some(string.from("hundred")) && result.unwrap(get(s, sh, 101)) == Some(string.from("hundred one"))
+}
+
+@test
+fn test_callback_shares_staged(c: Clock) -> Result[(), ()] waits {
+    if law_callback_shares_staged(c) {
         Ok(())
     } else {
         Error(())
@@ -5352,7 +5646,11 @@ fn retention_outcomes(c: Clock, retained: bool, top: u64) -> List[bool] waits {
                 Error(_) => false,
             }
             // Abort, so every bound starts from the same rows.
-            Error(Missing(if returned { "returned" } else { "overran" }))
+            Error(Missing(if returned {
+                "returned"
+            } else {
+                "overran"
+            }))
         }))
         match take ran {
             Aborted(Undone(value: Missing(why), ..)) => list.push(mut out, why == "returned"),
@@ -5446,8 +5744,7 @@ fn typed_error_tail_case(d: Dir, c: Clock, r: Random, tasks: Tasks, bounded: boo
 pub fn disk_law_typed_error_drops_frame_tail(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
     let bounded = typed_error_tail_case(d, c, r, tasks, true)
     let unbounded = typed_error_tail_case(d, c, r, tasks, false)
-    bounded.0 == 10 && bounded.1 == 20 && bounded.2 == 0 && bounded.3 == 40
-        && unbounded.0 == 10 && unbounded.1 == 20 && unbounded.2 == 0 && unbounded.3 == 40
+    bounded.0 == 10 && bounded.1 == 20 && bounded.2 == 0 && bounded.3 == 40 && unbounded.0 == 10 && unbounded.1 == 20 && unbounded.2 == 0 && unbounded.3 == 40
 }
 
 @test
@@ -6163,7 +6460,7 @@ fn reject_999(v: u64) -> Result[u64, Capacity] {
 
 fn write_state(tx: Tx) -> (u64, u64, u64, u64, u64, bool) {
     let node = tree_stamp(tx.roots.collections)
-    (node, tx.ids, tx.resident, tx.frame_bytes, tx.ops.rows.count, tx.wrote)
+    (node, tx.ids, tx.resident, tx.frame_bytes, tx.rows, tx.wrote)
 }
 
 fn check_index_put_refusal(mut db: Db, t: Table[u64, u64], value: u64, frame_limit: bool) -> bool waits {
@@ -6830,7 +7127,7 @@ pub fn look[R](s: Snapshot, steps: Option[u64], body: scoped[view] fn(Tx) -> R) 
     let issued: Log[u64] = log.new()
     let caught = isolate(fn() -> Result[R, OutOfTime] {
         let perform = scoped fn() -> R {
-            let tx = Tx(store: s.store, roots: share_roots(s.roots), ids: 0, private_from: 1, resident: 0, retain_old: false, frame_tail: NO_FRAME_TAIL, reads: view reads, issued: view issued, refusal: None, frame_bytes: 42, wrote: false, ops: empty_ops(), info: CallInfo(id: CallId(store: s.store, branch: s.branch, version: s.head), at: 0, seed: 0), stream_ops: empty_ops(), extra_bytes: 0, call: None)
+            let tx = Tx(store: s.store, roots: share_roots(s.roots), ids: 0, private_from: 1, resident: 0, retain_old: false, frame_tail: NO_FRAME_TAIL, reads: view reads, issued: view issued, refusal: None, frame_bytes: 42, wrote: false, ops: empty_ops(), info: CallInfo(id: CallId(store: s.store, branch: s.branch, version: s.head), at: 0, seed: 0), stream_ops: empty_ops(), extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, streams: 0)
             body(tx)
         }
         match steps {
@@ -9256,7 +9553,11 @@ fn scan_matches_rows(s: Snapshot, sh: Shape[u64, u64], low: u64, high: u64, hi: 
         result.unwrap(scan(s, sh, Included(low), hi))
     }
     for i in 0u64 .. 512 {
-        let key = 2 * (if reverse { 511 - i } else { i })
+        let key = 2 * (if reverse {
+            511 - i
+        } else {
+            i
+        })
         if low <= key && key < high && result.unwrap(next(mut rows)) != Some((key, key + 1)) {
             return false
         }
@@ -9283,17 +9584,15 @@ fn law_leaf_range_stop(c: Clock) -> bool waits {
     let s = snapshot(db)
     let sh = shape(t)
     let root = option.unwrap(std.page.collection_child(s.roots.collections.root, result.unwrap(prefix(sh.id))))
-    let Some(first) = std.page.child(root, 0) else { return false }
+    let Some(first) = std.page.child(root, 0) else {
+        return false
+    }
     let leaf = std.page.image_of(first)
     let n = std.page.count(leaf)
     let edge = result.unwrap(std.codec.decode_key(format, option.unwrap(std.page.key_at(leaf, n - 1))))
     let middle = result.unwrap(std.codec.decode_key(format, option.unwrap(std.page.key_at(leaf, n / 2))))
-    for reverse in [false, true] {
-        if !scan_matches_rows(s, sh, 0, edge, Excluded(edge), reverse)
-           || !scan_matches_rows(s, sh, middle, 1024, Unbounded, reverse)
-           || !scan_matches_rows(s, sh, 1, middle + 1, Included(middle), reverse)
-           || !scan_matches_rows(s, sh, 0, middle + 1, Excluded(middle + 1), reverse)
-           || !scan_matches_rows(s, sh, edge, middle, Excluded(middle), reverse) {
+    for reverse in[false, true] {
+        if !scan_matches_rows(s, sh, 0, edge, Excluded(edge), reverse) || !scan_matches_rows(s, sh, middle, 1024, Unbounded, reverse) || !scan_matches_rows(s, sh, 1, middle + 1, Included(middle), reverse) || !scan_matches_rows(s, sh, 0, middle + 1, Excluded(middle + 1), reverse) || !scan_matches_rows(s, sh, edge, middle, Excluded(middle), reverse) {
             return false
         }
     }
@@ -12312,7 +12611,11 @@ fn disk_cut_with_limit(mut db: Db, take delta: HolderDelta, seal: scoped fn(mut 
         Some(_) => true,
         None => false,
     }
-    let started = if observe { host.mono_ns(db.clock) } else { 0 }
+    let started = if observe {
+        host.mono_ns(db.clock)
+    } else {
+        0
+    }
     let drain_groups = durable_groups(mut db, last)?
     let Some(generation) = int.checked_add(db.checkpointed, 1) else {
         return Error(Limit(Ids))
@@ -12389,7 +12692,11 @@ fn disk_cut_with_limit(mut db: Db, take delta: HolderDelta, seal: scoped fn(mut 
     db.settled = db.changes
     db.uncovered = 0
     install_holder_delta(mut db, take delta)
-    let installed = if observe { host.mono_ns(db.clock) } else { 0 }
+    let installed = if observe {
+        host.mono_ns(db.clock)
+    } else {
+        0
+    }
     let removals_count = if observe {
         list.len(removals.packs) + 2 * (removals.before.end - removals.before.first + removals.after.end - removals.after.first)
     } else {
@@ -13092,13 +13399,12 @@ fn check_publish_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[()
             return Error(Foreign)
         }
     }
-    let committed_at = disk_cut_with_limit(mut db, NoHolderChange,
-        scoped fn(mut raw: Bytes, context: DiskContext, fence: u32) -> Result[(), Error] {
-            if list.capacity(raw) != planned {
-                return Error(Foreign)
-            }
-            seal_page_manifest_file(mut raw, context, fence)
-        }, None, options.pack_bytes, planned, mut timing)?
+    let committed_at = disk_cut_with_limit(mut db, NoHolderChange, scoped fn(mut raw: Bytes, context: DiskContext, fence: u32) -> Result[(), Error] {
+        if list.capacity(raw) != planned {
+            return Error(Foreign)
+        }
+        seal_page_manifest_file(mut raw, context, fence)
+    }, None, options.pack_bytes, planned, mut timing)?
     durable(mut db, committed_at)?
     let written = disk_read_paged_file(directory, pack, planned)?
     if list.len(written) != planned || read_le(written, 72, 2) != 0x0022 {
@@ -13276,8 +13582,7 @@ fn law_location_cow_charge() -> Result[bool, Error] {
     add_page_source(mut candidate, 1, HolderSource(0, 0, 0))?
     let before = std.omap.storage_charge(installed.frames.values, 8, 87)
     let after = std.omap.storage_charge(candidate.frames.values, 8, 87)
-    Ok(before > after && resident_location_charge(installed) == scan_location_storage_charge(installed)
-        && resident_location_charge(candidate) == scan_location_storage_charge(candidate))
+    Ok(before > after && resident_location_charge(installed) == scan_location_storage_charge(installed) && resident_location_charge(candidate) == scan_location_storage_charge(candidate))
 }
 
 // Wrong implementations caught: a record charged twice when a second holder
@@ -13301,8 +13606,7 @@ pub fn disk_law_resident_charge(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bo
     let _ = result.unwrap(checkpoint(mut db))
     let frame_ids = db.disk[0].pages.locations.frames.ids
     let pack_ids = db.disk[0].pages.locations.packs.ids
-    if before != accounts(db).resident || installed.frames.ids != frame_ids
-        || installed.packs.ids != pack_ids || !law_resident_scan(db) {
+    if before != accounts(db).resident || installed.frames.ids != frame_ids || installed.packs.ids != pack_ids || !law_resident_scan(db) {
         return false
     }
     let mut forked = 0u64
@@ -14056,7 +14360,11 @@ fn disk_crash_read_only(d: Dir, torn: bool) -> Result[(), Error] waits {
         fail("read-only open recovered the wrong journal prefix")
     }
     for k in 0u64 .. 96 {
-        let expected = if k < 64 { k + 101 } else { k + 1 }
+        let expected = if k < 64 {
+            k + 101
+        } else {
+            k + 1
+        }
         if read_only_get(reader, rows, k)? != Some(expected) {
             fail("read-only open recovered the wrong row")
         }
@@ -14096,7 +14404,7 @@ fn disk_test_read_only_snapshot(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
 }
 
 // S3 journal payloads are decoded exactly before their effects are applied.
-pub type CallRecord: codec {
+pub type CallRecord: codec + shareable + send {
     key: Bytes,
     args: Bytes,
     stream: Bytes,
@@ -14110,14 +14418,14 @@ pub type CallRecord: codec {
 
 // The CALL carries the original execution context only when a later frame
 // settles the call. An inline reply uses the context of its own frame.
-type Settlement {
+type Settlement: shareable + send {
     way: u8,
     base: u64,
     at: u64,
     seed: u64
 }
 
-type CallSection {
+type CallSection: shareable + send {
     record: CallRecord,
     settlement: Option[Settlement]
 }
@@ -16559,12 +16867,18 @@ fn journal_test_fork_threshold(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
         let generation = db.checkpointed
         let saved = snapshot(db)
         let (beta, receipt) = if refuse {
-            let attempt = bound bytes 4096 { fork(mut db, "beta", saved) }
+            let attempt = bound bytes 4096 {
+                fork(mut db, "beta", saved)
+            }
             result.unwrap(take attempt)?
         } else {
             fork(mut db, "beta", saved)?
         }
-        let expected_segment = if refuse { previous } else { previous + 1 }
+        let expected_segment = if refuse {
+            previous
+        } else {
+            previous + 1
+        }
         if !covered(db, receipt.mark) || journal_mark(receipt) != 2 || db.file_seq != expected_segment || db.since_cut != 0 {
             return Error(Foreign)
         }
@@ -17537,10 +17851,11 @@ fn journal_recorded_case(d: Dir, c: Clock, r: Random, tasks: Tasks, refuse: bool
     if refuse {
         for _ in 0u64 .. 2 {
             let segment = db.file_seq
-            match disk_cut_state(mut db, NoHolderChange,
-                scoped fn(mut raw: Bytes, context: DiskContext, fence: u32) -> Result[(), Error] {
-                    capacity(bound bytes 0 { seal_page_manifest_file(mut raw, context, fence) })?
-                }) {
+            match disk_cut_state(mut db, NoHolderChange, scoped fn(mut raw: Bytes, context: DiskContext, fence: u32) -> Result[(), Error] {
+                capacity(bound bytes 0 {
+                    seal_page_manifest_file(mut raw, context, fence)
+                })?
+            }) {
                 Error(Full(Allocation(_))) if db.file_seq == segment + 1 => (),
                 _ => return false
             }
@@ -18326,7 +18641,9 @@ fn journal_cap_restart(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), 
         return Error(Foreign)
     }
     durable(mut db, last.ticket)?
-    result.unwrap(bound bytes 1048576 { maybe_checkpoint(mut db) })?
+    result.unwrap(bound bytes 1048576 {
+        maybe_checkpoint(mut db)
+    })?
     if db.checkpointed != initial_generation || db.file_seq != initial_segment || db.uncovered != 16781392 || db.since_cut != 0 || db.inflight != 0 {
         return Error(Foreign)
     }
@@ -18452,7 +18769,9 @@ fn journal_test_cap_calls(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(
         return Error(())
     }
     result.unwrap(durable(mut db, last.ticket))
-    result.unwrap(result.unwrap(bound bytes 1048576 { maybe_checkpoint(mut db) }))
+    result.unwrap(result.unwrap(bound bytes 1048576 {
+        maybe_checkpoint(mut db)
+    }))
     let before = version(snapshot(db))
     let frames = db.frame_seq
     if accounts(db).journal != 16781392 || db.since_cut != 0 {

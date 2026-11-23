@@ -28,9 +28,11 @@ fn journal_test_fork_preparation(c: Clock, d: Dir, r: Random, tasks: Tasks) -> R
     close(take mem)?
     let root = disk_test_directory(d)
     let mut db = open(tasks, root, c, r, journal_crash_options())?
-    let (sender, take receiver): (Sender[JournalMsg], Receiver[JournalMsg]) = channel.new(1)
+    let (take sender, take receiver): (Sender[JournalMsg], Receiver[JournalMsg]) = channel.new(1)
     let _ = take receiver
-    let original = edit_disk(mut db.disk, scoped fn(mut state: DiskState) -> Sender[JournalMsg] { replace(mut state.journal, sender) })
+    let original = write_disk(mut db.disk, take sender, scoped fn(mut state: DiskState, take disconnected: Sender[JournalMsg]) -> Sender[JournalMsg] {
+        replace(mut state.journal, take disconnected)
+    })
     let saved_disk = snapshot(db)
     match fork(mut db, "beta", saved_disk) {
         Error(Poisoned(Closed)) => (),
@@ -226,7 +228,7 @@ fn journal_test_fork_threshold(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
         }
         close(take db)?
         let reopened = open(tasks, child, c, r, options)?
-        if option.unwrap(branch(reopened, "beta")).id != 1 || reopened.uncovered != expected_journal || get(snapshot_of(reopened, beta)?, shape(rows), 1)? != Some(11u64) {
+        if option.unwrap(branch(reopened, "beta")).id != 1 || disk_state(reopened).uncovered != expected_journal || get(snapshot_of(reopened, beta)?, shape(rows), 1)? != Some(11u64) {
             return Error(Foreign)
         }
         close(take reopened)?
@@ -278,12 +280,12 @@ fn journal_test_fork_pack_lists(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
     list.append(mut orphan_wire, capacity(disk_seal(ctx, 72, 33, 1, unused_page))?)
     disk_write_synced(child, orphan, orphan_wire)?
     let reopened = open(tasks, child, c, r, options)?
-    if disk_exists(child, orphan)? || option.unwrap(branch(reopened, "beta")).id != 1 || std.page.level(std.page.image_of(reopened.disk[0].pages.lists.packs)) < 2 {
+    if disk_exists(child, orphan)? || option.unwrap(branch(reopened, "beta")).id != 1 || std.page.level(std.page.image_of(disk_state(reopened).pages.lists.packs)) < 2 {
         return Error(Foreign)
     }
     let mut blob_count = 0u64
     for seq in first .. after {
-        let Some(pack) = disk_index_get(reopened.disk[0].pages.locations.packs, seq) else {
+        let Some(pack) = disk_index_get(disk_state(reopened).pages.locations.packs, seq) else {
             continue
         }
         if pack.class != 1 {

@@ -286,7 +286,8 @@ fn disk_test_relocation_late_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) 
     }
     let reopened = open(tasks, directory, c, r, options)?
     {
-        let known = view reopened.disk[0u64].pages.locations
+        let disk = disk_state(reopened)
+        let known = view disk.pages.locations
         let old_stamp = read_le(original, 88, 8)
         if std.omap.get(known.members.values, (old_blob_pack, old_stamp)) == None
            || moved_frames(known, false) != law_full_frame_selection(known, false)

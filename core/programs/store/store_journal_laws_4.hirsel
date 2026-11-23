@@ -77,7 +77,7 @@ fn journal_cap_restart(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), 
     }
     close(take db)?
     let mut recovered = open(tasks, d, c, r, options)?
-    if accounts(recovered).journal != 16781392 || recovered.since_cut != 0 || version(snapshot(recovered)) != previous_head {
+    if accounts(recovered).journal != 16781392 || disk_state(recovered).since_cut != 0 || version(snapshot(recovered)) != previous_head {
         return Error(Foreign)
     }
     let refused_again = run(mut recovered, None, fn(mut tx: Tx) -> Result[bool, Error] {

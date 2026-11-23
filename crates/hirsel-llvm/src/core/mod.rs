@@ -44,8 +44,8 @@ use std::fmt::{self, Write};
 
 use sink::{
     Binary, CONTEXT, CallAttrs, Cast, Extension, FnAttrs, FnSig, Global, Inline, Label, Linkage,
-    Local, MdItem, Memory, Metadata, Operation, Ordering, Parameter, Predicate, Rmw, Scoped, Sink,
-    Type, Value,
+    Local, MdItem, Memory, Metadata, Operation, Ordering, Parameter, Predicate, Scoped, Sink, Type,
+    Value,
 };
 
 use hirsel_core_ir::failure;

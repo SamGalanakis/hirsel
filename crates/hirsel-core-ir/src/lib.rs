@@ -704,9 +704,9 @@
 //! payload. A counted payload holds no resource, so a release runs no user code.
 //! Every counted row names its kind: `alloc for rc|arc` and `share`,
 //! `release` and `try_unwrap` with `rc|arc`, so each row alone says whether its
-//! count operations are atomic. An `arc` node is made and counted atomically, and
-//! each of these rows is an event in the run's order (MEM-15); `rc` never crosses
-//! a task (Rc is not `send`). The producer takes the kind from the core type the
+//! count operations are events. Counts are plain words (an `arc` never leaves
+//! its unit, CONC-2); each `arc` row is an event in the run's order (MEM-15) and
+//! `rc` never crosses a task. The producer takes the kind from the core type the
 //! source operation is on, `rc.*` or `Rc[T]` gives `rc`, `arc.*` or `Arc[T]`
 //! gives `arc`, never from bounds of `T`; a row whose kind differs from its node's
 //! allocation is malformed (the evaluator stops on it).

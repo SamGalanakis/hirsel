@@ -3656,7 +3656,7 @@ impl Machine<'_> {
 
 impl Machine<'_> {
     // ---- memory
-    /// Rc and Arc counts differ in atomicity only, which one task cannot observe;
+    /// Rc and Arc counts differ only in whether their operations are events,
     /// what the evaluator checks is that every operation names its node's kind.
     /// A `String` or `Bytes` carrier's bytes, data pointer, length and capacity.
     fn carrier(&self, c: u64) -> (Vec<u8>, u64, u64, u64) {

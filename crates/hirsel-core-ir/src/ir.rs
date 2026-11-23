@@ -795,9 +795,8 @@ pub enum AllocKind {
     /// Own storage for the owning edge that will hold it (crate docs, "Cleanup
     /// classes"): `box tN`, `seq E`, `map K V`, or
     /// `rc tN` / `arc tN`, a counted node: the count (u64, starting at 1) at offset 0,
-    /// the payload at 8. `arc` makes the node with the atomic count every later
-    /// `share`, `release` and `try_unwrap` of it uses (MEM-15); its operations name the
-    /// same kind. The edge's [`hirsel_core_layout::cleanup_class`] fixes the block's
+    /// the payload at 8. `arc` makes a node whose every later `share`, `release`
+    /// and `try_unwrap` is an event (MEM-15); its operations name the same kind. The edge's [`hirsel_core_layout::cleanup_class`] fixes the block's
     /// native prefix.
     Own { edge: FieldTy },
     /// An `own fn` environment (`alloc env tN`, crate docs "Callable

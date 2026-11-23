@@ -565,7 +565,7 @@ pub unsafe extern "C" fn hirsel_core_arc_initialized(context: *const Context) {
 }
 /// Complete an emitted Arc increment. No status/admission/allocation.
 /// # Safety
-/// As for arc_initialized; node is live and its checked atomic increment completed.
+/// As for arc_initialized; node is live and its checked increment completed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_arc_shared(context: *const Context, node: *const u8) {
     count_arc_hook();
@@ -574,8 +574,7 @@ pub unsafe extern "C" fn hirsel_core_arc_shared(context: *const Context, node: *
         if crate::tasks::arc_unobserved(context) {
             return;
         }
-        let count = (&*node.cast::<std::sync::atomic::AtomicU64>())
-            .load(std::sync::atomic::Ordering::Relaxed);
+        let count = node.cast::<u64>().read();
         crate::tasks::event_in(context, crate::tasks::ARC_SHARE, 0, count);
     }
 }
@@ -641,8 +640,8 @@ pub unsafe extern "C" fn hirsel_core_try_unwrap(node: NonNull<u8>, atomic: bool)
     // SAFETY: the caller owns a live holder in its provider event.
     unsafe { counted::try_unwrap(node, atomic) }
 }
-/// On replay the dispatcher grants the release before the atomic mutation.
-/// The emitter still fences the last release and reports the completed event.
+/// On replay the dispatcher grants the release before the count changes.
+/// The emitter still reports the completed event.
 /// # Safety
 /// Consumes a live Arc holder under the current task's event discipline.
 #[unsafe(no_mangle)]

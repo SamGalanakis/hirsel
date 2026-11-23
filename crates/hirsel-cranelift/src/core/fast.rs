@@ -475,23 +475,27 @@ pub(super) fn share(
         )?;
         b.ins().jump(done, &[]);
         b.switch_to_block(inline);
-        let initial = b.ins().atomic_load(types::I64, Flags::trusted(), node);
-        let head = b.create_block();
-        let update = b.create_block();
-        b.append_block_param(head, types::I64);
-        b.ins().jump(head, &[initial.into()]);
-        b.switch_to_block(head);
-        let old = b.block_params(head)[0];
-        let one = b.ins().iconst(types::I64, 1);
-        let (next, wrapped) = b.ins().uadd_overflow(old, one);
-        b.ins().brif(wrapped, overflow, &[], update, &[]);
-        b.switch_to_block(update);
-        // Cranelift atomics are SeqCst, stronger than the runtime's Relaxed CAS.
-        let actual = b.ins().atomic_cas(Flags::trusted(), node, old, next);
-        let same = b.ins().icmp(IntCC::Equal, actual, old);
-        let observed = b.create_block();
-        b.ins().brif(same, observed, &[], head, &[actual.into()]);
-        b.switch_to_block(observed);
+    }
+    // Rc and Arc counts are plain words: an Arc never leaves the thread
+    // running its unit (CONC-2).
+    let old = b.ins().load(
+        types::I64,
+        Flags::trusted(),
+        node,
+        memory_layout::NODE_COUNT as i32,
+    );
+    let one = b.ins().iconst(types::I64, 1);
+    let (next, wrapped) = b.ins().uadd_overflow(old, one);
+    let store = b.create_block();
+    b.ins().brif(wrapped, overflow, &[], store, &[]);
+    b.switch_to_block(store);
+    b.ins().store(
+        Flags::trusted(),
+        next,
+        node,
+        memory_layout::NODE_COUNT as i32,
+    );
+    if atomic {
         arc_event(
             b,
             calls,
@@ -501,27 +505,8 @@ pub(super) fn share(
             &[P],
             &[node],
         )?;
-        b.ins().jump(done, &[]);
-    } else {
-        let old = b.ins().load(
-            types::I64,
-            Flags::trusted(),
-            node,
-            memory_layout::NODE_COUNT as i32,
-        );
-        let one = b.ins().iconst(types::I64, 1);
-        let (next, wrapped) = b.ins().uadd_overflow(old, one);
-        let store = b.create_block();
-        b.ins().brif(wrapped, overflow, &[], store, &[]);
-        b.switch_to_block(store);
-        b.ins().store(
-            Flags::trusted(),
-            next,
-            node,
-            memory_layout::NODE_COUNT as i32,
-        );
-        b.ins().jump(done, &[]);
     }
+    b.ins().jump(done, &[]);
     b.switch_to_block(overflow);
     let atomic = b.ins().iconst(types::I8, i64::from(atomic));
     calls.c(
@@ -545,12 +530,11 @@ pub(super) fn decrement(
     node: Value,
     atomic: bool,
 ) -> Result<Value> {
-    let one = b.ins().iconst(types::I64, 1);
+    let done = b.create_block();
+    b.append_block_param(done, types::I8);
     if atomic {
         let inline = b.create_block();
         let replay = b.create_block();
-        let done = b.create_block();
-        b.append_block_param(done, types::I8);
         branch_on_arc_replay(b, context, inline, replay);
         b.switch_to_block(replay);
         let last = calls.c(
@@ -563,34 +547,25 @@ pub(super) fn decrement(
         )?[0];
         b.ins().jump(done, &[last.into()]);
         b.switch_to_block(inline);
-        // SeqCst includes the required Release decrement and Acquire on last.
-        let old = b.ins().atomic_rmw(
-            types::I64,
-            Flags::trusted(),
-            ir::AtomicRmwOp::Sub,
-            node,
-            one,
-        );
-        let last = b.ins().icmp_imm_s(IntCC::Equal, old, 1);
-        b.ins().jump(done, &[last.into()]);
-        b.switch_to_block(done);
-        Ok(b.block_params(done)[0])
-    } else {
-        let old = b.ins().load(
-            types::I64,
-            Flags::trusted(),
-            node,
-            memory_layout::NODE_COUNT as i32,
-        );
-        let next = b.ins().isub(old, one);
-        b.ins().store(
-            Flags::trusted(),
-            next,
-            node,
-            memory_layout::NODE_COUNT as i32,
-        );
-        Ok(b.ins().icmp_imm_s(IntCC::Equal, next, 0))
     }
+    let one = b.ins().iconst(types::I64, 1);
+    let old = b.ins().load(
+        types::I64,
+        Flags::trusted(),
+        node,
+        memory_layout::NODE_COUNT as i32,
+    );
+    let next = b.ins().isub(old, one);
+    b.ins().store(
+        Flags::trusted(),
+        next,
+        node,
+        memory_layout::NODE_COUNT as i32,
+    );
+    let last = b.ins().icmp_imm_s(IntCC::Equal, next, 0);
+    b.ins().jump(done, &[last.into()]);
+    b.switch_to_block(done);
+    Ok(b.block_params(done)[0])
 }
 
 pub(super) fn release(

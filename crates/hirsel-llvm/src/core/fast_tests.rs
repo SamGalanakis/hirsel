@@ -204,8 +204,6 @@ fn own_fast_paths_and_zero_charge_and_large_alignment_fallbacks_agree() {
 fn counted_hot_paths_are_inline_and_last_release_is_cold() {
     let module = text::parse(include_str!("../../../hirsel-core-ir/samples/counted.core")).unwrap();
     let ir = emit_ir(&module).unwrap();
-    assert!(ir.contains("atomicrmw add ptr"));
-    assert!(ir.contains("atomicrmw sub ptr"));
     for (label, call) in [
         ("replay_arc_init", "call void @hirsel_core_counted_init"),
         ("replay_arc_share", "call void @hirsel_core_share"),
@@ -225,7 +223,6 @@ fn counted_hot_paths_are_inline_and_last_release_is_cold() {
             }
         }
     }
-    assert!(ir.contains("store atomic i64 1"));
     assert!(ir.contains("call void @hirsel_core_arc_initialized(ptr %context)"));
     assert!(ir.contains("call void @hirsel_core_arc_shared"));
     assert!(ir.contains("call void @hirsel_core_arc_released"));

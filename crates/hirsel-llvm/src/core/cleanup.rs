@@ -1112,7 +1112,6 @@ impl FunctionEmitter<'_> {
                     self.br(Label::plain("resume"));
                     self.block(last_label);
                     if atomic {
-                        self.effect(Operation::Fence(Ordering::Acquire));
                         self.arc_event("hirsel_core_arc_released", &[zeroext(Type::I1, true)]);
                     }
                     "counted"

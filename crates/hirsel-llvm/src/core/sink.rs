@@ -429,29 +429,12 @@ impl Predicate {
 pub(super) enum Ordering {
     Monotonic = 2,
     Acquire = 4,
-    Release = 5,
 }
 impl Ordering {
     fn name(self) -> &'static str {
         match self {
             Self::Monotonic => "monotonic",
             Self::Acquire => "acquire",
-            Self::Release => "release",
-        }
-    }
-}
-/// An `atomicrmw` operation; the discriminant is LLVM's `AtomicRMWInst::BinOp`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(u32)]
-pub(super) enum Rmw {
-    Add = 1,
-    Sub = 2,
-}
-impl Rmw {
-    fn name(self) -> &'static str {
-        match self {
-            Self::Add => "add",
-            Self::Sub => "sub",
         }
     }
 }
@@ -715,8 +698,6 @@ pub(super) enum Operation<'a> {
     Phi(&'a Type, &'a [(Value, Label)]),
     Call(&'a FnSig, &'a Value, &'a [Value], &'a CallAttrs),
     /// `atomicrmw <op> ptr, <ty> <value> <ordering>, align 8`; yields the old value.
-    AtomicRmw(Rmw, &'a Value, &'a Type, &'a Value, Ordering),
-    Fence(Ordering),
     Branch(Label),
     Conditional(&'a Value, Label, Label, bool),
     Switch(&'a Type, &'a Value, Label, &'a [(i128, Label)]),
@@ -1185,14 +1166,6 @@ impl Sink for TextSink {
                 }
                 scopes(out, &attrs.scopes);
             }
-            Operation::AtomicRmw(op, p, ty, value, o) => write!(
-                out,
-                "atomicrmw {} ptr {p}, {ty} {value} {}, align 8",
-                op.name(),
-                o.name()
-            )
-            .unwrap(),
-            Operation::Fence(o) => write!(out, "fence {}", o.name()).unwrap(),
             Operation::Branch(target) => write!(out, "br label %{target}").unwrap(),
             Operation::Conditional(test, yes, no, likely) => {
                 write!(out, "br i1 {test}, label %{yes}, label %{no}").unwrap();

@@ -1970,20 +1970,10 @@ fn hash_read_facts_observe_intervening_writes() {
             for (key, cases, fixed) in &vectors {
                 // Supply CAP-8 entropy to the linked test process so the evaluator
                 // and native program see the same key.
-                let bytes = key.map(|b| b.to_string()).join(", ");
-                let bindings = format!(
-                    "#include <sys/random.h>\n\
-                     extern ssize_t __real_getrandom(void *, size_t, unsigned int);\n\
-                     ssize_t __wrap_getrandom(void *buf, size_t len, unsigned int flags) {{\n\
-                         static const uint8_t key[16] = {{{bytes}}};\n\
-                         if (len != sizeof(key) || flags != 0) return __real_getrandom(buf, len, flags);\n\
-                         memcpy(buf, key, len); return len;\n\
-                     }}\n"
-                );
                 let got = execute_object(
                     &module,
                     cases,
-                    &bindings,
+                    &map_entropy_binding(key),
                     "",
                     Optimization::None,
                     Some(object.clone()),
@@ -2026,18 +2016,16 @@ fn map_placement_operations_match_prog_11() {
             injection: None,
         })
         .collect();
-    let bindings = r#"
-#include <sys/random.h>
-extern ssize_t __real_getrandom(void *, size_t, unsigned int);
-ssize_t __wrap_getrandom(void *buf, size_t len, unsigned int flags) {
-    if (len != 16 || flags != 0) return __real_getrandom(buf, len, flags);
-    for (size_t i = 0; i < len; ++i) ((uint8_t *)buf)[i] = (uint8_t)i;
-    return len;
-}
-"#;
-    let reports = execute_object(&module, &cases, bindings, "", Optimization::Speed, None);
+    let key = std::array::from_fn(|i| i as u8);
+    let reports = execute_object(
+        &module,
+        &cases,
+        &map_entropy_binding(&key),
+        "",
+        Optimization::Speed,
+        None,
+    );
     for ((&(_, _, expected), case), native) in vectors::CASES.iter().zip(&cases).zip(reports) {
-        let key = std::array::from_fn(|i| i as u8);
         let (eval, _) = eval::run_map_hash(&module, case.function, &case.args, 0, key);
         assert_eq!(eval.outcome, eval::Outcome::Returned(expected.to_vec()));
         assert_eq!(native.outcome, eval.outcome);

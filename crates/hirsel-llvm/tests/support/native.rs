@@ -75,6 +75,20 @@ fn has_hostfile_field(shape: &hirsel_core_layout::Shape) -> bool {
 fn execute(input: &impl NativeInput, cases: &[Case]) -> Vec<NativeReport> {
     execute_with_bindings(input, cases, "")
 }
+
+fn map_entropy_binding(key: &[u8; 16]) -> String {
+    let bytes = key.map(|b| b.to_string()).join(", ");
+    format!(
+        "#include <sys/random.h>\n\
+         extern ssize_t __real_getrandom(void *, size_t, unsigned int);\n\
+         ssize_t __wrap_getrandom(void *buf, size_t len, unsigned int flags) {{\n\
+             static const uint8_t key[16] = {{{bytes}}};\n\
+             if (len != sizeof(key) || flags != 0) return __real_getrandom(buf, len, flags);\n\
+             memcpy(buf, key, len); return len;\n\
+         }}\n"
+    )
+}
+
 fn execute_with_bindings(input: &impl NativeInput, cases: &[Case], bindings: &str) -> Vec<NativeReport> {
     execute_with_configuration(input, cases, bindings, "")
 }
@@ -547,7 +561,10 @@ fn call_results_match_callees(ir: &str) {
 fn agree_cases(input: &impl NativeInput, cases: &[Case], memory: bool) {
     let module = input.module();
     call_results_match_callees(&emit_ir(module).unwrap());
-    check_native_reports(module, &input.sites(), cases, execute(input, cases), memory);
+    // Native startup draws its CAP-8 run key from the OS. Give it the same
+    // key as run_injected so the raw CoreIR hash results are comparable.
+    let got = execute_with_bindings(input, cases, &map_entropy_binding(&[0; 16]));
+    check_native_reports(module, &input.sites(), cases, got, memory);
 }
 
 fn check_native_reports(

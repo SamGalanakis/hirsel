@@ -45,8 +45,8 @@ fn history_number(mut key: String, n: u64) {
     string.push_u64(mut key, n)
 }
 
-fn history_key(lead: String, reference: HistoryRef) -> String {
-    let mut key = string.with_capacity(60)
+fn history_fill_key(mut key: String, lead: String, reference: HistoryRef) {
+    string.clear(mut key)
     string.push(mut key, lead)
     history_number(mut key, reference.seq)
     string.push_char(mut key, '-')
@@ -57,6 +57,11 @@ fn history_key(lead: String, reference: HistoryRef) -> String {
         let digit = (reference.digest >> (4 * (15 - i))) & 15
         string.push(mut key, string.slice(digits, digit, digit + 1))
     }
+}
+
+fn history_key(lead: String, reference: HistoryRef) -> String {
+    let mut key = string.with_capacity(60)
+    history_fill_key(mut key, lead, reference)
     take key
 }
 
@@ -129,7 +134,7 @@ fn history_config(raw: Bytes, frame_at: u64) -> Result[HistoryConfig, Error] {
     Ok(HistoryConfig(place: take place, level: take level))
 }
 
-fn history_decode_head(raw: Bytes) -> Result[HistoryCapture, Error] {
+fn history_head_frame(raw: Bytes) -> Result[(DiskContext, DiskFrame), Error] {
     if list.len(raw) < 72 {
         return Error(disk_fault("head", 0, Truncated))
     }
@@ -153,9 +158,19 @@ fn history_decode_head(raw: Bytes) -> Result[HistoryCapture, Error] {
     if field.end - field.payload != 136 {
         return Error(disk_fault("head", 72, Malformed))
     }
+    Ok((context, field))
+}
+
+fn history_frame_pair(raw: Bytes, field: DiskFrame) -> HistoryPair {
+    let at = field.payload
+    HistoryPair(epoch: read_le(raw, at, 8), holder: StoreId(hi: read_le(raw, at + 8, 8), lo: read_le(raw, at + 16, 8)))
+}
+
+fn history_decode_head(raw: Bytes) -> Result[HistoryCapture, Error] {
+    let (context, field) = history_head_frame(raw)?
     let head = list.slice(raw, field.payload, field.end)
-    let epoch = read_le(head, 0, 8)
-    let holder = StoreId(hi: read_le(head, 8, 8), lo: read_le(head, 16, 8))
+    let pair = history_frame_pair(raw, field)
+    let epoch = pair.epoch
     let newest = HistoryRef(seq: read_le(head, 32, 8), epoch: read_le(head, 40, 8), len: read_le(head, 48, 8), digest: read_le(head, 56, 8))
     let base = HistoryRef(seq: read_le(head, 64, 8), epoch: read_le(head, 72, 8), len: read_le(head, 80, 8), digest: read_le(head, 88, 8))
     let floor = read_le(head, 96, 8)
@@ -174,7 +189,7 @@ fn history_decode_head(raw: Bytes) -> Result[HistoryCapture, Error] {
         return Error(disk_fault("head", field.end, Malformed))
     }
     let meta = history_config(list.slice(raw, config.payload, config.end), field.end)?
-    let captured = HistoryHead(store: id, pair: HistoryPair(epoch, holder), activation: read_le(head, 24, 8), entry: newest, checkpoint: base, floor, binding)
+    let captured = HistoryHead(store: context.store, pair, activation: read_le(head, 24, 8), entry: newest, checkpoint: base, floor, binding)
     Ok(HistoryCapture(head: captured, config: take meta))
 }
 

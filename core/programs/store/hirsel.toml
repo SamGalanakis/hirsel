@@ -16,6 +16,7 @@ std = { major = 1 }
 "store-scrub.hirsel" = "store"
 "store-bucket.hirsel" = "store"
 "store-history.hirsel" = "store"
+"store-register.hirsel" = "store"
 "store-layout.hirsel" = "store"
 "store-reexec.hirsel" = "store"
 "store-tx.hirsel" = "store"

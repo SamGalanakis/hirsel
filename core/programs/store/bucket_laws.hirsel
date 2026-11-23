@@ -484,3 +484,73 @@ fn history_check_vector(raw: Bytes, expected: String) {
         fail("the HEAD wire bytes differ from the L60 vector")
     }
 }
+
+fn bucket_m2_law_commit_packet(mut raw: Bytes, head: HistoryHead, version_number: u64) -> Result[(), Error] {
+    let seq = history_next_id(head.entry.seq)?
+    let ctx = DiskContext(store: head.store, role: 2, seq)
+    history_packet_header(mut raw, ctx, head.pair.epoch, head.entry)?
+    list.fill(mut raw, 16, 0u8)
+    list.put_word_le(mut raw, 0u32)
+    list.put_word_le(mut raw, version_number)
+    list.put_word_le(mut raw, 0u64)
+    list.push(mut raw, 1u8)
+    list.push(mut raw, 0u8)
+    list.put_word_le(mut raw, 0u32)
+    capacity(history_seal(mut raw, ctx, 112, 0x0011))
+}
+
+fn bucket_m2_law_register(tasks: Tasks, sim: BucketSim) -> Result[(HistoryRef, HistoryRef), Error] waits {
+    let mut first = bucket_law_client(sim, tasks, "s3.test", 1)?
+    let mut second = bucket_law_client(sim, tasks, "s3.test", 2)?
+    let config = HistoryConfig(place: std.object.bucket_config(first), level: "bucket")
+    let metadata = history_config_bytes(config)?
+    let mut a_buffers = history_buffers(1024)?
+    let mut b_buffers = history_buffers(1024)?
+    let due = std.object.deadline_after_ms(first, BUCKET_LAW_OP_MS)
+    let mut a = history_publish_genesis(mut first, StoreId(hi: 9, lo: 10), StoreId(hi: 11, lo: 12), metadata, mut a_buffers, due)?
+    history_claim_packet(mut a_buffers.packet, a.head)?
+    let HistoryApplied(_) = history_register_advance(mut first, mut a, metadata, mut a_buffers, due)? else {
+        fail("genesis CLAIM did not advance")
+    }
+    bucket_m2_law_commit_packet(mut a_buffers.packet, a.head, 1)?
+    let HistoryApplied(_) = history_register_advance(mut first, mut a, metadata, mut a_buffers, due)? else {
+        fail("first commit did not advance")
+    }
+    let _ = history_fetch(mut second, "head", mut b_buffers.witness, due)?
+    let captured = history_decode_head(b_buffers.witness)?
+    let HistoryClaimed(take claimed) = history_replace_claim(mut second, captured.head, StoreId(hi: 13, lo: 14), mut b_buffers, due)? else {
+        fail("second holder failed to claim")
+    }
+    let mut b = take claimed
+    history_claim_packet(mut b_buffers.packet, b.head)?
+    let HistoryApplied(_) = history_register_advance(mut second, mut b, metadata, mut b_buffers, due)? else {
+        fail("second holder's CLAIM did not advance")
+    }
+    bucket_m2_law_commit_packet(mut a_buffers.packet, a.head, 2)?
+    let orphan = history_new_ref(4, 1, a_buffers.packet)
+    let refused = history_register_advance(mut first, mut a, metadata, mut a_buffers, due)
+    if let Error(Fenced(1)) = refused {} else {
+        fail("the stale holder's advance did not return Fenced")
+    }
+    bucket_m2_law_commit_packet(mut a_buffers.packet, a.head, 3)?
+    if let Error(Fenced(1)) = history_register_advance(mut first, mut a, metadata, mut a_buffers, due) {} else {
+        fail("the stale holder lost its terminal error")
+    }
+    Ok((b.head.entry, orphan))
+}
+
+// L53 register portion. An obsolete If-Match may leave immutable debris.
+// Head names only the new holder's chain.
+@test
+fn bucket_test_m2_register_fence(c: Clock, tasks: Tasks) -> Result[(), Error] waits {
+    let sim = bucket_law_sim(tasks, c, 5, None, list.new())
+    let observed = bucket_m2_law_register(tasks, sim)
+    let report = bucket_law_finish(take sim)
+    let (committed, orphan) = observed?
+    let published = option.unwrap(map.get(report.objects, "head"))
+    let final_capture = history_decode_head(published.data)?
+    if final_capture.head.pair.epoch != 2 || final_capture.head.entry.seq != 4 || !history_ref_matches(final_capture.head.entry, committed) || !map.contains(report.objects, history_key("e-", orphan)) || report.writes != 11 {
+        fail("the fenced advance appeared in the register")
+    }
+    Ok(())
+}

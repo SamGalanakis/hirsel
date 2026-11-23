@@ -1,0 +1,278 @@
+type HistoryWrite = HistoryApplied(std.object.ETag) | HistoryConflict(std.object.ETag) | HistoryRefused(std.object.Error) | HistoryUndecided
+
+fn history_fetch_head(mut client: std.object.Client, mut raw_bytes: Bytes, deadline: u64) -> Result[std.object.ETag, std.object.Error] waits {
+    list.clear(mut raw_bytes)
+    let (take outcome, take buffer) = std.object.fetch(mut client, "head", replace(mut raw_bytes, list.new()), deadline)
+    raw_bytes = take buffer
+    let meta = outcome?
+    if meta.size != list.len(raw_bytes) || meta.etag.len == 0 {
+        return Error(Fatal(Malformed))
+    }
+    Ok(meta.etag)
+}
+
+fn history_write_head(mut client: std.object.Client, precondition: std.object.Precondition, mut raw_bytes: Bytes, mut witness: Bytes, deadline: u64) -> HistoryWrite waits {
+    let mut uncertain = false
+    for _ in 0u64 .. 5 {
+        let (take outcome, take buffer) = std.object.store_if(mut client, "head", precondition, replace(mut raw_bytes, list.new()), deadline)
+        raw_bytes = take buffer
+        match take outcome {
+            Ok(Applied(meta)) => return HistoryApplied(meta.etag),
+            Ok(Mismatch) => {
+                let Ok(tag) = history_fetch_head(mut client, mut witness, deadline) else {
+                    return HistoryUndecided
+                }
+                return if raw_bytes == witness {
+                    HistoryApplied(tag)
+                } else {
+                    HistoryConflict(tag)
+                }
+            },
+            Error(Uncertain(_)) => {
+                uncertain = true
+            },
+            Error(take problem) => return if uncertain {
+                HistoryUndecided
+            } else {
+                HistoryRefused(take problem)
+            },
+        }
+        if std.object.deadline_after_ms(client, 0) >= deadline {
+            break
+        }
+    }
+    HistoryUndecided
+}
+
+type HistoryRegister {
+    head: HistoryHead,
+    tag: std.object.ETag,
+    terminal: Option[HistoryTerminal]
+}
+
+type HistoryTerminal = HistoryFault(Error) | HistoryUnknown
+
+type HistoryBuffers {
+    body: Bytes,
+    witness: Bytes,
+    packet: Bytes,
+    compare: Bytes,
+    key: String
+}
+
+fn history_buffers(packet_bytes: u64) -> Result[HistoryBuffers, Error] {
+    let room = order.max(packet_bytes, 152 + BINDING_BYTES)
+    disk_allocation(scoped fn() -> Result[HistoryBuffers, Error] {
+        Ok(HistoryBuffers(body: list.with_capacity(HISTORY_HEAD_LIMIT), witness: list.with_capacity(HISTORY_HEAD_LIMIT), packet: list.with_capacity(room), compare: list.with_capacity(room), key: string.with_capacity(60)))
+    })
+}
+
+fn history_packet_header(mut raw: Bytes, ctx: DiskContext, epoch: u64, predecessor: HistoryRef) -> Result[(), Error] {
+    list.clear(mut raw)
+    capacity(history_append_header(mut raw, ctx, epoch))?
+    list.fill(mut raw, 16, 0u8)
+    list.put_word_le(mut raw, predecessor.epoch)
+    list.put_word_le(mut raw, predecessor.len)
+    list.put_word_le(mut raw, predecessor.digest)
+    capacity(history_seal(mut raw, ctx, 72, 0x00B0))
+}
+
+fn history_new_ref(seq: u64, epoch: u64, raw: Bytes) -> HistoryRef {
+    HistoryRef(seq, epoch, len: list.len(raw), digest: std.check.xxh3(raw, 0, list.len(raw)))
+}
+
+fn history_fetch(mut client: std.object.Client, key: String, mut raw: Bytes, deadline: u64) -> Result[std.object.Meta, Error] waits {
+    list.clear(mut raw)
+    let (take outcome, take buffer) = std.object.fetch(mut client, key, replace(mut raw, list.new()), deadline)
+    raw = take buffer
+    match take outcome {
+        Ok(meta) => {
+            if meta.size != list.len(raw) {
+                return Error(disk_fault(key, 0, Truncated))
+            }
+            Ok(meta)
+        },
+        Error(take e) => Error(Remote(take e)),
+    }
+}
+
+fn history_create(mut client: std.object.Client, key: String, mut raw: Bytes, mut compare: Bytes, deadline: u64) -> Result[(), Error] waits {
+    for _ in 0u64 .. 5 {
+        let (take outcome, take buffer) = std.object.store_if(mut client, key, Absent, replace(mut raw, list.new()), deadline)
+        raw = take buffer
+        match take outcome {
+            Ok(Applied(_)) => return Ok(()),
+            Ok(Mismatch) => {
+                let _ = history_fetch(mut client, key, mut compare, deadline)?
+                if raw != compare {
+                    return Error(disk_fault(key, 0, Malformed))
+                }
+                return Ok(())
+            },
+            Error(Uncertain(_)) => (),
+            Error(take problem) => return Error(Remote(take problem)),
+        }
+        if std.object.deadline_after_ms(client, 0) >= deadline {
+            break
+        }
+    }
+    Error(Remote(Uncertain(Deadline)))
+}
+
+fn history_register_advance(mut client: std.object.Client, mut register: HistoryRegister, authority: Bytes, mut buffers: HistoryBuffers, deadline: u64) -> Result[HistoryWrite, Error] waits {
+    if let Some(stopped) = register.terminal {
+        return match stopped {
+            HistoryFault(problem) => Error(clone(problem)),
+            HistoryUnknown => Ok(HistoryUndecided),
+        }
+    }
+    let mut candidate = register.head
+    let seq = history_next_id(candidate.entry.seq)?
+    let item = history_new_ref(seq, candidate.pair.epoch, buffers.packet)
+    history_fill_key(mut buffers.key, "e-", item)
+    candidate.entry = item
+    history_encode_head(mut buffers.body, candidate, authority)?
+    if let Error(take problem) = history_create(mut client, buffers.key, mut buffers.packet, mut buffers.compare, deadline) {
+        register.terminal = Some(HistoryFault(clone(problem)))
+        return Error(take problem)
+    }
+    match history_write_head(mut client, Match(register.tag), mut buffers.body, mut buffers.witness, deadline) {
+        HistoryApplied(tag) => {
+            register.head = candidate
+            register.tag = tag
+            Ok(HistoryApplied(tag))
+        },
+        HistoryConflict(_) => {
+            let fenced = Fenced(register.head.pair.epoch)
+            register.terminal = Some(HistoryFault(clone(fenced)))
+            Error(fenced)
+        },
+        HistoryRefused(take problem) => {
+            let remote = Remote(take problem)
+            register.terminal = Some(HistoryFault(clone(remote)))
+            Error(take remote)
+        },
+        HistoryUndecided => {
+            register.terminal = Some(HistoryUnknown)
+            Ok(HistoryUndecided)
+        },
+    }
+}
+
+fn history_claim_packet(mut raw: Bytes, head: HistoryHead) -> Result[(), Error] {
+    let seq = history_next_id(head.entry.seq)?
+    let ctx = DiskContext(store: head.store, role: 2, seq)
+    history_packet_header(mut raw, ctx, head.pair.epoch, head.entry)?
+    list.fill(mut raw, 16, 0u8)
+    list.put_word_le(mut raw, head.pair.epoch)
+    list.put_word_le(mut raw, head.pair.holder.hi)
+    list.put_word_le(mut raw, head.pair.holder.lo)
+    capacity(history_seal(mut raw, ctx, 112, 0x0040))
+}
+
+fn history_manifest_packet(mut raw: Bytes, id: StoreId) -> Result[HistoryRef, Error] {
+    raw = disk_page_manifest_bytes(id, page_manifest_empty())?
+    let ctx = DiskContext(store: id, role: 1, seq: 1)
+    let mut header: Bytes = list.with_capacity(72 + BINDING_BYTES)
+    capacity(history_append_header(mut header, ctx, 1))?
+    for at in 0u64 .. 72 {
+        raw[at] = header[at]
+    }
+    Ok(history_new_ref(1, 1, raw))
+}
+
+fn history_genesis_packet(mut raw: Bytes, id: StoreId, manifest: HistoryRef) -> Result[HistoryRef, Error] {
+    let ctx = DiskContext(store: id, role: 2, seq: 1)
+    let none = HistoryRef(seq: 0, epoch: 0, len: 0, digest: 0)
+    history_packet_header(mut raw, ctx, 1, none)?
+    list.fill(mut raw, 16, 0u8)
+    list.put_word_le(mut raw, manifest.seq)
+    list.put_word_le(mut raw, manifest.epoch)
+    list.put_word_le(mut raw, manifest.digest)
+    list.put_word_le(mut raw, manifest.len)
+    list.put_word_le(mut raw, 1u64)
+    list.push(mut raw, 0u8)
+    list.put_word_le(mut raw, 0u32)
+    capacity(history_seal(mut raw, ctx, 112, 0x0090))?
+    let at = list.len(raw)
+    list.fill(mut raw, 16, 0u8)
+    capacity(history_seal(mut raw, ctx, at, 0x00C0))?
+    Ok(history_new_ref(1, 1, raw))
+}
+
+fn history_publish_genesis(mut client: std.object.Client, id: StoreId, holder: StoreId, authority: Bytes, mut buffers: HistoryBuffers, deadline: u64) -> Result[HistoryRegister, Error] waits {
+    let manifest = history_manifest_packet(mut buffers.packet, id)?
+    history_create(mut client, history_key("m-", manifest), mut buffers.packet, mut buffers.compare, deadline)?
+    let base = history_genesis_packet(mut buffers.packet, id, manifest)?
+    history_create(mut client, history_key("e-", base), mut buffers.packet, mut buffers.compare, deadline)?
+    let head = HistoryHead(store: id, pair: HistoryPair(epoch: 1, holder), activation: 0, entry: base, checkpoint: base, floor: 1, binding:[0; 32])
+    history_encode_head(mut buffers.body, head, authority)?
+    match history_write_head(mut client, Absent, mut buffers.body, mut buffers.witness, deadline) {
+        HistoryApplied(tag) => Ok(HistoryRegister(head, tag, terminal: None)),
+        HistoryConflict(_) => Error(Exists("head")),
+        HistoryRefused(take problem) => Error(Remote(take problem)),
+        HistoryUndecided => Error(Remote(Uncertain(Deadline))),
+    }
+}
+
+type HistoryClaimResult = HistoryClaimed(HistoryRegister) | HistoryClaimMoved | HistoryClaimLost | HistoryClaimUncertain
+
+// Keep only the bytes changed by the claim so the final GET can overwrite
+// the admitted buffer. All other bytes must match the prepared replacement.
+fn history_claim_saved(admitted: Bytes) -> Inline[u8, 48] {
+    let mut saved: Inline[u8, 48] =[0; 48]
+    for i in 0u64 .. 8 {
+        saved[i] = admitted[8 + i]
+        saved[8 + i] = admitted[48 + i]
+    }
+    for i in 0u64 .. 32 {
+        saved[16 + i] = admitted[80 + i]
+    }
+    saved
+}
+
+fn history_claim_same(candidate: Bytes, saved: Inline[u8, 48], observed: Bytes) -> bool {
+    if list.len(observed) != list.len(candidate) || list.slice(observed, 0, 8) != list.slice(candidate, 0, 8) || list.slice(observed, 16, 48) != list.slice(candidate, 16, 48) || list.slice(observed, 56, 80) != list.slice(candidate, 56, 80) || list.slice(observed, 112, list.len(observed)) != list.slice(candidate, 112, list.len(candidate)) {
+        return false
+    }
+    for i in 0u64 .. 8 {
+        if saved[i] != observed[8 + i] || saved[8 + i] != observed[48 + i] {
+            return false
+        }
+    }
+    for i in 0u64 .. 32 {
+        if saved[16 + i] != observed[80 + i] {
+            return false
+        }
+    }
+    true
+}
+
+fn history_claim_changed(head: HistoryHead, observed: Bytes) -> Result[HistoryClaimResult, Error] {
+    let (_, field) = history_head_frame(observed)?
+    if !history_pair_matches(head.pair, history_frame_pair(observed, field)) {
+        return Ok(HistoryClaimLost)
+    }
+    let latest = history_decode_head(observed)?
+    if latest.head.entry.seq <= head.entry.seq {
+        return Error(disk_fault("head", 72, Malformed))
+    }
+    Ok(HistoryClaimMoved)
+}
+
+// The caller has already recovered and admitted the head in witness.
+fn history_replace_claim(mut client: std.object.Client, admitted: HistoryHead, holder: StoreId, mut buffers: HistoryBuffers, deadline: u64) -> Result[HistoryClaimResult, Error] waits {
+    let candidate = history_claim_head(admitted, holder)?
+    let saved = history_claim_saved(buffers.witness)
+    history_encode_head(mut buffers.body, candidate, list.slice(buffers.witness, 240, list.len(buffers.witness)))?
+    let observed = history_fetch(mut client, "head", mut buffers.witness, deadline)?
+    if !history_claim_same(buffers.body, saved, buffers.witness) {
+        return history_claim_changed(admitted, buffers.witness)
+    }
+    match history_write_head(mut client, Match(observed.etag), mut buffers.body, mut buffers.witness, deadline) {
+        HistoryApplied(tag) => Ok(HistoryClaimed(HistoryRegister(head: candidate, tag, terminal: None))),
+        HistoryConflict(_) => history_claim_changed(admitted, buffers.witness),
+        HistoryRefused(take problem) => Error(Remote(take problem)),
+        HistoryUndecided => Ok(HistoryClaimUncertain),
+    }
+}

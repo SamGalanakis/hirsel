@@ -387,6 +387,8 @@ struct Pool {
     poll_until: AtomicU64,
     gep: i32,
     gwake: i32,
+    /// The shared poller is an io_uring ring, waited on through `_shared`.
+    uring: bool,
     _shared: Arc<hirsel_core_net::Poller>,
     /// The shared poller has been handed to a socket registry.
     net_used: AtomicBool,
@@ -1260,15 +1262,22 @@ fn poll_global(p: &Pool, timeout: i32) {
     if timeout != 0 {
         bump(S_GPOLL_BLOCKS);
     }
-    // SAFETY: a live epoll and a writable event array.
-    let n = unsafe { sync::epoll_wait(p.gep, evs.as_mut_ptr(), evs.len() as i32, timeout) };
+    let n = if p.uring {
+        // The ring's turn drains the wake eventfd itself.
+        p._shared.wait_shared(&mut evs, timeout) as i32
+    } else {
+        // SAFETY: a live epoll and a writable event array.
+        unsafe { sync::epoll_wait(p.gep, evs.as_mut_ptr(), evs.len() as i32, timeout) }
+    };
     p.last_poll.store(now(), Ordering::Relaxed);
     for e in evs.iter().take(n.max(0) as usize) {
         let tag = e.u64;
         if tag == WAKE_TAG {
-            let mut v = 0u64;
-            // SAFETY: nonblocking eventfd read.
-            unsafe { sync::read(p.gwake, (&mut v as *mut u64).cast(), 8) };
+            if !p.uring {
+                let mut v = 0u64;
+                // SAFETY: nonblocking eventfd read.
+                unsafe { sync::read(p.gwake, (&mut v as *mut u64).cast(), 8) };
+            }
         } else {
             bump(S_GPOLL_EVENTS);
             let unit = (tag >> hirsel_core_net::SHARED_UNIT_SHIFT) as u32;
@@ -1666,6 +1675,7 @@ pub(crate) fn launch(
     let shared = hirsel_core_net::share_poller(shared_unit)
         .unwrap_or_else(|_| crate::process::stop(b"HostPoll"));
     let (gep, gwake) = (shared.raw_fd(), shared.wake_fd());
+    let uring = shared.reactor() == hirsel_core_net::Reactor::IoUring;
     let handoff_ticks = env_u64("HIRSEL_UNTIED_HANDOFF_US", 1_000).div_ceil(HOST_TICK_US);
     let _ = POOL.set(Pool {
         w,
@@ -1694,6 +1704,7 @@ pub(crate) fn launch(
         poll_until: AtomicU64::new(u64::MAX),
         gep,
         gwake,
+        uring,
         _shared: shared,
         net_used: AtomicBool::new(false),
         timers: Mutex::new(BTreeSet::new()),
@@ -1766,7 +1777,7 @@ pub(crate) fn launch(
         #[cfg(not(feature = "record"))]
         let tape_stats = "";
         eprintln!(
-            "untied-stats workers={} units={} resumes={} parks={} yields={} steals={} os_wakes={} gpolls={} gpoll_blocks={} gpoll_events={} timer_fires={} notified_requeue={} create_ns_avg={} ready_to_park_ns_avg={} token_acquires={} unit_epoll_waits={} lifo={} handoffs={} handoff_ns={} handoff_tick_ns={} handoff_age_ns_avg={}{tape_stats}",
+            "untied-stats workers={} units={} resumes={} parks={} yields={} steals={} os_wakes={} gpolls={} gpoll_blocks={} gpoll_events={} timer_fires={} notified_requeue={} create_ns_avg={} ready_to_park_ns_avg={} token_acquires={} unit_epoll_waits={} lifo={} handoffs={} handoff_ns={} handoff_tick_ns={} handoff_age_ns_avg={} net_reactor={}{tape_stats}",
             w,
             g(S_CREATED),
             g(S_RESUMES),
@@ -1788,6 +1799,7 @@ pub(crate) fn launch(
             p.handoff_ticks.saturating_mul(p.handoff_tick_ns),
             p.handoff_tick_ns,
             g(S_HANDOFF_AGE_NS) / g(S_HANDOFFS).max(1),
+            p._shared.reactor().name(),
         );
     }
     if crate::sequencer::ACQUIRES.load(Ordering::Relaxed) != 0 {

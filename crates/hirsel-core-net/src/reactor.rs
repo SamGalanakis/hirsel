@@ -1,18 +1,80 @@
 //! Persistent edge-triggered interests, adapted from Go runtime/netpoll_epoll.go.
 //! Slot generations identify sockets across poll and dispatch.
+//!
+//! Two kernel interfaces carry the same interests: epoll, and io_uring
+//! multishot polls (edge-triggered unless `IORING_POLL_ADD_LEVEL`, as epoll
+//! with `EPOLLET`). One is chosen once per process ([`reactor`]); both turn a
+//! kernel turn into the same `(tag, flags)` events, so dispatch is shared.
 use std::{
+    collections::HashMap,
     io,
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
-    sync::{Arc, Mutex, MutexGuard, TryLockError},
+    sync::{Arc, Mutex, MutexGuard, OnceLock, TryLockError},
 };
 
 const POLL_BATCH: i32 = 128;
+/// The wake eventfd's tag.
+const WAKE: u64 = u64::MAX;
+/// io_uring: the completion of a poll removal, which carries no readiness.
+const REMOVED: u64 = u64::MAX - 1;
+const INTEREST: u32 = (libc::EPOLLIN | libc::EPOLLOUT | libc::EPOLLRDHUP) as u32;
+
+/// The kernel interface behind the Net transport.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reactor {
+    Epoll,
+    IoUring,
+}
+impl Reactor {
+    pub fn name(self) -> &'static str {
+        match self {
+            Reactor::Epoll => "epoll",
+            Reactor::IoUring => "io_uring",
+        }
+    }
+}
+
+/// `auto` (the default) uses io_uring when this kernel allows it; `epoll`
+/// forces epoll.
+pub const REACTOR_ENV: &str = "HIRSEL_NET_REACTOR";
+static CHOSEN: OnceLock<Result<Reactor, String>> = OnceLock::new();
+/// The ring and wake descriptor the probe built, for the first poller.
+static PROBED: Mutex<Option<(Uring, OwnedFd)>> = Mutex::new(None);
+
+/// The process's reactor, chosen at its first use and fixed after.
+pub fn reactor() -> io::Result<Reactor> {
+    CHOSEN
+        .get_or_init(|| match std::env::var_os(REACTOR_ENV) {
+            Some(v) if v == "epoll" => Ok(Reactor::Epoll),
+            Some(v) if v != "auto" => Err(format!(
+                "{REACTOR_ENV}={} is not a reactor; use auto or epoll",
+                v.to_string_lossy()
+            )),
+            _ => Ok(match Uring::open() {
+                Ok(probed) => {
+                    *PROBED.lock().unwrap_or_else(|e| e.into_inner()) = Some(probed);
+                    Reactor::IoUring
+                }
+                Err(_) => Reactor::Epoll,
+            }),
+        })
+        .clone()
+        .map_err(|message| {
+            eprintln!("{message}");
+            io::Error::new(io::ErrorKind::InvalidInput, message)
+        })
+}
 
 pub struct Poller {
-    epoll: OwnedFd,
+    backend: Backend,
     wake: OwnedFd,
     events: Mutex<Vec<libc::epoll_event>>,
     operations: &'static PollOperations,
+}
+
+enum Backend {
+    Epoll(OwnedFd),
+    Uring(Box<Uring>),
 }
 
 struct PollOperations {
@@ -32,42 +94,105 @@ fn checked(rc: i32) -> io::Result<i32> {
         Ok(rc)
     }
 }
+fn eventfd() -> io::Result<OwnedFd> {
+    // SAFETY: creates a new, uniquely owned CLOEXEC descriptor.
+    Ok(unsafe {
+        OwnedFd::from_raw_fd(checked(libc::eventfd(
+            0,
+            libc::EFD_CLOEXEC | libc::EFD_NONBLOCK,
+        ))?)
+    })
+}
 impl Poller {
     fn new() -> io::Result<Arc<Self>> {
-        // SAFETY: these calls create new, uniquely owned CLOEXEC descriptors.
+        match reactor()? {
+            Reactor::Epoll => Self::new_epoll(),
+            Reactor::IoUring => {
+                let probed = PROBED.lock().unwrap_or_else(|e| e.into_inner()).take();
+                let (ring, wake) = match probed {
+                    Some(probed) => probed,
+                    None => Uring::open()?,
+                };
+                Ok(Arc::new(Self {
+                    backend: Backend::Uring(Box::new(ring)),
+                    wake,
+                    events: Mutex::new(Vec::with_capacity(POLL_BATCH as usize)),
+                    operations: &PollOperations {
+                        poll: Self::poll_uring,
+                        wake: Self::wake_eventfd,
+                    },
+                }))
+            }
+        }
+    }
+    fn new_epoll() -> io::Result<Arc<Self>> {
+        // SAFETY: creates a new, uniquely owned CLOEXEC descriptor.
         let epoll =
             unsafe { OwnedFd::from_raw_fd(checked(libc::epoll_create1(libc::EPOLL_CLOEXEC))?) };
-        let wake = unsafe {
-            OwnedFd::from_raw_fd(checked(libc::eventfd(
-                0,
-                libc::EFD_CLOEXEC | libc::EFD_NONBLOCK,
-            ))?)
-        };
         let poller = Arc::new(Self {
-            epoll,
-            wake,
+            backend: Backend::Epoll(epoll),
+            wake: eventfd()?,
             events: Mutex::new(Vec::with_capacity(POLL_BATCH as usize)),
             operations: &PollOperations {
                 poll: Self::poll_epoll,
-                wake: Self::wake_epoll,
+                wake: Self::wake_eventfd,
             },
         });
-        poller.ctl(
+        poller.epoll_ctl(
             libc::EPOLL_CTL_ADD,
             poller.wake.as_raw_fd(),
             libc::EPOLLIN as u32,
-            u64::MAX,
+            WAKE,
         )?;
         Ok(poller)
     }
-    fn ctl(&self, op: i32, fd: i32, flags: u32, token: u64) -> io::Result<()> {
+    /// The interface this poller waits on.
+    pub fn reactor(&self) -> Reactor {
+        match self.backend {
+            Backend::Epoll(_) => Reactor::Epoll,
+            Backend::Uring(_) => Reactor::IoUring,
+        }
+    }
+    fn epoll_ctl(&self, op: i32, fd: i32, flags: u32, token: u64) -> io::Result<()> {
+        let Backend::Epoll(epoll) = &self.backend else {
+            unreachable!()
+        };
         let mut event = libc::epoll_event {
             events: flags,
             u64: token,
         };
         // SAFETY: live descriptors and writable event; DEL ignores the event.
-        checked(unsafe { libc::epoll_ctl(self.epoll.as_raw_fd(), op, fd, &mut event) })?;
+        checked(unsafe { libc::epoll_ctl(epoll.as_raw_fd(), op, fd, &mut event) })?;
         Ok(())
+    }
+    /// Watch `fd` for every direction, edge-triggered, under `tag`.
+    fn add(&self, fd: i32, tag: u64) -> io::Result<()> {
+        match &self.backend {
+            Backend::Epoll(_) => self.epoll_ctl(
+                libc::EPOLL_CTL_ADD,
+                fd,
+                INTEREST | libc::EPOLLET as u32,
+                tag,
+            ),
+            Backend::Uring(ring) => ring.add(fd, tag),
+        }
+    }
+    /// Stop watching `fd`. `closing` means the caller then drops the last
+    /// descriptor: an io_uring poll holds its own file reference until the
+    /// kernel retires it, so a listener is shut down first and its address
+    /// is free for rebinding on return, as after an epoll close.
+    fn remove(&self, fd: i32, tag: u64, closing: bool) -> io::Result<()> {
+        match &self.backend {
+            Backend::Epoll(_) => self.epoll_ctl(libc::EPOLL_CTL_DEL, fd, 0, 0),
+            Backend::Uring(ring) => {
+                if closing {
+                    // SAFETY: a live descriptor; a receive shutdown changes
+                    // nothing the close that follows does not.
+                    unsafe { libc::shutdown(fd, libc::SHUT_RD) };
+                }
+                ring.remove(tag)
+            }
+        }
     }
     fn try_turn(&self) -> Option<Turn<'_>> {
         match self.events.try_lock() {
@@ -98,6 +223,20 @@ impl Poller {
         (self.operations.poll)(self, events, timeout_ms)
     }
 
+    /// mc-units-untied: the shared poller's turn on an io_uring ring, for the
+    /// pool, which holds its own poll turn. Returns the events written.
+    pub fn wait_shared(&self, out: &mut [libc::epoll_event], timeout_ms: i32) -> usize {
+        let Backend::Uring(ring) = &self.backend else {
+            unreachable!("the pool waits on an epoll poller directly")
+        };
+        let _turn = self.events.lock().unwrap_or_else(|e| e.into_inner());
+        let n = ring.wait(out, timeout_ms);
+        if out[..n].iter().any(|event| event.u64 == WAKE) {
+            self.drain();
+        }
+        n
+    }
+
     // The optional operations are installed with the native poller, so a
     // scheduler that can never construct one does not link this syscall path.
     fn poll_epoll<'a>(
@@ -105,12 +244,15 @@ impl Poller {
         mut events: Turn<'a>,
         timeout_ms: i32,
     ) -> io::Result<Option<PollEvents<'a>>> {
+        let Backend::Epoll(epoll) = &self.backend else {
+            unreachable!()
+        };
         events.clear();
         crate::EPOLL_WAITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // SAFETY: epoll owns its descriptor and events has POLL_BATCH spare slots.
         let count = unsafe {
             libc::epoll_wait(
-                self.epoll.as_raw_fd(),
+                epoll.as_raw_fd(),
                 events.as_mut_ptr(),
                 POLL_BATCH,
                 timeout_ms,
@@ -122,7 +264,26 @@ impl Poller {
         let len = checked(count)? as usize;
         // SAFETY: epoll_wait initialized exactly this prefix of the buffer.
         unsafe { events.set_len(len) };
-        if events.iter().any(|event| event.u64 == u64::MAX) {
+        if events.iter().any(|event| event.u64 == WAKE) {
+            self.drain();
+        }
+        Ok(Some(PollEvents(events)))
+    }
+
+    fn poll_uring<'a>(
+        &'a self,
+        mut events: Turn<'a>,
+        timeout_ms: i32,
+    ) -> io::Result<Option<PollEvents<'a>>> {
+        let Backend::Uring(ring) = &self.backend else {
+            unreachable!()
+        };
+        events.clear();
+        crate::EPOLL_WAITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        events.resize(POLL_BATCH as usize, libc::epoll_event { events: 0, u64: 0 });
+        let len = ring.wait(&mut events, timeout_ms);
+        events.truncate(len);
+        if events.iter().any(|event| event.u64 == WAKE) {
             self.drain();
         }
         Ok(Some(PollEvents(events)))
@@ -131,16 +292,19 @@ impl Poller {
     pub fn wake(&self) {
         (self.operations.wake)(self);
     }
-    /// mc-units-untied: the epoll fd, for the shared poller.
+    /// mc-units-untied: the epoll fd (or io_uring ring fd), for the shared poller.
     pub fn raw_fd(&self) -> i32 {
-        self.epoll.as_raw_fd()
+        match &self.backend {
+            Backend::Epoll(epoll) => epoll.as_raw_fd(),
+            Backend::Uring(ring) => ring.ring.as_raw_fd(),
+        }
     }
     /// mc-units-light: the wake eventfd, registered under tag `u64::MAX`.
     pub fn wake_fd(&self) -> i32 {
         self.wake.as_raw_fd()
     }
 
-    fn wake_epoll(&self) {
+    fn wake_eventfd(&self) {
         let one = 1u64;
         loop {
             // SAFETY: nonblocking eventfd, readable eight-byte counter.
@@ -153,13 +317,201 @@ impl Poller {
         }
     }
     fn drain(&self) {
-        let mut value = 0u64;
-        // SAFETY: nonblocking eventfd, writable eight-byte counter.
-        while unsafe { libc::read(self.wake.as_raw_fd(), (&mut value as *mut u64).cast(), 8) } < 0 {
-            if io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
-                break;
+        drain(self.wake.as_raw_fd());
+    }
+}
+fn drain(fd: i32) {
+    let mut value = 0u64;
+    // SAFETY: nonblocking eventfd, writable eight-byte counter.
+    while unsafe { libc::read(fd, (&mut value as *mut u64).cast(), 8) } < 0 {
+        if io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+            break;
+        }
+    }
+}
+
+/// An io_uring ring holding one multishot poll per watched descriptor.
+/// Setup flags are 0: the driver token migrates between workers, which rules
+/// out `SINGLE_ISSUER` and with it `DEFER_TASKRUN`.
+struct Uring {
+    ring: io_uring::IoUring,
+    /// Serializes every submission-queue access; completions are read only
+    /// under the driver turn.
+    sq: Mutex<()>,
+    /// Live polls by tag, for re-arming one the kernel ended. Lock before `sq`.
+    armed: Mutex<HashMap<u64, i32>>,
+}
+impl Uring {
+    const ENTRIES: u32 = 64;
+    const COMPLETIONS: u32 = 1024;
+
+    /// A ring whose kernel runs multishot polls and bounded waits, with its
+    /// wake eventfd already watched. Any refusal (an old kernel, a seccomp
+    /// filter, `io_uring_disabled`) is an error, and the caller uses epoll.
+    fn open() -> io::Result<(Uring, OwnedFd)> {
+        use io_uring::{cqueue, opcode, register::Probe};
+        let unsupported = || io::Error::from(io::ErrorKind::Unsupported);
+        let ring = io_uring::IoUring::builder()
+            .setup_cqsize(Self::COMPLETIONS)
+            .build(Self::ENTRIES)?;
+        if !ring.params().is_feature_ext_arg() || !ring.params().is_feature_nodrop() {
+            return Err(unsupported());
+        }
+        let mut probe = Probe::new();
+        ring.submitter().register_probe(&mut probe)?;
+        if !probe.is_supported(opcode::PollAdd::CODE)
+            || !probe.is_supported(opcode::PollRemove::CODE)
+        {
+            return Err(unsupported());
+        }
+        let uring = Uring {
+            ring,
+            sq: Mutex::new(()),
+            armed: Mutex::new(HashMap::new()),
+        };
+        let wake = eventfd()?;
+        uring.add(wake.as_raw_fd(), WAKE)?;
+        // A multishot poll must report a wake and stay armed.
+        let one = 1u64;
+        // SAFETY: nonblocking eventfd, readable eight-byte counter.
+        if unsafe { libc::write(wake.as_raw_fd(), (&one as *const u64).cast(), 8) } != 8 {
+            return Err(io::Error::last_os_error());
+        }
+        uring.ring.submitter().submit_and_wait(1)?;
+        // SAFETY: no poller exists yet; this is the only completion reader.
+        let cqe = unsafe { uring.ring.completion_shared() }.next();
+        drain(wake.as_raw_fd());
+        match cqe {
+            Some(cqe)
+                if cqe.user_data() == WAKE
+                    && cqe.result() > 0
+                    && cqe.result() as u32 & libc::EPOLLIN as u32 != 0
+                    && cqueue::more(cqe.flags()) =>
+            {
+                Ok((uring, wake))
+            }
+            _ => Err(unsupported()),
+        }
+    }
+
+    fn push(&self, entry: io_uring::squeue::Entry) -> io::Result<()> {
+        let _sq = self.sq.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            // SAFETY: `sq` serializes submission-queue access.
+            let pushed = unsafe { self.ring.submission_shared().push(&entry) }.is_ok();
+            match self.ring.submitter().submit() {
+                Ok(_) => {}
+                // Entries left in the queue go in with the next enter.
+                Err(e)
+                    if matches!(
+                        e.raw_os_error(),
+                        Some(libc::EBUSY | libc::EAGAIN | libc::EINTR)
+                    ) => {}
+                Err(e) => return Err(e),
+            }
+            if pushed {
+                return Ok(());
             }
         }
+    }
+
+    /// The wake eventfd is always writable; only its counter matters.
+    fn interest(tag: u64) -> u32 {
+        if tag == WAKE {
+            libc::EPOLLIN as u32
+        } else {
+            INTEREST
+        }
+    }
+
+    fn arm(&self, fd: i32, tag: u64) -> io::Result<()> {
+        use io_uring::{opcode, types};
+        self.push(
+            opcode::PollAdd::new(types::Fd(fd), Self::interest(tag))
+                .multi(true)
+                .build()
+                .user_data(tag),
+        )
+    }
+
+    fn add(&self, fd: i32, tag: u64) -> io::Result<()> {
+        let mut armed = self.armed.lock().unwrap_or_else(|e| e.into_inner());
+        self.arm(fd, tag)?;
+        armed.insert(tag, fd);
+        Ok(())
+    }
+
+    fn remove(&self, tag: u64) -> io::Result<()> {
+        let mut armed = self.armed.lock().unwrap_or_else(|e| e.into_inner());
+        if armed.remove(&tag).is_some() {
+            self.push(
+                io_uring::opcode::PollRemove::new(tag)
+                    .build()
+                    .user_data(REMOVED),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// One kernel turn into `out`, under the driver turn. A timeout of 0 does
+    /// not block and -1 blocks until a completion.
+    fn wait(&self, out: &mut [libc::epoll_event], timeout_ms: i32) -> usize {
+        let n = self.reap(out);
+        if n != 0 {
+            return n;
+        }
+        let submitter = self.ring.submitter();
+        let entered = if timeout_ms == 0 {
+            submitter.submit()
+        } else if timeout_ms < 0 {
+            submitter.submit_and_wait(1)
+        } else {
+            let ms = timeout_ms as u64;
+            let ts = io_uring::types::Timespec::new()
+                .sec(ms / 1000)
+                .nsec((ms % 1000) as u32 * 1_000_000);
+            submitter.submit_with_args(1, &io_uring::types::SubmitArgs::new().timespec(&ts))
+        };
+        // A timeout, an interrupt or a full completion queue is a turn with
+        // whatever completions are already posted.
+        let _ = entered;
+        self.reap(out)
+    }
+
+    /// Translate posted completions into `(tag, flags)` events.
+    fn reap(&self, out: &mut [libc::epoll_event]) -> usize {
+        // SAFETY: the caller holds the driver turn, the only completion reader.
+        let mut cq = unsafe { self.ring.completion_shared() };
+        cq.sync();
+        let mut n = 0;
+        while n < out.len() {
+            let Some(cqe) = cq.next() else { break };
+            let tag = cqe.user_data();
+            if tag == REMOVED {
+                continue;
+            }
+            let res = cqe.result();
+            let mut flags = if res > 0 { res as u32 } else { 0 };
+            if !io_uring::cqueue::more(cqe.flags()) {
+                // The kernel ended this poll (a cancel when its submitting
+                // thread exited, or an overflowing completion queue). Re-arm
+                // a live one and report it ready, so its waiters retry.
+                let armed = self.armed.lock().unwrap_or_else(|e| e.into_inner());
+                let Some(&fd) = armed.get(&tag) else { continue };
+                if self.arm(fd, tag).is_err() {
+                    flags |= libc::EPOLLERR as u32;
+                }
+                flags |= (libc::EPOLLIN | libc::EPOLLOUT) as u32;
+            }
+            if flags != 0 {
+                out[n] = libc::epoll_event {
+                    events: flags,
+                    u64: tag,
+                };
+                n += 1;
+            }
+        }
+        n
     }
 }
 fn tag(index: usize, generation: u32) -> u64 {
@@ -181,7 +533,14 @@ pub const SHARED_UNIT_SHIFT: u32 = 48;
 /// Make the process's shared poller. `unit` names the calling unit, or None
 /// outside one (such a registry keeps a private poller).
 pub fn share_poller(unit: fn() -> Option<u32>) -> io::Result<Arc<Poller>> {
-    let poller = Poller::new()?;
+    share(Poller::new()?, unit)
+}
+/// The interleaving checker models epoll calls, so its pool shares an epoll
+/// poller whichever reactor the process chose.
+pub fn share_epoll_poller(unit: fn() -> Option<u32>) -> io::Result<Arc<Poller>> {
+    share(Poller::new_epoll()?, unit)
+}
+fn share(poller: Arc<Poller>, unit: fn() -> Option<u32>) -> io::Result<Arc<Poller>> {
     let _ = SHARED.set(SharedPoller {
         poller: poller.clone(),
         unit,
@@ -314,10 +673,12 @@ impl Sockets {
         assert_eq!(record.owners, 1);
         assert_eq!(record.waiters, [None; 2]);
         if record.registered {
-            self.poller
-                .as_ref()
-                .unwrap()
-                .ctl(libc::EPOLL_CTL_DEL, record.fd.as_raw_fd(), 0, 0)?;
+            let generation = self.slots[index].generation;
+            self.poller.as_ref().unwrap().remove(
+                record.fd.as_raw_fd(),
+                Self::registration_tag(self.shared, index, generation),
+                false,
+            )?;
         }
         let mut record = self.remove_record(index);
         record.registered = false;
@@ -404,10 +765,8 @@ impl Sockets {
         self.poller()?;
         let slot = &mut self.slots[index];
         let record = slot.record.as_mut().unwrap();
-        self.poller.as_ref().unwrap().ctl(
-            libc::EPOLL_CTL_ADD,
+        self.poller.as_ref().unwrap().add(
             record.fd.as_raw_fd(),
-            (libc::EPOLLIN | libc::EPOLLOUT | libc::EPOLLRDHUP | libc::EPOLLET) as u32,
             Self::registration_tag(self.shared, index, slot.generation),
         )?;
         record.registered = true;
@@ -508,7 +867,7 @@ impl Sockets {
         mut ready: impl FnMut(u64),
     ) -> usize {
         for event in events.0.iter() {
-            if event.u64 != u64::MAX {
+            if event.u64 != WAKE {
                 Self::dispatch_edge(slots, waiting, event.u64, event.events, &mut ready);
             }
         }
@@ -527,14 +886,15 @@ impl Sockets {
             return false;
         }
         let index = ((key >> 2) as u32) as usize;
+        let tag = Self::registration_tag(self.shared, index, self.slots[index].generation);
         let record = self.remove_record(index);
         if record.registered {
             // Unregister before dropping the sole descriptor owner.
-            let _ =
-                self.poller
-                    .as_ref()
-                    .unwrap()
-                    .ctl(libc::EPOLL_CTL_DEL, record.fd.as_raw_fd(), 0, 0);
+            let _ = self
+                .poller
+                .as_ref()
+                .unwrap()
+                .remove(record.fd.as_raw_fd(), tag, true);
         }
         true
     }
@@ -547,15 +907,15 @@ impl Sockets {
 }
 impl Drop for Sockets {
     fn drop(&mut self) {
-        for slot in &mut self.slots {
+        for (index, slot) in self.slots.iter_mut().enumerate() {
             if let Some(r) = slot.record.take() {
                 if r.registered {
-                    let _ = self.poller.as_ref().unwrap().ctl(
-                        libc::EPOLL_CTL_DEL,
-                        r.fd.as_raw_fd(),
-                        0,
-                        0,
-                    );
+                    let tag = Self::registration_tag(self.shared, index, slot.generation);
+                    let _ = self
+                        .poller
+                        .as_ref()
+                        .unwrap()
+                        .remove(r.fd.as_raw_fd(), tag, true);
                 }
                 drop(r);
             }
@@ -594,5 +954,68 @@ mod tests {
 
         let events = driver.poll(0).unwrap().unwrap();
         assert_eq!(sockets.dispatch_polled(events, |_| unreachable!()), 0);
+    }
+
+    /// Poll until `token` is readied or two seconds pass.
+    fn readied(sockets: &mut Sockets, token: u64) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            let mut found = false;
+            sockets.poll(20, |t| found |= t == token).unwrap();
+            if found {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Workers migrate, so the thread that registered a socket may be gone
+    /// when it becomes readable. io_uring ties a poll to its submitting task.
+    #[test]
+    fn a_socket_registered_by_an_exited_thread_still_reports_readiness() {
+        let mut sockets = Sockets::default();
+        let (socket, mut peer) = UnixStream::pair().unwrap();
+        socket.set_nonblocking(true).unwrap();
+        let key = sockets.insert(socket.into()).unwrap();
+        let sockets = std::thread::scope(|scope| {
+            scope
+                .spawn(move || {
+                    sockets.arm(key, false, 5).unwrap();
+                    sockets
+                })
+                .join()
+                .unwrap()
+        });
+        let mut sockets = sockets;
+        // The registration's first report, before any byte arrived.
+        sockets.poll(0, |_| {}).unwrap();
+        peer.write_all(b"x").unwrap();
+        sockets.arm(key, false, 6).unwrap();
+        assert!(readied(&mut sockets, 6), "{:?}", reactor());
+    }
+
+    /// Releasing a listener frees its address on return, as closing it
+    /// does, including when another thread registered it.
+    #[test]
+    fn a_released_listener_can_be_bound_again_at_once() {
+        for _ in 0..50 {
+            let mut sockets = Sockets::default();
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let address = listener.local_addr().unwrap();
+            let key = sockets.insert(listener.into()).unwrap();
+            let mut sockets = std::thread::scope(|scope| {
+                scope
+                    .spawn(move || {
+                        sockets.arm(key, false, 1).unwrap();
+                        sockets
+                    })
+                    .join()
+                    .unwrap()
+            });
+            assert!(sockets.release(key));
+            std::net::TcpListener::bind(address)
+                .unwrap_or_else(|e| panic!("{address} under {:?}: {e}", reactor()));
+        }
     }
 }

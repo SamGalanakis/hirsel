@@ -126,8 +126,11 @@ pub use grant::{
     GrantRule, NetGrant, ResolveRule, RuleView, UnixDirection, UnixRule, valid_relative_path,
 };
 mod reactor;
-pub use reactor::{Poller, SHARED_UNIT_SHIFT, SocketTransfer, Sockets, share_poller};
-/// mc-units-untied: epoll_wait calls made by run reactors.
+pub use reactor::{
+    Poller, REACTOR_ENV, Reactor, SHARED_UNIT_SHIFT, SocketTransfer, Sockets, reactor,
+    share_epoll_poller, share_poller,
+};
+/// mc-units-untied: kernel waits (epoll_wait or io_uring_enter) made by run reactors.
 pub static EPOLL_WAITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 mod signature;
 pub use signature::{SignatureAlgorithm, verify_signature};

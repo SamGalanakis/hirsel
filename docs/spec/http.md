@@ -60,8 +60,10 @@ There is one line per mechanism, saying what Hirsel does with it and why.
   - This is HTTP-11.
 - **ADOPTED.** Response, stream and upgrade are outcomes of an ordinary handler (message.goose:898; docs/api.md:325).
   - These are HTTP-10's three outcomes.
-- **NOT TAKEN.** io_uring with provided buffer rings (http.goose:126-160), which makes liburing a build dependency. Building it requires the liburing headers. HTTP/2 and HTTP/3 in rung 1 are also not taken (http.goose:41).
-  - NET's readiness provider is the one reactor.
+- **ADAPTED.** io_uring (http.goose:126-160), through the pure-Rust `io-uring` crate instead of liburing, so it needs no C headers or library. Provided buffer rings are not taken, and neither are HTTP/2 and HTTP/3 in rung 1 (http.goose:41).
+  - NET's transport has two reactors behind one boundary: io_uring when the running kernel allows it, epoll where it does not (an older kernel, a container that refuses `io_uring_setup`).
+  - The runtime chooses once, at its first socket poller, and `HIRSEL_NET_REACTOR=epoll` forces epoll. Any other value except `auto` is refused.
+  - The choice changes no program-visible result and is not a replay input, so a run recorded under one reactor replays under the other.
 
 ### Others
 
@@ -1437,4 +1439,4 @@ The WebSocket upgrade moves onto std `http`. The parallel parse and serve paths 
 
 | # | Question | Alternatives | Adopted | End state |
 |---|---|---|---|---|
-| 20 | HTTP/2 and /3, io_uring, a second reactor, imported C servers, worker-global cork | — | not in rung 1 | HTTP/2 is a later library over the same owner and authority |
+| 20 | HTTP/2 and /3, imported C servers, worker-global cork; NET's reactor | — | HTTP/2, HTTP/3, C servers and cork are not in rung 1; NET runs on io_uring when the kernel allows it and on epoll otherwise, chosen once at runtime start | HTTP/2 is a later library over the same owner and authority; the reactor never changes a program-visible result |

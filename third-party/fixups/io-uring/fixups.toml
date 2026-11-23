@@ -1,0 +1,3 @@
+# build.rs runs bindgen only under the unselected `bindgen` feature; otherwise
+# it declares two check-cfg names, which Buck does not need.
+buildscript.run = false

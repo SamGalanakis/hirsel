@@ -1748,7 +1748,7 @@ pub(super) fn run_one(case: &Case, seed: u64, out: &str) -> ! {
             .and_then(|v| v.parse().ok())
             .unwrap_or(d)
     };
-    let shared = hirsel_core_net::share_poller(super::shared_unit).unwrap();
+    let shared = hirsel_core_net::share_epoll_poller(super::shared_unit).unwrap();
     let (gep, gwake) = (shared.raw_fd(), shared.wake_fd());
     // Setup stamps (unit creation) use the real clock; start the model 10 s
     // ahead of it so no setup stamp is later than modelled time.
@@ -1824,6 +1824,7 @@ pub(super) fn run_one(case: &Case, seed: u64, out: &str) -> ! {
         poll_held: super::AtomicBool::new(false),
         gep,
         gwake,
+        uring: false,
         _shared: shared,
         net_used: super::AtomicBool::new(true),
         timers: super::Mutex::new(std::collections::BTreeSet::new()),

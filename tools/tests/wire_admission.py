@@ -31,13 +31,21 @@ def blob(b):
 
 def fingerprint(*opcodes):
     # Schema v3, no named definitions; CRC-64-AVRO, SEM-10.
+    return crc64(b'\x03\0\0\0\0' + bytes(opcodes))
+
+
+def crc64(data):
     value = 0xc15d213aa4d7a795
-    for byte in b'\x03\0\0\0\0' + bytes(opcodes):
+    for byte in data:
         value ^= byte
         for _ in range(8):
             value = (value >> 1) ^ (0xc15d213aa4d7a795 if value & 1 else 0)
     return value
 
+
+# RUNNER-SPEC rule 3: the read entry's result describes its ordered u64 key
+# (schema v4, opcode 6) followed by its current u32 value (v3, opcode 5).
+READ_RESULT_FP = crc64(blob(b'\x04\0\0\0\0\x06') + blob(b'\x03\0\0\0\0\x05'))
 
 # PROG-9 encodes the entire function signature, including the transaction's
 # Caller parameter. RUNNER-SPEC rule 3 puts those identity bytes in the key.
@@ -45,7 +53,7 @@ ENTRIES = {
     'put': (b'\x01wire@1/admission/put(mut store@1/store/Tx,wire@1/admission/H,store@1/store/Caller,take u32)->core@1/core/Result[u64,u32]', fingerprint(5), fingerprint(17, 6, 5)),
     'large': (b'\x01wire@1/admission/large(mut store@1/store/Tx,wire@1/admission/H,store@1/store/Caller,take u32)->core@1/core/Result[core@1/core/List[u8],u32]', fingerprint(5), fingerprint(17, 14, 3, 5)),
     'big': (b'\x01wire@1/admission/big(take u32)->core@1/core/Result[core@1/core/List[u8],core@1/core/Capacity]', fingerprint(5), fingerprint(14, 3)),
-    'read': (b'\x01wire@1/admission/read(store@1/store/Tx,wire@1/admission/H,take u32)->core@1/core/Result[runner@1/runner/Cover,core@1/core/Capacity]', fingerprint(5), fingerprint(0)),
+    'read': (b'\x01wire@1/admission/read(store@1/store/Tx,wire@1/admission/H,take u32)->core@1/core/Result[runner@1/runner/Cover,core@1/core/Capacity]', fingerprint(5), READ_RESULT_FP),
     'gone': (b'retired', 0, 0),
     'unknown': (b'unknown', 0, 0),
 }
@@ -346,7 +354,9 @@ def faulted_owner_releases_slot():
 
 
 def hirsel_call(url, *call):
-    command = [CLI['compiler'], 'call', CLI['server'], '--url', url, '--runtime', CLI['runtime']]
+    # Describe the admission fixture at the same n_place it serves.
+    command = [CLI['compiler'], 'call', CLI['server'], '--url', url, '--runtime', CLI['runtime'],
+               '--n-place', '1048576']
     command += ['--cc', CLI['cc']] if CLI.get('cc') else []
     return subprocess.Popen(command + ['--', *call], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 

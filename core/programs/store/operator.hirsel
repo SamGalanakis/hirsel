@@ -11,6 +11,7 @@
 //
 // D is the client's random 16-byte request ID, A a host-generated launcher.Attempt, and a
 // hash H is 32 bytes. A known D names the same group and input for its whole life.
+pub const PATH: String = "operator.sock"
 pub const MAX_FRAME: u64 = 16777216u64
 
 // A recorded group's tapes: each serving start writes `dir`/<recording ID in hex>.tape,
@@ -162,4 +163,73 @@ pub fn ask_bytes(a: Ask) -> Bytes {
     let mut out: Bytes = list.new()
     let _ = std.codec.encode(codec, a, mut out)
     out
+}
+
+fn read_exact(mut input: ReadHalf, mut out: Bytes, size: u64, until: Until) -> bool waits {
+    while list.len(out) < size {
+        let left = size - list.len(out)
+        match host.recv_bounded(mut input, mut out, left, until) {
+            Ok(n) if n > 0u64 => (),
+            _ => return false,
+        }
+    }
+    true
+}
+
+// One length-prefixed frame of at most MAX_FRAME bytes, or None at the stream's end.
+pub fn read_frame(mut input: ReadHalf, until: Until) -> Option[Bytes] waits {
+    let mut header: Bytes = list.with_capacity(4u64)
+    if !read_exact(mut input, mut header, 4u64, until) {
+        return None
+    }
+    let mut at = 0u64
+    let size: u64 = match std.codec.take_u32(header, mut at) {
+        Ok(n) => int.widen(n),
+        _ => return None
+    }
+    if size > MAX_FRAME {
+        return None
+    }
+    let mut body: Bytes = list.with_capacity(size)
+    if !read_exact(mut input, mut body, size, until) {
+        return None
+    }
+    Some(body)
+}
+
+pub fn send_frame(mut output: WriteHalf, body: Bytes, until: Until) -> bool waits {
+    if list.len(body) > MAX_FRAME {
+        return false
+    }
+    let mut header: Bytes = list.new()
+    std.codec.put_u32(int.narrow(list.len(body)), mut header)
+    let mut offset = 0u64
+    while offset < 4u64 + list.len(body) {
+        match host.send_pair(mut output, list.slice(header, std.order.min(offset, 4u64), 4u64), list.slice(body, int.saturating_sub(offset, 4u64), list.len(body)), until) {
+            Ok(n) if n > 0u64 => {
+                offset += n
+            },
+            _ => return false,
+        }
+    }
+    true
+}
+
+
+// Open one operator exchange and read its first answer. Source Begin carries its whole
+// input, so a complete admission keeps running after this connection closes.
+pub fn exchange(n: Net, root: String, ask: Ask, until: Until) -> Option[Answer] waits {
+    let Ok(take socket) = host.connect_unix(n, root, PATH, until) else { return None }
+    let (take rd, take wr) = net.split(take socket)
+    let mut w = take wr
+    if !send_frame(mut w, ask_bytes(ask), until) {
+        return None
+    }
+    let mut r = take rd
+    let Some(body) = read_frame(mut r, until) else { return None }
+    let codec: std.codec.Codec[Answer] = std.codec.of()
+    match std.codec.decode(codec, body) {
+        Ok(take a) => Some(take a),
+        Error(_) => None,
+    }
 }

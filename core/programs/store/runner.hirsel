@@ -3185,15 +3185,31 @@ pub fn launch_prepare_args(a: Args) -> Result[Option[PrepareArgs], Exit] {
     if args.len(a) != 4u64 { return Error(invalid) }
     let Some(attempt_text) = args.get(a, 2u64) else { return Error(invalid) }
     let Some(image_text) = args.get(a, 3u64) else { return Error(invalid) }
-    let attempt = std.base64.decode(string.as_bytes(attempt_text))
-    let digest = std.base64.decode(string.as_bytes(image_text))
+    let attempt = prepare_hex(attempt_text, 16u64)
+    let digest = prepare_hex(image_text, 32u64)
     match (take attempt, take digest) {
-        (Some(take ticket), Some(take image)) => {
-            if list.len(ticket) != 16 || list.len(image) != 32 { return Error(invalid) }
-            Ok(Some(PrepareArgs(attempt: take ticket, digest: take image)))
-        },
+        (Some(take ticket), Some(take image)) => Ok(Some(PrepareArgs(attempt: take ticket, digest: take image))),
         _ => Error(invalid),
     }
+}
+
+// The launcher passes the attempt and image digest as fixed-width hex.
+fn prepare_hex(text: String, count: u64) -> Option[Bytes] {
+    let raw = string.as_bytes(text)
+    if list.len(raw) != 2u64 * count { return None }
+    let mut out: Bytes = list.with_capacity(count)
+    for i in 0u64 .. count {
+        let Some(hi) = hex_digit(raw[2u64 * i]) else { return None }
+        let Some(lo) = hex_digit(raw[2u64 * i + 1u64]) else { return None }
+        list.push(mut out, (hi << 4u8) | lo)
+    }
+    Some(take out)
+}
+
+fn hex_digit(byte: u8) -> Option[u8] {
+    if byte >= b'0' && byte <= b'9' { return Some(byte - b'0') }
+    if byte >= b'a' && byte <= b'f' { return Some(byte - b'a' + 10u8) }
+    None
 }
 
 fn prepare_result[T](take outcome: Result[T, store.DeployError]) -> Result[T, PrepareError] {

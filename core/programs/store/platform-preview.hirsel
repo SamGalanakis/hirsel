@@ -151,3 +151,40 @@ fn trigger_rows(b: Bytes) -> Option[List[runner.TriggerScanRow]] {
         Error(_) => None,
     }
 }
+
+// Read the contract from the original Begin, including after a grant decision or reconnect.
+fn deploy_required_entries(h: Host, d: Bytes) -> Result[List[launcher.RequiredEntry], Refused] {
+    let Some(row) = request_row(h, d)? else {
+        return Error(Missing("deploy request"))
+    }
+    if let Source(b) = row.input {
+        let Some(tree) = launcher.tree_of(b) else {
+            return Error(Missing("deploy source tree"))
+        }
+        return Ok(clone(tree.required_entries))
+    }
+    Ok(list.new())
+}
+
+// Keys include both codec fingerprints. The kind also has to match how the
+// publisher calls or subscribes to the entry.
+fn keeps_entries(required: List[launcher.RequiredEntry], exported: List[runner.Exported]) -> bool {
+    if list.len(required) == 0u64 {
+        return true
+    }
+    let mut keys: Map[Bytes, runner.Kind] = map.new()
+    for e in exported {
+        let mut key: Bytes = clone(e.described.identity)
+        std.codec.put_u64(e.args_fp, mut key)
+        std.codec.put_u64(e.result_fp, mut key)
+        map.insert(mut keys, take key, e.described.kind)
+    }
+    for entry in required {
+        let Some(kind) = map.get(keys, entry.key) else { return false }
+        let actual: runner.Kind = clone(kind)
+        if actual != entry.kind {
+            return false
+        }
+    }
+    true
+}

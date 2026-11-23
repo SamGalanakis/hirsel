@@ -12,8 +12,6 @@
 // status 75; the launcher starts it again, and the new session's inventory reconciles
 // (RUNNER-SPEC §14.5). The host never changes its working directory: its grants name the
 // state directory as /proc/self/cwd.
-const MAX_FRAME: u64 = 16777216u64
-const OPERATOR_PATH: String = "operator.sock"
 const COLLECT_INTERVAL_NS: u64 = 300000000000u64
 
 type Reader: send {
@@ -21,40 +19,8 @@ type Reader: send {
     to: Sender[platform.Input]
 }
 
-fn read_exact(mut input: ReadHalf, mut out: Bytes, size: u64) -> bool waits {
-    while list.len(out) < size {
-        let left = size - list.len(out)
-        match host.recv_bounded(mut input, mut out, left, Never) {
-            Ok(n) if n > 0u64 => (),
-            _ => return false,
-        }
-    }
-    true
-}
-
-// One length-prefixed frame of at most MAX_FRAME bytes, or None at the stream's end.
-fn read_frame(mut input: ReadHalf) -> Option[Bytes] waits {
-    let mut header: Bytes = list.with_capacity(4u64)
-    if !read_exact(mut input, mut header, 4u64) {
-        return None
-    }
-    let mut at = 0u64
-    let size: u64 = match std.codec.take_u32(header, mut at) {
-        Ok(n) => int.widen(n),
-        _ => return None
-    }
-    if size > MAX_FRAME {
-        return None
-    }
-    let mut body: Bytes = list.with_capacity(size)
-    if !read_exact(mut input, mut body, size) {
-        return None
-    }
-    Some(body)
-}
-
 fn read_event(mut input: ReadHalf) -> Option[launcher.Event] waits {
-    let Some(body) = read_frame(mut input) else {
+    let Some(body) = operator.read_frame(mut input, Never) else {
         return None
     }
     let codec: std.codec.Codec[launcher.Event] = std.codec.of()
@@ -113,7 +79,7 @@ type Operator: send {
 fn read_operator(take seed: Operator) -> () waits {
     let Operator(conn: conn, input: take input, to: take to) = take seed
     let mut r = take input
-    while let Some(take body) = read_frame(mut r) {
+    while let Some(take body) = operator.read_frame(mut r, Never) {
         if let Error(_) = channel.send(to, Asked(conn, take body)) {
             return
         }
@@ -134,7 +100,7 @@ fn write_operator(take seed: Writer) -> () waits {
     let Writer(conn: conn, output: take output, frames: take frames, to: take to) = take seed
     let mut w = take output
     while let Ok(take body) = channel.receive(frames) {
-        if !send_frame(mut w, body) {
+        if !operator.send_frame(mut w, body, Never) {
             break
         }
     }
@@ -167,25 +133,7 @@ fn send_request(mut output: WriteHalf, r: launcher.Request) -> bool waits {
     if let Error(_) = std.codec.encode(codec, r, mut body) {
         return false
     }
-    send_frame(mut output, body)
-}
-
-fn send_frame(mut output: WriteHalf, body: Bytes) -> bool waits {
-    if list.len(body) > MAX_FRAME {
-        return false
-    }
-    let mut header: Bytes = list.new()
-    std.codec.put_u32(int.narrow(list.len(body)), mut header)
-    let mut offset = 0u64
-    while offset < 4u64 + list.len(body) {
-        match host.send_pair(mut output, list.slice(header, std.order.min(offset, 4u64), 4u64), list.slice(body, int.saturating_sub(offset, 4u64), list.len(body)), Never) {
-            Ok(n) if n > 0u64 => {
-                offset += n
-            },
-            _ => return false,
-        }
-    }
-    true
+    operator.send_frame(mut output, body, Never)
 }
 
 // Queues each answer the host decided on its connection's writer, never waiting on it. A
@@ -302,7 +250,7 @@ pub fn main(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, argv: Args) -> Re
         Ok(take s) => take s,
         Error(_) => return Error(Exit(status: 75u8))
     }
-    let listener = match host.listen_unix(n, root, OPERATOR_PATH, 16u16) {
+    let listener = match host.listen_unix(n, root, operator.PATH, 16u16) {
         Ok(take l) => take l,
         Error(_) => return Error(Exit(status: 74u8))
     }

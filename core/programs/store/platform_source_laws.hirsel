@@ -36,7 +36,7 @@ fn untrusted_source_admission(c: Clock, rnd: Random) -> Result[(), ()] waits {
 fn source_of(grant: String) -> launcher.Input {
     let mut grants: List[String] = list.new()
     list.push(mut grants, string.from(grant))
-    let tree = launcher.Tree(package: ".", grants: take grants, dirs: list.new(), files: list.new())
+    let tree = launcher.Tree(package: ".", grants: take grants, dirs: list.new(), files: list.new(), required_entries: list.new())
     let codec: std.codec.Codec[launcher.Tree] = std.codec.of()
     let mut out: Bytes = list.new()
     let _ = std.codec.encode(codec, tree, mut out)

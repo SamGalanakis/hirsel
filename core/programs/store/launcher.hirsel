@@ -78,8 +78,12 @@ pub type Tree: codec + send {
     package: String,
     grants: List[String],
     dirs: List[String],
-    files: List[SourceFile]
+    files: List[SourceFile],
+    // WIRE entries the host requires NEW to keep before import.
+    required_entries: List[RequiredEntry]
 }
+
+pub type RequiredEntry: codec + send { kind: runner.Kind, key: Bytes }
 
 pub type SourceFile: codec + send {
     path: String,

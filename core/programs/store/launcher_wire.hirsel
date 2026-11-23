@@ -166,7 +166,7 @@ fn session_vectors() -> Result[(), ()] {
     ok = vector_event(AdmissionFailed(attempt(), Denied("no")), "100000000807060504030201181716151413121100000000020000006e6f") && ok
     ok = vector_event(AdmissionFailed(attempt(), Uncompiled("no")), "100000000807060504030201181716151413121103000000020000006e6f") && ok
     ok = vector_event(AdmissionFailed(attempt(), Exhausted("om")), "100000000807060504030201181716151413121104000000020000006f6d") && ok
-    ok = vector_tree(Tree(package: ".", grants: one("G"), dirs: one("d"), files: one(SourceFile(path: "a", content: hex("0102")))), "010000002e010000000100000047010000000100000064010000000100000061020000000102") && ok
+    ok = vector_tree(Tree(package: ".", grants: one("G"), dirs: one("d"), files: one(SourceFile(path: "a", content: hex("0102"))), required_entries: one(RequiredEntry(kind: Query, key: hex("aabb")))), "010000002e010000000100000047010000000100000064010000000100000061020000000102010000000200000002000000aabb") && ok
     ok = vector_event(CutoverResult(serving(), attempt(), PlaceInstalled(4u64, true)), "11000000010000006703000000000000000100000007000000000000000807060504030201181716151413121105000000040000000000000001") && ok
     if ok {
         Ok(())

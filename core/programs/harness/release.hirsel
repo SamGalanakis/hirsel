@@ -6,9 +6,8 @@
 // proposal's parked tool call its result.
 //
 // The app lists the tools with `add_tools` from its `agent()`, so every entry reaches them,
-// creates the tables with `migrate` beside `harness.migrate`, and writes two entries of the
-// forwarding kind: one that calls `settle` after authorizing the host as its caller, and a
-// `project` transact entry that returns `harness.project` for the session.
+// creates the tables with `migrate` beside `harness.migrate`, and forwards the query and
+// settle entries after checking the host's Caller. The host uses release_publish.
 
 pub type File: codec + send {
     path: String,
@@ -21,10 +20,17 @@ pub type State: codec + send = Filed | Published(String) | Rejected(String)
 
 // A proposal: the parked call it settles, the hash of the source tree when it was filed,
 // and the agent's summary.
+pub type Build: codec + send {
+    package: String,
+    grants: List[String],
+    dirs: List[String]
+}
+
 pub type Proposal: codec + send {
     call: harness.EffectKey,
     tree: Bytes,
     summary: String,
+    build: Build,
     state: State
 }
 
@@ -69,7 +75,7 @@ pub fn add_tools[G: send](mut a: harness.Agent[G]) {
     list.push(mut a.tools, harness.inside("read_source", "Reads one source file of this harness.", "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}", code.describe(read_source)))
     list.push(mut a.tools, harness.inside("write_source", "Writes one source file of this harness; empty text deletes it.", "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"text\":{\"type\":\"string\"}},\"required\":[\"path\",\"text\"]}", code.describe(write_source)))
     list.push(mut a.tools, harness.inside("list_source", "Lists this harness's source files, one path per line.", "{\"type\":\"object\"}", code.describe(list_source)))
-    list.push(mut a.tools, harness.inside("propose_release", "Proposes the current source as this harness's next release; the result arrives when the host has decided.", "{\"type\":\"object\",\"properties\":{\"summary\":{\"type\":\"string\"}},\"required\":[\"summary\"]}", code.describe(propose_release)))
+    list.push(mut a.tools, harness.inside("propose_release", "Proposes the current source as this harness's next release; the result arrives when the host has decided.", "{\"type\":\"object\",\"properties\":{\"summary\":{\"type\":\"string\"},\"package\":{\"type\":\"string\"},\"grants\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"dirs\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}},\"required\":[\"summary\"]}", code.describe(propose_release)))
 }
 
 fn opened(tx: store.Tx) -> Result[Tables, harness.Fault] {
@@ -79,13 +85,17 @@ fn opened(tx: store.Tx) -> Result[Tables, harness.Fault] {
     }
 }
 
-fn arg(args: Bytes, key: String) -> Result[String, harness.Fault] {
+fn arguments(args: Bytes) -> Result[mcp.rpc.Fields, harness.Fault] {
     let Ok(raw) = string.from_utf8(clone(args)) else {
         return Error(BadArgs("arguments are not UTF-8"))
     }
     let Ok(fields) = mcp.rpc.object(raw) else {
         return Error(BadArgs("arguments are not a JSON object"))
     }
+    Ok(take fields)
+}
+
+fn text_arg(fields: mcp.rpc.Fields, key: String) -> Result[String, harness.Fault] {
     match mcp.rpc.field_text(fields, key) {
         Some(take v) => Ok(take v),
         None => {
@@ -94,6 +104,21 @@ fn arg(args: Bytes, key: String) -> Result[String, harness.Fault] {
             Error(BadArgs(result.unwrap(string.from_utf8(take why))))
         },
     }
+}
+
+fn arg(args: Bytes, key: String) -> Result[String, harness.Fault] {
+    text_arg(arguments(args)?, key)
+}
+
+fn strings_arg(fields: mcp.rpc.Fields, key: String) -> Result[List[String], harness.Fault] {
+    let Some(raw) = map.get(fields, key) else { return Ok(list.new()) }
+    let values = mcp.rpc.array(raw) ?=> |_| BadArgs("grants and dirs must be arrays of strings")
+    let mut out: List[String] = list.with_capacity(list.len(values))
+    for value in values {
+        let Some(take text) = mcp.rpc.text(value) else { return Error(BadArgs("grants and dirs must be arrays of strings")) }
+        list.push(mut out, take text)
+    }
+    Ok(take out)
 }
 
 fn path_arg(args: Bytes) -> Result[String, harness.Fault] {
@@ -156,18 +181,29 @@ fn list_source(mut tx: store.Tx, inv: harness.Invoke) -> Result[harness.Reply, h
 // trees hash alike exactly when they hold the same files.
 fn tree_of(tx: store.Tx, t: Tables) -> Result[(Bytes, u64), store.Error] {
     let mut rows = store.range(tx, store.shape(t.files), Unbounded, Unbounded)?
-    let mut raw: Bytes = list.new()
+    let mut hash = std.sha256.start()
     let mut n = 0u64
+    let mut size = 4u64
     while let Some((path, text)) = store.next_range(mut rows)? {
-        std.codec.put_key_string(path, mut raw)
-        std.codec.put_key_string(text, mut raw)
+        size += 8u64 + string.byte_len(path) + string.byte_len(text)
+        if size > store.launcher.TREE_BYTES {
+            return Error(Limit(Value))
+        }
+        hash_file(mut hash, path, text)
         n += 1u64
     }
-    Ok((sha(raw), n))
+    Ok((tree_hash(take hash), n))
 }
 
-fn sha(raw: Bytes) -> Bytes {
-    let d = std.sha256.hash(raw)
+fn hash_file(mut hash: std.sha256.Sha256, path: String, text: String) {
+    let mut raw: Bytes = list.new()
+    std.codec.put_key_string(path, mut raw)
+    std.codec.put_key_string(text, mut raw)
+    std.sha256.add(mut hash, raw, 0u64, list.len(raw))
+}
+
+fn tree_hash(take hash: std.sha256.Sha256) -> Bytes {
+    let d = std.sha256.finish(take hash)
     let mut out: Bytes = list.with_capacity(32u64)
     for i in 0u64 .. 32u64 {
         list.push(mut out, d[i])
@@ -187,14 +223,19 @@ fn call_id(key: harness.EffectKey) -> Bytes {
 // Files the current tree as a proposal and parks the call until the host settles it.
 fn propose_release(mut tx: store.Tx, inv: harness.Invoke) -> Result[harness.Reply, harness.Fault] {
     let t = opened(tx)?
-    let summary = arg(inv.args, "summary")?
-    let Ok((tree, n)) = tree_of(tx, t) else {
-        return Error(Unavailable)
+    let fields = arguments(inv.args)?
+    let summary = text_arg(fields, "summary")?
+    let package = if mcp.rpc.contains(fields, "package") { text_arg(fields, "package")? } else { "." }
+    let build = Build(package: take package, grants: strings_arg(fields, "grants")?, dirs: strings_arg(fields, "dirs")?)
+    let (tree, n) = match tree_of(tx, t) {
+        Ok(take named) => take named,
+        Error(Limit(Value)) => return Error(Refused("the source tree exceeds the launcher's byte limit")),
+        Error(_) => return Error(Unavailable),
     }
     if n == 0u64 {
         return Error(Refused("there is no source to propose"))
     }
-    let p = Proposal(call: clone(inv.key), tree: take tree, summary: take summary, state: Filed)
+    let p = Proposal(call: clone(inv.key), tree: take tree, summary: take summary, build: take build, state: Filed)
     match store.put(mut tx, t.proposals, call_id(inv.key), p) {
         Ok(_) => Ok(Later),
         Error(_) => Error(Unavailable),
@@ -217,18 +258,56 @@ pub fn pending(snap: store.Snapshot, t: Tables) -> Result[List[(Bytes, Proposal)
 // was filed: the host never publishes source the proposal did not name.
 pub fn source(snap: store.Snapshot, t: Tables, tree: Bytes) -> Result[Option[List[File]], store.Error] {
     let mut rows = store.scan(snap, store.shape(t.files), Unbounded, Unbounded)?
-    let mut raw: Bytes = list.new()
+    let mut hash = std.sha256.start()
     let mut files: List[File] = list.new()
     while let Some((take path, take text)) = store.next(mut rows)? {
-        std.codec.put_key_string(path, mut raw)
-        std.codec.put_key_string(text, mut raw)
+        hash_file(mut hash, path, text)
         list.push(mut files, File(path: take path, text: take text))
     }
-    if sha(raw) != tree {
+    if tree_hash(take hash) != tree {
         return Ok(None)
     }
     Ok(Some(take files))
 }
+
+pub fn names_files(tree: Bytes, files: List[File]) -> bool {
+    let mut hash = std.sha256.start()
+    for file in files {
+        hash_file(mut hash, file.path, file.text)
+    }
+    tree_hash(take hash) == tree
+}
+
+pub type Settlement: codec + send { id: Bytes, state: State }
+
+// WIRE query bodies. An app's query_as entries authorize the Caller before forwarding.
+// Each Cover is published against the same transaction snapshot as the scan that chose it.
+pub fn pending_cover(tx: store.Tx, t: Tables) -> Result[store.runner.Cover, Capacity] {
+    let shape = store.shape(t.proposals)
+    let mut rows = store.range(tx, shape, Unbounded, Unbounded) ?=> |_| read_failed()
+    while let Some((id, proposal)) = store.next_range(mut rows) ?=> |_| read_failed() {
+        if let Filed = proposal.state {
+            return store.runner.cover(shape, Included(clone(id)), Included(clone(id)))
+        }
+    }
+    store.runner.cover(shape, Included(list.new()), Excluded(list.new()))
+}
+
+// Publish one source row per WIRE query, so a full tree need not fit in one batch.
+pub fn source_cover(tx: store.Tx, t: Tables, after: Option[String]) -> Result[store.runner.Cover, Capacity] {
+    let shape = store.shape(t.files)
+    let low: store.Bound[String] = match after {
+        Some(path) => Excluded(string.from(path)),
+        None => Unbounded,
+    }
+    let mut rows = store.range(tx, shape, low, Unbounded) ?=> |_| read_failed()
+    if let Some((path, _)) = store.next_range(mut rows) ?=> |_| read_failed() {
+        return store.runner.cover(shape, Included(string.from(path)), Included(string.from(path)))
+    }
+    store.runner.cover(shape, Included(""), Excluded(""))
+}
+
+fn read_failed() -> Capacity { Capacity(requested: 1u64, available: 0u64) }
 
 // The host's decision on proposal `id`, given to its parked call. The app's settle entry
 // calls this after authorizing its caller as the host. A proposal already settled, or

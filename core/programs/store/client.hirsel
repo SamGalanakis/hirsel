@@ -58,6 +58,8 @@ pub opaque type Callee[A, R]: shareable + send {
     reply: std.codec.Codec[R]
 }
 
+pub fn entry_key[A, R](e: Callee[A, R]) -> Bytes { clone(e.key) }
+
 fn callee[F, A, R](f: StaticFn[F], args: std.codec.Codec[A], reply: std.codec.Codec[R]) -> Callee[A, R] {
     let key = match runner.attempt_key(f, args, reply) {
         Ok(take k) => take k,

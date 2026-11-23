@@ -242,7 +242,7 @@ type Cut {
 // prepare child on export `head`, OLD's import of it, the end of a drift retry's discarded
 // candidate after OLD kept the import (its head and prepared digest); or, after a failure,
 // OLD's abort and the helper's end, before `Failed(why)` is committed.
-type Stage = Describing | Previewing(u64) | Exporting | PrepareRunning(u64) | Importing(u64) | Imported(u64, Bytes) | Aborting(String)
+type Stage = Describing | Previewing(u64) | Exporting | PrepareRunning(u64) | Importing(u64) | Imported(u64, Bytes) | Aborting(String, operator.Class)
 
 type Prep {
     attempt: launcher.Attempt,
@@ -270,6 +270,7 @@ type Prep {
     preview: operator.Preview,
     // The running prepare child has answered its trigger report.
     scanned: bool,
+    required_entries: List[launcher.RequiredEntry],
 }
 
 // Where a deploy's admission stands (launch.md "The launcher", "Publish and assemble"):
@@ -1286,7 +1287,7 @@ fn drift(mut h: Host, name: String, g: GroupRow, take cut: Cut, now: Now, mut ou
         list.push(mut out, Stop(child_of(name, g.incarnation, c)))
     }
     list.push(mut out, Command(child_of(name, g.incarnation, cut.old), HostExport(attempt_bytes(retry.attempt), true)))
-    let p = Prep(attempt: retry.attempt, retry_of: retry.retry_of, incarnation: g.incarnation, old: cut.old, assembly: clone(retry.assembly), image: clone(retry.image), target: string.new(), n_place: 0u64, stage: Exporting, describe: clone(retry.describe), release: clone(retry.release), helper: None, aborting: false, discarded: discarded, old_exported: list.new(), preview: clone(retry.preview), scanned: false)
+    let p = Prep(attempt: retry.attempt, retry_of: retry.retry_of, incarnation: g.incarnation, old: cut.old, assembly: clone(retry.assembly), image: clone(retry.image), target: string.new(), n_place: 0u64, stage: Exporting, describe: clone(retry.describe), release: clone(retry.release), helper: None, aborting: false, discarded: discarded, old_exported: list.new(), preview: clone(retry.preview), scanned: false, required_entries: list.new())
     let mut v = vol_read(h, name)
     v.cut = None
     v.prep = Some(p)
@@ -1753,7 +1754,7 @@ fn resume_cuts(mut h: Host, held: List[launcher.CutoverKey], mut out: List[launc
         let Ok(Some(g)) = group_row(h, name) else {
             continue
         }
-        let p = Prep(attempt: d.attempt, retry_of: d.retry_of, incarnation: g.incarnation, old: d.old, assembly: clone(d.assembly), image: clone(d.image), target: string.new(), n_place: 0u64, stage: Aborting("interrupted before the cutover"), describe: list.new(), release: list.new(), helper: None, aborting: run_gen(h, name) == Some(d.old), discarded: None, old_exported: list.new(), preview: clone(d.preview), scanned: false)
+        let p = Prep(attempt: d.attempt, retry_of: d.retry_of, incarnation: g.incarnation, old: d.old, assembly: clone(d.assembly), image: clone(d.image), target: string.new(), n_place: 0u64, stage: Aborting("interrupted before the cutover", InvalidClass), describe: list.new(), release: list.new(), helper: None, aborting: run_gen(h, name) == Some(d.old), discarded: None, old_exported: list.new(), preview: clone(d.preview), scanned: false, required_entries: list.new())
         if p.aborting {
             list.push(mut out, Command(child_of(name, g.incarnation, d.old), abort_command(d.attempt, d.retry_of)))
         }
@@ -2067,6 +2068,7 @@ fn set_quota_turn(mut h: Host, tenant: String, q: Quota, now: Now) -> Result[Lis
 // checking each answer before the next step. `image` is NEW's image digest and `target`
 // and `n_place` the verified recipe's, which the preview must report.
 fn prepare(mut h: Host, name: String, request: Bytes, attempt: launcher.Attempt, assembly: Bytes, image_digest: Bytes, target: String, n_place: u64, grants: launcher.Grants, fetch_ns: u64, assemble_ns: u64) -> Result[List[launcher.Request], Refused] waits {
+    let required = deploy_required_entries(h, request)?
     let shown = operator.Preview(grants: clone(grants), entries: list.new(), triggers: list.new())
     let Some(g) = group_row(h, name)? else {
         return Error(Unknown)
@@ -2111,7 +2113,7 @@ fn prepare(mut h: Host, name: String, request: Bytes, attempt: launcher.Attempt,
     let mut out: List[launcher.Request] = list.new()
     list.push(mut out, Release(attempt))
     list.push(mut out, helper_launch(name, g, g.assembly, take mode))
-    let p = Prep(attempt: attempt, retry_of: None, incarnation: g.incarnation, old: old, assembly: clone(assembly), image: clone(image_digest), target: string.from(target), n_place: n_place, stage: Describing, describe: list.new(), release: list.new(), helper: Some(take describer), aborting: false, discarded: None, old_exported: list.new(), preview: take shown, scanned: false)
+    let p = Prep(attempt: attempt, retry_of: None, incarnation: g.incarnation, old: old, assembly: clone(assembly), image: clone(image_digest), target: string.from(target), n_place: n_place, stage: Describing, describe: list.new(), release: list.new(), helper: Some(take describer), aborting: false, discarded: None, old_exported: list.new(), preview: take shown, scanned: false, required_entries: take required)
     set_prep(mut h, name, Some(take p))
     Ok(take out)
 }
@@ -3436,15 +3438,19 @@ fn abort_command(attempt: launcher.Attempt, retry_of: Option[launcher.Attempt]) 
 // PlaceAborted or ended and the helper ended, so a host lost before then aborts again.
 // `old_live` is false when OLD's end is what failed it: its export ended with it.
 fn prep_fail(mut h: Host, name: String, take p: Prep, why: String, old_live: bool, mut out: List[launcher.Request]) waits {
+    prep_fail_as(mut h, name, take p, why, InvalidClass, old_live, mut out)
+}
+
+fn prep_fail_as(mut h: Host, name: String, take p: Prep, why: String, class: operator.Class, old_live: bool, mut out: List[launcher.Request]) waits {
     let mut q = take p
     let exported = match q.stage {
         Describing => false,
         Previewing(_) => false,
-        Aborting(_) => q.aborting,
+        Aborting(_, _) => q.aborting,
         _ => true
     }
     let keep_why = match q.stage {
-        Aborting(_) => true,
+        Aborting(_, _) => true,
         _ => false
     }
     q.aborting = exported && old_live
@@ -3455,7 +3461,7 @@ fn prep_fail(mut h: Host, name: String, take p: Prep, why: String, old_live: boo
         if let Some(c) = q.helper {
             list.push(mut out, Stop(clone(c)))
         }
-        q.stage = Aborting(string.from(why))
+        q.stage = Aborting(string.from(why), clone(class))
     }
     prep_finish(mut h, name, take q)
 }
@@ -3466,11 +3472,11 @@ fn prep_finish(mut h: Host, name: String, take p: Prep) waits {
         Some(_) => true,
         None => p.aborting
     }
-    let failed: Option[String] = match p.stage {
-        Aborting(w) => Some(string.from(w)),
+    let failed: Option[(String, operator.Class)] = match p.stage {
+        Aborting(w, class) => Some((string.from(w), clone(class))),
         _ => None
     }
-    let Some(why) = failed else {
+    let Some((why, class)) = failed else {
         set_prep(mut h, name, Some(take p));
         return
     }
@@ -3496,7 +3502,7 @@ fn prep_finish(mut h: Host, name: String, take p: Prep) waits {
             }
             d.outcome = Failed(string.from(why))
             d.preview = clone(shown)
-            put_deploy(mut tx, t, name, d, InvalidClass)
+            put_deploy(mut tx, t, name, d, class)
         })
     }
     if let Error(_) = decided(mut h, take made) {
@@ -3536,6 +3542,10 @@ fn answered(mut h: Host, c: launcher.Child, said: Bytes, mut out: List[launcher.
                 p.describe = describe
                 p.release = release
                 p.preview.entries = entry_diff(p.old_exported, exported)
+                if !keeps_entries(p.required_entries, exported) {
+                    prep_fail_as(mut h, name, take p, "candidate removes or changes a required release entry", UncompiledClass, true, mut out)
+                    return
+                }
                 p.helper = None
                 p.stage = Exporting
                 list.push(mut out, Command(child_of(name, p.incarnation, p.old), HostExport(attempt_bytes(p.attempt), false)))
@@ -3579,7 +3589,7 @@ fn helper_done(mut h: Host, c: launcher.Child, succeeded: bool, why: String, mut
         },
         Describing => prep_fail(mut h, name, take p, joined("describe ended without an answer: ", why), true, mut out),
         Previewing(_) => prep_fail(mut h, name, take p, joined("preview ended without an answer: ", why), true, mut out),
-        Aborting(_) => prep_finish(mut h, name, take p),
+        Aborting(_, _) => prep_finish(mut h, name, take p),
         _ => set_prep(mut h, name, Some(take p)),
     }
 }
@@ -3619,7 +3629,7 @@ fn prep_placed(mut h: Host, name: String, take p: Prep, reply: runner.HostReply,
             PlaceRefused(why) => prep_fail(mut h, name, take q, joined("import: ", why), true, mut out),
             _ => set_prep(mut h, name, Some(take q)),
         },
-        Aborting(_) => match reply {
+        Aborting(_, _) => match reply {
             PlaceAborted => {
                 q.aborting = false
                 prep_finish(mut h, name, take q)

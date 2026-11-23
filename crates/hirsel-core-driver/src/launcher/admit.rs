@@ -298,11 +298,13 @@ impl Worker {
                 let publication = match local {
                     None => None,
                     Some((Ok(root), ours)) => Some((root, ours)),
-                    Some((Err(tree), ours)) => match publish(&admission, &tree, &cancelled) {
-                        None => return,
-                        Some(Ok(root)) => Some((root, ours)),
-                        Some(Err(why)) => return tell(Note::Failed(id, attempt, why)),
-                    },
+                    Some((Err(tree), ours)) => {
+                        match publish(&admission, &tree, approvals.old.as_deref(), &cancelled) {
+                            None => return,
+                            Some(Ok(root)) => Some((root, ours)),
+                            Some(Err(why)) => return tell(Note::Failed(id, attempt, why)),
+                        }
+                    }
                 };
                 let note = work(
                     &admission,
@@ -414,6 +416,8 @@ pub(crate) struct Tree {
     pub(crate) grants: Vec<String>,
     pub(crate) dirs: Vec<String>,
     pub(crate) files: Vec<(String, Vec<u8>)>,
+    // The platform checks these against the candidate's preview before importing.
+    pub(crate) required_entries: Vec<(u32, Vec<u8>)>,
 }
 
 /// The most codec bytes a tree may take (`launcher.TREE_BYTES`).
@@ -429,6 +433,11 @@ impl Wire for Tree {
             w.bytes(path.as_bytes());
             w.bytes(bytes);
         }
+        w.len(self.required_entries.len());
+        for (kind, key) in &self.required_entries {
+            w.u32(*kind);
+            w.bytes(key);
+        }
     }
     fn get(r: &mut Reader<'_>) -> io::Result<Self> {
         let package = r.string()?;
@@ -437,11 +446,15 @@ impl Wire for Tree {
         let files = (0..r.count(8)?)
             .map(|_| Ok((r.string()?, r.bytes()?)))
             .collect::<io::Result<_>>()?;
+        let required_entries = (0..r.count(8)?)
+            .map(|_| Ok((r.u32()?, r.bytes()?)))
+            .collect::<io::Result<_>>()?;
         Ok(Self {
             package,
             grants,
             dirs,
             files,
+            required_entries,
         })
     }
 }
@@ -456,6 +469,7 @@ const DIAGNOSTIC_BYTES: usize = 64 << 10;
 fn publish(
     ad: &Admission,
     tree: &Tree,
+    old: Option<&[u8]>,
     cancel: &AtomicBool,
 ) -> Option<Result<ContentHash, Failure>> {
     let unrun =
@@ -485,6 +499,20 @@ fn publish(
         "--code-store".into(),
         path("code"),
     ];
+    // Source recompiles the group's program under its current recipe allowances.
+    // The verifier and host still check the resulting recipe and group memory.
+    if let Some(old) = old {
+        let old = match old_recipe(ad, old) {
+            Ok(recipe) => recipe,
+            Err(why) => return Some(Err(why)),
+        };
+        args.extend([
+            "--limit".into(),
+            old.launch.root_limit.to_string(),
+            "--n-place".into(),
+            old.launch.n_place.to_string(),
+        ]);
+    }
     for grant in &tree.grants {
         args.extend(["--grant".into(), grant.clone()]);
     }
@@ -664,6 +692,15 @@ fn work(
     }
 }
 
+fn old_recipe(ad: &Admission, old: &[u8]) -> Result<Recipe, Failure> {
+    let key = <[u8; 32]>::try_from(old)
+        .map_err(|_| Failure::Invalid("the old assembly name is not 32 bytes".into()))?;
+    ad.records
+        .assembly(ContentHash(key))
+        .and_then(|record| read_recipe(&ad.code, record.recipe, ad.limits.recipe_bytes))
+        .map_err(|e| Failure::Invalid(format!("old assembly: {e}")))
+}
+
 fn summary(ad: &Admission, recipe: &Recipe, old: Option<&[u8]>) -> Result<Summary, Failure> {
     let mut summary = Summary {
         root_limit: recipe.launch.root_limit,
@@ -672,13 +709,7 @@ fn summary(ad: &Admission, recipe: &Recipe, old: Option<&[u8]>) -> Result<Summar
         ..Summary::default()
     };
     if let Some(old) = old {
-        let key = <[u8; 32]>::try_from(old)
-            .map_err(|_| Failure::Invalid("the old assembly name is not 32 bytes".into()))?;
-        let old = ad
-            .records
-            .assembly(ContentHash(key))
-            .and_then(|record| read_recipe(&ad.code, record.recipe, ad.limits.recipe_bytes))
-            .map_err(|e| Failure::Invalid(format!("old assembly: {e}")))?;
+        let old = old_recipe(ad, old)?;
         summary.old_root_limit = old.launch.root_limit;
         summary.grants = grant_diff(&old, recipe);
     }

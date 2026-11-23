@@ -26,6 +26,7 @@ fn source_publishes_with_the_normal_checker() {
         .join("../../core")
         .canonicalize()
         .unwrap();
+    let ffi = core.join("programs/ffi_laws");
     let exe = std::env::current_exe().unwrap();
     let cache = root.join("cache");
     let child = Arc::new(move |args: &[String], at: &Path| {
@@ -112,11 +113,11 @@ fn source_publishes_with_the_normal_checker() {
     let mut rig = Rig { dir, launcher };
     rig.launcher.admit_with(admission).unwrap();
     rig.bind();
-    let mut admit = |n: u64| {
+    let mut admit = |n: u64, bytes: Vec<u8>| {
         rig.ask(Request::Admit(
             group(),
             attempt(n),
-            Input::Source(tree()),
+            Input::Source(bytes),
             Approvals::default(),
         ));
         // A cold compile of core takes longer than `until` waits.
@@ -134,7 +135,7 @@ fn source_publishes_with_the_normal_checker() {
         seen
     };
     for n in [1, 2] {
-        let answered = admit(n);
+        let answered = admit(n, tree());
         assert!(
             matches!(answered.as_slice(), [Event::Admitted(a, root, ..)]
                 if *a == attempt(n) && root == &published.0),
@@ -158,13 +159,54 @@ fn source_publishes_with_the_normal_checker() {
             .collect()
     };
     let before = recipes();
-    let answered = admit(3);
+    let answered = admit(3, tree());
     assert!(
         matches!(answered.as_slice(), [Event::AdmissionFailed(a, Failure::Uncompiled(text))]
             if *a == attempt(3) && text.contains(diagnostic.trim())),
         "a type error was not refused with {diagnostic:?}: {answered:?}"
     );
     assert_eq!(recipes(), before, "a refused source recorded a recipe");
+    let mut missing_lock = Tree::decode(&tree()).unwrap();
+    missing_lock.files.retain(|(path, _)| path != "hirsel.lock");
+    let answered = admit(4, missing_lock.encode());
+    assert!(
+        matches!(answered.as_slice(), [Event::AdmissionFailed(a, Failure::Uncompiled(text))]
+            if *a == attempt(4) && text.contains("hirsel.lock")),
+        "a tree without its frozen lock was not refused: {answered:?}"
+    );
+
+    // This is the same checked-in entry and native archive as the FFI law. It is a valid
+    // Foreign call with the capability granted. An untrusted tree submits no grant.
+    let ffi_manifest = fs::read_to_string(ffi.join("hirsel.toml")).unwrap();
+    let (manifest, _) = ffi_manifest.split_once("[tests]").unwrap();
+    fs::write(app.join("hirsel.toml"), manifest).unwrap();
+    let mut names = vec!["hirsel.toml", "hirsel.lock"];
+    for file in [
+        "main.hirsel",
+        "laws.hirsel",
+        "native.hirsel",
+        "libffi_laws.a",
+    ] {
+        fs::copy(ffi.join(file), app.join(file)).unwrap();
+        names.push(file);
+    }
+    let (status, stdout, stderr) = oracle(&["lock", "."]);
+    assert_eq!(status, Some(0), "{stdout}\n{stderr}");
+    let ffi_source = Tree {
+        package: ".".into(),
+        files: names
+            .into_iter()
+            .map(|name| (name.to_owned(), fs::read(app.join(name)).unwrap()))
+            .collect(),
+        ..Tree::default()
+    };
+    let answered = admit(5, ffi_source.encode());
+    assert!(
+        matches!(answered.as_slice(), [Event::AdmissionFailed(a, Failure::Uncompiled(text))]
+            if *a == attempt(5) && text.contains("not granted: Foreign[ffi_laws@1/laws/Laws]")),
+        "Foreign source without a grant was not refused: {answered:?}"
+    );
+    assert_eq!(recipes(), before, "refused source recorded a recipe");
 }
 
 /// The tree and the source failures share these bytes with
@@ -184,8 +226,12 @@ fn source_vectors() {
         grants: vec!["G".into()],
         dirs: vec!["d".into()],
         files: vec![("a".into(), vec![1, 2])],
+        required_entries: vec![(2, vec![0xaa, 0xbb])],
     };
-    let bytes = hex("010000002e010000000100000047010000000100000064010000000100000061020000000102");
+    let bytes = hex(concat!(
+        "010000002e010000000100000047010000000100000064010000000100000061020000000102",
+        "010000000200000002000000aabb"
+    ));
     assert_eq!(tree.encode(), bytes);
     assert_eq!(super::admit::tree(&bytes), Ok(tree));
     for (failure, expected) in [

@@ -818,8 +818,42 @@ caller the gateway lets decide, under the same Caller rules.
 
 Laws: L48 `deploy_admission_policy` (the hold and the decision) and L54 `deploy_preview`
 (the entry diff and the trigger report), in RUNNER-SPEC §14.3; `grant_diff_names_each_authority`
-in the launcher. Unbuilt: sending a release proposal's source (`release.source`) as a
-`Source` Begin, and the candidate re-run on a store fork that reports prompt-cache diffs.
+in the launcher. The candidate re-run on a store fork that reports prompt-cache diffs
+is separate from publishing.
+
+### Publishing a harness proposal
+
+An app that enables `harness.release` exposes WIRE queries for the pending proposal and
+its source, and a transact entry to settle it. Each checks the publisher's authenticated
+Caller before forwarding to `release.pending_cover`, `release.source_cover` or
+`release.settle`.
+The publisher is an operator-side application with a connection to those entries and
+the operator socket. The app's tools propose the source rows and their build settings
+(`package`, `grants` and `dirs`). The publisher supplies no Foreign or Exec approvals.
+
+Run one `harness.release_publish.Publisher` per group incarnation. Drive `poll` when
+work is available and while a request is outstanding. Reconnect the app client when
+the cutover closes its connection. A reconnect as the same Caller continues that
+Caller's WIRE request positions. A fresh authorized Caller has its own positions.
+The publisher reads one file per WIRE query, then verifies the full tree hash. Give
+both ends a WIRE frame allowance large enough for the largest source file and its
+envelope.
+
+The publisher derives D from the group name, incarnation and proposal ID. It asks
+Status before reading the named tree. An unknown D submits the unchanged tree through
+a Source Begin. The workspace must include its `hirsel.lock` and its pinned packages
+must be in the host's package store. A source tree that moves or fails the frozen
+check is rejected. After a restart, a known D uses its recorded input and phase. A completed request therefore cannot deploy again
+even if the source rows have since changed. A Source replacement uses OLD's verified recipe memory and place allowances. A
+grant difference follows the ordinary AwaitDecision and Decide exchange. The publisher settles Installed as Published and a
+failed request as Rejected, retaining the failure text. The app's settle entry can
+receive the same decision again after a lost reply.
+
+The source request names the required entry kinds and keys (identity and both codec
+fingerprints). In the ordinary candidate preview, the host refuses a candidate as
+Uncompiled if a key or kind is missing or has changed. This precedes OLD's export and
+import. NEW's handlers must enforce the app's Caller policy and keep the proposal
+tables so the publisher can read and settle after activation.
 
 ### The launcher
 

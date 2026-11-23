@@ -28,16 +28,16 @@
     "lines": 1056
   },
   "core/programs/store/platform.hirsel": {
-    "lines": 4051,
-    "reason": "store-sync-1906"
+    "lines": 4061,
+    "reason": "release-publish-1912"
   },
   "core/programs/store/platform_laws.hirsel": {
     "lines": 2020,
     "reason": "store-sync-1906"
   },
   "core/programs/store/runner.hirsel": {
-    "lines": 10168,
-    "reason": "store-sync-1906"
+    "lines": 10184,
+    "reason": "release-publish-1912"
   },
   "core/programs/store/runner_calls.hirsel": {
     "lines": 2805

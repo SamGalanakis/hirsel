@@ -24,6 +24,7 @@ store = { major = 1, path = "../store" }
 "gateway_http.hirsel" = "gateway_http"
 "gateway_reads.hirsel" = "gateway_http"
 "release.hirsel" = "release"
+"release_publish.hirsel" = "release_publish"
 
 [tests]
 limit = 268435456

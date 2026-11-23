@@ -78,7 +78,7 @@ pub fn law_release_proposal_settles(parent: Dir, clock: Clock, random: Random, t
 
     let mut name2 = string.with_capacity(32u64)
     let dir2 = result.unwrap(host.mkdtemp(parent, mut name2))
-    let mut db2 = answered_with(dir2, clock, random, tasks, true, harness.Call(id: "c1", name: "propose_release", args: inline_text("{\"summary\":\"swap fetch\"}")))
+    let mut db2 = answered_with(dir2, clock, random, tasks, true, harness.Call(id: "c1", name: "propose_release", args: inline_text("{\"summary\":\"swap fetch\",\"grants\":[\"Clock\"],\"package\":\"app\",\"dirs\":[\"data\"]}")))
     put_file(mut db2, "b.hirsel", "B")
     put_file(mut db2, "a.hirsel", "A")
     kick(mut db2, a)
@@ -89,7 +89,9 @@ pub fn law_release_proposal_settles(parent: Dir, clock: Clock, random: Random, t
     let filed = result.unwrap(release.pending(store.snapshot(db2), t2))
     let one = list.len(filed) == 1u64
     let (id, p): (Bytes, release.Proposal) = clone(filed[0])
-    let summary = p.summary == "swap fetch"
+    let summary = p.summary == "swap fetch" && p.build.package == "app" &&
+        list.len(p.build.grants) == 1u64 && p.build.grants[0u64] == "Clock" &&
+        list.len(p.build.dirs) == 1u64 && p.build.dirs[0u64] == "data"
     let named = match result.unwrap(release.source(store.snapshot(db2), t2, clone(p.tree))) {
         Some(files) => list.len(files) == 2u64 && files[0].path == "a.hirsel" && files[0].text == "A" && files[1].path == "b.hirsel" && files[1].text == "B",
         None => false,

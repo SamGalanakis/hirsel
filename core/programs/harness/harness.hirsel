@@ -19,7 +19,7 @@ pub type Outcome: codec + send = Returned(Payload) | Failed(String) | Denied(Str
 // place, a change for a new key is added at the end, and `None` removes the
 // key. `tools`, when present, replaces the offered tool definitions.
 pub type Change: codec + send { key: String, text: Option[String] }
-pub type ToolDef: codec + send { name: String, about: String, input: String, rev: u64 }
+pub type ToolDef: codec + send { name: String, about: String, input: String, rev: u64, catalog: Option[Bytes] }
 pub type Patch: codec + send { baseline: bool, changes: List[Change], tools: Option[List[ToolDef]] }
 pub type Entry: codec + send =
     User(String)
@@ -30,7 +30,7 @@ pub type Entry: codec + send =
     | Reset(String)
     | Note(String, Bytes)
 
-// ---- the seven tables ----
+// ---- the harness tables ----
 
 pub type Narrow: codec + send = All | Only(List[String])
 pub type SectionHash: codec + send { key: String, hash: Bytes }
@@ -43,6 +43,7 @@ pub type Session: codec + send {
     next_run: u64,
     active_sections_hashes: List[SectionHash],
     active_tools_hash: Bytes,
+    active_tools_pos: Option[u64],
 }
 
 pub type InboxKey: codec + send { caller: store.Caller, client_key: String }
@@ -61,7 +62,7 @@ pub const TOOL: u8 = 1u8
 pub type EffectKey: codec + send { run: u64, round: u64, kind: u8, ordinal: u64 }
 // The immutable logical cutoff of a model request. The worker builds the body
 // from entries[head_pos..=tail_pos] through a snapshot, off the write lock.
-pub type Cutoff: codec + send { head_pos: u64, tail_pos: u64, route: String, policy: u64 }
+pub type Cutoff: codec + send { head_pos: u64, tail_pos: u64, route: String, policy: u64, tools_pos: Option[u64] }
 // Once dispatches at most one body. Repeatable(n) resends with the same key
 // up to n dispatches within the deadline.
 pub type Repeat: codec + send = Once | Repeatable(u64)
@@ -96,6 +97,7 @@ pub type Handles: send {
     effects: store.Table[EffectKey, Effect],
     waits: store.Table[WaitKey, Wait],
     views: store.Table[u64, View],
+    mcp_catalog: store.Table[String, mcp_tools.Remote],
     triggers: store.triggers.Tables,
 }
 
@@ -184,6 +186,7 @@ fn created(take r: Result[(), store.Error]) -> Result[(), store.Error] {
 
 pub fn migrate(mut phase: store.Migration) -> Result[(), store.Error] {
     store.triggers.migrate(mut phase)?
+    mcp_tools.migrate(mut phase)?
     let c_session: std.codec.Codec[Session] = std.codec.of()
     let c_entry: std.codec.Codec[Entry] = std.codec.of()
     let c_received: std.codec.Codec[Received] = std.codec.of()
@@ -216,6 +219,7 @@ pub fn handles(schema: store.Schema) -> Result[Handles, store.Error] {
         effects: store.schema_table(schema, effects_name(), effect_key(), c_effect)?,
         waits: store.schema_table(schema, waits_name(), wait_key(), c_wait)?,
         views: store.schema_table(schema, views_name(), std.codec.key_u64(), c_shown)?,
+        mcp_catalog: mcp_tools.catalog(schema)?,
         triggers: store.triggers.tables(schema)?,
     ))
 }
@@ -239,6 +243,7 @@ pub type Reply: codec + send = Now(Bytes) | Later
 pub type ToolRun[G: send]: send =
     Outside(StaticFn[fn(G, take Bytes) -> Result[Bytes, Fault] waits], Repeat)
     | Inside(StaticFn[fn(mut store.Tx, Invoke) -> Result[Reply, Fault]])
+    | Mcp(Bytes)
 
 // `rev` names the tool's behaviour in approval keys: raise it when the same
 // arguments would now do something else, so earlier approvals stop matching.
@@ -275,6 +280,7 @@ pub type Agent[G: send]: send {
     model: StaticFn[fn(G, take Request) -> Result[Answer, Fault] waits],
     model_repeat: Repeat,
     tools: List[Tool[G]],
+    mcp_peer: Option[StaticFn[fn(G, String) -> Option[mcp_tools.Peer]]],
     gates: List[Gate],
     sections: List[Section],
     reactions: List[After],
@@ -282,7 +288,7 @@ pub type Agent[G: send]: send {
 }
 
 pub fn agent[G: send](take name: String, take route: String, model: StaticFn[fn(G, take Request) -> Result[Answer, Fault] waits]) -> Agent[G] {
-    Agent(name: take name, route: take route, model: model, model_repeat: Once, tools: list.new(), gates: list.new(),
+    Agent(name: take name, route: take route, model: model, model_repeat: Once, tools: list.new(), mcp_peer: None, gates: list.new(),
         sections: list.new(), reactions: list.new(),
         limits: Limits(rounds: 8u64, calls: 8u64, model_ms: 120000u64, tool_ms: 60000u64, model_reserve: 4096u64,
                         // Gates and sections read rows; opening a table alone takes over
@@ -337,7 +343,7 @@ fn session_of(tx: store.Tx, h: Handles) -> Result[Session, Refused] {
 pub fn open_session(mut tx: store.Tx, h: Handles, take model: String, take narrow: Narrow) -> Result[(), Refused] {
     if let Some(_) = kept(store.fetch(tx, store.shape(h.session), 0u64))? { return Ok(()) }
     let s = Session(model: take model, tools_narrow: take narrow, head_pos: 0u64, next_pos: 0u64, active_run: None,
-        next_run: 0u64, active_sections_hashes: list.new(), active_tools_hash: list.new())
+        next_run: 0u64, active_sections_hashes: list.new(), active_tools_hash: list.new(), active_tools_pos: None)
     kept(store.put(mut tx, h.session, 0u64, s))?
     kept(store.put(mut tx, h.views, 0u64, Status("idle")))
 }
@@ -439,6 +445,34 @@ fn tool_of[G: send](a: Agent[G], name: String) -> Option[Tool[G]] {
     None
 }
 
+// Read only the tool definitions the model saw. The pointer stays fixed even
+// when later System entries change sections without changing tools.
+fn matching_remote(pinned: Option[Entry], name: String, row: mcp_tools.Remote) -> bool {
+    let Some(System(patch)) = view pinned else { return false }
+    let Some(defs) = view patch.tools else { return false }
+    for def in defs {
+        if def.name == name {
+            return def.catalog == Some(clone(mcp_tools.fingerprint(row)))
+        }
+    }
+    false
+}
+
+fn current_remote(tx: store.Tx, h: Handles, cutoff: Cutoff, name: String) -> Result[Option[mcp_tools.Remote], Refused] {
+    let Some(pos) = cutoff.tools_pos else { return Ok(None) }
+    let Some(take row) = kept(store.fetch(tx, store.shape(h.mcp_catalog), name))? else { return Ok(None) }
+    let pinned = kept(store.fetch(tx, store.shape(h.entries), pos))?
+    if matching_remote(pinned, name, row) { Ok(Some(take row)) } else { Ok(None) }
+}
+
+fn resolve_tool[G: send](tx: store.Tx, h: Handles, a: Agent[G], cutoff: Cutoff, name: String) -> Result[Option[Tool[G]], Refused] {
+    if !mcp_tools.reserved(name) { return Ok(tool_of(a, name)) }
+    if let None = a.mcp_peer { return Ok(None) }
+    let Some(row) = current_remote(tx, h, cutoff, name)? else { return Ok(None) }
+    Ok(Some(Tool(name: clone(name), about: string.from(mcp_tools.about(row)), input: string.from(mcp_tools.input(row)),
+        rev: 0u64, repair: None, run: Mcp(clone(mcp_tools.fingerprint(row))))))
+}
+
 // Runs the tool's repair on the call's arguments, bounded like a gate.
 fn repaired[G: send](t: Tool[G], l: Limits, mut call: Call) -> Result[(), String] {
     let Some(f) = t.repair else { return Ok(()) }
@@ -483,6 +517,18 @@ pub fn approval_key(name: String, rev: u64, args: Payload) -> Bytes {
     let mut raw: Bytes = list.new()
     std.codec.put_key_string(name, mut raw)
     std.codec.put_key_u64(rev, mut raw)
+    hash_approval(take raw, args)
+}
+
+fn remote_approval(name: String, fingerprint: Bytes, args: Payload) -> Bytes {
+    let mut raw: Bytes = list.new()
+    std.codec.put_key_string(name, mut raw)
+    std.codec.put_key_bytes(fingerprint, mut raw)
+    hash_approval(take raw, args)
+}
+
+fn hash_approval(take prefix: Bytes, args: Payload) -> Bytes {
+    let mut raw = take prefix
     match args {
         Inline(b) => { list.push(mut raw, 0u8); list.append(mut raw, b) },
         Blob(r) => { list.push(mut raw, 1u8); list.append(mut raw, r.digest) },
@@ -506,6 +552,15 @@ pub fn decide[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, cal
     if run.caller.issuer != caller.issuer || run.caller.subject != caller.subject { return Error(NotAllowed) }
     let wait = WaitKey(run: d.run, slot: d.ordinal, kind: APPROVAL, generation: d.round)
     let Some(take found) = kept(store.fetch(tx, store.shape(h.waits), wait))? else { return Error(Malformed("no such hold")) }
+    let member_key = EffectKey(run: d.run, round: d.round, kind: TOOL, ordinal: d.ordinal)
+    let Some(take m) = kept(store.fetch(tx, store.shape(h.effects), member_key))? else { return Error(Malformed("no such call")) }
+    let mut member = take m
+    if let Some(c) = view member.call {
+        if mcp_tools.reserved(c.name) {
+            if let None = a.mcp_peer { return Error(Conflict) }
+            if let None = current_remote(tx, h, member.cutoff, c.name)? { return Error(Conflict) }
+        }
+    }
     let (held, expires) = match take found {
         Open(take k, x) => (take k, x),
         Decided(take k, allow) => return if k == d.key && allow == d.allow { Ok(ruled(allow)) } else { Error(Conflict) },
@@ -513,9 +568,6 @@ pub fn decide[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, cal
         Revoked => return Error(Conflict),
     }
     if held != d.key { return Error(Conflict) }
-    let member_key = EffectKey(run: d.run, round: d.round, kind: TOOL, ordinal: d.ordinal)
-    let Some(take m) = kept(store.fetch(tx, store.shape(h.effects), member_key))? else { return Error(Malformed("no such call")) }
-    let mut member = take m
     match member.phase { Held => (), _ => return Error(Conflict) }
     if now(mut tx) >= expires {
         lapse(mut tx, h, wait, member_key)?
@@ -623,7 +675,7 @@ fn prepare[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut s:
     kept(store.put(mut tx, h.session, 0u64, clone(s)))?
     let key = EffectKey(run: id, round: run.round, kind: MODEL, ordinal: 0u64)
     let deadline = now(mut tx) + a.limits.model_ms
-    let cutoff = Cutoff(head_pos: s.head_pos, tail_pos: s.next_pos - 1u64, route: clone(a.route), policy: 0u64)
+    let cutoff = Cutoff(head_pos: s.head_pos, tail_pos: s.next_pos - 1u64, route: clone(a.route), policy: 0u64, tools_pos: clone(s.active_tools_pos))
     let e = Effect(cutoff: take cutoff, call: None, repeat: clone(a.model_repeat), deadline: deadline, phase: Pending,
         trigger: None, dispatches: 0u64, reserve: a.limits.model_reserve)
     seal(mut tx, h, w, key, take e)?
@@ -650,12 +702,25 @@ fn hash_of(list: List[SectionHash], key: String) -> Option[Bytes] {
     None
 }
 
-fn offered[G: send](a: Agent[G], s: Session) -> List[ToolDef] {
+fn offered[G: send](tx: store.Tx, h: Handles, a: Agent[G], s: Session) -> Result[List[ToolDef], Refused] {
     let mut defs: List[ToolDef] = list.new()
     for t in a.tools {
-        if narrowed(s, t.name) { list.push(mut defs, ToolDef(name: clone(t.name), about: clone(t.about), input: clone(t.input), rev: t.rev)) }
+        if mcp_tools.reserved(t.name) { return Error(Malformed("reserved MCP tool name")) }
+        if narrowed(s, t.name) {
+            list.push(mut defs, ToolDef(name: clone(t.name), about: clone(t.about), input: clone(t.input), rev: t.rev, catalog: None))
+        }
     }
-    take defs
+    if let Some(_) = a.mcp_peer {
+        let Ok(take cursor) = store.range(tx, store.shape(h.mcp_catalog), Unbounded, Unbounded) else { return Error(Storage) }
+        let mut rows = take cursor
+        while let Some((take name, r)) = kept(store.next_range(mut rows))? {
+            if narrowed(s, name) {
+                list.push(mut defs, ToolDef(name: take name, about: string.from(mcp_tools.about(r)), input: string.from(mcp_tools.input(r)),
+                    rev: 0u64, catalog: Some(clone(mcp_tools.fingerprint(r)))))
+            }
+        }
+    }
+    Ok(take defs)
 }
 
 // Renders every section and appends the smallest System patch that brings the
@@ -695,9 +760,12 @@ fn plan[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], mut s: Session) -> R
     for e in shown { if let None = hash_of(s.active_sections_hashes, e.key) { list.push(mut expected, clone(e.key)) } }
     let mut in_place = list.len(expected) == list.len(shown)
     if in_place { for i in 0u64..list.len(shown) { if expected[i] != shown[i].key { in_place = false } } }
-    let baseline = first || !in_place
-    if baseline && kept_any { return Ok(()) }
-    let defs = offered(a, s)
+    let baseline = (first || !in_place) && !kept_any
+    if !in_place && kept_any {
+        shown = clone(s.active_sections_hashes)
+        changes = list.new()
+    }
+    let defs = offered(tx, h, a, s)?
     let Some(raw_defs) = encoded(defs) else { return Error(Malformed("tool definitions")) }
     let tools_hash = digest(raw_defs)
     let tools_changed = first || tools_hash != s.active_tools_hash
@@ -705,7 +773,8 @@ fn plan[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], mut s: Session) -> R
     let tools: Option[List[ToolDef]] = if tools_changed { Some(clone(defs)) } else { None }
     let patch = if baseline { Patch(baseline: true, changes: take texts, tools: Some(take defs)) }
         else { Patch(baseline: false, changes: take changes, tools: take tools) }
-    let _ = append(mut tx, h, a, mut s, System(take patch))?
+    let pos = append(mut tx, h, a, mut s, System(take patch))?
+    if baseline || tools_changed { s.active_tools_pos = Some(pos) }
     s.active_sections_hashes = take shown
     s.active_tools_hash = take tools_hash
     Ok(())
@@ -728,7 +797,7 @@ fn derive[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut s: 
             if ordinal >= a.limits.calls { Settled(Tool(Failed("too many calls in one answer"))) }
             else if !narrowed(s, call.name) { Settled(Tool(Gone)) }
             else {
-                match tool_of(a, call.name) {
+                match resolve_tool(tx, h, a, e.cutoff, call.name)? {
                     None => Settled(Tool(Gone)),
                     Some(t) => match repaired(t, a.limits, mut call) {
                         Error(take why) => Settled(Tool(Failed(take why))),
@@ -738,7 +807,11 @@ fn derive[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut s: 
                             Hold(_) => {
                                 let wait = WaitKey(run: id, slot: ordinal, kind: APPROVAL, generation: round)
                                 let expires = now(mut tx) + a.limits.hold_ms
-                                kept(store.put(mut tx, h.waits, wait, Open(approval_key(t.name, t.rev, call.args), expires)))?
+                                let approval = match t.run {
+                                    Mcp(fp) => remote_approval(t.name, fp, call.args),
+                                    _ => approval_key(t.name, t.rev, call.args),
+                                }
+                                kept(store.put(mut tx, h.waits, wait, Open(take approval, expires)))?
                                 let _ = armed(store.triggers.write(mut tx, h.triggers, w.entries, w.advance, Expire(wait), At(expires)))?
                                 Held
                             },
@@ -769,6 +842,19 @@ fn step_round[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut
         // A Held member waits for its decision; it counts as open above.
         if !pending { continue }
         let call: Call = match e.call { Some(c) => clone(c), None => return Error(Malformed("member call")) }
+        if mcp_tools.reserved(call.name) {
+            let live = current_remote(tx, h, e.cutoff, call.name)?
+            if let (Some(_), Some(_)) = (a.mcp_peer, live) {
+                open = true
+                e.repeat = Once
+                e.deadline = now(mut tx) + a.limits.tool_ms
+                seal(mut tx, h, w, key, take e)?
+            } else {
+                e.phase = Settled(Tool(Gone))
+                kept(store.put(mut tx, h.effects, key, e))?
+            }
+            continue
+        }
         let Some(run) = tool_named(a, call.name) else { return Error(Malformed("member tool")) }
         match run {
             Inside(f) => {
@@ -789,6 +875,7 @@ fn step_round[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut
                 e.deadline = now(mut tx) + a.limits.tool_ms
                 seal(mut tx, h, w, key, take e)?
             },
+            Mcp(_) => return Error(Malformed("member tool")),
         }
     }
     if open { return Ok(()) }
@@ -1068,6 +1155,27 @@ fn doubt[F](ctx: store.runner.TriggerContext, settle_entry: StaticFn[F], key: Ef
     match done { Some(_) => Doubted, None => Lost }
 }
 
+fn remote_effect[G: send](snap: store.Snapshot, h: Handles, e: Effect, c: Call, a: Agent[G], port: G) -> Outcome waits {
+    let Some(resolve) = a.mcp_peer else { return Gone }
+    let Some(pos) = e.cutoff.tools_pos else { return Gone }
+    let Ok(pinned) = store.get(snap, store.shape(h.entries), pos) else { return InDoubt }
+    let Ok(found) = store.get(snap, store.shape(h.mcp_catalog), c.name) else { return InDoubt }
+    let Some(row) = found else { return Gone }
+    if !matching_remote(pinned, c.name, row) { return Gone }
+    let get_peer = code.callable(resolve)
+    let Some(peer) = get_peer(port, mcp_tools.server_id(row)) else { return Gone }
+    let Inline(raw) = view c.args else { return Failed("MCP arguments must be inline") }
+    let wall = host.wall_ms(peer.clock)
+    if wall >= e.deadline { return Failed("MCP deadline elapsed before send") }
+    let deadline = std.clock.deadline_after_ms(host.mono_ns(peer.clock), e.deadline - wall)
+    match mcp_tools.call(peer, row, clone(raw), INLINE_LIMIT, deadline) {
+        Ok(take out) => if list.len(out) > INLINE_LIMIT { Failed("result too large") } else { Returned(Inline(take out)) },
+        Error(Unavailable) => InDoubt,
+        Error(BadArguments) => Failed("invalid MCP arguments"),
+        Error(Refused(take why)) => Failed(take why),
+    }
+}
+
 // The body of the app's granted effect entry: begin, read the sealed cutoff
 // through the fenced snapshot, make the one outside call, settle.
 pub fn effect[G: send, F](ctx: store.runner.TriggerContext, port: G, take key: EffectKey, a: Agent[G], settle_entry: StaticFn[F]) -> Result[Worked, Capacity] waits {
@@ -1092,14 +1200,17 @@ pub fn effect[G: send, F](ctx: store.runner.TriggerContext, port: G, take key: E
         }
     } else {
         let Some(c) = view e.call else { return Ok(Lost) }
-        let Some(Outside(f, _)) = tool_named(a, c.name) else { return Ok(Lost) }
-        let Inline(raw) = view c.args else { return Ok(Lost) }
-        let go = code.callable(f)
-        Tool(match go(port, clone(raw)) {
-            Ok(take out) => if list.len(out) > INLINE_LIMIT { Failed("result too large") } else { Returned(Inline(take out)) },
-            Error(Unavailable) => InDoubt,
-            Error(take fault) => Failed(fault_text(take fault)),
-        })
+        if mcp_tools.reserved(c.name) { Tool(remote_effect(snap, h, e, c, a, port)) }
+        else {
+            let Some(Outside(f, _)) = tool_named(a, c.name) else { return Ok(Lost) }
+            let Inline(raw) = view c.args else { return Ok(Lost) }
+            let go = code.callable(f)
+            Tool(match go(port, clone(raw)) {
+                Ok(take out) => if list.len(out) > INLINE_LIMIT { Failed("result too large") } else { Returned(Inline(take out)) },
+                Error(Unavailable) => InDoubt,
+                Error(take fault) => Failed(fault_text(take fault)),
+            })
+        }
     }
     let done: Option[Filed] = call_attempt(ctx, settle_entry, Settle(key: key, receipt: Some(take receipt)))
     match done { Some(_) => Ok(Sent), None => Ok(Lost) }

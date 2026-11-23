@@ -5,10 +5,12 @@ charge = "charge-v1"
 
 [dependencies]
 std = { major = 1 }
+mcp = { major = 1, path = "../mcp" }
 store = { major = 1, path = "../store" }
 
 [sources]
 "harness.hirsel" = "harness"
+"mcp.hirsel" = "mcp_tools"
 "provider.hirsel" = "provider"
 
 [tests]

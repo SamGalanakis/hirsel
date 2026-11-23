@@ -67,6 +67,26 @@ agent and the wiring:
   settled, the results are appended in model order and the next request is
   prepared.
 
+## MCP tools
+
+Use `harness.mcp_tools.discover` outside the transaction to list a configured
+stateless MCP server. Publish the complete listing with
+`harness.mcp_tools.replace` against `h.mcp_catalog` in a trusted write
+transaction. Each refresh replaces only that server's rows. Use a new server
+ID when changing the endpoint or account behind it.
+
+Set `agent.mcp_peer` to a static resolver that maps catalog server IDs to
+the endpoints and grants available to the worker. Keep its server IDs scoped
+to the agent. The next request offers catalog tools under their stable
+`harness.mcp_tools.offered_name(server, name)` names, subject to the session's
+tool narrowing. The `mcp__` prefix is reserved for those names.
+
+A schema or description change produces a tools-only System patch when the
+sections have stayed the same. Approvals cover the full catalog fingerprint
+and the arguments. A stale approval conflicts. The worker checks the catalog
+against the pinned request before using the one static MCP call body. Calls
+use the Once policy and return text content.
+
 ## System sections and reactions
 
 `agent.sections` is a list of `Section{key, render}`. List order is prompt

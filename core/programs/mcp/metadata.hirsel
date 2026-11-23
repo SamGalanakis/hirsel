@@ -170,7 +170,7 @@ fn scan(source: String, property_chain: bool, mut path: List[String], mut mirror
     Ok(())
 }
 
-fn definition(source: String) -> Result[ToolDefinition, ()] {
+pub fn definition(source: String) -> Result[ToolDefinition, ()] {
     let Ok(take fields) = rpc.object(source) else {
         return Error(())
     }

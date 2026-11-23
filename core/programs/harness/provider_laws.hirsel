@@ -125,7 +125,7 @@ fn request() -> harness.Request {
     list.push(mut messages, ToolResult("t1", Returned(Inline(bytes_of("sunny")))))
     list.push(mut messages, ToolResult("t2", Failed("clock offline")))
     let mut tools: List[harness.ToolDef] = list.new()
-    list.push(mut tools, harness.ToolDef(name: "get_weather", about: "weather", input: "{\"type\":\"object\"}", rev: 1u64))
+    list.push(mut tools, harness.ToolDef(name: "get_weather", about: "weather", input: "{\"type\":\"object\"}", rev: 1u64, catalog: None))
     let mut system: List[String] = list.new()
     list.push(mut system, "be brief")
     harness.Request(route: "m", system: take system, tools: take tools, messages: take messages, key: bytes_of("k"))

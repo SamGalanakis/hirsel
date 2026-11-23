@@ -526,17 +526,64 @@ pub fn ask(n: Net, clock: Clock, p: Provider, take req: harness.Request) -> Resu
 
 pub fn ask_with_preview(n: Net, clock: Clock, p: Provider, take req: harness.Request,
     mut sink: Option[preview.Source]) -> Result[harness.Answer, harness.Fault] waits {
-    let Reported(answer: take a, ..) = ask_reported(n, clock, p, take req, mut sink)?
-    Ok(take a)
+    let reply = ask_reported(n, clock, p, take req, mut sink)
+    match take reply {
+        Ok(Reported(answer: take a, ..)) => Ok(take a),
+        Error(Transport(take why)) => Error(take why),
+        Error(Http(status, message)) => Error(Refused(http_error(status, message))),
+    }
 }
 
 pub type Reported { answer: harness.Answer, cached_input: Option[u64] }
+pub type Failure = Transport(harness.Fault) | Http(u16, Option[String])
+
+pub fn http_error(status: u16, message: Option[String]) -> String {
+    let mut why = string.from("HTTP ")
+    string.push_u64(mut why, int.widen(status))
+    if let Some(detail) = message {
+        string.push(mut why, ": ")
+        string.push(mut why, detail)
+    }
+    if status >= 500u16 {
+        string.push(mut why, ". Retry when the provider is available again.")
+    }
+    take why
+}
+
+// Error responses are not streams. Read a bounded JSON body and use only
+// error.message. Omit details that might contain a provider API key.
+fn error_message(mut c: std.http_client.Connection) -> Option[String] waits {
+    let mut raw: Bytes = list.with_capacity(8193u64)
+    loop {
+        match std.http_client.read(mut c, mut raw) {
+            Ok(0u64) => break,
+            Ok(_) => if list.len(raw) > 8192u64 { return None },
+            Error(_) => return None,
+        }
+    }
+    let Ok(text) = string.from_utf8(take raw) else { return None }
+    let found = region r {
+        match std.json.parse(r, text) {
+            Ok(json) => str_at(json, "/error/message"),
+            Error(_) => None,
+        }
+    }
+    let Some(message) = found else { return None }
+    if let Some(_) = string.find(message, 0u64, "sk-") { return None }
+    let mut line: Bytes = list.new()
+    for byte in string.as_bytes(message) {
+        list.push(mut line, if byte < 32u8 || byte == 127u8 { b' ' } else { byte })
+    }
+    let Ok(clean) = string.from_utf8(take line) else { return None }
+    let trimmed = string.trim_ascii(clean)
+    if trimmed == "" { None } else { Some(string.from(trimmed)) }
+}
 
 pub fn ask_reported(n: Net, clock: Clock, p: Provider, take req: harness.Request,
-    mut sink: Option[preview.Source]) -> Result[Reported, harness.Fault] waits {
+    mut sink: Option[preview.Source]) -> Result[Reported, Failure] waits {
     let text = match body(p.model, req) {
         Ok(take t) => take t,
-        Error(take why) => return Error(BadArgs(take why)),
+        Error(take why) => return Error(Transport(BadArgs(take why))),
     }
     let deadline = host.mono_ns(clock) + p.deadline_ms * 1000000u64
     let opened = match p.endpoint.security {
@@ -545,35 +592,33 @@ pub fn ask_reported(n: Net, clock: Clock, p: Provider, take req: harness.Request
     }
     let mut c = match take opened {
         Ok(take ready) => take ready,
-        Error(_) => return Error(Refused("could not connect to the provider")),
+        Error(_) => return Error(Transport(Refused("could not connect to the provider"))),
     }
     let request = std.http_client.Request(method: "POST", target: path(p), headers: headers(p), body: Fixed(string.byte_len(text)))
-    if let Error(_) = std.http_client.start(mut c, request, deadline) { return Error(sent_or(c, "could not start the request")) }
-    if let Error(_) = std.http_client.write(mut c, string.as_bytes(text)) { return Error(sent_or(c, "could not send the request")) }
-    if let Error(_) = std.http_client.finish_request(mut c, p.bounds.body_bytes) { return Error(Unavailable) }
+    if let Error(_) = std.http_client.start(mut c, request, deadline) { return Error(Transport(sent_or(c, "could not start the request"))) }
+    if let Error(_) = std.http_client.write(mut c, string.as_bytes(text)) { return Error(Transport(sent_or(c, "could not send the request"))) }
+    if let Error(_) = std.http_client.finish_request(mut c, p.bounds.body_bytes) { return Error(Transport(Unavailable)) }
     let (status, events) = {
         let head = std.http_client.head(c)
         (std.http_client.status(head), event_stream(head))
     }
     if status != 200 {
-        let mut why = string.from("the provider answered HTTP ")
-        string.push_uint(mut why, int.widen(status), 10u32, 0u64, '0')
-        return Error(Refused(take why))
+        return Error(Http(status, error_message(mut c)))
     }
-    if !events { return Error(Unavailable) }
+    if !events { return Error(Transport(Unavailable)) }
     let mut dec = decoder(p.bounds)
     let mut st = stream(p.model.dialect, p.bounds)
     let mut chunk: Bytes = list.with_capacity(8192u64)
     loop {
         let got = match std.http_client.read(mut c, mut chunk) {
             Ok(k) => k,
-            Error(_) => return Error(Unavailable),
+            Error(_) => return Error(Transport(Unavailable)),
         }
-        if got == 0u64 { return Error(Unavailable) }
+        if got == 0u64 { return Error(Transport(Unavailable)) }
         let from = string.byte_len(st.text)
         let done = match feed(mut dec, mut st, chunk) {
             Ok(is_done) => is_done,
-            Error(_) => return Error(Unavailable),
+            Error(_) => return Error(Transport(Unavailable)),
         }
         if let Some(mut preview_out) = sink {
             preview.delta(mut preview_out, string.slice(st.text, from, string.byte_len(st.text)))
@@ -585,6 +630,6 @@ pub fn ask_reported(n: Net, clock: Clock, p: Provider, take req: harness.Request
     let cached = st.cached_input
     match answer(take st) {
         Ok(take a) => Ok(Reported(answer: take a, cached_input: cached)),
-        Error(_) => Error(Unavailable),
+        Error(_) => Error(Transport(Unavailable)),
     }
 }

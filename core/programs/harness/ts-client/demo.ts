@@ -68,7 +68,7 @@ async function createSession(base: string): Promise<number> {
       signal: AbortSignal.timeout(5000),
     });
   } catch {
-    throw new Error("Start the gateway with serve.sh and use the loopback address it prints.");
+    throw new Error("Start the gateway with serve.sh --gateway and use http://127.0.0.1:<port>.");
   }
   if (response.status !== 201) throw new Error(`Could not create the session (HTTP ${response.status}). Check the gateway address and capacity.`);
   return response.json();
@@ -166,13 +166,16 @@ try {
     if (!scripted) console.log(`OpenRouter model ${process.env.OPENROUTER_MODEL}`);
     await run(base, false);
   }
-  console.log("PASS");
 } catch (error) {
   console.error(failed ?? (error as Error).message);
   process.exitCode = 1;
 } finally {
   for (const client of clients) client.stop();
   gateway?.stdin.end();
-  if (closed) await closed;
+  if (closed && (await closed) !== 0 && !process.exitCode) {
+    console.error(failed ?? "The gateway shut down with an error. Check its output.");
+    process.exitCode = 1;
+  }
   if (mode === "--live") console.log(`OpenRouter requests ${requests}, prompt tokens hit ${hit}, miss ${miss}, usage reports ${usageReports}`);
 }
+if (!process.exitCode) console.log("PASS");

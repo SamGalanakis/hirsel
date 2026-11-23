@@ -5,7 +5,7 @@ set -euo pipefail
 here=$(cd -- "$(dirname -- "$0")" && pwd)
 mode=${1:---live}
 case "$mode" in
-    --scripted|--live|--gateway) shift "$(( $# > 0 ? 1 : 0 ))" ;;
+    --scripted|--live|--gateway) if (( $# )); then shift; fi ;;
     *) printf '%s\n' 'Use serve.sh --live [message], --scripted or --gateway.' >&2; exit 2 ;;
 esac
 if [[ $# -gt 1 || ( $# -gt 0 && "$mode" != --live ) ]]; then
@@ -17,6 +17,7 @@ net='Listen 127.0.0.0/8 0-65535;Connect 127.0.0.0/8 0-65535'
 if [[ "$mode" == --scripted ]]; then
     entry=(--entry harness_dev_serve@1/main/scripted)
 else
+    requested_model=${OPENROUTER_MODEL:-}
     env_file=${OPENROUTER_ENV_FILE:-$HOME/.config/hirsel/openrouter-dev.env}
     if [[ -r "$env_file" ]]; then
         source "$env_file"
@@ -26,7 +27,7 @@ else
         exit 1
     fi
     export -n OPENROUTER_API_KEY
-    export OPENROUTER_MODEL=${OPENROUTER_MODEL:-deepseek/deepseek-v4.1-flash-1017}
+    export OPENROUTER_MODEL=${requested_model:-${OPENROUTER_MODEL:-deepseek/deepseek-v4.1-flash-1017}}
     net+=';Resolve openrouter.ai;Connect 0.0.0.0/0 443-443;Tls openrouter.ai 443-443 System'
     entry=(--grant 'Env=OPENROUTER_MODEL' --grant 'Secret:api_key=env:OPENROUTER_API_KEY to openrouter.ai')
 fi

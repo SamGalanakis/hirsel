@@ -357,7 +357,9 @@ fn test_doubt_only_after_send(tasks: Tasks) -> Result[(), u64] waits {
     let (silent, _) = exchange(tasks, Anthropic, Some(list.new()))
     match silent { Error(Unavailable) => (), _ => return Error(9u64) }
     let (rejected, _) = exchange(tasks, Anthropic, Some(reply_with("400 Bad Request", "application/json", "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"bad\"}}")))
-    match rejected { Error(Refused(_)) => (), _ => return Error(10u64) }
+    match rejected { Error(Refused(why)) if why == "HTTP 400: bad" => (), _ => return Error(10u64) }
+    let (overloaded, _) = exchange(tasks, OpenAi, Some(reply_with("503 Service Unavailable", "application/json", "{\"error\":{\"message\":\"service warming up\"}}")))
+    match overloaded { Error(Refused(why)) if why == "HTTP 503: service warming up. Retry when the provider is available again." => (), _ => return Error(16u64) }
     let (oai, oai_heard) = exchange(tasks, OpenAi, Some(reply_with("200 OK", sse, openai_tools())))
     match oai { Ok(a) => if !openai_ok(a) { return Error(11u64) }, Error(_) => return Error(12u64) }
     if !has(oai_heard, "\"include_usage\":true") { return Error(13u64) }

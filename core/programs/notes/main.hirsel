@@ -424,11 +424,25 @@ fn live_model(g: Grants, live: Live, take request: harness.Request, mut draft: O
             }
             Ok(take a)
         },
-        Error(take fault) => {
+        Error(Http(status, message)) => {
+            let mut why = harness.provider.http_error(status, message)
+            if status == 400u16 || status == 404u16 {
+                string.push(mut why, ". Check OPENROUTER_MODEL against https://openrouter.ai/models and retry.")
+            } else if status < 500u16 {
+                string.push(mut why, ". Check this model's access, credits and rate limits in OpenRouter, then retry.")
+            }
+            emit(live.out, "OpenRouter ", why)
+            Error(Refused(take why))
+        },
+        Error(Transport(take fault)) => {
             match fault {
-                Refused(why) => emit(live.out, "OpenRouter refused: ", why),
-                BadArgs(why) => emit(live.out, "OpenRouter request invalid: ", why),
-                Unavailable => emit(live.out, "OpenRouter stream did not yield an answer", ""),
+                Refused(why) => {
+                    let mut line = string.from(why)
+                    string.push(mut line, ". Check your connection to openrouter.ai and retry.")
+                    emit(live.out, "OpenRouter ", line)
+                },
+                BadArgs(why) => emit(live.out, "OpenRouter request invalid. Check the request data. ", why),
+                Unavailable => emit(live.out, "OpenRouter response ended early. Check the run before retrying.", ""),
                 _ => (),
             }
             Error(take fault)
@@ -439,9 +453,9 @@ fn live_model(g: Grants, live: Live, take request: harness.Request, mut draft: O
 pub fn notes_agent() -> harness.Agent[Grants] {
     let mut a = harness.agent("notes", "notes", code.describe(model))
     list.push(mut a.tools, harness.inside("note_add", "saves a note", "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"}},\"required\":[\"text\"]}", code.describe(note_add)))
-    list.push(mut a.tools, harness.inside("note_delete", "deletes a note by id", "{\"id\":\"number\"}", code.describe(note_delete)))
-    list.push(mut a.tools, harness.outside("clock", "reads the wall clock", "{}", Repeatable(3u64), code.describe(clock_tool)))
-    list.push(mut a.tools, harness.outside("summarize", "asks a helper agent for a one-line summary", "{\"text\":\"string\"}", Once, code.describe(summarize)))
+    list.push(mut a.tools, harness.inside("note_delete", "deletes a note by id", "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"integer\"}},\"required\":[\"id\"]}", code.describe(note_delete)))
+    list.push(mut a.tools, harness.outside("clock", "reads the wall clock", "{\"type\":\"object\"}", Repeatable(3u64), code.describe(clock_tool)))
+    list.push(mut a.tools, harness.outside("summarize", "asks a helper agent for a one-line summary", "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"}},\"required\":[\"text\"]}", Once, code.describe(summarize)))
     harness.release.add_tools(mut a)
     list.push(mut a.gates, harness.Gate(name: "confirm_delete", check: code.describe(confirm_delete)))
     list.push(mut a.reactions, harness.After(name: "tally", run: code.describe(tally)))

@@ -327,7 +327,7 @@ fn retiring_list_packs(known: PageLocations, emission: CutFrames, mut retiring: 
     }
 }
 
-fn plan_paged_lists(mut known: PageLocations, installed: PagedLists, carried: List[u64], first_pack: u64, cap: u64, mut next_stamp: u64, issued: Log[u64], relocated: Option[View[Log[bool]]]) -> Result[ListLayout, Error] {
+fn plan_paged_lists(mut known: PageLocations, installed: PagedLists, carried: Option[View[List[u64]]], first_pack: u64, cap: u64, mut next_stamp: u64, issued: Log[u64], relocated: Option[View[Log[bool]]]) -> Result[ListLayout, Error] {
     let mut pack_root = arc.share(installed.packs)
     let private_from = next_stamp
     let data_retired = edit_pack_list(mut pack_root, known, private_from, mut next_stamp, issued)?
@@ -353,11 +353,17 @@ fn plan_paged_lists(mut known: PageLocations, installed: PagedLists, carried: Li
     }
     let mut emission = empty_cut_frames()
     plan_tree_frames(known, moves, pack_root, mut emission)
+    let Some(carried_files) = carried else {
+        let pack_plan = layout_packs(page_frames(emission), 2, first_pack, cap)?
+        apply_pack_layout(mut known, pack_plan)?
+        let roots = PagedLists(packs: take pack_root, retired: std.page.empty(0, 0, Unprefixed))
+        return Ok(ListLayout(roots: take roots, run_packs: take pack_plan, removals: take data_retired))
+    }
     let mut retiring: Map[u64, ()] = map.new()
     for seq in data_retired {
         map.insert(mut retiring, seq, ())
     }
-    for seq in carried {
+    for seq in carried_files {
         map.insert(mut retiring, seq, ())
     }
     retiring_list_packs(known, emission, mut retiring)
@@ -406,7 +412,7 @@ type PagedCutLayout: send {
     lists: ListLayout
 }
 
-fn plan_page_cut(base: PageRetryBase, holders: List[HeldPage], installed: PagedLists, carried: List[u64], first_pack: u64, cap: u64, marks: Map[u64, ()], relocated: Option[View[Log[bool]]], mut next_stamp: u64) -> Result[PagedCutLayout, Error] {
+fn plan_page_cut(base: PageRetryBase, holders: List[HeldPage], installed: PagedLists, carried: Option[View[List[u64]]], first_pack: u64, cap: u64, marks: Map[u64, ()], relocated: Option[View[Log[bool]]], mut next_stamp: u64) -> Result[PagedCutLayout, Error] {
     let issued = disk_allocation(fn() -> Result[Log[u64], Error] {
         Ok(log.new())
     })?

@@ -7067,7 +7067,7 @@ fn disk_cut_with_limit(mut db: Db, take delta: HolderDelta, seal: scoped fn(mut 
     let attempt = prepare_page_cut(base.locations, mut next_stamp, scoped fn(marks: Map[u64, ()], relocated: Option[View[Log[bool]]], mut stamp: u64) -> Result[PreparedDiskCut, Error] waits {
         let planned = {
             let installed = disk_state(db).pages
-            plan_page_cut(base, holders, installed.lists, installed.carried, installed.next_pack, pack_bytes, marks, relocated, mut stamp)?
+            plan_page_cut(base, holders, installed.lists, Some(view installed.carried), installed.next_pack, pack_bytes, marks, relocated, mut stamp)?
         }
         let mut buffers = cut_output_buffers(planned, manifest_bytes, limit)?
         // A retry after emission reuses the segment created by the first attempt.

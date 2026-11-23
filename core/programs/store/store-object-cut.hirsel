@@ -117,3 +117,78 @@ fn history_create_manifest(mut client: std.object.Client, id: StoreId, epoch: u6
     history_create(mut client, workspace.key, mut raw, mut workspace.compare, deadline)?
     Ok(item)
 }
+
+fn history_copy_header(mut raw: Bytes, ctx: DiskContext, epoch: u64) -> Result[(), Error] {
+    let header = disk_allocation(scoped fn() -> Result[Bytes, Error] {
+        let mut leader: Bytes = list.with_capacity(72 + BINDING_BYTES)
+        capacity(history_append_header(mut leader, ctx, epoch))?
+        Ok(take leader)
+    })?
+    for i in 0u64 .. 72 {
+        raw[i] = header[i]
+    }
+    Ok(())
+}
+
+fn history_upload_pack(mut client: std.object.Client, key: String, mut raw: Bytes, mut scratch: Bytes, deadline: u64) -> Result[(), Error] waits {
+    let (take created, take packet) = std.object.store_if_retry(mut client, key, Absent, replace(mut raw, list.new()), deadline)
+    raw = take packet
+    match take created {
+        Ok(Applied(_)) => return Ok(()),
+        Ok(Mismatch) => (),
+        Error(take e) => return Error(Remote(take e)),
+    }
+    let item = HistoryRef(seq: 0, epoch: 0, len: list.len(raw), digest: 0)
+    let mut at = 0u64
+    while at < item.len {
+        let end = at + order.min(item.len - at, 65536)
+        history_range(mut client, key, item, at, end, mut scratch, deadline)?
+        if scratch != list.slice(raw, at, end) {
+            return Error(disk_fault(key, at, Malformed))
+        }
+        at = end
+    }
+    Ok(())
+}
+
+fn history_write_pack_run(mut client: std.object.Client, id: StoreId, epoch: u64, pack_layout: PackRun, mut known: PageLocations, mut pack_objects: Map[u64, HistoryRef], mut buffers: PackBuffers, mut workspace: HistoryBuffers, deadline: u64) -> Result[(), Error] waits {
+    for planned in pack_layout.packs {
+        encode_pack(id, pack_layout, planned, mut known, mut buffers.out)?
+        history_copy_header(mut buffers.out, DiskContext(store: id, role: 3, seq: planned.seq), epoch)?
+        let item = history_new_ref(planned.seq, epoch, buffers.out)
+        history_fill_key(mut workspace.key, "p-", item)
+        history_upload_pack(mut client, workspace.key, mut buffers.out, mut workspace.compare, deadline)?
+        map.insert(mut pack_objects, planned.seq, item)
+    }
+    Ok(())
+}
+
+fn history_write_page_cut(mut client: std.object.Client, head: HistoryHead, take prepared: PagedCutLayout, inherited: HistoryLocator, mut buffers: PackBuffers, mut workspace: HistoryBuffers, deadline: u64) -> Result[(PagedCutLayout, List[HistoryRef]), Error] waits {
+    let (take uploaded, take covered_packs) = disk_allocation(scoped fn() -> Result[(Map[u64, HistoryRef], List[HistoryRef]), Error] {
+        let new_packs = list.len(prepared.blobs.packs) + list.len(prepared.data_pages.packs) + list.len(prepared.lists.run_packs.packs)
+        let mut refs: Map[u64, HistoryRef] = map.new()
+        capacity(map.try_reserve(mut refs, new_packs))?
+        Ok((take refs, list.with_capacity(std.omap.len(prepared.locations.packs.values))))
+    })?
+    list.clear(mut workspace.compare)
+    capacity(list.try_reserve(mut workspace.compare, 65536))?
+    let PagedCutLayout(locations: take locations, blobs: take blobs, data_pages: take data_pages, lists: take lists) = take prepared
+    let mut known = take locations
+    let mut packs = take uploaded
+    let mut rows = take covered_packs
+    history_write_pack_run(mut client, head.store, head.pair.epoch, blobs, mut known, mut packs, mut buffers, mut workspace, deadline)?
+    history_write_pack_run(mut client, head.store, head.pair.epoch, data_pages, mut known, mut packs, mut buffers, mut workspace, deadline)?
+    history_write_pack_run(mut client, head.store, head.pair.epoch, lists.run_packs, mut known, mut packs, mut buffers, mut workspace, deadline)?
+    let mut cursor = std.omap.range(known.packs.values, Unbounded, Unbounded)
+    while let Some((seq, record)) = std.omap.next(mut cursor) {
+        if record.live == 0 {
+            continue
+        }
+        let item = match map.get(packs, seq) {
+            Some(created) => created,
+            None => option.unwrap(map.get(inherited.rows, seq)),
+        }
+        list.push(mut rows, item)
+    }
+    Ok((PagedCutLayout(locations: take known, blobs: take blobs, data_pages: take data_pages, lists: take lists), take rows))
+}

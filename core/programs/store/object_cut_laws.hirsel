@@ -76,3 +76,54 @@ fn bucket_test_m2_checkpoint_advance(c: Clock, r: Random, tasks: Tasks) -> Resul
     let _ = bucket_law_finish(take sim)
     outcome
 }
+
+fn object_pack_law(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error] waits {
+    let client = bucket_law_client_with(sim, tasks, "s3.test", 1, true)?
+    let mut source = ObjectPackRead(client: take client, locator: HistoryLocator(rows: map.new(), chunks: list.new(), last_pack: 0), deadline: 0)
+    let mut workspace = history_buffers(65536)?
+    let (take opened, _) = history_open_register(mut source, sim.time, r, defaults(), "bucket", mut workspace, BUCKET_LAW_OP_MS)?
+    let mut held = take opened
+    let id = held.head.store
+    let mut draft = memory_at(sim.time, id, defaults())
+    let _ = create_table(mut draft, spec("rows", std.codec.key_u64(), std.codec.of_bytes()))?
+    let rows = table(mut draft, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    let value = bucket_m2_pack_value()
+    let wrote = run(mut draft, None, scoped fn(mut tx: Tx) -> Result[(), Error] {
+        put(mut tx, rows, 7, value)
+    })?
+    if let Committed(_) = wrote {} else { fail("fixture did not write a blob") }
+    let participants = cut_participants(draft, NoHolderChange)?
+    let base = page_retry_base(new_page_locations(), map.new(), participants.holders, participants.roots)?
+    let mut next_stamp = stamp_after(draft.next_node)?
+    let planned = plan_page_cut(base, participants.holders, empty_paged_lists(), None, 1, 65536, map.new(), None, mut next_stamp)?
+    let mut buffers = cut_output_buffers(planned, cut_manifest_size(draft, NoHolderChange), 65536)?
+    let (take layout, take packed) = history_write_page_cut(mut source.client, held.head, take planned, source.locator, mut buffers, mut workspace, source.deadline)?
+    if list.len(packed) != 3 || std.page.stamp(std.page.image_of(layout.lists.roots.retired)) != 0 {
+        fail("object cut did not emit exactly the three live pack classes")
+    }
+    fill_cut_manifest(mut buffers.out, draft, NoHolderChange, 2, 3, 3, layout, next_stamp, base.account, seal_page_manifest_file)?
+    let (_, take page_manifest) = disk_read_page_manifest("test manifest", buffers.out)?
+    let manifest_ref = history_create_manifest(mut source.client, id, 1, page_manifest, mut workspace, source.deadline)?
+    let loc = history_make_locator(mut source.client, id, 3, 1, take packed, mut workspace, source.deadline)?
+    let (take mark, _) = history_checkpoint(mut source.client, held.head, source.deadline)?
+    let kept = history_retain(mark, held.head.checkpoint, 3, 2)?
+    let metadata = history_config_bytes(HistoryConfig(place: std.object.bucket_config(source.client), level: "bucket"))?
+    let HistoryApplied(_) = history_publish_checkpoint(mut source.client, mut held, metadata, manifest_ref, kept, loc, None, mut workspace, source.deadline)? else {
+        fail("checkpoint did not advance after creating packs")
+    }
+    let recovered = history_paged_capture(mut source, held.head, 1048576)?
+    let tip = view recovered.state.tips[0]
+    let snap = Snapshot(store: id, open: 0, branch: 0, head: tip.head, roots: share_roots(tip.roots))
+    if get(snap, shape(rows), 7)? != Some(value) {
+        fail("pack objects created by the cut lost the imported row")
+    }
+    close(take draft)
+}
+
+@test
+fn bucket_test_m2_pack_emission(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let sim = bucket_law_sim(tasks, c, 992, None, list.new())
+    let outcome = object_pack_law(tasks, r, sim)
+    let _ = bucket_law_finish(take sim)
+    outcome
+}

@@ -554,3 +554,49 @@ fn bucket_test_m2_register_fence(c: Clock, tasks: Tasks) -> Result[(), Error] wa
     }
     Ok(())
 }
+
+fn bucket_m2_law_recover(tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits {
+    let _ = bucket_m2_law_register(tasks, sim)?
+    let mut client = bucket_law_client(sim, tasks, "s3.test", 3)?
+    let due = std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS)
+    let mut head_buf: Bytes = list.with_capacity(HISTORY_HEAD_LIMIT)
+    let _ = history_fetch(mut client, "head", mut head_buf, due)?
+    let captured = history_decode_head(head_buf)?
+    let history_head = captured.head
+    let chain = history_suffix(mut client, history_head, history_head.checkpoint, due)?
+    let (take mark, _) = history_checkpoint(mut client, history_head, due)?
+    let manifest = history_read_manifest(mut client, history_head.store, mark, history_head.checkpoint.seq, due)?
+    if manifest.generation != 1 || manifest.next_pack != 1 || manifest.first_live != 1 || list.len(manifest.branches) != 1 || manifest.branches[0].version != 0 {
+        fail("recovery did not load the genesis MANIFEST")
+    }
+    let initial = capacity(main_state(empty_roots(), 0, 0))?
+    let mut replay = journal_replay(take initial, 0)?
+    history_apply_suffix(mut client, history_head, history_head.checkpoint.seq, chain, mut replay, 1048576, due)?
+    if replay.state.tips[0].head != 1 {
+        fail("recovery did not apply exactly the published suffix")
+    }
+    Ok(())
+}
+
+@test
+fn bucket_test_m2_link_recovery(c: Clock, tasks: Tasks) -> Result[(), Error] waits {
+    let sim = bucket_law_sim(tasks, c, 5, None, list.new())
+    let recovered = bucket_m2_law_recover(tasks, sim)
+    let _ = bucket_law_finish(take sim)
+    recovered?
+    // Payload 16,777,368 plus the 88-byte envelope and 20-byte FENCE.
+    let test_id = StoreId(hi: 9, lo: 10)
+    let mut raw: Bytes = list.with_capacity(1024)
+    let largest = HistoryRef(seq: 1, epoch: 1, len: 16777476, digest: 3)
+    let fitted = history_genesis_packet(mut raw, test_id, largest)?
+    let admitted = history_read_mark("max MANIFEST", test_id, fitted, raw)?
+    if admitted.manifest.len != 16777476 {
+        fail("the max legal MANIFEST wire length was refused")
+    }
+    let excess = HistoryRef(seq: 1, epoch: 1, len: 16777477, digest: 3)
+    let too_large = history_genesis_packet(mut raw, test_id, excess)?
+    if let Error(Corrupt(Fault(why: Malformed, ..))) = history_read_mark("oversize MANIFEST", test_id, too_large, raw) {} else {
+        fail("one byte above the wire limit was admitted for GET")
+    }
+    Ok(())
+}

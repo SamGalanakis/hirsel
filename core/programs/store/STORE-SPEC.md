@@ -167,7 +167,7 @@ v2.28 (RUNNER-SPEC v2.17, lane caller-scope-1128, astra's second attack, ATTACK-
 
 ## CHANGES-v2.55 (store-runner-soften-1974: Spec Q1, Q4, Q5; with RUNNER v2.42; not yet built)
 
-L60 now requires `Unsupported(0x0050)` for the retired AUTHORITY, as specified in §12.2.
+L60 now requires `Unsupported(0x0050)` for the retired AUTHORITY, as specified in §12.2. The checked MANIFEST payload limit applies after the object envelope is removed.
 
 | Item | Change | Where |
 |---|---|---|
@@ -3568,7 +3568,7 @@ Retirement on objects@1 is reclaim's (§12.6): a pack is garbage when no retaine
 - **Bootstrap.** HEAD names the latest CHECKPOINT entry. Its MARK names the MANIFEST (generation, epoch, length, digest) and the locator depth. Its LOCATE frame gives the root. A cold reader needs no LIST at any step.
 - **Reading, in this order, each allocation bounded and charged before its own GET (Astra #9):**
   1. the CHECKPOINT entry, of HEAD's `c_len` (≤ `ENTRY_READ_LIMIT`);
-  2. the MANIFEST, of MARK's `m_len`, refused above AP14's `MANIFEST_LIMIT` before the GET;
+  2. the MANIFEST, of MARK's `m_len`. Before GET, refuse lengths above AP14's `MANIFEST_LIMIT` plus 88 bytes for HEADER and the frame envelope and 20 bytes for the optional FENCE. After GET, check the actual envelope and verify that the MANIFEST payload is within AP14's `MANIFEST_LIMIT`;
   3. the locator's chunks, each of the length its parent row gives, refused above 72 + 16 + 1 MiB;
   4. class-2 packs, the list-page reads of AP21 step 0. Each is one `fetch_range` of the PagePtr's 16 + `len` bytes (bounded at 8,400), then each class-2 pack is streamed once through the 65,536-byte chunk buffer with its whole-object length and digest checked against its row as the stream ends;
   5. class-0/1 packs, each refused before its GET if its row's `len` exceeds AP21 step 1's bound from that pack's `packs` row (its `frames`), then read whole.
@@ -3949,7 +3949,7 @@ This needs the provider contract (§12.2): with a non-linearizable head, two hol
 | one entry prefix (hint walk) | 112 per lane | the same |
 | one fetched entry | its `len` | the same |
 | the CHECKPOINT entry | HEAD's `c_len` | the same |
-| the MANIFEST | MARK's `m_len`, ≤ `MANIFEST_LIMIT` | the same |
+| the MANIFEST | MARK's `m_len`, bounded by `MANIFEST_LIMIT` plus its envelope (§12.2) | the same |
 | a locator chunk | its row's `len`, ≤ 72 + 16 + 1 MiB | the same |
 | a list-page read | ≤ 8,400 | the same |
 | a class-2 pack | the fixed 65,536-byte stream buffer | the same |

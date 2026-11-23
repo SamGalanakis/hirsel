@@ -1,0 +1,241 @@
+type HistoryLink {
+    epoch: u64,
+    len: u64,
+    digest: u64
+}
+
+type HistoryMark {
+    manifest: HistoryRef,
+    floor: u64,
+    retained: List[HistoryRef],
+    depth: u8,
+    locate_at: u64,
+    locate_end: u64
+}
+
+fn history_object_context(path: String, id: StoreId, role: u8, reference: HistoryRef, raw: Bytes) -> Result[DiskContext, Error] {
+    if list.len(raw) < 72 {
+        return Error(disk_fault(path, 0, Truncated))
+    }
+    let stored_id = StoreId(hi: read_le(raw, 32, 8), lo: read_le(raw, 40, 8))
+    if raw[28] != role || read_le(raw, 48, 8) != reference.epoch || read_le(raw, 56, 8) != reference.seq || !same(stored_id, id) {
+        return Error(disk_fault(path, 0, Header))
+    }
+    let ctx = DiskContext(store: id, role, seq: reference.seq)
+    let header = history_frame(path, ctx, raw, 0, 0x0001)?
+    if header.end != 72 || list.slice(raw, 16, 24) != string.as_bytes("HIRSTORE") || read_le(raw, 30, 2) != 0 || read_le(raw, 64, 8) != 0 {
+        return Error(disk_fault(path, 0, Header))
+    }
+    let format = read_le(raw, 24, 4)
+    if format != DISK_FORMAT {
+        return Error(Unsupported(format))
+    }
+    if raw[29] != 1 {
+        return Error(Unsupported(int.widen(raw[29])))
+    }
+    Ok(ctx)
+}
+
+fn history_object_digest(path: String, reference: HistoryRef, raw: Bytes) -> Result[(), Error] {
+    if list.len(raw) != reference.len {
+        return Error(disk_fault(path, 0, Truncated))
+    }
+    if std.check.xxh3(raw, 0, list.len(raw)) != reference.digest {
+        return Error(disk_fault(path, 0, Checksum))
+    }
+    Ok(())
+}
+
+fn history_entry_context(path: String, id: StoreId, reference: HistoryRef, raw: Bytes) -> Result[(DiskContext, HistoryLink), Error] {
+    let ctx = history_object_context(path, id, 2, reference, raw)?
+    let link = history_frame(path, ctx, raw, 72, 0x00B0)?
+    if link.end != 112 {
+        return Error(disk_fault(path, 72, Malformed))
+    }
+    let prev = HistoryLink(epoch: read_le(raw, 88, 8), len: read_le(raw, 96, 8), digest: read_le(raw, 104, 8))
+    if reference.seq == 1 {
+        if prev.epoch != 0 || prev.len != 0 || prev.digest != 0 {
+            return Error(disk_fault(path, 72, Malformed))
+        }
+    } else if prev.epoch == 0 || prev.epoch > reference.epoch || prev.len < 112 || prev.len > HISTORY_ENTRY_READ_LIMIT {
+        return Error(disk_fault(path, 72, Malformed))
+    }
+    Ok((ctx, prev))
+}
+
+fn history_length(link: HistoryLink, seq: u64) -> HistoryRef {
+    HistoryRef(seq, epoch: link.epoch, len: link.len, digest: link.digest)
+}
+
+fn history_range(mut client: std.object.Client, path: String, size: u64, lo: u64, hi: u64, mut buffer: Bytes, deadline: u64) -> Result[(), Error] waits {
+    list.clear(mut buffer)
+    let (take result, take raw) = std.object.fetch_range(mut client, path, lo, hi, replace(mut buffer, list.new()), deadline)
+    buffer = take raw
+    match take result {
+        Ok(meta) => {
+            if meta.size != size || list.len(buffer) != hi - lo {
+                return Error(disk_fault(path, lo, Truncated))
+            }
+            Ok(())
+        },
+        Error(take problem) => Error(Remote(take problem)),
+    }
+}
+
+fn history_suffix(mut client: std.object.Client, head: HistoryHead, from: HistoryRef, deadline: u64) -> Result[List[HistoryLink], Error] waits {
+    let end = head.entry.seq
+    if from.seq > end {
+        return Error(disk_fault("head", 72, Malformed))
+    }
+    let row_count = end - from.seq
+    let (take suffix, take room) = disk_allocation(scoped fn() -> Result[(List[HistoryLink], Bytes), Error] {
+        let mut refs: List[HistoryLink] = list.with_capacity(row_count)
+        let vacant = HistoryLink(epoch: 0, len: 0, digest: 0)
+        list.fill(mut refs, row_count, vacant)
+        Ok((take refs, list.with_capacity(112)))
+    })?
+    let mut refs = take suffix
+    let mut prefix_buffer = take room
+    let mut current = head.entry
+    while current.seq > from.seq {
+        let name = history_key("e-", current)
+        let leaf = HistoryLink(epoch: current.epoch, len: current.len, digest: current.digest)
+        let _ = list.set(mut refs, current.seq - from.seq - 1, leaf)
+        history_range(mut client, name, current.len, 0, 112, mut prefix_buffer, deadline)?
+        let (_, predecessor) = history_entry_context(name, head.store, current, prefix_buffer)?
+        current = history_length(predecessor, current.seq - 1)
+    }
+    if !history_ref_matches(current, from) {
+        return Error(disk_fault("head", 72, Malformed))
+    }
+    Ok(take refs)
+}
+
+fn history_read_object(mut client: std.object.Client, path: String, reference: HistoryRef, deadline: u64) -> Result[Bytes, Error] waits {
+    let mut raw = disk_allocation(scoped fn() -> Result[Bytes, Error] {
+        Ok(list.with_capacity(reference.len))
+    })?
+    let _ = history_fetch(mut client, path, mut raw, deadline)?
+    Ok(take raw)
+}
+
+fn history_read_mark(path: String, id: StoreId, reference: HistoryRef, raw: Bytes) -> Result[HistoryMark, Error] {
+    let (ctx, _) = history_entry_context(path, id, reference, raw)?
+    history_object_digest(path, reference, raw)?
+    let mark = history_frame(path, ctx, raw, 112, 0x0090)?
+    let size = mark.end - mark.payload
+    if size < 45 || size > 8173 {
+        return Error(disk_fault(path, 112, Malformed))
+    }
+    let row = list.slice(raw, mark.payload, mark.end)
+    let manifest = HistoryRef(seq: read_le(row, 0, 8), epoch: read_le(row, 8, 8), len: read_le(row, 24, 8), digest: read_le(row, 16, 8))
+    let floor = read_le(row, 32, 8)
+    let depth = row[40]
+    let row_count = read_le(row, 41, 4)
+    if manifest.seq == 0 || manifest.epoch == 0 || manifest.epoch > reference.epoch || manifest.len < 88 || manifest.len > MANIFEST_LIMIT + 88 + 20 || depth > 3 || row_count > 254 || size != 45 + 32 * row_count {
+        return Error(disk_fault(path, 112, Malformed))
+    }
+    let mut retained = disk_allocation(scoped fn() -> Result[List[HistoryRef], Error] {
+        Ok(list.with_capacity(row_count))
+    })?
+    let mut last = 0u64
+    for i in 0u64 .. row_count {
+        let at = 45 + 32 * i
+        let earlier = HistoryRef(seq: read_le(row, at, 8), epoch: read_le(row, at + 8, 8), len: read_le(row, at + 24, 8), digest: read_le(row, at + 16, 8))
+        if earlier.seq <= last || earlier.seq >= reference.seq || !history_entry_range(earlier, reference.epoch) {
+            return Error(disk_fault(path, 112, Malformed))
+        }
+        last = earlier.seq
+        list.push(mut retained, earlier)
+    }
+    let oldest = if row_count == 0 {
+        reference.seq
+    } else {
+        retained[0].seq
+    }
+    if floor != oldest {
+        return Error(disk_fault(path, 112, Malformed))
+    }
+    let locator = history_frame(path, ctx, raw, mark.end, 0x00C0)?
+    if locator.end != list.len(raw) || (locator.end - locator.payload) > 1048576 || (locator.end - locator.payload) % 32 != 0 {
+        return Error(disk_fault(path, mark.end, Malformed))
+    }
+    Ok(HistoryMark(manifest, floor, retained: take retained, depth, locate_at: locator.payload, locate_end: locator.end))
+}
+
+fn history_checkpoint(mut client: std.object.Client, head: HistoryHead, deadline: u64) -> Result[(HistoryMark, Bytes), Error] waits {
+    let name = history_key("e-", head.checkpoint)
+    let raw = history_read_object(mut client, name, head.checkpoint, deadline)?
+    let mark = disk_allocation(scoped fn() -> Result[HistoryMark, Error] {
+        history_read_mark(name, head.store, head.checkpoint, raw)
+    })?
+    if mark.floor != head.floor {
+        return Error(disk_fault(name, 112, Malformed))
+    }
+    Ok((take mark, take raw))
+}
+
+fn history_read_manifest(mut client: std.object.Client, id: StoreId, mark: HistoryMark, checkpoint_seq: u64, deadline: u64) -> Result[PageManifest, Error] waits {
+    let name = history_key("m-", mark.manifest)
+    let mut raw = history_read_object(mut client, name, mark.manifest, deadline)?
+    let local = disk_allocation(scoped fn() -> Result[Bytes, Error] {
+        let ctx = history_object_context(name, id, 1, mark.manifest, raw)?
+        history_object_digest(name, mark.manifest, raw)?
+        capacity(disk_header_bytes(ctx, 0, 0))
+    })?
+    // An AP14 directory HEADER has the same checksum binding, so its parser
+    // can check the rest of the already authenticated object unchanged.
+    for i in 0u64 .. 72 {
+        raw[i] = local[i]
+    }
+    disk_allocation(scoped fn() -> Result[PageManifest, Error] {
+        let (_, take manifest) = disk_read_page_manifest(name, raw)?
+        if manifest.first_live != checkpoint_seq || manifest.prev_first != checkpoint_seq || manifest.retirement_root != std.page.unlocated(0) {
+            return Error(disk_fault(name, 72, Malformed))
+        }
+        Ok(take manifest)
+    })
+}
+
+fn history_apply_entry(path: String, id: StoreId, reference: HistoryRef, raw: Bytes, mut replay: JournalReplay, ceiling: u64) -> Result[(), Error] {
+    let (ctx, _) = history_entry_context(path, id, reference, raw)?
+    history_object_digest(path, reference, raw)?
+    let frame = disk_frame_bytes(path, ctx, raw, 112)?
+    if frame.kind == 0x0040 {
+        if frame.flags != 1 || frame.end != list.len(raw) || frame.end - frame.payload != 24 || read_le(raw, frame.payload, 8) != reference.epoch {
+            return Error(disk_fault(path, 112, Malformed))
+        }
+        return Ok(())
+    }
+    let mut at = 112u64
+    let mut frames = 0u64
+    while at < list.len(raw) {
+        let current = disk_frame_bytes(path, ctx, raw, at)?
+        if current.kind == 0x0090 || current.kind == 0x00C0 {
+            return Error(disk_fault(path, at, Malformed))
+        }
+        disk_check_frame_kind(path, ctx, current.kind, current.flags, at)?
+        if current.kind == 0x0011 || current.kind == 0x0013 {
+            journal_apply(path, mut replay, journal_decode(path, current.kind, list.slice(raw, current.payload, current.end))?)?
+            over_ceiling(journal_account(replay)?, ceiling)?
+            frames += 1
+        } else if disk_kind_limit(current.kind) != None {
+            return Error(disk_fault(path, at, Malformed))
+        }
+        at = current.end
+    }
+    if frames == 0 {
+        return Error(disk_fault(path, 112, Malformed))
+    }
+    Ok(())
+}
+
+fn history_apply_suffix(mut client: std.object.Client, head: HistoryHead, after: u64, chain: List[HistoryLink], mut replay: JournalReplay, ceiling: u64, deadline: u64) -> Result[(), Error] waits {
+    for i in 0u64 .. list.len(chain) {
+        let reference = history_length(chain[i], after + i + 1)
+        let name = history_key("e-", reference)
+        let raw = history_read_object(mut client, name, reference, deadline)?
+        history_apply_entry(name, head.store, reference, raw, mut replay, ceiling)?
+    }
+    Ok(())
+}

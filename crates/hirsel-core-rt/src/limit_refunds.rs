@@ -171,11 +171,15 @@ impl Remote {
     pub(super) fn pending(&self) -> bool {
         self.queued != 0
     }
-    /// The record's queue. SAFETY: the caller runs on the owner Unit, and the
-    /// record is live.
-    #[allow(clippy::mut_from_ref)]
-    unsafe fn queue_of<'a>(record: NonNull<Slot>) -> &'a mut Queue {
-        unsafe { &mut *record.as_ref().queue.get() }
+    /// The record's queue, under the same single-consumer invariant as
+    /// `Domain::remote`: only the owner Unit, or `Funding::drop` under `retire`
+    /// once `posters` is zero, dereferences it. Each site takes one `&mut` for
+    /// a scope that ends before any other `&mut` to the same queue begins,
+    /// including the ones `link` and `unlink` take.
+    /// # Safety
+    /// The record is live.
+    unsafe fn queue_of(record: NonNull<Slot>) -> *mut Queue {
+        unsafe { record.as_ref().queue.get() }
     }
     /// The live inbox of a union-find root.
     fn live_inbox(root: NonNull<Slot>) -> NonNull<Inbox> {
@@ -185,12 +189,15 @@ impl Remote {
     fn link(root: NonNull<Slot>, inbox: NonNull<Inbox>) {
         // SAFETY: owner Unit; the root is unlinked and its list nonempty.
         unsafe {
-            let q = Self::queue_of(root);
-            debug_assert!(q.inbox.is_none() && q.head.is_some());
+            debug_assert!({
+                let q = &*Self::queue_of(root);
+                q.inbox.is_none() && q.head.is_some()
+            });
             let first = (*inbox.as_ref().head.get()).replace(root);
             if let Some(first) = first {
-                Self::queue_of(first).prev = Some(root);
+                (*Self::queue_of(first)).prev = Some(root);
             }
+            let q = &mut *Self::queue_of(root);
             q.next = first;
             q.prev = None;
             q.inbox = Some(inbox);
@@ -200,14 +207,16 @@ impl Remote {
     fn unlink(root: NonNull<Slot>) -> NonNull<Inbox> {
         // SAFETY: owner Unit; the root is linked on q.inbox.
         unsafe {
-            let q = Self::queue_of(root);
-            let inbox = q.inbox.take().unwrap();
-            match q.prev.take() {
-                Some(prev) => Self::queue_of(prev).next = q.next,
-                None => *inbox.as_ref().head.get() = q.next,
+            let (inbox, prev, next) = {
+                let q = &mut *Self::queue_of(root);
+                (q.inbox.take().unwrap(), q.prev.take(), q.next.take())
+            };
+            match prev {
+                Some(prev) => (*Self::queue_of(prev)).next = next,
+                None => *inbox.as_ref().head.get() = next,
             }
-            if let Some(next) = q.next.take() {
-                Self::queue_of(next).prev = q.prev;
+            if let Some(next) = next {
+                (*Self::queue_of(next)).prev = prev;
             }
             inbox
         }
@@ -217,13 +226,19 @@ impl Remote {
     fn push(root: NonNull<Slot>, slot: NonNull<Slot>) {
         // SAFETY: owner Unit; each dirty slot has one list link.
         unsafe {
-            let q = Self::queue_of(root);
-            *slot.as_ref().next_pending.get() = q.head;
-            if q.head.replace(slot).is_none() {
-                q.tail = Some(slot);
-                Self::link(root, Self::live_inbox(root));
-            } else {
-                q.inbox.unwrap().as_ref().notify();
+            let linked = {
+                let q = &mut *Self::queue_of(root);
+                *slot.as_ref().next_pending.get() = q.head;
+                if q.head.replace(slot).is_none() {
+                    q.tail = Some(slot);
+                    None
+                } else {
+                    q.inbox
+                }
+            };
+            match linked {
+                Some(inbox) => inbox.as_ref().notify(),
+                None => Self::link(root, Self::live_inbox(root)),
             }
         }
     }
@@ -306,7 +321,7 @@ impl Remote {
     fn follow(&self, root: NonNull<Slot>) {
         let target = Self::live_inbox(root);
         // SAFETY: owner Unit owns the root's queue.
-        let linked = unsafe { Self::queue_of(root).inbox };
+        let linked = unsafe { (*Self::queue_of(root)).inbox };
         if linked.is_some_and(|inbox| inbox != target) {
             let old = Self::unlink(root);
             Self::link(root, target);
@@ -320,24 +335,27 @@ impl Remote {
         self.follow(winner);
         // SAFETY: owner Unit owns both queues; the loser is no longer a root.
         unsafe {
-            let l = Self::queue_of(loser);
-            let Some(head) = l.head.take() else {
-                return;
+            let (head, tail) = {
+                let l = &mut *Self::queue_of(loser);
+                let Some(head) = l.head.take() else {
+                    return;
+                };
+                (head, l.tail.take().unwrap())
             };
-            let tail = l.tail.take().unwrap();
             let old = Self::unlink(loser);
-            let w = Self::queue_of(winner);
-            match w.tail {
-                Some(last) => {
-                    *last.as_ref().next_pending.get() = Some(head);
-                    w.tail = Some(tail);
-                    w.inbox.unwrap().as_ref().notify();
+            let linked = {
+                let w = &mut *Self::queue_of(winner);
+                let linked = w.tail.is_some().then(|| w.inbox.unwrap());
+                match w.tail {
+                    Some(last) => *last.as_ref().next_pending.get() = Some(head),
+                    None => w.head = Some(head),
                 }
-                None => {
-                    w.head = Some(head);
-                    w.tail = Some(tail);
-                    Self::link(winner, Self::live_inbox(winner));
-                }
+                w.tail = Some(tail);
+                linked
+            };
+            match linked {
+                Some(inbox) => inbox.as_ref().notify(),
+                None => Self::link(winner, Self::live_inbox(winner)),
             }
             self.vacate(old);
         }
@@ -357,11 +375,16 @@ impl Remote {
                 inbox.clear();
                 return None;
             };
-            let q = Self::queue_of(root);
-            let slot = q.head.unwrap();
-            q.head = (*slot.as_ref().next_pending.get()).take();
-            if q.head.is_none() {
-                q.tail = None;
+            let (slot, emptied) = {
+                let q = &mut *Self::queue_of(root);
+                let slot = q.head.unwrap();
+                q.head = (*slot.as_ref().next_pending.get()).take();
+                if q.head.is_none() {
+                    q.tail = None;
+                }
+                (slot, q.head.is_none())
+            };
+            if emptied {
                 Self::unlink(root);
                 if (*inbox.head.get()).is_none() {
                     inbox.clear();
@@ -384,7 +407,7 @@ impl Remote {
                 unsafe {
                     let mut root = *inbox.head.get();
                     while let Some(r) = root {
-                        let q = Self::queue_of(r);
+                        let q = &*Self::queue_of(r);
                         // The routing invariant: a linked list belongs to a
                         // root on its live inbox, and holds only that root's slots.
                         assert_eq!(q.inbox, Some(NonNull::from(inbox)));

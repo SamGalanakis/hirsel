@@ -678,6 +678,45 @@ fn reassignment_and_handover_move_exactly_the_moved_roots_queued_slots() {
     assert_eq!(root.available(), 96);
 }
 
+/// Routing law, middle unlink: three roots queued on one owner's inbox, then
+/// the middle root and then the oldest move to another owner. The newest root
+/// must stay queued on the first inbox, and every refund must come back. Red
+/// on an unlink that leaves its successor's `prev` empty: the second move
+/// then rewrites the inbox head and drops the newest root's queued slot.
+#[test]
+fn moving_a_middle_root_keeps_the_roots_queued_before_it() {
+    let root = Funding::root(96);
+    let routed = || root.payer.get().domain().remote_for_test().routed();
+    let contexts: Vec<Context> = (0..3)
+        .map(|_| {
+            let f = root.reserve(32).unwrap();
+            f.task_owner(1);
+            Context::with_funding(f)
+        })
+        .collect();
+    let id = |c: &Context| c.current.payer.get().slot().id;
+    for c in &contexts {
+        drop(Block::new(c, Some(8), 8, 8).unwrap());
+    }
+    let [a, b, c] = [id(&contexts[0]), id(&contexts[1]), id(&contexts[2])];
+    contexts[1].current.task_owner(2);
+    contexts[0].current.task_owner(2);
+    let mut moved = vec![(a, vec![a]), (b, vec![b])];
+    moved.sort();
+    assert_eq!(routed(), [(1, vec![(c, vec![c])]), (2, moved)]);
+    for c in &contexts {
+        c.current.task_owner(0);
+    }
+    root.drain();
+    assert_eq!(routed(), []);
+    // No refund was lost or doubled: every byte is back at its limit.
+    assert!(contexts.iter().all(|c| c.available() == 32));
+    for c in contexts {
+        c.current.end();
+    }
+    assert_eq!(root.available(), 96);
+}
+
 /// Cross-Unit stress law (CONC-15 refunds, MEM-19): foreign threads drop
 /// owner-charged blocks (content refunds) and settle connection charges
 /// (`refund_at_unit`) at once, over the root and nested limit records, while

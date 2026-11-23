@@ -1081,6 +1081,7 @@ fn push_store_error(mut line: String, problem: store.Error) {
         Decode(_) => string.push(mut line, "a stored value does not decode with this build's codec"),
         Exists(name) => { string.push(mut line, "already exists: "); string.push(mut line, name) },
         Missing(name) => { string.push(mut line, "missing: "); string.push(mut line, name) },
+        NoLevel(name) => { string.push(mut line, "unknown durability level "); string.push(mut line, name) },
         Diverged(_) => string.push(mut line, "the store diverged"),
         Foreign => string.push(mut line, "a handle from another store"),
         MigrationFault => string.push(mut line, "the migration faulted"),
@@ -1089,7 +1090,6 @@ fn push_store_error(mut line: String, problem: store.Error) {
         Remote(_) => string.push(mut line, "a bucket operation failed"),
     }
 }
-
 fn push_capacity(mut line: String, cap: Capacity) {
     string.push_u64(mut line, cap.requested)
     string.push(mut line, " bytes requested, ")

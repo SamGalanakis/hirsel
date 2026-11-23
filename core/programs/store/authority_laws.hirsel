@@ -1,0 +1,26 @@
+// L55's host level uses the directory journal's published sync frontier.
+@test
+fn log_level_uses_host_barrier(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let directory = disk_test_directory(d)
+    let mut db = open(tasks, directory, c, r, defaults())?
+    let declared = levels(db)
+    if list.len(declared) != 1 || declared[0] != "host" {
+        fail("the directory store did not declare host")
+    }
+    if let Error(NoLevel(missing)) = level(db, "process") {
+        if missing != "process" {
+            fail("the refusal named the wrong level")
+        }
+    } else {
+        fail("an undeclared level resolved")
+    }
+    let host_level = level(db, "host")?
+    let mem = memory(c, r, defaults())
+    let memory_level = level(mem, "memory")?
+    let schema = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
+    if let Error(Foreign) = durable_at(mut db, schema, memory_level) {} else {
+        fail("a level from another store was accepted")
+    }
+    durable_at(mut db, schema, host_level)?
+    close(take db)
+}

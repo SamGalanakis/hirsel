@@ -1,0 +1,35 @@
+pub opaque type Level: send {
+    store: StoreId,
+    name: String
+}
+
+fn store_level_name(db: Db) -> String {
+    if is_disk(db) {
+        "host"
+    } else {
+        "memory"
+    }
+}
+
+pub fn levels(db: Db) -> List[String] {
+    let mut declared: List[String] = list.with_capacity(1)
+    list.push(mut declared, store_level_name(db))
+    take declared
+}
+
+pub fn level(db: Db, name: String) -> Result[Level, Error] {
+    if name != store_level_name(db) {
+        return Error(NoLevel(string.from(name)))
+    }
+    Ok(Level(store: db.store, name: string.from(name)))
+}
+
+pub fn durable_at(mut db: Db, receipt: Ticket, requested: Level) -> Result[(), Error] waits {
+    if !same(requested.store, db.store) {
+        return Error(Foreign)
+    }
+    if requested.name != store_level_name(db) {
+        return Error(NoLevel(string.from(requested.name)))
+    }
+    durable(mut db, receipt)
+}

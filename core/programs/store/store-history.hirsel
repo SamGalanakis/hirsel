@@ -126,12 +126,12 @@ fn history_config(raw: Bytes, frame_at: u64) -> Result[HistoryConfig, Error] {
         return Error(disk_fault("head", frame_at, Malformed))
     }
     cursor += 1
-    let level = history_text(raw, mut cursor, 1, 64, frame_at)?
+    let level_name = history_text(raw, mut cursor, 1, 64, frame_at)?
     if list.len(raw) - cursor != 1 || raw[cursor] != 2 {
         return Error(disk_fault("head", frame_at, Malformed))
     }
     let place = std.object.Bucket(endpoint: take endpoint, aws_region: take aws_region_name, bucket: take bucket_name, prefix: take key_prefix, style)
-    Ok(HistoryConfig(place: take place, level: take level))
+    Ok(HistoryConfig(place: take place, level: take level_name))
 }
 
 fn history_head_frame(raw: Bytes) -> Result[(DiskContext, DiskFrame), Error] {
@@ -245,12 +245,12 @@ fn history_config_bytes(config: HistoryConfig) -> Result[Bytes, Error] {
     let place = view config.place
     let endpoint = string.byte_len(place.endpoint)
     let name = string.byte_len(place.bucket)
-    let level = string.byte_len(config.level)
-    if endpoint == 0 || endpoint > 2048 || name < 3 || name > 63 || string.byte_len(place.aws_region) > 64 || string.byte_len(place.prefix) > 1024 || level == 0 || level > 64 {
+    let level_length = string.byte_len(config.level)
+    if endpoint == 0 || endpoint > 2048 || name < 3 || name > 63 || string.byte_len(place.aws_region) > 64 || string.byte_len(place.prefix) > 1024 || level_length == 0 || level_length > 64 {
         return Error(Limit(Name))
     }
     disk_allocation(scoped fn() -> Result[Bytes, Error] {
-        let mut raw_bytes: Bytes = list.with_capacity(13 + endpoint + name + level + string.byte_len(place.aws_region) + string.byte_len(place.prefix))
+        let mut raw_bytes: Bytes = list.with_capacity(13 + endpoint + name + level_length + string.byte_len(place.aws_region) + string.byte_len(place.prefix))
         list.push(mut raw_bytes, if place.style == Virtual {
             0u8
         } else {

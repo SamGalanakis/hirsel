@@ -745,9 +745,9 @@ fn read_list_tree(d: Dir, id: StoreId, manifest: PageManifest, ptr: std.page.Pag
         return Error(disk_fault(path, ptr.offset, Malformed))
     }
     let image = read_list_page(d, id, ptr)?
-    let level = std.page.level(image)
+    let height = std.page.level(image)
     if let Some(expected) = expected_level {
-        if level != expected {
+        if height != expected {
             return Error(disk_fault(path, ptr.offset, Malformed))
         }
     }
@@ -777,7 +777,7 @@ fn read_list_tree(d: Dir, id: StoreId, manifest: PageManifest, ptr: std.page.Pag
         match row.cell {
             Child(edge) => {
                 page_edge_order(path, ptr, edge.child)?
-                read_list_tree(d, id, manifest, edge.child, Some(level - 1), retired, mut last, mut lists)?
+                read_list_tree(d, id, manifest, edge.child, Some(height - 1), retired, mut last, mut lists)?
                 capacity(list.try_reserve(mut kids, 1))?
                 list.push(mut kids, edge.child.stamp)
             },
@@ -929,9 +929,9 @@ fn resolve_data_page(packs: Map[u64, LoadedPack], ptr: std.page.PagePtr, domain:
         return Error(disk_fault(path, ptr.offset, Malformed))
     }
     let image = decode_located_page(path, ptr.offset, copied(payload)?, domain)?
-    let level = std.page.level(image)
+    let height = std.page.level(image)
     if let Some(wanted) = expected_level {
-        if level != wanted {
+        if height != wanted {
             return Error(disk_fault(path, ptr.offset, Malformed))
         }
     }
@@ -942,10 +942,10 @@ fn resolve_data_page(packs: Map[u64, LoadedPack], ptr: std.page.PagePtr, domain:
             Some(PageEdge(child)) => {
                 if child.stamp != 0 {
                     page_edge_order(path, ptr, child)?
-                    if level == 0 {
+                    if height == 0 {
                         resolve_data_page(packs, child, Collection, None, mut graph)?
                     } else {
-                        resolve_data_page(packs, child, domain, Some(level - 1), mut graph)?
+                        resolve_data_page(packs, child, domain, Some(height - 1), mut graph)?
                     }
                 }
                 list.push(mut kids, child.stamp)

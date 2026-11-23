@@ -591,7 +591,7 @@ reconciles it.
 
 **Quotas.** A start, a deploy or an added group that would exceed its tenant's quota is
 refused with the quota it exceeds. The host never evicts a live group to admit another
-(RUNNER-SPEC §13.4, "No eviction").
+(RUNNER-SPEC §14.2, "No eviction").
 
 ### Starting the host
 

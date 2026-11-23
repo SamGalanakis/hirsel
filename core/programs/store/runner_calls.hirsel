@@ -2648,33 +2648,33 @@ fn test_serve_bounded_and_settled(c: Clock) -> Result[(), ()] waits {
     if law_serve_bounded_and_settled(c) { Ok(()) } else { Error(()) }
 }
 
-// Place directory laws (RUNNER-SPEC v2.21 §13.6). Each lists one name, "a", over a disk
-// store, so a second live instance of "a" cannot open the store: it is refused `Held`.
-// Retain the fixture's original slack after replacing its 1 MiB checkpoint task
-// with AP16's 16,777,476-byte writer buffer. The enclosing test cap stays 64 MiB.
-const DIRECTORY_BUDGET: u64 = 41943040u64 - 1048576u64 + 16777476u64
+// In-process host laws (RUNNER-SPEC §14.9, ported from the directory's PD1 to PD4). Each
+// adds one group, "a", over a disk store, so a second live child of "a" cannot open the
+// store: it is refused `Held`. The place budget keeps the fixture's slack with AP16's
+// 16,777,476-byte writer buffer in place of its 1 MiB checkpoint task.
+const LOCAL_BUDGET: u64 = 41943040u64 - 1048576u64 + 16777476u64
 
-fn directory_wire() -> runner.WireConfig {
+fn local_wire() -> runner.WireConfig {
     let mut wire = runner.wire_defaults(65536u64, N_PLACE)
     wire.n_pool = 4194304u64
     wire
 }
 
-fn directory_config(supplied: local.Supplied, place_fn: StaticFn[fn(mut Calls) -> Result[(), runner.RegisterError]], migrate_fn: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits], stop: runner.Stop) -> runner.PlaceConfig[(), Hd, (), ()] {
+fn local_config(supplied: local.Supplied, place_fn: StaticFn[fn(mut Calls) -> Result[(), runner.RegisterError]], migrate_fn: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits], stop: runner.Stop) -> runner.PlaceConfig[(), Hd, (), ()] {
     runner.PlaceConfig(backing: Memory, selection: Install, place: place_fn, n_place: N_PLACE,
-        migrate: migrate_fn, handles: code.describe(handles), session: directory_wire(), max_sessions: 1u64,
+        migrate: migrate_fn, handles: code.describe(handles), session: local_wire(), max_sessions: 1u64,
         proxies: list.new(), n_publisher: 1048576u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16),
         net: supplied.net, tasks: supplied.tasks, clock: supplied.clock, random: supplied.random, stop: stop, wire: Some(ingress.binding()), triggers: None, idle: None)
 }
 
 // A place that stops at once.
 fn quick_place(take supplied: local.Supplied) -> Result[runner.PlaceConfig[(), Hd, (), ()], Capacity] {
-    Ok(directory_config(supplied, code.describe(place), code.describe(migrate), runner.Stop(lag_ms: 0u64, grace_ms: 2000u64)))
+    Ok(local_config(supplied, code.describe(place), code.describe(migrate), runner.Stop(lag_ms: 0u64, grace_ms: 2000u64)))
 }
 
 // A place whose drain keeps admission open for 400 ms, so an open can arrive during it.
 fn lagged_place(take supplied: local.Supplied) -> Result[runner.PlaceConfig[(), Hd, (), ()], Capacity] {
-    Ok(directory_config(supplied, code.describe(place), code.describe(migrate), runner.Stop(lag_ms: 400u64, grace_ms: 2000u64)))
+    Ok(local_config(supplied, code.describe(place), code.describe(migrate), runner.Stop(lag_ms: 400u64, grace_ms: 2000u64)))
 }
 
 type LocalRun { local: local.Local, door: local.Door, dir_name: String, changes: Receiver[local.Change] }
@@ -2687,7 +2687,7 @@ fn start_local(parent: Dir, make: fn(take local.Supplied) -> Result[runner.Place
     let (watch, changes): (Sender[local.Change], Receiver[local.Change]) = channel.new(16u64)
     let making: local.Factory[()] = local.factory(make)
     let config = local.Config(root: dir, options: disk_options(), factory: take making, seed: (), max_places: 1u64, idle_ms: idle_ms,
-        place_bytes: DIRECTORY_BUDGET, sessions: 1u64, tasks: tasks, clock: clock, random: random, net: net, watch: Some(take watch))
+        place_bytes: LOCAL_BUDGET, sessions: 1u64, tasks: tasks, clock: clock, random: random, net: net, watch: Some(take watch))
     let made = match local.local(take config) { Ok(take made) => take made, Error(_) => fail("local: refused a valid configuration") }
     let door = local.door(made)
     if let Error(_) = local.add(door, "a") { fail("local: add refused") }
@@ -2849,7 +2849,7 @@ fn kept_place(mut r: Calls) -> Result[(), runner.RegisterError] {
 }
 
 fn keeping_place(take supplied: local.Supplied) -> Result[runner.PlaceConfig[(), Hd, (), ()], Capacity] {
-    let mut config = directory_config(supplied, code.describe(kept_place), code.describe(ping_migrate), runner.Stop(lag_ms: 0u64, grace_ms: 2000u64))
+    let mut config = local_config(supplied, code.describe(kept_place), code.describe(ping_migrate), runner.Stop(lag_ms: 0u64, grace_ms: 2000u64))
     let (entries, _) = ping_entries()
     config.triggers = Some(runner.TriggerConfig(entries: take entries, author: store.Caller(issuer: 0u8, subject: list.new()),
         grants: (), grant: unit_grant, grant_bytes: 65536u64))
@@ -2866,7 +2866,7 @@ fn kept_keys() -> List[Bytes] {
 
 fn connect_lease(l: local.Lease, tasks: Tasks, net: Net, clock: Clock, random: Random, wanted: List[Bytes]) -> wire_client.Conn waits {
     let address = option.unwrap(latest.read(local.status(l)).addr)
-    match wire_client.connect(tasks, net, address, clock, random, wanted, Some(ingress.credential(random)), directory_wire().socket) {
+    match wire_client.connect(tasks, net, address, clock, random, wanted, Some(ingress.credential(random)), local_wire().socket) {
         Ok(take connected) => take connected,
         Error(_) => fail("local: connection refused"),
     }

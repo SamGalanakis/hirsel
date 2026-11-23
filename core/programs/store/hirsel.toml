@@ -20,7 +20,6 @@ std = { major = 1 }
 "steps.hirsel" = "steps"
 "signup.hirsel" = "signup"
 "runner.hirsel" = "runner"
-"places.hirsel" = "places"
 "local.hirsel" = "local"
 "runner_laws.hirsel" = "runner_laws"
 "runner_calls.hirsel" = "runner_calls"

@@ -229,7 +229,8 @@ alone.
 
 The hub retains at most the configured text bytes for each observed
 dispatch, and each SSE connection pulls one snapshot at a time. Deltas can
-be dropped under load. A gap or a full draft starts a fresh snapshot.
+be dropped under load. A gap starts a fresh draft; a full draft keeps its
+newest bytes and moves its offset.
 Dropping the last observer clears the draft. Preview adds no journal writes,
 and the front and workers can be configured without it.
 

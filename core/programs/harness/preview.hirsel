@@ -172,8 +172,9 @@ fn on_delta(mut active: List[Active], watching: List[Watching], limit: u64, chan
         if active[i].seq >= seq || !audience(watching, active[i].group, active[i].caller) {
             return
         }
-        let added = string.byte_len(text)
-        if seq != active[i].seq + 1u64 || string.byte_len(active[i].text) + added > limit {
+        // A lost delta leaves a hole, so the draft restarts at this delta. Otherwise
+        // the draft keeps its newest `limit` bytes, starting on a character.
+        if seq != active[i].seq + 1u64 {
             active[i].text = string.new()
         }
         if string.byte_len(active[i].text) == 0u64 {
@@ -183,6 +184,19 @@ fn on_delta(mut active: List[Active], watching: List[Watching], limit: u64, chan
         active[i].produced_ns = produced
         active[i].changed = changed
         string.push(mut active[i].text, text)
+        let n = string.byte_len(active[i].text)
+        if n > limit {
+            let cut = {
+                let raw = string.as_bytes(active[i].text)
+                let mut from = n - limit
+                while from < n && (raw[from] & 192u8) == 128u8 {
+                    from += 1u64
+                }
+                from
+            }
+            active[i].text = string.from(string.slice(active[i].text, cut, n))
+            active[i].base += cut
+        }
         return
     }
 }

@@ -840,8 +840,9 @@ fn test_preview_journal_and_reconnect(parent: Dir, clock: Clock, random: Random,
 }
 
 // A paused subscriber never polls while the fast one makes progress. The
-// 16-byte cap holds two eight-byte deltas, so every third delta replaces
-// the snapshot. A retry replaces the old key before its first delta.
+// 16-byte cap holds two eight-byte deltas, so from the second delta on the
+// draft is the last 16 bytes, at offset 8(i + 1) - 16. A retry replaces the
+// old key before its first delta.
 @test
 fn test_preview_slow_observer_and_retry(tasks: Tasks, clock: Clock) -> Result[(), u64] waits {
     let hub = harness.preview.start(tasks, 1048576u64, 16u64)
@@ -858,11 +859,12 @@ fn test_preview_slow_observer_and_retry(tasks: Tasks, clock: Clock) -> Result[()
     for i in 0u64 .. 1024u64 {
         harness.preview.delta(mut old, "abcdefgh")
         let Some(p) = harness.preview.read(fast) else { return Error(1u64) }
-        let expected = if i % 2u64 == 0u64 { "abcdefgh" } else { "abcdefghabcdefgh" }
-        if p.seq != i + 1u64 || p.text != expected { return Error(2u64) }
+        let expected = if i == 0u64 { "abcdefgh" } else { "abcdefghabcdefgh" }
+        let offset = if i == 0u64 { 0u64 } else { 8u64 * (i + 1u64) - 16u64 }
+        if p.seq != i + 1u64 || p.text != expected || p.offset != offset { return Error(2u64) }
     }
     let Some(only) = harness.preview.read(slow) else { return Error(3u64) }
-    if only.seq != 1024u64 || only.text != "abcdefghabcdefgh" { return Error(4u64) }
+    if only.seq != 1024u64 || only.text != "abcdefghabcdefgh" || only.offset != 8176u64 { return Error(4u64) }
     if let Some(_) = harness.preview.read(other) { return Error(5u64) }
 
     let retry = harness.preview.Key(dispatch: dispatch, run: 5u64, entry: 9u64, tool: None, attempt: 2u64)
@@ -871,7 +873,7 @@ fn test_preview_slow_observer_and_retry(tasks: Tasks, clock: Clock) -> Result[()
     if let Some(_) = harness.preview.read(fast) { return Error(6u64) }
     harness.preview.delta(mut new, "fresh")
     let Some(replacement) = harness.preview.read(fast) else { return Error(7u64) }
-    if replacement.key != retry || replacement.seq != 1u64 || replacement.text != "fresh" { return Error(8u64) }
+    if replacement.key != retry || replacement.seq != 1u64 || replacement.text != "fresh" || replacement.offset != 0u64 { return Error(8u64) }
     let recent = option.unwrap(harness.preview.observe(d, "s0", owner))
     let Some(latest_draft) = harness.preview.read(recent) else { return Error(9u64) }
     if latest_draft.text != "fresh" { return Error(10u64) }
@@ -883,7 +885,7 @@ fn test_preview_slow_observer_and_retry(tasks: Tasks, clock: Clock) -> Result[()
     if let Some(_) = harness.preview.read(rejoined) { return Error(11u64) }
     harness.preview.delta(mut new, "after detach")
     let Some(after_detach) = harness.preview.read(rejoined) else { return Error(12u64) }
-    if after_detach.text != "after detach" { return Error(13u64) }
+    if after_detach.text != "after detach" || after_detach.offset != 5u64 { return Error(13u64) }
     harness.preview.revoke(d, "s0", owner)
     harness.preview.delta(mut new, "after revoke")
     if let Some(_) = harness.preview.read(rejoined) { return Error(14u64) }

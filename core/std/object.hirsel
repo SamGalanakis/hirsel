@@ -1,5 +1,7 @@
 const PART_BYTES: u64 = 8388608
 
+const DEFAULT_LANES: u64 = 8
+
 const MAX_ATTEMPTS: u64 = 5
 
 const MAX_U64: u64 = 18446744073709551615
@@ -1953,10 +1955,15 @@ pub opaque type Upload: send {
 
 /// Starts one owner task per lane. Supply the credential grant as source for
 /// expiring credentials. Static credentials use None.
-pub fn start(n: Net, tasks: Tasks, take bucket: Bucket, take credentials_set: cred.Credentials, source: Option[Cred], take trust: Trust, c: Clock, random: Random, lanes: u64, lane_bytes: u64, deadline: u64) -> Result[Client, Error] waits {
+pub fn start(n: Net, tasks: Tasks, take bucket: Bucket, take credentials_set: cred.Credentials, source: Option[Cred], take trust: Trust, c: Clock, random: Random, requested_lanes: u64, lane_bytes: u64, deadline: u64) -> Result[Client, Error] waits {
     let server = endpoint(bucket, take trust)?
-    if lanes == 0 || has_source(source) && !server.secure {
+    if has_source(source) && !server.secure {
         return Error(Fatal(Malformed))
+    }
+    let lanes = if requested_lanes == 0 {
+        DEFAULT_LANES
+    } else {
+        requested_lanes
     }
     let mut peers: List[Peer] = list.with_capacity(16)
     if let Error(e) = resolve_peers(n, c, server.name, deadline, mut peers) {

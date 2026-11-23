@@ -12,7 +12,9 @@ signs with `UNSIGNED-PAYLOAD` and leaves TLS GET integrity to the record layer.
 
 `start` takes `cred.Credentials`, an optional credential grant for refresh,
 a trust policy, a clock, Random and Tasks capabilities, a lane count and
-the admission budget per lane. Each lane owns a connection
+the admission budget per lane. Pass zero for the default of eight lanes.
+Eight lanes reached 96% of the peak in the 512 MiB Tigris sweep.
+Each lane owns a connection
 and all of its HTTP buffers. The resolver refreshes DNS at 300-second
 intervals, favors addresses with throughput at or above the median, and
 breaks ties by the fewest open lanes. Failed connects cool down for 100 ms.

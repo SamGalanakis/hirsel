@@ -65,21 +65,25 @@ fn define(
 fn define_contents(
     object: &mut ObjectModule,
     id: DataId,
-    mut bytes: Vec<u8>,
+    bytes: Vec<u8>,
     align: u64,
     pointers: &[(u32, DataId)],
 ) -> Result<()> {
+    let mut data = description(bytes, align);
+    for &(offset, target) in pointers {
+        let reference = object.declare_data_in_data(target, &mut data);
+        data.write_data_addr(offset, reference, 0);
+    }
+    object.define_data(id, &data).map_err(error)
+}
+fn description(mut bytes: Vec<u8>, align: u64) -> DataDescription {
     if bytes.is_empty() {
         bytes.resize(8, 0);
     }
     let mut data = DataDescription::new();
     data.define(bytes.into_boxed_slice());
     data.set_align(align);
-    for &(offset, target) in pointers {
-        let reference = object.declare_data_in_data(target, &mut data);
-        data.write_data_addr(offset, reference, 0);
-    }
-    object.define_data(id, &data).map_err(error)
+    data
 }
 fn views<'a>(object: &mut ObjectModule, strings: impl Iterator<Item = &'a str>) -> Result<DataId> {
     let mut rows = Vec::new();
@@ -194,7 +198,9 @@ pub(super) fn write(
     let files_id = object
         .declare_data(SOURCE_FILES, Linkage::Local, false, false)
         .map_err(error)?;
-    define_contents(object, files_id, files, 8, &[])?;
+    let mut files = description(files, 8);
+    files.set_custom_section(".rodata.hirsel_sites");
+    object.define_data(files_id, &files).map_err(error)?;
     // The decoder symbol binds the generated entry and Context ABI to the runtime.
     let decoder = object
         .declare_data(

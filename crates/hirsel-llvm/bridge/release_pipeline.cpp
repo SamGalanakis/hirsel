@@ -13,6 +13,7 @@
 
 #include <llvm-c/TargetMachine.h>
 #include <llvm/ADT/MapVector.h>
+#include <llvm/Analysis/CFG.h>
 #include <llvm/Analysis/CGSCCPassManager.h>
 #include <llvm/Analysis/LoopInfo.h>
 #include <llvm/Analysis/ValueTracking.h>
@@ -600,19 +601,21 @@ extern "C" void hirsel_llvm_configure_codegen(LLVMModuleRef module, LLVMBool fra
     }
 }
 
-// Start every warm generated function on a 64 B line, as Go starts every
-// function on a 32 B boundary. The decoded-op caches (Zen's op cache, Intel's
-// uop cache) hold ops per aligned window, so a hot loop that straddles a
-// window costs extra fetches each iteration. At LLVM's 16 B function
-// alignment, whether a loop straddled depended on how much unrelated code was
-// linked in front of it: AWFY Sieve's cycles moved from -14% to +36% with
-// identical instructions. With each start fixed modulo 64, a function has the
-// same line layout in every program. The padding lies between functions and
-// is never executed. Cold and size-optimized bodies keep the default.
+// Fix a hot loop's layout modulo 64 B so its alignment in the uop cache
+// does not depend on preceding functions. In AWFY Sieve, the moving layout
+// changed cycles from -14% to +36% at the same instruction count.
 extern "C" void hirsel_llvm_align_release_functions(LLVMModuleRef module) {
+    SmallVector<std::pair<const BasicBlock *, const BasicBlock *>, 8> backedges;
     for (Function &f : *unwrap(module)) {
-        if (f.isDeclaration() || f.hasFnAttribute(Attribute::Cold) || f.hasOptSize()) continue;
-        if (f.getAlign().valueOrOne() < Align(64)) f.setAlignment(Align(64));
+        if (f.isDeclaration()) continue;
+        if (f.hasFnAttribute(Attribute::Cold)) {
+            if (!f.hasSection()) f.setSection((Twine(".text.unlikely.") + f.getName()).str());
+            continue;
+        }
+        if (f.hasOptSize() || f.getAlign().valueOrOne() >= Align(64)) continue;
+        backedges.clear();
+        FindFunctionBackedges(f, backedges);
+        if (!backedges.empty() || f.hasFnAttribute(Attribute::Hot)) f.setAlignment(Align(64));
     }
 }
 

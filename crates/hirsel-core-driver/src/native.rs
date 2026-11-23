@@ -10,6 +10,8 @@ use std::process::Command;
 
 #[path = "entry_cleanup.rs"]
 mod cleanup;
+#[path = "native_link.rs"]
+mod link;
 #[path = "recipe_native.rs"]
 pub(crate) mod recipe_build;
 #[path = "recipe_grants.rs"]
@@ -21,6 +23,7 @@ mod release;
 #[path = "std_release.rs"]
 pub(crate) mod std_release;
 use cleanup::result_cleanup;
+use link::direct_link;
 
 pub const TARGET: &str = "x86_64-unknown-linux-gnu";
 use crate::tool_inputs::SUPPORT_LIBS as DIRECT_LINK_SUPPORT_LIBS;
@@ -1501,62 +1504,6 @@ pub(crate) fn command(command: &mut Command) -> Result<Vec<u8>, NativeStop> {
     Ok(result.stdout)
 }
 
-fn direct_link(
-    recipe: &crate::tool_inputs::LinkRecipe,
-    inputs: &[PathBuf],
-    support_libs: &[&str],
-    output: &Path,
-    optimize: bool,
-    debug_lines: bool,
-    emit_relocations: bool,
-) -> Result<(), NativeStop> {
-    // The editor runs under an empty environment, in an empty directory of
-    // its own: a script's relative name finds nothing there
-    // (crate::link_closure). It writes a fixed relative name there, since
-    // the output's name enters the executable (a version script's base
-    // definition), and the executable is then moved to `output`.
-    let parent = output.parent().filter(|p| !p.as_os_str().is_empty());
-    let directory = tempfile::tempdir_in(parent.unwrap_or(Path::new(".")))?;
-    let mut process = crate::tool_inputs::tool_command(&recipe.linker);
-    process.current_dir(directory.path());
-    if optimize {
-        // Keep the executable's code revision even when no tape reads it.
-        process.args(["--gc-sections", "--undefined=hirsel_code_revision"]);
-    }
-    if !debug_lines {
-        process.arg("--strip-debug");
-    }
-    if emit_relocations {
-        process.arg("--emit-relocs");
-    }
-    let mut inserted = false;
-    for argument in &recipe.args {
-        if argument == crate::tool_inputs::INPUT_MARKER {
-            for input in inputs {
-                process.arg(std::path::absolute(input)?);
-            }
-            for library in support_libs {
-                process.arg(library);
-            }
-            inserted = true;
-        } else {
-            process.arg(argument);
-        }
-    }
-    if !inserted {
-        return Err(NativeStop::Link(
-            "direct link recipe has no input marker".into(),
-        ));
-    }
-    if !optimize {
-        process.arg("-O0");
-    }
-    process.arg("-o").arg("program");
-    command(&mut process)?;
-    std::fs::rename(directory.path().join("program"), output)?;
-    Ok(())
-}
-
 /// Raise the soft descriptor limit to the hard limit once, as Go does since
 /// 1.19: a link holds one descriptor per object. The limit a link may use.
 fn descriptor_limit() -> u64 {
@@ -1700,7 +1647,7 @@ fn link_objects(
     };
     // The executable key includes the mode-specific lld options.
     let link_mode = if options.optimize {
-        "release-link-gc-source-coordinates"
+        "release-link-gc-icf-cold-sites"
     } else {
         "development-link-O0"
     };

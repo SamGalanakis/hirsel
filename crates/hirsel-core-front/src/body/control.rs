@@ -131,7 +131,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             .returned_local
             .and_then(|(local, to)| (self.binder(pat) == Some(local)).then_some(to));
         self.frame_log_next = self.frame_log_let(s, pat, value);
+        let frame_copies = self.frame_string_copies.len();
+        self.frame_string_let(s, pat, value);
         let (t, v) = self.expr_into(value, declared.and_then(expect), to);
+        self.frame_string_copies.truncate(frame_copies);
         self.frame_log_next = false;
         let ty = declared.unwrap_or(t);
         let kind = self.type_kind(ty);

@@ -405,6 +405,49 @@ fn reserve_hint_charges_are_exact() -> bool {
     }
 }
 
+type StringFrameRow {
+    owner: String
+}
+
+fn string_frame_reads(row: StringFrameRow) -> bool {
+    list.capacity(string.as_bytes(row.owner)) == 8 && row.owner == "owner000"
+}
+
+fn string_frame_copy() -> bool {
+    let row = StringFrameRow(owner: string.from("owner000"))
+    string_frame_reads(row)
+}
+
+fn string_frames_under(room: u64, fuel: u64) -> Result[Result[Result[Result[bool, OutOfTime], Capacity], Causes], Capacity] {
+    isolate(fn() -> Result[Result[bool, OutOfTime], Capacity] {
+        bound bytes room {
+            bound steps fuel {
+                string_frame_copy() && string_frame_copy()
+            }
+        }
+    })
+}
+
+// The eight-byte copy holds one charge while the row is live. Both copies fit
+// under the same eight-byte limit only if the first drop refunds it. Each visit
+// enters five calls, including string.from and the two calls in the reader.
+// expect: run string_frame_charges_are_exact() = true
+fn string_frame_charges_are_exact() -> bool {
+    let all = match string_frames_under(8, 10) {
+        Ok(Ok(Ok(Ok(true)))) => true,
+        _ => false,
+    }
+    let stopped = match string_frames_under(8, 9) {
+        Ok(Ok(Ok(Error(e)))) => e.steps == 9,
+        _ => false,
+    }
+    let refused = match caught(string_frames_under(7, 10)) {
+        Some(c) => c.requested == 8 && c.available == 7,
+        None => false,
+    }
+    all && stopped && refused
+}
+
 fn present(o: Option[View[u64]]) -> u64 {
     match o {
         Some(v) => v,

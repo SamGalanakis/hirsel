@@ -1599,6 +1599,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         self.builtin_use(f, n);
         let g = &self.p.fns[f];
+        if g.path.is_core("string.from")
+            && let Some(&(_, len)) = self
+                .frame_string_copies
+                .iter()
+                .find(|&&(call, _)| call == n)
+        {
+            return self.frame_string_copy(vals[0]?, len, result, n);
+        }
         let codec = is_codec_of(&g.path);
         if codec && let Some(value) = self.codec_of(&g.path, types, vals, result, n) {
             return value;

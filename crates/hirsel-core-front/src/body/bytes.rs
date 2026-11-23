@@ -3,7 +3,13 @@
 use super::*;
 
 impl<'c, 'a> Cx<'c, 'a, '_> {
-    fn byte_word(&mut self, base: AddressBase, index: u64, ty: Ty, n: NodeId) -> Option<AddressId> {
+    pub(super) fn byte_word(
+        &mut self,
+        base: AddressBase,
+        index: u64,
+        ty: Ty,
+        n: NodeId,
+    ) -> Option<AddressId> {
         let offset = self.konst(Ty::Scalar(Scalar::U64), index * 8, n)?;
         Some(self.address(base, &[Step::Byte(offset)], PlaceTy::Value(ty), n))
     }

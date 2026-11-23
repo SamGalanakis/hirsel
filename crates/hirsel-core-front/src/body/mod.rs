@@ -60,6 +60,7 @@ pub(crate) mod core_ops;
 pub(crate) mod flow;
 mod frame_lists;
 mod frame_logs;
+mod frame_strings;
 mod growth;
 mod key_glue;
 mod lists;
@@ -1341,6 +1342,8 @@ struct Cx<'c, 'a, 'e> {
     frame_logs: HashMap<ValueId, TyId>,
     /// The binders that own a frame node, with their log's entry type.
     frame_log_owners: HashMap<u32, TyId>,
+    /// Literal copies in an immutable let whose binding is only viewed.
+    frame_string_copies: Vec<(NodeId, u64)>,
 }
 
 /// The gap a body reports when its emission stopped with no refusal or gap to say why.
@@ -1495,6 +1498,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             frame_log_next: false,
             frame_logs: HashMap::default(),
             frame_log_owners: HashMap::default(),
+            frame_string_copies: Vec::new(),
         }
     }
 

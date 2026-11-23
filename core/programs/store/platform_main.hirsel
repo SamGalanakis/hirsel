@@ -14,6 +14,7 @@
 // state directory as /proc/self/cwd.
 const MAX_FRAME: u64 = 16777216u64
 const OPERATOR_PATH: String = "operator.sock"
+const COLLECT_INTERVAL_NS: u64 = 300000000000u64
 
 type Reader: send {
     input: ReadHalf,
@@ -74,6 +75,16 @@ fn read_events(take seed: Reader) -> () waits {
         }
     }
     let _ = channel.send(to, Lost)
+}
+
+fn collect_periodically(take timer: (Clock, Sender[platform.Input])) waits {
+    let (c, take to) = take timer
+    loop {
+        std.clock.sleep_ns(c, COLLECT_INTERVAL_NS)
+        if let Error(_) = channel.send(to, CollectTick) {
+            return
+        }
+    }
 }
 
 type Accepter: send {
@@ -300,6 +311,7 @@ pub fn main(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, argv: Args) -> Re
     let (to, from): (Sender[platform.Input], Receiver[platform.Input]) = channel.new(64u64)
     let reading = task.spawn(tasks, bytes 33554432u64, Reader(input: take input, to: channel.sender(to)), read_events)
     let accepting = task.spawn(tasks, bytes 1048576u64, Accepter(listener: take listener, to: channel.sender(to)), accept_operators)
+    let collecting = task.spawn(tasks, bytes 4096u64, (c, channel.sender(to)), collect_periodically)
     let operators = channel.sender(to)
     let mut conns: Map[u64, Conn] = map.new()
     let mut next_conn = 1u64
@@ -357,6 +369,7 @@ pub fn main(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, argv: Args) -> Re
         }
     }
     platform.stop(take driving)
+    let _ = task.cancel_join(take collecting)
     let _ = task.cancel_join(take accepting)
     for take (_, take live) in take conns {
         let mut ending = take live

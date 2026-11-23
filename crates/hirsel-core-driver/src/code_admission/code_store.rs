@@ -77,12 +77,7 @@ impl Harness {
             kind,
             hash: object.hash,
         };
-        assert_eq!(
-            CodeStore::new(self.root())
-                .put(kind, &fixture.objects[&key])
-                .unwrap(),
-            object
-        );
+        fixture.publish_object(&CodeStore::new(self.root()), kind, object);
         key
     }
 
@@ -182,6 +177,14 @@ impl Fixture {
         self.recipe.groups.push(object);
         self.recipe.groups.sort_by_key(|row| row.hash);
         Group::member_address(object.hash, ordinal)
+    }
+
+    pub(crate) fn publish_object(&self, code: &CodeStore, kind: ObjectKind, object: ObjectRef) {
+        let key = ObjectKey {
+            kind,
+            hash: object.hash,
+        };
+        assert_eq!(code.put(kind, &self.objects[&key]).unwrap(), object);
     }
 
     fn send(&self, peer: &mut UnixStream) {

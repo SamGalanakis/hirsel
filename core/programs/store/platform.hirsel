@@ -3682,7 +3682,7 @@ pub fn status(h: Host) -> Status {
 // One input to the host's loop: a launcher event, a timer, the launcher session's end, an
 // operator connection accepted on operator.sock, one operator frame on connection `conn`,
 // that connection's end as read, or as written (its writer ended, flushed or failed).
-pub type Input: send = Got(launcher.Event) | DueAt(u64) | RetryAt(u64) | Lost | Joined(Socket) | Asked(u64, Bytes) | HungUp(u64) | Flushed(u64)
+pub type Input: send = Got(launcher.Event) | DueAt(u64) | RetryAt(u64) | CollectTick | Lost | Joined(Socket) | Asked(u64, Bytes) | HungUp(u64) | Flushed(u64)
 
 type Armed {
     at: u64,
@@ -3720,6 +3720,7 @@ pub fn step(mut h: Host, mut d: Driver, take input: Input, now: Now) -> List[lau
         Got(take e) => event(mut h, take e, now),
         DueAt(_) => tick(mut h, now),
         RetryAt(_) => tick(mut h, now),
+        CollectTick => match collect(mut h) { Ok(take reqs) => take reqs, Error(_) => list.new() },
         Asked(conn, body) => asked(mut h, conn, body, now),
         HungUp(conn) => detach(mut h, conn),
         Flushed(conn) => detach(mut h, conn),

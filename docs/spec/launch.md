@@ -843,7 +843,8 @@ cold listeners, child endpoints, pidfds and cgroup population changes.
      assembly of each Preparing, Pending or Undecided deploy (OLD's is the group's current
      one, so an unresolved deploy keeps both choices), and each unexpired recording pin's.
      A Failed or Installed deploy row is history and roots nothing. The host starts a
-     collection only after the session's inventory is reconciled, and runs one at a time.
+     collection every five minutes on a monotonic clock, after the session's inventory is
+     reconciled. One collection runs at a time.
      If it cannot read the snapshot it sends `CollectAbort` instead: the launcher removes
      nothing, ends the fence at once, applies the releases it deferred and answers
      `Collected(0)`, so a later collection can run in the same session.

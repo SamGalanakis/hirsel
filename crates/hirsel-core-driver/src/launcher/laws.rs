@@ -1275,11 +1275,12 @@ fn host_restart_wired() {
 
 /// `launcher_code_collection` (launch.md "The launcher"): a collection keeps each code
 /// object a kept assembly's recipe lists and each object an admission in flight reserved,
-/// and removes every other code object, assembly record and image.
+/// and removes old, unrooted objects. A fresh publication still admits after collection.
 #[test]
 fn code_collection_keeps_reached_reserved_and_freshly_published_objects() {
     use super::stores::Stores;
     use crate::code_admission::ObjectKey;
+    use crate::code_admission::code_store::{Fixture, limits};
     use crate::code_store::{CodeStore, ObjectKind};
     use hirsel_core_ids::{ContentHash, DefPath};
     use hirsel_core_ir::Identity;
@@ -1290,12 +1291,16 @@ fn code_collection_keeps_reached_reserved_and_freshly_published_objects() {
     let stores = Stores::open(state, 1 << 20).unwrap();
     let code = CodeStore::new(state.join("code"));
     let put = |kind, bytes: &[u8]| code.put(kind, bytes).unwrap();
-    let group = put(ObjectKind::Group, b"listed group");
+    let kept_group = put(ObjectKind::Group, b"listed group");
     let body = put(ObjectKind::Body, b"listed body");
     let annex = put(ObjectKind::Annex, b"listed annex");
     let reserved = put(ObjectKind::Body, b"reserved body");
     let garbage = put(ObjectKind::Body, b"unlisted body");
-    let reused = put(ObjectKind::Body, b"body an old publication shared");
+    let fixture = Fixture::leaf();
+    let fresh_group = fixture.recipe.groups[0];
+    let fresh_body = fixture.recipe.bodies[0].body;
+    let fresh_annex = fixture.recipe.bodies[0].annex;
+    fixture.publish_object(&code, ObjectKind::Body, fresh_body);
     let recipe = |groups, bodies| Recipe {
         entry: Identity::plain(DefPath::from_full("app@1/main/main").unwrap()),
         address: ContentHash([0; 32]),
@@ -1314,7 +1319,7 @@ fn code_collection_keeps_reached_reserved_and_freshly_published_objects() {
     };
     let kept = put(
         ObjectKind::Recipe,
-        &recipe(vec![group], vec![BodyRef { body, annex }]).encode(),
+        &recipe(vec![kept_group], vec![BodyRef { body, annex }]).encode(),
     );
     let dropped = put(ObjectKind::Recipe, &recipe(vec![], vec![]).encode());
     let assemble = |recipe: ContentHash, image: &[u8]| {
@@ -1334,42 +1339,34 @@ fn code_collection_keeps_reached_reserved_and_freshly_published_objects() {
     }
     // An operator publishes a recipe now and admits it after the collection below: no
     // root names it yet, and it shares a body an old publication already stored.
-    let new_group = put(ObjectKind::Group, b"group published now");
-    let shared = put(ObjectKind::Body, b"body an old publication shared");
-    let annex_now = put(ObjectKind::Annex, b"annex published now");
-    let published = put(
-        ObjectKind::Recipe,
-        &recipe(
-            vec![new_group],
-            vec![BodyRef {
-                body: shared,
-                annex: annex_now,
-            }],
-        )
-        .encode(),
-    );
-    assert_eq!(shared.hash, reused.hash);
+    fixture.publish_object(&code, ObjectKind::Group, fresh_group);
+    fixture.publish_object(&code, ObjectKind::Body, fresh_body);
+    fixture.publish_object(&code, ObjectKind::Annex, fresh_annex);
+    let published = put(ObjectKind::Recipe, &fixture.recipe.encode());
 
     let reserved_key = ObjectKey {
         kind: ObjectKind::Body,
         hash: reserved.hash,
     };
-    let removed = stores
-        .collect(&BTreeSet::from([live.identity.0]), &|key| {
-            key == reserved_key
+    let admission = super::Admission::open(state, stores.records(), limits(), 1 << 20).unwrap();
+    let removed = admission
+        .under_collection(|held| {
+            stores.collect(&BTreeSet::from([live.identity.0]), &|key| {
+                key == reserved_key || held(key)
+            })
         })
         .unwrap();
     let held = |kind, hash| code.path(kind, hash).exists();
     for (kind, object) in [
         (ObjectKind::Recipe, kept),
-        (ObjectKind::Group, group),
+        (ObjectKind::Group, kept_group),
         (ObjectKind::Body, body),
         (ObjectKind::Annex, annex),
         (ObjectKind::Body, reserved),
         (ObjectKind::Recipe, published),
-        (ObjectKind::Group, new_group),
-        (ObjectKind::Body, shared),
-        (ObjectKind::Annex, annex_now),
+        (ObjectKind::Group, fresh_group),
+        (ObjectKind::Body, fresh_body),
+        (ObjectKind::Annex, fresh_annex),
     ] {
         assert!(held(kind, object.hash), "{kind:?} removed");
     }
@@ -1378,4 +1375,27 @@ fn code_collection_keeps_reached_reserved_and_freshly_published_objects() {
     assert!(stores.records().assembly(old.identity).is_err());
     // The dropped record and its image, the unlisted body and the dropped recipe.
     assert_eq!(removed, 4);
+
+    let launcher = Launcher::new(state, None, || Ok(stores)).unwrap();
+    let mut rig = Rig { dir, launcher };
+    rig.launcher.admit_with(admission).unwrap();
+    rig.bind();
+    let a = attempt(1);
+    rig.ask(Request::Admit(
+        group(),
+        a,
+        Input::Publication(published.hash.0.to_vec()),
+        Approvals::default(),
+    ));
+    let answered = rig.until(|events| {
+        events
+            .iter()
+            .any(|e| matches!(e, Event::Admitted(..) | Event::AdmissionFailed(..)))
+    });
+    assert!(
+        matches!(answered.as_slice(), [Event::Admitted(candidate, root, ..)]
+            if *candidate == a && root == &published.hash.0),
+        "fresh publication failed admission after collection: {answered:?}"
+    );
+    rig.ask(Request::Release(a));
 }

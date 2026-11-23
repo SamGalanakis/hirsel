@@ -23,7 +23,7 @@ fn inspect(context: (), frame: runner.Frame) -> Option[u16] { None }
 fn finish(mut context: ()) -> Option[runner.PubIn] { None }
 
 fn service() -> runner.Service[()] {
-    runner.Service(context: (), step: step, ready: ready, allocate: fn(mut context: (), take plan: runner.ServiceAllocation) -> Result[runner.ServicePlan, u16] { Error(1013u16) }, finish: finish, check: inspect)
+    runner.Service(context: (), step: step, ready: ready, finish: finish, check: inspect)
 }
 
 fn run(n: Net, tasks: Tasks, clock: Clock, config: runner.WireConfig) -> Result[(), Exit] waits {
@@ -35,7 +35,7 @@ fn run(n: Net, tasks: Tasks, clock: Clock, config: runner.WireConfig) -> Result[
     }
     let mail = result.unwrap(runner.mailbox(64u64))
     let to_publisher = runner.post(mail)
-    let result = runner.serve(take listener, tasks, clock, to_publisher, c, 16u64, list.new(), service)
+    let result = runner.serve(take listener, tasks, clock, to_publisher, c, 16u64, list.new(), service, fn(mut context: (), take plan: runner.ServiceAllocation) -> Result[runner.ServicePlan, u16] { Error(1013u16) })
     match result { Ok(()) => Ok(()), Error(_) => Error(Exit(status: 1u8)) }
 }
 

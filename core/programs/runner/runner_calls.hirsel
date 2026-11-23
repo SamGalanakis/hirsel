@@ -1726,9 +1726,7 @@ fn test_restart_reopens(parent: Dir, clock: Clock, random: Random, tasks: Tasks,
     if law_restart_reopens(parent, clock, random, tasks, net) { Ok(()) } else { Error(()) }
 }
 
-// Start refusals name what to change. Oracles: the checkbox place serves at 1 MiB with
-// wire_defaults(65536, n), and a session holds n_place twice within its 16 MiB ceiling, so
-// 4 MiB cannot fit and the bound lies between them; a wire configuration whose n_place is not
+// Start refusals name what to change. Oracle: a wire configuration whose n_place is not
 // PlaceConfig.n_place is refused with both values (RUNNER-SPEC §6 "One n_place").
 fn refused_start(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, wire_n_place: u64, n_place: u64) -> runner.StartError waits {
     let mut name = string.with_capacity(32u64)
@@ -1745,13 +1743,6 @@ fn refused_start(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: N
 }
 
 pub fn law_start_refusals(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
-    let oversized = refused_start(parent, clock, random, tasks, net, 4194304u64, 4194304u64)
-    let bounded = match oversized {
-        Exceeds(over) => over.name == "n_place" && over.value == 4194304u64 && over.limit >= 1048576u64 && over.limit < 4194304u64,
-        _ => false,
-    }
-    want(bounded, "start refusal: 4 MiB n_place is not Exceeds naming n_place with a bound between 1 MiB and 4 MiB")
-    want(std.string.find(runner.start_text(take oversized), 0u64, "n_place is 4194304") != None, "start refusal: the n_place message does not name its value")
     let split = refused_start(parent, clock, random, tasks, net, 2097152u64, N_PLACE)
     let both = match split {
         Disagrees(differ) => differ.name == "session.n_place" && differ.given == 2097152u64 && differ.used == N_PLACE,

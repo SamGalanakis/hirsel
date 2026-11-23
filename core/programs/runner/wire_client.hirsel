@@ -168,8 +168,10 @@ fn server[G: send, H: send, B: send](take seed: Server[G, H, B]) -> Result[(), s
     let pending = std.wsock.pending(config.socket)?
     let lease = option.unwrap(std.wsock.acquire(pending)?)
     let up = std.wsock.server(take socket, take lease, peer.ip, list.new(), config.socket, c, host.mono_ns(c))?
-    let service = runner.wire_place_target(place, random, take session_wire, head, c, tasks, config, "fixture")
-    let h = match runner.serve_connection(tasks, take up, take service, post, config, c) { Ok(take h) => take h, Error(cap) => return Error(Allocation(cap)) }
+    let service = runner.wire_target_service(random, take session_wire, head, c, tasks, config, "fixture")
+    let placed: Result[own[send] fn(mut runner.WireSession[G, B], take runner.ServiceAllocation) -> Result[runner.ServicePlan, u16], runner.RegisterError] = runner.wire_place_allocator(place, config.n_place)
+    let allocate = match take placed { Ok(take a) => take a, Error(_) => return Error(Protocol(1013u16)) }
+    let h = match runner.serve_connection(tasks, take up, take service, take allocate, post, config, c) { Ok(take h) => take h, Error(cap) => return Error(Allocation(cap)) }
     match task.join(take h) { Ok(take r) => take r, Error(_) => Error(Protocol(1008u16)) }
 }
 

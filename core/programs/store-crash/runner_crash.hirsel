@@ -440,8 +440,8 @@ fn accept(take seed: Accept) -> () waits {
         let (socket, peer) = result.unwrap(host.accept(mut l, Never))
         let lease = option.unwrap(result.unwrap(std.wsock.acquire(pool)))
         let up = result.unwrap(std.wsock.server(take socket, take lease, peer.ip, list.new(), config.socket, c, host.mono_ns(c)))
-        let service = runner.wire_place_target(code.describe(place), random, Some(runner.ingress.binding()), head, c, tasks, config, "crash fixture")
-        let owner = result.unwrap(runner.serve_connection(tasks, take up, take service, post, config, c))
+        let service = runner.wire_target_service(random, Some(runner.ingress.binding()), head, c, tasks, config, "crash fixture")
+        let owner = result.unwrap(runner.serve_connection(tasks, take up, take service, result.unwrap(runner.wire_place_allocator(code.describe(place), config.n_place)), post, config, c))
         list.push(mut owners, take owner)
     }
     for take owner in owners { let _ = task.join(take owner) }

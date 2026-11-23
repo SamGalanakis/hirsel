@@ -3,7 +3,7 @@
 // 32 bytes do not fit a 64-byte pool until one of the two blocks drops.
 pub fn law_pool_holds_writer_bytes(tasks: Tasks, clock: Clock) -> bool waits {
     let config = wire_defaults(0u64, 0u64)
-    let allocated: Result[(Sender[WireAllocation[()]], Task[()]), Capacity] = start_wire_pool(tasks, config, clock, 64u64, 2u64)
+    let allocated: Result[(Sender[WireAllocation[()]], Task[()]), Capacity] = start_wire_pool(tasks, config, clock, 64u64, 2u64, fn(mut context: (), take plan: ServiceAllocation) -> Result[ServicePlan, u16] { Error(1013u16) })
     let (pool, take pooled_task) = result.unwrap(take allocated)
     let (one_to, one_from): (Sender[Result[Bytes, std.wsock.Error]], Receiver[Result[Bytes, std.wsock.Error]]) = channel.new(1u64)
     let (two_to, two_from): (Sender[Result[Bytes, std.wsock.Error]], Receiver[Result[Bytes, std.wsock.Error]]) = channel.new(1u64)
@@ -152,7 +152,7 @@ pub fn law_pool_releases_cancelled_reader(tasks: Tasks, clock: Clock, random: Ra
     let pending = result.unwrap(std.wsock.pending(config.socket))
     // A second live lease leaves room for a duplicate refund to add a token.
     let other_slot = option.unwrap(result.unwrap(std.wsock.acquire(pending)))
-    let allocated: Result[(Sender[WireAllocation[()]], Task[()]), Capacity] = start_wire_pool(tasks, config, clock, 80u64, 2u64)
+    let allocated: Result[(Sender[WireAllocation[()]], Task[()]), Capacity] = start_wire_pool(tasks, config, clock, 80u64, 2u64, fn(mut context: (), take plan: ServiceAllocation) -> Result[ServicePlan, u16] { Error(1013u16) })
     let (pool, take pooled_task) = result.unwrap(take allocated)
     let (reply, result_from): (Sender[Result[Bytes, std.wsock.Error]], Receiver[Result[Bytes, std.wsock.Error]]) =
         channel.new(1u64)
@@ -218,7 +218,7 @@ fn test_pool_releases_cancelled_reader(tasks: Tasks, clock: Clock, random: Rando
 pub fn law_serving_budget() -> bool {
     let config = wire_defaults(65536u64, 1048576u64)
     let total = match serving_bytes(config, 10000u64) { Ok(n) => n, Error(_) => return false }
-    if total != 1125122048u64 { return false }
+    if total != 1126170624u64 { return false }
     if let Ok(_) = serving_bytes(config, 10001u64) { return false }
     let mut excessive = config
     excessive.n_pool = 0xffffffffffffffffu64

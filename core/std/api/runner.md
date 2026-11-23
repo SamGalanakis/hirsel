@@ -66,12 +66,9 @@ the Hello with 1008, so its clients must pass `credential`. `Some(runner.wire_bi
 bind, ..))` binds the same way and carries no grant, so granted entries stay
 `Refused(NotAllowed)`.
 
-**Sizing `n_place`.** One wire session must fit in 16 MiB, and its peak holds
-`n_place` twice (its registry state and its service job) next to `n_service`,
-`budget` and `socket.max_frame`. With `wire_defaults(65536, n_place)`, an `n_place` of
-1 MiB fits and 4 MiB does not; a place that does not fit is refused
-`Exceeds(n_place, value, most)`, where `most` is the largest `n_place` this
-configuration fits. A standalone place has one `n_place`, `PlaceConfig.n_place`: it
+**Sizing `n_place`.** The serving task builds the place's one Registry under
+`n_place` and every wire session plans against it, so `n_place` counts once in the
+serving budget, not per session. A standalone place has one `n_place`, `PlaceConfig.n_place`: it
 bounds `place` in the head and every session, and `Status` and Welcome report it.
 The wire configuration must repeat it, and one that does not is refused
 `Disagrees(name, given, used)` with both values. A standalone start ignores

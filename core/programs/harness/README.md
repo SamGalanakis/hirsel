@@ -155,6 +155,33 @@ body that writes to the transaction (MEM-30).
 - **Spend.** Spend is kept as `known` (settled usage), `reserved` (calls in
   flight) and `unresolved` (calls that may have been charged).
 
+## Provider wire formats
+
+`provider.hirsel` turns a `harness.Request` into the request body of the
+Anthropic Messages API or the OpenAI Chat Completions API, and reads the
+streamed reply back into a `harness.Answer`. It is pure: the transport passes
+each response chunk to `provider.feed` and asks `provider.answer` at the end.
+
+- **An answer needs its terminator.** `answer` succeeds only after Anthropic's
+  `message_stop` event or OpenAI's `data: [DONE]`, and only with a stop
+  reason. A stream that ends sooner, or carries an error event, has no answer.
+  The request was already sent by then, so the worker records doubt and does
+  not seal a partial reply.
+- **Deltas stay in memory.** Text and tool-argument pieces build up in a
+  `Stream` held by the worker, under `Bounds` on event bytes, body bytes, text
+  bytes, call count and argument bytes. Only the finished answer is stored.
+- **Usage.** Anthropic reports input tokens in `message_start` and cumulative
+  output tokens in `message_delta`, so the last value wins. The OpenAI body
+  asks for `stream_options.include_usage`, and the usage arrives in a final
+  chunk with no choices.
+- **Bodies.** Anthropic gets the system text at top level and every tool result
+  of one assistant turn as `tool_result` blocks in one user message, with
+  `is_error` set for failures. OpenAI gets a system message, assistant
+  arguments as a JSON string, and one `tool` message per result. `worded` is
+  the one place a tool outcome becomes text the model reads.
+- **Checked fragments.** Tool input schemas and call arguments are raw JSON
+  embedded in the body, so `body` checks each one before writing.
+
 ## Laws
 
 | law | claim | oracle |
@@ -168,5 +195,8 @@ body that writes to the transaction (MEM-30).
 | H1 `test_late_decisions_lapse` | A decision at or after a hold's expiry is Lapsed and the call is denied "approval expired", with or without the expiry timer having run. A timer that runs early changes nothing. | Hand-derived outcomes for hold times of 0 and 24 hours. |
 | K1 `test_parked_call_resumes_once` | An Inside tool that returns Later runs once and stays parked through further wakes. The first resume settles it with the given result and the round goes on; a second resume is ignored. | The tool's own run count and the bytes passed to resume. |
 | J1 `test_round_bytes_bounded` | The transaction that appends a user entry and prepares the model call writes the same bytes after 10 earlier entries as after 1,000, within 64 bytes. | `store.changes` between the snapshots around the transaction. A request body copied into any row or trigger argument would add about 198,000 bytes. |
+| S1 `test_documented_streams_read` | The Anthropic docs' tool-use stream and an OpenAI tool-call stream read to their documented answer (text, calls, joined arguments, stop reason, usage), fed whole or in pieces of 1, 2, 7 or 61 bytes. | The Anthropic streaming docs' example, copied verbatim, and a stream built from OpenAI's documented chunk schema; the expected answers are read off the fixtures by hand. |
+| S2 `test_answer_needs_terminator` | A stream cut before `message_stop` or `[DONE]`, cut inside a tool argument, or ending in an error event gives no answer. | Each provider's documented success terminator. |
+| W1 `test_request_bodies_follow_wire_format` | Bodies follow each provider's documented message shape: Anthropic groups one turn's tool results into one user message with `is_error`, and OpenAI sends arguments as a string and asks for usage. | The message shapes in each provider's API reference. |
 
 Open: a `std.sim.fs` crash cut at the same boundary as C1.

@@ -1,0 +1,195 @@
+// Offline laws for the provider wire formats. Each fixture comes from the
+// provider's public documentation, not from this code: the Anthropic stream is
+// the tool-use example of the Messages streaming page verbatim, and the OpenAI
+// stream is built from the documented chat.completion.chunk schema (first
+// tool_calls delta per index carries id and name, later ones only argument
+// pieces; a final usage chunk with empty choices, then `data: [DONE]`). The
+// docs' code block omits the blank line that ends the last event; a server
+// sends it, so the fixture ends with it. No law
+// reaches a network.
+
+fn anthropic_docs() -> String { "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_014p7gG3wDgGV9EUtLvnow3U\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-opus-5\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":472,\"output_tokens\":2},\"content\":[],\"stop_reason\":null}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\nevent: ping\ndata: {\"type\": \"ping\"}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Okay\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\",\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" let\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"'s\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" check\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" the\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" weather\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" for\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" San\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" Francisco\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\",\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" CA\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\":\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_01T1x1fJ34qAmk2tNTrN7Up6\",\"name\":\"get_weather\",\"input\":{}}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"location\\\":\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\" \\\"San\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\" Francisc\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"o,\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\" CA\\\"}\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":89}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n" }
+fn anthropic_cut() -> String { "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_014p7gG3wDgGV9EUtLvnow3U\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-opus-5\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":472,\"output_tokens\":2},\"content\":[],\"stop_reason\":null}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\nevent: ping\ndata: {\"type\": \"ping\"}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Okay\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\",\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" let\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"'s\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" check\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" the\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" weather\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" for\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" San\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" Francisco\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\",\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" CA\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\":\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_01T1x1fJ34qAmk2tNTrN7Up6\",\"name\":\"get_weather\",\"input\":{}}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"location\\\":\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\" \\\"San\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\" Francisc\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"o,\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\" CA\\\"}\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":89}}\n\n" }
+fn anthropic_error() -> String { "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_014p7gG3wDgGV9EUtLvnow3U\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-opus-5\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":472,\"output_tokens\":2},\"content\":[],\"stop_reason\":null}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\nevent: ping\ndata: {\"type\": \"ping\"}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Okay\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\",\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" let\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"'s\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" check\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" the\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" weather\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" for\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" San\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" Francisco\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\",\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" CA\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\":\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_01T1x1fJ34qAmk2tNTrN7Up6\",\"name\":\"get_weather\",\"input\":{}}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"location\\\":\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\" \\\"San\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\" Francisc\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"o,\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\" CA\\\"}\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\nevent: error\ndata: {\"type\": \"error\", \"error\": {\"type\": \"overloaded_error\", \"message\": \"Overloaded\"}}\n\n" }
+fn openai_tools() -> String { "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"logprobs\":null,\"finish_reason\":null}],\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Checking\"},\"logprobs\":null,\"finish_reason\":null}],\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" now.\"},\"logprobs\":null,\"finish_reason\":null}],\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_abc\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"\"}}]},\"logprobs\":null,\"finish_reason\":null}],\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"location\\\":\"}}]},\"logprobs\":null,\"finish_reason\":null}],\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\" \\\"Paris\\\"}\"}}]},\"logprobs\":null,\"finish_reason\":null}],\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"call_def\",\"type\":\"function\",\"function\":{\"name\":\"get_time\",\"arguments\":\"{}\"}}]},\"logprobs\":null,\"finish_reason\":null}],\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{},\"logprobs\":null,\"finish_reason\":\"tool_calls\"}],\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[],\"usage\":{\"prompt_tokens\":31,\"completion_tokens\":17,\"total_tokens\":48}}\n\ndata: [DONE]\n\n" }
+fn openai_cut() -> String { "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"logprobs\":null,\"finish_reason\":null}],\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Checking\"},\"logprobs\":null,\"finish_reason\":null}],\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" now.\"},\"logprobs\":null,\"finish_reason\":null}],\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_abc\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"\"}}]},\"logprobs\":null,\"finish_reason\":null}],\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"location\\\":\"}}]},\"logprobs\":null,\"finish_reason\":null}],\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\" \\\"Paris\\\"}\"}}]},\"logprobs\":null,\"finish_reason\":null}],\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"call_def\",\"type\":\"function\",\"function\":{\"name\":\"get_time\",\"arguments\":\"{}\"}}]},\"logprobs\":null,\"finish_reason\":null}],\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{},\"logprobs\":null,\"finish_reason\":\"tool_calls\"}],\"usage\":null}\n\ndata: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[],\"usage\":{\"prompt_tokens\":31,\"completion_tokens\":17,\"total_tokens\":48}}\n\n" }
+
+fn bytes_of(s: String) -> Bytes { string.into_bytes(clone(s)) }
+
+// The same body fed in pieces of `size` bytes, so every event boundary and
+// every line ending falls inside a chunk at least once across the sizes used.
+fn read_in(d: provider.Dialect, body: String, size: u64) -> Result[harness.Answer, String] {
+    let all = bytes_of(body)
+    let b = provider.bounds()
+    let mut dec = provider.decoder(b)
+    let mut st = provider.stream(d, b)
+    let mut at = 0u64
+    let n = list.len(all)
+    while at < n {
+        let mut piece: Bytes = list.new()
+        let mut j = at
+        while j < n && j < at + size {
+            list.push(mut piece, all[j])
+            j += 1u64
+        }
+        if provider.feed(mut dec, mut st, piece)? { break }
+        at = j
+    }
+    std.sse.finish(mut dec)
+    provider.answer(take st)
+}
+
+fn args_are(c: harness.Call, pointer: String, want: String) -> bool {
+    let Inline(raw) = view c.args else { return false }
+    let Ok(take s) = string.from_utf8(clone(raw)) else { return false }
+    region r {
+        match std.json.parse(r, s) {
+            Ok(x) => match std.json.pointer(x, pointer) {
+                Some(Str(t)) => text.as_string(t) == want,
+                _ => false,
+            },
+            Error(_) => false,
+        }
+    }
+}
+
+// The documented example: text "Okay, let's check the weather for San
+// Francisco, CA:", one get_weather call whose partial_json pieces join to
+// {"location": "San Francisco, CA"}, stop reason tool_use, 472 input tokens
+// from message_start and 89 output tokens from the cumulative message_delta.
+fn anthropic_ok(a: harness.Answer) -> bool {
+    a.text == "Okay, let's check the weather for San Francisco, CA:"
+        && list.len(a.calls) == 1u64
+        && a.calls[0].id == "toolu_01T1x1fJ34qAmk2tNTrN7Up6"
+        && a.calls[0].name == "get_weather"
+        && args_are(a.calls[0], "/location", "San Francisco, CA")
+        && a.stop == "tool_use"
+        && a.usage.input == 472u64
+        && a.usage.output == 89u64
+}
+
+fn openai_ok(a: harness.Answer) -> bool {
+    a.text == "Checking now."
+        && list.len(a.calls) == 2u64
+        && a.calls[0].id == "call_abc"
+        && a.calls[0].name == "get_weather"
+        && args_are(a.calls[0], "/location", "Paris")
+        && a.calls[1].id == "call_def"
+        && a.calls[1].name == "get_time"
+        && a.stop == "tool_calls"
+        && a.usage.input == 31u64
+        && a.usage.output == 17u64
+}
+
+// Law S1: a documented stream reads to the documented answer however the
+// transport splits it. Answers the first failing chunk size, or 0.
+@test
+fn test_documented_streams_read() -> Result[(), u64] {
+    let sizes = [1u64, 2u64, 7u64, 61u64, 100000u64]
+    for s in sizes {
+        match read_in(Anthropic, anthropic_docs(), s) {
+            Ok(a) => if !anthropic_ok(a) { return Error(s) },
+            Error(_) => return Error(s),
+        }
+        match read_in(OpenAi, openai_tools(), s) {
+            Ok(a) => if !openai_ok(a) { return Error(1000000u64 + s) },
+            Error(_) => return Error(1000000u64 + s),
+        }
+    }
+    Ok(())
+}
+
+// Law S2: no answer without the success terminator. A stream that stops
+// before `message_stop` or `[DONE]`, or carries an error event, has no
+// answer: the request went out, so the worker must record doubt rather than
+// seal a partial reply. Answers the failing case, or 0.
+@test
+fn test_answer_needs_terminator() -> Result[(), u64] {
+    if let Ok(_) = read_in(Anthropic, anthropic_cut(), 100000u64) { return Error(1u64) }
+    if let Ok(_) = read_in(Anthropic, anthropic_error(), 100000u64) { return Error(2u64) }
+    if let Ok(_) = read_in(OpenAi, openai_cut(), 100000u64) { return Error(3u64) }
+    // An Anthropic stream that is cut while a tool argument is half written.
+    let docs = anthropic_docs()
+    let half = string.from(string.slice(docs, 0u64, string.byte_len(docs) / 2u64 + 40u64))
+    if let Ok(_) = read_in(Anthropic, half, 100000u64) { return Error(4u64) }
+    Ok(())
+}
+
+fn request() -> harness.Request {
+    let mut calls: List[harness.Call] = list.new()
+    list.push(mut calls, harness.Call(id: "t1", name: "get_weather", args: Inline(bytes_of("{\"location\":\"Paris\"}"))))
+    list.push(mut calls, harness.Call(id: "t2", name: "get_time", args: Inline(bytes_of("{}"))))
+    let mut messages: List[harness.Entry] = list.new()
+    list.push(mut messages, User("weather and time in Paris?"))
+    list.push(mut messages, Assistant(harness.Answer(text: "", calls: take calls, stop: "tool_use", usage: harness.Usage(input: 0u64, output: 0u64))))
+    list.push(mut messages, ToolResult("t1", Returned(Inline(bytes_of("sunny")))))
+    list.push(mut messages, ToolResult("t2", Failed("clock offline")))
+    let mut tools: List[harness.ToolDef] = list.new()
+    list.push(mut tools, harness.ToolDef(name: "get_weather", about: "weather", input: "{\"type\":\"object\"}", rev: 1u64))
+    let mut system: List[String] = list.new()
+    list.push(mut system, "be brief")
+    harness.Request(route: "m", system: take system, tools: take tools, messages: take messages, key: bytes_of("k"))
+}
+
+fn str_is(x: std.json.Json, p: String, want: String) -> bool {
+    match std.json.pointer(x, p) { Some(Str(t)) => text.as_string(t) == want, _ => false }
+}
+
+fn is_true(x: std.json.Json, p: String) -> bool { match std.json.pointer(x, p) { Some(True) => true, _ => false } }
+fn is_false(x: std.json.Json, p: String) -> bool { match std.json.pointer(x, p) { Some(False) => true, _ => false } }
+fn is_obj(x: std.json.Json, p: String) -> bool { match std.json.pointer(x, p) { Some(Obj(_)) => true, _ => false } }
+fn absent(x: std.json.Json, p: String) -> bool { match std.json.pointer(x, p) { None => true, _ => false } }
+
+// Law W1: request bodies follow each provider's documented message shape.
+// Anthropic: system is top level, both results of one assistant turn go in
+// ONE user message as tool_result blocks (separate user messages are
+// rejected), a failed call is marked is_error, and tool_use input is a JSON
+// object. OpenAI: system is a message, assistant arguments are a JSON string,
+// each result is its own `tool` message, and usage is requested so the final
+// chunk can report spend. Answers the failing check, or 0.
+@test
+fn test_request_bodies_follow_wire_format() -> Result[(), u64] {
+    let anth = provider.Model(dialect: Anthropic, name: "claude-x", max_tokens: 1024u64)
+    let Ok(take a) = provider.body(anth, request()) else { return Error(1u64) }
+    let ok_a = region r {
+        match std.json.parse(r, a) {
+            Ok(x) => {
+                if !str_is(x, "/system", "be brief") { 2u64 }
+                else if !is_true(x, "/stream") { 3u64 }
+                else if !str_is(x, "/messages/1/role", "assistant") { 4u64 }
+                else if !str_is(x, "/messages/1/content/0/type", "tool_use") { 5u64 }
+                else if !str_is(x, "/messages/1/content/0/input/location", "Paris") { 6u64 }
+                else if !is_obj(x, "/messages/1/content/1/input") { 7u64 }
+                else if !str_is(x, "/messages/2/role", "user") { 8u64 }
+                else if !str_is(x, "/messages/2/content/0/tool_use_id", "t1") { 9u64 }
+                else if !is_false(x, "/messages/2/content/0/is_error") { 10u64 }
+                else if !str_is(x, "/messages/2/content/1/tool_use_id", "t2") { 11u64 }
+                else if !is_true(x, "/messages/2/content/1/is_error") { 12u64 }
+                else if !absent(x, "/messages/3") { 13u64 }
+                else if !is_obj(x, "/tools/0/input_schema") { 14u64 }
+                else { 0u64 }
+            },
+            Error(_) => 15u64,
+        }
+    }
+    if ok_a != 0u64 { return Error(ok_a) }
+    let oai = provider.Model(dialect: OpenAi, name: "gpt-x", max_tokens: 1024u64)
+    let Ok(take o) = provider.body(oai, request()) else { return Error(20u64) }
+    let ok_o = region r {
+        match std.json.parse(r, o) {
+            Ok(x) => {
+                if !str_is(x, "/messages/0/role", "system") { 21u64 }
+                else if !str_is(x, "/messages/2/tool_calls/0/function/arguments", "{\"location\":\"Paris\"}") { 22u64 }
+                else if !str_is(x, "/messages/3/role", "tool") { 23u64 }
+                else if !str_is(x, "/messages/3/tool_call_id", "t1") { 24u64 }
+                else if !str_is(x, "/messages/4/tool_call_id", "t2") { 25u64 }
+                else if !is_true(x, "/stream_options/include_usage") { 26u64 }
+                else if !is_obj(x, "/tools/0/function/parameters") { 27u64 }
+                else { 0u64 }
+            },
+            Error(_) => 28u64,
+        }
+    }
+    if ok_o != 0u64 { return Error(ok_o) }
+    Ok(())
+}

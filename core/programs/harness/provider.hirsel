@@ -1,0 +1,456 @@
+// Provider wire formats for the harness: the request body and the streamed
+// answer of the Anthropic Messages API and the OpenAI Chat Completions API.
+// Everything here is pure: the transport feeds response chunks to `feed` and
+// asks `answer` for the result. An answer exists only after the provider's
+// documented success terminator (Anthropic `message_stop`, OpenAI
+// `data: [DONE]`); anything short of it is an error, which the worker
+// records as doubt because the request was already sent.
+
+pub type Dialect: codec + send + key = Anthropic | OpenAi
+pub type Model: codec + send { dialect: Dialect, name: String, max_tokens: u64 }
+
+// Bounds on one streamed answer. Deltas accumulate here in memory only and
+// are never stored.
+pub type Bounds: codec + send { event_bytes: u64, body_bytes: u64, text_bytes: u64, calls: u64, args_bytes: u64 }
+
+pub fn bounds() -> Bounds {
+    Bounds(event_bytes: 1048576u64, body_bytes: 8388608u64, text_bytes: 262144u64, calls: 32u64, args_bytes: 65536u64)
+}
+
+// ---- how outcomes are worded for the model ----
+
+// The one place a tool outcome becomes model-visible text, with whether the
+// provider should see it as an error.
+pub fn worded(o: harness.Outcome) -> (String, bool) {
+    match o {
+        Returned(Inline(b)) => match string.from_utf8(clone(b)) {
+            Ok(take s) => (take s, false),
+            Error(_) => ("the tool returned bytes that are not text", true),
+        },
+        Returned(Blob(r)) => (cat("the tool returned a stored object of type ", r.mime), false),
+        Failed(why) => (cat("the tool failed: ", why), true),
+        Denied(why) => (cat("the call was not allowed: ", why), true),
+        InDoubt => ("the call was interrupted and may or may not have taken effect; check before repeating it", true),
+        Gone => ("this tool is no longer available", true),
+    }
+}
+
+fn cat(a: String, b: String) -> String {
+    let mut out = string.from(a)
+    string.push(mut out, b)
+    take out
+}
+
+// ---- request bodies ----
+
+fn joined(parts: List[String]) -> String {
+    let mut out = string.new()
+    for i in 0u64..list.len(parts) {
+        if i > 0u64 { string.push(mut out, "\n\n") }
+        string.push(mut out, parts[i])
+    }
+    take out
+}
+
+fn args_text(p: harness.Payload) -> Result[String, String] {
+    let Inline(b) = view p else { return Error("stored-object arguments cannot be sent yet") }
+    let Ok(take s) = string.from_utf8(clone(b)) else { return Error("tool arguments are not UTF-8") }
+    if let Error(_) = std.json.size(s) { return Error("tool arguments are not JSON") }
+    Ok(take s)
+}
+
+// Every raw JSON fragment the body embeds, checked before writing.
+fn checked(req: harness.Request) -> Result[(), String] {
+    for t in req.tools {
+        if let Error(_) = std.json.size(t.input) { return Error(cat("the input schema is not JSON for tool ", t.name)) }
+    }
+    for e in req.messages {
+        if let Assistant(a) = e { for c in a.calls { let _ = args_text(c.args)? } }
+    }
+    Ok(())
+}
+
+// The JSON request body for a model. A resend of the same request is the
+// same bytes.
+pub fn body(m: Model, req: harness.Request) -> Result[String, String] {
+    checked(req)?
+    let mut out = string.new()
+    std.json.write(mut out, false, fn(doc) {
+        std.json.object(doc, 0u64, fn(w, mut items) {
+            match m.dialect {
+                Anthropic => anthropic_body(w, mut items, m, req),
+                OpenAi => openai_body(w, mut items, m, req),
+            }
+        })
+    })
+    Ok(take out)
+}
+
+fn member_string(w: std.json.Writer, mut items: std.json.Items, key: String, value: String) {
+    std.json.write_member(w, mut items, key)
+    std.json.write_string_value(w, value)
+}
+
+fn member_raw(w: std.json.Writer, mut items: std.json.Items, key: String, raw: String) {
+    std.json.write_member(w, mut items, key)
+    let _ = std.json.write_raw(w, raw)
+}
+
+fn anthropic_body(w: std.json.Writer, mut items: std.json.Items, m: Model, req: harness.Request) {
+    member_string(w, mut items, "model", m.name)
+    std.json.write_member(w, mut items, "max_tokens")
+    let _ = std.json.write_u64(w, m.max_tokens)
+    std.json.write_member(w, mut items, "stream")
+    std.json.write_bool(w, true)
+    if list.len(req.system) > 0u64 { member_string(w, mut items, "system", joined(req.system)) }
+    if list.len(req.tools) > 0u64 {
+        std.json.write_member(w, mut items, "tools")
+        std.json.array(w, items.depth, fn(tw, mut tools) {
+            for t in req.tools {
+                std.json.element(tw, mut tools)
+                std.json.object(tw, tools.depth, fn(ow, mut o) {
+                    member_string(ow, mut o, "name", t.name)
+                    member_string(ow, mut o, "description", t.about)
+                    member_raw(ow, mut o, "input_schema", t.input)
+                })
+            }
+        })
+    }
+    std.json.write_member(w, mut items, "messages")
+    std.json.array(w, items.depth, fn(mw, mut msgs) {
+        let n = list.len(req.messages)
+        let mut i = 0u64
+        while i < n {
+            match req.messages[i] {
+                ToolResult(_, _) => {
+                    // Every result for one assistant turn goes in one user message.
+                    std.json.element(mw, mut msgs)
+                    std.json.object(mw, msgs.depth, fn(ow, mut o) {
+                        member_string(ow, mut o, "role", "user")
+                        std.json.write_member(ow, mut o, "content")
+                        std.json.array(ow, o.depth, fn(cw, mut cs) {
+                            while i < n {
+                                let ToolResult(id, outcome) = view req.messages[i] else { break }
+                                let (text, is_error) = worded(outcome)
+                                std.json.element(cw, mut cs)
+                                std.json.object(cw, cs.depth, fn(rw, mut r) {
+                                    member_string(rw, mut r, "type", "tool_result")
+                                    member_string(rw, mut r, "tool_use_id", id)
+                                    member_string(rw, mut r, "content", text)
+                                    std.json.write_member(rw, mut r, "is_error")
+                                    std.json.write_bool(rw, is_error)
+                                })
+                                i += 1u64
+                            }
+                        })
+                    })
+                    continue
+                },
+                Assistant(a) => {
+                    std.json.element(mw, mut msgs)
+                    std.json.object(mw, msgs.depth, fn(ow, mut o) {
+                        member_string(ow, mut o, "role", "assistant")
+                        std.json.write_member(ow, mut o, "content")
+                        std.json.array(ow, o.depth, fn(cw, mut cs) {
+                            if string.byte_len(a.text) > 0u64 || list.len(a.calls) == 0u64 {
+                                std.json.element(cw, mut cs)
+                                std.json.object(cw, cs.depth, fn(bw, mut b) {
+                                    member_string(bw, mut b, "type", "text")
+                                    member_string(bw, mut b, "text", a.text)
+                                })
+                            }
+                            for c in a.calls {
+                                let Ok(args) = args_text(c.args) else { continue }
+                                std.json.element(cw, mut cs)
+                                std.json.object(cw, cs.depth, fn(bw, mut b) {
+                                    member_string(bw, mut b, "type", "tool_use")
+                                    member_string(bw, mut b, "id", c.id)
+                                    member_string(bw, mut b, "name", c.name)
+                                    member_raw(bw, mut b, "input", args)
+                                })
+                            }
+                        })
+                    })
+                },
+                User(text) => user_message(mw, mut msgs, text),
+                Inform(text) => user_message(mw, mut msgs, text),
+                Reset(summary) => user_message(mw, mut msgs, summary),
+                _ => (),
+            }
+            i += 1u64
+        }
+    })
+}
+
+fn user_message(w: std.json.Writer, mut msgs: std.json.Items, text: String) {
+    std.json.element(w, mut msgs)
+    std.json.object(w, msgs.depth, fn(ow, mut o) {
+        member_string(ow, mut o, "role", "user")
+        member_string(ow, mut o, "content", text)
+    })
+}
+
+fn openai_body(w: std.json.Writer, mut items: std.json.Items, m: Model, req: harness.Request) {
+    member_string(w, mut items, "model", m.name)
+    std.json.write_member(w, mut items, "max_completion_tokens")
+    let _ = std.json.write_u64(w, m.max_tokens)
+    std.json.write_member(w, mut items, "stream")
+    std.json.write_bool(w, true)
+    std.json.write_member(w, mut items, "stream_options")
+    std.json.object(w, items.depth, fn(ow, mut o) {
+        std.json.write_member(ow, mut o, "include_usage")
+        std.json.write_bool(ow, true)
+    })
+    if list.len(req.tools) > 0u64 {
+        std.json.write_member(w, mut items, "tools")
+        std.json.array(w, items.depth, fn(tw, mut tools) {
+            for t in req.tools {
+                std.json.element(tw, mut tools)
+                std.json.object(tw, tools.depth, fn(ow, mut o) {
+                    member_string(ow, mut o, "type", "function")
+                    std.json.write_member(ow, mut o, "function")
+                    std.json.object(ow, o.depth, fn(fw, mut f) {
+                        member_string(fw, mut f, "name", t.name)
+                        member_string(fw, mut f, "description", t.about)
+                        member_raw(fw, mut f, "parameters", t.input)
+                    })
+                })
+            }
+        })
+    }
+    std.json.write_member(w, mut items, "messages")
+    std.json.array(w, items.depth, fn(mw, mut msgs) {
+        if list.len(req.system) > 0u64 { role_message(mw, mut msgs, "system", joined(req.system)) }
+        for e in req.messages {
+            match e {
+                User(text) => role_message(mw, mut msgs, "user", text),
+                Inform(text) => role_message(mw, mut msgs, "user", text),
+                Reset(summary) => role_message(mw, mut msgs, "user", summary),
+                Assistant(a) => {
+                    std.json.element(mw, mut msgs)
+                    std.json.object(mw, msgs.depth, fn(ow, mut o) {
+                        member_string(ow, mut o, "role", "assistant")
+                        std.json.write_member(ow, mut o, "content")
+                        if string.byte_len(a.text) > 0u64 { std.json.write_string_value(ow, a.text) } else { std.json.write_null(ow) }
+                        if list.len(a.calls) > 0u64 {
+                            std.json.write_member(ow, mut o, "tool_calls")
+                            std.json.array(ow, o.depth, fn(cw, mut cs) {
+                                for c in a.calls {
+                                    let Ok(args) = args_text(c.args) else { continue }
+                                    std.json.element(cw, mut cs)
+                                    std.json.object(cw, cs.depth, fn(bw, mut b) {
+                                        member_string(bw, mut b, "id", c.id)
+                                        member_string(bw, mut b, "type", "function")
+                                        std.json.write_member(bw, mut b, "function")
+                                        std.json.object(bw, b.depth, fn(fw, mut f) {
+                                            member_string(fw, mut f, "name", c.name)
+                                            // OpenAI sends arguments as a JSON string.
+                                            member_string(fw, mut f, "arguments", args)
+                                        })
+                                    })
+                                }
+                            })
+                        }
+                    })
+                },
+                ToolResult(id, outcome) => {
+                    let (text, _) = worded(outcome)
+                    std.json.element(mw, mut msgs)
+                    std.json.object(mw, msgs.depth, fn(ow, mut o) {
+                        member_string(ow, mut o, "role", "tool")
+                        member_string(ow, mut o, "tool_call_id", id)
+                        member_string(ow, mut o, "content", text)
+                    })
+                },
+                _ => (),
+            }
+        }
+    })
+}
+
+fn role_message(w: std.json.Writer, mut msgs: std.json.Items, role: String, text: String) {
+    std.json.element(w, mut msgs)
+    std.json.object(w, msgs.depth, fn(ow, mut o) {
+        member_string(ow, mut o, "role", role)
+        member_string(ow, mut o, "content", text)
+    })
+}
+
+// ---- streamed answers ----
+
+type Part: send { index: u64, id: String, name: String, args: String }
+
+// One answer being read. It lives only in the worker's memory.
+pub type Stream: send {
+    dialect: Dialect,
+    bounds: Bounds,
+    text: String,
+    parts: List[Part],
+    stop: String,
+    input: u64,
+    output: u64,
+    done: bool,
+    seen: u64,
+}
+
+pub fn stream(d: Dialect, b: Bounds) -> Stream {
+    Stream(dialect: d, bounds: b, text: string.new(), parts: list.new(), stop: string.new(), input: 0u64, output: 0u64, done: false, seen: 0u64)
+}
+
+pub fn decoder(b: Bounds) -> std.sse.Decoder { std.sse.decoder(b.event_bytes) }
+
+fn str_at(x: std.json.Json, p: String) -> Option[String] {
+    match std.json.pointer(x, p) {
+        Some(Str(t)) => Some(string.from(text.as_string(t))),
+        _ => None,
+    }
+}
+
+fn u64_at(x: std.json.Json, p: String) -> Option[u64] {
+    match std.json.pointer(x, p) {
+        Some(v) => std.json.as_u64(v),
+        None => None,
+    }
+}
+
+fn add_text(mut st: Stream, more: String) -> Result[(), String] {
+    if string.byte_len(st.text) + string.byte_len(more) > st.bounds.text_bytes { return Error("answer text exceeds its bound") }
+    string.push(mut st.text, more)
+    Ok(())
+}
+
+fn part_at(st: Stream, index: u64) -> Option[u64] {
+    for i in 0u64..list.len(st.parts) { if st.parts[i].index == index { return Some(i) } }
+    None
+}
+
+fn open_part(mut st: Stream, index: u64, take id: String, take name: String) -> Result[u64, String] {
+    if list.len(st.parts) >= st.bounds.calls { return Error("answer has more tool calls than its bound") }
+    list.push(mut st.parts, Part(index: index, id: take id, name: take name, args: string.new()))
+    Ok(list.len(st.parts) - 1u64)
+}
+
+fn add_args(mut st: Stream, at: u64, more: String) -> Result[(), String] {
+    if string.byte_len(st.parts[at].args) + string.byte_len(more) > st.bounds.args_bytes { return Error("tool arguments exceed their bound") }
+    string.push(mut st.parts[at].args, more)
+    Ok(())
+}
+
+fn anthropic_event(mut st: Stream, x: std.json.Json) -> Result[(), String] {
+    let kind = match str_at(x, "/type") { Some(take k) => take k, None => return Ok(()) }
+    if kind == "message_start" {
+        if let Some(n) = u64_at(x, "/message/usage/input_tokens") { st.input = n }
+        if let Some(n) = u64_at(x, "/message/usage/output_tokens") { st.output = n }
+    } else if kind == "content_block_start" {
+        if str_at(x, "/content_block/type") == Some("tool_use") {
+            let Some(index) = u64_at(x, "/index") else { return Error("tool block without an index") }
+            let Some(take id) = str_at(x, "/content_block/id") else { return Error("tool block without an id") }
+            let Some(take name) = str_at(x, "/content_block/name") else { return Error("tool block without a name") }
+            let _ = open_part(mut st, index, take id, take name)?
+        }
+    } else if kind == "content_block_delta" {
+        let delta = match str_at(x, "/delta/type") { Some(take d) => take d, None => return Ok(()) }
+        if delta == "text_delta" {
+            if let Some(take more) = str_at(x, "/delta/text") { add_text(mut st, more)? }
+        } else if delta == "input_json_delta" {
+            let Some(index) = u64_at(x, "/index") else { return Error("tool delta without an index") }
+            let Some(at) = part_at(st, index) else { return Error("tool delta for an unopened block") }
+            if let Some(take more) = str_at(x, "/delta/partial_json") { add_args(mut st, at, more)? }
+        }
+    } else if kind == "message_delta" {
+        if let Some(take why) = str_at(x, "/delta/stop_reason") { st.stop = take why }
+        // Usage in message_delta is cumulative, so the last one is the total.
+        if let Some(n) = u64_at(x, "/usage/output_tokens") { st.output = n }
+        if let Some(n) = u64_at(x, "/usage/input_tokens") { st.input = n }
+    } else if kind == "message_stop" {
+        st.done = true
+    } else if kind == "error" {
+        let why = match str_at(x, "/error/type") { Some(take t) => take t, None => "error" }
+        return Error(cat("provider error event: ", why))
+    }
+    // ping, content_block_stop and event types added later are ignored.
+    Ok(())
+}
+
+fn openai_chunk(mut st: Stream, x: std.json.Json) -> Result[(), String] {
+    if let Some(_) = std.json.pointer(x, "/error") { return Error("provider error chunk") }
+    if let Some(take more) = str_at(x, "/choices/0/delta/content") { add_text(mut st, more)? }
+    if let Some(Arr(calls)) = std.json.pointer(x, "/choices/0/delta/tool_calls") {
+        for i in 0u64..seq.len(calls) {
+            let Some(tc) = indexed.get(calls, i) else { continue }
+            let Some(index) = u64_at(tc, "/index") else { return Error("tool call delta without an index") }
+            let at = match part_at(st, index) {
+                Some(at) => at,
+                None => {
+                    let Some(take id) = str_at(tc, "/id") else { return Error("first tool call delta without an id") }
+                    let name = match str_at(tc, "/function/name") { Some(take n) => take n, None => string.new() }
+                    open_part(mut st, index, take id, take name)?
+                },
+            }
+            if let Some(take more) = str_at(tc, "/function/arguments") { add_args(mut st, at, more)? }
+        }
+    }
+    if let Some(take why) = str_at(x, "/choices/0/finish_reason") { st.stop = take why }
+    if let Some(n) = u64_at(x, "/usage/prompt_tokens") { st.input = n }
+    if let Some(n) = u64_at(x, "/usage/completion_tokens") { st.output = n }
+    Ok(())
+}
+
+fn on_event(mut st: Stream, data: Bytes) -> Result[(), String] {
+    if st.done { return Ok(()) }
+    let Ok(take s) = string.from_utf8(clone(data)) else { return Error("event data is not UTF-8") }
+    if st.dialect == OpenAi && s == "[DONE]" {
+        st.done = true
+        return Ok(())
+    }
+    region r {
+        match std.json.parse(r, s) {
+            Ok(x) => match st.dialect {
+                Anthropic => anthropic_event(mut st, x),
+                OpenAi => openai_chunk(mut st, x),
+            },
+            Error(_) => Error("event data is not JSON"),
+        }
+    }
+}
+
+// Feeds one response chunk. Answers whether the terminator has been seen.
+pub fn feed(mut dec: std.sse.Decoder, mut st: Stream, chunk: Bytes) -> Result[bool, String] {
+    st.seen += list.len(chunk)
+    if st.seen > st.bounds.body_bytes { return Error("response body exceeds its bound") }
+    let fed = std.sse.feed(mut dec, chunk, fn(name: Bytes, data: Bytes, id: Bytes) -> std.sse.FeedControl[String] {
+        match on_event(mut st, data) {
+            Ok(()) => if st.done { Stop } else { Continue },
+            Error(take why) => Fail(take why),
+        }
+    })
+    match take fed {
+        Ok(_) => Ok(st.done),
+        Error(Decode(_, _)) => Error("malformed event stream"),
+        Error(Callback(take why, _)) => Error(take why),
+    }
+}
+
+// The answer, only after the terminator and a stop reason; every tool call's
+// arguments must be JSON.
+pub fn answer(take st: Stream) -> Result[harness.Answer, String] {
+    if !st.done { return Error("stream ended before its terminator") }
+    if string.byte_len(st.stop) == 0u64 { return Error("stream ended without a stop reason") }
+    let Stream(text: take text, parts: take parts, stop: take stop, input: input, output: output, ..) = take st
+    let mut calls: List[harness.Call] = list.new()
+    for p in parts {
+        let args = if string.byte_len(p.args) == 0u64 { "{}" } else { clone(p.args) }
+        if let Error(_) = std.json.size(args) { return Error(cat("tool arguments are not JSON for ", p.name)) }
+        list.push(mut calls, harness.Call(id: clone(p.id), name: clone(p.name), args: Inline(string.into_bytes(take args))))
+    }
+    Ok(harness.Answer(text: take text, calls: take calls, stop: take stop, usage: harness.Usage(input: input, output: output)))
+}
+
+// A whole response body at once: what the transport does chunk by chunk.
+pub fn read(d: Dialect, b: Bounds, body: Bytes) -> Result[harness.Answer, String] {
+    let mut dec = decoder(b)
+    let mut st = stream(d, b)
+    let _ = feed(mut dec, mut st, body)?
+    std.sse.finish(mut dec)
+    answer(take st)
+}

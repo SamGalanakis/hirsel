@@ -1,0 +1,443 @@
+// Bucket authority (STORE-SPEC row 12). The bucket holds the packs and every
+// MANIFEST generation. The local directory holds the journal and a mirror of
+// the packs and the current MANIFEST, byte for byte.
+
+const BUCKET_PART_BYTES: u64 = 8388608
+
+// Parts in flight per `parts` call.
+const BUCKET_PART_BATCH: u64 = 4
+
+const BUCKET_LIST_PAGE: u64 = 1000
+
+type BucketWriter {
+    client: std.object.Client,
+    claim: BucketClaim,
+    op_ms: u64,
+    // The first bucket failure stops the writer until the store is reopened.
+    failed: Option[Error]
+}
+
+fn bucket_failed(db: Db) -> Result[(), Error] {
+    for conn in db.disk {
+        if let Some(w) = conn.bucket {
+            if let Some(e) = w.failed {
+                return Error(clone(e))
+            }
+        }
+    }
+    Ok(())
+}
+
+fn bucket_claim_of(db: Db) -> Option[BucketClaim] {
+    if list.len(db.disk) == 0 {
+        return None
+    }
+    match db.disk[0u64].bucket {
+        Some(w) => Some(clone(w.claim)),
+        None => None,
+    }
+}
+
+fn manifest_key(generation: u64) -> String {
+    let mut digits = string.from("")
+    string.push_u64(mut digits, generation)
+    let mut out = string.from("MANIFEST-")
+    for _ in string.byte_len(digits) .. 20 {
+        string.push_char(mut out, '0')
+    }
+    string.push(mut out, digits)
+    take out
+}
+
+fn same_place(claim: BucketClaim, place: std.object.Bucket) -> bool {
+    claim.bucket == place.bucket && claim.prefix == place.prefix
+}
+
+fn place_claim(place: std.object.Bucket, epoch: u64, holder: StoreId) -> BucketClaim {
+    let style: u8 = match place.style {
+        Virtual => 0,
+        Path => 1,
+    }
+    BucketClaim(epoch, holder, endpoint: clone(place.endpoint), aws_region: clone(place.aws_region), bucket: clone(place.bucket), prefix: clone(place.prefix), style)
+}
+
+fn key_number(key: String, lead: String) -> Option[u64] {
+    if !string.starts_with(key, lead) {
+        return None
+    }
+    let digits = string.slice(key, string.byte_len(lead), string.byte_len(key))
+    if string.byte_len(digits) == 0 {
+        return None
+    }
+    for b in string.as_bytes(digits) {
+        if b < b'0' || b > b'9' {
+            return None
+        }
+    }
+    let parsed: Result[u64, ParseError] = int.parse(digits)
+    match parsed {
+        Ok(n) => Some(n),
+        Error(_) => None,
+    }
+}
+
+// Lists every key under `lead` after `after`, as number and size.
+fn bucket_numbered(mut client: std.object.Client, op_ms: u64, lead: String, after: String) -> Result[List[(u64, u64)], Error] waits {
+    let mut found: List[(u64, u64)] = list.new()
+    let mut entries: List[std.object.Entry] = list.with_capacity(BUCKET_LIST_PAGE)
+    let mut from = string.from(after)
+    loop {
+        list.clear(mut entries)
+        let due_ns = std.object.deadline_after_ms(client, op_ms)
+        let page = match std.object.list(mut client, lead, from, mut entries, due_ns) {
+            Ok(value) => value,
+            Error(take e) => return Error(Remote(take e)),
+        }
+        for item in entries {
+            if let Some(n) = key_number(std.object.key_text(item.key), lead) {
+                list.push(mut found, (n, item.size))
+            }
+        }
+        if !page.truncated || list.len(entries) == 0 {
+            return Ok(take found)
+        }
+        from = std.object.key_text(page.after)
+    }
+}
+
+fn bucket_fetch(mut client: std.object.Client, op_ms: u64, key: String, size: u64) -> Result[Bytes, Error] waits {
+    let into = disk_allocation(scoped fn() -> Result[Bytes, Error] {
+        Ok(list.with_capacity(size))
+    })?
+    let due_ns = std.object.deadline_after_ms(client, op_ms)
+    let (take fetched, take data) = std.object.fetch(mut client, key, take into, due_ns)
+    match take fetched {
+        Ok(meta) => {
+            if meta.size != size || list.len(data) != size {
+                return Error(disk_fault(key, 0, Truncated))
+            }
+            Ok(take data)
+        },
+        Error(take e) => Error(Remote(take e)),
+    }
+}
+
+// The no-clobber publish of one generation is the writer fence.
+fn bucket_put_manifest(mut client: std.object.Client, op_ms: u64, generation: u64, raw: Bytes) -> Result[bool, Error] waits {
+    let body: Bytes = clone(raw)
+    let due_ns = std.object.deadline_after_ms(client, op_ms)
+    let (take stored, _) = std.object.store_no_clobber(mut client, manifest_key(generation), take body, due_ns)
+    match take stored {
+        Ok(Created(_)) => Ok(true),
+        Ok(Exists) => Ok(false),
+        Error(take e) => Error(Remote(take e)),
+    }
+}
+
+fn bucket_abort_pending(mut client: std.object.Client, op_ms: u64) -> Result[(), Error] waits {
+    loop {
+        let mut handles: List[std.object.Upload] = list.new()
+        let due_ns = std.object.deadline_after_ms(client, op_ms)
+        let more = match std.object.pending_uploads(mut client, "", mut handles, due_ns) {
+            Ok(value) => value,
+            Error(take e) => return Error(Remote(take e)),
+        }
+        for take u in take handles {
+            let abort_ns = std.object.deadline_after_ms(client, op_ms)
+            if let Error(take e) = std.object.abort(mut client, take u, abort_ns) {
+                return Error(Remote(take e))
+            }
+        }
+        if !more {
+            return Ok(())
+        }
+    }
+}
+
+fn bucket_mirror_pack(mut client: std.object.Client, op_ms: u64, d: Dir, seq: u64, size: u64) -> Result[(), Error] waits {
+    let path = paged_pack_path(seq)?
+    if disk_exists(d, path)? {
+        return Ok(())
+    }
+    let raw = bucket_fetch(mut client, op_ms, path, size)?
+    let mut temporary = string.from(path)
+    string.push(mut temporary, ".tmp")
+    disk_write_synced(d, temporary, raw)?
+    disk_io(host.rename(d, temporary, path))
+}
+
+type LocalHead {
+    id: StoreId,
+    generation: u64,
+    holder: StoreId
+}
+
+type Listed {
+    number: u64,
+    size: u64
+}
+
+fn bucket_local(d: Dir, place: std.object.Bucket) -> Result[Option[LocalHead], Error] waits {
+    let (id, take m) = match read_page_manifest_file(d) {
+        Ok(take found) => take found,
+        Error(Io(NotFound)) => return Ok(None),
+        Error(take e) => return Error(take e),
+    }
+    let holder = match m.claim {
+        Some(claim) => {
+            if !same_place(claim, place) {
+                return Error(Foreign)
+            }
+            claim.holder
+        },
+        None => return Error(Unsupported(0)),
+    }
+    Ok(Some(LocalHead(id, generation: m.generation, holder: holder)))
+}
+
+fn bucket_newest(mut client: std.object.Client, op_ms: u64, after: String) -> Result[Option[Listed], Error] waits {
+    let generations = bucket_numbered(mut client, op_ms, "MANIFEST-", after)?
+    let mut newest: Option[Listed] = None
+    for item in generations {
+        let (number, size) = item
+        let better = match newest {
+            Some(best) => number > best.number,
+            None => true,
+        }
+        if better {
+            newest = Some(Listed(number, size))
+        }
+    }
+    Ok(newest)
+}
+
+// Creates generation 1. False when another writer created the store first.
+fn bucket_genesis(mut client: std.object.Client, r: Random, op_ms: u64, d: Dir, claim: BucketClaim) -> Result[bool, Error] waits {
+    let id = capacity(disk_identity(r))?
+    let mut genesis = page_manifest_empty()
+    genesis.claim = Some(clone(claim))
+    let raw = disk_page_manifest_bytes(id, genesis)?
+    if !bucket_put_manifest(mut client, op_ms, 1, raw)? {
+        return Ok(false)
+    }
+    let (take segment, take end_file) = disk_new_segment(d, id, 1, 0)?
+    disk_io(host.close(take segment))?
+    disk_io(host.close(take end_file))?
+    publish_page_manifest_bytes(d, raw)?
+    Ok(true)
+}
+
+// Claims the generation after `newest` and brings the directory to it.
+fn bucket_adopt(mut client: std.object.Client, op_ms: u64, d: Dir, place: std.object.Bucket, local: Option[LocalHead], holder: StoreId, newest: Listed) -> Result[BucketClaim, Error] waits {
+    let generation = newest.number
+    let key = manifest_key(generation)
+    let raw = bucket_fetch(mut client, op_ms, key, newest.size)?
+    let (id, take found) = disk_read_page_manifest(key, raw)?
+    if found.generation != generation {
+        return Error(disk_fault(key, 72, Malformed))
+    }
+    let (remote_epoch, remote_holder) = match found.claim {
+        Some(remote) => {
+            if !same_place(remote, place) {
+                return Error(Foreign)
+            }
+            (remote.epoch, remote.holder)
+        },
+        None => return Error(Unsupported(0)),
+    }
+    let mut fresh = true
+    if let Some(head) = local {
+        if !same(head.id, id) {
+            return Error(Foreign)
+        }
+        // A foreign holder took the store after this directory's last
+        // generation, so the directory's later commits are not the store's.
+        if !same(head.holder, remote_holder) {
+            return Error(Fenced(remote_epoch))
+        }
+        fresh = false
+    }
+    // Skip every pack number already used, so an orphan pack left by a
+    // crashed writer never meets a later pack's no-clobber upload.
+    let packs = bucket_numbered(mut client, op_ms, "p-", "")?
+    let mut next_pack = found.next_pack
+    for item in packs {
+        let (seq, _) = item
+        if seq >= next_pack {
+            next_pack = seq + 1
+        }
+    }
+    let claim = place_claim(place, remote_epoch + 1, holder)
+    let first_live = found.first_live
+    let live_packs = found.next_pack
+    let mut claimed = take found
+    claimed.generation = generation + 1
+    claimed.next_pack = next_pack
+    claimed.claim = Some(clone(claim))
+    let claim_raw = disk_page_manifest_bytes(id, claimed)?
+    if !bucket_put_manifest(mut client, op_ms, generation + 1, claim_raw)? {
+        return Error(Fenced(claim.epoch))
+    }
+    bucket_abort_pending(mut client, op_ms)?
+    if fresh {
+        for item in packs {
+            let (seq, size) = item
+            if seq < live_packs {
+                bucket_mirror_pack(mut client, op_ms, d, seq, size)?
+            }
+        }
+        let (take segment, take end_file) = disk_new_segment(d, id, first_live, 0)?
+        disk_io(host.close(take segment))?
+        disk_io(host.close(take end_file))?
+    }
+    publish_page_manifest_bytes(d, claim_raw)?
+    Ok(take claim)
+}
+
+// Brings the local directory to the bucket's newest generation and claims
+// the next one. A fresh directory takes a new holder. One that already holds
+// a MANIFEST must hold the newest generation's claim.
+fn bucket_prepare(d: Dir, r: Random, place: std.object.Bucket, create: bool, mut client: std.object.Client, op_ms: u64) -> Result[BucketClaim, Error] waits {
+    let local = bucket_local(d, place)?
+    let (holder, local_generation) = match local {
+        Some(head) => (head.holder, head.generation),
+        None => (capacity(disk_identity(r))?, 0u64),
+    }
+    let after = if local_generation > 1 {
+        manifest_key(local_generation - 1)
+    } else {
+        string.from("")
+    }
+    let mut attempts = 0u64
+    while attempts < 2 {
+        attempts += 1
+        if let Some(newest) = bucket_newest(mut client, op_ms, after)? {
+            if newest.number < local_generation {
+                return Error(disk_fault("MANIFEST", 0, Gap(local_generation)))
+            }
+            return bucket_adopt(mut client, op_ms, d, place, local, holder, newest)
+        }
+        if local_generation != 0 {
+            return Error(disk_fault("MANIFEST", 0, Gap(local_generation)))
+        }
+        if !create {
+            return Error(NotFound)
+        }
+        let claim = place_claim(place, 1, holder)
+        if bucket_genesis(mut client, r, op_ms, d, claim)? {
+            return Ok(claim)
+        }
+        // Another writer created the store first: adopt it.
+    }
+    Error(Fenced(1))
+}
+
+pub fn open_bucket(tasks: Tasks, d: Dir, c: Clock, r: Random, options: Options, take client: std.object.Client, op_ms: u64) -> Result[Db, Error] waits {
+    let place: std.object.Bucket = match options.authority {
+        Bucket(b) => clone(b),
+        Directory() => return Error(Unsupported(0)),
+    }
+    open_checks(options)?
+    let lock = disk_lock(d, c, options.lock_wait_ms)?
+    if disk_exists(d, "EXPORT")? {
+        return Error(ExportDirectory)
+    }
+    let mut remote = take client
+    let claim = bucket_prepare(d, r, place, options.create, mut remote, op_ms)?
+    let startup = disk_start(d, r, options)?
+    let writer = BucketWriter(client: take remote, claim: take claim, op_ms, failed: None)
+    open_started(tasks, d, c, options, DiskSession(lock: take lock, startup: take startup), Some(take writer))
+}
+
+// Uploads one local pack. A pack already at its number was left by a writer
+// that lost the claim before publishing it: no generation references it, so
+// the claim holder overwrites it. Any generation at or past this one means
+// this writer lost the claim instead.
+fn bucket_put_pack(mut w: BucketWriter, d: Dir, seq: u64, generation: u64) -> Result[(), Error] waits {
+    if bucket_send_pack(mut w, d, seq, NoClobber)? {
+        return Ok(())
+    }
+    let newer = bucket_numbered(mut w.client, w.op_ms, "MANIFEST-", manifest_key(generation - 1))?
+    for item in newer {
+        let (number, _) = item
+        if number >= generation {
+            return Error(Fenced(w.claim.epoch))
+        }
+    }
+    if bucket_send_pack(mut w, d, seq, Overwrite)? {
+        return Ok(())
+    }
+    Error(Fenced(w.claim.epoch))
+}
+
+// True when the upload created or replaced the key, false on Exists.
+fn bucket_send_pack(mut w: BucketWriter, d: Dir, seq: u64, mode: std.object.Mode) -> Result[bool, Error] waits {
+    let path = paged_pack_path(seq)?
+    let mut handle = disk_io(host.open(d, path, Read))?
+    let size = disk_io(host.stat_file(mut handle))?.size
+    let due_ns = std.object.deadline_after_ms(w.client, w.op_ms)
+    let mut u = match std.object.upload(mut w.client, path, mode, due_ns) {
+        Ok(take value) => take value,
+        Error(take e) => return Error(Remote(take e)),
+    }
+    let mut at = 0u64
+    while at < size {
+        let mut bodies: List[Bytes] = list.with_capacity(BUCKET_PART_BATCH)
+        while list.len(bodies) < BUCKET_PART_BATCH && at < size {
+            let n = order.min(BUCKET_PART_BYTES, size - at)
+            let part = match read_disk_bytes(mut handle, path, at, n) {
+                Ok(take value) => take value,
+                Error(take e) => {
+                    let abort_ns = std.object.deadline_after_ms(w.client, w.op_ms)
+                    let _ = std.object.abort(mut w.client, take u, abort_ns)
+                    return Error(take e)
+                },
+            }
+            list.push(mut bodies, take part)
+            at += n
+        }
+        let batch_ns = std.object.deadline_after_ms(w.client, w.op_ms)
+        let (take sent, _) = std.object.parts(mut w.client, mut u, take bodies, batch_ns)
+        if let Error(take e) = sent {
+            let abort_ns = std.object.deadline_after_ms(w.client, w.op_ms)
+            let _ = std.object.abort(mut w.client, take u, abort_ns)
+            return Error(Remote(take e))
+        }
+    }
+    disk_io(host.close(take handle))?
+    let complete_ns = std.object.deadline_after_ms(w.client, w.op_ms)
+    match std.object.complete(mut w.client, take u, complete_ns) {
+        Ok(Created(_)) => Ok(true),
+        Ok(Exists) => Ok(false),
+        Error(take e) => Error(Remote(take e)),
+    }
+}
+
+// Uploads the cut's new packs, then publishes its generation. Only a created
+// MANIFEST lets the cut advance; any failure stops the writer.
+fn bucket_publish(mut db: Db, first_pack: u64, end_pack: u64, generation: u64, manifest: Bytes) -> Result[(), Error] waits {
+    let d = db.disk[0u64].d
+    let Some(take writer) = replace(mut db.disk[0u64].bucket, None) else {
+        return Ok(())
+    }
+    let mut w = take writer
+    let mut outcome: Result[(), Error] = Ok(())
+    for seq in first_pack .. end_pack {
+        if let Error(take e) = bucket_put_pack(mut w, d, seq, generation) {
+            outcome = Error(take e)
+            break
+        }
+    }
+    if let Ok(()) = outcome {
+        outcome = match bucket_put_manifest(mut w.client, w.op_ms, generation, manifest) {
+            Ok(true) => Ok(()),
+            Ok(false) => Error(Fenced(w.claim.epoch)),
+            Error(take e) => Error(take e),
+        }
+    }
+    if let Error(e) = outcome {
+        w.failed = Some(clone(e))
+    }
+    db.disk[0u64].bucket = Some(take w)
+    take outcome
+}

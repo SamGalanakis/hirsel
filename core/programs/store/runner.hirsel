@@ -1031,6 +1031,8 @@ fn push_store_error(mut line: String, problem: store.Error) {
         Foreign => string.push(mut line, "a handle from another store"),
         MigrationFault => string.push(mut line, "the migration faulted"),
         ExportDirectory => string.push(mut line, "an export directory, not a place store"),
+        Fenced(_) => string.push(mut line, "another writer claimed the bucket store"),
+        Remote(_) => string.push(mut line, "a bucket operation failed"),
     }
 }
 

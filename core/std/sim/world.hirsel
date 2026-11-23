@@ -149,11 +149,18 @@ pub fn detach(mut w: World) -> Plan {
 
 /// Drives virtual timers at quiescence. Returns when no timer remains.
 pub fn run(mut w: World) waits {
-    loop {
-        match clock.idle(mut w.hand) {
-            Some(at) => clock.advance_to(mut w.hand, at),
-            None => return
-        }
+    while step(mut w) {}
+}
+
+/// Waits for quiescence and advances the clock to the earliest pending
+/// timer. False when there was none.
+pub fn step(mut w: World) -> bool waits {
+    match clock.idle(mut w.hand) {
+        Some(at) => {
+            clock.advance_to(mut w.hand, at)
+            true
+        },
+        None => false
     }
 }
 

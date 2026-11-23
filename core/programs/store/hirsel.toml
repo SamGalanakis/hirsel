@@ -13,6 +13,7 @@ std = { major = 1 }
 "store-locations.hirsel" = "store"
 "store-packs.hirsel" = "store"
 "store-scrub.hirsel" = "store"
+"store-bucket.hirsel" = "store"
 "main.hirsel" = "main"
 "ingress.hirsel" = "ingress"
 "triggers.hirsel" = "triggers"
@@ -34,7 +35,7 @@ module = "main"
 
 [tests]
 limit = 67108864
-grants = ["Clock", "Random", "Tasks", "Net=Listen 127.0.0.0/8 0-65535;Connect 127.0.0.0/8 0-65535"]
+grants = ["Clock", "Random", "Tasks", "Env=HIRSEL_TEST_SIM_SEED", "Net=Listen 127.0.0.0/8 0-65535;Connect 127.0.0.0/8 0-65535"]
 dirs = ["."]
 
 [tests.sources]
@@ -46,9 +47,19 @@ dirs = ["."]
 "runner_wire.hirsel" = "runner_wire"
 "launcher_wire.hirsel" = "launcher"
 "platform_laws.hirsel" = "platform"
+"bucket_laws.hirsel" = "store"
 
 [tests.runs."store@1/store/frame_size_boundary"]
 limit = 134217728
+
+[tests.runs."store@1/store/bucket_test_l4_cut"]
+limit = 536870912
+
+[tests.runs."store@1/store/bucket_test_fence"]
+limit = 536870912
+
+[tests.runs."store@1/store/bucket_test_soak"]
+limit = 536870912
 
 [tests.runs."store@1/store/disk_pack_bound"]
 limit = 536870912

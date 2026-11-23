@@ -1,8 +1,20 @@
 /// One fault per connection, selected before any request octets arrive.
 pub type Fault: send = Clean | ResetBeforeBody | ResetAfterBody | Stall(u64) | InternalError | SlowDown | CompleteError | MalformedComplete | CutResponse(u64) | RequireResume(u64)
 
+/// Kills the writer's connections at a wire cut. Requests to `address` are
+/// numbered from 1. The first `after` are served. Request `after + 1` is
+/// applied without a reply when `apply` is true and dropped otherwise, and
+/// every later one is dropped. Connections to `spare` are never cut and
+/// draw no fault.
+pub type Cut: send {
+    after: u64,
+    apply: bool,
+    spare: Addr
+}
+
 pub type Config: send {
     address: Addr,
+    cut: Option[Cut],
     network: sim.net.Network,
     after_resolve: Option[sim.net.Network],
     credential: String,
@@ -21,6 +33,8 @@ pub type Object: send {
 
 pub type Report: send {
     objects: Map[String, Object],
+    // The keys of multipart uploads neither completed nor aborted.
+    pending: List[String],
     writes: u64,
     attempts: u64,
     withdrawn: u64
@@ -36,7 +50,8 @@ type Bucket {
     objects: Map[String, Object],
     uploads: Map[String, Upload],
     next_upload: u64,
-    writes: u64
+    writes: u64,
+    served: u64
 }
 
 type Target {
@@ -488,6 +503,51 @@ fn list_objects(objects: Map[String, Object], query: Map[String, String]) -> Res
     reply(200, xml)
 }
 
+fn list_uploads(uploads: Map[String, Upload], query: Map[String, String]) -> Response {
+    let mut prefix = string.from("")
+    if let Some(raw) = map.get(query, "prefix") {
+        let Some(take value) = decode(raw) else {
+            return error(400, "InvalidArgument")
+        }
+        prefix = take value
+    }
+    let limit = if let Some(raw) = map.get(query, "max-uploads") {
+        let Some(n) = u64_field(raw) else {
+            return error(400, "InvalidArgument")
+        }
+        order.min(n, 1000u64)
+    } else {
+        1000
+    }
+    let mut xml = string.from("<ListMultipartUploadsResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">")
+    element(mut xml, "Prefix", prefix)
+    let mut body = string.from("")
+    let mut count = 0u64
+    let mut truncated = false
+    for id in sorted_keys(uploads) {
+        let upload = option.unwrap(map.get(uploads, id))
+        if string.starts_with(upload.key, prefix) {
+            if count == limit {
+                truncated = true
+                break
+            }
+            string.push(mut body, "<Upload>")
+            element(mut body, "Key", upload.key)
+            element(mut body, "UploadId", id)
+            string.push(mut body, "</Upload>")
+            count += 1
+        }
+    }
+    element(mut xml, "IsTruncated", if truncated {
+        "true"
+    } else {
+        "false"
+    })
+    string.push(mut xml, body)
+    string.push(mut xml, "</ListMultipartUploadsResult>")
+    reply(200, xml)
+}
+
 fn put(mut bucket: Bucket, key: String, take data: Bytes, take meta: Map[String, String]) -> String {
     let tag = etag(data)
     map.insert(mut bucket.objects, clone(key), Object(data: take data, etag: clone(tag), metadata: take meta))
@@ -682,6 +742,9 @@ fn dispatch(config: Config, mut bucket: Bucket, req: Request, take body: Bytes, 
         return begin(mut bucket, req)
     }
     if req.method == "GET" && req.target.key == "" {
+        if map.get(req.target.query, "uploads") != None {
+            return list_uploads(bucket.uploads, req.target.query)
+        }
         if let Some(v) = map.get(req.target.query, "list-type") {
             if v == "2" {
                 return list_objects(bucket.objects, req.target.query)
@@ -750,11 +813,12 @@ type Peer {
     outgoing: Bytes,
     sent: u64,
     read_closed: bool,
-    write_closed: bool
+    write_closed: bool,
+    spare: bool
 }
 
-fn new_peer(fault: Fault, take plan: sim.world.Plan) -> Peer {
-    Peer(fault: fault, plan: take plan, state: Reading, head: http1.head(), cursor: http1.cursor(), incoming: list.new(), outgoing: list.new(), sent: 0, read_closed: false, write_closed: false)
+fn new_peer(fault: Fault, take plan: sim.world.Plan, spare: bool) -> Peer {
+    Peer(fault: fault, plan: take plan, state: Reading, head: http1.head(), cursor: http1.cursor(), incoming: list.new(), outgoing: list.new(), sent: 0, read_closed: false, write_closed: false, spare: spare)
 }
 
 fn respond(mut peer: Peer, response: Response, head: bool) {
@@ -841,8 +905,23 @@ fn received(config: Config, mut bucket: Bucket, mut peer: Peer) {
         respond(mut peer, error(403, "SignatureDoesNotMatch"), head)
         return
     }
+    let mut silent = false
+    if let Some(cut) = config.cut {
+        if !peer.spare {
+            bucket.served += 1
+            if bucket.served > cut.after {
+                if !cut.apply || bucket.served > cut.after + 1 {
+                    peer.state = ResetPeer
+                    return
+                }
+                silent = true
+            }
+        }
+    }
     let response = dispatch(config, mut bucket, req, take body, peer.fault)
-    if let ResetAfterBody = peer.fault {
+    if silent {
+        peer.state = ResetPeer
+    } else if let ResetAfterBody = peer.fault {
         peer.state = ResetPeer
     } else {
         respond(mut peer, response, head)
@@ -989,7 +1068,7 @@ pub fn serve(n: Config, mut plan: sim.world.Plan, clock: Clock, take served: Ser
         fail("sim.s3 needs a positive fragment size and a 412 or 304 dialect")
     }
     let mut port = take served
-    let mut bucket = Bucket(objects: map.new(), uploads: map.new(), next_upload: 1, writes: 0)
+    let mut bucket = Bucket(objects: map.new(), uploads: map.new(), next_upload: 1, writes: 0, served: 0)
     let mut peers: Map[u64, Peer] = map.new()
     let mut next = 1u64
     let mut dns_changed = false
@@ -998,16 +1077,20 @@ pub fn serve(n: Config, mut plan: sim.world.Plan, clock: Clock, take served: Ser
         let op = provide.net_op(call)
         match op {
             Connect(addr: addr) => {
-                if !same_addr(addr, n.address) {
+                let spare = match n.cut {
+                    Some(cut) => same_addr(addr, cut.spare),
+                    None => false,
+                }
+                if !spare && !same_addr(addr, n.address) {
                     let _ = answer(mut port, take call, Failed(Refused))
                 } else if answer(mut port, take call, Socket(next, addr)) {
-                    let fault = if list.len(n.faults) == 0 {
+                    let fault = if spare || list.len(n.faults) == 0 {
                         Clean
                     } else {
                         n.faults[sim.world.pick(mut plan, list.len(n.faults))]
                     }
                     let stream = sim.world.plan(sim.world.pick(mut plan, 0xffffffffffffffff))
-                    map.insert(mut peers, next, new_peer(fault, take stream))
+                    map.insert(mut peers, next, new_peer(fault, take stream, spare))
                     next += 1
                 }
             },
@@ -1043,6 +1126,10 @@ pub fn serve(n: Config, mut plan: sim.world.Plan, clock: Clock, take served: Ser
             }
         }
     }
-    let Bucket(objects: take objects, writes, ..) = take bucket
-    Report(objects: take objects, writes: writes, attempts: next - 1, withdrawn: withdrawn)
+    let Bucket(objects: take objects, uploads: take uploads, writes, ..) = take bucket
+    let mut pending: List[String] = list.with_capacity(map.len(uploads))
+    for id in sorted_keys(uploads) {
+        list.push(mut pending, clone(option.unwrap(map.get(uploads, id)).key))
+    }
+    Report(objects: take objects, pending: take pending, writes: writes, attempts: next - 1, withdrawn: withdrawn)
 }

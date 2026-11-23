@@ -40,14 +40,18 @@ the operation uses a no-clobber precondition.
 | `parts(mut upload, take bodies, deadline_ns)` | Uploads a batch concurrently, numbers parts in input order across calls, and returns the buffers. If a batch fails, its part numbers can be reused by retrying it. |
 | `complete(take upload, deadline_ns)` | Publishes the multipart object. In `NoClobber` mode it sends `If-None-Match: *`. |
 | `abort(take upload, deadline_ns)` | Stops a multipart upload. An absent upload is success. |
+| `pending_uploads(prefix, mut into, deadline_ns)` | Appends handles for up to 16 multipart uploads still pending under the prefix and returns true when more remain. Abort them and list again. |
 
 A retried multipart initiation can leave a pending upload if the first
 reply was lost. It publishes no object. The owner of the prefix can
-abort those pending uploads during recovery.
+abort those pending uploads during recovery: `pending_uploads` lists them and
+`abort` stops each one.
 
 ## Deadlines and retries
 
-Deadlines are absolute monotonic nanoseconds. Each operation can make five
+Deadlines are absolute monotonic nanoseconds on the Clock the client was
+started with. `deadline_after_ms(client, ms)` returns the deadline `ms`
+milliseconds from now on that clock. Each operation can make five
 attempts before its deadline. A conditional write can issue a HEAD within
 an attempt to determine whether it committed. Retries use exponential
 backoff and draw jitter from the supplied Random capability.

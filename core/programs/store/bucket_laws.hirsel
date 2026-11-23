@@ -1,0 +1,414 @@
+// Bucket authority laws on std.sim.s3, against the real store writer.
+//
+// L4: a writer that loses its connection at any wire cut leaves a bucket that
+// a fresh directory recovers to the last checkpoint it acknowledged, or with
+// an applied but unanswered final request, to the next one. Recovery leaves
+// no pending upload, and the cut writer's directory is then fenced. Wrong
+// writers caught: publishing a MANIFEST before its packs complete (the cut
+// between leaves a generation whose pack is missing, so recovery fails),
+// recovering a lower generation than the newest (an acknowledged checkpoint
+// is lost), a publish that skips the If-None-Match fence (the fenced writer
+// below overwrites the new writer's generation, and its rows appear), and a
+// reopen that skips the holder check (the stale directory opens).
+//
+// Reopen: at every cut, the writer's own directory reopens with every row
+// its journal acknowledged, and its next checkpoint carries them to a fresh
+// directory. The soak runs one seeded cut per seed under retriable faults.
+// Each cut runs in its own process (`hirsel test --sim --seeds N`).
+
+type BucketSim {
+    network: Net,
+    time: Clock,
+    server: Task[std.sim.s3.Report],
+    driver: Task[()],
+    stop: Sender[()]
+}
+
+type BucketSimClock: send {
+    world: std.sim.world.World,
+    stop: Receiver[()],
+    real: Clock
+}
+
+type BucketSimServer: send {
+    config: std.sim.s3.Config,
+    plan: std.sim.world.Plan,
+    time: Clock,
+    port: core.Served[NetOp]
+}
+
+const BUCKET_LAW_OP_MS: u64 = 30000
+
+const BUCKET_LAW_ROUNDS: u64 = 3
+
+const BUCKET_LAW_CUTS: u64 = 40
+
+fn bucket_law_server(take input: BucketSimServer) -> std.sim.s3.Report waits {
+    let BucketSimServer(config: take config, plan: take initial, time, port: take port) = take input
+    let mut plan = take initial
+    std.sim.s3.serve(config, mut plan, time, take port)
+}
+
+// Advances virtual time until the law stops it and no virtual timer is
+// left. `clock.idle` also answers None while the store waits on its real
+// disk, so before the stop None means only that the driver waits a real
+// millisecond and asks again. After the stop, clients the law dropped may
+// still be backing off on virtual time; the driver ends only once they are
+// done, since a frozen clock would keep their tasks, and so the server, alive.
+fn bucket_law_clock(take input: BucketSimClock) waits {
+    let BucketSimClock(world: take initial, stop: take stop, real) = take input
+    let mut world = take initial
+    loop {
+        if std.sim.world.step(mut world) {
+            continue
+        }
+        if let Ok(()) = channel.try_receive(stop) {
+            return
+        }
+        host.sleep_until(real, clock.deadline_after_ms(host.mono_ns(real), 1))
+    }
+}
+
+fn bucket_law_signing_key() -> Secret {
+    // AWS's documentation example key, derived for 20130524/us-east-1/s3.
+    let raw: Inline[u8, 32] =[219, 184, 147, 172, 192, 16, 150, 73, 24, 241, 253, 67, 58, 221, 135, 199, 14, 139, 13, 182, 190, 48, 193, 251, 234, 254, 250, 94, 198, 186, 131, 120]
+    let mut owned: Bytes = list.with_capacity(32)
+    for i in 0u64 .. 32 {
+        list.push(mut owned, raw[i])
+    }
+    result.unwrap(secret.seal(take owned, "mac"))
+}
+
+fn bucket_law_spare() -> Addr {
+    Addr(ip: V4(2130706434), port: 8080)
+}
+
+// Requests to s3.test may be cut. Requests to spare.test never are.
+fn bucket_law_sim(tasks: Tasks, real: Clock, seed: u64, cut: Option[std.sim.s3.Cut], take faults: List[std.sim.s3.Fault]) -> BucketSim {
+    let address = Addr(ip: V4(2130706433), port: 8080)
+    let mut net_model = std.sim.net.new(std.sim.net.defaults())
+    let mut primary: List[Ip] = list.with_capacity(1)
+    list.push(mut primary, address.ip)
+    std.sim.net.resolve_as(mut net_model, string.from("bucket.s3.test"), take primary)
+    let mut spare: List[Ip] = list.with_capacity(1)
+    list.push(mut spare, bucket_law_spare().ip)
+    std.sim.net.resolve_as(mut net_model, string.from("bucket.spare.test"), take spare)
+    let key = bucket_law_signing_key()
+    let verify = result.unwrap(secret.narrow(key, "verify"))
+    let config = std.sim.s3.Config(address, cut: cut, network: take net_model, after_resolve: None, credential: string.from("AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request"), signing_key: take verify, faults: take faults, exists_status: 412, fragment_bytes: 4096, max_body: 16777216)
+    let (world, time) = std.sim.world.new(seed, 0, 1369353600000)
+    let (network, port) = provide.net(bytes 1048576)
+    let (stop, stopping): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let driver = task.spawn(tasks, bytes 65536, BucketSimClock(world: take world, stop: take stopping, real), bucket_law_clock)
+    let server = task.spawn(tasks, bytes 33554432, BucketSimServer(config: take config, plan: std.sim.world.plan(seed), time, port: take port), bucket_law_server)
+    BucketSim(network, time, server: take server, driver: take driver, stop: take stop)
+}
+
+fn bucket_law_place(host_name: String) -> std.object.Bucket {
+    let mut endpoint = string.from("http://")
+    string.push(mut endpoint, host_name)
+    string.push(mut endpoint, ":8080")
+    std.object.Bucket(endpoint: take endpoint, aws_region: string.from("us-east-1"), bucket: string.from("bucket"), prefix: string.from(""), style: Virtual)
+}
+
+fn bucket_law_client(s: BucketSim, tasks: Tasks, host_name: String, seed: u64) -> Result[std.object.Client, Error] waits {
+    let secret_bytes = string.into_bytes(string.from("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"))
+    let root = result.unwrap(secret.seal(take secret_bytes, "kdf"))
+    let credentials_set = std.cred.from_secret("AKIAIOSFODNN7EXAMPLE", take root, "")
+    let deadline = std.clock.deadline_after_ms(host.mono_ns(s.time), BUCKET_LAW_OP_MS)
+    match std.object.start(s.network, tasks, bucket_law_place(host_name), take credentials_set, None, System, s.time, provide.random(seed), 0, 1048576, deadline) {
+        Ok(take client) => Ok(take client),
+        Error(take e) => Error(Remote(take e)),
+    }
+}
+
+fn bucket_law_options(create: bool) -> Options {
+    let mut options = defaults()
+    options.create = create
+    options.authority = Bucket(bucket_law_place("s3.test"))
+    options
+}
+
+fn bucket_law_value(k: u64) -> Bytes {
+    let mut value: Bytes = list.with_capacity(600)
+    list.fill(mut value, 600, int.narrow(k))
+    take value
+}
+
+fn bucket_law_rows_table(mut db: Db) -> Result[Table[u64, Bytes], Error] waits {
+    match table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes()) {
+        Error(Missing(_)) => {
+            create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_bytes()))?
+            table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())
+        },
+        other => other,
+    }
+}
+
+// Commits row k and waits for it to be durable in the local journal.
+fn bucket_law_commit(mut db: Db, k: u64) -> Result[(), Error] waits {
+    let rows = bucket_law_rows_table(mut db)?
+    let value = bucket_law_value(k)
+    let done = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+        put(mut tx, rows, k, value)
+    })?
+    let Committed(take receipt) = take done else {
+        return Error(Foreign)
+    }
+    durable(mut db, receipt.ticket)
+}
+
+fn bucket_law_checkpoint(mut db: Db) -> Result[(), Error] waits {
+    let cut = checkpoint(mut db)?
+    durable(mut db, cut)
+}
+
+fn bucket_law_round(mut db: Db, k: u64) -> Result[(), Error] waits {
+    bucket_law_commit(mut db, k)?
+    bucket_law_checkpoint(mut db)
+}
+
+// What the writer was told: whether it opened, the last row the journal
+// acknowledged, and the last row whose checkpoint the bucket acknowledged.
+type BucketLawWrite {
+    opened: bool,
+    durable: u64,
+    checkpointed: u64
+}
+
+// Opens a fresh Bucket store in `w` and checkpoints each round.
+fn bucket_law_write(tasks: Tasks, w: Dir, c: Clock, r: Random, s: BucketSim, rounds: u64) -> BucketLawWrite waits {
+    let mut told = BucketLawWrite(opened: false, durable: 0, checkpointed: 0)
+    let Ok(take client) = bucket_law_client(s, tasks, "s3.test", 1) else {
+        return told
+    }
+    let Ok(take opened) = open_bucket(tasks, w, c, r, bucket_law_options(true), take client, BUCKET_LAW_OP_MS) else {
+        return told
+    }
+    told.opened = true
+    let mut db = take opened
+    for k in 1u64 .. rounds + 1 {
+        if let Error(_) = bucket_law_commit(mut db, k) {
+            break
+        }
+        told.durable = k
+        if let Error(_) = bucket_law_checkpoint(mut db) {
+            break
+        }
+        told.checkpointed = k
+    }
+    let _ = close(take db)
+    told
+}
+
+// The rounds a fresh directory recovers: k when rows 1..k hold their values.
+fn bucket_law_rows(mut db: Db) -> Result[u64, Error] waits {
+    let rows = match table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes()) {
+        Ok(take found) => take found,
+        Error(Missing(_)) => return Ok(0),
+        Error(take e) => return Error(take e),
+    }
+    let s = snapshot(db)
+    let mut got = 0u64
+    loop {
+        match get(s, shape(rows), got + 1)? {
+            Some(value) => {
+                if value != bucket_law_value(got + 1) {
+                    return Error(Foreign)
+                }
+                got += 1
+            },
+            None => return Ok(got),
+        }
+    }
+}
+
+// Opens `w` through the uncut address. None when the bucket holds no store.
+fn bucket_law_open(tasks: Tasks, w: Dir, c: Clock, r: Random, s: BucketSim, seed: u64) -> Result[Option[Db], Error] waits {
+    let client = bucket_law_client(s, tasks, "spare.test", seed)?
+    match open_bucket(tasks, w, c, r, bucket_law_options(false), take client, BUCKET_LAW_OP_MS) {
+        Ok(take opened) => Ok(Some(take opened)),
+        Error(NotFound) => Ok(None),
+        Error(take e) => Error(take e),
+    }
+}
+
+// Recovers through the uncut address into a fresh directory. None when the
+// bucket holds no store.
+fn bucket_law_recover(tasks: Tasks, d: Dir, c: Clock, r: Random, s: BucketSim, seed: u64) -> Result[Option[u64], Error] waits {
+    let Some(take opened) = bucket_law_open(tasks, disk_test_directory(d), c, r, s, seed)? else {
+        return Ok(None)
+    }
+    let mut db = take opened
+    let got = bucket_law_rows(mut db)
+    close(take db)?
+    Ok(Some(got?))
+}
+
+// Reopens the writer's own directory, checks what it kept and carries it
+// to the bucket with one checkpoint. None when the bucket holds no store.
+fn bucket_law_reopen(tasks: Tasks, w: Dir, c: Clock, r: Random, s: BucketSim, seed: u64) -> Result[Option[u64], Error] waits {
+    let Some(take opened) = bucket_law_open(tasks, w, c, r, s, seed)? else {
+        return Ok(None)
+    }
+    let mut db = take opened
+    let got = bucket_law_rows(mut db)
+    let carried = bucket_law_checkpoint(mut db)
+    close(take db)?
+    carried?
+    Ok(Some(got?))
+}
+
+fn bucket_law_finish(take s: BucketSim) -> std.sim.s3.Report waits {
+    let BucketSim(server: take server, driver: take driver, stop: take stop, ..) = take s
+    result.unwrap(channel.send(stop, ()))
+    let report = result.unwrap(task.join(take server))
+    result.unwrap(task.join(take driver))
+    take report
+}
+
+fn bucket_law_count(found: Option[u64]) -> u64 {
+    match found {
+        Some(n) => n,
+        None => 0,
+    }
+}
+
+// One cut, then recovery into a fresh directory. The writer's directory is
+// then fenced: the fresh directory's holder took the store.
+fn bucket_law_fresh(d: Dir, c: Clock, r: Random, tasks: Tasks, s: BucketSim, told: BucketLawWrite, w: Dir, apply: bool, seed: u64) -> Result[(), Error] waits {
+    let got = bucket_law_count(bucket_law_recover(tasks, d, c, r, s, seed)?)
+    let acked = told.checkpointed
+    if got != acked && !(apply && got == acked + 1) {
+        fail("bucket L4: recovery lost or invented a checkpoint")
+    }
+    if told.opened {
+        match bucket_law_open(tasks, w, c, r, s, seed + 1) {
+            Error(Fenced(_)) => {},
+            Ok(Some(take stale)) => {
+                let _ = close(take stale)
+                fail("bucket L4: the cut writer's directory reopened past a foreign holder")
+            },
+            _ => fail("bucket L4: the cut writer's directory was not fenced"),
+        }
+    }
+    Ok(())
+}
+
+// One cut, then the writer's own directory reopens. It keeps every row the
+// journal acknowledged and invents none, and its next checkpoint carries
+// them all to a fresh directory.
+fn bucket_law_same(d: Dir, c: Clock, r: Random, tasks: Tasks, s: BucketSim, told: BucketLawWrite, w: Dir, seed: u64, rounds: u64) -> Result[(), Error] waits {
+    let kept = bucket_law_count(bucket_law_reopen(tasks, w, c, r, s, seed)?)
+    if kept < told.durable || kept > rounds {
+        fail("bucket reopen: the writer's directory lost an acknowledged row")
+    }
+    let got = bucket_law_count(bucket_law_recover(tasks, d, c, r, s, seed + 1)?)
+    if got != kept {
+        fail("bucket reopen: the reopened directory's checkpoint did not reach the bucket")
+    }
+    Ok(())
+}
+
+// One cut. True when the writer ran every round uncut.
+fn bucket_law_cut(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, cut: std.sim.s3.Cut, take faults: List[std.sim.s3.Fault], same_directory: bool) -> Result[bool, Error] waits {
+    let apply = cut.apply
+    let s = bucket_law_sim(tasks, c, seed, Some(cut), take faults)
+    let w = disk_test_directory(d)
+    let told = bucket_law_write(tasks, w, c, r, s, BUCKET_LAW_ROUNDS)
+    let checked = if same_directory {
+        bucket_law_same(d, c, r, tasks, s, told, w, seed + 7, BUCKET_LAW_ROUNDS)
+    } else {
+        bucket_law_fresh(d, c, r, tasks, s, told, w, apply, seed + 7)
+    }
+    let report = bucket_law_finish(take s)
+    checked?
+    if list.len(report.pending) != 0 {
+        fail("bucket L4: recovery left a pending upload")
+    }
+    Ok(told.checkpointed == BUCKET_LAW_ROUNDS)
+}
+
+fn bucket_law_wire_cut(after: u64, apply: bool) -> std.sim.s3.Cut {
+    std.sim.s3.Cut(after, apply, spare: bucket_law_spare())
+}
+
+fn bucket_law_seed(e: Env) -> u64 {
+    match std.sim.world.test_seed(e) {
+        Some(active) => active,
+        None => 0,
+    }
+}
+
+// One wire cut per process. `hirsel test --sim --seeds 160` sweeps cuts 0
+// to 39 in each of the four modes: the request applied or dropped, and
+// recovery into a fresh directory or a reopen of the writer's own. Each
+// checkpoint takes at least four requests (begin, part, complete and the
+// MANIFEST), so a writer done before request 12 was not cut, and one cut at
+// 40 or later runs every round: the sweep covers every cut that matters.
+@test
+fn bucket_test_l4_cut(d: Dir, c: Clock, r: Random, tasks: Tasks, e: Env) -> Result[(), Error] waits {
+    let seed = bucket_law_seed(e)
+    let after = (seed / 4) % BUCKET_LAW_CUTS
+    let apply = seed % 2 == 0
+    let same_directory = (seed / 2) % 2 == 0
+    let uncut = bucket_law_cut(d, c, r, tasks, after, bucket_law_wire_cut(after, apply), list.new(), same_directory)?
+    if uncut && after < 4 * BUCKET_LAW_ROUNDS {
+        fail("bucket L4: the cut never reached the writer")
+    }
+    if !uncut && after + 1 == BUCKET_LAW_CUTS {
+        fail("bucket L4: the writer never finished uncut")
+    }
+    Ok(())
+}
+
+// The soak: one cut per seed at a seeded request, both recoveries, with
+// retriable faults on every connection the seed's plan picks.
+@test
+fn bucket_test_soak(d: Dir, c: Clock, r: Random, tasks: Tasks, e: Env) -> Result[(), Error] waits {
+    let seed = bucket_law_seed(e)
+    let after = seed % BUCKET_LAW_CUTS
+    let apply = (seed / BUCKET_LAW_CUTS) % 2 == 0
+    let same_directory = (seed / (2 * BUCKET_LAW_CUTS)) % 2 == 0
+    let mut faults: List[std.sim.s3.Fault] = list.with_capacity(10)
+    for _ in 0u64 .. 8 {
+        list.push(mut faults, Clean)
+    }
+    list.push(mut faults, ResetBeforeBody)
+    list.push(mut faults, InternalError)
+    let _ = bucket_law_cut(d, c, r, tasks, seed, bucket_law_wire_cut(after, apply), take faults, same_directory)?
+    Ok(())
+}
+
+// The fence. A opens and checkpoints round 1. B opens a fresh directory and
+// claims the next generation. A's next checkpoint halts with Fenced, B's
+// checkpoints go on from round 1, and recovery sees exactly B's rows.
+@test
+fn bucket_test_fence(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    // A cut that never fires, so that recovery can use the spare address.
+    let s = bucket_law_sim(tasks, c, 5, Some(bucket_law_wire_cut(0xffffffffffffffff, false)), list.new())
+    let mut a = open_bucket(tasks, disk_test_directory(d), c, r, bucket_law_options(true), bucket_law_client(s, tasks, "s3.test", 1)?, BUCKET_LAW_OP_MS)?
+    bucket_law_round(mut a, 1)?
+    let mut b = open_bucket(tasks, disk_test_directory(d), c, r, bucket_law_options(false), bucket_law_client(s, tasks, "s3.test", 2)?, BUCKET_LAW_OP_MS)?
+    match bucket_law_round(mut a, 2) {
+        Error(Fenced(_)) => {},
+        _ => fail("bucket fence: the old writer published past the new claim"),
+    }
+    if let Ok(_) = healthy(a) {
+        fail("bucket fence: the fenced writer stayed healthy")
+    }
+    let _ = close(take a)
+    // B's next pack number is the one A's late pack took.
+    bucket_law_round(mut b, 2)?
+    bucket_law_round(mut b, 3)?
+    close(take b)?
+    let got = bucket_law_recover(tasks, d, c, r, s, 3)?
+    let report = bucket_law_finish(take s)
+    if got != Some(3) {
+        fail("bucket fence: recovery did not see the new writer's rounds")
+    }
+    if list.len(report.pending) != 0 {
+        fail("bucket fence: a pending upload survived recovery")
+    }
+    Ok(())
+}

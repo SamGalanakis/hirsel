@@ -1,4 +1,6 @@
-# STORE-SPEC v2.42: the M4 store library (lane store-spec-1001)
+# STORE-SPEC v2.43: the M4 store library (lane store-spec-1001)
+
+v2.43 (lane store-bucket-1836): **built.** Rows 11 and 12 are built for one authority, a bucket. §11.18 is the contract: `open_bucket` keeps the packs and every MANIFEST generation in an S3 bucket through `std.object`, the no-clobber publish of `MANIFEST-<gen:020>` fences a second writer, and the CLAIM and AUTHORITY frames ride the MANIFEST. The journal stays local. Directory stores are unchanged.
 
 v2.42 (lane store-scrub-1786, store durability round 2 item 4): **built.** §11.17 adds an online scrub. `begin_scrub` leases the packs the current generation lists, and `scrub_step` rereads them from disk under a byte budget, apart from every resident page. It checks each frame's envelope, and each reachable frame against the pointer the generation holds to it. It reports faults with their generation, file, offset and kind. It never repairs and never writes. See CHANGES-v2.42.
 
@@ -107,6 +109,16 @@ v2.29 (RUNNER-SPEC v2.18, lane caller-scope-1128, astra's third attack, ATTACK-3
 - **Two RUNNER-SPEC slices consume this version.** AM3 and AM8 are small and are built first, as slice RA. RS then takes AM1, AM2 and AM4–AM7, and RR builds on AM8 (RUNNER-SPEC §9). Neither RS nor RR waits on the other.
 
 v2.28 (RUNNER-SPEC v2.17, lane caller-scope-1128, astra's second attack, ATTACK-2): text and format; no store has been deployed, so the cutover is a fresh store. `serve` runs an admitted position: it runs the policy and the body as two isolated executions over one snapshot and writes the reply, and the record when there is one, in the body's transaction; a fault keeps the run's digest in a `Pending` that `conclude` writes with the fixed reply (AL1). A duplicate returns the stored reply with its scope digest (AL2). The scope digest begins with the StoreId (AL3). `migrate` is its own phase over a `Migration`, and `Schema` only opens (AL4). The CALL section carries the authority bytes (AL5). The sizes follow the 32-byte scope digest, and `serve` keeps no read log (AL6).
+
+## CHANGES-v2.43 (store-bucket-1836: §11.18, built)
+
+| # | Item | Verdict | What v2.43 does | Where |
+|---|---|---|---|---|
+| BK1 | `Options.authority = Bucket(b)` was refused with `Unsupported(1)` | **built** | `open_bucket(tasks, d, c, r, o, take client, op_ms)` opens it. `open` still refuses Bucket with `Unsupported(1)`, and `open_bucket` refuses Directory with `Unsupported(0)` | §1.1, §11.18 |
+| BK2 | Rows 11 and 12 reserved CLAIM for j-* and gave AUTHORITY no layout | **built** | CLAIM (24 B: epoch, holder) and AUTHORITY (the Bucket config) are MUST frames after a Bucket store's MANIFEST frame; HEADER `authority` is 1 in that MANIFEST only | §2.3, §2.7, §2.9, §11.18 |
+| BK3 | A writer cut off from the bucket could publish over a newer writer | **built** | Each generation is published by `store_no_clobber`; `Exists` halts the writer with `Fenced(epoch)` | §11.18 |
+| BK4 | An upload left by a crashed writer stayed pending | **built** | Open aborts every pending multipart upload under the prefix (`std.object.pending_uploads`) | §11.18 |
+| BK5 | A fenced writer's late pack could take the next writer's pack number, so the next writer's no-clobber upload would halt it | **built** | On `Exists` for a pack the writer lists the generations after its own: none means the pack is an orphan no generation references, which it overwrites; any means it is fenced | §11.18 |
 
 ## CHANGES-v2.42 (store-scrub-1786: §11.17, built)
 
@@ -572,7 +584,7 @@ Each review item and each orchestrator item has a verdict: ACCEPTED (with the fi
   8. pins;
   9. forks;
   10. incremental checkpoints.
-- Rows 11 (claims and epoch fencing) and 12 (object-backed authorities and durability levels) get frame kinds, header fields and API slots now. §2.9 says what each waits for.
+- Rows 11 (claims and epoch fencing) and 12 (object-backed authorities) are built for a bucket authority (v2.43, §11.18). §2.9 says what is still open: leases, and durability levels above a local sync.
 - Rows 13 and 14 are never built:
   - a rename is a migrate;
   - internal state lives in its own trees and frame kinds, never in a reserved key space.
@@ -648,12 +660,13 @@ pub type Options {
     checkpoint_task_bytes: u64, // default 262,400,276: the checkpoint task's root limit, max(pack_bytes, 64 MiB + 88) + 2⌈resident_limit / 11⌉ + 64 KiB (Q1a)
     authority: Authority,
 }
-pub type Authority: send = Directory() | Bucket(std.object.Bucket)   // defaults() gives Directory(). Bucket holds the bucket's config, never a live client (row 12, §2.9); until its writer is built, `open` and `open_export` refuse it with `Unsupported(1)`. A `memory` store has no authority and ignores the field. Options is `send` because Bucket holds Strings, and is cloned where it was copied
+pub type Authority: send = Directory() | Bucket(std.object.Bucket)   // defaults() gives Directory(). Bucket holds the bucket's config, never a live client (row 12, §11.18); `open` and `open_export` refuse it with `Unsupported(1)`, and `open_bucket` opens it. A `memory` store has no authority and ignores the field. Options is `send` because Bucket holds Strings, and is cloned where it was copied
 pub type StoreId { hi: u64, lo: u64 }
 pub fn defaults() -> Options
 
 pub opaque type Db                         // not send: holds Task handles (CONC-1/2). RUN db_task.
 pub fn open(tasks: Tasks, d: Dir, c: Clock, r: Random, o: Options) -> Result[Db, Error] waits
+pub fn open_bucket(tasks: Tasks, d: Dir, c: Clock, r: Random, o: Options, take client: std.object.Client, op_ms: u64) -> Result[Db, Error] waits   // §11.18
 pub fn memory(c: Clock, r: Random, o: Options) -> Db   // no directory and no tasks; durable(t) is Ok at once
 pub fn close(take db: Db) -> Result[(), Error] waits   // §1.10: always consumes, always releases and joins
 pub fn identity(db: Db) -> StoreId
@@ -676,7 +689,9 @@ pub type Error =
     | Decode(codec.DecodeError)    // a stored row failed its codec: only a schema bug in user code
     | Exists(String) | Missing(String)
     | Diverged(u32)                // adopt: main moved after the branch forked (branch id)
-    | Foreign                      // a handle of another store, or a Snapshot or Ticket of another open (§1.12)
+    | Foreign                      // a handle of another store, or a Snapshot or Ticket of another open (§1.12); a bucket that holds another store (§11.18)
+    | Fenced(u64)                  // another writer claimed the bucket store; the value is this writer's epoch (§11.18)
+    | Remote(std.object.Error)     // a bucket operation failed; the writer stops until reopened (§11.18)
 pub type Limit = Key | Value | Transaction | Name
 pub type Fault { file: String, offset: u64, why: Why }
 pub type Why = Checksum | Truncated | Flags | Kind(u64) | Header | Gap(u64) | Order | Dangling(u64) | Malformed
@@ -1160,7 +1175,7 @@ All integers are little-endian unless marked BE. "str" means a u16 length follow
 
 | File | Role | Contents | Written |
 |---|---|---|---|
-| `MANIFEST` | 1 | HEADER, then exactly one MANIFEST frame; unknown kinds per §2.7 may come before or after it, within `UNKNOWN_ROOM` (V1) | `.tmp`, sync, rename, sync_dir |
+| `MANIFEST` | 1 | HEADER, then exactly one MANIFEST frame; unknown kinds per §2.7 may come before or after it, within `UNKNOWN_ROOM` (V1). A Bucket store's adds CLAIM and AUTHORITY after it (§11.18) | `.tmp`, sync, rename, sync_dir; a Bucket store publishes `MANIFEST-<gen:020>` to the bucket first |
 | `j-<seq>` | 2 | HEADER, then COMMIT frames | created at open and at each cut; appended by the journal task |
 | `p-<seq>` | 3 | HEADER, then NODE frames, children first | `.tmp`, sync, rename, sync_dir |
 | `j-<seq>.end` | 4 | HEADER, END | created with its segment; rewritten whole (open `Write` truncates) and synced by the journal task |
@@ -1172,10 +1187,10 @@ All integers are little-endian unless marked BE. "str" means a u16 length follow
 | 0 | 8 | magic | `HIRSTORE`, else `Header` |
 | 8 | 4 | format u32 | 2 (v2.30 AN2); any other value is `Unsupported(format)` |
 | 12 | 1 | role u8 | 1 manifest, 2 journal segment, 3 pack, 4 end file; must match the file's name |
-| 13 | 1 | authority u8 | 0 = local directory. 1–255 reserved for row 12; non-zero is `Unsupported` today |
+| 13 | 1 | authority u8 | 0 = local directory. 1 = bucket, only in a Bucket store's MANIFEST (§11.18); packs and segments keep 0. 2–255 are `Unsupported` |
 | 14 | 2 | zero | |
 | 16 | 16 | identity | equal to the manifest's, else `Header` (a file from another store) |
-| 32 | 8 | epoch u64 | row 11: the claim epoch of the writer. 0 today; non-zero is `Unsupported` |
+| 32 | 8 | epoch u64 | 0. A Bucket store carries its epoch in CLAIM (§11.18); non-zero is `Unsupported` |
 | 40 | 8 | seq u64 | manifest generation, segment number or pack number (role 4: its segment's); must match the file name |
 | 48 | 8 | prev_end u64 | segment only: the valid byte length of segment seq − 1, or 0 when the manifest's cut covers it. 0 for other roles. |
 
@@ -1296,8 +1311,8 @@ A reader walks every frame from offset 72 to the end of the file. Exactly one is
 | 0x0012 | END | j-*.end, after HEADER | 1 | 8 | v1 |
 | 0x0020 | NODE | p-* | 1 | 32 × (4096 + 1 MiB + 16) + 12 | v1 |
 | 0x0030 | MANIFEST | MANIFEST | 1 | 64 MiB | v1 |
-| 0x0040 | CLAIM | j-*, right after HEADER | 1 | 64 | reserved, row 11 |
-| 0x0050 | AUTHORITY | MANIFEST, after MANIFEST | 1 | 64 KiB | reserved, row 12 |
+| 0x0040 | CLAIM | MANIFEST of a Bucket store, after MANIFEST | 1 | 24 | v2.43, §11.18 |
+| 0x0050 | AUTHORITY | MANIFEST of a Bucket store, after CLAIM | 1 | 64 KiB | v2.43, §11.18 |
 | 0x0060 | PRINCIPAL | — | 0 | — | retired by v2.26 AJ4 and never reused: the caller is the stream key's prefix |
 | 0x0070 | FENCE | MANIFEST | 1 | 4 | v1 |
 | any other | unknown | anywhere after HEADER | 0 | **`UNKNOWN_LIMIT` = 64 KiB** (C3) | skipped |
@@ -1339,12 +1354,14 @@ absent.
 
 Reason: these bytes passed a 64-bit check bound to their place, so they are the bytes our writer produced there (up to the 2⁻⁶⁴ of E4). A wrong order would be our own writer's bug, and the host rule forbids guarding against that. This is Goose's line, "safety, not integrity" (§10). Safety still holds: decoding is total, a wrong order gives a wrong but well-formed tree, and nothing reads out of bounds.
 
-### 2.9 Rows 11 and 12: reserved now, and what each waits for
+### 2.9 Rows 11 and 12: what is built, and what each still waits for
 
-| Row | Reserved now | Waits for |
+v2.43 builds both rows for a bucket authority (§11.18). The table keeps what remains open.
+
+| Row | Built (v2.43) | Still waits for |
 |---|---|---|
-| 11 claims and epoch fencing | HEADER `epoch` (0); kind CLAIM (epoch u64, holder 16 bytes, lease_ms u64, MUST); `Error` gains `Fenced(u64)` when built | A second writer that can take over while the first is alive but cut off. Locally `try_lock` on LOCK is released when the process dies, so there is nothing to fence. It needs a remote authority (Net, M5a) or object storage with conditional writes, and a lease clock. Neither exists in host.hirsel (BY READING). |
-| 12 object authorities and durability levels | HEADER `authority` (0); kind AUTHORITY (authority u8, level u8, locator bytes); `Options.authority` with `Directory` and `Bucket(std.object.Bucket)`; `open` refuses `Bucket` with `Unsupported(1)` until its writer is built | Core object-storage operations: put-if-absent, get and list. A durability level above a local sync, such as replicated, needs a second authority. The output gate is already covered locally: replies are released after `durable` (§1.8). |
+| 11 claims and epoch fencing | CLAIM (epoch u64, holder StoreId) in a Bucket store's MANIFEST; `Error.Fenced(u64)`; the no-clobber publish of each generation is the fence (§11.18) | Leases. A fenced writer learns of the claim at its next publish, not before; a lease would need a clock both writers trust. A Directory store has nothing to fence: `try_lock` on LOCK is released when the process dies. |
+| 12 object authorities and durability levels | HEADER `authority` 1; AUTHORITY (the Bucket config); `open_bucket`; packs and generations in the bucket (§11.18) | Durability levels above a local sync: a commit is durable at the local journal's sync, and in the bucket only at the next cut. Journal-as-objects is post-1.0. The output gate is covered locally: replies are released after `durable` (§1.8). |
 
 ---
 
@@ -2051,7 +2068,7 @@ Integers are little-endian unless marked BE, as in §2. "str" and "bytes" have �
 | 0x0022 | BLOB | p-* of class 1 | 1 | 8 + 16,711,680 = 16,711,688 | new (AP8) |
 | 0x0030 | MANIFEST (format 2) | — | — | — | **retired; never reused** |
 | 0x0031 | MANIFEST | MANIFEST | 1 | `MANIFEST_LIMIT` = 16,777,368 (AP4) | new (AP14) |
-| 0x0040, 0x0050, 0x0060, 0x0070 | CLAIM, AUTHORITY, PRINCIPAL, FENCE | as §2.7 | as §2.7 | as §2.7 | unchanged |
+| 0x0040, 0x0050, 0x0060, 0x0070 | CLAIM, AUTHORITY, PRINCIPAL, FENCE | as §2.7 | as §2.7 | as §2.7 | CLAIM and AUTHORITY built (v2.43, §11.18) |
 | 0x0080, 0x0082, 0x0083 | export stamp, catalog delta, inventory | EXPORT (role 5), PREPARED (role 6), §3.5a | as built | as built | unchanged payloads |
 | 0x0081 | preparation metadata | PREPARED (role 6) | as built | 1,048,832 (as built) | **payload changed (AP1b, C-1)**: the target loses `checkpoint_task_bytes` and gains NEW's `pack_bytes`, `checkpoint_bytes` and `journal_limit` |
 | 0x0084 | prepared rows | PREPARED (role 6) | as built | 4096 + 16,711,680 + 8 = 16,715,784 (was 4096 + 1 MiB + 8) | payload unchanged |
@@ -2963,3 +2980,49 @@ A later version may add these, and a periodic tour with an I/O budget, without a
 - **Stale frame at its own place.** A frame resealed for pack C at 72, with its last byte changed, gives (C, 72, `Checksum`), from the pointer check alone.
 - **Clean control.** Before the damage, the same generation reads with no fault, and `checked` equals the sum of the listed packs' file sizes.
 - **A scrub racing compaction.** A tour is begun, then a cut retires every data pack it holds. Each held file still exists, and the tour finishes clean. After the tour is dropped, the next cut leaves exactly the still-listed packs on disk.
+
+### 11.18 Bucket authority (v2.43)
+
+A Bucket store keeps its packs and every MANIFEST generation in an S3 bucket through `std.object`. The local directory holds LOCK, the journal and a byte-exact mirror of the packs and the current MANIFEST. Commits are durable at the local journal's sync, as in a Directory store (§1.8). Objects become authoritative at each cut.
+
+**Opening.** `open_bucket(tasks, d, c, r, o, take client, op_ms)` takes `o.authority = Bucket(b)` and a started `std.object.Client` for `b` (`Directory()` is `Unsupported(0)`). `open` and `open_export` refuse Bucket with `Unsupported(1)`. Every bucket call gets the deadline `op_ms` from now on the client's clock (`std.object.deadline_after_ms`). The client belongs to the Db from then on.
+
+**Bucket keys** (under `b.prefix`):
+
+| Key | Bytes |
+|---|---|
+| `p-<seq>` | the local pack file `p-<seq>`, byte for byte. Uploaded by `upload(NoClobber)`, 8 MiB parts in batches of 4, and `complete` |
+| `MANIFEST-<gen>` | `gen` as 20 decimal digits. The local MANIFEST file of generation `gen`, byte for byte. Written once by `store_no_clobber` |
+
+**A Bucket store's MANIFEST.** HEADER `authority` is 1, in the MANIFEST only: packs and segments keep 0. After the MANIFEST frame come exactly one CLAIM and one AUTHORITY, both MUST:
+- **CLAIM (0x0040)**, 24 bytes: `epoch u64 LE ‖ holder.hi u64 LE ‖ holder.lo u64 LE`. `epoch` counts the claims of the store from 1. `holder` names the local directory that made the claim: a random StoreId drawn when a fresh directory first opens the store.
+- **AUTHORITY (0x0050)**, at most 64 KiB: `style u8` (0 virtual, 1 path), then `endpoint`, `aws_region`, `bucket` and `prefix`, each a u16 LE length and its bytes. It is config, never a credential.
+
+An authority-1 MANIFEST without both frames, with epoch 0, or with either frame twice is `Corrupt(Malformed)`. Either frame in another role's file is `Corrupt`. A Directory open of an authority-1 MANIFEST, or a Bucket open of an authority-0 one, is `Unsupported(1)`, so neither authority opens the other's store. Open compares only `bucket` and `prefix` with `b`: a store may be reached through another endpoint. Any other pair is `Foreign`.
+
+**A cut.** The cut writes its packs and its MANIFEST bytes locally as §11.12 says. Before the local MANIFEST rename, it:
+1. uploads every pack in `[previous next_pack, new next_pack)` from its local file;
+2. publishes `MANIFEST-<gen>` with `store_no_clobber`.
+
+Only a created MANIFEST lets the cut go on to the local rename, the segment removal and the ticket. `Exists` means another writer claimed generation `gen`: the cut fails with `Fenced(epoch)`. A failed bucket call fails it with `Remote(e)`. Either one is sticky: `healthy` returns it, and the Db accepts only `close`. Commits already acknowledged stay durable in the local journal, and a reopen of the same directory recovers them while it holds the claim.
+
+**An orphan pack.** A pack upload that finds its key taken lists the generations after the writer's own. Any generation at or past the one it is publishing means the writer has been fenced (`Fenced`). None means the pack was left by a writer that lost its claim before publishing it, so no generation references it, and the claim holder overwrites it. A writer that claims a generation always skips every pack number already in the bucket.
+
+**Recovery and the claim**, at every `open_bucket`:
+1. Read the local MANIFEST, if any. Its HEADER `authority` must be 1 and its AUTHORITY must name `b`.
+2. List `MANIFEST-` after the key of the local generation minus one, and take the highest generation. One below the local generation is `Corrupt(Gap)`.
+3. No generation, with no local MANIFEST: with `o.create`, publish genesis as `MANIFEST-1` (epoch 1, a new holder and a new StoreId). If another writer published it first, adopt that one. Without `o.create`: `NotFound`.
+4. Fetch the highest generation and decode it with its frame checks (xxh3-64, §2.1). A local MANIFEST must have the same StoreId (`Foreign`) and the same holder (`Fenced`): another holder's claim after this directory's last generation means the directory's later commits are not the store's.
+5. List `p-` and set `next_pack` past every pack in the bucket.
+6. Claim the next generation: publish it, as a copy of the highest with `epoch + 1`, this holder and the new `next_pack`, by `store_no_clobber`. `Exists` is `Fenced`.
+7. Abort every pending multipart upload under the prefix (`pending_uploads`, `abort`).
+8. A fresh directory fetches each pack the generation lists that it lacks (`.tmp`, sync, rename) and starts its journal at `first_live`.
+9. Write the claimed MANIFEST locally and open as §11 says.
+
+**Not built.** No bucket key is ever erased: retired packs and old generations stay in the bucket. Export and install of a Bucket store are refused. Leases and durability levels above a local sync are §2.9's.
+
+**Laws** (`bucket_laws.hirsel`, over `std.sim.s3`):
+- **L4, a wire cut.** For each request number n, the writer's connections are cut after n requests, with request n + 1 applied silently or dropped. A recovery through an uncut address into a fresh directory sees exactly the rows of the last acknowledged checkpoint, or with an applied final request, of the next one, and leaves no pending upload. The cut writer's directory then reopens only as `Fenced`, because the fresh directory's holder took the store. Wrong writers caught: a MANIFEST published before its packs complete, recovery below the highest generation, a publish without the fence, and a reopen without the holder check.
+- **Reopen after a cut.** At the same cuts, the writer's own directory reopens through the uncut address with every row its journal acknowledged and none it never committed, and its next checkpoint carries them to a fresh directory.
+- **Soak.** `hirsel test --sim --seeds N` runs one cut per seed: the seed picks the cut request, whether it is applied, and which recovery runs, under retriable faults (resets before the body, `InternalError`) on the connections the seed's plan picks.
+- **The fence.** Writer A checkpoints. Writer B opens a fresh directory and claims the next generation. A's next checkpoint is `Fenced` and A stays unhealthy. B's checkpoints go on, reusing the pack number A's late pack took, and recovery sees B's rows.

@@ -58,7 +58,7 @@ pub fn key_text(key: Key) -> String {
     result.unwrap(string.from_utf8(take out))
 }
 
-type Operation: key = Fetch | FetchRange | Put | PutConditional | ListObjects | Erase | Upload | Part | Complete | CompleteConditional | Abort | Head
+type Operation: key = Fetch | FetchRange | Put | PutConditional | ListObjects | Erase | Upload | Part | Complete | CompleteConditional | Abort | Head | ListUploads
 
 type Phase: key = BeforeRequest | RequestSent | ResponseHead | ResponseBody
 
@@ -408,7 +408,7 @@ type Job: send {
     entries: List[Entry]
 }
 
-type Value: send = Object(Meta) | Existing | Listed(Page) | Initiated(String)
+type Value: send = Object(Meta) | Existing | Listed(Page) | Initiated(String) | Pending(List[String], List[String], bool)
 
 type Reply: send {
     lane: u64,
@@ -424,6 +424,7 @@ fn method(op: Operation) -> String {
         Fetch => "GET",
         FetchRange => "GET",
         ListObjects => "GET",
+        ListUploads => "GET",
         Head => "HEAD",
         Put => "PUT",
         PutConditional => "PUT",
@@ -943,6 +944,54 @@ fn listing(mut c: http_client.Connection, prefix: String, mut entries: List[Entr
     Received(Listed(Page(truncated: more, after)))
 }
 
+// Keys come back with the bucket prefix, which the caller's handles leave out.
+fn parse_pending(body: Bytes, prefix: String) -> Exchange {
+    let Ok(text) = xml_text(body) else {
+        return Invalid(Fatal(Malformed))
+    }
+    if string.find(text, 0, "</ListMultipartUploadsResult>") == None {
+        return Invalid(Fatal(Malformed))
+    }
+    let more = match xml_field(text, "IsTruncated") {
+        Some(flag) => {
+            if flag == "true" {
+                true
+            } else if flag == "false" {
+                false
+            } else {
+                return Invalid(Fatal(Malformed))
+            }
+        },
+        None => return Invalid(Fatal(Malformed)),
+    }
+    let mut keys: List[String] = list.new()
+    let mut ids: List[String] = list.new()
+    let mut at = 0u64
+    while let Some(first) = string.find(text, at, "<Upload>") {
+        let Some(last) = string.find(text, first, "</Upload>") else {
+            return Invalid(Fatal(Malformed))
+        }
+        let entry = string.slice(text, first, last)
+        let (Some(raw_key), Some(raw_id)) = (xml_field(entry, "Key"), xml_field(entry, "UploadId")) else {
+            return Invalid(Fatal(Malformed))
+        }
+        let key = match xml_decoded(raw_key) {
+            Ok(take value) => take value,
+            Error(take e) => return Invalid(take e),
+        }
+        if !string.starts_with(key, prefix) {
+            return Invalid(Fatal(Malformed))
+        }
+        list.push(mut keys, string.from(string.slice(key, string.byte_len(prefix), string.byte_len(key))))
+        match xml_decoded(raw_id) {
+            Ok(take value) => list.push(mut ids, take value),
+            Error(take e) => return Invalid(take e),
+        }
+        at = last
+    }
+    Received(Pending(take keys, take ids, more))
+}
+
 fn status_failure(status: u16, body: Bytes) -> Failure {
     let mut code: Bytes = list.new()
     let mut server_time: Option[u64] = None
@@ -1063,6 +1112,9 @@ fn receive_control(mut c: http_client.Connection, octets: u64, put: Option[Inlin
     }
     if status < 200 || status >= 300 || fragment(buffer, 0, string.as_bytes("<Error")) != None {
         return interpret_error(op, status, buffer)
+    }
+    if op == ListUploads {
+        return parse_pending(buffer, prefix)
     }
     if op == Upload {
         let Ok(text) = xml_text(buffer) else {
@@ -1937,7 +1989,8 @@ pub opaque type Client {
     next: u64,
     random: Random,
     entropy: Bytes,
-    path: String
+    path: String,
+    clock: Clock
 }
 
 type PartReceipt: send {
@@ -2011,7 +2064,7 @@ pub fn start(n: Net, tasks: Tasks, take bucket: Bucket, take credentials_set: cr
     }
     let pool = Pool(network: n, clock: c, tasks, server: take server, input: take pool_rx, timer_tx: take pool_tx, replies: take replies, peers: take peers)
     let resolver = task.spawn(tasks, bytes lane_bytes, take pool, pool_loop)
-    Ok(Client(bucket: take bucket, lanes: take workers, output: take output, resolver: take resolver, renewal: take renewal, next: 0, random, entropy: list.with_capacity(16), path: string.with_capacity(4096)))
+    Ok(Client(bucket: take bucket, lanes: take workers, output: take output, resolver: take resolver, renewal: take renewal, next: 0, random, entropy: list.with_capacity(16), path: string.with_capacity(4096), clock: c))
 }
 
 fn new_job(op: Operation, take path: String, take data: Bytes, deadline: u64) -> Job {
@@ -2075,6 +2128,11 @@ fn as_unit(take result: Result[Value, Error]) -> Result[(), Error] {
         Ok(_) => Ok(()),
         Error(take e) => Error(take e),
     }
+}
+
+/// The deadline `ms` milliseconds from now on the clock the client was started with.
+pub fn deadline_after_ms(c: Client, ms: u64) -> u64 {
+    clock.deadline_after_ms(host.mono_ns(c.clock), ms)
 }
 
 pub fn fetch(mut c: Client, key: String, take into: Bytes, deadline_ns: u64) -> (Result[Meta, Error], Bytes) waits {
@@ -2152,6 +2210,38 @@ pub fn upload(mut c: Client, key: String, mode: Mode, deadline_ns: u64) -> Resul
     let Reply(result: take result, ..) = run(mut c, take request)
     match take result {
         Ok(Initiated(take upload_id)) => Ok(Upload(path: take path, upload_id: take upload_id, put_id: id, mode, parts: list.new())),
+        Error(take e) => Error(take e),
+        _ => Error(Fatal(Malformed)),
+    }
+}
+
+const PENDING_PAGE: u64 = 16
+
+/// Appends handles for up to 16 multipart uploads still pending under the
+/// prefix, for `abort`. The result is true when more remain: abort these
+/// and list again.
+pub fn pending_uploads(mut c: Client, prefix: String, mut into: List[Upload], deadline_ns: u64) -> Result[bool, Error] waits {
+    let path = request_path(c.bucket, "", true)
+    let mut request = new_job(ListUploads, take path, list.new(), deadline_ns)
+    let mut query = string.from("max-uploads=")
+    string.push_u64(mut query, PENDING_PAGE)
+    string.push(mut query, "&prefix=")
+    encode(mut query, string.as_bytes(c.bucket.prefix), false)
+    encode(mut query, string.as_bytes(prefix), false)
+    string.push(mut query, "&uploads=")
+    request.query = take query
+    let Reply(result: take result, ..) = run(mut c, take request)
+    match take result {
+        Ok(Pending(take keys, take ids, more)) => {
+            let mut k = 0u64
+            for take id in take ids {
+                let target = request_path(c.bucket, keys[k], false)
+                let put_id = fresh_id(c.random, mut c.entropy)
+                list.push(mut into, Upload(path: take target, upload_id: take id, put_id, mode: Overwrite, parts: list.new()))
+                k += 1
+            }
+            Ok(more)
+        },
         Error(take e) => Error(take e),
         _ => Error(Fatal(Malformed)),
     }

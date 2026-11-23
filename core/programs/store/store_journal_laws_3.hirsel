@@ -849,7 +849,7 @@ fn journal_boundary_case(d: Dir, c: Clock, r: Random, tasks: Tasks, last: u64, a
         }
         // §2.4:26-byte section prelude +16*(1+4+12+4)+stored values.
         let expected = 16 + 26 + 16 * 21 + 15 * 1048576 + last
-        if tx.frame_bytes != expected {
+        if tx.frame_bytes != Some(expected) {
             fail("disk L29 arithmetic")
         }
         Ok(expected)
@@ -914,7 +914,7 @@ fn journal_boundary_case(d: Dir, c: Clock, r: Random, tasks: Tasks, last: u64, a
     true
 }
 
-// L29 disk: the same hand-derived cap-1/cap/cap+1 as the memory law.
+// L29: the journal applies the hand-derived payload boundary.
 // The whole 16MiB boundary frame is replayed, rather than only decoded.
 pub fn journal_law_frame_size_boundary(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
     journal_boundary_case(disk_test_directory(d), c, r, tasks, 1048277, true) && journal_boundary_case(disk_test_directory(d), c, r, tasks, 1048278, true) && journal_boundary_case(disk_test_directory(d), c, r, tasks, 1048279, false)

@@ -55,7 +55,7 @@ dirs = ["."]
 "store_layout_laws.hirsel" = "store"
 "store_reexec_laws.hirsel" = "store"
 
-[tests.runs."store@1/store/frame_size_boundary"]
+[tests.runs."store@1/store/test_memory_no_frame_limit"]
 limit = 134217728
 
 [tests.runs."store@1/store/bucket_test_l4_cuts"]

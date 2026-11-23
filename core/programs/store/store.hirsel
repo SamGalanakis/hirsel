@@ -490,7 +490,7 @@ pub opaque scoped type Tx {
     reads: View[Log[Read]],
     issued: View[Log[u64]],
     refusal: Option[Capacity],
-    frame_bytes: u64,
+    frame_bytes: Option[u64],
     wrote: bool,
     ops: DataOps,
     info: CallInfo,
@@ -1048,14 +1048,13 @@ fn cause_number(causes: Causes) -> u32 {
 }
 
 fn save_reply(mut tx: Tx, complete: Completion, output: Bytes, rec: Option[CallRecord], settlement: Option[Settlement]) -> Result[(), Error] {
-    let size = match rec {
-        Some(value) => {
-            call_section_bytes(value, match settlement {
-                Some(_) => true,
-                None => false
-            })
-        },
-        None => 0u64,
+    let size = if let Some(_) = tx.frame_bytes {
+        match rec {
+            Some(value) => call_section_bytes(value, match settlement { Some(_) => true, None => false }),
+            None => 0u64,
+        }
+    } else {
+        0u64
     }
     let (take key, take value) = reply_row(tx, complete.stream, complete.p, output)?
     stream_write(mut tx, take key, take value, size)
@@ -1365,10 +1364,11 @@ fn raised_capacity(causes: Causes) -> Option[Capacity] {
 }
 
 fn draft_body[R, A](db: Db, base: Roots, ci: CallInfo, keep_reply: Option[fn(A) -> bool], reads: Log[Read], issued: Log[u64], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Finished[R, A] {
-    let mut tx = Tx(store: db.store, roots: share_roots(base), ids: db.next_node, private_from: int.saturating_add(db.next_node, 1), resident: db.resident, retain_old: retaining(db), frame_tail: match db.disk {
-        Some(_) => OPEN_FRAME_TAIL,
-        None => NO_FRAME_TAIL,
-    }, reads: view reads, issued: view issued, refusal: None, frame_bytes: 42, wrote: false, ops: empty_ops(), info: ci, stream_ops: empty_ops(), extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, streams: 0)
+    let (frame_bytes, initial_tail) = match db.disk {
+        Some(_) => (Some(42u64), OPEN_FRAME_TAIL),
+        None => (None, NO_FRAME_TAIL),
+    }
+    let mut tx = Tx(store: db.store, roots: share_roots(base), ids: db.next_node, private_from: int.saturating_add(db.next_node, 1), resident: db.resident, retain_old: retaining(db), frame_tail: initial_tail, reads: view reads, issued: view issued, refusal: None, frame_bytes: frame_bytes, wrote: false, ops: empty_ops(), info: ci, stream_ops: empty_ops(), extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, streams: 0)
     let outcome = body(mut tx)
     if tx.own != 0 {
         fold_own(mut tx)
@@ -2044,24 +2044,6 @@ fn fetch_logical(tx: Tx, take key: Bytes) -> Option[View[Bytes]] in tx {
     found
 }
 
-fn put_frame(tx: Tx, key: Bytes, value: Bytes, frame: u64) -> Result[u64, Error] {
-    if list.len(key) > 4096 {
-        return Error(Limit(Key))
-    }
-    if list.len(value) > VALUE_LIMIT {
-        return Error(Limit(Value))
-    }
-    edit_frame(tx, key, 9 + list.len(key) + list.len(value), frame)
-}
-
-fn edit_frame(tx: Tx, key: Bytes, width: u64, frame: u64) -> Result[u64, Error] {
-    let after = int.saturating_add(frame - old_data_op_size(tx.ops, tx.below, false, key), width)
-    if int.saturating_add(after, tx.extra_bytes) - 16 > 16777280 {
-        return Error(Limit(Transaction))
-    }
-    Ok(after)
-}
-
 fn apply_put(mut tx: Tx, take p: Bytes, take val: Bytes, tail: bool) -> Result[(), Error] {
     let charge = entry(p, val)
     let (old_charge, height) = {
@@ -2244,19 +2226,14 @@ fn stream_write(mut tx: Tx, take key: Bytes, take value: Bytes, call_size: u64) 
     if list.len(value) > 1048576 {
         return Error(Limit(Value))
     }
-    let head = if tx.streams == 0 {
-        5u64
-    } else {
-        0u64
-    }
-    let extra = int.saturating_add(tx.extra_bytes - old_data_op_size(tx.stream_ops, tx.below, true, key), head + 9 + list.len(key) + list.len(value) + call_size)
-    let data_head = if tx.rows == 0 {
-        5u64
-    } else {
-        0u64
-    }
-    if int.saturating_add(tx.frame_bytes, extra) - data_head - 16 > 16777280 {
-        return Error(Limit(Transaction))
+    let mut extra = 0u64
+    if let Some(frame_bytes) = tx.frame_bytes {
+        let head = if tx.streams == 0 { 5u64 } else { 0u64 }
+        let data_head = if tx.rows == 0 { 5u64 } else { 0u64 }
+        extra = int.saturating_add(tx.extra_bytes - old_data_op_size(tx.stream_ops, tx.below, true, key), head + 9 + list.len(key) + list.len(value) + call_size)
+        if int.saturating_add(frame_bytes, extra) - data_head - 16 > 16777280 {
+            return Error(Limit(Transaction))
+        }
     }
     let charge = entry(key, value)
     // As in apply_put: both retention modes take the same steps.
@@ -3059,9 +3036,9 @@ fn push_index_edit(mut edits: IndexEdits, take edit: DataEdit) {
     }
 }
 
-fn append_index_remove(tx: Tx, mut edits: IndexEdits, take key: Bytes, mut frame: u64) -> Result[(), Error] {
+fn append_index_remove(tx: Tx, mut edits: IndexEdits, take key: Bytes, mut frame: Option[u64]) -> Result[(), Error] {
     if let Some(refund) = delete_refund(tx, key) {
-        frame = edit_frame(tx, key, 5 + list.len(key), frame)?
+        frame = edit_frame(tx.ops, tx.below, tx.extra_bytes, key, None, frame)?
         push_index_edit(mut edits, RemoveRow(take key, refund))
     }
     Ok(())
@@ -3153,7 +3130,7 @@ fn delete_impl[K, V](mut tx: Tx, t: Table[K, V], key: Bytes) -> Result[bool, Err
         let row = capacity((ix.extract)(old, Some(ix.id), key))?
         append_index_remove(tx, mut edits, take row, mut frame)?
     }
-    frame = edit_frame(tx, p, 5 + list.len(p), frame)?
+    frame = edit_frame(tx.ops, tx.below, tx.extra_bytes, p, None, frame)?
     apply_edits(mut tx, take edits)?
     apply_delete(mut tx, take p, refund)?
     tx.frame_bytes = frame
@@ -4555,7 +4532,7 @@ pub fn look[R](s: Snapshot, steps: Option[u64], body: scoped[view] fn(Tx) -> R) 
     let issued: Log[u64] = log.new()
     let caught = isolate(fn() -> Result[R, OutOfTime] {
         let perform = scoped fn() -> R {
-            let tx = Tx(store: s.store, roots: share_roots(s.roots), ids: 0, private_from: 1, resident: 0, retain_old: false, frame_tail: NO_FRAME_TAIL, reads: view reads, issued: view issued, refusal: None, frame_bytes: 42, wrote: false, ops: empty_ops(), info: CallInfo(id: CallId(store: s.store, branch: s.branch, version: s.head), at: 0, seed: 0), stream_ops: empty_ops(), extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, streams: 0)
+            let tx = Tx(store: s.store, roots: share_roots(s.roots), ids: 0, private_from: 1, resident: 0, retain_old: false, frame_tail: NO_FRAME_TAIL, reads: view reads, issued: view issued, refusal: None, frame_bytes: None, wrote: false, ops: empty_ops(), info: CallInfo(id: CallId(store: s.store, branch: s.branch, version: s.head), at: 0, seed: 0), stream_ops: empty_ops(), extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, streams: 0)
             body(tx)
         }
         match steps {

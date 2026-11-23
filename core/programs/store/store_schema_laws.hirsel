@@ -743,7 +743,7 @@ fn reject_999(v: u64) -> Result[u64, Capacity] {
     }
 }
 
-fn write_state(tx: Tx) -> (u64, u64, u64, u64, u64, bool) {
+fn write_state(tx: Tx) -> (u64, u64, u64, Option[u64], u64, bool) {
     let node = tree_stamp(tx.roots.collections)
     (node, tx.ids, tx.resident, tx.frame_bytes, tx.rows, tx.wrote)
 }
@@ -752,7 +752,9 @@ fn check_index_put_refusal(mut db: Db, t: Table[u64, u64], value: u64, frame_lim
     let watermark = db.next_node
     let out = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[bool, Error] {
         let previous_extra = tx.extra_bytes
+        let previous_frame = tx.frame_bytes
         if frame_limit {
+            tx.frame_bytes = Some(42u64)
             // U1: header42 + primary31 + two (delete25 + put29) + delete25.
             // The last index put is the only edit that exceeds this allowance.
             tx.extra_bytes = 16777280 - (42 + 31 + 2 * (25 + 29) + 25 - 16)
@@ -763,8 +765,10 @@ fn check_index_put_refusal(mut db: Db, t: Table[u64, u64], value: u64, frame_lim
             Error(Limit(Transaction)) => frame_limit,
             _ => false
         }
+        let unchanged = write_state(tx) == prior
         tx.extra_bytes = previous_extra
-        Ok(rejected && write_state(tx) == prior && fetch(tx, shape(t), 1)? == Some(99u64))
+        tx.frame_bytes = previous_frame
+        Ok(rejected && unchanged && fetch(tx, shape(t), 1)? == Some(99u64))
     }))
     match take out {
         Committed(done) => done.value && db.next_node == watermark,

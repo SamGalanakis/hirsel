@@ -108,7 +108,8 @@ pub fn law_streams(c: Clock) -> bool waits {
             return Error(2)
         }
         // A 95-byte reply frame plus the 5-byte data head and one 29-byte put.
-        if tx_frame(tx) != 129 {
+        let ci = info(mut tx)
+        if list.len(result.unwrap(encode_sections(ci, mut tx.ops.rows, tx.stream_ops.rows, None, 1, 72))) != 129 {
             return Error(3)
         }
         Error(7)
@@ -270,14 +271,14 @@ pub fn law_streams(c: Clock) -> bool waits {
             return Error(2)
         }
         let two = list.len(result.unwrap(encode_sections(ci, mut tx.ops.rows, tx.stream_ops.rows, tx.call, 1, 72)))
-        if tx_frame(tx) != 240 || two != 240 {
+        if two != 240 {
             return Error(4)
         }
         if let Error(_) = put_bytes(mut tx, 1, key_word(4), key_word(44)) {
             return Error(5)
         }
         let three = list.len(result.unwrap(encode_sections(ci, mut tx.ops.rows, tx.stream_ops.rows, tx.call, 1, 72)))
-        if tx_frame(tx) != 274 || three != 274 {
+        if three != 274 {
             return Error(6)
         }
         Ok(())

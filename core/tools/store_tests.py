@@ -26,7 +26,7 @@ BYTE_LAWS = ('refused_reply',
              'typed_foreign', 'drop_recreate', 'typed_resident', 'typed_model', 'close_follow', 'abort_budget',
              'look', 'look_faults', 'changes', 'shared_changes', 'changes_identity', 'info_mut', 'changes_rewritten_equal',
              'assembly_indexed_recreate', 'read_liveness', 'overwrite_account', 'index_writes', 'read_cover', 'read_spans', 'range_prefix', 'published_value',
-             'frame_size', 'frame_size_boundary', 'stored_size', 'shared_payload_copy', 'branches', 'pin_settle',
+             'frame_size', 'stored_size', 'shared_payload_copy', 'branches', 'pin_settle',
              'fork_shared_head', 'fork_old_snapshot', 'fork_settle', 'pinned_delete', 'migrate', 'step_bounds',
              'streams', 'request_digest', 'keyset_pages')
 

@@ -52,7 +52,7 @@ fn delete_bytes(mut tx: Tx, id: u32, key: Bytes) -> Result[bool, Error] {
     let Some(refund) = delete_refund(tx, p) else {
         return Ok(false)
     }
-    let frame = edit_frame(tx, p, 5 + list.len(p), tx.frame_bytes)?
+    let frame = edit_frame(tx.ops, tx.below, tx.extra_bytes, p, None, tx.frame_bytes)?
     apply_delete(mut tx, take p, refund)?
     tx.frame_bytes = frame
     Ok(true)
@@ -60,15 +60,6 @@ fn delete_bytes(mut tx: Tx, id: u32, key: Bytes) -> Result[bool, Error] {
 
 // The COMMIT frame this Tx encodes (section 2.4). A frame with stream ops and
 // no data ops has no data head.
-fn tx_frame(tx: Tx) -> u64 {
-    let total = int.saturating_add(tx.frame_bytes, tx.extra_bytes)
-    if tx.rows == 0 && tx.streams != 0 {
-        total - 5
-    } else {
-        total
-    }
-}
-
 // G1: admit the entire frame before staging either the reply or the CALL.
 fn reply_recorded(mut tx: Tx, p: u64, take r: Bytes, take c: CallRecord) -> Result[(), Error] {
     if let Some(_) = tx.call {
@@ -473,7 +464,7 @@ pub fn law_frames(c: Clock) -> bool {
         put_bytes(mut tx, 1, key_word(1), key_word(11))?
         put_bytes(mut tx, 1, key_word(2), key_word(33))?
         let _ = delete_bytes(mut tx, 1, key_word(1))?
-        if tx.frame_bytes != 88 || tx.ops.rows.count != 2 {
+        if tx.ops.rows.count != 2 {
             return Error(Foreign)
         }
         capacity(encode_commit(info(mut tx), mut tx.ops.rows, 1, 72))

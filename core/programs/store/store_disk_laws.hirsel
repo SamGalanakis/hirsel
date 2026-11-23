@@ -74,84 +74,56 @@ type FrameRow {
 // An overwritten key has one final op; deleting an absent key adds none.
 // Table keys have12 bytes; the index keys have20 and empty values.
 pub fn law_frame_size(c: Clock) -> bool {
-    let mut db = raw_test_db(c, 1073741824)
-    let budgeted = result.unwrap(bound bytes 80 {
-        execute(mut db, 0, 16, None, fn(mut tx: Tx) -> Result[u64, Error] {
-            let _ = info(mut tx)
-            Ok(19)
-        })
-    })
-    match take budgeted {
-        Ok(Committed(done)) => if done.value != 19 {
+    let ci = call_info(StoreId(hi: 1, lo: 2), 0, 1, 17, 0)
+    let below: List[Arc[Staged]] = list.new()
+    let mut ops = empty_ops()
+    let mut rows = 0u64
+    let mut size = Some(42u64)
+    let mut model: List[FrameRow] = list.new()
+    for slot in 0u64 .. 24 {
+        let width = if slot < 12 { 12u64 } else { 20u64 }
+        list.push(mut model, FrameRow(present: false, op: 0, size: 0, key_size: width))
+    }
+    for step in 0u64 .. 96 {
+        let k = splitmix64(step) % 24
+        let id: u32 = if k < 12 { 1 } else { 2 }
+        let mut key = key_word(k % 12)
+        if id == 2 {
+            list.append(mut key, key_word(k % 4))
+        }
+        let physical = result.unwrap(logical_key(id, key))
+        if step % 5 == 0 {
+            if model[k].present {
+                size = result.unwrap(edit_frame(ops, below, 0, physical, None, size))
+                let _ = save_data_op(mut ops, below, false, mut rows, take physical, None)
+                model[k].present = false
+                model[k].op = 2
+                model[k].size = 0
+            }
+        } else {
+            let width = if id == 2 { 0u64 } else { splitmix64(step + 1) % 33 }
+            let mut value: Bytes = list.with_capacity(width)
+            list.fill(mut value, width, int.truncate(step))
+            size = result.unwrap(edit_frame(ops, below, 0, physical, Some(width), size))
+            let _ = save_data_op(mut ops, below, false, mut rows, take physical, Some(PageValue(take value)))
+            model[k].present = true
+            model[k].op = 1
+            model[k].size = width
+        }
+        let mut expected: u64 = 16 + 4 + 8 + 8 + 1 + 1 + 4
+        for row in model {
+            if row.op == 1 {
+                expected += 1 + 4 + row.key_size + 4 + row.size
+            } else if row.op == 2 {
+                expected += 1 + 4 + row.key_size
+            }
+        }
+        let raw = result.unwrap(encode_commit(ci, mut ops.rows, 1, 72))
+        if size != Some(expected) || list.len(raw) != expected || read_le(raw, 4, 4) != expected - 16 {
             return false
-        },
-        _ => return false
-    }
-    let outcome = result.unwrap(execute(mut db, 0, 17, None, fn(mut tx: Tx) -> Result[bool, Error] {
-        let mut model: List[FrameRow] = list.new()
-        for slot in 0u64 .. 24 {
-            let width = if slot < 12 {
-                12u64
-            } else {
-                20u64
-            }
-            list.push(mut model, FrameRow(present: false, op: 0, size: 0, key_size: width))
         }
-        for step in 0u64 .. 96 {
-            let k = splitmix64(step) % 24
-            let id: u32 = if k < 12 {
-                1
-            } else {
-                2
-            }
-            let mut key = key_word(k % 12)
-            if id == 2 {
-                list.append(mut key, key_word(k % 4))
-            }
-            if step % 5 == 0 {
-                let removed = delete_bytes(mut tx, id, key)?
-                if removed != model[k].present {
-                    return Ok(false)
-                }
-                if removed {
-                    model[k].present = false
-                    model[k].op = 2
-                    model[k].size = 0
-                }
-            } else {
-                let size = if id == 2 {
-                    0u64
-                } else {
-                    splitmix64(step + 1) % 33
-                }
-                let mut value: Bytes = list.with_capacity(size)
-                list.fill(mut value, size, int.truncate(step))
-                put_bytes(mut tx, id, key, value)?
-                model[k].present = true
-                model[k].op = 1
-                model[k].size = size
-            }
-            // head16 + branch4 + version8 + at8 + sections1 + data-tag1 + count4.
-            let mut expected: u64 = 16 + 4 + 8 + 8 + 1 + 1 + 4
-            for row in model {
-                if row.op == 1 {
-                    expected += 1 + 4 + row.key_size + 4 + row.size
-                } else if row.op == 2 {
-                    expected += 1 + 4 + row.key_size
-                }
-            }
-            let ci = info(mut tx)
-            let raw = capacity(encode_commit(ci, mut tx.ops.rows, 1, 72))?
-            if tx.frame_bytes != expected || list.len(raw) != expected || read_le(raw, 4, 4) != expected - 16 {
-                return Ok(false)
-            }
-        }
-        Ok(true)
-    }))
-    match take outcome {
-        Committed(done) => done.value,
-        _ => false
     }
+    true
 }
 
 @test
@@ -163,50 +135,28 @@ fn test_frame_size(c: Clock) -> Result[(), ()] {
     }
 }
 
-fn frame_boundary(c: Clock, last: u64, accepted: bool) -> bool {
+// The L29 cap-plus-one payload commits in memory if the rows fit the account.
+@test
+fn test_memory_no_frame_limit(c: Clock) -> Result[(), Error] {
     let mut db = raw_test_db(c, 1073741824)
-    let result = result.unwrap(execute(mut db, 0, 17, None, fn(mut tx: Tx) -> Result[u64, Error] {
+    let wrote = execute(mut db, 0, 17, None, fn(mut tx: Tx) -> Result[(), Error] {
         for k in 0u64 .. 16 {
-            let size = if k == 15 {
-                last
-            } else {
-                1048576u64
-            }
+            let size = if k == 15 { 1048279u64 } else { 1048576u64 }
             let mut value: Bytes = list.with_capacity(size)
             list.fill(mut value, size, 0u8)
             put_bytes(mut tx, 1, key_word(k), value)?
         }
-        let ci = info(mut tx)
-        let raw = capacity(encode_commit(ci, mut tx.ops.rows, 1, 72))?
-        // U1: payload26 +16*(op1+key-length4+key12+value-length4)
-        // +15*1048576 +last; the frame also has its16-byte head.
-        let expected = 16 + 26 + 16 * 21 + 15 * 1048576 + last
-        if tx.frame_bytes != expected || list.len(raw) != expected || read_le(raw, 4, 4) != expected - 16 {
-            fail("L29 frame size")
-        }
-        Ok(expected)
-    }))
-    match take result {
-        Committed(done) => accepted && done.value == 15729018 + last && db.heads[0].head == 1 && page_row_count(db.heads[0].roots.collections) == 16,
-        Aborted(Undone(value: Limit(Transaction), ticket: None)) => !accepted && db.heads[0].head == 0 && page_row_count(db.heads[0].roots.collections) == 0,
-        _ => false
-    }
-}
-
-// L29(b), U1's hand-derived payload cap-1, cap, and cap+1. The stored values
-// include schema0's two zero bytes. No journal or frame allocation in execute.
-pub fn law_frame_size_boundary(c: Clock) -> bool {
-    frame_boundary(c, 1048277, true) && frame_boundary(c, 1048278, true) && frame_boundary(c, 1048279, false)
-}
-
-@test
-fn frame_size_boundary(c: Clock) -> Result[(), ()] {
-    if law_frame_size_boundary(c) {
         Ok(())
-    } else {
-        Error(())
+    })?
+    match take wrote {
+        Committed(_) => if db.heads[0].head != 1 || page_row_count(db.heads[0].roots.collections) != 16 {
+            return Error(Foreign)
+        },
+        _ => return Error(Missing("memory commit")),
     }
+    Ok(())
 }
+
 
 // T2: key12 rounds to16; schema0's value2+8 rounds to16, schema1's2+16
 // rounds to24. Replacing the old stored row must therefore add exactly8.

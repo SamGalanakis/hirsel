@@ -39,7 +39,7 @@ pub(crate) unsafe fn grow_cold(
 /// # Safety
 /// As for `grow_cold`; `reuse` permits growing the backing in place.
 #[allow(clippy::too_many_arguments)]
-#[inline]
+#[inline(always)]
 pub(crate) unsafe fn replace(
     context: &Context,
     carrier: *mut u8,
